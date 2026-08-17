@@ -1,0 +1,12 @@
+.git
+.scratch
+target
+**/target
+**/.venv
+**/__pycache__
+**/*.pyc
+var
+.env
+deploy/.env
+*.md
+!deploy/README.md

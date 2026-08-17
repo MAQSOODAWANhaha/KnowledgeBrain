@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+          components: rustfmt, clippy
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+
+  python:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/docreader
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: ruff
+        run: uvx ruff check .
+      - name: pyright (package)
+        run: uv run --with pyright pyright .
+      - name: pyright (workspace root)
+        working-directory: .
+        run: uvx --from pyright pyright .
+      - name: pytest
+        run: PYTHONPATH=.. uv run --with pytest pytest tests/
+
+  other:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: compose
+        run: |
+          docker compose -f deploy/docker-compose.yml --env-file deploy/.env.example config -q
+          docker compose config -q
+      - name: shell
+        run: bash -n services/docreader/scripts/generate_proto.sh
+      - name: spec copy
+        run: cmp -s docs/system-design.md .scratch/knowledgebrain/spec.md

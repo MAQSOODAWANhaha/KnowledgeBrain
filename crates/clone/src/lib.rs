@@ -1,0 +1,537 @@
+//! version:clone — Postgres + caller-enqueued follow-ups. No in-memory Store path.
+
+use serde::{Deserialize, Serialize};
+use sqlx::{PgPool, Row};
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloneDiff {
+    pub op: String,
+    pub source_document_id: Option<Uuid>,
+}
+
+/// Jobs the caller (worker / runtime) must enqueue after the SQL commit.
+#[derive(Debug, Clone)]
+pub struct FollowUp {
+    pub task_type: &'static str,
+    pub queue: &'static str,
+    pub document_id: Uuid,
+    pub product_version_id: Uuid,
+    pub clone_keep: bool,
+}
+
+pub async fn run_clone(
+    pool: &PgPool,
+    source_version_id: Uuid,
+    target_version_id: Uuid,
+    diffs: &[CloneDiff],
+    make_current: bool,
+) -> Result<Vec<FollowUp>, String> {
+    let product_id: Uuid =
+        sqlx::query_scalar("SELECT product_id FROM product_versions WHERE id = $1")
+            .bind(target_version_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+    sqlx::query("UPDATE product_versions SET status = 'cloning', updated_at = now() WHERE id = $1")
+        .bind(target_version_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let src_emb: Option<String> =
+        sqlx::query_scalar("SELECT embedding_model_id FROM product_versions WHERE id = $1")
+            .bind(source_version_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    let dst_emb: Option<String> =
+        sqlx::query_scalar("SELECT embedding_model_id FROM product_versions WHERE id = $1")
+            .bind(target_version_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    let same_embedding = src_emb.unwrap_or_default() == dst_emb.unwrap_or_default();
+    let schema_ready = storage::embeddings_schema_ready(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let keep_copy = same_embedding && schema_ready;
+
+    let src_docs = sqlx::query(
+        "SELECT id, title, file_name, file_size, file_hash, object_key,
+                COALESCE(type, 'file') AS doc_type, source_passages,
+                COALESCE(description, '') AS description,
+                COALESCE(summary_status, 'none') AS summary_status
+         FROM documents WHERE product_version_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(source_version_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let ops: Vec<CloneDiff> = if diffs.is_empty() {
+        src_docs
+            .iter()
+            .map(|r| CloneDiff {
+                op: "keep".into(),
+                source_document_id: r.try_get("id").ok(),
+            })
+            .collect()
+    } else {
+        diffs.to_vec()
+    };
+
+    let mut follow = Vec::new();
+
+    for d in ops {
+        match d.op.as_str() {
+            "delete" => {}
+            "add" | "replace" | "keep" => {
+                let Some(sid) = d.source_document_id else {
+                    continue;
+                };
+                let Some(src) = src_docs.iter().find(|r| r.get::<Uuid, _>("id") == sid) else {
+                    continue;
+                };
+                let nid = Uuid::new_v4();
+                let title: String = src.try_get("title").unwrap_or_default();
+                let file_name: String = src.try_get("file_name").unwrap_or_default();
+                let file_size: i64 = src.try_get("file_size").unwrap_or(0);
+                let file_hash: String = src.try_get("file_hash").unwrap_or_default();
+                let object_key: String = src.try_get("object_key").unwrap_or_default();
+                storage::insert_document(
+                    pool,
+                    storage::NewDocument {
+                        id: nid,
+                        product_version_id: target_version_id,
+                        title: &title,
+                        file_name: &file_name,
+                        file_size,
+                        file_hash: &file_hash,
+                        object_key: &object_key,
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                let kind: String = src.try_get("doc_type").unwrap_or_else(|_| "file".into());
+                let passages: Vec<String> = src
+                    .try_get::<Option<serde_json::Value>, _>("source_passages")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default();
+                let _ = storage::set_document_source(pool, nid, &kind, &passages).await;
+                storage::bump_object_ref(pool, &file_hash, file_size)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                sqlx::query(
+                    "INSERT INTO document_tags (document_id, tag_id)
+                     SELECT $1, tag_id FROM document_tags WHERE document_id = $2",
+                )
+                .bind(nid)
+                .bind(sid)
+                .execute(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+                let copy_keep = d.op == "keep" && keep_copy;
+                if copy_keep {
+                    storage::copy_document_index(pool, sid, nid, target_version_id)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let desc: String = src.try_get("description").unwrap_or_default();
+                    let sum_st: String = src
+                        .try_get("summary_status")
+                        .unwrap_or_else(|_| "none".into());
+                    sqlx::query(
+                        "UPDATE documents SET parse_status = 'processing',
+                                enable_status = 'enabled',
+                                description = $2, summary_status = $3,
+                                updated_at = now()
+                         WHERE id = $1",
+                    )
+                    .bind(nid)
+                    .bind(&desc)
+                    .bind(&sum_st)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    follow.push(FollowUp {
+                        task_type: domain::TYPE_POST_PROCESS,
+                        queue: domain::QUEUE_POSTPROCESS,
+                        document_id: nid,
+                        product_version_id: target_version_id,
+                        clone_keep: true,
+                    });
+                } else {
+                    follow.push(FollowUp {
+                        task_type: domain::TYPE_DOCUMENT_PROCESS,
+                        queue: domain::QUEUE_DEFAULT,
+                        document_id: nid,
+                        product_version_id: target_version_id,
+                        clone_keep: false,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    sqlx::query("UPDATE product_versions SET status = 'active', updated_at = now() WHERE id = $1")
+        .bind(target_version_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    if make_current {
+        sqlx::query("UPDATE products SET current_version_id = $1 WHERE id = $2")
+            .bind(target_version_id)
+            .bind(product_id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(follow)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use storage::{
+        apply_0001, connect, create_workspace_with_library, insert_document, insert_user,
+    };
+    use tokio::sync::Mutex;
+
+    async fn db_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::const_new(());
+        LOCK.lock().await
+    }
+
+    #[tokio::test]
+    async fn keep_new_document_id_bumps_refcount_leaves_source() {
+        let _g = db_lock().await;
+        let Ok(pool) = connect().await else {
+            eprintln!("skip: postgres down");
+            return;
+        };
+        let _ = sqlx::query(
+            "DROP TABLE IF EXISTS
+                wiki_log_entries, wiki_folders, wiki_pages,
+                graph_relations, graph_nodes, chunk_embeddings, chunks,
+                api_keys, models,
+                task_dead_letters, task_pending_ops, document_processing_spans,
+                document_tags, tags, documents, content_objects,
+                product_versions, products, workspace_members, users, workspaces
+             CASCADE",
+        )
+        .execute(&pool)
+        .await;
+        apply_0001(&pool).await.expect("migrate");
+        let owner = Uuid::new_v4();
+        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
+            .await
+            .unwrap();
+        let seeded = create_workspace_with_library(&pool, owner, "Acme", "acme")
+            .await
+            .unwrap();
+        let src_ver = seeded.library_version_id;
+        let src_doc = Uuid::new_v4();
+        insert_document(
+            &pool,
+            storage::NewDocument {
+                id: src_doc,
+                product_version_id: src_ver,
+                title: "iso",
+                file_name: "iso.txt",
+                file_size: 3,
+                file_hash: "abc",
+                object_key: "objects/abc",
+            },
+        )
+        .await
+        .unwrap();
+        storage::bump_object_ref(&pool, "abc", 3).await.unwrap();
+        let dst = Uuid::new_v4();
+        storage::insert_version_cloning(&pool, dst, seeded.library_id, "2026", src_ver)
+            .await
+            .unwrap();
+        let follow = run_clone(&pool, src_ver, dst, &[], false).await.unwrap();
+        assert_eq!(follow.len(), 1);
+        assert_eq!(follow[0].task_type, domain::TYPE_POST_PROCESS);
+        assert!(follow[0].clone_keep);
+        assert_eq!(follow[0].product_version_id, dst);
+        let src_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM documents WHERE product_version_id = $1")
+                .bind(src_ver)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(src_count, 1);
+        let dst_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM documents WHERE product_version_id = $1")
+                .bind(dst)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(dst_count, 1);
+        let dst_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM documents WHERE product_version_id = $1")
+                .bind(dst)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_ne!(dst_id, src_doc);
+        let rc: i32 = sqlx::query_scalar("SELECT refcount FROM content_objects WHERE hash = 'abc'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rc, 2);
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM product_versions WHERE id = $1")
+                .bind(dst)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "active");
+        let current: Option<Uuid> =
+            sqlx::query_scalar("SELECT current_version_id FROM products WHERE id = $1")
+                .bind(seeded.library_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(current, Some(src_ver));
+    }
+
+    #[tokio::test]
+    async fn keep_copies_chunks_when_embedding_matches() {
+        let _g = db_lock().await;
+        let Ok(pool) = connect().await else {
+            eprintln!("skip: postgres down");
+            return;
+        };
+        let _ = sqlx::query(
+            "DROP TABLE IF EXISTS
+                wiki_log_entries, wiki_folders, wiki_pages,
+                graph_relations, graph_nodes, chunk_embeddings, chunks,
+                api_keys, models,
+                task_dead_letters, task_pending_ops, document_processing_spans,
+                document_tags, tags, documents, content_objects,
+                product_versions, products, workspace_members, users, workspaces
+             CASCADE",
+        )
+        .execute(&pool)
+        .await;
+        apply_0001(&pool).await.expect("migrate");
+        let owner = Uuid::new_v4();
+        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
+            .await
+            .unwrap();
+        let seeded = create_workspace_with_library(&pool, owner, "Copy", "copy")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE product_versions SET embedding_model_id = 'stub-emb' WHERE id = $1")
+            .bind(seeded.library_version_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let src_doc = Uuid::new_v4();
+        insert_document(
+            &pool,
+            storage::NewDocument {
+                id: src_doc,
+                product_version_id: seeded.library_version_id,
+                title: "spec",
+                file_name: "spec.txt",
+                file_size: 8,
+                file_hash: "keep1",
+                object_key: "objects/keep1",
+            },
+        )
+        .await
+        .unwrap();
+        storage::bump_object_ref(&pool, "keep1", 8).await.unwrap();
+        let cid = Uuid::new_v4();
+        let ch = domain::Chunk {
+            id: cid,
+            document_id: src_doc,
+            product_version_id: seeded.library_version_id,
+            chunk_type: "text".into(),
+            content: "throughput 99".into(),
+            context_header: "H".into(),
+            start_at: 0,
+            end_at: 13,
+            parent_chunk_id: None,
+            generated_questions: vec!["q?".into()],
+        };
+        let emb = domain::ChunkEmbedding {
+            chunk_id: cid,
+            product_version_id: seeded.library_version_id,
+            document_id: src_doc,
+            content: "throughput 99".into(),
+            vector: vec![0.1; models::EMBEDDING_DIM],
+            tsv: String::new(),
+        };
+        storage::replace_document_chunks(&pool, src_doc, &[ch], &[emb])
+            .await
+            .unwrap();
+        let dst = Uuid::new_v4();
+        storage::insert_version_cloning(
+            &pool,
+            dst,
+            seeded.library_id,
+            "v2",
+            seeded.library_version_id,
+        )
+        .await
+        .unwrap();
+        let follow = run_clone(&pool, seeded.library_version_id, dst, &[], false)
+            .await
+            .unwrap();
+        assert_eq!(follow.len(), 1);
+        assert_eq!(follow[0].task_type, domain::TYPE_POST_PROCESS);
+        assert!(follow[0].clone_keep);
+        let dst_id = follow[0].document_id;
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
+            .bind(dst_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        let copied: String =
+            sqlx::query_scalar("SELECT content FROM chunks WHERE document_id = $1")
+                .bind(dst_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(copied, "throughput 99");
+        let q: serde_json::Value =
+            sqlx::query_scalar("SELECT generated_questions FROM chunks WHERE document_id = $1")
+                .bind(dst_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(q, serde_json::json!(["q?"]));
+        let emb_n: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM chunk_embeddings WHERE document_id = $1")
+                .bind(dst_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(emb_n, 1);
+        let src_n: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
+            .bind(src_doc)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(src_n, 1);
+        let st: String = sqlx::query_scalar("SELECT parse_status FROM documents WHERE id = $1")
+            .bind(dst_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(st, "processing");
+    }
+
+    #[tokio::test]
+    async fn keep_reparses_when_embedding_models_differ() {
+        let _g = db_lock().await;
+        let Ok(pool) = connect().await else {
+            eprintln!("skip: postgres down");
+            return;
+        };
+        let _ = sqlx::query(
+            "DROP TABLE IF EXISTS
+                wiki_log_entries, wiki_folders, wiki_pages,
+                graph_relations, graph_nodes, chunk_embeddings, chunks,
+                api_keys, models,
+                task_dead_letters, task_pending_ops, document_processing_spans,
+                document_tags, tags, documents, content_objects,
+                product_versions, products, workspace_members, users, workspaces
+             CASCADE",
+        )
+        .execute(&pool)
+        .await;
+        apply_0001(&pool).await.expect("migrate");
+        let owner = Uuid::new_v4();
+        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
+            .await
+            .unwrap();
+        let seeded = create_workspace_with_library(&pool, owner, "Mis", "mis")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE product_versions SET embedding_model_id = 'emb-a' WHERE id = $1")
+            .bind(seeded.library_version_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let src_doc = Uuid::new_v4();
+        insert_document(
+            &pool,
+            storage::NewDocument {
+                id: src_doc,
+                product_version_id: seeded.library_version_id,
+                title: "iso",
+                file_name: "iso.txt",
+                file_size: 3,
+                file_hash: "mis1",
+                object_key: "objects/mis1",
+            },
+        )
+        .await
+        .unwrap();
+        storage::bump_object_ref(&pool, "mis1", 3).await.unwrap();
+        let cid = Uuid::new_v4();
+        storage::replace_document_chunks(
+            &pool,
+            src_doc,
+            &[domain::Chunk {
+                id: cid,
+                document_id: src_doc,
+                product_version_id: seeded.library_version_id,
+                chunk_type: "text".into(),
+                content: "hello".into(),
+                context_header: String::new(),
+                start_at: 0,
+                end_at: 5,
+                parent_chunk_id: None,
+                generated_questions: vec![],
+            }],
+            &[domain::ChunkEmbedding {
+                chunk_id: cid,
+                product_version_id: seeded.library_version_id,
+                document_id: src_doc,
+                content: "hello".into(),
+                vector: vec![0.2; models::EMBEDDING_DIM],
+                tsv: String::new(),
+            }],
+        )
+        .await
+        .unwrap();
+        let dst = Uuid::new_v4();
+        storage::insert_version_cloning(
+            &pool,
+            dst,
+            seeded.library_id,
+            "v2",
+            seeded.library_version_id,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE product_versions SET embedding_model_id = 'emb-b' WHERE id = $1")
+            .bind(dst)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let follow = run_clone(&pool, seeded.library_version_id, dst, &[], false)
+            .await
+            .unwrap();
+        assert_eq!(follow.len(), 1);
+        assert_eq!(follow[0].task_type, domain::TYPE_DOCUMENT_PROCESS);
+        assert!(!follow[0].clone_keep);
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
+            .bind(follow[0].document_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+}

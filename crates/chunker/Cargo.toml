@@ -1,0 +1,11 @@
+[package]
+name = "chunker"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+domain = { path = "../domain" }
+regex = "1"
+uuid.workspace = true

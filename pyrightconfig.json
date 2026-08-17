@@ -1,0 +1,23 @@
+{
+  "include": ["services/docreader"],
+  "exclude": [
+    "**/__pycache__",
+    "**/.venv",
+    "services/docreader/proto",
+    "services/docreader/.venv"
+  ],
+  "stubPath": "services/docreader/typings",
+  "extraPaths": ["services", "services/docreader/.."],
+  "executionEnvironments": [
+    {
+      "root": "services/docreader",
+      "extraPaths": ["services"]
+    }
+  ],
+  "venvPath": "services/docreader",
+  "venv": ".venv",
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic",
+  "reportMissingTypeStubs": "none",
+  "reportMissingImports": true
+}

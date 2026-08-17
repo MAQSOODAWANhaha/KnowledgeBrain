@@ -1,0 +1,21 @@
+# api + worker. Build from the repository root:
+#   docker build -f deploy/Dockerfile.rust --build-arg BIN=api -t knowledgebrain-api .
+ARG RUST_IMAGE=rust:1.97-bookworm
+FROM ${RUST_IMAGE} AS builder
+WORKDIR /src
+COPY rust-toolchain.toml rustfmt.toml Cargo.toml Cargo.lock ./
+COPY crates crates
+COPY migrations migrations
+COPY services/docreader/proto services/docreader/proto
+RUN cargo build --release -p api -p worker
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+ARG BIN=api
+COPY --from=builder /src/target/release/api /usr/local/bin/api
+COPY --from=builder /src/target/release/worker /usr/local/bin/worker
+ENV BIN=${BIN}
+EXPOSE 8080
+ENTRYPOINT ["/bin/sh", "-c", "exec \"$BIN\""]

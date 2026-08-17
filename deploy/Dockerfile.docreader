@@ -1,0 +1,18 @@
+# DocReader gRPC process. Build from the repository root:
+#   docker build -f deploy/Dockerfile.docreader -t knowledgebrain-docreader .
+FROM python:3.11-bookworm
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        gcc g++ pkg-config \
+        libxml2-dev libxslt1-dev libjpeg62-turbo-dev zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY services/docreader /app
+ENV UV_LINK_MODE=copy \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    DOCREADER_GRPC_PORT=50051
+RUN uv sync --frozen --no-dev
+EXPOSE 50051
+CMD ["uv", "run", "--no-dev", "python", "main.py"]

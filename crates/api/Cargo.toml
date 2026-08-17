@@ -1,0 +1,31 @@
+[package]
+name = "api"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+auth = { path = "../auth" }
+axum.workspace = true
+chrono.workspace = true
+domain = { path = "../domain" }
+models = { path = "../models" }
+obs = { path = "../obs" }
+http-body-util.workspace = true
+oxana-web.workspace = true
+runtime = { path = "../runtime" }
+search = { path = "../search" }
+serde.workspace = true
+serde_json.workspace = true
+storage = { path = "../storage" }
+tokio.workspace = true
+tower.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+sqlx.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
+tower.workspace = true
+worker = { path = "../worker" }

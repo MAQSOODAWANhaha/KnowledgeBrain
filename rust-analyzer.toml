@@ -1,0 +1,14 @@
+# Pin analysis to the workspace toolchain (edition 2024 / rustc 1.97).
+# Diagnostics stay on. Clippy -D warnings is the same gate as CI.
+[cargo]
+features = "all"
+allTargets = true
+
+[cargo.buildScripts]
+enable = true
+
+
+[check]
+command = "clippy"
+allTargets = true
+extraArgs = ["--", "-D", "warnings"]
