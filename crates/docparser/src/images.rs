@@ -17,13 +17,18 @@ pub fn rewrite_inline(result: &ReadResult) -> (String, Vec<(String, Vec<u8>)>) {
     (md, blobs)
 }
 
+const MAX_REMOTE_IMAGES: usize = 8;
+
 pub async fn rewrite_images(result: &ReadResult) -> (String, Vec<(String, Vec<u8>)>) {
     let (mut md, mut blobs) = rewrite_inline(result);
-    let remotes = remote_urls(&md);
-    for url in remotes {
-        if domain::url_blocked(&url) {
-            continue;
-        }
+    let candidates = remote_image_candidates(&md);
+    if candidates.len() > MAX_REMOTE_IMAGES {
+        eprintln!(
+            "image rewrite cap {MAX_REMOTE_IMAGES}, skipping {} remotes",
+            candidates.len() - MAX_REMOTE_IMAGES
+        );
+    }
+    for url in candidates.into_iter().take(MAX_REMOTE_IMAGES) {
         match fetch_image(&url).await {
             Ok(data) if !data.is_empty() => {
                 let hash = domain::sha256_hex(&data);
@@ -31,10 +36,22 @@ pub async fn rewrite_images(result: &ReadResult) -> (String, Vec<(String, Vec<u8
                 md = md.replace(&url, &key);
                 blobs.push((hash, data));
             }
-            _ => {}
+            Ok(_) => {
+                eprintln!("image rewrite skipped empty body: {url}");
+            }
+            Err(e) => {
+                eprintln!("image rewrite failed {url}: {e}");
+            }
         }
     }
     (md, blobs)
+}
+
+fn remote_image_candidates(md: &str) -> Vec<String> {
+    remote_urls(md)
+        .into_iter()
+        .filter(|url| looks_like_image_url(url) && !domain::url_blocked(url))
+        .collect()
 }
 
 fn replace_ref(md: &mut String, img: &ImageRef, key: &str) {
@@ -50,6 +67,18 @@ fn replace_ref(md: &mut String, img: &ImageRef, key: &str) {
             *md = md.replace(&nested, key);
         }
     }
+}
+
+fn looks_like_image_url(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".gif")
+        || lower.ends_with(".webp")
+        || lower.ends_with(".svg")
+        || lower.ends_with(".bmp")
 }
 
 fn remote_urls(md: &str) -> Vec<String> {
@@ -169,6 +198,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_image_http_link_is_not_fetched() {
+        let r = ReadResult {
+            markdown: "[手册](https://example.com/docs/guide)".into(),
+            ..ReadResult::default()
+        };
+        let (md, blobs) = rewrite_images(&r).await;
+        assert!(md.contains("https://example.com/docs/guide"));
+        assert!(blobs.is_empty());
+    }
+
+    #[tokio::test]
     async fn blocked_remote_image_stays() {
         let r = ReadResult {
             markdown: "![x](http://127.0.0.1/secret.png)".into(),
@@ -177,5 +217,19 @@ mod tests {
         let (md, blobs) = rewrite_images(&r).await;
         assert!(md.contains("http://127.0.0.1/secret.png"));
         assert!(blobs.is_empty());
+    }
+
+    #[test]
+    fn remote_image_candidates_cap_counts_attempts() {
+        let mut md = String::new();
+        for i in 0..10 {
+            md.push_str(&format!("![n](https://cdn.example/p{i}.png)\n"));
+        }
+        md.push_str("[手册](https://example.com/docs/guide)\n");
+        md.push_str("![x](http://127.0.0.1/secret.png)\n");
+        let c = remote_image_candidates(&md);
+        assert_eq!(c.len(), 10, "{c:?}");
+        assert!(c.iter().all(|u| u.contains("cdn.example")));
+        assert_eq!(c.into_iter().take(MAX_REMOTE_IMAGES).count(), 8);
     }
 }

@@ -1,11 +1,18 @@
 //! Convert: simple formats in-process; others via DocReader gRPC ReadStream.
 
+mod anydoc;
 mod asr;
+mod engines;
 mod grpc;
 mod http_engine;
 mod images;
 
+pub use anydoc::{
+    ENGINE as ANYDOC_ENGINE, supported_file_types as anydoc_file_types,
+    supports as anydoc_supports, version as anydoc_version,
+};
 pub use asr::{ASR_NOT_CONFIGURED, AsrSettings, apply as apply_asr, apply_stub as apply_asr_stub};
+pub use engines::{EngineCatalog, EngineInfo, list_all_engines, local_engines, merge_engines};
 pub use grpc::{ConvertRequest, DOCREADER_TIMEOUT, reader_addr};
 pub use images::{rewrite_images, rewrite_inline};
 
@@ -33,6 +40,7 @@ pub struct ReadResult {
     pub images: Vec<ImageRef>,
     pub is_audio: bool,
     pub audio_data: Vec<u8>,
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +58,7 @@ pub fn resolve_engine(engine: &str, file_type: &str, is_url: bool) -> &'static s
     match engine {
         "simple" => "simple",
         "builtin" => "docreader",
+        "anydoc" => "anydoc",
         "mineru" | "mineru_cloud" | "paddleocr_vl" | "paddleocr_vl_cloud" => "http-engine",
         "" => {
             if !is_url && is_simple_format(file_type) {
@@ -77,6 +86,7 @@ pub fn convert_simple(file_name: &str, bytes: &[u8]) -> ReadResult {
             images: Vec::new(),
             is_audio: true,
             audio_data: bytes.to_vec(),
+            metadata: std::collections::HashMap::new(),
         };
     }
     if is_image_type(file_name) {
@@ -128,6 +138,17 @@ pub fn convert_simple(file_name: &str, bytes: &[u8]) -> ReadResult {
     }
 }
 
+pub struct ConvertInput<'a> {
+    pub engine: &'a str,
+    pub file_name: &'a str,
+    pub file_type: &'a str,
+    pub is_url: bool,
+    pub bytes: Vec<u8>,
+    pub url: &'a str,
+    pub title: &'a str,
+    pub overrides: &'a std::collections::HashMap<String, String>,
+}
+
 /// Route like brain convert: simple in-process; DocReader via gRPC; no reader → error field.
 pub async fn convert(
     engine: &str,
@@ -138,30 +159,104 @@ pub async fn convert(
     url: &str,
     title: &str,
 ) -> Result<ReadResult, ConvertError> {
-    let resolved = resolve_engine(engine, file_type, is_url);
+    let empty = std::collections::HashMap::new();
+    convert_with(ConvertInput {
+        engine,
+        file_name,
+        file_type,
+        is_url,
+        bytes,
+        url,
+        title,
+        overrides: &empty,
+    })
+    .await
+}
+
+pub async fn convert_with(input: ConvertInput<'_>) -> Result<ReadResult, ConvertError> {
+    let resolved = resolve_engine(input.engine, input.file_type, input.is_url);
     match resolved {
-        "simple" => Ok(convert_simple(file_name, &bytes)),
+        "simple" => Ok(convert_simple(input.file_name, &input.bytes)),
+        "anydoc" => convert_anydoc(input).await,
         "docreader" => {
             grpc::read(ConvertRequest {
-                file_content: if is_url { Vec::new() } else { bytes },
-                file_name: file_name.to_string(),
-                file_type: file_type.to_string(),
-                url: url.to_string(),
-                title: title.to_string(),
-                parser_engine: if engine.is_empty() {
+                file_content: if input.is_url {
+                    Vec::new()
+                } else {
+                    input.bytes
+                },
+                file_name: input.file_name.to_string(),
+                file_type: input.file_type.to_string(),
+                url: input.url.to_string(),
+                title: input.title.to_string(),
+                parser_engine: if input.engine.is_empty() {
                     String::new()
                 } else {
-                    engine.to_string()
+                    input.engine.to_string()
                 },
+                parser_engine_overrides: input.overrides.clone(),
             })
             .await
         }
-        "http-engine" => http_engine::convert_http(engine, file_name, bytes).await,
+        "http-engine" => {
+            http_engine::convert_http(input.engine, input.file_name, input.bytes).await
+        }
         other => Ok(ReadResult {
             error: format!("unknown convert engine {other}"),
             ..ReadResult::default()
         }),
     }
+}
+
+/// Brain AnydocReader: in-process convert, scanned PDF → builtin DocReader.
+async fn convert_anydoc(input: ConvertInput<'_>) -> Result<ReadResult, ConvertError> {
+    let extract_images = anydoc::extract_images_enabled(input.overrides);
+    let result = anydoc::convert(
+        input.file_name,
+        input.file_type,
+        &input.bytes,
+        input.is_url,
+        extract_images,
+    );
+    let scanned =
+        result.error.contains("OCR is required") || result.error.contains("no extractable text");
+    if scanned && input.file_type.eq_ignore_ascii_case("pdf") && grpc::reader_addr().is_some() {
+        let mut fallback = grpc::read(ConvertRequest {
+            file_content: input.bytes,
+            file_name: input.file_name.to_string(),
+            file_type: input.file_type.to_string(),
+            url: input.url.to_string(),
+            title: input.title.to_string(),
+            parser_engine: "builtin".into(),
+            parser_engine_overrides: input.overrides.clone(),
+        })
+        .await?;
+        if fallback.metadata.get("parser").map(String::as_str) != Some("builtin") {
+            fallback.metadata.insert("parser".into(), "builtin".into());
+        }
+        fallback
+            .metadata
+            .insert("anydoc_fallback".into(), "scanned_pdf".into());
+        if fallback
+            .metadata
+            .get("image_source_type")
+            .map(String::is_empty)
+            .unwrap_or(true)
+        {
+            fallback
+                .metadata
+                .insert("image_source_type".into(), "scanned_pdf".into());
+        }
+        if fallback.error.is_empty() {
+            return Ok(fallback);
+        }
+        fallback.error = format!(
+            "anydoc scanned-PDF fallback failed for {:?}: {}",
+            input.file_name, fallback.error
+        );
+        return Ok(fallback);
+    }
+    Ok(result)
 }
 
 fn json_to_md(bytes: &[u8]) -> String {
@@ -275,6 +370,7 @@ mod tests {
         assert_eq!(resolve_engine("builtin", "md", false), "docreader");
         assert_eq!(resolve_engine("", "md", false), "simple");
         assert_eq!(resolve_engine("", "pdf", false), "docreader");
+        assert_eq!(resolve_engine("anydoc", "docx", false), "anydoc");
         assert_eq!(resolve_engine("mineru", "pdf", false), "http-engine");
         assert_eq!(resolve_engine("paddleocr_vl", "pdf", false), "http-engine");
         assert_eq!(resolve_engine("", "md", true), "docreader");
@@ -425,6 +521,205 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         dest
+    }
+
+    struct HangAfterImages;
+
+    #[tonic::async_trait]
+    impl DocReader for HangAfterImages {
+        type ReadStreamStream = ReceiverStream<Result<ReadStreamResponse, Status>>;
+
+        async fn read(&self, _req: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
+            Err(Status::unimplemented("no unary"))
+        }
+
+        async fn read_stream(
+            &self,
+            _req: Request<ReadRequest>,
+        ) -> Result<Response<Self::ReadStreamStream>, Status> {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tx.send(Ok(ReadStreamResponse {
+                payload: Some(crate::proto::read_stream_response::Payload::Meta(
+                    ReadStreamMeta {
+                        markdown_content: "# hi\n\nbody".into(),
+                        error: String::new(),
+                        image_count: 1,
+                        ..Default::default()
+                    },
+                )),
+            }))
+            .await
+            .unwrap();
+            tx.send(Ok(ReadStreamResponse {
+                payload: Some(crate::proto::read_stream_response::Payload::Image(
+                    ProtoImage {
+                        filename: "p.png".into(),
+                        original_ref: "images/p.png".into(),
+                        image_data: vec![1, 2, 3],
+                        ..Default::default()
+                    },
+                )),
+            }))
+            .await
+            .unwrap();
+            std::mem::forget(tx);
+            Ok(Response::new(ReceiverStream::new(rx)))
+        }
+
+        async fn list_engines(
+            &self,
+            _req: Request<ListEnginesRequest>,
+        ) -> Result<Response<ListEnginesResponse>, Status> {
+            Ok(Response::new(ListEnginesResponse { engines: vec![] }))
+        }
+    }
+
+    #[tokio::test]
+    async fn readstream_returns_after_image_count_without_eos() {
+        let addr = serve(HangAfterImages).await;
+        let _g = ADDR_LOCK.lock().await;
+        unsafe { std::env::set_var("DOCREADER_ADDR", &addr) };
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            convert("builtin", "a.pdf", "pdf", false, b"%PDF".to_vec(), "", ""),
+        )
+        .await
+        .expect("must not wait for stream EOS after image_count")
+        .unwrap();
+        unsafe { std::env::remove_var("DOCREADER_ADDR") };
+        assert_eq!(r.markdown, "# hi\n\nbody");
+        assert_eq!(r.images.len(), 1);
+        assert_eq!(r.images[0].data, vec![1, 2, 3]);
+    }
+
+    struct IncompleteImages;
+
+    #[tonic::async_trait]
+    impl DocReader for IncompleteImages {
+        type ReadStreamStream = ReceiverStream<Result<ReadStreamResponse, Status>>;
+
+        async fn read(&self, _req: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
+            Err(Status::unimplemented("no unary"))
+        }
+
+        async fn read_stream(
+            &self,
+            _req: Request<ReadRequest>,
+        ) -> Result<Response<Self::ReadStreamStream>, Status> {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tx.send(Ok(ReadStreamResponse {
+                payload: Some(crate::proto::read_stream_response::Payload::Meta(
+                    ReadStreamMeta {
+                        markdown_content: "# hi".into(),
+                        error: String::new(),
+                        image_count: 2,
+                        ..Default::default()
+                    },
+                )),
+            }))
+            .await
+            .unwrap();
+            tx.send(Ok(ReadStreamResponse {
+                payload: Some(crate::proto::read_stream_response::Payload::Image(
+                    ProtoImage {
+                        filename: "a.png".into(),
+                        image_data: vec![1],
+                        ..Default::default()
+                    },
+                )),
+            }))
+            .await
+            .unwrap();
+            drop(tx);
+            Ok(Response::new(ReceiverStream::new(rx)))
+        }
+
+        async fn list_engines(
+            &self,
+            _req: Request<ListEnginesRequest>,
+        ) -> Result<Response<ListEnginesResponse>, Status> {
+            Ok(Response::new(ListEnginesResponse { engines: vec![] }))
+        }
+    }
+
+    struct ZeroCountThenImage;
+
+    #[tonic::async_trait]
+    impl DocReader for ZeroCountThenImage {
+        type ReadStreamStream = ReceiverStream<Result<ReadStreamResponse, Status>>;
+
+        async fn read(&self, _req: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
+            Err(Status::unimplemented("no unary"))
+        }
+
+        async fn read_stream(
+            &self,
+            _req: Request<ReadRequest>,
+        ) -> Result<Response<Self::ReadStreamStream>, Status> {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tx.send(Ok(ReadStreamResponse {
+                payload: Some(crate::proto::read_stream_response::Payload::Meta(
+                    ReadStreamMeta {
+                        markdown_content: "# z".into(),
+                        error: String::new(),
+                        image_count: 0,
+                        ..Default::default()
+                    },
+                )),
+            }))
+            .await
+            .unwrap();
+            tx.send(Ok(ReadStreamResponse {
+                payload: Some(crate::proto::read_stream_response::Payload::Image(
+                    ProtoImage {
+                        filename: "z.png".into(),
+                        image_data: vec![9],
+                        ..Default::default()
+                    },
+                )),
+            }))
+            .await
+            .unwrap();
+            drop(tx);
+            Ok(Response::new(ReceiverStream::new(rx)))
+        }
+
+        async fn list_engines(
+            &self,
+            _req: Request<ListEnginesRequest>,
+        ) -> Result<Response<ListEnginesResponse>, Status> {
+            Ok(Response::new(ListEnginesResponse { engines: vec![] }))
+        }
+    }
+
+    #[tokio::test]
+    async fn readstream_incomplete_image_count_is_error() {
+        let addr = serve(IncompleteImages).await;
+        let _g = ADDR_LOCK.lock().await;
+        unsafe { std::env::set_var("DOCREADER_ADDR", &addr) };
+        let err = convert("builtin", "a.pdf", "pdf", false, b"%PDF".to_vec(), "", "")
+            .await
+            .unwrap_err();
+        unsafe { std::env::remove_var("DOCREADER_ADDR") };
+        assert!(
+            err.0.contains("incomplete") && err.0.contains("1 of 2"),
+            "{}",
+            err.0
+        );
+    }
+
+    #[tokio::test]
+    async fn readstream_zero_count_still_reads_images_until_eos() {
+        let addr = serve(ZeroCountThenImage).await;
+        let _g = ADDR_LOCK.lock().await;
+        unsafe { std::env::set_var("DOCREADER_ADDR", &addr) };
+        let r = convert("builtin", "a.pdf", "pdf", false, b"%PDF".to_vec(), "", "")
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var("DOCREADER_ADDR") };
+        assert_eq!(r.markdown, "# z");
+        assert_eq!(r.images.len(), 1);
+        assert_eq!(r.images[0].data, vec![9]);
     }
 
     #[tokio::test]

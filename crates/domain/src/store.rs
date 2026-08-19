@@ -316,9 +316,39 @@ pub struct WikiPage {
     #[serde(default)]
     pub source_refs: Vec<Uuid>,
     #[serde(default)]
+    pub chunk_refs: Vec<Uuid>,
+    #[serde(default)]
     pub category_path: Vec<String>,
     #[serde(default)]
     pub folder_id: Option<Uuid>,
+}
+
+impl WikiPage {
+    pub fn published(
+        id: Uuid,
+        product_version_id: Uuid,
+        slug: String,
+        title: String,
+        content: String,
+        page_type: String,
+        summary: String,
+    ) -> Self {
+        Self {
+            id,
+            product_version_id,
+            slug,
+            title,
+            content,
+            page_type,
+            status: "published".into(),
+            summary,
+            aliases: Vec::new(),
+            source_refs: Vec::new(),
+            chunk_refs: Vec::new(),
+            category_path: Vec::new(),
+            folder_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

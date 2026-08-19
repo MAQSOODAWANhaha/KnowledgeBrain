@@ -94,6 +94,7 @@ fn signed_send(method: &str, path: &str, body: &[u8], send_body: bool) -> Result
         access_key()
     );
     let url = format!("{}{path}", endpoint().trim_end_matches('/'));
+    // Dedicated blocking client: never call this on a tokio worker (deadlock).
     let mut req = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()

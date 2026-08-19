@@ -6,7 +6,10 @@ mod pending;
 mod prompts;
 mod summary;
 
-pub use chat::{attempt_superseded, chat_complete, chat_http_configured, sample_long_content};
+pub use chat::{
+    WIKI_LLM_MAX_ATTEMPTS, WIKI_LLM_MAX_TOKENS, attempt_superseded, chat_complete,
+    chat_complete_limited, chat_complete_wiki, chat_http_configured, sample_long_content,
+};
 pub use ocr::sanitize_ocr_text;
 pub use pending::{decr_pending, pending_count, pending_key, set_pending};
 pub use prompts::{OCR_PROMPT, OCR_SCANNED_PDF_PROMPT, caption_prompt, ocr_prompt};
@@ -510,11 +513,7 @@ pub fn vlm_configured() -> bool {
 }
 
 fn vlm_base_url() -> String {
-    let vlm = std::env::var("KNOWLEDGEBRAIN_VLM_BASE_URL").unwrap_or_default();
-    if !vlm.is_empty() {
-        return vlm;
-    }
-    std::env::var("KNOWLEDGEBRAIN_CHAT_BASE_URL").unwrap_or_default()
+    domain::vlm_base_url()
 }
 
 fn vlm_describe(
@@ -534,17 +533,40 @@ fn vlm_describe(
     Ok((ocr, cap))
 }
 
-fn vlm_complete(base: &str, prompt: &str, image_key: &str) -> Result<String, String> {
-    let key = std::env::var("KNOWLEDGEBRAIN_VLM_API_KEY")
-        .or_else(|_| std::env::var("KNOWLEDGEBRAIN_CHAT_API_KEY"))
-        .unwrap_or_default();
-    let model = std::env::var("KNOWLEDGEBRAIN_VLM_MODEL").unwrap_or_else(|_| "stub-vlm".into());
-    let url = chat::completions_url_for_vlm(base);
-    let image_url = if image_key.starts_with("http://") || image_key.starts_with("https://") {
-        image_key.to_string()
-    } else {
-        format!("attachment:{image_key}")
+fn image_data_url(image_key: &str) -> Result<String, String> {
+    let key = image_key.trim();
+    if key.starts_with("http://") || key.starts_with("https://") || key.starts_with("data:") {
+        return Ok(key.to_string());
+    }
+    let hash = key.trim_start_matches("objects/").trim_start_matches('/');
+    let dir = std::env::var("OBJECT_DIR").unwrap_or_else(|_| "var/objects".into());
+    let bytes = std::fs::read(std::path::Path::new(&dir).join(hash))
+        .map_err(|e| format!("read image {hash}: {e}"))?;
+    let mime = match bytes.first() {
+        Some(0x89) => "image/png",
+        Some(0x47) => "image/gif",
+        Some(0x52) => "image/webp",
+        _ => "image/jpeg",
     };
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
+}
+
+fn vlm_complete(base: &str, prompt: &str, image_key: &str) -> Result<String, String> {
+    tokio::task::block_in_place(|| vlm_complete_inner(base, prompt, image_key))
+}
+
+fn vlm_complete_inner(base: &str, prompt: &str, image_key: &str) -> Result<String, String> {
+    let key = domain::vlm_api_key();
+    let model = {
+        let m = domain::vlm_model();
+        if m.is_empty() || m == "stub-vlm" {
+            return Err("vlm model not configured".into());
+        }
+        m
+    };
+    let url = chat::completions_url_for_vlm(base);
+    let image_url = image_data_url(image_key)?;
     let body = serde_json::json!({
         "model": model,
         "max_tokens": 1024,
@@ -556,25 +578,7 @@ fn vlm_complete(base: &str, prompt: &str, image_key: &str) -> Result<String, Str
             ]
         }]
     });
-    let mut req = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| e.to_string())?
-        .post(url)
-        .json(&body);
-    if !key.is_empty() {
-        req = req.bearer_auth(key);
-    }
-    let resp = req.send().map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("vlm failed: {}", resp.status()));
-    }
-    let v: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
-    Ok(v["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .to_string())
+    models::chat_sse(&url, &key, body)
 }
 
 fn enqueue_post_process(store: &mut Store, document_id: Uuid) {

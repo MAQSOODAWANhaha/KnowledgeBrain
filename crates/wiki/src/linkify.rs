@@ -53,13 +53,25 @@ pub fn linkify_content(content: &str, refs: &[LinkRef], self_slug: &str) -> (Str
     (out, changed)
 }
 
+fn next_char(s: &str, i: usize) -> usize {
+    s.get(i..)
+        .and_then(|rest| rest.chars().next())
+        .map(|c| i + c.len_utf8())
+        .unwrap_or(s.len())
+}
+
 fn existing_slugs(content: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes = content.as_bytes();
     let mut i = 0;
     while i + 1 < bytes.len() {
+        if !content.is_char_boundary(i) {
+            i = next_char(content, i);
+            continue;
+        }
         if bytes[i] == b'['
             && bytes[i + 1] == b'['
+            && content.is_char_boundary(i + 2)
             && let Some(rel) = content[i + 2..].find("]]")
         {
             let inner = &content[i + 2..i + 2 + rel];
@@ -70,7 +82,7 @@ fn existing_slugs(content: &str) -> Vec<String> {
             i += 2 + rel + 2;
             continue;
         }
-        i += 1;
+        i = next_char(content, i);
     }
     out
 }
@@ -80,6 +92,10 @@ fn compute_forbidden_spans(content: &str) -> Vec<Span> {
     let bytes = content.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
+        if !content.is_char_boundary(i) {
+            i = next_char(content, i);
+            continue;
+        }
         if content[i..].starts_with("```") {
             let rest = &content[i + 3..];
             if let Some(rel) = rest.find("```") {
@@ -125,7 +141,7 @@ fn compute_forbidden_spans(content: &str) -> Vec<Span> {
             i = end;
             continue;
         }
-        i += 1;
+        i = next_char(content, i);
     }
     spans
 }
@@ -155,15 +171,15 @@ fn find_first_safe_match(haystack: &str, needle: &str, forbidden: &[Span]) -> Op
         let pos = start + rel;
         let end = pos + needle.len();
         if !haystack.is_char_boundary(pos) || !haystack.is_char_boundary(end) {
-            start = pos + 1;
+            start = next_char(haystack, pos);
             continue;
         }
         if span_contains(forbidden, pos, end) {
-            start = pos + 1;
+            start = next_char(haystack, pos);
             continue;
         }
         if needs_boundary && !has_word_boundary(haystack, pos, end) {
-            start = pos + 1;
+            start = next_char(haystack, pos);
             continue;
         }
         return Some(pos);
@@ -253,5 +269,26 @@ mod tests {
         assert!(changed);
         assert!(out.contains("[[concept/alpha-switch|Alpha Switch]]"));
         assert!(!out.contains("[[entity/alpha|Alpha]]"));
+    }
+
+    #[test]
+    fn chinese_content_does_not_panic() {
+        let refs = [LinkRef {
+            slug: "entity/tian".into(),
+            match_text: "天".into(),
+        }];
+        let (out, changed) = linkify_content("今天天气不错", &refs, "summary/x");
+        assert!(changed);
+        assert!(out.contains("[[entity/tian|天]]"));
+        let (plain, changed) = linkify_content(
+            "今天天气不错",
+            &[LinkRef {
+                slug: "entity/alpha".into(),
+                match_text: "Alpha".into(),
+            }],
+            "summary/x",
+        );
+        assert!(!changed);
+        assert_eq!(plain, "今天天气不错");
     }
 }

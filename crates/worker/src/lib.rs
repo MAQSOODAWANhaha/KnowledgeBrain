@@ -215,7 +215,7 @@ fn persist_inline_images(store: &mut Store, result: docparser::ReadResult) -> St
         let key = storage::object_key(&hash);
         store.objects.insert(key, data.clone());
         *store.object_refs.entry(hash.clone()).or_insert(0) += 1;
-        let _ = storage::write_blob(&hash, &data);
+        let _ = storage::write_blob_off_runtime(&hash, &data);
     }
     md
 }
@@ -300,6 +300,7 @@ fn document_process(store: &mut Store, payload: &serde_json::Value) -> Result<()
         .get("manual")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let mut convert_image_source = String::new();
     let markdown = if let Some(passages) = payload.get("passages").and_then(|v| v.as_array()) {
         passages
             .iter()
@@ -330,7 +331,7 @@ fn document_process(store: &mut Store, payload: &serde_json::Value) -> Result<()
             .map(|v| domain::engine_for_file(&v.parser_engine_rules, &ext))
             .unwrap_or_default();
         let engine = docparser::resolve_engine(&configured, &ext, false);
-        if engine != "simple" && docparser::reader_addr().is_none() {
+        if engine == "docreader" && docparser::reader_addr().is_none() {
             obs::finish(store, doc_id, obs::SPAN_DOCREADER, obs::STATUS_FAILED);
             obs::cascade_cancel(store, doc_id, doc.attempt, obs::SPAN_DOCREADER);
             store.fail_document(doc_id, docparser::NOT_CONFIGURED);
@@ -338,7 +339,10 @@ fn document_process(store: &mut Store, payload: &serde_json::Value) -> Result<()
         }
         let r = if engine == "simple" {
             docparser::convert_simple(&doc.file_name, &bytes)
-        } else if docparser::reader_addr().is_some() {
+        } else if engine == "anydoc"
+            || engine == "http-engine"
+            || docparser::reader_addr().is_some()
+        {
             match tokio::runtime::Handle::try_current() {
                 Ok(h) => h
                     .block_on(docparser::convert(
@@ -373,6 +377,11 @@ fn document_process(store: &mut Store, payload: &serde_json::Value) -> Result<()
             obs::cascade_cancel(store, doc_id, doc.attempt, obs::SPAN_DOCREADER);
             return Err(r.error);
         }
+        convert_image_source = r
+            .metadata
+            .get("image_source_type")
+            .cloned()
+            .unwrap_or_default();
         if r.is_audio {
             let version = store.effective_version(doc_id).ok_or("version missing")?;
             if !version.asr_enabled || version.asr_model_id.is_empty() {
@@ -488,7 +497,11 @@ fn document_process(store: &mut Store, payload: &serde_json::Value) -> Result<()
             Some(obs::ROOT_NAME),
         );
         enrichment::set_pending(store, doc_id, images.len() as i32);
-        let source = enrichment::image_source_type(&doc.file_name, &markdown);
+        let source = if convert_image_source.is_empty() {
+            enrichment::image_source_type(&doc.file_name, &markdown).to_string()
+        } else {
+            convert_image_source.clone()
+        };
         for key in images {
             store.enqueue(
                 TYPE_IMAGE_MULTIMODAL,

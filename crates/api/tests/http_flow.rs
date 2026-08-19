@@ -467,6 +467,60 @@ async fn ingest_enqueue_fail_returns_200_and_failed_row() {
 }
 
 #[tokio::test]
+async fn parser_engines_merge_local_catalog() {
+    let (app, _) = app();
+    let (st, v) = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/register")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"email":"eng@b.c","password":"pw"}).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let token = v["token"].as_str().unwrap().to_string();
+
+    let (st, v) = call(
+        &app,
+        Request::builder()
+            .uri("/api/v1/system/parser-engines")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let names: Vec<&str> = v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"simple"), "{v}");
+    assert!(names.contains(&"anydoc"), "{v}");
+    assert!(names.contains(&"builtin"), "{v}");
+    let anydoc = v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "anydoc")
+        .unwrap();
+    assert_eq!(anydoc["available"], true, "{v}");
+    assert!(
+        anydoc["file_types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t == "docx"),
+        "{v}"
+    );
+}
+
+#[tokio::test]
 async fn health_still_works() {
     let (app, _) = app();
     let (st, v) = call(

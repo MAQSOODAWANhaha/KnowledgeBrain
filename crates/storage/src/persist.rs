@@ -11,6 +11,7 @@ pub const MIGRATION_0007: &str = include_str!("../../../migrations/0007_housekee
 pub const MIGRATION_0008: &str = include_str!("../../../migrations/0008_embedding_dim.sql");
 pub const MIGRATION_0009: &str = include_str!("../../../migrations/0009_document_attempt.sql");
 pub const MIGRATION_0010: &str = include_str!("../../../migrations/0010_document_source.sql");
+pub const MIGRATION_0011: &str = include_str!("../../../migrations/0011_wiki_chunk_refs.sql");
 
 pub fn database_url() -> String {
     std::env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -45,6 +46,7 @@ pub async fn apply_0001(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(MIGRATION_0008).execute(pool).await?;
     sqlx::raw_sql(MIGRATION_0009).execute(pool).await?;
     sqlx::raw_sql(MIGRATION_0010).execute(pool).await?;
+    sqlx::raw_sql(MIGRATION_0011).execute(pool).await?;
     Ok(())
 }
 
@@ -680,7 +682,8 @@ async fn hydrate_workspace_index(
         }
         let pages = sqlx::query(
             "SELECT id, product_version_id, slug, title, content, page_type, status,
-                    COALESCE(summary, '') AS summary, aliases, source_refs, category_path, folder_id
+                    COALESCE(summary, '') AS summary, aliases, source_refs,
+                    COALESCE(chunk_refs, '[]'::jsonb) AS chunk_refs, category_path, folder_id
              FROM wiki_pages WHERE product_version_id = ANY($1) AND deleted_at IS NULL",
         )
         .bind(version_ids)
@@ -697,6 +700,11 @@ async fn hydrate_workspace_index(
                 .unwrap_or_default();
             let refs: Vec<String> = p
                 .try_get::<serde_json::Value, _>("source_refs")
+                .ok()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default();
+            let chunk_refs: Vec<String> = p
+                .try_get::<serde_json::Value, _>("chunk_refs")
                 .ok()
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default();
@@ -718,6 +726,10 @@ async fn hydrate_workspace_index(
                     summary: p.try_get("summary").unwrap_or_default(),
                     aliases,
                     source_refs: refs
+                        .into_iter()
+                        .filter_map(|s| Uuid::parse_str(&s).ok())
+                        .collect(),
+                    chunk_refs: chunk_refs
                         .into_iter()
                         .filter_map(|s| Uuid::parse_str(&s).ok())
                         .collect(),
@@ -2427,8 +2439,8 @@ pub async fn upsert_wiki_page(
     sqlx::query(
         "INSERT INTO wiki_pages
             (id, product_version_id, slug, title, content, page_type, status,
-             summary, aliases, source_refs, category_path, folder_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+             summary, aliases, source_refs, chunk_refs, category_path, folder_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
          ON CONFLICT (product_version_id, slug) DO UPDATE SET
             title = EXCLUDED.title,
             content = EXCLUDED.content,
@@ -2437,6 +2449,7 @@ pub async fn upsert_wiki_page(
             summary = EXCLUDED.summary,
             aliases = EXCLUDED.aliases,
             source_refs = EXCLUDED.source_refs,
+            chunk_refs = EXCLUDED.chunk_refs,
             category_path = EXCLUDED.category_path,
             folder_id = EXCLUDED.folder_id,
             updated_at = now(),
@@ -2452,6 +2465,12 @@ pub async fn upsert_wiki_page(
     .bind(&page.summary)
     .bind(serde_json::json!(page.aliases))
     .bind(serde_json::json!(refs))
+    .bind(serde_json::json!(
+        page.chunk_refs
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+    ))
     .bind(serde_json::json!(page.category_path))
     .bind(page.folder_id)
     .execute(pool)
@@ -2877,6 +2896,52 @@ pub async fn replace_document_chunks(
         .execute(pool)
         .await?;
     insert_document_chunks(pool, chunks, embeddings).await
+}
+
+pub async fn replace_document_embeddings(
+    pool: &PgPool,
+    document_id: Uuid,
+    embeddings: &[domain::ChunkEmbedding],
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM chunk_embeddings WHERE document_id = $1")
+        .bind(document_id)
+        .execute(pool)
+        .await?;
+    insert_document_chunks(pool, &[], embeddings).await
+}
+
+pub async fn load_document_chunks(
+    pool: &PgPool,
+    document_id: Uuid,
+) -> Result<Vec<domain::Chunk>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, document_id, product_version_id, chunk_type, content,
+                context_header, start_at, end_at, parent_chunk_id, generated_questions
+         FROM chunks WHERE document_id = $1
+         ORDER BY start_at, id",
+    )
+    .bind(document_id)
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for c in rows {
+        let qs: serde_json::Value = c
+            .try_get("generated_questions")
+            .unwrap_or_else(|_| serde_json::json!([]));
+        out.push(domain::Chunk {
+            id: c.try_get("id")?,
+            document_id: c.try_get("document_id")?,
+            product_version_id: c.try_get("product_version_id")?,
+            chunk_type: c.try_get("chunk_type")?,
+            content: c.try_get("content")?,
+            context_header: c.try_get("context_header").unwrap_or_default(),
+            start_at: c.try_get("start_at")?,
+            end_at: c.try_get("end_at")?,
+            parent_chunk_id: c.try_get("parent_chunk_id")?,
+            generated_questions: serde_json::from_value(qs).unwrap_or_default(),
+        });
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone)]

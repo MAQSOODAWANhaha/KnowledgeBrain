@@ -17,7 +17,7 @@
 
 | 进程 | 路径 | 端口 | 职责 |
 |---|---|---|---|
-| `api` | `crates/api` | `:8080` | HTTP：鉴权、领域 CRUD、入队、检索、文件代理、`/ops/oxana` |
+| `api` | `crates/api` | `:8080` | HTTP：鉴权、领域 CRUD、入队、检索、文件代理、`/system/parser-engines`、`/ops/oxana` |
 | `worker` | `crates/worker` | 无 | 6 个 oxana Runtime 消费队列 |
 | `docreader` | `services/docreader` | gRPC `:50051` | 文件/URL → Markdown + 图片字节 |
 
@@ -71,7 +71,7 @@ KnowledgeBrain/
 依赖方向：
 
 ```
-api     → auth, domain, runtime, search, obs, storage, models
+api     → auth, domain, runtime, search, obs, storage, models, docparser
 worker  → runtime, docparser, chunker, index, enrichment,
              graph, wiki, clone, obs, models, storage, domain
 runtime → domain, oxana
@@ -196,7 +196,7 @@ Workspace                         访问控制根
 
 **graph_relations**：`UNIQUE (product_version_id, document_id, node1, node2, rel_type)`，upsert。
 
-**wiki_pages**：`id, product_version_id, slug unique(product_version_id, slug), title, page_type, status ∈ {draft, published, archived}, content, summary, aliases jsonb, parent_slug, folder_id, category_path jsonb, source_refs jsonb, created_at, updated_at, deleted_at`
+**wiki_pages**：`id, product_version_id, slug unique(product_version_id, slug), title, page_type, status ∈ {draft, published, archived}, content, summary, aliases jsonb, parent_slug, folder_id, category_path jsonb, source_refs jsonb, chunk_refs jsonb, created_at, updated_at, deleted_at`
 
 **wiki_folders**：`id, product_version_id, parent_id, name, path, depth, sort_order, created_at, updated_at, deleted_at`
 
@@ -222,7 +222,7 @@ Workspace                         访问控制根
 
 **api_keys**：`scope_type ∈ {workspace, product}, scope_id, scopes[] ∈ {ingest, search, admin}`
 
-迁移分批：`0001` 领域（含 `products.kind`、tags、document_tags）+成员+spans+pending+DL；`0002` models；`0003` api_keys；`0004` embeddings；`0005` graph；`0006` wiki；`0007` housekeep；`0008` `vector(1024)`；`0009` `documents.attempt` / `description`。
+迁移分批：`0001` 领域（含 `products.kind`、tags、document_tags）+成员+spans+pending+DL；`0002` models；`0003` api_keys；`0004` embeddings；`0005` graph；`0006` wiki；`0007` housekeep；`0008` `vector(1024)`；`0009` `documents.attempt` / `description`；`0010` `documents` 来源字段；`0011` `wiki_pages.chunk_refs`。
 
 ### 2.2 配置合并
 
@@ -437,6 +437,7 @@ SSRF：拦 loopback / 链路本地 / 私网 / `169.254.169.254` / DNS rebinding�
 | engine | 实现 |
 |---|---|
 | `simple` | Rust SimpleFormatReader |
+| `anydoc` | 进程内 anydoc 0.1.9（docx/doc/pptx/ppt/xlsx/xls/odf/rtf/epub/csv/pdf）。不经 DocReader。纯 URL 拒绝。无文字层 PDF 回退 builtin，并打 `anydoc_fallback=scanned_pdf` / `image_source_type=scanned_pdf`。成功结果带 `parser` / `anydoc_version` / `source_format`。抽图开关：`parser_engine_overrides.anydoc_extract_images`。开启抽图时走文档模型：把 `ImageSource::Asset` 改写成 `images/image-N.ext` 后再序列化，图片留在原段落/表格/列表位置；`to_document` 失败则回退纯文本并记 `anydoc_assets_error`。 |
 | `mineru` / `mineru_cloud` | Rust HTTP |
 | `paddleocr_vl` / `paddleocr_vl_cloud` | Rust HTTP |
 | `builtin` | **强制** gRPC DocReader，禁止 simple 兜底 |
@@ -447,6 +448,8 @@ SSRF：拦 loopback / 链路本地 / 私网 / `169.254.169.254` / DNS rebinding�
 Simple：md/txt 原样；csv→Markdown 表；json 展开；图→`![](images/…)` + ImageRef；音频→`IsAudio` + 原始字节，随后 ASR 写回 Markdown，无 ASR 配置则 failed。
 
 DocReader 子超时 30min。`ReadResult.Error` 或 transport：非最后一次 retry；最后一次 `failed`。无 reader：「Document parsing service is not configured」立即 failed、不重试。
+
+`GET /api/v1/system/parser-engines`：对照 brain `ListParserEngines`。合并本进程 convert 引擎（builtin / simple / anydoc / mineru / mineru_cloud / paddleocr_vl / paddleocr_vl_cloud）与 DocReader `ListEngines`。同名以远端 `file_types` / `description` 为准；远端独有引擎追加。anydoc 始终 available。
 
 `payload.passages`：不调 convert/chunker.Split，每段一个 `text` chunk，直接 5.5。
 

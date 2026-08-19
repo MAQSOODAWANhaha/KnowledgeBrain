@@ -10,6 +10,7 @@ fn log_line(msg: &str) {
 
 #[tokio::main]
 async fn main() {
+    let _ = dotenvy::dotenv();
     log_line("worker ready");
     tokio::select! {
         _ = shutdown_signal() => {}

@@ -1,5 +1,11 @@
 //! Model catalog. v1 ships stub embedding / chat ids.
 
+mod http;
+mod sse;
+
+pub use http::{CHAT_TIMEOUT, EMBED_TIMEOUT, chat_sse, json_sse, post_llm};
+pub use sse::{collect_chat_content, last_json_value, looks_like_sse};
+
 use serde::{Deserialize, Serialize};
 
 /// Production embedding width. `0008` `vector(1024)` and HTTP `dimensions` must match.

@@ -78,6 +78,8 @@ pub struct ProcessOverrides {
     pub question_generation_config: Option<QuestionOverride>,
     #[serde(default)]
     pub asr_config: Option<AsrOverride>,
+    #[serde(default)]
+    pub parser_engine_overrides: std::collections::HashMap<String, String>,
 }
 
 impl ProcessOverrides {
@@ -89,6 +91,7 @@ impl ProcessOverrides {
             && self.extract_config.is_none()
             && self.question_generation_config.is_none()
             && self.asr_config.is_none()
+            && self.parser_engine_overrides.is_empty()
     }
 }
 

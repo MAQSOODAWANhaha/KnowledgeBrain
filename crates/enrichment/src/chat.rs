@@ -3,60 +3,85 @@
 use serde_json::json;
 
 pub fn chat_http_configured() -> bool {
-    !std::env::var("KNOWLEDGEBRAIN_CHAT_BASE_URL")
-        .unwrap_or_default()
-        .trim()
-        .is_empty()
+    !domain::chat_base_url().is_empty()
+}
+
+fn resolve_chat_model(model_id: &str) -> String {
+    if model_id.trim().is_empty() || model_id == "stub-chat" {
+        let env = domain::chat_model();
+        if env.is_empty() {
+            "stub-chat".into()
+        } else {
+            env
+        }
+    } else {
+        model_id.trim().to_string()
+    }
 }
 
 pub fn chat_complete(system: &str, user: &str, model_id: &str) -> Result<String, String> {
-    if model_id == "stub-chat"
-        || std::env::var("KNOWLEDGEBRAIN_CHAT_BASE_URL")
-            .unwrap_or_default()
-            .is_empty()
-    {
+    chat_complete_limited(system, user, model_id, 2048)
+}
+
+/// Brain `wikiLLMMaxTokens` — large Chinese extracts otherwise truncate mid-JSON.
+pub const WIKI_LLM_MAX_TOKENS: u32 = 32768;
+/// Brain `wikiLLMMaxAttempts`.
+pub const WIKI_LLM_MAX_ATTEMPTS: u32 = 3;
+/// Brain `wikiLLMBackoffBase`.
+pub const WIKI_LLM_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(2);
+
+pub fn chat_complete_limited(
+    system: &str,
+    user: &str,
+    model_id: &str,
+    max_tokens: u32,
+) -> Result<String, String> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::block_in_place(|| chat_complete_inner(system, user, model_id, max_tokens))
+    } else {
+        chat_complete_inner(system, user, model_id, max_tokens)
+    }
+}
+
+/// Brain `generateWithTemplate`: 32768 completion tokens, 3 attempts, 2s/4s/8s.
+pub fn chat_complete_wiki(system: &str, user: &str, model_id: &str) -> Result<String, String> {
+    let mut last = "chat returned empty".to_string();
+    for attempt in 1..=WIKI_LLM_MAX_ATTEMPTS {
+        match chat_complete_limited(system, user, model_id, WIKI_LLM_MAX_TOKENS) {
+            Ok(text) if !text.trim().is_empty() => return Ok(text),
+            Ok(_) => last = "chat returned empty".into(),
+            Err(e) => last = e,
+        }
+        if attempt < WIKI_LLM_MAX_ATTEMPTS {
+            std::thread::sleep(WIKI_LLM_BACKOFF_BASE * (1 << (attempt - 1)));
+        }
+    }
+    Err(last)
+}
+
+fn chat_complete_inner(
+    system: &str,
+    user: &str,
+    model_id: &str,
+    max_tokens: u32,
+) -> Result<String, String> {
+    let base = domain::chat_base_url();
+    let model = resolve_chat_model(model_id);
+    if base.is_empty() || model == "stub-chat" {
         return Ok(stub_complete(user));
     }
-    let base = std::env::var("KNOWLEDGEBRAIN_CHAT_BASE_URL").unwrap_or_default();
-    let key = std::env::var("KNOWLEDGEBRAIN_CHAT_API_KEY").unwrap_or_default();
+    let key = domain::chat_api_key();
     let url = completions_url(&base);
-    let model = if model_id.is_empty() {
-        "stub-chat"
-    } else {
-        model_id
-    };
     let body = json!({
         "model": model,
         "temperature": 0.3,
-        "max_tokens": 2048,
+        "max_tokens": max_tokens,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user}
         ]
     });
-    let mut req = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| e.to_string())?
-        .post(url)
-        .json(&body);
-    if !key.is_empty() {
-        req = req.bearer_auth(key);
-    }
-    let resp = req.send().map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("chat failed: {}", resp.status()));
-    }
-    let v: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
-    let text = v["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if text.is_empty() {
-        return Err("chat returned empty".into());
-    }
-    Ok(text)
+    models::chat_sse(&url, &key, body)
 }
 
 pub(crate) fn completions_url_for_vlm(base: &str) -> String {

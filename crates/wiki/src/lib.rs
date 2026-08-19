@@ -8,7 +8,7 @@ mod taxonomy;
 pub use linkify::{LinkRef, linkify_content};
 pub use taxonomy::{
     ALL_PAGE_TYPES, PAGE_COMPARISON, PAGE_CONCEPT, PAGE_ENTITY, PAGE_INDEX, PAGE_LOG, PAGE_SUMMARY,
-    PAGE_SYNTHESIS, parse_extraction, typed_slug,
+    PAGE_SYNTHESIS, junk_item_name, page_content_for, parse_extraction, typed_slug,
 };
 
 use chrono::{Duration, Utc};
@@ -17,16 +17,24 @@ use domain::{
 };
 use index::index_one;
 use taxonomy::{
-    Candidate, assemble_body, category_for, cite_chunks, collect_text_chunks,
-    existing_folder_paths, fallback_path, parse_taxonomy_assignments, select_relevant_folders,
+    Candidate, assemble_body, attach_citations, candidate_slug_prompt, category_for, cite_with_llm,
+    collect_text_chunks, dedup_candidates, document_language, existing_folder_paths, fallback_path,
+    first_lede, has_sufficient_text, parse_taxonomy_assignments, reduce_page,
+    select_relevant_folders, split_summary_line, wiki_summary_prompt,
 };
 use uuid::Uuid;
+
+pub fn summary_slug(document_id: Uuid) -> String {
+    format!("{PAGE_SUMMARY}/{document_id}")
+}
 
 pub const INGEST_DEBOUNCE_SECS: u64 = 30;
 pub const RETRACT_DEBOUNCE_SECS: u64 = 5;
 pub const FOLLOW_UP_DEBOUNCE_SECS: u64 = 5;
 pub const FINALIZE_DEBOUNCE_SECS: u64 = 20;
 pub const BATCH_DOCS: usize = 5;
+/// Brain `IngestReduceParallelOrDefault`.
+pub const REDUCE_PARALLEL: usize = 10;
 pub const ASSEMBLE_RUNE_CAP: usize = 32768;
 pub const STALE_CLAIM_MIN: u64 = 90;
 pub const LOCK_RETRY_SECS: u64 = 15;
@@ -195,6 +203,9 @@ pub fn process_ingest(store: &mut Store, version_id: Uuid) -> Result<(), String>
     }
     let mut slugs: Vec<(String, String)> = Vec::new();
     let mut done_ids: Vec<i64> = Vec::new();
+    let mut grouped: std::collections::HashMap<String, Vec<SlugUpdate>> =
+        std::collections::HashMap::new();
+    let mut mapped: Vec<(i64, Uuid)> = Vec::new();
     for op in &claimed {
         match op.op.as_str() {
             OP_RETRACT => {
@@ -211,15 +222,16 @@ pub fn process_ingest(store: &mut Store, version_id: Uuid) -> Result<(), String>
                     done_ids.push(op.id);
                     continue;
                 }
-                match map_one(store, version_id, did) {
-                    Ok(pages) if pages.is_empty() => {
+                match map_document(store, version_id, did) {
+                    Ok(updates) if updates.is_empty() => {
                         store.finalize_subtask(did);
                         done_ids.push(op.id);
                     }
-                    Ok(pages) => {
-                        slugs.extend(pages);
-                        store.finalize_subtask(did);
-                        done_ids.push(op.id);
+                    Ok(updates) => {
+                        for u in updates {
+                            grouped.entry(u.slug.clone()).or_default().push(u);
+                        }
+                        mapped.push((op.id, did));
                     }
                     Err(_) => {
                         if let Some(row) = store.wiki_ops.iter_mut().find(|r| r.id == op.id) {
@@ -235,6 +247,25 @@ pub fn process_ingest(store: &mut Store, version_id: Uuid) -> Result<(), String>
                 }
             }
         }
+    }
+    let model = version.wiki_chat_model().to_string();
+    let (written, failed_docs) = reduce_grouped(store, version_id, &model, grouped);
+    slugs.extend(written);
+    for (op_id, did) in mapped {
+        if failed_docs.contains(&did) {
+            if let Some(row) = store.wiki_ops.iter_mut().find(|r| r.id == op_id) {
+                row.fail_count += 1;
+                row.claimed_at = None;
+                if row.fail_count > MAX_FAIL_RETRIES {
+                    store.dead_letter(TYPE_WIKI_INGEST, did, "wiki reduce failed");
+                    store.finalize_subtask(did);
+                    done_ids.push(op_id);
+                }
+            }
+            continue;
+        }
+        store.finalize_subtask(did);
+        done_ids.push(op_id);
     }
     trim_ops(store, &done_ids);
     if !slugs.is_empty() {
@@ -378,11 +409,38 @@ pub fn fail_open_pending(store: &mut Store, version_id: Uuid) {
         .retain(|o| !(o.lane == TYPE_WIKI_INGEST && o.version_id == version_id));
 }
 
-fn map_one(
+#[derive(Debug, Clone)]
+struct SlugUpdate {
+    slug: String,
+    update_type: String,
+    document_id: Uuid,
+    doc_title: String,
+    language: String,
+    title: String,
+    about: String,
+    details: String,
+    aliases: Vec<String>,
+    chunk_ids: Vec<Uuid>,
+    summary_line: String,
+    summary_body: String,
+    retract_content: String,
+    doc_summary: String,
+}
+
+fn slugs_for_document(store: &Store, version_id: Uuid, document_id: Uuid) -> Vec<String> {
+    store
+        .wiki
+        .values()
+        .filter(|p| p.product_version_id == version_id && p.source_refs.contains(&document_id))
+        .map(|p| p.slug.clone())
+        .collect()
+}
+
+fn map_document(
     store: &mut Store,
     version_id: Uuid,
     document_id: Uuid,
-) -> Result<Vec<(String, String)>, String> {
+) -> Result<Vec<SlugUpdate>, String> {
     let Some(doc) = store.documents.get(&document_id).cloned() else {
         return Ok(Vec::new());
     };
@@ -394,110 +452,472 @@ fn map_one(
     }
     let chunks = collect_text_chunks(store, document_id);
     let body = assemble_body(&chunks);
-    if body.is_empty() {
+    if body.is_empty() || !has_sufficient_text(&body) {
         return Ok(Vec::new());
     }
     let title = doc.title.clone();
-    let mut candidates = extract_candidates(store, version_id, document_id, &title, &body, &chunks);
-    if !candidates.iter().any(|c| c.page_type == PAGE_SUMMARY) {
-        candidates.insert(
-            0,
-            Candidate {
-                title: title.clone(),
-                slug: typed_slug(PAGE_SUMMARY, &title),
-                page_type: PAGE_SUMMARY.into(),
-                aliases: Vec::new(),
-                about: body.chars().take(280).collect(),
-                source_refs: chunks.iter().map(|c| c.id).collect(),
-            },
-        );
-    }
-    let synthesized = enrichment::chat_complete(
-        "Write a concise wiki summary page from the source. Keep facts. Do not invent.",
-        &format!("# {title}\n\n{body}"),
-        version.wiki_chat_model(),
-    )
-    .unwrap_or_default();
-    let mut written = Vec::new();
+    let language = document_language(&body).to_string();
+    let mut candidates = extract_candidates(
+        store,
+        version_id,
+        document_id,
+        &title,
+        &body,
+        &chunks,
+        &language,
+    );
+    candidates = dedup_candidates(candidates);
+    let listing: String = candidates
+        .iter()
+        .filter(|c| c.page_type != PAGE_SUMMARY)
+        .map(|c| format!("- [[{}]] = {}", c.slug, c.title))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (sum_sys, sum_user) = wiki_summary_prompt(&body, &listing, &language);
+    let synthesized = if enrichment::chat_http_configured() {
+        enrichment::chat_complete_wiki(&sum_sys, &sum_user, version.wiki_chat_model())?
+    } else {
+        String::new()
+    };
+    let (summary_lede, summary_body) = split_summary_line(&synthesized);
+    let summary_body = if summary_body.is_empty() {
+        synthesized.clone()
+    } else {
+        summary_body
+    };
+    let doc_summary = if !summary_body.is_empty() {
+        summary_body.clone()
+    } else {
+        summary_lede.clone()
+    };
+    let sum_slug = summary_slug(document_id);
+    let mut updates = vec![SlugUpdate {
+        slug: sum_slug.clone(),
+        update_type: PAGE_SUMMARY.into(),
+        document_id,
+        doc_title: title.clone(),
+        language: language.clone(),
+        title: title.clone(),
+        about: summary_lede.clone(),
+        details: String::new(),
+        aliases: Vec::new(),
+        chunk_ids: Vec::new(),
+        summary_line: summary_lede.clone(),
+        summary_body,
+        retract_content: String::new(),
+        doc_summary: doc_summary.clone(),
+    }];
+    let mut new_slugs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    new_slugs.insert(sum_slug);
     for cand in candidates {
-        if !try_slug_lock(store, version_id, &cand.slug) {
-            return Err("slug lock conflict".into());
+        if cand.page_type == PAGE_SUMMARY {
+            continue;
         }
-        let content = if cand.page_type == PAGE_SUMMARY && !synthesized.trim().is_empty() {
-            let mut s = synthesized.clone();
-            if s.chars().count() > ASSEMBLE_RUNE_CAP {
-                s = s.chars().take(ASSEMBLE_RUNE_CAP).collect();
-            }
-            s
-        } else if !cand.about.is_empty() {
-            cand.about.clone()
-        } else {
-            body.clone()
-        };
-        let existing = store.wiki.get(&(version_id, cand.slug.clone())).cloned();
-        let mut source_refs = cand.source_refs.clone();
-        let mut aliases = cand.aliases.clone();
-        let (id, content, category_path, folder_id) = if let Some(old) = existing {
-            for r in old.source_refs {
-                if !source_refs.contains(&r) {
-                    source_refs.push(r);
-                }
-            }
-            for a in old.aliases {
-                if !aliases.iter().any(|x| x == &a) {
-                    aliases.push(a);
-                }
-            }
-            let keep = if old.status == "published" && cand.page_type != PAGE_SUMMARY {
-                old.content
-            } else {
-                content
-            };
-            (
-                old.id,
-                keep,
-                if old.category_path.is_empty() {
-                    category_for(&cand.page_type, &cand.title)
-                } else {
-                    old.category_path
-                },
-                old.folder_id,
-            )
-        } else {
-            (
-                Uuid::new_v4(),
-                content,
-                category_for(&cand.page_type, &cand.title),
-                None,
-            )
-        };
-        let page = WikiPage {
-            id,
-            product_version_id: version_id,
-            slug: cand.slug.clone(),
-            title: cand.title.clone(),
-            content: content.clone(),
-            page_type: cand.page_type.clone(),
-            status: "published".into(),
-            summary: content.chars().take(240).collect(),
-            aliases,
-            source_refs,
-            category_path,
-            folder_id,
-        };
-        store.wiki.insert((version_id, cand.slug.clone()), page);
-        index_wiki_page(
-            store,
-            version_id,
+        new_slugs.insert(cand.slug.clone());
+        updates.push(SlugUpdate {
+            slug: cand.slug,
+            update_type: cand.page_type,
             document_id,
-            &cand.slug,
-            &cand.title,
-            &content,
-        );
-        release_slug_lock(store, version_id, &cand.slug);
-        written.push((cand.slug, cand.title));
+            doc_title: title.clone(),
+            language: language.clone(),
+            title: cand.title,
+            about: cand.about,
+            details: cand.details,
+            aliases: cand.aliases,
+            chunk_ids: cand.source_refs,
+            summary_line: String::new(),
+            summary_body: String::new(),
+            retract_content: String::new(),
+            doc_summary: doc_summary.clone(),
+        });
     }
-    Ok(written)
+    let prior = store
+        .wiki
+        .get(&(version_id, summary_slug(document_id)))
+        .map(|p| p.content.clone())
+        .unwrap_or_else(|| doc_summary.clone());
+    for old in slugs_for_document(store, version_id, document_id) {
+        if new_slugs.contains(&old) {
+            if old.starts_with("summary/") {
+                continue;
+            }
+            updates.push(SlugUpdate {
+                slug: old,
+                update_type: "retract".into(),
+                document_id,
+                doc_title: title.clone(),
+                language: language.clone(),
+                title: String::new(),
+                about: String::new(),
+                details: String::new(),
+                aliases: Vec::new(),
+                chunk_ids: Vec::new(),
+                summary_line: String::new(),
+                summary_body: String::new(),
+                retract_content: prior.clone(),
+                doc_summary: doc_summary.clone(),
+            });
+        } else {
+            updates.push(SlugUpdate {
+                slug: old,
+                update_type: "retractStale".into(),
+                document_id,
+                doc_title: title.clone(),
+                language: language.clone(),
+                title: String::new(),
+                about: String::new(),
+                details: String::new(),
+                aliases: Vec::new(),
+                chunk_ids: Vec::new(),
+                summary_line: String::new(),
+                summary_body: String::new(),
+                retract_content: body.clone(),
+                doc_summary: doc_summary.clone(),
+            });
+        }
+    }
+    Ok(updates)
+}
+
+struct ReduceJob {
+    slug: String,
+    updates: Vec<SlugUpdate>,
+    existing: Option<WikiPage>,
+    chunks: Vec<Chunk>,
+    remaining: String,
+    valid_links: String,
+}
+
+struct ReducePatch {
+    slug: String,
+    title: String,
+    page_type: String,
+    content: String,
+    summary: String,
+    aliases: Vec<String>,
+    source_refs: Vec<Uuid>,
+    chunk_refs: Vec<Uuid>,
+    owner_doc: Uuid,
+}
+
+fn reduce_grouped(
+    store: &mut Store,
+    version_id: Uuid,
+    model: &str,
+    grouped: std::collections::HashMap<String, Vec<SlugUpdate>>,
+) -> (Vec<(String, String)>, std::collections::HashSet<Uuid>) {
+    let mut failed = std::collections::HashSet::new();
+    let mut jobs = Vec::new();
+    let valid_links: String = grouped
+        .keys()
+        .map(|s| format!("- [[{s}]]"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (slug, updates) in grouped {
+        if !try_slug_lock(store, version_id, &slug) {
+            for u in &updates {
+                failed.insert(u.document_id);
+            }
+            continue;
+        }
+        let existing = store.wiki.get(&(version_id, slug.clone())).cloned();
+        let mut chunk_ids = Vec::new();
+        for u in &updates {
+            chunk_ids.extend(u.chunk_ids.iter().copied());
+        }
+        chunk_ids.sort();
+        chunk_ids.dedup();
+        let chunks: Vec<Chunk> = chunk_ids
+            .iter()
+            .filter_map(|id| store.chunks.get(id).cloned())
+            .collect();
+        let retract_ids: std::collections::HashSet<Uuid> = updates
+            .iter()
+            .filter(|u| u.update_type == "retract" || u.update_type == "retractStale")
+            .map(|u| u.document_id)
+            .collect();
+        let remaining = if retract_ids.is_empty() {
+            String::new()
+        } else {
+            let keep: Vec<Uuid> = existing
+                .as_ref()
+                .map(|p| {
+                    p.source_refs
+                        .iter()
+                        .copied()
+                        .filter(|id| !retract_ids.contains(id))
+                        .collect()
+                })
+                .unwrap_or_default();
+            keep.iter()
+                .filter_map(|did| {
+                    store.wiki.values().find(|p| {
+                        p.product_version_id == version_id
+                            && p.page_type == PAGE_SUMMARY
+                            && p.source_refs.contains(did)
+                    })
+                })
+                .map(|p| {
+                    format!(
+                        "<document>\n<title>{}</title>\n<content>\n{}\n</content>\n</document>\n",
+                        p.title, p.content
+                    )
+                })
+                .collect()
+        };
+        jobs.push(ReduceJob {
+            slug,
+            updates,
+            existing,
+            chunks,
+            remaining,
+            valid_links: valid_links.clone(),
+        });
+    }
+    type BatchOut = Option<ReducePatch>;
+    let collected = std::sync::Mutex::new(Vec::<BatchOut>::new());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let workers = REDUCE_PARALLEL.min(jobs.len()).max(1);
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if i >= jobs.len() {
+                        break;
+                    }
+                    let out = run_reduce_job(model, &jobs[i]);
+                    collected.lock().expect("reduce mutex").push(out);
+                }
+            });
+        }
+    });
+    let mut written = Vec::new();
+    for patch in collected
+        .into_inner()
+        .expect("reduce mutex")
+        .into_iter()
+        .flatten()
+    {
+        let slug = patch.slug.clone();
+        let title = patch.title.clone();
+        apply_patch(store, version_id, patch);
+        release_slug_lock(store, version_id, &slug);
+        written.push((slug, title));
+    }
+    for job in &jobs {
+        if written.iter().all(|(s, _)| s != &job.slug) {
+            release_slug_lock(store, version_id, &job.slug);
+            for u in &job.updates {
+                failed.insert(u.document_id);
+            }
+        }
+    }
+    (written, failed)
+}
+
+fn run_reduce_job(model: &str, job: &ReduceJob) -> Option<ReducePatch> {
+    let mut summary_u = None;
+    let mut additions = Vec::new();
+    let mut retracts = Vec::new();
+    for u in &job.updates {
+        match u.update_type.as_str() {
+            t if t == PAGE_SUMMARY => summary_u = Some(u),
+            "retract" | "retractStale" => retracts.push(u),
+            _ => additions.push(u),
+        }
+    }
+    if let Some(sum) = summary_u {
+        let content = if !sum.summary_body.is_empty() {
+            sum.summary_body.clone()
+        } else {
+            format!("# {}\n", sum.title)
+        };
+        let lede = if !sum.summary_line.is_empty() {
+            sum.summary_line.clone()
+        } else {
+            first_lede(&content)
+        };
+        let mut source_refs = job
+            .existing
+            .as_ref()
+            .map(|p| p.source_refs.clone())
+            .unwrap_or_default();
+        if !source_refs.contains(&sum.document_id) {
+            source_refs.push(sum.document_id);
+        }
+        return Some(ReducePatch {
+            slug: job.slug.clone(),
+            title: sum.title.clone(),
+            page_type: PAGE_SUMMARY.into(),
+            content,
+            summary: lede,
+            aliases: Vec::new(),
+            source_refs,
+            chunk_refs: Vec::new(),
+            owner_doc: sum.document_id,
+        });
+    }
+    if additions.is_empty() && retracts.is_empty() {
+        return None;
+    }
+    let first = additions
+        .first()
+        .copied()
+        .or_else(|| retracts.first().copied())?;
+    let mut aliases = job
+        .existing
+        .as_ref()
+        .map(|p| p.aliases.clone())
+        .unwrap_or_default();
+    let mut source_refs = job
+        .existing
+        .as_ref()
+        .map(|p| p.source_refs.clone())
+        .unwrap_or_default();
+    let mut chunk_refs = job
+        .existing
+        .as_ref()
+        .map(|p| p.chunk_refs.clone())
+        .unwrap_or_default();
+    let retract_ids: std::collections::HashSet<Uuid> =
+        retracts.iter().map(|u| u.document_id).collect();
+    source_refs.retain(|id| !retract_ids.contains(id));
+    let mut about = String::new();
+    let mut details = String::new();
+    let mut title = job
+        .existing
+        .as_ref()
+        .map(|p| p.title.clone())
+        .unwrap_or_default();
+    let mut page_type = job
+        .existing
+        .as_ref()
+        .map(|p| p.page_type.clone())
+        .unwrap_or_default();
+    let mut cited: Vec<&Chunk> = Vec::new();
+    let mut deleted = String::new();
+    for u in &retracts {
+        if !u.retract_content.is_empty() {
+            deleted.push_str(&format!(
+                "<document>\n<title>{}</title>\n<content>\n{}\n</content>\n</document>\n",
+                u.doc_title, u.retract_content
+            ));
+        }
+    }
+    for u in &additions {
+        if title.is_empty() {
+            title = u.title.clone();
+        }
+        if page_type.is_empty() {
+            page_type = u.update_type.clone();
+        }
+        if about.len() < u.about.len() {
+            about = u.about.clone();
+        }
+        if details.len() < u.details.len() {
+            details = u.details.clone();
+        }
+        for a in &u.aliases {
+            if !aliases.iter().any(|x| x == a) {
+                aliases.push(a.clone());
+            }
+        }
+        if !source_refs.contains(&u.document_id) {
+            source_refs.push(u.document_id);
+        }
+        for id in &u.chunk_ids {
+            if !chunk_refs.contains(id) {
+                chunk_refs.push(*id);
+            }
+            if let Some(ch) = job.chunks.iter().find(|c| c.id == *id) {
+                cited.push(ch);
+            }
+        }
+    }
+    if title.is_empty() {
+        title = job.slug.clone();
+    }
+    if page_type.is_empty() {
+        page_type = PAGE_ENTITY.into();
+    }
+    let existing = job
+        .existing
+        .as_ref()
+        .map(|p| p.content.as_str())
+        .unwrap_or("");
+    let (content, lede) = reduce_page(taxonomy::ReduceInput {
+        model,
+        slug: &job.slug,
+        title: &title,
+        page_type: &page_type,
+        existing,
+        about: &about,
+        details: &details,
+        cited: &cited,
+        doc_title: &first.doc_title,
+        doc_summary: &first.doc_summary,
+        valid_links: &job.valid_links,
+        language: &first.language,
+        deleted_content: &deleted,
+        remaining_sources: &job.remaining,
+    });
+    Some(ReducePatch {
+        slug: job.slug.clone(),
+        title,
+        page_type,
+        content,
+        summary: lede,
+        aliases,
+        source_refs,
+        chunk_refs,
+        owner_doc: first.document_id,
+    })
+}
+
+fn apply_patch(store: &mut Store, version_id: Uuid, patch: ReducePatch) {
+    let existing = store.wiki.get(&(version_id, patch.slug.clone())).cloned();
+    let (id, category_path, folder_id) = if let Some(old) = existing {
+        (
+            old.id,
+            if old.category_path.is_empty() {
+                category_for(&patch.page_type, &patch.title)
+            } else {
+                old.category_path
+            },
+            old.folder_id,
+        )
+    } else {
+        (
+            Uuid::new_v4(),
+            category_for(&patch.page_type, &patch.title),
+            None,
+        )
+    };
+    let page = WikiPage {
+        id,
+        product_version_id: version_id,
+        slug: patch.slug.clone(),
+        title: patch.title.clone(),
+        content: patch.content.clone(),
+        page_type: patch.page_type,
+        status: "published".into(),
+        summary: patch.summary,
+        aliases: patch.aliases,
+        source_refs: patch.source_refs,
+        chunk_refs: patch.chunk_refs,
+        category_path,
+        folder_id,
+    };
+    store.wiki.insert((version_id, patch.slug.clone()), page);
+    index_wiki_page(
+        store,
+        version_id,
+        patch.owner_doc,
+        &patch.slug,
+        &patch.title,
+        &patch.content,
+    );
 }
 
 fn extract_candidates(
@@ -507,54 +927,67 @@ fn extract_candidates(
     title: &str,
     body: &str,
     chunks: &[Chunk],
+    language: &str,
 ) -> Vec<Candidate> {
     let model = store
         .versions
         .get(&version_id)
         .map(|v| v.wiki_chat_model().to_string())
         .unwrap_or_else(|| "stub-chat".into());
-    let raw = enrichment::chat_complete(
-        r#"Extract wiki candidates as JSON only:
-{"entities":[{"name":"...","slug":"entity/...","aliases":[]}],"concepts":[{"name":"...","slug":"concept/..."}]}"#,
-        &format!("# {title}\n\n{body}"),
-        &model,
-    )
-    .unwrap_or_default();
+    let previous: String = store
+        .wiki
+        .values()
+        .filter(|p| {
+            p.product_version_id == version_id
+                && (p.page_type == PAGE_ENTITY || p.page_type == PAGE_CONCEPT)
+        })
+        .map(|p| format!("- {} = {}", p.slug, p.title))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (sys, user) = candidate_slug_prompt(body, &previous, title, language);
+    let raw = if enrichment::chat_http_configured() {
+        enrichment::chat_complete_wiki(&sys, &user, &model).unwrap_or_default()
+    } else {
+        String::new()
+    };
     let items = parse_extraction(&raw);
-    if items.is_empty() {
+    let candidates = if items.is_empty() {
         let nodes: Vec<_> = store
             .graph
             .values()
             .filter(|n| n.version_id == version_id && n.document_id == document_id)
             .collect();
-        return taxonomy::candidates_from_graph(&nodes, chunks);
-    }
-    items
-        .into_iter()
-        .map(|it| {
-            let page_type = if ALL_PAGE_TYPES.contains(&it.page_type.as_str()) {
-                it.page_type
-            } else {
-                PAGE_ENTITY.into()
-            };
-            let slug = if it.slug.is_empty() {
-                typed_slug(&page_type, &it.name)
-            } else if it.slug.contains('/') {
-                it.slug
-            } else {
-                format!("{page_type}/{}", it.slug)
-            };
-            let refs = cite_chunks(chunks, &it.name, &it.aliases);
-            Candidate {
-                title: it.name,
-                slug,
-                page_type,
-                aliases: it.aliases,
-                about: it.description,
-                source_refs: refs,
-            }
-        })
-        .collect()
+        taxonomy::candidates_from_graph(&nodes, chunks)
+    } else {
+        items
+            .into_iter()
+            .map(|it| {
+                let page_type = if ALL_PAGE_TYPES.contains(&it.page_type.as_str()) {
+                    it.page_type
+                } else {
+                    PAGE_ENTITY.into()
+                };
+                let slug = if it.slug.is_empty() {
+                    typed_slug(&page_type, &it.name)
+                } else if it.slug.contains('/') {
+                    it.slug
+                } else {
+                    format!("{page_type}/{}", it.slug)
+                };
+                Candidate {
+                    title: it.name,
+                    slug,
+                    page_type,
+                    aliases: it.aliases,
+                    about: it.description,
+                    details: it.details,
+                    source_refs: Vec::new(),
+                }
+            })
+            .collect()
+    };
+    let (citations, news) = cite_with_llm(&model, &candidates, chunks, language);
+    attach_citations(candidates, citations, news, chunks)
 }
 
 fn index_wiki_page(
@@ -635,24 +1068,19 @@ fn write_index_page(store: &mut Store, version_id: Uuid) {
     }
     let content = lines.join("\n");
     let slug = PAGE_INDEX.to_string();
-    let page = WikiPage {
-        id: store
+    let page = WikiPage::published(
+        store
             .wiki
             .get(&(version_id, slug.clone()))
             .map(|p| p.id)
             .unwrap_or_else(Uuid::new_v4),
-        product_version_id: version_id,
-        slug: slug.clone(),
-        title: "Index".into(),
-        content: content.clone(),
-        page_type: PAGE_INDEX.into(),
-        status: "published".into(),
-        summary: "Wiki index".into(),
-        aliases: Vec::new(),
-        source_refs: Vec::new(),
-        category_path: Vec::new(),
-        folder_id: None,
-    };
+        version_id,
+        slug.clone(),
+        "Index".into(),
+        content.clone(),
+        PAGE_INDEX.into(),
+        "Wiki index".into(),
+    );
     store.wiki.insert((version_id, slug.clone()), page);
     store
         .chunks
@@ -847,20 +1275,15 @@ fn upsert_system_page(store: &mut Store, version_id: Uuid, slug: &str, title: &s
         .unwrap_or_else(Uuid::new_v4);
     store.wiki.insert(
         (version_id, slug.to_string()),
-        WikiPage {
+        WikiPage::published(
             id,
-            product_version_id: version_id,
-            slug: slug.to_string(),
-            title: title.into(),
-            content: content.to_string(),
-            page_type: slug.to_string(),
-            status: "published".into(),
-            summary: content.chars().take(240).collect(),
-            aliases: Vec::new(),
-            source_refs: Vec::new(),
-            category_path: Vec::new(),
-            folder_id: None,
-        },
+            version_id,
+            slug.to_string(),
+            title.into(),
+            content.to_string(),
+            slug.to_string(),
+            content.chars().take(240).collect(),
+        ),
     );
     store
         .chunks
@@ -1113,6 +1536,7 @@ mod tests {
         assert_eq!(FOLLOW_UP_DEBOUNCE_SECS, 5);
         assert_eq!(FINALIZE_DEBOUNCE_SECS, 20);
         assert_eq!(BATCH_DOCS, 5);
+        assert_eq!(REDUCE_PARALLEL, 10);
         assert_eq!(LOCK_RETRY_SECS, 15);
         assert_eq!(STALE_CLAIM_MIN, 90);
         assert_eq!(ASSEMBLE_RUNE_CAP, 32768);
@@ -1259,7 +1683,7 @@ mod tests {
     fn map_lock_conflict_keeps_op_and_skips_finalize() {
         let (mut s, vid, did) = seed();
         s.documents.get_mut(&did).unwrap().pending_subtasks_count = 1;
-        let slug = typed_slug(PAGE_SUMMARY, "Alpha");
+        let slug = summary_slug(did);
         s.wiki_slug_locks
             .insert(slug_lock_key(vid, &slug), Utc::now());
         enqueue_ingest(&mut s, vid, did);
@@ -1326,6 +1750,7 @@ mod tests {
                 .values()
                 .any(|p| p.page_type == PAGE_SUMMARY && p.product_version_id == vid)
         );
+        assert!(s.wiki.contains_key(&(vid, summary_slug(did))));
         assert!(
             s.wiki
                 .values()
@@ -1339,7 +1764,7 @@ mod tests {
             .values()
             .find(|p| p.page_type == PAGE_ENTITY)
             .unwrap();
-        assert!(!entity.source_refs.is_empty());
+        assert!(entity.source_refs.contains(&did));
         assert!(
             s.wiki_folders
                 .values()
@@ -1423,7 +1848,7 @@ mod tests {
             .find(|p| p.page_type == PAGE_ENTITY && p.title == "Alpha")
             .unwrap();
         assert!(entity.source_refs.len() >= first_refs.len());
-        assert!(entity.source_refs.contains(&c2.id) || entity.source_refs.len() > 1);
+        assert!(entity.source_refs.contains(&did2) || entity.source_refs.len() > 1);
     }
 
     #[test]

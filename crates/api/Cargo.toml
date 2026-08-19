@@ -9,6 +9,8 @@ license.workspace = true
 auth = { path = "../auth" }
 axum.workspace = true
 chrono.workspace = true
+dotenvy.workspace = true
+docparser = { path = "../docparser" }
 domain = { path = "../domain" }
 models = { path = "../models" }
 obs = { path = "../obs" }

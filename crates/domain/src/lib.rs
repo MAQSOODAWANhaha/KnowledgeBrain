@@ -33,15 +33,68 @@ pub fn max_file_bytes() -> usize {
         .unwrap_or(MAX_FILE_SIZE)
 }
 
-pub fn vlm_configured() -> bool {
-    let vlm = std::env::var("KNOWLEDGEBRAIN_VLM_BASE_URL").unwrap_or_default();
-    if !vlm.trim().is_empty() {
-        return true;
+pub fn first_env(keys: &[&str]) -> String {
+    for k in keys {
+        if let Ok(v) = std::env::var(k) {
+            let t = v.trim();
+            if !t.is_empty() {
+                return t.to_string();
+            }
+        }
     }
-    !std::env::var("KNOWLEDGEBRAIN_CHAT_BASE_URL")
-        .unwrap_or_default()
-        .trim()
-        .is_empty()
+    String::new()
+}
+
+pub fn chat_base_url() -> String {
+    first_env(&["KNOWLEDGEBRAIN_CHAT_BASE_URL", "LLM_BASE_URL"])
+}
+
+pub fn chat_api_key() -> String {
+    first_env(&["KNOWLEDGEBRAIN_CHAT_API_KEY", "LLM_API_KEY"])
+}
+
+pub fn chat_model() -> String {
+    first_env(&["KNOWLEDGEBRAIN_CHAT_MODEL", "LLM_MODEL"])
+}
+
+pub fn embedding_base_url() -> String {
+    first_env(&["KNOWLEDGEBRAIN_EMBEDDING_BASE_URL", "EMBEDDING_BASE_URL"])
+}
+
+pub fn embedding_api_key() -> String {
+    first_env(&["KNOWLEDGEBRAIN_EMBEDDING_API_KEY", "EMBEDDING_API_KEY"])
+}
+
+pub fn embedding_model() -> String {
+    first_env(&["KNOWLEDGEBRAIN_EMBEDDING_MODEL", "EMBEDDING_MODEL"])
+}
+
+pub fn vlm_base_url() -> String {
+    let v = first_env(&["KNOWLEDGEBRAIN_VLM_BASE_URL", "LLM_BASE_URL"]);
+    if !v.is_empty() {
+        return v;
+    }
+    chat_base_url()
+}
+
+pub fn vlm_api_key() -> String {
+    let v = first_env(&["KNOWLEDGEBRAIN_VLM_API_KEY", "LLM_API_KEY"]);
+    if !v.is_empty() {
+        return v;
+    }
+    chat_api_key()
+}
+
+pub fn vlm_model() -> String {
+    let v = first_env(&["KNOWLEDGEBRAIN_VLM_MODEL", "LLM_MODEL"]);
+    if !v.is_empty() {
+        return v;
+    }
+    chat_model()
+}
+
+pub fn vlm_configured() -> bool {
+    !vlm_base_url().is_empty()
 }
 
 pub fn is_valid_file_type(name: &str) -> bool {

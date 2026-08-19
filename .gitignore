@@ -5,6 +5,7 @@
 *.swp
 .env
 var/
+fixtures/
 .venv/
 __pycache__/
 .pytest_cache/

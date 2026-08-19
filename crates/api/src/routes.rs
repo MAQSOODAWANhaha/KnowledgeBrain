@@ -170,6 +170,7 @@ pub fn build(state: AppState) -> Router {
             "/api/v1/products/{id}/versions/{vid}/files",
             get_s(version_file),
         )
+        .route("/api/v1/system/parser-engines", get_s(list_parser_engines))
         .route(
             "/api/v1/models",
             get_s(list_models).merge(post_s(create_model)),
@@ -2708,6 +2709,16 @@ struct NewModel {
     kind: String,
     #[serde(default)]
     dimension: i32,
+}
+
+async fn list_parser_engines(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<docparser::EngineCatalog>, ApiErr> {
+    let _actor = actor_from(&headers, &state).await?;
+    Ok(Json(
+        docparser::list_all_engines(&std::collections::HashMap::new()).await,
+    ))
 }
 
 async fn list_models(

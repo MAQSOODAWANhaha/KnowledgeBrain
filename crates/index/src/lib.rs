@@ -6,10 +6,7 @@ use models::EMBEDDING_DIM;
 use uuid::Uuid;
 
 pub fn embedding_http_configured() -> bool {
-    !std::env::var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL")
-        .unwrap_or_default()
-        .trim()
-        .is_empty()
+    !domain::embedding_base_url().is_empty()
 }
 
 /// Search / taxonomy: HTTP when configured, else hashed stub. HTTP errors fall back.
@@ -123,40 +120,9 @@ pub fn process_chunks(
     let model_id = version.embedding_model_id.clone();
     let needs = version.needs_embedding();
     let chunks = keep_nonempty_chunks(chunks);
-    let mut pending = Vec::new();
-    let mut text_count = 0usize;
-    for ch in &chunks {
-        if ch.chunk_type == "text" {
-            text_count += 1;
-        }
-        if ch.chunk_type == "parent_text" || !needs {
-            continue;
-        }
-        if !matches!(
-            ch.chunk_type.as_str(),
-            "text" | "image_ocr" | "image_caption" | "summary" | "wiki_page" | "question"
-        ) {
-            continue;
-        }
-        let content = ch.index_content(&title);
-        let vector = if version.vector_enabled {
-            embed_index(&content, &model_id)?
-        } else {
-            Vec::new()
-        };
-        let tsv = if version.keyword_enabled {
-            tokenize(&content).join(" ")
-        } else {
-            String::new()
-        };
-        pending.push(ChunkEmbedding {
-            chunk_id: ch.id,
-            product_version_id: doc.product_version_id,
-            document_id,
-            content,
-            vector,
-            tsv,
-        });
+    let text_count = chunks.iter().filter(|c| c.chunk_type == "text").count();
+    for ch in chunks {
+        store.chunks.insert(ch.id, ch);
     }
     if store
         .documents
@@ -165,11 +131,49 @@ pub fn process_chunks(
     {
         return Ok(());
     }
-    for ch in chunks {
-        store.chunks.insert(ch.id, ch);
-    }
-    for emb in pending {
-        store.embeddings.insert(emb.chunk_id, emb);
+    if needs {
+        let pending: Vec<Chunk> = store
+            .chunks
+            .values()
+            .filter(|ch| {
+                ch.document_id == document_id
+                    && ch.chunk_type != "parent_text"
+                    && matches!(
+                        ch.chunk_type.as_str(),
+                        "text"
+                            | "image_ocr"
+                            | "image_caption"
+                            | "summary"
+                            | "wiki_page"
+                            | "question"
+                    )
+            })
+            .cloned()
+            .collect();
+        for ch in pending {
+            let content = ch.index_content(&title);
+            let vector = if version.vector_enabled {
+                embed_index(&content, &model_id)?
+            } else {
+                Vec::new()
+            };
+            let tsv = if version.keyword_enabled {
+                tokenize(&content).join(" ")
+            } else {
+                String::new()
+            };
+            store.embeddings.insert(
+                ch.id,
+                ChunkEmbedding {
+                    chunk_id: ch.id,
+                    product_version_id: doc.product_version_id,
+                    document_id,
+                    content,
+                    vector,
+                    tsv,
+                },
+            );
+        }
     }
     if let Some(d) = store.documents.get_mut(&document_id) {
         d.enable_status = "enabled".into();
@@ -267,15 +271,28 @@ pub fn index_one(
 }
 
 fn embed_http(text: &str, model_id: &str) -> Result<Vec<f32>, String> {
-    let base = std::env::var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL").unwrap_or_default();
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::block_in_place(|| embed_http_inner(text, model_id))
+    } else {
+        embed_http_inner(text, model_id)
+    }
+}
+
+fn embed_http_inner(text: &str, model_id: &str) -> Result<Vec<f32>, String> {
+    let base = domain::embedding_base_url();
     if base.is_empty() {
         return Err("embedding not configured".into());
     }
-    let key = std::env::var("KNOWLEDGEBRAIN_EMBEDDING_API_KEY").unwrap_or_default();
-    let model = if !model_id.trim().is_empty() {
-        model_id.trim().to_string()
+    let key = domain::embedding_api_key();
+    let model = if model_id.trim().is_empty() || model_id == "stub-emb" {
+        let env = domain::embedding_model();
+        if env.is_empty() {
+            "stub-emb".into()
+        } else {
+            env
+        }
     } else {
-        std::env::var("KNOWLEDGEBRAIN_EMBEDDING_MODEL").unwrap_or_else(|_| "stub-emb".into())
+        model_id.trim().to_string()
     };
     let url = embeddings_url(&base);
     let body = serde_json::json!({
@@ -283,20 +300,7 @@ fn embed_http(text: &str, model_id: &str) -> Result<Vec<f32>, String> {
         "input": text,
         "dimensions": EMBEDDING_DIM,
     });
-    let mut req = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| e.to_string())?
-        .post(url)
-        .json(&body);
-    if !key.is_empty() {
-        req = req.bearer_auth(key);
-    }
-    let resp = req.send().map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("embed failed: {}", resp.status()));
-    }
-    let v: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
+    let v = models::json_sse(&url, &key, body, false)?;
     let arr = v["data"][0]["embedding"]
         .as_array()
         .ok_or_else(|| "embed missing vector".to_string())?;
@@ -404,6 +408,56 @@ mod tests {
         assert!(s.embeddings.is_empty());
         assert_eq!(s.documents[&did].parse_status, ParseStatus::Completed);
         assert_eq!(s.documents[&did].summary_status, SummaryStatus::None);
+    }
+
+    #[test]
+    fn process_chunks_keeps_rows_when_embed_fails() {
+        let prev_base = std::env::var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL").ok();
+        let prev_alias = std::env::var("EMBEDDING_BASE_URL").ok();
+        unsafe {
+            std::env::set_var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL", "http://127.0.0.1:1");
+            std::env::set_var("EMBEDDING_BASE_URL", "http://127.0.0.1:1");
+        }
+        let mut s = Store::default();
+        let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
+        let vid = v.id;
+        s.versions.insert(vid, v);
+        let mut doc = Document::new(vid, "T".into(), "a.txt".into(), 1, "h".into(), "h".into());
+        doc.parse_status = ParseStatus::Processing;
+        let did = doc.id;
+        s.documents.insert(did, doc);
+        let ch = Chunk {
+            id: Uuid::new_v4(),
+            document_id: did,
+            product_version_id: vid,
+            chunk_type: "text".into(),
+            content: "keep this chunk".into(),
+            context_header: String::new(),
+            start_at: 0,
+            end_at: 15,
+            parent_chunk_id: None,
+            generated_questions: Vec::new(),
+        };
+        let err = process_chunks(&mut s, did, vec![ch.clone()], false).unwrap_err();
+        unsafe {
+            match prev_base {
+                Some(v) => std::env::set_var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL", v),
+                None => std::env::remove_var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL"),
+            }
+            match prev_alias {
+                Some(v) => std::env::set_var("EMBEDDING_BASE_URL", v),
+                None => std::env::remove_var("EMBEDDING_BASE_URL"),
+            }
+        }
+        assert!(
+            err.contains("error") || err.contains("connect") || err.contains("llm"),
+            "{err}"
+        );
+        assert!(
+            s.chunks.contains_key(&ch.id),
+            "chunk must survive embed fail"
+        );
+        assert!(!s.embeddings.contains_key(&ch.id));
     }
 
     #[test]

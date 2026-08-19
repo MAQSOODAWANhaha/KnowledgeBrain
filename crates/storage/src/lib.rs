@@ -19,6 +19,8 @@ pub fn blob_path(hash: &str) -> PathBuf {
     object_dir().join(hash)
 }
 
+/// Disk write plus a blocking S3 PUT. Must not run on a tokio worker thread
+/// (`reqwest::blocking` deadlocks there). Use [`write_blob_async`] from async code.
 pub fn write_blob(hash: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
     let dir = object_dir();
     std::fs::create_dir_all(&dir)?;
@@ -26,6 +28,23 @@ pub fn write_blob(hash: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
     std::fs::write(&path, bytes)?;
     let _ = s3::put_object(&object_key(hash), bytes);
     Ok(path)
+}
+
+pub async fn write_blob_async(hash: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    let hash = hash.to_string();
+    let bytes = bytes.to_vec();
+    tokio::task::spawn_blocking(move || write_blob(&hash, &bytes))
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+}
+
+/// Sync write that parks the tokio worker instead of deadlocking `reqwest::blocking`.
+pub fn write_blob_off_runtime(hash: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        tokio::task::block_in_place(|| write_blob(hash, bytes))
+    } else {
+        write_blob(hash, bytes)
+    }
 }
 
 pub fn read_blob(hash: &str) -> std::io::Result<Vec<u8>> {
@@ -55,7 +74,7 @@ pub fn put(store: &mut Store, bytes: &[u8]) -> (String, String) {
     let key = object_key(&hash);
     *store.object_refs.entry(hash.clone()).or_insert(0) += 1;
     store.objects.insert(key.clone(), bytes.to_vec());
-    let _ = write_blob(&hash, bytes);
+    let _ = write_blob_off_runtime(&hash, bytes);
     (hash, key)
 }
 

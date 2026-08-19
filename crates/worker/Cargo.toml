@@ -17,6 +17,7 @@ async-trait = "0.1"
 chunker = { path = "../chunker" }
 clone = { path = "../clone" }
 docparser = { path = "../docparser" }
+dotenvy.workspace = true
 domain = { path = "../domain" }
 enrichment = { path = "../enrichment" }
 graph = { path = "../graph" }

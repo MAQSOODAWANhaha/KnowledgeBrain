@@ -230,6 +230,39 @@ pub fn connect() -> Result<oxana::Storage, oxana::OxanaError> {
     oxana::Storage::from_url(redis_url())
 }
 
+/// Pool build is lazy: `from_url` succeeds even when Redis is down.
+/// Connection refused / deadpool errors mean "no oxana", not a failed enqueue.
+fn redis_unreachable(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("connection refused")
+        || e.contains("deadpool")
+        || e.contains("pool error")
+        || e.contains("creating a new object")
+        || e.contains("os error 111")
+        || e.contains("connection reset")
+        || e.contains("broken pipe")
+        || e.contains("timed out")
+        || e.contains("timeout")
+        || e.contains("network is unreachable")
+        || e.contains("no route to host")
+        || e.contains("name or service not known")
+        || e.contains("nodename nor servname")
+}
+
+fn oxana_id(r: Result<impl ToString, impl ToString>) -> Result<Option<String>, String> {
+    match r {
+        Ok(id) => Ok(Some(id.to_string())),
+        Err(e) => {
+            let msg = e.to_string();
+            if redis_unreachable(&msg) {
+                Ok(None)
+            } else {
+                Err(msg)
+            }
+        }
+    }
+}
+
 /// Queue catalog for oxana-web. Does not start workers.
 pub fn dashboard_catalog() -> Option<(oxana::Storage, oxana::Catalog)> {
     let storage = connect().ok()?;
@@ -310,21 +343,21 @@ pub async fn enqueue_document_process_with(
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue(
-            DefaultQueue,
-            DocumentProcessJob {
-                document_id,
-                product_version_id,
-                attempt,
-                task_type: domain::TYPE_DOCUMENT_PROCESS.to_string(),
-                passages,
-                manual: false,
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue(
+                DefaultQueue,
+                DocumentProcessJob {
+                    document_id,
+                    product_version_id,
+                    attempt,
+                    task_type: domain::TYPE_DOCUMENT_PROCESS.to_string(),
+                    passages,
+                    manual: false,
+                },
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_manual_process(
@@ -335,21 +368,21 @@ pub async fn enqueue_manual_process(
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue(
-            DefaultQueue,
-            DocumentProcessJob {
-                document_id,
-                product_version_id,
-                attempt,
-                task_type: domain::TYPE_MANUAL_PROCESS.to_string(),
-                passages: Vec::new(),
-                manual: true,
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue(
+                DefaultQueue,
+                DocumentProcessJob {
+                    document_id,
+                    product_version_id,
+                    attempt,
+                    task_type: domain::TYPE_MANUAL_PROCESS.to_string(),
+                    passages: Vec::new(),
+                    manual: true,
+                },
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_post_process(
@@ -360,19 +393,19 @@ pub async fn enqueue_post_process(
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue(
-            PostprocessQueue,
-            PostProcessJob {
-                document_id,
-                product_version_id,
-                clone_keep,
-                task_type: domain::TYPE_POST_PROCESS.to_string(),
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue(
+                PostprocessQueue,
+                PostProcessJob {
+                    document_id,
+                    product_version_id,
+                    clone_keep,
+                    task_type: domain::TYPE_POST_PROCESS.to_string(),
+                },
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_version_clone(
@@ -384,20 +417,20 @@ pub async fn enqueue_version_clone(
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue(
-            LowQueue,
-            VersionCloneJob {
-                source_version_id,
-                target_version_id,
-                diffs,
-                make_current,
-                task_type: domain::TYPE_VERSION_CLONE.to_string(),
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue(
+                LowQueue,
+                VersionCloneJob {
+                    source_version_id,
+                    target_version_id,
+                    diffs,
+                    make_current,
+                    task_type: domain::TYPE_VERSION_CLONE.to_string(),
+                },
+            )
+            .await,
+    )
 }
 
 /// Spec 5.11 / brain `wikiIngestDelay`.
@@ -420,18 +453,18 @@ pub async fn enqueue_wiki_ingest_in(
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue_in(
-            WikiQueue,
-            WikiIngestJob {
-                product_version_id,
-                task_type: domain::TYPE_WIKI_INGEST.to_string(),
-            },
-            delay_secs,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue_in(
+                WikiQueue,
+                WikiIngestJob {
+                    product_version_id,
+                    task_type: domain::TYPE_WIKI_INGEST.to_string(),
+                },
+                delay_secs,
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_image_multimodal(
@@ -445,40 +478,40 @@ pub async fn enqueue_image_multimodal(
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue(
-            MultimodalQueue,
-            ImageMultimodalJob {
-                document_id,
-                image_key: image_key.into(),
-                image_source_type: image_source_type.into(),
-                enable_ocr,
-                enable_caption,
-                attempt,
-                task_type: domain::TYPE_IMAGE_MULTIMODAL.to_string(),
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue(
+                MultimodalQueue,
+                ImageMultimodalJob {
+                    document_id,
+                    image_key: image_key.into(),
+                    image_source_type: image_source_type.into(),
+                    enable_ocr,
+                    enable_caption,
+                    attempt,
+                    task_type: domain::TYPE_IMAGE_MULTIMODAL.to_string(),
+                },
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_summary(document_id: Uuid, attempt: i32) -> Result<Option<String>, String> {
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue(
-            SummaryQueue,
-            SummaryJob {
-                document_id,
-                attempt,
-                task_type: domain::TYPE_SUMMARY.to_string(),
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue(
+                SummaryQueue,
+                SummaryJob {
+                    document_id,
+                    attempt,
+                    task_type: domain::TYPE_SUMMARY.to_string(),
+                },
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_question(
@@ -509,22 +542,22 @@ pub async fn enqueue_question_neighbors(
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue(
-            QuestionQueue,
-            QuestionJob {
-                document_id,
-                chunk_ids,
-                prev_ids,
-                next_ids,
-                attempt,
-                batch,
-                task_type: domain::TYPE_QUESTION.to_string(),
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue(
+                QuestionQueue,
+                QuestionJob {
+                    document_id,
+                    chunk_ids,
+                    prev_ids,
+                    next_ids,
+                    attempt,
+                    batch,
+                    task_type: domain::TYPE_QUESTION.to_string(),
+                },
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_extract(
@@ -535,104 +568,104 @@ pub async fn enqueue_extract(
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue(
-            GraphQueue,
-            ExtractJob {
-                chunk_id,
-                document_id,
-                attempt,
-                task_type: domain::TYPE_CHUNK_EXTRACT.to_string(),
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue(
+                GraphQueue,
+                ExtractJob {
+                    chunk_id,
+                    document_id,
+                    attempt,
+                    task_type: domain::TYPE_CHUNK_EXTRACT.to_string(),
+                },
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_datatable(document_id: Uuid) -> Result<Option<String>, String> {
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue(
-            SummaryQueue,
-            DatatableJob {
-                document_id,
-                task_type: domain::TYPE_DATATABLE.to_string(),
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue(
+                SummaryQueue,
+                DatatableJob {
+                    document_id,
+                    task_type: domain::TYPE_DATATABLE.to_string(),
+                },
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_list_delete(document_id: Uuid) -> Result<Option<String>, String> {
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue(
-            LowQueue,
-            ListDeleteJob {
-                document_id,
-                task_type: domain::TYPE_LIST_DELETE.to_string(),
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue(
+                LowQueue,
+                ListDeleteJob {
+                    document_id,
+                    task_type: domain::TYPE_LIST_DELETE.to_string(),
+                },
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_kb_delete(product_version_id: Uuid) -> Result<Option<String>, String> {
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue(
-            LowQueue,
-            KbDeleteJob {
-                product_version_id,
-                task_type: domain::TYPE_KB_DELETE.to_string(),
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue(
+                LowQueue,
+                KbDeleteJob {
+                    product_version_id,
+                    task_type: domain::TYPE_KB_DELETE.to_string(),
+                },
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_index_delete(document_id: Uuid) -> Result<Option<String>, String> {
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue(
-            LowQueue,
-            IndexDeleteJob {
-                document_id,
-                task_type: domain::TYPE_INDEX_DELETE.to_string(),
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue(
+                LowQueue,
+                IndexDeleteJob {
+                    document_id,
+                    task_type: domain::TYPE_INDEX_DELETE.to_string(),
+                },
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_list_reparse(document_id: Uuid) -> Result<Option<String>, String> {
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue(
-            LowQueue,
-            ListReparseJob {
-                document_id,
-                task_type: domain::TYPE_LIST_REPARSE.to_string(),
-            },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue(
+                LowQueue,
+                ListReparseJob {
+                    document_id,
+                    task_type: domain::TYPE_LIST_REPARSE.to_string(),
+                },
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_wiki_finalize(product_version_id: Uuid) -> Result<Option<String>, String> {
@@ -646,18 +679,18 @@ pub async fn enqueue_wiki_finalize_in(
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    let id = storage
-        .enqueue_in(
-            WikiQueue,
-            WikiFinalizeJob {
-                product_version_id,
-                task_type: domain::TYPE_WIKI_FINALIZE.to_string(),
-            },
-            delay_secs,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(id.to_string()))
+    oxana_id(
+        storage
+            .enqueue_in(
+                WikiQueue,
+                WikiFinalizeJob {
+                    product_version_id,
+                    task_type: domain::TYPE_WIKI_FINALIZE.to_string(),
+                },
+                delay_secs,
+            )
+            .await,
+    )
 }
 
 #[cfg(test)]
@@ -687,6 +720,14 @@ mod tests {
         assert_eq!(DOCUMENT_PROCESS_MAX_RETRY, 3);
         assert_eq!(DOCUMENT_PROCESS_TIMEOUT_SECS, 2 * 60 * 60);
         assert_eq!(POST_PROCESS_TIMEOUT_SECS, 30 * 60);
+    }
+
+    #[test]
+    fn redis_pool_refused_is_unreachable() {
+        assert!(redis_unreachable(
+            "Deadpool Redis pool error: Error occurred while creating a new object: Connection refused (os error 111)"
+        ));
+        assert!(!redis_unreachable("unique_id conflict"));
     }
 
     #[test]

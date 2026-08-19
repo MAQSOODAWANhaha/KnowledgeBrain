@@ -213,6 +213,8 @@ pub async fn convert_document(
         }
         return Ok(());
     }
+    let mut convert_image_source = String::new();
+    let prior_spans = document_stage_spans(pool, document_id, attempt).await;
     let markdown = if manual {
         let bytes = storage::read_blob(&file_hash).map_err(|e| e.to_string())?;
         let md = String::from_utf8_lossy(&bytes).into_owned();
@@ -225,7 +227,7 @@ pub async fn convert_document(
             Some(serde_json::json!({"engine": "manual", "file": file_name})),
         )
         .await;
-        let _ = storage::write_blob(&format!("{file_hash}.md"), md.as_bytes());
+        let _ = storage::write_blob_async(&format!("{file_hash}.md"), md.as_bytes()).await;
         let _ = storage::finish_span(
             pool,
             document_id,
@@ -235,6 +237,13 @@ pub async fn convert_document(
             Some(serde_json::json!({"engine": "manual", "markdown_bytes": md.len()})),
         )
         .await;
+        md
+    } else if let Some(md) = reused_markdown(&prior_spans, &file_hash) {
+        convert_image_source = reused_image_source(&prior_spans);
+        eprintln!(
+            "docreader reuse {document_id} file={file_name} md={} image_source={convert_image_source}",
+            md.len()
+        );
         md
     } else {
         let bytes = storage::read_blob(&file_hash).map_err(|e| e.to_string())?;
@@ -260,15 +269,21 @@ pub async fn convert_document(
             .await?;
             return Ok(());
         }
-        let mut result = match docparser::convert(
-            &parser_engine,
-            &file_name,
-            ext,
+        let engine_overrides = overrides
+            .as_ref()
+            .map(|o| o.parser_engine_overrides.clone())
+            .unwrap_or_default();
+        eprintln!("docreader convert start {document_id} file={file_name} engine={engine}");
+        let mut result = match docparser::convert_with(docparser::ConvertInput {
+            engine: &parser_engine,
+            file_name: &file_name,
+            file_type: ext,
             is_url,
-            if is_url { Vec::new() } else { bytes },
-            &url,
-            &file_name,
-        )
+            bytes: if is_url { Vec::new() } else { bytes },
+            url: &url,
+            title: &file_name,
+            overrides: &engine_overrides,
+        })
         .await
         {
             Ok(r) => r,
@@ -339,8 +354,14 @@ pub async fn convert_document(
                 .await;
             }
         }
+        eprintln!(
+            "docreader convert done {document_id} md={} images={}",
+            result.markdown.len(),
+            result.images.len()
+        );
         result.markdown = persist_and_rewrite_images(&result).await;
-        let _ = storage::write_blob(&format!("{file_hash}.md"), result.markdown.as_bytes());
+        let _ =
+            storage::write_blob_async(&format!("{file_hash}.md"), result.markdown.as_bytes()).await;
         let _ = storage::finish_span(
             pool,
             document_id,
@@ -349,48 +370,80 @@ pub async fn convert_document(
             obs::STATUS_DONE,
             Some(serde_json::json!({
                 "engine": engine,
-                "markdown_bytes": result.markdown.len()
+                "markdown_bytes": result.markdown.len(),
+                "parser": result.metadata.get("parser"),
+                "anydoc_version": result.metadata.get("anydoc_version"),
+                "source_format": result.metadata.get("source_format"),
+                "anydoc_fallback": result.metadata.get("anydoc_fallback"),
+                "image_source_type": result.metadata.get("image_source_type"),
             })),
         )
         .await;
+        if let Some(src) = result.metadata.get("image_source_type") {
+            convert_image_source = src.clone();
+        }
         result.markdown
     };
-    let _ = storage::start_span(
-        pool,
-        document_id,
-        attempt,
-        obs::SPAN_CHUNKING,
-        Some(obs::ROOT_NAME),
-        None,
-    )
-    .await;
     let mut opts = version_index_opts(pool, version_id).await;
     apply_chunking_overrides(&mut opts, overrides.as_ref());
-    let chunks = chunker::split_from_config(
-        &markdown,
-        version_id,
-        document_id,
-        chunker::SplitterConfig {
-            chunk_size: opts.size,
-            chunk_overlap: opts.overlap,
-            strategy: opts.strategy.clone(),
-            separators: opts.separators.clone(),
-            token_limit: opts.token_limit,
-            languages: opts.languages.clone(),
-        },
-        opts.parent_child,
-        opts.parent_size,
-        opts.child_size,
-    );
-    let _ = storage::finish_span(
-        pool,
-        document_id,
-        attempt,
-        obs::SPAN_CHUNKING,
-        obs::STATUS_DONE,
-        Some(serde_json::json!({"chunks": chunks.len()})),
-    )
-    .await;
+    let prior_spans = document_stage_spans(pool, document_id, attempt).await;
+    let existing_chunks = storage::load_document_chunks(pool, document_id)
+        .await
+        .unwrap_or_default();
+    let chunks =
+        if obs::stage_satisfied(&prior_spans, obs::SPAN_CHUNKING) && !existing_chunks.is_empty() {
+            eprintln!(
+                "chunking reuse {document_id} chunks={}",
+                existing_chunks.len()
+            );
+            existing_chunks
+        } else {
+            let _ = storage::start_span(
+                pool,
+                document_id,
+                attempt,
+                obs::SPAN_CHUNKING,
+                Some(obs::ROOT_NAME),
+                None,
+            )
+            .await;
+            let split = chunker::split_from_config(
+                &markdown,
+                version_id,
+                document_id,
+                chunker::SplitterConfig {
+                    chunk_size: opts.size,
+                    chunk_overlap: opts.overlap,
+                    strategy: opts.strategy.clone(),
+                    separators: opts.separators.clone(),
+                    token_limit: opts.token_limit,
+                    languages: opts.languages.clone(),
+                },
+                opts.parent_child,
+                opts.parent_size,
+                opts.child_size,
+            );
+            let kept = index::keep_nonempty_chunks(split);
+            storage::delete_graph_for_document(pool, document_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            storage::replace_document_chunks(pool, document_id, &kept, &[])
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = storage::finish_span(
+                pool,
+                document_id,
+                attempt,
+                obs::SPAN_CHUNKING,
+                obs::STATUS_DONE,
+                Some(serde_json::json!({"chunks": kept.len()})),
+            )
+            .await;
+            kept
+        };
+    if obs::stage_satisfied(&prior_spans, obs::SPAN_EMBEDDING) {
+        return Ok(());
+    }
     let _ = storage::start_span(
         pool,
         document_id,
@@ -400,15 +453,16 @@ pub async fn convert_document(
         None,
     )
     .await;
-    let indexed = persist_indexed_chunks(
-        pool,
-        document_id,
-        version_id,
-        &chunks,
-        opts.vector,
-        opts.keyword,
-    )
-    .await?;
+    let indexed =
+        match persist_document_embeddings(pool, document_id, &chunks, opts.vector, opts.keyword)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                return fail_stage_retryable(pool, document_id, attempt, obs::SPAN_EMBEDDING, &e)
+                    .await;
+            }
+        };
     let _ = storage::finish_span(
         pool,
         document_id,
@@ -436,7 +490,11 @@ pub async fn convert_document(
                 attempt,
                 text_count,
                 &mm_images,
-                enrichment::image_source_type(&file_name, &markdown),
+                if convert_image_source.is_empty() {
+                    enrichment::image_source_type(&file_name, &markdown)
+                } else {
+                    convert_image_source.as_str()
+                },
             )
             .await;
         }
@@ -458,7 +516,8 @@ async fn persist_passage_index(
             .unwrap_or_default();
     if !file_hash.is_empty() {
         let joined = passages.join("\n\n");
-        let _ = storage::write_blob(format!("{file_hash}.md").as_str(), joined.as_bytes());
+        let _ =
+            storage::write_blob_async(format!("{file_hash}.md").as_str(), joined.as_bytes()).await;
     }
     let chunks: Vec<domain::Chunk> = passages
         .iter()
@@ -748,6 +807,26 @@ async fn persist_indexed_chunks(
         return Ok(PersistIndexResult::Aborted);
     }
     let kept = index::keep_nonempty_chunks(chunks.to_vec());
+    storage::delete_graph_for_document(pool, document_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    // Chunk rows first so an embed failure does not throw away the split.
+    storage::replace_document_chunks(pool, document_id, &kept, &[])
+        .await
+        .map_err(|e| e.to_string())?;
+    persist_document_embeddings(pool, document_id, &kept, vector_on, keyword_on).await
+}
+
+async fn persist_document_embeddings(
+    pool: &PgPool,
+    document_id: Uuid,
+    chunks: &[domain::Chunk],
+    vector_on: bool,
+    keyword_on: bool,
+) -> Result<PersistIndexResult, String> {
+    if status_aborted(document_parse_status(pool, document_id).await.as_deref()) {
+        return Ok(PersistIndexResult::Aborted);
+    }
     let title: String = sqlx::query_scalar("SELECT title FROM documents WHERE id = $1")
         .bind(document_id)
         .fetch_one(pool)
@@ -763,14 +842,11 @@ async fn persist_indexed_chunks(
     .fetch_one(pool)
     .await
     .unwrap_or_default();
-    let embeddings = index::index_chunks(&kept, &title, vector_on, keyword_on, &model_id)?;
+    let embeddings = index::index_chunks(chunks, &title, vector_on, keyword_on, &model_id)?;
     if status_aborted(document_parse_status(pool, document_id).await.as_deref()) {
         return Ok(PersistIndexResult::Aborted);
     }
-    storage::delete_graph_for_document(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    storage::replace_document_chunks(pool, document_id, &kept, &embeddings)
+    storage::replace_document_embeddings(pool, document_id, &embeddings)
         .await
         .map_err(|e| e.to_string())?;
     let st = document_parse_status(pool, document_id).await;
@@ -789,8 +865,52 @@ async fn persist_indexed_chunks(
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
-    let text_count = kept.iter().filter(|c| c.chunk_type == "text").count();
+    let text_count = chunks.iter().filter(|c| c.chunk_type == "text").count();
     Ok(PersistIndexResult::Written { text_count })
+}
+
+async fn document_stage_spans(pool: &PgPool, document_id: Uuid, attempt: i32) -> Vec<domain::Span> {
+    storage::list_spans_attempt(pool, document_id, attempt)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| r.into_span())
+        .collect()
+}
+
+fn reused_image_source(spans: &[domain::Span]) -> String {
+    let Some(span) = spans.iter().find(|s| s.name == obs::SPAN_DOCREADER) else {
+        return String::new();
+    };
+    image_source_from_docreader_output(span.output.as_ref())
+}
+
+fn image_source_from_docreader_output(output: Option<&serde_json::Value>) -> String {
+    let Some(v) = output else {
+        return String::new();
+    };
+    if let Some(t) = v
+        .get("image_source_type")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return t.to_string();
+    }
+    if v.get("anydoc_fallback").and_then(|x| x.as_str()) == Some("scanned_pdf") {
+        return "scanned_pdf".into();
+    }
+    String::new()
+}
+
+fn reused_markdown(spans: &[domain::Span], file_hash: &str) -> Option<String> {
+    if !obs::stage_satisfied(spans, obs::SPAN_DOCREADER) {
+        return None;
+    }
+    let bytes = storage::read_blob(&format!("{file_hash}.md")).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn parse_stored_url(bytes: &[u8]) -> (bool, String) {
@@ -808,9 +928,17 @@ fn parse_stored_url(bytes: &[u8]) -> (bool, String) {
 
 async fn persist_and_rewrite_images(result: &docparser::ReadResult) -> String {
     let (md, blobs) = docparser::rewrite_images(result).await;
-    for (hash, data) in blobs {
-        let _ = storage::write_blob(&hash, &data);
+    if blobs.is_empty() {
+        return md;
     }
+    let _ = tokio::task::spawn_blocking(move || {
+        for (hash, data) in blobs {
+            if let Err(e) = storage::write_blob(&hash, &data) {
+                eprintln!("image persist failed objects/{hash}: {e}");
+            }
+        }
+    })
+    .await;
     md
 }
 
@@ -1586,6 +1714,7 @@ pub async fn process_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), 
     });
     let mut done = Vec::new();
     let mut slugs = Vec::new();
+    let mut ingest_ops = Vec::new();
     for op in &claimed {
         if op.op == wiki::OP_RETRACT {
             if let Some(did) = op
@@ -1621,51 +1750,58 @@ pub async fn process_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), 
         });
         wiki::enqueue_ingest(&mut store, version_id, did);
         wiki::set_ingest_fail_count(&mut store, version_id, did, op.fail_count);
+        ingest_ops.push((op.id, did));
+    }
+    if !ingest_ops.is_empty() {
         if let Err(e) = wiki::process_ingest(&mut store, version_id) {
-            storage::upsert_span(
-                pool,
-                did,
-                1,
-                "wiki.ingest",
-                "failed",
-                Some(serde_json::json!({"error": e})),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-            if let Some(n) = wiki::retryable_ingest_fail_count(&store, version_id, did) {
-                storage::retry_pending_op(pool, op.id, n)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            } else {
-                storage::finalize_subtask(pool, did)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                done.push(op.id);
+            for (_, did) in &ingest_ops {
+                let _ = storage::upsert_span(
+                    pool,
+                    *did,
+                    1,
+                    "wiki.ingest",
+                    "failed",
+                    Some(serde_json::json!({"error": e})),
+                )
+                .await;
             }
-            continue;
+            for (op_id, did) in &ingest_ops {
+                if let Some(n) = wiki::retryable_ingest_fail_count(&store, version_id, *did) {
+                    storage::retry_pending_op(pool, *op_id, n)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    storage::finalize_subtask(pool, *did)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    done.push(*op_id);
+                }
+            }
+        } else {
+            persist_wiki_store(pool, &store, version_id, None).await?;
+            for (op_id, did) in &ingest_ops {
+                if let Some(n) = wiki::retryable_ingest_fail_count(&store, version_id, *did) {
+                    storage::retry_pending_op(pool, *op_id, n)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    continue;
+                }
+                storage::finalize_subtask(pool, *did)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let _ = storage::upsert_span(
+                    pool,
+                    *did,
+                    1,
+                    "wiki.ingest",
+                    "done",
+                    Some(serde_json::json!({"version_id": version_id})),
+                )
+                .await;
+                slugs.push(*did);
+                done.push(*op_id);
+            }
         }
-        if let Some(n) = wiki::retryable_ingest_fail_count(&store, version_id, did) {
-            storage::retry_pending_op(pool, op.id, n)
-                .await
-                .map_err(|e| e.to_string())?;
-            continue;
-        }
-        persist_wiki_store(pool, &store, version_id, Some(did)).await?;
-        storage::finalize_subtask(pool, did)
-            .await
-            .map_err(|e| e.to_string())?;
-        storage::upsert_span(
-            pool,
-            did,
-            1,
-            "wiki.ingest",
-            "done",
-            Some(serde_json::json!({"version_id": version_id})),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        slugs.push(did);
-        done.push(op.id);
     }
     storage::delete_pending_ids(pool, &done)
         .await
@@ -2454,6 +2590,21 @@ mod tests {
         apply_0001, bump_object_ref, connect, create_workspace_with_library, insert_document,
         insert_user, write_blob,
     };
+
+    #[test]
+    fn reuse_reads_scanned_pdf_from_docreader_span() {
+        let tagged = serde_json::json!({"image_source_type": "scanned_pdf"});
+        assert_eq!(
+            image_source_from_docreader_output(Some(&tagged)),
+            "scanned_pdf"
+        );
+        let fallback = serde_json::json!({"anydoc_fallback": "scanned_pdf"});
+        assert_eq!(
+            image_source_from_docreader_output(Some(&fallback)),
+            "scanned_pdf"
+        );
+        assert_eq!(image_source_from_docreader_output(None), "");
+    }
     use tokio::sync::Mutex;
 
     async fn db_lock() -> tokio::sync::MutexGuard<'static, ()> {
@@ -2681,6 +2832,214 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn persist_indexed_chunks_keeps_rows_when_embed_fails() {
+        let _g = db_lock().await;
+        let Ok(pool) = connect().await else {
+            eprintln!("skip: postgres down");
+            return;
+        };
+        let _ = sqlx::query(
+            "DROP TABLE IF EXISTS
+                wiki_log_entries, wiki_folders, wiki_pages,
+                graph_relations, graph_nodes, chunk_embeddings, chunks,
+                api_keys, models,
+                task_dead_letters, task_pending_ops, document_processing_spans,
+                document_tags, tags, documents, content_objects,
+                product_versions, products, workspace_members, users, workspaces
+             CASCADE",
+        )
+        .execute(&pool)
+        .await;
+        apply_0001(&pool).await.unwrap();
+        let owner = Uuid::new_v4();
+        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
+            .await
+            .unwrap();
+        let seeded = create_workspace_with_library(&pool, owner, "Ef", "ef")
+            .await
+            .unwrap();
+        let did = Uuid::new_v4();
+        let hash = domain::sha256_hex(b"body");
+        write_blob(&hash, b"body").unwrap();
+        insert_document(
+            &pool,
+            storage::NewDocument {
+                id: did,
+                product_version_id: seeded.library_version_id,
+                title: "t",
+                file_name: "t.txt",
+                file_size: 4,
+                file_hash: &hash,
+                object_key: &format!("objects/{hash}"),
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE documents SET parse_status = 'processing' WHERE id = $1")
+            .bind(did)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ch = domain::Chunk {
+            id: Uuid::new_v4(),
+            document_id: did,
+            product_version_id: seeded.library_version_id,
+            chunk_type: "text".into(),
+            content: "keep this chunk".into(),
+            context_header: String::new(),
+            start_at: 0,
+            end_at: 15,
+            parent_chunk_id: None,
+            generated_questions: Vec::new(),
+        };
+        let prev_base = std::env::var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL").ok();
+        let prev_alias = std::env::var("EMBEDDING_BASE_URL").ok();
+        unsafe {
+            std::env::set_var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL", "http://127.0.0.1:1");
+            std::env::set_var("EMBEDDING_BASE_URL", "http://127.0.0.1:1");
+        }
+        let err =
+            match persist_indexed_chunks(&pool, did, seeded.library_version_id, &[ch], true, true)
+                .await
+            {
+                Ok(_) => panic!("embed must fail"),
+                Err(e) => e,
+            };
+        unsafe {
+            match prev_base {
+                Some(v) => std::env::set_var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL", v),
+                None => std::env::remove_var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL"),
+            }
+            match prev_alias {
+                Some(v) => std::env::set_var("EMBEDDING_BASE_URL", v),
+                None => std::env::remove_var("EMBEDDING_BASE_URL"),
+            }
+        }
+        assert!(
+            err.contains("embed") || err.contains("error") || err.contains("connect"),
+            "{err}"
+        );
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
+            .bind(did)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "chunk row must survive embed failure");
+        let e: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM chunk_embeddings WHERE document_id = $1")
+                .bind(did)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(e, 0);
+    }
+
+    #[tokio::test]
+    async fn convert_reuses_markdown_and_chunks_after_embed_fail() {
+        let _g = db_lock().await;
+        let Ok(pool) = connect().await else {
+            eprintln!("skip: postgres down");
+            return;
+        };
+        let _ = sqlx::query(
+            "DROP TABLE IF EXISTS
+                wiki_log_entries, wiki_folders, wiki_pages,
+                graph_relations, graph_nodes, chunk_embeddings, chunks,
+                api_keys, models,
+                task_dead_letters, task_pending_ops, document_processing_spans,
+                document_tags, tags, documents, content_objects,
+                product_versions, products, workspace_members, users, workspaces
+             CASCADE",
+        )
+        .execute(&pool)
+        .await;
+        apply_0001(&pool).await.unwrap();
+        let owner = Uuid::new_v4();
+        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
+            .await
+            .unwrap();
+        let seeded = create_workspace_with_library(&pool, owner, "Ru", "ru")
+            .await
+            .unwrap();
+        let did = Uuid::new_v4();
+        let hash = domain::sha256_hex(b"hello reuse");
+        write_blob(&hash, b"hello reuse").unwrap();
+        insert_document(
+            &pool,
+            storage::NewDocument {
+                id: did,
+                product_version_id: seeded.library_version_id,
+                title: "r",
+                file_name: "r.txt",
+                file_size: 11,
+                file_hash: &hash,
+                object_key: &format!("objects/{hash}"),
+            },
+        )
+        .await
+        .unwrap();
+        bump_object_ref(&pool, &hash, 11).await.unwrap();
+        convert_document(&pool, did, 1, &[], false).await.unwrap();
+        let started: String = sqlx::query_scalar(
+            "SELECT started_at::text FROM document_processing_spans
+             WHERE document_id = $1 AND name = 'docreader'",
+        )
+        .bind(did)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let chunk_ids: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM chunks WHERE document_id = $1 ORDER BY id")
+                .bind(did)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(!chunk_ids.is_empty());
+        sqlx::query("DELETE FROM chunk_embeddings WHERE document_id = $1")
+            .bind(did)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE document_processing_spans SET status = 'failed', finished_at = now()
+             WHERE document_id = $1 AND name = 'embedding'",
+        )
+        .bind(did)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE documents SET parse_status = 'processing' WHERE id = $1")
+            .bind(did)
+            .execute(&pool)
+            .await
+            .unwrap();
+        convert_document(&pool, did, 1, &[], false).await.unwrap();
+        let started2: String = sqlx::query_scalar(
+            "SELECT started_at::text FROM document_processing_spans
+             WHERE document_id = $1 AND name = 'docreader'",
+        )
+        .bind(did)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(started, started2, "docreader must not rerun");
+        let chunk_ids2: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM chunks WHERE document_id = $1 ORDER BY id")
+                .bind(did)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(chunk_ids, chunk_ids2);
+        let emb: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM chunk_embeddings WHERE document_id = $1")
+                .bind(did)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(emb, chunk_ids.len() as i64);
     }
 
     #[tokio::test]

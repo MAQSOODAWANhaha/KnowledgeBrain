@@ -12,6 +12,7 @@ fn log_ready(addr: &str) {
 
 #[tokio::main]
 async fn main() {
+    let _ = dotenvy::dotenv();
     let addr = bind_addr();
     let listener = TcpListener::bind(&addr)
         .await

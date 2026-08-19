@@ -103,10 +103,7 @@ pub fn extract_chunk_for_attempt(
 }
 
 fn is_stub_chat(model_id: &str) -> bool {
-    model_id == "stub-chat"
-        || std::env::var("KNOWLEDGEBRAIN_CHAT_BASE_URL")
-            .unwrap_or_default()
-            .is_empty()
+    domain::chat_base_url().is_empty() && (model_id == "stub-chat" || model_id.trim().is_empty())
 }
 
 #[cfg(test)]
