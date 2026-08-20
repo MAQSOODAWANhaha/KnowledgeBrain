@@ -117,6 +117,7 @@ pub fn answer(store: &Store, req: &AnswerRequest) -> Result<AnswerResponse, Sear
         version_scope: "current".into(),
         product_ids: vec![],
         workspace_id: Some(product.workspace_id),
+        scope: None,
         group_by: "none".into(),
         tender_text: None,
     };
@@ -187,6 +188,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "ws".into(),
             slug: "ws".into(),
+            kind: Default::default(),
             retrieval: domain::RetrievalConfig::default(),
         };
         let wid = ws.id;
@@ -365,6 +367,7 @@ mod tests {
             tag_slugs: vec![],
             start_at: 1,
             end_at: 2,
+            image_object_key: None,
         };
         let sys = render_answer_system("English", std::slice::from_ref(&h));
         assert!(sys.contains("x"));

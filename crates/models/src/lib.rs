@@ -8,7 +8,7 @@ pub use sse::{collect_chat_content, last_json_value, looks_like_sse};
 
 use serde::{Deserialize, Serialize};
 
-/// Production embedding width. `0008` `vector(1024)` and HTTP `dimensions` must match.
+/// Production embedding width. `0004` `vector(1024)` and HTTP `dimensions` must match.
 pub const EMBEDDING_DIM: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

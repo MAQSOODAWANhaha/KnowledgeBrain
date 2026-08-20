@@ -5,15 +5,20 @@ CREATE TABLE workspaces (
     id uuid PRIMARY KEY,
     name text NOT NULL,
     slug text NOT NULL UNIQUE,
+    kind text NOT NULL DEFAULT 'product_line' CHECK (kind IN ('product_line', 'company')),
     retrieval_config jsonb NOT NULL DEFAULT '{"vector_threshold":0.15,"keyword_threshold":0.3,"embedding_top_k":50}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE UNIQUE INDEX workspaces_one_company
+    ON workspaces (kind) WHERE kind = 'company';
+
 CREATE TABLE users (
     id uuid PRIMARY KEY,
     email text NOT NULL UNIQUE,
     password_hash text,
+    ldap_dn text,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -43,7 +48,7 @@ CREATE TABLE product_versions (
     cloned_from_version_id uuid,
     chunking_config jsonb NOT NULL DEFAULT '{}'::jsonb,
     indexing_strategy jsonb NOT NULL DEFAULT '{"vector":true,"keyword":true,"wiki":true,"graph":true}'::jsonb,
-    image_processing_config jsonb NOT NULL DEFAULT '{}'::jsonb,
+    image_processing_config jsonb NOT NULL DEFAULT '{"enable_multimodel":true}'::jsonb,
     embedding_model_id text,
     summary_model_id text,
     vlm_model_id text,
@@ -55,14 +60,17 @@ CREATE TABLE product_versions (
     question_generation_config jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    deleted_at timestamptz,
-    UNIQUE (product_id, label)
+    deleted_at timestamptz
 );
+
+CREATE UNIQUE INDEX product_versions_live_label_uidx
+    ON product_versions (product_id, label)
+    WHERE deleted_at IS NULL;
 
 CREATE TABLE documents (
     id uuid PRIMARY KEY,
     product_version_id uuid NOT NULL REFERENCES product_versions (id),
-    type text NOT NULL DEFAULT 'file',
+    type text NOT NULL DEFAULT 'file' CHECK (type IN ('file', 'url', 'passage', 'manual')),
     title text NOT NULL,
     parse_status text NOT NULL CHECK (
         parse_status IN (
@@ -76,19 +84,28 @@ CREATE TABLE documents (
         )
     ),
     pending_subtasks_count integer NOT NULL DEFAULT 0,
-    summary_status text NOT NULL DEFAULT 'none',
-    enable_status text NOT NULL DEFAULT 'disabled',
-    file_name text,
-    file_size bigint,
-    file_hash text,
-    object_key text,
+    summary_status text NOT NULL DEFAULT 'none' CHECK (
+        summary_status IN ('none', 'pending', 'processing', 'completed', 'failed')
+    ),
+    enable_status text NOT NULL DEFAULT 'disabled' CHECK (enable_status IN ('disabled', 'enabled')),
+    index_ready boolean NOT NULL DEFAULT false,
+    description text NOT NULL DEFAULT '',
+    attempt integer NOT NULL DEFAULT 1,
+    file_name text NOT NULL,
+    file_size bigint NOT NULL,
+    file_hash text NOT NULL,
+    object_key text NOT NULL,
+    source_passages jsonb,
     process_overrides jsonb,
     error_message text,
     processed_at timestamptz,
     updated_at timestamptz NOT NULL DEFAULT now(),
-    deleted_at timestamptz,
-    UNIQUE (product_version_id, file_name, file_size, file_hash)
+    deleted_at timestamptz
 );
+
+CREATE UNIQUE INDEX documents_live_file_uidx
+    ON documents (product_version_id, file_name, file_size, file_hash)
+    WHERE deleted_at IS NULL;
 
 CREATE TABLE tags (
     id uuid PRIMARY KEY,
@@ -100,8 +117,8 @@ CREATE TABLE tags (
 );
 
 CREATE TABLE document_tags (
-    document_id uuid NOT NULL REFERENCES documents (id),
-    tag_id uuid NOT NULL REFERENCES tags (id),
+    document_id uuid NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    tag_id uuid NOT NULL REFERENCES tags (id) ON DELETE CASCADE,
     PRIMARY KEY (document_id, tag_id)
 );
 
@@ -112,7 +129,7 @@ CREATE TABLE content_objects (
 );
 
 CREATE TABLE document_processing_spans (
-    document_id uuid NOT NULL,
+    document_id uuid NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
     attempt integer NOT NULL,
     name text NOT NULL,
     span_id uuid,

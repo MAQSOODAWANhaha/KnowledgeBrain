@@ -14,6 +14,7 @@ members = [
   "crates/wiki",
   "crates/clone",
   "crates/search",
+  "crates/bid",
   "crates/obs",
   "crates/storage",
   "crates/worker",
@@ -29,7 +30,7 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "si
 axum = { version = "0.8", features = ["multipart", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tower-http = { version = "0.6", features = ["cors", "trace", "limit"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "limit", "fs"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }

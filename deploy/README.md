@@ -24,7 +24,9 @@ cp .env.example .env
 docker compose --env-file .env up -d --build
 ```
 
-首次启动 `api` / `worker` 连上 Postgres 后会执行 `0001`–`0009`。对象写入容器卷 `/data/objects`，并按 `.env` 双写 MinIO。
+首次启动 `api` / `worker` 会在报告 ready / 开始消费队列前连接 Postgres 并执行 `0001`–`0008`；连接、迁移或公司工作区初始化失败时进程直接失败，不会以缺失 schema 的状态继续服务或确认作业。Worker 只在 Redis 可用并注册消费者后报告 ready，连接中断后会退避重连；Compose 也配置了自动重启。对象写入容器卷 `/data/objects`，并按 `.env` 双写 MinIO；配置了 MinIO 时远端写失败会令本次对象写失败，不再静默降级。
+
+生产部署必须把 `JWT_SECRET` 改为随机强密钥，并配置 `KNOWLEDGEBRAIN_LDAP_URL` 与 `KNOWLEDGEBRAIN_LDAP_BIND_DN`。LDAP URL 为空时是仅供本地/测试使用的开放登录行为，不能用于对外服务。
 
 ## 只起数据面（本机 cargo 跑进程）
 
@@ -65,7 +67,7 @@ DocReader 本机：`cd services/docreader && PYTHONPATH=.. uv run python main.py
 
 | 文件 | 产物 |
 |---|---|
-| `Dockerfile.rust` | `api` 与 `worker`（`BIN=api` / `BIN=worker`） |
+| `Dockerfile.rust` | `api` 与 `worker`（`BIN=api` / `BIN=worker`）；Node 构建阶段同时产出并内置 `/web` SPA |
 | `Dockerfile.docreader` | Python gRPC DocReader |
 
 ```bash

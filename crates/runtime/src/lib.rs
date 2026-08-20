@@ -18,7 +18,11 @@ pub const POOL_WIKI: &str = "wiki";
 
 pub fn queue_for(task_type: &str) -> &'static str {
     match task_type {
-        domain::TYPE_DOCUMENT_PROCESS | domain::TYPE_MANUAL_PROCESS => QUEUE_DEFAULT,
+        domain::TYPE_DOCUMENT_PROCESS
+        | domain::TYPE_MANUAL_PROCESS
+        | domain::TYPE_BID_CONVERT
+        | domain::TYPE_BID_EXTRACT
+        | domain::TYPE_BID_MATCH => QUEUE_DEFAULT,
         domain::TYPE_POST_PROCESS => QUEUE_POSTPROCESS,
         domain::TYPE_SUMMARY | domain::TYPE_DATATABLE => QUEUE_SUMMARY,
         domain::TYPE_IMAGE_MULTIMODAL => QUEUE_MULTIMODAL,

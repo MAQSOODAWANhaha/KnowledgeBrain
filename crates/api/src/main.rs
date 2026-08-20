@@ -13,17 +13,14 @@ fn log_ready(addr: &str) {
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
+    storage::connect()
+        .await
+        .unwrap_or_else(|e| panic!("postgres initialization failed: {e}"));
     let addr = bind_addr();
     let listener = TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
     log_ready(&addr);
-    tokio::spawn(async {
-        if let Err(e) = storage::connect().await {
-            let line = format!("postgres not ready: {e}\n");
-            let _ = std::io::stderr().write_all(line.as_bytes());
-        }
-    });
     run(listener, router()).await;
     let _ = std::io::stdout().write_all(b"api exiting\n");
 }

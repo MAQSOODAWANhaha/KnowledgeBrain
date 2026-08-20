@@ -76,3 +76,28 @@ fn api_starts_serves_health_and_exits_twice() {
     one_launch();
     one_launch();
 }
+
+#[test]
+fn api_does_not_become_ready_when_postgres_initialization_fails() {
+    let port = free_port();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_api"))
+        .env("API_PORT", port.to_string())
+        .env("DATABASE_URL", "invalid-database-url")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn api");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll api") {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("api did not fail startup");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!status.success());
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+}

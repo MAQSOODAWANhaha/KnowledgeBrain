@@ -19,6 +19,26 @@ fn app() -> (axum::Router, Arc<Mutex<Store>>) {
     (router, store)
 }
 
+fn seed_user(store: &Arc<Mutex<Store>>, email: &str) -> (String, String) {
+    let id = uuid::Uuid::new_v4();
+    let hash = auth::hash_password("pw");
+    {
+        let mut s = store.lock().unwrap();
+        s.users.insert(
+            id,
+            domain::User {
+                id,
+                email: email.into(),
+                password_hash: hash,
+                ldap_dn: String::new(),
+            },
+        );
+        s.users_by_email.insert(email.into(), id);
+    }
+    let token = auth::issue_jwt(id, "secret").unwrap();
+    (token, id.to_string())
+}
+
 async fn call(app: &axum::Router, req: Request<Body>) -> (StatusCode, Value) {
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
@@ -46,21 +66,7 @@ fn auth_json(token: &str, method: &str, uri: &str, body: Value) -> Request<Body>
 async fn catalog_ingest_search_match_answer_lifecycle() {
     let (app, store) = app();
 
-    let (st, v) = call(
-        &app,
-        Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/register")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                json!({"email":"a@b.c","password":"pw"}).to_string(),
-            ))
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    let token = v["token"].as_str().unwrap().to_string();
-    let owner = v["user_id"].as_str().unwrap().to_string();
+    let (token, owner) = seed_user(&store, "a@b.c");
 
     let (st, v) = call(
         &app,
@@ -79,31 +85,39 @@ async fn catalog_ingest_search_match_answer_lifecycle() {
         &app,
         auth_json(
             &token,
-            "GET",
-            &format!("/api/v1/workspaces/{ws}/products?kind=library"),
-            json!({}),
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/products"),
+            json!({"name":"公司资料","slug":"certs","kind":"library"}),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    assert_eq!(v["slug"], "certs");
+    let lib_id = v["id"].as_str().unwrap().to_string();
+    let (st, v) = call(
+        &app,
+        auth_json(
+            &token,
+            "POST",
+            &format!("/api/v1/products/{lib_id}/versions"),
+            json!({"label":"current"}),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    let (st, _) = call(
+        &app,
+        auth_json(
+            &token,
+            "POST",
+            &format!("/api/v1/products/{lib_id}/current-version"),
+            json!({"version_id": v["id"]}),
         ),
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    assert_eq!(v[0]["slug"], "library");
-    assert_eq!(v[0]["name"], "公司资料");
-    let lib_id = v[0]["id"].as_str().unwrap().to_string();
 
-    let (_reg_st, v) = call(
-        &app,
-        Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/register")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                json!({"email":"v@b.c","password":"pw"}).to_string(),
-            ))
-            .unwrap(),
-    )
-    .await;
-    let viewer_token = v["token"].as_str().unwrap().to_string();
-    let viewer_id = v["user_id"].as_str().unwrap().to_string();
+    let (viewer_token, viewer_id) = seed_user(&store, "v@b.c");
     let (st, _) = call(
         &app,
         auth_json(
@@ -125,7 +139,7 @@ async fn catalog_ingest_search_match_answer_lifecycle() {
         ),
     )
     .await;
-    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(st, StatusCode::CREATED, "{v}");
 
     let (st, v) = call(
         &app,
@@ -401,19 +415,7 @@ async fn ingest_enqueue_fail_returns_200_and_failed_row() {
         jwt_secret: "secret".into(),
         bootstrap_key: String::new(),
     });
-    let (_st, v) = call(
-        &app,
-        Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/register")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                json!({"email":"e@b.c","password":"pw"}).to_string(),
-            ))
-            .unwrap(),
-    )
-    .await;
-    let token = v["token"].as_str().unwrap().to_string();
+    let (token, _) = seed_user(&store, "e@b.c");
     let (_st, v) = call(
         &app,
         auth_json(
@@ -468,21 +470,8 @@ async fn ingest_enqueue_fail_returns_200_and_failed_row() {
 
 #[tokio::test]
 async fn parser_engines_merge_local_catalog() {
-    let (app, _) = app();
-    let (st, v) = call(
-        &app,
-        Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/register")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                json!({"email":"eng@b.c","password":"pw"}).to_string(),
-            ))
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    let token = v["token"].as_str().unwrap().to_string();
+    let (app, store) = app();
+    let (token, _) = seed_user(&store, "eng@b.c");
 
     let (st, v) = call(
         &app,
@@ -521,6 +510,24 @@ async fn parser_engines_merge_local_catalog() {
 }
 
 #[tokio::test]
+async fn register_is_gone() {
+    let (app, _) = app();
+    let (st, v) = call(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/register")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"email":"n@b.c","password":"pw"}).to_string(),
+            ))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::GONE, "{v}");
+}
+
+#[tokio::test]
 async fn health_still_works() {
     let (app, _) = app();
     let (st, v) = call(
@@ -538,20 +545,7 @@ async fn health_still_works() {
 #[tokio::test]
 async fn version_files_require_reference_and_passages_enqueue() {
     let (app, store) = app();
-    let (st, v) = call(
-        &app,
-        Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/register")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                json!({"email":"f@b.c","password":"pw"}).to_string(),
-            ))
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    let token = v["token"].as_str().unwrap().to_string();
+    let (token, _) = seed_user(&store, "f@b.c");
     let (_st, v) = call(
         &app,
         auth_json(
@@ -692,20 +686,8 @@ async fn version_files_require_reference_and_passages_enqueue() {
 
 #[tokio::test]
 async fn current_version_empty_is_validation() {
-    let (app, _) = app();
-    let (_st, v) = call(
-        &app,
-        Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/register")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                json!({"email":"c@b.c","password":"pw"}).to_string(),
-            ))
-            .unwrap(),
-    )
-    .await;
-    let token = v["token"].as_str().unwrap().to_string();
+    let (app, store) = app();
+    let (token, _) = seed_user(&store, "c@b.c");
     let (_st, v) = call(
         &app,
         auth_json(
@@ -751,20 +733,8 @@ async fn current_version_empty_is_validation() {
 
 #[tokio::test]
 async fn api_key_workspace_and_product_scope() {
-    let (app, _) = app();
-    let (_st, v) = call(
-        &app,
-        Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/register")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                json!({"email":"k@b.c","password":"pw"}).to_string(),
-            ))
-            .unwrap(),
-    )
-    .await;
-    let token = v["token"].as_str().unwrap().to_string();
+    let (app, store) = app();
+    let (token, _) = seed_user(&store, "k@b.c");
     let (_st, v) = call(
         &app,
         auth_json(
@@ -839,7 +809,7 @@ async fn api_key_workspace_and_product_scope() {
             .unwrap(),
     )
     .await;
-    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(st, StatusCode::CREATED);
 
     let (_st, v) = call(
         &app,
@@ -862,25 +832,13 @@ async fn api_key_workspace_and_product_scope() {
             .unwrap(),
     )
     .await;
-    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(st, StatusCode::OK);
 }
 
 #[tokio::test]
 async fn document_filters_tag_delete_and_process_config() {
     let (app, store) = app();
-    let (_st, v) = call(
-        &app,
-        Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/register")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                json!({"email":"g@b.c","password":"pw"}).to_string(),
-            ))
-            .unwrap(),
-    )
-    .await;
-    let token = v["token"].as_str().unwrap().to_string();
+    let (token, _) = seed_user(&store, "g@b.c");
     let (_st, v) = call(
         &app,
         auth_json(
@@ -1035,19 +993,7 @@ async fn document_filters_tag_delete_and_process_config() {
 #[tokio::test]
 async fn patch_version_config_and_me_and_workspace_delete() {
     let (app, store) = app();
-    let (_st, v) = call(
-        &app,
-        Request::builder()
-            .method("POST")
-            .uri("/api/v1/auth/register")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                json!({"email":"h@b.c","password":"pw"}).to_string(),
-            ))
-            .unwrap(),
-    )
-    .await;
-    let token = v["token"].as_str().unwrap().to_string();
+    let (token, _) = seed_user(&store, "h@b.c");
     let (st, v) = call(
         &app,
         auth_json(

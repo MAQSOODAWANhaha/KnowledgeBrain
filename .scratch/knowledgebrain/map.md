@@ -59,7 +59,7 @@ Review 票只能把「已核对为真」的项打钩；偏差未修回就记在 
 - 并发：`KNOWLEDGEBRAIN_{CORE,POSTPROCESS,ENRICHMENT,MAINTENANCE,SHARED,WIKI}_CONCURRENCY`，队列 `Dynamic` 默认与规格表一致
 - 父子 chunk：`chunking_config.enable_parent_child` → 父 4096 / 子 384；PG convert 走 `index::index_chunks`（尊重 vector/keyword）
 - post_process 扇出 oxana `summary`/`question`/`extract`（无 Redis 才 inline）；wiki map 合成 + reduce 回写 `wiki_page`
-- 部署：`deploy/`（compose + `.env.example` + Dockerfile + README）；根 `docker-compose.yml` 转发；`connect()` 会 apply `0001`–`0009`
+- 部署：`deploy/`（compose + `.env.example` + Dockerfile + README）；根 `docker-compose.yml` 转发；`connect()` 会 apply `0001`–`0008`
 - 队列看板：`oxana-web` 嵌在 `/api/v1/ops/oxana/web`（admin）；`GET /ops/oxana` 回队列深度 + 在途任务；Redis 不可达则不下挂看板
 - `process_overrides`：上传 / URL / passage / reparse 可带 `process_config`；合并规则对齐 brain（0/空保留 base、`EnableParentChild` 整值覆盖、`ParserEngineRules` 非空整表替换、`GraphEnabled AND extract.enabled`）；convert / chunk / post_process 走 `effective_version`
 - 文档列表：`GET .../documents?parse_status=&tag=&keyword=`

@@ -1,4 +1,4 @@
--- KnowledgeBrain 0004: chunks + pgvector embeddings. D=32 matches stub-emb.
+-- KnowledgeBrain 0004: chunks + pgvector embeddings. D=1024.
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS chunk_embeddings (
     chunk_id uuid PRIMARY KEY REFERENCES chunks (id) ON DELETE CASCADE,
     product_version_id uuid NOT NULL,
     document_id uuid NOT NULL,
-    embedding vector(32),
+    embedding vector(1024),
     tsv tsvector,
     content text NOT NULL
 );

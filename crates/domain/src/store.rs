@@ -10,6 +10,8 @@ pub struct User {
     pub id: Uuid,
     pub email: String,
     pub password_hash: String,
+    #[serde(default)]
+    pub ldap_dn: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +19,8 @@ pub struct Workspace {
     pub id: Uuid,
     pub name: String,
     pub slug: String,
+    #[serde(default)]
+    pub kind: WorkspaceKind,
     pub retrieval: RetrievalConfig,
 }
 
@@ -100,7 +104,7 @@ impl ProductVersion {
             question_enabled: true,
             question_count: 3,
             question_custom_instructions: String::new(),
-            enable_multimodel: false,
+            enable_multimodel: true,
             asr_enabled: false,
             asr_model_id: String::new(),
             embedding_model_id: "stub-emb".into(),
@@ -186,6 +190,8 @@ pub struct Document {
     pub doc_type: String,
     #[serde(default)]
     pub source_passages: Vec<String>,
+    #[serde(default)]
+    pub index_ready: bool,
 }
 
 impl Document {
@@ -219,6 +225,7 @@ impl Document {
             process_overrides: None,
             doc_type: "file".into(),
             source_passages: Vec::new(),
+            index_ready: false,
         }
     }
 }
@@ -674,6 +681,7 @@ mod tests {
                 process_overrides: None,
                 doc_type: "file".into(),
                 source_passages: Vec::new(),
+                index_ready: false,
             },
         );
         assert!(!s.set_finalizing(id, 2));

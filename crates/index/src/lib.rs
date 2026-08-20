@@ -181,6 +181,9 @@ pub fn process_chunks(
         d.summary_status = SummaryStatus::None;
         if text_count == 0 && !has_multimodal {
             d.parse_status = ParseStatus::Completed;
+            d.index_ready = true;
+        } else if !has_multimodal {
+            d.index_ready = true;
         }
     }
     Ok(())
@@ -329,9 +332,13 @@ fn embeddings_url(base: &str) -> String {
 mod tests {
     use super::*;
     use domain::{Document, ProductVersion};
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parent_text_not_vectorized() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let mut s = Store::default();
         let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         let vid = v.id;
@@ -382,6 +389,7 @@ mod tests {
 
     #[test]
     fn skips_blank_chunks_and_completes_without_text() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let mut s = Store::default();
         let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         let vid = v.id;
@@ -412,6 +420,7 @@ mod tests {
 
     #[test]
     fn process_chunks_keeps_rows_when_embed_fails() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let prev_base = std::env::var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL").ok();
         let prev_alias = std::env::var("EMBEDDING_BASE_URL").ok();
         unsafe {
@@ -462,12 +471,14 @@ mod tests {
 
     #[test]
     fn embed_index_without_url_is_stub() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let v = embed_index("throughput 40gbps", "stub-emb").unwrap();
         assert_eq!(v, stub_embed("throughput 40gbps"));
     }
 
     #[test]
     fn index_one_writes_vector_from_embed_index() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let mut s = Store::default();
         let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         let vid = v.id;

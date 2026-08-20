@@ -8,6 +8,13 @@ var/
 fixtures/
 .venv/
 __pycache__/
+web/node_modules/
+web/dist/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+.impeccable/
+target-bookworm/
+2.png
+3.png
+1.png

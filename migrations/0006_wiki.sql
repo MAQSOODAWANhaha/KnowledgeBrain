@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS wiki_pages (
     folder_id uuid,
     category_path jsonb NOT NULL DEFAULT '[]'::jsonb,
     source_refs jsonb NOT NULL DEFAULT '[]'::jsonb,
+    chunk_refs jsonb NOT NULL DEFAULT '[]'::jsonb,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     deleted_at timestamptz,

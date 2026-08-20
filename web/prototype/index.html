@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>原型 · 投标台</title>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #f6f7f8;
+      --surface: #fff;
+      --ink: #24292f;
+      --mute: #57606a;
+      --faint: #8c959f;
+      --line: #d8dee4;
+      --line2: #eaeef2;
+      --orange: #f6821f;
+      --orange-ink: #fff;
+      --orange-soft: #fff4ea;
+      --go: #1a7f37;
+      --go-soft: #dafbe1;
+      --stop: #cf222e;
+      --warn: #9a6700;
+      --warn-soft: #fff8c5;
+      --blue: #0969da;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+      font: 13px/1.45 "Noto Sans SC", sans-serif; }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .hide { display: none !important; }
+
+    .top {
+      height: 48px; display: flex; align-items: center; gap: 4px;
+      padding: 0 12px; background: #fff; border-bottom: 1px solid var(--line);
+      position: sticky; top: 0; z-index: 5;
+    }
+    .logo { font-weight: 700; letter-spacing: -.03em; margin-right: 8px; font-size: 13px; }
+    .navbtn {
+      border: 0; background: transparent; color: var(--mute);
+      padding: 6px 10px; border-radius: 6px;
+    }
+    .navbtn.on { background: var(--bg); color: var(--ink); font-weight: 600; }
+    .grow { flex: 1; }
+    .muted { color: var(--mute); }
+    .faint { color: var(--faint); font-size: 11px; }
+
+    .btn {
+      border: 1px solid var(--line); background: #fff; border-radius: 6px;
+      padding: 5px 10px; height: 28px;
+    }
+    .btn:hover { background: var(--bg); }
+    .btn.pri { background: var(--orange); border-color: var(--orange); color: #fff; font-weight: 600; }
+    .btn.pri:hover { filter: brightness(1.05); }
+    .btn.sm { height: 24px; padding: 0 8px; font-size: 12px; }
+    .seg { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+    .seg button { border: 0; background: #fff; padding: 4px 10px; color: var(--mute); }
+    .seg button.on { background: var(--bg); color: var(--ink); font-weight: 600; }
+
+    .work { display: grid; grid-template-columns: 232px 1fr 276px; height: calc(100vh - 48px); }
+    .side, .aside { background: #fff; overflow: auto; }
+    .side { border-right: 1px solid var(--line); }
+    .aside { border-left: 1px solid var(--line); }
+    .main { overflow: auto; }
+    .label { font-size: 11px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase;
+      color: var(--faint); padding: 14px 12px 6px; }
+    .item { display: block; width: 100%; text-align: left; border: 0; background: transparent;
+      padding: 7px 12px; }
+    .item:hover { background: var(--bg); }
+    .item.on { background: var(--orange-soft); }
+    .item b { font-weight: 600; display: block; }
+    .pill { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px;
+      background: var(--bg); color: var(--mute); border: 1px solid var(--line); }
+    .pill.go { background: var(--go-soft); color: var(--go); border-color: #aceebb; }
+    .pill.wait { background: var(--warn-soft); color: var(--warn); border-color: #e8d48b; }
+    .pill.off { opacity: .55; }
+
+    .panel { background: #fff; border: 1px solid var(--line); border-radius: 8px; margin: 16px; overflow: hidden; }
+    .hd { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px;
+      border-bottom: 1px solid var(--line2); }
+    .hd h1 { margin: 0; font-size: 16px; letter-spacing: -.02em; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--line2); font-variant-numeric: tabular-nums; }
+    th { font-size: 11px; color: var(--mute); font-weight: 500; background: #fafbfc; }
+    tr:hover td { background: #fafbfc; }
+    .bar { height: 4px; background: var(--line2); border-radius: 4px; margin-top: 4px; }
+    .bar > i { display: block; height: 100%; background: var(--orange); border-radius: 4px; }
+
+    .doc { max-width: 720px; margin: 0 auto; padding: 24px 28px 80px; }
+    .doc h1 { margin: 0 0 4px; font-size: 22px; letter-spacing: -.03em; }
+    .clause { padding: 12px 0; border-top: 1px solid var(--line2); cursor: pointer; }
+    .clause.on { background: var(--orange-soft); margin: 0 -12px; padding: 12px; border-radius: 6px; border-top-color: transparent; }
+    .clause .k { font-size: 11px; color: var(--faint); margin-bottom: 4px; }
+    .clause p { margin: 0; font-size: 14px; line-height: 1.6; max-width: 68ch; }
+    textarea { width: 100%; min-height: 72px; border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+    .field { display: grid; gap: 4px; }
+    .field span { font-size: 11px; color: var(--mute); }
+    .field input, .field select { border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; height: 28px; }
+    .drop { margin: 8px 12px; border: 1px dashed var(--line); border-radius: 6px; padding: 10px; text-align: center; color: var(--mute); background: var(--bg); }
+    .file { display: flex; justify-content: space-between; padding: 8px 12px; border-top: 1px solid var(--line2); }
+    .tools { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 12px 12px; }
+    .shot { width: 100%; height: 96px; background: repeating-linear-gradient(45deg, #eee, #eee 6px, #f7f7f7 6px, #f7f7f7 12px); border: 1px solid var(--line); border-radius: 6px; }
+
+    .login { min-height: 100vh; display: grid; grid-template-columns: 1fr 420px; }
+    .login .hero { padding: 72px; background: var(--bg); border-right: 1px solid var(--line); }
+    .login .hero h1 { font-size: 36px; letter-spacing: -.04em; margin: 0 0 8px; }
+    .login form { display: grid; align-content: center; gap: 10px; padding: 48px; max-width: 360px; }
+
+    .banner { font-size: 12px; background: #fff8e8; border-bottom: 1px solid #f0d9a8; color: #7a4b00; padding: 6px 12px; }
+    @media (max-width: 900px) {
+      .work { grid-template-columns: 1fr; height: auto; }
+      .login { grid-template-columns: 1fr; }
+      .side, .aside { max-height: 220px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="banner">原型 · 无后端 · 选 C：Cloudflare 白底密度 + Plannotator 三栏。同意后再实现。</div>
+
+  <section id="v-login" class="login">
+    <div class="hero">
+      <div class="logo">KnowledgeBrain</div>
+      <h1>投标</h1>
+      <p class="muted">拆条款、勾产品、补图、出 ①–⑤。<br/>测试环境不配目录，也不验密码。直接进。</p>
+    </div>
+    <form onsubmit="event.preventDefault(); show('bids')">
+      <label class="field"><span>账号（可空）</span><input /></label>
+      <label class="field"><span>密码（可空）</span><input type="password" /></label>
+      <button class="btn pri" type="submit">进入</button>
+    </form>
+  </section>
+
+  <div id="app" class="hide">
+    <header class="top">
+      <div class="logo">KnowledgeBrain</div>
+      <button class="navbtn on" data-go="bids" type="button">投标</button>
+      <button class="navbtn" data-go="lib" type="button">资料</button>
+      <button class="navbtn" data-go="prod" type="button">产品</button>
+      <div class="grow"></div>
+      <span id="top-extra"></span>
+      <span class="faint">dev@local</span>
+      <button class="btn sm" type="button" onclick="show('login')">退出</button>
+    </header>
+
+    <div class="work" id="v-bids">
+      <aside class="side">
+        <div class="label">Contents</div>
+        <button class="item on" type="button" onclick="show('editor')"><b>市一医院核心网改造</b><span class="faint">张衡 · 4 条待确认</span></button>
+        <button class="item" type="button"><b>政务云安全设备</b><span class="faint">李清 · 已勾选</span></button>
+      </aside>
+      <div class="main">
+        <section class="panel">
+          <div class="hd">
+            <h1>在办的标</h1>
+            <button class="btn pri sm" type="button">开标</button>
+          </div>
+          <div style="display:grid;grid-template-columns:1.4fr 1fr 1fr auto;gap:8px;padding:10px 14px;background:#fafbfc;border-bottom:1px solid var(--line2)">
+            <label class="field"><span>项目名称</span><input placeholder="例如：市一医院核心网改造" /></label>
+            <label class="field"><span>负责人</span><input placeholder="张衡" /></label>
+            <label class="field"><span>招标结束</span><input type="date" /></label>
+            <div style="align-self:end"><button class="btn pri" type="button" onclick="show('editor')">开标</button></div>
+          </div>
+          <table>
+            <thead><tr><th>项目</th><th>负责人</th><th>结束</th><th>阶段</th></tr></thead>
+            <tbody>
+              <tr onclick="show('editor')" style="cursor:pointer">
+                <td><a href="javascript:show('editor')">市一医院核心网改造</a></td>
+                <td>张衡</td><td>2026-12-31</td>
+                <td><span class="pill wait">4 条待确认</span></td>
+              </tr>
+              <tr>
+                <td>政务云安全设备</td><td>李清</td><td>2026-11-02</td>
+                <td><span class="pill go">已勾选</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+      <aside class="aside">
+        <div class="label">Annotations</div>
+        <p class="muted" style="padding:0 12px">打开一条标，在这里批注条款、看覆盖和缺件。</p>
+      </aside>
+    </div>
+
+    <div class="work hide" id="v-editor">
+      <aside class="side">
+        <div class="label">Contents</div>
+        <div class="item on"><b>市一医院核心网改造</b><span class="faint">张衡 · 4 条待确认</span></div>
+        <div class="label">技术</div>
+        <button class="item on" type="button"><b>吞吐 ≥ 40Gbps</b><span class="faint">draft · 必须</span></button>
+        <button class="item" type="button"><b>双电源热备</b><span class="faint">confirmed</span></button>
+        <div class="label">商务</div>
+        <button class="item" type="button"><b>须具备 ISO9001</b><span class="faint">draft · 必须</span></button>
+        <div class="label">Files</div>
+        <div class="drop">拖入招标文件<br/><button class="btn sm" type="button">选择文件</button></div>
+        <div class="file"><div>招标公告.pdf<br/><span class="faint" style="color:var(--go)">completed</span></div><button class="btn sm" type="button">删</button></div>
+      </aside>
+      <div class="main">
+        <div class="doc">
+          <h1>市一医院核心网改造</h1>
+          <p class="muted">张衡 · 招标结束 2026-12-31</p>
+          <article class="clause on">
+            <div class="k">技术 · draft · 必须</div>
+            <p>核心交换机整机吞吐不低于 40Gbps，支持堆叠，延迟 &lt; 5μs。</p>
+          </article>
+          <article class="clause">
+            <div class="k">技术 · confirmed</div>
+            <p>设备须支持双电源热备，单路故障不影响转发。</p>
+          </article>
+          <article class="clause">
+            <div class="k">商务 · draft · 必须</div>
+            <p>投标人须具备有效期内 ISO9001 质量管理体系认证。</p>
+          </article>
+        </div>
+      </div>
+      <aside class="aside">
+        <div class="label">Annotations</div>
+        <p class="muted" style="padding:0 12px 8px">未确认，不会进匹配。</p>
+        <div class="tools">
+          <button class="btn sm" type="button">技术</button>
+          <button class="btn sm" type="button">商务</button>
+          <button class="btn sm pri" type="button">必须</button>
+          <button class="btn sm pri" type="button">Approve</button>
+          <button class="btn sm" type="button">丢掉</button>
+          <button class="btn sm" type="button">偏离</button>
+        </div>
+        <div class="label">界面图</div>
+        <div style="padding:0 12px 16px">
+          <div class="shot"></div>
+          <p class="faint">先勾选产品才能补图。</p>
+        </div>
+      </aside>
+    </div>
+
+    <div class="work hide" id="v-picks">
+      <aside class="side">
+        <div class="label">Contents</div>
+        <button class="item" type="button" onclick="show('editor')"><b>回条款</b></button>
+        <button class="item on" type="button"><b>勾选</b></button>
+        <button class="item" type="button" onclick="show('preview')"><b>预览</b></button>
+      </aside>
+      <div class="main">
+        <section class="panel">
+          <div class="hd"><h1>勾选产品</h1><span class="muted">系统只排序，人勾方案</span></div>
+          <table>
+            <thead><tr><th>产品</th><th>覆盖</th><th></th></tr></thead>
+            <tbody>
+              <tr>
+                <td>交换机 A<br/><span class="faint">v3.2</span></td>
+                <td>86%<div class="bar"><i style="width:86%"></i></div></td>
+                <td><button class="btn pri sm" type="button">勾入</button></td>
+              </tr>
+              <tr>
+                <td>交换机 B<br/><span class="faint">v1.0</span></td>
+                <td>61%<div class="bar"><i style="width:61%"></i></div></td>
+                <td><button class="btn sm" type="button">勾入</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+      <aside class="aside">
+        <div class="label">Annotations</div>
+        <p class="muted" style="padding:0 12px">改条款后按新候选重勾。只点「再匹配」不够。</p>
+      </aside>
+    </div>
+
+    <div class="work hide" id="v-preview">
+      <aside class="side">
+        <div class="label">Contents</div>
+        <button class="item" type="button" onclick="show('editor')">回条款</button>
+        <div class="item on">① 扉页</div>
+        <div class="item">② 技术点对点</div>
+        <div class="item">③ 偏离表</div>
+        <div class="item">④ 商务材料</div>
+        <div class="item">⑤ 缺件</div>
+      </aside>
+      <div class="main">
+        <div class="doc">
+          <h1>市一医院核心网改造</h1>
+          <p class="muted">负责人：张衡</p>
+          <h2>① 项目扉页</h2>
+          <p>已选产品：交换机 A</p>
+          <h2>② 技术点对点</h2>
+          <p>吞吐 ≥ 40Gbps — 待确认</p>
+          <p>双电源热备 — 已覆盖 · 交换机 A</p>
+          <h2>③ 技术偏离表</h2>
+          <p class="muted">无偏离 / 无 must 未覆盖。</p>
+          <h2>④ 资格 / 商务材料</h2>
+          <p class="muted">暂无已命中的公司资料。</p>
+          <h2>⑤ 商务缺件</h2>
+          <p class="muted">无 must 缺件。</p>
+        </div>
+      </div>
+      <aside class="aside">
+        <div class="label">Annotations</div>
+        <p class="muted" style="padding:0 12px">过程下 Word，定稿橙色 Approve PDF。</p>
+      </aside>
+    </div>
+
+    <div class="work hide" id="v-lib">
+      <aside class="side">
+        <div class="label">Contents</div>
+        <div class="item on"><b>资质证照</b></div>
+        <div class="item"><b>体系认证</b></div>
+        <div class="item"><b>业绩案例</b></div>
+        <div class="item"><b>服务能力</b></div>
+      </aside>
+      <div class="main">
+        <section class="panel">
+          <div class="hd"><h1>公司资料</h1><button class="btn pri sm" type="button">上传材料</button></div>
+          <table>
+            <thead><tr><th>文件</th><th>分类</th><th>检索</th></tr></thead>
+            <tbody>
+              <tr><td>营业执照.pdf</td><td>资质证照</td><td><span class="pill go">可检索</span></td></tr>
+              <tr><td>ISO9001.pdf</td><td>体系认证</td><td><span class="pill wait">解析中</span></td></tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+      <aside class="aside">
+        <div class="label">Annotations</div>
+        <p class="muted" style="padding:0 12px">文件还在解析时，不会判缺件。</p>
+      </aside>
+    </div>
+
+    <div class="work hide" id="v-prod">
+      <aside class="side">
+        <div class="label">Contents</div>
+        <div class="item on"><b>数据中心产品线</b></div>
+      </aside>
+      <div class="main">
+        <section class="panel">
+          <div class="hd"><h1>产品线</h1><button class="btn pri sm" type="button">建立型号</button></div>
+          <table>
+            <thead><tr><th>型号</th><th>当前版</th><th>手册</th></tr></thead>
+            <tbody>
+              <tr><td>交换机 A</td><td>v3.2</td><td>4 份</td></tr>
+              <tr><td>交换机 B</td><td>v1.0</td><td>1 份</td></tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+      <aside class="aside">
+        <div class="label">Annotations</div>
+        <p class="muted" style="padding:0 12px">手册进产品库。招标文件不要传到这里。</p>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const extras = {
+      bids: '',
+      editor: `<span class="pill go">文件</span> <span class="pill go">解析</span> <span class="pill wait">待确认</span>
+        <span class="seg"><button class="on" type="button">Select</button><button type="button">Markup</button></span>
+        <button class="btn sm" type="button" onclick="show('picks')">勾选</button>
+        <button class="btn sm" type="button" onclick="show('preview')">预览</button>
+        <button class="btn sm" type="button">Word</button>
+        <button class="btn pri sm" type="button">Approve PDF</button>`,
+      picks: '',
+      preview: `<button class="btn sm" type="button">Word</button><button class="btn pri sm" type="button">Approve PDF</button>`,
+      lib: '',
+      prod: ''
+    };
+    function show(name) {
+      document.getElementById('v-login').classList.toggle('hide', name !== 'login');
+      document.getElementById('app').classList.toggle('hide', name === 'login');
+      ['bids','editor','picks','preview','lib','prod'].forEach(id => {
+        const el = document.getElementById('v-' + id);
+        if (el) el.classList.toggle('hide', id !== name);
+      });
+      document.querySelectorAll('.navbtn').forEach(b => {
+        const g = b.getAttribute('data-go');
+        b.classList.toggle('on', (name === 'lib' && g === 'lib') || (name === 'prod' && g === 'prod') || (['bids','editor','picks','preview'].includes(name) && g === 'bids'));
+      });
+      const extra = document.getElementById('top-extra');
+      if (extra) extra.innerHTML = extras[name] || '';
+    }
+    document.querySelectorAll('[data-go]').forEach(b => b.addEventListener('click', () => show(b.getAttribute('data-go'))));
+  </script>
+</body>
+</html>

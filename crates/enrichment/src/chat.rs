@@ -19,8 +19,39 @@ fn resolve_chat_model(model_id: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+impl ChatMessage {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: "system".into(),
+            content: content.into(),
+        }
+    }
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: "user".into(),
+            content: content.into(),
+        }
+    }
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".into(),
+            content: content.into(),
+        }
+    }
+}
+
 pub fn chat_complete(system: &str, user: &str, model_id: &str) -> Result<String, String> {
     chat_complete_limited(system, user, model_id, 2048)
+}
+
+pub fn chat_messages(messages: &[ChatMessage], model_id: &str) -> Result<String, String> {
+    chat_messages_limited(messages, model_id, 2048)
 }
 
 /// Brain `wikiLLMMaxTokens` — large Chinese extracts otherwise truncate mid-JSON.
@@ -36,10 +67,11 @@ pub fn chat_complete_limited(
     model_id: &str,
     max_tokens: u32,
 ) -> Result<String, String> {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::task::block_in_place(|| chat_complete_inner(system, user, model_id, max_tokens))
-    } else {
-        chat_complete_inner(system, user, model_id, max_tokens)
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| chat_complete_inner(system, user, model_id, max_tokens))
+        }
+        _ => chat_complete_inner(system, user, model_id, max_tokens),
     }
 }
 
@@ -65,10 +97,41 @@ fn chat_complete_inner(
     model_id: &str,
     max_tokens: u32,
 ) -> Result<String, String> {
+    chat_messages_inner(
+        &[ChatMessage::system(system), ChatMessage::user(user)],
+        model_id,
+        max_tokens,
+    )
+}
+
+pub fn chat_messages_limited(
+    messages: &[ChatMessage],
+    model_id: &str,
+    max_tokens: u32,
+) -> Result<String, String> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| chat_messages_inner(messages, model_id, max_tokens))
+        }
+        _ => chat_messages_inner(messages, model_id, max_tokens),
+    }
+}
+
+fn chat_messages_inner(
+    messages: &[ChatMessage],
+    model_id: &str,
+    max_tokens: u32,
+) -> Result<String, String> {
     let base = domain::chat_base_url();
     let model = resolve_chat_model(model_id);
     if base.is_empty() || model == "stub-chat" {
-        return Ok(stub_complete(user));
+        let last = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.as_str())
+            .unwrap_or("");
+        return Ok(stub_complete(last));
     }
     let key = domain::chat_api_key();
     let url = completions_url(&base);
@@ -76,10 +139,7 @@ fn chat_complete_inner(
         "model": model,
         "temperature": 0.3,
         "max_tokens": max_tokens,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user}
-        ]
+        "messages": messages
     });
     models::chat_sse(&url, &key, body)
 }
@@ -164,5 +224,15 @@ mod tests {
         assert!(!attempt_superseded(1, 0));
         assert!(!attempt_superseded(1, 1));
         assert!(attempt_superseded(2, 1));
+    }
+
+    #[test]
+    fn stub_messages_echo_last_user() {
+        let out = chat_messages(
+            &[ChatMessage::system("sys"), ChatMessage::user("hello-user")],
+            "stub-chat",
+        )
+        .unwrap();
+        assert_eq!(out, "hello-user");
     }
 }

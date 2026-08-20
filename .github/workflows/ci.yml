@@ -20,6 +20,49 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+  bid-smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: knowledgebrain
+          POSTGRES_PASSWORD: knowledgebrain
+          POSTGRES_DB: knowledgebrain
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U knowledgebrain"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://knowledgebrain:knowledgebrain@127.0.0.1:5432/knowledgebrain
+      REDIS_URL: redis://127.0.0.1:6379
+      BID_EXTRACT_MODE: heuristic
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+      - name: mandatory PostgreSQL-backed storage tests
+        run: cargo test -p storage persist::tests -- --nocapture
+      - name: install PDF font
+        run: sudo apt-get update && sudo apt-get install -y fonts-wqy-zenhei
+      - name: build services
+        run: cargo build -p api -p worker
+      - name: PostgreSQL + Redis + API + worker tender smoke
+        run: scripts/bid_e2e_smoke.sh
+
   python:
     runs-on: ubuntu-latest
     defaults:
@@ -42,11 +85,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - name: compose
         run: |
           docker compose -f deploy/docker-compose.yml --env-file deploy/.env.example config -q
           docker compose config -q
+      - name: web build
+        run: npm ci --prefix web && npm --prefix web run build
+      - name: runtime image build
+        run: docker build -f deploy/Dockerfile.rust --build-arg BIN=api -t knowledgebrain-api-ci .
       - name: shell
-        run: bash -n services/docreader/scripts/generate_proto.sh
+        run: bash -n services/docreader/scripts/generate_proto.sh scripts/bid_e2e_smoke.sh
       - name: spec copy
         run: cmp -s docs/system-design.md .scratch/knowledgebrain/spec.md

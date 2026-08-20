@@ -11,22 +11,45 @@ fn log_line(msg: &str) {
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
-    log_line("worker ready");
+    let pool = storage::connect()
+        .await
+        .unwrap_or_else(|e| panic!("postgres initialization failed: {e}"));
+    let extractor = bid::extraction::TenderExtractionEngine::from_env()
+        .unwrap_or_else(|e| panic!("bid extraction configuration failed: {e}"));
+    eprintln!(
+        "bid extraction configured mode={} model={} policy={} prompt={}",
+        extractor.mode().as_str(),
+        extractor.model_id(),
+        extractor.policy_version(),
+        extractor.prompt_version()
+    );
     tokio::select! {
         _ = shutdown_signal() => {}
-        _ = consume_loop() => {}
+        _ = consume_loop(pool) => {}
     }
     log_line("worker exiting");
 }
 
-async fn consume_loop() {
-    let pool = storage::connect().await.ok();
-    if runtime::connect().is_err() {
-        shutdown_signal().await;
-        return;
-    }
-    if let Err(e) = run_core(AppCtx { pool }).await {
-        eprintln!("worker consume ended: {e}");
+async fn consume_loop(pool: sqlx::PgPool) {
+    let mut backoff = std::time::Duration::from_secs(1);
+    loop {
+        match runtime::connect_verified().await {
+            Ok(_) => {
+                backoff = std::time::Duration::from_secs(1);
+                log_line("worker ready");
+                match run_core(AppCtx {
+                    pool: Some(pool.clone()),
+                })
+                .await
+                {
+                    Ok(()) => return,
+                    Err(error) => eprintln!("worker consume ended; reconnecting: {error}"),
+                }
+            }
+            Err(error) => eprintln!("redis unavailable; reconnecting: {error}"),
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
     }
 }
 

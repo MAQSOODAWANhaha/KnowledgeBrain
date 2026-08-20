@@ -56,11 +56,37 @@ pub enum VersionStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductKind {
+    #[default]
     Product,
     Library,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceKind {
+    #[default]
+    ProductLine,
+    Company,
+}
+
+impl WorkspaceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProductLine => "product_line",
+            Self::Company => "company",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        if s == "company" {
+            Self::Company
+        } else {
+            Self::ProductLine
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +123,10 @@ pub const TYPE_LIST_DELETE: &str = "knowledge:list_delete";
 pub const TYPE_LIST_REPARSE: &str = "knowledge:list_reparse";
 pub const TYPE_INDEX_DELETE: &str = "index:delete";
 pub const TYPE_DATATABLE: &str = "datatable:summary";
+pub const TYPE_BID_CONVERT: &str = "bid:convert";
+pub const TYPE_BID_EXTRACT: &str = "bid:extract";
+pub const TYPE_BID_SECTION_RETRY: &str = "bid:section-retry";
+pub const TYPE_BID_MATCH: &str = "bid:match";
 
 pub const QUEUE_DEFAULT: &str = "default";
 pub const QUEUE_POSTPROCESS: &str = "postprocess";

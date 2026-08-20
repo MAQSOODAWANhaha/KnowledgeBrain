@@ -54,6 +54,8 @@ pub struct SearchRequest {
     #[serde(default)]
     pub product_ids: Vec<Uuid>,
     pub workspace_id: Option<Uuid>,
+    #[serde(default)]
+    pub scope: Option<String>,
     #[serde(default = "none_group")]
     pub group_by: String,
     #[serde(default)]
@@ -183,6 +185,25 @@ pub struct Hit {
     pub tag_slugs: Vec<String>,
     pub start_at: i32,
     pub end_at: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_object_key: Option<String>,
+}
+
+pub fn image_key_for_hit(
+    chunk_type: &str,
+    context_header: &str,
+    doc_object_key: &str,
+) -> Option<String> {
+    if !matches!(chunk_type, "image_ocr" | "image_caption") {
+        return None;
+    }
+    if !context_header.is_empty() {
+        Some(context_header.to_string())
+    } else if !doc_object_key.is_empty() {
+        Some(doc_object_key.to_string())
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,8 +233,38 @@ pub struct Candidate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClauseHit {
+    pub id: String,
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hits: Vec<Hit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alts: Vec<ClauseAlt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClauseAlt {
+    pub document_id: Uuid,
+    pub file_name: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchingResponse {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<Candidate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clauses: Vec<ClauseHit>,
     pub warnings: Vec<String>,
 }
 
@@ -446,7 +497,7 @@ fn hits_from_pg_rows(rows: Vec<storage::PgSearchHit>, vth: f64, kth: f64) -> Vec
             content: row.content,
             score,
             match_type: match_type.into(),
-            chunk_type: row.chunk_type,
+            chunk_type: row.chunk_type.clone(),
             document_id: row.document_id,
             document_title: row.document_title,
             product_id: row.product_id,
@@ -458,6 +509,11 @@ fn hits_from_pg_rows(rows: Vec<storage::PgSearchHit>, vth: f64, kth: f64) -> Vec
             tag_slugs: row.tag_slugs,
             start_at: row.start_at,
             end_at: row.end_at,
+            image_object_key: image_key_for_hit(
+                &row.chunk_type,
+                &row.context_header,
+                &row.document_object_key,
+            ),
         });
     }
     hits
@@ -501,6 +557,7 @@ async fn graph_hits_for_version(
             tag_slugs: row.tag_slugs,
             start_at: row.start_at,
             end_at: row.end_at,
+            image_object_key: None,
         });
     }
     Ok(hits)
@@ -670,6 +727,11 @@ fn hybrid_search(
             tag_slugs,
             start_at: chunk.start_at,
             end_at: chunk.end_at,
+            image_object_key: image_key_for_hit(
+                &chunk.chunk_type,
+                &chunk.context_header,
+                &doc.object_key,
+            ),
         });
     }
     if req.expand_graph {
@@ -717,6 +779,7 @@ fn hybrid_search(
                     tag_slugs,
                     start_at: ch.start_at,
                     end_at: ch.end_at,
+                    image_object_key: None,
                 });
             }
         }
@@ -737,10 +800,17 @@ pub fn matching(store: &Store, req: &SearchRequest) -> Result<MatchingResponse, 
             message: "product_id is forbidden for matching".into(),
         });
     }
-    let workspace_id = req.workspace_id.ok_or(SearchError {
-        code: "VALIDATION",
-        message: "workspace required".into(),
-    })?;
+    if req.scope.as_deref() == Some("company") {
+        return matching_company(store, req);
+    }
+    let workspace_id = if req.scope.as_deref() == Some("product_lines") {
+        req.workspace_id.unwrap_or(Uuid::nil())
+    } else {
+        req.workspace_id.ok_or(SearchError {
+            code: "VALIDATION",
+            message: "workspace required".into(),
+        })?
+    };
     let mut requirements = req.requirements.clone();
     if requirements.is_empty()
         && let Some(t) = &req.tender_text
@@ -779,13 +849,29 @@ pub fn matching(store: &Store, req: &SearchRequest) -> Result<MatchingResponse, 
     let mut products: Vec<_> = store
         .products
         .values()
-        .filter(|p| p.workspace_id == workspace_id && p.kind == ProductKind::Product)
+        .filter(|p| {
+            if p.kind != ProductKind::Product {
+                return false;
+            }
+            if req.scope.as_deref() == Some("product_lines") {
+                return store
+                    .workspaces
+                    .get(&p.workspace_id)
+                    .is_some_and(|w| w.kind == domain::WorkspaceKind::ProductLine);
+            }
+            p.workspace_id == workspace_id
+        })
         .cloned()
         .collect();
     if !req.product_ids.is_empty() {
         products.retain(|p| req.product_ids.contains(&p.id));
     }
-    products.truncate(50);
+    if req.scope.as_deref() != Some("product_lines") {
+        products.truncate(50);
+    }
+    if req.scope.as_deref() == Some("product_lines") {
+        check_scope_thresholds(store, &products)?;
+    }
     let mut all_targets = Vec::new();
     for p in &products {
         all_targets.extend(product_versions(store, p, &req.version_scope));
@@ -836,6 +922,7 @@ pub fn matching(store: &Store, req: &SearchRequest) -> Result<MatchingResponse, 
                     version_scope: req.version_scope.clone(),
                     product_ids: Vec::new(),
                     workspace_id: Some(workspace_id),
+                    scope: None,
                     group_by: req.group_by.clone(),
                     tender_text: None,
                 };
@@ -915,7 +1002,147 @@ pub fn matching(store: &Store, req: &SearchRequest) -> Result<MatchingResponse, 
     });
     Ok(MatchingResponse {
         candidates,
+        clauses: Vec::new(),
         warnings,
+    })
+}
+
+fn check_scope_thresholds(store: &Store, products: &[domain::Product]) -> Result<(), SearchError> {
+    let mut seen: Option<(f64, f64)> = None;
+    for p in products {
+        let Some(ws) = store.workspaces.get(&p.workspace_id) else {
+            continue;
+        };
+        let pair = (
+            ws.retrieval.vector_threshold,
+            ws.retrieval.keyword_threshold,
+        );
+        match seen {
+            None => seen = Some(pair),
+            Some(prev) if prev != pair => {
+                return Err(SearchError {
+                    code: "EMBEDDING_MISMATCH",
+                    message: "product_line retrieval thresholds differ".into(),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn matching_company(store: &Store, req: &SearchRequest) -> Result<MatchingResponse, SearchError> {
+    let mut requirements = req.requirements.clone();
+    if requirements.is_empty()
+        && let Some(q) = &req.query
+        && !q.trim().is_empty()
+    {
+        requirements.push(Requirement {
+            id: "q0".into(),
+            text: q.clone(),
+            weight: 1.0,
+            must: false,
+            tag_ids: req.tag_ids.clone(),
+            use_library: false,
+        });
+    }
+    if requirements.is_empty() || requirements.len() > 30 {
+        return Err(SearchError {
+            code: "VALIDATION",
+            message: "requirements must have 1–30 items".into(),
+        });
+    }
+    let libs: Vec<_> = store
+        .products
+        .values()
+        .filter(|p| {
+            p.kind == ProductKind::Library
+                && store
+                    .workspaces
+                    .get(&p.workspace_id)
+                    .is_some_and(|w| w.kind == domain::WorkspaceKind::Company)
+        })
+        .cloned()
+        .collect();
+    let mut clauses = Vec::new();
+    for r in &requirements {
+        let mut all = Vec::new();
+        for lib in &libs {
+            let Some(vid) = lib.current_version_id else {
+                continue;
+            };
+            let sub = SearchRequest {
+                mode: "assembly".into(),
+                query: Some(r.text.clone()),
+                product_id: Some(lib.id),
+                version_id: Some(vid.to_string()),
+                include_library: false,
+                tag_ids: r.tag_ids.clone(),
+                match_count: req.match_count,
+                expand_wiki: false,
+                expand_graph: false,
+                requirements: Vec::new(),
+                version_scope: "current".into(),
+                product_ids: Vec::new(),
+                workspace_id: Some(lib.workspace_id),
+                scope: None,
+                group_by: "none".into(),
+                tender_text: None,
+            };
+            if let Ok(mut hits) = hybrid_search(store, vid, &r.text, &sub, false) {
+                hits.retain(|h| h.chunk_type != "wiki_page" && h.match_type != "graph");
+                all.append(&mut hits);
+            }
+        }
+        all.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let best = all.first().cloned();
+        let hit = best.as_ref().is_some_and(|h| h.score > 0.0);
+        let alts = if all.len() > 1 {
+            all.iter()
+                .skip(1)
+                .filter_map(|h| {
+                    store.documents.get(&h.document_id).map(|d| ClauseAlt {
+                        document_id: d.id,
+                        file_name: d.file_name.clone(),
+                        score: h.score,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        clauses.push(ClauseHit {
+            id: r.id.clone(),
+            outcome: if hit { "hit".into() } else { "miss".into() },
+            document_id: best.as_ref().and_then(|h| hit.then_some(h.document_id)),
+            version_id: best.as_ref().and_then(|h| hit.then_some(h.version_id)),
+            file_name: best.as_ref().and_then(|h| {
+                hit.then(|| {
+                    store
+                        .documents
+                        .get(&h.document_id)
+                        .map(|d| d.file_name.clone())
+                        .unwrap_or_default()
+                })
+            }),
+            score: best.as_ref().and_then(|h| hit.then_some(h.score)),
+            product_id: best.as_ref().and_then(|h| hit.then_some(h.product_id)),
+            hits: if hit {
+                best.clone().into_iter().collect()
+            } else {
+                Vec::new()
+            },
+            alts,
+        });
+    }
+    Ok(MatchingResponse {
+        candidates: Vec::new(),
+        clauses,
+        warnings: Vec::new(),
     })
 }
 
@@ -930,12 +1157,21 @@ pub async fn matching_pg(
             message: "product_id is forbidden for matching".into(),
         });
     }
-    let workspace_id = req.workspace_id.ok_or(SearchError {
-        code: "VALIDATION",
-        message: "workspace required".into(),
-    })?;
+    if req.scope.as_deref() == Some("company") {
+        return matching_company_pg(pool, req).await;
+    }
+    let scoped_lines = req.scope.as_deref() == Some("product_lines");
+    let workspace_id = if scoped_lines {
+        req.workspace_id.unwrap_or(Uuid::nil())
+    } else {
+        req.workspace_id.ok_or(SearchError {
+            code: "VALIDATION",
+            message: "workspace required".into(),
+        })?
+    };
     let mut requirements = req.requirements.clone();
-    if requirements.is_empty()
+    if !scoped_lines
+        && requirements.is_empty()
         && let Some(t) = &req.tender_text
         && !t.trim().is_empty()
     {
@@ -982,20 +1218,40 @@ pub async fn matching_pg(
         }
     }
     let all_active = req.version_scope == "all_active";
-    let rows = sqlx::query(
-        "SELECT p.id AS product_id, p.name AS product_name, pv.id AS version_id,
-                pv.label AS version_label, COALESCE(pv.embedding_model_id, '') AS emb
-         FROM products p
-         JOIN product_versions pv ON pv.product_id = p.id
-         WHERE p.workspace_id = $1
-           AND p.kind = 'product'
-           AND pv.deleted_at IS NULL
-           AND pv.status = 'active'
-           AND ($2 OR pv.id = p.current_version_id)",
-    )
-    .bind(workspace_id)
-    .bind(all_active)
-    .fetch_all(pool)
+    if scoped_lines {
+        check_product_line_thresholds_pg(pool).await?;
+    }
+    let rows = if scoped_lines {
+        sqlx::query(
+            "SELECT p.id AS product_id, p.name AS product_name, pv.id AS version_id,
+                    pv.label AS version_label, COALESCE(pv.embedding_model_id, '') AS emb
+             FROM products p
+             JOIN workspaces w ON w.id = p.workspace_id
+             JOIN product_versions pv ON pv.product_id = p.id
+             WHERE COALESCE(w.kind, 'product_line') = 'product_line'
+               AND p.kind = 'product'
+               AND pv.deleted_at IS NULL
+               AND pv.status = 'active'
+               AND ($1 OR pv.id = p.current_version_id)",
+        )
+        .bind(all_active)
+        .fetch_all(pool)
+    } else {
+        sqlx::query(
+            "SELECT p.id AS product_id, p.name AS product_name, pv.id AS version_id,
+                    pv.label AS version_label, COALESCE(pv.embedding_model_id, '') AS emb
+             FROM products p
+             JOIN product_versions pv ON pv.product_id = p.id
+             WHERE p.workspace_id = $1
+               AND p.kind = 'product'
+               AND pv.deleted_at IS NULL
+               AND pv.status = 'active'
+               AND ($2 OR pv.id = p.current_version_id)",
+        )
+        .bind(workspace_id)
+        .bind(all_active)
+        .fetch_all(pool)
+    }
     .await
     .map_err(|e| SearchError {
         code: "INTERNAL",
@@ -1043,20 +1299,21 @@ pub async fn matching_pg(
             _ => {}
         }
     }
-    let lib_ids: Vec<Uuid> = if req.include_library || requirements.iter().any(|r| r.use_library) {
-        sqlx::query_scalar(
-            "SELECT p.current_version_id FROM products p
+    let lib_ids: Vec<Uuid> =
+        if !scoped_lines && (req.include_library || requirements.iter().any(|r| r.use_library)) {
+            sqlx::query_scalar(
+                "SELECT p.current_version_id FROM products p
              JOIN product_versions pv ON pv.id = p.current_version_id
              WHERE p.workspace_id = $1 AND p.kind = 'library'
                AND pv.status = 'active' AND pv.deleted_at IS NULL",
-        )
-        .bind(workspace_id)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+            )
+            .bind(workspace_id)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
     if !lib_ids.is_empty() {
         let libs = storage::embedding_models_for_versions(pool, &lib_ids)
             .await
@@ -1084,7 +1341,7 @@ pub async fn matching_pg(
     for v in versions {
         by_product.entry(v.product_id).or_default().push(v);
     }
-    if by_product.len() > 50 {
+    if !scoped_lines && by_product.len() > 50 {
         let mut keys: Vec<Uuid> = by_product.keys().copied().collect();
         keys.sort();
         keys.truncate(50);
@@ -1185,7 +1442,144 @@ pub async fn matching_pg(
     }
     Ok(MatchingResponse {
         candidates,
+        clauses: Vec::new(),
         warnings,
+    })
+}
+
+async fn check_product_line_thresholds_pg(pool: &sqlx::PgPool) -> Result<(), SearchError> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT w.retrieval_config
+         FROM workspaces w WHERE COALESCE(w.kind, 'product_line') = 'product_line'",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| SearchError {
+        code: "INTERNAL",
+        message: e.to_string(),
+    })?;
+    let mut seen: Option<(f64, f64)> = None;
+    for r in rows {
+        use sqlx::Row;
+        let cfg: serde_json::Value = r.try_get("retrieval_config").unwrap_or_default();
+        let v = cfg
+            .get("vector_threshold")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.15);
+        let k = cfg
+            .get("keyword_threshold")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.3);
+        match seen {
+            None => seen = Some((v, k)),
+            Some(prev) if prev != (v, k) => {
+                return Err(SearchError {
+                    code: "EMBEDDING_MISMATCH",
+                    message: "product_line retrieval thresholds differ".into(),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+async fn matching_company_pg(
+    pool: &sqlx::PgPool,
+    req: &SearchRequest,
+) -> Result<MatchingResponse, SearchError> {
+    let mut requirements = req.requirements.clone();
+    if requirements.is_empty()
+        && let Some(q) = &req.query
+        && !q.trim().is_empty()
+    {
+        requirements.push(Requirement {
+            id: "q0".into(),
+            text: q.clone(),
+            weight: 1.0,
+            must: false,
+            tag_ids: req.tag_ids.clone(),
+            use_library: false,
+        });
+    }
+    if requirements.is_empty() || requirements.len() > 30 {
+        return Err(SearchError {
+            code: "VALIDATION",
+            message: "requirements must have 1–30 items".into(),
+        });
+    }
+    let version_rows = sqlx::query(
+        "SELECT p.id AS product_id, pv.id AS version_id,
+                COALESCE(pv.embedding_model_id, '') AS emb
+         FROM products p
+         JOIN workspaces w ON w.id = p.workspace_id
+         JOIN product_versions pv ON pv.id = p.current_version_id
+         WHERE w.kind = 'company' AND p.kind = 'library'
+           AND pv.status = 'active' AND pv.deleted_at IS NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| SearchError {
+        code: "INTERNAL",
+        message: e.to_string(),
+    })?;
+    let mut versions = Vec::new();
+    for r in version_rows {
+        use sqlx::Row;
+        versions.push((
+            r.get::<Uuid, _>("product_id"),
+            r.get::<Uuid, _>("version_id"),
+            r.get::<String, _>("emb"),
+        ));
+    }
+    let mut clauses = Vec::new();
+    for r in &requirements {
+        let mut all = Vec::new();
+        for (pid, vid, emb) in &versions {
+            let _ = pid;
+            if let Ok(mut hits) = pg_version_hits(pool, *vid, emb, &r.text, req, &r.tag_ids).await {
+                hits.retain(|h| h.chunk_type != "wiki_page" && h.match_type != "graph");
+                all.append(&mut hits);
+            }
+        }
+        all.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let best = all.first().cloned();
+        let hit = best.as_ref().is_some_and(|h| h.score > 0.0);
+        let alts = all
+            .iter()
+            .skip(1)
+            .map(|h| ClauseAlt {
+                document_id: h.document_id,
+                file_name: h.document_title.clone(),
+                score: h.score,
+            })
+            .collect();
+        clauses.push(ClauseHit {
+            id: r.id.clone(),
+            outcome: if hit { "hit".into() } else { "miss".into() },
+            document_id: best.as_ref().and_then(|h| hit.then_some(h.document_id)),
+            version_id: best.as_ref().and_then(|h| hit.then_some(h.version_id)),
+            file_name: best
+                .as_ref()
+                .and_then(|h| hit.then(|| h.document_title.clone())),
+            score: best.as_ref().and_then(|h| hit.then_some(h.score)),
+            product_id: best.as_ref().and_then(|h| hit.then_some(h.product_id)),
+            hits: if hit {
+                best.clone().into_iter().collect()
+            } else {
+                Vec::new()
+            },
+            alts,
+        });
+    }
+    Ok(MatchingResponse {
+        candidates: Vec::new(),
+        clauses,
+        warnings: Vec::new(),
     })
 }
 
@@ -1282,6 +1676,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "ws".into(),
             slug: "ws".into(),
+            kind: Default::default(),
             retrieval: Default::default(),
         };
         let p = domain::Product {
@@ -1312,6 +1707,7 @@ mod tests {
                 version_scope: "current".into(),
                 product_ids: vec![],
                 workspace_id: None,
+                scope: None,
                 group_by: "none".into(),
                 tender_text: None,
             },
@@ -1339,6 +1735,7 @@ mod tests {
             tag_slugs: vec![],
             start_at: 0,
             end_at: 0,
+            image_object_key: None,
         };
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
@@ -1372,6 +1769,7 @@ mod tests {
             tag_slugs: vec![],
             start_at: 0,
             end_at: 0,
+            image_object_key: None,
         };
         let fused = fuse_by_chunk_id(vec![mk(0.2, "graph"), mk(0.8, "vector")]);
         assert_eq!(fused.len(), 1);
@@ -1397,6 +1795,7 @@ mod tests {
             version_scope: "current".into(),
             product_ids: vec![],
             workspace_id: Some(ws),
+            scope: None,
             group_by: "none".into(),
             tender_text: Some(
                 "Throughput must be 40Gbps.\nMust have ISO9001 certification.".into(),
@@ -1407,6 +1806,91 @@ mod tests {
         let lines =
             split_tender_lines("Throughput must be 40Gbps.\nMust have ISO9001 certification.");
         assert!(lines.len() >= 2, "{lines:?}");
+    }
+
+    #[test]
+    fn company_scope_flattens_library_docs() {
+        let mut s = Store::default();
+        let ws = domain::Workspace {
+            id: Uuid::new_v4(),
+            name: "co".into(),
+            slug: "company".into(),
+            kind: domain::WorkspaceKind::Company,
+            retrieval: Default::default(),
+        };
+        let p = domain::Product {
+            id: Uuid::new_v4(),
+            workspace_id: ws.id,
+            kind: ProductKind::Library,
+            name: "iso".into(),
+            slug: "iso".into(),
+            current_version_id: None,
+            embedding_model_id: "stub-emb".into(),
+        };
+        let mut v = domain::ProductVersion::new(p.id, "current".into());
+        v.status = VersionStatus::Active;
+        let mut d = domain::Document::new(
+            v.id,
+            "ISO".into(),
+            "iso.txt".into(),
+            3,
+            "h".into(),
+            "objects/h".into(),
+        );
+        d.enable_status = "enabled".into();
+        d.markdown = "ISO9001 certificate".into();
+        let ch = domain::Chunk {
+            id: Uuid::new_v4(),
+            document_id: d.id,
+            product_version_id: v.id,
+            chunk_type: "text".into(),
+            content: "ISO9001 certificate".into(),
+            context_header: String::new(),
+            start_at: 0,
+            end_at: 19,
+            parent_chunk_id: None,
+            generated_questions: vec![],
+        };
+        let _ = index::index_one(&mut s, &ch, "ISO", true, true);
+        let mut p = p;
+        p.current_version_id = Some(v.id);
+        s.workspaces.insert(ws.id, ws);
+        s.products.insert(p.id, p);
+        s.versions.insert(v.id, v);
+        s.documents.insert(d.id, d);
+        s.chunks.insert(ch.id, ch);
+        let out = matching(
+            &s,
+            &SearchRequest {
+                mode: "matching".into(),
+                query: None,
+                product_id: None,
+                version_id: None,
+                include_library: false,
+                tag_ids: vec![],
+                match_count: 5,
+                expand_wiki: false,
+                expand_graph: false,
+                requirements: vec![Requirement {
+                    id: "c1".into(),
+                    text: "ISO9001".into(),
+                    weight: 1.0,
+                    must: true,
+                    tag_ids: vec![],
+                    use_library: false,
+                }],
+                version_scope: "current".into(),
+                product_ids: vec![],
+                workspace_id: None,
+                scope: Some("company".into()),
+                group_by: "none".into(),
+                tender_text: None,
+            },
+        )
+        .unwrap();
+        assert!(out.candidates.is_empty());
+        assert_eq!(out.clauses.len(), 1);
+        assert_eq!(out.clauses[0].id, "c1");
     }
 
     #[test]
@@ -1426,6 +1910,7 @@ mod tests {
             version_scope: "current".into(),
             product_ids: vec![],
             workspace_id: Some(Uuid::new_v4()),
+            scope: None,
             group_by: "none".into(),
             tender_text: None,
         };
@@ -1548,6 +2033,7 @@ mod tests {
             version_scope: "current".into(),
             product_ids: vec![],
             workspace_id: Some(seeded.workspace_id),
+            scope: None,
             group_by: "none".into(),
             tender_text: None,
         };

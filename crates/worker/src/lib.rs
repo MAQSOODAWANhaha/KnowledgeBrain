@@ -3,10 +3,10 @@
 pub mod consume;
 
 use domain::{
-    ParseStatus, Store, TYPE_CHUNK_EXTRACT, TYPE_DATATABLE, TYPE_DOCUMENT_PROCESS,
-    TYPE_IMAGE_MULTIMODAL, TYPE_KB_DELETE, TYPE_LIST_DELETE, TYPE_LIST_REPARSE,
-    TYPE_MANUAL_PROCESS, TYPE_POST_PROCESS, TYPE_QUESTION, TYPE_SUMMARY, TYPE_VERSION_CLONE,
-    TYPE_WIKI_FINALIZE, TYPE_WIKI_INGEST, expected_subtasks,
+    ParseStatus, Store, TYPE_BID_CONVERT, TYPE_BID_EXTRACT, TYPE_BID_MATCH, TYPE_CHUNK_EXTRACT,
+    TYPE_DATATABLE, TYPE_DOCUMENT_PROCESS, TYPE_IMAGE_MULTIMODAL, TYPE_KB_DELETE, TYPE_LIST_DELETE,
+    TYPE_LIST_REPARSE, TYPE_MANUAL_PROCESS, TYPE_POST_PROCESS, TYPE_QUESTION, TYPE_SUMMARY,
+    TYPE_VERSION_CLONE, TYPE_WIKI_FINALIZE, TYPE_WIKI_INGEST, expected_subtasks,
 };
 use uuid::Uuid;
 
@@ -87,6 +87,7 @@ pub fn drain(store: &mut Store) {
 
 pub(crate) fn handle(store: &mut Store, job: &domain::Job) -> Result<(), String> {
     match job.task_type.as_str() {
+        TYPE_BID_CONVERT | TYPE_BID_EXTRACT | TYPE_BID_MATCH => Ok(()),
         TYPE_DOCUMENT_PROCESS | TYPE_MANUAL_PROCESS => document_process(store, &job.payload),
         TYPE_POST_PROCESS => post_process(store, &job.payload),
         TYPE_SUMMARY => {
@@ -1104,6 +1105,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "ws".into(),
             slug: "ws".into(),
+            kind: Default::default(),
             retrieval: Default::default(),
         };
         let mut p = Product {

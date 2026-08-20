@@ -7,8 +7,9 @@ mod prompts;
 mod summary;
 
 pub use chat::{
-    WIKI_LLM_MAX_ATTEMPTS, WIKI_LLM_MAX_TOKENS, attempt_superseded, chat_complete,
-    chat_complete_limited, chat_complete_wiki, chat_http_configured, sample_long_content,
+    ChatMessage, WIKI_LLM_MAX_ATTEMPTS, WIKI_LLM_MAX_TOKENS, attempt_superseded, chat_complete,
+    chat_complete_limited, chat_complete_wiki, chat_http_configured, chat_messages,
+    chat_messages_limited, sample_long_content,
 };
 pub use ocr::sanitize_ocr_text;
 pub use pending::{decr_pending, pending_count, pending_key, set_pending};

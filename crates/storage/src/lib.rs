@@ -1,5 +1,6 @@
 //! Object bytes keyed as `objects/{sha256}`. Postgres migrate + workspace seed.
 
+pub mod bid;
 mod persist;
 mod s3;
 
@@ -26,7 +27,7 @@ pub fn write_blob(hash: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(hash);
     std::fs::write(&path, bytes)?;
-    let _ = s3::put_object(&object_key(hash), bytes);
+    s3::put_object(&object_key(hash), bytes).map_err(std::io::Error::other)?;
     Ok(path)
 }
 
@@ -40,10 +41,11 @@ pub async fn write_blob_async(hash: &str, bytes: &[u8]) -> std::io::Result<PathB
 
 /// Sync write that parks the tokio worker instead of deadlocking `reqwest::blocking`.
 pub fn write_blob_off_runtime(hash: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::task::block_in_place(|| write_blob(hash, bytes))
-    } else {
-        write_blob(hash, bytes)
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| write_blob(hash, bytes))
+        }
+        _ => write_blob(hash, bytes),
     }
 }
 

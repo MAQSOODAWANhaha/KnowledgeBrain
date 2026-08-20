@@ -170,6 +170,40 @@ pub struct WikiFinalizeJob {
 #[oxana(key = "wiki", concurrency = Dynamic(8))]
 pub struct WikiQueue;
 
+#[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
+#[oxana(unique_id = "bid:convert:{document_id}", on_conflict = Skip)]
+pub struct BidConvertJob {
+    pub document_id: Uuid,
+    pub task_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
+#[oxana(unique_id = "bid:extract:{run_id}", on_conflict = Skip)]
+pub struct BidExtractJob {
+    pub run_id: Uuid,
+    pub project_id: Uuid,
+    pub document_id: Option<Uuid>,
+    pub task_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
+#[oxana(unique_id = "bid:section-retry:{job_id}", on_conflict = Skip)]
+pub struct BidSectionRetryJob {
+    pub job_id: Uuid,
+    pub project_id: Uuid,
+    pub section_id: Uuid,
+    pub task_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
+#[oxana(unique_id = "bid:match:{project_id}:{debounce_key}", on_conflict = Skip)]
+pub struct BidMatchOxanaJob {
+    pub job_id: Uuid,
+    pub project_id: Uuid,
+    pub debounce_key: String,
+    pub task_type: String,
+}
+
 /// Periodic sweep; oxana cron on `low` every 5 minutes (`HOUSEKEEP_CRON`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, oxana::Job)]
 #[oxana(resurrect = false)]
@@ -228,6 +262,15 @@ pub async fn queue_depths() -> std::collections::HashMap<String, i64> {
 
 pub fn connect() -> Result<oxana::Storage, oxana::OxanaError> {
     oxana::Storage::from_url(redis_url())
+}
+
+pub async fn connect_verified() -> Result<oxana::Storage, String> {
+    let storage = connect().map_err(|error| error.to_string())?;
+    storage
+        .enqueued_count(DefaultQueue)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(storage)
 }
 
 /// Pool build is lazy: `from_url` succeeds even when Redis is down.
@@ -670,6 +713,92 @@ pub async fn enqueue_list_reparse(document_id: Uuid) -> Result<Option<String>, S
 
 pub async fn enqueue_wiki_finalize(product_version_id: Uuid) -> Result<Option<String>, String> {
     enqueue_wiki_finalize_in(product_version_id, WIKI_FINALIZE_DEBOUNCE_SECS).await
+}
+
+pub async fn enqueue_bid_convert(document_id: Uuid) -> Result<Option<String>, String> {
+    let Ok(storage) = connect() else {
+        return Ok(None);
+    };
+    oxana_id(
+        storage
+            .enqueue(
+                DefaultQueue,
+                BidConvertJob {
+                    document_id,
+                    task_type: domain::TYPE_BID_CONVERT.to_string(),
+                },
+            )
+            .await,
+    )
+}
+
+pub async fn enqueue_bid_extract(
+    run_id: Uuid,
+    project_id: Uuid,
+    document_id: Option<Uuid>,
+) -> Result<Option<String>, String> {
+    let Ok(storage) = connect() else {
+        return Ok(None);
+    };
+    oxana_id(
+        storage
+            .enqueue(
+                DefaultQueue,
+                BidExtractJob {
+                    run_id,
+                    project_id,
+                    document_id,
+                    task_type: domain::TYPE_BID_EXTRACT.to_string(),
+                },
+            )
+            .await,
+    )
+}
+
+pub async fn enqueue_bid_section_retry(
+    job_id: Uuid,
+    project_id: Uuid,
+    section_id: Uuid,
+) -> Result<Option<String>, String> {
+    let Ok(storage) = connect() else {
+        return Ok(None);
+    };
+    oxana_id(
+        storage
+            .enqueue(
+                DefaultQueue,
+                BidSectionRetryJob {
+                    job_id,
+                    project_id,
+                    section_id,
+                    task_type: domain::TYPE_BID_SECTION_RETRY.to_string(),
+                },
+            )
+            .await,
+    )
+}
+
+pub async fn enqueue_bid_match(
+    job_id: Uuid,
+    project_id: Uuid,
+    debounce_key: String,
+) -> Result<Option<String>, String> {
+    let Ok(storage) = connect() else {
+        return Ok(None);
+    };
+    oxana_id(
+        storage
+            .enqueue(
+                DefaultQueue,
+                BidMatchOxanaJob {
+                    job_id,
+                    project_id,
+                    debounce_key,
+                    task_type: domain::TYPE_BID_MATCH.to_string(),
+                },
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_wiki_finalize_in(

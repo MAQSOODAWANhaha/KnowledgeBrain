@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 auth = { path = "../auth" }
+bid = { path = "../bid" }
 axum.workspace = true
 chrono.workspace = true
 dotenvy.workspace = true
@@ -20,12 +21,15 @@ runtime = { path = "../runtime" }
 search = { path = "../search" }
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 storage = { path = "../storage" }
 tokio.workspace = true
 tower.workspace = true
+tower-http = { workspace = true, features = ["cors", "fs"] }
 uuid.workspace = true
 
 [dev-dependencies]
+auth = { path = "../auth" }
 http-body-util.workspace = true
 sqlx.workspace = true
 tokio = { workspace = true, features = ["process", "io-util"] }

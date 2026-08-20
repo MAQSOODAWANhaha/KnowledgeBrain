@@ -68,11 +68,25 @@ fn ensure_bucket() -> Result<(), String> {
     if head.is_ok() {
         return Ok(());
     }
-    let _ = signed_send("PUT", &path, &[], true);
+    signed_send("PUT", &path, &[], true)?;
     Ok(())
 }
 
 fn signed_send(method: &str, path: &str, body: &[u8], send_body: bool) -> Result<Vec<u8>, String> {
+    let method = method.to_string();
+    let path = path.to_string();
+    let body = body.to_vec();
+    std::thread::spawn(move || signed_send_blocking(&method, &path, &body, send_body))
+        .join()
+        .map_err(|_| "s3 request thread panicked".to_string())?
+}
+
+fn signed_send_blocking(
+    method: &str,
+    path: &str,
+    body: &[u8],
+    send_body: bool,
+) -> Result<Vec<u8>, String> {
     let host = host_header();
     let now = chrono::Utc::now();
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();

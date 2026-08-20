@@ -149,6 +149,19 @@ pub struct ConvertInput<'a> {
     pub overrides: &'a std::collections::HashMap<String, String>,
 }
 
+/// Convert bytes to markdown without a Document row. Shared by product ingest and bid:convert.
+pub async fn convert_to_markdown(
+    file_name: &str,
+    bytes: Vec<u8>,
+) -> Result<ReadResult, ConvertError> {
+    let ext = file_name
+        .rsplit('.')
+        .next()
+        .unwrap_or("txt")
+        .to_ascii_lowercase();
+    convert("", file_name, &ext, false, bytes, "", file_name).await
+}
+
 /// Route like brain convert: simple in-process; DocReader via gRPC; no reader → error field.
 pub async fn convert(
     engine: &str,

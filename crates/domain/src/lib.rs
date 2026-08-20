@@ -70,27 +70,15 @@ pub fn embedding_model() -> String {
 }
 
 pub fn vlm_base_url() -> String {
-    let v = first_env(&["KNOWLEDGEBRAIN_VLM_BASE_URL", "LLM_BASE_URL"]);
-    if !v.is_empty() {
-        return v;
-    }
-    chat_base_url()
+    first_env(&["KNOWLEDGEBRAIN_VLM_BASE_URL"])
 }
 
 pub fn vlm_api_key() -> String {
-    let v = first_env(&["KNOWLEDGEBRAIN_VLM_API_KEY", "LLM_API_KEY"]);
-    if !v.is_empty() {
-        return v;
-    }
-    chat_api_key()
+    first_env(&["KNOWLEDGEBRAIN_VLM_API_KEY"])
 }
 
 pub fn vlm_model() -> String {
-    let v = first_env(&["KNOWLEDGEBRAIN_VLM_MODEL", "LLM_MODEL"]);
-    if !v.is_empty() {
-        return v;
-    }
-    chat_model()
+    first_env(&["KNOWLEDGEBRAIN_VLM_MODEL"])
 }
 
 pub fn vlm_configured() -> bool {

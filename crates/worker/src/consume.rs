@@ -2,10 +2,11 @@
 
 use async_trait::async_trait;
 use runtime::{
-    DatatableJob, DefaultQueue, DocumentProcessJob, ExtractJob, GraphQueue, HousekeepJob,
-    ImageMultimodalJob, IndexDeleteJob, KbDeleteJob, ListDeleteJob, ListReparseJob, LowQueue,
-    MultimodalQueue, PostProcessJob, PostprocessQueue, QuestionJob, QuestionQueue, SummaryJob,
-    SummaryQueue, SyncQueue, VersionCloneJob, WikiFinalizeJob, WikiIngestJob, WikiQueue,
+    BidConvertJob, BidExtractJob, BidMatchOxanaJob, BidSectionRetryJob, DatatableJob, DefaultQueue,
+    DocumentProcessJob, ExtractJob, GraphQueue, HousekeepJob, ImageMultimodalJob, IndexDeleteJob,
+    KbDeleteJob, ListDeleteJob, ListReparseJob, LowQueue, MultimodalQueue, PostProcessJob,
+    PostprocessQueue, QuestionJob, QuestionQueue, SummaryJob, SummaryQueue, SyncQueue,
+    VersionCloneJob, WikiFinalizeJob, WikiIngestJob, WikiQueue,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -643,6 +644,8 @@ async fn after_index_fanout(
                 "enqueue failed",
             )
             .await;
+            let _ = storage::set_index_ready(pool, document_id, true).await;
+            let _ = bid::maybe_rematch_company_doc(pool, document_id).await;
             if text_count == 0 {
                 let _ = storage::set_parse_status(pool, document_id, "completed", "").await;
             } else {
@@ -659,6 +662,8 @@ async fn after_index_fanout(
         "no images",
     )
     .await;
+    let _ = storage::set_index_ready(pool, document_id, true).await;
+    let _ = bid::maybe_rematch_company_doc(pool, document_id).await;
     if text_count == 0 {
         let _ = storage::set_parse_status(pool, document_id, "completed", "").await;
         let _ = storage::skip_span(
@@ -1425,12 +1430,274 @@ impl oxana::Worker<HousekeepJob> for HousekeepWorker {
             return Ok(());
         }
         let Some(pool) = &self.pool else {
-            return Ok(());
+            return Err(JobErr("postgres not configured".into()));
         };
         storage::housekeep_documents(pool, runtime::HOUSEKEEP_STALE_SECS)
             .await
             .map_err(|e| JobErr(e.to_string()))?;
+        let _ = storage::bid::end_expired_projects(pool).await;
+        if let Ok(ids) =
+            storage::bid::reclaim_stale_converts(pool, runtime::HOUSEKEEP_STALE_SECS).await
+        {
+            for id in ids {
+                let _ = runtime::enqueue_bid_convert(id).await;
+            }
+        }
+        if let Ok(ids) = storage::bid::pending_converts(pool).await {
+            for id in ids {
+                let _ = runtime::enqueue_bid_convert(id).await;
+            }
+        }
+        if let Ok(stale) =
+            storage::bid::reclaim_stale_extracts(pool, runtime::HOUSEKEEP_STALE_SECS).await
+        {
+            for (rid, pid, did) in stale {
+                let _ = runtime::enqueue_bid_extract(rid, pid, did).await;
+            }
+        }
+        if let Ok(rows) =
+            sqlx::query("SELECT DISTINCT project_id FROM bid_extract_runs WHERE status = 'pending'")
+                .fetch_all(pool)
+                .await
+        {
+            use sqlx::Row;
+            for r in rows {
+                let pid: Uuid = r.get("project_id");
+                if let Ok(Some((rid, did))) = storage::bid::next_pending_extract(pool, pid).await {
+                    let _ = runtime::enqueue_bid_extract(rid, pid, did).await;
+                }
+            }
+        }
+        let _ = storage::bid::reclaim_stale_section_retry_jobs(pool, runtime::HOUSEKEEP_STALE_SECS)
+            .await;
+        if let Ok(jobs) = storage::bid::pending_section_retries(pool).await {
+            for (job_id, project_id, section_id) in jobs {
+                let _ = runtime::enqueue_bid_section_retry(job_id, project_id, section_id).await;
+            }
+        }
+        if let Ok(projects) = storage::bid::dirty_match_projects(pool).await {
+            for project_id in projects {
+                let _ = bid::schedule_match(pool, project_id).await;
+            }
+        }
+        let _ = storage::bid::reclaim_stale_match_jobs(pool, runtime::HOUSEKEEP_STALE_SECS).await;
+        if let Ok(jobs) = storage::bid::pending_matches(pool).await {
+            for (jid, pid, key) in jobs {
+                let _ = runtime::enqueue_bid_match(jid, pid, key).await;
+            }
+        }
         Ok(())
+    }
+}
+
+pub struct BidConvertWorker {
+    pool: Option<PgPool>,
+}
+
+impl oxana::FromContext<AppCtx> for BidConvertWorker {
+    fn from_context(ctx: &AppCtx) -> Self {
+        Self {
+            pool: ctx.pool.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl oxana::Worker<BidConvertJob> for BidConvertWorker {
+    type Error = JobErr;
+
+    fn max_retries(&self, _job: &BidConvertJob) -> u32 {
+        3
+    }
+
+    async fn process(
+        &self,
+        job: BidConvertJob,
+        ctx: &oxana::JobContext,
+    ) -> Result<(), Self::Error> {
+        let Some(pool) = &self.pool else {
+            return Err(JobErr("postgres not configured".into()));
+        };
+        if let Err(error) = bid::convert_document(pool, job.document_id).await {
+            if ctx.meta.retries >= 3 {
+                storage::bid::fail_pending_document_conversion(pool, job.document_id, &error)
+                    .await
+                    .map_err(|finish_error| JobErr(finish_error.to_string()))?;
+            }
+            return Err(JobErr(error));
+        }
+        let Some((run_id, project_id)) =
+            storage::bid::ensure_auto_extract_run(pool, job.document_id)
+                .await
+                .map_err(|error| JobErr(error.to_string()))?
+        else {
+            return Ok(());
+        };
+        // The pending run is durable; housekeeping recovers a transient enqueue failure.
+        let _ = runtime::enqueue_bid_extract(run_id, project_id, Some(job.document_id)).await;
+        Ok(())
+    }
+}
+
+pub struct BidSectionRetryWorker {
+    pool: Option<PgPool>,
+}
+
+impl oxana::FromContext<AppCtx> for BidSectionRetryWorker {
+    fn from_context(ctx: &AppCtx) -> Self {
+        Self {
+            pool: ctx.pool.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl oxana::Worker<BidSectionRetryJob> for BidSectionRetryWorker {
+    type Error = JobErr;
+
+    fn max_retries(&self, _job: &BidSectionRetryJob) -> u32 {
+        3
+    }
+
+    async fn process(
+        &self,
+        job: BidSectionRetryJob,
+        ctx: &oxana::JobContext,
+    ) -> Result<(), Self::Error> {
+        let Some(pool) = &self.pool else {
+            return Err(JobErr("postgres not configured".into()));
+        };
+        let Some(token) =
+            storage::bid::claim_section_retry_job(pool, job.job_id, job.project_id, job.section_id)
+                .await
+                .map_err(|error| JobErr(error.to_string()))?
+        else {
+            return Ok(());
+        };
+        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+        let heartbeat_pool = pool.clone();
+        let heartbeat_job_id = job.job_id;
+        let heartbeat = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+            loop {
+                tokio::select! {
+                    _ = &mut stop_rx => break,
+                    _ = interval.tick() => {
+                        match storage::bid::heartbeat_section_retry_job(&heartbeat_pool, heartbeat_job_id, token).await {
+                            Ok(true) => {}
+                            _ => break,
+                        }
+                    }
+                }
+            }
+        });
+        let result = bid::retry_section_claimed(pool, job.project_id, job.section_id, token).await;
+        let _ = stop_tx.send(());
+        let _ = heartbeat.await;
+        match result {
+            Ok(()) => {
+                let finished = storage::bid::finish_section_retry_job(
+                    pool,
+                    job.job_id,
+                    job.project_id,
+                    job.section_id,
+                    token,
+                    "done",
+                    "",
+                )
+                .await
+                .map_err(|error| JobErr(error.to_string()))?;
+                if !finished {
+                    return Err(JobErr("section retry job lease lost".into()));
+                }
+                Ok(())
+            }
+            Err(error) => {
+                let terminal = ctx.meta.retries >= 3;
+                let status = if terminal { "failed" } else { "pending" };
+                let finished = storage::bid::finish_section_retry_job(
+                    pool,
+                    job.job_id,
+                    job.project_id,
+                    job.section_id,
+                    token,
+                    status,
+                    &error,
+                )
+                .await
+                .map_err(|finish_error| JobErr(finish_error.to_string()))?;
+                if !finished {
+                    return Err(JobErr("section retry job lease lost".into()));
+                }
+                Err(JobErr(error))
+            }
+        }
+    }
+}
+
+pub struct BidExtractWorker {
+    pool: Option<PgPool>,
+}
+
+impl oxana::FromContext<AppCtx> for BidExtractWorker {
+    fn from_context(ctx: &AppCtx) -> Self {
+        Self {
+            pool: ctx.pool.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl oxana::Worker<BidExtractJob> for BidExtractWorker {
+    type Error = JobErr;
+
+    async fn process(
+        &self,
+        job: BidExtractJob,
+        _ctx: &oxana::JobContext,
+    ) -> Result<(), Self::Error> {
+        let Some(pool) = &self.pool else {
+            return Err(JobErr("postgres not configured".into()));
+        };
+        bid::extract_run(pool, job.run_id, job.project_id, job.document_id)
+            .await
+            .map_err(JobErr)?;
+        if let Ok(Some((nid, ndoc))) =
+            storage::bid::next_pending_extract(pool, job.project_id).await
+        {
+            let _ = runtime::enqueue_bid_extract(nid, job.project_id, ndoc).await;
+        }
+        Ok(())
+    }
+}
+
+pub struct BidMatchWorker {
+    pool: Option<PgPool>,
+}
+
+impl oxana::FromContext<AppCtx> for BidMatchWorker {
+    fn from_context(ctx: &AppCtx) -> Self {
+        Self {
+            pool: ctx.pool.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl oxana::Worker<BidMatchOxanaJob> for BidMatchWorker {
+    type Error = JobErr;
+
+    async fn process(
+        &self,
+        job: BidMatchOxanaJob,
+        _ctx: &oxana::JobContext,
+    ) -> Result<(), Self::Error> {
+        let Some(pool) = &self.pool else {
+            return Err(JobErr("postgres not configured".into()));
+        };
+        bid::run_match_job(pool, job.job_id, job.project_id)
+            .await
+            .map_err(JobErr)
     }
 }
 
@@ -1546,6 +1813,8 @@ pub async fn process_image_pg(
         .await
         .map_err(|e| e.to_string())?;
     if enrichment::decr_pending(&mut store, document_id) {
+        let _ = storage::set_index_ready(pool, document_id, true).await;
+        let _ = bid::maybe_rematch_company_doc(pool, document_id).await;
         let vid = store
             .documents
             .get(&document_id)
@@ -2472,7 +2741,7 @@ simple_worker!(
 pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
     let stop = std::sync::Arc::new(tokio::sync::Notify::new());
     let stopper = stop.clone();
-    tokio::spawn(async move {
+    let signal_task = tokio::spawn(async move {
         shutdown_signal().await;
         stopper.notify_waiters();
     });
@@ -2487,6 +2756,10 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .runtime(ctx.clone())
             .queue_with_concurrency::<DefaultQueue>(runtime::runtime_concurrency("CORE", 8))
             .worker::<DocumentProcessWorker, DocumentProcessJob>()
+            .worker::<BidConvertWorker, BidConvertJob>()
+            .worker::<BidSectionRetryWorker, BidSectionRetryJob>()
+            .worker::<BidExtractWorker, BidExtractJob>()
+            .worker::<BidMatchWorker, BidMatchOxanaJob>()
             .shutdown_on(shut(stop.clone()))
             .shutdown_timeout(timeout)
             .run()
@@ -2544,8 +2817,6 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
         let storage = runtime::connect().map_err(|e| e.to_string())?;
         storage
             .runtime(ctx.clone())
-            .queue_with_concurrency::<DefaultQueue>(shared_n)
-            .worker::<DocumentProcessWorker, DocumentProcessJob>()
             .queue_with_concurrency::<SummaryQueue>(shared_n)
             .worker::<SummaryWorker, SummaryJob>()
             .queue_with_concurrency::<MultimodalQueue>(shared_n)
@@ -2569,9 +2840,11 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .shutdown_timeout(timeout)
             .run()
     };
-    tokio::try_join!(core, post, enrich, maint, shared, wiki_rt)
+    let result = tokio::try_join!(core, post, enrich, maint, shared, wiki_rt)
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    signal_task.abort();
+    result
 }
 
 async fn shutdown_signal() {
