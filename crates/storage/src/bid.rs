@@ -500,6 +500,20 @@ pub async fn delete_document_for_project(
             "project extraction is running".into(),
         ));
     }
+    let extracting: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM bid_extract_runs
+             WHERE document_id = $1 AND status = 'running'
+        )",
+    )
+    .bind(document_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if extracting {
+        return Err(sqlx::Error::Protocol(
+            "document extraction is running".into(),
+        ));
+    }
     let result = sqlx::query(
         "DELETE FROM bid_documents
          WHERE id = $2 AND project_id = $1 AND parse_status <> 'processing'",
