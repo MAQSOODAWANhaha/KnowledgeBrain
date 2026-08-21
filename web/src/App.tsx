@@ -1,28 +1,16 @@
 import { useEffect, useState } from "react";
 import { Modal } from "@mantine/core";
-import { Dropzone } from "@mantine/dropzone";
-import { notifications } from "@mantine/notifications";
 import {
   ApiError,
-  type Product,
   type Project,
-  type Workspace,
   api,
   setToken,
-  slugify,
   token,
 } from "./api";
+import { Assets } from "./assets/Assets";
 import { Workbench } from "./bid/Workbench";
-import { bidHref, go, parseBidRoute, useHash } from "./hash";
+import { bidHref, go, parseAssetRoute, parseBidRoute, useHash } from "./hash";
 import { Shell } from "./Shell";
-
-function toast(msg: string) {
-  notifications.show({ message: msg, color: "iris" });
-}
-
-function parseStatus(s: string | object): string {
-  return typeof s === "string" ? s : Object.keys(s as object)[0] ?? "";
-}
 
 function Login() {
   const [email, setEmail] = useState("");
@@ -144,7 +132,7 @@ function Bids({ email }: { email: string }) {
               <div className="side-sec">项目</div>
               <nav className="sidenav">
                 {rows.map((p) => (
-                  <a key={p.id} href={`#/bids/${p.id}`}>
+                  <a key={p.id} href={`#${bidHref(p.id, "files")}`}>
                     <svg viewBox="0 0 24 24">
                       <rect x="3" y="4" width="18" height="16" rx="2" />
                       <path d="M8 4V3h8v1M8 10h8M8 14h5" />
@@ -199,7 +187,7 @@ function Bids({ email }: { email: string }) {
               </thead>
               <tbody>
                 {shown.map((p) => (
-                  <tr key={p.id} onClick={() => go(`/bids/${p.id}`)} style={{ cursor: "pointer" }}>
+                  <tr key={p.id} onClick={() => go(bidHref(p.id, "files"))} style={{ cursor: "pointer" }}>
                     <td>
                       <div className="name">{p.title}</div>
                     </td>
@@ -271,326 +259,6 @@ function Bids({ email }: { email: string }) {
   );
 }
 
-function Library({ email, folderId }: { email: string; folderId: string | null }) {
-  const [err, setErr] = useState("");
-  const [products, setProducts] = useState<Product[]>([]);
-  const [lines, setLines] = useState<Workspace[]>([]);
-  const [docs, setDocs] = useState<Record<string, { file_name: string; index_ready: boolean; parse_status: string | object }[]>>({});
-  async function reload() {
-    try {
-      const all = await api.workspaces();
-      setLines(all.filter((w) => w.kind !== "company"));
-      let ws = all.find((w) => w.kind === "company" || w.slug === "company");
-      if (!ws) ws = await api.createWorkspace({ name: "公司资料", slug: "company", kind: "company" });
-      let ps = await api.products(ws.id);
-      if (ps.length === 0) {
-        await Promise.all(["资质证照", "体系认证", "业绩案例", "服务能力"].map((name) => api.createProduct(ws.id, { name, slug: slugify(name), kind: "library" })));
-        ps = await api.products(ws.id);
-      }
-      setProducts(ps);
-      if (!folderId && ps[0]) {
-        const prefer = ps.find((p) => p.name === "资质证照") ?? ps[0];
-        go(`/library/${prefer.id}`);
-      }
-      const entries = await Promise.all(
-        ps.map(async (p) => {
-          let vid = p.current_version_id;
-          if (!vid) {
-            try {
-              vid = (await api.createVersion(p.id, "current")).id;
-            } catch {
-              vid = null;
-            }
-          }
-          const list = vid ? await api.documents(p.id, vid).catch(() => []) : [];
-          return [p.id, list] as const;
-        }),
-      );
-      setDocs(Object.fromEntries(entries));
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "加载失败");
-    }
-  }
-  useEffect(() => {
-    void reload();
-  }, [folderId]);
-  const folder = products.find((p) => p.id === folderId) ?? products[0] ?? null;
-  const files = folder ? (docs[folder.id] ?? []) : [];
-  return (
-    <Shell
-      root="assets"
-      email={email}
-      crumbs={`知识资产 / ${folder?.name ?? "公司资料"}`}
-      title={folder?.name ?? "公司资料"}
-      extra={
-        <button className="btn pri" type="button" onClick={() => document.getElementById("lib-drop")?.click()}>
-          上传材料
-        </button>
-      }
-      tree={
-        <>
-          <div className="side-sec">公司资料</div>
-          <nav className="sidenav">
-            {products.map((p) => (
-              <a key={p.id} className={p.id === folder?.id ? "on" : undefined} href={`#/library/${p.id}`}>
-                <svg viewBox="0 0 24 24">
-                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-                </svg>
-                <em>{p.name}</em>
-                <span>{(docs[p.id] ?? []).length || undefined}</span>
-              </a>
-            ))}
-          </nav>
-          <div className="side-sec">产品线</div>
-          <nav className="sidenav">
-            {lines.map((l) => (
-              <a key={l.id} href={`#/products/${l.id}`}>
-                <svg viewBox="0 0 24 24">
-                  <path d="M3 7.5 12 3l9 4.5v9L12 21l-9-4.5z" />
-                  <path d="M12 12 3 7.5M12 12v9M12 12l9-4.5" />
-                </svg>
-                <em>{l.name}</em>
-              </a>
-            ))}
-          </nav>
-        </>
-      }
-    >
-      <div className="wrap stack">
-        {err && (
-          <div className="banner bad">
-            {err}{" "}
-            <button className="btn sm" type="button" onClick={() => void reload()}>
-              重试
-            </button>
-          </div>
-        )}
-        {!folder ? (
-          <div className="card">加载中…</div>
-        ) : (
-          <>
-            <Dropzone
-              id="lib-drop"
-              className="drop"
-              multiple
-              onDrop={(dropped) => {
-                const vid = folder.current_version_id;
-                if (!vid) return;
-                void Promise.all(dropped.map((f) => api.ingest(folder.id, vid, f))).then(() => {
-                  toast("已入库，解析完成后可检索");
-                  void reload();
-                });
-              }}
-            >
-              <b>把证、案例、服务扫描件拖到这里</b>
-              只进公司资料库。可检索之后才会被商务条款打到。这里不是产品。
-            </Dropzone>
-            <div className="card pad-0">
-              {files.length === 0 ? (
-                <div className="empty">
-                  <h2>这个夹还是空的</h2>
-                  <p className="note">拖入扫描件，等可检索后再回评估里确认。</p>
-                </div>
-              ) : (
-                files.map((d) => (
-                  <div key={d.file_name} className="item" style={{ gridTemplateColumns: "1fr auto" }}>
-                    <div>
-                      <div className="name">{d.file_name}</div>
-                      <div className="desc">{folder.name}</div>
-                    </div>
-                    {d.index_ready ? (
-                      <span className="chip pine">
-                        <i className="dot" />
-                        可检索
-                      </span>
-                    ) : (
-                      <span className="chip amber">
-                        <i className="dot" />
-                        {parseStatus(d.parse_status) || "解析中"}
-                      </span>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-          </>
-        )}
-      </div>
-    </Shell>
-  );
-}
-
-function Products({ email, lineId }: { email: string; lineId: string | null }) {
-  const [lines, setLines] = useState<Workspace[]>([]);
-  const [folders, setFolders] = useState<Product[]>([]);
-  const [name, setName] = useState("");
-  const [lineName, setLineName] = useState("");
-  const [catalog, setCatalog] = useState<{ line: Workspace; products: Product[] }[]>([]);
-  const [newOpen, setNewOpen] = useState<"line" | "model" | null>(null);
-  async function reload() {
-    const all = await api.workspaces();
-    const ls = all.filter((w) => w.kind !== "company");
-    setLines(ls);
-    const company = all.find((w) => w.kind === "company");
-    if (company) setFolders(await api.products(company.id).catch(() => []));
-    if (!lineId && ls[0]) go(`/products/${ls[0].id}`);
-    const rows = await Promise.all(ls.map(async (line) => ({ line, products: (await api.products(line.id)).filter((p) => p.kind !== "library") })));
-    setCatalog(rows);
-  }
-  useEffect(() => {
-    void reload();
-  }, [lineId]);
-  const line = lines.find((l) => l.id === lineId) ?? lines[0] ?? null;
-  const products = catalog.find((c) => c.line.id === line?.id)?.products ?? [];
-  return (
-    <Shell
-      root="assets"
-      email={email}
-      crumbs={`知识资产 / ${line?.name ?? "产品线"}`}
-      title={line?.name ?? "产品线"}
-      extra={
-        <>
-          <button className="btn" type="button" onClick={() => setNewOpen("line")}>
-            建线
-          </button>
-          <button className="btn pri" type="button" onClick={() => setNewOpen("model")}>
-            新型号
-          </button>
-        </>
-      }
-      tree={
-        <>
-          <div className="side-sec">公司资料</div>
-          <nav className="sidenav">
-            {folders.map((p) => (
-              <a key={p.id} href={`#/library/${p.id}`}>
-                <svg viewBox="0 0 24 24">
-                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-                </svg>
-                <em>{p.name}</em>
-              </a>
-            ))}
-          </nav>
-          <div className="side-sec">产品线</div>
-          <nav className="sidenav">
-            {lines.map((l) => (
-              <a key={l.id} className={l.id === line?.id ? "on" : undefined} href={`#/products/${l.id}`}>
-                <svg viewBox="0 0 24 24">
-                  <path d="M3 7.5 12 3l9 4.5v9L12 21l-9-4.5z" />
-                  <path d="M12 12 3 7.5M12 12v9M12 12l9-4.5" />
-                </svg>
-                <em>{l.name}</em>
-                <span>{catalog.find((c) => c.line.id === l.id)?.products.length || undefined}</span>
-              </a>
-            ))}
-          </nav>
-        </>
-      }
-    >
-      <div className="wrap stack">
-        <div className="card pad-0">
-          {products.length === 0 ? (
-            <div className="empty">
-              <h2>还没有型号</h2>
-              <p className="note">建一个型号，再把手册拖上去。招标文件不要放这里。</p>
-            </div>
-          ) : (
-            <table className="grid">
-              <thead>
-                <tr>
-                  <th>型号</th>
-                  <th>手册</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {products.map((p) => (
-                  <tr key={p.id}>
-                    <td>
-                      <div className="name">{p.name}</div>
-                    </td>
-                    <td>
-                      <Dropzone
-                        className="drop"
-                        style={{ padding: 10 }}
-                        multiple={false}
-                        onDrop={(files) => {
-                          const vid = p.current_version_id;
-                          const f = files[0];
-                          if (!f || !vid) return;
-                          void api.ingest(p.id, vid, f).then(() => toast("手册已上传"));
-                        }}
-                      >
-                        上传手册
-                      </Dropzone>
-                    </td>
-                    <td />
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-        <div className="drop">
-          <b>手册进型号，不进资料</b>
-          招标文件不要放这里。
-        </div>
-      </div>
-      <Modal opened={newOpen === "line"} onClose={() => setNewOpen(null)} title="建线" radius={16}>
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            if (!lineName.trim()) return;
-            const created = await api.createWorkspace({ name: lineName.trim(), slug: slugify(lineName), kind: "product_line" });
-            setLineName("");
-            setNewOpen(null);
-            go(`/products/${created.id}`);
-          }}
-        >
-          <label className="fld">产品线名称</label>
-          <input className="inp" value={lineName} onChange={(e) => setLineName(e.target.value)} />
-          <div className="row" style={{ justifyContent: "flex-end", marginTop: 20 }}>
-            <button className="btn" type="button" onClick={() => setNewOpen(null)}>
-              取消
-            </button>
-            <button className="btn pri" type="submit">
-              建立
-            </button>
-          </div>
-        </form>
-      </Modal>
-      <Modal opened={newOpen === "model"} onClose={() => setNewOpen(null)} title="新型号" radius={16}>
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            if (!name.trim()) return;
-            let current = line;
-            if (!current) {
-              current = await api.createWorkspace({ name: name.trim(), slug: slugify(name), kind: "product_line" });
-            }
-            await api.createProduct(current.id, { name: name.trim(), slug: slugify(name), kind: "product" });
-            setName("");
-            setNewOpen(null);
-            toast("已建型号");
-            void reload();
-          }}
-        >
-          <label className="fld">型号名称</label>
-          <input className="inp" value={name} onChange={(e) => setName(e.target.value)} />
-          <div className="row" style={{ justifyContent: "flex-end", marginTop: 20 }}>
-            <button className="btn" type="button" onClick={() => setNewOpen(null)}>
-              取消
-            </button>
-            <button className="btn pri" type="submit">
-              建立
-            </button>
-          </div>
-        </form>
-      </Modal>
-    </Shell>
-  );
-}
-
 export function App() {
   const path = useHash();
   const [email, setEmail] = useState("");
@@ -630,10 +298,8 @@ export function App() {
     );
   }
   if (path === "/login") return <Login />;
-  const lib = path.match(/^\/library(?:\/([^/]+))?$/);
-  if (lib) return <Library email={email} folderId={lib[1] ?? null} />;
-  const prod = path.match(/^\/products(?:\/([^/]+))?$/);
-  if (prod) return <Products email={email} lineId={prod[1] ?? null} />;
+  const asset = parseAssetRoute(path);
+  if (asset) return <Assets email={email} route={asset} />;
   if (parseBidRoute(path)) return <Workbench email={email} />;
   return <Bids email={email} />;
 }

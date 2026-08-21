@@ -85,6 +85,19 @@ impl ExtractionInput {
             scope: ExtractionScope::Document,
         }
     }
+
+    pub fn section(document_id: Uuid, section: &ExtractedSection) -> Self {
+        Self {
+            document_id,
+            markdown: section.body.clone(),
+            scope: ExtractionScope::Section {
+                section_key: section.key.clone(),
+                heading_path: section.heading_path.clone(),
+                hint_family: section.hint_family.clone(),
+                body: section.body.clone(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +169,8 @@ pub struct ExtractionDiagnostics {
     pub fallback_reasons: Vec<String>,
     pub failed_spans: Vec<String>,
     pub coverage: CoverageReport,
+    #[serde(default)]
+    pub partial_failure: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

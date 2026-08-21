@@ -72,6 +72,9 @@ a {
   grid-template-rows: 56px minmax(0, 1fr);
   grid-template-columns: 260px minmax(0, 1fr);
 }
+.app.no-side {
+  grid-template-columns: minmax(0, 1fr);
+}
 
 .pnav {
   grid-column: 1 / -1;
@@ -80,6 +83,9 @@ a {
   border-bottom: 1px solid var(--line);
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr);
+}
+.app.no-side .pnav {
+  grid-template-columns: 220px minmax(0, 1fr);
 }
 
 .pnav-left {
@@ -295,10 +301,11 @@ a {
 }
 
 .side-sec {
-  margin: 14px 6px 4px;
+  margin: 8px 6px 6px;
   padding: 0 8px;
-  font-size: 12px;
-  font-weight: 550;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
   color: var(--faint);
 }
 
@@ -310,13 +317,13 @@ a {
 
 .sidenav a,
 .sidenav button {
-  height: 32px;
-  padding: 0 10px;
+  min-height: 34px;
+  padding: 6px 10px;
   border-radius: 8px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-size: 13.5px;
+  gap: 8px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--ink);
   background: none;
@@ -380,6 +387,25 @@ a {
 .sidenav button.flt svg {
   stroke: var(--iris-ink);
 }
+.sidenav.tree .tree-kids {
+  margin: 2px 0 4px 17px;
+  padding: 0 0 2px 10px;
+  border-left: 1px solid var(--line);
+}
+.sidenav a.sub {
+  padding-left: 8px;
+  min-height: 32px;
+  font-size: 12.5px;
+}
+.sidenav span.pine {
+  color: var(--pine);
+}
+.sidenav span.amber {
+  color: var(--amber);
+}
+.sidenav span.rose {
+  color: var(--rose);
+}
 
 .maincol {
   min-width: 0;
@@ -405,6 +431,24 @@ a {
   margin: 0 0 8px;
   font-weight: 550;
   line-height: 20px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.crumbs a {
+  color: var(--crumb);
+}
+.crumbs a:hover {
+  color: var(--ink);
+}
+.crumbs i {
+  font-style: normal;
+  color: var(--faint);
+  font-weight: 500;
+}
+.crumbs span {
+  color: var(--ink);
 }
 
 .h1 {
@@ -562,6 +606,21 @@ button.chip {
 .card.pad-0 {
   padding: 0;
   overflow: hidden;
+}
+
+.file-list {
+  overflow: visible;
+}
+
+.file-row {
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: start;
+  scroll-margin-top: 16px;
+}
+
+.file-row .name {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .inner {
@@ -783,6 +842,104 @@ table.grid tr:hover td {
 .steps .done i {
   background: var(--pine-soft);
   color: var(--pine);
+}
+
+.work-nav {
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 24px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 52px;
+}
+.work-nav .wizard {
+  flex: 1;
+  margin: 0;
+  min-width: 0;
+}
+.work-nav .wizard-nav {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0;
+}
+.work-nav .wizard-nav > span {
+  display: none;
+}
+
+.wizard {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  margin-top: 10px;
+}
+.wizard a:not(:last-child)::after {
+  content: "";
+  width: 18px;
+  height: 1px;
+  background: var(--line);
+  margin: 0 2px;
+}
+.wizard a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--muted);
+}
+.wizard a.on {
+  background: var(--iris-soft);
+  color: var(--iris-ink);
+  font-weight: 700;
+}
+.wizard a.done {
+  color: var(--pine);
+}
+.wizard a.fail {
+  background: var(--rose-soft);
+  color: var(--rose);
+}
+.wizard i {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+  background: var(--fill);
+  color: var(--muted);
+}
+.wizard a.on i {
+  background: var(--iris);
+  color: #fff;
+}
+.wizard a.done i {
+  background: var(--pine-soft);
+  color: var(--pine);
+}
+.wizard a.fail i {
+  background: var(--rose);
+  color: #fff;
+}
+.wizard em {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 650;
+}
+.wizard-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
 }
 
 .drop b {
@@ -1122,6 +1279,92 @@ table.grid tr:hover td {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px 18px;
+}
+.tree-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 22px;
+  align-items: center;
+  min-height: 30px;
+  padding-right: 4px;
+  padding-left: calc(4px + var(--d, 0) * 12px);
+  border-radius: 8px;
+}
+.tree-row.on {
+  background: var(--fill);
+}
+.tree-row:hover {
+  background: var(--iris-tint);
+}
+.tree-row a {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 30px;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.tree-row.on a {
+  font-weight: 600;
+}
+.tree-row em {
+  font-style: normal;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-row span {
+  color: var(--faint);
+  font-size: 12px;
+  font-weight: 550;
+  flex-shrink: 0;
+}
+.tree-chev,
+.tree-add {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+.tree-chev svg {
+  width: 12px;
+  height: 12px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.tree-chev.open svg {
+  transform: rotate(90deg);
+}
+.tree-add {
+  opacity: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+.tree-row:hover .tree-add,
+.tree-row.on .tree-add {
+  opacity: 1;
+}
+.tree-leaf {
+  width: 18px;
+  height: 18px;
 }
 
 @media (max-width: 1100px) {

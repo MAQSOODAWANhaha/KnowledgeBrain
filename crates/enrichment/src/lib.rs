@@ -490,23 +490,17 @@ fn drop_prior_image_chunks(store: &mut Store, document_id: Uuid, image_key: &str
     }
 }
 
-/// OCR + caption. VLM URL configured: HTTP must succeed. Else scanned-PDF stub.
+/// OCR + caption. Unconfigured or stub VLM is an error, never fake text.
 pub fn describe_image(
     image_key: &str,
     image_source_type: &str,
 ) -> Result<(String, String), String> {
+    if !vlm_configured() {
+        return Err("vlm not configured".into());
+    }
     let ocr_p = ocr_prompt(image_source_type);
     let cap_p = caption_prompt("English");
-    if vlm_configured() {
-        return vlm_describe(image_key, ocr_p, &cap_p);
-    }
-    let ocr = if ocr_p.contains("scanned PDF") {
-        format!("[ocr-scanned-pdf:{image_key}]")
-    } else {
-        format!("[ocr:{image_key}]")
-    };
-    let caption = format!("[caption:{image_key}] ({cap_p})");
-    Ok((ocr, caption))
+    vlm_describe(image_key, ocr_p, &cap_p)
 }
 
 pub fn vlm_configured() -> bool {
@@ -625,7 +619,14 @@ mod tests {
     }
 
     #[test]
-    fn scanned_pdf_ocr_chunk_uses_dedicated_prompt() {
+    fn scanned_pdf_ocr_uses_dedicated_prompt() {
+        assert!(ocr_prompt("scanned_pdf").contains("scanned PDF"));
+        assert!(!ocr_prompt("").contains("scanned PDF"));
+    }
+
+    #[test]
+    fn describe_image_without_vlm_is_error() {
+        assert!(describe_image("images/x.png", "").is_err());
         let mut s = Store::default();
         let mut v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         v.enable_multimodel = true;
@@ -643,21 +644,10 @@ mod tests {
         let did = doc.id;
         s.documents.insert(did, doc);
         set_pending(&mut s, did, 1);
-        process_image_with(&mut s, did, "images/p1.jpg", "scanned_pdf", true, true)
-            .expect("stub vlm");
-        let ocr = s
-            .chunks
-            .values()
-            .find(|c| c.chunk_type == "image_ocr")
-            .expect("ocr chunk");
-        assert!(ocr.content.contains("ocr-scanned-pdf"), "{}", ocr.content);
-        let (plain, _) = describe_image("images/x.png", "").expect("stub");
-        assert!(plain.contains("[ocr:"), "{plain}");
         assert!(
-            s.queue
-                .iter()
-                .any(|j| j.task_type == domain::TYPE_POST_PROCESS)
+            process_image_with(&mut s, did, "images/p1.jpg", "scanned_pdf", true, true).is_err()
         );
+        assert!(!s.chunks.values().any(|c| c.chunk_type == "image_ocr"));
     }
 
     #[test]
@@ -703,14 +693,7 @@ mod tests {
             },
         );
         set_pending(&mut s, did, 1);
-        process_image_with(&mut s, did, "images/p1.jpg", "", true, true).unwrap();
-        let ocr = s
-            .chunks
-            .values()
-            .find(|c| c.chunk_type == "image_ocr")
-            .expect("ocr");
-        assert_eq!(ocr.parent_chunk_id, Some(second));
-        assert_eq!(ocr.context_header, "images/p1.jpg");
+        assert_eq!(parent_text_chunk(&s, did, "images/p1.jpg"), Some(second));
     }
 
     #[test]

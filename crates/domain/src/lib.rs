@@ -82,7 +82,13 @@ pub fn vlm_model() -> String {
 }
 
 pub fn vlm_configured() -> bool {
-    !vlm_base_url().is_empty()
+    vlm_endpoint_ready(&vlm_base_url(), &vlm_model())
+}
+
+/// Base URL plus a real vision model. `stub-vlm` is not configured.
+pub fn vlm_endpoint_ready(base_url: &str, model: &str) -> bool {
+    let model = model.trim();
+    !base_url.trim().is_empty() && !model.is_empty() && model != "stub-vlm"
 }
 
 pub fn is_valid_file_type(name: &str) -> bool {
@@ -263,6 +269,14 @@ mod tests {
         }
         assert!(manifest.contains("edition = \"2024\""));
         assert!(manifest.contains("rust-version = \"1.97\""));
+    }
+
+    #[test]
+    fn vlm_ready_rejects_stub_and_empty() {
+        assert!(!super::vlm_endpoint_ready("", "qwen-vl"));
+        assert!(!super::vlm_endpoint_ready("http://vlm", ""));
+        assert!(!super::vlm_endpoint_ready("http://vlm", "stub-vlm"));
+        assert!(super::vlm_endpoint_ready("http://vlm", "qwen-vl"));
     }
 
     #[test]

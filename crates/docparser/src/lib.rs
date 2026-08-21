@@ -150,6 +150,7 @@ pub struct ConvertInput<'a> {
 }
 
 /// Convert bytes to markdown without a Document row. Shared by product ingest and bid:convert.
+/// Engine comes from the product default table (office→anydoc, pdf→builtin).
 pub async fn convert_to_markdown(
     file_name: &str,
     bytes: Vec<u8>,
@@ -159,7 +160,8 @@ pub async fn convert_to_markdown(
         .next()
         .unwrap_or("txt")
         .to_ascii_lowercase();
-    convert("", file_name, &ext, false, bytes, "", file_name).await
+    let engine = domain::parser_engine_for(&serde_json::json!({}), None, &ext);
+    convert(&engine, file_name, &ext, false, bytes, "", file_name).await
 }
 
 /// Route like brain convert: simple in-process; DocReader via gRPC; no reader → error field.
@@ -221,7 +223,30 @@ pub async fn convert_with(input: ConvertInput<'_>) -> Result<ReadResult, Convert
     }
 }
 
-/// Brain AnydocReader: in-process convert, scanned PDF → builtin DocReader.
+fn is_office_file_type(file_type: &str) -> bool {
+    matches!(
+        file_type
+            .trim_start_matches('.')
+            .to_ascii_lowercase()
+            .as_str(),
+        "doc"
+            | "docx"
+            | "docm"
+            | "xls"
+            | "xlsx"
+            | "xlsm"
+            | "ppt"
+            | "pptx"
+            | "pptm"
+            | "odt"
+            | "ods"
+            | "odp"
+            | "rtf"
+    )
+}
+
+/// Brain AnydocReader: in-process convert. Keep a successful anydoc result.
+/// Fallback builtin only on scanned PDF or office convert error/empty.
 async fn convert_anydoc(input: ConvertInput<'_>) -> Result<ReadResult, ConvertError> {
     let extract_images = anydoc::extract_images_enabled(input.overrides);
     let result = anydoc::convert(
@@ -231,45 +256,66 @@ async fn convert_anydoc(input: ConvertInput<'_>) -> Result<ReadResult, ConvertEr
         input.is_url,
         extract_images,
     );
-    let scanned =
-        result.error.contains("OCR is required") || result.error.contains("no extractable text");
-    if scanned && input.file_type.eq_ignore_ascii_case("pdf") && grpc::reader_addr().is_some() {
-        let mut fallback = grpc::read(ConvertRequest {
-            file_content: input.bytes,
-            file_name: input.file_name.to_string(),
-            file_type: input.file_type.to_string(),
-            url: input.url.to_string(),
-            title: input.title.to_string(),
-            parser_engine: "builtin".into(),
-            parser_engine_overrides: input.overrides.clone(),
-        })
-        .await?;
-        if fallback.metadata.get("parser").map(String::as_str) != Some("builtin") {
-            fallback.metadata.insert("parser".into(), "builtin".into());
-        }
-        fallback
-            .metadata
-            .insert("anydoc_fallback".into(), "scanned_pdf".into());
-        if fallback
+    if result.error.is_empty() && !result.markdown.trim().is_empty() {
+        return Ok(result);
+    }
+    let pdf = input.file_type.eq_ignore_ascii_case("pdf");
+    let scanned = pdf
+        && (result.error.contains("OCR is required")
+            || result.error.contains("no extractable text")
+            || result.markdown.trim().is_empty());
+    let reason = if scanned {
+        "scanned_pdf"
+    } else if is_office_file_type(input.file_type) {
+        "office_error"
+    } else {
+        return Ok(result);
+    };
+    if grpc::reader_addr().is_none() {
+        return Ok(result);
+    }
+    fallback_builtin(input, reason).await
+}
+
+async fn fallback_builtin(
+    input: ConvertInput<'_>,
+    reason: &str,
+) -> Result<ReadResult, ConvertError> {
+    let mut fallback = grpc::read(ConvertRequest {
+        file_content: input.bytes,
+        file_name: input.file_name.to_string(),
+        file_type: input.file_type.to_string(),
+        url: input.url.to_string(),
+        title: input.title.to_string(),
+        parser_engine: "builtin".into(),
+        parser_engine_overrides: input.overrides.clone(),
+    })
+    .await?;
+    if fallback.metadata.get("parser").map(String::as_str) != Some("builtin") {
+        fallback.metadata.insert("parser".into(), "builtin".into());
+    }
+    fallback
+        .metadata
+        .insert("anydoc_fallback".into(), reason.into());
+    if reason == "scanned_pdf"
+        && fallback
             .metadata
             .get("image_source_type")
             .map(String::is_empty)
             .unwrap_or(true)
-        {
-            fallback
-                .metadata
-                .insert("image_source_type".into(), "scanned_pdf".into());
-        }
-        if fallback.error.is_empty() {
-            return Ok(fallback);
-        }
-        fallback.error = format!(
-            "anydoc scanned-PDF fallback failed for {:?}: {}",
-            input.file_name, fallback.error
-        );
+    {
+        fallback
+            .metadata
+            .insert("image_source_type".into(), "scanned_pdf".into());
+    }
+    if fallback.error.is_empty() {
         return Ok(fallback);
     }
-    Ok(result)
+    fallback.error = format!(
+        "anydoc {reason} fallback failed for {:?}: {}",
+        input.file_name, fallback.error
+    );
+    Ok(fallback)
 }
 
 fn json_to_md(bytes: &[u8]) -> String {
@@ -379,6 +425,14 @@ mod tests {
     use tonic::{Request, Response, Status};
 
     #[test]
+    fn office_types_are_distinct_from_pdf() {
+        assert!(is_office_file_type("docx"));
+        assert!(is_office_file_type(".XLSX"));
+        assert!(!is_office_file_type("pdf"));
+        assert!(!is_office_file_type("md"));
+    }
+
+    #[test]
     fn builtin_never_falls_back_to_simple() {
         assert_eq!(resolve_engine("builtin", "md", false), "docreader");
         assert_eq!(resolve_engine("", "md", false), "simple");
@@ -459,6 +513,10 @@ mod tests {
                         markdown_content: "# hi\n\nbody".into(),
                         error: String::new(),
                         image_count: 1,
+                        metadata: std::collections::HashMap::from([(
+                            "image_source_type".into(),
+                            "scanned_pdf".into(),
+                        )]),
                         ..Default::default()
                     },
                 )),
@@ -497,6 +555,10 @@ mod tests {
         async fn read(&self, _req: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
             Ok(Response::new(ReadResponse {
                 markdown_content: "unary md".into(),
+                metadata: std::collections::HashMap::from([(
+                    "image_source_type".into(),
+                    "scanned_pdf".into(),
+                )]),
                 ..Default::default()
             }))
         }
@@ -760,5 +822,75 @@ mod tests {
             .unwrap();
         unsafe { std::env::remove_var("DOCREADER_ADDR") };
         assert_eq!(r.markdown, "unary md");
+        assert_eq!(
+            r.metadata.get("image_source_type").map(String::as_str),
+            Some("scanned_pdf")
+        );
+    }
+
+    #[tokio::test]
+    async fn readstream_forwards_docreader_metadata() {
+        let addr = serve(StreamSvc).await;
+        let _g = ADDR_LOCK.lock().await;
+        unsafe { std::env::set_var("DOCREADER_ADDR", &addr) };
+        let r = convert("builtin", "a.pdf", "pdf", false, b"%PDF".to_vec(), "", "")
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var("DOCREADER_ADDR") };
+        assert_eq!(
+            r.metadata.get("image_source_type").map(String::as_str),
+            Some("scanned_pdf")
+        );
+        assert_eq!(r.markdown, "# hi\n\nbody");
+    }
+
+    #[tokio::test]
+    async fn anydoc_office_error_falls_back_to_builtin() {
+        let addr = serve(UnaryOnly).await;
+        let _g = ADDR_LOCK.lock().await;
+        unsafe { std::env::set_var("DOCREADER_ADDR", &addr) };
+        let r = convert(
+            "anydoc",
+            "a.docx",
+            "docx",
+            false,
+            b"not-a-docx".to_vec(),
+            "",
+            "",
+        )
+        .await
+        .unwrap();
+        unsafe { std::env::remove_var("DOCREADER_ADDR") };
+        assert_eq!(r.markdown, "unary md");
+        assert_eq!(
+            r.metadata.get("anydoc_fallback").map(String::as_str),
+            Some("office_error")
+        );
+    }
+
+    #[tokio::test]
+    async fn anydoc_success_does_not_call_builtin() {
+        let addr = serve(UnaryOnly).await;
+        let _g = ADDR_LOCK.lock().await;
+        unsafe { std::env::set_var("DOCREADER_ADDR", &addr) };
+        let r = convert(
+            "anydoc",
+            "tender.docx",
+            "docx",
+            false,
+            anydoc::tests::sample_docx_with_table(),
+            "",
+            "",
+        )
+        .await
+        .unwrap();
+        unsafe { std::env::remove_var("DOCREADER_ADDR") };
+        assert!(!r.metadata.contains_key("anydoc_fallback"));
+        assert_eq!(r.metadata.get("parser").map(String::as_str), Some("anydoc"));
+        assert!(
+            r.markdown.contains('|') && r.markdown.contains("hot-swap"),
+            "{}",
+            r.markdown
+        );
     }
 }

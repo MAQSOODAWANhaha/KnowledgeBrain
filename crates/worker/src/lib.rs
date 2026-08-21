@@ -327,52 +327,20 @@ fn document_process(store: &mut Store, payload: &serde_json::Value) -> Result<()
             .next()
             .unwrap_or("txt")
             .to_string();
-        let configured = store
-            .effective_version(doc_id)
-            .map(|v| domain::engine_for_file(&v.parser_engine_rules, &ext))
-            .unwrap_or_default();
-        let engine = docparser::resolve_engine(&configured, &ext, false);
-        if engine == "docreader" && docparser::reader_addr().is_none() {
+        // In-memory drain is HTTP/unit-test only. Office/PDF convert lives in consume.rs.
+        if !domain::is_simple_format(&ext)
+            && !domain::is_image_type(&doc.file_name)
+            && !domain::is_audio_type(&doc.file_name)
+        {
             obs::finish(store, doc_id, obs::SPAN_DOCREADER, obs::STATUS_FAILED);
             obs::cascade_cancel(store, doc_id, doc.attempt, obs::SPAN_DOCREADER);
-            store.fail_document(doc_id, docparser::NOT_CONFIGURED);
+            store.fail_document(
+                doc_id,
+                "in-memory drain does not convert this type; oxana worker is the parse path",
+            );
             return Ok(());
         }
-        let r = if engine == "simple" {
-            docparser::convert_simple(&doc.file_name, &bytes)
-        } else if engine == "anydoc"
-            || engine == "http-engine"
-            || docparser::reader_addr().is_some()
-        {
-            match tokio::runtime::Handle::try_current() {
-                Ok(h) => h
-                    .block_on(docparser::convert(
-                        &configured,
-                        &doc.file_name,
-                        &ext,
-                        false,
-                        bytes,
-                        "",
-                        "",
-                    ))
-                    .unwrap_or_else(|e| {
-                        let mut r = docparser::convert_simple(&doc.file_name, &[]);
-                        r.error = e.0;
-                        r
-                    }),
-                Err(_) => {
-                    obs::finish(store, doc_id, obs::SPAN_DOCREADER, obs::STATUS_FAILED);
-                    obs::cascade_cancel(store, doc_id, doc.attempt, obs::SPAN_DOCREADER);
-                    store.fail_document(doc_id, docparser::NOT_CONFIGURED);
-                    return Ok(());
-                }
-            }
-        } else {
-            obs::finish(store, doc_id, obs::SPAN_DOCREADER, obs::STATUS_FAILED);
-            obs::cascade_cancel(store, doc_id, doc.attempt, obs::SPAN_DOCREADER);
-            store.fail_document(doc_id, docparser::NOT_CONFIGURED);
-            return Ok(());
-        };
+        let r = docparser::convert_simple(&doc.file_name, &bytes);
         if !r.error.is_empty() {
             obs::finish(store, doc_id, obs::SPAN_DOCREADER, obs::STATUS_FAILED);
             obs::cascade_cancel(store, doc_id, doc.attempt, obs::SPAN_DOCREADER);
@@ -489,7 +457,40 @@ fn document_process(store: &mut Store, payload: &serde_json::Value) -> Result<()
         obs::finish(store, doc_id, obs::ROOT_NAME, obs::STATUS_DONE);
         return Ok(());
     }
-    if has_mm {
+    if has_mm && !domain::vlm_configured() {
+        if let Some(d) = store.documents.get_mut(&doc_id) {
+            d.index_ready = false;
+            d.parse_status = ParseStatus::Finalizing;
+            d.error_message =
+                "ocr_error: vlm not configured; caption_error: vlm not configured".into();
+        }
+        obs::skip(
+            store,
+            doc_id,
+            doc.attempt,
+            obs::SPAN_MULTIMODAL,
+            "vlm not configured",
+        );
+        let rows = obs::timeline(store, doc_id);
+        if obs::can_start_stage(obs::SPAN_POSTPROCESS, &rows) {
+            obs::start(
+                store,
+                doc_id,
+                doc.attempt,
+                obs::SPAN_POSTPROCESS,
+                Some(obs::ROOT_NAME),
+            );
+            store.enqueue(
+                TYPE_POST_PROCESS,
+                domain::QUEUE_POSTPROCESS,
+                serde_json::json!({
+                    "document_id": doc_id,
+                    "product_version_id": doc.product_version_id,
+                    "clone_keep": false
+                }),
+            );
+        }
+    } else if has_mm {
         obs::start(
             store,
             doc_id,

@@ -135,7 +135,7 @@ pub async fn convert_document(
         asr_enabled = v;
     }
     let ext = file_name.rsplit('.').next().unwrap_or("txt");
-    let parser_engine = parser_engine_for(&chunking_cfg, overrides.as_ref(), ext);
+    let parser_engine = domain::parser_engine_for(&chunking_cfg, overrides.as_ref(), ext);
     if matches!(
         parse_status.as_str(),
         "cancelled" | "deleting" | "completed"
@@ -547,36 +547,6 @@ async fn persist_passage_index(
     .await
 }
 
-fn parser_engine_for(
-    chunking: &serde_json::Value,
-    overrides: Option<&domain::ProcessOverrides>,
-    ext: &str,
-) -> String {
-    let mut rules: Vec<domain::ParserEngineRule> = chunking
-        .get("parser_engine_rules")
-        .cloned()
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-    if let Some(o) = overrides {
-        if !o.parser_engine_rules.is_empty() {
-            rules = o.parser_engine_rules.clone();
-        } else if let Some(c) = &o.chunking_config
-            && !c.parser_engine_rules.is_empty()
-        {
-            rules = c.parser_engine_rules.clone();
-        }
-    }
-    let engine = domain::engine_for_file(&rules, ext);
-    if !engine.is_empty() {
-        return engine;
-    }
-    chunking
-        .get("parser_engine")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-
 enum PersistIndexResult {
     Aborted,
     Written { text_count: usize },
@@ -605,6 +575,28 @@ async fn after_index_fanout(
     file_name: &str,
 ) {
     if !images.is_empty() {
+        if !domain::vlm_configured() {
+            let _ = storage::skip_span(
+                pool,
+                document_id,
+                attempt,
+                obs::SPAN_MULTIMODAL,
+                "vlm not configured",
+            )
+            .await;
+            let _ = storage::set_parse_status(
+                pool,
+                document_id,
+                "finalizing",
+                "ocr_error: vlm not configured; caption_error: vlm not configured",
+            )
+            .await;
+            let _ = storage::set_index_ready(pool, document_id, false).await;
+            if text_count > 0 {
+                maybe_start_postprocess(pool, document_id, version_id, attempt).await;
+            }
+            return;
+        }
         let _ = storage::start_span(
             pool,
             document_id,
@@ -644,11 +636,15 @@ async fn after_index_fanout(
                 "enqueue failed",
             )
             .await;
-            let _ = storage::set_index_ready(pool, document_id, true).await;
-            let _ = bid::maybe_rematch_company_doc(pool, document_id).await;
-            if text_count == 0 {
-                let _ = storage::set_parse_status(pool, document_id, "completed", "").await;
-            } else {
+            let _ = storage::set_parse_status(
+                pool,
+                document_id,
+                "finalizing",
+                "ocr_error: image enqueue failed; caption_error: image enqueue failed",
+            )
+            .await;
+            let _ = storage::set_index_ready(pool, document_id, false).await;
+            if text_count > 0 {
                 maybe_start_postprocess(pool, document_id, version_id, attempt).await;
             }
         }
@@ -1449,23 +1445,27 @@ impl oxana::Worker<HousekeepJob> for HousekeepWorker {
             }
         }
         if let Ok(stale) =
-            storage::bid::reclaim_stale_extracts(pool, runtime::HOUSEKEEP_STALE_SECS).await
+            storage::bid::reclaim_stale_extracts(pool, runtime::HOUSEKEEP_EXTRACT_STALE_SECS).await
         {
             for (rid, pid, did) in stale {
                 let _ = runtime::enqueue_bid_extract(rid, pid, did).await;
             }
         }
-        if let Ok(rows) =
-            sqlx::query("SELECT DISTINCT project_id FROM bid_extract_runs WHERE status = 'pending'")
-                .fetch_all(pool)
-                .await
+        if let Ok(rows) = sqlx::query(
+            "SELECT r.id, r.project_id, r.document_id
+             FROM bid_extract_runs r
+             JOIN bid_projects p ON p.id = r.project_id
+             WHERE r.status = 'pending' AND p.status = 'open'",
+        )
+        .fetch_all(pool)
+        .await
         {
             use sqlx::Row;
             for r in rows {
+                let rid: Uuid = r.get("id");
                 let pid: Uuid = r.get("project_id");
-                if let Ok(Some((rid, did))) = storage::bid::next_pending_extract(pool, pid).await {
-                    let _ = runtime::enqueue_bid_extract(rid, pid, did).await;
-                }
+                let did: Option<Uuid> = r.get("document_id");
+                let _ = runtime::enqueue_bid_extract(rid, pid, did).await;
             }
         }
         let _ = storage::bid::reclaim_stale_section_retry_jobs(pool, runtime::HOUSEKEEP_STALE_SECS)
@@ -1519,7 +1519,8 @@ impl oxana::Worker<BidConvertJob> for BidConvertWorker {
             return Err(JobErr("postgres not configured".into()));
         };
         if let Err(error) = bid::convert_document(pool, job.document_id).await {
-            if ctx.meta.retries >= 3 {
+            let last_attempt = ctx.meta.retries.saturating_add(1) >= self.max_retries(&job);
+            if last_attempt || !bid::conversion_error_is_retryable(&error) {
                 storage::bid::fail_pending_document_conversion(pool, job.document_id, &error)
                     .await
                     .map_err(|finish_error| JobErr(finish_error.to_string()))?;
@@ -1742,6 +1743,13 @@ impl oxana::Worker<ImageMultimodalJob> for ImageMultimodalWorker {
         if let Err(e) = &result
             && ctx.meta.retries >= 3
         {
+            let _ = storage::set_parse_status(
+                pool,
+                job.document_id,
+                "finalizing",
+                &format!("ocr_error: {e}; caption_error: {e}"),
+            )
+            .await;
             finalize_multimodal_pg(pool, job.document_id, job.attempt).await;
             return Err(JobErr(e.clone()));
         }
@@ -2886,36 +2894,6 @@ mod tests {
     }
 
     #[test]
-    fn parser_engine_rules_win_over_bare_parser_engine() {
-        let chunking = serde_json::json!({
-            "parser_engine": "builtin",
-            "parser_engine_rules": [{"file_types": ["pdf"], "engine": "mineru"}]
-        });
-        assert_eq!(parser_engine_for(&chunking, None, "pdf"), "mineru");
-        assert_eq!(parser_engine_for(&chunking, None, "txt"), "builtin");
-        let o = domain::ProcessOverrides {
-            parser_engine_rules: vec![domain::ParserEngineRule {
-                file_types: vec!["pdf".into()],
-                engine: "paddle".into(),
-            }],
-            ..Default::default()
-        };
-        assert_eq!(parser_engine_for(&chunking, Some(&o), "pdf"), "paddle");
-        let docx_only = domain::ProcessOverrides {
-            parser_engine_rules: vec![domain::ParserEngineRule {
-                file_types: vec!["docx".into()],
-                engine: "builtin".into(),
-            }],
-            ..Default::default()
-        };
-        assert_eq!(
-            parser_engine_for(&chunking, Some(&docx_only), "pdf"),
-            "builtin",
-            "whole-table replace drops version pdf→mineru"
-        );
-    }
-
-    #[test]
     fn wiki_ingest_retry_delay_is_lock_retry() {
         let w = WikiIngestWorker { pool: None };
         let job = WikiIngestJob {
@@ -3549,17 +3527,35 @@ mod tests {
             .await
             .unwrap();
         convert_document(&pool, did, 1, &[], false).await.unwrap();
-        let Ok(storage) = runtime::connect() else {
-            eprintln!("skip: redis down");
-            return;
-        };
-        let n = storage
-            .enqueued_count(runtime::MultimodalQueue)
+        if domain::vlm_configured() {
+            let Ok(storage) = runtime::connect() else {
+                eprintln!("skip: redis down");
+                return;
+            };
+            let n = storage
+                .enqueued_count(runtime::MultimodalQueue)
+                .await
+                .unwrap();
+            assert!(n >= 1, "image:multimodal must be enqueued, got {n}");
+            assert_eq!(enrichment::pending_count(did), Some(1));
+            let _ = storage.wipe_queue(runtime::MultimodalQueue).await;
+        } else {
+            let (status, err): (String, String) = sqlx::query_as(
+                "SELECT parse_status, COALESCE(error_message,'') FROM documents WHERE id = $1",
+            )
+            .bind(did)
+            .fetch_one(&pool)
             .await
             .unwrap();
-        assert!(n >= 1, "image:multimodal must be enqueued, got {n}");
-        assert_eq!(enrichment::pending_count(did), Some(1));
-        let _ = storage.wipe_queue(runtime::MultimodalQueue).await;
+            assert_eq!(status, "finalizing");
+            assert!(err.contains("ocr_error"), "{err}");
+            let ready: bool = sqlx::query_scalar("SELECT index_ready FROM documents WHERE id = $1")
+                .bind(did)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert!(!ready, "images without VLM must not be searchable");
+        }
     }
 
     #[tokio::test]
@@ -4320,25 +4316,29 @@ mod tests {
         )
         .await
         .unwrap();
-        process_image_pg(&pool, did, "images/p1.jpg", "scanned_pdf", true, true, 1)
+        let image =
+            process_image_pg(&pool, did, "images/p1.jpg", "scanned_pdf", true, true, 1).await;
+        if domain::vlm_configured() {
+            image.unwrap();
+            let text_n: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM chunks WHERE document_id = $1 AND chunk_type = 'text'",
+            )
+            .bind(did)
+            .fetch_one(&pool)
             .await
             .unwrap();
-        let text_n: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM chunks WHERE document_id = $1 AND chunk_type = 'text'",
-        )
-        .bind(did)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(text_n, 1, "multimodal append must keep text chunks");
-        let ocr_n: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM chunks WHERE document_id = $1 AND chunk_type = 'image_ocr'",
-        )
-        .bind(did)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(ocr_n >= 1, "multimodal OCR chunk persisted");
+            assert_eq!(text_n, 1, "multimodal append must keep text chunks");
+            let ocr_n: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM chunks WHERE document_id = $1 AND chunk_type = 'image_ocr'",
+            )
+            .bind(did)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(ocr_n >= 1, "multimodal OCR chunk persisted");
+        } else {
+            assert!(image.is_err(), "no VLM must not stub OCR chunks");
+        }
 
         process_post_process(&pool, did, seeded.library_version_id, false)
             .await

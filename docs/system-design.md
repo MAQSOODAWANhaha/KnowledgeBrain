@@ -6,7 +6,7 @@
 | 日期 | 2026-08-19 |
 | 仓库 | `/opt/workspace/code/KnowledgeBrain` |
 | 管线对照 | `/opt/workspace/code/brain`（WeKnora）。任务类型、队列名、`parse_status`、分块算法、Wiki/图谱作用域与 brain **同语义** |
-| 投标 | 同仓。HTTP 挂 `api`，作业挂 `worker` 新队列。领域见 `docs/bid-platform-domain.md` |
+| 投标 | 同仓。HTTP 挂 `api`，作业挂 `worker` 新队列。抽取按段扇出、覆盖率可见。领域见 `docs/bid-platform-domain.md` |
 
 本文只描述**已确定的结构**。实现按本文执行，不另开管线。Workspace / `/match` / 鉴权 / VLM 与投标草案冲突时以草案为准。
 
@@ -194,7 +194,7 @@ BidProject                        与 Workspace 平级；见 bid-platform-domain
 **documents**：对齐 brain `knowledges`。关键列：`id, product_version_id, type, title, parse_status, pending_subtasks_count, summary_status, enable_status, index_ready, file_name, file_size, file_hash, object_key, process_overrides, error_message, processed_at, deleted_at`
 去重唯一：`(product_version_id, file_name, file_size, file_hash)`。`file_hash` = sha256 hex。  
 `enable_status`：入库 `disabled`；`processChunks` 写完 chunk/索引后改为 `enabled`（此时即可检索，`parse_status` 仍可能是 `processing`）。reparse 开始先改回 `disabled`。
-`index_ready`：convert 完成 ∧（无图 ∨ multimodal 完成）。商务自动 `/match` 与招标切条只看这个，**不**等 wiki/graph 的 `parse_status=completed`，也**不**在仅 `enable_status=enabled` 时写商务 miss。
+`index_ready`：convert 完成 ∧（无图 ∨ multimodal 成功写回）。有图但 VLM 未配/失败：原文可看，`parse_status=finalizing` 且露出 `ocr_error`，**`index_ready=false`，不自动商务匹配**。商务自动 `/match` 与招标切条只看 `index_ready`，**不**等 wiki/graph 的 `parse_status=completed`，也**不**在仅 `enable_status=enabled` 时写商务 miss。
 
 **tags**：`id, workspace_id FK, name, slug unique(workspace_id, slug), created_at`
 
@@ -445,13 +445,15 @@ SSRF：拦 loopback / 链路本地 / 私网 / `169.254.169.254` / DNS rebinding�
 
 不分块、不 OCR、不写存储/DB。扫描页只出 JPEG，OCR/Caption 在 5.6。
 
-引擎：builtin（docx→Docx2，OLE magic `D0CF11E0` 当 doc；pdf/md/xlsx/xls/epub/mhtml/图）、markitdown、opendataloader（仅 pdf）。引擎不支持该类型 → 回退 builtin。URL 固定 `WebParser`。空 content → `error` 非空。文本去 UTF-8 surrogate。
+引擎：anydoc（office 默认）、builtin（pdf / 扫描页回退；docx→Docx2，OLE magic `D0CF11E0` 当 doc）、markitdown、opendataloader（仅 pdf）。引擎不支持该类型 → 回退 builtin。URL 固定 `WebParser`。空 content → `error` 非空。文本去 UTF-8 surrogate。
 
 ### 5.2 convert（Rust）
 
 对照 `knowledge_process.go::convert` / `resolveDocReader`。
 
-抽出 **`convert_to_markdown(bytes, file_name) -> (markdown, images[])`**，不依赖 Document / ProductVersion。产品管线 `document:process` 与招标 `bid:convert` 共用。招标路径把 OCR/Caption 写回 Markdown 后只更新 `BidDocument`，不 `INSERT documents`。
+抽出 **`convert_to_markdown(bytes, file_name) -> (markdown, images[])`**，不依赖 Document / ProductVersion。**解析只有这一条**：引擎由扩展名 + 产品默认 `parser_engine_rules` 决定，再 VLM 写回。`document:process` 与 `bid:convert` 都是调用方，不得各写一套。落盘才分叉：知识库进 Document/索引；招标只更新 `BidDocument`，不 `INSERT documents`。
+
+**与 WeKnora 的差别（有意）：** 上游空引擎 = DocReader/MarkItDown；本仓 anydoc 已进程内集成。anydoc 明显更好的类型（docx/doc/xlsx/xls/pptx/ppt 的表与结构）**默认 anydoc**，不跟上游用 MarkItDown 当默认。PDF / 扫描页仍 builtin（版面 + 栅格化 OCR），anydoc 无文本层时回退 builtin。版本 `parser_engine_rules` 可覆盖。
 
 | engine | 实现 |
 |---|---|

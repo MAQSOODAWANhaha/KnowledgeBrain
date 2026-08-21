@@ -31,14 +31,14 @@
 | 项目里的文件 | **只放招标侧**。手册 / 证 / 业绩 / 服务 / 案例在知识库 |
 | 后来又传文件 | 只追加；已确认不动；该文件 `index_ready` 后**自动**抽 draft |
 | 条款 | 解析出初稿 → **人按段确认**。该段确认集变化后入队**该勾选段**的技术匹配；商务仍项目级。不在确认 HTTP 里同步打全库 |
-| 技术 / 商务怎么判 | `TenderExtractionEngine` 内两个独立有界 Agent + Span 级覆盖、仲裁与可见 fallback。标题只是 prior，不是门闩 |
+| 技术 / 商务怎么判 | `TenderExtractionEngine` 内两个独立有界 Agent + Span 级覆盖、仲裁与可见 fallback。**按段扇出、增量落库**；覆盖不全标 partial，禁止假成功。标题只是 prior，不是门闩 |
 | 推荐 | **按勾选段**排序，不宣布唯一最佳；人给该段勾选 1..N 个产品 |
 | 勾选落下 | `(勾选段, product_id, version_id)` + 该段当时快照 |
 | 解决方案 | 各勾选段已勾产品的并集。不另建方案表。不是全书一份排行榜 |
 | 商务第一期 | 公司资料库**按条款找文档**。不做证过期/金额判断。**不参与产品打分** |
 | 状态 | `open` / `ended` |
 | 成稿目标 | **投标应答卷** ①～⑤ 过程中可编；导出渲当前稿。⑥ 以后。不是装订递交包 |
-| 过程顺序 | **先商务、再技术段**。商务不做门闩 |
+| 过程顺序 | **先商务、再技术段**。商务不做门闩。工作台上导航三步：文件 → 评估 → 成稿；侧栏跟步走本标树。可回头，不硬锁 |
 | 缺了就补 | 都不卡死、不整表标红，给一条补的路径 |
 | 公司资料 | **恰好一条** `kind=company` Workspace。分类夹是它下面的 `kind=library` Product（资质证照 / 体系认证 / 业绩案例 / 服务能力）。文档挂 ProductVersion。不用把 `workspace_id` 改成空 |
 | `/match` | `scope=product_lines\|company`。带 `scope` 时不传、不推断 `workspace_id` |
@@ -122,9 +122,9 @@ BidDocument
 ```
 
 - 不标 `kind`，不作废链。补遗 = 再传一个文件。
-- **招标 convert 与公司资料入库分开。** 两边共用 DocReader / 同一 VLM，**不**共用知识库的 `parse_status` / `enable_status`。
-  - 公司资料：现有 Document 管线（必须进 `chunk_embeddings`，否则商务打不到）。
-  - 招标文件：`convert_to_markdown`（无 Document）→ 有图则同一套 multimodal 把 OCR/Caption **写回 Markdown** → 只写入 `BidDocument`。不 `INSERT documents`，不进产品索引。
+- **解析统一，入库分开。** 知识库文件与招标文件走同一套 convert：同一 `convert_to_markdown`、同一默认引擎表、同一 VLM 写回。**禁止**按「这是招标」另选引擎或另写 OCR。分叉只在落盘：
+  - 公司资料：Document 管线（必须进 `chunk_embeddings`，否则商务打不到）。
+  - 招标文件：同一套 markdown+图 只写入 `BidDocument`。不 `INSERT documents`，不进产品索引。两边 **不**共用知识库的 `parse_status` / `enable_status`。
 - 招标 `parse_status=completed` **只**表示 convert +（无图或 multimodal 写回）完成，等价于该文件的 `index_ready`。禁止拿一堆 `![](images/…)` 去切条款。
 - **失败就补**：该文件可重试（同一 `object_key` 再跑），可删掉重传。一份 `failed` **不**挡住其它已完成文件去抽条款。
 - **按文件自动抽。** 该文件 `completed` 后入队切段+抽取，draft 追加。后传同样：解析完就抽，不和已确认条款打架。

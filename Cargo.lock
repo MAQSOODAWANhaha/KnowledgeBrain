@@ -4358,7 +4358,9 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "domain",
+ "gethostname",
  "oxana",
+ "redis",
  "serde",
  "serde_json",
  "tokio",

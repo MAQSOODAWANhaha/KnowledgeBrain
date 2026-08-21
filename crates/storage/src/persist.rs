@@ -9,6 +9,7 @@ pub const MIGRATION_0005: &str = include_str!("../../../migrations/0005_graph.sq
 pub const MIGRATION_0006: &str = include_str!("../../../migrations/0006_wiki.sql");
 pub const MIGRATION_0007: &str = include_str!("../../../migrations/0007_bid.sql");
 pub const MIGRATION_0008: &str = include_str!("../../../migrations/0008_backfill.sql");
+pub const MIGRATION_0009: &str = include_str!("../../../migrations/0009_bid_extract_running.sql");
 
 pub fn database_url() -> String {
     std::env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -61,6 +62,7 @@ async fn apply_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(MIGRATION_0007).execute(pool).await?;
     ensure_company_workspace(pool).await?;
     sqlx::raw_sql(MIGRATION_0008).execute(pool).await?;
+    sqlx::raw_sql(MIGRATION_0009).execute(pool).await?;
     Ok(())
 }
 
@@ -2753,7 +2755,11 @@ pub async fn finalize_subtask(pool: &PgPool, document_id: Uuid) -> Result<(), sq
         "UPDATE documents SET
             pending_subtasks_count = GREATEST(pending_subtasks_count - 1, 0),
             parse_status = CASE
-                WHEN parse_status = 'finalizing' AND pending_subtasks_count <= 1 THEN 'completed'
+                WHEN parse_status = 'finalizing'
+                     AND pending_subtasks_count <= 1
+                     AND error_message NOT LIKE '%ocr_error%'
+                     AND error_message NOT LIKE '%caption_error%'
+                THEN 'completed'
                 ELSE parse_status
             END,
             updated_at = now()
@@ -3883,12 +3889,15 @@ mod tests {
         crate::bid::reclaim_stale_extracts(&pool, 60).await.unwrap();
         let stale_persist = crate::bid::persist_extraction_report(
             &pool,
-            run_id,
-            old_token,
-            project_id,
-            Uuid::new_v4(),
-            &[],
-            &[],
+            crate::bid::PersistExtractionReport {
+                run_id,
+                claim_token: old_token,
+                project_id,
+                document_id: Uuid::new_v4(),
+                sections: &[],
+                clauses: &[],
+                replace_document: true,
+            },
         )
         .await;
         assert!(stale_persist.is_err(), "stale owner must not persist");
@@ -4630,6 +4639,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tables_flat_conversion_skips_auto_extract() {
+        let _g = db_lock().await;
+        let Some(pool) = setup().await else {
+            return;
+        };
+        let project_id = Uuid::new_v4();
+        let document_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'tables flat')")
+            .bind(project_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO bid_documents
+                (id, project_id, file_name, file_hash, object_key)
+             VALUES ($1, $2, 'spec.docx', 'hash', 'objects/hash')",
+        )
+        .bind(document_id)
+        .bind(project_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (token, _, _, _) = crate::bid::claim_document_conversion(&pool, document_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            crate::bid::set_document_multimodal_status(&pool, document_id, token, "skipped", "",)
+                .await
+                .unwrap()
+        );
+        assert!(
+            crate::bid::finish_document_conversion(
+                &pool,
+                document_id,
+                token,
+                "completed",
+                Some("objects/md"),
+                "conversion_quality=tables_flat",
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            crate::bid::ensure_auto_extract_run(&pool, document_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn transient_conversion_failure_can_be_claimed_again_then_complete() {
         let _g = db_lock().await;
         let Some(pool) = setup().await else {
@@ -4976,12 +5037,15 @@ mod tests {
         };
         let result = crate::bid::persist_extraction_report(
             &pool,
-            run_id,
-            token,
-            project_id,
-            document_id,
-            &[section],
-            &[clause],
+            crate::bid::PersistExtractionReport {
+                run_id,
+                claim_token: token,
+                project_id,
+                document_id,
+                sections: &[section],
+                clauses: &[clause],
+                replace_document: true,
+            },
         )
         .await;
         assert!(result.is_err());

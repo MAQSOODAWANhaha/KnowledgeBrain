@@ -49,7 +49,7 @@ delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process
 
 ## Product Principles
 
-1. 一张工作台：侧栏选商务/勾选段/成稿，主列是表或文稿，不是三套页面。
+1. 引导式工作台：进标先看本标文件。上导航三步（文件 → 评估 → 成稿）；侧栏跟步走一棵本标树（文件列表 / 商务·技术段 / 成稿①～⑤）。解析是文件状态，不是一步。可回头、不锁死。
 2. 缺了就补，不锁死。
 3. 系统排序，人勾选。
 4. 过程 Word，定稿 PDF。

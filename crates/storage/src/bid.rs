@@ -68,6 +68,16 @@ pub struct ExtractionSectionRow<'a> {
     pub error_message: &'a str,
 }
 
+pub struct PersistExtractionReport<'a> {
+    pub run_id: Uuid,
+    pub claim_token: Uuid,
+    pub project_id: Uuid,
+    pub document_id: Uuid,
+    pub sections: &'a [ExtractionSectionRow<'a>],
+    pub clauses: &'a [ExtractionClauseRow<'a>],
+    pub replace_document: bool,
+}
+
 pub struct ExtractionClauseRow<'a> {
     pub id: Uuid,
     pub section_key: &'a str,
@@ -288,10 +298,20 @@ pub async fn list_documents(
     project_id: Uuid,
 ) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
     sqlx::query(
-        "SELECT id, project_id, file_name, file_hash, file_size, object_key,
-                parse_status, markdown_ref, parsed_at, error_message,
-                multimodal_status, multimodal_error
-         FROM bid_documents WHERE project_id = $1 ORDER BY created_at",
+        "SELECT d.id, d.project_id, d.file_name, d.file_hash, d.file_size, d.object_key,
+                d.parse_status, d.markdown_ref, d.parsed_at, d.error_message,
+                d.multimodal_status, d.multimodal_error,
+                r.status AS extract_status, r.error_message AS extract_error,
+                (SELECT count(*) FROM bid_clauses c
+                  WHERE c.source_document_id = d.id AND c.status <> 'superseded') AS clause_count
+         FROM bid_documents d
+         LEFT JOIN LATERAL (
+             SELECT status, error_message FROM bid_extract_runs
+             WHERE document_id = d.id
+             ORDER BY started_at DESC NULLS LAST, id DESC
+             LIMIT 1
+         ) r ON true
+         WHERE d.project_id = $1 ORDER BY d.created_at",
     )
     .bind(project_id)
     .fetch_all(pool)
@@ -581,6 +601,16 @@ pub async fn claim_section_retry_job(
         tx.rollback().await?;
         return Ok(None);
     }
+    let extracting: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM bid_extract_runs WHERE project_id = $1 AND status = 'running')",
+    )
+    .bind(project_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if extracting {
+        tx.rollback().await?;
+        return Ok(None);
+    }
     let pending: bool = sqlx::query_scalar(
         "SELECT EXISTS(
              SELECT 1 FROM bid_section_retry_jobs j
@@ -824,7 +854,7 @@ pub async fn finish_section_retry(
     Ok(())
 }
 
-/// Claim this pending run while serializing all claims for the project.
+/// Claim this pending run, or re-claim the same running run after a worker restart.
 pub async fn claim_extract_run(
     pool: &PgPool,
     id: Uuid,
@@ -832,26 +862,43 @@ pub async fn claim_extract_run(
     document_id: Option<Uuid>,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let project: Option<(String, Option<Uuid>)> = sqlx::query_as(
-        "SELECT status, extract_lock_token FROM bid_projects WHERE id = $1 FOR UPDATE",
+    let project: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT status, extract_lock_kind FROM bid_projects WHERE id = $1 FOR UPDATE",
     )
     .bind(project_id)
     .fetch_optional(&mut *tx)
     .await?;
-    if !matches!(project, Some((ref status, None)) if status == "open") {
+    match project {
+        Some((ref status, _)) if status == "open" => {}
+        _ => {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+    }
+    if matches!(
+        project.as_ref().and_then(|p| p.1.as_deref()),
+        Some("section_retry")
+    ) {
         tx.rollback().await?;
         return Ok(None);
     }
     let claim_token = Uuid::new_v4();
-    let claimed: Option<Uuid> = sqlx::query_scalar(
+    let claimed = sqlx::query_scalar(
         "UPDATE bid_extract_runs
          SET status = 'running', started_at = now(), heartbeat_at = now(), finished_at = NULL,
              claim_token = $3, error_message = ''
-         WHERE id = $1 AND project_id = $2 AND status = 'pending'
+         WHERE id = $1 AND project_id = $2
            AND document_id IS NOT DISTINCT FROM $4
+           AND (
+                status = 'pending'
+                OR (status = 'running'
+                    AND (heartbeat_at IS NULL
+                         OR heartbeat_at < now() - make_interval(secs => 90)))
+           )
            AND NOT EXISTS (
                SELECT 1 FROM bid_extract_runs r
-               WHERE r.project_id = $2 AND r.status = 'running'
+               WHERE r.status = 'running' AND r.id <> $1
+                 AND r.document_id IS NOT DISTINCT FROM $4
            )
          RETURNING claim_token",
     )
@@ -860,21 +907,62 @@ pub async fn claim_extract_run(
     .bind(claim_token)
     .bind(document_id)
     .fetch_optional(&mut *tx)
-    .await?;
-    if claimed.is_some() {
-        sqlx::query(
-            "UPDATE bid_projects
-             SET extract_lock_token = $2, extract_lock_kind = 'full', extract_lock_at = now(),
-                 extract_lock_section_id = NULL
-             WHERE id = $1",
-        )
-        .bind(project_id)
-        .bind(claim_token)
-        .execute(&mut *tx)
-        .await?;
+    .await;
+    match claimed {
+        Ok(token) => {
+            tx.commit().await?;
+            Ok(token)
+        }
+        Err(error) if is_unique_violation(&error) => {
+            tx.rollback().await?;
+            Ok(None)
+        }
+        Err(error) => {
+            tx.rollback().await?;
+            Err(error)
+        }
     }
+}
+
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|e| e.code())
+        .is_some_and(|code| code == "23505")
+}
+
+/// Drop-path: put a crashed running run back to pending so it can be claimed again.
+pub async fn release_extract_run_to_pending(
+    pool: &PgPool,
+    run_id: Uuid,
+    claim_token: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let released = sqlx::query(
+        "UPDATE bid_extract_runs
+         SET status = 'pending', claim_token = NULL, heartbeat_at = NULL,
+             error_message = 'extract_lease_released'
+         WHERE id = $1 AND claim_token = $2 AND status = 'running'",
+    )
+    .bind(run_id)
+    .bind(claim_token)
+    .execute(&mut *tx)
+    .await?;
+    if released.rows_affected() != 1 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    sqlx::query(
+        "UPDATE bid_projects
+         SET extract_lock_token = NULL, extract_lock_kind = NULL,
+             extract_lock_at = NULL, extract_lock_section_id = NULL
+         WHERE extract_lock_token = $1 AND extract_lock_kind = 'full'",
+    )
+    .bind(claim_token)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
-    Ok(claimed)
+    Ok(true)
 }
 
 pub async fn heartbeat_extract_run(
@@ -886,11 +974,9 @@ pub async fn heartbeat_extract_run(
     let mut tx = pool.begin().await?;
     let leased: Option<Uuid> = sqlx::query_scalar(
         "SELECT r.id FROM bid_extract_runs r
-         JOIN bid_projects p ON p.id = r.project_id
          WHERE r.id = $1 AND r.project_id = $2 AND r.status = 'running'
-           AND r.claim_token = $3 AND p.extract_lock_token = $3
-           AND p.extract_lock_kind = 'full'
-         FOR UPDATE OF r, p",
+           AND r.claim_token = $3
+         FOR UPDATE",
     )
     .bind(run_id)
     .bind(project_id)
@@ -903,10 +989,6 @@ pub async fn heartbeat_extract_run(
     }
     sqlx::query("UPDATE bid_extract_runs SET heartbeat_at = now() WHERE id = $1")
         .bind(run_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("UPDATE bid_projects SET extract_lock_at = now() WHERE id = $1")
-        .bind(project_id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -1075,6 +1157,7 @@ pub async fn ensure_auto_extract_run(
         "SELECT d.project_id, d.conversion_generation
          FROM bid_documents d JOIN bid_projects p ON p.id = d.project_id
          WHERE d.id = $1 AND d.parse_status = 'completed' AND p.status = 'open'
+           AND d.error_message NOT LIKE 'conversion_quality=%'
          FOR UPDATE OF d, p",
     )
     .bind(document_id)
@@ -1152,20 +1235,15 @@ pub async fn finish_extract_run(
     if result.rows_affected() != 1 {
         return Err(sqlx::Error::Protocol("extract run lease lost".into()));
     }
-    let cleared = sqlx::query(
+    sqlx::query(
         "UPDATE bid_projects
          SET extract_lock_token = NULL, extract_lock_kind = NULL,
              extract_lock_at = NULL, extract_lock_section_id = NULL
-         WHERE id = (SELECT project_id FROM bid_extract_runs WHERE id = $1)
-           AND extract_lock_token = $2 AND extract_lock_kind = 'full'",
+         WHERE extract_lock_token = $1 AND extract_lock_kind = 'full'",
     )
-    .bind(row.id)
     .bind(row.claim_token)
     .execute(&mut *tx)
     .await?;
-    if cleared.rows_affected() != 1 {
-        return Err(sqlx::Error::Protocol("extract project lease lost".into()));
-    }
     tx.commit().await?;
     Ok(())
 }
@@ -1261,21 +1339,23 @@ pub async fn insert_clause(pool: &PgPool, row: NewClause<'_>) -> Result<(), sqlx
 
 pub async fn persist_extraction_report(
     pool: &PgPool,
-    run_id: Uuid,
-    claim_token: Uuid,
-    project_id: Uuid,
-    document_id: Uuid,
-    sections: &[ExtractionSectionRow<'_>],
-    clauses: &[ExtractionClauseRow<'_>],
+    report: PersistExtractionReport<'_>,
 ) -> Result<(), sqlx::Error> {
+    let PersistExtractionReport {
+        run_id,
+        claim_token,
+        project_id,
+        document_id,
+        sections,
+        clauses,
+        replace_document,
+    } = report;
     let mut tx = pool.begin().await?;
     let lease: Option<Uuid> = sqlx::query_scalar(
         "SELECT r.id FROM bid_extract_runs r
-         JOIN bid_projects p ON p.id = r.project_id
          WHERE r.id = $1 AND r.project_id = $2 AND r.claim_token = $3
-           AND r.status = 'running' AND p.extract_lock_token = $3
-           AND p.extract_lock_kind = 'full'
-         FOR UPDATE OF r, p",
+           AND r.status = 'running'
+         FOR UPDATE",
     )
     .bind(run_id)
     .bind(project_id)
@@ -1313,15 +1393,31 @@ pub async fn persist_extraction_report(
         .await?;
         section_ids.insert(row.section_key, id);
     }
-    sqlx::query(
-        "UPDATE bid_clauses SET status = 'superseded', superseded_by_run_id = $3
-         WHERE project_id = $1 AND source_document_id = $2 AND status = 'draft'",
-    )
-    .bind(project_id)
-    .bind(document_id)
-    .bind(run_id)
-    .execute(&mut *tx)
-    .await?;
+    if replace_document {
+        sqlx::query(
+            "UPDATE bid_clauses SET status = 'superseded', superseded_by_run_id = $3
+             WHERE project_id = $1 AND source_document_id = $2 AND status = 'draft'",
+        )
+        .bind(project_id)
+        .bind(document_id)
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        let keys: Vec<String> = sections.iter().map(|s| s.section_key.to_string()).collect();
+        sqlx::query(
+            "UPDATE bid_clauses c SET status = 'superseded', superseded_by_run_id = $3
+             FROM bid_sections s
+             WHERE c.section_id = s.id AND c.project_id = $1 AND c.source_document_id = $2
+               AND c.status = 'draft' AND s.section_key = ANY($4)",
+        )
+        .bind(project_id)
+        .bind(document_id)
+        .bind(run_id)
+        .bind(&keys)
+        .execute(&mut *tx)
+        .await?;
+    }
     for row in clauses {
         let section_id = section_ids.get(row.section_key).copied().ok_or_else(|| {
             sqlx::Error::Protocol(format!(
@@ -1355,6 +1451,30 @@ pub async fn persist_extraction_report(
         .iter()
         .map(|section| section.section_key.to_string())
         .collect();
+    if replace_document {
+        sqlx::query(
+            "DELETE FROM bid_sections s
+             WHERE s.document_id = $1
+               AND NOT (s.section_key = ANY($2))
+               AND NOT EXISTS (
+                   SELECT 1 FROM bid_clauses c
+                   WHERE c.section_id = s.id AND c.status IN ('confirmed', 'rejected')
+               )",
+        )
+        .bind(document_id)
+        .bind(&current_keys)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn prune_unconfirmed_sections(
+    pool: &PgPool,
+    document_id: Uuid,
+    keep_keys: &[String],
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         "DELETE FROM bid_sections s
          WHERE s.document_id = $1
@@ -1365,10 +1485,9 @@ pub async fn persist_extraction_report(
            )",
     )
     .bind(document_id)
-    .bind(&current_keys)
-    .execute(&mut *tx)
+    .bind(keep_keys)
+    .execute(pool)
     .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -2063,11 +2182,6 @@ pub async fn next_pending_extract(
         "SELECT r.id, r.document_id FROM bid_extract_runs r
          JOIN bid_projects p ON p.id = r.project_id
          WHERE r.project_id = $1 AND r.status = 'pending' AND p.status = 'open'
-           AND p.extract_lock_token IS NULL
-           AND NOT EXISTS (
-               SELECT 1 FROM bid_extract_runs active
-               WHERE active.project_id = r.project_id AND active.status = 'running'
-           )
          ORDER BY r.started_at NULLS FIRST, r.id LIMIT 1",
     )
     .bind(project_id)

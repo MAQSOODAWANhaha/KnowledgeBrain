@@ -1,6 +1,5 @@
 //! Worker: consume oxana `default` / `document:process` when Redis is up.
 
-use tokio::signal::unix::{SignalKind, signal};
 use worker::consume::{AppCtx, run_core};
 
 fn log_line(msg: &str) {
@@ -23,10 +22,7 @@ async fn main() {
         extractor.policy_version(),
         extractor.prompt_version()
     );
-    tokio::select! {
-        _ = shutdown_signal() => {}
-        _ = consume_loop(pool) => {}
-    }
+    consume_loop(pool).await;
     log_line("worker exiting");
 }
 
@@ -37,6 +33,11 @@ async fn consume_loop(pool: sqlx::PgPool) {
             Ok(_) => {
                 backoff = std::time::Duration::from_secs(1);
                 log_line("worker ready");
+                match runtime::replay_orphaned_local_jobs().await {
+                    Ok(n) if n > 0 => eprintln!("replayed {n} orphaned oxana jobs"),
+                    Err(error) => eprintln!("orphan job replay skipped: {error}"),
+                    _ => {}
+                }
                 match run_core(AppCtx {
                     pool: Some(pool.clone()),
                 })
@@ -50,13 +51,5 @@ async fn consume_loop(pool: sqlx::PgPool) {
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
-    }
-}
-
-async fn shutdown_signal() {
-    let mut sigterm = signal(SignalKind::terminate()).expect("sigterm");
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = sigterm.recv() => {}
     }
 }

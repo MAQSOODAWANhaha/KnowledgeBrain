@@ -538,11 +538,16 @@ pub async fn convert_document(pool: &sqlx::PgPool, document_id: Uuid) -> Result<
     match conversion {
         Ok(()) => Ok(()),
         Err(error) => {
+            let status = if conversion_error_is_retryable(&error) {
+                "pending"
+            } else {
+                "failed"
+            };
             let _ = storage::bid::finish_document_conversion(
                 pool,
                 document_id,
                 claim_token,
-                "pending",
+                status,
                 None,
                 &error,
             )
@@ -550,6 +555,75 @@ pub async fn convert_document(pool: &sqlx::PgPool, document_id: Uuid) -> Result<
             Err(error)
         }
     }
+}
+
+pub fn conversion_is_thin(markdown: &str) -> bool {
+    let text = markdown.trim();
+    let tables = has_gfm_table(markdown);
+    if text.chars().count() < 200 && !tables {
+        return true;
+    }
+    let headings = markdown
+        .lines()
+        .filter(|line| line.trim_start().starts_with('#'))
+        .count();
+    headings == 0 && !tables
+}
+
+fn has_gfm_table(markdown: &str) -> bool {
+    markdown.lines().any(|line| {
+        let t = line.trim();
+        t.starts_with('|') && t.matches('|').count() >= 2
+    })
+}
+
+/// Office source with long prose but no GFM tables — likely flattened.
+pub fn conversion_tables_flat(markdown: &str, file_name: &str) -> bool {
+    let ext = file_name
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(
+        ext.as_str(),
+        "docx" | "doc" | "docm" | "xlsx" | "xls" | "xlsm"
+    ) {
+        return false;
+    }
+    if conversion_is_thin(markdown) {
+        return false;
+    }
+    !has_gfm_table(markdown)
+}
+
+pub fn conversion_quality_note(markdown: &str, file_name: &str) -> &'static str {
+    if conversion_is_thin(markdown) {
+        "conversion_quality=thin"
+    } else if conversion_tables_flat(markdown, file_name) {
+        "conversion_quality=tables_flat"
+    } else {
+        ""
+    }
+}
+
+/// Transient transport/service failures may retry; parse/format errors must not
+/// sit in `pending` or the files UI looks like the job is still queued.
+pub fn conversion_error_is_retryable(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    if error.contains("failed to parse")
+        || error.contains("cannot parse")
+        || error.contains("invalid utf-8")
+        || error.contains("simple reader cannot parse")
+        || error.contains("vlm not configured")
+    {
+        return false;
+    }
+    error.contains("timeout")
+        || error.contains("timed out")
+        || error.contains("unavailable")
+        || error.contains("connection")
+        || error.contains("reset")
+        || error.contains("temporarily")
 }
 
 async fn convert_document_inner(
@@ -572,7 +646,17 @@ async fn convert_document_inner(
     {
         return Err("document conversion lease lost".into());
     }
-    let multimodal_enabled = domain::vlm_configured() && !result.images.is_empty();
+    let has_images = result.images.iter().any(|img| !img.data.is_empty());
+    if has_images && !domain::vlm_configured() {
+        return Err("vlm not configured: images require a vision model".into());
+    }
+    let image_source_type = result
+        .metadata
+        .get("image_source_type")
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| enrichment::image_source_type(name, &result.markdown).to_string());
+    let multimodal_enabled = has_images;
     let multimodal_status = if multimodal_enabled {
         "running"
     } else {
@@ -603,7 +687,7 @@ async fn convert_document_inner(
         };
         let _ = ihash;
         if multimodal_enabled {
-            let (ocr, cap) = match enrichment::describe_image(&ikey, "") {
+            let (ocr, cap) = match enrichment::describe_image(&ikey, &image_source_type) {
                 Ok(description) => description,
                 Err(error) => {
                     let message = format!("tender multimodal stage failed: {error}");
@@ -643,13 +727,14 @@ async fn convert_document_inner(
     let mhash = domain::sha256_hex(md.as_bytes());
     let mkey = storage::object_key(&mhash);
     storage::write_blob_off_runtime(&mhash, md.as_bytes()).map_err(|e| e.to_string())?;
+    let quality_note = conversion_quality_note(&md, name);
     let finished = storage::bid::finish_document_conversion(
         pool,
         document_id,
         claim_token,
         "completed",
         Some(&mkey),
-        "",
+        quality_note,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -668,6 +753,39 @@ pub async fn extract_document(
     extract_run(pool, run_id, project_id, Some(document_id)).await
 }
 
+struct ExtractLease {
+    pool: sqlx::PgPool,
+    run_id: Uuid,
+    claim_token: Uuid,
+    armed: bool,
+}
+
+impl ExtractLease {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ExtractLease {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let pool = self.pool.clone();
+        let run_id = self.run_id;
+        let claim_token = self.claim_token;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let _ = tokio::task::block_in_place(|| {
+                handle.block_on(storage::bid::release_extract_run_to_pending(
+                    &pool,
+                    run_id,
+                    claim_token,
+                ))
+            });
+        }
+    }
+}
+
 pub async fn extract_run(
     pool: &sqlx::PgPool,
     run_id: Uuid,
@@ -680,13 +798,22 @@ pub async fn extract_run(
             Ok(None) => return Ok(()),
             Err(e) => return Err(e.to_string()),
         };
+    let mut lease = ExtractLease {
+        pool: pool.clone(),
+        run_id,
+        claim_token,
+        armed: true,
+    };
     let (heartbeat_stop, heartbeat_task) =
         spawn_full_extract_heartbeat(pool.clone(), run_id, project_id, claim_token);
     let run_result = extract_run_body(pool, run_id, claim_token, project_id, document_id).await;
     let _ = heartbeat_stop.send(());
     let _ = heartbeat_task.await;
     match run_result {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            lease.disarm();
+            Ok(())
+        }
         Err(error) => {
             let mode = extraction::configured_mode()
                 .map(|mode| mode.as_str())
@@ -713,6 +840,7 @@ pub async fn extract_run(
                 },
             )
             .await;
+            lease.disarm();
             Err(diagnostics["fatal_error"]
                 .as_str()
                 .unwrap_or("extract run failed")
@@ -891,7 +1019,7 @@ async fn extract_run_body(
                 );
                 document_diagnostics.push(json!({
                     "document_id": document_id,
-                    "status": "done",
+                    "status": if report.diagnostics.partial_failure { "partial" } else { "done" },
                     "diagnostics": report.diagnostics
                 }));
                 successful_documents += 1;
@@ -912,6 +1040,9 @@ async fn extract_run_body(
             }
         }
     }
+    let partial = document_diagnostics
+        .iter()
+        .any(|d| d.get("status").and_then(|v| v.as_str()) == Some("partial"));
     let status = if failed_documents > 0 && successful_documents == 0 {
         "failed"
     } else {
@@ -920,8 +1051,14 @@ async fn extract_run_body(
     let diagnostics = json!({
         "documents": document_diagnostics,
         "successful_documents": successful_documents,
-        "failed_documents": failed_documents
+        "failed_documents": failed_documents,
+        "partial_failure": partial || failed_documents > 0
     });
+    let error_message = if errors.is_empty() && (partial || failed_documents > 0) {
+        "partial_failure".to_string()
+    } else {
+        errors.join("; ")
+    };
     storage::bid::finish_extract_run(
         pool,
         storage::bid::FinishExtractRun {
@@ -930,7 +1067,7 @@ async fn extract_run_body(
             status,
             section_total: total,
             section_done: done,
-            error_message: &errors.join("; "),
+            error_message: &error_message,
             extractor_mode: engine.mode().as_str(),
             model_id: engine.model_id(),
             policy_version: engine.policy_version(),
@@ -969,11 +1106,143 @@ async fn extract_one_document(
     }
     let bytes = storage::read_blob(hash).map_err(|_| ("markdown_blob_unavailable".into(), None))?;
     let markdown = String::from_utf8(bytes).map_err(|_| ("markdown_invalid_utf8".into(), None))?;
-    let report = engine
-        .extract(extraction::ExtractionInput::document(document_id, markdown))
+    let outline = extraction::sections_for_document(&markdown).map_err(|e| (e, None))?;
+    if outline.is_empty() {
+        return Err(("document contains no extractable text".into(), None));
+    }
+    storage::bid::persist_extraction_report(
+        pool,
+        storage::bid::PersistExtractionReport {
+            run_id,
+            claim_token,
+            project_id,
+            document_id,
+            sections: &[],
+            clauses: &[],
+            replace_document: true,
+        },
+    )
+    .await
+    .map_err(|error| {
+        let category = if error.to_string().contains("lease lost") {
+            "extract_run_lease_lost"
+        } else {
+            "document_persist_failed"
+        };
+        (category.into(), None)
+    })?;
+    let mut combined = extraction::ExtractionReport {
+        sections: Vec::new(),
+        clauses: Vec::new(),
+        diagnostics: extraction::ExtractionDiagnostics {
+            mode: engine.mode().as_str().into(),
+            model_id: engine.model_id().to_string(),
+            policy_version: engine.policy_version().to_string(),
+            prompt_version: engine.prompt_version().to_string(),
+            ..Default::default()
+        },
+    };
+    let mut any_ok = false;
+    for section in outline.iter() {
+        let input = extraction::ExtractionInput::section(document_id, section);
+        match engine.extract(input).await {
+            Ok(report) => {
+                persist_report(
+                    pool,
+                    run_id,
+                    claim_token,
+                    project_id,
+                    document_id,
+                    &report,
+                    false,
+                )
+                .await?;
+                merge_extract_diagnostics(&mut combined.diagnostics, &report.diagnostics);
+                combined.sections.extend(report.sections);
+                combined.clauses.extend(report.clauses);
+                any_ok = true;
+            }
+            Err(failure) => {
+                if failure.message.contains("lease") {
+                    return Err(("extract_run_lease_lost".into(), Some(failure.diagnostics)));
+                }
+                let mut failed = section.clone();
+                failed.extract_status = "failed".into();
+                failed.error_message = failure.message.clone();
+                let failed_report = extraction::ExtractionReport {
+                    sections: vec![failed],
+                    clauses: vec![],
+                    diagnostics: failure.diagnostics.clone(),
+                };
+                persist_report(
+                    pool,
+                    run_id,
+                    claim_token,
+                    project_id,
+                    document_id,
+                    &failed_report,
+                    false,
+                )
+                .await?;
+                merge_extract_diagnostics(&mut combined.diagnostics, &failure.diagnostics);
+                combined.diagnostics.partial_failure = true;
+                combined.diagnostics.fallback_reasons.push(format!(
+                    "section_failed:{}:{}",
+                    section.key, failure.message
+                ));
+                combined.sections.push(section.clone());
+            }
+        }
+    }
+    if !any_ok && combined.clauses.is_empty() {
+        return Err(("document_extract_failed".into(), Some(combined.diagnostics)));
+    }
+    let keep: Vec<String> = outline.iter().map(|section| section.key.clone()).collect();
+    storage::bid::prune_unconfirmed_sections(pool, document_id, &keep)
         .await
-        .map_err(|failure| (failure.message, Some(failure.diagnostics)))?;
+        .map_err(|_| {
+            (
+                "document_persist_failed".into(),
+                Some(combined.diagnostics.clone()),
+            )
+        })?;
+    Ok(combined)
+}
 
+fn merge_extract_diagnostics(
+    into: &mut extraction::ExtractionDiagnostics,
+    from: &extraction::ExtractionDiagnostics,
+) {
+    into.agent_rounds += from.agent_rounds;
+    into.retries += from.retries;
+    into.tool_calls += from.tool_calls;
+    into.rejected_invalid_quotes += from.rejected_invalid_quotes;
+    into.family_conflicts += from.family_conflicts;
+    into.agent_terminations
+        .extend(from.agent_terminations.iter().cloned());
+    into.fallback_reasons
+        .extend(from.fallback_reasons.iter().cloned());
+    into.failed_spans.extend(from.failed_spans.iter().cloned());
+    into.coverage.candidate_spans += from.coverage.candidate_spans;
+    into.coverage.covered_spans += from.coverage.covered_spans;
+    into.coverage
+        .uncovered_spans
+        .extend(from.coverage.uncovered_spans.iter().cloned());
+    into.coverage.ambiguous_clauses += from.coverage.ambiguous_clauses;
+    if from.partial_failure {
+        into.partial_failure = true;
+    }
+}
+
+async fn persist_report(
+    pool: &sqlx::PgPool,
+    run_id: Uuid,
+    claim_token: Uuid,
+    project_id: Uuid,
+    document_id: Uuid,
+    report: &extraction::ExtractionReport,
+    replace_document: bool,
+) -> Result<(), (String, Option<extraction::ExtractionDiagnostics>)> {
     let section_rows: Vec<_> = report
         .sections
         .iter()
@@ -1016,12 +1285,15 @@ async fn extract_one_document(
         .collect();
     storage::bid::persist_extraction_report(
         pool,
-        run_id,
-        claim_token,
-        project_id,
-        document_id,
-        &section_rows,
-        &clause_rows,
+        storage::bid::PersistExtractionReport {
+            run_id,
+            claim_token,
+            project_id,
+            document_id,
+            sections: &section_rows,
+            clauses: &clause_rows,
+            replace_document,
+        },
     )
     .await
     .map_err(|error| {
@@ -1031,8 +1303,7 @@ async fn extract_one_document(
             "document_persist_failed"
         };
         (category.into(), Some(report.diagnostics.clone()))
-    })?;
-    Ok(report)
+    })
 }
 
 pub async fn run_match_job(
@@ -1413,6 +1684,17 @@ pub async fn maybe_rematch_company_doc(
     {
         return Ok(());
     }
+    let ready: bool =
+        sqlx::query_scalar("SELECT COALESCE(index_ready, false) FROM documents WHERE id = $1")
+            .bind(document_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+    if !ready {
+        return Ok(());
+    }
     let projects = storage::bid::open_projects_with_commercial(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -1597,6 +1879,41 @@ mod tests {
         m.insert(b, None);
         assert_eq!(resolve_unit(Some(a), &m), b);
         assert_eq!(resolve_unit(None, &m), Uuid::nil());
+    }
+
+    #[test]
+    fn conversion_quality_flags_short_markdown() {
+        assert!(conversion_is_thin("hi"));
+        let long_no_heading = "招标正文。".repeat(80);
+        assert!(conversion_is_thin(&long_no_heading));
+        let long = format!("# 标题\n{}", "招标正文。".repeat(80));
+        assert!(!conversion_is_thin(&long));
+        assert!(conversion_tables_flat(&long, "a.docx"));
+        assert!(!conversion_tables_flat(&long, "a.pdf"));
+        let table = "# 标题\n\n| 条款 | 内容 |\n| --- | --- |\n| 电源 | 双路 |\n";
+        assert!(!conversion_is_thin(table));
+        assert!(!conversion_tables_flat(table, "a.docx"));
+        assert_eq!(conversion_quality_note(table, "a.docx"), "");
+        assert_eq!(
+            conversion_quality_note(&long, "spec.docx"),
+            "conversion_quality=tables_flat"
+        );
+    }
+
+    #[test]
+    fn parse_failures_are_terminal_conversion_errors() {
+        assert!(!conversion_error_is_retryable(
+            "Failed to parse: BiddingFile.doc"
+        ));
+        assert!(!conversion_error_is_retryable(
+            "simple reader cannot parse .doc"
+        ));
+        assert!(conversion_error_is_retryable(
+            "docreader connection timed out"
+        ));
+        assert!(!conversion_error_is_retryable(
+            "vlm not configured: images require a vision model"
+        ));
     }
 
     #[test]

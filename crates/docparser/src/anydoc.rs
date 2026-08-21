@@ -463,7 +463,7 @@ fn normalize_ext(s: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -549,12 +549,76 @@ mod tests {
     }
 
     #[test]
+    fn docx_table_renders_as_gfm() {
+        let r = convert(
+            "tender.docx",
+            "docx",
+            &sample_docx_with_table(),
+            false,
+            false,
+        );
+        assert!(r.error.is_empty(), "{}", r.error);
+        assert_eq!(r.metadata.get("parser").map(String::as_str), Some(ENGINE));
+        assert!(
+            r.markdown.contains('|') && r.markdown.contains("hot-swap"),
+            "{}",
+            r.markdown
+        );
+        assert!(r.markdown.contains("validity"), "{}", r.markdown);
+    }
+
+    #[test]
     fn extract_images_off_does_not_emit_asset_link() {
         let bytes = sample_docx_with_image();
         let r = convert("report.docx", "docx", &bytes, false, false);
         assert!(r.error.is_empty(), "{}", r.error);
         assert!(r.images.is_empty());
         assert!(!r.markdown.contains("images/image-1.png"), "{}", r.markdown);
+    }
+
+    pub(crate) fn sample_docx_with_table() -> Vec<u8> {
+        store_zip(&[
+            (
+                "[Content_Types].xml",
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#,
+            ),
+            (
+                "word/document.xml",
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>Commercial terms</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="4000"/></w:tblGrid>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>clause</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>text</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>validity</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>90 days</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:p><w:r><w:t>power</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>hot-swap</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+  </w:body>
+</w:document>"#,
+            ),
+        ])
     }
 
     fn sample_docx_with_image() -> Vec<u8> {

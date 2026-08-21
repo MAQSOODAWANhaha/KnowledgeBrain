@@ -1,13 +1,14 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Dropzone } from "@mantine/dropzone";
 import type { BidDoc } from "../api";
-import { fileLabel } from "./helpers";
+import { fileStage } from "./helpers";
 
 export function FilesPane({
   docs,
   ended,
   uploading,
   pendingNames = [],
+  focusId,
   onUpload,
   onRetry,
   onDelete,
@@ -16,12 +17,18 @@ export function FilesPane({
   ended: boolean;
   uploading?: boolean;
   pendingNames?: string[];
+  focusId?: string | null;
   onUpload: (files: File[]) => void;
   onRetry: (docId: string) => void;
   onDelete: (docId: string) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragOn, setDragOn] = useState(false);
+
+  useEffect(() => {
+    if (!focusId) return;
+    document.getElementById(`bid-doc-${focusId}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [focusId]);
 
   function take(files: File[]) {
     if (!files.length || ended || uploading) return;
@@ -43,7 +50,7 @@ export function FilesPane({
 
   const empty = docs.length === 0 && pendingNames.length === 0;
   return (
-    <div className="wrap stack">
+    <div className="stack">
       {!ended && (
         <Dropzone
           multiple
@@ -91,7 +98,17 @@ export function FilesPane({
         }}
       />
       {!empty && (
-      <div className="card pad-0">
+      <div className="card pad-0 file-list">
+          <div className="group-h">
+            <span>招标文件</span>
+            <span>
+              {docs.filter((d) => fileStage(d).tone === "rose").length
+                ? `失败 ${docs.filter((d) => fileStage(d).tone === "rose").length}`
+                : docs.some((d) => d.parse_status === "pending" || d.parse_status === "processing" || d.extract_status === "pending" || d.extract_status === "running")
+                  ? "处理中"
+                  : `${docs.length} 个文件`}
+            </span>
+          </div>
           {pendingNames
             .filter((n) => !docs.some((d) => d.file_name === n))
             .map((n) => (
@@ -106,32 +123,27 @@ export function FilesPane({
                 </span>
               </div>
             ))}
-          {docs.map((d) => (
-            <div key={d.id} className={`item ${d.parse_status === "failed" ? "fail" : ""}`} style={{ gridTemplateColumns: "1fr auto auto auto" }}>
+          {docs.map((d) => {
+            const stage = fileStage(d);
+            return (
+            <div id={`bid-doc-${d.id}`} className={`item file-row${stage.tone === "rose" ? " fail" : ""}${focusId === d.id ? " on" : ""}`}>
               <div>
                 <div className="name">{d.file_name}</div>
-                <div className="desc">
-                  {d.multimodal_status === "failed"
-                    ? `图像处理失败：${d.multimodal_error || "请重试"}`
-                    : d.error_message || fileLabel(d.parse_status)}
-                </div>
+                <div className="desc">{stage.desc}</div>
               </div>
-              <span
-                className={`chip ${
-                  d.parse_status === "completed" ? "pine" : d.parse_status === "failed" ? "rose" : d.parse_status === "processing" ? "amber" : "gray"
-                }`}
-              >
-                {(d.parse_status === "completed" || d.parse_status === "failed" || d.parse_status === "processing") && <i className="dot" />}
-                {fileLabel(d.parse_status)}
+              <span className={`chip ${stage.tone}`}>
+                {stage.tone !== "gray" && <i className="dot" />}
+                {stage.label}
               </span>
-              <button className="btn sm" type="button" disabled={ended || d.parse_status !== "failed"} onClick={() => onRetry(d.id)}>
+              <button className="btn sm" type="button" disabled={ended || !stage.retryable} onClick={() => onRetry(d.id)}>
                 重试
               </button>
               <button className="btn sm" type="button" disabled={ended} onClick={() => onDelete(d.id)}>
                 删除
               </button>
             </div>
-          ))}
+            );
+          })}
       </div>
       )}
     </div>

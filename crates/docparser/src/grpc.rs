@@ -258,6 +258,7 @@ async fn read_unary(client: &mut Client, req: ReadRequest) -> Result<ReadResult,
         markdown: resp.markdown_content,
         error: resp.error,
         images: resp.image_refs.into_iter().map(from_proto_image).collect(),
+        metadata: resp.metadata,
         ..ReadResult::default()
     })
 }
@@ -274,6 +275,7 @@ fn apply_frame(
             *expected_images = (meta.image_count > 0).then_some(meta.image_count as usize);
             result.markdown = meta.markdown_content;
             result.error = meta.error;
+            result.metadata.extend(meta.metadata);
             if meta.image_count > 0 {
                 result.images.reserve(meta.image_count as usize);
             }

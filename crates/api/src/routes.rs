@@ -3758,12 +3758,19 @@ async fn get_bid(
                 .get("failed_documents")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
+            let error_message = row.get::<String, _>("error_message");
+            let partial_failure = failed_documents > 0
+                || diagnostics
+                    .get("partial_failure")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                || error_message.contains("partial_failure");
             json!({
                 "id": row.get::<Uuid, _>("id"),
                 "status": row.get::<String, _>("status"),
                 "extractor_mode": row.get::<String, _>("extractor_mode"),
                 "failed_documents": failed_documents,
-                "partial_failure": failed_documents > 0,
+                "partial_failure": partial_failure,
                 "diagnostics": {
                     "coverage": {
                         "candidate_spans": coverage_sum("candidate_spans"),
@@ -3773,7 +3780,7 @@ async fn get_bid(
                     },
                     "fallback_reasons": fallback_reasons
                 },
-                "error_message": row.get::<String, _>("error_message")
+                "error_message": error_message
             })
         });
     Ok(Json(json!({
@@ -3828,6 +3835,9 @@ async fn list_bid_docs(
                 "multimodal_status": r.get::<String, _>("multimodal_status"),
                 "multimodal_error": r.get::<String, _>("multimodal_error"),
                 "error_message": r.get::<String, _>("error_message"),
+                "extract_status": r.get::<Option<String>, _>("extract_status"),
+                "extract_error": r.get::<Option<String>, _>("extract_error"),
+                "clause_count": r.get::<i64, _>("clause_count"),
                 "object_key": r.get::<String, _>("object_key"),
             })
         })

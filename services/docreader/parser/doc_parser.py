@@ -90,6 +90,26 @@ class SandboxExecutor:
                 f"Command execution timeout after {self.default_timeout} seconds"
             )
 
+    def execute_local(self, cmd: List[str], timeout: Optional[int] = None) -> tuple:
+        """Run a local converter without the URL-fetch sandbox proxy."""
+        env = os.environ.copy()
+        for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            env.pop(key, None)
+        env.setdefault("SAL_USE_VCLPLUGIN", "svp")
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        limit = timeout or self.default_timeout
+        try:
+            stdout, stderr = process.communicate(timeout=limit)
+            return stdout, stderr, process.returncode
+        except subprocess.TimeoutExpired:
+            process.kill()
+            raise RuntimeError(f"Command execution timeout after {limit} seconds")
+
 
 logger = logging.getLogger(__name__)
 
@@ -106,14 +126,9 @@ class DocParser(Docx2Parser):
         logger.info(f"Parsing DOC document, content size: {len(content)} bytes")
 
         handle_chain = [
-            # 1. Try to convert to docx format to extract images
             self._parse_with_docx,
-            # 2. If image extraction is not needed or conversion failed,
-            # try using antiword to extract text
             self._parse_with_antiword,
-            # 3. If antiword extraction fails, use textract
-            # NOTE: _parse_with_textract is disabled due to SSRF vulnerability
-            # self._parse_with_textract,
+            self._parse_with_catdoc,
         ]
 
         # Save byte content as a temporary file
@@ -149,18 +164,41 @@ class DocParser(Docx2Parser):
         if not antiword_path:
             raise RuntimeError("antiword not found in PATH")
 
-        # Use antiword to extract text directly in sandbox
         cmd = [antiword_path, temp_file_path]
-        logger.info("Executing antiword in sandbox with proxy configuration")
+        logger.info("Executing antiword locally")
 
-        stdout, stderr, returncode = self.sandbox_executor.execute_in_sandbox(cmd)
+        stdout, stderr, returncode = self.sandbox_executor.execute_local(cmd)
 
         if returncode != 0:
             raise RuntimeError(
                 f"antiword extraction failed: {stderr.decode('utf-8', errors='ignore')}"
             )
         text = stdout.decode("utf-8", errors="ignore")
+        if not text.strip():
+            raise RuntimeError("antiword produced empty text")
         logger.info(f"Successfully extracted {len(text)} characters using antiword")
+        return Document(content=text)
+
+    def _parse_with_catdoc(self, temp_file_path: str) -> Document:
+        logger.info("Attempting to parse DOC file with catdoc")
+        catdoc_path = self._try_find_executable_path(
+            "catdoc",
+            ["/usr/bin/catdoc", "/usr/local/bin/catdoc"],
+            ["CATDOC_PATH"],
+        )
+        if not catdoc_path:
+            raise RuntimeError("catdoc not found in PATH")
+        stdout, stderr, returncode = self.sandbox_executor.execute_local(
+            [catdoc_path, "-d", "utf-8", temp_file_path]
+        )
+        if returncode != 0:
+            raise RuntimeError(
+                f"catdoc extraction failed: {stderr.decode('utf-8', errors='ignore')}"
+            )
+        text = stdout.decode("utf-8", errors="ignore")
+        if not text.strip():
+            raise RuntimeError("catdoc produced empty text")
+        logger.info(f"Successfully extracted {len(text)} characters using catdoc")
         return Document(content=text)
 
     def _parse_with_textract(self, temp_file_path: str) -> Document:
@@ -203,6 +241,9 @@ class DocParser(Docx2Parser):
                 cmd = [
                     soffice_path,
                     "--headless",
+                    "--nologo",
+                    "--nofirststartwizard",
+                    "--norestore",
                     f"-env:UserInstallation={user_installation}",
                     "--convert-to",
                     "docx",
@@ -216,8 +257,8 @@ class DocParser(Docx2Parser):
                 )
 
                 # Execute in sandbox with proxy configuration
-                stdout, stderr, returncode = self.sandbox_executor.execute_in_sandbox(
-                    cmd
+                stdout, stderr, returncode = self.sandbox_executor.execute_local(
+                    cmd, timeout=180
                 )
 
                 if returncode != 0:

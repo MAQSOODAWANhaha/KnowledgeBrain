@@ -1,4 +1,4 @@
-use crate::process::{ParserEngineRule, ProcessOverrides};
+use crate::process::{ParserEngineRule, ProcessOverrides, default_parser_engine_rules};
 use crate::status::*;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -119,7 +119,7 @@ impl ProductVersion {
             chunk_separators: Vec::new(),
             chunk_token_limit: 0,
             chunk_languages: Vec::new(),
-            parser_engine_rules: Vec::new(),
+            parser_engine_rules: default_parser_engine_rules(),
             table_metadata_instructions: String::new(),
         }
     }

@@ -119,6 +119,9 @@ export type BidDoc = {
   multimodal_status?: string;
   multimodal_error?: string;
   error_message?: string;
+  extract_status?: string | null;
+  extract_error?: string | null;
+  clause_count?: number;
   object_key: string;
 };
 
@@ -165,6 +168,14 @@ export type Product = {
   current_version_id: string | null;
 };
 
+export type Version = {
+  id: string;
+  product_id: string;
+  label: string;
+  status: string;
+  current: boolean;
+};
+
 export type Doc = {
   id: string;
   title: string;
@@ -172,6 +183,7 @@ export type Doc = {
   parse_status: string | { [k: string]: unknown };
   index_ready: boolean;
   object_key: string;
+  error_message?: string;
 };
 
 export const api = {
@@ -261,10 +273,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  createVersion: (pid: string, label: string) =>
-    req<{ id: string }>(`/api/v1/products/${pid}/versions`, {
+  versions: (pid: string) => req<Version[]>(`/api/v1/products/${pid}/versions`),
+  createVersion: (pid: string, label: string, makeCurrent = true) =>
+    req<Version>(`/api/v1/products/${pid}/versions`, {
       method: "POST",
-      body: JSON.stringify({ label, make_current: true }),
+      body: JSON.stringify({ label, make_current: makeCurrent }),
     }),
   documents: (pid: string, vid: string) =>
     req<Doc[]>(`/api/v1/products/${pid}/versions/${vid}/documents`),

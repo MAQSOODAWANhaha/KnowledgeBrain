@@ -6,6 +6,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         gcc g++ pkg-config \
         libxml2-dev libxslt1-dev libjpeg62-turbo-dev zlib1g-dev \
+        libreoffice-writer-nogui default-jre-headless \
+        antiword catdoc \
+        fonts-wqy-zenhei fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY services/docreader /app

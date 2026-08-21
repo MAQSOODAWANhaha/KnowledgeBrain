@@ -273,6 +273,82 @@ pub async fn connect_verified() -> Result<oxana::Storage, String> {
     Ok(storage)
 }
 
+/// Docker restart reuses hostname+pid, so oxana will not treat this process as dead.
+/// Move leftover jobs from our processing list back onto their queues before workers start.
+pub async fn replay_orphaned_local_jobs() -> Result<usize, String> {
+    let client = redis::Client::open(redis_url()).map_err(|e| e.to_string())?;
+    let mut con = client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|e| e.to_string())?;
+    let pid = std::process::id();
+    let mut hosts = vec![gethostname::gethostname().to_string_lossy().into_owned()];
+    if let Ok(file_host) = std::fs::read_to_string("/etc/hostname") {
+        let file_host = file_host.trim().to_string();
+        if !file_host.is_empty() && !hosts.iter().any(|h| h == &file_host) {
+            hosts.push(file_host);
+        }
+    }
+    let mut n = 0usize;
+    for host in hosts {
+        let key = format!("oxanus:processing:{host}-{pid}");
+        n += replay_processing_list(&mut con, &key).await?;
+    }
+    Ok(n)
+}
+
+async fn replay_processing_list(
+    con: &mut redis::aio::MultiplexedConnection,
+    key: &str,
+) -> Result<usize, String> {
+    let mut n = 0usize;
+    loop {
+        let id: Option<String> = redis::cmd("LPOP")
+            .arg(key)
+            .query_async(&mut *con)
+            .await
+            .map_err(|e| e.to_string())?;
+        let Some(id) = id else {
+            break;
+        };
+        let raw: Option<String> = redis::cmd("HGET")
+            .arg("oxanus:jobs")
+            .arg(&id)
+            .query_async(&mut *con)
+            .await
+            .map_err(|e| e.to_string())?;
+        let Some(raw) = raw else {
+            continue;
+        };
+        let env: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        let resurrect = env
+            .pointer("/meta/resurrect")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if resurrect {
+            let queue = env
+                .get("queue")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default");
+            let _: () = redis::cmd("LPUSH")
+                .arg(format!("oxanus:queue:{queue}"))
+                .arg(&id)
+                .query_async(&mut *con)
+                .await
+                .map_err(|e| e.to_string())?;
+            n += 1;
+        } else {
+            let _: () = redis::cmd("HDEL")
+                .arg("oxanus:jobs")
+                .arg(&id)
+                .query_async(&mut *con)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(n)
+}
+
 /// Pool build is lazy: `from_url` succeeds even when Redis is down.
 /// Connection refused / deadpool errors mean "no oxana", not a failed enqueue.
 fn redis_unreachable(err: &str) -> bool {
@@ -740,19 +816,14 @@ pub async fn enqueue_bid_extract(
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    oxana_id(
-        storage
-            .enqueue(
-                DefaultQueue,
-                BidExtractJob {
-                    run_id,
-                    project_id,
-                    document_id,
-                    task_type: domain::TYPE_BID_EXTRACT.to_string(),
-                },
-            )
-            .await,
-    )
+    let job = BidExtractJob {
+        run_id,
+        project_id,
+        document_id,
+        task_type: domain::TYPE_BID_EXTRACT.to_string(),
+    };
+    let _ = storage.delete_unique_job(&job).await;
+    oxana_id(storage.enqueue(DefaultQueue, job).await)
 }
 
 pub async fn enqueue_bid_section_retry(

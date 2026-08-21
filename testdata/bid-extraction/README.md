@@ -1,7 +1,10 @@
 # Bid extraction fixtures
 
-`*.md` files are synthetic, de-identified tender excerpts. Their `.expected.json`
+`*.md` files are synthetic, de-identified tender excerpts (`cn-tender-golden-01`–`03`). Their `.expected.json`
 files define clause labels and acceptance thresholds.
+
+Office table convert fixture lives in `crates/docparser/src/anydoc.rs` (`docx_table_renders_as_gfm`):
+a synthetic `.docx` with a 3-row table must emit GFM pipes. Default engine for `docx` is anydoc.
 
 Offline deterministic check:
 

@@ -253,6 +253,79 @@ pub fn engine_for_file(rules: &[ParserEngineRule], file_type: &str) -> String {
     String::new()
 }
 
+/// Product default: office → anydoc (tables), PDF → builtin (layout + scan OCR).
+pub fn default_parser_engine_rules() -> Vec<ParserEngineRule> {
+    vec![
+        ParserEngineRule {
+            file_types: vec![
+                "docx".into(),
+                "doc".into(),
+                "docm".into(),
+                "xlsx".into(),
+                "xls".into(),
+                "xlsm".into(),
+                "pptx".into(),
+                "ppt".into(),
+                "pptm".into(),
+            ],
+            engine: "anydoc".into(),
+        },
+        ParserEngineRule {
+            file_types: vec!["pdf".into()],
+            engine: "builtin".into(),
+        },
+    ]
+}
+
+/// Empty rules mean the product default, not MarkItDown. Bare engine is only
+/// used when no rule matches the extension (md/txt/csv stay empty → simple).
+pub fn resolve_parser_engine(
+    rules: &[ParserEngineRule],
+    bare_engine: &str,
+    file_type: &str,
+) -> String {
+    let default_rules;
+    let use_rules: &[ParserEngineRule] = if rules.is_empty() {
+        default_rules = default_parser_engine_rules();
+        &default_rules
+    } else {
+        rules
+    };
+    let engine = engine_for_file(use_rules, file_type);
+    if engine.is_empty() {
+        bare_engine.to_string()
+    } else {
+        engine
+    }
+}
+
+/// Knowledge `document:process` and bid convert share this entry.
+pub fn parser_engine_for(
+    chunking: &serde_json::Value,
+    overrides: Option<&ProcessOverrides>,
+    ext: &str,
+) -> String {
+    let mut rules: Vec<ParserEngineRule> = chunking
+        .get("parser_engine_rules")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    if let Some(o) = overrides {
+        if !o.parser_engine_rules.is_empty() {
+            rules = o.parser_engine_rules.clone();
+        } else if let Some(c) = &o.chunking_config
+            && !c.parser_engine_rules.is_empty()
+        {
+            rules = c.parser_engine_rules.clone();
+        }
+    }
+    let bare = chunking
+        .get("parser_engine")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    resolve_parser_engine(&rules, bare, ext)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +385,42 @@ mod tests {
         assert_eq!(eff.parser_engine_rules[0].file_types, ["docx"]);
         assert_eq!(engine_for_file(&eff.parser_engine_rules, "DOCX"), "mineru");
         assert!(engine_for_file(&eff.parser_engine_rules, "pdf").is_empty());
+    }
+
+    #[test]
+    fn default_engine_table_office_anydoc_pdf_builtin() {
+        let empty = serde_json::json!({});
+        assert_eq!(parser_engine_for(&empty, None, "docx"), "anydoc");
+        assert_eq!(parser_engine_for(&empty, None, "DOCX"), "anydoc");
+        assert_eq!(parser_engine_for(&empty, None, "xlsx"), "anydoc");
+        assert_eq!(parser_engine_for(&empty, None, "ppt"), "anydoc");
+        assert_eq!(parser_engine_for(&empty, None, "pdf"), "builtin");
+        assert_eq!(parser_engine_for(&empty, None, "txt"), "");
+        let bare = serde_json::json!({"parser_engine": "builtin"});
+        assert_eq!(parser_engine_for(&bare, None, "docx"), "anydoc");
+        assert_eq!(parser_engine_for(&bare, None, "txt"), "builtin");
+        let mineru = serde_json::json!({
+            "parser_engine": "builtin",
+            "parser_engine_rules": [{"file_types": ["pdf"], "engine": "mineru"}]
+        });
+        assert_eq!(parser_engine_for(&mineru, None, "pdf"), "mineru");
+        assert_eq!(parser_engine_for(&mineru, None, "txt"), "builtin");
+        let paddle = ProcessOverrides {
+            parser_engine_rules: vec![ParserEngineRule {
+                file_types: vec!["pdf".into()],
+                engine: "paddle".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(parser_engine_for(&mineru, Some(&paddle), "pdf"), "paddle");
+        let o = ProcessOverrides {
+            parser_engine_rules: vec![ParserEngineRule {
+                file_types: vec!["docx".into()],
+                engine: "builtin".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(parser_engine_for(&mineru, Some(&o), "pdf"), "builtin");
     }
 
     #[test]

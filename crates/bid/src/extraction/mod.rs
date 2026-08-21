@@ -23,6 +23,11 @@ pub use types::{
     ExtractionScope,
 };
 
+pub fn sections_for_document(markdown: &str) -> Result<Vec<ExtractedSection>, String> {
+    let policy = default_policy()?;
+    Ok(build_sections(markdown, &ExtractionScope::Document, policy))
+}
+
 pub fn configured_mode() -> Result<ExtractionMode, String> {
     ExtractionMode::from_env()
 }
@@ -295,10 +300,16 @@ impl TenderExtractionEngine {
         }
 
         if !diagnostics.coverage.uncovered_spans.is_empty() {
-            return Err(ExtractionFailure {
-                message: "candidate_spans_uncovered".into(),
-                diagnostics,
-            });
+            if self.mode == ExtractionMode::Agent {
+                return Err(ExtractionFailure {
+                    message: "candidate_spans_uncovered".into(),
+                    diagnostics,
+                });
+            }
+            diagnostics.partial_failure = true;
+        }
+        if !diagnostics.fallback_reasons.is_empty() {
+            diagnostics.partial_failure = true;
         }
 
         Ok(ExtractionReport {
@@ -587,6 +598,11 @@ mod tests {
         assert_golden(
             include_str!("../../../../testdata/bid-extraction/cn-tender-golden-02.md"),
             include_str!("../../../../testdata/bid-extraction/cn-tender-golden-02.expected.json"),
+        )
+        .await;
+        assert_golden(
+            include_str!("../../../../testdata/bid-extraction/cn-tender-golden-03.md"),
+            include_str!("../../../../testdata/bid-extraction/cn-tender-golden-03.expected.json"),
         )
         .await;
     }

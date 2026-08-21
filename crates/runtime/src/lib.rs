@@ -40,6 +40,8 @@ pub fn queue_for(task_type: &str) -> &'static str {
 
 /// DocumentProcessTimeout (2h) + 10m buffer. Brain `staleThreshold`.
 pub const HOUSEKEEP_STALE_SECS: i64 = DOCUMENT_PROCESS_TIMEOUT_SECS as i64 + 10 * 60;
+/// Bid extract heartbeats every 30s; three missed beats ≈ 90s.
+pub const HOUSEKEEP_EXTRACT_STALE_SECS: i64 = 90;
 pub const HOUSEKEEP_CRON: &str = "0 */5 * * * *";
 
 pub fn housekeep_stale() -> Duration {
@@ -107,6 +109,7 @@ mod tests {
         assert_eq!(POOL_SHARED, "shared");
         assert_eq!(HOUSEKEEP_CRON, "0 */5 * * * *");
         assert_eq!(HOUSEKEEP_STALE_SECS, 2 * 3600 + 10 * 60);
+        assert_eq!(HOUSEKEEP_EXTRACT_STALE_SECS, 90);
     }
 
     #[test]

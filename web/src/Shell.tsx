@@ -5,21 +5,24 @@ import { go } from "./hash";
 type Props = {
   root: "bids" | "assets";
   email: string;
-  crumbs: string;
+  crumbs: ReactNode;
   title: string;
   extra?: ReactNode;
   lead?: ReactNode;
+  steps?: ReactNode;
+  find?: boolean;
   tree?: ReactNode;
   inspector?: ReactNode;
   children: ReactNode;
   className?: string;
 };
 
-export function Shell({ root, email, crumbs, title, extra, lead, tree, inspector, children, className }: Props) {
+export function Shell({ root, email, crumbs, title, extra, lead, steps, find = true, tree, inspector, children, className }: Props) {
   const [menu, setMenu] = useState(false);
   const initial = !email || email.startsWith("dev@") ? "张" : email.slice(0, 1).toUpperCase();
+  const wide = tree == null;
   return (
-    <div className="app">
+    <div className={`app${wide ? " no-side" : ""}`}>
       <header className="pnav">
         <div className="pnav-left" style={{ position: "relative" }}>
           <div className="mark">KB</div>
@@ -73,18 +76,23 @@ export function Shell({ root, email, crumbs, title, extra, lead, tree, inspector
           <div className="avatar">{initial}</div>
         </div>
       </header>
-      <aside className="side">
-        <div className="side-find">
-          <svg viewBox="0 0 24 24">
-            <circle cx="11" cy="11" r="7" />
-            <path d="M20 20l-3-3" />
-          </svg>
-          <input placeholder="快速搜索…" />
-          <kbd>⌘K</kbd>
-        </div>
-        {tree}
-      </aside>
+      {tree != null && (
+        <aside className="side">
+          {find && (
+            <div className="side-find">
+              <svg viewBox="0 0 24 24">
+                <circle cx="11" cy="11" r="7" />
+                <path d="M20 20l-3-3" />
+              </svg>
+              <input placeholder="快速搜索…" />
+              <kbd>⌘K</kbd>
+            </div>
+          )}
+          {tree}
+        </aside>
+      )}
       <div className={`maincol ${className ?? ""}`}>
+        {steps}
         <div className="pagehead">
           <div>
             <p className="crumbs">{crumbs}</p>

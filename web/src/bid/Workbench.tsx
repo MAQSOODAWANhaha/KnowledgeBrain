@@ -16,7 +16,7 @@ import {
   api,
   downloadExport,
 } from "../api";
-import { bidHref, go, parseBidRoute, useHash } from "../hash";
+import { BID_STEPS, type BidStep, bidHref, go, parseBidRoute, useHash } from "../hash";
 import { Shell } from "../Shell";
 import { BookletPane } from "./BookletPane";
 import { ClauseDetail } from "./ClauseDetail";
@@ -38,33 +38,46 @@ function matchesRetryRunning(status?: string): boolean {
   return status === "pending" || status === "running";
 }
 
-type BidStage = "upload" | "parse" | "eval" | "booklet";
-
-function bidStage(view: string, docs: BidDoc[], derived: Derived, clauses: Clause[]): BidStage {
-  if (view === "booklet") return "booklet";
-  if (docs.length === 0) return "upload";
-  if (!derived.files_ready || derived.extract_running || clauses.length === 0) return "parse";
-  return "eval";
-}
-
-function BidSteps({ stage }: { stage: BidStage }) {
-  const items: { key: BidStage; n: string; label: string }[] = [
-    { key: "upload", n: "1", label: "上传" },
-    { key: "parse", n: "2", label: "解析" },
-    { key: "eval", n: "3", label: "评估" },
-    { key: "booklet", n: "4", label: "成稿" },
-  ];
-  const order: BidStage[] = ["upload", "parse", "eval", "booklet"];
-  const cur = order.indexOf(stage);
+function BidWizard({
+  id,
+  step,
+  view,
+  part,
+  docs,
+  derived,
+}: {
+  id: string;
+  step: BidStep;
+  view: string;
+  part: string;
+  docs: BidDoc[];
+  derived: Derived;
+}) {
+  const failed = docs.some((d) => d.parse_status === "failed" || d.extract_status === "failed");
+  const busy =
+    derived.extract_running || docs.some((d) => d.parse_status === "pending" || d.parse_status === "processing");
+  const cur = BID_STEPS.findIndex((s) => s.key === step);
   return (
-    <div className="steps" style={{ marginTop: 10 }}>
-      {items.map((it, i) => (
-        <div key={it.key} className={i === cur ? "on" : i < cur ? "done" : undefined}>
-          <i>{it.n}</i>
-          <span>{it.label}</span>
-        </div>
-      ))}
-    </div>
+    <nav className="wizard">
+      {BID_STEPS.map((it, i) => {
+        const href =
+          it.key === "eval"
+            ? bidHref(id, step === "eval" && view !== "booklet" ? view : "commercial", { step: "eval" })
+            : it.key === "booklet"
+              ? bidHref(id, "booklet", { step: "booklet", part: step === "booklet" ? part : "1" })
+              : bidHref(id, "files", { step: "files" });
+        let cls = i < cur ? "done" : undefined;
+        if (it.key === step) cls = failed && step === "files" ? "fail" : "on";
+        return (
+          <a key={it.key} className={cls} href={`#${href}`}>
+            <i>{it.n}</i>
+            <span>{it.label}</span>
+            {it.key === "files" && busy && step === "files" && <em>进行中</em>}
+            {it.key === "files" && failed && <em>有失败</em>}
+          </a>
+        );
+      })}
+    </nav>
   );
 }
 
@@ -75,6 +88,7 @@ export function Workbench({ email }: { email: string }) {
   const view = route?.view ?? "commercial";
   const part = route?.part ?? "1";
   const pane = route?.pane ?? "table";
+  const doc = route?.doc ?? null;
 
   const [project, setProject] = useState<Project | null>(null);
   const [derived, setDerived] = useState<Derived | null>(null);
@@ -104,16 +118,17 @@ export function Workbench({ email }: { email: string }) {
   useEffect(() => {
     if (!route) return;
     if (path.includes("/picks") || path.includes("/preview") || path.includes("/booklet/")) {
-      go(bidHref(route.id, route.view, route.view === "booklet" ? { part: route.part, pane: "draft" } : undefined));
+      go(bidHref(route.id, "booklet", { step: "booklet", part: route.part, pane: "draft" }));
     }
   }, [path, route]);
 
   async function load() {
     if (!id) return;
     const unit = unitIdForView(view);
+    try {
     const [b, d, c, un, bk, sh] = await Promise.all([
       api.bid(id),
-      api.docs(id).catch(() => ({ documents: [] })),
+      api.docs(id),
       api.clauses(id).catch(() => []),
       api.units(id).catch(() => ({ units: [] })),
       api.booklet(id).catch(() => ({ parts: [] })),
@@ -123,6 +138,7 @@ export function Workbench({ email }: { email: string }) {
     setDerived(b.derived);
     setLatestExtract(b.latest_extract ?? null);
     setDocs(d.documents);
+    setPendingNames((names) => names.filter((n) => !d.documents.some((doc) => doc.file_name === n)));
     setClauses(c);
     setUnits(un.units);
     setBooklet(bk.parts);
@@ -141,6 +157,9 @@ export function Workbench({ email }: { email: string }) {
       if (cur && pool.some((x) => x.id === cur)) return cur;
       return pool.find((x) => x.status === "draft")?.id ?? pool[0]?.id ?? null;
     });
+    } catch (e) {
+      toast(errMsg(e), "red");
+    }
   }
 
   useEffect(() => {
@@ -157,21 +176,23 @@ export function Workbench({ email }: { email: string }) {
   }, [view]);
 
   useEffect(() => {
-    if (!project || !id) return;
-    if (view === "commercial" && docs.length === 0 && clauses.length === 0) {
-      go(bidHref(id, "files"));
-    }
-  }, [project, id, view, docs.length, clauses.length]);
+    if (!project || !id || !route) return;
+    if (route.step) return;
+    go(bidHref(id, "files", { step: "files" }));
+  }, [project, id, route]);
 
   useEffect(() => {
-    if (view !== "files" || !derived || !advanceAfterUpload.current) return;
-    if (!derived.files_ready || derived.extract_running) return;
+    if (!derived || !advanceAfterUpload.current) return;
+    if (derived.extract_running) return;
+    const busy = docs.some((d) => d.parse_status === "pending" || d.parse_status === "processing");
+    if (busy) return;
     advanceAfterUpload.current = false;
-    if (clauses.length > 0) {
-      go(bidHref(id, "commercial"));
-      toast("文件已解析，条款已抽出，开始评估");
+    if (docs.some((d) => d.parse_status === "failed")) {
+      toast("有文件解析失败，请看列表后重试", "red");
+      return;
     }
-  }, [view, derived, clauses.length, id]);
+    if (clauses.length > 0) toast("文件已解析，条款已抽出。可去评估");
+  }, [derived, clauses.length, docs]);
 
   useEffect(() => {
     const server = booklet.find((p) => p.key === bookletKey)?.markdown ?? "";
@@ -257,22 +278,37 @@ export function Workbench({ email }: { email: string }) {
     );
   }
 
-  const job = view === "booklet" ? "成稿" : view === "files" ? "文件" : "评估";
+  const step: BidStep = route.step ?? "files";
   const sectionLabel =
-    view === "commercial"
-      ? "商务"
-      : view === "unsectioned"
-        ? "未归段"
-        : view === "files"
-          ? ""
-          : view === "booklet"
-            ? partTitle(part, units)
+    step === "files"
+      ? ""
+      : step === "booklet"
+        ? partTitle(part, units)
+        : view === "commercial"
+          ? "商务"
+          : view === "unsectioned"
+            ? "未归段"
             : techUnits.find((u) => u.id === view)?.heading_path || "技术段";
-  const crumbs = ["投标项目", project.title, job, sectionLabel].filter(Boolean).join(" / ");
+  const stepLabel = BID_STEPS.find((s) => s.key === step)?.label ?? "评估";
+  const crumbs = (
+    <>
+      <a href="#/">投标项目</a>
+      <i>/</i>
+      <a href={`#${bidHref(id, "files", { step: "files" })}`}>{project.title}</a>
+      <i>/</i>
+      <span>{stepLabel}</span>
+      {sectionLabel ? (
+        <>
+          <i>/</i>
+          <span>{sectionLabel}</span>
+        </>
+      ) : null}
+    </>
+  );
   const pageTitle =
-    view === "files"
+    step === "files"
       ? "招标文件"
-      : view === "booklet"
+      : step === "booklet"
         ? partTitle(part, units)
         : pane === "detail" && cur
           ? cur.text.slice(0, 18)
@@ -285,12 +321,12 @@ export function Workbench({ email }: { email: string }) {
 
   const extra = (
     <>
-      {view === "booklet" && (
+      {step === "booklet" && (
         <nav className="mode">
-          <button type="button" className={pane !== "draft" ? "on" : undefined} onClick={() => go(bidHref(id, "booklet", { part, pane: "table" }))}>
+          <button type="button" className={pane !== "draft" ? "on" : undefined} onClick={() => go(bidHref(id, "booklet", { step: "booklet", part, pane: "table" }))}>
             预览
           </button>
-          <button type="button" className={pane === "draft" ? "on" : undefined} onClick={() => go(bidHref(id, "booklet", { part, pane: "draft" }))}>
+          <button type="button" className={pane === "draft" ? "on" : undefined} onClick={() => go(bidHref(id, "booklet", { step: "booklet", part, pane: "draft" }))}>
             编辑
           </button>
         </nav>
@@ -336,11 +372,21 @@ export function Workbench({ email }: { email: string }) {
   );
 
   const tree = (
-    <BidSidebar id={id} view={view} part={part} units={units} booklet={booklet} docs={docs} clauses={clauses} />
+    <BidSidebar
+      id={id}
+      step={step}
+      view={view}
+      part={part}
+      doc={doc}
+      units={units}
+      booklet={booklet}
+      clauses={clauses}
+      docs={docs}
+    />
   );
 
   const inspector =
-    view === "files" || view === "booklet" || pane === "detail" ? undefined : (
+    step !== "eval" || pane === "detail" ? undefined : (
       <Inspector
         view={view}
         cur={view === "booklet" ? null : cur}
@@ -385,33 +431,39 @@ export function Workbench({ email }: { email: string }) {
       crumbs={crumbs}
       title={pageTitle}
       extra={extra}
-      lead={<BidSteps stage={bidStage(view, docs, derived, clauses)} />}
+      find={false}
+      steps={
+        <div className="work-nav">
+          <BidWizard id={id} step={step} view={view} part={part} docs={docs} derived={derived} />
+        </div>
+      }
       tree={tree}
       inspector={inspector}
-      className={view === "booklet" ? "ed-page" : undefined}
+      className={step === "booklet" ? "ed-page" : undefined}
     >
-      {(derived.extract_running || derived.match_running || failed) && view !== "booklet" && (
+      {(derived.extract_running || derived.match_running || failed) && step === "eval" && (
         <div className={`banner ${failed ? "bad" : ""}`} style={{ margin: inspector ? "0 0 16px" : "16px 24px 0" }}>
-          {failed ? "有文件解析失败。到「文件」重试或删除后再传。" : derived.extract_running ? "正在抽条款。抽出的草稿会出现在表里。" : matchMsg}
+          {failed ? "有文件解析失败。可回到「文件」重试。" : derived.extract_running ? "正在抽条款。抽出的草稿会出现在表里。" : matchMsg}
         </div>
       )}
-      {extractNotice && !derived.extract_running && view !== "booklet" && (
+      {extractNotice && !derived.extract_running && step !== "files" && (
         <div className={`banner ${latestExtract?.status === "failed" ? "bad" : "warn"}`} style={{ margin: inspector ? "0 0 16px" : "16px 24px 0" }}>
           {extractNotice}
         </div>
       )}
-      {anyStale && view === "booklet" && (
+      {anyStale && step === "booklet" && (
         <div className="banner warn" style={{ margin: "12px 24px 0" }}>
           成稿已过期。导出默认保留人句；勾选「重生成」才会覆盖。
         </div>
       )}
-      {view === "files" ? (
-        <>
+      {step === "files" ? (
+        <div className="wrap stack">
         <FilesPane
           docs={docs}
           ended={ended}
           uploading={uploading}
           pendingNames={pendingNames}
+          focusId={doc}
           onUpload={(files) => {
             setUploading(true);
             setPendingNames(files.map((f) => f.name));
@@ -425,13 +477,15 @@ export function Workbench({ email }: { email: string }) {
               .catch((e) => toast(errMsg(e), "red"))
               .finally(() => {
                 setUploading(false);
-                setPendingNames([]);
               });
           }}
           onRetry={(docId) => {
             void api
               .retryDoc(id, docId)
-              .then(() => toast("已重试"))
+              .then(() => {
+                toast("已重新排队解析");
+                return load();
+              })
               .catch((e) => toast(errMsg(e), "red"));
           }}
           onDelete={(docId) => {
@@ -445,7 +499,7 @@ export function Workbench({ email }: { email: string }) {
           }}
         />
         {docs.length > 0 && (
-          <div className="wrap" style={{ paddingTop: 0 }}>
+          <>
             {derived.extract_running && <div className="banner">文件已解析。正在抽商务 / 技术条款。</div>}
             {derived.files_ready && !derived.extract_running && clauses.length === 0 && (
               <div className="card">
@@ -467,23 +521,13 @@ export function Workbench({ email }: { email: string }) {
                   >
                     再抽一次
                   </button>
-                  <button className="btn pri" type="button" onClick={() => go(bidHref(id, "commercial"))}>
-                    去评估手补
-                  </button>
                 </div>
               </div>
             )}
-            {derived.files_ready && !derived.extract_running && clauses.length > 0 && (
-              <div className="row" style={{ justifyContent: "flex-end" }}>
-                <button className="btn pri" type="button" onClick={() => go(bidHref(id, "commercial"))}>
-                  去评估
-                </button>
-              </div>
-            )}
-          </div>
+          </>
         )}
-        </>
-      ) : view === "booklet" && docs.length === 0 ? (
+        </div>
+      ) : step === "booklet" && docs.length === 0 ? (
         <div className="wrap">
           <div className="card">
             <div className="empty">
@@ -491,13 +535,13 @@ export function Workbench({ email }: { email: string }) {
               <p className="note" style={{ margin: "0 0 16px" }}>
                 抽出条款并评估后，再编成稿、导出 Word / PDF。
               </p>
-              <button className="btn pri" type="button" onClick={() => go(bidHref(id, "files"))}>
+              <button className="btn pri" type="button" onClick={() => go(bidHref(id, "files", { step: "files" }))}>
                 去上传
               </button>
             </div>
           </div>
         </div>
-      ) : view === "booklet" ? (
+      ) : step === "booklet" ? (
         <BookletPane
           mdDraft={mdDraft}
           ended={ended}
@@ -548,7 +592,7 @@ export function Workbench({ email }: { email: string }) {
           extractRunning={derived.extract_running || currentRetryRunning}
           retryStatus={currentUnit?.retry_status}
           retryError={currentUnit?.error_message}
-          onGoFiles={() => go(bidHref(id, "files"))}
+          onGoFiles={() => go(bidHref(id, "files", { step: "files" }))}
           onExtract={() => {
             const retry = view !== "commercial" && view !== "unsectioned"
               ? api.retrySection(id, view)
@@ -570,7 +614,7 @@ export function Workbench({ email }: { email: string }) {
                     .mergeSection(id, view, prev)
                     .then(() => {
                       toast("已并入上一段");
-                      go(bidHref(id, prev));
+                      go(bidHref(id, prev, { step: "eval" }));
                     })
                     .catch((e) => toast(errMsg(e), "red"));
                 }
