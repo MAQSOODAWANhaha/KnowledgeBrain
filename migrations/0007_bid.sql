@@ -130,8 +130,9 @@ CREATE TABLE IF NOT EXISTS bid_extract_runs (
 CREATE UNIQUE INDEX IF NOT EXISTS bid_extract_runs_auto_conversion_uidx
     ON bid_extract_runs (document_id, conversion_generation)
     WHERE triggered_by = 'auto';
-CREATE UNIQUE INDEX IF NOT EXISTS bid_extract_runs_one_running_project_uidx
-    ON bid_extract_runs (project_id) WHERE status = 'running';
+-- One running extract per document is created in 0009. Do not recreate the old
+-- project-wide unique index here: apply_0001 re-runs this file, and parallel
+-- per-document runs would make CREATE UNIQUE fail.
 CREATE INDEX IF NOT EXISTS bid_extract_runs_project_latest_idx
     ON bid_extract_runs (project_id, started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS bid_extract_runs_status_heartbeat_idx
