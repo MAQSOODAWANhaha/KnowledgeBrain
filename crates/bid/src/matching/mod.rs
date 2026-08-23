@@ -465,4 +465,67 @@ mod tests {
             vec!["EMPTY_ROUTE", "FROZEN_SCOPE", "SKIP_UNIT"]
         );
     }
+
+    #[test]
+    fn canonical_decimal_never_emits_negative_zero() {
+        let value = "-0.0000001".parse::<Decimal>().unwrap();
+        assert_eq!(
+            serde_json::to_string(&CanonicalDecimal::new(value)).unwrap(),
+            "\"0.000000\""
+        );
+    }
+
+    #[test]
+    fn empty_report_has_exact_canonical_v1_bytes() {
+        let report = MatchingReportV1 {
+            project_id: Uuid::from_u128(21),
+            source_artifacts: Vec::new(),
+            payload: MatchingReportPayloadV1 {
+                schema_version: MATCHING_REPORT_SCHEMA_V1,
+                report_id: Uuid::from_u128(1),
+                manifest_id: Uuid::from_u128(2),
+                job_id: Uuid::from_u128(3),
+                route_id: Uuid::from_u128(4),
+                route: MatchRoute::Commercial,
+                generation: 5,
+                mutation_watermark: 6,
+                empty_disposition: Some(EmptyDisposition::ClearRoute),
+                coverage: CoverageCountsV1 {
+                    total: 0,
+                    eligible: 0,
+                    supported: 0,
+                    contradicted: 0,
+                    insufficient: 0,
+                    unresolved: 0,
+                },
+                quality_status: QualityStatus::Review,
+                degraded: true,
+                reason_codes: vec!["EMPTY_ROUTE".into(), "FROZEN_SCOPE".into()],
+                score: ReportScoreV1::NotScored {
+                    reason: "NO_EVIDENCE".into(),
+                },
+                requirement_decisions: Vec::new(),
+                candidates: Vec::new(),
+                candidate_groups: Vec::new(),
+                source_artifacts: Vec::new(),
+                ai_run_id: None,
+                ai_span_id: None,
+            },
+        };
+        let expected = concat!(
+            "{\"schema_version\":1,\"report_id\":\"00000000-0000-0000-0000-000000000001\",",
+            "\"manifest_id\":\"00000000-0000-0000-0000-000000000002\",",
+            "\"job_id\":\"00000000-0000-0000-0000-000000000003\",",
+            "\"route_id\":\"00000000-0000-0000-0000-000000000004\",",
+            "\"route\":{\"kind\":\"commercial\"},\"generation\":5,\"mutation_watermark\":6,",
+            "\"empty_disposition\":\"clear_route\",",
+            "\"coverage\":{\"total\":0,\"eligible\":0,\"supported\":0,\"contradicted\":0,\"insufficient\":0,\"unresolved\":0},",
+            "\"quality_status\":\"review\",\"degraded\":true,",
+            "\"reason_codes\":[\"EMPTY_ROUTE\",\"FROZEN_SCOPE\"],",
+            "\"score\":{\"status\":\"not_scored\",\"reason\":\"NO_EVIDENCE\"},",
+            "\"requirement_decisions\":[],\"candidates\":[],\"candidate_groups\":[],",
+            "\"source_artifacts\":[],\"ai_run_id\":null,\"ai_span_id\":null}"
+        );
+        assert_eq!(report.canonical_bytes(), expected.as_bytes());
+    }
 }

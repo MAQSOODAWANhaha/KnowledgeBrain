@@ -181,8 +181,10 @@ where
             ));
         }
 
-        let mut source_by_identity: BTreeMap<(Uuid, Uuid, Uuid, String), SourceChunkArtifactV1> =
-            BTreeMap::new();
+        let mut source_by_identity: BTreeMap<
+            (Uuid, Uuid, Uuid, String, String, String),
+            SourceChunkArtifactV1,
+        > = BTreeMap::new();
         let mut candidates = Vec::new();
         let mut dedup = HashSet::new();
         for loaded in &claimed.frozen_hits {
@@ -214,12 +216,19 @@ where
                 hit.document_id,
                 hit.source_chunk_id,
                 hit.chunk_sha256.clone(),
+                hit.frozen_document_display_name.clone(),
+                hit.retrieval_contract_version.clone(),
             );
             let source_id = deterministic_uuid(
                 "MatchingSourceChunkV1",
                 format!(
-                    "{}:{}:{}:{}",
-                    source_identity.0, source_identity.1, source_identity.2, source_identity.3
+                    "{}:{}:{}:{}:{}:{}",
+                    source_identity.0,
+                    source_identity.1,
+                    source_identity.2,
+                    source_identity.3,
+                    source_identity.4,
+                    source_identity.5
                 )
                 .as_bytes(),
             );
@@ -625,6 +634,16 @@ mod tests {
             .iter()
             .filter(|row| row.recommended)
             .collect();
+        assert_eq!(
+            report
+                .payload
+                .candidates
+                .iter()
+                .filter(|row| row.support == VerifierSupport::Supported)
+                .count(),
+            2,
+            "all supported candidates remain visible for a 1..N human selection"
+        );
         assert_eq!(recommended.len(), 1);
         assert_eq!(recommended[0].route_product_ordinal, 1);
         assert_eq!(
@@ -675,6 +694,86 @@ mod tests {
             report.payload.reason_codes,
             vec!["FROZEN_SCOPE", "NO_EVIDENCE"]
         );
+    }
+
+    #[tokio::test]
+    async fn report_quality_matrix_covers_empty_select_review_and_reject() {
+        let empty = MatchingWorkflow::new(FakeVerifier)
+            .execute(&claim(Vec::new(), Vec::new()), Uuid::from_u128(9))
+            .await
+            .unwrap();
+        assert_eq!(empty.payload.quality_status, QualityStatus::Review);
+        assert_eq!(empty.payload.coverage.total, 0);
+
+        let first = requirement(10, 0);
+        let second = requirement(11, 1);
+        let first_hit = hit(first.id, 0, 1, 1);
+        let second_hit = hit(second.id, 1, 1, 2);
+        let all_select = MatchingWorkflow::new(FakeVerifier)
+            .execute(
+                &claim(
+                    vec![first.clone(), second.clone()],
+                    vec![first_hit.clone(), second_hit.clone()],
+                ),
+                Uuid::from_u128(9),
+            )
+            .await
+            .unwrap();
+        assert_eq!(all_select.payload.quality_status, QualityStatus::Pass);
+        assert_eq!(all_select.payload.coverage.supported, 2);
+
+        let select_review = MatchingWorkflow::new(ScriptedVerifier(HashMap::from([
+            (first_hit.source_chunk_id, VerifierSupport::Supported),
+            (second_hit.source_chunk_id, VerifierSupport::Unresolved),
+        ])))
+        .execute(
+            &claim(
+                vec![first.clone(), second.clone()],
+                vec![first_hit.clone(), second_hit.clone()],
+            ),
+            Uuid::from_u128(9),
+        )
+        .await
+        .unwrap();
+        assert_eq!(select_review.payload.quality_status, QualityStatus::Review);
+
+        let review_reject = MatchingWorkflow::new(ScriptedVerifier(HashMap::from([
+            (first_hit.source_chunk_id, VerifierSupport::Insufficient),
+            (second_hit.source_chunk_id, VerifierSupport::Contradicted),
+        ])))
+        .execute(
+            &claim(vec![first, second], vec![first_hit, second_hit]),
+            Uuid::from_u128(9),
+        )
+        .await
+        .unwrap();
+        assert_eq!(review_reject.payload.quality_status, QualityStatus::Block);
+        assert_eq!(review_reject.payload.coverage.insufficient, 1);
+        assert_eq!(review_reject.payload.coverage.contradicted, 1);
+    }
+
+    #[tokio::test]
+    async fn frozen_source_identity_keeps_distinct_display_name_snapshots() {
+        let first = requirement(10, 0);
+        let second = requirement(11, 1);
+        let first_hit = hit(first.id, 0, 1, 1);
+        let mut renamed_hit = hit(second.id, 0, 1, 2);
+        renamed_hit.document_id = first_hit.document_id;
+        renamed_hit.source_chunk_id = first_hit.source_chunk_id;
+        renamed_hit.chunk_utf8 = first_hit.chunk_utf8.clone();
+        renamed_hit.chunk_sha256 = first_hit.chunk_sha256.clone();
+        renamed_hit.chunk_byte_length = first_hit.chunk_byte_length;
+        renamed_hit.quote_end_offset = first_hit.quote_end_offset;
+        renamed_hit.frozen_document_display_name = "renamed-manual.pdf".into();
+
+        let report = MatchingWorkflow::new(FakeVerifier)
+            .execute(
+                &claim(vec![first, second], vec![first_hit, renamed_hit]),
+                Uuid::from_u128(9),
+            )
+            .await
+            .unwrap();
+        assert_eq!(report.source_artifacts.len(), 2);
     }
 
     #[tokio::test]

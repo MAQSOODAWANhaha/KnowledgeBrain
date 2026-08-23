@@ -6,6 +6,8 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 pub const KNOWLEDGE_EVIDENCE_SCHEMA_V1: u16 = 1;
@@ -74,6 +76,90 @@ pub struct ProductEvidenceHitV1(pub KnowledgeEvidenceHitV1);
 #[serde(transparent)]
 pub struct CompanyEvidenceHitV1(pub KnowledgeEvidenceHitV1);
 
+/// Validate the complete point-in-time snapshots returned by a retrieval port
+/// before a consumer freezes them into its own domain. This check deliberately
+/// lives on the port contract so every adapter, including test and remote
+/// implementations, is held to the same byte and quota invariants.
+pub fn validate_evidence_hit_batch(
+    expected_workspace_kind: &str,
+    hits: &[KnowledgeEvidenceHitV1],
+    policy: &RetrievalPolicyIdentityV1,
+) -> Result<(), KnowledgeRetrievalError> {
+    if !matches!(expected_workspace_kind, "product_line" | "company")
+        || policy.contract_version.is_empty()
+        || policy.max_hits == 0
+        || policy.max_chunk_bytes == 0
+        || policy.max_total_bytes == 0
+        || hits.len() > policy.max_hits as usize
+    {
+        return Err(KnowledgeRetrievalError::InvalidHit(
+            "invalid expected scope or returned-hit quota".into(),
+        ));
+    }
+
+    let mut total_bytes = 0u64;
+    let mut identities = HashSet::new();
+    for (index, hit) in hits.iter().enumerate() {
+        let chunk = hit.chunk_utf8.as_bytes();
+        let start = usize::try_from(hit.quote_start_offset).map_err(|_| {
+            KnowledgeRetrievalError::InvalidHit("quote start offset overflow".into())
+        })?;
+        let end = usize::try_from(hit.quote_end_offset)
+            .map_err(|_| KnowledgeRetrievalError::InvalidHit("quote end offset overflow".into()))?;
+        total_bytes = total_bytes
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| KnowledgeRetrievalError::InvalidHit("hit byte quota overflow".into()))?;
+
+        if hit.schema_version != KNOWLEDGE_EVIDENCE_SCHEMA_V1
+            || hit.workspace_kind != expected_workspace_kind
+            || hit.document_id.is_nil()
+            || hit.source_chunk_id.is_nil()
+            || hit.product_id.is_nil()
+            || hit.product_version_id.is_nil()
+            || hit.frozen_document_display_name.is_empty()
+            || hit.retrieval_contract_version != policy.contract_version
+            || hit.offset_unit != UTF8_BYTE_OFFSET_UNIT
+            || hit.chunk_byte_length != chunk.len() as u64
+            || hit.chunk_byte_length > u64::from(policy.max_chunk_bytes)
+            || hit.chunk_sha256 != hex::encode(Sha256::digest(chunk))
+            || start >= end
+            || end > chunk.len()
+            || !hit.chunk_utf8.is_char_boundary(start)
+            || !hit.chunk_utf8.is_char_boundary(end)
+            || hit.retrieval_rank != index as u32 + 1
+            || !is_decimal_literal(&hit.retrieval_raw_score)
+            || !identities.insert((
+                hit.document_id,
+                hit.source_chunk_id,
+                hit.quote_start_offset,
+                hit.quote_end_offset,
+            ))
+        {
+            return Err(KnowledgeRetrievalError::InvalidHit(
+                "evidence scope, bytes, digest, offset, rank, or identity is invalid".into(),
+            ));
+        }
+    }
+    if total_bytes > policy.max_total_bytes {
+        return Err(KnowledgeRetrievalError::InvalidHit(
+            "returned-hit byte quota exceeded".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_decimal_literal(value: &str) -> bool {
+    let value = value.strip_prefix('-').unwrap_or(value);
+    let mut parts = value.split('.');
+    let integer = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    !integer.is_empty()
+        && integer.bytes().all(|byte| byte.is_ascii_digit())
+        && fraction
+            .is_none_or(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && parts.next().is_none()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum KnowledgeRetrievalError {
     #[error("invalid evidence request: {0}")]
@@ -95,4 +181,64 @@ pub trait KnowledgeRetrievalPort: Send + Sync {
         &self,
         request: CompanyEvidenceRequestV1,
     ) -> Result<Vec<CompanyEvidenceHitV1>, KnowledgeRetrievalError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn hit(chunk: &str) -> KnowledgeEvidenceHitV1 {
+        KnowledgeEvidenceHitV1 {
+            schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V1,
+            document_id: Uuid::from_u128(1),
+            source_chunk_id: Uuid::from_u128(2),
+            product_id: Uuid::from_u128(3),
+            product_version_id: Uuid::from_u128(4),
+            workspace_kind: "product_line".into(),
+            frozen_document_display_name: "manual.pdf".into(),
+            chunk_utf8: chunk.into(),
+            chunk_sha256: hex::encode(Sha256::digest(chunk.as_bytes())),
+            chunk_byte_length: chunk.len() as u64,
+            quote_start_offset: 3,
+            quote_end_offset: 4,
+            offset_unit: UTF8_BYTE_OFFSET_UNIT.into(),
+            retrieval_rank: 1,
+            retrieval_raw_score: "0.500000".into(),
+            retrieval_contract_version: "knowledge-evidence-v1".into(),
+        }
+    }
+
+    fn policy() -> RetrievalPolicyIdentityV1 {
+        RetrievalPolicyIdentityV1 {
+            contract_version: "knowledge-evidence-v1".into(),
+            policy_sha256: "a".repeat(64),
+            max_hits: 2,
+            max_chunk_bytes: 1024,
+            max_total_bytes: 2048,
+        }
+    }
+
+    #[test]
+    fn returned_hit_batch_validates_complete_snapshot_before_freeze() {
+        let value = hit("中A文");
+        validate_evidence_hit_batch("product_line", &[value], &policy()).unwrap();
+    }
+
+    #[test]
+    fn returned_hit_batch_rejects_wrong_route_invalid_bytes_and_noncanonical_rank() {
+        let value = hit("中A文");
+        assert!(
+            validate_evidence_hit_batch("company", std::slice::from_ref(&value), &policy())
+                .is_err()
+        );
+
+        let mut invalid_offset = value.clone();
+        invalid_offset.quote_start_offset = 1;
+        assert!(validate_evidence_hit_batch("product_line", &[invalid_offset], &policy()).is_err());
+
+        let mut invalid_rank = value;
+        invalid_rank.retrieval_rank = 2;
+        assert!(validate_evidence_hit_batch("product_line", &[invalid_rank], &policy()).is_err());
+    }
 }

@@ -6,13 +6,13 @@
 
 use domain::knowledge_retrieval::{
     CompanyEvidenceRequestV1, KNOWLEDGE_EVIDENCE_SCHEMA_V1, KnowledgeRetrievalPort,
-    ProductEvidenceRequestV1, RetrievalPolicyIdentityV1,
+    ProductEvidenceRequestV1, RetrievalPolicyIdentityV1, validate_evidence_hit_batch,
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use uuid::Uuid;
 
 const CLAIM_LEASE_MS: i32 = 300_000;
@@ -198,7 +198,6 @@ pub struct PublishRouteV2 {
     pub report_id: Uuid,
     pub report_nonce: Uuid,
     pub canonical_payload: Vec<u8>,
-    pub content_sha256: String,
     pub sources: Vec<StagedSourceArtifactV1>,
     pub candidates: Vec<StagedCandidateV1>,
     pub evidences: Vec<StagedEvidenceV1>,
@@ -447,9 +446,10 @@ async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
         routes.iter().map(|route| (route.id, route)).collect();
     let mut raw_hits = Vec::new();
     for requirement in &requirements {
-        let hits = match route_lookup[&requirement.route_id].route {
-            MatchRoute::Technical { .. } => port
-                .retrieve_product_evidence(ProductEvidenceRequestV1 {
+        let (workspace_kind, hits) = match route_lookup[&requirement.route_id].route {
+            MatchRoute::Technical { .. } => (
+                "product_line",
+                port.retrieve_product_evidence(ProductEvidenceRequestV1 {
                     schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V1,
                     requirement_identity_sha256: requirement.sha256.clone(),
                     requirement_text: requirement.text.clone(),
@@ -461,8 +461,10 @@ async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
                 .into_iter()
                 .map(|value| value.0)
                 .collect::<Vec<_>>(),
-            MatchRoute::Commercial => port
-                .retrieve_company_evidence(CompanyEvidenceRequestV1 {
+            ),
+            MatchRoute::Commercial => (
+                "company",
+                port.retrieve_company_evidence(CompanyEvidenceRequestV1 {
                     schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V1,
                     requirement_identity_sha256: requirement.sha256.clone(),
                     requirement_text: requirement.text.clone(),
@@ -474,7 +476,10 @@ async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
                 .into_iter()
                 .map(|value| value.0)
                 .collect::<Vec<_>>(),
+            ),
         };
+        validate_evidence_hit_batch(workspace_kind, &hits, &policy)
+            .map_err(|error| protocol(error.to_string()))?;
         for hit in hits {
             raw_hits.push((requirement, hit));
         }
@@ -899,6 +904,7 @@ pub async fn heartbeat_claim(
         "UPDATE bid_matching_job_claims claim SET heartbeat_at=clock_timestamp()
           FROM bid_matching_jobs job
          WHERE claim.job_id=$1 AND claim.attempt=$2 AND claim.claim_token=$3
+           AND claim.claim_lease_ms=$4 AND claim.lease_policy_generation=$5
            AND claim.status='running' AND job.id=claim.job_id AND job.status='running'
            AND job.active_attempt=claim.attempt
            AND claim.heartbeat_at + make_interval(secs => claim.claim_lease_ms::double precision/1000.0) > clock_timestamp()",
@@ -906,6 +912,8 @@ pub async fn heartbeat_claim(
     .bind(request.job_id)
     .bind(request.claim.attempt)
     .bind(request.claim.token)
+    .bind(request.claim.claim_lease_ms)
+    .bind(request.claim.lease_policy_generation)
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() == 1 {
@@ -932,21 +940,27 @@ pub async fn publish_route(
     claimed: &ClaimedMatchingRequest,
     report: PublishRouteV2,
 ) -> Result<PublishReceipt, sqlx::Error> {
-    if let Some((status, completed_report_id)) = sqlx::query_as::<_, (String, Option<Uuid>)>(
-        "SELECT status,completed_report_id FROM bid_matching_jobs WHERE id=$1",
-    )
-    .bind(claimed.job_id)
-    .fetch_optional(pool)
-    .await?
+    // The adapter is the single authority that derives the persisted report
+    // hash. Callers provide canonical bytes, never a second digest assertion.
+    let report_sha256 = sha256_hex(&report.canonical_payload);
+    if let Some((status, completed_report_id, completed_report_sha256)) =
+        sqlx::query_as::<_, (String, Option<Uuid>, Option<String>)>(
+            "SELECT job.status,job.completed_report_id,report.content_sha256
+           FROM bid_matching_jobs job
+           LEFT JOIN bid_matching_reports report ON report.id=job.completed_report_id
+          WHERE job.id=$1",
+        )
+        .bind(claimed.job_id)
+        .fetch_optional(pool)
+        .await?
         && status == "completed"
     {
-        return Ok(if completed_report_id == Some(report.report_id) {
-            PublishReceipt::Replayed {
-                report_id: report.report_id,
-            }
-        } else {
-            PublishReceipt::Stale
-        });
+        return completed_publish_receipt(
+            completed_report_id,
+            completed_report_sha256.as_deref(),
+            report.report_id,
+            &report_sha256,
+        );
     }
     let batches = stage_collections(&report)?;
     let staging_id = open_staging_set(pool, claimed, &report, &batches).await?;
@@ -955,20 +969,30 @@ pub async fn publish_route(
         claimed,
         staging_id,
         &report.canonical_payload,
-        &report.content_sha256,
+        &report_sha256,
     )
     .await?;
     for batch in batches {
         stage_batch(pool, claimed, staging_id, batch).await?;
     }
-    commit_staged_route(
-        pool,
-        claimed,
-        staging_id,
-        report.report_id,
-        &report.content_sha256,
-    )
-    .await
+    commit_staged_route(pool, claimed, staging_id, report.report_id, &report_sha256).await
+}
+
+fn completed_publish_receipt(
+    completed_report_id: Option<Uuid>,
+    completed_report_sha256: Option<&str>,
+    requested_report_id: Uuid,
+    requested_report_sha256: &str,
+) -> Result<PublishReceipt, sqlx::Error> {
+    if completed_report_id != Some(requested_report_id) {
+        return Ok(PublishReceipt::Stale);
+    }
+    if completed_report_sha256 != Some(requested_report_sha256) {
+        return Err(protocol("COMPLETED_REPORT_PAYLOAD_MISMATCH"));
+    }
+    Ok(PublishReceipt::Replayed {
+        report_id: requested_report_id,
+    })
 }
 
 #[derive(Debug)]
@@ -997,10 +1021,14 @@ async fn open_staging_set(
         .sum::<i64>();
     let open_hash = sha256_hex(
         format!(
-            "OpenStagingSetV1:{}:{}:{}:{}:{}:{}:{}",
+            "OpenStagingSetV1:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             claimed.job_id,
             claimed.claim.attempt,
             claimed.route_id,
+            claimed.manifest_id,
+            claimed.project_id,
+            claimed.generation,
+            claimed.mutation_watermark,
             report.report_nonce,
             batches.len(),
             expected_item_count,
@@ -1009,7 +1037,7 @@ async fn open_staging_set(
         .as_bytes(),
     );
     if let Some(row) = sqlx::query(
-        "SELECT id,report_nonce,open_payload_sha256,state FROM bid_matching_staging_sets
+        "SELECT * FROM bid_matching_staging_sets
          WHERE job_id=$1 AND claim_token=$2 AND attempt=$3 AND route_id=$4 FOR UPDATE",
     )
     .bind(claimed.job_id)
@@ -1019,7 +1047,8 @@ async fn open_staging_set(
     .fetch_optional(&mut *tx)
     .await?
     {
-        if row.get::<Uuid, _>("report_nonce") != report.report_nonce
+        if !staging_set_matches_claim(&row, claimed)
+            || row.get::<Uuid, _>("report_nonce") != report.report_nonce
             || row.get::<String, _>("open_payload_sha256") != open_hash
         {
             return Err(protocol("OPEN_STAGING_PAYLOAD_MISMATCH"));
@@ -1145,10 +1174,7 @@ async fn stage_batch(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| protocol("staging set is not active"))?;
-    if set.get::<Uuid, _>("job_id") != claimed.job_id
-        || set.get::<Uuid, _>("claim_token") != claimed.claim.token
-        || set.get::<i32, _>("attempt") != claimed.claim.attempt
-    {
+    if set.get::<Uuid, _>("job_id") != claimed.job_id || !staging_set_matches_claim(&set, claimed) {
         return Err(protocol("staging claim mismatch"));
     }
     let payload_sha256 = sha256_hex(&batch.bytes);
@@ -1168,6 +1194,14 @@ async fn stage_batch(
         }
         tx.commit().await?;
         return Ok(());
+    }
+    if batch.ordinal >= set.get::<i32, _>("expected_batch_count")
+        || set.get::<i64, _>("staged_item_count") + batch.item_count as i64
+            > set.get::<i64, _>("expected_item_count")
+        || set.get::<i64, _>("staged_byte_length") + batch.bytes.len() as i64
+            > set.get::<i64, _>("expected_byte_length")
+    {
+        return Err(protocol("STAGING_OPEN_DECLARATION_MISMATCH"));
     }
     let project_totals: (i64, i64) = sqlx::query_as(
         "SELECT COALESCE(sum(staged_item_count),0)::bigint,
@@ -1539,6 +1573,9 @@ async fn commit_staged_route(
     .bind(staging_id)
     .fetch_one(&mut *tx)
     .await?;
+    if !staging_set_matches_claim(&set, claimed) {
+        return Err(protocol("staging set frozen scope mismatch"));
+    }
     if set.get::<String, _>("state") != "active" || !ttl_live {
         return Err(protocol("staging set expired"));
     }
@@ -1549,27 +1586,34 @@ async fn commit_staged_route(
     .bind(staging_id)
     .fetch_all(&mut *tx)
     .await?;
-    if rows.len() < 6
-        || rows
-            .iter()
-            .enumerate()
-            .any(|(index, row)| row.get::<i32, _>("batch_ordinal") != index as i32)
+    if rows
+        .iter()
+        .enumerate()
+        .any(|(index, row)| row.get::<i32, _>("batch_ordinal") != index as i32)
     {
         return Err(protocol("STAGING_BATCH_ORDINAL_GAP"));
     }
     let mut collections: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
-    let mut expected_items = 0i64;
-    let mut expected_bytes = 0i64;
+    let mut actual_items = 0i64;
+    let mut actual_bytes = 0i64;
     for row in rows {
-        expected_items += i64::from(row.get::<i32, _>("item_count"));
-        expected_bytes += row.get::<i64, _>("byte_length");
+        actual_items += i64::from(row.get::<i32, _>("item_count"));
+        actual_bytes += row.get::<i64, _>("byte_length");
         collections
             .entry(row.get::<String, _>("collection_kind"))
             .or_default()
             .push(row.get::<Vec<u8>, _>("canonical_items"));
     }
-    if expected_items != set.get::<i64, _>("staged_item_count")
-        || expected_bytes != set.get::<i64, _>("staged_byte_length")
+    verify_staging_totals(
+        i64::from(set.get::<i32, _>("expected_batch_count")),
+        set.get("expected_item_count"),
+        set.get("expected_byte_length"),
+        collections.values().map(Vec::len).sum::<usize>() as i64,
+        actual_items,
+        actual_bytes,
+    )?;
+    if actual_items != set.get::<i64, _>("staged_item_count")
+        || actual_bytes != set.get::<i64, _>("staged_byte_length")
     {
         return Err(protocol("STAGING_COUNTER_MISMATCH"));
     }
@@ -1601,7 +1645,7 @@ async fn commit_staged_route(
         + decisions.len()
         + groups.len()
         + reason_codes.len()) as i64
-        != expected_items
+        != actual_items
     {
         return Err(protocol("STAGING_TYPED_ROW_COUNT_MISMATCH"));
     }
@@ -1823,7 +1867,10 @@ async fn lock_live_claim(
     claimed: &ClaimedMatchingRequest,
 ) -> Result<sqlx::postgres::PgRow, sqlx::Error> {
     let job = sqlx::query(
-        "SELECT j.*,claim.heartbeat_at,claim.claim_lease_ms,claim.status AS claim_status,
+        "SELECT j.*,claim.claim_token,claim.heartbeat_at,
+                claim.claim_lease_ms AS frozen_claim_lease_ms,
+                claim.lease_policy_generation AS frozen_lease_policy_generation,
+                claim.status AS claim_status,
                 (claim.heartbeat_at+make_interval(secs=>claim.claim_lease_ms::double precision/1000.0)>clock_timestamp()) AS lease_live,
                 m.generation,m.mutation_watermark,p.status AS project_status,p.matching_mutation_watermark
            FROM bid_matching_jobs j
@@ -1838,7 +1885,13 @@ async fn lock_live_claim(
     .ok_or_else(|| protocol("matching claim missing"))?;
     if job.get::<Uuid, _>("manifest_id") != claimed.manifest_id
         || job.get::<Uuid, _>("route_id") != claimed.route_id
-        || job.get::<i32, _>("active_attempt") != claimed.claim.attempt
+        || !claim_snapshot_matches(
+            job.get("claim_token"),
+            job.get("active_attempt"),
+            job.get("frozen_claim_lease_ms"),
+            job.get("frozen_lease_policy_generation"),
+            claimed.claim,
+        )
         || job.get::<String, _>("claim_status") != "running"
         || job.get::<String, _>("project_status") != "open"
         || job.get::<i64, _>("matching_mutation_watermark") != claimed.mutation_watermark
@@ -1851,6 +1904,50 @@ async fn lock_live_claim(
     Ok(job)
 }
 
+fn claim_snapshot_matches(
+    token: Uuid,
+    attempt: i32,
+    claim_lease_ms: i32,
+    lease_policy_generation: i64,
+    expected: MatchClaim,
+) -> bool {
+    token == expected.token
+        && attempt == expected.attempt
+        && claim_lease_ms == expected.claim_lease_ms
+        && lease_policy_generation == expected.lease_policy_generation
+}
+
+fn staging_set_matches_claim(
+    set: &sqlx::postgres::PgRow,
+    claimed: &ClaimedMatchingRequest,
+) -> bool {
+    set.get::<Uuid, _>("job_id") == claimed.job_id
+        && set.get::<Uuid, _>("route_id") == claimed.route_id
+        && set.get::<Uuid, _>("claim_token") == claimed.claim.token
+        && set.get::<i32, _>("attempt") == claimed.claim.attempt
+        && set.get::<Uuid, _>("manifest_id") == claimed.manifest_id
+        && set.get::<Uuid, _>("project_id") == claimed.project_id
+        && set.get::<i64, _>("generation") == claimed.generation
+        && set.get::<i64, _>("mutation_watermark") == claimed.mutation_watermark
+}
+
+fn verify_staging_totals(
+    declared_batches: i64,
+    declared_items: i64,
+    declared_bytes: i64,
+    actual_batches: i64,
+    actual_items: i64,
+    actual_bytes: i64,
+) -> Result<(), sqlx::Error> {
+    if declared_batches != actual_batches
+        || declared_items != actual_items
+        || declared_bytes != actual_bytes
+    {
+        return Err(protocol("STAGING_OPEN_DECLARATION_MISMATCH"));
+    }
+    Ok(())
+}
+
 struct StagedReportRelations<'a> {
     sources: &'a [StagedSourceArtifactV1],
     candidates: &'a [StagedCandidateV1],
@@ -1858,6 +1955,31 @@ struct StagedReportRelations<'a> {
     decisions: &'a [StagedDecisionV1],
     groups: &'a [StagedCandidateGroupV1],
     reason_codes: &'a [String],
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct FrozenEvidenceIdentity {
+    requirement_artifact_id: Uuid,
+    product_version_artifact_id: Uuid,
+    document_id: Uuid,
+    source_chunk_id: Uuid,
+    frozen_document_display_name: String,
+    chunk_utf8: String,
+    chunk_sha256: String,
+    chunk_byte_length: u64,
+    retrieval_rank: u32,
+    retrieval_raw_score: String,
+    quote_start_offset: u64,
+    quote_end_offset: u64,
+    retrieval_contract_version: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CandidateGroupPayloadV1 {
+    requirement_artifact_id: Uuid,
+    support: String,
+    candidate_artifact_ids: Vec<Uuid>,
 }
 
 async fn verify_staged_report(
@@ -1961,8 +2083,42 @@ async fn verify_staged_report(
     if source_map.len() != sources.len() {
         return Err(protocol("duplicate source artifact"));
     }
+    let candidates_by_id: HashMap<Uuid, &StagedCandidateV1> =
+        candidates.iter().map(|row| (row.id, row)).collect();
+    let frozen_evidence: HashSet<FrozenEvidenceIdentity> = sqlx::query(
+        "SELECT hit.requirement_artifact_id,hit.product_version_artifact_id,
+                hit.document_id,hit.source_chunk_id,hit.frozen_document_display_name,
+                convert_from(hit.chunk_utf8,'UTF8') AS chunk_text,hit.chunk_sha256,
+                hit.chunk_byte_length,hit.retrieval_rank,
+                to_char(hit.retrieval_raw_score,'FM99999999999999999990.000000') AS retrieval_raw_score,
+                hit.quote_start_offset,hit.quote_end_offset,hit.retrieval_contract_version
+           FROM bid_matching_frozen_retrieved_hits hit WHERE hit.route_id=$1",
+    )
+    .bind(claimed.route_id)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .map(|row| FrozenEvidenceIdentity {
+        requirement_artifact_id: row.get("requirement_artifact_id"),
+        product_version_artifact_id: row.get("product_version_artifact_id"),
+        document_id: row.get("document_id"),
+        source_chunk_id: row.get("source_chunk_id"),
+        frozen_document_display_name: row.get("frozen_document_display_name"),
+        chunk_utf8: row.get("chunk_text"),
+        chunk_sha256: row.get("chunk_sha256"),
+        chunk_byte_length: row.get::<i64, _>("chunk_byte_length") as u64,
+        retrieval_rank: row.get::<i32, _>("retrieval_rank") as u32,
+        retrieval_raw_score: row.get("retrieval_raw_score"),
+        quote_start_offset: row.get::<i64, _>("quote_start_offset") as u64,
+        quote_end_offset: row.get::<i64, _>("quote_end_offset") as u64,
+        retrieval_contract_version: row.get("retrieval_contract_version"),
+    })
+    .collect();
     let mut evidence_by_candidate: HashMap<Uuid, Vec<&StagedEvidenceV1>> = HashMap::new();
     for evidence in evidences {
+        let candidate = candidates_by_id
+            .get(&evidence.candidate_artifact_id)
+            .ok_or_else(|| protocol("evidence candidate missing"))?;
         let source = source_map
             .get(&evidence.source_chunk_artifact_id)
             .ok_or_else(|| protocol("evidence source missing"))?;
@@ -1980,8 +2136,25 @@ async fn verify_staged_report(
             || evidence.source_chunk_id != source.source_chunk_id
             || evidence.source_chunk_sha256 != source.chunk_sha256
             || evidence.document_display_name != source.frozen_document_display_name
+            || !frozen_evidence.contains(&FrozenEvidenceIdentity {
+                requirement_artifact_id: candidate.requirement_artifact_id,
+                product_version_artifact_id: candidate.product_version_artifact_id,
+                document_id: source.document_id,
+                source_chunk_id: source.source_chunk_id,
+                frozen_document_display_name: source.frozen_document_display_name.clone(),
+                chunk_utf8: source.chunk_utf8.clone(),
+                chunk_sha256: source.chunk_sha256.clone(),
+                chunk_byte_length: source.chunk_byte_length,
+                retrieval_rank: candidate.retrieval_rank,
+                retrieval_raw_score: candidate.retrieval_raw_score.clone(),
+                quote_start_offset: evidence.start_offset,
+                quote_end_offset: evidence.end_offset,
+                retrieval_contract_version: source.retrieval_contract_version.clone(),
+            })
         {
-            return Err(protocol("EvidenceV1 byte-slice verifier failed"));
+            return Err(protocol(
+                "EvidenceV1 byte-slice or frozen-hit provenance verifier failed",
+            ));
         }
         evidence_by_candidate
             .entry(evidence.candidate_artifact_id)
@@ -2003,6 +2176,9 @@ async fn verify_staged_report(
             let mut evidence_rows = evidence_by_candidate
                 .remove(&candidate.id)
                 .unwrap_or_default();
+            if evidence_rows.is_empty() {
+                return Err(protocol("candidate has no frozen evidence"));
+            }
             evidence_rows.sort_by_key(|row| row.ordinal);
             let evidence_value = serde_json::json!({"schema_version":1,"items":evidence_rows.iter().map(|row| serde_json::json!({
                 "source_chunk_artifact_id":row.source_chunk_artifact_id,"document_id":row.document_id,
@@ -2042,8 +2218,6 @@ async fn verify_staged_report(
     if !evidence_by_candidate.is_empty() {
         return Err(protocol("orphan staged evidence"));
     }
-    let candidates_by_id: HashMap<Uuid, &StagedCandidateV1> =
-        candidates.iter().map(|row| (row.id, row)).collect();
     let mut relation_decisions = Vec::with_capacity(decisions.len());
     for decision in decisions {
         let rows = candidates_by_requirement
@@ -2138,6 +2312,7 @@ async fn verify_staged_report(
     {
         return Err(protocol("MatchingReportV1 aggregation mismatch"));
     }
+    verify_candidate_groups(candidates, groups)?;
     let relation_groups = groups
         .iter()
         .map(|row| serde_json::from_slice::<serde_json::Value>(&row.canonical_payload))
@@ -2155,6 +2330,48 @@ async fn verify_staged_report(
         || parsed.get("source_artifacts") != Some(&serde_json::Value::Array(relation_sources))
     {
         return Err(protocol("MatchingReportV1 payload/relation mismatch"));
+    }
+    Ok(())
+}
+
+fn verify_candidate_groups(
+    candidates: &[StagedCandidateV1],
+    groups: &[StagedCandidateGroupV1],
+) -> Result<(), sqlx::Error> {
+    let mut expected = BTreeMap::<(Uuid, String), BTreeSet<Uuid>>::new();
+    for candidate in candidates {
+        expected
+            .entry((candidate.requirement_artifact_id, candidate.support.clone()))
+            .or_default()
+            .insert(candidate.id);
+    }
+    if expected.len() != groups.len() {
+        return Err(protocol("candidate group cardinality mismatch"));
+    }
+    for (ordinal, group) in groups.iter().enumerate() {
+        if group.ordinal != ordinal as u32
+            || sha256_hex(&group.canonical_payload) != group.content_sha256
+        {
+            return Err(protocol("candidate group ordinal or hash mismatch"));
+        }
+        let parsed: CandidateGroupPayloadV1 = serde_json::from_slice(&group.canonical_payload)
+            .map_err(|_| protocol("invalid candidate group payload"))?;
+        if serde_json::to_vec(&parsed).map_err(|error| protocol(error.to_string()))?
+            != group.canonical_payload
+            || parsed.requirement_artifact_id != group.requirement_artifact_id
+            || parsed.support != group.support
+            || !parsed
+                .candidate_artifact_ids
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            || expected.remove(&(parsed.requirement_artifact_id, parsed.support.clone()))
+                != Some(parsed.candidate_artifact_ids.into_iter().collect())
+        {
+            return Err(protocol("candidate group membership mismatch"));
+        }
+    }
+    if !expected.is_empty() {
+        return Err(protocol("candidate group set mismatch"));
     }
     Ok(())
 }
@@ -2232,9 +2449,19 @@ async fn stage_report_payload_for_set(
     lock_live_claim(&mut tx, claimed).await?;
     let active: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM bid_matching_staging_sets
-          WHERE id=$1 AND state='active' AND expires_at>clock_timestamp())",
+          WHERE id=$1 AND job_id=$2 AND route_id=$3 AND claim_token=$4 AND attempt=$5
+            AND manifest_id=$6 AND project_id=$7 AND generation=$8 AND mutation_watermark=$9
+            AND state='active' AND expires_at>clock_timestamp())",
     )
     .bind(staging_id)
+    .bind(claimed.job_id)
+    .bind(claimed.route_id)
+    .bind(claimed.claim.token)
+    .bind(claimed.claim.attempt)
+    .bind(claimed.manifest_id)
+    .bind(claimed.project_id)
+    .bind(claimed.generation)
+    .bind(claimed.mutation_watermark)
     .fetch_one(&mut *tx)
     .await?;
     if !active {
@@ -2269,9 +2496,13 @@ pub async fn retry_claim(
     detail: &str,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    if lock_live_claim(&mut tx, claimed).await.is_err() {
+    if let Err(error) = lock_live_claim(&mut tx, claimed).await {
         tx.rollback().await?;
-        return Ok(false);
+        return if is_claim_fence_error(&error) {
+            Ok(false)
+        } else {
+            Err(error)
+        };
     }
     sqlx::query("UPDATE bid_matching_job_claims SET status='failed' WHERE job_id=$1 AND attempt=$2 AND claim_token=$3")
       .bind(claimed.job_id).bind(claimed.claim.attempt).bind(claimed.claim.token).execute(&mut *tx).await?;
@@ -2290,9 +2521,13 @@ pub async fn fail_claim(
     detail: &str,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    if lock_live_claim(&mut tx, claimed).await.is_err() {
+    if let Err(error) = lock_live_claim(&mut tx, claimed).await {
         tx.rollback().await?;
-        return Ok(false);
+        return if is_claim_fence_error(&error) {
+            Ok(false)
+        } else {
+            Err(error)
+        };
     }
     sqlx::query("UPDATE bid_matching_job_claims SET status='failed' WHERE job_id=$1 AND attempt=$2 AND claim_token=$3")
       .bind(claimed.job_id).bind(claimed.claim.attempt).bind(claimed.claim.token).execute(&mut *tx).await?;
@@ -2349,6 +2584,14 @@ pub async fn reap_expired_claims(pool: &PgPool) -> Result<u64, sqlx::Error> {
     .await?;
     tx.commit().await?;
     Ok(rows.len() as u64 + expired)
+}
+
+fn is_claim_fence_error(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Protocol(message)
+            if message == "matching claim fence lost" || message == "matching claim missing"
+    )
 }
 
 pub async fn pending_route_envelopes(
@@ -2984,5 +3227,63 @@ mod tests {
         let decision = aggregate_decision(&[&later, &unresolved, &earlier]);
         assert_eq!(decision.0, "supported");
         assert_eq!(decision.4, Some(earlier.id));
+    }
+
+    #[test]
+    fn commit_rejects_any_difference_from_open_declared_totals() {
+        assert!(verify_staging_totals(6, 4, 128, 6, 4, 128).is_ok());
+        assert!(verify_staging_totals(7, 4, 128, 6, 4, 128).is_err());
+        assert!(verify_staging_totals(6, 5, 128, 6, 4, 128).is_err());
+        assert!(verify_staging_totals(6, 4, 129, 6, 4, 128).is_err());
+    }
+
+    #[test]
+    fn claim_fence_binds_token_attempt_and_frozen_lease_policy() {
+        let claim = MatchClaim {
+            token: Uuid::from_u128(1),
+            attempt: 2,
+            claim_lease_ms: 300_000,
+            lease_policy_generation: 7,
+        };
+        assert!(claim_snapshot_matches(
+            Uuid::from_u128(1),
+            2,
+            300_000,
+            7,
+            claim
+        ));
+        assert!(!claim_snapshot_matches(
+            Uuid::from_u128(9),
+            2,
+            300_000,
+            7,
+            claim
+        ));
+        assert!(!claim_snapshot_matches(
+            Uuid::from_u128(1),
+            2,
+            300_000,
+            8,
+            claim
+        ));
+    }
+
+    #[test]
+    fn completed_publish_replay_requires_the_same_report_and_hash() {
+        let report_id = Uuid::from_u128(1);
+        let digest = "a".repeat(64);
+        assert_eq!(
+            completed_publish_receipt(Some(report_id), Some(&digest), report_id, &digest).unwrap(),
+            PublishReceipt::Replayed { report_id }
+        );
+        assert!(
+            completed_publish_receipt(Some(report_id), Some(&"b".repeat(64)), report_id, &digest)
+                .is_err()
+        );
+        assert_eq!(
+            completed_publish_receipt(Some(Uuid::from_u128(2)), Some(&digest), report_id, &digest)
+                .unwrap(),
+            PublishReceipt::Stale
+        );
     }
 }

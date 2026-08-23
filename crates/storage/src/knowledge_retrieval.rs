@@ -9,6 +9,7 @@ use domain::knowledge_retrieval::{
     CompanyEvidenceHitV1, CompanyEvidenceRequestV1, KNOWLEDGE_EVIDENCE_SCHEMA_V1,
     KnowledgeEvidenceHitV1, KnowledgeRetrievalError, KnowledgeRetrievalPort, ProductEvidenceHitV1,
     ProductEvidenceRequestV1, RetrievalPolicyIdentityV1, UTF8_BYTE_OFFSET_UNIT,
+    validate_evidence_hit_batch,
 };
 use rust_decimal::{Decimal, RoundingStrategy};
 use sha2::{Digest, Sha256};
@@ -171,13 +172,7 @@ impl PostgresKnowledgeRetrievalAdapter {
                 retrieval_contract_version: policy.contract_version.clone(),
             });
         }
-        validate_hits(
-            workspace_kind,
-            &hits,
-            policy.max_hits,
-            policy.max_chunk_bytes,
-            policy.max_total_bytes,
-        )?;
+        validate_hits(workspace_kind, &hits, policy)?;
         Ok(hits)
     }
 }
@@ -255,51 +250,15 @@ fn validate_request(
 fn validate_hits(
     workspace_kind: &str,
     hits: &[KnowledgeEvidenceHitV1],
-    max_hits: u32,
-    max_chunk_bytes: u32,
-    max_total_bytes: u64,
+    policy: &RetrievalPolicyIdentityV1,
 ) -> Result<(), KnowledgeRetrievalError> {
-    let mut total = 0u64;
-    let mut seen = HashSet::new();
-    if hits.len() > max_hits as usize {
+    validate_evidence_hit_batch(workspace_kind, hits, policy)?;
+    if hits
+        .iter()
+        .any(|hit| Decimal::from_str(&hit.retrieval_raw_score).is_err())
+    {
         return Err(KnowledgeRetrievalError::InvalidHit(
-            "hit quota exceeded".into(),
-        ));
-    }
-    for (index, hit) in hits.iter().enumerate() {
-        let bytes = hit.chunk_utf8.as_bytes();
-        total = total.saturating_add(bytes.len() as u64);
-        if hit.schema_version != KNOWLEDGE_EVIDENCE_SCHEMA_V1
-            || hit.workspace_kind != workspace_kind
-            || hit.offset_unit != UTF8_BYTE_OFFSET_UNIT
-            || hit.chunk_byte_length != bytes.len() as u64
-            || hit.chunk_byte_length > u64::from(max_chunk_bytes)
-            || hit.chunk_sha256 != hex::encode(Sha256::digest(bytes))
-            || hit.quote_start_offset >= hit.quote_end_offset
-            || hit.quote_end_offset > hit.chunk_byte_length
-            || !hit
-                .chunk_utf8
-                .is_char_boundary(hit.quote_start_offset as usize)
-            || !hit
-                .chunk_utf8
-                .is_char_boundary(hit.quote_end_offset as usize)
-            || hit.retrieval_rank != index as u32 + 1
-            || Decimal::from_str(&hit.retrieval_raw_score).is_err()
-            || !seen.insert((
-                hit.document_id,
-                hit.source_chunk_id,
-                hit.quote_start_offset,
-                hit.quote_end_offset,
-            ))
-        {
-            return Err(KnowledgeRetrievalError::InvalidHit(
-                "evidence bytes, digest, offset, rank, or identity is invalid".into(),
-            ));
-        }
-    }
-    if total > max_total_bytes {
-        return Err(KnowledgeRetrievalError::InvalidHit(
-            "byte quota exceeded".into(),
+            "retrieval score is outside the supported decimal range".into(),
         ));
     }
     Ok(())
@@ -386,6 +345,13 @@ mod tests {
             retrieval_raw_score: "1.000000".into(),
             retrieval_contract_version: "knowledge-evidence-v1".into(),
         };
-        assert!(validate_hits("product_line", &[hit], 1, 1024, 1024).is_err());
+        let policy = RetrievalPolicyIdentityV1 {
+            contract_version: "knowledge-evidence-v1".into(),
+            policy_sha256: "0".repeat(64),
+            max_hits: 1,
+            max_chunk_bytes: 1024,
+            max_total_bytes: 1024,
+        };
+        assert!(validate_hits("product_line", &[hit], &policy).is_err());
     }
 }

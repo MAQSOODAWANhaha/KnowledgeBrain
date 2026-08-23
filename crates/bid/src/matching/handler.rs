@@ -204,12 +204,10 @@ fn report_transport(report: &MatchingReportV1) -> Result<PublishRouteV2, String>
             }
         })
         .collect();
-    let content_sha256 = report.content_sha256();
     Ok(PublishRouteV2 {
         report_id: report.payload.report_id,
         report_nonce: stable_child_id(report.payload.report_id, "nonce", 0),
         canonical_payload: report.canonical_bytes(),
-        content_sha256,
         sources,
         candidates,
         evidences,
@@ -253,10 +251,12 @@ async fn retry(
     claimed: &ClaimedMatchingRequest,
     error: &MatchError,
 ) -> Result<(), String> {
-    storage::bid_matching::retry_claim(pool, claimed, error.code(), error.detail())
+    let updated = storage::bid_matching::retry_claim(pool, claimed, error.code(), error.detail())
         .await
         .map_err(|db| db.to_string())?;
-    Ok(())
+    updated
+        .then_some(())
+        .ok_or_else(|| "matching retry claim fence lost".into())
 }
 
 async fn fail(
@@ -265,10 +265,12 @@ async fn fail(
     code: &str,
     detail: &str,
 ) -> Result<(), String> {
-    storage::bid_matching::fail_claim(pool, claimed, code, detail)
+    let updated = storage::bid_matching::fail_claim(pool, claimed, code, detail)
         .await
         .map_err(|error| error.to_string())?;
-    Ok(())
+    updated
+        .then_some(())
+        .ok_or_else(|| "matching failure claim fence lost".into())
 }
 
 #[cfg(test)]
@@ -318,7 +320,6 @@ mod tests {
             },
         };
         let transport = report_transport(&report).unwrap();
-        assert_eq!(transport.content_sha256, report.content_sha256());
         assert!(
             !String::from_utf8(transport.canonical_payload)
                 .unwrap()
