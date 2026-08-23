@@ -1,0 +1,222 @@
+{
+  "Blockers": [
+    {
+      "title": "EvidenceV1 的 eligibility 关系引用了不存在的实体",
+      "finding": "方案为 source chunk artifact 定义了 eligibility_snapshot_id，并要求对 eligibility artifact 建 FK RESTRICT，但当前 schema 只有 bid_match_product_version_artifacts.eligibility_snapshot JSONB，没有 eligibility snapshot 表或 ID。因此无法机械实现所述 composite FK，也无法证明 evidence artifact 与 candidate 的 product artifact 属于同一冻结 eligibility scope。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:431-464",
+        "migrations/0012_bid_match_contract.sql:238-251"
+      ],
+      "required_fix": "将 eligibility_snapshot_id 明确替换为 product_version_artifact_id，并建立 source artifact 与 report/product artifact 的复合关系；candidate evidence verifier 必须证明 artifact.report_id、artifact.product_version_artifact_id 分别等于 candidate 的 report/product，并验证 document_id 存在于该 product artifact 的 eligibility_snapshot。若确实要新增独立 eligibility artifact 表，则须在 PR1 schema 中完整定义该表及来源。"
+    },
+    {
+      "title": "MatchDecisionV1 的 DB verifier 尚不能证明 stable comparator 结果",
+      "finding": "方案定义了 comparator，却只要求 DB 验证 selected candidate 同 report/requirement 且为 supported/select/pass，没有要求 selected 等于所有 supported candidates 中 comparator 最小者。evidence_v1_sha256 的 canonical item 顺序、序列化和候选列也未定义。这样 storage 或 worker 选择非最小 supported candidate 仍可通过所述 verifier。所有非 selected candidate 的 verifier_support/system_decision/quality_status 冗余字段也没有要求彼此符合真值表。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:417-422",
+        "migrations/0012_bid_match_contract.sql:512-516",
+        "migrations/0012_bid_match_contract.sql:627-629",
+        "crates/bid/src/matching/workflow.rs:266-323",
+        "crates/storage/src/bid_matching.rs:1584-1608"
+      ],
+      "required_fix": "定义 EvidenceV1 canonical bytes、items 稳定顺序及 evidence_v1_sha256 列；DB deferred verifier 应断言 selected candidate 等于按四元组排序后的首个 supported candidate。还应验证每个 candidate 的 support/decision/quality 映射，或删除候选上的冗余 decision/quality 字段。decision 的 scored business value 必须与 selected candidate typed value 完全相等。"
+    },
+    {
+      "title": "QuoteSnapshotV1 尚未给出可跨 Rust/SQL 唯一实现的 canonical bytes",
+      "finding": "顶层键序已固定，但 ceiling 与 no_ceiling_review 的 JSON 类型、嵌套键、嵌套键序和 NULL 规则未定义。no-ceiling actor/reason/time 被要求冻结，时间格式也被描述，但无法判断这些值如何进入 no_ceiling_review。因此不同实现可以产生不同合法 JSON 和 hash。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:535-543",
+        "plans/bid-platform-complete-solution.md:566-574",
+        "plans/bid-platform-complete-solution.md:580-581"
+      ],
+      "required_fix": "固定两个字段的完整 schema，例如 ceiling 为 null 或固定键序的 CNY amount object；no_ceiling_review 为 null 或固定键序的 reviewed/reason/actor_id/at object。补充互斥 CHECK：有 ceiling 时 review details 全空；无 ceiling 时 reviewed=true 且 reason/actor/time 全非空。跨层 fixture 应覆盖两种分支。"
+    },
+    {
+      "title": "动态程序项的 requirement_kind 没有权威来源，附件兼容门禁可被任意重分类绕过",
+      "finding": "每条 procedural clause 会派生 required check，但 requirement_kind 只出现在用户 decision 行中，没有说明由 Router、clause artifact 还是独立审核分类产生。调用者可以把本应为 bid_bond 或 authorization_support 的条款提交为 confirmation，再用 confirmed_by_user 通过 PDF gate，使附件 kind compatibility 失去约束意义。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:617-623",
+        "plans/bid-platform-complete-solution.md:649-651",
+        "plans/bid-platform-complete-solution.md:657-666"
+      ],
+      "required_fix": "把 procedural requirement classification 与 compliance resolution 分离。为每个 current procedural clause 建立权威、版本化的 requirement_kind；若允许人工 override，必须单独记录原分类、目标分类、actor 和 bounded reason，并由 manifest 冻结。resolution mutation 不应自行选择 requirement_kind。"
+    },
+    {
+      "title": "Router 的 procedural guard 与 qualification guard 存在优先级冲突",
+      "finding": "procedural 位于 qualification 之前，并包含泛化的“明确提交义务”；ISO 证书、许可证或合同复印件的“须提交/加盖公章”同时满足 qualification guard，却会先被 procedural 捕获。这与合同复印件应路由 qualification/commercial 的 golden 不一致。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:224-229",
+        "plans/bid-platform-complete-solution.md:248-250"
+      ],
+      "required_fix": "限制 procedural 必须具有明确程序对象，如保证金、递交渠道、密封、投标函格式或授权材料；增加 qualification evidence veto，或让枚举的资格材料 guard 先于泛化提交义务。补充“须提交 ISO 证书”“许可证复印件须盖章”等重叠 golden。"
+    }
+  ],
+  "现在值得修正": [
+    {
+      "title": "EvidenceV1 的 bounded 条件需要精确常量和总量上限",
+      "finding": "chunk_utf8、展示名和 item 数只写为 bounded；现有 verifier policy 已有 max_evidence_items/max_evidence_bytes，但方案没有说明 source chunk 最大字节、每 report artifact 数量和总字节上限。单行有界并不能自动保证整个 route commit 有界。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:431-466",
+        "migrations/0012_bid_match_contract.sql:77-78"
+      ],
+      "recommendation": "复用 verifier policy 的 item/quote 限额，并新增 max_source_chunk_bytes、max_source_artifacts_per_report 或等价的候选/总字节上限；在 CAS 后、写 artifact 前整体校验。"
+    },
+    {
+      "title": "SourceSpanV2 的 slice 基准和跨行证明需要消除歧义",
+      "finding": "quote_text 被描述为 parent source[start..end]，但未明确 offset 是相对完整冻结转换文本还是相对 parent span；若是后者，应使用 start-parent_start。纯 JSON validator 也无法自行证明 quote 与源文本相等。此外 stable key 使用未定义的 document_generation。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:199-211",
+        "migrations/0010_bid_extract_publication.sql:93-112",
+        "migrations/0010_bid_extract_publication.sql:924-966"
+      ],
+      "recommendation": "明确四个 offset 均相对同一份冻结 converted UTF-8 bytes，并由 publication scope verifier 做 quote slice 等值校验；JSON validator 只负责 shape、数值和 UTF-8 边界。将 document_generation明确为 expected_conversion_generation，或写出确切 identity。"
+    },
+    {
+      "title": "Quote eligibility 与 fact_revision 的关系目前过度失效且状态语义不一致",
+      "finding": "事实 mutation 只有 ceiling 变化会把 snapshot 标为 ineligible，但 PDF 又要求 snapshot fact_revision 与 current facts identity 完全相等。因此预算、开标时间等无关事实变化后，snapshot 仍显示 eligible，却无法导出，且必须 reopen/finalize。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:392",
+        "plans/bid-platform-complete-solution.md:541-544",
+        "plans/bid-platform-complete-solution.md:582",
+        "plans/bid-platform-complete-solution.md:713"
+      ],
+      "recommendation": "优先让 quote eligibility 只比较冻结 ceiling value/currency/no-ceiling state，fact_revision 仅作 provenance 和 letter dependency。若产品坚持任一事实变化都重定稿，则增加 ineligible_fact_changed，并在所有事实 mutation 中同步标记，避免 eligible 状态与 PDF 结果矛盾。"
+    },
+    {
+      "title": "snapshot 的“immutable”需明确受控 eligibility 例外",
+      "finding": "表定义称 snapshot immutable，但后文要求 eligibility 原地从 eligible 变为 ineligible 或 superseded。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:533-548",
+        "plans/bid-platform-complete-solution.md:552",
+        "plans/bid-platform-complete-solution.md:581-583"
+      ],
+      "recommendation": "定义为 payload/hash/totals/provenance immutable，仅 eligibility 可由 SECURITY DEFINER 状态函数按明确单向图修改；普通 UPDATE/DELETE/TRUNCATE 全拒。"
+    },
+    {
+      "title": "正式 PDF 应明确计算完整 expected part-key 集合",
+      "finding": "方案列出了固定和动态 parts，但“所有 parts current”没有写出 expected set 的生成规则。当前实现仅生成①～⑤，且未知 key 会报错，因此 PR6 必须显式替换现有 helper，而不能只给现有行增加依赖字段。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:672-686",
+        "plans/bid-platform-complete-solution.md:713",
+        "crates/bid/src/lib.rs:152-155",
+        "crates/bid/src/booklet.rs:119-135",
+        "crates/bid/src/booklet.rs:293-300"
+      ],
+      "recommendation": "定义 expected set 为固定 1、3、4、5、全部 6:*，加当前 technical units 派生的 2:*；export verifier 应比较集合相等，拒绝缺失、重复和未知 part。"
+    }
+  ],
+  "可选": [
+    {
+      "title": "可精简 EvidenceItemV1 的重复冻结字段",
+      "observation": "item 同时保存 source_chunk_artifact_id 和 artifact 已拥有的 document/chunk/display/digest，属于可验证但重复的数据。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:431-462"
+      ],
+      "option": "可只保留 artifact ID、quote、offset 和 offset_unit，由 view 展开冻结元数据；若保留自包含 JSON，则现有逐字段一致性校验也合理，不构成过度设计。"
+    },
+    {
+      "title": "程序决定绑定整个 procedural set 会造成保守性全量失效",
+      "observation": "任一 procedural clause 变化都会让所有旧 decisions 不再 current，安全但可能增加重复确认。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:617-623",
+        "plans/bid-platform-complete-solution.md:649-651"
+      ],
+      "option": "v1 可接受这一保守策略；后续若操作成本明显，再改为 clause content identity 加项目 set identity，而不应阻塞当前 clean-slate 方案。"
+    }
+  ],
+  "忽略/延期": [
+    {
+      "item": "Org、多租户、复杂角色和职责分离门闩",
+      "reason": "已批准 single-company 边界；durable actor audit 已保留未来扩展点。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:22-27"
+      ]
+    },
+    {
+      "item": "历史回填、down migration、旧 binary、在线升级和灰度",
+      "reason": "clean-slate 已明确排除；只需 fresh bootstrap、schema head、checksum、ACL wiring。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:34-45",
+        "plans/bid-platform-complete-solution.md:775-783"
+      ]
+    },
+    {
+      "item": "多币种、汇率、自动定价和成本引擎",
+      "reason": "CNY、scale=2、人工报价边界明确，不应在本轮扩展。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:486-488",
+        "plans/bid-platform-complete-solution.md:554-562"
+      ]
+    }
+  ],
+  "已闭合项": [
+    {
+      "item": "EvidenceV1 采用 report 内 immutable bounded chunk artifact 的方向正确且不过度设计",
+      "assessment": "它直接解决 live document 删除后无法重放的问题；UTF-8 byte 半开区间、字符边界、quote slice 和 digest 的双层验证方向自洽。当前代码确实仍是 Vec<EvidenceQuote> 并读取 live chunks/documents，证明该 closure 有必要。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:426-466",
+        "crates/bid/src/matching/mod.rs:313-330",
+        "crates/storage/src/bid_matching.rs:1853-1871",
+        "crates/storage/src/bid_matching.rs:1901-1905",
+        "migrations/0012_bid_match_contract.sql:1169-1204"
+      ]
+    },
+    {
+      "item": "MatchDecisionV1 真值表的业务优先级完整",
+      "assessment": "supported > unresolved > insufficient > contradicted > no-evidence 能正确处理多候选混合集合；无候选、review/reject 的 selected=NULL，以及 selected 使用 candidate artifact ID 都已明确。它修复了当前 workflow 最后一次 verifier outcome 覆盖聚合结果、并把 product artifact ID 当 selected candidate 的问题。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:402-420",
+        "crates/bid/src/matching/workflow.rs:266-338",
+        "crates/storage/src/bid_matching.rs:1584-1626"
+      ]
+    },
+    {
+      "item": "typed CommitRoute 透传 requirement decisions 的改造 seam 正确",
+      "assessment": "当前 MatchingReport 已有 typed requirement_decisions，而 storage CommitRoute 只有 candidates 并用 .find() 重建；方案要求直接透传且逐项验证，切中了实际错误 seam。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:422-424",
+        "crates/bid/src/matching/mod.rs:353-386",
+        "crates/storage/src/bid_matching.rs:231-268",
+        "crates/storage/src/bid_matching.rs:1584-1608"
+      ]
+    },
+    {
+      "item": "报价金额、CNY/scale、舍入和 overflow 规则可实现且确定",
+      "assessment": "unit/lump-sum tuple、half-away-from-zero、逐行舍入后分别求和、numeric(30,6) 中间值和 numeric(20,2) 最终边界均明确；gross 与 ceiling 比较顺序也明确。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:554-562"
+      ]
+    },
+    {
+      "item": "quote pointer、finalize、reopen 和保留 ineligible identity 的总体状态机闭合",
+      "assessment": "draft 与 active pointer 互斥、finalize/reopen 原子切换、旧 snapshot 保留、PDF 禁止读取 live draft，能够保证投标函与报价表引用同一 snapshot。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:552",
+        "plans/bid-platform-complete-solution.md:576-584"
+      ]
+    },
+    {
+      "item": "SubmissionGateV1 固定字段、derived missing、附件验证状态和 Word/PDF 矩阵方向完整",
+      "assessment": "固定 profile 缺失、seal/signature、三态决定、附件 valid/confirmed/kind compatibility、stale revision/digest 都有明确 PDF hard gate；解决了当前 booklet 只有 stale 布尔和①～⑤的不足。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:590-666",
+        "migrations/0007_bid.sql:239-247",
+        "crates/bid/src/booklet.rs:14-18"
+      ]
+    },
+    {
+      "item": "SourceSpanV2 与 Router 的共存 cardinality 总体无结构冲突",
+      "assessment": "每 routed segment 恰一 disposition、clause 0..1、fact 0..N，以及 fact+clause 共存，与 0010 现有 span/disposition/clause candidate 模型可以增量兼容；统一 validator 也优于三套 JSON shape。",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:196-218",
+        "migrations/0010_bid_extract_publication.sql:924-975"
+      ]
+    }
+  ],
+  "结论": {
+    "status": "暂不签收",
+    "summary": "总体架构与已批准的①～⑥、0010 fenced facts、人工报价、single-company、clean-slate 边界一致，且 immutable evidence、typed matching decision、quote snapshot、submission manifest 都是针对当前真实 seam 的必要 closure，并非无目的扩张。但 Evidence eligibility FK、DB comparator verifier、QuoteSnapshot canonical nested shape、动态程序项分类来源和 Router 重叠 guard 仍存在实现级歧义或可绕过路径，必须先修正文档契约。",
+    "after_fix": "闭合上述 Blockers 后，其余项目可按 PR1～PR6 顺序实施；建议把“现在值得修正”同步进相应 PR 的 exit gate 和 PostgreSQL/Rust cross-layer fixtures。",
+    "review_mode": "fresh-context、只读；未修改文件，未运行测试。"
+  }
+}

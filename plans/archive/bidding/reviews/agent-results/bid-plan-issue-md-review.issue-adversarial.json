@@ -1,0 +1,143 @@
+{
+  "review": {
+    "scope": "只读核验 issue.md 的九项指控是否仍适用于当前 plans/bid-platform-complete-solution.md；未检查或扩展其它问题。",
+    "correct": [
+      "Issue 1、3、4、6、7、8 的核心指控仍被当前方案文本直接支持。",
+      "Issue 2、5、9 的核心风险仍存在，但 issue.md 的部分表述比当前证据更绝对，因此判为 PARTIAL。"
+    ],
+    "fixed": [],
+    "blockers": [
+      "Issue 1、2、3、4、5、6、7 应在作为施工真源前闭合。"
+    ],
+    "notes": [
+      "本次未编辑文件。",
+      "这是文档交叉核验，未运行测试。"
+    ]
+  },
+  "summary": {
+    "VALID": 6,
+    "PARTIAL": 3,
+    "RESOLVED": 0
+  },
+  "issues": [
+    {
+      "issue": 1,
+      "status": "VALID",
+      "title": "service / implementation_plan identity 不闭合",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:1015 将 6:implementation_plan 定义为 PickSetV1 + service matching identity + schedule_delivery。",
+        "plans/bid-platform-complete-solution.md:1026 的 MatchingReportSetV1 只允许 technical route，并明确拒绝 commercial report。",
+        "plans/bid-platform-complete-solution.md:1035-1039 的 identities 和 part validator 没有 service set/commercial identity，implementation_plan 仅要求 matching_report_set、pick_set、schedule_delivery_set。",
+        "plans/bid-platform-complete-solution.md:1059-1062 的 stale 图只让 commercial decision 影响 4/5，未让 service/commercial 变化直接失效 implementation_plan。"
+      ],
+      "conclusion": "service 被定义为 commercial matching 内容，但实施计划没有可验证的 service/commercial 权威 identity；issue.md 指控准确。"
+    },
+    {
+      "issue": 2,
+      "status": "PARTIAL",
+      "title": "多个 supported candidate 的当前可见性未明确闭合",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:443-449 保留全部 supported candidates，同时 selected 只能是稳定排序后的第一条。",
+        "plans/bid-platform-complete-solution.md:469 的 MatchingReportV1 candidates 数组确实冻结全部候选，因此“只存在于完全不可见 artifact”表述过强。",
+        "plans/bid-platform-complete-solution.md:572-578 位于④⑤ commercial decision view/query 小节，并写 current candidate view 仍只表达 selected projection。",
+        "方案没有另行定义②技术路列出全部 supported candidates 的 current projection/API/UI 契约。"
+      ],
+      "conclusion": "全部候选在报告 artifact 中存在，但技术勾选所需的 current/API 可见集合没有写明；缺口成立，issue.md 对“必然完全不可见”的推断则证据不足。"
+    },
+    {
+      "issue": 3,
+      "status": "VALID",
+      "title": "DOCX 与 quote snapshot 门禁冲突",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:23 和 :1088 将 DOCX 定义为 Word 过程稿。",
+        "plans/bid-platform-complete-solution.md:1019-1023 的 RequiredPartSet 对 formal export 固定包含 6:letter 和 6:quote。",
+        "plans/bid-platform-complete-solution.md:1039 要求这两个 part 都具有 quote_snapshot identity；内容表还称其读取 active eligible snapshot。",
+        "plans/bid-platform-complete-solution.md:1078 允许 active_quote=null，但 :1088 又规定 DOCX 仍执行其它 RequiredPartSet/dependency 门禁。"
+      ],
+      "conclusion": "未 finalize 报价时无法构造必需 dependency，active_quote=null 没有明确可达路径；issue.md 指控准确。"
+    },
+    {
+      "issue": 4,
+      "status": "VALID",
+      "title": "有效期冲突无法进入 GateIssueV1",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:415 明确要求 bid_valid_days 与 bid_valid_until 同时非空时阻断正式 PDF。",
+        "plans/bid-platform-complete-solution.md:1076 的 GateIssueV1 code 不含有效期冲突，entity_kind 也不含 fact。",
+        "plans/bid-platform-complete-solution.md:1088 的正式 PDF 条件没有补充独立的有效期冲突检查或稳定错误表达。"
+      ],
+      "conclusion": "阻断规则存在，但正式 gate/manifest 的稳定表达缺失；NO_CEILING_REVIEW 不能替代，指控准确。"
+    },
+    {
+      "issue": 5,
+      "status": "PARTIAL",
+      "title": "Agent 与 KindRouter 输出权威仍未完全写死",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:70 保留“两个有界 Agent + deterministic KindRouter”。",
+        "plans/bid-platform-complete-solution.md:194 说明 KindRouter 在持久化前运行且不替代两个 Agent；:241-250 的决策表实际由 Router 决定 clause kind。",
+        "plans/bid-platform-complete-solution.md:1273 进一步说明 Router/publisher 产出 kind、统一 seam 派生 kind+family，因此 kind/family 总体方向已有权威。",
+        "但方案仍未定义两个 Agent 的 exact 输出字段，也未明确禁止 Agent 输出 kind/family 或规定冲突时 Router 覆盖规则。"
+      ],
+      "conclusion": "KindRouter 作为 kind 路由权威已有较强暗示，所以“完全不知道谁说了算”略有夸大；Agent 输出边界仍缺正式契约，核心问题未解决。"
+    },
+    {
+      "issue": 6,
+      "status": "VALID",
+      "title": "extracted stable key 包含 router_version",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:228 明确把 router_version 放入 stable_span_key preimage。",
+        "plans/bid-platform-complete-solution.md:953 规定未编辑 extracted clause 复用 SourceSpanV2 routed segment key。",
+        "plans/bid-platform-complete-solution.md:955 的 manual/manual_after_edit key 则明确不包含 ProceduralRouter/classification version。",
+        "plans/bid-platform-complete-solution.md:969 希望 Router 语义变化时对仍存在的同 key 创建 successor；extracted key 会随 KindRouter version 改变，无法满足该 same-key 路径。"
+      ],
+      "conclusion": "extracted 与 manual 的 identity 稳定性语义不一致，KindRouter promotion 会改变 extracted key；指控准确。"
+    },
+    {
+      "issue": 7,
+      "status": "VALID",
+      "title": "缺少 MatchingReportV1 报告级聚合规则",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:429-449 只完整定义 requirement/candidate 级聚合。",
+        "plans/bid-platform-complete-solution.md:452 仅要求非空报告加入 FROZEN_SCOPE。",
+        "plans/bid-platform-complete-solution.md:458-473 把 report quality_status、degraded、reason_codes、coverage.unresolved/unresolved_count 冻结进 canonical identity，却只给枚举、排序和“满足0012加和关系”，没有给 mixed decision 的确定性聚合矩阵。"
+      ],
+      "conclusion": "同一组 requirement decisions 仍可能生成不同报告级 canonical 内容；issue.md 指控准确。"
+    },
+    {
+      "issue": 8,
+      "status": "VALID",
+      "title": "pricing / evaluation 并列无决胜规则",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:248 把 pricing 与 evaluation 放在同一优先级。",
+        "plans/bid-platform-complete-solution.md:228-230 要求不可安全拆分的多 kind segment 只能选择一个 kind并记录原因，但没有规定 pricing/evaluation 同时命中时选择哪一个。"
+      ],
+      "conclusion": "确定性 Router 表缺少该并列分支；作为建议项的指控准确。"
+    },
+    {
+      "issue": 9,
+      "status": "PARTIAL",
+      "title": "“不重做 worker”表述容易误导",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:53 和 :423 写 PR1 不重复建设或不重做既有 job/worker。",
+        "plans/bid-platform-complete-solution.md:526-569 又要求 worker 实施 OpenStagingSetV1、StageRouteBatchV1、周期 heartbeat、CommitRouteV2、cleanup/reaper，并明确取代单 JSON CommitRoute。",
+        "这些变化可以解释为保留既有调度和 worker 外壳、只重做其提交协议，因此并非严格逻辑矛盾；但“不重做 worker”没有限定到外壳或调度层。"
+      ],
+      "conclusion": "施工表述确实含混，但“完整重建 worker”不是唯一解释；判 PARTIAL。"
+    }
+  ],
+  "classification": {
+    "必须修复": [
+      "Issue 1：为 implementation_plan 确定单一、可 stale 的 service/commercial 权威 identity。",
+      "Issue 2：明确②技术路全部 supported candidates 的 current projection/API/UI 可见性及其与 selected 的关系。",
+      "Issue 3：明确 DOCX 是否允许无 finalized quote，并使 RequiredPartSet、dependency 和 active_quote nullability 一致。",
+      "Issue 4：为有效期冲突增加稳定 gate 表达并纳入 PDF 拒绝矩阵。",
+      "Issue 5：写死两个 Agent 的输出契约以及 KindRouter 对 kind、family 的唯一权威边界。",
+      "Issue 6：统一 extracted/manual segment key 的 router-version 语义，或明确 promotion 为全量失效。",
+      "Issue 7：补齐报告级 quality_status、degraded、reason_codes 和 coverage 的确定性聚合规则。"
+    ],
+    "建议": [
+      "Issue 8：拆分 pricing/evaluation 优先级，或定义固定 tie-break 与 review reason。",
+      "Issue 9：把“不重做 worker”限定为保留调度/job/worker 外壳，并明确提交协议与 worker runtime 必须改造。"
+    ],
+    "无需修复": []
+  }
+}

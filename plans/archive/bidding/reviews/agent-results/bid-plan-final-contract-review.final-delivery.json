@@ -1,0 +1,114 @@
+{
+  "Blockers": [
+    {
+      "id": "B1",
+      "title": "PR1 staging/commit 与全局 system 幂等契约冲突",
+      "evidence": [
+        "方案只用 batch ordinal 描述 StageRouteBatchV1 重试幂等，并未规定同 ordinal 不同 payload 的稳定冲突行为：plans/bid-platform-complete-solution.md:503。",
+        "CommitRouteV2 会产生正式 report/artifact/projection 写，并保存 receipt：plans/bid-platform-complete-solution.md:507。",
+        "全局契约却规定除 heartbeat/lease renew 外，所有 system mechanical mutation 都必须进入统一幂等表；列出的 key preimage 没有 stage batch 或 route commit：plans/bid-platform-complete-solution.md:919-921。"
+      ],
+      "impact": "PR1 无法同时满足 staging 重试语义和“只有 heartbeat 豁免”的完成定义；同 ordinal 不同内容、commit 成功后响应丢失重试均没有唯一规定。",
+      "requiredFix": "补充 StageRouteBatchV1 与 CommitRouteV2 的 operation enum、domain-tagged key preimage、canonical payload hash和首次 response receipt语义；同 key 同 hash返回首次结果，不同 hash返回稳定 mismatch。不得扩大 heartbeat 豁免。"
+    },
+    {
+      "id": "B2",
+      "title": "PR1 lease 和分批 report wire contract 尚未闭合",
+      "evidence": [
+        "staging set identity 字段未包含 claim lease，方案却要求使用“冻结 claim lease”：plans/bid-platform-complete-solution.md:503-505。",
+        "现有 0012 job 只有 claimed_at/heartbeat_at，没有冻结 lease 字段：migrations/0012_bid_match_contract.sql:317-323；当前 reaper 从调用方接收 stale_secs：crates/storage/src/bid_matching.rs:2018-2036。",
+        "CommitRouteV2 只说携带未定义的“MatchingReportV1摘要”：plans/bid-platform-complete-solution.md:507。",
+        "MatchingReportV1 canonical 内容包含 candidate_groups：plans/bid-platform-complete-solution.md:454；staging 子表清单仅列 source/candidate/evidence/decision，未明确 groups 和其余变长数组如何分批：plans/bid-platform-complete-solution.md:503。"
+      ],
+      "impact": "DB 无法证明 heartbeat、commit、reaper 使用同一个 attempt-frozen lease；同时无法保证所有可能超过4 MiB的 MatchingReportV1内容都来自完整 staging，而不是重新塞回 compact commit DTO。",
+      "requiredFix": "规定 lease 的唯一冻结来源和列，例如 claim事务写入 bounded claim_lease_ms，并由 heartbeat/commit/reaper逐字使用；定义 StageRouteBatchV1 exact schema、batch payload hash、所有变长 report collections（包括 candidate_groups）的 staging归属，以及 CommitRouteV2 exact compact header。加入阈值前后、同ordinal异payload、groups大报告和成功commit重放测试。"
+    },
+    {
+      "id": "B3",
+      "title": "PR6 procedural classification 的历史生命周期与唯一约束不可同时实现",
+      "evidence": [
+        "classification 使用无条件 UNIQUE(project_id, clause_id, stable_segment_key)：plans/bid-platform-complete-solution.md:686。",
+        "人工 stable key 由相同 clause、分段版本、offset、digest、router version确定；未改文本的取消确认再确认会得到同一 key：plans/bid-platform-complete-solution.md:759。",
+        "取消确认必须 supersede 全部 current classifications，且历史行保留：plans/bid-platform-complete-solution.md:773。",
+        "方案同时称原始 classification_status 永不改写，又把 superseded 放在同一个 classification_status enum：plans/bid-platform-complete-solution.md:779-780。"
+      ],
+      "impact": "未改文本的 procedural clause 在 unconfirm→reconfirm 后，要么新行违反 UNIQUE，要么复活历史行并违反 superseded/history与原始Router状态不变契约。",
+      "requiredFix": "把 immutable router result（classified/review）与 lifecycle current/superseded 分列；将 stable-key 唯一性改为只约束 current 行的 partial unique，并保留历史 revision唯一键。新增 extracted/manual 两类 unconfirm→reconfirm、离开procedural→回归及相同stable-key历史保留测试。"
+    }
+  ],
+  "现在值得修正": [
+    {
+      "title": "PR6 render asset 标量与 placement_metadata 缺少逐字段一致性约束",
+      "evidence": "artifact 同时保存 placement_ordinal/caption/width_hint 和 placement_metadata/hash：plans/bid-platform-complete-solution.md:731-735；BidShotSet又同时依赖这些标量和metadata hash：plans/bid-platform-complete-solution.md:753。",
+      "recommendation": "明确唯一 storage seam/deferred verifier证明JSON ordinal、caption、width_hint逐字段等于标量列，并证明placement_metadata_sha256来自规定canonical bytes；加入错配负例。"
+    },
+    {
+      "title": "规范 fresh runner 应明确完全自包含，并给 PR1 required-check 配置证据",
+      "evidence": [
+        "方案要求调用者只执行 scripts/bid_fresh_schema_acceptance.sh：plans/bid-platform-complete-solution.md:957、1036。",
+        "当前CI需要先单独安装runtime identities，再传入migrator/verifier/API连接运行catalog/ACL测试：.github/workflows/ci.yml:52-66、119-129。",
+        "PR7对required check保存ruleset/聚合证据有明确规定，PR1 fresh-schema required job没有同等级证据要求：plans/bid-platform-complete-solution.md:1002。"
+      ],
+      "recommendation": "规定脚本自行创建并清理临时cluster、roles、数据库和连接变量，不依赖前置workflow step或runtime-completion；PR1 exit gate补check name、目标SHA及ruleset/required aggregation证据。"
+    }
+  ],
+  "可选/延期": [
+    {
+      "item": "deployment completion、runtime-completion、镜像、restart和topology验收",
+      "status": "按已批准clean-slate边界继续排除",
+      "evidence": "plans/bid-platform-complete-solution.md:957-959、995-996。"
+    },
+    {
+      "item": "operator/governance签署及人工双签bundle",
+      "status": "保持共享环境开放前或补充证据，不应阻塞本地领域/schema PR",
+      "evidence": "plans/bid-platform-complete-solution.md:1006、1008-1010。"
+    },
+    {
+      "item": "PR2的0014",
+      "status": "条件式创建合理；无DDL变化时不应制造空migration",
+      "evidence": "plans/bid-platform-complete-solution.md:950。"
+    }
+  ],
+  "通过项": [
+    {
+      "item": "0013/0015/0016/0018归属",
+      "result": "通过",
+      "evidence": "PR1 matching归0013、PR3 publication归0015、PR4 fact decisions归0016、PR6 submission/manual provenance/assets归0018，且禁止跨PR改已执行slice：plans/bid-platform-complete-solution.md:947-954。当前head确为0012且embedded version=12：crates/storage/src/persist.rs:18、107-114。"
+    },
+    {
+      "item": "fresh runner方向",
+      "result": "通过，除上述自包含/required证据修正",
+      "evidence": "规范入口、PR1首次创建、PR3-PR6逐次运行、PR7仅复跑，以及排除runtime-completion均已明确：plans/bid-platform-complete-solution.md:957-959。"
+    },
+    {
+      "item": "PR3 family→kind与segment provenance归属",
+      "result": "通过",
+      "evidence": "PR3负责kind/family、SourceSpanV2及manual create/PATCH/smoke只提交kind：plans/bid-platform-complete-solution.md:951、990、1045；PR6才负责procedural manual segmentation/provenance：plans/bid-platform-complete-solution.md:954、993。当前smoke和Web仍写family，证明修改seam定位正确：scripts/bid_e2e_smoke.sh:85-96；web/src/api.ts:62、253-261。"
+    },
+    {
+      "item": "PR1 MatchingReport hash、资源边界与过期owner原则",
+      "result": "核心方向通过",
+      "evidence": "canonical report payload/content_sha256、deferred逐字段验证、PartDependency精确引用已定义：plans/bid-platform-complete-solution.md:454；active set唯一性、project总量、heartbeat错误即停和commit前检查原heartbeat均已写明：plans/bid-platform-complete-solution.md:503-509。"
+    },
+    {
+      "item": "PR6 assets/manifest正式读取路径",
+      "result": "通过，除metadata一致性修正",
+      "evidence": "live shot的current immutable artifact、替换/删除历史保留、引用感知retention：plans/bid-platform-complete-solution.md:742-755；manifest-owned render_assets、对象bounds、renderer禁止live读取和export CAS均已闭合：plans/bid-platform-complete-solution.md:873-879。"
+    },
+    {
+      "item": "PR7回归/Playwright",
+      "result": "通过",
+      "evidence": "固定bid-browser-e2e、实际checkout SHA、required ruleset/aggregation、always上传及缺文件失败均明确：plans/bid-platform-complete-solution.md:1000-1006。当前web仅有build且CI仅执行web build，故将Playwright新增归PR7是实际可实施增量：web/package.json:5-8；.github/workflows/ci.yml:179-188。family→kind仅作PR3 seam回归，没有重复归属。"
+    },
+    {
+      "item": "逐PR exit gate总体可实施性",
+      "result": "除三个blocker外通过",
+      "evidence": "PR1-PR7分别给出输出、removed seam与exit gate：plans/bid-platform-complete-solution.md:988-994；强制矩阵覆盖fresh、matching、procedural、assets/manifest及Playwright：plans/bid-platform-complete-solution.md:1036-1045。现有仓库已有embedded migration、manifest、catalog/ACL及service smoke入口，可承接这些门禁。"
+    }
+  ],
+  "最终结论": {
+    "decision": "REJECT",
+    "reason": "存在三个实现契约blocker：PR1 stage/commit幂等遗漏、PR1冻结lease/完整分批wire contract未定义，以及PR6 procedural lifecycle与唯一约束冲突。修正后其余PR归属、fresh runner方向、assets/manifest和PR7验收设计可接受。",
+    "scopeNote": "拒绝原因不包含已批准排除的deployment completion，也不因方案尚未实现代码而拒绝。"
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "Review": "第2轮 fresh-context 只读交付验收；未编辑文件、未执行测试命令。",
+  "Blockers": [
+    {
+      "问题": "0018 的 retention 独立数据库身份未纳入规范 fresh runner 和现有 bootstrap wiring，按当前方案无法完成 fresh-schema ACL 验收。",
+      "证据": [
+        "方案要求只有 retention 角色可锁 object registry、消费 outbox 和执行删除函数：plans/bid-platform-complete-solution.md:1081。",
+        "规范 runner 明确只创建 migrator/verifier/API/worker roles：plans/bid-platform-complete-solution.md:1064、1143。",
+        "当前身份脚本也只创建 API/worker runtime login：deploy/postgres-init/010-runtime-identities.sh:5-15、29-35；当前 CI 依赖该脚本：.github/workflows/ci.yml:52-66。"
+      ],
+      "必须修正": "PR6 明确交付 retention login/role、凭据环境变量、bootstrap topology/catalog/ACL allowlist、fresh runner role allow/deny 矩阵及 retention outbox consumer。同步定义 running 任务崩溃后的 reclaim/重试门禁；否则 0018 的 GRANT 或 outbox 执行链不能签收。"
+    }
+  ],
+  "现在值得修正": [
+    {
+      "问题": "0018 procedural provenance 尚未机械绑定 0015 的冻结 source/section artifact。",
+      "证据": [
+        "0015 定义 immutable converted source/section artifact及唯一 scope verifier：plans/bid-platform-complete-solution.md:224-228。",
+        "0018 classification 只有 nullable `extracted_origin_artifact_id`/origin span，未列 FK 或 scope verifier：plans/bid-platform-complete-solution.md:725-731。",
+        "方案又要求 extracted/manual_after_edit 永久保留可信 origin：plans/bid-platform-complete-solution.md:864。"
+      ],
+      "建议": "在0018中增加指向0015 source/section artifact的 RESTRICT 复合约束或 deferred verifier，并证明 project/document/source/section/generation、origin span内artifact IDs及digest一致；增加跨项目、错误section/digest和伪origin零写测试。"
+    },
+    {
+      "问题": "双 Router/template 的 authoritative current-version 数据源仍未落到明确 schema slice。",
+      "证据": [
+        "PartDependency要求 kind/procedural/template version来自 current contract/promotion row，promotion还必须重建dependency并stale：plans/bid-platform-complete-solution.md:936-944。",
+        "现有字段只有 stable-span preimage中的router_version、segment的segmentation_version和classification_version：plans/bid-platform-complete-solution.md:228、717、739。",
+        "0015/0018输出清单未明确current contract表、唯一current约束、promotion函数或seed归属：plans/bid-platform-complete-solution.md:1058-1062。"
+      ],
+      "建议": "明确0015拥有KindRouter contract/current pointer，0018拥有ProceduralRouter与template contract/current pointer；固定唯一current、版本FK、受控promotion锁序、seed及promotion并发/stale/export拒绝测试。"
+    },
+    {
+      "问题": "Profile canonical 有两种顶层形状表述。",
+      "证据": [
+        "CompanyProfileV1与SubmissionProfileV1被定义为各自完整standalone object及固定键序：plans/bid-platform-complete-solution.md:846。",
+        "随后又称“所有profile”使用顶层固定 `schema_version,items` 的CanonicalSetV1：plans/bid-platform-complete-solution.md:860。"
+      ],
+      "建议": "明确两个profile不使用CanonicalSetV1 wrapper，其content hash只对line 846定义的standalone object bytes计算；CanonicalSetV1仅用于真正的集合，并锁定跨SQL/Rust exact-byte fixture。"
+    },
+    {
+      "问题": "0013共享幂等协议的operation命名不唯一，0016 slice另夹带尚不存在的profile operations。",
+      "证据": [
+        "Stage/Commit wire分别写 `stage_route_batch_v1`、`commit_route_v2`，但同段幂等operation写 `match_stage_route_batch_v1`、`match_commit_route_v2`：plans/bid-platform-complete-solution.md:535、550。",
+        "全局system operation registry只列match前缀版本：plans/bid-platform-complete-solution.md:1026。",
+        "0016描述为fact/profile operations，但profile表归0018：plans/bid-platform-complete-solution.md:1059-1061。"
+      ],
+      "建议": "为wire字段与 `bid_idempotency_results.operation`固定同一个canonical枚举，或明确两者的有意映射并加入逐字段fixture；0016改为fact operations，profile operations明确归0018且复用0013基础表。"
+    },
+    {
+      "问题": "PR6矩阵应明确替换当前API/Web导出旁路，而不能等PR7 E2E才暴露。",
+      "证据": [
+        "当前API仍有无dependency CAS的booklet PUT/regenerate和GET export：crates/api/src/routes.rs:215-222、4713-4749、4757-4767。",
+        "当前Web仍直接调用这些接口：web/src/api.ts:300-313、328-355。",
+        "PR6行只概述manifest/PDF gate，未逐名列出这些removed seams或完整API/Web输出：plans/bid-platform-complete-solution.md:1100；但总规则禁止把旁路留给后续PR：同文件:1089。"
+      ],
+      "建议": "PR6明确交付profile/procedural/attachment/booklet/export API与Web，并删除或改造legacy GET export、`regenerate_stale`、无expected revision的save/regenerate；PR6 exit直接测试旧请求不能绕过RequiredPartSet/PartDependency/manifest。"
+    },
+    {
+      "问题": "fresh runner需明确使用带pgvector的PG16，而不是泛称PG16 cluster。",
+      "证据": [
+        "空库链的0004执行 `CREATE EXTENSION vector`：migrations/0004_embeddings.sql:3。",
+        "当前CI因此使用固定pgvector PG16镜像：.github/workflows/ci.yml:23-25。",
+        "新runner仅写“临时PG16 cluster”：plans/bid-platform-complete-solution.md:1064、1143。"
+      ],
+      "建议": "固定与CI一致的pgvector/PG16 image及digest，runner自行等待、校验vector extension并在成功/失败trap清理。"
+    }
+  ],
+  "可选/延期": [
+    {
+      "事项": "明确 `bid_object_registry.state='deleted'` 后相同digest再次上传是永久拒绝，还是允许在锁内校验物理对象后 `deleted→available`。当前available-only引用规则会永久拒绝复用已删除的content-addressed key：plans/bid-platform-complete-solution.md:858。"
+    },
+    {
+      "事项": "历史安装迁移、在线升级、down migration、runtime topology closure按已批准clean-slate边界延期合理：plans/bid-platform-complete-solution.md:37-43。"
+    }
+  ],
+  "通过项": [
+    "0013明确一次创建共享canonical actor/idempotency基础，0016复用且禁止重建：plans/bid-platform-complete-solution.md:1056、1059；actor_identity的user/api_key/system NULL矩阵和唯一键也已闭合：同文件:1024-1028。",
+    "0015对SourceSpanV2十四键、UTF-8 byte offsets、冻结source/section、scope verifier及事实候选同publication fencing定义充分：plans/bid-platform-complete-solution.md:196-232、298-354。",
+    "0016事实契约覆盖project-create真实expires_at digest、current/history分离、publisher/decision统一锁序、accept/reject/set/clear CAS及ceiling独立revision：plans/bid-platform-complete-solution.md:333-418。",
+    "0018 BidShot预分配pointer、真实placement唯一约束、immutable render asset、manifest关系FK/JSON互证和新引用/删除共锁方向正确：plans/bid-platform-complete-solution.md:790-858、980-988。",
+    "规范入口固定为 `scripts/bid_fresh_schema_acceptance.sh`，要求自建/清理环境、独立 `bid-fresh-schema` job、shell syntax gate及required-check证据；已正确区别于当前compose first-launch测试：plans/bid-platform-complete-solution.md:1064-1066、1143。",
+    "PR3已准确覆盖当前API/Web/smoke的family写入移除；当前实际seam可见于crates/api/src/routes.rs:4122-4305、web/src/api.ts:258、web/src/bid/Inspector.tsx:80-87、scripts/bid_e2e_smoke.sh:83-96。",
+    "逐PR outputs/removed seams/exit gates整体顺序和clean-slate bootstrap wiring一致，且PR7 required Playwright证据链定义充分：plans/bid-platform-complete-solution.md:1089-1113。"
+  ],
+  "accept/reject": "reject"
+}

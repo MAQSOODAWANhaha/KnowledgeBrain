@@ -1,0 +1,86 @@
+{
+  "Blockers": [
+    {
+      "问题": "ProceduralRequirementRouterV1 的句级输出基数与存储模型不一致。",
+      "证据": [
+        "plans/bid-platform-complete-solution.md:659-673 将 classification 约束为 UNIQUE(project_id, clause_id)，即每个 clause 最多一条。",
+        "plans/bid-platform-complete-solution.md:723 要求先做句级拆分，但只规定不可拆 segment 的多 requirement 情况；没有定义同一 clause 拆出多个不同 kind 后如何聚合。",
+        "plans/bid-platform-complete-solution.md:751 又要求每个 current procedural clause 有一条 classification。",
+        "crates/api/src/routes.rs:4258-4267 的人工 clause 接受任意 text；crates/api/src/routes.rs:4298-4313 持久化时 source_span=None，因此人工 procedural clause 既可能含多个可拆要求，也没有 SourceSpanV2。"
+      ],
+      "影响": "例如人工 clause“提交授权委托书并确认投标函盖章”会拆出 authorization_support 和 confirmation，但当前唯一键无法表示两个结果；同时“基于文本与 SourceSpanV2”无法覆盖人工 clause，SubmissionGate 因而没有确定结果。",
+      "修正": "二选一并写死契约：以 clause+stable segment identity 存多条 classification、Gate 按 segment 检查；或明确每 clause 只产一条聚合 classification，多个不同 segment kind 一律 review。另需明确人工 clause 的 nullable/manual provenance，不能强制其拥有 SourceSpanV2。"
+    },
+    {
+      "问题": "PickSetV1 的权威成员集合和 ordinal 来源未定义，无法与 0012 的 current-visible 语义闭合。",
+      "证据": [
+        "plans/bid-platform-complete-solution.md:719 以 current pick 集合和 ordinal 构造 PickSetV1，但只在 pick 进入、离开、替换时 bump。",
+        "migrations/0012_bid_match_contract.sql:778-807 的 bid_pick_snapshots 没有 pick ordinal；migrations/0012_bid_match_contract.sql:962-975 的 bid_pick_current 也没有 ordinal。",
+        "migrations/0012_bid_match_contract.sql:1206-1227 显示 bid_pick_current_visible 会因 matching projection/generation/watermark 变化而隐藏旧 pick，即使 bid_pick_current.is_current 仍为 true。"
+      ],
+      "影响": "若“current”指 bid_pick_current，part 3 可继续引用已经不属于 current matching 的旧 pick；若指 bid_pick_current_visible，matching 变化会改变集合却不会触发计划规定的 PickSet revision/digest bump。ordinal 也没有唯一可实现来源。",
+      "修正": "明确成员必须来自 current-visible 还是持久 pick head；若为 current-visible，matching 可见性变化也必须在 project lock 下重建 PickSet。为 ordinal 指定真实列/派生字段、范围和唯一性，或从 canonical item 中删除 ordinal 并按现有稳定身份排序。"
+    },
+    {
+      "问题": "BidShotSetV1 缺少从 live shot 到唯一 current immutable render asset 的权威映射。",
+      "证据": [
+        "plans/bid-platform-complete-solution.md:702-714 只定义了可存在多行的 immutable artifact 表。",
+        "plans/bid-platform-complete-solution.md:719、830、836 要求 current BidShotSetV1、每个正式 shot 恰好一个 current asset，并支持切换，但未定义 current pointer/projection 表或复合约束。",
+        "migrations/0007_bid.sql:220-230 的 bid_shots 只有 live object_key；crates/storage/src/bid.rs:1515-1517 仍直接写该结构。"
+      ],
+      "影响": "同一 source_bid_shot_id 可以有多个 artifact，但数据库无法判定哪一个进入 BidShotSetV1，也无法机械证明导出时“有且只有一个 current immutable asset”。",
+      "修正": "在 0018 明确定义受控 current mapping，例如 shot current projection 或 bid_shots 上受约束的 current_render_asset_artifact_id，并规定替换、删除、placement 更新、manifest FK 和 retention 的状态转换。"
+    },
+    {
+      "问题": "PartDependencyV1 强制 matching_report 使用 artifact SHA-256，但没有定义该 digest。",
+      "证据": [
+        "plans/bid-platform-complete-solution.md:792 要求 matching_report 使用 {id,generation,sha256} artifact identity。",
+        "plans/bid-platform-complete-solution.md:496 仅提到含义未固定的“report摘要”，没有 MatchingReportV1 canonical bytes/hash 契约。",
+        "migrations/0012_bid_match_contract.sql:394-437 的 bid_match_report_artifacts 当前没有 content_sha256 或等价字段。"
+      ],
+      "影响": "2:*、4、5、6:implementation_plan 都无法按 plans/bid-platform-complete-solution.md:794 构造可跨 Rust/SQL 验证的 PartDependencyV1。",
+      "修正": "在 PR1 定义 MatchingReportV1 的唯一 canonical serialization/content_sha256，或指定一个现存、不可变且逐字段验证的 commit receipt digest，并明确 PartDependency 使用哪一列。"
+    }
+  ],
+  "现在值得修正": [
+    {
+      "问题": "FactIdentityV1 的初始构造必须覆盖带 expires_at 的项目创建路径。",
+      "证据": [
+        "plans/bid-platform-complete-solution.md:373 将 expires_at 纳入 FactIdentityV1，并称 revision=0 为初始空事实。",
+        "crates/api/src/routes.rs:3739-3744 允许创建项目时直接提交 expires_at。",
+        "crates/storage/src/bid.rs:111-127 当前直接 INSERT expires_at。"
+      ],
+      "建议": "PR4 明确改造 project-create storage seam：同一事务按实际初始 expires_at 构建 revision=0 digest；不能给非空 expires_at 项目写“空事实”hash。"
+    },
+    {
+      "问题": "submission profile revision 存在两个潜在权威来源。",
+      "证据": [
+        "plans/bid-platform-complete-solution.md:646-657 已在 bid_submission_profile 保存 revision/content_sha256。",
+        "plans/bid-platform-complete-solution.md:717 又要求 project 保存 submission_profile_revision。",
+        "plans/bid-platform-complete-solution.md:792 要求 PartDependency 读取 submission profile 自身 revision/content hash。"
+      ],
+      "建议": "删除 project 上的重复 revision，或明确它是受 DB 约束、始终等于 profile row revision 的镜像；指定 PartDependency 和 CAS 唯一读取 profile row identity。"
+    },
+    {
+      "问题": "PartDependencyV1 的 router_version/template_version 缺少类型、NULL 和 currentness 规则。",
+      "证据": [
+        "plans/bid-platform-complete-solution.md:785-792 将两字段放入 canonical payload，但后文只定义 identities 的形状。",
+        "plans/bid-platform-complete-solution.md:794 的 part-specific validator 未规定哪些 part 使用哪个 router/template version，也未规定版本变化如何使 dependency 失效。"
+      ],
+      "建议": "固定为 bounded string 或显式 null，定义各 part 的版本来源和 applicability，并将版本变化纳入 current dependency 重建。"
+    }
+  ],
+  "可选/延期": [],
+  "通过项": [
+    "ProceduralRequirementRouterV1 的 classified/review × override/no-override 原始状态与 effective 状态矩阵本身完整；override 不覆盖原始结果，resolution 只读 effective kind，见 plans/bid-platform-complete-solution.md:741-748。",
+    "FactIdentityV1 已固定项目、revision、全部事实字段、Decimal/UTC/NULL 和初始 digest 规则，见 plans/bid-platform-complete-solution.md:373。",
+    "company profile 与 submission profile 在 PartDependencyV1 和 SubmissionGateV1 中使用各自独立 hash，没有聚合 profile hash，见 plans/bid-platform-complete-solution.md:792、826。",
+    "GateIssueV1 的 code、entity、NULL矩阵、bounds、排序和数组上限已机械化，见 plans/bid-platform-complete-solution.md:828。",
+    "SubmissionManifestInputV1 已固定顶层顺序、RequiredPartSet 顺序、逐 part dependency/content CAS、32 MiB 输入上限及 manifest-owned render 读取边界，见 plans/bid-platform-complete-solution.md:824-836。",
+    "PartDependencyV1 对 facts/profile/set 的 revision+digest 形状以及不适用 identity 必须显式 null 的规则已闭合，见 plans/bid-platform-complete-solution.md:792-796。"
+  ],
+  "最终结论": {
+    "判定": "reject",
+    "原因": "Procedural classification 基数、PickSet current 语义、BidShot current asset 映射及 matching report digest 仍无法按现有 0010/0012/Rust/storage seam 唯一实现。修正这些局部契约后可再 accept。"
+  }
+}

@@ -1,0 +1,165 @@
+{
+  "review": {
+    "Blockers": [
+      {
+        "id": "B1",
+        "finding": "fresh DB 实施链与仓库真实 migration 入口矛盾，当前方案无法按现状签收。",
+        "evidence": [
+          "方案在 plans/bid-platform-complete-solution.md:37-43 排除 migration manifest 交付，却在 625-639 声称空库执行 0013/0014。",
+          "crates/storage/src/persist.rs:6-114 只嵌入到 0012，CURRENT_SCHEMA_VERSION 也是 12；persist.rs:249-285 强制 manifest 与 embedded catalog 数量、身份和 SHA-256 完全一致。",
+          "deploy/first-launch/migration-manifest.toml:1-65 只登记到 0012；crates/storage/src/first_launch.rs:572-578 还把 ledger 行数硬编码为 11。",
+          ".github/workflows/ci.yml:73-140 强制执行 fresh-volume、first-launch verifier、catalog/ACL allow-list 和 PostgreSQL storage 测试。"
+        ],
+        "required_change": "明确区分“延期 runtime-completion/image/topology 部署闭包”和“fresh schema 必需的仓库 migration glue”。后者必须纳入：嵌入新 migration、CURRENT_SCHEMA_VERSION、migration-manifest、ledger/allow-list 期望及对应测试。还需为 PR1 的 Evidence/FROZEN_SCOPE DB 变化分配 migration；建议按 PR 顺序使用独立 head，例如 matching closure、publisher closure、kind/fact、quote、submission/booklet，而不是只预留 0013/0014。"
+      },
+      {
+        "id": "B2",
+        "finding": "正式⑥的程序材料门禁仍包含无法实现和验收的占位。",
+        "evidence": [
+          "plans/bid-platform-complete-solution.md:516-530 仅写出 contact fields、seal/signature confirmations、procedural confirmation fields 和 other_bounded，没有字段集合、状态机、必填规则或 clause 到检查项的映射。",
+          "同文件 544-548 要求 authorization/procedural parts 读取这些输入，574 又要求所有必须程序项确认或附件齐备。由于“必须项”及其满足条件未定义，PDF gate 无法得到确定布尔结果。"
+        ],
+        "required_change": "在 PR0 契约中定义固定必填字段及类型，并为动态 procedural 条款定义 typed check 模型，例如 clause_id、required、status=confirmed|missing|not_applicable、reason、actor、revision，以及附件满足规则。给出逐字段/逐状态 PDF 允许与拒绝矩阵。"
+      },
+      {
+        "id": "B3",
+        "finding": "“可人工修订且可审计”的 booklet part 没有进入正式 manifest 的不可变内容身份。",
+        "evidence": [
+          "plans/bid-platform-complete-solution.md:21 承诺⑥可人工修订、可审计。",
+          "同文件 569 只保存输入 revision/artifact/snapshot/template identity，575 的 submission manifest 也未包含 part 内容 revision/hash 或冻结后的渲染内容。",
+          "当前运行时允许直接修改 Markdown：crates/bid/src/booklet.rs:463-486；当前表读取只有 markdown、时间和 stale：crates/storage/src/bid.rs:1964-2027。"
+        ],
+        "required_change": "为每个 part 增加 content_revision/content_sha256、edited_by 与编辑审计；export 事务必须锁定并冻结全部 part revision/hash，渲染只能读取 manifest 所引用的冻结内容，不能在事务后重读 live Markdown。增加“并发编辑与 export 只能一方成功”的测试。"
+      },
+      {
+        "id": "B4",
+        "finding": "PR0、PR-S、PR1…PR7 只有任务清单，没有可逐 PR 签收的输入、输出和测试归属；PR7 的浏览器验收尤其没有执行入口。",
+        "evidence": [
+          "plans/bid-platform-complete-solution.md:660-703 描述各 PR 内容，但没有逐阶段前置 schema/API version、产出 artifact、禁止遗留旁路和退出条件。",
+          "全局测试集中在 709-747，无法判断哪些门禁必须在 PR1、PR2 等当期通过。",
+          "PR7 在 701-703 要求浏览器键盘路径和中文 UI 验收，但 web/package.json:4-7 只有 dev/build/preview，没有 test 或 browser E2E script；.github/workflows/ci.yml:183-184 也只做 web build。",
+          "现有 scripts/bid_e2e_smoke.sh:86-96 仍直接 PATCH family，133-143 只保存 part 1 就导出 PDF，与新 kind 派生和 PDF hard gate 相冲突。"
+        ],
+        "required_change": "增加 PR 验收矩阵：每个 PR 明确 prerequisites、schema/API 输出、必须删除的旧 seam、当期测试命令和通过标准。明确更新 ci.yml 与 bid_e2e_smoke.sh；浏览器验收要么增加真实 runner 和 CI script，要么定义有责任人、步骤和证据文件的人工验收协议，不能只写“浏览器验收”。"
+      }
+    ],
+    "现在值得修正": [
+      {
+        "finding": "PR1 应明确“改造现有 commercial decision view/query”，而不是“新增查询”。",
+        "evidence": [
+          "0012 已有 bid_match_current_commercial_decisions：migrations/0012_bid_match_contract.sql:1169-1204。",
+          "storage 已有 current_commercial_decisions：crates/storage/src/bid_matching.rs:1749-1758。",
+          "运行时和④⑤已读取它：crates/bid/src/lib.rs:325-349、crates/bid/src/booklet.rs:293-378。"
+        ],
+        "correction": "把 plans/bid-platform-complete-solution.md:396-407 改成：升级现有 view/query 以读取 EvidenceV1.items、冻结 display name/quote，并移除 live documents.file_name 依赖。"
+      },
+      {
+        "finding": "matching closure方向正确，但稳定选择与 DB 一致性条件还应写成可执行契约。",
+        "evidence": [
+          "当前 workflow 会被后续候选覆盖最终状态，并把 product.id 写进 selected_candidate_artifact_id：crates/bid/src/matching/workflow.rs:264-348。",
+          "handler 的 CommitRoute 不传 requirement_decisions：crates/bid/src/matching/handler.rs:101-139。",
+          "storage 又对每个 requirement 使用 .find() 重建：crates/storage/src/bid_matching.rs:1584-1628。",
+          "现有 FK 只证明 selected candidate 属于 report/requirement：migrations/0012_bid_match_contract.sql:626-629，尚需验证 decision 与 selected candidate 的 support/decision/quality 一致。"
+        ],
+        "correction": "定义准确 comparator，例如 frozen product ordinal、retrieval rank、candidate_identity；CommitRoute 使用 typed RequirementDecision DTO 原样透传。DB verifier 应验证每个 requirement 恰好一条 decision、select 指向 supported/select 候选，reject/review 不带 selected id，且 decision support/quality 与所选候选一致。"
+      },
+      {
+        "finding": "EvidenceV1 需要补充实际验证 seam。",
+        "evidence": [
+          "当前 Rust 是 Vec<EvidenceQuote>：crates/bid/src/matching/mod.rs:313-330。",
+          "当前 DB 对 evidence 只做大小检查：migrations/0012_bid_match_contract.sql:538-550。",
+          "当前 display name 来自 live documents join：同文件 1191-1204。",
+          "当前 retrieval offsets 来自 chunk start_at/end_at，并非明确的 quote 内 utf8 byte offset：crates/storage/src/bid_matching.rs:1865-1911。"
+        ],
+        "correction": "指定 Rust EvidenceV1 类型、SQL validator、commit-time document/chunk eligibility 校验、UTF-8 byte 回源算法和 display name 冻结来源；测试必须验证中文多字节、开区间和删除 live document 后重现。"
+      },
+      {
+        "finding": "0014 的 PR 归属互相冲突。",
+        "evidence": [
+          "plans/bid-platform-complete-solution.md:635-638 把 quote、company/submission、booklet dependency 和 manifest 都放入 0014。",
+          "但 693-695 的 PR5 只实现 quote，697-699 到 PR6 才实现 profile、attachments、booklet 和 manifest。"
+        ],
+        "correction": "拆为 quote migration 与 submission/booklet migration，保证 PR5 不引入未实现、未授权或未测试的 PR6 表。"
+      },
+      {
+        "finding": "ceiling 变化后的 active snapshot/reopen 协议矛盾，canonical hash 也未定义。",
+        "evidence": [
+          "plans/bid-platform-complete-solution.md:493-495 要求 reopen active finalized revision。",
+          "同文件 556 却在 ceiling 变化时先清空 active snapshot 引用，未说明 reopen 如何定位历史 snapshot。",
+          "462-494 只写 canonical_payload + SHA-256，没有规定字段顺序、Decimal 表示、Unicode/时间编码和 hash version。"
+        ],
+        "correction": "更简单的协议是保留 active snapshot 指针但标记/计算为 ineligible，reopen 明确接收 expected_snapshot_id；或清空前同事务自动创建 draft。为 snapshot 定义 schema_version 和唯一 canonical serialization。"
+      },
+      {
+        "finding": "kind/family lockstep 必须覆盖所有 Clause 写入口，不只是 PATCH。",
+        "evidence": [
+          "方案只在 plans/bid-platform-complete-solution.md:584 明确 PATCH 提交 kind。",
+          "当前手工创建入口仍接受 family：crates/api/src/routes.rs:4259-4313；PATCH 也直接接受 family：4122-4218。",
+          "当前 storage ClausePatch 同样暴露 family：crates/storage/src/bid.rs:33-40。"
+        ],
+        "correction": "PR3 验收列出 create、PATCH、抽取 publisher、Web DTO 和 smoke script 的全部改造，并全仓检查客户端不可写 family。"
+      },
+      {
+        "finding": "PR-S 混合了仓库内代码验收和外部治理事项。",
+        "evidence": [
+          "plans/bid-platform-complete-solution.md:608-620 同时包含路径校验、LDAP/TLS、解析隔离、凭据轮换、数据驻留和 DPA。",
+          "其中 DPA、数据驻留确认及“端点曾暴露则轮换”无法仅由代码测试签收。"
+        ],
+        "correction": "拆成 PR-S-code 和上线前 operator checklist；分别定义自动化测试、配置证据、责任人和签字产物。不要让外部治理占位阻塞所有本地领域 PR。"
+      }
+    ],
+    "可选改进": [
+      {
+        "finding": "本期可直接锁定 CNY，避免“默认 CNY + 未列出的 ISO 4217 allowlist”增加无收益复杂度。",
+        "evidence": "plans/bid-platform-complete-solution.md:431-432、478 同时声称默认 CNY和支持 allowlist。",
+        "suggestion": "若无已批准外币用例，schema/API 只接受 CNY、scale=2；未来再以独立版本扩展。"
+      },
+      {
+        "finding": "方案篇幅偏长且风险表重复正文。",
+        "evidence": "§14 的多数风险已在 §4、§6、§7、§8 和 §13 重复；§15 又重复实施顺序。",
+        "suggestion": "保留边界、关键契约、PR/验收矩阵；将风险表压缩为仅保留尚未由硬约束或测试闭合的风险。"
+      },
+      {
+        "finding": "稳定 comparator、canonical payload 和 procedural gate 可集中成三个版本化契约，减少散落规则。",
+        "suggestion": "分别命名 MatchDecisionV1、QuoteSnapshotV1、SubmissionGateV1，并让 Rust DTO、SQL validator、API 和测试引用同一版本号。"
+      }
+    ],
+    "应忽略/延期": [
+      "历史数据回填、down migration、旧 binary 共存、灰度和在线迁移，符合已批准 clean-slate 边界。",
+      "runtime-completion.toml 的完整发布哈希、镜像和 topology 部署闭包可延期；但不能据此省略 fresh DB 实际需要的 embedded migration、manifest 和 ACL/catalog 测试更新。",
+      "Org、多租户、复杂角色或负责人 ACL 不应借本次 actor audit 引入。",
+      "自动定价、成本引擎、汇率换算、第三匹配路和第三 LLM Agent 均应继续延期。"
+    ],
+    "覆盖良好": [
+      {
+        "area": "0010 publication",
+        "assessment": "正确识别了真实生产旁路。crates/bid/src/lib.rs:1277、1466、1684 仍调用 persist_extraction_report/persist_section_retry，storage 实现在 crates/storage/src/bid.rs:1311-1540 直接写 domain；PR2 先闭合 publisher、PR3 再加入 fenced facts 的依赖顺序合理。"
+      },
+      {
+        "area": "matching root causes",
+        "assessment": "Evidence 顶层数组、FROZEN_SCOPE allowlist 漂移、最终 decision 未透传、多候选覆盖、无候选 review 和三态 commercial 均被覆盖。特别是 runtime 在 workflow.rs:405 产生 FROZEN_SCOPE，而 migrations/0012_bid_match_contract.sql:439-443 未允许，判断准确。"
+      },
+      {
+        "area": "kind/family",
+        "assessment": "kind 表达语义、family 只负责两路 routing、family 可空以及显式 IS NOT NULL 的 CHECK，能避免 PostgreSQL 三值逻辑和 else→commercial。watermark 的 old/new membership 表也清晰。"
+      },
+      {
+        "area": "facts and quotes",
+        "assessment": "事实建议复用 0010 fencing、人工接受 CAS、immutable quote snapshot、Decimal 字符串、税含/税外公式、ceiling gate 和 letter/quote 共用 snapshot，整体符合批准边界。"
+      },
+      {
+        "area": "stale and formal export",
+        "assessment": "方案没有依赖单一 stale 布尔值，而要求比较 fact/profile/matching/pick/quote/template identity；正式 PDF manifest、幂等重试和 ended project 只下载已有制品的方向正确。"
+      },
+      {
+        "area": "tests and ACL",
+        "assessment": "§13.2 对 publication race、matching matrix、fact concurrency、Decimal、snapshot immutability、stale edges、PDF gate 和 security negative cases 的覆盖较完整；§11.3 的 API/worker 分权也符合现有 kb_runtime_api/kb_runtime_worker 架构。"
+      }
+    ],
+    "结论": {
+      "status": "needs_revision_before_implementation_signoff",
+      "summary": "总体架构和 PR 主依赖顺序可行，matching closure 也准确命中当前真实缺陷；但目前不能签收。必须先闭合 fresh migration/CI 入口、程序材料确定性门禁、人工修订 part 的冻结身份，以及逐 PR 可执行验收。完成这些修订后，不需要扩大到历史迁移、Org 或部署 completion。",
+      "test_execution": "本次为只读静态评审，未运行测试。修订后至少应由主会话执行 .github/workflows/ci.yml 中现有 mandatory PostgreSQL/ACL/matching/smoke 入口，并新增正式①～⑥及浏览器验收入口。"
+    }
+  }
+}

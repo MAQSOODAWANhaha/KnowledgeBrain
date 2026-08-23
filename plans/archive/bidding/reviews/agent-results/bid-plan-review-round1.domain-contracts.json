@@ -1,0 +1,148 @@
+{
+  "Blockers": [
+    {
+      "标题": "Fact acceptance 的 publication/CAS 与幂等线性化尚未闭合",
+      "证据": [
+        "方案只要求锁 project 和 suggestion，再验证 current publication（plans/bid-platform-complete-solution.md:332-344），但没有规定与 publisher 共同锁定 bid_section_publication_state、document extraction head 或使用条件更新。",
+        "0010 的 current 身份实际位于 bid_section_publication_state（migrations/0010_bid_extract_publication.sql:1017-1085）。accept 与 publish 若采用不同锁顺序，可能出现死锁，或在 current 检查后 publication 已替换的竞态。",
+        "方案保证同一 idempotency key 返回首次结果，但幂等结果在事务步骤第 7 步才写入（plans/bid-platform-complete-solution.md:332-344）；若重放时 suggestion 已 accepted/superseded，先执行 mutable precondition 会错误返回 SUGGESTION_NOT_CURRENT。"
+      ],
+      "必须修正": [
+        "定义统一锁序，例如 project → publication-state/head → suggestion → conflicting suggestions；publisher 与 accept/reject 必须遵守同一顺序。",
+        "accept 使用锁定的 publication identity 或带 current target/section candidate/generation 条件的原子更新；条件失败必须零领域写。",
+        "幂等函数首先按 actor+operation+key 查找/预占并校验 payload hash；已完成请求直接返回原结果。并发同 key 的 unique 冲突必须等待并重读结果，而不是暴露 23505。",
+        "reject 也应遵守同一锁序；明确它是否校验 expected_fact_revision。"
+      ]
+    },
+    {
+      "标题": "EvidenceV1 所称“冻结 chunk + 可逐字回源”当前数据结构无法兑现",
+      "证据": [
+        "EvidenceV1 只冻结 quote、offset 和 display name，却声明 offset 相对“冻结 chunk 正文”（plans/bid-platform-complete-solution.md:367-396）；对象内没有 chunk 正文、chunk digest 或不可变 chunk artifact。",
+        "当前 chunks 随 documents 物理删除而级联删除（migrations/0004_embeddings.sql:5-10），所以 live document 删除后不存在可供 offset 重放的 chunk。",
+        "当前检索把 chunks.start_at/end_at 直接当 evidence offset（crates/storage/src/bid_matching.rs:1866-1888），fallback 又按 char 数计算；新契约要求 utf8_byte，必须显式转换和验证。",
+        "当前 Rust evidence 仍是 Vec<EvidenceQuote>，且缺 display name/offset unit（crates/bid/src/matching/mod.rs:313-330）。"
+      ],
+      "必须修正": [
+        "二选一：冻结完整 bounded chunk artifact及其 SHA-256；或把 quote 本身定义为冻结来源，offset 改为相对 quote，并另存原文 document/chunk offset与单位。",
+        "持久化前验证 UTF-8 byte 边界、quote == frozen_chunk[start..end]、document/chunk 属于 eligibility snapshot；删除 live document 后只能依赖冻结 artifact。",
+        "Evidence schema validator、Rust DTO、SQL view 和测试必须统一读取 schema_version/items；当前 view 仍兼容顶层数组/扁平对象（migrations/0012_bid_match_contract.sql:1169-1200）。"
+      ]
+    },
+    {
+      "标题": "Matching 最终 decision 缺少完整的聚合枚举契约",
+      "证据": [
+        "方案规定 supported/select、mixed review、all contradicted/reject（plans/bid-platform-complete-solution.md:349-365），但没有规定 mixed contradicted+insufficient、insufficient+unresolved 时最终 verifier_support、reason_code、quality_status 的确定值。",
+        "DB decision 行要求这些值相互一致，因此不能只确定 system_decision（migrations/0012_bid_match_contract.sql:487-510）。",
+        "当前 storage 确实按 requirement `.find()` 任取首个 candidate 重建 decision（crates/storage/src/bid_matching.rs:1588-1624），当前 workflow 甚至把 product.id 写入 selected_candidate_artifact_id（crates/bid/src/matching/workflow.rs:271-323）。"
+      ],
+      "必须修正": [
+        "给出完整聚合优先级，例如 supported > unresolved > insufficient > contradicted > no-evidence，并为每一类锁定 verifier_support、reason_code、quality_status 和 business-value 状态。",
+        "定义稳定 selected candidate 排序的精确字段及 tie-breaker，而不是只写“稳定 candidate ordering”。",
+        "CommitRoute 应直接接收并逐项校验 MatchingReport.requirement_decisions；DB verifier 还应证明 select 指向 supported candidate。"
+      ]
+    },
+    {
+      "标题": "报价的 canonical hash、币种精度和 invalidation 状态机不足以形成可复现冻结快照",
+      "证据": [
+        "canonical_payload/jsonb 与 SHA-256 没有规定 canonical bytes、字段顺序、Decimal 格式及 null 规则（plans/bid-platform-complete-solution.md:459-467,494），Rust/DB 无法保证同值同 hash。",
+        "currency_scale 允许 0..6，但只以注释表达 CNY=2（plans/bid-platform-complete-solution.md:431-432）；没有约束 currency_code→scale。事实金额又固定 numeric(20,2)，与可能支持三位或更多小数的币种不一致。",
+        "行公式已定义，但 totals 是“已舍入行金额之和”还是对未舍入合计再次 round 没有定义（plans/bid-platform-complete-solution.md:476-482）。",
+        "ceiling 变化会清空 active_finalized_snapshot_id，却仍要求之后 reopen（plans/bid-platform-complete-solution.md:493-495,556）；若 reopen 只从 active snapshot 开始，来源身份已丢失。",
+        "方案引用 confirmed pricing watermark（plans/bid-platform-complete-solution.md:493,564），但没有定义该字段、何时 bump 或其 old/new membership 规则。"
+      ],
+      "必须修正": [
+        "定义唯一 canonical serialization，例如版本化 UTF-8 canonical JSON、所有 Decimal 固定十进制字符串、固定 key/order/null 规则；仅由一个 storage seam 生成 payload 和 hash。",
+        "本期若只支持 CNY，应明确 allowlist={CNY} 且 DB 强制 scale=2；否则事实金额精度和 currency registry 必须同步扩展。",
+        "明确 totals 为逐行舍入后求和，并设置金额、乘法结果、总额的 precision/overflow 上界。",
+        "建立 pricing_watermark 及 confirmed pricing clause 进入、离开、修改时的 bump 规则。",
+        "明确 quote 指针不变量及 reopen(snapshot_id)；或 ceiling invalidation 同事务直接创建 based_on_snapshot_id draft。无 ceiling 的人工复核结果、actor/reason 也应冻结进 snapshot/manifest，而不只存在于普通 audit。"
+      ]
+    },
+    {
+      "标题": "⑥的动态程序材料、附件和 stale identity 尚未建模，PDF hard gate 无法证明",
+      "证据": [
+        "bid_submission_profile 仅写成泛化的 procedural confirmation fields（plans/bid-platform-complete-solution.md:516-523），无法把任意 confirmed procedural clause 映射到“已确认、附件满足、不适用”。",
+        "附件模型只有 digest/display name/revision（plans/bid-platform-complete-solution.md:525-531），没有对象元数据 FK、validation status、MIME/size，也没有 attachment-set revision/digest。",
+        "6:authorization 的权威输入未包含 authorization_support 附件（plans/bid-platform-complete-solution.md:545），stale 图完全没有附件变化边（plans/bid-platform-complete-solution.md:554-567）。",
+        "booklet dependency identity 列表只保存 fact/profile revision、matching、pick、quote、Router/template（plans/bid-platform-complete-solution.md:569），遗漏 schedule_payment/service/schedule_delivery/procedural clause-set、程序确认和附件集合身份。"
+      ],
+      "必须修正": [
+        "增加 keyed procedural compliance decision：绑定 current confirmed clause/artifact，状态 confirmed_by_user|satisfied_by_attachment|not_applicable，含 reason、actor、revision。",
+        "附件引用 validated object metadata 表或不可变 object artifact，包含 digest、大小、媒体类型、验证策略版本和状态；新增项目级 attachment_set_revision/hash。",
+        "按 attachment kind 补齐 6:authorization、6:procedural 的输入和 stale 边。",
+        "为各 kind 的 confirmed clause set 定义 watermark/digest，并将其与 procedural decisions、attachment set 一起写入 part dependency 和 submission manifest；导出重新比较这些 identity。"
+      ]
+    }
+  ],
+  "现在值得修正": [
+    {
+      "标题": "KindRouter 顺序与 golden 存在内部冲突",
+      "证据": "schedule_delivery 在 technical 前，且“到货”会命中 delivery（plans/bid-platform-complete-solution.md:193-205）；但无法拆分的“到货后系统最大响应时间不超过 2 秒”要求 technical+review（同文件:223）。",
+      "建议": "增加“技术性能主谓结构优先、到货仅为条件从句”的 veto/precedence，并把冲突规则写成可执行决策表。payment 的组合信号与技术 veto 设计本身是正确方向。"
+    },
+    {
+      "标题": "Extraction source_span 不能同时表达父边界和精确子区间",
+      "证据": "方案要求保留二者（plans/bid-platform-complete-solution.md:180），但现有 kb_source_span_valid 只允许 start/end/page/quote_text（migrations/0010_bid_extract_publication.sql:93-111）。",
+      "建议": "版本化 source span，加入 parent_start/parent_end 或 parent_span_id，并显式 offset_unit；clause、fact、span 三者使用同一 validator。"
+    },
+    {
+      "标题": "人工事实修改协议缺失",
+      "证据": "方案提到已有人工值、事实“接受/人工修改”会 stale（plans/bid-platform-complete-solution.md:336,556），API/schema 实施清单却只有 suggestion accept/reject（同文件:585,633）。",
+      "建议": "增加 set/clear project fact API/function，使用 expected_fact_revision、override reason、idempotency、actor audit，并应用与 accept 相同的 typed validation和 stale/quote invalidation。"
+    },
+    {
+      "标题": "PR1 不应重复新增 current commercial decision 查询",
+      "证据": "当前已有 bid_match_current_commercial_decisions view（migrations/0012_bid_match_contract.sql:1169）和 storage 查询（crates/storage/src/bid_matching.rs:1749-1759），bid runtime 已消费它（crates/bid/src/lib.rs:329）。",
+      "建议": "把任务改为修正该 view 对 EvidenceV1 items/frozen display name 的读取，并验证无候选 review；不要再造平行查询。"
+    },
+    {
+      "标题": "Profile/attachment/procedural 写入缺少并发契约，global company audit scope 也不明确",
+      "证据": "资料模型只写 revision+audit（plans/bid-platform-complete-solution.md:508-531），API 未规定 expected revision/idempotency；bid_domain_audit 又以 project_id 开头（同文件:594-604），无法自然记录无 project 的 company singleton 更新。",
+      "建议": "所有 profile、附件和程序确认 mutation 使用 expected revision+idempotency；audit 增加明确 scope_kind/scope_id，或允许 global company audit 的 project_id=NULL。"
+    },
+    {
+      "标题": "Formal export 与 project ended 的竞态需定义",
+      "证据": "方案先事务冻结 manifest，再渲染；同时规定 ended 后只能下载已有成功制品（plans/bid-platform-complete-solution.md:574-576）。若 manifest 创建后、渲染成功前项目结束，既不能重试也没有成功制品。",
+      "建议": "定义 manifest pending/rendering/succeeded/failed 状态；end project 必须锁 project 并拒绝存在 rendering manifest，或允许 ended 后只重试已在结束前冻结的同一 pending manifest。"
+    },
+    {
+      "标题": "正式领域 mutation 必须排除无 durable actor 的 Bootstrap",
+      "证据": "当前认证存在 Actor::Bootstrap（crates/api/src/routes.rs:391-409），现有 bid pick 会把它映射为 system,None（同文件:4391-4401）。方案 audit/idempotency 依赖 actor identity（plans/bid-platform-complete-solution.md:594-604）。",
+      "建议": "PR-S/领域 API 明确 fact、quote、profile、procedural、final export 只接受 durable user/api_key actor；若保留 bootstrap，只允许启动管理操作，不能绕过 actor audit。"
+    }
+  ],
+  "可选改进": [
+    {
+      "建议": "给 fact suggestion current list 与历史 decision list分开命名；accepted suggestion 在 publication 更替后保留审计，但不应继续伪装成 current pending。"
+    },
+    {
+      "建议": "定义 bid_valid_days 与 bid_valid_until 同时存在但不一致时的 warning/PDF gate；不要静默择一，也不必自动换算。"
+    },
+    {
+      "建议": "booklet identity 可优先使用有界的 clause-set/attachment-set digest，避免 global company revision 更新时同步 fan-out 大量 stale 行；stale 布尔值仅作 UI 缓存。"
+    },
+    {
+      "建议": "把 routed segment 的稳定 span_key 算法锁定为文档 generation、section key、offset unit、start/end 和 router version 的摘要，便于 retry 幂等与 golden 固定。"
+    }
+  ],
+  "应忽略/延期": [
+    "按已批准 clean-slate 边界，不评审历史回填、在线 migration、旧 binary 共存、down migration 或部署 completion。",
+    "不应借公司资料与附件引入 Org、多租户、负责人 ACL 或复杂职责角色；authenticated-global 加 durable actor audit 即符合本期边界。",
+    "自动报价、成本引擎、跨币种汇率、负折扣行、包件和评标引擎应继续延期。",
+    "证件过期自动废标、第三检索路和第三 LLM Agent 不应混入本轮修正。"
+  ],
+  "优点": [
+    "事实候选复用 0010 target/generation/CAS 并与 clause/disposition 同事务发布，方向正确；现有 span→clause 一对一约束可直接扩展 fact 0..N（migrations/0010_bid_extract_publication.sql:920-1015）。",
+    "方案准确识别当前仍有 direct extraction persistence 绕路；生产调用确实存在于 crates/bid/src/lib.rs:1277,1466,1684。",
+    "kind 与 nullable family 分离、显式三值逻辑 CHECK、old/new matching membership watermark 表完整，避免了 else→commercial。",
+    "Evidence 改为顶层版本化 object、冻结 display name/quote，能消除当前 live file_name join 的主要可重现性问题。",
+    "报价坚持 Decimal 字符串、人工逐行确认、独立 finalize、gross ceiling 比较、finalized snapshot 与 letter/quote 同一身份，产品边界清晰。",
+    "stale 不仅依赖布尔值、正式 PDF 冻结 submission manifest、ended 后禁止改变输入，整体架构方向正确。",
+    "安全前置与当前具体实现吻合：global_file 只剥离 objects/ 后直接 read_blob（crates/api/src/routes.rs:3662-3672），blob_path 直接 Path::join（crates/storage/src/lib.rs:25-26）；LDAP 的 ldaps 目前仍被降为普通 TcpStream（crates/auth/src/lib.rs:54-68），JWT 也确有 dev-secret 默认值（crates/api/src/lib.rs:20）。这些不是泛化清单，而是实际阻断点。"
+  ],
+  "结论": {
+    "结果": "暂不具备 implementation-ready 条件",
+    "说明": "总体边界、publication 复用、人工报价和正式⑥方向正确，但 fact 线性化、Evidence 冻结、matching 决策聚合、报价快照状态机以及附件/程序材料依赖仍有不可实现或无法证明的契约缺口。修正上述 Blockers 后可进入 PR0/PR1；无需扩大到迁移、Org 或自动报价范围。",
+    "测试状态": "本轮为只读方案评审，未运行测试或修改文件。"
+  }
+}

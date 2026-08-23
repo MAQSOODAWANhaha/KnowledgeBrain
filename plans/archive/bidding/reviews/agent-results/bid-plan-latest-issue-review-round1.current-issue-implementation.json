@@ -1,0 +1,49 @@
+{
+  "review": {
+    "scope": "仅核查 issue.md 当前 Issue 1-3；未将尚未实现作为否决理由。",
+    "overall": "FAIL",
+    "issues": [
+      {
+        "issue": 1,
+        "result": "FAIL",
+        "priority": "blocker",
+        "answer": "会永久卡死。当前 promotion 仅处理 status='confirmed'；首次 promotion 降为 draft 后，后续 promotion 不再更新该行，而 confirm 又要求 marker generation 等于 current generation。",
+        "evidence": [
+          "plans/bid-platform-complete-solution.md:193 仅定义 confirmed clause 的跨-kind转换。",
+          "plans/bid-platform-complete-solution.md:195 要求确认时 marker generation 仍为 current，并禁止 PATCH 绕过。",
+          "plans/bid-platform-complete-solution.md:1111 只要 marker draft 仍存在就持续派生 KIND_ROUTER_RECONFIRMATION_REQUIRED。",
+          "plans/bid-platform-complete-solution.md:1293 现有 fixture 只覆盖单次 promotion→confirm，没有覆盖连续 promotion。"
+        ],
+        "required_resolution": "每次 promotion 同时处理已带 KIND_ROUTER_PROMOTION_RECONFIRM marker 的 draft：保持 draft，按本次 Router 更新允许重算的 kind/family，并将 marker generation 刷新为本次 current generation。增加 v2→draft、无人确认、v3再次刷新、随后确认成功的 fixture。"
+      },
+      {
+        "issue": 2,
+        "result": "FAIL",
+        "priority": "现在修复",
+        "answer": "当前方案没有写死允许 KindRouter 重算的 clause provenance。可执行口径应为：仅 provenance=extracted 且仍有通过 scope verifier 的 current frozen SourceSpanV2 时允许 promotion 重算；manual 和 manual_after_edit 不因 Router promotion 改 kind，只能由显式人工 PATCH 修改。",
+        "evidence": [
+          "plans/bid-platform-complete-solution.md:206 将 KindRouter 输入限定为冻结 span 与 proposal。",
+          "plans/bid-platform-complete-solution.md:982 明确 extracted 保有 current SourceSpanV2；manual 的 current/origin span 均为 NULL，manual_after_edit 的 current source_span_v2 也为 NULL。",
+          "plans/bid-platform-complete-solution.md:984 将 manual/manual_after_edit 改走当前人工文本分段。",
+          "plans/bid-platform-complete-solution.md:998 又称 promotion 可能改变 manual/manual_after_edit 的 kind，但未提供满足 §4 Router 输入契约的来源，形成不可实施分支。"
+        ],
+        "required_resolution": "在 §3.2 promotion 协议和测试矩阵中显式加入 provenance eligibility predicate，并删除或改写 line 998 对 manual/manual_after_edit 自动跨-kind重算的表述。"
+      },
+      {
+        "issue": 3,
+        "result": "FAIL",
+        "priority": "可选",
+        "answer": "“相关 PickSet item”仍未定义。应先取得 2:unsectioned dependency 中唯一 current unsectioned report R，再令相关子集 S 为 source_report_artifact_id == R.id 的 PickSetV1 items；只对 S 验证 unit_id 为 lowercase nil UUID并用于该 part，不能验证整个项目 PickSet。",
+        "evidence": [
+          "plans/bid-platform-complete-solution.md:960 已给 PickSetV1 item 定义 source_projection_id、source_report_artifact_id 和 unit_id，具备精确筛选字段。",
+          "plans/bid-platform-complete-solution.md:1069 仍只写“每个相关 PickSet item”，没有给出 subset predicate。",
+          "migrations/0012_bid_match_contract.sql:688-706 将 technical projection 精确绑定 unit_id、report_id 与 route_id。",
+          "migrations/0012_bid_match_contract.sql:779-813 将 pick snapshot 精确绑定 source projection、report artifact 与 unit。",
+          "migrations/0012_bid_match_contract.sql:1206-1228 的 current-visible view回验 projection/report/route/generation/watermark，证明该筛选可由既有关系实现。",
+          "crates/storage/src/bid_matching.rs:1766-1777 当前通用读取只按 project/unit 过滤；未来 current verifier需使用方案规划的 report identity，而不能把项目级结果整体解释为 unsectioned subset。"
+        ],
+        "required_resolution": "将 line 1069 改为精确谓词：先按 source_report_artifact_id=R.id 选择 S，再证明 S 中每项 unit_id=nil；同时依赖既有全局 PickSet verifier证明 source_projection/report identities current。"
+      }
+    ]
+  }
+}

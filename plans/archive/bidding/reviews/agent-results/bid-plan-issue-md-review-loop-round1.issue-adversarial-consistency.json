@@ -1,0 +1,66 @@
+{
+  "review": {
+    "result": "FAIL",
+    "summary": {
+      "pass": 7,
+      "fail": 2
+    },
+    "scope": "仅复核issue.md上一轮Issue 1–9；只读，未提出新issue。",
+    "items": [
+      {
+        "issue": 1,
+        "status": "PASS",
+        "finding": "原“⑥实施计划三套输入”指控已不成立。正文与parts表统一为ServiceClauseSetV1、PickSetV1、schedule_delivery；PartDependency明确matching_report=null；stale矩阵也排除commercial decision直接依赖。",
+        "lines": [187, 1038, 1060, 1075, 1076, 1077, 1083, 1084, 1289, 1303]
+      },
+      {
+        "issue": 2,
+        "status": "PASS",
+        "finding": "原“selected与1..N勾选冲突”已消除。technical projection展示全部supported，仅首项recommended，并允许同requirement选择1..N；commercial保持selected-only，边界一致。",
+        "lines": [590, 592, 597, 602, 952, 1128, 1234, 1285, 1318]
+      },
+      {
+        "issue": 3,
+        "status": "PASS",
+        "finding": "按当前文档的DOCX无eligible finalized quote可使用NULL依赖及placeholder、PDF强制同一current eligible snapshot语义，表格、PartDependency、GateIssue和manifest门禁一致。",
+        "lines": [716, 718, 1022, 1035, 1037, 1062, 1098, 1102, 1104, 1114, 1239]
+      },
+      {
+        "issue": 4,
+        "status": "PASS",
+        "finding": "有效期冲突已有完整gate：BID_VALIDITY_CONFLICT、entity_kind=fact、field=bid_validity；DOCX警告、PDF拒绝，并进入PR6及E2E门禁。",
+        "lines": [425, 1023, 1098, 1100, 1102, 1114, 1239, 1246, 1289]
+      },
+      {
+        "issue": 5,
+        "status": "PASS",
+        "finding": "两个Agent职责已分离：RequirementSpanAgent只给span/likelihood，FactSuggestionAgent只给事实建议；两者均不能输出kind/family，KindRouter是唯一clause kind权威。",
+        "lines": [198, 199, 200, 202, 1195, 1236, 1284, 1300]
+      },
+      {
+        "issue": 6,
+        "status": "FAIL",
+        "finding": "hard invalidation仍未完整显式。文档明确router_version换key，并完整终止procedural classification/decision、要求程序决定重确认；但promotion重路由若改变已confirmed bid_clause的kind/family，没有规定“禁止系统改confirmed kind”或“先unconfirm降为draft”。相反，confirmed成员kind修改只被描述为直接bump集合/watermark/stale。因此confirmed service/procedural可在promotion后静默保持confirmed并进入新的matching集合，原指控仍部分成立。",
+        "lines": [187, 190, 236, 990, 1005, 1086, 1236, 1284]
+      },
+      {
+        "issue": 7,
+        "status": "FAIL",
+        "finding": "质量优先级、coverage及reason union算法本身已闭合，但DDL切片仍有残留矛盾：基线明确FROZEN_SCOPE尚未进入DB allowlist；随后0013的显式新增清单只列SUPPORTED、UNRESOLVED、INSUFFICIENT、CONTRADICTED、NO_EVIDENCE，未列固定必含的FROZEN_SCOPE。后文“完整reason allowlist”和fixture门禁无法消除该显式遗漏。",
+        "lines": [54, 466, 467, 468, 469, 483, 490, 492, 1193, 1285, 1299]
+      },
+      {
+        "issue": 8,
+        "status": "PASS",
+        "finding": "pricing/evaluation不可拆时的权威结果一致固定为pricing，并记录PRICING_EVALUATION_CONFLICT；决策表、正文、golden与PR门禁一致。",
+        "lines": [256, 257, 261, 276, 1236, 1284]
+      },
+      {
+        "issue": 9,
+        "status": "PASS",
+        "finding": "允许保留既有worker进程外壳，但runtime协议唯一：同一worker必须改造为OpenStagingSetV1、StageRouteBatchV1、heartbeat、CommitRouteV2、cleanup/reaper，并删除旧单JSON CommitRoute；schema slice与PR1门禁均禁止第二套runtime。",
+        "lines": [53, 433, 455, 569, 586, 1193, 1234]
+      }
+    ]
+  }
+}

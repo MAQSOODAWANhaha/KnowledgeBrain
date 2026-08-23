@@ -1,0 +1,60 @@
+{
+  "Review": {
+    "Blockers": [],
+    "现在值得修正": [
+      {
+        "问题": "EvidenceV1 的新容量上限与现有 route commit 外层 4 MiB DTO 门禁不一致。",
+        "证据": [
+          "方案允许每个 report 去重 chunk 总量 64 MiB、Evidence canonical bytes 总量 16 MiB，并要求完整 chunk 经 CommitRoute 提交：plans/bid-platform-complete-solution.md:437-482。",
+          "当前唯一提交函数仍拒绝 p_payload::text 超过 4194304 bytes，且 exact-key DTO 没有 source artifacts 字段：migrations/0012_bid_match_contract.sql:1452-1457。"
+        ],
+        "建议": "在 PR1 明确修改或拆分外层提交 DTO，并为编码后 JSON/参数大小设置与 64 MiB、16 MiB 内层限制一致的派生上限；不能只新增表和内层 validator 而保留现有 4 MiB 门禁。"
+      },
+      {
+        "问题": "RequiredPartSetV1 应明确把 unsectioned sentinel 排除在普通 current technical unit 集合之外。",
+        "证据": [
+          "方案同时要求每个 current technical unit 产生 2:{unit_id}，并对未归段条款额外要求 2:unsectioned：plans/bid-platform-complete-solution.md:726。",
+          "当前 Rust 把未归段 unit 表示为 Uuid::nil()：crates/bid/src/lib.rs:56-58、229-233；展示键专门把该 sentinel 映射为 2:unsectioned：crates/bid/src/lib.rs:107-112。"
+        ],
+        "建议": "把集合定义写成：普通 technical units 为 distinct、非 nil 的 resolved unit UUID；nil sentinel 只能通过条件分支生成 2:unsectioned，绝不生成 2:00000000-0000-0000-0000-000000000000。这样 DB 集合相等 verifier 不会出现双计数解释。"
+      }
+    ],
+    "可选/延期": [
+      "无新增延期项。历史迁移、旧 binary、灰度、down migration、runtime-completion、image 与 topology 保持已批准的不在范围。"
+    ],
+    "验证通过项": [
+      {
+        "项": "EvidenceV1 实体关系与冻结 payload",
+        "结论": "通过。现有 product-version artifact 隶属 manifest，route-product 关系已有真实复合身份：migrations/0012_bid_match_contract.sql:238-264；candidate 也已有 report/requirement/product scope verifier：migrations/0012_bid_match_contract.sql:538-643。方案复用现有 eligibility_snapshot，并通过 deferred verifier连接 report route，而非虚构父复合键，方向正确。当前 retriever仍读取 live chunks/documents：crates/storage/src/bid_matching.rs:1853-1902；current commercial view仍读取 live documents.file_name：migrations/0012_bid_match_contract.sql:1181-1204。方案在检索事务冻结完整 chunk、展示名、digest和 byte offsets，并禁止 commit fallback live read，准确闭合了现有竞态。"
+      },
+      {
+        "项": "RequirementDecisionV1 与 deferred verifier",
+        "结论": "通过。当前 workflow 错把 product artifact ID 放入 selected_candidate_artifact_id：crates/bid/src/matching/workflow.rs:319-324；storage 又按 requirement 使用 .find() 任取候选重建 decision：crates/storage/src/bid_matching.rs:1587-1597。方案要求 MatchingReportV1 原样透传 typed decisions，并由 deferred verifier验证完整性、候选真值映射、supported comparator首项及 business value 一致性：plans/bid-platform-complete-solution.md:408-431，直接命中现有根因。这里的 eligible 应按方案既有成员谓词，即 frozen route 中由 confirmed、family非空条款产生的 requirement artifacts：plans/bid-platform-complete-solution.md:125-129。"
+      },
+      {
+        "项": "fact PR 切分",
+        "结论": "通过。PR3完整创建 durable decision ledger、状态列、publisher pending/supersede seam和 current-pending view；PR4直接消费且明确不重建或 ALTER ledger/view：plans/bid-platform-complete-solution.md:821-824。不存在 PR3 运行时依赖未来 PR4 表的问题。"
+      },
+      {
+        "项": "ceiling-only quote eligibility",
+        "结论": "通过。ceiling_revision 只随 ceiling identity/有无状态变化：plans/bid-platform-complete-solution.md:349-357；持续 eligibility 只比较 ceiling 与 pricing identity，不比较全局 fact_revision，普通预算、开标、截止和有效期变化仅 stale 实际消费者：plans/bid-platform-complete-solution.md:604-607、732-734、756。等于 ceiling 允许、无 ceiling 必须人工 review 的规则也闭合。"
+      },
+      {
+        "项": "nonmatching 与 attachment identities",
+        "结论": "通过。nonmatching revisions/digests 与 matching watermark 分离，并覆盖进入、离开、集合内语义变化和跨 kind 双 bump：plans/bid-platform-complete-solution.md:172-195。附件按 authorization/procedural 正式 part 拆分 identity，other_bounded 不满足门禁也不污染两个 digest：plans/bid-platform-complete-solution.md:684-686；避免了无关附件导致全⑥ stale。"
+      },
+      {
+        "项": "manifest cancel 与 end_expired",
+        "结论": "通过。方案规定 pending→cancelled、rendering 时拒绝结束，并让手工和自动到期统一调用同一 project-first DB transaction：plans/bid-platform-complete-solution.md:750-758。它正确替换了当前两套写法：手工 end_project 在 crates/storage/src/bid.rs:152-168，自动到期仍批量 UPDATE 于 crates/storage/src/bid.rs:1759-1774。逐项目处理 rendering 后重试的要求也避免一个项目阻断整个到期批次。"
+      },
+      {
+        "项": "RequiredPartSetV1",
+        "结论": "除上述 nil sentinel 文字澄清外通过。固定 parts、按当前技术单元条件加入②、未归段条件分支，以及对实际 part keys 做集合相等验证，足以拒绝缺失、重复、未知和额外 part：plans/bid-platform-complete-solution.md:718-728。"
+      }
+    ],
+    "最终判定": {
+      "结论": "通过，无实施阻断项。",
+      "条件": "建议在 PR0 契约定稿、进入 PR1/PR6 实现前纳入两处局部修正：Evidence route commit 外层容量门禁，以及 RequiredPartSet 的 nil/unsectioned 集合定义。二者均不需要架构重设计。"
+    }
+  }
+}

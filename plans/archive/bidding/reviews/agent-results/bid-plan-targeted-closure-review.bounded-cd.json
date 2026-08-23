@@ -1,0 +1,80 @@
+{
+  "review": [
+    {
+      "item": "C1 render artifact 去自然唯一",
+      "status": "pass",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:846-867 明确 render artifact 不设 object/placement 自然唯一键，每次 mutation/occurrence 使用新 artifact ID。"
+      ]
+    },
+    {
+      "item": "C2 source placement 与连续 manifest ordinal 分离",
+      "status": "pass",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:880-893 分别定义 source_placement_ordinal 与 manifest_ordinal。",
+        "plans/bid-platform-complete-solution.md:1078 明确 manifest ordinal 连续为 0..N-1，source placement 仅保留来源位置，绝不充当 manifest ordinal。"
+      ]
+    },
+    {
+      "item": "C3 object reference owner 矩阵与 occurrence UUID",
+      "status": "pass",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:905-914 完整列出七类 owner 映射，并禁止悬空多态 owner；manifest_asset 使用 relation UUID 逐 occurrence 建引用。",
+        "plans/bid-platform-complete-solution.md:937 要求 manifest payload、规范化 relation 与 occurrence reference 同事务互证。"
+      ]
+    },
+    {
+      "item": "C4 固定 Markdown parser 与 occurrence locator",
+      "status": "pass",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:947 禁止 render 时 regex/live read，要求 manifest 创建时固定解析并冻结 occurrence。",
+        "plans/bid-platform-complete-solution.md:1080 固定 kb-markdown-render-parser:v1、CommonMark 0.30、parser options、AST preorder index 与 markdown_node_path，并要求 renderer 重建 AST 逐 locator 验证。"
+      ]
+    },
+    {
+      "item": "D1 output_format 贯穿 request、manifest、receipt 与 DOCX/PDF gate",
+      "status": "pass",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:1072 将 output_format 纳入 SubmissionManifestInputV1 并要求与 manifest 行一致。",
+        "plans/bid-platform-complete-solution.md:1084-1086 将 output_format 纳入 manifest、formal_export_v1 request 与首次 receipt。",
+        "plans/bid-platform-complete-solution.md:1088 分别固定 DOCX warning gate、PDF hard gate、MIME、扩展名、重试和下载格式。"
+      ]
+    },
+    {
+      "item": "D2 fixed template slot 映射",
+      "status": "pass",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:984 完整定义固定 slot、2:{uuid}→2:unit、2:unsectioned 映射、未知 key 拒绝及 current version 来源。",
+        "plans/bid-platform-complete-solution.md:1037 要求 dependency 只能使用服务端映射出的 current slot/version。"
+      ]
+    },
+    {
+      "item": "D3 0013/0015/0016/0017/0018 operation registry 与 retention exact wire",
+      "status": "pass",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:1126-1136 按首次引入 slice 完整列出 registry，0015 明确零新增，并要求未知/future operation 拒绝及 SQL/Rust/API fixture 一致。",
+        "plans/bid-platform-complete-solution.md:945 固定 retention actor、四种 operation 的 exact request、receipt、error envelope、状态转换、payload hash、重放和 heartbeat 豁免。"
+      ]
+    },
+    {
+      "item": "D4 PR1/PR6 retention role 时点",
+      "status": "pass",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:1166 将 PR1 限定为共享 actor/idempotency 与 matching closure。",
+        "plans/bid-platform-complete-solution.md:1171 将独立 retention role/login 和 consumer 协议归属 PR6。",
+        "plans/bid-platform-complete-solution.md:1174 明确 PR1 不得预建 retention identity，PR6 才扩展 bootstrap、凭据与 ACL 矩阵。",
+        "plans/bid-platform-complete-solution.md:1192 明确 retention NOINHERIT role 的最小权限。"
+      ]
+    },
+    {
+      "item": "现有 export/API/CI 适配确认",
+      "status": "pass",
+      "evidence": [
+        "crates/bid/src/export.rs:478-512 当前为同步 ExportKind 路径；crates/bid/src/export.rs:540-584 当前仍以 regex/live blob 读取图片。方案在 plans/bid-platform-complete-solution.md:937,947,1084-1088 明确替换为 manifest-owned relation、固定 parser 和异步格式冻结。",
+        "crates/api/src/routes.rs:216-222 当前暴露旧 GET export；crates/api/src/routes.rs:4713-4788 当前 booklet 无 CAS 且 export 使用 format/regenerate_stale query。方案在 plans/bid-platform-complete-solution.md:1102 明确增加 booklet CAS、删除 regenerate_stale/同步 GET 旁路并改为 formal-exports API。",
+        ".github/workflows/ci.yml:18-166 当前只有 bid-smoke/既有 first-launch 路径；plans/bid-platform-complete-solution.md:1174,1207,1255 明确新增独立 bid-fresh-schema job 与 shell gate，plans/bid-platform-complete-solution.md:1213,1264 明确 PR7 增加 required Playwright gate。"
+      ]
+    }
+  ],
+  "verdict": "ACCEPT"
+}

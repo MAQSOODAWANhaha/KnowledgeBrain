@@ -1,6 +1,6 @@
 # KnowledgeBrain
 
-Product-document knowledge service. Spec: `docs/system-design.md`.
+Product-document knowledge service. Documentation: [`docs/README.md`](docs/README.md). Knowledge-base domain: [`docs/knowledge-base/domain.md`](docs/knowledge-base/domain.md). Bidding target: [`docs/bidding/domain.md`](docs/bidding/domain.md).
 
 HTTP (`/api/v1`) validates, persists, and enqueues only. Parse / chunk / vector / wiki / graph run in `worker`. Task progress: `GET /api/v1/documents/{id}/timeline`.
 

@@ -1,0 +1,75 @@
+{
+  "review_round": 4,
+  "Blockers": [],
+  "现在值得修正": [
+    {
+      "issue": "PR1 应明确接入 matching 周期 heartbeat，并增加长任务验收。",
+      "evidence": [
+        "方案规定 staging 初始 TTL 为 30 分钟，且只有同一 current heartbeat 可以续期：plans/bid-platform-complete-solution.md:489-493。",
+        "现有 heartbeat seam 已存在：crates/storage/src/bid_matching.rs:1296-1311。",
+        "现有 matching worker 直接运行任务，没有启动 heartbeat：crates/worker/src/consume.rs:1771-1788。"
+      ],
+      "correction": "在 PR1 输出和测试矩阵中明确：claim 成功后周期调用 heartbeat_claim，并在同一受控函数中续 staging TTL；heartbeat 返回 false 时停止 staging/commit。增加执行时间跨越初始 TTL、续期成功以及 claim 丢失后无法续期的测试。"
+    },
+    {
+      "issue": "SourceSpanV2 的 JSON-only validator 与 frozen bytes verifier 职责应再写清楚。",
+      "evidence": [
+        "方案称 JSON validator 验证 UTF-8 边界，同时又规定 publication scope verifier 通过 frozen artifact seam 证明切片：plans/bid-platform-complete-solution.md:217-219。",
+        "现有 SQL validator 仅接收 jsonb，无法单独证明 offset 是否落在外部 frozen bytes 的 UTF-8 字符边界：migrations/0010_bid_extract_publication.sql:93-109。"
+      ],
+      "correction": "改为：SQL JSON validator 只验证版本、字段形状、数值范围和 offset 次序；UTF-8 字符边界、quote slice、digest/length 必须由调用 read_frozen_converted_source 的 scope verifier 验证。"
+    }
+  ],
+  "可选/延期": [],
+  "通过项": [
+    {
+      "item": "immutable converted-source artifact、target 与 SourceSpanV2",
+      "result": "通过",
+      "evidence": [
+        "方案冻结 artifact id、摘要、长度及 conversion generation，并要求 target 复合 FK、ON DELETE RESTRICT 和受控回收：plans/bid-platform-complete-solution.md:200-219。",
+        "这正确补足当前 target 只有 expected_conversion_generation、没有 frozen bytes identity 的缺口：migrations/0010_bid_extract_publication.sql:707-755。",
+        "方案明确替换当前从 bid_documents.markdown_ref 读取 live blob 的路径：crates/bid/src/lib.rs:1256-1263。"
+      ]
+    },
+    {
+      "item": "唯一 frozen converted-source 读取 seam",
+      "result": "通过",
+      "evidence": [
+        "read_frozen_converted_source 被定义为唯一读取 seam，需回验 ownership、generation、digest 和 length，并禁止 publication verifier 读取 live markdown_ref：plans/bid-platform-complete-solution.md:215-219。",
+        "PR3 删除 live markdown/span 验证旁路及相应破坏性测试已进入退出门禁：plans/bid-platform-complete-solution.md:912。"
+      ]
+    },
+    {
+      "item": "Evidence StageRouteBatchV1 / CommitRouteV2",
+      "result": "通过",
+      "evidence": [
+        "方案在检索时冻结 chunk bytes、文件展示名及相对 chunk 的 UTF-8 byte offsets，commit 禁止重读 live rows：plans/bid-platform-complete-solution.md:444-487。",
+        "每批及最终 DTO 均保留 4 MiB 门禁，并规定 chunk 256 KiB、report 去重 chunk 64 MiB、Evidence canonical bytes 16 MiB 等限制：plans/bid-platform-complete-solution.md:489-493。",
+        "TTL、续期、不可见 staging、完整性 totals、CAS-loss 零可见写、cleanup/final-commit 锁竞争和 consumed receipt 均有定义及测试要求：plans/bid-platform-complete-solution.md:489-493, 961。",
+        "该设计正确替代当前单 JSON 4 MiB commit：migrations/0012_bid_match_contract.sql:1433-1454，并消除当前检索依赖 live chunks/documents 的竞态：crates/storage/src/bid_matching.rs:1853-1880。"
+      ]
+    },
+    {
+      "item": "non-null actor_identity 幂等",
+      "result": "通过",
+      "evidence": [
+        "fact mutation 明确先按非空 canonical actor_identity、operation、idempotency_key 预占并比较 payload hash：plans/bid-platform-complete-solution.md:372-380。",
+        "audit 与幂等表均使用 NOT NULL actor_identity，user/api_key 身份域隔离，system 使用 allowlist，唯一键不依赖 nullable actor_id：plans/bid-platform-complete-solution.md:828-843。",
+        "这覆盖当前 Bootstrap 被映射为 system + NULL actor_id 的缺口：crates/api/src/routes.rs:4394-4399。"
+      ]
+    },
+    {
+      "item": "RequiredPartSetV1 的 nil/unsectioned 语义",
+      "result": "通过",
+      "evidence": [
+        "普通 technical units 明确 distinct 且非 nil；nil sentinel 只能条件式映射为 2:unsectioned，禁止 nil UUID part key，并要求完整集合相等：plans/bid-platform-complete-solution.md:738-752。",
+        "manifest canonical 顺序和正式 PDF 集合门禁再次固定该规则：plans/bid-platform-complete-solution.md:795-803。",
+        "该定义与当前 Uuid::nil() 未归段语义吻合：crates/bid/src/lib.rs:56-65, 107-111；也修正了当前仅生成①～⑤ part 集合的实现：crates/bid/src/lib.rs:152-164。"
+      ]
+    }
+  ],
+  "最终": {
+    "decision": "ACCEPT",
+    "reason": "无架构 blocker。目标边界内的最终修正已闭合并与当前 0010、0012、Rust/storage seam 对齐；上述两项属于实现前应补强的契约文字与验收项，不阻止方案通过。"
+  }
+}

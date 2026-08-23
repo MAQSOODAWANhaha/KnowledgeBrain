@@ -1,0 +1,211 @@
+{
+  "review": "## Review",
+  "scope": {
+    "mode": "fresh-context read-only",
+    "files_read": [
+      "issue.md",
+      "plans/bid-platform-complete-solution.md",
+      "PRODUCT.md",
+      "docs/bid-platform-domain.md"
+    ],
+    "numbering_note": "issue.md 同时包含“原 Issue 1–9”和“仍未闭合 Issue 1–5”。以下分别核查，避免编号混淆。",
+    "implementation_lag_excluded": true
+  },
+  "original_issue_1_to_9": [
+    {
+      "issue": 1,
+      "status": "PASS",
+      "title": "⑥实施计划三套输入",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:177-190",
+        "plans/bid-platform-complete-solution.md:1038",
+        "plans/bid-platform-complete-solution.md:1060",
+        "plans/bid-platform-complete-solution.md:1083-1084"
+      ],
+      "reason": "实施计划的内容依赖已统一为 ServiceClauseSetV1、PickSetV1、schedule_delivery_set；PartDependency 明确要求 matching_report=null，commercial decision 只服务④⑤。原来的多套输入冲突已消失。注意：service 列在另一处漏列，作为下方“仍未闭合 Issue 2”单独判定 blocker。"
+    },
+    {
+      "issue": 2,
+      "status": "PASS",
+      "title": "selected 与 1..N 勾选冲突",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:449-457",
+        "plans/bid-platform-complete-solution.md:590-603",
+        "plans/bid-platform-complete-solution.md:952"
+      ],
+      "reason": "技术 projection 保留全部 supported candidate，仅 comparator 第一项标为 recommended；pick 绑定 current report/requirement/candidate，允许同 requirement 选择1..N并去重。④⑤仍按 selected decision 读取，二者职责一致。"
+    },
+    {
+      "issue": 3,
+      "status": "PASS",
+      "title": "Word与报价定稿矩阵",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:721-728",
+        "plans/bid-platform-complete-solution.md:1062",
+        "plans/bid-platform-complete-solution.md:1102-1104",
+        "plans/bid-platform-complete-solution.md:1114"
+      ],
+      "reason": "无 current eligible snapshot 时，两个报价 part 只能使用同一 NULL dependency，DOCX 冻结固定 placeholder 与 QUOTE_NOT_FINALIZED；有 eligible snapshot 时不能伪造 NULL；PDF 强制两个 part 引用同一非NULL eligible snapshot。NULL矩阵一致。"
+    },
+    {
+      "issue": 4,
+      "status": "PASS",
+      "title": "有效期冲突缺少GateIssue",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:425",
+        "plans/bid-platform-complete-solution.md:1023",
+        "plans/bid-platform-complete-solution.md:1100-1102",
+        "plans/bid-platform-complete-solution.md:1114"
+      ],
+      "reason": "BID_VALIDITY_CONFLICT 已进入 GateIssue allowlist，固定 entity_kind=fact、三个UUID locator均null、field=bid_validity、reason=null；DOCX warning、PDF hard reject，且由服务端派生。"
+    },
+    {
+      "issue": 5,
+      "status": "PASS",
+      "title": "两个Agent职责与KindRouter权威",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:198-202",
+        "plans/bid-platform-complete-solution.md:245-263",
+        "plans/bid-platform-complete-solution.md:1195"
+      ],
+      "reason": "RequirementSpanAgentV1 与 FactSuggestionAgentV1 均为有界 proposal，禁止 kind/family/technical/commercial 输出；KindRouter 是唯一 kind 权威，family 只由统一storage seam派生。"
+    },
+    {
+      "issue": 6,
+      "status": "FAIL",
+      "title": "router_version硬作废语义",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:236",
+        "plans/bid-platform-complete-solution.md:187-190",
+        "plans/bid-platform-complete-solution.md:990",
+        "plans/bid-platform-complete-solution.md:1086",
+        "issue.md:35-37"
+      ],
+      "reason": "程序段、classification和decision的hard invalidation已定义，但 confirmed bid_clauses 在promotion重路由并改写kind/family时没有对应状态转换。现有文字允许已确认service/procedural直接变成technical/qualification并继续confirmed，从而直接进入新matching集合。硬作废没有覆盖条款的人确认门闩，因此尚未真正闭合。"
+    },
+    {
+      "issue": 7,
+      "status": "FAIL",
+      "title": "报告级canonical质量聚合",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:54",
+        "plans/bid-platform-complete-solution.md:466-492",
+        "plans/bid-platform-complete-solution.md:1193",
+        "issue.md:57-59"
+      ],
+      "reason": "聚合算法本身一致：block>review>pass、unresolved_count=coverage.unresolved、reason_codes为FROZEN_SCOPE与decision reasons并集，且DB verifier重算。但基线明确FROZEN_SCOPE当前不在DB allowlist，§6.1要求0013新增时只显式列出五个decision reason，没有显式列入始终存在的FROZEN_SCOPE。施工仍可能按列举清单漏掉canonical必含值。"
+    },
+    {
+      "issue": 8,
+      "status": "PASS",
+      "title": "pricing/evaluation并列",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:256-263",
+        "plans/bid-platform-complete-solution.md:275"
+      ],
+      "reason": "不可拆冲突固定选择pricing并记录PRICING_EVALUATION_CONFLICT；可拆时分别路由，不再依赖遍历顺序。"
+    },
+    {
+      "issue": 9,
+      "status": "PASS",
+      "title": "PR1不重做worker",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:53",
+        "plans/bid-platform-complete-solution.md:433",
+        "plans/bid-platform-complete-solution.md:543-586",
+        "plans/bid-platform-complete-solution.md:1234"
+      ],
+      "reason": "方案明确保留schedule/job/claim与同一worker进程外壳，不建第二套调度或worker；仅把route执行与commit替换为Open/Stage/heartbeat/CommitRouteV2/cleanup/reaper，并删除旧单JSON CommitRoute。"
+    }
+  ],
+  "remaining_issue_md_findings": [
+    {
+      "issue": 1,
+      "severity": "blocker",
+      "status": "FAIL",
+      "location": [
+        "plans/bid-platform-complete-solution.md:187-190",
+        "plans/bid-platform-complete-solution.md:236",
+        "plans/bid-platform-complete-solution.md:990",
+        "plans/bid-platform-complete-solution.md:1086"
+      ],
+      "reason": "仍存在。promotion可以改变已发布条款kind，但只定义程序classification/decision重确认，没有规定confirmed clause必须保持原kind或先降为draft/unconfirm。已确认service→technical可能静默继续confirmed并进入matching。"
+    },
+    {
+      "issue": 2,
+      "severity": "blocker",
+      "status": "FAIL",
+      "location": [
+        "plans/bid-platform-complete-solution.md:177-190",
+        "plans/bid-platform-complete-solution.md:370-387",
+        "plans/bid-platform-complete-solution.md:1052-1060"
+      ],
+      "reason": "仍存在。§3.2和PartDependency要求bid_projects持有service_revision/service_set_sha256，但§5.4的BidProject增列清单只有pricing、schedule、evaluation、procedural，遗漏service两列。按该清单施工无法建立⑥的权威identity。"
+    },
+    {
+      "issue": 3,
+      "severity": "worth_fixing_now",
+      "status": "FAIL",
+      "location": [
+        "plans/bid-platform-complete-solution.md:482",
+        "plans/bid-platform-complete-solution.md:952",
+        "plans/bid-platform-complete-solution.md:1030-1043"
+      ],
+      "reason": "仍存在。方案禁止nil UUID生成普通2:{uuid} part并引入2:unsectioned，但没有逐字规定未归段technical report.route.unit_id、PickSetV1.unit_id都使用nil UUID字符串，同时part key保持2:unsectioned。"
+    },
+    {
+      "issue": 4,
+      "severity": "worth_fixing_now",
+      "status": "FAIL",
+      "location": [
+        "plans/bid-platform-complete-solution.md:54",
+        "plans/bid-platform-complete-solution.md:468",
+        "plans/bid-platform-complete-solution.md:1193"
+      ],
+      "reason": "仍存在。FROZEN_SCOPE是每份报告canonical reason_codes必含项，但0013新增allowlist的显式枚举只列decision reasons；“完整reason allowlist”不足以消除与基线缺码之间的施工歧义。"
+    },
+    {
+      "issue": 5,
+      "severity": "optional",
+      "status": "FAIL",
+      "location": [
+        "plans/bid-platform-complete-solution.md:200",
+        "plans/bid-platform-complete-solution.md:315-321"
+      ],
+      "reason": "仍存在。FactSuggestionAgentV1引用“§5.1事实字段”，实际字段枚举位于§5.2。属于交叉引用笔误，不影响架构。"
+    }
+  ],
+  "blockers": [
+    {
+      "title": "KindRouter promotion未保护confirmed clause的人确认状态",
+      "location": "plans/bid-platform-complete-solution.md:187-190,236,990,1086",
+      "required_fix": "写死promotion不得自动改变confirmed clause kind，或在系统改kind前先unconfirm/降draft；补已确认service→technical不得静默保持confirmed的fixture。"
+    },
+    {
+      "title": "BidProject增列清单遗漏service identity",
+      "location": "plans/bid-platform-complete-solution.md:177-190 vs 370-387",
+      "required_fix": "在§5.4显式加入service_revision bigint NOT NULL DEFAULT 0与service_set_sha256 bytea(32) NOT NULL，并与§3.2、PartDependency和stale图逐字统一。"
+    }
+  ],
+  "worth_fixing_now": [
+    "明确2:unsectioned的report.route.unit_id与PickSetV1.unit_id均为nil UUID字符串，part key只能是2:unsectioned。",
+    "在0013 reason allowlist中显式列出FROZEN_SCOPE，并注明EMPTY_ROUTE/SKIP_UNIT是沿用0012还是由0013加入。"
+  ],
+  "optional_or_ignore": [
+    "把plans/bid-platform-complete-solution.md:200的§5.1改为§5.2。",
+    "PRODUCT.md:27与docs/bid-platform-domain.md:40仍写⑥以后，但方案已在plans/bid-platform-complete-solution.md:12和:1232把同步真源列为PR0前置；按本次口径不据此否决方案。",
+    "现网实现落后不纳入本次结论。"
+  ],
+  "correct": [
+    "⑥权威输入已经收敛为ServiceClauseSetV1、PickSetV1、schedule_delivery_set。",
+    "报价NULL矩阵与QUOTE_NOT_FINALIZED GateIssue一致。",
+    "BID_VALIDITY_CONFLICT的GateIssue定位矩阵闭合。",
+    "MatchingReportV1的质量、coverage及reason union重算算法本身确定。",
+    "技术全部supported可见、仅首项recommended且支持1..N pick。",
+    "pricing/evaluation固定决策和PR1 worker外壳边界一致。"
+  ],
+  "final_decision": {
+    "result": "REJECT",
+    "reason": "原Issue 1–5、8、9主体已闭合，但confirmed clause在KindRouter promotion下的状态机和service identity建列清单仍是两处会直接导致错误施工的内部bug。修复这两个blocker后可重新accept；unsectioned与FROZEN_SCOPE建议同时写死。"
+  }
+}

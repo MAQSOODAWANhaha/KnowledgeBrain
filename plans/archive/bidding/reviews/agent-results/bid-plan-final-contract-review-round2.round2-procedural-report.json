@@ -1,0 +1,86 @@
+{
+  "Blockers": [
+    {
+      "issue": "GateIssueV1 无法表示“classification 完全缺失”",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:897 要求每个缺失 classification 的 segment 派生独立 missing",
+        "plans/bid-platform-complete-solution.md:978 又要求 classification/review/decision 类 issue 的 entity_id 必须是 current 或 superseded classification UUID"
+      ],
+      "impact": "classification 尚不存在时没有可填的 classification UUID，SubmissionGateV1 无法生成满足 exact schema 的错误项。",
+      "required_fix": "为 procedural segment 定义可持久引用的 UUID，或扩展 GateIssueV1 为 clause_id + stable_segment_key 的 typed locator；随后明确缺失、过期、review、decision 缺失各自的 locator 矩阵。"
+    },
+    {
+      "issue": "manual_after_edit 的 extracted origin 身份未定义到可验证对象",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:728-729 仅声明 extracted_origin_artifact_id UUID 和 origin SourceSpanV2，没有 FK 或一致性约束",
+        "plans/bid-platform-complete-solution.md:201-232 的 SourceSpanV2 同时包含 converted_source_artifact_id 与 converted_section_artifact_id",
+        "plans/bid-platform-complete-solution.md:864 要求 origin 永久保留"
+      ],
+      "impact": "无法判断 extracted_origin_artifact_id 指 source artifact、section artifact 还是其它对象，也无法由 DB 防止悬空或与 origin SourceSpanV2 不一致的审计来源。",
+      "required_fix": "明确该列所指实体并建立复合 FK/scope verifier；强制其与 extracted_origin_source_span_v2 内对应 artifact ID、project/document/section/generation 一致。未编辑 extracted 还应要求 current source_span_v2 与 origin span 完全相等。"
+    }
+  ],
+  "现在值得修正": [
+    {
+      "issue": "ProceduralSegmentSetV1 的成员权威与 classification 绑定机制仍不够具体",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:714-720 的 segment-set 表仅保存 header/hash，没有 canonical_payload 或 segment 成员子表",
+        "plans/bid-platform-complete-solution.md:733-735 的 FK 只绑定 set revision",
+        "plans/bid-platform-complete-solution.md:848 定义了 segments canonical 数组",
+        "plans/bid-platform-complete-solution.md:880 要求 deferred trigger 证明每个 current segment 恰一 classification"
+      ],
+      "correction": "明确采用 immutable canonical_payload 还是规范化 segment-member 子表；若从 classification 行重建，需定义 current_text_sha256/start/end 与 manual_* 字段的逐字段映射、去重规则及 hash 重建算法，否则 stable_segment_key 是否属于该 set 仍只有摘要声明。"
+    },
+    {
+      "issue": "classification 的跨 UPDATE 不可变约束没有落实机制",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:882-887 将原始 router result 永不改写描述为 DB CHECK",
+        "plans/bid-platform-complete-solution.md:880 又要求原行 UPDATE 为 superseded 并写 successor"
+      ],
+      "correction": "明确 BEFORE UPDATE trigger 的白名单：历史行只能完成 current→superseded 及设置合法 successor；router result、segment identity/provenance、set identity、override、revision 等均不可原地修改。override/reclass 必须 INSERT successor。CHECK 本身不能比较 OLD/NEW。"
+    },
+    {
+      "issue": "Matching comparator 的 product_ordinal 来源有歧义",
+      "evidence": [
+        "plans/bid-platform-complete-solution.md:439-443 使用 product_ordinal 作为首排序字段",
+        "migrations/0012_bid_match_contract.sql:241 定义 manifest 级 bid_match_product_version_artifacts.ordinal",
+        "migrations/0012_bid_match_contract.sql:258 定义 route 级 bid_match_route_product_versions.ordinal"
+      ],
+      "correction": "逐字指定 product_ordinal 取哪一列；建议使用 route-scoped ordinal，并在 candidate artifact、MatchingReportV1 payload及 deferred comparator verifier 中验证其等于冻结 route membership。"
+    }
+  ],
+  "可选/延期": [],
+  "通过项": [
+    {
+      "item": "MatchingReportV1 nested canonical contract 基本完整",
+      "evidence": "plans/bid-platform-complete-solution.md:454-475 已固定顶层及 route、coverage、score、decision、candidate、group、source_artifact 的键序、NULL矩阵、排序、content_sha256 和关系行回验。"
+    },
+    {
+      "item": "RequirementDecision 聚合正确针对现有 Rust 缺陷",
+      "evidence": [
+        "crates/bid/src/matching/workflow.rs:323 当前错误地把 product.id 作为 selected_candidate_artifact_id",
+        "crates/storage/src/bid_matching.rs:1589-1592 当前用 .find() 重建 decision",
+        "plans/bid-platform-complete-solution.md:445-450 明确禁止重建并要求真实 candidate artifact/comparator verifier"
+      ]
+    },
+    {
+      "item": "0012 当前 canonical identity、EvidenceV1 与 AI NULL 缺口已被计划覆盖",
+      "evidence": [
+        "migrations/0012_bid_match_contract.sql:394-455 当前 report 无 canonical_payload/content_sha256",
+        "migrations/0012_bid_match_contract.sql:549 当前 evidence 只是 bounded jsonb",
+        "migrations/0012_bid_match_contract.sql:438,586 当前 AI 约束允许 run 非空而 span 为空",
+        "plans/bid-platform-complete-solution.md:454-475,477-567 给出了对应闭包"
+      ]
+    },
+    {
+      "item": "classification lifecycle/current/successor 与 Gate currentness 的业务矩阵已覆盖",
+      "evidence": "plans/bid-platform-complete-solution.md:748-751,880-907 已包含 partial unique、higher-revision successor、terminal 矩阵、禁止历史复活，以及 Gate 对 classification/decision/attachment/clause-set currentness 的重验。"
+    },
+    {
+      "item": "PartDependencyV1 对 MatchingReport content_sha256 的引用明确",
+      "evidence": "plans/bid-platform-complete-solution.md:933-946 固定完整 identities schema，并要求 matching_report.sha256 精确等于 immutable report content_sha256，同时定义 dependency canonical hash及逐字段 current validator。"
+    }
+  ],
+  "accept_reject": "reject",
+  "reason": "GateIssueV1 对缺失 classification 的 locator 存在直接不可满足矛盾，且 manual_after_edit 的 origin artifact 尚不能形成可执行的引用完整性契约。"
+}

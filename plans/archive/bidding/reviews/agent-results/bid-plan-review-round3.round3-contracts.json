@@ -1,0 +1,62 @@
+{
+  "Blockers": [
+    {
+      "问题": "SourceSpanV2 所依赖的“冻结 converted bytes”没有实际持久化身份，publication 无法可靠执行 quote-slice 验证。",
+      "证据": [
+        "方案要求四个 offset 基于 target 引用的同一份冻结 UTF-8 bytes，并由 publication verifier 读取该 bytes 校验 quote：plans/bid-platform-complete-solution.md:199-212。",
+        "但当前 target 仅保存 expected_conversion_generation，没有 converted artifact/ref/digest：migrations/0010_bid_extract_publication.sql:710-716。",
+        "当前文档只保存可变的 markdown_ref 和 conversion_generation：migrations/0007_bid.sql:31-40；重试会清空 markdown_ref 并增加 generation：crates/storage/src/bid.rs:433-438。"
+      ],
+      "必须修正": "在 PR3 契约中明确增加不可变 converted-source artifact，或在 target 冻结 content-addressed ref、digest、byte length及generation，并规定删除保护和唯一读取 seam；SourceSpanV2 scope verifier必须基于该冻结对象而非 bid_documents 当前 markdown_ref。stable_span_key 的哈希前像也应固定 domain tag、字段类型和长度 framing。"
+    },
+    {
+      "问题": "system actor 的幂等唯一键在 PostgreSQL 中不能提供方案声称的唯一性。",
+      "证据": [
+        "system actor 被规定 actor_id=NULL、system_identity 非空：plans/bid-platform-complete-solution.md:781-791。",
+        "幂等唯一键却精确规定为 (actor_kind,actor_id,operation,idempotency_key)，且声称所有 mutation 使用该协议：plans/bid-platform-complete-solution.md:793。",
+        "仓库使用 PostgreSQL 16：docker-compose.yml:49-50。普通 UNIQUE 下 NULL 彼此不相等，因此多个 system 请求可以重复预占同一 key；该键也未区分不同 system_identity。"
+      ],
+      "必须修正": "将 durable actor identity 统一建模。可使用包含 system_identity 的 NULLS NOT DISTINCT 唯一约束，或生成非空 actor_identity；所有查询、冲突等待和 audit 必须使用同一身份列。若 system 机械转换明确不走幂等表，则应收窄“所有 mutation”表述并逐项列出豁免。"
+    }
+  ],
+  "现在值得修正": [
+    {
+      "问题": "QuoteSnapshotV1 没有明确覆盖 quote revision 的 title/notes，且 pricing_set_sha256 的 JSON 表示未钉死。",
+      "证据": [
+        "quote revision 将 title/notes 定义为业务字段：plans/bid-platform-complete-solution.md:519-529。",
+        "QuoteSnapshotV1 顶层 canonical schema 不含 title/notes：plans/bid-platform-complete-solution.md:585-595。",
+        "pricing_set_sha256 被纳入 canonical payload，但没有规定是64位小写hex、base64还是其他形式：plans/bid-platform-complete-solution.md:590-599。",
+        "正式 6:quote 只以 active QuoteSnapshotV1 为权威输入：plans/bid-platform-complete-solution.md:718-721。"
+      ],
+      "建议": "明确 title/notes 是否属于正式报价内容；若渲染，必须纳入 snapshot canonical bytes/hash及reopen复制契约，否则明确禁止正式 part 使用它们。固定 digest 为一种 JSON 表示，例如64位小写hex，并增加包含中文、转义字符、title/notes和digest的跨层fixture。"
+    },
+    {
+      "问题": "procedural requirement 的二级分类缺少可执行契约。",
+      "证据": [
+        "顶层 KindRouter 已给出 qualification 与 procedural 的明确 guard、veto 和 golden：plans/bid-platform-complete-solution.md:218-258。",
+        "但后续门禁依赖 confirmation、bid_bond、authorization_support、seal_sample、procedural_support 五种 router_requirement_kind：plans/bid-platform-complete-solution.md:641-649。",
+        "方案仅声明 Router 产生该分类，没有定义五类之间的优先级、veto、无法确定时行为或 subtype golden：plans/bid-platform-complete-solution.md:686-690；测试要求也只笼统写“Router权威classification”：plans/bid-platform-complete-solution.md:910-911。"
+      ],
+      "建议": "增加版本化 ProceduralRequirementRouterV1 决策表和 golden，特别固定“授权委托书”“投标函盖章”“密封袋骑缝章”“保证金缴纳/回执”等输入落入 confirmation、附件类或review的规则；不得以无审计默认值决定附件门禁。"
+    },
+    {
+      "问题": "formal export 的 expected dependency hash 和 manifest input identity 尚无版本化 canonical schema。",
+      "证据": [
+        "part dependency row需要保存多种 revision/digest、snapshot、Router/template及content identity：plans/bid-platform-complete-solution.md:712-729。",
+        "API要求客户端提交 expected dependency hash：plans/bid-platform-complete-solution.md:769-773。",
+        "manifest 被要求冻结全部 source identity、parts和Markdown bytes，但只以自然语言列举，没有固定字段顺序、NULL规则、part排序、hash算法或版本：plans/bid-platform-complete-solution.md:750-756。"
+      ],
+      "建议": "定义 PartDependencyV1 和 SubmissionManifestInputV1 canonical schema：固定part排序、每类identity字段、附件子集、gate结果、Markdown bytes编码/长度、NULL与digest表示及SHA-256 seam。expected_dependency_hash应明确就是哪一 canonical payload 的hash，manifest表保存schema_version、canonical input hash和不可变payload。"
+    }
+  ],
+  "可选/延期": [],
+  "验证通过项": [
+    "顶层 Router 已正确区分 qualification 与 procedural：资格/佐证材料 evidence veto 优先，不能仅凭“提交/盖章”判 procedural，并包含 ISO、许可证和合同复印件 golden，见 plans/bid-platform-complete-solution.md:223-258。",
+    "程序分类与resolution已正确分离：resolution不得提交 requirement_kind，只引用current classification ID/revision；override保留原/目标分类和durable actor，见 plans/bid-platform-complete-solution.md:686-690、764-770。",
+    "附件满足条件闭合：同项目、valid immutable object、confirmed attachment、kind兼容；confirmation只能人工确认，not_applicable要求原因且attachment为空，见 plans/bid-platform-complete-solution.md:690。",
+    "QuoteSnapshot nested ceiling/no_ceiling_review互斥、Decimal字符串、UTF-8 JSON escaping、单向eligibility和reopen清active pointer整体闭合，见 plans/bid-platform-complete-solution.md:571-610。",
+    "RequiredPartSetV1对固定part、技术unit和条件式2:unsectioned执行集合相等校验；part内容采用revision/hash CAS，manifest冻结Markdown而不重读live part，见 plans/bid-platform-complete-solution.md:713-756。",
+    "user与api_key已纳入幂等身份域，避免相同UUID跨actor_kind碰撞，见 plans/bid-platform-complete-solution.md:365-374。"
+  ],
+  "最终判定": "暂不通过最终契约签收。整体架构已基本闭合，但必须先补齐SourceSpanV2冻结converted artifact，以及修正system actor幂等唯一身份；随后应在实施前钉死QuoteSnapshot正式内容、程序二级分类和manifest dependency canonical schema。"
+}

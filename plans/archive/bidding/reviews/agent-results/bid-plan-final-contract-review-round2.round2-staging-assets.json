@@ -1,0 +1,73 @@
+{
+  "Blockers": [
+    {
+      "id": "B1",
+      "问题": "StageRouteBatchV1 尚不是可执行的 exact wire：source_artifacts 批次无法确定性携带 chunk_utf8，staging set 的创建/取得协议及 receipt 也未定义。",
+      "证据": [
+        "MatchingReportV1 的 source_artifacts item 明确不含 chunk_utf8：plans/bid-platform-complete-solution.md:471；但正式 source artifact 表要求 chunk_utf8：同文件:488。",
+        "StageRouteBatchV1 仅笼统引用“§6.1/§6.2 exact item schema”，没有列出 source_artifacts staging item 的键序和 chunk_utf8 字段：同文件:528-535。",
+        "Stage/Commit 都要求调用者已有 staging_set_id、report_nonce，但方案仅定义 set 字段，没有定义由 claim 创建、显式 open 操作创建或其首次 receipt 如何返回这些值：同文件:524-539。",
+        "当前 claim seam 只取得 claim_token/attempt，MatchClaim 也只有这两项：crates/storage/src/bid_matching.rs:105-108、1185-1194、1258-1267。",
+        "方案只称返回“首次 batch receipt”“首次 commit receipt/content hash”，没有给出 exact response/receipt 键序、字段、错误结果和成功重放时先读 receipt 还是先验证 consumed set：plans/bid-platform-complete-solution.md:535、550、552。"
+      ],
+      "必须修正": "逐字定义 Open/CreateStagingSetV1 或扩展 claim receipt：固定 staging_set_id、report_nonce、初始 expires_at、冻结 lease/policy 和首次响应。列出六类 Stage items 的完整 exact-key schema，source artifact staging item必须包含 bounded chunk_utf8。固定 idempotency key 的 domain-tag bytes、typed-frame 编码和 wire digest 表示；定义 batch/commit receipt exact schema以及重放检查顺序。"
+    },
+    {
+      "id": "B2",
+      "问题": "object registry 没有完成对现有 storage authority、关系引用和 ACL 的可执行切换，当前设计仍可能形成 registry 与 content_objects 两套删除真源。",
+      "证据": [
+        "方案 DDL 中 render asset 只有 object_ref/object_sha256，未声明到 bid_object_registry 的 FK；registry 本身也未声明 object_ref 必须等于 objects/<digest hex>：plans/bid-platform-complete-solution.md:790-840。",
+        "现库已有 content_objects refcount 真源：migrations/0001_domain.sql:125-128；bump_object_ref 继续直接增加该 refcount：crates/storage/src/persist.rs:2435-2439。",
+        "release_object_ref 会直接删除 content_objects 并调用物理删除：crates/storage/src/persist.rs:2399-2414；worker 随后还直接调用 drop_blob：crates/worker/src/consume.rs:2518-2523。",
+        "storage crate 公开导出 delete_object，并公开 drop_blob：crates/storage/src/lib.rs:15、94-96。",
+        "既有 ACL 给 API 和 worker 对 bid_shots、content_objects、documents 等表的整表 SELECT/INSERT/UPDATE/DELETE：migrations/0010_bid_extract_publication.sql:3037-3047。方案虽声明禁止旁路，但 PR6 schema 清单没有明确 content_objects 的替换/桥接、旧 GRANT revoke 和所有引用关系的 FK/cutover：plans/bid-platform-complete-solution.md:858、1056-1061、1081。"
+      ],
+      "必须修正": "在 PR6 明确一次性 cutover：确定 bid_object_registry 是否替代 content_objects；迁移所有 bump/release/upload/clone/document-delete 路径；为 artifact、attachment、document及其它正式引用建立规范化 reference relation 或明确 FK；强制 object_ref 与 digest 对应。显式 revoke 0010 遗留整表 DML，删除 crate 公共 delete_object/drop_blob/release_object_ref 出口，仅 retention 私有模块可物理删除。fresh ACL 必须验证旧角色无法直接写 registry/reference/live shot 或调用任何间接删除入口。"
+    },
+    {
+      "id": "B3",
+      "问题": "manifest asset 关系只冻结 BidShot，遗漏当前导出支持的 Markdown objects/{sha} 图片；正式 PDF 无法同时保证现有语义、可重放和删除 fencing。",
+      "证据": [
+        "SubmissionManifestInputV1.render_assets 只允许 current BidShot artifact，v1 part_key 固定为 3：plans/bid-platform-complete-solution.md:980。",
+        "当前导出会扫描所有 part Markdown 中的 objects/<64hex> 并读取对象：crates/bid/src/export.rs:508、540-550。",
+        "仓库现有成稿方案明确要求 Markdown objects/{sha} 也嵌图：plans/bid-workbench-close.md:94、plans/bid-booklet-preview.md:121。",
+        "仅冻结 content_utf8 不能给 Markdown 中引用的对象建立 manifest retention 引用；对象可能在 manifest 创建后、render 前被清理。"
+      ],
+      "必须修正": "二选一并写入 PR0 产品契约：要么把所有可渲染 Markdown object 引用解析为 immutable artifact，并写入 manifest-owned asset 关系与 registry reference；要么正式禁止 part Markdown object 图片、保存/manifest 时稳定拒绝，并同步删除当前 renderer 行为和旧文档承诺。不能继续依赖 render 时从 Markdown regex 读取 live blob。"
+    }
+  ],
+  "现在值得修正": [
+    {
+      "问题": "cleanup/reaper 的锁与 freshness 已明确，但 exact system mutation/receipt 仍不足。",
+      "证据": [
+        "方案规定 project→job→set 锁序和 DB-time 重验：plans/bid-platform-complete-solution.md:552。",
+        "§9.2 只列 reaper/cleanup key 字段，并称使用统一幂等表，没有固定 operation string、actor allowlist、payload schema、首次 no-op/transition receipt 和 mismatch 结果：同文件:1026。"
+      ],
+      "建议": "为 matching reaper 和 staging cleanup 各定义 exact request/payload hash、system actor、首次 receipt、同 hash replay、异 hash mismatch及 already-terminal no-op 语义；heartbeat继续保持唯一无领域 receipt 的 claim-token CAS。"
+    }
+  ],
+  "可选/延期": [],
+  "通过项": [
+    {
+      "项": "frozen lease 与 heartbeat",
+      "证据": "claim 将 bounded claim_lease_ms 与 lease_policy_generation 冻结到 attempt，heartbeat/stage/commit/cleanup/reaper统一读取，且删除自由 stale_secs：plans/bid-platform-complete-solution.md:524。heartbeat使用DB时间、原heartbeat freshness，错误立即停写：同文件:537。当前待删除 seam 确实存在于 crates/storage/src/bid_matching.rs:2014-2036。"
+    },
+    {
+      "项": "commit/cleanup fencing",
+      "证据": "CommitRouteV2 在 project→job→set 锁内先验证原heartbeat、TTL、token/attempt/route及冻结policy；cleanup/reaper同锁序锁后重验，成功receipt与consumed同事务：plans/bid-platform-complete-solution.md:550-552。"
+    },
+    {
+      "项": "BidShot pointer 与 placement",
+      "证据": "预分配 shot/artifact ID、NOT NULL pointer、INITIALLY DEFERRED 同项目/shot/placement复合FK以及真实 shot 列上的 UNIQUE(project_id,current_placement_ordinal)形成可执行插入顺序：plans/bid-platform-complete-solution.md:790-854。"
+    },
+    {
+      "项": "BidShot manifest 关系",
+      "证据": "关系表保存 manifest/project/shot/placement，复合FK ON DELETE RESTRICT；JSON与关系行由 deferred verifier逐项互证，renderer禁止重读 live shot：plans/bid-platform-complete-solution.md:814-826、856、984。"
+    },
+    {
+      "项": "object deletion 的并发方向",
+      "证据": "registry 行锁、缺行 digest advisory lock、available→deleting 后拒绝新引用、durable outbox和幂等物理删除方向正确：plans/bid-platform-complete-solution.md:858；本轮问题是缺少对现有 storage/ACL 的完整可执行 cutover。"
+    }
+  ],
+  "accept/reject": "REJECT"
+}

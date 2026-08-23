@@ -1,0 +1,5 @@
+Workflow completed with 3 child run(s). Return: {
+  "round": 3,
+  "finalRound": true,
+  "reviewers": {
+    "specFinal": "# Bid Extractor Hardening — Continuation Round-3 Final Review\n\n## Review\n\n### Correct\n\n- No blocker was found.\n- User-approved overrides are present:\n  - Automatic `text` is canonicalized to the verified quote: `crates/bid/src/extraction/agent.rs:436-457`, `crates/bid/src/extraction/reconcile.rs:99-125`.\n  - Arbitration follows heading prior → Policy score → server extractor rank → technical/conflict tie: `crates/bid/src/extraction/reconcile.rs:140-181`.\n  - Ambiguous `must` defaults false, and table syntax alone does not make it mandatory: `crates/bid/src/extraction/policy.rs:221-250`.\n  - Mutable outline/table terms are typed Policy fields: `crates/bid/src/extraction/policy.rs:10-53`, `crates/bid/config/cn-tender-v2.json:29-42`.\n  - Quote rejection counts from successful Agent/sweep outcomes accumulate rather than being overwritten: `crates/bid/src/extraction/mod.rs:210-213,245-267,331-340`.\n  - Par Trace: 6 event(s).

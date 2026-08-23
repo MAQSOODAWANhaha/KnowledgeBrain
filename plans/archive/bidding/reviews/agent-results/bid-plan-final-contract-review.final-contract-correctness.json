@@ -1,0 +1,92 @@
+{
+  "Blockers": [
+    {
+      "问题": "Procedural classification 无法按既定规则完成同 stable key 的版本替换。",
+      "证据": [
+        "plans/bid-platform-complete-solution.md:736-739 对 classification 设置 UNIQUE(project_id, clause_id, stable_segment_key)。",
+        "plans/bid-platform-complete-solution.md:773 要求 classification version 或语义变化时 supersede 旧 classification 并创建新 classification，且 plans/bid-platform-complete-solution.md:775-780 禁止改写原始分类结果。",
+        "extracted stable key 来自 SourceSpan，manual key 包含 router_version，但二者均未包含独立的 classification_version，见 plans/bid-platform-complete-solution.md:759。"
+      ],
+      "影响": "仅升级 ProceduralRouter/classification version、分段不变时，新旧行拥有相同 stable key；旧行必须保留而新行会违反 UNIQUE，重分类和 gate currentness 无法实现。",
+      "必须修正": "把唯一性改为“每个 segment 至多一个 current classification”的 partial/deferred 约束，允许 superseded 历史行复用相同 stable key；同时明确 successor、自引用及恰一 current classification 的验证规则。"
+    },
+    {
+      "问题": "extracted clause 被 PATCH text 后的 provenance 与重分段规则未闭合。",
+      "证据": [
+        "plans/bid-platform-complete-solution.md:759 规定 extracted clause 永远直接复用原 SourceSpanV2 routed segment，并要求 provenance=extracted。",
+        "plans/bid-platform-complete-solution.md:773 又规定 clause text 变化时重新生成 segment set。",
+        "plans/bid-platform-complete-solution.md:891 明确保留 Clause PATCH text；当前 API 也允许修改 text，见 crates/api/src/routes.rs:4122-4130。"
+      ],
+      "影响": "修改后的 stored text 可能与冻结 SourceSpan quote 不同；继续标 extracted 会产生虚假来源，按 manual 切分又违反当前二分规则。",
+      "必须修正": "明确且强制一种行为：要么禁止 extracted confirmed clause 修改 text；要么编辑后 segment provenance 转为 manual/manual_after_edit，按当前 stored UTF-8 text 重分段，同时另存不可变 extracted origin 供审计。"
+    },
+    {
+      "问题": "MatchingReportV1 尚不足以定义唯一 canonical hash。",
+      "证据": [
+        "plans/bid-platform-complete-solution.md:454 只固定顶层键和数组排序，却没有逐项列出 route、coverage、score、RequirementDecision、candidate、candidate_group 的 exact keys、键序、枚举及 NULL 矩阵；“immutable source artifact identity”也未给出具体字段。",
+        "当前报告、decision、candidate 是多张 typed artifact 表，见 migrations/0012_bid_match_contract.sql:394-454、492-581；无法从一个未定义的 nested shape 唯一推导 canonical bytes。",
+        "当前 storage 正在按 requirement 对 candidate 使用 .find() 重建 decision，见 crates/storage/src/bid_matching.rs:1587-1595，说明 PR1 确实必须以完整 DTO/canonical contract 替换，而不能依赖现有隐式形状。"
+      ],
+      "影响": "Rust、SQL verifier 和 fixture 可以生成字段集合或键序不同但各自自洽的 hash，PartDependency 引用的 report content_sha256 不具备跨层唯一含义。",
+      "必须修正": "在方案中完整定义所有 nested V1 object 的 exact fields、固定键序、枚举、数值格式、NULL/省略规则及 artifact ID/source identity 字段；随后才能签收跨 Rust/SQL canonical fixture。"
+    }
+  ],
+  "现在值得修正": [
+    {
+      "问题": "classification 中的 clause_set_revision/hash currentness 作用域未定义。",
+      "证据": [
+        "plans/bid-platform-complete-solution.md:735 保存 clause_set_revision/clause_set_sha256。",
+        "plans/bid-platform-complete-solution.md:773 要求语义未变的 classification 按 stable key 复用。",
+        "plans/bid-platform-complete-solution.md:790 又要求 classification 与 current clause/segment set identity 一致。"
+      ],
+      "建议": "明确它是项目级 procedural set 还是每 clause 的 segment-set identity。若为项目级，任一 clause 变化会让所有复用 classification 过期；建议新增明确的 per-clause ProceduralSegmentSetV1 identity，项目级 digest 再聚合 current classifications。"
+    },
+    {
+      "问题": "PartDependencyV1 只有一个 router_version，无法清晰证明两个 Router 的独立 currentness。",
+      "证据": [
+        "plans/bid-platform-complete-solution.md:816-824 把 router_version 定义为单一字符串，却要求它等于 KindRouter/ProceduralRouter contract version。",
+        "程序 part 同时间接依赖顶层 kind 路由和 ProceduralRequirementRouter classification。"
+      ],
+      "建议": "改为 exact object，例如 kind_router_version 与 procedural_router_version，按 part 显式 null/必填；或正式规定两者共享一个不可分割的 bundle version。"
+    },
+    {
+      "问题": "profile content hash 的 canonical payload 仍偏模糊。",
+      "证据": [
+        "plans/bid-platform-complete-solution.md:749 正确规定 profile 自身 revision+content_sha256 为唯一权威。",
+        "plans/bid-platform-complete-solution.md:757 仅称 profile item 为“正文业务字段+revision”，未分别固定 CompanyProfileV1、SubmissionProfileV1 的 exact keys、键序以及 singleton_key/project_id 是否入 hash。"
+      ],
+      "建议": "分别列出两个 profile canonical object 的完整键序和字段范围，避免 SQL/Rust 对 content_sha256 产生不同解释。"
+    }
+  ],
+  "可选/延期": [],
+  "通过项": [
+    {
+      "项": "segment 级 terminal cardinality",
+      "结论": "通过。方案明确每 routed segment 恰一 disposition、clause 0..1、fact 0..N，并要求 clause/disposition 一致。它正确延伸了当前 0010 的一 span 一 disposition 与唯一 clause candidate 约束，见 migrations/0010_bid_extract_publication.sql:920-975、993-1002 和 plans/bid-platform-complete-solution.md:276-283。"
+    },
+    {
+      "项": "SubmissionGate/decision 基数",
+      "结论": "通过。Gate 按每个 current stable segment 独立派生 missing，不能由同 clause 其它 segment 代替；resolution 只引用 current classification ID/revision，见 plans/bid-platform-complete-solution.md:781-790。"
+    },
+    {
+      "项": "current-visible PickSetV1、无 ordinal、matching 可见性联动",
+      "结论": "通过。成员明确取 bid_pick_current_visible 等价 projection，item 不含 ordinal，并覆盖 projection promote/retire、generation/watermark 导致的进入/离开，见 plans/bid-platform-complete-solution.md:751。该定义与当前 visibility seam 一致：migrations/0012_bid_match_contract.sql:1206-1227 已将 pick 与 current technical projection、report、generation、watermark 联结。当前 Pick API 也没有 ordinal，见 crates/api/src/routes.rs:4376-4380。"
+    },
+    {
+      "项": "FactIdentityV1 初始创建",
+      "结论": "通过。canonical 字段和键序完整，明确 project create 携带 expires_at 时 revision=0 digest 必须包含真实值，见 plans/bid-platform-complete-solution.md:382。它准确覆盖了当前 API/storage 的创建 seam：crates/api/src/routes.rs:3741-3763、crates/storage/src/bid.rs:114-126。"
+    },
+    {
+      "项": "profile 唯一权威",
+      "结论": "通过。company 使用 singleton row，submission 以 project_id 为 PK，revision+content_sha256 保存在 profile 自身且禁止 project 镜像，见 plans/bid-platform-complete-solution.md:732-749；仅 canonical shape 仍建议补全。"
+    },
+    {
+      "项": "MatchingReport hash 的权威落点",
+      "结论": "方向通过。方案正确指定 bid_match_report_artifacts.content_sha256 为唯一 report hash，并要求 PartDependency 精确引用该值，而非 live projection 或未定义摘要，见 plans/bid-platform-complete-solution.md:454、821-823；但 nested canonical contract 未补齐前仍构成 blocker。"
+    }
+  ],
+  "最终结论": {
+    "结果": "REJECT",
+    "理由": "产品边界无需重议；但 ProceduralRouter 历史替换/provenance 与 MatchingReportV1 canonical bytes 仍存在实现级不确定或直接约束冲突。修正上述 blockers 后可重新验收。"
+  }
+}
