@@ -13,7 +13,17 @@ PARALLEL SAFE
 SET search_path = pg_catalog
 AS $$
     SELECT value ~ '^(user|api_key):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-        OR value ~ '^system:[a-z0-9][a-z0-9._-]{0,63}$'
+        OR value IN (
+            'system:bid-convert-worker',
+            'system:bid-extraction-worker',
+            'system:first-launch',
+            'system:kind-router-promotion',
+            'system:knowledge-document-delete',
+            'system:knowledge-document-ingest',
+            'system:matching-invalidation',
+            'system:matching-publication',
+            'system:retention-consumer'
+        )
 $$;
 
 CREATE DOMAIN kb_actor_identity AS text CHECK (kb_actor_identity_valid(VALUE));
@@ -253,10 +263,9 @@ CREATE TABLE object_owner_references (
     occurrence text NOT NULL CHECK (octet_length(occurrence) BETWEEN 1 AND 128),
     created_by kb_actor_identity NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (object_ref, owner_kind, owner_id, occurrence)
+    PRIMARY KEY (object_ref, owner_kind, owner_id, occurrence),
+    UNIQUE (owner_kind, owner_id, occurrence)
 );
-CREATE INDEX object_owner_references_owner_idx
-    ON object_owner_references(owner_kind, owner_id, occurrence);
 
 CREATE TABLE object_retention_outbox (
     object_ref kb_object_ref PRIMARY KEY REFERENCES object_registry(object_ref) ON DELETE RESTRICT,
@@ -280,6 +289,9 @@ CREATE TABLE object_retention_outbox (
 CREATE INDEX object_retention_outbox_claim_idx
     ON object_retention_outbox(next_attempt_at, created_at, object_ref)
     WHERE state IN ('queued', 'retry');
+CREATE UNIQUE INDEX object_retention_outbox_claim_token_uidx
+    ON object_retention_outbox(claim_token)
+    WHERE claim_token IS NOT NULL;
 
 CREATE TABLE object_retention_tombstones (
     object_ref kb_object_ref PRIMARY KEY,
@@ -305,6 +317,7 @@ CREATE TABLE object_retention_attempt_receipts (
     error_code text,
     occurred_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (object_ref, claim_token),
+    UNIQUE (claim_token),
     CHECK ((outcome = 'deleted') = (error_code IS NULL))
 );
 CREATE TRIGGER object_retention_attempt_receipts_immutable
@@ -351,6 +364,14 @@ BEGIN
     INSERT INTO object_owner_references(object_ref, owner_kind, owner_id, occurrence, created_by)
     VALUES (p_object_ref, p_owner_kind, p_owner_id, p_occurrence, p_actor)
     ON CONFLICT DO NOTHING;
+    IF NOT EXISTS (
+        SELECT 1 FROM object_owner_references
+         WHERE object_ref = p_object_ref AND owner_kind = p_owner_kind
+           AND owner_id = p_owner_id AND occurrence = p_occurrence
+    ) THEN
+        RAISE EXCEPTION 'object owner occurrence already references another object'
+            USING ERRCODE = '23514';
+    END IF;
 END
 $$;
 
@@ -569,9 +590,44 @@ BEGIN
     IF p_worker_name !~ '^[a-z0-9][a-z0-9._-]{0,63}$' OR p_lease_ms NOT BETWEEN 1000 AND 300000 THEN
         RAISE EXCEPTION 'invalid retention claim parameters' USING ERRCODE = '22023';
     END IF;
+
+    -- A worker generates the claim token before the request. If the response is
+    -- lost, the same token resumes and renews the exact claim without consuming
+    -- another attempt.
+    RETURN QUERY
+    WITH resumed AS (
+        UPDATE object_retention_outbox outbox
+           SET heartbeat_at = clock_timestamp(),
+               lease_until = clock_timestamp() + make_interval(secs => p_lease_ms / 1000.0)
+         WHERE outbox.state = 'claimed' AND outbox.claim_token = p_claim_token
+           AND outbox.claimed_by = p_worker_name
+           AND outbox.lease_until > clock_timestamp()
+         RETURNING outbox.object_ref, outbox.attempt
+    )
+    SELECT registry.object_ref, registry.digest, registry.byte_length, resumed.attempt
+      FROM resumed JOIN object_registry registry USING (object_ref)
+     WHERE registry.state = 'deleting'
+       AND NOT EXISTS (
+           SELECT 1 FROM object_owner_references refs
+            WHERE refs.object_ref = resumed.object_ref
+       );
+    IF FOUND THEN
+        RETURN;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM object_retention_outbox WHERE claim_token = p_claim_token
+        UNION ALL
+        SELECT 1 FROM object_retention_attempt_receipts WHERE claim_token = p_claim_token
+        UNION ALL
+        SELECT 1 FROM object_retention_tombstones WHERE claim_token = p_claim_token
+    ) THEN
+        RAISE EXCEPTION 'retention claim token cannot be reused' USING ERRCODE = '22023';
+    END IF;
+
     RETURN QUERY
     WITH candidate AS (
-        SELECT outbox.object_ref
+        SELECT outbox.object_ref, outbox.state AS prior_state,
+               outbox.claim_token AS prior_claim_token, outbox.attempt AS prior_attempt
           FROM object_retention_outbox outbox
           JOIN object_registry registry USING (object_ref)
          WHERE registry.state = 'deleting'
@@ -582,6 +638,15 @@ BEGIN
          ORDER BY outbox.next_attempt_at, outbox.created_at, outbox.object_ref
          FOR UPDATE OF outbox SKIP LOCKED
          LIMIT 1
+    ), expired_receipt AS (
+        INSERT INTO object_retention_attempt_receipts AS receipt(
+            object_ref, claim_token, attempt, outcome, error_code
+        )
+        SELECT candidate.object_ref, candidate.prior_claim_token,
+               candidate.prior_attempt, 'retry', 'LEASE_EXPIRED'
+          FROM candidate
+         WHERE candidate.prior_state = 'claimed'
+        RETURNING receipt.object_ref
     ), claimed AS (
         UPDATE object_retention_outbox outbox
            SET state = 'claimed', attempt = outbox.attempt + 1,
@@ -591,6 +656,10 @@ BEGIN
                last_error_code = NULL
           FROM candidate
          WHERE outbox.object_ref = candidate.object_ref
+           AND (candidate.prior_state <> 'claimed' OR EXISTS (
+               SELECT 1 FROM expired_receipt
+                WHERE expired_receipt.object_ref = candidate.object_ref
+           ))
          RETURNING outbox.object_ref, outbox.attempt
     )
     SELECT registry.object_ref, registry.digest, registry.byte_length, claimed.attempt
@@ -673,13 +742,30 @@ SET search_path = pg_catalog, public
 AS $$
 DECLARE
     item object_retention_outbox%ROWTYPE;
+    outbox_found boolean;
 BEGIN
     IF p_error_code !~ '^[A-Z][A-Z0-9_]{0,63}$' THEN
         RAISE EXCEPTION 'invalid retention error code' USING ERRCODE = '22023';
     END IF;
-    SELECT * INTO STRICT item FROM object_retention_outbox
+    SELECT * INTO item FROM object_retention_outbox
      WHERE object_ref = p_object_ref FOR UPDATE;
-    IF item.state <> 'claimed' OR item.claim_token <> p_claim_token THEN
+    outbox_found := FOUND;
+    IF EXISTS (
+        SELECT 1 FROM object_retention_attempt_receipts
+         WHERE object_ref = p_object_ref AND claim_token = p_claim_token
+           AND outcome = 'retry' AND error_code = p_error_code
+    ) THEN
+        RETURN true;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM object_retention_attempt_receipts
+         WHERE claim_token = p_claim_token
+    ) THEN
+        RAISE EXCEPTION 'retention failure receipt conflicts with prior outcome'
+            USING ERRCODE = '40001';
+    END IF;
+    IF NOT outbox_found OR item.state <> 'claimed' OR item.claim_token <> p_claim_token
+       OR item.lease_until <= clock_timestamp() THEN
         RAISE EXCEPTION 'retention failure lost claim' USING ERRCODE = '40001';
     END IF;
     INSERT INTO object_retention_attempt_receipts(

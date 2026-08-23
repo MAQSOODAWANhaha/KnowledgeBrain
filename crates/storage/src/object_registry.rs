@@ -1,5 +1,9 @@
 use sqlx::{PgPool, Row};
+use std::time::Duration;
 use uuid::Uuid;
+
+const RETENTION_LEASE_MS: i32 = 60_000;
+const RETENTION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetentionClaim {
@@ -49,13 +53,12 @@ pub async fn release_knowledge_document_object(
 async fn claim_retention(
     pool: &PgPool,
     worker_name: &str,
-    lease_ms: i32,
 ) -> Result<Option<RetentionClaim>, sqlx::Error> {
     let claim_token = Uuid::new_v4();
     let row = sqlx::query("SELECT * FROM kb_retention_claim($1,$2,$3)")
         .bind(claim_token)
         .bind(worker_name)
-        .bind(lease_ms)
+        .bind(RETENTION_LEASE_MS)
         .fetch_optional(pool)
         .await?;
     row.map(|row| {
@@ -70,6 +73,46 @@ async fn claim_retention(
     .transpose()
 }
 
+async fn delete_claimed_blob_with_heartbeat(
+    pool: &PgPool,
+    claim: &RetentionClaim,
+) -> Result<Result<(), String>, sqlx::Error> {
+    let deletion = crate::delete_claimed_blob(&claim.digest);
+    tokio::pin!(deletion);
+    let mut heartbeat = tokio::time::interval(RETENTION_HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat.tick().await;
+
+    loop {
+        tokio::select! {
+            result = &mut deletion => return Ok(result),
+            _ = heartbeat.tick() => {
+                let renewal: Result<bool, sqlx::Error> = sqlx::query_scalar(
+                    "SELECT kb_retention_heartbeat($1::kb_object_ref,$2,$3)",
+                )
+                .bind(&claim.object_ref)
+                .bind(claim.claim_token)
+                .bind(RETENTION_LEASE_MS)
+                .fetch_one(pool)
+                .await;
+                match renewal {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let _ = deletion.await;
+                        return Err(sqlx::Error::Protocol(
+                            "retention heartbeat lost the current claim".into(),
+                        ));
+                    }
+                    Err(error) => {
+                        let _ = deletion.await;
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn bounded_error_code(error: &str) -> &'static str {
     if error.contains("timeout") {
         "OBJECT_DELETE_TIMEOUT"
@@ -80,16 +123,14 @@ fn bounded_error_code(error: &str) -> &'static str {
     }
 }
 
-/// Claim and process at most one retention item. Physical deletion is hidden
-/// inside this module and is impossible without a current database claim.
-pub async fn process_one_retention_item(
+/// Finish one current claim. Keeping this whole future in an owned Tokio task
+/// makes cancellation of the polling loop detach, rather than split, the
+/// heartbeat/delete/receipt lifecycle.
+async fn process_claimed_retention_item(
     pool: &PgPool,
-    worker_name: &str,
+    claim: &RetentionClaim,
 ) -> Result<bool, sqlx::Error> {
-    let Some(claim) = claim_retention(pool, worker_name, 60_000).await? else {
-        return Ok(false);
-    };
-    match crate::delete_claimed_blob(&claim.digest).await {
+    match delete_claimed_blob_with_heartbeat(pool, claim).await? {
         Ok(()) => {
             let completed: bool =
                 sqlx::query_scalar("SELECT kb_retention_complete($1::kb_object_ref,$2)")
@@ -120,4 +161,19 @@ pub async fn process_one_retention_item(
             Ok(true)
         }
     }
+}
+
+/// Claim and process at most one retention item. Physical deletion is hidden
+/// inside this module and is impossible without a current database claim.
+pub async fn process_one_retention_item(
+    pool: &PgPool,
+    worker_name: &str,
+) -> Result<bool, sqlx::Error> {
+    let Some(claim) = claim_retention(pool, worker_name).await? else {
+        return Ok(false);
+    };
+    let claimed_pool = pool.clone();
+    tokio::spawn(async move { process_claimed_retention_item(&claimed_pool, &claim).await })
+        .await
+        .map_err(|error| sqlx::Error::Protocol(format!("retention task join failed: {error}")))?
 }

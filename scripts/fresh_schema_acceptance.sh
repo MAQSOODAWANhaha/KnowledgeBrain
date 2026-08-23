@@ -132,11 +132,37 @@ BEGIN;
 INSERT INTO documents(id,product_version_id,title,parse_status,file_name,file_size,file_hash,object_ref)
 VALUES('10000000-0000-0000-0000-000000000005','10000000-0000-0000-0000-000000000004','safe','pending','a',3,'$digest','objects/$digest');
 SELECT kb_register_knowledge_document_object(
- '10000000-0000-0000-0000-000000000005','text/plain','system:schema-acceptance','register-1',
+ '10000000-0000-0000-0000-000000000005','text/plain','system:knowledge-document-ingest','register-1',
  '10000000-0000-0000-0000-000000000006');
 COMMIT;
 " >/dev/null
 role_psql kb_runtime_api api-test -Atc "SELECT count(*) FROM available_object_registry WHERE object_ref='objects/$digest'" | grep -qx '1'
+
+# System actors are a fixed V1 allowlist, not any bounded string. Replaying the
+# same request returns the original receipt and never appends a second audit;
+# changing the exact operation payload under that key fails closed.
+expect_denied kb_runtime_api api-test "SELECT 'system:not-allowlisted'::kb_actor_identity"
+role_psql kb_runtime_api api-test -Atc "SELECT kb_register_knowledge_document_object(
+ '10000000-0000-0000-0000-000000000005','text/plain','system:knowledge-document-ingest','register-1',
+ '10000000-0000-0000-0000-000000000016')" | grep -qx "objects/$digest"
+admin_psql -Atc "SELECT count(*) FROM audit_events
+ WHERE operation='knowledge.document.object.register'
+   AND actor_identity='system:knowledge-document-ingest' AND idempotency_key='register-1'" | grep -qx '1'
+expect_denied kb_runtime_api api-test "SELECT kb_register_knowledge_document_object(
+ '10000000-0000-0000-0000-000000000005','application/pdf','system:knowledge-document-ingest','register-1',
+ '10000000-0000-0000-0000-000000000017')"
+
+# A second owner reference protects the shared digest. Releasing only the first
+# owner must not queue deletion; releasing the last owner must do so atomically.
+role_psql kb_runtime_api api-test -c "
+BEGIN;
+INSERT INTO documents(id,product_version_id,title,parse_status,file_name,file_size,file_hash,object_ref)
+VALUES('10000000-0000-0000-0000-000000000015','10000000-0000-0000-0000-000000000004','safe-2','pending','b',3,'$digest','objects/$digest');
+SELECT kb_register_knowledge_document_object(
+ '10000000-0000-0000-0000-000000000015','text/plain','system:knowledge-document-ingest','register-2',
+ '10000000-0000-0000-0000-000000000018');
+COMMIT;
+" >/dev/null
 
 # Bidding and platform internals are function/view-only for API/worker. The
 # retention login has only retention functions and no business-table access.
@@ -150,16 +176,65 @@ expect_denied kb_runtime_retention retention-test "SELECT count(*) FROM bid_proj
 # Releasing the last owner reference soft-deletes the business row and queues
 # retention atomically. A new owner cannot revive the digest while deleting.
 role_psql kb_runtime_api api-test -Atc "SELECT kb_release_knowledge_document_object(
- '10000000-0000-0000-0000-000000000005','system:schema-acceptance','release-1',
- '10000000-0000-0000-0000-000000000007')" | grep -qx 't'
-release_checks=$(admin_psql -Atc "SELECT deleted_at IS NOT NULL FROM documents WHERE id='10000000-0000-0000-0000-000000000005'; SELECT state FROM object_registry WHERE object_ref='objects/$digest'")
+ '10000000-0000-0000-0000-000000000005','system:knowledge-document-delete','release-1',
+ '10000000-0000-0000-0000-000000000007')" | grep -qx 'f'
+first_release_checks=$(admin_psql -Atc "SELECT deleted_at IS NOT NULL FROM documents WHERE id='10000000-0000-0000-0000-000000000005'; SELECT state FROM object_registry WHERE object_ref='objects/$digest'; SELECT count(*) FROM object_owner_references WHERE object_ref='objects/$digest'")
+[ "$first_release_checks" = "$(printf 't\navailable\n1')" ]
+role_psql kb_runtime_api api-test -Atc "SELECT kb_release_knowledge_document_object(
+ '10000000-0000-0000-0000-000000000015','system:knowledge-document-delete','release-2',
+ '10000000-0000-0000-0000-000000000019')" | grep -qx 't'
+release_checks=$(admin_psql -Atc "SELECT deleted_at IS NOT NULL FROM documents WHERE id='10000000-0000-0000-0000-000000000015'; SELECT state FROM object_registry WHERE object_ref='objects/$digest'")
 [ "$release_checks" = "$(printf 't\ndeleting')" ]
+
+# A deleting object cannot be revived through a new business owner.
+expect_denied kb_runtime_api api-test "BEGIN;
+INSERT INTO documents(id,product_version_id,title,parse_status,file_name,file_size,file_hash,object_ref)
+VALUES('10000000-0000-0000-0000-000000000025','10000000-0000-0000-0000-000000000004','unsafe-revive','pending','c',3,'$digest','objects/$digest');
+SELECT kb_register_knowledge_document_object(
+ '10000000-0000-0000-0000-000000000025','text/plain','system:knowledge-document-ingest','register-revive',
+ '10000000-0000-0000-0000-000000000026');
+COMMIT;"
 
 claim=10000000-0000-0000-0000-000000000008
 role_psql kb_runtime_retention retention-test -Atc "SELECT object_ref FROM kb_retention_claim('$claim','schema-retention',60000)" | grep -qx "objects/$digest"
-role_psql kb_runtime_retention retention-test -Atc "SELECT kb_retention_complete('objects/$digest','$claim')" | grep -qx 't'
+# A lost claim response is replayed with the same token and does not increment
+# the attempt. Heartbeat extends only the live token lease.
+role_psql kb_runtime_retention retention-test -Atc "SELECT object_ref FROM kb_retention_claim('$claim','schema-retention',60000)" | grep -qx "objects/$digest"
+role_psql kb_runtime_retention retention-test -Atc "SELECT kb_retention_heartbeat('objects/$digest','$claim',60000)" | grep -qx 't'
+role_psql kb_runtime_retention retention-test -Atc "SELECT attempt FROM kb_retention_claim('$claim','schema-retention',60000)" | grep -qx '1'
+
+# A retry receipt is idempotent after response loss. The next claim uses a new
+# token; once that lease expires, a reclaim gets a new token and stale CAS calls
+# fail closed. The completion receipt is likewise replayable.
+role_psql kb_runtime_retention retention-test -Atc "SELECT kb_retention_fail('objects/$digest','$claim','OBJECT_DELETE_TIMEOUT')" | grep -qx 't'
+role_psql kb_runtime_retention retention-test -Atc "SELECT kb_retention_fail('objects/$digest','$claim','OBJECT_DELETE_TIMEOUT')" | grep -qx 't'
+admin_psql -c "UPDATE object_retention_outbox SET next_attempt_at=clock_timestamp() WHERE object_ref='objects/$digest'" >/dev/null
+claim2=10000000-0000-0000-0000-000000000009
+role_psql kb_runtime_retention retention-test -Atc "SELECT attempt FROM kb_retention_claim('$claim2','schema-retention',60000)" | grep -qx '2'
+admin_psql -c "UPDATE object_retention_outbox SET lease_until=clock_timestamp()-interval '1 second' WHERE object_ref='objects/$digest'" >/dev/null
+claim3=10000000-0000-0000-0000-000000000010
+# Claim-response replay is valid only while its lease is live. An expired token
+# cannot renew itself before another worker reclaims the item.
+expect_denied kb_runtime_retention retention-test "SELECT * FROM kb_retention_claim('$claim2','schema-retention',60000)"
+role_psql kb_runtime_retention retention-test -Atc "SELECT attempt FROM kb_retention_claim('$claim3','schema-retention',60000)" | grep -qx '3'
+admin_psql -Atc "SELECT count(*) FROM object_retention_attempt_receipts
+ WHERE claim_token='$claim2' AND attempt=2 AND outcome='retry' AND error_code='LEASE_EXPIRED'" | grep -qx '1'
+role_psql kb_runtime_retention retention-test -Atc "SELECT kb_retention_heartbeat('objects/$digest','$claim2',60000)" | grep -qx 'f'
+expect_denied kb_runtime_retention retention-test "SELECT * FROM kb_retention_claim('$claim2','schema-retention',60000)"
+expect_denied kb_runtime_retention retention-test "SELECT kb_retention_complete('objects/$digest','$claim2')"
+role_psql kb_runtime_retention retention-test -Atc "SELECT kb_retention_complete('objects/$digest','$claim3')" | grep -qx 't'
+role_psql kb_runtime_retention retention-test -Atc "SELECT kb_retention_complete('objects/$digest','$claim3')" | grep -qx 't'
 retention_checks=$(admin_psql -Atc "SELECT state FROM object_registry WHERE object_ref='objects/$digest'; SELECT count(*) FROM object_retention_tombstones WHERE object_ref='objects/$digest'")
 [ "$retention_checks" = "$(printf 'deleted\n1')" ]
+
+# Tombstones make deletion permanent for a digest in V1.
+expect_denied kb_runtime_api api-test "BEGIN;
+INSERT INTO documents(id,product_version_id,title,parse_status,file_name,file_size,file_hash,object_ref)
+VALUES('10000000-0000-0000-0000-000000000035','10000000-0000-0000-0000-000000000004','unsafe-deleted','pending','d',3,'$digest','objects/$digest');
+SELECT kb_register_knowledge_document_object(
+ '10000000-0000-0000-0000-000000000035','text/plain','system:knowledge-document-ingest','register-deleted',
+ '10000000-0000-0000-0000-000000000036');
+COMMIT;"
 
 # One-shot identities are disabled after verification.
 if role_psql kb_migrator migrator-test -c 'SELECT 1' >/dev/null 2>&1; then

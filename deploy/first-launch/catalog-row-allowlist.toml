@@ -2224,7 +2224,7 @@ owner = "app_owner"
 
 [[relations]]
 schema = "public"
-name = "object_owner_references_owner_idx"
+name = "object_owner_references_owner_kind_owner_id_occurrence_key"
 kind = "index"
 persistence = "permanent"
 owner = "app_owner"
@@ -2266,6 +2266,13 @@ owner = "app_owner"
 
 [[relations]]
 schema = "public"
+name = "object_retention_attempt_receipts_claim_token_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
 name = "object_retention_attempt_receipts_pkey"
 kind = "index"
 persistence = "permanent"
@@ -2281,6 +2288,13 @@ owner = "app_owner"
 [[relations]]
 schema = "public"
 name = "object_retention_outbox_claim_idx"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "object_retention_outbox_claim_token_uidx"
 kind = "index"
 persistence = "permanent"
 owner = "app_owner"
@@ -9679,6 +9693,39 @@ generated = ""
 schema = "public"
 relation = "bid_matching_staging_sets"
 ordinal = 14
+name = "expected_batch_count"
+type = "integer"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_staging_sets"
+ordinal = 15
+name = "expected_item_count"
+type = "bigint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_staging_sets"
+ordinal = 16
+name = "expected_byte_length"
+type = "bigint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_staging_sets"
+ordinal = 17
 name = "staged_item_count"
 type = "bigint"
 nullable = false
@@ -9689,7 +9736,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_staging_sets"
-ordinal = 15
+ordinal = 18
 name = "staged_byte_length"
 type = "bigint"
 nullable = false
@@ -9700,7 +9747,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_staging_sets"
-ordinal = 16
+ordinal = 19
 name = "consumed_report_id"
 type = "uuid"
 nullable = true
@@ -9711,7 +9758,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_staging_sets"
-ordinal = 17
+ordinal = 20
 name = "created_at"
 type = "timestamp with time zone"
 nullable = false
@@ -18532,7 +18579,7 @@ generated = ""
 
 [[columns]]
 schema = "public"
-relation = "object_owner_references_owner_idx"
+relation = "object_owner_references_owner_kind_owner_id_occurrence_key"
 ordinal = 1
 name = "owner_kind"
 type = "text"
@@ -18543,7 +18590,7 @@ generated = ""
 
 [[columns]]
 schema = "public"
-relation = "object_owner_references_owner_idx"
+relation = "object_owner_references_owner_kind_owner_id_occurrence_key"
 ordinal = 2
 name = "owner_id"
 type = "uuid"
@@ -18554,7 +18601,7 @@ generated = ""
 
 [[columns]]
 schema = "public"
-relation = "object_owner_references_owner_idx"
+relation = "object_owner_references_owner_kind_owner_id_occurrence_key"
 ordinal = 3
 name = "occurrence"
 type = "text"
@@ -18785,6 +18832,17 @@ generated = ""
 
 [[columns]]
 schema = "public"
+relation = "object_retention_attempt_receipts_claim_token_key"
+ordinal = 1
+name = "claim_token"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
 relation = "object_retention_attempt_receipts_pkey"
 ordinal = 1
 name = "object_ref"
@@ -18943,6 +19001,17 @@ relation = "object_retention_outbox_claim_idx"
 ordinal = 3
 name = "object_ref"
 type = "public.kb_object_ref"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "object_retention_outbox_claim_token_uidx"
+ordinal = 1
+name = "claim_token"
+type = "uuid"
 nullable = true
 default = ""
 identity = ""
@@ -24463,6 +24532,36 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "bid_matching_staging_sets"
+name = "bid_matching_staging_sets_expected_batch_count_check"
+kind = "check"
+definition = "CHECK (expected_batch_count >= 6 AND expected_batch_count <= 100000)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_staging_sets"
+name = "bid_matching_staging_sets_expected_byte_length_check"
+kind = "check"
+definition = "CHECK (expected_byte_length >= 0 AND expected_byte_length <= 67108864)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_staging_sets"
+name = "bid_matching_staging_sets_expected_item_count_check"
+kind = "check"
+definition = "CHECK (expected_item_count >= 0 AND expected_item_count <= 100000)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_staging_sets"
 name = "bid_matching_staging_sets_id_report_nonce_key"
 kind = "unique"
 definition = "UNIQUE (id, report_nonce)"
@@ -27323,6 +27422,16 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "object_owner_references"
+name = "object_owner_references_owner_kind_owner_id_occurrence_key"
+kind = "unique"
+definition = "UNIQUE (owner_kind, owner_id, occurrence)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "object_owner_references"
 name = "object_owner_references_pkey"
 kind = "primary_key"
 definition = "PRIMARY KEY (object_ref, owner_kind, owner_id, occurrence)"
@@ -27416,6 +27525,16 @@ relation = "object_retention_attempt_receipts"
 name = "object_retention_attempt_receipts_check"
 kind = "check"
 definition = "CHECK ((outcome = 'deleted'::text) = (error_code IS NULL))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "object_retention_attempt_receipts"
+name = "object_retention_attempt_receipts_claim_token_key"
+kind = "unique"
+definition = "UNIQUE (claim_token)"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -30383,11 +30502,11 @@ live = true
 [[indexes]]
 schema = "public"
 table = "object_owner_references"
-name = "object_owner_references_owner_idx"
+name = "object_owner_references_owner_kind_owner_id_occurrence_key"
 owner = "app_owner"
-definition = "CREATE INDEX object_owner_references_owner_idx ON public.object_owner_references USING btree (owner_kind, owner_id, occurrence)"
+definition = "CREATE UNIQUE INDEX object_owner_references_owner_kind_owner_id_occurrence_key ON public.object_owner_references USING btree (owner_kind, owner_id, occurrence)"
 primary = false
-unique = false
+unique = true
 valid = true
 ready = true
 live = true
@@ -30431,6 +30550,18 @@ live = true
 [[indexes]]
 schema = "public"
 table = "object_retention_attempt_receipts"
+name = "object_retention_attempt_receipts_claim_token_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX object_retention_attempt_receipts_claim_token_key ON public.object_retention_attempt_receipts USING btree (claim_token)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "object_retention_attempt_receipts"
 name = "object_retention_attempt_receipts_pkey"
 owner = "app_owner"
 definition = "CREATE UNIQUE INDEX object_retention_attempt_receipts_pkey ON public.object_retention_attempt_receipts USING btree (object_ref, claim_token)"
@@ -30448,6 +30579,18 @@ owner = "app_owner"
 definition = "CREATE INDEX object_retention_outbox_claim_idx ON public.object_retention_outbox USING btree (next_attempt_at, created_at, object_ref) WHERE (state = ANY (ARRAY['queued'::text, 'retry'::text]))"
 primary = false
 unique = false
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "object_retention_outbox"
+name = "object_retention_outbox_claim_token_uidx"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX object_retention_outbox_claim_token_uidx ON public.object_retention_outbox USING btree (claim_token) WHERE (claim_token IS NOT NULL)"
+primary = false
+unique = true
 valid = true
 ready = true
 live = true
@@ -31286,7 +31429,7 @@ security_definer = false
 leakproof = false
 parallel = "safe"
 config = ["search_path=pg_catalog"]
-definition_sha256 = "2f9cc17c6d65fb0d0e5066c3eea017861ed25facb2002905de9de6f3b3537705"
+definition_sha256 = "f5eb6a49e95b16747b279fddcb6e78a7078622bcfd2d5926654d73fec784a446"
 
 [[routines]]
 schema = "public"
@@ -31974,7 +32117,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "c41ccdee1410f5e84302fc8c2abfe84707ce1ed3609d8ad32e46205703e2cbe9"
+definition_sha256 = "d7c0a1371a47ed17deaae16f4c65e69d931e376606a8d6692e36fe1248e1a294"
 
 [[routines]]
 schema = "public"
@@ -32070,7 +32213,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "6b7b541868dce602ea173c72201130a66e7935ee591a124c6f51548117f3a308"
+definition_sha256 = "00d1d57da859890e16cdf3d7f21be64f0cdeb9bd714cbf475018fbb54e4d0587"
 
 [[routines]]
 schema = "public"
@@ -32102,7 +32245,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "2e2e98753230f6cd4337af8d9a8e4525e08772b685cd7c1368ab7ddf8a9953db"
+definition_sha256 = "ebf3dc9c0abd077f2e562613db913e19eca5f3ad3202ed8c7c331a0f5d071e01"
 
 [[routines]]
 schema = "public"

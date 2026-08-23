@@ -14,7 +14,7 @@ sha256 = "812ffd41bb94e8a00abed4716976f123e10933e283166d5024b624515965357c"
 version = 2
 name = "shared_platform_baseline"
 filename = "shared_platform_baseline.sql"
-sha256 = "0e02693dfadb3fc09ecad6fb3ec6fdf12d4eaaae68e029b00e7b6fd2057f911f"
+sha256 = "177f0424bf7f9128a38a2a1ff3c10f6fa3ab4553006c53062f8ac66824c44e55"
 
 [[migrations]]
 version = 3
