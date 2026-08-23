@@ -13,8 +13,13 @@
     "@mantine/hooks": "^7.17.8",
     "@mantine/notifications": "^7.17.8",
     "@tabler/icons-react": "^3.34.0",
+    "docx-preview": "^0.3.7",
+    "pptx-preview": "^1.0.7",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/react": "^19.1.8",

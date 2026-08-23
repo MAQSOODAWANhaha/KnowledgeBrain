@@ -140,6 +140,13 @@ impl TenderExtractionEngine {
                 {
                     Ok(outcome) => {
                         merge_stats(&mut diagnostics, &outcome.stats);
+                        tracing::debug!(
+                            family = family.as_str(),
+                            termination = %outcome.stats.termination,
+                            rounds = outcome.stats.rounds,
+                            tool_calls = outcome.stats.tool_calls,
+                            "bid_extract family"
+                        );
                         if outcome.stats.termination != "done" {
                             let reason = if outcome.stats.termination == "no_tool_call" {
                                 format!("{}_agent_returned_no_tool_calls", family.as_str())
@@ -181,6 +188,10 @@ impl TenderExtractionEngine {
             diagnostics
                 .fallback_reasons
                 .push("tool_model_not_configured".into());
+            tracing::warn!(
+                reason = "tool_model_not_configured",
+                "bid_extract hybrid fallback"
+            );
         }
 
         let initial = reconcile_candidates(self.policy, &sections, candidates.clone());
@@ -215,6 +226,13 @@ impl TenderExtractionEngine {
                     {
                         Ok(outcome) => {
                             merge_stats(&mut diagnostics, &outcome.stats);
+                            tracing::debug!(
+                                family = family.as_str(),
+                                termination = %outcome.stats.termination,
+                                rounds = outcome.stats.rounds,
+                                tool_calls = outcome.stats.tool_calls,
+                                "bid_extract family"
+                            );
                             span_succeeded |= !outcome.candidates.is_empty();
                             candidates.extend(outcome.candidates);
                         }

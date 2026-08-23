@@ -186,21 +186,21 @@ pub struct Hit {
     pub start_at: i32,
     pub end_at: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_object_key: Option<String>,
+    pub image_object_ref: Option<String>,
 }
 
 pub fn image_key_for_hit(
     chunk_type: &str,
     context_header: &str,
-    doc_object_key: &str,
+    doc_object_ref: &str,
 ) -> Option<String> {
     if !matches!(chunk_type, "image_ocr" | "image_caption") {
         return None;
     }
     if !context_header.is_empty() {
         Some(context_header.to_string())
-    } else if !doc_object_key.is_empty() {
-        Some(doc_object_key.to_string())
+    } else if !doc_object_ref.is_empty() {
+        Some(doc_object_ref.to_string())
     } else {
         None
     }
@@ -509,10 +509,10 @@ fn hits_from_pg_rows(rows: Vec<storage::PgSearchHit>, vth: f64, kth: f64) -> Vec
             tag_slugs: row.tag_slugs,
             start_at: row.start_at,
             end_at: row.end_at,
-            image_object_key: image_key_for_hit(
+            image_object_ref: image_key_for_hit(
                 &row.chunk_type,
                 &row.context_header,
-                &row.document_object_key,
+                &row.document_object_ref,
             ),
         });
     }
@@ -557,7 +557,7 @@ async fn graph_hits_for_version(
             tag_slugs: row.tag_slugs,
             start_at: row.start_at,
             end_at: row.end_at,
-            image_object_key: None,
+            image_object_ref: None,
         });
     }
     Ok(hits)
@@ -727,10 +727,10 @@ fn hybrid_search(
             tag_slugs,
             start_at: chunk.start_at,
             end_at: chunk.end_at,
-            image_object_key: image_key_for_hit(
+            image_object_ref: image_key_for_hit(
                 &chunk.chunk_type,
                 &chunk.context_header,
-                &doc.object_key,
+                &doc.object_ref,
             ),
         });
     }
@@ -779,7 +779,7 @@ fn hybrid_search(
                     tag_slugs,
                     start_at: ch.start_at,
                     end_at: ch.end_at,
-                    image_object_key: None,
+                    image_object_ref: None,
                 });
             }
         }
@@ -1735,7 +1735,7 @@ mod tests {
             tag_slugs: vec![],
             start_at: 0,
             end_at: 0,
-            image_object_key: None,
+            image_object_ref: None,
         };
         let a = Uuid::new_v4();
         let b = Uuid::new_v4();
@@ -1769,7 +1769,7 @@ mod tests {
             tag_slugs: vec![],
             start_at: 0,
             end_at: 0,
-            image_object_key: None,
+            image_object_ref: None,
         };
         let fused = fuse_by_chunk_id(vec![mk(0.2, "graph"), mk(0.8, "vector")]);
         assert_eq!(fused.len(), 1);
@@ -1934,13 +1934,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        storage::apply_0001(&pool).await.expect("migrate");
+        storage::apply_fresh_baseline(&pool).await.expect("migrate");
         let owner = Uuid::new_v4();
         storage::insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -1974,7 +1974,7 @@ mod tests {
                 file_name: "ds.txt",
                 file_size: 20,
                 file_hash: "match1",
-                object_key: "objects/match1",
+                object_ref: "objects/match1",
             },
         )
         .await

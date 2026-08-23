@@ -47,17 +47,6 @@ pub struct ClauseUpdateResult {
     pub match_changed: bool,
 }
 
-pub struct MatchJobFinish<'a> {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub claim_token: Uuid,
-    pub status: &'a str,
-    pub tech_status: &'a str,
-    pub commercial_status: &'a str,
-    pub candidates: &'a serde_json::Value,
-    pub error: &'a str,
-}
-
 pub struct ExtractionSectionRow<'a> {
     pub id: Uuid,
     pub section_key: &'a str,
@@ -76,6 +65,7 @@ pub struct PersistExtractionReport<'a> {
     pub sections: &'a [ExtractionSectionRow<'a>],
     pub clauses: &'a [ExtractionClauseRow<'a>],
     pub replace_document: bool,
+    pub scoped_section_count: Option<i32>,
 }
 
 pub struct ExtractionClauseRow<'a> {
@@ -104,16 +94,6 @@ pub struct FinishExtractRun<'a> {
     pub diagnostics: &'a serde_json::Value,
 }
 
-pub struct CommercialHitRow<'a> {
-    pub clause_id: Uuid,
-    pub outcome: &'a str,
-    pub document_id: Option<Uuid>,
-    pub version_id: Option<Uuid>,
-    pub file_name: Option<String>,
-    pub score: Option<f64>,
-    pub product_id: Option<Uuid>,
-}
-
 pub struct NewShot<'a> {
     pub id: Uuid,
     pub project_id: Uuid,
@@ -121,7 +101,7 @@ pub struct NewShot<'a> {
     pub product_id: Uuid,
     pub version_id: Uuid,
     pub source: &'a str,
-    pub object_key: &'a str,
+    pub object_ref: &'a str,
     pub kb_document_id: Option<Uuid>,
     pub kb_image_ref: Option<&'a str>,
 }
@@ -172,7 +152,7 @@ pub async fn end_project(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let ended: Option<Uuid> = sqlx::query_scalar(
         "UPDATE bid_projects SET status = 'ended', ended_at = now(), updated_at = now(),
-                match_dirty = false
+                scheduled_watermark = mutation_watermark, match_dirty = false
          WHERE id = $1 AND status = 'open' AND extract_lock_token IS NULL
          RETURNING id",
     )
@@ -203,6 +183,18 @@ async fn cancel_project_work(
     .bind(project_ids)
     .execute(&mut **tx)
     .await?;
+    let extract_run_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM bid_extract_runs
+         WHERE project_id = ANY($1) AND status IN ('pending', 'running')",
+    )
+    .bind(project_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    crate::bid_extract_publication::ExtractionPublicationStore::terminalize_runs(
+        tx,
+        &extract_run_ids,
+    )
+    .await?;
     sqlx::query(
         "UPDATE bid_extract_runs
          SET status = 'failed', error_message = 'project_ended', claim_token = NULL,
@@ -212,10 +204,18 @@ async fn cancel_project_work(
     .bind(project_ids)
     .execute(&mut **tx)
     .await?;
+    for run_id in &extract_run_ids {
+        crate::bid_extract_publication::ExtractionPublicationStore::refresh_run_aggregates(
+            tx, *run_id,
+        )
+        .await?;
+    }
     sqlx::query(
         "UPDATE bid_match_jobs
-         SET status = 'failed', error_message = 'project_ended', claim_token = NULL,
-             heartbeat_at = NULL, finished_at = now()
+         SET status = 'failed', terminal_error_code = 'OTHER_BOUNDED',
+             error_detail = 'project_ended', claim_token = NULL,
+             runtime_principal = NULL, claimed_at = NULL, heartbeat_at = NULL,
+             finished_at = now()
          WHERE project_id = ANY($1) AND status IN ('pending', 'running')",
     )
     .bind(project_ids)
@@ -245,24 +245,6 @@ async fn lock_open_project(
     Ok(status.as_deref() == Some("open"))
 }
 
-async fn supersede_old_match_jobs(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    project_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE bid_match_jobs j
-         SET status = 'failed', error_message = 'superseded', claim_token = NULL,
-             heartbeat_at = NULL, finished_at = now()
-         FROM bid_projects p
-         WHERE j.project_id = $1 AND p.id = j.project_id
-           AND j.generation < p.match_generation AND j.status IN ('pending', 'running')",
-    )
-    .bind(project_id)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
 pub async fn insert_document(
     pool: &PgPool,
     id: Uuid,
@@ -270,7 +252,7 @@ pub async fn insert_document(
     file_name: &str,
     file_hash: &str,
     file_size: i64,
-    object_key: &str,
+    object_ref: &str,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     if !lock_open_project(&mut tx, project_id).await? {
@@ -278,7 +260,7 @@ pub async fn insert_document(
     }
     sqlx::query(
         "INSERT INTO bid_documents
-            (id, project_id, file_name, file_hash, file_size, object_key, parse_status)
+            (id, project_id, file_name, file_hash, file_size, object_ref, parse_status)
          VALUES ($1, $2, $3, $4, $5, $6, 'pending')",
     )
     .bind(id)
@@ -286,7 +268,7 @@ pub async fn insert_document(
     .bind(file_name)
     .bind(file_hash)
     .bind(file_size)
-    .bind(object_key)
+    .bind(object_ref)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -298,7 +280,7 @@ pub async fn list_documents(
     project_id: Uuid,
 ) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
     sqlx::query(
-        "SELECT d.id, d.project_id, d.file_name, d.file_hash, d.file_size, d.object_key,
+        "SELECT d.id, d.project_id, d.file_name, d.file_hash, d.file_size, d.object_ref,
                 d.parse_status, d.markdown_ref, d.parsed_at, d.error_message,
                 d.multimodal_status, d.multimodal_error,
                 r.status AS extract_status, r.error_message AS extract_error,
@@ -331,7 +313,7 @@ pub async fn claim_document_conversion(
          FROM bid_projects p
          WHERE d.id = $1 AND d.parse_status = 'pending' AND p.id = d.project_id
            AND p.status = 'open' AND p.extract_lock_token IS NULL
-         RETURNING d.project_id, d.file_name, d.object_key, d.conversion_generation",
+         RETURNING d.project_id, d.file_name, d.object_ref, d.conversion_generation",
     )
     .bind(id)
     .bind(token)
@@ -342,7 +324,7 @@ pub async fn claim_document_conversion(
         (
             token,
             row.get("file_name"),
-            row.get("object_key"),
+            row.get("object_ref"),
             row.get("conversion_generation"),
         )
     }))
@@ -531,7 +513,7 @@ pub async fn document_row(
     id: Uuid,
 ) -> Result<Option<sqlx::postgres::PgRow>, sqlx::Error> {
     sqlx::query(
-        "SELECT id, project_id, file_name, file_hash, file_size, object_key,
+        "SELECT id, project_id, file_name, file_hash, file_size, object_ref,
                 parse_status, markdown_ref, parsed_at, error_message,
                 multimodal_status, multimodal_error
          FROM bid_documents WHERE id = $1",
@@ -1249,6 +1231,10 @@ pub async fn finish_extract_run(
     if result.rows_affected() != 1 {
         return Err(sqlx::Error::Protocol("extract run lease lost".into()));
     }
+    crate::bid_extract_publication::ExtractionPublicationStore::sync_finished_extract_run(
+        &mut tx, row.id,
+    )
+    .await?;
     sqlx::query(
         "UPDATE bid_projects
          SET extract_lock_token = NULL, extract_lock_kind = NULL,
@@ -1267,9 +1253,12 @@ pub async fn latest_extract(
     project_id: Uuid,
 ) -> Result<Option<sqlx::postgres::PgRow>, sqlx::Error> {
     sqlx::query(
-        "SELECT id, status, triggered_by, section_total, section_done,
+        "SELECT id, status, triggered_by,
                 extractor_mode, model_id, policy_version, prompt_version,
-                diagnostics, error_message, started_at, finished_at
+                diagnostics, error_message, started_at, finished_at,
+                target_count, published_target_count, scoped_section_count,
+                published_section_count, partial_publication, partial_failure,
+                worst_quality_status, degraded, reason_codes
          FROM bid_extract_runs
          WHERE project_id = $1
          ORDER BY started_at DESC NULLS LAST, id DESC
@@ -1334,151 +1323,7 @@ pub async fn insert_clause(pool: &PgPool, row: NewClause<'_>) -> Result<(), sqlx
     .execute(&mut *tx)
     .await?;
     if row.status == "confirmed" {
-        let dirty = sqlx::query(
-            "UPDATE bid_projects
-             SET match_generation = match_generation + 1, match_dirty = true, updated_at = now()
-             WHERE id = $1 AND status = 'open'",
-        )
-        .bind(row.project_id)
-        .execute(&mut *tx)
-        .await?;
-        if dirty.rows_affected() != 1 {
-            return Err(sqlx::Error::Protocol("bid project is not open".into()));
-        }
-        supersede_old_match_jobs(&mut tx, row.project_id).await?;
-    }
-    tx.commit().await?;
-    Ok(())
-}
-
-pub async fn persist_extraction_report(
-    pool: &PgPool,
-    report: PersistExtractionReport<'_>,
-) -> Result<(), sqlx::Error> {
-    let PersistExtractionReport {
-        run_id,
-        claim_token,
-        project_id,
-        document_id,
-        sections,
-        clauses,
-        replace_document,
-    } = report;
-    let mut tx = pool.begin().await?;
-    let lease: Option<Uuid> = sqlx::query_scalar(
-        "SELECT r.id FROM bid_extract_runs r
-         WHERE r.id = $1 AND r.project_id = $2 AND r.claim_token = $3
-           AND r.status = 'running'
-         FOR UPDATE",
-    )
-    .bind(run_id)
-    .bind(project_id)
-    .bind(claim_token)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if lease.is_none() {
-        return Err(sqlx::Error::Protocol("extract run lease lost".into()));
-    }
-    let mut section_ids = std::collections::HashMap::new();
-    for row in sections {
-        let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO bid_sections
-                (id, project_id, document_id, section_key, heading_path, hint_family,
-                 body, extract_status, error_message)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-             ON CONFLICT (document_id, section_key) DO UPDATE SET
-                heading_path = EXCLUDED.heading_path,
-                hint_family = EXCLUDED.hint_family,
-                body = EXCLUDED.body,
-                extract_status = EXCLUDED.extract_status,
-                error_message = EXCLUDED.error_message
-             RETURNING id",
-        )
-        .bind(row.id)
-        .bind(project_id)
-        .bind(document_id)
-        .bind(row.section_key)
-        .bind(row.heading_path)
-        .bind(row.hint_family)
-        .bind(row.body)
-        .bind(row.extract_status)
-        .bind(row.error_message)
-        .fetch_one(&mut *tx)
-        .await?;
-        section_ids.insert(row.section_key, id);
-    }
-    if replace_document {
-        sqlx::query(
-            "UPDATE bid_clauses SET status = 'superseded', superseded_by_run_id = $3
-             WHERE project_id = $1 AND source_document_id = $2 AND status = 'draft'",
-        )
-        .bind(project_id)
-        .bind(document_id)
-        .bind(run_id)
-        .execute(&mut *tx)
-        .await?;
-    } else {
-        let keys: Vec<String> = sections.iter().map(|s| s.section_key.to_string()).collect();
-        sqlx::query(
-            "UPDATE bid_clauses c SET status = 'superseded', superseded_by_run_id = $3
-             FROM bid_sections s
-             WHERE c.section_id = s.id AND c.project_id = $1 AND c.source_document_id = $2
-               AND c.status = 'draft' AND s.section_key = ANY($4)",
-        )
-        .bind(project_id)
-        .bind(document_id)
-        .bind(run_id)
-        .bind(&keys)
-        .execute(&mut *tx)
-        .await?;
-    }
-    for row in clauses {
-        let section_id = section_ids.get(row.section_key).copied().ok_or_else(|| {
-            sqlx::Error::Protocol(format!(
-                "extracted clause references unknown section_key: {}",
-                row.section_key
-            ))
-        })?;
-        sqlx::query(
-            "INSERT INTO bid_clauses
-                (id, project_id, extract_run_id, section_id, source_document_id,
-                 source_span, family_conflict, extraction_meta,
-                 raw_text, text, family, must, status)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'draft')",
-        )
-        .bind(row.id)
-        .bind(project_id)
-        .bind(run_id)
-        .bind(section_id)
-        .bind(document_id)
-        .bind(row.source_span)
-        .bind(row.family_conflict)
-        .bind(row.extraction_meta)
-        .bind(row.raw_text)
-        .bind(row.text)
-        .bind(row.family)
-        .bind(row.must)
-        .execute(&mut *tx)
-        .await?;
-    }
-    let current_keys: Vec<String> = sections
-        .iter()
-        .map(|section| section.section_key.to_string())
-        .collect();
-    if replace_document {
-        sqlx::query(
-            "DELETE FROM bid_sections s
-             WHERE s.document_id = $1
-               AND NOT (s.section_key = ANY($2))
-               AND NOT EXISTS (
-                   SELECT 1 FROM bid_clauses c
-                   WHERE c.section_id = s.id AND c.status IN ('confirmed', 'rejected')
-               )",
-        )
-        .bind(document_id)
-        .bind(&current_keys)
-        .execute(&mut *tx)
-        .await?;
+        crate::bid_matching::mark_project_matching_mutation(&mut tx, row.project_id).await?;
     }
     tx.commit().await?;
     Ok(())
@@ -1489,99 +1334,12 @@ pub async fn prune_unconfirmed_sections(
     document_id: Uuid,
     keep_keys: &[String],
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "DELETE FROM bid_sections s
-         WHERE s.document_id = $1
-           AND NOT (s.section_key = ANY($2))
-           AND NOT EXISTS (
-               SELECT 1 FROM bid_clauses c
-               WHERE c.section_id = s.id AND c.status IN ('confirmed', 'rejected')
-           )",
+    crate::bid_extract_publication::ExtractionPublicationStore::prune_unconfirmed_sections(
+        pool,
+        document_id,
+        keep_keys,
     )
-    .bind(document_id)
-    .bind(keep_keys)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-pub async fn persist_section_retry(
-    pool: &PgPool,
-    retry_token: Uuid,
-    project_id: Uuid,
-    document_id: Uuid,
-    section: &ExtractionSectionRow<'_>,
-    clauses: &[ExtractionClauseRow<'_>],
-) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let lease: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM bid_projects
-         WHERE id = $1 AND extract_lock_token = $2 AND extract_lock_kind = 'section_retry'
-           AND extract_lock_section_id = $3
-         FOR UPDATE",
-    )
-    .bind(project_id)
-    .bind(retry_token)
-    .bind(section.id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if lease.is_none() {
-        return Err(sqlx::Error::Protocol("section retry lease lost".into()));
-    }
-    let section_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO bid_sections
-            (id, project_id, document_id, section_key, heading_path, hint_family,
-             body, extract_status, error_message)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-         ON CONFLICT (document_id, section_key) DO UPDATE SET
-            heading_path = EXCLUDED.heading_path,
-            hint_family = EXCLUDED.hint_family,
-            body = EXCLUDED.body,
-            extract_status = EXCLUDED.extract_status,
-            error_message = EXCLUDED.error_message
-         RETURNING id",
-    )
-    .bind(section.id)
-    .bind(project_id)
-    .bind(document_id)
-    .bind(section.section_key)
-    .bind(section.heading_path)
-    .bind(section.hint_family)
-    .bind(section.body)
-    .bind(section.extract_status)
-    .bind(section.error_message)
-    .fetch_one(&mut *tx)
-    .await?;
-    sqlx::query(
-        "UPDATE bid_clauses SET status = 'superseded'
-         WHERE section_id = $1 AND status = 'draft'",
-    )
-    .bind(section_id)
-    .execute(&mut *tx)
-    .await?;
-    for row in clauses {
-        sqlx::query(
-            "INSERT INTO bid_clauses
-                (id, project_id, section_id, source_document_id, source_span,
-                 family_conflict, extraction_meta, raw_text, text, family, must, status)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'draft')",
-        )
-        .bind(row.id)
-        .bind(project_id)
-        .bind(section_id)
-        .bind(document_id)
-        .bind(row.source_span)
-        .bind(row.family_conflict)
-        .bind(row.extraction_meta)
-        .bind(row.raw_text)
-        .bind(row.text)
-        .bind(row.family)
-        .bind(row.must)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
-    Ok(())
+    .await
 }
 
 pub async fn list_clauses(
@@ -1664,18 +1422,7 @@ pub async fn update_clause(
     .execute(&mut *tx)
     .await?;
     if match_changed {
-        let dirty = sqlx::query(
-            "UPDATE bid_projects
-             SET match_generation = match_generation + 1, match_dirty = true, updated_at = now()
-             WHERE id = $1 AND status = 'open'",
-        )
-        .bind(row.project_id)
-        .execute(&mut *tx)
-        .await?;
-        if dirty.rows_affected() != 1 {
-            return Err(sqlx::Error::Protocol("bid project is not open".into()));
-        }
-        supersede_old_match_jobs(&mut tx, row.project_id).await?;
+        crate::bid_matching::mark_project_matching_mutation(&mut tx, row.project_id).await?;
     }
     tx.commit().await?;
     Ok(Some(ClauseUpdateResult { match_changed }))
@@ -1696,157 +1443,6 @@ pub async fn confirmed_clauses(
     .await
 }
 
-pub async fn insert_match_job(
-    pool: &PgPool,
-    id: Uuid,
-    project_id: Uuid,
-    expected_generation: i64,
-    debounce_key: &str,
-    job_kind: &str,
-    unit_id: Option<Uuid>,
-) -> Result<Uuid, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let generation: i64 = sqlx::query_scalar(
-        "SELECT match_generation FROM bid_projects
-         WHERE id = $1 AND status = 'open' AND match_generation = $2 FOR UPDATE",
-    )
-    .bind(project_id)
-    .bind(expected_generation)
-    .fetch_one(&mut *tx)
-    .await?;
-    if !matches!(job_kind, "technical" | "commercial") {
-        return Err(sqlx::Error::Protocol("invalid match job kind".into()));
-    }
-    sqlx::query(
-        "INSERT INTO bid_match_jobs
-            (id, project_id, status, debounce_key, job_kind, unit_id, generation)
-         VALUES ($1, $2, 'pending', $3, $4, $5, $6)
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(id)
-    .bind(project_id)
-    .bind(debounce_key)
-    .bind(job_kind)
-    .bind(unit_id)
-    .bind(generation)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "UPDATE bid_match_jobs
-         SET status = 'pending', tech_status = 'pending', commercial_status = 'pending',
-             error_message = '', claim_token = NULL, heartbeat_at = NULL,
-             started_at = NULL, finished_at = NULL, debounce_key = $5
-         WHERE project_id = $1 AND generation = $2 AND status = 'failed'
-           AND job_kind = $3
-           AND (($4::uuid IS NULL AND unit_id IS NULL) OR unit_id = $4)",
-    )
-    .bind(project_id)
-    .bind(generation)
-    .bind(job_kind)
-    .bind(unit_id)
-    .bind(debounce_key)
-    .execute(&mut *tx)
-    .await?;
-    let actual: Uuid = sqlx::query_scalar(
-        "SELECT id FROM bid_match_jobs
-         WHERE project_id = $1 AND generation = $2 AND job_kind = $3
-           AND (($4::uuid IS NULL AND unit_id IS NULL) OR unit_id = $4)",
-    )
-    .bind(project_id)
-    .bind(generation)
-    .bind(job_kind)
-    .bind(unit_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(actual)
-}
-
-pub async fn claim_match_job(
-    pool: &PgPool,
-    id: Uuid,
-    project_id: Uuid,
-) -> Result<Option<Uuid>, sqlx::Error> {
-    let token = Uuid::new_v4();
-    sqlx::query_scalar(
-        "UPDATE bid_match_jobs j SET status = 'running', claim_token = $3,
-             heartbeat_at = now(), started_at = now()
-         FROM bid_projects p
-         WHERE j.id = $1 AND j.project_id = $2 AND j.status = 'pending'
-           AND p.id = j.project_id AND p.status = 'open'
-           AND j.generation = p.match_generation
-         RETURNING j.claim_token",
-    )
-    .bind(id)
-    .bind(project_id)
-    .bind(token)
-    .fetch_optional(pool)
-    .await
-}
-
-pub async fn heartbeat_match_job(
-    pool: &PgPool,
-    id: Uuid,
-    claim_token: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(
-        "UPDATE bid_match_jobs j SET heartbeat_at = now()
-         FROM bid_projects p
-         WHERE j.id = $1 AND j.status = 'running' AND j.claim_token = $2
-           AND p.id = j.project_id AND p.status = 'open'
-           AND p.match_generation = j.generation",
-    )
-    .bind(id)
-    .bind(claim_token)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() == 1)
-}
-
-pub async fn reclaim_stale_match_jobs(
-    pool: &PgPool,
-    stale_secs: i64,
-) -> Result<Vec<(Uuid, Uuid, String)>, sqlx::Error> {
-    let rows = sqlx::query(
-        "UPDATE bid_match_jobs SET status = 'pending', claim_token = NULL, heartbeat_at = NULL,
-             tech_status = 'pending', commercial_status = 'pending',
-             error_message = 'stale_match_reclaimed'
-         WHERE status = 'running'
-           AND heartbeat_at < now() - make_interval(secs => $1)
-         RETURNING id, project_id, debounce_key",
-    )
-    .bind(stale_secs as f64)
-    .fetch_all(pool)
-    .await?;
-    use sqlx::Row;
-    Ok(rows
-        .into_iter()
-        .map(|row| {
-            (
-                row.get("id"),
-                row.get("project_id"),
-                row.get("debounce_key"),
-            )
-        })
-        .collect())
-}
-
-pub async fn clear_match_dirty(
-    pool: &PgPool,
-    project_id: Uuid,
-    generation: i64,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE bid_projects SET match_dirty = false
-         WHERE id = $1 AND match_generation = $2",
-    )
-    .bind(project_id)
-    .bind(generation)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 pub async fn current_match_generation(pool: &PgPool, project_id: Uuid) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar("SELECT match_generation FROM bid_projects WHERE id = $1")
         .bind(project_id)
@@ -1862,20 +1458,12 @@ pub async fn dirty_match_projects(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Erro
     .await
 }
 
-pub async fn match_job_unit(pool: &PgPool, job_id: Uuid) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("SELECT unit_id FROM bid_match_jobs WHERE id = $1")
-        .bind(job_id)
-        .fetch_optional(pool)
-        .await
-        .map(|r| r.flatten())
-}
-
 pub async fn any_match_running(pool: &PgPool, project_id: Uuid) -> Result<bool, sqlx::Error> {
     let n: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM bid_match_jobs j
          JOIN bid_projects p ON p.id = j.project_id
          WHERE j.project_id = $1 AND p.status = 'open'
-           AND j.generation = p.match_generation AND j.status IN ('pending', 'running')",
+           AND j.generation = p.match_generation AND j.status IN ('pending', 'running', 'committing')",
     )
     .bind(project_id)
     .fetch_one(pool)
@@ -1883,255 +1471,10 @@ pub async fn any_match_running(pool: &PgPool, project_id: Uuid) -> Result<bool, 
     Ok(n > 0)
 }
 
-pub async fn current_match_jobs(
-    pool: &PgPool,
-    project_id: Uuid,
-) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
-    sqlx::query(
-        "SELECT j.id, j.job_kind, j.unit_id, j.status, j.tech_status,
-                j.commercial_status, j.tech_candidates, j.error_message
-         FROM bid_match_jobs j JOIN bid_projects p ON p.id = j.project_id
-         WHERE j.project_id = $1 AND j.generation = p.match_generation
-         ORDER BY j.job_kind, j.unit_id NULLS FIRST",
-    )
-    .bind(project_id)
-    .fetch_all(pool)
-    .await
-}
-
-pub async fn latest_match_job(
-    pool: &PgPool,
-    project_id: Uuid,
-) -> Result<Option<sqlx::postgres::PgRow>, sqlx::Error> {
-    sqlx::query(
-        "SELECT id, status, tech_status, commercial_status, tech_candidates, error_message, unit_id
-         FROM bid_match_jobs WHERE project_id = $1
-         ORDER BY generation DESC, started_at DESC NULLS LAST, id DESC LIMIT 1",
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-}
-
-pub async fn latest_match_job_for_unit(
-    pool: &PgPool,
-    project_id: Uuid,
-    unit_id: Option<Uuid>,
-) -> Result<Option<sqlx::postgres::PgRow>, sqlx::Error> {
-    sqlx::query(
-        "SELECT id, status, tech_status, commercial_status, tech_candidates, error_message, unit_id
-         FROM bid_match_jobs WHERE project_id = $1 AND job_kind = 'technical'
-           AND (($2::uuid IS NULL AND unit_id IS NULL) OR unit_id = $2)
-         ORDER BY generation DESC, started_at DESC NULLS LAST, id DESC LIMIT 1",
-    )
-    .bind(project_id)
-    .bind(unit_id)
-    .fetch_optional(pool)
-    .await
-}
-
-pub async fn set_match_job(pool: &PgPool, row: MatchJobFinish<'_>) -> Result<(), sqlx::Error> {
-    let result = sqlx::query(
-        "UPDATE bid_match_jobs SET status = $4, tech_status = $5, commercial_status = $6,
-                tech_candidates = $7, error_message = $8,
-                claim_token = CASE WHEN $4 IN ('done', 'failed') THEN NULL ELSE claim_token END,
-                heartbeat_at = CASE WHEN $4 IN ('done', 'failed') THEN NULL ELSE heartbeat_at END,
-                finished_at = CASE WHEN $4 IN ('done', 'failed') THEN now() ELSE finished_at END
-         FROM bid_projects p
-         WHERE bid_match_jobs.id = $1 AND bid_match_jobs.project_id = $2
-           AND bid_match_jobs.claim_token = $3 AND bid_match_jobs.status = 'running'
-           AND p.id = bid_match_jobs.project_id AND p.status = 'open'
-           AND p.match_generation = bid_match_jobs.generation",
-    )
-    .bind(row.id)
-    .bind(row.project_id)
-    .bind(row.claim_token)
-    .bind(row.status)
-    .bind(row.tech_status)
-    .bind(row.commercial_status)
-    .bind(row.candidates)
-    .bind(row.error)
-    .execute(pool)
-    .await?;
-    if result.rows_affected() != 1 {
-        return Err(sqlx::Error::Protocol(
-            "match job lease or generation lost".into(),
-        ));
-    }
-    Ok(())
-}
-
-pub async fn replace_commercial_hits(
-    pool: &PgPool,
-    project_id: Uuid,
-    rows: &[CommercialHitRow<'_>],
-) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM bid_commercial_hits WHERE project_id = $1")
-        .bind(project_id)
-        .execute(&mut *tx)
-        .await?;
-    for row in rows {
-        sqlx::query(
-            "INSERT INTO bid_commercial_hits
-                (project_id, clause_id, outcome, document_id, version_id, file_name, score, product_id)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-        )
-        .bind(project_id)
-        .bind(row.clause_id)
-        .bind(row.outcome)
-        .bind(row.document_id)
-        .bind(row.version_id)
-        .bind(&row.file_name)
-        .bind(row.score)
-        .bind(row.product_id)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
-    Ok(())
-}
-
-pub async fn replace_commercial_hits_for_job(
-    pool: &PgPool,
-    job_id: Uuid,
-    project_id: Uuid,
-    claim_token: Uuid,
-    rows: &[CommercialHitRow<'_>],
-) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let current: Option<Uuid> = sqlx::query_scalar(
-        "SELECT j.id FROM bid_match_jobs j
-         JOIN bid_projects p ON p.id = j.project_id
-         WHERE j.id = $1 AND j.project_id = $2 AND j.status = 'running'
-           AND j.claim_token = $3 AND j.generation = p.match_generation
-           AND j.job_kind = 'commercial' AND p.status = 'open'
-         FOR UPDATE OF j, p",
-    )
-    .bind(job_id)
-    .bind(project_id)
-    .bind(claim_token)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if current.is_none() {
-        return Err(sqlx::Error::Protocol(
-            "match job lease or generation lost".into(),
-        ));
-    }
-    sqlx::query("DELETE FROM bid_commercial_hits WHERE project_id = $1")
-        .bind(project_id)
-        .execute(&mut *tx)
-        .await?;
-    for row in rows {
-        sqlx::query(
-            "INSERT INTO bid_commercial_hits
-                (project_id, clause_id, outcome, document_id, version_id, file_name, score, product_id)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-        )
-        .bind(project_id)
-        .bind(row.clause_id)
-        .bind(row.outcome)
-        .bind(row.document_id)
-        .bind(row.version_id)
-        .bind(&row.file_name)
-        .bind(row.score)
-        .bind(row.product_id)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
-    Ok(())
-}
-
-pub async fn list_commercial_hits(
-    pool: &PgPool,
-    project_id: Uuid,
-) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
-    sqlx::query(
-        "SELECT project_id, clause_id, outcome, document_id, version_id, file_name, score, product_id, matched_at
-         FROM bid_commercial_hits WHERE project_id = $1",
-    )
-    .bind(project_id)
-    .fetch_all(pool)
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn upsert_pick(
-    pool: &PgPool,
-    project_id: Uuid,
-    unit_id: Uuid,
-    product_id: Uuid,
-    version_id: Uuid,
-    score: f64,
-    coverage: f64,
-    clauses: &serde_json::Value,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO bid_picks (project_id, unit_id, product_id, version_id, score, coverage, clauses)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)
-         ON CONFLICT (project_id, unit_id, product_id) DO UPDATE SET
-            version_id = EXCLUDED.version_id,
-            score = EXCLUDED.score,
-            coverage = EXCLUDED.coverage,
-            clauses = EXCLUDED.clauses,
-            picked_at = now()",
-    )
-    .bind(project_id)
-    .bind(unit_id)
-    .bind(product_id)
-    .bind(version_id)
-    .bind(score)
-    .bind(coverage)
-    .bind(clauses)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-pub async fn delete_pick(
-    pool: &PgPool,
-    project_id: Uuid,
-    unit_id: Uuid,
-    product_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(
-        "DELETE FROM bid_picks WHERE project_id = $1 AND unit_id = $2 AND product_id = $3",
-    )
-    .bind(project_id)
-    .bind(unit_id)
-    .bind(product_id)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() == 1)
-}
-
-pub async fn list_picks(
-    pool: &PgPool,
-    project_id: Uuid,
-) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
-    list_picks_for_unit(pool, project_id, None).await
-}
-
-pub async fn list_picks_for_unit(
-    pool: &PgPool,
-    project_id: Uuid,
-    unit_id: Option<Uuid>,
-) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
-    sqlx::query(
-        "SELECT project_id, unit_id, product_id, version_id, score, coverage, picked_at, clauses
-         FROM bid_picks WHERE project_id = $1 AND ($2::uuid IS NULL OR unit_id = $2)",
-    )
-    .bind(project_id)
-    .bind(unit_id)
-    .fetch_all(pool)
-    .await
-}
-
 pub async fn insert_shot(pool: &PgPool, row: NewShot<'_>) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
         "INSERT INTO bid_shots
-            (id, project_id, clause_id, product_id, version_id, source, object_key, kb_document_id, kb_image_ref)
+            (id, project_id, clause_id, product_id, version_id, source, object_ref, kb_document_id, kb_image_ref)
          SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9
          WHERE EXISTS (
              SELECT 1 FROM bid_clauses c WHERE c.id = $3 AND c.project_id = $2
@@ -2145,7 +1488,7 @@ pub async fn insert_shot(pool: &PgPool, row: NewShot<'_>) -> Result<bool, sqlx::
     .bind(row.product_id)
     .bind(row.version_id)
     .bind(row.source)
-    .bind(row.object_key)
+    .bind(row.object_ref)
     .bind(row.kb_document_id)
     .bind(row.kb_image_ref)
     .execute(pool)
@@ -2158,7 +1501,7 @@ pub async fn list_shots(
     project_id: Uuid,
 ) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
     sqlx::query(
-        "SELECT id, project_id, clause_id, product_id, version_id, source, object_key,
+        "SELECT id, project_id, clause_id, product_id, version_id, source, object_ref,
                 kb_document_id, kb_image_ref
          FROM bid_shots WHERE project_id = $1",
     )
@@ -2214,26 +1557,11 @@ pub async fn pending_converts(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
     .await
 }
 
-pub async fn pending_matches(pool: &PgPool) -> Result<Vec<(Uuid, Uuid, String)>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT j.id, j.project_id, j.debounce_key FROM bid_match_jobs j
-         JOIN bid_projects p ON p.id = j.project_id
-         WHERE j.status = 'pending' AND j.generation = p.match_generation
-           AND p.status = 'open'",
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| (r.get("id"), r.get("project_id"), r.get("debounce_key")))
-        .collect())
-}
-
 pub async fn end_expired_projects(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let ended: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE bid_projects SET status = 'ended', ended_at = now(), updated_at = now(),
-                match_dirty = false
+                scheduled_watermark = mutation_watermark, match_dirty = false
          WHERE status = 'open' AND expires_at IS NOT NULL AND expires_at <= now()
            AND extract_lock_token IS NULL
          RETURNING id",
@@ -2271,26 +1599,6 @@ pub async fn open_projects_with_commercial(pool: &PgPool) -> Result<Vec<Uuid>, s
     .await
 }
 
-pub async fn latest_match_debounce(
-    pool: &PgPool,
-    project_id: Uuid,
-    job_kind: &str,
-    unit_id: Option<Uuid>,
-) -> Result<Option<(String, String)>, sqlx::Error> {
-    let row = sqlx::query(
-        "SELECT debounce_key, status FROM bid_match_jobs
-         WHERE project_id = $1 AND job_kind = $2
-           AND (($3::uuid IS NULL AND unit_id IS NULL) OR unit_id = $3)
-         ORDER BY generation DESC, started_at DESC NULLS LAST, id DESC LIMIT 1",
-    )
-    .bind(project_id)
-    .bind(job_kind)
-    .bind(unit_id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|r| (r.get("debounce_key"), r.get("status"))))
-}
-
 pub async fn list_sections(
     pool: &PgPool,
     project_id: Uuid,
@@ -2302,8 +1610,17 @@ pub async fn list_sections(
                     SELECT j.status FROM bid_section_retry_jobs j
                     WHERE j.section_id = s.id
                     ORDER BY j.created_at DESC LIMIT 1
-                ), '') AS retry_status
-         FROM bid_sections s WHERE s.project_id = $1 ORDER BY s.heading_path",
+                ), '') AS retry_status,
+                publication.published_extraction_generation,
+                publication.stale AS publication_stale,
+                publication.removed AS publication_removed,
+                publication.quality_status AS publication_quality_status,
+                publication.degraded AS publication_degraded,
+                publication.reason_codes AS publication_reason_codes
+         FROM bid_sections s
+         LEFT JOIN bid_section_publication_state publication
+           ON publication.document_id=s.document_id AND publication.section_key=s.section_key
+         WHERE s.project_id = $1 ORDER BY s.heading_path",
     )
     .bind(project_id)
     .fetch_all(pool)
@@ -2357,15 +1674,7 @@ pub async fn set_section_merge(
         tx.rollback().await?;
         return Ok(false);
     }
-    sqlx::query(
-        "UPDATE bid_projects
-         SET match_generation = match_generation + 1, match_dirty = true, updated_at = now()
-         WHERE id = $1 AND status = 'open'",
-    )
-    .bind(project_id)
-    .execute(&mut *tx)
-    .await?;
-    supersede_old_match_jobs(&mut tx, project_id).await?;
+    crate::bid_matching::mark_project_matching_mutation(&mut tx, project_id).await?;
     tx.commit().await?;
     Ok(true)
 }
@@ -2433,10 +1742,11 @@ pub async fn project_file_stats(
     .bind(project_id)
     .fetch_one(pool)
     .await?;
-    let picks: i64 = sqlx::query_scalar("SELECT count(*) FROM bid_picks WHERE project_id = $1")
-        .bind(project_id)
-        .fetch_one(pool)
-        .await?;
+    let picks: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM bid_pick_current_visible WHERE project_id = $1")
+            .bind(project_id)
+            .fetch_one(pool)
+            .await?;
     let pending_files: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM bid_documents d
          WHERE d.project_id = $1 AND d.parse_status = 'completed'

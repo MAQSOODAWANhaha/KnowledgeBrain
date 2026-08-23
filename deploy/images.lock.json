@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "platforms": {
+    "linux/amd64": {
+      "runtime_deployable": [
+        {
+          "lock_id": "postgres",
+          "compose_service": "postgres",
+          "deploy_target": "runtime",
+          "image": "pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b",
+          "unsigned": false
+        },
+        {
+          "lock_id": "redis",
+          "compose_service": "redis",
+          "deploy_target": "runtime",
+          "image": "redis@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf",
+          "unsigned": false
+        },
+        {
+          "lock_id": "neo4j",
+          "compose_service": "neo4j",
+          "deploy_target": "runtime",
+          "image": "neo4j@sha256:89d577f2e49606de76441eca8cf7a0fe88e594cbaac4d2a3d86c6e59676e2b1e",
+          "unsigned": false
+        },
+        {
+          "lock_id": "minio",
+          "compose_service": "minio",
+          "deploy_target": "runtime",
+          "image": "minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
+          "unsigned": false
+        },
+        {
+          "lock_id": "api",
+          "compose_service": "api",
+          "deploy_target": "runtime",
+          "image": "knowledgebrain-api@sha256:30a9535e1fa6a139ebe67d7612d144eff75eea3558d621ae003385c73879dd9b",
+          "unsigned": false
+        },
+        {
+          "lock_id": "worker",
+          "compose_service": "worker",
+          "deploy_target": "runtime",
+          "image": "knowledgebrain-worker@sha256:5d2715634560254f7c975b5c2a35bc73b72a09ec7926696d91d0dbaa9be6d256",
+          "unsigned": false
+        },
+        {
+          "lock_id": "docreader",
+          "compose_service": "docreader",
+          "deploy_target": "runtime",
+          "image": "knowledgebrain-docreader@sha256:72a50677badec74ed84c173c6098e139c0ab9b58281f20212e60610bbe0dbb97",
+          "unsigned": false
+        }
+      ],
+      "build_base": [
+        {
+          "lock_id": "rust-bookworm",
+          "compose_service": "build",
+          "deploy_target": "build",
+          "image": "rust@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97",
+          "unsigned": false
+        },
+        {
+          "lock_id": "node-web",
+          "compose_service": "build",
+          "deploy_target": "build",
+          "image": "node@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436",
+          "unsigned": false
+        },
+        {
+          "lock_id": "debian-runtime",
+          "compose_service": "build",
+          "deploy_target": "build",
+          "image": "debian@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241",
+          "unsigned": false
+        },
+        {
+          "lock_id": "python-docreader",
+          "compose_service": "build",
+          "deploy_target": "build",
+          "image": "python@sha256:c17b9ca6def1a936e55c77f086aaaf5f6a6c5f4d2fb4b7ac8c0113ba94e8b6ab",
+          "unsigned": false
+        }
+      ]
+    }
+  }
+}

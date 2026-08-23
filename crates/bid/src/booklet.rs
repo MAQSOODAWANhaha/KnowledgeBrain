@@ -1,7 +1,6 @@
 //! 过程成稿：按分册生成 / 保存 MD，导出前校验 must 锚。
 
 use serde::Serialize;
-use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -114,18 +113,7 @@ async fn load_picks_json(
     pool: &sqlx::PgPool,
     project_id: Uuid,
 ) -> Result<Vec<serde_json::Value>, String> {
-    Ok(storage::bid::list_picks(pool, project_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .iter()
-        .map(|r| {
-            json!({
-                "product_id": r.get::<Uuid, _>("product_id"),
-                "unit_id": r.try_get::<Uuid, _>("unit_id").unwrap_or(Uuid::nil()),
-                "clauses": r.get::<serde_json::Value, _>("clauses"),
-            })
-        })
-        .collect())
+    crate::visible_pick_json(pool, project_id, None).await
 }
 
 pub async fn expected_part_keys(
@@ -302,15 +290,49 @@ pub async fn generate_part_markdown(
         return Ok(md);
     }
 
-    let hits = storage::bid::list_commercial_hits(pool, project_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    if key == "4" || key == "5" {
+        if !commercial_projection_current(pool, project_id).await? {
+            return Ok(hidden_commercial_part_markdown(key));
+        }
+        let hits = crate::visible_commercial_json(pool, project_id).await?;
+        return Ok(commercial_part_markdown(key, &clauses, &hits));
+    }
+    Err("unknown booklet part".into())
+}
+
+async fn commercial_projection_current(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+) -> Result<bool, String> {
+    Ok(
+        storage::bid_matching::current_commercial_projection(pool, project_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .is_some(),
+    )
+}
+
+fn hidden_commercial_part_markdown(key: &str) -> String {
+    match key {
+        "4" => "# ④ 资格 / 商务材料\n\n（当前商务匹配结果已隐藏。）\n".into(),
+        "5" => "# ⑤ 商务缺件\n\n（当前商务匹配结果已隐藏。）\n".into(),
+        _ => String::new(),
+    }
+}
+
+fn commercial_part_markdown(
+    key: &str,
+    clauses: &[ClauseView],
+    hits: &[serde_json::Value],
+) -> String {
     if key == "4" {
         let mut md = String::from("# ④ 资格 / 商务材料\n\n");
         let mut any = false;
-        for h in &hits {
-            let cid: Uuid = h.get("clause_id");
-            let outcome: String = h.get("outcome");
+        for h in hits {
+            let Some(cid) = crate::preview_clause_id(h) else {
+                continue;
+            };
+            let outcome = h.get("outcome").and_then(|v| v.as_str()).unwrap_or("");
             if outcome != "hit" {
                 continue;
             }
@@ -321,40 +343,43 @@ pub async fn generate_part_markdown(
                 continue;
             }
             any = true;
-            let name: String = h
-                .try_get::<Option<String>, _>("file_name")
-                .ok()
-                .flatten()
+            let name = h
+                .get("file_name")
+                .and_then(|v| v.as_str())
                 .unwrap_or_default();
             md.push_str(&format!("- {name}\n"));
         }
         if !any {
             md.push_str("暂无已命中的公司资料。\n");
         }
-        return Ok(md);
+        return md;
     }
-    if key == "5" {
-        let mut md = String::from("# ⑤ 商务缺件\n\n");
-        let mut any = false;
-        for h in &hits {
-            let cid: Uuid = h.get("clause_id");
-            let outcome: String = h.get("outcome");
-            if outcome != "miss" {
-                continue;
-            }
-            if let Some(c) = clauses.iter().find(|c| {
-                c.id == cid && c.family == "commercial" && c.status == "confirmed" && c.must
-            }) {
-                any = true;
-                md.push_str(&format!("- {}\n", c.text));
+    let mut md = String::from("# ⑤ 商务缺件\n\n");
+    let mut any = false;
+    for h in hits {
+        let Some(cid) = crate::preview_clause_id(h) else {
+            continue;
+        };
+        let outcome = h.get("outcome").and_then(|v| v.as_str()).unwrap_or("");
+        if outcome != "miss" && outcome != "review" {
+            continue;
+        }
+        if let Some(c) = clauses
+            .iter()
+            .find(|c| c.id == cid && c.family == "commercial" && c.status == "confirmed" && c.must)
+        {
+            any = true;
+            if outcome == "review" {
+                md.push_str(&format!("- 待复核：{}\n", c.text));
+            } else {
+                md.push_str(&format!("- 缺件：{}\n", c.text));
             }
         }
-        if !any {
-            md.push_str("无 must 缺件。\n");
-        }
-        return Ok(md);
     }
-    Err("unknown booklet part".into())
+    if !any {
+        md.push_str("无 must 缺件。\n");
+    }
+    md
 }
 
 pub async fn ensure_part(
@@ -371,6 +396,20 @@ pub async fn ensure_part(
         if exists {
             return Err("project ended".into());
         }
+    }
+    if matches!(key, "4" | "5") && !commercial_projection_current(pool, project_id).await? {
+        let md = hidden_commercial_part_markdown(key);
+        storage::bid::upsert_booklet_generated(pool, project_id, key, &md)
+            .await
+            .map_err(|e| e.to_string())?;
+        storage::bid::mark_booklet_stale(pool, project_id, &[key])
+            .await
+            .map_err(|e| e.to_string())?;
+        let row = storage::bid::get_booklet_part(pool, project_id, key)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "booklet write missing".to_string())?;
+        return Ok(part_from_row(&row));
     }
     if !force && let Ok(Some(row)) = storage::bid::get_booklet_part(pool, project_id, key).await {
         return Ok(part_from_row(&row));
@@ -402,8 +441,10 @@ pub async fn ensure_all_parts(
             && existing
                 .as_ref()
                 .is_some_and(|r| r.try_get::<bool, _>("stale").unwrap_or(false));
+        let hide_commercial = matches!(key.as_str(), "4" | "5")
+            && !commercial_projection_current(pool, project_id).await?;
         match existing {
-            Some(row) if !force => out.push(part_from_row(&row)),
+            Some(row) if !force && !hide_commercial => out.push(part_from_row(&row)),
             _ => out.push(ensure_part(pool, project_id, &key, true).await?),
         }
     }
@@ -503,6 +544,56 @@ mod tests {
     fn part_three_has_no_clause_anchor() {
         let md = "# ③ 技术偏离表\n\n- 吞吐（偏离）\n";
         assert!(!md.contains("<!-- clause:"));
+    }
+
+    #[test]
+    fn commercial_part_four_is_confirmed_hit_only() {
+        let hit = Uuid::from_u128(1);
+        let miss = Uuid::from_u128(2);
+        let review = Uuid::from_u128(3);
+        let optional = Uuid::from_u128(4);
+        let clauses = vec![
+            commercial_clause(hit, "iso", true),
+            commercial_clause(miss, "must-miss", true),
+            commercial_clause(review, "must-review", true),
+            commercial_clause(optional, "optional-miss", false),
+        ];
+        let hits = vec![
+            serde_json::json!({"clause_id": hit.to_string(), "outcome": "hit", "file_name": "iso.pdf"}),
+            serde_json::json!({"clause_id": miss.to_string(), "outcome": "miss", "file_name": null}),
+            serde_json::json!({"clause_id": review.to_string(), "outcome": "review", "file_name": null}),
+            serde_json::json!({"clause_id": optional.to_string(), "outcome": "miss", "file_name": null}),
+        ];
+        let part4 = commercial_part_markdown("4", &clauses, &hits);
+        assert!(part4.contains("iso.pdf"));
+        assert!(!part4.contains("must-miss"));
+        assert!(!part4.contains("must-review"));
+        assert!(!part4.contains("optional-miss"));
+        let part5 = commercial_part_markdown("5", &clauses, &hits);
+        assert!(part5.contains("缺件：must-miss"));
+        assert!(part5.contains("待复核：must-review"));
+        assert!(!part5.contains("optional-miss"));
+        assert!(!part5.contains("iso.pdf"));
+    }
+
+    fn commercial_clause(id: Uuid, text: &str, must: bool) -> ClauseView {
+        ClauseView {
+            id,
+            text: text.into(),
+            raw_text: text.into(),
+            family: "commercial".into(),
+            must,
+            status: "confirmed".into(),
+            family_conflict: false,
+            deviate: false,
+            deviate_note: String::new(),
+            section_id: None,
+            assessment: "unset".into(),
+            unit_id: Uuid::nil(),
+            suggestion: String::new(),
+            hit_outcome: String::new(),
+            hit_file: String::new(),
+        }
     }
 
     #[test]

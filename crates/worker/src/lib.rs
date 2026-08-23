@@ -1,12 +1,14 @@
 //! Worker handlers. HTTP never calls these.
 
 pub mod consume;
+pub mod probe;
 
 use domain::{
-    ParseStatus, Store, TYPE_BID_CONVERT, TYPE_BID_EXTRACT, TYPE_BID_MATCH, TYPE_CHUNK_EXTRACT,
-    TYPE_DATATABLE, TYPE_DOCUMENT_PROCESS, TYPE_IMAGE_MULTIMODAL, TYPE_KB_DELETE, TYPE_LIST_DELETE,
-    TYPE_LIST_REPARSE, TYPE_MANUAL_PROCESS, TYPE_POST_PROCESS, TYPE_QUESTION, TYPE_SUMMARY,
-    TYPE_VERSION_CLONE, TYPE_WIKI_FINALIZE, TYPE_WIKI_INGEST, expected_subtasks,
+    ParseStatus, Store, TYPE_BID_CONVERT, TYPE_BID_EXTRACT, TYPE_BID_MATCH_ROUTE_V1,
+    TYPE_CHUNK_EXTRACT, TYPE_DATATABLE, TYPE_DOCUMENT_PROCESS, TYPE_IMAGE_MULTIMODAL,
+    TYPE_KB_DELETE, TYPE_LIST_DELETE, TYPE_LIST_REPARSE, TYPE_MANUAL_PROCESS, TYPE_POST_PROCESS,
+    TYPE_QUESTION, TYPE_SUMMARY, TYPE_VERSION_CLONE, TYPE_WIKI_FINALIZE, TYPE_WIKI_INGEST,
+    expected_subtasks,
 };
 use uuid::Uuid;
 
@@ -87,7 +89,7 @@ pub fn drain(store: &mut Store) {
 
 pub(crate) fn handle(store: &mut Store, job: &domain::Job) -> Result<(), String> {
     match job.task_type.as_str() {
-        TYPE_BID_CONVERT | TYPE_BID_EXTRACT | TYPE_BID_MATCH => Ok(()),
+        TYPE_BID_CONVERT | TYPE_BID_EXTRACT | TYPE_BID_MATCH_ROUTE_V1 => Ok(()),
         TYPE_DOCUMENT_PROCESS | TYPE_MANUAL_PROCESS => document_process(store, &job.payload),
         TYPE_POST_PROCESS => post_process(store, &job.payload),
         TYPE_SUMMARY => {
@@ -213,9 +215,8 @@ pub(crate) fn handle(store: &mut Store, job: &domain::Job) -> Result<(), String>
 fn persist_inline_images(store: &mut Store, result: docparser::ReadResult) -> String {
     let (md, blobs) = docparser::rewrite_inline(&result);
     for (hash, data) in blobs {
-        let key = storage::object_key(&hash);
+        let key = storage::object_ref(&hash);
         store.objects.insert(key, data.clone());
-        *store.object_refs.entry(hash.clone()).or_insert(0) += 1;
         let _ = storage::write_blob_off_runtime(&hash, &data);
     }
     md
@@ -311,14 +312,14 @@ fn document_process(store: &mut Store, payload: &serde_json::Value) -> Result<()
     } else if is_manual {
         store
             .objects
-            .get(&doc.object_key)
+            .get(&doc.object_ref)
             .cloned()
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_default()
     } else {
         let bytes = store
             .objects
-            .get(&doc.object_key)
+            .get(&doc.object_ref)
             .cloned()
             .unwrap_or_default();
         let ext = doc
@@ -747,19 +748,13 @@ pub fn delete_document(store: &mut Store, id: Uuid) {
         wiki::enqueue_retract(store, d.product_version_id, id, &d.title);
         let _ = graph::delete_document(d.product_version_id, id);
         store.clear_document_index(id);
-        storage_drop(store, &d.file_hash);
+        forget_in_memory_object(store, &d.file_hash);
         store.documents.remove(&id);
     }
 }
 
-fn storage_drop(store: &mut Store, hash: &str) {
-    if let Some(rc) = store.object_refs.get_mut(hash) {
-        *rc -= 1;
-        if *rc <= 0 {
-            store.object_refs.remove(hash);
-            store.objects.remove(&format!("objects/{hash}"));
-        }
-    }
+fn forget_in_memory_object(store: &mut Store, hash: &str) {
+    store.objects.remove(&format!("objects/{hash}"));
 }
 
 pub fn reparse_document(store: &mut Store, id: Uuid) {
@@ -827,7 +822,7 @@ fn datatable_summary(store: &mut Store, document_id: Uuid) -> Result<(), String>
         .to_ascii_lowercase();
     let bytes = store
         .objects
-        .get(&doc.object_key)
+        .get(&doc.object_ref)
         .cloned()
         .unwrap_or_default();
     let markdown = converted_markdown(&doc);
@@ -1144,7 +1139,6 @@ mod tests {
             let h = domain::sha256_hex(long.as_bytes());
             let k = format!("objects/{h}");
             s.objects.insert(k.clone(), long.as_bytes().to_vec());
-            s.object_refs.insert(h.clone(), 1);
             (h, k)
         };
         let passage_doc = Document::new(
@@ -1215,7 +1209,6 @@ mod tests {
             let h = domain::sha256_hex(body);
             let k = format!("objects/{h}");
             s.objects.insert(k.clone(), body.to_vec());
-            s.object_refs.insert(h.clone(), 1);
             (h, k)
         };
         let doc = Document::new(
@@ -1533,6 +1526,30 @@ mod tests {
         assert_eq!(s.documents[&did].pending_subtasks_count, 0);
         assert!(!s.chunks[&ids[0]].generated_questions.is_empty());
         assert!(!s.chunks[&ids[1]].generated_questions.is_empty());
+    }
+
+    #[test]
+    fn bid_convert_is_not_routed_via_default_and_unknown_task_is_not_default() {
+        assert_ne!(runtime::queue_for(TYPE_BID_CONVERT), domain::QUEUE_DEFAULT);
+        assert_eq!(
+            runtime::queue_for(TYPE_BID_CONVERT),
+            domain::QUEUE_BID_CONVERT_V1
+        );
+        assert_ne!(runtime::queue_for("not-a-real-task"), domain::QUEUE_DEFAULT);
+        assert_eq!(runtime::queue_for("not-a-real-task"), "rejected:unknown");
+        let err = handle(
+            &mut Store::default(),
+            &domain::Job {
+                id: Uuid::new_v4(),
+                task_type: "not-a-real-task".into(),
+                queue: runtime::queue_for("not-a-real-task").into(),
+                payload: serde_json::json!({}),
+                retries: 0,
+                max_retry: 1,
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown task"), "{err}");
     }
 
     #[test]

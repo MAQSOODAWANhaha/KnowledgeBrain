@@ -367,7 +367,7 @@ mod tests {
             tag_slugs: vec![],
             start_at: 1,
             end_at: 2,
-            image_object_key: None,
+            image_object_ref: None,
         };
         let sys = render_answer_system("English", std::slice::from_ref(&h));
         assert!(sys.contains("x"));

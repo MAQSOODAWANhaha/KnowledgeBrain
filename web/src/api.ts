@@ -89,7 +89,15 @@ export type ExtractRun = {
   extractor_mode: string;
   error_message: string;
   failed_documents?: number;
+  target_count?: number;
+  published_target_count?: number;
+  scoped_section_count?: number | null;
+  published_section_count?: number;
+  partial_publication?: boolean;
   partial_failure?: boolean;
+  worst_quality_status?: string;
+  degraded?: boolean;
+  reason_codes?: string[];
   diagnostics?: ExtractDiagnostics;
 };
 
@@ -103,6 +111,7 @@ export type BookletPart = {
 
 export type MatchUnit = {
   id: string | null;
+  route_id?: string | null;
   heading_path: string;
   kind?: string;
   technical_count?: number;
@@ -110,6 +119,12 @@ export type MatchUnit = {
   extract_status?: string;
   error_message?: string;
   retry_status?: string;
+  publication_generation?: number;
+  stale?: boolean;
+  removed?: boolean;
+  quality?: string;
+  degraded?: boolean;
+  reason?: string[];
 };
 
 export type BidDoc = {
@@ -122,11 +137,18 @@ export type BidDoc = {
   extract_status?: string | null;
   extract_error?: string | null;
   clause_count?: number;
-  object_key: string;
+  object_ref: string;
 };
 
 export type Candidate = {
+  requirement_artifact_id: string;
+  candidate_artifact_id: string;
   product_id: string;
+  product_version_id: string;
+  recommended: boolean;
+  retrieval_rank: number;
+  retrieval_raw_score: string;
+  evidence_v1_sha256: string;
   product_title: string;
   matched_version_id: string;
   matched_version_label: string;
@@ -136,7 +158,10 @@ export type Candidate = {
 };
 
 export type Pick = {
+  requirement_artifact_id: string;
+  candidate_artifact_id: string;
   product_id: string;
+  product_version_id: string;
   unit_id?: string;
   version_id: string;
   score: number;
@@ -144,12 +169,31 @@ export type Pick = {
   clauses: unknown;
 };
 
+export type RoutePickSet = {
+  route_id: string;
+  route_kind: "technical" | "commercial";
+  unit_id: string | null;
+  source_report_artifact_id: string;
+  report_sha256: string;
+  report_generation: number;
+  matching_mutation_watermark: number;
+  revision: number;
+  items: Array<{
+    requirement_artifact_id: string;
+    candidate_artifact_id: string;
+    product_id: string;
+    product_version_id: string;
+    unit_id?: string;
+  }>;
+  supported_candidates: Candidate[];
+};
+
 export type Shot = {
   id: string;
   clause_id: string;
   product_id: string;
   source: string;
-  object_key: string;
+  object_ref: string;
 };
 
 export type Workspace = {
@@ -182,8 +226,32 @@ export type Doc = {
   file_name: string;
   parse_status: string | { [k: string]: unknown };
   index_ready: boolean;
-  object_key: string;
+  object_ref: string;
   error_message?: string;
+};
+
+export type DocChunk = {
+  id: string;
+  chunk_type: string;
+  content: string;
+  context_header: string;
+  start_at: number;
+  end_at: number;
+  generated_questions: string[];
+};
+
+export type DocContent = {
+  id: string;
+  title: string;
+  file_name: string;
+  object_ref: string;
+  file_hash: string;
+  parse_status: string | { [k: string]: unknown };
+  index_ready: boolean;
+  error_message: string;
+  description: string;
+  markdown: string;
+  chunks: DocChunk[];
 };
 
 export const api = {
@@ -223,20 +291,24 @@ export const api = {
       body: JSON.stringify(body),
     }),
   reextract: (id: string) => req<void>(`/api/v1/bids/${id}/extract`, { method: "POST" }),
-  rematch: (id: string) => req<void>(`/api/v1/bids/${id}/match`, { method: "POST" }),
+  rematch: (id: string) => req<void>(`/api/v1/bids/${id}/matching/schedule`, { method: "POST" }),
   units: (id: string) => req<{ units: MatchUnit[] }>(`/api/v1/bids/${id}/units`),
-  picks: (id: string, unitId: string) =>
-    req<{ picks: Pick[]; candidates: Candidate[] }>(
-      `/api/v1/bids/${id}/picks?unit_id=${encodeURIComponent(unitId)}`,
-    ),
-  pick: (id: string, product_id: string, unitId: string) =>
-    req<void>(`/api/v1/bids/${id}/picks`, {
-      method: "POST",
-      body: JSON.stringify({ product_id, unit_id: unitId }),
-    }),
-  unpick: (id: string, pid: string, unitId: string) =>
-    req<void>(`/api/v1/bids/${id}/picks/${pid}?unit_id=${encodeURIComponent(unitId)}`, {
-      method: "DELETE",
+  routePickSet: (id: string, routeId: string) =>
+    req<RoutePickSet>(`/api/v1/bids/${id}/matching/routes/${routeId}/pick-set`),
+  replaceRoutePickSet: (
+    id: string,
+    routeId: string,
+    body: {
+      source_report_artifact_id: string;
+      report_sha256: string;
+      expected_revision: number;
+      items: Array<{ requirement_artifact_id: string; candidate_artifact_id: string }>;
+    },
+  ) =>
+    req(`/api/v1/bids/${id}/matching/routes/${routeId}/pick-set`, {
+      method: "PUT",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify(body),
     }),
   mergeSection: (id: string, sid: string, into: string) =>
     req<void>(`/api/v1/bids/${id}/sections/${sid}/merge`, {
@@ -281,6 +353,7 @@ export const api = {
     }),
   documents: (pid: string, vid: string) =>
     req<Doc[]>(`/api/v1/products/${pid}/versions/${vid}/documents`),
+  documentContent: (id: string) => req<DocContent>(`/api/v1/documents/${id}/content`),
   ingest: (pid: string, vid: string, file: File) => {
     const fd = new FormData();
     fd.set("file", file);

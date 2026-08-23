@@ -23,9 +23,10 @@ pub async fn rewrite_images(result: &ReadResult) -> (String, Vec<(String, Vec<u8
     let (mut md, mut blobs) = rewrite_inline(result);
     let candidates = remote_image_candidates(&md);
     if candidates.len() > MAX_REMOTE_IMAGES {
-        eprintln!(
-            "image rewrite cap {MAX_REMOTE_IMAGES}, skipping {} remotes",
-            candidates.len() - MAX_REMOTE_IMAGES
+        tracing::warn!(
+            cap = MAX_REMOTE_IMAGES,
+            skipped = candidates.len() - MAX_REMOTE_IMAGES,
+            "image rewrite cap"
         );
     }
     for url in candidates.into_iter().take(MAX_REMOTE_IMAGES) {
@@ -37,10 +38,10 @@ pub async fn rewrite_images(result: &ReadResult) -> (String, Vec<(String, Vec<u8
                 blobs.push((hash, data));
             }
             Ok(_) => {
-                eprintln!("image rewrite skipped empty body: {url}");
+                tracing::warn!(url = %url, "image rewrite skipped empty body");
             }
             Err(e) => {
-                eprintln!("image rewrite failed {url}: {e}");
+                tracing::warn!(url = %url, error = %e, "image rewrite failed");
             }
         }
     }

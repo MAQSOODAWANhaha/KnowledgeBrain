@@ -1,28 +1,25 @@
 use api::{bind_addr, router};
 use axum::Router;
-use std::io::Write;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
-
-fn log_ready(addr: &str) {
-    let line = format!("api ready on {addr}\n");
-    let _ = std::io::stdout().write_all(line.as_bytes());
-    let _ = std::io::stdout().flush();
-}
 
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
-    storage::connect()
+    runtime::init_tracing();
+    let pool = storage::connect()
         .await
-        .unwrap_or_else(|e| panic!("postgres initialization failed: {e}"));
+        .unwrap_or_else(|e| panic!("postgres schema verification failed: {e}"));
+    storage::require_production_first_launch_verified(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("production first-launch gate failed: {error}"));
     let addr = bind_addr();
     let listener = TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
-    log_ready(&addr);
+    tracing::info!(addr = %addr, "api ready");
     run(listener, router()).await;
-    let _ = std::io::stdout().write_all(b"api exiting\n");
+    tracing::info!("api exiting");
 }
 
 async fn run(listener: TcpListener, app: Router) {

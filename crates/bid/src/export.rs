@@ -529,7 +529,7 @@ async fn load_clause_images(
     };
     for r in rows {
         let cid: Uuid = r.get("clause_id");
-        let key: String = r.get("object_key");
+        let key: String = r.get("object_ref");
         if let Some(bytes) = blob_from_key(&key) {
             out.entry(cid).or_default().push(ExportImage { bytes });
         }

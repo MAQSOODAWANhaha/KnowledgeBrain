@@ -35,12 +35,12 @@ pub fn ocr_prompt(image_source_type: &str) -> &'static str {
 
 pub fn caption_prompt(language: &str) -> String {
     let language = if language.trim().is_empty() {
-        "English"
+        "the same language as the visible text in the image"
     } else {
         language.trim()
     };
     format!(
-        "Provide a brief and concise description of the main content of the image in {language}."
+        "Provide a brief and concise description of the main content of the image in {language}. Do not translate away from that language."
     )
 }
 

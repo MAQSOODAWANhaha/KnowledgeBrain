@@ -10,6 +10,7 @@ import {
 import { Assets } from "./assets/Assets";
 import { Workbench } from "./bid/Workbench";
 import { bidHref, go, parseAssetRoute, parseBidRoute, useHash } from "./hash";
+import { Crumbs } from "./Crumbs";
 import { Shell } from "./Shell";
 
 function Login() {
@@ -108,7 +109,7 @@ function Bids({ email }: { email: string }) {
     <Shell
       root="bids"
       email={email}
-      crumbs="投标项目 / 在办的标"
+      crumbs={<Crumbs items={[{ label: "投标项目" }, { label: "在办的标" }]} />}
       title="在办的标"
       extra={
         <button className="btn pri" type="button" onClick={() => setOpen(true)}>

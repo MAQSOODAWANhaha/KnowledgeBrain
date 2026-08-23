@@ -95,7 +95,9 @@ export function Shell({ root, email, crumbs, title, extra, lead, steps, find = t
         {steps}
         <div className="pagehead">
           <div>
-            <p className="crumbs">{crumbs}</p>
+            <nav className="crumbs" aria-label="面包屑">
+              {crumbs}
+            </nav>
             <h1 className="h1">{title}</h1>
             {lead}
           </div>

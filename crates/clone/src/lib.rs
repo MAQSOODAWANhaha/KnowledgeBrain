@@ -59,7 +59,7 @@ pub async fn run_clone(
     let keep_copy = same_embedding && schema_ready;
 
     let src_docs = sqlx::query(
-        "SELECT id, title, file_name, file_size, file_hash, object_key,
+        "SELECT id, title, file_name, file_size, file_hash, object_ref,
                 COALESCE(type, 'file') AS doc_type, source_passages,
                 COALESCE(description, '') AS description,
                 COALESCE(summary_status, 'none') AS summary_status
@@ -99,7 +99,7 @@ pub async fn run_clone(
                 let file_name: String = src.try_get("file_name").unwrap_or_default();
                 let file_size: i64 = src.try_get("file_size").unwrap_or(0);
                 let file_hash: String = src.try_get("file_hash").unwrap_or_default();
-                let object_key: String = src.try_get("object_key").unwrap_or_default();
+                let object_ref: String = src.try_get("object_ref").unwrap_or_default();
                 storage::insert_document(
                     pool,
                     storage::NewDocument {
@@ -109,7 +109,7 @@ pub async fn run_clone(
                         file_name: &file_name,
                         file_size,
                         file_hash: &file_hash,
-                        object_key: &object_key,
+                        object_ref: &object_ref,
                     },
                 )
                 .await
@@ -122,9 +122,6 @@ pub async fn run_clone(
                     .and_then(|v| serde_json::from_value(v).ok())
                     .unwrap_or_default();
                 let _ = storage::set_document_source(pool, nid, &kind, &passages).await;
-                storage::bump_object_ref(pool, &file_hash, file_size)
-                    .await
-                    .map_err(|e| e.to_string())?;
                 sqlx::query(
                     "INSERT INTO document_tags (document_id, tag_id)
                      SELECT $1, tag_id FROM document_tags WHERE document_id = $2",
@@ -197,7 +194,7 @@ pub async fn run_clone(
 mod tests {
     use super::*;
     use storage::{
-        apply_0001, connect, create_workspace_with_library, insert_document, insert_user,
+        apply_fresh_baseline, connect, create_workspace_with_library, insert_document, insert_user,
     };
     use tokio::sync::Mutex;
 
@@ -207,7 +204,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keep_new_document_id_bumps_refcount_leaves_source() {
+    async fn keep_new_document_id_adds_registry_owner_and_leaves_source() {
         let _g = db_lock().await;
         let Ok(pool) = connect().await else {
             eprintln!("skip: postgres down");
@@ -219,13 +216,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.expect("migrate");
+        apply_fresh_baseline(&pool).await.expect("migrate");
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -243,13 +240,12 @@ mod tests {
                 title: "iso",
                 file_name: "iso.txt",
                 file_size: 3,
-                file_hash: "abc",
-                object_key: "objects/abc",
+                file_hash: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                object_ref: "objects/ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             },
         )
         .await
         .unwrap();
-        storage::bump_object_ref(&pool, "abc", 3).await.unwrap();
         let dst = Uuid::new_v4();
         storage::insert_version_cloning(&pool, dst, seeded.library_id, "2026", src_ver)
             .await
@@ -280,11 +276,14 @@ mod tests {
                 .await
                 .unwrap();
         assert_ne!(dst_id, src_doc);
-        let rc: i32 = sqlx::query_scalar("SELECT refcount FROM content_objects WHERE hash = 'abc'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(rc, 2);
+        let owner_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM object_owner_references
+             WHERE object_ref = 'objects/ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(owner_count, 2);
         let status: String =
             sqlx::query_scalar("SELECT status FROM product_versions WHERE id = $1")
                 .bind(dst)
@@ -314,13 +313,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.expect("migrate");
+        apply_fresh_baseline(&pool).await.expect("migrate");
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -343,12 +342,11 @@ mod tests {
                 file_name: "spec.txt",
                 file_size: 8,
                 file_hash: "keep1",
-                object_key: "objects/keep1",
+                object_ref: "objects/keep1",
             },
         )
         .await
         .unwrap();
-        storage::bump_object_ref(&pool, "keep1", 8).await.unwrap();
         let cid = Uuid::new_v4();
         let ch = domain::Chunk {
             id: cid,
@@ -444,13 +442,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.expect("migrate");
+        apply_fresh_baseline(&pool).await.expect("migrate");
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -473,12 +471,11 @@ mod tests {
                 file_name: "iso.txt",
                 file_size: 3,
                 file_hash: "mis1",
-                object_key: "objects/mis1",
+                object_ref: "objects/mis1",
             },
         )
         .await
         .unwrap();
-        storage::bump_object_ref(&pool, "mis1", 3).await.unwrap();
         let cid = Uuid::new_v4();
         storage::replace_document_chunks(
             &pool,

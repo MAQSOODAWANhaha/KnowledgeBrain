@@ -426,29 +426,54 @@ a {
 }
 
 .crumbs {
-  font-size: 13.5px;
-  color: var(--crumb);
-  margin: 0 0 8px;
-  font-weight: 550;
-  line-height: 20px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 0;
+  margin: 0 0 6px;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 18px;
+  color: var(--crumb);
+}
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+.crumbs a,
+.crumb-now {
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .crumbs a {
   color: var(--crumb);
+  padding: 1px 5px;
+  margin: 0 -2px;
+  border-radius: 6px;
 }
 .crumbs a:hover {
   color: var(--ink);
+  background: var(--fill);
 }
-.crumbs i {
-  font-style: normal;
-  color: var(--faint);
-  font-weight: 500;
+.crumb-sep {
+  width: 12px;
+  height: 12px;
+  margin: 0 2px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: var(--faint);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
-.crumbs span {
-  color: var(--ink);
+.crumb-now {
+  max-width: 36ch;
+  color: var(--muted);
+  padding: 1px 2px;
 }
 
 .h1 {
@@ -1394,4 +1419,164 @@ table.grid tr:hover td {
   .side {
     display: none;
   }
+}
+
+.preview-card {
+  min-height: 480px;
+  overflow: auto;
+  background: #fafafb;
+}
+.preview-frame {
+  display: block;
+  width: 100%;
+  min-height: 720px;
+  border: 0;
+  background: #fff;
+}
+.preview-image {
+  display: flex;
+  justify-content: center;
+  padding: 24px;
+}
+.preview-image img {
+  max-width: 100%;
+  height: auto;
+}
+.preview-docx,
+.preview-excel,
+.preview-pptx {
+  padding: 16px 20px 32px;
+  overflow: auto;
+}
+.preview-pptx {
+  min-height: 420px;
+  background: #f3f3f5;
+}
+.preview-text {
+  margin: 0;
+  padding: 20px 24px;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.preview-empty {
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--muted);
+}
+.excel-sheet-name {
+  font-weight: 650;
+  margin: 12px 0 8px;
+}
+.chunk-row {
+  padding: 16px 20px 20px;
+  border-top: 1px solid var(--line-soft);
+}
+.chunk-row:first-child {
+  border-top: 0;
+}
+.chunk-row header {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.chunk-row pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+.chunk-qs {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.chunk-kicker {
+  margin: 12px 0 6px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.md-wrap {
+  width: 100%;
+  padding: 20px 28px 40px;
+  box-sizing: border-box;
+}
+.md-doc {
+  width: 100%;
+  max-width: none;
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--ink);
+}
+.md-doc .md-h1 {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  margin: 1.4em 0 0.5em;
+  scroll-margin-top: 72px;
+}
+.md-doc .md-h2 {
+  font-size: 18px;
+  font-weight: 650;
+  margin: 1.25em 0 0.4em;
+  scroll-margin-top: 72px;
+}
+.md-doc .md-h3,
+.md-doc .md-h4 {
+  font-size: 15.5px;
+  font-weight: 650;
+  margin: 1.1em 0 0.35em;
+  scroll-margin-top: 72px;
+}
+.md-doc p {
+  margin: 0.55em 0;
+}
+.md-doc li {
+  margin: 0.15em 0;
+}
+.md-doc a {
+  color: var(--iris-ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.md-doc ul,
+.md-doc ol {
+  margin: 0.4em 0 0.6em;
+  padding-left: 1.4em;
+}
+.md-doc table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0 16px;
+  font-size: 13.5px;
+}
+.md-doc th,
+.md-doc td {
+  border-bottom: 1px solid var(--line-soft);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.md-doc th {
+  font-weight: 650;
+  color: var(--muted);
+  background: #fafafb;
+}
+.md-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 12px 0 16px;
+  border-radius: 8px;
+  border: 1px solid var(--line-soft);
+  background: #fff;
 }

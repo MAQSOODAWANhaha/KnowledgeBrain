@@ -2,28 +2,33 @@
 
 use worker::consume::{AppCtx, run_core};
 
-fn log_line(msg: &str) {
-    let _ = std::io::Write::write_all(&mut std::io::stdout(), format!("{msg}\n").as_bytes());
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-}
-
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
+    runtime::init_tracing();
     let pool = storage::connect()
         .await
         .unwrap_or_else(|e| panic!("postgres initialization failed: {e}"));
+    storage::require_production_first_launch_verified(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("production first-launch gate failed: {error}"));
     let extractor = bid::extraction::TenderExtractionEngine::from_env()
         .unwrap_or_else(|e| panic!("bid extraction configuration failed: {e}"));
-    eprintln!(
-        "bid extraction configured mode={} model={} policy={} prompt={}",
-        extractor.mode().as_str(),
-        extractor.model_id(),
-        extractor.policy_version(),
-        extractor.prompt_version()
+    tracing::info!(
+        mode = extractor.mode().as_str(),
+        model = extractor.model_id(),
+        policy = extractor.policy_version(),
+        prompt = extractor.prompt_version(),
+        "bid extraction configured"
     );
+    let probe_addr = worker::probe::probe_addr();
+    let probe_listener = worker::probe::bind()
+        .await
+        .unwrap_or_else(|error| panic!("worker probe bind {probe_addr}: {error}"));
+    tracing::info!(addr = %probe_addr, "worker probe listening");
+    tokio::spawn(worker::probe::serve(probe_listener));
     consume_loop(pool).await;
-    log_line("worker exiting");
+    tracing::info!("worker exiting");
 }
 
 async fn consume_loop(pool: sqlx::PgPool) {
@@ -32,10 +37,10 @@ async fn consume_loop(pool: sqlx::PgPool) {
         match runtime::connect_verified().await {
             Ok(_) => {
                 backoff = std::time::Duration::from_secs(1);
-                log_line("worker ready");
+                tracing::info!("worker ready");
                 match runtime::replay_orphaned_local_jobs().await {
-                    Ok(n) if n > 0 => eprintln!("replayed {n} orphaned oxana jobs"),
-                    Err(error) => eprintln!("orphan job replay skipped: {error}"),
+                    Ok(n) if n > 0 => tracing::info!(replayed = n, "replayed orphaned oxana jobs"),
+                    Err(error) => tracing::warn!(%error, "orphan job replay skipped"),
                     _ => {}
                 }
                 match run_core(AppCtx {
@@ -44,10 +49,10 @@ async fn consume_loop(pool: sqlx::PgPool) {
                 .await
                 {
                     Ok(()) => return,
-                    Err(error) => eprintln!("worker consume ended; reconnecting: {error}"),
+                    Err(error) => tracing::error!(%error, "worker consume ended; reconnecting"),
                 }
             }
-            Err(error) => eprintln!("redis unavailable; reconnecting: {error}"),
+            Err(error) => tracing::warn!(%error, "redis unavailable; reconnecting"),
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(std::time::Duration::from_secs(30));

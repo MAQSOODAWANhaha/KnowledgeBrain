@@ -2,11 +2,11 @@
 
 use async_trait::async_trait;
 use runtime::{
-    BidConvertJob, BidExtractJob, BidMatchOxanaJob, BidSectionRetryJob, DatatableJob, DefaultQueue,
-    DocumentProcessJob, ExtractJob, GraphQueue, HousekeepJob, ImageMultimodalJob, IndexDeleteJob,
-    KbDeleteJob, ListDeleteJob, ListReparseJob, LowQueue, MultimodalQueue, PostProcessJob,
-    PostprocessQueue, QuestionJob, QuestionQueue, SummaryJob, SummaryQueue, SyncQueue,
-    VersionCloneJob, WikiFinalizeJob, WikiIngestJob, WikiQueue,
+    BidConvertJob, BidConvertV1Queue, BidExtractJob, BidExtractV1Queue, BidMatchRouteV1Job,
+    BidMatchingV1Queue, BidSectionRetryJob, BidSectionRetryV1Queue, DatatableJob, DefaultQueue,
+    DocumentProcessJob, ExtractJob, HousekeepJob, ImageMultimodalJob, IndexDeleteJob, KbDeleteJob,
+    ListDeleteJob, ListReparseJob, LowQueue, PostProcessJob, PostprocessQueue, QuestionJob,
+    SummaryJob, SummaryQueue, VersionCloneJob, WikiFinalizeJob, WikiIngestJob, WikiQueue,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -38,6 +38,14 @@ impl std::fmt::Display for JobErr {
 }
 
 impl std::error::Error for JobErr {}
+
+fn truncate_key(key: &str) -> &str {
+    let t = key.trim_start_matches("objects/").trim_start_matches('/');
+    match t.char_indices().nth(16) {
+        Some((i, _)) => &t[..i],
+        None => t,
+    }
+}
 
 #[async_trait]
 impl oxana::Worker<DocumentProcessJob> for DocumentProcessWorker {
@@ -149,6 +157,13 @@ pub async fn convert_document(
         return Ok(());
     }
     let _ = storage::open_attempt(pool, document_id, attempt).await;
+    tracing::info!(
+        document_id = %document_id,
+        file = %file_name,
+        engine = %parser_engine,
+        attempt,
+        "parse convert start"
+    );
     if !passages.is_empty() {
         let _ = storage::start_span(
             pool,
@@ -241,9 +256,10 @@ pub async fn convert_document(
         md
     } else if let Some(md) = reused_markdown(&prior_spans, &file_hash) {
         convert_image_source = reused_image_source(&prior_spans);
-        eprintln!(
-            "docreader reuse {document_id} file={file_name} md={} image_source={convert_image_source}",
-            md.len()
+        tracing::info!(
+            document_id = %document_id,
+            md_bytes = md.len(),
+            "parse convert reuse"
         );
         md
     } else {
@@ -274,7 +290,6 @@ pub async fn convert_document(
             .as_ref()
             .map(|o| o.parser_engine_overrides.clone())
             .unwrap_or_default();
-        eprintln!("docreader convert start {document_id} file={file_name} engine={engine}");
         let mut result = match docparser::convert_with(docparser::ConvertInput {
             engine: &parser_engine,
             file_name: &file_name,
@@ -355,10 +370,13 @@ pub async fn convert_document(
                 .await;
             }
         }
-        eprintln!(
-            "docreader convert done {document_id} md={} images={}",
-            result.markdown.len(),
-            result.images.len()
+        tracing::info!(
+            document_id = %document_id,
+            parser = result.metadata.get("parser").map(String::as_str).unwrap_or(engine),
+            md_bytes = result.markdown.len(),
+            images = result.images.len(),
+            anydoc_fallback = result.metadata.get("anydoc_fallback").map(String::as_str).unwrap_or("-"),
+            "parse convert done"
         );
         result.markdown = persist_and_rewrite_images(&result).await;
         let _ =
@@ -393,9 +411,10 @@ pub async fn convert_document(
         .unwrap_or_default();
     let chunks =
         if obs::stage_satisfied(&prior_spans, obs::SPAN_CHUNKING) && !existing_chunks.is_empty() {
-            eprintln!(
-                "chunking reuse {document_id} chunks={}",
-                existing_chunks.len()
+            tracing::info!(
+                document_id = %document_id,
+                chunks = existing_chunks.len(),
+                "parse chunking reuse"
             );
             existing_chunks
         } else {
@@ -440,6 +459,11 @@ pub async fn convert_document(
                 Some(serde_json::json!({"chunks": kept.len()})),
             )
             .await;
+            tracing::info!(
+                document_id = %document_id,
+                chunks = kept.len(),
+                "parse chunking done"
+            );
             kept
         };
     if obs::stage_satisfied(&prior_spans, obs::SPAN_EMBEDDING) {
@@ -473,6 +497,11 @@ pub async fn convert_document(
         None,
     )
     .await;
+    tracing::info!(
+        document_id = %document_id,
+        chunks = chunks.len(),
+        "parse embedding done"
+    );
     let images = enrichment::markdown_image_keys(&markdown);
     let mut mm = storage::version_multimodal_enabled(pool, version_id)
         .await
@@ -592,6 +621,12 @@ async fn after_index_fanout(
             )
             .await;
             let _ = storage::set_index_ready(pool, document_id, false).await;
+            tracing::warn!(
+                document_id = %document_id,
+                reason = "vlm not configured",
+                images = images.len(),
+                "parse multimodal hold"
+            );
             if text_count > 0 {
                 maybe_start_postprocess(pool, document_id, version_id, attempt).await;
             }
@@ -606,6 +641,11 @@ async fn after_index_fanout(
             Some(serde_json::json!({"images": images.len()})),
         )
         .await;
+        tracing::info!(
+            document_id = %document_id,
+            images = images.len(),
+            "parse multimodal enqueue"
+        );
         let mut pending = domain::Store::default();
         enrichment::set_pending(&mut pending, document_id, images.len() as i32);
         let mut leftover = images.len() as i32;
@@ -644,6 +684,11 @@ async fn after_index_fanout(
             )
             .await;
             let _ = storage::set_index_ready(pool, document_id, false).await;
+            tracing::warn!(
+                document_id = %document_id,
+                reason = "enqueue failed",
+                "parse multimodal hold"
+            );
             if text_count > 0 {
                 maybe_start_postprocess(pool, document_id, version_id, attempt).await;
             }
@@ -659,6 +704,7 @@ async fn after_index_fanout(
     )
     .await;
     let _ = storage::set_index_ready(pool, document_id, true).await;
+    tracing::info!(document_id = %document_id, index_ready = true, "parse completed");
     let _ = bid::maybe_rematch_company_doc(pool, document_id).await;
     if text_count == 0 {
         let _ = storage::set_parse_status(pool, document_id, "completed", "").await;
@@ -935,7 +981,7 @@ async fn persist_and_rewrite_images(result: &docparser::ReadResult) -> String {
     let _ = tokio::task::spawn_blocking(move || {
         for (hash, data) in blobs {
             if let Err(e) = storage::write_blob(&hash, &data) {
-                eprintln!("image persist failed objects/{hash}: {e}");
+                tracing::warn!(hash = %hash, error = %e, "image persist failed");
             }
         }
     })
@@ -980,6 +1026,7 @@ async fn fail_stage_retryable(
     )
     .await;
     let _ = storage::cancel_dependent_stages(pool, document_id, attempt, stage).await;
+    tracing::error!(document_id = %document_id, stage, error = %message, "parse stage fail");
     Err(message.into())
 }
 
@@ -1009,6 +1056,7 @@ async fn fail_pipeline(
         Some(serde_json::json!({"error": message})),
     )
     .await;
+    tracing::error!(document_id = %document_id, stage, error = %message, "parse stage fail");
     fail_now(pool, document_id, attempt, message).await
 }
 
@@ -1138,6 +1186,25 @@ impl oxana::Worker<PostProcessJob> for PostProcessWorker {
     }
 }
 
+/// Enqueue already returns `Ok(None)` for `DeclaredDisabled` lanes.
+/// Running generators here would re-enable those lanes in-process.
+fn allow_inline_fallback(task_type: &str) -> bool {
+    !matches!(
+        domain::launch_mode(task_type),
+        Ok(Some(domain::LaunchMode::DeclaredDisabled))
+    )
+}
+
+/// Invoke `inline` only when the registry does not declare the lane disabled.
+fn run_inline_if_allowed<T>(task_type: &str, inline: impl FnOnce() -> T) -> Option<T> {
+    allow_inline_fallback(task_type).then(inline)
+}
+
+#[tracing::instrument(
+    name = "parse.postprocess",
+    skip_all,
+    fields(document_id = %document_id, clone_keep)
+)]
 pub async fn process_post_process(
     pool: &PgPool,
     document_id: Uuid,
@@ -1157,6 +1224,11 @@ pub async fn process_post_process(
     let Some(ws) = ws else {
         return Ok(());
     };
+    tracing::info!(
+        document_id = %document_id,
+        clone_keep,
+        "parse postprocess start"
+    );
     let attempt: i32 =
         sqlx::query_scalar("SELECT COALESCE(attempt, 1) FROM documents WHERE id = $1")
             .bind(document_id)
@@ -1212,10 +1284,16 @@ pub async fn process_post_process(
         finish_postprocess_spans(pool, document_id, attempt).await;
         return Ok(());
     }
-    let wiki_trigger = store
-        .queue
-        .iter()
-        .any(|j| j.task_type == domain::TYPE_WIKI_INGEST);
+    let wiki_on = store
+        .versions
+        .get(&product_version_id)
+        .map(|v| v.wiki_enabled)
+        .unwrap_or(false);
+    let wiki_trigger = wiki_on
+        && store
+            .queue
+            .iter()
+            .any(|j| j.task_type == domain::TYPE_WIKI_INGEST);
     if wiki_trigger {
         storage::enqueue_pending_op(
             pool,
@@ -1309,15 +1387,21 @@ pub async fn process_post_process(
         {
             Ok(Some(_)) => {}
             Ok(None) => {
-                let _ = enrichment::generate_questions_with(
-                    &mut store,
-                    &ids,
-                    &prev_ids,
-                    &next_ids,
-                    document_id,
-                    attempt,
-                );
-                let _ = storage::persist_question_updates(pool, &store, document_id, &ids).await;
+                if run_inline_if_allowed(domain::TYPE_QUESTION, || {
+                    enrichment::generate_questions_with(
+                        &mut store,
+                        &ids,
+                        &prev_ids,
+                        &next_ids,
+                        document_id,
+                        attempt,
+                    )
+                })
+                .is_some()
+                {
+                    let _ =
+                        storage::persist_question_updates(pool, &store, document_id, &ids).await;
+                }
                 let _ = storage::finalize_subtask(pool, document_id).await;
             }
             Err(_) => {
@@ -1347,9 +1431,13 @@ pub async fn process_post_process(
         match runtime::enqueue_extract(*cid, *did, attempt).await {
             Ok(Some(_)) => {}
             Ok(None) => {
-                graph::extract_chunk(&mut store, *cid, *did)?;
-                let _ = storage::persist_graph_for_document(pool, &store, document_id).await;
-                let _ = graph::sync_document(&store, document_id);
+                if let Some(outcome) = run_inline_if_allowed(domain::TYPE_CHUNK_EXTRACT, || {
+                    graph::extract_chunk(&mut store, *cid, *did)
+                }) {
+                    outcome?;
+                    let _ = storage::persist_graph_for_document(pool, &store, document_id).await;
+                    let _ = graph::sync_document(&store, document_id);
+                }
                 let _ = storage::finalize_subtask(pool, document_id).await;
             }
             Err(_) => {
@@ -1369,6 +1457,11 @@ pub async fn process_post_process(
         }
     }
     finish_postprocess_spans(pool, document_id, attempt).await;
+    tracing::info!(
+        document_id = %document_id,
+        clone_keep,
+        "parse postprocess done"
+    );
     Ok(())
 }
 
@@ -1436,6 +1529,7 @@ impl oxana::Worker<HousekeepJob> for HousekeepWorker {
             storage::bid::reclaim_stale_converts(pool, runtime::HOUSEKEEP_STALE_SECS).await
         {
             for id in ids {
+                tracing::warn!(document_id = %id, "bid convert reclaim");
                 let _ = runtime::enqueue_bid_convert(id).await;
             }
         }
@@ -1448,6 +1542,12 @@ impl oxana::Worker<HousekeepJob> for HousekeepWorker {
             storage::bid::reclaim_stale_extracts(pool, runtime::HOUSEKEEP_EXTRACT_STALE_SECS).await
         {
             for (rid, pid, did) in stale {
+                tracing::warn!(
+                    run_id = %rid,
+                    project_id = %pid,
+                    document_id = ?did,
+                    "bid extract reclaim"
+                );
                 let _ = runtime::enqueue_bid_extract(rid, pid, did).await;
             }
         }
@@ -1477,15 +1577,13 @@ impl oxana::Worker<HousekeepJob> for HousekeepWorker {
         }
         if let Ok(projects) = storage::bid::dirty_match_projects(pool).await {
             for project_id in projects {
-                let _ = bid::schedule_match(pool, project_id).await;
+                let _ = bid::schedule_dirty_and_enqueue(pool, project_id).await;
             }
         }
-        let _ = storage::bid::reclaim_stale_match_jobs(pool, runtime::HOUSEKEEP_STALE_SECS).await;
-        if let Ok(jobs) = storage::bid::pending_matches(pool).await {
-            for (jid, pid, key) in jobs {
-                let _ = runtime::enqueue_bid_match(jid, pid, key).await;
-            }
-        }
+        // Matching reaping uses each claim's frozen lease policy and DB time;
+        // housekeeping cannot inject an arbitrary stale threshold.
+        let _ = storage::bid_matching::reap_expired_claims(pool).await;
+        let _ = bid::enqueue_pending_route_jobs(pool).await;
         Ok(())
     }
 }
@@ -1513,29 +1611,29 @@ impl oxana::Worker<BidConvertJob> for BidConvertWorker {
     async fn process(
         &self,
         job: BidConvertJob,
-        ctx: &oxana::JobContext,
+        _ctx: &oxana::JobContext,
     ) -> Result<(), Self::Error> {
         let Some(pool) = &self.pool else {
             return Err(JobErr("postgres not configured".into()));
         };
-        if let Err(error) = bid::convert_document(pool, job.document_id).await {
-            let last_attempt = ctx.meta.retries.saturating_add(1) >= self.max_retries(&job);
-            if last_attempt || !bid::conversion_error_is_retryable(&error) {
-                storage::bid::fail_pending_document_conversion(pool, job.document_id, &error)
-                    .await
-                    .map_err(|finish_error| JobErr(finish_error.to_string()))?;
-            }
-            return Err(JobErr(error));
-        }
-        let Some((run_id, project_id)) =
-            storage::bid::ensure_auto_extract_run(pool, job.document_id)
-                .await
-                .map_err(|error| JobErr(error.to_string()))?
-        else {
+        let target_id = bid::tender::convert_and_schedule_document(pool, job.document_id)
+            .await
+            .map_err(JobErr)?;
+        let Some(target_id) = target_id else {
             return Ok(());
         };
-        // The pending run is durable; housekeeping recovers a transient enqueue failure.
-        let _ = runtime::enqueue_bid_extract(run_id, project_id, Some(job.document_id)).await;
+        let document = storage::bidding::get_document(pool, job.document_id)
+            .await
+            .map_err(|error| JobErr(error.to_string()))?
+            .ok_or_else(|| JobErr("converted bid document disappeared".into()))?;
+        tracing::info!(
+            document_id = %job.document_id,
+            target_id = %target_id,
+            project_id = %document.project_id,
+            "bid_convert queued frozen extraction target"
+        );
+        let _ = runtime::enqueue_bid_extract(target_id, document.project_id, Some(job.document_id))
+            .await;
         Ok(())
     }
 }
@@ -1660,23 +1758,17 @@ impl oxana::Worker<BidExtractJob> for BidExtractWorker {
         let Some(pool) = &self.pool else {
             return Err(JobErr("postgres not configured".into()));
         };
-        bid::extract_run(pool, job.run_id, job.project_id, job.document_id)
+        bid::tender::run_extraction_target(pool, job.run_id, job.project_id, job.document_id)
             .await
-            .map_err(JobErr)?;
-        if let Ok(Some((nid, ndoc))) =
-            storage::bid::next_pending_extract(pool, job.project_id).await
-        {
-            let _ = runtime::enqueue_bid_extract(nid, job.project_id, ndoc).await;
-        }
-        Ok(())
+            .map_err(JobErr)
     }
 }
 
-pub struct BidMatchWorker {
+pub struct BidMatchRouteV1Handler {
     pool: Option<PgPool>,
 }
 
-impl oxana::FromContext<AppCtx> for BidMatchWorker {
+impl oxana::FromContext<AppCtx> for BidMatchRouteV1Handler {
     fn from_context(ctx: &AppCtx) -> Self {
         Self {
             pool: ctx.pool.clone(),
@@ -1685,18 +1777,22 @@ impl oxana::FromContext<AppCtx> for BidMatchWorker {
 }
 
 #[async_trait]
-impl oxana::Worker<BidMatchOxanaJob> for BidMatchWorker {
+impl oxana::Worker<BidMatchRouteV1Job> for BidMatchRouteV1Handler {
     type Error = JobErr;
+
+    fn max_retries(&self, _job: &BidMatchRouteV1Job) -> u32 {
+        0
+    }
 
     async fn process(
         &self,
-        job: BidMatchOxanaJob,
+        job: BidMatchRouteV1Job,
         _ctx: &oxana::JobContext,
     ) -> Result<(), Self::Error> {
         let Some(pool) = &self.pool else {
             return Err(JobErr("postgres not configured".into()));
         };
-        bid::run_match_job(pool, job.job_id, job.project_id)
+        bid::matching::run_match_route_v1(pool, job)
             .await
             .map_err(JobErr)
     }
@@ -1757,6 +1853,11 @@ impl oxana::Worker<ImageMultimodalJob> for ImageMultimodalWorker {
     }
 }
 
+#[tracing::instrument(
+    name = "parse.image",
+    skip_all,
+    fields(document_id = %document_id, attempt)
+)]
 pub async fn process_image_pg(
     pool: &PgPool,
     document_id: Uuid,
@@ -1789,14 +1890,29 @@ pub async fn process_image_pg(
     {
         d.parse_status = domain::ParseStatus::Processing;
     }
-    enrichment::process_image_without_decr(
+    if let Err(error) = enrichment::process_image_without_decr(
         &mut store,
         document_id,
         image_key,
         image_source_type,
         enable_ocr,
         enable_caption,
-    )?;
+    ) {
+        tracing::warn!(
+            document_id = %document_id,
+            image_key = truncate_key(image_key),
+            error = %error,
+            "parse image fail"
+        );
+        return Err(error);
+    }
+    tracing::info!(
+        document_id = %document_id,
+        image_key = truncate_key(image_key),
+        ocr = enable_ocr,
+        caption = enable_caption,
+        "parse image done"
+    );
     let image_chunks: Vec<_> = store
         .chunks
         .values()
@@ -1957,7 +2073,9 @@ pub async fn process_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), 
         .await
         .map_err(|e| e.to_string())?
     {
-        return Err("wiki ingest: version is not wiki enabled".into());
+        tracing::info!(%version_id, "wiki ingest skipped: not enabled");
+        let _ = storage::drop_pending_ops(pool, domain::TYPE_WIKI_INGEST, version_id).await;
+        return Ok(());
     }
     let claimed = storage::claim_pending_batch(
         pool,
@@ -2395,28 +2513,20 @@ pub async fn process_list_delete_pg(pool: &PgPool, document_id: Uuid) -> Result<
             .fetch_optional(pool)
             .await
             .map_err(|e| e.to_string())?;
-    let hash: Option<String> = sqlx::query_scalar("SELECT file_hash FROM documents WHERE id = $1")
-        .bind(document_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
     if let Some(vid) = vid {
         let _ = storage::delete_wiki_for_document(pool, vid, document_id).await;
         let _ = graph::delete_document(vid, document_id);
     }
     let _ = storage::purge_document_index(pool, document_id).await;
     let _ = runtime::enqueue_index_delete(document_id).await;
-    if let Some(h) = hash.as_deref().filter(|h| !h.is_empty()) {
-        let left = storage::release_object_ref(pool, h)
-            .await
-            .map_err(|e| e.to_string())?;
-        if left == 0 {
-            storage::drop_blob(h);
-        }
-    }
-    storage::soft_delete_document(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    storage::release_knowledge_document_object(
+        pool,
+        document_id,
+        "system:knowledge-document-delete",
+        &format!("knowledge-document-delete:{document_id}"),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     if let Some(ws) = ws {
         let mut store = domain::Store::default();
         let _ = storage::hydrate_workspace(pool, &mut store, ws).await;
@@ -2764,10 +2874,26 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .runtime(ctx.clone())
             .queue_with_concurrency::<DefaultQueue>(runtime::runtime_concurrency("CORE", 8))
             .worker::<DocumentProcessWorker, DocumentProcessJob>()
+            .queue_with_concurrency::<BidConvertV1Queue>(runtime::runtime_concurrency(
+                "BID_CONVERT",
+                4,
+            ))
             .worker::<BidConvertWorker, BidConvertJob>()
-            .worker::<BidSectionRetryWorker, BidSectionRetryJob>()
+            .queue_with_concurrency::<BidExtractV1Queue>(runtime::runtime_concurrency(
+                "BID_EXTRACT",
+                4,
+            ))
             .worker::<BidExtractWorker, BidExtractJob>()
-            .worker::<BidMatchWorker, BidMatchOxanaJob>()
+            .queue_with_concurrency::<BidSectionRetryV1Queue>(runtime::runtime_concurrency(
+                "BID_SECTION_RETRY",
+                4,
+            ))
+            .worker::<BidSectionRetryWorker, BidSectionRetryJob>()
+            .queue_with_concurrency::<BidMatchingV1Queue>(runtime::runtime_concurrency(
+                "BID_MATCHING",
+                4,
+            ))
+            .worker::<BidMatchRouteV1Handler, BidMatchRouteV1Job>()
             .shutdown_on(shut(stop.clone()))
             .shutdown_timeout(timeout)
             .run()
@@ -2793,12 +2919,6 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .queue_with_concurrency::<SummaryQueue>(enrich_n)
             .worker::<SummaryWorker, SummaryJob>()
             .worker::<DatatableWorker, DatatableJob>()
-            .queue_with_concurrency::<MultimodalQueue>(enrich_n)
-            .worker::<ImageMultimodalWorker, ImageMultimodalJob>()
-            .queue_with_concurrency::<GraphQueue>(enrich_n)
-            .worker::<ExtractWorker, ExtractJob>()
-            .queue_with_concurrency::<QuestionQueue>(enrich_n)
-            .worker::<QuestionWorker, QuestionJob>()
             .shutdown_on(shut(stop.clone()))
             .shutdown_timeout(timeout)
             .run()
@@ -2809,13 +2929,11 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
         storage
             .runtime(ctx.clone())
             .queue_with_concurrency::<LowQueue>(maint_n)
-            .worker::<HousekeepWorker, HousekeepJob>()
             .worker::<VersionCloneWorker, VersionCloneJob>()
             .worker::<ListDeleteWorker, ListDeleteJob>()
             .worker::<KbDeleteWorker, KbDeleteJob>()
             .worker::<ListReparseWorker, ListReparseJob>()
             .worker::<IndexDeleteWorker, IndexDeleteJob>()
-            .queue_with_concurrency::<SyncQueue>(maint_n)
             .shutdown_on(shut(stop.clone()))
             .shutdown_timeout(timeout)
             .run()
@@ -2827,12 +2945,6 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .runtime(ctx.clone())
             .queue_with_concurrency::<SummaryQueue>(shared_n)
             .worker::<SummaryWorker, SummaryJob>()
-            .queue_with_concurrency::<MultimodalQueue>(shared_n)
-            .worker::<ImageMultimodalWorker, ImageMultimodalJob>()
-            .queue_with_concurrency::<GraphQueue>(shared_n)
-            .worker::<ExtractWorker, ExtractJob>()
-            .queue_with_concurrency::<QuestionQueue>(shared_n)
-            .worker::<QuestionWorker, QuestionJob>()
             .shutdown_on(shut(stop.clone()))
             .shutdown_timeout(timeout)
             .run()
@@ -2868,8 +2980,8 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use storage::{
-        apply_0001, bump_object_ref, connect, create_workspace_with_library, insert_document,
-        insert_user, write_blob,
+        apply_fresh_baseline, connect, create_workspace_with_library, insert_document, insert_user,
+        write_blob,
     };
 
     #[test]
@@ -2936,13 +3048,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -2962,7 +3074,7 @@ mod tests {
                 file_name: "k.txt",
                 file_size: 4,
                 file_hash: &hash,
-                object_key: &format!("objects/{hash}"),
+                object_ref: &format!("objects/{hash}"),
             },
         )
         .await
@@ -3003,13 +3115,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -3027,7 +3139,7 @@ mod tests {
                 file_name: "e.txt",
                 file_size: 1,
                 file_hash: "blank1",
-                object_key: "objects/blank1",
+                object_ref: "objects/blank1",
             },
         )
         .await
@@ -3098,13 +3210,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -3124,7 +3236,7 @@ mod tests {
                 file_name: "t.txt",
                 file_size: 4,
                 file_hash: &hash,
-                object_key: &format!("objects/{hash}"),
+                object_ref: &format!("objects/{hash}"),
             },
         )
         .await
@@ -3201,13 +3313,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -3227,12 +3339,11 @@ mod tests {
                 file_name: "r.txt",
                 file_size: 11,
                 file_hash: &hash,
-                object_key: &format!("objects/{hash}"),
+                object_ref: &format!("objects/{hash}"),
             },
         )
         .await
         .unwrap();
-        bump_object_ref(&pool, &hash, 11).await.unwrap();
         convert_document(&pool, did, 1, &[], false).await.unwrap();
         let started: String = sqlx::query_scalar(
             "SELECT started_at::text FROM document_processing_spans
@@ -3306,13 +3417,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -3332,12 +3443,11 @@ mod tests {
                 file_name: "a.txt",
                 file_size: 12,
                 file_hash: &hash,
-                object_key: &format!("objects/{hash}"),
+                object_ref: &format!("objects/{hash}"),
             },
         )
         .await
         .unwrap();
-        bump_object_ref(&pool, &hash, 12).await.unwrap();
         convert_document(&pool, did, 1, &[], false).await.unwrap();
         let status: String = sqlx::query_scalar("SELECT parse_status FROM documents WHERE id = $1")
             .bind(did)
@@ -3405,13 +3515,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -3431,12 +3541,11 @@ mod tests {
                 file_name: "p.pdf",
                 file_size: 8,
                 file_hash: &hash,
-                object_key: &format!("objects/{hash}"),
+                object_ref: &format!("objects/{hash}"),
             },
         )
         .await
         .unwrap();
-        bump_object_ref(&pool, &hash, 8).await.unwrap();
         convert_document(&pool, did, 1, &[], false).await.unwrap();
         let (status, err): (String, String) = sqlx::query_as(
             "SELECT parse_status, COALESCE(error_message,'') FROM documents WHERE id = $1",
@@ -3483,13 +3592,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -3518,14 +3627,11 @@ mod tests {
                 file_name: "g.md",
                 file_size: body.len() as i64,
                 file_hash: &hash,
-                object_key: &format!("objects/{hash}"),
+                object_ref: &format!("objects/{hash}"),
             },
         )
         .await
         .unwrap();
-        bump_object_ref(&pool, &hash, body.len() as i64)
-            .await
-            .unwrap();
         convert_document(&pool, did, 1, &[], false).await.unwrap();
         if domain::vlm_configured() {
             let Ok(storage) = runtime::connect() else {
@@ -3571,13 +3677,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -3597,12 +3703,11 @@ mod tests {
                 file_name: "a.wav",
                 file_size: 4,
                 file_hash: &hash,
-                object_key: &format!("objects/{hash}"),
+                object_ref: &format!("objects/{hash}"),
             },
         )
         .await
         .unwrap();
-        bump_object_ref(&pool, &hash, 4).await.unwrap();
         convert_document(&pool, did, 1, &[], false).await.unwrap();
         let (status, err): (String, String) = sqlx::query_as(
             "SELECT parse_status, COALESCE(error_message,'') FROM documents WHERE id = $1",
@@ -3628,13 +3733,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -3663,14 +3768,11 @@ mod tests {
                 file_name: "talk.wav",
                 file_size: bytes.len() as i64,
                 file_hash: &hash,
-                object_key: &format!("objects/{hash}"),
+                object_ref: &format!("objects/{hash}"),
             },
         )
         .await
         .unwrap();
-        bump_object_ref(&pool, &hash, bytes.len() as i64)
-            .await
-            .unwrap();
         convert_document(&pool, did, 1, &[], false).await.unwrap();
         let status: String = sqlx::query_scalar("SELECT parse_status FROM documents WHERE id = $1")
             .bind(did)
@@ -3704,13 +3806,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -3729,7 +3831,7 @@ mod tests {
                 file_name: "p.txt",
                 file_size: 6,
                 file_hash: &hash,
-                object_key: &format!("objects/{hash}"),
+                object_ref: &format!("objects/{hash}"),
             },
         )
         .await
@@ -3794,13 +3896,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -3821,7 +3923,7 @@ mod tests {
                 file_name: "remote.md",
                 file_size: body.len() as i64,
                 file_hash: &hash,
-                object_key: &format!("objects/{hash}"),
+                object_ref: &format!("objects/{hash}"),
             },
         )
         .await
@@ -3851,13 +3953,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -3878,7 +3980,7 @@ mod tests {
                 file_name: "w.txt",
                 file_size: 9,
                 file_hash: &hash,
-                object_key: &format!("objects/{hash}"),
+                object_ref: &format!("objects/{hash}"),
             },
         )
         .await
@@ -4002,13 +4104,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -4042,13 +4144,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -4067,12 +4169,11 @@ mod tests {
                 file_name: "iso.txt",
                 file_size: 3,
                 file_hash: "abc",
-                object_key: "objects/abc",
+                object_ref: "objects/abc",
             },
         )
         .await
         .unwrap();
-        bump_object_ref(&pool, "abc", 3).await.unwrap();
         let dst = Uuid::new_v4();
         storage::insert_version_cloning(&pool, dst, seeded.library_id, "2026", src)
             .await
@@ -4142,13 +4243,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -4166,7 +4267,7 @@ mod tests {
                 file_name: "keep.txt",
                 file_size: 8,
                 file_hash: "pp1",
-                object_key: "objects/pp1",
+                object_ref: "objects/pp1",
             },
         )
         .await
@@ -4245,13 +4346,13 @@ mod tests {
                 graph_relations, graph_nodes, chunk_embeddings, chunks,
                 api_keys, models,
                 task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
+                document_tags, tags, documents,
                 product_versions, products, workspace_members, users, workspaces
              CASCADE",
         )
         .execute(&pool)
         .await;
-        apply_0001(&pool).await.unwrap();
+        apply_fresh_baseline(&pool).await.unwrap();
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -4274,7 +4375,7 @@ mod tests {
                 file_name: "spec.txt",
                 file_size: 80,
                 file_hash: "sum1",
-                object_key: "objects/sum1",
+                object_ref: "objects/sum1",
             },
         )
         .await

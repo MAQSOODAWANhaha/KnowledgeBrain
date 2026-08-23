@@ -15,3 +15,6 @@ sqlx.workspace = true
 storage = { path = "../storage" }
 tokio.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+storage = { path = "../storage", features = ["first-launch-migration"] }

@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
         env:
           POSTGRES_USER: knowledgebrain
           POSTGRES_PASSWORD: knowledgebrain
@@ -49,19 +49,67 @@ jobs:
       DATABASE_URL: postgres://knowledgebrain:knowledgebrain@127.0.0.1:5432/knowledgebrain
       REDIS_URL: redis://127.0.0.1:6379
       BID_EXTRACT_MODE: heuristic
+      KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS: "1"
+      KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.0
-      - name: mandatory PostgreSQL-backed storage tests
-        run: cargo test -p storage persist::tests -- --nocapture
+      - name: install production PostgreSQL bootstrap contract
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGPASSWORD: knowledgebrain
+          POSTGRES_USER: knowledgebrain
+          POSTGRES_DB: knowledgebrain
+          KNOWLEDGEBRAIN_MIGRATOR_PASSWORD: migrator-ci
+          KNOWLEDGEBRAIN_FIRST_LAUNCH_VERIFIER_PASSWORD: verifier-ci
+          KNOWLEDGEBRAIN_API_DB_PASSWORD: api-ci
+          KNOWLEDGEBRAIN_WORKER_DB_PASSWORD: worker-ci
+          KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD: retention-ci
+        run: sh deploy/postgres-init/010-runtime-identities.sh
+      - name: build migration and runtime binaries
+        run: cargo build -p migrator -p first-launch-verifier -p api -p worker -p retention
+      - name: fresh-volume Compose first-launch acceptance
+        run: scripts/compose_first_launch_acceptance.sh
+      - name: actual migrate process leaves runtime marker gate closed
+        env:
+          DATABASE_URL: postgres://kb_migrator:migrator-ci@127.0.0.1:5432/knowledgebrain
+          KNOWLEDGEBRAIN_BOOTSTRAP_ADMIN_DATABASE_URL: postgres://knowledgebrain:knowledgebrain@127.0.0.1:5432/knowledgebrain
+        run: target/debug/migrator
+      - name: runtime fails closed before durable verification marker
+        env:
+          DATABASE_URL: postgres://kb_runtime_api:api-ci@127.0.0.1:5432/knowledgebrain
+        run: |
+          if target/debug/api; then
+            echo "runtime unexpectedly started without first-launch marker" >&2
+            exit 1
+          fi
+      - name: mandatory first-launch verifier process
+        env:
+          DATABASE_URL: postgres://kb_first_launch_verifier:verifier-ci@127.0.0.1:5432/knowledgebrain
+          KNOWLEDGEBRAIN_APP_OWNER: kb_app_owner
+          KNOWLEDGEBRAIN_BOOTSTRAP_OWNER: knowledgebrain
+        run: target/debug/first-launch-verifier
+      - name: API and worker exact marker startup/restart gates
+        run: |
+          DATABASE_URL=postgres://kb_runtime_api:api-ci@127.0.0.1:5432/knowledgebrain \
+            cargo test -p api --test launch -- --nocapture --test-threads=1
+          DATABASE_URL=postgres://kb_runtime_worker:worker-ci@127.0.0.1:5432/knowledgebrain \
+            cargo test -p worker --test launch -- --nocapture --test-threads=1
+      - name: mandatory isolated fresh baseline, catalog, ACL, and ObjectRegistry acceptance
+        run: scripts/fresh_schema_acceptance.sh
+      - name: storage foundation unit tests
+        run: cargo test -p storage --lib -- --nocapture
+      - name: mandatory Bid matching tests
+        run: cargo test -p bid matching::tests -- --nocapture
+      - name: mandatory Redis-backed runtime queue tests
+        run: cargo test -p runtime jobs::tests -- --nocapture
       - name: install PDF font
         run: sudo apt-get update && sudo apt-get install -y fonts-wqy-zenhei
       - name: build services
-        run: cargo build -p api -p worker
-      - name: PostgreSQL + Redis + API + worker tender smoke
-        run: scripts/bid_e2e_smoke.sh
+        run: cargo build -p api -p worker -p retention
 
   python:
     runs-on: ubuntu-latest
@@ -99,6 +147,6 @@ jobs:
       - name: runtime image build
         run: docker build -f deploy/Dockerfile.rust --build-arg BIN=api -t knowledgebrain-api-ci .
       - name: shell
-        run: bash -n services/docreader/scripts/generate_proto.sh scripts/bid_e2e_smoke.sh
+        run: bash -n services/docreader/scripts/generate_proto.sh scripts/bid_e2e_smoke.sh deploy/compose-first-launch.sh deploy/compose-runtime-restart.sh scripts/compose_first_launch_acceptance.sh deploy/postgres-init/010-runtime-identities.sh
       - name: spec copy
         run: cmp -s docs/system-design.md .scratch/knowledgebrain/spec.md

@@ -225,7 +225,7 @@ function Shots({
     <div>
       <div className="shots">
         {mine.map((s) => (
-          <ShotImg key={s.id} objectKey={s.object_key} onDel={ended ? undefined : () => api.deleteShot(projectId, s.id).then(onChange)} />
+          <ShotImg key={s.id} objectKey={s.object_ref} onDel={ended ? undefined : () => api.deleteShot(projectId, s.id).then(onChange)} />
         ))}
         {!ended && pick && (
           <Dropzone

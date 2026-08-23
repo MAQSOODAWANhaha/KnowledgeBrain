@@ -12,27 +12,46 @@ fn free_port() -> u16 {
         .port()
 }
 
-fn wait_port(port: u16) {
+fn postgres_tests_required() -> bool {
+    std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS")
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn launch_test_may_skip() -> bool {
+    !postgres_tests_required() && std::env::var_os("DATABASE_URL").is_none()
+}
+
+fn wait_port(port: u16) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
+            return true;
         }
         if Instant::now() > deadline {
-            panic!("api did not listen on {port}");
+            return false;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
 }
 
 fn spawn_ready(port: u16) -> Child {
-    let child = Command::new(env!("CARGO_BIN_EXE_api"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_api"))
         .env("API_PORT", port.to_string())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn api");
-    wait_port(port);
+    if !wait_port(port) {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("API did not listen on configured port {port}");
+    }
     child
 }
 
@@ -73,6 +92,10 @@ fn one_launch() {
 
 #[test]
 fn api_starts_serves_health_and_exits_twice() {
+    if launch_test_may_skip() {
+        eprintln!("skip launch test: DATABASE_URL is not configured");
+        return;
+    }
     one_launch();
     one_launch();
 }

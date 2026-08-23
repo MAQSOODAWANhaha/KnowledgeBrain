@@ -543,6 +543,21 @@ async fn health_still_works() {
 }
 
 #[tokio::test]
+async fn live_is_liveness_without_dependencies() {
+    let (app, _) = app();
+    let (st, v) = call(
+        &app,
+        Request::builder().uri("/live").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(v["status"], "ok");
+    assert_eq!(v["probe"], "live");
+    assert_eq!(v["service"], "api");
+    assert!(v.get("reason").is_none());
+}
+
+#[tokio::test]
 async fn version_files_require_reference_and_passages_enqueue() {
     let (app, store) = app();
     let (token, _) = seed_user(&store, "f@b.c");

@@ -184,7 +184,8 @@ pub fn process_ingest(store: &mut Store, version_id: Uuid) -> Result<(), String>
         return Ok(());
     };
     if !version.wiki_enabled {
-        return Err("wiki ingest: version is not wiki enabled".into());
+        clear_lane(store, TYPE_WIKI_INGEST, version_id);
+        return Ok(());
     }
     if !reserve_inflight(store, version_id) {
         schedule_trigger(
@@ -448,7 +449,7 @@ fn map_document(
         return Ok(Vec::new());
     };
     if !version.wiki_enabled {
-        return Err("wiki disabled".into());
+        return Ok(Vec::new());
     }
     let chunks = collect_text_chunks(store, document_id);
     let body = assemble_body(&chunks);
@@ -1672,11 +1673,17 @@ mod tests {
     }
 
     #[test]
-    fn wiki_disabled_is_retryable() {
+    fn wiki_disabled_skips_without_error() {
         let (mut s, vid, did) = seed();
         s.versions.get_mut(&vid).unwrap().wiki_enabled = false;
         enqueue_ingest(&mut s, vid, did);
-        assert!(process_ingest(&mut s, vid).is_err());
+        process_ingest(&mut s, vid).unwrap();
+        let remaining = s
+            .wiki_ops
+            .iter()
+            .filter(|o| o.lane == TYPE_WIKI_INGEST)
+            .count();
+        assert_eq!(remaining, 0);
     }
 
     #[test]

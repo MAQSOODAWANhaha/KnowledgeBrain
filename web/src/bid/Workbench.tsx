@@ -12,10 +12,12 @@ import {
   type MatchUnit,
   type Pick,
   type Project,
+  type RoutePickSet,
   type Shot,
   api,
   downloadExport,
 } from "../api";
+import { Crumbs } from "../Crumbs";
 import { BID_STEPS, type BidStep, bidHref, go, parseBidRoute, useHash } from "../hash";
 import { Shell } from "../Shell";
 import { BookletPane } from "./BookletPane";
@@ -99,6 +101,7 @@ export function Workbench({ email }: { email: string }) {
   const [booklet, setBooklet] = useState<BookletPart[]>([]);
   const [picks, setPicks] = useState<Pick[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [routePickSet, setRoutePickSet] = useState<RoutePickSet | null>(null);
   const [shots, setShots] = useState<Shot[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [addText, setAddText] = useState("");
@@ -117,7 +120,7 @@ export function Workbench({ email }: { email: string }) {
 
   useEffect(() => {
     if (!route) return;
-    if (path.includes("/picks") || path.includes("/preview") || path.includes("/booklet/")) {
+    if (path.includes("/preview") || path.includes("/booklet/")) {
       go(bidHref(route.id, "booklet", { step: "booklet", part: route.part, pane: "draft" }));
     }
   }, [path, route]);
@@ -143,11 +146,32 @@ export function Workbench({ email }: { email: string }) {
     setUnits(un.units);
     setBooklet(bk.parts);
     setShots(sh.shots);
-    if (unit) {
-      const pk = await api.picks(id, unit).catch(() => ({ picks: [], candidates: [] }));
-      setPicks(pk.picks);
-      setCandidates(pk.candidates);
+    const routeId = unit ? un.units.find((entry) => entry.id === unit)?.route_id : null;
+    if (routeId) {
+      const pickSet = await api.routePickSet(id, routeId).catch(() => null);
+      setRoutePickSet(pickSet);
+      setPicks(
+        (pickSet?.items ?? []).map((item) => ({
+          ...item,
+          version_id: item.product_version_id,
+          score: 0,
+          coverage: 0,
+          clauses: [],
+        })),
+      );
+      setCandidates(
+        (pickSet?.supported_candidates ?? []).map((candidate) => ({
+          ...candidate,
+          product_title: candidate.product_id,
+          matched_version_id: candidate.product_version_id,
+          matched_version_label: candidate.product_version_id,
+          score: Number(candidate.retrieval_raw_score),
+          coverage: 0,
+          unmet_must: [],
+        })),
+      );
     } else {
+      setRoutePickSet(null);
       setPicks([]);
       setCandidates([]);
     }
@@ -160,6 +184,33 @@ export function Workbench({ email }: { email: string }) {
     } catch (e) {
       toast(errMsg(e), "red");
     }
+  }
+
+  async function mutateRoutePick(productId: string, include: boolean) {
+    if (!routePickSet) return;
+    const retained = routePickSet.items
+      .filter((item) => include || item.product_id !== productId)
+      .map((item) => ({
+        requirement_artifact_id: item.requirement_artifact_id,
+        candidate_artifact_id: item.candidate_artifact_id,
+      }));
+    if (include) {
+      for (const candidate of routePickSet.supported_candidates) {
+        if (candidate.product_id === productId) {
+          retained.push({
+            requirement_artifact_id: candidate.requirement_artifact_id,
+            candidate_artifact_id: candidate.candidate_artifact_id,
+          });
+        }
+      }
+    }
+    await api.replaceRoutePickSet(id, routePickSet.route_id, {
+      source_report_artifact_id: routePickSet.source_report_artifact_id,
+      report_sha256: routePickSet.report_sha256,
+      expected_revision: routePickSet.revision,
+      items: retained,
+    });
+    await load();
   }
 
   useEffect(() => {
@@ -272,7 +323,7 @@ export function Workbench({ email }: { email: string }) {
 
   if (!route || !project || !derived) {
     return (
-      <Shell root="bids" email={email} crumbs="投标项目" title="投标">
+      <Shell root="bids" email={email} crumbs={<Crumbs items={[{ label: "投标项目" }]} />} title="投标">
         <div className="wrap">加载中…</div>
       </Shell>
     );
@@ -291,19 +342,14 @@ export function Workbench({ email }: { email: string }) {
             : techUnits.find((u) => u.id === view)?.heading_path || "技术段";
   const stepLabel = BID_STEPS.find((s) => s.key === step)?.label ?? "评估";
   const crumbs = (
-    <>
-      <a href="#/">投标项目</a>
-      <i>/</i>
-      <a href={`#${bidHref(id, "files", { step: "files" })}`}>{project.title}</a>
-      <i>/</i>
-      <span>{stepLabel}</span>
-      {sectionLabel ? (
-        <>
-          <i>/</i>
-          <span>{sectionLabel}</span>
-        </>
-      ) : null}
-    </>
+    <Crumbs
+      items={[
+        { label: "投标项目", href: "/" },
+        { label: project.title, href: bidHref(id, "files", { step: "files" }) },
+        { label: stepLabel },
+        ...(sectionLabel ? [{ label: sectionLabel }] : []),
+      ]}
+    />
   );
   const pageTitle =
     step === "files"
@@ -400,20 +446,10 @@ export function Workbench({ email }: { email: string }) {
         onPatch={patch}
         onConfirm={(c) => void patch(c.id, { status: "confirmed" })}
         onPick={(pid) => {
-          const uid = unitIdForView(view);
-          if (!uid) return;
-          void api
-            .pick(id, pid, uid)
-            .then(() => load())
-            .catch((e) => toast(errMsg(e), "red"));
+          void mutateRoutePick(pid, true).catch((e) => toast(errMsg(e), "red"));
         }}
         onUnpick={(pid) => {
-          const uid = unitIdForView(view);
-          if (!uid) return;
-          void api
-            .unpick(id, pid, uid)
-            .then(() => load())
-            .catch((e) => toast(errMsg(e), "red"));
+          void mutateRoutePick(pid, false).catch((e) => toast(errMsg(e), "red"));
         }}
         onRegen={() => void regen()}
         onShots={() => void load()}
@@ -563,14 +599,10 @@ export function Workbench({ email }: { email: string }) {
           onPatch={patch}
           onConfirm={(c) => void patch(c.id, { status: "confirmed" })}
           onPick={(pid) => {
-            const uid = unitIdForView(view);
-            if (!uid) return;
-            void api.pick(id, pid, uid).then(() => load());
+            void mutateRoutePick(pid, true).catch((e) => toast(errMsg(e), "red"));
           }}
           onUnpick={(pid) => {
-            const uid = unitIdForView(view);
-            if (!uid) return;
-            void api.unpick(id, pid, uid).then(() => load());
+            void mutateRoutePick(pid, false).catch((e) => toast(errMsg(e), "red"));
           }}
           onDeviate={() => {
             setDeviateNote(cur.deviate_note ?? "");

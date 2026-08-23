@@ -129,10 +129,6 @@ pub struct IndexDeleteJob {
     pub task_type: String,
 }
 
-#[derive(oxana::Queue)]
-#[oxana(key = "sync", concurrency = Dynamic(4))]
-pub struct SyncQueue;
-
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
 #[oxana(
     unique_id = "image:multimodal:{document_id}:{image_key}:{attempt}",
@@ -195,13 +191,95 @@ pub struct BidSectionRetryJob {
     pub task_type: String,
 }
 
+#[derive(oxana::Queue)]
+#[oxana(key = "bid-convert-v1", concurrency = Dynamic(4))]
+pub struct BidConvertV1Queue;
+
+#[derive(oxana::Queue)]
+#[oxana(key = "bid-extract-v1", concurrency = Dynamic(4))]
+pub struct BidExtractV1Queue;
+
+#[derive(oxana::Queue)]
+#[oxana(key = "bid-section-retry-v1", concurrency = Dynamic(4))]
+pub struct BidSectionRetryV1Queue;
+
+#[derive(oxana::Queue)]
+#[oxana(key = "bid-matching-v1", concurrency = Dynamic(4))]
+pub struct BidMatchingV1Queue;
+
+pub const BID_MATCH_ROUTE_V1_SCHEMA: &str = "bid-match-route/v1";
+pub const BID_MATCH_ROUTE_V1_PAYLOAD_VERSION: u16 = 1;
+pub const BID_MATCH_ROUTE_V1_TRACE_ID_MAX: usize = 128;
+
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
-#[oxana(unique_id = "bid:match:{project_id}:{debounce_key}", on_conflict = Skip)]
-pub struct BidMatchOxanaJob {
+#[oxana(unique_id = "bid:match-route:v1:{job_id}", on_conflict = Skip)]
+pub struct BidMatchRouteV1Job {
     pub job_id: Uuid,
-    pub project_id: Uuid,
-    pub debounce_key: String,
+    pub config_snapshot_id: Uuid,
+    pub feature_snapshot_id: Uuid,
+    pub score_policy_snapshot_id: Uuid,
+    pub verifier_policy_snapshot_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    pub payload_version: u16,
     pub task_type: String,
+}
+
+impl BidMatchRouteV1Job {
+    pub fn new(
+        job_id: Uuid,
+        snapshots: BidMatchRouteV1Snapshots,
+        trace_id: Option<String>,
+    ) -> Result<Self, String> {
+        let trace_id = match trace_id {
+            Some(value) => Some(bounded_opaque_trace_id(value)?),
+            None => None,
+        };
+        Ok(Self {
+            job_id,
+            config_snapshot_id: snapshots.config_snapshot_id,
+            feature_snapshot_id: snapshots.feature_snapshot_id,
+            score_policy_snapshot_id: snapshots.score_policy_snapshot_id,
+            verifier_policy_snapshot_id: snapshots.verifier_policy_snapshot_id,
+            trace_id,
+            payload_version: BID_MATCH_ROUTE_V1_PAYLOAD_VERSION,
+            task_type: domain::TYPE_BID_MATCH_ROUTE_V1.to_string(),
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.payload_version != BID_MATCH_ROUTE_V1_PAYLOAD_VERSION {
+            return Err("rejected bid-match-route payload_version".into());
+        }
+        if self.task_type != domain::TYPE_BID_MATCH_ROUTE_V1 {
+            return Err("rejected bid-match-route task_type".into());
+        }
+        if let Some(trace_id) = &self.trace_id {
+            bounded_opaque_trace_id(trace_id.clone())?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BidMatchRouteV1Snapshots {
+    pub config_snapshot_id: Uuid,
+    pub feature_snapshot_id: Uuid,
+    pub score_policy_snapshot_id: Uuid,
+    pub verifier_policy_snapshot_id: Uuid,
+}
+
+fn bounded_opaque_trace_id(value: String) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > BID_MATCH_ROUTE_V1_TRACE_ID_MAX
+        || !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_graphic() || b == b'-' || b == b'_' || b == b':')
+    {
+        return Err("rejected bid-match-route trace_id".into());
+    }
+    Ok(trimmed.to_string())
 }
 
 /// Periodic sweep; oxana cron on `low` every 5 minutes (`HOUSEKEEP_CRON`).
@@ -253,6 +331,28 @@ pub async fn queue_depths() -> std::collections::HashMap<String, i64> {
         (
             "graph",
             storage.enqueued_count(GraphQueue).await.unwrap_or(0),
+        ),
+        (
+            "bid-convert-v1",
+            storage.enqueued_count(BidConvertV1Queue).await.unwrap_or(0),
+        ),
+        (
+            "bid-extract-v1",
+            storage.enqueued_count(BidExtractV1Queue).await.unwrap_or(0),
+        ),
+        (
+            "bid-section-retry-v1",
+            storage
+                .enqueued_count(BidSectionRetryV1Queue)
+                .await
+                .unwrap_or(0),
+        ),
+        (
+            "bid-matching-v1",
+            storage
+                .enqueued_count(BidMatchingV1Queue)
+                .await
+                .unwrap_or(0),
         ),
     ] {
         out.insert(name.into(), n as i64);
@@ -390,12 +490,15 @@ pub fn dashboard_catalog() -> Option<(oxana::Storage, oxana::Catalog)> {
         .queue::<DefaultQueue>()
         .queue::<PostprocessQueue>()
         .queue::<LowQueue>()
-        .queue::<SyncQueue>()
         .queue::<SummaryQueue>()
         .queue::<QuestionQueue>()
         .queue::<GraphQueue>()
         .queue::<MultimodalQueue>()
-        .queue::<WikiQueue>();
+        .queue::<WikiQueue>()
+        .queue::<BidConvertV1Queue>()
+        .queue::<BidExtractV1Queue>()
+        .queue::<BidSectionRetryV1Queue>()
+        .queue::<BidMatchingV1Queue>();
     let catalog = builder.catalog();
     Some((storage, catalog))
 }
@@ -436,6 +539,28 @@ pub async fn queue_job_previews() -> std::collections::HashMap<String, Vec<Strin
             storage.list_queue_jobs(MultimodalQueue, &opts).await.ok(),
         ),
         ("wiki", storage.list_queue_jobs(WikiQueue, &opts).await.ok()),
+        (
+            "bid-convert-v1",
+            storage.list_queue_jobs(BidConvertV1Queue, &opts).await.ok(),
+        ),
+        (
+            "bid-extract-v1",
+            storage.list_queue_jobs(BidExtractV1Queue, &opts).await.ok(),
+        ),
+        (
+            "bid-section-retry-v1",
+            storage
+                .list_queue_jobs(BidSectionRetryV1Queue, &opts)
+                .await
+                .ok(),
+        ),
+        (
+            "bid-matching-v1",
+            storage
+                .list_queue_jobs(BidMatchingV1Queue, &opts)
+                .await
+                .ok(),
+        ),
     ] {
         if let Some(jobs) = jobs {
             out.insert(name.into(), jobs.iter().map(|j| format!("{j:?}")).collect());
@@ -462,6 +587,7 @@ pub async fn enqueue_document_process_with(
     let Ok(storage) = connect() else {
         return Ok(None);
     };
+    tracing::debug!(document_id = %document_id, job = "document:process", "enqueue");
     oxana_id(
         storage
             .enqueue(
@@ -594,6 +720,9 @@ pub async fn enqueue_image_multimodal(
     enable_caption: bool,
     attempt: i32,
 ) -> Result<Option<String>, String> {
+    if crate::queue_for(domain::TYPE_IMAGE_MULTIMODAL).starts_with("rejected:") {
+        return Ok(None);
+    }
     let Ok(storage) = connect() else {
         return Ok(None);
     };
@@ -658,6 +787,9 @@ pub async fn enqueue_question_neighbors(
     attempt: i32,
     batch: u32,
 ) -> Result<Option<String>, String> {
+    if crate::queue_for(domain::TYPE_QUESTION).starts_with("rejected:") {
+        return Ok(None);
+    }
     let Ok(storage) = connect() else {
         return Ok(None);
     };
@@ -684,6 +816,9 @@ pub async fn enqueue_extract(
     document_id: Uuid,
     attempt: i32,
 ) -> Result<Option<String>, String> {
+    if crate::queue_for(domain::TYPE_CHUNK_EXTRACT).starts_with("rejected:") {
+        return Ok(None);
+    }
     let Ok(storage) = connect() else {
         return Ok(None);
     };
@@ -795,10 +930,11 @@ pub async fn enqueue_bid_convert(document_id: Uuid) -> Result<Option<String>, St
     let Ok(storage) = connect() else {
         return Ok(None);
     };
+    tracing::debug!(document_id = %document_id, job = "bid:convert", "enqueue");
     oxana_id(
         storage
             .enqueue(
-                DefaultQueue,
+                BidConvertV1Queue,
                 BidConvertJob {
                     document_id,
                     task_type: domain::TYPE_BID_CONVERT.to_string(),
@@ -822,8 +958,15 @@ pub async fn enqueue_bid_extract(
         document_id,
         task_type: domain::TYPE_BID_EXTRACT.to_string(),
     };
+    tracing::debug!(
+        run_id = %run_id,
+        project_id = %project_id,
+        document_id = ?document_id,
+        job = "bid:extract",
+        "enqueue"
+    );
     let _ = storage.delete_unique_job(&job).await;
-    oxana_id(storage.enqueue(DefaultQueue, job).await)
+    oxana_id(storage.enqueue(BidExtractV1Queue, job).await)
 }
 
 pub async fn enqueue_bid_section_retry(
@@ -837,7 +980,7 @@ pub async fn enqueue_bid_section_retry(
     oxana_id(
         storage
             .enqueue(
-                DefaultQueue,
+                BidSectionRetryV1Queue,
                 BidSectionRetryJob {
                     job_id,
                     project_id,
@@ -849,27 +992,17 @@ pub async fn enqueue_bid_section_retry(
     )
 }
 
-pub async fn enqueue_bid_match(
+pub async fn enqueue_bid_match_route_v1(
     job_id: Uuid,
-    project_id: Uuid,
-    debounce_key: String,
+    snapshots: BidMatchRouteV1Snapshots,
+    trace_id: Option<String>,
 ) -> Result<Option<String>, String> {
+    let job = BidMatchRouteV1Job::new(job_id, snapshots, trace_id)?;
     let Ok(storage) = connect() else {
         return Ok(None);
     };
-    oxana_id(
-        storage
-            .enqueue(
-                DefaultQueue,
-                BidMatchOxanaJob {
-                    job_id,
-                    project_id,
-                    debounce_key,
-                    task_type: domain::TYPE_BID_MATCH.to_string(),
-                },
-            )
-            .await,
-    )
+    tracing::debug!(job_id = %job_id, job = "bid:match-route:v1", "enqueue");
+    oxana_id(storage.enqueue(BidMatchingV1Queue, job).await)
 }
 
 pub async fn enqueue_wiki_finalize_in(
@@ -897,6 +1030,70 @@ pub async fn enqueue_wiki_finalize_in(
 mod tests {
     use super::*;
 
+    fn redis_tests_required() -> bool {
+        std::env::var("KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS")
+            .map(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    fn redis_test_storage(test_name: &str) -> Option<oxana::Storage> {
+        if std::env::var_os("REDIS_URL").is_none() && !redis_tests_required() {
+            eprintln!("skip runtime test {test_name}: REDIS_URL is not configured");
+            return None;
+        }
+        Some(connect().unwrap_or_else(|error| {
+            panic!("required runtime test {test_name} could not configure redis: {error}")
+        }))
+    }
+
+    fn redis_default_endpoint_open() -> bool {
+        std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], 16379)),
+            std::time::Duration::from_millis(150),
+        )
+        .is_ok()
+    }
+
+    async fn redis_live_if_up(test_name: &str) -> Option<oxana::Storage> {
+        let url_set = std::env::var_os("REDIS_URL").is_some();
+        if !url_set && !redis_tests_required() && !redis_default_endpoint_open() {
+            eprintln!(
+                "skip runtime test {test_name}: REDIS_URL unset and redis://127.0.0.1:16379 is down"
+            );
+            return None;
+        }
+        let storage = match connect() {
+            Ok(storage) => storage,
+            Err(error) => {
+                if redis_tests_required() {
+                    panic!("required runtime test {test_name} could not configure redis: {error}");
+                }
+                eprintln!("skip runtime test {test_name}: redis not configured ({error})");
+                return None;
+            }
+        };
+        match storage.enqueued_count(DefaultQueue).await {
+            Ok(_) => Some(storage),
+            Err(error) => {
+                if redis_tests_required() {
+                    panic!("required runtime test {test_name} redis is down: {error}");
+                }
+                eprintln!("skip runtime test {test_name}: redis not up ({error})");
+                None
+            }
+        }
+    }
+
+    async fn redis_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        LOCK.lock().await
+    }
+
     #[test]
     fn wiki_debounce_matches_spec() {
         assert_eq!(WIKI_INGEST_DEBOUNCE_SECS, 30);
@@ -913,6 +1110,119 @@ mod tests {
             oxana::QueueKind::Static { key } => assert_eq!(key, "wiki"),
             other => panic!("wiki queue must be static, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn bid_match_route_v1_identity_schema_and_queue_key() {
+        let job_id = Uuid::from_u128(1);
+        let job = BidMatchRouteV1Job::new(
+            job_id,
+            BidMatchRouteV1Snapshots {
+                config_snapshot_id: Uuid::from_u128(2),
+                feature_snapshot_id: Uuid::from_u128(3),
+                score_policy_snapshot_id: Uuid::from_u128(4),
+                verifier_policy_snapshot_id: Uuid::from_u128(5),
+            },
+            Some("trace:route-1".into()),
+        )
+        .unwrap();
+        assert_eq!(BID_MATCH_ROUTE_V1_SCHEMA, "bid-match-route/v1");
+        assert_eq!(job.payload_version, BID_MATCH_ROUTE_V1_PAYLOAD_VERSION);
+        assert_eq!(job.task_type, domain::TYPE_BID_MATCH_ROUTE_V1);
+        assert_eq!(
+            <BidMatchRouteV1Job as oxana::Job>::unique_id(&job),
+            Some(format!("bid:match-route:v1:{job_id}"))
+        );
+        match <BidMatchingV1Queue as oxana::Queue>::to_config().kind {
+            oxana::QueueKind::Static { key } => assert_eq!(key, domain::QUEUE_BID_MATCHING_V1),
+            other => panic!("bid-matching-v1 queue must be static, got {other:?}"),
+        }
+        assert_eq!(
+            crate::queue_for(domain::TYPE_BID_MATCH_ROUTE_V1),
+            domain::QUEUE_BID_MATCHING_V1
+        );
+    }
+
+    #[test]
+    fn unknown_old_bid_match_payload_is_rejected_not_default() {
+        assert!(crate::rejected_legacy_bid_match_task("bid:match"));
+        assert!(crate::rejected_legacy_bid_match_task("bid:match-route"));
+        assert_ne!(crate::queue_for("bid:match"), domain::QUEUE_DEFAULT);
+        assert_ne!(crate::queue_for("bid:match-route"), domain::QUEUE_DEFAULT);
+        let old = serde_json::json!({
+            "job_id": Uuid::from_u128(1),
+            "project_id": Uuid::from_u128(2),
+            "debounce_key": "same-snapshot",
+            "task_type": "bid:match"
+        });
+        assert!(serde_json::from_value::<BidMatchRouteV1Job>(old).is_err());
+    }
+
+    #[test]
+    fn bid_extract_pipeline_queues_keep_durable_ids_and_leave_default() {
+        let document_id = Uuid::from_u128(1);
+        let run_id = Uuid::from_u128(2);
+        let job_id = Uuid::from_u128(3);
+        let convert = BidConvertJob {
+            document_id,
+            task_type: domain::TYPE_BID_CONVERT.to_string(),
+        };
+        let extract = BidExtractJob {
+            run_id,
+            project_id: Uuid::from_u128(4),
+            document_id: Some(document_id),
+            task_type: domain::TYPE_BID_EXTRACT.to_string(),
+        };
+        let retry = BidSectionRetryJob {
+            job_id,
+            project_id: Uuid::from_u128(5),
+            section_id: Uuid::from_u128(6),
+            task_type: domain::TYPE_BID_SECTION_RETRY.to_string(),
+        };
+        assert_eq!(
+            <BidConvertJob as oxana::Job>::unique_id(&convert),
+            Some(format!("bid:convert:{document_id}"))
+        );
+        assert_eq!(
+            <BidExtractJob as oxana::Job>::unique_id(&extract),
+            Some(format!("bid:extract:{run_id}"))
+        );
+        assert_eq!(
+            <BidSectionRetryJob as oxana::Job>::unique_id(&retry),
+            Some(format!("bid:section-retry:{job_id}"))
+        );
+        match <BidConvertV1Queue as oxana::Queue>::to_config().kind {
+            oxana::QueueKind::Static { key } => assert_eq!(key, domain::QUEUE_BID_CONVERT_V1),
+            other => panic!("bid-convert-v1 queue must be static, got {other:?}"),
+        }
+        match <BidExtractV1Queue as oxana::Queue>::to_config().kind {
+            oxana::QueueKind::Static { key } => assert_eq!(key, domain::QUEUE_BID_EXTRACT_V1),
+            other => panic!("bid-extract-v1 queue must be static, got {other:?}"),
+        }
+        match <BidSectionRetryV1Queue as oxana::Queue>::to_config().kind {
+            oxana::QueueKind::Static { key } => {
+                assert_eq!(key, domain::QUEUE_BID_SECTION_RETRY_V1)
+            }
+            other => panic!("bid-section-retry-v1 queue must be static, got {other:?}"),
+        }
+        assert_eq!(
+            crate::queue_for(domain::TYPE_BID_CONVERT),
+            domain::QUEUE_BID_CONVERT_V1
+        );
+        assert_eq!(
+            crate::queue_for(domain::TYPE_BID_EXTRACT),
+            domain::QUEUE_BID_EXTRACT_V1
+        );
+        assert_eq!(
+            crate::queue_for(domain::TYPE_BID_SECTION_RETRY),
+            domain::QUEUE_BID_SECTION_RETRY_V1
+        );
+        assert_ne!(
+            crate::queue_for(domain::TYPE_BID_CONVERT),
+            domain::QUEUE_DEFAULT
+        );
+        assert_ne!(crate::queue_for("not-a-real-task"), domain::QUEUE_DEFAULT);
+        assert_eq!(crate::queue_for("not-a-real-task"), "rejected:unknown");
     }
 
     #[test]
@@ -943,10 +1253,10 @@ mod tests {
 
     #[tokio::test]
     async fn version_clone_lands_on_low_queue() {
-        let Ok(storage) = connect() else {
-            eprintln!("skip: redis not reachable");
+        let Some(storage) = redis_test_storage("version_clone_lands_on_low_queue") else {
             return;
         };
+        let _guard = redis_test_lock().await;
         let mut n = 0;
         for _ in 0..5 {
             let src = Uuid::new_v4();
@@ -961,15 +1271,15 @@ mod tests {
             }
         }
         assert!(n >= 1, "low queue empty");
-        let _ = storage.wipe_queue(LowQueue).await;
+        storage.wipe_queue(LowQueue).await.expect("wipe low queue");
     }
 
     #[tokio::test]
     async fn index_delete_lands_on_low_queue() {
-        let Ok(storage) = connect() else {
-            eprintln!("skip: redis not reachable");
+        let Some(storage) = redis_test_storage("index_delete_lands_on_low_queue") else {
             return;
         };
+        let _guard = redis_test_lock().await;
         let mut n = 0;
         for _ in 0..5 {
             let did = Uuid::new_v4();
@@ -981,16 +1291,19 @@ mod tests {
             }
         }
         assert!(n >= 1, "low queue empty after index:delete");
-        let _ = storage.wipe_queue(LowQueue).await;
+        storage.wipe_queue(LowQueue).await.expect("wipe low queue");
     }
 
     #[tokio::test]
     async fn enqueue_lands_on_default_queue() {
-        let Ok(storage) = connect() else {
-            eprintln!("skip: redis not reachable");
+        let Some(storage) = redis_test_storage("enqueue_lands_on_default_queue") else {
             return;
         };
-        let _ = storage.wipe_queue(DefaultQueue).await;
+        let _guard = redis_test_lock().await;
+        storage
+            .wipe_queue(DefaultQueue)
+            .await
+            .expect("wipe default queue");
         let before = storage.enqueued_count(DefaultQueue).await.unwrap();
         let doc = Uuid::new_v4();
         let pushed =
@@ -1016,16 +1329,22 @@ mod tests {
             "job missing on default queue: {blob}"
         );
         assert!(blob.contains("p1") && blob.contains("p2"), "{blob}");
-        let _ = storage.wipe_queue(DefaultQueue).await;
+        storage
+            .wipe_queue(DefaultQueue)
+            .await
+            .expect("wipe default queue");
     }
 
     #[tokio::test]
     async fn wiki_ingest_lands_on_wiki_queue() {
-        let Ok(storage) = connect() else {
-            eprintln!("skip: redis not reachable");
+        let Some(storage) = redis_test_storage("wiki_ingest_lands_on_wiki_queue") else {
             return;
         };
-        let _ = storage.wipe_queue(WikiQueue).await;
+        let _guard = redis_test_lock().await;
+        storage
+            .wipe_queue(WikiQueue)
+            .await
+            .expect("wipe wiki queue");
         let vid = Uuid::new_v4();
         let opts = oxana::QueueListOpts {
             count: 500,
@@ -1052,6 +1371,146 @@ mod tests {
             .filter(|j| format!("{j:?}").contains(&vid.to_string()))
             .count();
         assert_eq!(hits, 1, "unique_id Skip should coalesce ingest debounce");
-        let _ = storage.wipe_queue(WikiQueue).await;
+        storage
+            .wipe_queue(WikiQueue)
+            .await
+            .expect("wipe wiki queue");
+    }
+
+    #[tokio::test]
+    async fn bid_convert_lands_on_bid_convert_v1_not_default() {
+        let Some(storage) = redis_test_storage("bid_convert_lands_on_bid_convert_v1_not_default")
+        else {
+            return;
+        };
+        let _guard = redis_test_lock().await;
+        storage
+            .wipe_queue(DefaultQueue)
+            .await
+            .expect("wipe default queue");
+        storage
+            .wipe_queue(BidConvertV1Queue)
+            .await
+            .expect("wipe bid-convert-v1");
+        storage
+            .wipe_queue(BidExtractV1Queue)
+            .await
+            .expect("wipe bid-extract-v1");
+        storage
+            .wipe_queue(BidSectionRetryV1Queue)
+            .await
+            .expect("wipe bid-section-retry-v1");
+        let before_default = storage.enqueued_count(DefaultQueue).await.unwrap();
+        let convert_id = Uuid::new_v4();
+        let extract_id = Uuid::new_v4();
+        let retry_id = Uuid::new_v4();
+        assert!(
+            enqueue_bid_convert(convert_id)
+                .await
+                .expect("convert")
+                .is_some()
+        );
+        assert!(
+            enqueue_bid_extract(extract_id, Uuid::new_v4(), Some(convert_id))
+                .await
+                .expect("extract")
+                .is_some()
+        );
+        assert!(
+            enqueue_bid_section_retry(retry_id, Uuid::new_v4(), Uuid::new_v4())
+                .await
+                .expect("section-retry")
+                .is_some()
+        );
+        assert_eq!(
+            storage.enqueued_count(DefaultQueue).await.unwrap(),
+            before_default,
+            "bid extract-pipeline jobs must not land on default"
+        );
+        assert!(storage.enqueued_count(BidConvertV1Queue).await.unwrap() >= 1);
+        assert!(storage.enqueued_count(BidExtractV1Queue).await.unwrap() >= 1);
+        assert!(
+            storage
+                .enqueued_count(BidSectionRetryV1Queue)
+                .await
+                .unwrap()
+                >= 1
+        );
+        storage
+            .wipe_queue(BidConvertV1Queue)
+            .await
+            .expect("wipe bid-convert-v1");
+        storage
+            .wipe_queue(BidExtractV1Queue)
+            .await
+            .expect("wipe bid-extract-v1");
+        storage
+            .wipe_queue(BidSectionRetryV1Queue)
+            .await
+            .expect("wipe bid-section-retry-v1");
+    }
+
+    #[tokio::test]
+    async fn declared_disabled_enqueues_return_ok_none_without_increasing_queue_counts() {
+        let Some(storage) = redis_live_if_up(
+            "declared_disabled_enqueues_return_ok_none_without_increasing_queue_counts",
+        )
+        .await
+        else {
+            return;
+        };
+        let _guard = redis_test_lock().await;
+        let before_multimodal = storage.enqueued_count(MultimodalQueue).await.unwrap();
+        let before_graph = storage.enqueued_count(GraphQueue).await.unwrap();
+        let before_question = storage.enqueued_count(QuestionQueue).await.unwrap();
+        let before_default = storage.enqueued_count(DefaultQueue).await.unwrap();
+
+        assert_eq!(
+            enqueue_image_multimodal(Uuid::new_v4(), "k", "page_image", true, true, 1)
+                .await
+                .expect("multimodal enqueue result"),
+            None
+        );
+        assert_eq!(
+            enqueue_extract(Uuid::new_v4(), Uuid::new_v4(), 1)
+                .await
+                .expect("extract enqueue result"),
+            None
+        );
+        assert_eq!(
+            enqueue_question(Uuid::new_v4(), vec![Uuid::new_v4()], 1, 0)
+                .await
+                .expect("question enqueue result"),
+            None
+        );
+
+        assert_eq!(
+            storage.enqueued_count(MultimodalQueue).await.unwrap(),
+            before_multimodal
+        );
+        assert_eq!(
+            storage.enqueued_count(GraphQueue).await.unwrap(),
+            before_graph
+        );
+        assert_eq!(
+            storage.enqueued_count(QuestionQueue).await.unwrap(),
+            before_question
+        );
+        assert_eq!(
+            storage.enqueued_count(DefaultQueue).await.unwrap(),
+            before_default,
+            "declared_disabled enqueues must not spill onto default"
+        );
+
+        for task_type in [
+            domain::TYPE_BID_CONVERT,
+            domain::TYPE_BID_EXTRACT,
+            domain::TYPE_BID_SECTION_RETRY,
+            domain::TYPE_BID_MATCH_ROUTE_V1,
+        ] {
+            let mapped = crate::queue_for(task_type);
+            assert_ne!(mapped, domain::QUEUE_DEFAULT);
+            assert!(!mapped.starts_with("rejected:"));
+        }
     }
 }

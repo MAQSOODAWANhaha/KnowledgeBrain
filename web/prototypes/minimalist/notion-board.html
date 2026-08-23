@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>NGSOC</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: #fff;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, "PingFang SC", "Noto Sans SC", Arial, sans-serif;
+      color: #37352f;
+    }
+    .stage {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 28px 40px 48px;
+      background: #fff;
+    }
+    .win {
+      width: 1280px;
+      height: 780px;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 0 0 1px rgba(15,15,15,.08), 0 24px 60px rgba(15,15,15,.12);
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      overflow: hidden;
+    }
+    .side {
+      background: #f7f6f3;
+      padding: 10px 8px 12px;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .ws {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 8px 10px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .ws i {
+      width: 18px; height: 18px; border-radius: 4px;
+      background: #eb5757; color: #fff; font-style: normal;
+      font-size: 11px; display: grid; place-items: center; font-weight: 700;
+    }
+    .quick {
+      display: flex; gap: 4px; padding: 0 4px 10px;
+    }
+    .pill {
+      height: 28px; padding: 0 10px; border-radius: 6px;
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 14px; color: #37352f;
+    }
+    .pill.on { background: rgba(55,53,47,.08); }
+    .sec {
+      margin: 14px 10px 6px;
+      font-size: 11px; color: #9b9a97; font-weight: 500;
+    }
+    .row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 10px; border-radius: 4px;
+      font-size: 14px; color: #37352f;
+    }
+    .row:hover { background: rgba(55,53,47,.04); }
+    .row.on { background: rgba(55,53,47,.08); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .time { margin-left: auto; color: #9b9a97; font-size: 12px; }
+    .ico {
+      width: 18px; height: 18px; border-radius: 50%;
+      display: grid; place-items: center; font-size: 11px; flex-shrink: 0;
+    }
+    .grow { flex: 1; }
+    .chat {
+      margin-top: auto;
+      display: flex; gap: 8px; padding: 8px 6px 4px;
+    }
+    .chat .in {
+      flex: 1; height: 32px; border-radius: 16px;
+      border: 1px solid rgba(55,53,47,.09);
+      background: #fff; display: flex; align-items: center;
+      padding: 0 12px; color: #9b9a97; font-size: 13px;
+    }
+    .chat .fab {
+      width: 32px; height: 32px; border-radius: 50%;
+      border: 1px solid rgba(55,53,47,.09); background: #fff;
+      display: grid; place-items: center; color: #787774; font-size: 16px;
+    }
+    .main { min-width: 0; display: flex; flex-direction: column; background: #fff; }
+    .tabs {
+      height: 40px; display: flex; align-items: center; gap: 8px;
+      padding: 0 12px; border-bottom: 1px solid rgba(55,53,47,.06);
+      color: #787774; font-size: 13px;
+    }
+    .tab {
+      height: 28px; padding: 0 10px; border-radius: 6px 6px 0 0;
+      display: flex; align-items: center; gap: 6px; color: #37352f;
+      background: #fff;
+    }
+    .page { flex: 1; overflow: auto; padding: 28px 36px 32px; }
+    .hero { display: flex; align-items: center; gap: 16px; margin: 8px 0 22px; }
+    .hero .mark {
+      width: 78px; height: 78px; border-radius: 50%;
+      background: #f1f1ef; display: grid; place-items: center;
+      font-size: 34px; font-weight: 650; color: #37352f;
+    }
+    .hero h1 { margin: 0; font-size: 40px; font-weight: 700; letter-spacing: -0.03em; }
+    .views { display: flex; align-items: center; gap: 4px; margin-bottom: 16px; }
+    .view {
+      height: 28px; padding: 0 10px; border-radius: 6px;
+      font-size: 14px; color: #787774; display: inline-flex; align-items: center; gap: 6px;
+    }
+    .view.on { background: rgba(55,53,47,.08); color: #37352f; }
+    .tools { margin-left: auto; display: flex; gap: 8px; color: #787774; font-size: 13px; align-items: center; }
+    .new {
+      height: 28px; padding: 0 10px; border-radius: 6px;
+      background: #2383e2; color: #fff; font-size: 13px; font-weight: 550;
+      display: inline-flex; align-items: center;
+    }
+    .board {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      align-items: start;
+    }
+    .col { border-radius: 10px; padding: 8px; min-height: 420px; }
+    .col.todo { background: #f1efff; }
+    .col.prog { background: #fbf3db; }
+    .col.rev { background: #e7f3f8; }
+    .col.done { background: #edf3ec; }
+    .col h3 {
+      margin: 4px 6px 10px;
+      font-size: 14px; font-weight: 550;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .col h3 b { font-weight: 550; }
+    .col h3 span { color: #9b9a97; font-weight: 500; font-size: 13px; }
+    .card {
+      background: #fff; border-radius: 8px; padding: 10px 12px;
+      margin-bottom: 6px; font-size: 14px; line-height: 1.4;
+      box-shadow: 0 0 0 1px rgba(15,15,15,.04);
+    }
+    .add { padding: 8px 12px; color: #9b9a97; font-size: 14px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <div class="win">
+      <aside class="side">
+        <div class="ws"><i>K</i> 态势监管BU</div>
+        <div class="quick">
+          <span class="pill on">首页</span>
+        </div>
+        <div class="sec">产品线</div>
+        <div class="row on">NGSOC</div>
+        <div class="row">云安全管理平台</div>
+        <div class="sec">公司资料</div>
+        <div class="row">资质证照</div>
+        <div class="row">体系认证</div>
+        <div class="row">业绩案例</div>
+        <div class="grow"></div>
+        <div class="chat">
+          <div class="in">搜索知识资产</div>
+          <div class="fab">+</div>
+        </div>
+      </aside>
+      <section class="main">
+        <div class="tabs">
+          <span>‹ ›</span>
+          <div class="tab">NGSOC</div>
+          <span>+</span>
+        </div>
+        <div class="page">
+          <div class="hero">
+            <div class="mark">N</div>
+            <h1>NGSOC</h1>
+          </div>
+          <div class="views">
+            <span class="view on">文件</span>
+            <span class="view">解析</span>
+            <span class="view">正文</span>
+            <span class="view">图像</span>
+            <span class="view">+</span>
+            <div class="tools">
+              <span>筛选</span>
+              <span class="new">上传</span>
+            </div>
+          </div>
+          <div class="board">
+            <div class="col todo">
+              <h3><span class="dot" style="background:#9a6dd7;width:8px;height:8px;border-radius:50%;display:inline-block"></span><b>待解析</b> <span>2</span></h3>
+              <div class="card">等保测评报告 2025.docx</div>
+              <div class="card">接口清单-对外.xlsx</div>
+              <div class="add">+ 新页面</div>
+            </div>
+            <div class="col prog">
+              <h3><span class="dot" style="background:#dfab01;width:8px;height:8px;border-radius:50%;display:inline-block"></span><b>解析中</b> <span>1</span></h3>
+              <div class="card">奇安信网神安全分析与管理系统V4.0 用户手册 V1.pdf</div>
+              <div class="add">+ 新页面</div>
+            </div>
+            <div class="col rev">
+              <h3><span class="dot" style="background:#2eaadc;width:8px;height:8px;border-radius:50%;display:inline-block"></span><b>可检索</b> <span>2</span></h3>
+              <div class="card">云安全管理平台V2.0.6SP1-产品白皮书.docx</div>
+              <div class="card">部署架构说明.pptx</div>
+              <div class="add">+ 新页面</div>
+            </div>
+            <div class="col done">
+              <h3><span class="dot" style="background:#4d6461;width:8px;height:8px;border-radius:50%;display:inline-block"></span><b>摘要待重跑</b> <span>1</span></h3>
+              <div class="card">云安全管理平台V2.0.6SP1-产品白皮书.docx</div>
+              <div class="add">+ 新页面</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</body>
+</html>

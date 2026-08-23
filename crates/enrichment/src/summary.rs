@@ -2,6 +2,12 @@
 
 pub const SUMMARY_PROMPT: &str = r#"You are a precise document summarization expert. Your task is to summarize the core content of the document provided by the user, basing the summary STRICTLY on the text the user supplies — never on a filename, title, file extension, or any other external clue.
 
+## Language (mandatory, highest priority)
+- Required output language: {{language}}
+- Write the entire summary in that language only. Do not mix languages.
+- Do not default to English unless the required language is English.
+- If the source is Chinese, the summary must be Chinese.
+
 ## Steps
 1. Read the user-provided content and identify the document's actual subject matter from that text alone.
 2. Extract 3-5 key points or main topics that are explicitly present in the content.
@@ -32,8 +38,8 @@ pub const SUMMARY_PROMPT: &str = r#"You are a precise document summarization exp
 - Do NOT fabricate a topic, do NOT guess from any other clue, and do NOT copy content from examples or unrelated sources.
 - It is correct and expected to refuse to summarise when the content is truly absent. This is preferred over inventing a plausible-sounding but unsupported summary.
 
-## Language
-- Use {{language}} for all outputs
+## Language (repeat)
+- Required output language: {{language}}. No other language.
 "#;
 
 pub const QUESTIONS_PROMPT: &str = r#"You are a question generation assistant optimizing for search retrieval. Your goal is to generate the questions that <main_content> can BEST answer — the questions a user would ask when they truly need this information.
@@ -69,7 +75,9 @@ First, silently identify:
 Generate {{question_count}} questions, one per line, no numbering or prefixes.
 
 ## CRITICAL: Language Rule
-- Generate questions in {{language}}
+- Required output language: {{language}}
+- Every question must be in that language only. Do not default to English unless the required language is English.
+- If the source is Chinese, write the questions in Chinese.
 "#;
 
 pub fn render_summary_prompt(language: &str) -> String {

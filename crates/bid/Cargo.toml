@@ -13,16 +13,20 @@ docparser = { path = "../docparser" }
 docx-rs = "0.4"
 domain = { path = "../domain" }
 image = "0.25"
+hex.workspace = true
+sha2.workspace = true
 enrichment = { path = "../enrichment" }
 models = { path = "../models" }
 regex = "1"
 runtime = { path = "../runtime" }
-search = { path = "../search" }
+rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 storage = { path = "../storage" }
+thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 printpdf = { version = "0.12", features = ["png", "jpeg"] }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }

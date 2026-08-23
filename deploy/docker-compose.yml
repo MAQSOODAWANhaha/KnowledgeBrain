@@ -1,7 +1,6 @@
 name: knowledgebrain
 
 x-app-env: &app-env
-  DATABASE_URL: ${DATABASE_URL:-postgres://knowledgebrain:knowledgebrain@postgres:5432/knowledgebrain}
   REDIS_URL: ${REDIS_URL:-redis://redis:6379}
   OBJECT_DIR: ${OBJECT_DIR:-/data/objects}
   JWT_SECRET: ${JWT_SECRET:-change-me}
@@ -42,19 +41,26 @@ x-app-env: &app-env
   KNOWLEDGEBRAIN_MAINTENANCE_CONCURRENCY: ${KNOWLEDGEBRAIN_MAINTENANCE_CONCURRENCY:-4}
   KNOWLEDGEBRAIN_SHARED_CONCURRENCY: ${KNOWLEDGEBRAIN_SHARED_CONCURRENCY:-6}
   KNOWLEDGEBRAIN_WIKI_CONCURRENCY: ${KNOWLEDGEBRAIN_WIKI_CONCURRENCY:-8}
+  RUST_LOG: ${RUST_LOG:-info}
+  NO_COLOR: ${NO_COLOR:-1}
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
-    container_name: knowledgebrain-postgres
+    image: pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-knowledgebrain}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-knowledgebrain}
       POSTGRES_DB: ${POSTGRES_DB:-knowledgebrain}
+      KNOWLEDGEBRAIN_MIGRATOR_PASSWORD: ${KNOWLEDGEBRAIN_MIGRATOR_PASSWORD:-migrator-change-me}
+      KNOWLEDGEBRAIN_FIRST_LAUNCH_VERIFIER_PASSWORD: ${KNOWLEDGEBRAIN_FIRST_LAUNCH_VERIFIER_PASSWORD:-verifier-change-me}
+      KNOWLEDGEBRAIN_API_DB_PASSWORD: ${KNOWLEDGEBRAIN_API_DB_PASSWORD:-api-change-me}
+      KNOWLEDGEBRAIN_WORKER_DB_PASSWORD: ${KNOWLEDGEBRAIN_WORKER_DB_PASSWORD:-worker-change-me}
+      KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD: ${KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD:-retention-change-me}
     ports:
       - "${POSTGRES_HOST_PORT:-15432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-knowledgebrain} -d ${POSTGRES_DB:-knowledgebrain}"]
       interval: 5s
@@ -63,8 +69,7 @@ services:
       start_period: 10s
 
   redis:
-    image: redis:7-alpine
-    container_name: knowledgebrain-redis
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     ports:
       - "${REDIS_HOST_PORT:-16379}:6379"
     volumes:
@@ -77,8 +82,7 @@ services:
       start_period: 5s
 
   neo4j:
-    image: neo4j:5.26
-    container_name: knowledgebrain-neo4j
+    image: neo4j:5.26@sha256:89d577f2e49606de76441eca8cf7a0fe88e594cbaac4d2a3d86c6e59676e2b1e
     environment:
       NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/knowledgebrain}
     ports:
@@ -94,8 +98,7 @@ services:
       start_period: 20s
 
   minio:
-    image: minio/minio:latest
-    container_name: knowledgebrain-minio
+    image: minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
@@ -113,11 +116,11 @@ services:
       start_period: 15s
 
   docreader:
+    profiles: ["runtime"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.docreader
-    image: knowledgebrain-docreader:local
-    container_name: knowledgebrain-docreader
+    image: knowledgebrain-docreader:local@sha256:72a50677badec74ed84c173c6098e139c0ab9b58281f20212e60610bbe0dbb97
     environment:
       DOCREADER_GRPC_PORT: ${DOCREADER_GRPC_PORT:-50051}
       MAX_FILE_SIZE_MB: 50
@@ -134,16 +137,50 @@ services:
       retries: 12
       start_period: 30s
 
+  migrate:
+    profiles: ["first-launch"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.rust
+      args:
+        BIN: migrator
+    image: knowledgebrain-migrator:local
+    environment:
+      DATABASE_URL: postgres://kb_migrator:${KNOWLEDGEBRAIN_MIGRATOR_PASSWORD:-migrator-change-me}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
+      KNOWLEDGEBRAIN_BOOTSTRAP_ADMIN_DATABASE_URL: postgres://${POSTGRES_USER:-knowledgebrain}:${POSTGRES_PASSWORD:-knowledgebrain}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  first-launch-verifier:
+    profiles: ["first-launch"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.rust
+      args:
+        BIN: first-launch-verifier
+    image: knowledgebrain-first-launch-verifier:local
+    environment:
+      DATABASE_URL: postgres://kb_first_launch_verifier:${KNOWLEDGEBRAIN_FIRST_LAUNCH_VERIFIER_PASSWORD:-verifier-change-me}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
+      KNOWLEDGEBRAIN_APP_OWNER: kb_app_owner
+      KNOWLEDGEBRAIN_BOOTSTRAP_OWNER: ${POSTGRES_USER:-knowledgebrain}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
   api:
+    profiles: ["runtime"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.rust
       args:
         BIN: api
-    image: knowledgebrain-api:local
-    container_name: knowledgebrain-api
+    image: knowledgebrain-api:local@sha256:30a9535e1fa6a139ebe67d7612d144eff75eea3558d621ae003385c73879dd9b
     environment:
       <<: *app-env
+      DATABASE_URL: postgres://kb_runtime_api:${KNOWLEDGEBRAIN_API_DB_PASSWORD:-api-change-me}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
       API_PORT: ${API_PORT:-8080}
       KNOWLEDGEBRAIN_WEB_ROOT: ${KNOWLEDGEBRAIN_WEB_ROOT:-/web}
     ports:
@@ -157,22 +194,23 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/ready"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 15s
 
   worker:
+    profiles: ["runtime"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.rust
       args:
         BIN: worker
-    image: knowledgebrain-worker:local
-    container_name: knowledgebrain-worker
+    image: knowledgebrain-worker:local@sha256:5d2715634560254f7c975b5c2a35bc73b72a09ec7926696d91d0dbaa9be6d256
     environment:
       <<: *app-env
+      DATABASE_URL: postgres://kb_runtime_worker:${KNOWLEDGEBRAIN_WORKER_DB_PASSWORD:-worker-change-me}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
     restart: unless-stopped
     volumes:
       - objects:/data/objects
@@ -183,6 +221,39 @@ services:
         condition: service_healthy
       docreader:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  retention:
+    profiles: ["runtime"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.rust
+      args:
+        BIN: retention
+    image: knowledgebrain-retention:local
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgres://kb_runtime_retention:${KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD:-retention-change-me}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
+      RETENTION_PROBE_ADDR: 0.0.0.0:8082
+    restart: unless-stopped
+    volumes:
+      - objects:/data/objects
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8082/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
 
 volumes:
   postgres-data:

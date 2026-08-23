@@ -126,7 +126,7 @@ pub const TYPE_DATATABLE: &str = "datatable:summary";
 pub const TYPE_BID_CONVERT: &str = "bid:convert";
 pub const TYPE_BID_EXTRACT: &str = "bid:extract";
 pub const TYPE_BID_SECTION_RETRY: &str = "bid:section-retry";
-pub const TYPE_BID_MATCH: &str = "bid:match";
+pub const TYPE_BID_MATCH_ROUTE_V1: &str = "bid:match-route:v1";
 
 pub const QUEUE_DEFAULT: &str = "default";
 pub const QUEUE_POSTPROCESS: &str = "postprocess";
@@ -136,6 +136,10 @@ pub const QUEUE_GRAPH: &str = "graph";
 pub const QUEUE_QUESTION: &str = "question";
 pub const QUEUE_WIKI: &str = "wiki";
 pub const QUEUE_LOW: &str = "low";
+pub const QUEUE_BID_CONVERT_V1: &str = "bid-convert-v1";
+pub const QUEUE_BID_EXTRACT_V1: &str = "bid-extract-v1";
+pub const QUEUE_BID_SECTION_RETRY_V1: &str = "bid-section-retry-v1";
+pub const QUEUE_BID_MATCHING_V1: &str = "bid-matching-v1";
 
 #[cfg(test)]
 mod tests {
@@ -148,6 +152,13 @@ mod tests {
         assert_eq!(TYPE_KB_DELETE, "kb:delete");
         assert_eq!(TYPE_LIST_DELETE, "knowledge:list_delete");
         assert_eq!(TYPE_INDEX_DELETE, "index:delete");
+        assert_eq!(TYPE_BID_CONVERT, "bid:convert");
+        assert_eq!(TYPE_BID_EXTRACT, "bid:extract");
+        assert_eq!(TYPE_BID_SECTION_RETRY, "bid:section-retry");
         assert_eq!(QUEUE_LOW, "low");
+        assert_eq!(QUEUE_BID_CONVERT_V1, "bid-convert-v1");
+        assert_eq!(QUEUE_BID_EXTRACT_V1, "bid-extract-v1");
+        assert_eq!(QUEUE_BID_SECTION_RETRY_V1, "bid-section-retry-v1");
+        assert_eq!(QUEUE_BID_MATCHING_V1, "bid-matching-v1");
     }
 }

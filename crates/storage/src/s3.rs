@@ -49,12 +49,11 @@ pub fn get_object(key: &str) -> Result<Vec<u8>, String> {
     signed_send("GET", &object_path(key), &[], false)
 }
 
-pub fn delete_object(key: &str) -> Result<(), String> {
+pub(super) fn delete_object(key: &str) -> Result<(), String> {
     if !configured() {
         return Ok(());
     }
-    let _ = signed_send("DELETE", &object_path(key), &[], false);
-    Ok(())
+    signed_send("DELETE", &object_path(key), &[], false).map(|_| ())
 }
 
 fn object_path(key: &str) -> String {

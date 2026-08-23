@@ -1,31 +1,155 @@
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+#[cfg(feature = "first-launch-migration")]
+use sqlx::{Connection, PgConnection};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-pub const MIGRATION_0001: &str = include_str!("../../../migrations/0001_domain.sql");
-pub const MIGRATION_0002: &str = include_str!("../../../migrations/0002_models.sql");
-pub const MIGRATION_0003: &str = include_str!("../../../migrations/0003_api_keys.sql");
-pub const MIGRATION_0004: &str = include_str!("../../../migrations/0004_embeddings.sql");
-pub const MIGRATION_0005: &str = include_str!("../../../migrations/0005_graph.sql");
-pub const MIGRATION_0006: &str = include_str!("../../../migrations/0006_wiki.sql");
-pub const MIGRATION_0007: &str = include_str!("../../../migrations/0007_bid.sql");
-pub const MIGRATION_0008: &str = include_str!("../../../migrations/0008_backfill.sql");
-pub const MIGRATION_0009: &str = include_str!("../../../migrations/0009_bid_extract_running.sql");
+pub const KNOWLEDGE_BASE_BASELINE: &str =
+    include_str!("../../../migrations/knowledge_base_baseline.sql");
+pub const SHARED_PLATFORM_BASELINE: &str =
+    include_str!("../../../migrations/shared_platform_baseline.sql");
+pub const BIDDING_V1_BASELINE: &str = include_str!("../../../migrations/bidding_v1_baseline.sql");
+const MIGRATION_MANIFEST: &str =
+    include_str!("../../../deploy/first-launch/migration-manifest.toml");
+const BOOTSTRAP_AUTHORITY: &str =
+    include_str!("../../../deploy/postgres-init/010-runtime-identities.sh");
 
-pub fn database_url() -> String {
-    std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://knowledgebrain:knowledgebrain@127.0.0.1:15432/knowledgebrain".into()
-    })
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MigrationManifest {
+    format_version: u32,
+    bootstrap: ManifestBootstrap,
+    migrations: Vec<ManifestMigration>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestBootstrap {
+    filename: String,
+    sha256: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestMigration {
+    version: i32,
+    name: String,
+    filename: String,
+    sha256: String,
+}
+
+#[derive(Debug)]
+struct EmbeddedMigration {
+    version: i32,
+    name: &'static str,
+    filename: &'static str,
+    sql: &'static str,
+}
+
+const EMBEDDED_MIGRATIONS: &[EmbeddedMigration] = &[
+    EmbeddedMigration {
+        version: 1,
+        name: "knowledge_base_baseline",
+        filename: "knowledge_base_baseline.sql",
+        sql: KNOWLEDGE_BASE_BASELINE,
+    },
+    EmbeddedMigration {
+        version: 2,
+        name: "shared_platform_baseline",
+        filename: "shared_platform_baseline.sql",
+        sql: SHARED_PLATFORM_BASELINE,
+    },
+    EmbeddedMigration {
+        version: 3,
+        name: "bidding_v1_baseline",
+        filename: "bidding_v1_baseline.sql",
+        sql: BIDDING_V1_BASELINE,
+    },
+];
+
+pub const CURRENT_SCHEMA_VERSION: i32 = 3;
+
+const DEFAULT_DATABASE_URL: &str =
+    "postgres://knowledgebrain:knowledgebrain@127.0.0.1:15432/knowledgebrain";
+
+fn database_url_from_env_value(
+    value: Result<String, std::env::VarError>,
+) -> Result<String, std::env::VarError> {
+    match value {
+        Ok(value) => Ok(value),
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_DATABASE_URL.into()),
+        Err(error) => Err(error),
+    }
+}
+
+pub fn database_url() -> Result<String, std::env::VarError> {
+    database_url_from_env_value(std::env::var("DATABASE_URL"))
+}
+
+static POOL: tokio::sync::OnceCell<PgPool> = tokio::sync::OnceCell::const_new();
+
+async fn open_pool() -> Result<PgPool, sqlx::Error> {
+    let database_url =
+        database_url().map_err(|error| sqlx::Error::Configuration(Box::new(error)))?;
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(16)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .connect(&database_url)
+        .await
+}
+
+/// Process-wide runtime pool. Opening it is schema-verification-only: runtime
+/// binaries have no configuration switch which can execute DDL.
 pub async fn connect() -> Result<PgPool, sqlx::Error> {
-    let pool = PgPool::connect(&database_url()).await?;
-    apply_0001(&pool).await?;
-    Ok(pool)
+    POOL.get_or_try_init(|| async {
+        let pool = open_pool().await?;
+        verify_schema_identity(&pool).await?;
+        Ok(pool)
+    })
+    .await
+    .cloned()
 }
 
-pub async fn apply_0001(pool: &PgPool) -> Result<(), sqlx::Error> {
-    // API and worker can start together against an empty database. Serialize the
-    // repository-local idempotent migration bundle across processes.
+/// First-launch-only unverified connection. The API and worker startup paths do
+/// not call this interface; it exists solely for the migrate-only process.
+#[cfg(feature = "first-launch-migration")]
+pub async fn connect_for_first_launch_migration() -> Result<PgPool, sqlx::Error> {
+    open_pool().await
+}
+
+/// Commit phase 1 of the irreversible handoff from the migration login to the
+/// verifier. This closes authentication and removes authority, but intentionally
+/// leaves existing migrator backends for the separate bootstrap-admin phase.
+#[cfg(feature = "first-launch-migration")]
+pub async fn handoff_first_launch_to_verifier(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_catalog.kb_handoff_first_launch_to_verifier()")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Terminate every backend authenticated as the now-NOLOGIN migrator. The URL
+/// must identify the PostgreSQL bootstrap owner; the database helper rejects
+/// every other session identity and succeeds only after an exact-zero rescan.
+#[cfg(feature = "first-launch-migration")]
+pub async fn terminate_residual_migrator_backends(
+    bootstrap_admin_database_url: &str,
+) -> Result<(), sqlx::Error> {
+    let mut connection = PgConnection::connect(bootstrap_admin_database_url).await?;
+    let result = sqlx::query("SELECT pg_catalog.kb_terminate_residual_migrator_backends()")
+        .execute(&mut connection)
+        .await;
+    let close_result = connection.close().await;
+    result?;
+    close_result?;
+    Ok(())
+}
+
+#[cfg(feature = "first-launch-migration")]
+pub async fn apply_fresh_baseline(pool: &PgPool) -> Result<(), sqlx::Error> {
+    // The explicit first-launch migrator serializes the fixed three-slice fresh
+    // baseline. Normal API/worker connection setup never reaches this function.
     const MIGRATION_LOCK_ID: i64 = 0x4b_42_4d_49_47_52_41_54;
     let mut lock_connection = pool.acquire().await?;
     sqlx::query("SELECT pg_advisory_lock($1)")
@@ -42,28 +166,347 @@ pub async fn apply_0001(pool: &PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-async fn apply_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
-    let exists: bool = sqlx::query_scalar(
+fn migration_checksum(sql: &str) -> String {
+    hex::encode(Sha256::digest(sql.as_bytes()))
+}
+
+fn validated_migration_manifest(raw_manifest: &str) -> Result<MigrationManifest, sqlx::Error> {
+    let manifest: MigrationManifest = toml::from_str(raw_manifest)
+        .map_err(|error| sqlx::Error::Protocol(format!("invalid migration manifest: {error}")))?;
+    if manifest.format_version != 1
+        || manifest.bootstrap.filename != "deploy/postgres-init/010-runtime-identities.sh"
+        || manifest.bootstrap.sha256 != migration_checksum(BOOTSTRAP_AUTHORITY)
+        || manifest.migrations.len() != EMBEDDED_MIGRATIONS.len()
+    {
+        return Err(sqlx::Error::Protocol(
+            "baseline manifest bootstrap or slice identity mismatch".into(),
+        ));
+    }
+
+    let mut versions = std::collections::HashSet::new();
+    let mut names = std::collections::HashSet::new();
+    let mut filenames = std::collections::HashSet::new();
+    for (entry, embedded) in manifest.migrations.iter().zip(EMBEDDED_MIGRATIONS) {
+        if !versions.insert(entry.version)
+            || !names.insert(entry.name.as_str())
+            || !filenames.insert(entry.filename.as_str())
+        {
+            return Err(sqlx::Error::Protocol(
+                "migration manifest contains a duplicate version, name, or filename".into(),
+            ));
+        }
+        if entry.version != embedded.version
+            || entry.name != embedded.name
+            || entry.filename != embedded.filename
+        {
+            return Err(sqlx::Error::Protocol(format!(
+                "migration manifest catalog mismatch at {}",
+                embedded.filename
+            )));
+        }
+        let checksum = migration_checksum(embedded.sql);
+        if entry.sha256 != checksum {
+            return Err(sqlx::Error::Protocol(format!(
+                "migration manifest checksum mismatch at version {}",
+                entry.version
+            )));
+        }
+    }
+    Ok(manifest)
+}
+
+async fn table_exists(pool: &PgPool, table_name: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
         "SELECT EXISTS (
-            SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'public' AND table_name = 'workspaces'
+            SELECT 1 FROM pg_catalog.pg_class relation
+            JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+            WHERE namespace.nspname='public' AND relation.relname=$1 AND relation.relkind IN ('r','p')
         )",
+    )
+    .bind(table_name)
+    .fetch_one(pool)
+    .await
+}
+
+async fn verify_migration_ledger_contract(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let valid: bool = sqlx::query_scalar(
+        r#"SELECT
+          (SELECT count(*)=1 AND bool_and(relation.relkind='r' AND relation.relpersistence='p'
+             AND relation.relreplident='d' AND relation.relnatts=4 AND relation.relchecks=1
+             AND relation.relam=(SELECT oid FROM pg_catalog.pg_am WHERE amname='heap')
+             AND relation.reltablespace=0 AND relation.reloptions IS NULL
+             AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity)
+           FROM pg_catalog.pg_class relation
+           JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+           WHERE namespace.nspname='public' AND relation.relname='schema_migrations')
+          AND
+          (SELECT count(*)=4
+             AND count(*) FILTER(WHERE attribute.attnum=1 AND attribute.attname='version'
+               AND pg_catalog.format_type(attribute.atttypid,attribute.atttypmod)='integer'
+               AND attribute.attnotnull AND default_value.oid IS NULL)=1
+             AND count(*) FILTER(WHERE attribute.attnum=2 AND attribute.attname='name'
+               AND pg_catalog.format_type(attribute.atttypid,attribute.atttypmod)='text'
+               AND attribute.attnotnull AND default_value.oid IS NULL)=1
+             AND count(*) FILTER(WHERE attribute.attnum=3 AND attribute.attname='checksum'
+               AND pg_catalog.format_type(attribute.atttypid,attribute.atttypmod)='text'
+               AND attribute.attnotnull AND default_value.oid IS NULL)=1
+             AND count(*) FILTER(WHERE attribute.attnum=4 AND attribute.attname='applied_at'
+               AND pg_catalog.format_type(attribute.atttypid,attribute.atttypmod)='timestamp with time zone'
+               AND attribute.attnotnull
+               AND pg_catalog.pg_get_expr(default_value.adbin,default_value.adrelid)='now()')=1
+             AND bool_and(attribute.attidentity='' AND attribute.attgenerated=''
+                          AND attribute.attislocal AND attribute.attinhcount=0
+                          AND NOT attribute.atthasmissing AND attribute.attoptions IS NULL
+                          AND attribute.attcompression='')
+           FROM pg_catalog.pg_attribute attribute
+           LEFT JOIN pg_catalog.pg_attrdef default_value
+             ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum
+           WHERE attribute.attrelid='public.schema_migrations'::regclass
+             AND attribute.attnum>0 AND NOT attribute.attisdropped)
+          AND
+          (SELECT count(*)=3
+             AND count(*) FILTER(WHERE constraint_value.conname='schema_migrations_pkey'
+               AND constraint_value.contype='p' AND constraint_value.conkey=ARRAY[1]::smallint[]
+               AND pg_catalog.pg_get_constraintdef(constraint_value.oid,true)='PRIMARY KEY (version)')=1
+             AND count(*) FILTER(WHERE constraint_value.conname='schema_migrations_name_key'
+               AND constraint_value.contype='u' AND constraint_value.conkey=ARRAY[2]::smallint[]
+               AND pg_catalog.pg_get_constraintdef(constraint_value.oid,true)='UNIQUE (name)')=1
+             AND count(*) FILTER(WHERE constraint_value.conname='schema_migrations_checksum_check'
+               AND constraint_value.contype='c' AND constraint_value.conkey=ARRAY[3]::smallint[]
+               AND pg_catalog.pg_get_expr(constraint_value.conbin,constraint_value.conrelid)
+                   = '(checksum ~ ''^[0-9a-f]{64}$''::text)')=1
+             AND bool_and(NOT constraint_value.condeferrable AND NOT constraint_value.condeferred
+                          AND constraint_value.convalidated)
+           FROM pg_catalog.pg_constraint constraint_value
+           WHERE constraint_value.conrelid='public.schema_migrations'::regclass)
+          AND
+          (SELECT count(*)=2
+             AND count(*) FILTER(WHERE index_relation.relname='schema_migrations_pkey'
+               AND index_value.indisprimary AND index_value.indisunique
+               AND index_value.indkey::text='1')=1
+             AND count(*) FILTER(WHERE index_relation.relname='schema_migrations_name_key'
+               AND NOT index_value.indisprimary AND index_value.indisunique
+               AND index_value.indkey::text='2')=1
+             AND bool_and(index_value.indisvalid AND index_value.indisready
+                          AND index_value.indislive AND index_value.indimmediate
+                          AND NOT index_value.indisexclusion)
+           FROM pg_catalog.pg_index index_value
+           JOIN pg_catalog.pg_class index_relation ON index_relation.oid=index_value.indexrelid
+           WHERE index_value.indrelid='public.schema_migrations'::regclass)
+          AND
+          (SELECT count(*)=1 AND bool_and(function_value.prokind='f'
+             AND function_value.prorettype='pg_catalog.trigger'::regtype
+             AND language.lanname='plpgsql' AND NOT function_value.prosecdef
+             AND NOT function_value.proleakproof AND function_value.provolatile='v'
+             AND function_value.proparallel='u' AND function_value.pronargs=0
+             AND function_value.proconfig=ARRAY['search_path=pg_catalog, public']::text[]
+             AND btrim(regexp_replace(function_value.prosrc,'[[:space:]]+',' ','g'))
+                 = 'BEGIN RAISE EXCEPTION ''schema migration ledger is immutable'' USING ERRCODE=''42501''; END'
+             AND NOT EXISTS(SELECT 1 FROM aclexplode(COALESCE(function_value.proacl,
+                    acldefault('f',function_value.proowner))) acl
+                    WHERE acl.grantee=0 AND acl.privilege_type='EXECUTE'))
+           FROM pg_catalog.pg_proc function_value
+           JOIN pg_catalog.pg_namespace namespace ON namespace.oid=function_value.pronamespace
+           JOIN pg_catalog.pg_language language ON language.oid=function_value.prolang
+           WHERE namespace.nspname='public'
+             AND function_value.proname='kb_reject_schema_migration_mutation'
+             AND function_value.proargtypes=''::oidvector)
+          AND
+          (SELECT count(*)=2
+             AND count(*) FILTER(WHERE trigger_value.tgname='schema_migrations_immutable'
+               AND trigger_value.tgtype=27 AND trigger_value.tgenabled='O')=1
+             AND count(*) FILTER(WHERE trigger_value.tgname='schema_migrations_no_truncate'
+               AND trigger_value.tgtype=34 AND trigger_value.tgenabled='O')=1
+             AND bool_and(NOT trigger_value.tgisinternal AND trigger_value.tgqual IS NULL
+               AND trigger_value.tgnargs=0 AND octet_length(trigger_value.tgargs)=0
+               AND trigger_value.tgattr::text=''
+               AND trigger_value.tgfoid='public.kb_reject_schema_migration_mutation()'::regprocedure)
+           FROM pg_catalog.pg_trigger trigger_value
+           WHERE trigger_value.tgrelid='public.schema_migrations'::regclass
+             AND NOT trigger_value.tgisinternal)
+          AND NOT EXISTS(
+           SELECT 1 FROM aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) acl
+           WHERE relation.oid='public.schema_migrations'::regclass AND acl.grantee=0
+             AND acl.privilege_type IN ('INSERT','UPDATE','DELETE','TRUNCATE')
+          )
+         FROM pg_catalog.pg_class relation
+         WHERE relation.oid='public.schema_migrations'::regclass"#,
     )
     .fetch_one(pool)
     .await?;
-    if !exists {
-        sqlx::raw_sql(MIGRATION_0001).execute(pool).await?;
+    if !valid {
+        return Err(sqlx::Error::Protocol(
+            "schema migration ledger contract mismatch".into(),
+        ));
     }
-    sqlx::raw_sql(MIGRATION_0002).execute(pool).await?;
-    sqlx::raw_sql(MIGRATION_0003).execute(pool).await?;
-    sqlx::raw_sql(MIGRATION_0004).execute(pool).await?;
-    sqlx::raw_sql(MIGRATION_0005).execute(pool).await?;
-    sqlx::raw_sql(MIGRATION_0006).execute(pool).await?;
-    sqlx::raw_sql(MIGRATION_0007).execute(pool).await?;
-    ensure_company_workspace(pool).await?;
-    sqlx::raw_sql(MIGRATION_0008).execute(pool).await?;
-    sqlx::raw_sql(MIGRATION_0009).execute(pool).await?;
     Ok(())
+}
+
+async fn verify_migration_ledger(
+    pool: &PgPool,
+    manifest: &MigrationManifest,
+) -> Result<usize, sqlx::Error> {
+    verify_migration_ledger_contract(pool).await?;
+    let rows: Vec<(i32, String, String)> = sqlx::query_as(
+        "SELECT version, name, checksum FROM public.schema_migrations ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await?;
+    if rows.len() > manifest.migrations.len() {
+        return Err(sqlx::Error::Protocol(
+            "migration ledger has unknown or extra versions".into(),
+        ));
+    }
+    for (offset, (version, name, checksum)) in rows.iter().enumerate() {
+        let expected = &manifest.migrations[offset];
+        if *version != expected.version || name != &expected.name {
+            return Err(sqlx::Error::Protocol(format!(
+                "migration ledger gap, order, or name mismatch at manifest position {}",
+                offset + 1
+            )));
+        }
+        if checksum != &expected.sha256 {
+            return Err(sqlx::Error::Protocol(format!(
+                "migration checksum mismatch at version {}",
+                expected.version
+            )));
+        }
+    }
+    Ok(rows.len())
+}
+
+#[cfg(feature = "first-launch-migration")]
+async fn persistent_user_relation_exists(pool: &PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+           SELECT 1 FROM pg_catalog.pg_class relation
+           JOIN pg_catalog.pg_namespace namespace ON namespace.oid=relation.relnamespace
+           WHERE relation.relpersistence IN ('p','u')
+             AND relation.relkind IN ('r','p','v','m','S','f','c')
+             AND namespace.nspname NOT IN ('pg_catalog','information_schema')
+             AND namespace.nspname NOT LIKE 'pg_toast%'
+             AND namespace.nspname NOT LIKE 'pg_temp_%'
+             AND NOT EXISTS(
+               SELECT 1 FROM pg_catalog.pg_depend dependency
+               JOIN pg_catalog.pg_extension extension_value
+                 ON extension_value.oid=dependency.refobjid
+                AND dependency.refclassid='pg_catalog.pg_extension'::regclass
+               WHERE dependency.classid='pg_catalog.pg_class'::regclass
+                 AND dependency.objid=relation.oid
+                 AND dependency.objsubid=0
+                 AND dependency.deptype='e'
+             )
+         )",
+    )
+    .fetch_one(pool)
+    .await
+}
+
+#[cfg(feature = "first-launch-migration")]
+const LEDGER_DDL: &str = "CREATE TABLE public.schema_migrations (
+    version integer PRIMARY KEY,
+    name text NOT NULL UNIQUE,
+    checksum text NOT NULL CHECK (checksum ~ '^[0-9a-f]{64}$'),
+    applied_at timestamptz NOT NULL DEFAULT now()
+ );
+ CREATE OR REPLACE FUNCTION public.kb_reject_schema_migration_mutation()
+ RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
+ BEGIN RAISE EXCEPTION 'schema migration ledger is immutable' USING ERRCODE='42501'; END $$;
+ CREATE TRIGGER schema_migrations_immutable BEFORE UPDATE OR DELETE ON public.schema_migrations
+ FOR EACH ROW EXECUTE FUNCTION public.kb_reject_schema_migration_mutation();
+ CREATE TRIGGER schema_migrations_no_truncate BEFORE TRUNCATE ON public.schema_migrations
+ FOR EACH STATEMENT EXECUTE FUNCTION public.kb_reject_schema_migration_mutation();
+ REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON public.schema_migrations FROM PUBLIC;
+ REVOKE ALL ON FUNCTION public.kb_reject_schema_migration_mutation() FROM PUBLIC;";
+
+#[cfg(feature = "first-launch-migration")]
+async fn create_migration_ledger(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::raw_sql(LEDGER_DDL).execute(&mut *tx).await?;
+    tx.commit().await
+}
+
+#[cfg(feature = "first-launch-migration")]
+async fn apply_migration_transaction(
+    pool: &PgPool,
+    version: i32,
+    name: &str,
+    checksum: &str,
+    migration_sql: &'static str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::raw_sql(migration_sql).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO public.schema_migrations(version,name,checksum) VALUES($1,$2,$3)")
+        .bind(version)
+        .bind(name)
+        .bind(checksum)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
+}
+
+#[cfg(feature = "first-launch-migration")]
+async fn apply_migrations(pool: &PgPool) -> Result<(), sqlx::Error> {
+    // Validate the checked-in authority against every embedded raw source before
+    // inspecting or mutating database state.
+    let manifest = validated_migration_manifest(MIGRATION_MANIFEST)?;
+
+    if !table_exists(pool, "schema_migrations").await? {
+        if persistent_user_relation_exists(pool).await? {
+            return Err(sqlx::Error::Protocol(
+                "unledgered database contains persistent user relations".into(),
+            ));
+        }
+        create_migration_ledger(pool).await?;
+    }
+
+    let applied = verify_migration_ledger(pool, &manifest).await?;
+    for (entry, embedded) in manifest
+        .migrations
+        .iter()
+        .zip(EMBEDDED_MIGRATIONS)
+        .skip(applied)
+    {
+        apply_migration_transaction(
+            pool,
+            entry.version,
+            &entry.name,
+            &entry.sha256,
+            embedded.sql,
+        )
+        .await?;
+    }
+    verify_schema_identity(pool).await
+}
+
+/// Verify the exact fixed manifest identity without executing DDL. Every
+/// runtime connection and readiness probe uses this closed tuple, not a numeric
+/// head probe.
+pub async fn verify_schema_identity(pool: &PgPool) -> Result<(), sqlx::Error> {
+    let manifest = validated_migration_manifest(MIGRATION_MANIFEST)?;
+    if !table_exists(pool, "schema_migrations").await? {
+        return Err(sqlx::Error::Protocol(
+            "schema migration ledger is absent".into(),
+        ));
+    }
+    let applied = verify_migration_ledger(pool, &manifest).await?;
+    if applied != manifest.migrations.len() {
+        return Err(sqlx::Error::Protocol(format!(
+            "schema manifest is incomplete: expected {} slices, found {applied}",
+            manifest.migrations.len()
+        )));
+    }
+    Ok(())
+}
+
+pub fn schema_manifest_sha256() -> String {
+    migration_checksum(MIGRATION_MANIFEST)
+}
+
+pub async fn current_schema_version(pool: &PgPool) -> Result<i32, sqlx::Error> {
+    sqlx::query_scalar("SELECT COALESCE(max(version),0) FROM schema_migrations")
+        .fetch_one(pool)
+        .await
 }
 
 #[derive(Debug, Clone)]
@@ -579,7 +1022,7 @@ pub async fn hydrate_workspace(
             store.versions.insert(vid, pv);
             version_ids.push(vid);
             let docs = sqlx::query(
-                "SELECT id, title, file_name, file_size, file_hash, object_key,
+                "SELECT id, title, file_name, file_size, file_hash, object_ref,
                         parse_status, enable_status, pending_subtasks_count,
                         COALESCE(error_message, '') AS error_message,
                         process_overrides,
@@ -601,9 +1044,9 @@ pub async fn hydrate_workspace(
                 let file_name: String = d.try_get("file_name")?;
                 let file_size: i64 = d.try_get("file_size")?;
                 let file_hash: String = d.try_get("file_hash")?;
-                let object_key: String = d.try_get("object_key")?;
+                let object_ref: String = d.try_get("object_ref")?;
                 let mut doc =
-                    domain::Document::new(vid, title, file_name, file_size, file_hash, object_key);
+                    domain::Document::new(vid, title, file_name, file_size, file_hash, object_ref);
                 doc.id = did;
                 doc.parse_status = parse_parse_status(&st);
                 doc.enable_status = d.try_get("enable_status")?;
@@ -882,15 +1325,6 @@ pub async fn workspaces_for_user(pool: &PgPool, user_id: Uuid) -> Result<Vec<Uui
         .await
 }
 
-pub async fn soft_delete_document(pool: &PgPool, document_id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE documents SET deleted_at = now(), updated_at = now() WHERE id = $1")
-        .bind(document_id)
-        .execute(pool)
-        .await?;
-    delete_graph_for_document(pool, document_id).await?;
-    Ok(())
-}
-
 pub async fn document_workspace_id(
     pool: &PgPool,
     document_id: Uuid,
@@ -966,7 +1400,7 @@ pub struct NewDocument<'a> {
     pub file_name: &'a str,
     pub file_size: i64,
     pub file_hash: &'a str,
-    pub object_key: &'a str,
+    pub object_ref: &'a str,
 }
 
 pub async fn insert_tag(
@@ -1116,10 +1550,11 @@ pub async fn delete_image_chunks(
 }
 
 pub async fn insert_document(pool: &PgPool, doc: NewDocument<'_>) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO documents (
             id, product_version_id, title, parse_status, enable_status,
-            file_name, file_size, file_hash, object_key, type
+            file_name, file_size, file_hash, object_ref, type
          ) VALUES ($1, $2, $3, 'pending', 'disabled', $4, $5, $6, $7, 'file')",
     )
     .bind(doc.id)
@@ -1128,10 +1563,20 @@ pub async fn insert_document(pool: &PgPool, doc: NewDocument<'_>) -> Result<(), 
     .bind(doc.file_name)
     .bind(doc.file_size)
     .bind(doc.file_hash)
-    .bind(doc.object_key)
-    .execute(pool)
+    .bind(doc.object_ref)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
+    sqlx::query_scalar::<_, String>(
+        "SELECT kb_register_knowledge_document_object(
+            $1,'application/octet-stream',$2::kb_actor_identity,$3,$4)",
+    )
+    .bind(doc.id)
+    .bind("system:knowledge-document-ingest")
+    .bind(format!("knowledge-document:{}", doc.id))
+    .bind(Uuid::new_v4())
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await
 }
 
 pub async fn set_index_ready(
@@ -1891,26 +2336,6 @@ pub async fn list_spans_attempt(
     Ok(out)
 }
 
-pub async fn release_object_ref(pool: &PgPool, hash: &str) -> Result<i32, sqlx::Error> {
-    let n: Option<i32> = sqlx::query_scalar(
-        "UPDATE content_objects SET refcount = GREATEST(refcount - 1, 0)
-         WHERE hash = $1
-         RETURNING refcount",
-    )
-    .bind(hash)
-    .fetch_optional(pool)
-    .await?;
-    let left = n.unwrap_or(-1);
-    if left == 0 {
-        sqlx::query("DELETE FROM content_objects WHERE hash = $1 AND refcount <= 0")
-            .bind(hash)
-            .execute(pool)
-            .await?;
-        crate::drop_blob(hash);
-    }
-    Ok(left)
-}
-
 pub async fn mark_reparse_queued(pool: &PgPool, document_id: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE documents SET
@@ -1922,18 +2347,6 @@ pub async fn mark_reparse_queued(pool: &PgPool, document_id: Uuid) -> Result<(),
          WHERE id = $1",
     )
     .bind(document_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-pub async fn bump_object_ref(pool: &PgPool, hash: &str, size: i64) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO content_objects (hash, size, refcount) VALUES ($1, $2, 1)
-         ON CONFLICT (hash) DO UPDATE SET refcount = content_objects.refcount + 1",
-    )
-    .bind(hash)
-    .bind(size)
     .execute(pool)
     .await?;
     Ok(())
@@ -2369,6 +2782,20 @@ pub async fn claim_pending_batch(
     Ok(out)
 }
 
+pub async fn drop_pending_ops(
+    pool: &PgPool,
+    task_type: &str,
+    scope_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let n = sqlx::query("DELETE FROM task_pending_ops WHERE task_type = $1 AND scope_id = $2")
+        .bind(task_type)
+        .bind(scope_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(n)
+}
+
 pub async fn delete_pending_ids(pool: &PgPool, ids: &[Uuid]) -> Result<u64, sqlx::Error> {
     if ids.is_empty() {
         return Ok(0);
@@ -2714,7 +3141,7 @@ pub async fn version_references_object(
     key: &str,
     hash: &str,
 ) -> Result<bool, sqlx::Error> {
-    let object_key = if key.starts_with("objects/") {
+    let object_ref = if key.starts_with("objects/") {
         key.to_string()
     } else {
         format!("objects/{hash}")
@@ -2724,7 +3151,7 @@ pub async fn version_references_object(
             SELECT 1 FROM documents
             WHERE product_version_id = $1
               AND deleted_at IS NULL
-              AND (object_key = $2 OR object_key = $3 OR file_hash = $4)
+              AND (object_ref = $2 OR object_ref = $3 OR file_hash = $4)
          ) OR EXISTS (
             SELECT 1 FROM chunks
             WHERE product_version_id = $1
@@ -2732,7 +3159,7 @@ pub async fn version_references_object(
          )",
     )
     .bind(version_id)
-    .bind(&object_key)
+    .bind(&object_ref)
     .bind(key)
     .bind(hash)
     .fetch_one(pool)
@@ -3089,7 +3516,7 @@ pub struct PgSearchHit {
     pub tag_ids: Vec<Uuid>,
     pub tag_slugs: Vec<String>,
     pub context_header: String,
-    pub document_object_key: String,
+    pub document_object_ref: String,
 }
 
 fn pg_hit_from_row(r: &sqlx::postgres::PgRow) -> Result<PgSearchHit, sqlx::Error> {
@@ -3111,7 +3538,7 @@ fn pg_hit_from_row(r: &sqlx::postgres::PgRow) -> Result<PgSearchHit, sqlx::Error
         tag_ids: r.try_get("tag_ids")?,
         tag_slugs: r.try_get("tag_slugs").unwrap_or_default(),
         context_header: r.try_get("context_header").unwrap_or_default(),
-        document_object_key: r.try_get("document_object_key").unwrap_or_default(),
+        document_object_ref: r.try_get("document_object_ref").unwrap_or_default(),
     })
 }
 
@@ -3135,7 +3562,7 @@ pub async fn hybrid_search_pg(
         .unwrap_or(50) as i64;
     const VEC_SQL: &str = "SELECT c.id AS chunk_id, c.content, c.chunk_type, c.document_id,
                 c.start_at, c.end_at, COALESCE(c.context_header, '') AS context_header,
-                COALESCE(d.object_key, '') AS document_object_key, d.title,
+                COALESCE(d.object_ref, '') AS document_object_ref, d.title,
                 p.id AS product_id, p.kind AS product_kind,
                 pv.id AS version_id, pv.label AS version_label,
                 (p.current_version_id = pv.id) AS is_current,
@@ -3170,7 +3597,7 @@ pub async fn hybrid_search_pg(
          LIMIT $6";
     const KW_SQL: &str = "SELECT c.id AS chunk_id, c.content, c.chunk_type, c.document_id,
                 c.start_at, c.end_at, COALESCE(c.context_header, '') AS context_header,
-                COALESCE(d.object_key, '') AS document_object_key, d.title,
+                COALESCE(d.object_ref, '') AS document_object_ref, d.title,
                 p.id AS product_id, p.kind AS product_kind,
                 pv.id AS version_id, pv.label AS version_label,
                 (p.current_version_id = pv.id) AS is_current,
@@ -3493,7 +3920,7 @@ pub async fn document_file_meta(
     document_id: Uuid,
 ) -> Result<Option<(String, String)>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT COALESCE(file_name, ''), COALESCE(object_key, '')
+        "SELECT COALESCE(file_name, ''), COALESCE(object_ref, '')
          FROM documents WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(document_id)
@@ -3501,7 +3928,7 @@ pub async fn document_file_meta(
     .await
 }
 
-pub async fn document_image_object_keys(
+pub async fn document_image_object_refs(
     pool: &PgPool,
     document_id: Uuid,
 ) -> Result<Vec<String>, sqlx::Error> {
@@ -3519,2297 +3946,63 @@ pub async fn document_image_object_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::Mutex;
 
-    #[tokio::test]
-    async fn summary_append_keeps_text_and_soft_delete_frees_unique() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let owner = Uuid::new_v4();
-        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
-            .await
-            .unwrap();
-        let seeded = create_workspace_with_library(&pool, owner, "Unq", "unq")
-            .await
-            .unwrap();
-        let did = Uuid::new_v4();
-        insert_document(
-            &pool,
-            NewDocument {
-                id: did,
-                product_version_id: seeded.library_version_id,
-                title: "t",
-                file_name: "same.txt",
-                file_size: 4,
-                file_hash: "samehash",
-                object_key: "objects/samehash",
-            },
-        )
-        .await
-        .unwrap();
-        let cid = Uuid::new_v4();
-        replace_document_chunks(
-            &pool,
-            did,
-            &[domain::Chunk {
-                id: cid,
-                document_id: did,
-                product_version_id: seeded.library_version_id,
-                chunk_type: "text".into(),
-                content: "body".into(),
-                context_header: String::new(),
-                start_at: 0,
-                end_at: 4,
-                parent_chunk_id: None,
-                generated_questions: vec![],
-            }],
-            &[],
-        )
-        .await
-        .unwrap();
-        let mut store = domain::Store::default();
-        let sid = Uuid::new_v4();
-        store.chunks.insert(
-            sid,
-            domain::Chunk {
-                id: sid,
-                document_id: did,
-                product_version_id: seeded.library_version_id,
-                chunk_type: "summary".into(),
-                content: "sum".into(),
-                context_header: String::new(),
-                start_at: 0,
-                end_at: 3,
-                parent_chunk_id: Some(cid),
-                generated_questions: vec![],
-            },
+    #[test]
+    fn fixed_manifest_is_exact_and_checksummed() {
+        let manifest = validated_migration_manifest(MIGRATION_MANIFEST).unwrap();
+        assert_eq!(manifest.format_version, 1);
+        assert_eq!(
+            manifest
+                .migrations
+                .iter()
+                .map(|entry| (entry.version, entry.name.as_str(), entry.filename.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, "knowledge_base_baseline", "knowledge_base_baseline.sql"),
+                (
+                    2,
+                    "shared_platform_baseline",
+                    "shared_platform_baseline.sql"
+                ),
+                (3, "bidding_v1_baseline", "bidding_v1_baseline.sql"),
+            ]
         );
-        persist_summary_chunks(&pool, &store, did).await.unwrap();
-        let text_n: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM chunks WHERE document_id = $1 AND chunk_type = 'text'",
-        )
-        .bind(did)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(text_n, 1);
-        let sum_n: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM chunks WHERE document_id = $1 AND chunk_type = 'summary'",
-        )
-        .bind(did)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(sum_n, 1);
-
-        soft_delete_document(&pool, did).await.unwrap();
-        let did2 = Uuid::new_v4();
-        insert_document(
-            &pool,
-            NewDocument {
-                id: did2,
-                product_version_id: seeded.library_version_id,
-                title: "t",
-                file_name: "same.txt",
-                file_size: 4,
-                file_hash: "samehash",
-                object_key: "objects/samehash",
-            },
-        )
-        .await
-        .expect("partial unique must allow re-upload after soft-delete");
-
-        sqlx::query("UPDATE documents SET attempt = 4, description = 'd' WHERE id = $1")
-            .bind(did2)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let mut loaded = domain::Store::default();
-        hydrate_workspace(&pool, &mut loaded, seeded.workspace_id)
-            .await
-            .unwrap();
-        let got = loaded.documents.get(&did2).expect("hydrated");
-        assert_eq!(got.attempt, 4);
-        assert_eq!(got.description, "d");
-    }
-
-    #[tokio::test]
-    async fn soft_delete_version_frees_label() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let owner = Uuid::new_v4();
-        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
-            .await
-            .unwrap();
-        let seeded = create_workspace_with_library(&pool, owner, "Lbl", "lbl")
-            .await
-            .unwrap();
-        let pid = Uuid::new_v4();
-        let vid1 = Uuid::new_v4();
-        insert_product(
-            &pool,
-            pid,
-            seeded.workspace_id,
-            "product",
-            "P",
-            "p",
-            Some(vid1),
-        )
-        .await
-        .unwrap();
-        insert_version(&pool, vid1, pid, "v1", "active", None)
-            .await
-            .unwrap();
-        sqlx::query(
-            "UPDATE product_versions SET status = 'archived', deleted_at = now() WHERE id = $1",
-        )
-        .bind(vid1)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let vid2 = Uuid::new_v4();
-        insert_version(&pool, vid2, pid, "v1", "active", None)
-            .await
-            .expect("partial unique must allow reused label after soft-delete");
-        let n: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM product_versions WHERE product_id = $1 AND label = 'v1'",
-        )
-        .bind(pid)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(n, 2);
-        let live: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM product_versions
-             WHERE product_id = $1 AND label = 'v1' AND deleted_at IS NULL",
-        )
-        .bind(pid)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(live, 1);
     }
 
     #[test]
-    fn empty_vector_pads_to_embedding_dim() {
-        let lit = vector_literal(&[]);
-        assert!(lit.starts_with('['));
-        assert_eq!(lit.matches(',').count() + 1, models::EMBEDDING_DIM);
-        assert!(!vector_literal(&[0.1; 8]).contains("0, 0, 0"));
-    }
-
-    async fn db_lock() -> tokio::sync::MutexGuard<'static, ()> {
-        static LOCK: Mutex<()> = Mutex::const_new(());
-        LOCK.lock().await
-    }
-
-    async fn setup() -> Option<PgPool> {
-        let pool = match PgPool::connect(&database_url()).await {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("skip persist test: {e}");
-                return None;
-            }
-        };
-        let _ = sqlx::query(
-            "DROP TABLE IF EXISTS
-                schema_flags,
-                bid_booklet_parts, bid_shots, bid_commercial_hits, bid_picks, bid_match_jobs,
-                bid_clauses, bid_extract_runs, bid_sections, bid_documents, bid_projects,
-                wiki_log_entries, wiki_folders, wiki_pages,
-                graph_relations, graph_nodes, chunk_embeddings, chunks,
-                api_keys, models,
-                task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents, content_objects,
-                product_versions, products, workspace_members, users, workspaces
-             CASCADE",
-        )
-        .execute(&pool)
-        .await;
-        apply_0001(&pool).await.expect("migrate 0001");
-        Some(pool)
-    }
-
-    #[tokio::test]
-    async fn migration_has_spec_tables_and_no_quota() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let names = table_names(&pool).await.unwrap();
-        for t in [
-            "workspaces",
-            "users",
-            "workspace_members",
-            "products",
-            "product_versions",
-            "documents",
-            "tags",
-            "document_tags",
-            "content_objects",
-            "document_processing_spans",
-            "task_pending_ops",
-            "task_dead_letters",
-            "models",
-            "api_keys",
-            "chunks",
-            "chunk_embeddings",
-            "graph_nodes",
-            "graph_relations",
-            "wiki_pages",
-            "bid_projects",
-            "bid_documents",
-            "bid_clauses",
+    fn baseline_has_no_incremental_or_legacy_schema_seams() {
+        let all = [
+            KNOWLEDGE_BASE_BASELINE,
+            SHARED_PLATFORM_BASELINE,
+            BIDDING_V1_BASELINE,
+        ]
+        .join("\n")
+        .to_ascii_lowercase();
+        for forbidden in [
+            "add column if not exists",
+            "bid_booklet_parts",
+            "bid_picks ",
+            "bid_commercial_hits",
+            "commitroutev1",
         ] {
-            assert!(names.iter().any(|n| n == t), "missing table {t}: {names:?}");
-        }
-        let cols = column_names(&pool, "workspaces").await.unwrap();
-        for banned in ["quota", "token_limit", "tenant_id", "billing"] {
             assert!(
-                !cols.iter().any(|c| c.contains(banned)),
-                "banned col {banned}"
+                !all.contains(forbidden),
+                "legacy baseline token remains: {forbidden}"
             );
         }
-        let row = sqlx::query("SELECT retrieval_config FROM workspaces LIMIT 0")
-            .fetch_optional(&pool)
-            .await
-            .unwrap();
-        let _ = row;
-        let project_cols = column_names(&pool, "bid_projects").await.unwrap();
-        for required in [
-            "extract_lock_token",
-            "extract_lock_kind",
-            "extract_lock_at",
-            "extract_lock_section_id",
-        ] {
-            assert!(project_cols.iter().any(|column| column == required));
-        }
-        let run_cols = column_names(&pool, "bid_extract_runs").await.unwrap();
-        for required in ["claim_token", "heartbeat_at"] {
-            assert!(run_cols.iter().any(|column| column == required));
-        }
-        let invariant_project = Uuid::new_v4();
-        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'invariant test')")
-            .bind(invariant_project)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let invalid_running = sqlx::query(
-            "INSERT INTO bid_extract_runs (id, project_id, status) VALUES ($1, $2, 'running')",
-        )
-        .bind(Uuid::new_v4())
-        .bind(invariant_project)
-        .execute(&pool)
-        .await;
-        assert!(
-            invalid_running.is_err(),
-            "running run requires a live lease"
-        );
     }
 
-    #[tokio::test]
-    async fn bid_extract_claim_is_serialized_and_stale_owner_is_fenced() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let project_id = Uuid::new_v4();
-        let run_a = Uuid::new_v4();
-        let run_b = Uuid::new_v4();
-        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'claim test')")
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        for run_id in [run_a, run_b] {
-            crate::bid::insert_extract_run(&pool, run_id, project_id, None, "manual")
-                .await
-                .unwrap();
-        }
-        let mismatched =
-            crate::bid::claim_extract_run(&pool, run_a, project_id, Some(Uuid::new_v4()))
-                .await
-                .unwrap();
-        assert!(
-            mismatched.is_none(),
-            "payload identity must match stored run"
-        );
-
-        let (claim_a, claim_b) = tokio::join!(
-            crate::bid::claim_extract_run(&pool, run_a, project_id, None),
-            crate::bid::claim_extract_run(&pool, run_b, project_id, None)
-        );
-        let claim_a = claim_a.unwrap();
-        let claim_b = claim_b.unwrap();
-        assert_ne!(claim_a.is_some(), claim_b.is_some());
-        let running: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM bid_extract_runs WHERE project_id = $1 AND status = 'running'",
-        )
-        .bind(project_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(running, 1);
-
-        let (run_id, old_token) = if let Some(token) = claim_a {
-            (run_a, token)
-        } else {
-            (run_b, claim_b.unwrap())
-        };
-        sqlx::query(
-            "UPDATE bid_extract_runs SET heartbeat_at = now() - interval '2 hours' WHERE id = $1",
-        )
-        .bind(run_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        assert!(
-            crate::bid::heartbeat_extract_run(&pool, run_id, project_id, old_token)
-                .await
-                .unwrap()
-        );
-        assert!(
-            crate::bid::reclaim_stale_extracts(&pool, 60)
-                .await
-                .unwrap()
-                .is_empty(),
-            "a live heartbeat must prevent reclaim"
-        );
-        sqlx::query(
-            "UPDATE bid_extract_runs SET heartbeat_at = now() - interval '2 hours' WHERE id = $1",
-        )
-        .bind(run_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        crate::bid::reclaim_stale_extracts(&pool, 60).await.unwrap();
-        let stale_persist = crate::bid::persist_extraction_report(
-            &pool,
-            crate::bid::PersistExtractionReport {
-                run_id,
-                claim_token: old_token,
-                project_id,
-                document_id: Uuid::new_v4(),
-                sections: &[],
-                clauses: &[],
-                replace_document: true,
-            },
-        )
-        .await;
-        assert!(stale_persist.is_err(), "stale owner must not persist");
-
-        let diagnostics = serde_json::json!({});
-        let finish = crate::bid::finish_extract_run(
-            &pool,
-            crate::bid::FinishExtractRun {
-                id: run_id,
-                claim_token: old_token,
-                status: "done",
-                section_total: 0,
-                section_done: 0,
-                error_message: "",
-                extractor_mode: "heuristic",
-                model_id: "",
-                policy_version: "cn-tender-v2",
-                prompt_version: "clause-extractor-v2",
-                diagnostics: &diagnostics,
-            },
-        )
-        .await;
-        assert!(finish.is_err(), "stale owner must not finish reclaimed run");
-
-        let document_id = Uuid::new_v4();
-        let section_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO bid_documents
-                (id, project_id, file_name, file_hash, object_key, parse_status, multimodal_status)
-             VALUES ($1, $2, 'retry.md', 'retry-hash', 'objects/retry-hash', 'completed', 'skipped')",
-        )
-        .bind(document_id)
-        .bind(project_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO bid_sections
-                (id, project_id, document_id, section_key, body, extract_status)
-             VALUES ($1, $2, $3, 'retry-section', '必须支持接口', 'done')",
-        )
-        .bind(section_id)
-        .bind(project_id)
-        .bind(document_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let retry_token = crate::bid::claim_section_retry(&pool, project_id, section_id)
-            .await
+    #[test]
+    fn runtime_connection_source_has_no_migration_switch() {
+        let source = include_str!("persist.rs");
+        let connect_body = source
+            .split("pub async fn connect()")
+            .nth(1)
             .unwrap()
-            .expect("section retry should claim free project");
-        crate::bid::set_section_retry_status(
-            &pool,
-            project_id,
-            section_id,
-            retry_token,
-            "running",
-            "",
-        )
-        .await
-        .unwrap();
-        assert!(
-            crate::bid::heartbeat_section_retry(&pool, project_id, section_id, retry_token)
-                .await
-                .unwrap()
-        );
-        let full_during_retry = crate::bid::claim_extract_run(&pool, run_b, project_id, None)
-            .await
-            .unwrap();
-        assert!(full_during_retry.is_none());
-        sqlx::query(
-            "UPDATE bid_projects SET extract_lock_at = now() - interval '2 hours' WHERE id = $1",
-        )
-        .bind(project_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        crate::bid::reclaim_stale_extracts(&pool, 60).await.unwrap();
-        let replacement = crate::bid::claim_section_retry(&pool, project_id, section_id)
-            .await
-            .unwrap()
-            .expect("replacement retry should claim reclaimed project");
-        assert!(
-            crate::bid::set_section_retry_status(
-                &pool,
-                project_id,
-                section_id,
-                retry_token,
-                "failed",
-                "late stale failure",
-            )
-            .await
-            .is_err(),
-            "stale retry must not mutate section status"
-        );
-        crate::bid::set_section_retry_status(
-            &pool,
-            project_id,
-            section_id,
-            replacement,
-            "running",
-            "",
-        )
-        .await
-        .unwrap();
-        assert!(
-            crate::bid::finish_section_retry(&pool, project_id, section_id, retry_token)
-                .await
-                .is_err(),
-            "stale retry must not release replacement lease"
-        );
-        crate::bid::finish_section_retry(&pool, project_id, section_id, replacement)
-            .await
-            .unwrap();
-        assert!(crate::bid::end_project(&pool, project_id).await.unwrap());
-        assert!(
-            crate::bid::claim_extract_run(&pool, run_b, project_id, None)
-                .await
-                .unwrap()
-                .is_none(),
-            "ended projects must not start queued extraction"
-        );
-    }
-
-    #[tokio::test]
-    async fn document_mutations_require_project_ownership() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let owner = Uuid::new_v4();
-        let other = Uuid::new_v4();
-        let document_id = Uuid::new_v4();
-        for (id, title) in [(owner, "owner"), (other, "other")] {
-            sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, $2)")
-                .bind(id)
-                .bind(title)
-                .execute(&pool)
-                .await
-                .unwrap();
-        }
-        sqlx::query(
-            "INSERT INTO bid_documents
-                (id, project_id, file_name, file_hash, object_key, parse_status)
-             VALUES ($1, $2, 'owned.md', 'owned-hash', 'objects/owned-hash', 'failed')",
-        )
-        .bind(document_id)
-        .bind(owner)
-        .execute(&pool)
-        .await
-        .unwrap();
-        assert!(
-            !crate::bid::reset_document_for_retry(&pool, other, document_id)
-                .await
-                .unwrap()
-        );
-        assert!(
-            !crate::bid::delete_document_for_project(&pool, other, document_id)
-                .await
-                .unwrap()
-        );
-        let status: String =
-            sqlx::query_scalar("SELECT parse_status FROM bid_documents WHERE id = $1")
-                .bind(document_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(status, "failed");
-        assert!(
-            crate::bid::reset_document_for_retry(&pool, owner, document_id)
-                .await
-                .unwrap()
-        );
-        assert!(
-            crate::bid::delete_document_for_project(&pool, owner, document_id)
-                .await
-                .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn bid_section_retry_intent_is_idempotent_and_stale_owner_is_fenced() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let project_id = Uuid::new_v4();
-        let document_id = Uuid::new_v4();
-        let section_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'section retry')")
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO bid_documents
-                (id, project_id, file_name, file_hash, object_key, parse_status, multimodal_status)
-             VALUES ($1, $2, 'retry.md', 'hash', 'objects/hash', 'completed', 'skipped')",
-        )
-        .bind(document_id)
-        .bind(project_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO bid_sections
-                (id, project_id, document_id, section_key, body, extract_status)
-             VALUES ($1, $2, $3, 'retry', '必须支持接口', 'failed')",
-        )
-        .bind(section_id)
-        .bind(project_id)
-        .bind(document_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let job_id = crate::bid::enqueue_section_retry(&pool, project_id, section_id)
-            .await
-            .unwrap();
-        assert_eq!(
-            job_id,
-            crate::bid::enqueue_section_retry(&pool, project_id, section_id)
-                .await
-                .unwrap()
-        );
-        let token = crate::bid::claim_section_retry_job(&pool, job_id, project_id, section_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let project_token: Option<Uuid> =
-            sqlx::query_scalar("SELECT extract_lock_token FROM bid_projects WHERE id = $1")
-                .bind(project_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(project_token, Some(token));
-        assert!(
-            crate::bid::claim_section_retry(&pool, project_id, section_id)
-                .await
-                .unwrap()
-                .is_none(),
-            "paired Section retry lease must fence another extraction owner"
-        );
-        sqlx::query(
-            "UPDATE bid_section_retry_jobs
-             SET heartbeat_at = now() - interval '2 hours' WHERE id = $1",
-        )
-        .bind(job_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let reclaimed = crate::bid::reclaim_stale_section_retry_jobs(&pool, 60)
-            .await
-            .unwrap();
-        assert_eq!(reclaimed, vec![(job_id, project_id, section_id)]);
-        let project_token: Option<Uuid> =
-            sqlx::query_scalar("SELECT extract_lock_token FROM bid_projects WHERE id = $1")
-                .bind(project_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(project_token, None);
-        assert!(
-            !crate::bid::finish_section_retry_job(
-                &pool, job_id, project_id, section_id, token, "done", ""
-            )
-            .await
-            .unwrap(),
-            "the reclaimed owner must not finish the durable retry"
-        );
-    }
-
-    #[tokio::test]
-    async fn bid_match_generation_fences_stale_job_and_clause_dirty_is_atomic() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let project_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'match fence')")
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let old_job = Uuid::new_v4();
-        crate::bid::insert_match_job(&pool, old_job, project_id, 0, "old", "commercial", None)
-            .await
-            .unwrap();
-        let old_token = crate::bid::claim_match_job(&pool, old_job, project_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let clause_id = Uuid::new_v4();
-        crate::bid::insert_clause(
-            &pool,
-            crate::bid::NewClause {
-                id: clause_id,
-                project_id,
-                extract_run_id: None,
-                section_id: None,
-                source_document_id: None,
-                source_span: None,
-                family_conflict: false,
-                extraction_meta: None,
-                raw_text: "必须支持接口",
-                text: "必须支持接口",
-                family: "technical",
-                must: true,
-                status: "confirmed",
-            },
-        )
-        .await
-        .unwrap();
-        let candidates = serde_json::json!([]);
-        assert!(
-            crate::bid::set_match_job(
-                &pool,
-                crate::bid::MatchJobFinish {
-                    id: old_job,
-                    project_id,
-                    claim_token: old_token,
-                    status: "done",
-                    tech_status: "done",
-                    commercial_status: "skipped",
-                    candidates: &candidates,
-                    error: "",
-                },
-            )
-            .await
-            .is_err(),
-            "a prior generation must not publish results"
-        );
-        let (generation, dirty): (i64, bool) =
-            sqlx::query_as("SELECT match_generation, match_dirty FROM bid_projects WHERE id = $1")
-                .bind(project_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(generation, 1);
-        assert!(dirty);
-        assert!(
-            crate::bid::update_clause(
-                &pool,
-                crate::bid::ClausePatch {
-                    id: clause_id,
-                    project_id,
-                    expected_status: "confirmed",
-                    text: Some("必须支持双接口"),
-                    family: None,
-                    must: None,
-                    status: None,
-                    deviate: None,
-                    deviate_note: None,
-                    assessment: None,
-                },
-            )
-            .await
-            .unwrap()
-            .is_some()
-        );
-        let generation: i64 =
-            sqlx::query_scalar("SELECT match_generation FROM bid_projects WHERE id = $1")
-                .bind(project_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(generation, 2);
-    }
-
-    #[tokio::test]
-    async fn bid_match_scheduler_rejects_stale_snapshot_generation() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let project_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'schedule race')")
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let mut scheduler = pool.acquire().await.unwrap();
-        let stale_generation: i64 =
-            sqlx::query_scalar("SELECT match_generation FROM bid_projects WHERE id = $1")
-                .bind(project_id)
-                .fetch_one(&mut *scheduler)
-                .await
-                .unwrap();
-        let stale_clause_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM bid_clauses WHERE project_id = $1 AND status = 'confirmed'",
-        )
-        .bind(project_id)
-        .fetch_one(&mut *scheduler)
-        .await
-        .unwrap();
-        assert_eq!(stale_clause_count, 0);
-
-        crate::bid::insert_clause(
-            &pool,
-            crate::bid::NewClause {
-                id: Uuid::new_v4(),
-                project_id,
-                extract_run_id: None,
-                section_id: None,
-                source_document_id: None,
-                source_span: None,
-                family_conflict: false,
-                extraction_meta: None,
-                raw_text: "投标人须提供营业执照",
-                text: "投标人须提供营业执照",
-                family: "commercial",
-                must: true,
-                status: "confirmed",
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(
-            crate::bid::insert_match_job(
-                &pool,
-                Uuid::new_v4(),
-                project_id,
-                stale_generation,
-                "stale-snapshot",
-                "commercial",
-                None,
-            )
-            .await
-            .is_err(),
-            "a scheduler may not relabel its generation-0 snapshot as generation 1"
-        );
-        let current_generation: i64 =
-            sqlx::query_scalar("SELECT match_generation FROM bid_projects WHERE id = $1")
-                .bind(project_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let authoritative = crate::bid::insert_match_job(
-            &pool,
-            Uuid::new_v4(),
-            project_id,
-            current_generation,
-            "current-snapshot",
-            "commercial",
-            None,
-        )
-        .await
-        .unwrap();
-        let duplicate = crate::bid::insert_match_job(
-            &pool,
-            Uuid::new_v4(),
-            project_id,
-            current_generation,
-            "duplicate-delivery",
-            "commercial",
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(authoritative, duplicate);
-        let technical = crate::bid::insert_match_job(
-            &pool,
-            Uuid::new_v4(),
-            project_id,
-            current_generation,
-            "unsectioned-technical",
-            "technical",
-            Some(Uuid::nil()),
-        )
-        .await
-        .unwrap();
-        assert_ne!(authoritative, technical);
-        let kinds: Vec<String> = sqlx::query_scalar(
-            "SELECT job_kind FROM bid_match_jobs
-             WHERE project_id = $1 AND generation = $2 ORDER BY job_kind",
-        )
-        .bind(project_id)
-        .bind(current_generation)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        assert_eq!(kinds, vec!["commercial", "technical"]);
-    }
-
-    #[tokio::test]
-    async fn partial_clause_patches_preserve_omitted_match_inputs() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else { return };
-        let project_id = Uuid::new_v4();
-        let clause_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'patch race')")
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        crate::bid::insert_clause(
-            &pool,
-            crate::bid::NewClause {
-                id: clause_id,
-                project_id,
-                extract_run_id: None,
-                section_id: None,
-                source_document_id: None,
-                source_span: None,
-                family_conflict: false,
-                extraction_meta: None,
-                raw_text: "X",
-                text: "X",
-                family: "technical",
-                must: false,
-                status: "confirmed",
-            },
-        )
-        .await
-        .unwrap();
-        let a = crate::bid::update_clause(
-            &pool,
-            crate::bid::ClausePatch {
-                id: clause_id,
-                project_id,
-                expected_status: "confirmed",
-                text: Some("Y"),
-                family: None,
-                must: Some(true),
-                status: None,
-                deviate: None,
-                deviate_note: None,
-                assessment: None,
-            },
-        );
-        let b = crate::bid::update_clause(
-            &pool,
-            crate::bid::ClausePatch {
-                id: clause_id,
-                project_id,
-                expected_status: "confirmed",
-                text: None,
-                family: None,
-                must: None,
-                status: None,
-                deviate: None,
-                deviate_note: None,
-                assessment: Some("meet"),
-            },
-        );
-        let (a, b) = tokio::join!(a, b);
-        assert!(a.unwrap().is_some());
-        assert!(b.unwrap().is_some());
-        let row = sqlx::query("SELECT text, must, assessment FROM bid_clauses WHERE id = $1")
-            .bind(clause_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(row.get::<String, _>("text"), "Y");
-        assert!(row.get::<bool, _>("must"));
-        assert_eq!(row.get::<String, _>("assessment"), "meet");
-        let generation: i64 =
-            sqlx::query_scalar("SELECT match_generation FROM bid_projects WHERE id = $1")
-                .bind(project_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            generation, 2,
-            "insert confirmation plus one match-input patch"
-        );
-    }
-
-    #[tokio::test]
-    async fn opposing_section_merges_cannot_create_a_cycle() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else { return };
-        let project_id = Uuid::new_v4();
-        let document_id = Uuid::new_v4();
-        let a = Uuid::new_v4();
-        let b = Uuid::new_v4();
-        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'merge race')")
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO bid_documents (id, project_id, file_name, file_hash, object_key) VALUES ($1,$2,'x.md','h','objects/h')")
-            .bind(document_id).bind(project_id).execute(&pool).await.unwrap();
-        for id in [a, b] {
-            sqlx::query("INSERT INTO bid_sections (id, project_id, document_id, section_key) VALUES ($1,$2,$3,$4)")
-                .bind(id).bind(project_id).bind(document_id).bind(id.to_string())
-                .execute(&pool).await.unwrap();
-        }
-        let (ab, ba) = tokio::join!(
-            crate::bid::set_section_merge(&pool, project_id, a, Some(b)),
-            crate::bid::set_section_merge(&pool, project_id, b, Some(a)),
-        );
-        assert_eq!(
-            [ab.is_ok(), ba.is_ok()]
-                .into_iter()
-                .filter(|ok| *ok)
-                .count(),
-            1
-        );
-        let rows = sqlx::query("SELECT id, merge_into FROM bid_sections WHERE project_id = $1")
-            .bind(project_id)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-        let graph: std::collections::HashMap<Uuid, Option<Uuid>> = rows
-            .iter()
-            .map(|row| (row.get("id"), row.get("merge_into")))
-            .collect();
-        assert!(!(graph.get(&a) == Some(&Some(b)) && graph.get(&b) == Some(&Some(a))));
-    }
-
-    #[tokio::test]
-    async fn section_retry_terminal_finish_releases_both_leases_atomically() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else { return };
-        let project_id = Uuid::new_v4();
-        let document_id = Uuid::new_v4();
-        let section_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'retry finish')")
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO bid_documents (id, project_id, file_name, file_hash, object_key) VALUES ($1,$2,'x.md','h','objects/h')")
-            .bind(document_id).bind(project_id).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO bid_sections (id, project_id, document_id, section_key) VALUES ($1,$2,$3,'s')")
-            .bind(section_id).bind(project_id).bind(document_id).execute(&pool).await.unwrap();
-        let job_id = crate::bid::enqueue_section_retry(&pool, project_id, section_id)
-            .await
-            .unwrap();
-        let token = crate::bid::claim_section_retry_job(&pool, job_id, project_id, section_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            crate::bid::finish_section_retry_job(
-                &pool, job_id, project_id, section_id, token, "done", ""
-            )
-            .await
-            .unwrap()
-        );
-        assert!(
-            !crate::bid::finish_section_retry_job(
-                &pool, job_id, project_id, section_id, token, "done", ""
-            )
-            .await
-            .unwrap()
-        );
-        let state: (String, Option<Uuid>) = sqlx::query_as(
-            "SELECT j.status, p.extract_lock_token FROM bid_section_retry_jobs j
-             JOIN bid_projects p ON p.id = j.project_id WHERE j.id = $1",
-        )
-        .bind(job_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(state, ("done".into(), None));
-    }
-
-    #[tokio::test]
-    async fn bid_conversion_retry_fences_stale_owner_and_auto_handoff_is_idempotent() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let project_id = Uuid::new_v4();
-        let document_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'convert fence')")
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO bid_documents
-                (id, project_id, file_name, file_hash, object_key)
-             VALUES ($1, $2, 'tender.md', 'hash', 'objects/hash')",
-        )
-        .bind(document_id)
-        .bind(project_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let (old_token, _, _, old_generation) =
-            crate::bid::claim_document_conversion(&pool, document_id)
-                .await
-                .unwrap()
-                .unwrap();
-        assert_eq!(old_generation, 0);
-        assert!(
-            crate::bid::reset_document_for_retry(&pool, project_id, document_id)
-                .await
-                .unwrap()
-        );
-        assert!(
-            !crate::bid::finish_document_conversion(
-                &pool,
-                document_id,
-                old_token,
-                "completed",
-                Some("objects/stale"),
-                "",
-            )
-            .await
-            .unwrap(),
-            "stale conversion must not publish"
-        );
-        let (token, _, _, generation) = crate::bid::claim_document_conversion(&pool, document_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(generation, 1);
-        assert!(
-            crate::bid::set_document_multimodal_status(&pool, document_id, token, "skipped", "",)
-                .await
-                .unwrap()
-        );
-        assert!(
-            crate::bid::finish_document_conversion(
-                &pool,
-                document_id,
-                token,
-                "completed",
-                Some("objects/current"),
-                "",
-            )
-            .await
-            .unwrap()
-        );
-        let first = crate::bid::ensure_auto_extract_run(&pool, document_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let second = crate::bid::ensure_auto_extract_run(&pool, document_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(first, second);
-    }
-
-    #[tokio::test]
-    async fn tables_flat_conversion_skips_auto_extract() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let project_id = Uuid::new_v4();
-        let document_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'tables flat')")
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO bid_documents
-                (id, project_id, file_name, file_hash, object_key)
-             VALUES ($1, $2, 'spec.docx', 'hash', 'objects/hash')",
-        )
-        .bind(document_id)
-        .bind(project_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let (token, _, _, _) = crate::bid::claim_document_conversion(&pool, document_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            crate::bid::set_document_multimodal_status(&pool, document_id, token, "skipped", "",)
-                .await
-                .unwrap()
-        );
-        assert!(
-            crate::bid::finish_document_conversion(
-                &pool,
-                document_id,
-                token,
-                "completed",
-                Some("objects/md"),
-                "conversion_quality=tables_flat",
-            )
-            .await
-            .unwrap()
-        );
-        assert!(
-            crate::bid::ensure_auto_extract_run(&pool, document_id)
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn transient_conversion_failure_can_be_claimed_again_then_complete() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let project_id = Uuid::new_v4();
-        let document_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'convert retry')")
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        crate::bid::insert_document(
-            &pool,
-            document_id,
-            project_id,
-            "retry.md",
-            "retry-hash",
-            1,
-            "objects/retry-hash",
-        )
-        .await
-        .unwrap();
-        let (first, _, _, generation) = crate::bid::claim_document_conversion(&pool, document_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            crate::bid::finish_document_conversion(
-                &pool,
-                document_id,
-                first,
-                "pending",
-                None,
-                "transient provider error",
-            )
-            .await
-            .unwrap()
-        );
-        let (second, _, _, retry_generation) =
-            crate::bid::claim_document_conversion(&pool, document_id)
-                .await
-                .unwrap()
-                .unwrap();
-        assert_ne!(first, second);
-        assert_eq!(generation, retry_generation);
-        assert!(
-            crate::bid::set_document_multimodal_status(&pool, document_id, second, "skipped", "",)
-                .await
-                .unwrap()
-        );
-        assert!(
-            crate::bid::finish_document_conversion(
-                &pool,
-                document_id,
-                second,
-                "completed",
-                Some("objects/markdown"),
-                "",
-            )
-            .await
-            .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn ending_project_fences_active_conversion_and_match() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let project_id = Uuid::new_v4();
-        let document_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'end fence')")
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        crate::bid::insert_document(
-            &pool,
-            document_id,
-            project_id,
-            "active.md",
-            "active-hash",
-            1,
-            "objects/active-hash",
-        )
-        .await
-        .unwrap();
-        let (conversion_token, _, _, _) = crate::bid::claim_document_conversion(&pool, document_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let match_id = crate::bid::insert_match_job(
-            &pool,
-            Uuid::new_v4(),
-            project_id,
-            0,
-            "active-match",
-            "commercial",
-            None,
-        )
-        .await
-        .unwrap();
-        let match_token = crate::bid::claim_match_job(&pool, match_id, project_id)
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert!(crate::bid::end_project(&pool, project_id).await.unwrap());
-        assert!(
-            !crate::bid::heartbeat_document_conversion(&pool, document_id, conversion_token)
-                .await
-                .unwrap()
-        );
-        assert!(
-            !crate::bid::finish_document_conversion(
-                &pool,
-                document_id,
-                conversion_token,
-                "completed",
-                Some("objects/late"),
-                "",
-            )
-            .await
-            .unwrap()
-        );
-        assert!(
-            !crate::bid::heartbeat_match_job(&pool, match_id, match_token)
-                .await
-                .unwrap()
-        );
-        let status: String = sqlx::query_scalar("SELECT status FROM bid_match_jobs WHERE id = $1")
-            .bind(match_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(status, "failed");
-        assert!(
-            !crate::bid::any_match_running(&pool, project_id)
-                .await
-                .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn document_delete_cascades_pending_run_and_rejects_active_lease() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let project_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'delete lease')")
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let pending_document = Uuid::new_v4();
-        crate::bid::insert_document(
-            &pool,
-            pending_document,
-            project_id,
-            "pending.md",
-            "pending-delete-hash",
-            1,
-            "objects/pending-delete-hash",
-        )
-        .await
-        .unwrap();
-        let pending_run = Uuid::new_v4();
-        crate::bid::insert_extract_run(
-            &pool,
-            pending_run,
-            project_id,
-            Some(pending_document),
-            "auto",
-        )
-        .await
-        .unwrap();
-        assert!(
-            crate::bid::delete_document_for_project(&pool, project_id, pending_document)
-                .await
-                .unwrap()
-        );
-        let pending_exists: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM bid_extract_runs WHERE id = $1)")
-                .bind(pending_run)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(!pending_exists, "document-scoped pending run must cascade");
-
-        let active_document = Uuid::new_v4();
-        crate::bid::insert_document(
-            &pool,
-            active_document,
-            project_id,
-            "active.md",
-            "active-delete-hash",
-            1,
-            "objects/active-delete-hash",
-        )
-        .await
-        .unwrap();
-        let active_run = Uuid::new_v4();
-        crate::bid::insert_extract_run(
-            &pool,
-            active_run,
-            project_id,
-            Some(active_document),
-            "auto",
-        )
-        .await
-        .unwrap();
-        let token =
-            crate::bid::claim_extract_run(&pool, active_run, project_id, Some(active_document))
-                .await
-                .unwrap()
-                .unwrap();
-        assert!(
-            crate::bid::delete_document_for_project(&pool, project_id, active_document)
-                .await
-                .is_err(),
-            "active extraction lease must fence document deletion"
-        );
-        let diagnostics = serde_json::json!({});
-        crate::bid::finish_extract_run(
-            &pool,
-            crate::bid::FinishExtractRun {
-                id: active_run,
-                claim_token: token,
-                status: "failed",
-                section_total: 0,
-                section_done: 0,
-                error_message: "test cleanup",
-                extractor_mode: "heuristic",
-                model_id: "",
-                policy_version: "cn-tender-v2",
-                prompt_version: "clause-extractor-v2",
-                diagnostics: &diagnostics,
-            },
-        )
-        .await
-        .unwrap();
-        assert!(crate::bid::end_project(&pool, project_id).await.unwrap());
-        assert!(
-            crate::bid::insert_document(
-                &pool,
-                Uuid::new_v4(),
-                project_id,
-                "late.md",
-                "late-hash",
-                1,
-                "objects/late-hash",
-            )
-            .await
-            .is_err()
-        );
-        assert!(
-            crate::bid::insert_extract_run(&pool, Uuid::new_v4(), project_id, None, "manual",)
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn failed_document_persistence_rolls_back_draft_replacement() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let project_id = Uuid::new_v4();
-        let document_id = Uuid::new_v4();
-        let section_id = Uuid::new_v4();
-        let old_clause_id = Uuid::new_v4();
-        let run_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO bid_projects (id, title) VALUES ($1, 'atomic test')")
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO bid_documents
-                (id, project_id, file_name, file_hash, object_key, parse_status, multimodal_status)
-             VALUES ($1, $2, 't.md', 'hash', 'objects/hash', 'completed', 'skipped')",
-        )
-        .bind(document_id)
-        .bind(project_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO bid_sections
-                (id, project_id, document_id, section_key, body, extract_status)
-             VALUES ($1, $2, $3, 'stable-key', 'old body', 'done')",
-        )
-        .bind(section_id)
-        .bind(project_id)
-        .bind(document_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO bid_clauses
-                (id, project_id, section_id, source_document_id, text, family, status)
-             VALUES ($1, $2, $3, $4, 'old draft', 'technical', 'draft')",
-        )
-        .bind(old_clause_id)
-        .bind(project_id)
-        .bind(section_id)
-        .bind(document_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        crate::bid::insert_extract_run(&pool, run_id, project_id, Some(document_id), "manual")
-            .await
-            .unwrap();
-        let token = crate::bid::claim_extract_run(&pool, run_id, project_id, Some(document_id))
-            .await
-            .unwrap()
-            .unwrap();
-        let section = crate::bid::ExtractionSectionRow {
-            id: Uuid::new_v4(),
-            section_key: "stable-key",
-            heading_path: "new heading",
-            hint_family: "technical",
-            body: "new body",
-            extract_status: "done",
-            error_message: "",
-        };
-        let source_span = serde_json::json!({"span_id": "span-1", "quote": "new"});
-        let extraction_meta = serde_json::json!({});
-        let clause = crate::bid::ExtractionClauseRow {
-            id: Uuid::new_v4(),
-            section_key: "stable-key",
-            source_span: &source_span,
-            family_conflict: false,
-            extraction_meta: &extraction_meta,
-            raw_text: "new",
-            text: "new",
-            family: "invalid-family",
-            must: true,
-        };
-        let result = crate::bid::persist_extraction_report(
-            &pool,
-            crate::bid::PersistExtractionReport {
-                run_id,
-                claim_token: token,
-                project_id,
-                document_id,
-                sections: &[section],
-                clauses: &[clause],
-                replace_document: true,
-            },
-        )
-        .await;
-        assert!(result.is_err());
-        let status: String = sqlx::query_scalar("SELECT status FROM bid_clauses WHERE id = $1")
-            .bind(old_clause_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        let body: String = sqlx::query_scalar("SELECT body FROM bid_sections WHERE id = $1")
-            .bind(section_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(status, "draft");
-        assert_eq!(body, "old body");
-    }
-
-    #[tokio::test]
-    async fn workspace_seeds_default_library_and_blocks_delete() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let owner = Uuid::new_v4();
-        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
-            .bind(owner)
-            .bind(format!("{owner}@ex.com"))
-            .execute(&pool)
-            .await
-            .unwrap();
-        let seeded = create_workspace_with_library(&pool, owner, "Acme", "acme")
-            .await
-            .unwrap();
-        let rec = sqlx::query("SELECT name, slug, kind FROM products WHERE id = $1")
-            .bind(seeded.library_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(rec.get::<String, _>("slug"), "library");
-        assert_eq!(rec.get::<String, _>("name"), "公司资料");
-        assert_eq!(rec.get::<String, _>("kind"), "library");
-        let cfg: serde_json::Value =
-            sqlx::query_scalar("SELECT retrieval_config FROM workspaces WHERE id = $1")
-                .bind(seeded.workspace_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(cfg["vector_threshold"], 0.15);
-        assert_eq!(cfg["keyword_threshold"], 0.3);
-        assert_eq!(cfg["embedding_top_k"], 50);
-        match delete_product(&pool, seeded.library_id).await {
-            Err(PersistError::DefaultLibrary) => {}
-            other => panic!("expected DefaultLibrary, got {other:?}"),
-        }
-        let still = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM products WHERE id = $1")
-            .bind(seeded.library_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(still, 1);
-        let company = ensure_company_workspace(&pool).await.unwrap();
-        let kind: String = sqlx::query_scalar("SELECT kind FROM workspaces WHERE id = $1")
-            .bind(company)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(kind, "company");
-        let again = ensure_company_workspace(&pool).await.unwrap();
-        assert_eq!(company, again);
-    }
-
-    #[tokio::test]
-    async fn housekeep_fails_stale_processing_keeps_fresh_span() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let owner = Uuid::new_v4();
-        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
-            .await
-            .unwrap();
-        let seeded = create_workspace_with_library(&pool, owner, "Hk", "hk")
-            .await
-            .unwrap();
-        let stale = Uuid::new_v4();
-        let live = Uuid::new_v4();
-        for id in [stale, live] {
-            insert_document(
-                &pool,
-                NewDocument {
-                    id,
-                    product_version_id: seeded.library_version_id,
-                    title: "t",
-                    file_name: &format!("{id}.txt"),
-                    file_size: 1,
-                    file_hash: &id.to_string(),
-                    object_key: "k",
-                },
-            )
-            .await
-            .unwrap();
-            sqlx::query("UPDATE documents SET parse_status = 'processing', updated_at = now() - interval '3 hours' WHERE id = $1")
-                .bind(id)
-                .execute(&pool)
-                .await
-                .unwrap();
-        }
-        upsert_span(&pool, live, 1, "docreader", "ok", None)
-            .await
-            .unwrap();
-        let n = housekeep_documents(&pool, 2 * 3600 + 10 * 60)
-            .await
-            .unwrap();
-        assert!(n >= 1, "expected at least the stale row");
-        let stale_st: String =
-            sqlx::query_scalar("SELECT parse_status FROM documents WHERE id = $1")
-                .bind(stale)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let live_st: String =
-            sqlx::query_scalar("SELECT parse_status FROM documents WHERE id = $1")
-                .bind(live)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(stale_st, "failed");
-        assert_eq!(live_st, "processing");
-    }
-
-    #[tokio::test]
-    async fn try_set_processing_skips_cancelled() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let owner = Uuid::new_v4();
-        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
-            .await
-            .unwrap();
-        let seeded = create_workspace_with_library(&pool, owner, "Ab", "ab")
-            .await
-            .unwrap();
-        let did = Uuid::new_v4();
-        insert_document(
-            &pool,
-            NewDocument {
-                id: did,
-                product_version_id: seeded.library_version_id,
-                title: "t",
-                file_name: "t.txt",
-                file_size: 1,
-                file_hash: "h",
-                object_key: "k",
-            },
-        )
-        .await
-        .unwrap();
-        assert!(try_set_processing(&pool, did).await.unwrap());
-        let st: String = sqlx::query_scalar("SELECT parse_status FROM documents WHERE id = $1")
-            .bind(did)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(st, "processing");
-        set_parse_status(&pool, did, "cancelled", "").await.unwrap();
-        assert!(!try_set_processing(&pool, did).await.unwrap());
-        let st: String = sqlx::query_scalar("SELECT parse_status FROM documents WHERE id = $1")
-            .bind(did)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(st, "cancelled");
-    }
-
-    #[tokio::test]
-    async fn release_object_ref_drops_at_zero() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        bump_object_ref(&pool, "abc", 3).await.unwrap();
-        bump_object_ref(&pool, "abc", 3).await.unwrap();
-        assert_eq!(release_object_ref(&pool, "abc").await.unwrap(), 1);
-        let n: i32 = sqlx::query_scalar("SELECT refcount FROM content_objects WHERE hash = 'abc'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(n, 1);
-        assert_eq!(release_object_ref(&pool, "abc").await.unwrap(), 0);
-        let left: Option<i32> =
-            sqlx::query_scalar("SELECT refcount FROM content_objects WHERE hash = 'abc'")
-                .fetch_optional(&pool)
-                .await
-                .unwrap();
-        assert!(left.is_none());
-    }
-
-    #[tokio::test]
-    async fn api_key_roundtrip_and_chunk_embedding_persist() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let owner = Uuid::new_v4();
-        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
-            .await
-            .unwrap();
-        let seeded = create_workspace_with_library(&pool, owner, "Ak", "ak")
-            .await
-            .unwrap();
-        let kid = Uuid::new_v4();
-        insert_api_key(
-            &pool,
-            NewApiKey {
-                id: kid,
-                name: "ci",
-                key_hash: "hash-abc",
-                prefix: "kb_abc",
-                scope_type: "workspace",
-                scope_id: seeded.workspace_id,
-                scopes: &["search".into()],
-            },
-        )
-        .await
-        .unwrap();
-        let found = find_api_key_by_hash(&pool, "hash-abc").await.unwrap();
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().scope_id, seeded.workspace_id);
-
-        let did = Uuid::new_v4();
-        insert_document(
-            &pool,
-            NewDocument {
-                id: did,
-                product_version_id: seeded.library_version_id,
-                title: "t",
-                file_name: "t.txt",
-                file_size: 4,
-                file_hash: "hh",
-                object_key: "objects/hh",
-            },
-        )
-        .await
-        .unwrap();
-        let dup = find_duplicate_document(&pool, seeded.library_version_id, "t.txt", 4, "hh")
-            .await
-            .unwrap();
-        assert_eq!(dup, Some(did));
-        let cid = Uuid::new_v4();
-        let ch = domain::Chunk {
-            id: cid,
-            document_id: did,
-            product_version_id: seeded.library_version_id,
-            chunk_type: "text".into(),
-            content: "40Gbps throughput".into(),
-            context_header: String::new(),
-            start_at: 0,
-            end_at: 17,
-            parent_chunk_id: None,
-            generated_questions: vec![],
-        };
-        let emb = domain::ChunkEmbedding {
-            chunk_id: cid,
-            product_version_id: seeded.library_version_id,
-            document_id: did,
-            content: "40Gbps throughput".into(),
-            vector: vec![0.1; models::EMBEDDING_DIM],
-            tsv: "40gbps throughput".into(),
-        };
-        replace_document_chunks(&pool, did, &[ch], &[emb])
-            .await
-            .unwrap();
-        let img = domain::Chunk {
-            id: Uuid::new_v4(),
-            document_id: did,
-            product_version_id: seeded.library_version_id,
-            chunk_type: "image_ocr".into(),
-            content: "ocr".into(),
-            context_header: "images/p1.jpg".into(),
-            start_at: 0,
-            end_at: 3,
-            parent_chunk_id: Some(cid),
-            generated_questions: vec![],
-        };
-        insert_document_chunks(&pool, &[img], &[]).await.unwrap();
-        delete_image_chunks(&pool, did, "images/p1.jpg")
-            .await
-            .unwrap();
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
-            .bind(did)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(n, 1);
-        let dim: i32 = sqlx::query_scalar(
-            "SELECT vector_dims(embedding)::int FROM chunk_embeddings WHERE chunk_id = $1",
-        )
-        .bind(cid)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(dim, models::EMBEDDING_DIM as i32);
-
-        sqlx::query("UPDATE documents SET enable_status = 'enabled' WHERE id = $1")
-            .bind(did)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let qv = vector_literal(&vec![0.1; models::EMBEDDING_DIM]);
-        let hits = hybrid_search_pg(
-            &pool,
-            seeded.library_version_id,
-            "throughput",
-            &qv,
-            &[],
-            true,
-            8,
-        )
-        .await
-        .unwrap();
-        assert!(
-            hits.iter().any(|h| h.chunk_id == cid),
-            "pg hybrid search missed chunk"
-        );
-        assert!(hits[0].vec_score > 0.9, "cosine {}", hits[0].vec_score);
-        sqlx::query(
-            "UPDATE product_versions SET indexing_strategy = '{\"vector\":false,\"keyword\":true}'::jsonb
-             WHERE id = $1",
-        )
-        .bind(seeded.library_version_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "UPDATE chunk_embeddings SET tsv = to_tsvector('simple', content) WHERE chunk_id = $1",
-        )
-        .bind(cid)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let kw_only = hybrid_search_pg(
-            &pool,
-            seeded.library_version_id,
-            "throughput",
-            &qv,
-            &[],
-            true,
-            8,
-        )
-        .await
-        .unwrap();
-        assert!(
-            kw_only.iter().any(|h| h.chunk_id == cid),
-            "keyword-only channel must still recall the chunk"
-        );
-        assert!(
-            kw_only.iter().all(|h| h.vec_score == 0.0),
-            "vector channel must stay off"
-        );
-    }
-
-    #[tokio::test]
-    async fn hydrate_workspace_fills_empty_store() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let owner = Uuid::new_v4();
-        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
-            .await
-            .unwrap();
-        let seeded = create_workspace_with_library(&pool, owner, "Hy", "hy")
-            .await
-            .unwrap();
-        let mut store = domain::Store::default();
-        assert!(
-            hydrate_workspace(&pool, &mut store, seeded.workspace_id)
-                .await
-                .unwrap()
-        );
-        assert!(store.workspaces.contains_key(&seeded.workspace_id));
-        assert_eq!(
-            store.members.get(&(seeded.workspace_id, owner)).copied(),
-            Some(domain::Role::Owner)
-        );
-        assert_eq!(store.products[&seeded.library_id].slug, "library");
-        assert!(store.versions.contains_key(&seeded.library_version_id));
-        let ids = workspaces_for_user(&pool, owner).await.unwrap();
-        assert_eq!(ids, vec![seeded.workspace_id]);
-    }
-
-    #[tokio::test]
-    async fn set_finalizing_only_from_processing() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let owner = Uuid::new_v4();
-        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
-            .await
-            .unwrap();
-        let seeded = create_workspace_with_library(&pool, owner, "Fz", "fz")
-            .await
-            .unwrap();
-        let did = Uuid::new_v4();
-        insert_document(
-            &pool,
-            NewDocument {
-                id: did,
-                product_version_id: seeded.library_version_id,
-                title: "d",
-                file_name: "d.txt",
-                file_size: 1,
-                file_hash: "fz1",
-                object_key: "objects/fz1",
-            },
-        )
-        .await
-        .unwrap();
-        assert!(!set_finalizing(&pool, did, 3).await.unwrap());
-        sqlx::query("UPDATE documents SET parse_status = 'processing' WHERE id = $1")
-            .bind(did)
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert!(set_finalizing(&pool, did, 3).await.unwrap());
-        let (st, n): (String, i32) = sqlx::query_as(
-            "SELECT parse_status, pending_subtasks_count FROM documents WHERE id = $1",
-        )
-        .bind(did)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(st, "finalizing");
-        assert_eq!(n, 3);
-        assert!(!set_finalizing(&pool, did, 9).await.unwrap());
-        let n2: i32 =
-            sqlx::query_scalar("SELECT pending_subtasks_count FROM documents WHERE id = $1")
-                .bind(did)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(n2, 3);
-    }
-
-    #[tokio::test]
-    async fn persist_graph_unions_chunk_ids() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let owner = Uuid::new_v4();
-        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
-            .await
-            .unwrap();
-        let seeded = create_workspace_with_library(&pool, owner, "Fg", "fg")
-            .await
-            .unwrap();
-        let did = Uuid::new_v4();
-        insert_document(
-            &pool,
-            NewDocument {
-                id: did,
-                product_version_id: seeded.library_version_id,
-                title: "d",
-                file_name: "d.txt",
-                file_size: 1,
-                file_hash: "fg1",
-                object_key: "objects/fg1",
-            },
-        )
-        .await
-        .unwrap();
-        let c1 = Uuid::new_v4();
-        let c2 = Uuid::new_v4();
-        let mut a = domain::Store::default();
-        a.upsert_node(seeded.library_version_id, did, "Alpha", c1);
-        persist_graph_for_document(&pool, &a, did).await.unwrap();
-        let mut b = domain::Store::default();
-        b.upsert_node(seeded.library_version_id, did, "Alpha", c2);
-        persist_graph_for_document(&pool, &b, did).await.unwrap();
-        let ids: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT chunk_ids FROM graph_nodes
-             WHERE document_id = $1 AND name = 'Alpha'",
-        )
-        .bind(did)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(ids.len(), 2, "{ids:?}");
-        assert!(ids.contains(&c1));
-        assert!(ids.contains(&c2));
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM graph_nodes WHERE document_id = $1")
-            .bind(did)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(n, 1);
-    }
-
-    #[tokio::test]
-    async fn hydrate_reads_question_generation_config() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let owner = Uuid::new_v4();
-        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
-            .await
-            .unwrap();
-        let seeded = create_workspace_with_library(&pool, owner, "Hq", "hq")
-            .await
-            .unwrap();
-        update_version_config(
-            &pool,
-            seeded.library_version_id,
-            VersionConfig {
-                status: None,
-                chunking: Some(serde_json::json!({
-                    "chunk_size": 512,
-                    "chunk_overlap": 80,
-                    "strategy": "auto",
-                    "enable_parent_child": true,
-                    "parent_chunk_size": 2000,
-                    "child_chunk_size": 200,
-                    "separators": ["\n\n", "。"],
-                    "token_limit": 256,
-                    "languages": ["zh"],
-                    "table_metadata_instructions": "units in Mbps"
-                })),
-                indexing: None,
-                image_processing: None,
-                embedding_model_id: None,
-                summary_model_id: None,
-                asr_model_id: None,
-                asr_config: None,
-                extract_config: None,
-                wiki_config: None,
-                question_generation_config: Some(serde_json::json!({
-                    "enabled": true,
-                    "question_count": 7,
-                    "custom_instructions": "for auditors"
-                })),
-            },
-        )
-        .await
-        .unwrap();
-        let mut store = domain::Store::default();
-        assert!(
-            hydrate_workspace(&pool, &mut store, seeded.workspace_id)
-                .await
-                .unwrap()
-        );
-        let v = &store.versions[&seeded.library_version_id];
-        assert_eq!(v.question_count(), 7);
-        assert_eq!(v.question_custom_instructions, "for auditors");
-        assert!(v.question_enabled);
-        assert_eq!(v.parent_chunk_size(), 2000);
-        assert_eq!(v.child_chunk_size(), 200);
-        assert_eq!(v.chunk_separators, ["\n\n", "。"]);
-        assert_eq!(v.chunk_token_limit, 256);
-        assert_eq!(v.chunk_languages, ["zh"]);
-        assert!(v.enable_parent_child);
-        assert_eq!(v.table_metadata_instructions, "units in Mbps");
-    }
-
-    #[tokio::test]
-    async fn hydrate_workspace_loads_tags_graph_wiki_chunks() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let owner = Uuid::new_v4();
-        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
-            .await
-            .unwrap();
-        let seeded = create_workspace_with_library(&pool, owner, "Hx", "hx")
-            .await
-            .unwrap();
-        let tag_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO tags (id, workspace_id, name, slug) VALUES ($1,$2,'iso','iso')")
-            .bind(tag_id)
-            .bind(seeded.workspace_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let did = Uuid::new_v4();
-        insert_document(
-            &pool,
-            NewDocument {
-                id: did,
-                product_version_id: seeded.library_version_id,
-                title: "cert",
-                file_name: "cert.txt",
-                file_size: 4,
-                file_hash: "hyd1",
-                object_key: "objects/hyd1",
-            },
-        )
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO document_tags (document_id, tag_id) VALUES ($1,$2)")
-            .bind(did)
-            .bind(tag_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let cid = Uuid::new_v4();
-        replace_document_chunks(
-            &pool,
-            did,
-            &[domain::Chunk {
-                id: cid,
-                document_id: did,
-                product_version_id: seeded.library_version_id,
-                chunk_type: "text".into(),
-                content: "iso certified".into(),
-                context_header: String::new(),
-                start_at: 0,
-                end_at: 13,
-                parent_chunk_id: None,
-                generated_questions: vec![],
-            }],
-            &[domain::ChunkEmbedding {
-                chunk_id: cid,
-                product_version_id: seeded.library_version_id,
-                document_id: did,
-                content: "iso certified".into(),
-                vector: vec![0.3; models::EMBEDDING_DIM],
-                tsv: String::new(),
-            }],
-        )
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO graph_nodes (product_version_id, document_id, name, chunk_ids)
-             VALUES ($1,$2,'Widget',$3)",
-        )
-        .bind(seeded.library_version_id)
-        .bind(did)
-        .bind(&[cid][..])
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO graph_relations
-                (product_version_id, document_id, node1, node2, rel_type)
-             VALUES ($1,$2,'Widget','Spec','mentions')",
-        )
-        .bind(seeded.library_version_id)
-        .bind(did)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let page_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO wiki_pages (id, product_version_id, slug, title, content, status)
-             VALUES ($1,$2,'overview','Overview','wiki body','published')",
-        )
-        .bind(page_id)
-        .bind(seeded.library_version_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let mut store = domain::Store::default();
-        assert!(
-            hydrate_workspace(&pool, &mut store, seeded.workspace_id)
-                .await
-                .unwrap()
-        );
-        assert!(store.tags.contains_key(&tag_id));
-        assert!(store.document_tags.contains(&(did, tag_id)));
-        assert!(store.chunks.contains_key(&cid));
-        assert!(store.embeddings.contains_key(&cid));
-        assert_eq!(store.chunks[&cid].content, "iso certified");
-        assert!(
-            store
-                .graph
-                .contains_key(&(seeded.library_version_id, did, "Widget".into()))
-        );
-        assert!(store.relations.contains_key(&(
-            seeded.library_version_id,
-            did,
-            "Widget".into(),
-            "Spec".into(),
-            "mentions".into()
-        )));
-        assert!(
-            store
-                .wiki
-                .contains_key(&(seeded.library_version_id, "overview".into()))
-        );
-        assert_eq!(
-            store.wiki[&(seeded.library_version_id, "overview".into())].content,
-            "wiki body"
-        );
-        let gh = graph_hits_pg(&pool, seeded.library_version_id, "Widget", 10, &[])
-            .await
-            .unwrap();
-        assert!(
-            gh.iter()
-                .any(|h| h.name == "Widget" && h.document_id == did),
-            "{gh:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn persist_document_tags_and_dead_letters() {
-        let _g = db_lock().await;
-        let Some(pool) = setup().await else {
-            return;
-        };
-        let owner = Uuid::new_v4();
-        insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
-            .await
-            .unwrap();
-        let seeded = create_workspace_with_library(&pool, owner, "Tg", "tg")
-            .await
-            .unwrap();
-        let tag_id = Uuid::new_v4();
-        insert_tag(&pool, tag_id, seeded.workspace_id, "iso", "iso")
-            .await
-            .unwrap();
-        let did = Uuid::new_v4();
-        insert_document(
-            &pool,
-            NewDocument {
-                id: did,
-                product_version_id: seeded.library_version_id,
-                title: "cert",
-                file_name: "cert.txt",
-                file_size: 4,
-                file_hash: "tag1",
-                object_key: "objects/tag1",
-            },
-        )
-        .await
-        .unwrap();
-        insert_document_tags(&pool, did, &[tag_id]).await.unwrap();
-        insert_dead_letter(&pool, domain::TYPE_DOCUMENT_PROCESS, did, "parse failed")
-            .await
-            .unwrap();
-        let mut store = domain::Store::default();
-        assert!(
-            hydrate_workspace(&pool, &mut store, seeded.workspace_id)
-                .await
-                .unwrap()
-        );
-        assert!(store.tags.contains_key(&tag_id));
-        assert!(store.document_tags.contains(&(did, tag_id)));
-        replace_document_tags(&pool, did, &[]).await.unwrap();
-        store = domain::Store::default();
-        hydrate_workspace(&pool, &mut store, seeded.workspace_id)
-            .await
-            .unwrap();
-        assert!(!store.document_tags.contains(&(did, tag_id)));
-        let letters = list_dead_letters(&pool).await.unwrap();
-        assert!(
-            letters
-                .iter()
-                .any(|l| l.related_id == did && l.last_error.contains("parse failed")),
-            "{letters:?}"
-        );
-        assert!(count_dead_letters(&pool).await.unwrap() >= 1);
+            .split("pub async fn connect_for_first_launch_migration")
+            .next()
+            .unwrap();
+        assert!(connect_body.contains("verify_schema_identity"));
+        assert!(!connect_body.contains("apply_fresh_baseline"));
     }
 }

@@ -55,12 +55,15 @@ use domain::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sqlx::Row;
 use std::collections::HashMap;
 use uuid::Uuid;
 
 pub fn build(state: AppState) -> Router {
     let app = Router::<AppState>::new()
         .route("/health", get_s(health))
+        .route("/live", get_s(live))
+        .route("/ready", get_s(ready))
         .route("/api/v1/auth/register", post_s(register))
         .route("/api/v1/auth/login", post_s(login))
         .route("/api/v1/me", get_s(me).merge(patch_s(patch_me)))
@@ -142,6 +145,7 @@ pub fn build(state: AppState) -> Router {
         .route("/api/v1/documents/{id}/reparse", post_s(reparse_document))
         .route("/api/v1/documents/{id}/cancel", post_s(cancel_document))
         .route("/api/v1/documents/{id}/timeline", get_s(timeline))
+        .route("/api/v1/documents/{id}/content", get_s(document_content))
         .route(
             "/api/v1/workspaces/{id}/tags",
             get_s(list_tags).merge(post_s(create_tag)),
@@ -200,12 +204,11 @@ pub fn build(state: AppState) -> Router {
             get_s(list_bid_clauses).merge(post_s(add_bid_clause)),
         )
         .route("/api/v1/bids/{id}/clauses/{cid}", patch_s(patch_bid_clause))
-        .route("/api/v1/bids/{id}/match", post_s(run_bid_match))
+        .route("/api/v1/bids/{id}/matching/schedule", post_s(run_bid_match))
         .route(
-            "/api/v1/bids/{id}/picks",
-            get_s(list_bid_picks).merge(post_s(upsert_bid_pick)),
+            "/api/v1/bids/{id}/matching/routes/{route_id}/pick-set",
+            get_s(get_route_pick_set).merge(put_s(replace_route_pick_set)),
         )
-        .route("/api/v1/bids/{id}/picks/{pid}", delete_s(delete_bid_pick))
         .route(
             "/api/v1/bids/{id}/shots",
             get_s(list_bid_shots).merge(post_s(upload_bid_shot)),
@@ -278,6 +281,20 @@ async fn health(State(_state): State<AppState>) -> Json<HealthBody> {
         status: "ok",
         service: "api",
     })
+}
+
+async fn live() -> Json<storage::LiveBody> {
+    Json(storage::live_body("api"))
+}
+
+async fn ready() -> (StatusCode, Json<storage::ReadyBody>) {
+    let check = storage::check_readiness().await;
+    let status = if check.is_ready() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(storage::ready_body("api", &check)))
 }
 
 type ApiErr = (StatusCode, Json<ErrorBody>);
@@ -1789,7 +1806,7 @@ struct DocView {
     product_version_id: Uuid,
     title: String,
     file_name: String,
-    object_key: String,
+    object_ref: String,
     parse_status: ParseStatus,
     enable_status: String,
     index_ready: bool,
@@ -1805,7 +1822,7 @@ impl DocView {
             product_version_id: d.product_version_id,
             title: d.title.clone(),
             file_name: d.file_name.clone(),
-            object_key: d.object_key.clone(),
+            object_ref: d.object_ref.clone(),
             parse_status: d.parse_status,
             enable_status: d.enable_status.clone(),
             index_ready: d.index_ready,
@@ -2005,7 +2022,7 @@ async fn persist_ingest_row(doc: &Document, tag_ids: &[Uuid]) -> Result<(), ApiE
             file_name: &doc.file_name,
             file_size: doc.file_size,
             file_hash: &doc.file_hash,
-            object_key: &doc.object_key,
+            object_ref: &doc.object_ref,
         },
     )
     .await
@@ -2036,7 +2053,6 @@ async fn persist_ingest_row(doc: &Document, tag_ids: &[Uuid]) -> Result<(), ApiE
     }
     let _ = storage::set_document_source(&pool, doc.id, &doc.doc_type, &doc.source_passages).await;
     let _ = storage::insert_document_tags(&pool, doc.id, tag_ids).await;
-    let _ = storage::bump_object_ref(&pool, &doc.file_hash, doc.file_size).await;
     if let Some(o) = &doc.process_overrides {
         let _ = storage::set_process_overrides(&pool, doc.id, o).await;
     }
@@ -2070,7 +2086,7 @@ fn rollback_ingest(state: &AppState, doc: &Document) {
         s.queue.retain(|j| {
             j.payload.get("document_id").and_then(|v| v.as_str()) != Some(&doc.id.to_string())
         });
-        storage::drop_ref(&mut s, &doc.file_hash);
+        storage::discard_unpersisted_object(&mut s, &doc.file_hash);
     }
 }
 
@@ -2099,7 +2115,13 @@ async fn push_document_job(s: &std::sync::Mutex<domain::Store>, doc: &mut Docume
         return;
     }
     match runtime::enqueue_document_process(doc.id, doc.product_version_id, doc.attempt).await {
-        Ok(_) => {}
+        Ok(_) => {
+            tracing::info!(
+                document_id = %doc.id,
+                job = "document:process",
+                "enqueue"
+            );
+        }
         Err(e) => {
             if let Ok(mut store) = s.lock() {
                 store.fail_document(doc.id, &e);
@@ -2442,6 +2464,79 @@ async fn get_document(
         .workspace_id;
     require_ws(&s, ws, &actor, false, false)?;
     Ok(Json(DocView::from(d)))
+}
+
+async fn document_content(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiErr> {
+    let actor = actor_from(&headers, &state).await?;
+    if let Ok(pool) = storage::connect().await
+        && let Ok(Some(ws)) = storage::document_workspace_id(&pool, id).await
+    {
+        ensure_workspace(&state, ws).await;
+    }
+    let meta = {
+        let s = lock(&state)?;
+        let d = s.documents.get(&id).ok_or_else(|| not_found("document"))?;
+        let vid = d.product_version_id;
+        let pid = s
+            .versions
+            .get(&vid)
+            .ok_or_else(|| not_found("version"))?
+            .product_id;
+        let ws = s
+            .products
+            .get(&pid)
+            .ok_or_else(|| not_found("product"))?
+            .workspace_id;
+        require_ws(&s, ws, &actor, false, false)?;
+        d.clone()
+    };
+    let mut chunks: Vec<domain::Chunk> = {
+        let s = lock(&state)?;
+        s.chunks
+            .values()
+            .filter(|c| c.document_id == id)
+            .cloned()
+            .collect()
+    };
+    if let Ok(pool) = storage::connect().await
+        && let Ok(pg) = storage::load_document_chunks(&pool, id).await
+        && !pg.is_empty()
+    {
+        chunks = pg;
+    }
+    chunks.sort_by_key(|c| (c.start_at, c.id));
+    let mut markdown = meta.markdown.clone();
+    if markdown.is_empty()
+        && !meta.file_hash.is_empty()
+        && let Ok(bytes) = storage::read_blob(&format!("{}.md", meta.file_hash))
+    {
+        markdown = String::from_utf8_lossy(&bytes).into_owned();
+    }
+    Ok(Json(json!({
+        "id": meta.id,
+        "title": meta.title,
+        "file_name": meta.file_name,
+        "object_ref": meta.object_ref,
+        "file_hash": meta.file_hash,
+        "parse_status": meta.parse_status,
+        "index_ready": meta.index_ready,
+        "error_message": meta.error_message,
+        "description": meta.description,
+        "markdown": markdown,
+        "chunks": chunks.iter().map(|c| json!({
+            "id": c.id,
+            "chunk_type": c.chunk_type,
+            "content": c.content,
+            "context_header": c.context_header,
+            "start_at": c.start_at,
+            "end_at": c.end_at,
+            "generated_questions": c.generated_questions,
+        })).collect::<Vec<_>>(),
+    })))
 }
 
 async fn delete_document(
@@ -2890,8 +2985,8 @@ async fn version_file(
 fn version_references_key(s: &Store, version_id: Uuid, key: &str, hash: &str) -> bool {
     s.documents.values().any(|d| {
         d.product_version_id == version_id
-            && (d.object_key == key
-                || d.object_key.ends_with(hash)
+            && (d.object_ref == key
+                || d.object_ref.ends_with(hash)
                 || d.file_hash == hash
                 || d.markdown.contains(key)
                 || d.markdown.contains(hash))
@@ -3607,7 +3702,7 @@ fn bid_project_from_row(r: &sqlx::postgres::PgRow) -> bid::ProjectView {
 
 async fn require_bid_pool() -> Result<sqlx::PgPool, ApiErr> {
     storage::connect().await.map_err(|error| {
-        eprintln!("bid database unavailable: {error}");
+        tracing::error!(error = %error, "bid database unavailable");
         fail(
             StatusCode::SERVICE_UNAVAILABLE,
             "DATABASE_UNAVAILABLE",
@@ -3617,7 +3712,7 @@ async fn require_bid_pool() -> Result<sqlx::PgPool, ApiErr> {
 }
 
 fn bid_query_failed(operation: &str, error: impl std::fmt::Display) -> ApiErr {
-    eprintln!("bid {operation} failed: {error}");
+    tracing::error!(operation, error = %error, "bid query failed");
     fail(
         StatusCode::INTERNAL_SERVER_ERROR,
         "INTERNAL",
@@ -3630,7 +3725,7 @@ async fn require_open_project(pool: &sqlx::PgPool, id: Uuid) -> Result<(), ApiEr
     let row = storage::bid::get_project(pool, id)
         .await
         .map_err(|error| {
-            eprintln!("bid project lookup failed: {error}");
+            tracing::error!(error = %error, "bid project lookup failed");
             fail(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL",
@@ -3707,20 +3802,18 @@ async fn get_bid(
     let match_running = storage::bid::any_match_running(&pool, id)
         .await
         .map_err(|error| bid_query_failed("match status", error))?;
-    let match_jobs = storage::bid::current_match_jobs(&pool, id)
+    let match_jobs = storage::bid_matching::current_route_jobs(&pool, id)
         .await
         .map_err(|error| bid_query_failed("match jobs", error))?
         .iter()
         .map(|row| {
             json!({
                 "id": row.get::<Uuid, _>("id"),
-                "job_kind": row.get::<String, _>("job_kind"),
+                "job_kind": row.get::<String, _>("route_kind"),
                 "unit_id": row.get::<Option<Uuid>, _>("unit_id"),
                 "status": row.get::<String, _>("status"),
-                "tech_status": row.get::<String, _>("tech_status"),
-                "commercial_status": row.get::<String, _>("commercial_status"),
-                "tech_candidates": row.get::<serde_json::Value, _>("tech_candidates"),
-                "error_message": row.get::<String, _>("error_message")
+                "error_message": row.try_get::<Option<String>, _>("error_detail").ok().flatten().unwrap_or_default(),
+                "terminal_error_code": row.try_get::<Option<String>, _>("terminal_error_code").ok().flatten()
             })
         })
         .collect::<Vec<_>>();
@@ -3759,18 +3852,20 @@ async fn get_bid(
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
             let error_message = row.get::<String, _>("error_message");
-            let partial_failure = failed_documents > 0
-                || diagnostics
-                    .get("partial_failure")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
-                || error_message.contains("partial_failure");
             json!({
                 "id": row.get::<Uuid, _>("id"),
                 "status": row.get::<String, _>("status"),
                 "extractor_mode": row.get::<String, _>("extractor_mode"),
                 "failed_documents": failed_documents,
-                "partial_failure": partial_failure,
+                "partial_failure": row.get::<bool, _>("partial_failure"),
+                "target_count": row.get::<i64, _>("target_count"),
+                "published_target_count": row.get::<i64, _>("published_target_count"),
+                "scoped_section_count": row.get::<Option<i64>, _>("scoped_section_count"),
+                "published_section_count": row.get::<i64, _>("published_section_count"),
+                "partial_publication": row.get::<bool, _>("partial_publication"),
+                "worst_quality_status": row.get::<String, _>("worst_quality_status"),
+                "degraded": row.get::<bool, _>("degraded"),
+                "reason_codes": row.get::<Vec<String>, _>("reason_codes"),
                 "diagnostics": {
                     "coverage": {
                         "candidate_spans": coverage_sum("candidate_spans"),
@@ -3838,7 +3933,7 @@ async fn list_bid_docs(
                 "extract_status": r.get::<Option<String>, _>("extract_status"),
                 "extract_error": r.get::<Option<String>, _>("extract_error"),
                 "clause_count": r.get::<i64, _>("clause_count"),
-                "object_key": r.get::<String, _>("object_key"),
+                "object_ref": r.get::<String, _>("object_ref"),
             })
         })
         .collect();
@@ -3872,7 +3967,7 @@ async fn upload_bid_doc(
         return Err(validation("file required"));
     }
     let hash = domain::sha256_hex(&bytes);
-    let key = storage::object_key(&hash);
+    let key = storage::object_ref(&hash);
     storage::write_blob_async(&hash, &bytes)
         .await
         .map_err(|_| {
@@ -3886,7 +3981,12 @@ async fn upload_bid_doc(
     storage::bid::insert_document(&pool, did, id, &file_name, &hash, bytes.len() as i64, &key)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", e.to_string()))?;
-    // The pending row is durable; housekeeping re-enqueues it if Redis is temporarily unavailable.
+    tracing::info!(
+        document_id = %did,
+        job = "bid:convert",
+        file = %file_name,
+        "enqueue"
+    );
     let _ = runtime::enqueue_bid_convert(did).await;
     Ok((
         StatusCode::CREATED,
@@ -3953,7 +4053,7 @@ async fn retry_bid_doc(
     if !reset {
         return Err(not_found("document"));
     }
-    // The pending row is durable; housekeeping re-enqueues it if Redis is temporarily unavailable.
+    tracing::info!(document_id = %did, job = "bid:convert", "enqueue");
     let _ = runtime::enqueue_bid_convert(did).await;
     Ok(StatusCode::ACCEPTED)
 }
@@ -3995,7 +4095,7 @@ async fn reextract_bid(
                 "could not create extraction run",
             )
         })?;
-    // The pending run is durable; housekeeping re-enqueues it if Redis is temporarily unavailable.
+    tracing::info!(run_id = %run_id, project_id = %id, job = "bid:extract", "enqueue");
     let _ = runtime::enqueue_bid_extract(run_id, id, None).await;
     Ok(StatusCode::ACCEPTED)
 }
@@ -4238,10 +4338,9 @@ async fn add_bid_clause(
     Ok((StatusCode::CREATED, Json(json!({ "id": cid }))))
 }
 
-async fn enqueue_bid_match(pool: &sqlx::PgPool, project_id: Uuid) -> Result<(), ApiErr> {
-    bid::schedule_match(pool, project_id)
+async fn enqueue_bid_match(pool: &sqlx::PgPool, project_id: Uuid) -> Result<Option<Uuid>, ApiErr> {
+    bid::schedule_dirty_and_enqueue(pool, project_id)
         .await
-        .map(|_| ())
         .map_err(|error| {
             fail(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -4259,186 +4358,147 @@ async fn run_bid_match(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open_project(&pool, id).await?;
-    enqueue_bid_match(&pool, id).await?;
+    let _ = enqueue_bid_match(&pool, id).await?;
     Ok(StatusCode::ACCEPTED)
 }
 
-#[derive(Deserialize)]
-struct PickQ {
-    #[serde(default)]
-    unit_id: Option<Uuid>,
-}
-
-async fn list_bid_picks(
+async fn get_route_pick_set(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
-    Query(q): Query<PickQ>,
+    Path((project_id, route_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let _ = actor_from(&headers, &state).await?;
-    let Some(unit) = q.unit_id else {
-        return Err(validation("unit_id required"));
-    };
     let pool = require_bid_pool().await?;
-    let picks = storage::bid::list_picks_for_unit(&pool, id, Some(unit))
+    let report = storage::bid_matching::current_route_report(&pool, project_id, route_id)
         .await
-        .map_err(|error| bid_query_failed("pick list", error))?;
-    use sqlx::Row;
-    let picks: Vec<_> = picks
-        .iter()
-        .map(|r| {
-            json!({
-                "product_id": r.get::<Uuid, _>("product_id"),
-                "unit_id": r.try_get::<Uuid, _>("unit_id").unwrap_or(uuid::Uuid::nil()),
-                "version_id": r.get::<Uuid, _>("version_id"),
-                "score": r.get::<f64, _>("score"),
-                "coverage": r.get::<f64, _>("coverage"),
-                "clauses": r.get::<serde_json::Value, _>("clauses"),
-            })
-        })
-        .collect();
-    let job = storage::bid::latest_match_job_for_unit(&pool, id, Some(unit))
+        .map_err(|error| bid_query_failed("route report", error))?
+        .ok_or_else(|| not_found("current matching route"))?;
+    let items = storage::bid_matching::current_route_pick_items(&pool, project_id, route_id)
         .await
-        .map_err(|error| bid_query_failed("latest unit match", error))?;
-    let candidates = job
-        .as_ref()
-        .and_then(|j| j.try_get("tech_candidates").ok())
-        .unwrap_or(json!([]));
-    Ok(Json(json!({ "picks": picks, "candidates": candidates })))
+        .map_err(|error| bid_query_failed("route pick set", error))?;
+    let candidates =
+        storage::bid_matching::current_route_supported_candidates(&pool, project_id, route_id)
+            .await
+            .map_err(|error| bid_query_failed("route supported candidates", error))?;
+    Ok(Json(json!({
+        "route_id": route_id,
+        "route_kind": report.get::<String, _>("route_kind"),
+        "unit_id": report.get::<Option<Uuid>, _>("unit_id"),
+        "source_report_artifact_id": report.get::<Uuid, _>("report_id"),
+        "report_sha256": report.get::<String, _>("content_sha256"),
+        "report_generation": report.get::<i64, _>("generation"),
+        "matching_mutation_watermark": report.get::<i64, _>("mutation_watermark"),
+        "revision": report.get::<i64, _>("pick_revision"),
+        "items": items.iter().map(|row| json!({
+            "requirement_artifact_id": row.get::<Uuid, _>("requirement_artifact_id"),
+            "candidate_artifact_id": row.get::<Uuid, _>("candidate_artifact_id"),
+            "product_id": row.get::<Option<Uuid>, _>("product_id"),
+            "product_version_id": row.get::<Uuid, _>("product_version_id"),
+            "unit_id": row.get::<Option<Uuid>, _>("unit_id"),
+            "selected_by": row.get::<String, _>("selected_by"),
+            "selected_at": row.get::<chrono::DateTime<chrono::Utc>, _>("selected_at"),
+        })).collect::<Vec<_>>(),
+        "supported_candidates": candidates.iter().map(|row| json!({
+            "requirement_artifact_id": row.get::<Uuid, _>("requirement_artifact_id"),
+            "candidate_artifact_id": row.get::<Uuid, _>("candidate_artifact_id"),
+            "product_id": row.get::<Option<Uuid>, _>("product_id"),
+            "product_version_id": row.get::<Uuid, _>("product_version_id"),
+            "recommended": row.get::<bool, _>("recommended"),
+            "route_product_ordinal": row.get::<i32, _>("route_product_ordinal"),
+            "retrieval_rank": row.get::<i32, _>("retrieval_rank"),
+            "retrieval_raw_score": row.get::<String, _>("retrieval_raw_score"),
+            "evidence_v1_sha256": row.get::<String, _>("evidence_v1_sha256"),
+        })).collect::<Vec<_>>(),
+    })))
 }
 
-#[derive(Deserialize)]
-struct PickBody {
-    product_id: Uuid,
-    #[serde(default)]
-    unit_id: Option<Uuid>,
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaceRoutePickSetBody {
+    source_report_artifact_id: Uuid,
+    report_sha256: String,
+    expected_revision: i64,
+    items: Vec<storage::bid_matching::PickSelectionV1>,
 }
 
-async fn upsert_bid_pick(
+async fn replace_route_pick_set(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<Uuid>,
-    Json(body): Json<PickBody>,
-) -> Result<StatusCode, ApiErr> {
-    let _ = actor_from(&headers, &state).await?;
+    Path((project_id, route_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<ReplaceRoutePickSetBody>,
+) -> Result<Json<storage::bid_matching::PickSetReceiptV1>, ApiErr> {
+    let actor = actor_from(&headers, &state).await?;
+    let actor_identity = durable_actor_identity(&actor)?;
+    let idempotency_key = required_idempotency_key(&headers)?;
     let pool = require_bid_pool().await?;
-    require_open_project(&pool, id).await?;
-    let Some(unit) = body.unit_id else {
-        return Err(validation("unit_id required"));
-    };
-    let job = storage::bid::latest_match_job_for_unit(&pool, id, Some(unit))
-        .await
-        .map_err(|error| bid_query_failed("latest unit match", error))?;
-    use sqlx::Row;
-    let candidates: Vec<search::Candidate> = job
-        .as_ref()
-        .and_then(|j| j.try_get::<serde_json::Value, _>("tech_candidates").ok())
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-    let Some(c) = candidates
-        .into_iter()
-        .find(|c| c.product_id == body.product_id)
-    else {
+    require_open_project(&pool, project_id).await?;
+    if body.expected_revision < 0 {
+        return Err(validation("expected_revision must be non-negative"));
+    }
+    if body.report_sha256.len() != 64
+        || !body
+            .report_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
         return Err(validation(
-            "product not in current candidates; rematch then pick",
+            "report_sha256 must be 64 lowercase hex characters",
         ));
-    };
-    let clauses = {
-        let tech = storage::bid::confirmed_clauses(&pool, id, "technical")
-            .await
-            .map_err(|error| bid_query_failed("confirmed technical clauses", error))?;
-        use sqlx::Row;
-        json!(
-            c.requirements
-                .iter()
-                .map(|r| {
-                    let row = tech
-                        .iter()
-                        .find(|x| x.get::<Uuid, _>("id").to_string() == r.id);
-                    json!({
-                        "clause_id": r.id,
-                        "text": row.map(|x| x.get::<String, _>("text")).unwrap_or_default(),
-                        "must": row.map(|x| x.get::<bool, _>("must")).unwrap_or(false),
-                        "hit": r.hit,
-                        "hits": r.hits
-                    })
-                })
-                .collect::<Vec<_>>()
-        )
-    };
-    storage::bid::upsert_pick(
+    }
+    let context = storage::bidding::MutationContext::new(actor_identity, idempotency_key, &body)
+        .map_err(|error| validation(&error.to_string()))?;
+    let receipt = storage::bid_matching::replace_route_pick_set(
         &pool,
-        id,
-        unit,
-        c.product_id,
-        c.matched_version_id,
-        c.score,
-        c.coverage,
-        &clauses,
+        storage::bid_matching::ReplaceRoutePickSetV1 {
+            project_id,
+            route_id,
+            source_report_artifact_id: body.source_report_artifact_id,
+            report_sha256: body.report_sha256,
+            expected_revision: body.expected_revision,
+            selections: body.items,
+        },
+        &context,
     )
     .await
-    .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", e.to_string()))?;
-    let part = if unit == bid::unsectioned_unit() {
-        "2:unsectioned".to_string()
-    } else {
-        format!("2:{unit}")
-    };
-    let _ = storage::bid::mark_booklet_stale(&pool, id, &["1", part.as_str(), "3"]).await;
-    for r in &c.requirements {
-        let Ok(cid) = Uuid::parse_str(&r.id) else {
-            continue;
-        };
-        for h in &r.hits {
-            let Some(key) = h.image_object_key.as_deref() else {
-                continue;
-            };
-            let _ = storage::bid::insert_shot(
-                &pool,
-                storage::bid::NewShot {
-                    id: Uuid::new_v4(),
-                    project_id: id,
-                    clause_id: cid,
-                    product_id: c.product_id,
-                    version_id: h.version_id,
-                    source: "matched",
-                    object_key: key,
-                    kb_document_id: Some(h.document_id),
-                    kb_image_ref: Some(key),
-                },
-            )
-            .await;
-        }
-    }
-    Ok(StatusCode::NO_CONTENT)
+    .map_err(route_pick_write_error)?;
+    Ok(Json(receipt))
 }
 
-async fn delete_bid_pick(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path((id, pid)): Path<(Uuid, Uuid)>,
-    Query(q): Query<PickQ>,
-) -> Result<StatusCode, ApiErr> {
-    let _ = actor_from(&headers, &state).await?;
-    let pool = require_bid_pool().await?;
-    require_open_project(&pool, id).await?;
-    let Some(unit) = q.unit_id else {
-        return Err(validation("unit_id required"));
-    };
-    let deleted = storage::bid::delete_pick(&pool, id, unit, pid)
-        .await
-        .map_err(|error| {
-            fail(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL",
-                error.to_string(),
-            )
-        })?;
-    if !deleted {
-        return Err(not_found("pick"));
+fn durable_actor_identity(actor: &Actor) -> Result<String, ApiErr> {
+    match actor {
+        Actor::User(id) => Ok(format!("user:{id}")),
+        Actor::Key(key) => Ok(format!("api_key:{}", key.id)),
+        Actor::Bootstrap => Err(fail(
+            StatusCode::FORBIDDEN,
+            "HUMAN_ACTOR_REQUIRED",
+            "Bootstrap cannot create a human matching selection",
+        )),
     }
-    let part = bid::booklet_key_for_unit(unit);
-    let _ = storage::bid::mark_booklet_stale(&pool, id, &["1", part.as_str(), "3"]).await;
-    Ok(StatusCode::NO_CONTENT)
+}
+
+fn required_idempotency_key(headers: &HeaderMap) -> Result<String, ApiErr> {
+    let value = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 200)
+        .ok_or_else(|| validation("Idempotency-Key header is required"))?;
+    Ok(value.to_string())
+}
+
+fn route_pick_write_error(error: sqlx::Error) -> ApiErr {
+    let message = error.to_string();
+    if message.contains("REVISION_MISMATCH")
+        || message.contains("REPORT_SHA256_MISMATCH")
+        || message.contains("current matching report mismatch")
+        || message.contains("IDEMPOTENCY_PAYLOAD_MISMATCH")
+    {
+        return fail(StatusCode::CONFLICT, "MATCHING_PICK_CONFLICT", message);
+    }
+    if message.contains("supported candidate") || message.contains("HUMAN_ACTOR_REQUIRED") {
+        return validation(&message);
+    }
+    fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", message)
 }
 
 async fn list_bid_units(
@@ -4451,6 +4511,27 @@ async fn list_bid_units(
     let units = bid::list_match_units(&pool, id)
         .await
         .map_err(|error| bid_query_failed("unit list", error))?;
+    let routes = storage::bid_matching::current_routes(&pool, id)
+        .await
+        .map_err(|error| bid_query_failed("matching route list", error))?;
+    let units = units
+        .into_iter()
+        .map(|unit| {
+            let route_id = routes.iter().find_map(|route| {
+                let kind = route.get::<String, _>("route_kind");
+                let route_unit = route.get::<Option<Uuid>, _>("unit_id");
+                ((kind == "commercial" && unit.kind == "commercial")
+                    || (kind == "technical" && route_unit == unit.id))
+                    .then(|| route.get::<Uuid, _>("route_id"))
+            });
+            let mut value = serde_json::to_value(unit).expect("matching unit serializes");
+            value
+                .as_object_mut()
+                .expect("matching unit is an object")
+                .insert("route_id".into(), json!(route_id));
+            value
+        })
+        .collect::<Vec<_>>();
     Ok(Json(json!({ "units": units })))
 }
 
@@ -4523,7 +4604,7 @@ async fn list_bid_shots(
                 "clause_id": r.get::<Uuid, _>("clause_id"),
                 "product_id": r.get::<Uuid, _>("product_id"),
                 "source": r.get::<String, _>("source"),
-                "object_key": r.get::<String, _>("object_key"),
+                "object_ref": r.get::<String, _>("object_ref"),
             })
         })
         .collect();
@@ -4576,7 +4657,7 @@ async fn upload_bid_shot(
         ));
     }
     let hash = domain::sha256_hex(&bytes);
-    let key = storage::object_key(&hash);
+    let key = storage::object_ref(&hash);
     storage::write_blob_async(&hash, &bytes)
         .await
         .map_err(|_| {
@@ -4596,7 +4677,7 @@ async fn upload_bid_shot(
             product_id,
             version_id,
             source: "uploaded",
-            object_key: &key,
+            object_ref: &key,
             kb_document_id: None,
             kb_image_ref: None,
         },
@@ -4616,7 +4697,7 @@ async fn upload_bid_shot(
     }
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "id": sid, "object_key": key })),
+        Json(json!({ "id": sid, "object_ref": key })),
     ))
 }
 
@@ -4664,31 +4745,12 @@ async fn bid_preview(
         .iter()
         .map(|r| clause_from_row(r, &merge))
         .collect();
-    use sqlx::Row;
-    let picks: Vec<serde_json::Value> = storage::bid::list_picks(&pool, id)
+    let picks = bid::visible_pick_json(&pool, id, None)
         .await
-        .map_err(|error| bid_query_failed("preview picks", error))?
-        .iter()
-        .map(|r| {
-            json!({
-                "product_id": r.get::<Uuid, _>("product_id"),
-                "unit_id": r.try_get::<Uuid, _>("unit_id").unwrap_or(uuid::Uuid::nil()),
-                "clauses": r.get::<serde_json::Value, _>("clauses"),
-            })
-        })
-        .collect();
-    let commercial: Vec<serde_json::Value> = storage::bid::list_commercial_hits(&pool, id)
+        .map_err(|error| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", error))?;
+    let commercial = bid::visible_commercial_json(&pool, id)
         .await
-        .map_err(|error| bid_query_failed("preview commercial hits", error))?
-        .iter()
-        .map(|r| {
-            json!({
-                "clause_id": r.get::<Uuid, _>("clause_id").to_string(),
-                "outcome": r.get::<String, _>("outcome"),
-                "file_name": r.try_get::<Option<String>, _>("file_name").ok().flatten(),
-            })
-        })
-        .collect();
+        .map_err(|error| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", error))?;
     let cov = bid::coverage_for(&clauses, &picks);
     Ok(Json(bid::preview_json(
         &project,
@@ -4875,7 +4937,7 @@ mod tests {
                 file_name: "cert.txt",
                 file_size: 4,
                 file_hash: &file_hash,
-                object_key: "objects/merge",
+                object_ref: "objects/merge",
             },
         )
         .await

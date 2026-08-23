@@ -1,14 +1,26 @@
 //! Domain types, parse_status machine, and post_process formula.
 
+mod first_launch_evaluation;
 mod formula;
+mod image_lock;
+mod intended_state;
+pub mod knowledge_retrieval;
 mod process;
+mod queue_registry;
 mod status;
 mod store;
+mod topology_inputs;
 
+pub use first_launch_evaluation::*;
 pub use formula::*;
+pub use image_lock::*;
+pub use intended_state::*;
+pub use knowledge_retrieval::*;
 pub use process::*;
+pub use queue_registry::*;
 pub use status::*;
 pub use store::*;
+pub use topology_inputs::*;
 
 use sha2::{Digest, Sha256};
 use std::net::ToSocketAddrs;

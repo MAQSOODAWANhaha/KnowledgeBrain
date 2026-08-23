@@ -1,0 +1,48 @@
+# CI-only lightweight image override. It retains the production service names,
+# profiles, dependencies, environment, init scripts, and volumes while mounting
+# binaries already built by the mandatory Rust job.
+services:
+  migrate:
+    image: ubuntu:24.04
+    build: !reset null
+    entrypoint: ["/workspace/target/debug/migrator"]
+    volumes:
+      - ..:/workspace:ro
+  first-launch-verifier:
+    image: ubuntu:24.04
+    build: !reset null
+    entrypoint: ["/workspace/target/debug/first-launch-verifier"]
+    volumes:
+      - ..:/workspace:ro
+  api:
+    image: ubuntu:24.04
+    build: !reset null
+    entrypoint: ["/workspace/target/debug/api"]
+    volumes:
+      - ..:/workspace:ro
+    healthcheck:
+      test: ["CMD", "/bin/true"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+  worker:
+    image: ubuntu:24.04
+    build: !reset null
+    entrypoint: ["/workspace/target/debug/worker"]
+    volumes:
+      - ..:/workspace:ro
+  retention:
+    image: ubuntu:24.04
+    build: !reset null
+    entrypoint: ["/workspace/target/debug/retention"]
+    volumes:
+      - ..:/workspace:ro
+  docreader:
+    image: alpine:3.21
+    build: !reset null
+    entrypoint: ["/bin/sh", "-c", "exec sleep 3600"]
+    healthcheck:
+      test: ["CMD", "/bin/true"]
+      interval: 2s
+      timeout: 1s
+      retries: 10

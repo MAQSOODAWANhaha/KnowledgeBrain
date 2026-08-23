@@ -1,0 +1,90 @@
+# Approved first-launch intended feature state.
+# One lane per deploy/queue-registry.toml entry. States must match launch_mode:
+# required_enabled -> enabled, declared_disabled -> disabled,
+# maintenance_only -> maintenance_only.
+format_version = 1
+contract = "bid-matching-v1"
+
+[[lanes]]
+task_type = "document:process"
+state = "enabled"
+
+[[lanes]]
+task_type = "manual:process"
+state = "enabled"
+
+[[lanes]]
+task_type = "knowledge:post_process"
+state = "enabled"
+
+[[lanes]]
+task_type = "summary:generation"
+state = "enabled"
+
+[[lanes]]
+task_type = "datatable:summary"
+state = "enabled"
+
+[[lanes]]
+task_type = "image:multimodal"
+state = "disabled"
+
+[[lanes]]
+task_type = "chunk:extract"
+state = "disabled"
+
+[[lanes]]
+task_type = "question:generation"
+state = "disabled"
+
+[[lanes]]
+task_type = "wiki:ingest"
+state = "enabled"
+
+[[lanes]]
+task_type = "wiki:finalize"
+state = "enabled"
+
+[[lanes]]
+task_type = "version:clone"
+state = "enabled"
+
+[[lanes]]
+task_type = "kb:delete"
+state = "enabled"
+
+[[lanes]]
+task_type = "knowledge:list_delete"
+state = "enabled"
+
+[[lanes]]
+task_type = "index:delete"
+state = "enabled"
+
+[[lanes]]
+task_type = "knowledge:list_reparse"
+state = "enabled"
+
+[[lanes]]
+task_type = "system:maintenance-housekeep:v1"
+state = "maintenance_only"
+
+[[lanes]]
+task_type = "system:live-recovery:v1"
+state = "enabled"
+
+[[lanes]]
+task_type = "bid:convert"
+state = "enabled"
+
+[[lanes]]
+task_type = "bid:extract"
+state = "enabled"
+
+[[lanes]]
+task_type = "bid:section-retry"
+state = "enabled"
+
+[[lanes]]
+task_type = "bid:match-route:v1"
+state = "enabled"

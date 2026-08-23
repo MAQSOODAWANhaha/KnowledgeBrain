@@ -1,0 +1,222 @@
+{
+  "input": "testdata/bid-extraction/cn-tender-golden-03.md",
+  "expected": "testdata/bid-extraction/cn-tender-golden-03.expected.json",
+  "generated_at": "2026-08-23T04:53:34.371157310Z",
+  "quality_gate": "PASS",
+  "metrics": {
+    "expected": 5,
+    "actual": 5,
+    "assigned": 5,
+    "false_positives": 0,
+    "quote_validity": 1.0,
+    "unsupported": 0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "technical_precision": 1.0,
+    "technical_recall": 1.0,
+    "commercial_precision": 1.0,
+    "commercial_recall": 1.0,
+    "family_accuracy": 1.0,
+    "must_accuracy": 1.0,
+    "duplicate_rate": 0.0,
+    "absent_quote_violations": [],
+    "passed": true,
+    "failures": []
+  },
+  "report": {
+    "sections": [
+      {
+        "key": "sec-562890aa2dee5dbc-1",
+        "heading_path": "第一章 投标人资格",
+        "hint_family": "commercial",
+        "body": "投标人须具有有效营业执照。\n\n近三年应具有不少于两个类似项目业绩。",
+        "spans": [
+          {
+            "id": "sec-562890aa2dee5dbc-1:span-0001",
+            "section_key": "sec-562890aa2dee5dbc-1",
+            "heading_path": "第一章 投标人资格",
+            "ordinal": 0,
+            "context": "",
+            "body": "投标人须具有有效营业执照。",
+            "candidate": true
+          },
+          {
+            "id": "sec-562890aa2dee5dbc-1:span-0002",
+            "section_key": "sec-562890aa2dee5dbc-1",
+            "heading_path": "第一章 投标人资格",
+            "ordinal": 1,
+            "context": "",
+            "body": "近三年应具有不少于两个类似项目业绩。",
+            "candidate": true
+          }
+        ],
+        "extract_status": "done",
+        "error_message": ""
+      },
+      {
+        "key": "sec-69dae0e0762b9566-1",
+        "heading_path": "第二章 技术要求",
+        "hint_family": "technical",
+        "body": "设备必须支持双电源热插拔。\n\n整机吞吐量不得低于40Gbps。\n\n系统吞吐量不得低于10Gbps。",
+        "spans": [
+          {
+            "id": "sec-69dae0e0762b9566-1:span-0001",
+            "section_key": "sec-69dae0e0762b9566-1",
+            "heading_path": "第二章 技术要求",
+            "ordinal": 0,
+            "context": "",
+            "body": "设备必须支持双电源热插拔。",
+            "candidate": true
+          },
+          {
+            "id": "sec-69dae0e0762b9566-1:span-0002",
+            "section_key": "sec-69dae0e0762b9566-1",
+            "heading_path": "第二章 技术要求",
+            "ordinal": 1,
+            "context": "",
+            "body": "整机吞吐量不得低于40Gbps。",
+            "candidate": true
+          },
+          {
+            "id": "sec-69dae0e0762b9566-1:span-0003",
+            "section_key": "sec-69dae0e0762b9566-1",
+            "heading_path": "第二章 技术要求",
+            "ordinal": 2,
+            "context": "",
+            "body": "系统吞吐量不得低于10Gbps。",
+            "candidate": true
+          }
+        ],
+        "extract_status": "done",
+        "error_message": ""
+      }
+    ],
+    "clauses": [
+      {
+        "section_key": "sec-562890aa2dee5dbc-1",
+        "span_id": "sec-562890aa2dee5dbc-1:span-0001",
+        "heading_path": "第一章 投标人资格",
+        "quote": "投标人须具有有效营业执照。",
+        "text": "投标人须具有有效营业执照。",
+        "family": "commercial",
+        "must": true,
+        "family_conflict": false,
+        "extraction_meta": {
+          "proposed_families": [
+            "commercial"
+          ],
+          "extractors": [
+            "commercial_agent"
+          ],
+          "policy_version": "cn-tender-v2",
+          "prompt_version": "clause-extractor-v3"
+        }
+      },
+      {
+        "section_key": "sec-562890aa2dee5dbc-1",
+        "span_id": "sec-562890aa2dee5dbc-1:span-0002",
+        "heading_path": "第一章 投标人资格",
+        "quote": "近三年应具有不少于两个类似项目业绩。",
+        "text": "近三年应具有不少于两个类似项目业绩。",
+        "family": "commercial",
+        "must": true,
+        "family_conflict": false,
+        "extraction_meta": {
+          "proposed_families": [
+            "commercial"
+          ],
+          "extractors": [
+            "commercial_agent"
+          ],
+          "policy_version": "cn-tender-v2",
+          "prompt_version": "clause-extractor-v3"
+        }
+      },
+      {
+        "section_key": "sec-69dae0e0762b9566-1",
+        "span_id": "sec-69dae0e0762b9566-1:span-0001",
+        "heading_path": "第二章 技术要求",
+        "quote": "设备必须支持双电源热插拔。",
+        "text": "设备必须支持双电源热插拔。",
+        "family": "technical",
+        "must": true,
+        "family_conflict": false,
+        "extraction_meta": {
+          "proposed_families": [
+            "technical"
+          ],
+          "extractors": [
+            "technical_agent"
+          ],
+          "policy_version": "cn-tender-v2",
+          "prompt_version": "clause-extractor-v3"
+        }
+      },
+      {
+        "section_key": "sec-69dae0e0762b9566-1",
+        "span_id": "sec-69dae0e0762b9566-1:span-0002",
+        "heading_path": "第二章 技术要求",
+        "quote": "整机吞吐量不得低于40Gbps。",
+        "text": "整机吞吐量不得低于40Gbps。",
+        "family": "technical",
+        "must": true,
+        "family_conflict": false,
+        "extraction_meta": {
+          "proposed_families": [
+            "technical"
+          ],
+          "extractors": [
+            "technical_agent"
+          ],
+          "policy_version": "cn-tender-v2",
+          "prompt_version": "clause-extractor-v3"
+        }
+      },
+      {
+        "section_key": "sec-69dae0e0762b9566-1",
+        "span_id": "sec-69dae0e0762b9566-1:span-0003",
+        "heading_path": "第二章 技术要求",
+        "quote": "系统吞吐量不得低于10Gbps。",
+        "text": "系统吞吐量不得低于10Gbps。",
+        "family": "technical",
+        "must": true,
+        "family_conflict": false,
+        "extraction_meta": {
+          "proposed_families": [
+            "technical"
+          ],
+          "extractors": [
+            "technical_agent"
+          ],
+          "policy_version": "cn-tender-v2",
+          "prompt_version": "clause-extractor-v3"
+        }
+      }
+    ],
+    "diagnostics": {
+      "mode": "hybrid",
+      "model_id": "grok-4.6",
+      "policy_version": "cn-tender-v2",
+      "prompt_version": "clause-extractor-v3",
+      "agent_rounds": 8,
+      "retries": 0,
+      "tool_calls": 14,
+      "agent_terminations": [
+        "done",
+        "done"
+      ],
+      "rejected_invalid_quotes": 0,
+      "family_conflicts": 0,
+      "fallback_reasons": [],
+      "failed_spans": [],
+      "coverage": {
+        "candidate_spans": 5,
+        "covered_spans": 5,
+        "uncovered_spans": [],
+        "ambiguous_clauses": 0
+      },
+      "partial_failure": false
+    }
+  }
+}

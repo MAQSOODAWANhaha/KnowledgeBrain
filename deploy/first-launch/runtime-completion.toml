@@ -1,0 +1,9 @@
+format_version = 1
+schema_manifest_sha256 = "de522fd9652d67965eddcca8764f66f5cc61348d77fab2abd122a29f87a9b035"
+contract = "bidding-v1"
+phase_1d_runtime_complete = false
+registry_sha256 = ""
+evaluation_sha256 = ""
+readiness_sha256 = ""
+images_sha256 = ""
+topology_sha256 = ""

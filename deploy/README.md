@@ -1,30 +1,29 @@
 # KnowledgeBrain 部署
 
-进程：`api`（HTTP `:8080`）、`worker`（6 个 oxana Runtime）、`docreader`（gRPC `:50051`）。  
+进程：`api`（HTTP `:8080`）、`worker`（oxana Runtime）、独立 `retention`（HTTP probe `:8082`）、`docreader`（gRPC `:50051`）。
 数据面：Postgres+pgvector、Redis、MinIO；Neo4j 可选双写。
 
 本目录是部署真源：compose、环境变量、镜像。仓库根的 `docker-compose.yml` 只做转发，方便 `docker compose` 仍从根目录调用。
 
-## 一键拉起
+## 启动边界
 
-在仓库根目录：
+普通 `docker compose up -d`（从仓库根或本目录执行）**只启动基础设施**：Postgres、Redis、MinIO、Neo4j。它不会启动 API、worker、迁移或 verifier，也不是生产首次上线命令。
+
+全新生产安装最终只能从仓库根运行 checked-in orchestrator：
 
 ```bash
 cp deploy/.env.example deploy/.env
-docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
-docker compose -f deploy/docker-compose.yml ps
-curl -sS http://127.0.0.1:18080/health
+KNOWLEDGEBRAIN_FIRST_LAUNCH_FRESH=required deploy/compose-first-launch.sh
 ```
 
-或进入本目录：
+当前固定 manifest 只有 `knowledge_base_baseline`、`shared_platform_baseline`、`bidding_v1_baseline` 三个 fresh slices；bootstrap role/extension 脚本也由 manifest 校验 checksum。生产仍明确不可部署，因为 runtime-completion artifact 保持 incomplete 且没有环境变量绕过。只有 final API/Web、真实对象卷、PDF、恢复、readiness、image 和 topology 证据闭合后，orchestrator 才会销毁专用 volumes、执行一次性 migrate/verifier handoff，并启动 runtime profile。禁止对已有安装运行。
+
 
 ```bash
-cd deploy
-cp .env.example .env
-docker compose --env-file .env up -d --build
+deploy/compose-runtime-restart.sh
 ```
 
-首次启动 `api` / `worker` 会在报告 ready / 开始消费队列前连接 Postgres 并执行 `0001`–`0008`；连接、迁移或公司工作区初始化失败时进程直接失败，不会以缺失 schema 的状态继续服务或确认作业。Worker 只在 Redis 可用并注册消费者后报告 ready，连接中断后会退避重连；Compose 也配置了自动重启。对象写入容器卷 `/data/objects`，并按 `.env` 双写 MinIO；配置了 MinIO 时远端写失败会令本次对象写失败，不再静默降级。
+该命令只命名 runtime profile 的 `api`、`worker`、`retention`、`docreader`，不会运行 migrate/verifier。Worker 只在 Redis 可用并注册消费者后报告 ready；物理对象删除只由 retention login/consumer 在数据库 claim 后执行。对象写入容器卷 `/data/objects`，并按 `.env` 写入 MinIO。
 
 生产部署必须把 `JWT_SECRET` 改为随机强密钥，并配置 `KNOWLEDGEBRAIN_LDAP_URL` 与 `KNOWLEDGEBRAIN_LDAP_BIND_DN`。LDAP URL 为空时是仅供本地/测试使用的开放登录行为，不能用于对外服务。
 
@@ -46,6 +45,7 @@ export DOCREADER_ADDR=127.0.0.1:15051   # 若本机也起了 docreader 容器
 export KNOWLEDGEBRAIN_S3_ENDPOINT=http://127.0.0.1:19000
 API_PORT=8080 cargo run -p api
 cargo run -p worker
+cargo run -p retention
 ```
 
 DocReader 本机：`cd services/docreader && PYTHONPATH=.. uv run python main.py`。
@@ -55,6 +55,7 @@ DocReader 本机：`cd services/docreader && PYTHONPATH=.. uv run python main.py
 | 服务 | 容器 | 主机 |
 |---|---|---|
 | api | 8080 | 18080 |
+| retention probe | 8082 | internal |
 | docreader | 50051 | 15051 |
 | postgres | 5432 | 15432 |
 | redis | 6379 | 16379 |
@@ -67,12 +68,13 @@ DocReader 本机：`cd services/docreader && PYTHONPATH=.. uv run python main.py
 
 | 文件 | 产物 |
 |---|---|
-| `Dockerfile.rust` | `api` 与 `worker`（`BIN=api` / `BIN=worker`）；Node 构建阶段同时产出并内置 `/web` SPA |
+| `Dockerfile.rust` | `api`、`worker`、`retention`（对应 `BIN`）；Node 构建阶段同时产出并内置 `/web` SPA |
 | `Dockerfile.docreader` | Python gRPC DocReader |
 
 ```bash
 docker build -f deploy/Dockerfile.rust --build-arg BIN=api -t knowledgebrain-api .
 docker build -f deploy/Dockerfile.rust --build-arg BIN=worker -t knowledgebrain-worker .
+docker build -f deploy/Dockerfile.rust --build-arg BIN=retention -t knowledgebrain-retention .
 docker build -f deploy/Dockerfile.docreader -t knowledgebrain-docreader .
 ```
 

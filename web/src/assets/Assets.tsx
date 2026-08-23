@@ -10,8 +10,10 @@ import {
   api,
   slugify,
 } from "../api";
-import { type AssetRoute, go } from "../hash";
+import { Crumbs, type Crumb } from "../Crumbs";
+import { type AssetRoute, assetDocHref, assetVersionHref, go } from "../hash";
 import { Shell } from "../Shell";
+import { DocumentDetail } from "./DocumentDetail";
 
 function toast(msg: string, color: "iris" | "red" = "iris") {
   notifications.show({ message: msg, color });
@@ -37,6 +39,8 @@ function keyOf(route: AssetRoute): string {
       return `product:${route.productId}`;
     case "version":
       return `version:${route.versionId}`;
+    case "doc":
+      return `doc:${route.docId}`;
   }
 }
 
@@ -53,6 +57,9 @@ function ancestors(route: AssetRoute): string[] {
     case "product":
       return ["lines", `line:${route.lineId}`, `product:${route.productId}`];
     case "version":
+      return ["lines", `line:${route.lineId}`, `product:${route.productId}`];
+    case "doc":
+      if ("folderId" in route) return ["company", `folder:${route.folderId}`];
       return ["lines", `line:${route.lineId}`, `product:${route.productId}`];
   }
 }
@@ -116,6 +123,7 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
     const pids: string[] = [];
     if (route.kind === "folder") pids.push(route.folderId);
     if (route.kind === "product" || route.kind === "version") pids.push(route.productId);
+    if (route.kind === "doc") pids.push("folderId" in route ? route.folderId : route.productId);
     for (const id of [...open].filter((k) => k.startsWith("folder:") || k.startsWith("product:"))) {
       pids.push(id.split(":")[1]);
     }
@@ -123,9 +131,21 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
   }, [route, open]);
 
   const selectedProductId =
-    route.kind === "folder" ? route.folderId : route.kind === "product" || route.kind === "version" ? route.productId : null;
+    route.kind === "folder"
+      ? route.folderId
+      : route.kind === "product" || route.kind === "version"
+        ? route.productId
+        : route.kind === "doc"
+          ? "folderId" in route
+            ? route.folderId
+            : route.productId
+          : null;
   const selectedVersionId =
-    route.kind === "folder" ? route.versionId : route.kind === "version" ? route.versionId : undefined;
+    route.kind === "folder"
+      ? route.versionId
+      : route.kind === "version" || route.kind === "doc"
+        ? route.versionId
+        : undefined;
 
   useEffect(() => {
     let cancelled = false;
@@ -208,24 +228,74 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
     }
   }
 
-  const folder = folders.find((p) => p.id === (route.kind === "folder" ? route.folderId : "")) ?? null;
+  const folder =
+    folders.find(
+      (p) =>
+        p.id ===
+        (route.kind === "folder" ? route.folderId : route.kind === "doc" && "folderId" in route ? route.folderId : ""),
+    ) ?? null;
   const line = lines.find((l) => "lineId" in route && l.id === route.lineId) ?? null;
   const product =
-    line && (route.kind === "product" || route.kind === "version")
-      ? (productsByLine[line.id] ?? []).find((p) => p.id === route.productId) ?? null
+    line && (route.kind === "product" || route.kind === "version" || (route.kind === "doc" && "productId" in route))
+      ? (productsByLine[line.id] ?? []).find((p) => p.id === ("productId" in route ? route.productId : "")) ?? null
       : null;
   const versions = selectedProductId ? (versionsByProduct[selectedProductId] ?? []) : [];
   const version =
     selectedVersionId ? versions.find((v) => v.id === selectedVersionId) ?? null : versions.find((v) => v.current) ?? versions[0] ?? null;
 
   const crumbs = useMemo(() => {
-    if (route.kind === "company") return "知识资产 / 公司资料";
-    if (route.kind === "folder") return `知识资产 / 公司资料 / ${folder?.name ?? "分类"}`;
-    if (route.kind === "lines") return "知识资产 / 产品线";
-    if (route.kind === "line") return `知识资产 / 产品线 / ${line?.name ?? "线"}`;
-    if (route.kind === "product") return `知识资产 / ${line?.name ?? "产品线"} / ${product?.name ?? "产品"}`;
-    return `知识资产 / ${line?.name ?? "产品线"} / ${product?.name ?? "产品"} / ${version?.label ?? "版本"}`;
-  }, [route, folder, line, product, version]);
+    const items: Crumb[] = [{ label: "知识资产" }];
+    const fileName =
+      route.kind === "doc" ? (docs.find((d) => d.id === route.docId)?.file_name ?? "文件") : "";
+    const inLibrary =
+      route.kind === "company" || route.kind === "folder" || (route.kind === "doc" && "folderId" in route);
+    if (inLibrary) {
+      items.push({ label: "公司资料", href: route.kind === "company" ? undefined : "/library" });
+      if (route.kind === "company") return items;
+      const folderId = "folderId" in route ? route.folderId : "";
+      const folderName = folder?.name ?? "分类";
+      if (route.kind === "folder" && !route.versionId) {
+        items.push({ label: folderName });
+        return items;
+      }
+      items.push({ label: folderName, href: `/library/${folderId}` });
+      if (route.kind === "folder") {
+        items.push({ label: version?.label ?? "版本" });
+        return items;
+      }
+      items.push({
+        label: version?.label ?? "版本",
+        href: `/library/${folderId}/${route.kind === "doc" && "versionId" in route ? route.versionId : ""}`,
+      });
+      items.push({ label: fileName });
+      return items;
+    }
+    items.push({ label: "产品线", href: route.kind === "lines" ? undefined : "/products" });
+    if (route.kind === "lines") return items;
+    const lineId = "lineId" in route ? route.lineId : "";
+    const lineName = line?.name ?? "产品线";
+    if (route.kind === "line") {
+      items.push({ label: lineName });
+      return items;
+    }
+    items.push({ label: lineName, href: `/products/${lineId}` });
+    const productId = "productId" in route ? route.productId : "";
+    const productName = product?.name ?? "产品";
+    if (route.kind === "product") {
+      items.push({ label: productName });
+      return items;
+    }
+    items.push({ label: productName, href: `/products/${lineId}/${productId}` });
+    const verLabel = version?.label ?? "版本";
+    if (route.kind === "version") {
+      items.push({ label: verLabel });
+      return items;
+    }
+    const versionId = route.kind === "doc" && "versionId" in route ? route.versionId : version?.id ?? "";
+    items.push({ label: verLabel, href: `/products/${lineId}/${productId}/${versionId}` });
+    items.push({ label: fileName });
+    return items;
+  }, [route, folder, line, product, version, docs]);
 
   const title =
     route.kind === "company"
@@ -238,7 +308,9 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
             ? (line?.name ?? "产品线")
             : route.kind === "product"
               ? (product?.name ?? "产品")
-              : (version?.label ?? "版本");
+              : route.kind === "doc"
+                ? (docs.find((d) => d.id === route.docId)?.file_name ?? "文件")
+                : (version?.label ?? "版本");
 
   const createHint =
     route.kind === "company"
@@ -281,10 +353,10 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
     <Shell
       root="assets"
       email={email}
-      crumbs={crumbs}
+      crumbs={<Crumbs items={crumbs} />}
       title={title}
       extra={
-        route.kind === "version" || (route.kind === "folder" && version) ? (
+        route.kind === "doc" ? undefined : route.kind === "version" || (route.kind === "folder" && version) ? (
           <button className="btn pri" type="button" onClick={() => document.getElementById("asset-drop")?.click()}>
             上传
           </button>
@@ -493,6 +565,9 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
             ))}
           </Pane>
         )}
+        {route.kind === "doc" && version?.id ? (
+          <DocumentDetail docId={route.docId} backHref={assetVersionHref(route, version.id)} />
+        ) : null}
         {(route.kind === "version" || (route.kind === "folder" && (route.versionId || versions.length <= 1))) && (
           <>
             <Dropzone
@@ -516,10 +591,15 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
                 </div>
               ) : (
                 docs.map((d) => (
-                  <div key={d.id || d.file_name} className="item" style={{ gridTemplateColumns: "1fr auto" }}>
+                  <a
+                    key={d.id || d.file_name}
+                    className="item"
+                    href={version?.id ? `#${assetDocHref(route, version.id, d.id)}` : undefined}
+                    style={{ gridTemplateColumns: "1fr auto" }}
+                  >
                     <div>
                       <div className="name">{d.file_name || d.title}</div>
-                      <div className="desc">{d.error_message || version?.label}</div>
+                      <div className="desc">{d.error_message || version?.label || "点开看原件和分片"}</div>
                     </div>
                     {d.error_message && /ocr_error|caption_error|vlm not configured/i.test(d.error_message) ? (
                       <span className="chip rose">
@@ -537,7 +617,7 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
                         {parseStatus(d.parse_status) || "解析中"}
                       </span>
                     )}
-                  </div>
+                  </a>
                 ))
               )}
             </div>

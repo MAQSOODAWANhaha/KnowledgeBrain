@@ -3,7 +3,7 @@
 mod http;
 mod sse;
 
-pub use http::{CHAT_TIMEOUT, EMBED_TIMEOUT, chat_sse, json_sse, post_llm};
+pub use http::{CHAT_TIMEOUT, EMBED_TIMEOUT, HTTP_ATTEMPTS, chat_sse, json_sse, post_llm};
 pub use sse::{collect_chat_content, last_json_value, looks_like_sse};
 
 use serde::{Deserialize, Serialize};

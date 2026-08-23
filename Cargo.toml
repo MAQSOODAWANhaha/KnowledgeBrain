@@ -18,6 +18,9 @@ members = [
   "crates/obs",
   "crates/storage",
   "crates/worker",
+  "crates/retention",
+  "crates/migrator",
+  "crates/first-launch-verifier",
 ]
 
 [workspace.package]
@@ -30,6 +33,8 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "si
 axum = { version = "0.8", features = ["multipart", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rust_decimal = { version = "1.36", default-features = false, features = ["std"] }
+toml = "0.9"
 tower-http = { version = "0.6", features = ["cors", "trace", "limit", "fs"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
@@ -40,7 +45,7 @@ sha2 = "0.11"
 hex = "0.4"
 thiserror = "2"
 http = "1"
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json", "rust_decimal"] }
 oxana = { version = "2.1", default-features = false, features = ["macros"] }
 oxana-web = "2.1"
 tonic = "0.14"
@@ -51,6 +56,8 @@ protoc-bin-vendored = "3"
 tokio-stream = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "multipart", "blocking"] }
 dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std", "ansi"] }
 base64 = "0.22"
 redis = { version = "1", default-features = false, features = ["script"] }
 hmac = "0.13"

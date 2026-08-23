@@ -274,6 +274,7 @@ async fn convert_anydoc(input: ConvertInput<'_>) -> Result<ReadResult, ConvertEr
     if grpc::reader_addr().is_none() {
         return Ok(result);
     }
+    tracing::warn!(file = input.file_name, reason, "docparser anydoc fallback");
     fallback_builtin(input, reason).await
 }
 

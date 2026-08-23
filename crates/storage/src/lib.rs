@@ -1,11 +1,27 @@
 //! Object bytes keyed as `objects/{sha256}`. Postgres migrate + workspace seed.
 
 pub mod bid;
+pub mod bid_extract_publication;
+pub mod bid_matching;
+pub mod bidding;
+mod first_launch;
+pub mod knowledge_retrieval;
+mod object_registry;
 mod persist;
+mod probe;
 mod s3;
 
+pub use first_launch::{
+    FirstLaunchVerificationError, FreshPretrafficOwnerBindings, VerifiedCatalogRows,
+    require_production_first_launch_verified, verify_fresh_pretraffic_catalog_rows,
+};
+pub use object_registry::{
+    RetentionClaim, process_one_retention_item, register_knowledge_document_object,
+    release_knowledge_document_object,
+};
 pub use persist::*;
-pub use s3::{configured as s3_configured, delete_object, get_object, put_object};
+pub use probe::*;
+pub use s3::{configured as s3_configured, get_object, put_object};
 
 use domain::{Store, sha256_hex};
 use std::path::{Path, PathBuf};
@@ -27,7 +43,7 @@ pub fn write_blob(hash: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(hash);
     std::fs::write(&path, bytes)?;
-    s3::put_object(&object_key(hash), bytes).map_err(std::io::Error::other)?;
+    s3::put_object(&object_ref(hash), bytes).map_err(std::io::Error::other)?;
     Ok(path)
 }
 
@@ -53,7 +69,7 @@ pub fn read_blob(hash: &str) -> std::io::Result<Vec<u8>> {
     match std::fs::read(blob_path(hash)) {
         Ok(b) => Ok(b),
         Err(e) => {
-            if let Ok(remote) = s3::get_object(&object_key(hash)) {
+            if let Ok(remote) = s3::get_object(&object_ref(hash)) {
                 let _ = std::fs::create_dir_all(object_dir());
                 let _ = std::fs::write(blob_path(hash), &remote);
                 return Ok(remote);
@@ -67,52 +83,34 @@ pub fn blob_exists(hash: &str) -> bool {
     Path::new(&blob_path(hash)).exists()
 }
 
-pub fn object_key(hash: &str) -> String {
+pub fn object_ref(hash: &str) -> String {
     format!("objects/{hash}")
 }
 
 pub fn put(store: &mut Store, bytes: &[u8]) -> (String, String) {
     let hash = sha256_hex(bytes);
-    let key = object_key(&hash);
-    *store.object_refs.entry(hash.clone()).or_insert(0) += 1;
-    store.objects.insert(key.clone(), bytes.to_vec());
+    let reference = object_ref(&hash);
+    store.objects.insert(reference.clone(), bytes.to_vec());
     let _ = write_blob_off_runtime(&hash, bytes);
-    (hash, key)
+    (hash, reference)
 }
 
-pub fn add_ref(store: &mut Store, hash: &str) {
-    *store.object_refs.entry(hash.to_string()).or_insert(0) += 1;
+/// Remove an upload from the in-memory request model after its database
+/// transaction failed. Durable object deletion is retention-only.
+pub fn discard_unpersisted_object(store: &mut Store, hash: &str) {
+    store.objects.remove(&object_ref(hash));
 }
 
-pub fn drop_blob(hash: &str) {
-    let _ = std::fs::remove_file(blob_path(hash));
-    let _ = s3::delete_object(&object_key(hash));
-}
-
-pub fn drop_ref(store: &mut Store, hash: &str) {
-    if let Some(rc) = store.object_refs.get_mut(hash) {
-        *rc -= 1;
-        if *rc <= 0 {
-            store.object_refs.remove(hash);
-            store.objects.remove(&object_key(hash));
-            drop_blob(hash);
+async fn delete_claimed_blob(digest: &str) -> Result<(), String> {
+    let digest = digest.to_owned();
+    tokio::task::spawn_blocking(move || {
+        match std::fs::remove_file(blob_path(&digest)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn refcount_drops_blob() {
-        let mut s = Store::default();
-        let (hash, key) = put(&mut s, b"abc");
-        assert_eq!(s.objects[&key], b"abc");
-        add_ref(&mut s, &hash);
-        drop_ref(&mut s, &hash);
-        assert!(s.objects.contains_key(&key));
-        drop_ref(&mut s, &hash);
-        assert!(!s.objects.contains_key(&key));
-    }
+        s3::delete_object(&object_ref(&digest))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }

@@ -1,6 +1,7 @@
 //! summary / question / multimodal. Never fail parent parse_status.
 
 mod chat;
+mod language;
 mod ocr;
 mod pending;
 mod prompts;
@@ -11,6 +12,7 @@ pub use chat::{
     chat_complete_limited, chat_complete_wiki, chat_http_configured, chat_messages,
     chat_messages_limited, sample_long_content,
 };
+pub use language::{infer_output_language, language_for_document, normalize_language_tag};
 pub use ocr::sanitize_ocr_text;
 pub use pending::{decr_pending, pending_count, pending_key, set_pending};
 pub use prompts::{OCR_PROMPT, OCR_SCANNED_PDF_PROMPT, caption_prompt, ocr_prompt};
@@ -111,8 +113,11 @@ pub fn generate_summary_with(
         store.finalize_subtask(document_id);
         return Ok(SummaryOutcome::Done);
     }
-    let system = render_summary_prompt("English");
-    let summary = match chat::chat_complete(&system, &body, &version.summary_model_id) {
+    let language = language_for_document(store, document_id);
+    tracing::info!(%document_id, language = %language, "summary language");
+    let system = render_summary_prompt(&language);
+    let user = format!("Output language: {language}\n\n{body}");
+    let summary = match chat::chat_complete(&system, &user, &version.summary_model_id) {
         Ok(s) if !s.trim().is_empty() => s,
         other => {
             if fallback {
@@ -229,6 +234,8 @@ pub fn generate_questions_with(
     };
     drop_prior_question_chunks(store, chunk_ids);
     let want = version.question_count();
+    let language = language_for_document(store, document_id);
+    tracing::info!(%document_id, language = %language, "question language");
     for (i, cid) in chunk_ids.iter().enumerate() {
         let Some(mut ch) = store.chunks.get(cid).cloned() else {
             continue;
@@ -240,11 +247,15 @@ pub fn generate_questions_with(
         let next_content = neighbor_content(store, next_ids.get(i).and_then(|x| *x), &ch, false);
         let ctx = surrounding_context(&prev_content, &next_content);
         let prompt = append_custom_instructions(
-            &render_questions_prompt(&doc.title, &ch.content, want, "English", &ctx),
+            &render_questions_prompt(&doc.title, &ch.content, want, &language, &ctx),
             &version.question_custom_instructions,
             "question_generation",
         );
-        let raw = match chat::chat_complete(&prompt, &ch.content, &version.summary_model_id) {
+        let raw = match chat::chat_complete(
+            &prompt,
+            &format!("Output language: {language}\n\n{}", ch.content),
+            &version.summary_model_id,
+        ) {
             Ok(s) => s,
             Err(_) if chat_http_configured() && version.summary_model_id != "stub-chat" => {
                 continue;
@@ -409,7 +420,8 @@ fn process_image_core(
     };
     drop_prior_image_chunks(store, document_id, image_key);
     let parent = parent_text_chunk(store, document_id, image_key);
-    let (ocr, caption) = describe_image(image_key, image_source_type)?;
+    let language = language_for_document(store, document_id);
+    let (ocr, caption) = describe_image(image_key, image_source_type, &language)?;
     let mut parts = Vec::new();
     if enable_ocr {
         let ocr = sanitize_ocr_text(&ocr);
@@ -490,16 +502,26 @@ fn drop_prior_image_chunks(store: &mut Store, document_id: Uuid, image_key: &str
     }
 }
 
+fn truncate_key(key: &str) -> &str {
+    let t = key.trim_start_matches("objects/").trim_start_matches('/');
+    match t.char_indices().nth(16) {
+        Some((i, _)) => &t[..i],
+        None => t,
+    }
+}
+
 /// OCR + caption. Unconfigured or stub VLM is an error, never fake text.
 pub fn describe_image(
     image_key: &str,
     image_source_type: &str,
+    language: &str,
 ) -> Result<(String, String), String> {
     if !vlm_configured() {
+        tracing::warn!(image_key = truncate_key(image_key), "vlm not configured");
         return Err("vlm not configured".into());
     }
     let ocr_p = ocr_prompt(image_source_type);
-    let cap_p = caption_prompt("English");
+    let cap_p = caption_prompt(language);
     vlm_describe(image_key, ocr_p, &cap_p)
 }
 
@@ -520,9 +542,30 @@ fn vlm_describe(
     if base.is_empty() {
         return Err("vlm not configured".into());
     }
-    let ocr = vlm_complete(&base, ocr_prompt, image_key)?;
-    let cap = vlm_complete(&base, cap_prompt, image_key)?;
+    let ocr = match vlm_complete(&base, ocr_prompt, image_key) {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::warn!(
+                image_key = truncate_key(image_key),
+                error = %error,
+                "describe_image failed"
+            );
+            return Err(error);
+        }
+    };
+    let cap = match vlm_complete(&base, cap_prompt, image_key) {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::warn!(
+                image_key = truncate_key(image_key),
+                error = %error,
+                "describe_image failed"
+            );
+            return Err(error);
+        }
+    };
     if ocr.is_empty() && cap.is_empty() {
+        tracing::warn!(image_key = truncate_key(image_key), "describe_image failed");
         return Err("vlm empty".into());
     }
     Ok((ocr, cap))
@@ -626,7 +669,7 @@ mod tests {
 
     #[test]
     fn describe_image_without_vlm_is_error() {
-        assert!(describe_image("images/x.png", "").is_err());
+        assert!(describe_image("images/x.png", "", "Chinese").is_err());
         let mut s = Store::default();
         let mut v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         v.enable_multimodel = true;

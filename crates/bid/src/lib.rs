@@ -3,6 +3,8 @@
 mod booklet;
 mod export;
 pub mod extraction;
+pub mod matching;
+pub mod tender;
 
 pub use booklet::{BookletPartView, ensure_all_parts, ensure_part, save_part};
 pub use export::{
@@ -10,6 +12,7 @@ pub use export::{
 };
 
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::Row;
@@ -110,18 +113,6 @@ pub fn booklet_key_for_unit(unit: Uuid) -> String {
     }
 }
 
-pub fn should_skip_match(prev_key: &str, prev_status: &str, key: &str) -> bool {
-    prev_key == key && matches!(prev_status, "pending" | "running" | "done")
-}
-
-pub fn match_job_overall_status(tech_status: &str, comm_status: &str) -> &'static str {
-    if tech_status == "failed" || comm_status == "failed" {
-        "failed"
-    } else {
-        "done"
-    }
-}
-
 pub fn meet_blocked_by_suggestion(suggestion: &str) -> bool {
     suggestion == "unmet"
 }
@@ -145,6 +136,18 @@ pub struct MatchUnitView {
     pub error_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publication_generation: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<Vec<String>>,
 }
 
 pub fn expected_part_keys_from(units: &[MatchUnitView], confirmed_units: &[Uuid]) -> Vec<String> {
@@ -185,6 +188,12 @@ pub async fn list_match_units(
         extract_status: None,
         error_message: None,
         retry_status: None,
+        publication_generation: None,
+        stale: None,
+        removed: None,
+        quality: None,
+        degraded: None,
+        reason: None,
     }];
     let mut prev: Option<Uuid> = None;
     for s in sections {
@@ -208,6 +217,12 @@ pub async fn list_match_units(
             extract_status: Some(s.get("extract_status")),
             error_message: Some(s.get("error_message")),
             retry_status: Some(s.get("retry_status")),
+            publication_generation: s.try_get("published_extraction_generation").ok().flatten(),
+            stale: s.try_get("publication_stale").ok().flatten(),
+            removed: s.try_get("publication_removed").ok().flatten(),
+            quality: s.try_get("publication_quality_status").ok().flatten(),
+            degraded: s.try_get("publication_degraded").ok().flatten(),
+            reason: s.try_get("publication_reason_codes").ok().flatten(),
         });
         prev = Some(sid);
     }
@@ -225,6 +240,12 @@ pub async fn list_match_units(
         extract_status: None,
         error_message: None,
         retry_status: None,
+        publication_generation: None,
+        stale: None,
+        removed: None,
+        quality: None,
+        degraded: None,
+        reason: None,
     });
     Ok(out)
 }
@@ -234,33 +255,32 @@ pub async fn decorate_clauses(
     project_id: Uuid,
     clauses: &mut [ClauseView],
 ) -> Result<(), String> {
-    let picks: Vec<serde_json::Value> = storage::bid::list_picks(pool, project_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .iter()
-        .map(|r| {
-            json!({
-                "product_id": r.get::<Uuid, _>("product_id").to_string(),
-                "unit_id": r.try_get::<Uuid, _>("unit_id").unwrap_or(Uuid::nil()).to_string(),
-                "clauses": r.get::<serde_json::Value, _>("clauses"),
-            })
-        })
-        .collect();
+    let picks = visible_pick_json(pool, project_id, None).await?;
     let cov = coverage_for(clauses, &picks);
     let cmap: std::collections::HashMap<Uuid, String> =
         cov.into_iter().map(|r| (r.clause_id, r.status)).collect();
-    let hits = storage::bid::list_commercial_hits(pool, project_id)
-        .await
-        .map_err(|e| e.to_string())?;
+    let hits = visible_commercial_json(pool, project_id).await?;
+    let commercial_cov = coverage_for_commercial(clauses, &hits);
     let mut hmap = std::collections::HashMap::new();
-    for h in hits {
-        let cid: Uuid = h.get("clause_id");
-        let outcome: String = h.get("outcome");
-        let file = h
-            .try_get::<Option<String>, _>("file_name")
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+    for hit in &hits {
+        let Some(cid) = preview_clause_id(hit) else {
+            continue;
+        };
+        let outcome = commercial_cov
+            .iter()
+            .find(|row| row.clause_id == cid)
+            .map(|row| row.status.clone())
+            .unwrap_or_else(|| {
+                hit.get("outcome")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            });
+        let file = hit
+            .get("file_name")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
         hmap.insert(cid, (outcome, file));
     }
     for c in clauses.iter_mut() {
@@ -275,6 +295,79 @@ pub async fn decorate_clauses(
         }
     }
     Ok(())
+}
+
+pub async fn visible_pick_json(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+    unit_id: Option<Uuid>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let rows = storage::bid_matching::visible_picks(pool, project_id, unit_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            json!({
+                "product_id": row.try_get::<Uuid, _>("product_id").ok(),
+                "unit_id": row.try_get::<Uuid, _>("unit_id").ok().unwrap_or_else(Uuid::nil),
+                "version_id": row.try_get::<Uuid, _>("product_version_id").ok()
+                    .or_else(|| row.try_get::<Uuid, _>("version_id").ok()),
+                "score": row.try_get::<Decimal, _>("score_value").ok()
+                    .map(|value| value.to_string()),
+                "coverage": row.try_get::<i32, _>("coverage_supported").ok(),
+                "clauses": row.try_get::<serde_json::Value, _>("clauses").ok()
+                    .unwrap_or_else(|| json!([])),
+            })
+        })
+        .collect())
+}
+
+pub async fn visible_commercial_json(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+) -> Result<Vec<serde_json::Value>, String> {
+    let rows = storage::bid_matching::current_commercial_decisions(pool, project_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let decision = row.try_get::<String, _>("system_decision").ok()?;
+            let outcome = match decision.as_str() {
+                "select" => "hit",
+                "reject" => "miss",
+                "review" => "review",
+                _ => return None,
+            };
+            Some(json!({
+                "clause_id": row.try_get::<Uuid, _>("source_clause_id").ok(),
+                "outcome": outcome,
+                "file_name": row.try_get::<Option<String>, _>("file_name").ok().flatten(),
+            }))
+        })
+        .collect())
+}
+
+pub async fn visible_technical_candidates_json(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+    unit_id: Uuid,
+) -> Result<Vec<serde_json::Value>, String> {
+    let rows = storage::bid_matching::current_technical_candidates(pool, project_id, unit_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            json!({
+                "product_id": row.try_get::<Uuid, _>("product_id").ok(),
+                "product_version_id": row.try_get::<Uuid, _>("product_version_id").ok(),
+                "system_decision": row.try_get::<String, _>("system_decision").ok(),
+                "quality_status": row.try_get::<String, _>("quality_status").ok(),
+            })
+        })
+        .collect())
 }
 
 pub async fn section_merge_map(
@@ -293,23 +386,6 @@ pub async fn section_merge_map(
             )
         })
         .collect())
-}
-
-pub fn debounce_key(parts: &[(Uuid, &str, bool, &str)]) -> String {
-    let mut acc = String::new();
-    let mut rows = parts.to_vec();
-    rows.sort_by_key(|a| a.0);
-    for (id, text, must, family) in rows {
-        acc.push_str(&id.to_string());
-        acc.push('\t');
-        acc.push_str(text);
-        acc.push('\t');
-        acc.push_str(if must { "1" } else { "0" });
-        acc.push('\t');
-        acc.push_str(family);
-        acc.push('\n');
-    }
-    domain::sha256_hex(acc.as_bytes())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -386,7 +462,39 @@ pub fn coverage_for(clauses: &[ClauseView], picks: &[serde_json::Value]) -> Vec<
         .collect()
 }
 
-fn preview_clause_id(h: &serde_json::Value) -> Option<Uuid> {
+/// Map a current commercial v1 decision read onto confirmed clauses.
+/// Missing current projection yields no rows (hidden/empty), never a fabricated miss.
+pub fn coverage_for_commercial(
+    clauses: &[ClauseView],
+    decisions: &[serde_json::Value],
+) -> Vec<CoverageRow> {
+    let by_clause: std::collections::HashMap<Uuid, String> = decisions
+        .iter()
+        .filter_map(|decision| {
+            let clause_id = preview_clause_id(decision)?;
+            let outcome = decision.get("outcome").and_then(|value| value.as_str())?;
+            let status = match outcome {
+                "hit" | "select" => "hit",
+                "miss" | "reject" => "miss",
+                "review" => "review",
+                _ => return None,
+            };
+            Some((clause_id, status.to_string()))
+        })
+        .collect();
+    clauses
+        .iter()
+        .filter(|clause| clause.family == "commercial" && clause.status == "confirmed")
+        .filter_map(|clause| {
+            by_clause.get(&clause.id).map(|status| CoverageRow {
+                clause_id: clause.id,
+                status: status.clone(),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn preview_clause_id(h: &serde_json::Value) -> Option<Uuid> {
     let v = h.get("clause_id")?;
     if let Some(s) = v.as_str() {
         return Uuid::parse_str(s).ok();
@@ -477,12 +585,17 @@ pub fn preview_json(
                 "clause_id": cid.to_string(),
                 "file_name": h.get("file_name")
             }));
-        } else if outcome == "miss"
+        } else if (outcome == "miss" || outcome == "review")
             && clauses.iter().any(|c| {
                 c.id == cid && c.must && c.family == "commercial" && c.status == "confirmed"
             })
         {
-            s5.push(json!({"clause_id": cid.to_string(), "status": "缺件"}));
+            let status = if outcome == "review" {
+                "待复核"
+            } else {
+                "缺件"
+            };
+            s5.push(json!({"clause_id": cid.to_string(), "status": status}));
         }
     }
     json!({
@@ -503,6 +616,7 @@ pub fn preview_json(
     })
 }
 
+#[tracing::instrument(name = "bid.convert", skip_all, fields(document_id = %document_id))]
 pub async fn convert_document(pool: &sqlx::PgPool, document_id: Uuid) -> Result<(), String> {
     let Some((claim_token, name, key, _generation)) =
         storage::bid::claim_document_conversion(pool, document_id)
@@ -511,6 +625,7 @@ pub async fn convert_document(pool: &sqlx::PgPool, document_id: Uuid) -> Result<
     else {
         return Ok(());
     };
+    tracing::info!(document_id = %document_id, file = %name, "bid_convert start");
     let hash = key.trim_start_matches("objects/");
     let (heartbeat_stop, mut heartbeat_stop_rx) = tokio::sync::oneshot::channel();
     let heartbeat_pool = pool.clone();
@@ -536,8 +651,18 @@ pub async fn convert_document(pool: &sqlx::PgPool, document_id: Uuid) -> Result<
     let _ = heartbeat_stop.send(());
     let _ = heartbeat_task.await;
     match conversion {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            tracing::info!(document_id = %document_id, file = %name, "bid_convert done");
+            Ok(())
+        }
         Err(error) => {
+            tracing::error!(
+                document_id = %document_id,
+                file = %name,
+                error = %error,
+                retryable = conversion_error_is_retryable(&error),
+                "bid_convert fail"
+            );
             let status = if conversion_error_is_retryable(&error) {
                 "pending"
             } else {
@@ -640,6 +765,14 @@ async fn convert_document_inner(
     if !result.error.is_empty() {
         return Err(result.error);
     }
+    tracing::info!(
+        document_id = %document_id,
+        file = name,
+        parser = result.metadata.get("parser").map(String::as_str).unwrap_or("-"),
+        images = result.images.len(),
+        anydoc_fallback = result.metadata.get("anydoc_fallback").map(String::as_str).unwrap_or("-"),
+        "bid_convert parsed"
+    );
     if !storage::bid::heartbeat_document_conversion(pool, document_id, claim_token)
         .await
         .map_err(|e| e.to_string())?
@@ -675,19 +808,21 @@ async fn convert_document_inner(
         return Err("document conversion lease lost".into());
     }
     let mut md = result.markdown;
+    let language = enrichment::infer_output_language(&format!("{name}\n{md}"));
     for img in &result.images {
         if img.data.is_empty() {
             continue;
         }
         let (ihash, ikey) = {
             let h = domain::sha256_hex(&img.data);
-            let k = storage::object_key(&h);
+            let k = storage::object_ref(&h);
             storage::write_blob_off_runtime(&h, &img.data).map_err(|e| e.to_string())?;
             (h, k)
         };
         let _ = ihash;
         if multimodal_enabled {
-            let (ocr, cap) = match enrichment::describe_image(&ikey, &image_source_type) {
+            let (ocr, cap) = match enrichment::describe_image(&ikey, &image_source_type, &language)
+            {
                 Ok(description) => description,
                 Err(error) => {
                     let message = format!("tender multimodal stage failed: {error}");
@@ -725,9 +860,17 @@ async fn convert_document_inner(
         return Err("document conversion lease lost".into());
     }
     let mhash = domain::sha256_hex(md.as_bytes());
-    let mkey = storage::object_key(&mhash);
+    let mkey = storage::object_ref(&mhash);
     storage::write_blob_off_runtime(&mhash, md.as_bytes()).map_err(|e| e.to_string())?;
     let quality_note = conversion_quality_note(&md, name);
+    if !quality_note.is_empty() {
+        tracing::warn!(
+            document_id = %document_id,
+            file = name,
+            note = quality_note,
+            "bid_convert quality"
+        );
+    }
     let finished = storage::bid::finish_document_conversion(
         pool,
         document_id,
@@ -786,6 +929,7 @@ impl Drop for ExtractLease {
     }
 }
 
+#[tracing::instrument(name = "bid.extract", skip_all, fields(run_id = %run_id, project_id = %project_id))]
 pub async fn extract_run(
     pool: &sqlx::PgPool,
     run_id: Uuid,
@@ -821,7 +965,11 @@ pub async fn extract_run(
             let model_id = extraction::configured_model_id();
             let (policy_version, prompt_version) =
                 extraction::embedded_policy_versions().unwrap_or(("", ""));
-            eprintln!("bid_extract run={run_id} fatal={}", bounded_error(&error));
+            tracing::error!(
+                run_id = %run_id,
+                error = %bounded_error(&error),
+                "bid_extract run fail"
+            );
             let diagnostics = json!({"fatal_error": "extract_run_internal_error"});
             let _ = storage::bid::finish_extract_run(
                 pool,
@@ -941,9 +1089,10 @@ async fn extract_run_body(
             let model_id = extraction::configured_model_id();
             let (policy_version, prompt_version) =
                 extraction::embedded_policy_versions().unwrap_or(("", ""));
-            eprintln!(
-                "bid_extract run={run_id} configuration_error={}",
-                bounded_error(&error)
+            tracing::error!(
+                run_id = %run_id,
+                error = %bounded_error(&error),
+                "bid_extract run fail"
             );
             let diagnostics = json!({"configuration_error": "invalid_extraction_configuration"});
             storage::bid::finish_extract_run(
@@ -1003,19 +1152,15 @@ async fn extract_run_body(
             Ok(report) => {
                 total += report.sections.len() as i32;
                 done += report.sections.len() as i32;
-                eprintln!(
-                    "bid_extract run={run_id} document={document_id} mode={} model={} policy={} prompt={} rounds={} retries={} tools={} candidate_spans={} covered_spans={} conflicts={} fallbacks={}",
-                    report.diagnostics.mode,
-                    report.diagnostics.model_id,
-                    report.diagnostics.policy_version,
-                    report.diagnostics.prompt_version,
-                    report.diagnostics.agent_rounds,
-                    report.diagnostics.retries,
-                    report.diagnostics.tool_calls,
-                    report.diagnostics.coverage.candidate_spans,
-                    report.diagnostics.coverage.covered_spans,
-                    report.diagnostics.family_conflicts,
-                    report.diagnostics.fallback_reasons.len()
+                tracing::info!(
+                    run_id = %run_id,
+                    document_id = %document_id,
+                    rounds = report.diagnostics.agent_rounds,
+                    candidate_spans = report.diagnostics.coverage.candidate_spans,
+                    covered_spans = report.diagnostics.coverage.covered_spans,
+                    fallbacks = report.diagnostics.fallback_reasons.len(),
+                    partial_failure = report.diagnostics.partial_failure,
+                    "bid_extract document done"
                 );
                 document_diagnostics.push(json!({
                     "document_id": document_id,
@@ -1028,7 +1173,12 @@ async fn extract_run_body(
                 if category == "extract_run_lease_lost" {
                     return Err(category);
                 }
-                eprintln!("bid_extract run={run_id} document={document_id} failed={category}");
+                tracing::error!(
+                    run_id = %run_id,
+                    document_id = %document_id,
+                    category = %category,
+                    "bid_extract run fail"
+                );
                 failed_documents += 1;
                 errors.push(format!("{document_id}:{category}"));
                 document_diagnostics.push(json!({
@@ -1080,6 +1230,11 @@ async fn extract_run_body(
     Ok(())
 }
 
+#[tracing::instrument(
+    name = "bid.extract.document",
+    skip_all,
+    fields(run_id = %run_id, document_id = %document_id)
+)]
 async fn extract_one_document(
     pool: &sqlx::PgPool,
     engine: &extraction::TenderExtractionEngine,
@@ -1105,21 +1260,44 @@ async fn extract_one_document(
         return Err(("markdown_reference_missing".into(), None));
     }
     let bytes = storage::read_blob(hash).map_err(|_| ("markdown_blob_unavailable".into(), None))?;
+    let file_name: String = row.try_get("file_name").unwrap_or_default();
     let markdown = String::from_utf8(bytes).map_err(|_| ("markdown_invalid_utf8".into(), None))?;
     let outline = extraction::sections_for_document(&markdown).map_err(|e| (e, None))?;
+    tracing::info!(
+        run_id = %run_id,
+        document_id = %document_id,
+        file = %file_name,
+        sections = outline.len(),
+        mode = engine.mode().as_str(),
+        model = engine.model_id(),
+        "bid_extract start"
+    );
     if outline.is_empty() {
         return Err(("document contains no extractable text".into(), None));
     }
-    storage::bid::persist_extraction_report(
+    let pending_sections: Vec<_> = outline
+        .iter()
+        .map(|section| storage::bid::ExtractionSectionRow {
+            id: Uuid::new_v4(),
+            section_key: &section.key,
+            heading_path: &section.heading_path,
+            hint_family: &section.hint_family,
+            body: &section.body,
+            extract_status: "pending",
+            error_message: "",
+        })
+        .collect();
+    storage::bid_extract_publication::ExtractionPublicationStore::publish_document(
         pool,
         storage::bid::PersistExtractionReport {
             run_id,
             claim_token,
             project_id,
             document_id,
-            sections: &[],
+            sections: &pending_sections,
             clauses: &[],
             replace_document: true,
+            scoped_section_count: Some(outline.len() as i32),
         },
     )
     .await
@@ -1147,6 +1325,15 @@ async fn extract_one_document(
         let input = extraction::ExtractionInput::section(document_id, section);
         match engine.extract(input).await {
             Ok(report) => {
+                tracing::info!(
+                    run_id = %run_id,
+                    document_id = %document_id,
+                    section_key = %section.key,
+                    clauses = report.clauses.len(),
+                    rounds = report.diagnostics.agent_rounds,
+                    fallbacks = report.diagnostics.fallback_reasons.len(),
+                    "bid_extract section done"
+                );
                 persist_report(
                     pool,
                     run_id,
@@ -1163,6 +1350,13 @@ async fn extract_one_document(
                 any_ok = true;
             }
             Err(failure) => {
+                tracing::warn!(
+                    run_id = %run_id,
+                    document_id = %document_id,
+                    section_key = %section.key,
+                    error = %bounded_error(&failure.message),
+                    "bid_extract section fail"
+                );
                 if failure.message.contains("lease") {
                     return Err(("extract_run_lease_lost".into(), Some(failure.diagnostics)));
                 }
@@ -1198,14 +1392,18 @@ async fn extract_one_document(
         return Err(("document_extract_failed".into(), Some(combined.diagnostics)));
     }
     let keep: Vec<String> = outline.iter().map(|section| section.key.clone()).collect();
-    storage::bid::prune_unconfirmed_sections(pool, document_id, &keep)
-        .await
-        .map_err(|_| {
-            (
-                "document_persist_failed".into(),
-                Some(combined.diagnostics.clone()),
-            )
-        })?;
+    storage::bid_extract_publication::ExtractionPublicationStore::prune_unconfirmed_sections(
+        pool,
+        document_id,
+        &keep,
+    )
+    .await
+    .map_err(|_| {
+        (
+            "document_persist_failed".into(),
+            Some(combined.diagnostics.clone()),
+        )
+    })?;
     Ok(combined)
 }
 
@@ -1283,7 +1481,7 @@ async fn persist_report(
             must: clause.must,
         })
         .collect();
-    storage::bid::persist_extraction_report(
+    storage::bid_extract_publication::ExtractionPublicationStore::publish_document(
         pool,
         storage::bid::PersistExtractionReport {
             run_id,
@@ -1293,6 +1491,7 @@ async fn persist_report(
             sections: &section_rows,
             clauses: &clause_rows,
             replace_document,
+            scoped_section_count: None,
         },
     )
     .await
@@ -1306,372 +1505,72 @@ async fn persist_report(
     })
 }
 
-pub async fn run_match_job(
-    pool: &sqlx::PgPool,
-    job_id: Uuid,
-    project_id: Uuid,
-) -> Result<(), String> {
-    let Some(claim_token) = storage::bid::claim_match_job(pool, job_id, project_id)
-        .await
-        .map_err(|e| e.to_string())?
-    else {
-        return Ok(());
-    };
-    let (heartbeat_stop, mut heartbeat_stop_rx) = tokio::sync::oneshot::channel();
-    let heartbeat_pool = pool.clone();
-    let heartbeat_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
-        loop {
-            tokio::select! {
-                _ = &mut heartbeat_stop_rx => break,
-                _ = interval.tick() => {
-                    match storage::bid::heartbeat_match_job(&heartbeat_pool, job_id, claim_token).await {
-                        Ok(true) => {}
-                        _ => break,
-                    }
-                }
-            }
-        }
-    });
-    let result = run_claimed_match_job(pool, job_id, project_id, claim_token).await;
-    let _ = heartbeat_stop.send(());
-    let _ = heartbeat_task.await;
-    result
+pub fn matching_schedule_environment() -> storage::bid_matching::ScheduleEnvironment {
+    let profile = std::env::var("KNOWLEDGEBRAIN_RUNTIME_PROFILE")
+        .or_else(|_| std::env::var("KNOWLEDGEBRAIN_PROFILE"))
+        .unwrap_or_else(|_| "development".into());
+    let environment = match profile.to_ascii_lowercase().as_str() {
+        "prod" | "production" => "production",
+        "test" => "test",
+        _ => "development",
+    }
+    .to_string();
+    storage::bid_matching::ScheduleEnvironment {
+        environment,
+        max_attempts: 3,
+    }
 }
 
-async fn run_claimed_match_job(
+pub async fn schedule_dirty_and_enqueue(
     pool: &sqlx::PgPool,
-    job_id: Uuid,
     project_id: Uuid,
-    claim_token: Uuid,
-) -> Result<(), String> {
-    let unit = storage::bid::match_job_unit(pool, job_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let merge = section_merge_map(pool, project_id).await?;
-    let all_tech = storage::bid::confirmed_clauses(pool, project_id, "technical")
-        .await
-        .map_err(|e| e.to_string())?;
-    let tech_rows: Vec<_> = if let Some(uid) = unit {
-        all_tech
-            .into_iter()
-            .filter(|r| {
-                let sid = r.try_get::<Option<Uuid>, _>("section_id").ok().flatten();
-                resolve_unit(sid, &merge) == uid
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let comm_rows = if unit.is_none() {
-        storage::bid::confirmed_clauses(pool, project_id, "commercial")
-            .await
-            .map_err(|e| e.to_string())?
-    } else {
-        Vec::new()
-    };
-    let mut tech_status = "skipped";
-    let mut comm_status = "skipped";
-    let mut candidates = json!([]);
-    let mut err = String::new();
-    if !tech_rows.is_empty() {
-        tech_status = "running";
-        let mut reqs = Vec::new();
-        for r in &tech_rows {
-            reqs.push(search::Requirement {
-                id: r.get::<Uuid, _>("id").to_string(),
-                text: r.get("text"),
-                weight: 1.0,
-                must: r.get("must"),
-                tag_ids: vec![],
-                use_library: false,
-            });
-        }
-        let mut all = Vec::new();
-        for chunk in reqs.chunks(30) {
-            let req = search::SearchRequest {
-                mode: "matching".into(),
-                query: None,
-                product_id: None,
-                version_id: None,
-                include_library: false,
-                tag_ids: vec![],
-                match_count: 10,
-                expand_wiki: false,
-                expand_graph: false,
-                requirements: chunk.to_vec(),
-                version_scope: "current".into(),
-                product_ids: vec![],
-                workspace_id: None,
-                scope: Some("product_lines".into()),
-                group_by: "none".into(),
-                tender_text: None,
-            };
-            match search::matching_pg(pool, &req).await {
-                Ok(mut resp) => all.append(&mut resp.candidates),
-                Err(e) => {
-                    tech_status = "failed";
-                    err = e.message;
-                    break;
-                }
-            }
-        }
-        if tech_status != "failed" {
-            candidates = merge_candidates(all, &reqs);
-            tech_status = "done";
-        }
-    }
-    if unit.is_some() {
-        comm_status = "skipped";
-    } else if comm_rows.is_empty() {
-        if storage::bid::replace_commercial_hits_for_job(pool, job_id, project_id, claim_token, &[])
-            .await
-            .is_err()
-        {
-            comm_status = "failed";
-        }
-    } else {
-        comm_status = "running";
-        let mut hits_acc = Vec::new();
-        let mut reqs = Vec::new();
-        for r in &comm_rows {
-            reqs.push(search::Requirement {
-                id: r.get::<Uuid, _>("id").to_string(),
-                text: r.get("text"),
-                weight: 1.0,
-                must: r.get("must"),
-                tag_ids: vec![],
-                use_library: false,
-            });
-        }
-        let mut ok = true;
-        for chunk in reqs.chunks(30) {
-            let req = search::SearchRequest {
-                mode: "matching".into(),
-                query: None,
-                product_id: None,
-                version_id: None,
-                include_library: false,
-                tag_ids: vec![],
-                match_count: 10,
-                expand_wiki: false,
-                expand_graph: false,
-                requirements: chunk.to_vec(),
-                version_scope: "current".into(),
-                product_ids: vec![],
-                workspace_id: None,
-                scope: Some("company".into()),
-                group_by: "none".into(),
-                tender_text: None,
-            };
-            match search::matching_pg(pool, &req).await {
-                Ok(resp) => hits_acc.extend(resp.clauses),
-                Err(e) => {
-                    comm_status = "failed";
-                    if !err.is_empty() {
-                        err.push_str("; ");
-                    }
-                    err.push_str(&e.message);
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if ok {
-            let rows: Vec<storage::bid::CommercialHitRow<'_>> = hits_acc
-                .iter()
-                .filter_map(|c| {
-                    Some(storage::bid::CommercialHitRow {
-                        clause_id: Uuid::parse_str(&c.id).ok()?,
-                        outcome: c.outcome.as_str(),
-                        document_id: c.document_id,
-                        version_id: c.version_id,
-                        file_name: c.file_name.clone(),
-                        score: c.score,
-                        product_id: c.product_id,
-                    })
-                })
-                .collect();
-            if storage::bid::replace_commercial_hits_for_job(
-                pool,
-                job_id,
-                project_id,
-                claim_token,
-                &rows,
-            )
-            .await
-            .is_err()
-            {
-                comm_status = "failed";
-            } else {
-                comm_status = "done";
-            }
-        }
-    }
-    let status = match_job_overall_status(tech_status, comm_status);
-    storage::bid::set_match_job(
+) -> Result<Option<Uuid>, String> {
+    let receipt = storage::bid_matching::schedule_dirty_project(
         pool,
-        storage::bid::MatchJobFinish {
-            id: job_id,
-            project_id,
-            claim_token,
-            status,
-            tech_status,
-            commercial_status: comm_status,
-            candidates: &candidates,
-            error: &err,
-        },
+        project_id,
+        matching_schedule_environment(),
     )
     .await
     .map_err(|e| e.to_string())?;
-    if comm_status == "done" {
-        let _ = storage::bid::mark_booklet_stale(pool, project_id, &["4", "5"]).await;
-    }
-    Ok(())
-}
-
-fn merge_candidates(
-    parts: Vec<search::Candidate>,
-    all_reqs: &[search::Requirement],
-) -> serde_json::Value {
-    use std::collections::HashMap;
-    let mut by: HashMap<Uuid, search::Candidate> = HashMap::new();
-    for c in parts {
-        by.entry(c.product_id)
-            .and_modify(|e| {
-                e.requirements.extend(c.requirements.clone());
-            })
-            .or_insert(c);
-    }
-    let mut out = Vec::new();
-    for (_, mut c) in by {
-        let mut wsum = 0.0;
-        let mut weighted = 0.0;
-        let mut hit_w = 0.0;
-        let mut unmet = Vec::new();
-        for r in all_reqs {
-            if let Some(rr) = c.requirements.iter().find(|x| x.id == r.id) {
-                weighted += r.weight * rr.score;
-                wsum += r.weight;
-                if rr.hit {
-                    hit_w += r.weight;
-                }
-                if r.must && !rr.hit {
-                    unmet.push(r.id.clone());
-                }
-            }
-        }
-        c.score = if wsum == 0.0 { 0.0 } else { weighted / wsum };
-        c.coverage = if wsum == 0.0 { 0.0 } else { hit_w / wsum };
-        c.unmet_must = unmet;
-        out.push(c);
-    }
-    out.sort_by(|a, b| {
-        b.unmet_must.is_empty().cmp(&a.unmet_must.is_empty()).then(
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal),
-        )
-    });
-    serde_json::to_value(out).unwrap_or(json!([]))
-}
-
-async fn enqueue_one_match(
-    pool: &sqlx::PgPool,
-    project_id: Uuid,
-    generation: i64,
-    job_kind: &str,
-    unit_id: Option<Uuid>,
-    parts: &[(Uuid, String, bool, String)],
-) -> Result<Option<Uuid>, String> {
-    let refs: Vec<(Uuid, &str, bool, &str)> = parts
-        .iter()
-        .map(|(id, t, m, f)| (*id, t.as_str(), *m, f.as_str()))
-        .collect();
-    let key = debounce_key(&refs);
-    let requested_id = Uuid::new_v4();
-    let job_id = match storage::bid::insert_match_job(
-        pool,
-        requested_id,
-        project_id,
-        generation,
-        &key,
-        job_kind,
-        unit_id,
-    )
-    .await
-    {
-        Ok(job_id) => job_id,
-        Err(sqlx::Error::RowNotFound) => return Ok(None),
-        Err(error) => return Err(error.to_string()),
-    };
-    // The pending match row is durable; housekeeping recovers a transient enqueue failure.
-    let _ = runtime::enqueue_bid_match(job_id, project_id, key).await;
-    Ok(Some(job_id))
-}
-
-pub async fn schedule_match(pool: &sqlx::PgPool, project_id: Uuid) -> Result<Option<Uuid>, String> {
-    let generation = storage::bid::current_match_generation(pool, project_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let tech = storage::bid::confirmed_clauses(pool, project_id, "technical")
-        .await
-        .map_err(|e| e.to_string())?;
-    let comm = storage::bid::confirmed_clauses(pool, project_id, "commercial")
-        .await
-        .map_err(|e| e.to_string())?;
-    if tech.is_empty() && comm.is_empty() {
-        storage::bid::replace_commercial_hits(pool, project_id, &[])
-            .await
-            .map_err(|e| e.to_string())?;
-        storage::bid::clear_match_dirty(pool, project_id, generation)
-            .await
-            .map_err(|e| e.to_string())?;
+    let Some(receipt) = receipt else {
         return Ok(None);
-    }
-    let merge = section_merge_map(pool, project_id).await?;
-    let mut by_unit: std::collections::HashMap<Uuid, Vec<(Uuid, String, bool, String)>> =
-        std::collections::HashMap::new();
-    for r in &tech {
-        let sid = r.try_get::<Option<Uuid>, _>("section_id").ok().flatten();
-        let unit = resolve_unit(sid, &merge);
-        by_unit.entry(unit).or_default().push((
-            r.get("id"),
-            r.get("text"),
-            r.get("must"),
-            r.get("family"),
-        ));
-    }
+    };
     let mut last = None;
-    for (unit, parts) in by_unit {
-        last = enqueue_one_match(
-            pool,
-            project_id,
-            generation,
-            "technical",
-            Some(unit),
-            &parts,
+    for job in receipt.jobs {
+        let _ = runtime::enqueue_bid_match_route_v1(
+            job.id,
+            runtime::BidMatchRouteV1Snapshots {
+                config_snapshot_id: job.snapshots.config_snapshot_id,
+                feature_snapshot_id: job.snapshots.feature_snapshot_id,
+                score_policy_snapshot_id: job.snapshots.score_policy_snapshot_id,
+                verifier_policy_snapshot_id: job.snapshots.verifier_policy_snapshot_id,
+            },
+            None,
         )
-        .await?;
+        .await;
+        last = Some(job.id);
     }
-    if !comm.is_empty() {
-        let parts: Vec<_> = comm
-            .iter()
-            .map(|r| {
-                (
-                    r.get::<Uuid, _>("id"),
-                    r.get::<String, _>("text"),
-                    r.get::<bool, _>("must"),
-                    r.get::<String, _>("family"),
-                )
-            })
-            .collect();
-        last = enqueue_one_match(pool, project_id, generation, "commercial", None, &parts).await?;
-    }
-    storage::bid::clear_match_dirty(pool, project_id, generation)
+    Ok(last)
+}
+
+pub async fn enqueue_pending_route_jobs(pool: &sqlx::PgPool) -> Result<usize, String> {
+    let jobs = storage::bid_matching::pending_route_envelopes(pool)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(last)
+    for job in &jobs {
+        let _ = runtime::enqueue_bid_match_route_v1(
+            job.job_id,
+            runtime::BidMatchRouteV1Snapshots {
+                config_snapshot_id: job.snapshots.config_snapshot_id,
+                feature_snapshot_id: job.snapshots.feature_snapshot_id,
+                score_policy_snapshot_id: job.snapshots.score_policy_snapshot_id,
+                verifier_policy_snapshot_id: job.snapshots.verifier_policy_snapshot_id,
+            },
+            None,
+        )
+        .await;
+    }
+    Ok(jobs.len())
 }
 
 pub async fn maybe_rematch_company_doc(
@@ -1699,7 +1598,7 @@ pub async fn maybe_rematch_company_doc(
         .await
         .map_err(|e| e.to_string())?;
     for pid in projects {
-        let _ = schedule_match(pool, pid).await;
+        let _ = schedule_dirty_and_enqueue(pool, pid).await;
     }
     Ok(())
 }
@@ -1801,7 +1700,7 @@ pub async fn retry_section_claimed(
                     must: clause.must,
                 })
                 .collect();
-            match storage::bid::persist_section_retry(
+            match storage::bid_extract_publication::ExtractionPublicationStore::publish_section(
                 pool,
                 retry_token,
                 project_id,
@@ -1823,9 +1722,9 @@ pub async fn retry_section_claimed(
                         category,
                     )
                     .await;
-                    eprintln!(
-                        "bid section retry persist error: {}",
-                        bounded_error(&error.to_string())
+                    tracing::error!(
+                        error = %bounded_error(&error.to_string()),
+                        "bid section retry persist failed"
                     );
                     Err(category.into())
                 }
@@ -1982,13 +1881,85 @@ mod tests {
     }
 
     #[test]
-    fn debounce_key_stable() {
-        let a = Uuid::nil();
-        let k1 = debounce_key(&[(a, "iso", true, "commercial")]);
-        let k2 = debounce_key(&[(a, "iso", true, "commercial")]);
-        let k3 = debounce_key(&[(a, "iso", false, "commercial")]);
-        assert_eq!(k1, k2);
-        assert_ne!(k1, k3);
+    fn commercial_coverage_maps_decisions_and_skips_hidden() {
+        let hit = Uuid::from_u128(1);
+        let miss = Uuid::from_u128(2);
+        let review = Uuid::from_u128(3);
+        let clauses = vec![
+            ClauseView {
+                id: hit,
+                text: "iso".into(),
+                raw_text: String::new(),
+                family: "commercial".into(),
+                must: true,
+                status: "confirmed".into(),
+                family_conflict: false,
+                deviate: false,
+                deviate_note: String::new(),
+                section_id: None,
+                assessment: "unset".into(),
+                unit_id: Uuid::nil(),
+                suggestion: String::new(),
+                hit_outcome: String::new(),
+                hit_file: String::new(),
+            },
+            ClauseView {
+                id: miss,
+                text: "miss".into(),
+                raw_text: String::new(),
+                family: "commercial".into(),
+                must: true,
+                status: "confirmed".into(),
+                family_conflict: false,
+                deviate: false,
+                deviate_note: String::new(),
+                section_id: None,
+                assessment: "unset".into(),
+                unit_id: Uuid::nil(),
+                suggestion: String::new(),
+                hit_outcome: String::new(),
+                hit_file: String::new(),
+            },
+            ClauseView {
+                id: review,
+                text: "review".into(),
+                raw_text: String::new(),
+                family: "commercial".into(),
+                must: true,
+                status: "confirmed".into(),
+                family_conflict: false,
+                deviate: false,
+                deviate_note: String::new(),
+                section_id: None,
+                assessment: "unset".into(),
+                unit_id: Uuid::nil(),
+                suggestion: String::new(),
+                hit_outcome: String::new(),
+                hit_file: String::new(),
+            },
+        ];
+        let decisions = vec![
+            json!({"clause_id": hit.to_string(), "outcome": "hit"}),
+            json!({"clause_id": miss.to_string(), "outcome": "miss"}),
+            json!({"clause_id": review.to_string(), "outcome": "review"}),
+        ];
+        let cov = coverage_for_commercial(&clauses, &decisions);
+        assert_eq!(
+            cov.iter().find(|row| row.clause_id == hit).unwrap().status,
+            "hit"
+        );
+        assert_eq!(
+            cov.iter().find(|row| row.clause_id == miss).unwrap().status,
+            "miss"
+        );
+        assert_eq!(
+            cov.iter()
+                .find(|row| row.clause_id == review)
+                .unwrap()
+                .status,
+            "review"
+        );
+        assert!(coverage_for_commercial(&clauses, &[]).is_empty());
     }
 
     #[test]
@@ -2108,22 +2079,6 @@ mod tests {
     }
 
     #[test]
-    fn skip_match_when_same_key_already_done() {
-        assert!(should_skip_match("abc", "done", "abc"));
-        assert!(should_skip_match("abc", "pending", "abc"));
-        assert!(!should_skip_match("abc", "done", "xyz"));
-        assert!(!should_skip_match("abc", "failed", "abc"));
-    }
-
-    #[test]
-    fn match_job_fails_if_either_side_failed() {
-        assert_eq!(match_job_overall_status("failed", "skipped"), "failed");
-        assert_eq!(match_job_overall_status("skipped", "failed"), "failed");
-        assert_eq!(match_job_overall_status("done", "skipped"), "done");
-        assert_eq!(match_job_overall_status("failed", "failed"), "failed");
-    }
-
-    #[test]
     fn meet_blocked_only_on_unmet() {
         assert!(meet_blocked_by_suggestion("unmet"));
         assert!(!meet_blocked_by_suggestion("cover"));
@@ -2153,6 +2108,12 @@ mod tests {
                 extract_status: None,
                 error_message: None,
                 retry_status: None,
+                publication_generation: None,
+                stale: None,
+                removed: None,
+                quality: None,
+                degraded: None,
+                reason: None,
             },
             MatchUnitView {
                 kind: "technical".into(),
@@ -2163,6 +2124,12 @@ mod tests {
                 extract_status: None,
                 error_message: None,
                 retry_status: None,
+                publication_generation: None,
+                stale: None,
+                removed: None,
+                quality: None,
+                degraded: None,
+                reason: None,
             },
             MatchUnitView {
                 kind: "technical".into(),
@@ -2173,6 +2140,12 @@ mod tests {
                 extract_status: None,
                 error_message: None,
                 retry_status: None,
+                publication_generation: None,
+                stale: None,
+                removed: None,
+                quality: None,
+                degraded: None,
+                reason: None,
             },
             MatchUnitView {
                 kind: "unsectioned".into(),
@@ -2183,6 +2156,12 @@ mod tests {
                 extract_status: None,
                 error_message: None,
                 retry_status: None,
+                publication_generation: None,
+                stale: None,
+                removed: None,
+                quality: None,
+                degraded: None,
+                reason: None,
             },
         ];
         let keys = expected_part_keys_from(&units, &[late, early]);
@@ -2199,5 +2178,50 @@ mod tests {
         );
         let none = expected_part_keys_from(&units, &[]);
         assert_eq!(none, vec!["1", "3", "4", "5"]);
+    }
+
+    #[test]
+    fn match_unit_publication_metadata_serializes_only_when_present() {
+        let mut unit = MatchUnitView {
+            kind: "commercial".into(),
+            id: None,
+            heading_path: "商务".into(),
+            technical_count: None,
+            prev_id: None,
+            extract_status: None,
+            error_message: None,
+            retry_status: None,
+            publication_generation: None,
+            stale: None,
+            removed: None,
+            quality: None,
+            degraded: None,
+            reason: None,
+        };
+        let legacy = serde_json::to_value(&unit).unwrap();
+        for field in [
+            "publication_generation",
+            "stale",
+            "removed",
+            "quality",
+            "degraded",
+            "reason",
+        ] {
+            assert!(legacy.get(field).is_none(), "legacy unit exposed {field}");
+        }
+        unit.kind = "technical".into();
+        unit.publication_generation = Some(7);
+        unit.stale = Some(true);
+        unit.removed = Some(false);
+        unit.quality = Some("review".into());
+        unit.degraded = Some(true);
+        unit.reason = Some(vec!["QUALITY_REVIEW".into()]);
+        let modern = serde_json::to_value(&unit).unwrap();
+        assert_eq!(modern["publication_generation"], 7);
+        assert_eq!(modern["stale"], true);
+        assert_eq!(modern["removed"], false);
+        assert_eq!(modern["quality"], "review");
+        assert_eq!(modern["degraded"], true);
+        assert_eq!(modern["reason"], serde_json::json!(["QUALITY_REVIEW"]));
     }
 }

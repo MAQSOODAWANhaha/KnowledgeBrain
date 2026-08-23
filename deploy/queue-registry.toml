@@ -1,0 +1,256 @@
+format = 1
+schema_version = 1
+release_id = "kb-queue-registry-v1"
+minimum_worker_protocol = 1
+
+[[entries]]
+physical_queue = "default"
+task_type = "document:process"
+payload_schema = "document-process/v1"
+payload_version = 1
+identity_formula = "document:process:{document_id}:{attempt}"
+protocol = 1
+handler = "DocumentProcessV1Handler"
+snapshots = ["process"]
+capabilities = ["postgresql", "object_store", "docreader"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "default"
+task_type = "manual:process"
+payload_schema = "manual-process/v1"
+payload_version = 1
+identity_formula = "manual:process:{document_id}:{attempt}"
+protocol = 1
+handler = "ManualProcessV1Handler"
+snapshots = ["process"]
+capabilities = ["postgresql", "object_store", "docreader"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "postprocess"
+task_type = "knowledge:post_process"
+payload_schema = "post-process/v1"
+payload_version = 1
+identity_formula = "knowledge:post_process:{document_id}"
+protocol = 1
+handler = "PostProcessV1Handler"
+snapshots = ["process", "feature"]
+capabilities = ["postgresql", "embedding", "index"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "summary"
+task_type = "summary:generation"
+payload_schema = "summary/v1"
+payload_version = 1
+identity_formula = "summary:generation:{document_id}:{attempt}"
+protocol = 1
+handler = "SummaryV1Handler"
+snapshots = ["generation", "feature"]
+capabilities = ["chat"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "summary"
+task_type = "datatable:summary"
+payload_schema = "datatable/v1"
+payload_version = 1
+identity_formula = "datatable:summary:{document_id}"
+protocol = 1
+handler = "DatatableV1Handler"
+snapshots = ["generation", "feature"]
+capabilities = ["chat"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "multimodal"
+task_type = "image:multimodal"
+payload_schema = "image-multimodal/v1"
+payload_version = 1
+identity_formula = "image:multimodal:{document_id}:{image_key}:{attempt}"
+protocol = 1
+handler = "ImageMultimodalV1Handler"
+snapshots = ["multimodal", "feature"]
+capabilities = ["vlm", "ocr", "object_store"]
+launch_mode = "declared_disabled"
+
+[[entries]]
+physical_queue = "graph"
+task_type = "chunk:extract"
+payload_schema = "chunk-extract/v1"
+payload_version = 1
+identity_formula = "chunk:extract:{chunk_id}"
+protocol = 1
+handler = "ChunkExtractV1Handler"
+snapshots = ["graph", "feature"]
+capabilities = ["embedding", "graph_store"]
+launch_mode = "declared_disabled"
+
+[[entries]]
+physical_queue = "question"
+task_type = "question:generation"
+payload_schema = "question-generation/v1"
+payload_version = 1
+identity_formula = "question:generation:{document_id}:{batch}"
+protocol = 1
+handler = "QuestionV1Handler"
+snapshots = ["generation", "feature"]
+capabilities = ["chat"]
+launch_mode = "declared_disabled"
+
+[[entries]]
+physical_queue = "wiki"
+task_type = "wiki:ingest"
+payload_schema = "wiki-ingest/v1"
+payload_version = 1
+identity_formula = "wiki-ingest:{product_version_id}"
+protocol = 1
+handler = "WikiIngestV1Handler"
+snapshots = ["wiki", "feature"]
+capabilities = ["postgresql", "embedding", "index"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "wiki"
+task_type = "wiki:finalize"
+payload_schema = "wiki-finalize/v1"
+payload_version = 1
+identity_formula = "wiki-finalize:{product_version_id}"
+protocol = 1
+handler = "WikiFinalizeV1Handler"
+snapshots = ["wiki", "feature"]
+capabilities = ["chat", "postgresql"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "low"
+task_type = "version:clone"
+payload_schema = "version-clone/v1"
+payload_version = 1
+identity_formula = "version:clone:{target_version_id}"
+protocol = 1
+handler = "VersionCloneV1Handler"
+snapshots = ["clone"]
+capabilities = ["postgresql", "object_store", "index"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "low"
+task_type = "kb:delete"
+payload_schema = "kb-delete/v1"
+payload_version = 1
+identity_formula = "kb:delete:{product_version_id}"
+protocol = 1
+handler = "KbDeleteV1Handler"
+snapshots = ["operator_feature"]
+capabilities = ["postgresql", "object_store", "index"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "low"
+task_type = "knowledge:list_delete"
+payload_schema = "list-delete/v1"
+payload_version = 1
+identity_formula = "knowledge:list_delete:{document_id}"
+protocol = 1
+handler = "ListDeleteV1Handler"
+snapshots = ["operator_feature"]
+capabilities = ["postgresql", "object_store", "index"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "low"
+task_type = "index:delete"
+payload_schema = "index-delete/v1"
+payload_version = 1
+identity_formula = "index:delete:{document_id}"
+protocol = 1
+handler = "IndexDeleteV1Handler"
+snapshots = ["operator_feature"]
+capabilities = ["index"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "low"
+task_type = "knowledge:list_reparse"
+payload_schema = "list-reparse/v1"
+payload_version = 1
+identity_formula = "knowledge:list_reparse:{document_id}"
+protocol = 1
+handler = "ListReparseV1Handler"
+snapshots = ["process", "feature"]
+capabilities = ["postgresql", "object_store", "docreader"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "low"
+task_type = "system:maintenance-housekeep:v1"
+payload_schema = "maintenance-housekeep/v1"
+payload_version = 1
+identity_formula = "system:maintenance-housekeep:v1:{activation_epoch}:{scheduled_epoch_5m}"
+protocol = 1
+handler = "MaintenanceHousekeepV1Handler"
+snapshots = ["maintenance_activation", "feature"]
+capabilities = ["postgresql", "redis"]
+launch_mode = "maintenance_only"
+
+[[entries]]
+physical_queue = "low"
+task_type = "system:live-recovery:v1"
+payload_schema = "live-recovery/v1"
+payload_version = 1
+identity_formula = "system:live-recovery:v1:{recovery_kind}:{durable_id}:{generation}:{recovery_epoch}"
+protocol = 1
+handler = "LiveRecoveryV1Handler"
+snapshots = ["recovery_policy", "feature"]
+capabilities = ["postgresql", "redis"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "bid-convert-v1"
+task_type = "bid:convert"
+payload_schema = "bid-convert/v1"
+payload_version = 1
+identity_formula = "bid:convert:{document_id}"
+protocol = 1
+handler = "BidConvertV1Handler"
+snapshots = ["conversion", "feature"]
+capabilities = ["postgresql", "object_store", "docreader"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "bid-extract-v1"
+task_type = "bid:extract"
+payload_schema = "bid-extract/v1"
+payload_version = 1
+identity_formula = "bid:extract:{run_id}"
+protocol = 1
+handler = "BidExtractV1Handler"
+snapshots = ["target_config", "feature"]
+capabilities = ["chat", "extraction_policy", "postgresql"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "bid-section-retry-v1"
+task_type = "bid:section-retry"
+payload_schema = "bid-section-retry/v1"
+payload_version = 1
+identity_formula = "bid:section-retry:{job_id}"
+protocol = 1
+handler = "BidSectionRetryV1Handler"
+snapshots = ["target_config", "feature"]
+capabilities = ["chat", "extraction_policy", "postgresql"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "bid-matching-v1"
+task_type = "bid:match-route:v1"
+payload_schema = "bid-match-route/v1"
+payload_version = 1
+identity_formula = "bid:match-route:v1:{job_id}"
+protocol = 1
+handler = "BidMatchRouteV1Handler"
+snapshots = ["matching_config", "feature", "score_policy", "verifier_policy"]
+capabilities = ["retrieval", "verifier", "chat", "postgresql"]
+launch_mode = "required_enabled"
