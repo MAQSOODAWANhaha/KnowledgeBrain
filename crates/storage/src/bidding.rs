@@ -654,6 +654,56 @@ pub async fn current_fact_suggestions(
         .collect())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactSuggestionDecision {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub candidate_id: Uuid,
+    pub revision: i32,
+    pub status: String,
+    pub reason: Option<String>,
+    pub decided_by: String,
+    pub decided_at: DateTime<Utc>,
+    pub previous_decision_id: Option<Uuid>,
+    pub field: String,
+    pub typed_value: Value,
+    pub raw_quote: String,
+    pub confidence: String,
+    pub source_span_v2: Value,
+}
+
+pub async fn fact_suggestion_history(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Vec<FactSuggestionDecision>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT * FROM bidding_fact_suggestion_history
+         WHERE project_id=$1 ORDER BY candidate_id,revision",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| FactSuggestionDecision {
+            id: row.get("id"),
+            project_id: row.get("project_id"),
+            candidate_id: row.get("candidate_id"),
+            revision: row.get("revision"),
+            status: row.get("status"),
+            reason: row.get("reason"),
+            decided_by: row.get("decided_by"),
+            decided_at: row.get("decided_at"),
+            previous_decision_id: row.get("previous_decision_id"),
+            field: row.get("field"),
+            typed_value: row.get("typed_value"),
+            raw_quote: row.get("raw_quote"),
+            confidence: format!("{:.4}", row.get::<rust_decimal::Decimal, _>("confidence")),
+            source_span_v2: row.get("source_span_v2"),
+        })
+        .collect())
+}
+
 pub struct FactMutation<'a> {
     pub project_id: Uuid,
     pub action: &'a str,

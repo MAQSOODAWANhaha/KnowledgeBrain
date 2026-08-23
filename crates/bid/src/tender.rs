@@ -190,6 +190,7 @@ fn contains_any(text: &str, terms: &[&str]) -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceSpanV2 {
     pub schema_version: u8,
     pub source_artifact_id: Uuid,
@@ -206,6 +207,67 @@ pub struct SourceSpanV2 {
     pub quote: String,
     pub quote_sha256: String,
     pub heading_path: Vec<String>,
+}
+
+/// Frozen identities used to verify a [`SourceSpanV2`] before it is consumed.
+///
+/// PostgreSQL repeats these checks when publishing. Keeping the verifier here
+/// gives non-database consumers the same byte/scope boundary without falling
+/// back to a live document pointer.
+pub struct SourceSpanScope<'a> {
+    pub source: &'a [u8],
+    pub source_artifact_id: Uuid,
+    pub section_artifact_id: Uuid,
+    pub project_id: Uuid,
+    pub document_id: Uuid,
+    pub conversion_generation: i32,
+    pub section_key: &'a str,
+    pub parent_start_offset: usize,
+    pub parent_end_offset: usize,
+    pub heading_path: &'a [String],
+}
+
+pub fn verify_source_span_v2(
+    span: &SourceSpanV2,
+    scope: SourceSpanScope<'_>,
+) -> Result<(), &'static str> {
+    let source_utf8 =
+        std::str::from_utf8(scope.source).map_err(|_| "frozen source is not valid UTF-8")?;
+    if span.schema_version != 2 || span.offset_unit != "utf8_byte" {
+        return Err("source span schema or offset unit invalid");
+    }
+    if span.source_artifact_id != scope.source_artifact_id
+        || span.section_artifact_id != scope.section_artifact_id
+        || span.project_id != scope.project_id
+        || span.document_id != scope.document_id
+        || span.conversion_generation != scope.conversion_generation
+        || span.section_key != scope.section_key
+        || span.heading_path != scope.heading_path
+    {
+        return Err("source span frozen scope mismatch");
+    }
+
+    let parent_start = usize::try_from(span.parent_start_offset)
+        .map_err(|_| "source span parent bounds invalid")?;
+    let parent_end =
+        usize::try_from(span.parent_end_offset).map_err(|_| "source span parent bounds invalid")?;
+    let start = usize::try_from(span.start_offset).map_err(|_| "source span bounds invalid")?;
+    let end = usize::try_from(span.end_offset).map_err(|_| "source span bounds invalid")?;
+    if parent_start != scope.parent_start_offset
+        || parent_end != scope.parent_end_offset
+        || parent_start >= parent_end
+        || parent_end > scope.source.len()
+        || !source_utf8.is_char_boundary(parent_start)
+        || !source_utf8.is_char_boundary(parent_end)
+        || start < parent_start
+        || end > parent_end
+    {
+        return Err("source span parent scope mismatch");
+    }
+    if span.quote_sha256 != hex::encode(Sha256::digest(span.quote.as_bytes())) {
+        return Err("source span quote digest mismatch");
+    }
+    verify_utf8_span(scope.source, start, end, &span.quote)
 }
 
 pub fn verify_utf8_span(
@@ -861,6 +923,78 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn source_span_v2_rejects_scope_generation_digest_and_unknown_keys() {
+        let source = "# 技术要求\n系统必须支持国密协议。";
+        let quote = "系统必须支持国密协议。";
+        let start = source.find(quote).unwrap();
+        let end = start + quote.len();
+        let source_artifact_id = Uuid::new_v4();
+        let section_artifact_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let document_id = Uuid::new_v4();
+        let heading_path = vec!["技术要求".to_string()];
+        let span = SourceSpanV2 {
+            schema_version: 2,
+            source_artifact_id,
+            section_artifact_id,
+            project_id,
+            document_id,
+            conversion_generation: 3,
+            section_key: "section:technical".into(),
+            parent_start_offset: 0,
+            parent_end_offset: source.len() as i64,
+            start_offset: start as i64,
+            end_offset: end as i64,
+            offset_unit: "utf8_byte".into(),
+            quote: quote.into(),
+            quote_sha256: hex::encode(Sha256::digest(quote.as_bytes())),
+            heading_path: heading_path.clone(),
+        };
+        let scope = || SourceSpanScope {
+            source: source.as_bytes(),
+            source_artifact_id,
+            section_artifact_id,
+            project_id,
+            document_id,
+            conversion_generation: 3,
+            section_key: "section:technical",
+            parent_start_offset: 0,
+            parent_end_offset: source.len(),
+            heading_path: &heading_path,
+        };
+
+        verify_source_span_v2(&span, scope()).unwrap();
+
+        let mut wrong_generation = span.clone();
+        wrong_generation.conversion_generation += 1;
+        assert_eq!(
+            verify_source_span_v2(&wrong_generation, scope()),
+            Err("source span frozen scope mismatch")
+        );
+
+        let mut wrong_section = span.clone();
+        wrong_section.section_artifact_id = Uuid::new_v4();
+        assert_eq!(
+            verify_source_span_v2(&wrong_section, scope()),
+            Err("source span frozen scope mismatch")
+        );
+
+        let mut wrong_digest = span.clone();
+        wrong_digest.quote_sha256 = "0".repeat(64);
+        assert_eq!(
+            verify_source_span_v2(&wrong_digest, scope()),
+            Err("source span quote digest mismatch")
+        );
+
+        let mut encoded = serde_json::to_value(&span).unwrap();
+        encoded
+            .as_object_mut()
+            .unwrap()
+            .insert("live_document_id".into(), json!(Uuid::new_v4()));
+        assert!(serde_json::from_value::<SourceSpanV2>(encoded).is_err());
     }
 
     #[test]
