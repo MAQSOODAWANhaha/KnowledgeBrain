@@ -30079,7 +30079,7 @@ schema = "public"
 relation = "bid_submission_gate_issues"
 name = "bid_submission_gate_issues_code_check"
 kind = "check"
-definition = "CHECK (code = ANY (ARRAY['PROFILE_FIELD_MISSING'::text, 'SIGNATURE_OR_SEAL_NOT_CONFIRMED'::text, 'PROCEDURAL_CLASSIFICATION_MISSING'::text, 'PROCEDURAL_CLASSIFICATION_REVIEW'::text, 'PROCEDURAL_DECISION_MISSING'::text, 'PROCEDURAL_NOT_APPLICABLE'::text, 'ATTACHMENT_NOT_VALID'::text, 'PART_MISSING'::text, 'PART_STALE'::text, 'QUOTE_NOT_FINALIZED'::text, 'BID_VALIDITY_CONFLICT'::text, 'KIND_ROUTER_RECONFIRMATION_REQUIRED'::text, 'DEPENDENCY_NOT_CURRENT'::text]))"
+definition = "CHECK (code = ANY (ARRAY['PROFILE_FIELD_MISSING'::text, 'SIGNATURE_OR_SEAL_NOT_CONFIRMED'::text, 'MATCHING_REPORT_MISSING'::text, 'MATCHING_PICK_MISSING'::text, 'PROCEDURAL_CLASSIFICATION_MISSING'::text, 'PROCEDURAL_CLASSIFICATION_REVIEW'::text, 'PROCEDURAL_DECISION_MISSING'::text, 'PROCEDURAL_NOT_APPLICABLE'::text, 'ATTACHMENT_NOT_VALID'::text, 'PART_MISSING'::text, 'PART_STALE'::text, 'QUOTE_NOT_FINALIZED'::text, 'BID_VALIDITY_CONFLICT'::text, 'KIND_ROUTER_RECONFIRMATION_REQUIRED'::text, 'DEPENDENCY_NOT_CURRENT'::text]))"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -36272,7 +36272,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "1e7b8fc5e54b0f690de64ab5d4b9ee8f756b3d0fc9a981e615e0070042b30611"
+definition_sha256 = "6302e2c0907a243a35fd1af9ba3690f2f82b1dad62e240cbeff7dd9a0baf283f"
 
 [[routines]]
 schema = "public"
@@ -37040,7 +37040,7 @@ security_definer = false
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "bec01b7e3f2225344cac7f3097e7acf5b9abaee016a27598a72e2a4b52ff5036"
+definition_sha256 = "773332b8cc1152bd6721e8f40b089a72e4919e1e6311abbfc2f4eefee474f185"
 
 [[routines]]
 schema = "public"
@@ -37636,6 +37636,22 @@ definition_sha256 = "705bbb6248bb7d16bda95c84b70e0bc0782be517f8a0905b6acc5c1d799
 
 [[routines]]
 schema = "public"
+name = "kb_match_report_canonical_payload_v1"
+identity_arguments = "p_report_id uuid"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "bytea"
+volatility = "stable"
+strict = false
+security_definer = false
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "b0a05c04cfde9c69f8a5f96c5a4427b38d57d402021c8b934b89126bc443ca43"
+
+[[routines]]
+schema = "public"
 name = "kb_match_verify_evidence_v1"
 identity_arguments = ""
 kind = "function"
@@ -37680,7 +37696,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "38e2016edba95f3f3ff67ee6c165b21b8ba817a0fd2d936b3f9cdb30815e66c6"
+definition_sha256 = "cd0cba690d885ebf857597ae258ee22808bd3c54fc2ecaba2e7057c39579c377"
 
 [[routines]]
 schema = "public"
@@ -51699,6 +51715,15 @@ grant_option = false
 schema = "public"
 name = "kb_guard_knowledge_document_delete"
 identity_arguments = ""
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_match_report_canonical_payload_v1"
+identity_arguments = "p_report_id uuid"
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
 privilege = "EXECUTE"

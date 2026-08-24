@@ -1184,6 +1184,134 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
         "MATCHING_REPORT_V1_PAYLOAD_RELATION_MISMATCH",
     );
     forged.rollback().await.unwrap();
+
+    let noncanonical_route_id = Uuid::new_v4();
+    let noncanonical_unit_id = Uuid::new_v4();
+    let noncanonical_job_id = Uuid::new_v4();
+    let noncanonical_requirement_id = Uuid::new_v4();
+    let noncanonical_report_id = Uuid::new_v4();
+    let noncanonical_payload = json!({
+        "schema_version": 1,
+        "report_id": noncanonical_report_id,
+        "manifest_id": report_identity.0,
+        "job_id": noncanonical_job_id,
+        "route_id": noncanonical_route_id,
+        "route": {"kind": "commercial"},
+        "generation": report_identity.2,
+        "mutation_watermark": report_identity.3,
+        "empty_disposition": null,
+        "coverage": {
+            "total": 1,
+            "eligible": 0,
+            "supported": 0,
+            "contradicted": 0,
+            "insufficient": 1,
+            "unresolved": 0
+        },
+        "quality_status": "review",
+        "degraded": true,
+        "reason_codes": ["FROZEN_SCOPE", "NO_EVIDENCE"],
+        "score": {"status": "scored", "value": "1.000000"},
+        "requirement_decisions": [{
+            "requirement_artifact_id": noncanonical_requirement_id,
+            "final_support": "insufficient",
+            "system_decision": "review",
+            "quality_status": "review",
+            "reason_code": "NO_EVIDENCE",
+            "selected_candidate_artifact_id": null,
+            "business_value": {"status": "scored", "value": "1.000000", "source": "forged"}
+        }],
+        "candidates": [],
+        "candidate_groups": [],
+        "source_artifacts": [],
+        "ai_run_id": null,
+        "ai_span_id": null
+    });
+    let noncanonical_bytes = serde_json::to_vec_pretty(&noncanonical_payload).unwrap();
+    let noncanonical_sha256 = domain::sha256_hex(&noncanonical_bytes);
+    let mut noncanonical = pool.begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO bid_matching_routes
+         (id,manifest_id,project_id,route_kind,unit_id,ordinal,empty_policy,route_scope_sha256)
+         VALUES($1,$2,$3,'technical',$4,10000,'clear_route',$5)",
+    )
+    .bind(noncanonical_route_id)
+    .bind(report_identity.0)
+    .bind(project_id)
+    .bind(noncanonical_unit_id)
+    .bind("e".repeat(64))
+    .execute(&mut *noncanonical)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_matching_jobs
+         (id,project_id,manifest_id,route_id,status,max_attempts,claim_lease_ms,lease_policy_generation)
+         VALUES($1,$2,$3,$4,'pending',1,300000,1)",
+    )
+    .bind(noncanonical_job_id)
+    .bind(project_id)
+    .bind(report_identity.0)
+    .bind(noncanonical_route_id)
+    .execute(&mut *noncanonical)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_matching_requirement_artifacts
+         (id,manifest_id,route_id,clause_id,ordinal,requirement_text,requirement_sha256)
+         VALUES($1,$2,$3,$4,0,'noncanonical report regression',$5)",
+    )
+    .bind(noncanonical_requirement_id)
+    .bind(report_identity.0)
+    .bind(noncanonical_route_id)
+    .bind(clause_id)
+    .bind("f".repeat(64))
+    .execute(&mut *noncanonical)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_matching_reports
+         (id,project_id,manifest_id,job_id,route_id,generation,mutation_watermark,empty_disposition,
+          coverage_total,coverage_supported,coverage_contradicted,coverage_insufficient,coverage_unresolved,
+          quality_status,degraded,reason_codes,canonical_payload,content_sha256,published_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,NULL,1,0,0,1,0,'review',true,
+           ARRAY['FROZEN_SCOPE','NO_EVIDENCE'],$8,$9,clock_timestamp())",
+    )
+    .bind(noncanonical_report_id)
+    .bind(project_id)
+    .bind(report_identity.0)
+    .bind(noncanonical_job_id)
+    .bind(noncanonical_route_id)
+    .bind(report_identity.2)
+    .bind(report_identity.3)
+    .bind(noncanonical_bytes)
+    .bind(noncanonical_sha256)
+    .execute(&mut *noncanonical)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_matching_requirement_decisions
+         (id,report_id,requirement_artifact_id,final_support,system_decision,quality_status,
+          reason_code,selected_candidate_artifact_id,ordinal)
+         VALUES($1,$2,$3,'insufficient','review','review','NO_EVIDENCE',NULL,0)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(noncanonical_report_id)
+    .bind(noncanonical_requirement_id)
+    .execute(&mut *noncanonical)
+    .await
+    .unwrap();
+    let noncanonical_verification =
+        sqlx::query("SET CONSTRAINTS bid_matching_reports_verify IMMEDIATE")
+            .execute(&mut *noncanonical)
+            .await;
+    assert_database_error(
+        noncanonical_verification.expect_err(
+            "route, eligible coverage, score, decision business value, key order, and whitespace must be canonical",
+        ),
+        "MATCHING_REPORT_V1_NON_CANONICAL",
+    );
+    noncanonical.rollback().await.unwrap();
+
     let body = json!({
         "source_report_artifact_id": report.get::<Uuid, _>("report_id"),
         "report_sha256": report.get::<String, _>("content_sha256"),
@@ -1320,7 +1448,7 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
         }],
     });
     let ordinary_context = storage::bidding::MutationContext::new(
-        actor,
+        actor.clone(),
         format!("pick-ordinary-{project_id}"),
         &ordinary_body,
     )
@@ -1423,6 +1551,52 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .await
     .unwrap();
     assert_eq!(frozen_name, "国密手册.pdf");
+
+    let mutation_body = json!({
+        "clause_id": clause_id,
+        "action": "patch",
+        "expected_revision": 1,
+        "patch": {"text": "支持国密算法并提供检测报告"}
+    });
+    let mutation_context = storage::bidding::MutationContext::new(
+        actor.clone(),
+        format!("invalidate-matching-{project_id}"),
+        &mutation_body,
+    )
+    .unwrap();
+    storage::bidding::mutate_clause(
+        &pool,
+        project_id,
+        clause_id,
+        "patch",
+        &mutation_body["patch"],
+        1,
+        &mutation_context,
+    )
+    .await
+    .unwrap();
+    let gate_without_current_reports: serde_json::Value =
+        sqlx::query_scalar("SELECT kb_bid_list_gate_issues($1,'pdf')")
+            .bind(project_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(gate_without_current_reports["status"], "reject");
+    assert_eq!(
+        gate_without_current_reports["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|issue| issue["code"] == "MATCHING_REPORT_MISSING")
+            .count(),
+        2,
+        "every confirmed technical requirement remains gated after current matching is invalidated"
+    );
+    let required_after_invalidation = gate_without_current_reports["required_part_keys"]
+        .as_array()
+        .unwrap();
+    assert!(required_after_invalidation.contains(&json!("2:unsectioned")));
+    assert!(required_after_invalidation.contains(&json!(format!("2:{ordinary_unit_id}"))));
 
     sqlx::query("UPDATE bid_projects SET status='ended',ended_at=clock_timestamp() WHERE id=$1")
         .bind(project_id)

@@ -913,6 +913,143 @@ CREATE TRIGGER bid_matching_evidence_verify
 BEFORE INSERT ON bid_matching_evidence_artifacts
 FOR EACH ROW EXECUTE FUNCTION kb_match_verify_evidence_v1();
 
+CREATE FUNCTION kb_match_report_canonical_payload_v1(p_report_id uuid)
+RETURNS bytea
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog, public
+AS $$
+DECLARE report_value bid_matching_reports%ROWTYPE; route_value bid_matching_routes%ROWTYPE;
+ decisions_json text; candidates_json text; groups_json text; sources_json text; reasons_json text;
+ route_json text; payload text;
+BEGIN
+  SELECT * INTO STRICT report_value FROM bid_matching_reports WHERE id=p_report_id;
+  SELECT * INTO STRICT route_value FROM bid_matching_routes WHERE id=report_value.route_id;
+
+  SELECT COALESCE(string_agg(to_json(reason)::text,',' ORDER BY ordinal),'')
+    INTO reasons_json
+    FROM unnest(report_value.reason_codes) WITH ORDINALITY AS reason_value(reason,ordinal);
+
+  SELECT COALESCE(string_agg(
+    '{"requirement_artifact_id":'||to_json(decision.requirement_artifact_id::text)::text
+    ||',"final_support":'||to_json(decision.final_support)::text
+    ||',"system_decision":'||to_json(decision.system_decision)::text
+    ||',"quality_status":'||to_json(decision.quality_status)::text
+    ||',"reason_code":'||to_json(decision.reason_code)::text
+    ||',"selected_candidate_artifact_id":'||CASE
+         WHEN decision.selected_candidate_artifact_id IS NULL THEN 'null'
+         ELSE to_json(decision.selected_candidate_artifact_id::text)::text END
+    ||',"business_value":'||CASE
+         WHEN selected.business_value_status='scored' THEN
+           '{"status":"scored","value":'||to_json(to_char(selected.business_value,'FM99999999999999999990.000000'))::text
+           ||',"source":"verifier"}'
+         ELSE '{"status":"not_scored","reason":"NO_EVIDENCE"}' END
+    ||'}',',' ORDER BY decision.ordinal),'')
+    INTO decisions_json
+    FROM bid_matching_requirement_decisions decision
+    LEFT JOIN bid_matching_candidate_artifacts selected
+      ON selected.report_id=decision.report_id AND selected.id=decision.selected_candidate_artifact_id
+   WHERE decision.report_id=p_report_id;
+
+  SELECT COALESCE(string_agg(
+    '{"id":'||to_json(candidate.id::text)::text
+    ||',"requirement_artifact_id":'||to_json(candidate.requirement_artifact_id::text)::text
+    ||',"product_version_artifact_id":'||to_json(candidate.product_version_artifact_id::text)::text
+    ||',"route_product_ordinal":'||candidate.route_product_ordinal::text
+    ||',"retrieval_rank":'||candidate.retrieval_rank::text
+    ||',"retrieval_raw_score":'||to_json(to_char(candidate.retrieval_raw_score,'FM99999999999999999990.000000'))::text
+    ||',"candidate_identity_sha256":'||to_json(candidate.candidate_identity_sha256)::text
+    ||',"evidence_v1_sha256":'||to_json(candidate.evidence_v1_sha256)::text
+    ||',"evidence":'||evidence.payload
+    ||',"support":'||to_json(candidate.support)::text
+    ||',"business_value":'||CASE
+         WHEN candidate.business_value_status='scored' THEN
+           '{"status":"scored","value":'||to_json(to_char(candidate.business_value,'FM99999999999999999990.000000'))::text
+           ||',"source":"verifier"}'
+         ELSE '{"status":"not_scored","reason":"NO_EVIDENCE"}' END
+    ||',"recommended":'||CASE WHEN candidate.recommended THEN 'true' ELSE 'false' END
+    ||'}',',' ORDER BY candidate.requirement_artifact_id,candidate.route_product_ordinal,
+         candidate.retrieval_rank,candidate.candidate_identity_sha256,candidate.evidence_v1_sha256,candidate.id),'')
+    INTO candidates_json
+    FROM bid_matching_candidate_artifacts candidate
+    CROSS JOIN LATERAL (
+      SELECT '{"schema_version":1,"items":['||COALESCE(string_agg(
+        '{"source_chunk_artifact_id":'||to_json(item.source_chunk_artifact_id::text)::text
+        ||',"document_id":'||to_json(item.document_id::text)::text
+        ||',"document_display_name":'||to_json(item.document_display_name)::text
+        ||',"source_chunk_id":'||to_json(item.source_chunk_id::text)::text
+        ||',"source_chunk_sha256":'||to_json(item.source_chunk_sha256)::text
+        ||',"quote":'||to_json(convert_from(item.quote_utf8,'UTF8'))::text
+        ||',"start_offset":'||item.start_offset::text
+        ||',"end_offset":'||item.end_offset::text
+        ||',"offset_unit":'||to_json(item.offset_unit)::text||'}',',' ORDER BY item.ordinal),'')||']}' AS payload
+        FROM bid_matching_evidence_artifacts item
+       WHERE item.report_id=p_report_id AND item.candidate_artifact_id=candidate.id
+    ) evidence
+   WHERE candidate.report_id=p_report_id;
+
+  SELECT COALESCE(string_agg(
+    '{"requirement_artifact_id":'||to_json(group_value.requirement_artifact_id::text)::text
+    ||',"support":'||to_json(group_value.support)::text
+    ||',"candidate_artifact_ids":['||candidate_ids.payload||']}',',' ORDER BY group_value.ordinal),'')
+    INTO groups_json
+    FROM bid_matching_candidate_groups group_value
+    CROSS JOIN LATERAL (
+      SELECT COALESCE(string_agg(to_json(candidate.id::text)::text,',' ORDER BY candidate.id),'') AS payload
+        FROM bid_matching_candidate_artifacts candidate
+       WHERE candidate.report_id=p_report_id
+         AND candidate.requirement_artifact_id=group_value.requirement_artifact_id
+         AND candidate.support=group_value.support
+    ) candidate_ids
+   WHERE group_value.report_id=p_report_id;
+  SELECT COALESCE(string_agg(
+    '{"id":'||to_json(source_value.id::text)::text
+    ||',"product_version_artifact_id":'||to_json(source_value.product_version_artifact_id::text)::text
+    ||',"document_id":'||to_json(source_value.document_id::text)::text
+    ||',"source_chunk_id":'||to_json(source_value.source_chunk_id::text)::text
+    ||',"frozen_document_display_name":'||to_json(source_value.frozen_document_display_name)::text
+    ||',"chunk_sha256":'||to_json(source_value.chunk_sha256)::text
+    ||',"chunk_byte_length":'||source_value.chunk_byte_length::text
+    ||',"retrieval_rank":'||source_value.retrieval_rank::text
+    ||',"retrieval_raw_score":'||to_json(to_char(source_value.retrieval_raw_score,'FM99999999999999999990.000000'))::text
+    ||',"retrieval_contract_version":'||to_json(source_value.retrieval_contract_version)::text||'}',',' ORDER BY source_value.id),'')
+    INTO sources_json
+    FROM bid_matching_source_artifacts source_value
+   WHERE source_value.report_id=p_report_id;
+
+  route_json := CASE route_value.route_kind
+    WHEN 'technical' THEN '{"kind":"technical","unit_id":'||to_json(route_value.unit_id::text)::text||'}'
+    ELSE '{"kind":"commercial"}' END;
+  payload := '{"schema_version":1'
+    ||',"report_id":'||to_json(report_value.id::text)::text
+    ||',"manifest_id":'||to_json(report_value.manifest_id::text)::text
+    ||',"job_id":'||to_json(report_value.job_id::text)::text
+    ||',"route_id":'||to_json(report_value.route_id::text)::text
+    ||',"route":'||route_json
+    ||',"generation":'||report_value.generation::text
+    ||',"mutation_watermark":'||report_value.mutation_watermark::text
+    ||',"empty_disposition":'||CASE WHEN report_value.empty_disposition IS NULL THEN 'null' ELSE to_json(report_value.empty_disposition)::text END
+    ||',"coverage":{"total":'||report_value.coverage_total::text
+    ||',"eligible":'||report_value.coverage_total::text
+    ||',"supported":'||report_value.coverage_supported::text
+    ||',"contradicted":'||report_value.coverage_contradicted::text
+    ||',"insufficient":'||report_value.coverage_insufficient::text
+    ||',"unresolved":'||report_value.coverage_unresolved::text||'}'
+    ||',"quality_status":'||to_json(report_value.quality_status)::text
+    ||',"degraded":'||CASE WHEN report_value.degraded THEN 'true' ELSE 'false' END
+    ||',"reason_codes":['||reasons_json||']'
+    ||',"score":{"status":"not_scored","reason":"NO_EVIDENCE"}'
+    ||',"requirement_decisions":['||decisions_json||']'
+    ||',"candidates":['||candidates_json||']'
+    ||',"candidate_groups":['||groups_json||']'
+    ||',"source_artifacts":['||sources_json||']'
+    ||',"ai_run_id":'||CASE WHEN report_value.ai_run_id IS NULL THEN 'null' ELSE to_json(report_value.ai_run_id::text)::text END
+    ||',"ai_span_id":'||CASE WHEN report_value.ai_span_id IS NULL THEN 'null' ELSE to_json(report_value.ai_span_id::text)::text END
+    ||'}';
+  RETURN convert_to(payload,'UTF8');
+END
+$$;
+
 CREATE FUNCTION kb_match_verify_report_v1()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -1073,6 +1210,9 @@ BEGIN
          CROSS JOIN LATERAL jsonb_array_elements(candidate_value->'evidence'->'items')
            WITH ORDINALITY AS evidence_item(item,item_ordinal))
     ) THEN RAISE EXCEPTION 'MATCHING_REPORT_V1_PAYLOAD_RELATION_MISMATCH' USING ERRCODE='23514'; END IF;
+    IF NEW.canonical_payload<>kb_match_report_canonical_payload_v1(NEW.id) THEN
+      RAISE EXCEPTION 'MATCHING_REPORT_V1_NON_CANONICAL' USING ERRCODE='23514';
+    END IF;
     IF EXISTS(
       SELECT 1 FROM bid_matching_requirement_decisions d
       LEFT JOIN LATERAL (
@@ -1113,6 +1253,119 @@ BEGIN
              FROM bid_matching_requirement_decisions decision
              WHERE decision.report_id=NEW.id AND decision.requirement_artifact_id=candidate.requirement_artifact_id)))
     ) THEN RAISE EXCEPTION 'REQUIREMENT_DECISION_V1_AGGREGATION_MISMATCH' USING ERRCODE='23514'; END IF;
+    IF NOT EXISTS(
+      SELECT 1
+        FROM bid_matching_jobs job
+        JOIN bid_matching_manifests manifest ON manifest.id=job.manifest_id
+        JOIN bid_matching_routes route ON route.id=job.route_id AND route.manifest_id=manifest.id
+       WHERE job.id=NEW.job_id AND job.project_id=NEW.project_id
+         AND job.manifest_id=NEW.manifest_id AND job.route_id=NEW.route_id
+         AND route.project_id=NEW.project_id AND manifest.project_id=NEW.project_id
+         AND manifest.generation=NEW.generation
+         AND manifest.mutation_watermark=NEW.mutation_watermark
+    ) OR EXISTS(
+      SELECT 1
+        FROM bid_matching_candidate_artifacts candidate
+        JOIN bid_matching_requirement_artifacts requirement ON requirement.id=candidate.requirement_artifact_id
+        LEFT JOIN bid_matching_route_memberships membership
+          ON membership.route_id=NEW.route_id
+         AND membership.product_version_artifact_id=candidate.product_version_artifact_id
+       WHERE candidate.report_id=NEW.id
+         AND (requirement.route_id<>NEW.route_id OR membership.route_id IS NULL)
+    ) OR EXISTS(
+      SELECT 1
+        FROM bid_matching_source_artifacts source_value
+        LEFT JOIN bid_matching_route_memberships membership
+          ON membership.route_id=NEW.route_id
+         AND membership.product_version_artifact_id=source_value.product_version_artifact_id
+       WHERE source_value.report_id=NEW.id AND membership.route_id IS NULL
+    ) OR EXISTS(
+      SELECT 1 FROM bid_matching_requirement_decisions decision
+      JOIN bid_matching_requirement_artifacts requirement ON requirement.id=decision.requirement_artifact_id
+      WHERE decision.report_id=NEW.id AND requirement.route_id<>NEW.route_id
+    ) OR EXISTS(
+      SELECT 1 FROM bid_matching_candidate_groups group_value
+      JOIN bid_matching_requirement_artifacts requirement ON requirement.id=group_value.requirement_artifact_id
+      WHERE group_value.report_id=NEW.id AND requirement.route_id<>NEW.route_id
+    ) THEN
+      RAISE EXCEPTION 'MATCHING_REPORT_V1_SCOPE_MISMATCH' USING ERRCODE='23514';
+    END IF;
+    IF EXISTS(
+      SELECT 1
+        FROM bid_matching_candidate_artifacts candidate
+        CROSS JOIN LATERAL (
+          SELECT convert_to('{"schema_version":1,"items":['||COALESCE(string_agg(
+            '{"source_chunk_artifact_id":'||to_json(item.source_chunk_artifact_id::text)::text
+            ||',"document_id":'||to_json(item.document_id::text)::text
+            ||',"document_display_name":'||to_json(item.document_display_name)::text
+            ||',"source_chunk_id":'||to_json(item.source_chunk_id::text)::text
+            ||',"source_chunk_sha256":'||to_json(item.source_chunk_sha256)::text
+            ||',"quote":'||to_json(convert_from(item.quote_utf8,'UTF8'))::text
+            ||',"start_offset":'||item.start_offset::text
+            ||',"end_offset":'||item.end_offset::text
+            ||',"offset_unit":'||to_json(item.offset_unit)::text||'}',',' ORDER BY item.ordinal),'')||']}','UTF8') AS payload
+            FROM bid_matching_evidence_artifacts item
+           WHERE item.report_id=NEW.id AND item.candidate_artifact_id=candidate.id
+        ) evidence
+       WHERE candidate.report_id=NEW.id
+         AND candidate.evidence_v1_sha256<>encode(public.digest(evidence.payload,'sha256'),'hex')
+    ) OR EXISTS(
+      SELECT 1
+        FROM (
+          SELECT item.ordinal,row_number() OVER (
+            PARTITION BY item.candidate_artifact_id
+            ORDER BY item.source_chunk_artifact_id,item.start_offset,item.end_offset,item.quote_utf8)-1 AS expected_ordinal
+            FROM bid_matching_evidence_artifacts item WHERE item.report_id=NEW.id
+        ) ordered_item
+       WHERE ordered_item.ordinal<>ordered_item.expected_ordinal
+    ) THEN
+      RAISE EXCEPTION 'EVIDENCE_V1_CANONICAL_MISMATCH' USING ERRCODE='23514';
+    END IF;
+    IF EXISTS(
+      (SELECT DISTINCT candidate.requirement_artifact_id,candidate.support
+         FROM bid_matching_candidate_artifacts candidate WHERE candidate.report_id=NEW.id
+       EXCEPT
+       SELECT group_value.requirement_artifact_id,group_value.support
+         FROM bid_matching_candidate_groups group_value WHERE group_value.report_id=NEW.id)
+      UNION ALL
+      (SELECT group_value.requirement_artifact_id,group_value.support
+         FROM bid_matching_candidate_groups group_value WHERE group_value.report_id=NEW.id
+       EXCEPT
+       SELECT DISTINCT candidate.requirement_artifact_id,candidate.support
+         FROM bid_matching_candidate_artifacts candidate WHERE candidate.report_id=NEW.id)
+    ) OR EXISTS(
+      SELECT 1
+        FROM bid_matching_candidate_groups group_value
+        CROSS JOIN LATERAL (
+          SELECT convert_to('{"requirement_artifact_id":'||to_json(group_value.requirement_artifact_id::text)::text
+            ||',"support":'||to_json(group_value.support)::text
+            ||',"candidate_artifact_ids":['
+            ||COALESCE(string_agg(to_json(candidate.id::text)::text,',' ORDER BY candidate.id),'')||']}','UTF8') AS payload
+            FROM bid_matching_candidate_artifacts candidate
+           WHERE candidate.report_id=NEW.id
+             AND candidate.requirement_artifact_id=group_value.requirement_artifact_id
+             AND candidate.support=group_value.support
+        ) expected_group
+       WHERE group_value.report_id=NEW.id AND group_value.canonical_payload<>expected_group.payload
+    ) OR EXISTS(
+      SELECT 1 FROM (
+        SELECT group_value.ordinal,row_number() OVER (
+          ORDER BY group_value.requirement_artifact_id,
+            CASE group_value.support WHEN 'contradicted' THEN 0 WHEN 'insufficient' THEN 1
+              WHEN 'unresolved' THEN 2 ELSE 3 END)-1 AS expected_ordinal
+          FROM bid_matching_candidate_groups group_value WHERE group_value.report_id=NEW.id
+      ) ordered_group WHERE ordered_group.ordinal<>ordered_group.expected_ordinal
+    ) OR EXISTS(
+      SELECT 1 FROM (
+        SELECT decision.ordinal,row_number() OVER (
+          ORDER BY requirement.ordinal,requirement.id)-1 AS expected_ordinal
+          FROM bid_matching_requirement_decisions decision
+          JOIN bid_matching_requirement_artifacts requirement ON requirement.id=decision.requirement_artifact_id
+         WHERE decision.report_id=NEW.id
+      ) ordered_decision WHERE ordered_decision.ordinal<>ordered_decision.expected_ordinal
+    ) THEN
+      RAISE EXCEPTION 'MATCHING_REPORT_V1_COLLECTION_CANONICAL_MISMATCH' USING ERRCODE='23514';
+    END IF;
     RETURN NEW;
 END
 $$;
@@ -1733,6 +1986,7 @@ CREATE TABLE bid_submission_gate_issues (
     ordinal integer NOT NULL CHECK (ordinal >= 0),
     code text NOT NULL CHECK (code IN (
         'PROFILE_FIELD_MISSING', 'SIGNATURE_OR_SEAL_NOT_CONFIRMED',
+        'MATCHING_REPORT_MISSING', 'MATCHING_PICK_MISSING',
         'PROCEDURAL_CLASSIFICATION_MISSING', 'PROCEDURAL_CLASSIFICATION_REVIEW',
         'PROCEDURAL_DECISION_MISSING', 'PROCEDURAL_NOT_APPLICABLE',
         'ATTACHMENT_NOT_VALID', 'PART_MISSING',
@@ -3616,8 +3870,11 @@ AS $$
 DECLARE keys text[] := ARRAY['1']; unit_id uuid; has_unsectioned boolean := false;
 BEGIN
   FOR unit_id IN
-    SELECT DISTINCT route.unit_id FROM bidding_current_routes route
-     WHERE route.project_id=p_project_id AND route.route_kind='technical' AND route.unit_id IS NOT NULL
+    SELECT DISTINCT COALESCE(
+      (clause.current_source_span_v2->>'section_artifact_id')::uuid,
+      '00000000-0000-0000-0000-000000000000'::uuid)
+      FROM bidding_current_clauses clause
+     WHERE clause.project_id=p_project_id AND clause.status='confirmed' AND clause.kind='technical'
      ORDER BY 1
   LOOP
     IF unit_id = '00000000-0000-0000-0000-000000000000'::uuid THEN
@@ -5906,6 +6163,33 @@ BEGIN
       jsonb_build_object('action','finalize_eligible_quote')));
     hard_issue_count := hard_issue_count + 1;
   END IF;
+  FOR pending IN
+    SELECT clause.id AS clause_id,clause.kind,
+           COALESCE((clause.current_source_span_v2->>'section_artifact_id')::uuid,
+             '00000000-0000-0000-0000-000000000000'::uuid) AS unit_id
+      FROM bidding_current_clauses clause
+     WHERE clause.project_id=p_project_id AND clause.status='confirmed'
+       AND clause.kind IN ('technical','qualification','service')
+       AND NOT EXISTS (
+         SELECT 1
+           FROM bidding_current_matching_reports report
+           JOIN bid_matching_requirement_decisions decision ON decision.report_id=report.id
+           JOIN bid_matching_requirement_artifacts requirement
+             ON requirement.id=decision.requirement_artifact_id
+          WHERE report.project_id=p_project_id AND requirement.clause_id=clause.id)
+     ORDER BY clause.kind,clause.id
+  LOOP
+    key := CASE
+      WHEN pending.kind='technical' AND pending.unit_id='00000000-0000-0000-0000-000000000000'::uuid
+        THEN '2:unsectioned'
+      WHEN pending.kind='technical' THEN '2:'||pending.unit_id::text
+      ELSE '4' END;
+    issues := issues || jsonb_build_array(kb_bid_gate_issue('MATCHING_REPORT_MISSING',key,
+      jsonb_build_object('clause_id',pending.clause_id,'kind',pending.kind),NULL,
+      jsonb_build_object('current_matching_decision',true),
+      jsonb_build_object('action','run_matching')));
+    hard_issue_count := hard_issue_count + 1;
+  END LOOP;
   FOR pending IN
     SELECT route.id AS route_id, route.unit_id, report.id AS report_id,
            report.content_sha256 AS report_sha256,
