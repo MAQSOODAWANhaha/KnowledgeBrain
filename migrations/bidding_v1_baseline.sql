@@ -4652,14 +4652,14 @@ IMMUTABLE
 SET search_path = pg_catalog
 AS $$
 DECLARE bytes bytea := convert_to(p_text,'UTF8'); pos int := 0; last int := 0; ch text; ch_len int;
- trimmed record; emitted int := 0; previous_ch text:=NULL; remaining text; numbered_boundary boolean;
+ trimmed record; emitted int := 0; remaining text; numbered_boundary boolean;
 BEGIN
   IF p_text IS NULL OR p_text = '' THEN RETURN; END IF;
   WHILE pos < octet_length(bytes) LOOP
     ch := public.kb_bid_utf8_char_at(bytes, pos);
     ch_len := public.kb_bid_utf8_char_len(bytes, pos);
     remaining:=convert_from(substring(bytes from pos+1),'UTF8');
-    numbered_boundary:=pos>last AND previous_ch IS NOT NULL AND previous_ch~'[[:space:]]'
+    numbered_boundary:=pos>last
       AND remaining~'^([0-9]{1,3}([.][[:space:]]+|[)、][[:space:]]*)|（[0-9一二三四五六七八九十]{1,4}）[[:space:]]*|[一二三四五六七八九十]{1,4}、[[:space:]]*)';
     IF numbered_boundary THEN
       SELECT * INTO trimmed FROM public.kb_bid_trim_utf8_ws(bytes,last,pos);
@@ -4680,7 +4680,6 @@ BEGIN
       END IF;
       last := pos + ch_len;
     END IF;
-    previous_ch:=ch;
     pos := pos + ch_len;
   END LOOP;
   IF last < octet_length(bytes) THEN
@@ -5374,7 +5373,8 @@ DECLARE occurrence_count integer; occurrence_bytes numeric;
 BEGIN
   WITH occurrence AS (
     SELECT 'objects/'||match_value.m[1] AS object_ref
-      FROM regexp_matches(convert_from(p_markdown,'UTF8'),'objects/([0-9a-f]{64})','g') AS match_value(m)
+      FROM regexp_matches(convert_from(p_markdown,'UTF8'),
+        '![[][^]]*[]][(]objects/([0-9a-f]{64})[)]','g') AS match_value(m)
   ), checked AS (
     SELECT occurrence.object_ref,registry.byte_length,source_image.id
       FROM occurrence
@@ -5393,7 +5393,7 @@ BEGIN
   SELECT count(*),COALESCE(sum(byte_length),0) INTO occurrence_count,occurrence_bytes FROM checked
    WHERE id IS NOT NULL;
   IF occurrence_count<>(SELECT count(*) FROM regexp_matches(convert_from(p_markdown,'UTF8'),
-       'objects/([0-9a-f]{64})','g') AS match_count(m))
+       '![[][^]]*[]][(]objects/([0-9a-f]{64})[)]','g') AS match_count(m))
      OR occurrence_count>2048 OR occurrence_bytes>268435456 THEN
     RAISE EXCEPTION 'PART_MARKDOWN_ASSET_INVALID_OR_UNAUTHORIZED' USING ERRCODE='22023';
   END IF;
@@ -6040,7 +6040,8 @@ BEGIN
              AND source_image.id IS NOT NULL AS valid
       FROM renderable_part part
       CROSS JOIN LATERAL regexp_matches(convert_from(part.canonical_markdown_utf8,'UTF8'),
-        'objects/([0-9a-f]{64})','g') WITH ORDINALITY AS occurrence(matches,ordinality)
+        '![[][^]]*[]][(]objects/([0-9a-f]{64})[)]','g')
+        WITH ORDINALITY AS occurrence(matches,ordinality)
       LEFT JOIN available_object_registry registry
         ON registry.object_ref='objects/'||occurrence.matches[1]
       LEFT JOIN LATERAL (
@@ -7565,9 +7566,24 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+DECLARE claim_value bid_matching_job_claims%ROWTYPE; job_value bid_matching_jobs%ROWTYPE;
+ now_ts timestamptz := clock_timestamp();
 BEGIN
-  UPDATE bid_matching_job_claims SET status='failed' WHERE job_id=p_job_id AND attempt=p_attempt AND claim_token=p_claim_token;
-  UPDATE bid_matching_jobs SET status='pending',active_attempt=NULL,error_code=left(p_error_code,128),error_detail=left(p_error_detail,4096) WHERE id=p_job_id;
+  SELECT * INTO job_value FROM bid_matching_jobs WHERE id=p_job_id FOR UPDATE;
+  IF NOT FOUND OR job_value.status<>'running' OR job_value.active_attempt<>p_attempt THEN
+    RAISE EXCEPTION 'MATCHING_CLAIM_LOST' USING ERRCODE='40001';
+  END IF;
+  SELECT * INTO claim_value FROM bid_matching_job_claims
+   WHERE job_id=p_job_id AND attempt=p_attempt AND claim_token=p_claim_token FOR UPDATE;
+  IF NOT FOUND OR claim_value.status<>'running'
+     OR claim_value.heartbeat_at + make_interval(secs=>claim_value.claim_lease_ms::double precision/1000.0)<=now_ts THEN
+    RAISE EXCEPTION 'MATCHING_CLAIM_LOST' USING ERRCODE='40001';
+  END IF;
+  UPDATE bid_matching_job_claims SET status='failed'
+   WHERE job_id=p_job_id AND attempt=p_attempt AND claim_token=p_claim_token;
+  UPDATE bid_matching_jobs SET status='pending',active_attempt=NULL,
+    error_code=left(p_error_code,128),error_detail=left(p_error_detail,4096)
+   WHERE id=p_job_id;
   UPDATE bid_matching_staging_sets SET state='failed' WHERE job_id=p_job_id AND attempt=p_attempt AND claim_token=p_claim_token AND state='active';
 END
 $$;
@@ -7578,9 +7594,24 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+DECLARE claim_value bid_matching_job_claims%ROWTYPE; job_value bid_matching_jobs%ROWTYPE;
+ now_ts timestamptz := clock_timestamp();
 BEGIN
-  UPDATE bid_matching_job_claims SET status='failed' WHERE job_id=p_job_id AND attempt=p_attempt AND claim_token=p_claim_token;
-  UPDATE bid_matching_jobs SET status='failed',active_attempt=NULL,error_code=left(p_error_code,128),error_detail=left(p_error_detail,4096),finished_at=clock_timestamp() WHERE id=p_job_id;
+  SELECT * INTO job_value FROM bid_matching_jobs WHERE id=p_job_id FOR UPDATE;
+  IF NOT FOUND OR job_value.status<>'running' OR job_value.active_attempt<>p_attempt THEN
+    RAISE EXCEPTION 'MATCHING_CLAIM_LOST' USING ERRCODE='40001';
+  END IF;
+  SELECT * INTO claim_value FROM bid_matching_job_claims
+   WHERE job_id=p_job_id AND attempt=p_attempt AND claim_token=p_claim_token FOR UPDATE;
+  IF NOT FOUND OR claim_value.status<>'running'
+     OR claim_value.heartbeat_at + make_interval(secs=>claim_value.claim_lease_ms::double precision/1000.0)<=now_ts THEN
+    RAISE EXCEPTION 'MATCHING_CLAIM_LOST' USING ERRCODE='40001';
+  END IF;
+  UPDATE bid_matching_job_claims SET status='failed'
+   WHERE job_id=p_job_id AND attempt=p_attempt AND claim_token=p_claim_token;
+  UPDATE bid_matching_jobs SET status='failed',active_attempt=NULL,
+    error_code=left(p_error_code,128),error_detail=left(p_error_detail,4096),finished_at=now_ts
+   WHERE id=p_job_id;
   UPDATE bid_matching_staging_sets SET state='failed' WHERE job_id=p_job_id AND attempt=p_attempt AND claim_token=p_claim_token AND state='active';
 END
 $$;
@@ -7591,20 +7622,31 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
-DECLARE n int := 0; rec record;
+DECLARE n int := 0; rec record; claim_value bid_matching_job_claims%ROWTYPE;
 BEGIN
   FOR rec IN
-    SELECT claim.job_id, claim.attempt, job.max_attempts
+    SELECT claim.job_id, claim.attempt, claim.claim_token, job.max_attempts
       FROM bid_matching_job_claims claim
       JOIN bid_matching_jobs job ON job.id=claim.job_id
      WHERE claim.status='running'
+       AND job.status='running' AND job.active_attempt=claim.attempt
        AND claim.heartbeat_at + make_interval(secs => claim.claim_lease_ms::double precision/1000.0) <= clock_timestamp()
+     FOR UPDATE OF job SKIP LOCKED
   LOOP
-    UPDATE bid_matching_job_claims SET status='reaped' WHERE job_id=rec.job_id AND attempt=rec.attempt;
+    SELECT * INTO claim_value FROM bid_matching_job_claims
+     WHERE job_id=rec.job_id AND attempt=rec.attempt AND claim_token=rec.claim_token
+       AND status='running'
+       AND heartbeat_at + make_interval(secs=>claim_lease_ms::double precision/1000.0)<=clock_timestamp()
+     FOR UPDATE;
+    CONTINUE WHEN NOT FOUND;
+    UPDATE bid_matching_job_claims SET status='reaped'
+     WHERE job_id=rec.job_id AND attempt=rec.attempt AND claim_token=rec.claim_token AND status='running';
+    CONTINUE WHEN NOT FOUND;
     UPDATE bid_matching_jobs SET status=CASE WHEN rec.attempt>=rec.max_attempts THEN 'failed' ELSE 'pending' END,
       active_attempt=NULL, error_code='CLAIM_LEASE_EXPIRED',
       finished_at=CASE WHEN rec.attempt>=rec.max_attempts THEN clock_timestamp() ELSE finished_at END
-     WHERE id=rec.job_id;
+     WHERE id=rec.job_id AND status='running' AND active_attempt=rec.attempt;
+    CONTINUE WHEN NOT FOUND;
     UPDATE bid_matching_staging_sets SET state='expired' WHERE job_id=rec.job_id AND attempt=rec.attempt AND state='active';
     n := n + 1;
   END LOOP;

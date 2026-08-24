@@ -1,5 +1,5 @@
 format_version = 1
-schema_manifest_sha256 = "66e05509513463c99a8ce8cb19cbfa860f93faed9390b166ca009e8164e62439"
+schema_manifest_sha256 = "0ad7690e343a3dcfc8687f50a871fcba626bdc5c9b54c345138bf51118e008d7"
 contract = "bidding-v1"
 phase_1d_runtime_complete = false
 registry_sha256 = ""

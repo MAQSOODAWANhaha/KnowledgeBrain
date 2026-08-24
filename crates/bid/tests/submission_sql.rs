@@ -288,6 +288,21 @@ async fn procedural_segments_distinguish_numbered_items_from_decimal_amounts() {
         numbered_segments,
         vec!["投标材料包括", "1. 提交授权委托书", "2、上传保证金回执"]
     );
+
+    let compact_numbered = "材料：（一）上传保证金回执（二）提交授权委托书";
+    let compact_segments: Vec<String> = sqlx::query_scalar(
+        "SELECT convert_from(segment_utf8,'UTF8')
+           FROM kb_bid_split_procedural_segments($1)
+          ORDER BY start_offset",
+    )
+    .bind(compact_numbered)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        compact_segments,
+        vec!["材料：", "（一）上传保证金回执", "（二）提交授权委托书"]
+    );
 }
 
 async fn upload_shot_artifact(pool: &PgPool, seed: &SubmissionSeed, bytes: &[u8]) -> String {
@@ -1136,10 +1151,21 @@ async fn manifest_freezes_global_occurrences_across_parts_and_repeated_object() 
         &pool,
         &seed,
         "1",
-        &format!("first {object_ref}\nrepeated {object_ref}"),
+        &format!(
+            "first ![shared]({object_ref})\nplain {object_ref}\nrepeated ![shared again]({object_ref})"
+        ),
     )
     .await;
-    seed_current_part_with_markdown(&pool, &seed, "4", &format!("other {object_ref}")).await;
+    seed_current_part_with_markdown(&pool, &seed, "4", &format!("other ![shared]({object_ref})"))
+        .await;
+
+    let missing_bare_ref = format!("plain objects/{}", "f".repeat(64));
+    sqlx::query("SELECT kb_bid_validate_part_markdown_assets($1,$2)")
+        .bind(seed.project_id)
+        .bind(missing_bare_ref.as_bytes())
+        .execute(&pool)
+        .await
+        .expect("a bare object ref is ordinary markdown text");
 
     let manifest = create_manifest(&pool, &seed, "docx").await;
     let manifest_id: Uuid = manifest["manifest_id"].as_str().unwrap().parse().unwrap();
@@ -2265,7 +2291,13 @@ async fn manifest_creation_rolls_back_for_missing_and_corrupt_physical_blob() {
         !storage::blob_exists(digest),
         "unique missing-blob fixture must not already exist"
     );
-    seed_current_part_with_markdown(&pool, &seed, "1", &object_ref).await;
+    seed_current_part_with_markdown(
+        &pool,
+        &seed,
+        "1",
+        &format!("![missing asset]({object_ref})"),
+    )
+    .await;
 
     let missing_manifest_id = Uuid::new_v4();
     let missing_key = format!("missing-blob-{missing_manifest_id}");

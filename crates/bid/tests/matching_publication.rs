@@ -447,26 +447,79 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
         .await
         .unwrap_err();
     assert_database_error(error, "MATCHING_CLAIM_LOST");
-    storage::bid_matching::retry_claim(
+    let error = storage::bid_matching::retry_claim(
         &pool,
         &lease_claim,
         "LEASE_TEST_RETRY",
-        "expired lease is retryable",
+        "expired lease must be fenced",
     )
     .await
-    .unwrap();
-    let lease_status: (String, String) = sqlx::query_as(
-        "SELECT job.status,claim.status
+    .unwrap_err();
+    assert_database_error(error, "MATCHING_CLAIM_LOST");
+    assert_eq!(
+        storage::bid_matching::reap_expired_claims(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    let replacement_claim =
+        storage::bid_matching::claim_and_load(&pool, commercial_job.id, commercial_job.snapshots)
+            .await
+            .unwrap()
+            .expect("reaped matching job must be claimable again");
+    assert_eq!(replacement_claim.claim.attempt, 2);
+
+    let error = storage::bid_matching::retry_claim(
+        &pool,
+        &lease_claim,
+        "STALE_ATTEMPT_RETRY",
+        "an old attempt must not reset its replacement",
+    )
+    .await
+    .unwrap_err();
+    assert_database_error(error, "MATCHING_CLAIM_LOST");
+    let error = storage::bid_matching::fail_claim(
+        &pool,
+        &lease_claim,
+        "STALE_ATTEMPT_FAIL",
+        "an old attempt must not fail its replacement",
+    )
+    .await
+    .unwrap_err();
+    assert_database_error(error, "MATCHING_CLAIM_LOST");
+
+    let lease_status: (String, Option<i32>, String, String) = sqlx::query_as(
+        "SELECT job.status,job.active_attempt,old_claim.status,new_claim.status
          FROM bid_matching_jobs job
-         JOIN bid_matching_job_claims claim ON claim.job_id=job.id AND claim.attempt=$2
+         JOIN bid_matching_job_claims old_claim
+           ON old_claim.job_id=job.id AND old_claim.attempt=$2
+         JOIN bid_matching_job_claims new_claim
+           ON new_claim.job_id=job.id AND new_claim.attempt=$3
          WHERE job.id=$1",
     )
     .bind(lease_claim.job_id)
     .bind(lease_claim.claim.attempt)
+    .bind(replacement_claim.claim.attempt)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(lease_status, ("pending".into(), "failed".into()));
+    assert_eq!(
+        lease_status,
+        (
+            "running".into(),
+            Some(replacement_claim.claim.attempt),
+            "reaped".into(),
+            "running".into()
+        )
+    );
+    storage::bid_matching::retry_claim(
+        &pool,
+        &replacement_claim,
+        "LEASE_TEST_RETRY",
+        "the current claim may retry",
+    )
+    .await
+    .unwrap();
 
     let ordinary_job = scheduled
         .jobs
