@@ -458,8 +458,32 @@ VALUES ('kind-router-v1', 1,
  '1970-01-01 UTC');
 INSERT INTO kind_router_current(singleton_key, version, promotion_generation)
 VALUES (true, 'kind-router-v1', 0);
+
+CREATE TABLE procedural_router_contract_artifacts (
+    version text PRIMARY KEY,
+    schema_version smallint NOT NULL CHECK (schema_version=1),
+    canonical_payload bytea NOT NULL,
+    content_sha256 kb_sha256 NOT NULL UNIQUE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (content_sha256=encode(public.digest(canonical_payload,'sha256'),'hex'))
+);
+CREATE TABLE procedural_router_current (
+    singleton_key boolean PRIMARY KEY DEFAULT true CHECK (singleton_key),
+    version text NOT NULL REFERENCES procedural_router_contract_artifacts(version) ON DELETE RESTRICT,
+    promotion_generation bigint NOT NULL CHECK (promotion_generation>=0)
+);
+INSERT INTO procedural_router_contract_artifacts(version,schema_version,canonical_payload,content_sha256,created_at)
+VALUES('procedural-router-v1',1,
+  convert_to('{"schema_version":1,"version":"procedural-router-v1","overrides":{}}','UTF8'),
+  encode(public.digest(convert_to('{"schema_version":1,"version":"procedural-router-v1","overrides":{}}','UTF8'),'sha256'),'hex'),
+  '1970-01-01 UTC');
+INSERT INTO procedural_router_current(singleton_key,version,promotion_generation)
+VALUES(true,'procedural-router-v1',0);
 CREATE TRIGGER kind_router_contract_artifacts_immutable
 BEFORE UPDATE OR DELETE ON kind_router_contract_artifacts
+FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
+CREATE TRIGGER procedural_router_contract_artifacts_immutable
+BEFORE UPDATE OR DELETE ON procedural_router_contract_artifacts
 FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
 
 -- MatchingPublication: frozen manifest, routes, scope, staging, immutable report,
@@ -1433,6 +1457,8 @@ CREATE TABLE bid_procedural_classification_artifacts (
     project_id uuid NOT NULL REFERENCES bid_projects(id) ON DELETE RESTRICT,
     segment_id uuid NOT NULL REFERENCES bid_procedural_segment_artifacts(id) ON DELETE RESTRICT,
     revision integer NOT NULL CHECK (revision > 0),
+    router_contract_version text NOT NULL REFERENCES procedural_router_contract_artifacts(version) ON DELETE RESTRICT,
+    router_promotion_generation bigint NOT NULL CHECK (router_promotion_generation>=0),
     router_result_status text NOT NULL CHECK (router_result_status IN ('classified', 'review')),
     router_requirement_kind text CHECK (router_requirement_kind IN (
         'bid_bond', 'authorization_support', 'seal_sample', 'procedural_support', 'confirmation'
@@ -1488,6 +1514,21 @@ CREATE TABLE bid_procedural_attachments (
     UNIQUE (project_id, id),
     CHECK ((media_type LIKE 'image/%' AND pixel_width BETWEEN 1 AND 20000 AND pixel_height BETWEEN 1 AND 20000)
         OR (media_type='application/pdf' AND pixel_width IS NULL AND pixel_height IS NULL)),
+    CHECK (object_ref='objects/'||content_sha256)
+);
+CREATE TABLE bid_attachment_render_pages (
+    attachment_id uuid NOT NULL,
+    project_id uuid NOT NULL,
+    page_ordinal integer NOT NULL CHECK (page_ordinal BETWEEN 0 AND 511),
+    object_ref kb_object_ref NOT NULL,
+    content_sha256 kb_sha256 NOT NULL,
+    media_type text NOT NULL CHECK (media_type IN ('image/png','image/jpeg','image/webp')),
+    byte_length bigint NOT NULL CHECK (byte_length BETWEEN 1 AND 20971520),
+    pixel_width integer NOT NULL CHECK (pixel_width BETWEEN 1 AND 20000),
+    pixel_height integer NOT NULL CHECK (pixel_height BETWEEN 1 AND 20000),
+    PRIMARY KEY (attachment_id, page_ordinal),
+    FOREIGN KEY (project_id, attachment_id)
+        REFERENCES bid_procedural_attachments(project_id, id) ON DELETE RESTRICT,
     CHECK (object_ref='objects/'||content_sha256)
 );
 CREATE TABLE bid_procedural_decision_artifacts (
@@ -1679,18 +1720,24 @@ CREATE TABLE bid_submission_manifest_parts (
 CREATE TABLE bid_manifest_render_assets (
     id uuid PRIMARY KEY,
     manifest_id uuid NOT NULL REFERENCES bid_submission_manifests(id) ON DELETE RESTRICT,
-    source_kind text NOT NULL CHECK (source_kind IN ('bid_shot', 'markdown_object')),
+    source_kind text NOT NULL CHECK (source_kind IN (
+        'bid_shot', 'markdown_object', 'procedural_attachment', 'procedural_attachment_page'
+    )),
     source_locator jsonb NOT NULL CHECK (jsonb_typeof(source_locator) = 'object'),
     object_ref kb_object_ref NOT NULL,
     digest kb_sha256 NOT NULL,
     media_type text NOT NULL,
     byte_length bigint NOT NULL CHECK (byte_length >= 0),
-    pixel_width integer NOT NULL CHECK (pixel_width BETWEEN 1 AND 20000),
-    pixel_height integer NOT NULL CHECK (pixel_height BETWEEN 1 AND 20000),
+    pixel_width integer,
+    pixel_height integer,
     manifest_ordinal integer NOT NULL CHECK (manifest_ordinal >= 0),
     occurrence_ordinal integer NOT NULL CHECK (occurrence_ordinal >= 0),
     UNIQUE (manifest_id, manifest_ordinal),
-    UNIQUE (manifest_id, source_kind, source_locator)
+    UNIQUE (manifest_id, source_kind, source_locator),
+    CHECK ((media_type='application/pdf' AND source_kind='procedural_attachment'
+            AND pixel_width IS NULL AND pixel_height IS NULL)
+        OR (media_type IN ('image/png','image/jpeg','image/webp')
+            AND pixel_width BETWEEN 1 AND 20000 AND pixel_height BETWEEN 1 AND 20000))
 );
 CREATE TABLE bid_submission_output_artifacts (
     id uuid PRIMARY KEY,
@@ -1820,7 +1867,13 @@ BEGIN
   ELSIF NOT EXISTS (
     SELECT 1 FROM bid_procedural_decision_artifacts successor
      WHERE successor.id=NEW.successor_id AND successor.project_id=NEW.project_id
-       AND successor.classification_id=NEW.classification_id AND successor.revision=NEW.revision+1
+       AND (
+         (successor.classification_id=NEW.classification_id AND successor.revision=NEW.revision+1)
+         OR (successor.revision=1 AND EXISTS (
+           SELECT 1 FROM bid_procedural_classification_artifacts old_classification
+            WHERE old_classification.id=NEW.classification_id
+              AND old_classification.successor_id=successor.classification_id))
+       )
   ) THEN RAISE EXCEPTION 'PROCEDURAL_DECISION_SUCCESSOR_INVALID' USING ERRCODE='23514'; END IF;
   RETURN NULL;
 END
@@ -1833,6 +1886,7 @@ CREATE TRIGGER bid_procedural_classification_transition_guard BEFORE UPDATE OR D
 CREATE TRIGGER bid_procedural_decision_transition_guard BEFORE UPDATE OR DELETE ON bid_procedural_decision_artifacts FOR EACH ROW EXECUTE FUNCTION kb_bid_guard_procedural_decision_transition();
 CREATE CONSTRAINT TRIGGER bid_procedural_classification_successor_verify AFTER UPDATE ON bid_procedural_classification_artifacts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION kb_bid_verify_procedural_successor();
 CREATE CONSTRAINT TRIGGER bid_procedural_decision_successor_verify AFTER UPDATE ON bid_procedural_decision_artifacts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION kb_bid_verify_procedural_successor();
+CREATE TRIGGER bid_attachment_render_pages_immutable BEFORE UPDATE OR DELETE ON bid_attachment_render_pages FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
 CREATE TRIGGER bid_shot_artifacts_immutable BEFORE UPDATE OR DELETE ON bid_shot_artifacts FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
 CREATE TRIGGER bid_template_contract_artifacts_immutable BEFORE UPDATE OR DELETE ON bid_template_contract_artifacts FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
 CREATE TRIGGER bid_part_content_artifacts_immutable BEFORE UPDATE OR DELETE ON bid_part_content_artifacts FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
@@ -2153,16 +2207,23 @@ AS $$ WITH changed AS (
 CREATE FUNCTION kb_bid_complete_document_conversion(
  p_document_id uuid,p_claim_token uuid,p_source_artifact_id uuid,p_markdown bytea,
  p_converter_contract_version text,p_image_asset_set_sha256 kb_sha256,
- p_image_assets jsonb,p_actor kb_actor_identity
+ p_image_assets jsonb,p_extraction_target_id uuid,p_expected_section_count integer,
+ p_policy_version text,p_prompt_version text,p_actor kb_actor_identity
 )
-RETURNS uuid
+RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
 DECLARE project_key uuid; document_value bid_documents%ROWTYPE; attempt_value bid_document_conversion_attempts%ROWTYPE;
  markdown_hash kb_sha256; computed_image_asset_set_sha256 kb_sha256; image_asset jsonb;
+ router_value kind_router_current%ROWTYPE; extraction_generation_value integer; response jsonb;
 BEGIN
+    IF p_extraction_target_id IS NULL OR p_expected_section_count<=0
+       OR octet_length(p_policy_version) NOT BETWEEN 1 AND 128
+       OR octet_length(p_prompt_version) NOT BETWEEN 1 AND 128 THEN
+      RAISE EXCEPTION 'EXTRACTION_TARGET_INVALID' USING ERRCODE='22023';
+    END IF;
     IF jsonb_typeof(p_image_assets)<>'array' OR jsonb_array_length(p_image_assets)>1024 THEN
       RAISE EXCEPTION 'CONVERTED_IMAGE_ASSETS_INVALID' USING ERRCODE='22023';
     END IF;
@@ -2222,7 +2283,19 @@ BEGIN
       parse_status='completed',parsed_at=clock_timestamp(),error_code=NULL WHERE id=p_document_id;
     UPDATE bid_document_conversion_attempts SET status='completed'
       WHERE document_id=p_document_id AND claim_token=p_claim_token;
-    RETURN p_source_artifact_id;
+    SELECT * INTO STRICT router_value FROM kind_router_current WHERE singleton_key FOR SHARE;
+    SELECT COALESCE(max(extraction_generation),0)+1 INTO extraction_generation_value
+      FROM bid_extraction_targets WHERE project_id=project_key AND document_id=p_document_id;
+    INSERT INTO bid_extraction_targets(id,project_id,document_id,source_artifact_id,conversion_generation,
+      extraction_generation,router_contract_version,policy_version,prompt_version,output_schema_version,
+      expected_section_count,state)
+    VALUES(p_extraction_target_id,project_key,p_document_id,p_source_artifact_id,
+      document_value.conversion_generation,extraction_generation_value,router_value.version,
+      p_policy_version,p_prompt_version,1,p_expected_section_count,'pending');
+    response:=jsonb_build_object('source_artifact_id',p_source_artifact_id,
+      'extraction_target_id',p_extraction_target_id,'extraction_generation',extraction_generation_value,
+      'router_contract_version',router_value.version);
+    RETURN response;
 END
 $$;
 
@@ -2239,7 +2312,8 @@ BEGIN
     PERFORM 1 FROM bid_projects WHERE id=project_key FOR UPDATE;
     PERFORM 1 FROM bid_documents WHERE id=p_document_id FOR UPDATE;
     UPDATE bid_document_conversion_attempts SET status='failed',error_code=left(p_error_code,128)
-      WHERE document_id=p_document_id AND claim_token=p_claim_token AND status='running';
+      WHERE document_id=p_document_id AND claim_token=p_claim_token AND status='running'
+        AND heartbeat_at+make_interval(secs=>claim_lease_ms/1000.0)>clock_timestamp();
     IF NOT FOUND THEN RETURN false; END IF;
     UPDATE bid_documents SET parse_status=CASE WHEN p_retry THEN 'pending' ELSE 'failed' END,
       error_code=left(p_error_code,128) WHERE id=p_document_id;
@@ -2377,7 +2451,8 @@ DECLARE
  section_id uuid; section_hash kb_sha256; publication_id uuid:=gen_random_uuid(); publication_revision bigint;
  replay bytea; response jsonb; graph_hash kb_sha256; segment jsonb; segment_ordinal bigint;
  prior_end bigint:=NULL; start_value bigint; end_value bigint; quote_value text; quote_hash kb_sha256;
- span_id uuid; span_value jsonb; span_bytes bytea; candidate_id uuid; clause_value jsonb; clause_id uuid;
+ span_id uuid; span_value jsonb; span_bytes bytea; span_hash kb_sha256;
+ candidate_id uuid; clause_value jsonb; clause_id uuid;
  routed_kind text; routed_reason text;
  fact_value jsonb; fact_id uuid; decision_value record; previous_decision uuid; previous_revision integer;
  response_clauses jsonb:='[]'::jsonb; response_facts jsonb:='[]'::jsonb; allowed_keys text[];
@@ -2440,10 +2515,13 @@ BEGIN
  IF current_publication.publication_id IS NOT NULL THEN
    SELECT * INTO STRICT old_publication FROM bid_section_publications
     WHERE id=current_publication.publication_id FOR SHARE;
-   PERFORM 1 FROM bid_clauses WHERE publication_id=old_publication.id AND provenance='extracted'
-     AND status='draft' ORDER BY id FOR UPDATE;
-   UPDATE bid_clauses SET status='superseded',revision=revision+1,updated_at=clock_timestamp()
-    WHERE publication_id=old_publication.id AND provenance='extracted' AND status='draft';
+   PERFORM 1 FROM bid_clauses clause_value
+    WHERE clause_value.publication_id=old_publication.id AND clause_value.provenance='extracted'
+      AND clause_value.status='draft' ORDER BY clause_value.id FOR UPDATE;
+   UPDATE bid_clauses clause_value
+    SET status='superseded',revision=clause_value.revision+1,updated_at=clock_timestamp()
+    WHERE clause_value.publication_id=old_publication.id
+      AND clause_value.provenance='extracted' AND clause_value.status='draft';
    FOR decision_value IN
      SELECT latest.id,latest.candidate_id,latest.revision FROM (
        SELECT DISTINCT ON (d.candidate_id) d.id,d.candidate_id,d.revision,d.status
@@ -2478,7 +2556,6 @@ BEGIN
      RAISE EXCEPTION 'SEGMENT_QUOTE_OR_BOUNDS_INVALID' USING ERRCODE='23514';
    END IF;
    prior_end:=end_value; quote_hash:=encode(public.digest(convert_to(quote_value,'UTF8'),'sha256'),'hex');
-   span_id:=gen_random_uuid();
    span_value:=jsonb_build_object('schema_version',2,'source_artifact_id',target_value.source_artifact_id,
      'section_artifact_id',section_id,'project_id',target_value.project_id,'document_id',target_value.document_id,
      'conversion_generation',target_value.conversion_generation,'section_key',p_section_key,
@@ -2486,13 +2563,38 @@ BEGIN
      'start_offset',start_value,'end_offset',end_value,'offset_unit','utf8_byte','quote',quote_value,
      'quote_sha256',quote_hash,'heading_path',p_heading_path);
    span_bytes:=convert_to(span_value::text,'UTF8');
-   INSERT INTO bid_source_span_artifacts(id,schema_version,project_id,document_id,source_artifact_id,
-     section_artifact_id,conversion_generation,section_key,parent_start_offset,parent_end_offset,
-     start_offset,end_offset,offset_unit,quote,quote_sha256,heading_path,source_span_v2,canonical_payload,content_sha256)
-   VALUES(span_id,2,target_value.project_id,target_value.document_id,target_value.source_artifact_id,section_id,
-     target_value.conversion_generation,p_section_key,p_parent_start_offset,p_parent_end_offset,start_value,
-     end_value,'utf8_byte',quote_value,quote_hash,p_heading_path,span_value,span_bytes,
-     encode(public.digest(span_bytes,'sha256'),'hex'));
+   span_hash:=encode(public.digest(span_bytes,'sha256'),'hex');
+   SELECT artifact.id INTO span_id
+     FROM bid_source_span_artifacts artifact
+    WHERE artifact.project_id=target_value.project_id
+      AND artifact.document_id=target_value.document_id
+      AND artifact.source_artifact_id=target_value.source_artifact_id
+      AND artifact.section_artifact_id=section_id
+      AND artifact.start_offset=start_value AND artifact.end_offset=end_value
+      AND artifact.quote_sha256=quote_hash
+    FOR SHARE;
+   IF span_id IS NULL THEN
+     span_id:=gen_random_uuid();
+     INSERT INTO bid_source_span_artifacts(id,schema_version,project_id,document_id,source_artifact_id,
+       section_artifact_id,conversion_generation,section_key,parent_start_offset,parent_end_offset,
+       start_offset,end_offset,offset_unit,quote,quote_sha256,heading_path,source_span_v2,canonical_payload,content_sha256)
+     VALUES(span_id,2,target_value.project_id,target_value.document_id,target_value.source_artifact_id,section_id,
+       target_value.conversion_generation,p_section_key,p_parent_start_offset,p_parent_end_offset,start_value,
+       end_value,'utf8_byte',quote_value,quote_hash,p_heading_path,span_value,span_bytes,span_hash);
+   ELSE
+     PERFORM 1 FROM bid_source_span_artifacts artifact
+      WHERE artifact.id=span_id AND artifact.schema_version=2
+        AND artifact.conversion_generation=target_value.conversion_generation
+        AND artifact.section_key=p_section_key
+        AND artifact.parent_start_offset=p_parent_start_offset
+        AND artifact.parent_end_offset=p_parent_end_offset
+        AND artifact.offset_unit='utf8_byte' AND artifact.quote=quote_value
+        AND artifact.heading_path=p_heading_path AND artifact.source_span_v2=span_value
+        AND artifact.canonical_payload=span_bytes AND artifact.content_sha256=span_hash;
+     IF NOT FOUND THEN
+       RAISE EXCEPTION 'SOURCE_SPAN_ARTIFACT_IDENTITY_MISMATCH' USING ERRCODE='23505';
+     END IF;
+   END IF;
    candidate_id:=gen_random_uuid();
    INSERT INTO bid_extract_segment_candidates(id,target_id,section_artifact_id,source_span_artifact_id,ordinal)
      VALUES(candidate_id,p_target_id,section_id,span_id,segment_ordinal);
@@ -3083,7 +3185,8 @@ BEGIN
  PERFORM 1 FROM bid_projects WHERE id=target_value.project_id FOR UPDATE;
  PERFORM 1 FROM bid_extraction_targets WHERE id=p_target_id FOR UPDATE;
  UPDATE bid_extraction_attempts SET status='failed',error_code=left(p_error_code,128)
-  WHERE target_id=p_target_id AND attempt=p_attempt AND claim_token=p_claim_token AND status='running';
+  WHERE target_id=p_target_id AND attempt=p_attempt AND claim_token=p_claim_token AND status='running'
+    AND heartbeat_at+make_interval(secs=>claim_lease_ms/1000.0)>clock_timestamp();
  IF NOT FOUND THEN RETURN false; END IF;
  UPDATE bid_extraction_targets SET state=CASE WHEN p_retry THEN 'pending' ELSE 'failed' END WHERE id=p_target_id;
  RETURN true;
@@ -3262,6 +3365,16 @@ SELECT project_id,set_kind,revision,content_sha256,updated_at FROM bid_clause_se
 CREATE VIEW bidding_kind_router_current AS
 SELECT current_value.version,current_value.promotion_generation,artifact.content_sha256,artifact.canonical_payload
 FROM kind_router_current current_value JOIN kind_router_contract_artifacts artifact ON artifact.version=current_value.version;
+CREATE VIEW bidding_procedural_router_current AS
+SELECT current_value.version,current_value.promotion_generation,artifact.content_sha256,artifact.canonical_payload
+FROM procedural_router_current current_value
+JOIN procedural_router_contract_artifacts artifact ON artifact.version=current_value.version;
+CREATE VIEW bidding_template_contract_current AS
+SELECT current_value.slot,current_value.version,current_value.promotion_generation,
+       artifact.content_sha256,artifact.canonical_payload
+FROM bid_template_contract_current current_value
+JOIN bid_template_contract_artifacts artifact
+  ON artifact.slot=current_value.slot AND artifact.version=current_value.version;
 
 
 -- Quote/Submission checked mutations, pointer integrity, and typed projections.
@@ -3291,7 +3404,8 @@ ALTER TABLE bid_procedural_decision_artifacts
     FOREIGN KEY (successor_id) REFERENCES bid_procedural_decision_artifacts(id)
     DEFERRABLE INITIALLY DEFERRED,
   ADD CONSTRAINT bid_procedural_decision_terminal_reason_check CHECK (terminal_reason IN (
-    'clause_deleted','clause_unconfirmed','left_procedural','text_changed','resegmented','segment_removed'
+    'clause_deleted','clause_unconfirmed','left_procedural','text_changed','resegmented','segment_removed',
+    'router_promoted'
   )),
   ADD CONSTRAINT bid_procedural_decision_successor_xor CHECK (
     (lifecycle_status='current' AND successor_id IS NULL AND terminal_reason IS NULL
@@ -3361,7 +3475,9 @@ CREATE VIEW bidding_current_submission_profiles AS
 SELECT artifact.* FROM bid_submission_profile_artifacts artifact
 JOIN bid_current_profiles current_value ON current_value.submission_profile_id=artifact.id;
 CREATE VIEW bidding_current_procedural_classifications AS
-SELECT classification.* FROM bid_procedural_classification_artifacts classification
+SELECT classification.*,convert_from(segment.segment_utf8,'UTF8') AS segment_text
+FROM bid_procedural_classification_artifacts classification
+JOIN bid_procedural_segment_artifacts segment ON segment.id=classification.segment_id
 WHERE classification.lifecycle_status='current';
 CREATE VIEW bidding_current_procedural_decisions AS
 SELECT decision.* FROM bid_procedural_decision_artifacts decision
@@ -3532,20 +3648,24 @@ IMMUTABLE
 SET search_path = pg_catalog
 AS $$
 DECLARE basis numeric(20,2); net numeric(20,2); tax numeric(20,2); gross numeric(20,2); product numeric(30,6);
+ normalized_unit text;
 BEGIN
   IF p_tax_rate IS NULL OR p_tax_rate < 0 OR p_tax_rate > 1 THEN
     RAISE EXCEPTION 'QUOTE_TAX_RATE_INVALID' USING ERRCODE='22023';
   END IF;
   IF p_pricing_mode='unit_price' THEN
     IF p_entered_amount IS NOT NULL THEN RAISE EXCEPTION 'QUOTE_LINE_SHAPE_INVALID' USING ERRCODE='22023'; END IF;
-    IF p_quantity IS NULL AND p_unit IS NULL AND p_unit_price IS NULL THEN
-      RETURN QUERY SELECT false, NULL::numeric, NULL::text, NULL::numeric, NULL::numeric, p_tax_rate,
+    normalized_unit := NULLIF(btrim(COALESCE(p_unit,'')), '');
+    IF p_quantity IS NOT NULL AND (p_quantity<=0 OR p_quantity>1000000000) THEN
+      RAISE EXCEPTION 'QUOTE_LINE_INCOMPLETE' USING ERRCODE='22023';
+    END IF;
+    IF p_unit_price IS NOT NULL AND (p_unit_price<0 OR p_unit_price>1000000000000) THEN
+      RAISE EXCEPTION 'QUOTE_LINE_INCOMPLETE' USING ERRCODE='22023';
+    END IF;
+    IF p_quantity IS NULL OR normalized_unit IS NULL OR p_unit_price IS NULL THEN
+      RETURN QUERY SELECT false, p_quantity, normalized_unit, p_unit_price, NULL::numeric, p_tax_rate,
         NULL::numeric, NULL::numeric, NULL::numeric, NULL::numeric;
       RETURN;
-    END IF;
-    IF p_quantity IS NULL OR btrim(COALESCE(p_unit,''))='' OR p_unit_price IS NULL OR p_quantity<=0
-       OR p_quantity>1000000000 OR p_unit_price<0 OR p_unit_price>1000000000000 THEN
-      RAISE EXCEPTION 'QUOTE_LINE_INCOMPLETE' USING ERRCODE='22023';
     END IF;
     BEGIN
       product := p_quantity * p_unit_price;
@@ -3584,7 +3704,7 @@ BEGIN
   END;
   RETURN QUERY SELECT true,
     CASE WHEN p_pricing_mode='unit_price' THEN p_quantity ELSE NULL END,
-    CASE WHEN p_pricing_mode='unit_price' THEN p_unit ELSE NULL END,
+    CASE WHEN p_pricing_mode='unit_price' THEN normalized_unit ELSE NULL END,
     CASE WHEN p_pricing_mode='unit_price' THEN p_unit_price ELSE NULL END,
     CASE WHEN p_pricing_mode='lump_sum' THEN p_entered_amount ELSE NULL END,
     p_tax_rate, basis, net, tax, gross;
@@ -4194,14 +4314,18 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION kb_bid_route_procedural(p_text text)
+CREATE FUNCTION kb_bid_route_procedural(p_text text,p_contract_version text)
 RETURNS jsonb
 LANGUAGE plpgsql
-IMMUTABLE
-SET search_path = pg_catalog
+STABLE
+SET search_path = pg_catalog, public
 AS $$
-DECLARE hits text[] := '{}';
+DECLARE hits text[] := '{}'; contract_payload jsonb; overridden jsonb;
 BEGIN
+  SELECT convert_from(canonical_payload,'UTF8')::jsonb INTO STRICT contract_payload
+    FROM procedural_router_contract_artifacts WHERE version=p_contract_version;
+  overridden:=contract_payload->'overrides'->p_text;
+  IF overridden IS NOT NULL THEN RETURN overridden; END IF;
   IF (p_text LIKE '%ISO%' OR p_text LIKE '%等保%' OR p_text LIKE '%资质证书%' OR p_text LIKE '%资格证书%' OR p_text LIKE '%软著%')
      AND (p_text LIKE '%上传%' OR p_text LIKE '%提交%')
      AND p_text NOT LIKE '%保证金%' AND p_text NOT LIKE '%授权委托%' AND p_text NOT LIKE '%回执%' THEN
@@ -4247,6 +4371,236 @@ BEGIN
     RETURN jsonb_build_object('status','review','reason','MULTIPLE_PROCEDURAL_REQUIREMENTS');
   END IF;
   RETURN jsonb_build_object('status','classified','kind',hits[1]);
+END
+$$;
+
+CREATE FUNCTION kb_bid_register_procedural_router_contract(
+ p_version text,p_canonical_payload bytea,p_content_sha256 kb_sha256,p_actor kb_actor_identity,
+ p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE replay bytea; payload jsonb; response jsonb;
+BEGIN
+  PERFORM 1 FROM application_maintenance_gate WHERE singleton_key AND mode='maintenance' FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'MAINTENANCE_REQUIRED' USING ERRCODE='55000'; END IF;
+  replay:=kb_bid_idempotency_begin(p_actor,'bid.procedural_router.register',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  IF p_content_sha256<>encode(public.digest(p_canonical_payload,'sha256'),'hex') THEN
+    RAISE EXCEPTION 'PROCEDURAL_ROUTER_HASH_MISMATCH' USING ERRCODE='22023'; END IF;
+  BEGIN payload:=convert_from(p_canonical_payload,'UTF8')::jsonb;
+  EXCEPTION WHEN OTHERS THEN RAISE EXCEPTION 'PROCEDURAL_ROUTER_PAYLOAD_INVALID' USING ERRCODE='22023'; END;
+  IF payload->>'version'<>p_version OR payload->>'schema_version'<>'1'
+     OR jsonb_typeof(payload->'overrides')<>'object'
+     OR EXISTS (
+       SELECT 1 FROM jsonb_each(payload->'overrides') override_value
+        WHERE jsonb_typeof(override_value.value)<>'object'
+          OR override_value.value->>'status' NOT IN ('classified','review')
+          OR (override_value.value->>'status'='classified' AND
+              override_value.value->>'kind' NOT IN ('bid_bond','authorization_support','seal_sample','procedural_support','confirmation'))
+          OR (override_value.value->>'status'='review' AND COALESCE(override_value.value->>'reason','')='')
+     ) THEN RAISE EXCEPTION 'PROCEDURAL_ROUTER_CONTRACT_SCHEMA_INVALID' USING ERRCODE='22023'; END IF;
+  INSERT INTO procedural_router_contract_artifacts(version,schema_version,canonical_payload,content_sha256)
+  VALUES(p_version,1,p_canonical_payload,p_content_sha256);
+  response:=jsonb_build_object('version',p_version,'content_sha256',p_content_sha256);
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
+    entity_kind,entity_locator,after_revision,after_sha256)
+  VALUES(gen_random_uuid(),1,'bid.procedural_router.register',p_actor,p_idempotency_key,p_request_sha256,
+    encode(public.digest(convert_to(response::text,'UTF8'),'sha256'),'hex'),'procedural_router_contract',
+    jsonb_build_object('version',p_version),1,p_content_sha256);
+  PERFORM kb_bid_idempotency_complete(p_actor,'bid.procedural_router.register',p_idempotency_key,201,convert_to(response::text,'UTF8'));
+  RETURN response;
+END
+$$;
+
+CREATE FUNCTION kb_bid_promote_procedural_router(
+ p_target_version text,p_expected_current_version text,p_expected_promotion_generation bigint,
+ p_actor kb_actor_identity,p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE gate_value application_maintenance_gate%ROWTYPE; current_value procedural_router_current%ROWTYPE;
+ replay bytea; project_value record; class_value bid_procedural_classification_artifacts%ROWTYPE;
+ decision_value bid_procedural_decision_artifacts%ROWTYPE; segment_value bid_procedural_segment_artifacts%ROWTYPE;
+ routed jsonb; target_generation bigint; next_class_id uuid; next_decision_id uuid; next_effective text;
+ preserve_decision boolean; changed_count bigint:=0; blocked_count bigint:=0; project_changed bigint; response jsonb;
+BEGIN
+  SELECT * INTO STRICT gate_value FROM application_maintenance_gate WHERE singleton_key FOR UPDATE;
+  IF gate_value.mode<>'maintenance' THEN RAISE EXCEPTION 'MAINTENANCE_REQUIRED' USING ERRCODE='55000'; END IF;
+  SELECT * INTO STRICT current_value FROM procedural_router_current WHERE singleton_key FOR UPDATE;
+  replay:=kb_bid_idempotency_begin(p_actor,'bid.procedural_router.promote',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  IF current_value.version<>p_expected_current_version
+     OR current_value.promotion_generation<>p_expected_promotion_generation THEN
+    RAISE EXCEPTION 'PROCEDURAL_ROUTER_PROMOTION_CAS_MISMATCH' USING ERRCODE='40001'; END IF;
+  PERFORM 1 FROM procedural_router_contract_artifacts WHERE version=p_target_version FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'PROCEDURAL_ROUTER_TARGET_MISSING' USING ERRCODE='23503'; END IF;
+  target_generation:=current_value.promotion_generation+1;
+  FOR project_value IN SELECT id FROM bid_projects WHERE status='open' ORDER BY id FOR UPDATE LOOP
+    project_changed:=0;
+    FOR class_value IN
+      SELECT classification.* FROM bid_procedural_classification_artifacts classification
+       JOIN bid_procedural_segment_artifacts segment ON segment.id=classification.segment_id
+       WHERE classification.project_id=project_value.id AND classification.lifecycle_status='current'
+       ORDER BY segment.stable_key FOR UPDATE OF classification
+    LOOP
+      SELECT * INTO STRICT segment_value FROM bid_procedural_segment_artifacts WHERE id=class_value.segment_id FOR SHARE;
+      routed:=kb_bid_route_procedural(convert_from(segment_value.segment_utf8,'UTF8'),p_target_version);
+      next_effective:=CASE WHEN class_value.override_actor IS NOT NULL THEN class_value.effective_requirement_kind
+                           ELSE routed->>'kind' END;
+      next_class_id:=gen_random_uuid();
+      UPDATE bid_procedural_classification_artifacts SET lifecycle_status='superseded',successor_id=next_class_id
+       WHERE id=class_value.id;
+      INSERT INTO bid_procedural_classification_artifacts(
+        id,project_id,segment_id,revision,router_contract_version,router_promotion_generation,
+        router_result_status,router_requirement_kind,review_reason,effective_requirement_kind,
+        override_from,override_to,override_actor,override_reason,override_at,lifecycle_status)
+      VALUES(next_class_id,class_value.project_id,class_value.segment_id,class_value.revision+1,
+        p_target_version,target_generation,routed->>'status',routed->>'kind',routed->>'reason',next_effective,
+        class_value.override_from,class_value.override_to,class_value.override_actor,
+        class_value.override_reason,class_value.override_at,'current');
+      SELECT * INTO decision_value FROM bid_procedural_decision_artifacts
+       WHERE classification_id=class_value.id AND lifecycle_status='current' FOR UPDATE;
+      IF decision_value.id IS NOT NULL THEN
+        preserve_decision:=next_effective IS NOT DISTINCT FROM class_value.effective_requirement_kind
+          AND (decision_value.resolution<>'satisfied_by_attachment' OR EXISTS(
+            SELECT 1 FROM bid_procedural_attachments attachment
+             WHERE attachment.id=decision_value.attachment_id AND attachment.project_id=project_value.id
+               AND attachment.status='confirmed' AND attachment.validation_status='valid'
+               AND attachment.kind=next_effective));
+        IF preserve_decision THEN
+          next_decision_id:=gen_random_uuid();
+          UPDATE bid_procedural_decision_artifacts SET lifecycle_status='superseded',successor_id=next_decision_id
+           WHERE id=decision_value.id;
+          INSERT INTO bid_procedural_decision_artifacts(id,project_id,classification_id,revision,resolution,
+            attachment_id,reason,actor_identity,decided_at,lifecycle_status)
+          VALUES(next_decision_id,decision_value.project_id,next_class_id,1,decision_value.resolution,
+            decision_value.attachment_id,decision_value.reason,decision_value.actor_identity,
+            decision_value.decided_at,'current');
+        ELSE
+          UPDATE bid_procedural_decision_artifacts SET lifecycle_status='superseded',terminal_reason='router_promoted',
+            terminal_at=clock_timestamp(),terminal_actor=p_actor WHERE id=decision_value.id;
+          blocked_count:=blocked_count+1;
+        END IF;
+      ELSIF next_effective IS NULL THEN blocked_count:=blocked_count+1;
+      END IF;
+      changed_count:=changed_count+1;
+      project_changed:=project_changed+1;
+    END LOOP;
+    IF project_changed>0 THEN
+      PERFORM kb_bid_stale_parts(project_value.id,ARRAY['5','6:authorization','6:procedural'],'PROCEDURAL_ROUTER_PROMOTED');
+    END IF;
+  END LOOP;
+  UPDATE procedural_router_current SET version=p_target_version,promotion_generation=target_generation
+   WHERE singleton_key AND version=p_expected_current_version
+     AND promotion_generation=p_expected_promotion_generation;
+  IF NOT FOUND THEN RAISE EXCEPTION 'PROCEDURAL_ROUTER_PROMOTION_CAS_MISMATCH' USING ERRCODE='40001'; END IF;
+  response:=jsonb_build_object('version',p_target_version,'promotion_generation',target_generation,
+    'classification_count',changed_count,'blocked_decision_count',blocked_count);
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
+    entity_kind,entity_locator,before_revision,before_sha256,after_revision,after_sha256)
+  SELECT gen_random_uuid(),1,'bid.procedural_router.promote',p_actor,p_idempotency_key,p_request_sha256,
+    encode(public.digest(convert_to(response::text,'UTF8'),'sha256'),'hex'),'procedural_router_current',
+    jsonb_build_object('singleton',true),p_expected_promotion_generation,old_artifact.content_sha256,
+    target_generation,new_artifact.content_sha256
+  FROM procedural_router_contract_artifacts old_artifact,procedural_router_contract_artifacts new_artifact
+  WHERE old_artifact.version=p_expected_current_version AND new_artifact.version=p_target_version;
+  PERFORM kb_bid_idempotency_complete(p_actor,'bid.procedural_router.promote',p_idempotency_key,200,convert_to(response::text,'UTF8'));
+  RETURN response;
+END
+$$;
+
+CREATE FUNCTION kb_bid_register_template_contract(
+ p_slot text,p_version text,p_canonical_payload bytea,p_content_sha256 kb_sha256,p_actor kb_actor_identity,
+ p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE replay bytea; payload jsonb; response jsonb;
+BEGIN
+  PERFORM 1 FROM application_maintenance_gate WHERE singleton_key AND mode='maintenance' FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'MAINTENANCE_REQUIRED' USING ERRCODE='55000'; END IF;
+  replay:=kb_bid_idempotency_begin(p_actor,'bid.template_contract.register',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  IF p_content_sha256<>encode(public.digest(p_canonical_payload,'sha256'),'hex') THEN
+    RAISE EXCEPTION 'TEMPLATE_CONTRACT_HASH_MISMATCH' USING ERRCODE='22023'; END IF;
+  BEGIN payload:=convert_from(p_canonical_payload,'UTF8')::jsonb;
+  EXCEPTION WHEN OTHERS THEN RAISE EXCEPTION 'TEMPLATE_CONTRACT_PAYLOAD_INVALID' USING ERRCODE='22023'; END;
+  IF payload->>'schema_version'<>'1' OR payload->>'slot'<>p_slot OR payload->>'version'<>p_version THEN
+    RAISE EXCEPTION 'TEMPLATE_CONTRACT_SCHEMA_INVALID' USING ERRCODE='22023'; END IF;
+  INSERT INTO bid_template_contract_artifacts(slot,version,canonical_payload,content_sha256)
+  VALUES(p_slot,p_version,p_canonical_payload,p_content_sha256);
+  response:=jsonb_build_object('slot',p_slot,'version',p_version,'content_sha256',p_content_sha256);
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
+    entity_kind,entity_locator,after_revision,after_sha256)
+  VALUES(gen_random_uuid(),1,'bid.template_contract.register',p_actor,p_idempotency_key,p_request_sha256,
+    encode(public.digest(convert_to(response::text,'UTF8'),'sha256'),'hex'),'bid_template_contract',
+    jsonb_build_object('slot',p_slot,'version',p_version),1,p_content_sha256);
+  PERFORM kb_bid_idempotency_complete(p_actor,'bid.template_contract.register',p_idempotency_key,201,convert_to(response::text,'UTF8'));
+  RETURN response;
+END
+$$;
+
+CREATE FUNCTION kb_bid_promote_template_contract(
+ p_slot text,p_target_version text,p_expected_current_version text,p_expected_promotion_generation bigint,
+ p_actor kb_actor_identity,p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE gate_value application_maintenance_gate%ROWTYPE; current_value bid_template_contract_current%ROWTYPE;
+ replay bytea; project_value record; affected bigint:=0; project_affected bigint; target_generation bigint; response jsonb;
+BEGIN
+  SELECT * INTO STRICT gate_value FROM application_maintenance_gate WHERE singleton_key FOR UPDATE;
+  IF gate_value.mode<>'maintenance' THEN RAISE EXCEPTION 'MAINTENANCE_REQUIRED' USING ERRCODE='55000'; END IF;
+  SELECT * INTO STRICT current_value FROM bid_template_contract_current WHERE slot=p_slot FOR UPDATE;
+  replay:=kb_bid_idempotency_begin(p_actor,'bid.template_contract.promote',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  IF current_value.version<>p_expected_current_version
+     OR current_value.promotion_generation<>p_expected_promotion_generation THEN
+    RAISE EXCEPTION 'TEMPLATE_CONTRACT_PROMOTION_CAS_MISMATCH' USING ERRCODE='40001'; END IF;
+  PERFORM 1 FROM bid_template_contract_artifacts WHERE slot=p_slot AND version=p_target_version FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'TEMPLATE_CONTRACT_TARGET_MISSING' USING ERRCODE='23503'; END IF;
+  target_generation:=current_value.promotion_generation+1;
+  FOR project_value IN SELECT id FROM bid_projects WHERE status='open' ORDER BY id FOR UPDATE LOOP
+    UPDATE bid_current_parts current_part SET stale=true,
+      stale_reason_codes=(SELECT ARRAY(SELECT DISTINCT reason FROM unnest(
+        current_part.stale_reason_codes||ARRAY['TEMPLATE_CONTRACT_PROMOTED']) reason ORDER BY reason))
+      FROM bid_part_dependency_artifacts dependency
+     WHERE current_part.project_id=project_value.id
+       AND dependency.id=current_part.dependency_artifact_id
+       AND dependency.template_slot=p_slot AND dependency.template_version=p_expected_current_version;
+    GET DIAGNOSTICS project_affected=ROW_COUNT;
+    affected:=affected+project_affected;
+  END LOOP;
+  UPDATE bid_template_contract_current SET version=p_target_version,promotion_generation=target_generation
+   WHERE slot=p_slot AND version=p_expected_current_version
+     AND promotion_generation=p_expected_promotion_generation;
+  IF NOT FOUND THEN RAISE EXCEPTION 'TEMPLATE_CONTRACT_PROMOTION_CAS_MISMATCH' USING ERRCODE='40001'; END IF;
+  response:=jsonb_build_object('slot',p_slot,'version',p_target_version,
+    'promotion_generation',target_generation,'stale_part_count',affected);
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
+    entity_kind,entity_locator,before_revision,before_sha256,after_revision,after_sha256)
+  SELECT gen_random_uuid(),1,'bid.template_contract.promote',p_actor,p_idempotency_key,p_request_sha256,
+    encode(public.digest(convert_to(response::text,'UTF8'),'sha256'),'hex'),'bid_template_contract_current',
+    jsonb_build_object('slot',p_slot),p_expected_promotion_generation,old_artifact.content_sha256,
+    target_generation,new_artifact.content_sha256
+  FROM bid_template_contract_artifacts old_artifact,bid_template_contract_artifacts new_artifact
+  WHERE old_artifact.slot=p_slot AND old_artifact.version=p_expected_current_version
+    AND new_artifact.slot=p_slot AND new_artifact.version=p_target_version;
+  PERFORM kb_bid_idempotency_complete(p_actor,'bid.template_contract.promote',p_idempotency_key,200,convert_to(response::text,'UTF8'));
+  RETURN response;
 END
 $$;
 
@@ -4297,12 +4651,26 @@ LANGUAGE plpgsql
 IMMUTABLE
 SET search_path = pg_catalog
 AS $$
-DECLARE bytes bytea := convert_to(p_text,'UTF8'); pos int := 0; last int := 0; ch text; ch_len int; start_i int; end_i int; trimmed record; emitted int := 0;
+DECLARE bytes bytea := convert_to(p_text,'UTF8'); pos int := 0; last int := 0; ch text; ch_len int;
+ trimmed record; emitted int := 0; previous_ch text:=NULL; remaining text; numbered_boundary boolean;
 BEGIN
   IF p_text IS NULL OR p_text = '' THEN RETURN; END IF;
   WHILE pos < octet_length(bytes) LOOP
     ch := public.kb_bid_utf8_char_at(bytes, pos);
     ch_len := public.kb_bid_utf8_char_len(bytes, pos);
+    remaining:=convert_from(substring(bytes from pos+1),'UTF8');
+    numbered_boundary:=pos>last AND previous_ch IS NOT NULL AND previous_ch~'[[:space:]]'
+      AND remaining~'^([0-9]{1,3}([.][[:space:]]+|[)、][[:space:]]*)|（[0-9一二三四五六七八九十]{1,4}）[[:space:]]*|[一二三四五六七八九十]{1,4}、[[:space:]]*)';
+    IF numbered_boundary THEN
+      SELECT * INTO trimmed FROM public.kb_bid_trim_utf8_ws(bytes,last,pos);
+      IF trimmed.o_end>trimmed.o_start THEN
+        emitted:=emitted+1;
+        IF emitted>1024 THEN RAISE EXCEPTION 'PROCEDURAL_SEGMENT_LIMIT' USING ERRCODE='22023'; END IF;
+        RETURN QUERY SELECT trimmed.o_start::bigint,trimmed.o_end::bigint,
+          substring(bytes from trimmed.o_start+1 for trimmed.o_end-trimmed.o_start);
+      END IF;
+      last:=pos;
+    END IF;
     IF ch IN ('。','；','！','？', E'\n') THEN
       SELECT * INTO trimmed FROM public.kb_bid_trim_utf8_ws(bytes, last, pos + ch_len);
       IF trimmed.o_end > trimmed.o_start THEN
@@ -4312,6 +4680,7 @@ BEGIN
       END IF;
       last := pos + ch_len;
     END IF;
+    previous_ch:=ch;
     pos := pos + ch_len;
   END LOOP;
   IF last < octet_length(bytes) THEN
@@ -4336,6 +4705,31 @@ AS $$
     'UTF8'),'sha256'),'hex')
 $$;
 
+CREATE FUNCTION kb_bid_procedural_segments_for_clause(p_clause bid_clauses)
+RETURNS TABLE(start_offset bigint,end_offset bigint,segment_utf8 bytea,stable_key kb_sha256)
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog, public
+AS $$
+DECLARE span_value bid_source_span_artifacts%ROWTYPE; segment record;
+BEGIN
+  IF p_clause.provenance='extracted' THEN
+    SELECT * INTO STRICT span_value FROM bid_source_span_artifacts
+     WHERE id=p_clause.current_source_span_artifact_id AND project_id=p_clause.project_id;
+    IF span_value.quote<>p_clause.text OR span_value.quote_sha256<>encode(public.digest(convert_to(p_clause.text,'UTF8'),'sha256'),'hex') THEN
+      RAISE EXCEPTION 'PROCEDURAL_SOURCE_SPAN_NOT_CURRENT' USING ERRCODE='23514';
+    END IF;
+    RETURN QUERY SELECT 0::bigint,octet_length(convert_to(p_clause.text,'UTF8'))::bigint,
+      convert_to(p_clause.text,'UTF8'),span_value.content_sha256;
+    RETURN;
+  END IF;
+  FOR segment IN SELECT * FROM kb_bid_split_procedural_segments(p_clause.text) LOOP
+    RETURN QUERY SELECT segment.start_offset,segment.end_offset,segment.segment_utf8,
+      kb_bid_stable_segment_key(p_clause.id,segment.start_offset,segment.end_offset,segment.segment_utf8);
+  END LOOP;
+END
+$$;
+
 CREATE FUNCTION kb_bid_sync_procedural_clause(
   p_project_id uuid, p_clause bid_clauses, p_terminal text, p_actor kb_actor_identity
 )
@@ -4344,8 +4738,10 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, public
 AS $$
 DECLARE seg record; routed jsonb; class_id uuid; existing bid_procedural_classification_artifacts%ROWTYPE;
+ current_router procedural_router_current%ROWTYPE;
  keep text[] := '{}'; now_ts timestamptz := clock_timestamp();
 BEGIN
+  SELECT * INTO STRICT current_router FROM procedural_router_current WHERE singleton_key FOR SHARE;
   IF p_clause.kind<>'procedural' OR p_clause.status<>'confirmed' OR p_terminal IS NOT NULL THEN
     UPDATE bid_procedural_classification_artifacts SET lifecycle_status='superseded',
       terminal_reason=COALESCE(p_terminal,'clause_unconfirmed'), terminal_at=now_ts, terminal_actor=p_actor
@@ -4358,28 +4754,30 @@ BEGIN
          WHERE segment_id IN (SELECT id FROM bid_procedural_segment_artifacts WHERE clause_id=p_clause.id));
     RETURN;
   END IF;
-  FOR seg IN SELECT * FROM kb_bid_split_procedural_segments(p_clause.text) LOOP
-    keep := keep || kb_bid_stable_segment_key(p_clause.id, seg.start_offset, seg.end_offset, seg.segment_utf8);
+  FOR seg IN SELECT * FROM kb_bid_procedural_segments_for_clause(p_clause) LOOP
+    keep := keep || seg.stable_key;
     INSERT INTO bid_procedural_segment_artifacts(id,project_id,clause_id,stable_key,segmentation_version,start_offset,end_offset,
       segment_utf8,segment_sha256,provenance)
     VALUES(gen_random_uuid(),p_project_id,p_clause.id,
-      kb_bid_stable_segment_key(p_clause.id,seg.start_offset,seg.end_offset,seg.segment_utf8),
+      seg.stable_key,
       'procedural-segment-v1',seg.start_offset,seg.end_offset,seg.segment_utf8,
       encode(public.digest(seg.segment_utf8,'sha256'),'hex'), p_clause.provenance)
     ON CONFLICT (project_id, stable_key) DO NOTHING;
     SELECT * INTO existing FROM bid_procedural_classification_artifacts
      WHERE segment_id=(SELECT id FROM bid_procedural_segment_artifacts
-        WHERE project_id=p_project_id AND stable_key=kb_bid_stable_segment_key(p_clause.id,seg.start_offset,seg.end_offset,seg.segment_utf8))
+        WHERE project_id=p_project_id AND stable_key=seg.stable_key)
        AND lifecycle_status='current';
     IF existing.id IS NULL THEN
-      routed := kb_bid_route_procedural(convert_from(seg.segment_utf8,'UTF8'));
+      routed := kb_bid_route_procedural(convert_from(seg.segment_utf8,'UTF8'),current_router.version);
       class_id := gen_random_uuid();
-      INSERT INTO bid_procedural_classification_artifacts(id,project_id,segment_id,revision,router_result_status,
+      INSERT INTO bid_procedural_classification_artifacts(id,project_id,segment_id,revision,
+        router_contract_version,router_promotion_generation,router_result_status,
         router_requirement_kind,review_reason,effective_requirement_kind,lifecycle_status)
       VALUES(class_id,p_project_id,
         (SELECT id FROM bid_procedural_segment_artifacts WHERE project_id=p_project_id
-          AND stable_key=kb_bid_stable_segment_key(p_clause.id,seg.start_offset,seg.end_offset,seg.segment_utf8)),
-        1, routed->>'status', routed->>'kind', routed->>'reason',
+          AND stable_key=seg.stable_key),
+        1,current_router.version,current_router.promotion_generation,
+        routed->>'status', routed->>'kind', routed->>'reason',
         routed->>'kind', 'current');
     END IF;
   END LOOP;
@@ -4416,9 +4814,9 @@ BEGIN
       ||COALESCE(string_agg(stable_key, E'\n' ORDER BY stable_key),''),'UTF8'),'sha256'),'hex')
     INTO digest
     FROM (
-      SELECT kb_bid_stable_segment_key(clause.id,segment.start_offset,segment.end_offset,segment.segment_utf8) AS stable_key
+      SELECT segment.stable_key
         FROM bid_clauses clause
-        CROSS JOIN LATERAL kb_bid_split_procedural_segments(clause.text) segment
+        CROSS JOIN LATERAL kb_bid_procedural_segments_for_clause(clause) segment
        WHERE clause.project_id=p_project_id AND clause.status='confirmed' AND clause.kind='procedural'
     ) current_segments;
   INSERT INTO bid_procedural_segment_sets(project_id,revision,content_sha256,updated_at)
@@ -4566,10 +4964,12 @@ BEGIN
   END IF;
   UPDATE bid_procedural_classification_artifacts SET lifecycle_status='superseded', successor_id=new_id
    WHERE id=current_row.id;
-  INSERT INTO bid_procedural_classification_artifacts(id,project_id,segment_id,revision,router_result_status,
+  INSERT INTO bid_procedural_classification_artifacts(id,project_id,segment_id,revision,
+    router_contract_version,router_promotion_generation,router_result_status,
     router_requirement_kind,review_reason,effective_requirement_kind,override_from,override_to,override_actor,
     override_reason,override_at,lifecycle_status)
-  VALUES(new_id,p_project_id,current_row.segment_id,current_row.revision+1,current_row.router_result_status,
+  VALUES(new_id,p_project_id,current_row.segment_id,current_row.revision+1,
+    current_row.router_contract_version,current_row.router_promotion_generation,current_row.router_result_status,
     current_row.router_requirement_kind,current_row.review_reason,p_effective_kind,
     current_row.effective_requirement_kind,p_effective_kind,p_actor,btrim(p_reason),clock_timestamp(),'current');
   UPDATE bid_procedural_decision_artifacts SET lifecycle_status='superseded',
@@ -4650,6 +5050,7 @@ $$;
 CREATE FUNCTION kb_bid_upload_attachment(
   p_staging_id uuid, p_id uuid, p_project_id uuid, p_kind text, p_object_ref kb_object_ref, p_digest kb_sha256,
   p_media_type text, p_byte_length bigint, p_pixel_width integer, p_pixel_height integer,
+  p_render_pages jsonb,
   p_actor kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 kb_sha256
 )
 RETURNS jsonb
@@ -4658,12 +5059,20 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
 DECLARE replay bytea; project_value bid_projects%ROWTYPE; response jsonb; validation_payload jsonb;
- validation_digest kb_sha256;
+ validation_digest kb_sha256; page jsonb; expected_page integer := 0; render_page_bytes bigint := 0;
 BEGIN
   PERFORM kb_bid_require_human_actor(p_actor);
   replay := kb_bid_idempotency_begin(p_actor,'bid.attachment.upload',p_idempotency_key,p_request_bytes,p_request_sha256);
   IF replay IS NOT NULL THEN
     PERFORM kb_object_upload_abandon(p_staging_id,p_actor);
+    IF jsonb_typeof(p_render_pages)='array' THEN
+      FOR page IN SELECT value FROM jsonb_array_elements(p_render_pages) LOOP
+        BEGIN
+          PERFORM kb_object_upload_abandon((page->>'staging_id')::uuid,p_actor);
+        EXCEPTION WHEN OTHERS THEN NULL;
+        END;
+      END LOOP;
+    END IF;
     RETURN convert_from(replay,'UTF8')::jsonb;
   END IF;
   SELECT * INTO STRICT project_value FROM bid_projects WHERE id=p_project_id FOR UPDATE;
@@ -4677,6 +5086,29 @@ BEGIN
      OR (p_pixel_width IS NOT NULL AND (p_pixel_width NOT BETWEEN 1 AND 20000 OR p_pixel_height NOT BETWEEN 1 AND 20000)) THEN
     RAISE EXCEPTION 'ATTACHMENT_VALIDATION_INVALID' USING ERRCODE='22023';
   END IF;
+  IF jsonb_typeof(p_render_pages)<>'array'
+     OR (p_media_type='application/pdf' AND jsonb_array_length(p_render_pages) NOT BETWEEN 1 AND 512)
+     OR (p_media_type<>'application/pdf' AND jsonb_array_length(p_render_pages)<>0) THEN
+    RAISE EXCEPTION 'ATTACHMENT_RENDER_PAGE_SET_INVALID' USING ERRCODE='22023';
+  END IF;
+  FOR page IN SELECT value FROM jsonb_array_elements(p_render_pages) LOOP
+    IF (SELECT array_agg(key ORDER BY key) FROM jsonb_object_keys(page) key)
+         IS DISTINCT FROM ARRAY['byte_length','digest','media_type','object_ref','page_ordinal',
+           'pixel_height','pixel_width','staging_id']::text[]
+       OR (page->>'page_ordinal')::integer<>expected_page
+       OR page->>'object_ref'<>'objects/'||(page->>'digest')
+       OR page->>'media_type' NOT IN ('image/png','image/jpeg','image/webp')
+       OR (page->>'byte_length')::bigint NOT BETWEEN 1 AND 20971520
+       OR (page->>'pixel_width')::integer NOT BETWEEN 1 AND 20000
+       OR (page->>'pixel_height')::integer NOT BETWEEN 1 AND 20000 THEN
+      RAISE EXCEPTION 'ATTACHMENT_RENDER_PAGE_SET_INVALID' USING ERRCODE='22023';
+    END IF;
+    render_page_bytes := render_page_bytes + (page->>'byte_length')::bigint;
+    expected_page := expected_page + 1;
+  END LOOP;
+  IF render_page_bytes>268435456 THEN
+    RAISE EXCEPTION 'ATTACHMENT_RENDER_PAGE_QUOTA_EXCEEDED' USING ERRCODE='22023';
+  END IF;
   validation_payload := jsonb_build_object('schema_version',1,'object_ref',p_object_ref,
     'digest',p_digest,'media_type',p_media_type,'byte_length',p_byte_length,
     'pixel_width',p_pixel_width,'pixel_height',p_pixel_height);
@@ -4687,8 +5119,19 @@ BEGIN
     pixel_width,pixel_height,validation_sha256,validation_status,status,revision,created_by)
   VALUES(p_id,p_project_id,p_kind,p_object_ref,p_digest,p_media_type,p_byte_length,p_pixel_width,p_pixel_height,
     validation_digest,'pending','draft',1,p_actor);
+  FOR page IN SELECT value FROM jsonb_array_elements(p_render_pages) ORDER BY (value->>'page_ordinal')::integer LOOP
+    PERFORM kb_object_upload_commit((page->>'staging_id')::uuid,page->>'object_ref',page->>'digest',
+      page->>'media_type',(page->>'byte_length')::bigint,'bid_attachment_page',p_id,
+      page->>'page_ordinal',p_actor);
+    INSERT INTO bid_attachment_render_pages(attachment_id,project_id,page_ordinal,object_ref,content_sha256,
+      media_type,byte_length,pixel_width,pixel_height)
+    VALUES(p_id,p_project_id,(page->>'page_ordinal')::integer,page->>'object_ref',page->>'digest',
+      page->>'media_type',(page->>'byte_length')::bigint,(page->>'pixel_width')::integer,
+      (page->>'pixel_height')::integer);
+  END LOOP;
   PERFORM kb_bid_stale_parts(p_project_id, ARRAY['5','6:authorization','6:procedural'], 'ATTACHMENT_CHANGED');
-  response := jsonb_build_object('id',p_id,'kind',p_kind,'validation_status','pending','status','draft','revision',1);
+  response := jsonb_build_object('id',p_id,'kind',p_kind,'validation_status','pending','status','draft',
+    'revision',1,'render_page_count',expected_page);
   INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
     entity_kind,entity_locator,after_revision,after_sha256)
   VALUES(gen_random_uuid(),1,'bid.attachment.upload',p_actor,p_idempotency_key,p_request_sha256,
@@ -4730,6 +5173,21 @@ BEGIN
          'pixel_width',attach.pixel_width,'pixel_height',attach.pixel_height)::text,'UTF8'),'sha256'),'hex') THEN
       RAISE EXCEPTION 'ATTACHMENT_VALIDATION_IDENTITY_MISMATCH' USING ERRCODE='23514';
     END IF;
+    IF (attach.media_type='application/pdf' AND (
+          NOT EXISTS (SELECT 1 FROM bid_attachment_render_pages page WHERE page.attachment_id=attach.id)
+          OR EXISTS (
+            SELECT 1 FROM bid_attachment_render_pages page
+            LEFT JOIN available_object_registry registry ON registry.object_ref=page.object_ref
+             WHERE page.attachment_id=attach.id AND (
+               registry.object_ref IS NULL OR registry.digest<>page.content_sha256
+               OR registry.media_type<>page.media_type OR registry.byte_length<>page.byte_length
+               OR NOT EXISTS (SELECT 1 FROM object_owner_references owner_ref
+                 WHERE owner_ref.object_ref=page.object_ref AND owner_ref.owner_kind='bid_attachment_page'
+                   AND owner_ref.owner_id=attach.id AND owner_ref.occurrence=page.page_ordinal::text))))
+       OR (attach.media_type<>'application/pdf'
+           AND EXISTS (SELECT 1 FROM bid_attachment_render_pages page WHERE page.attachment_id=attach.id))) THEN
+      RAISE EXCEPTION 'ATTACHMENT_RENDER_PAGE_IDENTITY_MISMATCH' USING ERRCODE='23514';
+    END IF;
     UPDATE bid_procedural_attachments SET validation_status='valid', revision=revision+1, updated_at=clock_timestamp()
      WHERE id=p_attachment_id RETURNING * INTO attach;
   ELSIF p_action='invalidate' THEN
@@ -4744,6 +5202,8 @@ BEGIN
      WHERE id=p_attachment_id RETURNING * INTO attach;
   ELSIF p_action='delete' THEN
     PERFORM kb_object_reference_remove(attach.object_ref,'bid_attachment',attach.id,'original');
+    PERFORM kb_object_reference_remove(page.object_ref,'bid_attachment_page',attach.id,page.page_ordinal::text)
+      FROM bid_attachment_render_pages page WHERE page.attachment_id=attach.id;
     UPDATE bid_procedural_attachments SET status='superseded', revision=revision+1, updated_at=clock_timestamp()
      WHERE id=p_attachment_id RETURNING * INTO attach;
   ELSE
@@ -5160,7 +5620,12 @@ BEGIN
         'object_ref',attachment.object_ref,'validation_status',attachment.validation_status,
         'status',attachment.status,'digest',attachment.content_sha256,'media_type',attachment.media_type,
         'byte_length',attachment.byte_length,'pixel_width',attachment.pixel_width,
-        'pixel_height',attachment.pixel_height,'validation_sha256',attachment.validation_sha256)
+        'pixel_height',attachment.pixel_height,'validation_sha256',attachment.validation_sha256,
+        'render_pages',COALESCE((SELECT jsonb_agg(jsonb_build_object(
+          'page_ordinal',page.page_ordinal,'object_ref',page.object_ref,'digest',page.content_sha256,
+          'media_type',page.media_type,'byte_length',page.byte_length,
+          'pixel_width',page.pixel_width,'pixel_height',page.pixel_height) ORDER BY page.page_ordinal)
+          FROM bid_attachment_render_pages page WHERE page.attachment_id=attachment.id),'[]'::jsonb))
         ORDER BY attachment.id),'[]'::jsonb)::text,'UTF8'),'sha256'),'hex')))
       INTO identities
       FROM bid_procedural_attachments attachment
@@ -5197,6 +5662,8 @@ DECLARE replay bytea; project_value bid_projects%ROWTYPE; template_slot text; te
  typed_identities jsonb; generated_markdown bytea; now_ts timestamptz := clock_timestamp();
 BEGIN
   PERFORM kb_bid_require_human_actor(p_actor);
+  PERFORM 1 FROM application_maintenance_gate WHERE singleton_key AND mode='open' FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'MAINTENANCE_PART_REGENERATION_BLOCKED' USING ERRCODE='55000'; END IF;
   replay := kb_bid_idempotency_begin(p_actor,'bid.part.regenerate',p_idempotency_key,p_request_bytes,p_request_sha256);
   IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
   SELECT * INTO STRICT project_value FROM bid_projects WHERE id=p_project_id FOR UPDATE;
@@ -5377,11 +5844,10 @@ BEGIN
            attachment.revision AS attachment_revision,attachment.content_sha256 AS attachment_sha256,
            attachment.validation_sha256,attachment.validation_status,attachment.status AS attachment_status
       FROM (
-        SELECT clause.id AS clause_id,
-               kb_bid_stable_segment_key(clause.id,segment.start_offset,segment.end_offset,segment.segment_utf8) AS stable_key,
+        SELECT clause.id AS clause_id,segment.stable_key,
                segment.start_offset
           FROM bid_clauses clause
-          CROSS JOIN LATERAL kb_bid_split_procedural_segments(clause.text) segment
+          CROSS JOIN LATERAL kb_bid_procedural_segments_for_clause(clause) segment
          WHERE clause.project_id=p_project_id AND clause.status='confirmed' AND clause.kind='procedural'
       ) expected
       LEFT JOIN bid_procedural_segment_artifacts artifact
@@ -5562,6 +6028,7 @@ BEGIN
     SELECT part.key AS part_key,part.part_ordinal,
            CASE WHEN part.key='3' THEN 1 ELSE 0 END AS source_rank,
            occurrence.ordinality-1 AS occurrence_ordinal,
+           occurrence.ordinality-1 AS render_order,
            'markdown_object'::text AS source_kind,
            jsonb_build_object('part_key',part.key,'occurrence',occurrence.ordinality-1) AS source_locator,
            'objects/'||occurrence.matches[1] AS object_ref,
@@ -5588,7 +6055,8 @@ BEGIN
       ) source_image ON true
   ), shot_occurrence AS (
     SELECT required_part.key AS part_key,required_part.part_ordinal,0 AS source_rank,
-           placement.ordinal AS occurrence_ordinal,'bid_shot'::text AS source_kind,
+           placement.ordinal AS occurrence_ordinal,placement.ordinal AS render_order,
+           'bid_shot'::text AS source_kind,
            jsonb_build_object('placement_ordinal',placement.ordinal,'shot_artifact_id',shot.id) AS source_locator,
            shot.object_ref,registry.digest,registry.media_type,registry.byte_length,
            shot.pixel_width,shot.pixel_height,
@@ -5605,10 +6073,70 @@ BEGIN
         ON shot.project_id=placement.project_id AND shot.id=placement.shot_artifact_id
       LEFT JOIN available_object_registry registry ON registry.object_ref=shot.object_ref
      WHERE required_part.key='3'
+  ), selected_attachment AS (
+    SELECT DISTINCT attachment.id,attachment.kind,attachment.object_ref,attachment.content_sha256,
+           attachment.media_type,attachment.byte_length,attachment.pixel_width,attachment.pixel_height,
+           CASE WHEN attachment.kind='authorization_support'
+                THEN '6:authorization' ELSE '6:procedural' END AS part_key
+      FROM bid_procedural_decision_artifacts decision
+      JOIN bid_procedural_classification_artifacts classification
+        ON classification.id=decision.classification_id AND classification.lifecycle_status='current'
+      JOIN bid_procedural_segment_artifacts segment
+        ON segment.id=classification.segment_id
+      JOIN bid_procedural_attachments attachment ON attachment.id=decision.attachment_id
+     WHERE segment.project_id=p_project_id AND decision.lifecycle_status='current'
+       AND decision.resolution='satisfied_by_attachment'
+       AND attachment.project_id=p_project_id AND attachment.status='confirmed'
+       AND attachment.validation_status='valid'
+       AND attachment.kind=classification.effective_requirement_kind
+  ), attachment_rank AS (
+    SELECT selected_attachment.*,
+           row_number() OVER (ORDER BY part_key,kind,id)-1 AS attachment_ordinal
+      FROM selected_attachment
+  ), attachment_original AS (
+    SELECT required_part.key AS part_key,required_part.part_ordinal,2 AS source_rank,
+           attachment.attachment_ordinal AS occurrence_ordinal,
+           attachment.attachment_ordinal*513 AS render_order,
+           'procedural_attachment'::text AS source_kind,
+           jsonb_build_object('part_key',attachment.part_key,
+             'attachment_ordinal',attachment.attachment_ordinal,
+             'attachment_id',attachment.id,'kind',attachment.kind) AS source_locator,
+           attachment.object_ref,registry.digest,registry.media_type,registry.byte_length,
+           attachment.pixel_width,attachment.pixel_height,
+           registry.object_ref IS NOT NULL AND registry.digest=attachment.content_sha256
+             AND registry.media_type=attachment.media_type AND registry.byte_length=attachment.byte_length
+             AND EXISTS (SELECT 1 FROM object_owner_references owner_ref
+               WHERE owner_ref.object_ref=attachment.object_ref AND owner_ref.owner_kind='bid_attachment'
+                 AND owner_ref.owner_id=attachment.id AND owner_ref.occurrence='original') AS valid
+      FROM required_part
+      JOIN attachment_rank attachment ON attachment.part_key=required_part.key
+      LEFT JOIN available_object_registry registry ON registry.object_ref=attachment.object_ref
+  ), attachment_page AS (
+    SELECT required_part.key AS part_key,required_part.part_ordinal,2 AS source_rank,
+           page.page_ordinal AS occurrence_ordinal,
+           attachment.attachment_ordinal*513+page.page_ordinal+1 AS render_order,
+           'procedural_attachment_page'::text AS source_kind,
+           jsonb_build_object('part_key',attachment.part_key,
+             'attachment_ordinal',attachment.attachment_ordinal,
+             'attachment_id',attachment.id,'page_ordinal',page.page_ordinal) AS source_locator,
+           page.object_ref,registry.digest,registry.media_type,registry.byte_length,
+           page.pixel_width,page.pixel_height,
+           registry.object_ref IS NOT NULL AND registry.digest=page.content_sha256
+             AND registry.media_type=page.media_type AND registry.byte_length=page.byte_length
+             AND EXISTS (SELECT 1 FROM object_owner_references owner_ref
+               WHERE owner_ref.object_ref=page.object_ref AND owner_ref.owner_kind='bid_attachment_page'
+                 AND owner_ref.owner_id=attachment.id AND owner_ref.occurrence=page.page_ordinal::text) AS valid
+      FROM required_part
+      JOIN attachment_rank attachment ON attachment.part_key=required_part.key
+      JOIN bid_attachment_render_pages page ON page.attachment_id=attachment.id
+      LEFT JOIN available_object_registry registry ON registry.object_ref=page.object_ref
   ), combined AS (
-    SELECT * FROM markdown_occurrence UNION ALL SELECT * FROM shot_occurrence
+    SELECT * FROM markdown_occurrence
+    UNION ALL SELECT * FROM shot_occurrence
+    UNION ALL SELECT * FROM attachment_original
+    UNION ALL SELECT * FROM attachment_page
   ), ordered AS (
-    SELECT row_number() OVER (ORDER BY part_ordinal,source_rank,occurrence_ordinal,source_kind)-1 AS manifest_ordinal,
+    SELECT row_number() OVER (ORDER BY part_ordinal,source_rank,render_order,source_kind)-1 AS manifest_ordinal,
            combined.* FROM combined
   )
   SELECT COALESCE(jsonb_agg(jsonb_build_object(
@@ -5654,6 +6182,8 @@ DECLARE replay bytea; project_value bid_projects%ROWTYPE; gate jsonb; keys text[
  now_ts timestamptz := clock_timestamp();
 BEGIN
   PERFORM kb_bid_require_human_actor(p_actor);
+  PERFORM 1 FROM application_maintenance_gate WHERE singleton_key AND mode='open' FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'MAINTENANCE_SUBMISSION_BLOCKED' USING ERRCODE='55000'; END IF;
   IF p_format='pdf' THEN PERFORM kb_bid_require_user_actor(p_actor); END IF;
   replay := kb_bid_idempotency_begin(p_actor,'bid.submission.create_manifest',p_idempotency_key,p_request_bytes,p_request_sha256);
   IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
@@ -5867,6 +6397,8 @@ DECLARE replay bytea; manifest bid_submission_manifests%ROWTYPE;
  job bid_submission_render_jobs%ROWTYPE; response jsonb; now_ts timestamptz := clock_timestamp();
 BEGIN
   PERFORM kb_bid_require_human_actor(p_actor);
+  PERFORM 1 FROM application_maintenance_gate WHERE singleton_key AND mode='open' FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'MAINTENANCE_SUBMISSION_BLOCKED' USING ERRCODE='55000'; END IF;
   replay := kb_bid_idempotency_begin(p_actor,'bid.submission.schedule_render',p_idempotency_key,p_request_bytes,p_request_sha256);
   IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
   SELECT * INTO manifest FROM bid_submission_manifests
@@ -5956,7 +6488,8 @@ AS $$
 DECLARE updated integer;
 BEGIN
   UPDATE bid_submission_render_jobs SET heartbeat_at=clock_timestamp()
-   WHERE id=p_render_job_id AND status='running' AND claim_token=p_claim_token;
+   WHERE id=p_render_job_id AND status='running' AND claim_token=p_claim_token
+     AND heartbeat_at+make_interval(secs=>claim_lease_ms::double precision/1000.0)>clock_timestamp();
   GET DIAGNOSTICS updated = ROW_COUNT;
   RETURN updated=1;
 END
@@ -5973,7 +6506,9 @@ AS $$
 DECLARE job bid_submission_render_jobs%ROWTYPE; next_status text;
 BEGIN
   SELECT * INTO job FROM bid_submission_render_jobs
-   WHERE id=p_render_job_id AND status='running' AND claim_token=p_claim_token FOR UPDATE;
+   WHERE id=p_render_job_id AND status='running' AND claim_token=p_claim_token
+     AND heartbeat_at+make_interval(secs=>claim_lease_ms::double precision/1000.0)>clock_timestamp()
+   FOR UPDATE;
   IF job.id IS NULL THEN RETURN NULL; END IF;
   next_status := CASE WHEN p_retryable AND job.attempt_count<job.max_attempts THEN 'pending' ELSE 'failed' END;
   UPDATE bid_submission_render_jobs
@@ -6031,7 +6566,9 @@ DECLARE replay bytea; job bid_submission_render_jobs%ROWTYPE; manifest bid_submi
  request_payload jsonb; request_bytes bytea; request_sha256 kb_sha256;
 BEGIN
   SELECT * INTO job FROM bid_submission_render_jobs
-   WHERE id=p_render_job_id AND status='running' AND claim_token=p_claim_token FOR UPDATE;
+   WHERE id=p_render_job_id AND status='running' AND claim_token=p_claim_token
+     AND heartbeat_at+make_interval(secs=>claim_lease_ms::double precision/1000.0)>clock_timestamp()
+   FOR UPDATE;
   IF job.id IS NULL THEN RAISE EXCEPTION 'SUBMISSION_RENDER_CLAIM_LOST' USING ERRCODE='40001'; END IF;
   PERFORM kb_bid_require_human_actor(job.requested_by);
   request_payload := jsonb_build_object('render_job_id',job.id,'expected_manifest_sha256',job.expected_manifest_sha256);
@@ -6130,13 +6667,24 @@ SET search_path = pg_catalog, public
 AS $$
 BEGIN
   RETURN QUERY
+    WITH expired AS (
+      SELECT t.id,a.attempt,a.claim_token
+        FROM bid_extraction_targets t
+        JOIN bid_extraction_attempts a ON a.target_id=t.id AND a.status='running'
+       WHERE t.state='running'
+         AND a.heartbeat_at+make_interval(secs=>a.claim_lease_ms/1000.0)<=clock_timestamp()
+       ORDER BY t.id,a.attempt
+       FOR UPDATE OF t,a SKIP LOCKED
+    ), reaped AS (
+      UPDATE bid_extraction_attempts a SET status='reaped',error_code='CLAIM_LEASE_EXPIRED'
+       FROM expired e
+       WHERE a.target_id=e.id AND a.attempt=e.attempt AND a.claim_token=e.claim_token
+         AND a.status='running'
+       RETURNING a.target_id
+    )
     UPDATE bid_extraction_targets t SET state='pending'
-     WHERE t.state='running'
-       AND EXISTS (
-         SELECT 1 FROM bid_extraction_attempts a
-          WHERE a.target_id=t.id AND a.status='running'
-            AND a.heartbeat_at + make_interval(secs => a.claim_lease_ms/1000.0) < clock_timestamp())
-    RETURNING t.id, t.project_id, t.document_id;
+      FROM reaped r WHERE t.id=r.target_id AND t.state='running'
+    RETURNING t.id,t.project_id,t.document_id;
 END
 $$;
 
@@ -6358,6 +6906,24 @@ BEGIN
       body := '# 报价表'||E'\n\n【固定占位】当前没有合格的 QuoteSnapshotV1。过程稿可继续编辑；正式 PDF 必须先定稿报价。'||E'\n';
     ELSE
       body := '# 报价表'||E'\n\n引用快照 '||quote.id::text||' / '||quote.content_sha256||E'\n'
+        ||E'\n| 序号 | 说明 | 计价方式 | 数量 | 单位 | 单价/总价 | 税率 | 未税金额 | 税额 | 含税金额 |\n'
+        ||E'| ---: | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |\n';
+      FOR rec IN
+        SELECT value AS line FROM jsonb_array_elements(convert_from(quote.canonical_payload,'UTF8')::jsonb->'lines')
+         ORDER BY (value->>'ordinal')::integer
+      LOOP
+        body := body||'| '||((rec.line->>'ordinal')::integer+1)::text
+          ||' | '||replace(replace(COALESCE(rec.line->>'description',''),E'\n',' '),'|',E'\\|')
+          ||' | '||(rec.line->>'pricing_mode')
+          ||' | '||COALESCE(rec.line->>'quantity','')
+          ||' | '||replace(COALESCE(rec.line->>'unit',''),'|',E'\\|')
+          ||' | '||COALESCE(rec.line->>'unit_price',rec.line->>'entered_amount','')
+          ||' | '||COALESCE(rec.line->>'tax_rate','')
+          ||' | '||COALESCE(rec.line->>'net_amount','')
+          ||' | '||COALESCE(rec.line->>'tax_amount','')
+          ||' | '||COALESCE(rec.line->>'gross_amount','')||E' |\n';
+      END LOOP;
+      body := body||E'\n'
         ||'- 未税合计：'||kb_bid_format_amount(quote.net_total)||E'\n'
         ||'- 税额合计：'||kb_bid_format_amount(quote.tax_total)||E'\n'
         ||'- 含税合计：'||kb_bid_format_amount(quote.gross_total)||E'\n';
@@ -7055,6 +7621,7 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
 GRANT SELECT ON bidding_projects,bidding_documents,bidding_current_section_publication_state,
  bidding_current_clauses,bidding_clause_history,bidding_current_fact_suggestions,
  bidding_fact_suggestion_history,bidding_clause_set_identities,bidding_kind_router_current,
+ bidding_procedural_router_current,bidding_template_contract_current,
  bidding_current_matching_reports,bidding_matching_report_history,bidding_current_technical_candidates,
  bidding_current_commercial_decisions,bidding_current_route_pick_sets,bidding_current_project_pick_sets,
  bidding_current_quote_snapshots,bidding_current_part_status,bidding_current_routes,bidding_quote_drafts,
@@ -7078,6 +7645,10 @@ GRANT EXECUTE ON FUNCTION
  kb_bid_mutate_clause(uuid,uuid,text,jsonb,bigint,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_register_kind_router_contract(text,bytea,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_promote_kind_router(text,text,bigint,kb_actor_identity,text,bytea,kb_sha256),
+ kb_bid_register_procedural_router_contract(text,bytea,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
+ kb_bid_promote_procedural_router(text,text,bigint,kb_actor_identity,text,bytea,kb_sha256),
+ kb_bid_register_template_contract(text,text,bytea,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
+ kb_bid_promote_template_contract(text,text,text,bigint,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_create_quote_draft(uuid,text,text,text,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_patch_quote_header(uuid,bigint,text,text,text,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_upsert_quote_line(uuid,uuid,bigint,integer,text,text,text,text,text,text,text,boolean,kb_actor_identity,text,bytea,kb_sha256),
@@ -7092,7 +7663,7 @@ GRANT EXECUTE ON FUNCTION
  kb_bid_update_submission_profile(uuid,bigint,text,text,text,date,text,boolean,boolean,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_override_procedural_classification(uuid,uuid,text,text,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_resolve_procedural_requirement(uuid,uuid,text,uuid,text,kb_actor_identity,text,bytea,kb_sha256),
- kb_bid_upload_attachment(uuid,uuid,uuid,text,kb_object_ref,kb_sha256,text,bigint,integer,integer,kb_actor_identity,text,bytea,kb_sha256),
+ kb_bid_upload_attachment(uuid,uuid,uuid,text,kb_object_ref,kb_sha256,text,bigint,integer,integer,jsonb,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_mutate_attachment(uuid,uuid,text,integer,text,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_upload_shot_artifact(uuid,uuid,uuid,kb_object_ref,kb_sha256,text,bigint,integer,integer,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_replace_shot_set(uuid,bigint,uuid[],kb_actor_identity,text,bytea,kb_sha256),
@@ -7112,7 +7683,7 @@ GRANT EXECUTE ON FUNCTION
 TO kb_runtime_api;
 GRANT EXECUTE ON FUNCTION
  kb_bid_claim_document_conversion(uuid,uuid,text),kb_bid_heartbeat_document_conversion(uuid,uuid),
- kb_bid_complete_document_conversion(uuid,uuid,uuid,bytea,text,kb_sha256,jsonb,kb_actor_identity),
+ kb_bid_complete_document_conversion(uuid,uuid,uuid,bytea,text,kb_sha256,jsonb,uuid,integer,text,text,kb_actor_identity),
  kb_bid_fail_document_conversion(uuid,uuid,text,boolean),
  kb_bid_schedule_extraction(uuid,uuid,integer,text,text,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_claim_extraction(uuid,uuid,text),kb_bid_heartbeat_extraction(uuid,uuid,integer),

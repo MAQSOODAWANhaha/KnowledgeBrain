@@ -2,6 +2,8 @@
 
 本文定义 `Submission` 深模块。它只消费其它模块已经发布的 identity/artifact，不读取临时 candidate、live quote draft 或知识库 live rows。
 
+> 实施状态（2026-08-24）：RequiredPartSet、manifest、durable render job、worker publish、冻结程序附件、manifest-only DOCX/PDF renderer，以及 `6:quote` 的结构化 DOCX table / PDF grid seam 均已落位，并通过隔离 fresh Compose 的真实 DOCX/PDF、恢复与对象生命周期验收；生产未部署。
+
 ## 1. 输出语义
 
 - DOCX/Word：过程稿，可带 warning、缺失清单和固定 placeholder，可供人工修订。
@@ -97,6 +99,7 @@ mutation 使用 durable actor、expected revision、idempotency；更新 profile
 
 - 未编辑 extracted clause 复用合法 current SourceSpanV2 routed segment key；
 - manual/manual_after_edit 按 `。；！？\n` 和有界编号列表边界切分；
+- 阿拉伯数字句点编号仅在句点后存在空白时形成边界；`10.00`、`100.00`、`1.50` 等金额/小数不得切分，`1. `、`1)`、`1、`、`（一）` 仍是合法编号；
 - offsets 是相对 current clause text 的 UTF-8 byte 半开区间；
 - trim 只移除两端 Unicode whitespace 并同步收缩 offsets；
 - 空 segment 丢弃，最多 1024 段；
@@ -189,6 +192,7 @@ not_applicable
 - `not_applicable` 需要非空 reason 和 durable actor，attachment 必须 NULL；
 - effective kind NULL 时不能创建 resolution；
 - decision 修改插入 higher revision successor；classification superseded 或 segment terminal 时 current decision 同步 terminal。
+- ProceduralRouter promotion 后 effective kind 不变时，decision 迁移为新 classification 下 revision 1 successor；effective kind 改变或附件不再匹配时，旧 decision 以 `router_promoted` terminal 结束，不伪造可继续使用的 resolution。
 
 ## 5. Attachments
 
@@ -249,7 +253,7 @@ BidShot 是某次投标使用的图片 artifact，不回写知识库产品手册
 
 每个 part 有 current editable content revision 与 immutable canonical Markdown artifact。编辑只改变该 part 的 content identity；生成/重生成必须携带 expected dependency/current content CAS，不能覆盖并发人工修改。
 
-Markdown image grammar 固定且只允许 `objects/<64-lowercase-hex>`。manifest 创建时用固定 parser 解析 occurrence，不能在 render 时用临时 regex 重新发现资源。
+Markdown image grammar 固定为 `![alt](objects/<64-lowercase-hex>)`。裸 `objects/<64-lowercase-hex>` 是普通文本，不产生 render occurrence。manifest 创建与 renderer 共用固定 parser，不在 render 时用临时 regex 重新发现资源。
 
 ## 8. PartDependencyV1 与 stale
 
@@ -377,6 +381,14 @@ renderer 只能调用 `read_manifest_render_asset`，禁止查询 live shot/part
 
 HTTP render endpoint 只校验 manifest identity/renderer contract，先幂等创建 durable render job，再 best-effort 写入 `bid-render-v1`，返回 `202 queued` 和稳定 `render_job_id`。Redis 短暂不可用时 job 保持 `pending`，housekeep 必须重入队；客户端通过 project-scoped job API 观察 `pending|running|completed|failed`，不得用“outputs 尚未出现”推断 worker 状态。worker 使用 claim token/lease fencing；可重试失败回到 `pending`，确定性失败或耗尽尝试进入 `failed`，过期 claim 由 housekeep reap。DOCX/PDF 构造、manifest asset bytes 读取、输出 staging write 与最终 publish 全部由 worker 完成。输出 bytes 先取得平台 upload staging reference，`publish_submission_output` 在同一事务中把它转移为 `bid_submission_output` owner并把 render job 置为 `completed`；publish/CAS 或 claim fencing 失败必须 abandon，不能留下无 owner 的物理对象。队列 payload 只携带 `render_job_id`，manifest identity、actor 与幂等键必须从 durable job claim 取得，不能信任可漂移的消息副本。
 
+### 11.3 renderer 输出合同
+
+- Markdown 图片节点从正文文本中完整消费，再按 occurrence locator 恰好渲染一次；裸 object ref 保留为普通文本。
+- DOCX 图片按 `560×870px` 内容框双向等比缩小且不放大；PDF 图片按 A4 `178×265mm` 内容框双向等比缩小，必要时先换页。
+- PDF 正文使用冻结字体的 glyph advance 在 A4 内容宽度内换行，不能按字符数猜测 CJK 行宽。
+- 程序附件按 manifest ordinal 冻结；图片直接渲染，PDF 原件必须附带有序的冻结页面图片，renderer 不在运行时重新转换原件。
+- `6:quote` 输出结构化 DOCX table 与 PDF grid；renderer focused tests 分别检查 DOCX 原生表格节点与 PDF grid 绘制命令，隔离 fresh runtime 的正式报价渲染也已通过。
+
 ## 12. 模板 contract promotion
 
 每个固定 slot 保存 immutable template contract artifact 与 singleton current pointer/generation。promotion 只在 maintenance gate 下：
@@ -415,7 +427,7 @@ promote_procedural_router/template_contract (maintenance only)
 - RequiredPartSet 动态 unit、unsectioned 与缺 part 负例；
 - 普通 unit + unsectioned 混合 ProjectPickSet，`R/S` 精确筛选；
 - implementation plan 只读 ServiceClauseSet+ProjectPickSet+delivery；
-- manual/manual_after_edit 中文 segment offsets 和 golden classifier；
+- manual/manual_after_edit 中文 segment offsets、编号/小数边界和 golden classifier；
 - classification/decision successor XOR terminal、KindRouter promotion terminal/rebuild；
 - attachment kind/validation/current identity；
 - GateIssue exact locator 与 DOCX/PDF 矩阵；

@@ -146,6 +146,7 @@ jobs:
           }
 
           cargo test -p api --test submission_contract -- --nocapture --test-threads=1
+          cargo test -p bid --test tender_publication -- --nocapture --test-threads=1
           cargo test -p bid --test matching_publication -- --nocapture --test-threads=1
 
           audit_before="$(psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc \

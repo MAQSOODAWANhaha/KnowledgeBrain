@@ -208,6 +208,20 @@ owner = "app_owner"
 
 [[relations]]
 schema = "public"
+name = "bid_attachment_render_pages"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_attachment_render_pages_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
 name = "bid_clause_set_identities"
 kind = "table"
 persistence = "permanent"
@@ -2168,6 +2182,13 @@ owner = "app_owner"
 
 [[relations]]
 schema = "public"
+name = "bidding_procedural_router_current"
+kind = "view"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
 name = "bidding_projects"
 kind = "view"
 persistence = "permanent"
@@ -2183,6 +2204,13 @@ owner = "app_owner"
 [[relations]]
 schema = "public"
 name = "bidding_quote_lines"
+kind = "view"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bidding_template_contract_current"
 kind = "view"
 persistence = "permanent"
 owner = "app_owner"
@@ -2554,6 +2582,41 @@ owner = "app_owner"
 [[relations]]
 schema = "public"
 name = "platform_role_contracts_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "procedural_router_contract_artifacts"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "procedural_router_contract_artifacts_content_sha256_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "procedural_router_contract_artifacts_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "procedural_router_current"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "procedural_router_current_pkey"
 kind = "index"
 persistence = "permanent"
 owner = "app_owner"
@@ -3305,6 +3368,127 @@ relation = "available_object_registry"
 ordinal = 5
 name = "registered_at"
 type = "timestamp with time zone"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+ordinal = 1
+name = "attachment_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+ordinal = 2
+name = "project_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+ordinal = 3
+name = "page_ordinal"
+type = "integer"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+ordinal = 4
+name = "object_ref"
+type = "public.kb_object_ref"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+ordinal = 5
+name = "content_sha256"
+type = "public.kb_sha256"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+ordinal = 6
+name = "media_type"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+ordinal = 7
+name = "byte_length"
+type = "bigint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+ordinal = 8
+name = "pixel_width"
+type = "integer"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+ordinal = 9
+name = "pixel_height"
+type = "integer"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_render_pages_pkey"
+ordinal = 1
+name = "attachment_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_render_pages_pkey"
+ordinal = 2
+name = "page_ordinal"
+type = "integer"
 nullable = true
 default = ""
 identity = ""
@@ -6044,7 +6228,7 @@ relation = "bid_manifest_render_assets"
 ordinal = 9
 name = "pixel_width"
 type = "integer"
-nullable = false
+nullable = true
 default = ""
 identity = ""
 generated = ""
@@ -6055,7 +6239,7 @@ relation = "bid_manifest_render_assets"
 ordinal = 10
 name = "pixel_height"
 type = "integer"
-nullable = false
+nullable = true
 default = ""
 identity = ""
 generated = ""
@@ -10717,7 +10901,7 @@ generated = ""
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
 ordinal = 5
-name = "router_result_status"
+name = "router_contract_version"
 type = "text"
 nullable = false
 default = ""
@@ -10728,6 +10912,28 @@ generated = ""
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
 ordinal = 6
+name = "router_promotion_generation"
+type = "bigint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_procedural_classification_artifacts"
+ordinal = 7
+name = "router_result_status"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_procedural_classification_artifacts"
+ordinal = 8
 name = "router_requirement_kind"
 type = "text"
 nullable = true
@@ -10738,7 +10944,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
-ordinal = 7
+ordinal = 9
 name = "review_reason"
 type = "text"
 nullable = true
@@ -10749,7 +10955,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
-ordinal = 8
+ordinal = 10
 name = "effective_requirement_kind"
 type = "text"
 nullable = true
@@ -10760,7 +10966,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
-ordinal = 9
+ordinal = 11
 name = "override_from"
 type = "text"
 nullable = true
@@ -10771,7 +10977,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
-ordinal = 10
+ordinal = 12
 name = "override_to"
 type = "text"
 nullable = true
@@ -10782,7 +10988,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
-ordinal = 11
+ordinal = 13
 name = "override_actor"
 type = "public.kb_actor_identity"
 nullable = true
@@ -10793,7 +10999,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
-ordinal = 12
+ordinal = 14
 name = "override_reason"
 type = "text"
 nullable = true
@@ -10804,7 +11010,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
-ordinal = 13
+ordinal = 15
 name = "override_at"
 type = "timestamp with time zone"
 nullable = true
@@ -10815,7 +11021,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
-ordinal = 14
+ordinal = 16
 name = "lifecycle_status"
 type = "text"
 nullable = false
@@ -10826,7 +11032,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
-ordinal = 15
+ordinal = 17
 name = "successor_id"
 type = "uuid"
 nullable = true
@@ -10837,7 +11043,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
-ordinal = 16
+ordinal = 18
 name = "terminal_reason"
 type = "text"
 nullable = true
@@ -10848,7 +11054,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
-ordinal = 17
+ordinal = 19
 name = "terminal_at"
 type = "timestamp with time zone"
 nullable = true
@@ -10859,7 +11065,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
-ordinal = 18
+ordinal = 20
 name = "terminal_actor"
 type = "public.kb_actor_identity"
 nullable = true
@@ -16745,7 +16951,7 @@ generated = ""
 schema = "public"
 relation = "bidding_current_procedural_classifications"
 ordinal = 5
-name = "router_result_status"
+name = "router_contract_version"
 type = "text"
 nullable = true
 default = ""
@@ -16756,8 +16962,8 @@ generated = ""
 schema = "public"
 relation = "bidding_current_procedural_classifications"
 ordinal = 6
-name = "router_requirement_kind"
-type = "text"
+name = "router_promotion_generation"
+type = "bigint"
 nullable = true
 default = ""
 identity = ""
@@ -16767,7 +16973,7 @@ generated = ""
 schema = "public"
 relation = "bidding_current_procedural_classifications"
 ordinal = 7
-name = "review_reason"
+name = "router_result_status"
 type = "text"
 nullable = true
 default = ""
@@ -16778,7 +16984,7 @@ generated = ""
 schema = "public"
 relation = "bidding_current_procedural_classifications"
 ordinal = 8
-name = "effective_requirement_kind"
+name = "router_requirement_kind"
 type = "text"
 nullable = true
 default = ""
@@ -16789,7 +16995,7 @@ generated = ""
 schema = "public"
 relation = "bidding_current_procedural_classifications"
 ordinal = 9
-name = "override_from"
+name = "review_reason"
 type = "text"
 nullable = true
 default = ""
@@ -16800,7 +17006,7 @@ generated = ""
 schema = "public"
 relation = "bidding_current_procedural_classifications"
 ordinal = 10
-name = "override_to"
+name = "effective_requirement_kind"
 type = "text"
 nullable = true
 default = ""
@@ -16811,8 +17017,8 @@ generated = ""
 schema = "public"
 relation = "bidding_current_procedural_classifications"
 ordinal = 11
-name = "override_actor"
-type = "public.kb_actor_identity"
+name = "override_from"
+type = "text"
 nullable = true
 default = ""
 identity = ""
@@ -16822,7 +17028,7 @@ generated = ""
 schema = "public"
 relation = "bidding_current_procedural_classifications"
 ordinal = 12
-name = "override_reason"
+name = "override_to"
 type = "text"
 nullable = true
 default = ""
@@ -16833,8 +17039,8 @@ generated = ""
 schema = "public"
 relation = "bidding_current_procedural_classifications"
 ordinal = 13
-name = "override_at"
-type = "timestamp with time zone"
+name = "override_actor"
+type = "public.kb_actor_identity"
 nullable = true
 default = ""
 identity = ""
@@ -16844,7 +17050,7 @@ generated = ""
 schema = "public"
 relation = "bidding_current_procedural_classifications"
 ordinal = 14
-name = "lifecycle_status"
+name = "override_reason"
 type = "text"
 nullable = true
 default = ""
@@ -16855,8 +17061,8 @@ generated = ""
 schema = "public"
 relation = "bidding_current_procedural_classifications"
 ordinal = 15
-name = "successor_id"
-type = "uuid"
+name = "override_at"
+type = "timestamp with time zone"
 nullable = true
 default = ""
 identity = ""
@@ -16866,7 +17072,7 @@ generated = ""
 schema = "public"
 relation = "bidding_current_procedural_classifications"
 ordinal = 16
-name = "terminal_reason"
+name = "lifecycle_status"
 type = "text"
 nullable = true
 default = ""
@@ -16877,6 +17083,28 @@ generated = ""
 schema = "public"
 relation = "bidding_current_procedural_classifications"
 ordinal = 17
+name = "successor_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_current_procedural_classifications"
+ordinal = 18
+name = "terminal_reason"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_current_procedural_classifications"
+ordinal = 19
 name = "terminal_at"
 type = "timestamp with time zone"
 nullable = true
@@ -16887,9 +17115,20 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bidding_current_procedural_classifications"
-ordinal = 18
+ordinal = 20
 name = "terminal_actor"
 type = "public.kb_actor_identity"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_current_procedural_classifications"
+ordinal = 21
+name = "segment_text"
+type = "text"
 nullable = true
 default = ""
 identity = ""
@@ -18976,6 +19215,50 @@ generated = ""
 
 [[columns]]
 schema = "public"
+relation = "bidding_procedural_router_current"
+ordinal = 1
+name = "version"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_procedural_router_current"
+ordinal = 2
+name = "promotion_generation"
+type = "bigint"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_procedural_router_current"
+ordinal = 3
+name = "content_sha256"
+type = "public.kb_sha256"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_procedural_router_current"
+ordinal = 4
+name = "canonical_payload"
+type = "bytea"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
 relation = "bidding_projects"
 ordinal = 1
 name = "id"
@@ -19585,6 +19868,61 @@ relation = "bidding_quote_lines"
 ordinal = 19
 name = "revision_status"
 type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_template_contract_current"
+ordinal = 1
+name = "slot"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_template_contract_current"
+ordinal = 2
+name = "version"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_template_contract_current"
+ordinal = 3
+name = "promotion_generation"
+type = "bigint"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_template_contract_current"
+ordinal = 4
+name = "content_sha256"
+type = "public.kb_sha256"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_template_contract_current"
+ordinal = 5
+name = "canonical_payload"
+type = "bytea"
 nullable = true
 default = ""
 identity = ""
@@ -21759,6 +22097,127 @@ generated = ""
 
 [[columns]]
 schema = "public"
+relation = "procedural_router_contract_artifacts"
+ordinal = 1
+name = "version"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "procedural_router_contract_artifacts"
+ordinal = 2
+name = "schema_version"
+type = "smallint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "procedural_router_contract_artifacts"
+ordinal = 3
+name = "canonical_payload"
+type = "bytea"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "procedural_router_contract_artifacts"
+ordinal = 4
+name = "content_sha256"
+type = "public.kb_sha256"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "procedural_router_contract_artifacts"
+ordinal = 5
+name = "created_at"
+type = "timestamp with time zone"
+nullable = false
+default = "now()"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "procedural_router_contract_artifacts_content_sha256_key"
+ordinal = 1
+name = "content_sha256"
+type = "public.kb_sha256"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "procedural_router_contract_artifacts_pkey"
+ordinal = 1
+name = "version"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "procedural_router_current"
+ordinal = 1
+name = "singleton_key"
+type = "boolean"
+nullable = false
+default = "true"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "procedural_router_current"
+ordinal = 2
+name = "version"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "procedural_router_current"
+ordinal = 3
+name = "promotion_generation"
+type = "bigint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "procedural_router_current_pkey"
+ordinal = 1
+name = "singleton_key"
+type = "boolean"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
 relation = "product_versions"
 ordinal = 1
 name = "id"
@@ -23867,6 +24326,86 @@ validated = true
 
 [[constraints]]
 schema = "public"
+relation = "bid_attachment_render_pages"
+name = "bid_attachment_render_pages_byte_length_check"
+kind = "check"
+definition = "CHECK (byte_length >= 1 AND byte_length <= 20971520)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+name = "bid_attachment_render_pages_check"
+kind = "check"
+definition = "CHECK (object_ref::text = ('objects/'::text || content_sha256::text))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+name = "bid_attachment_render_pages_media_type_check"
+kind = "check"
+definition = "CHECK (media_type = ANY (ARRAY['image/png'::text, 'image/jpeg'::text, 'image/webp'::text]))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+name = "bid_attachment_render_pages_page_ordinal_check"
+kind = "check"
+definition = "CHECK (page_ordinal >= 0 AND page_ordinal <= 511)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+name = "bid_attachment_render_pages_pixel_height_check"
+kind = "check"
+definition = "CHECK (pixel_height >= 1 AND pixel_height <= 20000)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+name = "bid_attachment_render_pages_pixel_width_check"
+kind = "check"
+definition = "CHECK (pixel_width >= 1 AND pixel_width <= 20000)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+name = "bid_attachment_render_pages_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (attachment_id, page_ordinal)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+name = "bid_attachment_render_pages_project_id_attachment_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (project_id, attachment_id) REFERENCES public.bid_procedural_attachments(project_id, id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
 relation = "bid_clause_set_identities"
 name = "bid_clause_set_identities_pkey"
 kind = "primary_key"
@@ -25248,6 +25787,16 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "bid_manifest_render_assets"
+name = "bid_manifest_render_assets_check"
+kind = "check"
+definition = "CHECK (media_type = 'application/pdf'::text AND source_kind = 'procedural_attachment'::text AND pixel_width IS NULL AND pixel_height IS NULL OR (media_type = ANY (ARRAY['image/png'::text, 'image/jpeg'::text, 'image/webp'::text])) AND pixel_width >= 1 AND pixel_width <= 20000 AND pixel_height >= 1 AND pixel_height <= 20000)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_manifest_render_assets"
 name = "bid_manifest_render_assets_manifest_id_fkey"
 kind = "foreign_key"
 definition = "FOREIGN KEY (manifest_id) REFERENCES public.bid_submission_manifests(id) ON DELETE RESTRICT"
@@ -25298,26 +25847,6 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "bid_manifest_render_assets"
-name = "bid_manifest_render_assets_pixel_height_check"
-kind = "check"
-definition = "CHECK (pixel_height >= 1 AND pixel_height <= 20000)"
-deferrable = false
-initially_deferred = false
-validated = true
-
-[[constraints]]
-schema = "public"
-relation = "bid_manifest_render_assets"
-name = "bid_manifest_render_assets_pixel_width_check"
-kind = "check"
-definition = "CHECK (pixel_width >= 1 AND pixel_width <= 20000)"
-deferrable = false
-initially_deferred = false
-validated = true
-
-[[constraints]]
-schema = "public"
-relation = "bid_manifest_render_assets"
 name = "bid_manifest_render_assets_pkey"
 kind = "primary_key"
 definition = "PRIMARY KEY (id)"
@@ -25330,7 +25859,7 @@ schema = "public"
 relation = "bid_manifest_render_assets"
 name = "bid_manifest_render_assets_source_kind_check"
 kind = "check"
-definition = "CHECK (source_kind = ANY (ARRAY['bid_shot'::text, 'markdown_object'::text]))"
+definition = "CHECK (source_kind = ANY (ARRAY['bid_shot'::text, 'markdown_object'::text, 'procedural_attachment'::text, 'procedural_attachment_page'::text]))"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -27628,6 +28157,16 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "bid_procedural_classification_artifacts"
+name = "bid_procedural_classification_arti_router_contract_version_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (router_contract_version) REFERENCES public.procedural_router_contract_artifacts(version) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_procedural_classification_artifacts"
 name = "bid_procedural_classification_artifa_router_result_status_check"
 kind = "check"
 definition = "CHECK (router_result_status = ANY (ARRAY['classified'::text, 'review'::text]))"
@@ -27731,6 +28270,16 @@ relation = "bid_procedural_classification_artifacts"
 name = "bid_procedural_classification_artifacts_terminal_reason_check"
 kind = "check"
 definition = "CHECK (terminal_reason = ANY (ARRAY['clause_deleted'::text, 'clause_unconfirmed'::text, 'left_procedural'::text, 'text_changed'::text, 'resegmented'::text, 'segment_removed'::text]))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_procedural_classification_artifacts"
+name = "bid_procedural_classification_router_promotion_generation_check"
+kind = "check"
+definition = "CHECK (router_promotion_generation >= 0)"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -27910,7 +28459,7 @@ schema = "public"
 relation = "bid_procedural_decision_artifacts"
 name = "bid_procedural_decision_terminal_reason_check"
 kind = "check"
-definition = "CHECK (terminal_reason = ANY (ARRAY['clause_deleted'::text, 'clause_unconfirmed'::text, 'left_procedural'::text, 'text_changed'::text, 'resegmented'::text, 'segment_removed'::text]))"
+definition = "CHECK (terminal_reason = ANY (ARRAY['clause_deleted'::text, 'clause_unconfirmed'::text, 'left_procedural'::text, 'text_changed'::text, 'resegmented'::text, 'segment_removed'::text, 'router_promoted'::text]))"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -30907,6 +31456,86 @@ validated = true
 
 [[constraints]]
 schema = "public"
+relation = "procedural_router_contract_artifacts"
+name = "procedural_router_contract_artifacts_check"
+kind = "check"
+definition = "CHECK (content_sha256::text = encode(public.digest(canonical_payload, 'sha256'::text), 'hex'::text))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "procedural_router_contract_artifacts"
+name = "procedural_router_contract_artifacts_content_sha256_key"
+kind = "unique"
+definition = "UNIQUE (content_sha256)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "procedural_router_contract_artifacts"
+name = "procedural_router_contract_artifacts_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (version)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "procedural_router_contract_artifacts"
+name = "procedural_router_contract_artifacts_schema_version_check"
+kind = "check"
+definition = "CHECK (schema_version = 1)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "procedural_router_current"
+name = "procedural_router_current_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (singleton_key)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "procedural_router_current"
+name = "procedural_router_current_promotion_generation_check"
+kind = "check"
+definition = "CHECK (promotion_generation >= 0)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "procedural_router_current"
+name = "procedural_router_current_singleton_key_check"
+kind = "check"
+definition = "CHECK (singleton_key)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "procedural_router_current"
+name = "procedural_router_current_version_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (version) REFERENCES public.procedural_router_contract_artifacts(version) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
 relation = "product_versions"
 name = "product_versions_pkey"
 kind = "primary_key"
@@ -31511,6 +32140,18 @@ table = "audit_events"
 name = "audit_events_pkey"
 owner = "app_owner"
 definition = "CREATE UNIQUE INDEX audit_events_pkey ON public.audit_events USING btree (id)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_attachment_render_pages"
+name = "bid_attachment_render_pages_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_attachment_render_pages_pkey ON public.bid_attachment_render_pages USING btree (attachment_id, page_ordinal)"
 primary = true
 unique = true
 valid = true
@@ -34063,6 +34704,42 @@ live = true
 
 [[indexes]]
 schema = "public"
+table = "procedural_router_contract_artifacts"
+name = "procedural_router_contract_artifacts_content_sha256_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX procedural_router_contract_artifacts_content_sha256_key ON public.procedural_router_contract_artifacts USING btree (content_sha256)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "procedural_router_contract_artifacts"
+name = "procedural_router_contract_artifacts_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX procedural_router_contract_artifacts_pkey ON public.procedural_router_contract_artifacts USING btree (version)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "procedural_router_current"
+name = "procedural_router_current_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX procedural_router_current_pkey ON public.procedural_router_current USING btree (singleton_key)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
 table = "product_versions"
 name = "product_versions_live_label_uidx"
 owner = "app_owner"
@@ -34386,6 +35063,13 @@ table = "audit_events"
 name = "audit_events_no_truncate"
 enabled = "origin"
 definition = "CREATE TRIGGER audit_events_no_truncate BEFORE TRUNCATE ON public.audit_events FOR EACH STATEMENT EXECUTE FUNCTION public.kb_reject_append_only()"
+
+[[triggers]]
+schema = "public"
+table = "bid_attachment_render_pages"
+name = "bid_attachment_render_pages_immutable"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_attachment_render_pages_immutable BEFORE DELETE OR UPDATE ON public.bid_attachment_render_pages FOR EACH ROW EXECUTE FUNCTION public.kb_reject_append_only()"
 
 [[triggers]]
 schema = "public"
@@ -34830,6 +35514,13 @@ definition = "CREATE TRIGGER object_retention_tombstones_no_truncate BEFORE TRUN
 
 [[triggers]]
 schema = "public"
+table = "procedural_router_contract_artifacts"
+name = "procedural_router_contract_artifacts_immutable"
+enabled = "origin"
+definition = "CREATE TRIGGER procedural_router_contract_artifacts_immutable BEFORE DELETE OR UPDATE ON public.procedural_router_contract_artifacts FOR EACH ROW EXECUTE FUNCTION public.kb_reject_append_only()"
+
+[[triggers]]
+schema = "public"
 table = "production_first_launch_catalog_verifications"
 name = "production_first_launch_catalog_verifications_immutable"
 enabled = "origin"
@@ -34909,7 +35600,7 @@ security_definer = false
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "e88172eac04370d36e1fa54b71abd35689f694cc9818c45bb9b597a4c70ee51e"
+definition_sha256 = "662b35e77ad76feb459f33df346d76488fac9a62e7458314f90abfd7815350b1"
 
 [[routines]]
 schema = "public"
@@ -35010,18 +35701,18 @@ definition_sha256 = "6b8f4ba07400e1590688f1bbb9bb25929568bfc014c0e2b54de5994fb83
 [[routines]]
 schema = "public"
 name = "kb_bid_complete_document_conversion"
-identity_arguments = "p_document_id uuid, p_claim_token uuid, p_source_artifact_id uuid, p_markdown bytea, p_converter_contract_version text, p_image_asset_set_sha256 public.kb_sha256, p_image_assets jsonb, p_actor public.kb_actor_identity"
+identity_arguments = "p_document_id uuid, p_claim_token uuid, p_source_artifact_id uuid, p_markdown bytea, p_converter_contract_version text, p_image_asset_set_sha256 public.kb_sha256, p_image_assets jsonb, p_extraction_target_id uuid, p_expected_section_count integer, p_policy_version text, p_prompt_version text, p_actor public.kb_actor_identity"
 kind = "function"
 owner = "app_owner"
 language = "plpgsql"
-return_type = "uuid"
+return_type = "jsonb"
 volatility = "volatile"
 strict = false
 security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "668ca72c3891e28dcd11ebce8080da3c0c30b38d2eef80c8687250750d78122e"
+definition_sha256 = "95cf1ff70cedeb9b8080f5f0017c12d65f724b0f7551723b8d72e71ad5c6f76c"
 
 [[routines]]
 schema = "public"
@@ -35037,7 +35728,7 @@ security_definer = false
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog"]
-definition_sha256 = "4a0c8e7b1206a7f422c4b6e4a4e52c277314432288d8338ed295fba71334b2f0"
+definition_sha256 = "87f180641a92ba1dcf0c2e30ee18bab43cbac1cfb2c9eb73abe12aa01b58ccab"
 
 [[routines]]
 schema = "public"
@@ -35101,7 +35792,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "08687f36c926498b350c8a3378cfe86d68420c33666e92d6f08077a73d573d60"
+definition_sha256 = "0c0db04c632730215e506f3ce67946321cdfe905b1a49c65ad66919c30b0f553"
 
 [[routines]]
 schema = "public"
@@ -35133,7 +35824,7 @@ security_definer = false
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "a43de269be558d95e2aa59904b7285cbc16aa6aa828bdce4f9ed695abeabec3b"
+definition_sha256 = "6cd4837290c3f27107e41db075d3cc9c0b52c530f858f13f736b965712fe0a28"
 
 [[routines]]
 schema = "public"
@@ -35245,7 +35936,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "c8c8423367744f716caa1f5d25db95c419f5bed1108bbf84195e17db8e27c05d"
+definition_sha256 = "4b61d53f2e610fb9bb6281903d14076a532a097d778acfa650bda1e55a4d9abf"
 
 [[routines]]
 schema = "public"
@@ -35261,7 +35952,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "17a9c4a6e2c13d669c55104007d74c0fb4f8bacab458f95b85e321b6497c54b4"
+definition_sha256 = "4dae6a333c267eddca1d365ea7cbd92f323a9d438ea6f335d72964aec90f3cfc"
 
 [[routines]]
 schema = "public"
@@ -35277,7 +35968,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "84f3c09b1ce7221d770854eda8d0215977a3b1edf4cfbfd9f5feb9ca6da2593c"
+definition_sha256 = "73c5611fcff94a84bce2d9f7781d7a051f5ca873f12d6f5d6ef317e6bac0ad5c"
 
 [[routines]]
 schema = "public"
@@ -35501,7 +36192,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "10b1d5411a5bf1ea82fb2a7076912af468e3dbf38451bdbca3fe8ce8dd390c5a"
+definition_sha256 = "e8d6ba4111dae5897ed988cd562885bb62b3aba36b236a798826886a52e7115d"
 
 [[routines]]
 schema = "public"
@@ -35581,7 +36272,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "d58d529820fb81546caa82dc4d6f4ee14a2dd88ff729a7a1c9f04b0b6997f0dc"
+definition_sha256 = "a4faa68c41267adc6b2f458be2e38fbc7fddcce88fb0f324bff7a46ef8ccee8d"
 
 [[routines]]
 schema = "public"
@@ -35805,7 +36496,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "c2bbbc99aac5ac7ef74d8770383d8fdbe17aa21e391b46ecd1e95aa38647445a"
+definition_sha256 = "36ebdda137677aded863a85246b51f30be6817aff3858bf1836a2b1b15d6e359"
 
 [[routines]]
 schema = "public"
@@ -35853,7 +36544,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "ec9918e5300d1329ed6afc3bd4a7686994cc3b88a02f3d6f20bce1255de49132"
+definition_sha256 = "1c742fc9cdf2a345fc446a1c44b72e3961e4332fa0c5a33d186b8353fe7f0d4c"
 
 [[routines]]
 schema = "public"
@@ -35969,6 +36660,22 @@ definition_sha256 = "5d471e5e57d20f5d227df264bc270e5119fad523f7984accd3496925c8f
 
 [[routines]]
 schema = "public"
+name = "kb_bid_procedural_segments_for_clause"
+identity_arguments = "p_clause public.bid_clauses"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "record"
+volatility = "stable"
+strict = false
+security_definer = false
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "6f41451a4d2f34151e2d4cf2fc5249cd1262a5cba7ed2984f76dc4ea57cf6535"
+
+[[routines]]
+schema = "public"
 name = "kb_bid_promote_kind_router"
 identity_arguments = "p_target_version text, p_expected_current_version text, p_expected_promotion_generation bigint, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
 kind = "function"
@@ -35985,6 +36692,38 @@ definition_sha256 = "cf0f5946f60d58181ae7cfe6090ae671562a19bb0a38806f06b5c042659
 
 [[routines]]
 schema = "public"
+name = "kb_bid_promote_procedural_router"
+identity_arguments = "p_target_version text, p_expected_current_version text, p_expected_promotion_generation bigint, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "jsonb"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "3662785f249693bb52b9e17b6822c5edc93e7b797eaf92bad11b7ef3d73e182e"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_promote_template_contract"
+identity_arguments = "p_slot text, p_target_version text, p_expected_current_version text, p_expected_promotion_generation bigint, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "jsonb"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "64edb845b562dc801ad6c18918148dbb886505d32eb7bb727e627fa8917dd2a5"
+
+[[routines]]
+schema = "public"
 name = "kb_bid_publish_extraction_section"
 identity_arguments = "p_target_id uuid, p_attempt integer, p_claim_token uuid, p_section_key text, p_heading_path jsonb, p_parent_start_offset bigint, p_parent_end_offset bigint, p_expected_current_publication_id uuid, p_candidate_graph jsonb, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
 kind = "function"
@@ -35997,7 +36736,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "5827c6cbcefa6a6b2b39380c0ad34b144e5e7ddc7063b0f93db5782398a17a5d"
+definition_sha256 = "f4c3a32156aeedc3bbcb1c78ddbe7ee9ca8afb32838c6c810882a569b4ade4c1"
 
 [[routines]]
 schema = "public"
@@ -36013,7 +36752,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "2aaa760816a61adf2cfc6724183d5ab5a5f7977daefea249f3f6151323c99d67"
+definition_sha256 = "966a5bb675c63f1d5a0ed22cc8c34ad00f781757d74b9d084b548e1598d5a902"
 
 [[routines]]
 schema = "public"
@@ -36109,7 +36848,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "b7f07269b45f6d77f4091a7351536e3a95c3bf5b2699d52208dc4d7bc1d103ca"
+definition_sha256 = "036067f73ec41dc0a9c57c2b61e6450c043c57e2332f77f9706d80820c49ca2b"
 
 [[routines]]
 schema = "public"
@@ -36157,7 +36896,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "9cffabf3aa1d7cb462fffe6989a5ed0bd0c536bad22ddac049b9002408f60a65"
+definition_sha256 = "bd818373fd0e18497313ae8bf0deb8290944fa20e9f60c011d6aa18966e5b7a4"
 
 [[routines]]
 schema = "public"
@@ -36174,6 +36913,38 @@ leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
 definition_sha256 = "316c51eae6c4776179b549a3c4a58c92eee32fd460553f22302cb39a47155350"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_register_procedural_router_contract"
+identity_arguments = "p_version text, p_canonical_payload bytea, p_content_sha256 public.kb_sha256, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "jsonb"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "1242d2e37b9c62270a9fac51b428b40c5343324bc6499856e194c58f495a858d"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_register_template_contract"
+identity_arguments = "p_slot text, p_version text, p_canonical_payload bytea, p_content_sha256 public.kb_sha256, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "jsonb"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "c4cfcb9cd9bbc84352cb7d7b63bf50b597dd710d6da8a9f4c37816f994f43c3d"
 
 [[routines]]
 schema = "public"
@@ -36338,18 +37109,18 @@ definition_sha256 = "e8b43fb03b59e26c87c28722e5cdf3aeca37f95f1b3e525362c6d3cc8cd
 [[routines]]
 schema = "public"
 name = "kb_bid_route_procedural"
-identity_arguments = "p_text text"
+identity_arguments = "p_text text, p_contract_version text"
 kind = "function"
 owner = "app_owner"
 language = "plpgsql"
 return_type = "jsonb"
-volatility = "immutable"
+volatility = "stable"
 strict = false
 security_definer = false
 leakproof = false
 parallel = "unsafe"
-config = ["search_path=pg_catalog"]
-definition_sha256 = "8d914005af34532f1e0e47cf88cdd1a561389c293aa9c1b82863e0d0966e6511"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "a915e072901f06a6a907d0f08c3a0e51407e71a88a46b3f36fcc94aee775c268"
 
 [[routines]]
 schema = "public"
@@ -36381,7 +37152,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "a1205247d65280b458365c3be68f04c030fcd928f927a64ea74bb6b1384b5076"
+definition_sha256 = "4131ecf5b789774a440e9646812754de39c32c06afeba6347b97cfdf4344a17f"
 
 [[routines]]
 schema = "public"
@@ -36397,7 +37168,7 @@ security_definer = false
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog"]
-definition_sha256 = "471417ec95c16b16bd39623b1db35336d3123f75613958b12078d802286fe72c"
+definition_sha256 = "c4dc31fe5f1284d6c98529eb9e3be943b001474d2c80bc53316b5e69cb8cc41f"
 
 [[routines]]
 schema = "public"
@@ -36461,7 +37232,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "24916ad36d6d7977953d93c97a017537ee81cb7eac490f82a0d1f94dd5d248f3"
+definition_sha256 = "9e4db42d0ea241f89f7eac60d0dd2edb526c6d1b2ec1f2a323ab3f91ffcb0f58"
 
 [[routines]]
 schema = "public"
@@ -36477,7 +37248,7 @@ security_definer = false
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "c214249932fbe435c10aafdbdcd398ad311ccf876c756b482b002a491ac6d0c3"
+definition_sha256 = "b9068f47dc7c253351e50de48eb574773109df98739e75b31a8331c8eb3ad559"
 
 [[routines]]
 schema = "public"
@@ -36493,7 +37264,7 @@ security_definer = false
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "d628d3dcf4eeb6f26b80890b744670696e35bc420588844998e81792f06c09ac"
+definition_sha256 = "3972c6d6affef314fc6f30e7f4eb0dfbe9c222c52022aed7a1d7377e556f61d6"
 
 [[routines]]
 schema = "public"
@@ -36578,7 +37349,7 @@ definition_sha256 = "08a824d9324af0a3dda33706ec16b2158e5fc1b19910124988cfe8468dc
 [[routines]]
 schema = "public"
 name = "kb_bid_upload_attachment"
-identity_arguments = "p_staging_id uuid, p_id uuid, p_project_id uuid, p_kind text, p_object_ref public.kb_object_ref, p_digest public.kb_sha256, p_media_type text, p_byte_length bigint, p_pixel_width integer, p_pixel_height integer, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+identity_arguments = "p_staging_id uuid, p_id uuid, p_project_id uuid, p_kind text, p_object_ref public.kb_object_ref, p_digest public.kb_sha256, p_media_type text, p_byte_length bigint, p_pixel_width integer, p_pixel_height integer, p_render_pages jsonb, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
 kind = "function"
 owner = "app_owner"
 language = "plpgsql"
@@ -36589,7 +37360,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "1278a0df07af8908bde83f45238ef6b333c3c8c55643df5573d68e7607eb3ea1"
+definition_sha256 = "b71a1baa2ee1d5fd8709175913ca543d0498762e56c261750dfd866f4d909515"
 
 [[routines]]
 schema = "public"
@@ -36781,7 +37552,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "9dc4e414c011a578e58e9aa870c70199b56b230cd8b2ae4f8f995533faafa99f"
+definition_sha256 = "37b921d91e7cdd0912eccf3232313beb4b7634f30b1c5268c2e05a09032aaa71"
 
 [[routines]]
 schema = "public"
@@ -37741,6 +38512,69 @@ grant_option = false
 
 [[relation_acls]]
 schema = "public"
+relation = "bid_attachment_render_pages"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_attachment_render_pages"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
 relation = "bid_clause_set_identities"
 kind = "table"
 grantor = "kb_app_owner"
@@ -44716,6 +45550,87 @@ grant_option = false
 
 [[relation_acls]]
 schema = "public"
+relation = "bidding_procedural_router_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_procedural_router_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_procedural_router_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_procedural_router_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_procedural_router_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_procedural_router_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_procedural_router_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_procedural_router_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_api"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_procedural_router_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_worker"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
 relation = "bidding_projects"
 kind = "view"
 grantor = "kb_app_owner"
@@ -44951,6 +45866,87 @@ grant_option = false
 [[relation_acls]]
 schema = "public"
 relation = "bidding_quote_lines"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_worker"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_template_contract_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_template_contract_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_template_contract_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_template_contract_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_template_contract_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_template_contract_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_template_contract_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_template_contract_current"
+kind = "view"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_api"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bidding_template_contract_current"
 kind = "view"
 grantor = "kb_app_owner"
 grantee = "kb_runtime_worker"
@@ -46724,6 +47720,132 @@ grant_option = false
 [[relation_acls]]
 schema = "public"
 relation = "platform_role_contracts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "procedural_router_contract_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "procedural_router_contract_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "procedural_router_contract_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "procedural_router_contract_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "procedural_router_contract_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "procedural_router_contract_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "procedural_router_contract_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "procedural_router_current"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "procedural_router_current"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "procedural_router_current"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "procedural_router_current"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "procedural_router_current"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "procedural_router_current"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "procedural_router_current"
 kind = "table"
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
@@ -48830,7 +49952,7 @@ grant_option = false
 [[routine_acls]]
 schema = "public"
 name = "kb_bid_complete_document_conversion"
-identity_arguments = "p_document_id uuid, p_claim_token uuid, p_source_artifact_id uuid, p_markdown bytea, p_converter_contract_version text, p_image_asset_set_sha256 public.kb_sha256, p_image_assets jsonb, p_actor public.kb_actor_identity"
+identity_arguments = "p_document_id uuid, p_claim_token uuid, p_source_artifact_id uuid, p_markdown bytea, p_converter_contract_version text, p_image_asset_set_sha256 public.kb_sha256, p_image_assets jsonb, p_extraction_target_id uuid, p_expected_section_count integer, p_policy_version text, p_prompt_version text, p_actor public.kb_actor_identity"
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
 privilege = "EXECUTE"
@@ -48839,7 +49961,7 @@ grant_option = false
 [[routine_acls]]
 schema = "public"
 name = "kb_bid_complete_document_conversion"
-identity_arguments = "p_document_id uuid, p_claim_token uuid, p_source_artifact_id uuid, p_markdown bytea, p_converter_contract_version text, p_image_asset_set_sha256 public.kb_sha256, p_image_assets jsonb, p_actor public.kb_actor_identity"
+identity_arguments = "p_document_id uuid, p_claim_token uuid, p_source_artifact_id uuid, p_markdown bytea, p_converter_contract_version text, p_image_asset_set_sha256 public.kb_sha256, p_image_assets jsonb, p_extraction_target_id uuid, p_expected_section_count integer, p_policy_version text, p_prompt_version text, p_actor public.kb_actor_identity"
 grantor = "kb_app_owner"
 grantee = "kb_runtime_worker"
 privilege = "EXECUTE"
@@ -49765,6 +50887,15 @@ grant_option = false
 
 [[routine_acls]]
 schema = "public"
+name = "kb_bid_procedural_segments_for_clause"
+identity_arguments = "p_clause public.bid_clauses"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
 name = "kb_bid_promote_kind_router"
 identity_arguments = "p_target_version text, p_expected_current_version text, p_expected_promotion_generation bigint, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
 grantor = "kb_app_owner"
@@ -49776,6 +50907,42 @@ grant_option = false
 schema = "public"
 name = "kb_bid_promote_kind_router"
 identity_arguments = "p_target_version text, p_expected_current_version text, p_expected_promotion_generation bigint, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_api"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_promote_procedural_router"
+identity_arguments = "p_target_version text, p_expected_current_version text, p_expected_promotion_generation bigint, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_promote_procedural_router"
+identity_arguments = "p_target_version text, p_expected_current_version text, p_expected_promotion_generation bigint, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_api"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_promote_template_contract"
+identity_arguments = "p_slot text, p_target_version text, p_expected_current_version text, p_expected_promotion_generation bigint, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_promote_template_contract"
+identity_arguments = "p_slot text, p_target_version text, p_expected_current_version text, p_expected_promotion_generation bigint, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
 grantor = "kb_app_owner"
 grantee = "kb_runtime_api"
 privilege = "EXECUTE"
@@ -49981,6 +51148,42 @@ grant_option = false
 
 [[routine_acls]]
 schema = "public"
+name = "kb_bid_register_procedural_router_contract"
+identity_arguments = "p_version text, p_canonical_payload bytea, p_content_sha256 public.kb_sha256, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_register_procedural_router_contract"
+identity_arguments = "p_version text, p_canonical_payload bytea, p_content_sha256 public.kb_sha256, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_api"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_register_template_contract"
+identity_arguments = "p_slot text, p_version text, p_canonical_payload bytea, p_content_sha256 public.kb_sha256, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_register_template_contract"
+identity_arguments = "p_slot text, p_version text, p_canonical_payload bytea, p_content_sha256 public.kb_sha256, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_api"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
 name = "kb_bid_reopen_quote"
 identity_arguments = "p_project_id uuid, p_expected_snapshot_id uuid, p_expected_fact_revision bigint, p_expected_pricing_revision bigint, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
 grantor = "kb_app_owner"
@@ -50126,7 +51329,7 @@ grant_option = false
 [[routine_acls]]
 schema = "public"
 name = "kb_bid_route_procedural"
-identity_arguments = "p_text text"
+identity_arguments = "p_text text, p_contract_version text"
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
 privilege = "EXECUTE"
@@ -50306,7 +51509,7 @@ grant_option = false
 [[routine_acls]]
 schema = "public"
 name = "kb_bid_upload_attachment"
-identity_arguments = "p_staging_id uuid, p_id uuid, p_project_id uuid, p_kind text, p_object_ref public.kb_object_ref, p_digest public.kb_sha256, p_media_type text, p_byte_length bigint, p_pixel_width integer, p_pixel_height integer, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+identity_arguments = "p_staging_id uuid, p_id uuid, p_project_id uuid, p_kind text, p_object_ref public.kb_object_ref, p_digest public.kb_sha256, p_media_type text, p_byte_length bigint, p_pixel_width integer, p_pixel_height integer, p_render_pages jsonb, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
 privilege = "EXECUTE"
@@ -50315,7 +51518,7 @@ grant_option = false
 [[routine_acls]]
 schema = "public"
 name = "kb_bid_upload_attachment"
-identity_arguments = "p_staging_id uuid, p_id uuid, p_project_id uuid, p_kind text, p_object_ref public.kb_object_ref, p_digest public.kb_sha256, p_media_type text, p_byte_length bigint, p_pixel_width integer, p_pixel_height integer, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+identity_arguments = "p_staging_id uuid, p_id uuid, p_project_id uuid, p_kind text, p_object_ref public.kb_object_ref, p_digest public.kb_sha256, p_media_type text, p_byte_length bigint, p_pixel_width integer, p_pixel_height integer, p_render_pages jsonb, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
 grantor = "kb_app_owner"
 grantee = "kb_runtime_api"
 privilege = "EXECUTE"
@@ -50815,6 +52018,15 @@ schema = "public"
 name = "audit_events"
 row_count = 0
 key_columns = ["id"]
+
+[[tables]]
+schema = "public"
+name = "bid_attachment_render_pages"
+row_count = 0
+key_columns = [
+    "attachment_id",
+    "page_ordinal",
+]
 
 [[tables]]
 schema = "public"
@@ -51489,6 +52701,18 @@ key_columns = ["role_name"]
 
 [[tables]]
 schema = "public"
+name = "procedural_router_contract_artifacts"
+row_count = 1
+key_columns = ["version"]
+
+[[tables]]
+schema = "public"
+name = "procedural_router_current"
+row_count = 1
+key_columns = ["singleton_key"]
+
+[[tables]]
+schema = "public"
 name = "product_versions"
 row_count = 0
 key_columns = ["id"]
@@ -51822,6 +53046,18 @@ schema = "public"
 table = "platform_role_contracts"
 key = '[["role_name", "kb_runtime_worker"]]'
 value_sha256 = "374de4db0d643c3c8277cd18ddc7687ad3e0c7d1bc94a6efd9f95355902c944b"
+
+[[seed_rows]]
+schema = "public"
+table = "procedural_router_contract_artifacts"
+key = '[["version", "procedural-router-v1"]]'
+value_sha256 = "61182c32550bba8cfdaf179676cd37552604297fb0608d161a18c582d4daee1f"
+
+[[seed_rows]]
+schema = "public"
+table = "procedural_router_current"
+key = '[["singleton_key", true]]'
+value_sha256 = "99e1bf6fc905d969cabe173a411ee777cda2dff93dd6d1c74a20ce4d95306cbf"
 
 [[seed_rows]]
 schema = "public"

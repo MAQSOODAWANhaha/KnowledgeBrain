@@ -15,7 +15,7 @@ pub const CURRENCY_SCALE: u32 = 2;
 pub const QTY_SCALE: u32 = 6;
 pub const MAX_TITLE_BYTES: usize = 256;
 pub const MAX_NOTES_BYTES: usize = 4096;
-const MAX_AMOUNT_UNITS: i128 = 10i128.pow(18) - 1;
+const MAX_AMOUNT_UNITS: i128 = 10i128.pow(20) - 1;
 const MAX_QTY: &str = "1000000000.000000";
 const MAX_UNIT_PRICE: &str = "1000000000000.000000";
 
@@ -453,21 +453,26 @@ fn compute_unit_price_line(
         .as_deref()
         .map(|raw| parse_decimal_string(raw, QTY_SCALE))
         .transpose()?;
-    let complete = match (quantity, unit.as_ref(), unit_price) {
-        (Some(qty), Some(_), Some(price)) => {
-            qty_in_range(qty)?;
-            unit_price_in_range(price)?;
-            true
-        }
-        (None, None, None) => false,
-        _ => {
-            return Err(QuoteError::Invalid(
-                "unit_price complete tuple requires quantity, unit, and unit_price together".into(),
-            ));
-        }
-    };
+    if let Some(quantity) = quantity {
+        qty_in_range(quantity)?;
+    }
+    if let Some(unit_price) = unit_price {
+        unit_price_in_range(unit_price)?;
+    }
+    let complete = quantity.is_some() && unit.is_some() && unit_price.is_some();
     if !complete {
-        return Ok(incomplete_line(input, None, unit, None, None, tax_rate_s));
+        return Ok(incomplete_line(
+            input,
+            quantity
+                .map(|value| format_fixed(value, QTY_SCALE))
+                .transpose()?,
+            unit,
+            unit_price
+                .map(|value| format_fixed(value, QTY_SCALE))
+                .transpose()?,
+            None,
+            tax_rate_s,
+        ));
     }
     let quantity = quantity.expect("complete");
     let unit_price = unit_price.expect("complete");
@@ -1102,6 +1107,23 @@ mod tests {
     }
 
     #[test]
+    fn unit_price_partial_tuple_remains_an_editable_incomplete_line() {
+        let mut input = line_unit(11, 0, "2.000000", "600.000000", "0.130000");
+        input.unit = None;
+        input.unit_price = None;
+        input.user_confirmed = false;
+
+        let line = compute_line(&input, TaxMode::TaxExclusive).unwrap();
+
+        assert!(!line.complete);
+        assert_eq!(line.quantity.as_deref(), Some("2.000000"));
+        assert_eq!(line.unit, None);
+        assert_eq!(line.unit_price, None);
+        assert_eq!(line.basis_amount, None);
+        assert!(!line.user_confirmed);
+    }
+
+    #[test]
     fn lump_sum_forbids_quantity_fields() {
         let mut input = line_lump(2, 0, "100.00", "0.130000");
         input.quantity = Some("1.000000".into());
@@ -1146,6 +1168,25 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, QuoteError::Overflow);
+    }
+
+    #[test]
+    fn numeric_20_2_maximum_matches_postgres() {
+        let maximum = compute_line(
+            &line_lump(10, 0, "999999999999999999.99", "0.000000"),
+            TaxMode::TaxExclusive,
+        )
+        .expect("numeric(20,2) maximum must be accepted by Rust and PostgreSQL");
+        assert_eq!(
+            maximum.gross_amount.as_deref(),
+            Some("999999999999999999.99")
+        );
+        let overflow = compute_line(
+            &line_lump(11, 0, "1000000000000000000.00", "0.000000"),
+            TaxMode::TaxExclusive,
+        )
+        .unwrap_err();
+        assert_eq!(overflow, QuoteError::Overflow);
     }
 
     #[test]

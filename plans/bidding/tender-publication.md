@@ -2,6 +2,8 @@
 
 本文定义 `TenderPublication` 与 `ClauseLifecycle` 的最终 V1。所有表名均表示最终 baseline，不表示增量 migration 阶段。
 
+> 实施状态（2026-08-24）：Rust bounded tender parser、SourceSpanV2、KindRouter，以及最终 baseline 中的 publication/lifecycle 路径均按本文合同落位，并通过隔离 fresh Compose 的真实 PDF/DOCX 转换、抽取、promotion marker 与恢复验收；生产未部署。
+
 ## 1. 模块边界
 
 ### 1.1 TenderPublication 拥有
@@ -370,7 +372,7 @@ maintenance 期间拒绝 confirm。恢复后 confirm 携带 expected clause revi
 
 ## 9. API 边界
 
-建议 application API：
+Application API contract：
 
 ```text
 create_project

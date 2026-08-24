@@ -159,9 +159,9 @@ regenerate_parts
 get_json "/api/v1/bids/$ACCEPTANCE_PROJECT_ID/gate-issues?format=pdf" "$TMP/gate-after-marker.json"
 jq -e '.status == "pass"' "$TMP/gate-after-marker.json" >/dev/null || fail "PDF gate did not recover after marker confirmation"
 
-# A current attachment owns its independent object until the business reference
-# is released. Separately, the immutable manifest must own every frozen render
-# asset occurrence even while retention is running.
+# A current attachment owns its object until the business reference is released.
+# Once an immutable manifest freezes that same object, the manifest occurrence
+# remains an independent owner and must keep the object available for replay.
 protected_identity="$(printf '%s\n' \
   "SELECT registry.state||E'\\t'||count(reference_value.*)" \
   "  FROM object_registry registry" \
@@ -211,14 +211,36 @@ attachment_owner_count="$(printf '%s\n' \
   "   AND owner_kind='bid_attachment' AND owner_id='$ACCEPTANCE_ATTACHMENT_ID'::uuid" \
   "   AND occurrence='original';" | admin_psql -At)"
 [ "$attachment_owner_count" = "0" ] || fail "deleted attachment retained its business owner reference"
-for _ in $(seq 1 60); do
-  attachment_object_state="$(printf '%s\n' \
-    "SELECT state FROM object_registry WHERE object_ref='$ACCEPTANCE_ATTACHMENT_OBJECT_REF'::kb_object_ref;" |
-    admin_psql -At)"
-  [ "$attachment_object_state" = "deleted" ] && break
-  sleep 1
-done
-[ "$attachment_object_state" = "deleted" ] || fail "retention did not delete the released attachment object"
+released_attachment_identity="$(printf '%s\n' \
+  "SELECT registry.state||E'\\t'||" \
+  "       count(owner_ref.*) FILTER (WHERE owner_ref.owner_kind='bid_manifest_asset')||E'\\t'||" \
+  "       count(owner_ref.*) FILTER (WHERE owner_ref.owner_kind<>'bid_manifest_asset')||E'\\t'||" \
+  "       COALESCE(max(outbox.state),'missing')" \
+  "  FROM object_registry registry" \
+  "  LEFT JOIN object_owner_references owner_ref ON owner_ref.object_ref=registry.object_ref" \
+  "  LEFT JOIN object_retention_outbox outbox ON outbox.object_ref=registry.object_ref" \
+  " WHERE registry.object_ref='$ACCEPTANCE_ATTACHMENT_OBJECT_REF'::kb_object_ref" \
+  " GROUP BY registry.state;" | admin_psql -At)"
+IFS=$'\t' read -r attachment_object_state attachment_manifest_owner_count \
+  attachment_non_manifest_owner_count attachment_outbox_state <<<"$released_attachment_identity"
+[ "$attachment_object_state" = "available" ] || fail "manifest-owned attachment object became unavailable"
+[ "$attachment_manifest_owner_count" -ge 1 ] || fail "released attachment object lost its immutable manifest owner"
+[ "$attachment_non_manifest_owner_count" = "0" ] || fail "released attachment object retained a non-manifest owner"
+[ "$attachment_outbox_state" = "missing" ] || fail "manifest-owned attachment object was queued for retention"
+frozen_attachment_asset_id="$(printf '%s\n' \
+  "SELECT asset.id FROM bid_manifest_render_assets asset" \
+  " WHERE asset.manifest_id='$ACCEPTANCE_PDF_MANIFEST_ID'::uuid" \
+  "   AND asset.source_kind='procedural_attachment'" \
+  "   AND asset.object_ref='$ACCEPTANCE_ATTACHMENT_OBJECT_REF'::kb_object_ref" \
+  "   AND asset.source_locator->>'attachment_id'='$ACCEPTANCE_ATTACHMENT_ID'" \
+  " ORDER BY asset.manifest_ordinal LIMIT 1;" | admin_psql -At)"
+[ -n "$frozen_attachment_asset_id" ] || fail "PDF manifest did not freeze the released attachment original"
+frozen_attachment_read="$(role_psql kb_runtime_worker acceptance-worker -Atc \
+  "SELECT object_ref||E'\\t'||digest FROM kb_bid_read_manifest_render_asset(
+    '$ACCEPTANCE_PROJECT_ID'::uuid,'$ACCEPTANCE_PDF_MANIFEST_ID'::uuid,
+    '$frozen_attachment_asset_id'::uuid);")"
+[ "$frozen_attachment_read" = "$ACCEPTANCE_ATTACHMENT_OBJECT_REF"$'\t'"$ACCEPTANCE_ATTACHMENT_DIGEST" ] ||
+  fail "worker could not replay the manifest-owned attachment after business release"
 curl -fsS "$ACCEPTANCE_BASE_URL/api/v1/bids/$ACCEPTANCE_PROJECT_ID/submission/artifacts/$ACCEPTANCE_PDF_OUTPUT_ID" \
   -H "$AUTH" -o "$TMP/historical-after-attachment-delete.pdf" || fail "download historical PDF after attachment delete"
 historical_pdf_sha="$(sha256sum "$TMP/historical-after-attachment-delete.pdf" | awk '{print $1}')"
@@ -335,6 +357,7 @@ jq -n \
   --argjson promotion_generation "$((current_generation + 1))" \
   --arg attachment_object_ref "$ACCEPTANCE_ATTACHMENT_OBJECT_REF" \
   --arg attachment_digest "$ACCEPTANCE_ATTACHMENT_DIGEST" \
+  --argjson attachment_manifest_owner_count "$attachment_manifest_owner_count" \
   --arg manifest_asset_object_ref "$manifest_asset_object_ref" \
   --arg manifest_asset_digest "$manifest_asset_digest" \
   --argjson manifest_asset_count "$manifest_asset_count" \
@@ -348,7 +371,10 @@ jq -n \
   '{schema_version:1,status:"passed",kind_router:{target_version:$target_router,promotion_generation:$promotion_generation,
       evaluation_clause_id:$evaluation_clause_id,marker_rejected_pdf:true,reconfirmed:true},
     object_lifecycle:{attachment_object_ref:$attachment_object_ref,attachment_digest:$attachment_digest,
-      attachment_released_deleted:true,manifest_asset_object_ref:$manifest_asset_object_ref,
+      attachment_business_owner_released:true,attachment_manifest_owner_retained:true,
+      attachment_object_available_after_business_release:true,
+      attachment_manifest_owner_count:$attachment_manifest_owner_count,
+      manifest_asset_object_ref:$manifest_asset_object_ref,
       manifest_asset_digest:$manifest_asset_digest,manifest_asset_count:$manifest_asset_count,
       manifest_owner_present_and_available:true,historical_pdf_sha256:$historical_pdf_sha256,
       recovered_staging_object_ref:$recovery_staging_object_ref,staging_state_after_expire:"deleting",

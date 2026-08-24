@@ -241,6 +241,34 @@ async fn live_submission_pool() -> Option<PgPool> {
         eprintln!("skipped live Submission HTTP contract: final Submission schema unavailable");
         return None;
     }
+    let gate_generation: Option<i64> = sqlx::query_scalar(
+        "WITH changed AS (
+           UPDATE application_maintenance_gate
+              SET mode='open',generation=generation+1,
+                  updated_by='system:first-launch',updated_at=clock_timestamp()
+            WHERE singleton_key AND mode='maintenance'
+            RETURNING generation
+         ), audited AS (
+           INSERT INTO maintenance_gate_audit(
+             id,from_mode,to_mode,generation,actor_identity,reason)
+           SELECT $1,'maintenance','open',generation,'system:first-launch',
+                  'open isolated Submission HTTP contract fixture'
+             FROM changed
+         )
+         SELECT generation FROM changed",
+    )
+    .bind(Uuid::new_v4())
+    .fetch_optional(&pool)
+    .await
+    .expect("open Submission HTTP contract maintenance gate");
+    if gate_generation.is_none() {
+        let mode: String =
+            sqlx::query_scalar("SELECT mode FROM application_maintenance_gate WHERE singleton_key")
+                .fetch_one(&pool)
+                .await
+                .expect("read Submission HTTP contract maintenance gate");
+        assert_eq!(mode, "open");
+    }
     Some(pool)
 }
 
@@ -297,6 +325,102 @@ async fn regenerate_rejects_caller_defined_identities_at_json_boundary() {
         status,
         StatusCode::UNPROCESSABLE_ENTITY,
         "caller identities must be rejected before database access: {body}"
+    );
+}
+
+async fn procedural_listing_includes_frozen_segment_text() {
+    let Some(pool) = live_submission_pool().await else {
+        return;
+    };
+    let (app, token) = live_actor(&pool).await;
+    let project = create_project(&app, &token, "Procedural segment context").await;
+    let project_id = Uuid::parse_str(&project).unwrap();
+    let owner_id: Uuid = sqlx::query_scalar("SELECT owner_user_id FROM bid_projects WHERE id=$1")
+        .bind(project_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let actor = format!("user:{owner_id}");
+    let clause_id = Uuid::new_v4();
+    let segment_id = Uuid::new_v4();
+    let classification_id = Uuid::new_v4();
+    let segment_text = "提交授权委托书原件";
+    let segment_sha256 = domain::sha256_hex(segment_text.as_bytes());
+    let stable_key = domain::sha256_hex(format!("{clause_id}:{segment_sha256}").as_bytes());
+
+    sqlx::query(
+        "INSERT INTO bid_clauses(
+           id,project_id,provenance,status,kind,text,must,revision,created_by)
+         VALUES($1,$2,'manual','confirmed','procedural',$3,true,2,$4)",
+    )
+    .bind(clause_id)
+    .bind(project_id)
+    .bind(segment_text)
+    .bind(&actor)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_procedural_segment_artifacts(
+           id,project_id,clause_id,stable_key,segmentation_version,start_offset,end_offset,
+           segment_utf8,segment_sha256,provenance)
+         VALUES($1,$2,$3,$4,'procedural-segment-v1',0,$5,$6,$7,'manual')",
+    )
+    .bind(segment_id)
+    .bind(project_id)
+    .bind(clause_id)
+    .bind(stable_key)
+    .bind(segment_text.len() as i64)
+    .bind(segment_text.as_bytes())
+    .bind(segment_sha256)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_procedural_classification_artifacts(
+           id,project_id,segment_id,revision,router_contract_version,router_promotion_generation,
+           router_result_status,router_requirement_kind,effective_requirement_kind,lifecycle_status)
+         VALUES($1,$2,$3,1,'procedural-router-v1',0,'classified',
+                'authorization_support','authorization_support','current')",
+    )
+    .bind(classification_id)
+    .bind(project_id)
+    .bind(segment_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut runtime_role = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL ROLE kb_runtime_api")
+        .execute(&mut *runtime_role)
+        .await
+        .unwrap();
+    let runtime_visible_text: String = sqlx::query_scalar(
+        "SELECT segment_text
+           FROM bidding_current_procedural_classifications
+          WHERE id=$1",
+    )
+    .bind(classification_id)
+    .fetch_one(&mut *runtime_role)
+    .await
+    .unwrap();
+    assert_eq!(runtime_visible_text, segment_text);
+    runtime_role.rollback().await.unwrap();
+
+    let (status, body) = call(
+        &app,
+        json_request(
+            &token,
+            "GET",
+            &format!("/api/v1/bids/{project}/procedural-requirements"),
+            Value::Null,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["classifications"][0]["segment_text"], segment_text,
+        "operators need the frozen segment body to resolve the requirement"
     );
 }
 
@@ -369,6 +493,22 @@ async fn bid_routes_and_list_are_isolated_by_project_owner() {
     let project_a = create_project(&app, &owner_a_token, "Owner A project").await;
     let project_b = create_project(&app, &owner_b_token, "Owner B project").await;
 
+    let (anonymous_status, anonymous_body) = call(
+        &app,
+        Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/bids/{project_a}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        anonymous_status,
+        StatusCode::UNAUTHORIZED,
+        "{anonymous_body}"
+    );
+    assert_eq!(anonymous_body["error"]["code"], "UNAUTHORIZED");
+
     let (cross_owner_status, cross_owner_body) = call(
         &app,
         json_request(
@@ -384,6 +524,7 @@ async fn bid_routes_and_list_are_isolated_by_project_owner() {
         StatusCode::NOT_FOUND,
         "{cross_owner_body}"
     );
+    assert_eq!(cross_owner_body["error"]["code"], "NOT_FOUND");
 
     let project_a_text = project_a.to_string();
     let encoded_project_a = format!(
@@ -421,6 +562,33 @@ async fn bid_routes_and_list_are_isolated_by_project_owner() {
         .collect::<Vec<_>>();
     assert!(ids.contains(&project_b.as_str()));
     assert!(!ids.contains(&project_a.as_str()));
+
+    let (family_status, family_body) = call(
+        &app,
+        json_request(
+            &owner_a_token,
+            "POST",
+            &format!("/api/v1/bids/{project_a}/clauses"),
+            json!({"text":"x","kind":"technical","must":true,"family":"technical"}),
+        ),
+    )
+    .await;
+    assert_ne!(family_status, StatusCode::OK, "{family_body}");
+    assert_ne!(family_status, StatusCode::CREATED, "{family_body}");
+    assert_ne!(family_body["error"]["code"], "NOT_FOUND", "{family_body}");
+
+    for uri in [
+        format!("/api/v1/bids/{project_a}/matching"),
+        format!("/api/v1/bids/{project_a}/quote"),
+        format!("/api/v1/bids/{project_a}/gate-issues"),
+        format!("/api/v1/bids/{project_a}/parts"),
+        format!("/api/v1/bids/{project_a}/company-profile"),
+        format!("/api/v1/bids/{project_a}/submission-profile"),
+    ] {
+        let (status, body) = call(&app, json_request(&owner_a_token, "GET", &uri, json!({}))).await;
+        assert_ne!(status, StatusCode::NOT_FOUND, "missing V1 GET {uri}");
+        assert_ne!(body["error"]["code"], "NOT_FOUND", "missing V1 GET {uri}");
+    }
 }
 
 async fn render_hides_cross_project_manifest_ids() {
@@ -812,10 +980,11 @@ async fn tender_upload_validates_bytes_before_staging_and_persists_media_type() 
 
 #[tokio::test]
 async fn submission_http_contracts() {
+    bid_routes_and_list_are_isolated_by_project_owner().await;
     tender_upload_validates_bytes_before_staging_and_persists_media_type().await;
+    procedural_listing_includes_frozen_segment_text().await;
     regenerate_rejects_caller_defined_identities_at_json_boundary().await;
     regenerate_rejects_existing_dependency_cas_mismatches().await;
-    bid_routes_and_list_are_isolated_by_project_owner().await;
     render_hides_cross_project_manifest_ids().await;
     shot_upload_replays_the_first_receipt_for_the_same_key().await;
     shot_set_rejects_cross_project_duplicates_and_stale_revision().await;

@@ -328,26 +328,36 @@ pub struct CompleteDocumentConversion<'a> {
     pub converter_contract_version: &'a str,
     pub image_asset_set_sha256: &'a str,
     pub image_assets: &'a [ConvertedSourceImageUpload],
+    pub extraction_target_id: Uuid,
+    pub expected_section_count: i32,
+    pub policy_version: &'a str,
+    pub prompt_version: &'a str,
     pub actor: &'a str,
 }
 
 pub async fn complete_document_conversion(
     pool: &PgPool,
     input: CompleteDocumentConversion<'_>,
-) -> Result<Uuid, sqlx::Error> {
+) -> Result<Value, sqlx::Error> {
     let image_assets = serde_json::to_value(input.image_assets)
         .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
-    sqlx::query_scalar("SELECT kb_bid_complete_document_conversion($1,$2,$3,$4,$5,$6,$7,$8)")
-        .bind(input.document_id)
-        .bind(input.claim_token)
-        .bind(input.source_artifact_id)
-        .bind(input.markdown)
-        .bind(input.converter_contract_version)
-        .bind(input.image_asset_set_sha256)
-        .bind(image_assets)
-        .bind(input.actor)
-        .fetch_one(pool)
-        .await
+    sqlx::query_scalar(
+        "SELECT kb_bid_complete_document_conversion($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+    )
+    .bind(input.document_id)
+    .bind(input.claim_token)
+    .bind(input.source_artifact_id)
+    .bind(input.markdown)
+    .bind(input.converter_contract_version)
+    .bind(input.image_asset_set_sha256)
+    .bind(image_assets)
+    .bind(input.extraction_target_id)
+    .bind(input.expected_section_count)
+    .bind(input.policy_version)
+    .bind(input.prompt_version)
+    .bind(input.actor)
+    .fetch_one(pool)
+    .await
 }
 
 pub async fn fail_document_conversion(
@@ -792,6 +802,86 @@ pub async fn promote_kind_router(
     context: &MutationContext,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar("SELECT kb_bid_promote_kind_router($1,$2,$3,$4,$5,$6,$7)")
+        .bind(target_version)
+        .bind(expected_current_version)
+        .bind(expected_promotion_generation)
+        .bind(&context.actor)
+        .bind(&context.idempotency_key)
+        .bind(&context.request.bytes)
+        .bind(&context.request.sha256)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn register_procedural_router_contract(
+    pool: &PgPool,
+    version: &str,
+    canonical_payload: &[u8],
+    content_sha256: &str,
+    context: &MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_register_procedural_router_contract($1,$2,$3,$4,$5,$6,$7)")
+        .bind(version)
+        .bind(canonical_payload)
+        .bind(content_sha256)
+        .bind(&context.actor)
+        .bind(&context.idempotency_key)
+        .bind(&context.request.bytes)
+        .bind(&context.request.sha256)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn promote_procedural_router(
+    pool: &PgPool,
+    target_version: &str,
+    expected_current_version: &str,
+    expected_promotion_generation: i64,
+    context: &MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_promote_procedural_router($1,$2,$3,$4,$5,$6,$7)")
+        .bind(target_version)
+        .bind(expected_current_version)
+        .bind(expected_promotion_generation)
+        .bind(&context.actor)
+        .bind(&context.idempotency_key)
+        .bind(&context.request.bytes)
+        .bind(&context.request.sha256)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn register_template_contract(
+    pool: &PgPool,
+    slot: &str,
+    version: &str,
+    canonical_payload: &[u8],
+    content_sha256: &str,
+    context: &MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_register_template_contract($1,$2,$3,$4,$5,$6,$7,$8)")
+        .bind(slot)
+        .bind(version)
+        .bind(canonical_payload)
+        .bind(content_sha256)
+        .bind(&context.actor)
+        .bind(&context.idempotency_key)
+        .bind(&context.request.bytes)
+        .bind(&context.request.sha256)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn promote_template_contract(
+    pool: &PgPool,
+    slot: &str,
+    target_version: &str,
+    expected_current_version: &str,
+    expected_promotion_generation: i64,
+    context: &MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_promote_template_contract($1,$2,$3,$4,$5,$6,$7,$8)")
+        .bind(slot)
         .bind(target_version)
         .bind(expected_current_version)
         .bind(expected_promotion_generation)

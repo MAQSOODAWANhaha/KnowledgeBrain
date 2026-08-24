@@ -1,5 +1,42 @@
+import { useState } from "react";
 import { Button, Checkbox, FileButton, Select, TextInput } from "@mantine/core";
-import type { CompanyProfile, SubmissionProfile } from "../api";
+import type {
+  AttachmentAction,
+  AttachmentKind,
+  CompanyProfile,
+  ProceduralAttachment,
+  ProceduralClassification,
+  ProceduralRequirementKind,
+  ProceduralResolution,
+  SubmissionProfile,
+} from "../api";
+
+const ATTACHMENT_KINDS: Array<{ value: AttachmentKind; label: string }> = [
+  { value: "bid_bond", label: "投标保证金" },
+  { value: "authorization_support", label: "授权证明" },
+  { value: "seal_sample", label: "盖章样本" },
+  { value: "procedural_support", label: "其他程序材料" },
+];
+
+const COMPANY_FIELDS: Array<{ key: Exclude<keyof CompanyProfile, "revision">; label: string }> = [
+  { key: "legal_name", label: "公司名称" },
+  { key: "unified_social_credit_code", label: "统一社会信用代码" },
+  { key: "registered_address", label: "注册地址" },
+  { key: "legal_representative", label: "法定代表人" },
+  { key: "contact_name", label: "联系人" },
+  { key: "contact_phone", label: "联系电话" },
+  { key: "contact_email", label: "联系邮箱" },
+];
+
+type SubmissionTextField = "buyer_name" | "project_code" | "authorized_representative" | "submission_date" | "submission_place";
+
+const SUBMISSION_FIELDS: Array<{ key: SubmissionTextField; label: string }> = [
+  { key: "buyer_name", label: "采购人" },
+  { key: "project_code", label: "项目编号" },
+  { key: "authorized_representative", label: "授权代表" },
+  { key: "submission_date", label: "递交日期" },
+  { key: "submission_place", label: "递交地点" },
+];
 
 export function MaterialsPane({
   view,
@@ -18,32 +55,32 @@ export function MaterialsPane({
   view: string;
   company: CompanyProfile;
   submission: SubmissionProfile;
-  classifications: Array<Record<string, unknown>>;
-  attachments: Array<Record<string, unknown>>;
+  classifications: ProceduralClassification[];
+  attachments: ProceduralAttachment[];
   ended: boolean;
   onSaveCompany: (body: CompanyProfile) => void;
   onSaveSubmission: (body: SubmissionProfile) => void;
-  onOverride: (id: string, kind: string, reason: string) => void;
-  onResolve: (id: string, resolution: string, attachmentId?: string, reason?: string) => void;
-  onUpload: (kind: string, file: File) => void;
-  onAttachAction: (id: string, action: string, revision: number) => void;
+  onOverride: (id: string, kind: ProceduralRequirementKind, reason: string) => void;
+  onResolve: (id: string, resolution: ProceduralResolution, attachmentId?: string, reason?: string) => void;
+  onUpload: (kind: AttachmentKind, file: File) => void;
+  onAttachAction: (id: string, action: AttachmentAction, revision: number) => void;
 }) {
+  const [attachmentKind, setAttachmentKind] = useState<AttachmentKind>("authorization_support");
+
   if (view === "company") {
     return (
       <div className="card">
         <h3 className="h3">公司资料</h3>
-        {["legal_name", "unified_social_credit_code", "registered_address", "legal_representative", "contact_name", "contact_phone", "contact_email"].map(
-          (key) => (
-            <TextInput
-              key={key}
-              mt="sm"
-              label={key}
-              data-testid={`company-${key}`}
-              value={String((company as Record<string, unknown>)[key] ?? "")}
-              onChange={(e) => onSaveCompany({ ...company, [key]: e.currentTarget.value })}
-            />
-          ),
-        )}
+        {COMPANY_FIELDS.map((field) => (
+          <TextInput
+            key={field.key}
+            mt="sm"
+            label={field.label}
+            data-testid={`company-${field.key}`}
+            value={company[field.key] ?? ""}
+            onChange={(e) => onSaveCompany({ ...company, [field.key]: e.currentTarget.value })}
+          />
+        ))}
         <Button mt="md" disabled={ended} onClick={() => onSaveCompany(company)}>
           保存公司资料
         </Button>
@@ -54,14 +91,14 @@ export function MaterialsPane({
     return (
       <div className="card">
         <h3 className="h3">投标资料</h3>
-        {["buyer_name", "project_code", "authorized_representative", "submission_date", "submission_place"].map((key) => (
+        {SUBMISSION_FIELDS.map((field) => (
           <TextInput
-            key={key}
+            key={field.key}
             mt="sm"
-            label={key}
-            data-testid={`submission-${key}`}
-            value={String((submission as Record<string, unknown>)[key] ?? "")}
-            onChange={(e) => onSaveSubmission({ ...submission, [key]: e.currentTarget.value })}
+            label={field.label}
+            data-testid={`submission-${field.key}`}
+            value={submission[field.key] ?? ""}
+            onChange={(e) => onSaveSubmission({ ...submission, [field.key]: e.currentTarget.value })}
           />
         ))}
         <Checkbox
@@ -87,8 +124,7 @@ export function MaterialsPane({
       <div className="card">
         <h3 className="h3">程序要求</h3>
         {classifications.map((c) => {
-          const id = String(c.id ?? "");
-          const requirementKind = String(c.effective_requirement_kind ?? c.router_requirement_kind ?? "");
+          const requirementKind = c.effective_requirement_kind ?? c.router_requirement_kind;
           const usableAttachments = attachments.filter(
             (attachment) =>
               attachment.kind === requirementKind &&
@@ -96,31 +132,31 @@ export function MaterialsPane({
               attachment.validation_status === "valid",
           );
           return (
-            <div key={id} className="inner" style={{ marginTop: 12 }}>
+            <div key={c.id} className="inner" style={{ marginTop: 12 }}>
+              <p>{c.segment_text}</p>
               <p className="note">
-                {String(c.effective_requirement_kind ?? c.router_requirement_kind ?? "review")} · {String(c.router_result_status)}
+                {requirementKind} · {c.router_result_status}
               </p>
               <div className="row">
                 <Select
                   data={["bid_bond", "authorization_support", "seal_sample", "procedural_support", "confirmation"]}
                   placeholder="override kind"
-                  onChange={(v) => v && onOverride(id, v, "人工覆盖")}
+                  onChange={(value) => value && onOverride(c.id, value as ProceduralRequirementKind, "人工覆盖")}
                 />
-                <Button size="compact-sm" variant="default" onClick={() => onResolve(id, "confirmed_by_user")}>
+                <Button size="compact-sm" variant="default" onClick={() => onResolve(c.id, "confirmed_by_user")}>
                   人工确认
                 </Button>
-                <Button size="compact-sm" variant="default" onClick={() => onResolve(id, "not_applicable", undefined, "本标不适用")}>
+                <Button size="compact-sm" variant="default" onClick={() => onResolve(c.id, "not_applicable", undefined, "本标不适用")}>
                   不适用
                 </Button>
                 {usableAttachments.map((attachment) => {
-                  const attachmentId = String(attachment.id ?? "");
                   return (
                     <Button
-                      key={attachmentId}
+                      key={attachment.id}
                       size="compact-sm"
                       variant="default"
-                      data-testid={`resolve-attachment-${id}-${attachmentId}`}
-                      onClick={() => onResolve(id, "satisfied_by_attachment", attachmentId)}
+                      data-testid={`resolve-attachment-${c.id}-${attachment.id}`}
+                      onClick={() => onResolve(c.id, "satisfied_by_attachment", attachment.id)}
                     >
                       用已确认附件满足
                     </Button>
@@ -134,22 +170,32 @@ export function MaterialsPane({
       </div>
       <div className="card">
         <h3 className="h3">附件</h3>
-        <FileButton onChange={(file) => file && onUpload("authorization_support", file)}>
-          {(props) => (
-            <Button {...props} variant="default" disabled={ended}>
-              上传授权类附件
-            </Button>
-          )}
-        </FileButton>
+        <div className="row">
+          <Select
+            data-testid="attachment-kind"
+            label="材料分类"
+            data={ATTACHMENT_KINDS}
+            value={attachmentKind}
+            allowDeselect={false}
+            onChange={(value) => value && setAttachmentKind(value as AttachmentKind)}
+          />
+          <FileButton onChange={(file) => file && onUpload(attachmentKind, file)}>
+            {(props) => (
+              <Button {...props} data-testid="attachment-upload" variant="default" disabled={ended}>
+                上传附件
+              </Button>
+            )}
+          </FileButton>
+        </div>
         {attachments.map((a) => (
-          <div key={String(a.id)} data-testid={`attachment-${String(a.id)}`} className="row" style={{ marginTop: 10 }}>
+          <div key={a.id} data-testid={`attachment-${a.id}`} className="row" style={{ marginTop: 10 }}>
             <span>
-              {String(a.kind)} · {String(a.status)} / {String(a.validation_status)}
+              {a.kind} · {a.status} / {a.validation_status}
             </span>
-            <Button size="compact-sm" onClick={() => onAttachAction(String(a.id), "validate", Number(a.revision ?? 1))}>
+            <Button size="compact-sm" onClick={() => onAttachAction(a.id, "validate", a.revision)}>
               校验
             </Button>
-            <Button size="compact-sm" variant="default" onClick={() => onAttachAction(String(a.id), "confirm", Number(a.revision ?? 1))}>
+            <Button size="compact-sm" variant="default" onClick={() => onAttachAction(a.id, "confirm", a.revision)}>
               确认
             </Button>
           </div>

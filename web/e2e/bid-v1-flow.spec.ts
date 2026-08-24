@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -14,6 +14,36 @@ const OUTPUT = "77777777-7777-7777-7777-777777777777";
 const OTHER_MANIFEST = "88888888-8888-8888-8888-888888888888";
 const PROCEDURAL = "99999999-9999-9999-9999-999999999999";
 const ATTACHMENT = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+
+async function activateWithKeyboard(locator: Locator) {
+  await expect(locator).toBeEnabled();
+  await locator.focus();
+  await locator.press("Enter");
+}
+
+async function toggleWithKeyboard(locator: Locator) {
+  await expect(locator).toBeEnabled();
+  await locator.focus();
+  await locator.press("Space");
+}
+
+async function replaceWithKeyboard(locator: Locator, value: string) {
+  await expect(locator).toBeEnabled();
+  await locator.focus();
+  await locator.press("ControlOrMeta+A");
+  await locator.pressSequentially(value);
+  await locator.press("Tab");
+}
+
+async function tabTo(page: Page, locator: Locator, maxTabs = 200) {
+  await expect(locator).toBeVisible();
+  await expect(locator).toBeEnabled();
+  for (let tab = 0; tab <= maxTabs; tab += 1) {
+    if (await locator.evaluate((node) => node === document.activeElement)) return;
+    await page.keyboard.press("Tab");
+  }
+  throw new Error(`Tab order did not reach ${await locator.getAttribute("data-testid") ?? (await locator.getAttribute("name")) ?? "target"}`);
+}
 
 function project(over: Record<string, unknown> = {}) {
   return {
@@ -46,9 +76,11 @@ async function mockApi(
     rejectFirstManifest?: boolean;
     failFirstRenderJob?: boolean;
     holdPartLoad?: string;
+    holdFirstPickMutation?: boolean;
     withoutPricingSet?: boolean;
     withProceduralAttachment?: boolean;
     validityConflict?: boolean;
+    gateIssues?: Array<{ code: string; part_key: string }>;
   } = {},
 ) {
   let quoteExists = false;
@@ -60,11 +92,16 @@ async function mockApi(
   const downloadedOutputIds: string[] = [];
   const partRegenerateBodies: Array<Record<string, unknown>> = [];
   const quoteFinalizeBodies: Array<Record<string, unknown>> = [];
+  const quoteLineBodies: Array<Record<string, unknown>> = [];
+  const attachmentUploadBodies: string[] = [];
   const submissionProfileBodies: Array<Record<string, unknown>> = [];
   const proceduralResolutionBodies: Array<Record<string, unknown>> = [];
   const factMutationBodies: Array<Record<string, unknown>> = [];
   const routePickBodies: Array<Record<string, unknown>> = [];
   let pickRevision = 0;
+  let quoteEditVersion = 0;
+  let quoteLines: Array<Record<string, unknown>> = [];
+  let projectCeiling: string | null = null;
   let pickItems: Array<{
     requirement_artifact_id: string;
     candidate_artifact_id: string;
@@ -72,6 +109,10 @@ async function mockApi(
   let releasePartLoad: () => void = () => {};
   const heldPartLoad = new Promise<void>((resolve) => {
     releasePartLoad = resolve;
+  });
+  let releaseFirstPickMutation: () => void = () => {};
+  const heldFirstPickMutation = new Promise<void>((resolve) => {
+    releaseFirstPickMutation = resolve;
   });
   const manifestsByKey = new Map<string, string>();
   const manifestsByJob = new Map<string, string>();
@@ -98,12 +139,18 @@ async function mockApi(
     }
     if (p === `/api/v1/bids/${PROJECT}` && method === "GET") {
       return json({
-        project: project(options.validityConflict
-          ? { bid_valid_days: 90, bid_valid_until: "2026-12-01T00:00:00Z" }
-          : {}),
+        project: project({
+          ...(options.validityConflict
+            ? { bid_valid_days: 90, bid_valid_until: "2026-12-01T00:00:00Z" }
+            : {}),
+          ceiling_price: projectCeiling,
+          ceiling_basis: projectCeiling ? "tax_inclusive" : "unspecified",
+          ceiling_revision: projectCeiling ? 1 : 0,
+          ceiling_identity_sha256: (projectCeiling ? "e" : "b").repeat(64),
+        }),
         documents: [],
         quote: quoteExists
-          ? { exists: true, pointer: quotePointer, edit_version: 1, title: "示范招标 报价", tax_mode: "tax_exclusive", lines: [] }
+          ? { exists: true, pointer: quotePointer, edit_version: quoteEditVersion, title: "示范招标 报价", tax_mode: "tax_exclusive", lines: quoteLines, snapshot_id: quotePointer === "finalized" ? "snap-1" : null }
           : { exists: false },
         facts: { revision: 1, suggestions: [], budget_amount: null, ceiling_price: null, ceiling_basis: "unspecified", ceiling_revision: 0, ceiling_identity_sha256: "b".repeat(64), expires_at: null, bid_open_at: null, bid_valid_until: null, bid_valid_days: null },
         clause_sets: options.withoutPricingSet
@@ -201,25 +248,55 @@ async function mockApi(
         expected_revision: number;
         items: typeof pickItems;
       };
+      const firstMutation = routePickBodies.length === 0;
       routePickBodies.push({
         expected_revision: body.expected_revision,
         items: body.items,
       });
+      if (body.expected_revision !== pickRevision) {
+        return json({ code: "ROUTE_PICK_REVISION_MISMATCH" }, 409);
+      }
       pickItems = body.items.map((item) => ({ ...item }));
       pickRevision += 1;
+      if (options.holdFirstPickMutation && firstMutation) await heldFirstPickMutation;
       return json({ route_revision: pickRevision });
     }
     if (p.endsWith("/quote") && method === "GET") {
       return json(
         quoteExists
-          ? { exists: true, pointer: quotePointer, edit_version: 1, title: "示范招标 报价", tax_mode: "tax_exclusive", lines: [], snapshot_id: quotePointer === "finalized" ? "snap-1" : null }
+          ? { exists: true, pointer: quotePointer, edit_version: quoteEditVersion, title: "示范招标 报价", tax_mode: "tax_exclusive", lines: quoteLines, snapshot_id: quotePointer === "finalized" ? "snap-1" : null }
           : { exists: false },
       );
     }
     if (p.endsWith("/quote/draft")) {
       quoteExists = true;
       quotePointer = "draft";
+      quoteEditVersion = 0;
       return json({ exists: true, pointer: "draft", edit_version: 0 }, 201);
+    }
+    if (p.includes("/quote/lines/") && method === "PUT") {
+      const lineId = p.split("/").at(-1) ?? "";
+      const body = req.postDataJSON() as Record<string, unknown>;
+      quoteLineBodies.push(body);
+      if (body.expected_edit_version !== quoteEditVersion) {
+        return json({ code: "QUOTE_EDIT_VERSION_CAS_MISMATCH" }, 409);
+      }
+      quoteEditVersion += 1;
+      quoteLines = [
+        {
+          id: lineId,
+          ...body,
+          complete:
+            body.pricing_mode === "lump_sum"
+              ? body.entered_amount != null
+              : body.quantity != null && body.unit != null && body.unit_price != null,
+          basis_amount: body.entered_amount ?? null,
+          net_amount: body.entered_amount ?? null,
+          tax_amount: "0.00",
+          gross_amount: body.entered_amount ?? null,
+        },
+      ];
+      return json({ line_id: lineId, edit_version: quoteEditVersion });
     }
     if (p.endsWith("/quote/finalize")) {
       quoteFinalizeBodies.push(req.postDataJSON() as Record<string, unknown>);
@@ -241,6 +318,7 @@ async function mockApi(
         classifications: options.withProceduralAttachment
           ? [{
               id: PROCEDURAL,
+              segment_text: "提交授权委托书原件",
               effective_requirement_kind: "authorization_support",
               router_result_status: "classified",
               lifecycle_status: "current",
@@ -264,6 +342,10 @@ async function mockApi(
             }]
           : [],
       });
+    }
+    if (p.endsWith("/attachments") && method === "POST") {
+      attachmentUploadBodies.push(req.postData() ?? "");
+      return json({ id: ATTACHMENT, revision: 1 }, 201);
     }
     if (p.endsWith("/parts") && method === "GET") return json({ required_part_keys: required, parts: required.map((part_key) => ({ part_key, stale: false })) });
     if (p.includes("/parts/") && method === "GET") {
@@ -289,9 +371,10 @@ async function mockApi(
       return json({
         format: url.searchParams.get("format"),
         status: "reject",
-        issues: [
+        issues: options.gateIssues ?? [
           { code: "QUOTE_NOT_FINALIZED", part_key: "6:quote" },
           { code: "BID_VALIDITY_CONFLICT", part_key: "6:letter" },
+          { code: "KIND_ROUTER_RECONFIRMATION_REQUIRED", part_key: "1" },
         ],
         required_part_keys: required,
       });
@@ -354,39 +437,64 @@ async function mockApi(
     downloadedOutputIds,
     partRegenerateBodies,
     quoteFinalizeBodies,
+    quoteLineBodies,
+    attachmentUploadBodies,
     submissionProfileBodies,
     proceduralResolutionBodies,
     factMutationBodies,
     routePickBodies,
     releasePartLoad,
+    releaseFirstPickMutation,
+    setProjectCeiling: (ceiling: string) => {
+      projectCeiling = ceiling;
+    },
   };
 }
 
 test("mocked UI contract: keyboard walk and export buttons visible", async ({ page }, testInfo) => {
   await mockApi(page);
   await page.goto("/#/login");
-  await page.getByTestId("login-email").fill("e2e@local");
-  await page.getByTestId("login-password").fill("pw");
-  await page.getByTestId("login-submit").click();
+  await tabTo(page, page.getByTestId("login-email"));
+  await page.keyboard.type("e2e@local");
+  await tabTo(page, page.getByTestId("login-password"));
+  await page.keyboard.type("pw");
+  await tabTo(page, page.getByTestId("login-submit"));
+  await page.keyboard.press("Enter");
   await expect(page.getByTestId("new-bid")).toBeVisible();
-  await page.getByTestId("new-bid").click();
-  await page.getByTestId("bid-title").fill("示范招标");
-  await page.getByTestId("bid-ends").fill("2026-12-31");
-  await page.getByTestId("bid-create").click();
+  await tabTo(page, page.getByTestId("new-bid"));
+  await page.keyboard.press("Enter");
+  await tabTo(page, page.getByTestId("bid-title"));
+  await page.keyboard.type("示范招标");
+  await tabTo(page, page.getByTestId("bid-ends"));
+  await page.keyboard.type("2026-12-31");
+  await tabTo(page, page.getByTestId("bid-create"));
+  await page.keyboard.press("Enter");
   await expect(page.getByTestId("wizard-files")).toBeVisible();
-  await page.getByTestId("wizard-facts").click();
+  await tabTo(page, page.getByTestId("wizard-facts"));
+  await page.keyboard.press("Enter");
   await expect(page.getByTestId("validity-conflict")).toBeVisible();
-  await page.getByTestId("nav-pending").click();
-  await page.getByTestId("clause-text").fill("系统必须支持双千兆网络接口。");
-  await page.getByTestId("clause-add").click();
-  await page.getByTestId("wizard-matching").click();
-  await page.getByTestId("schedule-match").click();
-  await page.getByTestId("wizard-quote").click();
-  await page.getByTestId("quote-create").click();
-  await page.getByTestId("no-ceiling-review").click();
-  await page.getByTestId("quote-finalize").click();
-  await page.getByTestId("wizard-parts").click();
+  await tabTo(page, page.getByTestId("nav-pending"));
+  await page.keyboard.press("Enter");
+  await tabTo(page, page.getByTestId("clause-text"));
+  await page.keyboard.type("系统必须支持双千兆网络接口。");
+  await tabTo(page, page.getByTestId("clause-add"));
+  await page.keyboard.press("Enter");
+  await tabTo(page, page.getByTestId("wizard-matching"));
+  await page.keyboard.press("Enter");
+  await tabTo(page, page.getByTestId("schedule-match"));
+  await page.keyboard.press("Enter");
+  await tabTo(page, page.getByTestId("wizard-quote"));
+  await page.keyboard.press("Enter");
+  await tabTo(page, page.getByTestId("quote-create"));
+  await page.keyboard.press("Enter");
+  await tabTo(page, page.getByTestId("no-ceiling-review"));
+  await page.keyboard.press("Space");
+  await tabTo(page, page.getByTestId("quote-finalize"));
+  await page.keyboard.press("Enter");
+  await tabTo(page, page.getByTestId("wizard-parts"));
+  await page.keyboard.press("Enter");
   await expect(page.getByTestId("gate-issues")).toContainText("BID_VALIDITY_CONFLICT");
+  await expect(page.getByTestId("gate-issues")).toContainText("KIND_ROUTER_RECONFIRMATION_REQUIRED");
   await expect(page.getByTestId("export-docx")).toBeVisible();
   await expect(page.getByTestId("export-pdf")).toBeVisible();
   await page.screenshot({ path: path.join(testInfo.outputDir, "bid-v1-parts.png"), fullPage: true });
@@ -399,12 +507,167 @@ test("mocked UI contract: keyboard walk and export buttons visible", async ({ pa
   );
 });
 
-test("technical matching preserves both manual picks after controlled reloads", async ({ page }) => {
+for (const issue of [
+  { code: "BID_VALIDITY_CONFLICT", part_key: "6:letter" },
+  { code: "KIND_ROUTER_RECONFIRMATION_REQUIRED", part_key: "1" },
+]) {
+  test(`submission gate exposes ${issue.code} independently`, async ({ page }) => {
+    await mockApi(page, { gateIssues: [issue] });
+    await page.goto("/#/login");
+    await page.getByTestId("login-email").fill("e2e@local");
+    await page.getByTestId("login-password").fill("pw");
+    await activateWithKeyboard(page.getByTestId("login-submit"));
+    await page.goto(`/#/bids/${PROJECT}?step=parts&part=1`);
+
+    const gate = page.getByTestId("gate-issues");
+    await expect(gate).toContainText("Gate reject · 1 项");
+    await expect(gate).toContainText(`${issue.code} @ ${issue.part_key}`);
+    const otherCode = issue.code === "BID_VALIDITY_CONFLICT"
+      ? "KIND_ROUTER_RECONFIRMATION_REQUIRED"
+      : "BID_VALIDITY_CONFLICT";
+    await expect(gate).not.toContainText(otherCode);
+  });
+}
+
+test("quote editor sends explicit lump sum and unit price values", async ({ page }) => {
   const requests = await mockApi(page);
   await page.goto("/#/login");
   await page.getByTestId("login-email").fill("e2e@local");
   await page.getByTestId("login-password").fill("pw");
-  await page.getByTestId("login-submit").click();
+  await activateWithKeyboard(page.getByTestId("login-submit"));
+  await page.goto(`/#/bids/${PROJECT}?step=quote&view=quote`);
+
+  await activateWithKeyboard(page.getByTestId("quote-create"));
+  await activateWithKeyboard(page.getByTestId("quote-add-line"));
+  const lineId = await page.locator('tr[data-testid^="quote-line-"]').getAttribute("data-testid");
+  expect(lineId).toBeTruthy();
+  const suffix = lineId!.replace("quote-line-", "");
+  const mutateQuote = async (action: () => Promise<void>) => {
+    const response = page.waitForResponse(
+      (candidate) =>
+        candidate.request().method() === "PUT" &&
+        new URL(candidate.url()).pathname.includes("/quote/lines/"),
+    );
+    await action();
+    expect((await response).ok()).toBeTruthy();
+  };
+
+  await mutateQuote(() =>
+    replaceWithKeyboard(page.getByTestId(`quote-line-entered-amount-${suffix}`), "1250.00"),
+  );
+  await mutateQuote(() => toggleWithKeyboard(page.getByTestId(`quote-line-confirmed-${suffix}`)));
+  const pricingMode = page.getByTestId(`quote-line-pricing-mode-${suffix}`);
+  await mutateQuote(async () => {
+    await pricingMode.focus();
+    await pricingMode.press("ArrowDown");
+    await pricingMode.press("ArrowDown");
+    await pricingMode.press("Enter");
+  });
+  await expect(pricingMode).toHaveValue("单价计价");
+  await mutateQuote(() =>
+    replaceWithKeyboard(page.getByTestId(`quote-line-quantity-${suffix}`), "2.000000"),
+  );
+  await mutateQuote(() => replaceWithKeyboard(page.getByTestId(`quote-line-unit-${suffix}`), "套"));
+  await mutateQuote(() =>
+    replaceWithKeyboard(page.getByTestId(`quote-line-unit-price-${suffix}`), "600.000000"),
+  );
+  await mutateQuote(() => toggleWithKeyboard(page.getByTestId(`quote-line-confirmed-${suffix}`)));
+  await mutateQuote(() =>
+    replaceWithKeyboard(page.getByTestId(`quote-line-tax-rate-${suffix}`), "0.060000"),
+  );
+  expect(requests.quoteLineBodies.at(-1)).toMatchObject({ tax_rate: "0.060000", user_confirmed: false });
+  await mutateQuote(() => toggleWithKeyboard(page.getByTestId(`quote-line-confirmed-${suffix}`)));
+
+  expect(requests.quoteLineBodies[0]).toMatchObject({
+    pricing_mode: "lump_sum",
+    entered_amount: null,
+    user_confirmed: false,
+  });
+  expect(requests.quoteLineBodies).toContainEqual(
+    expect.objectContaining({ pricing_mode: "lump_sum", entered_amount: "1250.00" }),
+  );
+  expect(requests.quoteLineBodies.at(-1)).toMatchObject({
+    pricing_mode: "unit_price",
+    quantity: "2.000000",
+    unit: "套",
+    unit_price: "600.000000",
+    entered_amount: null,
+    tax_rate: "0.060000",
+    user_confirmed: true,
+  });
+});
+
+test("attachment upload uses the explicitly selected material kind", async ({ page }) => {
+  const requests = await mockApi(page, { withProceduralAttachment: true });
+  await page.goto("/#/login");
+  await page.getByTestId("login-email").fill("e2e@local");
+  await page.getByTestId("login-password").fill("pw");
+  await activateWithKeyboard(page.getByTestId("login-submit"));
+  await page.goto(`/#/bids/${PROJECT}?step=quote&view=procedural`);
+
+  const kind = page.getByTestId("attachment-kind");
+  await kind.focus();
+  await kind.press("ArrowUp");
+  await kind.press("ArrowUp");
+  await kind.press("Enter");
+  await expect(kind).toHaveValue("投标保证金");
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "bond.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("%PDF-1.4\n%%EOF\n"),
+  });
+
+  await expect.poll(() => requests.attachmentUploadBodies.length).toBe(1);
+  expect(requests.attachmentUploadBodies[0]).toContain("bid_bond");
+});
+
+test("quote finalization clears a stale no-ceiling review when a ceiling appears", async ({ page }) => {
+  const requests = await mockApi(page);
+  await page.goto("/#/login");
+  await page.getByTestId("login-email").fill("e2e@local");
+  await page.getByTestId("login-password").fill("pw");
+  await activateWithKeyboard(page.getByTestId("login-submit"));
+  await page.goto(`/#/bids/${PROJECT}?step=quote&view=quote`);
+
+  await activateWithKeyboard(page.getByTestId("quote-create"));
+  await toggleWithKeyboard(page.getByTestId("no-ceiling-review"));
+  requests.setProjectCeiling("10000.00");
+  await expect(page.getByTestId("no-ceiling-review")).toBeHidden({ timeout: 7_000 });
+  await activateWithKeyboard(page.getByTestId("quote-finalize"));
+
+  await expect.poll(() => requests.quoteFinalizeBodies).toHaveLength(1);
+  expect(requests.quoteFinalizeBodies[0]).toMatchObject({
+    expected_ceiling_revision: 1,
+    no_ceiling_reviewed: false,
+  });
+});
+
+test("procedural requirement cards show their source segment text", async ({ page }) => {
+  await mockApi(page, { withProceduralAttachment: true });
+  await page.goto("/#/login");
+  await page.getByTestId("login-email").fill("e2e@local");
+  await page.getByTestId("login-password").fill("pw");
+  await activateWithKeyboard(page.getByTestId("login-submit"));
+  await page.goto(`/#/bids/${PROJECT}?step=quote&view=procedural`);
+
+  await expect(page.getByText("提交授权委托书原件")).toBeVisible();
+});
+
+test("technical matching serializes rapid picks without losing either selection", async ({ page }) => {
+  const requests = await mockApi(page, { holdFirstPickMutation: true });
+  const statuses: number[] = [];
+  page.on("response", (response) => {
+    if (
+      response.request().method() === "PUT" &&
+      new URL(response.url()).pathname === `/api/v1/bids/${PROJECT}/matching/routes/${ROUTE}/pick-set`
+    ) {
+      statuses.push(response.status());
+    }
+  });
+  await page.goto("/#/login");
+  await page.getByTestId("login-email").fill("e2e@local");
+  await page.getByTestId("login-password").fill("pw");
+  await activateWithKeyboard(page.getByTestId("login-submit"));
   await page.goto(`/#/bids/${PROJECT}?step=matching&view=unsectioned`);
 
   const firstPick = page.getByTestId(`pick-${CAND}`);
@@ -412,20 +675,13 @@ test("technical matching preserves both manual picks after controlled reloads", 
   await expect(firstPick).not.toBeChecked();
   await expect(secondPick).not.toBeChecked();
 
-  const firstResponse = page.waitForResponse((response) =>
-    response.request().method() === "PUT" &&
-    new URL(response.url()).pathname === `/api/v1/bids/${PROJECT}/matching/routes/${ROUTE}/pick-set`,
-  );
-  await firstPick.click();
-  expect((await firstResponse).ok()).toBeTruthy();
-  await expect(firstPick).toBeChecked();
+  await toggleWithKeyboard(firstPick);
+  await expect.poll(() => requests.routePickBodies.length).toBe(1);
+  await toggleWithKeyboard(secondPick);
+  requests.releaseFirstPickMutation();
 
-  const secondResponse = page.waitForResponse((response) =>
-    response.request().method() === "PUT" &&
-    new URL(response.url()).pathname === `/api/v1/bids/${PROJECT}/matching/routes/${ROUTE}/pick-set`,
-  );
-  await secondPick.click();
-  expect((await secondResponse).ok()).toBeTruthy();
+  await expect.poll(() => statuses.length).toBe(2);
+  expect(statuses).toEqual([200, 200]);
   await expect(firstPick).toBeChecked();
   await expect(secondPick).toBeChecked();
 
@@ -479,6 +735,22 @@ test("quote finalization is blocked when the pricing set identity is unavailable
 
   await expect(page.getByText("缺少价格条款集，无法定稿报价")).toBeVisible();
   expect(requests.quoteFinalizeBodies).toHaveLength(0);
+});
+
+test("profile polling does not overwrite an unsaved company draft", async ({ page }) => {
+  await mockApi(page);
+  await page.goto("/#/login");
+  await page.getByTestId("login-email").fill("e2e@local");
+  await page.getByTestId("login-password").fill("pw");
+  await activateWithKeyboard(page.getByTestId("login-submit"));
+  await page.goto(`/#/bids/${PROJECT}?step=quote&view=company`);
+
+  const legalName = page.getByTestId("company-legal_name");
+  await expect(legalName).toHaveValue("示例公司");
+  await replaceWithKeyboard(legalName, "尚未保存的公司草稿");
+  await page.waitForTimeout(5_500);
+
+  await expect(legalName).toHaveValue("尚未保存的公司草稿");
 });
 
 test("submission profile save is blocked when the date is empty", async ({ page }) => {

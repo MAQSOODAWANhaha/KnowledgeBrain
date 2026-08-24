@@ -2,6 +2,8 @@
 
 mod jobs;
 pub use jobs::*;
+mod lease;
+pub use lease::*;
 
 use chrono::{Duration, Utc};
 use domain::{

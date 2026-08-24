@@ -23,8 +23,8 @@ pub struct StoredManifestRenderAsset {
     pub digest: String,
     pub media_type: String,
     pub byte_length: i64,
-    pub pixel_width: i32,
-    pub pixel_height: i32,
+    pub pixel_width: Option<i32>,
+    pub pixel_height: Option<i32>,
     pub source_kind: String,
     pub source_locator: Value,
     pub manifest_ordinal: i32,
@@ -49,12 +49,12 @@ fn protocol(message: impl Into<String>) -> sqlx::Error {
     sqlx::Error::Protocol(message.into())
 }
 
-async fn load_validated_image(digest: &str) -> Result<(Vec<u8>, ValidatedUpload), sqlx::Error> {
+async fn load_validated_asset(digest: &str) -> Result<(Vec<u8>, ValidatedUpload), sqlx::Error> {
     let digest = digest.to_string();
     tokio::task::spawn_blocking(move || {
         let bytes = crate::read_blob(&digest).map_err(|_| "MANIFEST_ASSET_BYTES_MISSING")?;
         let metadata =
-            validate_upload_bytes(&bytes, false).map_err(|_| "MANIFEST_ASSET_IMAGE_INVALID")?;
+            validate_upload_bytes(&bytes, true).map_err(|_| "MANIFEST_ASSET_BYTES_INVALID")?;
         Ok::<_, &'static str>((bytes, metadata))
     })
     .await
@@ -220,8 +220,14 @@ pub async fn list_procedural_classifications(
     project_id: Uuid,
 ) -> Result<Vec<Value>, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.segment_id), '[]'::jsonb)
-           FROM bidding_current_procedural_classifications c WHERE c.project_id=$1",
+        "SELECT COALESCE(
+            jsonb_agg(
+              to_jsonb(classification) ORDER BY classification.segment_id
+            ),
+            '[]'::jsonb
+          )
+           FROM bidding_current_procedural_classifications classification
+          WHERE classification.project_id=$1",
     )
     .bind(project_id)
     .fetch_one(pool)
@@ -284,6 +290,7 @@ pub struct UploadAttachment<'a> {
     pub byte_length: i64,
     pub pixel_width: Option<i32>,
     pub pixel_height: Option<i32>,
+    pub render_pages: &'a Value,
 }
 
 pub async fn upload_attachment(
@@ -292,7 +299,7 @@ pub async fn upload_attachment(
     context: &MutationContext,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT kb_bid_upload_attachment($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+        "SELECT kb_bid_upload_attachment($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
     )
     .bind(input.staging_id)
     .bind(input.id)
@@ -304,6 +311,7 @@ pub async fn upload_attachment(
     .bind(input.byte_length)
     .bind(input.pixel_width)
     .bind(input.pixel_height)
+    .bind(input.render_pages)
     .bind(&context.actor)
     .bind(&context.idempotency_key)
     .bind(&context.request.bytes)
@@ -544,15 +552,15 @@ where
     .await?;
     let object_ref: String = row.get("object_ref");
     let digest: String = row.get("digest");
-    let (bytes, metadata) = load_validated_image(&digest).await?;
-    let pixel_width: i32 = row.get("pixel_width");
-    let pixel_height: i32 = row.get("pixel_height");
+    let (bytes, metadata) = load_validated_asset(&digest).await?;
+    let pixel_width: Option<i32> = row.get("pixel_width");
+    let pixel_height: Option<i32> = row.get("pixel_height");
     if object_ref != crate::object_ref(&digest)
         || domain::sha256_hex(&bytes) != digest
         || metadata.media_type != row.get::<String, _>("media_type")
         || metadata.byte_length != row.get::<i64, _>("byte_length")
-        || metadata.pixel_width != Some(pixel_width)
-        || metadata.pixel_height != Some(pixel_height)
+        || metadata.pixel_width != pixel_width
+        || metadata.pixel_height != pixel_height
     {
         return Err(protocol("MANIFEST_ASSET_IDENTITY_MISMATCH"));
     }

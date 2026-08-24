@@ -1,4 +1,4 @@
-import { Button, SegmentedControl } from "@mantine/core";
+import { Button, SegmentedControl, Textarea } from "@mantine/core";
 import { GfmPreview } from "./gfm";
 import type { GateIssue } from "../api";
 import { partTitle } from "./helpers";
@@ -85,7 +85,14 @@ export function PartsPane({
                 <p className="note">这一册还是空的。切到编辑，或按依赖重生成。</p>
               )
             ) : (
-              <textarea data-testid="part-editor" value={markdown} onChange={(e) => onChange(e.target.value)} spellCheck={false} />
+              <Textarea
+                data-testid="part-editor"
+                value={markdown}
+                onChange={(event) => onChange(event.currentTarget.value)}
+                autosize
+                minRows={24}
+                spellCheck={false}
+              />
             )}
           </div>
         </div>

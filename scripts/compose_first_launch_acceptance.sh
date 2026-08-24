@@ -391,7 +391,10 @@ jq -e \
   and .compose_before_end_hook.status == "passed"
   and .compose_before_end_hook.evidence.kind_router.marker_rejected_pdf
   and .compose_before_end_hook.evidence.restart_recovery.completed_after_restart
-  and .compose_before_end_hook.evidence.object_lifecycle.attachment_released_deleted
+  and .compose_before_end_hook.evidence.object_lifecycle.attachment_business_owner_released
+  and .compose_before_end_hook.evidence.object_lifecycle.attachment_manifest_owner_retained
+  and .compose_before_end_hook.evidence.object_lifecycle.attachment_object_available_after_business_release
+  and .compose_before_end_hook.evidence.object_lifecycle.attachment_manifest_owner_count > 0
   and .compose_before_end_hook.evidence.object_lifecycle.manifest_asset_count > 0
   and .compose_before_end_hook.evidence.object_lifecycle.manifest_owner_present_and_available
   and .compose_before_end_hook.evidence.object_lifecycle.released_staging_deleted

@@ -7,6 +7,8 @@ use storage::bidding::{
 };
 use uuid::Uuid;
 
+mod support;
+
 struct PublicationSeed {
     project_id: Uuid,
     document_id: Uuid,
@@ -173,12 +175,13 @@ fn publication_context(
 
 #[tokio::test]
 async fn publication_is_atomic_and_fact_accept_race_is_linearizable() {
-    let Ok(pool) = storage::connect().await else {
-        eprintln!("skipped live TenderPublication contract: database unavailable");
+    let Some(pool) = support::connect_postgres_contract("TenderPublication").await else {
         return;
     };
-    if !final_tender_schema_is_ready(&pool).await {
-        eprintln!("skipped live TenderPublication contract: final V1 schema unavailable");
+    if !support::require_final_schema(
+        "TenderPublication",
+        final_tender_schema_is_ready(&pool).await,
+    ) {
         return;
     }
 
@@ -346,13 +349,399 @@ async fn publication_is_atomic_and_fact_accept_race_is_linearizable() {
 }
 
 #[tokio::test]
-async fn confirmed_clause_cannot_patch_kind_before_leaving_old_membership() {
-    let Ok(pool) = storage::connect().await else {
-        eprintln!("skipped live ClauseLifecycle contract: database unavailable");
+async fn kind_router_promotions_refresh_generation_two_and_three_markers() {
+    let Some(pool) = support::connect_postgres_contract("TenderPublication").await else {
         return;
     };
-    if !final_tender_schema_is_ready(&pool).await {
-        eprintln!("skipped live ClauseLifecycle contract: final V1 schema unavailable");
+    if !support::require_final_schema(
+        "TenderPublication",
+        final_tender_schema_is_ready(&pool).await,
+    ) {
+        return;
+    }
+
+    let markdown = "# 技术要求\n系统必须支持国密协议。";
+    let section = outline_and_route(markdown).unwrap().remove(0);
+    let graph = section.candidate_graph();
+    let seed = seed_publication(&pool, markdown).await;
+    let target_id = Uuid::new_v4();
+    let claim_token = Uuid::new_v4();
+    seed_running_target(&pool, &seed, target_id, 1, claim_token).await;
+    let publication = storage::bidding::publish_extraction_section(
+        &pool,
+        PublishSection {
+            target_id,
+            attempt: 1,
+            claim_token,
+            section_key: &section.key,
+            heading_path: &json!(section.heading_path),
+            parent_start_offset: section.parent_start_offset as i64,
+            parent_end_offset: section.parent_end_offset as i64,
+            expected_current_publication_id: None,
+            candidate_graph: &graph,
+        },
+        &publication_context(&seed, target_id, "kind-promotion", &graph),
+    )
+    .await
+    .expect("publish extracted clause for promotion");
+    let extracted_clause_id: Uuid = publication["clauses"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let clause_text: String = sqlx::query_scalar("SELECT text FROM bid_clauses WHERE id=$1")
+        .bind(extracted_clause_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let confirm_extracted = MutationContext::new(
+        seed.actor.clone(),
+        format!("confirm-extracted-{extracted_clause_id}"),
+        &json!({"action":"confirm","expected_revision":1}),
+    )
+    .unwrap();
+    storage::bidding::mutate_clause(
+        &pool,
+        seed.project_id,
+        extracted_clause_id,
+        "confirm",
+        &json!({}),
+        1,
+        &confirm_extracted,
+    )
+    .await
+    .expect("confirm extracted clause before promotion");
+
+    let manual_clause_id = Uuid::new_v4();
+    let create_manual = MutationContext::new(
+        seed.actor.clone(),
+        format!("create-manual-{manual_clause_id}"),
+        &json!({"text":clause_text,"kind":"technical"}),
+    )
+    .unwrap();
+    storage::bidding::create_clause(
+        &pool,
+        manual_clause_id,
+        seed.project_id,
+        &clause_text,
+        "technical",
+        true,
+        &create_manual,
+    )
+    .await
+    .expect("create manual control clause");
+    let confirm_manual = MutationContext::new(
+        seed.actor.clone(),
+        format!("confirm-manual-{manual_clause_id}"),
+        &json!({"action":"confirm","expected_revision":1}),
+    )
+    .unwrap();
+    storage::bidding::mutate_clause(
+        &pool,
+        seed.project_id,
+        manual_clause_id,
+        "confirm",
+        &json!({}),
+        1,
+        &confirm_manual,
+    )
+    .await
+    .expect("confirm manual control clause");
+
+    let initial_router: (String, i64) = sqlx::query_as(
+        "SELECT version,promotion_generation FROM kind_router_current WHERE singleton_key",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(initial_router, ("kind-router-v1".into(), 0));
+
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query(
+        "UPDATE application_maintenance_gate
+            SET mode='maintenance',generation=generation+1,updated_by=$1,updated_at=clock_timestamp()
+          WHERE singleton_key",
+    )
+    .bind(&seed.actor)
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    let text_sha256 = domain::sha256_hex(clause_text.as_bytes());
+    let suffix = Uuid::new_v4().simple().to_string();
+    let versions = [
+        (format!("kind-router-{suffix}-v2"), "service"),
+        (format!("kind-router-{suffix}-v3"), "pricing"),
+        (format!("kind-router-{suffix}-v4"), "service"),
+    ];
+    for (version, kind) in &versions {
+        let mut overrides = serde_json::Map::new();
+        overrides.insert(text_sha256.clone(), json!(kind));
+        let contract = json!({
+            "schema_version": 1,
+            "version": version,
+            "family": {
+                "technical": "technical",
+                "qualification": "commercial",
+                "service": "commercial",
+                "pricing": null,
+                "schedule_delivery": null,
+                "schedule_payment": null,
+                "evaluation": null,
+                "procedural": null,
+            },
+            "overrides": overrides,
+        });
+        let canonical_payload = serde_json::to_vec(&contract).unwrap();
+        let content_sha256 = domain::sha256_hex(&canonical_payload);
+        let request = json!({"version":version,"content_sha256":content_sha256});
+        let request_bytes = serde_json::to_vec(&request).unwrap();
+        let request_sha256 = domain::sha256_hex(&request_bytes);
+        let registered: Value =
+            sqlx::query_scalar("SELECT kb_bid_register_kind_router_contract($1,$2,$3,$4,$5,$6,$7)")
+                .bind(version)
+                .bind(canonical_payload)
+                .bind(content_sha256)
+                .bind(&seed.actor)
+                .bind(format!("register-{version}"))
+                .bind(request_bytes)
+                .bind(request_sha256)
+                .fetch_one(&mut *transaction)
+                .await
+                .unwrap_or_else(|error| panic!("register {version}: {error}"));
+        assert_eq!(registered["version"], version.as_str());
+    }
+
+    let mut expected_version = "kind-router-v1".to_string();
+    for (index, (target_version, expected_kind)) in versions.iter().enumerate() {
+        let expected_generation = i64::try_from(index).unwrap();
+        let target_generation = expected_generation + 1;
+        let request = json!({
+            "target_version": target_version,
+            "expected_current_version": expected_version,
+            "expected_promotion_generation": expected_generation,
+        });
+        let request_bytes = serde_json::to_vec(&request).unwrap();
+        let request_sha256 = domain::sha256_hex(&request_bytes);
+        let promoted: Value =
+            sqlx::query_scalar("SELECT kb_bid_promote_kind_router($1,$2,$3,$4,$5,$6,$7)")
+                .bind(target_version)
+                .bind(&expected_version)
+                .bind(expected_generation)
+                .bind(&seed.actor)
+                .bind(format!("promote-{target_version}"))
+                .bind(request_bytes)
+                .bind(request_sha256)
+                .fetch_one(&mut *transaction)
+                .await
+                .unwrap_or_else(|error| panic!("promote {target_version}: {error}"));
+        assert_eq!(promoted["promotion_generation"], target_generation);
+
+        let extracted: (String, String, i64, Option<i64>) = sqlx::query_as(
+            "SELECT status,kind,revision,confirmation_required_router_generation
+               FROM bid_clauses WHERE id=$1",
+        )
+        .bind(extracted_clause_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+        assert_eq!(
+            extracted,
+            (
+                "draft".into(),
+                (*expected_kind).into(),
+                target_generation + 2,
+                Some(target_generation),
+            )
+        );
+        let manual: (String, String, i64, Option<i64>) = sqlx::query_as(
+            "SELECT status,kind,revision,confirmation_required_router_generation
+               FROM bid_clauses WHERE id=$1",
+        )
+        .bind(manual_clause_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+        assert_eq!(manual, ("confirmed".into(), "technical".into(), 2, None));
+        expected_version = target_version.clone();
+    }
+
+    let clause_audits: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events
+          WHERE operation='bid.kind_router.promotion_clause'
+            AND entity_locator->>'clause_id'=$1",
+    )
+    .bind(extracted_clause_id.to_string())
+    .fetch_one(&mut *transaction)
+    .await
+    .unwrap();
+    assert_eq!(clause_audits, 3);
+    sqlx::query(
+        "UPDATE application_maintenance_gate
+            SET mode='open',generation=generation+1,updated_by=$1,updated_at=clock_timestamp()
+          WHERE singleton_key",
+    )
+    .bind(&seed.actor)
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    let reconfirm = json!({"action":"confirm","expected_revision":5});
+    let reconfirm_bytes = serde_json::to_vec(&reconfirm).unwrap();
+    let reconfirm_sha256 = domain::sha256_hex(&reconfirm_bytes);
+    let reconfirmed: Value = sqlx::query_scalar(
+        "SELECT kb_bid_mutate_clause($1,$2,'confirm','{}'::jsonb,5,$3,$4,$5,$6)",
+    )
+    .bind(seed.project_id)
+    .bind(extracted_clause_id)
+    .bind(&seed.actor)
+    .bind(format!("reconfirm-{extracted_clause_id}"))
+    .bind(reconfirm_bytes)
+    .bind(reconfirm_sha256)
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("reconfirm against the current generation-three marker");
+    assert_eq!(reconfirmed["status"], "confirmed");
+    assert_eq!(reconfirmed["kind"], "service");
+    assert_eq!(
+        reconfirmed["confirmation_required_router_generation"],
+        Value::Null
+    );
+    let service_revision: i64 = sqlx::query_scalar(
+        "SELECT revision FROM bid_clause_set_identities
+          WHERE project_id=$1 AND set_kind='service'",
+    )
+    .bind(seed.project_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .unwrap();
+    assert_eq!(
+        service_revision, 1,
+        "NEW membership is entered exactly once"
+    );
+
+    sqlx::query(
+        "UPDATE application_maintenance_gate
+            SET mode='maintenance',generation=generation+1,updated_by=$1,updated_at=clock_timestamp()
+          WHERE singleton_key",
+    )
+    .bind(&seed.actor)
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+
+    let cas_request = json!({"target_version":versions[2].0,"expected_generation":2});
+    let cas_bytes = serde_json::to_vec(&cas_request).unwrap();
+    let cas_sha256 = domain::sha256_hex(&cas_bytes);
+    let cas: Result<Value, sqlx::Error> =
+        sqlx::query_scalar("SELECT kb_bid_promote_kind_router($1,$2,2,$3,$4,$5,$6)")
+            .bind(&versions[2].0)
+            .bind(&versions[1].0)
+            .bind(&seed.actor)
+            .bind(format!("stale-cas-{suffix}"))
+            .bind(cas_bytes)
+            .bind(cas_sha256)
+            .fetch_one(&mut *transaction)
+            .await;
+    let message = cas
+        .expect_err("a stale generation-two CAS must not overwrite generation three")
+        .as_database_error()
+        .map(|error| error.message().to_string())
+        .unwrap_or_default();
+    assert!(message.contains("KIND_ROUTER_PROMOTION_CAS_MISMATCH"));
+    transaction.rollback().await.unwrap();
+    let rolled_back_router: (String, i64) = sqlx::query_as(
+        "SELECT version,promotion_generation FROM kind_router_current WHERE singleton_key",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rolled_back_router, initial_router);
+}
+
+#[tokio::test]
+async fn extraction_reaper_terminates_only_the_expired_attempt() {
+    let Some(pool) = support::connect_postgres_contract("TenderPublication").await else {
+        return;
+    };
+    if !support::require_final_schema(
+        "TenderPublication",
+        final_tender_schema_is_ready(&pool).await,
+    ) {
+        return;
+    }
+    let seed = seed_publication(&pool, "# 技术要求\n系统必须支持国密协议。").await;
+    let target_id = Uuid::new_v4();
+    let old_claim_token = Uuid::new_v4();
+    seed_running_target(&pool, &seed, target_id, 1, old_claim_token).await;
+    sqlx::query(
+        "UPDATE bid_extraction_attempts
+            SET heartbeat_at=clock_timestamp()-interval '10 minutes'
+          WHERE target_id=$1 AND attempt=1 AND claim_token=$2",
+    )
+    .bind(target_id)
+    .bind(old_claim_token)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let reclaimed = storage::bid_submission::reclaim_stale_extractions(&pool)
+        .await
+        .unwrap();
+    assert!(reclaimed.iter().any(|row| row.0 == target_id));
+    let old_status: String = sqlx::query_scalar(
+        "SELECT status FROM bid_extraction_attempts WHERE target_id=$1 AND attempt=1",
+    )
+    .bind(target_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(old_status, "reaped");
+
+    let new_claim_token = Uuid::new_v4();
+    let new_claim = storage::bidding::claim_extraction(
+        &pool,
+        target_id,
+        new_claim_token,
+        "reaper-regression-test",
+    )
+    .await
+    .unwrap()
+    .expect("reaped target must be claimable");
+    assert_eq!(new_claim.attempt, 2);
+    assert!(
+        storage::bid_submission::reclaim_stale_extractions(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .all(|row| row.0 != target_id),
+        "the old expired attempt must not reap its healthy successor"
+    );
+    let state: String = sqlx::query_scalar("SELECT state FROM bid_extraction_targets WHERE id=$1")
+        .bind(target_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "running");
+    assert!(
+        storage::bidding::fail_extraction(
+            &pool,
+            target_id,
+            new_claim.attempt,
+            new_claim_token,
+            "TEST_COMPLETE",
+            false,
+        )
+        .await
+        .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn confirmed_clause_cannot_patch_kind_before_leaving_old_membership() {
+    let Some(pool) = support::connect_postgres_contract("ClauseLifecycle").await else {
+        return;
+    };
+    if !support::require_final_schema("ClauseLifecycle", final_tender_schema_is_ready(&pool).await)
+    {
         return;
     }
 
@@ -525,12 +914,13 @@ async fn confirmed_clause_cannot_patch_kind_before_leaving_old_membership() {
 
 #[tokio::test]
 async fn converted_images_transfer_staging_to_source_artifact_owners() {
-    let Ok(pool) = storage::connect().await else {
-        eprintln!("skipped live conversion object contract: database unavailable");
+    let Some(pool) = support::connect_postgres_contract("conversion object").await else {
         return;
     };
-    if !final_tender_schema_is_ready(&pool).await {
-        eprintln!("skipped live conversion object contract: final V1 schema unavailable");
+    if !support::require_final_schema(
+        "conversion object",
+        final_tender_schema_is_ready(&pool).await,
+    ) {
         return;
     }
 
@@ -628,7 +1018,8 @@ async fn converted_images_transfer_staging_to_source_artifact_owners() {
         format!("ConvertedSourceArtifactV1:image-set:{image_digest}").as_bytes(),
     );
     let source_artifact_id = Uuid::new_v4();
-    storage::bidding::complete_document_conversion(
+    let extraction_target_id = Uuid::new_v4();
+    let completed = storage::bidding::complete_document_conversion(
         &pool,
         CompleteDocumentConversion {
             document_id,
@@ -645,11 +1036,32 @@ async fn converted_images_transfer_staging_to_source_artifact_owners() {
                 byte_length: image.len() as i64,
                 occurrence: "image:0".into(),
             }],
+            extraction_target_id,
+            expected_section_count: 1,
+            policy_version: "requirement-span-v1+fact-suggestion-v1",
+            prompt_version: "bounded-tender-publication-v1",
             actor: conversion_actor,
         },
     )
     .await
     .unwrap();
+    assert_eq!(
+        completed["source_artifact_id"],
+        source_artifact_id.to_string()
+    );
+    assert_eq!(
+        completed["extraction_target_id"],
+        extraction_target_id.to_string()
+    );
+    let target: (Uuid, i32, String) = sqlx::query_as(
+        "SELECT source_artifact_id,conversion_generation,state
+           FROM bid_extraction_targets WHERE id=$1",
+    )
+    .bind(extraction_target_id)
+    .fetch_one(&pool)
+    .await
+    .expect("conversion completion must durably create its extraction target");
+    assert_eq!(target, (source_artifact_id, 1, "pending".into()));
 
     let owner_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM object_owner_references

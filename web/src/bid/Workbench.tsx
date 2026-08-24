@@ -13,6 +13,8 @@ import {
   type MatchUnit,
   type MutationAttempt,
   type PartStatus,
+  type ProceduralAttachment,
+  type ProceduralClassification,
   type Project,
   type QuoteLine,
   type QuoteState,
@@ -91,8 +93,8 @@ export function Workbench({ email }: { email: string }) {
   const [pickSet, setPickSet] = useState<RoutePickSet | null>(null);
   const [company, setCompany] = useState<CompanyProfile>({});
   const [submission, setSubmission] = useState<SubmissionProfile>({});
-  const [classifications, setClassifications] = useState<Array<Record<string, unknown>>>([]);
-  const [attachments, setAttachments] = useState<Array<Record<string, unknown>>>([]);
+  const [classifications, setClassifications] = useState<ProceduralClassification[]>([]);
+  const [attachments, setAttachments] = useState<ProceduralAttachment[]>([]);
   const [parts, setParts] = useState<PartStatus[]>([]);
   const [requiredKeys, setRequiredKeys] = useState<string[]>([]);
   const [clauseSets, setClauseSets] = useState<Array<{ set_kind: string; revision: number; content_sha256: string }>>([]);
@@ -110,6 +112,7 @@ export function Workbench({ email }: { email: string }) {
   const [factDrafts, setFactDrafts] = useState<Record<string, string>>({});
   const [noCeiling, setNoCeiling] = useState(false);
   const [noCeilingReason, setNoCeilingReason] = useState("招标文件未设置最高限价，已人工复核");
+  const [quoteSaving, setQuoteSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [pendingNames, setPendingNames] = useState<string[]>([]);
   const [partPreview, setPartPreview] = useState(pane !== "draft");
@@ -118,6 +121,9 @@ export function Workbench({ email }: { email: string }) {
   const partLoadSequence = useRef(0);
   const uploadRetryAttempts = useRef(new Map<string, MutationAttempt[]>());
   const submissionExportAttempts = useRef(new Map<string, ReturnType<typeof createSubmissionExportAttempt>>());
+  const companyDirty = useRef(false);
+  const submissionDirty = useRef(false);
+  const pickMutationTail = useRef<Promise<void>>(Promise.resolve());
   const ended = project?.status === "ended";
   const partIdentity = step === "parts" ? `${id}:${part}` : null;
   const partReady = partIdentity !== null && loadedPartIdentity === partIdentity;
@@ -191,8 +197,8 @@ export function Workbench({ email }: { email: string }) {
           api.attachments(id).catch(() => ({ attachments: [] })),
           api.previewQuote(id).catch(() => undefined),
         ]);
-        if (cp) setCompany(cp);
-        if (sp) setSubmission(sp);
+        if (cp && !companyDirty.current) setCompany(cp);
+        if (sp && !submissionDirty.current) setSubmission(sp);
         setClassifications(pr.classifications ?? []);
         setAttachments(at.attachments ?? []);
         setPreview(pv);
@@ -230,7 +236,14 @@ export function Workbench({ email }: { email: string }) {
   useEffect(() => {
     uploadRetryAttempts.current.clear();
     submissionExportAttempts.current.clear();
+    companyDirty.current = false;
+    submissionDirty.current = false;
+    pickMutationTail.current = Promise.resolve();
   }, [id]);
+
+  useEffect(() => {
+    if (project?.ceiling_price) setNoCeiling(false);
+  }, [project?.ceiling_price]);
 
   const live = useMemo(() => liveClauses(clauses, view), [clauses, view]);
   const cur = live.find((c) => c.id === selected) ?? live[0] ?? null;
@@ -285,6 +298,53 @@ export function Workbench({ email }: { email: string }) {
     } catch (e) {
       toast(errMsg(e), "red");
     }
+  }
+
+  function runQuoteMutation(request: () => Promise<unknown>, successMessage?: string) {
+    if (quoteSaving) return;
+    setQuoteSaving(true);
+    void request()
+      .then(async () => {
+        if (successMessage) toast(successMessage);
+        await load();
+      })
+      .catch((e) => toast(errMsg(e), "red"))
+      .finally(() => setQuoteSaving(false));
+  }
+
+  function queuePickMutation(candidate: Candidate, include: boolean) {
+    const routeId = pickSet?.route_id;
+    if (!routeId) return;
+    pickMutationTail.current = pickMutationTail.current
+      .then(async () => {
+        const current = await api.routePickSet(id, routeId);
+        if (!current.source_report_artifact_id || !current.report_sha256) return;
+        const items = current.items
+          .filter((item) => include || item.candidate_artifact_id !== candidate.candidate_artifact_id)
+          .map((item) => ({
+            requirement_artifact_id: item.requirement_artifact_id,
+            candidate_artifact_id: item.candidate_artifact_id,
+          }));
+        if (include && !items.some((item) => item.candidate_artifact_id === candidate.candidate_artifact_id)) {
+          items.push({
+            requirement_artifact_id: candidate.requirement_artifact_id,
+            candidate_artifact_id: candidate.candidate_artifact_id,
+          });
+        }
+        await api.replaceRoutePickSet(id, routeId, {
+          source_report_artifact_id: current.source_report_artifact_id,
+          report_sha256: current.report_sha256,
+          expected_revision: current.revision,
+          items,
+        });
+        const refreshed = await api.routePickSet(id, routeId);
+        setPickSet((active) => (active?.route_id === routeId ? refreshed : active));
+      })
+      .catch(async (error) => {
+        toast(errMsg(error), "red");
+        const refreshed = await api.routePickSet(id, routeId).catch(() => null);
+        if (refreshed) setPickSet((active) => (active?.route_id === routeId ? refreshed : active));
+      });
   }
 
   async function doExport(format: "docx" | "pdf") {
@@ -351,28 +411,7 @@ export function Workbench({ email }: { email: string }) {
         onConfirm={(c) => void mutateClause(c, "confirm")}
         onUnconfirm={(c) => void mutateClause(c, "unconfirm")}
         onPickToggle={(candidate: Candidate, include: boolean) => {
-          if (!pickSet?.source_report_artifact_id || !pickSet.report_sha256) return;
-          const items = pickSet.items
-            .filter((item) => include || item.candidate_artifact_id !== candidate.candidate_artifact_id)
-            .map((item) => ({
-              requirement_artifact_id: item.requirement_artifact_id,
-              candidate_artifact_id: item.candidate_artifact_id,
-            }));
-          if (include) {
-            items.push({
-              requirement_artifact_id: candidate.requirement_artifact_id,
-              candidate_artifact_id: candidate.candidate_artifact_id,
-            });
-          }
-          void api
-            .replaceRoutePickSet(id, pickSet.route_id, {
-              source_report_artifact_id: pickSet.source_report_artifact_id,
-              report_sha256: pickSet.report_sha256,
-              expected_revision: pickSet.revision,
-              items,
-            })
-            .then(() => load())
-            .catch((e) => toast(errMsg(e), "red"));
+          queuePickMutation(candidate, include);
         }}
       />
     ) : undefined;
@@ -533,6 +572,7 @@ export function Workbench({ email }: { email: string }) {
             quote={quote}
             preview={preview}
             ended={ended}
+            saving={quoteSaving}
             noCeiling={noCeiling}
             noCeilingReason={noCeilingReason}
             onNoCeiling={(reviewed, reason) => {
@@ -540,60 +580,57 @@ export function Workbench({ email }: { email: string }) {
               setNoCeilingReason(reason);
             }}
             onCreate={() => {
-              void api
-                .createQuoteDraft(id, { tax_mode: "tax_exclusive", title: `${project.title} 报价` })
-                .then(() => load())
-                .catch((e) => toast(errMsg(e), "red"));
+              runQuoteMutation(() =>
+                api.createQuoteDraft(id, { tax_mode: "tax_exclusive", title: `${project.title} 报价` }),
+              );
             }}
             onPatch={(title, taxMode, notes) => {
               if (!quote.edit_version && quote.edit_version !== 0) return;
-              void api
-                .patchQuote(id, {
+              runQuoteMutation(() =>
+                api.patchQuote(id, {
                   expected_edit_version: quote.edit_version ?? 0,
                   tax_mode: taxMode,
                   title,
                   notes,
-                })
-                .then(() => load())
-                .catch((e) => toast(errMsg(e), "red"));
+                }),
+              );
             }}
             onAddLine={() => {
               const lineId = crypto.randomUUID();
-              void api
-                .upsertQuoteLine(id, lineId, {
+              runQuoteMutation(() =>
+                api.upsertQuoteLine(id, lineId, {
                   expected_edit_version: quote.edit_version ?? 0,
                   ordinal: (quote.lines?.length ?? 0) + 1,
                   description: "新报价行",
                   pricing_mode: "lump_sum",
-                  entered_amount: "0.00",
+                  quantity: null,
+                  unit: null,
+                  unit_price: null,
+                  entered_amount: null,
                   tax_rate: "0.130000",
                   user_confirmed: false,
-                })
-                .then(() => load())
-                .catch((e) => toast(errMsg(e), "red"));
+                }),
+              );
             }}
             onUpdateLine={(line: QuoteLine, patch) => {
-              void api
-                .upsertQuoteLine(id, line.id, {
+              const next = { ...line, ...patch };
+              runQuoteMutation(() =>
+                api.upsertQuoteLine(id, line.id, {
                   expected_edit_version: quote.edit_version ?? 0,
-                  ordinal: line.ordinal,
-                  description: patch.description ?? line.description,
-                  pricing_mode: line.pricing_mode,
-                  quantity: line.quantity,
-                  unit: line.unit,
-                  unit_price: line.unit_price,
-                  entered_amount: line.entered_amount,
-                  tax_rate: line.tax_rate,
-                  user_confirmed: patch.user_confirmed ?? line.user_confirmed,
-                })
-                .then(() => load())
-                .catch((e) => toast(errMsg(e), "red"));
+                  ordinal: next.ordinal,
+                  description: next.description,
+                  pricing_mode: next.pricing_mode,
+                  quantity: next.quantity,
+                  unit: next.unit,
+                  unit_price: next.unit_price,
+                  entered_amount: next.entered_amount,
+                  tax_rate: next.tax_rate,
+                  user_confirmed: next.user_confirmed,
+                }),
+              );
             }}
             onDeleteLine={(line) => {
-              void api
-                .deleteQuoteLine(id, line.id, quote.edit_version ?? 0)
-                .then(() => load())
-                .catch((e) => toast(errMsg(e), "red"));
+              runQuoteMutation(() => api.deleteQuoteLine(id, line.id, quote.edit_version ?? 0));
             }}
             onFinalize={() => {
               const pricingSet = clauseSets.find((s) => s.set_kind === "pricing");
@@ -601,33 +638,31 @@ export function Workbench({ email }: { email: string }) {
                 toast("缺少价格条款集，无法定稿报价", "red");
                 return;
               }
-              void api
-                .finalizeQuote(id, {
+              runQuoteMutation(
+                () =>
+                  api.finalizeQuote(id, {
                   expected_edit_version: quote.edit_version ?? 0,
                   expected_fact_revision: project.fact_revision,
                   expected_ceiling_revision: project.ceiling_revision,
                   expected_ceiling_identity_sha256: project.ceiling_identity_sha256,
                   expected_pricing_revision: pricingSet.revision,
                   expected_pricing_set_sha256: pricingSet.content_sha256,
-                  no_ceiling_reviewed: noCeiling,
+                  no_ceiling_reviewed: !project.ceiling_price && noCeiling,
                   no_ceiling_reason: noCeilingReason,
-                })
-                .then(() => {
-                  toast("报价已定稿");
-                  return load();
-                })
-                .catch((e) => toast(errMsg(e), "red"));
+                  }),
+                "报价已定稿",
+              );
             }}
             onReopen={() => {
-              if (!quote.snapshot_id) return;
-              void api
-                .reopenQuote(id, {
-                  expected_snapshot_id: quote.snapshot_id,
+              const snapshotId = quote.snapshot_id;
+              if (!snapshotId) return;
+              runQuoteMutation(() =>
+                api.reopenQuote(id, {
+                  expected_snapshot_id: snapshotId,
                   expected_fact_revision: project.fact_revision,
                   expected_pricing_revision: clauseSets.find((s) => s.set_kind === "pricing")?.revision ?? 0,
-                })
-                .then(() => load())
-                .catch((e) => toast(errMsg(e), "red"));
+                }),
+              );
             }}
           />
         </div>
@@ -642,8 +677,10 @@ export function Workbench({ email }: { email: string }) {
             attachments={attachments}
             ended={ended}
             onSaveCompany={(body) => {
+              const save = body === company;
+              if (!save) companyDirty.current = true;
               setCompany(body);
-              if (body === company) {
+              if (save) {
                 void api
                   .updateCompanyProfile(id, {
                     expected_revision: Number(company.revision ?? 0),
@@ -655,13 +692,18 @@ export function Workbench({ email }: { email: string }) {
                     contact_phone: company.contact_phone || "",
                     contact_email: company.contact_email || "",
                   })
-                  .then(() => load())
+                  .then(() => {
+                    companyDirty.current = false;
+                    return load();
+                  })
                   .catch((e) => toast(errMsg(e), "red"));
               }
             }}
             onSaveSubmission={(body) => {
+              const save = body === submission;
+              if (!save) submissionDirty.current = true;
               setSubmission(body);
-              if (body === submission) {
+              if (save) {
                 if (!submission.submission_date?.trim()) {
                   toast("请填写投标日期", "red");
                   return;
@@ -677,7 +719,10 @@ export function Workbench({ email }: { email: string }) {
                     seal_confirmed: !!submission.seal_confirmed,
                     signature_confirmed: !!submission.signature_confirmed,
                   })
-                  .then(() => load())
+                  .then(() => {
+                    submissionDirty.current = false;
+                    return load();
+                  })
                   .catch((e) => toast(errMsg(e), "red"));
               }
             }}

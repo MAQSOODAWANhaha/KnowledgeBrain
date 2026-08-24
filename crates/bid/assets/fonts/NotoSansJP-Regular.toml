@@ -7,6 +7,6 @@ copyright = "Copyright 2014, 2015 Adobe Systems Incorporated; Noto is a trademar
 sha256 = "5d0df56f107605387e0de494b22dfc7fb05d8d79ffd981474e7be11dbe571882"
 license = "SIL Open Font License 1.1"
 license_file = "OFL.txt"
-license_sha256 = "6350e13cbaeba2cfdcbd977d3722ffcbbc834dc8e06b8dc162bec6094166b2a1"
+license_sha256 = "79a0f8bc83bc6bfbc9076c39551b70a47847e5b15a24bed1e621a4ae5279e113"
 source_package = "printpdf 0.12.6"
 source_path = "examples/assets/fonts/NotoSansJP-Regular.otf"

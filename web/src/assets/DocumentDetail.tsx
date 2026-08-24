@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { SegmentedControl, Skeleton } from "@mantine/core";
 import { type DocChunk, type DocContent, api } from "../api";
 import { GfmPreview, formatPlainLayout } from "../bid/gfm";
 import { FilePreview } from "./FilePreview";
@@ -75,7 +76,14 @@ export function DocumentDetail({
       </div>
     );
   }
-  if (!data) return <div className="card">正在打开文件…</div>;
+  if (!data) {
+    return (
+      <div className="card stack">
+        <Skeleton height={44} radius="md" />
+        <Skeleton height={320} radius="md" />
+      </div>
+    );
+  }
 
   const tabs: { key: Tab; label: string; n?: number; hideIfEmpty?: boolean }[] = [
     { key: "file", label: "原件" },
@@ -95,19 +103,16 @@ export function DocumentDetail({
           「解析」是完整 Markdown；「正文」只含切块后的检索正文，不含问句、Wiki、配图。
         </p>
         <div className="toolbar" style={{ borderBottom: 0 }}>
-          {tabs
-            .filter((t) => !t.hideIfEmpty || (t.n ?? 0) > 0)
-            .map((t) => (
-              <button
-                key={t.key}
-                className={`chip ${tab === t.key ? "iris" : ""}`}
-                type="button"
-                onClick={() => setTab(t.key)}
-              >
-                {t.label}
-                {t.n != null ? <span style={{ marginLeft: 6, opacity: 0.7 }}>{t.n}</span> : null}
-              </button>
-            ))}
+          <SegmentedControl
+            value={tab}
+            onChange={(value) => setTab(value as Tab)}
+            data={tabs
+              .filter((item) => !item.hideIfEmpty || (item.n ?? 0) > 0)
+              .map((item) => ({
+                value: item.key,
+                label: item.n == null ? item.label : `${item.label} ${item.n}`,
+              }))}
+          />
         </div>
       </div>
       {tab === "file" ? (

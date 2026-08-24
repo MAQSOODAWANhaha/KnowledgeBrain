@@ -1,35 +1,19 @@
 //! Submission manifest SQL contract tests against a migrated V1 database.
 
 use serde_json::{Value, json};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{Acquire, PgPool};
 use std::io::Cursor;
 use uuid::Uuid;
+
+mod support;
 
 struct SubmissionSeed {
     project_id: Uuid,
     actor: String,
 }
 
-async fn connect_test_pool() -> Result<PgPool, sqlx::Error> {
-    let database_url =
-        storage::database_url().map_err(|error| sqlx::Error::Configuration(Box::new(error)))?;
-    PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&database_url)
-        .await
-}
-
 async fn live_test_pool() -> Option<PgPool> {
-    match connect_test_pool().await {
-        Ok(pool) => Some(pool),
-        Err(error) if std::env::var_os("DATABASE_URL").is_some() => {
-            panic!("connect live Submission contract database: {error}")
-        }
-        Err(_) => {
-            eprintln!("skipped live Submission contract: database unavailable");
-            None
-        }
-    }
+    support::connect_postgres_contract("Submission").await
 }
 
 async fn final_submission_schema_is_ready(pool: &PgPool) -> bool {
@@ -62,7 +46,7 @@ async fn final_submission_schema_is_ready(pool: &PgPool) -> bool {
            'kb_bid_upload_shot_artifact(uuid,uuid,uuid,kb_object_ref,kb_sha256,text,bigint,integer,integer,kb_actor_identity,text,bytea,kb_sha256)'
          ) IS NOT NULL
          AND to_regprocedure(
-           'kb_bid_upload_attachment(uuid,uuid,uuid,text,kb_object_ref,kb_sha256,text,bigint,integer,integer,kb_actor_identity,text,bytea,kb_sha256)'
+           'kb_bid_upload_attachment(uuid,uuid,uuid,text,kb_object_ref,kb_sha256,text,bigint,integer,integer,jsonb,kb_actor_identity,text,bytea,kb_sha256)'
          ) IS NOT NULL",
     )
     .fetch_one(pool)
@@ -120,6 +104,31 @@ fn unique_png(seed: Uuid) -> Vec<u8> {
         .write_to(&mut bytes, image::ImageFormat::Png)
         .expect("encode fixture PNG");
     bytes.into_inner()
+}
+
+struct TestBlobs(Vec<String>);
+
+impl TestBlobs {
+    fn persist(entries: &[(&str, &[u8])]) -> Self {
+        std::fs::create_dir_all(storage::object_dir()).expect("create test object directory");
+        for (digest, bytes) in entries {
+            std::fs::write(storage::blob_path(digest), bytes).expect("persist test object bytes");
+        }
+        Self(
+            entries
+                .iter()
+                .map(|(digest, _)| (*digest).to_string())
+                .collect(),
+        )
+    }
+}
+
+impl Drop for TestBlobs {
+    fn drop(&mut self) {
+        for digest in &self.0 {
+            let _ = std::fs::remove_file(storage::blob_path(digest));
+        }
+    }
 }
 
 async fn stage_object(
@@ -238,6 +247,49 @@ async fn schedule_and_claim_render(
     (render_job_id, claim_token, claim)
 }
 
+#[tokio::test]
+async fn procedural_segments_distinguish_numbered_items_from_decimal_amounts() {
+    let Some(pool) = support::connect_postgres_contract("ProceduralSegmentV1").await else {
+        return;
+    };
+    let ready: bool = sqlx::query_scalar(
+        "SELECT to_regprocedure('kb_bid_split_procedural_segments(text)') IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("probe procedural segment splitter");
+    if !support::require_final_schema("ProceduralSegmentV1", ready) {
+        return;
+    }
+
+    let amount = "投标人应提交投标保证金 10.00 万元整，并上传缴纳回执。";
+    let amount_segments: Vec<String> = sqlx::query_scalar(
+        "SELECT convert_from(segment_utf8,'UTF8')
+           FROM kb_bid_split_procedural_segments($1)
+          ORDER BY start_offset",
+    )
+    .bind(amount)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(amount_segments, vec![amount]);
+
+    let numbered = "投标材料包括 1. 提交授权委托书 2、上传保证金回执";
+    let numbered_segments: Vec<String> = sqlx::query_scalar(
+        "SELECT convert_from(segment_utf8,'UTF8')
+           FROM kb_bid_split_procedural_segments($1)
+          ORDER BY start_offset",
+    )
+    .bind(numbered)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        numbered_segments,
+        vec!["投标材料包括", "1. 提交授权委托书", "2、上传保证金回执"]
+    );
+}
+
 async fn upload_shot_artifact(pool: &PgPool, seed: &SubmissionSeed, bytes: &[u8]) -> String {
     let shot_id = Uuid::new_v4();
     let digest = domain::sha256_hex(bytes);
@@ -287,8 +339,7 @@ async fn upload_replay_returns_first_receipt_and_consumes_second_staging_referen
     let Some(pool) = live_test_pool().await else {
         return;
     };
-    if !final_submission_schema_is_ready(&pool).await {
-        eprintln!("skipped live Submission contract: final V1 schema unavailable");
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
         return;
     }
     let seed = seed_project(&pool).await;
@@ -376,7 +427,6 @@ async fn upload_replay_returns_first_receipt_and_consumes_second_staging_referen
             .await
             .unwrap();
     assert_eq!(staging_rows, 0, "replay must consume temporary staging");
-    pool.close().await;
 }
 
 #[tokio::test]
@@ -384,8 +434,7 @@ async fn rejected_upload_is_domain_zero_write_and_platform_abandon_is_tracked() 
     let Some(pool) = live_test_pool().await else {
         return;
     };
-    if !final_submission_schema_is_ready(&pool).await {
-        eprintln!("skipped live Submission contract: final V1 schema unavailable");
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
         return;
     }
     let seed = seed_project(&pool).await;
@@ -415,7 +464,7 @@ async fn rejected_upload_is_domain_zero_write_and_platform_abandon_is_tracked() 
     let key = format!("attachment-reject-{attachment_id}");
     let result: Result<Value, sqlx::Error> = sqlx::query_scalar(
         "SELECT kb_bid_upload_attachment(
-           $1,$2,$3,'not-a-kind',$4,$5,'application/pdf',$6,NULL,NULL,$7,$8,$9,$10)",
+           $1,$2,$3,'not-a-kind',$4,$5,'application/pdf',$6,NULL,NULL,'[]'::jsonb,$7,$8,$9,$10)",
     )
     .bind(staging_id)
     .bind(attachment_id)
@@ -477,7 +526,6 @@ async fn rejected_upload_is_domain_zero_write_and_platform_abandon_is_tracked() 
     .await
     .unwrap();
     assert_eq!(lifecycle, ("deleting".into(), 1));
-    pool.close().await;
 }
 
 async fn seed_current_part_with_markdown(
@@ -572,8 +620,7 @@ async fn publishing_a_manifest_rejects_when_current_identity_changed() {
     let Some(pool) = live_test_pool().await else {
         return;
     };
-    if !final_submission_schema_is_ready(&pool).await {
-        eprintln!("skipped live Submission contract: final V1 schema unavailable");
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
         return;
     }
     let seed = seed_project(&pool).await;
@@ -622,7 +669,6 @@ async fn publishing_a_manifest_rejects_when_current_identity_changed() {
     storage::abandon_object_upload(&pool, staging_id, &seed.actor)
         .await
         .unwrap();
-    pool.close().await;
 }
 
 #[tokio::test]
@@ -630,8 +676,7 @@ async fn submission_render_job_is_idempotent_fenced_and_terminally_observable() 
     let Some(pool) = live_test_pool().await else {
         return;
     };
-    if !final_submission_schema_is_ready(&pool).await {
-        eprintln!("skipped live Submission contract: final V1 schema unavailable");
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
         return;
     }
     let seed = seed_project(&pool).await;
@@ -865,7 +910,6 @@ async fn submission_render_job_is_idempotent_fenced_and_terminally_observable() 
     assert_eq!(exhausted["status"], "failed");
     assert_eq!(exhausted["attempt_count"], 4);
     assert_eq!(exhausted["error_code"], "SUBMISSION_RENDER_FAILED");
-    pool.close().await;
 }
 
 #[tokio::test]
@@ -873,8 +917,7 @@ async fn submission_render_reaper_is_concurrent_idempotent_and_fences_old_claim(
     let Some(pool) = live_test_pool().await else {
         return;
     };
-    if !final_submission_schema_is_ready(&pool).await {
-        eprintln!("skipped live Submission contract: final V1 schema unavailable");
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
         return;
     }
     let seed = seed_project(&pool).await;
@@ -901,6 +944,63 @@ async fn submission_render_reaper_is_concurrent_idempotent_and_fences_old_claim(
     .await
     .expect("age the target render claim");
     assert_eq!(aged.rows_affected(), 1);
+    assert!(
+        !storage::bid_submission::heartbeat_submission_render(
+            &pool,
+            render_job_id,
+            old_claim_token,
+        )
+        .await
+        .unwrap(),
+        "an expired claim must not be revived before the reaper runs"
+    );
+    assert_eq!(
+        storage::bid_submission::fail_submission_render(
+            &pool,
+            render_job_id,
+            old_claim_token,
+            "STALE_OWNER",
+            "expired owner must be fenced",
+            true,
+        )
+        .await
+        .unwrap(),
+        None,
+        "an expired claim must not settle the durable job"
+    );
+    let expired_output_id = Uuid::new_v4();
+    let expired_output_bytes = b"expired owner output";
+    let expired_output_sha256 = domain::sha256_hex(expired_output_bytes);
+    let expired_output_ref = format!("objects/{expired_output_sha256}");
+    let expired_staging_id = stage_object(
+        &pool,
+        &expired_output_ref,
+        &expired_output_sha256,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        expired_output_bytes.len() as i64,
+        &seed.actor,
+    )
+    .await;
+    let expired_publish: Result<Value, sqlx::Error> =
+        sqlx::query_scalar("SELECT kb_bid_publish_submission_output($1,$2,$3,$4,$5,$6,$7)")
+            .bind(expired_staging_id)
+            .bind(expired_output_id)
+            .bind(render_job_id)
+            .bind(old_claim_token)
+            .bind(&expired_output_ref)
+            .bind(&expired_output_sha256)
+            .bind(expired_output_bytes.len() as i64)
+            .fetch_one(&pool)
+            .await;
+    assert_database_error(
+        expired_publish.expect_err("expired claim must not publish before reaping"),
+        "SUBMISSION_RENDER_CLAIM_LOST",
+    );
+    assert!(
+        storage::abandon_object_upload(&pool, expired_staging_id, &seed.actor)
+            .await
+            .unwrap()
+    );
 
     let left_pool = pool.clone();
     let right_pool = pool.clone();
@@ -1020,7 +1120,6 @@ async fn submission_render_reaper_is_concurrent_idempotent_and_fences_old_claim(
         .as_deref(),
         Some("failed")
     );
-    pool.close().await;
 }
 
 #[tokio::test]
@@ -1028,8 +1127,7 @@ async fn manifest_freezes_global_occurrences_across_parts_and_repeated_object() 
     let Some(pool) = live_test_pool().await else {
         return;
     };
-    if !final_submission_schema_is_ready(&pool).await {
-        eprintln!("skipped live Submission contract: final V1 schema unavailable");
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
         return;
     }
     let seed = seed_project(&pool).await;
@@ -1078,7 +1176,6 @@ async fn manifest_freezes_global_occurrences_across_parts_and_repeated_object() 
         assets[2]["source_locator"],
         json!({"part_key":"4","occurrence":0})
     );
-    pool.close().await;
 }
 
 #[tokio::test]
@@ -1086,8 +1183,7 @@ async fn docx_without_eligible_quote_freezes_fixed_placeholder() {
     let Some(pool) = live_test_pool().await else {
         return;
     };
-    if !final_submission_schema_is_ready(&pool).await {
-        eprintln!("skipped live Submission contract: final V1 schema unavailable");
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
         return;
     }
     let seed = seed_project(&pool).await;
@@ -1113,7 +1209,551 @@ async fn docx_without_eligible_quote_freezes_fixed_placeholder() {
         quote["content_sha256"],
         domain::sha256_hex("> [报价尚未最终确认]".as_bytes())
     );
-    pool.close().await;
+}
+
+#[tokio::test]
+async fn pdf_manifest_creation_rejects_the_persisted_submission_gate() {
+    let Some(pool) = live_test_pool().await else {
+        return;
+    };
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
+        return;
+    }
+    let seed = seed_project(&pool).await;
+    let manifest_id = Uuid::new_v4();
+    let request = json!({
+        "manifest_id": manifest_id,
+        "project_id": seed.project_id,
+        "format": "pdf",
+    });
+    let (request_bytes, request_sha256) = request_identity(&request);
+    let idempotency_key = format!("pdf-gate-{manifest_id}");
+    let result: Result<Value, sqlx::Error> =
+        sqlx::query_scalar("SELECT kb_bid_create_submission_manifest($1,$2,'pdf',$3,$4,$5,$6)")
+            .bind(manifest_id)
+            .bind(seed.project_id)
+            .bind(&seed.actor)
+            .bind(&idempotency_key)
+            .bind(request_bytes)
+            .bind(request_sha256)
+            .fetch_one(&pool)
+            .await;
+
+    assert_database_error(
+        result.expect_err("PDF must fail while the durable gate has hard issues"),
+        "SUBMISSION_GATE_REJECTED",
+    );
+    assert_manifest_attempt_rolled_back(&pool, manifest_id, &seed.actor, &idempotency_key).await;
+}
+
+#[tokio::test]
+async fn procedural_router_and_template_promotions_are_cas_fenced_and_durable() {
+    let Some(pool) = live_test_pool().await else {
+        return;
+    };
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
+        return;
+    }
+    let seed = seed_project(&pool).await;
+    seed_current_part_with_markdown(&pool, &seed, "1", "项目总览").await;
+
+    let closed_request = json!({"target":"missing","expected_generation":0});
+    let (closed_bytes, closed_sha256) = request_identity(&closed_request);
+    let closed: Result<Value, sqlx::Error> = sqlx::query_scalar(
+        "SELECT kb_bid_promote_procedural_router(
+           'missing','procedural-router-v1',0,$1,$2,$3,$4)",
+    )
+    .bind(&seed.actor)
+    .bind(format!("maintenance-required-{}", Uuid::new_v4()))
+    .bind(closed_bytes)
+    .bind(closed_sha256)
+    .fetch_one(&pool)
+    .await;
+    assert_database_error(
+        closed.expect_err("promotion outside maintenance must reject"),
+        "MAINTENANCE_REQUIRED",
+    );
+
+    let initial_procedural: (String, i64) = sqlx::query_as(
+        "SELECT version,promotion_generation FROM procedural_router_current WHERE singleton_key",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let initial_template: (String, i64) = sqlx::query_as(
+        "SELECT version,promotion_generation
+           FROM bid_template_contract_current WHERE slot='1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(initial_procedural, ("procedural-router-v1".into(), 0));
+    assert_eq!(initial_template, ("v1".into(), 0));
+
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query(
+        "UPDATE application_maintenance_gate
+            SET mode='maintenance',generation=generation+1,updated_by=$1,updated_at=clock_timestamp()
+          WHERE singleton_key",
+    )
+    .bind(&seed.actor)
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    let clause_id = Uuid::new_v4();
+    let segment_id = Uuid::new_v4();
+    let classification_id = Uuid::new_v4();
+    let decision_id = Uuid::new_v4();
+    let segment_text = "投标函签字并盖章";
+    let segment_bytes = segment_text.as_bytes();
+    let segment_sha256 = domain::sha256_hex(segment_bytes);
+    let stable_key = domain::sha256_hex(format!("{clause_id}:{segment_sha256}").as_bytes());
+    sqlx::query(
+        "INSERT INTO bid_clauses(
+           id,project_id,provenance,status,kind,text,must,revision,created_by)
+         VALUES($1,$2,'manual','confirmed','procedural',$3,true,2,$4)",
+    )
+    .bind(clause_id)
+    .bind(seed.project_id)
+    .bind(segment_text)
+    .bind(&seed.actor)
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_procedural_segment_artifacts(
+           id,project_id,clause_id,stable_key,segmentation_version,start_offset,end_offset,
+           segment_utf8,segment_sha256,provenance)
+         VALUES($1,$2,$3,$4,'procedural-segment-v1',0,$5,$6,$7,'manual')",
+    )
+    .bind(segment_id)
+    .bind(seed.project_id)
+    .bind(clause_id)
+    .bind(stable_key)
+    .bind(segment_bytes.len() as i64)
+    .bind(segment_bytes)
+    .bind(&segment_sha256)
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_procedural_classification_artifacts(
+           id,project_id,segment_id,revision,router_contract_version,router_promotion_generation,
+           router_result_status,router_requirement_kind,effective_requirement_kind,lifecycle_status)
+         VALUES($1,$2,$3,1,'procedural-router-v1',0,'classified','confirmation','confirmation','current')",
+    )
+    .bind(classification_id)
+    .bind(seed.project_id)
+    .bind(segment_id)
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_procedural_decision_artifacts(
+           id,project_id,classification_id,revision,resolution,actor_identity,decided_at,lifecycle_status)
+         VALUES($1,$2,$3,1,'confirmed_by_user',$4,clock_timestamp(),'current')",
+    )
+    .bind(decision_id)
+    .bind(seed.project_id)
+    .bind(classification_id)
+    .bind(&seed.actor)
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let procedural_versions = [
+        (
+            format!("procedural-router-{suffix}-v2"),
+            json!({"status":"classified","kind":"confirmation"}),
+        ),
+        (
+            format!("procedural-router-{suffix}-v3"),
+            json!({"status":"classified","kind":"bid_bond"}),
+        ),
+    ];
+    for (version, override_value) in &procedural_versions {
+        let mut overrides = serde_json::Map::new();
+        overrides.insert(segment_text.to_string(), override_value.clone());
+        let contract = json!({
+            "schema_version": 1,
+            "version": version,
+            "overrides": overrides,
+        });
+        let canonical_payload = serde_json::to_vec(&contract).unwrap();
+        let content_sha256 = domain::sha256_hex(&canonical_payload);
+        let request = json!({"version":version,"content_sha256":content_sha256});
+        let (request_bytes, request_sha256) = request_identity(&request);
+        let _: Value = sqlx::query_scalar(
+            "SELECT kb_bid_register_procedural_router_contract($1,$2,$3,$4,$5,$6,$7)",
+        )
+        .bind(version)
+        .bind(canonical_payload)
+        .bind(content_sha256)
+        .bind(&seed.actor)
+        .bind(format!("register-{version}"))
+        .bind(request_bytes)
+        .bind(request_sha256)
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap_or_else(|error| panic!("register {version}: {error}"));
+    }
+
+    let first_request = json!({"target_version":procedural_versions[0].0,"generation":0});
+    let (first_bytes, first_sha256) = request_identity(&first_request);
+    let first: Value = sqlx::query_scalar(
+        "SELECT kb_bid_promote_procedural_router(
+           $1,'procedural-router-v1',0,$2,$3,$4,$5)",
+    )
+    .bind(&procedural_versions[0].0)
+    .bind(&seed.actor)
+    .bind(format!("promote-{}", procedural_versions[0].0))
+    .bind(first_bytes)
+    .bind(first_sha256)
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("promote procedural router while preserving a compatible decision");
+    assert_eq!(first["promotion_generation"], 1);
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *transaction)
+        .await
+        .expect("verify first successor chain");
+    let first_successor: (Uuid, i32, String, i64) = sqlx::query_as(
+        "SELECT successor.id,successor.revision,successor.router_contract_version,
+                successor.router_promotion_generation
+           FROM bid_procedural_classification_artifacts predecessor
+           JOIN bid_procedural_classification_artifacts successor
+             ON successor.id=predecessor.successor_id
+          WHERE predecessor.id=$1",
+    )
+    .bind(classification_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .unwrap();
+    assert_eq!(first_successor.1, 2);
+    assert_eq!(first_successor.2, procedural_versions[0].0);
+    assert_eq!(first_successor.3, 1);
+    let first_decision_successor: (Uuid, Uuid, i32, String) = sqlx::query_as(
+        "SELECT successor.id,successor.classification_id,successor.revision,predecessor.lifecycle_status
+           FROM bid_procedural_decision_artifacts predecessor
+           JOIN bid_procedural_decision_artifacts successor ON successor.id=predecessor.successor_id
+          WHERE predecessor.id=$1",
+    )
+    .bind(decision_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .unwrap();
+    assert_eq!(first_decision_successor.1, first_successor.0);
+    assert_eq!(first_decision_successor.2, 1);
+    assert_eq!(first_decision_successor.3, "superseded");
+    sqlx::query("SET CONSTRAINTS ALL DEFERRED")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+
+    let second_request = json!({"target_version":procedural_versions[1].0,"generation":1});
+    let (second_bytes, second_sha256) = request_identity(&second_request);
+    let second: Value =
+        sqlx::query_scalar("SELECT kb_bid_promote_procedural_router($1,$2,1,$3,$4,$5,$6)")
+            .bind(&procedural_versions[1].0)
+            .bind(&procedural_versions[0].0)
+            .bind(&seed.actor)
+            .bind(format!("promote-{}", procedural_versions[1].0))
+            .bind(second_bytes)
+            .bind(second_sha256)
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("promote procedural router while terminating an incompatible decision");
+    assert_eq!(second["promotion_generation"], 2);
+    assert!(second["blocked_decision_count"].as_i64().unwrap() >= 1);
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *transaction)
+        .await
+        .expect("verify second successor and terminal contracts");
+    let current_classification: (i32, String, i64, Option<String>) = sqlx::query_as(
+        "SELECT revision,router_contract_version,router_promotion_generation,effective_requirement_kind
+           FROM bid_procedural_classification_artifacts
+          WHERE segment_id=$1 AND lifecycle_status='current'",
+    )
+    .bind(segment_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .unwrap();
+    assert_eq!(
+        current_classification,
+        (
+            3,
+            procedural_versions[1].0.clone(),
+            2,
+            Some("bid_bond".into())
+        )
+    );
+    let terminated_decision: (String, Option<String>, bool, bool) = sqlx::query_as(
+        "SELECT lifecycle_status,terminal_reason,terminal_at IS NOT NULL,terminal_actor IS NOT NULL
+           FROM bid_procedural_decision_artifacts WHERE id=$1",
+    )
+    .bind(first_decision_successor.0)
+    .fetch_one(&mut *transaction)
+    .await
+    .unwrap();
+    assert_eq!(
+        terminated_decision,
+        (
+            "superseded".into(),
+            Some("router_promoted".into()),
+            true,
+            true
+        )
+    );
+    let current_decisions: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bid_procedural_decision_artifacts decision
+          JOIN bid_procedural_classification_artifacts classification
+            ON classification.id=decision.classification_id
+         WHERE classification.segment_id=$1 AND decision.lifecycle_status='current'",
+    )
+    .bind(segment_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .unwrap();
+    assert_eq!(current_decisions, 0);
+
+    {
+        let mut savepoint = transaction.begin().await.unwrap();
+        let request = json!({"stale_expected_generation":0});
+        let (request_bytes, request_sha256) = request_identity(&request);
+        let stale: Result<Value, sqlx::Error> = sqlx::query_scalar(
+            "SELECT kb_bid_promote_procedural_router($1,'procedural-router-v1',0,$2,$3,$4,$5)",
+        )
+        .bind(&procedural_versions[1].0)
+        .bind(&seed.actor)
+        .bind(format!("procedural-stale-cas-{suffix}"))
+        .bind(request_bytes)
+        .bind(request_sha256)
+        .fetch_one(&mut *savepoint)
+        .await;
+        assert_database_error(
+            stale.expect_err("stale procedural promotion CAS must reject"),
+            "PROCEDURAL_ROUTER_PROMOTION_CAS_MISMATCH",
+        );
+        savepoint.rollback().await.unwrap();
+    }
+
+    let template_version = format!("template-{suffix}-v2");
+    let template_contract = json!({
+        "schema_version": 1,
+        "slot": "1",
+        "version": template_version,
+    });
+    let template_payload = serde_json::to_vec(&template_contract).unwrap();
+    let template_sha256 = domain::sha256_hex(&template_payload);
+    let template_request = json!({"slot":"1","version":template_version});
+    let (template_bytes, template_request_sha256) = request_identity(&template_request);
+    let _: Value =
+        sqlx::query_scalar("SELECT kb_bid_register_template_contract('1',$1,$2,$3,$4,$5,$6,$7)")
+            .bind(&template_version)
+            .bind(template_payload)
+            .bind(template_sha256)
+            .bind(&seed.actor)
+            .bind(format!("register-{template_version}"))
+            .bind(template_bytes)
+            .bind(template_request_sha256)
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("register target template contract");
+    let expected_stale_part_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM bid_current_parts current_part
+           JOIN bid_part_dependency_artifacts dependency
+             ON dependency.id=current_part.dependency_artifact_id
+           JOIN bid_projects project_value ON project_value.id=current_part.project_id
+          WHERE project_value.status='open'
+            AND dependency.template_slot='1' AND dependency.template_version='v1'",
+    )
+    .fetch_one(&mut *transaction)
+    .await
+    .unwrap();
+    let promote_template_request = json!({"slot":"1","target_version":template_version});
+    let (promote_template_bytes, promote_template_sha256) =
+        request_identity(&promote_template_request);
+    let template: Value =
+        sqlx::query_scalar("SELECT kb_bid_promote_template_contract('1',$1,'v1',0,$2,$3,$4,$5)")
+            .bind(&template_version)
+            .bind(&seed.actor)
+            .bind(format!("promote-{template_version}"))
+            .bind(promote_template_bytes)
+            .bind(promote_template_sha256)
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("promote template and stale its current consumers");
+    assert_eq!(template["promotion_generation"], 1);
+    assert_eq!(
+        template["stale_part_count"].as_i64(),
+        Some(expected_stale_part_count)
+    );
+    let stale_part: (bool, Vec<String>) = sqlx::query_as(
+        "SELECT stale,stale_reason_codes FROM bid_current_parts
+          WHERE project_id=$1 AND part_key='1'",
+    )
+    .bind(seed.project_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .unwrap();
+    assert!(stale_part.0);
+    assert!(
+        stale_part
+            .1
+            .contains(&"TEMPLATE_CONTRACT_PROMOTED".to_string())
+    );
+
+    {
+        let mut savepoint = transaction.begin().await.unwrap();
+        let request = json!({"stale_expected_generation":0});
+        let (request_bytes, request_sha256) = request_identity(&request);
+        let stale: Result<Value, sqlx::Error> = sqlx::query_scalar(
+            "SELECT kb_bid_promote_template_contract('1',$1,'v1',0,$2,$3,$4,$5)",
+        )
+        .bind(&template_version)
+        .bind(&seed.actor)
+        .bind(format!("template-stale-cas-{suffix}"))
+        .bind(request_bytes)
+        .bind(request_sha256)
+        .fetch_one(&mut *savepoint)
+        .await;
+        assert_database_error(
+            stale.expect_err("stale template promotion CAS must reject"),
+            "TEMPLATE_CONTRACT_PROMOTION_CAS_MISMATCH",
+        );
+        savepoint.rollback().await.unwrap();
+    }
+
+    for (operation, expected_count) in [
+        ("bid.procedural_router.register", 2_i64),
+        ("bid.procedural_router.promote", 2_i64),
+        ("bid.template_contract.register", 1_i64),
+        ("bid.template_contract.promote", 1_i64),
+    ] {
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_events
+              WHERE operation=$1 AND actor_identity=$2",
+        )
+        .bind(operation)
+        .bind(&seed.actor)
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+        assert_eq!(
+            audit_count, expected_count,
+            "maintenance contract mutation must append exactly one audit envelope"
+        );
+    }
+
+    transaction.rollback().await.unwrap();
+    let rolled_back_procedural: (String, i64) = sqlx::query_as(
+        "SELECT version,promotion_generation FROM procedural_router_current WHERE singleton_key",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let rolled_back_template: (String, i64) = sqlx::query_as(
+        "SELECT version,promotion_generation
+           FROM bid_template_contract_current WHERE slot='1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rolled_back_procedural, initial_procedural);
+    assert_eq!(rolled_back_template, initial_template);
+}
+
+#[tokio::test]
+async fn pdf_attachment_upload_requires_a_contiguous_frozen_page_set() {
+    let Some(pool) = live_test_pool().await else {
+        return;
+    };
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
+        return;
+    }
+    let seed = seed_project(&pool).await;
+    let attachment_id = Uuid::new_v4();
+    let original = format!("%PDF-1.7\n% {attachment_id}\n%%EOF\n").into_bytes();
+    let original_digest = domain::sha256_hex(&original);
+    let original_ref = format!("objects/{original_digest}");
+    let original_staging = stage_object(
+        &pool,
+        &original_ref,
+        &original_digest,
+        "application/pdf",
+        original.len() as i64,
+        &seed.actor,
+    )
+    .await;
+    let page = unique_png(Uuid::new_v4());
+    let page_digest = domain::sha256_hex(&page);
+    let page_ref = format!("objects/{page_digest}");
+    let page_staging = stage_object(
+        &pool,
+        &page_ref,
+        &page_digest,
+        "image/png",
+        page.len() as i64,
+        &seed.actor,
+    )
+    .await;
+    let render_pages = json!([{
+        "staging_id": page_staging,
+        "page_ordinal": 1,
+        "object_ref": page_ref,
+        "digest": page_digest,
+        "media_type": "image/png",
+        "byte_length": page.len(),
+        "pixel_width": 2,
+        "pixel_height": 2,
+    }]);
+    let request = json!({
+        "attachment_id": attachment_id,
+        "project_id": seed.project_id,
+        "kind": "bid_bond",
+        "render_pages": render_pages.clone(),
+    });
+    let (request_bytes, request_sha256) = request_identity(&request);
+    let result: Result<Value, sqlx::Error> = sqlx::query_scalar(
+        "SELECT kb_bid_upload_attachment(
+           $1,$2,$3,'bid_bond',$4,$5,'application/pdf',$6,NULL,NULL,$7,$8,$9,$10,$11)",
+    )
+    .bind(original_staging)
+    .bind(attachment_id)
+    .bind(seed.project_id)
+    .bind(&original_ref)
+    .bind(&original_digest)
+    .bind(original.len() as i64)
+    .bind(&render_pages)
+    .bind(&seed.actor)
+    .bind(format!("attachment-gap-{attachment_id}"))
+    .bind(request_bytes)
+    .bind(request_sha256)
+    .fetch_one(&pool)
+    .await;
+    assert_database_error(
+        result.expect_err("a PDF page set starting at ordinal one must reject"),
+        "ATTACHMENT_RENDER_PAGE_SET_INVALID",
+    );
+    let attachment_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM bid_procedural_attachments WHERE id=$1")
+            .bind(attachment_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(attachment_rows, 0);
+    assert!(
+        storage::abandon_object_upload(&pool, original_staging, &seed.actor)
+            .await
+            .unwrap()
+    );
+    assert!(
+        storage::abandon_object_upload(&pool, page_staging, &seed.actor)
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1121,8 +1761,7 @@ async fn attachment_validation_rejects_unavailable_frozen_object_identity() {
     let Some(pool) = live_test_pool().await else {
         return;
     };
-    if !final_submission_schema_is_ready(&pool).await {
-        eprintln!("skipped live Submission contract: final V1 schema unavailable");
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
         return;
     }
     let seed = seed_project(&pool).await;
@@ -1136,7 +1775,7 @@ async fn attachment_validation_rejects_unavailable_frozen_object_identity() {
         "kind": "bid_bond",
         "object_ref": object_ref,
         "digest": digest,
-        "media_type": "application/pdf",
+        "media_type": "image/png",
         "byte_length": attachment_bytes.len(),
     });
     let (upload_bytes, upload_sha256) = request_identity(&upload);
@@ -1144,14 +1783,14 @@ async fn attachment_validation_rejects_unavailable_frozen_object_identity() {
         &pool,
         &object_ref,
         &digest,
-        "application/pdf",
+        "image/png",
         attachment_bytes.len() as i64,
         &seed.actor,
     )
     .await;
     let _: Value = sqlx::query_scalar(
         "SELECT kb_bid_upload_attachment(
-           $1,$2,$3,'bid_bond',$4,$5,'application/pdf',$6,NULL,NULL,$7,$8,$9,$10)",
+           $1,$2,$3,'bid_bond',$4,$5,'image/png',$6,1,1,'[]'::jsonb,$7,$8,$9,$10)",
     )
     .bind(staging_id)
     .bind(attachment_id)
@@ -1197,7 +1836,417 @@ async fn attachment_validation_rejects_unavailable_frozen_object_identity() {
         result.expect_err("unavailable attachment identity must not validate"),
         "ATTACHMENT_VALIDATION_IDENTITY_MISMATCH",
     );
-    pool.close().await;
+}
+
+#[tokio::test]
+async fn confirmed_pdf_attachment_is_frozen_into_manifest_and_rendered_from_pages() {
+    let Some(pool) = live_test_pool().await else {
+        return;
+    };
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
+        return;
+    }
+    let seed = seed_project(&pool).await;
+    sqlx::query(
+        "INSERT INTO bid_clause_set_identities(project_id,set_kind,revision,content_sha256,updated_at)
+         VALUES($1,'procedural',0,
+           encode(public.digest(convert_to('ClauseSetV1:procedural:','UTF8'),'sha256'),'hex'),
+           clock_timestamp())",
+    )
+    .bind(seed.project_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let original_pdf = bid::render_manifest_document(
+        bid::submission::GateFormat::Pdf,
+        "保证金附件原件",
+        &[("1".into(), "已冻结 PDF 原件".into())],
+        &[],
+    )
+    .expect("build valid PDF attachment fixture");
+    let pages = [unique_png(Uuid::new_v4()), unique_png(Uuid::new_v4())];
+    let original_digest = domain::sha256_hex(&original_pdf);
+    let page_digests = pages
+        .iter()
+        .map(|page| domain::sha256_hex(page))
+        .collect::<Vec<_>>();
+    let _blobs = TestBlobs::persist(&[
+        (&original_digest, &original_pdf),
+        (&page_digests[0], &pages[0]),
+        (&page_digests[1], &pages[1]),
+    ]);
+    let original_ref = format!("objects/{original_digest}");
+    let original_staging = stage_object(
+        &pool,
+        &original_ref,
+        &original_digest,
+        "application/pdf",
+        original_pdf.len() as i64,
+        &seed.actor,
+    )
+    .await;
+    let mut render_pages = Vec::new();
+    for (page_ordinal, (page, digest)) in pages.iter().zip(&page_digests).enumerate() {
+        let object_ref = format!("objects/{digest}");
+        let staging_id = stage_object(
+            &pool,
+            &object_ref,
+            digest,
+            "image/png",
+            page.len() as i64,
+            &seed.actor,
+        )
+        .await;
+        render_pages.push(json!({
+            "staging_id": staging_id,
+            "page_ordinal": page_ordinal,
+            "object_ref": object_ref,
+            "digest": digest,
+            "media_type": "image/png",
+            "byte_length": page.len(),
+            "pixel_width": 2,
+            "pixel_height": 2,
+        }));
+    }
+    let attachment_id = Uuid::new_v4();
+    let upload_request = json!({
+        "attachment_id": attachment_id,
+        "project_id": seed.project_id,
+        "kind": "bid_bond",
+        "object_ref": original_ref,
+        "digest": original_digest,
+        "render_pages": render_pages,
+    });
+    let (upload_bytes, upload_sha256) = request_identity(&upload_request);
+    let uploaded: Value = sqlx::query_scalar(
+        "SELECT kb_bid_upload_attachment(
+           $1,$2,$3,'bid_bond',$4,$5,'application/pdf',$6,NULL,NULL,$7,$8,$9,$10,$11)",
+    )
+    .bind(original_staging)
+    .bind(attachment_id)
+    .bind(seed.project_id)
+    .bind(&original_ref)
+    .bind(&original_digest)
+    .bind(original_pdf.len() as i64)
+    .bind(json!(render_pages))
+    .bind(&seed.actor)
+    .bind(format!("upload-pdf-{attachment_id}"))
+    .bind(upload_bytes)
+    .bind(upload_sha256)
+    .fetch_one(&pool)
+    .await
+    .expect("upload PDF with frozen pages");
+    assert_eq!(uploaded["render_page_count"], 2);
+
+    for (action, expected_revision) in [("validate", 1), ("confirm", 2)] {
+        let request = json!({
+            "attachment_id": attachment_id,
+            "action": action,
+            "expected_revision": expected_revision,
+        });
+        let (request_bytes, request_sha256) = request_identity(&request);
+        let _: Value =
+            sqlx::query_scalar("SELECT kb_bid_mutate_attachment($1,$2,$3,$4,NULL,$5,$6,$7,$8)")
+                .bind(seed.project_id)
+                .bind(attachment_id)
+                .bind(action)
+                .bind(expected_revision)
+                .bind(&seed.actor)
+                .bind(format!("{action}-{attachment_id}"))
+                .bind(request_bytes)
+                .bind(request_sha256)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|error| panic!("{action} frozen PDF attachment: {error}"));
+    }
+
+    let clause_id = Uuid::new_v4();
+    let create_context = storage::bidding::MutationContext::new(
+        seed.actor.clone(),
+        format!("create-procedural-{clause_id}"),
+        &json!({"text":"上传保证金缴纳回执","kind":"procedural"}),
+    )
+    .unwrap();
+    storage::bidding::create_clause(
+        &pool,
+        clause_id,
+        seed.project_id,
+        "上传保证金缴纳回执",
+        "procedural",
+        true,
+        &create_context,
+    )
+    .await
+    .expect("create procedural clause");
+    let confirm_context = storage::bidding::MutationContext::new(
+        seed.actor.clone(),
+        format!("confirm-procedural-{clause_id}"),
+        &json!({"action":"confirm","expected_revision":1}),
+    )
+    .unwrap();
+    storage::bidding::mutate_clause(
+        &pool,
+        seed.project_id,
+        clause_id,
+        "confirm",
+        &json!({}),
+        1,
+        &confirm_context,
+    )
+    .await
+    .expect("confirm procedural clause");
+    let classification_id: Uuid = sqlx::query_scalar(
+        "SELECT classification.id
+           FROM bidding_current_procedural_classifications classification
+           JOIN bid_procedural_segment_artifacts segment ON segment.id=classification.segment_id
+          WHERE classification.project_id=$1 AND segment.clause_id=$2
+            AND classification.effective_requirement_kind='bid_bond'",
+    )
+    .bind(seed.project_id)
+    .bind(clause_id)
+    .fetch_one(&pool)
+    .await
+    .expect("procedural clause must classify as bid bond");
+    let resolve_context = storage::bidding::MutationContext::new(
+        seed.actor.clone(),
+        format!("resolve-bid-bond-{classification_id}"),
+        &json!({"resolution":"satisfied_by_attachment","attachment_id":attachment_id}),
+    )
+    .unwrap();
+    storage::bid_submission::resolve_procedural_requirement(
+        &pool,
+        seed.project_id,
+        classification_id,
+        "satisfied_by_attachment",
+        Some(attachment_id),
+        None,
+        &resolve_context,
+    )
+    .await
+    .expect("resolve requirement with confirmed PDF attachment");
+
+    let manifest_id = Uuid::new_v4();
+    let manifest_key = format!("pdf-attachment-manifest-{manifest_id}");
+    let manifest_context = storage::bidding::MutationContext::new(
+        seed.actor.clone(),
+        manifest_key,
+        &json!({"manifest_id":manifest_id,"project_id":seed.project_id,"format":"docx"}),
+    )
+    .unwrap();
+    storage::bid_submission::create_submission_manifest(
+        &pool,
+        manifest_id,
+        seed.project_id,
+        "docx",
+        &manifest_context,
+    )
+    .await
+    .expect("freeze attachment into a manifest after verifying physical bytes");
+    let input = storage::bid_submission::manifest_render_input(&pool, seed.project_id, manifest_id)
+        .await
+        .unwrap();
+    let parts = input["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|part| {
+            (
+                part["part_key"].as_str().unwrap().to_string(),
+                part["markdown"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut assets = Vec::new();
+    let mut page_asset_ids = Vec::new();
+    for row in input["assets"].as_array().unwrap() {
+        let asset_id: Uuid = row["id"].as_str().unwrap().parse().unwrap();
+        let stored = storage::bid_submission::read_manifest_render_asset(
+            &pool,
+            seed.project_id,
+            manifest_id,
+            asset_id,
+        )
+        .await
+        .expect("read only the frozen manifest asset");
+        let manifest_ordinal = u32::try_from(stored.manifest_ordinal).unwrap();
+        let locator = match stored.source_kind.as_str() {
+            "procedural_attachment" => {
+                bid::ManifestRenderAssetLocator::ProceduralAttachmentOriginal {
+                    part_key: stored.source_locator["part_key"]
+                        .as_str()
+                        .unwrap()
+                        .to_string(),
+                    attachment_ordinal: u32::try_from(
+                        stored.source_locator["attachment_ordinal"]
+                            .as_u64()
+                            .unwrap(),
+                    )
+                    .unwrap(),
+                    attachment_id: stored.source_locator["attachment_id"]
+                        .as_str()
+                        .unwrap()
+                        .parse()
+                        .unwrap(),
+                    kind: stored.source_locator["kind"].as_str().unwrap().to_string(),
+                }
+            }
+            "procedural_attachment_page" => {
+                let page_ordinal =
+                    u32::try_from(stored.source_locator["page_ordinal"].as_u64().unwrap()).unwrap();
+                page_asset_ids.push((page_ordinal, asset_id));
+                bid::ManifestRenderAssetLocator::ProceduralAttachmentPage {
+                    part_key: stored.source_locator["part_key"]
+                        .as_str()
+                        .unwrap()
+                        .to_string(),
+                    attachment_ordinal: u32::try_from(
+                        stored.source_locator["attachment_ordinal"]
+                            .as_u64()
+                            .unwrap(),
+                    )
+                    .unwrap(),
+                    attachment_id: stored.source_locator["attachment_id"]
+                        .as_str()
+                        .unwrap()
+                        .parse()
+                        .unwrap(),
+                    page_ordinal,
+                }
+            }
+            source_kind => panic!("unexpected formal attachment source kind: {source_kind}"),
+        };
+        assets.push(bid::ManifestRenderAsset {
+            manifest_ordinal,
+            locator,
+            object_ref: stored.object_ref,
+            digest: stored.digest,
+            media_type: stored.media_type,
+            byte_length: u64::try_from(stored.byte_length).unwrap(),
+            bytes: stored.bytes,
+        });
+    }
+    assert_eq!(
+        input["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|asset| asset["source_kind"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "procedural_attachment",
+            "procedural_attachment_page",
+            "procedural_attachment_page",
+        ]
+    );
+    assert_eq!(page_asset_ids.len(), 2);
+    let docx = bid::render_manifest_document(
+        bid::submission::GateFormat::Docx,
+        "投标文件",
+        &parts,
+        &assets,
+    )
+    .expect("render manifest-only DOCX with both frozen PDF pages");
+    let parsed_docx = docx_rs::read_docx(&docx).expect("parse rendered DOCX");
+    assert_eq!(parsed_docx.images.len(), 2);
+    let pdf = bid::render_manifest_document(
+        bid::submission::GateFormat::Pdf,
+        "投标文件",
+        &parts,
+        &assets,
+    )
+    .expect("render manifest-only PDF with both frozen PDF pages");
+    assert!(pdf.starts_with(b"%PDF"));
+    lopdf::Document::load_mem(&pdf).expect("rendered PDF is structurally valid");
+
+    std::fs::write(
+        storage::blob_path(&page_digests[0]),
+        unique_png(Uuid::new_v4()),
+    )
+    .unwrap();
+    let corrupt = storage::bid_submission::read_manifest_render_asset(
+        &pool,
+        seed.project_id,
+        manifest_id,
+        page_asset_ids
+            .iter()
+            .find(|(ordinal, _)| *ordinal == 0)
+            .unwrap()
+            .1,
+    )
+    .await
+    .expect_err("corrupt frozen page bytes must fail closed");
+    assert!(
+        corrupt
+            .to_string()
+            .contains("MANIFEST_ASSET_IDENTITY_MISMATCH")
+    );
+    std::fs::write(storage::blob_path(&page_digests[0]), &pages[0]).unwrap();
+
+    let page_one_ref = format!("objects/{}", page_digests[1]);
+    let retention_scheduled: bool =
+        sqlx::query_scalar("SELECT kb_object_reference_remove($1,'bid_attachment_page',$2,'1')")
+            .bind(&page_one_ref)
+            .bind(attachment_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        !retention_scheduled,
+        "the already-frozen manifest reference must keep the object available"
+    );
+    let attachment_page_owners: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM object_owner_references
+          WHERE object_ref=$1 AND owner_kind='bid_attachment_page'
+            AND owner_id=$2 AND occurrence='1'",
+    )
+    .bind(&page_one_ref)
+    .bind(attachment_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(attachment_page_owners, 0);
+    let validate_request = json!({
+        "attachment_id": attachment_id,
+        "action": "validate",
+        "expected_revision": 3,
+    });
+    let (validate_bytes, validate_sha256) = request_identity(&validate_request);
+    let validation: Result<Value, sqlx::Error> =
+        sqlx::query_scalar("SELECT kb_bid_mutate_attachment($1,$2,'validate',3,NULL,$3,$4,$5,$6)")
+            .bind(seed.project_id)
+            .bind(attachment_id)
+            .bind(&seed.actor)
+            .bind(format!("revalidate-missing-page-{attachment_id}"))
+            .bind(validate_bytes)
+            .bind(validate_sha256)
+            .fetch_one(&pool)
+            .await;
+    assert_database_error(
+        validation.expect_err("validation must detect a missing frozen page owner"),
+        "ATTACHMENT_RENDER_PAGE_IDENTITY_MISMATCH",
+    );
+
+    let missing_manifest_id = Uuid::new_v4();
+    let missing_key = format!("missing-page-{missing_manifest_id}");
+    let missing_context = storage::bidding::MutationContext::new(
+        seed.actor.clone(),
+        missing_key.clone(),
+        &json!({"manifest_id":missing_manifest_id,"project_id":seed.project_id,"format":"docx"}),
+    )
+    .unwrap();
+    let missing = storage::bid_submission::create_submission_manifest(
+        &pool,
+        missing_manifest_id,
+        seed.project_id,
+        "docx",
+        &missing_context,
+    )
+    .await
+    .expect_err("manifest creation must reject a missing frozen page owner");
+    assert_database_error(missing, "MANIFEST_ASSET_UNAVAILABLE_OR_INVALID");
+    assert_manifest_attempt_rolled_back(&pool, missing_manifest_id, &seed.actor, &missing_key)
+        .await;
 }
 
 #[tokio::test]
@@ -1205,8 +2254,7 @@ async fn manifest_creation_rolls_back_for_missing_and_corrupt_physical_blob() {
     let Some(pool) = live_test_pool().await else {
         return;
     };
-    if !final_submission_schema_is_ready(&pool).await {
-        eprintln!("skipped live Submission contract: final V1 schema unavailable");
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
         return;
     }
     let seed = seed_project(&pool).await;
@@ -1263,6 +2311,4 @@ async fn manifest_creation_rolls_back_for_missing_and_corrupt_physical_blob() {
     assert_database_error(corrupt_error, "MANIFEST_ASSET_IDENTITY_MISMATCH");
     assert_manifest_attempt_rolled_back(&pool, corrupt_manifest_id, &seed.actor, &corrupt_key)
         .await;
-
-    pool.close().await;
 }

@@ -2,12 +2,42 @@ use bid::matching::run_match_route_v1;
 use runtime::{BidMatchRouteV1Job, BidMatchRouteV1Snapshots};
 use serde_json::json;
 use sqlx::Row;
-use storage::bid_matching::{PickSelectionV1, ReplaceRoutePickSetV1, ScheduleEnvironment};
+use storage::bid_matching::{
+    PickSelectionV1, PublishRouteV2, ReplaceRoutePickSetV1, ScheduleEnvironment,
+    StagedSourceArtifactV1,
+};
 use uuid::Uuid;
+
+mod support;
+
+fn empty_publish_route() -> PublishRouteV2 {
+    PublishRouteV2 {
+        report_id: Uuid::new_v4(),
+        report_nonce: Uuid::new_v4(),
+        canonical_payload: b"{}".to_vec(),
+        sources: Vec::new(),
+        candidates: Vec::new(),
+        evidences: Vec::new(),
+        decisions: Vec::new(),
+        candidate_groups: Vec::new(),
+        reason_codes: Vec::new(),
+    }
+}
+
+fn assert_database_error(error: sqlx::Error, expected: &str) {
+    let message = error
+        .as_database_error()
+        .map(|error| error.message().to_string())
+        .unwrap_or_else(|| error.to_string());
+    assert!(
+        message.contains(expected),
+        "expected database error {expected}, got {message}"
+    );
+}
 
 #[tokio::test]
 async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets() {
-    let Ok(pool) = storage::connect().await else {
+    let Some(pool) = support::connect_postgres_contract("MatchingPublication").await else {
         return;
     };
     let final_schema: bool = sqlx::query_scalar(
@@ -16,7 +46,7 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .fetch_one(&pool)
     .await
     .unwrap_or(false);
-    if !final_schema {
+    if !support::require_final_schema("MatchingPublication", final_schema) {
         return;
     }
 
@@ -26,14 +56,24 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     let version_id = Uuid::new_v4();
     let document_id = Uuid::new_v4();
     let chunk_id = Uuid::new_v4();
+    let second_product_id = Uuid::new_v4();
+    let second_version_id = Uuid::new_v4();
+    let second_document_id = Uuid::new_v4();
+    let second_chunk_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
     let clause_id = Uuid::new_v4();
+    let ordinary_clause_id = Uuid::new_v4();
+    let tender_document_id = Uuid::new_v4();
+    let source_artifact_id = Uuid::new_v4();
+    let ordinary_unit_id = Uuid::new_v4();
+    let source_span_id = Uuid::new_v4();
     let actor = format!("user:{user_id}");
     let file_bytes = b"manual";
     let digest = domain::sha256_hex(file_bytes);
     let object_ref = format!("objects/{digest}");
     let requirement = "支持国密算法";
-    let chunk = "产品完整支持国密算法，并提供配置说明。";
+    let ordinary_requirement = "设备应支持国密算法";
+    let chunk = "产品说明：设备应支持国密算法，并提供配置说明。";
 
     let mut seed = pool.begin().await.unwrap();
     sqlx::query("INSERT INTO users(id,email) VALUES($1,$2)")
@@ -71,6 +111,29 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
         .execute(&mut *seed)
         .await
         .unwrap();
+    sqlx::query(
+        "INSERT INTO products(id,workspace_id,kind,name,slug) VALUES($1,$2,'product','密码机',$3)",
+    )
+    .bind(second_product_id)
+    .bind(workspace_id)
+    .bind(format!("crypto-appliance-{second_product_id}"))
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO product_versions(id,product_id,label,status) VALUES($1,$2,'v1','active')",
+    )
+    .bind(second_version_id)
+    .bind(second_product_id)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE products SET current_version_id=$2 WHERE id=$1")
+        .bind(second_product_id)
+        .bind(second_version_id)
+        .execute(&mut *seed)
+        .await
+        .unwrap();
     sqlx::query("SELECT kb_object_reference_add($1,$2,'application/pdf',$3,'knowledge_document',$4,'original',$5)")
         .bind(&object_ref)
         .bind(&digest)
@@ -90,6 +153,40 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .bind(file_bytes.len() as i64)
     .bind(&digest)
     .bind(&object_ref)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    sqlx::query("SELECT kb_object_reference_add($1,$2,'application/pdf',$3,'knowledge_document',$4,'original',$5)")
+        .bind(&object_ref)
+        .bind(&digest)
+        .bind(file_bytes.len() as i64)
+        .bind(second_document_id)
+        .bind(&actor)
+        .execute(&mut *seed)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO documents
+         (id,product_version_id,title,parse_status,enable_status,index_ready,file_name,file_size,file_hash,object_ref)
+         VALUES($1,$2,'密码机手册','completed','enabled',true,'密码机国密手册.pdf',$3,$4,$5)",
+    )
+    .bind(second_document_id)
+    .bind(second_version_id)
+    .bind(file_bytes.len() as i64)
+    .bind(&digest)
+    .bind(&object_ref)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO chunks(id,product_version_id,document_id,chunk_type,content,start_at,end_at)
+         VALUES($1,$2,$3,'text',$4,0,$5)",
+    )
+    .bind(second_chunk_id)
+    .bind(second_version_id)
+    .bind(second_document_id)
+    .bind(chunk)
+    .bind(chunk.len() as i32)
     .execute(&mut *seed)
     .await
     .unwrap();
@@ -117,6 +214,112 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .execute(&mut *seed)
     .await
     .unwrap();
+    let tender_digest = "3".repeat(64);
+    let source_bytes = ordinary_requirement.as_bytes();
+    let source_digest = domain::sha256_hex(source_bytes);
+    let section_key = "section:ordinary";
+    let heading_path = json!(["技术要求"]);
+    sqlx::query(
+        "INSERT INTO bid_documents
+         (id,project_id,file_name,media_type,byte_length,original_object_ref,original_sha256,
+          conversion_generation,parse_status)
+         VALUES($1,$2,'ordinary.md','text/markdown',$3,$4,$5,1,'completed')",
+    )
+    .bind(tender_document_id)
+    .bind(project_id)
+    .bind(source_bytes.len() as i64)
+    .bind(format!("objects/{tender_digest}"))
+    .bind(&tender_digest)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_converted_source_artifacts
+         (id,project_id,document_id,conversion_generation,original_object_ref,original_sha256,
+          canonical_markdown_utf8,markdown_sha256,byte_length,converter_contract_version,
+          image_asset_set_sha256)
+         VALUES($1,$2,$3,1,$4,$5,$6,$7,$8,'matching-test-v1',repeat('4',64))",
+    )
+    .bind(source_artifact_id)
+    .bind(project_id)
+    .bind(tender_document_id)
+    .bind(format!("objects/{tender_digest}"))
+    .bind(&tender_digest)
+    .bind(source_bytes)
+    .bind(&source_digest)
+    .bind(source_bytes.len() as i64)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_section_artifacts
+         (id,project_id,document_id,source_artifact_id,conversion_generation,section_key,
+          heading_path,parent_start_offset,parent_end_offset,section_sha256)
+         VALUES($1,$2,$3,$4,1,$5,$6,0,$7,$8)",
+    )
+    .bind(ordinary_unit_id)
+    .bind(project_id)
+    .bind(tender_document_id)
+    .bind(source_artifact_id)
+    .bind(section_key)
+    .bind(&heading_path)
+    .bind(source_bytes.len() as i64)
+    .bind(&source_digest)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    let source_span = json!({
+        "schema_version": 2,
+        "source_artifact_id": source_artifact_id,
+        "section_artifact_id": ordinary_unit_id,
+        "project_id": project_id,
+        "document_id": tender_document_id,
+        "conversion_generation": 1,
+        "section_key": section_key,
+        "parent_start_offset": 0,
+        "parent_end_offset": source_bytes.len(),
+        "start_offset": 0,
+        "end_offset": source_bytes.len(),
+        "offset_unit": "utf8_byte",
+        "quote": ordinary_requirement,
+        "quote_sha256": source_digest,
+        "heading_path": heading_path,
+    });
+    let source_span_bytes = serde_json::to_vec(&source_span).unwrap();
+    let source_span_digest = domain::sha256_hex(&source_span_bytes);
+    sqlx::query(
+        "INSERT INTO bid_source_span_artifacts
+         (id,schema_version,project_id,document_id,source_artifact_id,section_artifact_id,
+          conversion_generation,section_key,parent_start_offset,parent_end_offset,start_offset,
+          end_offset,offset_unit,quote,quote_sha256,heading_path,source_span_v2,canonical_payload,
+          content_sha256)
+         VALUES($1,2,$2,$3,$4,$5,1,$6,0,$7,0,$7,'utf8_byte',$8,$9,$10,$11,$12,$13)",
+    )
+    .bind(source_span_id)
+    .bind(project_id)
+    .bind(tender_document_id)
+    .bind(source_artifact_id)
+    .bind(ordinary_unit_id)
+    .bind(section_key)
+    .bind(source_bytes.len() as i64)
+    .bind(ordinary_requirement)
+    .bind(&source_digest)
+    .bind(&heading_path)
+    .bind(&source_span)
+    .bind(&source_span_bytes)
+    .bind(&source_span_digest)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE bid_documents SET current_converted_source_artifact_id=$2,parsed_at=clock_timestamp()
+         WHERE id=$1",
+    )
+    .bind(tender_document_id)
+    .bind(source_artifact_id)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
     sqlx::query(
         "INSERT INTO bid_clauses
          (id,project_id,provenance,status,kind,text,must,revision,created_by)
@@ -125,6 +328,20 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .bind(clause_id)
     .bind(project_id)
     .bind(requirement)
+    .bind(&actor)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_clauses
+         (id,project_id,provenance,status,kind,text,must,current_source_span_artifact_id,
+          extracted_origin_source_span_artifact_id,revision,created_by)
+         VALUES($1,$2,'extracted','confirmed','technical',$3,true,$4,$4,1,$5)",
+    )
+    .bind(ordinary_clause_id)
+    .bind(project_id)
+    .bind(ordinary_requirement)
+    .bind(source_span_id)
     .bind(&actor)
     .execute(&mut *seed)
     .await
@@ -144,7 +361,11 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(scheduled.jobs.len(), 2, "technical + commercial routes");
+    assert_eq!(
+        scheduled.jobs.len(),
+        3,
+        "ordinary technical + unsectioned technical + commercial routes"
+    );
     let replay = storage::bid_matching::schedule_dirty_project(
         &pool,
         project_id,
@@ -170,7 +391,209 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .await
     .unwrap();
     assert_eq!(schedule_audit_count, 1, "replay must not append audit");
-    for scheduled_job in scheduled.jobs {
+
+    let job_routes = sqlx::query(
+        "SELECT job.id,route.route_kind,route.unit_id
+         FROM bid_matching_jobs job
+         JOIN bid_matching_routes route ON route.id=job.route_id
+         WHERE job.manifest_id=$1",
+    )
+    .bind(scheduled.manifest_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let commercial_job_id: Uuid = job_routes
+        .iter()
+        .find(|row| row.get::<String, _>("route_kind") == "commercial")
+        .unwrap()
+        .get("id");
+    let ordinary_job_id: Uuid = job_routes
+        .iter()
+        .find(|row| row.get::<Option<Uuid>, _>("unit_id") == Some(ordinary_unit_id))
+        .unwrap()
+        .get("id");
+    let unsectioned_job_id: Uuid = job_routes
+        .iter()
+        .find(|row| row.get::<Option<Uuid>, _>("unit_id") == Some(Uuid::nil()))
+        .unwrap()
+        .get("id");
+
+    let commercial_job = scheduled
+        .jobs
+        .iter()
+        .find(|job| job.id == commercial_job_id)
+        .unwrap();
+    let lease_claim =
+        storage::bid_matching::claim_and_load(&pool, commercial_job.id, commercial_job.snapshots)
+            .await
+            .unwrap()
+            .unwrap();
+    sqlx::query(
+        "UPDATE bid_matching_job_claims
+         SET heartbeat_at=clock_timestamp()-interval '10 minutes'
+         WHERE job_id=$1 AND attempt=$2",
+    )
+    .bind(lease_claim.job_id)
+    .bind(lease_claim.claim.attempt)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !storage::bid_matching::heartbeat_claim(&pool, &lease_claim)
+            .await
+            .unwrap()
+    );
+    let error = storage::bid_matching::publish_route(&pool, &lease_claim, empty_publish_route())
+        .await
+        .unwrap_err();
+    assert_database_error(error, "MATCHING_CLAIM_LOST");
+    storage::bid_matching::retry_claim(
+        &pool,
+        &lease_claim,
+        "LEASE_TEST_RETRY",
+        "expired lease is retryable",
+    )
+    .await
+    .unwrap();
+    let lease_status: (String, String) = sqlx::query_as(
+        "SELECT job.status,claim.status
+         FROM bid_matching_jobs job
+         JOIN bid_matching_job_claims claim ON claim.job_id=job.id AND claim.attempt=$2
+         WHERE job.id=$1",
+    )
+    .bind(lease_claim.job_id)
+    .bind(lease_claim.claim.attempt)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(lease_status, ("pending".into(), "failed".into()));
+
+    let ordinary_job = scheduled
+        .jobs
+        .iter()
+        .find(|job| job.id == ordinary_job_id)
+        .unwrap();
+    let staging_claim =
+        storage::bid_matching::claim_and_load(&pool, ordinary_job.id, ordinary_job.snapshots)
+            .await
+            .unwrap()
+            .unwrap();
+    let staged_source_id = Uuid::new_v4();
+    let staged_source = StagedSourceArtifactV1 {
+        id: staged_source_id,
+        product_version_artifact_id: Uuid::new_v4(),
+        document_id: Uuid::new_v4(),
+        source_chunk_id: Uuid::new_v4(),
+        frozen_document_display_name: "duplicate staging source".into(),
+        chunk_utf8: "x".into(),
+        chunk_sha256: domain::sha256_hex(b"x"),
+        chunk_byte_length: 1,
+        retrieval_rank: 1,
+        retrieval_raw_score: "1.000000".into(),
+        retrieval_contract_version: "matching-staging-test-v1".into(),
+    };
+    let mut duplicate_source_report = empty_publish_route();
+    duplicate_source_report.sources = vec![staged_source.clone(), staged_source];
+    assert!(
+        storage::bid_matching::publish_route(&pool, &staging_claim, duplicate_source_report,)
+            .await
+            .is_err(),
+        "duplicate staged identities must reject the batch"
+    );
+    let staging_before_retry: (String, i64) = sqlx::query_as(
+        "SELECT staging.state,
+           (SELECT count(*) FROM bid_matching_staged_batches batch
+             WHERE batch.staging_set_id=staging.id)
+         FROM bid_matching_staging_sets staging
+         WHERE staging.job_id=$1 AND staging.attempt=$2",
+    )
+    .bind(staging_claim.job_id)
+    .bind(staging_claim.claim.attempt)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(staging_before_retry, ("active".into(), 0));
+    storage::bid_matching::retry_claim(
+        &pool,
+        &staging_claim,
+        "STAGING_TEST_RETRY",
+        "partial staging is retryable",
+    )
+    .await
+    .unwrap();
+    let staging_after_retry: (String, String, String) = sqlx::query_as(
+        "SELECT job.status,claim.status,staging.state
+         FROM bid_matching_jobs job
+         JOIN bid_matching_job_claims claim ON claim.job_id=job.id AND claim.attempt=$2
+         JOIN bid_matching_staging_sets staging ON staging.job_id=job.id AND staging.attempt=claim.attempt
+         WHERE job.id=$1",
+    )
+    .bind(staging_claim.job_id)
+    .bind(staging_claim.claim.attempt)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        staging_after_retry,
+        ("pending".into(), "failed".into(), "failed".into())
+    );
+
+    let unsectioned_job = scheduled
+        .jobs
+        .iter()
+        .find(|job| job.id == unsectioned_job_id)
+        .unwrap();
+    let commit_claim =
+        storage::bid_matching::claim_and_load(&pool, unsectioned_job.id, unsectioned_job.snapshots)
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(
+        storage::bid_matching::publish_route(&pool, &commit_claim, empty_publish_route())
+            .await
+            .is_err(),
+        "invalid staged report payload must fail during commit"
+    );
+    let commit_before_retry: (String, i64, i64) = sqlx::query_as(
+        "SELECT staging.state,
+           (SELECT count(*) FROM bid_matching_staged_batches batch
+             WHERE batch.staging_set_id=staging.id),
+           (SELECT count(*) FROM bid_matching_reports report WHERE report.job_id=staging.job_id)
+         FROM bid_matching_staging_sets staging
+         WHERE staging.job_id=$1 AND staging.attempt=$2",
+    )
+    .bind(commit_claim.job_id)
+    .bind(commit_claim.claim.attempt)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(commit_before_retry, ("active".into(), 6, 0));
+    storage::bid_matching::retry_claim(
+        &pool,
+        &commit_claim,
+        "COMMIT_TEST_RETRY",
+        "commit failure is retryable",
+    )
+    .await
+    .unwrap();
+    let commit_after_retry: (String, String, String) = sqlx::query_as(
+        "SELECT job.status,claim.status,staging.state
+         FROM bid_matching_jobs job
+         JOIN bid_matching_job_claims claim ON claim.job_id=job.id AND claim.attempt=$2
+         JOIN bid_matching_staging_sets staging ON staging.job_id=job.id AND staging.attempt=claim.attempt
+         WHERE job.id=$1",
+    )
+    .bind(commit_claim.job_id)
+    .bind(commit_claim.claim.attempt)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        commit_after_retry,
+        ("pending".into(), "failed".into(), "failed".into())
+    );
+
+    for scheduled_job in &scheduled.jobs {
         run_match_route_v1(
             &pool,
             BidMatchRouteV1Job::new(
@@ -196,7 +619,10 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
         .unwrap();
     let technical_route = routes
         .iter()
-        .find(|row| row.get::<String, _>("route_kind") == "technical")
+        .find(|row| {
+            row.get::<String, _>("route_kind") == "technical"
+                && row.get::<Option<Uuid>, _>("unit_id") == Some(Uuid::nil())
+        })
         .unwrap();
     assert_eq!(technical_route.get::<Uuid, _>("unit_id"), Uuid::nil());
     let route_id: Uuid = technical_route.get("route_id");
@@ -227,22 +653,35 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
         storage::bid_matching::current_route_supported_candidates(&pool, project_id, route_id)
             .await
             .unwrap();
-    assert_eq!(candidates.len(), 1);
-    assert!(candidates[0].get::<bool, _>("recommended"));
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|candidate| candidate.get::<bool, _>("recommended"))
+            .count(),
+        1
+    );
 
     let candidate_id: Uuid = candidates[0].get("candidate_artifact_id");
+    let second_candidate_id: Uuid = candidates[1].get("candidate_artifact_id");
     let requirement_id: Uuid = candidates[0].get("requirement_artifact_id");
+    assert_eq!(
+        candidates[1].get::<Uuid, _>("requirement_artifact_id"),
+        requirement_id
+    );
     let body = json!({
         "source_report_artifact_id": report.get::<Uuid, _>("report_id"),
         "report_sha256": report.get::<String, _>("content_sha256"),
         "expected_revision": 0,
         "items": [
             {"requirement_artifact_id": requirement_id, "candidate_artifact_id": candidate_id},
-            {"requirement_artifact_id": requirement_id, "candidate_artifact_id": candidate_id}
+            {"requirement_artifact_id": requirement_id, "candidate_artifact_id": candidate_id},
+            {"requirement_artifact_id": requirement_id, "candidate_artifact_id": second_candidate_id}
         ],
     });
     let context =
-        storage::bidding::MutationContext::new(actor, format!("pick-{project_id}"), &body).unwrap();
+        storage::bidding::MutationContext::new(actor.clone(), format!("pick-{project_id}"), &body)
+            .unwrap();
     let receipt = storage::bid_matching::replace_route_pick_set(
         &pool,
         ReplaceRoutePickSetV1 {
@@ -259,6 +698,10 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
                 PickSelectionV1 {
                     requirement_artifact_id: requirement_id,
                     candidate_artifact_id: candidate_id,
+                },
+                PickSelectionV1 {
+                    requirement_artifact_id: requirement_id,
+                    candidate_artifact_id: second_candidate_id,
                 },
             ],
         },
@@ -283,6 +726,10 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
                 PickSelectionV1 {
                     requirement_artifact_id: requirement_id,
                     candidate_artifact_id: candidate_id,
+                },
+                PickSelectionV1 {
+                    requirement_artifact_id: requirement_id,
+                    candidate_artifact_id: second_candidate_id,
                 },
             ],
         },
@@ -327,16 +774,82 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .unwrap();
     assert_eq!(domain::sha256_hex(&route_payload), route_digest);
     assert_eq!(route_digest, receipt.route_sha256);
+
+    let ordinary_route = routes
+        .iter()
+        .find(|row| row.get::<Option<Uuid>, _>("unit_id") == Some(ordinary_unit_id))
+        .unwrap();
+    let ordinary_route_id: Uuid = ordinary_route.get("route_id");
+    let ordinary_report =
+        storage::bid_matching::current_route_report(&pool, project_id, ordinary_route_id)
+            .await
+            .unwrap()
+            .unwrap();
+    let ordinary_candidates = storage::bid_matching::current_route_supported_candidates(
+        &pool,
+        project_id,
+        ordinary_route_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ordinary_candidates.len(), 2);
+    let ordinary_candidate_id: Uuid = ordinary_candidates[0].get("candidate_artifact_id");
+    let ordinary_requirement_id: Uuid = ordinary_candidates[0].get("requirement_artifact_id");
+    let ordinary_body = json!({
+        "source_report_artifact_id": ordinary_report.get::<Uuid, _>("report_id"),
+        "report_sha256": ordinary_report.get::<String, _>("content_sha256"),
+        "expected_revision": 0,
+        "items": [{
+            "requirement_artifact_id": ordinary_requirement_id,
+            "candidate_artifact_id": ordinary_candidate_id
+        }],
+    });
+    let ordinary_context = storage::bidding::MutationContext::new(
+        actor,
+        format!("pick-ordinary-{project_id}"),
+        &ordinary_body,
+    )
+    .unwrap();
+    let ordinary_receipt = storage::bid_matching::replace_route_pick_set(
+        &pool,
+        ReplaceRoutePickSetV1 {
+            project_id,
+            route_id: ordinary_route_id,
+            source_report_artifact_id: ordinary_report.get("report_id"),
+            report_sha256: ordinary_report.get("content_sha256"),
+            expected_revision: 0,
+            selections: vec![PickSelectionV1 {
+                requirement_artifact_id: ordinary_requirement_id,
+                candidate_artifact_id: ordinary_candidate_id,
+            }],
+        },
+        &ordinary_context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ordinary_receipt.route_revision, 1);
+
     let project_units: Vec<Option<Uuid>> = sqlx::query_scalar(
         "SELECT item.unit_id FROM bid_current_project_pick_sets current_value
          JOIN bid_project_pick_set_items item ON item.project_pick_set_id=current_value.pick_set_id
-         WHERE current_value.project_id=$1",
+         WHERE current_value.project_id=$1
+         ORDER BY item.unit_id",
     )
     .bind(project_id)
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(project_units, vec![Some(Uuid::nil())]);
+    assert_eq!(
+        project_units,
+        vec![Some(Uuid::nil()), Some(Uuid::nil()), Some(ordinary_unit_id)]
+    );
+    let current_route_pick_sets: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM bid_current_route_pick_sets WHERE project_id=$1")
+            .bind(project_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(current_route_pick_sets, 2);
     let route_pick_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM bid_current_route_pick_sets current_value
          JOIN bid_route_pick_set_items item ON item.pick_set_id=current_value.pick_set_id
@@ -348,8 +861,8 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .await
     .unwrap();
     assert_eq!(
-        route_pick_count, 1,
-        "duplicate candidate picks are canonicalized"
+        route_pick_count, 2,
+        "duplicate selections are canonicalized while two distinct supported picks persist"
     );
 
     sqlx::query("UPDATE documents SET file_name='已改名.pdf' WHERE id=$1")
@@ -373,9 +886,10 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     let frozen_name: String = sqlx::query_scalar(
         "SELECT source.frozen_document_display_name FROM bid_matching_source_artifacts source
          JOIN bid_matching_reports report ON report.id=source.report_id
-         WHERE report.project_id=$1",
+         WHERE report.project_id=$1 AND source.document_id=$2",
     )
     .bind(project_id)
+    .bind(document_id)
     .fetch_one(&pool)
     .await
     .unwrap();

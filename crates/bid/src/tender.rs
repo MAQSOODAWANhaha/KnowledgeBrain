@@ -4,6 +4,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::{collections::HashMap, sync::LazyLock, time::Duration};
 use storage::bidding::{
     CompleteDocumentConversion, ConvertedSourceImageUpload, MutationContext, PublishSection,
 };
@@ -12,6 +13,32 @@ use uuid::Uuid;
 pub const ROUTER_VERSION: &str = "kind-router-v1";
 pub const POLICY_VERSION: &str = "requirement-span-v1+fact-suggestion-v1";
 pub const PROMPT_VERSION: &str = "bounded-tender-publication-v1";
+
+#[derive(Deserialize)]
+struct TenderConfig {
+    families: HashMap<String, TenderFamilyConfig>,
+    skip_heading_hints: Vec<String>,
+    outline: TenderOutlineConfig,
+}
+
+#[derive(Deserialize)]
+struct TenderFamilyConfig {
+    heading_hints: Vec<String>,
+    signals: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct TenderOutlineConfig {
+    enumeration_prefix_terms: Vec<String>,
+    numbered_heading_suffixes: Vec<String>,
+    numbered_requirement_predicates: Vec<String>,
+    table_predicates: Vec<String>,
+}
+
+static TENDER_CONFIG: LazyLock<TenderConfig> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../config/cn-tender-v2.json"))
+        .expect("cn-tender-v2 config must be valid")
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -189,6 +216,37 @@ pub fn route_kind(text: &str) -> RoutedKind {
 
 fn contains_any(text: &str, terms: &[&str]) -> bool {
     terms.iter().any(|term| text.contains(term))
+}
+
+fn has_requirement_signal(text: &str) -> bool {
+    contains_any(
+        text,
+        &["必须", "应当", "应", "须", "不得", "要求", "提供", "提交"],
+    ) || contains_any(
+        text,
+        &[
+            "设备",
+            "系统",
+            "接口",
+            "协议",
+            "许可证",
+            "ISO",
+            "等保",
+            "资质",
+            "质保",
+            "驻场",
+            "培训",
+            "付款",
+            "交货",
+            "供货",
+            "报价",
+            "评分",
+            "保证金",
+            "密封",
+            "投标函",
+        ],
+    ) || configured_requirement_signal(text)
+        || numbered_title_has_strong_requirement(numbered_line_body(text).unwrap_or(text))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,6 +460,140 @@ fn stable_path_key(path: &[String]) -> String {
     hex::encode(hasher.finalize())[..16].to_string()
 }
 
+static NUMERIC_NUMBERED_LINE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?P<number>[0-9]{1,5}(?:\.[0-9]{1,5}){0,5})(?:[.、]\s*|\s+)(?P<title>\S.*)$")
+        .expect("static regex")
+});
+
+static CHINESE_NUMBERED_LINE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?P<prefix>(?:[（(][一二三四五六七八九十百千]+[）)]|[一二三四五六七八九十百千]+[、.．]))\s*(?P<title>\S.*)$",
+    )
+    .expect("static regex")
+});
+
+fn numbered_line_body(line: &str) -> Option<&str> {
+    NUMERIC_NUMBERED_LINE
+        .captures(line)
+        .or_else(|| CHINESE_NUMBERED_LINE.captures(line))
+        .and_then(|capture| capture.name("title"))
+        .map(|title| title.as_str().trim())
+}
+
+fn has_subject_action_object(title: &str, actions: &[&String]) -> bool {
+    const SUBJECT_TERMS: [&str; 15] = [
+        "系统",
+        "产品",
+        "设备",
+        "服务",
+        "项目",
+        "企业",
+        "公司",
+        "投标人",
+        "供应商",
+        "承包人",
+        "申请人",
+        "法定代表人",
+        "投标文件",
+        "响应文件",
+        "报价",
+    ];
+    actions.iter().any(|action| {
+        title.match_indices(action.as_str()).any(|(index, _)| {
+            let subject = title[..index].trim();
+            let object = title[index + action.len()..].trim();
+            !subject.is_empty()
+                && !object.is_empty()
+                && SUBJECT_TERMS.iter().any(|term| subject.contains(term))
+                && !(action.as_str() == "符合" && object.starts_with('性'))
+        })
+    })
+}
+
+fn numbered_title_has_strong_requirement(title: &str) -> bool {
+    if TENDER_CONFIG
+        .outline
+        .numbered_requirement_predicates
+        .iter()
+        .filter(|predicate| {
+            !["应", "需", "须"]
+                .iter()
+                .any(|modal| predicate.ends_with(modal))
+        })
+        .any(|predicate| title.starts_with(predicate))
+        || ["必须", "不得"]
+            .iter()
+            .any(|predicate| title.contains(predicate))
+    {
+        return true;
+    }
+    let action_terms = TENDER_CONFIG
+        .outline
+        .table_predicates
+        .iter()
+        .filter(|term| term.chars().count() > 1 && term.as_str() != "应当")
+        .collect::<Vec<_>>();
+    if TENDER_CONFIG
+        .outline
+        .enumeration_prefix_terms
+        .iter()
+        .filter(|term| term.chars().count() > 1)
+        .any(|term| title.starts_with(term))
+    {
+        return true;
+    }
+    if has_subject_action_object(title, &action_terms) {
+        return true;
+    }
+    const EXTRA_ACTION_TERMS: [&str; 20] = [
+        "完成", "符合", "遵守", "保证", "确保", "交付", "部署", "安装", "禁止", "限制", "签字",
+        "盖章", "密封", "递交", "缴纳", "上传", "验收", "付款", "兼容", "为",
+    ];
+    ["应当", "应该", "应", "需要", "需", "须"]
+        .iter()
+        .any(|modal| {
+            title.match_indices(modal).any(|(index, _)| {
+                let rest = &title[index + modal.len()..];
+                action_terms.iter().any(|action| rest.starts_with(*action))
+                    || EXTRA_ACTION_TERMS
+                        .iter()
+                        .any(|action| rest.starts_with(action))
+            })
+        })
+}
+
+fn configured_heading_hint(title: &str) -> bool {
+    TENDER_CONFIG
+        .families
+        .values()
+        .flat_map(|family| &family.heading_hints)
+        .chain(&TENDER_CONFIG.skip_heading_hints)
+        .any(|hint| hint == title)
+}
+
+fn configured_requirement_signal(title: &str) -> bool {
+    TENDER_CONFIG
+        .families
+        .values()
+        .flat_map(|family| &family.signals)
+        .any(|signal| title.contains(signal))
+}
+
+fn numbered_title_is_heading(title: &str) -> bool {
+    if numbered_title_has_strong_requirement(title) {
+        return false;
+    }
+    if configured_heading_hint(title) {
+        return true;
+    }
+    !configured_requirement_signal(title)
+        && TENDER_CONFIG
+            .outline
+            .numbered_heading_suffixes
+            .iter()
+            .any(|suffix| title.ends_with(suffix))
+}
+
 fn heading(line: &str) -> Option<(usize, String)> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.len() > 256 || trimmed.contains(['。', '；', '！', '？']) {
@@ -417,25 +609,24 @@ fn heading(line: &str) -> Option<(usize, String)> {
             trimmed.to_string(),
         ));
     }
-    let numeric_prefix = trimmed
-        .split_once(['.', '、'])
-        .is_some_and(|(prefix, rest)| {
-            !rest.trim().is_empty() && prefix.split('.').all(|p| p.parse::<u16>().is_ok())
-        });
-    if numeric_prefix {
-        let level = trimmed
-            .split_once(['.', '、'])
-            .map(|(prefix, _)| prefix.matches('.').count() + 1)
-            .unwrap_or(1);
-        return Some((level.min(6), trimmed.to_string()));
+    if let Some(capture) = NUMERIC_NUMBERED_LINE.captures(trimmed) {
+        let level = capture["number"].split('.').count();
+        let title = capture["title"].trim();
+        if numbered_title_is_heading(title) {
+            return Some((level.min(6), trimmed.to_string()));
+        }
+        return None;
     }
-    let mut chars = trimmed.chars();
-    if chars
-        .next()
-        .is_some_and(|first| "一二三四五六七八九十".contains(first))
-        && chars.next() == Some('、')
-    {
-        return Some((1, trimmed.to_string()));
+    if let Some(capture) = CHINESE_NUMBERED_LINE.captures(trimmed) {
+        if !numbered_title_is_heading(capture["title"].trim()) {
+            return None;
+        }
+        let level = if capture["prefix"].starts_with(['（', '(']) {
+            2
+        } else {
+            1
+        };
+        return Some((level, trimmed.to_string()));
     }
     None
 }
@@ -504,34 +695,7 @@ fn classify_segment(text: &str, has_fact: bool) -> SegmentDisposition {
     {
         return SegmentDisposition::DeterministicNonRequirement;
     }
-    let requirement_signal = contains_any(
-        trimmed,
-        &["必须", "应当", "应", "须", "不得", "要求", "提供", "提交"],
-    ) || contains_any(
-        trimmed,
-        &[
-            "设备",
-            "系统",
-            "接口",
-            "协议",
-            "许可证",
-            "ISO",
-            "等保",
-            "资质",
-            "质保",
-            "驻场",
-            "培训",
-            "付款",
-            "交货",
-            "供货",
-            "报价",
-            "评分",
-            "保证金",
-            "密封",
-            "投标函",
-        ],
-    );
-    if requirement_signal {
+    if has_requirement_signal(trimmed) {
         let routed = route_kind(trimmed);
         return SegmentDisposition::Clause {
             text: trimmed.to_string(),
@@ -550,24 +714,33 @@ fn classify_segment(text: &str, has_fact: bool) -> SegmentDisposition {
 
 fn extract_fact_proposals(text: &str) -> Vec<FactProposal> {
     let mut facts = Vec::new();
-    let amount = Regex::new(r"(?P<amount>[0-9]{1,18}(?:\.[0-9]{1,2})?)\s*(?:元|人民币)")
-        .expect("static regex");
-    if let Some(capture) = amount.captures(text) {
-        let amount = normalize_cny(&capture["amount"]);
-        if text.contains("预算") {
-            facts.push(FactProposal {
-                field: "budget_amount",
-                typed_value: json!({"amount":amount,"currency_code":"CNY"}),
-                confidence: "0.9500".into(),
-            });
-        }
-        if contains_any(text, &["最高限价", "控制价", "限价"]) {
-            facts.push(FactProposal {
-                field: "ceiling_price",
-                typed_value: json!({"amount":amount,"currency_code":"CNY","basis":"unspecified"}),
-                confidence: "0.9500".into(),
-            });
-        }
+    const CNY_AMOUNT: &str =
+        r"(?P<amount>(?:[1-9][0-9]{0,2}(?:,[0-9]{3})+|(?:0|[1-9][0-9]{0,17}))(?:\.[0-9]{1,2})?)";
+    static BUDGET_AMOUNT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(&format!(
+            r"预算(?:金额)?(?:为|是|[:：])?\s*(?:人民币\s*)?{CNY_AMOUNT}\s*(?:元|人民币)"
+        ))
+        .expect("static regex")
+    });
+    static CEILING_AMOUNT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(&format!(
+            r"(?:最高限价|最高控制价|控制价|限价)(?:金额)?(?:为|是|[:：])?\s*(?:人民币\s*)?{CNY_AMOUNT}\s*(?:元|人民币)"
+        ))
+        .expect("static regex")
+    });
+    if let Some(amount) = capture_cny_amount(&BUDGET_AMOUNT, text) {
+        facts.push(FactProposal {
+            field: "budget_amount",
+            typed_value: json!({"amount":amount,"currency_code":"CNY"}),
+            confidence: "0.9500".into(),
+        });
+    }
+    if let Some(amount) = capture_cny_amount(&CEILING_AMOUNT, text) {
+        facts.push(FactProposal {
+            field: "ceiling_price",
+            typed_value: json!({"amount":amount,"currency_code":"CNY","basis":"unspecified"}),
+            confidence: "0.9500".into(),
+        });
     }
     let days = Regex::new(r"(?:有效期|有效)\s*(?P<days>[0-9]{1,4})\s*天").expect("static regex");
     if let Some(capture) = days.captures(text)
@@ -583,12 +756,20 @@ fn extract_fact_proposals(text: &str) -> Vec<FactProposal> {
     facts
 }
 
-fn normalize_cny(value: &str) -> String {
-    let mut parts = value.split('.');
+fn capture_cny_amount(regex: &Regex, text: &str) -> Option<String> {
+    normalize_cny(regex.captures(text)?.name("amount")?.as_str())
+}
+
+fn normalize_cny(value: &str) -> Option<String> {
+    let canonical = value.replace(',', "");
+    let mut parts = canonical.split('.');
     let whole = parts.next().unwrap_or("0").trim_start_matches('0');
     let whole = if whole.is_empty() { "0" } else { whole };
+    if whole.len() > 18 {
+        return None;
+    }
     let fraction = parts.next().unwrap_or("");
-    format!("{whole}.{fraction:0<2}")
+    Some(format!("{whole}.{fraction:0<2}"))
 }
 
 impl FrozenSection {
@@ -664,138 +845,131 @@ pub async fn convert_and_schedule_document(
     else {
         return Ok(None);
     };
-    let original_digest = claim.object_ref.trim_start_matches("objects/");
-    let bytes = storage::read_blob(original_digest).map_err(|error| error.to_string())?;
     const CONVERSION_OBJECT_ACTOR: &str = "system:bid-convert-worker";
     let mut image_uploads: Vec<ConvertedSourceImageUpload> = Vec::new();
-    let conversion = async {
-        let converted = docparser::convert_to_markdown(&claim.file_name, bytes)
-            .await
-            .map_err(|error| error.0)?;
-        if !converted.error.is_empty() {
-            return Err(converted.error);
-        }
-        let mut markdown = converted.markdown;
-        let image_source_type = converted
-            .metadata
-            .get("image_source_type")
-            .cloned()
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| {
-                enrichment::image_source_type(&claim.file_name, &markdown).to_string()
-            });
-        let language =
-            enrichment::infer_output_language(&format!("{}\n{markdown}", claim.file_name));
-        let mut image_digests = Vec::new();
-        for image in converted.images {
-            if image.data.is_empty() {
-                continue;
-            }
-            if !storage::bidding::heartbeat_document_conversion(pool, document_id, claim_token)
+    let target_id = Uuid::new_v4();
+    let conversion = runtime::run_with_heartbeat(
+        Duration::from_millis(claim.claim_lease_ms as u64),
+        async {
+            let original_digest = claim.object_ref.trim_start_matches("objects/");
+            let bytes = storage::read_blob(original_digest).map_err(|error| error.to_string())?;
+            let converted = docparser::convert_to_markdown(&claim.file_name, bytes)
                 .await
-                .map_err(|error| error.to_string())?
-            {
-                return Err("document conversion lease lost".into());
+                .map_err(|error| error.0)?;
+            if !converted.error.is_empty() {
+                return Err(converted.error);
             }
-            let image_digest = hex::encode(Sha256::digest(&image.data));
-            let image_ref = storage::object_ref(&image_digest);
-            let media_type = image.mime_type.trim();
-            if !media_type.starts_with("image/") {
-                return Err("converted image media type is missing or invalid".into());
+            let mut markdown = converted.markdown;
+            let image_source_type = converted
+                .metadata
+                .get("image_source_type")
+                .cloned()
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| {
+                    enrichment::image_source_type(&claim.file_name, &markdown).to_string()
+                });
+            let language =
+                enrichment::infer_output_language(&format!("{}\n{markdown}", claim.file_name));
+            let mut image_digests = Vec::new();
+            for image in converted.images {
+                if image.data.is_empty() {
+                    continue;
+                }
+                let image_digest = hex::encode(Sha256::digest(&image.data));
+                let image_ref = storage::object_ref(&image_digest);
+                let media_type = image.mime_type.trim();
+                if !media_type.starts_with("image/") {
+                    return Err("converted image media type is missing or invalid".into());
+                }
+                let staging_id = Uuid::new_v4();
+                storage::stage_object_upload(
+                    pool,
+                    staging_id,
+                    &image_ref,
+                    &image_digest,
+                    media_type,
+                    image.data.len() as i64,
+                    CONVERSION_OBJECT_ACTOR,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                image_uploads.push(ConvertedSourceImageUpload {
+                    staging_id,
+                    object_ref: image_ref.clone(),
+                    digest: image_digest.clone(),
+                    media_type: media_type.to_string(),
+                    byte_length: image.data.len() as i64,
+                    occurrence: format!("image:{}", image_uploads.len()),
+                });
+                storage::write_blob_off_runtime(&image_digest, &image.data)
+                    .map_err(|error| error.to_string())?;
+                image_digests.push(image_digest);
+                if domain::vlm_configured() {
+                    let (ocr, caption) =
+                        enrichment::describe_image(&image_ref, &image_source_type, &language)
+                            .map_err(|error| format!("tender multimodal stage failed: {error}"))?;
+                    markdown = markdown.replacen(
+                        &format!("]({})", image.original_ref),
+                        &format!("]({image_ref})\n\n{ocr}\n\n{caption}\n"),
+                        1,
+                    );
+                } else if markdown.contains(&image.original_ref) {
+                    markdown = markdown.replace(&image.original_ref, &image_ref);
+                }
             }
-            let staging_id = Uuid::new_v4();
-            storage::stage_object_upload(
+            image_digests.sort();
+            let mut image_set_hasher = Sha256::new();
+            image_set_hasher.update(b"ConvertedSourceArtifactV1:image-set:");
+            for digest in image_digests {
+                image_set_hasher.update(digest.as_bytes());
+            }
+            let image_asset_set_sha256 = hex::encode(image_set_hasher.finalize());
+            let sections = outline_and_route(&markdown)?;
+            let source_artifact_id = Uuid::new_v4();
+            let completed = storage::bidding::complete_document_conversion(
                 pool,
-                staging_id,
-                &image_ref,
-                &image_digest,
-                media_type,
-                image.data.len() as i64,
-                CONVERSION_OBJECT_ACTOR,
+                CompleteDocumentConversion {
+                    document_id,
+                    claim_token,
+                    source_artifact_id,
+                    markdown: markdown.as_bytes(),
+                    converter_contract_version: "docparser-converted-source-v1",
+                    image_asset_set_sha256: &image_asset_set_sha256,
+                    image_assets: &image_uploads,
+                    extraction_target_id: target_id,
+                    expected_section_count: sections.len() as i32,
+                    policy_version: POLICY_VERSION,
+                    prompt_version: PROMPT_VERSION,
+                    actor: CONVERSION_OBJECT_ACTOR,
+                },
             )
             .await
             .map_err(|error| error.to_string())?;
-            image_uploads.push(ConvertedSourceImageUpload {
-                staging_id,
-                object_ref: image_ref.clone(),
-                digest: image_digest.clone(),
-                media_type: media_type.to_string(),
-                byte_length: image.data.len() as i64,
-                occurrence: format!("image:{}", image_uploads.len()),
-            });
-            storage::write_blob_off_runtime(&image_digest, &image.data)
-                .map_err(|error| error.to_string())?;
-            image_digests.push(image_digest);
-            if domain::vlm_configured() {
-                let (ocr, caption) =
-                    enrichment::describe_image(&image_ref, &image_source_type, &language)
-                        .map_err(|error| format!("tender multimodal stage failed: {error}"))?;
-                markdown = markdown.replacen(
-                    &format!("]({})", image.original_ref),
-                    &format!("]({image_ref})\n\n{ocr}\n\n{caption}\n"),
-                    1,
-                );
-            } else if markdown.contains(&image.original_ref) {
-                markdown = markdown.replace(&image.original_ref, &image_ref);
+            if completed["source_artifact_id"] != source_artifact_id.to_string()
+                || completed["extraction_target_id"] != target_id.to_string()
+            {
+                return Err("conversion publication identity mismatch".into());
             }
-        }
-        image_digests.sort();
-        let mut image_set_hasher = Sha256::new();
-        image_set_hasher.update(b"ConvertedSourceArtifactV1:image-set:");
-        for digest in image_digests {
-            image_set_hasher.update(digest.as_bytes());
-        }
-        let image_asset_set_sha256 = hex::encode(image_set_hasher.finalize());
-        let sections = outline_and_route(&markdown)?;
-        let source_artifact_id = Uuid::new_v4();
-        storage::bidding::complete_document_conversion(
-            pool,
-            CompleteDocumentConversion {
-                document_id,
-                claim_token,
-                source_artifact_id,
-                markdown: markdown.as_bytes(),
-                converter_contract_version: "docparser-converted-source-v1",
-                image_asset_set_sha256: &image_asset_set_sha256,
-                image_assets: &image_uploads,
-                actor: CONVERSION_OBJECT_ACTOR,
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        let target_id = Uuid::new_v4();
-        let schedule_payload = json!({
-            "schema_version":1,
-            "target_id":target_id,
-            "document_id":document_id,
-            "source_artifact_id":source_artifact_id,
-            "expected_section_count":sections.len(),
-            "policy_version":POLICY_VERSION,
-            "prompt_version":PROMPT_VERSION
-        });
-        let context = MutationContext::new(
-            "system:bid-convert-worker",
-            format!("{document_id}:{}", claim.conversion_generation),
-            &schedule_payload,
-        )
-        .map_err(|error| error.to_string())?;
-        storage::bidding::schedule_extraction(
-            pool,
-            target_id,
-            document_id,
-            sections.len() as i32,
-            POLICY_VERSION,
-            PROMPT_VERSION,
-            &context,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        Ok(target_id)
-    }
+            Ok(target_id)
+        },
+        || async {
+            storage::bidding::heartbeat_document_conversion(pool, document_id, claim_token)
+                .await
+                .map_err(|error| error.to_string())
+        },
+    )
     .await;
     match conversion {
-        Ok(target_id) => Ok(Some(target_id)),
-        Err(error) => {
+        runtime::LeaseRun::Completed(Ok(target_id)) => Ok(Some(target_id)),
+        runtime::LeaseRun::Lost => {
+            for image in &image_uploads {
+                let _ =
+                    storage::abandon_object_upload(pool, image.staging_id, CONVERSION_OBJECT_ACTOR)
+                        .await;
+            }
+            Err("document conversion lease lost".into())
+        }
+        runtime::LeaseRun::Completed(Err(error)) | runtime::LeaseRun::HeartbeatFailed(error) => {
             for image in &image_uploads {
                 let _ =
                     storage::abandon_object_upload(pool, image.staging_id, CONVERSION_OBJECT_ACTOR)
@@ -847,69 +1021,96 @@ pub async fn run_extraction_target(
         .await;
         return Err("extraction target scope mismatch".into());
     }
-    let source = storage::bidding::extraction_source(pool, claim.document_id)
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "frozen extraction source missing".to_string())?;
-    if source.source_artifact_id != claim.source_artifact_id
-        || source.conversion_generation != claim.conversion_generation
-        || hex::encode(Sha256::digest(&source.markdown)) != source.markdown_sha256
-    {
-        return Err("frozen extraction source identity mismatch".into());
-    }
-    let markdown =
-        String::from_utf8(source.markdown).map_err(|_| "converted source is not UTF-8")?;
-    let sections = outline_and_route(&markdown)?;
-    for section in &sections {
-        if !storage::bidding::heartbeat_extraction(pool, target_id, claim_token, claim.attempt)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            return Err("extraction lease lost".into());
-        }
-        let graph = section.candidate_graph();
-        let expected_current_publication_id = storage::bidding::current_section_publication(
-            pool,
-            claim.project_id,
-            claim.document_id,
-            &section.key,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        let request = PublicationRequest {
-            target_id,
-            attempt: claim.attempt,
-            section_key: &section.key,
-            parent_start_offset: section.parent_start_offset,
-            parent_end_offset: section.parent_end_offset,
-            expected_current_publication_id,
-            candidate_graph: &graph,
-        };
-        let context = MutationContext::new(
-            "system:bid-extraction-worker",
-            format!("{target_id}:{}", section.key),
-            &request,
-        )
-        .map_err(|error| error.to_string())?;
-        storage::bidding::publish_extraction_section(
-            pool,
-            PublishSection {
+    let extraction = runtime::run_with_heartbeat(
+        Duration::from_millis(claim.claim_lease_ms as u64),
+        async {
+            let source = storage::bidding::extraction_source(pool, claim.document_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "frozen extraction source missing".to_string())?;
+            if source.source_artifact_id != claim.source_artifact_id
+                || source.conversion_generation != claim.conversion_generation
+                || hex::encode(Sha256::digest(&source.markdown)) != source.markdown_sha256
+            {
+                return Err("frozen extraction source identity mismatch".into());
+            }
+            let markdown = String::from_utf8(source.markdown)
+                .map_err(|_| "converted source is not UTF-8".to_string())?;
+            let sections = outline_and_route(&markdown)?;
+            for section in &sections {
+                let graph = section.candidate_graph();
+                let expected_current_publication_id =
+                    storage::bidding::current_section_publication(
+                        pool,
+                        claim.project_id,
+                        claim.document_id,
+                        &section.key,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let request = PublicationRequest {
+                    target_id,
+                    attempt: claim.attempt,
+                    section_key: &section.key,
+                    parent_start_offset: section.parent_start_offset,
+                    parent_end_offset: section.parent_end_offset,
+                    expected_current_publication_id,
+                    candidate_graph: &graph,
+                };
+                let context = MutationContext::new(
+                    "system:bid-extraction-worker",
+                    format!("{target_id}:{}", section.key),
+                    &request,
+                )
+                .map_err(|error| error.to_string())?;
+                storage::bidding::publish_extraction_section(
+                    pool,
+                    PublishSection {
+                        target_id,
+                        attempt: claim.attempt,
+                        claim_token,
+                        section_key: &section.key,
+                        heading_path: &json!(section.heading_path),
+                        parent_start_offset: section.parent_start_offset as i64,
+                        parent_end_offset: section.parent_end_offset as i64,
+                        expected_current_publication_id,
+                        candidate_graph: &graph,
+                    },
+                    &context,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        },
+        || async {
+            storage::bidding::heartbeat_extraction(pool, target_id, claim_token, claim.attempt)
+                .await
+                .map_err(|error| error.to_string())
+        },
+    )
+    .await;
+    match extraction {
+        runtime::LeaseRun::Completed(Ok(())) => Ok(()),
+        runtime::LeaseRun::Lost => Err("extraction lease lost".into()),
+        runtime::LeaseRun::Completed(Err(error)) | runtime::LeaseRun::HeartbeatFailed(error) => {
+            let retry = super::conversion_error_is_retryable(&error);
+            let _ = storage::bidding::fail_extraction(
+                pool,
                 target_id,
-                attempt: claim.attempt,
+                claim.attempt,
                 claim_token,
-                section_key: &section.key,
-                heading_path: &json!(section.heading_path),
-                parent_start_offset: section.parent_start_offset as i64,
-                parent_end_offset: section.parent_end_offset as i64,
-                expected_current_publication_id,
-                candidate_graph: &graph,
-            },
-            &context,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+                if retry {
+                    "EXTRACTION_TRANSIENT"
+                } else {
+                    "EXTRACTION_TERMINAL"
+                },
+                retry,
+            )
+            .await;
+            Err(error)
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -959,6 +1160,202 @@ mod tests {
                 &clause.quote
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn dotted_numeric_headings_preserve_their_full_hierarchy() {
+        let markdown =
+            "1. 技术要求\n正文说明。\n1.2 服务要求\n服务正文。\n1.2.3 性能指标\n性能正文。";
+
+        let sections = outline_and_route(markdown).unwrap();
+        let heading_paths: Vec<_> = sections
+            .iter()
+            .map(|section| section.heading_path.as_slice())
+            .collect();
+
+        assert_eq!(
+            heading_paths,
+            vec![
+                &["1. 技术要求".to_string()][..],
+                &["1. 技术要求".to_string(), "1.2 服务要求".to_string()][..],
+                &[
+                    "1. 技术要求".to_string(),
+                    "1.2 服务要求".to_string(),
+                    "1.2.3 性能指标".to_string()
+                ][..]
+            ]
+        );
+    }
+
+    #[test]
+    fn numbered_requirements_and_real_headings_are_distinguished_in_both_numbering_styles() {
+        let markdown = concat!(
+            "1. 系统应提供双电源\n",
+            "2. 提供营业执照复印件\n",
+            "二、提交近三年审计报告\n",
+            "5. 投标人须在截止日前提交营业执照\n",
+            "6. 法定代表人须签字\n",
+            "3. 应急预案\n",
+            "3.1 需求分析\n",
+            "4. 系统应用架构\n",
+            "二、应对方案\n",
+            "三、技术要求\n",
+            "系统应支持国密协议。",
+        );
+
+        let sections = outline_and_route(markdown).unwrap();
+
+        assert_eq!(sections.len(), 6);
+        assert!(sections[0].heading_path.is_empty());
+        let clause_quotes = sections[0]
+            .segments
+            .iter()
+            .filter_map(|segment| match segment.disposition {
+                SegmentDisposition::Clause { .. } => Some(segment.quote.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(clause_quotes.contains(&"1. 系统应提供双电源"));
+        assert!(clause_quotes.contains(&"2. 提供营业执照复印件"));
+        assert!(clause_quotes.contains(&"二、提交近三年审计报告"));
+        assert!(clause_quotes.contains(&"5. 投标人须在截止日前提交营业执照"));
+        assert!(clause_quotes.contains(&"6. 法定代表人须签字"));
+        assert_eq!(sections[1].heading_path, vec!["3. 应急预案".to_string()]);
+        assert_eq!(
+            sections[2].heading_path,
+            vec!["3. 应急预案".to_string(), "3.1 需求分析".to_string()]
+        );
+        assert_eq!(
+            sections[3].heading_path,
+            vec!["4. 系统应用架构".to_string()]
+        );
+        assert_eq!(sections[4].heading_path, vec!["二、应对方案".to_string()]);
+        assert_eq!(sections[5].heading_path, vec!["三、技术要求".to_string()]);
+    }
+
+    #[test]
+    fn numbered_action_requirements_are_preserved_as_clauses_instead_of_headings() {
+        let markdown = concat!(
+            "2. 投标文件格式符合招标要求\n",
+            "3. 产品满足性能要求\n",
+            "4. 系统达到性能要求\n",
+            "5. 投标人应当遵守保密要求",
+        );
+
+        let sections = outline_and_route(markdown).unwrap();
+
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].heading_path.is_empty());
+        let clause_quotes = sections[0]
+            .segments
+            .iter()
+            .filter_map(|segment| match segment.disposition {
+                SegmentDisposition::Clause { .. } => Some(segment.quote.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            clause_quotes,
+            vec![
+                "2. 投标文件格式符合招标要求",
+                "3. 产品满足性能要求",
+                "4. 系统达到性能要求",
+                "5. 投标人应当遵守保密要求",
+            ]
+        );
+    }
+
+    #[test]
+    fn numbered_elliptical_requirements_are_preserved_as_clauses_instead_of_headings() {
+        let markdown = concat!(
+            "2. ISO 9001认证资质\n",
+            "3. 近三年类似项目业绩\n",
+            "4. 需具备独立法人资格\n",
+            "5. 具备独立法人资格\n",
+            "6. 产品采用国产数据库",
+        );
+
+        let sections = outline_and_route(markdown).unwrap();
+
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].heading_path.is_empty());
+        let clause_quotes = sections[0]
+            .segments
+            .iter()
+            .filter_map(|segment| match segment.disposition {
+                SegmentDisposition::Clause { .. } => Some(segment.quote.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            clause_quotes,
+            vec![
+                "2. ISO 9001认证资质",
+                "3. 近三年类似项目业绩",
+                "4. 需具备独立法人资格",
+                "5. 具备独立法人资格",
+                "6. 产品采用国产数据库",
+            ]
+        );
+    }
+
+    #[test]
+    fn configured_numbered_heading_hints_define_outline_boundaries() {
+        let markdown = concat!(
+            "1. 采购需求\n",
+            "2. 技术规格\n",
+            "3. 技术参数\n",
+            "4. 资格审查\n",
+            "5. 商务条款\n",
+            "6. 注册资本\n",
+            "7. 类似项目\n",
+            "8. 服务能力",
+        );
+
+        let sections = outline_and_route(markdown).unwrap();
+        let heading_paths = sections
+            .iter()
+            .map(|section| section.heading_path.as_slice())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            heading_paths,
+            vec![
+                &["1. 采购需求".to_string()][..],
+                &["2. 技术规格".to_string()][..],
+                &["3. 技术参数".to_string()][..],
+                &["4. 资格审查".to_string()][..],
+                &["5. 商务条款".to_string()][..],
+                &["6. 注册资本".to_string()][..],
+                &["7. 类似项目".to_string()][..],
+                &["8. 服务能力".to_string()][..],
+            ]
+        );
+    }
+
+    #[test]
+    fn amount_facts_bind_to_their_own_field_context_and_accept_grouping() {
+        let markdown = "预算1,000,000.00元，最高限价900,000.00元。";
+
+        let sections = outline_and_route(markdown).unwrap();
+        let facts = &sections[0].segments[0].facts;
+        let budget = facts
+            .iter()
+            .find(|fact| fact.field == "budget_amount")
+            .unwrap();
+        let ceiling = facts
+            .iter()
+            .find(|fact| fact.field == "ceiling_price")
+            .unwrap();
+
+        assert_eq!(
+            budget.typed_value,
+            json!({"amount":"1000000.00","currency_code":"CNY"})
+        );
+        assert_eq!(
+            ceiling.typed_value,
+            json!({"amount":"900000.00","currency_code":"CNY","basis":"unspecified"})
         );
     }
 

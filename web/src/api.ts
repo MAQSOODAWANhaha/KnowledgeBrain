@@ -232,6 +232,30 @@ export type SubmissionProfile = {
   signature_confirmed?: boolean;
 };
 
+export type AttachmentKind = "bid_bond" | "authorization_support" | "seal_sample" | "procedural_support";
+
+export type ProceduralRequirementKind = AttachmentKind | "confirmation";
+
+export type ProceduralResolution = "confirmed_by_user" | "satisfied_by_attachment" | "not_applicable";
+
+export type AttachmentAction = "validate" | "invalidate" | "confirm" | "reject" | "delete";
+
+export type ProceduralClassification = {
+  id: string;
+  segment_text: string;
+  effective_requirement_kind: ProceduralRequirementKind;
+  router_requirement_kind: ProceduralRequirementKind;
+  router_result_status: string;
+};
+
+export type ProceduralAttachment = {
+  id: string;
+  kind: AttachmentKind;
+  status: "draft" | "confirmed" | "rejected" | "superseded";
+  validation_status: "pending" | "valid" | "invalid";
+  revision: number;
+};
+
 export type GateIssue = {
   code: string;
   part_key?: string | null;
@@ -474,8 +498,8 @@ export const api = {
   submissionProfile: (id: string) => req<SubmissionProfile | null>(`/api/v1/bids/${id}/submission-profile`),
   updateSubmissionProfile: (id: string, body: SubmissionProfile & { expected_revision: number }) =>
     req(`/api/v1/bids/${id}/submission-profile`, { method: "PUT", body: JSON.stringify(body) }),
-  procedural: (id: string) => req<{ classifications: Array<Record<string, unknown>> }>(`/api/v1/bids/${id}/procedural-requirements`),
-  overrideClassification: (id: string, cid: string, body: { effective_kind: string; reason: string }) =>
+  procedural: (id: string) => req<{ classifications: ProceduralClassification[] }>(`/api/v1/bids/${id}/procedural-requirements`),
+  overrideClassification: (id: string, cid: string, body: { effective_kind: ProceduralRequirementKind; reason: string }) =>
     req(`/api/v1/bids/${id}/procedural-classifications/${cid}/override`, {
       method: "POST",
       body: JSON.stringify(body),
@@ -483,14 +507,14 @@ export const api = {
   resolveRequirement: (
     id: string,
     cid: string,
-    body: { resolution: string; attachment_id?: string | null; reason?: string },
+    body: { resolution: ProceduralResolution; attachment_id?: string | null; reason?: string },
   ) =>
     req(`/api/v1/bids/${id}/procedural-requirements/${cid}/resolve`, {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  attachments: (id: string) => req<{ attachments: Array<Record<string, unknown>> }>(`/api/v1/bids/${id}/attachments`),
-  uploadAttachment: (id: string, kind: string, file: File, attempt: MutationAttempt) => {
+  attachments: (id: string) => req<{ attachments: ProceduralAttachment[] }>(`/api/v1/bids/${id}/attachments`),
+  uploadAttachment: (id: string, kind: AttachmentKind, file: File, attempt: MutationAttempt) => {
     const fd = new FormData();
     fd.set("kind", kind);
     fd.set("file", file);
@@ -500,7 +524,7 @@ export const api = {
       attempt,
     );
   },
-  mutateAttachment: (id: string, aid: string, action: string, expected_revision: number, reason?: string) =>
+  mutateAttachment: (id: string, aid: string, action: AttachmentAction, expected_revision: number, reason?: string) =>
     req(`/api/v1/bids/${id}/attachments/${aid}/${action}`, {
       method: "POST",
       body: JSON.stringify({ expected_revision, reason }),

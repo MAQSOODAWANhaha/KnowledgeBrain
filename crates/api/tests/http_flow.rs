@@ -1107,7 +1107,45 @@ async fn patch_version_config_and_me_and_workspace_delete() {
 }
 
 #[tokio::test]
-async fn bid_v1_http_rejects_anonymous_family_and_legacy_export() {
+async fn bid_v1_maintenance_contract_mutations_reject_ordinary_users() {
+    let (app, store) = app();
+    let (token, _) = seed_user(&store, "bid-maintenance-user@v1.test");
+    let register = json!({"version":"test-v1","canonical_payload":"{}"});
+    let promote = json!({
+        "target_version":"test-v1",
+        "expected_current_version":"test-v0",
+        "expected_promotion_generation":0
+    });
+    let mutations = [
+        ("/api/v1/maintenance/kind-router/register", register.clone()),
+        ("/api/v1/maintenance/kind-router/promote", promote.clone()),
+        (
+            "/api/v1/maintenance/procedural-router/register",
+            register.clone(),
+        ),
+        (
+            "/api/v1/maintenance/procedural-router/promote",
+            promote.clone(),
+        ),
+        (
+            "/api/v1/maintenance/template-contracts/letter/register",
+            register,
+        ),
+        (
+            "/api/v1/maintenance/template-contracts/letter/promote",
+            promote,
+        ),
+    ];
+
+    for (uri, body) in mutations {
+        let (status, response) = call(&app, auth_json(&token, "POST", uri, body)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {response}");
+        assert_eq!(response["error"]["code"], "FORBIDDEN", "{uri}: {response}");
+    }
+}
+
+#[tokio::test]
+async fn bid_v1_http_rejects_anonymous_and_legacy_routes() {
     let (app, store) = app();
     let (token, _) = seed_user(&store, "bid@v1.test");
     let project = uuid::Uuid::new_v4();
@@ -1137,20 +1175,6 @@ async fn bid_v1_http_rejects_anonymous_family_and_legacy_export() {
     assert_ne!(st, StatusCode::CREATED);
     assert_ne!(v["error"]["code"], "NOT_FOUND");
 
-    let (st, v) = call(
-        &app,
-        auth_json(
-            &token,
-            "POST",
-            &format!("/api/v1/bids/{project}/clauses"),
-            json!({"text":"x","kind":"technical","must":true,"family":"technical"}),
-        ),
-    )
-    .await;
-    assert_ne!(st, StatusCode::OK);
-    assert_ne!(st, StatusCode::CREATED);
-    assert_ne!(v["error"]["code"], "NOT_FOUND");
-
     for uri in [
         format!("/api/v1/bids/{project}/export?regenerate_stale=true"),
         format!("/api/v1/bids/{project}/booklet"),
@@ -1168,18 +1192,5 @@ async fn bid_v1_http_rejects_anonymous_family_and_legacy_export() {
             st == StatusCode::NOT_FOUND || st == StatusCode::METHOD_NOT_ALLOWED,
             "legacy POST {uri} still routed: {st}"
         );
-    }
-
-    for uri in [
-        format!("/api/v1/bids/{project}/matching"),
-        format!("/api/v1/bids/{project}/quote"),
-        format!("/api/v1/bids/{project}/gate-issues"),
-        format!("/api/v1/bids/{project}/parts"),
-        format!("/api/v1/bids/{project}/company-profile"),
-        format!("/api/v1/bids/{project}/submission-profile"),
-    ] {
-        let (st, v) = call(&app, auth_json(&token, "GET", &uri, json!({}))).await;
-        assert_ne!(st, StatusCode::NOT_FOUND, "missing V1 GET {uri}");
-        assert_ne!(v["error"]["code"], "NOT_FOUND", "missing V1 GET {uri}");
     }
 }

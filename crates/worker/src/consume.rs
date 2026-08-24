@@ -1732,7 +1732,32 @@ impl oxana::Worker<BidRenderSubmissionV1Job> for BidRenderSubmissionV1Handler {
         else {
             return Ok(());
         };
-        match render_submission_manifest(pool, &claim, claim_token).await {
+        let render = runtime::run_with_heartbeat(
+            std::time::Duration::from_millis(claim.claim_lease_ms as u64),
+            render_submission_manifest(pool, &claim, claim_token),
+            || async {
+                storage::bid_submission::heartbeat_submission_render(
+                    pool,
+                    claim.render_job_id,
+                    claim_token,
+                )
+                .await
+                .map_err(|error| error.to_string())
+            },
+        )
+        .await;
+        let result = match render {
+            runtime::LeaseRun::Completed(result) => result,
+            runtime::LeaseRun::Lost => {
+                tracing::warn!(
+                    render_job_id = %claim.render_job_id,
+                    "submission render stopped after losing its claim lease"
+                );
+                return Ok(());
+            }
+            runtime::LeaseRun::HeartbeatFailed(error) => Err(error),
+        };
+        match result {
             Ok(_) => Ok(()),
             Err(detail) => {
                 let error_code = submission_render_error_code(&detail);
@@ -1929,6 +1954,70 @@ async fn render_submission_manifest(
                     .to_string(),
                 occurrence_ordinal,
             },
+            "procedural_attachment" => {
+                bid::ManifestRenderAssetLocator::ProceduralAttachmentOriginal {
+                    part_key: stored
+                        .source_locator
+                        .get("part_key")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "procedural attachment part locator invalid".to_string())?
+                        .to_string(),
+                    attachment_ordinal: stored
+                        .source_locator
+                        .get("attachment_ordinal")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| {
+                            "procedural attachment ordinal locator invalid".to_string()
+                        })?,
+                    attachment_id: stored
+                        .source_locator
+                        .get("attachment_id")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|value| Uuid::parse_str(value).ok())
+                        .ok_or_else(|| "procedural attachment id locator invalid".to_string())?,
+                    kind: stored
+                        .source_locator
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "procedural attachment kind locator invalid".to_string())?
+                        .to_string(),
+                }
+            }
+            "procedural_attachment_page" => {
+                bid::ManifestRenderAssetLocator::ProceduralAttachmentPage {
+                    part_key: stored
+                        .source_locator
+                        .get("part_key")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            "procedural attachment page part locator invalid".to_string()
+                        })?
+                        .to_string(),
+                    attachment_ordinal: stored
+                        .source_locator
+                        .get("attachment_ordinal")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| {
+                            "procedural attachment page ordinal locator invalid".to_string()
+                        })?,
+                    attachment_id: stored
+                        .source_locator
+                        .get("attachment_id")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|value| Uuid::parse_str(value).ok())
+                        .ok_or_else(|| {
+                            "procedural attachment page id locator invalid".to_string()
+                        })?,
+                    page_ordinal: stored
+                        .source_locator
+                        .get("page_ordinal")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                        .ok_or_else(|| "procedural attachment page locator invalid".to_string())?,
+                }
+            }
             _ => return Err("manifest asset source kind invalid".into()),
         };
         assets.push(bid::ManifestRenderAsset {
@@ -1943,12 +2032,6 @@ async fn render_submission_manifest(
         });
     }
     let bytes = bid::render_manifest_document(format, "投标文件", &parts, &assets)?;
-    if !storage::bid_submission::heartbeat_submission_render(pool, claim.render_job_id, claim_token)
-        .await
-        .map_err(|error| error.to_string())?
-    {
-        return Err("SUBMISSION_RENDER_CLAIM_LOST".into());
-    }
     let digest = domain::sha256_hex(&bytes);
     let object_ref = storage::object_ref(&digest);
     let media_type = match format {
@@ -1969,17 +2052,10 @@ async fn render_submission_manifest(
     )
     .await
     .map_err(|error| error.to_string())?;
-    if let Err(error) = storage::write_blob_async(&digest, &bytes).await {
-        let _ = storage::abandon_object_upload(pool, staging_id, &claim.requested_by).await;
-        return Err(error.to_string());
-    }
-    if !storage::bid_submission::heartbeat_submission_render(pool, claim.render_job_id, claim_token)
+    let mut staging = SubmissionStagingGuard::new(pool.clone(), staging_id, &claim.requested_by);
+    storage::write_blob_async(&digest, &bytes)
         .await
-        .map_err(|error| error.to_string())?
-    {
-        let _ = storage::abandon_object_upload(pool, staging_id, &claim.requested_by).await;
-        return Err("SUBMISSION_RENDER_CLAIM_LOST".into());
-    }
+        .map_err(|error| error.to_string())?;
     let published = storage::bid_submission::publish_submission_output(
         pool,
         storage::bid_submission::PublishSubmissionOutput {
@@ -1992,11 +2068,43 @@ async fn render_submission_manifest(
             byte_length: bytes.len() as i64,
         },
     )
-    .await;
-    if published.is_err() {
-        let _ = storage::abandon_object_upload(pool, staging_id, &claim.requested_by).await;
+    .await
+    .map_err(|error| error.to_string())?;
+    staging.disarm();
+    Ok(published)
+}
+
+struct SubmissionStagingGuard {
+    pool: PgPool,
+    staging_id: Option<Uuid>,
+    actor: String,
+}
+
+impl SubmissionStagingGuard {
+    fn new(pool: PgPool, staging_id: Uuid, actor: &str) -> Self {
+        Self {
+            pool,
+            staging_id: Some(staging_id),
+            actor: actor.to_string(),
+        }
     }
-    published.map_err(|error| error.to_string())
+
+    fn disarm(&mut self) {
+        self.staging_id = None;
+    }
+}
+
+impl Drop for SubmissionStagingGuard {
+    fn drop(&mut self) {
+        let Some(staging_id) = self.staging_id.take() else {
+            return;
+        };
+        let pool = self.pool.clone();
+        let actor = self.actor.clone();
+        tokio::spawn(async move {
+            let _ = storage::abandon_object_upload(&pool, staging_id, &actor).await;
+        });
+    }
 }
 
 pub struct ImageMultimodalWorker {

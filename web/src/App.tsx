@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button, Modal, TextInput } from "@mantine/core";
+import { Button, Modal, PasswordInput, SegmentedControl, Skeleton, TextInput } from "@mantine/core";
 import { ApiError, type Project, api, setToken, token } from "./api";
 import { Assets } from "./assets/Assets";
 import { Workbench } from "./bid/Workbench";
@@ -42,23 +42,20 @@ function Login() {
           <p className="note" style={{ margin: "0 0 28px" }}>
             LDAP 账号。测试环境账号密码可空。
           </p>
-          <label className="fld">账号</label>
-          <input
-            className="inp"
+          <TextInput
             data-testid="login-email"
+            label="账号"
             placeholder="账号"
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={(e) => setEmail(e.currentTarget.value)}
           />
-          <div style={{ height: 16 }} />
-          <label className="fld">密码</label>
-          <input
-            className="inp"
+          <PasswordInput
             data-testid="login-password"
-            type="password"
+            label="密码"
+            mt="md"
             placeholder="密码"
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={(e) => setPassword(e.currentTarget.value)}
           />
           {err && (
             <p className="note" style={{ color: "var(--rose)" }}>
@@ -81,6 +78,7 @@ function Bids({ email }: { email: string }) {
   const [when, setWhen] = useState("");
   const [err, setErr] = useState("");
   const [filter, setFilter] = useState<"all" | "open" | "ended">("all");
+  const [query, setQuery] = useState("");
   useEffect(() => {
     api
       .bids()
@@ -88,6 +86,7 @@ function Bids({ email }: { email: string }) {
       .catch(() => setRows([]));
   }, []);
   const shown = (rows ?? []).filter((p) => {
+    if (query.trim() && !p.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())) return false;
     if (filter === "open") return p.status !== "ended";
     if (filter === "ended") return p.status === "ended";
     return true;
@@ -138,7 +137,11 @@ function Bids({ email }: { email: string }) {
     >
       <div className="wrap stack">
         {rows === null ? (
-          <div className="card">加载中…</div>
+          <div className="card stack">
+            <Skeleton height={48} radius="md" />
+            <Skeleton height={48} radius="md" />
+            <Skeleton height={48} radius="md" />
+          </div>
         ) : rows.length === 0 ? (
           <div className="card">
             <div className="empty">
@@ -152,16 +155,21 @@ function Bids({ email }: { email: string }) {
         ) : (
           <div className="card pad-0">
             <div className="toolbar">
-              <input className="inp" placeholder="按项目名过滤…" />
-              <button className={`chip ${filter === "all" ? "iris" : ""}`} type="button" onClick={() => setFilter("all")}>
-                全部
-              </button>
-              <button className={`chip ${filter === "open" ? "iris" : ""}`} type="button" onClick={() => setFilter("open")}>
-                在办
-              </button>
-              <button className={`chip ${filter === "ended" ? "iris" : ""}`} type="button" onClick={() => setFilter("ended")}>
-                已结束
-              </button>
+              <TextInput
+                placeholder="按项目名过滤…"
+                value={query}
+                onChange={(event) => setQuery(event.currentTarget.value)}
+                style={{ flex: 1 }}
+              />
+              <SegmentedControl
+                value={filter}
+                onChange={(value) => setFilter(value as typeof filter)}
+                data={[
+                  { value: "all", label: "全部" },
+                  { value: "open", label: "在办" },
+                  { value: "ended", label: "已结束" },
+                ]}
+              />
             </div>
             <table className="grid">
               <thead>
@@ -220,6 +228,7 @@ function Bids({ email }: { email: string }) {
           }}
         >
           <TextInput data-testid="bid-title" label="项目名称" value={title} onChange={(e) => setTitle(e.currentTarget.value)} required />
+          <TextInput label="负责人" value={email} mt="md" readOnly />
           <TextInput
             data-testid="bid-ends"
             label="招标结束日"

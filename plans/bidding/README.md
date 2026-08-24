@@ -2,8 +2,8 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | **已确认目标，待按 PR0～PR8 实施** |
-| 日期 | 2026-08-23 |
+| 状态 | **最终 V1 主链已实现；本地、DB、Web 与隔离 fresh Compose runtime 已验收** |
+| 日期 | 2026-08-24 |
 | 业务 | 网络安全产品与服务应标（乙方） |
 | 部署 | clean-slate fresh redeploy |
 | 正式范围 | 招标拆解、事实、两路匹配、人工选择、人工报价、①～⑥组卷、DOCX/PDF |
@@ -21,6 +21,14 @@
 已被替代的旧方案和评审只保存在 [`../archive/README.md`](../archive/README.md)，不再留旧路径兼容副本。
 
 ---
+
+## 当前实施状态
+
+当前仓库已切换到 clean-slate V1：最终 baseline、Rust domain/storage/API/worker、Web 工作台和 manifest-only DOCX/PDF renderer 均已有实现路径，旧方案不再是兼容目标。
+
+“已实现”只描述代码和合同已经落位，不等于全部验收完成。本地、DB、HTTP、浏览器、部署和 runtime acceptance 必须按 [`implementation-acceptance.md`](implementation-acceptance.md) 分别记录实际证据。
+
+2026-08-24 已在空 PostgreSQL/Redis/对象卷上通过强制 Compose 全链：真实 PDF/DOCX 转换、抽取、两路匹配、人工报价、Gate 修复、DOCX/PDF、manifest replay、claim/reaper、staging retention 与结束态拒绝均产生运行证据，临时容器、卷和镜像随后清理。该结论只表示当前 checkout 的隔离 fresh runtime accepted；生产未部署，平台级 `runtime-completion.toml` 仍因 provider evaluation、签名 image lock 和 topology 发布闭包保持 `false`。
 
 ## 1. 方案结论
 
@@ -189,21 +197,21 @@ baseline 必须一次建立：
 
 V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用户拥有的项目，所有 `/api/v1/bids/{project_id}/...` 路径先校验 owner。当前模型没有 Bid 成员或 API-key-to-Bid scope relation，因此这两类访问必须 fail-closed；若未来需要协作成员，先增加显式 membership/scope artifact 与受检授权合同，不能把“已认证”当作“可访问任意 Bid”。
 
-## 8. 实施顺序
+## 8. 实施与验收状态
 
-| 阶段 | 目标 | 完成证据 |
+| 阶段 | 当前实现状态 | 完成证据 |
 | --- | --- | --- |
-| PR0 | 文档、PRODUCT、领域词汇和最终 contract 固化 | 文档链接/重复定义检查通过 |
-| PR1 | 最终 baseline、平台共享边界和旧 schema 删除 | fresh DB、catalog、ACL、seed 校验 |
-| PR2 | TenderPublication 与 SourceSpanV2 | publication 并发/失败原子性 fixture |
-| PR3 | ClauseLifecycle、KindRouter、事实 decision | promotion/连续 marker/人工边界 fixture |
-| PR4 | MatchingPublication 与两路检索端口 | report/evidence/staging/current verifier |
-| PR5 | Quote | Decimal/ceiling/finalize/reopen fixture |
-| PR6 | Submission parts、程序材料、ObjectRegistry consumer | dependency/stale/gate/retention fixture |
-| PR7 | API 与 Web 全链 cutover，删除旧 client | DTO contract、build、浏览器 E2E |
-| PR8 | clean-slate Compose 部署与真实运行验收 | 空环境启动、全链 PDF、日志和恢复证据 |
+| PR0 | 已实施：文档、PRODUCT、领域词汇和最终 contract 已固化 | 文档链接与重复权威定义检查 |
+| PR1 | 已实施：最终 baseline 与共享平台边界已有单一路径 | fresh DB、catalog、ACL、seed 已通过 |
+| PR2 | 已实施：TenderPublication、SourceSpanV2 与 bounded parser 已落位 | publication 并发与失败原子性 DB fixture 已通过 |
+| PR3 | 已实施：ClauseLifecycle、KindRouter 与 fact decision 已落位 | promotion generation 2/3、连续 marker 与人工边界 DB fixture 已通过 |
+| PR4 | 已实施：MatchingPublication 与两路检索端口已落位 | report/evidence/staging/current 集成验收已通过 |
+| PR5 | 已实施：Decimal、ceiling、finalize/reopen 与 QuoteSnapshotV1 已落位 | Rust/SQL exact bytes、DB 并发与 Web 验收已通过 |
+| PR6 | 已实施：parts、冻结程序附件、manifest、durable render job、报价 table/grid 与 renderer 已落位 | DB/对象生命周期、Gate 矩阵与 fresh runtime PDF 已通过 |
+| PR7 | 已实施：最终 API routes 与模块化 Web 工作台已落位 | HTTP contract、lint/build 与 mocked 浏览器验收已通过 |
+| PR8 | 隔离验收已完成 | 空环境启动、全链 PDF、日志、失败恢复与资源清理已通过；生产发布闭包不在本方案内 |
 
-每个 PR 都必须删除被替代的旧逻辑；不得把“以后再清理兼容层”留到 PR8。
+每个实现切片都必须同步删除被替代的旧逻辑；验收时继续用删除矩阵检查，不把兼容层清理留给部署阶段。
 
 ## 9. 验收口径
 

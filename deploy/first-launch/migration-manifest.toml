@@ -20,4 +20,4 @@ sha256 = "c25a7e4ca3157a47bd42965a606000636421c314a2a749136f11b4d99f7588b2"
 version = 3
 name = "bidding_v1_baseline"
 filename = "bidding_v1_baseline.sql"
-sha256 = "4bea8d790c261d547d47fd0cb67905a165c556499854b3045ec5a92b15b5df14"
+sha256 = "f4076c7dee0b70c15042ff04c92d1ec84d422bde550fb61e675a1d3d118ffe6b"

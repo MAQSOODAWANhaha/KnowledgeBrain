@@ -1,6 +1,18 @@
 # 招投标实施、删除矩阵与验收
 
-本文把最终方案转成可执行 PR0～PR8。它假设 fresh redeploy，不安排兼容阶段。
+本文记录最终方案的实现切片、删除矩阵和剩余验收。目标环境始终是 fresh redeploy，不安排兼容阶段。
+
+## 0. 当前证据边界
+
+| 层次 | 当前状态 |
+| --- | --- |
+| 最终合同 | 已固化在当前 docs/plans，旧方案只留 archive |
+| schema 与代码 | PR1～PR7 主链已有最终 baseline、Rust、API、worker 和 Web 实现路径 |
+| 本地验证 | Rust workspace、Clippy、格式、Web lint/build 与 mocked Playwright 已通过 |
+| fresh deployment | 隔离空环境 Compose 已通过；不表示生产环境已部署 |
+| runtime accepted | **是（招投标 V1 隔离环境）**；真实 DocReader、API/worker/retention、DOCX/PDF、恢复与对象生命周期全链通过 |
+
+`6:quote` 的结构化 DOCX table / PDF grid renderer seam 已由 focused test 和隔离运行 PDF 共同覆盖。该证据不提升平台级 `phase_1d_runtime_complete`：生产发布仍受真实 provider evaluation、签名 image lock、readiness 与 topology 发布合同独立约束。
 
 ## 1. 成功标准
 
@@ -18,7 +30,7 @@
 
 ### 2.1 不保留升级叙事
 
-最终代码不得继续以“0010 publication + 0012 matching，再升级 0013～0018”组织目标。实施 PR1 从最终 ERD 重建 fresh schema，旧编号只留在 Git 历史/归档报告。
+最终代码不再以“0010 publication + 0012 matching，再升级 0013～0018”组织目标。当前 baseline 直接从最终 ERD 建立 fresh schema，旧编号只留在 Git 历史和归档报告。
 
 baseline manifest 的分片顺序、checksum、共享表和角色只由 [`../platform/runtime-foundation.md`](../platform/runtime-foundation.md) 定义。本文只定义 `bidding_v1` 业务 slice 及其消费约束。
 
@@ -26,7 +38,7 @@ baseline manifest 的分片顺序、checksum、共享表和角色只由 [`../pla
 
 ### 2.2 招投标 repository wiring
 
-PR1 按平台 manifest 注册最终 `bidding_v1` slice，并同步更新：
+当前 repository 按平台 manifest 注册最终 `bidding_v1` slice，并维护：
 
 - bidding schema version/checksum 与 seed contract artifacts/current pointers；
 - bidding catalog allowlist/denylist 与受检函数权限声明；
@@ -149,7 +161,16 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 
 运维 DPA、数据驻留、备份、凭据轮换等由部署 checklist 签署，和代码自动测试分别报告。
 
-## 6. PR0～PR8
+## 6. 实现切片与验收状态
+
+| 切片 | 实现状态 | 验收状态 |
+| --- | --- | --- |
+| PR0 | 已实施 | 文档链接与过期状态扫描已通过 |
+| PR1 | 已实施 | fresh schema/ACL/seed 已通过 |
+| PR2～PR5 | 已实施 | Rust、DB、并发和 exact-bytes 已通过 |
+| PR6 | 已实施 | table/grid、DB、对象、Gate 与隔离 runtime 输出已通过 |
+| PR7 | 已实施 | HTTP、Web lint/build 与 mocked 浏览器验收已通过 |
+| PR8 | 隔离验收已完成 | clean-slate Compose、真实全链、恢复、retention 与资源清理已通过；生产未部署 |
 
 ### PR0 — 文档与目标冻结
 
@@ -270,7 +291,7 @@ npm --prefix web run lint
 npm --prefix web run build
 ```
 
-实际命令以仓库脚本为准；计划实施时补齐：
+仓库已提供以下专项验收入口；是否通过只以本次实际命令输出和证据包为准：
 
 ```text
 scripts/fresh_schema_acceptance.sh
@@ -333,7 +354,7 @@ scripts/compose_first_launch_acceptance.sh
 5. 先证明 Gate 拒绝，再修复并出 PDF；
 6. 重启 worker，证明 active claim/staging 可恢复；
 7. 删除 live knowledge document 后历史 report/PDF 可审计重放；
-8. attachment/manifest reference 存在时对象不能删，释放后 retention 可恢复删除；
+8. attachment 业务引用释放后，已冻结的 manifest owner 仍保持对象可重放；无 owner 的 staging 引用释放后由 retention 可恢复删除；
 9. project ended 后新 publication/export 稳定拒绝。
 
 ### 8.3 证据包

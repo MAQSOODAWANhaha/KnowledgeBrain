@@ -191,7 +191,7 @@ role_psql kb_runtime_api api-test -Atc "SELECT has_function_privilege('kb_runtim
 role_psql kb_runtime_worker worker-test -Atc "SELECT count(*) FROM bidding_current_matching_reports" | grep -qx '0'
 role_psql kb_runtime_worker worker-test -Atc "SELECT count(*) FROM bid_matching_jobs job LEFT JOIN bidding_matching_report_history report ON report.id=job.completed_report_id" | grep -qx '0'
 role_psql kb_runtime_worker worker-test -Atc "SELECT has_function_privilege('kb_runtime_worker','kb_bid_manifest_render_input(uuid,uuid)','EXECUTE')" | grep -qx 't'
-role_psql kb_runtime_worker worker-test -Atc "SELECT has_function_privilege('kb_runtime_worker','kb_bid_complete_document_conversion(uuid,uuid,uuid,bytea,text,kb_sha256,jsonb,kb_actor_identity)','EXECUTE')" | grep -qx 't'
+role_psql kb_runtime_worker worker-test -Atc "SELECT has_function_privilege('kb_runtime_worker','kb_bid_complete_document_conversion(uuid,uuid,uuid,bytea,text,kb_sha256,jsonb,uuid,integer,text,text,kb_actor_identity)','EXECUTE')" | grep -qx 't'
 role_psql kb_runtime_worker worker-test -Atc "SELECT has_function_privilege('kb_runtime_worker','kb_bid_sync_project_procedural(uuid,kb_actor_identity)','EXECUTE')" | grep -qx 'f'
 
 profile_project=10000000-0000-0000-0000-000000000037

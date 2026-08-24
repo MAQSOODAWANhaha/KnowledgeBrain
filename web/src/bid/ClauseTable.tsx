@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Button, Checkbox, Select, TextInput } from "@mantine/core";
+import { Button, Checkbox, SegmentedControl, Select, TextInput } from "@mantine/core";
 import { CLAUSE_KINDS, type Clause } from "../api";
 import { familyLabel, kindLabel } from "./helpers";
 
@@ -64,15 +64,15 @@ export function ClauseTable({
       </div>
       <div className="card pad-0">
         <div className="toolbar">
-          <button className={`chip ${filter === "all" ? "iris" : ""}`} type="button" onClick={() => setFilter("all")}>
-            全部 {live.length}
-          </button>
-          <button className={`chip ${filter === "draft" ? "iris" : ""}`} type="button" onClick={() => setFilter("draft")}>
-            待确认 {live.filter((c) => c.status === "draft").length}
-          </button>
-          <button className={`chip ${filter === "confirmed" ? "iris" : ""}`} type="button" onClick={() => setFilter("confirmed")}>
-            已确认 {live.filter((c) => c.status === "confirmed").length}
-          </button>
+          <SegmentedControl
+            value={filter}
+            onChange={(value) => setFilter(value as typeof filter)}
+            data={[
+              { value: "all", label: `全部 ${live.length}` },
+              { value: "draft", label: `待确认 ${live.filter((c) => c.status === "draft").length}` },
+              { value: "confirmed", label: `已确认 ${live.filter((c) => c.status === "confirmed").length}` },
+            ]}
+          />
         </div>
         <table className="grid">
           <thead>

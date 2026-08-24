@@ -80,26 +80,35 @@ pub fn template_slot_for_part_key(part_key: &str) -> Option<&'static str> {
     }
 }
 
-pub fn parse_markdown_object_occurrences(markdown: &str) -> Vec<(usize, String)> {
+pub fn parse_markdown_object_occurrences(markdown: &str) -> Vec<(std::ops::Range<usize>, String)> {
     let mut out = Vec::new();
     let bytes = markdown.as_bytes();
-    let mut i = 0;
-    while i + 8 + 64 <= bytes.len() {
-        if bytes[i..].starts_with(b"objects/") {
-            let hex = &bytes[i + 8..i + 8 + 64];
-            if hex
+    let mut cursor = 0usize;
+    while let Some(relative_start) = markdown[cursor..].find("![") {
+        let start = cursor + relative_start;
+        let alt_start = start + 2;
+        let Some(relative_alt_end) = markdown[alt_start..].find("](") else {
+            break;
+        };
+        let object_start = alt_start + relative_alt_end + 2;
+        let Some(object_end) = object_start.checked_add(8 + 64) else {
+            break;
+        };
+        let is_image_node = object_end < bytes.len()
+            && bytes[object_start..].starts_with(b"objects/")
+            && bytes[object_start + 8..object_end]
                 .iter()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-            {
-                out.push((
-                    out.len(),
-                    format!("objects/{}", std::str::from_utf8(hex).expect("hex")),
-                ));
-                i += 8 + 64;
-                continue;
-            }
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            && bytes[object_end] == b')';
+        if is_image_node {
+            out.push((
+                start..object_end + 1,
+                markdown[object_start..object_end].to_string(),
+            ));
+            cursor = object_end + 1;
+        } else {
+            cursor = alt_start;
         }
-        i += 1;
     }
     out
 }
@@ -149,10 +158,18 @@ mod tests {
     }
 
     #[test]
-    fn markdown_object_parser_is_fixed_and_lowercase_only() {
-        let md = "见图 ![](objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) 以及 objects/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    fn markdown_object_parser_accepts_only_lowercase_image_nodes() {
+        let md = concat!(
+            "前文 ![证据](objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) 后文 ",
+            "objects/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ",
+            "![大写](objects/CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC)"
+        );
         let found = parse_markdown_object_occurrences(md);
         assert_eq!(found.len(), 1);
+        assert_eq!(
+            &md[found[0].0.clone()],
+            "![证据](objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)"
+        );
         assert_eq!(
             found[0].1,
             "objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

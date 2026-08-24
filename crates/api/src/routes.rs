@@ -3049,7 +3049,7 @@ async fn patch_model(
     Ok(Json(body))
 }
 
-fn require_admin(state: &AppState, actor: &Actor) -> Result<(), ApiErr> {
+pub(crate) fn require_admin(state: &AppState, actor: &Actor) -> Result<(), ApiErr> {
     {
         let s = lock(state)?;
         let admin = match actor {

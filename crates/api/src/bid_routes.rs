@@ -4,7 +4,8 @@ use crate::AppState;
 use crate::err::{fail, not_found, validation};
 use crate::routes::ApiErr;
 use crate::routes::{
-    Actor, actor_from, durable_human_actor, require_bid_pool, required_idempotency_key,
+    Actor, actor_from, durable_human_actor, require_admin, require_bid_pool,
+    required_idempotency_key,
 };
 use axum::extract::{Multipart, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -122,6 +123,22 @@ pub fn router(state: AppState) -> Router<AppState> {
             "/api/v1/maintenance/kind-router/promote",
             post(promote_kind_router),
         )
+        .route(
+            "/api/v1/maintenance/procedural-router/register",
+            post(register_procedural_router),
+        )
+        .route(
+            "/api/v1/maintenance/procedural-router/promote",
+            post(promote_procedural_router),
+        )
+        .route(
+            "/api/v1/maintenance/template-contracts/{slot}/register",
+            post(register_template_contract),
+        )
+        .route(
+            "/api/v1/maintenance/template-contracts/{slot}/promote",
+            post(promote_template_contract),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state,
             require_bid_project_owner,
@@ -211,6 +228,9 @@ fn map_sql(error: sqlx::Error) -> ApiErr {
         "ATTACHMENT_NOT_VALID",
         "ATTACHMENT_VALIDATION_INVALID",
         "ATTACHMENT_VALIDATION_IDENTITY_MISMATCH",
+        "ATTACHMENT_RENDER_PAGE_SET_INVALID",
+        "ATTACHMENT_RENDER_PAGE_IDENTITY_MISMATCH",
+        "ATTACHMENT_RENDER_PAGE_QUOTA_EXCEEDED",
         "SHOT_VALIDATION_INVALID",
         "SHOT_SET_ARTIFACTS_INVALID",
         "MANIFEST_ASSET_UNAVAILABLE_OR_INVALID",
@@ -315,6 +335,52 @@ async fn abandon_staged_upload(pool: &sqlx::PgPool, staging_id: Uuid, actor: &st
     if let Err(error) = storage::abandon_object_upload(pool, staging_id, actor).await {
         tracing::error!(%error, %staging_id, "failed to abandon object upload staging");
     }
+}
+
+async fn render_attachment_pdf_pages(
+    file_name: &str,
+    bytes: Vec<u8>,
+) -> Result<Vec<(Vec<u8>, storage::bid_submission::ValidatedUpload)>, ApiErr> {
+    let overrides = std::collections::HashMap::from([("pdf_force_scanned".into(), "true".into())]);
+    let result = docparser::convert_with(docparser::ConvertInput {
+        engine: "builtin",
+        file_name,
+        file_type: "pdf",
+        is_url: false,
+        bytes,
+        url: "",
+        title: file_name,
+        overrides: &overrides,
+    })
+    .await
+    .map_err(|error| validation(&format!("attachment PDF rendering failed: {error}")))?;
+    if !result.error.is_empty() {
+        return Err(validation(&format!(
+            "attachment PDF rendering failed: {}",
+            result.error
+        )));
+    }
+    let page_count = result
+        .metadata
+        .get("page_count")
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| validation("attachment PDF page count missing"))?;
+    if !(1..=512).contains(&page_count) || result.images.len() != page_count {
+        return Err(validation("attachment PDF render page set invalid"));
+    }
+    let mut pages = Vec::with_capacity(page_count);
+    let mut total_bytes = 0usize;
+    for image in result.images {
+        let (bytes, metadata) = validate_uploaded_bytes(image.data, false).await?;
+        total_bytes = total_bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| validation("attachment PDF render page quota exceeded"))?;
+        if total_bytes > 256 * 1024 * 1024 {
+            return Err(validation("attachment PDF render page quota exceeded"));
+        }
+        pages.push((bytes, metadata));
+    }
+    Ok(pages)
 }
 
 async fn require_open(pool: &sqlx::PgPool, id: Uuid) -> Result<storage::bidding::Project, ApiErr> {
@@ -1510,10 +1576,12 @@ async fn upload_attachment(
     require_open(&pool, id).await?;
     let mut kind = String::new();
     let mut bytes = Vec::new();
+    let mut file_name = "attachment".to_string();
     while let Ok(Some(field)) = multipart.next_field().await {
         match field.name() {
             Some("kind") => kind = field.text().await.unwrap_or_default(),
             Some("file") => {
+                file_name = field.file_name().unwrap_or("attachment").to_string();
                 bytes = field
                     .bytes()
                     .await
@@ -1531,9 +1599,31 @@ async fn upload_attachment(
     let digest = domain::sha256_hex(&bytes);
     let object_ref = storage::object_ref(&digest);
     let attachment_id = Uuid::new_v4();
+    let rendered_pages = if metadata.media_type == PDF_MEDIA_TYPE {
+        render_attachment_pdf_pages(&file_name, bytes.clone()).await?
+    } else {
+        Vec::new()
+    };
+    let render_page_identities = rendered_pages
+        .iter()
+        .enumerate()
+        .map(|(page_ordinal, (page_bytes, page_metadata))| {
+            let page_digest = domain::sha256_hex(page_bytes);
+            json!({
+                "page_ordinal": page_ordinal,
+                "object_ref": storage::object_ref(&page_digest),
+                "digest": page_digest,
+                "media_type": page_metadata.media_type,
+                "byte_length": page_metadata.byte_length,
+                "pixel_width": page_metadata.pixel_width,
+                "pixel_height": page_metadata.pixel_height,
+            })
+        })
+        .collect::<Vec<_>>();
     let payload = json!({"project_id":id,"kind":kind,"digest":digest,
         "media_type":metadata.media_type,"byte_length":metadata.byte_length,
-        "pixel_width":metadata.pixel_width,"pixel_height":metadata.pixel_height});
+        "pixel_width":metadata.pixel_width,"pixel_height":metadata.pixel_height,
+        "render_pages":render_page_identities});
     let context = storage::bidding::MutationContext::new(
         actor.clone(),
         required_idempotency_key(&headers)?,
@@ -1551,6 +1641,42 @@ async fn upload_attachment(
         &actor,
     )
     .await?;
+    let mut page_staging_ids = Vec::with_capacity(rendered_pages.len());
+    let mut render_pages = Vec::with_capacity(rendered_pages.len());
+    for (page_ordinal, (page_bytes, page_metadata)) in rendered_pages.iter().enumerate() {
+        let page_staging_id = Uuid::new_v4();
+        let page_digest = domain::sha256_hex(page_bytes);
+        let page_object_ref = storage::object_ref(&page_digest);
+        if let Err(error) = stage_uploaded_bytes(
+            &pool,
+            page_staging_id,
+            &page_object_ref,
+            &page_digest,
+            page_metadata.media_type,
+            page_bytes,
+            &actor,
+        )
+        .await
+        {
+            abandon_staged_upload(&pool, staging_id, &actor).await;
+            for staged in page_staging_ids {
+                abandon_staged_upload(&pool, staged, &actor).await;
+            }
+            return Err(error);
+        }
+        page_staging_ids.push(page_staging_id);
+        render_pages.push(json!({
+            "staging_id": page_staging_id,
+            "page_ordinal": page_ordinal,
+            "object_ref": page_object_ref,
+            "digest": page_digest,
+            "media_type": page_metadata.media_type,
+            "byte_length": page_metadata.byte_length,
+            "pixel_width": page_metadata.pixel_width,
+            "pixel_height": page_metadata.pixel_height,
+        }));
+    }
+    let render_pages = Value::Array(render_pages);
     let uploaded = storage::bid_submission::upload_attachment(
         &pool,
         storage::bid_submission::UploadAttachment {
@@ -1564,12 +1690,16 @@ async fn upload_attachment(
             byte_length: metadata.byte_length,
             pixel_width: metadata.pixel_width,
             pixel_height: metadata.pixel_height,
+            render_pages: &render_pages,
         },
         &context,
     )
     .await;
     if uploaded.is_err() {
         abandon_staged_upload(&pool, staging_id, &actor).await;
+        for staged in page_staging_ids {
+            abandon_staged_upload(&pool, staged, &actor).await;
+        }
     }
     Ok((StatusCode::CREATED, Json(uploaded.map_err(map_sql)?)))
 }
@@ -2093,6 +2223,7 @@ async fn register_kind_router(
     Json(body): Json<RegisterKindRouter>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
+    require_admin(&state, &actor)?;
     let pool = require_bid_pool().await?;
     let bytes = body.canonical_payload.as_bytes();
     let digest = domain::sha256_hex(bytes);
@@ -2131,6 +2262,7 @@ async fn promote_kind_router(
     Json(body): Json<PromoteKindRouter>,
 ) -> Result<Json<Value>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
+    require_admin(&state, &actor)?;
     let pool = require_bid_pool().await?;
     let context = storage::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
@@ -2141,6 +2273,145 @@ async fn promote_kind_router(
     Ok(Json(
         storage::bidding::promote_kind_router(
             &pool,
+            &body.target_version,
+            &body.expected_current_version,
+            body.expected_promotion_generation,
+            &context,
+        )
+        .await
+        .map_err(map_sql)?,
+    ))
+}
+
+async fn register_procedural_router(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<RegisterKindRouter>,
+) -> Result<(StatusCode, Json<Value>), ApiErr> {
+    let actor = actor_from(&headers, &state).await?;
+    require_admin(&state, &actor)?;
+    let pool = require_bid_pool().await?;
+    let bytes = body.canonical_payload.as_bytes();
+    let digest = domain::sha256_hex(bytes);
+    let context = storage::bidding::MutationContext::new(
+        durable_human_actor(&actor)?,
+        required_idempotency_key(&headers)?,
+        &body,
+    )
+    .map_err(|error| validation(&error.to_string()))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            storage::bidding::register_procedural_router_contract(
+                &pool,
+                &body.version,
+                bytes,
+                &digest,
+                &context,
+            )
+            .await
+            .map_err(map_sql)?,
+        ),
+    ))
+}
+
+async fn promote_procedural_router(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PromoteKindRouter>,
+) -> Result<Json<Value>, ApiErr> {
+    let actor = actor_from(&headers, &state).await?;
+    require_admin(&state, &actor)?;
+    let pool = require_bid_pool().await?;
+    let context = storage::bidding::MutationContext::new(
+        durable_human_actor(&actor)?,
+        required_idempotency_key(&headers)?,
+        &body,
+    )
+    .map_err(|error| validation(&error.to_string()))?;
+    Ok(Json(
+        storage::bidding::promote_procedural_router(
+            &pool,
+            &body.target_version,
+            &body.expected_current_version,
+            body.expected_promotion_generation,
+            &context,
+        )
+        .await
+        .map_err(map_sql)?,
+    ))
+}
+
+#[derive(Deserialize, Serialize)]
+struct RegisterTemplateContract {
+    version: String,
+    canonical_payload: String,
+}
+
+async fn register_template_contract(
+    State(state): State<AppState>,
+    Path(slot): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<RegisterTemplateContract>,
+) -> Result<(StatusCode, Json<Value>), ApiErr> {
+    let actor = actor_from(&headers, &state).await?;
+    require_admin(&state, &actor)?;
+    let pool = require_bid_pool().await?;
+    let bytes = body.canonical_payload.as_bytes();
+    let digest = domain::sha256_hex(bytes);
+    let request = json!({
+        "slot":&slot,
+        "version":&body.version,
+        "canonical_payload":&body.canonical_payload
+    });
+    let context = storage::bidding::MutationContext::new(
+        durable_human_actor(&actor)?,
+        required_idempotency_key(&headers)?,
+        &request,
+    )
+    .map_err(|error| validation(&error.to_string()))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            storage::bidding::register_template_contract(
+                &pool,
+                &slot,
+                &body.version,
+                bytes,
+                &digest,
+                &context,
+            )
+            .await
+            .map_err(map_sql)?,
+        ),
+    ))
+}
+
+async fn promote_template_contract(
+    State(state): State<AppState>,
+    Path(slot): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<PromoteKindRouter>,
+) -> Result<Json<Value>, ApiErr> {
+    let actor = actor_from(&headers, &state).await?;
+    require_admin(&state, &actor)?;
+    let pool = require_bid_pool().await?;
+    let request = json!({
+        "slot":&slot,
+        "target_version":&body.target_version,
+        "expected_current_version":&body.expected_current_version,
+        "expected_promotion_generation":body.expected_promotion_generation
+    });
+    let context = storage::bidding::MutationContext::new(
+        durable_human_actor(&actor)?,
+        required_idempotency_key(&headers)?,
+        &request,
+    )
+    .map_err(|error| validation(&error.to_string()))?;
+    Ok(Json(
+        storage::bidding::promote_template_contract(
+            &pool,
+            &slot,
             &body.target_version,
             &body.expected_current_version,
             body.expected_promotion_generation,
