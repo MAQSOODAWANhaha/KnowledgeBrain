@@ -1,7 +1,7 @@
 use bid::matching::run_match_route_v1;
 use runtime::{BidMatchRouteV1Job, BidMatchRouteV1Snapshots};
 use serde_json::json;
-use sqlx::Row;
+use sqlx::{PgPool, Row};
 use storage::bid_matching::{
     PickSelectionV1, PublishRouteV2, ReplaceRoutePickSetV1, ScheduleEnvironment,
     StagedSourceArtifactV1,
@@ -33,6 +33,54 @@ fn assert_database_error(error: sqlx::Error, expected: &str) {
         message.contains(expected),
         "expected database error {expected}, got {message}"
     );
+}
+
+async fn wait_for_lock_wait(pool: &PgPool, application_name: &str) {
+    for _ in 0..100 {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+               SELECT 1 FROM pg_stat_activity
+                WHERE application_name=$1 AND wait_event_type='Lock')",
+        )
+        .bind(application_name)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("matching settlement must reach the job lock");
+}
+
+async fn expire_claim_after_function_entry(pool: &PgPool, job_id: Uuid, attempt: i32) {
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    sqlx::query(
+        "UPDATE bid_matching_job_claims
+            SET claim_lease_ms=1000,
+                heartbeat_at=clock_timestamp()-interval '1001 milliseconds'
+          WHERE job_id=$1 AND attempt=$2",
+    )
+    .bind(job_id)
+    .bind(attempt)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn restore_claim_lease(pool: &PgPool, job_id: Uuid, attempt: i32, claim_lease_ms: i32) {
+    sqlx::query(
+        "UPDATE bid_matching_job_claims
+            SET claim_lease_ms=$3,heartbeat_at=clock_timestamp()
+          WHERE job_id=$1 AND attempt=$2",
+    )
+    .bind(job_id)
+    .bind(attempt)
+    .bind(claim_lease_ms)
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -512,6 +560,53 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
             "running".into()
         )
     );
+
+    let mut retry_blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM bid_matching_jobs WHERE id=$1 FOR UPDATE")
+        .bind(replacement_claim.job_id)
+        .execute(&mut *retry_blocker)
+        .await
+        .unwrap();
+    let retry_application_name = format!("matching-retry-{}", Uuid::new_v4());
+    let mut retry_connection = pool.acquire().await.unwrap();
+    sqlx::query("SELECT set_config('application_name',$1,false)")
+        .bind(&retry_application_name)
+        .execute(&mut *retry_connection)
+        .await
+        .unwrap();
+    let retry_job_id = replacement_claim.job_id;
+    let retry_token = replacement_claim.claim.token;
+    let retry_attempt = replacement_claim.claim.attempt;
+    let blocked_retry = tokio::spawn(async move {
+        sqlx::query("SELECT kb_bid_matching_retry_claim($1,$2,$3,$4,$5)")
+            .bind(retry_job_id)
+            .bind(retry_token)
+            .bind(retry_attempt)
+            .bind("LEASE_EXPIRED_WHILE_WAITING")
+            .bind("retry must use DB time after acquiring the job lock")
+            .execute(&mut *retry_connection)
+            .await
+    });
+    wait_for_lock_wait(&pool, &retry_application_name).await;
+    expire_claim_after_function_entry(
+        &pool,
+        replacement_claim.job_id,
+        replacement_claim.claim.attempt,
+    )
+    .await;
+    retry_blocker.commit().await.unwrap();
+    assert_database_error(
+        blocked_retry.await.unwrap().unwrap_err(),
+        "MATCHING_CLAIM_LOST",
+    );
+    restore_claim_lease(
+        &pool,
+        replacement_claim.job_id,
+        replacement_claim.claim.attempt,
+        replacement_claim.claim.claim_lease_ms,
+    )
+    .await;
+
     storage::bid_matching::retry_claim(
         &pool,
         &replacement_claim,
@@ -566,6 +661,49 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .await
     .unwrap();
     assert_eq!(staging_before_retry, ("active".into(), 0));
+
+    let mut fail_blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM bid_matching_jobs WHERE id=$1 FOR UPDATE")
+        .bind(staging_claim.job_id)
+        .execute(&mut *fail_blocker)
+        .await
+        .unwrap();
+    let fail_application_name = format!("matching-fail-{}", Uuid::new_v4());
+    let mut fail_connection = pool.acquire().await.unwrap();
+    sqlx::query("SELECT set_config('application_name',$1,false)")
+        .bind(&fail_application_name)
+        .execute(&mut *fail_connection)
+        .await
+        .unwrap();
+    let fail_job_id = staging_claim.job_id;
+    let fail_token = staging_claim.claim.token;
+    let fail_attempt = staging_claim.claim.attempt;
+    let blocked_fail = tokio::spawn(async move {
+        sqlx::query("SELECT kb_bid_matching_fail_claim($1,$2,$3,$4,$5)")
+            .bind(fail_job_id)
+            .bind(fail_token)
+            .bind(fail_attempt)
+            .bind("LEASE_EXPIRED_WHILE_WAITING")
+            .bind("failure settlement must use DB time after acquiring the job lock")
+            .execute(&mut *fail_connection)
+            .await
+    });
+    wait_for_lock_wait(&pool, &fail_application_name).await;
+    expire_claim_after_function_entry(&pool, staging_claim.job_id, staging_claim.claim.attempt)
+        .await;
+    fail_blocker.commit().await.unwrap();
+    assert_database_error(
+        blocked_fail.await.unwrap().unwrap_err(),
+        "MATCHING_CLAIM_LOST",
+    );
+    restore_claim_lease(
+        &pool,
+        staging_claim.job_id,
+        staging_claim.claim.attempt,
+        staging_claim.claim.claim_lease_ms,
+    )
+    .await;
+
     storage::bid_matching::retry_claim(
         &pool,
         &staging_claim,
@@ -601,8 +739,12 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
             .await
             .unwrap()
             .unwrap();
+    let invalid_commit_report = empty_publish_route();
+    let invalid_report_id = invalid_commit_report.report_id;
+    let invalid_report_nonce = invalid_commit_report.report_nonce;
+    let invalid_report_sha256 = domain::sha256_hex(&invalid_commit_report.canonical_payload);
     assert!(
-        storage::bid_matching::publish_route(&pool, &commit_claim, empty_publish_route())
+        storage::bid_matching::publish_route(&pool, &commit_claim, invalid_commit_report)
             .await
             .is_err(),
         "invalid staged report payload must fail during commit"
@@ -621,6 +763,141 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .await
     .unwrap();
     assert_eq!(commit_before_retry, ("active".into(), 6, 0));
+    let staging_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM bid_matching_staging_sets WHERE job_id=$1 AND attempt=$2",
+    )
+    .bind(commit_claim.job_id)
+    .bind(commit_claim.claim.attempt)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let mut commit_blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM bid_matching_jobs WHERE id=$1 FOR UPDATE")
+        .bind(commit_claim.job_id)
+        .execute(&mut *commit_blocker)
+        .await
+        .unwrap();
+    let commit_application_name = format!("matching-commit-{}", Uuid::new_v4());
+    let mut commit_connection = pool.acquire().await.unwrap();
+    sqlx::query("SELECT set_config('application_name',$1,false)")
+        .bind(&commit_application_name)
+        .execute(&mut *commit_connection)
+        .await
+        .unwrap();
+    let commit_job_id = commit_claim.job_id;
+    let commit_token = commit_claim.claim.token;
+    let commit_attempt = commit_claim.claim.attempt;
+    let blocked_report_sha256 = invalid_report_sha256.clone();
+    let blocked_commit = tokio::spawn(async move {
+        sqlx::query("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6,$7)")
+            .bind(commit_job_id)
+            .bind(commit_token)
+            .bind(commit_attempt)
+            .bind(staging_id)
+            .bind(invalid_report_id)
+            .bind(invalid_report_nonce)
+            .bind(blocked_report_sha256)
+            .execute(&mut *commit_connection)
+            .await
+    });
+    wait_for_lock_wait(&pool, &commit_application_name).await;
+    expire_claim_after_function_entry(&pool, commit_claim.job_id, commit_claim.claim.attempt).await;
+    commit_blocker.commit().await.unwrap();
+    assert_database_error(
+        blocked_commit.await.unwrap().unwrap_err(),
+        "MATCHING_CLAIM_LOST",
+    );
+    restore_claim_lease(
+        &pool,
+        commit_claim.job_id,
+        commit_claim.claim.attempt,
+        commit_claim.claim.claim_lease_ms,
+    )
+    .await;
+
+    sqlx::query(
+        "UPDATE bid_matching_job_claims
+            SET heartbeat_at=clock_timestamp()-interval '10 minutes'
+          WHERE job_id=$1 AND attempt=$2",
+    )
+    .bind(commit_claim.job_id)
+    .bind(commit_claim.claim.attempt)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let expired_commit: Result<serde_json::Value, sqlx::Error> =
+        sqlx::query_scalar("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6,$7)")
+            .bind(commit_claim.job_id)
+            .bind(commit_claim.claim.token)
+            .bind(commit_claim.claim.attempt)
+            .bind(staging_id)
+            .bind(invalid_report_id)
+            .bind(invalid_report_nonce)
+            .bind(&invalid_report_sha256)
+            .fetch_one(&pool)
+            .await;
+    assert_database_error(expired_commit.unwrap_err(), "MATCHING_CLAIM_LOST");
+    sqlx::query(
+        "UPDATE bid_matching_job_claims SET heartbeat_at=clock_timestamp()
+          WHERE job_id=$1 AND attempt=$2",
+    )
+    .bind(commit_claim.job_id)
+    .bind(commit_claim.claim.attempt)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query("UPDATE bid_matching_staging_sets SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1")
+        .bind(staging_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let expired_staging_commit: Result<serde_json::Value, sqlx::Error> =
+        sqlx::query_scalar("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6,$7)")
+            .bind(commit_claim.job_id)
+            .bind(commit_claim.claim.token)
+            .bind(commit_claim.claim.attempt)
+            .bind(staging_id)
+            .bind(invalid_report_id)
+            .bind(invalid_report_nonce)
+            .bind(&invalid_report_sha256)
+            .fetch_one(&pool)
+            .await;
+    assert_database_error(expired_staging_commit.unwrap_err(), "STAGING_NOT_ACTIVE");
+    sqlx::query("UPDATE bid_matching_staging_sets SET expires_at=clock_timestamp()+interval '30 minutes' WHERE id=$1")
+        .bind(staging_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "UPDATE bid_projects SET matching_mutation_watermark=matching_mutation_watermark+1 WHERE id=$1",
+    )
+    .bind(project_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let stale_inputs_commit: Result<serde_json::Value, sqlx::Error> =
+        sqlx::query_scalar("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6,$7)")
+            .bind(commit_claim.job_id)
+            .bind(commit_claim.claim.token)
+            .bind(commit_claim.claim.attempt)
+            .bind(staging_id)
+            .bind(invalid_report_id)
+            .bind(invalid_report_nonce)
+            .bind(&invalid_report_sha256)
+            .fetch_one(&pool)
+            .await;
+    assert_database_error(stale_inputs_commit.unwrap_err(), "MATCHING_INPUTS_STALE");
+    sqlx::query(
+        "UPDATE bid_projects SET matching_mutation_watermark=matching_mutation_watermark-1 WHERE id=$1",
+    )
+    .bind(project_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
     storage::bid_matching::retry_claim(
         &pool,
         &commit_claim,

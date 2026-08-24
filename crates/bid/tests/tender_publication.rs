@@ -412,6 +412,53 @@ async fn kind_router_promotions_refresh_generation_two_and_three_markers() {
     .await
     .expect("confirm extracted clause before promotion");
 
+    let source_span_id: Uuid =
+        sqlx::query_scalar("SELECT current_source_span_artifact_id FROM bid_clauses WHERE id=$1")
+            .bind(extracted_clause_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let manualized_extracted_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO bid_clauses
+         (id,project_id,provenance,status,kind,text,must,current_source_span_artifact_id,
+          extracted_origin_source_span_artifact_id,revision,created_by)
+         VALUES($1,$2,'extracted','draft','technical',$3,true,$4,$4,1,$5)",
+    )
+    .bind(manualized_extracted_id)
+    .bind(seed.project_id)
+    .bind(&clause_text)
+    .bind(source_span_id)
+    .bind(&seed.actor)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let manualize_context = MutationContext::new(
+        seed.actor.clone(),
+        format!("manualize-extracted-{manualized_extracted_id}"),
+        &json!({"action":"patch","expected_revision":1,"kind":"service"}),
+    )
+    .unwrap();
+    storage::bidding::mutate_clause(
+        &pool,
+        seed.project_id,
+        manualized_extracted_id,
+        "patch",
+        &json!({"kind":"service"}),
+        1,
+        &manualize_context,
+    )
+    .await
+    .expect("editing extracted kind must make the clause manual-after-edit");
+    let manualized: (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT provenance,current_source_span_artifact_id FROM bid_clauses WHERE id=$1",
+    )
+    .bind(manualized_extracted_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(manualized, ("manual_after_edit".into(), None));
+
     let manual_clause_id = Uuid::new_v4();
     let create_manual = MutationContext::new(
         seed.actor.clone(),
@@ -562,6 +609,24 @@ async fn kind_router_promotions_refresh_generation_two_and_three_markers() {
         .await
         .unwrap();
         assert_eq!(manual, ("confirmed".into(), "technical".into(), 2, None));
+        let manualized: (String, String, String, i64, Option<i64>) = sqlx::query_as(
+            "SELECT provenance,status,kind,revision,confirmation_required_router_generation
+               FROM bid_clauses WHERE id=$1",
+        )
+        .bind(manualized_extracted_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+        assert_eq!(
+            manualized,
+            (
+                "manual_after_edit".into(),
+                "draft".into(),
+                "service".into(),
+                2,
+                None,
+            )
+        );
         expected_version = target_version.clone();
     }
 
@@ -733,6 +798,113 @@ async fn extraction_reaper_terminates_only_the_expired_attempt() {
         .await
         .unwrap()
     );
+}
+
+#[tokio::test]
+async fn conversion_reaper_rejects_renewal_after_logical_expiry() {
+    let Some(pool) = support::connect_postgres_contract("TenderPublication").await else {
+        return;
+    };
+    if !support::require_final_schema(
+        "TenderPublication",
+        final_tender_schema_is_ready(&pool).await,
+    ) {
+        return;
+    }
+    let seed = seed_publication(&pool, "# 技术要求\n系统必须支持国密协议。").await;
+    let document_id = Uuid::new_v4();
+    let claim_token = Uuid::new_v4();
+    let digest = "3".repeat(64);
+    sqlx::query(
+        "INSERT INTO bid_documents
+         (id,project_id,file_name,media_type,byte_length,original_object_ref,original_sha256,
+          conversion_generation,parse_status)
+         VALUES($1,$2,'lease-race.docx','application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+           1,$3,$4,1,'processing')",
+    )
+    .bind(document_id)
+    .bind(seed.project_id)
+    .bind(format!("objects/{digest}"))
+    .bind(&digest)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_document_conversion_attempts
+         (document_id,conversion_generation,attempt,claim_token,claimed_by,claim_lease_ms,
+          claimed_at,heartbeat_at,status)
+         VALUES($1,1,1,$2,'conversion-reaper-race',300000,
+           clock_timestamp()-interval '10 minutes',clock_timestamp()-interval '10 minutes','running')",
+    )
+    .bind(document_id)
+    .bind(claim_token)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM bid_documents WHERE id=$1 FOR UPDATE")
+        .bind(document_id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+
+    let application_name = format!("conversion-reaper-{}", Uuid::new_v4());
+    let mut reaper_connection = pool.acquire().await.unwrap();
+    sqlx::query("SELECT set_config('application_name',$1,false)")
+        .bind(&application_name)
+        .execute(&mut *reaper_connection)
+        .await
+        .unwrap();
+    let reaper = tokio::spawn(async move {
+        sqlx::query_scalar::<_, Vec<Uuid>>("SELECT kb_bid_reclaim_stale_conversions()")
+            .fetch_one(&mut *reaper_connection)
+            .await
+    });
+
+    let mut waiting = false;
+    for _ in 0..100 {
+        waiting = sqlx::query_scalar(
+            "SELECT EXISTS(
+               SELECT 1 FROM pg_stat_activity
+                WHERE application_name=$1 AND wait_event_type='Lock')",
+        )
+        .bind(&application_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        waiting,
+        "reaper must reach the document lock before renewal"
+    );
+    assert!(
+        !storage::bidding::heartbeat_document_conversion(&pool, document_id, claim_token)
+            .await
+            .unwrap(),
+        "an already expired owner must not renew while reaper is waiting"
+    );
+    blocker.commit().await.unwrap();
+
+    let reaped = reaper.await.unwrap().unwrap();
+    assert_eq!(reaped, vec![document_id]);
+    let state: (String, String) = sqlx::query_as(
+        "SELECT document.parse_status,attempt.status
+           FROM bid_documents document
+           JOIN bid_document_conversion_attempts attempt
+             ON attempt.document_id=document.id AND attempt.conversion_generation=document.conversion_generation
+          WHERE document.id=$1 AND attempt.claim_token=$2",
+    )
+    .bind(document_id)
+    .bind(claim_token)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, ("pending".into(), "reaped".into()));
 }
 
 #[tokio::test]

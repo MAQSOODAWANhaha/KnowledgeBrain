@@ -948,7 +948,15 @@ pub async fn publish_route(
     for batch in batches {
         stage_batch(pool, claimed, staging_id, batch).await?;
     }
-    commit_staged_route(pool, claimed, staging_id, report.report_id, &report_sha256).await
+    commit_staged_route(
+        pool,
+        claimed,
+        staging_id,
+        report.report_id,
+        report.report_nonce,
+        &report_sha256,
+    )
+    .await
 }
 
 fn completed_publish_receipt(
@@ -1143,15 +1151,17 @@ async fn commit_staged_route(
     claimed: &ClaimedMatchingRequest,
     staging_id: Uuid,
     report_id: Uuid,
+    report_nonce: Uuid,
     expected_report_sha256: &str,
 ) -> Result<PublishReceipt, sqlx::Error> {
     let receipt: serde_json::Value =
-        sqlx::query_scalar("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6)")
+        sqlx::query_scalar("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6,$7)")
             .bind(claimed.job_id)
             .bind(claimed.claim.token)
             .bind(claimed.claim.attempt)
             .bind(staging_id)
             .bind(report_id)
+            .bind(report_nonce)
             .bind(expected_report_sha256)
             .fetch_one(pool)
             .await?;

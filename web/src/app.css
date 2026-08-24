@@ -432,7 +432,7 @@ a {
   gap: 0;
   margin: 0 0 6px;
   min-width: 0;
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 500;
   line-height: 18px;
   color: var(--crumb);
@@ -1490,14 +1490,13 @@ table.grid tr:hover td {
   margin: 10px 0 0;
   padding-left: 18px;
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .chunk-kicker {
   margin: 12px 0 6px;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 650;
   letter-spacing: 0.06em;
-  text-transform: uppercase;
   color: var(--faint);
 }
 .md-wrap {
@@ -1520,14 +1519,14 @@ table.grid tr:hover td {
   scroll-margin-top: 72px;
 }
 .md-doc .md-h2 {
-  font-size: 18px;
+  font-size: 17px;
   font-weight: 650;
   margin: 1.25em 0 0.4em;
   scroll-margin-top: 72px;
 }
 .md-doc .md-h3,
 .md-doc .md-h4 {
-  font-size: 15.5px;
+  font-size: 15px;
   font-weight: 650;
   margin: 1.1em 0 0.35em;
   scroll-margin-top: 72px;
@@ -1552,7 +1551,7 @@ table.grid tr:hover td {
   width: 100%;
   border-collapse: collapse;
   margin: 12px 0 16px;
-  font-size: 13.5px;
+  font-size: 13px;
 }
 .md-doc th,
 .md-doc td {

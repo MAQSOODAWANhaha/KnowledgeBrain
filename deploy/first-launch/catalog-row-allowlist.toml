@@ -36325,7 +36325,7 @@ definition_sha256 = "f9651fa498f7b2f0668d6e557c5ab33bc83830f3c98da730efe313674e3
 [[routines]]
 schema = "public"
 name = "kb_bid_matching_commit"
-identity_arguments = "p_job_id uuid, p_claim_token uuid, p_attempt integer, p_staging_set_id uuid, p_report_id uuid, p_expected_report_sha256 public.kb_sha256"
+identity_arguments = "p_job_id uuid, p_claim_token uuid, p_attempt integer, p_staging_set_id uuid, p_report_id uuid, p_report_nonce uuid, p_expected_report_sha256 public.kb_sha256"
 kind = "function"
 owner = "app_owner"
 language = "plpgsql"
@@ -36336,7 +36336,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "0491d7c1c49a680a85be44b439a8f3fd26666635b797c4908e7877ce58c6c958"
+definition_sha256 = "5376bc7e0fd93c7b40da825b0583221e4fa30e653695493cea05e9dca00680ca"
 
 [[routines]]
 schema = "public"
@@ -36352,7 +36352,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "39703ceb7b8ba888dc1670bd419257d9e03829d940a64af12eb9331d954ba398"
+definition_sha256 = "3d32e88108cff65537e7c7ca816183b7d003e43063fc204a03ff02d5591b579b"
 
 [[routines]]
 schema = "public"
@@ -36432,7 +36432,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "da4dbb8dc2ee2ca1fda683ec273faac0c1d864d5549051fdd4f878739a47ab42"
+definition_sha256 = "7c5b80a1bd6de9c7bdce9e6b5a931022d6342991833fd10af858a1c035841efe"
 
 [[routines]]
 schema = "public"
@@ -36512,7 +36512,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "4f9e8de191e20619cd3bd033666e4a863b018ffb2e689764ca0cb39573e032a7"
+definition_sha256 = "6716c53ae3f0d5d476594bac39dbe482c31f4d78ca4e465c1a4a705891ee5639"
 
 [[routines]]
 schema = "public"
@@ -37328,7 +37328,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "a900c22349338856d722a0b8fe19534f71048db1b0c27e9bf2c5824d0f9a8f3a"
+definition_sha256 = "cb00f535c669c43c2b4d3745eb349699753425cea5e4a627a1cbffb569b63a33"
 
 [[routines]]
 schema = "public"
@@ -50519,7 +50519,7 @@ grant_option = false
 [[routine_acls]]
 schema = "public"
 name = "kb_bid_matching_commit"
-identity_arguments = "p_job_id uuid, p_claim_token uuid, p_attempt integer, p_staging_set_id uuid, p_report_id uuid, p_expected_report_sha256 public.kb_sha256"
+identity_arguments = "p_job_id uuid, p_claim_token uuid, p_attempt integer, p_staging_set_id uuid, p_report_id uuid, p_report_nonce uuid, p_expected_report_sha256 public.kb_sha256"
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
 privilege = "EXECUTE"
@@ -50528,7 +50528,7 @@ grant_option = false
 [[routine_acls]]
 schema = "public"
 name = "kb_bid_matching_commit"
-identity_arguments = "p_job_id uuid, p_claim_token uuid, p_attempt integer, p_staging_set_id uuid, p_report_id uuid, p_expected_report_sha256 public.kb_sha256"
+identity_arguments = "p_job_id uuid, p_claim_token uuid, p_attempt integer, p_staging_set_id uuid, p_report_id uuid, p_report_nonce uuid, p_expected_report_sha256 public.kb_sha256"
 grantor = "kb_app_owner"
 grantee = "kb_runtime_worker"
 privilege = "EXECUTE"

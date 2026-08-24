@@ -2902,7 +2902,7 @@ BEGIN
    IF old_status='confirmed' AND new_kind IS DISTINCT FROM old_kind THEN
      RAISE EXCEPTION 'CLAUSE_KIND_CHANGE_REQUIRES_UNCONFIRM' USING ERRCODE='55000';
    END IF;
-   IF clause_value.provenance='extracted' AND new_text IS DISTINCT FROM old_text THEN
+   IF clause_value.provenance='extracted' THEN
      new_provenance:='manual_after_edit';new_current_span:=NULL;
    END IF;
  ELSIF p_action='confirm' THEN
@@ -5410,14 +5410,20 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
 DECLARE replay bytea; project_value bid_projects%ROWTYPE; current_row bid_current_parts%ROWTYPE;
- content bid_part_content_artifacts%ROWTYPE; new_id uuid := gen_random_uuid(); digest kb_sha256; response jsonb;
+ content bid_part_content_artifacts%ROWTYPE; new_id uuid := gen_random_uuid(); dependency_id uuid := gen_random_uuid();
+ digest kb_sha256; dependency_payload bytea; dependency_digest kb_sha256; response jsonb;
+ template_slot text; template_version text; typed_identities jsonb; now_ts timestamptz := clock_timestamp();
 BEGIN
   PERFORM kb_bid_require_human_actor(p_actor);
   replay := kb_bid_idempotency_begin(p_actor,'bid.part.update',p_idempotency_key,p_request_bytes,p_request_sha256);
   IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
   SELECT * INTO STRICT project_value FROM bid_projects WHERE id=p_project_id FOR UPDATE;
   IF project_value.status<>'open' THEN RAISE EXCEPTION 'PROJECT_ENDED' USING ERRCODE='55000'; END IF;
-  IF kb_bid_template_slot(p_part_key) IS NULL THEN RAISE EXCEPTION 'PART_KEY_INVALID' USING ERRCODE='22023'; END IF;
+  template_slot := kb_bid_template_slot(p_part_key);
+  IF template_slot IS NULL THEN RAISE EXCEPTION 'PART_KEY_INVALID' USING ERRCODE='22023'; END IF;
+  SELECT current_template.version INTO STRICT template_version
+    FROM bid_template_contract_current current_template
+   WHERE current_template.slot=template_slot FOR UPDATE;
   PERFORM kb_bid_validate_part_markdown_assets(p_project_id,p_markdown);
   SELECT * INTO current_row FROM bid_current_parts WHERE project_id=p_project_id AND part_key=p_part_key FOR UPDATE;
   IF current_row.project_id IS NOT NULL THEN
@@ -5429,12 +5435,26 @@ BEGIN
   digest := encode(public.digest(p_markdown,'sha256'),'hex');
   INSERT INTO bid_part_content_artifacts(id,project_id,part_key,revision,canonical_markdown_utf8,content_sha256,created_by)
   VALUES(new_id,p_project_id,p_part_key,COALESCE(content.revision,0)+1,p_markdown,digest,p_actor);
-  IF current_row.project_id IS NOT NULL THEN
-    UPDATE bid_current_parts SET content_artifact_id=new_id, stale=true,
-      stale_reason_codes=(SELECT ARRAY(SELECT DISTINCT x FROM unnest(stale_reason_codes||ARRAY['PART_EDITED']) x ORDER BY 1))
-     WHERE project_id=p_project_id AND part_key=p_part_key;
-  END IF;
-  response := jsonb_build_object('content_artifact_id',new_id,'revision',COALESCE(content.revision,0)+1,'content_sha256',digest);
+  typed_identities := kb_bid_current_part_input_identities(p_project_id,p_part_key);
+  dependency_payload := convert_to('{"schema_version":1,"project_id":'||kb_bid_json_string(p_project_id::text)
+    ||',"part_key":'||kb_bid_json_string(p_part_key)
+    ||',"template_slot":'||kb_bid_json_string(template_slot)
+    ||',"template_version":'||kb_bid_json_string(template_version)
+    ||',"input_identities":'||typed_identities::text
+    ||',"part_content_revision":'||(COALESCE(content.revision,0)+1)::text
+    ||',"part_content_sha256":'||kb_bid_json_string(digest)
+    ||',"generated_at":'||kb_bid_json_string(kb_bid_utc_json_time(now_ts))||'}','UTF8');
+  dependency_digest := encode(public.digest(dependency_payload,'sha256'),'hex');
+  INSERT INTO bid_part_dependency_artifacts(id,project_id,part_key,template_slot,template_version,
+    part_content_artifact_id,schema_version,typed_input_identities,canonical_payload,content_sha256,generated_at)
+  VALUES(dependency_id,p_project_id,p_part_key,template_slot,template_version,new_id,1,typed_identities,
+    dependency_payload,dependency_digest,now_ts);
+  INSERT INTO bid_current_parts(project_id,part_key,content_artifact_id,dependency_artifact_id,stale,stale_reason_codes)
+  VALUES(p_project_id,p_part_key,new_id,dependency_id,false,'{}')
+  ON CONFLICT (project_id,part_key) DO UPDATE SET content_artifact_id=EXCLUDED.content_artifact_id,
+    dependency_artifact_id=EXCLUDED.dependency_artifact_id,stale=false,stale_reason_codes='{}';
+  response := jsonb_build_object('content_artifact_id',new_id,'dependency_artifact_id',dependency_id,
+    'revision',COALESCE(content.revision,0)+1,'content_sha256',digest,'dependency_sha256',dependency_digest);
   INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
     entity_kind,entity_locator,after_revision,after_sha256)
   VALUES(gen_random_uuid(),1,'bid.part.update',p_actor,p_idempotency_key,p_request_sha256,
@@ -7361,33 +7381,66 @@ $$;
 
 CREATE FUNCTION kb_bid_matching_commit(
   p_job_id uuid, p_claim_token uuid, p_attempt integer, p_staging_set_id uuid,
-  p_report_id uuid, p_expected_report_sha256 kb_sha256
+  p_report_id uuid, p_report_nonce uuid, p_expected_report_sha256 kb_sha256
 )
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
-DECLARE job bid_matching_jobs%ROWTYPE; set_row bid_matching_staging_sets%ROWTYPE;
- route_value bid_matching_routes%ROWTYPE; payload bytea; parsed jsonb;
- coverage jsonb; rec record;
+DECLARE job bid_matching_jobs%ROWTYPE; claim_value bid_matching_job_claims%ROWTYPE;
+ set_row bid_matching_staging_sets%ROWTYPE; manifest_value bid_matching_manifests%ROWTYPE;
+ project_value bid_projects%ROWTYPE; route_value bid_matching_routes%ROWTYPE;
+ payload bytea; parsed jsonb; coverage jsonb; rec record; now_ts timestamptz;
 BEGIN
   SELECT * INTO STRICT job FROM bid_matching_jobs WHERE id=p_job_id FOR UPDATE;
   IF job.status='completed' AND job.completed_report_id=p_report_id THEN
+    PERFORM 1 FROM bid_matching_reports report
+      JOIN bid_matching_staging_sets staging ON staging.consumed_report_id=report.id
+     WHERE report.id=p_report_id AND report.job_id=p_job_id
+       AND report.content_sha256=p_expected_report_sha256
+       AND staging.id=p_staging_set_id AND staging.job_id=p_job_id
+       AND staging.claim_token=p_claim_token AND staging.attempt=p_attempt
+       AND staging.report_nonce=p_report_nonce AND staging.state='consumed';
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'COMPLETED_REPORT_PAYLOAD_MISMATCH' USING ERRCODE='23505';
+    END IF;
     RETURN jsonb_build_object('status','replayed','report_id',p_report_id);
   END IF;
-  PERFORM 1 FROM bid_projects WHERE id=job.project_id FOR UPDATE;
-  PERFORM 1 FROM bid_matching_job_claims claim
-   WHERE claim.job_id=p_job_id AND claim.attempt=p_attempt AND claim.claim_token=p_claim_token
-     AND claim.status='running' FOR UPDATE;
-  IF NOT FOUND THEN RAISE EXCEPTION 'MATCHING_CLAIM_LOST' USING ERRCODE='40001'; END IF;
+  IF job.status<>'running' OR job.active_attempt<>p_attempt THEN
+    RAISE EXCEPTION 'MATCHING_CLAIM_LOST' USING ERRCODE='40001';
+  END IF;
+  SELECT * INTO STRICT project_value FROM bid_projects WHERE id=job.project_id FOR UPDATE;
+  SELECT * INTO STRICT manifest_value FROM bid_matching_manifests WHERE id=job.manifest_id;
+  IF project_value.status<>'open'
+     OR project_value.matching_mutation_watermark<>manifest_value.mutation_watermark
+     OR manifest_value.generation<>(SELECT max(generation) FROM bid_matching_manifests WHERE project_id=job.project_id) THEN
+    RAISE EXCEPTION 'MATCHING_INPUTS_STALE' USING ERRCODE='40001';
+  END IF;
+  SELECT * INTO claim_value FROM bid_matching_job_claims
+   WHERE job_id=p_job_id AND attempt=p_attempt AND claim_token=p_claim_token FOR UPDATE;
   SELECT * INTO STRICT route_value FROM bid_matching_routes
-   WHERE id=job.route_id AND project_id=job.project_id;
+   WHERE id=job.route_id AND project_id=job.project_id AND manifest_id=job.manifest_id;
   SELECT * INTO STRICT set_row FROM bid_matching_staging_sets WHERE id=p_staging_set_id FOR UPDATE;
-  IF set_row.state<>'active' OR set_row.job_id<>p_job_id THEN RAISE EXCEPTION 'STAGING_NOT_ACTIVE' USING ERRCODE='40001'; END IF;
+  now_ts := clock_timestamp();
+  IF claim_value.job_id IS NULL OR claim_value.status<>'running'
+     OR claim_value.heartbeat_at+make_interval(secs=>claim_value.claim_lease_ms::double precision/1000.0)<=now_ts THEN
+    RAISE EXCEPTION 'MATCHING_CLAIM_LOST' USING ERRCODE='40001';
+  END IF;
+  IF set_row.state<>'active' OR set_row.expires_at<=now_ts
+     OR set_row.job_id<>p_job_id OR set_row.route_id<>job.route_id
+     OR set_row.claim_token<>p_claim_token OR set_row.attempt<>p_attempt
+     OR set_row.manifest_id<>job.manifest_id OR set_row.project_id<>job.project_id
+     OR set_row.generation<>manifest_value.generation
+     OR set_row.mutation_watermark<>manifest_value.mutation_watermark
+     OR set_row.report_nonce<>p_report_nonce THEN
+    RAISE EXCEPTION 'STAGING_NOT_ACTIVE' USING ERRCODE='40001';
+  END IF;
   IF set_row.expected_batch_count<>(SELECT count(*) FROM bid_matching_staged_batches WHERE staging_set_id=p_staging_set_id)
      OR set_row.staged_item_count<>set_row.expected_item_count
-     OR set_row.staged_byte_length<>set_row.expected_byte_length THEN
+     OR set_row.staged_byte_length<>set_row.expected_byte_length
+     OR 0<>(SELECT min(batch_ordinal) FROM bid_matching_staged_batches WHERE staging_set_id=p_staging_set_id)
+     OR set_row.expected_batch_count-1<>(SELECT max(batch_ordinal) FROM bid_matching_staged_batches WHERE staging_set_id=p_staging_set_id) THEN
     RAISE EXCEPTION 'STAGING_COUNT_MISMATCH' USING ERRCODE='22023';
   END IF;
   SELECT canonical_payload INTO STRICT payload FROM bid_matching_staging_report_payloads WHERE staging_set_id=p_staging_set_id;
@@ -7567,7 +7620,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
 DECLARE claim_value bid_matching_job_claims%ROWTYPE; job_value bid_matching_jobs%ROWTYPE;
- now_ts timestamptz := clock_timestamp();
+ now_ts timestamptz;
 BEGIN
   SELECT * INTO job_value FROM bid_matching_jobs WHERE id=p_job_id FOR UPDATE;
   IF NOT FOUND OR job_value.status<>'running' OR job_value.active_attempt<>p_attempt THEN
@@ -7575,7 +7628,8 @@ BEGIN
   END IF;
   SELECT * INTO claim_value FROM bid_matching_job_claims
    WHERE job_id=p_job_id AND attempt=p_attempt AND claim_token=p_claim_token FOR UPDATE;
-  IF NOT FOUND OR claim_value.status<>'running'
+  now_ts := clock_timestamp();
+  IF claim_value.job_id IS NULL OR claim_value.status<>'running'
      OR claim_value.heartbeat_at + make_interval(secs=>claim_value.claim_lease_ms::double precision/1000.0)<=now_ts THEN
     RAISE EXCEPTION 'MATCHING_CLAIM_LOST' USING ERRCODE='40001';
   END IF;
@@ -7595,7 +7649,7 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
 DECLARE claim_value bid_matching_job_claims%ROWTYPE; job_value bid_matching_jobs%ROWTYPE;
- now_ts timestamptz := clock_timestamp();
+ now_ts timestamptz;
 BEGIN
   SELECT * INTO job_value FROM bid_matching_jobs WHERE id=p_job_id FOR UPDATE;
   IF NOT FOUND OR job_value.status<>'running' OR job_value.active_attempt<>p_attempt THEN
@@ -7603,7 +7657,8 @@ BEGIN
   END IF;
   SELECT * INTO claim_value FROM bid_matching_job_claims
    WHERE job_id=p_job_id AND attempt=p_attempt AND claim_token=p_claim_token FOR UPDATE;
-  IF NOT FOUND OR claim_value.status<>'running'
+  now_ts := clock_timestamp();
+  IF claim_value.job_id IS NULL OR claim_value.status<>'running'
      OR claim_value.heartbeat_at + make_interval(secs=>claim_value.claim_lease_ms::double precision/1000.0)<=now_ts THEN
     RAISE EXCEPTION 'MATCHING_CLAIM_LOST' USING ERRCODE='40001';
   END IF;
@@ -7743,7 +7798,7 @@ GRANT EXECUTE ON FUNCTION
  kb_bid_matching_open_staging(jsonb),
  kb_bid_matching_stage_batch(jsonb),
  kb_bid_matching_stage_report_payload(uuid,bytea,kb_sha256),
- kb_bid_matching_commit(uuid,uuid,integer,uuid,uuid,kb_sha256),
+ kb_bid_matching_commit(uuid,uuid,integer,uuid,uuid,uuid,kb_sha256),
  kb_bid_matching_retry_claim(uuid,uuid,integer,text,text),
  kb_bid_matching_fail_claim(uuid,uuid,integer,text,text),
  kb_bid_matching_reap(),

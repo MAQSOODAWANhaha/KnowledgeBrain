@@ -305,6 +305,65 @@ async fn procedural_segments_distinguish_numbered_items_from_decimal_amounts() {
     );
 }
 
+#[tokio::test]
+async fn manual_part_put_creates_and_keeps_a_current_exportable_revision() {
+    let Some(pool) = live_test_pool().await else {
+        return;
+    };
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
+        return;
+    }
+    let seed = seed_project(&pool).await;
+
+    for (expected_revision, markdown) in [(0_i64, "人工初稿"), (1_i64, "人工修订稿")] {
+        let request = json!({
+            "project_id": seed.project_id,
+            "part_key": "1",
+            "expected_content_revision": expected_revision,
+            "markdown": markdown,
+        });
+        let (request_bytes, request_sha256) = request_identity(&request);
+        let receipt: Value =
+            sqlx::query_scalar("SELECT kb_bid_update_part($1,'1',$2,$3,$4,$5,$6,$7)")
+                .bind(seed.project_id)
+                .bind(expected_revision)
+                .bind(markdown.as_bytes())
+                .bind(&seed.actor)
+                .bind(format!(
+                    "manual-part-{expected_revision}-{}",
+                    seed.project_id
+                ))
+                .bind(request_bytes)
+                .bind(request_sha256)
+                .fetch_one(&pool)
+                .await
+                .expect("manual part PUT must create a current dependency-bound revision");
+        assert_eq!(receipt["revision"], expected_revision + 1);
+
+        let current: (i64, Vec<u8>, bool, bool) = sqlx::query_as(
+            "SELECT content.revision,content.canonical_markdown_utf8,current_value.stale,
+                    dependency.part_content_artifact_id=current_value.content_artifact_id
+               FROM bid_current_parts current_value
+               JOIN bid_part_content_artifacts content ON content.id=current_value.content_artifact_id
+               JOIN bid_part_dependency_artifacts dependency ON dependency.id=current_value.dependency_artifact_id
+              WHERE current_value.project_id=$1 AND current_value.part_key='1'",
+        )
+        .bind(seed.project_id)
+        .fetch_one(&pool)
+        .await
+        .expect("manual part must remain current after PUT");
+        assert_eq!(
+            current,
+            (
+                expected_revision + 1,
+                markdown.as_bytes().to_vec(),
+                false,
+                true
+            )
+        );
+    }
+}
+
 async fn upload_shot_artifact(pool: &PgPool, seed: &SubmissionSeed, bytes: &[u8]) -> String {
     let shot_id = Uuid::new_v4();
     let digest = domain::sha256_hex(bytes);
