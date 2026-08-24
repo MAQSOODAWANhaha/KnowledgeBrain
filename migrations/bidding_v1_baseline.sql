@@ -922,7 +922,7 @@ AS $$
 DECLARE parsed jsonb; decision_count integer; supported_count integer;
  contradicted_count integer; insufficient_count integer; unresolved_count integer;
  expected_quality text; expected_reasons text[]; relation_reasons text[];
- candidate_count integer; source_count integer; group_count integer;
+ candidate_count integer; source_count integer; group_count integer; evidence_count integer;
 BEGIN
     BEGIN parsed:=convert_from(NEW.canonical_payload,'UTF8')::jsonb;
     EXCEPTION WHEN OTHERS THEN
@@ -956,6 +956,7 @@ BEGIN
     SELECT count(*) INTO candidate_count FROM bid_matching_candidate_artifacts WHERE report_id=NEW.id;
     SELECT count(*) INTO source_count FROM bid_matching_source_artifacts WHERE report_id=NEW.id;
     SELECT count(*) INTO group_count FROM bid_matching_candidate_groups WHERE report_id=NEW.id;
+    SELECT count(*) INTO evidence_count FROM bid_matching_evidence_artifacts WHERE report_id=NEW.id;
     IF decision_count<>NEW.coverage_total OR supported_count<>NEW.coverage_supported
        OR contradicted_count<>NEW.coverage_contradicted OR insufficient_count<>NEW.coverage_insufficient
        OR unresolved_count<>NEW.coverage_unresolved OR expected_quality<>NEW.quality_status
@@ -965,6 +966,9 @@ BEGIN
        OR jsonb_array_length(parsed->'candidates')<>candidate_count
        OR jsonb_array_length(parsed->'candidate_groups')<>group_count
        OR jsonb_array_length(parsed->'source_artifacts')<>source_count
+       OR (SELECT count(*)
+             FROM jsonb_array_elements(parsed->'candidates') candidate_value
+             CROSS JOIN LATERAL jsonb_array_elements(candidate_value->'evidence'->'items') item)<>evidence_count
     THEN
       RAISE EXCEPTION 'MATCHING_REPORT_V1_RELATION_MISMATCH' USING ERRCODE='23514';
     END IF;
@@ -985,41 +989,89 @@ BEGIN
               value->>'quality_status',value->>'reason_code',value->>'selected_candidate_artifact_id'
          FROM jsonb_array_elements(parsed->'requirement_decisions') value)
     ) OR EXISTS(
-      SELECT value->>'id',value->>'requirement_artifact_id',value->>'product_version_artifact_id',
-             value->>'candidate_identity_sha256',value->>'evidence_v1_sha256',value->>'support',
-             value->>'route_product_ordinal',value->>'retrieval_rank',value->>'retrieval_raw_score',value->>'recommended'
-        FROM jsonb_array_elements(parsed->'candidates') value
-      EXCEPT
-      SELECT id::text,requirement_artifact_id::text,product_version_artifact_id::text,
-             candidate_identity_sha256,evidence_v1_sha256,support,route_product_ordinal::text,
-             retrieval_rank::text,to_char(retrieval_raw_score,'FM99999999999999999990.000000'),recommended::text
-        FROM bid_matching_candidate_artifacts WHERE report_id=NEW.id
+      (SELECT value->>'id',value->>'requirement_artifact_id',value->>'product_version_artifact_id',
+              value->>'candidate_identity_sha256',value->>'evidence_v1_sha256',value->>'support',
+              value->'business_value'->>'status',value->'business_value'->>'value',
+              value->>'route_product_ordinal',value->>'retrieval_rank',value->>'retrieval_raw_score',value->>'recommended'
+         FROM jsonb_array_elements(parsed->'candidates') value
+       EXCEPT
+       SELECT id::text,requirement_artifact_id::text,product_version_artifact_id::text,
+              candidate_identity_sha256,evidence_v1_sha256,support,business_value_status,
+              CASE WHEN business_value IS NULL THEN NULL
+                   ELSE to_char(business_value,'FM99999999999999999990.000000') END,
+              route_product_ordinal::text,retrieval_rank::text,
+              to_char(retrieval_raw_score,'FM99999999999999999990.000000'),recommended::text
+         FROM bid_matching_candidate_artifacts WHERE report_id=NEW.id)
+      UNION ALL
+      (SELECT id::text,requirement_artifact_id::text,product_version_artifact_id::text,
+              candidate_identity_sha256,evidence_v1_sha256,support,business_value_status,
+              CASE WHEN business_value IS NULL THEN NULL
+                   ELSE to_char(business_value,'FM99999999999999999990.000000') END,
+              route_product_ordinal::text,retrieval_rank::text,
+              to_char(retrieval_raw_score,'FM99999999999999999990.000000'),recommended::text
+         FROM bid_matching_candidate_artifacts WHERE report_id=NEW.id
+       EXCEPT
+       SELECT value->>'id',value->>'requirement_artifact_id',value->>'product_version_artifact_id',
+              value->>'candidate_identity_sha256',value->>'evidence_v1_sha256',value->>'support',
+              value->'business_value'->>'status',value->'business_value'->>'value',
+              value->>'route_product_ordinal',value->>'retrieval_rank',value->>'retrieval_raw_score',value->>'recommended'
+         FROM jsonb_array_elements(parsed->'candidates') value)
     ) OR EXISTS(
-      SELECT value::text FROM jsonb_array_elements(parsed->'candidate_groups') value
-      EXCEPT
-      SELECT (convert_from(canonical_payload,'UTF8')::jsonb)::text
-        FROM bid_matching_candidate_groups WHERE report_id=NEW.id
+      (SELECT value::text FROM jsonb_array_elements(parsed->'candidate_groups') value
+       EXCEPT
+       SELECT (convert_from(canonical_payload,'UTF8')::jsonb)::text
+         FROM bid_matching_candidate_groups WHERE report_id=NEW.id)
+      UNION ALL
+      (SELECT (convert_from(canonical_payload,'UTF8')::jsonb)::text
+         FROM bid_matching_candidate_groups WHERE report_id=NEW.id
+       EXCEPT
+       SELECT value::text FROM jsonb_array_elements(parsed->'candidate_groups') value)
     ) OR EXISTS(
-      SELECT value->>'id',value->>'product_version_artifact_id',value->>'document_id',value->>'source_chunk_id',
-             value->>'frozen_document_display_name',value->>'chunk_sha256',value->>'chunk_byte_length',
-             value->>'retrieval_rank',value->>'retrieval_raw_score',value->>'retrieval_contract_version'
-        FROM jsonb_array_elements(parsed->'source_artifacts') value
-      EXCEPT
-      SELECT id::text,product_version_artifact_id::text,document_id::text,source_chunk_id::text,
-             frozen_document_display_name,chunk_sha256,chunk_byte_length::text,retrieval_rank::text,
-             to_char(retrieval_raw_score,'FM99999999999999999990.000000'),retrieval_contract_version
-        FROM bid_matching_source_artifacts WHERE report_id=NEW.id
+      (SELECT value->>'id',value->>'product_version_artifact_id',value->>'document_id',value->>'source_chunk_id',
+              value->>'frozen_document_display_name',value->>'chunk_sha256',value->>'chunk_byte_length',
+              value->>'retrieval_rank',value->>'retrieval_raw_score',value->>'retrieval_contract_version'
+         FROM jsonb_array_elements(parsed->'source_artifacts') value
+       EXCEPT
+       SELECT id::text,product_version_artifact_id::text,document_id::text,source_chunk_id::text,
+              frozen_document_display_name,chunk_sha256,chunk_byte_length::text,retrieval_rank::text,
+              to_char(retrieval_raw_score,'FM99999999999999999990.000000'),retrieval_contract_version
+         FROM bid_matching_source_artifacts WHERE report_id=NEW.id)
+      UNION ALL
+      (SELECT id::text,product_version_artifact_id::text,document_id::text,source_chunk_id::text,
+              frozen_document_display_name,chunk_sha256,chunk_byte_length::text,retrieval_rank::text,
+              to_char(retrieval_raw_score,'FM99999999999999999990.000000'),retrieval_contract_version
+         FROM bid_matching_source_artifacts WHERE report_id=NEW.id
+       EXCEPT
+       SELECT value->>'id',value->>'product_version_artifact_id',value->>'document_id',value->>'source_chunk_id',
+              value->>'frozen_document_display_name',value->>'chunk_sha256',value->>'chunk_byte_length',
+              value->>'retrieval_rank',value->>'retrieval_raw_score',value->>'retrieval_contract_version'
+         FROM jsonb_array_elements(parsed->'source_artifacts') value)
     ) OR EXISTS(
-      SELECT candidate_value->>'id',item->>'source_chunk_artifact_id',item->>'document_id',
-             item->>'document_display_name',item->>'source_chunk_id',item->>'source_chunk_sha256',
-             item->>'quote',item->>'start_offset',item->>'end_offset',item->>'offset_unit'
-        FROM jsonb_array_elements(parsed->'candidates') candidate_value
-        CROSS JOIN LATERAL jsonb_array_elements(candidate_value->'evidence'->'items') item
-      EXCEPT
-      SELECT candidate_artifact_id::text,source_chunk_artifact_id::text,document_id::text,
-             document_display_name,source_chunk_id::text,source_chunk_sha256,convert_from(quote_utf8,'UTF8'),
-             start_offset::text,end_offset::text,offset_unit
-        FROM bid_matching_evidence_artifacts WHERE report_id=NEW.id
+      (SELECT candidate_value->>'id',item->>'source_chunk_artifact_id',item->>'document_id',
+              item->>'document_display_name',item->>'source_chunk_id',item->>'source_chunk_sha256',
+              item->>'quote',item->>'start_offset',item->>'end_offset',item->>'offset_unit',
+              (item_ordinal-1)::text
+         FROM jsonb_array_elements(parsed->'candidates') candidate_value
+         CROSS JOIN LATERAL jsonb_array_elements(candidate_value->'evidence'->'items')
+           WITH ORDINALITY AS evidence_item(item,item_ordinal)
+       EXCEPT
+       SELECT candidate_artifact_id::text,source_chunk_artifact_id::text,document_id::text,
+              document_display_name,source_chunk_id::text,source_chunk_sha256,convert_from(quote_utf8,'UTF8'),
+              start_offset::text,end_offset::text,offset_unit,ordinal::text
+         FROM bid_matching_evidence_artifacts WHERE report_id=NEW.id)
+      UNION ALL
+      (SELECT candidate_artifact_id::text,source_chunk_artifact_id::text,document_id::text,
+              document_display_name,source_chunk_id::text,source_chunk_sha256,convert_from(quote_utf8,'UTF8'),
+              start_offset::text,end_offset::text,offset_unit,ordinal::text
+         FROM bid_matching_evidence_artifacts WHERE report_id=NEW.id
+       EXCEPT
+       SELECT candidate_value->>'id',item->>'source_chunk_artifact_id',item->>'document_id',
+              item->>'document_display_name',item->>'source_chunk_id',item->>'source_chunk_sha256',
+              item->>'quote',item->>'start_offset',item->>'end_offset',item->>'offset_unit',
+              (item_ordinal-1)::text
+         FROM jsonb_array_elements(parsed->'candidates') candidate_value
+         CROSS JOIN LATERAL jsonb_array_elements(candidate_value->'evidence'->'items')
+           WITH ORDINALITY AS evidence_item(item,item_ordinal))
     ) THEN RAISE EXCEPTION 'MATCHING_REPORT_V1_PAYLOAD_RELATION_MISMATCH' USING ERRCODE='23514'; END IF;
     IF EXISTS(
       SELECT 1 FROM bid_matching_requirement_decisions d
@@ -5854,6 +5906,41 @@ BEGIN
       jsonb_build_object('action','finalize_eligible_quote')));
     hard_issue_count := hard_issue_count + 1;
   END IF;
+  FOR pending IN
+    SELECT route.id AS route_id, route.unit_id, report.id AS report_id,
+           report.content_sha256 AS report_sha256,
+           decision.requirement_artifact_id, requirement.clause_id
+      FROM bid_matching_routes route
+      JOIN bid_current_matching_reports current_report
+        ON current_report.project_id=route.project_id AND current_report.route_id=route.id
+      JOIN bid_matching_reports report ON report.id=current_report.report_id
+      JOIN bid_matching_requirement_decisions decision
+        ON decision.report_id=report.id AND decision.final_support='supported'
+      JOIN bid_matching_requirement_artifacts requirement
+        ON requirement.id=decision.requirement_artifact_id
+     WHERE route.project_id=p_project_id AND route.route_kind='technical'
+       AND NOT EXISTS (
+         SELECT 1
+           FROM bid_current_route_pick_sets current_pick
+           JOIN bid_route_pick_set_artifacts pick_set ON pick_set.id=current_pick.pick_set_id
+           JOIN bid_route_pick_set_items item ON item.pick_set_id=pick_set.id
+          WHERE current_pick.project_id=p_project_id AND current_pick.route_id=route.id
+            AND pick_set.source_report_artifact_id=report.id
+            AND pick_set.report_sha256=report.content_sha256
+            AND item.requirement_artifact_id=decision.requirement_artifact_id)
+     ORDER BY route.ordinal,decision.ordinal,decision.requirement_artifact_id
+  LOOP
+    key := CASE
+      WHEN pending.unit_id='00000000-0000-0000-0000-000000000000'::uuid THEN '2:unsectioned'
+      ELSE '2:'||pending.unit_id::text END;
+    issues := issues || jsonb_build_array(kb_bid_gate_issue('MATCHING_PICK_MISSING',key,
+      jsonb_build_object('route_id',pending.route_id,'report_id',pending.report_id,
+        'requirement_artifact_id',pending.requirement_artifact_id,'clause_id',pending.clause_id),
+      jsonb_build_object('report_sha256',pending.report_sha256,'selected_candidate_count',0),
+      jsonb_build_object('report_sha256',pending.report_sha256,'minimum_selected_candidates',1),
+      jsonb_build_object('action','select_supported_candidate')));
+    hard_issue_count := hard_issue_count + 1;
+  END LOOP;
   FOR seg IN
     SELECT expected.clause_id, expected.stable_key, artifact.id AS segment_id,
            classification.id AS classification_id, classification.revision AS classification_revision,
@@ -6659,14 +6746,20 @@ AS $$
 DECLARE ids uuid[] := '{}'; rec record;
 BEGIN
   FOR rec IN
-    SELECT d.id FROM bid_documents d
+    SELECT d.id,d.conversion_generation,a.attempt,a.claim_token FROM bid_documents d
     JOIN bid_document_conversion_attempts a ON a.document_id=d.id AND a.conversion_generation=d.conversion_generation
     WHERE d.parse_status='processing' AND a.status='running'
       AND a.heartbeat_at + make_interval(secs => a.claim_lease_ms/1000.0) < clock_timestamp()
+    FOR UPDATE OF d,a
   LOOP
-    UPDATE bid_documents SET parse_status='pending' WHERE id=rec.id;
     UPDATE bid_document_conversion_attempts SET status='reaped'
-     WHERE document_id=rec.id AND status='running';
+     WHERE document_id=rec.id AND conversion_generation=rec.conversion_generation
+       AND attempt=rec.attempt AND claim_token=rec.claim_token AND status='running'
+       AND heartbeat_at + make_interval(secs => claim_lease_ms/1000.0) < clock_timestamp();
+    CONTINUE WHEN NOT FOUND;
+    UPDATE bid_documents SET parse_status='pending'
+     WHERE id=rec.id AND conversion_generation=rec.conversion_generation AND parse_status='processing';
+    CONTINUE WHEN NOT FOUND;
     ids := ids || rec.id;
   END LOOP;
   RETURN ids;

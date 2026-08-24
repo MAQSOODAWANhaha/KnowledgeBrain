@@ -36272,7 +36272,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "a4faa68c41267adc6b2f458be2e38fbc7fddcce88fb0f324bff7a46ef8ccee8d"
+definition_sha256 = "1e7b8fc5e54b0f690de64ab5d4b9ee8f756b3d0fc9a981e615e0070042b30611"
 
 [[routines]]
 schema = "public"
@@ -36832,7 +36832,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "ff41ed57f449d8047b0a11c2a28e734444503c83f483da5df618088af9c4d200"
+definition_sha256 = "efcd86732f941f89def9e973d07b5f27a21a0595cf980a67b5caaf0b33bfc3a1"
 
 [[routines]]
 schema = "public"
@@ -37680,7 +37680,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "500d5b2e54c54916bb9a8a4b1b6f53e1579e3d1a0616b1e2e1384ee57c9fe5b7"
+definition_sha256 = "38e2016edba95f3f3ff67ee6c165b21b8ba817a0fd2d936b3f9cdb30815e66c6"
 
 [[routines]]
 schema = "public"

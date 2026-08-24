@@ -999,6 +999,191 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
         candidates[1].get::<Uuid, _>("requirement_artifact_id"),
         requirement_id
     );
+    sqlx::query(
+        "INSERT INTO bid_clause_set_identities(project_id,set_kind,revision,content_sha256,updated_at)
+         VALUES($1,'pricing',0,$2,clock_timestamp())
+         ON CONFLICT (project_id,set_kind) DO NOTHING",
+    )
+    .bind(project_id)
+    .bind("9".repeat(64))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let gate_before_pick: serde_json::Value =
+        sqlx::query_scalar("SELECT kb_bid_list_gate_issues($1,'pdf')")
+            .bind(project_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        gate_before_pick["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["code"] == "MATCHING_PICK_MISSING"),
+        "a supported technical decision must require an explicit human pick before PDF export"
+    );
+
+    let report_identity: (Uuid, Uuid, i64, i64) = sqlx::query_as(
+        "SELECT manifest_id,job_id,generation,mutation_watermark
+           FROM bid_matching_reports WHERE id=$1",
+    )
+    .bind(report.get::<Uuid, _>("report_id"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let first_candidate_identity: (Uuid, i32) = sqlx::query_as(
+        "SELECT product_version_artifact_id,route_product_ordinal
+           FROM bid_matching_candidate_artifacts WHERE id=$1",
+    )
+    .bind(candidate_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let second_candidate_identity: (Uuid, i32) = sqlx::query_as(
+        "SELECT product_version_artifact_id,route_product_ordinal
+           FROM bid_matching_candidate_artifacts WHERE id=$1",
+    )
+    .bind(second_candidate_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let forged_report_id = Uuid::new_v4();
+    let forged_candidate_id = Uuid::new_v4();
+    let omitted_candidate_id = Uuid::new_v4();
+    let forged_generation = report_identity.2 + 1_000;
+    let forged_candidate = json!({
+        "id": forged_candidate_id,
+        "requirement_artifact_id": requirement_id,
+        "product_version_artifact_id": first_candidate_identity.0,
+        "route_product_ordinal": first_candidate_identity.1,
+        "retrieval_rank": 1,
+        "retrieval_raw_score": "1.000000",
+        "candidate_identity_sha256": "a".repeat(64),
+        "evidence_v1_sha256": "c".repeat(64),
+        "evidence": {"schema_version": 1, "items": []},
+        "support": "supported",
+        "business_value": {"status": "not_scored", "reason": "verifier regression"},
+        "recommended": true
+    });
+    let forged_payload = json!({
+        "schema_version": 1,
+        "report_id": forged_report_id,
+        "manifest_id": report_identity.0,
+        "job_id": report_identity.1,
+        "route_id": route_id,
+        "route": historical_report["payload"]["route"].clone(),
+        "generation": forged_generation,
+        "mutation_watermark": report_identity.3,
+        "empty_disposition": null,
+        "coverage": {
+            "total": 1,
+            "eligible": 1,
+            "supported": 1,
+            "contradicted": 0,
+            "insufficient": 0,
+            "unresolved": 0
+        },
+        "quality_status": "pass",
+        "degraded": false,
+        "reason_codes": ["FROZEN_SCOPE", "SUPPORTED"],
+        "score": {"status": "not_scored", "reason": "verifier regression"},
+        "requirement_decisions": [{
+            "requirement_artifact_id": requirement_id,
+            "final_support": "supported",
+            "system_decision": "select",
+            "quality_status": "pass",
+            "reason_code": "SUPPORTED",
+            "selected_candidate_artifact_id": forged_candidate_id,
+            "business_value": {"status": "not_scored", "reason": "verifier regression"}
+        }],
+        "candidates": [forged_candidate.clone(), forged_candidate],
+        "candidate_groups": [],
+        "source_artifacts": [],
+        "ai_run_id": null,
+        "ai_span_id": null
+    });
+    let forged_bytes = serde_json::to_vec(&forged_payload).unwrap();
+    let forged_sha256 = domain::sha256_hex(&forged_bytes);
+    let mut forged = pool.begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO bid_matching_reports
+         (id,project_id,manifest_id,job_id,route_id,generation,mutation_watermark,empty_disposition,
+          coverage_total,coverage_supported,coverage_contradicted,coverage_insufficient,coverage_unresolved,
+          quality_status,degraded,reason_codes,canonical_payload,content_sha256,published_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,NULL,1,1,0,0,0,'pass',false,
+           ARRAY['FROZEN_SCOPE','SUPPORTED'],$8,$9,clock_timestamp())",
+    )
+    .bind(forged_report_id)
+    .bind(project_id)
+    .bind(report_identity.0)
+    .bind(report_identity.1)
+    .bind(route_id)
+    .bind(forged_generation)
+    .bind(report_identity.3)
+    .bind(forged_bytes)
+    .bind(forged_sha256)
+    .execute(&mut *forged)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_matching_candidate_artifacts
+         (id,report_id,requirement_artifact_id,product_version_artifact_id,support,
+          candidate_identity_sha256,evidence_v1_sha256,business_value_status,business_value,
+          route_product_ordinal,retrieval_rank,retrieval_raw_score,recommended)
+         VALUES($1,$2,$3,$4,'supported',$5,$6,'not_scored',NULL,$7,1,1.000000,$8)",
+    )
+    .bind(forged_candidate_id)
+    .bind(forged_report_id)
+    .bind(requirement_id)
+    .bind(first_candidate_identity.0)
+    .bind("a".repeat(64))
+    .bind("c".repeat(64))
+    .bind(first_candidate_identity.1)
+    .bind(true)
+    .execute(&mut *forged)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_matching_candidate_artifacts
+         (id,report_id,requirement_artifact_id,product_version_artifact_id,support,
+          candidate_identity_sha256,evidence_v1_sha256,business_value_status,business_value,
+          route_product_ordinal,retrieval_rank,retrieval_raw_score,recommended)
+         VALUES($1,$2,$3,$4,'supported',$5,$6,'not_scored',NULL,$7,1,1.000000,false)",
+    )
+    .bind(omitted_candidate_id)
+    .bind(forged_report_id)
+    .bind(requirement_id)
+    .bind(second_candidate_identity.0)
+    .bind("b".repeat(64))
+    .bind("d".repeat(64))
+    .bind(second_candidate_identity.1)
+    .execute(&mut *forged)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_matching_requirement_decisions
+         (id,report_id,requirement_artifact_id,final_support,system_decision,quality_status,
+          reason_code,selected_candidate_artifact_id,ordinal)
+         VALUES($1,$2,$3,'supported','select','pass','SUPPORTED',$4,0)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(forged_report_id)
+    .bind(requirement_id)
+    .bind(forged_candidate_id)
+    .execute(&mut *forged)
+    .await
+    .unwrap();
+    let forged_verification = sqlx::query("SET CONSTRAINTS bid_matching_reports_verify IMMEDIATE")
+        .execute(&mut *forged)
+        .await;
+    assert_database_error(
+        forged_verification.expect_err(
+            "a canonical report that duplicates one candidate and omits another must be rejected",
+        ),
+        "MATCHING_REPORT_V1_PAYLOAD_RELATION_MISMATCH",
+    );
+    forged.rollback().await.unwrap();
     let body = json!({
         "source_report_artifact_id": report.get::<Uuid, _>("report_id"),
         "report_sha256": report.get::<String, _>("content_sha256"),
@@ -1158,6 +1343,20 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .await
     .unwrap();
     assert_eq!(ordinary_receipt.route_revision, 1);
+    let gate_after_picks: serde_json::Value =
+        sqlx::query_scalar("SELECT kb_bid_list_gate_issues($1,'pdf')")
+            .bind(project_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        gate_after_picks["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|issue| issue["code"] != "MATCHING_PICK_MISSING"),
+        "every supported technical requirement has an explicit current pick"
+    );
 
     let project_units: Vec<Option<Uuid>> = sqlx::query_scalar(
         "SELECT item.unit_id FROM bid_current_project_pick_sets current_value

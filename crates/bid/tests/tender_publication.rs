@@ -811,6 +811,11 @@ async fn conversion_reaper_rejects_renewal_after_logical_expiry() {
     ) {
         return;
     }
+    let mut reaper_guard = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(2026082401)")
+        .execute(&mut *reaper_guard)
+        .await
+        .unwrap();
     let seed = seed_publication(&pool, "# 技术要求\n系统必须支持国密协议。").await;
     let document_id = Uuid::new_v4();
     let claim_token = Uuid::new_v4();
@@ -905,6 +910,122 @@ async fn conversion_reaper_rejects_renewal_after_logical_expiry() {
     .await
     .unwrap();
     assert_eq!(state, ("pending".into(), "reaped".into()));
+    reaper_guard.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn conversion_reaper_rechecks_the_exact_attempt_after_waiting_for_a_lock() {
+    let Some(pool) = support::connect_postgres_contract("TenderPublication").await else {
+        return;
+    };
+    if !support::require_final_schema(
+        "TenderPublication",
+        final_tender_schema_is_ready(&pool).await,
+    ) {
+        return;
+    }
+    let mut reaper_guard = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(2026082401)")
+        .execute(&mut *reaper_guard)
+        .await
+        .unwrap();
+    let seed = seed_publication(&pool, "# 技术要求\n系统必须支持国密协议。").await;
+    let document_id = Uuid::new_v4();
+    let claim_token = Uuid::new_v4();
+    let digest = "4".repeat(64);
+    sqlx::query(
+        "INSERT INTO bid_documents
+         (id,project_id,file_name,media_type,byte_length,original_object_ref,original_sha256,
+          conversion_generation,parse_status)
+         VALUES($1,$2,'lease-recheck.docx','application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+           1,$3,$4,1,'processing')",
+    )
+    .bind(document_id)
+    .bind(seed.project_id)
+    .bind(format!("objects/{digest}"))
+    .bind(&digest)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_document_conversion_attempts
+         (document_id,conversion_generation,attempt,claim_token,claimed_by,claim_lease_ms,
+          claimed_at,heartbeat_at,status)
+         VALUES($1,1,1,$2,'conversion-reaper-recheck',300000,
+           clock_timestamp()-interval '10 minutes',clock_timestamp()-interval '10 minutes','running')",
+    )
+    .bind(document_id)
+    .bind(claim_token)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM bid_documents WHERE id=$1 FOR UPDATE")
+        .bind(document_id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE bid_document_conversion_attempts
+            SET heartbeat_at=clock_timestamp()
+          WHERE document_id=$1 AND conversion_generation=1 AND attempt=1",
+    )
+    .bind(document_id)
+    .execute(&mut *blocker)
+    .await
+    .unwrap();
+
+    let application_name = format!("conversion-recheck-{}", Uuid::new_v4());
+    let mut reaper_connection = pool.acquire().await.unwrap();
+    sqlx::query("SELECT set_config('application_name',$1,false)")
+        .bind(&application_name)
+        .execute(&mut *reaper_connection)
+        .await
+        .unwrap();
+    let reaper = tokio::spawn(async move {
+        sqlx::query_scalar::<_, Vec<Uuid>>("SELECT kb_bid_reclaim_stale_conversions()")
+            .fetch_one(&mut *reaper_connection)
+            .await
+    });
+
+    let mut waiting = false;
+    for _ in 0..100 {
+        waiting = sqlx::query_scalar(
+            "SELECT EXISTS(
+               SELECT 1 FROM pg_stat_activity
+                WHERE application_name=$1 AND wait_event_type='Lock')",
+        )
+        .bind(&application_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(waiting, "reaper must wait on the exact conversion rows");
+    blocker.commit().await.unwrap();
+
+    assert!(
+        reaper.await.unwrap().unwrap().is_empty(),
+        "a reaper that waited for a lock must recheck the current attempt lease"
+    );
+    let state: (String, String) = sqlx::query_as(
+        "SELECT document.parse_status,attempt.status
+           FROM bid_documents document
+           JOIN bid_document_conversion_attempts attempt
+             ON attempt.document_id=document.id AND attempt.conversion_generation=document.conversion_generation
+          WHERE document.id=$1 AND attempt.claim_token=$2",
+    )
+    .bind(document_id)
+    .bind(claim_token)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, ("processing".into(), "running".into()));
+    reaper_guard.rollback().await.unwrap();
 }
 
 #[tokio::test]
