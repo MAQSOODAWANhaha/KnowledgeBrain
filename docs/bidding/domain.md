@@ -25,8 +25,9 @@
 
 ## 2. 固定边界
 
-- 一家公司、无 Org、无多租户；登录用户共享项目池。
-- 负责人是业务跟踪字段，不是 ACL。
+- 一家公司、无 Org、无多租户、无复杂角色系统。
+- V1 以 `owner_user_id` 作为 project 访问边界：项目列表只返回当前用户拥有的项目，所有项目路径先校验 owner；当前没有 Bid membership 或 API-key-to-Bid scope relation，无法证明 scope 时必须 fail-closed。
+- 负责人仍可作为业务跟踪字段，但不能替代 `owner_user_id` ACL。
 - 一个 `BidProject` 表示一份招标事项，多份招标文件直接挂项目；V1 无包件层。
 - 招标文件不进入知识库 `Document` 或产品索引。
 - 只保留产品证据、公司证据两条知识检索路，不引入第三个通用 Agent。

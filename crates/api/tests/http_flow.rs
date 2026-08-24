@@ -1105,3 +1105,81 @@ async fn patch_version_config_and_me_and_workspace_delete() {
         assert!(s.queue.iter().any(|j| j.task_type == "kb:delete"));
     }
 }
+
+#[tokio::test]
+async fn bid_v1_http_rejects_anonymous_family_and_legacy_export() {
+    let (app, store) = app();
+    let (token, _) = seed_user(&store, "bid@v1.test");
+    let project = uuid::Uuid::new_v4();
+
+    let (st, _) = call(
+        &app,
+        Request::builder()
+            .method("GET")
+            .uri("/api/v1/bids")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+    let (st, v) = call(
+        &app,
+        auth_json(
+            &token,
+            "POST",
+            "/api/v1/bids",
+            json!({"title":"x","owner_name":"legacy"}),
+        ),
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK);
+    assert_ne!(st, StatusCode::CREATED);
+    assert_ne!(v["error"]["code"], "NOT_FOUND");
+
+    let (st, v) = call(
+        &app,
+        auth_json(
+            &token,
+            "POST",
+            &format!("/api/v1/bids/{project}/clauses"),
+            json!({"text":"x","kind":"technical","must":true,"family":"technical"}),
+        ),
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK);
+    assert_ne!(st, StatusCode::CREATED);
+    assert_ne!(v["error"]["code"], "NOT_FOUND");
+
+    for uri in [
+        format!("/api/v1/bids/{project}/export?regenerate_stale=true"),
+        format!("/api/v1/bids/{project}/booklet"),
+        format!("/api/v1/bids/{project}/booklet/1"),
+        format!("/api/v1/bids/{project}/preview"),
+        format!("/api/v1/bids/{project}/extract"),
+    ] {
+        let (st, _) = call(&app, auth_json(&token, "GET", &uri, json!({}))).await;
+        assert!(
+            st == StatusCode::NOT_FOUND || st == StatusCode::METHOD_NOT_ALLOWED,
+            "legacy GET {uri} still routed: {st}"
+        );
+        let (st, _) = call(&app, auth_json(&token, "POST", &uri, json!({}))).await;
+        assert!(
+            st == StatusCode::NOT_FOUND || st == StatusCode::METHOD_NOT_ALLOWED,
+            "legacy POST {uri} still routed: {st}"
+        );
+    }
+
+    for uri in [
+        format!("/api/v1/bids/{project}/matching"),
+        format!("/api/v1/bids/{project}/quote"),
+        format!("/api/v1/bids/{project}/gate-issues"),
+        format!("/api/v1/bids/{project}/parts"),
+        format!("/api/v1/bids/{project}/company-profile"),
+        format!("/api/v1/bids/{project}/submission-profile"),
+    ] {
+        let (st, v) = call(&app, auth_json(&token, "GET", &uri, json!({}))).await;
+        assert_ne!(st, StatusCode::NOT_FOUND, "missing V1 GET {uri}");
+        assert_ne!(v["error"]["code"], "NOT_FOUND", "missing V1 GET {uri}");
+    }
+}

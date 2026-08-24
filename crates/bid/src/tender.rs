@@ -4,7 +4,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use storage::bidding::{MutationContext, PublishSection};
+use storage::bidding::{
+    CompleteDocumentConversion, ConvertedSourceImageUpload, MutationContext, PublishSection,
+};
 use uuid::Uuid;
 
 pub const ROUTER_VERSION: &str = "kind-router-v1";
@@ -664,6 +666,8 @@ pub async fn convert_and_schedule_document(
     };
     let original_digest = claim.object_ref.trim_start_matches("objects/");
     let bytes = storage::read_blob(original_digest).map_err(|error| error.to_string())?;
+    const CONVERSION_OBJECT_ACTOR: &str = "system:bid-convert-worker";
+    let mut image_uploads: Vec<ConvertedSourceImageUpload> = Vec::new();
     let conversion = async {
         let converted = docparser::convert_to_markdown(&claim.file_name, bytes)
             .await
@@ -695,6 +699,30 @@ pub async fn convert_and_schedule_document(
             }
             let image_digest = hex::encode(Sha256::digest(&image.data));
             let image_ref = storage::object_ref(&image_digest);
+            let media_type = image.mime_type.trim();
+            if !media_type.starts_with("image/") {
+                return Err("converted image media type is missing or invalid".into());
+            }
+            let staging_id = Uuid::new_v4();
+            storage::stage_object_upload(
+                pool,
+                staging_id,
+                &image_ref,
+                &image_digest,
+                media_type,
+                image.data.len() as i64,
+                CONVERSION_OBJECT_ACTOR,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            image_uploads.push(ConvertedSourceImageUpload {
+                staging_id,
+                object_ref: image_ref.clone(),
+                digest: image_digest.clone(),
+                media_type: media_type.to_string(),
+                byte_length: image.data.len() as i64,
+                occurrence: format!("image:{}", image_uploads.len()),
+            });
             storage::write_blob_off_runtime(&image_digest, &image.data)
                 .map_err(|error| error.to_string())?;
             image_digests.push(image_digest);
@@ -722,12 +750,16 @@ pub async fn convert_and_schedule_document(
         let source_artifact_id = Uuid::new_v4();
         storage::bidding::complete_document_conversion(
             pool,
-            document_id,
-            claim_token,
-            source_artifact_id,
-            markdown.as_bytes(),
-            "docparser-converted-source-v1",
-            &image_asset_set_sha256,
+            CompleteDocumentConversion {
+                document_id,
+                claim_token,
+                source_artifact_id,
+                markdown: markdown.as_bytes(),
+                converter_contract_version: "docparser-converted-source-v1",
+                image_asset_set_sha256: &image_asset_set_sha256,
+                image_assets: &image_uploads,
+                actor: CONVERSION_OBJECT_ACTOR,
+            },
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -764,6 +796,11 @@ pub async fn convert_and_schedule_document(
     match conversion {
         Ok(target_id) => Ok(Some(target_id)),
         Err(error) => {
+            for image in &image_uploads {
+                let _ =
+                    storage::abandon_object_upload(pool, image.staging_id, CONVERSION_OBJECT_ACTOR)
+                        .await;
+            }
             let retry = super::conversion_error_is_retryable(&error);
             let _ = storage::bidding::fail_document_conversion(
                 pool,

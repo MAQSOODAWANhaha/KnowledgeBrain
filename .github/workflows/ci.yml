@@ -56,6 +56,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: install live browser acceptance dependencies
+        run: |
+          npm ci --prefix web
+          cd web
+          npx playwright install --with-deps chromium
       - name: install production PostgreSQL bootstrap contract
         env:
           PGHOST: 127.0.0.1
@@ -71,8 +81,28 @@ jobs:
         run: sh deploy/postgres-init/010-runtime-identities.sh
       - name: build migration and runtime binaries
         run: cargo build -p migrator -p first-launch-verifier -p api -p worker -p retention
-      - name: fresh-volume Compose first-launch acceptance
+      - name: fresh-volume Compose first-launch and heuristic runtime/PDF acceptance
+        env:
+          KNOWLEDGEBRAIN_REQUIRE_DOCKER_ACCEPTANCE: "1"
+          KNOWLEDGEBRAIN_REQUIRE_BROWSER_ACCEPTANCE: "1"
         run: scripts/compose_first_launch_acceptance.sh
+      - name: upload Compose runtime/PDF evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bidding-v1-runtime-pdf-heuristic
+          path: web/e2e/artifacts/runtime
+          if-no-files-found: warn
+      - name: upload live browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bidding-v1-playwright-live-ui
+          path: |
+            web/e2e/artifacts/live
+            web/playwright-report-live
+            web/test-results-live
+          if-no-files-found: warn
       - name: actual migrate process leaves runtime marker gate closed
         env:
           DATABASE_URL: postgres://kb_migrator:migrator-ci@127.0.0.1:5432/knowledgebrain
@@ -98,6 +128,49 @@ jobs:
             cargo test -p api --test launch -- --nocapture --test-threads=1
           DATABASE_URL=postgres://kb_runtime_worker:worker-ci@127.0.0.1:5432/knowledgebrain \
             cargo test -p worker --test launch -- --nocapture --test-threads=1
+      - name: mandatory live QuoteSnapshot and Submission SQL contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          schema_ready="$(psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
+            SELECT to_regprocedure(
+              'kb_bid_build_quote_snapshot_v1(uuid,uuid,bigint,text,text,text,jsonb,numeric,numeric,numeric,jsonb,jsonb,bigint,bigint,kb_sha256)'
+            ) IS NOT NULL
+            AND to_regprocedure(
+              'kb_bid_publish_submission_output(uuid,uuid,uuid,uuid,kb_object_ref,kb_sha256,bigint)'
+            ) IS NOT NULL;
+          ")"
+          test "$schema_ready" = "t" || {
+            echo "live QuoteSnapshot/Submission SQL contracts are unavailable" >&2
+            exit 1
+          }
+
+          cargo test -p api --test submission_contract -- --nocapture --test-threads=1
+          cargo test -p bid --test matching_publication -- --nocapture --test-threads=1
+
+          audit_before="$(psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc \
+            "SELECT count(*) FROM audit_events WHERE operation='bid.submission.create_manifest'")"
+          submission_log="$(mktemp)"
+          cargo test -p bid --test submission_sql -- --nocapture --test-threads=1 2>&1 \
+            | tee "$submission_log"
+          if grep -q 'skipped live Submission contract' "$submission_log"; then
+            echo "submission_sql used its skip path in mandatory live CI" >&2
+            exit 1
+          fi
+          audit_after="$(psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc \
+            "SELECT count(*) FROM audit_events WHERE operation='bid.submission.create_manifest'")"
+          test "$audit_after" -gt "$audit_before" || {
+            echo "submission_sql produced no live manifest audit evidence" >&2
+            exit 1
+          }
+
+          quote_log="$(mktemp)"
+          cargo test -p bid --test quote_snapshot_sql -- --nocapture --test-threads=1 2>&1 \
+            | tee "$quote_log"
+          if grep -Eq 'skip(ped)?:.*(database|schema)|skipped live' "$quote_log"; then
+            echo "quote_snapshot_sql used a skip path in mandatory live CI" >&2
+            exit 1
+          fi
       - name: mandatory isolated fresh baseline, catalog, ACL, and ObjectRegistry acceptance
         run: scripts/fresh_schema_acceptance.sh
       - name: storage foundation unit tests
@@ -106,8 +179,6 @@ jobs:
         run: cargo test -p bid matching::tests -- --nocapture
       - name: mandatory Redis-backed runtime queue tests
         run: cargo test -p runtime jobs::tests -- --nocapture
-      - name: install PDF font
-        run: sudo apt-get update && sudo apt-get install -y fonts-wqy-zenhei
       - name: build services
         run: cargo build -p api -p worker -p retention
 
@@ -142,11 +213,33 @@ jobs:
         run: |
           docker compose -f deploy/docker-compose.yml --env-file deploy/.env.example config -q
           docker compose config -q
+      - name: web lint
+        run: npm ci --prefix web && npm --prefix web run lint
       - name: web build
-        run: npm ci --prefix web && npm --prefix web run build
+        run: npm --prefix web run build
+      - name: install playwright browser
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: mocked web UI contract e2e
+        working-directory: web
+        run: npx playwright test
+      - name: require mocked Playwright evidence
+        if: always()
+        run: |
+          test -d web/playwright-report
+          test -d web/test-results
+      - name: upload mocked Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-bid-v1-mocked-ui-contract
+          path: |
+            web/playwright-report
+            web/test-results
+            web/e2e/artifacts
       - name: runtime image build
         run: docker build -f deploy/Dockerfile.rust --build-arg BIN=api -t knowledgebrain-api-ci .
       - name: shell
-        run: bash -n services/docreader/scripts/generate_proto.sh scripts/bid_e2e_smoke.sh deploy/compose-first-launch.sh deploy/compose-runtime-restart.sh scripts/compose_first_launch_acceptance.sh deploy/postgres-init/010-runtime-identities.sh
-      - name: spec copy
-        run: cmp -s docs/system-design.md .scratch/knowledgebrain/spec.md
+        run: bash -n services/docreader/scripts/generate_proto.sh scripts/bid_e2e_smoke.sh scripts/bid_runtime_acceptance.sh scripts/bid_runtime_compose_hook.sh scripts/bidding_v1_deletion_scan.sh deploy/compose-first-launch.sh deploy/compose-runtime-restart.sh scripts/compose_first_launch_acceptance.sh scripts/fresh_schema_acceptance.sh deploy/postgres-init/010-runtime-identities.sh
+      - name: bidding V1 deletion scan
+        run: sh scripts/bidding_v1_deletion_scan.sh

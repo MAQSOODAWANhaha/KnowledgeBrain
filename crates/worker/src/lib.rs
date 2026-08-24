@@ -1,14 +1,15 @@
 //! Worker handlers. HTTP never calls these.
+#![recursion_limit = "512"]
 
 pub mod consume;
 pub mod probe;
 
 use domain::{
     ParseStatus, Store, TYPE_BID_CONVERT, TYPE_BID_EXTRACT, TYPE_BID_MATCH_ROUTE_V1,
-    TYPE_CHUNK_EXTRACT, TYPE_DATATABLE, TYPE_DOCUMENT_PROCESS, TYPE_IMAGE_MULTIMODAL,
-    TYPE_KB_DELETE, TYPE_LIST_DELETE, TYPE_LIST_REPARSE, TYPE_MANUAL_PROCESS, TYPE_POST_PROCESS,
-    TYPE_QUESTION, TYPE_SUMMARY, TYPE_VERSION_CLONE, TYPE_WIKI_FINALIZE, TYPE_WIKI_INGEST,
-    expected_subtasks,
+    TYPE_BID_RENDER_SUBMISSION_V1, TYPE_CHUNK_EXTRACT, TYPE_DATATABLE, TYPE_DOCUMENT_PROCESS,
+    TYPE_IMAGE_MULTIMODAL, TYPE_KB_DELETE, TYPE_LIST_DELETE, TYPE_LIST_REPARSE,
+    TYPE_MANUAL_PROCESS, TYPE_POST_PROCESS, TYPE_QUESTION, TYPE_SUMMARY, TYPE_VERSION_CLONE,
+    TYPE_WIKI_FINALIZE, TYPE_WIKI_INGEST, expected_subtasks,
 };
 use uuid::Uuid;
 
@@ -89,7 +90,10 @@ pub fn drain(store: &mut Store) {
 
 pub(crate) fn handle(store: &mut Store, job: &domain::Job) -> Result<(), String> {
     match job.task_type.as_str() {
-        TYPE_BID_CONVERT | TYPE_BID_EXTRACT | TYPE_BID_MATCH_ROUTE_V1 => Ok(()),
+        TYPE_BID_CONVERT
+        | TYPE_BID_EXTRACT
+        | TYPE_BID_MATCH_ROUTE_V1
+        | TYPE_BID_RENDER_SUBMISSION_V1 => Ok(()),
         TYPE_DOCUMENT_PROCESS | TYPE_MANUAL_PROCESS => document_process(store, &job.payload),
         TYPE_POST_PROCESS => post_process(store, &job.payload),
         TYPE_SUMMARY => {

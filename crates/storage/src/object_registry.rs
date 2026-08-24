@@ -14,6 +14,49 @@ pub struct RetentionClaim {
     pub claim_token: Uuid,
 }
 
+pub async fn stage_object_upload(
+    pool: &PgPool,
+    staging_id: Uuid,
+    object_ref: &str,
+    digest: &str,
+    media_type: &str,
+    byte_length: i64,
+    actor_identity: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT kb_object_upload_stage(
+            $1,$2::kb_object_ref,$3::kb_sha256,$4,$5,$6::kb_actor_identity
+        )",
+    )
+    .bind(staging_id)
+    .bind(object_ref)
+    .bind(digest)
+    .bind(media_type)
+    .bind(byte_length)
+    .bind(actor_identity)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn abandon_object_upload(
+    pool: &PgPool,
+    staging_id: Uuid,
+    actor_identity: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_object_upload_abandon($1,$2::kb_actor_identity)")
+        .bind(staging_id)
+        .bind(actor_identity)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn expire_object_uploads(pool: &PgPool) -> Result<i32, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_object_upload_expire()")
+        .fetch_one(pool)
+        .await
+}
+
 pub async fn register_knowledge_document_object(
     pool: &PgPool,
     document_id: Uuid,

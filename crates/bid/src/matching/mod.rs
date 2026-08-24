@@ -7,9 +7,10 @@ mod handler;
 mod workflow;
 
 pub use handler::run_match_route_v1;
+#[cfg(test)]
+pub use workflow::FakeVerifier;
 pub use workflow::{
-    EvidenceVerifier, FakeVerifier, LexicalEvidenceVerifier, MatchError, MatchingWorkflow,
-    VerifyOutcome,
+    EvidenceVerifier, LexicalEvidenceVerifier, MatchError, MatchingWorkflow, VerifyOutcome,
 };
 
 use rust_decimal::{Decimal, RoundingStrategy};

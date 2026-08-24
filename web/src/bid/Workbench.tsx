@@ -1,34 +1,43 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Modal } from "@mantine/core";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import {
   ApiError,
   type BidDoc,
-  type BookletPart,
   type Candidate,
   type Clause,
+  type CompanyProfile,
   type Derived,
-  type ExtractRun,
+  type FactSuggestion,
+  type GateIssue,
   type MatchUnit,
-  type Pick,
+  type MutationAttempt,
+  type PartStatus,
   type Project,
+  type QuoteLine,
+  type QuoteState,
   type RoutePickSet,
-  type Shot,
+  type SubmissionProfile,
   api,
-  downloadExport,
+  createMutationAttempt,
+  createSubmissionExportAttempt,
+  exportSubmission,
 } from "../api";
 import { Crumbs } from "../Crumbs";
-import { BID_STEPS, type BidStep, bidHref, go, parseBidRoute, useHash } from "../hash";
+import { BID_STEPS, type BidStep, bidHref, parseBidRoute, useHash } from "../hash";
 import { Shell } from "../Shell";
-import { BookletPane } from "./BookletPane";
-import { ClauseDetail } from "./ClauseDetail";
 import { ClauseTable } from "./ClauseTable";
+import { FactsPane } from "./FactsPane";
 import { FilesPane } from "./FilesPane";
 import { Inspector } from "./Inspector";
+import { MatchingPane } from "./MatchingPane";
+import { MaterialsPane } from "./MaterialsPane";
+import { PartsPane } from "./PartsPane";
+import { QuotePane } from "./QuotePane";
 import { BidSidebar } from "./Sidebar";
-import { bookletKeyFor, liveClauses, partTitle, unitIdForView } from "./helpers";
+import { liveClauses, partTitle } from "./helpers";
 
-function toast(msg: string, color: "iris" | "red" = "iris") {
+function toast(msg: string, color: "blue" | "red" = "blue") {
   notifications.show({ message: msg, color });
 }
 
@@ -36,49 +45,26 @@ function errMsg(e: unknown): string {
   return e instanceof ApiError ? e.message : String(e);
 }
 
-function matchesRetryRunning(status?: string): boolean {
-  return status === "pending" || status === "running";
+async function uploadContentSha256(file: File): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function BidWizard({
-  id,
-  step,
-  view,
-  part,
-  docs,
-  derived,
-}: {
-  id: string;
-  step: BidStep;
-  view: string;
-  part: string;
-  docs: BidDoc[];
-  derived: Derived;
-}) {
-  const failed = docs.some((d) => d.parse_status === "failed" || d.extract_status === "failed");
-  const busy =
-    derived.extract_running || docs.some((d) => d.parse_status === "pending" || d.parse_status === "processing");
+function Wizard({ id, step }: { id: string; step: BidStep }) {
   const cur = BID_STEPS.findIndex((s) => s.key === step);
   return (
     <nav className="wizard">
-      {BID_STEPS.map((it, i) => {
-        const href =
-          it.key === "eval"
-            ? bidHref(id, step === "eval" && view !== "booklet" ? view : "commercial", { step: "eval" })
-            : it.key === "booklet"
-              ? bidHref(id, "booklet", { step: "booklet", part: step === "booklet" ? part : "1" })
-              : bidHref(id, "files", { step: "files" });
-        let cls = i < cur ? "done" : undefined;
-        if (it.key === step) cls = failed && step === "files" ? "fail" : "on";
-        return (
-          <a key={it.key} className={cls} href={`#${href}`}>
-            <i>{it.n}</i>
-            <span>{it.label}</span>
-            {it.key === "files" && busy && step === "files" && <em>进行中</em>}
-            {it.key === "files" && failed && <em>有失败</em>}
-          </a>
-        );
-      })}
+      {BID_STEPS.map((it, i) => (
+        <a
+          key={it.key}
+          data-testid={`wizard-${it.key}`}
+          className={it.key === step ? "on" : i < cur ? "done" : undefined}
+          href={`#${bidHref(id, it.key, { step: it.key })}`}
+        >
+          <i>{it.n}</i>
+          <span>{it.label}</span>
+        </a>
+      ))}
     </nav>
   );
 }
@@ -87,226 +73,214 @@ export function Workbench({ email }: { email: string }) {
   const path = useHash();
   const route = parseBidRoute(path);
   const id = route?.id ?? "";
-  const view = route?.view ?? "commercial";
+  const step: BidStep = route?.step ?? "files";
+  const view = route?.view ?? "files";
   const part = route?.part ?? "1";
   const pane = route?.pane ?? "table";
   const doc = route?.doc ?? null;
 
   const [project, setProject] = useState<Project | null>(null);
   const [derived, setDerived] = useState<Derived | null>(null);
-  const [latestExtract, setLatestExtract] = useState<ExtractRun | null>(null);
   const [docs, setDocs] = useState<BidDoc[]>([]);
   const [clauses, setClauses] = useState<Clause[]>([]);
   const [units, setUnits] = useState<MatchUnit[]>([]);
-  const [booklet, setBooklet] = useState<BookletPart[]>([]);
-  const [picks, setPicks] = useState<Pick[]>([]);
-  const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [routePickSet, setRoutePickSet] = useState<RoutePickSet | null>(null);
-  const [shots, setShots] = useState<Shot[]>([]);
+  const [suggestions, setSuggestions] = useState<FactSuggestion[]>([]);
+  const [quote, setQuote] = useState<QuoteState>({ exists: false });
+  const [preview, setPreview] = useState<{ net_total?: string; tax_total?: string; gross_total?: string }>();
+  const [matching, setMatching] = useState<Awaited<ReturnType<typeof api.matching>>>();
+  const [pickSet, setPickSet] = useState<RoutePickSet | null>(null);
+  const [company, setCompany] = useState<CompanyProfile>({});
+  const [submission, setSubmission] = useState<SubmissionProfile>({});
+  const [classifications, setClassifications] = useState<Array<Record<string, unknown>>>([]);
+  const [attachments, setAttachments] = useState<Array<Record<string, unknown>>>([]);
+  const [parts, setParts] = useState<PartStatus[]>([]);
+  const [requiredKeys, setRequiredKeys] = useState<string[]>([]);
+  const [clauseSets, setClauseSets] = useState<Array<{ set_kind: string; revision: number; content_sha256: string }>>([]);
+
+  const [partMarkdown, setPartMarkdown] = useState("");
+  const [partRevision, setPartRevision] = useState(0);
+  const [partDependencySha, setPartDependencySha] = useState<string | null>(null);
+  const [partStale, setPartStale] = useState(false);
+  const [loadedPartIdentity, setLoadedPartIdentity] = useState<string | null>(null);
+  const [gate, setGate] = useState<{ status: string; issues: GateIssue[] }>();
   const [selected, setSelected] = useState<string | null>(null);
   const [addText, setAddText] = useState("");
+  const [addKind, setAddKind] = useState("technical");
   const [addMust, setAddMust] = useState(false);
-  const [deviateOpen, setDeviateOpen] = useState(false);
-  const [deviateNote, setDeviateNote] = useState("");
-  const [regenStale, setRegenStale] = useState(false);
-  const [mdDraft, setMdDraft] = useState("");
+  const [factDrafts, setFactDrafts] = useState<Record<string, string>>({});
+  const [noCeiling, setNoCeiling] = useState(false);
+  const [noCeilingReason, setNoCeilingReason] = useState("招标文件未设置最高限价，已人工复核");
   const [uploading, setUploading] = useState(false);
   const [pendingNames, setPendingNames] = useState<string[]>([]);
-  const drafts = useRef<Record<string, string>>({});
-  const dirtyKeys = useRef<Set<string>>(new Set());
-  const advanceAfterUpload = useRef(false);
+  const [partPreview, setPartPreview] = useState(pane !== "draft");
+  const dirtyPart = useRef(false);
+  const activePartIdentity = useRef<string | null>(null);
+  const partLoadSequence = useRef(0);
+  const uploadRetryAttempts = useRef(new Map<string, MutationAttempt[]>());
+  const submissionExportAttempts = useRef(new Map<string, ReturnType<typeof createSubmissionExportAttempt>>());
   const ended = project?.status === "ended";
-  const bookletKey = bookletKeyFor(view, part, selected, clauses);
+  const partIdentity = step === "parts" ? `${id}:${part}` : null;
+  const partReady = partIdentity !== null && loadedPartIdentity === partIdentity;
+  activePartIdentity.current = partIdentity;
 
-  useEffect(() => {
-    if (!route) return;
-    if (path.includes("/preview") || path.includes("/booklet/")) {
-      go(bidHref(route.id, "booklet", { step: "booklet", part: route.part, pane: "draft" }));
-    }
-  }, [path, route]);
-
-  async function load() {
-    if (!id) return;
-    const unit = unitIdForView(view);
+  async function uploadWithAttempt<T>(
+    operation: string,
+    file: File,
+    request: (attempt: MutationAttempt) => Promise<T>,
+  ): Promise<T> {
+    const contentSha256 = await uploadContentSha256(file);
+    const attemptKey = `${id}:${operation}:${file.name}:${file.type}:${file.size}:${contentSha256}`;
+    const retryQueue = uploadRetryAttempts.current.get(attemptKey);
+    const attempt = retryQueue?.shift() ?? createMutationAttempt();
+    if (retryQueue?.length === 0) uploadRetryAttempts.current.delete(attemptKey);
     try {
-    const [b, d, c, un, bk, sh] = await Promise.all([
-      api.bid(id),
-      api.docs(id),
-      api.clauses(id).catch(() => []),
-      api.units(id).catch(() => ({ units: [] })),
-      api.booklet(id).catch(() => ({ parts: [] })),
-      api.shots(id).catch(() => ({ shots: [] })),
-    ]);
-    setProject(b.project);
-    setDerived(b.derived);
-    setLatestExtract(b.latest_extract ?? null);
-    setDocs(d.documents);
-    setPendingNames((names) => names.filter((n) => !d.documents.some((doc) => doc.file_name === n)));
-    setClauses(c);
-    setUnits(un.units);
-    setBooklet(bk.parts);
-    setShots(sh.shots);
-    const routeId = unit ? un.units.find((entry) => entry.id === unit)?.route_id : null;
-    if (routeId) {
-      const pickSet = await api.routePickSet(id, routeId).catch(() => null);
-      setRoutePickSet(pickSet);
-      setPicks(
-        (pickSet?.items ?? []).map((item) => ({
-          ...item,
-          version_id: item.product_version_id,
-          score: 0,
-          coverage: 0,
-          clauses: [],
-        })),
-      );
-      setCandidates(
-        (pickSet?.supported_candidates ?? []).map((candidate) => ({
-          ...candidate,
-          product_title: candidate.product_id,
-          matched_version_id: candidate.product_version_id,
-          matched_version_label: candidate.product_version_id,
-          score: Number(candidate.retrieval_raw_score),
-          coverage: 0,
-          unmet_must: [],
-        })),
-      );
-    } else {
-      setRoutePickSet(null);
-      setPicks([]);
-      setCandidates([]);
+      return await request(attempt);
+    } catch (error) {
+      if (!(error instanceof ApiError)) {
+        const pending = uploadRetryAttempts.current.get(attemptKey) ?? [];
+        pending.push(attempt);
+        uploadRetryAttempts.current.set(attemptKey, pending);
+      }
+      throw error;
     }
-    setSelected((cur) => {
-      if (route?.clause && c.some((x) => x.id === route.clause)) return route.clause;
-      const pool = liveClauses(c, view);
-      if (cur && pool.some((x) => x.id === cur)) return cur;
-      return pool.find((x) => x.status === "draft")?.id ?? pool[0]?.id ?? null;
-    });
+  }
+
+  const load = useCallback(async () => {
+    if (!id) return;
+    try {
+      const [detail, clausePage, unitPage, factPage, partPage] = await Promise.all([
+        api.bid(id),
+        api.clauses(id).catch(() => ({ clauses: [] })),
+        api.units(id).catch(() => ({ units: [] })),
+        api.facts(id).catch(() => ({ suggestions: [] as FactSuggestion[] })),
+        api.parts(id).catch(() => ({ required_part_keys: [] as string[], parts: [] as PartStatus[] })),
+      ]);
+      setProject(detail.project);
+      setDerived(detail.derived);
+      setDocs(detail.documents);
+      setPendingNames((names) => names.filter((n) => !detail.documents.some((d) => d.file_name === n)));
+      setQuote(detail.quote ?? { exists: false });
+      setMatching(detail.matching);
+      setClauses(clausePage.clauses);
+      setUnits(unitPage.units);
+      setSuggestions(factPage.suggestions ?? detail.facts?.suggestions ?? []);
+      setRequiredKeys(partPage.required_part_keys ?? []);
+      setParts(partPage.parts ?? []);
+      setClauseSets(detail.clause_sets ?? []);
+      const pool = liveClauses(clausePage.clauses, view);
+      setSelected((cur) => (cur && pool.some((x) => x.id === cur) ? cur : pool[0]?.id ?? null));
+      if (step === "matching") {
+        const routeId =
+          view === "commercial"
+            ? unitPage.units.find((u) => u.kind === "commercial")?.route_id
+            : view === "unsectioned"
+              ? unitPage.units.find((u) => u.kind === "unsectioned")?.route_id
+              : unitPage.units.find((u) => u.id === view)?.route_id;
+        if (routeId) {
+          const set = await api.routePickSet(id, routeId).catch(() => null);
+          setPickSet(set);
+        } else {
+          setPickSet(null);
+        }
+      }
+      if (step === "quote") {
+        const [cp, sp, pr, at, pv] = await Promise.all([
+          api.companyProfile(id).catch(() => null),
+          api.submissionProfile(id).catch(() => null),
+          api.procedural(id).catch(() => ({ classifications: [] })),
+          api.attachments(id).catch(() => ({ attachments: [] })),
+          api.previewQuote(id).catch(() => undefined),
+        ]);
+        if (cp) setCompany(cp);
+        if (sp) setSubmission(sp);
+        setClassifications(pr.classifications ?? []);
+        setAttachments(at.attachments ?? []);
+        setPreview(pv);
+      }
+      if (step === "parts") {
+        const requestedPartIdentity = `${id}:${part}`;
+        const loadSequence = ++partLoadSequence.current;
+        const current = await api.part(id, part).catch(() => null);
+        if (
+          activePartIdentity.current === requestedPartIdentity &&
+          partLoadSequence.current === loadSequence &&
+          !dirtyPart.current
+        ) {
+          setPartMarkdown(current?.markdown ?? "");
+          setPartRevision(current?.content_revision ?? 0);
+          setPartDependencySha(current?.dependency_sha256 ?? null);
+          setPartStale(!!current?.stale);
+          setLoadedPartIdentity(requestedPartIdentity);
+        }
+        const g = await api.gateIssues(id, "pdf").catch(() => undefined);
+        if (g) setGate({ status: g.status, issues: g.issues });
+      }
     } catch (e) {
       toast(errMsg(e), "red");
     }
-  }
-
-  async function mutateRoutePick(productId: string, include: boolean) {
-    if (!routePickSet) return;
-    const retained = routePickSet.items
-      .filter((item) => include || item.product_id !== productId)
-      .map((item) => ({
-        requirement_artifact_id: item.requirement_artifact_id,
-        candidate_artifact_id: item.candidate_artifact_id,
-      }));
-    if (include) {
-      for (const candidate of routePickSet.supported_candidates) {
-        if (candidate.product_id === productId) {
-          retained.push({
-            requirement_artifact_id: candidate.requirement_artifact_id,
-            candidate_artifact_id: candidate.candidate_artifact_id,
-          });
-        }
-      }
-    }
-    await api.replaceRoutePickSet(id, routePickSet.route_id, {
-      source_report_artifact_id: routePickSet.source_report_artifact_id,
-      report_sha256: routePickSet.report_sha256,
-      expected_revision: routePickSet.revision,
-      items: retained,
-    });
-    await load();
-  }
+  }, [id, part, step, view]);
 
   useEffect(() => {
-    drafts.current = {};
-    dirtyKeys.current = new Set();
+    dirtyPart.current = false;
     void load();
-    const t = window.setInterval(() => void load(), 4000);
+    const t = window.setInterval(() => void load(), 5000);
     return () => clearInterval(t);
+  }, [load]);
+
+  useEffect(() => {
+    uploadRetryAttempts.current.clear();
+    submissionExportAttempts.current.clear();
   }, [id]);
-
-  useEffect(() => {
-    void load();
-    setSelected(route?.clause ?? null);
-  }, [view]);
-
-  useEffect(() => {
-    if (!project || !id || !route) return;
-    if (route.step) return;
-    go(bidHref(id, "files", { step: "files" }));
-  }, [project, id, route]);
-
-  useEffect(() => {
-    if (!derived || !advanceAfterUpload.current) return;
-    if (derived.extract_running) return;
-    const busy = docs.some((d) => d.parse_status === "pending" || d.parse_status === "processing");
-    if (busy) return;
-    advanceAfterUpload.current = false;
-    if (docs.some((d) => d.parse_status === "failed")) {
-      toast("有文件解析失败，请看列表后重试", "red");
-      return;
-    }
-    if (clauses.length > 0) toast("文件已解析，条款已抽出。可去评估");
-  }, [derived, clauses.length, docs]);
-
-  useEffect(() => {
-    const server = booklet.find((p) => p.key === bookletKey)?.markdown ?? "";
-    if (dirtyKeys.current.has(bookletKey)) {
-      setMdDraft(drafts.current[bookletKey] ?? server);
-      return;
-    }
-    drafts.current[bookletKey] = server;
-    setMdDraft(server);
-  }, [booklet, bookletKey]);
 
   const live = useMemo(() => liveClauses(clauses, view), [clauses, view]);
   const cur = live.find((c) => c.id === selected) ?? live[0] ?? null;
-  const techUnits = units.filter((u) => u.kind === "technical");
-  const currentUnit = techUnits.find((u) => u.id === view);
-  const currentRetryRunning = matchesRetryRunning(currentUnit?.retry_status);
-  const currentPart = booklet.find((p) => p.key === bookletKey);
-  const anyStale = booklet.some((p) => p.stale);
-  const extractNotice = useMemo(() => {
-    if (!latestExtract || latestExtract.status === "running" || latestExtract.status === "pending") return "";
-    const fallback = latestExtract.diagnostics?.fallback_reasons?.length ?? 0;
-    const uncovered = latestExtract.diagnostics?.coverage?.uncovered_spans?.length ?? 0;
-    if (latestExtract.status === "failed") return `条款抽取失败：${latestExtract.error_message || "请检查模型和文件后重试"}`;
-    if (latestExtract.partial_failure || (latestExtract.failed_documents ?? 0) > 0) {
-      return `本次有 ${latestExtract.failed_documents ?? 1} 个文件抽取失败：${latestExtract.error_message || "请检查后重试"}`;
-    }
-    if (uncovered > 0) return `本次仍有 ${uncovered} 个候选片段未覆盖，请人工复核或重抽。`;
-    if (fallback > 0 || latestExtract.extractor_mode === "heuristic") return `本次使用了规则兜底（${latestExtract.extractor_mode}），草稿需重点复核。`;
-    return "";
-  }, [latestExtract]);
 
-  function setDraft(text: string) {
-    drafts.current[bookletKey] = text;
-    dirtyKeys.current.add(bookletKey);
-    setMdDraft(text);
-  }
-
-  async function patch(cid: string, body: Partial<Clause>) {
+  async function mutateClause(c: Clause, action: "patch" | "confirm" | "unconfirm" | "reject", patch?: Record<string, unknown>) {
     try {
-      await api.patchClause(id, cid, body);
+      await api.mutateClause(id, c.id, { action, expected_revision: c.revision, patch });
       await load();
     } catch (e) {
       toast(errMsg(e), "red");
     }
   }
 
-  async function saveDraft() {
+  async function setFact(field: string, raw: string, basis = project?.ceiling_basis ?? "unspecified") {
+    if (!project) return;
+    let typed: unknown = raw;
+    if (field === "bid_valid_days") typed = Number(raw);
+    if (field === "budget_amount") typed = { amount: raw, currency_code: "CNY" };
+    if (field === "ceiling_price" || field === "ceiling_basis") {
+      const amount = field === "ceiling_price" ? raw : project.ceiling_price || raw;
+      if (!amount) {
+        toast("先写入最高限价金额", "red");
+        return;
+      }
+      typed = { amount, currency_code: "CNY", basis: field === "ceiling_basis" ? raw : basis };
+      field = "ceiling_price";
+    }
     try {
-      await api.saveBooklet(id, bookletKey, drafts.current[bookletKey] ?? mdDraft);
-      dirtyKeys.current.delete(bookletKey);
-      toast("已保存成稿");
+      await api.mutateFact(id, {
+        action: "set",
+        expected_fact_revision: project.fact_revision,
+        field,
+        typed_value: typed,
+      });
+      toast("已写入事实");
       await load();
     } catch (e) {
       toast(errMsg(e), "red");
     }
   }
 
-  async function regen() {
+  async function clearFact(field: string) {
+    if (!project) return;
     try {
-      await api.regenBooklet(id, bookletKey);
-      dirtyKeys.current.delete(bookletKey);
-      delete drafts.current[bookletKey];
-      toast("已按当前数据重生成");
+      await api.mutateFact(id, {
+        action: "clear",
+        expected_fact_revision: project.fact_revision,
+        field,
+      });
+      toast("已清除事实");
       await load();
     } catch (e) {
       toast(errMsg(e), "red");
@@ -314,9 +288,17 @@ export function Workbench({ email }: { email: string }) {
   }
 
   async function doExport(format: "docx" | "pdf") {
+    const attemptKey = `${id}:${format}`;
+    const attempt = submissionExportAttempts.current.get(attemptKey) ?? createSubmissionExportAttempt();
+    submissionExportAttempts.current.set(attemptKey, attempt);
     try {
-      await downloadExport(id, format, ended ? false : regenStale);
+      await exportSubmission(id, format, attempt);
+      submissionExportAttempts.current.delete(attemptKey);
+      toast(format === "pdf" ? "正式 PDF 已下载" : "过程 Word 已下载");
     } catch (e) {
+      if (e instanceof ApiError && e.code !== "SUBMISSION_RENDER_TIMEOUT") {
+        submissionExportAttempts.current.delete(attemptKey);
+      }
       toast(errMsg(e), "red");
     }
   }
@@ -329,366 +311,439 @@ export function Workbench({ email }: { email: string }) {
     );
   }
 
-  const step: BidStep = route.step ?? "files";
-  const sectionLabel =
-    step === "files"
-      ? ""
-      : step === "booklet"
-        ? partTitle(part, units)
-        : view === "commercial"
-          ? "商务"
-          : view === "unsectioned"
-            ? "未归段"
-            : techUnits.find((u) => u.id === view)?.heading_path || "技术段";
-  const stepLabel = BID_STEPS.find((s) => s.key === step)?.label ?? "评估";
-  const crumbs = (
-    <Crumbs
-      items={[
-        { label: "投标项目", href: "/" },
-        { label: project.title, href: bidHref(id, "files", { step: "files" }) },
-        { label: stepLabel },
-        ...(sectionLabel ? [{ label: sectionLabel }] : []),
-      ]}
-    />
-  );
-  const pageTitle =
-    step === "files"
-      ? "招标文件"
-      : step === "booklet"
-        ? partTitle(part, units)
-        : pane === "detail" && cur
-          ? cur.text.slice(0, 18)
-          : view === "commercial"
-            ? "商务条款"
-            : sectionLabel;
-
-  const matchMsg = view === "commercial" ? "正在按资格条款检索资料" : "正在按本段参数匹配产品";
-  const failed = docs.some((d) => d.parse_status === "failed");
-
   const extra = (
     <>
-      {step === "booklet" && (
-        <nav className="mode">
-          <button type="button" className={pane !== "draft" ? "on" : undefined} onClick={() => go(bidHref(id, "booklet", { step: "booklet", part, pane: "table" }))}>
-            预览
-          </button>
-          <button type="button" className={pane === "draft" ? "on" : undefined} onClick={() => go(bidHref(id, "booklet", { step: "booklet", part, pane: "draft" }))}>
-            编辑
-          </button>
-        </nav>
-      )}
-      {pane === "detail" && (
-        <button className="btn" type="button" onClick={() => go(bidHref(id, view, { clause: selected }))}>
-          返回列表
-        </button>
-      )}
       {ended ? (
         <span className="chip gray">已结束</span>
       ) : (
-        <button
-          className="btn"
-          type="button"
+        <Button
+          variant="default"
           onClick={() => {
             void api
-              .endBid(id)
+              .endBid(id, project.fact_revision)
               .then(() => {
-                toast("本标已结束，文稿只读");
-                setRegenStale(false);
+                toast("本标已结束");
                 void load();
               })
               .catch((e) => toast(errMsg(e), "red"));
           }}
         >
           结束本标
-        </button>
+        </Button>
       )}
-      {anyStale && !ended && (
-        <label className="row" style={{ fontSize: 12.5, color: "var(--muted)" }}>
-          <input type="checkbox" checked={regenStale} onChange={(e) => setRegenStale(e.target.checked)} />
-          导出时重生成过期稿
-        </label>
-      )}
-      <button className="btn" type="button" onClick={() => void doExport("docx")}>
-        Word
-      </button>
-      <button className="btn pri" type="button" onClick={() => void doExport("pdf")}>
-        定稿 PDF
-      </button>
+      <Button data-testid="export-docx" variant="default" onClick={() => void doExport("docx")}>
+        过程 Word
+      </Button>
+      <Button data-testid="export-pdf" onClick={() => void doExport("pdf")}>
+        正式 PDF
+      </Button>
     </>
   );
 
-  const tree = (
-    <BidSidebar
-      id={id}
-      step={step}
-      view={view}
-      part={part}
-      doc={doc}
-      units={units}
-      booklet={booklet}
-      clauses={clauses}
-      docs={docs}
-    />
-  );
-
   const inspector =
-    step !== "eval" || pane === "detail" ? undefined : (
+    step === "facts" || step === "matching" ? (
       <Inspector
-        view={view}
-        cur={view === "booklet" ? null : cur}
+        step={step}
+        cur={cur}
         ended={ended}
-        derivedMatch={derived.match_running}
-        candidates={candidates}
-        picks={picks}
-        shots={shots}
-        currentPart={currentPart}
-        projectId={id}
-        onPatch={patch}
-        onConfirm={(c) => void patch(c.id, { status: "confirmed" })}
-        onPick={(pid) => {
-          void mutateRoutePick(pid, true).catch((e) => toast(errMsg(e), "red"));
-        }}
-        onUnpick={(pid) => {
-          void mutateRoutePick(pid, false).catch((e) => toast(errMsg(e), "red"));
-        }}
-        onRegen={() => void regen()}
-        onShots={() => void load()}
-        onDeviate={() => {
-          setDeviateNote(cur?.deviate_note ?? "");
-          setDeviateOpen(true);
+        pickSet={pickSet}
+        onPatch={(c, patch) => void mutateClause(c, "patch", patch)}
+        onConfirm={(c) => void mutateClause(c, "confirm")}
+        onUnconfirm={(c) => void mutateClause(c, "unconfirm")}
+        onPickToggle={(candidate: Candidate, include: boolean) => {
+          if (!pickSet?.source_report_artifact_id || !pickSet.report_sha256) return;
+          const items = pickSet.items
+            .filter((item) => include || item.candidate_artifact_id !== candidate.candidate_artifact_id)
+            .map((item) => ({
+              requirement_artifact_id: item.requirement_artifact_id,
+              candidate_artifact_id: item.candidate_artifact_id,
+            }));
+          if (include) {
+            items.push({
+              requirement_artifact_id: candidate.requirement_artifact_id,
+              candidate_artifact_id: candidate.candidate_artifact_id,
+            });
+          }
+          void api
+            .replaceRoutePickSet(id, pickSet.route_id, {
+              source_report_artifact_id: pickSet.source_report_artifact_id,
+              report_sha256: pickSet.report_sha256,
+              expected_revision: pickSet.revision,
+              items,
+            })
+            .then(() => load())
+            .catch((e) => toast(errMsg(e), "red"));
         }}
       />
-    );
+    ) : undefined;
 
   return (
     <Shell
       root="bids"
       email={email}
-      crumbs={crumbs}
-      title={pageTitle}
+      crumbs={
+        <Crumbs
+          items={[
+            { label: "投标项目", href: "/" },
+            { label: project.title, href: bidHref(id, "files", { step: "files" }) },
+            { label: BID_STEPS.find((s) => s.key === step)?.label ?? "" },
+          ]}
+        />
+      }
+      title={
+        step === "parts"
+          ? partTitle(part, units)
+          : step === "files"
+            ? "招标文件"
+            : BID_STEPS.find((s) => s.key === step)?.label ?? "投标"
+      }
       extra={extra}
       find={false}
       steps={
         <div className="work-nav">
-          <BidWizard id={id} step={step} view={view} part={part} docs={docs} derived={derived} />
+          <Wizard id={id} step={step} />
         </div>
       }
-      tree={tree}
-      inspector={inspector}
-      className={step === "booklet" ? "ed-page" : undefined}
-    >
-      {(derived.extract_running || derived.match_running || failed) && step === "eval" && (
-        <div className={`banner ${failed ? "bad" : ""}`} style={{ margin: inspector ? "0 0 16px" : "16px 24px 0" }}>
-          {failed ? "有文件解析失败。可回到「文件」重试。" : derived.extract_running ? "正在抽条款。抽出的草稿会出现在表里。" : matchMsg}
-        </div>
-      )}
-      {extractNotice && !derived.extract_running && step !== "files" && (
-        <div className={`banner ${latestExtract?.status === "failed" ? "bad" : "warn"}`} style={{ margin: inspector ? "0 0 16px" : "16px 24px 0" }}>
-          {extractNotice}
-        </div>
-      )}
-      {anyStale && step === "booklet" && (
-        <div className="banner warn" style={{ margin: "12px 24px 0" }}>
-          成稿已过期。导出默认保留人句；勾选「重生成」才会覆盖。
-        </div>
-      )}
-      {step === "files" ? (
-        <div className="wrap stack">
-        <FilesPane
+      tree={
+        <BidSidebar
+          id={id}
+          step={step}
+          view={view}
+          part={part}
+          doc={doc}
+          units={units}
+          parts={parts}
+          requiredKeys={requiredKeys}
+          clauses={clauses}
           docs={docs}
-          ended={ended}
-          uploading={uploading}
-          pendingNames={pendingNames}
-          focusId={doc}
-          onUpload={(files) => {
-            setUploading(true);
-            setPendingNames(files.map((f) => f.name));
-            advanceAfterUpload.current = true;
-            toast(`正在上传 ${files.length} 个文件`);
-            void Promise.all(files.map((f) => api.uploadDoc(id, f)))
-              .then(() => {
-                toast("已上传，正在解析");
-                return load();
-              })
-              .catch((e) => toast(errMsg(e), "red"))
-              .finally(() => {
-                setUploading(false);
-              });
-          }}
-          onRetry={(docId) => {
-            void api
-              .retryDoc(id, docId)
-              .then(() => {
-                toast("已重新排队解析");
-                return load();
-              })
-              .catch((e) => toast(errMsg(e), "red"));
-          }}
-          onDelete={(docId) => {
-            void api
-              .deleteDoc(id, docId)
-              .then(() => {
-                toast("已删除");
-                void load();
-              })
-              .catch((e) => toast(errMsg(e), "red"));
-          }}
         />
-        {docs.length > 0 && (
-          <>
-            {derived.extract_running && <div className="banner">文件已解析。正在抽商务 / 技术条款。</div>}
-            {derived.files_ready && !derived.extract_running && clauses.length === 0 && (
-              <div className="card">
-                <h3 className="h3">抽取没有出条款</h3>
-                <p className="note" style={{ margin: "8px 0 16px" }}>
-                  可以再抽一次，或先去评估里手补。漏抽不锁死流程。
-                </p>
-                <div className="row">
-                  <button
-                    className="btn"
-                    type="button"
-                    disabled={ended}
-                    onClick={() => {
-                      void api.reextract(id).then(() => {
-                        toast("已重新抽取");
-                        return load();
-                      }).catch((e) => toast(errMsg(e), "red"));
-                    }}
-                  >
-                    再抽一次
-                  </button>
-                </div>
-              </div>
-            )}
-          </>
-        )}
+      }
+      inspector={inspector}
+      className={step === "parts" ? "ed-page" : undefined}
+    >
+      {step === "files" && (
+        <div className="wrap stack">
+          <FilesPane
+            docs={docs}
+            ended={ended}
+            uploading={uploading}
+            pendingNames={pendingNames}
+            focusId={doc}
+            onUpload={(files) => {
+              setUploading(true);
+              setPendingNames(files.map((f) => f.name));
+              void Promise.all(
+                files.map((file) =>
+                  uploadWithAttempt("document", file, (attempt) => api.uploadDoc(id, file, attempt)),
+                ),
+              )
+                .then(() => {
+                  toast("已上传，正在解析");
+                  return load();
+                })
+                .catch((e) => toast(errMsg(e), "red"))
+                .finally(() => setUploading(false));
+            }}
+            onRetry={(d) => {
+              void api
+                .retryDoc(id, d.id, d.conversion_generation)
+                .then(() => load())
+                .catch((e) => toast(errMsg(e), "red"));
+            }}
+          />
         </div>
-      ) : step === "booklet" && docs.length === 0 ? (
+      )}
+      {step === "facts" && view === "facts" && (
         <div className="wrap">
-          <div className="card">
-            <div className="empty">
-              <h2>先上传招标文件</h2>
-              <p className="note" style={{ margin: "0 0 16px" }}>
-                抽出条款并评估后，再编成稿、导出 Word / PDF。
-              </p>
-              <button className="btn pri" type="button" onClick={() => go(bidHref(id, "files", { step: "files" }))}>
-                去上传
-              </button>
-            </div>
-          </div>
+          <FactsPane
+            project={project}
+            suggestions={suggestions}
+            drafts={factDrafts}
+            ended={ended}
+            onAccept={(s) => {
+              void api
+                .mutateFact(id, {
+                  action: "accept",
+                  expected_fact_revision: project.fact_revision,
+                  candidate_id: s.id,
+                })
+                .then(() => load())
+                .catch((e) => toast(errMsg(e), "red"));
+            }}
+            onSet={(field, value) => void setFact(field, value)}
+            onClear={(field) => void clearFact(field)}
+            onChangeDraft={(field, value) => setFactDrafts((cur) => ({ ...cur, [field]: value }))}
+            onChangeCeilingBasis={(basis) => void setFact("ceiling_basis", basis)}
+          />
         </div>
-      ) : step === "booklet" ? (
-        <BookletPane
-          mdDraft={mdDraft}
-          ended={ended}
-          preview={pane !== "draft"}
-          onChange={setDraft}
-          onSave={() => void saveDraft()}
-          onRegen={() => void regen()}
-        />
-      ) : pane === "detail" && cur ? (
-        <ClauseDetail
-          id={id}
-          view={view}
-          cur={cur}
-          ended={ended}
-          candidates={candidates}
-          picks={picks}
-          shots={shots}
-          projectId={id}
-          onPatch={patch}
-          onConfirm={(c) => void patch(c.id, { status: "confirmed" })}
-          onPick={(pid) => {
-            void mutateRoutePick(pid, true).catch((e) => toast(errMsg(e), "red"));
-          }}
-          onUnpick={(pid) => {
-            void mutateRoutePick(pid, false).catch((e) => toast(errMsg(e), "red"));
-          }}
-          onDeviate={() => {
-            setDeviateNote(cur.deviate_note ?? "");
-            setDeviateOpen(true);
-          }}
-          onShots={() => void load()}
-        />
-      ) : (
-        <ClauseTable
-          id={id}
-          view={view}
-          live={live}
-          selected={selected}
-          ended={ended}
-          addText={addText}
-          addMust={addMust}
-          hasFiles={docs.length > 0}
-          filesReady={derived.files_ready}
-          extractRunning={derived.extract_running || currentRetryRunning}
-          retryStatus={currentUnit?.retry_status}
-          retryError={currentUnit?.error_message}
-          onGoFiles={() => go(bidHref(id, "files", { step: "files" }))}
-          onExtract={() => {
-            const retry = view !== "commercial" && view !== "unsectioned"
-              ? api.retrySection(id, view)
-              : api.reextract(id);
-            void retry.then(() => {
-              toast(view !== "commercial" && view !== "unsectioned" ? "已排队重抽本段" : "已重新抽取");
-              return load();
-            }).catch((e) => toast(errMsg(e), "red"));
-          }}
-          onSelect={setSelected}
-          onConfirm={(c) => void patch(c.id, { status: "confirmed" })}
-          onReject={(c) => void patch(c.id, { status: "rejected" })}
-          onMerge={
-            view !== "commercial" && techUnits.find((u) => u.id === view)?.prev_id
-              ? () => {
-                  const prev = techUnits.find((u) => u.id === view)?.prev_id;
-                  if (!prev) return;
-                  void api
-                    .mergeSection(id, view, prev)
-                    .then(() => {
-                      toast("已并入上一段");
-                      go(bidHref(id, prev, { step: "eval" }));
-                    })
-                    .catch((e) => toast(errMsg(e), "red"));
+      )}
+      {step === "facts" && view !== "facts" && (
+        <div className="wrap">
+          <ClauseTable
+            live={live}
+            selected={selected}
+            ended={ended}
+            addText={addText}
+            addKind={addKind}
+            addMust={addMust}
+            onSelect={setSelected}
+            onConfirm={(c) => void mutateClause(c, "confirm")}
+            onReject={(c) => void mutateClause(c, "reject")}
+            onAddText={setAddText}
+            onAddKind={setAddKind}
+            onAddMust={setAddMust}
+            onAdd={() => {
+              void api
+                .addClause(id, { text: addText.trim(), kind: addKind, must: addMust })
+                .then(() => {
+                  setAddText("");
+                  toast("已添加草稿");
+                  return load();
+                })
+                .catch((e) => toast(errMsg(e), "red"));
+            }}
+          />
+        </div>
+      )}
+      {step === "matching" && (
+        <div className="wrap">
+          <MatchingPane
+            view={view}
+            clauses={clauses}
+            units={units}
+            matching={matching}
+            pickSet={pickSet}
+            ended={ended}
+            onSchedule={() => {
+              void api
+                .rematch(id)
+                .then(() => {
+                  toast("已调度匹配");
+                  return load();
+                })
+                .catch((e) => toast(errMsg(e), "red"));
+            }}
+          />
+        </div>
+      )}
+      {step === "quote" && view === "quote" && (
+        <div className="wrap">
+          <QuotePane
+            project={project}
+            quote={quote}
+            preview={preview}
+            ended={ended}
+            noCeiling={noCeiling}
+            noCeilingReason={noCeilingReason}
+            onNoCeiling={(reviewed, reason) => {
+              setNoCeiling(reviewed);
+              setNoCeilingReason(reason);
+            }}
+            onCreate={() => {
+              void api
+                .createQuoteDraft(id, { tax_mode: "tax_exclusive", title: `${project.title} 报价` })
+                .then(() => load())
+                .catch((e) => toast(errMsg(e), "red"));
+            }}
+            onPatch={(title, taxMode, notes) => {
+              if (!quote.edit_version && quote.edit_version !== 0) return;
+              void api
+                .patchQuote(id, {
+                  expected_edit_version: quote.edit_version ?? 0,
+                  tax_mode: taxMode,
+                  title,
+                  notes,
+                })
+                .then(() => load())
+                .catch((e) => toast(errMsg(e), "red"));
+            }}
+            onAddLine={() => {
+              const lineId = crypto.randomUUID();
+              void api
+                .upsertQuoteLine(id, lineId, {
+                  expected_edit_version: quote.edit_version ?? 0,
+                  ordinal: (quote.lines?.length ?? 0) + 1,
+                  description: "新报价行",
+                  pricing_mode: "lump_sum",
+                  entered_amount: "0.00",
+                  tax_rate: "0.130000",
+                  user_confirmed: false,
+                })
+                .then(() => load())
+                .catch((e) => toast(errMsg(e), "red"));
+            }}
+            onUpdateLine={(line: QuoteLine, patch) => {
+              void api
+                .upsertQuoteLine(id, line.id, {
+                  expected_edit_version: quote.edit_version ?? 0,
+                  ordinal: line.ordinal,
+                  description: patch.description ?? line.description,
+                  pricing_mode: line.pricing_mode,
+                  quantity: line.quantity,
+                  unit: line.unit,
+                  unit_price: line.unit_price,
+                  entered_amount: line.entered_amount,
+                  tax_rate: line.tax_rate,
+                  user_confirmed: patch.user_confirmed ?? line.user_confirmed,
+                })
+                .then(() => load())
+                .catch((e) => toast(errMsg(e), "red"));
+            }}
+            onDeleteLine={(line) => {
+              void api
+                .deleteQuoteLine(id, line.id, quote.edit_version ?? 0)
+                .then(() => load())
+                .catch((e) => toast(errMsg(e), "red"));
+            }}
+            onFinalize={() => {
+              const pricingSet = clauseSets.find((s) => s.set_kind === "pricing");
+              if (!pricingSet) {
+                toast("缺少价格条款集，无法定稿报价", "red");
+                return;
+              }
+              void api
+                .finalizeQuote(id, {
+                  expected_edit_version: quote.edit_version ?? 0,
+                  expected_fact_revision: project.fact_revision,
+                  expected_ceiling_revision: project.ceiling_revision,
+                  expected_ceiling_identity_sha256: project.ceiling_identity_sha256,
+                  expected_pricing_revision: pricingSet.revision,
+                  expected_pricing_set_sha256: pricingSet.content_sha256,
+                  no_ceiling_reviewed: noCeiling,
+                  no_ceiling_reason: noCeilingReason,
+                })
+                .then(() => {
+                  toast("报价已定稿");
+                  return load();
+                })
+                .catch((e) => toast(errMsg(e), "red"));
+            }}
+            onReopen={() => {
+              if (!quote.snapshot_id) return;
+              void api
+                .reopenQuote(id, {
+                  expected_snapshot_id: quote.snapshot_id,
+                  expected_fact_revision: project.fact_revision,
+                  expected_pricing_revision: clauseSets.find((s) => s.set_kind === "pricing")?.revision ?? 0,
+                })
+                .then(() => load())
+                .catch((e) => toast(errMsg(e), "red"));
+            }}
+          />
+        </div>
+      )}
+      {step === "quote" && view !== "quote" && (
+        <div className="wrap">
+          <MaterialsPane
+            view={view}
+            company={company}
+            submission={submission}
+            classifications={classifications}
+            attachments={attachments}
+            ended={ended}
+            onSaveCompany={(body) => {
+              setCompany(body);
+              if (body === company) {
+                void api
+                  .updateCompanyProfile(id, {
+                    expected_revision: Number(company.revision ?? 0),
+                    legal_name: company.legal_name || "",
+                    unified_social_credit_code: company.unified_social_credit_code || "",
+                    registered_address: company.registered_address || "",
+                    legal_representative: company.legal_representative || "",
+                    contact_name: company.contact_name || "",
+                    contact_phone: company.contact_phone || "",
+                    contact_email: company.contact_email || "",
+                  })
+                  .then(() => load())
+                  .catch((e) => toast(errMsg(e), "red"));
+              }
+            }}
+            onSaveSubmission={(body) => {
+              setSubmission(body);
+              if (body === submission) {
+                if (!submission.submission_date?.trim()) {
+                  toast("请填写投标日期", "red");
+                  return;
                 }
-              : undefined
-          }
-          onAddText={setAddText}
-          onAddMust={setAddMust}
-          onAdd={() => {
-            if (!addText.trim()) return;
-            const family = view === "commercial" ? "commercial" : "technical";
-            const section_id = view === "commercial" || view === "unsectioned" ? null : view;
+                void api
+                  .updateSubmissionProfile(id, {
+                    expected_revision: Number(submission.revision ?? 0),
+                    buyer_name: submission.buyer_name || "",
+                    project_code: submission.project_code || "",
+                    authorized_representative: submission.authorized_representative || "",
+                    submission_date: submission.submission_date,
+                    submission_place: submission.submission_place || "",
+                    seal_confirmed: !!submission.seal_confirmed,
+                    signature_confirmed: !!submission.signature_confirmed,
+                  })
+                  .then(() => load())
+                  .catch((e) => toast(errMsg(e), "red"));
+              }
+            }}
+            onOverride={(cid, kind, reason) => {
+              void api.overrideClassification(id, cid, { effective_kind: kind, reason }).then(() => load()).catch((e) => toast(errMsg(e), "red"));
+            }}
+            onResolve={(cid, resolution, attachmentId, reason) => {
+              void api
+                .resolveRequirement(id, cid, { resolution, attachment_id: attachmentId, reason })
+                .then(() => load())
+                .catch((e) => toast(errMsg(e), "red"));
+            }}
+            onUpload={(kind, file) => {
+              void uploadWithAttempt(`attachment:${kind}`, file, (attempt) =>
+                api.uploadAttachment(id, kind, file, attempt),
+              )
+                .then(() => load())
+                .catch((e) => toast(errMsg(e), "red"));
+            }}
+            onAttachAction={(aid, action, revision) => {
+              void api.mutateAttachment(id, aid, action, revision).then(() => load()).catch((e) => toast(errMsg(e), "red"));
+            }}
+          />
+        </div>
+      )}
+      {step === "parts" && (
+        <PartsPane
+          partKey={part}
+          markdown={partMarkdown}
+          stale={partStale}
+          ended={ended}
+          ready={partReady}
+          preview={partPreview}
+          units={units}
+          gate={gate}
+          onChange={(text) => {
+            dirtyPart.current = true;
+            setPartMarkdown(text);
+          }}
+          onSave={() => {
+            if (!partReady) return;
             void api
-              .addClause(id, { text: addText.trim(), family, must: addMust, section_id })
+              .updatePart(id, part, partRevision, partMarkdown)
               .then(() => {
-                setAddText("");
-                setAddMust(false);
-                toast("已手补并确认");
+                dirtyPart.current = false;
+                toast("已保存");
                 return load();
               })
               .catch((e) => toast(errMsg(e), "red"));
           }}
+          onRegen={() => {
+            if (!partReady) return;
+            void api
+              .regeneratePart(id, part, {
+                expected_content_revision: partRevision,
+                expected_dependency_sha256: partDependencySha,
+              })
+              .then(() => {
+                dirtyPart.current = false;
+                return load();
+              })
+              .catch((e) => toast(errMsg(e), "red"));
+          }}
+          onPreview={setPartPreview}
         />
       )}
-      <Modal opened={deviateOpen} onClose={() => setDeviateOpen(false)} title="偏离说明" radius={16}>
-        <label className="fld">偏离说明会进 ③ 技术偏离表</label>
-        <textarea className="area" value={deviateNote} onChange={(e) => setDeviateNote(e.target.value)} />
-        <div className="row" style={{ justifyContent: "flex-end", marginTop: 16 }}>
-          <button className="btn" type="button" onClick={() => setDeviateOpen(false)}>
-            取消
-          </button>
-          <button
-            className="btn pri"
-            type="button"
-            onClick={() => {
-              if (cur) void patch(cur.id, { deviate: true, deviate_note: deviateNote, assessment: "deviate" });
-              setDeviateOpen(false);
-            }}
-          >
-            记下
-          </button>
-        </div>
-      </Modal>
     </Shell>
   );
 }

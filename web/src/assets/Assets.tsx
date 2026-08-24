@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { Modal } from "@mantine/core";
 import { Dropzone } from "@mantine/dropzone";
 import { notifications } from "@mantine/notifications";
@@ -76,13 +76,16 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
   const [create, setCreate] = useState<{ kind: CreateKind; parentId?: string } | null>(null);
   const [name, setName] = useState("");
 
-  async function ensureVersions(pid: string): Promise<Version[]> {
-    if (versionsByProduct[pid]) return versionsByProduct[pid];
-    const list = await api.versions(pid);
-    const live = list.filter((v) => v.status !== "archived");
-    setVersionsByProduct((cur) => ({ ...cur, [pid]: live }));
-    return live;
-  }
+  const ensureVersions = useCallback(
+    async (pid: string): Promise<Version[]> => {
+      if (versionsByProduct[pid]) return versionsByProduct[pid];
+      const list = await api.versions(pid);
+      const live = list.filter((v) => v.status !== "archived");
+      setVersionsByProduct((cur) => ({ ...cur, [pid]: live }));
+      return live;
+    },
+    [versionsByProduct],
+  );
 
   async function reloadTree() {
     const all = await api.workspaces();
@@ -128,7 +131,7 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
       pids.push(id.split(":")[1]);
     }
     void Promise.all([...new Set(pids)].map((id) => ensureVersions(id).catch(() => [])));
-  }, [route, open]);
+  }, [route, open, ensureVersions]);
 
   const selectedProductId =
     route.kind === "folder"
@@ -167,7 +170,7 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
     return () => {
       cancelled = true;
     };
-  }, [selectedProductId, selectedVersionId]);
+  }, [selectedProductId, selectedVersionId, ensureVersions]);
 
   function toggle(id: string) {
     setOpen((cur) => {

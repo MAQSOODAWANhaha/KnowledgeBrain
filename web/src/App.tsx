@@ -1,14 +1,9 @@
 import { useEffect, useState } from "react";
-import { Modal } from "@mantine/core";
-import {
-  ApiError,
-  type Project,
-  api,
-  setToken,
-  token,
-} from "./api";
+import { Button, Modal, TextInput } from "@mantine/core";
+import { ApiError, type Project, api, setToken, token } from "./api";
 import { Assets } from "./assets/Assets";
 import { Workbench } from "./bid/Workbench";
+import { shanghaiEndOfDay } from "./bid/helpers";
 import { bidHref, go, parseAssetRoute, parseBidRoute, useHash } from "./hash";
 import { Crumbs } from "./Crumbs";
 import { Shell } from "./Shell";
@@ -25,28 +20,9 @@ function Login() {
         <div className="brand">KnowledgeBrain</div>
       </header>
       <div className="login-body">
-        <div className="login-copy">
-          <h1>投标台</h1>
-          <p className="lead">拆条款、勾产品、补图、出 ①–⑤。登录后先做这一标，缺证再进知识资产补。</p>
-          <div className="login-ways">
-            <div className="login-way">
-              <i />
-              <div>
-                <b>投标项目</b>
-                <p>建项、上传招标文件、确认条款、勾选型号、导出过程 Word / 定稿 PDF。</p>
-              </div>
-            </div>
-            <div className="login-way">
-              <i />
-              <div>
-                <b>知识资产</b>
-                <p>资质证照、体系认证、业绩案例、服务能力，以及参与排序的型号手册。</p>
-              </div>
-            </div>
-          </div>
-        </div>
         <form
           className="login-card"
+          data-testid="login-form"
           onSubmit={async (e) => {
             e.preventDefault();
             setErr("");
@@ -67,18 +43,31 @@ function Login() {
             LDAP 账号。测试环境账号密码可空。
           </p>
           <label className="fld">账号</label>
-          <input className="inp" placeholder="账号" value={email} onChange={(e) => setEmail(e.target.value)} />
+          <input
+            className="inp"
+            data-testid="login-email"
+            placeholder="账号"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
           <div style={{ height: 16 }} />
           <label className="fld">密码</label>
-          <input className="inp" type="password" placeholder="密码" value={password} onChange={(e) => setPassword(e.target.value)} />
+          <input
+            className="inp"
+            data-testid="login-password"
+            type="password"
+            placeholder="密码"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
           {err && (
             <p className="note" style={{ color: "var(--rose)" }}>
               {err}
             </p>
           )}
-          <button className="btn pri lg block" style={{ marginTop: 28, height: 44, fontSize: 15 }} type="submit" disabled={busy}>
-            {busy ? "进入中…" : "进入投标台"}
-          </button>
+          <Button type="submit" fullWidth mt={28} h={44} disabled={busy} data-testid="login-submit">
+            {busy ? "进入中…" : "进入"}
+          </Button>
         </form>
       </div>
     </div>
@@ -89,7 +78,6 @@ function Bids({ email }: { email: string }) {
   const [rows, setRows] = useState<Project[] | null>(null);
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
-  const [owner, setOwner] = useState("");
   const [when, setWhen] = useState("");
   const [err, setErr] = useState("");
   const [filter, setFilter] = useState<"all" | "open" | "ended">("all");
@@ -112,9 +100,9 @@ function Bids({ email }: { email: string }) {
       crumbs={<Crumbs items={[{ label: "投标项目" }, { label: "在办的标" }]} />}
       title="在办的标"
       extra={
-        <button className="btn pri" type="button" onClick={() => setOpen(true)}>
+        <Button data-testid="new-bid" onClick={() => setOpen(true)}>
           新建标
-        </button>
+        </Button>
       }
       tree={
         <>
@@ -133,7 +121,7 @@ function Bids({ email }: { email: string }) {
               <div className="side-sec">项目</div>
               <nav className="sidenav">
                 {rows.map((p) => (
-                  <a key={p.id} href={`#${bidHref(p.id, "files")}`}>
+                  <a key={p.id} href={`#${bidHref(p.id, "files", { step: "files" })}`}>
                     <svg viewBox="0 0 24 24">
                       <rect x="3" y="4" width="18" height="16" rx="2" />
                       <path d="M8 4V3h8v1M8 10h8M8 14h5" />
@@ -158,15 +146,13 @@ function Bids({ email }: { email: string }) {
               <p className="note" style={{ margin: "0 0 20px" }}>
                 先建一项，再把招标文件拖进「文件」。
               </p>
-              <button className="btn pri" type="button" onClick={() => setOpen(true)}>
-                新建标
-              </button>
+              <Button onClick={() => setOpen(true)}>新建标</Button>
             </div>
           </div>
         ) : (
           <div className="card pad-0">
             <div className="toolbar">
-              <input className="inp" placeholder="按项目名、负责人过滤…" />
+              <input className="inp" placeholder="按项目名过滤…" />
               <button className={`chip ${filter === "all" ? "iris" : ""}`} type="button" onClick={() => setFilter("all")}>
                 全部
               </button>
@@ -181,19 +167,17 @@ function Bids({ email }: { email: string }) {
               <thead>
                 <tr>
                   <th>项目</th>
-                  <th>负责人</th>
                   <th>招标结束</th>
                   <th>状态</th>
                 </tr>
               </thead>
               <tbody>
                 {shown.map((p) => (
-                  <tr key={p.id} onClick={() => go(bidHref(p.id, "files"))} style={{ cursor: "pointer" }}>
+                  <tr key={p.id} onClick={() => go(bidHref(p.id, "files", { step: "files" }))} style={{ cursor: "pointer" }}>
                     <td>
                       <div className="name">{p.title}</div>
                     </td>
-                    <td className="muted">{p.owner_name || "—"}</td>
-                    <td className="muted">{p.expires_at ? p.expires_at.slice(0, 10) : "—"}</td>
+                    <td className="muted">{p.ends_at ? p.ends_at.slice(0, 10) : "—"}</td>
                     <td>
                       {p.status === "ended" ? (
                         <span className="chip gray">已结束</span>
@@ -211,48 +195,52 @@ function Bids({ email }: { email: string }) {
           </div>
         )}
       </div>
-      <Modal opened={open} onClose={() => setOpen(false)} title="新建标" radius={16}>
+      <Modal opened={open} onClose={() => setOpen(false)} title="新建标">
         <form
+          data-testid="create-bid-form"
           onSubmit={async (e) => {
             e.preventDefault();
             if (!title.trim()) {
               setErr("先写项目名称");
               return;
             }
+            if (!when) {
+              setErr("先选招标结束日");
+              return;
+            }
             try {
               const p = await api.createBid({
                 title: title.trim(),
-                owner_name: owner.trim(),
-                expires_at: when ? new Date(`${when}T16:00:00Z`).toISOString() : null,
+                ends_at: shanghaiEndOfDay(when),
               });
-              go(bidHref(p.id, "files"));
+              go(bidHref(p.id, "files", { step: "files" }));
             } catch (ex) {
               setErr(ex instanceof Error ? ex.message : "创建失败");
             }
           }}
         >
-          <label className="fld">项目名称</label>
-          <input className="inp" value={title} onChange={(e) => setTitle(e.target.value)} required />
-          <label className="fld" style={{ marginTop: 16 }}>
-            负责人
-          </label>
-          <input className="inp" value={owner} onChange={(e) => setOwner(e.target.value)} />
-          <label className="fld" style={{ marginTop: 16 }}>
-            招标结束日
-          </label>
-          <input className="inp" type="date" value={when} onChange={(e) => setWhen(e.target.value)} />
+          <TextInput data-testid="bid-title" label="项目名称" value={title} onChange={(e) => setTitle(e.currentTarget.value)} required />
+          <TextInput
+            data-testid="bid-ends"
+            label="招标结束日"
+            type="date"
+            mt="md"
+            value={when}
+            onChange={(e) => setWhen(e.currentTarget.value)}
+            required
+          />
           {err && (
             <p className="note" style={{ color: "var(--rose)" }}>
               {err}
             </p>
           )}
           <div className="row" style={{ justifyContent: "flex-end", marginTop: 24 }}>
-            <button className="btn" type="button" onClick={() => setOpen(false)}>
+            <Button variant="default" type="button" onClick={() => setOpen(false)}>
               取消
-            </button>
-            <button className="btn pri" type="submit">
+            </Button>
+            <Button type="submit" data-testid="bid-create">
               创建
-            </button>
+            </Button>
           </div>
         </form>
       </Modal>

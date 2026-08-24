@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use runtime::{
     BidConvertJob, BidConvertV1Queue, BidExtractJob, BidExtractV1Queue, BidMatchRouteV1Job,
-    BidMatchingV1Queue, BidSectionRetryJob, BidSectionRetryV1Queue, DatatableJob, DefaultQueue,
+    BidMatchingV1Queue, BidRenderSubmissionV1Job, BidRenderV1Queue, DatatableJob, DefaultQueue,
     DocumentProcessJob, ExtractJob, HousekeepJob, ImageMultimodalJob, IndexDeleteJob, KbDeleteJob,
     ListDeleteJob, ListReparseJob, LowQueue, PostProcessJob, PostprocessQueue, QuestionJob,
     SummaryJob, SummaryQueue, VersionCloneJob, WikiFinalizeJob, WikiIngestJob, WikiQueue,
@@ -1524,66 +1524,59 @@ impl oxana::Worker<HousekeepJob> for HousekeepWorker {
         storage::housekeep_documents(pool, runtime::HOUSEKEEP_STALE_SECS)
             .await
             .map_err(|e| JobErr(e.to_string()))?;
-        let _ = storage::bid::end_expired_projects(pool).await;
-        if let Ok(ids) =
-            storage::bid::reclaim_stale_converts(pool, runtime::HOUSEKEEP_STALE_SECS).await
-        {
+        storage::expire_object_uploads(pool)
+            .await
+            .map_err(|e| JobErr(e.to_string()))?;
+        let _ = storage::bid_submission::housekeep_end_expired(pool).await;
+        if let Ok(ids) = storage::bid_submission::reclaim_stale_conversions(pool).await {
             for id in ids {
                 tracing::warn!(document_id = %id, "bid convert reclaim");
                 let _ = runtime::enqueue_bid_convert(id).await;
             }
         }
-        if let Ok(ids) = storage::bid::pending_converts(pool).await {
+        if let Ok(ids) = storage::bid_submission::pending_conversions(pool).await {
             for id in ids {
                 let _ = runtime::enqueue_bid_convert(id).await;
             }
         }
-        if let Ok(stale) =
-            storage::bid::reclaim_stale_extracts(pool, runtime::HOUSEKEEP_EXTRACT_STALE_SECS).await
-        {
-            for (rid, pid, did) in stale {
-                tracing::warn!(
-                    run_id = %rid,
-                    project_id = %pid,
-                    document_id = ?did,
-                    "bid extract reclaim"
-                );
-                let _ = runtime::enqueue_bid_extract(rid, pid, did).await;
+        if let Ok(stale) = storage::bid_submission::reclaim_stale_extractions(pool).await {
+            for (target_id, project_id, document_id) in stale {
+                tracing::warn!(target_id = %target_id, project_id = %project_id, "bid extract reclaim");
+                let _ =
+                    runtime::enqueue_bid_extract(target_id, project_id, Some(document_id)).await;
             }
         }
-        if let Ok(rows) = sqlx::query(
-            "SELECT r.id, r.project_id, r.document_id
-             FROM bid_extract_runs r
-             JOIN bid_projects p ON p.id = r.project_id
-             WHERE r.status = 'pending' AND p.status = 'open'",
-        )
-        .fetch_all(pool)
-        .await
-        {
-            use sqlx::Row;
-            for r in rows {
-                let rid: Uuid = r.get("id");
-                let pid: Uuid = r.get("project_id");
-                let did: Option<Uuid> = r.get("document_id");
-                let _ = runtime::enqueue_bid_extract(rid, pid, did).await;
+        if let Ok(pending) = storage::bid_submission::pending_extractions(pool).await {
+            for (target_id, project_id, document_id) in pending {
+                let _ =
+                    runtime::enqueue_bid_extract(target_id, project_id, Some(document_id)).await;
             }
         }
-        let _ = storage::bid::reclaim_stale_section_retry_jobs(pool, runtime::HOUSEKEEP_STALE_SECS)
-            .await;
-        if let Ok(jobs) = storage::bid::pending_section_retries(pool).await {
-            for (job_id, project_id, section_id) in jobs {
-                let _ = runtime::enqueue_bid_section_retry(job_id, project_id, section_id).await;
-            }
-        }
-        if let Ok(projects) = storage::bid::dirty_match_projects(pool).await {
+        if let Ok(projects) = storage::bid_submission::dirty_match_projects(pool).await {
             for project_id in projects {
-                let _ = bid::schedule_dirty_and_enqueue(pool, project_id).await;
+                let _ = bid::schedule_dirty_and_enqueue(
+                    pool,
+                    project_id,
+                    storage::bid_matching::ScheduleMutationContext::system(),
+                )
+                .await;
             }
         }
         // Matching reaping uses each claim's frozen lease policy and DB time;
         // housekeeping cannot inject an arbitrary stale threshold.
-        let _ = storage::bid_matching::reap_expired_claims(pool).await;
+        storage::bid_matching::reap_expired_claims(pool)
+            .await
+            .map_err(|error| JobErr(error.to_string()))?;
         let _ = bid::enqueue_pending_route_jobs(pool).await;
+        storage::bid_submission::reap_submission_renders(pool)
+            .await
+            .map_err(|error| JobErr(error.to_string()))?;
+        if let Ok(render_job_ids) = storage::bid_submission::pending_submission_renders(pool).await
+        {
+            for render_job_id in render_job_ids {
+                let _ = runtime::enqueue_bid_render_submission_v1(render_job_id).await;
+            }
+        }
         Ok(())
     }
 }
@@ -1635,102 +1628,6 @@ impl oxana::Worker<BidConvertJob> for BidConvertWorker {
         let _ = runtime::enqueue_bid_extract(target_id, document.project_id, Some(job.document_id))
             .await;
         Ok(())
-    }
-}
-
-pub struct BidSectionRetryWorker {
-    pool: Option<PgPool>,
-}
-
-impl oxana::FromContext<AppCtx> for BidSectionRetryWorker {
-    fn from_context(ctx: &AppCtx) -> Self {
-        Self {
-            pool: ctx.pool.clone(),
-        }
-    }
-}
-
-#[async_trait]
-impl oxana::Worker<BidSectionRetryJob> for BidSectionRetryWorker {
-    type Error = JobErr;
-
-    fn max_retries(&self, _job: &BidSectionRetryJob) -> u32 {
-        3
-    }
-
-    async fn process(
-        &self,
-        job: BidSectionRetryJob,
-        ctx: &oxana::JobContext,
-    ) -> Result<(), Self::Error> {
-        let Some(pool) = &self.pool else {
-            return Err(JobErr("postgres not configured".into()));
-        };
-        let Some(token) =
-            storage::bid::claim_section_retry_job(pool, job.job_id, job.project_id, job.section_id)
-                .await
-                .map_err(|error| JobErr(error.to_string()))?
-        else {
-            return Ok(());
-        };
-        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
-        let heartbeat_pool = pool.clone();
-        let heartbeat_job_id = job.job_id;
-        let heartbeat = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
-            loop {
-                tokio::select! {
-                    _ = &mut stop_rx => break,
-                    _ = interval.tick() => {
-                        match storage::bid::heartbeat_section_retry_job(&heartbeat_pool, heartbeat_job_id, token).await {
-                            Ok(true) => {}
-                            _ => break,
-                        }
-                    }
-                }
-            }
-        });
-        let result = bid::retry_section_claimed(pool, job.project_id, job.section_id, token).await;
-        let _ = stop_tx.send(());
-        let _ = heartbeat.await;
-        match result {
-            Ok(()) => {
-                let finished = storage::bid::finish_section_retry_job(
-                    pool,
-                    job.job_id,
-                    job.project_id,
-                    job.section_id,
-                    token,
-                    "done",
-                    "",
-                )
-                .await
-                .map_err(|error| JobErr(error.to_string()))?;
-                if !finished {
-                    return Err(JobErr("section retry job lease lost".into()));
-                }
-                Ok(())
-            }
-            Err(error) => {
-                let terminal = ctx.meta.retries >= 3;
-                let status = if terminal { "failed" } else { "pending" };
-                let finished = storage::bid::finish_section_retry_job(
-                    pool,
-                    job.job_id,
-                    job.project_id,
-                    job.section_id,
-                    token,
-                    status,
-                    &error,
-                )
-                .await
-                .map_err(|finish_error| JobErr(finish_error.to_string()))?;
-                if !finished {
-                    return Err(JobErr("section retry job lease lost".into()));
-                }
-                Err(JobErr(error))
-            }
-        }
     }
 }
 
@@ -1796,6 +1693,310 @@ impl oxana::Worker<BidMatchRouteV1Job> for BidMatchRouteV1Handler {
             .await
             .map_err(JobErr)
     }
+}
+
+pub struct BidRenderSubmissionV1Handler {
+    pool: Option<PgPool>,
+}
+
+impl oxana::FromContext<AppCtx> for BidRenderSubmissionV1Handler {
+    fn from_context(ctx: &AppCtx) -> Self {
+        Self {
+            pool: ctx.pool.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl oxana::Worker<BidRenderSubmissionV1Job> for BidRenderSubmissionV1Handler {
+    type Error = JobErr;
+
+    fn max_retries(&self, _job: &BidRenderSubmissionV1Job) -> u32 {
+        3
+    }
+
+    async fn process(
+        &self,
+        job: BidRenderSubmissionV1Job,
+        _ctx: &oxana::JobContext,
+    ) -> Result<(), Self::Error> {
+        job.validate().map_err(JobErr)?;
+        let Some(pool) = &self.pool else {
+            return Err(JobErr("postgres not configured".into()));
+        };
+        let claim_token = Uuid::new_v4();
+        let Some(claim) =
+            storage::bid_submission::claim_submission_render(pool, job.render_job_id, claim_token)
+                .await
+                .map_err(|error| JobErr(error.to_string()))?
+        else {
+            return Ok(());
+        };
+        match render_submission_manifest(pool, &claim, claim_token).await {
+            Ok(_) => Ok(()),
+            Err(detail) => {
+                let error_code = submission_render_error_code(&detail);
+                let retryable = submission_render_error_retryable(error_code, &detail);
+                let status = storage::bid_submission::fail_submission_render(
+                    pool,
+                    claim.render_job_id,
+                    claim_token,
+                    error_code,
+                    &detail,
+                    retryable,
+                )
+                .await
+                .map_err(|error| JobErr(error.to_string()))?;
+                match status.as_deref() {
+                    Some("pending") => Err(JobErr(detail)),
+                    Some("failed") => {
+                        tracing::error!(
+                            render_job_id = %claim.render_job_id,
+                            %error_code,
+                            "submission render reached durable failed state"
+                        );
+                        Ok(())
+                    }
+                    _ => {
+                        tracing::warn!(
+                            render_job_id = %claim.render_job_id,
+                            "submission render claim was already fenced"
+                        );
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn submission_render_error_code(detail: &str) -> &'static str {
+    for code in [
+        "MANIFEST_SHA256_MISMATCH",
+        "RENDERER_CONTRACT_MISMATCH",
+        "SUBMISSION_END_STATE_CHANGED",
+        "SUBMISSION_MANIFEST_MISSING",
+        "MANIFEST_ASSET_MISSING",
+        "MANIFEST_ASSET_IDENTITY_MISMATCH",
+        "MANIFEST_ASSET_BYTES_MISSING",
+        "PROJECT_ENDED",
+        "SUBMISSION_RENDER_CLAIM_LOST",
+    ] {
+        if detail.contains(code) {
+            return code;
+        }
+    }
+    "SUBMISSION_RENDER_FAILED"
+}
+
+fn submission_render_error_retryable(error_code: &str, detail: &str) -> bool {
+    if error_code != "SUBMISSION_RENDER_FAILED" {
+        return false;
+    }
+    let detail = detail.to_ascii_lowercase();
+    if [
+        "permission denied",
+        "authentication failed",
+        "unauthorized",
+        "forbidden",
+        "not configured",
+        "configuration",
+        "renderer",
+        "manifest",
+        "bid shot",
+        "markdown",
+    ]
+    .iter()
+    .any(|fragment| detail.contains(fragment))
+    {
+        return false;
+    }
+    [
+        "temporary",
+        "temporarily",
+        "timeout",
+        "timed out",
+        "connection refused",
+        "connection reset",
+        "connection closed",
+        "broken pipe",
+        "network is unreachable",
+        "dns error",
+        "error trying to connect",
+        "service unavailable",
+        "too many requests",
+        "too many connections",
+        "deadlock detected",
+        "could not serialize access",
+        "no space left on device",
+        "-> 408",
+        "-> 429",
+        "-> 500",
+        "-> 502",
+        "-> 503",
+        "-> 504",
+    ]
+    .iter()
+    .any(|fragment| detail.contains(fragment))
+}
+
+async fn render_submission_manifest(
+    pool: &PgPool,
+    claim: &storage::bid_submission::SubmissionRenderClaim,
+    claim_token: Uuid,
+) -> Result<serde_json::Value, String> {
+    let input =
+        storage::bid_submission::manifest_render_input(pool, claim.project_id, claim.manifest_id)
+            .await
+            .map_err(|error| error.to_string())?;
+    if input
+        .get("content_sha256")
+        .and_then(serde_json::Value::as_str)
+        != Some(claim.expected_manifest_sha256.as_str())
+    {
+        return Err("MANIFEST_SHA256_MISMATCH".into());
+    }
+    let format = match input.get("format").and_then(serde_json::Value::as_str) {
+        Some("pdf") => bid::submission::GateFormat::Pdf,
+        Some("docx") => bid::submission::GateFormat::Docx,
+        _ => return Err("invalid manifest format".into()),
+    };
+    if input.get("renderer_contract") != Some(&bid::renderer_contract_identity(format)) {
+        return Err("RENDERER_CONTRACT_MISMATCH".into());
+    }
+    let parts = input
+        .get("parts")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|row| {
+            (
+                row.get("part_key")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                row.get("markdown")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let asset_rows = input
+        .get("assets")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "manifest assets missing".to_string())?;
+    let mut assets = Vec::with_capacity(asset_rows.len());
+    for row in asset_rows {
+        let asset_id = row
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .ok_or_else(|| "manifest asset id invalid".to_string())?;
+        let stored = storage::bid_submission::read_manifest_render_asset(
+            pool,
+            claim.project_id,
+            claim.manifest_id,
+            asset_id,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        let manifest_ordinal = u32::try_from(stored.manifest_ordinal)
+            .map_err(|_| "manifest asset ordinal invalid".to_string())?;
+        let occurrence_ordinal = u32::try_from(stored.occurrence_ordinal)
+            .map_err(|_| "manifest occurrence ordinal invalid".to_string())?;
+        let locator = match stored.source_kind.as_str() {
+            "bid_shot" => bid::ManifestRenderAssetLocator::BidShot {
+                placement_ordinal: stored
+                    .source_locator
+                    .get("placement_ordinal")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or_else(|| "bid shot placement locator invalid".to_string())?,
+                shot_artifact_id: stored
+                    .source_locator
+                    .get("shot_artifact_id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .ok_or_else(|| "bid shot artifact locator invalid".to_string())?,
+            },
+            "markdown_object" => bid::ManifestRenderAssetLocator::MarkdownObject {
+                part_key: stored
+                    .source_locator
+                    .get("part_key")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "markdown part locator invalid".to_string())?
+                    .to_string(),
+                occurrence_ordinal,
+            },
+            _ => return Err("manifest asset source kind invalid".into()),
+        };
+        assets.push(bid::ManifestRenderAsset {
+            manifest_ordinal,
+            locator,
+            object_ref: stored.object_ref,
+            digest: stored.digest,
+            media_type: stored.media_type,
+            byte_length: u64::try_from(stored.byte_length)
+                .map_err(|_| "manifest asset byte length invalid".to_string())?,
+            bytes: stored.bytes,
+        });
+    }
+    let bytes = bid::render_manifest_document(format, "投标文件", &parts, &assets)?;
+    if !storage::bid_submission::heartbeat_submission_render(pool, claim.render_job_id, claim_token)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Err("SUBMISSION_RENDER_CLAIM_LOST".into());
+    }
+    let digest = domain::sha256_hex(&bytes);
+    let object_ref = storage::object_ref(&digest);
+    let media_type = match format {
+        bid::submission::GateFormat::Pdf => "application/pdf",
+        bid::submission::GateFormat::Docx => {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+    };
+    let staging_id = Uuid::new_v4();
+    storage::stage_object_upload(
+        pool,
+        staging_id,
+        &object_ref,
+        &digest,
+        media_type,
+        bytes.len() as i64,
+        &claim.requested_by,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if let Err(error) = storage::write_blob_async(&digest, &bytes).await {
+        let _ = storage::abandon_object_upload(pool, staging_id, &claim.requested_by).await;
+        return Err(error.to_string());
+    }
+    if !storage::bid_submission::heartbeat_submission_render(pool, claim.render_job_id, claim_token)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        let _ = storage::abandon_object_upload(pool, staging_id, &claim.requested_by).await;
+        return Err("SUBMISSION_RENDER_CLAIM_LOST".into());
+    }
+    let published = storage::bid_submission::publish_submission_output(
+        pool,
+        storage::bid_submission::PublishSubmissionOutput {
+            staging_id,
+            id: Uuid::new_v4(),
+            render_job_id: claim.render_job_id,
+            claim_token,
+            object_ref: &object_ref,
+            digest: &digest,
+            byte_length: bytes.len() as i64,
+        },
+    )
+    .await;
+    if published.is_err() {
+        let _ = storage::abandon_object_upload(pool, staging_id, &claim.requested_by).await;
+    }
+    published.map_err(|error| error.to_string())
 }
 
 pub struct ImageMultimodalWorker {
@@ -2884,16 +3085,16 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
                 4,
             ))
             .worker::<BidExtractWorker, BidExtractJob>()
-            .queue_with_concurrency::<BidSectionRetryV1Queue>(runtime::runtime_concurrency(
-                "BID_SECTION_RETRY",
-                4,
-            ))
-            .worker::<BidSectionRetryWorker, BidSectionRetryJob>()
             .queue_with_concurrency::<BidMatchingV1Queue>(runtime::runtime_concurrency(
                 "BID_MATCHING",
                 4,
             ))
             .worker::<BidMatchRouteV1Handler, BidMatchRouteV1Job>()
+            .queue_with_concurrency::<BidRenderV1Queue>(runtime::runtime_concurrency(
+                "BID_RENDER",
+                2,
+            ))
+            .worker::<BidRenderSubmissionV1Handler, BidRenderSubmissionV1Job>()
             .shutdown_on(shut(stop.clone()))
             .shutdown_timeout(timeout)
             .run()
@@ -2999,6 +3200,83 @@ mod tests {
         assert_eq!(image_source_from_docreader_output(None), "");
     }
     use tokio::sync::Mutex;
+
+    #[test]
+    fn submission_render_failure_classification_is_deterministic() {
+        let cases = [
+            (
+                "database: SUBMISSION_END_STATE_CHANGED",
+                "SUBMISSION_END_STATE_CHANGED",
+                false,
+            ),
+            ("invalid manifest format", "SUBMISSION_RENDER_FAILED", false),
+            (
+                "manifest asset MIME is not a supported image: image/tiff",
+                "SUBMISSION_RENDER_FAILED",
+                false,
+            ),
+            (
+                "permission denied for function kb_bid_manifest_render_input",
+                "SUBMISSION_RENDER_FAILED",
+                false,
+            ),
+            (
+                "submission renderer is not configured",
+                "SUBMISSION_RENDER_FAILED",
+                false,
+            ),
+            (
+                "invalid manifest timeout configuration",
+                "SUBMISSION_RENDER_FAILED",
+                false,
+            ),
+            (
+                "permission denied for object store: service unavailable",
+                "SUBMISSION_RENDER_FAILED",
+                false,
+            ),
+            (
+                "manifest asset temporary signature mismatch",
+                "SUBMISSION_RENDER_FAILED",
+                false,
+            ),
+            (
+                "temporary object store timeout",
+                "SUBMISSION_RENDER_FAILED",
+                true,
+            ),
+            (
+                "reqwest request failed: connection refused",
+                "SUBMISSION_RENDER_FAILED",
+                true,
+            ),
+            (
+                "s3 PUT /bucket/output -> 503",
+                "SUBMISSION_RENDER_FAILED",
+                true,
+            ),
+            (
+                "s3 PUT /bucket/output -> 403",
+                "SUBMISSION_RENDER_FAILED",
+                false,
+            ),
+            (
+                "database error: deadlock detected",
+                "SUBMISSION_RENDER_FAILED",
+                true,
+            ),
+        ];
+
+        for (detail, expected_code, expected_retryable) in cases {
+            let error_code = submission_render_error_code(detail);
+            assert_eq!(error_code, expected_code, "detail: {detail}");
+            assert_eq!(
+                submission_render_error_retryable(error_code, detail),
+                expected_retryable,
+                "detail: {detail}"
+            );
+        }
+    }
 
     async fn db_lock() -> tokio::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::const_new(());

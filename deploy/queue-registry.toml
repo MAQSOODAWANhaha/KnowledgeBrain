@@ -232,18 +232,6 @@ capabilities = ["chat", "extraction_policy", "postgresql"]
 launch_mode = "required_enabled"
 
 [[entries]]
-physical_queue = "bid-section-retry-v1"
-task_type = "bid:section-retry"
-payload_schema = "bid-section-retry/v1"
-payload_version = 1
-identity_formula = "bid:section-retry:{job_id}"
-protocol = 1
-handler = "BidSectionRetryV1Handler"
-snapshots = ["target_config", "feature"]
-capabilities = ["chat", "extraction_policy", "postgresql"]
-launch_mode = "required_enabled"
-
-[[entries]]
 physical_queue = "bid-matching-v1"
 task_type = "bid:match-route:v1"
 payload_schema = "bid-match-route/v1"
@@ -253,4 +241,16 @@ protocol = 1
 handler = "BidMatchRouteV1Handler"
 snapshots = ["matching_config", "feature", "score_policy", "verifier_policy"]
 capabilities = ["retrieval", "verifier", "chat", "postgresql"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "bid-render-v1"
+task_type = "bid:render-submission:v1"
+payload_schema = "bid-render-submission/v1"
+payload_version = 1
+identity_formula = "bid:render-submission:v1:{render_job_id}"
+protocol = 1
+handler = "BidRenderSubmissionV1Handler"
+snapshots = ["submission_render_job"]
+capabilities = ["postgresql", "object_store", "document_renderer"]
 launch_mode = "required_enabled"

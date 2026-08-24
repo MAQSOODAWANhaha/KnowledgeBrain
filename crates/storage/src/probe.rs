@@ -14,7 +14,6 @@ pub const REASON_GATE_MODE_NOT_LIVE_READY: &str = "gate_mode_not_live_ready";
 pub const REASON_QUEUE_REGISTRY_UNREADABLE: &str = "queue_registry_unreadable";
 pub const REASON_INTENDED_STATE_UNREADABLE: &str = "intended_state_unreadable";
 pub const REASON_DISABLED_LANE_MISMATCH: &str = "disabled_lane_mismatch";
-pub const REASON_PRODUCTION_STUB_FORBIDDEN: &str = "production_stub_forbidden";
 pub const REASON_CHAT_CAPABILITY_UNCONFIGURED: &str = "chat_capability_unconfigured";
 pub const REASON_EMBEDDING_CAPABILITY_UNCONFIGURED: &str = "embedding_capability_unconfigured";
 pub const REASON_REDIS_CAPABILITY_UNCONFIGURED: &str = "redis_capability_unconfigured";
@@ -200,16 +199,6 @@ pub fn inspect_signed_launch_artifacts() -> Result<(), &'static str> {
     }
 }
 
-fn matching_fakes_enabled() -> bool {
-    matches!(
-        std::env::var("KNOWLEDGEBRAIN_MATCH_FAKES")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
 fn chat_capability_ready() -> bool {
     let model = domain::chat_model();
     let model = model.trim();
@@ -261,7 +250,6 @@ fn disabled_lanes_ready(
     [
         domain::TYPE_BID_CONVERT,
         domain::TYPE_BID_EXTRACT,
-        domain::TYPE_BID_SECTION_RETRY,
         domain::TYPE_BID_MATCH_ROUTE_V1,
     ]
     .into_iter()
@@ -299,9 +287,6 @@ pub fn inspect_launch_runtime_policy() -> Result<(), &'static str> {
     let intended = domain::IntendedState::load().map_err(|_| REASON_DISABLED_LANE_MISMATCH)?;
     if !disabled_lanes_ready(&intended, &registry) {
         return Err(REASON_DISABLED_LANE_MISMATCH);
-    }
-    if matching_fakes_enabled() {
-        return Err(REASON_PRODUCTION_STUB_FORBIDDEN);
     }
     if enabled_lane_lists_capability(&intended, &registry, "chat")? && !chat_capability_ready() {
         return Err(REASON_CHAT_CAPABILITY_UNCONFIGURED);

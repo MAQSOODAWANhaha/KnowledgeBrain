@@ -131,6 +131,7 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .unwrap();
     seed.commit().await.unwrap();
 
+    let schedule_context = storage::bid_matching::ScheduleMutationContext::system();
     let scheduled = storage::bid_matching::schedule_dirty_project(
         &pool,
         project_id,
@@ -138,11 +139,37 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
             environment: "test".into(),
             max_attempts: 3,
         },
+        &schedule_context,
     )
     .await
     .unwrap()
     .unwrap();
     assert_eq!(scheduled.jobs.len(), 2, "technical + commercial routes");
+    let replay = storage::bid_matching::schedule_dirty_project(
+        &pool,
+        project_id,
+        ScheduleEnvironment {
+            environment: "test".into(),
+            max_attempts: 3,
+        },
+        &schedule_context,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(replay.manifest_id, scheduled.manifest_id);
+    assert_eq!(
+        replay.jobs.iter().map(|job| job.id).collect::<Vec<_>>(),
+        scheduled.jobs.iter().map(|job| job.id).collect::<Vec<_>>()
+    );
+    let schedule_audit_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE operation='bid.matching.schedule' AND entity_locator->>'project_id'=$1",
+    )
+    .bind(project_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(schedule_audit_count, 1, "replay must not append audit");
     for scheduled_job in scheduled.jobs {
         run_match_route_v1(
             &pool,
@@ -177,6 +204,25 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
         .await
         .unwrap()
         .unwrap();
+    let historical_report = storage::bid_matching::matching_report_artifact_json(
+        &pool,
+        project_id,
+        report.get("report_id"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let canonical_payload = historical_report["canonical_payload"]
+        .as_str()
+        .expect("historical report must expose the exact canonical UTF-8 bytes");
+    assert_eq!(
+        domain::sha256_hex(canonical_payload.as_bytes()),
+        report.get::<String, _>("content_sha256")
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(canonical_payload).unwrap(),
+        historical_report["payload"]
+    );
     let candidates =
         storage::bid_matching::current_route_supported_candidates(&pool, project_id, route_id)
             .await
@@ -190,7 +236,10 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
         "source_report_artifact_id": report.get::<Uuid, _>("report_id"),
         "report_sha256": report.get::<String, _>("content_sha256"),
         "expected_revision": 0,
-        "items": [{"requirement_artifact_id": requirement_id, "candidate_artifact_id": candidate_id}],
+        "items": [
+            {"requirement_artifact_id": requirement_id, "candidate_artifact_id": candidate_id},
+            {"requirement_artifact_id": requirement_id, "candidate_artifact_id": candidate_id}
+        ],
     });
     let context =
         storage::bidding::MutationContext::new(actor, format!("pick-{project_id}"), &body).unwrap();
@@ -202,16 +251,82 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
             source_report_artifact_id: report.get("report_id"),
             report_sha256: report.get("content_sha256"),
             expected_revision: 0,
-            selections: vec![PickSelectionV1 {
-                requirement_artifact_id: requirement_id,
-                candidate_artifact_id: candidate_id,
-            }],
+            selections: vec![
+                PickSelectionV1 {
+                    requirement_artifact_id: requirement_id,
+                    candidate_artifact_id: candidate_id,
+                },
+                PickSelectionV1 {
+                    requirement_artifact_id: requirement_id,
+                    candidate_artifact_id: candidate_id,
+                },
+            ],
         },
         &context,
     )
     .await
     .unwrap();
     assert_eq!(receipt.route_revision, 1);
+    let replay = storage::bid_matching::replace_route_pick_set(
+        &pool,
+        ReplaceRoutePickSetV1 {
+            project_id,
+            route_id,
+            source_report_artifact_id: report.get("report_id"),
+            report_sha256: report.get("content_sha256"),
+            expected_revision: 0,
+            selections: vec![
+                PickSelectionV1 {
+                    requirement_artifact_id: requirement_id,
+                    candidate_artifact_id: candidate_id,
+                },
+                PickSelectionV1 {
+                    requirement_artifact_id: requirement_id,
+                    candidate_artifact_id: candidate_id,
+                },
+            ],
+        },
+        &context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(replay.route_pick_set_id, receipt.route_pick_set_id);
+    assert_eq!(replay.route_revision, receipt.route_revision);
+    assert_eq!(replay.route_sha256, receipt.route_sha256);
+    let route_artifact_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bid_route_pick_set_artifacts WHERE project_id=$1 AND route_id=$2",
+    )
+    .bind(project_id)
+    .bind(route_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        route_artifact_count, 1,
+        "idempotent replay must not append an artifact"
+    );
+    let pick_audit_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE operation='bid.matching.route_pick.replace'
+         AND entity_locator->>'project_id'=$1 AND entity_locator->>'route_id'=$2",
+    )
+    .bind(project_id.to_string())
+    .bind(route_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        pick_audit_count, 1,
+        "idempotent replay must not append audit"
+    );
+    let (route_payload, route_digest): (Vec<u8>, String) = sqlx::query_as(
+        "SELECT canonical_payload,content_sha256 FROM bid_route_pick_set_artifacts WHERE id=$1",
+    )
+    .bind(receipt.route_pick_set_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(domain::sha256_hex(&route_payload), route_digest);
+    assert_eq!(route_digest, receipt.route_sha256);
     let project_units: Vec<Option<Uuid>> = sqlx::query_scalar(
         "SELECT item.unit_id FROM bid_current_project_pick_sets current_value
          JOIN bid_project_pick_set_items item ON item.project_pick_set_id=current_value.pick_set_id
@@ -222,6 +337,20 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .await
     .unwrap();
     assert_eq!(project_units, vec![Some(Uuid::nil())]);
+    let route_pick_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bid_current_route_pick_sets current_value
+         JOIN bid_route_pick_set_items item ON item.pick_set_id=current_value.pick_set_id
+         WHERE current_value.project_id=$1 AND current_value.route_id=$2",
+    )
+    .bind(project_id)
+    .bind(route_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        route_pick_count, 1,
+        "duplicate candidate picks are canonicalized"
+    );
 
     sqlx::query("UPDATE documents SET file_name='已改名.pdf' WHERE id=$1")
         .bind(document_id)
@@ -251,4 +380,24 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .await
     .unwrap();
     assert_eq!(frozen_name, "国密手册.pdf");
+
+    sqlx::query("UPDATE bid_projects SET status='ended',ended_at=clock_timestamp() WHERE id=$1")
+        .bind(project_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let historical = storage::bid_matching::matching_report_artifact_json(
+        &pool,
+        project_id,
+        report.get("report_id"),
+    )
+    .await
+    .unwrap()
+    .expect("immutable report remains readable after project end");
+    assert_eq!(historical["id"], json!(report.get::<Uuid, _>("report_id")));
+    assert_eq!(
+        historical["content_sha256"],
+        json!(report.get::<String, _>("content_sha256"))
+    );
+    assert_eq!(historical["payload"]["report_id"], historical["id"]);
 }

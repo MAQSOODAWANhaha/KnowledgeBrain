@@ -122,10 +122,16 @@ pub async fn create_project(
         .await
 }
 
-pub async fn list_projects(pool: &PgPool) -> Result<Vec<Project>, sqlx::Error> {
-    let rows = sqlx::query("SELECT * FROM bidding_projects ORDER BY created_at DESC,id")
-        .fetch_all(pool)
-        .await?;
+pub async fn list_projects(
+    pool: &PgPool,
+    owner_user_id: Uuid,
+) -> Result<Vec<Project>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT * FROM bidding_projects WHERE owner_user_id=$1 ORDER BY created_at DESC,id",
+    )
+    .bind(owner_user_id)
+    .fetch_all(pool)
+    .await?;
     Ok(rows.iter().map(project_from_row).collect())
 }
 
@@ -199,10 +205,12 @@ pub struct UploadDocument<'a> {
 
 pub async fn upload_document(
     pool: &PgPool,
+    staging_id: Uuid,
     input: UploadDocument<'_>,
     context: &MutationContext,
 ) -> Result<Value, sqlx::Error> {
-    sqlx::query_scalar("SELECT kb_bid_upload_document($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+    sqlx::query_scalar("SELECT kb_bid_upload_document($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
+        .bind(staging_id)
         .bind(input.id)
         .bind(input.project_id)
         .bind(input.file_name)
@@ -302,22 +310,42 @@ pub async fn heartbeat_document_conversion(
         .await
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ConvertedSourceImageUpload {
+    pub staging_id: Uuid,
+    pub object_ref: String,
+    pub digest: String,
+    pub media_type: String,
+    pub byte_length: i64,
+    pub occurrence: String,
+}
+
+pub struct CompleteDocumentConversion<'a> {
+    pub document_id: Uuid,
+    pub claim_token: Uuid,
+    pub source_artifact_id: Uuid,
+    pub markdown: &'a [u8],
+    pub converter_contract_version: &'a str,
+    pub image_asset_set_sha256: &'a str,
+    pub image_assets: &'a [ConvertedSourceImageUpload],
+    pub actor: &'a str,
+}
+
 pub async fn complete_document_conversion(
     pool: &PgPool,
-    document_id: Uuid,
-    claim_token: Uuid,
-    source_artifact_id: Uuid,
-    markdown: &[u8],
-    converter_contract_version: &str,
-    image_asset_set_sha256: &str,
+    input: CompleteDocumentConversion<'_>,
 ) -> Result<Uuid, sqlx::Error> {
-    sqlx::query_scalar("SELECT kb_bid_complete_document_conversion($1,$2,$3,$4,$5,$6)")
-        .bind(document_id)
-        .bind(claim_token)
-        .bind(source_artifact_id)
-        .bind(markdown)
-        .bind(converter_contract_version)
-        .bind(image_asset_set_sha256)
+    let image_assets = serde_json::to_value(input.image_assets)
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    sqlx::query_scalar("SELECT kb_bid_complete_document_conversion($1,$2,$3,$4,$5,$6,$7,$8)")
+        .bind(input.document_id)
+        .bind(input.claim_token)
+        .bind(input.source_artifact_id)
+        .bind(input.markdown)
+        .bind(input.converter_contract_version)
+        .bind(input.image_asset_set_sha256)
+        .bind(image_assets)
+        .bind(input.actor)
         .fetch_one(pool)
         .await
 }

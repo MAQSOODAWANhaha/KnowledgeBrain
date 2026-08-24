@@ -230,7 +230,7 @@ pub fn declared_disabled_tasks() -> Result<Vec<&'static str>, QueueRegistryError
 mod tests {
     use super::*;
     use crate::{
-        TYPE_BID_CONVERT, TYPE_BID_EXTRACT, TYPE_BID_MATCH_ROUTE_V1, TYPE_BID_SECTION_RETRY,
+        TYPE_BID_CONVERT, TYPE_BID_EXTRACT, TYPE_BID_MATCH_ROUTE_V1, TYPE_BID_RENDER_SUBMISSION_V1,
     };
 
     const DOCUMENTED_QUEUES: &[&str] = &[
@@ -244,8 +244,8 @@ mod tests {
         "low",
         "bid-convert-v1",
         "bid-extract-v1",
-        "bid-section-retry-v1",
         "bid-matching-v1",
+        "bid-render-v1",
     ];
 
     fn loaded() -> QueueRegistry {
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_bid_four_entries() {
+    fn exact_bid_entries() {
         let registry = loaded();
         let bid: Vec<_> = registry
             .entries()
@@ -290,15 +290,6 @@ mod tests {
         assert_eq!(extract.handler, "BidExtractV1Handler");
         assert_eq!(extract.launch_mode, LaunchMode::RequiredEnabled);
 
-        let retry = registry
-            .entry_for_task(TYPE_BID_SECTION_RETRY)
-            .expect("bid:section-retry");
-        assert_eq!(retry.physical_queue, "bid-section-retry-v1");
-        assert_eq!(retry.payload_schema, "bid-section-retry/v1");
-        assert_eq!(retry.identity_formula, "bid:section-retry:{job_id}");
-        assert_eq!(retry.handler, "BidSectionRetryV1Handler");
-        assert_eq!(retry.launch_mode, LaunchMode::RequiredEnabled);
-
         let matching = registry
             .entry_for_task(TYPE_BID_MATCH_ROUTE_V1)
             .expect("bid:match-route:v1");
@@ -307,6 +298,18 @@ mod tests {
         assert_eq!(matching.identity_formula, "bid:match-route:v1:{job_id}");
         assert_eq!(matching.handler, "BidMatchRouteV1Handler");
         assert_eq!(matching.launch_mode, LaunchMode::RequiredEnabled);
+
+        let render = registry
+            .entry_for_task(TYPE_BID_RENDER_SUBMISSION_V1)
+            .expect("bid:render-submission:v1");
+        assert_eq!(render.physical_queue, "bid-render-v1");
+        assert_eq!(render.payload_schema, "bid-render-submission/v1");
+        assert_eq!(
+            render.identity_formula,
+            "bid:render-submission:v1:{render_job_id}"
+        );
+        assert_eq!(render.handler, "BidRenderSubmissionV1Handler");
+        assert_eq!(render.launch_mode, LaunchMode::RequiredEnabled);
     }
 
     #[test]

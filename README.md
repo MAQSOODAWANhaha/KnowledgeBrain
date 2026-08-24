@@ -39,4 +39,9 @@ cargo test --workspace
 scripts/fresh_schema_acceptance.sh
 (cd services/docreader && uvx ruff check . && uv run --with pyright pyright . && PYTHONPATH=.. uv run --with pytest pytest tests/)
 docker compose -f deploy/docker-compose.yml --env-file deploy/.env.example config -q
+npm ci --prefix web
+npm --prefix web run lint
+npm --prefix web run build
+npm --prefix web run test:e2e
+scripts/bidding_v1_deletion_scan.sh
 ```

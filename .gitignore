@@ -1,4 +1,5 @@
 /target
+/test-results/
 **/*.rs.bk
 .idea
 .vscode
@@ -10,6 +11,11 @@ fixtures/
 __pycache__/
 web/node_modules/
 web/dist/
+web/playwright-report/
+web/playwright-report-live/
+web/test-results/
+web/test-results-live/
+web/e2e/artifacts/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/

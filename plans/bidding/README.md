@@ -141,7 +141,7 @@ revision 用于 CAS 和快速失效，digest 用于证明内容；不得相互�
 + completed idempotency receipt
 ```
 
-任何 CAS、scope、hash 或 verifier 失败都零写。
+任何 CAS、scope、hash 或 verifier 失败都零领域写。涉及物理对象时，平台允许先建立受检、可过期的 upload staging reference；领域事务失败必须 abandon staging 并由 retention 回收，禁止留下无 registry/reference 的孤儿 blob。
 
 ### 5.3 人工边界
 
@@ -186,6 +186,8 @@ baseline 必须一次建立：
 ### 7.2 权限
 
 招投标 API/worker 只获得受检函数和必要读 view 权限；不能直接改不可变 artifact、current pointer、ObjectRegistry 或 outbox。平台角色与 retention 权限由 [`../platform/runtime-foundation.md`](../platform/runtime-foundation.md) 定义，fresh-schema acceptance 联合验证 allow/deny 矩阵。
+
+V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用户拥有的项目，所有 `/api/v1/bids/{project_id}/...` 路径先校验 owner。当前模型没有 Bid 成员或 API-key-to-Bid scope relation，因此这两类访问必须 fail-closed；若未来需要协作成员，先增加显式 membership/scope artifact 与受检授权合同，不能把“已认证”当作“可访问任意 Bid”。
 
 ## 8. 实施顺序
 

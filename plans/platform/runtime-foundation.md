@@ -79,6 +79,7 @@ retention outbox/tombstone
 
 - object key 只接受上述 canonical 形式；绝对路径、`..` 和 alias 全部拒绝；
 - 业务通过受检接口注册/移除 owner reference、读取 available 对象，不维护第二套 refcount；
+- API/worker 写物理 bytes 前必须先创建有时限的 `object_upload_staging` owner reference；业务事务通过平台内部接口把该 reference 原子转移给最终 owner，CAS/校验失败则显式 abandon 并进入 retention，进程崩溃遗留 staging 由 maintenance expiry 回收；
 - 对象仍被任何 reference 引用时不得进入 `deleting`；
 - 普通 API/worker 无物理删除权限，不能直接修改 registry、outbox 或 tombstone；
 - 同 digest 的 `deleted` 对象在 V1 稳定拒绝复活；

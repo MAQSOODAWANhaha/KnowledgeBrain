@@ -176,7 +176,7 @@ fn locate_state_path() -> Result<PathBuf, IntendedStateError> {
 mod tests {
     use super::*;
     use crate::{
-        TYPE_BID_CONVERT, TYPE_BID_EXTRACT, TYPE_BID_MATCH_ROUTE_V1, TYPE_BID_SECTION_RETRY,
+        TYPE_BID_CONVERT, TYPE_BID_EXTRACT, TYPE_BID_MATCH_ROUTE_V1, TYPE_BID_RENDER_SUBMISSION_V1,
         TYPE_CHUNK_EXTRACT, TYPE_IMAGE_MULTIMODAL, TYPE_QUESTION,
     };
 
@@ -237,13 +237,13 @@ mod tests {
     }
 
     #[test]
-    fn bid_four_enabled() {
+    fn bid_lanes_enabled() {
         let state = loaded();
         for task_type in [
             TYPE_BID_CONVERT,
             TYPE_BID_EXTRACT,
-            TYPE_BID_SECTION_RETRY,
             TYPE_BID_MATCH_ROUTE_V1,
+            TYPE_BID_RENDER_SUBMISSION_V1,
         ] {
             assert_eq!(
                 state.lane_for_task(task_type).map(|lane| lane.state),

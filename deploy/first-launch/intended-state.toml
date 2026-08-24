@@ -82,9 +82,9 @@ task_type = "bid:extract"
 state = "enabled"
 
 [[lanes]]
-task_type = "bid:section-retry"
+task_type = "bid:match-route:v1"
 state = "enabled"
 
 [[lanes]]
-task_type = "bid:match-route:v1"
+task_type = "bid:render-submission:v1"
 state = "enabled"

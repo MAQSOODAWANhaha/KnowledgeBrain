@@ -1,5 +1,6 @@
 //! HTTP: auth, catalog, ingest, retrieve. No parse / split / vector work here.
 
+mod bid_routes;
 mod err;
 mod routes;
 

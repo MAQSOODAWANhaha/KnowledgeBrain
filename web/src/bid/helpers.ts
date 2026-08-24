@@ -1,6 +1,27 @@
-import type { BookletPart, Clause, MatchUnit } from "../api";
+import type { BidDoc, Clause, MatchUnit } from "../api";
 
 export const NIL = "00000000-0000-0000-0000-000000000000";
+
+export const KIND_LABEL: Record<string, string> = {
+  technical: "技术",
+  qualification: "资格",
+  service: "服务",
+  pricing: "报价结构",
+  schedule_delivery: "交付",
+  schedule_payment: "付款",
+  evaluation: "评标",
+  procedural: "程序",
+};
+
+export function kindLabel(kind: string): string {
+  return KIND_LABEL[kind] || kind;
+}
+
+export function familyLabel(family: string | null): string {
+  if (family === "technical") return "技术匹配";
+  if (family === "commercial") return "商务匹配";
+  return "不进匹配";
+}
 
 export function fileLabel(s: string): string {
   if (s === "completed") return "已解析";
@@ -24,138 +45,62 @@ export function explainFileError(message: string, fileName?: string): string {
   return msg;
 }
 
-export function fileStage(doc: {
-  parse_status: string;
-  multimodal_status?: string;
-  multimodal_error?: string;
-  error_message?: string;
-  extract_status?: string | null;
-  extract_error?: string | null;
-  clause_count?: number;
-  file_name: string;
-}): { label: string; tone: "pine" | "amber" | "rose" | "gray"; desc: string; retryable: boolean } {
-  const err = explainFileError(doc.error_message || "", doc.file_name);
-  if (doc.parse_status === "failed" || (doc.parse_status === "pending" && err)) {
+export function fileStage(doc: BidDoc): {
+  label: string;
+  tone: "pine" | "amber" | "rose" | "gray";
+  desc: string;
+  retryable: boolean;
+} {
+  const err = explainFileError(doc.error_code || "", doc.file_name);
+  if (doc.parse_status === "failed") {
     return { label: "解析失败", tone: "rose", desc: err || "解析失败，可重试或换格式。", retryable: true };
   }
   if (doc.parse_status === "pending") {
     return { label: "排队解析", tone: "gray", desc: "已入库，等待转换。", retryable: false };
   }
   if (doc.parse_status === "processing") {
-    if (doc.multimodal_status === "running") {
-      return { label: "处理图像", tone: "amber", desc: "正在识别文件中的图片。", retryable: false };
-    }
-    if (doc.multimodal_status === "failed") {
-      return {
-        label: "图像失败",
-        tone: "rose",
-        desc: explainFileError(doc.multimodal_error || "图像处理失败", doc.file_name),
-        retryable: true,
-      };
-    }
     return { label: "解析中", tone: "amber", desc: "正在转成可抽取的文本。", retryable: false };
   }
-  if ((doc.error_message || "").includes("conversion_quality=thin")) {
-    return {
-      label: "转换偏瘦",
-      tone: "amber",
-      desc: "转换文本过短或缺少标题，抽取可能漏条款。可去评估手补。",
-      retryable: false,
-    };
-  }
-  if ((doc.error_message || "").includes("conversion_quality=tables_flat")) {
-    return {
-      label: "表格可能丢失",
-      tone: "amber",
-      desc: "Word/Excel 转换后没有表，抽取可能漏条款。可去评估手补。",
-      retryable: false,
-    };
-  }
-  if (doc.extract_status === "pending" || doc.extract_status === "running") {
-    return { label: "抽条款中", tone: "amber", desc: "文本已就绪，正在抽商务 / 技术条款。", retryable: false };
-  }
-  if (doc.extract_status === "failed") {
-    return {
-      label: "抽取失败",
-      tone: "rose",
-      desc: doc.extract_error || "条款抽取失败，可重试。",
-      retryable: true,
-    };
-  }
-  const n = doc.clause_count ?? 0;
-  if ((doc.extract_error || "").includes("partial_failure") || (doc.extract_error || "").includes("fallback")) {
-    return {
-      label: n > 0 ? `需复核 ${n}` : "需复核",
-      tone: "amber",
-      desc: "抽取用了规则兜底或覆盖不全，请在评估里重点复核。",
-      retryable: true,
-    };
-  }
-  if (n > 0) {
-    return { label: `已抽出 ${n} 条`, tone: "pine", desc: "解析完成，可去评估确认条款。", retryable: false };
-  }
-  return { label: "已解析", tone: "pine", desc: "文本已就绪，等待抽取或可去评估手补。", retryable: false };
-}
-
-export function suggestionLabel(s?: string): string {
-  if (s === "cover") return "覆盖";
-  if (s === "pending") return "待勾选";
-  if (s === "need_rematch") return "需重配";
-  if (s === "unmet" || s === "uncovered") return "未覆盖";
-  return s || "—";
-}
-
-export function assessmentLabel(s?: string): string {
-  if (s === "meet") return "满足";
-  if (s === "partial") return "部分";
-  if (s === "deviate") return "偏离";
-  if (s === "fail") return "不响应";
-  return "未评";
+  return { label: "已解析", tone: "pine", desc: "文本已就绪，可确认事实与条款。", retryable: false };
 }
 
 export function partTitle(key: string, units: MatchUnit[]): string {
-  if (key === "1") return "① 扉页";
-  if (key === "3") return "③ 偏离表";
-  if (key === "4") return "④ 资格材料";
-  if (key === "5") return "⑤ 商务缺件";
+  if (key === "1") return "① 项目概况";
+  if (key === "3") return "③ 总体方案";
+  if (key === "4") return "④ 公司资质";
+  if (key === "5") return "⑤ 偏离与缺件";
+  if (key === "6:letter") return "⑥ 投标函";
+  if (key === "6:authorization") return "⑥ 授权材料";
+  if (key === "6:quote") return "⑥ 报价表";
+  if (key === "6:implementation_plan") return "⑥ 实施计划";
+  if (key === "6:procedural") return "⑥ 程序检查";
   if (key === "2:unsectioned") return "② 未归段";
   if (key.startsWith("2:")) {
     const id = key.slice(2);
     const u = units.find((x) => x.id === id);
-    return `② ${u?.heading_path || "技术段"}`;
+    return `② ${u?.heading_path || "技术单元"}`;
   }
   return key;
 }
 
-export function unitIdForView(view: string): string | null {
-  if (view === "commercial" || view === "booklet" || view === "files") return null;
-  if (view === "unsectioned") return NIL;
-  return view;
-}
-
-export function bookletKeyFor(view: string, part: string, selected: string | null, clauses: Clause[]): string {
-  if (view === "booklet") return part;
-  if (view === "commercial") {
-    const hit = clauses.find((c) => c.id === selected)?.hit_outcome;
-    return hit === "miss" ? "5" : "4";
-  }
-  if (view === "unsectioned") return "2:unsectioned";
-  return `2:${view}`;
+export function catalogKeys(required: string[], units: MatchUnit[]): string[] {
+  if (required.length) return required;
+  const twos = units
+    .filter((u) => u.kind === "technical" || u.kind === "unsectioned")
+    .map((u) => (u.id && u.id !== NIL ? `2:${u.id}` : "2:unsectioned"));
+  return ["1", ...twos, "3", "4", "5", "6:letter", "6:authorization", "6:quote", "6:implementation_plan", "6:procedural"];
 }
 
 export function liveClauses(clauses: Clause[], view: string): Clause[] {
   const open = clauses.filter((c) => c.status !== "superseded");
+  if (view === "pending") return open.filter((c) => c.status === "draft");
+  if (view === "confirmed") return open.filter((c) => c.status === "confirmed");
   if (view === "commercial") return open.filter((c) => c.family === "commercial");
-  if (view === "booklet" || view === "files") return [];
-  if (view === "unsectioned") return open.filter((c) => c.family === "technical" && (!c.unit_id || c.unit_id === NIL));
-  return open.filter((c) => c.family === "technical" && c.unit_id === view);
+  if (view === "unsectioned") return open.filter((c) => c.kind === "technical");
+  if (view === "procedural") return open.filter((c) => c.kind === "procedural");
+  return open;
 }
 
-export function catalogKeys(units: MatchUnit[], booklet: BookletPart[]): string[] {
-  const tech = units.filter((u) => u.kind === "technical");
-  const twos = [
-    ...tech.map((u) => `2:${u.id}`),
-    "2:unsectioned",
-  ].filter((key) => booklet.some((p) => p.key === key));
-  return ["1", ...twos, "3", "4", "5"];
+export function shanghaiEndOfDay(date: string): string {
+  return `${date}T23:59:59+08:00`;
 }

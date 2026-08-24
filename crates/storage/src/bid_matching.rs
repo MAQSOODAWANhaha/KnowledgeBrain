@@ -12,15 +12,12 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, Transaction};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 const CLAIM_LEASE_MS: i32 = 300_000;
 const LEASE_POLICY_GENERATION: i64 = 1;
 const STAGING_TTL_MS: i64 = 900_000;
-const MAX_ACTIVE_STAGING_PER_PROJECT: i64 = 8;
-const MAX_STAGING_ROWS_PER_PROJECT: i64 = 100_000;
-const MAX_STAGING_BYTES_PER_PROJECT: i64 = 64 * 1024 * 1024;
 const MAX_BATCH_BYTES: usize = 1024 * 1024;
 const MAX_BATCH_ITEMS: usize = 10_000;
 const RETRIEVAL_MAX_HITS: u32 = 64;
@@ -67,6 +64,41 @@ pub struct ScheduleReceipt {
 pub struct ScheduleEnvironment {
     pub environment: String,
     pub max_attempts: i32,
+}
+
+#[derive(Debug, Clone)]
+pub enum ScheduleMutationContext {
+    Human {
+        actor: String,
+        idempotency_key: String,
+    },
+    System,
+}
+
+impl ScheduleMutationContext {
+    pub fn human(actor: String, idempotency_key: String) -> Self {
+        Self::Human {
+            actor,
+            idempotency_key,
+        }
+    }
+
+    pub fn system() -> Self {
+        Self::System
+    }
+
+    fn identity(&self, project_id: Uuid, watermark: i64) -> (String, String) {
+        match self {
+            Self::Human {
+                actor,
+                idempotency_key,
+            } => (actor.clone(), idempotency_key.clone()),
+            Self::System => (
+                "system:matching-publication".into(),
+                format!("matching-schedule:{project_id}:{watermark}"),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,15 +352,17 @@ pub async fn schedule_dirty_project(
     pool: &PgPool,
     project_id: Uuid,
     environment: ScheduleEnvironment,
+    context: &ScheduleMutationContext,
 ) -> Result<Option<ScheduleReceipt>, sqlx::Error> {
     let port = crate::knowledge_retrieval::PostgresKnowledgeRetrievalAdapter::new(pool.clone());
-    schedule_dirty_project_with_port(pool, project_id, environment, &port).await
+    schedule_dirty_project_with_port(pool, project_id, environment, context, &port).await
 }
 
 async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
     pool: &PgPool,
     project_id: Uuid,
     environment: ScheduleEnvironment,
+    context: &ScheduleMutationContext,
     port: &P,
 ) -> Result<Option<ScheduleReceipt>, sqlx::Error> {
     if !(1..=32).contains(&environment.max_attempts)
@@ -340,7 +374,7 @@ async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
         return Err(protocol("invalid matching scheduling policy"));
     }
     let project =
-        sqlx::query("SELECT status,matching_mutation_watermark FROM bid_projects WHERE id=$1")
+        sqlx::query("SELECT status,matching_mutation_watermark FROM bidding_projects WHERE id=$1")
             .bind(project_id)
             .fetch_optional(pool)
             .await?
@@ -349,23 +383,46 @@ async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
         return Err(protocol("bid project is not open"));
     }
     let watermark: i64 = project.get("matching_mutation_watermark");
+    let (actor, idempotency_key) = context.identity(project_id, watermark);
+    let request_bytes = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "project_id": project_id,
+        "expected_watermark": watermark,
+        "environment": environment.environment,
+        "max_attempts": environment.max_attempts
+    }))
+    .expect("matching schedule request serializes");
+    let request_sha256 = sha256_hex(&request_bytes);
     let already_scheduled: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM bid_matching_manifests WHERE project_id=$1 AND mutation_watermark=$2)",
+        "SELECT EXISTS(SELECT 1 FROM bidding_current_routes WHERE project_id=$1 AND mutation_watermark=$2)",
     )
     .bind(project_id)
     .bind(watermark)
     .fetch_one(pool)
     .await?;
     if already_scheduled {
-        return Ok(None);
+        return persist_schedule(
+            pool,
+            PersistScheduleInput {
+                project_id,
+                watermark,
+                max_attempts: environment.max_attempts,
+                payload: &serde_json::json!({}),
+                actor: &actor,
+                idempotency_key: &idempotency_key,
+                request_bytes: &request_bytes,
+                request_sha256: &request_sha256,
+            },
+        )
+        .await;
     }
 
     let clause_rows = sqlx::query(
         "SELECT c.id,c.text,c.family,
-                CASE WHEN c.family='technical' THEN COALESCE(span.section_artifact_id,
+                CASE WHEN c.family='technical' THEN COALESCE(
+                    (c.current_source_span_v2->>'section_artifact_id')::uuid,
                     '00000000-0000-0000-0000-000000000000'::uuid) ELSE NULL END AS unit_id
-           FROM bid_clauses c
-           LEFT JOIN bid_source_span_artifacts span ON span.id=c.current_source_span_artifact_id
+           FROM bidding_current_clauses c
           WHERE c.project_id=$1 AND c.status='confirmed' AND c.family IS NOT NULL
           ORDER BY c.family,c.id",
     )
@@ -571,183 +628,134 @@ async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
         .expect("frozen scope serializes"),
     );
 
-    let mut tx = pool.begin().await?;
-    let current = sqlx::query(
-        "SELECT status,matching_mutation_watermark FROM bid_projects WHERE id=$1 FOR UPDATE",
-    )
-    .bind(project_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    if current.get::<String, _>("status") != "open"
-        || current.get::<i64, _>("matching_mutation_watermark") != watermark
-    {
-        tx.rollback().await?;
-        return Err(protocol("matching schedule fence lost"));
-    }
-    let duplicate: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM bid_matching_manifests WHERE project_id=$1 AND mutation_watermark=$2)",
-    )
-    .bind(project_id)
-    .bind(watermark)
-    .fetch_one(&mut *tx)
-    .await?;
-    if duplicate {
-        tx.rollback().await?;
-        return Ok(None);
-    }
-    let generation: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(max(generation),0)+1 FROM bid_matching_manifests WHERE project_id=$1",
-    )
-    .bind(project_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    let manifest_payload = serde_json::json!({
-        "schema_version": 1,
-        "manifest_id": manifest_id,
-        "project_id": project_id,
-        "generation": generation,
-        "mutation_watermark": watermark,
-        "requirement_set_sha256": requirement_set_sha256,
-        "eligible_scope_sha256": eligible_scope_sha256,
-    });
-    let manifest_bytes =
-        serde_json::to_vec(&manifest_payload).expect("manifest payload serializes");
-    sqlx::query(
-        "INSERT INTO bid_matching_manifests
-         (id,project_id,generation,mutation_watermark,requirement_set_sha256,eligible_scope_sha256,
-          canonical_payload,content_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
-    )
-    .bind(manifest_id)
-    .bind(project_id)
-    .bind(generation)
-    .bind(watermark)
-    .bind(&requirement_set_sha256)
-    .bind(&eligible_scope_sha256)
-    .bind(&manifest_bytes)
-    .bind(sha256_hex(&manifest_bytes))
-    .execute(&mut *tx)
-    .await?;
-    for route in &routes {
-        let (kind, unit_id) = route.route.parts();
-        sqlx::query(
-            "INSERT INTO bid_matching_routes
-             (id,manifest_id,project_id,route_kind,unit_id,ordinal,empty_policy,route_scope_sha256)
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
-        )
-        .bind(route.id)
-        .bind(manifest_id)
-        .bind(project_id)
-        .bind(kind)
-        .bind(unit_id)
-        .bind(route.ordinal as i32)
-        .bind(&route.empty_policy)
-        .bind(&route.scope_sha256)
-        .execute(&mut *tx)
-        .await?;
-    }
-    for requirement in &requirements {
-        sqlx::query(
-            "INSERT INTO bid_matching_requirement_artifacts
-             (id,manifest_id,route_id,clause_id,ordinal,requirement_text,requirement_sha256)
-             VALUES($1,$2,$3,$4,$5,$6,$7)",
-        )
-        .bind(requirement.id)
-        .bind(manifest_id)
-        .bind(requirement.route_id)
-        .bind(requirement.clause_id)
-        .bind(requirement.ordinal as i32)
-        .bind(&requirement.text)
-        .bind(&requirement.sha256)
-        .execute(&mut *tx)
-        .await?;
-    }
-    for product in &products {
-        sqlx::query(
-            "INSERT INTO bid_matching_product_version_artifacts
-             (id,manifest_id,product_id,product_version_id,workspace_kind,frozen_display_name,identity_sha256)
-             VALUES($1,$2,$3,$4,$5,$6,$7)",
-        )
-        .bind(product.id)
-        .bind(manifest_id)
-        .bind(product.product_id)
-        .bind(product.product_version_id)
-        .bind(&product.workspace_kind)
-        .bind(&product.frozen_display_name)
-        .bind(&product.identity_sha256)
-        .execute(&mut *tx)
-        .await?;
-    }
+    let mut memberships = Vec::new();
     for route in &routes {
         let mut members: BTreeSet<(Uuid, Uuid)> = BTreeSet::new();
         for hit in frozen_hits.iter().filter(|hit| hit.route_id == route.id) {
             members.insert((hit.hit.product_version_id, hit.product_version_artifact_id));
         }
         for (ordinal, (_, artifact_id)) in members.into_iter().enumerate() {
-            sqlx::query(
-                "INSERT INTO bid_matching_route_memberships
-                 (route_id,product_version_artifact_id,route_product_ordinal) VALUES($1,$2,$3)",
-            )
-            .bind(route.id)
-            .bind(artifact_id)
-            .bind(ordinal as i32)
-            .execute(&mut *tx)
-            .await?;
+            memberships.push(serde_json::json!({
+                "route_id": route.id,
+                "product_version_artifact_id": artifact_id,
+                "route_product_ordinal": ordinal
+            }));
         }
     }
-    for frozen in &frozen_hits {
-        sqlx::query(
-            "INSERT INTO bid_matching_frozen_retrieved_hits
-             (id,manifest_id,route_id,requirement_artifact_id,product_version_artifact_id,
-              document_id,source_chunk_id,frozen_document_display_name,chunk_utf8,chunk_sha256,
-              chunk_byte_length,retrieval_rank,retrieval_raw_score,quote_start_offset,quote_end_offset,
-              offset_unit,retrieval_contract_version)
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8,convert_to($9,'UTF8'),$10,$11,$12,$13,$14,$15,$16,$17)",
-        )
-        .bind(frozen.id)
-        .bind(manifest_id)
-        .bind(frozen.route_id)
-        .bind(frozen.requirement_artifact_id)
-        .bind(frozen.product_version_artifact_id)
-        .bind(frozen.hit.document_id)
-        .bind(frozen.hit.source_chunk_id)
-        .bind(&frozen.hit.frozen_document_display_name)
-        .bind(&frozen.hit.chunk_utf8)
-        .bind(&frozen.hit.chunk_sha256)
-        .bind(frozen.hit.chunk_byte_length as i64)
-        .bind(frozen.hit.retrieval_rank as i32)
-        .bind(frozen.hit.retrieval_raw_score.parse::<Decimal>().map_err(|_| protocol("invalid retrieval score"))?)
-        .bind(frozen.hit.quote_start_offset as i64)
-        .bind(frozen.hit.quote_end_offset as i64)
-        .bind(&frozen.hit.offset_unit)
-        .bind(&frozen.hit.retrieval_contract_version)
-        .execute(&mut *tx)
-        .await?;
-    }
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "manifest_id": manifest_id,
+        "project_id": project_id,
+        "mutation_watermark": watermark,
+        "requirement_set_sha256": requirement_set_sha256,
+        "eligible_scope_sha256": eligible_scope_sha256,
+        "routes": routes.iter().map(|route| {
+            let (kind, unit_id) = route.route.parts();
+            serde_json::json!({
+                "id": route.id,
+                "route_kind": kind,
+                "unit_id": unit_id,
+                "ordinal": route.ordinal,
+                "empty_policy": route.empty_policy,
+                "route_scope_sha256": route.scope_sha256
+            })
+        }).collect::<Vec<_>>(),
+        "requirements": requirements.iter().map(|row| serde_json::json!({
+            "id": row.id,
+            "route_id": row.route_id,
+            "clause_id": row.clause_id,
+            "ordinal": row.ordinal,
+            "text": row.text,
+            "sha256": row.sha256
+        })).collect::<Vec<_>>(),
+        "products": products.iter().map(|row| serde_json::json!({
+            "id": row.id,
+            "product_id": row.product_id,
+            "product_version_id": row.product_version_id,
+            "workspace_kind": row.workspace_kind,
+            "frozen_display_name": row.frozen_display_name,
+            "identity_sha256": row.identity_sha256
+        })).collect::<Vec<_>>(),
+        "memberships": memberships,
+        "frozen_hits": frozen_hits.iter().map(|row| serde_json::json!({
+            "id": row.id,
+            "route_id": row.route_id,
+            "requirement_artifact_id": row.requirement_artifact_id,
+            "product_version_artifact_id": row.product_version_artifact_id,
+            "document_id": row.hit.document_id,
+            "source_chunk_id": row.hit.source_chunk_id,
+            "frozen_document_display_name": row.hit.frozen_document_display_name,
+            "chunk_utf8": row.hit.chunk_utf8,
+            "chunk_sha256": row.hit.chunk_sha256,
+            "chunk_byte_length": row.hit.chunk_byte_length,
+            "retrieval_rank": row.hit.retrieval_rank,
+            "retrieval_raw_score": row.hit.retrieval_raw_score,
+            "quote_start_offset": row.hit.quote_start_offset,
+            "quote_end_offset": row.hit.quote_end_offset,
+            "offset_unit": row.hit.offset_unit,
+            "retrieval_contract_version": row.hit.retrieval_contract_version
+        })).collect::<Vec<_>>()
+    });
+    persist_schedule(
+        pool,
+        PersistScheduleInput {
+            project_id,
+            watermark,
+            max_attempts: environment.max_attempts,
+            payload: &payload,
+            actor: &actor,
+            idempotency_key: &idempotency_key,
+            request_bytes: &request_bytes,
+            request_sha256: &request_sha256,
+        },
+    )
+    .await
+}
+
+struct PersistScheduleInput<'a> {
+    project_id: Uuid,
+    watermark: i64,
+    max_attempts: i32,
+    payload: &'a serde_json::Value,
+    actor: &'a str,
+    idempotency_key: &'a str,
+    request_bytes: &'a [u8],
+    request_sha256: &'a str,
+}
+
+async fn persist_schedule(
+    pool: &PgPool,
+    input: PersistScheduleInput<'_>,
+) -> Result<Option<ScheduleReceipt>, sqlx::Error> {
+    let scheduled: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT kb_bid_matching_schedule($1,$2,$3,$4,$5,$6,$7,$8)")
+            .bind(input.project_id)
+            .bind(input.watermark)
+            .bind(input.max_attempts)
+            .bind(input.payload)
+            .bind(input.actor)
+            .bind(input.idempotency_key)
+            .bind(input.request_bytes)
+            .bind(input.request_sha256)
+            .fetch_one(pool)
+            .await?;
+    let Some(scheduled) = scheduled else {
+        return Ok(None);
+    };
+    let manifest_id = scheduled
+        .get("manifest_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| protocol("matching schedule receipt missing manifest"))?;
     let snapshots = snapshot_identity(manifest_id);
-    let mut jobs = Vec::new();
-    for route in &routes {
-        let job_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO bid_matching_jobs
-             (id,project_id,manifest_id,route_id,status,max_attempts,claim_lease_ms,
-              lease_policy_generation,created_at)
-             VALUES($1,$2,$3,$4,'pending',$5,$6,$7,clock_timestamp())",
-        )
-        .bind(job_id)
-        .bind(project_id)
-        .bind(manifest_id)
-        .bind(route.id)
-        .bind(environment.max_attempts)
-        .bind(CLAIM_LEASE_MS)
-        .bind(LEASE_POLICY_GENERATION)
-        .execute(&mut *tx)
-        .await?;
-        jobs.push(ScheduledJob {
-            id: job_id,
-            snapshots,
-        });
-    }
-    tx.commit().await?;
+    let jobs = scheduled
+        .get("job_ids")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| protocol("matching schedule receipt missing jobs"))?
+        .iter()
+        .filter_map(|value| value.as_str().and_then(|value| Uuid::parse_str(value).ok()))
+        .map(|id| ScheduledJob { id, snapshots })
+        .collect();
     Ok(Some(ScheduleReceipt { manifest_id, jobs }))
 }
 
@@ -756,58 +764,47 @@ pub async fn claim_and_load(
     job_id: Uuid,
     snapshots: EnvelopeSnapshotIdentity,
 ) -> Result<Option<ClaimedMatchingRequest>, sqlx::Error> {
+    let token = Uuid::new_v4();
+    let claimed: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT kb_bid_matching_claim($1,$2)")
+            .bind(job_id)
+            .bind(token)
+            .fetch_one(pool)
+            .await?;
+    let Some(claimed) = claimed else {
+        return Ok(None);
+    };
+    let manifest_id = claimed
+        .get("manifest_id")
+        .and_then(|value| value.as_str())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| protocol("matching claim missing manifest"))?;
+    if snapshots != snapshot_identity(manifest_id) {
+        return Err(protocol("matching envelope snapshot mismatch"));
+    }
     let mut tx = pool.begin().await?;
-    let Some(job) = sqlx::query(
+    let job = sqlx::query(
         "SELECT j.*,m.generation,m.mutation_watermark,r.route_kind,r.unit_id,r.empty_policy
            FROM bid_matching_jobs j
            JOIN bid_matching_manifests m ON m.id=j.manifest_id
            JOIN bid_matching_routes r ON r.id=j.route_id
-           JOIN bid_projects p ON p.id=j.project_id
-          WHERE j.id=$1 AND j.status='pending' AND p.status='open'
-            AND p.matching_mutation_watermark=m.mutation_watermark
-            AND m.generation=(SELECT max(m2.generation) FROM bid_matching_manifests m2 WHERE m2.project_id=m.project_id)
-          FOR UPDATE OF j",
-    )
-    .bind(job_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    else {
-        tx.rollback().await?;
-        return Ok(None);
-    };
-    if snapshots != snapshot_identity(job.get("manifest_id")) {
-        tx.rollback().await?;
-        return Err(protocol("matching envelope snapshot mismatch"));
-    }
-    let attempt: i32 = sqlx::query_scalar(
-        "SELECT COALESCE(max(attempt),0)+1 FROM bid_matching_job_claims WHERE job_id=$1",
+          WHERE j.id=$1",
     )
     .bind(job_id)
     .fetch_one(&mut *tx)
     .await?;
-    if attempt > job.get::<i32, _>("max_attempts") {
-        sqlx::query("UPDATE bid_matching_jobs SET status='failed',error_code='ATTEMPTS_EXHAUSTED',finished_at=clock_timestamp() WHERE id=$1")
-            .bind(job_id).execute(&mut *tx).await?;
-        tx.commit().await?;
-        return Ok(None);
-    }
-    let token = Uuid::new_v4();
-    let lease_ms: i32 = job.get("claim_lease_ms");
-    let lease_generation: i64 = job.get("lease_policy_generation");
-    sqlx::query(
-        "INSERT INTO bid_matching_job_claims
-         (job_id,attempt,claim_token,claim_lease_ms,lease_policy_generation,claimed_at,heartbeat_at,status)
-         VALUES($1,$2,$3,$4,$5,clock_timestamp(),clock_timestamp(),'running')",
-    )
-    .bind(job_id)
-    .bind(attempt)
-    .bind(token)
-    .bind(lease_ms)
-    .bind(lease_generation)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query("UPDATE bid_matching_jobs SET status='running',active_attempt=$2,started_at=COALESCE(started_at,clock_timestamp()) WHERE id=$1")
-        .bind(job_id).bind(attempt).execute(&mut *tx).await?;
+    let attempt = claimed
+        .get("attempt")
+        .and_then(|value| value.as_i64())
+        .ok_or_else(|| protocol("matching claim missing attempt"))? as i32;
+    let lease_ms = claimed
+        .get("claim_lease_ms")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(CLAIM_LEASE_MS as i64) as i32;
+    let lease_generation = claimed
+        .get("lease_policy_generation")
+        .and_then(|value| value.as_i64())
+        .unwrap_or(LEASE_POLICY_GENERATION);
     let request = load_claimed(&mut tx, &job, token, attempt, lease_ms, lease_generation).await?;
     tx.commit().await?;
     Ok(Some(request))
@@ -899,40 +896,16 @@ pub async fn heartbeat_claim(
     pool: &PgPool,
     request: &ClaimedMatchingRequest,
 ) -> Result<bool, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let result = sqlx::query(
-        "UPDATE bid_matching_job_claims claim SET heartbeat_at=clock_timestamp()
-          FROM bid_matching_jobs job
-         WHERE claim.job_id=$1 AND claim.attempt=$2 AND claim.claim_token=$3
-           AND claim.claim_lease_ms=$4 AND claim.lease_policy_generation=$5
-           AND claim.status='running' AND job.id=claim.job_id AND job.status='running'
-           AND job.active_attempt=claim.attempt
-           AND claim.heartbeat_at + make_interval(secs => claim.claim_lease_ms::double precision/1000.0) > clock_timestamp()",
-    )
-    .bind(request.job_id)
-    .bind(request.claim.attempt)
-    .bind(request.claim.token)
-    .bind(request.claim.claim_lease_ms)
-    .bind(request.claim.lease_policy_generation)
-    .execute(&mut *tx)
-    .await?;
-    if result.rows_affected() == 1 {
-        sqlx::query(
-            "UPDATE bid_matching_staging_sets SET expires_at=clock_timestamp()+make_interval(secs=>$4::double precision/1000.0)
-             WHERE job_id=$1 AND attempt=$2 AND claim_token=$3 AND state='active'",
-        )
+    let ok: bool = sqlx::query_scalar("SELECT kb_bid_matching_heartbeat($1,$2,$3,$4,$5,$6)")
         .bind(request.job_id)
-        .bind(request.claim.attempt)
         .bind(request.claim.token)
-        .bind(STAGING_TTL_MS)
-        .execute(&mut *tx)
+        .bind(request.claim.attempt)
+        .bind(request.claim.claim_lease_ms)
+        .bind(request.claim.lease_policy_generation)
+        .bind(STAGING_TTL_MS as i32)
+        .fetch_one(pool)
         .await?;
-        tx.commit().await?;
-        Ok(true)
-    } else {
-        tx.rollback().await?;
-        Ok(false)
-    }
+    if ok { Ok(true) } else { Ok(false) }
 }
 
 pub async fn publish_route(
@@ -947,7 +920,7 @@ pub async fn publish_route(
         sqlx::query_as::<_, (String, Option<Uuid>, Option<String>)>(
             "SELECT job.status,job.completed_report_id,report.content_sha256
            FROM bid_matching_jobs job
-           LEFT JOIN bid_matching_reports report ON report.id=job.completed_report_id
+           LEFT JOIN bidding_matching_report_history report ON report.id=job.completed_report_id
           WHERE job.id=$1",
         )
         .bind(claimed.job_id)
@@ -1009,8 +982,6 @@ async fn open_staging_set(
     report: &PublishRouteV2,
     batches: &[StageBatch],
 ) -> Result<Uuid, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    lock_live_claim(&mut tx, claimed).await?;
     let expected_item_count = batches
         .iter()
         .map(|batch| batch.item_count as i64)
@@ -1036,68 +1007,26 @@ async fn open_staging_set(
         )
         .as_bytes(),
     );
-    if let Some(row) = sqlx::query(
-        "SELECT * FROM bid_matching_staging_sets
-         WHERE job_id=$1 AND claim_token=$2 AND attempt=$3 AND route_id=$4 FOR UPDATE",
-    )
-    .bind(claimed.job_id)
-    .bind(claimed.claim.token)
-    .bind(claimed.claim.attempt)
-    .bind(claimed.route_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    {
-        if !staging_set_matches_claim(&row, claimed)
-            || row.get::<Uuid, _>("report_nonce") != report.report_nonce
-            || row.get::<String, _>("open_payload_sha256") != open_hash
-        {
-            return Err(protocol("OPEN_STAGING_PAYLOAD_MISMATCH"));
-        }
-        let state: String = row.get("state");
-        if state == "expired" || state == "failed" {
-            return Err(protocol("staging set is terminal"));
-        }
-        let id = row.get("id");
-        tx.commit().await?;
-        return Ok(id);
-    }
-    let active: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM bid_matching_staging_sets WHERE project_id=$1 AND state='active'",
-    )
-    .bind(claimed.project_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    if active >= MAX_ACTIVE_STAGING_PER_PROJECT {
-        return Err(protocol("STAGING_ACTIVE_SET_QUOTA_EXCEEDED"));
-    }
-    let id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO bid_matching_staging_sets
-         (id,job_id,route_id,claim_token,attempt,manifest_id,project_id,generation,mutation_watermark,
-          report_nonce,state,expires_at,open_payload_sha256,expected_batch_count,expected_item_count,
-          expected_byte_length,staged_item_count,staged_byte_length)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'active',
-          clock_timestamp()+make_interval(secs=>$11::double precision/1000.0),$12,$13,$14,$15,0,0)",
-    )
-    .bind(id)
-    .bind(claimed.job_id)
-    .bind(claimed.route_id)
-    .bind(claimed.claim.token)
-    .bind(claimed.claim.attempt)
-    .bind(claimed.manifest_id)
-    .bind(claimed.project_id)
-    .bind(claimed.generation)
-    .bind(claimed.mutation_watermark)
-    .bind(report.report_nonce)
-    .bind(STAGING_TTL_MS)
-    .bind(open_hash)
-    .bind(batches.len() as i32)
-    .bind(expected_item_count)
-    .bind(expected_byte_length)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(id)
+    let payload = serde_json::json!({
+        "job_id": claimed.job_id,
+        "claim_token": claimed.claim.token,
+        "attempt": claimed.claim.attempt,
+        "route_id": claimed.route_id,
+        "manifest_id": claimed.manifest_id,
+        "project_id": claimed.project_id,
+        "generation": claimed.generation,
+        "mutation_watermark": claimed.mutation_watermark,
+        "report_nonce": report.report_nonce,
+        "open_payload_sha256": open_hash,
+        "expected_batch_count": batches.len(),
+        "expected_item_count": expected_item_count,
+        "expected_byte_length": expected_byte_length,
+        "ttl_ms": STAGING_TTL_MS
+    });
+    sqlx::query_scalar("SELECT kb_bid_matching_open_staging($1)")
+        .bind(payload)
+        .fetch_one(pool)
+        .await
 }
 
 fn stage_collections(report: &PublishRouteV2) -> Result<Vec<StageBatch>, sqlx::Error> {
@@ -1165,379 +1094,48 @@ async fn stage_batch(
     staging_id: Uuid,
     batch: StageBatch,
 ) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    lock_live_claim(&mut tx, claimed).await?;
-    let set = sqlx::query(
-        "SELECT * FROM bid_matching_staging_sets WHERE id=$1 AND state='active' AND expires_at>clock_timestamp() FOR UPDATE",
-    )
-    .bind(staging_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| protocol("staging set is not active"))?;
-    if set.get::<Uuid, _>("job_id") != claimed.job_id || !staging_set_matches_claim(&set, claimed) {
-        return Err(protocol("staging claim mismatch"));
-    }
-    let payload_sha256 = sha256_hex(&batch.bytes);
-    if let Some(existing) = sqlx::query(
-        "SELECT payload_sha256,canonical_items FROM bid_matching_staged_batches
-         WHERE staging_set_id=$1 AND batch_ordinal=$2",
-    )
-    .bind(staging_id)
-    .bind(batch.ordinal)
-    .fetch_optional(&mut *tx)
-    .await?
-    {
-        if existing.get::<String, _>("payload_sha256") != payload_sha256
-            || existing.get::<Vec<u8>, _>("canonical_items") != batch.bytes
-        {
-            return Err(protocol("STAGING_BATCH_PAYLOAD_MISMATCH"));
-        }
-        tx.commit().await?;
-        return Ok(());
-    }
-    if batch.ordinal >= set.get::<i32, _>("expected_batch_count")
-        || set.get::<i64, _>("staged_item_count") + batch.item_count as i64
-            > set.get::<i64, _>("expected_item_count")
-        || set.get::<i64, _>("staged_byte_length") + batch.bytes.len() as i64
-            > set.get::<i64, _>("expected_byte_length")
-    {
-        return Err(protocol("STAGING_OPEN_DECLARATION_MISMATCH"));
-    }
-    let project_totals: (i64, i64) = sqlx::query_as(
-        "SELECT COALESCE(sum(staged_item_count),0)::bigint,
-                COALESCE(sum(staged_byte_length),0)::bigint
-           FROM bid_matching_staging_sets WHERE project_id=$1 AND state='active'",
-    )
-    .bind(claimed.project_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    if project_totals.0 + batch.item_count as i64 > MAX_STAGING_ROWS_PER_PROJECT
-        || project_totals.1 + batch.bytes.len() as i64 > MAX_STAGING_BYTES_PER_PROJECT
-    {
-        return Err(protocol("STAGING_PROJECT_QUOTA_EXCEEDED"));
-    }
-    sqlx::query(
-        "INSERT INTO bid_matching_staged_batches
-         (staging_set_id,batch_ordinal,collection_kind,canonical_items,payload_sha256,item_count,byte_length)
-         VALUES($1,$2,$3,$4,$5,$6,$7)",
-    )
-    .bind(staging_id)
-    .bind(batch.ordinal)
-    .bind(batch.kind)
-    .bind(&batch.bytes)
-    .bind(payload_sha256)
-    .bind(batch.item_count as i32)
-    .bind(batch.bytes.len() as i64)
-    .execute(&mut *tx)
-    .await?;
-    stage_typed_rows(&mut tx, staging_id, batch.ordinal, batch.kind, &batch.bytes).await?;
-    sqlx::query(
-        "UPDATE bid_matching_staging_sets SET staged_item_count=staged_item_count+$2,
-          staged_byte_length=staged_byte_length+$3 WHERE id=$1",
-    )
-    .bind(staging_id)
-    .bind(batch.item_count as i64)
-    .bind(batch.bytes.len() as i64)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
+    let items = stage_batch_items(batch.kind, &batch.bytes)?;
+    let payload = serde_json::json!({
+        "staging_set_id": staging_id,
+        "job_id": claimed.job_id,
+        "claim_token": claimed.claim.token,
+        "attempt": claimed.claim.attempt,
+        "batch_ordinal": batch.ordinal,
+        "collection_kind": batch.kind,
+        "canonical_items_b64": base64_encode(&batch.bytes),
+        "payload_sha256": sha256_hex(&batch.bytes),
+        "item_count": batch.item_count,
+        "byte_length": batch.bytes.len(),
+        "items": items
+    });
+    sqlx::query("SELECT kb_bid_matching_stage_batch($1)")
+        .bind(payload)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
-async fn stage_typed_rows(
-    tx: &mut Transaction<'_, Postgres>,
-    staging_id: Uuid,
-    batch_ordinal: i32,
-    kind: &str,
-    bytes: &[u8],
-) -> Result<(), sqlx::Error> {
-    match kind {
-        "source_artifacts" => {
-            for (item_ordinal, row) in serde_json::from_slice::<Vec<StagedSourceArtifactV1>>(bytes)
-                .map_err(|error| protocol(error.to_string()))?
-                .into_iter()
-                .enumerate()
-            {
-                sqlx::query(
-                    "INSERT INTO bid_matching_staged_source_artifacts
-                  (staging_set_id,id,batch_ordinal,item_ordinal,product_version_artifact_id,
-                   document_id,source_chunk_id,frozen_document_display_name,chunk_utf8,chunk_sha256,
-                   chunk_byte_length,retrieval_rank,retrieval_raw_score,retrieval_contract_version)
-                  VALUES($1,$2,$3,$4,$5,$6,$7,$8,convert_to($9,'UTF8'),$10,$11,$12,$13,$14)",
-                )
-                .bind(staging_id)
-                .bind(row.id)
-                .bind(batch_ordinal)
-                .bind(item_ordinal as i32)
-                .bind(row.product_version_artifact_id)
-                .bind(row.document_id)
-                .bind(row.source_chunk_id)
-                .bind(row.frozen_document_display_name)
-                .bind(row.chunk_utf8)
-                .bind(row.chunk_sha256)
-                .bind(row.chunk_byte_length as i64)
-                .bind(row.retrieval_rank as i32)
-                .bind(
-                    row.retrieval_raw_score
-                        .parse::<Decimal>()
-                        .map_err(|_| protocol("invalid staged source score"))?,
-                )
-                .bind(row.retrieval_contract_version)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-        "candidates" => {
-            for (item_ordinal, row) in serde_json::from_slice::<Vec<StagedCandidateV1>>(bytes)
-                .map_err(|error| protocol(error.to_string()))?
-                .into_iter()
-                .enumerate()
-            {
-                sqlx::query("INSERT INTO bid_matching_staged_candidates
-                  (staging_set_id,id,batch_ordinal,item_ordinal,requirement_artifact_id,
-                   product_version_artifact_id,route_product_ordinal,retrieval_rank,retrieval_raw_score,
-                   candidate_identity_sha256,evidence_v1_sha256,support,business_value_status,business_value,recommended)
-                  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
-                    .bind(staging_id).bind(row.id).bind(batch_ordinal).bind(item_ordinal as i32)
-                    .bind(row.requirement_artifact_id).bind(row.product_version_artifact_id)
-                    .bind(row.route_product_ordinal as i32).bind(row.retrieval_rank as i32)
-                    .bind(row.retrieval_raw_score.parse::<Decimal>().map_err(|_| protocol("invalid staged candidate score"))?)
-                    .bind(row.candidate_identity_sha256).bind(row.evidence_v1_sha256).bind(row.support)
-                    .bind(row.business_value_status)
-                    .bind(row.business_value.as_deref().map(str::parse::<Decimal>).transpose().map_err(|_| protocol("invalid staged business value"))?)
-                    .bind(row.recommended).execute(&mut **tx).await?;
-            }
-        }
-        "evidences" => {
-            for (item_ordinal, row) in serde_json::from_slice::<Vec<StagedEvidenceV1>>(bytes)
-                .map_err(|error| protocol(error.to_string()))?
-                .into_iter()
-                .enumerate()
-            {
-                sqlx::query(
-                    "INSERT INTO bid_matching_staged_evidences
-                  (staging_set_id,id,batch_ordinal,item_ordinal,candidate_artifact_id,
-                   source_chunk_artifact_id,document_id,document_display_name,source_chunk_id,
-                   source_chunk_sha256,quote,start_offset,end_offset,offset_unit,ordinal)
-                  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
-                )
-                .bind(staging_id)
-                .bind(row.id)
-                .bind(batch_ordinal)
-                .bind(item_ordinal as i32)
-                .bind(row.candidate_artifact_id)
-                .bind(row.source_chunk_artifact_id)
-                .bind(row.document_id)
-                .bind(row.document_display_name)
-                .bind(row.source_chunk_id)
-                .bind(row.source_chunk_sha256)
-                .bind(row.quote)
-                .bind(row.start_offset as i64)
-                .bind(row.end_offset as i64)
-                .bind(row.offset_unit)
-                .bind(row.ordinal as i32)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-        "requirement_decisions" => {
-            for (item_ordinal, row) in serde_json::from_slice::<Vec<StagedDecisionV1>>(bytes)
-                .map_err(|error| protocol(error.to_string()))?
-                .into_iter()
-                .enumerate()
-            {
-                sqlx::query("INSERT INTO bid_matching_staged_requirement_decisions
-                  (staging_set_id,id,batch_ordinal,item_ordinal,requirement_artifact_id,final_support,
-                   system_decision,quality_status,reason_code,selected_candidate_artifact_id,ordinal)
-                  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
-                    .bind(staging_id).bind(row.id).bind(batch_ordinal).bind(item_ordinal as i32)
-                    .bind(row.requirement_artifact_id).bind(row.final_support).bind(row.system_decision)
-                    .bind(row.quality_status).bind(row.reason_code).bind(row.selected_candidate_artifact_id)
-                    .bind(row.ordinal as i32).execute(&mut **tx).await?;
-            }
-        }
-        "candidate_groups" => {
-            for (item_ordinal, row) in serde_json::from_slice::<Vec<StagedCandidateGroupV1>>(bytes)
-                .map_err(|error| protocol(error.to_string()))?
-                .into_iter()
-                .enumerate()
-            {
-                sqlx::query(
-                    "INSERT INTO bid_matching_staged_candidate_groups
-                  (staging_set_id,id,batch_ordinal,item_ordinal,requirement_artifact_id,support,
-                   ordinal,canonical_payload,content_sha256) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-                )
-                .bind(staging_id)
-                .bind(row.id)
-                .bind(batch_ordinal)
-                .bind(item_ordinal as i32)
-                .bind(row.requirement_artifact_id)
-                .bind(row.support)
-                .bind(row.ordinal as i32)
-                .bind(row.canonical_payload)
-                .bind(row.content_sha256)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-        "reason_codes" => {
-            for (item_ordinal, reason_code) in serde_json::from_slice::<Vec<String>>(bytes)
-                .map_err(|error| protocol(error.to_string()))?
-                .into_iter()
-                .enumerate()
-            {
-                sqlx::query(
-                    "INSERT INTO bid_matching_staged_reason_codes
-                  (staging_set_id,batch_ordinal,item_ordinal,reason_code) VALUES($1,$2,$3,$4)",
-                )
-                .bind(staging_id)
-                .bind(batch_ordinal)
-                .bind(item_ordinal as i32)
-                .bind(reason_code)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-        _ => return Err(protocol("unknown staged collection kind")),
+fn stage_batch_items(kind: &str, bytes: &[u8]) -> Result<serde_json::Value, sqlx::Error> {
+    if kind != "candidate_groups" {
+        return serde_json::from_slice(bytes).map_err(|error| protocol(error.to_string()));
     }
-    Ok(())
-}
-
-struct OwnedStagedReportRelations {
-    sources: Vec<StagedSourceArtifactV1>,
-    candidates: Vec<StagedCandidateV1>,
-    evidences: Vec<StagedEvidenceV1>,
-    decisions: Vec<StagedDecisionV1>,
-    groups: Vec<StagedCandidateGroupV1>,
-    reason_codes: Vec<String>,
-}
-
-async fn load_typed_staged_rows(
-    tx: &mut Transaction<'_, Postgres>,
-    staging_id: Uuid,
-) -> Result<OwnedStagedReportRelations, sqlx::Error> {
-    let sources = sqlx::query(
-        "SELECT source_value.*,convert_from(chunk_utf8,'UTF8') AS chunk_text
-      FROM bid_matching_staged_source_artifacts source_value
-      WHERE staging_set_id=$1 ORDER BY batch_ordinal,item_ordinal",
-    )
-    .bind(staging_id)
-    .fetch_all(&mut **tx)
-    .await?
-    .into_iter()
-    .map(|row| StagedSourceArtifactV1 {
-        id: row.get("id"),
-        product_version_artifact_id: row.get("product_version_artifact_id"),
-        document_id: row.get("document_id"),
-        source_chunk_id: row.get("source_chunk_id"),
-        frozen_document_display_name: row.get("frozen_document_display_name"),
-        chunk_utf8: row.get("chunk_text"),
-        chunk_sha256: row.get("chunk_sha256"),
-        chunk_byte_length: row.get::<i64, _>("chunk_byte_length") as u64,
-        retrieval_rank: row.get::<i32, _>("retrieval_rank") as u32,
-        retrieval_raw_score: format!("{:.6}", row.get::<Decimal, _>("retrieval_raw_score")),
-        retrieval_contract_version: row.get("retrieval_contract_version"),
-    })
-    .collect();
-    let candidates = sqlx::query(
-        "SELECT * FROM bid_matching_staged_candidates
-      WHERE staging_set_id=$1 ORDER BY batch_ordinal,item_ordinal",
-    )
-    .bind(staging_id)
-    .fetch_all(&mut **tx)
-    .await?
-    .into_iter()
-    .map(|row| StagedCandidateV1 {
-        id: row.get("id"),
-        requirement_artifact_id: row.get("requirement_artifact_id"),
-        product_version_artifact_id: row.get("product_version_artifact_id"),
-        route_product_ordinal: row.get::<i32, _>("route_product_ordinal") as u32,
-        retrieval_rank: row.get::<i32, _>("retrieval_rank") as u32,
-        retrieval_raw_score: format!("{:.6}", row.get::<Decimal, _>("retrieval_raw_score")),
-        candidate_identity_sha256: row.get("candidate_identity_sha256"),
-        evidence_v1_sha256: row.get("evidence_v1_sha256"),
-        support: row.get("support"),
-        business_value_status: row.get("business_value_status"),
-        business_value: row
-            .get::<Option<Decimal>, _>("business_value")
-            .map(|value| format!("{value:.6}")),
-        recommended: row.get("recommended"),
-    })
-    .collect();
-    let evidences = sqlx::query(
-        "SELECT * FROM bid_matching_staged_evidences
-      WHERE staging_set_id=$1 ORDER BY batch_ordinal,item_ordinal",
-    )
-    .bind(staging_id)
-    .fetch_all(&mut **tx)
-    .await?
-    .into_iter()
-    .map(|row| StagedEvidenceV1 {
-        id: row.get("id"),
-        candidate_artifact_id: row.get("candidate_artifact_id"),
-        source_chunk_artifact_id: row.get("source_chunk_artifact_id"),
-        document_id: row.get("document_id"),
-        document_display_name: row.get("document_display_name"),
-        source_chunk_id: row.get("source_chunk_id"),
-        source_chunk_sha256: row.get("source_chunk_sha256"),
-        quote: row.get("quote"),
-        start_offset: row.get::<i64, _>("start_offset") as u64,
-        end_offset: row.get::<i64, _>("end_offset") as u64,
-        offset_unit: row.get("offset_unit"),
-        ordinal: row.get::<i32, _>("ordinal") as u32,
-    })
-    .collect();
-    let decisions = sqlx::query(
-        "SELECT * FROM bid_matching_staged_requirement_decisions
-      WHERE staging_set_id=$1 ORDER BY batch_ordinal,item_ordinal",
-    )
-    .bind(staging_id)
-    .fetch_all(&mut **tx)
-    .await?
-    .into_iter()
-    .map(|row| StagedDecisionV1 {
-        id: row.get("id"),
-        requirement_artifact_id: row.get("requirement_artifact_id"),
-        final_support: row.get("final_support"),
-        system_decision: row.get("system_decision"),
-        quality_status: row.get("quality_status"),
-        reason_code: row.get("reason_code"),
-        selected_candidate_artifact_id: row.get("selected_candidate_artifact_id"),
-        ordinal: row.get::<i32, _>("ordinal") as u32,
-    })
-    .collect();
-    let groups = sqlx::query(
-        "SELECT * FROM bid_matching_staged_candidate_groups
-      WHERE staging_set_id=$1 ORDER BY batch_ordinal,item_ordinal",
-    )
-    .bind(staging_id)
-    .fetch_all(&mut **tx)
-    .await?
-    .into_iter()
-    .map(|row| StagedCandidateGroupV1 {
-        id: row.get("id"),
-        requirement_artifact_id: row.get("requirement_artifact_id"),
-        support: row.get("support"),
-        ordinal: row.get::<i32, _>("ordinal") as u32,
-        canonical_payload: row.get("canonical_payload"),
-        content_sha256: row.get("content_sha256"),
-    })
-    .collect();
-    let reason_codes = sqlx::query_scalar(
-        "SELECT reason_code FROM bid_matching_staged_reason_codes
-      WHERE staging_set_id=$1 ORDER BY batch_ordinal,item_ordinal",
-    )
-    .bind(staging_id)
-    .fetch_all(&mut **tx)
-    .await?;
-    Ok(OwnedStagedReportRelations {
-        sources,
-        candidates,
-        evidences,
-        decisions,
-        groups,
-        reason_codes,
-    })
+    let groups: Vec<StagedCandidateGroupV1> =
+        serde_json::from_slice(bytes).map_err(|error| protocol(error.to_string()))?;
+    Ok(serde_json::Value::Array(
+        groups
+            .into_iter()
+            .map(|group| {
+                serde_json::json!({
+                    "id": group.id,
+                    "requirement_artifact_id": group.requirement_artifact_id,
+                    "support": group.support,
+                    "ordinal": group.ordinal,
+                    "canonical_payload_b64": base64_encode(&group.canonical_payload),
+                    "content_sha256": group.content_sha256,
+                })
+            })
+            .collect(),
+    ))
 }
 
 async fn commit_staged_route(
@@ -1547,897 +1145,26 @@ async fn commit_staged_route(
     report_id: Uuid,
     expected_report_sha256: &str,
 ) -> Result<PublishReceipt, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let job = lock_live_claim(&mut tx, claimed).await?;
-    if job.get::<String, _>("status") == "completed" {
-        let completed: Option<Uuid> = job.get("completed_report_id");
-        tx.rollback().await?;
-        return Ok(completed.map_or(PublishReceipt::Stale, |report_id| {
-            PublishReceipt::Replayed { report_id }
-        }));
-    }
-    let set = sqlx::query("SELECT * FROM bid_matching_staging_sets WHERE id=$1 FOR UPDATE")
-        .bind(staging_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    if set.get::<String, _>("state") == "consumed" {
-        let completed: Option<Uuid> = set.get("consumed_report_id");
-        tx.rollback().await?;
-        return Ok(completed.map_or(PublishReceipt::Stale, |report_id| {
-            PublishReceipt::Replayed { report_id }
-        }));
-    }
-    let ttl_live: bool = sqlx::query_scalar(
-        "SELECT expires_at>clock_timestamp() FROM bid_matching_staging_sets WHERE id=$1",
-    )
-    .bind(staging_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    if !staging_set_matches_claim(&set, claimed) {
-        return Err(protocol("staging set frozen scope mismatch"));
-    }
-    if set.get::<String, _>("state") != "active" || !ttl_live {
-        return Err(protocol("staging set expired"));
-    }
-    let rows = sqlx::query(
-        "SELECT batch_ordinal,collection_kind,canonical_items,item_count,byte_length
-         FROM bid_matching_staged_batches WHERE staging_set_id=$1 ORDER BY batch_ordinal",
-    )
-    .bind(staging_id)
-    .fetch_all(&mut *tx)
-    .await?;
-    if rows
-        .iter()
-        .enumerate()
-        .any(|(index, row)| row.get::<i32, _>("batch_ordinal") != index as i32)
-    {
-        return Err(protocol("STAGING_BATCH_ORDINAL_GAP"));
-    }
-    let mut collections: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
-    let mut actual_items = 0i64;
-    let mut actual_bytes = 0i64;
-    for row in rows {
-        actual_items += i64::from(row.get::<i32, _>("item_count"));
-        actual_bytes += row.get::<i64, _>("byte_length");
-        collections
-            .entry(row.get::<String, _>("collection_kind"))
-            .or_default()
-            .push(row.get::<Vec<u8>, _>("canonical_items"));
-    }
-    verify_staging_totals(
-        i64::from(set.get::<i32, _>("expected_batch_count")),
-        set.get("expected_item_count"),
-        set.get("expected_byte_length"),
-        collections.values().map(Vec::len).sum::<usize>() as i64,
-        actual_items,
-        actual_bytes,
-    )?;
-    if actual_items != set.get::<i64, _>("staged_item_count")
-        || actual_bytes != set.get::<i64, _>("staged_byte_length")
-    {
-        return Err(protocol("STAGING_COUNTER_MISMATCH"));
-    }
-    let required_kinds = [
-        "source_artifacts",
-        "candidates",
-        "evidences",
-        "requirement_decisions",
-        "candidate_groups",
-        "reason_codes",
-    ];
-    if collections.len() != required_kinds.len()
-        || required_kinds
-            .iter()
-            .any(|kind| !collections.contains_key(*kind))
-    {
-        return Err(protocol("STAGING_COLLECTION_SET_MISMATCH"));
-    }
-    let loaded = load_typed_staged_rows(&mut tx, staging_id).await?;
-    let sources = loaded.sources;
-    let candidates = loaded.candidates;
-    let evidences = loaded.evidences;
-    let decisions = loaded.decisions;
-    let groups = loaded.groups;
-    let reason_codes = loaded.reason_codes;
-    if (sources.len()
-        + candidates.len()
-        + evidences.len()
-        + decisions.len()
-        + groups.len()
-        + reason_codes.len()) as i64
-        != actual_items
-    {
-        return Err(protocol("STAGING_TYPED_ROW_COUNT_MISMATCH"));
-    }
-
-    let payload: Vec<u8> = sqlx::query_scalar(
-        "SELECT canonical_payload FROM bid_matching_staging_report_payloads WHERE staging_set_id=$1",
-    )
-    .bind(staging_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| protocol("staged report payload missing"))?;
-    if sha256_hex(&payload) != expected_report_sha256 {
-        return Err(protocol("REPORT_HASH_MISMATCH"));
-    }
-    verify_staged_report(
-        &mut tx,
-        claimed,
-        report_id,
-        &payload,
-        StagedReportRelations {
-            sources: &sources,
-            candidates: &candidates,
-            evidences: &evidences,
-            decisions: &decisions,
-            groups: &groups,
-            reason_codes: &reason_codes,
-        },
-    )
-    .await?;
-    let parsed: serde_json::Value =
-        serde_json::from_slice(&payload).map_err(|_| protocol("invalid report JSON"))?;
-    let coverage = parsed
-        .get("coverage")
-        .ok_or_else(|| protocol("coverage missing"))?;
-    sqlx::query(
-        "INSERT INTO bid_matching_reports
-         (id,project_id,manifest_id,job_id,route_id,generation,mutation_watermark,empty_disposition,
-          coverage_total,coverage_supported,coverage_contradicted,coverage_insufficient,coverage_unresolved,
-          quality_status,degraded,reason_codes,canonical_payload,content_sha256,ai_run_id,ai_span_id,published_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,clock_timestamp())",
-    )
-    .bind(report_id)
-    .bind(claimed.project_id)
-    .bind(claimed.manifest_id)
-    .bind(claimed.job_id)
-    .bind(claimed.route_id)
-    .bind(claimed.generation)
-    .bind(claimed.mutation_watermark)
-    .bind(parsed.get("empty_disposition").and_then(|value| value.as_str()))
-    .bind(json_i32(coverage, "total")?)
-    .bind(json_i32(coverage, "supported")?)
-    .bind(json_i32(coverage, "contradicted")?)
-    .bind(json_i32(coverage, "insufficient")?)
-    .bind(json_i32(coverage, "unresolved")?)
-    .bind(json_str(&parsed, "quality_status")?)
-    .bind(parsed.get("degraded").and_then(|value| value.as_bool()).ok_or_else(|| protocol("degraded missing"))?)
-    .bind(&reason_codes)
-    .bind(&payload)
-    .bind(expected_report_sha256)
-    .bind(parsed.get("ai_run_id").and_then(|value| value.as_str()).and_then(|value| Uuid::parse_str(value).ok()))
-    .bind(parsed.get("ai_span_id").and_then(|value| value.as_str()).and_then(|value| Uuid::parse_str(value).ok()))
-    .execute(&mut *tx)
-    .await?;
-    for source in &sources {
-        sqlx::query(
-            "INSERT INTO bid_matching_source_artifacts
-             (id,report_id,product_version_artifact_id,document_id,source_chunk_id,
-              frozen_document_display_name,chunk_utf8,chunk_sha256,chunk_byte_length,
-              retrieval_rank,retrieval_raw_score,retrieval_contract_version)
-             VALUES($1,$2,$3,$4,$5,$6,convert_to($7,'UTF8'),$8,$9,$10,$11,$12)",
-        )
-        .bind(source.id)
-        .bind(report_id)
-        .bind(source.product_version_artifact_id)
-        .bind(source.document_id)
-        .bind(source.source_chunk_id)
-        .bind(&source.frozen_document_display_name)
-        .bind(&source.chunk_utf8)
-        .bind(&source.chunk_sha256)
-        .bind(source.chunk_byte_length as i64)
-        .bind(source.retrieval_rank as i32)
-        .bind(
-            source
-                .retrieval_raw_score
-                .parse::<Decimal>()
-                .map_err(|_| protocol("invalid source score"))?,
-        )
-        .bind(&source.retrieval_contract_version)
-        .execute(&mut *tx)
-        .await?;
-    }
-    for candidate in &candidates {
-        sqlx::query(
-            "INSERT INTO bid_matching_candidate_artifacts
-             (id,report_id,requirement_artifact_id,product_version_artifact_id,support,
-              candidate_identity_sha256,evidence_v1_sha256,business_value_status,business_value,
-              route_product_ordinal,retrieval_rank,retrieval_raw_score,recommended)
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
-        )
-        .bind(candidate.id)
-        .bind(report_id)
-        .bind(candidate.requirement_artifact_id)
-        .bind(candidate.product_version_artifact_id)
-        .bind(&candidate.support)
-        .bind(&candidate.candidate_identity_sha256)
-        .bind(&candidate.evidence_v1_sha256)
-        .bind(&candidate.business_value_status)
-        .bind(
-            candidate
-                .business_value
-                .as_deref()
-                .map(str::parse::<Decimal>)
-                .transpose()
-                .map_err(|_| protocol("invalid business value"))?,
-        )
-        .bind(candidate.route_product_ordinal as i32)
-        .bind(candidate.retrieval_rank as i32)
-        .bind(
-            candidate
-                .retrieval_raw_score
-                .parse::<Decimal>()
-                .map_err(|_| protocol("invalid candidate score"))?,
-        )
-        .bind(candidate.recommended)
-        .execute(&mut *tx)
-        .await?;
-    }
-    for evidence in &evidences {
-        sqlx::query(
-            "INSERT INTO bid_matching_evidence_artifacts
-             (id,report_id,candidate_artifact_id,source_chunk_artifact_id,start_offset,end_offset,
-              quote_utf8,quote_sha256,ordinal,offset_unit,document_id,document_display_name,
-              source_chunk_id,source_chunk_sha256)
-             VALUES($1,$2,$3,$4,$5,$6,convert_to($7,'UTF8'),$8,$9,$10,$11,$12,$13,$14)",
-        )
-        .bind(evidence.id)
-        .bind(report_id)
-        .bind(evidence.candidate_artifact_id)
-        .bind(evidence.source_chunk_artifact_id)
-        .bind(evidence.start_offset as i64)
-        .bind(evidence.end_offset as i64)
-        .bind(&evidence.quote)
-        .bind(sha256_hex(evidence.quote.as_bytes()))
-        .bind(evidence.ordinal as i32)
-        .bind(&evidence.offset_unit)
-        .bind(evidence.document_id)
-        .bind(&evidence.document_display_name)
-        .bind(evidence.source_chunk_id)
-        .bind(&evidence.source_chunk_sha256)
-        .execute(&mut *tx)
-        .await?;
-    }
-    for decision in &decisions {
-        sqlx::query(
-            "INSERT INTO bid_matching_requirement_decisions
-             (id,report_id,requirement_artifact_id,final_support,system_decision,quality_status,
-              reason_code,selected_candidate_artifact_id,ordinal)
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-        )
-        .bind(decision.id)
-        .bind(report_id)
-        .bind(decision.requirement_artifact_id)
-        .bind(&decision.final_support)
-        .bind(&decision.system_decision)
-        .bind(&decision.quality_status)
-        .bind(&decision.reason_code)
-        .bind(decision.selected_candidate_artifact_id)
-        .bind(decision.ordinal as i32)
-        .execute(&mut *tx)
-        .await?;
-    }
-    for group in &groups {
-        sqlx::query(
-            "INSERT INTO bid_matching_candidate_groups
-             (id,report_id,requirement_artifact_id,support,ordinal,canonical_payload,content_sha256)
-             VALUES($1,$2,$3,$4,$5,$6,$7)",
-        )
-        .bind(group.id)
-        .bind(report_id)
-        .bind(group.requirement_artifact_id)
-        .bind(&group.support)
-        .bind(group.ordinal as i32)
-        .bind(&group.canonical_payload)
-        .bind(&group.content_sha256)
-        .execute(&mut *tx)
-        .await?;
-    }
-    sqlx::query(
-        "INSERT INTO bid_current_matching_reports(project_id,route_id,report_id,generation,mutation_watermark)
-         VALUES($1,$2,$3,$4,$5)
-         ON CONFLICT(project_id,route_id) DO UPDATE SET report_id=EXCLUDED.report_id,
-          generation=EXCLUDED.generation,mutation_watermark=EXCLUDED.mutation_watermark",
-    )
-    .bind(claimed.project_id).bind(claimed.route_id).bind(report_id)
-    .bind(claimed.generation).bind(claimed.mutation_watermark).execute(&mut *tx).await?;
-    sqlx::query("DELETE FROM bid_current_route_pick_sets WHERE project_id=$1 AND route_id=$2")
-        .bind(claimed.project_id)
-        .bind(claimed.route_id)
-        .execute(&mut *tx)
-        .await?;
-    rebuild_project_pick_set(&mut tx, claimed.project_id, "system:matching-publication").await?;
-    sqlx::query("UPDATE bid_matching_job_claims SET status='completed' WHERE job_id=$1 AND attempt=$2 AND claim_token=$3")
-        .bind(claimed.job_id).bind(claimed.claim.attempt).bind(claimed.claim.token).execute(&mut *tx).await?;
-    sqlx::query("UPDATE bid_matching_jobs SET status='completed',active_attempt=NULL,completed_report_id=$2,finished_at=clock_timestamp() WHERE id=$1")
-        .bind(claimed.job_id).bind(report_id).execute(&mut *tx).await?;
-    sqlx::query(
-        "UPDATE bid_matching_staging_sets SET state='consumed',consumed_report_id=$2 WHERE id=$1",
-    )
-    .bind(staging_id)
-    .bind(report_id)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(PublishReceipt::Committed { report_id })
-}
-
-async fn lock_live_claim(
-    tx: &mut Transaction<'_, Postgres>,
-    claimed: &ClaimedMatchingRequest,
-) -> Result<sqlx::postgres::PgRow, sqlx::Error> {
-    let job = sqlx::query(
-        "SELECT j.*,claim.claim_token,claim.heartbeat_at,
-                claim.claim_lease_ms AS frozen_claim_lease_ms,
-                claim.lease_policy_generation AS frozen_lease_policy_generation,
-                claim.status AS claim_status,
-                (claim.heartbeat_at+make_interval(secs=>claim.claim_lease_ms::double precision/1000.0)>clock_timestamp()) AS lease_live,
-                m.generation,m.mutation_watermark,p.status AS project_status,p.matching_mutation_watermark
-           FROM bid_matching_jobs j
-           JOIN bid_matching_job_claims claim ON claim.job_id=j.id AND claim.attempt=j.active_attempt
-           JOIN bid_matching_manifests m ON m.id=j.manifest_id
-           JOIN bid_projects p ON p.id=j.project_id
-          WHERE j.id=$1 FOR UPDATE OF p,j,claim",
-    )
-    .bind(claimed.job_id)
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or_else(|| protocol("matching claim missing"))?;
-    if job.get::<Uuid, _>("manifest_id") != claimed.manifest_id
-        || job.get::<Uuid, _>("route_id") != claimed.route_id
-        || !claim_snapshot_matches(
-            job.get("claim_token"),
-            job.get("active_attempt"),
-            job.get("frozen_claim_lease_ms"),
-            job.get("frozen_lease_policy_generation"),
-            claimed.claim,
-        )
-        || job.get::<String, _>("claim_status") != "running"
-        || job.get::<String, _>("project_status") != "open"
-        || job.get::<i64, _>("matching_mutation_watermark") != claimed.mutation_watermark
-        || job.get::<i64, _>("generation") != claimed.generation
-        || job.get::<i64, _>("mutation_watermark") != claimed.mutation_watermark
-        || !job.get::<bool, _>("lease_live")
-    {
-        return Err(protocol("matching claim fence lost"));
-    }
-    Ok(job)
-}
-
-fn claim_snapshot_matches(
-    token: Uuid,
-    attempt: i32,
-    claim_lease_ms: i32,
-    lease_policy_generation: i64,
-    expected: MatchClaim,
-) -> bool {
-    token == expected.token
-        && attempt == expected.attempt
-        && claim_lease_ms == expected.claim_lease_ms
-        && lease_policy_generation == expected.lease_policy_generation
-}
-
-fn staging_set_matches_claim(
-    set: &sqlx::postgres::PgRow,
-    claimed: &ClaimedMatchingRequest,
-) -> bool {
-    set.get::<Uuid, _>("job_id") == claimed.job_id
-        && set.get::<Uuid, _>("route_id") == claimed.route_id
-        && set.get::<Uuid, _>("claim_token") == claimed.claim.token
-        && set.get::<i32, _>("attempt") == claimed.claim.attempt
-        && set.get::<Uuid, _>("manifest_id") == claimed.manifest_id
-        && set.get::<Uuid, _>("project_id") == claimed.project_id
-        && set.get::<i64, _>("generation") == claimed.generation
-        && set.get::<i64, _>("mutation_watermark") == claimed.mutation_watermark
-}
-
-fn verify_staging_totals(
-    declared_batches: i64,
-    declared_items: i64,
-    declared_bytes: i64,
-    actual_batches: i64,
-    actual_items: i64,
-    actual_bytes: i64,
-) -> Result<(), sqlx::Error> {
-    if declared_batches != actual_batches
-        || declared_items != actual_items
-        || declared_bytes != actual_bytes
-    {
-        return Err(protocol("STAGING_OPEN_DECLARATION_MISMATCH"));
-    }
-    Ok(())
-}
-
-struct StagedReportRelations<'a> {
-    sources: &'a [StagedSourceArtifactV1],
-    candidates: &'a [StagedCandidateV1],
-    evidences: &'a [StagedEvidenceV1],
-    decisions: &'a [StagedDecisionV1],
-    groups: &'a [StagedCandidateGroupV1],
-    reason_codes: &'a [String],
-}
-
-#[derive(Debug, PartialEq, Eq, Hash)]
-struct FrozenEvidenceIdentity {
-    requirement_artifact_id: Uuid,
-    product_version_artifact_id: Uuid,
-    document_id: Uuid,
-    source_chunk_id: Uuid,
-    frozen_document_display_name: String,
-    chunk_utf8: String,
-    chunk_sha256: String,
-    chunk_byte_length: u64,
-    retrieval_rank: u32,
-    retrieval_raw_score: String,
-    quote_start_offset: u64,
-    quote_end_offset: u64,
-    retrieval_contract_version: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CandidateGroupPayloadV1 {
-    requirement_artifact_id: Uuid,
-    support: String,
-    candidate_artifact_ids: Vec<Uuid>,
-}
-
-async fn verify_staged_report(
-    tx: &mut Transaction<'_, Postgres>,
-    claimed: &ClaimedMatchingRequest,
-    report_id: Uuid,
-    payload: &[u8],
-    relations: StagedReportRelations<'_>,
-) -> Result<(), sqlx::Error> {
-    let StagedReportRelations {
-        sources,
-        candidates,
-        evidences,
-        decisions,
-        groups,
-        reason_codes,
-    } = relations;
-    let parsed: serde_json::Value =
-        serde_json::from_slice(payload).map_err(|_| protocol("invalid MatchingReportV1 bytes"))?;
-    let object = parsed
-        .as_object()
-        .ok_or_else(|| protocol("report must be an object"))?;
-    let expected_keys = [
-        "schema_version",
-        "report_id",
-        "manifest_id",
-        "job_id",
-        "route_id",
-        "route",
-        "generation",
-        "mutation_watermark",
-        "empty_disposition",
-        "coverage",
-        "quality_status",
-        "degraded",
-        "reason_codes",
-        "score",
-        "requirement_decisions",
-        "candidates",
-        "candidate_groups",
-        "source_artifacts",
-        "ai_run_id",
-        "ai_span_id",
-    ];
-    let expected_route = match claimed.route {
-        MatchRoute::Technical { unit_id } => {
-            serde_json::json!({"kind":"technical","unit_id":unit_id})
-        }
-        MatchRoute::Commercial => serde_json::json!({"kind":"commercial"}),
-    };
-    if object.len() != expected_keys.len()
-        || expected_keys.iter().any(|key| !object.contains_key(*key))
-        || parsed
-            .get("schema_version")
-            .and_then(|value| value.as_u64())
-            != Some(1)
-        || parsed.get("report_id").and_then(|value| value.as_str())
-            != Some(report_id.to_string().as_str())
-        || parsed.get("manifest_id").and_then(|value| value.as_str())
-            != Some(claimed.manifest_id.to_string().as_str())
-        || parsed.get("job_id").and_then(|value| value.as_str())
-            != Some(claimed.job_id.to_string().as_str())
-        || parsed.get("route_id").and_then(|value| value.as_str())
-            != Some(claimed.route_id.to_string().as_str())
-        || parsed.get("generation").and_then(|value| value.as_i64()) != Some(claimed.generation)
-        || parsed
-            .get("mutation_watermark")
-            .and_then(|value| value.as_i64())
-            != Some(claimed.mutation_watermark)
-        || parsed.get("route") != Some(&expected_route)
-    {
-        return Err(protocol("report fixed header mismatch"));
-    }
-    if parsed.get("reason_codes") != Some(&serde_json::to_value(reason_codes).unwrap())
-        || !strict_sorted_unique(reason_codes)
-    {
-        return Err(protocol("report reason relation mismatch"));
-    }
-    let requirement_ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM bid_matching_requirement_artifacts WHERE route_id=$1 ORDER BY ordinal,id",
-    )
-    .bind(claimed.route_id)
-    .fetch_all(&mut **tx)
-    .await?;
-    if decisions.len() != requirement_ids.len()
-        || decisions
-            .iter()
-            .map(|row| row.requirement_artifact_id)
-            .collect::<Vec<_>>()
-            != requirement_ids
-    {
-        return Err(protocol("decision cardinality or order mismatch"));
-    }
-    let memberships: HashMap<Uuid, i32> = sqlx::query(
-        "SELECT product_version_artifact_id,route_product_ordinal FROM bid_matching_route_memberships WHERE route_id=$1",
-    )
-    .bind(claimed.route_id).fetch_all(&mut **tx).await?.into_iter()
-    .map(|row| (row.get("product_version_artifact_id"), row.get("route_product_ordinal"))).collect();
-    let source_map: HashMap<Uuid, &StagedSourceArtifactV1> =
-        sources.iter().map(|row| (row.id, row)).collect();
-    if source_map.len() != sources.len() {
-        return Err(protocol("duplicate source artifact"));
-    }
-    let candidates_by_id: HashMap<Uuid, &StagedCandidateV1> =
-        candidates.iter().map(|row| (row.id, row)).collect();
-    let frozen_evidence: HashSet<FrozenEvidenceIdentity> = sqlx::query(
-        "SELECT hit.requirement_artifact_id,hit.product_version_artifact_id,
-                hit.document_id,hit.source_chunk_id,hit.frozen_document_display_name,
-                convert_from(hit.chunk_utf8,'UTF8') AS chunk_text,hit.chunk_sha256,
-                hit.chunk_byte_length,hit.retrieval_rank,
-                to_char(hit.retrieval_raw_score,'FM99999999999999999990.000000') AS retrieval_raw_score,
-                hit.quote_start_offset,hit.quote_end_offset,hit.retrieval_contract_version
-           FROM bid_matching_frozen_retrieved_hits hit WHERE hit.route_id=$1",
-    )
-    .bind(claimed.route_id)
-    .fetch_all(&mut **tx)
-    .await?
-    .into_iter()
-    .map(|row| FrozenEvidenceIdentity {
-        requirement_artifact_id: row.get("requirement_artifact_id"),
-        product_version_artifact_id: row.get("product_version_artifact_id"),
-        document_id: row.get("document_id"),
-        source_chunk_id: row.get("source_chunk_id"),
-        frozen_document_display_name: row.get("frozen_document_display_name"),
-        chunk_utf8: row.get("chunk_text"),
-        chunk_sha256: row.get("chunk_sha256"),
-        chunk_byte_length: row.get::<i64, _>("chunk_byte_length") as u64,
-        retrieval_rank: row.get::<i32, _>("retrieval_rank") as u32,
-        retrieval_raw_score: row.get("retrieval_raw_score"),
-        quote_start_offset: row.get::<i64, _>("quote_start_offset") as u64,
-        quote_end_offset: row.get::<i64, _>("quote_end_offset") as u64,
-        retrieval_contract_version: row.get("retrieval_contract_version"),
-    })
-    .collect();
-    let mut evidence_by_candidate: HashMap<Uuid, Vec<&StagedEvidenceV1>> = HashMap::new();
-    for evidence in evidences {
-        let candidate = candidates_by_id
-            .get(&evidence.candidate_artifact_id)
-            .ok_or_else(|| protocol("evidence candidate missing"))?;
-        let source = source_map
-            .get(&evidence.source_chunk_artifact_id)
-            .ok_or_else(|| protocol("evidence source missing"))?;
-        let bytes = source.chunk_utf8.as_bytes();
-        let start =
-            usize::try_from(evidence.start_offset).map_err(|_| protocol("offset overflow"))?;
-        let end = usize::try_from(evidence.end_offset).map_err(|_| protocol("offset overflow"))?;
-        if evidence.offset_unit != "utf8_byte"
-            || start >= end
-            || end > bytes.len()
-            || !source.chunk_utf8.is_char_boundary(start)
-            || !source.chunk_utf8.is_char_boundary(end)
-            || source.chunk_utf8.get(start..end) != Some(evidence.quote.as_str())
-            || evidence.document_id != source.document_id
-            || evidence.source_chunk_id != source.source_chunk_id
-            || evidence.source_chunk_sha256 != source.chunk_sha256
-            || evidence.document_display_name != source.frozen_document_display_name
-            || !frozen_evidence.contains(&FrozenEvidenceIdentity {
-                requirement_artifact_id: candidate.requirement_artifact_id,
-                product_version_artifact_id: candidate.product_version_artifact_id,
-                document_id: source.document_id,
-                source_chunk_id: source.source_chunk_id,
-                frozen_document_display_name: source.frozen_document_display_name.clone(),
-                chunk_utf8: source.chunk_utf8.clone(),
-                chunk_sha256: source.chunk_sha256.clone(),
-                chunk_byte_length: source.chunk_byte_length,
-                retrieval_rank: candidate.retrieval_rank,
-                retrieval_raw_score: candidate.retrieval_raw_score.clone(),
-                quote_start_offset: evidence.start_offset,
-                quote_end_offset: evidence.end_offset,
-                retrieval_contract_version: source.retrieval_contract_version.clone(),
-            })
-        {
-            return Err(protocol(
-                "EvidenceV1 byte-slice or frozen-hit provenance verifier failed",
-            ));
-        }
-        evidence_by_candidate
-            .entry(evidence.candidate_artifact_id)
-            .or_default()
-            .push(evidence);
-    }
-    let mut relation_candidates = Vec::with_capacity(candidates.len());
-    let candidates_by_requirement: HashMap<Uuid, Vec<&StagedCandidateV1>> = {
-        let mut map: HashMap<Uuid, Vec<&StagedCandidateV1>> = HashMap::new();
-        for candidate in candidates {
-            let Some(ordinal) = memberships.get(&candidate.product_version_artifact_id) else {
-                return Err(protocol("candidate outside route membership"));
-            };
-            if *ordinal != candidate.route_product_ordinal as i32
-                || !requirement_ids.contains(&candidate.requirement_artifact_id)
-            {
-                return Err(protocol("candidate scope or route ordinal mismatch"));
-            }
-            let mut evidence_rows = evidence_by_candidate
-                .remove(&candidate.id)
-                .unwrap_or_default();
-            if evidence_rows.is_empty() {
-                return Err(protocol("candidate has no frozen evidence"));
-            }
-            evidence_rows.sort_by_key(|row| row.ordinal);
-            let evidence_value = serde_json::json!({"schema_version":1,"items":evidence_rows.iter().map(|row| serde_json::json!({
-                "source_chunk_artifact_id":row.source_chunk_artifact_id,"document_id":row.document_id,
-                "document_display_name":row.document_display_name,"source_chunk_id":row.source_chunk_id,
-                "source_chunk_sha256":row.source_chunk_sha256,"quote":row.quote,"start_offset":row.start_offset,
-                "end_offset":row.end_offset,"offset_unit":row.offset_unit
-            })).collect::<Vec<_>>()});
-            if sha256_hex(&serde_json::to_vec(&evidence_value).unwrap())
-                != candidate.evidence_v1_sha256
-            {
-                return Err(protocol("EvidenceV1 hash mismatch"));
-            }
-            let business_value = match (&candidate.business_value_status, &candidate.business_value)
-            {
-                (status, Some(value)) if status == "scored" => {
-                    serde_json::json!({"status":"scored","value":value,"source":"verifier"})
-                }
-                (status, None) if status == "not_scored" => {
-                    serde_json::json!({"status":"not_scored","reason":"NO_EVIDENCE"})
-                }
-                _ => return Err(protocol("candidate business value matrix mismatch")),
-            };
-            relation_candidates.push(serde_json::json!({
-                "id":candidate.id,"requirement_artifact_id":candidate.requirement_artifact_id,
-                "product_version_artifact_id":candidate.product_version_artifact_id,
-                "route_product_ordinal":candidate.route_product_ordinal,"retrieval_rank":candidate.retrieval_rank,
-                "retrieval_raw_score":candidate.retrieval_raw_score,"candidate_identity_sha256":candidate.candidate_identity_sha256,
-                "evidence_v1_sha256":candidate.evidence_v1_sha256,"evidence":evidence_value,
-                "support":candidate.support,"business_value":business_value,"recommended":candidate.recommended
-            }));
-            map.entry(candidate.requirement_artifact_id)
-                .or_default()
-                .push(candidate);
-        }
-        map
-    };
-    if !evidence_by_candidate.is_empty() {
-        return Err(protocol("orphan staged evidence"));
-    }
-    let mut relation_decisions = Vec::with_capacity(decisions.len());
-    for decision in decisions {
-        let rows = candidates_by_requirement
-            .get(&decision.requirement_artifact_id)
-            .cloned()
-            .unwrap_or_default();
-        let expected = aggregate_decision(&rows);
-        let recommended = rows
-            .iter()
-            .filter(|row| row.recommended)
-            .map(|row| row.id)
-            .collect::<Vec<_>>();
-        if decision.final_support != expected.0
-            || decision.system_decision != expected.1
-            || decision.quality_status != expected.2
-            || decision.reason_code != expected.3
-            || decision.selected_candidate_artifact_id != expected.4
-            || recommended != expected.4.into_iter().collect::<Vec<_>>()
-        {
-            return Err(protocol("RequirementDecisionV1 aggregation mismatch"));
-        }
-        let business_value = decision
-            .selected_candidate_artifact_id
-            .and_then(|id| candidates_by_id.get(&id).copied())
-            .map_or_else(
-                || serde_json::json!({"status":"not_scored","reason":"NO_EVIDENCE"}),
-                |candidate| match &candidate.business_value {
-                    Some(value) => {
-                        serde_json::json!({"status":"scored","value":value,"source":"verifier"})
-                    }
-                    None => serde_json::json!({"status":"not_scored","reason":"NO_EVIDENCE"}),
-                },
-            );
-        relation_decisions.push(serde_json::json!({"requirement_artifact_id":decision.requirement_artifact_id,
-          "final_support":decision.final_support,"system_decision":decision.system_decision,"quality_status":decision.quality_status,
-          "reason_code":decision.reason_code,"selected_candidate_artifact_id":decision.selected_candidate_artifact_id,
-          "business_value":business_value}));
-    }
-    let quality = if decisions.iter().any(|row| row.quality_status == "block") {
-        "block"
-    } else if decisions.is_empty() || decisions.iter().any(|row| row.quality_status == "review") {
-        "review"
-    } else {
-        "pass"
-    };
-    let mut expected_reasons = BTreeSet::from(["FROZEN_SCOPE".to_string()]);
-    expected_reasons.extend(decisions.iter().map(|row| row.reason_code.clone()));
-    if decisions.is_empty() {
-        expected_reasons.insert("EMPTY_ROUTE".into());
-        if parsed
-            .get("empty_disposition")
-            .and_then(|value| value.as_str())
-            == Some("skip_unit")
-        {
-            expected_reasons.insert("SKIP_UNIT".into());
-        }
-    }
-    if expected_reasons.into_iter().collect::<Vec<_>>() != reason_codes {
-        return Err(protocol("MatchingReportV1 reason aggregation mismatch"));
-    }
-    let coverage = parsed
-        .get("coverage")
-        .ok_or_else(|| protocol("coverage missing"))?;
-    let counts = (
-        decisions
-            .iter()
-            .filter(|row| row.final_support == "supported")
-            .count() as i32,
-        decisions
-            .iter()
-            .filter(|row| row.final_support == "contradicted")
-            .count() as i32,
-        decisions
-            .iter()
-            .filter(|row| row.final_support == "insufficient")
-            .count() as i32,
-        decisions
-            .iter()
-            .filter(|row| row.final_support == "unresolved")
-            .count() as i32,
-    );
-    if json_str(&parsed, "quality_status")? != quality
-        || parsed.get("degraded").and_then(|v| v.as_bool()) != Some(quality != "pass")
-        || json_i32(coverage, "total")? != decisions.len() as i32
-        || json_i32(coverage, "eligible")? != decisions.len() as i32
-        || (
-            json_i32(coverage, "supported")?,
-            json_i32(coverage, "contradicted")?,
-            json_i32(coverage, "insufficient")?,
-            json_i32(coverage, "unresolved")?,
-        ) != counts
-    {
-        return Err(protocol("MatchingReportV1 aggregation mismatch"));
-    }
-    verify_candidate_groups(candidates, groups)?;
-    let relation_groups = groups
-        .iter()
-        .map(|row| serde_json::from_slice::<serde_json::Value>(&row.canonical_payload))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| protocol("invalid candidate group payload"))?;
-    let relation_sources=sources.iter().map(|row|serde_json::json!({"id":row.id,
-      "product_version_artifact_id":row.product_version_artifact_id,"document_id":row.document_id,
-      "source_chunk_id":row.source_chunk_id,"frozen_document_display_name":row.frozen_document_display_name,
-      "chunk_sha256":row.chunk_sha256,"chunk_byte_length":row.chunk_byte_length,"retrieval_rank":row.retrieval_rank,
-      "retrieval_raw_score":row.retrieval_raw_score,"retrieval_contract_version":row.retrieval_contract_version})).collect::<Vec<_>>();
-    if parsed.get("candidates") != Some(&serde_json::Value::Array(relation_candidates))
-        || parsed.get("requirement_decisions")
-            != Some(&serde_json::Value::Array(relation_decisions))
-        || parsed.get("candidate_groups") != Some(&serde_json::Value::Array(relation_groups))
-        || parsed.get("source_artifacts") != Some(&serde_json::Value::Array(relation_sources))
-    {
-        return Err(protocol("MatchingReportV1 payload/relation mismatch"));
-    }
-    Ok(())
-}
-
-fn verify_candidate_groups(
-    candidates: &[StagedCandidateV1],
-    groups: &[StagedCandidateGroupV1],
-) -> Result<(), sqlx::Error> {
-    let mut expected = BTreeMap::<(Uuid, String), BTreeSet<Uuid>>::new();
-    for candidate in candidates {
-        expected
-            .entry((candidate.requirement_artifact_id, candidate.support.clone()))
-            .or_default()
-            .insert(candidate.id);
-    }
-    if expected.len() != groups.len() {
-        return Err(protocol("candidate group cardinality mismatch"));
-    }
-    for (ordinal, group) in groups.iter().enumerate() {
-        if group.ordinal != ordinal as u32
-            || sha256_hex(&group.canonical_payload) != group.content_sha256
-        {
-            return Err(protocol("candidate group ordinal or hash mismatch"));
-        }
-        let parsed: CandidateGroupPayloadV1 = serde_json::from_slice(&group.canonical_payload)
-            .map_err(|_| protocol("invalid candidate group payload"))?;
-        if serde_json::to_vec(&parsed).map_err(|error| protocol(error.to_string()))?
-            != group.canonical_payload
-            || parsed.requirement_artifact_id != group.requirement_artifact_id
-            || parsed.support != group.support
-            || !parsed
-                .candidate_artifact_ids
-                .windows(2)
-                .all(|pair| pair[0] < pair[1])
-            || expected.remove(&(parsed.requirement_artifact_id, parsed.support.clone()))
-                != Some(parsed.candidate_artifact_ids.into_iter().collect())
-        {
-            return Err(protocol("candidate group membership mismatch"));
-        }
-    }
-    if !expected.is_empty() {
-        return Err(protocol("candidate group set mismatch"));
-    }
-    Ok(())
-}
-
-fn aggregate_decision(
-    rows: &[&StagedCandidateV1],
-) -> (String, String, String, String, Option<Uuid>) {
-    let has = |support: &str| rows.iter().any(|row| row.support == support);
-    if has("supported") {
-        let selected = rows
-            .iter()
-            .filter(|row| row.support == "supported")
-            .min_by_key(|row| {
-                (
-                    row.route_product_ordinal,
-                    row.retrieval_rank,
-                    row.candidate_identity_sha256.clone(),
-                    row.evidence_v1_sha256.clone(),
-                )
-            })
-            .map(|row| row.id);
-        (
-            "supported".into(),
-            "select".into(),
-            "pass".into(),
-            "SUPPORTED".into(),
-            selected,
-        )
-    } else if has("unresolved") {
-        (
-            "unresolved".into(),
-            "review".into(),
-            "review".into(),
-            "UNRESOLVED".into(),
-            None,
-        )
-    } else if has("insufficient") {
-        (
-            "insufficient".into(),
-            "review".into(),
-            "review".into(),
-            "INSUFFICIENT".into(),
-            None,
-        )
-    } else if has("contradicted") {
-        (
-            "contradicted".into(),
-            "reject".into(),
-            "block".into(),
-            "CONTRADICTED".into(),
-            None,
-        )
-    } else {
-        (
-            "insufficient".into(),
-            "review".into(),
-            "review".into(),
-            "NO_EVIDENCE".into(),
-            None,
-        )
+    let receipt: serde_json::Value =
+        sqlx::query_scalar("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6)")
+            .bind(claimed.job_id)
+            .bind(claimed.claim.token)
+            .bind(claimed.claim.attempt)
+            .bind(staging_id)
+            .bind(report_id)
+            .bind(expected_report_sha256)
+            .fetch_one(pool)
+            .await?;
+    match receipt.get("status").and_then(|value| value.as_str()) {
+        Some("replayed") => Ok(PublishReceipt::Replayed { report_id }),
+        Some("committed") => Ok(PublishReceipt::Committed { report_id }),
+        _ => Err(protocol("matching commit receipt invalid")),
     }
 }
 
 async fn stage_report_payload_for_set(
     pool: &PgPool,
-    claimed: &ClaimedMatchingRequest,
+    _claimed: &ClaimedMatchingRequest,
     staging_id: Uuid,
     canonical_payload: &[u8],
     content_sha256: &str,
@@ -2445,47 +1172,12 @@ async fn stage_report_payload_for_set(
     if sha256_hex(canonical_payload) != content_sha256 {
         return Err(protocol("REPORT_HASH_MISMATCH"));
     }
-    let mut tx = pool.begin().await?;
-    lock_live_claim(&mut tx, claimed).await?;
-    let active: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM bid_matching_staging_sets
-          WHERE id=$1 AND job_id=$2 AND route_id=$3 AND claim_token=$4 AND attempt=$5
-            AND manifest_id=$6 AND project_id=$7 AND generation=$8 AND mutation_watermark=$9
-            AND state='active' AND expires_at>clock_timestamp())",
-    )
-    .bind(staging_id)
-    .bind(claimed.job_id)
-    .bind(claimed.route_id)
-    .bind(claimed.claim.token)
-    .bind(claimed.claim.attempt)
-    .bind(claimed.manifest_id)
-    .bind(claimed.project_id)
-    .bind(claimed.generation)
-    .bind(claimed.mutation_watermark)
-    .fetch_one(&mut *tx)
-    .await?;
-    if !active {
-        return Err(protocol("active staging set missing"));
-    }
-    sqlx::query(
-        "INSERT INTO bid_matching_staging_report_payloads(staging_set_id,canonical_payload,content_sha256)
-         VALUES($1,$2,$3) ON CONFLICT(staging_set_id) DO NOTHING",
-    )
-    .bind(staging_id)
-    .bind(canonical_payload)
-    .bind(content_sha256)
-    .execute(&mut *tx)
-    .await?;
-    let stored: (Vec<u8>, String) = sqlx::query_as(
-        "SELECT canonical_payload,content_sha256 FROM bid_matching_staging_report_payloads WHERE staging_set_id=$1",
-    )
-    .bind(staging_id)
-    .fetch_one(&mut *tx)
-    .await?;
-    if stored.0 != canonical_payload || stored.1 != content_sha256 {
-        return Err(protocol("STAGED_REPORT_PAYLOAD_MISMATCH"));
-    }
-    tx.commit().await?;
+    sqlx::query("SELECT kb_bid_matching_stage_report_payload($1,$2,$3)")
+        .bind(staging_id)
+        .bind(canonical_payload)
+        .bind(content_sha256)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -2495,22 +1187,14 @@ pub async fn retry_claim(
     code: &str,
     detail: &str,
 ) -> Result<bool, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    if let Err(error) = lock_live_claim(&mut tx, claimed).await {
-        tx.rollback().await?;
-        return if is_claim_fence_error(&error) {
-            Ok(false)
-        } else {
-            Err(error)
-        };
-    }
-    sqlx::query("UPDATE bid_matching_job_claims SET status='failed' WHERE job_id=$1 AND attempt=$2 AND claim_token=$3")
-      .bind(claimed.job_id).bind(claimed.claim.attempt).bind(claimed.claim.token).execute(&mut *tx).await?;
-    sqlx::query("UPDATE bid_matching_jobs SET status='pending',active_attempt=NULL,error_code=$2,error_detail=$3 WHERE id=$1")
-      .bind(claimed.job_id).bind(code).bind(bound_detail(detail)).execute(&mut *tx).await?;
-    sqlx::query("UPDATE bid_matching_staging_sets SET state='failed' WHERE job_id=$1 AND attempt=$2 AND claim_token=$3 AND state='active'")
-      .bind(claimed.job_id).bind(claimed.claim.attempt).bind(claimed.claim.token).execute(&mut *tx).await?;
-    tx.commit().await?;
+    sqlx::query("SELECT kb_bid_matching_retry_claim($1,$2,$3,$4,$5)")
+        .bind(claimed.job_id)
+        .bind(claimed.claim.token)
+        .bind(claimed.claim.attempt)
+        .bind(code)
+        .bind(bound_detail(detail))
+        .execute(pool)
+        .await?;
     Ok(true)
 }
 
@@ -2520,78 +1204,22 @@ pub async fn fail_claim(
     code: &str,
     detail: &str,
 ) -> Result<bool, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    if let Err(error) = lock_live_claim(&mut tx, claimed).await {
-        tx.rollback().await?;
-        return if is_claim_fence_error(&error) {
-            Ok(false)
-        } else {
-            Err(error)
-        };
-    }
-    sqlx::query("UPDATE bid_matching_job_claims SET status='failed' WHERE job_id=$1 AND attempt=$2 AND claim_token=$3")
-      .bind(claimed.job_id).bind(claimed.claim.attempt).bind(claimed.claim.token).execute(&mut *tx).await?;
-    sqlx::query("UPDATE bid_matching_jobs SET status='failed',active_attempt=NULL,error_code=$2,error_detail=$3,finished_at=clock_timestamp() WHERE id=$1")
-      .bind(claimed.job_id).bind(code).bind(bound_detail(detail)).execute(&mut *tx).await?;
-    sqlx::query("UPDATE bid_matching_staging_sets SET state='failed' WHERE job_id=$1 AND attempt=$2 AND claim_token=$3 AND state='active'")
-      .bind(claimed.job_id).bind(claimed.claim.attempt).bind(claimed.claim.token).execute(&mut *tx).await?;
-    tx.commit().await?;
+    sqlx::query("SELECT kb_bid_matching_fail_claim($1,$2,$3,$4,$5)")
+        .bind(claimed.job_id)
+        .bind(claimed.claim.token)
+        .bind(claimed.claim.attempt)
+        .bind(code)
+        .bind(bound_detail(detail))
+        .execute(pool)
+        .await?;
     Ok(true)
 }
 
 pub async fn reap_expired_claims(pool: &PgPool) -> Result<u64, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let rows=sqlx::query("SELECT claim.job_id,claim.attempt,claim.claim_token,job.max_attempts
-      FROM bid_matching_job_claims claim JOIN bid_matching_jobs job ON job.id=claim.job_id AND job.active_attempt=claim.attempt
-      WHERE claim.status='running' AND job.status='running'
-        AND claim.heartbeat_at+make_interval(secs=>claim.claim_lease_ms::double precision/1000.0)<=clock_timestamp()
-      ORDER BY claim.job_id FOR UPDATE OF job,claim SKIP LOCKED").fetch_all(&mut *tx).await?;
-    for row in &rows {
-        let job_id: Uuid = row.get("job_id");
-        let attempt: i32 = row.get("attempt");
-        let max: i32 = row.get("max_attempts");
-        sqlx::query(
-            "UPDATE bid_matching_job_claims SET status='reaped' WHERE job_id=$1 AND attempt=$2",
-        )
-        .bind(job_id)
-        .bind(attempt)
-        .execute(&mut *tx)
+    let n: i32 = sqlx::query_scalar("SELECT kb_bid_matching_reap()")
+        .fetch_one(pool)
         .await?;
-        sqlx::query("UPDATE bid_matching_jobs SET status=$2,active_attempt=NULL,error_code='CLAIM_LEASE_EXPIRED',
-        finished_at=CASE WHEN $2='failed' THEN clock_timestamp() ELSE NULL END WHERE id=$1")
-        .bind(job_id).bind(if attempt>=max{"failed"}else{"pending"}).execute(&mut *tx).await?;
-        sqlx::query("UPDATE bid_matching_staging_sets SET state='expired' WHERE job_id=$1 AND attempt=$2 AND state='active'")
-        .bind(job_id).bind(attempt).execute(&mut *tx).await?;
-    }
-    let expired=sqlx::query("UPDATE bid_matching_staging_sets SET state='expired' WHERE state='active' AND expires_at<=clock_timestamp()")
-      .execute(&mut *tx).await?.rows_affected();
-    sqlx::query("DELETE FROM bid_matching_staging_report_payloads payload USING bid_matching_staging_sets staging
-      WHERE payload.staging_set_id=staging.id AND staging.state IN ('expired','failed')
-        AND staging.created_at<clock_timestamp()-interval '24 hours'")
-      .execute(&mut *tx).await?;
-    sqlx::query(
-        "DELETE FROM bid_matching_staged_batches batch USING bid_matching_staging_sets staging
-      WHERE batch.staging_set_id=staging.id AND staging.state IN ('expired','failed')
-        AND staging.created_at<clock_timestamp()-interval '24 hours'",
-    )
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "DELETE FROM bid_matching_staging_sets WHERE state IN ('expired','failed')
-      AND created_at<clock_timestamp()-interval '24 hours'",
-    )
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(rows.len() as u64 + expired)
-}
-
-fn is_claim_fence_error(error: &sqlx::Error) -> bool {
-    matches!(
-        error,
-        sqlx::Error::Protocol(message)
-            if message == "matching claim fence lost" || message == "matching claim missing"
-    )
+    Ok(n as u64)
 }
 
 pub async fn pending_route_envelopes(
@@ -2742,6 +1370,210 @@ pub async fn current_route_pick_items(
     .await
 }
 
+pub async fn matching_overview(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<serde_json::Value, sqlx::Error> {
+    let routes: serde_json::Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY r.ordinal), '[]'::jsonb)
+           FROM bidding_current_routes r WHERE r.project_id=$1",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+    let reports: serde_json::Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'id', r.id,
+            'route_id', r.route_id,
+            'generation', r.generation,
+            'mutation_watermark', r.mutation_watermark,
+            'quality_status', r.quality_status,
+            'degraded', r.degraded,
+            'reason_codes', to_jsonb(r.reason_codes),
+            'coverage_total', r.coverage_total,
+            'coverage_supported', r.coverage_supported,
+            'coverage_unresolved', r.coverage_unresolved,
+            'coverage_insufficient', r.coverage_insufficient,
+            'coverage_contradicted', r.coverage_contradicted,
+            'content_sha256', r.content_sha256,
+            'empty_disposition', r.empty_disposition
+          ) ORDER BY r.route_id), '[]'::jsonb)
+           FROM bidding_current_matching_reports r WHERE r.project_id=$1",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+    let technical_candidates: serde_json::Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.route_id,c.requirement_artifact_id,c.recommended DESC,c.route_product_ordinal,c.retrieval_rank), '[]'::jsonb)
+           FROM bidding_current_technical_candidates c WHERE c.project_id=$1",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+    let commercial_decisions: serde_json::Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.ordinal), '[]'::jsonb)
+           FROM bidding_current_commercial_decisions c WHERE c.project_id=$1",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+    let route_pick_sets: serde_json::Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'route_id', p.route_id,
+            'revision', p.revision,
+            'source_report_artifact_id', p.source_report_artifact_id,
+            'report_sha256', p.report_sha256,
+            'report_generation', p.report_generation,
+            'route_unit_id', p.route_unit_id,
+            'content_sha256', p.content_sha256,
+            'payload', convert_from(p.canonical_payload,'UTF8')::jsonb
+          ) ORDER BY p.route_id), '[]'::jsonb)
+           FROM bidding_current_route_pick_sets p WHERE p.project_id=$1",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await?;
+    let project_pick_set: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+            'id', p.id,
+            'revision', p.revision,
+            'content_sha256', p.content_sha256,
+            'payload', convert_from(p.canonical_payload,'UTF8')::jsonb
+          )
+           FROM bidding_current_project_pick_sets p WHERE p.project_id=$1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(serde_json::json!({
+        "routes": routes,
+        "reports": reports,
+        "technical_candidates": technical_candidates,
+        "commercial_decisions": commercial_decisions,
+        "route_pick_sets": route_pick_sets,
+        "project_pick_set": project_pick_set
+    }))
+}
+
+pub async fn matching_report_artifact_json(
+    pool: &PgPool,
+    project_id: Uuid,
+    report_id: Uuid,
+) -> Result<Option<serde_json::Value>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+            'id', report.id,
+            'project_id', report.project_id,
+            'route_id', report.route_id,
+            'generation', report.generation,
+            'mutation_watermark', report.mutation_watermark,
+            'content_sha256', report.content_sha256,
+            'published_at', report.published_at,
+            'canonical_payload', convert_from(report.canonical_payload,'UTF8'),
+            'payload', convert_from(report.canonical_payload,'UTF8')::jsonb
+          )
+           FROM bidding_matching_report_history report
+          WHERE report.project_id=$1 AND report.id=$2",
+    )
+    .bind(project_id)
+    .bind(report_id)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn route_pick_set_json(
+    pool: &PgPool,
+    project_id: Uuid,
+    route_id: Uuid,
+) -> Result<serde_json::Value, sqlx::Error> {
+    let route: Option<(String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT route_kind, unit_id FROM bidding_current_routes WHERE project_id=$1 AND route_id=$2",
+    )
+    .bind(project_id)
+    .bind(route_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((route_kind, unit_id)) = route else {
+        return Ok(serde_json::json!({
+            "route_id": route_id,
+            "exists": false,
+            "items": [],
+            "supported_candidates": []
+        }));
+    };
+    let report: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+            'id', r.id,
+            'generation', r.generation,
+            'content_sha256', r.content_sha256,
+            'mutation_watermark', r.mutation_watermark,
+            'quality_status', r.quality_status,
+            'degraded', r.degraded,
+            'reason_codes', to_jsonb(r.reason_codes)
+          )
+           FROM bidding_current_matching_reports r
+          WHERE r.project_id=$1 AND r.route_id=$2",
+    )
+    .bind(project_id)
+    .bind(route_id)
+    .fetch_optional(pool)
+    .await?;
+    let pick: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+            'revision', p.revision,
+            'source_report_artifact_id', p.source_report_artifact_id,
+            'report_sha256', p.report_sha256,
+            'report_generation', p.report_generation,
+            'route_unit_id', p.route_unit_id,
+            'content_sha256', p.content_sha256,
+            'payload', convert_from(p.canonical_payload,'UTF8')::jsonb
+          )
+           FROM bidding_current_route_pick_sets p
+          WHERE p.project_id=$1 AND p.route_id=$2",
+    )
+    .bind(project_id)
+    .bind(route_id)
+    .fetch_optional(pool)
+    .await?;
+    let supported: serde_json::Value = sqlx::query_scalar(
+        "SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.requirement_artifact_id,c.recommended DESC,c.route_product_ordinal,c.retrieval_rank), '[]'::jsonb)
+           FROM bidding_current_technical_candidates c
+          WHERE c.project_id=$1 AND c.route_id=$2",
+    )
+    .bind(project_id)
+    .bind(route_id)
+    .fetch_one(pool)
+    .await?;
+    let items = pick
+        .as_ref()
+        .and_then(|value| value.get("payload"))
+        .and_then(|value| value.get("items"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let revision = pick
+        .as_ref()
+        .and_then(|value| value.get("revision"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    Ok(serde_json::json!({
+        "exists": true,
+        "route_id": route_id,
+        "route_kind": route_kind,
+        "unit_id": unit_id,
+        "source_report_artifact_id": report.as_ref().and_then(|value| value.get("id")).cloned(),
+        "report_sha256": report.as_ref().and_then(|value| value.get("content_sha256")).cloned(),
+        "report_generation": report.as_ref().and_then(|value| value.get("generation")).cloned(),
+        "matching_mutation_watermark": report.as_ref().and_then(|value| value.get("mutation_watermark")).cloned(),
+        "quality_status": report.as_ref().and_then(|value| value.get("quality_status")).cloned(),
+        "degraded": report.as_ref().and_then(|value| value.get("degraded")).cloned(),
+        "reason_codes": report.as_ref().and_then(|value| value.get("reason_codes")).cloned(),
+        "revision": revision,
+        "items": items,
+        "supported_candidates": supported,
+        "pick_set": pick
+    }))
+}
+
 pub async fn current_route_supported_candidates(
     pool: &PgPool,
     project_id: Uuid,
@@ -2774,135 +1606,53 @@ pub async fn replace_route_pick_set(
     input: ReplaceRoutePickSetV1,
     context: &crate::bidding::MutationContext,
 ) -> Result<PickSetReceiptV1, sqlx::Error> {
-    if context.actor.starts_with("system:") {
-        return Err(protocol("HUMAN_ACTOR_REQUIRED"));
-    }
-    let mut tx = pool.begin().await?;
-    let replay = idempotency_begin(&mut tx, context, "bid.matching.route_pick.replace").await?;
-    if let Some(bytes) = replay {
-        return serde_json::from_slice(&bytes).map_err(|_| protocol("invalid pick receipt"));
-    }
-    let project = sqlx::query("SELECT status FROM bid_projects WHERE id=$1 FOR UPDATE")
-        .bind(input.project_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    if project.get::<String, _>("status") != "open" {
-        return Err(protocol("bid project is not open"));
-    }
-    let report=sqlx::query("SELECT report.*,route.unit_id,route.route_kind FROM bid_current_matching_reports current_value
-      JOIN bid_matching_reports report ON report.id=current_value.report_id JOIN bid_matching_routes route ON route.id=report.route_id
-      JOIN bid_projects project ON project.id=current_value.project_id
-      WHERE current_value.project_id=$1 AND current_value.route_id=$2 AND report.id=$3
-        AND project.status='open' AND report.mutation_watermark=project.matching_mutation_watermark
-        AND report.generation=(SELECT max(generation) FROM bid_matching_manifests WHERE project_id=$1)
-      FOR UPDATE OF current_value")
-      .bind(input.project_id).bind(input.route_id).bind(input.source_report_artifact_id).fetch_optional(&mut *tx).await?
-      .ok_or_else(||protocol("current matching report mismatch"))?;
-    if report.get::<String, _>("route_kind") != "technical" {
-        return Err(protocol("ROUTE_PICK_REQUIRES_TECHNICAL_REPORT"));
-    }
-    if report.get::<String, _>("content_sha256") != input.report_sha256 {
-        return Err(protocol("REPORT_SHA256_MISMATCH"));
-    }
-    let current_revision:Option<i64>=sqlx::query_scalar("SELECT revision FROM bid_current_route_pick_sets WHERE project_id=$1 AND route_id=$2 FOR UPDATE")
-      .bind(input.project_id).bind(input.route_id).fetch_optional(&mut *tx).await?;
-    if current_revision.unwrap_or(0) != input.expected_revision {
-        return Err(protocol("ROUTE_PICK_REVISION_MISMATCH"));
-    }
-    let before_digest =
-        current_route_pick_digest(&mut tx, input.project_id, input.route_id).await?;
-    let mut selections = input.selections;
-    selections.sort_by_key(|row| (row.requirement_artifact_id, row.candidate_artifact_id));
-    selections.dedup_by_key(|row| (row.requirement_artifact_id, row.candidate_artifact_id));
-    let ids: Vec<Uuid> = selections
-        .iter()
-        .map(|row| row.candidate_artifact_id)
-        .collect();
-    let candidates = if ids.is_empty() {
-        Vec::new()
-    } else {
-        sqlx::query("SELECT candidate.id,candidate.requirement_artifact_id,product.product_id,product.product_version_id
-      FROM bid_matching_candidate_artifacts candidate JOIN bid_matching_product_version_artifacts product ON product.id=candidate.product_version_artifact_id
-      WHERE candidate.report_id=$1 AND candidate.support='supported' AND candidate.id=ANY($2::uuid[]) ORDER BY candidate.requirement_artifact_id,candidate.id")
-      .bind(input.source_report_artifact_id).bind(&ids).fetch_all(&mut *tx).await?
-    };
-    if candidates.len() != selections.len()
-        || candidates.iter().zip(&selections).any(|(row, selected)| {
-            row.get::<Uuid, _>("id") != selected.candidate_artifact_id
-                || row.get::<Uuid, _>("requirement_artifact_id") != selected.requirement_artifact_id
-        })
-    {
-        return Err(protocol("pick item is not a visible supported candidate"));
-    }
-    let selected_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
-        .fetch_one(&mut *tx)
-        .await?;
-    let revision = input.expected_revision + 1;
-    let pick_set_id = Uuid::new_v4();
-    let unit_id: Option<Uuid> = report.get("unit_id");
-    let items:Vec<serde_json::Value>=candidates.iter().zip(&selections).map(|(row,selection)|serde_json::json!({
-      "requirement_artifact_id":selection.requirement_artifact_id,"candidate_artifact_id":selection.candidate_artifact_id,
-      "product_id":row.get::<Option<Uuid>,_>("product_id"),"product_version_id":row.get::<Uuid,_>("product_version_id"),
-      "source_report_artifact_id":input.source_report_artifact_id,"unit_id":unit_id,"selected_by":context.actor,
-      "selected_at":selected_at.to_rfc3339_opts(chrono::SecondsFormat::Micros,true)
-    })).collect();
-    let payload = serde_json::json!({"schema_version":1,"project_id":input.project_id,"route_id":input.route_id,
-      "source_report_artifact_id":input.source_report_artifact_id,"report_generation":report.get::<i64,_>("generation"),
-      "report_sha256":input.report_sha256,"route_unit_id":unit_id,"revision":revision,"items":items});
-    let bytes = serde_json::to_vec(&payload).unwrap();
-    let digest = sha256_hex(&bytes);
-    sqlx::query("INSERT INTO bid_route_pick_set_artifacts(id,project_id,route_id,source_report_artifact_id,report_generation,
-      report_sha256,route_unit_id,revision,canonical_payload,content_sha256,selected_by,selected_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)")
-      .bind(pick_set_id).bind(input.project_id).bind(input.route_id).bind(input.source_report_artifact_id)
-      .bind(report.get::<i64,_>("generation")).bind(&input.report_sha256).bind(unit_id).bind(revision).bind(&bytes).bind(&digest)
-      .bind(&context.actor).bind(selected_at).execute(&mut *tx).await?;
-    for (ordinal, (row, selection)) in candidates.iter().zip(&selections).enumerate() {
-        sqlx::query("INSERT INTO bid_route_pick_set_items(pick_set_id,ordinal,requirement_artifact_id,candidate_artifact_id,
-       product_id,product_version_id,source_report_artifact_id,unit_id,selected_by,selected_at)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)")
-       .bind(pick_set_id).bind(ordinal as i32).bind(selection.requirement_artifact_id).bind(selection.candidate_artifact_id)
-       .bind(row.get::<Option<Uuid>,_>("product_id")).bind(row.get::<Uuid,_>("product_version_id"))
-       .bind(input.source_report_artifact_id).bind(unit_id).bind(&context.actor).bind(selected_at).execute(&mut *tx).await?;
-    }
-    sqlx::query("INSERT INTO bid_current_route_pick_sets(project_id,route_id,pick_set_id,revision) VALUES($1,$2,$3,$4)
-      ON CONFLICT(project_id,route_id) DO UPDATE SET pick_set_id=EXCLUDED.pick_set_id,revision=EXCLUDED.revision")
-      .bind(input.project_id).bind(input.route_id).bind(pick_set_id).bind(revision).execute(&mut *tx).await?;
-    let project_pick = rebuild_project_pick_set(&mut tx, input.project_id, &context.actor).await?;
-    let part_key = match unit_id {
-        Some(id) if id.is_nil() => "2:unsectioned".into(),
-        Some(id) => format!("2:{id}"),
-        None => "4".into(),
-    };
-    sqlx::query("UPDATE bid_current_parts SET stale=true,stale_reason_codes=(SELECT ARRAY(SELECT DISTINCT code FROM unnest(stale_reason_codes||ARRAY['MATCHING_PICK_CHANGED']) code ORDER BY code))
-      WHERE project_id=$1 AND (part_key=$2 OR part_key IN ('3','5','6:implementation_plan'))")
-      .bind(input.project_id).bind(part_key).execute(&mut *tx).await?;
-    let receipt = PickSetReceiptV1 {
-        route_pick_set_id: pick_set_id,
-        route_revision: revision,
-        route_sha256: digest,
-        project_pick_set_id: project_pick.0,
-        project_revision: project_pick.1,
-        project_sha256: project_pick.2,
-    };
-    let response = serde_json::to_vec(&receipt).unwrap();
-    sqlx::query("INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
-      entity_kind,entity_locator,before_revision,before_sha256,after_revision,after_sha256)
-      VALUES($1,1,'bid.matching.route_pick.replace',$2,$3,$4,$5,'bid_route_pick_set',$6,$7,$8,$9,$10)")
-      .bind(Uuid::new_v4()).bind(&context.actor).bind(&context.idempotency_key).bind(&context.request.sha256).bind(sha256_hex(&response))
-      .bind(serde_json::json!({"project_id":input.project_id,"route_id":input.route_id}))
-      .bind((input.expected_revision>0).then_some(input.expected_revision))
-      .bind(before_digest).bind(revision).bind(&receipt.route_sha256).execute(&mut *tx).await?;
-    idempotency_complete(
-        &mut tx,
-        context,
-        "bid.matching.route_pick.replace",
-        200,
-        &response,
+    let selections =
+        serde_json::to_value(&input.selections).map_err(|error| protocol(error.to_string()))?;
+    let value: serde_json::Value = sqlx::query_scalar(
+        "SELECT kb_bid_matching_replace_route_picks($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
     )
+    .bind(input.project_id)
+    .bind(input.route_id)
+    .bind(input.source_report_artifact_id)
+    .bind(&input.report_sha256)
+    .bind(input.expected_revision)
+    .bind(selections)
+    .bind(&context.actor)
+    .bind(&context.idempotency_key)
+    .bind(&context.request.bytes)
+    .bind(&context.request.sha256)
+    .fetch_one(pool)
     .await?;
-    tx.commit().await?;
-    Ok(receipt)
+    Ok(PickSetReceiptV1 {
+        route_pick_set_id: parse_uuid(&value, "route_pick_set_id")?,
+        route_revision: value
+            .get("route_revision")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        route_sha256: value
+            .get("route_sha256")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        project_pick_set_id: parse_uuid(&value, "project_pick_set_id")?,
+        project_revision: value
+            .get("project_revision")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        project_sha256: value
+            .get("project_sha256")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+fn parse_uuid(value: &serde_json::Value, key: &str) -> Result<Uuid, sqlx::Error> {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok())
+        .ok_or_else(|| protocol(format!("matching receipt missing {key}")))
 }
 
 async fn rebuild_project_pick_set(
@@ -3024,49 +1774,6 @@ async fn verify_mixed_pick_rows(
     verify_project_pick_union(unsectioned, &project_items, &route_items)
 }
 
-async fn current_route_pick_digest(
-    tx: &mut Transaction<'_, Postgres>,
-    project_id: Uuid,
-    route_id: Uuid,
-) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar("SELECT artifact.content_sha256 FROM bid_current_route_pick_sets current_value JOIN bid_route_pick_set_artifacts artifact ON artifact.id=current_value.pick_set_id WHERE current_value.project_id=$1 AND current_value.route_id=$2")
- .bind(project_id).bind(route_id).fetch_optional(&mut **tx).await
-}
-
-async fn idempotency_begin(
-    tx: &mut Transaction<'_, Postgres>,
-    context: &crate::bidding::MutationContext,
-    operation: &str,
-) -> Result<Option<Vec<u8>>, sqlx::Error> {
-    let replay: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT kb_bid_idempotency_begin($1,$2,$3,$4,$5)")
-            .bind(&context.actor)
-            .bind(operation)
-            .bind(&context.idempotency_key)
-            .bind(&context.request.bytes)
-            .bind(&context.request.sha256)
-            .fetch_one(&mut **tx)
-            .await?;
-    Ok(replay)
-}
-async fn idempotency_complete(
-    tx: &mut Transaction<'_, Postgres>,
-    context: &crate::bidding::MutationContext,
-    operation: &str,
-    status: i32,
-    response: &[u8],
-) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT kb_bid_idempotency_complete($1,$2,$3,$4,$5)")
-        .bind(&context.actor)
-        .bind(operation)
-        .bind(&context.idempotency_key)
-        .bind(status)
-        .bind(response)
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
-}
-
 fn snapshot_identity(manifest_id: Uuid) -> EnvelopeSnapshotIdentity {
     EnvelopeSnapshotIdentity {
         config_snapshot_id: deterministic_uuid("config", manifest_id.as_bytes()),
@@ -3085,6 +1792,32 @@ fn deterministic_uuid(tag: &str, identity: &[u8]) -> Uuid {
     b[8] = (b[8] & 63) | 128;
     Uuid::from_bytes(b)
 }
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b0 = bytes[i];
+        let b1 = if i + 1 < bytes.len() { bytes[i + 1] } else { 0 };
+        let b2 = if i + 2 < bytes.len() { bytes[i + 2] } else { 0 };
+        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        if i + 1 < bytes.len() {
+            out.push(TABLE[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if i + 2 < bytes.len() {
+            out.push(TABLE[(n & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        i += 3;
+    }
+    out
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
@@ -3104,22 +1837,7 @@ fn parse_collection<T: for<'de> Deserialize<'de>>(
     }
     Ok(values)
 }
-fn json_i32(value: &serde_json::Value, key: &str) -> Result<i32, sqlx::Error> {
-    value
-        .get(key)
-        .and_then(|v| v.as_u64())
-        .and_then(|v| i32::try_from(v).ok())
-        .ok_or_else(|| protocol(format!("{key} missing")))
-}
-fn json_str<'a>(value: &'a serde_json::Value, key: &str) -> Result<&'a str, sqlx::Error> {
-    value
-        .get(key)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| protocol(format!("{key} missing")))
-}
-fn strict_sorted_unique(values: &[String]) -> bool {
-    values.windows(2).all(|w| w[0] < w[1])
-}
+
 fn bound_detail(value: &str) -> String {
     value.chars().take(1024).collect()
 }
@@ -3154,6 +1872,32 @@ mod tests {
         let replayed: Vec<serde_json::Value> =
             parse_collection(&collections, "candidates").unwrap();
         assert_eq!(replayed, items);
+    }
+
+    #[test]
+    fn candidate_group_stage_items_use_the_sql_base64_field() {
+        let canonical_payload = br#"{"schema_version":1}"#.to_vec();
+        let group = StagedCandidateGroupV1 {
+            id: Uuid::from_u128(1),
+            requirement_artifact_id: Uuid::from_u128(2),
+            support: "supported".into(),
+            ordinal: 0,
+            content_sha256: sha256_hex(&canonical_payload),
+            canonical_payload: canonical_payload.clone(),
+        };
+        let mut batches = Vec::new();
+
+        split_collection("candidate_groups", &[group], &mut batches).unwrap();
+
+        let items = stage_batch_items(batches[0].kind, &batches[0].bytes).unwrap();
+        let expected = base64_encode(&canonical_payload);
+        assert_eq!(
+            items[0]
+                .get("canonical_payload_b64")
+                .and_then(serde_json::Value::as_str),
+            Some(expected.as_str())
+        );
+        assert!(items[0].get("canonical_payload").is_none());
     }
 
     #[test]
@@ -3196,76 +1940,6 @@ mod tests {
         assert!(
             verify_project_pick_union(Some(unsectioned_report), &wrong_nil, &route_items).is_err()
         );
-    }
-
-    #[test]
-    fn decision_aggregation_uses_contract_priority_and_comparator() {
-        let requirement = Uuid::new_v4();
-        let later = StagedCandidateV1 {
-            id: Uuid::from_u128(2),
-            requirement_artifact_id: requirement,
-            product_version_artifact_id: Uuid::new_v4(),
-            route_product_ordinal: 2,
-            retrieval_rank: 1,
-            retrieval_raw_score: "1.000000".into(),
-            candidate_identity_sha256: "b".repeat(64),
-            evidence_v1_sha256: "b".repeat(64),
-            support: "supported".into(),
-            business_value_status: "not_scored".into(),
-            business_value: None,
-            recommended: false,
-        };
-        let mut earlier = later.clone();
-        earlier.id = Uuid::from_u128(1);
-        earlier.route_product_ordinal = 1;
-        earlier.candidate_identity_sha256 = "a".repeat(64);
-        earlier.evidence_v1_sha256 = "a".repeat(64);
-        let mut unresolved = later.clone();
-        unresolved.id = Uuid::from_u128(3);
-        unresolved.route_product_ordinal = 0;
-        unresolved.support = "unresolved".into();
-        let decision = aggregate_decision(&[&later, &unresolved, &earlier]);
-        assert_eq!(decision.0, "supported");
-        assert_eq!(decision.4, Some(earlier.id));
-    }
-
-    #[test]
-    fn commit_rejects_any_difference_from_open_declared_totals() {
-        assert!(verify_staging_totals(6, 4, 128, 6, 4, 128).is_ok());
-        assert!(verify_staging_totals(7, 4, 128, 6, 4, 128).is_err());
-        assert!(verify_staging_totals(6, 5, 128, 6, 4, 128).is_err());
-        assert!(verify_staging_totals(6, 4, 129, 6, 4, 128).is_err());
-    }
-
-    #[test]
-    fn claim_fence_binds_token_attempt_and_frozen_lease_policy() {
-        let claim = MatchClaim {
-            token: Uuid::from_u128(1),
-            attempt: 2,
-            claim_lease_ms: 300_000,
-            lease_policy_generation: 7,
-        };
-        assert!(claim_snapshot_matches(
-            Uuid::from_u128(1),
-            2,
-            300_000,
-            7,
-            claim
-        ));
-        assert!(!claim_snapshot_matches(
-            Uuid::from_u128(9),
-            2,
-            300_000,
-            7,
-            claim
-        ));
-        assert!(!claim_snapshot_matches(
-            Uuid::from_u128(1),
-            2,
-            300_000,
-            8,
-            claim
-        ));
     }
 
     #[test]

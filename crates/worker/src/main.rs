@@ -12,15 +12,6 @@ async fn main() {
     storage::require_production_first_launch_verified(&pool)
         .await
         .unwrap_or_else(|error| panic!("production first-launch gate failed: {error}"));
-    let extractor = bid::extraction::TenderExtractionEngine::from_env()
-        .unwrap_or_else(|e| panic!("bid extraction configuration failed: {e}"));
-    tracing::info!(
-        mode = extractor.mode().as_str(),
-        model = extractor.model_id(),
-        policy = extractor.policy_version(),
-        prompt = extractor.prompt_version(),
-        "bid extraction configured"
-    );
     let probe_addr = worker::probe::probe_addr();
     let probe_listener = worker::probe::bind()
         .await

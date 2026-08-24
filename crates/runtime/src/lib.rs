@@ -6,7 +6,7 @@ pub use jobs::*;
 use chrono::{Duration, Utc};
 use domain::{
     ParseStatus, QUEUE_BID_CONVERT_V1, QUEUE_BID_EXTRACT_V1, QUEUE_BID_MATCHING_V1,
-    QUEUE_BID_SECTION_RETRY_V1, QUEUE_DEFAULT, QUEUE_GRAPH, QUEUE_LOW, QUEUE_MULTIMODAL,
+    QUEUE_BID_RENDER_V1, QUEUE_DEFAULT, QUEUE_GRAPH, QUEUE_LOW, QUEUE_MULTIMODAL,
     QUEUE_POSTPROCESS, QUEUE_QUESTION, QUEUE_SUMMARY, QUEUE_WIKI, Store,
 };
 
@@ -58,8 +58,8 @@ pub fn queue_for(task_type: &str) -> &'static str {
         domain::TYPE_DOCUMENT_PROCESS | domain::TYPE_MANUAL_PROCESS => QUEUE_DEFAULT,
         domain::TYPE_BID_CONVERT => QUEUE_BID_CONVERT_V1,
         domain::TYPE_BID_EXTRACT => QUEUE_BID_EXTRACT_V1,
-        domain::TYPE_BID_SECTION_RETRY => QUEUE_BID_SECTION_RETRY_V1,
         domain::TYPE_BID_MATCH_ROUTE_V1 => QUEUE_BID_MATCHING_V1,
+        domain::TYPE_BID_RENDER_SUBMISSION_V1 => QUEUE_BID_RENDER_V1,
         domain::TYPE_POST_PROCESS => QUEUE_POSTPROCESS,
         domain::TYPE_SUMMARY | domain::TYPE_DATATABLE => QUEUE_SUMMARY,
         domain::TYPE_IMAGE_MULTIMODAL => QUEUE_MULTIMODAL,
@@ -150,12 +150,12 @@ mod tests {
             domain::QUEUE_BID_EXTRACT_V1
         );
         assert_eq!(
-            queue_for(domain::TYPE_BID_SECTION_RETRY),
-            domain::QUEUE_BID_SECTION_RETRY_V1
-        );
-        assert_eq!(
             queue_for(domain::TYPE_BID_MATCH_ROUTE_V1),
             domain::QUEUE_BID_MATCHING_V1
+        );
+        assert_eq!(
+            queue_for(domain::TYPE_BID_RENDER_SUBMISSION_V1),
+            domain::QUEUE_BID_RENDER_V1
         );
         assert_eq!(queue_for(domain::TYPE_POST_PROCESS), "postprocess");
         assert_eq!(queue_for(domain::TYPE_KB_DELETE), "low");
@@ -222,8 +222,8 @@ mod tests {
         for constant in [
             domain::TYPE_BID_CONVERT,
             domain::TYPE_BID_EXTRACT,
-            domain::TYPE_BID_SECTION_RETRY,
             domain::TYPE_BID_MATCH_ROUTE_V1,
+            domain::TYPE_BID_RENDER_SUBMISSION_V1,
         ] {
             assert!(
                 task_types.contains(constant),

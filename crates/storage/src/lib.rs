@@ -1,8 +1,8 @@
 //! Object bytes keyed as `objects/{sha256}`. Postgres migrate + workspace seed.
 
-pub mod bid;
-pub mod bid_extract_publication;
 pub mod bid_matching;
+pub mod bid_quote;
+pub mod bid_submission;
 pub mod bidding;
 mod first_launch;
 pub mod knowledge_retrieval;
@@ -16,8 +16,8 @@ pub use first_launch::{
     require_production_first_launch_verified, verify_fresh_pretraffic_catalog_rows,
 };
 pub use object_registry::{
-    RetentionClaim, process_one_retention_item, register_knowledge_document_object,
-    release_knowledge_document_object,
+    RetentionClaim, abandon_object_upload, expire_object_uploads, process_one_retention_item,
+    register_knowledge_document_object, release_knowledge_document_object, stage_object_upload,
 };
 pub use persist::*;
 pub use probe::*;

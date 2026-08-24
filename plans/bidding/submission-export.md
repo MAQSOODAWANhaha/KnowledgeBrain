@@ -336,6 +336,7 @@ required_part_keys
 part_artifacts + PartDependencyV1
 fact/profile/report/pick/quote/procedural/attachment/shot identities
 template contracts
+renderer contract version + frozen PDF font identity
 render asset occurrences
 gate result/issues
 created_by, created_at
@@ -374,6 +375,8 @@ manifest 创建时验证 available、ownership、MIME/魔数、bytes、pixels �
 
 renderer 只能调用 `read_manifest_render_asset`，禁止查询 live shot/part/object table 或直接读任意 object key。
 
+HTTP render endpoint 只校验 manifest identity/renderer contract，先幂等创建 durable render job，再 best-effort 写入 `bid-render-v1`，返回 `202 queued` 和稳定 `render_job_id`。Redis 短暂不可用时 job 保持 `pending`，housekeep 必须重入队；客户端通过 project-scoped job API 观察 `pending|running|completed|failed`，不得用“outputs 尚未出现”推断 worker 状态。worker 使用 claim token/lease fencing；可重试失败回到 `pending`，确定性失败或耗尽尝试进入 `failed`，过期 claim 由 housekeep reap。DOCX/PDF 构造、manifest asset bytes 读取、输出 staging write 与最终 publish 全部由 worker 完成。输出 bytes 先取得平台 upload staging reference，`publish_submission_output` 在同一事务中把它转移为 `bid_submission_output` owner并把 render job 置为 `completed`；publish/CAS 或 claim fencing 失败必须 abandon，不能留下无 owner 的物理对象。队列 payload 只携带 `render_job_id`，manifest identity、actor 与幂等键必须从 durable job claim 取得，不能信任可漂移的消息副本。
+
 ## 12. 模板 contract promotion
 
 每个固定 slot 保存 immutable template contract artifact 与 singleton current pointer/generation。promotion 只在 maintenance gate 下：
@@ -400,6 +403,7 @@ list_gate_issues
 create_submission_manifest
 render_docx
 render_pdf
+get_submission_render_job
 download_submission_artifact
 promote_procedural_router/template_contract (maintenance only)
 ```

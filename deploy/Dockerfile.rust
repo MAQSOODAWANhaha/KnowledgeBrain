@@ -14,11 +14,12 @@ COPY rust-toolchain.toml rustfmt.toml Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY migrations migrations
 COPY services/docreader/proto services/docreader/proto
-RUN mkdir -p deploy/first-launch
+RUN mkdir -p deploy/first-launch deploy/postgres-init
 COPY deploy/queue-registry.toml deploy/queue-registry.toml
 COPY deploy/first-launch/intended-state.toml deploy/first-launch/intended-state.toml
 COPY deploy/first-launch/catalog-row-allowlist.toml deploy/first-launch/catalog-row-allowlist.toml
 COPY deploy/first-launch/migration-manifest.toml deploy/first-launch/migration-manifest.toml
+COPY deploy/postgres-init/010-runtime-identities.sh deploy/postgres-init/010-runtime-identities.sh
 RUN cargo build --release -p api -p worker -p retention -p migrator -p first-launch-verifier
 
 FROM debian:bookworm-slim

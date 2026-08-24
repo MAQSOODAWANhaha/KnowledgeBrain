@@ -43,6 +43,16 @@ SELECT format(
   :'retention_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='kb_runtime_retention') \gexec
 
+-- pgvector is bootstrap-owned. Knowledge indexing/search binds text vectors,
+-- applies the declared typmod, reads vectors for replay, and ranks by cosine;
+-- keep those four extension routines role-scoped after PUBLIC is revoked.
+GRANT EXECUTE ON FUNCTION
+ public.vector_in(cstring,oid,integer),
+ public.vector_out(public.vector),
+ public.vector(public.vector,integer,boolean),
+ public.cosine_distance(public.vector,public.vector)
+TO kb_runtime_api,kb_runtime_worker;
+
 DO $launch_roles$
 DECLARE role_name text; expected_inherit boolean;
 BEGIN

@@ -1,48 +1,55 @@
-# CI-only lightweight image override. It retains the production service names,
-# profiles, dependencies, environment, init scripts, and volumes while mounting
-# binaries already built by the mandatory Rust job.
+# CI-only immutable application-image override. It retains the production
+# service topology while running the exact binaries frozen into one acceptance
+# image before the first container starts.
 services:
   migrate:
-    image: ubuntu:24.04
+    image: ${KB_ACCEPT_RUNTIME_ID:?acceptance application image ID is required}
     build: !reset null
-    entrypoint: ["/workspace/target/debug/migrator"]
-    volumes:
-      - ..:/workspace:ro
+    entrypoint: ["/usr/local/bin/migrator"]
   first-launch-verifier:
-    image: ubuntu:24.04
+    image: ${KB_ACCEPT_RUNTIME_ID:?acceptance application image ID is required}
     build: !reset null
-    entrypoint: ["/workspace/target/debug/first-launch-verifier"]
-    volumes:
-      - ..:/workspace:ro
+    entrypoint: ["/usr/local/bin/first-launch-verifier"]
   api:
-    image: ubuntu:24.04
+    image: ${KB_ACCEPT_RUNTIME_ID:?acceptance application image ID is required}
     build: !reset null
-    entrypoint: ["/workspace/target/debug/api"]
-    volumes:
-      - ..:/workspace:ro
+    entrypoint: ["/usr/local/bin/api"]
     healthcheck:
-      test: ["CMD", "/bin/true"]
+      test: ["CMD", "/bin/bash", "-c", ":> /dev/tcp/127.0.0.1/8080"]
       interval: 2s
       timeout: 1s
       retries: 10
   worker:
-    image: ubuntu:24.04
+    image: ${KB_ACCEPT_RUNTIME_ID:?acceptance application image ID is required}
     build: !reset null
-    entrypoint: ["/workspace/target/debug/worker"]
-    volumes:
-      - ..:/workspace:ro
-  retention:
-    image: ubuntu:24.04
-    build: !reset null
-    entrypoint: ["/workspace/target/debug/retention"]
-    volumes:
-      - ..:/workspace:ro
-  docreader:
-    image: alpine:3.21
-    build: !reset null
-    entrypoint: ["/bin/sh", "-c", "exec sleep 3600"]
+    entrypoint: ["/usr/local/bin/worker"]
     healthcheck:
-      test: ["CMD", "/bin/true"]
+      test: ["CMD", "/bin/bash", "-c", ":> /dev/tcp/127.0.0.1/8081"]
       interval: 2s
       timeout: 1s
       retries: 10
+  retention:
+    image: ${KB_ACCEPT_RUNTIME_ID:?acceptance application image ID is required}
+    build: !reset null
+    entrypoint: ["/usr/local/bin/retention"]
+    healthcheck:
+      test: ["CMD", "/bin/bash", "-c", ":> /dev/tcp/127.0.0.1/8082"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+  docreader:
+    image: ${KB_ACCEPT_DOCREADER_ID:?acceptance DocReader image ID is required}
+    build: !reset null
+    entrypoint: !reset null
+    environment:
+      DOCREADER_GRPC_PORT: 50051
+      MAX_FILE_SIZE_MB: 50
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import socket;s=socket.create_connection(('127.0.0.1',50051),2);s.close()\"",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 30

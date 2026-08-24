@@ -182,15 +182,6 @@ pub struct BidExtractJob {
     pub task_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
-#[oxana(unique_id = "bid:section-retry:{job_id}", on_conflict = Skip)]
-pub struct BidSectionRetryJob {
-    pub job_id: Uuid,
-    pub project_id: Uuid,
-    pub section_id: Uuid,
-    pub task_type: String,
-}
-
 #[derive(oxana::Queue)]
 #[oxana(key = "bid-convert-v1", concurrency = Dynamic(4))]
 pub struct BidConvertV1Queue;
@@ -200,12 +191,12 @@ pub struct BidConvertV1Queue;
 pub struct BidExtractV1Queue;
 
 #[derive(oxana::Queue)]
-#[oxana(key = "bid-section-retry-v1", concurrency = Dynamic(4))]
-pub struct BidSectionRetryV1Queue;
-
-#[derive(oxana::Queue)]
 #[oxana(key = "bid-matching-v1", concurrency = Dynamic(4))]
 pub struct BidMatchingV1Queue;
+
+#[derive(oxana::Queue)]
+#[oxana(key = "bid-render-v1", concurrency = Dynamic(2))]
+pub struct BidRenderV1Queue;
 
 pub const BID_MATCH_ROUTE_V1_SCHEMA: &str = "bid-match-route/v1";
 pub const BID_MATCH_ROUTE_V1_PAYLOAD_VERSION: u16 = 1;
@@ -256,6 +247,44 @@ impl BidMatchRouteV1Job {
         }
         if let Some(trace_id) = &self.trace_id {
             bounded_opaque_trace_id(trace_id.clone())?;
+        }
+        Ok(())
+    }
+}
+
+pub const BID_RENDER_SUBMISSION_V1_SCHEMA: &str = "bid-render-submission/v1";
+pub const BID_RENDER_SUBMISSION_V1_PAYLOAD_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
+#[oxana(
+    unique_id = "bid:render-submission:v1:{render_job_id}",
+    on_conflict = Skip
+)]
+pub struct BidRenderSubmissionV1Job {
+    pub render_job_id: Uuid,
+    pub payload_version: u16,
+    pub task_type: String,
+}
+
+impl BidRenderSubmissionV1Job {
+    pub fn new(render_job_id: Uuid) -> Result<Self, String> {
+        let job = Self {
+            render_job_id,
+            payload_version: BID_RENDER_SUBMISSION_V1_PAYLOAD_VERSION,
+            task_type: domain::TYPE_BID_RENDER_SUBMISSION_V1.to_string(),
+        };
+        job.validate()?;
+        Ok(job)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.payload_version != BID_RENDER_SUBMISSION_V1_PAYLOAD_VERSION
+            || self.task_type != domain::TYPE_BID_RENDER_SUBMISSION_V1
+        {
+            return Err("rejected bid-render-submission payload contract".into());
+        }
+        if self.render_job_id.is_nil() {
+            return Err("rejected bid-render-submission render_job_id".into());
         }
         Ok(())
     }
@@ -341,18 +370,15 @@ pub async fn queue_depths() -> std::collections::HashMap<String, i64> {
             storage.enqueued_count(BidExtractV1Queue).await.unwrap_or(0),
         ),
         (
-            "bid-section-retry-v1",
-            storage
-                .enqueued_count(BidSectionRetryV1Queue)
-                .await
-                .unwrap_or(0),
-        ),
-        (
             "bid-matching-v1",
             storage
                 .enqueued_count(BidMatchingV1Queue)
                 .await
                 .unwrap_or(0),
+        ),
+        (
+            "bid-render-v1",
+            storage.enqueued_count(BidRenderV1Queue).await.unwrap_or(0),
         ),
     ] {
         out.insert(name.into(), n as i64);
@@ -497,7 +523,6 @@ pub fn dashboard_catalog() -> Option<(oxana::Storage, oxana::Catalog)> {
         .queue::<WikiQueue>()
         .queue::<BidConvertV1Queue>()
         .queue::<BidExtractV1Queue>()
-        .queue::<BidSectionRetryV1Queue>()
         .queue::<BidMatchingV1Queue>();
     let catalog = builder.catalog();
     Some((storage, catalog))
@@ -548,18 +573,15 @@ pub async fn queue_job_previews() -> std::collections::HashMap<String, Vec<Strin
             storage.list_queue_jobs(BidExtractV1Queue, &opts).await.ok(),
         ),
         (
-            "bid-section-retry-v1",
-            storage
-                .list_queue_jobs(BidSectionRetryV1Queue, &opts)
-                .await
-                .ok(),
-        ),
-        (
             "bid-matching-v1",
             storage
                 .list_queue_jobs(BidMatchingV1Queue, &opts)
                 .await
                 .ok(),
+        ),
+        (
+            "bid-render-v1",
+            storage.list_queue_jobs(BidRenderV1Queue, &opts).await.ok(),
         ),
     ] {
         if let Some(jobs) = jobs {
@@ -969,29 +991,6 @@ pub async fn enqueue_bid_extract(
     oxana_id(storage.enqueue(BidExtractV1Queue, job).await)
 }
 
-pub async fn enqueue_bid_section_retry(
-    job_id: Uuid,
-    project_id: Uuid,
-    section_id: Uuid,
-) -> Result<Option<String>, String> {
-    let Ok(storage) = connect() else {
-        return Ok(None);
-    };
-    oxana_id(
-        storage
-            .enqueue(
-                BidSectionRetryV1Queue,
-                BidSectionRetryJob {
-                    job_id,
-                    project_id,
-                    section_id,
-                    task_type: domain::TYPE_BID_SECTION_RETRY.to_string(),
-                },
-            )
-            .await,
-    )
-}
-
 pub async fn enqueue_bid_match_route_v1(
     job_id: Uuid,
     snapshots: BidMatchRouteV1Snapshots,
@@ -1003,6 +1002,17 @@ pub async fn enqueue_bid_match_route_v1(
     };
     tracing::debug!(job_id = %job_id, job = "bid:match-route:v1", "enqueue");
     oxana_id(storage.enqueue(BidMatchingV1Queue, job).await)
+}
+
+pub async fn enqueue_bid_render_submission_v1(
+    render_job_id: Uuid,
+) -> Result<Option<String>, String> {
+    let job = BidRenderSubmissionV1Job::new(render_job_id)?;
+    let Ok(storage) = connect() else {
+        return Ok(None);
+    };
+    tracing::debug!(%render_job_id, job = "bid:render-submission:v1", "enqueue");
+    oxana_id(storage.enqueue(BidRenderV1Queue, job).await)
 }
 
 pub async fn enqueue_wiki_finalize_in(
@@ -1144,6 +1154,31 @@ mod tests {
     }
 
     #[test]
+    fn bid_render_submission_v1_identity_schema_and_queue_key() {
+        let render_job_id = Uuid::from_u128(4);
+        let job = BidRenderSubmissionV1Job::new(render_job_id).unwrap();
+        assert_eq!(BID_RENDER_SUBMISSION_V1_SCHEMA, "bid-render-submission/v1");
+        assert_eq!(
+            job.payload_version,
+            BID_RENDER_SUBMISSION_V1_PAYLOAD_VERSION
+        );
+        assert_eq!(job.task_type, domain::TYPE_BID_RENDER_SUBMISSION_V1);
+        assert_eq!(job.render_job_id, render_job_id);
+        assert_eq!(
+            <BidRenderSubmissionV1Job as oxana::Job>::unique_id(&job),
+            Some(format!("bid:render-submission:v1:{render_job_id}"))
+        );
+        match <BidRenderV1Queue as oxana::Queue>::to_config().kind {
+            oxana::QueueKind::Static { key } => assert_eq!(key, domain::QUEUE_BID_RENDER_V1),
+            other => panic!("bid-render-v1 queue must be static, got {other:?}"),
+        }
+        assert_eq!(
+            crate::queue_for(domain::TYPE_BID_RENDER_SUBMISSION_V1),
+            domain::QUEUE_BID_RENDER_V1
+        );
+    }
+
+    #[test]
     fn unknown_old_bid_match_payload_is_rejected_not_default() {
         assert!(crate::rejected_legacy_bid_match_task("bid:match"));
         assert!(crate::rejected_legacy_bid_match_task("bid:match-route"));
@@ -1162,7 +1197,6 @@ mod tests {
     fn bid_extract_pipeline_queues_keep_durable_ids_and_leave_default() {
         let document_id = Uuid::from_u128(1);
         let run_id = Uuid::from_u128(2);
-        let job_id = Uuid::from_u128(3);
         let convert = BidConvertJob {
             document_id,
             task_type: domain::TYPE_BID_CONVERT.to_string(),
@@ -1173,12 +1207,6 @@ mod tests {
             document_id: Some(document_id),
             task_type: domain::TYPE_BID_EXTRACT.to_string(),
         };
-        let retry = BidSectionRetryJob {
-            job_id,
-            project_id: Uuid::from_u128(5),
-            section_id: Uuid::from_u128(6),
-            task_type: domain::TYPE_BID_SECTION_RETRY.to_string(),
-        };
         assert_eq!(
             <BidConvertJob as oxana::Job>::unique_id(&convert),
             Some(format!("bid:convert:{document_id}"))
@@ -1186,10 +1214,6 @@ mod tests {
         assert_eq!(
             <BidExtractJob as oxana::Job>::unique_id(&extract),
             Some(format!("bid:extract:{run_id}"))
-        );
-        assert_eq!(
-            <BidSectionRetryJob as oxana::Job>::unique_id(&retry),
-            Some(format!("bid:section-retry:{job_id}"))
         );
         match <BidConvertV1Queue as oxana::Queue>::to_config().kind {
             oxana::QueueKind::Static { key } => assert_eq!(key, domain::QUEUE_BID_CONVERT_V1),
@@ -1199,12 +1223,6 @@ mod tests {
             oxana::QueueKind::Static { key } => assert_eq!(key, domain::QUEUE_BID_EXTRACT_V1),
             other => panic!("bid-extract-v1 queue must be static, got {other:?}"),
         }
-        match <BidSectionRetryV1Queue as oxana::Queue>::to_config().kind {
-            oxana::QueueKind::Static { key } => {
-                assert_eq!(key, domain::QUEUE_BID_SECTION_RETRY_V1)
-            }
-            other => panic!("bid-section-retry-v1 queue must be static, got {other:?}"),
-        }
         assert_eq!(
             crate::queue_for(domain::TYPE_BID_CONVERT),
             domain::QUEUE_BID_CONVERT_V1
@@ -1212,10 +1230,6 @@ mod tests {
         assert_eq!(
             crate::queue_for(domain::TYPE_BID_EXTRACT),
             domain::QUEUE_BID_EXTRACT_V1
-        );
-        assert_eq!(
-            crate::queue_for(domain::TYPE_BID_SECTION_RETRY),
-            domain::QUEUE_BID_SECTION_RETRY_V1
         );
         assert_ne!(
             crate::queue_for(domain::TYPE_BID_CONVERT),
@@ -1396,14 +1410,9 @@ mod tests {
             .wipe_queue(BidExtractV1Queue)
             .await
             .expect("wipe bid-extract-v1");
-        storage
-            .wipe_queue(BidSectionRetryV1Queue)
-            .await
-            .expect("wipe bid-section-retry-v1");
         let before_default = storage.enqueued_count(DefaultQueue).await.unwrap();
         let convert_id = Uuid::new_v4();
         let extract_id = Uuid::new_v4();
-        let retry_id = Uuid::new_v4();
         assert!(
             enqueue_bid_convert(convert_id)
                 .await
@@ -1416,12 +1425,6 @@ mod tests {
                 .expect("extract")
                 .is_some()
         );
-        assert!(
-            enqueue_bid_section_retry(retry_id, Uuid::new_v4(), Uuid::new_v4())
-                .await
-                .expect("section-retry")
-                .is_some()
-        );
         assert_eq!(
             storage.enqueued_count(DefaultQueue).await.unwrap(),
             before_default,
@@ -1429,13 +1432,6 @@ mod tests {
         );
         assert!(storage.enqueued_count(BidConvertV1Queue).await.unwrap() >= 1);
         assert!(storage.enqueued_count(BidExtractV1Queue).await.unwrap() >= 1);
-        assert!(
-            storage
-                .enqueued_count(BidSectionRetryV1Queue)
-                .await
-                .unwrap()
-                >= 1
-        );
         storage
             .wipe_queue(BidConvertV1Queue)
             .await
@@ -1444,10 +1440,6 @@ mod tests {
             .wipe_queue(BidExtractV1Queue)
             .await
             .expect("wipe bid-extract-v1");
-        storage
-            .wipe_queue(BidSectionRetryV1Queue)
-            .await
-            .expect("wipe bid-section-retry-v1");
     }
 
     #[tokio::test]
@@ -1505,8 +1497,8 @@ mod tests {
         for task_type in [
             domain::TYPE_BID_CONVERT,
             domain::TYPE_BID_EXTRACT,
-            domain::TYPE_BID_SECTION_RETRY,
             domain::TYPE_BID_MATCH_ROUTE_V1,
+            domain::TYPE_BID_RENDER_SUBMISSION_V1,
         ] {
             let mapped = crate::queue_for(task_type);
             assert_ne!(mapped, domain::QUEUE_DEFAULT);

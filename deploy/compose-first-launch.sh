@@ -48,11 +48,18 @@ for field, filename in bindings.items():
         sys.exit(66)
 legacy_surfaces = {
     "crates/storage/src/bid.rs": ["persist_extraction_report", "persist_section_retry"],
-    "crates/storage/src/bid_matching.rs": ["pub async fn commit_route("],
+    "crates/storage/src/bid_extract_publication.rs": ["ExtractionPublicationStore"],
+    "crates/storage/src/bid_matching.rs": ["pub async fn commit_route(", "CommitRouteV1"],
     "crates/storage/src/lib.rs": ["drop_blob", "release_object_ref", "bump_object_ref"],
+    "crates/bid/src/export.rs": ["regenerate_stale"],
+    "crates/bid/src/booklet.rs": ["bid_booklet_parts"],
+    "web/src/api.ts": ["downloadExport", "regenerateStale", "owner_name"],
 }
 for filename, forbidden in legacy_surfaces.items():
-    source = pathlib.Path(filename).read_text(encoding="utf-8")
+    path = pathlib.Path(filename)
+    if not path.exists():
+        continue
+    source = path.read_text(encoding="utf-8")
     present = [token for token in forbidden if token in source]
     if present:
         print(f"refusing production first launch: legacy matching surface remains in {filename}: {present}", file=sys.stderr)

@@ -79,9 +79,11 @@ pub trait EvidenceVerifier: Send + Sync {
     ) -> Result<VerifyOutcome, MatchError>;
 }
 
-/// Deterministic verifier used only by tests and explicit development fixtures.
+/// Deterministic verifier used only by tests.
+#[cfg(test)]
 pub struct FakeVerifier;
 
+#[cfg(test)]
 #[async_trait]
 impl EvidenceVerifier for FakeVerifier {
     async fn verify(
@@ -222,7 +224,8 @@ where
             let source_id = deterministic_uuid(
                 "MatchingSourceChunkV1",
                 format!(
-                    "{}:{}:{}:{}:{}:{}",
+                    "{}:{}:{}:{}:{}:{}:{}",
+                    report_id,
                     source_identity.0,
                     source_identity.1,
                     source_identity.2,
@@ -774,6 +777,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(report.source_artifacts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn frozen_source_artifact_identity_is_scoped_to_its_report() {
+        let requirement = requirement(10, 0);
+        let frozen_hit = hit(requirement.id, 0, 1, 1);
+        let claimed = claim(vec![requirement], vec![frozen_hit]);
+
+        let first = MatchingWorkflow::new(FakeVerifier)
+            .execute(&claimed, Uuid::from_u128(9))
+            .await
+            .unwrap();
+        let second = MatchingWorkflow::new(FakeVerifier)
+            .execute(&claimed, Uuid::from_u128(10))
+            .await
+            .unwrap();
+
+        assert_ne!(first.source_artifacts[0].id, second.source_artifacts[0].id);
     }
 
     #[tokio::test]

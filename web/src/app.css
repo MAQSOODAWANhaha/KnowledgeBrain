@@ -1,31 +1,31 @@
 :root {
-  --bg: #f6f6f8;
+  --bg: #f5f5f7;
   --surface: #ffffff;
-  --ink: #1f1f23;
-  --muted: #6b6b73;
-  --faint: #8e8e96;
-  --crumb: #a1a1aa;
-  --line: #ececef;
-  --line-soft: #f1f1f4;
-  --fill: #f4f4f7;
-  --fill-2: #f7f7f8;
-  --iris: #635ff2;
-  --iris-600: #514cdc;
-  --iris-soft: #ecebfe;
-  --iris-wash: #f3f2fe;
-  --iris-tint: #f7f6ff;
-  --iris-ink: #4b47d4;
-  --amber: #c4923a;
-  --amber-soft: #fff6e4;
-  --pine: #2f9b6a;
-  --pine-soft: #e6f6ee;
-  --rose: #c44b6a;
-  --rose-soft: #f8e4ea;
-  --shadow: 0 1px 2px rgba(31, 31, 35, 0.04), 0 10px 28px rgba(31, 31, 35, 0.045);
-  --sans: "Plus Jakarta Sans", "Noto Sans SC", "PingFang SC", sans-serif;
-  --r-card: 20px;
-  --r-in: 14px;
-  --r-ctl: 12px;
+  --ink: #1d1d1f;
+  --muted: #6e6e73;
+  --faint: #8e8e93;
+  --crumb: #86868b;
+  --line: rgba(60, 60, 67, 0.12);
+  --line-soft: rgba(60, 60, 67, 0.08);
+  --fill: #f2f2f7;
+  --fill-2: #f5f5f7;
+  --iris: #1d6fd8;
+  --iris-600: #185bbb;
+  --iris-soft: #e8f1fc;
+  --iris-wash: #e8f1fc;
+  --iris-tint: #f3f8fe;
+  --iris-ink: #185bbb;
+  --amber: #c93400;
+  --amber-soft: #fff1eb;
+  --pine: #248a3d;
+  --pine-soft: #e6f6ea;
+  --rose: #d70015;
+  --rose-soft: #fde8ea;
+  --shadow: 0 1px 2px rgba(29, 29, 31, 0.04), 0 10px 28px rgba(29, 29, 31, 0.045);
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Noto Sans SC", sans-serif;
+  --r-card: 12px;
+  --r-in: 12px;
+  --r-ctl: 10px;
   --r-pill: 999px;
 }
 
@@ -37,8 +37,8 @@ body,
   background: var(--bg);
   color: var(--ink);
   font-family: var(--sans);
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: 15px;
+  line-height: 1.47;
   -webkit-font-smoothing: antialiased;
   font-variant-numeric: tabular-nums;
 }
@@ -1185,13 +1185,8 @@ table.grid tr:hover td {
 .login-body {
   flex: 1;
   display: grid;
-  grid-template-columns: 1fr 440px;
-  gap: 80px;
-  align-items: center;
-  padding: 48px 80px 80px;
-  max-width: 1280px;
-  width: 100%;
-  margin: 0 auto;
+  place-items: center;
+  padding: 48px 24px 80px;
 }
 
 .login-copy h1 {

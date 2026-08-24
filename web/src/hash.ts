@@ -14,47 +14,58 @@ export function go(path: string): void {
   location.hash = path;
 }
 
-export type BidStep = "files" | "eval" | "booklet";
+export type BidStep = "files" | "facts" | "matching" | "quote" | "parts";
 
 export const BID_STEPS: { key: BidStep; n: string; label: string }[] = [
   { key: "files", n: "1", label: "文件" },
-  { key: "eval", n: "2", label: "评估" },
-  { key: "booklet", n: "3", label: "成稿" },
+  { key: "facts", n: "2", label: "事实/条款" },
+  { key: "matching", n: "3", label: "匹配/选择" },
+  { key: "quote", n: "4", label: "报价/材料" },
+  { key: "parts", n: "5", label: "成稿" },
 ];
 
 export type BidRoute = {
   id: string;
-  step: BidStep | null;
+  step: BidStep;
   view: string;
   part: string;
-  pane: "table" | "draft" | "detail";
+  pane: "table" | "draft";
   clause: string | null;
   doc: string | null;
 };
 
 function isBidStep(value: string | null): value is BidStep {
-  return value === "files" || value === "eval" || value === "booklet";
+  return value === "files" || value === "facts" || value === "matching" || value === "quote" || value === "parts";
 }
 
 function normalizeStep(value: string | null): BidStep | null {
   if (isBidStep(value)) return value;
-  if (value === "parse") return "files";
   return null;
 }
 
 export function bidHref(
   id: string,
   view: string,
-  extra?: { step?: BidStep | "parse"; part?: string; pane?: "table" | "draft" | "detail"; clause?: string | null; doc?: string | null },
+  extra?: { step?: BidStep; part?: string; pane?: "table" | "draft"; clause?: string | null; doc?: string | null },
 ): string {
   const q = new URLSearchParams();
   const step =
     normalizeStep(extra?.step ?? null) ??
-    (view === "parse" || view === "files" ? "files" : view === "booklet" ? "booklet" : isBidStep(view) ? view : "eval");
+    (view === "files"
+      ? "files"
+      : view === "parts"
+        ? "parts"
+        : view === "quote" || view === "materials"
+          ? "quote"
+          : view === "matching"
+            ? "matching"
+            : view === "facts"
+              ? "facts"
+              : isBidStep(view)
+                ? view
+                : "facts");
   q.set("step", step);
-  if (step === "eval" && view && view !== "commercial" && view !== "eval" && view !== "files" && view !== "parse") {
-    q.set("view", view);
-  }
+  if (view && view !== step) q.set("view", view);
   if (extra?.part) q.set("part", extra.part);
   if (extra?.pane && extra.pane !== "table") q.set("pane", extra.pane);
   if (extra?.clause) q.set("clause", extra.clause);
@@ -119,30 +130,19 @@ export function assetVersionHref(route: AssetRoute, versionId?: string): string 
 export function parseBidRoute(path: string): BidRoute | null {
   const [rawPath, qs] = path.split("?");
   const raw = (rawPath || "/").replace(/\/+$/, "") || "/";
-  const preview = raw.match(/^\/bids\/([^/]+)\/preview$/);
-  const bookletPath = raw.match(/^\/bids\/([^/]+)\/booklet\/([^/]+)$/);
   const bid = raw.match(/^\/bids\/([^/]+)$/);
-  const id = preview?.[1] ?? bookletPath?.[1] ?? bid?.[1];
+  const id = bid?.[1];
   if (!id) return null;
   const q = new URLSearchParams(qs || "");
-  let view = q.get("view") || "commercial";
-  let part = q.get("part") || "1";
-  const stepQ = q.get("step");
-  let step: BidStep | null = normalizeStep(stepQ);
-  if (preview) {
-    view = "booklet";
-    part = q.get("part") || "1";
-    step = "booklet";
-  }
-  if (bookletPath) {
-    view = "booklet";
-    part = decodeURIComponent(bookletPath[2]);
-    step = "booklet";
-  }
-  if (!step) step = normalizeStep(view);
-  if (step === "files") view = "commercial";
-  if (step === "booklet") view = "booklet";
-  const paneRaw = q.get("pane");
-  const pane = paneRaw === "draft" || paneRaw === "detail" ? paneRaw : "table";
+  let view = q.get("view") || "";
+  const part = q.get("part") || "1";
+  let step = normalizeStep(q.get("step"));
+  if (!step) step = normalizeStep(view) ?? "files";
+  if (step === "files") view = view || "files";
+  if (step === "facts" && !view) view = "facts";
+  if (step === "matching" && !view) view = "commercial";
+  if (step === "quote" && !view) view = "quote";
+  if (step === "parts") view = "parts";
+  const pane = q.get("pane") === "draft" ? "draft" : "table";
   return { id, step, view, part, pane, clause: q.get("clause"), doc: q.get("doc") };
 }

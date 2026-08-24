@@ -1,7 +1,7 @@
 //! Worker handler for one frozen matching route.
 
 use super::{
-    CandidateBusinessValue, EvidenceVerifier, FakeVerifier, LexicalEvidenceVerifier, MatchError,
+    CandidateBusinessValue, EvidenceVerifier, LexicalEvidenceVerifier, MatchError,
     MatchingReportV1, MatchingWorkflow, QualityStatus, SystemDecision, VerifierSupport,
 };
 use runtime::BidMatchRouteV1Job;
@@ -17,21 +17,7 @@ use uuid::Uuid;
 
 pub async fn run_match_route_v1(pool: &PgPool, job: BidMatchRouteV1Job) -> Result<(), String> {
     job.validate()?;
-    if matching_fakes_enabled() {
-        dispatch(pool, job, MatchingWorkflow::new(FakeVerifier)).await
-    } else {
-        dispatch(pool, job, MatchingWorkflow::new(LexicalEvidenceVerifier)).await
-    }
-}
-
-fn matching_fakes_enabled() -> bool {
-    matches!(
-        std::env::var("KNOWLEDGEBRAIN_MATCH_FAKES")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    dispatch(pool, job, MatchingWorkflow::new(LexicalEvidenceVerifier)).await
 }
 
 async fn dispatch<V>(

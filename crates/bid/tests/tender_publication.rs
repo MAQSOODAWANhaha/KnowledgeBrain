@@ -1,7 +1,10 @@
 use bid::tender::outline_and_route;
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use storage::bidding::{FactMutation, MutationContext, PublishSection};
+use storage::bidding::{
+    CompleteDocumentConversion, ConvertedSourceImageUpload, FactMutation, MutationContext,
+    PublishSection, UploadDocument,
+};
 use uuid::Uuid;
 
 struct PublicationSeed {
@@ -518,4 +521,161 @@ async fn confirmed_clause_cannot_patch_kind_before_leaving_old_membership() {
     .unwrap();
     assert_eq!(final_watermark, 3);
     assert_eq!(service_revision, 1);
+}
+
+#[tokio::test]
+async fn converted_images_transfer_staging_to_source_artifact_owners() {
+    let Ok(pool) = storage::connect().await else {
+        eprintln!("skipped live conversion object contract: database unavailable");
+        return;
+    };
+    if !final_tender_schema_is_ready(&pool).await {
+        eprintln!("skipped live conversion object contract: final V1 schema unavailable");
+        return;
+    }
+
+    let user_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let document_id = Uuid::new_v4();
+    let actor = format!("user:{user_id}");
+    sqlx::query("INSERT INTO users(id,email) VALUES($1,$2)")
+        .bind(user_id)
+        .bind(format!("{user_id}@converted-image.invalid"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_projects
+         (id,title,owner_user_id,ends_at,fact_sha256,ceiling_identity_sha256,created_by)
+         VALUES($1,'Converted image registry contract',$2,clock_timestamp()+interval '30 days',
+           repeat('0',64),repeat('0',64),$3)",
+    )
+    .bind(project_id)
+    .bind(user_id)
+    .bind(&actor)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let original = b"original tender bytes";
+    let original_digest = domain::sha256_hex(original);
+    let original_ref = storage::object_ref(&original_digest);
+    let original_staging_id = Uuid::new_v4();
+    storage::stage_object_upload(
+        &pool,
+        original_staging_id,
+        &original_ref,
+        &original_digest,
+        "application/pdf",
+        original.len() as i64,
+        &actor,
+    )
+    .await
+    .unwrap();
+    let upload_body = json!({
+        "project_id": project_id,
+        "document_id": document_id,
+        "object_ref": original_ref,
+        "sha256": original_digest,
+    });
+    let upload_context =
+        MutationContext::new(actor.clone(), format!("upload-{document_id}"), &upload_body).unwrap();
+    storage::bidding::upload_document(
+        &pool,
+        original_staging_id,
+        UploadDocument {
+            id: document_id,
+            project_id,
+            file_name: "converted-image.pdf",
+            media_type: "application/pdf",
+            byte_length: original.len() as i64,
+            object_ref: &original_ref,
+            original_sha256: &original_digest,
+        },
+        &upload_context,
+    )
+    .await
+    .unwrap();
+
+    let claim_token = Uuid::new_v4();
+    storage::bidding::claim_document_conversion(
+        &pool,
+        document_id,
+        claim_token,
+        "converted-image-contract-test",
+    )
+    .await
+    .unwrap()
+    .expect("pending document must be claimable");
+
+    let image = b"\x89PNG\r\n\x1a\nconverted-image";
+    let image_digest = domain::sha256_hex(image);
+    let image_ref = storage::object_ref(&image_digest);
+    let image_staging_id = Uuid::new_v4();
+    let conversion_actor = "system:bid-convert-worker";
+    storage::stage_object_upload(
+        &pool,
+        image_staging_id,
+        &image_ref,
+        &image_digest,
+        "image/png",
+        image.len() as i64,
+        conversion_actor,
+    )
+    .await
+    .unwrap();
+    let image_set_sha256 = domain::sha256_hex(
+        format!("ConvertedSourceArtifactV1:image-set:{image_digest}").as_bytes(),
+    );
+    let source_artifact_id = Uuid::new_v4();
+    storage::bidding::complete_document_conversion(
+        &pool,
+        CompleteDocumentConversion {
+            document_id,
+            claim_token,
+            source_artifact_id,
+            markdown: format!("![topology]({image_ref})").as_bytes(),
+            converter_contract_version: "converted-image-contract-v1",
+            image_asset_set_sha256: &image_set_sha256,
+            image_assets: &[ConvertedSourceImageUpload {
+                staging_id: image_staging_id,
+                object_ref: image_ref.clone(),
+                digest: image_digest.clone(),
+                media_type: "image/png".into(),
+                byte_length: image.len() as i64,
+                occurrence: "image:0".into(),
+            }],
+            actor: conversion_actor,
+        },
+    )
+    .await
+    .unwrap();
+
+    let owner_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM object_owner_references
+         WHERE object_ref=$1 AND owner_kind='bid_converted_source_image'
+           AND owner_id=$2 AND occurrence='image:0'",
+    )
+    .bind(&image_ref)
+    .bind(source_artifact_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(owner_count, 1);
+    let staging_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM object_upload_staging WHERE id=$1")
+            .bind(image_staging_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        staging_count, 0,
+        "completion must consume the staging owner"
+    );
+    let state: String = sqlx::query_scalar("SELECT state FROM object_registry WHERE object_ref=$1")
+        .bind(&image_ref)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "available");
 }

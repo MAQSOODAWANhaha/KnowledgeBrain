@@ -108,10 +108,17 @@ fn signed_send_blocking(
     );
     let url = format!("{}{path}", endpoint().trim_end_matches('/'));
     // Dedicated blocking client: never call this on a tokio worker (deadlock).
-    let mut req = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+    // A plaintext MinIO endpoint needs no trust roots. Avoid initializing the
+    // platform certificate verifier in minimal runtime images that do not ship
+    // a CA bundle; HTTPS endpoints continue to use the platform verifier.
+    let mut client_builder =
+        reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(30));
+    if endpoint().starts_with("http://") {
+        client_builder = client_builder.tls_certs_only(std::iter::empty::<reqwest::Certificate>());
+    }
+    let mut req = client_builder
         .build()
-        .map_err(|e| e.to_string())?
+        .map_err(|error| format!("{error:?}"))?
         .request(
             method.parse().map_err(|_| format!("bad method {method}"))?,
             url,
@@ -123,9 +130,9 @@ fn signed_send_blocking(
     if send_body && method != "GET" && method != "HEAD" && method != "DELETE" {
         req = req.body(body.to_vec());
     }
-    let resp = req.send().map_err(|e| e.to_string())?;
+    let resp = req.send().map_err(|error| format!("{error:?}"))?;
     let status = resp.status();
-    let bytes = resp.bytes().map_err(|e| e.to_string())?.to_vec();
+    let bytes = resp.bytes().map_err(|error| format!("{error:?}"))?.to_vec();
     if !status.is_success() {
         return Err(format!("s3 {method} {path} -> {status}"));
     }

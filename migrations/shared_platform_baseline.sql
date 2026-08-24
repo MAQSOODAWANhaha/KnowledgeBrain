@@ -16,6 +16,7 @@ AS $$
         OR value IN (
             'system:bid-convert-worker',
             'system:bid-extraction-worker',
+            'system:clause-lifecycle',
             'system:first-launch',
             'system:kind-router-promotion',
             'system:knowledge-document-delete',
@@ -196,6 +197,9 @@ INSERT INTO queue_contract_artifacts(
     contract_key, version, schema_version, canonical_payload, content_sha256, created_at
 )
 VALUES
+ ('bid.render-submission.v1', 1, 1, '{"queue":"bid-render-v1","schema_version":1,"task_type":"bid:render-submission:v1"}',
+  encode(digest(convert_to('{"queue":"bid-render-v1","schema_version":1,"task_type":"bid:render-submission:v1"}', 'UTF8'), 'sha256'), 'hex'),
+  '1970-01-01 UTC'),
  ('document.process', 1, 1, '{"claim_lease_ms":300000,"queue":"default","schema_version":1}',
   encode(digest(convert_to('{"claim_lease_ms":300000,"queue":"default","schema_version":1}', 'UTF8'), 'sha256'), 'hex'),
   '1970-01-01 UTC'),
@@ -203,7 +207,9 @@ VALUES
   encode(digest(convert_to('{"claim_lease_ms":60000,"queue":"retention","schema_version":1}', 'UTF8'), 'sha256'), 'hex'),
   '1970-01-01 UTC');
 INSERT INTO queue_contract_current(contract_key, version, generation)
-VALUES ('document.process', 1, 0), ('object.retention', 1, 0);
+VALUES ('bid.render-submission.v1', 1, 0),
+       ('document.process', 1, 0),
+       ('object.retention', 1, 0);
 CREATE TRIGGER queue_contract_artifacts_immutable
 BEFORE UPDATE OR DELETE ON queue_contract_artifacts
 FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
@@ -266,6 +272,17 @@ CREATE TABLE object_owner_references (
     PRIMARY KEY (object_ref, owner_kind, owner_id, occurrence),
     UNIQUE (owner_kind, owner_id, occurrence)
 );
+
+CREATE TABLE object_upload_staging (
+    id uuid PRIMARY KEY,
+    object_ref kb_object_ref NOT NULL REFERENCES object_registry(object_ref) ON DELETE RESTRICT,
+    created_by kb_actor_identity NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz NOT NULL DEFAULT (now() + interval '24 hours'),
+    CHECK (expires_at > created_at)
+);
+CREATE INDEX object_upload_staging_expiry_idx
+    ON object_upload_staging(expires_at, id);
 
 CREATE TABLE object_retention_outbox (
     object_ref kb_object_ref PRIMARY KEY REFERENCES object_registry(object_ref) ON DELETE RESTRICT,
@@ -402,6 +419,141 @@ BEGIN
         END IF;
     END IF;
     RETURN scheduled;
+END
+$$;
+
+-- Runtime uploaders first register a short-lived platform-owned reference,
+-- then write the physical bytes. A domain mutation atomically transfers that
+-- reference to its final owner. Failed or abandoned mutations never leave an
+-- unregistered physical object, and crashed uploaders are reclaimed by the
+-- maintenance worker through the expiry function below.
+CREATE FUNCTION kb_object_upload_stage(
+    p_staging_id uuid,
+    p_object_ref kb_object_ref,
+    p_digest kb_sha256,
+    p_media_type text,
+    p_byte_length bigint,
+    p_actor kb_actor_identity
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+    PERFORM kb_object_reference_add(
+        p_object_ref, p_digest, p_media_type, p_byte_length,
+        'object_upload_staging', p_staging_id, 'payload', p_actor
+    );
+    INSERT INTO object_upload_staging(id, object_ref, created_by)
+    VALUES (p_staging_id, p_object_ref, p_actor)
+    ON CONFLICT (id) DO NOTHING;
+    IF NOT EXISTS (
+        SELECT 1 FROM object_upload_staging
+         WHERE id = p_staging_id AND object_ref = p_object_ref AND created_by = p_actor
+    ) THEN
+        RAISE EXCEPTION 'object upload staging identity mismatch'
+            USING ERRCODE = '23514';
+    END IF;
+END
+$$;
+
+-- Internal transfer seam. Domain SECURITY DEFINER mutations call this in the
+-- same transaction as their business row, audit, pointer, and receipt writes.
+-- It is deliberately not granted to runtime roles.
+CREATE FUNCTION kb_object_upload_commit(
+    p_staging_id uuid,
+    p_object_ref kb_object_ref,
+    p_digest kb_sha256,
+    p_media_type text,
+    p_byte_length bigint,
+    p_owner_kind text,
+    p_owner_id uuid,
+    p_occurrence text,
+    p_actor kb_actor_identity
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    staging object_upload_staging%ROWTYPE;
+    registry object_registry%ROWTYPE;
+BEGIN
+    SELECT * INTO STRICT staging FROM object_upload_staging
+     WHERE id = p_staging_id FOR UPDATE;
+    IF staging.object_ref <> p_object_ref OR staging.created_by <> p_actor THEN
+        RAISE EXCEPTION 'object upload staging owner mismatch' USING ERRCODE = '23514';
+    END IF;
+    SELECT * INTO STRICT registry FROM object_registry
+     WHERE object_ref = staging.object_ref FOR UPDATE;
+    IF registry.digest <> p_digest OR registry.media_type <> p_media_type
+       OR registry.byte_length <> p_byte_length OR registry.state <> 'available' THEN
+        RAISE EXCEPTION 'object upload staging content identity mismatch'
+            USING ERRCODE = '23514';
+    END IF;
+    PERFORM kb_object_reference_add(
+        p_object_ref, p_digest, p_media_type, p_byte_length,
+        p_owner_kind, p_owner_id, p_occurrence, p_actor
+    );
+    DELETE FROM object_upload_staging WHERE id = p_staging_id;
+    PERFORM kb_object_reference_remove(
+        p_object_ref, 'object_upload_staging', p_staging_id, 'payload'
+    );
+END
+$$;
+
+CREATE FUNCTION kb_object_upload_abandon(
+    p_staging_id uuid,
+    p_actor kb_actor_identity
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    staging object_upload_staging%ROWTYPE;
+BEGIN
+    SELECT * INTO staging FROM object_upload_staging
+     WHERE id = p_staging_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+    IF staging.created_by <> p_actor THEN
+        RAISE EXCEPTION 'object upload staging owner mismatch' USING ERRCODE = '42501';
+    END IF;
+    DELETE FROM object_upload_staging WHERE id = p_staging_id;
+    RETURN kb_object_reference_remove(
+        staging.object_ref, 'object_upload_staging', p_staging_id, 'payload'
+    );
+END
+$$;
+
+CREATE FUNCTION kb_object_upload_expire()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    staging object_upload_staging%ROWTYPE;
+    expired_count integer := 0;
+BEGIN
+    FOR staging IN
+        SELECT * FROM object_upload_staging
+         WHERE expires_at <= clock_timestamp()
+         ORDER BY expires_at, id
+         FOR UPDATE SKIP LOCKED
+    LOOP
+        DELETE FROM object_upload_staging WHERE id = staging.id;
+        PERFORM kb_object_reference_remove(
+            staging.object_ref, 'object_upload_staging', staging.id, 'payload'
+        );
+        expired_count := expired_count + 1;
+    END LOOP;
+    RETURN expired_count;
 END
 $$;
 
@@ -886,8 +1038,12 @@ TO kb_runtime_api, kb_runtime_worker;
 GRANT EXECUTE ON FUNCTION kb_actor_identity_valid(text)
 TO kb_runtime_api, kb_runtime_worker, kb_runtime_retention;
 GRANT EXECUTE ON FUNCTION kb_register_knowledge_document_object(uuid, text, kb_actor_identity, text, uuid),
-    kb_release_knowledge_document_object(uuid, kb_actor_identity, text, uuid)
+    kb_release_knowledge_document_object(uuid, kb_actor_identity, text, uuid),
+    kb_object_upload_stage(uuid, kb_object_ref, kb_sha256, text, bigint, kb_actor_identity),
+    kb_object_upload_abandon(uuid, kb_actor_identity)
 TO kb_runtime_api, kb_runtime_worker;
+GRANT EXECUTE ON FUNCTION kb_object_upload_expire()
+TO kb_runtime_worker;
 GRANT EXECUTE ON FUNCTION kb_retention_claim(uuid, text, integer),
     kb_retention_heartbeat(kb_object_ref, uuid, integer),
     kb_retention_complete(kb_object_ref, uuid),
