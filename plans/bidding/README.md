@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | **最终 V1 产品方案已固化；stable Oxana durable-dispatch 修订待交叉 review，代码尚未实施或验收** |
+| 状态 | **最终 V1 产品方案与 stable Oxana durable-dispatch 修订已批准并固化；运行时代码尚未实施或验收** |
 | 日期 | 2026-08-26 |
 | 业务 | 网络安全产品与服务应标（乙方） |
 | 部署 | clean-slate fresh redeploy |
@@ -16,7 +16,7 @@
 | [`matching.md`](matching.md) | 两路检索、不可变证据、MatchingReportV1、选择集和匹配发布 |
 | [`quote.md`](quote.md) | CNY Decimal、限价口径、QuoteSnapshotV1、finalize/reopen |
 | [`submission-export.md`](submission-export.md) | ①～⑥、程序材料、stale、manifest、ObjectRegistry 使用、DOCX/PDF |
-| [`durable-dispatch.md`](durable-dispatch.md) | target+intent 原子性、单跳投递、业务 lease 恢复、Oxana transport seam 与删除矩阵 |
+| [`durable-dispatch.md`](durable-dispatch.md) | target+intent 原子性、单跳投递、业务 lease 恢复、平台 WorkTransport 消费合同与删除矩阵 |
 | [`implementation-acceptance.md`](implementation-acceptance.md) | 最终 baseline schema、删除矩阵、PR0～PR9（含 PR8A～PR8F）、测试与运行验收 |
 
 已被替代的旧方案和评审只保存在 [`../archive/README.md`](../archive/README.md)，不再留旧路径兼容副本。
@@ -31,8 +31,8 @@
 | --- | --- |
 | implemented | 部分；产品主链已有实现，durable dispatch 深 module 与旧 recovery 删除尚未实施 |
 | locally verified | 部分；已有定向证据不能覆盖新 dispatch 合同，完整 workspace/强制活库/fresh runtime 需重跑 |
-| committed | 否；当前工作树存在未提交变更 |
-| pushed | 否 |
+| committed | 部分；`ee8b492` 与本次独立方案固化提交已提交，PR8A～PR9 运行时代码尚未实施或提交 |
+| pushed | 部分；`ee8b492` 已在 `origin/main`，本次方案固化提交仅保留本地、未 push |
 | deployed | 否；未部署到 fresh 或生产环境 |
 | runtime accepted | 否；当前 checkout 没有完整 fresh-runtime 证据包，`phase_1d_runtime_complete=false` |
 
@@ -203,7 +203,7 @@ baseline 必须一次建立：
 - matching job/artifacts/current projections/picks；
 - quote draft/snapshot/current pointer；
 - profiles/procedural/parts/manifest/render assets；
-- Bid async target identity、current dispatch head、0..N immutable intent/state、一次性 delivery attempt、settlement/inbound/evidence 与 typed target exact relation；
+- Bid async target identity、current dispatch head、0..N immutable intent/state、delivery/business attempts、bounded observations、settlement/inbound、repair obligations、rejected deliveries、typed evidence、semantics/governor 与 typed target exact relation；
 - functions、triggers、views、ACL 和 seed contract artifacts。
 
 ### 7.2 权限
@@ -216,7 +216,7 @@ V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用�
 
 | 阶段 | 当前实现状态 | 完成证据 |
 | --- | --- | --- |
-| PR0 | 产品基线已批准；dispatch 修订待 review | 本轮文档检查与第二轮 P0/P1/P2 交叉 review 尚待完成 |
+| PR0 | 产品基线与 stable durable-dispatch 修订已批准并固化 | 2026-08-26 `diff --check`、relative links、Markdown tables通过；DB/并发、transport、跨文档三轴复审均P0/P1/P2=0 |
 | PR1 | 原 baseline 主体已落位；dispatch schema/ACL/checksum 尚待替换 | fresh-schema/catalog/seed/ACL 必须在替换后重跑 |
 | PR2 | TenderPublication 产品逻辑已落位；conversion/extraction dispatch 尚待替换 | publication/conversion/extraction 强制活库套件待重跑 |
 | PR3 | ClauseLifecycle、KindRouter 与 fact decision 已落位 | promotion/concurrency 强制活库套件待最终重跑 |
@@ -225,7 +225,7 @@ V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用�
 | PR6 | Submission 产品逻辑已落位；attachment/render dispatch 尚待替换 | submission/renderer/worker/fresh PDF 待重跑 |
 | PR7 | API routes 与模块化 Web 工作台已落位 | HTTP、lint/build、mocked 与 live Playwright 待最终重跑 |
 | PR8A | 未完成 | registry Oxana 2.1.3、pure prepare、显式 job ID、adapter 单 invocation 至多一次 enqueue 及 stable Skip/resurrection/max_retries 合同；不切换业务 owner |
-| PR8B | 未完成 | dormant async target/空 conversion target/head/intents/state/一次性 attempt/settlement/inbound/evidence catalog、dispatch 深 module、policy/ACL；不激活 producer或业务 owner |
+| PR8B | 未完成 | dormant async target/空 conversion target/head/intents/state、delivery/business attempts、observations、settlement/inbound、repair obligation、rejected delivery、typed evidence、semantics/governor catalog、dispatch 深 module与policy/ACL；不激活 producer或业务 owner |
 | PR8C | 未完成 | conversion/extraction 纵切替换，同步删除该类旧 enqueue/recovery owner |
 | PR8D | 未完成 | attachment preparation/render 纵切替换，同步删除该类旧 owner |
 | PR8E | 未完成 | matching schedule/job/fanout 纵切替换，同步删除 dirty/orphan recovery |

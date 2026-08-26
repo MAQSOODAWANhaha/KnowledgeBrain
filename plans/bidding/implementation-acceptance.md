@@ -6,11 +6,11 @@
 
 | 层次 | 当前状态 |
 | --- | --- |
-| 最终合同 | 产品基线已批准；stable durable-dispatch 修订待第二轮交叉 review |
+| 最终合同 | 产品基线与 stable durable-dispatch 修订已批准并固化；运行时代码尚未实施或验收 |
 | implemented | 部分；PR1～PR7 产品主链已有实现，durable dispatch 与旧两跳 recovery 删除尚未实施 |
 | locally verified | 部分；旧定向证据不能证明新 dispatch 合同，完整门禁与 fresh runtime 需重跑 |
-| committed | 否；当前工作树存在未提交变更 |
-| pushed | 否 |
+| committed | 部分；`ee8b492` 与本次独立方案固化提交已提交，PR8A～PR9 运行时代码尚未实施或提交 |
+| pushed | 部分；`ee8b492` 已在 `origin/main`，本次方案固化提交仅保留本地、未 push |
 | deployed | 否；未部署到 fresh 或生产环境 |
 | runtime accepted | 否；当前 checkout 没有完整证据包，`phase_1d_runtime_complete=false` |
 
@@ -97,7 +97,7 @@ shared platform slice 由 [`../platform/runtime-foundation.md`](../platform/runt
 
 - immutable `bid_async_targets` 与六类 typed target exact-one extension；
 - 每 target 一条 mutable current head、0..N immutable `bid_dispatch_intents` 与每 dispatch 一条受检 state；
-- 每 dispatch 至多一次 delivery attempt、bounded late observation、immutable disposition settlement、inbound outcome 与 typed evidence；
+- 每 dispatch 至多一次 delivery attempt、每 target 有界 ordinal business attempt/唯一 owner lease、bounded late observation、immutable disposition settlement、inbound outcome、repair obligation、rejected delivery、typed evidence 与跨generation governor；
 - target kind/id/generation exact relation 与 frozen fence hash；
 - dispatch semantics snapshots、ready/offer lease/delivery-start/business lease due partial index 与 shared governor；
 - conversion/extraction/matching schedule+job/attachment preparation/submission render target adapters；
@@ -138,9 +138,9 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 | commit 后 `enqueue_bid_*_with_snapshots` / best-effort enqueue | 删除 | target 与 dispatch intent 同事务 stage |
 | `system:live-recovery:v1` 两跳 envelope/handler/claim ledger | 删除 | [`durable-dispatch.md`](durable-dispatch.md) 单跳 final delivery |
 | 旧 Bid convert/extract/matching/attachment/render wire DTO 与 task registrations | 删除 | 一个显式 `bid:delivery:v1` typed job + allowlisted lane mapping |
-| `discover/claim/heartbeat/complete/release/fail` recovery 浅 interface | 删除 | `stage/run` 深 module，状态机留在 implementation |
+| `discover/claim/heartbeat/complete/release/fail` recovery 浅 interface | 删除 | `stage/replace/cancel/run/handle` 深 module，状态机留在 implementation |
 | dirty-manifest/orphan-target/orphan-match 大 UNION 与泛化 housekeep | 删除 | due-intent index + target-local exact repair |
-| Bid 对 `hostname+pid` 私有 Redis replay/live-recovery 的依赖 | 删除 | DB delivery-start deadline + 新 dispatch ID；共享 replay 仅为非 Bid legacy jobs 暂留，按平台独立 cutover 删除 |
+| Bid 对 `hostname+pid` 私有 Redis replay/live-recovery 的 correctness 依赖 | 删除 | DB delivery-start deadline + 新 dispatch ID；共享 replay 当前可能触碰 Bid membership，但新路径不调用/不依赖，按平台独立 cutover 删除 |
 | `persist_extraction_report` / `persist_section_retry` 生产直写 | 删除/私有测试 helper 也不保留同名 public seam | `TenderPublication` 单一 publisher |
 | heuristic 同时写 candidate/current domain | 删除 | candidate -> verified atomic publication |
 | 旧 `family` client 写入与 family-only clause DTO | 删除 | client 提交 kind，服务端派生 family |
@@ -189,7 +189,7 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 
 | 切片 | 实现状态 | 验收状态 |
 | --- | --- | --- |
-| PR0 | 产品基线已批准；dispatch 修订待 review | 本轮文档检查与第二轮 P0/P1/P2 交叉 review 尚待完成 |
+| PR0 | 产品基线与 stable durable-dispatch 修订已批准并固化 | 2026-08-26 `diff --check`、relative links、Markdown tables通过；DB/并发、transport、跨文档三轴复审均P0/P1/P2=0 |
 | PR1 | 部分 | dispatch schema/ACL/checksum 落位后重跑 fresh-schema/catalog/seed/ACL |
 | PR2～PR3 | 部分 | 产品逻辑已在；conversion/extraction dispatch 替换后重跑 publication/promotion |
 | PR4 | 部分 | 产品逻辑已在；schedule/fanout/job dispatch 替换后重跑 matching/lease/pick |
@@ -197,7 +197,7 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 | PR6 | 部分 | attachment/render dispatch 替换及 fresh runtime 正式输出待验收 |
 | PR7 | 产品逻辑已在 | HTTP、Web lint/build、mocked 与 live Playwright 待最终重跑 |
 | PR8A | 未完成 | registry Oxana 2.1.3、pure prepare、显式 job identity、adapter 单次调用至多一次 enqueue 与 stable `Skip/resurrect/max_retries=0` 合同；不切换业务 owner |
-| PR8B | 未完成 | dormant async target/空 conversion target/head/0..N intent/state/一次性 attempt/settlement/inbound/evidence catalog、深 module、policy/ACL；不激活 producer或业务 owner |
+| PR8B | 未完成 | dormant async target/空 conversion target/head/0..N intent/state、delivery/business attempts、observations、settlement/inbound、repair obligation、rejected delivery、typed evidence、semantics/governor catalog、深 module与policy/ACL；不激活 producer或业务 owner |
 | PR8C | 未完成 | conversion/extraction 纵切替换并删除该类旧 owner |
 | PR8D | 未完成 | attachment preparation/render 纵切替换并删除该类旧 owner |
 | PR8E | 未完成 | matching schedule/job/fanout 纵切替换并删除 dirty/orphan recovery |
@@ -305,7 +305,7 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 范围：
 
 - 精确锁定 crates.io `oxana`、`oxana-macros`、`oxana-web` 为 2.1.3，禁止 vendor、path dependency 与 `[patch.crates-io]`；
-- 按 [`../platform/queue-runtime.md`](../platform/queue-runtime.md) 落位 pure deterministic `prepare`、最薄 production/recording `offer` adapter 与 `returned|indeterminate|adapter_mismatch` outcome；
+- 按 [`../platform/queue-runtime.md`](../platform/queue-runtime.md) 落位 pure deterministic `prepare`、最薄 production/recording `offer` adapter 与 `returned|indeterminate|returned_job_id_mismatch(actual_job_id)` outcome；actual ID必须bounded透传，领域按indeterminate observation结算并使readiness fail closed；
 - `BidDeliveryV1Job` 显式固定 `Job::name`、unique ID、`on_conflict=Skip`、`resurrect=true`；worker 固定 `max_retries=0`；
 - 证明一次 `offer` adapter invocation 最多一次 `Storage::enqueue`：未取消且 deadline 有效的正常路径恰好一次，deadline 已过/首次 poll 前取消允许零次；任何路径都不在 adapter 内部 retry/probe/delete。跨 invocation 的 once-per-dispatch 留给 PR8B；
 - Bid/WorkTransport 不读取 `oxanus:*`、不使用 `get_job/list/stats/delete_job` 作 correctness。共享 `replay_orphaned_local_jobs` 当前无领域过滤，可能触碰 Bid membership，但新路径不主动调用、不依赖其结果，也不把它作为 Bid owner 或验收证据；
@@ -313,17 +313,25 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 
 新增 `scripts/verify_oxana_registry_source.sh`，fail-closed 解析 `cargo metadata --locked`、workspace manifest 与 `Cargo.lock`，并断言：三个 package 各恰有一个 2.1.3 registry node；workspace 中实际直接声明的 Oxana dependency constraints 精确为 `=2.1.3`；source 为 crates.io registry；checksum 分别为 `bf94eae5bcc69eb7d6950252afa3f316cfa7d769fecc184735a760861eeb01a1`、`4451fc018cae2fdd5fe86041b3807f0c80401ba87a3fa2e04335e28fa3f20cd1`、`e9b57c0781b889c6dcab3e3e47ad5aef395d5f95443295c3d3b5a2f7819bebda`；仓库无 Oxana path/vendor/`[patch.crates-io]`。任一缺包、重复、版本/source/checksum 漂移或 parser 失败都退出非零。
 
-验证：上述 verifier、`BidDeliveryV1/KBDL` golden、explicit name/job ID、payload/registry 负例、RecordingTransport 单 invocation 0/1 调用次数、live Redis `Storage::enqueue`/unique `Skip`/resurrection、worker `max_retries=0`、legacy replay mixed processing-list 事实和 Bid/WorkTransport private-key/call-site/correctness-inspection denylist。测试必须如实证明发布版行为，不能将 `Ok` 提升为 inserted/accepted receipt，也不能在 PR8A 冒充 DB 收敛证据。
+验证：上述 verifier、`BidDeliveryV1/KBDL` golden、explicit name/job ID、payload/registry 负例、RecordingTransport 单 invocation 0/1 调用次数、live Redis `Storage::enqueue`/unique `Skip`/resurrection、worker `max_retries=0`、offer returned ID mismatch携带实际ID且readiness fail closed、legacy replay mixed processing-list 事实和 Bid/WorkTransport private-key/call-site/correctness-inspection denylist。测试必须如实证明发布版行为，不能将 `Ok` 提升为 inserted/accepted receipt，也不能在 PR8A 冒充 DB 收敛证据。该切片即把统一cleanup harness、六种退出模式receipt、shell trap和CI `if: always()`残留断言接入`bid-durable-dispatch`；不是等PR9才补资源合同。
 
 ### PR8B — Durable dispatch core 与 baseline
 
 范围：
 
-- 建立 dormant base/六类空 typed extension、空的 document conversion domain target 表、dispatch head/immutable intents/state/一次性 delivery attempt/late observation/settlement/inbound/evidence/semantics schema、partial index 与 ACL；conversion producer/current pointer 仍不激活；
-- 实现 `stage/run/begin`、PostgreSQL store、one-shot offer claim/settle、delivery-start successor、consumer begin、business lease repair 和 retention；
+- 建立 dormant base/六类空 typed extension、空的 document conversion domain target 表、dispatch head/immutable intents/state/一次性 delivery attempt/business attempt owner lease/bounded late observation/settlement/inbound/repair obligation/rejected delivery/typed evidence/semantics/governor schema、partial index 与 ACL；conversion producer/current pointer 仍不激活；
+- 实现 `stage/replace_current_target/cancel_target/run/handle` 深 module、PostgreSQL store、one-shot offer claim/settle、delivery-start successor、内部 consumer begin/background heartbeat/publish、business lease repair 和 retention；worker只能调用`handle`，不能编排内部原语；
 - 只以 synthetic transaction fixture/RecordingTransport/活 Redis 合同验证新 aggregate；旧 target 不补建、不双写，六种 target owner（conversion、extraction、matching schedule、matching job、attachment preparation、submission render）均不切换。
 
-验证：base `PRIMARY KEY(id)` 与 typed/head/initial intent/state commit/rollback、六类 `KBTF` 与 `KBDL` fixed golden及逐字段篡改负例、contract-poison stored/recomputed、`UNIQUE(settlement_key)` 双事务 insert-or-read、head/predecessor/generation/attempt/settlement composite FK、replacement 指向 generation>0 与 state/settlement kind 错配负例、第二 successor/第二 disposition拒绝、`advanced` 与 cross-target `superseded` replacement XOR/FK/并发/晚到 delivery、replacement-vs-heartbeat/publish、正确 payload + 错误 `JobContext.meta.id` 且 external I/O=0、state NULL matrix、claim 后 crash/Ok/Err/timeout/response-lost 均不二次 offer、consumer-before-publisher、late publisher observation、deadline-vs-begin、duplicate owner CAS、owner-expired repair、gate rebase、hash-only/volume-loss successor、ACL 和空库 catalog。
+验证：base `PRIMARY KEY(id)` 与 typed/head/initial intent/state commit/rollback、六类 `KBTF` 与 `KBDL` fixed golden及逐字段篡改负例、`claim_lease_ms` 单真源及0/低于30s/超过30m负例、`max_attempts` 0/>10负例、delivery attempt exact intent/claim-token/phase/outcome composite FK及完整NULL matrix、cross-dispatch pointer、offering→settled、awaiting→inflight/consumer-started、returned job≠expected、第二次claim与settled outcome改写负例、bounded observation exact FK/每observer唯一、publisher/consumer/reaper/replacement/cancel outcome与NULL shape错配及adapter mismatch actual=expected负例、publisher-result与consumer-first/lease-expiry/replacement/cancel四组双序race及败方重读后的合法transition、publisher-first settled→consumer begin创建唯一business owner且delivery disposition不变、delivery-start deadline-vs-publisher与gate-rebase-vs-publisher双序race及old absorbing state/attempt matrix、business attempt dispatch/target/status FK与 ordinal/token unique、running缺lease、terminal缺code、ordinal 0/gap/>max、state/settlement/evidence attempt-status错配负例、contract-poison stored/recomputed、`UNIQUE(settlement_key)` 双事务 insert-or-read、head/predecessor/generation/attempt/settlement composite FK、replacement 指向 generation>0、cross-project/cross-kind/same-target 与 state/settlement kind 错配负例、第二 successor/第二 disposition拒绝、`advanced` 与 cross-target `superseded` replacement XOR/FK/并发/晚到 delivery、replacement 的 ready/offering/awaiting/running/absorbing 五态与 late publisher、replacement-vs-heartbeat/publish、正确 payload + 错误 `JobContext.meta.id` 且 external I/O=0、state NULL matrix、claim 后 crash/Ok/Err/timeout/response-lost 均不二次 offer、consumer-before-publisher、late publisher observation、deadline-vs-begin、duplicate owner CAS、owner-expired repair、attempt N-1/N、retryable-at-N handler settlement/evidence/inbound原子性、reaper-at-N无 inbound、resultless exhausted/result-artifact错配负例、非法 begin-at-max 后继只能 `DISPATCH_BUDGET_ORPHAN` poison、begin后连续 crash/reap在 max边界 terminal exhausted、gate rebase、hash-only/volume-loss successor、ACL 和空库 catalog。
+
+`handle` lifecycle测试必须覆盖正常、error、timeout、cancel/future-drop、panic、worker shutdown、heartbeat fenced与heartbeat DB failure；每条都证明guard不残留续租task、adapter cancellation token被触发、旧owner不能publish，lease最终可由reaper按budget收敛。测试不得用detached `tokio::spawn`加sleep作为通过条件。
+
+另以 synthetic aggregate 固定验证 `cancel_target` 的 ready/offering/awaiting/running/absorbing 五态与 late publisher/delivery；统一absorbing cleanup覆盖normal terminal、advanced、replacement、cancel、`DISPATCH_BUDGET_ORPHAN`与`DISPATCH_FENCE_ORPHAN`，并拒绝任何absorbing state残留inflight attempt；gate stale只能 same-target rebase，target fence stale必须 replacement或 `DISPATCH_FENCE_ORPHAN` poison，绝不创建复制 stale fence的 successor。
+
+inbound shape负例必须证明 historical/terminal只能引用 absorbing settlement，current owner/gate/fence stale只能以相同reason exact composite FK引用 unresolved repair obligation，delivery mismatch只能以observed identity与mismatch kind exact composite FK引用rejected delivery；三类指针XOR、owner/gate/target reason错配、cross-dispatch repair resolution、rejected expected/observed ID/version/mismatch kind/reason错配均拒绝，repair resolution只绑定后续 settlement而不改写原 observation。owner-expired→gate-stale、gate-stale→target-stale及handler-vs-repair双序race必须证明任一absorbing transaction按dispatch解析全部unresolved obligations，且absorbing state不能残留unresolved row。
+
+execution governor以两个并发begin争抢global/per-kind最后一个slot证明硬上限；terminal/reap/replacement/cancel精确释放，counter underflow/overflow、attempt config generation错配、promotion limit低于active count、跨新旧generation聚合超限及counter与全部running attempt数量不等都必须失败。capacity unavailable不得创建business attempt或清start deadline；promotion-vs-begin与promotion-vs-terminal两组双序并发必须按统一pointer→global→kind子序完成且无`40P01`。
 
 ### PR8C — Conversion/Extraction 纵切
 
@@ -333,7 +341,7 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 - conversion settlement 与 converted source + extraction target + intent 同事务；
 - 同一改动删除这两类旧 enqueue/recovery/housekeep 分支。
 
-验证：TenderPublication 强制活库、commit/offer/begin/publish fencing、长转换 heartbeat、后继原子性和该 target family 的删除扫描。
+验证：TenderPublication 强制活库、commit/offer/begin/publish fencing、长转换 heartbeat、后继原子性、conversion/extraction 人工 retry generic replacement/current-pointer CAS和该 target family 的删除扫描。
 
 ### PR8D — Attachment preparation/Render 纵切
 
@@ -343,7 +351,7 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 - 保持 upload staging、owner transfer、manifest-only render 与 publish fencing；
 - 同一改动删除这两类旧 enqueue/recovery/housekeep 分支。
 
-验证：preparation/render claim/heartbeat/retry/reap/cancel、staging abandon、publish 原子性、DOCX/PDF gate 与该 target family 的删除扫描。
+验证：preparation/render claim/heartbeat/retry/reap/cancel、staging abandon、publish 原子性、preparation重新提交/render重新请求 generic replacement/current-pointer CAS、DOCX/PDF gate与该 target family 的删除扫描。
 
 ### PR8E — Matching schedule/job 纵切
 
@@ -353,7 +361,7 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 - schedule settlement 原子产生 manifest、0..N jobs 与等量 intents；
 - 同一改动删除 dirty-manifest、orphan-target/orphan-match 和旧 matching recovery owner。
 
-验证：schedule/fanout 原子性、lease/staging/commit、65 eligible/0 hit、普通+unsectioned 混合、持久化 1..N picks 和该 target family 删除扫描。
+验证：schedule/fanout 原子性、lease/staging/commit、65 eligible/0 hit、普通+unsectioned 混合、持久化 1..N picks；matching mutation 对旧 schedule replacement与旧 manifest下0/1/N nonterminal jobs cancel同事务，晚到旧 job外部 I/O=0；以及该 target family删除扫描。
 
 ### PR8F — 单 owner closure 与全量门禁
 
@@ -413,7 +421,7 @@ KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS=1
 scripts/bid_durable_dispatch_acceptance.sh
 ```
 
-PR8A 新增 `scripts/bid_durable_dispatch_acceptance.sh`，只纳入 registry verifier、Oxana/runtime pure prepare、adapter 单 invocation 0/1 调用次数、stable enqueue/Skip/resurrection 与 legacy mixed-list 命令；PR8B 在启用任一 Bid owner 前纳入 dormant dispatch SQL/worker、claim 后 one-shot、successor 和 replay-independent synthetic 命令；PR8C～PR8E 在各自纵切中纳入对应领域命令；PR8F 使用下列完整固定清单。未来切片的 test target 不必在更早 PR 用占位测试伪造通过，但启用某 target owner 的 PR 必须先将它的真实合同加入 required job。该入口顺序执行且任一失败立即失败：
+PR8A 新增 `scripts/bid_durable_dispatch_acceptance.sh`，只纳入 registry verifier、Oxana/runtime pure prepare、adapter 单 invocation 0/1 调用次数、stable enqueue/Skip/resurrection、legacy mixed-list命令与统一六模式cleanup harness；CI从该切片起以独立`if: always()`步骤再次执行幂等cleanup+残留断言并校验receipt。PR8B 在启用任一 Bid owner 前纳入 dormant dispatch SQL/worker、claim 后 one-shot、successor 和 replay-independent synthetic 命令；PR8C～PR8E 在各自纵切中纳入对应领域命令；PR8F 使用下列完整固定清单。未来切片的 test target 不必在更早 PR 用占位测试伪造通过，但启用某 target owner 的 PR 必须先将它的真实合同加入 required job。该入口顺序执行且任一失败立即失败：
 
 ```text
 scripts/verify_oxana_registry_source.sh

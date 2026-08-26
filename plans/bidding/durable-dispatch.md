@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | clean-slate V1 稳定版修订；待交叉 review，尚未实施 |
+| 状态 | clean-slate V1 稳定版修订已批准并固化；尚未实施或验收 |
 | 所有者 | Bidding |
 | 传输依赖 | [`../platform/queue-runtime.md`](../platform/queue-runtime.md) |
 
@@ -27,20 +27,24 @@
 外部 interface 固定为：
 
 ```text
-stage(tx, BidTargetRef) -> DispatchId
+stage(tx, NewBidTargetRef) -> DispatchId
+replace_current_target(tx, ExpectedCurrentTarget, NewBidTargetRef, reason)
+  -> ReplacementOutcome
+cancel_target(tx, ExpectedCurrentTarget, reason)
+  -> CancelOutcome
 run(shutdown) -> Result<(), DispatchFatal>
-begin(ObservedDelivery {
+handle(ObservedDelivery {
   dispatch_id,
   payload_version,
   observed_job_id
-}) -> BeginOutcome
+}) -> HandlerOutcome
 ```
 
-- `stage` 为 crate-private，只能由所属 target 的受检 mutation 在现有事务中调用；API/worker 不得在 commit 后直接调用 Redis。
-- `stage` 从事务内 typed target 读取并冻结 target fence、gate epoch、lane、delivery contract 和 dispatch semantics；调用方不能传 snapshot JSON 或自行构造队列 payload。
-- `run` 内部拥有 transport admission、due scan、一次性 offer、delivery-start reaper 和 target-local repair。Redis unavailable/timeout 是单条 indeterminate outcome，不终止进程；registry/codec/queue closure mismatch 才返回 `DispatchFatal` 并使 readiness fail closed。
-- `begin` 只由 `BidDeliveryV1Job` worker 调用，在任何 provider/object store/DocReader/renderer I/O 前完成 current-head、gate、fence 和 owner CAS。`observed_job_id` 必须原样取自 Oxana 2.1.3 公共 `JobContext.meta.id`，`payload_version` 必须取自实际解码 payload；禁止根据 dispatch ID 重新推导 observed ID 后再自证相等。
-- claim/heartbeat/publish/advance/reap/settle 是 module 内部原语，不向 route 或普通业务 service 暴露可随意拼装的多步状态机。
+- 三个 mutation entry均为crate-private，只能由所属target的受检domain mutation在调用方现有transaction中使用；它们原子stage、cross-target replace或cancel完整aggregate，调用方不能取得claim/settlement子步骤。API/worker不得在commit后直接调用Redis。
+- `stage` 从事务内 typed target 读取并冻结 target fence、gate epoch、lane、固定task/payload contract 和 dispatch semantics；调用方不能传 snapshot JSON 或自行构造队列 payload。
+- `run` 内部拥有 due scan、一次性 offer、delivery-start reaper 和 target-local repair。Redis unavailable/timeout 是单条 indeterminate outcome，不终止进程；registry/codec/queue closure mismatch 才返回 `DispatchFatal` 并使 readiness fail closed。
+- `handle` 是 `BidDeliveryV1Job` worker唯一调用的领域entry；在任何provider/object store/DocReader/renderer I/O前内部完成begin CAS，取得owner后选择private typed target adapter，启动scoped background heartbeat，执行外部调用，并在返回前内部publish/advance/settle。`observed_job_id`必须原样取自Oxana 2.1.3公共`JobContext.meta.id`，`payload_version`必须取自实际解码payload；禁止根据dispatch ID重新推导observed ID后再自证相等。
+- `begin/claim/heartbeat/publish/advance/reap/settle` 都是 module implementation的内部原语；typed adapters只收到受限`ExecutionContext`与immutable target input，不能取得SQL store或自行迁移state。route、worker和普通业务module均不能拼装多步状态机。
 
 ## 3. Durable 数据模型
 
@@ -68,7 +72,7 @@ UNIQUE(id,target_kind,project_id)
 
 每张以 base `id` 为 PK/FK，保存相同 project 与 constant kind，并以 `(id,project_id)` composite FK 指向真实 executable domain target：分别是 `bid_document_conversion_targets`、`bid_extraction_targets`、`bid_matching_schedule_intents`、`bid_matching_jobs`、`bid_attachment_preparation_jobs` 和 `bid_submission_render_jobs`。extension 只证明 dispatch relation，不复制业务 status、generation、claim 或结果。
 
-base identity 固定为全局唯一 `id`；`(id,target_kind,project_id)` composite unique 只用于 exact relation FK。generation/watermark 是 fence，不兼作 identity。document conversion 每个 generation 创建新 target ID，`BidDocument` 只保存 current conversion target pointer。terminal/superseded/poisoned target 不重开；人工 retry 或新 mutation 创建新的 target identity。
+base identity 固定为全局唯一 `id`；`(id,target_kind,project_id)` composite unique 只用于 exact relation FK。generation/watermark 是 fence，不兼作 identity。document conversion 每个 generation 创建新 target ID，`BidDocument` 只保存 current conversion target pointer。terminal/superseded/poisoned target 不重开；人工 retry 或新 mutation创建新的 target identity。若它替换同 kind 的 nonabsorbing current target，必须调用第 5 节通用 cross-target replacement 原语；若旧 target 已 absorbing，则保持旧 settlement 不可变并独立 stage 新 target。
 
 catalog 约束：
 
@@ -114,6 +118,8 @@ canonical_payload_sha256
 unique_identity
 expected_oxana_job_id
 created_at
+UNIQUE(id,expected_oxana_job_id)
+UNIQUE(id,expected_oxana_job_id,payload_version)
 ```
 
 关键约束：
@@ -154,6 +160,8 @@ V1 binary 为 `KBTF + u16be(1) + u8(kind_tag) + u16be(field_count)`，随后按�
 
 以下 live 值不入 fence：status/current pointer、attempt count、claim token、owner/heartbeat/lease、published count、staging/output pointer、error/time、maintenance gate epoch 和 ObjectRegistry 可用性。它们在 live CAS 中验证。
 
+六类 fence共同验证`1 <= max_attempts <= 10`与`30_000 <= claim_lease_ms <= 1_800_000`（毫秒）；Rust builder与SQL verifier都拒绝0、低于最小值、超上限及类型溢出。heartbeat interval必须不大于`min(claim_lease_ms/3,60_000)`，不能用超长lease掩盖缺失heartbeat。
+
 ### 3.4 Mutable state 与一次性 delivery attempt
 
 每条 intent 恰有一条 `bid_dispatch_states`：
@@ -164,8 +172,10 @@ next_offer_at
 offer_claim_token, offer_claimed_by, offer_lease_expires_at
 delivery_start_deadline_at
 delivery_attempt_id
+delivery_attempt_phase
+delivery_attempt_outcome
 business_attempt_id
-repair_requested_at
+business_attempt_status
 absorbing_settlement_id
 absorbing_settlement_kind
 last_transport_code
@@ -177,26 +187,86 @@ completed_at
 | 状态 | 必须存在 | 必须为空 |
 | --- | --- | --- |
 | `ready` | `next_offer_at` | offer claim、start deadline、delivery/business attempt |
-| `offering` | exact claim/token/lease、delivery attempt、start deadline | business attempt、absorbing settlement |
-| `awaiting_start` | finalized/consumer-first delivery attempt、start deadline | offer claim、business attempt、absorbing settlement |
-| `running` | exact business attempt | offer claim、start deadline、absorbing settlement |
-| `terminal` 或 `poisoned` | exact absorbing settlement、completed_at | 所有 due/claim/deadline/active attempt |
-| `superseded` | exact `advanced` 或 `superseded` settlement、completed_at | 所有 due/claim/deadline/active attempt |
+| `offering` | exact claim/token/lease、`inflight` delivery attempt、start deadline | delivery outcome、business attempt、absorbing settlement |
+| `awaiting_start` | exact `settled` delivery attempt及允许的 awaiting outcome、start deadline | offer claim、business attempt、absorbing settlement |
+| `running` | exact `settled` delivery attempt、exact running business attempt | offer claim、start deadline、absorbing settlement |
+| `terminal` 或 `poisoned` | exact absorbing settlement、completed_at；若保留 delivery pointer则必须 exact `settled` | 所有 due/claim/deadline/active attempt |
+| `superseded` | exact `advanced` 或 `superseded` settlement、completed_at；若保留 delivery pointer则必须 exact `settled` | 所有 due/claim/deadline/active attempt |
 
 `bid_dispatch_delivery_attempts` 每个 dispatch 至多一行：
 
 ```text
 id, dispatch_id UNIQUE
-claim_token
-runtime_governor_generation
+target_id, target_kind, project_id
+claim_token UNIQUE
+phase = inflight|settled
 started_at, lease_expires_at
 settled_at
-outcome = enqueue_returned|enqueue_indeterminate|consumer_started|publisher_lost
+outcome = enqueue_returned|enqueue_indeterminate|consumer_started|publisher_lost|superseded|cancelled
 returned_job_id
 error_code
+UNIQUE(id,dispatch_id,claim_token,phase)
+UNIQUE(id,dispatch_id,phase,outcome)
+UNIQUE(id,dispatch_id)
 ```
 
-claim transaction 提交时即插入 attempt 并进入 `offering`；从此 identity 视为已暴露，attempt 永远不能被 reclaim 为第二次 enqueue。publisher lease 过期只将同 attempt 结算为 `publisher_lost` 并进入 `awaiting_start`。consumer-first 可结算为 `consumer_started`。publisher 晚到结果写 bounded append-only `bid_dispatch_delivery_observations`，不能改变 attempt disposition、current head 或业务 owner。
+attempt 以 `(dispatch_id,target_id,target_kind,project_id)` composite FK 指向 exact intent。`enqueue_returned` 的 `(dispatch_id,returned_job_id)` 必须以 composite FK指向intent的`(id,expected_oxana_job_id)` exact unique key。state 的 offering shape 以 `(delivery_attempt_id,dispatch_id,offer_claim_token,delivery_attempt_phase)` exact FK 指向同 dispatch、同 token 的 `inflight` attempt；其它持有 pointer 的 shape 以 `(delivery_attempt_id,dispatch_id,delivery_attempt_phase,delivery_attempt_outcome)` exact FK 指向同 dispatch 的 `settled` attempt。deferred verifier补足 nullable composite FK，并拒绝 cross-dispatch pointer。
+
+attempt NULL/outcome matrix 固定为：
+
+| phase/outcome | 必须存在 | 必须为空 |
+| --- | --- | --- |
+| `inflight` | token、started、lease | settled、outcome、returned job、error |
+| `settled/enqueue_returned` | token、started、settled、returned job | active lease、error |
+| `settled/enqueue_indeterminate` | token、started、settled、bounded error | active lease、returned job |
+| `settled/consumer_started\|publisher_lost\|superseded\|cancelled` | token、started、settled | active lease、returned job、error |
+
+`awaiting_start` 只允许 `enqueue_returned|enqueue_indeterminate|publisher_lost`；consumer-first 必须在同一事务把 attempt结算为`consumer_started`并直接进入`running`，不得经过 awaiting。publisher-first后consumer从awaiting直接创建business owner，不再改写已settled delivery attempt。claim transaction提交时即插入attempt并进入`offering`；从此identity视为已暴露，`UNIQUE(dispatch_id)`与受检函数共同拒绝第二次claim/enqueue。唯一合法attempt更新是一次 `inflight -> settled` CAS；settled disposition不可改写。
+
+publisher、consumer、publisher lease reaper、same-target advance、replacement和cancel只在争夺同一个inflight disposition时竞争CAS；该CAS败方的当前事务不能继续用旧观察改state/head/owner，只能追加observation或重读。重读后仍按状态机继续：consumer见合法settled awaiting outcome可begin；advance/replacement/cancel见settled attempt仍必须吸收target并保留attempt作audit；见已absorbing则幂等读回settlement。因此“attempt CAS败方”不等于永久禁止合法后续状态迁移。
+
+CAS败方需要保留transport事实时，只可追加 `bid_dispatch_delivery_observations`：
+
+```text
+id, delivery_attempt_id, dispatch_id
+observer_kind = publisher|consumer|publisher_lease_reaper|replacement|cancel
+observation_kind = race_lost|adapter_mismatch
+observed_outcome
+returned_job_id, error_code, observed_at
+UNIQUE(delivery_attempt_id,observer_kind)
+UNIQUE(id,delivery_attempt_id,dispatch_id)
+```
+
+observation 以 `(delivery_attempt_id,dispatch_id)` exact FK 指向 attempt，字段有固定长度上限。`race_lost`保存败方观察到的候选disposition并使用对应returned/error shape；`adapter_mismatch`只允许publisher，必须保存 `returned_job_id_mismatch(actual_job_id)`携带的实际ID与固定error code。prepare/registry/codec closure mismatch发生在offer前，不创建delivery attempt observation。每个 attempt最多五条 observation，普通 duplicate delivery只写 inbound noop，不膨胀 observation。publisher晚到结果只能写该 append-only bounded row，不能改变 attempt disposition、current head或业务owner。
+
+observation CHECK matrix固定为：publisher的`race_lost`只允许`enqueue_returned|enqueue_indeterminate`并分别遵守returned/error XOR；consumer只允许`race_lost/consumer_started`且returned/error为空；publisher lease reaper只允许`race_lost/publisher_lost`；replacement只允许`race_lost/superseded`；cancel只允许`race_lost/cancelled`。`adapter_mismatch`只允许publisher且`observed_outcome=enqueue_indeterminate`，actual returned ID与固定error必须同时存在；deferred verifier沿attempt→intent证明actual ID不等于`expected_oxana_job_id`。其它observer/outcome组合、actual=expected或NULL shape全部拒绝。
+
+所有进入`terminal|superseded|poisoned`的原语共用一个private absorbing-cleanup：锁state后若存在inflight delivery attempt，带exact `ObservedDelivery`的handler先结算为`consumer_started`；cancel结算为`cancelled`；replacement、gate/fence repair及其它非timeout吸收结算为`superseded`；只有publisher lease expiry或delivery-start timeout结算为`publisher_lost`。已有settled attempt只保留作audit。cleanup随后才允许写absorbing settlement/state并解析全部repair obligations。任何absorbing state与inflight attempt共存都由deferred verifier拒绝。
+
+`bid_dispatch_business_attempts` 是六类 executor 共用的唯一 owner lease：
+
+```text
+id, dispatch_id UNIQUE
+target_id, target_kind, project_id
+attempt_ordinal CHECK (attempt_ordinal >= 1)
+claim_token UNIQUE
+runtime_governor_generation
+status = running|succeeded|retryable_failed|deterministic_failed|expired|superseded|cancelled|poisoned
+started_at, heartbeat_at, lease_expires_at, terminal_at
+terminal_code
+UNIQUE(target_id,target_kind,attempt_ordinal)
+```
+
+attempt NULL matrix 固定为：
+
+| status | 必须存在 | 必须为空 |
+| --- | --- | --- |
+| `running` | token、started/heartbeat/lease | terminal_at、terminal_code |
+| 七种 terminal status | token、started/last heartbeat、terminal_at、terminal_code | active lease |
+
+row 以 composite FK 同时指向 exact dispatch intent 与 async target，并提供含 status 的 unique key。state 持久化 `business_attempt_id,business_attempt_status`：`running` state只能 composite-FK到同 dispatch/target的 running attempt；其它 state不得指向 running attempt。settlement/inbound/typed evidence 如引用 attempt，也持久化 attempt dispatch/target/status并只能 composite-FK到同 dispatch/target的 finalized attempt。
+
+`begin` 在锁住 domain target后按 existing max ordinal+1插入，ordinal 即 `business_attempts_started`，不得维护第二个可漂移 counter。受检函数与 deferred verifier共同保证 ordinal从1连续、不得超过 target fence frozen `max_attempts`；普通 API/worker无直接 DML。terminal transition清 active lease并冻结 status/code/time，后续 heartbeat必须返回 fenced。各 typed executor/domain attempt以 exact FK扩展该 owner row，不能另存一套 claim token/lease owner；PR8C～PR8E纵切时删除对应旧 claim owner。
 
 ### 3.5 Settlement、inbound outcome 与 evidence
 
@@ -204,6 +274,7 @@ claim transaction 提交时即插入 attempt 并进入 `offering`；从此 ident
 
 ```text
 id, dispatch_id
+old_target_id, old_target_kind, old_project_id
 settlement_kind = advanced|terminal|superseded|poisoned|cancelled
 successor_dispatch_id
 replacement_target_id, replacement_target_kind, replacement_project_id
@@ -211,17 +282,18 @@ replacement_initial_dispatch_id, replacement_dispatch_generation
 reason_code
 gate_epoch
 business_attempt_id
+business_attempt_status
 created_at
 UNIQUE(dispatch_id)
 ```
 
-disposition XOR 固定为：
+所有 settlement 先以 `(dispatch_id,old_target_id,old_target_kind,old_project_id)` composite FK 指向 old exact intent，避免只凭全局 UUID 推断 old relation。disposition XOR 固定为：
 
 - `advanced` 只允许 `successor_dispatch_id` 非空；successor 必须属于同 target、generation=`old+1`，且 predecessor 反向指回 old dispatch；全部 replacement 字段为空；
-- `superseded` 禁止 successor，必须填满 replacement target/dispatch 五元组，且 `replacement_dispatch_generation=0`。该五元组分别以 composite FK 指向新的 async target，以及 intent 的 `(id,target_id,target_kind,project_id,dispatch_generation)` unique key；intent 的 initial CHECK 因而同时证明 predecessor 为空。replacement 与 old target 同 project/kind、ID 不同；
+- `superseded` 禁止 successor，必须填满 replacement target/dispatch 五元组，且 `replacement_dispatch_generation=0`。该五元组分别以 composite FK 指向新的 async target，以及 intent 的 `(id,target_id,target_kind,project_id,dispatch_generation)` unique key；intent 的 initial CHECK 因而同时证明 predecessor 为空。row CHECK 强制 `replacement_project_id=old_project_id`、`replacement_target_kind=old_target_kind` 且 `replacement_target_id<>old_target_id`；
 - `terminal|poisoned|cancelled` 的 successor 与全部 replacement 字段均为空。
 
-`UNIQUE(replacement_initial_dispatch_id) WHERE settlement_kind='superseded'` 防止一个新 target 吸收多个旧 current target。settlement 提供 `UNIQUE(id,dispatch_id,settlement_kind)`；state 持久化 `absorbing_settlement_id,absorbing_settlement_kind` 并以三列 composite FK 指回 exact settlement。state CHECK 规定：`superseded` 只接受 `advanced|superseded`，`terminal` 只接受 `terminal|cancelled`，`poisoned` 只接受 `poisoned`，nonabsorbing state 两列均为空。并发 reaper、consumer、gate rebase 和 replacement mutation 通过 predecessor、replacement 与 dispatch 唯一约束 insert-or-read 同一结果。
+`UNIQUE(replacement_initial_dispatch_id) WHERE settlement_kind='superseded'` 防止一个新 target 吸收多个旧 current target。settlement 提供`UNIQUE(id,dispatch_id)`与`UNIQUE(id,dispatch_id,settlement_kind)`；state持久化`absorbing_settlement_id,absorbing_settlement_kind`并以三列composite FK指回exact settlement。state CHECK规定：`superseded`只接受`advanced|superseded`，`terminal`只接受`terminal|cancelled`，`poisoned`只接受`poisoned`，nonabsorbing state两列均为空。并发reaper、consumer、gate rebase和replacement mutation通过predecessor、replacement与dispatch唯一约束insert-or-read同一结果。
 
 每次准备向 Oxana 返回成功前必须写或复用 `bid_dispatch_inbound_outcomes`：
 
@@ -233,11 +305,48 @@ observed_payload_version
 outcome_kind = business_success|business_failed|retry_scheduled|noop|poison
 reason_code
 business_attempt_id
+business_attempt_status
 dispatch_settlement_id
+repair_obligation_id
+rejected_delivery_id
+rejected_delivery_mismatch_kind
 evidence_sha256
 created_at
 UNIQUE(settlement_key)
 ```
+
+`bid_dispatch_repair_obligations` durable 地表示 current nonabsorbing noop 后必须完成的修复：
+
+```text
+id, dispatch_id
+reason = owner_expired|gate_stale|target_stale
+observed_gate_epoch, observed_target_fence_sha256
+requested_at
+resolved_settlement_id, resolved_at
+UNIQUE(dispatch_id,reason,observed_gate_epoch,observed_target_fence_sha256)
+UNIQUE(id,dispatch_id,reason)
+```
+
+inbound以`(repair_obligation_id,dispatch_id,reason_code)` composite-FK到obligation的`(id,dispatch_id,reason)` exact unique key，不能让owner/gate/target stale observation互相借用义务；resolution以`(resolved_settlement_id,dispatch_id)` composite-FK到settlement的同名unique key。NULL matrix要求unresolved时settlement/time都为空，resolved时两者都存在且settlement属于同dispatch。repair due scan直接以`resolved_at IS NULL` partial index读取 obligation，state不复制 pointer或requested time作为第二真源。
+
+同一 dispatch允许多个不同观察产生多个 unresolved obligation。current stale handler只在锁住target/head/state并确认仍nonabsorbing后，原子插入或复用 exact unresolved obligation及引用它的 inbound，然后提交成功；handler不得在同一事务即时advance/replacement而把刚提交的obligation变为resolved。repair runner按`target_stale > gate_stale > owner_expired`优先级重算当前权威事实，不把旧reason当命令；它按ID锁住该dispatch全部unresolved obligations，并在advance、replacement、cancel、terminal或poison吸收事务中把全部obligation绑定到同一exact settlement并设置同一resolved time。若吸收先提交，并发handler重验后只能写historical/terminal noop，不得再创建unresolved obligation；若handler先提交，吸收事务必须看见并解析它。因此任一absorbing state都不允许残留该dispatch的unresolved obligation。
+
+`bid_dispatch_rejected_deliveries` 最小schema固定为：
+
+```text
+id, dispatch_id
+observed_job_id, observed_payload_version
+expected_oxana_job_id, expected_payload_version
+mismatch_kind = job_id|payload_version|job_and_payload
+reason_code = delivery_mismatch
+observed_at
+UNIQUE(dispatch_id,observed_job_id,observed_payload_version,mismatch_kind)
+UNIQUE(id,dispatch_id,observed_job_id,observed_payload_version,mismatch_kind)
+```
+
+row 的 `(dispatch_id,expected_oxana_job_id,expected_payload_version)` composite FK必须指向intent的`(id,expected_oxana_job_id,payload_version)` exact unique key；CHECK要求observed tuple至少一项不等，并要求`mismatch_kind`与实际不等字段完全一致。known dispatch的observed/expected identity不一致时先插入或复用该bounded row；inbound以`(rejected_delivery_id,dispatch_id,observed_job_id,observed_payload_version,rejected_delivery_mismatch_kind)` exact FK引用它，且CHECK要求 inbound `reason_code=delivery_mismatch`。所有identity与reason字段有固定长度上限。无法解析或unknown dispatch不造业务row，只形成平台bounded dead/metric。
+
+inbound shape固定：historical/target-terminal noop必须只引用exact absorbing settlement；owner-expired/gate-stale/target-stale current noop必须只引用repair obligation且初始settlement为空；delivery-mismatch必须只引用rejected-delivery；duplicate-fresh-owner三者都为空；business success/failure/retry只引用对应settlement。repair完成后只更新obligation的resolved settlement/time，不回写或伪造原始inbound observation。
 
 durable noop reason 固定为：
 
@@ -267,12 +376,15 @@ delivery_start_timeout_ms
 successor_backoff_base_ms
 successor_backoff_cap_ms
 historical_replay_window_ms
-business_claim_lease_ms
 ```
 
-所有值正数且有上限；publisher lease 覆盖正常 offer deadline，delivery-start timeout 大于 publisher lease；successor backoff 按 generation 指数增长并 cap，避免 lane 不可用时高频 duplicate。generation 超过告警阈值使 readiness 降级但不把基础设施故障改成业务 terminal。
+以上列表不包含 `business_claim_lease_ms`；business claim lease 的唯一权威值是 target fence 已冻结的 `claim_lease_ms`，dispatch semantics 不得复制第二份。所有 transport 值正数且有上限；publisher lease 覆盖正常 offer deadline，delivery-start timeout 大于 publisher lease；successor backoff 按 generation 指数增长并 cap，避免 lane 不可用时高频 duplicate。generation 超过告警阈值使 readiness 降级但不把基础设施故障改成业务 terminal。
 
-poll interval、batch size、global/per-kind concurrency 属于 live shared governor。每批 `FOR UPDATE SKIP LOCKED` 且有硬上限；semantics promotion 只在 maintenance，不能改写已有 intent。所有 nonterminal intent 引用的 semantics、lane 与 typed adapter 在引用归零前必须保留 registry closure。
+poll interval、batch size、global/per-kind concurrency属于live shared governor。每批`FOR UPDATE SKIP LOCKED`且有硬上限；semantics promotion只在maintenance，不能改写已有intent。所有nonterminal intent引用的semantics、lane与typed adapter在引用归零前必须保留registry closure。
+
+execution concurrency是DB硬上限，不是假定Oxana单进程配置。governor config是immutable version+current pointer；global与每kind各有一行跨generation稳定aggregate counter`limit/current_count`。`begin`在锁target后严格按current/config pointer→global counter→kind counter取锁，只有两个`current_count < limit`才在同事务各+1并创建记录所用config generation的business attempt。容量不足不创建attempt、不清start deadline，handler返回worker error；delivery随后由start deadline用新identity恢复。attempt任一terminal/reap/replacement/cancel在同事务按相同子序对稳定counters各-1；counter不得为负或超过limit。
+
+governor promotion按current/config pointer→global counter→kind counters稳定排序取锁；新global/per-kind limit不得低于当时对应`current_count`，否则promotion失败并等待drain，不能为新generation另开一套从0开始的容量。旧config在引用归零前保留作audit，但不拥有独立counter。deferred verifier要求每个stable counter等于所有active config generations对应running attempts的聚合数。
 
 ## 4. 状态机与恢复
 
@@ -281,7 +393,7 @@ poll interval、batch size、global/per-kind concurrency 属于 live shared gove
 | 事件 | CAS 前置 | 原子结果 |
 | --- | --- | --- |
 | stage initial | typed target 可投递且无 head | target/base/extension + generation 0 intent/state/head 同事务；state=`ready` |
-| claim offer | current head、ready、due、gate open、transport admission 允许 | 插入唯一 delivery attempt；state=`offering`；同时写 claim lease 与 delivery-start deadline |
+| claim offer | current head、ready、due、gate open | 插入唯一 delivery attempt；state=`offering`；同时写 claim lease 与 delivery-start deadline |
 | enqueue returned | exact claim，仍 current offering | attempt=`enqueue_returned`，验证 job ID，清 claim，state=`awaiting_start` |
 | enqueue indeterminate | exact claim，仍 current offering | attempt=`enqueue_indeterminate`，清 claim，state=`awaiting_start`；禁止同 ID 重试 |
 | publisher lease expired | exact offering claim 已过期 | attempt=`publisher_lost`，清 claim，state=`awaiting_start` |
@@ -291,35 +403,41 @@ poll interval、batch size、global/per-kind concurrency 属于 live shared gove
 
 ### 4.2 Consumer begin
 
-consumer 接收完整 `ObservedDelivery`，按全局锁序锁定 target、业务 attempt、head、dispatch 并重新验证：
+consumer 接收完整 `ObservedDelivery`，按全局锁序锁定 target、业务 attempt、head、dispatch并按固定优先级重新验证：
 
-1. payload version、observed job ID 与 intent expected job ID 完全相等；
-2. dispatch 仍是同 target current head；
-3. target pending 且 typed fence 仍相等；
-4. maintenance gate open 且 epoch 等于 intent；
-5. business owner 分类为 `none|fresh|expired_or_fenced`。
+1. payload version、observed job ID与intent expected job ID完全相等，并证明intent→target/project immutable relation；
+2. 读取 target status、dispatch state/head和可选 absorbing settlement；若dispatch已非head或任一方absorbing，先走historical/terminal noop，不要求target仍pending或当前gate仍等于旧intent；
+3. 仅对 current nonabsorbing dispatch重算typed fence、检查target/dispatch status matrix和maintenance gate/epoch；
+4. 只有 current `offering|awaiting_start` + target pending 或 current running + target running是可执行形状；其它组合contract poison；
+5. 调用唯一 `classify_owner` 得到 `none|fresh|expired_or_fenced`。
 
 transition：
 
+`business_attempts_started` 是 stable target 上的单调计数；每次成功取得 business owner 的 `begin` 原子分配下一 ordinal 并立即消耗一次 budget。begin 前 delivery 丢失不消耗，provider 在同一 owner 内的 bounded retry 不另计；begin 后 crash、lease expiry 或 retryable failure 都已消耗该次 attempt。
+
 | 观察 | 结果 |
 | --- | --- |
-| current `offering` 或 `awaiting_start` + owner none | finalize 可选 delivery attempt=`consumer_started`，清 publisher claim/deadline，创建 business attempt，target/dispatch=`running` |
+| current `offering` 或 `awaiting_start` + owner none + `started < max_attempts` | finalize 可选 delivery attempt=`consumer_started`，清 publisher claim/deadline，分配下一 business attempt，target/dispatch=`running` |
+| current `offering` 或 `awaiting_start` + owner none + `started >= max_attempts` | 该 state按构造合同不可达；不创建owner，先以ObservedDelivery执行统一absorbing cleanup，再原子写 `DISPATCH_BUDGET_ORPHAN` poison settlement/evidence/inbound并使 readiness失败 |
 | current running + owner fresh | durable `noop/duplicate_fresh_owner`，不改变 owner |
-| owner expired_or_fenced | durable `noop/owner_expired` 并设置 repair hint；可由同一受检原语 reap+advance，但当前 handler 不得偷取旧 token |
+| owner expired_or_fenced | durable `noop/owner_expired` 与 unresolved repair obligation；当前 handler 不得偷取旧 token或即时repair |
 | dispatch 非 head 或已 superseded | 引用其 exact absorbing settlement（`advanced`、`superseded`、`terminal`、`poisoned` 或 `cancelled`）写 `noop/historical_dispatch` |
 | target terminal/poisoned/cancelled | 写或复用对应 terminal noop |
-| gate/fence stale | 写 noop 与 repair hint，不执行外部依赖 |
+| gate stale、target fence仍有效 | 写 noop 与 unresolved gate-rebase obligation，不执行外部依赖 |
+| target fence stale | 写 `noop/target_stale` 与 unresolved target-replacement obligation；禁止 same-target advance |
 | known dispatch 但 job ID/version 不匹配 | rejected-delivery + `noop/delivery_mismatch` |
+| execution governor capacity unavailable | 不改state/attempt、不写成功inbound；返回worker error，现有start deadline最终以新identity恢复 |
 
-只有取得 exact business claim 的分支可以调用外部依赖。其它分支在 durable inbound outcome 提交后直接向 Oxana 返回成功。
+只有取得 exact business claim 的分支可以调用外部依赖。除 capacity unavailable 返回worker error外，其它非执行分支都在 durable inbound outcome 提交后直接向 Oxana 返回成功。
 
 ### 4.3 Business execution、heartbeat 与 publish
 
 - executor 只从 immutable target/snapshot 读取输入；Redis payload 不携带业务数据。
-- 长时间 DocReader/provider/object/render 调用期间运行独立 background heartbeat；heartbeat 与 publish 都验证 target 仍为 executable/running、dispatch state=`running`、absorbing settlement 为空，以及 exact head、attempt token、lease、gate epoch 和 target fence。
+- 长时间 DocReader/provider/object/render 调用期间运行独立 background heartbeat；heartbeat 与 publish 只调用第 4.5 节的同一个 `classify_owner` 权威原语，不复制或缩短 fresh 条件。
+- heartbeat由`handle`持有的structured-concurrency guard管理，禁止detach：正常完成/错误/worker shutdown先取消并join heartbeat；panic、timeout、future cancel/drop由abort-on-drop guard同步终止。heartbeat任何一次返回fenced或无法从DB证明owner fresh，都取消传给typed adapter的execution token；adapter必须停止后续外部工作，`handle`禁止publish并返回worker error或读取已存在durable disposition。heartbeat task不得在`handle`生命周期外继续续租。
 - staging 外部产物在 publish 前登记 owner；lease-lost/fenced owner 不能绑定 current pointer，孤儿由 ObjectRegistry/retention 回收。
 - success 或 deterministic failure：domain result、target terminal、dispatch terminal settlement、typed evidence 和 inbound outcome 同一事务；提交后才向 Oxana 返回成功。
-- retryable failure：终结旧 business attempt、target 回 pending、调用 `advance_dispatch` 创建新 identity，并写 `retry_scheduled` inbound outcome；业务 attempt budget 只在这里消耗。
+- retryable failure：终结已计数的 business attempt并调用 `advance_dispatch`；尚有 budget 时创建新 identity并写 `retry_scheduled` inbound outcome，已耗尽时原子 terminal。owner crash/lease expiry 使用同一边界，不额外或遗漏计数。
 - DB commit 结果未知时 handler 返回 error；若事务实际已提交，任何晚到 delivery 只读取 exact absorbing settlement 并 noop。
 - stale owner 恢复后 heartbeat/publish 必须因 token/head/lease/gate/fence 任一不等而失败，不能覆盖 successor 结果。
 
@@ -328,34 +446,53 @@ transition：
 所有未开始恢复、owner reap、业务 retry 和 gate rebase 只调用：
 
 ```text
-advance_dispatch(old_dispatch_id, reason, new_gate_epoch, due_at)
-  -> new_dispatch_id
+advance_dispatch(
+  old_dispatch_id,
+  reason,
+  new_gate_epoch,
+  due_at,
+  observed_delivery: Option<ObservedDelivery>
+)
+  -> advanced(new_dispatch_id)
+   | terminal_exhausted(settlement_id)
+   | owner_still_fresh
+   | target_stale
+   | contract_poison(settlement_id)
 ```
 
 原语必须在一个 transaction 中：
 
-1. 按固定顺序锁 target、exact business attempt、head、old dispatch state；
-2. 验证 old 仍是 current head 且尚无 absorbing settlement；
+1. 按固定顺序锁 target、存在running owner时的exact governor counters、可选exact business attempt、head、old dispatch state、可选exact delivery attempt及全部unresolved repair obligations；
+2. 验证 old仍是 current head、尚无 absorbing settlement且 immutable target fence仍与 domain target一致；fence stale返回 `target_stale`，禁止复制旧 fence创建 successor；
 3. 对 fresh owner 返回 `OWNER_STILL_FRESH`，不得抢占；
-4. 对 expired/fenced owner 精确终结旧 attempt 并清理其 claim；
-5. 生成新 UUID 并插入 generation+1 immutable intent 与 `ready` state；
-6. 以 `UNIQUE(predecessor_dispatch_id)` insert-or-read 并发唯一 successor；
-7. old state=`superseded`，写 advanced settlement，target 回 pending，head 指向 successor；
-8. 清 old due/claim/deadline/repair 字段并写审计。
+4. 对 expired/fenced owner 精确终结已经在 begin 时计数的旧 attempt 并清理其 claim，不在 reaper 再加一次；
+5. 在任何后续absorbing分支前先执行统一delivery cleanup：若old state=`offering`且attempt仍inflight，`Some(observed_delivery)`结算为`consumer_started`；`reason=publisher_lease_expired|delivery_not_started`结算为`publisher_lost`；gate rebase及其它非timeout advance结算为`superseded`。`awaiting_start|running`必须保留已有settled disposition，ready可无attempt；
+6. 若 `business_attempts_started >= max_attempts`，先验证current dispatch是否存在exact finalized `expired|retryable_failed` attempt：存在时原子把target/dispatch置terminal，写resultless `attempts_exhausted` settlement/evidence，清due/claim/deadline、解析全部repair obligations并返回`terminal_exhausted`；handler传`Some(observed_delivery)`时还在同事务写`business_failed/attempts_exhausted` inbound，提交后才向Oxana成功；reaper传`None`时不伪造inbound，只写settlement/evidence/audit；
+7. 若已达max但current dispatch没有上述exact finalized attempt（例如非法offering/awaiting后继），禁止伪造exhausted：写`DISPATCH_BUDGET_ORPHAN` poison settlement/evidence/readiness failure，解析全部repair obligations并返回`contract_poison`；有ObservedDelivery时同事务写poison inbound；
+8. 否则生成新 UUID并插入 generation+1 immutable intent 与 `ready` state；
+9. 以 `UNIQUE(predecessor_dispatch_id)` insert-or-read 并发唯一 successor；
+10. old state=`superseded`，写 advanced settlement，target回 pending，head指向 successor；
+11. 清 old due/claim/deadline，把 old dispatch 全部 unresolved repair obligations 解析到该 exact settlement，然后写审计。
 
-delivery-start reaper 只处理 current `offering|awaiting_start` 且 DB 无 fresh owner的 row：
+`max_attempts` 是 target fence 的不可变正整数，跨同 target 的所有 dispatch generation 共享；cross-target 人工 retry 创建新 target时才按新的受检 policy 取得新 budget。transport successor 在 begin 前不消耗 budget，但不能越过已耗尽检查创建一个永远不可 claim 的 dispatch。
+
+`attempts_exhausted` evidence 是合法的 resultless variant：引用同 dispatch/target的 finalized `expired|retryable_failed` business attempt、frozen max/ordinal 与 fence hash，result artifact必须为空。attempt/status/result形状不匹配必须拒绝整个 terminal transaction。若 begin观察到“无 owner但 ordinal已达max”的后继 dispatch，说明先前错误创建了不可claim successor，只能按 `DISPATCH_BUDGET_ORPHAN` contract poison收敛，不能伪造 exhausted evidence。
+
+delivery-start reaper 只处理 current `offering|awaiting_start` 且 DB 无 fresh owner的 row；repair runner独立消费 unresolved obligations，stale delivery handler本身不调用reaper：
 
 - deadline 未到不推进；
 - deadline 到且 owner none：`advance_dispatch(delivery_not_started,...)`；
 - owner fresh：归一为 running 或保持业务 owner，不推进；
-- owner expired/fenced：精确 reap 后推进；
+- owner expired/fenced：精确 reap 后按剩余 budget advance 或 terminal exhausted；
 - Redis queue depth/get_job/stats 不得改变单条决定。
 
 ### 4.5 Gate 与 owner 三态
 
-fresh owner 必须同时满足：exact current head、dispatch/gate/fence 相等、attempt running、token 相等且 DB lease 未过期。只要 gate epoch 改变或 head 改变，即使 heartbeat 时间尚新也属于 `expired_or_fenced`，不能继续发布。
+`classify_owner` 是 begin、heartbeat、publish、advance、replacement 和 reaper 共用的唯一权威定义。fresh 必须同时满足：target 仍为 executable/running；dispatch state=`running` 且 absorbing settlement 为空；exact current head；dispatch/gate/fence 相等；business attempt status=`running`、token相等且 DB lease 未过期。缺少 attempt 为 `none`；曾有 owner但任一 fresh 条件不满足为 `expired_or_fenced`。不得在其它函数复制较短条件。只要 target/head/gate/fence/settlement 任一改变，即使 heartbeat 时间尚新也不能继续发布。
 
 gate 关闭时停止新 offer/begin 并阻断 heartbeat/publish；旧外部调用可结束但结果不能成为 current。gate 以新 epoch 开放后，none 直接 advance，expired/fenced 先精确 reap 再 advance。旧 epoch owner 不允许分类为 fresh 并无限等待。
+
+gate rebase只改变 gate epoch，可使用同 target `advance_dispatch`。target fence stale表示 immutable target输入已失效，只能由所属领域 checked mutation调用 `replace_current_target`。repair重验时若已经存在新 current target，则旧 delivery按其 absorbing disposition noop；若 stale target仍是 current且没有 replacement，说明原子 mutation contract已破坏，必须先执行统一absorbing cleanup，再以 `DISPATCH_FENCE_ORPHAN` poison settlement/evidence终结并使 readiness失败，绝不循环创建同一 stale fence的 dispatch。
 
 ## 5. Target adapters 与原子后继
 
@@ -370,9 +507,23 @@ gate 关闭时停止新 offer/begin 并阻断 heartbeat/publish；旧外部调�
 
 所有“完成 A 后创建 B”路径必须在 A 的 fenced settlement 事务中同时创建 B domain target、base/typed extension、head、generation 0 intent 与 ready state。禁止先把 A 标 completed，再用第二次 DB 调用或 commit 后 enqueue B。
 
-matching mutation 使用独立的 cross-target replacement 原语，不调用 same-target `advance_dispatch`。事务先锁 project/current schedule revision，再按全局锁序锁旧 nonterminal target、exact running business attempt、head 与 dispatch state；随后创建新 schedule domain target、base/extension/head/generation-0 intent/state。若旧 target nonterminal，则精确终结旧 attempt 为 `superseded`、清 owner/lease，把旧 target/state 标为 superseded，并写以 replacement 五元组指向新 target/initial dispatch 的 `superseded` settlement。旧 head保留指向旧 final dispatch用于 audit，新 target拥有自己的 head。若旧 target 已有 absorbing settlement，则保持其终态不可变，只创建由新 watermark 驱动的新 target；不存在可晚到执行的旧 owner。
+所有“人工 retry 或新 mutation 以新 target 取代同 kind current target”的路径都使用 crate-private `replace_current_target`，不调用 same-target `advance_dispatch`。所属领域事务先锁 project/current domain pointer revision，再按全局锁序锁全部相关旧 targets、存在running owner时的governor counters、可选 exact business attempts、heads、dispatch states、delivery attempts与unresolved repair obligations；随后创建新domain target、base/extension/head/generation-0 intent/state，并原子切换所属领域current pointer。旧dispatch按状态分支：
 
-replacement mutation 与 heartbeat/publish 使用同一锁序和 CAS。mutation 先提交时，旧 owner 因 target/state/absorbing 检查失败；publish 先提交时，mutation 观察旧 absorbing terminal 并不得改写它。并发 mutation 只能有一个 current revision CAS 成功，失败方不得留下 target 或 intent。旧 nonterminal delivery 晚到时引用 exact `superseded` settlement durable noop，不能执行 schedule。
+- `ready`：清 `next_offer_at`；
+- `offering`：把 exact delivery attempt 结算为 `superseded`，清 publisher claim/start deadline；已经在途的 publisher 结果只能追加 observation；
+- `awaiting_start`：保留 finalized delivery attempt作 audit，清 start deadline；
+- `running`：精确终结 business attempt 为 `superseded` 并清 owner/lease；
+- 已有 absorbing settlement：保持旧 target/state/settlement 不可变，新 target 由新 watermark 独立 stage。
+
+前四种 nonabsorbing 分支都把旧 target/state 标为 superseded，并在同一事务写 replacement 五元组指向新 target/initial dispatch 的 `superseded` settlement；所有 due/active claim/deadline 清空，finalized attempt pointer 可保留作 audit，旧dispatch全部unresolved repair obligations解析到该settlement。旧 head保留指向旧 final dispatch，新 target拥有自己的 head。
+
+replacement mutation 与 heartbeat/publish 使用同一锁序和 CAS。mutation 先提交时，旧 owner 因 `classify_owner` 失败；publish 先提交时，mutation 观察旧 absorbing terminal 并不得改写它。并发 mutation 只能有一个 current revision CAS 成功，失败方不得留下 target 或 intent。旧 nonterminal delivery 晚到时引用 exact `superseded` settlement durable noop，不能执行 target；晚到 publisher 只追加 observation。旧 target 已 absorbing 时，新 target的 domain audit记录 retry/mutation reason与旧 target ID，但不得伪造第二条 dispatch settlement。
+
+matching input mutation 必须在推进 watermark、stale 旧 projections/picks和创建新 schedule target的同一事务调用该原语。conversion/extraction 人工 retry、attachment preparation重新提交和 render重新请求在各自 current pointer存在时使用同一原语；目标 family 切换 PR 必须验证其 domain pointer CAS与 generic replacement relation一致。
+
+`cancel_target` 是同 module 的第二个 absorbing 原语，用于“旧 target 不存在一对一 replacement，但已失去执行资格”。它复用统一锁序并按五态处理：`ready`无delivery attempt；`offering`才把exact inflight attempt结算为`cancelled`并清publisher claim/deadline；`awaiting_start`保留已有settled attempt作audit并清deadline；`running`保留settled delivery attempt、把exact business attempt终结为`cancelled`并清owner/lease；已absorbing保持旧state/settlement不可变。前四种nonabsorbing状态都把target/dispatch置terminal，写无successor/replacement的`cancelled` settlement，并把该dispatch全部unresolved repair obligations解析到同一settlement。晚到publisher只追加observation，晚到delivery在外部I/O前引用cancelled settlement noop。
+
+matching input mutation除以 `replace_current_target` 替换旧 nonterminal schedule外，还必须按稳定 target ID顺序锁定并 `cancel_target(reason=matching_input_changed)` 旧 current manifest下全部 nonterminal matching jobs，再创建新 schedule。0/1/N jobs都在推进 watermark的同一事务完成；不能等待新 schedule fanout后再异步清旧 jobs，也不能让旧 job用 stale watermark发布。
 
 schedule executor 原子创建 manifest 与 0..N fanout；零 route 时 manifest 和 schedule/dispatch 成功 terminal，不创建 child。
 
@@ -395,10 +546,11 @@ DISPATCH_ADAPTER_MISMATCH
 
 - `enqueue_returned`：只记录 API 返回与 expected job ID 相等，不记录 accepted/inserted/duplicate；
 - `enqueue_indeterminate`：错误 code bounded，仍等待 start deadline，禁止同 ID 重投；
+- `offer returned_job_id_mismatch`：attempt结算为`enqueue_indeterminate(error=adapter_mismatch)`并写含实际returned job ID的bounded observation，同时runtime readiness fail closed；该dispatch仍不得重投，只能由start deadline以新identity恢复；
 - publisher result 晚到：只追加 bounded observation；
 - pure prepare payload rejected：业务 transaction 回滚；
 - runtime adapter/registry mismatch：global fatal/not-ready；已经暴露的 identity 仍只能由 deadline successor；
-- transport health 不可用：未 claim 的 ready row 保持 ready，不创建 attempt；health 只是 admission hint，不是单条 membership proof。
+- Redis unavailable/timeout 只能在调用 `offer` 后形成 `enqueue_indeterminate`；固定 seam 没有 claim 前 membership/health proof，dispatcher 不得据未公开的 admission 状态跳过或反复重用 identity。
 
 ### 6.3 Handler outcome
 
@@ -409,12 +561,12 @@ DISPATCH_ADAPTER_MISMATCH
 
 ## 7. 并发、性能与 retention
 
-- due scan 分别覆盖 `ready next_offer_at`、`offering publisher lease expired`、`offering|awaiting_start delivery_start_deadline`、business lease expired 和 repair requested；每个条件有 partial index。
+- due scan 分别覆盖 `ready next_offer_at`、`offering publisher lease expired`、`offering|awaiting_start delivery_start_deadline`、business lease expired 和 unresolved repair obligation；每个条件有 partial index。
 - 每批固定上限，`FOR UPDATE SKIP LOCKED`；global/per-kind successor 与 execution concurrency 由 current governor 限制。
 - target repair 按 typed adapter round-robin，每 kind 每轮固定 batch，不能用无界中央 UNION 让大 backlog 饿死其它 kind。
 - 新 ready intent commit 后发 bounded NOTIFY hint，polling 是漏通知兜底。
 - queue backlog 无法与丢消息区分；successor 按 frozen exponential backoff 并受 lane/global rate limit。历史消息可能增加，但全部在 DB begin 前 noop。
-- aggregate 包含 domain target/base/extension/head、全部 dispatch intents/states/delivery attempts/observations、business attempts、settlements、inbound outcomes/rejected deliveries/evidence。
+- aggregate 包含 domain target/base/extension/head、全部 dispatch intents/states/delivery attempts/observations、business attempts、settlements、inbound outcomes、repair obligations、rejected deliveries与evidence。
 - nonterminal aggregate、current head、replay 窗口内 historical dispatch 和 terminal audit 不得单删；终态且外部引用释放后按 retention 整体删除。
 - Redis job/dead list、get_job 和 delete_job 不参与 retention proof。
 
@@ -423,22 +575,28 @@ DISPATCH_ADAPTER_MISMATCH
 ```text
 project/current domain pointer（需要时）
   -> domain target/base/extension
+  -> runtime governor current/config pointer（需要 owner begin 或 promotion 时）
+  -> runtime governor global counter（需要 owner transition 时）
+  -> runtime governor kind counter
   -> exact business attempt
   -> dispatch head
   -> dispatch intent/state
-  -> settlement/inbound/evidence
+  -> exact delivery attempt
+  -> unresolved repair obligations（按 ID）
+  -> settlement/delivery observation/inbound/evidence
 ```
 
-- consumer 可先无锁定位 target，但加锁后按上述顺序重验全部 fence；不需要 project/current pointer 的原语从 domain target 开始，禁止反向补锁；
+- consumer 可先无锁定位target，但加锁后按上述顺序重验全部fence；不需要project/current pointer或governor counter的原语跳过对应行，禁止反向补锁；
+- governor promotion不锁domain target，直接从current/config pointer开始并按global→kind稳定顺序取得全部counter；begin使用target→pointer→global→kind，terminal/reap/replacement/cancel若无需pointer可跳过它，但不得在取得counter后反向获取pointer；
 - Redis/provider/object/DocReader/renderer 调用期间不持 PostgreSQL row lock；
-- publisher result settlement 不得在持 dispatch 锁时反向获取 target；late result 只追加 observation；
+- publisher result settlement从dispatch state开始使用相同后缀`state -> delivery attempt -> observation`，不得先锁attempt再反向获取state或target；late result只追加observation；
 - fanout 多 target 按 `(project_id,target_kind,target_id)` 稳定排序；
 - PostgreSQL `40P01` 只允许 bounded whole-transaction retry，不消耗业务 retry budget。
 
 ## 8. 权限与可观测性
 
 - API role 只能通过所属 domain mutation 间接 stage，不能直接改 head/state/attempt；
-- worker 只能调用 bounded offer claim/settle、delivery begin、heartbeat 和 exact target settlement；
+- worker role只能调用`handle(ObservedDelivery)`受检函数；dispatcher runtime role只能调用`run`背后的bounded受检函数；两者都无attempt/head/settlement直接DML权限；
 - maintenance、runtime、retention role 分离；maintenance lane 不能代替 live dispatch；
 - 日志字段限于 dispatch/target ID、kind、generation、lane、attempt、gate、reason code 和 latency，不记录 payload 内容或 secret；
 - 指标至少包含 ready、offering/awaiting-start overdue、successor generation、enqueue returned/indeterminate、duplicate/historical noop、business lease repair、poison 和 per-kind concurrency；
@@ -474,7 +632,7 @@ project/current domain pointer（需要时）
 ## 10. 实施顺序
 
 1. **PR8A — stable transport**：精确锁定 registry Oxana 2.1.3；实现 pure prepare、显式 job name/unique ID 和最薄 `offer` adapter；验证一次 adapter invocation 内 enqueue count 只能为 0 或 1（正常有效路径为 1）以及 `Skip/resurrect/max_retries=0` 真实语义；不 vendor、不 patch、不切换业务 owner。
-2. **PR8B — dormant durable core**：fresh baseline 建立 base/extensions/head/intent/state/delivery attempt/observation/settlement/inbound/evidence/semantics/governor 与 ACL；用 synthetic aggregate 验证每 dispatch 最多一次 offer、same-target advance、cross-target supersede 和其余状态机，不激活真实 producer/consumer。
+2. **PR8B — dormant durable core**：fresh baseline 建立 base/extensions/head/intent/state/delivery attempt/business attempt/observation/settlement/inbound/repair obligation/rejected delivery/evidence/semantics/governor 与 ACL；实现受检mutation/run/handle深module，用synthetic aggregate通过同一interface验证每dispatch最多一次offer、same-target advance、cross-target supersede和其余状态机，不激活真实producer/consumer。
 3. **PR8C — conversion/extraction**：安装 reverse verifier，原子切换 owner，删除该 family 旧 enqueue/live-recovery；验证 conversion→extraction 后继同事务。
 4. **PR8D — attachment/render**：原子切换 owner，删除旧 enqueue/recovery，验证附件 staging 与 render publish fencing。
 5. **PR8E — matching**：原子切换 schedule/job owner，落位 0..N fanout 并删除 dirty/orphan recovery。
@@ -491,7 +649,11 @@ project/current domain pointer（需要时）
 - reverse verifier 拒绝零/多 extension、缺 head、head 跨 target、单删和 identity move；
 - predecessor/generation/head composite FK 可建立，`UNIQUE(predecessor_dispatch_id)` 拒绝双 successor；
 - base `PRIMARY KEY(id)` 拒绝跨 kind/project 重用 UUID，composite FK 仍证明 exact project/kind；
-- intent initial CHECK 与 generation-bearing composite FK 拒绝 replacement 指向 generation>0；state 三列 FK/NULL matrix 拒绝 status 与 absorbing settlement kind 错配；
+- intent initial CHECK 与 generation-bearing composite FK 拒绝 replacement 指向 generation>0；old relation composite FK 与 row CHECK 拒绝 cross-project、cross-kind、same-target replacement；state 三列 FK/NULL matrix 拒绝 status 与 absorbing settlement kind 错配；
+- delivery attempt 的 exact intent relation、claim token/phase/state composite FK与deferred verifier拒绝cross-dispatch pointer、offering引用settled、awaiting引用inflight/consumer_started、第二次claim和settled outcome改写；returned job composite FK必须等于intent expected ID，六种outcome逐项满足NULL matrix；
+- 统一absorbing cleanup覆盖normal terminal、advanced、replacement、cancel、`DISPATCH_BUDGET_ORPHAN`与`DISPATCH_FENCE_ORPHAN`；ObservedDelivery/replacement/cancel/reaper对应disposition正确，任何absorbing state残留inflight attempt都失败；
+- fresh schema实际建立intent expected-job、attempt/state与observation的全部exact composite FK；缺少任一referenced unique key、列序/类型不一致或deferred verifier缺失均使catalog test失败；
+- delivery observation以exact attempt/dispatch FK、每observer唯一性及observer/outcome/NULL CHECK matrix证明bounded append-only；publisher result与consumer-first、lease-expiry、replacement、cancel分别做双序race：attempt CAS败方不得覆盖settled disposition，只能留下合法observation或重读；重读后consumer begin、replacement/cancel吸收与absorbing幂等返回仍必须完成；
 - `advanced` 只指向同 target successor；`superseded` 只指向不同 target 的 exact generation-0 replacement，XOR/FK/unique 拒绝混填、缺填和共享 replacement；
 - dispatch intent immutable，state NULL matrix 覆盖全部 transition；
 - 同 target/fence initial stage 幂等，不同 fence 冲突；terminal target 不重开；
@@ -499,7 +661,8 @@ project/current domain pointer（需要时）
 - `BidDeliveryV1/KBDL` Rust/SQL fixed golden、explicit job name、expected job ID 与 payload/version 篡改负例；
 - settlement、inbound outcome 和 typed evidence canonical key/hash 并发 insert-or-read 只复用同一语义；
 - conversion completion→extraction 与 matching schedule→manifest+0..N jobs/dispatches 原子，零 route 成功 terminal。
-- matching mutation 的新 target+initial dispatch 与旧 nonterminal target attempt reap/`superseded` settlement 同事务；replacement-vs-heartbeat 与 replacement-vs-publish 两种锁序结果都证明旧 owner不能发布；并发 mutation 只创建一个 replacement，旧 delivery 的 historical noop 引用 exact superseded settlement。
+- generic replacement 的新 target+initial dispatch/current pointer与旧 nonabsorbing target cleanup/`superseded` settlement同事务；ready/offering/awaiting/running/absorbing 五态、late publisher、replacement-vs-heartbeat与replacement-vs-publish均有并发测试并证明旧 owner不能发布；并发 mutation只创建一个 replacement，旧 delivery的 historical noop引用 exact superseded settlement；各 family 纵切再验证真实 current pointer。
+- generic cancel覆盖 ready/offering/awaiting/running/absorbing五态与late publisher/delivery；matching mutation在同事务替换旧 schedule并取消旧 manifest下0/1/N nonterminal jobs。
 
 ### 11.2 一次性 transport 与 start deadline
 
@@ -507,7 +670,10 @@ project/current domain pointer（需要时）
 - claim 后、Redis 前 crash；enqueue Ok、Err、timeout、response lost 四种路径都只进入 awaiting/running/absorbing，不回 ready；
 - Redis HSET-only/hash-only unique job 模拟后，successor 新 ID 仍执行；旧 ID 永不复用；
 - enqueue succeeded 但 publisher DB settle 前 crash，consumer-first 可从 offering begin；晚到 publisher 只写 observation；
+- publisher先把attempt结算为`enqueue_returned`并进入awaiting后，consumer仍创建恰好一个business owner并进入running，delivery attempt保持原settled disposition不变；
 - publisher lease expiry 不会重投同 ID；delivery-start deadline 才创建新 dispatch；
+- delivery-start deadline与publisher settle双序race只产生一个successor：reaper先提交时inflight attempt结算为`publisher_lost`且晚publisher只observation；publisher先提交时保留其settled disposition再吸收；old state/attempt matrix始终合法；
+- gate rebase与publisher settle双序race也只产生一个successor：rebase先提交时inflight attempt结算为`superseded`且晚publisher只observation；publisher先提交时保留其settled disposition后advance；不得伪造`publisher_lost`；
 - deadline-vs-consumer begin 并发只得到“旧 dispatch 运行”或“successor current+旧 delivery noop”；
 - Redis flush、membership-only、七天 cleanup 和相同 hostname/PID restart 后，新 dispatch 在时限内恢复；
 - `get_job/list/stats/delete_job` 不参与正确性，source denylist 覆盖 Bid/WorkTransport；
@@ -516,9 +682,13 @@ project/current domain pointer（需要时）
 ### 11.3 Consumer、lease 与 fencing
 
 - duplicate 并发 begin 只有一个 business owner，其余 durable noop；
-- historical advanced、cross-target superseded、terminal、gate stale、fence stale、wrong job ID/version 均在任何外部调用前 settle/noop，并引用 exact absorbing disposition；正确 payload + 错误 `JobContext.meta.id` 的 external I/O count 必须为 0；
+- historical advanced、cross-target superseded与terminal delivery在任何外部调用前noop并引用 exact absorbing disposition；current gate/target stale与owner-expired noop引用 exact repair obligation而不伪造尚不存在的 settlement；wrong job ID/version引用 rejected-delivery；正确payload + 错误`JobContext.meta.id`的 external I/O count必须为0；
+- owner-expired→gate-stale、gate-stale→target-stale与三类handler-vs-repair双序race证明每个current stale inbound提交时只引用unresolved exact obligation；任一后续absorbing transaction按dispatch锁定并解析全部obligations，absorbing state残留unresolved、cross-dispatch resolution和修改历史inbound均被拒绝；
+- rejected delivery的expected tuple必须exact FK到intent，observed tuple必须不同且mismatch kind与差异字段一致；expected、mismatch kind、inbound reason任一错配均被拒绝；
 - begin 前 worker crash 由 start deadline 恢复；begin 后 crash/卡死由 business lease 精确 reap；
+- business attempt在 begin 取得 owner时计数；N-1/N边界、retryable failure与连续 crash/reap都只能 advance到剩余 budget或原子 `attempts_exhausted` terminal，绝不创建不可 claim successor；
 - owner fresh 不被 deadline/reaper 抢占；gate/head 改变后旧 owner 立即 fenced 且不能 heartbeat/publish；
+- gate stale可在 fence仍有效时rebase；target fence stale只能走 domain replacement/cancel，orphan stale target必须 poison且 readiness fail，same-target successor count=0；
 - business retry、owner reap、delivery not started 和 gate rebase 全部只通过 `advance_dispatch`；
 - heartbeat 与 publish race、lease 边界、旧 worker 恢复、DB 连接丢失均不能覆盖 successor；
 - 长时间 conversion/render/provider 调用有独立 heartbeat 且 claim token/gate/fence 丢失即停止 publish；

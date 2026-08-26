@@ -2,10 +2,10 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | clean-slate V1 稳定版依赖修订；待交叉 review |
+| 状态 | clean-slate V1 稳定版依赖修订已批准并固化；运行时代码尚未实施或验收 |
 | 所有者 | Shared Platform |
-| 发布依赖 | crates.io `oxana = 2.1.3` |
-| 消费方 | 知识库现有任务、招投标 durable dispatch |
+| 发布依赖 | crates.io `oxana = "=2.1.3"` |
+| 消费方 | 招投标 durable dispatch；知识库旧 jobs 仍直接使用 Oxana，不属于本 WorkTransport seam |
 
 本文只定义应用到 Oxana 的 transport seam 与发布版事实。业务 target、current head、generation、gate、business lease、successor、noop、settlement 和恢复资格必须由所属领域定义；招投标的唯一权威状态机见 [`../bidding/durable-dispatch.md`](../bidding/durable-dispatch.md)。
 
@@ -40,7 +40,6 @@ interface 固定为：
 
 ```text
 DeliverySpec {
-  contract_version,
   physical_lane,
   task_type,
   dispatch_id,
@@ -61,15 +60,16 @@ prepare(spec: DeliverySpec)
 offer(prepared: PreparedDelivery, deadline)
 -> returned(job_id)
  | indeterminate(error_class)
- | adapter_mismatch
+ | returned_job_id_mismatch(actual_job_id)
 ```
 
 - `prepare` 是无 Redis、网络、时钟和随机数的纯函数。它验证 allowlist，构造 typed job，并冻结应用 payload bytes/digest 与预期 Oxana job ID；digest 只证明应用 codec 一致，不称为 Redis receipt fingerprint。
+- V1不另设可漂移的`contract_version`字段：`task_type=bid:delivery:v1`本身固定delivery contract，`payload_version=1`固定codec。未来不原地promotion这两个值；新合同使用新task type并先修订领域方案与registry closure。
 - `offer` 的一次调用内部最多发起一次发布版 `Storage::enqueue`，绝不内部 retry、probe、delete 或 private-key repair。deadline 已过或 future 首次 poll 前被取消时允许零次 I/O；未取消且 deadline 有效的正常路径必须恰好一次。跨调用的一次性业务 identity 由调用方领域负责，平台 adapter 不声称拥有该状态。
 - deadline 取消后结果仍是 `indeterminate`，不能推断 Redis 未写入。
 - `returned(job_id)` 只表示公开 API 返回，可能是首次写入，也可能是 unique `Skip` 返回已有 ID；它不证明 inserted、queued、processing、单一 membership 或 payload 等价。
 - `indeterminate` 覆盖连接错误、timeout、response lost 和其它 enqueue error。调用方不得据此断言无 Redis side effect。
-- 返回的 `job_id` 必须逐字节等于 `expected_job_id`；不等返回 `adapter_mismatch` 并使 runtime readiness fail closed。
+- 返回的 `job_id` 必须逐字节等于 `expected_job_id`；不等返回携带实际ID的 `returned_job_id_mismatch` 并使 runtime readiness fail closed。领域必须把该次已发生的enqueue视为indeterminate，禁止原identity重投；实际ID只可进入bounded runtime observation，不能成为业务receipt。prepare/registry/codec closure mismatch在offer前作为无enqueue的fatal处理，不伪造实际ID或delivery observation。
 - 平台接口不使用 `Option<String>` 同时表达成功、跳过和 Redis 不可用。
 
 生产 adapter 内聚 queue mapping、typed job 构造、Oxana error 分类和 deadline；业务 module 不接触 Oxana `Storage`、`JobEnvelope` 或 Redis key。
@@ -126,7 +126,7 @@ Bid clean-slate cutover 删除 `system:live-recovery:v1` 业务两跳和全部 B
 - Redis I/O 永远发生在 PostgreSQL 事务外；adapter 使用硬 deadline。
 - transport 指标至少包含 health、queue depth、enqueue returned/indeterminate/latency、resurrection 和 dead count；这些只用于运维。
 - readiness 验证 Cargo 来源/版本、queue/task/handler registry closure 和 worker registration；queue depth 不代表任何领域 backlog。
-- 所有启动 Redis/PostgreSQL/Compose 的测试都必须按 [`implementation-acceptance.md`](../bidding/implementation-acceptance.md) 的固定退出模式和双层 cleanup 合同清理资源。
+- 所有启动 Redis/PostgreSQL/Compose 的测试都必须覆盖 `success|failure|timeout|cancel|SIGINT|SIGTERM`，使用 shell trap + CI `if: always()` 双层 cleanup，并证明本轮 container/volume/network/临时 image 零残留；领域验收只能消费并加严该平台合同，不能反向拥有它。
 
 ## 7. 平台验收
 
@@ -139,6 +139,6 @@ PR8A 只验收发布版 transport seam，不提前声称验证 PR8B 的 PostgreS
 5. adapter mismatch、Redis unavailable、deadline 与 registry closure 有 bounded error、metric 和 readiness 行为；
 6. `get_job`、queue list、stats、`delete_job` 和 `oxanus:*` 不出现在 WorkTransport/Bid correctness 路径；
 7. legacy replay 混合 processing-list fixture 证明 hash metadata 缺失/true 时可能移动 Bid membership、显式 false 时不移动，并静态证明 WorkTransport/Bid 不调用它；启用/禁用 replay 后业务仍收敛的证明属于 PR8B synthetic 与 PR9，不由 PR8A 冒充；
-8. 本地测试、fresh Compose、部署和 runtime accepted 分别报告；启动的资源按固定六种退出模式全部清理。
+8. 本地测试、fresh Compose、部署和 runtime accepted 分别报告；`bid-durable-dispatch` 从PR8A起必须调用统一cleanup harness实际触发固定六种退出模式，shell trap与CI独立`if: always()`步骤分别产生receipt，并在每种模式后断言本轮container/volume/network/临时image零残留；缺模式、cleanup失败或残留均使required job失败。
 
 Bid 的 once-per-dispatch、consumer-before-publisher、deadline、lease、successor、historical noop 和 fault matrix 只由 [`durable-dispatch.md`](../bidding/durable-dispatch.md) 及其 PR8B～PR9 验收定义。
