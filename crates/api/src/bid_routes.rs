@@ -337,52 +337,6 @@ async fn abandon_staged_upload(pool: &sqlx::PgPool, staging_id: Uuid, actor: &st
     }
 }
 
-async fn render_attachment_pdf_pages(
-    file_name: &str,
-    bytes: Vec<u8>,
-) -> Result<Vec<(Vec<u8>, storage::bid_submission::ValidatedUpload)>, ApiErr> {
-    let overrides = std::collections::HashMap::from([("pdf_force_scanned".into(), "true".into())]);
-    let result = docparser::convert_with(docparser::ConvertInput {
-        engine: "builtin",
-        file_name,
-        file_type: "pdf",
-        is_url: false,
-        bytes,
-        url: "",
-        title: file_name,
-        overrides: &overrides,
-    })
-    .await
-    .map_err(|error| validation(&format!("attachment PDF rendering failed: {error}")))?;
-    if !result.error.is_empty() {
-        return Err(validation(&format!(
-            "attachment PDF rendering failed: {}",
-            result.error
-        )));
-    }
-    let page_count = result
-        .metadata
-        .get("page_count")
-        .and_then(|value| value.parse::<usize>().ok())
-        .ok_or_else(|| validation("attachment PDF page count missing"))?;
-    if !(1..=512).contains(&page_count) || result.images.len() != page_count {
-        return Err(validation("attachment PDF render page set invalid"));
-    }
-    let mut pages = Vec::with_capacity(page_count);
-    let mut total_bytes = 0usize;
-    for image in result.images {
-        let (bytes, metadata) = validate_uploaded_bytes(image.data, false).await?;
-        total_bytes = total_bytes
-            .checked_add(bytes.len())
-            .ok_or_else(|| validation("attachment PDF render page quota exceeded"))?;
-        if total_bytes > 256 * 1024 * 1024 {
-            return Err(validation("attachment PDF render page quota exceeded"));
-        }
-        pages.push((bytes, metadata));
-    }
-    Ok(pages)
-}
-
 async fn require_open(pool: &sqlx::PgPool, id: Uuid) -> Result<storage::bidding::Project, ApiErr> {
     let project = storage::bidding::get_project(pool, id)
         .await
@@ -1576,12 +1530,10 @@ async fn upload_attachment(
     require_open(&pool, id).await?;
     let mut kind = String::new();
     let mut bytes = Vec::new();
-    let mut file_name = "attachment".to_string();
     while let Ok(Some(field)) = multipart.next_field().await {
         match field.name() {
             Some("kind") => kind = field.text().await.unwrap_or_default(),
             Some("file") => {
-                file_name = field.file_name().unwrap_or("attachment").to_string();
                 bytes = field
                     .bytes()
                     .await
@@ -1599,31 +1551,9 @@ async fn upload_attachment(
     let digest = domain::sha256_hex(&bytes);
     let object_ref = storage::object_ref(&digest);
     let attachment_id = Uuid::new_v4();
-    let rendered_pages = if metadata.media_type == PDF_MEDIA_TYPE {
-        render_attachment_pdf_pages(&file_name, bytes.clone()).await?
-    } else {
-        Vec::new()
-    };
-    let render_page_identities = rendered_pages
-        .iter()
-        .enumerate()
-        .map(|(page_ordinal, (page_bytes, page_metadata))| {
-            let page_digest = domain::sha256_hex(page_bytes);
-            json!({
-                "page_ordinal": page_ordinal,
-                "object_ref": storage::object_ref(&page_digest),
-                "digest": page_digest,
-                "media_type": page_metadata.media_type,
-                "byte_length": page_metadata.byte_length,
-                "pixel_width": page_metadata.pixel_width,
-                "pixel_height": page_metadata.pixel_height,
-            })
-        })
-        .collect::<Vec<_>>();
     let payload = json!({"project_id":id,"kind":kind,"digest":digest,
         "media_type":metadata.media_type,"byte_length":metadata.byte_length,
-        "pixel_width":metadata.pixel_width,"pixel_height":metadata.pixel_height,
-        "render_pages":render_page_identities});
+        "pixel_width":metadata.pixel_width,"pixel_height":metadata.pixel_height});
     let context = storage::bidding::MutationContext::new(
         actor.clone(),
         required_idempotency_key(&headers)?,
@@ -1641,42 +1571,6 @@ async fn upload_attachment(
         &actor,
     )
     .await?;
-    let mut page_staging_ids = Vec::with_capacity(rendered_pages.len());
-    let mut render_pages = Vec::with_capacity(rendered_pages.len());
-    for (page_ordinal, (page_bytes, page_metadata)) in rendered_pages.iter().enumerate() {
-        let page_staging_id = Uuid::new_v4();
-        let page_digest = domain::sha256_hex(page_bytes);
-        let page_object_ref = storage::object_ref(&page_digest);
-        if let Err(error) = stage_uploaded_bytes(
-            &pool,
-            page_staging_id,
-            &page_object_ref,
-            &page_digest,
-            page_metadata.media_type,
-            page_bytes,
-            &actor,
-        )
-        .await
-        {
-            abandon_staged_upload(&pool, staging_id, &actor).await;
-            for staged in page_staging_ids {
-                abandon_staged_upload(&pool, staged, &actor).await;
-            }
-            return Err(error);
-        }
-        page_staging_ids.push(page_staging_id);
-        render_pages.push(json!({
-            "staging_id": page_staging_id,
-            "page_ordinal": page_ordinal,
-            "object_ref": page_object_ref,
-            "digest": page_digest,
-            "media_type": page_metadata.media_type,
-            "byte_length": page_metadata.byte_length,
-            "pixel_width": page_metadata.pixel_width,
-            "pixel_height": page_metadata.pixel_height,
-        }));
-    }
-    let render_pages = Value::Array(render_pages);
     let uploaded = storage::bid_submission::upload_attachment(
         &pool,
         storage::bid_submission::UploadAttachment {
@@ -1690,18 +1584,28 @@ async fn upload_attachment(
             byte_length: metadata.byte_length,
             pixel_width: metadata.pixel_width,
             pixel_height: metadata.pixel_height,
-            render_pages: &render_pages,
         },
         &context,
     )
     .await;
     if uploaded.is_err() {
         abandon_staged_upload(&pool, staging_id, &actor).await;
-        for staged in page_staging_ids {
-            abandon_staged_upload(&pool, staged, &actor).await;
+    }
+    let uploaded = uploaded.map_err(map_sql)?;
+    if let Some(preparation_job_id) = uploaded
+        .get("preparation_job_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+    {
+        match runtime::enqueue_bid_prepare_attachment_v1(preparation_job_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => tracing::warn!(%preparation_job_id,
+                "attachment preparation queue unavailable; durable job remains pending"),
+            Err(error) => tracing::warn!(%preparation_job_id,%error,
+                "attachment preparation enqueue failed; durable job remains pending"),
         }
     }
-    Ok((StatusCode::CREATED, Json(uploaded.map_err(map_sql)?)))
+    Ok((StatusCode::CREATED, Json(uploaded)))
 }
 
 #[derive(Deserialize, Serialize)]

@@ -46,7 +46,13 @@ async fn final_submission_schema_is_ready(pool: &PgPool) -> bool {
            'kb_bid_upload_shot_artifact(uuid,uuid,uuid,kb_object_ref,kb_sha256,text,bigint,integer,integer,kb_actor_identity,text,bytea,kb_sha256)'
          ) IS NOT NULL
          AND to_regprocedure(
-           'kb_bid_upload_attachment(uuid,uuid,uuid,text,kb_object_ref,kb_sha256,text,bigint,integer,integer,jsonb,kb_actor_identity,text,bytea,kb_sha256)'
+           'kb_bid_upload_attachment(uuid,uuid,uuid,text,kb_object_ref,kb_sha256,text,bigint,integer,integer,kb_actor_identity,text,bytea,kb_sha256)'
+         ) IS NOT NULL
+         AND to_regprocedure(
+           'kb_bid_claim_attachment_preparation(uuid,uuid)'
+         ) IS NOT NULL
+         AND to_regprocedure(
+           'kb_bid_publish_attachment_preparation(uuid,uuid,jsonb,kb_actor_identity)'
          ) IS NOT NULL",
     )
     .fetch_one(pool)
@@ -155,6 +161,80 @@ async fn stage_object(
     .await
     .expect("stage object identity");
     staging_id
+}
+
+async fn upload_pending_pdf_attachment(pool: &PgPool, seed: &SubmissionSeed) -> (Uuid, Uuid) {
+    let attachment_id = Uuid::new_v4();
+    let original = format!("%PDF-1.7\n% {attachment_id}\n%%EOF\n").into_bytes();
+    let digest = domain::sha256_hex(&original);
+    let object_ref = format!("objects/{digest}");
+    let staging_id = stage_object(
+        pool,
+        &object_ref,
+        &digest,
+        "application/pdf",
+        original.len() as i64,
+        &seed.actor,
+    )
+    .await;
+    let request = json!({
+        "attachment_id": attachment_id,
+        "project_id": seed.project_id,
+        "kind": "bid_bond",
+        "object_ref": object_ref,
+        "digest": digest,
+    });
+    let (request_bytes, request_sha256) = request_identity(&request);
+    let uploaded: Value = sqlx::query_scalar(
+        "SELECT kb_bid_upload_attachment(
+           $1,$2,$3,'bid_bond',$4,$5,'application/pdf',$6,NULL,NULL,$7,$8,$9,$10)",
+    )
+    .bind(staging_id)
+    .bind(attachment_id)
+    .bind(seed.project_id)
+    .bind(&object_ref)
+    .bind(&digest)
+    .bind(original.len() as i64)
+    .bind(&seed.actor)
+    .bind(format!("upload-pending-pdf-{attachment_id}"))
+    .bind(request_bytes)
+    .bind(request_sha256)
+    .fetch_one(pool)
+    .await
+    .expect("upload pending PDF attachment");
+    assert_eq!(uploaded["preparation_status"], "pending");
+    let preparation_job_id = uploaded["preparation_job_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    (attachment_id, preparation_job_id)
+}
+
+async fn stage_render_page(pool: &PgPool, page_ordinal: usize) -> (Uuid, Value) {
+    let page = unique_png(Uuid::new_v4());
+    let digest = domain::sha256_hex(&page);
+    let object_ref = format!("objects/{digest}");
+    let staging_id = stage_object(
+        pool,
+        &object_ref,
+        &digest,
+        "image/png",
+        page.len() as i64,
+        "system:bid-attachment-preparation",
+    )
+    .await;
+    let descriptor = json!({
+        "staging_id": staging_id,
+        "page_ordinal": page_ordinal,
+        "object_ref": object_ref,
+        "digest": digest,
+        "media_type": "image/png",
+        "byte_length": page.len(),
+        "pixel_width": 2,
+        "pixel_height": 2,
+    });
+    (staging_id, descriptor)
 }
 
 async fn assert_manifest_attempt_rolled_back(
@@ -538,7 +618,7 @@ async fn rejected_upload_is_domain_zero_write_and_platform_abandon_is_tracked() 
     let key = format!("attachment-reject-{attachment_id}");
     let result: Result<Value, sqlx::Error> = sqlx::query_scalar(
         "SELECT kb_bid_upload_attachment(
-           $1,$2,$3,'not-a-kind',$4,$5,'application/pdf',$6,NULL,NULL,'[]'::jsonb,$7,$8,$9,$10)",
+           $1,$2,$3,'not-a-kind',$4,$5,'application/pdf',$6,NULL,NULL,$7,$8,$9,$10)",
     )
     .bind(staging_id)
     .bind(attachment_id)
@@ -1751,7 +1831,7 @@ async fn procedural_router_and_template_promotions_are_cas_fenced_and_durable() 
 }
 
 #[tokio::test]
-async fn pdf_attachment_upload_requires_a_contiguous_frozen_page_set() {
+async fn pdf_attachment_preparation_requires_a_contiguous_frozen_page_set() {
     let Some(pool) = live_test_pool().await else {
         return;
     };
@@ -1772,6 +1852,59 @@ async fn pdf_attachment_upload_requires_a_contiguous_frozen_page_set() {
         &seed.actor,
     )
     .await;
+    let request = json!({
+        "attachment_id": attachment_id,
+        "project_id": seed.project_id,
+        "kind": "bid_bond",
+    });
+    let (request_bytes, request_sha256) = request_identity(&request);
+    let uploaded: Value = sqlx::query_scalar(
+        "SELECT kb_bid_upload_attachment(
+           $1,$2,$3,'bid_bond',$4,$5,'application/pdf',$6,NULL,NULL,$7,$8,$9,$10)",
+    )
+    .bind(original_staging)
+    .bind(attachment_id)
+    .bind(seed.project_id)
+    .bind(&original_ref)
+    .bind(&original_digest)
+    .bind(original.len() as i64)
+    .bind(&seed.actor)
+    .bind(format!("attachment-gap-{attachment_id}"))
+    .bind(request_bytes)
+    .bind(request_sha256)
+    .fetch_one(&pool)
+    .await
+    .expect("upload PDF before preparing its frozen pages");
+    assert_eq!(uploaded["preparation_status"], "pending");
+    assert_eq!(uploaded["render_page_count"], 0);
+    let preparation_job_id: Uuid = uploaded["preparation_job_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let validate_request = json!({
+        "attachment_id": attachment_id,
+        "action": "validate",
+        "expected_revision": 1,
+    });
+    let (validate_bytes, validate_sha256) = request_identity(&validate_request);
+    let validation: Result<Value, sqlx::Error> =
+        sqlx::query_scalar("SELECT kb_bid_mutate_attachment($1,$2,'validate',1,NULL,$3,$4,$5,$6)")
+            .bind(seed.project_id)
+            .bind(attachment_id)
+            .bind(&seed.actor)
+            .bind(format!("validate-pending-{attachment_id}"))
+            .bind(validate_bytes)
+            .bind(validate_sha256)
+            .fetch_one(&pool)
+            .await;
+    assert_database_error(
+        validation.expect_err("a PDF cannot validate while page preparation is pending"),
+        "ATTACHMENT_PREPARATION_INCOMPLETE",
+    );
+
+    let worker_actor = "system:bid-attachment-preparation";
     let page = unique_png(Uuid::new_v4());
     let page_digest = domain::sha256_hex(&page);
     let page_ref = format!("objects/{page_digest}");
@@ -1781,7 +1914,7 @@ async fn pdf_attachment_upload_requires_a_contiguous_frozen_page_set() {
         &page_digest,
         "image/png",
         page.len() as i64,
-        &seed.actor,
+        worker_actor,
     )
     .await;
     let render_pages = json!([{
@@ -1794,51 +1927,298 @@ async fn pdf_attachment_upload_requires_a_contiguous_frozen_page_set() {
         "pixel_width": 2,
         "pixel_height": 2,
     }]);
-    let request = json!({
-        "attachment_id": attachment_id,
-        "project_id": seed.project_id,
-        "kind": "bid_bond",
-        "render_pages": render_pages.clone(),
-    });
-    let (request_bytes, request_sha256) = request_identity(&request);
-    let result: Result<Value, sqlx::Error> = sqlx::query_scalar(
-        "SELECT kb_bid_upload_attachment(
-           $1,$2,$3,'bid_bond',$4,$5,'application/pdf',$6,NULL,NULL,$7,$8,$9,$10,$11)",
-    )
-    .bind(original_staging)
-    .bind(attachment_id)
-    .bind(seed.project_id)
-    .bind(&original_ref)
-    .bind(&original_digest)
-    .bind(original.len() as i64)
-    .bind(&render_pages)
-    .bind(&seed.actor)
-    .bind(format!("attachment-gap-{attachment_id}"))
-    .bind(request_bytes)
-    .bind(request_sha256)
-    .fetch_one(&pool)
-    .await;
+    let claim_token = Uuid::new_v4();
+    let claim: Option<Value> =
+        sqlx::query_scalar("SELECT kb_bid_claim_attachment_preparation($1,$2)")
+            .bind(preparation_job_id)
+            .bind(claim_token)
+            .fetch_one(&pool)
+            .await
+            .expect("claim PDF attachment preparation");
+    assert!(claim.is_some());
+    let result: Result<Value, sqlx::Error> =
+        sqlx::query_scalar("SELECT kb_bid_publish_attachment_preparation($1,$2,$3,$4)")
+            .bind(preparation_job_id)
+            .bind(claim_token)
+            .bind(&render_pages)
+            .bind(worker_actor)
+            .fetch_one(&pool)
+            .await;
     assert_database_error(
         result.expect_err("a PDF page set starting at ordinal one must reject"),
         "ATTACHMENT_RENDER_PAGE_SET_INVALID",
     );
-    let attachment_rows: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM bid_procedural_attachments WHERE id=$1")
-            .bind(attachment_id)
+    let page_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bid_attachment_render_pages WHERE attachment_id=$1",
+    )
+    .bind(attachment_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let page_owner_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM object_owner_references
+          WHERE owner_kind='bid_attachment_page' AND owner_id=$1",
+    )
+    .bind(attachment_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((page_rows, page_owner_rows), (0, 0));
+    let failed: Option<String> = sqlx::query_scalar(
+        "SELECT kb_bid_fail_attachment_preparation($1,$2,'INVALID_PAGE_SET',$3,true)",
+    )
+    .bind(preparation_job_id)
+    .bind(claim_token)
+    .bind("page ordinals must start at zero")
+    .fetch_one(&pool)
+    .await
+    .expect("settle the rejected preparation claim");
+    assert_eq!(failed.as_deref(), Some("pending"));
+    assert!(
+        storage::abandon_object_upload(&pool, page_staging, worker_actor)
+            .await
+            .unwrap()
+    );
+
+    let second_claim_token = Uuid::new_v4();
+    let second_claim: Option<Value> =
+        sqlx::query_scalar("SELECT kb_bid_claim_attachment_preparation($1,$2)")
+            .bind(preparation_job_id)
+            .bind(second_claim_token)
+            .fetch_one(&pool)
+            .await
+            .expect("reclaim preparation after retryable page-set failure");
+    assert!(second_claim.is_some());
+    let (page_zero_staging, page_zero) = stage_render_page(&pool, 0).await;
+    let unavailable_page = unique_png(Uuid::new_v4());
+    let unavailable_digest = domain::sha256_hex(&unavailable_page);
+    let page_one = json!({
+        "staging_id": Uuid::new_v4(),
+        "page_ordinal": 1,
+        "object_ref": format!("objects/{unavailable_digest}"),
+        "digest": unavailable_digest,
+        "media_type": "image/png",
+        "byte_length": unavailable_page.len(),
+        "pixel_width": 2,
+        "pixel_height": 2,
+    });
+    let partial_publish: Result<Value, sqlx::Error> =
+        sqlx::query_scalar("SELECT kb_bid_publish_attachment_preparation($1,$2,$3,$4)")
+            .bind(preparation_job_id)
+            .bind(second_claim_token)
+            .bind(json!([page_zero, page_one]))
+            .bind(worker_actor)
+            .fetch_one(&pool)
+            .await;
+    partial_publish.expect_err("missing second staging row must roll back the complete page set");
+    let page_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bid_attachment_render_pages WHERE attachment_id=$1",
+    )
+    .bind(attachment_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let page_owner_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM object_owner_references
+          WHERE owner_kind='bid_attachment_page' AND owner_id=$1",
+    )
+    .bind(attachment_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let page_zero_staging_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM object_upload_staging WHERE id=$1")
+            .bind(page_zero_staging)
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(attachment_rows, 0);
+    assert_eq!(
+        (page_rows, page_owner_rows, page_zero_staging_rows),
+        (0, 0, 1)
+    );
+    let failed: Option<String> = sqlx::query_scalar(
+        "SELECT kb_bid_fail_attachment_preparation($1,$2,'STAGING_MISSING',$3,true)",
+    )
+    .bind(preparation_job_id)
+    .bind(second_claim_token)
+    .bind("a page staging row disappeared before publication")
+    .fetch_one(&pool)
+    .await
+    .expect("settle atomic publication failure");
+    assert_eq!(failed.as_deref(), Some("pending"));
     assert!(
-        storage::abandon_object_upload(&pool, original_staging, &seed.actor)
+        storage::abandon_object_upload(&pool, page_zero_staging, worker_actor)
             .await
             .unwrap()
     );
-    assert!(
-        storage::abandon_object_upload(&pool, page_staging, &seed.actor)
+}
+
+#[tokio::test]
+async fn attachment_preparation_reaper_fences_expired_owner_and_allows_reclaim() {
+    let Some(pool) = live_test_pool().await else {
+        return;
+    };
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
+        return;
+    }
+    let seed = seed_project(&pool).await;
+    let (attachment_id, preparation_job_id) = upload_pending_pdf_attachment(&pool, &seed).await;
+    let expired_token = Uuid::new_v4();
+    let claim: Option<Value> =
+        sqlx::query_scalar("SELECT kb_bid_claim_attachment_preparation($1,$2)")
+            .bind(preparation_job_id)
+            .bind(expired_token)
+            .fetch_one(&pool)
             .await
-            .unwrap()
+            .expect("claim PDF preparation before simulating lease expiry");
+    assert!(claim.is_some());
+    sqlx::query(
+        "UPDATE bid_attachment_preparation_jobs
+            SET heartbeat_at=clock_timestamp()-make_interval(secs=>claim_lease_ms/1000.0)-interval '1 second'
+          WHERE id=$1",
+    )
+    .bind(preparation_job_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let renewed: bool = sqlx::query_scalar("SELECT kb_bid_heartbeat_attachment_preparation($1,$2)")
+        .bind(preparation_job_id)
+        .bind(expired_token)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!renewed, "an expired lease must not be revived");
+    let stale_publish: Result<Value, sqlx::Error> =
+        sqlx::query_scalar("SELECT kb_bid_publish_attachment_preparation($1,$2,'[]'::jsonb,$3)")
+            .bind(preparation_job_id)
+            .bind(expired_token)
+            .bind("system:bid-attachment-preparation")
+            .fetch_one(&pool)
+            .await;
+    assert_database_error(
+        stale_publish.expect_err("expired attachment preparation owner must be fenced"),
+        "ATTACHMENT_PREPARATION_CLAIM_LOST",
     );
+
+    let reaped: i32 = sqlx::query_scalar("SELECT kb_bid_reap_attachment_preparations()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(reaped, 1);
+    let reaped_state: (String, Option<Uuid>, String) = sqlx::query_as(
+        "SELECT status,claim_token,error_code
+           FROM bid_attachment_preparation_jobs WHERE id=$1",
+    )
+    .bind(preparation_job_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        reaped_state,
+        ("pending".into(), None, "CLAIM_LEASE_EXPIRED".into())
+    );
+
+    let reclaim_token = Uuid::new_v4();
+    let reclaim: Option<Value> =
+        sqlx::query_scalar("SELECT kb_bid_claim_attachment_preparation($1,$2)")
+            .bind(preparation_job_id)
+            .bind(reclaim_token)
+            .fetch_one(&pool)
+            .await
+            .expect("reclaim reaped PDF preparation");
+    assert!(reclaim.is_some());
+    let (_, page) = stage_render_page(&pool, 0).await;
+    let prepared: Value =
+        sqlx::query_scalar("SELECT kb_bid_publish_attachment_preparation($1,$2,$3,$4)")
+            .bind(preparation_job_id)
+            .bind(reclaim_token)
+            .bind(json!([page]))
+            .bind("system:bid-attachment-preparation")
+            .fetch_one(&pool)
+            .await
+            .expect("new preparation owner publishes after reaping old lease");
+    assert_eq!(prepared["attachment_id"], attachment_id.to_string());
+    assert_eq!(prepared["status"], "completed");
+}
+
+#[tokio::test]
+async fn rejecting_or_deleting_attachment_cancels_and_fences_running_preparation() {
+    let Some(pool) = live_test_pool().await else {
+        return;
+    };
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
+        return;
+    }
+    let seed = seed_project(&pool).await;
+    for (action, expected_error_code) in [
+        ("reject", "ATTACHMENT_REJECTED"),
+        ("delete", "ATTACHMENT_DELETED"),
+    ] {
+        let (attachment_id, preparation_job_id) = upload_pending_pdf_attachment(&pool, &seed).await;
+        let claim_token = Uuid::new_v4();
+        let claim: Option<Value> =
+            sqlx::query_scalar("SELECT kb_bid_claim_attachment_preparation($1,$2)")
+                .bind(preparation_job_id)
+                .bind(claim_token)
+                .fetch_one(&pool)
+                .await
+                .expect("claim preparation before attachment cancellation");
+        assert!(claim.is_some());
+
+        let request = json!({
+            "attachment_id": attachment_id,
+            "action": action,
+            "expected_revision": 1,
+        });
+        let (request_bytes, request_sha256) = request_identity(&request);
+        let _: Value =
+            sqlx::query_scalar("SELECT kb_bid_mutate_attachment($1,$2,$3,1,NULL,$4,$5,$6,$7)")
+                .bind(seed.project_id)
+                .bind(attachment_id)
+                .bind(action)
+                .bind(&seed.actor)
+                .bind(format!("{action}-running-preparation-{attachment_id}"))
+                .bind(request_bytes)
+                .bind(request_sha256)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{action} attachment with running preparation: {error}")
+                });
+        let job_state: (String, Option<Uuid>, String) = sqlx::query_as(
+            "SELECT status,claim_token,error_code
+               FROM bid_attachment_preparation_jobs WHERE id=$1",
+        )
+        .bind(preparation_job_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            job_state,
+            ("cancelled".into(), None, expected_error_code.into())
+        );
+        let heartbeat: bool =
+            sqlx::query_scalar("SELECT kb_bid_heartbeat_attachment_preparation($1,$2)")
+                .bind(preparation_job_id)
+                .bind(claim_token)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!heartbeat);
+        let stale_publish: Result<Value, sqlx::Error> = sqlx::query_scalar(
+            "SELECT kb_bid_publish_attachment_preparation($1,$2,'[]'::jsonb,$3)",
+        )
+        .bind(preparation_job_id)
+        .bind(claim_token)
+        .bind("system:bid-attachment-preparation")
+        .fetch_one(&pool)
+        .await;
+        assert_database_error(
+            stale_publish.expect_err("cancelled preparation owner must be fenced"),
+            "ATTACHMENT_PREPARATION_CLAIM_LOST",
+        );
+    }
 }
 
 #[tokio::test]
@@ -1873,9 +2253,9 @@ async fn attachment_validation_rejects_unavailable_frozen_object_identity() {
         &seed.actor,
     )
     .await;
-    let _: Value = sqlx::query_scalar(
+    let uploaded: Value = sqlx::query_scalar(
         "SELECT kb_bid_upload_attachment(
-           $1,$2,$3,'bid_bond',$4,$5,'image/png',$6,1,1,'[]'::jsonb,$7,$8,$9,$10)",
+           $1,$2,$3,'bid_bond',$4,$5,'image/png',$6,1,1,$7,$8,$9,$10)",
     )
     .bind(staging_id)
     .bind(attachment_id)
@@ -1890,6 +2270,16 @@ async fn attachment_validation_rejects_unavailable_frozen_object_identity() {
     .fetch_one(&pool)
     .await
     .expect("upload attachment identity");
+    assert_eq!(uploaded["preparation_status"], "not_required");
+    assert!(uploaded["preparation_job_id"].is_null());
+    let preparation_jobs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bid_attachment_preparation_jobs WHERE attachment_id=$1",
+    )
+    .bind(attachment_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(preparation_jobs, 0);
 
     let removed: bool =
         sqlx::query_scalar("SELECT kb_object_reference_remove($1,'bid_attachment',$2,'original')")
@@ -1971,6 +2361,63 @@ async fn confirmed_pdf_attachment_is_frozen_into_manifest_and_rendered_from_page
         &seed.actor,
     )
     .await;
+    let attachment_id = Uuid::new_v4();
+    let upload_request = json!({
+        "attachment_id": attachment_id,
+        "project_id": seed.project_id,
+        "kind": "bid_bond",
+        "object_ref": original_ref,
+        "digest": original_digest,
+    });
+    let (upload_bytes, upload_sha256) = request_identity(&upload_request);
+    let uploaded: Value = sqlx::query_scalar(
+        "SELECT kb_bid_upload_attachment(
+           $1,$2,$3,'bid_bond',$4,$5,'application/pdf',$6,NULL,NULL,$7,$8,$9,$10)",
+    )
+    .bind(original_staging)
+    .bind(attachment_id)
+    .bind(seed.project_id)
+    .bind(&original_ref)
+    .bind(&original_digest)
+    .bind(original_pdf.len() as i64)
+    .bind(&seed.actor)
+    .bind(format!("upload-pdf-{attachment_id}"))
+    .bind(upload_bytes)
+    .bind(upload_sha256)
+    .fetch_one(&pool)
+    .await
+    .expect("upload PDF before preparing frozen pages");
+    assert_eq!(uploaded["preparation_status"], "pending");
+    assert_eq!(uploaded["render_page_count"], 0);
+    let preparation_job_id: Uuid = uploaded["preparation_job_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let pending_validation_request = json!({
+        "attachment_id": attachment_id,
+        "action": "validate",
+        "expected_revision": 1,
+    });
+    let (pending_validation_bytes, pending_validation_sha256) =
+        request_identity(&pending_validation_request);
+    let pending_validation: Result<Value, sqlx::Error> =
+        sqlx::query_scalar("SELECT kb_bid_mutate_attachment($1,$2,'validate',1,NULL,$3,$4,$5,$6)")
+            .bind(seed.project_id)
+            .bind(attachment_id)
+            .bind(&seed.actor)
+            .bind(format!("validate-pending-{attachment_id}"))
+            .bind(pending_validation_bytes)
+            .bind(pending_validation_sha256)
+            .fetch_one(&pool)
+            .await;
+    assert_database_error(
+        pending_validation.expect_err("pending PDF preparation must block validation"),
+        "ATTACHMENT_PREPARATION_INCOMPLETE",
+    );
+
+    let worker_actor = "system:bid-attachment-preparation";
     let mut render_pages = Vec::new();
     for (page_ordinal, (page, digest)) in pages.iter().zip(&page_digests).enumerate() {
         let object_ref = format!("objects/{digest}");
@@ -1980,7 +2427,7 @@ async fn confirmed_pdf_attachment_is_frozen_into_manifest_and_rendered_from_page
             digest,
             "image/png",
             page.len() as i64,
-            &seed.actor,
+            worker_actor,
         )
         .await;
         render_pages.push(json!({
@@ -1994,35 +2441,26 @@ async fn confirmed_pdf_attachment_is_frozen_into_manifest_and_rendered_from_page
             "pixel_height": 2,
         }));
     }
-    let attachment_id = Uuid::new_v4();
-    let upload_request = json!({
-        "attachment_id": attachment_id,
-        "project_id": seed.project_id,
-        "kind": "bid_bond",
-        "object_ref": original_ref,
-        "digest": original_digest,
-        "render_pages": render_pages,
-    });
-    let (upload_bytes, upload_sha256) = request_identity(&upload_request);
-    let uploaded: Value = sqlx::query_scalar(
-        "SELECT kb_bid_upload_attachment(
-           $1,$2,$3,'bid_bond',$4,$5,'application/pdf',$6,NULL,NULL,$7,$8,$9,$10,$11)",
-    )
-    .bind(original_staging)
-    .bind(attachment_id)
-    .bind(seed.project_id)
-    .bind(&original_ref)
-    .bind(&original_digest)
-    .bind(original_pdf.len() as i64)
-    .bind(json!(render_pages))
-    .bind(&seed.actor)
-    .bind(format!("upload-pdf-{attachment_id}"))
-    .bind(upload_bytes)
-    .bind(upload_sha256)
-    .fetch_one(&pool)
-    .await
-    .expect("upload PDF with frozen pages");
-    assert_eq!(uploaded["render_page_count"], 2);
+    let claim_token = Uuid::new_v4();
+    let claim: Option<Value> =
+        sqlx::query_scalar("SELECT kb_bid_claim_attachment_preparation($1,$2)")
+            .bind(preparation_job_id)
+            .bind(claim_token)
+            .fetch_one(&pool)
+            .await
+            .expect("claim PDF attachment preparation");
+    assert!(claim.is_some());
+    let prepared: Value =
+        sqlx::query_scalar("SELECT kb_bid_publish_attachment_preparation($1,$2,$3,$4)")
+            .bind(preparation_job_id)
+            .bind(claim_token)
+            .bind(json!(render_pages))
+            .bind(worker_actor)
+            .fetch_one(&pool)
+            .await
+            .expect("publish the frozen PDF page set");
+    assert_eq!(prepared["status"], "completed");
+    assert_eq!(prepared["render_page_count"], 2);
 
     for (action, expected_revision) in [("validate", 1), ("confirm", 2)] {
         let request = json!({

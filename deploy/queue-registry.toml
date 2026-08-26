@@ -220,6 +220,18 @@ capabilities = ["postgresql", "object_store", "docreader"]
 launch_mode = "required_enabled"
 
 [[entries]]
+physical_queue = "bid-convert-v1"
+task_type = "bid:prepare-attachment:v1"
+payload_schema = "bid-prepare-attachment/v1"
+payload_version = 1
+identity_formula = "bid:prepare-attachment:v1:{preparation_job_id}"
+protocol = 1
+handler = "BidPrepareAttachmentV1Handler"
+snapshots = ["conversion", "feature"]
+capabilities = ["postgresql", "object_store", "docreader"]
+launch_mode = "required_enabled"
+
+[[entries]]
 physical_queue = "bid-extract-v1"
 task_type = "bid:extract"
 payload_schema = "bid-extract/v1"

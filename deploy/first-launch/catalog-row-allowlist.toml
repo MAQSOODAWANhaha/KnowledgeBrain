@@ -208,6 +208,48 @@ owner = "app_owner"
 
 [[relations]]
 schema = "public"
+name = "bid_attachment_preparation_jobs"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_attachment_preparation_jobs_attachment_id_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_attachment_preparation_jobs_pending_idx"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_attachment_preparation_jobs_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_attachment_preparation_jobs_project_id_id_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_attachment_preparation_jobs_running_idx"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
 name = "bid_attachment_render_pages"
 kind = "table"
 persistence = "permanent"
@@ -2427,6 +2469,20 @@ owner = "app_owner"
 
 [[relations]]
 schema = "public"
+name = "knowledge_matching_scope_attestations"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "knowledge_matching_scope_attestations_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
 name = "maintenance_gate_audit"
 kind = "table"
 persistence = "permanent"
@@ -3389,6 +3445,248 @@ relation = "available_object_registry"
 ordinal = 5
 name = "registered_at"
 type = "timestamp with time zone"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 2
+name = "project_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 3
+name = "attachment_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 4
+name = "status"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 5
+name = "attempt_count"
+type = "integer"
+nullable = false
+default = "0"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 6
+name = "max_attempts"
+type = "integer"
+nullable = false
+default = "4"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 7
+name = "claim_token"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 8
+name = "claim_lease_ms"
+type = "integer"
+nullable = false
+default = "300000"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 9
+name = "heartbeat_at"
+type = "timestamp with time zone"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 10
+name = "error_code"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 11
+name = "error_detail"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 12
+name = "created_at"
+type = "timestamp with time zone"
+nullable = false
+default = "now()"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 13
+name = "started_at"
+type = "timestamp with time zone"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 14
+name = "finished_at"
+type = "timestamp with time zone"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs_attachment_id_key"
+ordinal = 1
+name = "attachment_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs_pending_idx"
+ordinal = 1
+name = "created_at"
+type = "timestamp with time zone"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs_pending_idx"
+ordinal = 2
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs_pkey"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs_project_id_id_key"
+ordinal = 1
+name = "project_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs_project_id_id_key"
+ordinal = 2
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs_running_idx"
+ordinal = 1
+name = "heartbeat_at"
+type = "timestamp with time zone"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs_running_idx"
+ordinal = 2
+name = "id"
+type = "uuid"
 nullable = true
 default = ""
 identity = ""
@@ -7545,8 +7843,8 @@ generated = ""
 schema = "public"
 relation = "bid_matching_manifests"
 ordinal = 7
-name = "canonical_payload"
-type = "bytea"
+name = "knowledge_scope_attestation_id"
+type = "uuid"
 nullable = false
 default = ""
 identity = ""
@@ -7556,7 +7854,7 @@ generated = ""
 schema = "public"
 relation = "bid_matching_manifests"
 ordinal = 8
-name = "content_sha256"
+name = "knowledge_scope_attestation_sha256"
 type = "public.kb_sha256"
 nullable = false
 default = ""
@@ -7567,6 +7865,28 @@ generated = ""
 schema = "public"
 relation = "bid_matching_manifests"
 ordinal = 9
+name = "canonical_payload"
+type = "bytea"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_manifests"
+ordinal = 10
+name = "content_sha256"
+type = "public.kb_sha256"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_manifests"
+ordinal = 11
 name = "created_at"
 type = "timestamp with time zone"
 nullable = false
@@ -16090,6 +16410,72 @@ generated = ""
 
 [[columns]]
 schema = "public"
+relation = "bidding_current_attachments"
+ordinal = 17
+name = "preparation_status"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_current_attachments"
+ordinal = 18
+name = "preparation_job_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_current_attachments"
+ordinal = 19
+name = "preparation_attempt_count"
+type = "integer"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_current_attachments"
+ordinal = 20
+name = "preparation_error_code"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_current_attachments"
+ordinal = 21
+name = "preparation_error_detail"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_current_attachments"
+ordinal = 22
+name = "render_page_count"
+type = "integer"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
 relation = "bidding_current_clauses"
 ordinal = 1
 name = "id"
@@ -16444,8 +16830,41 @@ generated = ""
 schema = "public"
 relation = "bidding_current_commercial_decisions"
 ordinal = 13
-name = "frozen_document_display_name"
-type = "text"
+name = "explanatory_candidate_artifact_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_current_commercial_decisions"
+ordinal = 14
+name = "candidate_identity_sha256"
+type = "public.kb_sha256"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_current_commercial_decisions"
+ordinal = 15
+name = "evidence_v1_sha256"
+type = "public.kb_sha256"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bidding_current_commercial_decisions"
+ordinal = 16
+name = "evidence_items"
+type = "jsonb"
 nullable = true
 default = ""
 identity = ""
@@ -21293,6 +21712,72 @@ generated = ""
 
 [[columns]]
 schema = "public"
+relation = "knowledge_matching_scope_attestations"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations"
+ordinal = 2
+name = "schema_version"
+type = "smallint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations"
+ordinal = 3
+name = "canonical_payload"
+type = "bytea"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations"
+ordinal = 4
+name = "content_sha256"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations"
+ordinal = 5
+name = "created_at"
+type = "timestamp with time zone"
+nullable = false
+default = "now()"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_pkey"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
 relation = "maintenance_gate_audit"
 ordinal = 1
 name = "id"
@@ -24429,6 +24914,106 @@ relation = "audit_events"
 name = "audit_events_schema_version_check"
 kind = "check"
 definition = "CHECK (schema_version = 1)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_attachment_id_key"
+kind = "unique"
+definition = "UNIQUE (attachment_id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_attempt_count_check"
+kind = "check"
+definition = "CHECK (attempt_count >= 0 AND attempt_count <= 4)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_check"
+kind = "check"
+definition = "CHECK (status = 'pending'::text AND claim_token IS NULL AND heartbeat_at IS NULL AND finished_at IS NULL OR status = 'running'::text AND claim_token IS NOT NULL AND heartbeat_at IS NOT NULL AND finished_at IS NULL OR status = 'completed'::text AND claim_token IS NULL AND heartbeat_at IS NULL AND error_code IS NULL AND finished_at IS NOT NULL OR status = 'failed'::text AND claim_token IS NULL AND heartbeat_at IS NULL AND error_code IS NOT NULL AND finished_at IS NOT NULL OR status = 'cancelled'::text AND claim_token IS NULL AND heartbeat_at IS NULL AND finished_at IS NOT NULL)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_claim_lease_ms_check"
+kind = "check"
+definition = "CHECK (claim_lease_ms = 300000)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_max_attempts_check"
+kind = "check"
+definition = "CHECK (max_attempts = 4)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_project_id_attachment_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (project_id, attachment_id) REFERENCES public.bid_procedural_attachments(project_id, id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_project_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (project_id) REFERENCES public.bid_projects(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_project_id_id_key"
+kind = "unique"
+definition = "UNIQUE (project_id, id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_status_check"
+kind = "check"
+definition = "CHECK (status = ANY (ARRAY['pending'::text, 'running'::text, 'completed'::text, 'failed'::text, 'cancelled'::text]))"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -31315,6 +31900,46 @@ validated = true
 
 [[constraints]]
 schema = "public"
+relation = "knowledge_matching_scope_attestations"
+name = "knowledge_matching_scope_attestations_check"
+kind = "check"
+definition = "CHECK (content_sha256 = encode(public.digest(canonical_payload, 'sha256'::text), 'hex'::text))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations"
+name = "knowledge_matching_scope_attestations_content_sha256_check"
+kind = "check"
+definition = "CHECK (content_sha256 ~ '^[0-9a-f]{64}$'::text)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations"
+name = "knowledge_matching_scope_attestations_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations"
+name = "knowledge_matching_scope_attestations_schema_version_check"
+kind = "check"
+definition = "CHECK (schema_version = 1)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
 relation = "maintenance_gate_audit"
 name = "maintenance_gate_audit_from_mode_check"
 kind = "check"
@@ -32391,6 +33016,66 @@ owner = "app_owner"
 definition = "CREATE UNIQUE INDEX audit_events_pkey ON public.audit_events USING btree (id)"
 primary = true
 unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_attachment_id_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_attachment_preparation_jobs_attachment_id_key ON public.bid_attachment_preparation_jobs USING btree (attachment_id)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_pending_idx"
+owner = "app_owner"
+definition = "CREATE INDEX bid_attachment_preparation_jobs_pending_idx ON public.bid_attachment_preparation_jobs USING btree (created_at, id) WHERE (status = 'pending'::text)"
+primary = false
+unique = false
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_attachment_preparation_jobs_pkey ON public.bid_attachment_preparation_jobs USING btree (id)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_project_id_id_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_attachment_preparation_jobs_project_id_id_key ON public.bid_attachment_preparation_jobs USING btree (project_id, id)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_running_idx"
+owner = "app_owner"
+definition = "CREATE INDEX bid_attachment_preparation_jobs_running_idx ON public.bid_attachment_preparation_jobs USING btree (heartbeat_at, id) WHERE (status = 'running'::text)"
+primary = false
+unique = false
 valid = true
 ready = true
 live = true
@@ -34785,6 +35470,18 @@ live = true
 
 [[indexes]]
 schema = "public"
+table = "knowledge_matching_scope_attestations"
+name = "knowledge_matching_scope_attestations_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX knowledge_matching_scope_attestations_pkey ON public.knowledge_matching_scope_attestations USING btree (id)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
 table = "maintenance_gate_audit"
 name = "maintenance_gate_audit_pkey"
 owner = "app_owner"
@@ -35860,7 +36557,7 @@ security_definer = false
 leakproof = false
 parallel = "safe"
 config = ["search_path=pg_catalog"]
-definition_sha256 = "8b597166e180df65c2eb83fbe48ad8130df70fc74f57f3b74bb0c334b4e6cdeb"
+definition_sha256 = "a28f9011f07e57c90996b4ed53b0adf43bfd3954581dcbbafbbe80ba56383617"
 
 [[routines]]
 schema = "public"
@@ -35892,7 +36589,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "c4778b67018141cabde86b238b82e7c620fd60f1925f704e2ae73e81fc435edc"
+definition_sha256 = "0d37e703a85e78c7c68d893cac1962a26c3eee463be5b1bdf241eacf763b37c0"
 
 [[routines]]
 schema = "public"
@@ -35941,6 +36638,22 @@ leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
 definition_sha256 = "56bf53d0cf03ea1b71f196f05a27ec6717a9751e6d812986f33de5e186ee019b"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_claim_attachment_preparation"
+identity_arguments = "p_job_id uuid, p_claim_token uuid"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "jsonb"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "9ffa9288077791d9322152bcf24bc5974cc4904217403e0fa6d9fff9c0aaafcc"
 
 [[routines]]
 schema = "public"
@@ -36232,6 +36945,22 @@ definition_sha256 = "f9bac373e3e397e13ea73cfc804db45ee0781bf56f725ce934c06909bce
 
 [[routines]]
 schema = "public"
+name = "kb_bid_fail_attachment_preparation"
+identity_arguments = "p_job_id uuid, p_claim_token uuid, p_error_code text, p_error_detail text, p_retryable boolean"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "text"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "f9ef620c6c52a623f5ad940f630057b417d5b2817597a87b35aadc0f8535359c"
+
+[[routines]]
+schema = "public"
 name = "kb_bid_fail_document_conversion"
 identity_arguments = "p_document_id uuid, p_claim_token uuid, p_error_code text, p_retry boolean"
 kind = "function"
@@ -36453,6 +37182,22 @@ leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
 definition_sha256 = "b20784da37eabb04f01192e4245b8cc483775ae64a946fc1736db42f03e73fe1"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_heartbeat_attachment_preparation"
+identity_arguments = "p_job_id uuid, p_claim_token uuid"
+kind = "function"
+owner = "app_owner"
+language = "sql"
+return_type = "boolean"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "84c000cbc025c546a811b4d781bb5a60858542e6178ca8ed70e7bbcb68cae0b5"
 
 [[routines]]
 schema = "public"
@@ -36756,7 +37501,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "43e30f651833d4e8e8f8d7485b79f2da76009b5c925849d593880c21713812e9"
+definition_sha256 = "43a670ae4c31845d8ff3b11050f0dbbc8fa82e6a0f5cdc6d4b0032a02a98e490"
 
 [[routines]]
 schema = "public"
@@ -36804,7 +37549,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "36ebdda137677aded863a85246b51f30be6817aff3858bf1836a2b1b15d6e359"
+definition_sha256 = "19ac94cba5e2ad0bf6bea7cf36c9f7f10deeabbaa9847605c137d0c3cee37447"
 
 [[routines]]
 schema = "public"
@@ -36901,6 +37646,22 @@ leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
 definition_sha256 = "2f37ce814a774202f19b59a0aeafaa6348b675f26a6b70e244ef6ecff580f21b"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_pending_attachment_preparations"
+identity_arguments = ""
+kind = "function"
+owner = "app_owner"
+language = "sql"
+return_type = "uuid[]"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "93f4cf754691bcd4fc6195cb1c670b28cf9d874fb4764e480310f4f77a7adf80"
 
 [[routines]]
 schema = "public"
@@ -37032,6 +37793,22 @@ definition_sha256 = "64edb845b562dc801ad6c18918148dbb886505d32eb7bb727e627fa8917
 
 [[routines]]
 schema = "public"
+name = "kb_bid_publish_attachment_preparation"
+identity_arguments = "p_job_id uuid, p_claim_token uuid, p_render_pages jsonb, p_actor public.kb_actor_identity"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "jsonb"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "5320811993bfee70ca80c8b49898842e392f3e6e6a194ae7fd456dfb46e29cf3"
+
+[[routines]]
+schema = "public"
 name = "kb_bid_publish_extraction_section"
 identity_arguments = "p_target_id uuid, p_attempt integer, p_claim_token uuid, p_section_key text, p_heading_path jsonb, p_parent_start_offset bigint, p_parent_end_offset bigint, p_expected_current_publication_id uuid, p_candidate_graph jsonb, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
 kind = "function"
@@ -37093,6 +37870,22 @@ leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
 definition_sha256 = "663a639e1b4a1daf35d216449783268a811d933d44b957ed7c530adeb9d46741"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_reap_attachment_preparations"
+identity_arguments = ""
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "integer"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "625de788635c2b3966f9eb024b056fd55b469031f27985af38d71811c8fbec61"
 
 [[routines]]
 schema = "public"
@@ -37657,7 +38450,7 @@ definition_sha256 = "08a824d9324af0a3dda33706ec16b2158e5fc1b19910124988cfe8468dc
 [[routines]]
 schema = "public"
 name = "kb_bid_upload_attachment"
-identity_arguments = "p_staging_id uuid, p_id uuid, p_project_id uuid, p_kind text, p_object_ref public.kb_object_ref, p_digest public.kb_sha256, p_media_type text, p_byte_length bigint, p_pixel_width integer, p_pixel_height integer, p_render_pages jsonb, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+identity_arguments = "p_staging_id uuid, p_id uuid, p_project_id uuid, p_kind text, p_object_ref public.kb_object_ref, p_digest public.kb_sha256, p_media_type text, p_byte_length bigint, p_pixel_width integer, p_pixel_height integer, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
 kind = "function"
 owner = "app_owner"
 language = "plpgsql"
@@ -37668,7 +38461,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "b71a1baa2ee1d5fd8709175913ca543d0498762e56c261750dfd866f4d909515"
+definition_sha256 = "31a6637aa5b73499e187c23a6cffd2c896f53b0f79bb5ec5db6b337eaaea007c"
 
 [[routines]]
 schema = "public"
@@ -37957,6 +38750,38 @@ leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
 definition_sha256 = "705bbb6248bb7d16bda95c84b70e0bc0782be517f8a0905b6acc5c1d7994660b"
+
+[[routines]]
+schema = "public"
+name = "kb_knowledge_attest_matching_scope_v1"
+identity_arguments = "p_scope jsonb"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "jsonb"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "d7002cb2e326dcddf304ea9aa703c8bae1d5d84f0a9cfa8d329945a2466ee261"
+
+[[routines]]
+schema = "public"
+name = "kb_knowledge_verify_matching_scope_v1"
+identity_arguments = "p_attestation_id uuid, p_content_sha256 text, p_scope jsonb"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "void"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "45fd4742c7333a131254ab84da9a6aa30d04709b614f1ca08e086d69edc8b940"
 
 [[routines]]
 schema = "public"
@@ -38852,6 +39677,69 @@ grant_option = false
 
 [[relation_acls]]
 schema = "public"
+relation = "bid_attachment_preparation_jobs"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
 relation = "bid_attachment_render_pages"
 kind = "table"
 grantor = "kb_app_owner"
@@ -47421,6 +48309,69 @@ grant_option = false
 [[relation_acls]]
 schema = "public"
 relation = "kind_router_current"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations"
 kind = "table"
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
@@ -50237,6 +51188,24 @@ grant_option = false
 
 [[routine_acls]]
 schema = "public"
+name = "kb_bid_claim_attachment_preparation"
+identity_arguments = "p_job_id uuid, p_claim_token uuid"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_claim_attachment_preparation"
+identity_arguments = "p_job_id uuid, p_claim_token uuid"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_worker"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
 name = "kb_bid_claim_document_conversion"
 identity_arguments = "p_document_id uuid, p_claim_token uuid, p_claimed_by text"
 grantor = "kb_app_owner"
@@ -50507,6 +51476,24 @@ grant_option = false
 
 [[routine_acls]]
 schema = "public"
+name = "kb_bid_fail_attachment_preparation"
+identity_arguments = "p_job_id uuid, p_claim_token uuid, p_error_code text, p_error_detail text, p_retryable boolean"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_fail_attachment_preparation"
+identity_arguments = "p_job_id uuid, p_claim_token uuid, p_error_code text, p_error_detail text, p_retryable boolean"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_worker"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
 name = "kb_bid_fail_document_conversion"
 identity_arguments = "p_document_id uuid, p_claim_token uuid, p_error_code text, p_retry boolean"
 grantor = "kb_app_owner"
@@ -50691,6 +51678,24 @@ name = "kb_bid_guard_quote_snapshot_transition"
 identity_arguments = ""
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_heartbeat_attachment_preparation"
+identity_arguments = "p_job_id uuid, p_claim_token uuid"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_heartbeat_attachment_preparation"
+identity_arguments = "p_job_id uuid, p_claim_token uuid"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_worker"
 privilege = "EXECUTE"
 grant_option = false
 
@@ -51164,6 +52169,24 @@ grant_option = false
 
 [[routine_acls]]
 schema = "public"
+name = "kb_bid_pending_attachment_preparations"
+identity_arguments = ""
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_pending_attachment_preparations"
+identity_arguments = ""
+grantor = "kb_app_owner"
+grantee = "kb_runtime_worker"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
 name = "kb_bid_pending_conversions"
 identity_arguments = ""
 grantor = "kb_app_owner"
@@ -51299,6 +52322,24 @@ grant_option = false
 
 [[routine_acls]]
 schema = "public"
+name = "kb_bid_publish_attachment_preparation"
+identity_arguments = "p_job_id uuid, p_claim_token uuid, p_render_pages jsonb, p_actor public.kb_actor_identity"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_publish_attachment_preparation"
+identity_arguments = "p_job_id uuid, p_claim_token uuid, p_render_pages jsonb, p_actor public.kb_actor_identity"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_worker"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
 name = "kb_bid_publish_extraction_section"
 identity_arguments = "p_target_id uuid, p_attempt integer, p_claim_token uuid, p_section_key text, p_heading_path jsonb, p_parent_start_offset bigint, p_parent_end_offset bigint, p_expected_current_publication_id uuid, p_candidate_graph jsonb, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
 grantor = "kb_app_owner"
@@ -51373,6 +52414,24 @@ grant_option = false
 schema = "public"
 name = "kb_bid_read_manifest_render_asset"
 identity_arguments = "p_project_id uuid, p_manifest_id uuid, p_asset_id uuid"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_worker"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_reap_attachment_preparations"
+identity_arguments = ""
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_reap_attachment_preparations"
+identity_arguments = ""
 grantor = "kb_app_owner"
 grantee = "kb_runtime_worker"
 privilege = "EXECUTE"
@@ -51858,7 +52917,7 @@ grant_option = false
 [[routine_acls]]
 schema = "public"
 name = "kb_bid_upload_attachment"
-identity_arguments = "p_staging_id uuid, p_id uuid, p_project_id uuid, p_kind text, p_object_ref public.kb_object_ref, p_digest public.kb_sha256, p_media_type text, p_byte_length bigint, p_pixel_width integer, p_pixel_height integer, p_render_pages jsonb, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+identity_arguments = "p_staging_id uuid, p_id uuid, p_project_id uuid, p_kind text, p_object_ref public.kb_object_ref, p_digest public.kb_sha256, p_media_type text, p_byte_length bigint, p_pixel_width integer, p_pixel_height integer, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
 privilege = "EXECUTE"
@@ -51867,7 +52926,7 @@ grant_option = false
 [[routine_acls]]
 schema = "public"
 name = "kb_bid_upload_attachment"
-identity_arguments = "p_staging_id uuid, p_id uuid, p_project_id uuid, p_kind text, p_object_ref public.kb_object_ref, p_digest public.kb_sha256, p_media_type text, p_byte_length bigint, p_pixel_width integer, p_pixel_height integer, p_render_pages jsonb, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
+identity_arguments = "p_staging_id uuid, p_id uuid, p_project_id uuid, p_kind text, p_object_ref public.kb_object_ref, p_digest public.kb_sha256, p_media_type text, p_byte_length bigint, p_pixel_width integer, p_pixel_height integer, p_actor public.kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 public.kb_sha256"
 grantor = "kb_app_owner"
 grantee = "kb_runtime_api"
 privilege = "EXECUTE"
@@ -52057,6 +53116,24 @@ grant_option = false
 schema = "public"
 name = "kb_guard_knowledge_document_delete"
 identity_arguments = ""
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_knowledge_attest_matching_scope_v1"
+identity_arguments = "p_scope jsonb"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_knowledge_verify_matching_scope_v1"
+identity_arguments = "p_attestation_id uuid, p_content_sha256 text, p_scope jsonb"
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
 privilege = "EXECUTE"
@@ -52383,6 +53460,12 @@ key_columns = ["singleton_key"]
 [[tables]]
 schema = "public"
 name = "audit_events"
+row_count = 0
+key_columns = ["id"]
+
+[[tables]]
+schema = "public"
+name = "bid_attachment_preparation_jobs"
 row_count = 0
 key_columns = ["id"]
 
@@ -53003,6 +54086,12 @@ schema = "public"
 name = "kind_router_current"
 row_count = 1
 key_columns = ["singleton_key"]
+
+[[tables]]
+schema = "public"
+name = "knowledge_matching_scope_attestations"
+row_count = 0
+key_columns = ["id"]
 
 [[tables]]
 schema = "public"

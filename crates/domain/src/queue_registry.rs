@@ -230,7 +230,8 @@ pub fn declared_disabled_tasks() -> Result<Vec<&'static str>, QueueRegistryError
 mod tests {
     use super::*;
     use crate::{
-        TYPE_BID_CONVERT, TYPE_BID_EXTRACT, TYPE_BID_MATCH_ROUTE_V1, TYPE_BID_RENDER_SUBMISSION_V1,
+        TYPE_BID_CONVERT, TYPE_BID_EXTRACT, TYPE_BID_MATCH_ROUTE_V1,
+        TYPE_BID_PREPARE_ATTACHMENT_V1, TYPE_BID_RENDER_SUBMISSION_V1,
     };
 
     const DOCUMENTED_QUEUES: &[&str] = &[
@@ -259,7 +260,7 @@ mod tests {
         assert_eq!(registry.schema_version, 1);
         assert_eq!(registry.release_id, "kb-queue-registry-v1");
         assert_eq!(registry.minimum_worker_protocol, 1);
-        assert_eq!(registry.entries().len(), 21);
+        assert_eq!(registry.entries().len(), 22);
     }
 
     #[test]
@@ -270,7 +271,7 @@ mod tests {
             .iter()
             .filter(|entry| entry.task_type.starts_with("bid:"))
             .collect();
-        assert_eq!(bid.len(), 4);
+        assert_eq!(bid.len(), 5);
 
         let convert = registry
             .entry_for_task(TYPE_BID_CONVERT)
@@ -280,6 +281,18 @@ mod tests {
         assert_eq!(convert.identity_formula, "bid:convert:{document_id}");
         assert_eq!(convert.handler, "BidConvertV1Handler");
         assert_eq!(convert.launch_mode, LaunchMode::RequiredEnabled);
+
+        let prepare = registry
+            .entry_for_task(TYPE_BID_PREPARE_ATTACHMENT_V1)
+            .expect("bid:prepare-attachment:v1");
+        assert_eq!(prepare.physical_queue, "bid-convert-v1");
+        assert_eq!(prepare.payload_schema, "bid-prepare-attachment/v1");
+        assert_eq!(
+            prepare.identity_formula,
+            "bid:prepare-attachment:v1:{preparation_job_id}"
+        );
+        assert_eq!(prepare.handler, "BidPrepareAttachmentV1Handler");
+        assert_eq!(prepare.launch_mode, LaunchMode::RequiredEnabled);
 
         let extract = registry
             .entry_for_task(TYPE_BID_EXTRACT)

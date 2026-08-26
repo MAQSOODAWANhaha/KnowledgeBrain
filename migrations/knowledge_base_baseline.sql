@@ -3,6 +3,7 @@
 -- It is create-only: no compatibility objects, backfill, repair, or upgrade DDL.
 
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE workspaces (
     id uuid PRIMARY KEY,
@@ -197,6 +198,170 @@ CREATE TABLE chunk_embeddings (
 CREATE INDEX chunk_embeddings_hnsw ON chunk_embeddings USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX chunk_embeddings_tsv ON chunk_embeddings USING gin (tsv);
 CREATE INDEX chunk_embeddings_version_idx ON chunk_embeddings (product_version_id);
+
+-- Knowledge-base-owned persistence attestation for the frozen DTO returned by
+-- KnowledgeRetrievalPort. Bidding passes only the port snapshot; this function
+-- alone may compare that snapshot with live knowledge-owned relations.
+CREATE TABLE knowledge_matching_scope_attestations (
+    id uuid PRIMARY KEY,
+    schema_version smallint NOT NULL CHECK (schema_version=1),
+    canonical_payload bytea NOT NULL,
+    content_sha256 text NOT NULL CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (content_sha256=encode(public.digest(canonical_payload,'sha256'),'hex'))
+);
+
+CREATE FUNCTION kb_knowledge_attest_matching_scope_v1(p_scope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    p_products jsonb := p_scope->'products';
+    p_hits jsonb := p_scope->'frozen_hits';
+    p_workspace_kinds text[] := ARRAY(
+        SELECT jsonb_array_elements_text(p_scope->'workspace_kinds') ORDER BY 1);
+    attestation_id uuid := gen_random_uuid();
+    canonical_payload bytea;
+    content_sha256 text;
+BEGIN
+    IF (SELECT array_agg(key ORDER BY key) FROM jsonb_object_keys(p_scope) key)
+         IS DISTINCT FROM ARRAY['frozen_hits','products','schema_version','workspace_kinds']::text[]
+       OR p_scope->>'schema_version'<>'1'
+       OR jsonb_typeof(p_products) IS DISTINCT FROM 'array'
+       OR jsonb_typeof(p_hits) IS DISTINCT FROM 'array'
+       OR jsonb_typeof(p_scope->'workspace_kinds') IS DISTINCT FROM 'array'
+       OR EXISTS (
+           SELECT 1 FROM unnest(p_workspace_kinds) kind
+            WHERE kind NOT IN ('product_line', 'company'))
+       OR cardinality(p_workspace_kinds)
+          <> (SELECT count(DISTINCT kind) FROM unnest(p_workspace_kinds) kind) THEN
+        RAISE EXCEPTION 'KNOWLEDGE_MATCHING_SCOPE_V1_INVALID' USING ERRCODE='23514';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+          FROM jsonb_array_elements(p_products) artifact
+          LEFT JOIN product_versions version_value
+            ON version_value.id=(artifact->>'product_version_id')::uuid
+          LEFT JOIN products product ON product.id=version_value.product_id
+          LEFT JOIN workspaces workspace_value ON workspace_value.id=product.workspace_id
+         WHERE product.id IS NULL
+            OR (artifact->>'product_id')::uuid IS DISTINCT FROM product.id
+            OR artifact->>'workspace_kind' IS DISTINCT FROM workspace_value.kind
+            OR NOT (workspace_value.kind=ANY(p_workspace_kinds))
+            OR (workspace_value.kind='product_line' AND product.kind IS DISTINCT FROM 'product')
+            OR (workspace_value.kind='company' AND product.kind IS DISTINCT FROM 'library')
+            OR version_value.status IS DISTINCT FROM 'active'
+            OR version_value.deleted_at IS NOT NULL
+            OR product.current_version_id IS DISTINCT FROM version_value.id
+            OR artifact->>'frozen_display_name' IS DISTINCT FROM version_value.id::text
+            OR artifact->>'identity_sha256' IS DISTINCT FROM encode(public.digest(convert_to(
+                'ProductVersionEvidenceV1:'||product.id::text||':'||version_value.id::text||':'
+                ||workspace_value.kind,'UTF8'),'sha256'),'hex')
+            OR NOT EXISTS (
+                SELECT 1
+                  FROM documents document_value
+                  JOIN chunks chunk_value
+                    ON chunk_value.document_id=document_value.id
+                   AND chunk_value.product_version_id=document_value.product_version_id
+                 WHERE document_value.product_version_id=version_value.id
+                   AND document_value.deleted_at IS NULL
+                   AND document_value.enable_status='enabled'
+                   AND document_value.index_ready
+                   AND octet_length(convert_to(chunk_value.content,'UTF8'))<=262144))
+       OR EXISTS (
+        SELECT 1
+          FROM workspaces workspace_value
+          JOIN products product ON product.workspace_id=workspace_value.id
+          JOIN product_versions version_value
+            ON version_value.product_id=product.id
+           AND product.current_version_id=version_value.id
+         WHERE workspace_value.kind=ANY(p_workspace_kinds)
+           AND version_value.status='active'
+           AND version_value.deleted_at IS NULL
+           AND ((workspace_value.kind='product_line' AND product.kind='product')
+             OR (workspace_value.kind='company' AND product.kind='library'))
+           AND EXISTS (
+               SELECT 1
+                 FROM documents document_value
+                 JOIN chunks chunk_value
+                   ON chunk_value.document_id=document_value.id
+                  AND chunk_value.product_version_id=document_value.product_version_id
+                WHERE document_value.product_version_id=version_value.id
+                  AND document_value.deleted_at IS NULL
+                  AND document_value.enable_status='enabled'
+                  AND document_value.index_ready
+                  AND octet_length(convert_to(chunk_value.content,'UTF8'))<=262144)
+           AND NOT EXISTS (
+               SELECT 1 FROM jsonb_array_elements(p_products) artifact
+                WHERE (artifact->>'product_id')::uuid=product.id
+                  AND (artifact->>'product_version_id')::uuid=version_value.id
+                  AND artifact->>'workspace_kind'=workspace_value.kind)) THEN
+        RAISE EXCEPTION 'KNOWLEDGE_MATCHING_SCOPE_V1_MISMATCH' USING ERRCODE='23514';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+          FROM jsonb_array_elements(p_hits) hit
+          LEFT JOIN LATERAL (
+              SELECT artifact
+                FROM jsonb_array_elements(p_products) artifact
+               WHERE artifact->>'id'=hit->>'product_version_artifact_id'
+          ) artifact_value ON true
+          LEFT JOIN documents document_value ON document_value.id=(hit->>'document_id')::uuid
+          LEFT JOIN chunks chunk_value ON chunk_value.id=(hit->>'source_chunk_id')::uuid
+         WHERE artifact_value.artifact IS NULL
+            OR document_value.product_version_id IS DISTINCT FROM
+               (artifact_value.artifact->>'product_version_id')::uuid
+            OR chunk_value.product_version_id IS DISTINCT FROM
+               (artifact_value.artifact->>'product_version_id')::uuid
+            OR chunk_value.document_id IS DISTINCT FROM document_value.id
+            OR document_value.deleted_at IS NOT NULL
+            OR document_value.enable_status IS DISTINCT FROM 'enabled'
+            OR NOT document_value.index_ready
+            OR hit->>'frozen_document_display_name' IS DISTINCT FROM document_value.file_name
+            OR hit->>'chunk_utf8' IS DISTINCT FROM chunk_value.content
+            OR (hit->>'chunk_byte_length')::bigint IS DISTINCT FROM
+               octet_length(convert_to(chunk_value.content,'UTF8'))
+            OR hit->>'chunk_sha256' IS DISTINCT FROM encode(public.digest(
+               convert_to(chunk_value.content,'UTF8'),'sha256'),'hex')
+            OR hit->>'retrieval_contract_version' IS DISTINCT FROM 'knowledge-evidence-v1') THEN
+        RAISE EXCEPTION 'KNOWLEDGE_MATCHING_HIT_V1_MISMATCH' USING ERRCODE='23514';
+    END IF;
+    canonical_payload := convert_to(p_scope::text,'UTF8');
+    content_sha256 := encode(public.digest(canonical_payload,'sha256'),'hex');
+    INSERT INTO knowledge_matching_scope_attestations(
+        id,schema_version,canonical_payload,content_sha256)
+    VALUES(attestation_id,1,canonical_payload,content_sha256);
+    RETURN jsonb_build_object('id',attestation_id,'content_sha256',content_sha256);
+END
+$$;
+
+CREATE FUNCTION kb_knowledge_verify_matching_scope_v1(
+    p_attestation_id uuid,
+    p_content_sha256 text,
+    p_scope jsonb
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+    PERFORM 1
+      FROM knowledge_matching_scope_attestations attestation
+     WHERE attestation.id=p_attestation_id
+       AND attestation.content_sha256=p_content_sha256
+       AND attestation.canonical_payload=convert_to(p_scope::text,'UTF8');
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'KNOWLEDGE_MATCHING_ATTESTATION_V1_MISMATCH' USING ERRCODE='23514';
+    END IF;
+END
+$$;
+REVOKE ALL ON FUNCTION kb_knowledge_attest_matching_scope_v1(jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION kb_knowledge_verify_matching_scope_v1(uuid,text,jsonb) FROM PUBLIC;
 
 CREATE TABLE graph_nodes (
     product_version_id uuid NOT NULL REFERENCES product_versions (id),

@@ -69,6 +69,23 @@ pub struct KnowledgeEvidenceHitV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EligibleEvidenceVersionV1 {
+    pub product_id: Uuid,
+    pub product_version_id: Uuid,
+    pub workspace_kind: String,
+    pub frozen_display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeEvidenceBatchV1 {
+    pub schema_version: u16,
+    pub eligible_versions: Vec<EligibleEvidenceVersionV1>,
+    pub hits: Vec<KnowledgeEvidenceHitV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ProductEvidenceHitV1(pub KnowledgeEvidenceHitV1);
 
@@ -148,6 +165,42 @@ pub fn validate_evidence_hit_batch(
     Ok(())
 }
 
+pub fn validate_evidence_batch(
+    expected_workspace_kind: &str,
+    batch: &KnowledgeEvidenceBatchV1,
+    policy: &RetrievalPolicyIdentityV1,
+) -> Result<(), KnowledgeRetrievalError> {
+    if batch.schema_version != KNOWLEDGE_EVIDENCE_SCHEMA_V1 {
+        return Err(KnowledgeRetrievalError::InvalidHit(
+            "invalid evidence batch schema".into(),
+        ));
+    }
+    let mut eligible = HashSet::new();
+    for version in &batch.eligible_versions {
+        if version.product_id.is_nil()
+            || version.product_version_id.is_nil()
+            || version.workspace_kind != expected_workspace_kind
+            || version.frozen_display_name.is_empty()
+            || !eligible.insert((version.product_id, version.product_version_id))
+        {
+            return Err(KnowledgeRetrievalError::InvalidHit(
+                "invalid or duplicate eligible evidence version".into(),
+            ));
+        }
+    }
+    validate_evidence_hit_batch(expected_workspace_kind, &batch.hits, policy)?;
+    if batch
+        .hits
+        .iter()
+        .any(|hit| !eligible.contains(&(hit.product_id, hit.product_version_id)))
+    {
+        return Err(KnowledgeRetrievalError::InvalidHit(
+            "evidence hit is outside the eligible version scope".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn is_decimal_literal(value: &str) -> bool {
     let value = value.strip_prefix('-').unwrap_or(value);
     let mut parts = value.split('.');
@@ -175,12 +228,12 @@ pub trait KnowledgeRetrievalPort: Send + Sync {
     async fn retrieve_product_evidence(
         &self,
         request: ProductEvidenceRequestV1,
-    ) -> Result<Vec<ProductEvidenceHitV1>, KnowledgeRetrievalError>;
+    ) -> Result<KnowledgeEvidenceBatchV1, KnowledgeRetrievalError>;
 
     async fn retrieve_company_evidence(
         &self,
         request: CompanyEvidenceRequestV1,
-    ) -> Result<Vec<CompanyEvidenceHitV1>, KnowledgeRetrievalError>;
+    ) -> Result<KnowledgeEvidenceBatchV1, KnowledgeRetrievalError>;
 }
 
 #[cfg(test)]
@@ -240,5 +293,32 @@ mod tests {
         let mut invalid_rank = value;
         invalid_rank.retrieval_rank = 2;
         assert!(validate_evidence_hit_batch("product_line", &[invalid_rank], &policy()).is_err());
+    }
+
+    #[test]
+    fn eligible_scope_is_independent_from_the_hit_quota_and_allows_no_evidence() {
+        let batch = KnowledgeEvidenceBatchV1 {
+            schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V1,
+            eligible_versions: (1..=65)
+                .map(|value| EligibleEvidenceVersionV1 {
+                    product_id: Uuid::from_u128(value),
+                    product_version_id: Uuid::from_u128(value + 100),
+                    workspace_kind: "product_line".into(),
+                    frozen_display_name: format!("v{value}"),
+                })
+                .collect(),
+            hits: Vec::new(),
+        };
+        validate_evidence_batch("product_line", &batch, &policy()).unwrap();
+    }
+
+    #[test]
+    fn evidence_hit_must_belong_to_the_frozen_eligible_scope() {
+        let batch = KnowledgeEvidenceBatchV1 {
+            schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V1,
+            eligible_versions: Vec::new(),
+            hits: vec![hit("中A文")],
+        };
+        assert!(validate_evidence_batch("product_line", &batch, &policy()).is_err());
     }
 }

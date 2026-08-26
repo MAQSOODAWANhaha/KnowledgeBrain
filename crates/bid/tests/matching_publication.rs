@@ -93,6 +93,157 @@ fn matching_schedule_payload_without_eligible_scope(
     })
 }
 
+async fn matching_schedule_payload_with_complete_product_scope(
+    pool: &PgPool,
+    project_id: Uuid,
+    watermark: i64,
+    requirements: &[(Uuid, &str)],
+) -> serde_json::Value {
+    let manifest_id = Uuid::new_v4();
+    let technical_route_id = Uuid::new_v4();
+    let commercial_route_id = Uuid::new_v4();
+
+    let mut frozen_requirements = requirements
+        .iter()
+        .map(|(clause_id, text)| {
+            (
+                Uuid::new_v4(),
+                *clause_id,
+                (*text).to_string(),
+                domain::sha256_hex(text.as_bytes()),
+            )
+        })
+        .collect::<Vec<_>>();
+    frozen_requirements.sort_by_key(|row| row.1);
+    let requirement_set_sha256 = domain::sha256_hex(
+        &serde_json::to_vec(
+            &frozen_requirements
+                .iter()
+                .map(|row| json!([technical_route_id, row.1, row.2, row.3]))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap(),
+    );
+
+    let eligible_rows = sqlx::query(
+        "SELECT product.id AS product_id,version_value.id AS product_version_id
+           FROM workspaces workspace_value
+           JOIN products product ON product.workspace_id=workspace_value.id
+           JOIN product_versions version_value
+             ON version_value.product_id=product.id
+            AND product.current_version_id=version_value.id
+          WHERE workspace_value.kind='product_line' AND product.kind='product'
+            AND version_value.status='active' AND version_value.deleted_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM documents document_value
+              JOIN chunks chunk_value ON chunk_value.document_id=document_value.id
+               AND chunk_value.product_version_id=document_value.product_version_id
+              WHERE document_value.product_version_id=version_value.id
+                AND document_value.deleted_at IS NULL
+                AND document_value.enable_status='enabled' AND document_value.index_ready
+                AND octet_length(convert_to(chunk_value.content,'UTF8'))<=262144)
+          ORDER BY product.id,version_value.id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let frozen_products = eligible_rows
+        .iter()
+        .map(|row| {
+            let product_id: Uuid = row.get("product_id");
+            let product_version_id: Uuid = row.get("product_version_id");
+            let identity_sha256 = domain::sha256_hex(
+                format!("ProductVersionEvidenceV1:{product_id}:{product_version_id}:product_line")
+                    .as_bytes(),
+            );
+            (
+                Uuid::new_v4(),
+                product_id,
+                product_version_id,
+                identity_sha256,
+            )
+        })
+        .collect::<Vec<_>>();
+    let eligible_scope_sha256 = domain::sha256_hex(
+        &serde_json::to_vec(
+            &frozen_products
+                .iter()
+                .map(|row| json!([row.1, row.2, row.3]))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap(),
+    );
+    let products = frozen_products
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.0,
+                "product_id": row.1,
+                "product_version_id": row.2,
+                "workspace_kind": "product_line",
+                "frozen_display_name": row.2.to_string(),
+                "identity_sha256": row.3,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut membership_products = frozen_products
+        .iter()
+        .map(|row| (row.2, row.0))
+        .collect::<Vec<_>>();
+    membership_products.sort();
+    let memberships = membership_products
+        .iter()
+        .enumerate()
+        .map(|(ordinal, (_, artifact_id))| {
+            json!({
+                "route_id": technical_route_id,
+                "product_version_artifact_id": artifact_id,
+                "route_product_ordinal": ordinal,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "schema_version": 1,
+        "manifest_id": manifest_id,
+        "project_id": project_id,
+        "mutation_watermark": watermark,
+        "requirement_set_sha256": requirement_set_sha256,
+        "eligible_scope_sha256": eligible_scope_sha256,
+        "routes": [
+            {
+                "id": technical_route_id,
+                "route_kind": "technical",
+                "unit_id": Uuid::nil(),
+                "ordinal": 0,
+                "empty_policy": "clear_route",
+                "route_scope_sha256": domain::sha256_hex(
+                    b"technical:00000000-0000-0000-0000-000000000000"
+                )
+            },
+            {
+                "id": commercial_route_id,
+                "route_kind": "commercial",
+                "unit_id": null,
+                "ordinal": 1,
+                "empty_policy": "clear_route",
+                "route_scope_sha256": domain::sha256_hex(b"commercial")
+            }
+        ],
+        "requirements": frozen_requirements.iter().enumerate().map(|(ordinal, row)| json!({
+            "id": row.0,
+            "route_id": technical_route_id,
+            "clause_id": row.1,
+            "ordinal": ordinal,
+            "text": row.2,
+            "sha256": row.3,
+        })).collect::<Vec<_>>(),
+        "products": products,
+        "memberships": memberships,
+        "frozen_hits": []
+    })
+}
+
 async fn assert_matching_schedule_rejected(
     pool: &PgPool,
     project_id: Uuid,
@@ -172,6 +323,675 @@ async fn restore_claim_lease(pool: &PgPool, job_id: Uuid, attempt: i32, claim_le
     .execute(pool)
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn commercial_review_and_reject_project_frozen_explanatory_evidence() {
+    let Some(pool) = support::connect_postgres_contract("MatchingCommercialProjection").await
+    else {
+        return;
+    };
+    let final_schema: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+           SELECT 1 FROM information_schema.columns
+            WHERE table_schema='public'
+              AND table_name='bidding_current_commercial_decisions'
+              AND column_name='evidence_items')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(false);
+    if !support::require_final_schema("MatchingCommercialProjection", final_schema) {
+        return;
+    }
+
+    let user_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let review_clause_id = Uuid::new_v4();
+    let reject_clause_id = Uuid::new_v4();
+    let actor = format!("user:{user_id}");
+    let mut seed = pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO users(id,email) VALUES($1,$2)")
+        .bind(user_id)
+        .bind(format!("{user_id}@matching-commercial-projection.invalid"))
+        .execute(&mut *seed)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_projects
+         (id,title,owner_user_id,ends_at,fact_sha256,ceiling_identity_sha256,
+          matching_mutation_watermark,created_by)
+         VALUES($1,'商务证据投影',$2,clock_timestamp()+interval '30 days',
+           repeat('0',64),repeat('1',64),1,$3)",
+    )
+    .bind(project_id)
+    .bind(user_id)
+    .bind(&actor)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    for (clause_id, kind, text) in [
+        (review_clause_id, "qualification", "须提供资质证明"),
+        (reject_clause_id, "service", "不得拒绝现场服务"),
+    ] {
+        sqlx::query(
+            "INSERT INTO bid_clauses
+             (id,project_id,provenance,status,kind,text,must,revision,created_by)
+             VALUES($1,$2,'manual','confirmed',$3,$4,true,1,$5)",
+        )
+        .bind(clause_id)
+        .bind(project_id)
+        .bind(kind)
+        .bind(text)
+        .bind(&actor)
+        .execute(&mut *seed)
+        .await
+        .unwrap();
+    }
+    seed.commit().await.unwrap();
+
+    let scheduled = storage::bid_matching::schedule_dirty_project(
+        &pool,
+        project_id,
+        ScheduleEnvironment {
+            environment: "test".into(),
+            max_attempts: 3,
+        },
+        &storage::bid_matching::ScheduleMutationContext::system(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let manifest_generation: i64 =
+        sqlx::query_scalar("SELECT generation FROM bid_matching_manifests WHERE id=$1")
+            .bind(scheduled.manifest_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let commercial_route: (Uuid, Uuid) = sqlx::query_as(
+        "SELECT route.id,job.id
+           FROM bid_matching_routes route
+           JOIN bid_matching_jobs job ON job.route_id=route.id
+          WHERE route.manifest_id=$1 AND route.route_kind='commercial'",
+    )
+    .bind(scheduled.manifest_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let requirements = sqlx::query(
+        "SELECT id,clause_id FROM bid_matching_requirement_artifacts
+          WHERE route_id=$1 ORDER BY ordinal",
+    )
+    .bind(commercial_route.0)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let review_requirement_id: Uuid = requirements
+        .iter()
+        .find(|row| row.get::<Uuid, _>("clause_id") == review_clause_id)
+        .unwrap()
+        .get("id");
+    let reject_requirement_id: Uuid = requirements
+        .iter()
+        .find(|row| row.get::<Uuid, _>("clause_id") == reject_clause_id)
+        .unwrap()
+        .get("id");
+
+    let mut fixture = pool.begin().await.unwrap();
+    let first_product_artifact_id = Uuid::new_v4();
+    let second_product_artifact_id = Uuid::new_v4();
+    let first_membership_ordinal: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(max(route_product_ordinal),-1)+1
+           FROM bid_matching_route_memberships WHERE route_id=$1",
+    )
+    .bind(commercial_route.0)
+    .fetch_one(&mut *fixture)
+    .await
+    .unwrap();
+    for (artifact_id, ordinal) in [
+        (first_product_artifact_id, first_membership_ordinal),
+        (second_product_artifact_id, first_membership_ordinal + 1),
+    ] {
+        sqlx::query(
+            "INSERT INTO bid_matching_product_version_artifacts
+             (id,manifest_id,product_id,product_version_id,workspace_kind,
+              frozen_display_name,identity_sha256)
+             VALUES($1,$2,$3,$4,'company',$5,$6)",
+        )
+        .bind(artifact_id)
+        .bind(scheduled.manifest_id)
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(format!("冻结公司 {ordinal}"))
+        .bind(domain::sha256_hex(artifact_id.as_bytes()))
+        .execute(&mut *fixture)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO bid_matching_route_memberships
+             (manifest_id,route_id,product_version_artifact_id,route_product_ordinal)
+             VALUES($1,$2,$3,$4)",
+        )
+        .bind(scheduled.manifest_id)
+        .bind(commercial_route.0)
+        .bind(artifact_id)
+        .bind(ordinal)
+        .execute(&mut *fixture)
+        .await
+        .unwrap();
+    }
+
+    let report_id = Uuid::new_v4();
+    let canonical_payload = b"{}";
+    sqlx::query(
+        "INSERT INTO bid_matching_reports
+         (id,project_id,manifest_id,job_id,route_id,generation,mutation_watermark,
+          coverage_total,coverage_supported,coverage_contradicted,coverage_insufficient,
+          coverage_unresolved,quality_status,degraded,reason_codes,canonical_payload,
+          content_sha256,published_at)
+         VALUES($1,$2,$3,$4,$5,$6,1,2,0,1,1,0,'block',true,
+           ARRAY['FROZEN_SCOPE','CONTRADICTED','INSUFFICIENT'],$7,$8,clock_timestamp())",
+    )
+    .bind(report_id)
+    .bind(project_id)
+    .bind(scheduled.manifest_id)
+    .bind(commercial_route.1)
+    .bind(commercial_route.0)
+    .bind(manifest_generation)
+    .bind(canonical_payload.as_slice())
+    .bind(domain::sha256_hex(canonical_payload))
+    .execute(&mut *fixture)
+    .await
+    .unwrap();
+
+    let review_first_candidate_id = Uuid::new_v4();
+    let review_explanatory_candidate_id = Uuid::new_v4();
+    let reject_first_candidate_id = Uuid::new_v4();
+    let reject_explanatory_candidate_id = Uuid::new_v4();
+    let candidates = [
+        (
+            review_first_candidate_id,
+            review_requirement_id,
+            second_product_artifact_id,
+            first_membership_ordinal + 1,
+            "insufficient",
+            "review first.pdf",
+            "review first frozen quote",
+        ),
+        (
+            review_explanatory_candidate_id,
+            review_requirement_id,
+            first_product_artifact_id,
+            first_membership_ordinal,
+            "insufficient",
+            "review explanatory.pdf",
+            "review explanatory frozen quote",
+        ),
+        (
+            reject_first_candidate_id,
+            reject_requirement_id,
+            second_product_artifact_id,
+            first_membership_ordinal + 1,
+            "contradicted",
+            "reject first.pdf",
+            "reject first frozen quote",
+        ),
+        (
+            reject_explanatory_candidate_id,
+            reject_requirement_id,
+            first_product_artifact_id,
+            first_membership_ordinal,
+            "contradicted",
+            "reject explanatory.pdf",
+            "reject explanatory frozen quote",
+        ),
+    ];
+    let mut expected_evidence = std::collections::HashMap::new();
+    for (
+        candidate_id,
+        requirement_id,
+        product_artifact_id,
+        membership_ordinal,
+        support,
+        file_name,
+        quote,
+    ) in candidates
+    {
+        let source_artifact_id = Uuid::new_v4();
+        let evidence_artifact_id = Uuid::new_v4();
+        let document_id = Uuid::new_v4();
+        let source_chunk_id = Uuid::new_v4();
+        let chunk_sha256 = domain::sha256_hex(quote.as_bytes());
+        let candidate_identity_sha256 = domain::sha256_hex(candidate_id.as_bytes());
+        let evidence_v1_sha256 = domain::sha256_hex(evidence_artifact_id.as_bytes());
+        sqlx::query(
+            "INSERT INTO bid_matching_source_artifacts
+             (id,report_id,product_version_artifact_id,document_id,source_chunk_id,
+              frozen_document_display_name,chunk_utf8,chunk_sha256,chunk_byte_length,
+              retrieval_rank,retrieval_raw_score,retrieval_contract_version)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,1,0.5,'projection-test-v1')",
+        )
+        .bind(source_artifact_id)
+        .bind(report_id)
+        .bind(product_artifact_id)
+        .bind(document_id)
+        .bind(source_chunk_id)
+        .bind(file_name)
+        .bind(quote.as_bytes())
+        .bind(&chunk_sha256)
+        .bind(quote.len() as i64)
+        .execute(&mut *fixture)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO bid_matching_candidate_artifacts
+             (id,report_id,requirement_artifact_id,product_version_artifact_id,support,
+              candidate_identity_sha256,evidence_v1_sha256,business_value_status,
+              route_product_ordinal,retrieval_rank,retrieval_raw_score,recommended)
+             VALUES($1,$2,$3,$4,$5,$6,$7,'not_scored',$8,1,0.5,false)",
+        )
+        .bind(candidate_id)
+        .bind(report_id)
+        .bind(requirement_id)
+        .bind(product_artifact_id)
+        .bind(support)
+        .bind(candidate_identity_sha256)
+        .bind(evidence_v1_sha256)
+        .bind(membership_ordinal)
+        .execute(&mut *fixture)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO bid_matching_evidence_artifacts
+             (id,report_id,candidate_artifact_id,source_chunk_artifact_id,document_id,
+              document_display_name,source_chunk_id,source_chunk_sha256,start_offset,end_offset,
+              offset_unit,quote_utf8,quote_sha256,ordinal)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,0,$9,'utf8_byte',$10,$8,0)",
+        )
+        .bind(evidence_artifact_id)
+        .bind(report_id)
+        .bind(candidate_id)
+        .bind(source_artifact_id)
+        .bind(document_id)
+        .bind(file_name)
+        .bind(source_chunk_id)
+        .bind(&chunk_sha256)
+        .bind(quote.len() as i64)
+        .bind(quote.as_bytes())
+        .execute(&mut *fixture)
+        .await
+        .unwrap();
+        expected_evidence.insert(candidate_id, (evidence_artifact_id, source_chunk_id, quote));
+    }
+    for (requirement_id, final_support, system_decision, quality_status, reason_code, ordinal) in [
+        (
+            review_requirement_id,
+            "insufficient",
+            "review",
+            "review",
+            "INSUFFICIENT",
+            0,
+        ),
+        (
+            reject_requirement_id,
+            "contradicted",
+            "reject",
+            "block",
+            "CONTRADICTED",
+            1,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO bid_matching_requirement_decisions
+             (id,report_id,requirement_artifact_id,final_support,system_decision,
+              quality_status,reason_code,selected_candidate_artifact_id,ordinal)
+             VALUES($1,$2,$3,$4,$5,$6,$7,NULL,$8)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(report_id)
+        .bind(requirement_id)
+        .bind(final_support)
+        .bind(system_decision)
+        .bind(quality_status)
+        .bind(reason_code)
+        .bind(ordinal)
+        .execute(&mut *fixture)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO bid_current_matching_reports
+         (project_id,route_id,report_id,generation,mutation_watermark)
+         VALUES($1,$2,$3,$4,1)",
+    )
+    .bind(project_id)
+    .bind(commercial_route.0)
+    .bind(report_id)
+    .bind(manifest_generation)
+    .execute(&mut *fixture)
+    .await
+    .unwrap();
+
+    let projected = sqlx::query(
+        "SELECT clause_id,system_decision,final_support,selected_candidate_artifact_id,
+                explanatory_candidate_artifact_id,evidence_items
+           FROM bidding_current_commercial_decisions
+          WHERE project_id=$1 ORDER BY ordinal",
+    )
+    .bind(project_id)
+    .fetch_all(&mut *fixture)
+    .await
+    .unwrap();
+    assert_eq!(projected.len(), 2);
+    for (row, expected_clause_id, expected_candidate_id) in [
+        (
+            &projected[0],
+            review_clause_id,
+            review_explanatory_candidate_id,
+        ),
+        (
+            &projected[1],
+            reject_clause_id,
+            reject_explanatory_candidate_id,
+        ),
+    ] {
+        assert_eq!(row.get::<Uuid, _>("clause_id"), expected_clause_id);
+        assert_eq!(
+            row.get::<Option<Uuid>, _>("selected_candidate_artifact_id"),
+            None,
+            "review/reject must not acquire decision selected semantics"
+        );
+        assert_eq!(
+            row.get::<Option<Uuid>, _>("explanatory_candidate_artifact_id"),
+            Some(expected_candidate_id)
+        );
+        let evidence_items: serde_json::Value = row.get("evidence_items");
+        let evidence = &evidence_items[0];
+        let expected = expected_evidence[&expected_candidate_id];
+        assert_eq!(evidence["evidence_artifact_id"], json!(expected.0));
+        assert_eq!(evidence["source_chunk_id"], json!(expected.1));
+        assert_eq!(evidence["quote"], expected.2);
+        assert!(
+            evidence["document_display_name"]
+                .as_str()
+                .unwrap()
+                .contains("explanatory")
+        );
+    }
+    assert_eq!(projected[0].get::<String, _>("system_decision"), "review");
+    assert_eq!(projected[1].get::<String, _>("system_decision"), "reject");
+    fixture.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn matching_schedule_preserves_sixty_five_eligible_versions_with_zero_hits() {
+    let Some(pool) = support::connect_postgres_contract("MatchingPublication").await else {
+        return;
+    };
+    let final_schema: bool = sqlx::query_scalar(
+        "SELECT to_regclass('public.bid_matching_frozen_retrieved_hits') IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(false);
+    if !support::require_final_schema("MatchingPublication", final_schema) {
+        return;
+    }
+
+    let user_id = Uuid::new_v4();
+    let workspace_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let clause_id = Uuid::new_v4();
+    let actor = format!("user:{user_id}");
+    let document_bytes = b"matching eligible version fixture";
+    let document_digest = domain::sha256_hex(document_bytes);
+    let document_ref = format!("objects/{document_digest}");
+    let unrelated_chunk = "型号规格说明书";
+    let requirement = "量子纠缠验证协议";
+    let baseline_eligible: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM workspaces workspace_value
+           JOIN products product ON product.workspace_id=workspace_value.id
+           JOIN product_versions version_value
+             ON version_value.product_id=product.id
+            AND product.current_version_id=version_value.id
+          WHERE workspace_value.kind='product_line' AND product.kind='product'
+            AND version_value.status='active' AND version_value.deleted_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM documents document_value
+              JOIN chunks chunk_value ON chunk_value.document_id=document_value.id
+               AND chunk_value.product_version_id=document_value.product_version_id
+              WHERE document_value.product_version_id=version_value.id
+                AND document_value.deleted_at IS NULL
+                AND document_value.enable_status='enabled' AND document_value.index_ready
+                AND octet_length(convert_to(chunk_value.content,'UTF8'))<=262144)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mut fixture_version_ids = Vec::new();
+    let mut seed = pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO users(id,email) VALUES($1,$2)")
+        .bind(user_id)
+        .bind(format!("{user_id}@matching-eligible.invalid"))
+        .execute(&mut *seed)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO workspaces(id,name,slug,kind) VALUES($1,'产品线',$2,'product_line')")
+        .bind(workspace_id)
+        .bind(format!("matching-eligible-{workspace_id}"))
+        .execute(&mut *seed)
+        .await
+        .unwrap();
+    for ordinal in 0..65 {
+        let product_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let document_id = Uuid::new_v4();
+        let chunk_id = Uuid::new_v4();
+        fixture_version_ids.push(version_id);
+        sqlx::query(
+            "INSERT INTO products(id,workspace_id,kind,name,slug)
+             VALUES($1,$2,'product',$3,$4)",
+        )
+        .bind(product_id)
+        .bind(workspace_id)
+        .bind(format!("无命中产品 {ordinal}"))
+        .bind(format!("no-hit-{product_id}"))
+        .execute(&mut *seed)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO product_versions(id,product_id,label,status)
+             VALUES($1,$2,'v1','active')",
+        )
+        .bind(version_id)
+        .bind(product_id)
+        .execute(&mut *seed)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE products SET current_version_id=$2 WHERE id=$1")
+            .bind(product_id)
+            .bind(version_id)
+            .execute(&mut *seed)
+            .await
+            .unwrap();
+        sqlx::query(
+            "SELECT kb_object_reference_add(
+               $1,$2,'application/pdf',$3,'knowledge_document',$4,'original',$5)",
+        )
+        .bind(&document_ref)
+        .bind(&document_digest)
+        .bind(document_bytes.len() as i64)
+        .bind(document_id)
+        .bind(&actor)
+        .execute(&mut *seed)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO documents
+             (id,product_version_id,title,parse_status,enable_status,index_ready,
+              file_name,file_size,file_hash,object_ref)
+             VALUES($1,$2,$3,'completed','enabled',true,$4,$5,$6,$7)",
+        )
+        .bind(document_id)
+        .bind(version_id)
+        .bind(format!("产品 {ordinal} 说明"))
+        .bind(format!("产品-{ordinal}.pdf"))
+        .bind(document_bytes.len() as i64)
+        .bind(&document_digest)
+        .bind(&document_ref)
+        .execute(&mut *seed)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chunks
+             (id,product_version_id,document_id,chunk_type,content,start_at,end_at)
+             VALUES($1,$2,$3,'text',$4,0,$5)",
+        )
+        .bind(chunk_id)
+        .bind(version_id)
+        .bind(document_id)
+        .bind(unrelated_chunk)
+        .bind(unrelated_chunk.len() as i32)
+        .execute(&mut *seed)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO bid_projects
+         (id,title,owner_user_id,ends_at,fact_sha256,ceiling_identity_sha256,
+          matching_mutation_watermark,created_by)
+         VALUES($1,'65 个产品零命中',$2,clock_timestamp()+interval '30 days',
+           repeat('0',64),repeat('1',64),1,$3)",
+    )
+    .bind(project_id)
+    .bind(user_id)
+    .bind(&actor)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_clauses
+         (id,project_id,provenance,status,kind,text,must,revision,created_by)
+         VALUES($1,$2,'manual','confirmed','technical',$3,true,1,$4)",
+    )
+    .bind(clause_id)
+    .bind(project_id)
+    .bind(requirement)
+    .bind(&actor)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    seed.commit().await.unwrap();
+
+    let scheduled = storage::bid_matching::schedule_dirty_project(
+        &pool,
+        project_id,
+        ScheduleEnvironment {
+            environment: "test".into(),
+            max_attempts: 3,
+        },
+        &storage::bid_matching::ScheduleMutationContext::system(),
+    )
+    .await
+    .expect("schedule matching with eligible scope larger than the hit quota")
+    .expect("dirty project produces a matching manifest");
+    assert_eq!(scheduled.jobs.len(), 2, "technical and commercial routes");
+    let technical_route_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM bid_matching_routes
+          WHERE manifest_id=$1 AND route_kind='technical'",
+    )
+    .bind(scheduled.manifest_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let frozen_counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+           (SELECT count(*) FROM bid_matching_product_version_artifacts WHERE manifest_id=$1),
+           (SELECT count(*) FROM bid_matching_route_memberships
+             WHERE manifest_id=$1 AND route_id=$2),
+           (SELECT count(*) FROM bid_matching_frozen_retrieved_hits WHERE manifest_id=$1)",
+    )
+    .bind(scheduled.manifest_id)
+    .bind(technical_route_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        frozen_counts,
+        (baseline_eligible + 65, baseline_eligible + 65, 0)
+    );
+    let fixture_memberships: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM bid_matching_route_memberships membership
+           JOIN bid_matching_product_version_artifacts product
+             ON product.id=membership.product_version_artifact_id
+          WHERE membership.manifest_id=$1 AND membership.route_id=$2
+            AND product.product_version_id=ANY($3::uuid[])",
+    )
+    .bind(scheduled.manifest_id)
+    .bind(technical_route_id)
+    .bind(&fixture_version_ids)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(fixture_memberships, 65);
+
+    let technical_job_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM bid_matching_jobs
+          WHERE manifest_id=$1 AND route_id=$2",
+    )
+    .bind(scheduled.manifest_id)
+    .bind(technical_route_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let technical_job = scheduled
+        .jobs
+        .iter()
+        .find(|job| job.id == technical_job_id)
+        .expect("scheduled technical job");
+    run_match_route_v1(
+        &pool,
+        BidMatchRouteV1Job::new(
+            technical_job.id,
+            BidMatchRouteV1Snapshots {
+                config_snapshot_id: technical_job.snapshots.config_snapshot_id,
+                feature_snapshot_id: technical_job.snapshots.feature_snapshot_id,
+                score_policy_snapshot_id: technical_job.snapshots.score_policy_snapshot_id,
+                verifier_policy_snapshot_id: technical_job.snapshots.verifier_policy_snapshot_id,
+            },
+            None,
+        )
+        .unwrap(),
+    )
+    .await
+    .expect("publish a deterministic zero-evidence technical report");
+    let report_payload: serde_json::Value = sqlx::query_scalar(
+        "SELECT convert_from(report.canonical_payload,'UTF8')::jsonb
+           FROM bid_current_matching_reports current_value
+           JOIN bid_matching_reports report ON report.id=current_value.report_id
+          WHERE current_value.project_id=$1 AND current_value.route_id=$2",
+    )
+    .bind(project_id)
+    .bind(technical_route_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(report_payload["candidates"], json!([]));
+    assert_eq!(report_payload["coverage"]["eligible"], 1);
+    assert_eq!(report_payload["coverage"]["insufficient"], 1);
+    assert_eq!(
+        report_payload["requirement_decisions"][0]["reason_code"],
+        "NO_EVIDENCE"
+    );
+    assert!(
+        report_payload["reason_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "NO_EVIDENCE")
+    );
 }
 
 #[tokio::test]
@@ -557,12 +1377,13 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .unwrap();
     assert_eq!(schedule_audit_count, 1, "replay must not append audit");
 
-    let cross_project_payload = matching_schedule_payload_without_eligible_scope(
+    let cross_project_payload = matching_schedule_payload_with_complete_product_scope(
+        &pool,
         scope_project_id,
         1,
-        clause_id,
-        requirement,
-    );
+        &[(scope_clause_id, requirement), (clause_id, requirement)],
+    )
+    .await;
     assert_matching_schedule_rejected(
         &pool,
         scope_project_id,
@@ -583,7 +1404,7 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
         scope_project_id,
         &missing_eligible_payload,
         "matching-scope-missing-eligible-products",
-        "MATCHING_MANIFEST_V1_SCOPE_MISMATCH",
+        "KNOWLEDGE_MATCHING_SCOPE_V1_MISMATCH",
     )
     .await;
     let rejected_manifest_count: i64 =

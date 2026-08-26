@@ -6,7 +6,7 @@
 
 use domain::knowledge_retrieval::{
     CompanyEvidenceRequestV1, KNOWLEDGE_EVIDENCE_SCHEMA_V1, KnowledgeRetrievalPort,
-    ProductEvidenceRequestV1, RetrievalPolicyIdentityV1, validate_evidence_hit_batch,
+    ProductEvidenceRequestV1, RetrievalPolicyIdentityV1, validate_evidence_batch,
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -502,8 +502,9 @@ async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
     let route_lookup: HashMap<Uuid, &FrozenRouteInput> =
         routes.iter().map(|route| (route.id, route)).collect();
     let mut raw_hits = Vec::new();
+    let mut product_keys = BTreeSet::new();
     for requirement in &requirements {
-        let (workspace_kind, hits) = match route_lookup[&requirement.route_id].route {
+        let (workspace_kind, batch) = match route_lookup[&requirement.route_id].route {
             MatchRoute::Technical { .. } => (
                 "product_line",
                 port.retrieve_product_evidence(ProductEvidenceRequestV1 {
@@ -514,10 +515,7 @@ async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
                     retrieval_policy: policy.clone(),
                 })
                 .await
-                .map_err(|error| protocol(error.to_string()))?
-                .into_iter()
-                .map(|value| value.0)
-                .collect::<Vec<_>>(),
+                .map_err(|error| protocol(error.to_string()))?,
             ),
             MatchRoute::Commercial => (
                 "company",
@@ -529,29 +527,26 @@ async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
                     retrieval_policy: policy.clone(),
                 })
                 .await
-                .map_err(|error| protocol(error.to_string()))?
-                .into_iter()
-                .map(|value| value.0)
-                .collect::<Vec<_>>(),
+                .map_err(|error| protocol(error.to_string()))?,
             ),
         };
-        validate_evidence_hit_batch(workspace_kind, &hits, &policy)
+        validate_evidence_batch(workspace_kind, &batch, &policy)
             .map_err(|error| protocol(error.to_string()))?;
-        for hit in hits {
+        for version in batch.eligible_versions {
+            product_keys.insert((
+                version.product_id,
+                version.product_version_id,
+                version.workspace_kind,
+                version.frozen_display_name,
+            ));
+        }
+        for hit in batch.hits {
             raw_hits.push((requirement, hit));
         }
     }
 
-    let mut product_keys = BTreeSet::new();
-    for (_, hit) in &raw_hits {
-        product_keys.insert((
-            hit.product_id,
-            hit.product_version_id,
-            hit.workspace_kind.clone(),
-        ));
-    }
     let mut products = Vec::new();
-    for (product_id, product_version_id, workspace_kind) in product_keys {
+    for (product_id, product_version_id, workspace_kind, frozen_display_name) in product_keys {
         let identity = sha256_hex(
             format!("ProductVersionEvidenceV1:{product_id}:{product_version_id}:{workspace_kind}")
                 .as_bytes(),
@@ -564,7 +559,7 @@ async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
             product_id,
             product_version_id,
             workspace_kind,
-            frozen_display_name: product_version_id.to_string(),
+            frozen_display_name,
             identity_sha256: identity,
         });
     }
@@ -630,9 +625,16 @@ async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
 
     let mut memberships = Vec::new();
     for route in &routes {
+        let workspace_kind = match route.route {
+            MatchRoute::Technical { .. } => "product_line",
+            MatchRoute::Commercial => "company",
+        };
         let mut members: BTreeSet<(Uuid, Uuid)> = BTreeSet::new();
-        for hit in frozen_hits.iter().filter(|hit| hit.route_id == route.id) {
-            members.insert((hit.hit.product_version_id, hit.product_version_artifact_id));
+        for product in products
+            .iter()
+            .filter(|product| product.workspace_kind == workspace_kind)
+        {
+            members.insert((product.product_version_id, product.id));
         }
         for (ordinal, (_, artifact_id)) in members.into_iter().enumerate() {
             memberships.push(serde_json::json!({
@@ -1305,18 +1307,13 @@ pub async fn current_commercial_decisions(
     pool: &PgPool,
     project_id: Uuid,
 ) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
-    sqlx::query("SELECT decision.*,requirement.clause_id AS source_clause_id,source.frozen_document_display_name AS file_name
-      FROM bid_current_matching_reports current_value JOIN bid_matching_reports report ON report.id=current_value.report_id
-      JOIN bid_matching_routes route ON route.id=report.route_id
-      JOIN bid_matching_requirement_decisions decision ON decision.report_id=report.id
-      JOIN bid_matching_requirement_artifacts requirement ON requirement.id=decision.requirement_artifact_id
-      LEFT JOIN bid_matching_candidate_artifacts candidate ON candidate.id=decision.selected_candidate_artifact_id
-      LEFT JOIN bid_matching_evidence_artifacts evidence ON evidence.candidate_artifact_id=candidate.id AND evidence.ordinal=0
-      LEFT JOIN bid_matching_source_artifacts source ON source.id=evidence.source_chunk_artifact_id
-      JOIN bid_projects project ON project.id=current_value.project_id
-      WHERE current_value.project_id=$1 AND route.route_kind='commercial' AND project.status='open'
-       AND report.mutation_watermark=project.matching_mutation_watermark ORDER BY decision.ordinal")
-      .bind(project_id).fetch_all(pool).await
+    sqlx::query(
+        "SELECT * FROM bidding_current_commercial_decisions
+          WHERE project_id=$1 ORDER BY ordinal",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
 }
 
 pub async fn current_commercial_projection(

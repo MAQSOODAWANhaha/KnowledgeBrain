@@ -7,12 +7,14 @@
 | 层次 | 当前状态 |
 | --- | --- |
 | 最终合同 | 已固化在当前 docs/plans，旧方案只留 archive |
-| schema 与代码 | PR1～PR7 主链已有最终 baseline、Rust、API、worker 和 Web 实现路径 |
-| 本地验证 | Rust workspace、Clippy、格式、Web lint/build 与 mocked Playwright 已通过 |
-| fresh deployment | 隔离空环境 Compose 已通过；不表示生产环境已部署 |
-| runtime accepted | **是（招投标 V1 隔离环境）**；真实 DocReader、API/worker/retention、DOCX/PDF、恢复与对象生命周期全链通过 |
+| implemented | 是；PR1～PR7 主链及 eligible/hit 解耦、knowledge attestation、PDF 附件 durable preparation 已在当前工作树落位 |
+| locally verified | 是；Rust workspace/Clippy、32 个强制活库 SQL/HTTP 合同、Web lint/build/20 个 mocked e2e、fresh-schema/ACL 与删除扫描已通过 |
+| committed | 是；本轮增量已收拢为当前交付提交 |
+| pushed | 否 |
+| deployed | 否；未部署到 fresh 或生产环境 |
+| runtime accepted | 否；当前 checkout 没有完整证据包，`phase_1d_runtime_complete=false` |
 
-`6:quote` 的结构化 DOCX table / PDF grid renderer seam 已由 focused test 和隔离运行 PDF 共同覆盖。该证据不提升平台级 `phase_1d_runtime_complete`：生产发布仍受真实 provider evaluation、签名 image lock、readiness 与 topology 发布合同独立约束。
+`6:quote` 的结构化 DOCX table / PDF grid renderer seam 已通过当前 checkout 的 Rust/SQL/Web 回归；fresh runtime 正式输出仍须另行验收。旧 checkout 或历史隔离运行证据不能提升当前状态。
 
 ## 1. 成功标准
 
@@ -66,6 +68,7 @@ shared platform slice 由 [`../platform/runtime-foundation.md`](../platform/runt
 ### 3.3 MatchingPublication
 
 - manifests/routes/route memberships/requirements/product-version artifacts；
+- knowledge-owned matching scope attestation ID/hash；
 - jobs/attempts/claims/lease；
 - adapter staging set + typed collections；
 - immutable source/evidence/candidate/group/decision/report artifacts；
@@ -83,6 +86,7 @@ shared platform slice 由 [`../platform/runtime-foundation.md`](../platform/runt
 
 - company/submission profile artifacts/current pointers；
 - procedural segments/classifications/decisions/attachments；
+- attachment preparation jobs/claims/leases 与冻结 page artifacts；
 - BidShot artifacts/current placements；
 - template contract artifacts/current pointers；
 - part content/dependencies/current pointers/stale；
@@ -165,12 +169,14 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 
 | 切片 | 实现状态 | 验收状态 |
 | --- | --- | --- |
-| PR0 | 已实施 | 文档链接与过期状态扫描已通过 |
-| PR1 | 已实施 | fresh schema/ACL/seed 已通过 |
-| PR2～PR5 | 已实施 | Rust、DB、并发和 exact-bytes 已通过 |
-| PR6 | 已实施 | table/grid、DB、对象、Gate 与隔离 runtime 输出已通过 |
-| PR7 | 已实施 | HTTP、Web lint/build 与 mocked 浏览器验收已通过 |
-| PR8 | 隔离验收已完成 | clean-slate Compose、真实全链、恢复、retention 与资源清理已通过；生产未部署 |
+| PR0 | 已实施 | 文档状态、链接与过期状态扫描通过 |
+| PR1 | 已实施 | allowlist 已重生成，fresh-schema/catalog/seed/ACL 验收通过 |
+| PR2～PR3 | 已实施 | Rust 与强制活库 publication/conversion/extraction/promotion 回归 7/7 通过 |
+| PR4 | 已实施 | 65 eligible/0 hit、knowledge attestation、cross-project scope、commercial evidence 与 publication/lease/pick 回归通过 |
+| PR5 | 已实施 | Rust、强制活库 quote 4/4、HTTP 与 Web 回归通过 |
+| PR6 | 已实施 | attachment preparation、Gate、对象、render job 与 renderer 本地回归通过；fresh runtime 正式输出待验收 |
+| PR7 | 已实施 | HTTP contract、Web lint/build 与 mocked Playwright 20/20 通过 |
+| PR8 | 未完成 | clean-slate Compose、恢复、retention、资源清理和当前证据包均待完成；`phase_1d_runtime_complete=false` |
 
 ### PR0 — 文档与目标冻结
 
@@ -222,13 +228,14 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 范围：
 
 - KnowledgeRetrievalPort 两路 adapter；
-- frozen route/requirements/product memberships；
+- 完整 eligible version scope 与有限 hit 集解耦；
+- frozen route/requirements/product memberships 与 knowledge scope attestation；
 - EvidenceV1、RequirementDecisionV1、MatchingReportV1；
 - adapter 内部 Open/Stage/Commit、heartbeat/reaper；
 - current projections、RoutePickSet/ProjectPickSet；
 - 删除旧 CommitRoute/live fallback/rebuild decision。
 
-验证：报告 exact bytes/aggregation、lease/staging/commit、1..N supported picks、普通+unsectioned混合集。
+验证：65 个 eligible version/0 hit 仍 schedule、保留 65 个 membership 并生成 `NO_EVIDENCE`；报告 exact bytes/aggregation、attestation mismatch、lease/staging/commit、1..N supported picks、普通+unsectioned混合集。
 
 ### PR5 — Quote
 
@@ -247,13 +254,14 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 范围：
 
 - profiles、procedural segment/router/classification/decision/attachment；
+- PDF attachment durable preparation：claim/heartbeat/retry/reaper/cancel、page staging 与 atomic publish；
 - RequiredPartSet、parts/dependency/stale；
 - BidShot/Markdown render assets；
 - SubmissionGate/manifest/DOCX/PDF；
 - ObjectRegistry consumer cutover，复用平台 retention；
 - 删除旧 export/regenerate/refcount/direct delete。
 
-验证：程序 lifecycle、R/S、gate matrix、manifest race、assets/owner-reference 平台集成、DOCX placeholder/PDF reject；retention 内部状态机使用平台验收证据。
+验证：程序 lifecycle、R/S、gate matrix、manifest race、assets/owner-reference 平台集成、DOCX placeholder/PDF reject；PDF preparation incomplete gate、过期 claim/reaper/cancel fencing、连续 page set、publish 失败零 page owner/page row；retention 内部状态机使用平台验收证据。
 
 ### PR7 — API/Web 最终切换
 
@@ -311,9 +319,9 @@ scripts/compose_first_launch_acceptance.sh
 ### 7.3 领域 fixtures
 
 - Tender：span、router golden、publication/fact/clause promotion；
-- Matching：decision/report/evidence canonical、stage/commit、picks/R/S；
+- Matching：eligible scope/hit quota 解耦、knowledge attestation、decision/report/evidence canonical、stage/commit、picks/R/S；
 - Quote：tax/rounding/overflow/ceiling/snapshot/reopen；
-- Submission：profiles/procedural/parts/stale/gate/assets/owner-reference 集成；
+- Submission：profiles/procedural/attachment preparation/parts/stale/gate/assets/owner-reference 集成；
 - Cross-cutting：actor/idempotency/audit/ended/maintenance/race。
 
 ### 7.4 HTTP/Web
@@ -350,7 +358,7 @@ scripts/compose_first_launch_acceptance.sh
 1. first launch 建 schema、seed、roles，全部服务 ready；
 2. 真实 PDF/DOCX 招标文件 convert/extract/publish；
 3. 两路真实知识检索并冻结 evidence；
-4. 人工 picks、quote、profiles、程序附件；
+4. 人工 picks、quote、profiles、程序附件，并等待 PDF 附件 durable preparation 完成；
 5. 先证明 Gate 拒绝，再修复并出 PDF；
 6. 重启 worker，证明 active claim/staging 可恢复；
 7. 删除 live knowledge document 后历史 report/PDF 可审计重放；
@@ -377,8 +385,9 @@ scripts/compose_first_launch_acceptance.sh
 implemented
 locally verified
 committed
+pushed
 deployed to fresh environment
 runtime accepted
 ```
 
-只有五项全部有证据且删除矩阵闭合，才声明“招投标最终 V1 完成”。PR0 文档完成或本地测试全绿都不能提前使用该结论。
+只有六项全部有证据且删除矩阵闭合，才声明“招投标最终 V1 完成”。PR0 文档完成或本地测试全绿都不能提前使用该结论。

@@ -2,7 +2,7 @@
 
 本文定义 `Quote` 深模块的最终 V1。报价由人录入和确认；系统只负责结构、计算、限价校验、快照和正式输出一致性。
 
-> 实施状态（2026-08-24）：Rust Decimal 计算与 QuoteSnapshotV1 canonical seam，以及最终 baseline、storage/API 和 Web 报价路径均按本文合同落位；数据库、HTTP、mocked 浏览器和隔离 fresh runtime 的人工金额/finalize/reopen/正式输出验收均已通过，生产未部署。
+> 实施状态（2026-08-26）：Rust Decimal、QuoteSnapshotV1 canonical seam、最终 baseline、storage/API 和 Web 报价路径已落位；当前 checkout 的 Rust、强制活库 SQL、HTTP 与 mocked 浏览器回归已通过。fresh runtime 尚未验收，未部署。
 
 ## 1. 边界
 

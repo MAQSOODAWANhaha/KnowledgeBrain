@@ -49,7 +49,16 @@ export function MatchingPane({
                     <td>
                       {d.system_decision} / {d.final_support}
                     </td>
-                    <td className="muted">{d.frozen_document_display_name || d.reason_code || "—"}</td>
+                    <td className="muted">
+                      {(d.evidence_items ?? []).map((evidence) => (
+                        <div key={evidence.evidence_artifact_id}>
+                          <div>{evidence.document_display_name}</div>
+                          <div>“{evidence.quote}”</div>
+                          <div>来源片段 {evidence.source_chunk_id}</div>
+                        </div>
+                      ))}
+                      {(d.evidence_items ?? []).length === 0 && (d.reason_code || "—")}
+                    </td>
                   </tr>
                 );
               })}

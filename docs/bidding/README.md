@@ -2,9 +2,22 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | ①～⑥目标边界已确认；实现尚待按计划完成 |
+| 状态 | 最终 V1 主链已实现；当前 checkout 的完整回归、提交、部署与 runtime acceptance 未完成 |
 | 角色 | 网络安全产品与服务应标方（乙方） |
 | 部署策略 | clean-slate fresh redeploy，不保留旧数据与旧协议 |
+
+## 当前证据边界（2026-08-26）
+
+| 层次 | 状态 |
+| --- | --- |
+| implemented | 是；当前工作树包含完整 V1 主链，以及 eligible/hit 解耦、knowledge scope attestation、PDF 附件 durable preparation |
+| locally verified | 是；Rust workspace/Clippy、强制活库 SQL/HTTP、Web lint/build/mocked e2e、fresh-schema/ACL 与删除扫描已通过 |
+| committed | 是；本轮增量已收拢为当前交付提交 |
+| pushed | 否 |
+| deployed | 否 |
+| runtime accepted | 否；`phase_1d_runtime_complete=false` |
+
+旧运行记录不能替代当前 checkout 的 acceptance。最终状态以 [`../../plans/bidding/implementation-acceptance.md`](../../plans/bidding/implementation-acceptance.md) 的分层证据为准。
 
 ## 权威文档
 

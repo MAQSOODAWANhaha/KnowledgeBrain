@@ -33,7 +33,15 @@ publish_route(matching_report)
 
 ### 2.1 消费 KnowledgeRetrievalPort
 
-端口 operation、request 和返回 DTO 只由 [`../../docs/knowledge-base/domain.md`](../../docs/knowledge-base/domain.md) 定义。Matching adapter 收到 `ProductEvidenceHitV1|CompanyEvidenceHitV1` 后立即校验，并映射为内部 `FrozenRetrievedHitV1`：
+端口 operation、request 和返回 DTO 只由 [`../../docs/knowledge-base/domain.md`](../../docs/knowledge-base/domain.md) 定义。Matching adapter 收到 `KnowledgeEvidenceBatchV1` 后，分别校验完整 `eligible_versions` 和有界 `hits`：
+
+- route membership 只从 `eligible_versions` 建立，不从 hit 反推；
+- hit 必须属于同 batch 的 eligible version，但 eligible version 不要求产生 hit；
+- hit quota 只限制 `hits`，不能截断 eligible scope；
+- 65 个 eligible version、0 hit 是合法输入，65 个 membership 全部冻结，各 requirement 产生 `NO_EVIDENCE` decision；
+- product_line/company scope 分别进入对应 route，不能跨 workspace kind 混用。
+
+每个 hit 随后映射为内部 `FrozenRetrievedHitV1`：
 
 ```text
 document_id, source_chunk_id
@@ -55,7 +63,13 @@ retrieval_contract_version
 | technical unsectioned | lowercase nil UUID | 未归入普通 unit 的 current technical requirements |
 | commercial | `NULL` | 全项目 confirmed qualification/service requirements |
 
-每个 manifest 冻结 project、generation、matching watermark、requirement set、eligible product version/company scope 和 route membership ordinal。
+每个 manifest 冻结 project、generation、matching watermark、requirement set、完整 eligible product version/company scope、有限 frozen hits 和 route membership ordinal。
+
+### 2.3 knowledge scope attestation
+
+schedule 把端口快照交给知识库拥有的 `kb_knowledge_attest_matching_scope_v1` 合同。该合同是唯一允许核对 live Workspace/Product/ProductVersion/Document/chunk 的边界；招投标只冻结返回的 attestation ID/hash，并在 manifest deferred verifier 中以 ID/hash/同一 payload 调用 `kb_knowledge_verify_matching_scope_v1`。
+
+因此招投标 schema/function 不直接 join 知识库业务表。attestation 失败时 schedule 全事务回滚；attestation 成功后 live 知识资料的修改或删除不改写已冻结的 manifest、report 或正式输出。
 
 ## 3. RequirementDecisionV1
 

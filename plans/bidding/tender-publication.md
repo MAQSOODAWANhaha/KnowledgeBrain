@@ -2,7 +2,7 @@
 
 本文定义 `TenderPublication` 与 `ClauseLifecycle` 的最终 V1。所有表名均表示最终 baseline，不表示增量 migration 阶段。
 
-> 实施状态（2026-08-24）：Rust bounded tender parser、SourceSpanV2、KindRouter，以及最终 baseline 中的 publication/lifecycle 路径均按本文合同落位，并通过隔离 fresh Compose 的真实 PDF/DOCX 转换、抽取、promotion marker 与恢复验收；生产未部署。
+> 实施状态（2026-08-26）：Rust bounded tender parser、SourceSpanV2、KindRouter 和最终 baseline publication/lifecycle 路径已落位；当前 Rust 与强制活库回归已通过。fresh runtime acceptance 尚未完成，未部署。
 
 ## 1. 模块边界
 

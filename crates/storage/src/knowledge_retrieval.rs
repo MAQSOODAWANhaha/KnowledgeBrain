@@ -6,15 +6,15 @@
 
 use async_trait::async_trait;
 use domain::knowledge_retrieval::{
-    CompanyEvidenceHitV1, CompanyEvidenceRequestV1, KNOWLEDGE_EVIDENCE_SCHEMA_V1,
-    KnowledgeEvidenceHitV1, KnowledgeRetrievalError, KnowledgeRetrievalPort, ProductEvidenceHitV1,
-    ProductEvidenceRequestV1, RetrievalPolicyIdentityV1, UTF8_BYTE_OFFSET_UNIT,
-    validate_evidence_hit_batch,
+    CompanyEvidenceRequestV1, EligibleEvidenceVersionV1, KNOWLEDGE_EVIDENCE_SCHEMA_V1,
+    KnowledgeEvidenceBatchV1, KnowledgeEvidenceHitV1, KnowledgeRetrievalError,
+    KnowledgeRetrievalPort, ProductEvidenceRequestV1, RetrievalPolicyIdentityV1,
+    UTF8_BYTE_OFFSET_UNIT, validate_evidence_batch,
 };
 use rust_decimal::{Decimal, RoundingStrategy};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
-use std::{collections::HashSet, str::FromStr};
+use std::{collections::BTreeMap, collections::HashSet};
 use uuid::Uuid;
 
 const ABSOLUTE_MAX_HITS: u32 = 256;
@@ -42,7 +42,7 @@ impl PostgresKnowledgeRetrievalAdapter {
     async fn retrieve(
         &self,
         query: RetrievalQuery<'_>,
-    ) -> Result<Vec<KnowledgeEvidenceHitV1>, KnowledgeRetrievalError> {
+    ) -> Result<KnowledgeEvidenceBatchV1, KnowledgeRetrievalError> {
         let RetrievalQuery {
             workspace_kind,
             requirement_identity_sha256,
@@ -82,13 +82,24 @@ impl PostgresKnowledgeRetrievalAdapter {
         .map_err(|error| KnowledgeRetrievalError::Unavailable(error.to_string()))?;
 
         let mut ranked = Vec::new();
+        let mut eligible_versions = BTreeMap::new();
         for row in rows {
             let chunk_utf8: String = row.get("content");
             let raw_score = lexical_score(requirement_text, &chunk_utf8);
+            let product_id = row.get::<Uuid, _>("product_id");
+            let product_version_id = row.get::<Uuid, _>("product_version_id");
+            eligible_versions
+                .entry((product_id, product_version_id))
+                .or_insert_with(|| EligibleEvidenceVersionV1 {
+                    product_id,
+                    product_version_id,
+                    workspace_kind: workspace_kind.to_string(),
+                    frozen_display_name: product_version_id.to_string(),
+                });
             ranked.push((
                 raw_score,
-                row.get::<Uuid, _>("product_id"),
-                row.get::<Uuid, _>("product_version_id"),
+                product_id,
+                product_version_id,
                 row.get::<Uuid, _>("document_id"),
                 row.get::<Uuid, _>("source_chunk_id"),
                 row.get::<String, _>("file_name"),
@@ -105,47 +116,21 @@ impl PostgresKnowledgeRetrievalAdapter {
                 .then(left.4.cmp(&right.4))
         });
 
-        // Preserve complete eligible version membership, including a version
-        // whose best lexical score is zero. Additional ranked chunks may fill
-        // the remaining hit quota. A scope that cannot fit is rejected rather
-        // than silently truncated.
-        let version_count = ranked.iter().map(|row| row.2).collect::<HashSet<_>>().len();
-        if version_count > policy.max_hits as usize {
-            return Err(KnowledgeRetrievalError::InvalidRequest(
-                "eligible version scope exceeds retrieval hit quota".into(),
-            ));
-        }
         let mut chosen = Vec::new();
-        let mut represented = HashSet::new();
-        for row in &ranked {
-            if represented.insert(row.2) {
-                chosen.push(row.clone());
-            }
-        }
-        let mut chosen_chunks: HashSet<Uuid> = chosen.iter().map(|row| row.4).collect();
+        let mut chosen_chunks = HashSet::new();
+        let mut chosen_bytes = 0u64;
         for row in ranked {
             if chosen.len() >= policy.max_hits as usize {
                 break;
             }
-            if chosen_chunks.insert(row.4) {
+            if row.0 <= Decimal::ZERO || !chosen_chunks.insert(row.4) {
+                continue;
+            }
+            let next_bytes = chosen_bytes + row.6.len() as u64;
+            if next_bytes <= policy.max_total_bytes {
+                chosen_bytes = next_bytes;
                 chosen.push(row);
             }
-        }
-        chosen.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then(left.1.cmp(&right.1))
-                .then(left.2.cmp(&right.2))
-                .then(left.3.cmp(&right.3))
-                .then(left.4.cmp(&right.4))
-        });
-
-        let required_total = chosen.iter().map(|row| row.6.len() as u64).sum::<u64>();
-        if required_total > policy.max_total_bytes {
-            return Err(KnowledgeRetrievalError::InvalidRequest(
-                "eligible version scope exceeds retrieval byte quota".into(),
-            ));
         }
         let mut hits = Vec::new();
         for (score, product_id, product_version_id, document_id, source_chunk_id, name, chunk) in
@@ -172,8 +157,13 @@ impl PostgresKnowledgeRetrievalAdapter {
                 retrieval_contract_version: policy.contract_version.clone(),
             });
         }
-        validate_hits(workspace_kind, &hits, policy)?;
-        Ok(hits)
+        let batch = KnowledgeEvidenceBatchV1 {
+            schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V1,
+            eligible_versions: eligible_versions.into_values().collect(),
+            hits,
+        };
+        validate_evidence_batch(workspace_kind, &batch, policy)?;
+        Ok(batch)
     }
 }
 
@@ -182,7 +172,7 @@ impl KnowledgeRetrievalPort for PostgresKnowledgeRetrievalAdapter {
     async fn retrieve_product_evidence(
         &self,
         request: ProductEvidenceRequestV1,
-    ) -> Result<Vec<ProductEvidenceHitV1>, KnowledgeRetrievalError> {
+    ) -> Result<KnowledgeEvidenceBatchV1, KnowledgeRetrievalError> {
         if request.schema_version != KNOWLEDGE_EVIDENCE_SCHEMA_V1 {
             return Err(KnowledgeRetrievalError::InvalidRequest(
                 "unsupported ProductEvidenceRequestV1 schema_version".into(),
@@ -196,13 +186,12 @@ impl KnowledgeRetrievalPort for PostgresKnowledgeRetrievalAdapter {
             policy: &request.retrieval_policy,
         })
         .await
-        .map(|hits| hits.into_iter().map(ProductEvidenceHitV1).collect())
     }
 
     async fn retrieve_company_evidence(
         &self,
         request: CompanyEvidenceRequestV1,
-    ) -> Result<Vec<CompanyEvidenceHitV1>, KnowledgeRetrievalError> {
+    ) -> Result<KnowledgeEvidenceBatchV1, KnowledgeRetrievalError> {
         if request.schema_version != KNOWLEDGE_EVIDENCE_SCHEMA_V1 {
             return Err(KnowledgeRetrievalError::InvalidRequest(
                 "unsupported CompanyEvidenceRequestV1 schema_version".into(),
@@ -216,7 +205,6 @@ impl KnowledgeRetrievalPort for PostgresKnowledgeRetrievalAdapter {
             policy: &request.retrieval_policy,
         })
         .await
-        .map(|hits| hits.into_iter().map(CompanyEvidenceHitV1).collect())
     }
 }
 
@@ -242,23 +230,6 @@ fn validate_request(
     {
         return Err(KnowledgeRetrievalError::InvalidRequest(
             "invalid evidence scope, policy, or quota".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_hits(
-    workspace_kind: &str,
-    hits: &[KnowledgeEvidenceHitV1],
-    policy: &RetrievalPolicyIdentityV1,
-) -> Result<(), KnowledgeRetrievalError> {
-    validate_evidence_hit_batch(workspace_kind, hits, policy)?;
-    if hits
-        .iter()
-        .any(|hit| Decimal::from_str(&hit.retrieval_raw_score).is_err())
-    {
-        return Err(KnowledgeRetrievalError::InvalidHit(
-            "retrieval score is outside the supported decimal range".into(),
         ));
     }
     Ok(())
@@ -352,6 +323,16 @@ mod tests {
             max_chunk_bytes: 1024,
             max_total_bytes: 1024,
         };
-        assert!(validate_hits("product_line", &[hit], &policy).is_err());
+        let batch = KnowledgeEvidenceBatchV1 {
+            schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V1,
+            eligible_versions: vec![EligibleEvidenceVersionV1 {
+                product_id: hit.product_id,
+                product_version_id: hit.product_version_id,
+                workspace_kind: "product_line".into(),
+                frozen_display_name: hit.product_version_id.to_string(),
+            }],
+            hits: vec![hit],
+        };
+        assert!(validate_evidence_batch("product_line", &batch, &policy).is_err());
     }
 }

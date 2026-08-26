@@ -2,8 +2,8 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | **最终 V1 主链已实现；本地、DB、Web 与隔离 fresh Compose runtime 已验收** |
-| 日期 | 2026-08-24 |
+| 状态 | **最终 V1 主链已实现并完成本地验收与提交；尚未 push、部署或 runtime accepted** |
+| 日期 | 2026-08-26 |
 | 业务 | 网络安全产品与服务应标（乙方） |
 | 部署 | clean-slate fresh redeploy |
 | 正式范围 | 招标拆解、事实、两路匹配、人工选择、人工报价、①～⑥组卷、DOCX/PDF |
@@ -24,11 +24,18 @@
 
 ## 当前实施状态
 
-当前仓库已切换到 clean-slate V1：最终 baseline、Rust domain/storage/API/worker、Web 工作台和 manifest-only DOCX/PDF renderer 均已有实现路径，旧方案不再是兼容目标。
+当前仓库已切换到 clean-slate V1：最终 baseline、Rust domain/storage/API/worker、Web 工作台和 manifest-only DOCX/PDF renderer 均已有实现路径，旧方案不再是兼容目标。当前工作树还包含 eligible/hit scope 解耦、knowledge-owned scope attestation 和 PDF 程序附件 durable preparation。
 
-“已实现”只描述代码和合同已经落位，不等于全部验收完成。本地、DB、HTTP、浏览器、部署和 runtime acceptance 必须按 [`implementation-acceptance.md`](implementation-acceptance.md) 分别记录实际证据。
+| 层次 | 当前证据 |
+| --- | --- |
+| implemented | 是；上述合同与实现已在当前工作树落位 |
+| locally verified | 是；Rust workspace/Clippy、32 个强制活库 SQL/HTTP 合同、Web lint/build/20 个 mocked e2e、fresh-schema/ACL 与删除扫描已通过 |
+| committed | 是；本轮增量已收拢为当前交付提交 |
+| pushed | 否 |
+| deployed | 否；未部署到 fresh 或生产环境 |
+| runtime accepted | 否；当前 checkout 没有完整 fresh-runtime 证据包，`phase_1d_runtime_complete=false` |
 
-2026-08-24 已在空 PostgreSQL/Redis/对象卷上通过强制 Compose 全链：真实 PDF/DOCX 转换、抽取、两路匹配、人工报价、Gate 修复、DOCX/PDF、manifest replay、claim/reaper、staging retention 与结束态拒绝均产生运行证据，临时容器、卷和镜像随后清理。该结论只表示当前 checkout 的隔离 fresh runtime accepted；生产未部署，平台级 `runtime-completion.toml` 仍因 provider evaluation、签名 image lock 和 topology 发布闭包保持 `false`。
+历史运行记录只能作为历史证据，不能提升当前 checkout 的状态。“已实现”也不等于 locally verified、committed、pushed、deployed 或 runtime accepted；各层必须按 [`implementation-acceptance.md`](implementation-acceptance.md) 分别记录实际证据。
 
 ## 1. 方案结论
 
@@ -109,7 +116,7 @@ Matching 的 Open/Stage/Commit 是大 artifact 的 adapter 内部协议。applic
 
 ### 4.3 MatchingPublication
 
-冻结 route membership，调用知识库端口，验证证据，构建 `RequirementDecisionV1` 和 `MatchingReportV1`，再原子发布 current report。人工选择形成 `RoutePickSetV1`，项目聚合形成 `ProjectPickSetV1`。
+冻结由完整 eligible version scope 产生的 route membership，并将有限 hit 集独立冻结；知识库拥有 schedule-time scope attestation，招投标不得直接 join live 知识表。随后构建 `RequirementDecisionV1` 和 `MatchingReportV1` 并原子发布 current report；eligible version 没有 hit 时保留 membership，并产生 `NO_EVIDENCE`。人工选择形成 `RoutePickSetV1`，项目聚合形成 `ProjectPickSetV1`。
 
 ### 4.4 Quote
 
@@ -117,7 +124,7 @@ Matching 的 Open/Stage/Commit 是大 artifact 的 adapter 内部协议。applic
 
 ### 4.5 Submission
 
-拥有 company/submission profile、程序材料分类与 resolution、parts、dependency/stale、manifest、render assets 和导出门禁。只读其它模块发布的 identity/artifact。
+拥有 company/submission profile、程序材料分类与 resolution、附件 durable preparation、parts、dependency/stale、manifest、render assets 和导出门禁。PDF 附件上传只提交原对象和 durable job，worker 通过 lease/heartbeat/reaper 生成并原子发布冻结页面；preparation 未完成时 Gate 拒绝。Submission 只读其它模块发布的 identity/artifact。
 
 ## 5. 关键不变量
 
@@ -202,14 +209,14 @@ V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用�
 | 阶段 | 当前实现状态 | 完成证据 |
 | --- | --- | --- |
 | PR0 | 已实施：文档、PRODUCT、领域词汇和最终 contract 已固化 | 文档链接与重复权威定义检查 |
-| PR1 | 已实施：最终 baseline 与共享平台边界已有单一路径 | fresh DB、catalog、ACL、seed 已通过 |
-| PR2 | 已实施：TenderPublication、SourceSpanV2 与 bounded parser 已落位 | publication 并发与失败原子性 DB fixture 已通过 |
-| PR3 | 已实施：ClauseLifecycle、KindRouter 与 fact decision 已落位 | promotion generation 2/3、连续 marker 与人工边界 DB fixture 已通过 |
-| PR4 | 已实施：MatchingPublication 与两路检索端口已落位 | report/evidence/staging/current 集成验收已通过 |
-| PR5 | 已实施：Decimal、ceiling、finalize/reopen 与 QuoteSnapshotV1 已落位 | Rust/SQL exact bytes、DB 并发与 Web 验收已通过 |
-| PR6 | 已实施：parts、冻结程序附件、manifest、durable render job、报价 table/grid 与 renderer 已落位 | DB/对象生命周期、Gate 矩阵与 fresh runtime PDF 已通过 |
-| PR7 | 已实施：最终 API routes 与模块化 Web 工作台已落位 | HTTP contract、lint/build 与 mocked 浏览器验收已通过 |
-| PR8 | 隔离验收已完成 | 空环境启动、全链 PDF、日志、失败恢复与资源清理已通过；生产发布闭包不在本方案内 |
+| PR1 | 已实施：最终 baseline 与共享平台边界为单一路径，新增 knowledge attestation 与 attachment preparation schema | allowlist 已重生成，fresh-schema/catalog/seed/ACL 验收通过 |
+| PR2 | 已实施：TenderPublication、SourceSpanV2 与 bounded parser 已落位 | 强制活库 publication/conversion/extraction 回归 7/7 通过 |
+| PR3 | 已实施：ClauseLifecycle、KindRouter 与 fact decision 已落位 | generation 2/3 promotion 与并发边界已由同一强制活库套件覆盖 |
+| PR4 | 已实施：完整 eligible scope/有限 hits、knowledge attestation、MatchingPublication 与两路端口已落位 | 强制活库 matching 3/3 与 Rust 定向测试通过 |
+| PR5 | 已实施：Decimal、ceiling、finalize/reopen 与 QuoteSnapshotV1 已落位 | 强制活库 quote 4/4、HTTP/Web 回归通过 |
+| PR6 | 已实施：附件 durable preparation、parts、manifest、durable render、table/grid 与 renderer 已落位 | 强制活库 submission 17/17 与 renderer/worker 回归通过；fresh runtime PDF 未验收 |
+| PR7 | 已实施：最终 API routes 与模块化 Web 工作台已落位 | HTTP contract、Web lint/build 与 mocked Playwright 20/20 通过 |
+| PR8 | 未完成 | 尚未形成当前 checkout 的 clean-slate Compose、恢复、retention、资源清理与证据包；`phase_1d_runtime_complete=false` |
 
 每个实现切片都必须同步删除被替代的旧逻辑；验收时继续用删除矩阵检查，不把兼容层清理留给部署阶段。
 

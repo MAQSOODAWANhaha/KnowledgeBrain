@@ -124,6 +124,7 @@ pub const TYPE_LIST_REPARSE: &str = "knowledge:list_reparse";
 pub const TYPE_INDEX_DELETE: &str = "index:delete";
 pub const TYPE_DATATABLE: &str = "datatable:summary";
 pub const TYPE_BID_CONVERT: &str = "bid:convert";
+pub const TYPE_BID_PREPARE_ATTACHMENT_V1: &str = "bid:prepare-attachment:v1";
 pub const TYPE_BID_EXTRACT: &str = "bid:extract";
 pub const TYPE_BID_MATCH_ROUTE_V1: &str = "bid:match-route:v1";
 pub const TYPE_BID_RENDER_SUBMISSION_V1: &str = "bid:render-submission:v1";
@@ -153,6 +154,7 @@ mod tests {
         assert_eq!(TYPE_LIST_DELETE, "knowledge:list_delete");
         assert_eq!(TYPE_INDEX_DELETE, "index:delete");
         assert_eq!(TYPE_BID_CONVERT, "bid:convert");
+        assert_eq!(TYPE_BID_PREPARE_ATTACHMENT_V1, "bid:prepare-attachment:v1");
         assert_eq!(TYPE_BID_EXTRACT, "bid:extract");
         assert_eq!(TYPE_BID_RENDER_SUBMISSION_V1, "bid:render-submission:v1");
         assert_eq!(QUEUE_LOW, "low");

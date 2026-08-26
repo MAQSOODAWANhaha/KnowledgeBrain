@@ -49,8 +49,16 @@ mod tests {
     use super::*;
     use std::sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
+
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
 
     #[tokio::test]
     async fn renews_while_claimed_work_is_running() {
@@ -78,9 +86,12 @@ mod tests {
 
     #[tokio::test]
     async fn stops_work_as_soon_as_the_lease_is_lost() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let work_dropped = dropped.clone();
         let result = run_with_heartbeat(
             Duration::from_millis(15),
-            async {
+            async move {
+                let _drop_signal = DropSignal(work_dropped);
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 Ok::<_, &'static str>(())
             },
@@ -89,5 +100,31 @@ mod tests {
         .await;
 
         assert_eq!(result, LeaseRun::Lost);
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "losing the lease must cancel work and run its staging guards"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_error_cancels_work_and_preserves_the_error() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let work_dropped = dropped.clone();
+        let result = run_with_heartbeat(
+            Duration::from_millis(15),
+            async move {
+                let _drop_signal = DropSignal(work_dropped);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok::<_, &'static str>(())
+            },
+            || async { Err("heartbeat unavailable") },
+        )
+        .await;
+
+        assert_eq!(result, LeaseRun::HeartbeatFailed("heartbeat unavailable"));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "heartbeat failure must cancel work and run its staging guards"
+        );
     }
 }

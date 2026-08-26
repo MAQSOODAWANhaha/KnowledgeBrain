@@ -8,16 +8,16 @@ sha256 = "416c00cb118192dafb524f7daaec28c6e77329091b97e4ee990ba71793b2f1e1"
 version = 1
 name = "knowledge_base_baseline"
 filename = "knowledge_base_baseline.sql"
-sha256 = "812ffd41bb94e8a00abed4716976f123e10933e283166d5024b624515965357c"
+sha256 = "096ada6b3fa94c154c5ddcaa97110469853ec19d275bb2962207319974b44279"
 
 [[migrations]]
 version = 2
 name = "shared_platform_baseline"
 filename = "shared_platform_baseline.sql"
-sha256 = "c25a7e4ca3157a47bd42965a606000636421c314a2a749136f11b4d99f7588b2"
+sha256 = "863254e62ef17441e38119397e3ee25a024d6f54ad7a88baad8e02e95c867df8"
 
 [[migrations]]
 version = 3
 name = "bidding_v1_baseline"
 filename = "bidding_v1_baseline.sql"
-sha256 = "91db0eb49bc6b3371db9cf7a3339073cbf9c748819c9020357cff060288dae37"
+sha256 = "d9fde5d064f8956ed984ccb337525f4226f552481edc24414e75c15a1152e5db"

@@ -44,15 +44,29 @@ Workspace
 
 ```text
 retrieve_product_evidence(ProductEvidenceRequestV1)
-  -> ProductEvidenceHitV1[]
+  -> KnowledgeEvidenceBatchV1
 
 retrieve_company_evidence(CompanyEvidenceRequestV1)
-  -> CompanyEvidenceHitV1[]
+  -> KnowledgeEvidenceBatchV1
 ```
 
 两个 request 只表达知识库可理解的冻结检索范围、requirement text/identity、版本选择和检索 policy identity；不得包含 BidProject 表名、matching job、part 或 quote 模型。
 
-两个 hit 使用同一有界 `KnowledgeEvidenceHitV1` 公共结构，并分别增加产品或公司资料 scope identity：
+batch 把完整 eligible scope 与有界命中集合分开：
+
+```text
+KnowledgeEvidenceBatchV1
+  schema_version
+  eligible_versions: EligibleEvidenceVersionV1[]
+  hits: KnowledgeEvidenceHitV1[]
+
+EligibleEvidenceVersionV1
+  product_id, product_version_id
+  workspace_kind = product_line|company
+  frozen_display_name
+```
+
+`hits` 使用同一有界 `KnowledgeEvidenceHitV1` 结构：
 
 ```text
 schema_version
@@ -68,13 +82,22 @@ retrieval_contract_version
 
 不变量：
 
-- `ProductEvidenceHitV1` 只能来自 product_line 下 current eligible product version；
-- `CompanyEvidenceHitV1` 只能来自 company 下 current eligible library version，不构成产品排名；
+- `eligible_versions` 是本次 request 对应 workspace kind 的完整 current eligible version 集合，不受 hit 数量配额截断；
+- `product_line` 只包含 current eligible product version，`company` 只包含 current eligible library version；
+- 每个 hit 必须属于同 batch 的 `eligible_versions`，但 eligible version 不要求产生 hit；
+- `eligible_versions` 非空而 `hits=[]` 是合法结果，调用方据此为每个 requirement 生成 `NO_EVIDENCE`，不能把“无命中”解释成“无 eligible membership”；
+- hit 数量、单 chunk bytes 和总 bytes 受检索 policy 限制，eligible version 数量使用独立边界；
+- company hit 不构成产品排名；
 - quote 是 chunk 的连续 UTF-8 byte slice，offset/digest/length 可验证；
 - 文件显示名和 chunk bytes 是检索时快照，便于调用方立即冻结；
-- 返回数量、单 chunk bytes、总 bytes 有 policy 上限；
 - 知识库不接收也不保存招投标 candidate/decision/report/pick；
 - 端口返回以后 live Document 的修改或删除，不改写调用方已冻结 artifact。
+
+### 2.1 knowledge-owned scope attestation
+
+知识库拥有检索 scope 的持久化 `kb_knowledge_attest_matching_scope_v1` / `kb_knowledge_verify_matching_scope_v1` 合同。招投标 schedule 只能把端口返回的 `eligible_versions` 与 `hits` 快照交给该合同；只有知识库函数可以将快照与 live Workspace/Product/ProductVersion/Document/chunk 关系比较。
+
+attest 成功后产生 immutable attestation ID、canonical payload 与 SHA-256。招投标 manifest 冻结 attestation ID/hash，deferred verifier 只能以 ID/hash/同一 payload 调用 knowledge verify；不得在招投标函数中直接 join 知识库表。attestation 证明 schedule 时的完整 scope 和 hit 来源，后续 live 资料变化不改写已发布 manifest/report。
 
 ## 3. 招投标边界
 

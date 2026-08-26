@@ -78,6 +78,10 @@ task_type = "bid:convert"
 state = "enabled"
 
 [[lanes]]
+task_type = "bid:prepare-attachment:v1"
+state = "enabled"
+
+[[lanes]]
 task_type = "bid:extract"
 state = "enabled"
 

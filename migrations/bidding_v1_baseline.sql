@@ -495,6 +495,8 @@ CREATE TABLE bid_matching_manifests (
     mutation_watermark bigint NOT NULL CHECK (mutation_watermark >= 0),
     requirement_set_sha256 kb_sha256 NOT NULL,
     eligible_scope_sha256 kb_sha256 NOT NULL,
+    knowledge_scope_attestation_id uuid NOT NULL,
+    knowledge_scope_attestation_sha256 kb_sha256 NOT NULL,
     canonical_payload bytea NOT NULL,
     content_sha256 kb_sha256 NOT NULL UNIQUE,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -787,6 +789,7 @@ DECLARE
   memberships_payload jsonb;
   hits_payload jsonb;
   expected_digest kb_sha256;
+  workspace_kinds text[];
   nil_unit constant uuid := '00000000-0000-0000-0000-000000000000'::uuid;
 BEGIN
   SELECT * INTO STRICT manifest_value
@@ -855,6 +858,8 @@ BEGIN
     'mutation_watermark',manifest_value.mutation_watermark,
     'requirement_set_sha256',manifest_value.requirement_set_sha256,
     'eligible_scope_sha256',manifest_value.eligible_scope_sha256,
+    'knowledge_scope_attestation_id',manifest_value.knowledge_scope_attestation_id,
+    'knowledge_scope_attestation_sha256',manifest_value.knowledge_scope_attestation_sha256,
     'routes',routes_payload,'requirements',requirements_payload,'products',products_payload,
     'memberships',memberships_payload,'frozen_hits',hits_payload
   );
@@ -952,116 +957,25 @@ BEGIN
     RAISE EXCEPTION 'MATCHING_MANIFEST_V1_SCOPE_DIGEST_MISMATCH' USING ERRCODE='23514';
   END IF;
 
+  SELECT COALESCE(array_agg(DISTINCT
+           CASE route.route_kind WHEN 'technical' THEN 'product_line' ELSE 'company' END
+           ORDER BY CASE route.route_kind WHEN 'technical' THEN 'product_line' ELSE 'company' END),
+         '{}'::text[])
+    INTO workspace_kinds
+    FROM bid_matching_requirement_artifacts requirement
+    JOIN bid_matching_routes route
+      ON route.manifest_id=requirement.manifest_id AND route.id=requirement.route_id
+   WHERE requirement.manifest_id=p_manifest_id;
+  PERFORM kb_knowledge_verify_matching_scope_v1(
+    manifest_value.knowledge_scope_attestation_id,
+    manifest_value.knowledge_scope_attestation_sha256,
+    jsonb_build_object(
+      'schema_version',1,
+      'workspace_kinds',to_jsonb(workspace_kinds),
+      'products',products_payload,
+      'frozen_hits',hits_payload));
+
   IF EXISTS(
-       SELECT 1
-         FROM bid_matching_product_version_artifacts artifact
-         LEFT JOIN product_versions version_value ON version_value.id=artifact.product_version_id
-         LEFT JOIN products product ON product.id=version_value.product_id
-         LEFT JOIN workspaces workspace_value ON workspace_value.id=product.workspace_id
-        WHERE artifact.manifest_id=p_manifest_id AND (
-          artifact.product_id IS NULL OR product.id IS NULL
-          OR artifact.product_id IS DISTINCT FROM product.id
-          OR artifact.workspace_kind IS DISTINCT FROM workspace_value.kind
-          OR (artifact.workspace_kind='product_line' AND product.kind IS DISTINCT FROM 'product')
-          OR (artifact.workspace_kind='company' AND product.kind IS DISTINCT FROM 'library')
-          OR version_value.status IS DISTINCT FROM 'active' OR version_value.deleted_at IS NOT NULL
-          OR product.current_version_id IS DISTINCT FROM version_value.id
-          OR artifact.frozen_display_name IS DISTINCT FROM artifact.product_version_id::text
-          OR artifact.identity_sha256 IS DISTINCT FROM encode(public.digest(convert_to(
-             'ProductVersionEvidenceV1:'||artifact.product_id::text||':'
-             ||artifact.product_version_id::text||':'||artifact.workspace_kind,'UTF8'),'sha256'),'hex')
-          OR NOT EXISTS(
-            SELECT 1
-              FROM documents document_value
-              JOIN chunks chunk_value
-                ON chunk_value.document_id=document_value.id
-               AND chunk_value.product_version_id=document_value.product_version_id
-             WHERE document_value.product_version_id=artifact.product_version_id
-               AND document_value.deleted_at IS NULL
-               AND document_value.enable_status='enabled' AND document_value.index_ready
-               AND octet_length(convert_to(chunk_value.content,'UTF8'))<=262144)
-          OR NOT EXISTS(
-            SELECT 1 FROM bid_matching_frozen_retrieved_hits hit
-             WHERE hit.manifest_id=p_manifest_id
-               AND hit.product_version_artifact_id=artifact.id)))
-     OR EXISTS(
-       SELECT 1
-         FROM workspaces workspace_value
-         JOIN products product ON product.workspace_id=workspace_value.id
-         JOIN product_versions version_value
-           ON version_value.product_id=product.id AND product.current_version_id=version_value.id
-        WHERE version_value.status='active' AND version_value.deleted_at IS NULL
-          AND ((workspace_value.kind='product_line' AND product.kind='product'
-                AND EXISTS(
-                  SELECT 1
-                    FROM bid_matching_requirement_artifacts requirement
-                    JOIN bid_matching_routes route
-                      ON route.manifest_id=requirement.manifest_id AND route.id=requirement.route_id
-                   WHERE requirement.manifest_id=p_manifest_id AND route.route_kind='technical'))
-            OR (workspace_value.kind='company' AND product.kind='library'
-                AND EXISTS(
-                  SELECT 1
-                    FROM bid_matching_requirement_artifacts requirement
-                    JOIN bid_matching_routes route
-                      ON route.manifest_id=requirement.manifest_id AND route.id=requirement.route_id
-                   WHERE requirement.manifest_id=p_manifest_id AND route.route_kind='commercial')))
-          AND EXISTS(
-            SELECT 1
-              FROM documents document_value
-              JOIN chunks chunk_value
-                ON chunk_value.document_id=document_value.id
-               AND chunk_value.product_version_id=document_value.product_version_id
-             WHERE document_value.product_version_id=version_value.id
-               AND document_value.deleted_at IS NULL
-               AND document_value.enable_status='enabled' AND document_value.index_ready
-               AND octet_length(convert_to(chunk_value.content,'UTF8'))<=262144)
-          AND NOT EXISTS(
-            SELECT 1
-              FROM bid_matching_product_version_artifacts artifact
-             WHERE artifact.manifest_id=p_manifest_id AND artifact.product_id=product.id
-               AND artifact.product_version_id=version_value.id
-               AND artifact.workspace_kind=workspace_value.kind))
-     OR EXISTS(
-       SELECT 1
-         FROM bid_matching_frozen_retrieved_hits hit
-         LEFT JOIN bid_matching_routes route
-           ON route.manifest_id=hit.manifest_id AND route.id=hit.route_id
-         LEFT JOIN bid_matching_requirement_artifacts requirement
-           ON requirement.manifest_id=hit.manifest_id AND requirement.route_id=hit.route_id
-          AND requirement.id=hit.requirement_artifact_id
-         LEFT JOIN bid_matching_product_version_artifacts artifact
-           ON artifact.manifest_id=hit.manifest_id AND artifact.id=hit.product_version_artifact_id
-         LEFT JOIN documents document_value ON document_value.id=hit.document_id
-         LEFT JOIN chunks chunk_value ON chunk_value.id=hit.source_chunk_id
-        WHERE hit.manifest_id=p_manifest_id AND (
-          route.id IS NULL OR requirement.id IS NULL OR artifact.id IS NULL
-          OR route.route_kind IS DISTINCT FROM
-             CASE artifact.workspace_kind WHEN 'product_line' THEN 'technical' ELSE 'commercial' END
-          OR document_value.product_version_id IS DISTINCT FROM artifact.product_version_id
-          OR chunk_value.product_version_id IS DISTINCT FROM artifact.product_version_id
-          OR chunk_value.document_id IS DISTINCT FROM hit.document_id
-          OR document_value.deleted_at IS NOT NULL
-          OR document_value.enable_status IS DISTINCT FROM 'enabled' OR NOT document_value.index_ready
-          OR hit.frozen_document_display_name IS DISTINCT FROM document_value.file_name
-          OR hit.chunk_utf8 IS DISTINCT FROM convert_to(chunk_value.content,'UTF8')
-          OR hit.retrieval_contract_version IS DISTINCT FROM 'knowledge-evidence-v1'))
-     OR EXISTS(
-       SELECT 1
-         FROM bid_matching_requirement_artifacts requirement
-         JOIN bid_matching_routes route
-           ON route.manifest_id=requirement.manifest_id AND route.id=requirement.route_id
-         JOIN bid_matching_product_version_artifacts artifact
-           ON artifact.manifest_id=requirement.manifest_id
-          AND artifact.workspace_kind=CASE WHEN route.route_kind='technical'
-                                           THEN 'product_line' ELSE 'company' END
-        WHERE requirement.manifest_id=p_manifest_id
-          AND NOT EXISTS(
-            SELECT 1
-              FROM bid_matching_frozen_retrieved_hits hit
-             WHERE hit.manifest_id=requirement.manifest_id AND hit.route_id=requirement.route_id
-               AND hit.requirement_artifact_id=requirement.id
-               AND hit.product_version_artifact_id=artifact.id))
-     OR EXISTS(
        SELECT 1
          FROM bid_matching_frozen_retrieved_hits hit
         WHERE hit.manifest_id=p_manifest_id
@@ -1086,14 +1000,9 @@ BEGIN
          LEFT JOIN bid_matching_routes route ON route.id=membership.route_id
          LEFT JOIN bid_matching_product_version_artifacts product
            ON product.id=membership.product_version_artifact_id
-        WHERE membership.manifest_id=p_manifest_id AND (
-          route.manifest_id IS DISTINCT FROM membership.manifest_id
-          OR product.manifest_id IS DISTINCT FROM membership.manifest_id
-          OR NOT EXISTS(
-            SELECT 1 FROM bid_matching_frozen_retrieved_hits hit
-             WHERE hit.manifest_id=membership.manifest_id
-               AND hit.route_id=membership.route_id
-               AND hit.product_version_artifact_id=membership.product_version_artifact_id)))
+        WHERE membership.manifest_id=p_manifest_id
+          AND (route.manifest_id IS DISTINCT FROM membership.manifest_id
+            OR product.manifest_id IS DISTINCT FROM membership.manifest_id))
      OR EXISTS(
        SELECT 1
          FROM bid_matching_frozen_retrieved_hits hit
@@ -2262,6 +2171,39 @@ CREATE TABLE bid_attachment_render_pages (
         REFERENCES bid_procedural_attachments(project_id, id) ON DELETE RESTRICT,
     CHECK (object_ref='objects/'||content_sha256)
 );
+CREATE TABLE bid_attachment_preparation_jobs (
+    id uuid PRIMARY KEY,
+    project_id uuid NOT NULL REFERENCES bid_projects(id) ON DELETE RESTRICT,
+    attachment_id uuid NOT NULL UNIQUE,
+    status text NOT NULL CHECK (status IN ('pending','running','completed','failed','cancelled')),
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 4),
+    max_attempts integer NOT NULL DEFAULT 4 CHECK (max_attempts=4),
+    claim_token uuid,
+    claim_lease_ms integer NOT NULL DEFAULT 300000 CHECK (claim_lease_ms=300000),
+    heartbeat_at timestamptz,
+    error_code text,
+    error_detail text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    started_at timestamptz,
+    finished_at timestamptz,
+    UNIQUE (project_id,id),
+    FOREIGN KEY (project_id,attachment_id)
+        REFERENCES bid_procedural_attachments(project_id,id) ON DELETE RESTRICT,
+    CHECK (
+      (status='pending' AND claim_token IS NULL AND heartbeat_at IS NULL AND finished_at IS NULL)
+      OR (status='running' AND claim_token IS NOT NULL AND heartbeat_at IS NOT NULL AND finished_at IS NULL)
+      OR (status='completed' AND claim_token IS NULL AND heartbeat_at IS NULL
+          AND error_code IS NULL AND finished_at IS NOT NULL)
+      OR (status='failed' AND claim_token IS NULL AND heartbeat_at IS NULL
+          AND error_code IS NOT NULL AND finished_at IS NOT NULL)
+      OR (status='cancelled' AND claim_token IS NULL AND heartbeat_at IS NULL
+          AND finished_at IS NOT NULL)
+    )
+);
+CREATE INDEX bid_attachment_preparation_jobs_pending_idx
+    ON bid_attachment_preparation_jobs(created_at,id) WHERE status='pending';
+CREATE INDEX bid_attachment_preparation_jobs_running_idx
+    ON bid_attachment_preparation_jobs(heartbeat_at,id) WHERE status='running';
 CREATE TABLE bid_procedural_decision_artifacts (
     id uuid PRIMARY KEY,
     project_id uuid NOT NULL REFERENCES bid_projects(id) ON DELETE RESTRICT,
@@ -4069,14 +4011,45 @@ JOIN bid_matching_candidate_artifacts candidate ON candidate.report_id=report.id
 JOIN bid_matching_product_version_artifacts product ON product.id=candidate.product_version_artifact_id;
 CREATE VIEW bidding_current_commercial_decisions AS
 SELECT report.project_id,report.route_id,decision.*,requirement.clause_id,
- source.frozen_document_display_name
+ explanatory_candidate.id AS explanatory_candidate_artifact_id,
+ explanatory_candidate.candidate_identity_sha256,
+ explanatory_candidate.evidence_v1_sha256,
+ COALESCE(explanatory_evidence.items,'[]'::jsonb) AS evidence_items
 FROM bidding_current_matching_reports report
 JOIN bid_matching_routes route ON route.id=report.route_id AND route.route_kind='commercial'
 JOIN bid_matching_requirement_decisions decision ON decision.report_id=report.id
 JOIN bid_matching_requirement_artifacts requirement ON requirement.id=decision.requirement_artifact_id
-LEFT JOIN bid_matching_candidate_artifacts candidate ON candidate.id=decision.selected_candidate_artifact_id
-LEFT JOIN bid_matching_evidence_artifacts evidence ON evidence.candidate_artifact_id=candidate.id AND evidence.ordinal=0
-LEFT JOIN bid_matching_source_artifacts source ON source.id=evidence.source_chunk_artifact_id;
+LEFT JOIN LATERAL (
+  SELECT candidate.*
+  FROM bid_matching_candidate_artifacts candidate
+  WHERE candidate.report_id=report.id
+    AND candidate.requirement_artifact_id=decision.requirement_artifact_id
+    AND (candidate.id=decision.selected_candidate_artifact_id
+      OR (decision.selected_candidate_artifact_id IS NULL
+        AND candidate.support=decision.final_support))
+  ORDER BY (candidate.id=decision.selected_candidate_artifact_id) DESC,
+    candidate.route_product_ordinal,candidate.retrieval_rank,
+    candidate.candidate_identity_sha256,candidate.evidence_v1_sha256
+  LIMIT 1
+) explanatory_candidate ON true
+LEFT JOIN LATERAL (
+  SELECT jsonb_agg(jsonb_build_object(
+    'evidence_artifact_id',evidence.id,
+    'source_chunk_artifact_id',evidence.source_chunk_artifact_id,
+    'document_id',evidence.document_id,
+    'document_display_name',evidence.document_display_name,
+    'source_chunk_id',evidence.source_chunk_id,
+    'source_chunk_sha256',evidence.source_chunk_sha256,
+    'quote',convert_from(evidence.quote_utf8,'UTF8'),
+    'start_offset',evidence.start_offset,
+    'end_offset',evidence.end_offset,
+    'offset_unit',evidence.offset_unit,
+    'ordinal',evidence.ordinal
+  ) ORDER BY evidence.ordinal) AS items
+  FROM bid_matching_evidence_artifacts evidence
+  WHERE evidence.report_id=report.id
+    AND evidence.candidate_artifact_id=explanatory_candidate.id
+) explanatory_evidence ON true;
 CREATE VIEW bidding_current_route_pick_sets AS
 SELECT artifact.*,current_value.revision AS current_revision
 FROM bid_current_route_pick_sets current_value
@@ -4215,7 +4188,18 @@ CREATE VIEW bidding_current_procedural_decisions AS
 SELECT decision.* FROM bid_procedural_decision_artifacts decision
 WHERE decision.lifecycle_status='current';
 CREATE VIEW bidding_current_attachments AS
-SELECT * FROM bid_procedural_attachments WHERE status IN ('draft','confirmed','rejected');
+SELECT attachment.*,
+       COALESCE(preparation.status,'not_required') AS preparation_status,
+       preparation.id AS preparation_job_id,
+       preparation.attempt_count AS preparation_attempt_count,
+       preparation.error_code AS preparation_error_code,
+       preparation.error_detail AS preparation_error_detail,
+       (SELECT count(*)::integer FROM bid_attachment_render_pages page
+         WHERE page.attachment_id=attachment.id) AS render_page_count
+  FROM bid_procedural_attachments attachment
+  LEFT JOIN bid_attachment_preparation_jobs preparation
+    ON preparation.attachment_id=attachment.id
+ WHERE attachment.status IN ('draft','confirmed','rejected');
 CREATE VIEW bidding_current_shot_sets AS
 SELECT artifact.* FROM bid_shot_set_artifacts artifact
 JOIN bid_current_shot_sets current_value ON current_value.shot_set_id=artifact.id;
@@ -5784,7 +5768,6 @@ $$;
 CREATE FUNCTION kb_bid_upload_attachment(
   p_staging_id uuid, p_id uuid, p_project_id uuid, p_kind text, p_object_ref kb_object_ref, p_digest kb_sha256,
   p_media_type text, p_byte_length bigint, p_pixel_width integer, p_pixel_height integer,
-  p_render_pages jsonb,
   p_actor kb_actor_identity, p_idempotency_key text, p_request_bytes bytea, p_request_sha256 kb_sha256
 )
 RETURNS jsonb
@@ -5793,20 +5776,12 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
 DECLARE replay bytea; project_value bid_projects%ROWTYPE; response jsonb; validation_payload jsonb;
- validation_digest kb_sha256; page jsonb; expected_page integer := 0; render_page_bytes bigint := 0;
+ validation_digest kb_sha256; preparation_job_id uuid; preparation_status text;
 BEGIN
   PERFORM kb_bid_require_human_actor(p_actor);
   replay := kb_bid_idempotency_begin(p_actor,'bid.attachment.upload',p_idempotency_key,p_request_bytes,p_request_sha256);
   IF replay IS NOT NULL THEN
     PERFORM kb_object_upload_abandon(p_staging_id,p_actor);
-    IF jsonb_typeof(p_render_pages)='array' THEN
-      FOR page IN SELECT value FROM jsonb_array_elements(p_render_pages) LOOP
-        BEGIN
-          PERFORM kb_object_upload_abandon((page->>'staging_id')::uuid,p_actor);
-        EXCEPTION WHEN OTHERS THEN NULL;
-        END;
-      END LOOP;
-    END IF;
     RETURN convert_from(replay,'UTF8')::jsonb;
   END IF;
   SELECT * INTO STRICT project_value FROM bid_projects WHERE id=p_project_id FOR UPDATE;
@@ -5820,12 +5795,143 @@ BEGIN
      OR (p_pixel_width IS NOT NULL AND (p_pixel_width NOT BETWEEN 1 AND 20000 OR p_pixel_height NOT BETWEEN 1 AND 20000)) THEN
     RAISE EXCEPTION 'ATTACHMENT_VALIDATION_INVALID' USING ERRCODE='22023';
   END IF;
+  validation_payload := jsonb_build_object('schema_version',1,'object_ref',p_object_ref,
+    'digest',p_digest,'media_type',p_media_type,'byte_length',p_byte_length,
+    'pixel_width',p_pixel_width,'pixel_height',p_pixel_height);
+  validation_digest := encode(public.digest(convert_to(validation_payload::text,'UTF8'),'sha256'),'hex');
+  PERFORM kb_object_upload_commit(p_staging_id,p_object_ref,p_digest,p_media_type,p_byte_length,
+    'bid_attachment',p_id,'original',p_actor);
+  INSERT INTO bid_procedural_attachments(id,project_id,kind,object_ref,content_sha256,media_type,byte_length,
+    pixel_width,pixel_height,validation_sha256,validation_status,status,revision,created_by)
+  VALUES(p_id,p_project_id,p_kind,p_object_ref,p_digest,p_media_type,p_byte_length,p_pixel_width,p_pixel_height,
+    validation_digest,'pending','draft',1,p_actor);
+  IF p_media_type='application/pdf' THEN
+    preparation_job_id := gen_random_uuid();
+    preparation_status := 'pending';
+    INSERT INTO bid_attachment_preparation_jobs(id,project_id,attachment_id,status)
+    VALUES(preparation_job_id,p_project_id,p_id,'pending');
+  ELSE
+    preparation_status := 'not_required';
+  END IF;
+  PERFORM kb_bid_stale_parts(p_project_id, ARRAY['5','6:authorization','6:procedural'], 'ATTACHMENT_CHANGED');
+  response := jsonb_build_object('id',p_id,'kind',p_kind,'validation_status','pending','status','draft',
+    'revision',1,'render_page_count',0,'preparation_status',preparation_status,
+    'preparation_job_id',preparation_job_id);
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
+    entity_kind,entity_locator,after_revision,after_sha256)
+  VALUES(gen_random_uuid(),1,'bid.attachment.upload',p_actor,p_idempotency_key,p_request_sha256,
+    encode(public.digest(convert_to(response::text,'UTF8'),'sha256'),'hex'),'bid_attachment',
+    jsonb_build_object('attachment_id',p_id),1,
+    encode(public.digest(convert_to(response::text,'UTF8'),'sha256'),'hex'));
+  PERFORM kb_bid_idempotency_complete(p_actor,'bid.attachment.upload',p_idempotency_key,201,convert_to(response::text,'UTF8'));
+  RETURN response;
+END
+$$;
+
+CREATE FUNCTION kb_bid_claim_attachment_preparation(p_job_id uuid,p_claim_token uuid)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE job_value bid_attachment_preparation_jobs%ROWTYPE;
+ attachment bid_procedural_attachments%ROWTYPE; project_key uuid; attachment_key uuid;
+BEGIN
+  SELECT project_id,attachment_id INTO project_key,attachment_key
+    FROM bid_attachment_preparation_jobs WHERE id=p_job_id;
+  IF project_key IS NULL THEN RETURN NULL; END IF;
+  PERFORM 1 FROM bid_projects WHERE id=project_key AND status='open' FOR UPDATE;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  SELECT * INTO STRICT attachment FROM bid_procedural_attachments
+   WHERE id=attachment_key FOR UPDATE;
+  SELECT * INTO STRICT job_value FROM bid_attachment_preparation_jobs WHERE id=p_job_id FOR UPDATE;
+  IF job_value.status<>'pending' OR attachment.status<>'draft'
+     OR attachment.validation_status<>'pending' OR attachment.media_type<>'application/pdf' THEN
+    RETURN NULL;
+  END IF;
+  IF job_value.attempt_count>=job_value.max_attempts THEN
+    UPDATE bid_attachment_preparation_jobs
+       SET status='failed',error_code='ATTEMPTS_EXHAUSTED',
+           error_detail='attachment preparation attempts exhausted',finished_at=clock_timestamp()
+     WHERE id=p_job_id;
+    RETURN NULL;
+  END IF;
+  UPDATE bid_attachment_preparation_jobs
+     SET status='running',attempt_count=attempt_count+1,claim_token=p_claim_token,
+         heartbeat_at=clock_timestamp(),started_at=COALESCE(started_at,clock_timestamp()),
+         finished_at=NULL,error_code=NULL,error_detail=NULL
+   WHERE id=p_job_id
+   RETURNING * INTO job_value;
+  RETURN jsonb_build_object(
+    'preparation_job_id',job_value.id,'project_id',job_value.project_id,
+    'attachment_id',job_value.attachment_id,'object_ref',attachment.object_ref,
+    'content_sha256',attachment.content_sha256,'byte_length',attachment.byte_length,
+    'attempt_count',job_value.attempt_count,'max_attempts',job_value.max_attempts,
+    'claim_lease_ms',job_value.claim_lease_ms);
+END
+$$;
+
+CREATE FUNCTION kb_bid_heartbeat_attachment_preparation(p_job_id uuid,p_claim_token uuid)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+  WITH changed AS (
+    UPDATE bid_attachment_preparation_jobs job
+       SET heartbeat_at=clock_timestamp()
+      FROM bid_projects project_value,bid_procedural_attachments attachment
+     WHERE job.id=p_job_id AND job.claim_token=p_claim_token AND job.status='running'
+       AND job.heartbeat_at+make_interval(secs=>job.claim_lease_ms/1000.0)>clock_timestamp()
+       AND project_value.id=job.project_id AND project_value.status='open'
+       AND attachment.id=job.attachment_id AND attachment.project_id=job.project_id
+       AND attachment.status='draft' AND attachment.validation_status='pending'
+    RETURNING 1)
+  SELECT EXISTS(SELECT 1 FROM changed)
+$$;
+
+CREATE FUNCTION kb_bid_publish_attachment_preparation(
+  p_job_id uuid,p_claim_token uuid,p_render_pages jsonb,p_actor kb_actor_identity
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE job_value bid_attachment_preparation_jobs%ROWTYPE;
+ attachment bid_procedural_attachments%ROWTYPE; project_value bid_projects%ROWTYPE;
+ page jsonb; expected_page integer:=0; render_page_bytes bigint:=0; project_key uuid; attachment_key uuid;
+BEGIN
+  IF p_actor<>'system:bid-attachment-preparation' THEN
+    RAISE EXCEPTION 'ATTACHMENT_PREPARATION_ACTOR_INVALID' USING ERRCODE='42501';
+  END IF;
+  SELECT project_id,attachment_id INTO project_key,attachment_key
+    FROM bid_attachment_preparation_jobs WHERE id=p_job_id;
+  IF project_key IS NULL THEN
+    RAISE EXCEPTION 'ATTACHMENT_PREPARATION_CLAIM_LOST' USING ERRCODE='40001';
+  END IF;
+  SELECT * INTO STRICT project_value FROM bid_projects WHERE id=project_key FOR UPDATE;
+  SELECT * INTO STRICT attachment FROM bid_procedural_attachments WHERE id=attachment_key FOR UPDATE;
+  SELECT * INTO STRICT job_value FROM bid_attachment_preparation_jobs WHERE id=p_job_id FOR UPDATE;
+  IF project_value.status<>'open' OR attachment.status<>'draft'
+     OR attachment.validation_status<>'pending' OR attachment.media_type<>'application/pdf'
+     OR job_value.status<>'running' OR job_value.claim_token<>p_claim_token
+     OR job_value.heartbeat_at+make_interval(secs=>job_value.claim_lease_ms/1000.0)<=clock_timestamp() THEN
+    RAISE EXCEPTION 'ATTACHMENT_PREPARATION_CLAIM_LOST' USING ERRCODE='40001';
+  END IF;
   IF jsonb_typeof(p_render_pages)<>'array'
-     OR (p_media_type='application/pdf' AND jsonb_array_length(p_render_pages) NOT BETWEEN 1 AND 512)
-     OR (p_media_type<>'application/pdf' AND jsonb_array_length(p_render_pages)<>0) THEN
+     OR jsonb_array_length(p_render_pages) NOT BETWEEN 1 AND 512 THEN
     RAISE EXCEPTION 'ATTACHMENT_RENDER_PAGE_SET_INVALID' USING ERRCODE='22023';
   END IF;
-  FOR page IN SELECT value FROM jsonb_array_elements(p_render_pages) LOOP
+  IF EXISTS (SELECT page_value->>'staging_id' FROM jsonb_array_elements(p_render_pages) page_value
+              GROUP BY page_value->>'staging_id' HAVING count(*)>1) THEN
+    RAISE EXCEPTION 'ATTACHMENT_RENDER_PAGE_SET_INVALID' USING ERRCODE='22023';
+  END IF;
+  FOR page IN SELECT value FROM jsonb_array_elements(p_render_pages)
+               ORDER BY (value->>'page_ordinal')::integer LOOP
+    IF jsonb_typeof(page)<>'object' THEN
+      RAISE EXCEPTION 'ATTACHMENT_RENDER_PAGE_SET_INVALID' USING ERRCODE='22023';
+    END IF;
     IF (SELECT array_agg(key ORDER BY key) FROM jsonb_object_keys(page) key)
          IS DISTINCT FROM ARRAY['byte_length','digest','media_type','object_ref','page_ordinal',
            'pixel_height','pixel_width','staging_id']::text[]
@@ -5837,44 +5943,111 @@ BEGIN
        OR (page->>'pixel_height')::integer NOT BETWEEN 1 AND 20000 THEN
       RAISE EXCEPTION 'ATTACHMENT_RENDER_PAGE_SET_INVALID' USING ERRCODE='22023';
     END IF;
-    render_page_bytes := render_page_bytes + (page->>'byte_length')::bigint;
-    expected_page := expected_page + 1;
+    render_page_bytes:=render_page_bytes+(page->>'byte_length')::bigint;
+    expected_page:=expected_page+1;
   END LOOP;
-  IF render_page_bytes>268435456 THEN
-    RAISE EXCEPTION 'ATTACHMENT_RENDER_PAGE_QUOTA_EXCEEDED' USING ERRCODE='22023';
+  IF render_page_bytes>268435456
+     OR EXISTS (SELECT 1 FROM bid_attachment_render_pages WHERE attachment_id=attachment.id) THEN
+    RAISE EXCEPTION 'ATTACHMENT_RENDER_PAGE_SET_INVALID' USING ERRCODE='22023';
   END IF;
-  validation_payload := jsonb_build_object('schema_version',1,'object_ref',p_object_ref,
-    'digest',p_digest,'media_type',p_media_type,'byte_length',p_byte_length,
-    'pixel_width',p_pixel_width,'pixel_height',p_pixel_height);
-  validation_digest := encode(public.digest(convert_to(validation_payload::text,'UTF8'),'sha256'),'hex');
-  PERFORM kb_object_upload_commit(p_staging_id,p_object_ref,p_digest,p_media_type,p_byte_length,
-    'bid_attachment',p_id,'original',p_actor);
-  INSERT INTO bid_procedural_attachments(id,project_id,kind,object_ref,content_sha256,media_type,byte_length,
-    pixel_width,pixel_height,validation_sha256,validation_status,status,revision,created_by)
-  VALUES(p_id,p_project_id,p_kind,p_object_ref,p_digest,p_media_type,p_byte_length,p_pixel_width,p_pixel_height,
-    validation_digest,'pending','draft',1,p_actor);
-  FOR page IN SELECT value FROM jsonb_array_elements(p_render_pages) ORDER BY (value->>'page_ordinal')::integer LOOP
+  FOR page IN SELECT value FROM jsonb_array_elements(p_render_pages)
+               ORDER BY (value->>'page_ordinal')::integer LOOP
     PERFORM kb_object_upload_commit((page->>'staging_id')::uuid,page->>'object_ref',page->>'digest',
-      page->>'media_type',(page->>'byte_length')::bigint,'bid_attachment_page',p_id,
+      page->>'media_type',(page->>'byte_length')::bigint,'bid_attachment_page',attachment.id,
       page->>'page_ordinal',p_actor);
     INSERT INTO bid_attachment_render_pages(attachment_id,project_id,page_ordinal,object_ref,content_sha256,
       media_type,byte_length,pixel_width,pixel_height)
-    VALUES(p_id,p_project_id,(page->>'page_ordinal')::integer,page->>'object_ref',page->>'digest',
-      page->>'media_type',(page->>'byte_length')::bigint,(page->>'pixel_width')::integer,
-      (page->>'pixel_height')::integer);
+    VALUES(attachment.id,attachment.project_id,(page->>'page_ordinal')::integer,page->>'object_ref',
+      page->>'digest',page->>'media_type',(page->>'byte_length')::bigint,
+      (page->>'pixel_width')::integer,(page->>'pixel_height')::integer);
   END LOOP;
-  PERFORM kb_bid_stale_parts(p_project_id, ARRAY['5','6:authorization','6:procedural'], 'ATTACHMENT_CHANGED');
-  response := jsonb_build_object('id',p_id,'kind',p_kind,'validation_status','pending','status','draft',
-    'revision',1,'render_page_count',expected_page);
-  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
-    entity_kind,entity_locator,after_revision,after_sha256)
-  VALUES(gen_random_uuid(),1,'bid.attachment.upload',p_actor,p_idempotency_key,p_request_sha256,
-    encode(public.digest(convert_to(response::text,'UTF8'),'sha256'),'hex'),'bid_attachment',
-    jsonb_build_object('attachment_id',p_id),1,
-    encode(public.digest(convert_to(response::text,'UTF8'),'sha256'),'hex'));
-  PERFORM kb_bid_idempotency_complete(p_actor,'bid.attachment.upload',p_idempotency_key,201,convert_to(response::text,'UTF8'));
-  RETURN response;
+  UPDATE bid_attachment_preparation_jobs
+     SET status='completed',claim_token=NULL,heartbeat_at=NULL,error_code=NULL,error_detail=NULL,
+         finished_at=clock_timestamp()
+   WHERE id=p_job_id;
+  RETURN jsonb_build_object('preparation_job_id',p_job_id,'attachment_id',attachment.id,
+    'status','completed','render_page_count',expected_page);
 END
+$$;
+
+CREATE FUNCTION kb_bid_fail_attachment_preparation(
+  p_job_id uuid,p_claim_token uuid,p_error_code text,p_error_detail text,p_retryable boolean
+)
+RETURNS text
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE job_value bid_attachment_preparation_jobs%ROWTYPE;
+ attachment bid_procedural_attachments%ROWTYPE; project_value bid_projects%ROWTYPE;
+ project_key uuid; attachment_key uuid; next_status text;
+BEGIN
+  SELECT project_id,attachment_id INTO project_key,attachment_key
+    FROM bid_attachment_preparation_jobs WHERE id=p_job_id;
+  IF project_key IS NULL THEN RETURN NULL; END IF;
+  SELECT * INTO STRICT project_value FROM bid_projects WHERE id=project_key FOR UPDATE;
+  SELECT * INTO STRICT attachment FROM bid_procedural_attachments WHERE id=attachment_key FOR UPDATE;
+  SELECT * INTO STRICT job_value FROM bid_attachment_preparation_jobs WHERE id=p_job_id FOR UPDATE;
+  IF job_value.status<>'running' OR job_value.claim_token<>p_claim_token
+     OR job_value.heartbeat_at+make_interval(secs=>job_value.claim_lease_ms/1000.0)<=clock_timestamp() THEN
+    RETURN NULL;
+  END IF;
+  next_status:=CASE
+    WHEN project_value.status<>'open' OR attachment.status<>'draft' THEN 'cancelled'
+    WHEN p_retryable AND job_value.attempt_count<job_value.max_attempts THEN 'pending'
+    ELSE 'failed' END;
+  UPDATE bid_attachment_preparation_jobs
+     SET status=next_status,claim_token=NULL,heartbeat_at=NULL,
+         error_code=left(COALESCE(NULLIF(p_error_code,''),'ATTACHMENT_PREPARATION_FAILED'),128),
+         error_detail=left(COALESCE(NULLIF(p_error_detail,''),'attachment preparation failed'),2048),
+         finished_at=CASE WHEN next_status IN ('failed','cancelled') THEN clock_timestamp() ELSE NULL END
+   WHERE id=p_job_id;
+  RETURN next_status;
+END
+$$;
+
+CREATE FUNCTION kb_bid_reap_attachment_preparations()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE rec record; job_value bid_attachment_preparation_jobs%ROWTYPE;
+ project_value bid_projects%ROWTYPE; attachment bid_procedural_attachments%ROWTYPE;
+ next_status text; reaped integer:=0;
+BEGIN
+  FOR rec IN SELECT id,project_id,attachment_id FROM bid_attachment_preparation_jobs
+              WHERE status='running'
+                AND heartbeat_at+make_interval(secs=>claim_lease_ms/1000.0)<=clock_timestamp()
+              ORDER BY id LOOP
+    SELECT * INTO STRICT project_value FROM bid_projects WHERE id=rec.project_id FOR UPDATE;
+    SELECT * INTO STRICT attachment FROM bid_procedural_attachments WHERE id=rec.attachment_id FOR UPDATE;
+    SELECT * INTO STRICT job_value FROM bid_attachment_preparation_jobs WHERE id=rec.id FOR UPDATE;
+    CONTINUE WHEN job_value.status<>'running'
+      OR job_value.heartbeat_at+make_interval(secs=>job_value.claim_lease_ms/1000.0)>clock_timestamp();
+    next_status:=CASE
+      WHEN project_value.status<>'open' OR attachment.status<>'draft' THEN 'cancelled'
+      WHEN job_value.attempt_count<job_value.max_attempts THEN 'pending'
+      ELSE 'failed' END;
+    UPDATE bid_attachment_preparation_jobs
+       SET status=next_status,claim_token=NULL,heartbeat_at=NULL,error_code='CLAIM_LEASE_EXPIRED',
+           error_detail='attachment preparation claim lease expired',
+           finished_at=CASE WHEN next_status IN ('failed','cancelled') THEN clock_timestamp() ELSE NULL END
+     WHERE id=rec.id;
+    reaped:=reaped+1;
+  END LOOP;
+  RETURN reaped;
+END
+$$;
+
+CREATE FUNCTION kb_bid_pending_attachment_preparations()
+RETURNS uuid[]
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+  SELECT COALESCE(array_agg(id ORDER BY created_at,id),'{}'::uuid[])
+    FROM bid_attachment_preparation_jobs WHERE status='pending'
 $$;
 
 CREATE FUNCTION kb_bid_mutate_attachment(
@@ -5907,6 +6080,11 @@ BEGIN
          'pixel_width',attach.pixel_width,'pixel_height',attach.pixel_height)::text,'UTF8'),'sha256'),'hex') THEN
       RAISE EXCEPTION 'ATTACHMENT_VALIDATION_IDENTITY_MISMATCH' USING ERRCODE='23514';
     END IF;
+    IF attach.media_type='application/pdf' AND NOT EXISTS (
+      SELECT 1 FROM bid_attachment_preparation_jobs preparation
+       WHERE preparation.attachment_id=attach.id AND preparation.status='completed') THEN
+      RAISE EXCEPTION 'ATTACHMENT_PREPARATION_INCOMPLETE' USING ERRCODE='55000';
+    END IF;
     IF (attach.media_type='application/pdf' AND (
           NOT EXISTS (SELECT 1 FROM bid_attachment_render_pages page WHERE page.attachment_id=attach.id)
           OR EXISTS (
@@ -5932,9 +6110,19 @@ BEGIN
     UPDATE bid_procedural_attachments SET status='confirmed', revision=revision+1, updated_at=clock_timestamp()
      WHERE id=p_attachment_id RETURNING * INTO attach;
   ELSIF p_action='reject' THEN
+    UPDATE bid_attachment_preparation_jobs
+       SET status='cancelled',claim_token=NULL,heartbeat_at=NULL,
+           error_code='ATTACHMENT_REJECTED',error_detail='attachment rejected by user',
+           finished_at=clock_timestamp()
+     WHERE attachment_id=attach.id AND status IN ('pending','running');
     UPDATE bid_procedural_attachments SET status='rejected', revision=revision+1, updated_at=clock_timestamp()
      WHERE id=p_attachment_id RETURNING * INTO attach;
   ELSIF p_action='delete' THEN
+    UPDATE bid_attachment_preparation_jobs
+       SET status='cancelled',claim_token=NULL,heartbeat_at=NULL,
+           error_code='ATTACHMENT_DELETED',error_detail='attachment deleted by user',
+           finished_at=clock_timestamp()
+     WHERE attachment_id=attach.id AND status IN ('pending','running');
     PERFORM kb_object_reference_remove(attach.object_ref,'bid_attachment',attach.id,'original');
     PERFORM kb_object_reference_remove(page.object_ref,'bid_attachment_page',attach.id,page.page_ordinal::text)
       FROM bid_attachment_render_pages page WHERE page.attachment_id=attach.id;
@@ -7856,7 +8044,8 @@ SET search_path = pg_catalog, public
 AS $$
 DECLARE project_value bid_projects%ROWTYPE; generation bigint; manifest_id uuid;
  item jsonb; membership jsonb; job_ids uuid[] := '{}'; job_id uuid; replay bytea;
- existing_manifest bid_matching_manifests%ROWTYPE; response jsonb;
+ existing_manifest bid_matching_manifests%ROWTYPE; response jsonb; verified_payload jsonb;
+ knowledge_scope jsonb; knowledge_attestation jsonb; workspace_kinds jsonb;
 BEGIN
   IF p_actor <> 'system:matching-publication' THEN
     PERFORM kb_bid_require_human_actor(p_actor);
@@ -7902,11 +8091,30 @@ BEGIN
   END IF;
   SELECT COALESCE(max(m.generation),0)+1 INTO generation FROM bid_matching_manifests m WHERE m.project_id=p_project_id;
   manifest_id := (p_payload->>'manifest_id')::uuid;
+  SELECT COALESCE(jsonb_agg(kind ORDER BY kind),'[]'::jsonb)
+    INTO workspace_kinds
+    FROM (
+      SELECT DISTINCT CASE route->>'route_kind'
+        WHEN 'technical' THEN 'product_line' ELSE 'company' END AS kind
+        FROM jsonb_array_elements(p_payload->'requirements') requirement
+        JOIN jsonb_array_elements(p_payload->'routes') route
+          ON route->>'id'=requirement->>'route_id'
+    ) required_kinds;
+  knowledge_scope := jsonb_build_object(
+    'schema_version',1,
+    'workspace_kinds',workspace_kinds,
+    'products',COALESCE(p_payload->'products','[]'::jsonb),
+    'frozen_hits',COALESCE(p_payload->'frozen_hits','[]'::jsonb));
+  knowledge_attestation := kb_knowledge_attest_matching_scope_v1(knowledge_scope);
+  verified_payload := p_payload || jsonb_build_object(
+    'knowledge_scope_attestation_id',(knowledge_attestation->>'id')::uuid,
+    'knowledge_scope_attestation_sha256',knowledge_attestation->>'content_sha256');
   INSERT INTO bid_matching_manifests(id,project_id,generation,mutation_watermark,requirement_set_sha256,eligible_scope_sha256,
-    canonical_payload,content_sha256)
+    knowledge_scope_attestation_id,knowledge_scope_attestation_sha256,canonical_payload,content_sha256)
   VALUES(manifest_id,p_project_id,generation,p_expected_watermark,p_payload->>'requirement_set_sha256',
-    p_payload->>'eligible_scope_sha256', convert_to(p_payload::text,'UTF8'),
-    encode(public.digest(convert_to(p_payload::text,'UTF8'),'sha256'),'hex'));
+    p_payload->>'eligible_scope_sha256',(knowledge_attestation->>'id')::uuid,
+    knowledge_attestation->>'content_sha256',convert_to(verified_payload::text,'UTF8'),
+    encode(public.digest(convert_to(verified_payload::text,'UTF8'),'sha256'),'hex'));
   FOR item IN SELECT value FROM jsonb_array_elements(p_payload->'routes') LOOP
     INSERT INTO bid_matching_routes(id,manifest_id,project_id,route_kind,unit_id,ordinal,empty_policy,route_scope_sha256)
     VALUES((item->>'id')::uuid,manifest_id,p_project_id,item->>'route_kind',NULLIF(item->>'unit_id','')::uuid,
@@ -7954,9 +8162,9 @@ BEGIN
     entity_kind,entity_locator,after_revision,after_sha256
   ) VALUES(
     gen_random_uuid(),1,'bid.matching.schedule',p_actor,p_idempotency_key,p_request_sha256,
-    encode(public.digest(convert_to(response::text,'UTF8'),'sha256'),'hex'),'bid_matching_manifest',
-    jsonb_build_object('project_id',p_project_id,'manifest_id',manifest_id),generation,
-    encode(public.digest(convert_to(p_payload::text,'UTF8'),'sha256'),'hex')
+      encode(public.digest(convert_to(response::text,'UTF8'),'sha256'),'hex'),'bid_matching_manifest',
+      jsonb_build_object('project_id',p_project_id,'manifest_id',manifest_id),generation,
+    encode(public.digest(convert_to(verified_payload::text,'UTF8'),'sha256'),'hex')
   );
   PERFORM kb_bid_idempotency_complete(
     p_actor,'bid.matching.schedule',p_idempotency_key,202,convert_to(response::text,'UTF8')
@@ -8565,7 +8773,7 @@ GRANT EXECUTE ON FUNCTION
  kb_bid_update_submission_profile(uuid,bigint,text,text,text,date,text,boolean,boolean,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_override_procedural_classification(uuid,uuid,text,text,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_resolve_procedural_requirement(uuid,uuid,text,uuid,text,kb_actor_identity,text,bytea,kb_sha256),
- kb_bid_upload_attachment(uuid,uuid,uuid,text,kb_object_ref,kb_sha256,text,bigint,integer,integer,jsonb,kb_actor_identity,text,bytea,kb_sha256),
+ kb_bid_upload_attachment(uuid,uuid,uuid,text,kb_object_ref,kb_sha256,text,bigint,integer,integer,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_mutate_attachment(uuid,uuid,text,integer,text,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_upload_shot_artifact(uuid,uuid,uuid,kb_object_ref,kb_sha256,text,bigint,integer,integer,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_replace_shot_set(uuid,bigint,uuid[],kb_actor_identity,text,bytea,kb_sha256),
@@ -8596,6 +8804,12 @@ GRANT EXECUTE ON FUNCTION
  kb_bid_pending_conversions(),
  kb_bid_reclaim_stale_extractions(),
  kb_bid_pending_extractions(),
+ kb_bid_claim_attachment_preparation(uuid,uuid),
+ kb_bid_heartbeat_attachment_preparation(uuid,uuid),
+ kb_bid_publish_attachment_preparation(uuid,uuid,jsonb,kb_actor_identity),
+ kb_bid_fail_attachment_preparation(uuid,uuid,text,text,boolean),
+ kb_bid_reap_attachment_preparations(),
+ kb_bid_pending_attachment_preparations(),
  kb_bid_dirty_match_projects(),
  kb_bid_matching_schedule(uuid,bigint,integer,jsonb,kb_actor_identity,text,bytea,kb_sha256),
  kb_bid_matching_claim(uuid,uuid),

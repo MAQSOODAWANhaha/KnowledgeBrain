@@ -174,6 +174,13 @@ pub struct BidConvertJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
+#[oxana(unique_id = "bid:prepare-attachment:v1:{preparation_job_id}", on_conflict = Skip)]
+pub struct BidPrepareAttachmentV1Job {
+    pub preparation_job_id: Uuid,
+    pub task_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
 #[oxana(unique_id = "bid:extract:{run_id}", on_conflict = Skip)]
 pub struct BidExtractJob {
     pub run_id: Uuid,
@@ -966,6 +973,26 @@ pub async fn enqueue_bid_convert(document_id: Uuid) -> Result<Option<String>, St
     )
 }
 
+pub async fn enqueue_bid_prepare_attachment_v1(
+    preparation_job_id: Uuid,
+) -> Result<Option<String>, String> {
+    let Ok(storage) = connect() else {
+        return Ok(None);
+    };
+    tracing::debug!(%preparation_job_id,job="bid:prepare-attachment:v1","enqueue");
+    oxana_id(
+        storage
+            .enqueue(
+                BidConvertV1Queue,
+                BidPrepareAttachmentV1Job {
+                    preparation_job_id,
+                    task_type: domain::TYPE_BID_PREPARE_ATTACHMENT_V1.to_string(),
+                },
+            )
+            .await,
+    )
+}
+
 pub async fn enqueue_bid_extract(
     run_id: Uuid,
     project_id: Uuid,
@@ -1197,9 +1224,14 @@ mod tests {
     fn bid_extract_pipeline_queues_keep_durable_ids_and_leave_default() {
         let document_id = Uuid::from_u128(1);
         let run_id = Uuid::from_u128(2);
+        let preparation_job_id = Uuid::from_u128(3);
         let convert = BidConvertJob {
             document_id,
             task_type: domain::TYPE_BID_CONVERT.to_string(),
+        };
+        let prepare = BidPrepareAttachmentV1Job {
+            preparation_job_id,
+            task_type: domain::TYPE_BID_PREPARE_ATTACHMENT_V1.to_string(),
         };
         let extract = BidExtractJob {
             run_id,
@@ -1210,6 +1242,10 @@ mod tests {
         assert_eq!(
             <BidConvertJob as oxana::Job>::unique_id(&convert),
             Some(format!("bid:convert:{document_id}"))
+        );
+        assert_eq!(
+            <BidPrepareAttachmentV1Job as oxana::Job>::unique_id(&prepare),
+            Some(format!("bid:prepare-attachment:v1:{preparation_job_id}"))
         );
         assert_eq!(
             <BidExtractJob as oxana::Job>::unique_id(&extract),
@@ -1225,6 +1261,10 @@ mod tests {
         }
         assert_eq!(
             crate::queue_for(domain::TYPE_BID_CONVERT),
+            domain::QUEUE_BID_CONVERT_V1
+        );
+        assert_eq!(
+            crate::queue_for(domain::TYPE_BID_PREPARE_ATTACHMENT_V1),
             domain::QUEUE_BID_CONVERT_V1
         );
         assert_eq!(
@@ -1412,11 +1452,18 @@ mod tests {
             .expect("wipe bid-extract-v1");
         let before_default = storage.enqueued_count(DefaultQueue).await.unwrap();
         let convert_id = Uuid::new_v4();
+        let preparation_id = Uuid::new_v4();
         let extract_id = Uuid::new_v4();
         assert!(
             enqueue_bid_convert(convert_id)
                 .await
                 .expect("convert")
+                .is_some()
+        );
+        assert!(
+            enqueue_bid_prepare_attachment_v1(preparation_id)
+                .await
+                .expect("attachment preparation")
                 .is_some()
         );
         assert!(

@@ -3,10 +3,11 @@
 use async_trait::async_trait;
 use runtime::{
     BidConvertJob, BidConvertV1Queue, BidExtractJob, BidExtractV1Queue, BidMatchRouteV1Job,
-    BidMatchingV1Queue, BidRenderSubmissionV1Job, BidRenderV1Queue, DatatableJob, DefaultQueue,
-    DocumentProcessJob, ExtractJob, HousekeepJob, ImageMultimodalJob, IndexDeleteJob, KbDeleteJob,
-    ListDeleteJob, ListReparseJob, LowQueue, PostProcessJob, PostprocessQueue, QuestionJob,
-    SummaryJob, SummaryQueue, VersionCloneJob, WikiFinalizeJob, WikiIngestJob, WikiQueue,
+    BidMatchingV1Queue, BidPrepareAttachmentV1Job, BidRenderSubmissionV1Job, BidRenderV1Queue,
+    DatatableJob, DefaultQueue, DocumentProcessJob, ExtractJob, HousekeepJob, ImageMultimodalJob,
+    IndexDeleteJob, KbDeleteJob, ListDeleteJob, ListReparseJob, LowQueue, PostProcessJob,
+    PostprocessQueue, QuestionJob, SummaryJob, SummaryQueue, VersionCloneJob, WikiFinalizeJob,
+    WikiIngestJob, WikiQueue,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -1539,6 +1540,16 @@ impl oxana::Worker<HousekeepJob> for HousekeepWorker {
                 let _ = runtime::enqueue_bid_convert(id).await;
             }
         }
+        if let Ok(reaped) = storage::bid_submission::reap_attachment_preparations(pool).await
+            && reaped > 0
+        {
+            tracing::warn!(reaped, "attachment preparation claims reaped");
+        }
+        if let Ok(ids) = storage::bid_submission::pending_attachment_preparations(pool).await {
+            for preparation_job_id in ids {
+                let _ = runtime::enqueue_bid_prepare_attachment_v1(preparation_job_id).await;
+            }
+        }
         if let Ok(stale) = storage::bid_submission::reclaim_stale_extractions(pool).await {
             for (target_id, project_id, document_id) in stale {
                 tracing::warn!(target_id = %target_id, project_id = %project_id, "bid extract reclaim");
@@ -1628,6 +1639,295 @@ impl oxana::Worker<BidConvertJob> for BidConvertWorker {
         let _ = runtime::enqueue_bid_extract(target_id, document.project_id, Some(job.document_id))
             .await;
         Ok(())
+    }
+}
+
+const ATTACHMENT_PREPARATION_ACTOR: &str = "system:bid-attachment-preparation";
+
+pub struct BidPrepareAttachmentV1Handler {
+    pool: Option<PgPool>,
+}
+
+impl oxana::FromContext<AppCtx> for BidPrepareAttachmentV1Handler {
+    fn from_context(ctx: &AppCtx) -> Self {
+        Self {
+            pool: ctx.pool.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl oxana::Worker<BidPrepareAttachmentV1Job> for BidPrepareAttachmentV1Handler {
+    type Error = JobErr;
+
+    fn max_retries(&self, _job: &BidPrepareAttachmentV1Job) -> u32 {
+        3
+    }
+
+    async fn process(
+        &self,
+        job: BidPrepareAttachmentV1Job,
+        _ctx: &oxana::JobContext,
+    ) -> Result<(), Self::Error> {
+        let Some(pool) = &self.pool else {
+            return Err(JobErr("postgres not configured".into()));
+        };
+        let claim_token = Uuid::new_v4();
+        let Some(claim) = storage::bid_submission::claim_attachment_preparation(
+            pool,
+            job.preparation_job_id,
+            claim_token,
+        )
+        .await
+        .map_err(|error| JobErr(error.to_string()))?
+        else {
+            return Ok(());
+        };
+        let preparation = runtime::run_with_heartbeat(
+            std::time::Duration::from_millis(claim.claim_lease_ms as u64),
+            prepare_attachment_pdf_pages(pool, &claim, claim_token),
+            || async {
+                storage::bid_submission::heartbeat_attachment_preparation(
+                    pool,
+                    claim.preparation_job_id,
+                    claim_token,
+                )
+                .await
+                .map_err(|error| error.to_string())
+            },
+        )
+        .await;
+        let result = match preparation {
+            runtime::LeaseRun::Completed(result) => result,
+            runtime::LeaseRun::Lost => {
+                tracing::warn!(
+                    preparation_job_id=%claim.preparation_job_id,
+                    attachment_id=%claim.attachment_id,
+                    "attachment preparation stopped after losing its claim lease"
+                );
+                return Ok(());
+            }
+            runtime::LeaseRun::HeartbeatFailed(error) => Err(error),
+        };
+        match result {
+            Ok(_) => Ok(()),
+            Err(detail) => {
+                let error_code = attachment_preparation_error_code(&detail);
+                let retryable = attachment_preparation_error_retryable(error_code);
+                let status = storage::bid_submission::fail_attachment_preparation(
+                    pool,
+                    claim.preparation_job_id,
+                    claim_token,
+                    error_code,
+                    &detail,
+                    retryable,
+                )
+                .await
+                .map_err(|error| JobErr(error.to_string()))?;
+                match status.as_deref() {
+                    Some("pending") => Err(JobErr(detail)),
+                    Some("failed") => {
+                        tracing::error!(
+                            preparation_job_id=%claim.preparation_job_id,
+                            attachment_id=%claim.attachment_id,
+                            %error_code,
+                            "attachment preparation reached durable failed state"
+                        );
+                        Ok(())
+                    }
+                    Some("cancelled") | None => Ok(()),
+                    Some(other) => Err(JobErr(format!(
+                        "attachment preparation returned invalid status {other}"
+                    ))),
+                }
+            }
+        }
+    }
+}
+
+async fn prepare_attachment_pdf_pages(
+    pool: &PgPool,
+    claim: &storage::bid_submission::AttachmentPreparationClaim,
+    claim_token: Uuid,
+) -> Result<serde_json::Value, String> {
+    let digest = claim.content_sha256.clone();
+    let expected_bytes = claim.byte_length;
+    let expected_ref = claim.object_ref.clone();
+    let bytes = tokio::task::spawn_blocking(move || {
+        let bytes = storage::read_blob(&digest)
+            .map_err(|error| format!("ATTACHMENT_SOURCE_BYTES_MISSING: {error}"))?;
+        let metadata = storage::bid_submission::validate_upload_bytes(&bytes, true)
+            .map_err(|error| format!("ATTACHMENT_SOURCE_INVALID: {error}"))?;
+        if domain::sha256_hex(&bytes) != digest
+            || storage::object_ref(&digest) != expected_ref
+            || metadata.media_type != "application/pdf"
+            || metadata.byte_length != expected_bytes
+        {
+            return Err("ATTACHMENT_SOURCE_IDENTITY_MISMATCH".to_string());
+        }
+        Ok::<_, String>(bytes)
+    })
+    .await
+    .map_err(|error| format!("ATTACHMENT_SOURCE_READ_TASK_FAILED: {error}"))??;
+    let overrides = std::collections::HashMap::from([("pdf_force_scanned".into(), "true".into())]);
+    let converted = docparser::convert_with(docparser::ConvertInput {
+        engine: "builtin",
+        file_name: "attachment.pdf",
+        file_type: "pdf",
+        is_url: false,
+        bytes,
+        url: "",
+        title: "attachment.pdf",
+        overrides: &overrides,
+    })
+    .await
+    .map_err(|error| format!("ATTACHMENT_PDF_RENDER_FAILED: {error}"))?;
+    if !converted.error.is_empty() {
+        return Err(format!("ATTACHMENT_PDF_RENDER_FAILED: {}", converted.error));
+    }
+    let page_count = converted
+        .metadata
+        .get("page_count")
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| "ATTACHMENT_RENDER_PAGE_SET_INVALID: page count missing".to_string())?;
+    if !(1..=512).contains(&page_count) || converted.images.len() != page_count {
+        return Err("ATTACHMENT_RENDER_PAGE_SET_INVALID: page count mismatch".into());
+    }
+    let mut staging = AttachmentPageStagingGuard::new(pool.clone());
+    let mut pages = Vec::with_capacity(page_count);
+    let mut total_bytes = 0usize;
+    for (page_ordinal, image) in converted.images.into_iter().enumerate() {
+        let page_bytes = image.data;
+        let (page_bytes, metadata) = tokio::task::spawn_blocking(move || {
+            let metadata = storage::bid_submission::validate_upload_bytes(&page_bytes, false)
+                .map_err(|error| format!("ATTACHMENT_RENDER_PAGE_INVALID: {error}"))?;
+            Ok::<_, String>((page_bytes, metadata))
+        })
+        .await
+        .map_err(|error| format!("ATTACHMENT_RENDER_PAGE_TASK_FAILED: {error}"))??;
+        total_bytes = total_bytes
+            .checked_add(page_bytes.len())
+            .ok_or_else(|| "ATTACHMENT_RENDER_PAGE_QUOTA_EXCEEDED".to_string())?;
+        if total_bytes > 256 * 1024 * 1024 {
+            return Err("ATTACHMENT_RENDER_PAGE_QUOTA_EXCEEDED".into());
+        }
+        let page_digest = domain::sha256_hex(&page_bytes);
+        let page_object_ref = storage::object_ref(&page_digest);
+        let staging_id = Uuid::new_v4();
+        // Register the identity before the cancellable database await. The
+        // server may commit staging even when this future is dropped before it
+        // receives the response; the guard must still know what to abandon.
+        staging.push(staging_id);
+        storage::stage_object_upload(
+            pool,
+            staging_id,
+            &page_object_ref,
+            &page_digest,
+            metadata.media_type,
+            metadata.byte_length,
+            ATTACHMENT_PREPARATION_ACTOR,
+        )
+        .await
+        .map_err(|error| format!("ATTACHMENT_RENDER_PAGE_STAGE_FAILED: {error}"))?;
+        storage::write_blob_async(&page_digest, &page_bytes)
+            .await
+            .map_err(|error| format!("ATTACHMENT_RENDER_PAGE_WRITE_FAILED: {error}"))?;
+        pages.push(serde_json::json!({
+            "staging_id":staging_id,
+            "page_ordinal":page_ordinal,
+            "object_ref":page_object_ref,
+            "digest":page_digest,
+            "media_type":metadata.media_type,
+            "byte_length":metadata.byte_length,
+            "pixel_width":metadata.pixel_width,
+            "pixel_height":metadata.pixel_height,
+        }));
+    }
+    let published = storage::bid_submission::publish_attachment_preparation(
+        pool,
+        claim.preparation_job_id,
+        claim_token,
+        &serde_json::Value::Array(pages),
+        ATTACHMENT_PREPARATION_ACTOR,
+    )
+    .await
+    .map_err(|error| format!("ATTACHMENT_PREPARATION_PUBLISH_FAILED: {error}"))?;
+    staging.disarm();
+    Ok(published)
+}
+
+fn attachment_preparation_error_code(detail: &str) -> &'static str {
+    for code in [
+        "ATTACHMENT_SOURCE_BYTES_MISSING",
+        "ATTACHMENT_SOURCE_READ_TASK_FAILED",
+        "ATTACHMENT_SOURCE_INVALID",
+        "ATTACHMENT_SOURCE_IDENTITY_MISMATCH",
+        "ATTACHMENT_PDF_RENDER_FAILED",
+        "ATTACHMENT_RENDER_PAGE_SET_INVALID",
+        "ATTACHMENT_RENDER_PAGE_INVALID",
+        "ATTACHMENT_RENDER_PAGE_TASK_FAILED",
+        "ATTACHMENT_RENDER_PAGE_QUOTA_EXCEEDED",
+        "ATTACHMENT_RENDER_PAGE_STAGE_FAILED",
+        "ATTACHMENT_RENDER_PAGE_WRITE_FAILED",
+        "ATTACHMENT_PREPARATION_CLAIM_LOST",
+        "ATTACHMENT_PREPARATION_PUBLISH_FAILED",
+    ] {
+        if detail.contains(code) {
+            return code;
+        }
+    }
+    "ATTACHMENT_PREPARATION_FAILED"
+}
+
+fn attachment_preparation_error_retryable(code: &str) -> bool {
+    matches!(
+        code,
+        "ATTACHMENT_SOURCE_BYTES_MISSING"
+            | "ATTACHMENT_SOURCE_READ_TASK_FAILED"
+            | "ATTACHMENT_RENDER_PAGE_TASK_FAILED"
+            | "ATTACHMENT_RENDER_PAGE_STAGE_FAILED"
+            | "ATTACHMENT_RENDER_PAGE_WRITE_FAILED"
+            | "ATTACHMENT_PREPARATION_PUBLISH_FAILED"
+            | "ATTACHMENT_PREPARATION_FAILED"
+    )
+}
+
+struct AttachmentPageStagingGuard {
+    pool: PgPool,
+    staging_ids: Vec<Uuid>,
+}
+
+impl AttachmentPageStagingGuard {
+    fn new(pool: PgPool) -> Self {
+        Self {
+            pool,
+            staging_ids: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, staging_id: Uuid) {
+        self.staging_ids.push(staging_id);
+    }
+
+    fn disarm(&mut self) {
+        self.staging_ids.clear();
+    }
+}
+
+impl Drop for AttachmentPageStagingGuard {
+    fn drop(&mut self) {
+        if self.staging_ids.is_empty() {
+            return;
+        }
+        let pool = self.pool.clone();
+        let staging_ids = std::mem::take(&mut self.staging_ids);
+        tokio::spawn(async move {
+            for staging_id in staging_ids {
+                let _ =
+                    storage::abandon_object_upload(&pool, staging_id, ATTACHMENT_PREPARATION_ACTOR)
+                        .await;
+            }
+        });
     }
 }
 
@@ -3188,6 +3488,7 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
                 4,
             ))
             .worker::<BidConvertWorker, BidConvertJob>()
+            .worker::<BidPrepareAttachmentV1Handler, BidPrepareAttachmentV1Job>()
             .queue_with_concurrency::<BidExtractV1Queue>(runtime::runtime_concurrency(
                 "BID_EXTRACT",
                 4,
@@ -3384,6 +3685,111 @@ mod tests {
                 "detail: {detail}"
             );
         }
+    }
+
+    #[test]
+    fn attachment_preparation_failure_classification_is_deterministic() {
+        let cases = [
+            (
+                "ATTACHMENT_SOURCE_BYTES_MISSING: object store unavailable",
+                "ATTACHMENT_SOURCE_BYTES_MISSING",
+                true,
+            ),
+            (
+                "ATTACHMENT_SOURCE_READ_TASK_FAILED: cancelled",
+                "ATTACHMENT_SOURCE_READ_TASK_FAILED",
+                true,
+            ),
+            (
+                "ATTACHMENT_SOURCE_INVALID: PDF_STRUCTURE_INVALID",
+                "ATTACHMENT_SOURCE_INVALID",
+                false,
+            ),
+            (
+                "ATTACHMENT_SOURCE_IDENTITY_MISMATCH",
+                "ATTACHMENT_SOURCE_IDENTITY_MISMATCH",
+                false,
+            ),
+            (
+                "ATTACHMENT_PDF_RENDER_FAILED: invalid xref",
+                "ATTACHMENT_PDF_RENDER_FAILED",
+                false,
+            ),
+            (
+                "ATTACHMENT_PREPARATION_PUBLISH_FAILED: ATTACHMENT_RENDER_PAGE_SET_INVALID",
+                "ATTACHMENT_RENDER_PAGE_SET_INVALID",
+                false,
+            ),
+            (
+                "ATTACHMENT_RENDER_PAGE_INVALID: image/tiff",
+                "ATTACHMENT_RENDER_PAGE_INVALID",
+                false,
+            ),
+            (
+                "ATTACHMENT_RENDER_PAGE_TASK_FAILED: cancelled",
+                "ATTACHMENT_RENDER_PAGE_TASK_FAILED",
+                true,
+            ),
+            (
+                "ATTACHMENT_RENDER_PAGE_QUOTA_EXCEEDED",
+                "ATTACHMENT_RENDER_PAGE_QUOTA_EXCEEDED",
+                false,
+            ),
+            (
+                "ATTACHMENT_RENDER_PAGE_STAGE_FAILED: database unavailable",
+                "ATTACHMENT_RENDER_PAGE_STAGE_FAILED",
+                true,
+            ),
+            (
+                "ATTACHMENT_RENDER_PAGE_WRITE_FAILED: object store unavailable",
+                "ATTACHMENT_RENDER_PAGE_WRITE_FAILED",
+                true,
+            ),
+            (
+                "ATTACHMENT_PREPARATION_PUBLISH_FAILED: ATTACHMENT_PREPARATION_CLAIM_LOST",
+                "ATTACHMENT_PREPARATION_CLAIM_LOST",
+                false,
+            ),
+            (
+                "ATTACHMENT_PREPARATION_PUBLISH_FAILED: deadlock detected",
+                "ATTACHMENT_PREPARATION_PUBLISH_FAILED",
+                true,
+            ),
+            (
+                "unexpected attachment preparation failure",
+                "ATTACHMENT_PREPARATION_FAILED",
+                true,
+            ),
+        ];
+
+        for (detail, expected_code, expected_retryable) in cases {
+            let error_code = attachment_preparation_error_code(detail);
+            assert_eq!(error_code, expected_code, "detail: {detail}");
+            assert_eq!(
+                attachment_preparation_error_retryable(error_code),
+                expected_retryable,
+                "detail: {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_preparation_worker_matches_durable_contract() {
+        let worker = BidPrepareAttachmentV1Handler { pool: None };
+        let job = BidPrepareAttachmentV1Job {
+            preparation_job_id: Uuid::from_u128(1),
+            task_type: domain::TYPE_BID_PREPARE_ATTACHMENT_V1.to_string(),
+        };
+
+        assert_eq!(
+            ATTACHMENT_PREPARATION_ACTOR,
+            "system:bid-attachment-preparation"
+        );
+        assert_eq!(
+            oxana::Worker::<BidPrepareAttachmentV1Job>::max_retries(&worker, &job),
+            3,
+            "one initial attempt plus three queue retries must match four durable attempts"
+        );
     }
 
     async fn db_lock() -> tokio::sync::MutexGuard<'static, ()> {

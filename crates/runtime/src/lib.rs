@@ -58,7 +58,7 @@ pub fn queue_for(task_type: &str) -> &'static str {
     }
     match task_type {
         domain::TYPE_DOCUMENT_PROCESS | domain::TYPE_MANUAL_PROCESS => QUEUE_DEFAULT,
-        domain::TYPE_BID_CONVERT => QUEUE_BID_CONVERT_V1,
+        domain::TYPE_BID_CONVERT | domain::TYPE_BID_PREPARE_ATTACHMENT_V1 => QUEUE_BID_CONVERT_V1,
         domain::TYPE_BID_EXTRACT => QUEUE_BID_EXTRACT_V1,
         domain::TYPE_BID_MATCH_ROUTE_V1 => QUEUE_BID_MATCHING_V1,
         domain::TYPE_BID_RENDER_SUBMISSION_V1 => QUEUE_BID_RENDER_V1,
@@ -148,6 +148,10 @@ mod tests {
             domain::QUEUE_BID_CONVERT_V1
         );
         assert_eq!(
+            queue_for(domain::TYPE_BID_PREPARE_ATTACHMENT_V1),
+            domain::QUEUE_BID_CONVERT_V1
+        );
+        assert_eq!(
             queue_for(domain::TYPE_BID_EXTRACT),
             domain::QUEUE_BID_EXTRACT_V1
         );
@@ -223,6 +227,7 @@ mod tests {
             .collect();
         for constant in [
             domain::TYPE_BID_CONVERT,
+            domain::TYPE_BID_PREPARE_ATTACHMENT_V1,
             domain::TYPE_BID_EXTRACT,
             domain::TYPE_BID_MATCH_ROUTE_V1,
             domain::TYPE_BID_RENDER_SUBMISSION_V1,

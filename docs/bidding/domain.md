@@ -170,6 +170,8 @@ KindRouter contract promotion 只自动重算满足全部条件的 clause：未�
 ## 9. 匹配与选择
 
 - technical route 按确认后的技术单元执行，另允许唯一 unsectioned technical route；commercial route 项目级执行。
+- route membership 来自知识库端口返回的完整 eligible version scope；有限 hit 集不能截断 membership，eligible 但无 hit 仍必须保留并生成 `NO_EVIDENCE`。
+- schedule 只消费 knowledge-owned scope attestation，不允许招投标 verifier 直接 join live Workspace/ProductVersion/Document/chunk 表。
 - 每个 eligible requirement 恰有一个 `RequirementDecisionV1`。
 - support 聚合优先级固定为 `supported > unresolved > insufficient > contradicted > no-evidence`。
 - 有 supported 候选时系统按冻结 comparator 给出 recommended，但保留全部 supported 候选；用户可选择 1..N 个，不宣称唯一最佳。
@@ -213,7 +215,7 @@ DOCX 可以带 warning 和明确 placeholder，便于过程协作；正式 PDF �
 
 - 固定公司/投标 profile 字段完整，签字和盖章确认有效；
 - 所有 current procedural segment 有 current classification 和 resolution；
-- 所需附件已验证、已确认且种类匹配，或 durable actor 明确标记 not applicable 并给出原因；
+- 所需附件已完成必要的 durable preparation、已验证、已确认且种类匹配，或 durable actor 明确标记 not applicable 并给出原因；
 - 不存在待 KindRouter 重新确认条款；
 - 存在 current eligible finalized quote；
 - 不存在投标有效期冲突；

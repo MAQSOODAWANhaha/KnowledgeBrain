@@ -15,6 +15,7 @@ AS $$
     SELECT value ~ '^(user|api_key):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
         OR value IN (
             'system:bid-convert-worker',
+            'system:bid-attachment-preparation',
             'system:bid-extraction-worker',
             'system:clause-lifecycle',
             'system:first-launch',

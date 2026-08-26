@@ -45,6 +45,19 @@ pub struct SubmissionRenderClaim {
     pub claim_lease_ms: i32,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AttachmentPreparationClaim {
+    pub preparation_job_id: Uuid,
+    pub project_id: Uuid,
+    pub attachment_id: Uuid,
+    pub object_ref: String,
+    pub content_sha256: String,
+    pub byte_length: i64,
+    pub attempt_count: i32,
+    pub max_attempts: i32,
+    pub claim_lease_ms: i32,
+}
+
 fn protocol(message: impl Into<String>) -> sqlx::Error {
     sqlx::Error::Protocol(message.into())
 }
@@ -290,7 +303,6 @@ pub struct UploadAttachment<'a> {
     pub byte_length: i64,
     pub pixel_width: Option<i32>,
     pub pixel_height: Option<i32>,
-    pub render_pages: &'a Value,
 }
 
 pub async fn upload_attachment(
@@ -299,7 +311,7 @@ pub async fn upload_attachment(
     context: &MutationContext,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT kb_bid_upload_attachment($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+        "SELECT kb_bid_upload_attachment($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
     )
     .bind(input.staging_id)
     .bind(input.id)
@@ -311,13 +323,86 @@ pub async fn upload_attachment(
     .bind(input.byte_length)
     .bind(input.pixel_width)
     .bind(input.pixel_height)
-    .bind(input.render_pages)
     .bind(&context.actor)
     .bind(&context.idempotency_key)
     .bind(&context.request.bytes)
     .bind(&context.request.sha256)
     .fetch_one(pool)
     .await
+}
+
+pub async fn claim_attachment_preparation(
+    pool: &PgPool,
+    preparation_job_id: Uuid,
+    claim_token: Uuid,
+) -> Result<Option<AttachmentPreparationClaim>, sqlx::Error> {
+    let value: Option<Value> =
+        sqlx::query_scalar("SELECT kb_bid_claim_attachment_preparation($1,$2)")
+            .bind(preparation_job_id)
+            .bind(claim_token)
+            .fetch_one(pool)
+            .await?;
+    value
+        .map(|value| serde_json::from_value(value).map_err(|error| protocol(error.to_string())))
+        .transpose()
+}
+
+pub async fn heartbeat_attachment_preparation(
+    pool: &PgPool,
+    preparation_job_id: Uuid,
+    claim_token: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_heartbeat_attachment_preparation($1,$2)")
+        .bind(preparation_job_id)
+        .bind(claim_token)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn publish_attachment_preparation(
+    pool: &PgPool,
+    preparation_job_id: Uuid,
+    claim_token: Uuid,
+    render_pages: &Value,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_publish_attachment_preparation($1,$2,$3,$4)")
+        .bind(preparation_job_id)
+        .bind(claim_token)
+        .bind(render_pages)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn fail_attachment_preparation(
+    pool: &PgPool,
+    preparation_job_id: Uuid,
+    claim_token: Uuid,
+    error_code: &str,
+    error_detail: &str,
+    retryable: bool,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_fail_attachment_preparation($1,$2,$3,$4,$5)")
+        .bind(preparation_job_id)
+        .bind(claim_token)
+        .bind(error_code)
+        .bind(error_detail)
+        .bind(retryable)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn reap_attachment_preparations(pool: &PgPool) -> Result<i32, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_reap_attachment_preparations()")
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn pending_attachment_preparations(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar("SELECT COALESCE(kb_bid_pending_attachment_preparations(),'{}'::uuid[])")
+        .fetch_one(pool)
+        .await
 }
 
 pub async fn mutate_attachment(

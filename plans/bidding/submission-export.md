@@ -2,7 +2,7 @@
 
 本文定义 `Submission` 深模块。它只消费其它模块已经发布的 identity/artifact，不读取临时 candidate、live quote draft 或知识库 live rows。
 
-> 实施状态（2026-08-24）：RequiredPartSet、manifest、durable render job、worker publish、冻结程序附件、manifest-only DOCX/PDF renderer，以及 `6:quote` 的结构化 DOCX table / PDF grid seam 均已落位，并通过隔离 fresh Compose 的真实 DOCX/PDF、恢复与对象生命周期验收；生产未部署。
+> 实施状态（2026-08-26）：RequiredPartSet、manifest、durable render job、冻结程序附件、manifest-only DOCX/PDF renderer 和 `6:quote` table/grid seam 已落位；PDF 程序附件已改为 durable preparation。当前 Rust、强制活库 SQL/HTTP 与 mocked 浏览器回归已通过并提交；未 push、未部署、未完成 fresh runtime acceptance。
 
 ## 1. 输出语义
 
@@ -209,7 +209,18 @@ actor/timestamps
 
 upload/replace/delete/validate/confirm/reject 是独立 typed operation，使用 expected revision + idempotency。validated object artifact 与 attachment 通过 project composite FK 和 ObjectRegistry reference 互证。
 
-只有 `validation_status=valid AND status=confirmed` 才能满足 Gate。附件集合按 kind 维护 revision/digest，任何变化在同一事务 stale 对应 part。
+图片上传完成后 `preparation_status=not_required`，不创建 preparation job。PDF 上传路径只校验并提交原对象，在同一业务事务创建 durable preparation job，返回 `preparation_status=pending` 和稳定 `preparation_job_id`；Redis enqueue 只是 best effort，pending job 必须能由 housekeep 重新入队。
+
+PDF preparation 使用 durable task `bid:prepare-attachment:v1`，复用物理队列 `bid-convert-v1`，handler 为 `BidPrepareAttachmentV1Handler`，durable actor 为 `system:bid-attachment-preparation`：
+
+- worker 以 claim token、lease 和后台 heartbeat 读取原对象并调用 DocReader；
+- 每个有序页面先取得 ObjectRegistry upload staging reference；
+- publish 在单一事务中验证 claim/lease、连续 ordinal、MIME/bytes/pixels/总配额，把全部 staging 转成 page owner reference，并原子写 completed status；
+- claim 丢失、render/staging/publish 失败或 future 被取消时 abandon 尚未发布的 staging；
+- retryable failure 回 pending，确定性失败/耗尽尝试进入 failed，过期 claim 由 reaper 回收；
+- reject/delete 会将 pending/running job 置为 cancelled、清除 claim，从而 fence 旧 worker。
+
+PDF preparation 未完成时 validate 必须返回 `ATTACHMENT_PREPARATION_INCOMPLETE`；PDF 必须 `preparation_status=completed`，图片必须 `preparation_status=not_required`，并同时满足 `validation_status=valid AND status=confirmed`，才能通过对应 Gate。附件集合按 kind 维护 revision/digest，任何变化在同一事务 stale 对应 part。
 
 ## 6. PickSet 与技术 parts
 
@@ -387,7 +398,7 @@ HTTP render endpoint 只校验 manifest identity/renderer contract，先幂等�
 - DOCX 图片按 `560×870px` 内容框双向等比缩小且不放大；PDF 图片按 A4 `178×265mm` 内容框双向等比缩小，必要时先换页。
 - PDF 正文使用冻结字体的 glyph advance 在 A4 内容宽度内换行，不能按字符数猜测 CJK 行宽。
 - 程序附件按 manifest ordinal 冻结；图片直接渲染，PDF 原件必须附带有序的冻结页面图片，renderer 不在运行时重新转换原件。
-- `6:quote` 输出结构化 DOCX table 与 PDF grid；renderer focused tests 分别检查 DOCX 原生表格节点与 PDF grid 绘制命令，隔离 fresh runtime 的正式报价渲染也已通过。
+- `6:quote` 输出结构化 DOCX table 与 PDF grid；renderer focused tests 分别检查 DOCX 原生表格节点与 PDF grid 绘制命令，fresh runtime 正式报价渲染必须另行验收。
 
 ## 12. 模板 contract promotion
 
@@ -429,7 +440,8 @@ promote_procedural_router/template_contract (maintenance only)
 - implementation plan 只读 ServiceClauseSet+ProjectPickSet+delivery；
 - manual/manual_after_edit 中文 segment offsets、编号/小数边界和 golden classifier；
 - classification/decision successor XOR terminal、KindRouter promotion terminal/rebuild；
-- attachment kind/validation/current identity；
+- attachment kind/validation/current identity，图片不创建 preparation job；
+- PDF preparation incomplete gate、claim/heartbeat/reaper fencing、cancel fencing、连续页面集合和 publish 失败零 page owner/page row；
 - GateIssue exact locator 与 DOCX/PDF 矩阵；
 - quote NULL placeholder 与 active eligible snapshot 同一性；
 - part edit/regenerate CAS 和 complete stale graph；

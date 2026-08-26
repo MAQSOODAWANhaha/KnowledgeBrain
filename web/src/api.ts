@@ -299,7 +299,22 @@ export type BidDetail = {
       system_decision?: string;
       final_support?: string;
       reason_code?: string;
-      frozen_document_display_name?: string;
+      explanatory_candidate_artifact_id?: string | null;
+      candidate_identity_sha256?: string | null;
+      evidence_v1_sha256?: string | null;
+      evidence_items?: Array<{
+        evidence_artifact_id: string;
+        source_chunk_artifact_id: string;
+        document_id: string;
+        document_display_name: string;
+        source_chunk_id: string;
+        source_chunk_sha256: string;
+        quote: string;
+        start_offset: number;
+        end_offset: number;
+        offset_unit: "utf8_byte";
+        ordinal: number;
+      }>;
     }>;
     technical_candidates: Candidate[];
     project_pick_set?: { payload?: { items?: unknown[] } } | null;
