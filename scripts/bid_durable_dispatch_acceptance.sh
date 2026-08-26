@@ -22,7 +22,7 @@ require_enabled() {
 reject_skip_or_empty() {
   contract_id=$1
   log=$2
-  if grep -Eiq 'skip runtime test|skipped live|skipped redis|skipped required' "$log"; then
+  if grep -Eiq '^skip .*redis|skip runtime test|skipped live|skipped redis|skipped required|\.\.\. ignored$|test result:.*[1-9][0-9]* ignored' "$log"; then
     fail "$contract_id used a skip path"
   fi
 }
@@ -38,8 +38,8 @@ require_contract_id() {
   contract_id=$1
   test_name=$2
   log=$3
-  grep -Fq "$test_name" "$log" \
-    || fail "required test $test_name is missing for $contract_id"
+  grep -Fxq "test $test_name ... ok" "$log" \
+    || fail "required test $test_name did not finish with an exact ok result for $contract_id"
   printf 'verified required contract ID: %s\n' "$contract_id" | tee -a "$log"
 }
 
@@ -65,6 +65,8 @@ run_logged oxana-registry-source "$ARTIFACT_DIR/logs/oxana-registry-source.log" 
   scripts/verify_oxana_registry_source.sh --self-test
 run_logged work-transport-pure "$ARTIFACT_DIR/logs/work-transport.log" \
   cargo test -p runtime --test work_transport -- --nocapture
+run_logged work-transport-registry-negative "$ARTIFACT_DIR/logs/work-transport-registry-negative.log" \
+  cargo test -p runtime work_transport::registry_tests::tampered_registry_closure_fails_closed -- --exact --nocapture
 run_logged runtime-pure-and-legacy "$ARTIFACT_DIR/logs/runtime-jobs.log" \
   cargo test -p runtime jobs::tests -- --nocapture
 run_logged work-transport-live "$ARTIFACT_DIR/logs/work-transport-live.log" \
@@ -79,8 +81,24 @@ require_contract_id \
   bid_delivery_v1_prepare_rejects_contract_drift \
   "$ARTIFACT_DIR/logs/work-transport.log"
 require_contract_id \
+  runtime.work_transport.bid_delivery_v1.payload_verifier_negative \
+  bid_delivery_v1_payload_verifier_rejects_each_frozen_field \
+  "$ARTIFACT_DIR/logs/work-transport.log"
+require_contract_id \
+  runtime.work_transport.bid_delivery_v1.registry_positive \
+  published_registry_closure_is_valid \
+  "$ARTIFACT_DIR/logs/work-transport.log"
+require_contract_id \
+  runtime.work_transport.bid_delivery_v1.registry_negative \
+  work_transport::registry_tests::tampered_registry_closure_fails_closed \
+  "$ARTIFACT_DIR/logs/work-transport-registry-negative.log"
+require_contract_id \
   runtime.work_transport.bid_delivery_v1.recording_once \
   recording_transport_observes_zero_or_one_enqueue_per_offer \
+  "$ARTIFACT_DIR/logs/work-transport.log"
+require_contract_id \
+  runtime.work_transport.bid_delivery_v1.metrics_readiness \
+  transport_metrics_drive_degraded_recovery_without_overriding_fatal \
   "$ARTIFACT_DIR/logs/work-transport.log"
 require_contract_id \
   runtime.work_transport.bid_delivery_v1.worker_max_retries_zero \
@@ -95,14 +113,23 @@ require_contract_id \
   stable_adapter_uses_storage_enqueue_unique_skip_and_resurrect_metadata \
   "$ARTIFACT_DIR/logs/work-transport-live.log"
 require_contract_id \
+  runtime.work_transport.bid_delivery_v1.live_redis_unreachable \
+  stable_adapter_classifies_unreachable_redis_as_indeterminate_once \
+  "$ARTIFACT_DIR/logs/work-transport-live.log"
+require_contract_id \
   runtime.work_transport.bid_delivery_v1.live_native_resurrection \
   oxana_native_resurrection_restores_dead_processing_membership \
+  "$ARTIFACT_DIR/logs/work-transport-live.log"
+require_contract_id \
+  runtime.work_transport.bid_delivery_v1.live_worker_dead_once \
+  bid_delivery_worker_failure_is_attempted_once_and_moved_dead \
   "$ARTIFACT_DIR/logs/work-transport-live.log"
 require_contract_id \
   runtime.jobs.legacy_replay.mixed_membership \
   jobs::tests::legacy_replay_mixed_list_can_move_bid_delivery_membership \
   "$ARTIFACT_DIR/logs/runtime-jobs.log"
 require_nonzero_tests work-transport-pure "$ARTIFACT_DIR/logs/work-transport.log"
+require_nonzero_tests work-transport-registry-negative "$ARTIFACT_DIR/logs/work-transport-registry-negative.log"
 require_nonzero_tests runtime-pure-and-legacy "$ARTIFACT_DIR/logs/runtime-jobs.log"
 require_nonzero_tests work-transport-live "$ARTIFACT_DIR/logs/work-transport-live.log"
 

@@ -22,6 +22,15 @@ run_token_file() {
   printf '%s/run-token\n' "$RECEIPT_DIR"
 }
 
+load_run_token() {
+  token_file=$(run_token_file)
+  [ -f "$token_file" ] || fail "cleanup run token is missing"
+  RUN_TOKEN=$(sed -n '1p' "$token_file")
+  [ -n "$RUN_TOKEN" ] || fail "cleanup run token is empty"
+  [ "$RUN_TOKEN" = "$(sanitize_token "$RUN_TOKEN")" ] \
+    || fail "cleanup run token is invalid"
+}
+
 project_for() {
   mode_token=$(sanitize_token "$1")
   printf 'kb-dd-%s-%s\n' "$RUN_TOKEN" "$mode_token"
@@ -228,9 +237,10 @@ case_cleanup() {
 
 run_case_process() {
   CASE_MODE=$1
-  CASE_PROJECT=$2
-  CASE_IMAGE=$3
-  CASE_COMPOSE_FILE=$4
+  expected_status_for "$CASE_MODE" >/dev/null
+  CASE_PROJECT=$(project_for "$CASE_MODE")
+  CASE_IMAGE=$(image_for "$CASE_MODE")
+  CASE_COMPOSE_FILE=$(compose_file_for "$CASE_MODE")
 
   trap case_cleanup EXIT
   trap 'exit 129' HUP
@@ -323,13 +333,10 @@ exercise() {
   prepare_exercise
 
   for mode in $REQUIRED_MODES; do
-    project=$(project_for "$mode")
-    image=$(image_for "$mode")
-    compose_file=$(compose_file_for "$mode")
     expected_status=$(expected_status_for "$mode")
 
     set +e
-    "$0" __case "$mode" "$project" "$image" "$compose_file"
+    "$0" __case "$mode"
     actual_status=$?
     set -e
     [ "$actual_status" -eq "$expected_status" ] \
@@ -343,10 +350,7 @@ exercise() {
 ci_cleanup() {
   command -v docker >/dev/null 2>&1 || fail "docker is required"
   docker compose version >/dev/null 2>&1 || fail "docker compose is required"
-  token_file=$(run_token_file)
-  [ -f "$token_file" ] || fail "cleanup run token is missing"
-  RUN_TOKEN=$(sed -n '1p' "$token_file")
-  [ -n "$RUN_TOKEN" ] || fail "cleanup run token is empty"
+  load_run_token
 
   ci_ok=1
   for mode in $REQUIRED_MODES; do
@@ -405,13 +409,9 @@ case "${1:-}" in
     ci_cleanup
     ;;
   __case)
-    [ "$#" -eq 5 ] || fail "internal cleanup case requires mode/project/image/compose"
-    if [ -f "$(run_token_file)" ]; then
-      RUN_TOKEN=$(sed -n '1p' "$(run_token_file)")
-    else
-      fail "cleanup run token is missing"
-    fi
-    run_case_process "$2" "$3" "$4" "$5"
+    [ "$#" -eq 2 ] || fail "internal cleanup case requires mode"
+    load_run_token
+    run_case_process "$2"
     ;;
   *)
     fail "usage: $0 exercise|ci-cleanup"

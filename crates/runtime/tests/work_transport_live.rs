@@ -1,8 +1,17 @@
 use runtime::{
-    BID_DELIVERY_V1_PAYLOAD_VERSION, BID_DELIVERY_V1_TASK_TYPE, BidConvertV1Queue, DeliverySpec,
-    OxanaStableAdapter, TransportOutcome, WorkTransport, prepare_bid_delivery_v1,
+    BID_DELIVERY_V1_PAYLOAD_VERSION, BID_DELIVERY_V1_TASK_TYPE, BidConvertV1Queue,
+    BidDeliveryV1Handler, BidDeliveryV1Job, BidDeliveryV1WorkerAdapter, DeliverySpec,
+    ObservedBidDeliveryV1, OxanaStableAdapter, TransportErrorClass, TransportOutcome,
+    WorkTransport, WorkTransportReadiness, prepare_bid_delivery_v1,
 };
-use std::{sync::Arc, time::Duration, time::Instant};
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+    time::Instant,
+};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -80,6 +89,39 @@ async fn cleanup_namespace(storage: &oxana::Storage) {
 }
 
 #[tokio::test]
+async fn stable_adapter_classifies_unreachable_redis_as_indeterminate_once() {
+    let storage = oxana::Storage::builder()
+        .namespace(format!(
+            "oxanus:work-transport-unreachable:{}",
+            Uuid::new_v4()
+        ))
+        .build_from_redis_url("redis://127.0.0.1:1/")
+        .expect("configure unreachable Redis storage");
+    let transport = OxanaStableAdapter::new(storage).expect("registry closure");
+    let prepared = prepared_delivery(Uuid::new_v4());
+    let deadline = Instant::now() + Duration::from_secs(2);
+
+    assert_eq!(
+        transport.offer(&prepared, deadline).await,
+        TransportOutcome::Indeterminate {
+            error_class: TransportErrorClass::RedisUnavailable
+        }
+    );
+    assert!(
+        Instant::now() < deadline,
+        "connection refusal must beat the hard deadline"
+    );
+    assert_eq!(transport.readiness(), WorkTransportReadiness::Degraded);
+    let metrics = transport.metrics_snapshot();
+    assert_eq!(metrics.offers_created, 1);
+    assert_eq!(metrics.offers_started, 1);
+    assert_eq!(metrics.enqueue_attempts, 1);
+    assert_eq!(metrics.indeterminate, 1);
+    assert_eq!(metrics.redis_unavailable, 1);
+    assert_eq!(metrics.timeout_after_start, 0);
+}
+
+#[tokio::test]
 async fn stable_adapter_uses_storage_enqueue_unique_skip_and_resurrect_metadata() {
     let Some(storage) =
         live_storage("stable_adapter_uses_storage_enqueue_unique_skip_and_resurrect_metadata")
@@ -90,7 +132,7 @@ async fn stable_adapter_uses_storage_enqueue_unique_skip_and_resurrect_metadata(
     let dispatch_id = Uuid::new_v4();
     let prepared = prepared_delivery(dispatch_id);
     let expected_job_id = prepared.expected_job_id().to_string();
-    let transport = OxanaStableAdapter::new(storage.clone());
+    let transport = OxanaStableAdapter::new(storage.clone()).expect("registry closure");
 
     assert_eq!(
         transport
@@ -144,6 +186,16 @@ async fn stable_adapter_uses_storage_enqueue_unique_skip_and_resurrect_metadata(
             .expect("count queue after Skip"),
         1
     );
+    let diagnostics = transport
+        .diagnostics_snapshot()
+        .await
+        .expect("public monitoring diagnostics");
+    assert_eq!(diagnostics.convert_depth, 1);
+    assert_eq!(diagnostics.dead_count, 0);
+    assert_eq!(
+        transport.readiness(),
+        runtime::WorkTransportReadiness::Ready
+    );
     cleanup_namespace(&storage).await;
 }
 
@@ -157,7 +209,7 @@ async fn oxana_native_resurrection_restores_dead_processing_membership() {
     let dispatch_id = Uuid::new_v4();
     let prepared = prepared_delivery(dispatch_id);
     let expected_job_id = prepared.expected_job_id().to_string();
-    let transport = OxanaStableAdapter::new(storage.clone());
+    let transport = OxanaStableAdapter::new(storage.clone()).expect("registry closure");
     assert!(matches!(
         transport
             .offer(&prepared, Instant::now() + Duration::from_secs(5))
@@ -239,6 +291,10 @@ async fn oxana_native_resurrection_restores_dead_processing_membership() {
         .await
         .expect("verify dead processing list drained");
     let processing_drained = processing_members.is_empty();
+    let diagnostics = transport
+        .diagnostics_snapshot()
+        .await
+        .expect("public monitoring diagnostics");
     cleanup_namespace(&storage).await;
     resurrection_result.expect("Oxana native resurrection must restore membership");
     runtime_result.expect("Oxana runtime must stop cleanly");
@@ -246,4 +302,126 @@ async fn oxana_native_resurrection_restores_dead_processing_membership() {
         processing_drained,
         "dead processing membership must be drained"
     );
+    assert!(diagnostics.resurrection_enabled);
+}
+
+#[derive(Clone)]
+struct FailingWorkerContext {
+    attempts: Arc<AtomicUsize>,
+    observed_job_ids: Arc<Mutex<Vec<String>>>,
+}
+
+struct FailingHandler {
+    attempts: Arc<AtomicUsize>,
+    observed_job_ids: Arc<Mutex<Vec<String>>>,
+}
+
+impl oxana::FromContext<FailingWorkerContext> for FailingHandler {
+    fn from_context(context: &FailingWorkerContext) -> Self {
+        Self {
+            attempts: context.attempts.clone(),
+            observed_job_ids: context.observed_job_ids.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FailingHandlerError;
+
+impl std::fmt::Display for FailingHandlerError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("expected live worker failure")
+    }
+}
+
+impl std::error::Error for FailingHandlerError {}
+
+#[async_trait::async_trait]
+impl BidDeliveryV1Handler for FailingHandler {
+    type Error = FailingHandlerError;
+
+    async fn handle(&self, delivery: ObservedBidDeliveryV1) -> Result<(), Self::Error> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        self.observed_job_ids
+            .lock()
+            .expect("observed job ID lock poisoned")
+            .push(delivery.observed_job_id);
+        Err(FailingHandlerError)
+    }
+}
+
+#[tokio::test]
+async fn bid_delivery_worker_failure_is_attempted_once_and_moved_dead() {
+    let Some(storage) =
+        live_storage("bid_delivery_worker_failure_is_attempted_once_and_moved_dead").await
+    else {
+        return;
+    };
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let observed_job_ids = Arc::new(Mutex::new(Vec::new()));
+    let context = FailingWorkerContext {
+        attempts: attempts.clone(),
+        observed_job_ids: observed_job_ids.clone(),
+    };
+    let prepared = prepared_delivery(Uuid::new_v4());
+    let expected_job_id = prepared.expected_job_id().to_string();
+    let transport = OxanaStableAdapter::new(storage.clone()).expect("registry closure");
+    assert!(matches!(
+        transport
+            .offer(&prepared, Instant::now() + Duration::from_secs(5))
+            .await,
+        TransportOutcome::Returned { .. }
+    ));
+
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        storage
+            .clone()
+            .runtime(context.clone())
+            .queue::<BidConvertV1Queue>()
+            .worker::<BidDeliveryV1WorkerAdapter<FailingHandler>, BidDeliveryV1Job>()
+            .exit_when_processed(1)
+            .run(),
+    )
+    .await
+    .expect("worker must process the delivery")
+    .expect("worker runtime must stop");
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        observed_job_ids
+            .lock()
+            .expect("observed job ID lock poisoned")
+            .as_slice(),
+        [expected_job_id.as_str()],
+        "worker must forward JobContext.meta.id without rewriting it"
+    );
+    assert_eq!(storage.dead_count().await.expect("dead count"), 1);
+    assert_eq!(
+        storage
+            .enqueued_count(BidConvertV1Queue)
+            .await
+            .expect("queue count"),
+        0
+    );
+
+    storage
+        .clone()
+        .runtime(context)
+        .queue::<BidConvertV1Queue>()
+        .worker::<BidDeliveryV1WorkerAdapter<FailingHandler>, BidDeliveryV1Job>()
+        .shutdown_on(async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok(())
+        })
+        .run()
+        .await
+        .expect("second runtime must stop");
+    let diagnostics = transport
+        .diagnostics_snapshot()
+        .await
+        .expect("public monitoring diagnostics");
+    let final_attempts = attempts.load(Ordering::SeqCst);
+    cleanup_namespace(&storage).await;
+    assert_eq!(final_attempts, 1, "dead job must not be processed twice");
+    assert_eq!(diagnostics.dead_count, 1);
 }
