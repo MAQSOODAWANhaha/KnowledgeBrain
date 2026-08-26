@@ -307,7 +307,7 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 范围：
 
 - 精确锁定 crates.io `oxana`、`oxana-macros`、`oxana-web` 为 2.1.3，禁止 vendor、path dependency 与 `[patch.crates-io]`；
-- 按 [`../platform/queue-runtime.md`](../platform/queue-runtime.md) 落位 pure deterministic `prepare`、最薄 production/recording `offer` adapter 与 `returned|indeterminate|returned_job_id_mismatch(actual_job_id)` outcome；actual ID必须bounded透传，领域按indeterminate observation结算并使readiness fail closed；
+- 按 [`../platform/queue-runtime.md`](../platform/queue-runtime.md) 落位 pure deterministic `prepare`、最薄 production/recording `offer` adapter 与 `returned|indeterminate|returned_job_id_mismatch(actual_job_id)` outcome；publisher 返回的不匹配 actual ID必须在 transport outcome 处bounded归档，领域按indeterminate observation结算并使readiness fail closed。consumer 的 `ObservedBidDeliveryV1.observed_job_id` 则必须原样复制公开 `JobContext.meta.id`，进入 PR8B rejected-delivery 持久化边界时再按该表的bounded合同归档，不能在worker seam提前截断；
 - `BidDeliveryV1Job` 显式固定 `Job::name`、unique ID、`on_conflict=Skip`、`resurrect=true`；worker 固定 `max_retries=0`；
 - 证明一次 `offer` adapter invocation 最多一次 `Storage::enqueue`：未取消且 deadline 有效的正常路径恰好一次，deadline 已过/首次 poll 前取消允许零次；任何路径都不在 adapter 内部 retry/probe/delete。跨 invocation 的 once-per-dispatch 留给 PR8B；
 - Bid/WorkTransport 不读取 `oxanus:*`、不使用 `get_job/list/stats/delete_job` 作 correctness。共享 `replay_orphaned_local_jobs` 当前无领域过滤，可能触碰 Bid membership，但新路径不主动调用、不依赖其结果，也不把它作为 Bid owner 或验收证据；
@@ -315,7 +315,7 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 
 新增 `scripts/verify_oxana_registry_source.sh`，fail-closed 解析 `cargo metadata --locked`、workspace manifest 与 `Cargo.lock`，并断言：三个 package 各恰有一个 2.1.3 registry node；workspace 中实际直接声明的 Oxana dependency constraints 精确为 `=2.1.3`；source 为 crates.io registry；checksum 分别为 `bf94eae5bcc69eb7d6950252afa3f316cfa7d769fecc184735a760861eeb01a1`、`4451fc018cae2fdd5fe86041b3807f0c80401ba87a3fa2e04335e28fa3f20cd1`、`e9b57c0781b889c6dcab3e3e47ad5aef395d5f95443295c3d3b5a2f7819bebda`；仓库无 Oxana path/vendor/`[patch.crates-io]`。任一缺包、重复、版本/source/checksum 漂移或 parser 失败都退出非零。
 
-验证：上述 verifier、`BidDeliveryV1/KBDL` golden、explicit name/job ID、payload/registry 负例、RecordingTransport 单 invocation 0/1 调用次数、live Redis `Storage::enqueue`/unique `Skip`/resurrection、worker `max_retries=0`、offer returned ID mismatch携带实际ID且readiness fail closed、legacy replay mixed processing-list 事实和 Bid/WorkTransport private-key/call-site/correctness-inspection denylist。测试必须如实证明发布版行为，不能将 `Ok` 提升为 inserted/accepted receipt，也不能在 PR8A 冒充 DB 收敛证据。该切片即把统一cleanup harness、六种退出模式receipt、shell trap和CI `if: always()`残留断言接入`bid-durable-dispatch`；不是等PR9才补资源合同。
+验证：上述 verifier、`BidDeliveryV1/KBDL` golden、explicit name/job ID、payload/registry 负例、RecordingTransport 单 invocation 0/1 调用次数、真实adapter不可达Redis分类与硬deadline、live Redis `Storage::enqueue`/unique `Skip`/resurrection、真实注册worker的`max_retries=0`/单次失败/dead路径、offer returned ID mismatch携带bounded实际ID且readiness fail closed、legacy replay mixed processing-list 事实和 Bid/WorkTransport private-key/call-site/correctness-inspection denylist。`resurrection`运维指标固定为来自冻结job合同的`resurrection_enabled` gauge；实际复活由live行为回执证明，不能手工累加伪造发布版计数。required脚本必须验证对应测试结果行是`ok`，仅出现测试名、`ignored`、skip或零用例都失败。测试必须如实证明发布版行为，不能将 `Ok` 提升为 inserted/accepted receipt，也不能在 PR8A 冒充 DB 收敛证据。该切片即把统一cleanup harness、六种退出模式receipt、shell trap和CI `if: always()`残留断言接入`bid-durable-dispatch`；不是等PR9才补资源合同。
 
 ### PR8B — Durable dispatch core 与 baseline
 

@@ -124,8 +124,8 @@ Bid clean-slate cutover 删除 `system:live-recovery:v1` 业务两跳和全部 B
 - queue/task/version/lane 全部 allowlist；unknown task 没有 fallback。
 - payload、日志和 metric 不得记录文档内容、secret 或完整 snapshot bytes。
 - Redis I/O 永远发生在 PostgreSQL 事务外；adapter 使用硬 deadline。
-- transport 指标至少包含 health、queue depth、enqueue returned/indeterminate/latency、resurrection 和 dead count；这些只用于运维。
-- readiness 验证 Cargo 来源/版本、queue/task/handler registry closure 和 worker registration；queue depth 不代表任何领域 backlog。
+- transport 指标至少包含 health、queue depth、enqueue returned/indeterminate/latency、`resurrection_enabled` 和 dead count；这些只用于运维。Oxana 2.1.3 的公开 API 不提供原生 resurrection 次数，因此 V1 只从冻结的 `Job::should_resurrect()` 暴露配置 gauge，并以活 Redis 行为回执证明实际复活；禁止用测试或调用方手工累加伪造生产 resurrection counter，也禁止为取得该计数读取 private key 或修改发布依赖。
+- readiness 验证 Cargo 来源/版本以及 queue/task/payload/handler/worker retry 的 registry closure。PR8A 活 Redis验收必须真实注册 worker 并证明该合同；PR8A/PR8B 生产 composition 保持 dormant，不能把测试态注册描述成生产 worker 已注册，只有目标 owner 切换的纵切才能把对应生产 registration 纳入 readiness。queue depth 不代表任何领域 backlog。
 - 所有启动 Redis/PostgreSQL/Compose 的测试都必须覆盖 `success|failure|timeout|cancel|SIGINT|SIGTERM`，使用 shell trap + CI `if: always()` 双层 cleanup，并证明本轮 container/volume/network/临时 image 零残留；领域验收只能消费并加严该平台合同，不能反向拥有它。
 
 ## 7. 平台验收
@@ -135,7 +135,7 @@ PR8A 只验收发布版 transport seam，不提前声称验证 PR8B 的 PostgreS
 1. fail-closed verifier 证明三个 Oxana package 唯一为 registry 2.1.3、checksum 固定，且无 path/vendor/patch；
 2. pure `prepare` golden 覆盖显式 job name、deterministic ID、bounded payload、digest、lane/task/version allowlist 与篡改负例；
 3. RecordingTransport 证明一次 `offer` invocation 的 enqueue count 只能为 0 或 1，绝不大于 1；未取消且 deadline 有效的正常路径为 1，deadline/cancel 零 I/O路径与 Err/timeout 路径均无内部 retry/probe/delete；
-4. 活 Redis 证明发布版 `Storage::enqueue`、unique `Skip`、`resurrect=true` 和 `max_retries=0` 的实际行为，且不把返回值提升为 receipt；
+4. 活 Redis 证明发布版 `Storage::enqueue`、unique `Skip`、`resurrect=true` 和真实注册 worker 的 `max_retries=0` 行为；失败 handler 只执行一次、retry queue 为零且 dead 为一，并且不把 enqueue 返回值提升为 receipt；
 5. adapter mismatch、Redis unavailable、deadline 与 registry closure 有 bounded error、metric 和 readiness 行为；
 6. `get_job`、queue list、stats、`delete_job` 和 `oxanus:*` 不出现在 WorkTransport/Bid correctness 路径；
 7. legacy replay 混合 processing-list fixture 证明 hash metadata 缺失/true 时可能移动 Bid membership、显式 false 时不移动，并静态证明 WorkTransport/Bid 不调用它；启用/禁用 replay 后业务仍收敛的证明属于 PR8B synthetic 与 PR9，不由 PR8A 冒充；
