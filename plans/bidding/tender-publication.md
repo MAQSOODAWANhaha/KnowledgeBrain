@@ -2,7 +2,7 @@
 
 本文定义 `TenderPublication` 与 `ClauseLifecycle` 的最终 V1。所有表名均表示最终 baseline，不表示增量 migration 阶段。
 
-> 实施状态（2026-08-26）：Rust bounded tender parser、SourceSpanV2、KindRouter 和最终 baseline publication/lifecycle 路径已落位；当前 Rust 与强制活库回归已通过。fresh runtime acceptance 尚未完成，未部署。
+> 实施状态（2026-08-26）：Rust bounded tender parser、SourceSpanV2、KindRouter 和 publication/lifecycle 产品路径已落位；conversion/extraction durable dispatch 替换尚未实施，完整门禁与 fresh runtime 需重跑，未部署。
 
 ## 1. 模块边界
 
@@ -11,6 +11,7 @@
 - `BidProject` 与 `BidDocument` 的招标侧生命周期；
 - converted source/section 不可变 artifact；
 - extraction target、generation、claim/attempt；
+- document conversion/extraction target 的 dispatch stage 与 target-local repair adapter；
 - span disposition、clause candidate、fact suggestion candidate；
 - section publication、current projection 与 receipt；
 - fact suggestion decision ledger 和项目事实 mutation。
@@ -36,35 +37,55 @@ BidDocument
   file_name, media_type, byte_length
   original_object_ref, original_sha256
   conversion_generation
-  parse_status = pending|processing|completed|failed
+  current_conversion_target_id
   current_converted_source_artifact_id
-  created_at, parsed_at, error_code
+  created_at
 ```
 
 - 招标文件不写入知识库 `documents`，不进入产品索引。
 - 可复用同一个 convert adapter，但状态、重试、publication 和对象 owner 均归招投标。
-- `completed` 表示原件已转换且所需多模态写回完成，可以冻结 source artifact；不是条款抽取成功。
-- 重试产生更高 `conversion_generation` 和新 source artifact，不覆盖历史。
+- current conversion target 的 `completed` 表示原件已转换且所需多模态写回完成，可以冻结 source artifact；不是条款抽取成功。
+- 重试产生更高 `conversion_generation`、新的 stable conversion target 和新 source artifact，不覆盖历史。
 
-### 2.2 ConvertedSourceArtifactV1
+### 2.2 DocumentConversionTarget
+
+每个 generation 使用新的 stable async target：
+
+```text
+id, project_id, document_id, conversion_generation
+conversion_snapshot_id, feature_snapshot_id
+status = pending|running|completed|failed|superseded|cancelled
+active_attempt, max_attempts
+created_at, completed_at, terminal_code
+```
+
+`id` 同时是 `bid_async_targets` 的 PK/FK identity；`BidDocument.current_conversion_target_id` 只能指向同 document/current generation 的非 superseded target。claim/attempt/heartbeat 使用 target ID，不再用可复用的 document ID 表示多个 generation。
+
+### 2.3 ConvertedSourceArtifactV1
 
 artifact 至少冻结：
 
 ```text
-id, project_id, document_id, conversion_generation
+id, project_id, document_id, conversion_target_id, conversion_generation
 original_object_ref, original_sha256
 canonical_markdown_utf8, markdown_sha256, byte_length
 converter_contract_version, image_asset_set_sha256
 created_at
 ```
 
-source artifact immutable，复合唯一键覆盖 `(project_id,document_id,conversion_generation)`。抽取 target 必须引用确切 artifact，不允许只存 document current pointer。
+source artifact immutable，复合唯一键覆盖 `(project_id,document_id,conversion_target_id,conversion_generation)`。抽取 target 必须引用确切 artifact，不允许只存 document current pointer。
 
-### 2.3 SectionArtifactV1
+### 2.4 SectionArtifactV1
 
 Section 记录 `section_key`、heading path、在 source Markdown 中的 parent UTF-8 byte 半开区间和 section digest。section key 由大纲路径与稳定序号生成，不包含正文 hash；正文变化由 artifact generation/digest 区分。
 
 OutlineParser 必须识别 ATX、章/节、数字层级和中文编号。普通要求句不能误判成标题。表格行保留可回源的原始 Markdown。
+
+### 2.5 Conversion 与 extraction dispatch
+
+文档上传或 conversion retry 必须在创建/推进 `conversion_generation` 的同一事务创建 base async target、`DocumentConversionTarget` 和 `document_conversion` dispatch intent；API 不在 commit 后 enqueue。conversion worker 成功时，在 fenced settlement 事务中同时冻结 converted source、创建 extraction base/typed target、stage extraction dispatch intent，并终结 conversion target。
+
+禁止先把 document 标记为 completed，再通过第二次 DB 调用或 Redis enqueue 创建 extraction target。Redis unavailable、duplicate、worker crash、alive-but-stuck lease 和旧 generation delivery 的行为只由 [`durable-dispatch.md`](durable-dispatch.md) 定义；本模块只实现 target-local begin/heartbeat/publish/repair。
 
 ## 3. SourceSpanV2 与抽取契约
 

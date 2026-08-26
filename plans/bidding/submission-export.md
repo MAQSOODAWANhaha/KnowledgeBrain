@@ -2,7 +2,7 @@
 
 本文定义 `Submission` 深模块。它只消费其它模块已经发布的 identity/artifact，不读取临时 candidate、live quote draft 或知识库 live rows。
 
-> 实施状态（2026-08-26）：RequiredPartSet、manifest、durable render job、冻结程序附件、manifest-only DOCX/PDF renderer 和 `6:quote` table/grid seam 已落位；PDF 程序附件已改为 durable preparation。当前 Rust、强制活库 SQL/HTTP 与 mocked 浏览器回归已通过并提交；未 push、未部署、未完成 fresh runtime acceptance。
+> 实施状态（2026-08-26）：RequiredPartSet、manifest、冻结程序附件、manifest-only DOCX/PDF renderer 和 `6:quote` table/grid seam 等产品逻辑已在当前工作树落位；attachment preparation 与 submission render 尚待切换到 [`durable-dispatch.md`](durable-dispatch.md) 的最终 owner。既有定向测试不构成新 dispatch 合同的完整验收；当前变更未提交、未 push、未部署，且未完成 fresh runtime acceptance。
 
 ## 1. 输出语义
 
@@ -209,15 +209,15 @@ actor/timestamps
 
 upload/replace/delete/validate/confirm/reject 是独立 typed operation，使用 expected revision + idempotency。validated object artifact 与 attachment 通过 project composite FK 和 ObjectRegistry reference 互证。
 
-图片上传完成后 `preparation_status=not_required`，不创建 preparation job。PDF 上传路径只校验并提交原对象，在同一业务事务创建 durable preparation job，返回 `preparation_status=pending` 和稳定 `preparation_job_id`；Redis enqueue 只是 best effort，pending job 必须能由 housekeep 重新入队。
+图片上传完成后 `preparation_status=not_required`，不创建 preparation job。PDF 上传路径只校验并提交原对象，在同一业务事务创建 base async target、typed durable preparation job 和对应 dispatch intent，返回 `preparation_status=pending` 和稳定 `preparation_job_id`；API 不在 commit 后直接 enqueue。dispatcher 按 [`durable-dispatch.md`](durable-dispatch.md) 单跳 offer 最终 delivery，Redis 不可用时 intent 保持 ready。
 
-PDF preparation 使用 durable task `bid:prepare-attachment:v1`，复用物理队列 `bid-convert-v1`，handler 为 `BidPrepareAttachmentV1Handler`，durable actor 为 `system:bid-attachment-preparation`：
+PDF preparation 使用 `attachment_preparation` durable target，复用物理队列 `bid-convert-v1`；Redis 只承载 `bid-delivery/v1` minimal delivery，业务执行由 target adapter 完成，durable actor 为 `system:bid-attachment-preparation`：
 
 - worker 以 claim token、lease 和后台 heartbeat 读取原对象并调用 DocReader；
 - 每个有序页面先取得 ObjectRegistry upload staging reference；
 - publish 在单一事务中验证 claim/lease、连续 ordinal、MIME/bytes/pixels/总配额，把全部 staging 转成 page owner reference，并原子写 completed status；
 - claim 丢失、render/staging/publish 失败或 future 被取消时 abandon 尚未发布的 staging；
-- retryable failure 回 pending，确定性失败/耗尽尝试进入 failed，过期 claim 由 reaper 回收；
+- retryable failure 在同一事务精确终结旧 attempt、回到 pending 并推进下一 offer；确定性失败/耗尽尝试进入 failed，过期 claim 由 attachment target-local repair 回收；
 - reject/delete 会将 pending/running job 置为 cancelled、清除 claim，从而 fence 旧 worker。
 
 PDF preparation 未完成时 validate 必须返回 `ATTACHMENT_PREPARATION_INCOMPLETE`；PDF 必须 `preparation_status=completed`，图片必须 `preparation_status=not_required`，并同时满足 `validation_status=valid AND status=confirmed`，才能通过对应 Gate。附件集合按 kind 维护 revision/digest，任何变化在同一事务 stale 对应 part。
@@ -390,7 +390,7 @@ manifest 创建时验证 available、ownership、MIME/魔数、bytes、pixels �
 
 renderer 只能调用 `read_manifest_render_asset`，禁止查询 live shot/part/object table 或直接读任意 object key。
 
-HTTP render endpoint 只校验 manifest identity/renderer contract，先幂等创建 durable render job，再 best-effort 写入 `bid-render-v1`，返回 `202 queued` 和稳定 `render_job_id`。Redis 短暂不可用时 job 保持 `pending`，housekeep 必须重入队；客户端通过 project-scoped job API 观察 `pending|running|completed|failed`，不得用“outputs 尚未出现”推断 worker 状态。worker 使用 claim token/lease fencing；可重试失败回到 `pending`，确定性失败或耗尽尝试进入 `failed`，过期 claim 由 housekeep reap。DOCX/PDF 构造、manifest asset bytes 读取、输出 staging write 与最终 publish 全部由 worker 完成。输出 bytes 先取得平台 upload staging reference，`publish_submission_output` 在同一事务中把它转移为 `bid_submission_output` owner并把 render job 置为 `completed`；publish/CAS 或 claim fencing 失败必须 abandon，不能留下无 owner 的物理对象。队列 payload 只携带 `render_job_id`，manifest identity、actor 与幂等键必须从 durable job claim 取得，不能信任可漂移的消息副本。
+HTTP render endpoint 只校验 manifest identity/renderer contract，在同一事务幂等创建 base async target、typed durable render job 与 dispatch intent，返回 `202 queued` 和稳定 `render_job_id`；API 不直接访问 Redis。Redis 短暂不可用或 volume 丢失时 intent 保持可 offer，客户端通过 project-scoped job API 观察 `pending|running|completed|failed`，不得用“outputs 尚未出现”推断 worker 状态。worker 使用 claim token/lease fencing；可重试失败精确终结旧 attempt、回到 `pending` 并推进下一 offer，确定性失败或耗尽尝试进入 `failed`，过期 claim 由 render target-local repair 回收。DOCX/PDF 构造、manifest asset bytes 读取、输出 staging write 与最终 publish 全部由 worker 完成。输出 bytes 先取得平台 upload staging reference，`publish_submission_output` 在同一事务中把它转移为 `bid_submission_output` owner、把 render job 与 dispatch intent 置为 terminal；publish/CAS 或 claim fencing 失败必须 abandon，不能留下无 owner 的物理对象。Redis payload 只携带 `dispatch_id + offer + lane_key + payload_version`；manifest identity、actor、generation、snapshot 与幂等键必须从 durable intent/target claim 取得，不能信任可漂移的消息副本。
 
 ### 11.3 renderer 输出合同
 

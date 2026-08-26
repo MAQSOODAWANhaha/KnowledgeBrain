@@ -18,16 +18,31 @@ Matching 不拥有：
 - 知识库 Workspace/Product/Document/index；
 - clause kind/family 状态机；
 - quote 或 submission part；
-- 通用平台队列协议。
+- 通用平台队列 transport；由 [`../platform/queue-runtime.md`](../platform/queue-runtime.md) 定义。
 
 Open/Stage/Commit 是 Matching storage adapter 的内部发布机制。application service 接口只表达：
 
 ```text
-schedule_dirty_project(project_identity)
+execute_schedule(schedule_target_identity)
 claim_route(job_identity)
 execute_route(frozen_route_scope)
 publish_route(matching_report)
 ```
+
+### 1.1 Scheduling 与 durable dispatch
+
+任何会改变 matching 输入的领域 mutation 必须在同一事务：
+
+1. 推进 `matching_mutation_watermark`；
+2. 使旧 current report/pick/consumer stale；
+3. 创建 immutable base async target 与 typed matching schedule target，冻结 generation、watermark 和 config/feature/score/verifier snapshots；
+4. `stage` 对应 dispatch intent。
+
+不得只增加 watermark 后依赖全局 dirty scan，也不得在恢复时读取 current snapshot 临时补 schedule intent。
+
+schedule executor 从 durable target 取得冻结合同，调用 `KnowledgeRetrievalPort` 后，在一个 fenced transaction 中创建 manifest、`0..N` matching jobs、等量 job dispatch intents，并终结 schedule target/dispatch。事务失败时 manifest、job 和 child intent 全部不可见；成功后不再进行第二次 DB 调用或 commit 后 enqueue。完整 delivery/恢复合同见 [`durable-dispatch.md`](durable-dispatch.md)。
+
+零 route 是合法的 `noop_empty_scope` 终态：事务仍发布可审计的 empty manifest，不创建 matching job 或 child dispatch intent，并把 schedule target/dispatch 一并终结。旧 current report、route pick 与 project pick 已由触发本次 schedule 的 mutation 按 watermark 标记 stale，不得因零 route 继续保留为 current，也不得由恢复流程临时补造空 job。
 
 ## 2. 两路知识检索
 
@@ -272,9 +287,9 @@ Commit 只发送 fixed header、expected counts/bytes、expected batch count、r
 ### 6.6 cleanup/reaper
 
 - active set TTL 到期 -> expired 并释放配额；
-- claim lease 过期由 reaper 以冻结 policy 回收 attempt；
+- claim lease 过期由 matching target-local repair 以冻结 policy 精确终结旧 attempt，并在同一事务推进下一 dispatch offer；
 - failed/expired staged rows 可物理清理，但 immutable committed artifacts 不受影响；
-- cleanup/reaper 使用 token/CAS 和 allowlisted system actor；
+- cleanup/repair 使用 token/CAS 和 allowlisted system actor；
 - terminal staging 不可续期或继续收 batch。
 
 ## 7. 人工选择

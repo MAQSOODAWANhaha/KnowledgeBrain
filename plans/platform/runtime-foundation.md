@@ -6,7 +6,7 @@
 | 所有者 | Shared Platform |
 | 消费方 | 知识库、招投标 |
 
-本文是 fresh baseline 编排、共享 actor/idempotency/audit、`ObjectRegistry` 和 retention 内部协议的唯一活动实施定义。业务领域只定义自己的聚合、业务引用和消费门禁，不复制平台表或对象生命周期。
+本文是 fresh baseline 编排、共享 actor/idempotency/audit、`ObjectRegistry` 和 retention 内部协议的唯一活动实施定义。队列 transport 另由 [`queue-runtime.md`](queue-runtime.md) 定义；业务领域只定义自己的聚合、durable intent、业务引用和消费门禁，不复制平台表、队列内部实现或对象生命周期。
 
 ## 1. 所有权边界
 
@@ -15,7 +15,7 @@
 - baseline manifest、checksum ledger、extension、角色与启动期 schema identity 校验；
 - authenticated actor identity、共享幂等 intent/receipt 和 append-only audit envelope；
 - `ObjectRegistry`、owner reference、retention outbox/tombstone 与物理删除 consumer；
-- queue registry、通用 claim/lease/heartbeat/reaper 基础；
+- queue registry 与 [`WorkTransport`](queue-runtime.md)；业务 claim/lease/heartbeat/reaper 归所属领域；
 - maintenance gate、健康检查、日志、tracing、metrics 与部署验收基础。
 
 知识库和招投标分别拥有自己的表、artifact、current pointer、operation 名称和 payload。Open/Stage/Commit 若被某个 adapter 使用，仍是该 adapter 的内部提交协议，不属于本平台接口。
@@ -79,7 +79,7 @@ retention outbox/tombstone
 
 - object key 只接受上述 canonical 形式；绝对路径、`..` 和 alias 全部拒绝；
 - 业务通过受检接口注册/移除 owner reference、读取 available 对象，不维护第二套 refcount；
-- API/worker 写物理 bytes 前必须先创建有时限的 `object_upload_staging` owner reference；业务事务通过平台内部接口把该 reference 原子转移给最终 owner，CAS/校验失败则显式 abandon 并进入 retention，进程崩溃遗留 staging 由 maintenance expiry 回收；
+- API/worker 写物理 bytes 前必须先创建有时限的 `object_upload_staging` owner reference；业务事务通过平台内部接口把该 reference 原子转移给最终 owner，CAS/校验失败则显式 abandon 并进入 retention，进程崩溃遗留 staging 由独立 retention-owned expiry 回收；
 - 对象仍被任何 reference 引用时不得进入 `deleting`；
 - 普通 API/worker 无物理删除权限，不能直接修改 registry、outbox 或 tombstone；
 - 同 digest 的 `deleted` 对象在 V1 稳定拒绝复活；
@@ -97,6 +97,8 @@ retention outbox/tombstone
 4. 重试不得重复释放业务 reference，也不得把仍有引用的对象删除；
 5. 日志、audit 和 receipt 不记录对象内容或 secret。
 
+`object_upload_staging` expiry 同样只由独立 retention service 执行；每个五分钟 tick 只运行一次固定上限 100 条的数据库批次。超过一批的 backlog 保持为 expired staging，由后续 tick 按 `expires_at,id` 顺序继续回收。API、worker 和 maintenance lane 均不得获得该 expiry 权限。
+
 业务消费验收只证明自己的 reference 创建、替换、释放和读取行为；claim/lease/retry 状态机由平台测试证明。
 
 ## 6. 实施与验收
@@ -111,6 +113,7 @@ PR1 建立 baseline manifest、actor/idempotency/audit、`ObjectRegistry`、角�
 - object key、digest、MIME/bytes、owner scope 和 reference 一致性；
 - 有引用拒绝删除、释放后删除、并发 add-reference/delete 竞态；
 - consumer crash、lease reclaim、响应丢失、重试与幂等 receipt；
+- 队列 registration、transport outcome、boot instance identity 与 in-flight resurrection 使用 [`queue-runtime.md`](queue-runtime.md) 的验收证据；
 - `rg` 与 catalog denylist 证明旧 refcount、公开删除函数和 runtime repair 已不存在；
 - Compose 空对象卷下的上传、读取、引用保护和最终回收实测。
 

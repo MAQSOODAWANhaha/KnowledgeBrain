@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | **最终 V1 主链已实现并完成本地验收与提交；尚未 push、部署或 runtime accepted** |
+| 状态 | **最终 V1 方案已批准并固化为实施基线；durable dispatch 替换待实施，尚未完成本地验收、实现提交、部署或 runtime accepted** |
 | 日期 | 2026-08-26 |
 | 业务 | 网络安全产品与服务应标（乙方） |
 | 部署 | clean-slate fresh redeploy |
@@ -16,7 +16,8 @@
 | [`matching.md`](matching.md) | 两路检索、不可变证据、MatchingReportV1、选择集和匹配发布 |
 | [`quote.md`](quote.md) | CNY Decimal、限价口径、QuoteSnapshotV1、finalize/reopen |
 | [`submission-export.md`](submission-export.md) | ①～⑥、程序材料、stale、manifest、ObjectRegistry 使用、DOCX/PDF |
-| [`implementation-acceptance.md`](implementation-acceptance.md) | 最终 baseline schema、删除矩阵、PR0～PR8、测试与运行验收 |
+| [`durable-dispatch.md`](durable-dispatch.md) | target+intent 原子性、单跳投递、业务 lease 恢复、Oxana transport seam 与删除矩阵 |
+| [`implementation-acceptance.md`](implementation-acceptance.md) | 最终 baseline schema、删除矩阵、PR0～PR9（含 PR8A～PR8F）、测试与运行验收 |
 
 已被替代的旧方案和评审只保存在 [`../archive/README.md`](../archive/README.md)，不再留旧路径兼容副本。
 
@@ -24,13 +25,13 @@
 
 ## 当前实施状态
 
-当前仓库已切换到 clean-slate V1：最终 baseline、Rust domain/storage/API/worker、Web 工作台和 manifest-only DOCX/PDF renderer 均已有实现路径，旧方案不再是兼容目标。当前工作树还包含 eligible/hit scope 解耦、knowledge-owned scope attestation 和 PDF 程序附件 durable preparation。
+当前仓库已落位大部分 clean-slate V1 产品主链，但本轮拟议的 transactional durable dispatch 尚未实施；当前工作树仍含将被替换的两跳 live-recovery、commit 后 best-effort enqueue 和 Oxana 私有 processing-list replay。旧方案不再是兼容目标，替换时必须删除而不是双跑。
 
 | 层次 | 当前证据 |
 | --- | --- |
-| implemented | 是；上述合同与实现已在当前工作树落位 |
-| locally verified | 是；Rust workspace/Clippy、32 个强制活库 SQL/HTTP 合同、Web lint/build/20 个 mocked e2e、fresh-schema/ACL 与删除扫描已通过 |
-| committed | 是；本轮增量已收拢为当前交付提交 |
+| implemented | 部分；产品主链已有实现，durable dispatch 深 module 与旧 recovery 删除尚未实施 |
+| locally verified | 部分；已有定向证据不能覆盖新 dispatch 合同，完整 workspace/强制活库/fresh runtime 需重跑 |
+| committed | 否；当前工作树存在未提交变更 |
 | pushed | 否 |
 | deployed | 否；未部署到 fresh 或生产环境 |
 | runtime accepted | 否；当前 checkout 没有完整 fresh-runtime 证据包，`phase_1d_runtime_complete=false` |
@@ -96,9 +97,15 @@ Shared Platform
 
 ### 3.2 共享平台
 
-鉴权、actor identity、幂等/audit 基础表、运行时队列、维护门、对象注册与物理删除归共享平台。业务模块只使用平台接口；fresh baseline 编排与 `ObjectRegistry`/retention 内部协议见 [`../platform/runtime-foundation.md`](../platform/runtime-foundation.md)。
+鉴权、actor identity、幂等/audit 基础表、运行时队列、维护门、对象注册与物理删除归共享平台。业务模块只使用平台接口；fresh baseline 编排与 `ObjectRegistry`/retention 内部协议见 [`../platform/runtime-foundation.md`](../platform/runtime-foundation.md)，Oxana/Redis transport interface 见 [`../platform/queue-runtime.md`](../platform/queue-runtime.md)。
 
 Matching 的 Open/Stage/Commit 是大 artifact 的 adapter 内部协议。application service 只表达“执行并发布 route”，不能让 staging set、claim token 或 batch ordinal 泄漏到其它业务模块。
+
+### 3.3 Durable dispatch
+
+招投标拥有自己的 PostgreSQL durable intent 和 target-local recovery，完整合同只在 [`durable-dispatch.md`](durable-dispatch.md) 定义。业务 target 与 intent 同事务提交，dispatcher 通过平台 `WorkTransport` 单跳投递最终 delivery；API 不在 commit 后 best-effort enqueue，Oxana 不拥有业务 snapshot、generation 或 retry 状态。
+
+该 runtime module 是五个业务深模块共享的内部实施能力，不增加第六个业务领域。正常投递和失败恢复使用同一 intent；不得保留独立 `system:live-recovery:v1` queue hop 或泛化 housekeep 扫描。
 
 ## 4. 五个深模块
 
@@ -196,11 +203,12 @@ baseline 必须一次建立：
 - matching job/artifacts/current projections/picks；
 - quote draft/snapshot/current pointer；
 - profiles/procedural/parts/manifest/render assets；
+- Bid async target identity、durable dispatch intent/state/attempt/inbound receipt 与 typed target exact relation；
 - functions、triggers、views、ACL 和 seed contract artifacts。
 
 ### 7.2 权限
 
-招投标 API/worker 只获得受检函数和必要读 view 权限；不能直接改不可变 artifact、current pointer、ObjectRegistry 或 outbox。平台角色与 retention 权限由 [`../platform/runtime-foundation.md`](../platform/runtime-foundation.md) 定义，fresh-schema acceptance 联合验证 allow/deny 矩阵。
+招投标 API/worker 只获得受检函数和必要读 view 权限；不能直接改不可变 artifact、current pointer、ObjectRegistry、retention outbox 或 Bid dispatch intent/state。平台角色与 retention 权限由 [`../platform/runtime-foundation.md`](../platform/runtime-foundation.md) 定义，dispatch 权限由 [`durable-dispatch.md`](durable-dispatch.md) 定义，fresh-schema acceptance 联合验证 allow/deny 矩阵。
 
 V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用户拥有的项目，所有 `/api/v1/bids/{project_id}/...` 路径先校验 owner。当前模型没有 Bid 成员或 API-key-to-Bid scope relation，因此这两类访问必须 fail-closed；若未来需要协作成员，先增加显式 membership/scope artifact 与受检授权合同，不能把“已认证”当作“可访问任意 Bid”。
 
@@ -208,17 +216,23 @@ V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用�
 
 | 阶段 | 当前实现状态 | 完成证据 |
 | --- | --- | --- |
-| PR0 | 已实施：文档、PRODUCT、领域词汇和最终 contract 已固化 | 文档链接与重复权威定义检查 |
-| PR1 | 已实施：最终 baseline 与共享平台边界为单一路径，新增 knowledge attestation 与 attachment preparation schema | allowlist 已重生成，fresh-schema/catalog/seed/ACL 验收通过 |
-| PR2 | 已实施：TenderPublication、SourceSpanV2 与 bounded parser 已落位 | 强制活库 publication/conversion/extraction 回归 7/7 通过 |
-| PR3 | 已实施：ClauseLifecycle、KindRouter 与 fact decision 已落位 | generation 2/3 promotion 与并发边界已由同一强制活库套件覆盖 |
-| PR4 | 已实施：完整 eligible scope/有限 hits、knowledge attestation、MatchingPublication 与两路端口已落位 | 强制活库 matching 3/3 与 Rust 定向测试通过 |
-| PR5 | 已实施：Decimal、ceiling、finalize/reopen 与 QuoteSnapshotV1 已落位 | 强制活库 quote 4/4、HTTP/Web 回归通过 |
-| PR6 | 已实施：附件 durable preparation、parts、manifest、durable render、table/grid 与 renderer 已落位 | 强制活库 submission 17/17 与 renderer/worker 回归通过；fresh runtime PDF 未验收 |
-| PR7 | 已实施：最终 API routes 与模块化 Web 工作台已落位 | HTTP contract、Web lint/build 与 mocked Playwright 20/20 通过 |
-| PR8 | 未完成 | 尚未形成当前 checkout 的 clean-slate Compose、恢复、retention、资源清理与证据包；`phase_1d_runtime_complete=false` |
+| PR0 | 已批准并固化 | `git diff --check -- plans`、修改文档相对链接检查及 P0/P1 交叉 review 已通过 |
+| PR1 | 原 baseline 主体已落位；dispatch schema/ACL/checksum 尚待替换 | fresh-schema/catalog/seed/ACL 必须在替换后重跑 |
+| PR2 | TenderPublication 产品逻辑已落位；conversion/extraction dispatch 尚待替换 | publication/conversion/extraction 强制活库套件待重跑 |
+| PR3 | ClauseLifecycle、KindRouter 与 fact decision 已落位 | promotion/concurrency 强制活库套件待最终重跑 |
+| PR4 | MatchingPublication 产品逻辑已落位；schedule/fanout/job dispatch 尚待替换 | matching/lease/fanout 强制活库套件待重跑 |
+| PR5 | Quote 产品逻辑已落位 | quote/HTTP/Web 最终门禁待重跑 |
+| PR6 | Submission 产品逻辑已落位；attachment/render dispatch 尚待替换 | submission/renderer/worker/fresh PDF 待重跑 |
+| PR7 | API routes 与模块化 Web 工作台已落位 | HTTP、lint/build、mocked 与 live Playwright 待最终重跑 |
+| PR8A | 未完成 | 平台 transport adapter、Oxana atomic receipt/fingerprint/phase/cleanup、boot UUID 与 retry/resurrection 合同；不切换业务 owner |
+| PR8B | 未完成 | async target/intent/state/attempt schema、dispatch 深 module、policy/ACL；不切换业务 owner |
+| PR8C | 未完成 | conversion/extraction 纵切替换，同步删除该类旧 enqueue/recovery owner |
+| PR8D | 未完成 | attachment preparation/render 纵切替换，同步删除该类旧 owner |
+| PR8E | 未完成 | matching schedule/job/fanout 纵切替换，同步删除 dirty/orphan recovery |
+| PR8F | 未完成 | 最终删除扫描、baseline checksum、catalog/ACL、queue registry closure 与全量本地/强制活库门禁 |
+| PR9 | 未完成 | 干净已 push 候选 SHA 的 clean-slate Compose、全量故障矩阵、真实浏览器/PDF、retention、强制资源清理、证据绑定与受审计 cutover；`phase_1d_runtime_complete=false` |
 
-每个实现切片都必须同步删除被替代的旧逻辑；验收时继续用删除矩阵检查，不把兼容层清理留给部署阶段。
+PR8A/PR8B 只建立平台和深 module 能力，不启用第二个业务 owner。PR8C～PR8E 每个纵切都必须在同一改动中启用新 target adapter 并删除该类旧 enqueue/recovery 分支；PR8F 证明全局只剩一个 owner。验收时继续用删除矩阵检查，不把兼容层清理留给部署阶段。
 
 ## 9. 验收口径
 
@@ -231,7 +245,8 @@ V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用�
 5. DOCX warning 与 PDF hard gate 行为一致且可测试；
 6. Web 能走完创建项目到下载正式 PDF；
 7. 旧 API/client/schema/view/test 删除且 `rg` 无残留调用；
-8. Compose 在真实空环境启动，健康检查、worker、对象存储、失败恢复通过；
-9. 实际运行生成的 PDF 与 audit/manifest/fixture identity 可互证。
+8. Compose 在真实空环境启动，健康检查、worker、对象存储及 [`durable-dispatch.md`](durable-dispatch.md) 故障矩阵通过；
+9. 实际运行生成的 PDF 与 audit/manifest/fixture identity 可互证；
+10. `bid-durable-dispatch` 与 `bid-v1-fresh-runtime` 对同一可追溯候选系列成功，fresh evidence 证明 `git_dirty=false`、`playwright=live-ui`、无 skip、全量 fault case 通过且验收容器/volumes/networks 已清理，受审计 cutover 已绑定 hashes 并翻转 `phase_1d_runtime_complete=true`。
 
 本地测试、commit、部署与真实运行验收分别报告，不相互代替。
