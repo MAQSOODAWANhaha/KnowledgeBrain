@@ -203,7 +203,7 @@ baseline 必须一次建立：
 - matching job/artifacts/current projections/picks；
 - quote draft/snapshot/current pointer；
 - profiles/procedural/parts/manifest/render assets；
-- Bid async target identity、durable dispatch intent/state/attempt/inbound receipt 与 typed target exact relation；
+- Bid async target identity、durable dispatch intent/immutable offer/state/attempt/transport receipt/settlement/retirement 与 typed target exact relation；
 - functions、triggers、views、ACL 和 seed contract artifacts。
 
 ### 7.2 权限
@@ -224,15 +224,17 @@ V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用�
 | PR5 | Quote 产品逻辑已落位 | quote/HTTP/Web 最终门禁待重跑 |
 | PR6 | Submission 产品逻辑已落位；attachment/render dispatch 尚待替换 | submission/renderer/worker/fresh PDF 待重跑 |
 | PR7 | API routes 与模块化 Web 工作台已落位 | HTTP、lint/build、mocked 与 live Playwright 待最终重跑 |
-| PR8A | 未完成 | 平台 transport adapter、Oxana atomic receipt/fingerprint/phase/cleanup、boot UUID 与 retry/resurrection 合同；不切换业务 owner |
-| PR8B | 未完成 | async target/intent/state/attempt schema、dispatch 深 module、policy/ACL；不切换业务 owner |
+| PR8A | 未完成 | 平台 pure prepare、Oxana atomic offer/probe/retire+tombstone、boot UUID/resurrection、删除 private replay并回归 legacy enqueue；不切换业务 owner |
+| PR8B | 未完成 | dormant async target/空 conversion target/intent/offer/state/attempt/receipt/settlement/retirement catalog、dispatch 深 module、policy/ACL；不激活 producer或业务 owner |
 | PR8C | 未完成 | conversion/extraction 纵切替换，同步删除该类旧 enqueue/recovery owner |
 | PR8D | 未完成 | attachment preparation/render 纵切替换，同步删除该类旧 owner |
 | PR8E | 未完成 | matching schedule/job/fanout 纵切替换，同步删除 dirty/orphan recovery |
-| PR8F | 未完成 | 最终删除扫描、baseline checksum、catalog/ACL、queue registry closure 与全量本地/强制活库门禁 |
+| PR8F | 未完成 | 删除剩余旧 owner、复证 private replay denylist、baseline checksum、catalog/ACL、queue registry closure 与全量本地/强制活库门禁 |
 | PR9 | 未完成 | 干净已 push 候选 SHA 的 clean-slate Compose、全量故障矩阵、真实浏览器/PDF、retention、强制资源清理、证据绑定与受审计 cutover；`phase_1d_runtime_complete=false` |
 
-PR8A/PR8B 只建立平台和深 module 能力，不启用第二个业务 owner。PR8C～PR8E 每个纵切都必须在同一改动中启用新 target adapter 并删除该类旧 enqueue/recovery 分支；PR8F 证明全局只剩一个 owner。验收时继续用删除矩阵检查，不把兼容层清理留给部署阶段。
+PR8A 删除 private-key replay并由 Oxana public resurrection 接管 transport recovery；PR8F 只复证该 denylist，不承担首次删除。PR8A/PR8B 只建立平台和 dormant 深 module 能力，不补建旧 target aggregate、不双写也不启用第二个业务 owner。PR8C～PR8E 每个纵切才原子创建该 family 的 base/typed/intent/offer 0/state，并在同一改动启用新 adapter、删除旧 enqueue/recovery 分支；PR8F 证明全局只剩一个 owner。
+
+Redis terminal tombstone 只证明 transport 已结束，`ack_settled` 还必须匹配 PostgreSQL durable settlement；`handler_unsettled|killed|invalid_envelope` 与领域主动 `retired` 不得混同。六张 `bid_async_*` sidecar 只保存 dispatch identity 与真实 domain target 的 exact relation，不复制业务状态、generation、claim或结果。
 
 ## 9. 验收口径
 

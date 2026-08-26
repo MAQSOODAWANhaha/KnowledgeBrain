@@ -96,11 +96,11 @@ shared platform slice 由 [`../platform/runtime-foundation.md`](../platform/runt
 ### 3.6 Durable dispatch
 
 - immutable `bid_async_targets` 与六类 typed target exact-one extension；
-- immutable `bid_dispatch_intents`、mutable current state、append-only offer/probe attempts 与 durable inbound settlement receipts；
+- immutable `bid_dispatch_intents/offers/transport_receipts/settlements/evidence`、mutable current state、append-only offer/probe attempts、ACK sidecar 与 durable retirement obligation；
 - target kind/id/generation exact relation 与 frozen fence hash；
-- dispatch policy snapshots、due partial index、offer claim/lease/receipt；
+- dispatch policy snapshots、due partial index、offer/probe/retirement 独立 claim/lease；
 - conversion/extraction/matching schedule+job/attachment preparation/submission render target adapters；
-- minimal `bid-delivery/v1` envelope 与平台 `WorkTransport` adapter；
+- minimal `bid-delivery/v1` envelope 与平台 `WorkTransport prepare/offer/probe/retire_exact` adapter；
 - target-local business lease repair、terminal settlement 与 bounded retention。
 
 完整状态机、删除范围和故障验收只由 [`durable-dispatch.md`](durable-dispatch.md) 定义。
@@ -194,12 +194,12 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 | PR5 | 产品逻辑已在 | quote/HTTP/Web 最终门禁待重跑 |
 | PR6 | 部分 | attachment/render dispatch 替换及 fresh runtime 正式输出待验收 |
 | PR7 | 产品逻辑已在 | HTTP、Web lint/build、mocked 与 live Playwright 待最终重跑 |
-| PR8A | 未完成 | 平台 transport adapter、Oxana boot UUID patch 与 retry/resurrection 合同；不切换业务 owner |
-| PR8B | 未完成 | async target/intent/state/attempt schema、dispatch 深 module、policy/ACL；不切换业务 owner |
+| PR8A | 未完成 | 平台 pure prepare、atomic offer/probe/retire+tombstone、boot UUID/resurrection、删除 private replay并回归 legacy enqueue；不切换业务 owner |
+| PR8B | 未完成 | dormant async target/空 conversion target/intent/offer/state/attempt/receipt/settlement/retirement catalog、深 module、policy/ACL；不激活 producer或业务 owner |
 | PR8C | 未完成 | conversion/extraction 纵切替换并删除该类旧 owner |
 | PR8D | 未完成 | attachment preparation/render 纵切替换并删除该类旧 owner |
 | PR8E | 未完成 | matching schedule/job/fanout 纵切替换并删除 dirty/orphan recovery |
-| PR8F | 未完成 | 全局旧 recovery/housekeep/private-key replay 删除、catalog/ACL/checksum/registry closure 与全量门禁 |
+| PR8F | 未完成 | 全局剩余旧 recovery/housekeep 删除、PR8A private-key replay denylist 复证、catalog/ACL/checksum/registry closure 与全量门禁 |
 | PR9 | 未完成 | 干净已 push 候选 SHA 的 clean-slate Compose、全量 fault matrix、live Playwright/PDF、retention、强制资源清理、证据绑定与受审计 cutover；`phase_1d_runtime_complete=false` |
 
 ### PR0 — 文档与目标冻结
@@ -302,22 +302,23 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 
 范围：
 
-- 按 [`../platform/queue-runtime.md`](../platform/queue-runtime.md) 落位 `WorkTransport` production/recording adapter 与 typed outcome；
-- vendor 并锁定 Oxana 2.1.x，落位 deterministic transport ID、atomic receipt/membership、fingerprint/phase probe、active-receipt cleanup 与 boot UUID；
-- 证明 `max_retries=0` 不阻断 `resurrect=true`，且业务代码不读取 `oxanus:*` 私有 key；
+- 按 [`../platform/queue-runtime.md`](../platform/queue-runtime.md) 落位 pure deterministic `prepare`、`offer/probe/retire_exact` production/recording adapter 与 typed outcome；
+- vendor 并锁定 Oxana 2.1.x，落位 atomic receipt/membership、fingerprint/phase probe、absent-retire tombstone、active-receipt cleanup 与 boot UUID；
+- 删除 `replay_orphaned_local_jobs`、对应 public seam 与 worker 启动调用；由 patched Oxana resurrection 单独拥有 processing recovery；
+- 证明 `max_retries=0` 不阻断 `resurrect=true`，且业务代码不读取 `oxanus:*` 私有 key；现有非 durable `Storage::enqueue`/unique `Skip` 合同保持不变；
 - 本切片不启用 Bid 新 dispatcher，不改变任一业务 target owner。
 
-验证：Oxana upstream 测试、atomic create/dequeue/resurrection/terminal cleanup 故障注入、duplicate-equivalent/identity-conflict、phase probe、超过七天的 active receipt、相同 hostname/PID 不同 boot UUID 恢复和私有 key denylist。
+验证：Oxana upstream 测试、`work-transport-envelope/v1` golden、atomic create/dequeue/resurrection/terminal/retire 故障注入、offer↔retire↔finish/resurrection 并发线性化、`ack_settled`/`handler_unsettled` terminal 区分、absent tombstone 阻止 late offer、超过七天 active receipt、Redis-local `phase_age_ms`、boot UUID、legacy unique `Skip` 回归和 private replay implementation+startup denylist。
 
 ### PR8B — Durable dispatch core 与 baseline
 
 范围：
 
-- 建立 base async target、typed exact-one extension、intent/state/attempt/policy schema、partial index 与 ACL；
-- 实现 `stage/run`、PostgreSQL store、offer/probe、consumer begin、target-local repair registry 和 retention；
-- 接入四条 task→queue closure，但不切换六类业务 target owner。
+- 建立 dormant base/六类空 typed extension、空的 document conversion domain target 表、intent/immutable offer/state/attempt/receipt/settlement/evidence/retirement/policy schema、partial index 与 ACL；conversion producer/current pointer 仍不激活；
+- 实现 `stage/run`、PostgreSQL store、offer/probe/retirement claim、consumer begin、late-same-receipt settlement、target-local repair registry 和 retention；
+- 只以 synthetic transaction fixture/RecordingTransport/活 Redis 合同验证新 aggregate；旧 target 不补建、不双写，四条真实业务 owner 仍不切换。
 
-验证：base/typed/intent commit/rollback、六类 fence canonical golden、identity conflict、offer/probe/lease/gate/ACL 和空库 catalog。
+验证：base/typed/intent/offer 0 commit/rollback、六类 `KBTF` fence及 `KBDS/KBEV/KBCP/KBRJ/KBAO` 固定 expected bytes/hash 的 Rust/SQL golden与逐字段/variant/optional/顺序篡改负例、fresh/expired owner observation 在后续 success/reap 后 hash 不漂移、contract-poison stored/recomputed 相等或结构性错误拒绝写 settlement、`UNIQUE(settlement_key)` 双事务 insert-or-read 只复用同一 settlement/evidence/inbound sidecar、state/attempt/receipt/settlement/successor/retirement composite FK、单删 intent/offer与伪造 historical attempt负例、每 old offer 第二条 advance与每 dispatch 第二条 absorbing settlement均由 partial unique 拒绝、逐 outcome evidence-shape 负例、consumer-before-publisher 三种顺序、ready late consumer、late A 与 active B claim 隔离、owner-expired repair、terminal/retired 区分、ACK terminal 缺 settlement 时 receipt/active claim B/probe claim/attempt disposition/全部 state timer 事务前后不变且无新增 observation/settlement/sidecar、probe/retirement lease reclaim、retire-vs-finish/resurrection、volume-loss 后 historical receipt reopen-retire、Redis/PG clock-skew、state timer NULL matrix、identity conflict、gate/ACL 和空库 catalog。
 
 ### PR8C — Conversion/Extraction 纵切
 
@@ -353,7 +354,7 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 
 范围：
 
-- 删除剩余两跳 live recovery、best-effort enqueue、业务 housekeep、旧 wire DTO/registry 和私有 Redis replay；
+- 删除剩余两跳 live recovery、best-effort enqueue、业务 housekeep和旧 wire DTO/registry；复证 PR8A 已删除 private Redis replay implementation/public seam/启动调用且 denylist 仍为零；
 - 重生 baseline checksum、catalog/ACL allowlist/denylist 和 queue/producer/handler registry closure；
 - 从 compiler/link、`rg`、catalog 和 runtime registry 四个角度证明任一 target 只有新 dispatcher owner。
 
@@ -407,7 +408,7 @@ KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS=1
 scripts/bid_durable_dispatch_acceptance.sh
 ```
 
-PR8A 新增 `scripts/bid_durable_dispatch_acceptance.sh` 并纳入 Oxana/runtime transport 命令；PR8B 在启用任一 Bid owner 前纳入 dispatch SQL/worker 命令；PR8C～PR8E 在各自纵切中纳入对应领域命令；PR8F 使用下列完整固定清单。未来切片的 test target 不必在更早 PR 用占位测试伪造通过，但启用某 target owner 的 PR 必须先将它的真实合同加入 required job。该入口顺序执行且任一失败立即失败：
+PR8A 新增 `scripts/bid_durable_dispatch_acceptance.sh` 并纳入 Oxana/runtime pure prepare、atomic offer/probe/retire/tombstone 命令；PR8B 在启用任一 Bid owner 前纳入 dormant dispatch SQL/worker 命令；PR8C～PR8E 在各自纵切中纳入对应领域命令；PR8F 使用下列完整固定清单。未来切片的 test target 不必在更早 PR 用占位测试伪造通过，但启用某 target owner 的 PR 必须先将它的真实合同加入 required job。该入口顺序执行且任一失败立即失败：
 
 ```text
 cargo test --manifest-path vendor/oxana/Cargo.toml --all-targets
@@ -524,8 +525,12 @@ convergence_deadline_ms
 final_target_status
 final_dispatch_status
 effective_publish_count
-orphan_target_count
+orphan_domain_target_count
+orphan_async_base_target_count
+orphan_extension_count
 orphan_intent_count
+orphan_offer_count
+orphan_state_count
 orphan_artifact_count
 orphan_object_owner_count
 attempt_terminal_codes[]
@@ -533,7 +538,7 @@ evidence_refs[]
 result = passed|failed
 ```
 
-`commit` case 要求结果只能是全回滚或 target+typed extension+intent 全部可见；`offer` 固定注入 Redis accepted 但 DB receipt 未 settle；`begin` 固定注入 delivery 已取得但 business claim 未完成；`publish` 固定注入外部/staging 产物已形成但 fenced terminal transaction 未确认。不允许 `skipped`、`inconclusive` 或人工填写 `passed`；缺少任一 target/fault-point 组合、超过收敛时限或 count 不为预期值时 job 失败。
+`commit` case 要求结果只能是全回滚或 domain target+async base target+typed extension+intent+offer 0+state 全部可见；`offer` 固定注入 Redis accepted 但 DB receipt 未 settle；`begin` 固定注入 delivery 已取得但 business claim 未完成；`publish` 固定注入外部/staging 产物已形成但 fenced terminal transaction 未确认。不允许 `skipped`、`inconclusive` 或人工填写 `passed`；缺少任一 target/fault-point 组合、超过收敛时限，或 domain target/async base/extension/intent/offer/state/artifact/object owner 任一方向的孤儿 count 不为零时 job 失败。
 
 ### 8.3 证据包
 
