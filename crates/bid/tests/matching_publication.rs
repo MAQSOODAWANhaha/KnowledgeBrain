@@ -35,6 +35,97 @@ fn assert_database_error(error: sqlx::Error, expected: &str) {
     );
 }
 
+fn matching_schedule_payload_without_eligible_scope(
+    project_id: Uuid,
+    watermark: i64,
+    clause_id: Uuid,
+    requirement: &str,
+) -> serde_json::Value {
+    let manifest_id = Uuid::new_v4();
+    let technical_route_id = Uuid::new_v4();
+    let commercial_route_id = Uuid::new_v4();
+    let requirement_sha256 = domain::sha256_hex(requirement.as_bytes());
+    let requirement_set_sha256 = domain::sha256_hex(
+        &serde_json::to_vec(&vec![(
+            technical_route_id,
+            clause_id,
+            requirement,
+            requirement_sha256.as_str(),
+        )])
+        .unwrap(),
+    );
+    json!({
+        "schema_version": 1,
+        "manifest_id": manifest_id,
+        "project_id": project_id,
+        "mutation_watermark": watermark,
+        "requirement_set_sha256": requirement_set_sha256,
+        "eligible_scope_sha256": domain::sha256_hex(b"[]"),
+        "routes": [
+            {
+                "id": technical_route_id,
+                "route_kind": "technical",
+                "unit_id": Uuid::nil(),
+                "ordinal": 0,
+                "empty_policy": "clear_route",
+                "route_scope_sha256": domain::sha256_hex(b"technical:00000000-0000-0000-0000-000000000000")
+            },
+            {
+                "id": commercial_route_id,
+                "route_kind": "commercial",
+                "unit_id": null,
+                "ordinal": 1,
+                "empty_policy": "clear_route",
+                "route_scope_sha256": domain::sha256_hex(b"commercial")
+            }
+        ],
+        "requirements": [{
+            "id": Uuid::new_v4(),
+            "route_id": technical_route_id,
+            "clause_id": clause_id,
+            "ordinal": 0,
+            "text": requirement,
+            "sha256": requirement_sha256
+        }],
+        "products": [],
+        "memberships": [],
+        "frozen_hits": []
+    })
+}
+
+async fn assert_matching_schedule_rejected(
+    pool: &PgPool,
+    project_id: Uuid,
+    payload: &serde_json::Value,
+    idempotency_key: &str,
+    expected: &str,
+) {
+    let request_bytes = serde_json::to_vec(payload).unwrap();
+    let request_sha256 = domain::sha256_hex(&request_bytes);
+    let mut tx = pool.begin().await.unwrap();
+    let result = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT kb_bid_matching_schedule($1,1,3,$2,'system:matching-publication',$3,$4,$5)",
+    )
+    .bind(project_id)
+    .bind(payload)
+    .bind(idempotency_key)
+    .bind(&request_bytes)
+    .bind(&request_sha256)
+    .fetch_one(&mut *tx)
+    .await;
+    let error = match result {
+        Err(error) => {
+            tx.rollback().await.unwrap();
+            error
+        }
+        Ok(_) => tx
+            .commit()
+            .await
+            .expect_err("invalid matching schedule payload must not commit"),
+    };
+    assert_database_error(error, expected);
+}
+
 async fn wait_for_lock_wait(pool: &PgPool, application_name: &str) {
     for _ in 0..100 {
         let waiting: bool = sqlx::query_scalar(
@@ -109,7 +200,9 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     let second_document_id = Uuid::new_v4();
     let second_chunk_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
+    let scope_project_id = Uuid::new_v4();
     let clause_id = Uuid::new_v4();
+    let scope_clause_id = Uuid::new_v4();
     let ordinary_clause_id = Uuid::new_v4();
     let tender_document_id = Uuid::new_v4();
     let source_artifact_id = Uuid::new_v4();
@@ -394,6 +487,30 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .execute(&mut *seed)
     .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_projects
+         (id,title,owner_user_id,ends_at,fact_sha256,ceiling_identity_sha256,
+          matching_mutation_watermark,created_by)
+         VALUES($1,'可信边界测试',$2,clock_timestamp()+interval '30 days',repeat('0',64),repeat('1',64),1,$3)",
+    )
+    .bind(scope_project_id)
+    .bind(user_id)
+    .bind(&actor)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_clauses
+         (id,project_id,provenance,status,kind,text,must,revision,created_by)
+         VALUES($1,$2,'manual','confirmed','technical',$3,true,1,$4)",
+    )
+    .bind(scope_clause_id)
+    .bind(scope_project_id)
+    .bind(requirement)
+    .bind(&actor)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
     seed.commit().await.unwrap();
 
     let schedule_context = storage::bid_matching::ScheduleMutationContext::system();
@@ -439,6 +556,108 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .await
     .unwrap();
     assert_eq!(schedule_audit_count, 1, "replay must not append audit");
+
+    let cross_project_payload = matching_schedule_payload_without_eligible_scope(
+        scope_project_id,
+        1,
+        clause_id,
+        requirement,
+    );
+    assert_matching_schedule_rejected(
+        &pool,
+        scope_project_id,
+        &cross_project_payload,
+        "matching-scope-cross-project-clause",
+        "MATCHING_MANIFEST_V1_SCOPE_MISMATCH",
+    )
+    .await;
+
+    let missing_eligible_payload = matching_schedule_payload_without_eligible_scope(
+        scope_project_id,
+        1,
+        scope_clause_id,
+        requirement,
+    );
+    assert_matching_schedule_rejected(
+        &pool,
+        scope_project_id,
+        &missing_eligible_payload,
+        "matching-scope-missing-eligible-products",
+        "MATCHING_MANIFEST_V1_SCOPE_MISMATCH",
+    )
+    .await;
+    let rejected_manifest_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM bid_matching_manifests WHERE project_id=$1")
+            .bind(scope_project_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rejected_manifest_count, 0);
+
+    let scope_scheduled = storage::bid_matching::schedule_dirty_project(
+        &pool,
+        scope_project_id,
+        ScheduleEnvironment {
+            environment: "test".into(),
+            max_attempts: 3,
+        },
+        &schedule_context,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let scope_route_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM bid_matching_routes
+         WHERE manifest_id=$1 AND route_kind='technical' ORDER BY ordinal LIMIT 1",
+    )
+    .bind(scope_scheduled.manifest_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let next_membership_ordinal: i32 = sqlx::query_scalar(
+        "SELECT count(*)::integer FROM bid_matching_route_memberships WHERE route_id=$1",
+    )
+    .bind(scope_route_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let foreign_product_artifact_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM bid_matching_product_version_artifacts
+         WHERE manifest_id=$1 ORDER BY id LIMIT 1",
+    )
+    .bind(scheduled.manifest_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mut cross_manifest_tx = pool.begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO bid_matching_route_memberships
+         (manifest_id,route_id,product_version_artifact_id,route_product_ordinal)
+         VALUES($1,$2,$3,$4)",
+    )
+    .bind(scope_scheduled.manifest_id)
+    .bind(scope_route_id)
+    .bind(foreign_product_artifact_id)
+    .bind(next_membership_ordinal)
+    .execute(&mut *cross_manifest_tx)
+    .await
+    .unwrap();
+    let error = cross_manifest_tx
+        .commit()
+        .await
+        .expect_err("cross-manifest membership must not commit");
+    assert_database_error(error, "bid_matching_memberships_manifest_product_fk");
+    let cross_manifest_membership_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bid_matching_route_memberships
+         WHERE manifest_id=$1 AND route_id=$2 AND product_version_artifact_id=$3",
+    )
+    .bind(scope_scheduled.manifest_id)
+    .bind(scope_route_id)
+    .bind(foreign_product_artifact_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cross_manifest_membership_count, 0);
 
     let job_routes = sqlx::query(
         "SELECT job.id,route.route_kind,route.unit_id

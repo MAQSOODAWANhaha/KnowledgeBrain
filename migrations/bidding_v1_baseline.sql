@@ -517,6 +517,11 @@ CREATE TABLE bid_matching_routes (
     route_scope_sha256 kb_sha256 NOT NULL,
     UNIQUE (manifest_id, route_kind, unit_id),
     UNIQUE (manifest_id, ordinal),
+    UNIQUE (manifest_id, id),
+    CONSTRAINT bid_matching_routes_manifest_project_fk
+      FOREIGN KEY (project_id, manifest_id)
+      REFERENCES bid_matching_manifests(project_id, id)
+      ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     CHECK ((route_kind = 'commercial' AND unit_id IS NULL)
         OR (route_kind = 'technical' AND unit_id IS NOT NULL))
 );
@@ -533,7 +538,12 @@ CREATE TABLE bid_matching_requirement_artifacts (
     requirement_text text NOT NULL,
     requirement_sha256 kb_sha256 NOT NULL,
     UNIQUE (route_id, ordinal),
-    UNIQUE (route_id, id)
+    UNIQUE (route_id, id),
+    UNIQUE (manifest_id, route_id, id),
+    CONSTRAINT bid_matching_requirements_manifest_route_fk
+      FOREIGN KEY (manifest_id, route_id)
+      REFERENCES bid_matching_routes(manifest_id, id)
+      ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
 );
 CREATE TRIGGER bid_matching_requirement_artifacts_immutable
 BEFORE UPDATE OR DELETE ON bid_matching_requirement_artifacts
@@ -547,18 +557,28 @@ CREATE TABLE bid_matching_product_version_artifacts (
     workspace_kind text NOT NULL CHECK (workspace_kind IN ('product_line', 'company')),
     frozen_display_name text NOT NULL,
     identity_sha256 kb_sha256 NOT NULL,
-    UNIQUE (manifest_id, product_version_id)
+    UNIQUE (manifest_id, product_version_id),
+    UNIQUE (manifest_id, id)
 );
 CREATE TRIGGER bid_matching_product_version_artifacts_immutable
 BEFORE UPDATE OR DELETE ON bid_matching_product_version_artifacts
 FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
 
 CREATE TABLE bid_matching_route_memberships (
+    manifest_id uuid NOT NULL REFERENCES bid_matching_manifests(id) ON DELETE RESTRICT,
     route_id uuid NOT NULL REFERENCES bid_matching_routes(id) ON DELETE RESTRICT,
     product_version_artifact_id uuid NOT NULL REFERENCES bid_matching_product_version_artifacts(id) ON DELETE RESTRICT,
     route_product_ordinal integer NOT NULL CHECK (route_product_ordinal >= 0),
     PRIMARY KEY (route_id, product_version_artifact_id),
-    UNIQUE (route_id, route_product_ordinal)
+    UNIQUE (route_id, route_product_ordinal),
+    CONSTRAINT bid_matching_memberships_manifest_route_fk
+      FOREIGN KEY (manifest_id, route_id)
+      REFERENCES bid_matching_routes(manifest_id, id)
+      ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT bid_matching_memberships_manifest_product_fk
+      FOREIGN KEY (manifest_id, product_version_artifact_id)
+      REFERENCES bid_matching_product_version_artifacts(manifest_id, id)
+      ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
 );
 CREATE TRIGGER bid_matching_route_memberships_immutable
 BEFORE UPDATE OR DELETE ON bid_matching_route_memberships
@@ -580,6 +600,14 @@ CREATE TABLE bid_matching_jobs (
     started_at timestamptz,
     finished_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT bid_matching_jobs_manifest_project_fk
+      FOREIGN KEY (project_id, manifest_id)
+      REFERENCES bid_matching_manifests(project_id, id)
+      ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT bid_matching_jobs_manifest_route_fk
+      FOREIGN KEY (manifest_id, route_id)
+      REFERENCES bid_matching_routes(manifest_id, id)
+      ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     CHECK ((status = 'running') = (active_attempt IS NOT NULL)),
     CHECK ((status = 'completed') = (completed_report_id IS NOT NULL))
 );
@@ -724,12 +752,410 @@ CREATE TABLE bid_matching_frozen_retrieved_hits (
     retrieval_contract_version text NOT NULL,
     UNIQUE (route_id, requirement_artifact_id, product_version_artifact_id, document_id,
             source_chunk_id, quote_start_offset, quote_end_offset),
+    CONSTRAINT bid_matching_hits_manifest_route_fk
+      FOREIGN KEY (manifest_id, route_id)
+      REFERENCES bid_matching_routes(manifest_id, id)
+      ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT bid_matching_hits_manifest_requirement_fk
+      FOREIGN KEY (manifest_id, route_id, requirement_artifact_id)
+      REFERENCES bid_matching_requirement_artifacts(manifest_id, route_id, id)
+      ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT bid_matching_hits_manifest_product_fk
+      FOREIGN KEY (manifest_id, product_version_artifact_id)
+      REFERENCES bid_matching_product_version_artifacts(manifest_id, id)
+      ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     CHECK (quote_end_offset > quote_start_offset AND quote_end_offset <= chunk_byte_length),
     CHECK (chunk_sha256 = encode(public.digest(chunk_utf8, 'sha256'), 'hex'))
 );
 CREATE TRIGGER bid_matching_frozen_retrieved_hits_immutable
 BEFORE UPDATE OR DELETE ON bid_matching_frozen_retrieved_hits
 FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
+
+CREATE FUNCTION kb_bid_assert_matching_manifest_scope(p_manifest_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  manifest_value bid_matching_manifests%ROWTYPE;
+  payload jsonb;
+  expected_payload jsonb;
+  routes_payload jsonb;
+  requirements_payload jsonb;
+  products_payload jsonb;
+  memberships_payload jsonb;
+  hits_payload jsonb;
+  expected_digest kb_sha256;
+  nil_unit constant uuid := '00000000-0000-0000-0000-000000000000'::uuid;
+BEGIN
+  SELECT * INTO STRICT manifest_value
+    FROM bid_matching_manifests
+   WHERE id=p_manifest_id
+   FOR SHARE;
+  BEGIN
+    payload := convert_from(manifest_value.canonical_payload,'UTF8')::jsonb;
+  EXCEPTION WHEN others THEN
+    RAISE EXCEPTION 'MATCHING_MANIFEST_V1_PAYLOAD_INVALID' USING ERRCODE='23514';
+  END;
+
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'id',route.id,'route_kind',route.route_kind,'unit_id',route.unit_id,
+      'ordinal',route.ordinal,'empty_policy',route.empty_policy,
+      'route_scope_sha256',route.route_scope_sha256
+    ) ORDER BY route.ordinal),'[]'::jsonb)
+    INTO routes_payload
+    FROM bid_matching_routes route
+   WHERE route.manifest_id=p_manifest_id;
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'id',requirement.id,'route_id',requirement.route_id,'clause_id',requirement.clause_id,
+      'ordinal',requirement.ordinal,'text',requirement.requirement_text,
+      'sha256',requirement.requirement_sha256
+    ) ORDER BY requirement.route_id,requirement.clause_id),'[]'::jsonb)
+    INTO requirements_payload
+    FROM bid_matching_requirement_artifacts requirement
+   WHERE requirement.manifest_id=p_manifest_id;
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'id',product.id,'product_id',product.product_id,
+      'product_version_id',product.product_version_id,'workspace_kind',product.workspace_kind,
+      'frozen_display_name',product.frozen_display_name,'identity_sha256',product.identity_sha256
+    ) ORDER BY product.product_id,product.product_version_id,product.workspace_kind),'[]'::jsonb)
+    INTO products_payload
+    FROM bid_matching_product_version_artifacts product
+   WHERE product.manifest_id=p_manifest_id;
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'route_id',membership.route_id,
+      'product_version_artifact_id',membership.product_version_artifact_id,
+      'route_product_ordinal',membership.route_product_ordinal
+    ) ORDER BY route.ordinal,product.product_version_id,product.id),'[]'::jsonb)
+    INTO memberships_payload
+    FROM bid_matching_route_memberships membership
+    JOIN bid_matching_routes route ON route.id=membership.route_id
+    JOIN bid_matching_product_version_artifacts product
+      ON product.id=membership.product_version_artifact_id
+   WHERE membership.manifest_id=p_manifest_id;
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'id',hit.id,'route_id',hit.route_id,
+      'requirement_artifact_id',hit.requirement_artifact_id,
+      'product_version_artifact_id',hit.product_version_artifact_id,
+      'document_id',hit.document_id,'source_chunk_id',hit.source_chunk_id,
+      'frozen_document_display_name',hit.frozen_document_display_name,
+      'chunk_utf8',convert_from(hit.chunk_utf8,'UTF8'),'chunk_sha256',hit.chunk_sha256,
+      'chunk_byte_length',hit.chunk_byte_length,'retrieval_rank',hit.retrieval_rank,
+      'retrieval_raw_score',to_char(hit.retrieval_raw_score,'FM99999999999999999999.000000'),
+      'quote_start_offset',hit.quote_start_offset,'quote_end_offset',hit.quote_end_offset,
+      'offset_unit',hit.offset_unit,'retrieval_contract_version',hit.retrieval_contract_version
+    ) ORDER BY hit.route_id,hit.requirement_artifact_id,hit.retrieval_rank,hit.id),'[]'::jsonb)
+    INTO hits_payload
+    FROM bid_matching_frozen_retrieved_hits hit
+   WHERE hit.manifest_id=p_manifest_id;
+
+  expected_payload := jsonb_build_object(
+    'schema_version',1,'manifest_id',manifest_value.id,'project_id',manifest_value.project_id,
+    'mutation_watermark',manifest_value.mutation_watermark,
+    'requirement_set_sha256',manifest_value.requirement_set_sha256,
+    'eligible_scope_sha256',manifest_value.eligible_scope_sha256,
+    'routes',routes_payload,'requirements',requirements_payload,'products',products_payload,
+    'memberships',memberships_payload,'frozen_hits',hits_payload
+  );
+  IF payload IS DISTINCT FROM expected_payload THEN
+    RAISE EXCEPTION 'MATCHING_MANIFEST_V1_PAYLOAD_RELATION_MISMATCH' USING ERRCODE='23514';
+  END IF;
+
+  IF (SELECT count(*) FROM bid_matching_routes WHERE manifest_id=p_manifest_id)
+       <> (SELECT count(DISTINCT COALESCE(span.section_artifact_id,nil_unit))+1
+             FROM bid_clauses clause
+             LEFT JOIN bid_source_span_artifacts span
+               ON span.id=clause.current_source_span_artifact_id
+            WHERE clause.project_id=manifest_value.project_id
+              AND clause.status='confirmed' AND clause.family='technical')
+     OR (SELECT count(*) FROM bid_matching_routes
+          WHERE manifest_id=p_manifest_id AND route_kind='commercial')<>1
+     OR EXISTS(
+       SELECT 1
+         FROM bid_clauses clause
+         LEFT JOIN bid_source_span_artifacts span
+           ON span.id=clause.current_source_span_artifact_id
+        WHERE clause.project_id=manifest_value.project_id
+          AND clause.status='confirmed' AND clause.family='technical'
+          AND NOT EXISTS(
+            SELECT 1 FROM bid_matching_routes route
+             WHERE route.manifest_id=p_manifest_id AND route.route_kind='technical'
+               AND route.unit_id=COALESCE(span.section_artifact_id,nil_unit)))
+     OR EXISTS(
+       SELECT 1
+         FROM bid_matching_routes route
+        WHERE route.manifest_id=p_manifest_id
+          AND route.route_scope_sha256 IS DISTINCT FROM encode(public.digest(convert_to(
+            CASE WHEN route.route_kind='technical' THEN 'technical:'||route.unit_id::text
+                 ELSE 'commercial' END,'UTF8'),'sha256'),'hex'))
+     OR EXISTS(
+       SELECT 1 FROM (
+         SELECT route.ordinal,
+                row_number() OVER(ORDER BY (route.route_kind='commercial'),route.unit_id)-1 AS expected_ordinal
+           FROM bid_matching_routes route
+          WHERE route.manifest_id=p_manifest_id
+       ) ranked WHERE ranked.ordinal<>ranked.expected_ordinal)
+  THEN
+    RAISE EXCEPTION 'MATCHING_MANIFEST_V1_SCOPE_MISMATCH' USING ERRCODE='23514';
+  END IF;
+
+  IF EXISTS(
+       SELECT 1
+         FROM bid_matching_requirement_artifacts requirement
+         LEFT JOIN bid_matching_routes route
+           ON route.manifest_id=requirement.manifest_id AND route.id=requirement.route_id
+         LEFT JOIN bid_clauses clause ON clause.id=requirement.clause_id
+         LEFT JOIN bid_source_span_artifacts span
+           ON span.id=clause.current_source_span_artifact_id
+        WHERE requirement.manifest_id=p_manifest_id AND (
+          route.id IS NULL OR clause.id IS NULL
+          OR clause.project_id IS DISTINCT FROM manifest_value.project_id
+          OR clause.status IS DISTINCT FROM 'confirmed' OR clause.family IS NULL
+          OR requirement.requirement_text IS DISTINCT FROM clause.text
+          OR requirement.requirement_sha256 IS DISTINCT FROM
+             encode(public.digest(convert_to(clause.text,'UTF8'),'sha256'),'hex')
+          OR route.route_kind IS DISTINCT FROM
+             CASE WHEN clause.family='technical' THEN 'technical' ELSE 'commercial' END
+          OR route.unit_id IS DISTINCT FROM
+             CASE WHEN clause.family='technical'
+                  THEN COALESCE(span.section_artifact_id,nil_unit) ELSE NULL END))
+     OR EXISTS(
+       SELECT 1
+         FROM bid_clauses clause
+        WHERE clause.project_id=manifest_value.project_id
+          AND clause.status='confirmed' AND clause.family IS NOT NULL
+          AND NOT EXISTS(
+            SELECT 1 FROM bid_matching_requirement_artifacts requirement
+             WHERE requirement.manifest_id=p_manifest_id AND requirement.clause_id=clause.id))
+     OR EXISTS(
+       SELECT 1 FROM (
+         SELECT requirement.ordinal,
+                row_number() OVER(PARTITION BY requirement.route_id ORDER BY requirement.clause_id)-1
+                  AS expected_ordinal
+           FROM bid_matching_requirement_artifacts requirement
+          WHERE requirement.manifest_id=p_manifest_id
+       ) ranked WHERE ranked.ordinal<>ranked.expected_ordinal)
+  THEN
+    RAISE EXCEPTION 'MATCHING_MANIFEST_V1_SCOPE_MISMATCH' USING ERRCODE='23514';
+  END IF;
+
+  SELECT encode(public.digest(convert_to('['||COALESCE(string_agg(
+      '['||to_jsonb(requirement.route_id)::text||','||to_jsonb(requirement.clause_id)::text||','
+         ||to_jsonb(requirement.requirement_text)::text||','
+         ||to_jsonb(requirement.requirement_sha256)::text||']',
+      ',' ORDER BY requirement.route_id,requirement.clause_id),'')||']','UTF8'),'sha256'),'hex')
+    INTO expected_digest
+    FROM bid_matching_requirement_artifacts requirement
+   WHERE requirement.manifest_id=p_manifest_id;
+  IF manifest_value.requirement_set_sha256 IS DISTINCT FROM expected_digest THEN
+    RAISE EXCEPTION 'MATCHING_MANIFEST_V1_SCOPE_DIGEST_MISMATCH' USING ERRCODE='23514';
+  END IF;
+
+  IF EXISTS(
+       SELECT 1
+         FROM bid_matching_product_version_artifacts artifact
+         LEFT JOIN product_versions version_value ON version_value.id=artifact.product_version_id
+         LEFT JOIN products product ON product.id=version_value.product_id
+         LEFT JOIN workspaces workspace_value ON workspace_value.id=product.workspace_id
+        WHERE artifact.manifest_id=p_manifest_id AND (
+          artifact.product_id IS NULL OR product.id IS NULL
+          OR artifact.product_id IS DISTINCT FROM product.id
+          OR artifact.workspace_kind IS DISTINCT FROM workspace_value.kind
+          OR (artifact.workspace_kind='product_line' AND product.kind IS DISTINCT FROM 'product')
+          OR (artifact.workspace_kind='company' AND product.kind IS DISTINCT FROM 'library')
+          OR version_value.status IS DISTINCT FROM 'active' OR version_value.deleted_at IS NOT NULL
+          OR product.current_version_id IS DISTINCT FROM version_value.id
+          OR artifact.frozen_display_name IS DISTINCT FROM artifact.product_version_id::text
+          OR artifact.identity_sha256 IS DISTINCT FROM encode(public.digest(convert_to(
+             'ProductVersionEvidenceV1:'||artifact.product_id::text||':'
+             ||artifact.product_version_id::text||':'||artifact.workspace_kind,'UTF8'),'sha256'),'hex')
+          OR NOT EXISTS(
+            SELECT 1
+              FROM documents document_value
+              JOIN chunks chunk_value
+                ON chunk_value.document_id=document_value.id
+               AND chunk_value.product_version_id=document_value.product_version_id
+             WHERE document_value.product_version_id=artifact.product_version_id
+               AND document_value.deleted_at IS NULL
+               AND document_value.enable_status='enabled' AND document_value.index_ready
+               AND octet_length(convert_to(chunk_value.content,'UTF8'))<=262144)
+          OR NOT EXISTS(
+            SELECT 1 FROM bid_matching_frozen_retrieved_hits hit
+             WHERE hit.manifest_id=p_manifest_id
+               AND hit.product_version_artifact_id=artifact.id)))
+     OR EXISTS(
+       SELECT 1
+         FROM workspaces workspace_value
+         JOIN products product ON product.workspace_id=workspace_value.id
+         JOIN product_versions version_value
+           ON version_value.product_id=product.id AND product.current_version_id=version_value.id
+        WHERE version_value.status='active' AND version_value.deleted_at IS NULL
+          AND ((workspace_value.kind='product_line' AND product.kind='product'
+                AND EXISTS(
+                  SELECT 1
+                    FROM bid_matching_requirement_artifacts requirement
+                    JOIN bid_matching_routes route
+                      ON route.manifest_id=requirement.manifest_id AND route.id=requirement.route_id
+                   WHERE requirement.manifest_id=p_manifest_id AND route.route_kind='technical'))
+            OR (workspace_value.kind='company' AND product.kind='library'
+                AND EXISTS(
+                  SELECT 1
+                    FROM bid_matching_requirement_artifacts requirement
+                    JOIN bid_matching_routes route
+                      ON route.manifest_id=requirement.manifest_id AND route.id=requirement.route_id
+                   WHERE requirement.manifest_id=p_manifest_id AND route.route_kind='commercial')))
+          AND EXISTS(
+            SELECT 1
+              FROM documents document_value
+              JOIN chunks chunk_value
+                ON chunk_value.document_id=document_value.id
+               AND chunk_value.product_version_id=document_value.product_version_id
+             WHERE document_value.product_version_id=version_value.id
+               AND document_value.deleted_at IS NULL
+               AND document_value.enable_status='enabled' AND document_value.index_ready
+               AND octet_length(convert_to(chunk_value.content,'UTF8'))<=262144)
+          AND NOT EXISTS(
+            SELECT 1
+              FROM bid_matching_product_version_artifacts artifact
+             WHERE artifact.manifest_id=p_manifest_id AND artifact.product_id=product.id
+               AND artifact.product_version_id=version_value.id
+               AND artifact.workspace_kind=workspace_value.kind))
+     OR EXISTS(
+       SELECT 1
+         FROM bid_matching_frozen_retrieved_hits hit
+         LEFT JOIN bid_matching_routes route
+           ON route.manifest_id=hit.manifest_id AND route.id=hit.route_id
+         LEFT JOIN bid_matching_requirement_artifacts requirement
+           ON requirement.manifest_id=hit.manifest_id AND requirement.route_id=hit.route_id
+          AND requirement.id=hit.requirement_artifact_id
+         LEFT JOIN bid_matching_product_version_artifacts artifact
+           ON artifact.manifest_id=hit.manifest_id AND artifact.id=hit.product_version_artifact_id
+         LEFT JOIN documents document_value ON document_value.id=hit.document_id
+         LEFT JOIN chunks chunk_value ON chunk_value.id=hit.source_chunk_id
+        WHERE hit.manifest_id=p_manifest_id AND (
+          route.id IS NULL OR requirement.id IS NULL OR artifact.id IS NULL
+          OR route.route_kind IS DISTINCT FROM
+             CASE artifact.workspace_kind WHEN 'product_line' THEN 'technical' ELSE 'commercial' END
+          OR document_value.product_version_id IS DISTINCT FROM artifact.product_version_id
+          OR chunk_value.product_version_id IS DISTINCT FROM artifact.product_version_id
+          OR chunk_value.document_id IS DISTINCT FROM hit.document_id
+          OR document_value.deleted_at IS NOT NULL
+          OR document_value.enable_status IS DISTINCT FROM 'enabled' OR NOT document_value.index_ready
+          OR hit.frozen_document_display_name IS DISTINCT FROM document_value.file_name
+          OR hit.chunk_utf8 IS DISTINCT FROM convert_to(chunk_value.content,'UTF8')
+          OR hit.retrieval_contract_version IS DISTINCT FROM 'knowledge-evidence-v1'))
+     OR EXISTS(
+       SELECT 1
+         FROM bid_matching_requirement_artifacts requirement
+         JOIN bid_matching_routes route
+           ON route.manifest_id=requirement.manifest_id AND route.id=requirement.route_id
+         JOIN bid_matching_product_version_artifacts artifact
+           ON artifact.manifest_id=requirement.manifest_id
+          AND artifact.workspace_kind=CASE WHEN route.route_kind='technical'
+                                           THEN 'product_line' ELSE 'company' END
+        WHERE requirement.manifest_id=p_manifest_id
+          AND NOT EXISTS(
+            SELECT 1
+              FROM bid_matching_frozen_retrieved_hits hit
+             WHERE hit.manifest_id=requirement.manifest_id AND hit.route_id=requirement.route_id
+               AND hit.requirement_artifact_id=requirement.id
+               AND hit.product_version_artifact_id=artifact.id))
+     OR EXISTS(
+       SELECT 1
+         FROM bid_matching_frozen_retrieved_hits hit
+        WHERE hit.manifest_id=p_manifest_id
+        GROUP BY hit.requirement_artifact_id
+       HAVING count(*)>64 OR COALESCE(sum(hit.chunk_byte_length),0)>8388608
+          OR max(hit.chunk_byte_length)>262144)
+     OR EXISTS(
+       SELECT 1 FROM (
+         SELECT hit.retrieval_rank,
+                row_number() OVER(PARTITION BY hit.requirement_artifact_id
+                                  ORDER BY hit.retrieval_rank,hit.id) AS expected_rank
+           FROM bid_matching_frozen_retrieved_hits hit
+          WHERE hit.manifest_id=p_manifest_id
+       ) ranked WHERE ranked.retrieval_rank<>ranked.expected_rank)
+  THEN
+    RAISE EXCEPTION 'MATCHING_MANIFEST_V1_SCOPE_MISMATCH' USING ERRCODE='23514';
+  END IF;
+
+  IF EXISTS(
+       SELECT 1
+         FROM bid_matching_route_memberships membership
+         LEFT JOIN bid_matching_routes route ON route.id=membership.route_id
+         LEFT JOIN bid_matching_product_version_artifacts product
+           ON product.id=membership.product_version_artifact_id
+        WHERE membership.manifest_id=p_manifest_id AND (
+          route.manifest_id IS DISTINCT FROM membership.manifest_id
+          OR product.manifest_id IS DISTINCT FROM membership.manifest_id
+          OR NOT EXISTS(
+            SELECT 1 FROM bid_matching_frozen_retrieved_hits hit
+             WHERE hit.manifest_id=membership.manifest_id
+               AND hit.route_id=membership.route_id
+               AND hit.product_version_artifact_id=membership.product_version_artifact_id)))
+     OR EXISTS(
+       SELECT 1
+         FROM bid_matching_frozen_retrieved_hits hit
+        WHERE hit.manifest_id=p_manifest_id
+          AND NOT EXISTS(
+            SELECT 1 FROM bid_matching_route_memberships membership
+             WHERE membership.manifest_id=hit.manifest_id
+               AND membership.route_id=hit.route_id
+               AND membership.product_version_artifact_id=hit.product_version_artifact_id))
+     OR EXISTS(
+       SELECT 1 FROM (
+         SELECT membership.route_product_ordinal,
+                row_number() OVER(PARTITION BY membership.route_id
+                                  ORDER BY product.product_version_id,product.id)-1 AS expected_ordinal
+           FROM bid_matching_route_memberships membership
+           JOIN bid_matching_product_version_artifacts product
+             ON product.manifest_id=membership.manifest_id
+            AND product.id=membership.product_version_artifact_id
+          WHERE membership.manifest_id=p_manifest_id
+       ) ranked WHERE ranked.route_product_ordinal<>ranked.expected_ordinal)
+  THEN
+    RAISE EXCEPTION 'MATCHING_MANIFEST_V1_SCOPE_MISMATCH' USING ERRCODE='23514';
+  END IF;
+
+  SELECT encode(public.digest(convert_to('['||COALESCE(string_agg(
+      '['||to_jsonb(product.product_id)::text||','||to_jsonb(product.product_version_id)::text||','
+         ||to_jsonb(product.identity_sha256)::text||']',
+      ',' ORDER BY product.product_id,product.product_version_id,product.workspace_kind),'')||']',
+      'UTF8'),'sha256'),'hex')
+    INTO expected_digest
+    FROM bid_matching_product_version_artifacts product
+   WHERE product.manifest_id=p_manifest_id;
+  IF manifest_value.eligible_scope_sha256 IS DISTINCT FROM expected_digest
+     OR (SELECT count(*) FROM bid_matching_jobs WHERE manifest_id=p_manifest_id)
+        <> (SELECT count(*) FROM bid_matching_routes WHERE manifest_id=p_manifest_id)
+     OR EXISTS(
+       SELECT 1
+         FROM bid_matching_jobs job
+         LEFT JOIN bid_matching_routes route
+           ON route.manifest_id=job.manifest_id AND route.id=job.route_id
+        WHERE job.manifest_id=p_manifest_id
+          AND (job.project_id IS DISTINCT FROM manifest_value.project_id OR route.id IS NULL))
+  THEN
+    RAISE EXCEPTION 'MATCHING_MANIFEST_V1_SCOPE_MISMATCH' USING ERRCODE='23514';
+  END IF;
+END
+$$;
+
+CREATE FUNCTION kb_bid_verify_matching_manifest_v1()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+  PERFORM kb_bid_assert_matching_manifest_scope((to_jsonb(NEW)->>TG_ARGV[0])::uuid);
+  RETURN NEW;
+END
+$$;
+CREATE CONSTRAINT TRIGGER bid_matching_manifests_scope_verify
+AFTER INSERT ON bid_matching_manifests DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION kb_bid_verify_matching_manifest_v1('id');
 
 CREATE TABLE bid_matching_source_artifacts (
     id uuid PRIMARY KEY,
@@ -7497,8 +7923,9 @@ BEGIN
       item->>'workspace_kind',item->>'frozen_display_name',item->>'identity_sha256');
   END LOOP;
   FOR item IN SELECT value FROM jsonb_array_elements(COALESCE(p_payload->'memberships','[]'::jsonb)) LOOP
-    INSERT INTO bid_matching_route_memberships(route_id,product_version_artifact_id,route_product_ordinal)
-    VALUES((item->>'route_id')::uuid,(item->>'product_version_artifact_id')::uuid,(item->>'route_product_ordinal')::integer);
+    INSERT INTO bid_matching_route_memberships(manifest_id,route_id,product_version_artifact_id,route_product_ordinal)
+    VALUES(manifest_id,(item->>'route_id')::uuid,(item->>'product_version_artifact_id')::uuid,
+      (item->>'route_product_ordinal')::integer);
   END LOOP;
   FOR item IN SELECT value FROM jsonb_array_elements(COALESCE(p_payload->'frozen_hits','[]'::jsonb)) LOOP
     INSERT INTO bid_matching_frozen_retrieved_hits
@@ -7518,6 +7945,7 @@ BEGIN
     VALUES(job_id,p_project_id,manifest_id,(item->>'id')::uuid,'pending',p_max_attempts,300000,1,clock_timestamp());
     job_ids := job_ids || job_id;
   END LOOP;
+  PERFORM kb_bid_assert_matching_manifest_scope(manifest_id);
   response := jsonb_build_object(
     'manifest_id',manifest_id,'generation',generation,'job_ids',to_jsonb(job_ids),'scheduled',true
   );

@@ -866,6 +866,13 @@ owner = "app_owner"
 
 [[relations]]
 schema = "public"
+name = "bid_matching_product_version_artifacts_manifest_id_id_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
 name = "bid_matching_product_version_artifacts_pkey"
 kind = "index"
 persistence = "permanent"
@@ -910,6 +917,13 @@ owner = "app_owner"
 schema = "public"
 name = "bid_matching_requirement_artifacts"
 kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_matching_requirement_artifacts_manifest_id_route_id_id_key"
+kind = "index"
 persistence = "permanent"
 owner = "app_owner"
 
@@ -987,6 +1001,13 @@ owner = "app_owner"
 schema = "public"
 name = "bid_matching_routes"
 kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_matching_routes_manifest_id_id_key"
+kind = "index"
 persistence = "permanent"
 owner = "app_owner"
 
@@ -7720,6 +7741,28 @@ generated = ""
 
 [[columns]]
 schema = "public"
+relation = "bid_matching_product_version_artifacts_manifest_id_id_key"
+ordinal = 1
+name = "manifest_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_product_version_artifacts_manifest_id_id_key"
+ordinal = 2
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
 relation = "bid_matching_product_version_artifacts_pkey"
 ordinal = 1
 name = "id"
@@ -8105,6 +8148,39 @@ generated = ""
 
 [[columns]]
 schema = "public"
+relation = "bid_matching_requirement_artifacts_manifest_id_route_id_id_key"
+ordinal = 1
+name = "manifest_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_requirement_artifacts_manifest_id_route_id_id_key"
+ordinal = 2
+name = "route_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_requirement_artifacts_manifest_id_route_id_id_key"
+ordinal = 3
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
 relation = "bid_matching_requirement_artifacts_pkey"
 ordinal = 1
 name = "id"
@@ -8338,7 +8414,7 @@ generated = ""
 schema = "public"
 relation = "bid_matching_route_memberships"
 ordinal = 1
-name = "route_id"
+name = "manifest_id"
 type = "uuid"
 nullable = false
 default = ""
@@ -8349,7 +8425,7 @@ generated = ""
 schema = "public"
 relation = "bid_matching_route_memberships"
 ordinal = 2
-name = "product_version_artifact_id"
+name = "route_id"
 type = "uuid"
 nullable = false
 default = ""
@@ -8360,6 +8436,17 @@ generated = ""
 schema = "public"
 relation = "bid_matching_route_memberships"
 ordinal = 3
+name = "product_version_artifact_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_route_memberships"
+ordinal = 4
 name = "route_product_ordinal"
 type = "integer"
 nullable = false
@@ -8473,6 +8560,28 @@ ordinal = 8
 name = "route_scope_sha256"
 type = "public.kb_sha256"
 nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_routes_manifest_id_id_key"
+ordinal = 1
+name = "manifest_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_routes_manifest_id_id_key"
+ordinal = 2
+name = "id"
+type = "uuid"
+nullable = true
 default = ""
 identity = ""
 generated = ""
@@ -26306,6 +26415,36 @@ validated = true
 
 [[constraints]]
 schema = "public"
+relation = "bid_matching_frozen_retrieved_hits"
+name = "bid_matching_hits_manifest_product_fk"
+kind = "foreign_key"
+definition = "FOREIGN KEY (manifest_id, product_version_artifact_id) REFERENCES public.bid_matching_product_version_artifacts(manifest_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED"
+deferrable = true
+initially_deferred = true
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_frozen_retrieved_hits"
+name = "bid_matching_hits_manifest_requirement_fk"
+kind = "foreign_key"
+definition = "FOREIGN KEY (manifest_id, route_id, requirement_artifact_id) REFERENCES public.bid_matching_requirement_artifacts(manifest_id, route_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED"
+deferrable = true
+initially_deferred = true
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_frozen_retrieved_hits"
+name = "bid_matching_hits_manifest_route_fk"
+kind = "foreign_key"
+definition = "FOREIGN KEY (manifest_id, route_id) REFERENCES public.bid_matching_routes(manifest_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED"
+deferrable = true
+initially_deferred = true
+validated = true
+
+[[constraints]]
+schema = "public"
 relation = "bid_matching_job_claims"
 name = "bid_matching_job_claims_attempt_check"
 kind = "check"
@@ -26442,6 +26581,26 @@ kind = "foreign_key"
 definition = "FOREIGN KEY (manifest_id) REFERENCES public.bid_matching_manifests(id) ON DELETE RESTRICT"
 deferrable = false
 initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_jobs"
+name = "bid_matching_jobs_manifest_project_fk"
+kind = "foreign_key"
+definition = "FOREIGN KEY (project_id, manifest_id) REFERENCES public.bid_matching_manifests(project_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED"
+deferrable = true
+initially_deferred = true
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_jobs"
+name = "bid_matching_jobs_manifest_route_fk"
+kind = "foreign_key"
+definition = "FOREIGN KEY (manifest_id, route_id) REFERENCES public.bid_matching_routes(manifest_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED"
+deferrable = true
+initially_deferred = true
 validated = true
 
 [[constraints]]
@@ -26586,6 +26745,16 @@ validated = true
 
 [[constraints]]
 schema = "public"
+relation = "bid_matching_manifests"
+name = "bid_matching_manifests_scope_verify"
+kind = "constraint_trigger"
+definition = "TRIGGER DEFERRABLE INITIALLY DEFERRED"
+deferrable = true
+initially_deferred = true
+validated = true
+
+[[constraints]]
+schema = "public"
 relation = "bid_matching_product_version_artifacts"
 name = "bid_matching_product_version__manifest_id_product_version_i_key"
 kind = "unique"
@@ -26600,6 +26769,16 @@ relation = "bid_matching_product_version_artifacts"
 name = "bid_matching_product_version_artifacts_manifest_id_fkey"
 kind = "foreign_key"
 definition = "FOREIGN KEY (manifest_id) REFERENCES public.bid_matching_manifests(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_product_version_artifacts"
+name = "bid_matching_product_version_artifacts_manifest_id_id_key"
+kind = "unique"
+definition = "UNIQUE (manifest_id, id)"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -26857,6 +27036,16 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "bid_matching_requirement_artifacts"
+name = "bid_matching_requirement_artifacts_manifest_id_route_id_id_key"
+kind = "unique"
+definition = "UNIQUE (manifest_id, route_id, id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_requirement_artifacts"
 name = "bid_matching_requirement_artifacts_ordinal_check"
 kind = "check"
 definition = "CHECK (ordinal >= 0)"
@@ -26902,6 +27091,16 @@ kind = "unique"
 definition = "UNIQUE (route_id, ordinal)"
 deferrable = false
 initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_requirement_artifacts"
+name = "bid_matching_requirements_manifest_route_fk"
+kind = "foreign_key"
+definition = "FOREIGN KEY (manifest_id, route_id) REFERENCES public.bid_matching_routes(manifest_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED"
+deferrable = true
+initially_deferred = true
 validated = true
 
 [[constraints]]
@@ -27037,9 +27236,39 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "bid_matching_route_memberships"
+name = "bid_matching_memberships_manifest_product_fk"
+kind = "foreign_key"
+definition = "FOREIGN KEY (manifest_id, product_version_artifact_id) REFERENCES public.bid_matching_product_version_artifacts(manifest_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED"
+deferrable = true
+initially_deferred = true
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_route_memberships"
+name = "bid_matching_memberships_manifest_route_fk"
+kind = "foreign_key"
+definition = "FOREIGN KEY (manifest_id, route_id) REFERENCES public.bid_matching_routes(manifest_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED"
+deferrable = true
+initially_deferred = true
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_route_memberships"
 name = "bid_matching_route_membership_route_id_route_product_ordina_key"
 kind = "unique"
 definition = "UNIQUE (route_id, route_product_ordinal)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_route_memberships"
+name = "bid_matching_route_memberships_manifest_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (manifest_id) REFERENCES public.bid_matching_manifests(id) ON DELETE RESTRICT"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -27117,6 +27346,16 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "bid_matching_routes"
+name = "bid_matching_routes_manifest_id_id_key"
+kind = "unique"
+definition = "UNIQUE (manifest_id, id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_routes"
 name = "bid_matching_routes_manifest_id_ordinal_key"
 kind = "unique"
 definition = "UNIQUE (manifest_id, ordinal)"
@@ -27132,6 +27371,16 @@ kind = "unique"
 definition = "UNIQUE (manifest_id, route_kind, unit_id)"
 deferrable = false
 initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_routes"
+name = "bid_matching_routes_manifest_project_fk"
+kind = "foreign_key"
+definition = "FOREIGN KEY (project_id, manifest_id) REFERENCES public.bid_matching_manifests(project_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED"
+deferrable = true
+initially_deferred = true
 validated = true
 
 [[constraints]]
@@ -32893,6 +33142,18 @@ live = true
 [[indexes]]
 schema = "public"
 table = "bid_matching_product_version_artifacts"
+name = "bid_matching_product_version_artifacts_manifest_id_id_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_matching_product_version_artifacts_manifest_id_id_key ON public.bid_matching_product_version_artifacts USING btree (manifest_id, id)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_matching_product_version_artifacts"
 name = "bid_matching_product_version_artifacts_pkey"
 owner = "app_owner"
 definition = "CREATE UNIQUE INDEX bid_matching_product_version_artifacts_pkey ON public.bid_matching_product_version_artifacts USING btree (id)"
@@ -32944,6 +33205,18 @@ table = "bid_matching_reports"
 name = "bid_matching_reports_route_id_generation_key"
 owner = "app_owner"
 definition = "CREATE UNIQUE INDEX bid_matching_reports_route_id_generation_key ON public.bid_matching_reports USING btree (route_id, generation)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_matching_requirement_artifacts"
+name = "bid_matching_requirement_artifacts_manifest_id_route_id_id_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_matching_requirement_artifacts_manifest_id_route_id_id_key ON public.bid_matching_requirement_artifacts USING btree (manifest_id, route_id, id)"
 primary = false
 unique = true
 valid = true
@@ -33041,6 +33314,18 @@ name = "bid_matching_route_memberships_pkey"
 owner = "app_owner"
 definition = "CREATE UNIQUE INDEX bid_matching_route_memberships_pkey ON public.bid_matching_route_memberships USING btree (route_id, product_version_artifact_id)"
 primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_matching_routes"
+name = "bid_matching_routes_manifest_id_id_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_matching_routes_manifest_id_id_key ON public.bid_matching_routes USING btree (manifest_id, id)"
+primary = false
 unique = true
 valid = true
 ready = true
@@ -35171,6 +35456,13 @@ definition = "CREATE TRIGGER bid_matching_manifests_immutable BEFORE DELETE OR U
 
 [[triggers]]
 schema = "public"
+table = "bid_matching_manifests"
+name = "bid_matching_manifests_scope_verify"
+enabled = "origin"
+definition = "CREATE CONSTRAINT TRIGGER bid_matching_manifests_scope_verify AFTER INSERT ON public.bid_matching_manifests DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.kb_bid_verify_matching_manifest_v1('id')"
+
+[[triggers]]
+schema = "public"
 table = "bid_matching_product_version_artifacts"
 name = "bid_matching_product_version_artifacts_immutable"
 enabled = "origin"
@@ -35585,6 +35877,22 @@ leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
 definition_sha256 = "0afc99fc242d98aad35785ae65dd28ebb303bcc8fa0eaccdcfc0769bdde8efa7"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_assert_matching_manifest_scope"
+identity_arguments = "p_manifest_id uuid"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "void"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "c4778b67018141cabde86b238b82e7c620fd60f1925f704e2ae73e81fc435edc"
 
 [[routines]]
 schema = "public"
@@ -36448,7 +36756,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "e33612c230a80533ede0ca3d655d271f5b9a5f9bc9eb4ad0067af43e5b34088b"
+definition_sha256 = "43e30f651833d4e8e8f8d7485b79f2da76009b5c925849d593880c21713812e9"
 
 [[routines]]
 schema = "public"
@@ -37521,6 +37829,22 @@ leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
 definition_sha256 = "c508796f9501f8919e570270e32dac492a09b26b4d3d3d3647741ce54957038a"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_verify_matching_manifest_v1"
+identity_arguments = ""
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "trigger"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "1b8b0395dab224f76add7827d9abdc70a7cf9ded61c4b494c4437b0a489fa6bc"
 
 [[routines]]
 schema = "public"
@@ -49877,6 +50201,15 @@ grant_option = false
 
 [[routine_acls]]
 schema = "public"
+name = "kb_bid_assert_matching_manifest_scope"
+identity_arguments = "p_manifest_id uuid"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
 name = "kb_bid_build_part_markdown"
 identity_arguments = "p_project_id uuid, p_part_key text"
 grantor = "kb_app_owner"
@@ -51651,6 +51984,15 @@ grant_option = false
 [[routine_acls]]
 schema = "public"
 name = "kb_bid_validate_source_span_v2"
+identity_arguments = ""
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_verify_matching_manifest_v1"
 identity_arguments = ""
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
