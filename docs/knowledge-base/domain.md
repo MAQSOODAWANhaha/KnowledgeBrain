@@ -97,6 +97,8 @@ retrieval_contract_version
 
 知识库拥有检索 scope 的持久化 `kb_knowledge_attest_matching_scope_v1` / `kb_knowledge_verify_matching_scope_v1` 合同。招投标 schedule 只能把端口返回的 `eligible_versions` 与 `hits` 快照交给该合同；只有知识库函数可以将快照与 live Workspace/Product/ProductVersion/Document/chunk 关系比较。
 
+attestation scope 必须携带固定结构 `version_selections={"product_line":[],"company":[]}`。两个 key 都必须存在，每个值都是按 UUID 升序排列且无重复的 version ID 数组；空数组表示该 workspace kind 的全部 current eligible versions，非空数组表示必须精确匹配的冻结子集。未出现在 `workspace_kinds` 的 kind 必须使用空数组，禁止把 product 与 company selection 混在同一无类型列表中。`products` 必须与上述每个 kind 的 effective selection 双向精确一致。
+
 attest 成功后产生 immutable attestation ID、canonical payload 与 SHA-256。招投标 manifest 冻结 attestation ID/hash，deferred verifier 只能以 ID/hash/同一 payload 调用 knowledge verify；不得在招投标函数中直接 join 知识库表。attestation 证明 schedule 时的完整 scope 和 hit 来源，后续 live 资料变化不改写已发布 manifest/report。
 
 ## 3. 招投标边界

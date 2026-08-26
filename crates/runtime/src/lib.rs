@@ -72,7 +72,8 @@ pub fn queue_for(task_type: &str) -> &'static str {
         | domain::TYPE_KB_DELETE
         | domain::TYPE_LIST_DELETE
         | domain::TYPE_LIST_REPARSE
-        | domain::TYPE_INDEX_DELETE => QUEUE_LOW,
+        | domain::TYPE_INDEX_DELETE
+        | domain::TYPE_SYSTEM_LIVE_RECOVERY_V1 => QUEUE_LOW,
         _ => "rejected:unknown",
     }
 }
@@ -192,6 +193,14 @@ mod tests {
         assert_eq!(HOUSEKEEP_CRON, "0 */5 * * * *");
         assert_eq!(HOUSEKEEP_STALE_SECS, 2 * 3600 + 10 * 60);
         assert_eq!(HOUSEKEEP_EXTRACT_STALE_SECS, 90);
+    }
+
+    #[test]
+    fn live_recovery_required_lane_maps_to_low_queue() {
+        assert_eq!(
+            queue_for(domain::TYPE_SYSTEM_LIVE_RECOVERY_V1),
+            domain::QUEUE_LOW
+        );
     }
 
     #[test]

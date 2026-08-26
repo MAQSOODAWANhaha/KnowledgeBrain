@@ -103,7 +103,11 @@ def is_production_complete(lock):
             return False
         if not all(is_signed(entry) for entry in list(runtime) + list(build)):
             return False
-        if not has_signed_lock_id(runtime, "api") or not has_signed_lock_id(runtime, "worker"):
+        if (
+            not has_signed_lock_id(runtime, "api")
+            or not has_signed_lock_id(runtime, "worker")
+            or not has_signed_lock_id(runtime, "retention")
+        ):
             return False
     return True
 

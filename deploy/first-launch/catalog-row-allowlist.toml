@@ -894,6 +894,13 @@ owner = "app_owner"
 
 [[relations]]
 schema = "public"
+name = "bid_matching_manifests_schedule_intent_id_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
 name = "bid_matching_product_version__manifest_id_product_version_i_key"
 kind = "index"
 persistence = "permanent"
@@ -1070,6 +1077,41 @@ owner = "app_owner"
 [[relations]]
 schema = "public"
 name = "bid_matching_routes_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_matching_schedule_intents"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_matching_schedule_intents_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_matching_schedule_intents_project_id_generation_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_matching_schedule_intents_project_id_id_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_matching_schedule_intents_project_id_mutation_watermark_key"
 kind = "index"
 persistence = "permanent"
 owner = "app_owner"
@@ -1301,6 +1343,55 @@ owner = "app_owner"
 [[relations]]
 schema = "public"
 name = "bid_matching_staging_sets_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_operation_snapshot_artifacts"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_operation_snapshot_artifacts_content_sha256_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_operation_snapshot_artifacts_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_operation_snapshot_artifacts_snapshot_kind_id_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_operation_snapshot_artifacts_snapshot_kind_version_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_operation_snapshot_current"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_operation_snapshot_current_pkey"
 kind = "index"
 persistence = "permanent"
 owner = "app_owner"
@@ -1986,6 +2077,41 @@ owner = "app_owner"
 
 [[relations]]
 schema = "public"
+name = "bid_submission_render_job_snapshot_artifacts"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_submission_render_job_snapshot_artifacts_content_sha256_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_submission_render_job_snapshot_artifacts_manifest_id_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_submission_render_job_snapshot_artifacts_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_submission_render_job_snapshot_artifacts_project_id_id_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
 name = "bid_submission_render_jobs"
 kind = "table"
 persistence = "permanent"
@@ -2022,6 +2148,13 @@ owner = "app_owner"
 [[relations]]
 schema = "public"
 name = "bid_submission_render_jobs_running_idx"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "bid_submission_render_jobs_submission_render_job_snapshot_i_key"
 kind = "index"
 persistence = "permanent"
 owner = "app_owner"
@@ -2483,6 +2616,90 @@ owner = "app_owner"
 
 [[relations]]
 schema = "public"
+name = "knowledge_matching_scope_attestations_v2"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "knowledge_matching_scope_attestations_v2_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "knowledge_retrieval_policies_v2"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "knowledge_retrieval_policies_v2_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "live_recovery_configuration"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "live_recovery_configuration_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "live_recovery_feature_snapshots"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "live_recovery_feature_snapshots_content_sha256_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "live_recovery_feature_snapshots_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "live_recovery_policy_snapshots"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "live_recovery_policy_snapshots_content_sha256_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "live_recovery_policy_snapshots_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
 name = "maintenance_gate_audit"
 kind = "table"
 persistence = "permanent"
@@ -2837,6 +3054,48 @@ name = "schema_migrations_pkey"
 kind = "index"
 persistence = "permanent"
 owner = "kb_launch_owner"
+
+[[relations]]
+schema = "public"
+name = "system_live_recovery_claims"
+kind = "table"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "system_live_recovery_claims_active_identity_idx"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "system_live_recovery_claims_pending_idx"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "system_live_recovery_claims_pkey"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "system_live_recovery_claims_recovery_kind_durable_id_genera_key"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
+
+[[relations]]
+schema = "public"
+name = "system_live_recovery_claims_running_idx"
+kind = "index"
+persistence = "permanent"
+owner = "app_owner"
 
 [[relations]]
 schema = "public"
@@ -3487,6 +3746,28 @@ generated = ""
 schema = "public"
 relation = "bid_attachment_preparation_jobs"
 ordinal = 4
+name = "conversion_snapshot_id"
+type = "uuid"
+nullable = false
+default = "'b1d00000-0000-5000-8000-000000000001'::uuid"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 5
+name = "feature_snapshot_id"
+type = "uuid"
+nullable = false
+default = "'b1d00000-0000-5000-8000-000000000006'::uuid"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+ordinal = 6
 name = "status"
 type = "text"
 nullable = false
@@ -3497,7 +3778,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_attachment_preparation_jobs"
-ordinal = 5
+ordinal = 7
 name = "attempt_count"
 type = "integer"
 nullable = false
@@ -3508,7 +3789,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_attachment_preparation_jobs"
-ordinal = 6
+ordinal = 8
 name = "max_attempts"
 type = "integer"
 nullable = false
@@ -3519,7 +3800,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_attachment_preparation_jobs"
-ordinal = 7
+ordinal = 9
 name = "claim_token"
 type = "uuid"
 nullable = true
@@ -3530,7 +3811,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_attachment_preparation_jobs"
-ordinal = 8
+ordinal = 10
 name = "claim_lease_ms"
 type = "integer"
 nullable = false
@@ -3541,7 +3822,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_attachment_preparation_jobs"
-ordinal = 9
+ordinal = 11
 name = "heartbeat_at"
 type = "timestamp with time zone"
 nullable = true
@@ -3552,7 +3833,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_attachment_preparation_jobs"
-ordinal = 10
+ordinal = 12
 name = "error_code"
 type = "text"
 nullable = true
@@ -3563,7 +3844,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_attachment_preparation_jobs"
-ordinal = 11
+ordinal = 13
 name = "error_detail"
 type = "text"
 nullable = true
@@ -3574,7 +3855,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_attachment_preparation_jobs"
-ordinal = 12
+ordinal = 14
 name = "created_at"
 type = "timestamp with time zone"
 nullable = false
@@ -3585,7 +3866,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_attachment_preparation_jobs"
-ordinal = 13
+ordinal = 15
 name = "started_at"
 type = "timestamp with time zone"
 nullable = true
@@ -3596,7 +3877,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_attachment_preparation_jobs"
-ordinal = 14
+ordinal = 16
 name = "finished_at"
 type = "timestamp with time zone"
 nullable = true
@@ -5412,6 +5693,28 @@ generated = ""
 schema = "public"
 relation = "bid_documents"
 ordinal = 9
+name = "conversion_snapshot_id"
+type = "uuid"
+nullable = false
+default = "'b1d00000-0000-5000-8000-000000000001'::uuid"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_documents"
+ordinal = 10
+name = "feature_snapshot_id"
+type = "uuid"
+nullable = false
+default = "'b1d00000-0000-5000-8000-000000000006'::uuid"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_documents"
+ordinal = 11
 name = "parse_status"
 type = "text"
 nullable = false
@@ -5422,7 +5725,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_documents"
-ordinal = 10
+ordinal = 12
 name = "current_converted_source_artifact_id"
 type = "uuid"
 nullable = true
@@ -5433,7 +5736,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_documents"
-ordinal = 11
+ordinal = 13
 name = "created_at"
 type = "timestamp with time zone"
 nullable = false
@@ -5444,7 +5747,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_documents"
-ordinal = 12
+ordinal = 14
 name = "parsed_at"
 type = "timestamp with time zone"
 nullable = true
@@ -5455,7 +5758,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_documents"
-ordinal = 13
+ordinal = 15
 name = "error_code"
 type = "text"
 nullable = true
@@ -6138,6 +6441,28 @@ generated = ""
 schema = "public"
 relation = "bid_extraction_targets"
 ordinal = 7
+name = "target_config_snapshot_id"
+type = "uuid"
+nullable = false
+default = "'b1d00000-0000-5000-8000-000000000002'::uuid"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_extraction_targets"
+ordinal = 8
+name = "feature_snapshot_id"
+type = "uuid"
+nullable = false
+default = "'b1d00000-0000-5000-8000-000000000006'::uuid"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_extraction_targets"
+ordinal = 9
 name = "router_contract_version"
 type = "text"
 nullable = false
@@ -6148,7 +6473,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_extraction_targets"
-ordinal = 8
+ordinal = 10
 name = "policy_version"
 type = "text"
 nullable = false
@@ -6159,7 +6484,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_extraction_targets"
-ordinal = 9
+ordinal = 11
 name = "prompt_version"
 type = "text"
 nullable = false
@@ -6170,7 +6495,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_extraction_targets"
-ordinal = 10
+ordinal = 12
 name = "output_schema_version"
 type = "smallint"
 nullable = false
@@ -6181,7 +6506,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_extraction_targets"
-ordinal = 11
+ordinal = 13
 name = "expected_section_count"
 type = "integer"
 nullable = false
@@ -6192,7 +6517,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_extraction_targets"
-ordinal = 12
+ordinal = 14
 name = "published_section_count"
 type = "integer"
 nullable = false
@@ -6203,7 +6528,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_extraction_targets"
-ordinal = 13
+ordinal = 15
 name = "state"
 type = "text"
 nullable = false
@@ -6214,7 +6539,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_extraction_targets"
-ordinal = 14
+ordinal = 16
 name = "created_at"
 type = "timestamp with time zone"
 nullable = false
@@ -7634,6 +7959,50 @@ generated = ""
 schema = "public"
 relation = "bid_matching_jobs"
 ordinal = 5
+name = "matching_config_snapshot_id"
+type = "uuid"
+nullable = false
+default = "'b1d00000-0000-5000-8000-000000000005'::uuid"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_jobs"
+ordinal = 6
+name = "feature_snapshot_id"
+type = "uuid"
+nullable = false
+default = "'b1d00000-0000-5000-8000-000000000006'::uuid"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_jobs"
+ordinal = 7
+name = "score_policy_snapshot_id"
+type = "uuid"
+nullable = false
+default = "'b1d00000-0000-5000-8000-000000000007'::uuid"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_jobs"
+ordinal = 8
+name = "verifier_policy_snapshot_id"
+type = "uuid"
+nullable = false
+default = "'b1d00000-0000-5000-8000-000000000008'::uuid"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_jobs"
+ordinal = 9
 name = "status"
 type = "text"
 nullable = false
@@ -7644,7 +8013,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_jobs"
-ordinal = 6
+ordinal = 10
 name = "max_attempts"
 type = "integer"
 nullable = false
@@ -7655,7 +8024,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_jobs"
-ordinal = 7
+ordinal = 11
 name = "claim_lease_ms"
 type = "integer"
 nullable = false
@@ -7666,7 +8035,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_jobs"
-ordinal = 8
+ordinal = 12
 name = "lease_policy_generation"
 type = "bigint"
 nullable = false
@@ -7677,7 +8046,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_jobs"
-ordinal = 9
+ordinal = 13
 name = "active_attempt"
 type = "integer"
 nullable = true
@@ -7688,7 +8057,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_jobs"
-ordinal = 10
+ordinal = 14
 name = "completed_report_id"
 type = "uuid"
 nullable = true
@@ -7699,7 +8068,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_jobs"
-ordinal = 11
+ordinal = 15
 name = "error_code"
 type = "text"
 nullable = true
@@ -7710,7 +8079,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_jobs"
-ordinal = 12
+ordinal = 16
 name = "error_detail"
 type = "text"
 nullable = true
@@ -7721,7 +8090,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_jobs"
-ordinal = 13
+ordinal = 17
 name = "started_at"
 type = "timestamp with time zone"
 nullable = true
@@ -7732,7 +8101,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_jobs"
-ordinal = 14
+ordinal = 18
 name = "finished_at"
 type = "timestamp with time zone"
 nullable = true
@@ -7743,7 +8112,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_jobs"
-ordinal = 15
+ordinal = 19
 name = "created_at"
 type = "timestamp with time zone"
 nullable = false
@@ -7799,6 +8168,17 @@ generated = ""
 schema = "public"
 relation = "bid_matching_manifests"
 ordinal = 3
+name = "schedule_intent_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_manifests"
+ordinal = 4
 name = "generation"
 type = "bigint"
 nullable = false
@@ -7809,7 +8189,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_manifests"
-ordinal = 4
+ordinal = 5
 name = "mutation_watermark"
 type = "bigint"
 nullable = false
@@ -7820,7 +8200,51 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_manifests"
-ordinal = 5
+ordinal = 6
+name = "matching_config_snapshot_id"
+type = "uuid"
+nullable = false
+default = "'b1d00000-0000-5000-8000-000000000005'::uuid"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_manifests"
+ordinal = 7
+name = "feature_snapshot_id"
+type = "uuid"
+nullable = false
+default = "'b1d00000-0000-5000-8000-000000000006'::uuid"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_manifests"
+ordinal = 8
+name = "score_policy_snapshot_id"
+type = "uuid"
+nullable = false
+default = "'b1d00000-0000-5000-8000-000000000007'::uuid"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_manifests"
+ordinal = 9
+name = "verifier_policy_snapshot_id"
+type = "uuid"
+nullable = false
+default = "'b1d00000-0000-5000-8000-000000000008'::uuid"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_manifests"
+ordinal = 10
 name = "requirement_set_sha256"
 type = "public.kb_sha256"
 nullable = false
@@ -7831,7 +8255,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_manifests"
-ordinal = 6
+ordinal = 11
 name = "eligible_scope_sha256"
 type = "public.kb_sha256"
 nullable = false
@@ -7842,7 +8266,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_manifests"
-ordinal = 7
+ordinal = 12
 name = "knowledge_scope_attestation_id"
 type = "uuid"
 nullable = false
@@ -7853,7 +8277,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_manifests"
-ordinal = 8
+ordinal = 13
 name = "knowledge_scope_attestation_sha256"
 type = "public.kb_sha256"
 nullable = false
@@ -7864,7 +8288,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_manifests"
-ordinal = 9
+ordinal = 14
 name = "canonical_payload"
 type = "bytea"
 nullable = false
@@ -7875,7 +8299,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_manifests"
-ordinal = 10
+ordinal = 15
 name = "content_sha256"
 type = "public.kb_sha256"
 nullable = false
@@ -7886,7 +8310,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_matching_manifests"
-ordinal = 11
+ordinal = 16
 name = "created_at"
 type = "timestamp with time zone"
 nullable = false
@@ -7954,6 +8378,17 @@ schema = "public"
 relation = "bid_matching_manifests_project_id_id_key"
 ordinal = 2
 name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_manifests_schedule_intent_id_key"
+ordinal = 1
+name = "schedule_intent_id"
 type = "uuid"
 nullable = true
 default = ""
@@ -8967,6 +9402,182 @@ relation = "bid_matching_routes_pkey"
 ordinal = 1
 name = "id"
 type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+ordinal = 2
+name = "project_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+ordinal = 3
+name = "generation"
+type = "bigint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+ordinal = 4
+name = "mutation_watermark"
+type = "bigint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+ordinal = 5
+name = "matching_config_snapshot_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+ordinal = 6
+name = "feature_snapshot_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+ordinal = 7
+name = "score_policy_snapshot_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+ordinal = 8
+name = "verifier_policy_snapshot_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+ordinal = 9
+name = "created_at"
+type = "timestamp with time zone"
+nullable = false
+default = "now()"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents_pkey"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents_project_id_generation_key"
+ordinal = 1
+name = "project_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents_project_id_generation_key"
+ordinal = 2
+name = "generation"
+type = "bigint"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents_project_id_id_key"
+ordinal = 1
+name = "project_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents_project_id_id_key"
+ordinal = 2
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents_project_id_mutation_watermark_key"
+ordinal = 1
+name = "project_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_matching_schedule_intents_project_id_mutation_watermark_key"
+ordinal = 2
+name = "mutation_watermark"
+type = "bigint"
 nullable = true
 default = ""
 identity = ""
@@ -10749,6 +11360,204 @@ relation = "bid_matching_staging_sets_pkey"
 ordinal = 1
 name = "id"
 type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+ordinal = 2
+name = "snapshot_kind"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+ordinal = 3
+name = "version"
+type = "integer"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+ordinal = 4
+name = "schema_version"
+type = "smallint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+ordinal = 5
+name = "canonical_payload"
+type = "bytea"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+ordinal = 6
+name = "content_sha256"
+type = "public.kb_sha256"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+ordinal = 7
+name = "created_at"
+type = "timestamp with time zone"
+nullable = false
+default = "now()"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts_content_sha256_key"
+ordinal = 1
+name = "content_sha256"
+type = "public.kb_sha256"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts_pkey"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts_snapshot_kind_id_key"
+ordinal = 1
+name = "snapshot_kind"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts_snapshot_kind_id_key"
+ordinal = 2
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts_snapshot_kind_version_key"
+ordinal = 1
+name = "snapshot_kind"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts_snapshot_kind_version_key"
+ordinal = 2
+name = "version"
+type = "integer"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+ordinal = 1
+name = "snapshot_kind"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+ordinal = 2
+name = "snapshot_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+ordinal = 3
+name = "version"
+type = "integer"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+ordinal = 4
+name = "promotion_generation"
+type = "bigint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_operation_snapshot_current_pkey"
+ordinal = 1
+name = "snapshot_kind"
+type = "text"
 nullable = true
 default = ""
 identity = ""
@@ -15541,6 +16350,160 @@ generated = ""
 
 [[columns]]
 schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+ordinal = 2
+name = "project_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+ordinal = 3
+name = "manifest_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+ordinal = 4
+name = "expected_manifest_sha256"
+type = "public.kb_sha256"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+ordinal = 5
+name = "render_config_snapshot_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+ordinal = 6
+name = "feature_snapshot_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+ordinal = 7
+name = "canonical_payload"
+type = "bytea"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+ordinal = 8
+name = "content_sha256"
+type = "public.kb_sha256"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+ordinal = 9
+name = "created_at"
+type = "timestamp with time zone"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts_content_sha256_key"
+ordinal = 1
+name = "content_sha256"
+type = "public.kb_sha256"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts_manifest_id_key"
+ordinal = 1
+name = "manifest_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts_pkey"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts_project_id_id_key"
+ordinal = 1
+name = "project_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts_project_id_id_key"
+ordinal = 2
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
 relation = "bid_submission_render_jobs"
 ordinal = 1
 name = "id"
@@ -15576,6 +16539,17 @@ generated = ""
 schema = "public"
 relation = "bid_submission_render_jobs"
 ordinal = 4
+name = "submission_render_job_snapshot_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_jobs"
+ordinal = 5
 name = "expected_manifest_sha256"
 type = "public.kb_sha256"
 nullable = false
@@ -15586,7 +16560,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_submission_render_jobs"
-ordinal = 5
+ordinal = 6
 name = "requested_by"
 type = "public.kb_actor_identity"
 nullable = false
@@ -15597,7 +16571,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_submission_render_jobs"
-ordinal = 6
+ordinal = 7
 name = "idempotency_key"
 type = "text"
 nullable = false
@@ -15608,7 +16582,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_submission_render_jobs"
-ordinal = 7
+ordinal = 8
 name = "status"
 type = "text"
 nullable = false
@@ -15619,7 +16593,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_submission_render_jobs"
-ordinal = 8
+ordinal = 9
 name = "attempt_count"
 type = "integer"
 nullable = false
@@ -15630,7 +16604,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_submission_render_jobs"
-ordinal = 9
+ordinal = 10
 name = "max_attempts"
 type = "integer"
 nullable = false
@@ -15641,7 +16615,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_submission_render_jobs"
-ordinal = 10
+ordinal = 11
 name = "claim_token"
 type = "uuid"
 nullable = true
@@ -15652,7 +16626,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_submission_render_jobs"
-ordinal = 11
+ordinal = 12
 name = "claim_lease_ms"
 type = "integer"
 nullable = false
@@ -15663,7 +16637,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_submission_render_jobs"
-ordinal = 12
+ordinal = 13
 name = "heartbeat_at"
 type = "timestamp with time zone"
 nullable = true
@@ -15674,7 +16648,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_submission_render_jobs"
-ordinal = 13
+ordinal = 14
 name = "output_artifact_id"
 type = "uuid"
 nullable = true
@@ -15685,7 +16659,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_submission_render_jobs"
-ordinal = 14
+ordinal = 15
 name = "error_code"
 type = "text"
 nullable = true
@@ -15696,7 +16670,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_submission_render_jobs"
-ordinal = 15
+ordinal = 16
 name = "error_detail"
 type = "text"
 nullable = true
@@ -15707,7 +16681,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_submission_render_jobs"
-ordinal = 16
+ordinal = 17
 name = "created_at"
 type = "timestamp with time zone"
 nullable = false
@@ -15718,7 +16692,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_submission_render_jobs"
-ordinal = 17
+ordinal = 18
 name = "started_at"
 type = "timestamp with time zone"
 nullable = true
@@ -15729,7 +16703,7 @@ generated = ""
 [[columns]]
 schema = "public"
 relation = "bid_submission_render_jobs"
-ordinal = 18
+ordinal = 19
 name = "finished_at"
 type = "timestamp with time zone"
 nullable = true
@@ -15819,6 +16793,17 @@ schema = "public"
 relation = "bid_submission_render_jobs_running_idx"
 ordinal = 2
 name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "bid_submission_render_jobs_submission_render_job_snapshot_i_key"
+ordinal = 1
+name = "submission_render_job_snapshot_id"
 type = "uuid"
 nullable = true
 default = ""
@@ -21778,6 +22763,457 @@ generated = ""
 
 [[columns]]
 schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+ordinal = 2
+name = "schema_version"
+type = "smallint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+ordinal = 3
+name = "canonical_payload"
+type = "bytea"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+ordinal = 4
+name = "content_sha256"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+ordinal = 5
+name = "created_at"
+type = "timestamp with time zone"
+nullable = false
+default = "now()"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+ordinal = 6
+name = "updated_at"
+type = "timestamp with time zone"
+nullable = false
+default = "now()"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2_pkey"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+ordinal = 1
+name = "policy_sha256"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+ordinal = 2
+name = "canonical_policy_payload"
+type = "bytea"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+ordinal = 3
+name = "contract_version"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+ordinal = 4
+name = "max_hits"
+type = "bigint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+ordinal = 5
+name = "max_chunk_bytes"
+type = "bigint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+ordinal = 6
+name = "max_total_bytes"
+type = "bigint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+ordinal = 7
+name = "support_state"
+type = "text"
+nullable = false
+default = "'supported'::text"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+ordinal = 8
+name = "created_at"
+type = "timestamp with time zone"
+nullable = false
+default = "now()"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+ordinal = 9
+name = "updated_at"
+type = "timestamp with time zone"
+nullable = false
+default = "now()"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2_pkey"
+ordinal = 1
+name = "policy_sha256"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_configuration"
+ordinal = 1
+name = "singleton_key"
+type = "boolean"
+nullable = false
+default = "true"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_configuration"
+ordinal = 2
+name = "policy_snapshot_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_configuration"
+ordinal = 3
+name = "feature_snapshot_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_configuration_pkey"
+ordinal = 1
+name = "singleton_key"
+type = "boolean"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+ordinal = 2
+name = "schema_version"
+type = "smallint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+ordinal = 3
+name = "live_recovery_enabled"
+type = "boolean"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+ordinal = 4
+name = "intended_state_sha256"
+type = "public.kb_sha256"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+ordinal = 5
+name = "canonical_payload"
+type = "bytea"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+ordinal = 6
+name = "content_sha256"
+type = "public.kb_sha256"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+ordinal = 7
+name = "created_at"
+type = "timestamp with time zone"
+nullable = false
+default = "now()"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_feature_snapshots_content_sha256_key"
+ordinal = 1
+name = "content_sha256"
+type = "public.kb_sha256"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_feature_snapshots_pkey"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+ordinal = 2
+name = "schema_version"
+type = "smallint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+ordinal = 3
+name = "claim_lease_ms"
+type = "integer"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+ordinal = 4
+name = "max_batch_size"
+type = "integer"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+ordinal = 5
+name = "max_global_concurrency"
+type = "integer"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+ordinal = 6
+name = "max_concurrency_by_kind"
+type = "jsonb"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+ordinal = 7
+name = "canonical_payload"
+type = "bytea"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+ordinal = 8
+name = "content_sha256"
+type = "public.kb_sha256"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+ordinal = 9
+name = "created_at"
+type = "timestamp with time zone"
+nullable = false
+default = "now()"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_policy_snapshots_content_sha256_key"
+ordinal = 1
+name = "content_sha256"
+type = "public.kb_sha256"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "live_recovery_policy_snapshots_pkey"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
 relation = "maintenance_gate_audit"
 ordinal = 1
 name = "id"
@@ -23780,6 +25216,424 @@ generated = ""
 
 [[columns]]
 schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 2
+name = "recovery_kind"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 3
+name = "target_kind"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 4
+name = "durable_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 5
+name = "generation"
+type = "bigint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 6
+name = "observed_watermark"
+type = "bigint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 7
+name = "observed_stage"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 8
+name = "observed_heartbeat_at"
+type = "timestamp with time zone"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 9
+name = "observed_owner_token"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 10
+name = "observed_attempt"
+type = "integer"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 11
+name = "recovery_epoch"
+type = "bigint"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 12
+name = "policy_snapshot_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 13
+name = "feature_snapshot_id"
+type = "uuid"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 14
+name = "original_snapshots"
+type = "jsonb"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 15
+name = "status"
+type = "text"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 16
+name = "claim_token"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 17
+name = "attempt"
+type = "integer"
+nullable = false
+default = "0"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 18
+name = "claimed_by"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 19
+name = "claim_lease_ms"
+type = "integer"
+nullable = false
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 20
+name = "heartbeat_at"
+type = "timestamp with time zone"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 21
+name = "action_applied"
+type = "boolean"
+nullable = false
+default = "false"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 22
+name = "last_error_code"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 23
+name = "terminal_code"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 24
+name = "receipt"
+type = "jsonb"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 25
+name = "discovered_at"
+type = "timestamp with time zone"
+nullable = false
+default = "now()"
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims"
+ordinal = 26
+name = "completed_at"
+type = "timestamp with time zone"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims_active_identity_idx"
+ordinal = 1
+name = "recovery_kind"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims_active_identity_idx"
+ordinal = 2
+name = "durable_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims_pending_idx"
+ordinal = 1
+name = "recovery_epoch"
+type = "bigint"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims_pending_idx"
+ordinal = 2
+name = "discovered_at"
+type = "timestamp with time zone"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims_pending_idx"
+ordinal = 3
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims_pkey"
+ordinal = 1
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims_recovery_kind_durable_id_genera_key"
+ordinal = 1
+name = "recovery_kind"
+type = "text"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims_recovery_kind_durable_id_genera_key"
+ordinal = 2
+name = "durable_id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims_recovery_kind_durable_id_genera_key"
+ordinal = 3
+name = "generation"
+type = "bigint"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims_recovery_kind_durable_id_genera_key"
+ordinal = 4
+name = "recovery_epoch"
+type = "bigint"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims_running_idx"
+ordinal = 1
+name = "heartbeat_at"
+type = "timestamp with time zone"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
+relation = "system_live_recovery_claims_running_idx"
+ordinal = 2
+name = "id"
+type = "uuid"
+nullable = true
+default = ""
+identity = ""
+generated = ""
+
+[[columns]]
+schema = "public"
 relation = "tags"
 ordinal = 1
 name = "id"
@@ -24961,6 +26815,26 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_conversion_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (conversion_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_feature_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (feature_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_attachment_preparation_jobs"
 name = "bid_attachment_preparation_jobs_max_attempts_check"
 kind = "check"
 definition = "CHECK (max_attempts = 4)"
@@ -25891,9 +27765,29 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "bid_documents"
+name = "bid_documents_conversion_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (conversion_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_documents"
 name = "bid_documents_current_source_fk"
 kind = "foreign_key"
 definition = "FOREIGN KEY (project_id, id, current_converted_source_artifact_id) REFERENCES public.bid_converted_source_artifacts(project_id, document_id, id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_documents"
+name = "bid_documents_feature_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (feature_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -26301,6 +28195,16 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "bid_extraction_targets"
+name = "bid_extraction_targets_feature_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (feature_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_extraction_targets"
 name = "bid_extraction_targets_output_schema_version_check"
 kind = "check"
 definition = "CHECK (output_schema_version = 1)"
@@ -26364,6 +28268,16 @@ relation = "bid_extraction_targets"
 name = "bid_extraction_targets_state_check"
 kind = "check"
 definition = "CHECK (state = ANY (ARRAY['pending'::text, 'running'::text, 'terminal'::text, 'published'::text, 'failed'::text]))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_extraction_targets"
+name = "bid_extraction_targets_target_config_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (target_config_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -27151,6 +29065,16 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "bid_matching_jobs"
+name = "bid_matching_jobs_feature_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (feature_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_jobs"
 name = "bid_matching_jobs_lease_policy_generation_check"
 kind = "check"
 definition = "CHECK (lease_policy_generation >= 0)"
@@ -27186,6 +29110,16 @@ kind = "foreign_key"
 definition = "FOREIGN KEY (manifest_id, route_id) REFERENCES public.bid_matching_routes(manifest_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED"
 deferrable = true
 initially_deferred = true
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_jobs"
+name = "bid_matching_jobs_matching_config_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (matching_config_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
 validated = true
 
 [[constraints]]
@@ -27241,9 +29175,29 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "bid_matching_jobs"
+name = "bid_matching_jobs_score_policy_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (score_policy_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_jobs"
 name = "bid_matching_jobs_status_check"
 kind = "check"
 definition = "CHECK (status = ANY (ARRAY['pending'::text, 'running'::text, 'completed'::text, 'failed'::text, 'superseded'::text]))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_jobs"
+name = "bid_matching_jobs_verifier_policy_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (verifier_policy_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -27271,9 +29225,29 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "bid_matching_manifests"
+name = "bid_matching_manifests_feature_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (feature_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_manifests"
 name = "bid_matching_manifests_generation_check"
 kind = "check"
 definition = "CHECK (generation > 0)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_manifests"
+name = "bid_matching_manifests_matching_config_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (matching_config_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -27331,11 +29305,51 @@ validated = true
 [[constraints]]
 schema = "public"
 relation = "bid_matching_manifests"
+name = "bid_matching_manifests_schedule_intent_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (schedule_intent_id) REFERENCES public.bid_matching_schedule_intents(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_manifests"
+name = "bid_matching_manifests_schedule_intent_id_key"
+kind = "unique"
+definition = "UNIQUE (schedule_intent_id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_manifests"
 name = "bid_matching_manifests_scope_verify"
 kind = "constraint_trigger"
 definition = "TRIGGER DEFERRABLE INITIALLY DEFERRED"
 deferrable = true
 initially_deferred = true
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_manifests"
+name = "bid_matching_manifests_score_policy_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (score_policy_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_manifests"
+name = "bid_matching_manifests_verifier_policy_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (verifier_policy_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
 validated = true
 
 [[constraints]]
@@ -28004,6 +30018,116 @@ relation = "bid_matching_routes"
 name = "bid_matching_routes_route_kind_check"
 kind = "check"
 definition = "CHECK (route_kind = ANY (ARRAY['technical'::text, 'commercial'::text]))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_feature_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (feature_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_generation_check"
+kind = "check"
+definition = "CHECK (generation > 0)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_matching_config_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (matching_config_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_mutation_watermark_check"
+kind = "check"
+definition = "CHECK (mutation_watermark > 0)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_project_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (project_id) REFERENCES public.bid_projects(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_project_id_generation_key"
+kind = "unique"
+definition = "UNIQUE (project_id, generation)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_project_id_id_key"
+kind = "unique"
+definition = "UNIQUE (project_id, id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_project_id_mutation_watermark_key"
+kind = "unique"
+definition = "UNIQUE (project_id, mutation_watermark)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_score_policy_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (score_policy_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_verifier_policy_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (verifier_policy_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -28684,6 +30808,146 @@ relation = "bid_matching_staging_sets"
 name = "bid_matching_staging_sets_state_check"
 kind = "check"
 definition = "CHECK (state = ANY (ARRAY['active'::text, 'consumed'::text, 'expired'::text, 'failed'::text]))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_canonical_payload_check"
+kind = "check"
+definition = "CHECK (octet_length(canonical_payload) >= 1 AND octet_length(canonical_payload) <= 16384)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_check"
+kind = "check"
+definition = "CHECK (content_sha256::text = encode(public.digest(canonical_payload, 'sha256'::text), 'hex'::text))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_content_sha256_key"
+kind = "unique"
+definition = "UNIQUE (content_sha256)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_schema_version_check"
+kind = "check"
+definition = "CHECK (schema_version = 1)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_snapshot_kind_check"
+kind = "check"
+definition = "CHECK (snapshot_kind = ANY (ARRAY['conversion'::text, 'target_config'::text, 'render'::text, 'matching_config'::text, 'feature'::text, 'score_policy'::text, 'verifier_policy'::text]))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_snapshot_kind_id_key"
+kind = "unique"
+definition = "UNIQUE (snapshot_kind, id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_snapshot_kind_version_key"
+kind = "unique"
+definition = "UNIQUE (snapshot_kind, version)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_version_check"
+kind = "check"
+definition = "CHECK (version > 0)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+name = "bid_operation_snapshot_current_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (snapshot_kind)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+name = "bid_operation_snapshot_current_promotion_generation_check"
+kind = "check"
+definition = "CHECK (promotion_generation >= 0)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+name = "bid_operation_snapshot_current_snapshot_kind_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (snapshot_kind, snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(snapshot_kind, id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+name = "bid_operation_snapshot_current_snapshot_kind_version_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (snapshot_kind, version) REFERENCES public.bid_operation_snapshot_artifacts(snapshot_kind, version) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+name = "bid_operation_snapshot_current_version_check"
+kind = "check"
+definition = "CHECK (version > 0)"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -31300,6 +33564,96 @@ validated = true
 
 [[constraints]]
 schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapsh_render_config_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (render_config_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshot__project_id_manifest_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (project_id, manifest_id) REFERENCES public.bid_submission_manifests(project_id, id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshot_art_feature_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (feature_snapshot_id) REFERENCES public.bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshot_artifacts_check"
+kind = "check"
+definition = "CHECK (content_sha256::text = encode(public.digest(canonical_payload, 'sha256'::text), 'hex'::text))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshot_artifacts_content_sha256_key"
+kind = "unique"
+definition = "UNIQUE (content_sha256)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshot_artifacts_manifest_id_key"
+kind = "unique"
+definition = "UNIQUE (manifest_id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshot_artifacts_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshot_artifacts_project_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (project_id) REFERENCES public.bid_projects(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshot_artifacts_project_id_id_key"
+kind = "unique"
+definition = "UNIQUE (project_id, id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
 relation = "bid_submission_render_jobs"
 name = "bid_submission_render_jobs_attempt_count_check"
 kind = "check"
@@ -31414,6 +33768,26 @@ relation = "bid_submission_render_jobs"
 name = "bid_submission_render_jobs_status_check"
 kind = "check"
 definition = "CHECK (status = ANY (ARRAY['pending'::text, 'running'::text, 'completed'::text, 'failed'::text]))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_submission_render_jobs"
+name = "bid_submission_render_jobs_submission_render_job_snapshot__fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (submission_render_job_snapshot_id) REFERENCES public.bid_submission_render_job_snapshot_artifacts(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "bid_submission_render_jobs"
+name = "bid_submission_render_jobs_submission_render_job_snapshot_i_key"
+kind = "unique"
+definition = "UNIQUE (submission_render_job_snapshot_id)"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -31932,6 +34306,316 @@ validated = true
 schema = "public"
 relation = "knowledge_matching_scope_attestations"
 name = "knowledge_matching_scope_attestations_schema_version_check"
+kind = "check"
+definition = "CHECK (schema_version = 1)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+name = "knowledge_matching_scope_attestations_v2_check"
+kind = "check"
+definition = "CHECK (content_sha256 = encode(public.digest(canonical_payload, 'sha256'::text), 'hex'::text))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+name = "knowledge_matching_scope_attestations_v2_content_sha256_check"
+kind = "check"
+definition = "CHECK (content_sha256 ~ '^[0-9a-f]{64}$'::text)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+name = "knowledge_matching_scope_attestations_v2_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+name = "knowledge_matching_scope_attestations_v2_schema_version_check"
+kind = "check"
+definition = "CHECK (schema_version = 2)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+name = "knowledge_retrieval_policies_v2_check"
+kind = "check"
+definition = "CHECK (policy_sha256 = encode(public.digest(canonical_policy_payload, 'sha256'::text), 'hex'::text))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+name = "knowledge_retrieval_policies_v2_contract_version_check"
+kind = "check"
+definition = "CHECK (contract_version = 'knowledge-evidence-v2'::text)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+name = "knowledge_retrieval_policies_v2_max_chunk_bytes_check"
+kind = "check"
+definition = "CHECK (max_chunk_bytes >= 1 AND max_chunk_bytes <= 1073741824)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+name = "knowledge_retrieval_policies_v2_max_hits_check"
+kind = "check"
+definition = "CHECK (max_hits >= 1 AND max_hits <= 1000000)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+name = "knowledge_retrieval_policies_v2_max_total_bytes_check"
+kind = "check"
+definition = "CHECK (max_total_bytes >= 1 AND max_total_bytes <= '1099511627776'::bigint)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+name = "knowledge_retrieval_policies_v2_payload_matches_columns"
+kind = "check"
+definition = "CHECK (NOT jsonb_typeof(convert_from(canonical_policy_payload, 'UTF8'::name)::jsonb) IS DISTINCT FROM 'object'::text AND NOT jsonb_typeof(convert_from(canonical_policy_payload, 'UTF8'::name)::jsonb -> 'contract_version'::text) IS DISTINCT FROM 'string'::text AND NOT (convert_from(canonical_policy_payload, 'UTF8'::name)::jsonb ->> 'contract_version'::text) IS DISTINCT FROM contract_version AND NOT jsonb_typeof(convert_from(canonical_policy_payload, 'UTF8'::name)::jsonb -> 'request_quotas'::text) IS DISTINCT FROM 'object'::text AND NOT jsonb_typeof((convert_from(canonical_policy_payload, 'UTF8'::name)::jsonb -> 'request_quotas'::text) -> 'max_hits'::text) IS DISTINCT FROM 'number'::text AND NOT ((convert_from(canonical_policy_payload, 'UTF8'::name)::jsonb -> 'request_quotas'::text) -> 'max_hits'::text) IS DISTINCT FROM to_jsonb(max_hits) AND NOT jsonb_typeof((convert_from(canonical_policy_payload, 'UTF8'::name)::jsonb -> 'request_quotas'::text) -> 'max_chunk_bytes'::text) IS DISTINCT FROM 'number'::text AND NOT ((convert_from(canonical_policy_payload, 'UTF8'::name)::jsonb -> 'request_quotas'::text) -> 'max_chunk_bytes'::text) IS DISTINCT FROM to_jsonb(max_chunk_bytes) AND NOT jsonb_typeof((convert_from(canonical_policy_payload, 'UTF8'::name)::jsonb -> 'request_quotas'::text) -> 'max_total_bytes'::text) IS DISTINCT FROM 'number'::text AND NOT ((convert_from(canonical_policy_payload, 'UTF8'::name)::jsonb -> 'request_quotas'::text) -> 'max_total_bytes'::text) IS DISTINCT FROM to_jsonb(max_total_bytes))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+name = "knowledge_retrieval_policies_v2_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (policy_sha256)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+name = "knowledge_retrieval_policies_v2_policy_sha256_check"
+kind = "check"
+definition = "CHECK (policy_sha256 ~ '^[0-9a-f]{64}$'::text)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+name = "knowledge_retrieval_policies_v2_support_state_check"
+kind = "check"
+definition = "CHECK (support_state = ANY (ARRAY['supported'::text, 'revoked'::text]))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_configuration"
+name = "live_recovery_configuration_feature_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (feature_snapshot_id) REFERENCES public.live_recovery_feature_snapshots(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_configuration"
+name = "live_recovery_configuration_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (singleton_key)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_configuration"
+name = "live_recovery_configuration_policy_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (policy_snapshot_id) REFERENCES public.live_recovery_policy_snapshots(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_configuration"
+name = "live_recovery_configuration_singleton_key_check"
+kind = "check"
+definition = "CHECK (singleton_key)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+name = "live_recovery_feature_snapshots_canonical_payload_check"
+kind = "check"
+definition = "CHECK (octet_length(canonical_payload) >= 1 AND octet_length(canonical_payload) <= 4096)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+name = "live_recovery_feature_snapshots_check"
+kind = "check"
+definition = "CHECK (content_sha256::text = encode(public.digest(canonical_payload, 'sha256'::text), 'hex'::text))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+name = "live_recovery_feature_snapshots_content_sha256_key"
+kind = "unique"
+definition = "UNIQUE (content_sha256)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+name = "live_recovery_feature_snapshots_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+name = "live_recovery_feature_snapshots_schema_version_check"
+kind = "check"
+definition = "CHECK (schema_version = 1)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+name = "live_recovery_policy_snapshots_canonical_payload_check"
+kind = "check"
+definition = "CHECK (octet_length(canonical_payload) >= 1 AND octet_length(canonical_payload) <= 4096)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+name = "live_recovery_policy_snapshots_check"
+kind = "check"
+definition = "CHECK (content_sha256::text = encode(public.digest(canonical_payload, 'sha256'::text), 'hex'::text))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+name = "live_recovery_policy_snapshots_claim_lease_ms_check"
+kind = "check"
+definition = "CHECK (claim_lease_ms >= 5000 AND claim_lease_ms <= 300000)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+name = "live_recovery_policy_snapshots_content_sha256_key"
+kind = "unique"
+definition = "UNIQUE (content_sha256)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+name = "live_recovery_policy_snapshots_max_batch_size_check"
+kind = "check"
+definition = "CHECK (max_batch_size >= 1 AND max_batch_size <= 128)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+name = "live_recovery_policy_snapshots_max_concurrency_by_kind_check"
+kind = "check"
+definition = "CHECK (jsonb_typeof(max_concurrency_by_kind) = 'object'::text AND max_concurrency_by_kind ?& ARRAY['dirty_manifest'::text, 'orphan_target'::text, 'orphan_match_job'::text] AND (max_concurrency_by_kind - 'dirty_manifest'::text - 'orphan_target'::text - 'orphan_match_job'::text) = '{}'::jsonb AND ((max_concurrency_by_kind ->> 'dirty_manifest'::text)::integer) >= 1 AND ((max_concurrency_by_kind ->> 'dirty_manifest'::text)::integer) <= 32 AND ((max_concurrency_by_kind ->> 'orphan_target'::text)::integer) >= 1 AND ((max_concurrency_by_kind ->> 'orphan_target'::text)::integer) <= 32 AND ((max_concurrency_by_kind ->> 'orphan_match_job'::text)::integer) >= 1 AND ((max_concurrency_by_kind ->> 'orphan_match_job'::text)::integer) <= 32)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+name = "live_recovery_policy_snapshots_max_global_concurrency_check"
+kind = "check"
+definition = "CHECK (max_global_concurrency >= 1 AND max_global_concurrency <= 32)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+name = "live_recovery_policy_snapshots_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+name = "live_recovery_policy_snapshots_schema_version_check"
 kind = "check"
 definition = "CHECK (schema_version = 1)"
 deferrable = false
@@ -32724,6 +35408,206 @@ relation = "schema_migrations"
 name = "schema_migrations_pkey"
 kind = "primary_key"
 definition = "PRIMARY KEY (version)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_attempt_check"
+kind = "check"
+definition = "CHECK (attempt >= 0 AND attempt <= 1000)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_check"
+kind = "check"
+definition = "CHECK (status = 'pending'::text AND claim_token IS NULL AND claimed_by IS NULL AND heartbeat_at IS NULL AND completed_at IS NULL AND terminal_code IS NULL AND receipt IS NULL OR status = 'running'::text AND claim_token IS NOT NULL AND claimed_by IS NOT NULL AND heartbeat_at IS NOT NULL AND completed_at IS NULL AND terminal_code IS NULL AND receipt IS NULL OR (status = ANY (ARRAY['completed'::text, 'noop'::text, 'failed'::text])) AND completed_at IS NOT NULL AND terminal_code IS NOT NULL)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_claim_lease_ms_check"
+kind = "check"
+definition = "CHECK (claim_lease_ms >= 5000 AND claim_lease_ms <= 300000)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_claimed_by_check"
+kind = "check"
+definition = "CHECK (claimed_by IS NULL OR octet_length(claimed_by) >= 1 AND octet_length(claimed_by) <= 128)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_feature_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (feature_snapshot_id) REFERENCES public.live_recovery_feature_snapshots(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_generation_check"
+kind = "check"
+definition = "CHECK (generation > 0)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_last_error_code_check"
+kind = "check"
+definition = "CHECK (last_error_code IS NULL OR octet_length(last_error_code) >= 1 AND octet_length(last_error_code) <= 128)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_observed_attempt_check"
+kind = "check"
+definition = "CHECK (observed_attempt IS NULL OR observed_attempt > 0)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_observed_stage_check"
+kind = "check"
+definition = "CHECK (octet_length(observed_stage) >= 1 AND octet_length(observed_stage) <= 64)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_observed_watermark_check"
+kind = "check"
+definition = "CHECK (observed_watermark >= 0)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_original_snapshots_check"
+kind = "check"
+definition = "CHECK (jsonb_typeof(original_snapshots) = 'array'::text AND jsonb_array_length(original_snapshots) <= 8 AND octet_length(original_snapshots::text) <= 4096)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_pkey"
+kind = "primary_key"
+definition = "PRIMARY KEY (id)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_policy_snapshot_id_fkey"
+kind = "foreign_key"
+definition = "FOREIGN KEY (policy_snapshot_id) REFERENCES public.live_recovery_policy_snapshots(id) ON DELETE RESTRICT"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_receipt_check"
+kind = "check"
+definition = "CHECK (receipt IS NULL OR jsonb_typeof(receipt) = 'object'::text AND octet_length(receipt::text) <= 8192)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_recovery_epoch_check"
+kind = "check"
+definition = "CHECK (recovery_epoch > 0)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_recovery_kind_check"
+kind = "check"
+definition = "CHECK (recovery_kind = ANY (ARRAY['dirty_manifest'::text, 'orphan_target'::text, 'orphan_match_job'::text]))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_recovery_kind_durable_id_genera_key"
+kind = "unique"
+definition = "UNIQUE (recovery_kind, durable_id, generation, recovery_epoch)"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_status_check"
+kind = "check"
+definition = "CHECK (status = ANY (ARRAY['pending'::text, 'running'::text, 'completed'::text, 'noop'::text, 'failed'::text]))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_target_kind_check"
+kind = "check"
+definition = "CHECK (target_kind = ANY (ARRAY['matching_manifest'::text, 'document_conversion'::text, 'extraction_target'::text, 'attachment_preparation'::text, 'submission_render'::text, 'matching_job'::text]))"
+deferrable = false
+initially_deferred = false
+validated = true
+
+[[constraints]]
+schema = "public"
+relation = "system_live_recovery_claims"
+name = "system_live_recovery_claims_terminal_code_check"
+kind = "check"
+definition = "CHECK (terminal_code IS NULL OR octet_length(terminal_code) >= 1 AND octet_length(terminal_code) <= 128)"
 deferrable = false
 initially_deferred = false
 validated = true
@@ -33814,6 +36698,18 @@ live = true
 
 [[indexes]]
 schema = "public"
+table = "bid_matching_manifests"
+name = "bid_matching_manifests_schedule_intent_id_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_matching_manifests_schedule_intent_id_key ON public.bid_matching_manifests USING btree (schedule_intent_id)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
 table = "bid_matching_product_version_artifacts"
 name = "bid_matching_product_version__manifest_id_product_version_i_key"
 owner = "app_owner"
@@ -34047,6 +36943,54 @@ name = "bid_matching_routes_pkey"
 owner = "app_owner"
 definition = "CREATE UNIQUE INDEX bid_matching_routes_pkey ON public.bid_matching_routes USING btree (id)"
 primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_matching_schedule_intents_pkey ON public.bid_matching_schedule_intents USING btree (id)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_project_id_generation_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_matching_schedule_intents_project_id_generation_key ON public.bid_matching_schedule_intents USING btree (project_id, generation)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_project_id_id_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_matching_schedule_intents_project_id_id_key ON public.bid_matching_schedule_intents USING btree (project_id, id)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_project_id_mutation_watermark_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_matching_schedule_intents_project_id_mutation_watermark_key ON public.bid_matching_schedule_intents USING btree (project_id, mutation_watermark)"
+primary = false
 unique = true
 valid = true
 ready = true
@@ -34322,6 +37266,66 @@ table = "bid_matching_staging_sets"
 name = "bid_matching_staging_sets_pkey"
 owner = "app_owner"
 definition = "CREATE UNIQUE INDEX bid_matching_staging_sets_pkey ON public.bid_matching_staging_sets USING btree (id)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_content_sha256_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_operation_snapshot_artifacts_content_sha256_key ON public.bid_operation_snapshot_artifacts USING btree (content_sha256)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_operation_snapshot_artifacts_pkey ON public.bid_operation_snapshot_artifacts USING btree (id)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_snapshot_kind_id_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_operation_snapshot_artifacts_snapshot_kind_id_key ON public.bid_operation_snapshot_artifacts USING btree (snapshot_kind, id)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_snapshot_kind_version_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_operation_snapshot_artifacts_snapshot_kind_version_key ON public.bid_operation_snapshot_artifacts USING btree (snapshot_kind, version)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_operation_snapshot_current"
+name = "bid_operation_snapshot_current_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_operation_snapshot_current_pkey ON public.bid_operation_snapshot_current USING btree (snapshot_kind)"
 primary = true
 unique = true
 valid = true
@@ -35170,6 +38174,54 @@ live = true
 
 [[indexes]]
 schema = "public"
+table = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshot_artifacts_content_sha256_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_submission_render_job_snapshot_artifacts_content_sha256_key ON public.bid_submission_render_job_snapshot_artifacts USING btree (content_sha256)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshot_artifacts_manifest_id_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_submission_render_job_snapshot_artifacts_manifest_id_key ON public.bid_submission_render_job_snapshot_artifacts USING btree (manifest_id)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshot_artifacts_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_submission_render_job_snapshot_artifacts_pkey ON public.bid_submission_render_job_snapshot_artifacts USING btree (id)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshot_artifacts_project_id_id_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_submission_render_job_snapshot_artifacts_project_id_id_key ON public.bid_submission_render_job_snapshot_artifacts USING btree (project_id, id)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
 table = "bid_submission_render_jobs"
 name = "bid_submission_render_jobs_manifest_id_key"
 owner = "app_owner"
@@ -35224,6 +38276,18 @@ owner = "app_owner"
 definition = "CREATE INDEX bid_submission_render_jobs_running_idx ON public.bid_submission_render_jobs USING btree (heartbeat_at, id) WHERE (status = 'running'::text)"
 primary = false
 unique = false
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "bid_submission_render_jobs"
+name = "bid_submission_render_jobs_submission_render_job_snapshot_i_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX bid_submission_render_jobs_submission_render_job_snapshot_i_key ON public.bid_submission_render_jobs USING btree (submission_render_job_snapshot_id)"
+primary = false
+unique = true
 valid = true
 ready = true
 live = true
@@ -35474,6 +38538,90 @@ table = "knowledge_matching_scope_attestations"
 name = "knowledge_matching_scope_attestations_pkey"
 owner = "app_owner"
 definition = "CREATE UNIQUE INDEX knowledge_matching_scope_attestations_pkey ON public.knowledge_matching_scope_attestations USING btree (id)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "knowledge_matching_scope_attestations_v2"
+name = "knowledge_matching_scope_attestations_v2_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX knowledge_matching_scope_attestations_v2_pkey ON public.knowledge_matching_scope_attestations_v2 USING btree (id)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "knowledge_retrieval_policies_v2"
+name = "knowledge_retrieval_policies_v2_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX knowledge_retrieval_policies_v2_pkey ON public.knowledge_retrieval_policies_v2 USING btree (policy_sha256)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "live_recovery_configuration"
+name = "live_recovery_configuration_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX live_recovery_configuration_pkey ON public.live_recovery_configuration USING btree (singleton_key)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "live_recovery_feature_snapshots"
+name = "live_recovery_feature_snapshots_content_sha256_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX live_recovery_feature_snapshots_content_sha256_key ON public.live_recovery_feature_snapshots USING btree (content_sha256)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "live_recovery_feature_snapshots"
+name = "live_recovery_feature_snapshots_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX live_recovery_feature_snapshots_pkey ON public.live_recovery_feature_snapshots USING btree (id)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "live_recovery_policy_snapshots"
+name = "live_recovery_policy_snapshots_content_sha256_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX live_recovery_policy_snapshots_content_sha256_key ON public.live_recovery_policy_snapshots USING btree (content_sha256)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "live_recovery_policy_snapshots"
+name = "live_recovery_policy_snapshots_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX live_recovery_policy_snapshots_pkey ON public.live_recovery_policy_snapshots USING btree (id)"
 primary = true
 unique = true
 valid = true
@@ -35866,6 +39014,66 @@ live = true
 
 [[indexes]]
 schema = "public"
+table = "system_live_recovery_claims"
+name = "system_live_recovery_claims_active_identity_idx"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX system_live_recovery_claims_active_identity_idx ON public.system_live_recovery_claims USING btree (recovery_kind, durable_id) WHERE (status = ANY (ARRAY['pending'::text, 'running'::text]))"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "system_live_recovery_claims"
+name = "system_live_recovery_claims_pending_idx"
+owner = "app_owner"
+definition = "CREATE INDEX system_live_recovery_claims_pending_idx ON public.system_live_recovery_claims USING btree (recovery_epoch, discovered_at, id) WHERE (status = 'pending'::text)"
+primary = false
+unique = false
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "system_live_recovery_claims"
+name = "system_live_recovery_claims_pkey"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX system_live_recovery_claims_pkey ON public.system_live_recovery_claims USING btree (id)"
+primary = true
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "system_live_recovery_claims"
+name = "system_live_recovery_claims_recovery_kind_durable_id_genera_key"
+owner = "app_owner"
+definition = "CREATE UNIQUE INDEX system_live_recovery_claims_recovery_kind_durable_id_genera_key ON public.system_live_recovery_claims USING btree (recovery_kind, durable_id, generation, recovery_epoch)"
+primary = false
+unique = true
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
+table = "system_live_recovery_claims"
+name = "system_live_recovery_claims_running_idx"
+owner = "app_owner"
+definition = "CREATE INDEX system_live_recovery_claims_running_idx ON public.system_live_recovery_claims USING btree (heartbeat_at, id) WHERE (status = 'running'::text)"
+primary = false
+unique = false
+valid = true
+ready = true
+live = true
+
+[[indexes]]
+schema = "public"
 table = "tags"
 name = "tags_pkey"
 owner = "app_owner"
@@ -36048,6 +39256,20 @@ definition = "CREATE TRIGGER audit_events_no_truncate BEFORE TRUNCATE ON public.
 
 [[triggers]]
 schema = "public"
+table = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_conversion_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_attachment_preparation_jobs_conversion_snapshot_kind BEFORE INSERT OR UPDATE OF conversion_snapshot_id ON public.bid_attachment_preparation_jobs FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('conversion_snapshot_id', 'conversion')"
+
+[[triggers]]
+schema = "public"
+table = "bid_attachment_preparation_jobs"
+name = "bid_attachment_preparation_jobs_feature_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_attachment_preparation_jobs_feature_snapshot_kind BEFORE INSERT OR UPDATE OF feature_snapshot_id ON public.bid_attachment_preparation_jobs FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('feature_snapshot_id', 'feature')"
+
+[[triggers]]
+schema = "public"
 table = "bid_attachment_render_pages"
 name = "bid_attachment_render_pages_immutable"
 enabled = "origin"
@@ -36066,6 +39288,20 @@ table = "bid_converted_source_artifacts"
 name = "bid_converted_source_artifacts_immutable"
 enabled = "origin"
 definition = "CREATE TRIGGER bid_converted_source_artifacts_immutable BEFORE DELETE OR UPDATE ON public.bid_converted_source_artifacts FOR EACH ROW EXECUTE FUNCTION public.kb_reject_append_only()"
+
+[[triggers]]
+schema = "public"
+table = "bid_documents"
+name = "bid_documents_conversion_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_documents_conversion_snapshot_kind BEFORE INSERT OR UPDATE OF conversion_snapshot_id ON public.bid_documents FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('conversion_snapshot_id', 'conversion')"
+
+[[triggers]]
+schema = "public"
+table = "bid_documents"
+name = "bid_documents_feature_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_documents_feature_snapshot_kind BEFORE INSERT OR UPDATE OF feature_snapshot_id ON public.bid_documents FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('feature_snapshot_id', 'feature')"
 
 [[triggers]]
 schema = "public"
@@ -36094,6 +39330,20 @@ table = "bid_extract_segment_dispositions"
 name = "bid_extract_segment_dispositions_immutable"
 enabled = "origin"
 definition = "CREATE TRIGGER bid_extract_segment_dispositions_immutable BEFORE DELETE OR UPDATE ON public.bid_extract_segment_dispositions FOR EACH ROW EXECUTE FUNCTION public.kb_reject_append_only()"
+
+[[triggers]]
+schema = "public"
+table = "bid_extraction_targets"
+name = "bid_extraction_targets_config_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_extraction_targets_config_snapshot_kind BEFORE INSERT OR UPDATE OF target_config_snapshot_id ON public.bid_extraction_targets FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('target_config_snapshot_id', 'target_config')"
+
+[[triggers]]
+schema = "public"
+table = "bid_extraction_targets"
+name = "bid_extraction_targets_feature_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_extraction_targets_feature_snapshot_kind BEFORE INSERT OR UPDATE OF feature_snapshot_id ON public.bid_extraction_targets FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('feature_snapshot_id', 'feature')"
 
 [[triggers]]
 schema = "public"
@@ -36146,6 +39396,48 @@ definition = "CREATE TRIGGER bid_matching_frozen_retrieved_hits_immutable BEFORE
 
 [[triggers]]
 schema = "public"
+table = "bid_matching_jobs"
+name = "bid_matching_jobs_config_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_matching_jobs_config_snapshot_kind BEFORE INSERT OR UPDATE OF matching_config_snapshot_id ON public.bid_matching_jobs FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('matching_config_snapshot_id', 'matching_config')"
+
+[[triggers]]
+schema = "public"
+table = "bid_matching_jobs"
+name = "bid_matching_jobs_feature_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_matching_jobs_feature_snapshot_kind BEFORE INSERT OR UPDATE OF feature_snapshot_id ON public.bid_matching_jobs FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('feature_snapshot_id', 'feature')"
+
+[[triggers]]
+schema = "public"
+table = "bid_matching_jobs"
+name = "bid_matching_jobs_score_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_matching_jobs_score_snapshot_kind BEFORE INSERT OR UPDATE OF score_policy_snapshot_id ON public.bid_matching_jobs FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('score_policy_snapshot_id', 'score_policy')"
+
+[[triggers]]
+schema = "public"
+table = "bid_matching_jobs"
+name = "bid_matching_jobs_verifier_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_matching_jobs_verifier_snapshot_kind BEFORE INSERT OR UPDATE OF verifier_policy_snapshot_id ON public.bid_matching_jobs FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('verifier_policy_snapshot_id', 'verifier_policy')"
+
+[[triggers]]
+schema = "public"
+table = "bid_matching_manifests"
+name = "bid_matching_manifests_config_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_matching_manifests_config_snapshot_kind BEFORE INSERT ON public.bid_matching_manifests FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('matching_config_snapshot_id', 'matching_config')"
+
+[[triggers]]
+schema = "public"
+table = "bid_matching_manifests"
+name = "bid_matching_manifests_feature_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_matching_manifests_feature_snapshot_kind BEFORE INSERT ON public.bid_matching_manifests FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('feature_snapshot_id', 'feature')"
+
+[[triggers]]
+schema = "public"
 table = "bid_matching_manifests"
 name = "bid_matching_manifests_immutable"
 enabled = "origin"
@@ -36157,6 +39449,20 @@ table = "bid_matching_manifests"
 name = "bid_matching_manifests_scope_verify"
 enabled = "origin"
 definition = "CREATE CONSTRAINT TRIGGER bid_matching_manifests_scope_verify AFTER INSERT ON public.bid_matching_manifests DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.kb_bid_verify_matching_manifest_v1('id')"
+
+[[triggers]]
+schema = "public"
+table = "bid_matching_manifests"
+name = "bid_matching_manifests_score_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_matching_manifests_score_snapshot_kind BEFORE INSERT ON public.bid_matching_manifests FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('score_policy_snapshot_id', 'score_policy')"
+
+[[triggers]]
+schema = "public"
+table = "bid_matching_manifests"
+name = "bid_matching_manifests_verifier_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_matching_manifests_verifier_snapshot_kind BEFORE INSERT ON public.bid_matching_manifests FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('verifier_policy_snapshot_id', 'verifier_policy')"
 
 [[triggers]]
 schema = "public"
@@ -36209,10 +39515,66 @@ definition = "CREATE TRIGGER bid_matching_routes_immutable BEFORE DELETE OR UPDA
 
 [[triggers]]
 schema = "public"
+table = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_config_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_matching_schedule_intents_config_snapshot_kind BEFORE INSERT ON public.bid_matching_schedule_intents FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('matching_config_snapshot_id', 'matching_config')"
+
+[[triggers]]
+schema = "public"
+table = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_feature_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_matching_schedule_intents_feature_snapshot_kind BEFORE INSERT ON public.bid_matching_schedule_intents FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('feature_snapshot_id', 'feature')"
+
+[[triggers]]
+schema = "public"
+table = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_immutable"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_matching_schedule_intents_immutable BEFORE DELETE OR UPDATE ON public.bid_matching_schedule_intents FOR EACH ROW EXECUTE FUNCTION public.kb_reject_append_only()"
+
+[[triggers]]
+schema = "public"
+table = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_no_truncate"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_matching_schedule_intents_no_truncate BEFORE TRUNCATE ON public.bid_matching_schedule_intents FOR EACH STATEMENT EXECUTE FUNCTION public.kb_reject_append_only()"
+
+[[triggers]]
+schema = "public"
+table = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_score_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_matching_schedule_intents_score_snapshot_kind BEFORE INSERT ON public.bid_matching_schedule_intents FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('score_policy_snapshot_id', 'score_policy')"
+
+[[triggers]]
+schema = "public"
+table = "bid_matching_schedule_intents"
+name = "bid_matching_schedule_intents_verifier_snapshot_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_matching_schedule_intents_verifier_snapshot_kind BEFORE INSERT ON public.bid_matching_schedule_intents FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('verifier_policy_snapshot_id', 'verifier_policy')"
+
+[[triggers]]
+schema = "public"
 table = "bid_matching_source_artifacts"
 name = "bid_matching_source_artifacts_immutable"
 enabled = "origin"
 definition = "CREATE TRIGGER bid_matching_source_artifacts_immutable BEFORE DELETE OR UPDATE ON public.bid_matching_source_artifacts FOR EACH ROW EXECUTE FUNCTION public.kb_reject_append_only()"
+
+[[triggers]]
+schema = "public"
+table = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_immutable"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_operation_snapshot_artifacts_immutable BEFORE DELETE OR UPDATE ON public.bid_operation_snapshot_artifacts FOR EACH ROW EXECUTE FUNCTION public.kb_reject_append_only()"
+
+[[triggers]]
+schema = "public"
+table = "bid_operation_snapshot_artifacts"
+name = "bid_operation_snapshot_artifacts_no_truncate"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_operation_snapshot_artifacts_no_truncate BEFORE TRUNCATE ON public.bid_operation_snapshot_artifacts FOR EACH STATEMENT EXECUTE FUNCTION public.kb_reject_append_only()"
 
 [[triggers]]
 schema = "public"
@@ -36419,6 +39781,34 @@ definition = "CREATE TRIGGER bid_submission_profile_artifacts_immutable BEFORE D
 
 [[triggers]]
 schema = "public"
+table = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshots_feature_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_submission_render_job_snapshots_feature_kind BEFORE INSERT ON public.bid_submission_render_job_snapshot_artifacts FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('feature_snapshot_id', 'feature')"
+
+[[triggers]]
+schema = "public"
+table = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshots_immutable"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_submission_render_job_snapshots_immutable BEFORE DELETE OR UPDATE ON public.bid_submission_render_job_snapshot_artifacts FOR EACH ROW EXECUTE FUNCTION public.kb_reject_append_only()"
+
+[[triggers]]
+schema = "public"
+table = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshots_no_truncate"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_submission_render_job_snapshots_no_truncate BEFORE TRUNCATE ON public.bid_submission_render_job_snapshot_artifacts FOR EACH STATEMENT EXECUTE FUNCTION public.kb_reject_append_only()"
+
+[[triggers]]
+schema = "public"
+table = "bid_submission_render_job_snapshot_artifacts"
+name = "bid_submission_render_job_snapshots_render_kind"
+enabled = "origin"
+definition = "CREATE TRIGGER bid_submission_render_job_snapshots_render_kind BEFORE INSERT ON public.bid_submission_render_job_snapshot_artifacts FOR EACH ROW EXECUTE FUNCTION public.kb_bid_require_operation_snapshot_kind('render_config_snapshot_id', 'render')"
+
+[[triggers]]
+schema = "public"
 table = "bid_template_contract_artifacts"
 name = "bid_template_contract_artifacts_immutable"
 enabled = "origin"
@@ -36458,6 +39848,48 @@ table = "kind_router_contract_artifacts"
 name = "kind_router_contract_artifacts_immutable"
 enabled = "origin"
 definition = "CREATE TRIGGER kind_router_contract_artifacts_immutable BEFORE DELETE OR UPDATE ON public.kind_router_contract_artifacts FOR EACH ROW EXECUTE FUNCTION public.kb_reject_append_only()"
+
+[[triggers]]
+schema = "public"
+table = "knowledge_retrieval_policies_v2"
+name = "knowledge_retrieval_policies_v2_guard_removal"
+enabled = "origin"
+definition = "CREATE TRIGGER knowledge_retrieval_policies_v2_guard_removal BEFORE DELETE OR TRUNCATE ON public.knowledge_retrieval_policies_v2 FOR EACH STATEMENT EXECUTE FUNCTION public.kb_knowledge_guard_retrieval_policy_v2_removal()"
+
+[[triggers]]
+schema = "public"
+table = "knowledge_retrieval_policies_v2"
+name = "knowledge_retrieval_policies_v2_guard_update"
+enabled = "origin"
+definition = "CREATE TRIGGER knowledge_retrieval_policies_v2_guard_update BEFORE UPDATE ON public.knowledge_retrieval_policies_v2 FOR EACH ROW EXECUTE FUNCTION public.kb_knowledge_guard_retrieval_policy_v2_update()"
+
+[[triggers]]
+schema = "public"
+table = "live_recovery_feature_snapshots"
+name = "live_recovery_feature_snapshots_immutable"
+enabled = "origin"
+definition = "CREATE TRIGGER live_recovery_feature_snapshots_immutable BEFORE DELETE OR UPDATE ON public.live_recovery_feature_snapshots FOR EACH ROW EXECUTE FUNCTION public.kb_reject_append_only()"
+
+[[triggers]]
+schema = "public"
+table = "live_recovery_feature_snapshots"
+name = "live_recovery_feature_snapshots_no_truncate"
+enabled = "origin"
+definition = "CREATE TRIGGER live_recovery_feature_snapshots_no_truncate BEFORE TRUNCATE ON public.live_recovery_feature_snapshots FOR EACH STATEMENT EXECUTE FUNCTION public.kb_reject_append_only()"
+
+[[triggers]]
+schema = "public"
+table = "live_recovery_policy_snapshots"
+name = "live_recovery_policy_snapshots_immutable"
+enabled = "origin"
+definition = "CREATE TRIGGER live_recovery_policy_snapshots_immutable BEFORE DELETE OR UPDATE ON public.live_recovery_policy_snapshots FOR EACH ROW EXECUTE FUNCTION public.kb_reject_append_only()"
+
+[[triggers]]
+schema = "public"
+table = "live_recovery_policy_snapshots"
+name = "live_recovery_policy_snapshots_no_truncate"
+enabled = "origin"
+definition = "CREATE TRIGGER live_recovery_policy_snapshots_no_truncate BEFORE TRUNCATE ON public.live_recovery_policy_snapshots FOR EACH STATEMENT EXECUTE FUNCTION public.kb_reject_append_only()"
 
 [[triggers]]
 schema = "public"
@@ -36589,7 +40021,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "0d37e703a85e78c7c68d893cac1962a26c3eee463be5b1bdf241eacf763b37c0"
+definition_sha256 = "9423a2adbc2b8b62b893d3340e876b7d88b424daa51e40c205f0e1d5dea7ea29"
 
 [[routines]]
 schema = "public"
@@ -36605,7 +40037,7 @@ security_definer = false
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "662b35e77ad76feb459f33df346d76488fac9a62e7458314f90abfd7815350b1"
+definition_sha256 = "37287e0342b8c79c1b603eb8389df0af05a819a48575b8853ecf8ffe119ba648"
 
 [[routines]]
 schema = "public"
@@ -36733,7 +40165,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "95cf1ff70cedeb9b8080f5f0017c12d65f724b0f7551723b8d72e71ad5c6f76c"
+definition_sha256 = "bf0189bdd54ef883325d0ca978efc10657324f4abc62453b9d8b11644569996e"
 
 [[routines]]
 schema = "public"
@@ -36830,6 +40262,22 @@ leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
 definition_sha256 = "44df51eaa9ee61c68268115129e54b86fc3a133f0aef865087ef7f7b02924900"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_current_operation_snapshot"
+identity_arguments = "p_snapshot_kind text"
+kind = "function"
+owner = "app_owner"
+language = "sql"
+return_type = "uuid"
+volatility = "stable"
+strict = true
+security_definer = false
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "59bad2495289ea5f27a11cc2389b265b7c951ad3903af81f58c4716e4397ed16"
 
 [[routines]]
 schema = "public"
@@ -37329,6 +40777,118 @@ definition_sha256 = "6302e2c0907a243a35fd1af9ba3690f2f82b1dad62e240cbeff7dd9a0ba
 
 [[routines]]
 schema = "public"
+name = "kb_bid_live_recovery_claim"
+identity_arguments = "p_candidate jsonb, p_claim_token uuid, p_claimed_by text"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "jsonb"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "8c7102e58ba40cb209f01c8aaeb1c186300c559969c9ff8df4469eb7598b8b23"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_live_recovery_complete"
+identity_arguments = "p_recovery_kind text, p_durable_id uuid, p_generation bigint, p_recovery_epoch bigint, p_claim_token uuid, p_attempt integer, p_receipt jsonb"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "boolean"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "6e4c95f71feb4a8d4007facb721f6b0e0c20bf0087bf060152358db4525439d7"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_live_recovery_discover"
+identity_arguments = "p_limit integer"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "jsonb"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "66c01a6e9923d5578b58de5c9370e9b3b0622911dc22fb0ce9ad301c7e9e6c80"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_live_recovery_fail"
+identity_arguments = "p_recovery_kind text, p_durable_id uuid, p_generation bigint, p_recovery_epoch bigint, p_claim_token uuid, p_attempt integer, p_error_code text"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "boolean"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "106e7db223a67c51299599dcb9fa71b992f70ce63c6bed4d82d3a81aa2d66a77"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_live_recovery_heartbeat"
+identity_arguments = "p_recovery_kind text, p_durable_id uuid, p_generation bigint, p_recovery_epoch bigint, p_claim_token uuid, p_attempt integer"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "boolean"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "f05afacef29a0d4094c4e6578f7900137aced59004b818bfd2b31e184d0e49b2"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_live_recovery_payload"
+identity_arguments = "p_claim public.system_live_recovery_claims"
+kind = "function"
+owner = "app_owner"
+language = "sql"
+return_type = "jsonb"
+volatility = "stable"
+strict = true
+security_definer = false
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "a70878aa028d8d5973bc993ce11fa6a72162d3854394d34533f1ef87ebae6dd7"
+
+[[routines]]
+schema = "public"
+name = "kb_bid_live_recovery_release"
+identity_arguments = "p_recovery_kind text, p_durable_id uuid, p_generation bigint, p_recovery_epoch bigint, p_claim_token uuid, p_attempt integer, p_error_code text"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "boolean"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "7219881756e0d10042384d6e18084852059a254f2832e5da8d67e636e4695611"
+
+[[routines]]
+schema = "public"
 name = "kb_bid_lock_quote_draft"
 identity_arguments = "p_project_id uuid"
 kind = "function"
@@ -37362,7 +40922,7 @@ definition_sha256 = "e7a537ea585b269b847c951813d4b17914ec08a9b72bd7cd281f9171385
 [[routines]]
 schema = "public"
 name = "kb_bid_matching_claim"
-identity_arguments = "p_job_id uuid, p_claim_token uuid"
+identity_arguments = "p_job_id uuid, p_claim_token uuid, p_matching_config_snapshot_id uuid, p_feature_snapshot_id uuid, p_score_policy_snapshot_id uuid, p_verifier_policy_snapshot_id uuid"
 kind = "function"
 owner = "app_owner"
 language = "plpgsql"
@@ -37373,7 +40933,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "f9651fa498f7b2f0668d6e557c5ab33bc83830f3c98da730efe313674e30dcd0"
+definition_sha256 = "223d5553673195102506a356ab108557a1bb7eda69a65bddf1aae593b0ade3ac"
 
 [[routines]]
 schema = "public"
@@ -37501,7 +41061,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "43a670ae4c31845d8ff3b11050f0dbbc8fa82e6a0f5cdc6d4b0032a02a98e490"
+definition_sha256 = "655571f0b32ece3e8a265a1ce52d0c69db0e52b6bf15137c46cce984396297ac"
 
 [[routines]]
 schema = "public"
@@ -38113,6 +41673,22 @@ definition_sha256 = "5914a91e99aae8c72e0f24f1c5d10bb0dba4c574818adeecfbf74b55166
 
 [[routines]]
 schema = "public"
+name = "kb_bid_require_operation_snapshot_kind"
+identity_arguments = ""
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "trigger"
+volatility = "volatile"
+strict = false
+security_definer = false
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "39837af74a5a75366daa05cb469298c9b3d6d78ec7cdaa0280a22ca94247ef1f"
+
+[[routines]]
+schema = "public"
 name = "kb_bid_require_user_actor"
 identity_arguments = "p_actor public.kb_actor_identity"
 kind = "function"
@@ -38157,7 +41733,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "c6d8056e30f60fa112adf9c1f29dd3725daa79876fe6e45510dab82cac140574"
+definition_sha256 = "aace9d81304b91cca2a0816793f0c41c3c3c7440e639603c5ab1031cd5b1a8ff"
 
 [[routines]]
 schema = "public"
@@ -38237,7 +41813,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "d1f5eaa244c296180627617efd6e985b7818326158715aac91a68f6aef781529"
+definition_sha256 = "f6811a67ee37979abc35201c0efe1e0b7c752bde529ad2dafba72ec2bd4a260c"
 
 [[routines]]
 schema = "public"
@@ -38253,7 +41829,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "4131ecf5b789774a440e9646812754de39c32c06afeba6347b97cfdf4344a17f"
+definition_sha256 = "ae01d5aec31b1b7cd4ce33457954afb80991623d23e8bc83b175c20b92a38e64"
 
 [[routines]]
 schema = "public"
@@ -38301,7 +41877,7 @@ security_definer = false
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "2467b61044d38f7cf593df35842c0f961d8e4afb6fca8d844a86dc5e15967a33"
+definition_sha256 = "36f67844ebc6bb7de5eee61f79d57b6136a0190c078960c025a92f6c2a7b4ea6"
 
 [[routines]]
 schema = "public"
@@ -38349,7 +41925,7 @@ security_definer = false
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "b9068f47dc7c253351e50de48eb574773109df98739e75b31a8331c8eb3ad559"
+definition_sha256 = "ace4eba4047db1b39cc705822b440abd46051cd4a71c8cbc8616187637d152e3"
 
 [[routines]]
 schema = "public"
@@ -38461,7 +42037,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "31a6637aa5b73499e187c23a6cffd2c896f53b0f79bb5ec5db6b337eaaea007c"
+definition_sha256 = "0f54a4c85044735d2ad408fd4432917cd189e3082b4383b55ba414f58188a2de"
 
 [[routines]]
 schema = "public"
@@ -38477,7 +42053,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "797dfdb2ed75c154e05e4ead0a35617b279f2892f58e15661edd3f936ac3b7f2"
+definition_sha256 = "0ff659531a2a5435139c47796f145d80417a0133a047a4a0a38944d27903afe7"
 
 [[routines]]
 schema = "public"
@@ -38765,7 +42341,55 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "d7002cb2e326dcddf304ea9aa703c8bae1d5d84f0a9cfa8d329945a2466ee261"
+definition_sha256 = "9980c9983df85997149873e18542ab5526a81fe82297b24e05e7a63dd4a158fe"
+
+[[routines]]
+schema = "public"
+name = "kb_knowledge_attest_matching_scope_v2"
+identity_arguments = "p_scope jsonb"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "jsonb"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "3a94605e054d849178edaec84464144f2b061b744603d0373ef4aa8b7f3e057e"
+
+[[routines]]
+schema = "public"
+name = "kb_knowledge_guard_retrieval_policy_v2_removal"
+identity_arguments = ""
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "trigger"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "5e12407533bc37b307a073542cdd485adfcdcab1761218d92c77ac49408a6373"
+
+[[routines]]
+schema = "public"
+name = "kb_knowledge_guard_retrieval_policy_v2_update"
+identity_arguments = ""
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "trigger"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "e801d29e159703c0a609035c8792efd7d43ca69b85174a8d69059bdbb2bd91bd"
 
 [[routines]]
 schema = "public"
@@ -38782,6 +42406,22 @@ leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
 definition_sha256 = "45fd4742c7333a131254ab84da9a6aa30d04709b614f1ca08e086d69edc8b940"
+
+[[routines]]
+schema = "public"
+name = "kb_knowledge_verify_matching_scope_v2"
+identity_arguments = "p_attestation_id uuid, p_content_sha256 text, p_scope jsonb"
+kind = "function"
+owner = "app_owner"
+language = "plpgsql"
+return_type = "void"
+volatility = "volatile"
+strict = false
+security_definer = true
+leakproof = false
+parallel = "unsafe"
+config = ["search_path=pg_catalog, public"]
+definition_sha256 = "0086ebbfd4859349fbfa8ccd385a77966be2a0accd9febe96b8e4e493c5b0c05"
 
 [[routines]]
 schema = "public"
@@ -38941,7 +42581,7 @@ security_definer = true
 leakproof = false
 parallel = "unsafe"
 config = ["search_path=pg_catalog, public"]
-definition_sha256 = "e47877590225214939905a6475ab04bcd67e2fed4aa50b25f4e102f70413fe2e"
+definition_sha256 = "6f8e7d898b76aae4dfe7f1f3b77e91c2ed985d7420050bc7361b74add5e0da87"
 
 [[routines]]
 schema = "public"
@@ -39527,6 +43167,15 @@ schema = "public"
 relation = "application_maintenance_gate"
 kind = "table"
 grantor = "kb_app_owner"
+grantee = "kb_runtime_retention"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "application_maintenance_gate"
+kind = "table"
+grantor = "kb_app_owner"
 grantee = "kb_runtime_worker"
 privilege = "SELECT"
 grant_option = false
@@ -42143,6 +45792,69 @@ grant_option = false
 
 [[relation_acls]]
 schema = "public"
+relation = "bid_matching_schedule_intents"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_matching_schedule_intents"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
 relation = "bid_matching_source_artifacts"
 kind = "table"
 grantor = "kb_app_owner"
@@ -42800,6 +46512,132 @@ grant_option = false
 
 [[relation_acls]]
 schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_operation_snapshot_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_operation_snapshot_current"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
 relation = "bid_part_content_artifacts"
 kind = "table"
 grantor = "kb_app_owner"
@@ -44493,6 +48331,69 @@ grant_option = false
 [[relation_acls]]
 schema = "public"
 relation = "bid_submission_profile_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "bid_submission_render_job_snapshot_artifacts"
 kind = "table"
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
@@ -48372,6 +52273,321 @@ grant_option = false
 [[relation_acls]]
 schema = "public"
 relation = "knowledge_matching_scope_attestations"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_matching_scope_attestations_v2"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "knowledge_retrieval_policies_v2"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_configuration"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_configuration"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_configuration"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_configuration"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_configuration"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_configuration"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_configuration"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_feature_snapshots"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "live_recovery_policy_snapshots"
 kind = "table"
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
@@ -49888,6 +54104,69 @@ kind = "table"
 grantor = "kb_launch_owner"
 grantee = "kb_runtime_worker"
 privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "system_live_recovery_claims"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "DELETE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "system_live_recovery_claims"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "INSERT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "system_live_recovery_claims"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "REFERENCES"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "system_live_recovery_claims"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "SELECT"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "system_live_recovery_claims"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRIGGER"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "system_live_recovery_claims"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "TRUNCATE"
+grant_option = false
+
+[[relation_acls]]
+schema = "public"
+relation = "system_live_recovery_claims"
+kind = "table"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "UPDATE"
 grant_option = false
 
 [[relation_acls]]
@@ -51377,6 +55656,15 @@ grant_option = false
 
 [[routine_acls]]
 schema = "public"
+name = "kb_bid_current_operation_snapshot"
+identity_arguments = "p_snapshot_kind text"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
 name = "kb_bid_current_part_input_identities"
 identity_arguments = "p_project_id uuid, p_part_key text"
 grantor = "kb_app_owner"
@@ -51818,6 +56106,123 @@ grant_option = false
 
 [[routine_acls]]
 schema = "public"
+name = "kb_bid_live_recovery_claim"
+identity_arguments = "p_candidate jsonb, p_claim_token uuid, p_claimed_by text"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_live_recovery_claim"
+identity_arguments = "p_candidate jsonb, p_claim_token uuid, p_claimed_by text"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_worker"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_live_recovery_complete"
+identity_arguments = "p_recovery_kind text, p_durable_id uuid, p_generation bigint, p_recovery_epoch bigint, p_claim_token uuid, p_attempt integer, p_receipt jsonb"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_live_recovery_complete"
+identity_arguments = "p_recovery_kind text, p_durable_id uuid, p_generation bigint, p_recovery_epoch bigint, p_claim_token uuid, p_attempt integer, p_receipt jsonb"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_worker"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_live_recovery_discover"
+identity_arguments = "p_limit integer"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_live_recovery_discover"
+identity_arguments = "p_limit integer"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_worker"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_live_recovery_fail"
+identity_arguments = "p_recovery_kind text, p_durable_id uuid, p_generation bigint, p_recovery_epoch bigint, p_claim_token uuid, p_attempt integer, p_error_code text"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_live_recovery_fail"
+identity_arguments = "p_recovery_kind text, p_durable_id uuid, p_generation bigint, p_recovery_epoch bigint, p_claim_token uuid, p_attempt integer, p_error_code text"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_worker"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_live_recovery_heartbeat"
+identity_arguments = "p_recovery_kind text, p_durable_id uuid, p_generation bigint, p_recovery_epoch bigint, p_claim_token uuid, p_attempt integer"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_live_recovery_heartbeat"
+identity_arguments = "p_recovery_kind text, p_durable_id uuid, p_generation bigint, p_recovery_epoch bigint, p_claim_token uuid, p_attempt integer"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_worker"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_live_recovery_payload"
+identity_arguments = "p_claim public.system_live_recovery_claims"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_live_recovery_release"
+identity_arguments = "p_recovery_kind text, p_durable_id uuid, p_generation bigint, p_recovery_epoch bigint, p_claim_token uuid, p_attempt integer, p_error_code text"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_bid_live_recovery_release"
+identity_arguments = "p_recovery_kind text, p_durable_id uuid, p_generation bigint, p_recovery_epoch bigint, p_claim_token uuid, p_attempt integer, p_error_code text"
+grantor = "kb_app_owner"
+grantee = "kb_runtime_worker"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
 name = "kb_bid_lock_quote_draft"
 identity_arguments = "p_project_id uuid"
 grantor = "kb_app_owner"
@@ -51855,7 +56260,7 @@ grant_option = false
 [[routine_acls]]
 schema = "public"
 name = "kb_bid_matching_claim"
-identity_arguments = "p_job_id uuid, p_claim_token uuid"
+identity_arguments = "p_job_id uuid, p_claim_token uuid, p_matching_config_snapshot_id uuid, p_feature_snapshot_id uuid, p_score_policy_snapshot_id uuid, p_verifier_policy_snapshot_id uuid"
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
 privilege = "EXECUTE"
@@ -51864,7 +56269,7 @@ grant_option = false
 [[routine_acls]]
 schema = "public"
 name = "kb_bid_matching_claim"
-identity_arguments = "p_job_id uuid, p_claim_token uuid"
+identity_arguments = "p_job_id uuid, p_claim_token uuid, p_matching_config_snapshot_id uuid, p_feature_snapshot_id uuid, p_score_policy_snapshot_id uuid, p_verifier_policy_snapshot_id uuid"
 grantor = "kb_app_owner"
 grantee = "kb_runtime_worker"
 privilege = "EXECUTE"
@@ -52655,6 +57060,15 @@ grant_option = false
 
 [[routine_acls]]
 schema = "public"
+name = "kb_bid_require_operation_snapshot_kind"
+identity_arguments = ""
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
 name = "kb_bid_require_user_actor"
 identity_arguments = "p_actor public.kb_actor_identity"
 grantor = "kb_app_owner"
@@ -53132,7 +57546,43 @@ grant_option = false
 
 [[routine_acls]]
 schema = "public"
+name = "kb_knowledge_attest_matching_scope_v2"
+identity_arguments = "p_scope jsonb"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_knowledge_guard_retrieval_policy_v2_removal"
+identity_arguments = ""
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_knowledge_guard_retrieval_policy_v2_update"
+identity_arguments = ""
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
 name = "kb_knowledge_verify_matching_scope_v1"
+identity_arguments = "p_attestation_id uuid, p_content_sha256 text, p_scope jsonb"
+grantor = "kb_app_owner"
+grantee = "kb_app_owner"
+privilege = "EXECUTE"
+grant_option = false
+
+[[routine_acls]]
+schema = "public"
+name = "kb_knowledge_verify_matching_scope_v2"
 identity_arguments = "p_attestation_id uuid, p_content_sha256 text, p_scope jsonb"
 grantor = "kb_app_owner"
 grantee = "kb_app_owner"
@@ -53252,7 +57702,7 @@ schema = "public"
 name = "kb_object_upload_expire"
 identity_arguments = ""
 grantor = "kb_app_owner"
-grantee = "kb_runtime_worker"
+grantee = "kb_runtime_retention"
 privilege = "EXECUTE"
 grant_option = false
 
@@ -53731,6 +58181,12 @@ key_columns = ["id"]
 
 [[tables]]
 schema = "public"
+name = "bid_matching_schedule_intents"
+row_count = 0
+key_columns = ["id"]
+
+[[tables]]
+schema = "public"
 name = "bid_matching_source_artifacts"
 row_count = 0
 key_columns = ["id"]
@@ -53810,6 +58266,18 @@ schema = "public"
 name = "bid_matching_staging_sets"
 row_count = 0
 key_columns = ["id"]
+
+[[tables]]
+schema = "public"
+name = "bid_operation_snapshot_artifacts"
+row_count = 7
+key_columns = ["id"]
+
+[[tables]]
+schema = "public"
+name = "bid_operation_snapshot_current"
+row_count = 7
+key_columns = ["snapshot_kind"]
 
 [[tables]]
 schema = "public"
@@ -53987,6 +58455,12 @@ key_columns = ["id"]
 
 [[tables]]
 schema = "public"
+name = "bid_submission_render_job_snapshot_artifacts"
+row_count = 0
+key_columns = ["id"]
+
+[[tables]]
+schema = "public"
 name = "bid_submission_render_jobs"
 row_count = 0
 key_columns = ["id"]
@@ -54091,6 +58565,36 @@ key_columns = ["singleton_key"]
 schema = "public"
 name = "knowledge_matching_scope_attestations"
 row_count = 0
+key_columns = ["id"]
+
+[[tables]]
+schema = "public"
+name = "knowledge_matching_scope_attestations_v2"
+row_count = 0
+key_columns = ["id"]
+
+[[tables]]
+schema = "public"
+name = "knowledge_retrieval_policies_v2"
+row_count = 0
+key_columns = ["policy_sha256"]
+
+[[tables]]
+schema = "public"
+name = "live_recovery_configuration"
+row_count = 1
+key_columns = ["singleton_key"]
+
+[[tables]]
+schema = "public"
+name = "live_recovery_feature_snapshots"
+row_count = 1
+key_columns = ["id"]
+
+[[tables]]
+schema = "public"
+name = "live_recovery_policy_snapshots"
+row_count = 1
 key_columns = ["id"]
 
 [[tables]]
@@ -54220,6 +58724,12 @@ key_columns = ["version"]
 
 [[tables]]
 schema = "public"
+name = "system_live_recovery_claims"
+row_count = 0
+key_columns = ["id"]
+
+[[tables]]
+schema = "public"
 name = "tags"
 row_count = 0
 key_columns = ["id"]
@@ -54280,6 +58790,90 @@ schema = "public"
 table = "application_maintenance_gate"
 key = '[["singleton_key", true]]'
 value_sha256 = "03523792709d8de0f48d6736469b060970cb12439e5a75b7c64bace247adcf46"
+
+[[seed_rows]]
+schema = "public"
+table = "bid_operation_snapshot_artifacts"
+key = '[["id", "b1d00000-0000-5000-8000-000000000001"]]'
+value_sha256 = "05b119e4c188e868b1ea1badd0020abcfb0c0085a154576d9af9e59ec2109677"
+
+[[seed_rows]]
+schema = "public"
+table = "bid_operation_snapshot_artifacts"
+key = '[["id", "b1d00000-0000-5000-8000-000000000002"]]'
+value_sha256 = "3e5265b0d3c4c0d02c4f75d66a6fa815e4187eb4200ec4a762f4d89c768c9c47"
+
+[[seed_rows]]
+schema = "public"
+table = "bid_operation_snapshot_artifacts"
+key = '[["id", "b1d00000-0000-5000-8000-000000000004"]]'
+value_sha256 = "5087772404a4f08a34d0224d8424ec8281e35b1bf798a3e534302c4f5d5f04cc"
+
+[[seed_rows]]
+schema = "public"
+table = "bid_operation_snapshot_artifacts"
+key = '[["id", "b1d00000-0000-5000-8000-000000000005"]]'
+value_sha256 = "5aa6db8d959fd119b745c32c5c7a9916afcf73c2d3e8cac281ba1e424404111e"
+
+[[seed_rows]]
+schema = "public"
+table = "bid_operation_snapshot_artifacts"
+key = '[["id", "b1d00000-0000-5000-8000-000000000006"]]'
+value_sha256 = "0d03dbf2c1b82c7f78d851244c97b6b78fbada85172efe3b0c07a8b07df7d854"
+
+[[seed_rows]]
+schema = "public"
+table = "bid_operation_snapshot_artifacts"
+key = '[["id", "b1d00000-0000-5000-8000-000000000007"]]'
+value_sha256 = "a79985812d847f021221a2a490371cab15a602ec5aca13ca018e21eea488054f"
+
+[[seed_rows]]
+schema = "public"
+table = "bid_operation_snapshot_artifacts"
+key = '[["id", "b1d00000-0000-5000-8000-000000000008"]]'
+value_sha256 = "0f971b66cf3d7d580db95dab6f49b5a86b8402d3c30d08e8a30037b4521e91a5"
+
+[[seed_rows]]
+schema = "public"
+table = "bid_operation_snapshot_current"
+key = '[["snapshot_kind", "conversion"]]'
+value_sha256 = "acb578dc155c151274c56a94f3a5d2c8d4a9572d38457e19b471aec1bd242d56"
+
+[[seed_rows]]
+schema = "public"
+table = "bid_operation_snapshot_current"
+key = '[["snapshot_kind", "feature"]]'
+value_sha256 = "54d5bd3a30f0673289a91433abf827979a46cc93c8a63c66bd3de6b8f66246dd"
+
+[[seed_rows]]
+schema = "public"
+table = "bid_operation_snapshot_current"
+key = '[["snapshot_kind", "matching_config"]]'
+value_sha256 = "081cfc1a0e2556ec5df0a5a6a08686b37ff7902f44c90b2ba661f43255d32f7a"
+
+[[seed_rows]]
+schema = "public"
+table = "bid_operation_snapshot_current"
+key = '[["snapshot_kind", "render"]]'
+value_sha256 = "e1d256babf002ccadc1c9e4d4a1a2f999ceb2b4f7d5c97a2db41542176afe3ed"
+
+[[seed_rows]]
+schema = "public"
+table = "bid_operation_snapshot_current"
+key = '[["snapshot_kind", "score_policy"]]'
+value_sha256 = "f94c37f3b743335d7fc90f3f2dd02f60a167d40fc5940cb000e9f4dda6647685"
+
+[[seed_rows]]
+schema = "public"
+table = "bid_operation_snapshot_current"
+key = '[["snapshot_kind", "target_config"]]'
+value_sha256 = "af899dbc0e3496f40eb9d6fc900bfb180ad4e9bfe731b4cf1ee4db7027d0b994"
+
+[[seed_rows]]
+schema = "public"
+table = "bid_operation_snapshot_current"
+key = '[["snapshot_kind", "verifier_policy"]]'
+value_sha256 = "cecd7caf753a1b4a4053e91592996fd3fe242ecade9d3ed43157d94bcad61b58"
 
 [[seed_rows]]
 schema = "public"
@@ -54424,6 +59018,24 @@ schema = "public"
 table = "kind_router_current"
 key = '[["singleton_key", true]]'
 value_sha256 = "e1017fdd8f9773b19a160b7ed1f6994511b9c7b0ddeaf7569b020fc150eb58d6"
+
+[[seed_rows]]
+schema = "public"
+table = "live_recovery_configuration"
+key = '[["singleton_key", true]]'
+value_sha256 = "c6fb6552f5e072f0eb6fcca0c70f30c2fe878ceb9463fc85e342aacc6fdec723"
+
+[[seed_rows]]
+schema = "public"
+table = "live_recovery_feature_snapshots"
+key = '[["id", "87c935bb-4d16-5ba3-a4c3-28eab0d92960"]]'
+value_sha256 = "964c2d539983f144d0fa5b10901eacbd98b6db78289de5462dcc33c9437eabbd"
+
+[[seed_rows]]
+schema = "public"
+table = "live_recovery_policy_snapshots"
+key = '[["id", "638e256e-b95f-55af-a335-dad1f72f1592"]]'
+value_sha256 = "23f3cffa9b62006e8e1004060a318e952e510e46ef5d7ef7a39498ec6cab41e3"
 
 [[seed_rows]]
 schema = "public"

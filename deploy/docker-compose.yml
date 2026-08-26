@@ -234,10 +234,11 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.rust
       args:
-        BIN: retention
-    image: knowledgebrain-retention:local
+        BIN: worker
+    image: knowledgebrain-worker:local@sha256:5d2715634560254f7c975b5c2a35bc73b72a09ec7926696d91d0dbaa9be6d256
     environment:
       <<: *app-env
+      BIN: retention
       DATABASE_URL: postgres://kb_runtime_retention:${KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD:-retention-change-me}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
       RETENTION_PROBE_ADDR: 0.0.0.0:8082
     restart: unless-stopped

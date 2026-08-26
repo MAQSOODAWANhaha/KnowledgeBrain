@@ -134,14 +134,6 @@ async fn matching_schedule_payload_with_complete_product_scope(
             AND product.current_version_id=version_value.id
           WHERE workspace_value.kind='product_line' AND product.kind='product'
             AND version_value.status='active' AND version_value.deleted_at IS NULL
-            AND EXISTS (
-              SELECT 1 FROM documents document_value
-              JOIN chunks chunk_value ON chunk_value.document_id=document_value.id
-               AND chunk_value.product_version_id=document_value.product_version_id
-              WHERE document_value.product_version_id=version_value.id
-                AND document_value.deleted_at IS NULL
-                AND document_value.enable_status='enabled' AND document_value.index_ready
-                AND octet_length(convert_to(chunk_value.content,'UTF8'))<=262144)
           ORDER BY product.id,version_value.id",
     )
     .fetch_all(pool)
@@ -720,6 +712,58 @@ async fn commercial_review_and_reject_project_frozen_explanatory_evidence() {
     }
     assert_eq!(projected[0].get::<String, _>("system_decision"), "review");
     assert_eq!(projected[1].get::<String, _>("system_decision"), "reject");
+
+    let part_4: String = sqlx::query_scalar("SELECT kb_bid_build_part_markdown($1,'4')")
+        .bind(project_id)
+        .fetch_one(&mut *fixture)
+        .await
+        .unwrap();
+    assert!(part_4.starts_with("# 公司资质与服务证据\n\n"));
+    assert!(part_4.contains("须提供资质证明 → review/insufficient/INSUFFICIENT"));
+    assert!(part_4.contains("不得拒绝现场服务 → reject/contradicted/CONTRADICTED"));
+    assert!(part_4.contains(&format!("冻结公司：冻结公司 {first_membership_ordinal}")));
+    assert!(part_4.contains("冻结证据 [review explanatory.pdf]：review explanatory frozen quote"));
+    assert!(part_4.contains("冻结证据 [reject explanatory.pdf]：reject explanatory frozen quote"));
+    assert!(
+        !part_4.contains("review first frozen quote"),
+        "Part 4 must consume only the deterministic explanatory candidate evidence"
+    );
+    assert!(
+        !part_4.contains("reject first frozen quote"),
+        "Part 4 must consume only the deterministic explanatory candidate evidence"
+    );
+
+    let regenerate_request = json!({"project_id":project_id,"part_key":"4"});
+    let regenerate_request_bytes = serde_json::to_vec(&regenerate_request).unwrap();
+    let regenerate_request_sha256 = domain::sha256_hex(&regenerate_request_bytes);
+    let regenerated: serde_json::Value = sqlx::query_scalar(
+        "SELECT kb_bid_regenerate_part(
+           $1,'4',0,NULL,$2::kb_actor_identity,$3,$4,$5::kb_sha256)",
+    )
+    .bind(project_id)
+    .bind(&actor)
+    .bind(format!("part-4-frozen-evidence-{project_id}"))
+    .bind(regenerate_request_bytes)
+    .bind(regenerate_request_sha256)
+    .fetch_one(&mut *fixture)
+    .await
+    .unwrap();
+    let stored_part_4: String = sqlx::query_scalar(
+        "SELECT convert_from(content.canonical_markdown_utf8,'UTF8')
+           FROM bid_part_content_artifacts content
+          WHERE content.id=$1",
+    )
+    .bind(
+        regenerated["content_artifact_id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap(),
+    )
+    .fetch_one(&mut *fixture)
+    .await
+    .unwrap();
+    assert_eq!(stored_part_4, part_4);
     fixture.rollback().await.unwrap();
 }
 
@@ -747,6 +791,7 @@ async fn matching_schedule_preserves_sixty_five_eligible_versions_with_zero_hits
     let document_digest = domain::sha256_hex(document_bytes);
     let document_ref = format!("objects/{document_digest}");
     let unrelated_chunk = "型号规格说明书";
+    let oversized_chunk = "x".repeat(262_145);
     let requirement = "量子纠缠验证协议";
     let baseline_eligible: i64 = sqlx::query_scalar(
         "SELECT count(*)
@@ -756,15 +801,7 @@ async fn matching_schedule_preserves_sixty_five_eligible_versions_with_zero_hits
              ON version_value.product_id=product.id
             AND product.current_version_id=version_value.id
           WHERE workspace_value.kind='product_line' AND product.kind='product'
-            AND version_value.status='active' AND version_value.deleted_at IS NULL
-            AND EXISTS (
-              SELECT 1 FROM documents document_value
-              JOIN chunks chunk_value ON chunk_value.document_id=document_value.id
-               AND chunk_value.product_version_id=document_value.product_version_id
-              WHERE document_value.product_version_id=version_value.id
-                AND document_value.deleted_at IS NULL
-                AND document_value.enable_status='enabled' AND document_value.index_ready
-                AND octet_length(convert_to(chunk_value.content,'UTF8'))<=262144)",
+            AND version_value.status='active' AND version_value.deleted_at IS NULL",
     )
     .fetch_one(&pool)
     .await
@@ -815,6 +852,9 @@ async fn matching_schedule_preserves_sixty_five_eligible_versions_with_zero_hits
             .execute(&mut *seed)
             .await
             .unwrap();
+        if ordinal == 63 {
+            continue;
+        }
         sqlx::query(
             "SELECT kb_object_reference_add(
                $1,$2,'application/pdf',$3,'knowledge_document',$4,'original',$5)",
@@ -851,8 +891,16 @@ async fn matching_schedule_preserves_sixty_five_eligible_versions_with_zero_hits
         .bind(chunk_id)
         .bind(version_id)
         .bind(document_id)
-        .bind(unrelated_chunk)
-        .bind(unrelated_chunk.len() as i32)
+        .bind(if ordinal == 64 {
+            oversized_chunk.as_str()
+        } else {
+            unrelated_chunk
+        })
+        .bind(if ordinal == 64 {
+            oversized_chunk.len() as i32
+        } else {
+            unrelated_chunk.len() as i32
+        })
         .execute(&mut *seed)
         .await
         .unwrap();

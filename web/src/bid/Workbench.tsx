@@ -47,6 +47,32 @@ function errMsg(e: unknown): string {
   return e instanceof ApiError ? e.message : String(e);
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+async function readOr<T>(request: Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await request;
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    return fallback;
+  }
+}
+
+function pickRouteKey(projectId: string, routeId: string): string {
+  return `${projectId}:${routeId}`;
+}
+
+function pickCandidateKey(projectId: string, routeId: string, candidateId: string): string {
+  return `${pickRouteKey(projectId, routeId)}:${candidateId}`;
+}
+
+function routeHasPendingPicks(counts: Map<string, number>, routeKey: string): boolean {
+  const prefix = `${routeKey}:`;
+  return Array.from(counts).some(([key, count]) => count > 0 && key.startsWith(prefix));
+}
+
 async function uploadContentSha256(file: File): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -92,7 +118,9 @@ export function Workbench({ email }: { email: string }) {
   const [matching, setMatching] = useState<Awaited<ReturnType<typeof api.matching>>>();
   const [pickSet, setPickSet] = useState<RoutePickSet | null>(null);
   const [company, setCompany] = useState<CompanyProfile>({});
+  const [companySnapshot, setCompanySnapshot] = useState<CompanyProfile>({});
   const [submission, setSubmission] = useState<SubmissionProfile>({});
+  const [submissionSnapshot, setSubmissionSnapshot] = useState<SubmissionProfile>({});
   const [classifications, setClassifications] = useState<ProceduralClassification[]>([]);
   const [attachments, setAttachments] = useState<ProceduralAttachment[]>([]);
   const [parts, setParts] = useState<PartStatus[]>([]);
@@ -113,6 +141,12 @@ export function Workbench({ email }: { email: string }) {
   const [noCeiling, setNoCeiling] = useState(false);
   const [noCeilingReason, setNoCeilingReason] = useState("招标文件未设置最高限价，已人工复核");
   const [quoteSaving, setQuoteSaving] = useState(false);
+  const [companySaving, setCompanySaving] = useState(false);
+  const [submissionSaving, setSubmissionSaving] = useState(false);
+  const [companyDraftDirty, setCompanyDraftDirty] = useState(false);
+  const [submissionDraftDirty, setSubmissionDraftDirty] = useState(false);
+  const [pendingPickKeys, setPendingPickKeys] = useState<Set<string>>(new Set());
+  const [optimisticPick, setOptimisticPick] = useState<{ routeId: string; candidateIds: Set<string> } | null>(null);
   const [uploading, setUploading] = useState(false);
   const [pendingNames, setPendingNames] = useState<string[]>([]);
   const [partPreview, setPartPreview] = useState(pane !== "draft");
@@ -123,11 +157,15 @@ export function Workbench({ email }: { email: string }) {
   const submissionExportAttempts = useRef(new Map<string, ReturnType<typeof createSubmissionExportAttempt>>());
   const companyDirty = useRef(false);
   const submissionDirty = useRef(false);
-  const pickMutationTail = useRef<Promise<void>>(Promise.resolve());
+  const activeProjectId = useRef(id);
+  const loadAbort = useRef<AbortController | null>(null);
+  const pickMutationTails = useRef(new Map<string, Promise<void>>());
+  const pendingPickCounts = useRef(new Map<string, number>());
   const ended = project?.status === "ended";
   const partIdentity = step === "parts" ? `${id}:${part}` : null;
   const partReady = partIdentity !== null && loadedPartIdentity === partIdentity;
   activePartIdentity.current = partIdentity;
+  activeProjectId.current = id;
 
   async function uploadWithAttempt<T>(
     operation: string,
@@ -152,15 +190,25 @@ export function Workbench({ email }: { email: string }) {
   }
 
   const load = useCallback(async () => {
-    if (!id) return;
+    const requestedProjectId = id;
+    if (!requestedProjectId || activeProjectId.current !== requestedProjectId) return;
+    const controller = new AbortController();
+    loadAbort.current?.abort();
+    loadAbort.current = controller;
+    const { signal } = controller;
     try {
       const [detail, clausePage, unitPage, factPage, partPage] = await Promise.all([
-        api.bid(id),
-        api.clauses(id).catch(() => ({ clauses: [] })),
-        api.units(id).catch(() => ({ units: [] })),
-        api.facts(id).catch(() => ({ suggestions: [] as FactSuggestion[] })),
-        api.parts(id).catch(() => ({ required_part_keys: [] as string[], parts: [] as PartStatus[] })),
+        api.bid(id, signal),
+        readOr(api.clauses(id, false, signal), { clauses: [] }),
+        readOr(api.units(id, signal), { units: [] }),
+        readOr(api.facts(id, signal), {
+          project_facts: undefined,
+          suggestions: [] as FactSuggestion[],
+          history: [] as unknown[],
+        }),
+        readOr(api.parts(id, signal), { required_part_keys: [] as string[], parts: [] as PartStatus[] }),
       ]);
+      if (signal.aborted || activeProjectId.current !== requestedProjectId) return;
       setProject(detail.project);
       setDerived(detail.derived);
       setDocs(detail.documents);
@@ -183,22 +231,39 @@ export function Workbench({ email }: { email: string }) {
               ? unitPage.units.find((u) => u.kind === "unsectioned")?.route_id
               : unitPage.units.find((u) => u.id === view)?.route_id;
         if (routeId) {
-          const set = await api.routePickSet(id, routeId).catch(() => null);
+          const set = await readOr(api.routePickSet(id, routeId, signal), null);
+          if (signal.aborted || activeProjectId.current !== requestedProjectId) return;
           setPickSet(set);
+          if (set && !routeHasPendingPicks(pendingPickCounts.current, pickRouteKey(id, routeId))) {
+            setOptimisticPick({
+              routeId,
+              candidateIds: new Set(set.items.map((item) => item.candidate_artifact_id)),
+            });
+          }
         } else {
           setPickSet(null);
+          setOptimisticPick(null);
         }
       }
       if (step === "quote") {
         const [cp, sp, pr, at, pv] = await Promise.all([
-          api.companyProfile(id).catch(() => null),
-          api.submissionProfile(id).catch(() => null),
-          api.procedural(id).catch(() => ({ classifications: [] })),
-          api.attachments(id).catch(() => ({ attachments: [] })),
-          api.previewQuote(id).catch(() => undefined),
+          readOr(api.companyProfile(id, signal), undefined),
+          readOr(api.submissionProfile(id, signal), undefined),
+          readOr(api.procedural(id, signal), { classifications: [] }),
+          readOr(api.attachments(id, signal), { attachments: [] }),
+          readOr(api.previewQuote(id, signal), undefined),
         ]);
-        if (cp && !companyDirty.current) setCompany(cp);
-        if (sp && !submissionDirty.current) setSubmission(sp);
+        if (signal.aborted || activeProjectId.current !== requestedProjectId) return;
+        if (cp !== undefined) {
+          const snapshot = cp ?? {};
+          setCompanySnapshot(snapshot);
+          if (!companyDirty.current) setCompany(snapshot);
+        }
+        if (sp !== undefined) {
+          const snapshot = sp ?? {};
+          setSubmissionSnapshot(snapshot);
+          if (!submissionDirty.current) setSubmission(snapshot);
+        }
         setClassifications(pr.classifications ?? []);
         setAttachments(at.attachments ?? []);
         setPreview(pv);
@@ -206,7 +271,7 @@ export function Workbench({ email }: { email: string }) {
       if (step === "parts") {
         const requestedPartIdentity = `${id}:${part}`;
         const loadSequence = ++partLoadSequence.current;
-        const current = await api.part(id, part).catch(() => null);
+        const current = await readOr(api.part(id, part, signal), null);
         if (
           activePartIdentity.current === requestedPartIdentity &&
           partLoadSequence.current === loadSequence &&
@@ -218,28 +283,41 @@ export function Workbench({ email }: { email: string }) {
           setPartStale(!!current?.stale);
           setLoadedPartIdentity(requestedPartIdentity);
         }
-        const g = await api.gateIssues(id, "pdf").catch(() => undefined);
+        const g = await readOr(api.gateIssues(id, "pdf", signal), undefined);
         if (g) setGate({ status: g.status, issues: g.issues });
       }
     } catch (e) {
-      toast(errMsg(e), "red");
+      if (!isAbortError(e)) toast(errMsg(e), "red");
+    } finally {
+      if (loadAbort.current === controller) loadAbort.current = null;
     }
   }, [id, part, step, view]);
-
-  useEffect(() => {
-    dirtyPart.current = false;
-    void load();
-    const t = window.setInterval(() => void load(), 5000);
-    return () => clearInterval(t);
-  }, [load]);
 
   useEffect(() => {
     uploadRetryAttempts.current.clear();
     submissionExportAttempts.current.clear();
     companyDirty.current = false;
     submissionDirty.current = false;
-    pickMutationTail.current = Promise.resolve();
+    setCompanyDraftDirty(false);
+    setSubmissionDraftDirty(false);
+    setCompanySaving(false);
+    setSubmissionSaving(false);
+    setCompany({});
+    setCompanySnapshot({});
+    setSubmission({});
+    setSubmissionSnapshot({});
+    setOptimisticPick(null);
   }, [id]);
+
+  useEffect(() => {
+    dirtyPart.current = false;
+    void load();
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => {
+      window.clearInterval(timer);
+      loadAbort.current?.abort();
+    };
+  }, [load]);
 
   useEffect(() => {
     if (project?.ceiling_price) setNoCeiling(false);
@@ -247,6 +325,15 @@ export function Workbench({ email }: { email: string }) {
 
   const live = useMemo(() => liveClauses(clauses, view), [clauses, view]);
   const cur = live.find((c) => c.id === selected) ?? live[0] ?? null;
+  const pendingPickCandidateIds = useMemo(() => {
+    if (!pickSet) return new Set<string>();
+    const prefix = `${pickRouteKey(id, pickSet.route_id)}:`;
+    return new Set(
+      Array.from(pendingPickKeys)
+        .filter((key) => key.startsWith(prefix))
+        .map((key) => key.slice(prefix.length)),
+    );
+  }, [id, pendingPickKeys, pickSet]);
 
   async function mutateClause(c: Clause, action: "patch" | "confirm" | "unconfirm" | "reject", patch?: Record<string, unknown>) {
     try {
@@ -315,36 +402,88 @@ export function Workbench({ email }: { email: string }) {
   function queuePickMutation(candidate: Candidate, include: boolean) {
     const routeId = pickSet?.route_id;
     if (!routeId) return;
-    pickMutationTail.current = pickMutationTail.current
+    const routeKey = pickRouteKey(id, routeId);
+    const candidateKey = pickCandidateKey(id, routeId, candidate.candidate_artifact_id);
+    pendingPickCounts.current.set(candidateKey, (pendingPickCounts.current.get(candidateKey) ?? 0) + 1);
+    setPendingPickKeys(new Set(pendingPickCounts.current.keys()));
+    setOptimisticPick((current) => {
+      const candidateIds = new Set(
+        current?.routeId === routeId
+          ? current.candidateIds
+          : (pickSet.items.map((item) => item.candidate_artifact_id)),
+      );
+      if (include) candidateIds.add(candidate.candidate_artifact_id);
+      else candidateIds.delete(candidate.candidate_artifact_id);
+      return { routeId, candidateIds };
+    });
+
+    let finalSet: RoutePickSet | null = null;
+    const previous = pickMutationTails.current.get(routeKey) ?? Promise.resolve();
+    const operation = previous
       .then(async () => {
-        const current = await api.routePickSet(id, routeId);
-        if (!current.source_report_artifact_id || !current.report_sha256) return;
-        const items = current.items
-          .filter((item) => include || item.candidate_artifact_id !== candidate.candidate_artifact_id)
-          .map((item) => ({
-            requirement_artifact_id: item.requirement_artifact_id,
-            candidate_artifact_id: item.candidate_artifact_id,
-          }));
-        if (include && !items.some((item) => item.candidate_artifact_id === candidate.candidate_artifact_id)) {
-          items.push({
-            requirement_artifact_id: candidate.requirement_artifact_id,
-            candidate_artifact_id: candidate.candidate_artifact_id,
-          });
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const current = await api.routePickSet(id, routeId);
+          if (!current.source_report_artifact_id || !current.report_sha256) {
+            throw new Error("当前匹配报告身份不完整，无法保存选择");
+          }
+          const items = current.items
+            .filter((item) => include || item.candidate_artifact_id !== candidate.candidate_artifact_id)
+            .map((item) => ({
+              requirement_artifact_id: item.requirement_artifact_id,
+              candidate_artifact_id: item.candidate_artifact_id,
+            }));
+          if (include && !items.some((item) => item.candidate_artifact_id === candidate.candidate_artifact_id)) {
+            items.push({
+              requirement_artifact_id: candidate.requirement_artifact_id,
+              candidate_artifact_id: candidate.candidate_artifact_id,
+            });
+          }
+          try {
+            await api.replaceRoutePickSet(id, routeId, {
+              source_report_artifact_id: current.source_report_artifact_id,
+              report_sha256: current.report_sha256,
+              expected_revision: current.revision,
+              items,
+            });
+            finalSet = await api.routePickSet(id, routeId);
+            setPickSet((active) => (active?.route_id === routeId ? finalSet : active));
+            return;
+          } catch (error) {
+            if (!(error instanceof ApiError) || error.status !== 409 || attempt > 0) throw error;
+            toast("选择已被其他操作更新，正在基于最新版本重试");
+          }
         }
-        await api.replaceRoutePickSet(id, routeId, {
-          source_report_artifact_id: current.source_report_artifact_id,
-          report_sha256: current.report_sha256,
-          expected_revision: current.revision,
-          items,
-        });
-        const refreshed = await api.routePickSet(id, routeId);
-        setPickSet((active) => (active?.route_id === routeId ? refreshed : active));
       })
       .catch(async (error) => {
-        toast(errMsg(error), "red");
-        const refreshed = await api.routePickSet(id, routeId).catch(() => null);
-        if (refreshed) setPickSet((active) => (active?.route_id === routeId ? refreshed : active));
+        toast(
+          error instanceof ApiError && error.status === 409
+            ? "选择再次发生冲突，已同步最新结果，请重试本次选择"
+            : errMsg(error),
+          "red",
+        );
+        finalSet = await api.routePickSet(id, routeId).catch(() => null);
+        if (finalSet) setPickSet((active) => (active?.route_id === routeId ? finalSet : active));
+      })
+      .finally(() => {
+        const remaining = (pendingPickCounts.current.get(candidateKey) ?? 1) - 1;
+        if (remaining > 0) pendingPickCounts.current.set(candidateKey, remaining);
+        else pendingPickCounts.current.delete(candidateKey);
+        setPendingPickKeys(new Set(pendingPickCounts.current.keys()));
+        if (finalSet && !routeHasPendingPicks(pendingPickCounts.current, routeKey)) {
+          setOptimisticPick((active) =>
+            active?.routeId === routeId
+              ? {
+                  routeId,
+                  candidateIds: new Set(finalSet?.items.map((item) => item.candidate_artifact_id) ?? []),
+                }
+              : active,
+          );
+        }
       });
+    pickMutationTails.current.set(routeKey, operation);
+    void operation.then(() => {
+      if (pickMutationTails.current.get(routeKey) === operation) pickMutationTails.current.delete(routeKey);
+    });
   }
 
   async function doExport(format: "docx" | "pdf") {
@@ -407,6 +546,10 @@ export function Workbench({ email }: { email: string }) {
         cur={cur}
         ended={ended}
         pickSet={pickSet}
+        selectedCandidateIds={
+          optimisticPick && optimisticPick.routeId === pickSet?.route_id ? optimisticPick.candidateIds : undefined
+        }
+        pendingCandidateIds={pendingPickCandidateIds}
         onPatch={(c, patch) => void mutateClause(c, "patch", patch)}
         onConfirm={(c) => void mutateClause(c, "confirm")}
         onUnconfirm={(c) => void mutateClause(c, "unconfirm")}
@@ -676,55 +819,113 @@ export function Workbench({ email }: { email: string }) {
             classifications={classifications}
             attachments={attachments}
             ended={ended}
-            onSaveCompany={(body) => {
-              const save = body === company;
-              if (!save) companyDirty.current = true;
+            companyDirty={companyDraftDirty}
+            submissionDirty={submissionDraftDirty}
+            companySaving={companySaving}
+            submissionSaving={submissionSaving}
+            onChangeCompany={(body) => {
+              companyDirty.current = true;
+              setCompanyDraftDirty(true);
               setCompany(body);
-              if (save) {
-                void api
-                  .updateCompanyProfile(id, {
-                    expected_revision: Number(company.revision ?? 0),
-                    legal_name: company.legal_name || "",
-                    unified_social_credit_code: company.unified_social_credit_code || "",
-                    registered_address: company.registered_address || "",
-                    legal_representative: company.legal_representative || "",
-                    contact_name: company.contact_name || "",
-                    contact_phone: company.contact_phone || "",
-                    contact_email: company.contact_email || "",
-                  })
-                  .then(() => {
-                    companyDirty.current = false;
-                    return load();
-                  })
-                  .catch((e) => toast(errMsg(e), "red"));
-              }
             }}
-            onSaveSubmission={(body) => {
-              const save = body === submission;
-              if (!save) submissionDirty.current = true;
+            onChangeSubmission={(body) => {
+              submissionDirty.current = true;
+              setSubmissionDraftDirty(true);
               setSubmission(body);
-              if (save) {
-                if (!submission.submission_date?.trim()) {
-                  toast("请填写投标日期", "red");
-                  return;
-                }
-                void api
-                  .updateSubmissionProfile(id, {
-                    expected_revision: Number(submission.revision ?? 0),
-                    buyer_name: submission.buyer_name || "",
-                    project_code: submission.project_code || "",
-                    authorized_representative: submission.authorized_representative || "",
-                    submission_date: submission.submission_date,
-                    submission_place: submission.submission_place || "",
-                    seal_confirmed: !!submission.seal_confirmed,
-                    signature_confirmed: !!submission.signature_confirmed,
-                  })
-                  .then(() => {
-                    submissionDirty.current = false;
-                    return load();
-                  })
-                  .catch((e) => toast(errMsg(e), "red"));
+            }}
+            onResetCompany={() => {
+              companyDirty.current = false;
+              setCompanyDraftDirty(false);
+              setCompany(companySnapshot);
+            }}
+            onResetSubmission={() => {
+              submissionDirty.current = false;
+              setSubmissionDraftDirty(false);
+              setSubmission(submissionSnapshot);
+            }}
+            onSaveCompany={() => {
+              if (companySaving) return;
+              const projectId = id;
+              const draft = company;
+              setCompanySaving(true);
+              void api
+                .updateCompanyProfile(projectId, {
+                  expected_revision: Number(draft.revision ?? 0),
+                  legal_name: draft.legal_name || "",
+                  unified_social_credit_code: draft.unified_social_credit_code || "",
+                  registered_address: draft.registered_address || "",
+                  legal_representative: draft.legal_representative || "",
+                  contact_name: draft.contact_name || "",
+                  contact_phone: draft.contact_phone || "",
+                  contact_email: draft.contact_email || "",
+                })
+                .then((saved) => {
+                  if (activeProjectId.current !== projectId) return;
+                  const snapshot = { ...draft, revision: saved.revision };
+                  companyDirty.current = false;
+                  setCompanyDraftDirty(false);
+                  setCompanySnapshot(snapshot);
+                  setCompany(snapshot);
+                  toast("公司资料已保存");
+                  return load();
+                })
+                .catch(async (error) => {
+                  if (activeProjectId.current !== projectId) return;
+                  if (error instanceof ApiError && error.status === 409) {
+                    const latest = await api.companyProfile(projectId).catch(() => null);
+                    if (latest) setCompanySnapshot(latest);
+                    toast("公司资料已在其他位置更新。草稿已保留，可重置后重新填写。", "red");
+                    return;
+                  }
+                  toast(errMsg(error), "red");
+                })
+                .finally(() => {
+                  if (activeProjectId.current === projectId) setCompanySaving(false);
+                });
+            }}
+            onSaveSubmission={() => {
+              if (submissionSaving) return;
+              if (!submission.submission_date?.trim()) {
+                toast("请填写投标日期", "red");
+                return;
               }
+              const projectId = id;
+              const draft = submission;
+              setSubmissionSaving(true);
+              void api
+                .updateSubmissionProfile(projectId, {
+                  expected_revision: Number(draft.revision ?? 0),
+                  buyer_name: draft.buyer_name || "",
+                  project_code: draft.project_code || "",
+                  authorized_representative: draft.authorized_representative || "",
+                  submission_date: draft.submission_date,
+                  submission_place: draft.submission_place || "",
+                  seal_confirmed: !!draft.seal_confirmed,
+                  signature_confirmed: !!draft.signature_confirmed,
+                })
+                .then((saved) => {
+                  if (activeProjectId.current !== projectId) return;
+                  const snapshot = { ...draft, revision: saved.revision };
+                  submissionDirty.current = false;
+                  setSubmissionDraftDirty(false);
+                  setSubmissionSnapshot(snapshot);
+                  setSubmission(snapshot);
+                  toast("投标资料已保存");
+                  return load();
+                })
+                .catch(async (error) => {
+                  if (activeProjectId.current !== projectId) return;
+                  if (error instanceof ApiError && error.status === 409) {
+                    const latest = await api.submissionProfile(projectId).catch(() => null);
+                    if (latest) setSubmissionSnapshot(latest);
+                    toast("投标资料已在其他位置更新。草稿已保留，可重置后重新填写。", "red");
+                    return;
+                  }
+                  toast(errMsg(error), "red");
+                })
+                .finally(() => {
+                  if (activeProjectId.current === projectId) setSubmissionSaving(false);
+                });
             }}
             onOverride={(cid, kind, reason) => {
               void api.overrideClassification(id, cid, { effective_kind: kind, reason }).then(() => load()).catch((e) => toast(errMsg(e), "red"));

@@ -23,6 +23,96 @@ AS $$
     END
 $$;
 
+-- Every durable Bid intent freezes the operation snapshots used by its first
+-- delivery. Recovery reads these persisted identities; it never invents a
+-- replacement snapshot from a target UUID.
+CREATE TABLE bid_operation_snapshot_artifacts (
+    id uuid PRIMARY KEY,
+    snapshot_kind text NOT NULL CHECK (snapshot_kind IN (
+        'conversion','target_config','render','matching_config',
+        'feature','score_policy','verifier_policy'
+    )),
+    version integer NOT NULL CHECK (version > 0),
+    schema_version smallint NOT NULL CHECK (schema_version = 1),
+    canonical_payload bytea NOT NULL,
+    content_sha256 kb_sha256 NOT NULL UNIQUE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (snapshot_kind,version),
+    UNIQUE (snapshot_kind,id),
+    CHECK (octet_length(canonical_payload) BETWEEN 1 AND 16384),
+    CHECK (content_sha256=encode(public.digest(canonical_payload,'sha256'),'hex'))
+);
+CREATE TRIGGER bid_operation_snapshot_artifacts_immutable
+BEFORE UPDATE OR DELETE ON bid_operation_snapshot_artifacts
+FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
+CREATE TRIGGER bid_operation_snapshot_artifacts_no_truncate
+BEFORE TRUNCATE ON bid_operation_snapshot_artifacts
+FOR EACH STATEMENT EXECUTE FUNCTION kb_reject_append_only();
+
+CREATE TABLE bid_operation_snapshot_current (
+    snapshot_kind text PRIMARY KEY,
+    snapshot_id uuid NOT NULL,
+    version integer NOT NULL CHECK (version > 0),
+    promotion_generation bigint NOT NULL CHECK (promotion_generation >= 0),
+    FOREIGN KEY (snapshot_kind,snapshot_id)
+        REFERENCES bid_operation_snapshot_artifacts(snapshot_kind,id) ON DELETE RESTRICT,
+    FOREIGN KEY (snapshot_kind,version)
+        REFERENCES bid_operation_snapshot_artifacts(snapshot_kind,version) ON DELETE RESTRICT
+);
+
+INSERT INTO bid_operation_snapshot_artifacts(
+    id,snapshot_kind,version,schema_version,canonical_payload,content_sha256,created_at
+)
+SELECT seed.id,seed.kind,1,1,seed.payload,
+       encode(public.digest(seed.payload,'sha256'),'hex'),'1970-01-01 UTC'
+  FROM (VALUES
+    ('b1d00000-0000-5000-8000-000000000001'::uuid,'conversion',
+      convert_to('{"converter_contract_version":"bid-converter-v1","schema_version":1}','UTF8')),
+    ('b1d00000-0000-5000-8000-000000000002'::uuid,'target_config',
+      convert_to('{"output_schema_version":1,"policy_version":"bid-extraction-policy-v1","prompt_version":"bid-extraction-prompt-v1","router_contract_version":"bid-router-v1","schema_version":1}','UTF8')),
+    ('b1d00000-0000-5000-8000-000000000004'::uuid,'render',
+      convert_to('{"claim_lease_ms":1800000,"max_attempts":4,"schema_version":1}','UTF8')),
+    ('b1d00000-0000-5000-8000-000000000005'::uuid,'matching_config',
+      convert_to('{"claim_lease_ms":300000,"lease_policy_generation":1,"schema_version":1}','UTF8')),
+    ('b1d00000-0000-5000-8000-000000000006'::uuid,'feature',
+      convert_to('{"bid_conversion":true,"bid_extraction":true,"bid_matching":true,"bid_submission":true,"schema_version":1}','UTF8')),
+    ('b1d00000-0000-5000-8000-000000000007'::uuid,'score_policy',
+      convert_to('{"policy":"bid-score-v1","schema_version":1}','UTF8')),
+    ('b1d00000-0000-5000-8000-000000000008'::uuid,'verifier_policy',
+      convert_to('{"policy":"bid-verifier-v1","schema_version":1}','UTF8'))
+  ) AS seed(id,kind,payload);
+INSERT INTO bid_operation_snapshot_current(snapshot_kind,snapshot_id,version,promotion_generation)
+SELECT snapshot_kind,id,version,0 FROM bid_operation_snapshot_artifacts;
+
+CREATE FUNCTION kb_bid_require_operation_snapshot_kind()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+DECLARE snapshot_id uuid;
+BEGIN
+    snapshot_id := (to_jsonb(NEW)->>TG_ARGV[0])::uuid;
+    PERFORM 1 FROM bid_operation_snapshot_artifacts
+     WHERE id=snapshot_id AND snapshot_kind=TG_ARGV[1];
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'BID_OPERATION_SNAPSHOT_KIND_MISMATCH' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION kb_bid_current_operation_snapshot(p_snapshot_kind text)
+RETURNS uuid
+LANGUAGE sql
+STABLE
+STRICT
+SET search_path = pg_catalog, public
+AS $$
+    SELECT current_value.snapshot_id
+      FROM bid_operation_snapshot_current current_value
+     WHERE current_value.snapshot_kind=p_snapshot_kind
+$$;
+
 CREATE TABLE bid_projects (
     id uuid PRIMARY KEY,
     title text NOT NULL CHECK (octet_length(btrim(title)) BETWEEN 1 AND 256),
@@ -64,6 +154,10 @@ CREATE TABLE bid_documents (
     original_object_ref kb_object_ref NOT NULL,
     original_sha256 kb_sha256 NOT NULL,
     conversion_generation integer NOT NULL DEFAULT 1 CHECK (conversion_generation > 0),
+    conversion_snapshot_id uuid NOT NULL DEFAULT 'b1d00000-0000-5000-8000-000000000001'
+        REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    feature_snapshot_id uuid NOT NULL DEFAULT 'b1d00000-0000-5000-8000-000000000006'
+        REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
     parse_status text NOT NULL CHECK (parse_status IN ('pending', 'processing', 'completed', 'failed')),
     current_converted_source_artifact_id uuid,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -87,6 +181,12 @@ CREATE TABLE bid_document_conversion_attempts (
     PRIMARY KEY (document_id, conversion_generation, attempt),
     UNIQUE (document_id, claim_token)
 );
+CREATE TRIGGER bid_documents_conversion_snapshot_kind
+BEFORE INSERT OR UPDATE OF conversion_snapshot_id ON bid_documents
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('conversion_snapshot_id','conversion');
+CREATE TRIGGER bid_documents_feature_snapshot_kind
+BEFORE INSERT OR UPDATE OF feature_snapshot_id ON bid_documents
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('feature_snapshot_id','feature');
 
 CREATE TABLE bid_converted_source_artifacts (
     id uuid PRIMARY KEY,
@@ -246,6 +346,10 @@ CREATE TABLE bid_extraction_targets (
     source_artifact_id uuid NOT NULL,
     conversion_generation integer NOT NULL CHECK (conversion_generation > 0),
     extraction_generation integer NOT NULL CHECK (extraction_generation > 0),
+    target_config_snapshot_id uuid NOT NULL DEFAULT 'b1d00000-0000-5000-8000-000000000002'
+        REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    feature_snapshot_id uuid NOT NULL DEFAULT 'b1d00000-0000-5000-8000-000000000006'
+        REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
     router_contract_version text NOT NULL,
     policy_version text NOT NULL,
     prompt_version text NOT NULL,
@@ -274,6 +378,12 @@ CREATE TABLE bid_extraction_attempts (
     PRIMARY KEY (target_id, attempt),
     UNIQUE (target_id, claim_token)
 );
+CREATE TRIGGER bid_extraction_targets_config_snapshot_kind
+BEFORE INSERT OR UPDATE OF target_config_snapshot_id ON bid_extraction_targets
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('target_config_snapshot_id','target_config');
+CREATE TRIGGER bid_extraction_targets_feature_snapshot_kind
+BEFORE INSERT OR UPDATE OF feature_snapshot_id ON bid_extraction_targets
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('feature_snapshot_id','feature');
 
 CREATE TABLE bid_extract_segment_candidates (
     id uuid PRIMARY KEY,
@@ -488,11 +598,53 @@ FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
 
 -- MatchingPublication: frozen manifest, routes, scope, staging, immutable report,
 -- and distinct route/project pick-set artifacts.
-CREATE TABLE bid_matching_manifests (
+CREATE TABLE bid_matching_schedule_intents (
     id uuid PRIMARY KEY,
     project_id uuid NOT NULL REFERENCES bid_projects(id) ON DELETE RESTRICT,
     generation bigint NOT NULL CHECK (generation > 0),
+    mutation_watermark bigint NOT NULL CHECK (mutation_watermark > 0),
+    matching_config_snapshot_id uuid NOT NULL REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    feature_snapshot_id uuid NOT NULL REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    score_policy_snapshot_id uuid NOT NULL REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    verifier_policy_snapshot_id uuid NOT NULL REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (project_id,generation),
+    UNIQUE (project_id,mutation_watermark),
+    UNIQUE (project_id,id)
+);
+CREATE TRIGGER bid_matching_schedule_intents_immutable
+BEFORE UPDATE OR DELETE ON bid_matching_schedule_intents
+FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
+CREATE TRIGGER bid_matching_schedule_intents_no_truncate
+BEFORE TRUNCATE ON bid_matching_schedule_intents
+FOR EACH STATEMENT EXECUTE FUNCTION kb_reject_append_only();
+CREATE TRIGGER bid_matching_schedule_intents_config_snapshot_kind
+BEFORE INSERT ON bid_matching_schedule_intents
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('matching_config_snapshot_id','matching_config');
+CREATE TRIGGER bid_matching_schedule_intents_feature_snapshot_kind
+BEFORE INSERT ON bid_matching_schedule_intents
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('feature_snapshot_id','feature');
+CREATE TRIGGER bid_matching_schedule_intents_score_snapshot_kind
+BEFORE INSERT ON bid_matching_schedule_intents
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('score_policy_snapshot_id','score_policy');
+CREATE TRIGGER bid_matching_schedule_intents_verifier_snapshot_kind
+BEFORE INSERT ON bid_matching_schedule_intents
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('verifier_policy_snapshot_id','verifier_policy');
+
+CREATE TABLE bid_matching_manifests (
+    id uuid PRIMARY KEY,
+    project_id uuid NOT NULL REFERENCES bid_projects(id) ON DELETE RESTRICT,
+    schedule_intent_id uuid NOT NULL UNIQUE REFERENCES bid_matching_schedule_intents(id) ON DELETE RESTRICT,
+    generation bigint NOT NULL CHECK (generation > 0),
     mutation_watermark bigint NOT NULL CHECK (mutation_watermark >= 0),
+    matching_config_snapshot_id uuid NOT NULL DEFAULT 'b1d00000-0000-5000-8000-000000000005'
+        REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    feature_snapshot_id uuid NOT NULL DEFAULT 'b1d00000-0000-5000-8000-000000000006'
+        REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    score_policy_snapshot_id uuid NOT NULL DEFAULT 'b1d00000-0000-5000-8000-000000000007'
+        REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    verifier_policy_snapshot_id uuid NOT NULL DEFAULT 'b1d00000-0000-5000-8000-000000000008'
+        REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
     requirement_set_sha256 kb_sha256 NOT NULL,
     eligible_scope_sha256 kb_sha256 NOT NULL,
     knowledge_scope_attestation_id uuid NOT NULL,
@@ -507,6 +659,18 @@ CREATE TABLE bid_matching_manifests (
 CREATE TRIGGER bid_matching_manifests_immutable
 BEFORE UPDATE OR DELETE ON bid_matching_manifests
 FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
+CREATE TRIGGER bid_matching_manifests_config_snapshot_kind
+BEFORE INSERT ON bid_matching_manifests
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('matching_config_snapshot_id','matching_config');
+CREATE TRIGGER bid_matching_manifests_feature_snapshot_kind
+BEFORE INSERT ON bid_matching_manifests
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('feature_snapshot_id','feature');
+CREATE TRIGGER bid_matching_manifests_score_snapshot_kind
+BEFORE INSERT ON bid_matching_manifests
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('score_policy_snapshot_id','score_policy');
+CREATE TRIGGER bid_matching_manifests_verifier_snapshot_kind
+BEFORE INSERT ON bid_matching_manifests
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('verifier_policy_snapshot_id','verifier_policy');
 
 CREATE TABLE bid_matching_routes (
     id uuid PRIMARY KEY,
@@ -591,6 +755,14 @@ CREATE TABLE bid_matching_jobs (
     project_id uuid NOT NULL REFERENCES bid_projects(id) ON DELETE RESTRICT,
     manifest_id uuid NOT NULL REFERENCES bid_matching_manifests(id) ON DELETE RESTRICT,
     route_id uuid NOT NULL UNIQUE REFERENCES bid_matching_routes(id) ON DELETE RESTRICT,
+    matching_config_snapshot_id uuid NOT NULL DEFAULT 'b1d00000-0000-5000-8000-000000000005'
+        REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    feature_snapshot_id uuid NOT NULL DEFAULT 'b1d00000-0000-5000-8000-000000000006'
+        REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    score_policy_snapshot_id uuid NOT NULL DEFAULT 'b1d00000-0000-5000-8000-000000000007'
+        REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    verifier_policy_snapshot_id uuid NOT NULL DEFAULT 'b1d00000-0000-5000-8000-000000000008'
+        REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
     status text NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'failed', 'superseded')),
     max_attempts integer NOT NULL CHECK (max_attempts BETWEEN 1 AND 32),
     claim_lease_ms integer NOT NULL CHECK (claim_lease_ms BETWEEN 1000 AND 3600000),
@@ -625,6 +797,18 @@ CREATE TABLE bid_matching_job_claims (
     PRIMARY KEY (job_id, attempt),
     UNIQUE (job_id, claim_token)
 );
+CREATE TRIGGER bid_matching_jobs_config_snapshot_kind
+BEFORE INSERT OR UPDATE OF matching_config_snapshot_id ON bid_matching_jobs
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('matching_config_snapshot_id','matching_config');
+CREATE TRIGGER bid_matching_jobs_feature_snapshot_kind
+BEFORE INSERT OR UPDATE OF feature_snapshot_id ON bid_matching_jobs
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('feature_snapshot_id','feature');
+CREATE TRIGGER bid_matching_jobs_score_snapshot_kind
+BEFORE INSERT OR UPDATE OF score_policy_snapshot_id ON bid_matching_jobs
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('score_policy_snapshot_id','score_policy');
+CREATE TRIGGER bid_matching_jobs_verifier_snapshot_kind
+BEFORE INSERT OR UPDATE OF verifier_policy_snapshot_id ON bid_matching_jobs
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('verifier_policy_snapshot_id','verifier_policy');
 
 CREATE TABLE bid_matching_staging_sets (
     id uuid PRIMARY KEY,
@@ -972,6 +1156,9 @@ BEGIN
     jsonb_build_object(
       'schema_version',1,
       'workspace_kinds',to_jsonb(workspace_kinds),
+      'version_selections',jsonb_build_object(
+        'product_line','[]'::jsonb,
+        'company','[]'::jsonb),
       'products',products_payload,
       'frozen_hits',hits_payload));
 
@@ -2175,6 +2362,10 @@ CREATE TABLE bid_attachment_preparation_jobs (
     id uuid PRIMARY KEY,
     project_id uuid NOT NULL REFERENCES bid_projects(id) ON DELETE RESTRICT,
     attachment_id uuid NOT NULL UNIQUE,
+    conversion_snapshot_id uuid NOT NULL DEFAULT 'b1d00000-0000-5000-8000-000000000001'
+        REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    feature_snapshot_id uuid NOT NULL DEFAULT 'b1d00000-0000-5000-8000-000000000006'
+        REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
     status text NOT NULL CHECK (status IN ('pending','running','completed','failed','cancelled')),
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 4),
     max_attempts integer NOT NULL DEFAULT 4 CHECK (max_attempts=4),
@@ -2204,6 +2395,12 @@ CREATE INDEX bid_attachment_preparation_jobs_pending_idx
     ON bid_attachment_preparation_jobs(created_at,id) WHERE status='pending';
 CREATE INDEX bid_attachment_preparation_jobs_running_idx
     ON bid_attachment_preparation_jobs(heartbeat_at,id) WHERE status='running';
+CREATE TRIGGER bid_attachment_preparation_jobs_conversion_snapshot_kind
+BEFORE INSERT OR UPDATE OF conversion_snapshot_id ON bid_attachment_preparation_jobs
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('conversion_snapshot_id','conversion');
+CREATE TRIGGER bid_attachment_preparation_jobs_feature_snapshot_kind
+BEFORE INSERT OR UPDATE OF feature_snapshot_id ON bid_attachment_preparation_jobs
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('feature_snapshot_id','feature');
 CREATE TABLE bid_procedural_decision_artifacts (
     id uuid PRIMARY KEY,
     project_id uuid NOT NULL REFERENCES bid_projects(id) ON DELETE RESTRICT,
@@ -2435,10 +2632,40 @@ CREATE TABLE bid_current_submission_outputs (
     FOREIGN KEY (project_id, output_artifact_id)
         REFERENCES bid_submission_output_artifacts(project_id, id) ON DELETE RESTRICT
 );
+CREATE TABLE bid_submission_render_job_snapshot_artifacts (
+    id uuid PRIMARY KEY,
+    project_id uuid NOT NULL REFERENCES bid_projects(id) ON DELETE RESTRICT,
+    manifest_id uuid NOT NULL UNIQUE,
+    expected_manifest_sha256 kb_sha256 NOT NULL,
+    render_config_snapshot_id uuid NOT NULL REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    feature_snapshot_id uuid NOT NULL REFERENCES bid_operation_snapshot_artifacts(id) ON DELETE RESTRICT,
+    canonical_payload bytea NOT NULL,
+    content_sha256 kb_sha256 NOT NULL UNIQUE,
+    created_at timestamptz NOT NULL,
+    UNIQUE (project_id,id),
+    FOREIGN KEY (project_id,manifest_id)
+        REFERENCES bid_submission_manifests(project_id,id) ON DELETE RESTRICT,
+    CHECK (content_sha256=encode(public.digest(canonical_payload,'sha256'),'hex'))
+);
+CREATE TRIGGER bid_submission_render_job_snapshots_immutable
+BEFORE UPDATE OR DELETE ON bid_submission_render_job_snapshot_artifacts
+FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
+CREATE TRIGGER bid_submission_render_job_snapshots_no_truncate
+BEFORE TRUNCATE ON bid_submission_render_job_snapshot_artifacts
+FOR EACH STATEMENT EXECUTE FUNCTION kb_reject_append_only();
+CREATE TRIGGER bid_submission_render_job_snapshots_render_kind
+BEFORE INSERT ON bid_submission_render_job_snapshot_artifacts
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('render_config_snapshot_id','render');
+CREATE TRIGGER bid_submission_render_job_snapshots_feature_kind
+BEFORE INSERT ON bid_submission_render_job_snapshot_artifacts
+FOR EACH ROW EXECUTE FUNCTION kb_bid_require_operation_snapshot_kind('feature_snapshot_id','feature');
+
 CREATE TABLE bid_submission_render_jobs (
     id uuid PRIMARY KEY,
     project_id uuid NOT NULL REFERENCES bid_projects(id) ON DELETE RESTRICT,
     manifest_id uuid NOT NULL UNIQUE,
+    submission_render_job_snapshot_id uuid NOT NULL UNIQUE
+        REFERENCES bid_submission_render_job_snapshot_artifacts(id) ON DELETE RESTRICT,
     expected_manifest_sha256 kb_sha256 NOT NULL,
     requested_by kb_actor_identity NOT NULL,
     idempotency_key text NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 128),
@@ -2727,11 +2954,22 @@ RETURNS void
 LANGUAGE plpgsql
 SET search_path = pg_catalog, public
 AS $$
-DECLARE set_kind text;
+DECLARE set_kind text; next_watermark bigint; next_generation bigint;
 BEGIN
     IF p_matching THEN
       UPDATE bid_projects SET matching_mutation_watermark=matching_mutation_watermark+1,
-        updated_at=clock_timestamp() WHERE id=p_project_id;
+        updated_at=clock_timestamp() WHERE id=p_project_id
+        RETURNING matching_mutation_watermark INTO next_watermark;
+      SELECT COALESCE(max(intent.generation),0)+1 INTO next_generation
+        FROM bid_matching_schedule_intents intent WHERE intent.project_id=p_project_id;
+      INSERT INTO bid_matching_schedule_intents(
+        id,project_id,generation,mutation_watermark,matching_config_snapshot_id,
+        feature_snapshot_id,score_policy_snapshot_id,verifier_policy_snapshot_id
+      ) VALUES(
+        gen_random_uuid(),p_project_id,next_generation,next_watermark,
+        kb_bid_current_operation_snapshot('matching_config'),kb_bid_current_operation_snapshot('feature'),
+        kb_bid_current_operation_snapshot('score_policy'),kb_bid_current_operation_snapshot('verifier_policy')
+      );
       DELETE FROM bid_current_matching_reports WHERE project_id=p_project_id;
       DELETE FROM bid_current_route_pick_sets WHERE project_id=p_project_id;
       PERFORM kb_bid_rebuild_project_pick_set(p_project_id,'system:matching-invalidation');
@@ -2828,8 +3066,9 @@ BEGIN
     PERFORM kb_object_upload_commit(p_staging_id,p_object_ref,p_original_sha256,p_media_type,
       p_byte_length,'bid_document',p_id,'original',p_actor);
     INSERT INTO bid_documents(id,project_id,file_name,media_type,byte_length,original_object_ref,
-      original_sha256,parse_status) VALUES(p_id,p_project_id,p_file_name,p_media_type,p_byte_length,
-      p_object_ref,p_original_sha256,'pending');
+      original_sha256,conversion_snapshot_id,feature_snapshot_id,parse_status)
+    VALUES(p_id,p_project_id,p_file_name,p_media_type,p_byte_length,p_object_ref,p_original_sha256,
+      kb_bid_current_operation_snapshot('conversion'),kb_bid_current_operation_snapshot('feature'),'pending');
     response:=jsonb_build_object('id',p_id,'project_id',p_project_id,'conversion_generation',1,'parse_status','pending');
     INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
       entity_kind,entity_locator,after_revision,after_sha256)
@@ -2961,11 +3200,12 @@ BEGIN
     SELECT COALESCE(max(extraction_generation),0)+1 INTO extraction_generation_value
       FROM bid_extraction_targets WHERE project_id=project_key AND document_id=p_document_id;
     INSERT INTO bid_extraction_targets(id,project_id,document_id,source_artifact_id,conversion_generation,
-      extraction_generation,router_contract_version,policy_version,prompt_version,output_schema_version,
-      expected_section_count,state)
+      extraction_generation,target_config_snapshot_id,feature_snapshot_id,router_contract_version,
+      policy_version,prompt_version,output_schema_version,expected_section_count,state)
     VALUES(p_extraction_target_id,project_key,p_document_id,p_source_artifact_id,
-      document_value.conversion_generation,extraction_generation_value,router_value.version,
-      p_policy_version,p_prompt_version,1,p_expected_section_count,'pending');
+      document_value.conversion_generation,extraction_generation_value,
+      kb_bid_current_operation_snapshot('target_config'),kb_bid_current_operation_snapshot('feature'),
+      router_value.version,p_policy_version,p_prompt_version,1,p_expected_section_count,'pending');
     response:=jsonb_build_object('source_artifact_id',p_source_artifact_id,
       'extraction_target_id',p_extraction_target_id,'extraction_generation',extraction_generation_value,
       'router_contract_version',router_value.version);
@@ -3021,11 +3261,12 @@ BEGIN
     SELECT COALESCE(max(extraction_generation),0)+1 INTO generation_value
       FROM bid_extraction_targets WHERE project_id=document_value.project_id AND document_id=p_document_id;
     INSERT INTO bid_extraction_targets(id,project_id,document_id,source_artifact_id,conversion_generation,
-      extraction_generation,router_contract_version,policy_version,prompt_version,output_schema_version,
-      expected_section_count,state)
+      extraction_generation,target_config_snapshot_id,feature_snapshot_id,router_contract_version,
+      policy_version,prompt_version,output_schema_version,expected_section_count,state)
     VALUES(p_target_id,document_value.project_id,p_document_id,document_value.current_converted_source_artifact_id,
-      document_value.conversion_generation,generation_value,router_value.version,p_policy_version,p_prompt_version,
-      1,p_expected_section_count,'pending');
+      document_value.conversion_generation,generation_value,
+      kb_bid_current_operation_snapshot('target_config'),kb_bid_current_operation_snapshot('feature'),
+      router_value.version,p_policy_version,p_prompt_version,1,p_expected_section_count,'pending');
     response:=jsonb_build_object('target_id',p_target_id,'project_id',document_value.project_id,
       'document_id',p_document_id,'extraction_generation',generation_value,
       'source_artifact_id',document_value.current_converted_source_artifact_id,
@@ -5499,15 +5740,25 @@ BEGIN
         routed->>'kind', 'current');
     END IF;
   END LOOP;
-  UPDATE bid_procedural_classification_artifacts SET lifecycle_status='superseded',
-    terminal_reason='segment_removed', terminal_at=now_ts, terminal_actor=p_actor
-   WHERE project_id=p_project_id AND lifecycle_status='current'
-     AND segment_id IN (SELECT id FROM bid_procedural_segment_artifacts WHERE clause_id=p_clause.id AND NOT (stable_key = ANY(keep)));
-  UPDATE bid_procedural_decision_artifacts SET lifecycle_status='superseded',
-    terminal_reason='segment_removed',terminal_at=now_ts,terminal_actor=p_actor
-   WHERE lifecycle_status='current' AND classification_id IN (
-     SELECT id FROM bid_procedural_classification_artifacts WHERE lifecycle_status='superseded' AND terminal_reason='segment_removed'
-       AND segment_id IN (SELECT id FROM bid_procedural_segment_artifacts WHERE clause_id=p_clause.id));
+  UPDATE bid_procedural_classification_artifacts classification SET lifecycle_status='superseded',
+    terminal_reason=CASE
+      WHEN p_clause.provenance='extracted' THEN 'segment_removed'
+      WHEN segment.segmentation_version<>'procedural-segment-v1' THEN 'resegmented'
+      ELSE 'text_changed'
+    END,
+    terminal_at=now_ts, terminal_actor=p_actor
+    FROM bid_procedural_segment_artifacts segment
+   WHERE classification.project_id=p_project_id AND classification.lifecycle_status='current'
+     AND classification.segment_id=segment.id AND segment.clause_id=p_clause.id
+     AND NOT (segment.stable_key = ANY(keep));
+  UPDATE bid_procedural_decision_artifacts decision SET lifecycle_status='superseded',
+    terminal_reason=classification.terminal_reason,terminal_at=now_ts,terminal_actor=p_actor
+    FROM bid_procedural_classification_artifacts classification,
+         bid_procedural_segment_artifacts segment
+   WHERE decision.lifecycle_status='current' AND decision.classification_id=classification.id
+     AND classification.lifecycle_status='superseded' AND classification.terminal_at=now_ts
+     AND classification.segment_id=segment.id AND segment.clause_id=p_clause.id
+     AND NOT (segment.stable_key = ANY(keep));
 END
 $$;
 
@@ -5733,8 +5984,8 @@ BEGIN
       RAISE EXCEPTION 'PROCEDURAL_RESOLUTION_INVALID' USING ERRCODE='22023';
     END IF;
   ELSIF p_resolution='satisfied_by_attachment' THEN
-    SELECT * INTO STRICT attach FROM bid_procedural_attachments WHERE id=p_attachment_id FOR UPDATE;
-    IF attach.project_id<>p_project_id OR attach.validation_status<>'valid' OR attach.status<>'confirmed'
+    SELECT * INTO attach FROM bid_procedural_attachments WHERE id=p_attachment_id FOR UPDATE;
+    IF NOT FOUND OR attach.project_id<>p_project_id OR attach.validation_status<>'valid' OR attach.status<>'confirmed'
        OR attach.kind<>class_row.effective_requirement_kind THEN
       RAISE EXCEPTION 'ATTACHMENT_NOT_VALID' USING ERRCODE='22023';
     END IF;
@@ -5808,8 +6059,12 @@ BEGIN
   IF p_media_type='application/pdf' THEN
     preparation_job_id := gen_random_uuid();
     preparation_status := 'pending';
-    INSERT INTO bid_attachment_preparation_jobs(id,project_id,attachment_id,status)
-    VALUES(preparation_job_id,p_project_id,p_id,'pending');
+    INSERT INTO bid_attachment_preparation_jobs(
+      id,project_id,attachment_id,conversion_snapshot_id,feature_snapshot_id,status
+    ) VALUES(
+      preparation_job_id,p_project_id,p_id,kb_bid_current_operation_snapshot('conversion'),
+      kb_bid_current_operation_snapshot('feature'),'pending'
+    );
   ELSE
     preparation_status := 'not_required';
   END IF;
@@ -7401,6 +7656,7 @@ SET search_path = pg_catalog, public
 AS $$
 DECLARE replay bytea; manifest bid_submission_manifests%ROWTYPE;
  job bid_submission_render_jobs%ROWTYPE; response jsonb; now_ts timestamptz := clock_timestamp();
+ snapshot_id uuid; render_config_id uuid; feature_id uuid; snapshot_payload bytea; snapshot_sha256 kb_sha256;
 BEGIN
   PERFORM kb_bid_require_human_actor(p_actor);
   PERFORM 1 FROM application_maintenance_gate WHERE singleton_key AND mode='open' FOR SHARE;
@@ -7408,26 +7664,40 @@ BEGIN
   replay := kb_bid_idempotency_begin(p_actor,'bid.submission.schedule_render',p_idempotency_key,p_request_bytes,p_request_sha256);
   IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
   SELECT * INTO manifest FROM bid_submission_manifests
-   WHERE project_id=p_project_id AND id=p_manifest_id FOR SHARE;
+   WHERE project_id=p_project_id AND id=p_manifest_id FOR UPDATE;
   IF manifest.id IS NULL THEN RAISE EXCEPTION 'SUBMISSION_MANIFEST_MISSING' USING ERRCODE='P0002'; END IF;
   IF manifest.format='pdf' THEN PERFORM kb_bid_require_user_actor(p_actor); END IF;
   IF manifest.content_sha256<>p_expected_manifest_sha256 THEN
     RAISE EXCEPTION 'MANIFEST_SHA256_MISMATCH' USING ERRCODE='40001';
   END IF;
-  INSERT INTO bid_submission_render_jobs(
-    id,project_id,manifest_id,expected_manifest_sha256,requested_by,idempotency_key,
-    status,created_at
-  ) VALUES(
-    p_id,p_project_id,p_manifest_id,p_expected_manifest_sha256,p_actor,p_idempotency_key,
-    'pending',now_ts
-  )
-  ON CONFLICT (manifest_id) DO NOTHING;
-  SELECT * INTO STRICT job FROM bid_submission_render_jobs WHERE manifest_id=p_manifest_id FOR UPDATE;
+  SELECT * INTO job FROM bid_submission_render_jobs WHERE manifest_id=p_manifest_id FOR UPDATE;
+  IF job.id IS NULL THEN
+    snapshot_id:=gen_random_uuid();
+    render_config_id:=kb_bid_current_operation_snapshot('render');
+    feature_id:=kb_bid_current_operation_snapshot('feature');
+    snapshot_payload:=convert_to(jsonb_build_object(
+      'schema_version',1,'snapshot_id',snapshot_id,'project_id',p_project_id,
+      'manifest_id',p_manifest_id,'expected_manifest_sha256',p_expected_manifest_sha256,
+      'render_config_snapshot_id',render_config_id,'feature_snapshot_id',feature_id)::text,'UTF8');
+    snapshot_sha256:=encode(public.digest(snapshot_payload,'sha256'),'hex');
+    INSERT INTO bid_submission_render_job_snapshot_artifacts(
+      id,project_id,manifest_id,expected_manifest_sha256,render_config_snapshot_id,
+      feature_snapshot_id,canonical_payload,content_sha256,created_at
+    ) VALUES(snapshot_id,p_project_id,p_manifest_id,p_expected_manifest_sha256,render_config_id,
+      feature_id,snapshot_payload,snapshot_sha256,now_ts);
+    INSERT INTO bid_submission_render_jobs(
+      id,project_id,manifest_id,submission_render_job_snapshot_id,
+      expected_manifest_sha256,requested_by,idempotency_key,status,created_at
+    ) VALUES(p_id,p_project_id,p_manifest_id,snapshot_id,p_expected_manifest_sha256,p_actor,
+      p_idempotency_key,'pending',now_ts);
+    SELECT * INTO STRICT job FROM bid_submission_render_jobs WHERE id=p_id FOR UPDATE;
+  END IF;
   IF job.project_id<>p_project_id OR job.expected_manifest_sha256<>p_expected_manifest_sha256 THEN
     RAISE EXCEPTION 'SUBMISSION_RENDER_IDENTITY_MISMATCH' USING ERRCODE='40001';
   END IF;
   response := jsonb_build_object(
     'render_job_id',job.id,'manifest_id',job.manifest_id,'status',job.status,
+    'submission_render_job_snapshot_id',job.submission_render_job_snapshot_id,
     'attempt_count',job.attempt_count,'created_at',kb_bid_utc_json_time(job.created_at)
   );
   INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
@@ -7720,6 +7990,758 @@ AS $$
       (SELECT max(m.mutation_watermark) FROM bid_matching_manifests m WHERE m.project_id=p.id), -1)
 $$;
 
+CREATE FUNCTION kb_bid_live_recovery_payload(p_claim system_live_recovery_claims)
+RETURNS jsonb
+LANGUAGE sql
+STABLE
+STRICT
+SET search_path = pg_catalog, public
+AS $$
+  SELECT jsonb_build_object(
+    'recovery_kind',p_claim.recovery_kind,
+    'target_kind',p_claim.target_kind,
+    'durable_id',p_claim.durable_id,
+    'generation',p_claim.generation,
+    'observed_watermark',p_claim.observed_watermark,
+    'observed_stage',p_claim.observed_stage,
+    'observed_heartbeat_at',p_claim.observed_heartbeat_at,
+    'observed_owner_token',p_claim.observed_owner_token,
+    'observed_attempt',p_claim.observed_attempt,
+    'recovery_epoch',p_claim.recovery_epoch,
+    'recovery_policy_snapshot_id',p_claim.policy_snapshot_id,
+    'feature_snapshot_id',p_claim.feature_snapshot_id,
+    'original_snapshots',p_claim.original_snapshots)
+$$;
+
+CREATE FUNCTION kb_bid_live_recovery_discover(p_limit integer)
+RETURNS SETOF jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  gate_value application_maintenance_gate%ROWTYPE;
+  config_value live_recovery_configuration%ROWTYPE;
+  policy_value live_recovery_policy_snapshots%ROWTYPE;
+  feature_value live_recovery_feature_snapshots%ROWTYPE;
+  claim_value system_live_recovery_claims%ROWTYPE;
+  candidate record;
+  effective_limit integer;
+  returned_count integer := 0;
+  active_global integer;
+  active_kind integer;
+  kind_limit integer;
+BEGIN
+  IF p_limit < 1 OR p_limit > 128 THEN
+    RAISE EXCEPTION 'LIVE_RECOVERY_LIMIT_INVALID' USING ERRCODE='22023';
+  END IF;
+  SELECT * INTO STRICT gate_value FROM application_maintenance_gate
+   WHERE singleton_key FOR UPDATE;
+  SELECT * INTO STRICT config_value FROM live_recovery_configuration
+   WHERE singleton_key FOR SHARE;
+  SELECT * INTO STRICT policy_value FROM live_recovery_policy_snapshots
+   WHERE id=config_value.policy_snapshot_id FOR SHARE;
+  SELECT * INTO STRICT feature_value FROM live_recovery_feature_snapshots
+   WHERE id=config_value.feature_snapshot_id FOR SHARE;
+  IF gate_value.mode<>'open' OR NOT feature_value.live_recovery_enabled THEN RETURN; END IF;
+
+  effective_limit := LEAST(p_limit,policy_value.max_batch_size);
+
+  UPDATE system_live_recovery_claims
+     SET status='noop',terminal_code='RECOVERY_EPOCH_CHANGED',
+         completed_at=clock_timestamp(),receipt=jsonb_build_object('reason','gate_epoch_changed')
+   WHERE status IN ('pending','running') AND recovery_epoch<>gate_value.generation;
+
+  UPDATE system_live_recovery_claims
+     SET status='pending',claim_token=NULL,claimed_by=NULL,heartbeat_at=NULL,
+         last_error_code='RECOVERY_CLAIM_LEASE_EXPIRED'
+   WHERE status='running' AND recovery_epoch=gate_value.generation
+     AND heartbeat_at+make_interval(secs=>claim_lease_ms::double precision/1000.0)<=clock_timestamp();
+
+  FOR claim_value IN
+    SELECT * FROM system_live_recovery_claims
+     WHERE status='pending' AND recovery_epoch=gate_value.generation
+       AND policy_snapshot_id=config_value.policy_snapshot_id
+       AND feature_snapshot_id=config_value.feature_snapshot_id
+     ORDER BY discovered_at,id
+     LIMIT effective_limit
+  LOOP
+    RETURN NEXT kb_bid_live_recovery_payload(claim_value);
+    returned_count := returned_count+1;
+  END LOOP;
+  IF returned_count>=effective_limit THEN RETURN; END IF;
+
+  SELECT count(*) INTO active_global FROM system_live_recovery_claims
+   WHERE status IN ('pending','running');
+  IF active_global>=policy_value.max_global_concurrency THEN RETURN; END IF;
+
+  FOR candidate IN
+    WITH raw_candidates AS (
+      SELECT 10 AS priority,'dirty_manifest'::text AS recovery_kind,
+        'matching_manifest'::text AS target_kind,intent.id AS durable_id,
+        intent.generation, intent.mutation_watermark AS observed_watermark,'dirty'::text AS observed_stage,
+        NULL::timestamptz AS observed_heartbeat_at,NULL::uuid AS observed_owner_token,
+        NULL::integer AS observed_attempt,jsonb_build_array(
+          jsonb_build_object('snapshot_kind','matching_config','snapshot_id',intent.matching_config_snapshot_id),
+          jsonb_build_object('snapshot_kind','feature','snapshot_id',intent.feature_snapshot_id),
+          jsonb_build_object('snapshot_kind','score_policy','snapshot_id',intent.score_policy_snapshot_id),
+          jsonb_build_object('snapshot_kind','verifier_policy','snapshot_id',intent.verifier_policy_snapshot_id)) AS original_snapshots
+      FROM bid_matching_schedule_intents intent
+      JOIN bid_projects project_value ON project_value.id=intent.project_id
+       AND project_value.status='open'
+       AND project_value.matching_mutation_watermark=intent.mutation_watermark
+      WHERE NOT EXISTS (SELECT 1 FROM bid_matching_manifests manifest
+                         WHERE manifest.schedule_intent_id=intent.id)
+      UNION ALL
+      SELECT 20,'orphan_target','document_conversion',document.id,
+        document.conversion_generation::bigint,0,document.parse_status,
+        owner_value.heartbeat_at,owner_value.claim_token,owner_value.attempt,
+        jsonb_build_array(
+          jsonb_build_object('snapshot_kind','conversion_config','snapshot_id',document.conversion_snapshot_id),
+          jsonb_build_object('snapshot_kind','feature','snapshot_id',document.feature_snapshot_id))
+      FROM bid_documents document
+      JOIN bid_projects project_value ON project_value.id=document.project_id AND project_value.status='open'
+      LEFT JOIN LATERAL (
+        SELECT attempt.claim_token,attempt.attempt,attempt.heartbeat_at,attempt.claim_lease_ms
+          FROM bid_document_conversion_attempts attempt
+         WHERE attempt.document_id=document.id
+           AND attempt.conversion_generation=document.conversion_generation
+           AND attempt.status='running'
+         ORDER BY attempt.attempt DESC LIMIT 1
+      ) owner_value ON true
+      WHERE document.parse_status='pending'
+         OR (document.parse_status='processing' AND owner_value.claim_token IS NOT NULL
+             AND owner_value.heartbeat_at+make_interval(secs=>owner_value.claim_lease_ms::double precision/1000.0)
+                 <=clock_timestamp())
+      UNION ALL
+      SELECT 30,'orphan_target','extraction_target',target.id,
+        target.extraction_generation::bigint,0,target.state,
+        owner_value.heartbeat_at,owner_value.claim_token,owner_value.attempt,
+        jsonb_build_array(
+          jsonb_build_object('snapshot_kind','source_artifact','snapshot_id',target.source_artifact_id),
+          jsonb_build_object('snapshot_kind','target_config','snapshot_id',target.target_config_snapshot_id),
+          jsonb_build_object('snapshot_kind','feature','snapshot_id',target.feature_snapshot_id))
+      FROM bid_extraction_targets target
+      JOIN bid_projects project_value ON project_value.id=target.project_id AND project_value.status='open'
+      LEFT JOIN LATERAL (
+        SELECT attempt.claim_token,attempt.attempt,attempt.heartbeat_at,attempt.claim_lease_ms
+          FROM bid_extraction_attempts attempt
+         WHERE attempt.target_id=target.id AND attempt.status='running'
+         ORDER BY attempt.attempt DESC LIMIT 1
+      ) owner_value ON true
+      WHERE target.state='pending'
+         OR (target.state='running' AND owner_value.claim_token IS NOT NULL
+             AND owner_value.heartbeat_at+make_interval(secs=>owner_value.claim_lease_ms::double precision/1000.0)
+                 <=clock_timestamp())
+      UNION ALL
+      SELECT 40,'orphan_target','attachment_preparation',job.id,
+        (job.attempt_count+1)::bigint,0,job.status,job.heartbeat_at,job.claim_token,
+        NULLIF(job.attempt_count,0),jsonb_build_array(
+          jsonb_build_object('snapshot_kind','conversion_config','snapshot_id',job.conversion_snapshot_id),
+          jsonb_build_object('snapshot_kind','feature','snapshot_id',job.feature_snapshot_id))
+      FROM bid_attachment_preparation_jobs job
+      JOIN bid_projects project_value ON project_value.id=job.project_id AND project_value.status='open'
+      JOIN bid_procedural_attachments attachment ON attachment.id=job.attachment_id
+      WHERE attachment.status='draft' AND job.attempt_count<job.max_attempts
+        AND (job.status='pending' OR (job.status='running'
+          AND job.heartbeat_at+make_interval(secs=>job.claim_lease_ms::double precision/1000.0)<=clock_timestamp()))
+      UNION ALL
+      SELECT 50,'orphan_target','submission_render',job.id,
+        (job.attempt_count+1)::bigint,0,job.status,job.heartbeat_at,job.claim_token,
+        NULLIF(job.attempt_count,0),jsonb_build_array(
+          jsonb_build_object('snapshot_kind','submission_render_job','snapshot_id',job.submission_render_job_snapshot_id))
+      FROM bid_submission_render_jobs job
+      JOIN bid_projects project_value ON project_value.id=job.project_id AND project_value.status='open'
+      WHERE job.attempt_count<job.max_attempts
+        AND (job.status='pending' OR (job.status='running'
+          AND job.heartbeat_at+make_interval(secs=>job.claim_lease_ms::double precision/1000.0)<=clock_timestamp()))
+      UNION ALL
+      SELECT 60,'orphan_match_job','matching_job',job.id,manifest.generation,
+        manifest.mutation_watermark,job.status,owner_value.heartbeat_at,owner_value.claim_token,
+        owner_value.attempt,jsonb_build_array(
+          jsonb_build_object('snapshot_kind','matching_manifest','snapshot_id',manifest.id),
+          jsonb_build_object('snapshot_kind','matching_config','snapshot_id',job.matching_config_snapshot_id),
+          jsonb_build_object('snapshot_kind','feature','snapshot_id',job.feature_snapshot_id),
+          jsonb_build_object('snapshot_kind','score_policy','snapshot_id',job.score_policy_snapshot_id),
+          jsonb_build_object('snapshot_kind','verifier_policy','snapshot_id',job.verifier_policy_snapshot_id))
+      FROM bid_matching_jobs job
+      JOIN bid_matching_manifests manifest ON manifest.id=job.manifest_id
+      JOIN bid_projects project_value ON project_value.id=job.project_id AND project_value.status='open'
+        AND project_value.matching_mutation_watermark=manifest.mutation_watermark
+      LEFT JOIN bid_matching_job_claims owner_value
+        ON owner_value.job_id=job.id AND owner_value.attempt=job.active_attempt AND owner_value.status='running'
+      WHERE job.max_attempts>COALESCE(job.active_attempt,0)
+        AND manifest.generation=(SELECT max(newest.generation) FROM bid_matching_manifests newest
+                                  WHERE newest.project_id=manifest.project_id)
+        AND (job.status='pending' OR (job.status='running' AND owner_value.claim_token IS NOT NULL
+          AND owner_value.heartbeat_at+make_interval(secs=>owner_value.claim_lease_ms::double precision/1000.0)
+              <=clock_timestamp()))
+    ), waved AS (
+      SELECT raw_candidates.*,
+        row_number() OVER (PARTITION BY target_kind ORDER BY durable_id) AS wave
+      FROM raw_candidates
+    )
+    SELECT * FROM waved ORDER BY wave,priority,durable_id
+  LOOP
+    EXIT WHEN returned_count>=effective_limit OR active_global>=policy_value.max_global_concurrency;
+    SELECT count(*) INTO active_kind FROM system_live_recovery_claims
+     WHERE status IN ('pending','running') AND recovery_kind=candidate.recovery_kind;
+    kind_limit := (policy_value.max_concurrency_by_kind->>candidate.recovery_kind)::integer;
+    CONTINUE WHEN active_kind>=kind_limit;
+    INSERT INTO system_live_recovery_claims(
+      id,recovery_kind,target_kind,durable_id,generation,observed_watermark,observed_stage,
+      observed_heartbeat_at,observed_owner_token,observed_attempt,recovery_epoch,
+      policy_snapshot_id,feature_snapshot_id,original_snapshots,status,claim_lease_ms
+    ) VALUES(
+      gen_random_uuid(),candidate.recovery_kind,candidate.target_kind,candidate.durable_id,
+      candidate.generation,candidate.observed_watermark,candidate.observed_stage,
+      candidate.observed_heartbeat_at,candidate.observed_owner_token,candidate.observed_attempt,
+      gate_value.generation,config_value.policy_snapshot_id,config_value.feature_snapshot_id,
+      candidate.original_snapshots,'pending',policy_value.claim_lease_ms
+    ) ON CONFLICT DO NOTHING
+    RETURNING * INTO claim_value;
+    IF claim_value.id IS NOT NULL THEN
+      RETURN NEXT kb_bid_live_recovery_payload(claim_value);
+      returned_count:=returned_count+1;
+      active_global:=active_global+1;
+      claim_value:=NULL;
+    END IF;
+  END LOOP;
+END
+$$;
+
+CREATE FUNCTION kb_bid_live_recovery_claim(
+  p_candidate jsonb,p_claim_token uuid,p_claimed_by text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  claim_value system_live_recovery_claims%ROWTYPE;
+  gate_value application_maintenance_gate%ROWTYPE;
+  config_value live_recovery_configuration%ROWTYPE;
+  feature_value live_recovery_feature_snapshots%ROWTYPE;
+  document_value bid_documents%ROWTYPE;
+  conversion_attempt bid_document_conversion_attempts%ROWTYPE;
+  extraction_value bid_extraction_targets%ROWTYPE;
+  extraction_attempt bid_extraction_attempts%ROWTYPE;
+  attachment_job bid_attachment_preparation_jobs%ROWTYPE;
+  render_job bid_submission_render_jobs%ROWTYPE;
+  matching_job bid_matching_jobs%ROWTYPE;
+  matching_claim bid_matching_job_claims%ROWTYPE;
+  manifest_value bid_matching_manifests%ROWTYPE;
+  schedule_intent bid_matching_schedule_intents%ROWTYPE;
+  project_value bid_projects%ROWTYPE;
+  next_attempt integer;
+  action_value jsonb;
+  fence_ok boolean := true;
+BEGIN
+  IF p_claim_token IS NULL OR octet_length(btrim(p_claimed_by)) NOT BETWEEN 1 AND 128 THEN
+    RAISE EXCEPTION 'LIVE_RECOVERY_CLAIM_INVALID' USING ERRCODE='22023';
+  END IF;
+  SELECT * INTO claim_value FROM system_live_recovery_claims
+   WHERE recovery_kind=p_candidate->>'recovery_kind'
+     AND durable_id=(p_candidate->>'durable_id')::uuid
+     AND generation=(p_candidate->>'generation')::bigint
+     AND recovery_epoch=(p_candidate->>'recovery_epoch')::bigint
+   FOR UPDATE;
+  IF claim_value.id IS NULL OR claim_value.status<>'pending' THEN RETURN NULL; END IF;
+
+  IF claim_value.target_kind IS DISTINCT FROM p_candidate->>'target_kind'
+     OR claim_value.observed_watermark IS DISTINCT FROM NULLIF(p_candidate->>'observed_watermark','')::bigint
+     OR claim_value.observed_stage IS DISTINCT FROM p_candidate->>'observed_stage'
+     OR claim_value.observed_heartbeat_at IS DISTINCT FROM NULLIF(p_candidate->>'observed_heartbeat_at','')::timestamptz
+     OR claim_value.observed_owner_token IS DISTINCT FROM NULLIF(p_candidate->>'observed_owner_token','')::uuid
+     OR claim_value.observed_attempt IS DISTINCT FROM NULLIF(p_candidate->>'observed_attempt','')::integer
+     OR claim_value.policy_snapshot_id IS DISTINCT FROM (p_candidate->>'recovery_policy_snapshot_id')::uuid
+     OR claim_value.feature_snapshot_id IS DISTINCT FROM (p_candidate->>'feature_snapshot_id')::uuid
+     OR claim_value.original_snapshots IS DISTINCT FROM p_candidate->'original_snapshots'
+     OR NOT EXISTS (SELECT 1 FROM live_recovery_policy_snapshots WHERE id=claim_value.policy_snapshot_id)
+     OR NOT EXISTS (SELECT 1 FROM live_recovery_feature_snapshots WHERE id=claim_value.feature_snapshot_id)
+  THEN
+    UPDATE system_live_recovery_claims
+       SET status='failed',terminal_code='SNAPSHOT_MISSING',completed_at=clock_timestamp(),
+           receipt=jsonb_build_object('reason','envelope_snapshot_or_observation_mismatch')
+     WHERE id=claim_value.id;
+    RETURN NULL;
+  END IF;
+
+  SELECT * INTO STRICT gate_value FROM application_maintenance_gate
+   WHERE singleton_key FOR UPDATE;
+  SELECT * INTO STRICT config_value FROM live_recovery_configuration
+   WHERE singleton_key FOR SHARE;
+  SELECT * INTO STRICT feature_value FROM live_recovery_feature_snapshots
+   WHERE id=config_value.feature_snapshot_id FOR SHARE;
+  IF gate_value.mode<>'open' OR gate_value.generation<>claim_value.recovery_epoch
+     OR config_value.policy_snapshot_id<>claim_value.policy_snapshot_id
+     OR config_value.feature_snapshot_id<>claim_value.feature_snapshot_id
+     OR NOT feature_value.live_recovery_enabled
+  THEN
+    UPDATE system_live_recovery_claims
+       SET status='noop',terminal_code='RECOVERY_GATE_CHANGED',completed_at=clock_timestamp(),
+           receipt=jsonb_build_object('reason','gate_epoch_or_feature_changed')
+     WHERE id=claim_value.id;
+    RETURN NULL;
+  END IF;
+
+  IF NOT claim_value.action_applied THEN
+    CASE claim_value.target_kind
+      WHEN 'matching_manifest' THEN
+        SELECT * INTO schedule_intent FROM bid_matching_schedule_intents
+         WHERE id=claim_value.durable_id FOR SHARE;
+        IF schedule_intent.id IS NOT NULL THEN
+          SELECT * INTO project_value FROM bid_projects WHERE id=schedule_intent.project_id FOR UPDATE;
+        END IF;
+        fence_ok := schedule_intent.id IS NOT NULL AND project_value.id IS NOT NULL AND project_value.status='open'
+          AND project_value.matching_mutation_watermark=claim_value.observed_watermark
+          AND schedule_intent.generation=claim_value.generation
+          AND schedule_intent.mutation_watermark=claim_value.observed_watermark
+          AND schedule_intent.matching_config_snapshot_id=(claim_value.original_snapshots->0->>'snapshot_id')::uuid
+          AND schedule_intent.feature_snapshot_id=(claim_value.original_snapshots->1->>'snapshot_id')::uuid
+          AND schedule_intent.score_policy_snapshot_id=(claim_value.original_snapshots->2->>'snapshot_id')::uuid
+          AND schedule_intent.verifier_policy_snapshot_id=(claim_value.original_snapshots->3->>'snapshot_id')::uuid;
+        action_value:=jsonb_build_object('kind','schedule_matching_manifest',
+          'schedule_intent_id',schedule_intent.id,'project_id',schedule_intent.project_id,
+          'mutation_watermark',claim_value.observed_watermark,
+          'matching_config_snapshot_id',schedule_intent.matching_config_snapshot_id,
+          'feature_snapshot_id',schedule_intent.feature_snapshot_id,
+          'score_policy_snapshot_id',schedule_intent.score_policy_snapshot_id,
+          'verifier_policy_snapshot_id',schedule_intent.verifier_policy_snapshot_id);
+      WHEN 'document_conversion' THEN
+        SELECT * INTO document_value FROM bid_documents WHERE id=claim_value.durable_id FOR UPDATE;
+        fence_ok:=document_value.id IS NOT NULL AND document_value.conversion_generation=claim_value.generation
+          AND document_value.conversion_snapshot_id=(claim_value.original_snapshots->0->>'snapshot_id')::uuid
+          AND document_value.feature_snapshot_id=(claim_value.original_snapshots->1->>'snapshot_id')::uuid
+          AND document_value.parse_status=claim_value.observed_stage;
+        IF fence_ok AND claim_value.observed_stage='processing' THEN
+          SELECT * INTO conversion_attempt FROM bid_document_conversion_attempts
+           WHERE document_id=document_value.id AND conversion_generation=document_value.conversion_generation
+             AND attempt=claim_value.observed_attempt AND claim_token=claim_value.observed_owner_token
+             AND status='running' FOR UPDATE;
+          fence_ok:=conversion_attempt.document_id IS NOT NULL
+            AND conversion_attempt.heartbeat_at=claim_value.observed_heartbeat_at
+            AND conversion_attempt.heartbeat_at
+                +make_interval(secs=>conversion_attempt.claim_lease_ms::double precision/1000.0)<=clock_timestamp();
+          IF fence_ok THEN
+            UPDATE bid_document_conversion_attempts SET status='reaped',error_code='CLAIM_LEASE_EXPIRED'
+             WHERE document_id=conversion_attempt.document_id
+               AND conversion_generation=conversion_attempt.conversion_generation
+               AND attempt=conversion_attempt.attempt AND claim_token=conversion_attempt.claim_token
+               AND status='running' AND heartbeat_at=conversion_attempt.heartbeat_at;
+            fence_ok:=FOUND;
+            IF fence_ok THEN
+              UPDATE bid_documents SET parse_status='pending',error_code='CLAIM_LEASE_EXPIRED'
+               WHERE id=document_value.id AND parse_status='processing'
+                 AND conversion_generation=claim_value.generation;
+              fence_ok:=FOUND;
+            END IF;
+          END IF;
+        END IF;
+        action_value:=jsonb_build_object('kind','reenqueue_document_conversion',
+          'document_id',claim_value.durable_id,'conversion_generation',claim_value.generation);
+      WHEN 'extraction_target' THEN
+        SELECT * INTO extraction_value FROM bid_extraction_targets WHERE id=claim_value.durable_id FOR UPDATE;
+        fence_ok:=extraction_value.id IS NOT NULL
+          AND extraction_value.extraction_generation=claim_value.generation
+          AND extraction_value.source_artifact_id=(claim_value.original_snapshots->0->>'snapshot_id')::uuid
+          AND extraction_value.target_config_snapshot_id=(claim_value.original_snapshots->1->>'snapshot_id')::uuid
+          AND extraction_value.feature_snapshot_id=(claim_value.original_snapshots->2->>'snapshot_id')::uuid
+          AND extraction_value.state=claim_value.observed_stage;
+        IF fence_ok AND claim_value.observed_stage='running' THEN
+          SELECT * INTO extraction_attempt FROM bid_extraction_attempts
+           WHERE target_id=extraction_value.id AND attempt=claim_value.observed_attempt
+             AND claim_token=claim_value.observed_owner_token AND status='running' FOR UPDATE;
+          fence_ok:=extraction_attempt.target_id IS NOT NULL
+            AND extraction_attempt.heartbeat_at=claim_value.observed_heartbeat_at
+            AND extraction_attempt.heartbeat_at
+                +make_interval(secs=>extraction_attempt.claim_lease_ms::double precision/1000.0)<=clock_timestamp();
+          IF fence_ok THEN
+            UPDATE bid_extraction_attempts SET status='reaped',error_code='CLAIM_LEASE_EXPIRED'
+             WHERE target_id=extraction_attempt.target_id AND attempt=extraction_attempt.attempt
+               AND claim_token=extraction_attempt.claim_token AND status='running'
+               AND heartbeat_at=extraction_attempt.heartbeat_at;
+            fence_ok:=FOUND;
+            IF fence_ok THEN
+              UPDATE bid_extraction_targets SET state='pending'
+               WHERE id=extraction_value.id AND state='running'
+                 AND extraction_generation=claim_value.generation;
+              fence_ok:=FOUND;
+            END IF;
+          END IF;
+        END IF;
+        action_value:=jsonb_build_object('kind','reenqueue_extraction_target',
+          'target_id',claim_value.durable_id,'project_id',extraction_value.project_id,
+          'document_id',extraction_value.document_id,'extraction_generation',claim_value.generation);
+      WHEN 'attachment_preparation' THEN
+        SELECT * INTO attachment_job FROM bid_attachment_preparation_jobs
+         WHERE id=claim_value.durable_id FOR UPDATE;
+        fence_ok:=attachment_job.id IS NOT NULL AND attachment_job.attempt_count+1=claim_value.generation
+          AND attachment_job.conversion_snapshot_id=(claim_value.original_snapshots->0->>'snapshot_id')::uuid
+          AND attachment_job.feature_snapshot_id=(claim_value.original_snapshots->1->>'snapshot_id')::uuid
+          AND attachment_job.status=claim_value.observed_stage;
+        IF fence_ok AND claim_value.observed_stage='running' THEN
+          fence_ok:=attachment_job.claim_token=claim_value.observed_owner_token
+            AND attachment_job.attempt_count=claim_value.observed_attempt
+            AND attachment_job.heartbeat_at=claim_value.observed_heartbeat_at
+            AND attachment_job.heartbeat_at
+                +make_interval(secs=>attachment_job.claim_lease_ms::double precision/1000.0)<=clock_timestamp();
+          IF fence_ok THEN
+            UPDATE bid_attachment_preparation_jobs
+               SET status='pending',claim_token=NULL,heartbeat_at=NULL,
+                   error_code='CLAIM_LEASE_EXPIRED',error_detail='live recovery reaped expired owner'
+             WHERE id=attachment_job.id AND status='running'
+               AND claim_token=claim_value.observed_owner_token
+               AND heartbeat_at=claim_value.observed_heartbeat_at;
+            fence_ok:=FOUND;
+          END IF;
+        END IF;
+        action_value:=jsonb_build_object('kind','reenqueue_attachment_preparation',
+          'preparation_job_id',claim_value.durable_id);
+      WHEN 'submission_render' THEN
+        SELECT * INTO render_job FROM bid_submission_render_jobs
+         WHERE id=claim_value.durable_id FOR UPDATE;
+        fence_ok:=render_job.id IS NOT NULL AND render_job.attempt_count+1=claim_value.generation
+          AND render_job.submission_render_job_snapshot_id=(claim_value.original_snapshots->0->>'snapshot_id')::uuid
+          AND render_job.status=claim_value.observed_stage;
+        IF fence_ok AND claim_value.observed_stage='running' THEN
+          fence_ok:=render_job.claim_token=claim_value.observed_owner_token
+            AND render_job.attempt_count=claim_value.observed_attempt
+            AND render_job.heartbeat_at=claim_value.observed_heartbeat_at
+            AND render_job.heartbeat_at
+                +make_interval(secs=>render_job.claim_lease_ms::double precision/1000.0)<=clock_timestamp();
+          IF fence_ok THEN
+            UPDATE bid_submission_render_jobs
+               SET status='pending',claim_token=NULL,heartbeat_at=NULL,
+                   error_code='CLAIM_LEASE_EXPIRED',error_detail='live recovery reaped expired owner'
+             WHERE id=render_job.id AND status='running'
+               AND claim_token=claim_value.observed_owner_token
+               AND heartbeat_at=claim_value.observed_heartbeat_at;
+            fence_ok:=FOUND;
+          END IF;
+        END IF;
+        action_value:=jsonb_build_object('kind','reenqueue_submission_render',
+          'render_job_id',claim_value.durable_id);
+      WHEN 'matching_job' THEN
+        SELECT * INTO matching_job FROM bid_matching_jobs WHERE id=claim_value.durable_id FOR UPDATE;
+        IF matching_job.id IS NOT NULL THEN
+          SELECT * INTO manifest_value FROM bid_matching_manifests WHERE id=matching_job.manifest_id FOR SHARE;
+        END IF;
+        fence_ok:=matching_job.id IS NOT NULL AND manifest_value.generation=claim_value.generation
+          AND manifest_value.mutation_watermark=claim_value.observed_watermark
+          AND matching_job.manifest_id=(claim_value.original_snapshots->0->>'snapshot_id')::uuid
+          AND matching_job.matching_config_snapshot_id=(claim_value.original_snapshots->1->>'snapshot_id')::uuid
+          AND matching_job.feature_snapshot_id=(claim_value.original_snapshots->2->>'snapshot_id')::uuid
+          AND matching_job.score_policy_snapshot_id=(claim_value.original_snapshots->3->>'snapshot_id')::uuid
+          AND matching_job.verifier_policy_snapshot_id=(claim_value.original_snapshots->4->>'snapshot_id')::uuid
+          AND matching_job.status=claim_value.observed_stage;
+        IF fence_ok AND claim_value.observed_stage='running' THEN
+          SELECT * INTO matching_claim FROM bid_matching_job_claims
+           WHERE job_id=matching_job.id AND attempt=claim_value.observed_attempt
+             AND claim_token=claim_value.observed_owner_token AND status='running' FOR UPDATE;
+          fence_ok:=matching_claim.job_id IS NOT NULL
+            AND matching_claim.heartbeat_at=claim_value.observed_heartbeat_at
+            AND matching_claim.heartbeat_at
+                +make_interval(secs=>matching_claim.claim_lease_ms::double precision/1000.0)<=clock_timestamp();
+          IF fence_ok THEN
+            UPDATE bid_matching_job_claims SET status='reaped'
+             WHERE job_id=matching_claim.job_id AND attempt=matching_claim.attempt
+               AND claim_token=matching_claim.claim_token AND status='running'
+               AND heartbeat_at=matching_claim.heartbeat_at;
+            fence_ok:=FOUND;
+            IF fence_ok THEN
+              UPDATE bid_matching_staging_sets SET state='expired'
+               WHERE job_id=matching_job.id AND attempt=matching_claim.attempt AND state='active';
+              UPDATE bid_matching_jobs
+                 SET status='pending',active_attempt=NULL,error_code='CLAIM_LEASE_EXPIRED',
+                     error_detail='live recovery reaped expired owner'
+               WHERE id=matching_job.id AND status='running'
+                 AND active_attempt=matching_claim.attempt;
+              fence_ok:=FOUND;
+            END IF;
+          END IF;
+        END IF;
+        action_value:=jsonb_build_object('kind','reenqueue_matching_job',
+          'job_id',claim_value.durable_id,'matching_config_snapshot_id',matching_job.matching_config_snapshot_id,
+          'feature_snapshot_id',matching_job.feature_snapshot_id,
+          'score_policy_snapshot_id',matching_job.score_policy_snapshot_id,
+          'verifier_policy_snapshot_id',matching_job.verifier_policy_snapshot_id);
+      ELSE
+        fence_ok:=false;
+    END CASE;
+    IF fence_ok IS NOT TRUE THEN
+      UPDATE system_live_recovery_claims
+         SET status='noop',terminal_code='DOMAIN_FENCE_CHANGED',completed_at=clock_timestamp(),
+             receipt=jsonb_build_object('reason','observed_domain_state_changed')
+       WHERE id=claim_value.id;
+      RETURN NULL;
+    END IF;
+    UPDATE system_live_recovery_claims SET action_applied=true WHERE id=claim_value.id;
+  ELSE
+    CASE claim_value.target_kind
+      WHEN 'matching_manifest' THEN
+        SELECT * INTO schedule_intent FROM bid_matching_schedule_intents
+         WHERE id=claim_value.durable_id FOR SHARE;
+        SELECT * INTO project_value FROM bid_projects WHERE id=schedule_intent.project_id FOR UPDATE;
+        fence_ok:=schedule_intent.id IS NOT NULL AND project_value.status='open'
+          AND project_value.matching_mutation_watermark=claim_value.observed_watermark;
+        action_value:=jsonb_build_object('kind','schedule_matching_manifest',
+          'schedule_intent_id',schedule_intent.id,'project_id',schedule_intent.project_id,
+          'mutation_watermark',claim_value.observed_watermark,
+          'matching_config_snapshot_id',schedule_intent.matching_config_snapshot_id,
+          'feature_snapshot_id',schedule_intent.feature_snapshot_id,
+          'score_policy_snapshot_id',schedule_intent.score_policy_snapshot_id,
+          'verifier_policy_snapshot_id',schedule_intent.verifier_policy_snapshot_id);
+      WHEN 'document_conversion' THEN
+        SELECT * INTO document_value FROM bid_documents WHERE id=claim_value.durable_id FOR UPDATE;
+        fence_ok:=document_value.parse_status='pending'
+          AND document_value.conversion_generation=claim_value.generation;
+        action_value:=jsonb_build_object('kind','reenqueue_document_conversion',
+          'document_id',claim_value.durable_id,'conversion_generation',claim_value.generation);
+      WHEN 'extraction_target' THEN
+        SELECT * INTO extraction_value FROM bid_extraction_targets WHERE id=claim_value.durable_id FOR UPDATE;
+        fence_ok:=extraction_value.state='pending'
+          AND extraction_value.extraction_generation=claim_value.generation;
+        action_value:=jsonb_build_object('kind','reenqueue_extraction_target',
+          'target_id',claim_value.durable_id,'project_id',extraction_value.project_id,
+          'document_id',extraction_value.document_id,'extraction_generation',claim_value.generation);
+      WHEN 'attachment_preparation' THEN
+        SELECT * INTO attachment_job FROM bid_attachment_preparation_jobs WHERE id=claim_value.durable_id FOR UPDATE;
+        fence_ok:=attachment_job.status='pending' AND attachment_job.attempt_count+1=claim_value.generation;
+        action_value:=jsonb_build_object('kind','reenqueue_attachment_preparation',
+          'preparation_job_id',claim_value.durable_id);
+      WHEN 'submission_render' THEN
+        SELECT * INTO render_job FROM bid_submission_render_jobs WHERE id=claim_value.durable_id FOR UPDATE;
+        fence_ok:=render_job.status='pending' AND render_job.attempt_count+1=claim_value.generation;
+        action_value:=jsonb_build_object('kind','reenqueue_submission_render','render_job_id',claim_value.durable_id);
+      WHEN 'matching_job' THEN
+        SELECT * INTO matching_job FROM bid_matching_jobs WHERE id=claim_value.durable_id FOR UPDATE;
+        fence_ok:=matching_job.status='pending' AND matching_job.manifest_id=(claim_value.original_snapshots->0->>'snapshot_id')::uuid;
+        action_value:=jsonb_build_object('kind','reenqueue_matching_job',
+          'job_id',claim_value.durable_id,'matching_config_snapshot_id',matching_job.matching_config_snapshot_id,
+          'feature_snapshot_id',matching_job.feature_snapshot_id,
+          'score_policy_snapshot_id',matching_job.score_policy_snapshot_id,
+          'verifier_policy_snapshot_id',matching_job.verifier_policy_snapshot_id);
+      ELSE fence_ok:=false;
+    END CASE;
+    IF fence_ok IS NOT TRUE THEN
+      UPDATE system_live_recovery_claims
+         SET status='noop',terminal_code='DOMAIN_FENCE_CHANGED',completed_at=clock_timestamp(),
+             receipt=jsonb_build_object('reason','post_recovery_domain_state_changed')
+       WHERE id=claim_value.id;
+      RETURN NULL;
+    END IF;
+  END IF;
+
+  next_attempt:=claim_value.attempt+1;
+  IF next_attempt>1000 THEN
+    UPDATE system_live_recovery_claims
+       SET status='failed',terminal_code='RECOVERY_ATTEMPTS_EXHAUSTED',
+           completed_at=clock_timestamp(),receipt=jsonb_build_object('reason','claim_attempt_limit')
+     WHERE id=claim_value.id;
+    RETURN NULL;
+  END IF;
+  UPDATE system_live_recovery_claims
+     SET status='running',claim_token=p_claim_token,attempt=next_attempt,claimed_by=p_claimed_by,
+         heartbeat_at=clock_timestamp(),last_error_code=NULL
+   WHERE id=claim_value.id AND status='pending';
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  RETURN jsonb_build_object(
+    'candidate',kb_bid_live_recovery_payload(claim_value),
+    'claim_token',p_claim_token,'attempt',next_attempt,
+    'claim_lease_ms',claim_value.claim_lease_ms,'action',action_value);
+END
+$$;
+
+CREATE FUNCTION kb_bid_live_recovery_heartbeat(
+  p_recovery_kind text,p_durable_id uuid,p_generation bigint,p_recovery_epoch bigint,
+  p_claim_token uuid,p_attempt integer
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE updated integer;
+BEGIN
+  UPDATE system_live_recovery_claims claim_value SET heartbeat_at=clock_timestamp()
+    FROM application_maintenance_gate gate_value,live_recovery_configuration config_value,
+         live_recovery_feature_snapshots feature_value
+   WHERE claim_value.recovery_kind=p_recovery_kind AND claim_value.durable_id=p_durable_id
+     AND claim_value.generation=p_generation AND claim_value.recovery_epoch=p_recovery_epoch
+     AND claim_value.status='running' AND claim_value.claim_token=p_claim_token
+     AND claim_value.attempt=p_attempt
+     AND claim_value.heartbeat_at
+         +make_interval(secs=>claim_value.claim_lease_ms::double precision/1000.0)>clock_timestamp()
+     AND gate_value.singleton_key AND gate_value.mode='open'
+     AND gate_value.generation=claim_value.recovery_epoch
+     AND config_value.singleton_key
+     AND config_value.policy_snapshot_id=claim_value.policy_snapshot_id
+     AND config_value.feature_snapshot_id=claim_value.feature_snapshot_id
+     AND feature_value.id=claim_value.feature_snapshot_id
+     AND feature_value.live_recovery_enabled;
+  GET DIAGNOSTICS updated=ROW_COUNT;
+  RETURN updated=1;
+END
+$$;
+
+CREATE FUNCTION kb_bid_live_recovery_complete(
+  p_recovery_kind text,p_durable_id uuid,p_generation bigint,p_recovery_epoch bigint,
+  p_claim_token uuid,p_attempt integer,p_receipt jsonb
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE claim_value system_live_recovery_claims%ROWTYPE;
+ gate_value application_maintenance_gate%ROWTYPE;
+ config_value live_recovery_configuration%ROWTYPE;
+ valid boolean:=false;
+BEGIN
+  IF jsonb_typeof(p_receipt)<>'object' OR octet_length(p_receipt::text)>8192 THEN
+    RAISE EXCEPTION 'LIVE_RECOVERY_RECEIPT_INVALID' USING ERRCODE='22023';
+  END IF;
+  SELECT * INTO claim_value FROM system_live_recovery_claims
+   WHERE recovery_kind=p_recovery_kind AND durable_id=p_durable_id
+     AND generation=p_generation AND recovery_epoch=p_recovery_epoch FOR UPDATE;
+  IF claim_value.id IS NULL OR claim_value.status<>'running'
+     OR claim_value.claim_token<>p_claim_token OR claim_value.attempt<>p_attempt
+     OR claim_value.heartbeat_at
+        +make_interval(secs=>claim_value.claim_lease_ms::double precision/1000.0)<=clock_timestamp()
+  THEN RETURN false; END IF;
+  SELECT * INTO STRICT gate_value FROM application_maintenance_gate WHERE singleton_key FOR UPDATE;
+  SELECT * INTO STRICT config_value FROM live_recovery_configuration WHERE singleton_key FOR SHARE;
+  IF gate_value.mode<>'open' OR gate_value.generation<>claim_value.recovery_epoch
+     OR config_value.policy_snapshot_id<>claim_value.policy_snapshot_id
+     OR config_value.feature_snapshot_id<>claim_value.feature_snapshot_id THEN
+    UPDATE system_live_recovery_claims SET status='noop',terminal_code='RECOVERY_GATE_CHANGED',
+      completed_at=clock_timestamp(),receipt=jsonb_build_object('reason','commit_gate_changed')
+     WHERE id=claim_value.id;
+    RETURN false;
+  END IF;
+  CASE claim_value.target_kind
+    WHEN 'matching_manifest' THEN
+      valid:=EXISTS(SELECT 1 FROM bid_matching_schedule_intents intent
+        JOIN bid_projects project_value ON project_value.id=intent.project_id
+        JOIN bid_matching_manifests manifest ON manifest.schedule_intent_id=intent.id
+       WHERE intent.id=claim_value.durable_id AND project_value.status='open'
+         AND project_value.matching_mutation_watermark=claim_value.observed_watermark
+         AND manifest.mutation_watermark=claim_value.observed_watermark
+         AND manifest.generation=claim_value.generation
+         AND manifest.matching_config_snapshot_id=(claim_value.original_snapshots->0->>'snapshot_id')::uuid
+         AND manifest.feature_snapshot_id=(claim_value.original_snapshots->1->>'snapshot_id')::uuid
+         AND manifest.score_policy_snapshot_id=(claim_value.original_snapshots->2->>'snapshot_id')::uuid
+         AND manifest.verifier_policy_snapshot_id=(claim_value.original_snapshots->3->>'snapshot_id')::uuid);
+    WHEN 'document_conversion' THEN
+      valid:=EXISTS(SELECT 1 FROM bid_documents document
+       WHERE document.id=claim_value.durable_id AND document.conversion_generation=claim_value.generation
+         AND document.conversion_snapshot_id=(claim_value.original_snapshots->0->>'snapshot_id')::uuid
+         AND document.feature_snapshot_id=(claim_value.original_snapshots->1->>'snapshot_id')::uuid
+         AND document.parse_status IN ('pending','processing'));
+    WHEN 'extraction_target' THEN
+      valid:=EXISTS(SELECT 1 FROM bid_extraction_targets target
+       WHERE target.id=claim_value.durable_id AND target.extraction_generation=claim_value.generation
+         AND target.source_artifact_id=(claim_value.original_snapshots->0->>'snapshot_id')::uuid
+         AND target.target_config_snapshot_id=(claim_value.original_snapshots->1->>'snapshot_id')::uuid
+         AND target.feature_snapshot_id=(claim_value.original_snapshots->2->>'snapshot_id')::uuid
+         AND target.state IN ('pending','running'));
+    WHEN 'attachment_preparation' THEN
+      valid:=EXISTS(SELECT 1 FROM bid_attachment_preparation_jobs job
+       WHERE job.id=claim_value.durable_id AND job.attempt_count+1>=claim_value.generation
+         AND job.conversion_snapshot_id=(claim_value.original_snapshots->0->>'snapshot_id')::uuid
+         AND job.feature_snapshot_id=(claim_value.original_snapshots->1->>'snapshot_id')::uuid
+         AND job.status IN ('pending','running'));
+    WHEN 'submission_render' THEN
+      valid:=EXISTS(SELECT 1 FROM bid_submission_render_jobs job
+       WHERE job.id=claim_value.durable_id AND job.attempt_count+1>=claim_value.generation
+         AND job.submission_render_job_snapshot_id=(claim_value.original_snapshots->0->>'snapshot_id')::uuid
+         AND job.status IN ('pending','running'));
+    WHEN 'matching_job' THEN
+      valid:=EXISTS(SELECT 1 FROM bid_matching_jobs job
+        JOIN bid_matching_manifests manifest ON manifest.id=job.manifest_id
+       WHERE job.id=claim_value.durable_id AND manifest.generation=claim_value.generation
+         AND manifest.mutation_watermark=claim_value.observed_watermark
+         AND job.manifest_id=(claim_value.original_snapshots->0->>'snapshot_id')::uuid
+         AND job.matching_config_snapshot_id=(claim_value.original_snapshots->1->>'snapshot_id')::uuid
+         AND job.feature_snapshot_id=(claim_value.original_snapshots->2->>'snapshot_id')::uuid
+         AND job.score_policy_snapshot_id=(claim_value.original_snapshots->3->>'snapshot_id')::uuid
+         AND job.verifier_policy_snapshot_id=(claim_value.original_snapshots->4->>'snapshot_id')::uuid
+         AND job.status IN ('pending','running'));
+    ELSE valid:=false;
+  END CASE;
+  IF NOT valid THEN
+    UPDATE system_live_recovery_claims SET status='noop',terminal_code='DOMAIN_FENCE_CHANGED',
+      completed_at=clock_timestamp(),receipt=jsonb_build_object('reason','commit_domain_changed')
+     WHERE id=claim_value.id;
+    RETURN false;
+  END IF;
+  UPDATE system_live_recovery_claims SET status='completed',terminal_code='DELIVERY_ENQUEUED',
+    completed_at=clock_timestamp(),receipt=p_receipt WHERE id=claim_value.id;
+  RETURN true;
+END
+$$;
+
+CREATE FUNCTION kb_bid_live_recovery_release(
+  p_recovery_kind text,p_durable_id uuid,p_generation bigint,p_recovery_epoch bigint,
+  p_claim_token uuid,p_attempt integer,p_error_code text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE updated integer;
+BEGIN
+  IF octet_length(btrim(p_error_code)) NOT BETWEEN 1 AND 128 THEN
+    RAISE EXCEPTION 'LIVE_RECOVERY_ERROR_CODE_INVALID' USING ERRCODE='22023';
+  END IF;
+  UPDATE system_live_recovery_claims claim_value
+     SET status='pending',claim_token=NULL,claimed_by=NULL,heartbeat_at=NULL,
+         last_error_code=p_error_code
+    FROM application_maintenance_gate gate_value,live_recovery_configuration config_value
+   WHERE claim_value.recovery_kind=p_recovery_kind AND claim_value.durable_id=p_durable_id
+     AND claim_value.generation=p_generation AND claim_value.recovery_epoch=p_recovery_epoch
+     AND claim_value.status='running' AND claim_value.claim_token=p_claim_token
+     AND claim_value.attempt=p_attempt
+     AND claim_value.heartbeat_at
+         +make_interval(secs=>claim_value.claim_lease_ms::double precision/1000.0)>clock_timestamp()
+     AND gate_value.singleton_key AND gate_value.mode='open'
+     AND gate_value.generation=claim_value.recovery_epoch AND config_value.singleton_key
+     AND config_value.policy_snapshot_id=claim_value.policy_snapshot_id
+     AND config_value.feature_snapshot_id=claim_value.feature_snapshot_id;
+  GET DIAGNOSTICS updated=ROW_COUNT;
+  RETURN updated=1;
+END
+$$;
+
+CREATE FUNCTION kb_bid_live_recovery_fail(
+  p_recovery_kind text,p_durable_id uuid,p_generation bigint,p_recovery_epoch bigint,
+  p_claim_token uuid,p_attempt integer,p_error_code text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE updated integer;
+BEGIN
+  IF octet_length(btrim(p_error_code)) NOT BETWEEN 1 AND 128 THEN
+    RAISE EXCEPTION 'LIVE_RECOVERY_ERROR_CODE_INVALID' USING ERRCODE='22023';
+  END IF;
+  UPDATE system_live_recovery_claims
+     SET status='failed',terminal_code=p_error_code,completed_at=clock_timestamp(),
+         receipt=jsonb_build_object('reason','deterministic_handler_failure')
+   WHERE recovery_kind=p_recovery_kind AND durable_id=p_durable_id
+     AND generation=p_generation AND recovery_epoch=p_recovery_epoch
+     AND status='running' AND claim_token=p_claim_token AND attempt=p_attempt
+     AND heartbeat_at+make_interval(secs=>claim_lease_ms::double precision/1000.0)>clock_timestamp();
+  GET DIAGNOSTICS updated=ROW_COUNT;
+  RETURN updated=1;
+END
+$$;
+
 CREATE FUNCTION kb_bid_get_part(p_project_id uuid, p_part_key text)
 RETURNS jsonb
 LANGUAGE sql
@@ -7810,7 +8832,7 @@ SET search_path = pg_catalog, public
 AS $$
 DECLARE body text := ''; project_value bid_projects%ROWTYPE; company bid_company_profile_artifacts%ROWTYPE;
  submission bid_submission_profile_artifacts%ROWTYPE; quote bid_quote_snapshots%ROWTYPE;
- part_unit_id uuid; rec record;
+ part_unit_id uuid; rec record; evidence jsonb;
 BEGIN
   IF kb_bid_template_slot(p_part_key) IS NULL THEN RAISE EXCEPTION 'PART_KEY_INVALID' USING ERRCODE='22023'; END IF;
   SELECT * INTO STRICT project_value FROM bid_projects WHERE id=p_project_id;
@@ -7867,16 +8889,34 @@ BEGIN
   ELSIF p_part_key='4' THEN
     body := '# 公司资质与服务证据'||E'\n\n';
     FOR rec IN
-      SELECT clause.text, decision.system_decision, decision.reason_code
-        FROM bid_matching_routes route
-        JOIN bidding_current_matching_reports report ON report.route_id=route.id
-        JOIN bid_matching_requirement_decisions decision ON decision.report_id=report.id
-        JOIN bid_matching_requirement_artifacts requirement ON requirement.id=decision.requirement_artifact_id
-        JOIN bid_clauses clause ON clause.id=requirement.clause_id
-       WHERE route.project_id=p_project_id AND route.route_kind='commercial'
+      SELECT clause.text,decision.system_decision,decision.final_support,decision.reason_code,
+             product.frozen_display_name AS company_display_name,decision.evidence_items
+        FROM bidding_current_commercial_decisions decision
+        JOIN bid_clauses clause ON clause.id=decision.clause_id
+        LEFT JOIN bid_matching_candidate_artifacts candidate
+          ON candidate.id=decision.explanatory_candidate_artifact_id
+        LEFT JOIN bid_matching_product_version_artifacts product
+          ON product.id=candidate.product_version_artifact_id
+       WHERE decision.project_id=p_project_id
        ORDER BY decision.ordinal
     LOOP
-      body := body||'- '||rec.text||' → '||rec.system_decision||'/'||rec.reason_code||E'\n';
+      body := body||'- '||replace(replace(rec.text,E'\r',' '),E'\n',' ')||' → '
+        ||rec.system_decision||'/'||rec.final_support||'/'||rec.reason_code||E'\n';
+      IF rec.company_display_name IS NOT NULL THEN
+        body := body||'  - 冻结公司：'||replace(replace(rec.company_display_name,E'\r',' '),E'\n',' ')||E'\n';
+      END IF;
+      IF jsonb_array_length(rec.evidence_items)=0 THEN
+        body := body||'  - 冻结证据：无'||E'\n';
+      ELSE
+        FOR evidence IN
+          SELECT value FROM jsonb_array_elements(rec.evidence_items)
+           ORDER BY (value->>'ordinal')::integer
+        LOOP
+          body := body||'  - 冻结证据 ['
+            ||replace(replace(evidence->>'document_display_name',E'\r',' '),E'\n',' ')||']：'
+            ||replace(replace(evidence->>'quote',E'\r',' '),E'\n',' ')||E'\n';
+        END LOOP;
+      END IF;
     END LOOP;
   ELSIF p_part_key='5' THEN
     body := '# 偏离、未解决与缺件'||E'\n\n';
@@ -8046,6 +9086,7 @@ DECLARE project_value bid_projects%ROWTYPE; generation bigint; manifest_id uuid;
  item jsonb; membership jsonb; job_ids uuid[] := '{}'; job_id uuid; replay bytea;
  existing_manifest bid_matching_manifests%ROWTYPE; response jsonb; verified_payload jsonb;
  knowledge_scope jsonb; knowledge_attestation jsonb; workspace_kinds jsonb;
+ schedule_intent bid_matching_schedule_intents%ROWTYPE;
 BEGIN
   IF p_actor <> 'system:matching-publication' THEN
     PERFORM kb_bid_require_human_actor(p_actor);
@@ -8060,11 +9101,14 @@ BEGIN
   IF project_value.matching_mutation_watermark<>p_expected_watermark THEN
     RAISE EXCEPTION 'MATCHING_SCHEDULE_FENCE_LOST' USING ERRCODE='40001';
   END IF;
+  SELECT * INTO schedule_intent FROM bid_matching_schedule_intents
+   WHERE project_id=p_project_id AND mutation_watermark=p_expected_watermark FOR SHARE;
+  IF schedule_intent.id IS NULL THEN
+    RAISE EXCEPTION 'MATCHING_SCHEDULE_INTENT_MISSING' USING ERRCODE='55000';
+  END IF;
   SELECT * INTO existing_manifest
     FROM bid_matching_manifests
-   WHERE project_id=p_project_id AND mutation_watermark=p_expected_watermark
-   ORDER BY generation DESC
-   LIMIT 1;
+   WHERE schedule_intent_id=schedule_intent.id;
   IF FOUND THEN
     SELECT COALESCE(array_agg(job.id ORDER BY route.ordinal),'{}'::uuid[])
       INTO job_ids
@@ -8073,7 +9117,11 @@ BEGIN
      WHERE job.manifest_id=existing_manifest.id;
     response := jsonb_build_object(
       'manifest_id',existing_manifest.id,'generation',existing_manifest.generation,
-      'job_ids',to_jsonb(job_ids),'scheduled',false
+      'job_ids',to_jsonb(job_ids),'scheduled',false,
+      'matching_config_snapshot_id',existing_manifest.matching_config_snapshot_id,
+      'feature_snapshot_id',existing_manifest.feature_snapshot_id,
+      'score_policy_snapshot_id',existing_manifest.score_policy_snapshot_id,
+      'verifier_policy_snapshot_id',existing_manifest.verifier_policy_snapshot_id
     );
     INSERT INTO audit_events(
       id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
@@ -8089,7 +9137,7 @@ BEGIN
     );
     RETURN response;
   END IF;
-  SELECT COALESCE(max(m.generation),0)+1 INTO generation FROM bid_matching_manifests m WHERE m.project_id=p_project_id;
+  generation := schedule_intent.generation;
   manifest_id := (p_payload->>'manifest_id')::uuid;
   SELECT COALESCE(jsonb_agg(kind ORDER BY kind),'[]'::jsonb)
     INTO workspace_kinds
@@ -8103,16 +9151,24 @@ BEGIN
   knowledge_scope := jsonb_build_object(
     'schema_version',1,
     'workspace_kinds',workspace_kinds,
+    'version_selections',jsonb_build_object(
+      'product_line','[]'::jsonb,
+      'company','[]'::jsonb),
     'products',COALESCE(p_payload->'products','[]'::jsonb),
     'frozen_hits',COALESCE(p_payload->'frozen_hits','[]'::jsonb));
   knowledge_attestation := kb_knowledge_attest_matching_scope_v1(knowledge_scope);
   verified_payload := p_payload || jsonb_build_object(
     'knowledge_scope_attestation_id',(knowledge_attestation->>'id')::uuid,
     'knowledge_scope_attestation_sha256',knowledge_attestation->>'content_sha256');
-  INSERT INTO bid_matching_manifests(id,project_id,generation,mutation_watermark,requirement_set_sha256,eligible_scope_sha256,
-    knowledge_scope_attestation_id,knowledge_scope_attestation_sha256,canonical_payload,content_sha256)
-  VALUES(manifest_id,p_project_id,generation,p_expected_watermark,p_payload->>'requirement_set_sha256',
-    p_payload->>'eligible_scope_sha256',(knowledge_attestation->>'id')::uuid,
+  INSERT INTO bid_matching_manifests(
+    id,project_id,schedule_intent_id,generation,mutation_watermark,matching_config_snapshot_id,feature_snapshot_id,
+    score_policy_snapshot_id,verifier_policy_snapshot_id,requirement_set_sha256,eligible_scope_sha256,
+    knowledge_scope_attestation_id,knowledge_scope_attestation_sha256,canonical_payload,content_sha256
+  ) VALUES(
+    manifest_id,p_project_id,schedule_intent.id,generation,p_expected_watermark,
+    schedule_intent.matching_config_snapshot_id,schedule_intent.feature_snapshot_id,
+    schedule_intent.score_policy_snapshot_id,schedule_intent.verifier_policy_snapshot_id,
+    p_payload->>'requirement_set_sha256',p_payload->>'eligible_scope_sha256',(knowledge_attestation->>'id')::uuid,
     knowledge_attestation->>'content_sha256',convert_to(verified_payload::text,'UTF8'),
     encode(public.digest(convert_to(verified_payload::text,'UTF8'),'sha256'),'hex'));
   FOR item IN SELECT value FROM jsonb_array_elements(p_payload->'routes') LOOP
@@ -8149,13 +9205,25 @@ BEGIN
   END LOOP;
   FOR item IN SELECT value FROM jsonb_array_elements(p_payload->'routes') LOOP
     job_id := gen_random_uuid();
-    INSERT INTO bid_matching_jobs(id,project_id,manifest_id,route_id,status,max_attempts,claim_lease_ms,lease_policy_generation,created_at)
-    VALUES(job_id,p_project_id,manifest_id,(item->>'id')::uuid,'pending',p_max_attempts,300000,1,clock_timestamp());
+    INSERT INTO bid_matching_jobs(
+      id,project_id,manifest_id,route_id,matching_config_snapshot_id,feature_snapshot_id,
+      score_policy_snapshot_id,verifier_policy_snapshot_id,status,max_attempts,
+      claim_lease_ms,lease_policy_generation,created_at
+    ) VALUES(
+      job_id,p_project_id,manifest_id,(item->>'id')::uuid,
+      schedule_intent.matching_config_snapshot_id,schedule_intent.feature_snapshot_id,
+      schedule_intent.score_policy_snapshot_id,schedule_intent.verifier_policy_snapshot_id,
+      'pending',p_max_attempts,300000,1,clock_timestamp()
+    );
     job_ids := job_ids || job_id;
   END LOOP;
   PERFORM kb_bid_assert_matching_manifest_scope(manifest_id);
   response := jsonb_build_object(
-    'manifest_id',manifest_id,'generation',generation,'job_ids',to_jsonb(job_ids),'scheduled',true
+    'manifest_id',manifest_id,'generation',generation,'job_ids',to_jsonb(job_ids),'scheduled',true,
+    'matching_config_snapshot_id',schedule_intent.matching_config_snapshot_id,
+    'feature_snapshot_id',schedule_intent.feature_snapshot_id,
+    'score_policy_snapshot_id',schedule_intent.score_policy_snapshot_id,
+    'verifier_policy_snapshot_id',schedule_intent.verifier_policy_snapshot_id
   );
   INSERT INTO audit_events(
     id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
@@ -8173,7 +9241,10 @@ BEGIN
 END
 $$;
 
-CREATE FUNCTION kb_bid_matching_claim(p_job_id uuid, p_claim_token uuid)
+CREATE FUNCTION kb_bid_matching_claim(
+  p_job_id uuid,p_claim_token uuid,p_matching_config_snapshot_id uuid,
+  p_feature_snapshot_id uuid,p_score_policy_snapshot_id uuid,p_verifier_policy_snapshot_id uuid
+)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -8184,6 +9255,12 @@ DECLARE job bid_matching_jobs%ROWTYPE; manifest bid_matching_manifests%ROWTYPE; 
 BEGIN
   SELECT * INTO job FROM bid_matching_jobs WHERE id=p_job_id FOR UPDATE;
   IF NOT FOUND OR job.status<>'pending' THEN RETURN NULL; END IF;
+  IF job.matching_config_snapshot_id<>p_matching_config_snapshot_id
+     OR job.feature_snapshot_id<>p_feature_snapshot_id
+     OR job.score_policy_snapshot_id<>p_score_policy_snapshot_id
+     OR job.verifier_policy_snapshot_id<>p_verifier_policy_snapshot_id THEN
+    RAISE EXCEPTION 'MATCHING_ENVELOPE_SNAPSHOT_MISMATCH' USING ERRCODE='40001';
+  END IF;
   SELECT * INTO STRICT manifest FROM bid_matching_manifests WHERE id=job.manifest_id;
   PERFORM 1 FROM bid_projects WHERE id=job.project_id AND status='open'
     AND matching_mutation_watermark=manifest.mutation_watermark FOR UPDATE;
@@ -8205,7 +9282,11 @@ BEGIN
     'job_id',p_job_id,'manifest_id',job.manifest_id,'project_id',job.project_id,'generation',manifest.generation,
     'mutation_watermark',manifest.mutation_watermark,'route_id',job.route_id,'route_kind',route.route_kind,
     'unit_id',route.unit_id,'empty_policy',route.empty_policy,'attempt',attempt,'claim_token',p_claim_token,
-    'claim_lease_ms',lease_ms,'lease_policy_generation',lease_gen);
+    'claim_lease_ms',lease_ms,'lease_policy_generation',lease_gen,
+    'matching_config_snapshot_id',job.matching_config_snapshot_id,
+    'feature_snapshot_id',job.feature_snapshot_id,
+    'score_policy_snapshot_id',job.score_policy_snapshot_id,
+    'verifier_policy_snapshot_id',job.verifier_policy_snapshot_id);
 END
 $$;
 
@@ -8812,7 +9893,7 @@ GRANT EXECUTE ON FUNCTION
  kb_bid_pending_attachment_preparations(),
  kb_bid_dirty_match_projects(),
  kb_bid_matching_schedule(uuid,bigint,integer,jsonb,kb_actor_identity,text,bytea,kb_sha256),
- kb_bid_matching_claim(uuid,uuid),
+ kb_bid_matching_claim(uuid,uuid,uuid,uuid,uuid,uuid),
  kb_bid_matching_heartbeat(uuid,uuid,integer,integer,bigint,integer),
  kb_bid_matching_open_staging(jsonb),
  kb_bid_matching_stage_batch(jsonb),
@@ -8828,5 +9909,11 @@ GRANT EXECUTE ON FUNCTION
  kb_bid_fail_submission_render(uuid,uuid,text,text,boolean),
  kb_bid_reap_submission_renders(),
  kb_bid_pending_submission_renders(),
- kb_bid_publish_submission_output(uuid,uuid,uuid,uuid,kb_object_ref,kb_sha256,bigint)
+ kb_bid_publish_submission_output(uuid,uuid,uuid,uuid,kb_object_ref,kb_sha256,bigint),
+ kb_bid_live_recovery_discover(integer),
+ kb_bid_live_recovery_claim(jsonb,uuid,text),
+ kb_bid_live_recovery_heartbeat(text,uuid,bigint,bigint,uuid,integer),
+ kb_bid_live_recovery_complete(text,uuid,bigint,bigint,uuid,integer,jsonb),
+ kb_bid_live_recovery_release(text,uuid,bigint,bigint,uuid,integer,text),
+ kb_bid_live_recovery_fail(text,uuid,bigint,bigint,uuid,integer,text)
 TO kb_runtime_worker;

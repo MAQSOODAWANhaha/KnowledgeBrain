@@ -128,6 +128,7 @@ pub const TYPE_BID_PREPARE_ATTACHMENT_V1: &str = "bid:prepare-attachment:v1";
 pub const TYPE_BID_EXTRACT: &str = "bid:extract";
 pub const TYPE_BID_MATCH_ROUTE_V1: &str = "bid:match-route:v1";
 pub const TYPE_BID_RENDER_SUBMISSION_V1: &str = "bid:render-submission:v1";
+pub const TYPE_SYSTEM_LIVE_RECOVERY_V1: &str = "system:live-recovery:v1";
 
 pub const QUEUE_DEFAULT: &str = "default";
 pub const QUEUE_POSTPROCESS: &str = "postprocess";

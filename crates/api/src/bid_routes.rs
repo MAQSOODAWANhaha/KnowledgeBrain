@@ -196,6 +196,7 @@ fn map_sql(error: sqlx::Error) -> ApiErr {
         "CEILING_IDENTITY_CAS_MISMATCH",
         "PRICING_IDENTITY_CAS_MISMATCH",
         "QUOTE_SNAPSHOT_CAS_MISMATCH",
+        "CLAUSE_REVISION_CAS_MISMATCH",
         "PROFILE_REVISION_CAS_MISMATCH",
         "PART_CONTENT_CAS_MISMATCH",
         "PART_DEPENDENCY_CAS_MISMATCH",
@@ -208,9 +209,23 @@ fn map_sql(error: sqlx::Error) -> ApiErr {
         "SUBMISSION_RENDER_CLAIM_LOST",
         "CURRENT_MATCHING_REPORT_MISMATCH",
         "ROUTE_PICK_REVISION_MISMATCH",
+        "ATTACHMENT_PREPARATION_INCOMPLETE",
+        "QUOTE_CEILING_REVIEW_CONFLICT",
+        "PROCEDURAL_CLASSIFICATION_NOT_CURRENT",
     ] {
         if message.contains(code) {
             return fail(StatusCode::CONFLICT, code, message);
+        }
+    }
+    for code in [
+        "NO_CEILING_REVIEW_REQUIRED",
+        "ATTACHMENT_KIND_INVALID",
+        "ATTACHMENT_NOT_VALID",
+        "PROCEDURAL_OVERRIDE_INVALID",
+        "PROCEDURAL_RESOLUTION_INVALID",
+    ] {
+        if message.contains(code) {
+            return fail(StatusCode::UNPROCESSABLE_ENTITY, code, message);
         }
     }
     for code in [
@@ -223,9 +238,9 @@ fn map_sql(error: sqlx::Error) -> ApiErr {
         "PROFILE_FIELD_MISSING",
         "SUBMISSION_GATE_REJECTED",
         "HUMAN_ACTOR_REQUIRED",
+        "PROJECT_END_MUST_BE_FUTURE",
         "PROJECT_ENDED",
         "PART_KEY_INVALID",
-        "ATTACHMENT_NOT_VALID",
         "ATTACHMENT_VALIDATION_INVALID",
         "ATTACHMENT_VALIDATION_IDENTITY_MISMATCH",
         "ATTACHMENT_RENDER_PAGE_SET_INVALID",
@@ -335,6 +350,62 @@ async fn abandon_staged_upload(pool: &sqlx::PgPool, staging_id: Uuid, actor: &st
     if let Err(error) = storage::abandon_object_upload(pool, staging_id, actor).await {
         tracing::error!(%error, %staging_id, "failed to abandon object upload staging");
     }
+}
+
+async fn enqueue_bid_conversion(
+    pool: &sqlx::PgPool,
+    document_id: Uuid,
+) -> Result<Option<String>, String> {
+    let snapshots = storage::bid_recovery::conversion_snapshots(pool, document_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("document {document_id} snapshot intent is missing"))?;
+    runtime::enqueue_bid_convert_with_snapshots(
+        document_id,
+        runtime::BidConversionV1Snapshots {
+            conversion_snapshot_id: snapshots.conversion_snapshot_id,
+            feature_snapshot_id: snapshots.feature_snapshot_id,
+        },
+    )
+    .await
+}
+
+async fn enqueue_attachment_preparation(
+    pool: &sqlx::PgPool,
+    preparation_job_id: Uuid,
+) -> Result<Option<String>, String> {
+    let snapshots =
+        storage::bid_recovery::attachment_preparation_snapshots(pool, preparation_job_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                format!("attachment preparation {preparation_job_id} snapshot intent is missing")
+            })?;
+    runtime::enqueue_bid_prepare_attachment_v1_with_snapshots(
+        preparation_job_id,
+        runtime::BidConversionV1Snapshots {
+            conversion_snapshot_id: snapshots.conversion_snapshot_id,
+            feature_snapshot_id: snapshots.feature_snapshot_id,
+        },
+    )
+    .await
+}
+
+async fn enqueue_submission_render(
+    pool: &sqlx::PgPool,
+    render_job_id: Uuid,
+) -> Result<Option<String>, String> {
+    let snapshots = storage::bid_recovery::submission_render_snapshots(pool, render_job_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("submission render {render_job_id} snapshot intent is missing"))?;
+    runtime::enqueue_bid_render_submission_v1_with_snapshots(
+        render_job_id,
+        runtime::BidRenderSubmissionV1Snapshots {
+            submission_render_job_snapshot_id: snapshots.submission_render_job_snapshot_id,
+        },
+    )
+    .await
 }
 
 async fn require_open(pool: &sqlx::PgPool, id: Uuid) -> Result<storage::bidding::Project, ApiErr> {
@@ -645,7 +716,9 @@ async fn upload_document(
         abandon_staged_upload(&pool, staging_id, &actor).await;
     }
     let created = created.map_err(map_sql)?;
-    let _ = runtime::enqueue_bid_convert(document_id).await;
+    if let Err(error) = enqueue_bid_conversion(&pool, document_id).await {
+        tracing::warn!(%document_id, %error, "bid conversion enqueue failed; durable intent remains pending");
+    }
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -678,7 +751,9 @@ async fn retry_document(
     )
     .await
     .map_err(map_sql)?;
-    let _ = runtime::enqueue_bid_convert(did).await;
+    if let Err(error) = enqueue_bid_conversion(&pool, did).await {
+        tracing::warn!(document_id = %did, %error, "bid conversion retry enqueue failed; durable intent remains pending");
+    }
     Ok(Json(result))
 }
 
@@ -1489,6 +1564,17 @@ struct ResolveBody {
     reason: Option<String>,
 }
 
+fn validate_resolve_body(body: &ResolveBody) -> Result<(), ApiErr> {
+    if body.resolution == "satisfied_by_attachment" && body.attachment_id.is_none() {
+        return Err(fail(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "PROCEDURAL_RESOLUTION_INVALID",
+            "attachment_id is required for satisfied_by_attachment",
+        ));
+    }
+    Ok(())
+}
+
 async fn resolve_requirement(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1496,6 +1582,7 @@ async fn resolve_requirement(
     Json(body): Json<ResolveBody>,
 ) -> Result<Json<Value>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
+    validate_resolve_body(&body)?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
     let context = storage::bidding::MutationContext::new(
@@ -1597,7 +1684,7 @@ async fn upload_attachment(
         .and_then(Value::as_str)
         .and_then(|value| Uuid::parse_str(value).ok())
     {
-        match runtime::enqueue_bid_prepare_attachment_v1(preparation_job_id).await {
+        match enqueue_attachment_preparation(&pool, preparation_job_id).await {
             Ok(Some(_)) => {}
             Ok(None) => tracing::warn!(%preparation_job_id,
                 "attachment preparation queue unavailable; durable job remains pending"),
@@ -2032,7 +2119,7 @@ async fn render_manifest(
                 "durable render job did not return an id",
             )
         })?;
-    match runtime::enqueue_bid_render_submission_v1(render_job_id).await {
+    match enqueue_submission_render(&pool, render_job_id).await {
         Ok(Some(_)) => {}
         Ok(None) => {
             tracing::warn!(%render_job_id, "render queue unavailable; durable job remains pending")
@@ -2444,5 +2531,50 @@ mod tests {
                 "{code}"
             );
         }
+    }
+
+    #[test]
+    fn bid_domain_errors_have_stable_http_statuses() {
+        for (code, expected_status) in [
+            ("ATTACHMENT_PREPARATION_INCOMPLETE", StatusCode::CONFLICT),
+            ("PROJECT_END_MUST_BE_FUTURE", StatusCode::BAD_REQUEST),
+            ("CLAUSE_REVISION_CAS_MISMATCH", StatusCode::CONFLICT),
+            ("QUOTE_CEILING_REVIEW_CONFLICT", StatusCode::CONFLICT),
+            (
+                "PROCEDURAL_CLASSIFICATION_NOT_CURRENT",
+                StatusCode::CONFLICT,
+            ),
+            (
+                "NO_CEILING_REVIEW_REQUIRED",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("ATTACHMENT_KIND_INVALID", StatusCode::UNPROCESSABLE_ENTITY),
+            (
+                "PROCEDURAL_OVERRIDE_INVALID",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "PROCEDURAL_RESOLUTION_INVALID",
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            ("ATTACHMENT_NOT_VALID", StatusCode::UNPROCESSABLE_ENTITY),
+        ] {
+            let response = map_sql(sqlx::Error::Protocol(code.into())).into_response();
+            assert_eq!(response.status(), expected_status, "{code}");
+        }
+    }
+
+    #[test]
+    fn satisfied_by_attachment_requires_attachment_id_at_the_api_boundary() {
+        let body = ResolveBody {
+            resolution: "satisfied_by_attachment".into(),
+            attachment_id: None,
+            reason: None,
+        };
+
+        let response = validate_resolve_body(&body)
+            .expect_err("missing attachment_id must reject")
+            .into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

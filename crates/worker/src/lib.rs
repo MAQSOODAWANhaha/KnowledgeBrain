@@ -2,6 +2,7 @@
 #![recursion_limit = "512"]
 
 pub mod consume;
+pub mod live_recovery;
 pub mod probe;
 
 use domain::{

@@ -193,6 +193,13 @@ role_psql kb_runtime_worker worker-test -Atc "SELECT count(*) FROM bid_matching_
 role_psql kb_runtime_worker worker-test -Atc "SELECT has_function_privilege('kb_runtime_worker','kb_bid_manifest_render_input(uuid,uuid)','EXECUTE')" | grep -qx 't'
 role_psql kb_runtime_worker worker-test -Atc "SELECT has_function_privilege('kb_runtime_worker','kb_bid_complete_document_conversion(uuid,uuid,uuid,bytea,text,kb_sha256,jsonb,uuid,integer,text,text,kb_actor_identity)','EXECUTE')" | grep -qx 't'
 role_psql kb_runtime_worker worker-test -Atc "SELECT has_function_privilege('kb_runtime_worker','kb_bid_sync_project_procedural(uuid,kb_actor_identity)','EXECUTE')" | grep -qx 'f'
+role_psql kb_runtime_worker worker-test -Atc "SELECT has_function_privilege('kb_runtime_worker','kb_object_upload_expire()','EXECUTE')" | grep -qx 'f'
+role_psql kb_runtime_retention retention-test -Atc "SELECT has_function_privilege('kb_runtime_retention','kb_object_upload_expire()','EXECUTE')" | grep -qx 't'
+role_psql kb_runtime_retention retention-test -Atc "SELECT count(*) FROM application_maintenance_gate" | grep -qx '1'
+role_psql kb_runtime_retention retention-test -Atc "SELECT count(*) FROM schema_migrations" | grep -qx '3'
+role_psql kb_runtime_retention retention-test -Atc "SELECT count(*) FROM production_first_launch_catalog_verifications" | grep -qx '1'
+expect_denied kb_runtime_retention retention-test "SELECT count(*) FROM queue_contract_current"
+expect_denied kb_runtime_retention retention-test "SELECT count(*) FROM available_object_registry"
 
 profile_project=10000000-0000-0000-0000-000000000037
 profile_actor=user:10000000-0000-0000-0000-000000000001

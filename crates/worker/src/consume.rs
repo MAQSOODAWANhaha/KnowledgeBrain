@@ -5,9 +5,9 @@ use runtime::{
     BidConvertJob, BidConvertV1Queue, BidExtractJob, BidExtractV1Queue, BidMatchRouteV1Job,
     BidMatchingV1Queue, BidPrepareAttachmentV1Job, BidRenderSubmissionV1Job, BidRenderV1Queue,
     DatatableJob, DefaultQueue, DocumentProcessJob, ExtractJob, HousekeepJob, ImageMultimodalJob,
-    IndexDeleteJob, KbDeleteJob, ListDeleteJob, ListReparseJob, LowQueue, PostProcessJob,
-    PostprocessQueue, QuestionJob, SummaryJob, SummaryQueue, VersionCloneJob, WikiFinalizeJob,
-    WikiIngestJob, WikiQueue,
+    IndexDeleteJob, KbDeleteJob, ListDeleteJob, ListReparseJob, LiveRecoveryV1Job, LowQueue,
+    PostProcessJob, PostprocessQueue, QuestionJob, SummaryJob, SummaryQueue, VersionCloneJob,
+    WikiFinalizeJob, WikiIngestJob, WikiQueue,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -1525,70 +1525,42 @@ impl oxana::Worker<HousekeepJob> for HousekeepWorker {
         storage::housekeep_documents(pool, runtime::HOUSEKEEP_STALE_SECS)
             .await
             .map_err(|e| JobErr(e.to_string()))?;
-        storage::expire_object_uploads(pool)
-            .await
-            .map_err(|e| JobErr(e.to_string()))?;
-        let _ = storage::bid_submission::housekeep_end_expired(pool).await;
-        if let Ok(ids) = storage::bid_submission::reclaim_stale_conversions(pool).await {
-            for id in ids {
-                tracing::warn!(document_id = %id, "bid convert reclaim");
-                let _ = runtime::enqueue_bid_convert(id).await;
-            }
-        }
-        if let Ok(ids) = storage::bid_submission::pending_conversions(pool).await {
-            for id in ids {
-                let _ = runtime::enqueue_bid_convert(id).await;
-            }
-        }
-        if let Ok(reaped) = storage::bid_submission::reap_attachment_preparations(pool).await
-            && reaped > 0
-        {
-            tracing::warn!(reaped, "attachment preparation claims reaped");
-        }
-        if let Ok(ids) = storage::bid_submission::pending_attachment_preparations(pool).await {
-            for preparation_job_id in ids {
-                let _ = runtime::enqueue_bid_prepare_attachment_v1(preparation_job_id).await;
-            }
-        }
-        if let Ok(stale) = storage::bid_submission::reclaim_stale_extractions(pool).await {
-            for (target_id, project_id, document_id) in stale {
-                tracing::warn!(target_id = %target_id, project_id = %project_id, "bid extract reclaim");
-                let _ =
-                    runtime::enqueue_bid_extract(target_id, project_id, Some(document_id)).await;
-            }
-        }
-        if let Ok(pending) = storage::bid_submission::pending_extractions(pool).await {
-            for (target_id, project_id, document_id) in pending {
-                let _ =
-                    runtime::enqueue_bid_extract(target_id, project_id, Some(document_id)).await;
-            }
-        }
-        if let Ok(projects) = storage::bid_submission::dirty_match_projects(pool).await {
-            for project_id in projects {
-                let _ = bid::schedule_dirty_and_enqueue(
-                    pool,
-                    project_id,
-                    storage::bid_matching::ScheduleMutationContext::system(),
-                )
-                .await;
-            }
-        }
-        // Matching reaping uses each claim's frozen lease policy and DB time;
-        // housekeeping cannot inject an arbitrary stale threshold.
-        storage::bid_matching::reap_expired_claims(pool)
-            .await
-            .map_err(|error| JobErr(error.to_string()))?;
-        let _ = bid::enqueue_pending_route_jobs(pool).await;
-        storage::bid_submission::reap_submission_renders(pool)
-            .await
-            .map_err(|error| JobErr(error.to_string()))?;
-        if let Ok(render_job_ids) = storage::bid_submission::pending_submission_renders(pool).await
-        {
-            for render_job_id in render_job_ids {
-                let _ = runtime::enqueue_bid_render_submission_v1(render_job_id).await;
-            }
-        }
         Ok(())
+    }
+}
+
+pub struct LiveRecoveryV1Handler {
+    pool: Option<PgPool>,
+}
+
+impl oxana::FromContext<AppCtx> for LiveRecoveryV1Handler {
+    fn from_context(ctx: &AppCtx) -> Self {
+        Self {
+            pool: ctx.pool.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl oxana::Worker<LiveRecoveryV1Job> for LiveRecoveryV1Handler {
+    type Error = JobErr;
+
+    fn max_retries(&self, _job: &LiveRecoveryV1Job) -> u32 {
+        3
+    }
+
+    async fn process(
+        &self,
+        job: LiveRecoveryV1Job,
+        _ctx: &oxana::JobContext,
+    ) -> Result<(), Self::Error> {
+        job.validate().map_err(JobErr)?;
+        let Some(pool) = &self.pool else {
+            return Err(JobErr("postgres not configured".into()));
+        };
+        crate::live_recovery::process(pool, job)
+            .await
+            .map_err(JobErr)
     }
 }
 
@@ -1617,9 +1589,19 @@ impl oxana::Worker<BidConvertJob> for BidConvertWorker {
         job: BidConvertJob,
         _ctx: &oxana::JobContext,
     ) -> Result<(), Self::Error> {
+        job.validate().map_err(JobErr)?;
         let Some(pool) = &self.pool else {
             return Err(JobErr("postgres not configured".into()));
         };
+        let snapshots = storage::bid_recovery::conversion_snapshots(pool, job.document_id)
+            .await
+            .map_err(|error| JobErr(error.to_string()))?
+            .ok_or_else(|| JobErr("bid conversion snapshot intent is missing".into()))?;
+        if snapshots.conversion_snapshot_id != job.conversion_snapshot_id
+            || snapshots.feature_snapshot_id != job.feature_snapshot_id
+        {
+            return Err(JobErr("bid conversion snapshot fence changed".into()));
+        }
         let target_id = bid::tender::convert_and_schedule_document(pool, job.document_id)
             .await
             .map_err(JobErr)?;
@@ -1636,8 +1618,20 @@ impl oxana::Worker<BidConvertJob> for BidConvertWorker {
             project_id = %document.project_id,
             "bid_convert queued frozen extraction target"
         );
-        let _ = runtime::enqueue_bid_extract(target_id, document.project_id, Some(job.document_id))
-            .await;
+        let snapshots = storage::bid_recovery::extraction_snapshots(pool, target_id)
+            .await
+            .map_err(|error| JobErr(error.to_string()))?
+            .ok_or_else(|| JobErr("bid extraction snapshot intent is missing".into()))?;
+        let _ = runtime::enqueue_bid_extract_with_snapshots(
+            target_id,
+            document.project_id,
+            Some(job.document_id),
+            runtime::BidExtractV1Snapshots {
+                target_config_snapshot_id: snapshots.target_config_snapshot_id,
+                feature_snapshot_id: snapshots.feature_snapshot_id,
+            },
+        )
+        .await;
         Ok(())
     }
 }
@@ -1669,9 +1663,24 @@ impl oxana::Worker<BidPrepareAttachmentV1Job> for BidPrepareAttachmentV1Handler 
         job: BidPrepareAttachmentV1Job,
         _ctx: &oxana::JobContext,
     ) -> Result<(), Self::Error> {
+        job.validate().map_err(JobErr)?;
         let Some(pool) = &self.pool else {
             return Err(JobErr("postgres not configured".into()));
         };
+        let snapshots =
+            storage::bid_recovery::attachment_preparation_snapshots(pool, job.preparation_job_id)
+                .await
+                .map_err(|error| JobErr(error.to_string()))?
+                .ok_or_else(|| {
+                    JobErr("attachment preparation snapshot intent is missing".into())
+                })?;
+        if snapshots.conversion_snapshot_id != job.conversion_snapshot_id
+            || snapshots.feature_snapshot_id != job.feature_snapshot_id
+        {
+            return Err(JobErr(
+                "attachment preparation snapshot fence changed".into(),
+            ));
+        }
         let claim_token = Uuid::new_v4();
         let Some(claim) = storage::bid_submission::claim_attachment_preparation(
             pool,
@@ -1897,6 +1906,25 @@ struct AttachmentPageStagingGuard {
     staging_ids: Vec<Uuid>,
 }
 
+const STAGING_ABANDON_ATTEMPTS: usize = 10;
+const STAGING_ABANDON_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+async fn abandon_staging_with_retry(pool: &PgPool, staging_id: Uuid, actor: &str) {
+    let mut last_error = None;
+    for attempt in 1..=STAGING_ABANDON_ATTEMPTS {
+        match storage::abandon_object_upload(pool, staging_id, actor).await {
+            Ok(true) => return,
+            Ok(false) => last_error = None,
+            Err(error) => last_error = Some(error.to_string()),
+        }
+        if attempt < STAGING_ABANDON_ATTEMPTS {
+            tokio::time::sleep(STAGING_ABANDON_RETRY_DELAY).await;
+        }
+    }
+    tracing::warn!(%staging_id, %actor, ?last_error,
+        "staging abandon retries exhausted; retention expiry remains the backstop");
+}
+
 impl AttachmentPageStagingGuard {
     fn new(pool: PgPool) -> Self {
         Self {
@@ -1923,9 +1951,7 @@ impl Drop for AttachmentPageStagingGuard {
         let staging_ids = std::mem::take(&mut self.staging_ids);
         tokio::spawn(async move {
             for staging_id in staging_ids {
-                let _ =
-                    storage::abandon_object_upload(&pool, staging_id, ATTACHMENT_PREPARATION_ACTOR)
-                        .await;
+                abandon_staging_with_retry(&pool, staging_id, ATTACHMENT_PREPARATION_ACTOR).await;
             }
         });
     }
@@ -1952,9 +1978,19 @@ impl oxana::Worker<BidExtractJob> for BidExtractWorker {
         job: BidExtractJob,
         _ctx: &oxana::JobContext,
     ) -> Result<(), Self::Error> {
+        job.validate().map_err(JobErr)?;
         let Some(pool) = &self.pool else {
             return Err(JobErr("postgres not configured".into()));
         };
+        let snapshots = storage::bid_recovery::extraction_snapshots(pool, job.run_id)
+            .await
+            .map_err(|error| JobErr(error.to_string()))?
+            .ok_or_else(|| JobErr("bid extraction snapshot intent is missing".into()))?;
+        if snapshots.target_config_snapshot_id != job.target_config_snapshot_id
+            || snapshots.feature_snapshot_id != job.feature_snapshot_id
+        {
+            return Err(JobErr("bid extraction snapshot fence changed".into()));
+        }
         bid::tender::run_extraction_target(pool, job.run_id, job.project_id, job.document_id)
             .await
             .map_err(JobErr)
@@ -2024,6 +2060,13 @@ impl oxana::Worker<BidRenderSubmissionV1Job> for BidRenderSubmissionV1Handler {
         let Some(pool) = &self.pool else {
             return Err(JobErr("postgres not configured".into()));
         };
+        let snapshots = storage::bid_recovery::submission_render_snapshots(pool, job.render_job_id)
+            .await
+            .map_err(|error| JobErr(error.to_string()))?
+            .ok_or_else(|| JobErr("submission render snapshot intent is missing".into()))?;
+        if snapshots.submission_render_job_snapshot_id != job.submission_render_job_snapshot_id {
+            return Err(JobErr("submission render snapshot fence changed".into()));
+        }
         let claim_token = Uuid::new_v4();
         let Some(claim) =
             storage::bid_submission::claim_submission_render(pool, job.render_job_id, claim_token)
@@ -2341,8 +2384,8 @@ async fn render_submission_manifest(
         }
     };
     let staging_id = Uuid::new_v4();
-    storage::stage_object_upload(
-        pool,
+    let mut staging = SubmissionStagingGuard::stage(
+        pool.clone(),
         staging_id,
         &object_ref,
         &digest,
@@ -2352,7 +2395,6 @@ async fn render_submission_manifest(
     )
     .await
     .map_err(|error| error.to_string())?;
-    let mut staging = SubmissionStagingGuard::new(pool.clone(), staging_id, &claim.requested_by);
     storage::write_blob_async(&digest, &bytes)
         .await
         .map_err(|error| error.to_string())?;
@@ -2381,6 +2423,31 @@ struct SubmissionStagingGuard {
 }
 
 impl SubmissionStagingGuard {
+    async fn stage(
+        pool: PgPool,
+        staging_id: Uuid,
+        object_ref: &str,
+        digest: &str,
+        media_type: &str,
+        byte_length: i64,
+        actor: &str,
+    ) -> Result<Self, sqlx::Error> {
+        // Hold the cleanup identity before the cancellable database await. The
+        // server can commit staging before this future receives its response.
+        let guard = Self::new(pool.clone(), staging_id, actor);
+        storage::stage_object_upload(
+            &pool,
+            staging_id,
+            object_ref,
+            digest,
+            media_type,
+            byte_length,
+            actor,
+        )
+        .await?;
+        Ok(guard)
+    }
+
     fn new(pool: PgPool, staging_id: Uuid, actor: &str) -> Self {
         Self {
             pool,
@@ -2402,7 +2469,7 @@ impl Drop for SubmissionStagingGuard {
         let pool = self.pool.clone();
         let actor = self.actor.clone();
         tokio::spawn(async move {
-            let _ = storage::abandon_object_upload(&pool, staging_id, &actor).await;
+            abandon_staging_with_retry(&pool, staging_id, &actor).await;
         });
     }
 }
@@ -3467,11 +3534,19 @@ simple_worker!(
 
 pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
     let stop = std::sync::Arc::new(tokio::sync::Notify::new());
+    let recovery_pool = ctx
+        .pool
+        .clone()
+        .ok_or_else(|| "postgres not configured".to_string())?;
     let stopper = stop.clone();
     let signal_task = tokio::spawn(async move {
         shutdown_signal().await;
         stopper.notify_waiters();
     });
+    let recovery_task = tokio::spawn(crate::live_recovery::run_discovery_loop(
+        recovery_pool,
+        stop.clone(),
+    ));
     let shut = |n: std::sync::Arc<tokio::sync::Notify>| async move {
         n.notified().await;
         Ok::<(), std::io::Error>(())
@@ -3544,6 +3619,7 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .worker::<KbDeleteWorker, KbDeleteJob>()
             .worker::<ListReparseWorker, ListReparseJob>()
             .worker::<IndexDeleteWorker, IndexDeleteJob>()
+            .worker::<LiveRecoveryV1Handler, LiveRecoveryV1Job>()
             .shutdown_on(shut(stop.clone()))
             .shutdown_timeout(timeout)
             .run()
@@ -3566,15 +3642,19 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .queue_with_concurrency::<WikiQueue>(runtime::runtime_concurrency("WIKI", 8))
             .worker::<WikiIngestWorker, WikiIngestJob>()
             .worker::<WikiFinalizeWorker, WikiFinalizeJob>()
-            .shutdown_on(shut(stop))
+            .shutdown_on(shut(stop.clone()))
             .shutdown_timeout(timeout)
             .run()
     };
     let result = tokio::try_join!(core, post, enrich, maint, shared, wiki_rt)
         .map(|_| ())
         .map_err(|e| e.to_string());
+    stop.notify_waiters();
+    let recovery_result = recovery_task
+        .await
+        .map_err(|error| format!("live-recovery discovery task failed: {error}"))?;
     signal_task.abort();
-    result
+    result.and(recovery_result)
 }
 
 async fn shutdown_signal() {
@@ -3776,10 +3856,14 @@ mod tests {
     #[test]
     fn attachment_preparation_worker_matches_durable_contract() {
         let worker = BidPrepareAttachmentV1Handler { pool: None };
-        let job = BidPrepareAttachmentV1Job {
-            preparation_job_id: Uuid::from_u128(1),
-            task_type: domain::TYPE_BID_PREPARE_ATTACHMENT_V1.to_string(),
-        };
+        let job = BidPrepareAttachmentV1Job::new(
+            Uuid::from_u128(1),
+            runtime::BidConversionV1Snapshots {
+                conversion_snapshot_id: Uuid::from_u128(2),
+                feature_snapshot_id: Uuid::from_u128(3),
+            },
+        )
+        .unwrap();
 
         assert_eq!(
             ATTACHMENT_PREPARATION_ACTOR,
@@ -5022,6 +5106,26 @@ mod tests {
         assert!(src.contains("queue_with_concurrency"));
     }
 
+    #[test]
+    fn live_recovery_uses_typed_producer_instead_of_an_empty_cron_payload() {
+        assert!(
+            <LiveRecoveryV1Handler as oxana::Worker<LiveRecoveryV1Job>>::cron_schedule().is_none()
+        );
+        let src = include_str!("consume.rs");
+        assert!(src.contains("live_recovery::run_discovery_loop"));
+    }
+
+    #[test]
+    fn run_core_registers_live_recovery_without_maintenance_housekeep() {
+        let src = include_str!("consume.rs");
+        let live_registration =
+            concat!(".worker::<LiveRecoveryV1Handler, ", "LiveRecoveryV1Job>()");
+        let maintenance_registration = concat!(".worker::<HousekeepWorker, ", "HousekeepJob>()");
+
+        assert!(src.contains(live_registration));
+        assert!(!src.contains(maintenance_registration));
+    }
+
     #[tokio::test]
     async fn process_post_process_clone_keep_sets_progress_and_wiki_pending() {
         let _g = db_lock().await;
@@ -5255,6 +5359,77 @@ mod tests {
         assert!(
             qs.as_array().is_some_and(|a| !a.is_empty()),
             "questions written back: {qs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn submission_staging_is_abandoned_when_the_render_future_is_cancelled() {
+        let _g = db_lock().await;
+        let pool = match connect().await {
+            Ok(pool) => pool,
+            Err(error)
+                if std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").as_deref() == Ok("1") =>
+            {
+                panic!("required PostgreSQL staging cleanup test unavailable: {error}")
+            }
+            Err(error) => {
+                eprintln!("skip: postgres down: {error}");
+                return;
+            }
+        };
+        apply_fresh_baseline(&pool).await.unwrap();
+        let staging_id = Uuid::new_v4();
+        let actor = format!("user:{}", Uuid::new_v4());
+        let bytes = b"cancelled submission output";
+        let digest = domain::sha256_hex(bytes);
+        let object_ref = storage::object_ref(&digest);
+        let staging = SubmissionStagingGuard::new(pool.clone(), staging_id, &actor);
+        let delayed_pool = pool.clone();
+        let delayed_actor = actor.clone();
+        let delayed_object_ref = object_ref.clone();
+        let delayed_digest = digest.clone();
+        let delayed_stage = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            storage::stage_object_upload(
+                &delayed_pool,
+                staging_id,
+                &delayed_object_ref,
+                &delayed_digest,
+                "application/pdf",
+                bytes.len() as i64,
+                &delayed_actor,
+            )
+            .await
+        });
+
+        let result = runtime::run_with_heartbeat(
+            std::time::Duration::from_millis(3),
+            async move {
+                let _staging = staging;
+                std::future::pending::<Result<(), String>>().await
+            },
+            || async { Ok::<bool, String>(false) },
+        )
+        .await;
+        assert!(matches!(result, runtime::LeaseRun::Lost));
+        delayed_stage.await.unwrap().unwrap();
+
+        let mut remaining = 1_i64;
+        for _ in 0..100 {
+            remaining =
+                sqlx::query_scalar("SELECT count(*) FROM object_upload_staging WHERE id=$1")
+                    .bind(staging_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            if remaining == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            remaining, 0,
+            "retry must abandon staging committed after lease cancellation"
         );
     }
 }

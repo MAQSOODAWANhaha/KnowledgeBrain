@@ -4318,11 +4318,14 @@ name = "retention"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "domain",
  "dotenvy",
  "runtime",
+ "sqlx",
  "storage",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

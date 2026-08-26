@@ -392,7 +392,7 @@ export const api = {
   bids: () => req<Project[]>("/api/v1/bids"),
   createBid: (body: { title: string; ends_at: string; expires_at?: string | null }) =>
     req<{ id: string }>("/api/v1/bids", { method: "POST", body: JSON.stringify(body) }),
-  bid: (id: string) => req<BidDetail>(`/api/v1/bids/${id}`),
+  bid: (id: string, signal?: AbortSignal) => req<BidDetail>(`/api/v1/bids/${id}`, { signal }),
   endBid: (id: string, expected_fact_revision: number) =>
     req<void>(`/api/v1/bids/${id}`, {
       method: "POST",
@@ -409,8 +409,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ expected_generation }),
     }),
-  clauses: (id: string, history = false) =>
-    req<{ clauses: Clause[] }>(`/api/v1/bids/${id}/clauses?include_history=${history}`),
+  clauses: (id: string, history = false, signal?: AbortSignal) =>
+    req<{ clauses: Clause[] }>(`/api/v1/bids/${id}/clauses?include_history=${history}`, { signal }),
   addClause: (id: string, body: { text: string; kind: string; must: boolean }) =>
     req<{ id: string; revision: number }>(`/api/v1/bids/${id}/clauses`, {
       method: "POST",
@@ -425,12 +425,12 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ action: body.action, expected_revision: body.expected_revision, patch: body.patch ?? {} }),
     }),
-  facts: (id: string) =>
+  facts: (id: string, signal?: AbortSignal) =>
     req<{
       project_facts: BidDetail["facts"];
       suggestions: FactSuggestion[];
       history: unknown[];
-    }>(`/api/v1/bids/${id}/facts`),
+    }>(`/api/v1/bids/${id}/facts`, { signal }),
   mutateFact: (
     id: string,
     body: {
@@ -445,8 +445,9 @@ export const api = {
   ) => req<void>(`/api/v1/bids/${id}/facts`, { method: "POST", body: JSON.stringify(body) }),
   rematch: (id: string) => req<{ job_id: string | null }>(`/api/v1/bids/${id}/matching/schedule`, { method: "POST" }),
   matching: (id: string) => req<NonNullable<BidDetail["matching"]>>(`/api/v1/bids/${id}/matching`),
-  units: (id: string) => req<{ units: MatchUnit[] }>(`/api/v1/bids/${id}/units`),
-  routePickSet: (id: string, routeId: string) => req<RoutePickSet>(`/api/v1/bids/${id}/matching/routes/${routeId}/pick-set`),
+  units: (id: string, signal?: AbortSignal) => req<{ units: MatchUnit[] }>(`/api/v1/bids/${id}/units`, { signal }),
+  routePickSet: (id: string, routeId: string, signal?: AbortSignal) =>
+    req<RoutePickSet>(`/api/v1/bids/${id}/matching/routes/${routeId}/pick-set`, { signal }),
   replaceRoutePickSet: (
     id: string,
     routeId: string,
@@ -489,7 +490,8 @@ export const api = {
       method: "DELETE",
       body: JSON.stringify({ expected_edit_version }),
     }),
-  previewQuote: (id: string) => req<{ net_total?: string; tax_total?: string; gross_total?: string }>(`/api/v1/bids/${id}/quote/preview`),
+  previewQuote: (id: string, signal?: AbortSignal) =>
+    req<{ net_total?: string; tax_total?: string; gross_total?: string }>(`/api/v1/bids/${id}/quote/preview`, { signal }),
   finalizeQuote: (
     id: string,
     body: {
@@ -507,13 +509,22 @@ export const api = {
     id: string,
     body: { expected_snapshot_id: string; expected_fact_revision: number; expected_pricing_revision: number },
   ) => req(`/api/v1/bids/${id}/quote/reopen`, { method: "POST", body: JSON.stringify(body) }),
-  companyProfile: (id: string) => req<CompanyProfile | null>(`/api/v1/bids/${id}/company-profile`),
+  companyProfile: (id: string, signal?: AbortSignal) =>
+    req<CompanyProfile | null>(`/api/v1/bids/${id}/company-profile`, { signal }),
   updateCompanyProfile: (id: string, body: CompanyProfile & { expected_revision: number }) =>
-    req(`/api/v1/bids/${id}/company-profile`, { method: "PUT", body: JSON.stringify(body) }),
-  submissionProfile: (id: string) => req<SubmissionProfile | null>(`/api/v1/bids/${id}/submission-profile`),
+    req<{ id: string; revision: number; content_sha256: string }>(`/api/v1/bids/${id}/company-profile`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  submissionProfile: (id: string, signal?: AbortSignal) =>
+    req<SubmissionProfile | null>(`/api/v1/bids/${id}/submission-profile`, { signal }),
   updateSubmissionProfile: (id: string, body: SubmissionProfile & { expected_revision: number }) =>
-    req(`/api/v1/bids/${id}/submission-profile`, { method: "PUT", body: JSON.stringify(body) }),
-  procedural: (id: string) => req<{ classifications: ProceduralClassification[] }>(`/api/v1/bids/${id}/procedural-requirements`),
+    req<{ id: string; revision: number; content_sha256: string }>(`/api/v1/bids/${id}/submission-profile`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  procedural: (id: string, signal?: AbortSignal) =>
+    req<{ classifications: ProceduralClassification[] }>(`/api/v1/bids/${id}/procedural-requirements`, { signal }),
   overrideClassification: (id: string, cid: string, body: { effective_kind: ProceduralRequirementKind; reason: string }) =>
     req(`/api/v1/bids/${id}/procedural-classifications/${cid}/override`, {
       method: "POST",
@@ -528,7 +539,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  attachments: (id: string) => req<{ attachments: ProceduralAttachment[] }>(`/api/v1/bids/${id}/attachments`),
+  attachments: (id: string, signal?: AbortSignal) =>
+    req<{ attachments: ProceduralAttachment[] }>(`/api/v1/bids/${id}/attachments`, { signal }),
   uploadAttachment: (id: string, kind: AttachmentKind, file: File, attempt: MutationAttempt) => {
     const fd = new FormData();
     fd.set("kind", kind);
@@ -544,8 +556,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ expected_revision, reason }),
     }),
-  parts: (id: string) => req<{ required_part_keys: string[]; parts: PartStatus[] }>(`/api/v1/bids/${id}/parts`),
-  part: (id: string, key: string) => req<PartStatus>(`/api/v1/bids/${id}/parts/${encodeURIComponent(key)}`),
+  parts: (id: string, signal?: AbortSignal) =>
+    req<{ required_part_keys: string[]; parts: PartStatus[] }>(`/api/v1/bids/${id}/parts`, { signal }),
+  part: (id: string, key: string, signal?: AbortSignal) =>
+    req<PartStatus>(`/api/v1/bids/${id}/parts/${encodeURIComponent(key)}`, { signal }),
   updatePart: (id: string, key: string, expected_content_revision: number, markdown: string) =>
     req(`/api/v1/bids/${id}/parts/${encodeURIComponent(key)}`, {
       method: "PUT",
@@ -563,9 +577,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  gateIssues: (id: string, format: "docx" | "pdf") =>
+  gateIssues: (id: string, format: "docx" | "pdf", signal?: AbortSignal) =>
     req<{ format: string; status: string; issues: GateIssue[]; required_part_keys: string[] }>(
       `/api/v1/bids/${id}/gate-issues?format=${format}`,
+      { signal },
     ),
   createManifest: (id: string, format: "docx" | "pdf", attempt: MutationAttempt) =>
     req<{ manifest_id: string; content_sha256: string; format: string }>(`/api/v1/bids/${id}/submission/manifests`, {

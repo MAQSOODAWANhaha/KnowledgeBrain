@@ -362,7 +362,7 @@ notes = "Real provider evaluation was NOT run."
         assert!(!evaluation.can_promote());
         assert!(
             lock.is_production_complete(),
-            "signed api/worker pins may make the lock production-complete; eval still cannot promote"
+            "signed api/worker/retention pins may make the lock production-complete; eval still cannot promote"
         );
 
         let hashes = compute_bind_completion_hashes().expect("can hash current bind inputs");

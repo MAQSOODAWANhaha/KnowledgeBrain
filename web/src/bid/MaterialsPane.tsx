@@ -45,8 +45,16 @@ export function MaterialsPane({
   classifications,
   attachments,
   ended,
+  companyDirty,
+  submissionDirty,
+  companySaving,
+  submissionSaving,
+  onChangeCompany,
+  onChangeSubmission,
   onSaveCompany,
   onSaveSubmission,
+  onResetCompany,
+  onResetSubmission,
   onOverride,
   onResolve,
   onUpload,
@@ -58,8 +66,16 @@ export function MaterialsPane({
   classifications: ProceduralClassification[];
   attachments: ProceduralAttachment[];
   ended: boolean;
-  onSaveCompany: (body: CompanyProfile) => void;
-  onSaveSubmission: (body: SubmissionProfile) => void;
+  companyDirty: boolean;
+  submissionDirty: boolean;
+  companySaving: boolean;
+  submissionSaving: boolean;
+  onChangeCompany: (body: CompanyProfile) => void;
+  onChangeSubmission: (body: SubmissionProfile) => void;
+  onSaveCompany: () => void;
+  onSaveSubmission: () => void;
+  onResetCompany: () => void;
+  onResetSubmission: () => void;
   onOverride: (id: string, kind: ProceduralRequirementKind, reason: string) => void;
   onResolve: (id: string, resolution: ProceduralResolution, attachmentId?: string, reason?: string) => void;
   onUpload: (kind: AttachmentKind, file: File) => void;
@@ -78,12 +94,23 @@ export function MaterialsPane({
             label={field.label}
             data-testid={`company-${field.key}`}
             value={company[field.key] ?? ""}
-            onChange={(e) => onSaveCompany({ ...company, [field.key]: e.currentTarget.value })}
+            onChange={(e) => onChangeCompany({ ...company, [field.key]: e.currentTarget.value })}
           />
         ))}
-        <Button mt="md" disabled={ended} onClick={() => onSaveCompany(company)}>
-          保存公司资料
-        </Button>
+        {companyDirty && <p className="note" role="status">有未保存的公司资料修改</p>}
+        <div className="row" style={{ marginTop: 16 }}>
+          <Button disabled={ended} loading={companySaving} onClick={onSaveCompany}>
+            保存公司资料
+          </Button>
+          <Button
+            data-testid="company-reset"
+            variant="default"
+            disabled={!companyDirty || companySaving}
+            onClick={onResetCompany}
+          >
+            重置为已同步版本
+          </Button>
+        </div>
       </div>
     );
   }
@@ -98,24 +125,35 @@ export function MaterialsPane({
             label={field.label}
             data-testid={`submission-${field.key}`}
             value={submission[field.key] ?? ""}
-            onChange={(e) => onSaveSubmission({ ...submission, [field.key]: e.currentTarget.value })}
+            onChange={(e) => onChangeSubmission({ ...submission, [field.key]: e.currentTarget.value })}
           />
         ))}
         <Checkbox
           mt="sm"
           label="已确认盖章"
           checked={!!submission.seal_confirmed}
-          onChange={(e) => onSaveSubmission({ ...submission, seal_confirmed: e.currentTarget.checked })}
+          onChange={(e) => onChangeSubmission({ ...submission, seal_confirmed: e.currentTarget.checked })}
         />
         <Checkbox
           mt="sm"
           label="已确认签字"
           checked={!!submission.signature_confirmed}
-          onChange={(e) => onSaveSubmission({ ...submission, signature_confirmed: e.currentTarget.checked })}
+          onChange={(e) => onChangeSubmission({ ...submission, signature_confirmed: e.currentTarget.checked })}
         />
-        <Button mt="md" disabled={ended} onClick={() => onSaveSubmission(submission)}>
-          保存投标资料
-        </Button>
+        {submissionDirty && <p className="note" role="status">有未保存的投标资料修改</p>}
+        <div className="row" style={{ marginTop: 16 }}>
+          <Button disabled={ended} loading={submissionSaving} onClick={onSaveSubmission}>
+            保存投标资料
+          </Button>
+          <Button
+            data-testid="submission-reset"
+            variant="default"
+            disabled={!submissionDirty || submissionSaving}
+            onClick={onResetSubmission}
+          >
+            重置为已同步版本
+          </Button>
+        </div>
       </div>
     );
   }
@@ -133,7 +171,9 @@ export function MaterialsPane({
           );
           return (
             <div key={c.id} className="inner" style={{ marginTop: 12 }}>
-              <p>{c.segment_text}</p>
+              <p className="lbl">分段原文</p>
+              <p>{c.segment_text || "（空分段）"}</p>
+              <p className="note">来源：已确认的程序条款 · 冻结分段</p>
               <p className="note">
                 {requirementKind} · {c.router_result_status}
               </p>

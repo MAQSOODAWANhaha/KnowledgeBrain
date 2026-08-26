@@ -2,6 +2,7 @@
 
 pub mod bid_matching;
 pub mod bid_quote;
+pub mod bid_recovery;
 pub mod bid_submission;
 pub mod bidding;
 mod first_launch;

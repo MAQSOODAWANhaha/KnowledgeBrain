@@ -365,6 +365,57 @@ async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
     context: &ScheduleMutationContext,
     port: &P,
 ) -> Result<Option<ScheduleReceipt>, sqlx::Error> {
+    schedule_project_with_port(pool, project_id, environment, context, port, None).await
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecoveryScheduleFence {
+    intent_id: Uuid,
+    watermark: i64,
+    snapshots: EnvelopeSnapshotIdentity,
+}
+
+pub async fn schedule_recovery_intent(
+    pool: &PgPool,
+    intent_id: Uuid,
+    project_id: Uuid,
+    expected_watermark: i64,
+    expected_snapshots: EnvelopeSnapshotIdentity,
+    environment: ScheduleEnvironment,
+    context: &ScheduleMutationContext,
+) -> Result<Option<ScheduleReceipt>, sqlx::Error> {
+    let port = crate::knowledge_retrieval::PostgresKnowledgeRetrievalAdapter::new(pool.clone());
+    let result = schedule_project_with_port(
+        pool,
+        project_id,
+        environment,
+        context,
+        &port,
+        Some(RecoveryScheduleFence {
+            intent_id,
+            watermark: expected_watermark,
+            snapshots: expected_snapshots,
+        }),
+    )
+    .await;
+    match result {
+        Err(sqlx::Error::Database(error))
+            if error.message().contains("MATCHING_SCHEDULE_FENCE_LOST") =>
+        {
+            Ok(None)
+        }
+        other => other,
+    }
+}
+
+async fn schedule_project_with_port<P: KnowledgeRetrievalPort>(
+    pool: &PgPool,
+    project_id: Uuid,
+    environment: ScheduleEnvironment,
+    context: &ScheduleMutationContext,
+    port: &P,
+    recovery_fence: Option<RecoveryScheduleFence>,
+) -> Result<Option<ScheduleReceipt>, sqlx::Error> {
     if !(1..=32).contains(&environment.max_attempts)
         || !matches!(
             environment.environment.as_str(),
@@ -373,16 +424,47 @@ async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
     {
         return Err(protocol("invalid matching scheduling policy"));
     }
-    let project =
+    let project = if let Some(fence) = recovery_fence {
+        sqlx::query(
+            "SELECT project.status,project.matching_mutation_watermark
+               FROM bidding_projects project
+               JOIN bid_matching_schedule_intents intent ON intent.project_id=project.id
+              WHERE project.id=$1 AND intent.id=$2
+                AND intent.mutation_watermark=$3
+                AND project.matching_mutation_watermark=$3
+                AND intent.matching_config_snapshot_id=$4
+                AND intent.feature_snapshot_id=$5
+                AND intent.score_policy_snapshot_id=$6
+                AND intent.verifier_policy_snapshot_id=$7",
+        )
+        .bind(project_id)
+        .bind(fence.intent_id)
+        .bind(fence.watermark)
+        .bind(fence.snapshots.config_snapshot_id)
+        .bind(fence.snapshots.feature_snapshot_id)
+        .bind(fence.snapshots.score_policy_snapshot_id)
+        .bind(fence.snapshots.verifier_policy_snapshot_id)
+        .fetch_optional(pool)
+        .await?
+    } else {
         sqlx::query("SELECT status,matching_mutation_watermark FROM bidding_projects WHERE id=$1")
             .bind(project_id)
             .fetch_optional(pool)
             .await?
-            .ok_or_else(|| protocol("bid project does not exist"))?;
+    };
+    let Some(project) = project else {
+        return if recovery_fence.is_some() {
+            Ok(None)
+        } else {
+            Err(protocol("bid project does not exist"))
+        };
+    };
     if project.get::<String, _>("status") != "open" {
         return Err(protocol("bid project is not open"));
     }
-    let watermark: i64 = project.get("matching_mutation_watermark");
+    let watermark: i64 = recovery_fence
+        .map(|fence| fence.watermark)
+        .unwrap_or_else(|| project.get("matching_mutation_watermark"));
     let (actor, idempotency_key) = context.identity(project_id, watermark);
     let request_bytes = serde_json::to_vec(&serde_json::json!({
         "schema_version": 1,
@@ -749,7 +831,12 @@ async fn persist_schedule(
         .and_then(serde_json::Value::as_str)
         .and_then(|value| Uuid::parse_str(value).ok())
         .ok_or_else(|| protocol("matching schedule receipt missing manifest"))?;
-    let snapshots = snapshot_identity(manifest_id);
+    let snapshots = EnvelopeSnapshotIdentity {
+        config_snapshot_id: uuid_json_field(&scheduled, "matching_config_snapshot_id")?,
+        feature_snapshot_id: uuid_json_field(&scheduled, "feature_snapshot_id")?,
+        score_policy_snapshot_id: uuid_json_field(&scheduled, "score_policy_snapshot_id")?,
+        verifier_policy_snapshot_id: uuid_json_field(&scheduled, "verifier_policy_snapshot_id")?,
+    };
     let jobs = scheduled
         .get("job_ids")
         .and_then(|value| value.as_array())
@@ -768,22 +855,18 @@ pub async fn claim_and_load(
 ) -> Result<Option<ClaimedMatchingRequest>, sqlx::Error> {
     let token = Uuid::new_v4();
     let claimed: Option<serde_json::Value> =
-        sqlx::query_scalar("SELECT kb_bid_matching_claim($1,$2)")
+        sqlx::query_scalar("SELECT kb_bid_matching_claim($1,$2,$3,$4,$5,$6)")
             .bind(job_id)
             .bind(token)
+            .bind(snapshots.config_snapshot_id)
+            .bind(snapshots.feature_snapshot_id)
+            .bind(snapshots.score_policy_snapshot_id)
+            .bind(snapshots.verifier_policy_snapshot_id)
             .fetch_one(pool)
             .await?;
     let Some(claimed) = claimed else {
         return Ok(None);
     };
-    let manifest_id = claimed
-        .get("manifest_id")
-        .and_then(|value| value.as_str())
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .ok_or_else(|| protocol("matching claim missing manifest"))?;
-    if snapshots != snapshot_identity(manifest_id) {
-        return Err(protocol("matching envelope snapshot mismatch"));
-    }
     let mut tx = pool.begin().await?;
     let job = sqlx::query(
         "SELECT j.*,m.generation,m.mutation_watermark,r.route_kind,r.unit_id,r.empty_policy
@@ -1237,13 +1320,23 @@ pub async fn reap_expired_claims(pool: &PgPool) -> Result<u64, sqlx::Error> {
 pub async fn pending_route_envelopes(
     pool: &PgPool,
 ) -> Result<Vec<PendingRouteEnvelope>, sqlx::Error> {
-    let rows=sqlx::query("SELECT id,manifest_id FROM bid_matching_jobs WHERE status='pending' ORDER BY created_at,id")
-      .fetch_all(pool).await?;
+    let rows = sqlx::query(
+        "SELECT id,matching_config_snapshot_id,feature_snapshot_id,
+      score_policy_snapshot_id,verifier_policy_snapshot_id
+      FROM bid_matching_jobs WHERE status='pending' ORDER BY created_at,id",
+    )
+    .fetch_all(pool)
+    .await?;
     Ok(rows
         .into_iter()
         .map(|row| PendingRouteEnvelope {
             job_id: row.get("id"),
-            snapshots: snapshot_identity(row.get("manifest_id")),
+            snapshots: EnvelopeSnapshotIdentity {
+                config_snapshot_id: row.get("matching_config_snapshot_id"),
+                feature_snapshot_id: row.get("feature_snapshot_id"),
+                score_policy_snapshot_id: row.get("score_policy_snapshot_id"),
+                verifier_policy_snapshot_id: row.get("verifier_policy_snapshot_id"),
+            },
         })
         .collect())
 }
@@ -1781,23 +1874,23 @@ async fn verify_mixed_pick_rows(
     verify_project_pick_union(unsectioned, &project_items, &route_items)
 }
 
-fn snapshot_identity(manifest_id: Uuid) -> EnvelopeSnapshotIdentity {
-    EnvelopeSnapshotIdentity {
-        config_snapshot_id: deterministic_uuid("config", manifest_id.as_bytes()),
-        feature_snapshot_id: deterministic_uuid("feature", manifest_id.as_bytes()),
-        score_policy_snapshot_id: deterministic_uuid("score", manifest_id.as_bytes()),
-        verifier_policy_snapshot_id: deterministic_uuid("verifier", manifest_id.as_bytes()),
-    }
+fn uuid_json_field(value: &serde_json::Value, field: &str) -> Result<Uuid, sqlx::Error> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| protocol(format!("matching schedule receipt missing {field}")))
 }
+
 fn deterministic_uuid(tag: &str, identity: &[u8]) -> Uuid {
     let mut h = Sha256::new();
     h.update(tag);
     h.update([0]);
     h.update(identity);
-    let mut b: [u8; 16] = h.finalize()[..16].try_into().unwrap();
-    b[6] = (b[6] & 15) | 80;
-    b[8] = (b[8] & 63) | 128;
-    Uuid::from_bytes(b)
+    let mut bytes: [u8; 16] = h.finalize()[..16].try_into().expect("sha256 prefix");
+    bytes[6] = (bytes[6] & 15) | 80;
+    bytes[8] = (bytes[8] & 63) | 128;
+    Uuid::from_bytes(bytes)
 }
 fn base64_encode(bytes: &[u8]) -> String {
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

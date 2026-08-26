@@ -23,6 +23,7 @@
 - 知识库领域真源：[`domain.md`](domain.md)
 - 仓库实现快照（非规范）：[`../research/repository-implementation-snapshot.md`](../research/repository-implementation-snapshot.md)
 - 文档详情计划：[`../../plans/knowledge-base/document-detail.md`](../../plans/knowledge-base/document-detail.md)
+- 检索融合与可选重排计划：[`../../plans/knowledge-base/retrieval-ranking.md`](../../plans/knowledge-base/retrieval-ranking.md)
 - 外部解析抽取调研基线：[`../research/weknora-parse-extract-baseline.md`](../research/weknora-parse-extract-baseline.md)
 
 本页没有改动现有 Workspace、Document、索引或检索业务规则；后续知识库重构应在 [`../../plans/knowledge-base/README.md`](../../plans/knowledge-base/README.md) 下独立评审。

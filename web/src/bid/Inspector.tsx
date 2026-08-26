@@ -7,6 +7,8 @@ export function Inspector({
   cur,
   ended,
   pickSet,
+  selectedCandidateIds,
+  pendingCandidateIds,
   onPatch,
   onConfirm,
   onUnconfirm,
@@ -16,13 +18,15 @@ export function Inspector({
   cur: Clause | null;
   ended: boolean;
   pickSet: RoutePickSet | null;
+  selectedCandidateIds?: ReadonlySet<string>;
+  pendingCandidateIds: ReadonlySet<string>;
   onPatch: (c: Clause, patch: Record<string, unknown>) => void;
   onConfirm: (c: Clause) => void;
   onUnconfirm: (c: Clause) => void;
   onPickToggle: (candidate: Candidate, include: boolean) => void;
 }) {
   if (step === "matching" && pickSet) {
-    const picked = new Set(pickSet.items.map((i) => i.candidate_artifact_id));
+    const picked = selectedCandidateIds ?? new Set(pickSet.items.map((i) => i.candidate_artifact_id));
     return (
       <>
         <p className="lbl">全部 supported</p>
@@ -32,7 +36,8 @@ export function Inspector({
             <Checkbox
               data-testid={`pick-${c.candidate_artifact_id}`}
               checked={picked.has(c.candidate_artifact_id)}
-              disabled={ended}
+              disabled={ended || pendingCandidateIds.has(c.candidate_artifact_id)}
+              aria-busy={pendingCandidateIds.has(c.candidate_artifact_id)}
               onChange={(e) => onPickToggle(c, e.currentTarget.checked)}
             />
             <span>

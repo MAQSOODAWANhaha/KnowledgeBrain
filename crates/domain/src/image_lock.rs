@@ -1,8 +1,8 @@
 //! Checked-in image lock reader.
 //!
 //! linux/amd64 may pin inspectable runtime digests. The lock is not production-
-//! complete until every runtime and build-base entry is signed, including api
-//! and worker. An incomplete lock cannot flip runtime completion.
+//! complete until every runtime and build-base entry is signed, including api,
+//! worker, and retention. An incomplete lock cannot flip runtime completion.
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -84,6 +84,7 @@ impl ImageLock {
                     .all(ImageLockEntry::is_signed)
                 && has_signed_lock_id(&platform.runtime_deployable, "api")
                 && has_signed_lock_id(&platform.runtime_deployable, "worker")
+                && has_signed_lock_id(&platform.runtime_deployable, "retention")
         })
     }
 
@@ -282,7 +283,7 @@ mod tests {
             "minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
         );
         assert!(minio.is_signed());
-        assert_eq!(amd64.runtime_deployable.len(), 7);
+        assert_eq!(amd64.runtime_deployable.len(), 8);
         let api = amd64
             .runtime_deployable
             .iter()
@@ -309,6 +310,19 @@ mod tests {
             "knowledgebrain-worker@sha256:5d2715634560254f7c975b5c2a35bc73b72a09ec7926696d91d0dbaa9be6d256"
         );
         assert!(worker.is_signed());
+        let retention = amd64
+            .runtime_deployable
+            .iter()
+            .find(|entry| entry.lock_id == "retention")
+            .expect("retention runtime pin");
+        assert_eq!(retention.compose_service, "retention");
+        assert_eq!(retention.deploy_target, "runtime");
+        assert!(!retention.unsigned);
+        assert_eq!(
+            retention.image,
+            "knowledgebrain-worker@sha256:5d2715634560254f7c975b5c2a35bc73b72a09ec7926696d91d0dbaa9be6d256"
+        );
+        assert!(retention.is_signed());
         let docreader = amd64
             .runtime_deployable
             .iter()
@@ -324,6 +338,7 @@ mod tests {
         assert!(docreader.is_signed());
         assert!(has_signed_lock_id(&amd64.runtime_deployable, "api"));
         assert!(has_signed_lock_id(&amd64.runtime_deployable, "worker"));
+        assert!(has_signed_lock_id(&amd64.runtime_deployable, "retention"));
         assert_eq!(amd64.build_base.len(), 4);
         for (lock_id, image) in [
             (
@@ -452,6 +467,11 @@ mod tests {
                   "compose_service": "worker",
                   "deploy_target": "runtime",
                   "image": "example.com/knowledgebrain-worker@sha256:{digest}"
+                }}, {{
+                  "lock_id": "retention",
+                  "compose_service": "retention",
+                  "deploy_target": "runtime",
+                  "image": "example.com/knowledgebrain-worker@sha256:{digest}"
                 }}"#
             ),
             &format!(
@@ -515,5 +535,67 @@ mod tests {
             "checked-in lock must not invent production digests"
         );
         assert!(checked.is_production_complete());
+    }
+
+    #[test]
+    fn production_complete_requires_signed_retention_runtime() {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let without_retention = ImageLock::parse(&platform_json(
+            &format!(
+                r#"{{
+                  "lock_id": "api",
+                  "compose_service": "api",
+                  "deploy_target": "runtime",
+                  "image": "example.com/knowledgebrain-api@sha256:{digest}"
+                }}, {{
+                  "lock_id": "worker",
+                  "compose_service": "worker",
+                  "deploy_target": "runtime",
+                  "image": "example.com/knowledgebrain-worker@sha256:{digest}"
+                }}"#
+            ),
+            &format!(
+                r#"{{
+                  "lock_id": "rust-bookworm",
+                  "compose_service": "build",
+                  "deploy_target": "build",
+                  "image": "example.com/rust-base@sha256:{digest}"
+                }}"#
+            ),
+        ))
+        .expect("signed lock without retention");
+
+        assert!(!without_retention.is_production_complete());
+    }
+
+    #[test]
+    fn checked_in_compose_uses_the_locked_retention_image() {
+        let lock = checked_in();
+        let retention = lock.platforms[REQUIRED_PLATFORM]
+            .runtime_deployable
+            .iter()
+            .find(|entry| entry.lock_id == "retention")
+            .expect("retention runtime pin");
+        let compose_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../deploy/docker-compose.yml");
+        let compose = std::fs::read_to_string(compose_path).expect("checked-in Compose file");
+        let retention_block = compose
+            .split_once("\n  retention:\n")
+            .map(|(_, tail)| tail)
+            .expect("retention service")
+            .split_once("\nvolumes:\n")
+            .map(|(block, _)| block)
+            .expect("retention service boundary");
+        let compose_image = retention_block
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("image: "))
+            .expect("retention image");
+
+        assert_eq!(
+            compose_image.replace(":local@sha256:", "@sha256:"),
+            retention.image
+        );
+        assert!(retention_block.contains("args:\n        BIN: worker"));
+        assert!(retention_block.contains("\n      BIN: retention\n"));
     }
 }

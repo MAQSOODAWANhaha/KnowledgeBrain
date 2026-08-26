@@ -9,6 +9,12 @@ license.workspace = true
 axum.workspace = true
 dotenvy.workspace = true
 runtime = { path = "../runtime" }
+sqlx.workspace = true
 storage = { path = "../storage" }
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+domain = { path = "../domain" }
+storage = { path = "../storage", features = ["first-launch-migration"] }
+uuid.workspace = true

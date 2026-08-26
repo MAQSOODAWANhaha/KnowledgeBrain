@@ -93,6 +93,43 @@ fn shot_upload_request_with_key(
         .unwrap()
 }
 
+fn attachment_upload_request(token: &str, project_id: &str, bytes: &[u8]) -> Request<Body> {
+    attachment_upload_request_with_kind(token, project_id, "bid_bond", bytes)
+}
+
+fn attachment_upload_request_with_kind(
+    token: &str,
+    project_id: &str,
+    kind: &str,
+    bytes: &[u8],
+) -> Request<Body> {
+    let boundary = format!("kb-attachment-{}", Uuid::new_v4().simple());
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"kind\"\r\n\r\n{kind}\r\n")
+            .as_bytes(),
+    );
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"bond.pdf\"\r\nContent-Type: application/pdf\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/bids/{project_id}/attachments"))
+        .header("authorization", format!("Bearer {token}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .header("idempotency-key", Uuid::new_v4().to_string())
+        .body(Body::from(body))
+        .unwrap()
+}
+
 fn document_upload_request_with_key(
     token: &str,
     project_id: &str,
@@ -422,6 +459,120 @@ async fn procedural_listing_includes_frozen_segment_text() {
         body["classifications"][0]["segment_text"], segment_text,
         "operators need the frozen segment body to resolve the requirement"
     );
+
+    let resolve_uri =
+        format!("/api/v1/bids/{project}/procedural-requirements/{classification_id}/resolve");
+    let (missing_attachment_status, missing_attachment_body) = call(
+        &app,
+        json_request(
+            &token,
+            "POST",
+            &resolve_uri,
+            json!({"resolution":"satisfied_by_attachment"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        missing_attachment_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{missing_attachment_body}"
+    );
+    assert_eq!(
+        missing_attachment_body["error"]["code"],
+        "PROCEDURAL_RESOLUTION_INVALID"
+    );
+
+    let (unknown_attachment_status, unknown_attachment_body) = call(
+        &app,
+        json_request(
+            &token,
+            "POST",
+            &resolve_uri,
+            json!({
+                "resolution":"satisfied_by_attachment",
+                "attachment_id":Uuid::new_v4()
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        unknown_attachment_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{unknown_attachment_body}"
+    );
+    assert_eq!(
+        unknown_attachment_body["error"]["code"],
+        "ATTACHMENT_NOT_VALID"
+    );
+
+    let (invalid_resolution_status, invalid_resolution_body) = call(
+        &app,
+        json_request(
+            &token,
+            "POST",
+            &resolve_uri,
+            json!({"resolution":"confirmed_by_user"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        invalid_resolution_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{invalid_resolution_body}"
+    );
+    assert_eq!(
+        invalid_resolution_body["error"]["code"],
+        "PROCEDURAL_RESOLUTION_INVALID"
+    );
+
+    let override_uri =
+        format!("/api/v1/bids/{project}/procedural-classifications/{classification_id}/override");
+    let (invalid_override_status, invalid_override_body) = call(
+        &app,
+        json_request(
+            &token,
+            "POST",
+            &override_uri,
+            json!({"effective_kind":"invalid","reason":"invalid contract probe"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        invalid_override_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{invalid_override_body}"
+    );
+    assert_eq!(
+        invalid_override_body["error"]["code"],
+        "PROCEDURAL_OVERRIDE_INVALID"
+    );
+
+    let (override_status, override_body) = call(
+        &app,
+        json_request(
+            &token,
+            "POST",
+            &override_uri,
+            json!({"effective_kind":"bid_bond","reason":"exercise stale classification"}),
+        ),
+    )
+    .await;
+    assert_eq!(override_status, StatusCode::OK, "{override_body}");
+    let (stale_status, stale_body) = call(
+        &app,
+        json_request(
+            &token,
+            "POST",
+            &override_uri,
+            json!({"effective_kind":"seal_sample","reason":"stale classification probe"}),
+        ),
+    )
+    .await;
+    assert_eq!(stale_status, StatusCode::CONFLICT, "{stale_body}");
+    assert_eq!(
+        stale_body["error"]["code"],
+        "PROCEDURAL_CLASSIFICATION_NOT_CURRENT"
+    );
 }
 
 async fn regenerate_rejects_existing_dependency_cas_mismatches() {
@@ -589,6 +740,271 @@ async fn bid_routes_and_list_are_isolated_by_project_owner() {
         assert_ne!(status, StatusCode::NOT_FOUND, "missing V1 GET {uri}");
         assert_ne!(body["error"]["code"], "NOT_FOUND", "missing V1 GET {uri}");
     }
+}
+
+async fn bid_sql_error_contracts_map_to_stable_http_statuses() {
+    let Some(pool) = live_submission_pool().await else {
+        return;
+    };
+    let (app, owner_token) = live_actor(&pool).await;
+
+    let (past_end_status, past_end_body) = call(
+        &app,
+        json_request(
+            &owner_token,
+            "POST",
+            "/api/v1/bids",
+            json!({"title":"Past end","ends_at":"2000-01-01T00:00:00Z"}),
+        ),
+    )
+    .await;
+    assert_eq!(past_end_status, StatusCode::BAD_REQUEST, "{past_end_body}");
+    assert_eq!(
+        past_end_body["error"]["code"], "PROJECT_END_MUST_BE_FUTURE",
+        "{past_end_body}"
+    );
+
+    let project = create_project(&app, &owner_token, "HTTP error mapping").await;
+    let (clause_status, clause) = call(
+        &app,
+        json_request(
+            &owner_token,
+            "POST",
+            &format!("/api/v1/bids/{project}/clauses"),
+            json!({"text":"提供资质证明","kind":"qualification","must":true}),
+        ),
+    )
+    .await;
+    assert_eq!(clause_status, StatusCode::CREATED, "{clause}");
+    let clause_id = clause["id"].as_str().unwrap();
+    let clause_uri = format!("/api/v1/bids/{project}/clauses/{clause_id}");
+    let (stale_status, stale_body) = call(
+        &app,
+        json_request(
+            &owner_token,
+            "PATCH",
+            &clause_uri,
+            json!({"action":"patch","expected_revision":0,"patch":{"text":"更新资质证明"}}),
+        ),
+    )
+    .await;
+    assert_eq!(stale_status, StatusCode::CONFLICT, "{stale_body}");
+    assert_eq!(
+        stale_body["error"]["code"], "CLAUSE_REVISION_CAS_MISMATCH",
+        "{stale_body}"
+    );
+
+    let other_owner = Uuid::new_v4();
+    storage::insert_user(
+        &pool,
+        other_owner,
+        &format!("submission-error-owner-{other_owner}@invalid.test"),
+        None,
+    )
+    .await
+    .unwrap();
+    let other_token = auth::issue_jwt(other_owner, "submission-contract-secret").unwrap();
+    let (hidden_status, hidden_body) = call(
+        &app,
+        json_request(
+            &other_token,
+            "PATCH",
+            &clause_uri,
+            json!({"action":"patch","expected_revision":0,"patch":{"text":"越权更新"}}),
+        ),
+    )
+    .await;
+    assert_eq!(hidden_status, StatusCode::NOT_FOUND, "{hidden_body}");
+    assert_eq!(hidden_body["error"]["code"], "NOT_FOUND", "{hidden_body}");
+
+    let (upload_status, uploaded) = call(
+        &app,
+        attachment_upload_request(
+            &owner_token,
+            &project,
+            b"%PDF-1.7\n% pending preparation\n%%EOF\n",
+        ),
+    )
+    .await;
+    assert_eq!(upload_status, StatusCode::CREATED, "{uploaded}");
+    assert_eq!(uploaded["preparation_status"], "pending", "{uploaded}");
+    let attachment_id = uploaded["id"].as_str().unwrap();
+    let (preparation_status, preparation_body) = call(
+        &app,
+        json_request(
+            &owner_token,
+            "POST",
+            &format!("/api/v1/bids/{project}/attachments/{attachment_id}/validate"),
+            json!({"expected_revision":1}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        preparation_status,
+        StatusCode::CONFLICT,
+        "{preparation_body}"
+    );
+    assert_eq!(
+        preparation_body["error"]["code"], "ATTACHMENT_PREPARATION_INCOMPLETE",
+        "{preparation_body}"
+    );
+
+    let (invalid_kind_status, invalid_kind_body) = call(
+        &app,
+        attachment_upload_request_with_kind(
+            &owner_token,
+            &project,
+            "unknown_material",
+            ONE_PIXEL_PNG,
+        ),
+    )
+    .await;
+    assert_eq!(
+        invalid_kind_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{invalid_kind_body}"
+    );
+    assert_eq!(
+        invalid_kind_body["error"]["code"],
+        "ATTACHMENT_KIND_INVALID"
+    );
+
+    let quote_project = create_project(&app, &owner_token, "Quote review error mapping").await;
+    let quote_project_id = Uuid::parse_str(&quote_project).unwrap();
+    let (draft_status, draft) = call(
+        &app,
+        json_request(
+            &owner_token,
+            "POST",
+            &format!("/api/v1/bids/{quote_project}/quote/draft"),
+            json!({"tax_mode":"tax_inclusive","title":"Error contract quote","notes":null}),
+        ),
+    )
+    .await;
+    assert_eq!(draft_status, StatusCode::CREATED, "{draft}");
+    let line_id = Uuid::new_v4();
+    let (line_status, line) = call(
+        &app,
+        json_request(
+            &owner_token,
+            "PUT",
+            &format!("/api/v1/bids/{quote_project}/quote/lines/{line_id}"),
+            json!({
+                "expected_edit_version":0,
+                "ordinal":0,
+                "description":"Complete line",
+                "pricing_mode":"lump_sum",
+                "quantity":null,
+                "unit":null,
+                "unit_price":null,
+                "entered_amount":"100.00",
+                "tax_rate":"0.130000",
+                "user_confirmed":true
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(line_status, StatusCode::OK, "{line}");
+    assert_eq!(line["complete"], true, "{line}");
+
+    let (fact_revision, ceiling_revision, ceiling_identity_sha256): (i64, i64, String) =
+        sqlx::query_as(
+            "SELECT fact_revision,ceiling_revision,ceiling_identity_sha256
+               FROM bid_projects WHERE id=$1",
+        )
+        .bind(quote_project_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (pricing_revision, pricing_set_sha256): (i64, String) = sqlx::query_as(
+        "SELECT revision,content_sha256 FROM bid_clause_set_identities
+          WHERE project_id=$1 AND set_kind='pricing'",
+    )
+    .bind(quote_project_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let finalize_uri = format!("/api/v1/bids/{quote_project}/quote/finalize");
+    let (review_required_status, review_required_body) = call(
+        &app,
+        json_request(
+            &owner_token,
+            "POST",
+            &finalize_uri,
+            json!({
+                "expected_edit_version":1,
+                "expected_fact_revision":fact_revision,
+                "expected_ceiling_revision":ceiling_revision,
+                "expected_ceiling_identity_sha256":ceiling_identity_sha256,
+                "expected_pricing_revision":pricing_revision,
+                "expected_pricing_set_sha256":pricing_set_sha256,
+                "no_ceiling_reviewed":false,
+                "no_ceiling_reason":null
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        review_required_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{review_required_body}"
+    );
+    assert_eq!(
+        review_required_body["error"]["code"],
+        "NO_CEILING_REVIEW_REQUIRED"
+    );
+
+    let (fact_status, fact) = call(
+        &app,
+        json_request(
+            &owner_token,
+            "POST",
+            &format!("/api/v1/bids/{quote_project}/facts"),
+            json!({
+                "action":"set",
+                "expected_fact_revision":fact_revision,
+                "candidate_id":null,
+                "field":"ceiling_price",
+                "typed_value":{
+                    "amount":"1000.00",
+                    "currency_code":"CNY",
+                    "basis":"tax_inclusive"
+                },
+                "reason":null,
+                "override_reason":null
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(fact_status, StatusCode::OK, "{fact}");
+    let (ceiling_conflict_status, ceiling_conflict_body) = call(
+        &app,
+        json_request(
+            &owner_token,
+            "POST",
+            &finalize_uri,
+            json!({
+                "expected_edit_version":1,
+                "expected_fact_revision":fact["fact_revision"],
+                "expected_ceiling_revision":fact["ceiling_revision"],
+                "expected_ceiling_identity_sha256":fact["ceiling_identity_sha256"],
+                "expected_pricing_revision":pricing_revision,
+                "expected_pricing_set_sha256":pricing_set_sha256,
+                "no_ceiling_reviewed":true,
+                "no_ceiling_reason":"previous no-ceiling review"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        ceiling_conflict_status,
+        StatusCode::CONFLICT,
+        "{ceiling_conflict_body}"
+    );
+    assert_eq!(
+        ceiling_conflict_body["error"]["code"],
+        "QUOTE_CEILING_REVIEW_CONFLICT"
+    );
 }
 
 async fn render_hides_cross_project_manifest_ids() {
@@ -980,6 +1396,7 @@ async fn tender_upload_validates_bytes_before_staging_and_persists_media_type() 
 
 #[tokio::test]
 async fn submission_http_contracts() {
+    bid_sql_error_contracts_map_to_stable_http_statuses().await;
     bid_routes_and_list_are_isolated_by_project_owner().await;
     tender_upload_validates_bytes_before_staging_and_persists_media_type().await;
     procedural_listing_includes_frozen_segment_text().await;

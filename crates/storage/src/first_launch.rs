@@ -2050,7 +2050,7 @@ mod tests {
         assert!(validated_migration_manifest(&name).is_err());
         let duplicate = MIGRATION_MANIFEST.replacen("version = 2", "version = 1", 1);
         assert!(validated_migration_manifest(&duplicate).is_err());
-        let malformed = MIGRATION_MANIFEST.replacen("sha256 = \"8", "sha256 = \"g", 1);
+        let malformed = MIGRATION_MANIFEST.replacen("sha256 = \"", "sha256 = \"g", 1);
         assert!(validated_migration_manifest(&malformed).is_err());
     }
 

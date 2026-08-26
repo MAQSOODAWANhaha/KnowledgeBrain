@@ -147,6 +147,7 @@ jobs:
 
           cargo test -p api --test submission_contract -- --nocapture --test-threads=1
           cargo test -p bid --test tender_publication -- --nocapture --test-threads=1
+          cargo test -p bid --test knowledge_retrieval_selection -- --nocapture --test-threads=1
           cargo test -p bid --test matching_publication -- --nocapture --test-threads=1
 
           audit_before="$(psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc \
@@ -176,6 +177,14 @@ jobs:
         run: scripts/fresh_schema_acceptance.sh
       - name: storage foundation unit tests
         run: cargo test -p storage --lib -- --nocapture
+      - name: mandatory upload staging cleanup tests
+        env:
+          KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD: retention-ci
+        run: |
+          cargo test -p worker --lib consume::tests::submission_staging_is_abandoned_when_the_render_future_is_cancelled -- --exact --nocapture
+          cargo test -p worker --lib consume::tests::live_recovery_ends_expired_bid_projects -- --exact --nocapture
+          cargo test -p retention tests::expired_upload_staging_is_removed_by_running_retention_expiry_loop -- --exact --nocapture
+          cargo test -p retention tests::retention_role_can_inspect_readiness_gate -- --exact --nocapture
       - name: mandatory Bid matching tests
         run: cargo test -p bid matching::tests -- --nocapture
       - name: mandatory Redis-backed runtime queue tests

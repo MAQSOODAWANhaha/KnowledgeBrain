@@ -386,6 +386,134 @@ async fn procedural_segments_distinguish_numbered_items_from_decimal_amounts() {
 }
 
 #[tokio::test]
+async fn procedural_text_change_terminals_previous_classification_and_decision() {
+    let Some(pool) = live_test_pool().await else {
+        return;
+    };
+    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
+        return;
+    }
+    let seed = seed_project(&pool).await;
+    let clause_id = Uuid::new_v4();
+    let create_context = storage::bidding::MutationContext::new(
+        seed.actor.clone(),
+        format!("procedural-text-create-{clause_id}"),
+        &json!({"text":"投标函签字并盖章。","kind":"procedural","must":true}),
+    )
+    .unwrap();
+    storage::bidding::create_clause(
+        &pool,
+        clause_id,
+        seed.project_id,
+        "投标函签字并盖章。",
+        "procedural",
+        true,
+        &create_context,
+    )
+    .await
+    .unwrap();
+    let confirm_context = storage::bidding::MutationContext::new(
+        seed.actor.clone(),
+        format!("procedural-text-confirm-{clause_id}"),
+        &json!({"action":"confirm","expected_revision":1}),
+    )
+    .unwrap();
+    storage::bidding::mutate_clause(
+        &pool,
+        seed.project_id,
+        clause_id,
+        "confirm",
+        &json!({}),
+        1,
+        &confirm_context,
+    )
+    .await
+    .unwrap();
+    let classification_id: Uuid = sqlx::query_scalar(
+        "SELECT classification.id
+           FROM bidding_current_procedural_classifications classification
+           JOIN bid_procedural_segment_artifacts segment ON segment.id=classification.segment_id
+          WHERE classification.project_id=$1 AND segment.clause_id=$2
+            AND classification.effective_requirement_kind='confirmation'",
+    )
+    .bind(seed.project_id)
+    .bind(clause_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let resolve_context = storage::bidding::MutationContext::new(
+        seed.actor.clone(),
+        format!("procedural-text-resolve-{classification_id}"),
+        &json!({"resolution":"confirmed_by_user"}),
+    )
+    .unwrap();
+    storage::bid_submission::resolve_procedural_requirement(
+        &pool,
+        seed.project_id,
+        classification_id,
+        "confirmed_by_user",
+        None,
+        None,
+        &resolve_context,
+    )
+    .await
+    .unwrap();
+
+    let patch = json!({"text":"投标函签字并加盖公章。"});
+    let patch_context = storage::bidding::MutationContext::new(
+        seed.actor.clone(),
+        format!("procedural-text-patch-{clause_id}"),
+        &patch,
+    )
+    .unwrap();
+    storage::bidding::mutate_clause(
+        &pool,
+        seed.project_id,
+        clause_id,
+        "patch",
+        &patch,
+        2,
+        &patch_context,
+    )
+    .await
+    .unwrap();
+
+    let old_lifecycle: (String, Option<String>, String, Option<String>) = sqlx::query_as(
+        "SELECT classification.lifecycle_status,classification.terminal_reason,
+                decision.lifecycle_status,decision.terminal_reason
+           FROM bid_procedural_classification_artifacts classification
+           JOIN bid_procedural_decision_artifacts decision
+             ON decision.classification_id=classification.id
+          WHERE classification.id=$1",
+    )
+    .bind(classification_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        old_lifecycle,
+        (
+            "superseded".into(),
+            Some("text_changed".into()),
+            "superseded".into(),
+            Some("text_changed".into())
+        )
+    );
+    let current_segments: Vec<String> = sqlx::query_scalar(
+        "SELECT classification.segment_text
+           FROM bidding_current_procedural_classifications classification
+           JOIN bid_procedural_segment_artifacts segment ON segment.id=classification.segment_id
+          WHERE classification.project_id=$1 AND segment.clause_id=$2",
+    )
+    .bind(seed.project_id)
+    .bind(clause_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(current_segments, vec!["投标函签字并加盖公章。".to_string()]);
+}
+
+#[tokio::test]
 async fn manual_part_put_creates_and_keeps_a_current_exportable_revision() {
     let Some(pool) = live_test_pool().await else {
         return;

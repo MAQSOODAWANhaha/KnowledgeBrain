@@ -316,22 +316,32 @@ expired_staging_row="$(printf '%s\n' \
   "   RETURNING 1" \
   ") SELECT count(*) FROM updated;" | admin_psql -At)"
 [ "$expired_staging_row" = "1" ] || fail "could not expire the isolated upload staging fixture"
-expired_staging="$(role_psql kb_runtime_worker acceptance-worker -Atc 'SELECT kb_object_upload_expire();')"
-[ "$expired_staging" -ge 1 ] || fail "expired upload staging reference was not recovered"
-staging_after_expire="$(printf '%s\n' \
-  "SELECT registry.state||E'\\t'||" \
-  "       (NOT EXISTS (SELECT 1 FROM object_upload_staging staging WHERE staging.id='$staging_id'::uuid))||E'\\t'||" \
-  "       COALESCE((SELECT outbox.state FROM object_retention_outbox outbox" \
-  "                  WHERE outbox.object_ref=registry.object_ref),'missing')" \
-  "  FROM object_registry registry WHERE registry.object_ref='$staging_ref'::kb_object_ref;" |
-  admin_psql -At)"
-IFS=$'\t' read -r staging_reaped_state staging_row_removed staging_outbox_state \
-  <<<"$staging_after_expire"
-[ "$staging_reaped_state" = "deleting" ] || fail "expired staging object did not enter deleting"
-[ "$staging_row_removed" = "true" ] || fail "expired staging row was not removed"
-[ "$staging_outbox_state" = "queued" ] || fail "expired staging object was not queued for retention"
-
 docker compose up -d --no-deps worker retention >/dev/null
+staging_reaped_state="available"
+staging_row_removed="false"
+staging_outbox_state="missing"
+for _ in $(seq 1 120); do
+  staging_after_expire="$(printf '%s\n' \
+    "SELECT registry.state||E'\\t'||" \
+    "       (NOT EXISTS (SELECT 1 FROM object_upload_staging staging WHERE staging.id='$staging_id'::uuid))||E'\\t'||" \
+    "       COALESCE((SELECT outbox.state FROM object_retention_outbox outbox" \
+    "                  WHERE outbox.object_ref=registry.object_ref),'missing')" \
+    "  FROM object_registry registry WHERE registry.object_ref='$staging_ref'::kb_object_ref;" |
+    admin_psql -At)"
+  IFS=$'\t' read -r staging_reaped_state staging_row_removed staging_outbox_state \
+    <<<"$staging_after_expire"
+  if [ "$staging_row_removed" = "true" ] &&
+    { [ "$staging_reaped_state" = "deleting" ] || [ "$staging_reaped_state" = "deleted" ]; }; then
+    break
+  fi
+  sleep 1
+done
+[ "$staging_row_removed" = "true" ] || fail "retention expiry loop did not remove expired staging"
+case "$staging_reaped_state:$staging_outbox_state" in
+  deleting:queued|deleting:claimed|deleting:retry|deleted:missing) ;;
+  *) fail "retention expiry loop produced invalid object/outbox state: $staging_reaped_state/$staging_outbox_state" ;;
+esac
+
 for _ in $(seq 1 120); do
   get_json "/api/v1/bids/$ACCEPTANCE_PROJECT_ID/submission/render-jobs/$recovery_render_job_id" "$TMP/recovery-status.json"
   recovery_status="$(jq -r .status "$TMP/recovery-status.json")"
@@ -368,6 +378,8 @@ jq -n \
   --argjson recovery_attempt_count_after "$recovery_attempt_count_after" \
   --arg reaped_status "$reaped_status" \
   --arg recovery_staging_object_ref "$staging_ref" \
+  --arg staging_state_after_expire "$staging_reaped_state" \
+  --arg staging_outbox_state_after_expire "$staging_outbox_state" \
   '{schema_version:1,status:"passed",kind_router:{target_version:$target_router,promotion_generation:$promotion_generation,
       evaluation_clause_id:$evaluation_clause_id,marker_rejected_pdf:true,reconfirmed:true},
     object_lifecycle:{attachment_object_ref:$attachment_object_ref,attachment_digest:$attachment_digest,
@@ -377,8 +389,10 @@ jq -n \
       manifest_asset_object_ref:$manifest_asset_object_ref,
       manifest_asset_digest:$manifest_asset_digest,manifest_asset_count:$manifest_asset_count,
       manifest_owner_present_and_available:true,historical_pdf_sha256:$historical_pdf_sha256,
-      recovered_staging_object_ref:$recovery_staging_object_ref,staging_state_after_expire:"deleting",
-      staging_outbox_queued:true,released_staging_deleted:true},
+      recovered_staging_object_ref:$recovery_staging_object_ref,
+      staging_state_after_expire:$staging_state_after_expire,
+      staging_outbox_state_after_expire:$staging_outbox_state_after_expire,
+      staging_row_removed_by_retention_service:true,released_staging_deleted:true},
     restart_recovery:{render_job_id:$recovery_render_job_id,claim_lease_ms:$recovery_claim_lease_ms,
       attempt_count_before_recovery:$recovery_attempt_count_before,
       fresh_claim_fenced:true,target_state_after_reap:$reaped_status,old_token_fenced:true,

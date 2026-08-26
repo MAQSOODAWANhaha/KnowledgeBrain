@@ -77,6 +77,7 @@ async function mockApi(
     failFirstRenderJob?: boolean;
     holdPartLoad?: string;
     holdFirstPickMutation?: boolean;
+    conflictFirstPickMutation?: boolean;
     withoutPricingSet?: boolean;
     withProceduralAttachment?: boolean;
     validityConflict?: boolean;
@@ -98,10 +99,13 @@ async function mockApi(
   const proceduralResolutionBodies: Array<Record<string, unknown>> = [];
   const factMutationBodies: Array<Record<string, unknown>> = [];
   const routePickBodies: Array<Record<string, unknown>> = [];
+  const companyProfileBodies: Array<Record<string, unknown>> = [];
   let pickRevision = 0;
   let quoteEditVersion = 0;
   let quoteLines: Array<Record<string, unknown>> = [];
   let projectCeiling: string | null = null;
+  let companyLegalName = "示例公司";
+  let submissionBuyerName = "招标人";
   let pickItems: Array<{
     requirement_artifact_id: string;
     candidate_artifact_id: string;
@@ -253,6 +257,10 @@ async function mockApi(
         expected_revision: body.expected_revision,
         items: body.items,
       });
+      if (options.conflictFirstPickMutation && firstMutation) {
+        pickRevision += 1;
+        return json({ error: { code: "ROUTE_PICK_REVISION_MISMATCH", message: "pick revision changed" } }, 409);
+      }
       if (body.expected_revision !== pickRevision) {
         return json({ code: "ROUTE_PICK_REVISION_MISMATCH" }, 409);
       }
@@ -308,10 +316,23 @@ async function mockApi(
       return json({ pointer: "draft" });
     }
     if (p.endsWith("/quote/preview")) return json({ net_total: "0.00", tax_total: "0.00", gross_total: "0.00" });
-    if (p.endsWith("/company-profile")) return json({ revision: 0, legal_name: "示例公司" });
+    if (p.endsWith("/company-profile")) {
+      if (method === "PUT") {
+        const body = req.postDataJSON() as Record<string, unknown>;
+        companyProfileBodies.push(body);
+        companyLegalName = String(body.legal_name ?? "");
+        return json({ id: "company-profile-1", revision: Number(body.expected_revision ?? 0) + 1, content_sha256: "f".repeat(64) });
+      }
+      return json({ revision: 0, legal_name: companyLegalName });
+    }
     if (p.endsWith("/submission-profile")) {
-      if (method === "PUT") submissionProfileBodies.push(req.postDataJSON() as Record<string, unknown>);
-      return json({ revision: 0, buyer_name: "招标人", seal_confirmed: false, signature_confirmed: false });
+      if (method === "PUT") {
+        const body = req.postDataJSON() as Record<string, unknown>;
+        submissionProfileBodies.push(body);
+        submissionBuyerName = String(body.buyer_name ?? "");
+        return json({ id: "submission-profile-1", revision: Number(body.expected_revision ?? 0) + 1, content_sha256: "f".repeat(64) });
+      }
+      return json({ revision: 0, buyer_name: submissionBuyerName, seal_confirmed: false, signature_confirmed: false });
     }
     if (p.endsWith("/procedural-requirements")) {
       return json({
@@ -443,10 +464,17 @@ async function mockApi(
     proceduralResolutionBodies,
     factMutationBodies,
     routePickBodies,
+    companyProfileBodies,
     releasePartLoad,
     releaseFirstPickMutation,
     setProjectCeiling: (ceiling: string) => {
       projectCeiling = ceiling;
+    },
+    setCompanyLegalName: (legalName: string) => {
+      companyLegalName = legalName;
+    },
+    setSubmissionBuyerName: (buyerName: string) => {
+      submissionBuyerName = buyerName;
     },
   };
 }
@@ -650,7 +678,10 @@ test("procedural requirement cards show their source segment text", async ({ pag
   await activateWithKeyboard(page.getByTestId("login-submit"));
   await page.goto(`/#/bids/${PROJECT}?step=quote&view=procedural`);
 
-  await expect(page.getByText("提交授权委托书原件")).toBeVisible();
+  const requirement = page.locator(".inner").filter({ hasText: "提交授权委托书原件" });
+  await expect(requirement.getByText("分段原文")).toBeVisible();
+  await expect(requirement.getByText("提交授权委托书原件")).toBeVisible();
+  await expect(requirement.getByText("来源：已确认的程序条款 · 冻结分段")).toBeVisible();
 });
 
 test("technical matching serializes rapid picks without losing either selection", async ({ page }) => {
@@ -677,6 +708,10 @@ test("technical matching serializes rapid picks without losing either selection"
 
   await toggleWithKeyboard(firstPick);
   await expect.poll(() => requests.routePickBodies.length).toBe(1);
+  await expect(firstPick).toBeChecked();
+  await expect(firstPick).toBeDisabled();
+  await firstPick.press("Space");
+  expect(requests.routePickBodies).toHaveLength(1);
   await toggleWithKeyboard(secondPick);
   requests.releaseFirstPickMutation();
 
@@ -696,6 +731,33 @@ test("technical matching serializes rapid picks without losing either selection"
         { requirement_artifact_id: REQ, candidate_artifact_id: CAND },
         { requirement_artifact_id: REQ, candidate_artifact_id: CAND_2 },
       ],
+    },
+  ]);
+});
+
+test("technical matching retries one CAS conflict and preserves the requested pick", async ({ page }) => {
+  const requests = await mockApi(page, { conflictFirstPickMutation: true });
+  await page.goto("/#/login");
+  await page.getByTestId("login-email").fill("e2e@local");
+  await page.getByTestId("login-password").fill("pw");
+  await activateWithKeyboard(page.getByTestId("login-submit"));
+  await page.goto(`/#/bids/${PROJECT}?step=matching&view=unsectioned`);
+
+  const firstPick = page.getByTestId(`pick-${CAND}`);
+  await toggleWithKeyboard(firstPick);
+
+  await expect(page.getByText("选择已被其他操作更新，正在基于最新版本重试")).toBeVisible();
+  await expect.poll(() => requests.routePickBodies).toHaveLength(2);
+  await expect(firstPick).toBeChecked();
+  await expect(firstPick).toBeEnabled();
+  expect(requests.routePickBodies).toEqual([
+    {
+      expected_revision: 0,
+      items: [{ requirement_artifact_id: REQ, candidate_artifact_id: CAND }],
+    },
+    {
+      expected_revision: 1,
+      items: [{ requirement_artifact_id: REQ, candidate_artifact_id: CAND }],
     },
   ]);
 });
@@ -737,8 +799,8 @@ test("quote finalization is blocked when the pricing set identity is unavailable
   expect(requests.quoteFinalizeBodies).toHaveLength(0);
 });
 
-test("profile polling does not overwrite an unsaved company draft", async ({ page }) => {
-  await mockApi(page);
+test("profile polling preserves a company draft until explicit reset", async ({ page }) => {
+  const requests = await mockApi(page);
   await page.goto("/#/login");
   await page.getByTestId("login-email").fill("e2e@local");
   await page.getByTestId("login-password").fill("pw");
@@ -748,9 +810,13 @@ test("profile polling does not overwrite an unsaved company draft", async ({ pag
   const legalName = page.getByTestId("company-legal_name");
   await expect(legalName).toHaveValue("示例公司");
   await replaceWithKeyboard(legalName, "尚未保存的公司草稿");
+  requests.setCompanyLegalName("服务端更新的公司");
   await page.waitForTimeout(5_500);
 
   await expect(legalName).toHaveValue("尚未保存的公司草稿");
+  await expect(page.getByText("有未保存的公司资料修改")).toBeVisible();
+  await activateWithKeyboard(page.getByTestId("company-reset"));
+  await expect(legalName).toHaveValue("服务端更新的公司");
 });
 
 test("submission profile save is blocked when the date is empty", async ({ page }) => {
@@ -764,6 +830,26 @@ test("submission profile save is blocked when the date is empty", async ({ page 
 
   await expect(page.getByText("请填写投标日期")).toBeVisible();
   expect(requests.submissionProfileBodies).toHaveLength(0);
+});
+
+test("profile polling preserves a submission draft until explicit reset", async ({ page }) => {
+  const requests = await mockApi(page);
+  await page.goto("/#/login");
+  await page.getByTestId("login-email").fill("e2e@local");
+  await page.getByTestId("login-password").fill("pw");
+  await activateWithKeyboard(page.getByTestId("login-submit"));
+  await page.goto(`/#/bids/${PROJECT}?step=quote&view=submission`);
+
+  const buyerName = page.getByTestId("submission-buyer_name");
+  await expect(buyerName).toHaveValue("招标人");
+  await replaceWithKeyboard(buyerName, "尚未保存的采购人草稿");
+  requests.setSubmissionBuyerName("服务端更新的采购人");
+  await page.waitForTimeout(5_500);
+
+  await expect(buyerName).toHaveValue("尚未保存的采购人草稿");
+  await expect(page.getByText("有未保存的投标资料修改")).toBeVisible();
+  await activateWithKeyboard(page.getByTestId("submission-reset"));
+  await expect(buyerName).toHaveValue("服务端更新的采购人");
 });
 
 test("a confirmed valid attachment can satisfy its procedural requirement", async ({ page }) => {

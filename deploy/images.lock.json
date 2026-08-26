@@ -46,6 +46,13 @@
           "unsigned": false
         },
         {
+          "lock_id": "retention",
+          "compose_service": "retention",
+          "deploy_target": "runtime",
+          "image": "knowledgebrain-worker@sha256:5d2715634560254f7c975b5c2a35bc73b72a09ec7926696d91d0dbaa9be6d256",
+          "unsigned": false
+        },
+        {
           "lock_id": "docreader",
           "compose_service": "docreader",
           "deploy_target": "runtime",
