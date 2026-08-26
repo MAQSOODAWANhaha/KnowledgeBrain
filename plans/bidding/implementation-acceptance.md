@@ -6,11 +6,11 @@
 
 | 层次 | 当前状态 |
 | --- | --- |
-| 最终合同 | 产品基线与 stable durable-dispatch 修订已批准并固化；运行时代码尚未实施或验收 |
-| implemented | 部分；PR1～PR7 产品主链已有实现，durable dispatch 与旧两跳 recovery 删除尚未实施 |
-| locally verified | 部分；旧定向证据不能证明新 dispatch 合同，完整门禁与 fresh runtime 需重跑 |
-| committed | 部分；`ee8b492` 与本次独立方案固化提交已提交，PR8A～PR9 运行时代码尚未实施或提交 |
-| pushed | 部分；`ee8b492` 已在 `origin/main`，本次方案固化提交仅保留本地、未 push |
+| 最终合同 | 产品基线与 stable durable-dispatch 修订已批准并固化；PR8A transport seam 已实现并本地验收，PR8B～PR9 尚未完成 |
+| implemented | 部分；PR1～PR7 产品主链与 PR8A stable transport 已实现，PR8B～PR8F durable owner 纵切及旧两跳 recovery 删除尚未完成 |
+| locally verified | 部分；PR8A mandatory transport acceptance 的 14 个 contract ID、六模式 cleanup、资源零残留及 Standards/Spec 双轴复审已通过；PR8B～PR9、全量产品门禁与 fresh runtime 仍须实施或重跑 |
+| committed | 部分；PR8A 已由本地提交 `c825040` 收口，PR8B～PR9 尚未实施或提交 |
+| pushed | 部分；`ee8b492` 已在 `origin/main`，方案固化与 PR8A 提交仅保留本地，当前 `main` ahead 6、未 push |
 | deployed | 否；未部署到 fresh 或生产环境 |
 | runtime accepted | 否；当前 checkout 没有完整证据包，`phase_1d_runtime_complete=false` |
 
@@ -198,7 +198,7 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 | PR5 | 产品逻辑已在 | quote/HTTP/Web 最终门禁待重跑 |
 | PR6 | 部分 | attachment/render dispatch 替换及 fresh runtime 正式输出待验收 |
 | PR7 | 产品逻辑已在 | HTTP、Web lint/build、mocked 与 live Playwright 待最终重跑 |
-| PR8A | 未完成 | registry Oxana 2.1.3、pure prepare、显式 job identity、adapter 单次调用至多一次 enqueue 与 stable `Skip/resurrect/max_retries=0` 合同；不切换业务 owner |
+| PR8A | 已实现并本地提交（`c825040`） | 2026-08-26：registry Oxana 2.1.3 verifier、pure 8/8、registry negative 1/1、runtime 44/44、live Redis 4/4、14 个 required contract ID、六模式 cleanup 与零残留通过；`cargo check`/Clippy 0 error，Standards/Spec 均 P0/P1/P2/Judgement=0；未切换业务 owner，未 push、未部署、未作 runtime accepted 声明 |
 | PR8B | 未完成 | dormant async target/空 conversion target/head/0..N intent/state、delivery/business attempts、observations、settlement/inbound、repair obligation、rejected delivery、typed evidence、semantics/governor catalog、owner-only SQL + 完整domain mutation wrapper/run-handle store seam、独立dispatcher role/DSN与policy/ACL；不注册真实adapter、不启动dispatcher或业务owner |
 | PR8C | 未完成 | conversion/extraction 纵切替换并删除该类旧 owner |
 | PR8D | 未完成 | attachment preparation/render 纵切替换并删除该类旧 owner |
@@ -432,7 +432,7 @@ scripts/compose_first_launch_acceptance.sh
 
 ### 7.2 PR8 required job：`bid-durable-dispatch`
 
-当前 CI 的强制活库 job 名为 `bid-smoke`；`bid-durable-dispatch` 是本方案的目标 required check，不是当前已落位事实。PR8A 必须新增该 job，或把现有 `bid-smoke` 显式改名并同步更新 branch protection/required-check 聚合；旧 job 不得继续作为可替代的绿色旁路。目标 job 使用独立 PostgreSQL 16 和 Redis 7，固定：
+当前 CI 已落位独立 job `bid-durable-dispatch`，使用独立 PostgreSQL 16 和 Redis 7；`bid-product-smoke` 继续承担产品活库门，不作为 durable-dispatch 的可替代绿色旁路。该 CI 变更尚未 push，branch protection/required-check 聚合也尚无远端证据，因此这里只记录 implemented/locally verified/committed，不提升 pushed 或 runtime accepted。job 固定：
 
 ```text
 KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS=1
