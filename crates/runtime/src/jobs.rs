@@ -2336,4 +2336,92 @@ mod tests {
             assert!(!mapped.starts_with("rejected:"));
         }
     }
+
+    #[tokio::test]
+    async fn legacy_replay_mixed_list_can_move_bid_delivery_membership() {
+        let Some(_storage) =
+            redis_live_if_up("legacy_replay_mixed_list_can_move_bid_delivery_membership").await
+        else {
+            return;
+        };
+        let _guard = redis_test_lock().await;
+        let client = redis::Client::open(redis_url()).expect("configure Redis client");
+        let mut connection = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("connect to Redis");
+        let fixture_id = Uuid::new_v4();
+        let processing_key = format!("oxanus:processing:bid-replay-fixture-{fixture_id}");
+        let queue = format!("bid-replay-fixture-{fixture_id}");
+        let queue_key = format!("oxanus:queue:{queue}");
+        let missing_id = format!("bid:delivery:v1/{}", Uuid::new_v4());
+        let true_id = format!("bid:delivery:v1/{}", Uuid::new_v4());
+        let false_id = format!("bid:delivery:v1/{}", Uuid::new_v4());
+
+        for (id, meta) in [
+            (&missing_id, serde_json::json!({})),
+            (&true_id, serde_json::json!({ "resurrect": true })),
+            (&false_id, serde_json::json!({ "resurrect": false })),
+        ] {
+            let raw = serde_json::json!({
+                "id": id,
+                "queue": queue,
+                "job": { "name": "bid:delivery:v1", "args": {} },
+                "meta": meta
+            })
+            .to_string();
+            let _: i64 = redis::cmd("HSET")
+                .arg("oxanus:jobs")
+                .arg(id)
+                .arg(raw)
+                .query_async(&mut connection)
+                .await
+                .expect("seed job hash");
+            let _: i64 = redis::cmd("RPUSH")
+                .arg(&processing_key)
+                .arg(id)
+                .query_async(&mut connection)
+                .await
+                .expect("seed processing list");
+        }
+
+        assert_eq!(
+            replay_processing_list(&mut connection, &processing_key)
+                .await
+                .expect("replay mixed fixture"),
+            2
+        );
+        let replayed: Vec<String> = redis::cmd("LRANGE")
+            .arg(&queue_key)
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut connection)
+            .await
+            .expect("read replayed queue");
+        assert!(replayed.contains(&missing_id));
+        assert!(replayed.contains(&true_id));
+        assert!(!replayed.contains(&false_id));
+        let false_job: Option<String> = redis::cmd("HGET")
+            .arg("oxanus:jobs")
+            .arg(&false_id)
+            .query_async(&mut connection)
+            .await
+            .expect("read resurrect=false job");
+        assert!(false_job.is_none());
+
+        let _: i64 = redis::cmd("DEL")
+            .arg(&processing_key)
+            .arg(&queue_key)
+            .query_async(&mut connection)
+            .await
+            .expect("delete fixture lists");
+        let _: i64 = redis::cmd("HDEL")
+            .arg("oxanus:jobs")
+            .arg(&missing_id)
+            .arg(&true_id)
+            .arg(&false_id)
+            .query_async(&mut connection)
+            .await
+            .expect("delete fixture hash fields");
+    }
 }

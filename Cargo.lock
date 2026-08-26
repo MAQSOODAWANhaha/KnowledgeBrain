@@ -4420,6 +4420,7 @@ dependencies = [
 name = "runtime"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "domain",
  "gethostname",
@@ -4427,6 +4428,7 @@ dependencies = [
  "redis",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
  "tracing",
  "tracing-subscriber",

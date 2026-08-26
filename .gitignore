@@ -1,5 +1,6 @@
 /target
 /test-results/
+/.artifacts/
 **/*.rs.bk
 .idea
 .vscode

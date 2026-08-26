@@ -4,6 +4,8 @@ mod jobs;
 pub use jobs::*;
 mod lease;
 pub use lease::*;
+mod work_transport;
+pub use work_transport::*;
 
 use chrono::{Duration, Utc};
 use domain::{

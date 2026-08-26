@@ -20,7 +20,57 @@ jobs:
       - name: test
         run: cargo test --workspace
 
-  bid-smoke:
+  bid-durable-dispatch:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+        env:
+          POSTGRES_USER: knowledgebrain
+          POSTGRES_PASSWORD: knowledgebrain
+          POSTGRES_DB: knowledgebrain
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U knowledgebrain"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://knowledgebrain:knowledgebrain@127.0.0.1:5432/knowledgebrain
+      REDIS_URL: redis://127.0.0.1:6379
+      KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS: "1"
+      KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+      - name: shellcheck durable-dispatch acceptance scripts
+        run: shellcheck scripts/bid_durable_dispatch_acceptance.sh scripts/bid_durable_dispatch_cleanup.sh scripts/verify_oxana_registry_source.sh
+      - name: mandatory PR8A transport and cleanup acceptance
+        run: scripts/bid_durable_dispatch_acceptance.sh
+      - name: independent durable-dispatch cleanup and residue assertion
+        if: always()
+        run: scripts/bid_durable_dispatch_cleanup.sh ci-cleanup
+      - name: upload durable-dispatch PR8A evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bid-durable-dispatch-pr8a
+          path: .artifacts/bid-durable-dispatch
+          if-no-files-found: error
+
+  bid-product-smoke:
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -250,6 +300,6 @@ jobs:
       - name: runtime image build
         run: docker build -f deploy/Dockerfile.rust --build-arg BIN=api -t knowledgebrain-api-ci .
       - name: shell
-        run: bash -n services/docreader/scripts/generate_proto.sh scripts/bid_e2e_smoke.sh scripts/bid_runtime_acceptance.sh scripts/bid_runtime_compose_hook.sh scripts/bidding_v1_deletion_scan.sh deploy/compose-first-launch.sh deploy/compose-runtime-restart.sh scripts/compose_first_launch_acceptance.sh scripts/fresh_schema_acceptance.sh deploy/postgres-init/010-runtime-identities.sh
+        run: bash -n services/docreader/scripts/generate_proto.sh scripts/bid_durable_dispatch_acceptance.sh scripts/bid_durable_dispatch_cleanup.sh scripts/bid_e2e_smoke.sh scripts/bid_runtime_acceptance.sh scripts/bid_runtime_compose_hook.sh scripts/bidding_v1_deletion_scan.sh deploy/compose-first-launch.sh deploy/compose-runtime-restart.sh scripts/compose_first_launch_acceptance.sh scripts/fresh_schema_acceptance.sh scripts/verify_oxana_registry_source.sh deploy/postgres-init/010-runtime-identities.sh
       - name: bidding V1 deletion scan
         run: sh scripts/bidding_v1_deletion_scan.sh
