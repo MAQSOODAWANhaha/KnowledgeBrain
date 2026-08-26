@@ -397,6 +397,11 @@ async fn bid_delivery_worker_failure_is_attempted_once_and_moved_dead() {
     );
     assert_eq!(storage.dead_count().await.expect("dead count"), 1);
     assert_eq!(
+        storage.retries_count().await.expect("retry count"),
+        0,
+        "max_retries=0 must not create a retry entry"
+    );
+    assert_eq!(
         storage
             .enqueued_count(BidConvertV1Queue)
             .await
@@ -420,8 +425,10 @@ async fn bid_delivery_worker_failure_is_attempted_once_and_moved_dead() {
         .diagnostics_snapshot()
         .await
         .expect("public monitoring diagnostics");
+    let final_retries = storage.retries_count().await.expect("final retry count");
     let final_attempts = attempts.load(Ordering::SeqCst);
     cleanup_namespace(&storage).await;
     assert_eq!(final_attempts, 1, "dead job must not be processed twice");
+    assert_eq!(final_retries, 0, "dead job must not enter delayed retry");
     assert_eq!(diagnostics.dead_count, 1);
 }

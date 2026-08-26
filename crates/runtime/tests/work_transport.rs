@@ -305,15 +305,11 @@ fn bid_delivery_v1_worker_contract_disables_oxana_retries() {
 
 #[test]
 fn work_transport_correctness_path_has_no_redis_inspection_or_private_keys() {
-    let source = include_str!("../src/work_transport.rs");
+    let source = production_prefix(include_str!("../src/work_transport.rs"));
     let correctness_start = source
         .find("impl WorkTransport for OxanaStableAdapter")
         .expect("production WorkTransport implementation");
-    let correctness_end = source[correctness_start..]
-        .find("pub enum RecordingResponse")
-        .map(|offset| correctness_start + offset)
-        .expect("recording adapter follows production adapter");
-    let correctness_path = &source[correctness_start..correctness_end];
+    let correctness_path = &source[correctness_start..];
     for forbidden in [
         "oxanus:",
         ".get_job(",
@@ -334,17 +330,15 @@ fn work_transport_correctness_path_has_no_redis_inspection_or_private_keys() {
         .parent()
         .and_then(std::path::Path::parent)
         .expect("workspace root");
-    for crate_name in ["api", "bid", "worker", "storage", "domain"] {
+    for crate_name in ["api", "bid", "storage", "domain"] {
         let root = repository.join("crates").join(crate_name).join("src");
         for path in rust_sources(&root) {
             let contents = std::fs::read_to_string(&path).expect("read production source");
+            let contents = production_prefix(&contents);
             for forbidden in [
                 "bid:delivery:v1",
                 "BidDeliveryV1",
-                "oxanus:",
-                ".get_job(",
-                ".list_queue_jobs(",
-                ".delete_job(",
+                "replay_orphaned_local_jobs",
             ] {
                 assert!(
                     !contents.contains(forbidden),
@@ -354,6 +348,56 @@ fn work_transport_correctness_path_has_no_redis_inspection_or_private_keys() {
             }
         }
     }
+
+    let mut bid_correctness_paths = rust_sources(&repository.join("crates/bid/src"));
+    bid_correctness_paths.extend([
+        repository.join("crates/api/src/bid_routes.rs"),
+        repository.join("crates/storage/src/bid_matching.rs"),
+        repository.join("crates/storage/src/bid_quote.rs"),
+        repository.join("crates/storage/src/bid_recovery.rs"),
+        repository.join("crates/storage/src/bid_submission.rs"),
+        repository.join("crates/storage/src/bidding.rs"),
+        repository.join("crates/worker/src/consume.rs"),
+        repository.join("crates/worker/src/live_recovery.rs"),
+    ]);
+    for path in bid_correctness_paths {
+        let contents = std::fs::read_to_string(&path).expect("read Bid correctness source");
+        let contents = production_prefix(&contents);
+        for forbidden in [
+            "oxanus:",
+            ".get_job(",
+            ".list_queue_jobs(",
+            ".enqueued_count(",
+            ".dead_count(",
+            ".stats(",
+            ".delete_job(",
+        ] {
+            assert!(
+                !contents.contains(forbidden),
+                "Bid correctness path contains forbidden token {forbidden} in {}",
+                path.display()
+            );
+        }
+    }
+
+    let worker_root = repository.join("crates/worker/src");
+    let mut replay_calls = 0;
+    for path in rust_sources(&worker_root) {
+        let contents = std::fs::read_to_string(&path).expect("read worker production source");
+        let contents = production_prefix(&contents);
+        replay_calls += contents.matches("replay_orphaned_local_jobs()").count();
+        for forbidden in ["bid:delivery:v1", "BidDeliveryV1"] {
+            assert!(
+                !contents.contains(forbidden),
+                "unapproved worker Bid delivery/private Redis call-site {forbidden} in {}",
+                path.display()
+            );
+        }
+    }
+    assert_eq!(
+        replay_calls, 1,
+        "only the frozen generic legacy replay call may remain in worker production"
+    );
 
     let runtime_root = repository.join("crates/runtime/src");
     for path in rust_sources(&runtime_root) {
@@ -395,6 +439,10 @@ fn rust_sources(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     sources
+}
+
+fn production_prefix(source: &str) -> &str {
+    source.split("\n#[cfg(test)]").next().unwrap_or(source)
 }
 
 fn valid_spec() -> DeliverySpec {

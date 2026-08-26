@@ -202,15 +202,16 @@ pub enum TransportOutcome {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum WorkTransportReadiness {
+    #[default]
     Ready,
     Degraded,
     FailedClosed,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct OfferMetricsSnapshot {
+pub struct TransportMetricsSnapshot {
     pub offers_created: u64,
     pub offers_started: u64,
     pub enqueue_attempts: u64,
@@ -221,14 +222,15 @@ pub struct OfferMetricsSnapshot {
     pub redis_unavailable: u64,
     pub enqueue_failed: u64,
     pub returned_job_id_mismatch: u64,
+    pub registry_closure_mismatch: u64,
     pub total_latency_micros: u64,
     pub last_latency_micros: u64,
 }
 
 #[derive(Default)]
 struct TransportState {
-    readiness: u8,
-    metrics: OfferMetricsSnapshot,
+    readiness: WorkTransportReadiness,
+    metrics: TransportMetricsSnapshot,
 }
 
 #[derive(Default)]
@@ -236,16 +238,10 @@ struct TransportHealth(Mutex<TransportState>);
 
 impl TransportHealth {
     fn readiness(&self) -> WorkTransportReadiness {
-        match self
-            .0
+        self.0
             .lock()
             .expect("transport health lock poisoned")
             .readiness
-        {
-            0 => WorkTransportReadiness::Ready,
-            1 => WorkTransportReadiness::Degraded,
-            _ => WorkTransportReadiness::FailedClosed,
-        }
     }
 
     fn update(&self, update: impl FnOnce(&mut TransportState)) {
@@ -253,18 +249,18 @@ impl TransportHealth {
     }
 
     fn degrade(state: &mut TransportState) {
-        if state.readiness == 0 {
-            state.readiness = 1;
+        if state.readiness == WorkTransportReadiness::Ready {
+            state.readiness = WorkTransportReadiness::Degraded;
         }
     }
 
     fn recover(state: &mut TransportState) {
-        if state.readiness == 1 {
-            state.readiness = 0;
+        if state.readiness == WorkTransportReadiness::Degraded {
+            state.readiness = WorkTransportReadiness::Ready;
         }
     }
 
-    fn snapshot(&self) -> OfferMetricsSnapshot {
+    fn snapshot(&self) -> TransportMetricsSnapshot {
         self.0
             .lock()
             .expect("transport health lock poisoned")
@@ -283,7 +279,7 @@ pub trait WorkTransport: Send + Sync {
 
     fn readiness(&self) -> WorkTransportReadiness;
 
-    fn metrics_snapshot(&self) -> OfferMetricsSnapshot;
+    fn metrics_snapshot(&self) -> TransportMetricsSnapshot;
 }
 
 #[derive(Clone)]
@@ -293,8 +289,15 @@ pub struct OxanaStableAdapter {
 }
 
 impl OxanaStableAdapter {
-    pub fn new(storage: oxana::Storage) -> Result<Self, RegistryClosureError> {
-        validate_bid_delivery_v1_registry()?;
+    pub fn new(storage: oxana::Storage) -> Result<Self, RegistryClosureFailure> {
+        Self::with_registry_result(storage, validate_bid_delivery_v1_registry())
+    }
+
+    fn with_registry_result(
+        storage: oxana::Storage,
+        registry_result: Result<(), RegistryClosureError>,
+    ) -> Result<Self, RegistryClosureFailure> {
+        registry_result.map_err(RegistryClosureFailure::new)?;
         Ok(Self {
             storage,
             health: Arc::new(TransportHealth::default()),
@@ -379,7 +382,7 @@ impl WorkTransport for OxanaStableAdapter {
         self.health.readiness()
     }
 
-    fn metrics_snapshot(&self) -> OfferMetricsSnapshot {
+    fn metrics_snapshot(&self) -> TransportMetricsSnapshot {
         self.health.snapshot()
     }
 }
@@ -452,7 +455,7 @@ impl WorkTransport for RecordingTransport {
         self.health.readiness()
     }
 
-    fn metrics_snapshot(&self) -> OfferMetricsSnapshot {
+    fn metrics_snapshot(&self) -> TransportMetricsSnapshot {
         self.health.snapshot()
     }
 }
@@ -511,7 +514,9 @@ where
                         increment(&mut state.metrics.enqueue_failed, 1)
                     }
                     TransportErrorClass::DeadlineExceeded => {}
-                    TransportErrorClass::AdapterMismatch => state.readiness = 2,
+                    TransportErrorClass::AdapterMismatch => {
+                        state.readiness = WorkTransportReadiness::FailedClosed
+                    }
                 }
                 if error_class != TransportErrorClass::AdapterMismatch {
                     TransportHealth::degrade(state);
@@ -531,7 +536,7 @@ where
         Ok(Ok(actual_job_id)) => {
             health.update(|state| {
                 increment(&mut state.metrics.returned_job_id_mismatch, 1);
-                state.readiness = 2;
+                state.readiness = WorkTransportReadiness::FailedClosed;
             });
             record_latency(health, started_at);
             TransportOutcome::ReturnedJobIdMismatch {
@@ -632,6 +637,27 @@ pub enum RegistryClosureError {
     ConflictStrategy,
     Resurrection,
     WorkerRetry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegistryClosureFailure {
+    pub error: RegistryClosureError,
+    pub readiness: WorkTransportReadiness,
+    pub metrics: TransportMetricsSnapshot,
+}
+
+impl RegistryClosureFailure {
+    fn new(error: RegistryClosureError) -> Self {
+        let metrics = TransportMetricsSnapshot {
+            registry_closure_mismatch: 1,
+            ..TransportMetricsSnapshot::default()
+        };
+        Self {
+            error,
+            readiness: WorkTransportReadiness::FailedClosed,
+            metrics,
+        }
+    }
 }
 
 struct RegistryObservation {
@@ -858,5 +884,21 @@ mod registry_tests {
             verify_registry_observation(&observation),
             Err(RegistryClosureError::WorkerRetry)
         );
+
+        let storage = oxana::Storage::builder()
+            .namespace("registry-negative")
+            .build_from_redis_url("redis://127.0.0.1:1/")
+            .expect("configure non-I/O registry fixture");
+        let failure = match OxanaStableAdapter::with_registry_result(
+            storage,
+            Err(RegistryClosureError::WorkerRetry),
+        ) {
+            Ok(_) => panic!("registry mismatch must not construct an adapter"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.error, RegistryClosureError::WorkerRetry);
+        assert_eq!(failure.readiness, WorkTransportReadiness::FailedClosed);
+        assert_eq!(failure.metrics.registry_closure_mismatch, 1);
+        assert_eq!(failure.metrics.enqueue_attempts, 0);
     }
 }
