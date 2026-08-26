@@ -36,7 +36,7 @@ bidding_v1_baseline.sql       # 最终招投标 V1
 2. migration/schema runner 只执行固定 manifest，应用启动只验证 schema identity；
 3. extension、seed contract、current pointer、role/grant/revoke 全部进入 manifest 与 checksum；
 4. CI 和 Compose first launch 都从空库验证 catalog allowlist/denylist；
-5. API、worker、retention、migration 使用独立最小权限角色。
+5. API、worker、领域 dispatcher、retention、migration 使用独立最小权限角色；招投标 dispatcher 的唯一 role/DSN/grant 合同见 [`../bidding/durable-dispatch.md`](../bidding/durable-dispatch.md)。
 
 业务 baseline slice 由所属领域定义；平台只拥有 manifest 编排、共享表和权限边界。
 
@@ -103,12 +103,12 @@ retention outbox/tombstone
 
 ## 6. 实施与验收
 
-PR1 建立 baseline manifest、actor/idempotency/audit、`ObjectRegistry`、角色/ACL 和 seed；各业务 PR 在此后接入。招投标 PR6 只负责 Submission consumer cutover 和删除旧 refcount/direct-delete 路径，不重新实现 retention。
+PR1 建立 baseline manifest、actor/idempotency/audit、`ObjectRegistry`、通用角色/ACL 和 seed；各业务 PR 在此后接入。招投标PR8B必须沿现有first-launch trust topology完整增加`kb_runtime_bid_dispatcher`：`KNOWLEDGEBRAIN_BID_DISPATCHER_DB_PASSWORD`与`010-runtime-identities.sh` identity创建、全部governed/password-helper/handoff/finalizer集合、Rust verifier常量/runtime reachability、catalog allowlist、dispatcher零membership、handoff既有两条临时SET edge、finalizer后零membership、finalized role count 13→14、database`CONNECT`、schema`USAGE`、Compose dormant DSN以及CI bootstrap/fresh-schema/Compose/catalog全链必须同步，不能只在业务baseline增加GRANT。其独立DSN、与worker的交叉deny及dormant不启动合同只由[`../bidding/durable-dispatch.md`](../bidding/durable-dispatch.md)定义。招投标PR6只负责Submission consumer cutover和删除旧refcount/direct-delete路径，不重新实现retention。
 
 平台完成证据至少包括：
 
 - 空库重复建立、checksum、extension、seed 与 catalog allow/deny；
-- API/worker/retention/migration role allow/deny；
+- API/worker/domain dispatcher/retention/migration role allow/deny；
 - 应用重复启动只验证 schema，不执行 DDL；
 - object key、digest、MIME/bytes、owner scope 和 reference 一致性；
 - 有引用拒绝删除、释放后删除、并发 add-reference/delete 竞态；

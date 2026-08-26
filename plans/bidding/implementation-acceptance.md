@@ -102,6 +102,8 @@ shared platform slice 由 [`../platform/runtime-foundation.md`](../platform/runt
 - dispatch semantics snapshots、ready/offer lease/delivery-start/business lease due partial index 与 shared governor；
 - conversion/extraction/matching schedule+job/attachment preparation/submission render target adapters；
 - minimal `BidDeliveryV1Job` 与平台 stable `WorkTransport prepare/offer` adapter；
+- owner-only SQL `stage/replace_current_target/cancel_target` 由所属 SECURITY DEFINER domain mutation 在同一transaction直接调用；Rust不得直调internal entry，只在确有Rust mutation调用方时以`pub(crate)` adapter包住完整domain mutation，并为run/handle提供private store seam；
+- 独立 `kb_runtime_bid_dispatcher` login role/`BID_DISPATCH_DATABASE_URL` 只拥有 `run` 背后的 bounded dispatch grants，`kb_runtime_worker` 只拥有 `handle` grants；
 - 每次 offer identity 只调用一次 Oxana；任一未知结果只创建新 `dispatch_id` successor，不重用旧 ID；
 - target-local business lease repair、terminal settlement 与 bounded retention。
 
@@ -197,7 +199,7 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 | PR6 | 部分 | attachment/render dispatch 替换及 fresh runtime 正式输出待验收 |
 | PR7 | 产品逻辑已在 | HTTP、Web lint/build、mocked 与 live Playwright 待最终重跑 |
 | PR8A | 未完成 | registry Oxana 2.1.3、pure prepare、显式 job identity、adapter 单次调用至多一次 enqueue 与 stable `Skip/resurrect/max_retries=0` 合同；不切换业务 owner |
-| PR8B | 未完成 | dormant async target/空 conversion target/head/0..N intent/state、delivery/business attempts、observations、settlement/inbound、repair obligation、rejected delivery、typed evidence、semantics/governor catalog、深 module与policy/ACL；不激活 producer或业务 owner |
+| PR8B | 未完成 | dormant async target/空 conversion target/head/0..N intent/state、delivery/business attempts、observations、settlement/inbound、repair obligation、rejected delivery、typed evidence、semantics/governor catalog、owner-only SQL + 完整domain mutation wrapper/run-handle store seam、独立dispatcher role/DSN与policy/ACL；不注册真实adapter、不启动dispatcher或业务owner |
 | PR8C | 未完成 | conversion/extraction 纵切替换并删除该类旧 owner |
 | PR8D | 未完成 | attachment preparation/render 纵切替换并删除该类旧 owner |
 | PR8E | 未完成 | matching schedule/job/fanout 纵切替换并删除 dirty/orphan recovery |
@@ -320,8 +322,25 @@ actor、幂等 identity、receipt、audit envelope 与 heartbeat/lease 豁免只
 范围：
 
 - 建立 dormant base/六类空 typed extension、空的 document conversion domain target 表、dispatch head/immutable intents/state/一次性 delivery attempt/business attempt owner lease/bounded late observation/settlement/inbound/repair obligation/rejected delivery/typed evidence/semantics/governor schema、partial index 与 ACL；conversion producer/current pointer 仍不激活；
+- owner-only SQL `stage/replace_current_target/cancel_target` 只能由所属 SECURITY DEFINER domain mutation 在其现有transaction中直接调用；`PUBLIC`、API、worker、dispatcher、retention role均无直接`EXECUTE`。Rust不得一一映射或直调internal entry；只有实际Rust mutation调用方可用接收现有transaction的`pub(crate)` adapter包住完整domain mutation，run/handle只使用private store seam；禁止commit后补stage；
+- 新增独立login role`kb_runtime_bid_dispatcher`与`KNOWLEDGEBRAIN_BID_DISPATCHER_DB_PASSWORD`；`010-runtime-identities.sh`按既有风格创建`LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS` identity。该role加入脚本全部governed数组、password helper允许名/初始`EXECUTE` grantee、handoff/finalizer检查、Rust`GOVERNED_ROLES`/runtime reachability与first-launch catalog allowlist，finalized exact role count从13变14；dispatcher自身始终无membership/`MEMBER/SET`，handoff只保留verifier的两条临时SET edge且finalizer后governed membership为零；
+- `kb_app_owner`只授予dispatcher非grantable database`CONNECT`、`public` schema`USAGE`和`run`背后的bounded函数；worker DSN只能`handle`，dispatcher独立`BID_DISPATCH_DATABASE_URL`只能`run`，双方不能直接DML、直调internal mutation或调用对方入口。`deploy/docker-compose.yml`向PostgreSQL bootstrap传password并生成dormant DSN；`.github/workflows/ci.yml`、fresh-schema/Compose first-launch脚本、catalog ACL/password posture/handoff/post-finalizer verifier常量与expected role count同步验证全链；PR8B不在worker main、`run_core`、API或domain mutation中启动dispatcher；
 - 实现 `stage/replace_current_target/cancel_target/run/handle` 深 module、PostgreSQL store、one-shot offer claim/settle、delivery-start successor、内部 consumer begin/background heartbeat/publish、business lease repair 和 retention；worker只能调用`handle`，不能编排内部原语；
-- 只以 synthetic transaction fixture/RecordingTransport/活 Redis 合同验证新 aggregate；旧 target 不补建、不双写，六种 target owner（conversion、extraction、matching schedule、matching job、attachment preparation、submission render）均不切换。
+- synthetic fixture只在可丢弃独立数据库或最终显式rollback的完整transaction中创建真实`bid_document_conversion_targets` row，并经测试owner fixture调用同一owner-only mutation建立`document_conversion` aggregate；多连接commit/race只能使用可丢弃独立数据库。每例在trap/finally中销毁并断言aggregate/role/database零残留；不新增synthetic target kind/extension/task/registry。测试可注入RecordingTransport与测试私有typed adapter；PR8B生产composition root不注册六类真实adapter、不创建真实aggregate、不启动dispatcher；
+- 旧 target 不补建、不双写，六种 target owner（conversion、extraction、matching schedule、matching job、attachment preparation、submission render）均不切换，旧 producer/consumer/live recovery继续保留为唯一真实 owner。
+
+PR8B 是一个合并门，内部实现固定拆为八个顺序 vertical slices：
+
+| 内部 slice | 范围 | 进入下一 slice 前的验证 |
+| --- | --- | --- |
+| B1 | canonical KBDL/KBTF、dispatcher role/DSN、基础 ACL | golden/篡改、role catalog、API/worker/dispatcher交叉 deny |
+| B2 | dormant base/extensions/conversion target/head/intent/state、owner-only SQL、完整domain mutation wrapper与run/handle store seam | commit/rollback、exact FK、immutability、NULL matrix、runtime/Rust direct-call deny |
+| B3 | one-shot delivery claim/offer与delivery-attempt outcome | claim后crash/Ok/Err/timeout/response lost无二次offer、outcome矩阵 |
+| B4 | late observation/settlement/inbound/repair/rejected/evidence | late publisher/consumer/reaper、XOR/exact FK、bounded uniqueness、canonical insert-or-read |
+| B5 | business begin/lease/budget/governor/promotion | capacity、N边界、global/per-kind最后slot及promotion双序 |
+| B6 | successor/replacement/cancel/absorbing cleanup | 五态、late delivery/publisher、race与残留拒绝 |
+| B7 | `handle` scoped heartbeat lifecycle | normal/error/timeout/drop/panic/shutdown/fenced/DB failure收敛 |
+| B8 | required job与dormant closure | fresh catalog/ACL/checksum；无生产target/adapter/dispatcher spawn；旧owner仍唯一 |
 
 验证：base `PRIMARY KEY(id)` 与 typed/head/initial intent/state commit/rollback、六类 `KBTF` 与 `KBDL` fixed golden及逐字段篡改负例、`claim_lease_ms` 单真源及0/低于30s/超过30m负例、`max_attempts` 0/>10负例、delivery attempt exact intent/claim-token/phase/outcome composite FK及完整NULL matrix、cross-dispatch pointer、offering→settled、awaiting→inflight/consumer-started、returned job≠expected、第二次claim与settled outcome改写负例、bounded observation exact FK/每observer唯一、publisher/consumer/reaper/replacement/cancel outcome与NULL shape错配及adapter mismatch actual=expected负例、publisher-result与consumer-first/lease-expiry/replacement/cancel四组双序race及败方重读后的合法transition、publisher-first settled→consumer begin创建唯一business owner且delivery disposition不变、delivery-start deadline-vs-publisher与gate-rebase-vs-publisher双序race及old absorbing state/attempt matrix、business attempt dispatch/target/status FK与 ordinal/token unique、running缺lease、terminal缺code、ordinal 0/gap/>max、state/settlement/evidence attempt-status错配负例、contract-poison stored/recomputed、`UNIQUE(settlement_key)` 双事务 insert-or-read、head/predecessor/generation/attempt/settlement composite FK、replacement 指向 generation>0、cross-project/cross-kind/same-target 与 state/settlement kind 错配负例、第二 successor/第二 disposition拒绝、`advanced` 与 cross-target `superseded` replacement XOR/FK/并发/晚到 delivery、replacement 的 ready/offering/awaiting/running/absorbing 五态与 late publisher、replacement-vs-heartbeat/publish、正确 payload + 错误 `JobContext.meta.id` 且 external I/O=0、state NULL matrix、claim 后 crash/Ok/Err/timeout/response-lost 均不二次 offer、consumer-before-publisher、late publisher observation、deadline-vs-begin、duplicate owner CAS、owner-expired repair、attempt N-1/N、retryable-at-N handler settlement/evidence/inbound原子性、reaper-at-N无 inbound、resultless exhausted/result-artifact错配负例、非法 begin-at-max 后继只能 `DISPATCH_BUDGET_ORPHAN` poison、begin后连续 crash/reap在 max边界 terminal exhausted、gate rebase、hash-only/volume-loss successor、ACL 和空库 catalog。
 
@@ -428,6 +447,7 @@ scripts/verify_oxana_registry_source.sh
 cargo test -p runtime jobs::tests -- --nocapture
 cargo test -p runtime --test work_transport_live -- --nocapture --test-threads=1
 cargo test -p bid --test durable_dispatch_sql -- --nocapture --test-threads=1
+cargo test -p bid --lib dispatch::tests -- --nocapture
 cargo test -p worker --test durable_dispatch_worker -- --nocapture --test-threads=1
 cargo test -p bid --test tender_publication -- --nocapture --test-threads=1
 cargo test -p bid --test knowledge_retrieval_selection -- --nocapture --test-threads=1
@@ -438,7 +458,7 @@ scripts/fresh_schema_acceptance.sh
 scripts/bidding_v1_deletion_scan.sh
 ```
 
-`durable_dispatch_sql` 和 `durable_dispatch_worker` 是 PR8B 起固定的新合同 target；PR8B 及后续切片中对应文件不存在时 required job 必须保持红色。PR8A 的 job 不得用尚不存在的 DB dispatcher 测试冒充 one-shot 证据；PR8B 合并前 claim/crash/timeout/successor 合同必须进入同名 required job。所有活库测试必须在连接、schema 或 Redis 不可用时 fail closed；任一 `SKIP`、`SKIPPED`、`skipped live`、零用例匹配或缺少预期 contract ID 均使 job 失败。无 `continue-on-error`、无 optional service、无本地环境自动降级。
+三个PR8B入口责任固定：`durable_dispatch_sql`以DB owner fixture验证internal SQL mutation、schema/FK/CHECK/deferred verifier、ACL、并发与真实`document_conversion` typed synthetic aggregate，不经过Rust直调；`cargo test -p bid --lib dispatch::tests`以crate unit tests验证完整Rust domain mutation wrapper（若存在）、run/handle store seam、private runner、注入clock、RecordingTransport及once-per-dispatch，并证明Rust无internal SQL entry直调路径，不导出测试façade；`durable_dispatch_worker`只经worker可见`handle` seam验证ObservedDelivery、测试私有typed adapter、structured heartbeat与lifecycle，不能直接编排内部原语。三者从PR8B起都是固定合同入口；对应文件/测试不存在或无匹配用例时required job必须保持红色。PR8A的job不得用尚不存在的DB dispatcher测试冒充one-shot证据；PR8B合并前claim/crash/timeout/successor合同必须进入上述固定入口。所有活库测试必须在连接、schema或Redis不可用时fail closed；任一`SKIP`、`SKIPPED`、`skipped live`、零用例匹配或缺少预期contract ID均使job失败。无`continue-on-error`、无optional service、无本地环境自动降级。
 
 ### 7.3 PR9 required job：`bid-v1-fresh-runtime`
 

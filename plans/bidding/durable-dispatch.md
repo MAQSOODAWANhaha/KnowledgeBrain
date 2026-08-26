@@ -24,7 +24,9 @@
 
 ## 2. 深 module interface
 
-外部 interface 固定为：
+本 module 跨 PostgreSQL 与 Rust 两层，但只暴露一套受检 interface。所属领域已经由 PostgreSQL function 持有原子 mutation 的路径，必须由该 SECURITY DEFINER domain mutation 在同一个数据库 transaction 内直接调用 owner-only SQL entry。Rust 不直接调用、也不需要一一映射这些 internal SQL entry；若某条完整 domain mutation 实际由 Rust 持有 transaction，Rust 只提供包住整个 domain mutation 的 `pub(crate)` transaction adapter，不能在 domain mutation commit 后补调 dispatch。运行时由 composition root 注入各自 DB pool、`WorkTransport`、private typed-adapter registry、clock 与 shutdown token，module implementation 不从全局状态重新创建这些依赖。
+
+逻辑 interface 固定为：
 
 ```text
 stage(tx, NewBidTargetRef) -> DispatchId
@@ -40,7 +42,8 @@ handle(ObservedDelivery {
 }) -> HandlerOutcome
 ```
 
-- 三个 mutation entry均为crate-private，只能由所属target的受检domain mutation在调用方现有transaction中使用；它们原子stage、cross-target replace或cancel完整aggregate，调用方不能取得claim/settlement子步骤。API/worker不得在commit后直接调用Redis。
+- `stage/replace_current_target/cancel_target` 在 SQL 层是由 `kb_app_owner` 拥有的 internal function：`PUBLIC`、`kb_runtime_api`、`kb_runtime_worker`、`kb_runtime_bid_dispatcher` 与 `kb_runtime_retention` 均无直接 `EXECUTE`；只有所属 SECURITY DEFINER domain mutation 能在其现有 transaction 中直接调用。Rust store/run/handle seam不得获得这些 internal entry 的直调能力；存在 Rust mutation 调用方时，其 `pub(crate)` adapter只能调用完整受检 domain mutation并接收调用方现有 `Transaction`，不能提交、开启第二个 transaction或提升为普通 storage façade。
+- 三个 mutation entry 原子 stage、cross-target replace 或 cancel 完整 aggregate，调用方不能取得 claim/settlement 子步骤。API/worker不得在 commit 后直接调用 Redis，也不得用“domain mutation 成功后再调用 Rust adapter”伪造同事务原子性。
 - `stage` 从事务内 typed target 读取并冻结 target fence、gate epoch、lane、固定task/payload contract 和 dispatch semantics；调用方不能传 snapshot JSON 或自行构造队列 payload。
 - `run` 内部拥有 due scan、一次性 offer、delivery-start reaper 和 target-local repair。Redis unavailable/timeout 是单条 indeterminate outcome，不终止进程；registry/codec/queue closure mismatch 才返回 `DispatchFatal` 并使 readiness fail closed。
 - `handle` 是 `BidDeliveryV1Job` worker唯一调用的领域entry；在任何provider/object store/DocReader/renderer I/O前内部完成begin CAS，取得owner后选择private typed target adapter，启动scoped background heartbeat，执行外部调用，并在返回前内部publish/advance/settle。`observed_job_id`必须原样取自Oxana 2.1.3公共`JobContext.meta.id`，`payload_version`必须取自实际解码payload；禁止根据dispatch ID重新推导observed ID后再自证相等。
@@ -82,7 +85,9 @@ catalog 约束：
 - 普通 API/worker 无这些表的直接 DML，只能调用所属受检函数；
 - `SET CONSTRAINTS ALL IMMEDIATE` 必须拒绝零/多 extension、project/kind mismatch、单删和 identity move/swap。
 
-PR8B 可建立 dormant base/extensions 与空 conversion target 表，但不补建旧行、不双写、不注册第二 owner。PR8C～PR8E 每切换一个 family 时才安装其反向 verifier 并删除旧 producer/consumer。
+PR8B 可建立 dormant base/extensions 与空 conversion target 表，但不补建旧行、不双写、不注册第二 owner。PR8C～PR8E 每切换一个 family 时才安装其反向 verifier并删除旧 producer/consumer。
+
+PR8B 的 synthetic fixture 不增加 `synthetic` target kind、extension、queue task 或生产 registry entry。它只在隔离 fresh test schema 中建立一条真实 `bid_document_conversion_targets` domain row，并通过测试 owner fixture调用同一 owner-only SQL mutation建立 `document_conversion` base/typed extension/head/initial intent/state；测试 composition root 可为该真实 kind注入RecordingTransport与测试私有typed adapter。每个fixture必须使用可丢弃的独立数据库并在trap/finally中销毁，或完全包含在最终显式rollback的transaction中；需要多连接commit/race的测试只能使用可丢弃独立数据库。测试返回前必须证明base/typed/head/intent/state及role/database资源零残留。PR8B生产composition root不注册六类真实typed adapter、不创建任何真实target aggregate，也不启动dispatcher；因此fixture不能成为生产owner或需要后续兼容的数据格式。
 
 ### 3.2 Current head 与 immutable dispatch intent
 
@@ -595,8 +600,13 @@ project/current domain pointer（需要时）
 
 ## 8. 权限与可观测性
 
-- API role 只能通过所属 domain mutation 间接 stage，不能直接改 head/state/attempt；
-- worker role只能调用`handle(ObservedDelivery)`受检函数；dispatcher runtime role只能调用`run`背后的bounded受检函数；两者都无attempt/head/settlement直接DML权限；
+- API role 只能通过所属 SECURITY DEFINER domain mutation 间接进入 owner-only `stage/replace_current_target/cancel_target`，不能直接执行这些 internal function 或改 head/state/attempt；
+- PR8B 沿用既有 first-launch trust topology新增独立 login role `kb_runtime_bid_dispatcher`：`deploy/postgres-init/010-runtime-identities.sh` 必须要求 `KNOWLEDGEBRAIN_BID_DISPATCHER_DB_PASSWORD`，并以 `LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`、默认 connection limit、无 valid-until 创建；独立 DSN 固定为 `BID_DISPATCH_DATABASE_URL=postgres://kb_runtime_bid_dispatcher:<password>@<host>:<port>/<database>`，不能复用 worker DSN；
+- 该 role 必须加入bootstrap脚本全部governed数组、password-posture helper允许名与初始`EXECUTE` grantee、handoff/finalizer检查、Rust `GOVERNED_ROLES`与runtime reachability集合、catalog allowlist；finalized governed role exact count由13改为14。dispatcher自身始终零membership且不得`MEMBER/SET`到owner/governed role；handoff阶段仍只允许verifier→`kb_app_owner`/`kb_launch_owner`两条临时SET edge，finalizer后全部governed membership精确为零。handoff后dispatcher仍为login，finalizer只移除migrator/verifier临时authority，不得授予dispatcher owner可达性；
+- `kb_app_owner` 只授予dispatcher对目标database的非grantable `CONNECT`和`public` schema的非grantable `USAGE`，再授予`run`背后的最小受检function；`PUBLIC`及dispatcher对表/sequence/internal mutation/worker `handle` entry均deny。first-launch verifier的expected database/schema ACL、role attributes、password posture、membership和post-finalizer exact topology必须同步，不能只改role seed；
+- `deploy/docker-compose.yml`在PR8B把password传入PostgreSQL bootstrap并生成dormant dispatcher DSN配置；`.github/workflows/ci.yml`、`scripts/fresh_schema_acceptance.sh`、`scripts/compose_first_launch_acceptance.sh`与`crates/storage/src/first_launch.rs`的bootstrap参数、catalog/ACL/password posture、handoff/post-finalizer常量和fixture必须同时传入并验证该identity。PR8B不启动使用该DSN的进程；未来可以由同一worker binary持有两个pool，但凭证、pool与grants必须分离；
+- `kb_runtime_worker` 只能调用 `handle(ObservedDelivery)` 背后的受检函数，`kb_runtime_bid_dispatcher` 只能调用 `run` 背后的 due scan/offer/reaper/repair 受检函数；双方均无对方入口的 `EXECUTE`，也无 attempt/head/settlement 直接 DML 权限；
+- PR8B 只建立 dispatcher role、DSN contract 和 ACL 负例，不在 worker main、`run_core`、API 或任何 domain mutation 中 spawn `run`；首次真实启动只能与 PR8C～PR8E 对应 family 的旧 owner 删除发生在同一纵切；
 - maintenance、runtime、retention role 分离；maintenance lane 不能代替 live dispatch；
 - 日志字段限于 dispatch/target ID、kind、generation、lane、attempt、gate、reason code 和 latency，不记录 payload 内容或 secret；
 - 指标至少包含 ready、offering/awaiting-start overdue、successor generation、enqueue returned/indeterminate、duplicate/historical noop、business lease repair、poison 和 per-kind concurrency；
@@ -632,7 +642,7 @@ project/current domain pointer（需要时）
 ## 10. 实施顺序
 
 1. **PR8A — stable transport**：精确锁定 registry Oxana 2.1.3；实现 pure prepare、显式 job name/unique ID 和最薄 `offer` adapter；验证一次 adapter invocation 内 enqueue count 只能为 0 或 1（正常有效路径为 1）以及 `Skip/resurrect/max_retries=0` 真实语义；不 vendor、不 patch、不切换业务 owner。
-2. **PR8B — dormant durable core**：fresh baseline 建立 base/extensions/head/intent/state/delivery attempt/business attempt/observation/settlement/inbound/repair obligation/rejected delivery/evidence/semantics/governor 与 ACL；实现受检mutation/run/handle深module，用synthetic aggregate通过同一interface验证每dispatch最多一次offer、same-target advance、cross-target supersede和其余状态机，不激活真实producer/consumer。
+2. **PR8B — dormant durable core**：fresh baseline 建立 base/extensions/head/intent/state/delivery attempt/business attempt/observation/settlement/inbound/repair obligation/rejected delivery/evidence/semantics/governor 与独立 dispatcher role/ACL；实现 owner-only SQL mutation、完整 domain mutation wrapper（仅实际 Rust mutation 调用方需要）与受检 run/handle store seam，用真实 `document_conversion` typed target 的隔离 synthetic fixture 通过同一 interface 验证每 dispatch 最多一次 offer、same-target advance、cross-target supersede 和其余状态机，不注册真实 adapter、不启动 dispatcher或切换 producer/consumer。
 3. **PR8C — conversion/extraction**：安装 reverse verifier，原子切换 owner，删除该 family 旧 enqueue/live-recovery；验证 conversion→extraction 后继同事务。
 4. **PR8D — attachment/render**：原子切换 owner，删除旧 enqueue/recovery，验证附件 staging 与 render publish fencing。
 5. **PR8E — matching**：原子切换 schedule/job owner，落位 0..N fanout 并删除 dirty/orphan recovery。
@@ -641,7 +651,27 @@ project/current domain pointer（需要时）
 
 任何阶段不得让同一 target 同时受旧 live-recovery 和新 dispatcher 驱动。最终部署为 fresh redeploy，不创建历史 payload converter、数据 backfill、双写或兼容 view。
 
+PR8B 保持一个合并门，但内部固定按下列八个 vertical slices 顺序收敛；后续 slice 只能依赖前一 slice 已冻结的 interface，不得平行发明第二套状态原语：
+
+| PR8B 内部 slice | 范围 | 本 slice 验证 |
+| --- | --- | --- |
+| B1 Canonical identity 与 role | KBDL/KBTF builder/verifier、`kb_runtime_bid_dispatcher`、独立 DSN 与基础 deny-by-default grants | fixed golden/逐字段篡改、role catalog、worker/dispatcher/API 交叉 deny |
+| B2 Dormant schema skeleton | base、六 typed extension、空 conversion target、head、initial intent/state、owner-only SQL mutation、完整 domain mutation wrapper 与 Rust run/handle store seam | commit/rollback、exact relation、immutability、NULL matrix、runtime role不能直调internal mutation、Rust无直调路径 |
+| B3 Delivery one-shot | due claim、唯一 delivery attempt、one-shot offer及returned/indeterminate outcome | claim 后 crash/Ok/Err/timeout/response lost均不二次 offer，attempt outcome矩阵闭合 |
+| B4 Settlement 与 inbound integrity | late observation、settlement、rejected delivery、repair obligation、inbound、typed evidence | late publisher/consumer/reaper observation、XOR/exact FK、bounded uniqueness、canonical insert-or-read |
+| B5 Business owner 与 governor | begin CAS、ordinal/budget、lease、global/per-kind stable counters、promotion | capacity 不建 attempt、N 边界、并发 slot 与 promotion 双序 |
+| B6 Successor 与 absorbing primitives | `advance_dispatch`、replacement、cancel、统一 absorbing cleanup | 五态、双序 race、late publisher/delivery、无 inflight/未解析 obligation 残留 |
+| B7 Handle lifecycle | private typed adapter dispatch、scoped heartbeat、publish/settle、reap | normal/error/timeout/drop/panic/shutdown/fenced/DB failure均 join/cancel并最终收敛 |
+| B8 Dormant closure | required job、fresh catalog/ACL/checksum、source/registry denylist | 真实 conversion fixture只存在于测试；生产无 target/adapter/dispatcher spawn，旧 owner仍唯一 |
+
 ## 11. 验收矩阵
+
+PR8B 的测试责任固定分层，不为 integration test 扩张生产 interface：
+
+- `cargo test -p bid --test durable_dispatch_sql -- --nocapture --test-threads=1` 以 fresh PostgreSQL owner fixture验证 owner-only SQL mutation、schema/FK/CHECK/deferred verifier、ACL、并发与 synthetic `document_conversion` aggregate；它不经过Rust直调或映射internal SQL entry；
+- `cargo test -p bid --lib dispatch::tests -- --nocapture` 由 crate unit tests验证完整 Rust domain mutation wrapper（若存在）、run/handle store seam、private runner原语、注入clock、RecordingTransport及once-per-dispatch；它明确证明Rust不能直调internal SQL mutation，也不是可由其它crate复用的公开façade；
+- `cargo test -p worker --test durable_dispatch_worker -- --nocapture --test-threads=1` 只经 worker 可见 `handle` seam验证 ObservedDelivery、private test adapter、structured heartbeat与 lifecycle 收敛，不能直接编排 begin/heartbeat/publish/settle；
+- 三个入口从 PR8B 起全部进入同一 required job；任一缺失、skip 或改用另一绿色入口均失败。生产 PR8B composition root 不注册真实 adapter、不 spawn `run`，由 B8 静态扫描与 fresh runtime registry共同证明。
 
 ### 11.1 原子性与 schema
 

@@ -208,7 +208,7 @@ baseline 必须一次建立：
 
 ### 7.2 权限
 
-招投标 API/worker 只获得受检函数和必要读 view 权限；不能直接改不可变 artifact、current pointer、ObjectRegistry、retention outbox 或 Bid dispatch intent/state。平台角色与 retention 权限由 [`../platform/runtime-foundation.md`](../platform/runtime-foundation.md) 定义，dispatch 权限由 [`durable-dispatch.md`](durable-dispatch.md) 定义，fresh-schema acceptance 联合验证 allow/deny 矩阵。
+招投标API/worker/dispatcher只获得各自受检函数和必要读view权限；不能直接改不可变artifact、current pointer、ObjectRegistry、retention outbox或Bid dispatch intent/state。平台角色与retention权限由[`../platform/runtime-foundation.md`](../platform/runtime-foundation.md)定义；独立`kb_runtime_bid_dispatcher`的password/bootstrap/governed/handoff/finalizer/catalog/CONNECT/USAGE/Compose/CI trust topology、独立DSN、worker/dispatcher交叉deny与PR8B dormant不启动合同由[`durable-dispatch.md`](durable-dispatch.md)定义，fresh-schema acceptance联合验证allow/deny矩阵。
 
 V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用户拥有的项目，所有 `/api/v1/bids/{project_id}/...` 路径先校验 owner。当前模型没有 Bid 成员或 API-key-to-Bid scope relation，因此这两类访问必须 fail-closed；若未来需要协作成员，先增加显式 membership/scope artifact 与受检授权合同，不能把“已认证”当作“可访问任意 Bid”。
 
@@ -225,7 +225,7 @@ V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用�
 | PR6 | Submission 产品逻辑已落位；attachment/render dispatch 尚待替换 | submission/renderer/worker/fresh PDF 待重跑 |
 | PR7 | API routes 与模块化 Web 工作台已落位 | HTTP、lint/build、mocked 与 live Playwright 待最终重跑 |
 | PR8A | 未完成 | registry Oxana 2.1.3、pure prepare、显式 job ID、adapter 单 invocation 至多一次 enqueue 及 stable Skip/resurrection/max_retries 合同；不切换业务 owner |
-| PR8B | 未完成 | dormant async target/空 conversion target/head/intents/state、delivery/business attempts、observations、settlement/inbound、repair obligation、rejected delivery、typed evidence、semantics/governor catalog、dispatch 深 module与policy/ACL；不激活 producer或业务 owner |
+| PR8B | 未完成 | dormant async target/空 conversion target/head/intents/state、delivery/business attempts、observations、settlement/inbound、repair obligation、rejected delivery、typed evidence、semantics/governor catalog、owner-only SQL + 完整domain mutation wrapper/run-handle store seam、独立dispatcher role/DSN与policy/ACL；不注册真实adapter、不启动dispatcher或业务owner |
 | PR8C | 未完成 | conversion/extraction 纵切替换，同步删除该类旧 enqueue/recovery owner |
 | PR8D | 未完成 | attachment preparation/render 纵切替换，同步删除该类旧 owner |
 | PR8E | 未完成 | matching schedule/job/fanout 纵切替换，同步删除 dirty/orphan recovery |
