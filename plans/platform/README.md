@@ -10,4 +10,4 @@
 - [`../../docs/research/repository-implementation-snapshot.md`](../../docs/research/repository-implementation-snapshot.md)：迁移前仓库实现快照，非规范。
 - [`../archive/platform/README.md`](../archive/platform/README.md)：旧综合稳定性与 schema 加固方案，仅供追溯。
 
-队列 transport 只由 `queue-runtime.md` 定义；领域 durable intent、target recovery 和业务 retry 由所属领域定义并链接平台 interface，不在平台文档复制业务表。
+队列 transport、handler retry和worker crash resurrection只由`queue-runtime.md`定义。领域只保存durable business target、claim/lease、幂等publish及Redis全丢兜底，不复制queue membership或retry状态机。

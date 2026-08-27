@@ -2,8 +2,8 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | **最终 V1 产品方案与 stable Oxana durable-dispatch 修订已批准并固化；运行时代码尚未实施或验收** |
-| 日期 | 2026-08-26 |
+| 状态 | **最终 V1 与 Oxana 2.1.3 简化队列方案已批准并固化；运行时代码尚未按新方案实施或验收** |
+| 日期 | 2026-08-27 |
 | 业务 | 网络安全产品与服务应标（乙方） |
 | 部署 | clean-slate fresh redeploy |
 | 正式范围 | 招标拆解、事实、两路匹配、人工选择、人工报价、①～⑥组卷、DOCX/PDF |
@@ -16,8 +16,8 @@
 | [`matching.md`](matching.md) | 两路检索、不可变证据、MatchingReportV1、选择集和匹配发布 |
 | [`quote.md`](quote.md) | CNY Decimal、限价口径、QuoteSnapshotV1、finalize/reopen |
 | [`submission-export.md`](submission-export.md) | ①～⑥、程序材料、stale、manifest、ObjectRegistry 使用、DOCX/PDF |
-| [`durable-dispatch.md`](durable-dispatch.md) | target+intent 原子性、单跳投递、业务 lease 恢复、平台 WorkTransport 消费合同与删除矩阵 |
-| [`implementation-acceptance.md`](implementation-acceptance.md) | 最终 baseline schema、删除矩阵、PR0～PR9（含 PR8A～PR8F）、测试与运行验收 |
+| [`durable-dispatch.md`](durable-dispatch.md) | 现有业务 target、generation/lease fencing、Oxana 消费和 Redis 全丢兜底 |
+| [`implementation-acceptance.md`](implementation-acceptance.md) | 最终 baseline、删除矩阵、PR0～PR9、测试与运行验收 |
 
 已被替代的旧方案和评审只保存在 [`../archive/README.md`](../archive/README.md)，不再留旧路径兼容副本。
 
@@ -25,14 +25,14 @@
 
 ## 当前实施状态
 
-当前仓库已落位大部分 clean-slate V1 产品主链，但 transactional durable dispatch 尚未实施；当前工作树仍含将被替换的 Bid 两跳 live-recovery 与 commit 后 best-effort enqueue。共享 `replay_orphaned_local_jobs` 没有领域过滤，可能触碰未来 Bid transport membership；PR8 新路径不主动调用、不依赖其结果，也不在缺少其它领域替代恢复证明时误删，准确边界见平台 [`queue-runtime.md`](../platform/queue-runtime.md)。
+当前仓库已落位大部分 clean-slate V1 产品主链，但简化后的异步投递尚未实施；当前工作树仍含将被替换的 Bid 两跳 live-recovery、commit 后 best-effort enqueue和未采用的复杂 dispatch 草稿。最终实现只复用 Oxana retry/resurrection，并以现有业务 target承担 durable intent，准确边界见平台 [`queue-runtime.md`](../platform/queue-runtime.md)。
 
 | 层次 | 当前证据 |
 | --- | --- |
-| implemented | 部分；产品主链已有实现，durable dispatch 深 module 与旧 recovery 删除尚未实施 |
-| locally verified | 部分；已有定向证据不能覆盖新 dispatch 合同，完整 workspace/强制活库/fresh runtime 需重跑 |
-| committed | 部分；`ee8b492` 与本次独立方案固化提交已提交，PR8A～PR9 运行时代码尚未实施或提交 |
-| pushed | 部分；`ee8b492` 已在 `origin/main`，本次方案固化提交仅保留本地、未 push |
+| implemented | 部分；产品主链已有实现，简化 dispatch与旧 recovery删除尚未完成 |
+| locally verified | 部分；已有定向证据不能覆盖新合同，完整 workspace/强制活库/fresh runtime需重跑 |
+| committed | 部分；当前精确状态以Git为准，本轮方案未提交 |
+| pushed | 部分；当前精确状态以Git为准，本轮方案未push |
 | deployed | 否；未部署到 fresh 或生产环境 |
 | runtime accepted | 否；当前 checkout 没有完整 fresh-runtime 证据包，`phase_1d_runtime_complete=false` |
 
@@ -103,9 +103,9 @@ Matching 的 Open/Stage/Commit 是大 artifact 的 adapter 内部协议。applic
 
 ### 3.3 Durable dispatch
 
-招投标拥有自己的 PostgreSQL current dispatch head、0..N immutable intent 和 target-local recovery，完整合同只在 [`durable-dispatch.md`](durable-dispatch.md) 定义。业务 target、head 与 initial intent 同事务提交；每个 dispatch identity 最多调用一次稳定版 Oxana enqueue，未知结果只创建新 ID successor。API 不在 commit 后 best-effort enqueue，Oxana 不拥有业务 snapshot、generation、retry 或 terminal 状态。
+招投标现有业务 target就是durable intent，完整合同只在 [`durable-dispatch.md`](durable-dispatch.md) 定义。target与业务mutation同事务提交；Oxana负责enqueue、retry、并发消费和worker crash resurrection，PostgreSQL只保留delivery generation、业务claim/lease和fenced publish。API不在commit后best-effort enqueue，也不建立dispatch head/intent/attempt/successor等第二套队列状态机。
 
-该 runtime module 是五个业务深模块共享的内部实施能力，不增加第六个业务领域。正常投递和失败恢复使用同一 intent；不得保留独立 `system:live-recovery:v1` queue hop 或泛化 housekeep 扫描。
+轻量due reconciler运行在现有worker中，只处理Redis完全丢失或任务长期未终结的兜底重新投递；不得保留独立`system:live-recovery:v1` queue hop、泛化housekeep扫描或独立dispatcher服务。
 
 ## 4. 五个深模块
 
@@ -203,12 +203,12 @@ baseline 必须一次建立：
 - matching job/artifacts/current projections/picks；
 - quote draft/snapshot/current pointer；
 - profiles/procedural/parts/manifest/render assets；
-- Bid async target identity、current dispatch head、0..N immutable intent/state、delivery/business attempts、bounded observations、settlement/inbound、repair obligations、rejected deliveries、typed evidence、semantics/governor 与 typed target exact relation；
+- 六类现有业务target上的delivery generation、next enqueue、业务claim/lease和result/error字段；
 - functions、triggers、views、ACL 和 seed contract artifacts。
 
 ### 7.2 权限
 
-招投标API/worker/dispatcher只获得各自受检函数和必要读view权限；不能直接改不可变artifact、current pointer、ObjectRegistry、retention outbox或Bid dispatch intent/state。平台角色与retention权限由[`../platform/runtime-foundation.md`](../platform/runtime-foundation.md)定义；独立`kb_runtime_bid_dispatcher`的password/bootstrap/governed/handoff/finalizer/catalog/CONNECT/USAGE/Compose/CI trust topology、独立DSN、worker/dispatcher交叉deny与PR8B dormant不启动合同由[`durable-dispatch.md`](durable-dispatch.md)定义，fresh-schema acceptance联合验证allow/deny矩阵。
+招投标API和worker只获得各自受检函数与必要read view权限；不能直接改不可变artifact、current pointer、ObjectRegistry或retention outbox。due reconciler复用现有worker role，只能调用bounded reserve/reap函数；V1不新增dispatcher role、DSN或service。平台角色与retention权限由[`../platform/runtime-foundation.md`](../platform/runtime-foundation.md)定义，fresh-schema acceptance验证allow/deny矩阵。
 
 V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用户拥有的项目，所有 `/api/v1/bids/{project_id}/...` 路径先校验 owner。当前模型没有 Bid 成员或 API-key-to-Bid scope relation，因此这两类访问必须 fail-closed；若未来需要协作成员，先增加显式 membership/scope artifact 与受检授权合同，不能把“已认证”当作“可访问任意 Bid”。
 
@@ -216,25 +216,18 @@ V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用�
 
 | 阶段 | 当前实现状态 | 完成证据 |
 | --- | --- | --- |
-| PR0 | 产品基线与 stable durable-dispatch 修订已批准并固化 | 2026-08-26 `diff --check`、relative links、Markdown tables通过；DB/并发、transport、跨文档三轴复审均P0/P1/P2=0 |
+| PR0 | 产品基线与Oxana简化方案已批准并固化 | 2026-08-27职责边界、故障收敛、活动目录一致性与`diff --check`通过 |
 | PR1 | 原 baseline 主体已落位；dispatch schema/ACL/checksum 尚待替换 | fresh-schema/catalog/seed/ACL 必须在替换后重跑 |
-| PR2 | TenderPublication 产品逻辑已落位；conversion/extraction dispatch 尚待替换 | publication/conversion/extraction 强制活库套件待重跑 |
-| PR3 | ClauseLifecycle、KindRouter 与 fact decision 已落位 | promotion/concurrency 强制活库套件待最终重跑 |
-| PR4 | MatchingPublication 产品逻辑已落位；schedule/fanout/job dispatch 尚待替换 | matching/lease/fanout 强制活库套件待重跑 |
-| PR5 | Quote 产品逻辑已落位 | quote/HTTP/Web 最终门禁待重跑 |
-| PR6 | Submission 产品逻辑已落位；attachment/render dispatch 尚待替换 | submission/renderer/worker/fresh PDF 待重跑 |
-| PR7 | API routes 与模块化 Web 工作台已落位 | HTTP、lint/build、mocked 与 live Playwright 待最终重跑 |
-| PR8A | 未完成 | registry Oxana 2.1.3、pure prepare、显式 job ID、adapter 单 invocation 至多一次 enqueue 及 stable Skip/resurrection/max_retries 合同；不切换业务 owner |
-| PR8B | 未完成 | dormant async target/空 conversion target/head/intents/state、delivery/business attempts、observations、settlement/inbound、repair obligation、rejected delivery、typed evidence、semantics/governor catalog、owner-only SQL + 完整domain mutation wrapper/run-handle store seam、独立dispatcher role/DSN与policy/ACL；不注册真实adapter、不启动dispatcher或业务owner |
-| PR8C | 未完成 | conversion/extraction 纵切替换，同步删除该类旧 enqueue/recovery owner |
-| PR8D | 未完成 | attachment preparation/render 纵切替换，同步删除该类旧 owner |
-| PR8E | 未完成 | matching schedule/job/fanout 纵切替换，同步删除 dirty/orphan recovery |
-| PR8F | 未完成 | 删除剩余 Bid 旧 owner、复证 Bid/WorkTransport private-key denylist、baseline checksum、catalog/ACL、queue registry closure 与全量本地/强制活库门禁 |
+| PR2 | TenderPublication、ClauseLifecycle、KindRouter和facts主体已落位；dispatch与parser边界待收口 | publication/promotion/concurrency强制活库套件待重跑 |
+| PR3 | MatchingPublication主体已落位；schedule/job dispatch待替换 | matching/lease/fanout/pick强制活库套件待重跑 |
+| PR4 | Quote主体已落位 | quote/HTTP/Web最终门禁待重跑 |
+| PR5 | Submission主体已落位；attachment/render dispatch待替换 | submission/renderer/worker/fresh PDF待重跑 |
+| PR6 | API routes与模块化Web工作台已落位 | HTTP、lint/build、mocked与live Playwright待最终重跑 |
+| PR7 | 旧transport seam已有部分实现；须按简化合同调整 | Oxana 2.1.3原生retry/Skip/resurrection和cleanup活Redis验收 |
+| PR8 | 未完成 | 六类target最小delivery字段、worker内reconciler、generation/token/lease fencing及旧Bid recovery/复杂dispatch草稿删除 |
 | PR9 | 未完成 | 干净已 push 候选 SHA 的 clean-slate Compose、全量故障矩阵、真实浏览器/PDF、retention、强制资源清理、证据绑定与受审计 cutover；`phase_1d_runtime_complete=false` |
 
-PR8A/PR8B 只建立稳定版 transport seam 与 dormant 深 module，不补建旧 target aggregate、不双写也不启用第二个业务 owner。PR8C～PR8E 每个纵切才原子创建该 family 的 base/typed/head/initial intent/state，并在同一改动启用新 adapter、删除旧 Bid enqueue/recovery 分支；PR8F 证明 Bid 只剩一个业务 owner。共享 private-key replay 的删除属于独立 Shared Platform/Knowledge Base cutover，不伪装成 PR8 完成条件。
-
-发布版 Oxana 没有 exact receipt、probe、retire 或 terminal tombstone；`Storage::enqueue` 返回也不能证明首次插入。PostgreSQL head、一次性 identity、delivery-start deadline、business lease 与 durable settlement 是唯一正确性边界。六张 `bid_async_*` sidecar 只保存 dispatch identity 与真实 domain target 的 exact relation，不复制业务状态、generation、claim或结果。
+PR7先固化并实测Oxana 2.1.3原生retry/resurrection；PR8逐类接入现有target，并在同一改动删除旧owner，不补建sidecar aggregate、不双写、不启动第二个dispatcher。发布版Oxana结果不能证明业务完成；业务正确性只由target generation、claim/lease和原子publish保证。
 
 ## 9. 验收口径
 
