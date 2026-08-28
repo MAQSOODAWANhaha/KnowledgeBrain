@@ -73,6 +73,18 @@ pub fn router() -> Router<AppState> {
             post(create_outline_candidate),
         )
         .route(
+            "/api/v2/submission-workspaces/{workspace_id}/outline-checkpoints",
+            post(create_outline_checkpoint),
+        )
+        .route(
+            "/api/v2/submission-workspaces/{workspace_id}/assets",
+            get(list_workspace_assets).post(upload_workspace_asset),
+        )
+        .route(
+            "/api/v2/submission-workspaces/{workspace_id}/document-settings",
+            patch(patch_document_settings),
+        )
+        .route(
             "/api/v2/submission-workspaces/{workspace_id}/requests/{request_id}",
             get(get_async_request),
         )
@@ -540,6 +552,19 @@ struct AcceptCandidateBody {
     client_node_refs: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateOutlineCheckpointBody {
+    expected_workspace_revision_id: Uuid,
+    expected_workspace_sha256: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchDocumentSettingsBody {
+    settings: Value,
+}
+
 async fn freeze_document_set(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -788,16 +813,14 @@ async fn mutate_workspace(
         .await
         .map_err(map_sql)?
         .ok_or_else(|| not_found("submission workspace"))?;
-    let snapshot = bidding::workspace::apply_workspace_operations(&current, &body).map_err(
-        |error| match error {
-            bidding::workspace::WorkspaceMutationError::WorkspaceCasMismatch => fail(
-                StatusCode::CONFLICT,
-                "WORKSPACE_CAS_CONFLICT",
-                error.to_string(),
-            ),
-            _ => validation(&error.to_string()),
-        },
-    )?;
+    // A byte-identical retry reaches the idempotency receipt before SQL performs CAS.
+    // Passing the current snapshot on a stale head is safe: a non-replay request is
+    // rejected by kb_bid_v2_commit_workspace_mutation before the snapshot is read.
+    let snapshot = match bidding::workspace::apply_workspace_operations(&current, &body) {
+        Ok(snapshot) => snapshot,
+        Err(bidding::workspace::WorkspaceMutationError::WorkspaceCasMismatch) => current.clone(),
+        Err(error) => return Err(validation(&error.to_string())),
+    };
     let context =
         bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
             .map_err(|error| validation(&error.to_string()))?;
@@ -1019,4 +1042,182 @@ async fn reject_candidate(
         .await
         .map(Json)
         .map_err(map_sql)
+}
+
+async fn create_outline_checkpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<CreateOutlineCheckpointBody>,
+) -> Result<(StatusCode, Json<Value>), ApiErr> {
+    let (_, actor) = human_actor(&headers, &state).await?;
+    let context = bidding::MutationContext::new(
+        actor,
+        required_idempotency_key(&headers)?,
+        &json!({"workspace_id":workspace_id,"request":body}),
+    )
+    .map_err(|error| validation(&error.to_string()))?;
+    let pool = require_bid_pool().await?;
+    let value = bidding::bid_authoring_v2::create_outline_checkpoint_v2(
+        &pool,
+        workspace_id,
+        body.expected_workspace_revision_id,
+        &body.expected_workspace_sha256,
+        Uuid::new_v4(),
+        &context,
+    )
+    .await
+    .map_err(map_sql)?;
+    Ok((StatusCode::CREATED, Json(value)))
+}
+
+async fn list_workspace_assets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Json<Value>, ApiErr> {
+    let (_, actor) = human_actor(&headers, &state).await?;
+    let pool = require_bid_pool().await?;
+    bidding::bid_authoring_v2::list_workspace_assets_v2(&pool, workspace_id, &actor)
+        .await
+        .map(Json)
+        .map_err(map_sql)
+}
+
+async fn upload_workspace_asset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<Value>), ApiErr> {
+    let (_, actor) = human_actor(&headers, &state).await?;
+    let mut file_name = String::new();
+    let mut declared_media_type = None;
+    let mut bytes = Vec::new();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| validation(&error.to_string()))?
+    {
+        if field.name() == Some("file") {
+            file_name = field.file_name().unwrap_or("asset.bin").to_owned();
+            declared_media_type = field.content_type().map(str::to_owned);
+            bytes = field
+                .bytes()
+                .await
+                .map_err(|error| validation(&error.to_string()))?
+                .to_vec();
+        }
+    }
+    if bytes.is_empty() {
+        return Err(validation("file required"));
+    }
+    let validated = bidding::tender_upload::validate_tender_upload(
+        &file_name,
+        declared_media_type.as_deref(),
+        &bytes,
+    )
+    .map_err(|error| validation(&error.to_string()))?;
+    let digest = platform::sha256_hex(&bytes);
+    let object_ref = platform::object_ref(&digest);
+    let context = bidding::MutationContext::new(
+        actor.clone(),
+        required_idempotency_key(&headers)?,
+        &json!({
+            "workspace_id":workspace_id,"file_name":file_name,"media_type":validated.media_type,
+            "byte_length":bytes.len(),"content_sha256":digest
+        }),
+    )
+    .map_err(|error| validation(&error.to_string()))?;
+    let pool = require_bid_pool().await?;
+    let staging_id = Uuid::new_v4();
+    stage_upload(
+        &pool,
+        staging_id,
+        &object_ref,
+        &digest,
+        validated.media_type,
+        &bytes,
+        &actor,
+    )
+    .await?;
+    let result = bidding::bid_authoring_v2::upload_workspace_asset_v2(
+        &pool,
+        bidding::bid_authoring_v2::UploadWorkspaceAssetV2 {
+            workspace_id,
+            asset_id: Uuid::new_v4(),
+            staging_id,
+            file_name: &file_name,
+            media_type: validated.media_type,
+            byte_length: bytes.len() as i64,
+            object_ref: &object_ref,
+            content_sha256: &digest,
+        },
+        &context,
+    )
+    .await;
+    if result.is_err() {
+        let _ = platform::abandon_object_upload(&pool, staging_id, &actor).await;
+    }
+    result
+        .map(|value| (StatusCode::CREATED, Json(value)))
+        .map_err(map_sql)
+}
+
+async fn patch_document_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+    Json(body): Json<PatchDocumentSettingsBody>,
+) -> Result<(HeaderMap, Json<Value>), ApiErr> {
+    let (_, actor) = human_actor(&headers, &state).await?;
+    let if_match = headers
+        .get("if-match")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim_start_matches("W/").trim_matches('"').to_owned())
+        .ok_or_else(|| fail(StatusCode::PRECONDITION_REQUIRED,"IF_MATCH_REQUIRED","If-Match required"))?;
+    bidding::workspace::validate_document_settings(&body.settings)
+        .map_err(|error| validation(&error.to_string()))?;
+    let pool = require_bid_pool().await?;
+    let current = bidding::bid_authoring_v2::load_workspace_v2(&pool, workspace_id, &actor)
+        .await
+        .map_err(map_sql)?
+        .ok_or_else(|| not_found("submission workspace"))?;
+    let current_sha = current.get("sha256").and_then(Value::as_str).unwrap_or_default();
+    let current_revision = current
+        .get("revision_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| validation("workspace revision identity missing"))?;
+    let expected_revision = if current_sha == if_match { current_revision } else { Uuid::nil() };
+    let request = bidding::workspace::WorkspaceMutationRequestV1 {
+        schema_version: 1,
+        workspace_id,
+        expected_workspace_revision_id: expected_revision,
+        expected_workspace_sha256: if_match.clone(),
+        operations: vec![json!({"kind":"update_document_settings","settings":body.settings})],
+    };
+    let snapshot = if current_sha == if_match {
+        bidding::workspace::apply_workspace_operations(&current, &request)
+            .map_err(|error| validation(&error.to_string()))?
+    } else {
+        current.clone()
+    };
+    let context = bidding::MutationContext::new(
+        actor,
+        required_idempotency_key(&headers)?,
+        &json!({"workspace_id":workspace_id,"if_match":if_match,"settings":body.settings}),
+    )
+    .map_err(|error| validation(&error.to_string()))?;
+    let workspace = bidding::bid_authoring_v2::commit_workspace_mutation_v2(
+        &pool,
+        workspace_id,
+        expected_revision,
+        &request.expected_workspace_sha256,
+        &snapshot,
+        &context,
+    )
+    .await
+    .map_err(map_sql)?;
+    workspace_response(workspace)
 }

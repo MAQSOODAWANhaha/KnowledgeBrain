@@ -14,6 +14,59 @@ pub struct WorkspaceMutationRequestV1 {
     pub operations: Vec<Value>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DocumentMargins {
+    top: f64,
+    right: f64,
+    bottom: f64,
+    left: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DocumentSettings {
+    page_size: String,
+    margins_mm: DocumentMargins,
+    cjk_font: String,
+    latin_font: String,
+    body_font_pt: f64,
+    line_spacing: f64,
+    heading_numbering: String,
+    header: String,
+    footer: String,
+    page_number: String,
+}
+
+pub fn validate_document_settings(value: &Value) -> Result<()> {
+    let settings: DocumentSettings = serde_json::from_value(value.clone())
+        .map_err(|error| invalid(format!("document settings schema invalid: {error}")))?;
+    let margins = [
+        settings.margins_mm.top,
+        settings.margins_mm.right,
+        settings.margins_mm.bottom,
+        settings.margins_mm.left,
+    ];
+    if settings.page_size != "A4"
+        || margins.iter().any(|margin| !margin.is_finite() || !(5.0..=80.0).contains(margin))
+        || settings.cjk_font.is_empty()
+        || settings.cjk_font.chars().count() > 128
+        || settings.latin_font.is_empty()
+        || settings.latin_font.chars().count() > 128
+        || !settings.body_font_pt.is_finite()
+        || !(6.0..=48.0).contains(&settings.body_font_pt)
+        || !settings.line_spacing.is_finite()
+        || !(0.8..=4.0).contains(&settings.line_spacing)
+        || !matches!(settings.heading_numbering.as_str(), "decimal" | "chinese" | "none")
+        || settings.header.chars().count() > 2_048
+        || settings.footer.chars().count() > 2_048
+        || !matches!(settings.page_number.as_str(), "none" | "footer_center" | "footer_outside")
+    {
+        return Err(invalid("document settings are outside the closed V1 contract"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum WorkspaceMutationError {
     #[error("workspace identity does not match the mutation request")]
@@ -81,6 +134,7 @@ pub fn apply_workspace_operations(
                     .get("settings")
                     .cloned()
                     .ok_or_else(|| invalid("settings missing"))?;
+                validate_document_settings(&settings)?;
             }
             "bind_fulfillment" => bind_fulfillment(&mut bindings, operation)?,
             "remap_fulfillment" => remap_fulfillment(&mut bindings, operation)?,

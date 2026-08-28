@@ -1123,6 +1123,7 @@ CREATE TABLE bid_workspace_asset_artifacts (
   object_ref kb_object_ref NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
   media_type text NOT NULL CHECK (octet_length(media_type) BETWEEN 1 AND 256),
+  file_name text NOT NULL CHECK (octet_length(file_name) BETWEEN 1 AND 1024),
   object_state text NOT NULL DEFAULT 'available' CHECK (object_state='available'),
   byte_length bigint NOT NULL CHECK (byte_length > 0),
   source text NOT NULL CHECK (source='human_upload'),
@@ -4580,6 +4581,89 @@ BEGIN
   RETURN kb_bid_v2_load_workspace(p_workspace_id);
 END $$;
 
+CREATE FUNCTION kb_bid_v2_list_workspace_assets(
+  p_workspace_id uuid,p_actor kb_actor_identity
+) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE project_id uuid;
+BEGIN
+  SELECT value.project_id INTO project_id FROM bid_submission_workspaces value WHERE value.id=p_workspace_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'WORKSPACE_NOT_FOUND' USING ERRCODE='P0002'; END IF;
+  PERFORM kb_bid_v2_require_project_owner(project_id,p_actor);
+  RETURN coalesce((SELECT jsonb_agg(jsonb_build_object(
+    'asset_revision_id',a.id,'media_type',a.media_type,'file_name',a.file_name,
+    'byte_length',a.byte_length,'object_ref',a.object_ref,'content_sha256',a.content_sha256
+  ) ORDER BY a.created_at,a.id) FROM bid_workspace_asset_artifacts a
+    WHERE a.workspace_id=p_workspace_id),'[]'::jsonb);
+END $$;
+
+CREATE FUNCTION kb_bid_v2_upload_workspace_asset(
+  p_workspace_id uuid,p_asset_id uuid,p_staging_id uuid,p_file_name text,
+  p_media_type text,p_byte_length bigint,p_object_ref kb_object_ref,p_content_sha256 kb_sha256,
+  p_actor kb_actor_identity,p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE project_id uuid; replay bytea; response jsonb; response_bytes bytea;
+BEGIN
+  replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.workspace.asset.upload',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  SELECT value.project_id INTO project_id FROM bid_submission_workspaces value WHERE value.id=p_workspace_id FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'WORKSPACE_NOT_FOUND' USING ERRCODE='P0002'; END IF;
+  PERFORM kb_bid_v2_require_project_owner(project_id,p_actor);
+  IF p_byte_length<=0 OR octet_length(p_file_name) NOT BETWEEN 1 AND 1024 THEN
+    RAISE EXCEPTION 'ASSET_METADATA_INVALID' USING ERRCODE='23514';
+  END IF;
+  INSERT INTO bid_workspace_asset_artifacts(
+    id,project_id,workspace_id,object_ref,content_sha256,media_type,file_name,byte_length,source,created_by)
+  VALUES(p_asset_id,project_id,p_workspace_id,p_object_ref,p_content_sha256,p_media_type,
+    p_file_name,p_byte_length,'human_upload',p_actor);
+  PERFORM kb_object_upload_commit(p_staging_id,p_object_ref,p_content_sha256,p_media_type,p_byte_length,
+    'bid_workspace_asset',p_asset_id,'payload',p_actor);
+  response:=jsonb_build_object('asset_revision_id',p_asset_id,'media_type',p_media_type,
+    'file_name',p_file_name,'byte_length',p_byte_length,'object_ref',p_object_ref,'content_sha256',p_content_sha256);
+  response_bytes:=convert_to(response::text,'UTF8');
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
+    entity_kind,entity_locator,after_revision,after_sha256)
+  VALUES(gen_random_uuid(),1,'bid.v2.workspace.asset.upload',p_actor,p_idempotency_key,p_request_sha256,
+    kb_bid_v2_sha256_bytes(response_bytes),'bid_v2_workspace_asset',jsonb_build_object('workspace_id',p_workspace_id,'asset_id',p_asset_id),1,p_content_sha256);
+  PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.workspace.asset.upload',p_idempotency_key,201,response_bytes);
+  RETURN response;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_create_outline_checkpoint(
+  p_workspace_id uuid,p_expected_revision_id uuid,p_expected_sha256 kb_sha256,p_checkpoint_id uuid,
+  p_actor kb_actor_identity,p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE workspace bid_submission_workspaces%ROWTYPE; head bid_workspace_heads%ROWTYPE;
+  revision bid_workspace_revision_artifacts%ROWTYPE; replay bytea; payload bytea; digest kb_sha256;
+  response jsonb; response_bytes bytea;
+BEGIN
+  replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.outline.checkpoint.create',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  SELECT * INTO STRICT workspace FROM bid_submission_workspaces WHERE id=p_workspace_id;
+  PERFORM kb_bid_v2_require_project_owner(workspace.project_id,p_actor);
+  SELECT * INTO STRICT head FROM bid_workspace_heads WHERE scope_id=p_workspace_id FOR UPDATE;
+  IF head.artifact_id<>p_expected_revision_id OR head.artifact_sha256<>p_expected_sha256 THEN
+    RAISE EXCEPTION 'WORKSPACE_CAS_CONFLICT' USING ERRCODE='40001';
+  END IF;
+  SELECT * INTO STRICT revision FROM bid_workspace_revision_artifacts WHERE id=head.artifact_id;
+  payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'workspace_id',p_workspace_id,
+    'workspace_revision_id',revision.id,'workspace_sha256',revision.content_sha256,
+    'requirement_projection_id',revision.requirement_projection_id,
+    'requirement_projection_sha256',revision.requirement_projection_sha256));
+  digest:=kb_bid_v2_sha256_bytes(payload);
+  INSERT INTO bid_outline_checkpoint_artifacts(id,project_id,workspace_id,workspace_revision_id,
+    requirement_projection_id,requirement_projection_sha256,canonical_payload,content_sha256,actor)
+  VALUES(p_checkpoint_id,workspace.project_id,p_workspace_id,revision.id,revision.requirement_projection_id,
+    revision.requirement_projection_sha256,payload,digest,p_actor);
+  response:=jsonb_build_object('artifact_id',p_checkpoint_id,'sha256',digest);
+  response_bytes:=convert_to(response::text,'UTF8');
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
+    entity_kind,entity_locator,after_revision,after_sha256)
+  VALUES(gen_random_uuid(),1,'bid.v2.outline.checkpoint.create',p_actor,p_idempotency_key,p_request_sha256,
+    kb_bid_v2_sha256_bytes(response_bytes),'bid_v2_outline_checkpoint',jsonb_build_object('workspace_id',p_workspace_id,'checkpoint_id',p_checkpoint_id),1,digest);
+  PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.outline.checkpoint.create',p_idempotency_key,201,response_bytes);
+  RETURN response;
+END $$;
+
 -- Publication is the only path that marks a tender document ready.
 CREATE FUNCTION kb_bid_v2_mark_tender_document_failed(
   p_request_artifact_id uuid,p_error_code text
@@ -4622,6 +4706,9 @@ GRANT EXECUTE ON FUNCTION kb_bid_v2_create_project(uuid,text,uuid,kb_actor_ident
   kb_bid_v2_patch_requirement(uuid,uuid,uuid,kb_sha256,text,text,text,text,text,jsonb,jsonb,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_publish_requirement_supersession(uuid,uuid,uuid,uuid,jsonb,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_load_workspace_for_actor(uuid,kb_actor_identity),
+  kb_bid_v2_list_workspace_assets(uuid,kb_actor_identity),
+  kb_bid_v2_upload_workspace_asset(uuid,uuid,uuid,text,text,bigint,kb_object_ref,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
+  kb_bid_v2_create_outline_checkpoint(uuid,uuid,kb_sha256,uuid,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_commit_workspace_mutation_idempotent(uuid,uuid,kb_sha256,jsonb,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_create_outline_candidate(uuid,uuid,kb_sha256,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_get_async_request(uuid,uuid,kb_actor_identity),

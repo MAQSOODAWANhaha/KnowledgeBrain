@@ -1,7 +1,7 @@
-//! Inactive V2 authoring repository seams.
+//! V2 authoring repository seams.
 //!
-//! These methods call typed SECURITY DEFINER procedures from the inactive V2
-//! baseline. They are not reachable from the active V1 router or worker.
+//! These methods call typed SECURITY DEFINER procedures from the active clean-slate
+//! V2 baseline.
 
 use serde_json::Value;
 use sqlx::{PgPool, Row};
@@ -607,6 +607,80 @@ pub async fn reject_candidate_v2(
     )
     .bind(workspace_id)
     .bind(candidate_id)
+    .bind(&context.actor)
+    .bind(&context.idempotency_key)
+    .bind(&context.request.bytes)
+    .bind(&context.request.sha256)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn list_workspace_assets_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_list_workspace_assets($1,$2::kb_actor_identity)")
+        .bind(workspace_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct UploadWorkspaceAssetV2<'a> {
+    pub workspace_id: Uuid,
+    pub asset_id: Uuid,
+    pub staging_id: Uuid,
+    pub file_name: &'a str,
+    pub media_type: &'a str,
+    pub byte_length: i64,
+    pub object_ref: &'a str,
+    pub content_sha256: &'a str,
+}
+
+pub async fn upload_workspace_asset_v2(
+    pool: &PgPool,
+    input: UploadWorkspaceAssetV2<'_>,
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_upload_workspace_asset(
+          $1,$2,$3,$4,$5,$6,$7::kb_object_ref,$8::kb_sha256,
+          $9::kb_actor_identity,$10,$11,$12::kb_sha256)",
+    )
+    .bind(input.workspace_id)
+    .bind(input.asset_id)
+    .bind(input.staging_id)
+    .bind(input.file_name)
+    .bind(input.media_type)
+    .bind(input.byte_length)
+    .bind(input.object_ref)
+    .bind(input.content_sha256)
+    .bind(&context.actor)
+    .bind(&context.idempotency_key)
+    .bind(&context.request.bytes)
+    .bind(&context.request.sha256)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn create_outline_checkpoint_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    expected_revision_id: Uuid,
+    expected_sha256: &str,
+    checkpoint_id: Uuid,
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_create_outline_checkpoint(
+          $1,$2,$3::kb_sha256,$4,$5::kb_actor_identity,$6,$7,$8::kb_sha256)",
+    )
+    .bind(workspace_id)
+    .bind(expected_revision_id)
+    .bind(expected_sha256)
+    .bind(checkpoint_id)
     .bind(&context.actor)
     .bind(&context.idempotency_key)
     .bind(&context.request.bytes)
