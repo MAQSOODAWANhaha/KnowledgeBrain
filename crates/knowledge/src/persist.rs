@@ -280,6 +280,78 @@ pub async fn load_version(
     Ok(Some(product_version_from_row(product_id, &row)?))
 }
 
+pub async fn resolve_product_version_id(
+    pool: &PgPool,
+    product_id: Uuid,
+    version_id: &str,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    if version_id == "current" {
+        let product = load_product(pool, product_id).await?;
+        return Ok(product.and_then(|p| p.current_version_id));
+    }
+    let Ok(vid) = Uuid::parse_str(version_id) else {
+        return Ok(None);
+    };
+    let version = load_version(pool, vid).await?;
+    Ok(version.filter(|v| v.product_id == product_id).map(|v| v.id))
+}
+
+pub async fn clear_product_current_if(
+    pool: &PgPool,
+    product_id: Uuid,
+    version_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE products SET current_version_id = NULL WHERE id = $1 AND current_version_id = $2",
+    )
+    .bind(product_id)
+    .bind(version_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn version_label_taken(
+    pool: &PgPool,
+    product_id: Uuid,
+    label: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM product_versions
+            WHERE product_id = $1 AND label = $2 AND status <> 'archived' AND deleted_at IS NULL
+         )",
+    )
+    .bind(product_id)
+    .bind(label)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn workspace_embedding_conflict(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    incoming: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    if incoming.is_empty() {
+        return Ok(None);
+    }
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT pv.embedding_model_id
+         FROM products p
+         JOIN product_versions pv ON pv.id = p.current_version_id
+         WHERE p.workspace_id = $1 AND p.kind = 'product'
+           AND COALESCE(pv.embedding_model_id, '') <> ''
+         LIMIT 1",
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(existing.filter(|have| have != incoming).map(|have| {
+        format!("workspace products must share embedding_model_id (have {have}, got {incoming})")
+    }))
+}
+
 fn document_from_row(d: sqlx::postgres::PgRow) -> Result<crate::Document, sqlx::Error> {
     let did: Uuid = d.try_get("id")?;
     let st: String = d.try_get("parse_status")?;

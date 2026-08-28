@@ -1358,8 +1358,19 @@ async fn create_version(
     Json(body): Json<NewVersion>,
 ) -> Result<(StatusCode, Json<VersionView>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_product(&mut s, id).await;
+    let pool = pg().await?;
+    let p = knowledge::load_product(&pool, id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| not_found("product"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, p.workspace_id, &actor, true, false)?;
+    if knowledge::version_label_taken(&pool, id, &body.label)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+    {
+        return Err(fail(StatusCode::CONFLICT, "CONFLICT", "label taken"));
+    }
     let clone_from = body.clone_from;
     let make_current = body.make_current;
     let diffs: Vec<serde_json::Value> = body
@@ -1367,75 +1378,36 @@ async fn create_version(
         .iter()
         .map(|d| json!({"op": d.op, "source_document_id": d.source_document_id}))
         .collect();
-    let (view, view_id, label, made_current) = {
-        let p = s
-            .products
-            .get(&id)
-            .ok_or_else(|| not_found("product"))?
-            .clone();
-        require_ws(&s, p.workspace_id, &actor, true, false)?;
-        if s.versions.values().any(|v| {
-            v.product_id == id && v.label == body.label && v.status != VersionStatus::Archived
-        }) {
-            return Err(fail(StatusCode::CONFLICT, "CONFLICT", "label taken"));
-        }
-        let mut v = ProductVersion::new(id, body.label);
-        v.cloned_from = clone_from;
-        if let Some(src) = clone_from {
-            if let Some(src_v) = s.versions.get(&src).cloned() {
-                v.vector_enabled = src_v.vector_enabled;
-                v.keyword_enabled = src_v.keyword_enabled;
-                v.wiki_enabled = src_v.wiki_enabled;
-                v.graph_enabled = src_v.graph_enabled;
-                v.extract_enabled = src_v.extract_enabled;
-                v.extract_custom_instructions = src_v.extract_custom_instructions.clone();
-                v.question_enabled = src_v.question_enabled;
-                v.question_count = src_v.question_count;
-                v.question_custom_instructions = src_v.question_custom_instructions.clone();
-                v.table_metadata_instructions = src_v.table_metadata_instructions.clone();
-                v.enable_multimodel = src_v.enable_multimodel;
-                v.asr_enabled = src_v.asr_enabled;
-                v.asr_model_id = src_v.asr_model_id;
-                v.embedding_model_id = src_v.embedding_model_id;
-                v.summary_model_id = src_v.summary_model_id;
-                v.wiki_synthesis_model_id = src_v.wiki_synthesis_model_id;
-                v.chunk_size = src_v.chunk_size;
-                v.chunk_overlap = src_v.chunk_overlap;
-                v.chunk_strategy = src_v.chunk_strategy;
-                v.enable_parent_child = src_v.enable_parent_child;
-                v.parent_chunk_size = src_v.parent_chunk_size;
-                v.child_chunk_size = src_v.child_chunk_size;
-                v.chunk_separators = src_v.chunk_separators;
-                v.chunk_token_limit = src_v.chunk_token_limit;
-                v.chunk_languages = src_v.chunk_languages;
-                v.parser_engine_rules = src_v.parser_engine_rules;
-            }
-            v.status = VersionStatus::Cloning;
-        }
-        let view_id = v.id;
-        let label = v.label.clone();
-        s.versions.insert(v.id, v);
-        let made_current = p.current_version_id.is_none();
-        if made_current && let Some(prod) = s.products.get_mut(&id) {
-            prod.current_version_id = Some(view_id);
-        }
-        let view = version_view(&s, s.versions.get(&view_id).unwrap());
-        (view, view_id, label, made_current)
-    };
-    if let Ok(pool) = platform::connect().await {
-        if let Some(src) = clone_from {
-            let _ = knowledge::insert_version_cloning(&pool, view_id, id, &label, src).await;
-        } else {
-            let _ = knowledge::insert_version(&pool, view_id, id, &label, "active", None).await;
-        }
-        if made_current {
-            let _ = knowledge::set_product_current(&pool, id, view_id).await;
-        }
+    let mut v = ProductVersion::new(id, body.label);
+    v.cloned_from = clone_from;
+    if clone_from.is_some() {
+        v.status = VersionStatus::Cloning;
+    }
+    let view_id = v.id;
+    let label = v.label.clone();
+    if let Some(src) = clone_from {
+        knowledge::insert_version_cloning(&pool, view_id, id, &label, src)
+            .await
+            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+    } else {
+        knowledge::insert_version(&pool, view_id, id, &label, "active", None)
+            .await
+            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+    }
+    let mut current = p.current_version_id;
+    if current.is_none() {
+        knowledge::set_product_current(&pool, id, view_id)
+            .await
+            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+        current = Some(view_id);
     }
     if let Some(src) = clone_from {
         let _ = platform::enqueue_version_clone(src, view_id, json!(diffs), make_current).await;
     }
-    Ok((StatusCode::CREATED, Json(view)))
+    if let Some(loaded) = knowledge::load_version(&pool, view_id).await.ok().flatten() {
+        v = loaded;
+    }
+    Ok((StatusCode::CREATED, Json(version_view_for(current, &v))))
 }
 
 async fn get_version(
@@ -1444,12 +1416,28 @@ async fn get_version(
     Path((id, version_id)): Path<(Uuid, String)>,
 ) -> Result<Json<VersionView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_product(&mut s, id).await;
-    let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
-    require_ws(&s, p.workspace_id, &actor, false, false)?;
-    let vid = resolve_write_version(&s, id, &version_id)?;
-    Ok(Json(version_view(&s, s.versions.get(&vid).unwrap())))
+    let pool = pg().await?;
+    let p = knowledge::load_product(&pool, id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| not_found("product"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, p.workspace_id, &actor, false, false)?;
+    let vid = knowledge::resolve_product_version_id(&pool, id, &version_id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| {
+            if version_id == "current" {
+                validation("no current version")
+            } else {
+                not_found("version")
+            }
+        })?;
+    let v = knowledge::load_version(&pool, vid)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| not_found("version"))?;
+    Ok(Json(version_view_for(p.current_version_id, &v)))
 }
 
 #[derive(Deserialize, Default)]
@@ -1631,40 +1619,20 @@ async fn delete_version(
     Path((id, version_id)): Path<(Uuid, String)>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_product(&mut s, id).await;
-    let vid = {
-        let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
-        require_ws(&s, p.workspace_id, &actor, false, true)?;
-        let vid = resolve_write_version(&s, id, &version_id)?;
-        for d in s.documents.values_mut() {
-            if d.product_version_id == vid
-                && matches!(
-                    d.parse_status,
-                    ParseStatus::Pending | ParseStatus::Processing | ParseStatus::Finalizing
-                )
-            {
-                d.parse_status = ParseStatus::Cancelled;
-            }
-        }
-        if let Some(v) = s.versions.get_mut(&vid) {
-            v.status = VersionStatus::Archived;
-        }
-        if let Some(prod) = s.products.get_mut(&id)
-            && prod.current_version_id == Some(vid)
-        {
-            prod.current_version_id = None;
-        }
-        s.enqueue(
-            TYPE_KB_DELETE,
-            platform::QUEUE_LOW,
-            json!({ "product_version_id": vid }),
-        );
-        vid
-    };
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::cancel_active_docs_for_versions(&pool, &[vid]).await;
-    }
+    let pool = pg().await?;
+    let p = knowledge::load_product(&pool, id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| not_found("product"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, p.workspace_id, &actor, false, true)?;
+    let vid = knowledge::resolve_product_version_id(&pool, id, &version_id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| not_found("version"))?;
+    let _ = knowledge::cancel_active_docs_for_versions(&pool, &[vid]).await;
+    let _ = knowledge::set_version_status(&pool, vid, "archived").await;
+    let _ = knowledge::clear_product_current_if(&pool, id, vid).await;
     let _ = platform::enqueue_kb_delete(vid).await;
     Ok(StatusCode::ACCEPTED)
 }
@@ -1681,35 +1649,39 @@ async fn set_current(
     Json(body): Json<SetCurrent>,
 ) -> Result<Json<ProductView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_product(&mut s, id).await;
-    let view = {
-        let p = s
-            .products
-            .get(&id)
-            .ok_or_else(|| not_found("product"))?
-            .clone();
-        require_ws(&s, p.workspace_id, &actor, false, true)?;
-        let v = s
-            .versions
-            .get(&body.version_id)
-            .ok_or_else(|| not_found("version"))?
-            .clone();
-        if v.product_id != id {
-            return Err(validation("version not on product"));
-        }
-        write_active(&s, body.version_id)?;
-        if let Some(err) = embedding_mismatch(&s, p.workspace_id, &v.embedding_model_id) {
-            return Err(fail(StatusCode::BAD_REQUEST, "EMBEDDING_MISMATCH", err));
-        }
-        s.products.get_mut(&id).unwrap().current_version_id = Some(body.version_id);
-        s.products.get_mut(&id).unwrap().embedding_model_id = v.embedding_model_id.clone();
-        ProductView::from(s.products.get(&id).unwrap())
-    };
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::set_product_current(&pool, id, body.version_id).await;
+    let pool = pg().await?;
+    let mut p = knowledge::load_product(&pool, id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| not_found("product"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, p.workspace_id, &actor, false, true)?;
+    let v = knowledge::load_version(&pool, body.version_id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| not_found("version"))?;
+    if v.product_id != id {
+        return Err(validation("version not on product"));
     }
-    Ok(Json(view))
+    if v.status != VersionStatus::Active {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "VERSION_NOT_ACTIVE",
+            "version is not active",
+        ));
+    }
+    if let Some(err) = knowledge::workspace_embedding_conflict(&pool, p.workspace_id, &v.embedding_model_id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+    {
+        return Err(fail(StatusCode::BAD_REQUEST, "EMBEDDING_MISMATCH", err));
+    }
+    knowledge::set_product_current(&pool, id, body.version_id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+    p.current_version_id = Some(body.version_id);
+    p.embedding_model_id = v.embedding_model_id;
+    Ok(Json(ProductView::from(&p)))
 }
 
 fn embedding_mismatch(store: &Store, workspace_id: Uuid, incoming: &str) -> Option<String> {
@@ -2464,30 +2436,24 @@ async fn delete_document(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_document(&mut s, id).await;
-    {
-        let d = s
-            .documents
-            .get(&id)
-            .ok_or_else(|| not_found("document"))?
-            .clone();
-        let pid = s.versions.get(&d.product_version_id).unwrap().product_id;
-        let ws = s.products.get(&pid).unwrap().workspace_id;
-        require_ws(&s, ws, &actor, true, false)?;
-        if let Some(doc) = s.documents.get_mut(&id) {
-            doc.parse_status = ParseStatus::Deleting;
-        }
-        s.enqueue(
-            TYPE_LIST_DELETE,
-            platform::QUEUE_LOW,
-            json!({ "document_ids": [id] }),
-        );
-    }
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::set_parse_status(&pool, id, "deleting", "").await;
-    }
-    let _ = platform::enqueue_list_delete(id).await;
+    let pool = pg().await?;
+    let d = knowledge::load_document(&pool, id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| not_found("document"))?;
+    let ws = knowledge::document_workspace_id(&pool, id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| not_found("document"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, ws, &actor, true, false)?;
+    let _ = d;
+    knowledge::set_parse_status(&pool, id, "deleting", "")
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+    platform::enqueue_list_delete(id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", e))?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -2504,38 +2470,41 @@ async fn reparse_document(
     body: Option<Json<ReparseIn>>,
 ) -> Result<Json<DocView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_document(&mut s, id).await;
-    let doc = {
-        let d = s
-            .documents
-            .get(&id)
-            .ok_or_else(|| not_found("document"))?
-            .clone();
-        let pid = s.versions.get(&d.product_version_id).unwrap().product_id;
-        let ws = s.products.get(&pid).unwrap().workspace_id;
-        require_ws(&s, ws, &actor, true, false)?;
-        write_active(&s, d.product_version_id)?;
-        if let Some(doc) = s.documents.get_mut(&id) {
-            doc.parse_status = ParseStatus::Pending;
-            doc.enable_status = "disabled".into();
-            if let Some(o) = body.as_ref().and_then(|b| b.process_config.clone()) {
-                doc.process_overrides = Some(o).filter(|x| !x.is_empty());
-            }
-        }
-        s.enqueue(
-            TYPE_LIST_REPARSE,
-            platform::QUEUE_LOW,
-            json!({ "document_ids": [id] }),
-        );
-        s.documents.get(&id).unwrap().clone()
-    };
-    if let Ok(pool) = platform::connect().await {
-        if let Some(o) = &doc.process_overrides {
-            let _ = knowledge::set_process_overrides(&pool, id, o).await;
-        }
-        let _ = knowledge::mark_reparse_queued(&pool, id).await;
+    let pool = pg().await?;
+    let mut doc = knowledge::load_document(&pool, id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| not_found("document"))?;
+    let ws = knowledge::document_workspace_id(&pool, id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| not_found("document"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, ws, &actor, true, false)?;
+    let v = knowledge::load_version(&pool, doc.product_version_id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| not_found("version"))?;
+    if v.status != VersionStatus::Active {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "VERSION_NOT_ACTIVE",
+            "version is not active",
+        ));
     }
+    if let Some(o) = body.as_ref().and_then(|b| b.process_config.clone()) {
+        doc.process_overrides = Some(o).filter(|x| !x.is_empty());
+        if let Some(o) = &doc.process_overrides {
+            knowledge::set_process_overrides(&pool, id, o)
+                .await
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+        }
+    }
+    knowledge::mark_reparse_queued(&pool, id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+    doc.parse_status = ParseStatus::Pending;
+    doc.enable_status = "disabled".into();
     platform::enqueue_list_reparse(id)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", e))?;
@@ -2548,26 +2517,22 @@ async fn cancel_document(
     Path(id): Path<Uuid>,
 ) -> Result<Json<DocView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_document(&mut s, id).await;
-    let view = {
-        let d = s
-            .documents
-            .get(&id)
-            .ok_or_else(|| not_found("document"))?
-            .clone();
-        let pid = s.versions.get(&d.product_version_id).unwrap().product_id;
-        let ws = s.products.get(&pid).unwrap().workspace_id;
-        require_ws(&s, ws, &actor, true, false)?;
-        if let Some(doc) = s.documents.get_mut(&id) {
-            doc.parse_status = ParseStatus::Cancelled;
-        }
-        DocView::from(s.documents.get(&id).unwrap())
-    };
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::set_parse_status(&pool, id, "cancelled", "").await;
-    }
-    Ok(Json(view))
+    let pool = pg().await?;
+    let mut doc = knowledge::load_document(&pool, id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| not_found("document"))?;
+    let ws = knowledge::document_workspace_id(&pool, id)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .ok_or_else(|| not_found("document"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, ws, &actor, true, false)?;
+    knowledge::set_parse_status(&pool, id, "cancelled", "")
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+    doc.parse_status = ParseStatus::Cancelled;
+    Ok(Json(DocView::from(&doc)))
 }
 
 #[derive(Deserialize)]

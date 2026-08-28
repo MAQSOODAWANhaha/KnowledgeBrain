@@ -46,9 +46,14 @@ pub use platform::{
 
 /// Disk write plus in-memory object map. Production bytes still go through platform blobs.
 pub fn put(store: &mut Store, bytes: &[u8]) -> (String, String) {
+    let (hash, reference) = put_bytes(bytes);
+    store.objects.insert(reference.clone(), bytes.to_vec());
+    (hash, reference)
+}
+
+pub fn put_bytes(bytes: &[u8]) -> (String, String) {
     let hash = sha256_hex(bytes);
     let reference = platform::object_ref(&hash);
-    store.objects.insert(reference.clone(), bytes.to_vec());
     let _ = platform::write_blob_off_runtime(&hash, bytes);
     (hash, reference)
 }

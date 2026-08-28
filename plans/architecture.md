@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | **已确认，实施中（D5：列表/检索 + workspace/product 写路径已走 SQL；ingest/version/wiki 仍 hydrate）** |
+| 状态 | **已确认，实施中（D 未完成项见 [`d5-remaining.md`](d5-remaining.md)）** |
 | 产品契约 | [`../docs/bidding/authoring.md`](../docs/bidding/authoring.md) |
 | 编制 Web | [`bidding/frontend-authoring.md`](bidding/frontend-authoring.md) |
 | 后端到达 | [`bidding/tender-to-submission-v2.md`](bidding/tender-to-submission-v2.md) |
