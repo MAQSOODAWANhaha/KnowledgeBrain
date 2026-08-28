@@ -45,6 +45,10 @@ pub fn router() -> Router<AppState> {
             get(list_source_units),
         )
         .route(
+            "/api/v2/bid-projects/{id}/source-unit-disposition-sets",
+            post(publish_disposition_set),
+        )
+        .route(
             "/api/v2/bid-projects/{id}/requirements",
             get(list_requirements),
         )
@@ -475,6 +479,15 @@ struct FreezeDocumentSetBody {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PublishDispositionSetBody {
+    document_set_revision_id: Uuid,
+    expected_artifact_id: Uuid,
+    expected_sha256: String,
+    items: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OutlineGenerateBody {
     expected_workspace_revision_id: Uuid,
     document_set_revision_id: Uuid,
@@ -532,6 +545,42 @@ async fn freeze_document_set(
         disposition_set_revision_id,
     })
     .await?;
+    Ok((StatusCode::CREATED, Json(value)))
+}
+
+async fn publish_disposition_set(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PublishDispositionSetBody>,
+) -> Result<(StatusCode, Json<Value>), ApiErr> {
+    let (_, actor) = human_actor(&headers, &state).await?;
+    let context = bidding::MutationContext::new(
+        actor,
+        required_idempotency_key(&headers)?,
+        &body,
+    ).map_err(|error| validation(&error.to_string()))?;
+    let pool = require_bid_pool().await?;
+    let value = bidding::bid_authoring_v2::publish_disposition_set_v2(
+        &pool,
+        id,
+        body.document_set_revision_id,
+        &body.items,
+        body.expected_artifact_id,
+        &body.expected_sha256,
+        Uuid::new_v4(),
+        &context,
+    ).await.map_err(map_sql)?;
+    let request = request_identity(&value)?;
+    let disposition_set_revision_id = value.get("artifact_id").and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| validation("disposition set artifact id missing"))?;
+    enqueue(BidAuthoringJobPayloadV2::RequirementSetCompile {
+        request,
+        project_id: id,
+        document_set_revision_id: body.document_set_revision_id,
+        disposition_set_revision_id,
+    }).await?;
     Ok((StatusCode::CREATED, Json(value)))
 }
 

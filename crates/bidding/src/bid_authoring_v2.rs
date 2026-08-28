@@ -344,6 +344,34 @@ pub async fn freeze_document_set_v2(
     .await
 }
 
+pub async fn publish_disposition_set_v2(
+    pool: &PgPool,
+    project_id: Uuid,
+    document_set_id: Uuid,
+    items: &Value,
+    expected_artifact_id: Uuid,
+    expected_sha256: &str,
+    request_artifact_id: Uuid,
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_publish_disposition_set(
+          $1,$2,$3,$4,$5::kb_sha256,$6,$7::kb_actor_identity,$8,$9,$10::kb_sha256)",
+    )
+    .bind(project_id)
+    .bind(document_set_id)
+    .bind(items)
+    .bind(expected_artifact_id)
+    .bind(expected_sha256)
+    .bind(request_artifact_id)
+    .bind(&context.actor)
+    .bind(&context.idempotency_key)
+    .bind(&context.request.bytes)
+    .bind(&context.request.sha256)
+    .fetch_one(pool)
+    .await
+}
+
 pub async fn list_source_units_v2(
     pool: &PgPool,
     project_id: Uuid,

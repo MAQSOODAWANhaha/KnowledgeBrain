@@ -3896,6 +3896,114 @@ BEGIN
   RETURN response;
 END $$;
 
+CREATE FUNCTION kb_bid_v2_publish_disposition_set(
+  p_project_id uuid,p_document_set_id uuid,p_items jsonb,
+  p_expected_artifact_id uuid,p_expected_sha256 kb_sha256,p_request_artifact_id uuid,
+  p_actor kb_actor_identity,p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE
+  replay bytea; response jsonb; response_bytes bytea;
+  document_head bid_document_set_current%ROWTYPE; document_value bid_document_set_artifacts%ROWTYPE;
+  disposition_head bid_source_unit_disposition_set_current%ROWTYPE;
+  disposition_id uuid:=gen_random_uuid(); disposition_revision bigint; normalized_items jsonb;
+  disposition_payload bytea; disposition_sha kb_sha256;
+  frozen_payload bytea; frozen_sha kb_sha256; job_payload jsonb; job_bytes bytea; job_sha kb_sha256;
+BEGIN
+  PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
+  replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.disposition_set.publish',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  IF jsonb_typeof(p_items)<>'array' OR jsonb_array_length(p_items)=0 THEN
+    RAISE EXCEPTION 'DISPOSITION_SET_ITEMS_INVALID' USING ERRCODE='23514';
+  END IF;
+  SELECT * INTO STRICT document_head FROM bid_document_set_current WHERE scope_id=p_project_id;
+  IF document_head.artifact_id<>p_document_set_id THEN
+    RAISE EXCEPTION 'DOCUMENT_SET_NOT_CURRENT' USING ERRCODE='40001';
+  END IF;
+  SELECT * INTO STRICT document_value FROM bid_document_set_artifacts
+    WHERE project_id=p_project_id AND id=p_document_set_id;
+  SELECT * INTO STRICT disposition_head FROM bid_source_unit_disposition_set_current
+    WHERE scope_id=p_project_id FOR UPDATE;
+  IF disposition_head.artifact_id IS DISTINCT FROM p_expected_artifact_id
+     OR disposition_head.artifact_sha256 IS DISTINCT FROM p_expected_sha256 THEN
+    RAISE EXCEPTION 'DISPOSITION_SET_CAS_MISMATCH' USING ERRCODE='40001';
+  END IF;
+  IF EXISTS (SELECT 1 FROM jsonb_array_elements(p_items) item
+      WHERE jsonb_typeof(item)<>'object'
+         OR (item->>'source_unit_revision_id') IS NULL
+         OR (item->>'disposition') NOT IN ('requirement','non_requirement','unresolved')
+         OR (item ? 'reason' AND item->>'reason' IS NULL)
+         OR octet_length(COALESCE(item->>'reason','x'))>4096)
+     OR (SELECT count(*) FROM jsonb_array_elements(p_items)) <>
+        (SELECT count(DISTINCT item->>'source_unit_revision_id') FROM jsonb_array_elements(p_items) item) THEN
+    RAISE EXCEPTION 'DISPOSITION_SET_ITEMS_INVALID' USING ERRCODE='23514';
+  END IF;
+  IF EXISTS (
+      SELECT expected.id FROM bid_document_set_items set_item
+      JOIN bid_source_unit_revision_artifacts expected
+        ON expected.project_id=set_item.project_id AND expected.source_revision_id=set_item.source_revision_id
+      WHERE set_item.document_set_id=p_document_set_id
+      EXCEPT SELECT (item->>'source_unit_revision_id')::uuid FROM jsonb_array_elements(p_items) item
+    ) OR EXISTS (
+      SELECT (item->>'source_unit_revision_id')::uuid FROM jsonb_array_elements(p_items) item
+      EXCEPT SELECT expected.id FROM bid_document_set_items set_item
+      JOIN bid_source_unit_revision_artifacts expected
+        ON expected.project_id=set_item.project_id AND expected.source_revision_id=set_item.source_revision_id
+      WHERE set_item.document_set_id=p_document_set_id
+    ) THEN
+    RAISE EXCEPTION 'DISPOSITION_SET_COVERAGE_INVALID' USING ERRCODE='23514';
+  END IF;
+  SELECT jsonb_agg(jsonb_build_object(
+      'source_unit_revision_id',item->>'source_unit_revision_id',
+      'disposition',item->>'disposition','reason',item->>'reason')
+      ORDER BY item->>'source_unit_revision_id') INTO normalized_items
+    FROM jsonb_array_elements(p_items) item;
+  disposition_revision:=disposition_head.generation+1;
+  disposition_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,
+    'project_id',p_project_id,'document_set_id',p_document_set_id,
+    'revision',disposition_revision,'items',normalized_items));
+  disposition_sha:=kb_bid_v2_sha256_bytes(disposition_payload);
+  INSERT INTO bid_source_unit_disposition_set_artifacts(id,project_id,document_set_id,document_set_sequence,
+    revision,canonical_payload,content_sha256,actor)
+  VALUES(disposition_id,p_project_id,p_document_set_id,document_value.revision,disposition_revision,
+    disposition_payload,disposition_sha,p_actor);
+  INSERT INTO bid_source_unit_disposition_set_items(disposition_set_id,project_id,
+    source_unit_revision_id,disposition,reason)
+  SELECT disposition_id,p_project_id,(item->>'source_unit_revision_id')::uuid,
+    item->>'disposition',NULLIF(item->>'reason','') FROM jsonb_array_elements(normalized_items) item;
+  IF NOT kb_bid_v2_advance_disposition_set(p_project_id,p_expected_artifact_id,p_expected_sha256,
+      disposition_id,disposition_sha) THEN
+    RAISE EXCEPTION 'DISPOSITION_SET_CAS_MISMATCH' USING ERRCODE='40001';
+  END IF;
+  frozen_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'project_id',p_project_id,
+    'document_set_revision_id',p_document_set_id,'document_set_sha256',document_value.content_sha256,
+    'disposition_set_revision_id',disposition_id,'disposition_set_sha256',disposition_sha));
+  frozen_sha:=kb_bid_v2_sha256_bytes(frozen_payload);
+  job_payload:=jsonb_build_object('job_kind','requirement_set_compile','request',jsonb_build_object(
+    'request_artifact_id',p_request_artifact_id,'request_revision',1,'frozen_input_sha256',frozen_sha),
+    'project_id',p_project_id,'document_set_revision_id',p_document_set_id,
+    'disposition_set_revision_id',disposition_id);
+  job_bytes:=kb_bid_v2_json_payload(job_payload); job_sha:=kb_bid_v2_sha256_bytes(job_bytes);
+  INSERT INTO bid_async_request_snapshot_artifacts(id,project_id,workspace_id,request_kind,revision,
+    frozen_input_sha256,request_payload,request_sha256,status)
+  VALUES(p_request_artifact_id,p_project_id,NULL,'requirement_set_compile',1,frozen_sha,job_bytes,job_sha,'pending');
+  INSERT INTO bid_requirement_set_compile_request_identities(request_artifact_id,project_id,request_revision,
+    request_sha256,frozen_input_sha256,document_set_revision_id,document_set_sha256,
+    disposition_set_revision_id,disposition_set_sha256)
+  VALUES(p_request_artifact_id,p_project_id,1,job_sha,frozen_sha,p_document_set_id,
+    document_value.content_sha256,disposition_id,disposition_sha);
+  response:=jsonb_build_object('artifact_id',disposition_id,'sha256',disposition_sha,
+    'revision',disposition_revision,'document_set_revision_id',p_document_set_id,
+    'request_artifact_id',p_request_artifact_id,'request_revision',1,'frozen_input_sha256',frozen_sha);
+  response_bytes:=convert_to(response::text,'UTF8');
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,
+    request_sha256,response_sha256,entity_kind,entity_locator,before_revision,before_sha256,after_revision,after_sha256)
+  VALUES(gen_random_uuid(),1,'bid.v2.disposition_set.publish',p_actor,p_idempotency_key,p_request_sha256,
+    kb_bid_v2_sha256_bytes(response_bytes),'bid_v2_disposition_set',jsonb_build_object('project_id',p_project_id),
+    disposition_head.generation,disposition_head.artifact_sha256,disposition_revision,disposition_sha);
+  PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.disposition_set.publish',p_idempotency_key,201,response_bytes);
+  RETURN response;
+END $$;
+
 CREATE FUNCTION kb_bid_v2_list_source_units(
   p_project_id uuid,p_actor kb_actor_identity
 ) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
@@ -4328,6 +4436,7 @@ GRANT EXECUTE ON FUNCTION kb_bid_v2_create_project(uuid,text,uuid,kb_actor_ident
   kb_bid_v2_upsert_document_relation(uuid,uuid,uuid,uuid,text,jsonb,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_list_document_relations(uuid,kb_actor_identity),
   kb_bid_v2_freeze_document_set(uuid,uuid[],uuid,kb_sha256,uuid,kb_actor_identity,text,bytea,kb_sha256),
+  kb_bid_v2_publish_disposition_set(uuid,uuid,jsonb,uuid,kb_sha256,uuid,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_list_source_units(uuid,kb_actor_identity),
   kb_bid_v2_list_requirements(uuid,kb_actor_identity),
   kb_bid_v2_load_workspace_for_actor(uuid,kb_actor_identity),
