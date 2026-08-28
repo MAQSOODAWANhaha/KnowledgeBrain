@@ -1,8 +1,4 @@
-#!/bin/sh
-set -eu
-
+#!/usr/bin/env bash
+set -euo pipefail
 cd "$(dirname "$0")/.."
-
-# Deliberately excludes migrate and first-launch-verifier. Runtime identities
-# read the durable marker and finalized topology during every startup.
-docker compose --profile runtime up -d --no-deps api worker retention docreader
+docker compose -f deploy/docker-compose.yml --profile runtime up -d --remove-orphans "$@"

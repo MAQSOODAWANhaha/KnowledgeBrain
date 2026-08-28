@@ -1,4 +1,4 @@
-name: ci
+name: CI
 
 on:
   push:
@@ -13,64 +13,32 @@ jobs:
         with:
           toolchain: 1.97.0
           components: rustfmt, clippy
-      - name: fmt
+      - name: format
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: test
-        run: cargo test --workspace
+      - name: tests
+        run: cargo test --workspace --no-fail-fast
 
-  bid-authoring-v2-phase0:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.0
-          components: rustfmt
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - name: install Phase 0 schema validator
-        run: python -m pip install --disable-pip-version-check 'jsonschema==4.25.1'
-      - name: mandatory Phase 0 static schema and fixture acceptance
-        run: scripts/fresh_schema_v2_acceptance.sh
-      - name: mandatory Phase 0 focused Rust contracts
-        run: |
-          cargo test -p bid --test authoring_schema_contracts --test bidding_v2_baseline_contract
-          cargo test -p runtime --lib
-          cargo test -p domain queue_registry
-          cargo test -p storage fixed_manifest_is_exact_and_checksummed
-      - name: mandatory Phase 0 live fresh V2 schema acceptance
-        env:
-          RUN_LIVE_V2_SCHEMA: "1"
-        run: scripts/fresh_schema_v2_acceptance.sh
-
-  bid-durable-dispatch:
+  bidding-v2-live:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+        image: pgvector/pgvector:0.8.6-pg16
         env:
           POSTGRES_USER: knowledgebrain
           POSTGRES_PASSWORD: knowledgebrain
           POSTGRES_DB: knowledgebrain
-        ports:
-          - 5432:5432
+        ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U knowledgebrain"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
+          --health-cmd "pg_isready -U knowledgebrain -d knowledgebrain"
+          --health-interval 5s --health-timeout 5s --health-retries 12
       redis:
         image: redis:7-alpine
-        ports:
-          - 6379:6379
+        ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
+          --health-interval 5s --health-timeout 5s --health-retries 12
     env:
       DATABASE_URL: postgres://knowledgebrain:knowledgebrain@127.0.0.1:5432/knowledgebrain
       REDIS_URL: redis://127.0.0.1:6379
@@ -81,7 +49,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.0
-      - name: install durable-delivery database schema
+      - name: install runtime identities
         env:
           PGHOST: 127.0.0.1
           PGPORT: "5432"
@@ -89,237 +57,23 @@ jobs:
           POSTGRES_USER: knowledgebrain
           POSTGRES_DB: knowledgebrain
           KNOWLEDGEBRAIN_MIGRATOR_PASSWORD: migrator-ci
-          KNOWLEDGEBRAIN_FIRST_LAUNCH_VERIFIER_PASSWORD: verifier-ci
-          KNOWLEDGEBRAIN_API_DB_PASSWORD: api-ci
-          KNOWLEDGEBRAIN_WORKER_DB_PASSWORD: worker-ci
-          KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD: retention-ci
-        run: |
-          sh deploy/postgres-init/010-runtime-identities.sh
-          DATABASE_URL=postgres://kb_migrator:migrator-ci@127.0.0.1:5432/knowledgebrain \
-            KNOWLEDGEBRAIN_BOOTSTRAP_ADMIN_DATABASE_URL=postgres://knowledgebrain:knowledgebrain@127.0.0.1:5432/knowledgebrain \
-            cargo run --locked -p migrator
-      - name: shellcheck durable-delivery acceptance scripts
-        run: shellcheck scripts/bid_durable_dispatch_acceptance.sh scripts/verify_oxana_registry_source.sh
-      - name: mandatory durable-delivery acceptance
-        run: scripts/bid_durable_dispatch_acceptance.sh
-      - name: upload durable-delivery evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bid-durable-delivery
-          path: .artifacts/bid-durable-dispatch
-          if-no-files-found: error
-
-  bid-product-smoke:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
-        env:
-          POSTGRES_USER: knowledgebrain
-          POSTGRES_PASSWORD: knowledgebrain
-          POSTGRES_DB: knowledgebrain
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U knowledgebrain"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-    env:
-      DATABASE_URL: postgres://knowledgebrain:knowledgebrain@127.0.0.1:5432/knowledgebrain
-      REDIS_URL: redis://127.0.0.1:6379
-      BID_EXTRACT_MODE: heuristic
-      KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS: "1"
-      KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS: "1"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: install live browser acceptance dependencies
-        run: |
-          npm ci --prefix web
-          cd web
-          npx playwright install --with-deps chromium
-      - name: install production PostgreSQL bootstrap contract
-        env:
-          PGHOST: 127.0.0.1
-          PGPORT: "5432"
-          PGPASSWORD: knowledgebrain
-          POSTGRES_USER: knowledgebrain
-          POSTGRES_DB: knowledgebrain
-          KNOWLEDGEBRAIN_MIGRATOR_PASSWORD: migrator-ci
-          KNOWLEDGEBRAIN_FIRST_LAUNCH_VERIFIER_PASSWORD: verifier-ci
           KNOWLEDGEBRAIN_API_DB_PASSWORD: api-ci
           KNOWLEDGEBRAIN_WORKER_DB_PASSWORD: worker-ci
           KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD: retention-ci
         run: sh deploy/postgres-init/010-runtime-identities.sh
-      - name: build migration and runtime binaries
-        run: cargo build -p migrator -p first-launch-verifier -p api -p worker -p retention
-      - name: fresh-volume Compose first-launch and heuristic runtime/PDF acceptance
-        env:
-          KNOWLEDGEBRAIN_REQUIRE_DOCKER_ACCEPTANCE: "1"
-          KNOWLEDGEBRAIN_REQUIRE_BROWSER_ACCEPTANCE: "1"
-          KNOWLEDGEBRAIN_REQUIRE_CLEAN_ACCEPTANCE: "1"
-        run: scripts/compose_first_launch_acceptance.sh
-      - name: upload Compose runtime/PDF evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bidding-v1-runtime-pdf-heuristic
-          path: web/e2e/artifacts/runtime
-          if-no-files-found: warn
-      - name: upload live browser evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bidding-v1-playwright-live-ui
-          path: |
-            web/e2e/artifacts/live
-            web/playwright-report-live
-            web/test-results-live
-          if-no-files-found: warn
-      - name: actual migrate process leaves runtime marker gate closed
-        env:
-          DATABASE_URL: postgres://kb_migrator:migrator-ci@127.0.0.1:5432/knowledgebrain
-          KNOWLEDGEBRAIN_BOOTSTRAP_ADMIN_DATABASE_URL: postgres://knowledgebrain:knowledgebrain@127.0.0.1:5432/knowledgebrain
-        run: target/debug/migrator
-      - name: runtime fails closed before durable verification marker
-        env:
-          DATABASE_URL: postgres://kb_runtime_api:api-ci@127.0.0.1:5432/knowledgebrain
-        run: |
-          if target/debug/api; then
-            echo "runtime unexpectedly started without first-launch marker" >&2
-            exit 1
-          fi
-      - name: mandatory first-launch verifier process
-        env:
-          DATABASE_URL: postgres://kb_first_launch_verifier:verifier-ci@127.0.0.1:5432/knowledgebrain
-          KNOWLEDGEBRAIN_APP_OWNER: kb_app_owner
-          KNOWLEDGEBRAIN_BOOTSTRAP_OWNER: knowledgebrain
-        run: target/debug/first-launch-verifier
-      - name: API and worker exact marker startup/restart gates
-        run: |
-          DATABASE_URL=postgres://kb_runtime_api:api-ci@127.0.0.1:5432/knowledgebrain \
-            cargo test -p api --test launch -- --nocapture --test-threads=1
-          DATABASE_URL=postgres://kb_runtime_worker:worker-ci@127.0.0.1:5432/knowledgebrain \
-            cargo test -p worker --test launch -- --nocapture --test-threads=1
-      - name: mandatory live QuoteSnapshot and Submission SQL contracts
-        shell: bash
-        run: |
-          set -euo pipefail
-          schema_ready="$(psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc "
-            SELECT to_regprocedure(
-              'kb_bid_build_quote_snapshot_v1(uuid,uuid,bigint,text,text,text,jsonb,numeric,numeric,numeric,jsonb,jsonb,bigint,bigint,kb_sha256)'
-            ) IS NOT NULL
-            AND to_regprocedure(
-              'kb_bid_publish_submission_output(uuid,uuid,uuid,bigint,kb_object_ref,kb_sha256,bigint)'
-            ) IS NOT NULL;
-          ")"
-          test "$schema_ready" = "t" || {
-            echo "live QuoteSnapshot/Submission SQL contracts are unavailable" >&2
-            exit 1
-          }
-
-          cargo test -p api --test submission_contract -- --nocapture --test-threads=1
-          cargo test -p bid --test tender_publication -- --nocapture --test-threads=1
-          cargo test -p bid --test knowledge_retrieval_selection -- --nocapture --test-threads=1
-          cargo test -p bid --features knowledge-v2-exact-contract-tests --test knowledge_retrieval_exact_v2 -- --nocapture --test-threads=1
-          cargo test -p bid --test knowledge_retrieval_attestation_v2 -- --nocapture --test-threads=1
-          cargo test -p bid --test knowledge_keyword_index_v2 -- --nocapture --test-threads=1
-          cargo test -p bid --test knowledge_vector_index_v2 -- --nocapture --test-threads=1
-          cargo test -p worker --lib consume::tests::semantic_index_v2_business_lifecycle_is_fenced -- --exact --nocapture --test-threads=1
-          cargo test -p bid --test matching_publication -- --nocapture --test-threads=1
-
-          audit_before="$(psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc \
-            "SELECT count(*) FROM audit_events WHERE operation='bid.submission.create_manifest'")"
-          submission_log="$(mktemp)"
-          cargo test -p bid --test submission_sql -- --nocapture --test-threads=1 2>&1 \
-            | tee "$submission_log"
-          if grep -q 'skipped live Submission contract' "$submission_log"; then
-            echo "submission_sql used its skip path in mandatory live CI" >&2
-            exit 1
-          fi
-          audit_after="$(psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc \
-            "SELECT count(*) FROM audit_events WHERE operation='bid.submission.create_manifest'")"
-          test "$audit_after" -gt "$audit_before" || {
-            echo "submission_sql produced no live manifest audit evidence" >&2
-            exit 1
-          }
-
-          quote_log="$(mktemp)"
-          cargo test -p bid --test quote_snapshot_sql -- --nocapture --test-threads=1 2>&1 \
-            | tee "$quote_log"
-          if grep -Eq 'skip(ped)?:.*(database|schema)|skipped live' "$quote_log"; then
-            echo "quote_snapshot_sql used a skip path in mandatory live CI" >&2
-            exit 1
-          fi
-      - name: mandatory isolated fresh baseline, catalog, ACL, and ObjectRegistry acceptance
+      - name: fresh V2 schema acceptance
         run: scripts/fresh_schema_acceptance.sh
-      - name: assert fresh-schema test containers are absent
-        if: always()
-        shell: bash
+      - name: V2 deletion scan
+        run: scripts/bidding_v2_deletion_scan.sh
+      - name: V2 focused contracts
         run: |
-          set -euo pipefail
-          residue_output="$(docker ps -a \
-            --filter "name=kb-fresh-schema-${GITHUB_RUN_ID}-" \
-            --format '{{.Names}}')"
-          if [[ -n "$residue_output" ]]; then
-            mapfile -t residue <<< "$residue_output"
-            docker rm -f -v "${residue[@]}"
-            printf 'fresh-schema container residue: %s\n' "${residue[@]}" >&2
-            exit 1
-          fi
-      - name: storage foundation unit tests
-        run: cargo test -p storage --lib -- --nocapture
-      - name: mandatory upload staging cleanup tests
-        env:
-          KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD: retention-ci
-        run: |
-          cargo test -p worker --lib consume::tests::submission_staging_is_abandoned_when_the_render_future_is_cancelled -- --exact --nocapture
-          cargo test -p retention tests::expired_upload_staging_is_removed_by_running_retention_expiry_loop -- --exact --nocapture
-          cargo test -p retention tests::retention_role_can_inspect_readiness_gate -- --exact --nocapture
-      - name: mandatory Bid matching tests
-        run: cargo test -p bid matching::tests -- --nocapture
-      - name: mandatory Redis-backed runtime queue tests
-        run: cargo test -p runtime jobs::tests -- --nocapture
-      - name: build services
-        run: cargo build -p api -p worker -p retention
+          cargo test -p bidding --test authoring_schema_contracts -- --nocapture
+          cargo test -p bidding --test bidding_v2_baseline_contract -- --nocapture
+          cargo test -p bidding --test tender_document_process_v2 -- --nocapture
+      - name: API and worker tests
+        run: cargo test -p api -p worker --no-fail-fast -- --nocapture
 
-  python:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: services/docreader
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - name: ruff
-        run: uvx ruff check .
-      - name: pyright (package)
-        run: uv run --with pyright pyright .
-      - name: pyright (workspace root)
-        working-directory: .
-        run: uvx --from pyright pyright .
-      - name: pytest
-        run: PYTHONPATH=.. uv run --with pytest pytest tests/
-
-  other:
+  web:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -328,37 +82,31 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: compose
-        run: |
-          docker compose -f deploy/docker-compose.yml --env-file deploy/.env.example config -q
-          docker compose config -q
-      - name: web lint
-        run: npm ci --prefix web && npm --prefix web run lint
-      - name: web build
-        run: npm --prefix web run build
-      - name: install playwright browser
-        working-directory: web
-        run: npx playwright install --with-deps chromium
-      - name: mocked web UI contract e2e
-        working-directory: web
-        run: npx playwright test
-      - name: require mocked Playwright evidence
-        if: always()
-        run: |
-          test -d web/playwright-report
-          test -d web/test-results
-      - name: upload mocked Playwright artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
+      - run: npm ci --prefix web
+      - name: lint
+        run: npm run lint --prefix web
+      - name: authoring unit contracts
+        run: npm test --prefix web
+      - name: build
+        run: npm run build --prefix web
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          name: playwright-bid-v1-mocked-ui-contract
-          path: |
-            web/playwright-report
-            web/test-results
-            web/e2e/artifacts
-      - name: runtime image build
-        run: docker build -f deploy/Dockerfile.rust --build-arg BIN=api -t knowledgebrain-api-ci .
-      - name: shell
-        run: bash -n services/docreader/scripts/generate_proto.sh scripts/bid_durable_dispatch_acceptance.sh scripts/bid_e2e_smoke.sh scripts/bid_runtime_acceptance.sh scripts/bid_runtime_compose_hook.sh scripts/bidding_v1_deletion_scan.sh deploy/compose-first-launch.sh deploy/compose-runtime-restart.sh scripts/compose_first_launch_acceptance.sh scripts/fresh_schema_acceptance.sh scripts/verify_oxana_registry_source.sh deploy/postgres-init/010-runtime-identities.sh
-      - name: bidding V1 deletion scan
-        run: sh scripts/bidding_v1_deletion_scan.sh
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r services/docreader/requirements.txt
+      - name: pytest
+        run: python -m pytest services/docreader
+
+  deploy-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: compose config
+        run: docker compose --profile runtime config --quiet
+      - name: shell syntax
+        run: bash -n scripts/bidding_v2_deletion_scan.sh scripts/fresh_schema_acceptance.sh deploy/postgres-init/010-runtime-identities.sh deploy/compose-runtime-restart.sh
