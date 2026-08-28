@@ -48,15 +48,12 @@ where
     delete::<H, T, AppState>(h)
 }
 use knowledge::{
-    ApiKey, Document, ParseStatus, Product, ProductKind, ProductVersion, Role, Store,
-    TYPE_DATATABLE, TYPE_DOCUMENT_PROCESS, TYPE_KB_DELETE, TYPE_LIST_DELETE, TYPE_LIST_REPARSE,
-    TYPE_MANUAL_PROCESS, Tag, User, VersionStatus, Workspace, is_audio_type, is_image_type,
-    is_valid_file_type, is_video,
+    ApiKey, Document, ParseStatus, Product, ProductKind, ProductVersion, Role, Store, Tag,
+    VersionStatus, Workspace, is_audio_type, is_image_type, is_valid_file_type, is_video,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
-use std::ops::{Deref, DerefMut};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 pub fn build(state: AppState) -> Router {
@@ -185,7 +182,6 @@ pub fn build(state: AppState) -> Router {
         .route("/api/v1/ops/queues", get_s(list_queues))
         .route("/api/v1/ops/oxana", get_s(ops_oxana))
         .route("/metrics", get_s(metrics))
-        .merge(crate::bid_routes::router(state.clone()))
         .layer(DefaultBodyLimit::max(
             platform::max_file_bytes() + 1024 * 1024,
         ));
@@ -253,112 +249,6 @@ async fn ready() -> (StatusCode, Json<knowledge::ReadyBody>) {
 
 pub(crate) type ApiErr = (StatusCode, Json<ErrorBody>);
 
-fn parse_rank(st: ParseStatus) -> u8 {
-    match st {
-        ParseStatus::Pending => 0,
-        ParseStatus::Processing => 1,
-        ParseStatus::Finalizing => 2,
-        ParseStatus::Completed
-        | ParseStatus::Failed
-        | ParseStatus::Cancelled
-        | ParseStatus::Deleting => 3,
-    }
-}
-
-fn merge_catalog(dst: &mut Store, src: Store) {
-    // PG overwrites catalog. A memory document that is further along than PG
-    // (in-process drain, worker not yet flushed) is kept.
-    let hydrated_workspace_ids: HashSet<_> = src.workspaces.keys().copied().collect();
-    let persisted_document_ids: HashSet<_> = src.documents.keys().copied().collect();
-    dst.workspaces.extend(src.workspaces);
-    dst.members.extend(src.members);
-    for (k, mut v) in src.products {
-        if v.current_version_id.is_none()
-            && let Some(old) = dst.products.get(&k)
-        {
-            v.current_version_id = old.current_version_id;
-            if v.embedding_model_id.is_empty() {
-                v.embedding_model_id = old.embedding_model_id.clone();
-            }
-        }
-        dst.products.insert(k, v);
-    }
-    for (k, mut v) in src.versions {
-        if v.embedding_model_id.is_empty()
-            && let Some(old) = dst.versions.get(&k)
-        {
-            v.embedding_model_id = old.embedding_model_id.clone();
-        }
-        dst.versions.insert(k, v);
-    }
-    for (k, v) in src.documents {
-        match dst.documents.get(&k) {
-            Some(old) if parse_rank(old.parse_status) > parse_rank(v.parse_status) => {}
-            _ => {
-                dst.documents.insert(k, v);
-            }
-        }
-    }
-    let removed_document_ids: Vec<_> = dst
-        .documents
-        .iter()
-        .filter_map(|(document_id, document)| {
-            if document.parse_status != ParseStatus::Deleting
-                || persisted_document_ids.contains(document_id)
-            {
-                return None;
-            }
-            let workspace_id = dst
-                .versions
-                .get(&document.product_version_id)
-                .and_then(|version| dst.products.get(&version.product_id))
-                .map(|product| product.workspace_id)?;
-            hydrated_workspace_ids
-                .contains(&workspace_id)
-                .then_some(*document_id)
-        })
-        .collect();
-    for document_id in removed_document_ids {
-        dst.clear_document_index(document_id);
-        dst.document_tags.retain(|(id, _)| *id != document_id);
-        dst.documents.remove(&document_id);
-    }
-    dst.tags.extend(src.tags);
-    dst.document_tags.extend(src.document_tags);
-    for (k, v) in src.chunks {
-        dst.chunks.entry(k).or_insert(v);
-    }
-    for (k, v) in src.embeddings {
-        dst.embeddings.entry(k).or_insert(v);
-    }
-    dst.graph.extend(src.graph);
-    dst.relations.extend(src.relations);
-    dst.wiki.extend(src.wiki);
-}
-
-struct Catalog {
-    store: Store,
-}
-
-impl Deref for Catalog {
-    type Target = Store;
-    fn deref(&self) -> &Store {
-        &self.store
-    }
-}
-
-impl DerefMut for Catalog {
-    fn deref_mut(&mut self) -> &mut Store {
-        &mut self.store
-    }
-}
-
-async fn lock(_state: &AppState) -> Result<Catalog, ApiErr> {
-    Ok(Catalog {
-        store: Store::default(),
-    })
-}
-
 async fn pg() -> Result<sqlx::PgPool, ApiErr> {
     platform::connect().await.map_err(|e| {
         fail(
@@ -369,39 +259,29 @@ async fn pg() -> Result<sqlx::PgPool, ApiErr> {
     })
 }
 
-pub(crate) async fn ensure_workspace(store: &mut Store, workspace_id: Uuid) {
-    let Ok(pool) = platform::connect().await else {
-        return;
-    };
-    let mut tmp = Store::default();
-    if !knowledge::hydrate_workspace(&pool, &mut tmp, workspace_id)
+fn pg_err(e: impl ToString) -> ApiErr {
+    fail(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "UPSTREAM",
+        &e.to_string(),
+    )
+}
+
+async fn resolve_vid(
+    pool: &sqlx::PgPool,
+    product_id: Uuid,
+    version_id: &str,
+) -> Result<Uuid, ApiErr> {
+    knowledge::resolve_product_version_id(pool, product_id, version_id)
         .await
-        .unwrap_or(false)
-    {
-        return;
-    }
-    merge_catalog(store, tmp);
-}
-
-async fn ensure_user_workspaces(store: &mut Store, user_id: Uuid) {
-    let Ok(pool) = platform::connect().await else {
-        return;
-    };
-    let Ok(ids) = knowledge::workspaces_for_user(&pool, user_id).await else {
-        return;
-    };
-    for id in ids {
-        ensure_workspace(store, id).await;
-    }
-}
-
-async fn ensure_product(store: &mut Store, product_id: Uuid) {
-    let Ok(pool) = platform::connect().await else {
-        return;
-    };
-    if let Ok(Some(ws)) = knowledge::product_workspace_id(&pool, product_id).await {
-        ensure_workspace(store, ws).await;
-    }
+        .map_err(pg_err)?
+        .ok_or_else(|| {
+            if version_id == "current" {
+                validation("no current version")
+            } else {
+                not_found("version")
+            }
+        })
 }
 
 #[derive(Clone)]
@@ -426,21 +306,14 @@ pub(crate) async fn actor_from(headers: &HeaderMap, state: &AppState) -> Result<
             return Ok(Actor::Bootstrap);
         }
         let hash = platform::hash_password(raw);
-        {
-            let s = lock(state).await?;
-            if let Some(key) = s.api_keys.values().find(|k| k.key_hash == hash).cloned() {
-                return Ok(Actor::Key(key));
-            }
-        }
-        if let Ok(pool) = platform::connect().await
-            && let Ok(Some(key)) = knowledge::find_api_key_by_hash(&pool, &hash).await
-        {
-            if let Ok(mut s) = lock(state).await {
-                s.api_keys.insert(key.id, key.clone());
-            }
-            return Ok(Actor::Key(key));
-        }
-        return Err(unauthorized());
+        let Ok(pool) = platform::connect().await else {
+            return Err(unauthorized());
+        };
+        let key = knowledge::find_api_key_by_hash(&pool, &hash)
+            .await
+            .map_err(pg_err)?
+            .ok_or_else(unauthorized)?;
+        return Ok(Actor::Key(key));
     }
     let raw = headers
         .get("authorization")
@@ -511,29 +384,19 @@ async fn register_local(
     State(state): State<AppState>,
     Json(body): Json<AuthBody>,
 ) -> Result<Json<TokenBody>, ApiErr> {
-    let hash = platform::hash_password(&body.password);
-    let email = body.email.clone();
-    let id = {
-        let mut s = lock(&state).await?;
-        if s.users_by_email.contains_key(&body.email) {
-            return Err(fail(StatusCode::CONFLICT, "CONFLICT", "email taken"));
-        }
-        let id = Uuid::new_v4();
-        s.users.insert(
-            id,
-            User {
-                id,
-                email: email.clone(),
-                password_hash: hash.clone(),
-                ldap_dn: String::new(),
-            },
-        );
-        s.users_by_email.insert(body.email, id);
-        id
-    };
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::insert_user(&pool, id, &email, Some(&hash)).await;
+    let pool = pg().await?;
+    if knowledge::find_user_by_email(&pool, &body.email)
+        .await
+        .map_err(pg_err)?
+        .is_some()
+    {
+        return Err(fail(StatusCode::CONFLICT, "CONFLICT", "email taken"));
     }
+    let hash = platform::hash_password(&body.password);
+    let id = Uuid::new_v4();
+    knowledge::insert_user(&pool, id, &body.email, Some(&hash))
+        .await
+        .map_err(pg_err)?;
     let token =
         platform::issue_jwt(id, &state.jwt_secret).map_err(|e| validation(&e.to_string()))?;
     Ok(Json(TokenBody { token, user_id: id }))
@@ -558,73 +421,35 @@ async fn login(
         return Ok(Json(TokenBody { token, user_id: id }));
     }
     if !platform::ldap_url().is_empty() {
-        let dn = platform::ldap_bind(&body.email, &body.password).map_err(|_| unauthorized())?;
-        let id = {
-            let mut s = lock(&state).await?;
-            if let Some(id) = s.users_by_email.get(&body.email).copied() {
-                if let Some(u) = s.users.get_mut(&id) {
-                    u.ldap_dn = dn.clone();
-                }
-                id
-            } else {
-                let id = Uuid::new_v4();
-                s.users.insert(
-                    id,
-                    User {
-                        id,
-                        email: body.email.clone(),
-                        password_hash: String::new(),
-                        ldap_dn: dn.clone(),
-                    },
-                );
-                s.users_by_email.insert(body.email.clone(), id);
-                id
-            }
+        let _dn = platform::ldap_bind(&body.email, &body.password).map_err(|_| unauthorized())?;
+        let pool = pg().await?;
+        let id = if let Some((id, _, _)) = knowledge::find_user_by_email(&pool, &body.email)
+            .await
+            .map_err(pg_err)?
+        {
+            id
+        } else {
+            let id = Uuid::new_v4();
+            knowledge::insert_user(&pool, id, &body.email, None)
+                .await
+                .map_err(pg_err)?;
+            id
         };
-        if let Ok(pool) = platform::connect().await {
-            let _ = knowledge::insert_user(&pool, id, &body.email, None).await;
-        }
         let token =
             platform::issue_jwt(id, &state.jwt_secret).map_err(|e| validation(&e.to_string()))?;
         return Ok(Json(TokenBody { token, user_id: id }));
     }
-    let mem = {
-        let s = lock(&state).await?;
-        s.users_by_email
-            .get(&body.email)
-            .and_then(|id| s.users.get(id).cloned())
-    };
-    let u = if let Some(u) = mem {
-        u
-    } else if let Ok(pool) = platform::connect().await {
-        let row = knowledge::find_user_by_email(&pool, &body.email)
-            .await
-            .ok()
-            .flatten()
-            .ok_or_else(unauthorized)?;
-        let u = User {
-            id: row.0,
-            email: row.1,
-            password_hash: row.2,
-            ldap_dn: String::new(),
-        };
-        if let Ok(mut s) = lock(&state).await {
-            s.users_by_email.insert(u.email.clone(), u.id);
-            s.users.insert(u.id, u.clone());
-        }
-        u
-    } else {
-        return Err(unauthorized());
-    };
-    if !platform::verify_password(&body.password, &u.password_hash) {
+    let pool = pg().await?;
+    let (id, _email, password_hash) = knowledge::find_user_by_email(&pool, &body.email)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(unauthorized)?;
+    if !platform::verify_password(&body.password, &password_hash) {
         return Err(unauthorized());
     }
     let token =
-        platform::issue_jwt(u.id, &state.jwt_secret).map_err(|e| validation(&e.to_string()))?;
-    Ok(Json(TokenBody {
-        token,
-        user_id: u.id,
-    }))
+        platform::issue_jwt(id, &state.jwt_secret).map_err(|e| validation(&e.to_string()))?;
+    Ok(Json(TokenBody { token, user_id: id }))
 }
 
 #[derive(Serialize)]
@@ -633,79 +458,29 @@ struct MeBody {
     email: String,
 }
 
-async fn ensure_local_user(state: &AppState, email: &str) -> Result<Uuid, ApiErr> {
+async fn ensure_local_user(_state: &AppState, email: &str) -> Result<Uuid, ApiErr> {
+    let pool = pg().await?;
+    if let Some((id, _, _)) = knowledge::find_user_by_email(&pool, email)
+        .await
+        .map_err(pg_err)?
     {
-        let s = lock(state).await?;
-        if let Some(id) = s.users_by_email.get(email).copied() {
-            return Ok(id);
-        }
-    }
-    if let Ok(pool) = platform::connect().await
-        && let Ok(Some((id, db_email, hash))) = knowledge::find_user_by_email(&pool, email).await
-    {
-        if let Ok(mut s) = lock(state).await {
-            s.users.insert(
-                id,
-                User {
-                    id,
-                    email: db_email,
-                    password_hash: hash,
-                    ldap_dn: String::new(),
-                },
-            );
-            s.users_by_email.insert(email.into(), id);
-        }
         return Ok(id);
     }
     let id = Uuid::new_v4();
-    {
-        let mut s = lock(state).await?;
-        s.users.insert(
-            id,
-            User {
-                id,
-                email: email.into(),
-                password_hash: String::new(),
-                ldap_dn: String::new(),
-            },
-        );
-        s.users_by_email.insert(email.into(), id);
-    }
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::insert_user(&pool, id, email, None).await;
-    }
+    knowledge::insert_user(&pool, id, email, None)
+        .await
+        .map_err(pg_err)?;
     Ok(id)
 }
 
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<MeBody>, ApiErr> {
     let uid = user_from(&headers, &state).await?;
-    {
-        let s = lock(&state).await?;
-        if let Some(u) = s.users.get(&uid) {
-            return Ok(Json(MeBody {
-                id: u.id,
-                email: u.email.clone(),
-            }));
-        }
-    }
-    if let Ok(pool) = platform::connect().await
-        && let Ok(Some((id, email))) = knowledge::find_user_by_id(&pool, uid).await
-    {
-        if let Ok(mut s) = lock(&state).await {
-            s.users.insert(
-                id,
-                User {
-                    id,
-                    email: email.clone(),
-                    password_hash: String::new(),
-                    ldap_dn: String::new(),
-                },
-            );
-            s.users_by_email.insert(email.clone(), id);
-        }
-        return Ok(Json(MeBody { id, email }));
-    }
-    Err(not_found("user"))
+    let pool = pg().await?;
+    let (id, email) = knowledge::find_user_by_id(&pool, uid)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("user"))?;
+    Ok(Json(MeBody { id, email }))
 }
 
 #[derive(Deserialize)]
@@ -719,18 +494,18 @@ async fn patch_me(
     Json(body): Json<PatchMe>,
 ) -> Result<Json<MeBody>, ApiErr> {
     let uid = user_from(&headers, &state).await?;
-    let email = {
-        let mut s = lock(&state).await?;
-        let u = s.users.get_mut(&uid).ok_or_else(|| not_found("user"))?;
-        if let Some(e) = body.email {
-            u.email = e;
-        }
-        u.email.clone()
-    };
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::update_user_email(&pool, uid, &email).await;
+    let pool = pg().await?;
+    let (id, mut email) = knowledge::find_user_by_id(&pool, uid)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("user"))?;
+    if let Some(e) = body.email {
+        email = e;
+        knowledge::update_user_email(&pool, id, &email)
+            .await
+            .map_err(pg_err)?;
     }
-    Ok(Json(MeBody { id: uid, email }))
+    Ok(Json(MeBody { id, email }))
 }
 
 #[derive(Deserialize)]
@@ -751,46 +526,39 @@ async fn create_workspace(
         Some("company") => knowledge::WorkspaceKind::Company,
         _ => knowledge::WorkspaceKind::ProductLine,
     };
-    let (view, ws_id, ws_name, ws_slug, kind_s) = {
-        let mut s = lock(&state).await?;
-        if s.workspaces.values().any(|w| w.slug == body.slug) {
-            return Err(fail(StatusCode::CONFLICT, "CONFLICT", "slug taken"));
-        }
-        if kind == knowledge::WorkspaceKind::Company
-            && s.workspaces
-                .values()
-                .any(|w| w.kind == knowledge::WorkspaceKind::Company)
-        {
-            return Err(fail(
-                StatusCode::CONFLICT,
-                "CONFLICT",
-                "company workspace already exists",
-            ));
-        }
-        let ws = Workspace {
-            id: Uuid::new_v4(),
-            name: body.name,
-            slug: body.slug,
-            kind,
-            retrieval: Default::default(),
-        };
-        s.members.insert((ws.id, uid), Role::Owner);
-        let view = WorkspaceView::from(&ws);
-        let ids = (
-            view,
-            ws.id,
-            ws.name.clone(),
-            ws.slug.clone(),
-            ws.kind.as_str(),
-        );
-        s.workspaces.insert(ws.id, ws);
-        ids
-    };
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::insert_workspace_kind(&pool, ws_id, &ws_name, &ws_slug, kind_s).await;
-        let _ = knowledge::insert_member(&pool, ws_id, uid, "owner").await;
+    let pool = pg().await?;
+    if knowledge::workspace_slug_taken(&pool, &body.slug)
+        .await
+        .map_err(pg_err)?
+    {
+        return Err(fail(StatusCode::CONFLICT, "CONFLICT", "slug taken"));
     }
-    Ok((StatusCode::CREATED, Json(view)))
+    if kind == knowledge::WorkspaceKind::Company
+        && knowledge::company_workspace_id(&pool)
+            .await
+            .map_err(pg_err)?
+            .is_some()
+    {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "CONFLICT",
+            "company workspace already exists",
+        ));
+    }
+    let ws = Workspace {
+        id: Uuid::new_v4(),
+        name: body.name,
+        slug: body.slug,
+        kind,
+        retrieval: Default::default(),
+    };
+    knowledge::insert_workspace_kind(&pool, ws.id, &ws.name, &ws.slug, ws.kind.as_str())
+        .await
+        .map_err(pg_err)?;
+    knowledge::insert_member(&pool, ws.id, uid, "owner")
+        .await
+        .map_err(pg_err)?;
+    Ok((StatusCode::CREATED, Json(WorkspaceView::from(&ws))))
 }
 
 #[derive(Serialize)]
@@ -819,9 +587,13 @@ async fn list_workspaces(
     let actor = actor_from(&headers, &state).await?;
     let pool = pg().await?;
     let _ = knowledge::ensure_company_workspace(&pool).await;
-    let rows = knowledge::list_workspaces(&pool)
-        .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+    let rows = knowledge::list_workspaces(&pool).await.map_err(|e| {
+        fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "UPSTREAM",
+            &e.to_string(),
+        )
+    })?;
     let dummy = Store::default();
     let out = rows
         .iter()
@@ -842,7 +614,13 @@ async fn get_workspace(
     require_ws(&dummy, id, &actor, false, false)?;
     let w = knowledge::load_workspace(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("workspace"))?;
     Ok(Json(WorkspaceView::from(&w)))
 }
@@ -864,13 +642,25 @@ async fn patch_workspace(
     let pool = pg().await?;
     let mut w = knowledge::load_workspace(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("workspace"))?;
     if let Some(name) = body.name {
         w.name = name;
         knowledge::update_workspace_name(&pool, id, &w.name)
             .await
-            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+            .map_err(|e| {
+                fail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "UPSTREAM",
+                    &e.to_string(),
+                )
+            })?;
     }
     Ok(Json(WorkspaceView::from(&w)))
 }
@@ -886,14 +676,24 @@ async fn delete_workspace(
     let pool = pg().await?;
     let vids = knowledge::version_ids_for_workspace(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?;
     let _ = knowledge::cancel_active_docs_for_versions(&pool, &vids).await;
     for vid in vids {
         let _ = platform::enqueue_kb_delete(vid).await;
     }
-    knowledge::retire_workspace(&pool, id)
-        .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+    knowledge::retire_workspace(&pool, id).await.map_err(|e| {
+        fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "UPSTREAM",
+            &e.to_string(),
+        )
+    })?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -914,7 +714,13 @@ async fn list_members(
     let pool = pg().await?;
     let rows = knowledge::list_members_for_workspace(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?;
     let out = rows
         .into_iter()
         .map(|(user_id, role)| MemberView {
@@ -938,15 +744,16 @@ async fn add_member(
     Json(body): Json<AddMember>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_workspace(&mut s, id).await;
-    {
-        require_ws(&s, id, &actor, false, true)?;
-        s.members.insert((id, body.user_id), body.role);
-    }
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::insert_member(&pool, id, body.user_id, role_name(body.role)).await;
-    }
+    let dummy = Store::default();
+    require_ws(&dummy, id, &actor, false, true)?;
+    let pool = pg().await?;
+    knowledge::load_workspace(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("workspace"))?;
+    knowledge::insert_member(&pool, id, body.user_id, role_name(body.role))
+        .await
+        .map_err(pg_err)?;
     Ok(StatusCode::CREATED)
 }
 
@@ -971,15 +778,16 @@ async fn patch_member(
     Json(body): Json<PatchMember>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_workspace(&mut s, id).await;
-    {
-        require_ws(&s, id, &actor, false, true)?;
-        s.members.insert((id, user_id), body.role);
-    }
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::upsert_member(&pool, id, user_id, role_name(body.role)).await;
-    }
+    let dummy = Store::default();
+    require_ws(&dummy, id, &actor, false, true)?;
+    let pool = pg().await?;
+    knowledge::load_workspace(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("workspace"))?;
+    knowledge::upsert_member(&pool, id, user_id, role_name(body.role))
+        .await
+        .map_err(pg_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -989,15 +797,16 @@ async fn remove_member(
     Path((id, user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_workspace(&mut s, id).await;
-    {
-        require_ws(&s, id, &actor, false, true)?;
-        s.members.remove(&(id, user_id));
-    }
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::delete_member(&pool, id, user_id).await;
-    }
+    let dummy = Store::default();
+    require_ws(&dummy, id, &actor, false, true)?;
+    let pool = pg().await?;
+    knowledge::load_workspace(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("workspace"))?;
+    knowledge::delete_member(&pool, id, user_id)
+        .await
+        .map_err(pg_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1007,14 +816,14 @@ async fn get_retrieval(
     Path(id): Path<Uuid>,
 ) -> Result<Json<knowledge::RetrievalConfig>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_workspace(&mut s, id).await;
-    require_ws(&s, id, &actor, false, false)?;
-    let w = s
-        .workspaces
-        .get(&id)
+    let dummy = Store::default();
+    require_ws(&dummy, id, &actor, false, false)?;
+    let pool = pg().await?;
+    let w = knowledge::load_workspace(&pool, id)
+        .await
+        .map_err(pg_err)?
         .ok_or_else(|| not_found("workspace"))?;
-    Ok(Json(w.retrieval.clone()))
+    Ok(Json(w.retrieval))
 }
 
 async fn patch_retrieval(
@@ -1024,28 +833,23 @@ async fn patch_retrieval(
     Json(body): Json<knowledge::RetrievalConfig>,
 ) -> Result<Json<knowledge::RetrievalConfig>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_workspace(&mut s, id).await;
-    let view = {
-        require_ws(&s, id, &actor, false, true)?;
-        let w = s
-            .workspaces
-            .get_mut(&id)
-            .ok_or_else(|| not_found("workspace"))?;
-        w.retrieval = body;
-        w.retrieval.clone()
-    };
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::set_retrieval_config(
-            &pool,
-            id,
-            view.vector_threshold,
-            view.keyword_threshold,
-            view.embedding_top_k as i32,
-        )
-        .await;
-    }
-    Ok(Json(view))
+    let dummy = Store::default();
+    require_ws(&dummy, id, &actor, false, true)?;
+    let pool = pg().await?;
+    knowledge::load_workspace(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("workspace"))?;
+    knowledge::set_retrieval_config(
+        &pool,
+        id,
+        body.vector_threshold,
+        body.keyword_threshold,
+        body.embedding_top_k as i32,
+    )
+    .await
+    .map_err(pg_err)?;
+    Ok(Json(body))
 }
 
 #[derive(Deserialize)]
@@ -1096,7 +900,13 @@ async fn list_products(
     let pool = pg().await?;
     let rows = knowledge::list_products_in_workspace(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?;
     let out = rows
         .iter()
         .filter(|p| match q.kind.as_deref() {
@@ -1122,7 +932,13 @@ async fn create_product(
     let (view, pid, pname, pslug, pkind) = {
         if knowledge::product_slug_taken(&pool, id, &body.slug)
             .await
-            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+            .map_err(|e| {
+                fail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "UPSTREAM",
+                    &e.to_string(),
+                )
+            })?
         {
             return Err(fail(StatusCode::CONFLICT, "CONFLICT", "slug taken"));
         }
@@ -1161,7 +977,13 @@ async fn create_product(
     };
     knowledge::insert_product(&pool, pid, id, pkind, &pname, &pslug, None)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?;
     Ok((StatusCode::CREATED, Json(view)))
 }
 
@@ -1174,7 +996,13 @@ async fn get_product(
     let pool = pg().await?;
     let p = knowledge::load_product(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("product"))?;
     let dummy = Store::default();
     require_ws(&dummy, p.workspace_id, &actor, false, false)?;
@@ -1196,7 +1024,13 @@ async fn patch_product(
     let pool = pg().await?;
     let mut p = knowledge::load_product(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("product"))?;
     let dummy = Store::default();
     require_ws(&dummy, p.workspace_id, &actor, false, true)?;
@@ -1204,7 +1038,13 @@ async fn patch_product(
         p.name = name;
         knowledge::update_product_name(&pool, id, &p.name)
             .await
-            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+            .map_err(|e| {
+                fail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "UPSTREAM",
+                    &e.to_string(),
+                )
+            })?;
     }
     Ok(Json(ProductView::from(&p)))
 }
@@ -1218,7 +1058,13 @@ async fn delete_product(
     let pool = pg().await?;
     let p = knowledge::load_product(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("product"))?;
     let dummy = Store::default();
     require_ws(&dummy, p.workspace_id, &actor, false, true)?;
@@ -1231,7 +1077,13 @@ async fn delete_product(
     }
     let vids = knowledge::version_ids_for_product(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?;
     let _ = knowledge::cancel_active_docs_for_versions(&pool, &vids).await;
     for vid in vids {
         let _ = platform::enqueue_kb_delete(vid).await;
@@ -1289,13 +1141,6 @@ struct VersionView {
     table_metadata_instructions: String,
 }
 
-fn version_view(s: &Store, v: &ProductVersion) -> VersionView {
-    version_view_for(
-        s.products.get(&v.product_id).and_then(|p| p.current_version_id),
-        v,
-    )
-}
-
 fn version_view_for(current_version_id: Option<Uuid>, v: &ProductVersion) -> VersionView {
     let current = current_version_id == Some(v.id);
     VersionView {
@@ -1337,13 +1182,25 @@ async fn list_versions(
     let pool = pg().await?;
     let p = knowledge::load_product(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("product"))?;
     let dummy = Store::default();
     require_ws(&dummy, p.workspace_id, &actor, false, false)?;
     let versions = knowledge::list_versions_for_product(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?;
     let out = versions
         .iter()
         .map(|v| version_view_for(p.current_version_id, v))
@@ -1361,13 +1218,25 @@ async fn create_version(
     let pool = pg().await?;
     let p = knowledge::load_product(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("product"))?;
     let dummy = Store::default();
     require_ws(&dummy, p.workspace_id, &actor, true, false)?;
     if knowledge::version_label_taken(&pool, id, &body.label)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
     {
         return Err(fail(StatusCode::CONFLICT, "CONFLICT", "label taken"));
     }
@@ -1388,17 +1257,35 @@ async fn create_version(
     if let Some(src) = clone_from {
         knowledge::insert_version_cloning(&pool, view_id, id, &label, src)
             .await
-            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+            .map_err(|e| {
+                fail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "UPSTREAM",
+                    &e.to_string(),
+                )
+            })?;
     } else {
         knowledge::insert_version(&pool, view_id, id, &label, "active", None)
             .await
-            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+            .map_err(|e| {
+                fail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "UPSTREAM",
+                    &e.to_string(),
+                )
+            })?;
     }
     let mut current = p.current_version_id;
     if current.is_none() {
         knowledge::set_product_current(&pool, id, view_id)
             .await
-            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+            .map_err(|e| {
+                fail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "UPSTREAM",
+                    &e.to_string(),
+                )
+            })?;
         current = Some(view_id);
     }
     if let Some(src) = clone_from {
@@ -1419,13 +1306,25 @@ async fn get_version(
     let pool = pg().await?;
     let p = knowledge::load_product(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("product"))?;
     let dummy = Store::default();
     require_ws(&dummy, p.workspace_id, &actor, false, false)?;
     let vid = knowledge::resolve_product_version_id(&pool, id, &version_id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| {
             if version_id == "current" {
                 validation("no current version")
@@ -1435,7 +1334,13 @@ async fn get_version(
         })?;
     let v = knowledge::load_version(&pool, vid)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("version"))?;
     Ok(Json(version_view_for(p.current_version_id, &v)))
 }
@@ -1478,6 +1383,123 @@ fn version_status_str(st: VersionStatus) -> &'static str {
     }
 }
 
+fn apply_patch_version(v: &mut ProductVersion, body: &PatchVersion) {
+    if let Some(st) = body.status {
+        v.status = st;
+    }
+    if let Some(n) = body.chunk_size.filter(|n| *n > 0) {
+        v.chunk_size = n;
+    }
+    if let Some(n) = body.chunk_overlap.filter(|n| *n > 0) {
+        v.chunk_overlap = n;
+    }
+    if let Some(st) = body.chunk_strategy.clone().filter(|s| !s.is_empty()) {
+        v.chunk_strategy = st;
+    }
+    if let Some(b) = body.enable_parent_child {
+        v.enable_parent_child = b;
+    }
+    if let Some(n) = body.parent_chunk_size.filter(|n| *n > 0) {
+        v.parent_chunk_size = n;
+    }
+    if let Some(n) = body.child_chunk_size.filter(|n| *n > 0) {
+        v.child_chunk_size = n;
+    }
+    if let Some(s) = body.separators.clone().filter(|s| !s.is_empty()) {
+        v.chunk_separators = s;
+    }
+    if let Some(n) = body.token_limit.filter(|n| *n > 0) {
+        v.chunk_token_limit = n;
+    }
+    if let Some(l) = body.languages.clone().filter(|l| !l.is_empty()) {
+        v.chunk_languages = l;
+    }
+    if let Some(b) = body.vector_enabled {
+        v.vector_enabled = b;
+    }
+    if let Some(b) = body.keyword_enabled {
+        v.keyword_enabled = b;
+    }
+    if let Some(b) = body.wiki_enabled {
+        v.wiki_enabled = b;
+    }
+    if let Some(b) = body.graph_enabled {
+        v.graph_enabled = b;
+    }
+    if let Some(b) = body.extract_enabled {
+        v.extract_enabled = b;
+    }
+    if let Some(b) = body.question_enabled {
+        v.question_enabled = b;
+    }
+    if let Some(n) = body.question_count {
+        v.question_count = if n == 0 { 3 } else { n.min(10) };
+    }
+    if let Some(s) = body.question_custom_instructions.clone() {
+        v.question_custom_instructions = s;
+    }
+    if let Some(s) = body.table_metadata_instructions.clone() {
+        v.table_metadata_instructions = s;
+    }
+    if let Some(b) = body.enable_multimodel {
+        v.enable_multimodel = b;
+    }
+    if let Some(b) = body.asr_enabled {
+        v.asr_enabled = b;
+    }
+    if let Some(m) = body.embedding_model_id.clone().filter(|s| !s.is_empty()) {
+        v.embedding_model_id = m;
+    }
+    if let Some(m) = body.summary_model_id.clone().filter(|s| !s.is_empty()) {
+        v.summary_model_id = m;
+    }
+    if let Some(m) = body.wiki_synthesis_model_id.clone() {
+        v.wiki_synthesis_model_id = m;
+    }
+    if let Some(m) = body.asr_model_id.clone() {
+        v.asr_model_id = m;
+    }
+}
+
+fn version_config_of(v: &ProductVersion) -> knowledge::VersionConfig {
+    knowledge::VersionConfig {
+        status: Some(version_status_str(v.status).into()),
+        chunking: Some(json!({
+            "chunk_size": v.chunk_size,
+            "chunk_overlap": v.chunk_overlap,
+            "strategy": v.chunk_strategy,
+            "enable_parent_child": v.enable_parent_child,
+            "parent_chunk_size": v.parent_chunk_size(),
+            "child_chunk_size": v.child_chunk_size(),
+            "separators": v.chunk_separators,
+            "token_limit": v.chunk_token_limit,
+            "languages": v.chunk_languages,
+            "parser_engine_rules": v.parser_engine_rules,
+            "table_metadata_instructions": v.table_metadata_instructions,
+        })),
+        indexing: Some(json!({
+            "vector": v.vector_enabled,
+            "keyword": v.keyword_enabled,
+            "wiki": v.wiki_enabled,
+            "graph": v.graph_enabled,
+        })),
+        image_processing: Some(json!({"enable_multimodel": v.enable_multimodel})),
+        embedding_model_id: Some(v.embedding_model_id.clone()),
+        summary_model_id: Some(v.summary_model_id.clone()),
+        asr_model_id: Some(v.asr_model_id.clone()),
+        asr_config: Some(json!({"enabled": v.asr_enabled})),
+        extract_config: Some(json!({"enabled": v.extract_enabled})),
+        wiki_config: Some(json!({
+            "synthesis_model_id": v.wiki_synthesis_model_id,
+        })),
+        question_generation_config: Some(json!({
+            "enabled": v.question_enabled,
+            "question_count": v.question_count(),
+            "custom_instructions": v.question_custom_instructions,
+        })),
+    }
+}
+
 async fn patch_version(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1485,132 +1507,23 @@ async fn patch_version(
     Json(body): Json<PatchVersion>,
 ) -> Result<Json<VersionView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_product(&mut s, id).await;
-    let (view, vid, cfg) = {
-        let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
-        require_ws(&s, p.workspace_id, &actor, false, true)?;
-        let vid = resolve_write_version(&s, id, &version_id)?;
-        let v = s.versions.get_mut(&vid).unwrap();
-        if let Some(st) = body.status {
-            v.status = st;
-        }
-        if let Some(n) = body.chunk_size.filter(|n| *n > 0) {
-            v.chunk_size = n;
-        }
-        if let Some(n) = body.chunk_overlap.filter(|n| *n > 0) {
-            v.chunk_overlap = n;
-        }
-        if let Some(st) = body.chunk_strategy.filter(|s| !s.is_empty()) {
-            v.chunk_strategy = st;
-        }
-        if let Some(b) = body.enable_parent_child {
-            v.enable_parent_child = b;
-        }
-        if let Some(n) = body.parent_chunk_size.filter(|n| *n > 0) {
-            v.parent_chunk_size = n;
-        }
-        if let Some(n) = body.child_chunk_size.filter(|n| *n > 0) {
-            v.child_chunk_size = n;
-        }
-        if let Some(s) = body.separators.filter(|s| !s.is_empty()) {
-            v.chunk_separators = s;
-        }
-        if let Some(n) = body.token_limit.filter(|n| *n > 0) {
-            v.chunk_token_limit = n;
-        }
-        if let Some(l) = body.languages.filter(|l| !l.is_empty()) {
-            v.chunk_languages = l;
-        }
-        if let Some(b) = body.vector_enabled {
-            v.vector_enabled = b;
-        }
-        if let Some(b) = body.keyword_enabled {
-            v.keyword_enabled = b;
-        }
-        if let Some(b) = body.wiki_enabled {
-            v.wiki_enabled = b;
-        }
-        if let Some(b) = body.graph_enabled {
-            v.graph_enabled = b;
-        }
-        if let Some(b) = body.extract_enabled {
-            v.extract_enabled = b;
-        }
-        if let Some(b) = body.question_enabled {
-            v.question_enabled = b;
-        }
-        if let Some(n) = body.question_count {
-            v.question_count = if n == 0 { 3 } else { n.min(10) };
-        }
-        if let Some(s) = body.question_custom_instructions {
-            v.question_custom_instructions = s;
-        }
-        if let Some(s) = body.table_metadata_instructions {
-            v.table_metadata_instructions = s;
-        }
-        if let Some(b) = body.enable_multimodel {
-            v.enable_multimodel = b;
-        }
-        if let Some(b) = body.asr_enabled {
-            v.asr_enabled = b;
-        }
-        if let Some(m) = body.embedding_model_id.filter(|s| !s.is_empty()) {
-            v.embedding_model_id = m;
-        }
-        if let Some(m) = body.summary_model_id.filter(|s| !s.is_empty()) {
-            v.summary_model_id = m;
-        }
-        if let Some(m) = body.wiki_synthesis_model_id {
-            v.wiki_synthesis_model_id = m;
-        }
-        if let Some(m) = body.asr_model_id {
-            v.asr_model_id = m;
-        }
-        let view = version_view(&s, s.versions.get(&vid).unwrap());
-        let v = s.versions.get(&vid).unwrap();
-        let cfg = knowledge::VersionConfig {
-            status: Some(version_status_str(view.status).into()),
-            chunking: Some(json!({
-                "chunk_size": v.chunk_size,
-                "chunk_overlap": v.chunk_overlap,
-                "strategy": v.chunk_strategy,
-                "enable_parent_child": v.enable_parent_child,
-                "parent_chunk_size": v.parent_chunk_size(),
-                "child_chunk_size": v.child_chunk_size(),
-                "separators": v.chunk_separators,
-                "token_limit": v.chunk_token_limit,
-                "languages": v.chunk_languages,
-                "parser_engine_rules": v.parser_engine_rules,
-                "table_metadata_instructions": v.table_metadata_instructions,
-            })),
-            indexing: Some(json!({
-                "vector": v.vector_enabled,
-                "keyword": v.keyword_enabled,
-                "wiki": v.wiki_enabled,
-                "graph": v.graph_enabled,
-            })),
-            image_processing: Some(json!({"enable_multimodel": v.enable_multimodel})),
-            embedding_model_id: Some(v.embedding_model_id.clone()),
-            summary_model_id: Some(v.summary_model_id.clone()),
-            asr_model_id: Some(v.asr_model_id.clone()),
-            asr_config: Some(json!({"enabled": v.asr_enabled})),
-            extract_config: Some(json!({"enabled": v.extract_enabled})),
-            wiki_config: Some(json!({
-                "synthesis_model_id": v.wiki_synthesis_model_id,
-            })),
-            question_generation_config: Some(json!({
-                "enabled": v.question_enabled,
-                "question_count": v.question_count(),
-                "custom_instructions": v.question_custom_instructions,
-            })),
-        };
-        (view, vid, cfg)
-    };
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::update_version_config(&pool, vid, cfg).await;
-    }
-    Ok(Json(view))
+    let pool = pg().await?;
+    let p = knowledge::load_product(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("product"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, p.workspace_id, &actor, false, true)?;
+    let vid = resolve_vid(&pool, id, &version_id).await?;
+    let mut v = knowledge::load_version(&pool, vid)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("version"))?;
+    apply_patch_version(&mut v, &body);
+    knowledge::update_version_config(&pool, vid, version_config_of(&v))
+        .await
+        .map_err(pg_err)?;
+    Ok(Json(version_view_for(p.current_version_id, &v)))
 }
 
 async fn delete_version(
@@ -1622,13 +1535,25 @@ async fn delete_version(
     let pool = pg().await?;
     let p = knowledge::load_product(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("product"))?;
     let dummy = Store::default();
     require_ws(&dummy, p.workspace_id, &actor, false, true)?;
     let vid = knowledge::resolve_product_version_id(&pool, id, &version_id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("version"))?;
     let _ = knowledge::cancel_active_docs_for_versions(&pool, &[vid]).await;
     let _ = knowledge::set_version_status(&pool, vid, "archived").await;
@@ -1652,13 +1577,25 @@ async fn set_current(
     let pool = pg().await?;
     let mut p = knowledge::load_product(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("product"))?;
     let dummy = Store::default();
     require_ws(&dummy, p.workspace_id, &actor, false, true)?;
     let v = knowledge::load_version(&pool, body.version_id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("version"))?;
     if v.product_id != id {
         return Err(validation("version not on product"));
@@ -1670,39 +1607,31 @@ async fn set_current(
             "version is not active",
         ));
     }
-    if let Some(err) = knowledge::workspace_embedding_conflict(&pool, p.workspace_id, &v.embedding_model_id)
-        .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+    if let Some(err) =
+        knowledge::workspace_embedding_conflict(&pool, p.workspace_id, &v.embedding_model_id)
+            .await
+            .map_err(|e| {
+                fail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "UPSTREAM",
+                    &e.to_string(),
+                )
+            })?
     {
         return Err(fail(StatusCode::BAD_REQUEST, "EMBEDDING_MISMATCH", err));
     }
     knowledge::set_product_current(&pool, id, body.version_id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?;
     p.current_version_id = Some(body.version_id);
     p.embedding_model_id = v.embedding_model_id;
     Ok(Json(ProductView::from(&p)))
-}
-
-fn embedding_mismatch(store: &Store, workspace_id: Uuid, incoming: &str) -> Option<String> {
-    for p in store
-        .products
-        .values()
-        .filter(|p| p.workspace_id == workspace_id && p.kind == knowledge::ProductKind::Product)
-    {
-        if let Some(vid) = p.current_version_id
-            && let Some(ver) = store.versions.get(&vid)
-            && !ver.embedding_model_id.is_empty()
-            && !incoming.is_empty()
-            && ver.embedding_model_id != incoming
-        {
-            return Some(format!(
-                "workspace products must share embedding_model_id (have {}, got {incoming})",
-                ver.embedding_model_id
-            ));
-        }
-    }
-    None
 }
 
 #[derive(Serialize)]
@@ -1738,9 +1667,8 @@ impl DocView {
     }
 }
 
-fn write_active(s: &Store, vid: Uuid) -> Result<(), ApiErr> {
-    let v = s.versions.get(&vid).ok_or_else(|| not_found("version"))?;
-    if v.status != VersionStatus::Active {
+fn write_active_status(status: VersionStatus) -> Result<(), ApiErr> {
+    if status != VersionStatus::Active {
         return Err(fail(
             StatusCode::BAD_REQUEST,
             "VERSION_NOT_ACTIVE",
@@ -1767,7 +1695,13 @@ async fn list_documents(
     let pool = pg().await?;
     let p = knowledge::load_product(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("product"))?;
     let dummy = Store::default();
     require_ws(&dummy, p.workspace_id, &actor, false, false)?;
@@ -1781,48 +1715,32 @@ async fn list_documents(
         .as_deref()
         .map(|k| k.trim())
         .filter(|k| !k.is_empty());
-    let rows = knowledge::list_documents_in_version(
-        &pool,
-        vid,
-        q.parse_status.as_deref(),
-        keyword,
-        q.tag,
-    )
-    .await
-    .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+    let rows =
+        knowledge::list_documents_in_version(&pool, vid, q.parse_status.as_deref(), keyword, q.tag)
+            .await
+            .map_err(|e| {
+                fail(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "UPSTREAM",
+                    &e.to_string(),
+                )
+            })?;
     let out = rows.iter().map(DocView::from).collect();
     Ok(Json(out))
 }
 
-fn enqueue_process(s: &mut Store, doc: &Document, extra: serde_json::Value) -> Result<(), String> {
-    let mut payload = extra;
-    payload["document_id"] = json!(doc.id);
-    payload["product_version_id"] = json!(doc.product_version_id);
-    payload["attempt"] = json!(doc.attempt);
-    s.try_enqueue(TYPE_DOCUMENT_PROCESS, platform::QUEUE_DEFAULT, payload)
-        .map(|_| ())
-}
-
-struct PendingIngest<'a> {
-    vid: Uuid,
+async fn ingest_prepared(
+    actor: &Actor,
+    product_id: Uuid,
+    version_id: &str,
     title: String,
     file_name: String,
-    bytes: &'a [u8],
-    tag_ids: &'a [Uuid],
-    ws: Uuid,
+    bytes: &[u8],
+    tag_ids: &[Uuid],
     overrides: Option<knowledge::ProcessOverrides>,
-}
-
-fn insert_pending(s: &mut Store, req: PendingIngest<'_>) -> Result<Document, ApiErr> {
-    let PendingIngest {
-        vid,
-        title,
-        file_name,
-        bytes,
-        tag_ids,
-        ws,
-        overrides,
-    } = req;
+    doc_type: &str,
+    passages: Vec<String>,
+) -> Result<Document, ApiErr> {
     if is_video(&file_name) {
         return Err(validation("video is not allowed"));
     }
@@ -1832,22 +1750,30 @@ fn insert_pending(s: &mut Store, req: PendingIngest<'_>) -> Result<Document, Api
     if bytes.len() > platform::max_file_bytes() {
         return Err(validation("file too large"));
     }
-    let version = s.versions.get(&vid).ok_or_else(|| not_found("version"))?;
-    if let Some(p) = s.products.get(&version.product_id) {
-        let frozen = p.kind == ProductKind::Library
-            && p.slug == "library"
-            && s.workspaces
-                .get(&p.workspace_id)
-                .is_some_and(|w| w.kind == knowledge::WorkspaceKind::ProductLine);
-        if frozen {
-            return Err(fail(
-                StatusCode::CONFLICT,
-                "CONFLICT",
-                "product-line default library is frozen; upload to company workspace",
-            ));
-        }
+    let pool = pg().await?;
+    let p = knowledge::load_product(&pool, product_id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("product"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, p.workspace_id, actor, true, false)?;
+    let vid = resolve_vid(&pool, product_id, version_id).await?;
+    let version = knowledge::load_version(&pool, vid)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("version"))?;
+    write_active_status(version.status)?;
+    if knowledge::is_frozen_default_library(&pool, product_id)
+        .await
+        .map_err(pg_err)?
+    {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "CONFLICT",
+            "product-line default library is frozen; upload to company workspace",
+        ));
     }
-    let eff = knowledge::resolve_process_config(version, overrides.as_ref());
+    let eff = knowledge::resolve_process_config(&version, overrides.as_ref());
     if is_image_type(&file_name) && (!eff.enable_multimodel || !platform::vlm_configured()) {
         return Err(validation("image requires VLM configuration"));
     }
@@ -1855,37 +1781,61 @@ fn insert_pending(s: &mut Store, req: PendingIngest<'_>) -> Result<Document, Api
         return Err(validation("audio requires ASR configuration"));
     }
     let hash = platform::sha256_hex(bytes);
-    if let Some(existing) = s.find_duplicate(vid, &file_name, bytes.len() as i64, &hash) {
+    if let Some(existing) =
+        knowledge::find_duplicate_document(&pool, vid, &file_name, bytes.len() as i64, &hash)
+            .await
+            .map_err(pg_err)?
+    {
         return Err(fail(
             StatusCode::CONFLICT,
             "CONFLICT",
             format!("duplicate file {existing}"),
         ));
     }
-    let (hash, key) = knowledge::put(s, bytes);
-    for t in tag_ids {
-        let tag = s.tags.get(t).ok_or_else(|| validation("unknown tag"))?;
-        if tag.workspace_id != ws {
-            return Err(validation("tag not in workspace"));
-        }
+    if !knowledge::tags_belong_to_workspace(&pool, p.workspace_id, tag_ids)
+        .await
+        .map_err(pg_err)?
+    {
+        return Err(validation("unknown tag"));
     }
+    let (hash, key) = knowledge::put_bytes(bytes);
     let mut doc = Document::new(vid, title, file_name.clone(), bytes.len() as i64, hash, key);
     doc.process_overrides = overrides.filter(|o| !o.is_empty());
-    if file_name.ends_with(".csv") || file_name.ends_with(".xlsx") || file_name.ends_with(".xls") {
-        let _ = s.try_enqueue(
-            TYPE_DATATABLE,
-            platform::QUEUE_SUMMARY,
-            json!({ "document_id": doc.id }),
-        );
+    if !doc_type.is_empty() {
+        doc.doc_type = doc_type.to_string();
     }
-    for t in tag_ids {
-        s.document_tags.insert((doc.id, *t));
+    if !passages.is_empty() {
+        doc.source_passages = passages.clone();
     }
-    s.documents.insert(doc.id, doc.clone());
-    if let Err(e) = enqueue_process(s, &doc, json!({})) {
-        s.fail_document(doc.id, &e);
-        doc = s.documents.get(&doc.id).cloned().unwrap_or(doc);
-        return Ok(doc);
+    persist_ingest_row(&doc, tag_ids).await?;
+    let enqueue_err = if doc_type == "manual" {
+        platform::enqueue_manual_process(doc.id, doc.product_version_id, doc.attempt)
+            .await
+            .err()
+    } else if doc_type == "passage" {
+        platform::enqueue_document_process_with(
+            doc.id,
+            doc.product_version_id,
+            doc.attempt,
+            passages,
+        )
+        .await
+        .err()
+    } else {
+        if file_name.ends_with(".csv")
+            || file_name.ends_with(".xlsx")
+            || file_name.ends_with(".xls")
+        {
+            let _ = platform::enqueue_datatable(doc.id).await;
+        }
+        platform::enqueue_document_process(doc.id, doc.product_version_id, doc.attempt)
+            .await
+            .err()
+    };
+    if let Some(e) = enqueue_err {
+        doc.parse_status = ParseStatus::Failed;
+        doc.error_message = e;
+        persist_failed_row(&doc).await;
     }
     Ok(doc)
 }
@@ -1983,56 +1933,6 @@ async fn persist_failed_row(doc: &Document) {
     let _ = knowledge::set_parse_status(&pool, doc.id, "failed", &doc.error_message).await;
 }
 
-fn rollback_ingest(store: &mut Store, doc: &Document) {
-    store.documents.remove(&doc.id);
-    store.document_tags.retain(|(id, _)| *id != doc.id);
-    store.queue.retain(|j| {
-        j.payload.get("document_id").and_then(|v| v.as_str()) != Some(&doc.id.to_string())
-    });
-    knowledge::discard_unpersisted_object(store, &doc.file_hash);
-}
-
-fn resolve_write_version(s: &Store, product_id: Uuid, version_id: &str) -> Result<Uuid, ApiErr> {
-    if version_id == "current"
-        && s.products
-            .get(&product_id)
-            .is_some_and(|p| p.current_version_id.is_none())
-    {
-        return Err(validation("no current version"));
-    }
-    s.resolve_version(product_id, version_id)
-        .ok_or_else(|| not_found("version"))
-}
-
-async fn ensure_document(store: &mut Store, document_id: Uuid) {
-    if let Ok(pool) = platform::connect().await
-        && let Ok(Some(ws)) = knowledge::document_workspace_id(&pool, document_id).await
-    {
-        ensure_workspace(store, ws).await;
-    }
-}
-
-async fn push_document_job(store: &mut Store, doc: &mut Document) {
-    if doc.parse_status == ParseStatus::Failed {
-        return;
-    }
-    match platform::enqueue_document_process(doc.id, doc.product_version_id, doc.attempt).await {
-        Ok(_) => {
-            tracing::info!(
-                document_id = %doc.id,
-                job = "document:process",
-                "enqueue"
-            );
-        }
-        Err(e) => {
-            store.fail_document(doc.id, &e);
-            if let Some(d) = store.documents.get(&doc.id) {
-                *doc = d.clone();
-            }
-        }
-    }
-}
-
 async fn ingest_file(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2040,8 +1940,6 @@ async fn ingest_file(
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<DocView>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_product(&mut s, id).await;
     let mut file_name = String::from("upload.txt");
     let mut bytes = Vec::new();
     let mut tag_ids = Vec::new();
@@ -2076,40 +1974,20 @@ async fn ingest_file(
     if bytes.is_empty() {
         return Err(validation("empty file"));
     }
-    let mut doc = {
-        let p = s
-            .products
-            .get(&id)
-            .ok_or_else(|| not_found("product"))?
-            .clone();
-        require_ws(&s, p.workspace_id, &actor, true, false)?;
-        let vid = resolve_write_version(&s, id, &version_id)?;
-        write_active(&s, vid)?;
-        insert_pending(
-            &mut s,
-            PendingIngest {
-                vid,
-                title: file_name.clone(),
-                file_name,
-                bytes: &bytes,
-                tag_ids: &tag_ids,
-                ws: p.workspace_id,
-                overrides,
-            },
-        )?
-    };
-    if let Err(e) = persist_ingest_row(&doc, &tag_ids).await {
-        rollback_ingest(&mut s, &doc);
-        return Err(e);
-    }
-    if doc.file_name.ends_with(".csv")
-        || doc.file_name.ends_with(".xlsx")
-        || doc.file_name.ends_with(".xls")
-    {
-        let _ = platform::enqueue_datatable(doc.id).await;
-    }
-    push_document_job(&mut s, &mut doc).await;
-    persist_failed_row(&doc).await;
+    let title = file_name.clone();
+    let doc = ingest_prepared(
+        &actor,
+        id,
+        &version_id,
+        title,
+        file_name,
+        &bytes,
+        &tag_ids,
+        overrides,
+        "file",
+        Vec::new(),
+    )
+    .await?;
     Ok((ingest_status(&doc), Json(DocView::from(&doc))))
 }
 
@@ -2129,46 +2007,24 @@ async fn ingest_url(
     Json(body): Json<UrlIn>,
 ) -> Result<(StatusCode, Json<DocView>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_product(&mut s, id).await;
     if platform::url_blocked(&body.url) {
         return Err(validation("url failed SSRF check"));
     }
     let name = body.title.unwrap_or_else(|| "remote.md".into());
     let bytes = format!("url:{}", body.url).into_bytes();
-    let mut doc = {
-        let p = s
-            .products
-            .get(&id)
-            .ok_or_else(|| not_found("product"))?
-            .clone();
-        require_ws(&s, p.workspace_id, &actor, true, false)?;
-        let vid = resolve_write_version(&s, id, &version_id)?;
-        write_active(&s, vid)?;
-        let mut doc = insert_pending(
-            &mut s,
-            PendingIngest {
-                vid,
-                title: name.clone(),
-                file_name: name,
-                bytes: &bytes,
-                tag_ids: &[],
-                ws: p.workspace_id,
-                overrides: body.process_config,
-            },
-        )?;
-        if let Some(d) = s.documents.get_mut(&doc.id) {
-            d.doc_type = "url".into();
-            doc = d.clone();
-        }
-        doc
-    };
-    if let Err(e) = persist_ingest_row(&doc, &[]).await {
-        rollback_ingest(&mut s, &doc);
-        return Err(e);
-    }
-    push_document_job(&mut s, &mut doc).await;
-    persist_failed_row(&doc).await;
+    let doc = ingest_prepared(
+        &actor,
+        id,
+        &version_id,
+        name.clone(),
+        name,
+        &bytes,
+        &[],
+        body.process_config,
+        "url",
+        Vec::new(),
+    )
+    .await?;
     Ok((ingest_status(&doc), Json(DocView::from(&doc))))
 }
 
@@ -2197,65 +2053,21 @@ async fn ingest_passage(
     Json(body): Json<PassageIn>,
 ) -> Result<(StatusCode, Json<DocView>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_product(&mut s, id).await;
     let joined = body.passages.join("\n");
-    let bytes = joined.as_bytes();
-    let mut doc = {
-        let p = s
-            .products
-            .get(&id)
-            .ok_or_else(|| not_found("product"))?
-            .clone();
-        require_ws(&s, p.workspace_id, &actor, true, false)?;
-        let vid = resolve_write_version(&s, id, &version_id)?;
-        write_active(&s, vid)?;
-        let mut doc = insert_pending(
-            &mut s,
-            PendingIngest {
-                vid,
-                title: body.title.clone(),
-                file_name: format!("{}.txt", body.title),
-                bytes,
-                tag_ids: &body.tag_ids,
-                ws: p.workspace_id,
-                overrides: body.process_config,
-            },
-        )?;
-        if let Some(j) = s.queue.back_mut() {
-            j.payload["passages"] = json!(body.passages);
-        }
-        if let Some(d) = s.documents.get_mut(&doc.id) {
-            d.title = body.title;
-            d.doc_type = "passage".into();
-            d.source_passages = body.passages.clone();
-            doc = d.clone();
-        }
-        doc
-    };
-    if let Err(e) = persist_ingest_row(&doc, &body.tag_ids).await {
-        rollback_ingest(&mut s, &doc);
-        return Err(e);
-    }
-    match platform::enqueue_document_process_with(
-        doc.id,
-        doc.product_version_id,
-        doc.attempt,
+    let file_name = format!("{}.txt", body.title);
+    let doc = ingest_prepared(
+        &actor,
+        id,
+        &version_id,
+        body.title,
+        file_name,
+        joined.as_bytes(),
+        &body.tag_ids,
+        body.process_config,
+        "passage",
         body.passages,
     )
-    .await
-    {
-        Ok(_) => {}
-        Err(e) => {
-            if let Ok(mut store) = lock(&state).await {
-                store.fail_document(doc.id, &e);
-                if let Some(d) = store.documents.get(&doc.id) {
-                    doc = d.clone();
-                }
-            }
-        }
-    }
-    persist_failed_row(&doc).await;
+    .await?;
     Ok((ingest_status(&doc), Json(DocView::from(&doc))))
 }
 
@@ -2276,65 +2088,27 @@ async fn ingest_manual(
     Json(body): Json<ManualIn>,
 ) -> Result<(StatusCode, Json<DocView>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_product(&mut s, id).await;
     if body.content.trim().is_empty() {
         return Err(validation("content required"));
     }
-    let bytes = body.content.as_bytes();
     let file_name = if body.title.to_ascii_lowercase().ends_with(".md") {
         body.title.clone()
     } else {
         format!("{}.md", body.title)
     };
-    let mut doc = {
-        let p = s
-            .products
-            .get(&id)
-            .ok_or_else(|| not_found("product"))?
-            .clone();
-        require_ws(&s, p.workspace_id, &actor, true, false)?;
-        let vid = resolve_write_version(&s, id, &version_id)?;
-        write_active(&s, vid)?;
-        let mut doc = insert_pending(
-            &mut s,
-            PendingIngest {
-                vid,
-                title: body.title.clone(),
-                file_name,
-                bytes,
-                tag_ids: &body.tag_ids,
-                ws: p.workspace_id,
-                overrides: body.process_config,
-            },
-        )?;
-        if let Some(j) = s.queue.back_mut() {
-            j.task_type = TYPE_MANUAL_PROCESS.to_string();
-            j.payload["manual"] = json!(true);
-        }
-        if let Some(d) = s.documents.get_mut(&doc.id) {
-            d.title = body.title;
-            d.doc_type = "manual".into();
-            doc = d.clone();
-        }
-        doc
-    };
-    if let Err(e) = persist_ingest_row(&doc, &body.tag_ids).await {
-        rollback_ingest(&mut s, &doc);
-        return Err(e);
-    }
-    match platform::enqueue_manual_process(doc.id, doc.product_version_id, doc.attempt).await {
-        Ok(_) => {}
-        Err(e) => {
-            if let Ok(mut store) = lock(&state).await {
-                store.fail_document(doc.id, &e);
-                if let Some(d) = store.documents.get(&doc.id) {
-                    doc = d.clone();
-                }
-            }
-        }
-    }
-    persist_failed_row(&doc).await;
+    let doc = ingest_prepared(
+        &actor,
+        id,
+        &version_id,
+        body.title,
+        file_name,
+        body.content.as_bytes(),
+        &body.tag_ids,
+        body.process_config,
+        "manual",
+        Vec::new(),
+    )
+    .await?;
     Ok((ingest_status(&doc), Json(DocView::from(&doc))))
 }
 
@@ -2347,11 +2121,23 @@ async fn get_document(
     let pool = pg().await?;
     let d = knowledge::load_document(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("document"))?;
     let ws = knowledge::document_workspace_id(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("document"))?;
     let dummy = Store::default();
     require_ws(&dummy, ws, &actor, false, false)?;
@@ -2364,41 +2150,20 @@ async fn document_content(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    if let Ok(pool) = platform::connect().await
-        && let Ok(Some(ws)) = knowledge::document_workspace_id(&pool, id).await
-    {
-        ensure_workspace(&mut s, ws).await;
-    }
-    let meta = {
-        let d = s.documents.get(&id).ok_or_else(|| not_found("document"))?;
-        let vid = d.product_version_id;
-        let pid = s
-            .versions
-            .get(&vid)
-            .ok_or_else(|| not_found("version"))?
-            .product_id;
-        let ws = s
-            .products
-            .get(&pid)
-            .ok_or_else(|| not_found("product"))?
-            .workspace_id;
-        require_ws(&s, ws, &actor, false, false)?;
-        d.clone()
-    };
-    let mut chunks: Vec<knowledge::Chunk> = {
-        s.chunks
-            .values()
-            .filter(|c| c.document_id == id)
-            .cloned()
-            .collect()
-    };
-    if let Ok(pool) = platform::connect().await
-        && let Ok(pg) = knowledge::load_document_chunks(&pool, id).await
-        && !pg.is_empty()
-    {
-        chunks = pg;
-    }
+    let pool = pg().await?;
+    let meta = knowledge::load_document(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("document"))?;
+    let ws = knowledge::document_workspace_id(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("document"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, ws, &actor, false, false)?;
+    let mut chunks = knowledge::load_document_chunks(&pool, id)
+        .await
+        .map_err(pg_err)?;
     chunks.sort_by_key(|c| (c.start_at, c.id));
     let mut markdown = meta.markdown.clone();
     if markdown.is_empty()
@@ -2439,18 +2204,36 @@ async fn delete_document(
     let pool = pg().await?;
     let d = knowledge::load_document(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("document"))?;
     let ws = knowledge::document_workspace_id(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("document"))?;
     let dummy = Store::default();
     require_ws(&dummy, ws, &actor, true, false)?;
     let _ = d;
     knowledge::set_parse_status(&pool, id, "deleting", "")
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?;
     platform::enqueue_list_delete(id)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", e))?;
@@ -2473,17 +2256,35 @@ async fn reparse_document(
     let pool = pg().await?;
     let mut doc = knowledge::load_document(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("document"))?;
     let ws = knowledge::document_workspace_id(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("document"))?;
     let dummy = Store::default();
     require_ws(&dummy, ws, &actor, true, false)?;
     let v = knowledge::load_version(&pool, doc.product_version_id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("version"))?;
     if v.status != VersionStatus::Active {
         return Err(fail(
@@ -2497,12 +2298,24 @@ async fn reparse_document(
         if let Some(o) = &doc.process_overrides {
             knowledge::set_process_overrides(&pool, id, o)
                 .await
-                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+                .map_err(|e| {
+                    fail(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "UPSTREAM",
+                        &e.to_string(),
+                    )
+                })?;
         }
     }
     knowledge::mark_reparse_queued(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?;
     doc.parse_status = ParseStatus::Pending;
     doc.enable_status = "disabled".into();
     platform::enqueue_list_reparse(id)
@@ -2520,17 +2333,35 @@ async fn cancel_document(
     let pool = pg().await?;
     let mut doc = knowledge::load_document(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("document"))?;
     let ws = knowledge::document_workspace_id(&pool, id)
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?
         .ok_or_else(|| not_found("document"))?;
     let dummy = Store::default();
     require_ws(&dummy, ws, &actor, true, false)?;
     knowledge::set_parse_status(&pool, id, "cancelled", "")
         .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", &e.to_string()))?;
+        .map_err(|e| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "UPSTREAM",
+                &e.to_string(),
+            )
+        })?;
     doc.parse_status = ParseStatus::Cancelled;
     Ok(Json(DocView::from(&doc)))
 }
@@ -2547,52 +2378,32 @@ async fn timeline(
     Query(q): Query<TimelineQuery>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    if let Ok(pool) = platform::connect().await
-        && let Ok(Some(ws)) = knowledge::document_workspace_id(&pool, id).await
-    {
-        ensure_workspace(&mut s, ws).await;
-    }
-    let (parse_status, mem_attempt, mem_spans, err_msg) = {
-        let d = s.documents.get(&id).ok_or_else(|| not_found("document"))?;
-        let pid = s
-            .versions
-            .get(&d.product_version_id)
-            .ok_or_else(|| not_found("version"))?
-            .product_id;
-        let ws = s
-            .products
-            .get(&pid)
-            .ok_or_else(|| not_found("product"))?
-            .workspace_id;
-        require_ws(&s, ws, &actor, false, false)?;
-        (
-            d.parse_status.as_str().to_string(),
-            d.attempt,
-            s.spans
-                .iter()
-                .filter(|sp| sp.document_id == id)
-                .cloned()
-                .collect::<Vec<_>>(),
-            d.error_message.clone(),
-        )
-    };
-    let mut latest = mem_attempt;
-    let mut rows = mem_spans;
-    if let Ok(pool) = platform::connect().await {
-        if let Ok(n) = knowledge::latest_span_attempt(&pool, id).await
-            && n > 0
-        {
-            latest = n;
-        }
-        let want = q.attempt.filter(|n| *n > 0).unwrap_or(latest);
-        if let Ok(pg) = knowledge::list_spans_attempt(&pool, id, want).await
-            && !pg.is_empty()
-        {
-            rows = pg.into_iter().map(|r| r.into_span()).collect();
-        }
+    let pool = pg().await?;
+    let d = knowledge::load_document(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("document"))?;
+    let ws = knowledge::document_workspace_id(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("document"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, ws, &actor, false, false)?;
+    let parse_status = d.parse_status.as_str().to_string();
+    let err_msg = d.error_message.clone();
+    let mut latest = knowledge::latest_span_attempt(&pool, id)
+        .await
+        .map_err(pg_err)?;
+    if latest <= 0 {
+        latest = d.attempt;
     }
     let attempt = q.attempt.filter(|n| *n > 0).unwrap_or(latest);
+    let rows: Vec<_> = knowledge::list_spans_attempt(&pool, id, attempt)
+        .await
+        .map_err(pg_err)?
+        .into_iter()
+        .map(|r| r.into_span())
+        .collect();
     let (trace, current_stage, last_fail) =
         knowledge::obs::build_trace(attempt, &parse_status, &rows);
     let last_error = last_fail
@@ -2637,16 +2448,17 @@ async fn list_tags(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<Tag>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_workspace(&mut s, id).await;
-    require_ws(&s, id, &actor, false, false)?;
-    Ok(Json(
-        s.tags
-            .values()
-            .filter(|t| t.workspace_id == id)
-            .cloned()
-            .collect(),
-    ))
+    let dummy = Store::default();
+    require_ws(&dummy, id, &actor, false, false)?;
+    let pool = pg().await?;
+    knowledge::load_workspace(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("workspace"))?;
+    let tags = knowledge::list_tags_for_workspace(&pool, id)
+        .await
+        .map_err(pg_err)?;
+    Ok(Json(tags))
 }
 
 async fn create_tag(
@@ -2656,22 +2468,22 @@ async fn create_tag(
     Json(body): Json<NewTag>,
 ) -> Result<(StatusCode, Json<Tag>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_workspace(&mut s, id).await;
-    let tag = {
-        require_ws(&s, id, &actor, true, false)?;
-        let tag = Tag {
-            id: Uuid::new_v4(),
-            workspace_id: id,
-            name: body.name,
-            slug: body.slug,
-        };
-        s.tags.insert(tag.id, tag.clone());
-        tag
+    let dummy = Store::default();
+    require_ws(&dummy, id, &actor, true, false)?;
+    let pool = pg().await?;
+    knowledge::load_workspace(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("workspace"))?;
+    let tag = Tag {
+        id: Uuid::new_v4(),
+        workspace_id: id,
+        name: body.name,
+        slug: body.slug,
     };
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::insert_tag(&pool, tag.id, tag.workspace_id, &tag.name, &tag.slug).await;
-    }
+    knowledge::insert_tag(&pool, tag.id, tag.workspace_id, &tag.name, &tag.slug)
+        .await
+        .map_err(pg_err)?;
     Ok((StatusCode::CREATED, Json(tag)))
 }
 
@@ -2681,22 +2493,17 @@ async fn delete_tag(
     Path((id, tag_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_workspace(&mut s, id).await;
-    {
-        require_ws(&s, id, &actor, false, true)?;
-        let Some(tag) = s.tags.get(&tag_id).cloned() else {
-            return Err(not_found("tag"));
-        };
-        if tag.workspace_id != id {
-            return Err(not_found("tag"));
-        }
-        s.tags.remove(&tag_id);
-        s.document_tags.retain(|(_, t)| *t != tag_id);
+    let dummy = Store::default();
+    require_ws(&dummy, id, &actor, false, true)?;
+    let pool = pg().await?;
+    let tag = knowledge::load_tag(&pool, tag_id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("tag"))?;
+    if tag.workspace_id != id {
+        return Err(not_found("tag"));
     }
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::delete_tag(&pool, tag_id).await;
-    }
+    knowledge::delete_tag(&pool, tag_id).await.map_err(pg_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2712,30 +2519,23 @@ async fn put_tags(
     Json(body): Json<PutTags>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_document(&mut s, id).await;
-    let kept = {
-        let d = s
-            .documents
-            .get(&id)
-            .ok_or_else(|| not_found("document"))?
-            .clone();
-        let pid = s.versions.get(&d.product_version_id).unwrap().product_id;
-        let ws = s.products.get(&pid).unwrap().workspace_id;
-        require_ws(&s, ws, &actor, true, false)?;
-        s.document_tags.retain(|(doc, _)| *doc != id);
-        let mut kept = Vec::new();
-        for t in body.tag_ids {
-            if s.tags.get(&t).is_some_and(|tg| tg.workspace_id == ws) {
-                s.document_tags.insert((id, t));
-                kept.push(t);
-            }
-        }
-        kept
-    };
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::replace_document_tags(&pool, id, &kept).await;
-    }
+    let pool = pg().await?;
+    knowledge::load_document(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("document"))?;
+    let ws = knowledge::document_workspace_id(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("document"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, ws, &actor, true, false)?;
+    let kept = knowledge::tags_in_workspace(&pool, ws, &body.tag_ids)
+        .await
+        .map_err(pg_err)?;
+    knowledge::replace_document_tags(&pool, id, &kept)
+        .await
+        .map_err(pg_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2745,23 +2545,18 @@ async fn wiki_pages(
     Path((id, vid)): Path<(Uuid, String)>,
 ) -> Result<Json<Vec<knowledge::WikiPage>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_product(&mut s, id).await;
-    if let Ok(pool) = platform::connect().await
-        && let Ok(Some(ws)) = knowledge::product_workspace_id(&pool, id).await
-    {
-        ensure_workspace(&mut s, ws).await;
-    }
-    let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
-    require_ws(&s, p.workspace_id, &actor, false, false)?;
-    let version = resolve_write_version(&s, id, &vid)?;
-    Ok(Json(
-        s.wiki
-            .values()
-            .filter(|w| w.product_version_id == version)
-            .cloned()
-            .collect(),
-    ))
+    let pool = pg().await?;
+    let p = knowledge::load_product(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("product"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, p.workspace_id, &actor, false, false)?;
+    let version = resolve_vid(&pool, id, &vid).await?;
+    let pages = knowledge::list_wiki_pages(&pool, version)
+        .await
+        .map_err(pg_err)?;
+    Ok(Json(pages))
 }
 
 async fn wiki_page(
@@ -2770,14 +2565,17 @@ async fn wiki_page(
     Path((id, vid, slug)): Path<(Uuid, String, String)>,
 ) -> Result<Json<knowledge::WikiPage>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_product(&mut s, id).await;
-    let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
-    require_ws(&s, p.workspace_id, &actor, false, false)?;
-    let version = resolve_write_version(&s, id, &vid)?;
-    s.wiki
-        .get(&(version, slug))
-        .cloned()
+    let pool = pg().await?;
+    let p = knowledge::load_product(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("product"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, p.workspace_id, &actor, false, false)?;
+    let version = resolve_vid(&pool, id, &vid).await?;
+    knowledge::load_wiki_page(&pool, version, &slug)
+        .await
+        .map_err(pg_err)?
         .map(Json)
         .ok_or_else(|| not_found("page"))
 }
@@ -2788,38 +2586,22 @@ async fn wiki_folders(
     Path((id, vid)): Path<(Uuid, String)>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_product(&mut s, id).await;
-    let version = {
-        let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
-        require_ws(&s, p.workspace_id, &actor, false, false)?;
-        resolve_write_version(&s, id, &vid)?
-    };
-    let mut folders = {
-        s.wiki_folders
-            .values()
-            .filter(|f| f.product_version_id == version)
-            .map(|f| {
-                json!({
-                    "id": f.id,
-                    "name": f.name,
-                    "path": f.path,
-                    "depth": f.depth
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-    if folders.is_empty()
-        && let Ok(pool) = platform::connect().await
-        && let Ok(rows) = knowledge::list_wiki_folders(&pool, version).await
-    {
-        folders = rows
-            .into_iter()
-            .map(|(fid, name, path, depth)| {
-                json!({"id": fid, "name": name, "path": path, "depth": depth})
-            })
-            .collect();
-    }
+    let pool = pg().await?;
+    let p = knowledge::load_product(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("product"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, p.workspace_id, &actor, false, false)?;
+    let version = resolve_vid(&pool, id, &vid).await?;
+    let folders = knowledge::list_wiki_folders(&pool, version)
+        .await
+        .map_err(pg_err)?
+        .into_iter()
+        .map(|(fid, name, path, depth)| {
+            json!({"id": fid, "name": name, "path": path, "depth": depth})
+        })
+        .collect::<Vec<_>>();
     Ok(Json(json!({ "folders": folders })))
 }
 
@@ -2835,8 +2617,6 @@ async fn version_file(
     Query(q): Query<FileQuery>,
 ) -> Result<Vec<u8>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_product(&mut s, id).await;
     let hash = q.key.trim_start_matches("objects/");
     if hash.is_empty() {
         return Err(not_found("file"));
@@ -2846,37 +2626,21 @@ async fn version_file(
     } else {
         format!("objects/{hash}")
     };
-    let resolved = {
-        let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
-        require_ws(&s, p.workspace_id, &actor, false, false)?;
-        let version = resolve_write_version(&s, id, &vid)?;
-        let mem = version_references_key(&s, version, &key, hash);
-        (version, mem)
-    };
-    let mut allowed = resolved.1;
-    if !allowed
-        && let Ok(pool) = platform::connect().await
-        && let Ok(hit) = knowledge::version_references_object(&pool, resolved.0, &key, hash).await
-    {
-        allowed = hit;
-    }
+    let pool = pg().await?;
+    let p = knowledge::load_product(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("product"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, p.workspace_id, &actor, false, false)?;
+    let version = resolve_vid(&pool, id, &vid).await?;
+    let allowed = knowledge::version_references_object(&pool, version, &key, hash)
+        .await
+        .map_err(pg_err)?;
     if !allowed {
         return Err(not_found("file"));
     }
     platform::read_blob(hash).map_err(|_| not_found("file"))
-}
-
-fn version_references_key(s: &Store, version_id: Uuid, key: &str, hash: &str) -> bool {
-    s.documents.values().any(|d| {
-        d.product_version_id == version_id
-            && (d.object_ref == key
-                || d.object_ref.ends_with(hash)
-                || d.file_hash == hash
-                || d.markdown.contains(key)
-                || d.markdown.contains(hash))
-    }) || s.chunks.values().any(|c| {
-        c.product_version_id == version_id && (c.content.contains(key) || c.content.contains(hash))
-    })
 }
 
 #[derive(Deserialize, Serialize)]
@@ -3041,121 +2805,24 @@ async fn do_match(
     headers: HeaderMap,
     Json(mut req): Json<knowledge::search::SearchRequest>,
 ) -> Result<Json<knowledge::search::MatchingResponse>, ApiErr> {
-    let actor = actor_from(&headers, &state).await?;
+    let _actor = actor_from(&headers, &state).await?;
     req.mode = "matching".into();
     if req.scope.is_some() {
         req.expand_wiki = false;
         req.expand_graph = false;
         req.include_library = false;
     }
-    let mut s = lock(&state).await?;
-    hydrate_search_workspace(&mut s, &actor, &req).await;
-    let mem = {
-        let s = lock(&state).await?;
-        if req.scope.is_none() {
-            let ws = infer_workspace(&s, &actor, &req)?;
-            req.workspace_id = Some(ws);
-        }
-        knowledge::search::matching(&s, &req)
-    };
-    match mem {
-        Ok(r) if matching_has_hits(&r) => {
-            debug_assert!(
-                serde_json::to_value(&r)
-                    .unwrap()
-                    .get("best_product_id")
-                    .is_none()
-            );
-            Ok(Json(r))
-        }
-        Ok(empty) => {
-            if let Ok(pool) = platform::connect().await {
-                match knowledge::search::matching_pg(&pool, &req).await {
-                    Ok(pg) if matching_has_hits(&pg) => return Ok(Json(pg)),
-                    Ok(_) if !empty.candidates.is_empty() => return Ok(Json(empty)),
-                    Ok(pg) => return Ok(Json(pg)),
-                    Err(e) if empty.candidates.is_empty() => return Err(map_search(e)),
-                    Err(_) => return Ok(Json(empty)),
-                }
-            }
-            Ok(Json(empty))
-        }
-        Err(e) if e.code == "NOT_FOUND" || e.code == "VALIDATION" => {
-            if let Ok(pool) = platform::connect().await {
-                return match knowledge::search::matching_pg(&pool, &req).await {
-                    Ok(pg) => Ok(Json(pg)),
-                    Err(pg_err) => Err(map_search(pg_err)),
-                };
-            }
-            Err(map_search(e))
-        }
-        Err(e) => Err(map_search(e)),
-    }
-}
-
-async fn hydrate_search_workspace(
-    store: &mut Store,
-    actor: &Actor,
-    req: &knowledge::search::SearchRequest,
-) {
-    if let Some(ws) = req.workspace_id {
-        ensure_workspace(store, ws).await;
-        return;
-    }
-    if let Some(pid) = req.product_id {
-        ensure_product(store, pid).await;
-        return;
-    }
-    match actor {
-        Actor::User(uid) => ensure_user_workspaces(store, *uid).await,
-        Actor::Key(k) if k.scope_type == "workspace" => ensure_workspace(store, k.scope_id).await,
-        Actor::Key(k) if k.scope_type == "product" => ensure_product(store, k.scope_id).await,
-        _ => {}
-    }
-}
-
-fn matching_has_hits(r: &knowledge::search::MatchingResponse) -> bool {
-    r.candidates
-        .iter()
-        .any(|c| c.requirements.iter().any(|req| req.hit))
-        || r.clauses.iter().any(|c| c.outcome == "hit")
-}
-
-fn infer_workspace(
-    s: &Store,
-    actor: &Actor,
-    req: &knowledge::search::SearchRequest,
-) -> Result<Uuid, ApiErr> {
-    if let Some(pid) = req.product_id {
-        let p = s.products.get(&pid).ok_or_else(|| not_found("product"))?;
-        require_ws(s, p.workspace_id, actor, false, false)?;
-        return Ok(p.workspace_id);
-    }
-    if let Some(ws) = req.workspace_id {
-        require_ws(s, ws, actor, false, false)?;
-        return Ok(ws);
-    }
-    match actor {
-        Actor::User(uid) => {
-            let mut it = s.members.iter().filter(|((_, u), _)| *u == *uid);
-            let ((ws, _), _) = it.next().ok_or_else(forbidden)?;
-            if it.next().is_some() {
-                return Err(validation("workspace_id required when member of multiple"));
-            }
-            Ok(*ws)
-        }
-        Actor::Key(k) if k.scope_type == "workspace" => {
-            require_ws(s, k.scope_id, actor, false, false)?;
-            Ok(k.scope_id)
-        }
-        Actor::Key(k) if k.scope_type == "product" => {
-            let p = s.products.get(&k.scope_id).ok_or_else(forbidden)?;
-            require_ws(s, p.workspace_id, actor, false, false)?;
-            Ok(p.workspace_id)
-        }
-        Actor::Bootstrap => Err(validation("workspace_id required")),
-        _ => Err(forbidden()),
-    }
+    let pool = pg().await?;
+    let out = knowledge::search::matching_pg(&pool, &req)
+        .await
+        .map_err(map_search)?;
+    debug_assert!(
+        serde_json::to_value(&out)
+            .unwrap()
+            .get("best_product_id")
+            .is_none()
+    );
+    Ok(Json(out))
 }
 
 fn map_search(e: knowledge::search::SearchError) -> ApiErr {
@@ -3196,60 +2863,47 @@ async fn do_answer(
     Json(body): Json<AnswerIn>,
 ) -> Result<Json<AnswerOut>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut s = lock(&state).await?;
-    ensure_product(&mut s, body.product_id).await;
-    {
-        let p = s
-            .products
-            .get(&body.product_id)
-            .ok_or_else(|| not_found("product"))?;
-        require_ws(&s, p.workspace_id, &actor, false, false)?;
-        if p.current_version_id.is_none() {
-            return Err(validation("product has no current version"));
-        }
+    let pool = pg().await?;
+    let p = knowledge::load_product(&pool, body.product_id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("product"))?;
+    let dummy = Store::default();
+    require_ws(&dummy, p.workspace_id, &actor, false, false)?;
+    if p.current_version_id.is_none() {
+        return Err(validation("product has no current version"));
     }
-    let req = knowledge::search::AnswerRequest {
-        query: body.query,
-        product_id: body.product_id,
-        version_id: body.version_id,
+    if body.query.trim().is_empty() {
+        return Err(validation("query required"));
+    }
+    let sreq = knowledge::search::SearchRequest {
+        mode: "assembly".into(),
+        query: Some(body.query.clone()),
+        product_id: Some(body.product_id),
+        version_id: body.version_id.clone(),
         include_library: body.include_library,
-        tag_ids: body.tag_ids,
-        context: body.context,
+        tag_ids: body.tag_ids.clone(),
+        match_count: 8,
+        expand_wiki: true,
+        expand_graph: true,
+        requirements: vec![],
+        version_scope: "current".into(),
+        product_ids: vec![],
+        workspace_id: None,
+        scope: None,
+        group_by: "none".into(),
+        tender_text: None,
     };
-    let req2 = req.clone();
-    let mut res = knowledge::search::answer(&s, &req).map_err(map_search)?;
-    if res.hits.is_empty()
-        && let Ok(pool) = platform::connect().await
-    {
-        let sreq = knowledge::search::SearchRequest {
-            mode: "assembly".into(),
-            query: Some(req2.query.clone()),
-            product_id: Some(req2.product_id),
-            version_id: req2.version_id.clone(),
-            include_library: req2.include_library,
-            tag_ids: req2.tag_ids.clone(),
-            match_count: 8,
-            expand_wiki: true,
-            expand_graph: true,
-            requirements: vec![],
-            version_scope: "current".into(),
-            product_ids: vec![],
-            workspace_id: None,
-            scope: None,
-            group_by: "none".into(),
-            tender_text: None,
-        };
-        if let Ok(pg) = knowledge::search::assembly_pg(&pool, &sreq).await
-            && !pg.hits.is_empty()
-        {
-            let model = knowledge::current_summary_model(&pool, req2.product_id)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "stub-chat".into());
-            res = knowledge::search::answer_from_hits(&req2.query, &req2.context, pg.hits, &model);
-        }
-    }
+    let assembled = knowledge::search::assembly_pg(&pool, &sreq)
+        .await
+        .map_err(map_search)?;
+    let model = knowledge::current_summary_model(&pool, body.product_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "stub-chat".into());
+    let res =
+        knowledge::search::answer_from_hits(&body.query, &body.context, assembled.hits, &model);
     let citations = res
         .citations
         .into_iter()
@@ -3274,26 +2928,9 @@ async fn dead_letters(
     headers: HeaderMap,
 ) -> Result<Json<Vec<knowledge::DeadLetter>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let mut out = {
-        let s = lock(&state).await?;
-        let admin = match &actor {
-            Actor::Bootstrap => true,
-            Actor::Key(k) => k.scopes.iter().any(|x| x == "admin"),
-            Actor::User(uid) => s
-                .members
-                .iter()
-                .any(|((_, u), r)| *u == *uid && r.can_admin()),
-        };
-        if !admin {
-            return Err(forbidden());
-        }
-        s.dead_letters.clone()
-    };
-    if let Ok(pool) = platform::connect().await
-        && let Ok(pg) = knowledge::list_dead_letters(&pool).await
-    {
-        out.extend(pg);
-    }
+    require_admin(&state, &actor).await?;
+    let pool = pg().await?;
+    let out = knowledge::list_dead_letters(&pool).await.map_err(pg_err)?;
     Ok(Json(out))
 }
 
@@ -3309,37 +2946,12 @@ async fn list_queues(
     headers: HeaderMap,
 ) -> Result<Json<QueueView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let (memory, dead_letters) = {
-        let s = lock(&state).await?;
-        let admin = match &actor {
-            Actor::Bootstrap => true,
-            Actor::Key(k) => k.scopes.iter().any(|x| x == "admin"),
-            Actor::User(uid) => s
-                .members
-                .iter()
-                .any(|((_, u), r)| *u == *uid && r.can_admin()),
-        };
-        if !admin {
-            return Err(forbidden());
-        }
-        let mut memory = HashMap::new();
-        for j in &s.queue {
-            *memory.entry(j.queue.clone()).or_insert(0) += 1;
-        }
-        (memory, s.dead_letters.len())
-    };
-    let mut pending_ops = HashMap::new();
-    let mut dead_letters = dead_letters;
-    if let Ok(pool) = platform::connect().await {
-        if let Ok(rows) = knowledge::pending_op_counts(&pool).await {
-            pending_ops = rows;
-        }
-        if let Ok(n) = knowledge::count_dead_letters(&pool).await {
-            dead_letters += n as usize;
-        }
-    }
+    require_admin(&state, &actor).await?;
+    let pool = pg().await?;
+    let pending_ops = knowledge::pending_op_counts(&pool).await.map_err(pg_err)?;
+    let dead_letters = knowledge::count_dead_letters(&pool).await.map_err(pg_err)? as usize;
     Ok(Json(QueueView {
-        memory,
+        memory: HashMap::new(),
         pending_ops,
         dead_letters,
     }))
@@ -3390,68 +3002,64 @@ async fn create_api_key(
     if body.scope_type != "workspace" && body.scope_type != "product" {
         return Err(validation("scope_type must be workspace or product"));
     }
-    let (view, persist) = {
-        let mut s = lock(&state).await?;
-        require_ws(&s, id, &actor, false, true)?;
-        let scope_id = if body.scope_type == "workspace" {
-            id
-        } else {
-            let pid = body
-                .scope_id
-                .ok_or_else(|| validation("scope_id required"))?;
-            let p = s.products.get(&pid).ok_or_else(|| not_found("product"))?;
-            if p.workspace_id != id {
-                return Err(forbidden());
-            }
-            pid
-        };
-        let raw = format!("kb_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-        let key = ApiKey {
-            id: Uuid::new_v4(),
-            name: body.name,
-            key_hash: platform::hash_password(&raw),
-            prefix: raw.chars().take(10).collect(),
-            scope_type: body.scope_type,
-            scope_id,
-            scopes: body.scopes,
-        };
-        let view = ApiKeyView {
-            id: key.id,
-            name: key.name.clone(),
-            prefix: key.prefix.clone(),
-            scope_type: key.scope_type.clone(),
-            scope_id: key.scope_id,
-            scopes: key.scopes.clone(),
-            token: Some(raw),
-        };
-        let persist = (
-            key.id,
-            key.name.clone(),
-            key.key_hash.clone(),
-            key.prefix.clone(),
-            key.scope_type.clone(),
-            key.scope_id,
-            key.scopes.clone(),
-        );
-        s.api_keys.insert(key.id, key);
-        (view, persist)
+    let dummy = Store::default();
+    require_ws(&dummy, id, &actor, false, true)?;
+    let pool = pg().await?;
+    knowledge::load_workspace(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("workspace"))?;
+    let scope_id = if body.scope_type == "workspace" {
+        id
+    } else {
+        let pid = body
+            .scope_id
+            .ok_or_else(|| validation("scope_id required"))?;
+        let p = knowledge::load_product(&pool, pid)
+            .await
+            .map_err(pg_err)?
+            .ok_or_else(|| not_found("product"))?;
+        if p.workspace_id != id {
+            return Err(forbidden());
+        }
+        pid
     };
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::insert_api_key(
-            &pool,
-            knowledge::NewApiKey {
-                id: persist.0,
-                name: &persist.1,
-                key_hash: &persist.2,
-                prefix: &persist.3,
-                scope_type: &persist.4,
-                scope_id: persist.5,
-                scopes: &persist.6,
-            },
-        )
-        .await;
-    }
-    Ok((StatusCode::CREATED, Json(view)))
+    let raw = format!("kb_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let key = ApiKey {
+        id: Uuid::new_v4(),
+        name: body.name,
+        key_hash: platform::hash_password(&raw),
+        prefix: raw.chars().take(10).collect(),
+        scope_type: body.scope_type,
+        scope_id,
+        scopes: body.scopes,
+    };
+    knowledge::insert_api_key(
+        &pool,
+        knowledge::NewApiKey {
+            id: key.id,
+            name: &key.name,
+            key_hash: &key.key_hash,
+            prefix: &key.prefix,
+            scope_type: &key.scope_type,
+            scope_id: key.scope_id,
+            scopes: &key.scopes,
+        },
+    )
+    .await
+    .map_err(pg_err)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ApiKeyView {
+            id: key.id,
+            name: key.name,
+            prefix: key.prefix,
+            scope_type: key.scope_type,
+            scope_id: key.scope_id,
+            scopes: key.scopes,
+            token: Some(raw),
+        }),
+    ))
 }
 
 async fn list_api_keys(
@@ -3460,25 +3068,20 @@ async fn list_api_keys(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<ApiKeyView>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let s = lock(&state).await?;
-    require_ws(&s, id, &actor, false, true)?;
-    let out = s
-        .api_keys
-        .values()
-        .filter(|k| {
-            k.scope_type == "workspace" && k.scope_id == id
-                || k.scope_type == "product"
-                    && s.products
-                        .get(&k.scope_id)
-                        .is_some_and(|p| p.workspace_id == id)
-        })
+    let dummy = Store::default();
+    require_ws(&dummy, id, &actor, false, true)?;
+    let pool = pg().await?;
+    let out = knowledge::list_api_keys_for_workspace(&pool, id)
+        .await
+        .map_err(pg_err)?
+        .into_iter()
         .map(|k| ApiKeyView {
             id: k.id,
-            name: k.name.clone(),
-            prefix: k.prefix.clone(),
-            scope_type: k.scope_type.clone(),
+            name: k.name,
+            prefix: k.prefix,
+            scope_type: k.scope_type,
             scope_id: k.scope_id,
-            scopes: k.scopes.clone(),
+            scopes: k.scopes,
             token: None,
         })
         .collect();
@@ -3491,26 +3094,26 @@ async fn delete_api_key(
     Path((id, key_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    {
-        let mut s = lock(&state).await?;
-        require_ws(&s, id, &actor, false, true)?;
-        let k = s
-            .api_keys
-            .get(&key_id)
-            .ok_or_else(|| not_found("api_key"))?;
-        let owned = k.scope_type == "workspace" && k.scope_id == id
-            || k.scope_type == "product"
-                && s.products
-                    .get(&k.scope_id)
-                    .is_some_and(|p| p.workspace_id == id);
-        if !owned {
-            return Err(not_found("api_key"));
-        }
-        s.api_keys.remove(&key_id);
+    let dummy = Store::default();
+    require_ws(&dummy, id, &actor, false, true)?;
+    let pool = pg().await?;
+    let k = knowledge::load_api_key(&pool, key_id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| not_found("api_key"))?;
+    let owned = k.scope_type == "workspace" && k.scope_id == id
+        || k.scope_type == "product"
+            && knowledge::load_product(&pool, k.scope_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.workspace_id == id);
+    if !owned {
+        return Err(not_found("api_key"));
     }
-    if let Ok(pool) = platform::connect().await {
-        let _ = knowledge::delete_api_key(&pool, key_id).await;
-    }
+    knowledge::delete_api_key(&pool, key_id)
+        .await
+        .map_err(pg_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

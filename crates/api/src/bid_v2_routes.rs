@@ -184,7 +184,7 @@ async fn create_project(
         return Err(validation("title required"));
     }
     let context =
-        bidding::bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
+        bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
             .map_err(|error| validation(&error.to_string()))?;
     let pool = require_bid_pool().await?;
     let value = bidding::bid_authoring_v2::create_project_v2(
@@ -221,7 +221,7 @@ async fn end_project(
 ) -> Result<Json<Value>, ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let context =
-        bidding::bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
+        bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
             .map_err(|error| validation(&error.to_string()))?;
     let pool = require_bid_pool().await?;
     bidding::bid_authoring_v2::end_project_v2(&pool, id, &context)
@@ -319,7 +319,7 @@ async fn upload_tender_document(
         "byte_length": bytes.len(),
         "original_sha256": digest,
     });
-    let context = bidding::bidding::MutationContext::new(
+    let context = bidding::MutationContext::new(
         actor.clone(),
         required_idempotency_key(&headers)?,
         &context_payload,
@@ -389,7 +389,7 @@ async fn patch_document_role(
 ) -> Result<Json<Value>, ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let context =
-        bidding::bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
+        bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
             .map_err(|error| validation(&error.to_string()))?;
     let pool = require_bid_pool().await?;
     bidding::bid_authoring_v2::patch_document_role_v2(
@@ -442,7 +442,7 @@ async fn upsert_document_relation(
 ) -> Result<Json<Value>, ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let context =
-        bidding::bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
+        bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
             .map_err(|error| validation(&error.to_string()))?;
     let pool = require_bid_pool().await?;
     bidding::bid_authoring_v2::upsert_document_relation_v2(
@@ -500,7 +500,7 @@ async fn freeze_document_set(
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let context =
-        bidding::bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
+        bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
             .map_err(|error| validation(&error.to_string()))?;
     let pool = require_bid_pool().await?;
     let value = bidding::bid_authoring_v2::freeze_document_set_v2(
@@ -654,7 +654,7 @@ async fn mutate_workspace(
         },
     )?;
     let context =
-        bidding::bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
+        bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
             .map_err(|error| validation(&error.to_string()))?;
     let workspace = bidding::bid_authoring_v2::commit_workspace_mutation_v2(
         &pool,
@@ -710,7 +710,7 @@ async fn create_outline_candidate(
             )
         })?;
     let context =
-        bidding::bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
+        bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
             .map_err(|error| validation(&error.to_string()))?;
     let pool = require_bid_pool().await?;
     let request = bidding::bid_authoring_v2::create_outline_candidate_v2(
@@ -839,7 +839,7 @@ async fn accept_candidate(
     let snapshot = bidding::workspace::apply_workspace_operations(&current, &mutation)
         .map_err(|error| validation(&error.to_string()))?;
     let context =
-        bidding::bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
+        bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
             .map_err(|error| validation(&error.to_string()))?;
     let workspace = bidding::bid_authoring_v2::accept_candidate_v2(
         &pool,
@@ -863,7 +863,7 @@ async fn reject_candidate(
 ) -> Result<Json<Value>, ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let receipt_body = json!({"workspace_id":workspace_id,"candidate_id":candidate_id});
-    let context = bidding::bidding::MutationContext::new(
+    let context = bidding::MutationContext::new(
         actor,
         required_idempotency_key(&headers)?,
         &receipt_body,

@@ -135,7 +135,7 @@ pub async fn create_project_v2(
     id: Uuid,
     title: &str,
     owner_user_id: Uuid,
-    context: &crate::bidding::MutationContext,
+    context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kb_bid_v2_create_project($1,$2,$3,$4::kb_actor_identity,$5,$6,$7::kb_sha256)",
@@ -179,7 +179,7 @@ pub async fn get_project_v2(
 pub async fn end_project_v2(
     pool: &PgPool,
     project_id: Uuid,
-    context: &crate::bidding::MutationContext,
+    context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar("SELECT kb_bid_v2_end_project($1,$2::kb_actor_identity,$3,$4,$5::kb_sha256)")
         .bind(project_id)
@@ -207,7 +207,7 @@ pub struct UploadTenderDocumentV2<'a> {
 pub async fn upload_tender_document_v2(
     pool: &PgPool,
     input: UploadTenderDocumentV2<'_>,
-    context: &crate::bidding::MutationContext,
+    context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kb_bid_v2_upload_tender_document(
@@ -250,7 +250,7 @@ pub async fn patch_document_role_v2(
     role: &str,
     expected_artifact_id: Uuid,
     expected_sha256: &str,
-    context: &crate::bidding::MutationContext,
+    context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kb_bid_v2_patch_document_role(
@@ -284,7 +284,7 @@ pub struct UpsertDocumentRelationV2<'a> {
 pub async fn upsert_document_relation_v2(
     pool: &PgPool,
     input: UpsertDocumentRelationV2<'_>,
-    context: &crate::bidding::MutationContext,
+    context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kb_bid_v2_upsert_document_relation(
@@ -325,7 +325,7 @@ pub async fn freeze_document_set_v2(
     expected_artifact_id: Option<Uuid>,
     expected_sha256: Option<&str>,
     request_artifact_id: Uuid,
-    context: &crate::bidding::MutationContext,
+    context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kb_bid_v2_freeze_document_set(
@@ -387,7 +387,7 @@ pub async fn commit_workspace_mutation_v2(
     expected_revision_id: Uuid,
     expected_sha256: &str,
     snapshot: &Value,
-    context: &crate::bidding::MutationContext,
+    context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kb_bid_v2_commit_workspace_mutation_idempotent(
@@ -412,7 +412,7 @@ pub async fn create_outline_candidate_v2(
     expected_sha256: &str,
     document_set_id: Uuid,
     document_set_sha256: &str,
-    context: &crate::bidding::MutationContext,
+    context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kb_bid_v2_create_outline_candidate(
@@ -469,7 +469,7 @@ pub async fn accept_candidate_v2(
     expected_sha256: &str,
     snapshot: &Value,
     selected_ordinals: &[i32],
-    context: &crate::bidding::MutationContext,
+    context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kb_bid_v2_accept_candidate(
@@ -493,7 +493,7 @@ pub async fn reject_candidate_v2(
     pool: &PgPool,
     workspace_id: Uuid,
     candidate_id: Uuid,
-    context: &crate::bidding::MutationContext,
+    context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kb_bid_v2_reject_candidate($1,$2,$3::kb_actor_identity,$4,$5,$6::kb_sha256)",
