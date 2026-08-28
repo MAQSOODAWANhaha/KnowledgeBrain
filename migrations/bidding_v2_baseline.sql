@@ -351,7 +351,6 @@ CREATE TABLE bid_requirement_set_artifacts (
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id,revision),
   UNIQUE(project_id,id),
-  UNIQUE(project_id,document_set_id,disposition_set_id),
   FOREIGN KEY(project_id,document_set_id) REFERENCES bid_document_set_artifacts(project_id,id),
   FOREIGN KEY(project_id,disposition_set_id,document_set_id)
     REFERENCES bid_source_unit_disposition_set_artifacts(project_id,id,document_set_id),
@@ -2824,6 +2823,26 @@ BEGIN
   UPDATE bid_workspace_requirement_projection_current SET artifact_id=candidate.id,artifact_sha256=candidate.content_sha256,generation=candidate.revision WHERE scope_id=p_workspace_id; RETURN true;
 END $$;
 
+CREATE FUNCTION kb_bid_v2_advance_requirement_set(
+  p_project_id uuid,p_expected_artifact_id uuid,p_expected_sha256 kb_sha256,
+  p_new_artifact_id uuid,p_new_sha256 kb_sha256
+) RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE candidate bid_requirement_set_artifacts%ROWTYPE; head bid_requirement_set_current%ROWTYPE;
+BEGIN
+  SELECT * INTO STRICT candidate FROM bid_requirement_set_artifacts
+    WHERE project_id=p_project_id AND id=p_new_artifact_id AND content_sha256=p_new_sha256;
+  SELECT * INTO STRICT head FROM bid_requirement_set_current WHERE scope_id=p_project_id FOR UPDATE;
+  IF head.artifact_id IS DISTINCT FROM p_expected_artifact_id
+     OR head.artifact_sha256 IS DISTINCT FROM p_expected_sha256
+     OR candidate.revision<>head.generation+1 THEN RETURN false; END IF;
+  UPDATE bid_requirement_set_current SET artifact_id=candidate.id,
+    artifact_sha256=candidate.content_sha256,generation=candidate.revision,
+    document_set_sequence=candidate.document_set_sequence,
+    disposition_set_sequence=candidate.disposition_set_sequence
+    WHERE scope_id=p_project_id;
+  RETURN true;
+END $$;
+
 CREATE FUNCTION kb_bid_v2_publish_requirement_set(
   p_artifact_id uuid,p_artifact_sha256 kb_sha256
 ) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
@@ -4135,6 +4154,167 @@ BEGIN
   RETURN result_value;
 END $$;
 
+CREATE FUNCTION kb_bid_v2_patch_requirement(
+  p_project_id uuid,p_requirement_revision_id uuid,p_expected_set_id uuid,p_expected_set_sha256 kb_sha256,
+  p_requirement_kind text,p_requiredness text,p_compliance_policy text,p_lifecycle text,p_text text,
+  p_fulfillment_expr jsonb,p_applicability jsonb,p_actor kb_actor_identity,p_idempotency_key text,
+  p_request_bytes bytea,p_request_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE replay bytea; response jsonb; response_bytes bytea;
+  head bid_requirement_set_current%ROWTYPE; old_set bid_requirement_set_artifacts%ROWTYPE;
+  old_requirement bid_requirement_revision_artifacts%ROWTYPE;
+  new_requirement_id uuid:=gen_random_uuid(); new_requirement_revision bigint;
+  requirement_payload bytea; requirement_sha kb_sha256; text_bytes bytea; text_sha kb_sha256;
+  new_set_id uuid:=gen_random_uuid(); new_set_revision bigint; set_items jsonb; set_payload bytea; set_sha kb_sha256;
+  workspace_value bid_submission_workspaces%ROWTYPE; projection_head bid_workspace_requirement_projection_current%ROWTYPE;
+  projection_id uuid:=gen_random_uuid(); projection_revision bigint; projection_payload bytea; projection_sha kb_sha256;
+BEGIN
+  PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
+  replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.requirement.patch',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  IF p_requirement_kind NOT IN ('qualification','technical','commercial','pricing','delivery','evaluation','format','attachment','other')
+     OR p_requiredness NOT IN ('mandatory','optional','informational')
+     OR p_compliance_policy NOT IN ('must_comply','explicit_response','deviation_allowed','scored')
+     OR p_lifecycle NOT IN ('current','superseded','withdrawn','unresolved')
+     OR octet_length(p_text)=0 OR jsonb_typeof(p_fulfillment_expr)<>'object'
+     OR jsonb_typeof(p_applicability)<>'object' THEN
+    RAISE EXCEPTION 'REQUIREMENT_PATCH_INVALID' USING ERRCODE='23514';
+  END IF;
+  SELECT * INTO STRICT head FROM bid_requirement_set_current WHERE scope_id=p_project_id FOR UPDATE;
+  IF head.artifact_id<>p_expected_set_id OR head.artifact_sha256<>p_expected_set_sha256 THEN
+    RAISE EXCEPTION 'REQUIREMENT_SET_CAS_MISMATCH' USING ERRCODE='40001';
+  END IF;
+  SELECT * INTO STRICT old_set FROM bid_requirement_set_artifacts
+    WHERE project_id=p_project_id AND id=head.artifact_id;
+  SELECT requirement.* INTO STRICT old_requirement
+    FROM bid_requirement_set_items item JOIN bid_requirement_revision_artifacts requirement
+      ON requirement.project_id=item.project_id AND requirement.id=item.requirement_revision_id
+    WHERE item.requirement_set_id=old_set.id AND requirement.id=p_requirement_revision_id;
+  SELECT COALESCE(max(revision),0)+1 INTO new_requirement_revision
+    FROM bid_requirement_revision_artifacts
+    WHERE project_id=p_project_id AND lineage_id=old_requirement.lineage_id;
+  text_bytes:=convert_to(p_text,'UTF8'); text_sha:=kb_bid_v2_sha256_bytes(text_bytes);
+  requirement_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,
+    'lineage_id',old_requirement.lineage_id,'revision',new_requirement_revision,
+    'requirement_kind',p_requirement_kind,'requiredness',p_requiredness,
+    'compliance_policy',p_compliance_policy,'lifecycle',p_lifecycle,'text',p_text,
+    'fulfillment_expr',p_fulfillment_expr,'applicability',p_applicability));
+  requirement_sha:=kb_bid_v2_sha256_bytes(requirement_payload);
+  INSERT INTO bid_requirement_revision_artifacts(id,project_id,lineage_id,revision,requirement_kind,
+    requiredness,compliance_policy,lifecycle,text_utf8,text_sha256,fulfillment_expr,applicability,
+    tombstone,canonical_payload,content_sha256,actor)
+  VALUES(new_requirement_id,p_project_id,old_requirement.lineage_id,new_requirement_revision,
+    p_requirement_kind,p_requiredness,p_compliance_policy,p_lifecycle,text_bytes,text_sha,
+    p_fulfillment_expr,p_applicability,false,requirement_payload,requirement_sha,p_actor);
+  INSERT INTO bid_requirement_source_revision_artifacts(id,project_id,requirement_revision_id,
+    source_unit_revision_id,quote_start_offset,quote_end_offset,quote_sha256)
+  SELECT gen_random_uuid(),project_id,new_requirement_id,source_unit_revision_id,
+    quote_start_offset,quote_end_offset,quote_sha256
+    FROM bid_requirement_source_revision_artifacts
+    WHERE project_id=p_project_id AND requirement_revision_id=old_requirement.id;
+  SELECT jsonb_agg(jsonb_build_object('requirement_revision_id',
+      CASE WHEN item.requirement_revision_id=old_requirement.id THEN new_requirement_id ELSE item.requirement_revision_id END,
+      'ordinal',item.ordinal) ORDER BY item.ordinal) INTO set_items
+    FROM bid_requirement_set_items item WHERE item.requirement_set_id=old_set.id;
+  new_set_revision:=head.generation+1;
+  set_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'project_id',p_project_id,
+    'document_set_revision_id',old_set.document_set_id,'disposition_set_revision_id',old_set.disposition_set_id,
+    'revision',new_set_revision,'items',set_items)); set_sha:=kb_bid_v2_sha256_bytes(set_payload);
+  INSERT INTO bid_requirement_set_artifacts(id,project_id,document_set_id,document_set_sequence,
+    disposition_set_id,disposition_set_sequence,revision,canonical_payload,content_sha256)
+  VALUES(new_set_id,p_project_id,old_set.document_set_id,old_set.document_set_sequence,
+    old_set.disposition_set_id,old_set.disposition_set_sequence,new_set_revision,set_payload,set_sha);
+  INSERT INTO bid_requirement_set_items(requirement_set_id,project_id,requirement_revision_id,ordinal)
+  SELECT new_set_id,p_project_id,(item->>'requirement_revision_id')::uuid,(item->>'ordinal')::integer
+    FROM jsonb_array_elements(set_items) item;
+  IF NOT kb_bid_v2_advance_requirement_set(p_project_id,p_expected_set_id,p_expected_set_sha256,
+      new_set_id,set_sha) THEN RAISE EXCEPTION 'REQUIREMENT_SET_CAS_MISMATCH' USING ERRCODE='40001'; END IF;
+  SELECT * INTO STRICT workspace_value FROM bid_submission_workspaces WHERE project_id=p_project_id;
+  SELECT * INTO STRICT projection_head FROM bid_workspace_requirement_projection_current
+    WHERE scope_id=workspace_value.id FOR UPDATE;
+  projection_revision:=projection_head.generation+1;
+  projection_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,
+    'workspace_id',workspace_value.id,'requirement_set_id',new_set_id,
+    'revision',projection_revision,'items',set_items)); projection_sha:=kb_bid_v2_sha256_bytes(projection_payload);
+  INSERT INTO bid_workspace_requirement_projection_artifacts(id,project_id,workspace_id,requirement_set_id,
+    revision,canonical_payload,content_sha256)
+  VALUES(projection_id,p_project_id,workspace_value.id,new_set_id,projection_revision,projection_payload,projection_sha);
+  INSERT INTO bid_workspace_requirement_projection_items(projection_id,project_id,requirement_revision_id,ordinal)
+  SELECT projection_id,p_project_id,(item->>'requirement_revision_id')::uuid,(item->>'ordinal')::integer
+    FROM jsonb_array_elements(set_items) item;
+  IF NOT kb_bid_v2_advance_requirement_projection(p_project_id,workspace_value.id,
+      projection_head.artifact_id,projection_head.artifact_sha256,projection_id,projection_sha) THEN
+    RAISE EXCEPTION 'REQUIREMENT_PROJECTION_CAS_MISMATCH' USING ERRCODE='40001';
+  END IF;
+  response:=jsonb_build_object('requirement_revision_id',new_requirement_id,
+    'lineage_id',old_requirement.lineage_id,'revision',new_requirement_revision,
+    'content_sha256',requirement_sha,'requirement_set_id',new_set_id,
+    'requirement_set_sha256',set_sha,'requirement_projection_id',projection_id,
+    'requirement_projection_sha256',projection_sha);
+  response_bytes:=convert_to(response::text,'UTF8');
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,
+    response_sha256,entity_kind,entity_locator,before_revision,before_sha256,after_revision,after_sha256)
+  VALUES(gen_random_uuid(),1,'bid.v2.requirement.patch',p_actor,p_idempotency_key,p_request_sha256,
+    kb_bid_v2_sha256_bytes(response_bytes),'bid_v2_requirement',jsonb_build_object('lineage_id',old_requirement.lineage_id),
+    old_requirement.revision,old_requirement.content_sha256,new_requirement_revision,requirement_sha);
+  PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.requirement.patch',p_idempotency_key,200,response_bytes);
+  RETURN response;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_publish_requirement_supersession(
+  p_project_id uuid,p_lineage_id uuid,p_old_requirement_revision_id uuid,p_new_requirement_revision_id uuid,
+  p_applicability jsonb,p_expected_artifact_id uuid,p_expected_sha256 kb_sha256,
+  p_actor kb_actor_identity,p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE replay bytea; response jsonb; response_bytes bytea;
+  head bid_requirement_supersession_current%ROWTYPE; new_id uuid:=gen_random_uuid(); new_revision bigint;
+  payload bytea; sha kb_sha256;
+BEGIN
+  PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
+  replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.requirement.supersession',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  IF p_old_requirement_revision_id=p_new_requirement_revision_id OR jsonb_typeof(p_applicability)<>'object'
+     OR NOT EXISTS(SELECT 1 FROM bid_requirement_revision_artifacts WHERE project_id=p_project_id AND id=p_old_requirement_revision_id)
+     OR NOT EXISTS(SELECT 1 FROM bid_requirement_revision_artifacts WHERE project_id=p_project_id AND id=p_new_requirement_revision_id) THEN
+    RAISE EXCEPTION 'REQUIREMENT_SUPERSESSION_INVALID' USING ERRCODE='23514';
+  END IF;
+  SELECT * INTO head FROM bid_requirement_supersession_current WHERE scope_id=p_lineage_id FOR UPDATE;
+  IF FOUND THEN
+    IF head.project_id<>p_project_id OR head.artifact_id IS DISTINCT FROM p_expected_artifact_id
+       OR head.artifact_sha256 IS DISTINCT FROM p_expected_sha256 THEN
+      RAISE EXCEPTION 'REQUIREMENT_SUPERSESSION_CAS_MISMATCH' USING ERRCODE='40001';
+    END IF;
+    new_revision:=head.generation+1;
+  ELSE
+    IF p_expected_artifact_id IS NOT NULL OR p_expected_sha256 IS NOT NULL THEN
+      RAISE EXCEPTION 'REQUIREMENT_SUPERSESSION_CAS_MISMATCH' USING ERRCODE='40001';
+    END IF;
+    new_revision:=1;
+  END IF;
+  payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'lineage_id',p_lineage_id,
+    'revision',new_revision,'old_requirement_revision_id',p_old_requirement_revision_id,
+    'new_requirement_revision_id',p_new_requirement_revision_id,'applicability',p_applicability,'tombstone',false));
+  sha:=kb_bid_v2_sha256_bytes(payload);
+  INSERT INTO bid_requirement_supersession_revision_artifacts(id,project_id,lineage_id,revision,
+    old_requirement_revision_id,new_requirement_revision_id,applicability,tombstone,canonical_payload,
+    content_sha256,actor)
+  VALUES(new_id,p_project_id,p_lineage_id,new_revision,p_old_requirement_revision_id,
+    p_new_requirement_revision_id,p_applicability,false,payload,sha,p_actor);
+  IF NOT kb_bid_v2_advance_requirement_supersession(p_project_id,p_lineage_id,
+      p_expected_artifact_id,p_expected_sha256,new_id,sha) THEN
+    RAISE EXCEPTION 'REQUIREMENT_SUPERSESSION_CAS_MISMATCH' USING ERRCODE='40001'; END IF;
+  response:=jsonb_build_object('artifact_id',new_id,'lineage_id',p_lineage_id,
+    'revision',new_revision,'sha256',sha);
+  response_bytes:=convert_to(response::text,'UTF8');
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,
+    response_sha256,entity_kind,entity_locator,after_revision,after_sha256)
+  VALUES(gen_random_uuid(),1,'bid.v2.requirement.supersession',p_actor,p_idempotency_key,p_request_sha256,
+    kb_bid_v2_sha256_bytes(response_bytes),'bid_v2_requirement_supersession',jsonb_build_object('lineage_id',p_lineage_id),
+    new_revision,sha);
+  PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.requirement.supersession',p_idempotency_key,201,response_bytes);
+  RETURN response;
+END $$;
+
 CREATE FUNCTION kb_bid_v2_list_requirements(
   p_project_id uuid,p_actor kb_actor_identity
 ) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
@@ -4439,6 +4619,8 @@ GRANT EXECUTE ON FUNCTION kb_bid_v2_create_project(uuid,text,uuid,kb_actor_ident
   kb_bid_v2_publish_disposition_set(uuid,uuid,jsonb,uuid,kb_sha256,uuid,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_list_source_units(uuid,kb_actor_identity),
   kb_bid_v2_list_requirements(uuid,kb_actor_identity),
+  kb_bid_v2_patch_requirement(uuid,uuid,uuid,kb_sha256,text,text,text,text,text,jsonb,jsonb,kb_actor_identity,text,bytea,kb_sha256),
+  kb_bid_v2_publish_requirement_supersession(uuid,uuid,uuid,uuid,jsonb,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_load_workspace_for_actor(uuid,kb_actor_identity),
   kb_bid_v2_commit_workspace_mutation_idempotent(uuid,uuid,kb_sha256,jsonb,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_create_outline_candidate(uuid,uuid,kb_sha256,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
