@@ -52,7 +52,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-knowledgebrain}
       POSTGRES_DB: ${POSTGRES_DB:-knowledgebrain}
       KNOWLEDGEBRAIN_MIGRATOR_PASSWORD: ${KNOWLEDGEBRAIN_MIGRATOR_PASSWORD:-migrator-change-me}
-      KNOWLEDGEBRAIN_FIRST_LAUNCH_VERIFIER_PASSWORD: ${KNOWLEDGEBRAIN_FIRST_LAUNCH_VERIFIER_PASSWORD:-verifier-change-me}
       KNOWLEDGEBRAIN_API_DB_PASSWORD: ${KNOWLEDGEBRAIN_API_DB_PASSWORD:-api-change-me}
       KNOWLEDGEBRAIN_WORKER_DB_PASSWORD: ${KNOWLEDGEBRAIN_WORKER_DB_PASSWORD:-worker-change-me}
       KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD: ${KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD:-retention-change-me}
@@ -138,7 +137,7 @@ services:
       start_period: 30s
 
   migrate:
-    profiles: ["first-launch"]
+    profiles: ["runtime", "bootstrap"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.rust
@@ -147,27 +146,9 @@ services:
     image: knowledgebrain-migrator:local
     environment:
       DATABASE_URL: postgres://kb_migrator:${KNOWLEDGEBRAIN_MIGRATOR_PASSWORD:-migrator-change-me}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
-      KNOWLEDGEBRAIN_BOOTSTRAP_ADMIN_DATABASE_URL: postgres://${POSTGRES_USER:-knowledgebrain}:${POSTGRES_PASSWORD:-knowledgebrain}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
     depends_on:
       postgres:
         condition: service_healthy
-    restart: "no"
-
-  first-launch-verifier:
-    profiles: ["first-launch"]
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.rust
-      args:
-        BIN: first-launch-verifier
-    image: knowledgebrain-first-launch-verifier:local
-    environment:
-      DATABASE_URL: postgres://kb_first_launch_verifier:${KNOWLEDGEBRAIN_FIRST_LAUNCH_VERIFIER_PASSWORD:-verifier-change-me}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
-      KNOWLEDGEBRAIN_APP_OWNER: kb_app_owner
-      KNOWLEDGEBRAIN_BOOTSTRAP_OWNER: ${POSTGRES_USER:-knowledgebrain}
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
     restart: "no"
 
   api:
@@ -191,6 +172,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     healthcheck:
@@ -217,6 +200,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       docreader:
@@ -247,6 +232,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       minio:
         condition: service_healthy
     healthcheck:

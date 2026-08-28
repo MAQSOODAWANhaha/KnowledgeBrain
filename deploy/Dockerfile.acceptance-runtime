@@ -1,5 +1,5 @@
 ARG RUNTIME_IMAGE
 FROM ${RUNTIME_IMAGE}
 
-COPY api worker retention migrator first-launch-verifier /usr/local/bin/
+COPY api worker retention migrator /usr/local/bin/
 COPY web /web

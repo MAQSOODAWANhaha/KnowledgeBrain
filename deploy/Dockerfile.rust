@@ -14,11 +14,8 @@ COPY rust-toolchain.toml rustfmt.toml Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY migrations migrations
 COPY services/docreader/proto services/docreader/proto
-RUN mkdir -p deploy/first-launch deploy/postgres-init
+RUN mkdir -p deploy/postgres-init
 COPY deploy/queue-registry.toml deploy/queue-registry.toml
-COPY deploy/first-launch/intended-state.toml deploy/first-launch/intended-state.toml
-COPY deploy/first-launch/catalog-row-allowlist.toml deploy/first-launch/catalog-row-allowlist.toml
-COPY deploy/first-launch/migration-manifest.toml deploy/first-launch/migration-manifest.toml
 COPY deploy/postgres-init/010-runtime-identities.sh deploy/postgres-init/010-runtime-identities.sh
 RUN cargo build --release -p api -p worker -p retention -p platform
 
@@ -31,7 +28,6 @@ COPY --from=builder /src/target/release/api /usr/local/bin/api
 COPY --from=builder /src/target/release/worker /usr/local/bin/worker
 COPY --from=builder /src/target/release/retention /usr/local/bin/retention
 COPY --from=builder /src/target/release/migrator /usr/local/bin/migrator
-COPY --from=builder /src/target/release/first-launch-verifier /usr/local/bin/first-launch-verifier
 COPY --from=web-builder /src/web/dist /web
 ENV BIN=${BIN}
 EXPOSE 8080

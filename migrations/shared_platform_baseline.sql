@@ -18,8 +18,8 @@ AS $$
             'system:bid-attachment-preparation',
             'system:bid-extraction-worker',
             'system:clause-lifecycle',
-            'system:first-launch',
             'system:kind-router-promotion',
+            'system:maintenance',
             'system:knowledge-document-delete',
             'system:knowledge-document-ingest',
             'system:matching-invalidation',
@@ -49,16 +49,8 @@ CREATE TABLE platform_role_contracts (
     purpose text NOT NULL CHECK (octet_length(purpose) BETWEEN 1 AND 128)
 );
 INSERT INTO platform_role_contracts(role_name, login, purpose) VALUES
-    ('kb_app_owner', false, 'owns application catalog after first-launch handoff'),
-    ('kb_first_launch_verifier', true, 'one-shot catalog and seed verifier'),
-    ('kb_launch_attestor', false, 'launch attestation capability'),
-    ('kb_launch_ingress', false, 'launch ingress capability'),
-    ('kb_launch_operator', false, 'launch operator capability'),
-    ('kb_launch_owner', false, 'owns immutable first-launch ledger'),
-    ('kb_launch_reset_dispatcher', false, 'launch reset dispatch capability'),
-    ('kb_launch_router', false, 'launch routing capability'),
-    ('kb_launch_signature_verifier', false, 'launch signature verification capability'),
-    ('kb_migrator', true, 'fresh-baseline writer disabled after handoff'),
+    ('kb_app_owner', false, 'owns the application catalog'),
+    ('kb_migrator', true, 'explicit fresh-schema bootstrap writer'),
     ('kb_runtime_api', true, 'runtime HTTP identity'),
     ('kb_runtime_retention', true, 'exclusive physical object deletion identity'),
     ('kb_runtime_worker', true, 'runtime asynchronous job identity');
@@ -159,7 +151,7 @@ CREATE TABLE application_maintenance_gate (
 );
 INSERT INTO application_maintenance_gate
     (singleton_key, mode, generation, updated_by, updated_at)
-VALUES (true, 'maintenance', 0, 'system:first-launch', '1970-01-01 UTC');
+VALUES (true, 'open', 0, 'system:maintenance', '1970-01-01 UTC');
 
 CREATE TABLE maintenance_gate_audit (
     id uuid PRIMARY KEY,
@@ -1001,42 +993,13 @@ CREATE TRIGGER documents_object_reference_delete_guard
 BEFORE DELETE ON documents
 FOR EACH ROW EXECUTE FUNCTION kb_guard_knowledge_document_delete();
 
--- One-shot launch evidence. The bootstrap-owned handoff routines validate these
--- rows and then remove migration/verifier authority.
-CREATE TABLE production_launch_state (
-    singleton_key boolean PRIMARY KEY DEFAULT true CHECK (singleton_key),
-    state text NOT NULL CHECK (state IN ('preflight', 'verified', 'exposed')),
-    cutover_id uuid,
-    cutover_epoch bigint NOT NULL DEFAULT 0 CHECK (cutover_epoch >= 0),
-    evidence_epoch bigint NOT NULL DEFAULT 0 CHECK (evidence_epoch >= 0),
-    traffic_exposure_started_at timestamptz,
-    reset_authority_revoked_at timestamptz,
-    first_production_request_at timestamptz
-);
-INSERT INTO production_launch_state(singleton_key, state) VALUES (true, 'preflight');
-
-CREATE TABLE production_first_launch_catalog_verifications (
-    singleton_key boolean PRIMARY KEY DEFAULT true CHECK (singleton_key),
-    allowlist_sha256 kb_sha256 NOT NULL,
-    catalog_sha256 kb_sha256 NOT NULL,
-    rows_sha256 kb_sha256 NOT NULL,
-    manifest_sha256 kb_sha256 NOT NULL,
-    verified_at timestamptz NOT NULL DEFAULT now()
-);
-CREATE TRIGGER production_first_launch_catalog_verifications_immutable
-BEFORE UPDATE OR DELETE ON production_first_launch_catalog_verifications
-FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
-CREATE TRIGGER production_first_launch_catalog_verifications_no_truncate
-BEFORE TRUNCATE ON production_first_launch_catalog_verifications
-FOR EACH STATEMENT EXECUTE FUNCTION kb_reject_append_only();
-
 -- Runtime roles get no direct platform table writes. Knowledge-document object
 -- mutations are checked SECURITY DEFINER functions. Retention has the only
 -- database capability which can complete physical-deletion state.
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
 GRANT SELECT ON application_maintenance_gate, queue_contract_current,
-    available_object_registry, production_first_launch_catalog_verifications
+    available_object_registry
 TO kb_runtime_api, kb_runtime_worker;
 GRANT SELECT ON application_maintenance_gate
 TO kb_runtime_retention;

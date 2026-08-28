@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=deploy/schemas/compose-spec.json
 # Forwards to deploy/docker-compose.yml so `docker compose` from the repo root still works.
 include:
   - path: deploy/docker-compose.yml
