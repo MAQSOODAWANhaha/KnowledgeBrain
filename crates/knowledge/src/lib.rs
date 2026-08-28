@@ -10,6 +10,7 @@ pub mod search;
 pub mod wiki;
 
 mod formula;
+pub mod job;
 pub mod obs;
 mod persist;
 mod process;
@@ -23,6 +24,7 @@ pub mod pipeline;
 pub use knowledge_retrieval_pg::PostgresKnowledgeRetrievalAdapter;
 
 pub use formula::*;
+pub use job::{DocJob, WikiJob};
 pub use knowledge_retrieval::*;
 pub use persist::*;
 pub use process::*;

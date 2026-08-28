@@ -3,11 +3,9 @@
 use api::{AppState, router_with};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use knowledge::Store;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -21,7 +19,6 @@ const ONE_PIXEL_PNG: &[u8] = &[
 
 fn app() -> axum::Router {
     router_with(AppState {
-        test_catalog: Some(Arc::new(Mutex::new(Store::default()))),
         jwt_secret: "submission-contract-secret".into(),
         bootstrap_key: String::new(),
     })

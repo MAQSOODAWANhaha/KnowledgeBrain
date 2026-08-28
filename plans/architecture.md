@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | **已确认，实施中（A+B 完成，C 七 crate 已落地，D1 worker consume 已只走 PgPool；drain/API 仍用 Store）** |
+| 状态 | **已确认，实施中（D5：列表/检索 + workspace/product 写路径已走 SQL；ingest/version/wiki 仍 hydrate）** |
 | 产品契约 | [`../docs/bidding/authoring.md`](../docs/bidding/authoring.md) |
 | 编制 Web | [`bidding/frontend-authoring.md`](bidding/frontend-authoring.md) |
 | 后端到达 | [`bidding/tender-to-submission-v2.md`](bidding/tender-to-submission-v2.md) |

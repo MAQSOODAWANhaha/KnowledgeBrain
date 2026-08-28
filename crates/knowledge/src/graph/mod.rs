@@ -34,26 +34,35 @@ pub fn extract_chunk_for_attempt(
     document_id: Uuid,
     job_attempt: i32,
 ) -> Result<ExtractOutcome, String> {
-    let Some(doc) = store.documents.get(&document_id).cloned() else {
+    let Some(mut job) = crate::DocJob::from_store(store, document_id) else {
         return Ok(ExtractOutcome::Done);
     };
+    let outcome = extract_chunk_on_job(&mut job, chunk_id, job_attempt)?;
+    job.write_back(store);
+    Ok(outcome)
+}
+
+pub fn extract_chunk_on_job(
+    job: &mut crate::DocJob,
+    chunk_id: Uuid,
+    job_attempt: i32,
+) -> Result<ExtractOutcome, String> {
+    let _document_id = job.document.id;
+    let doc = job.document.clone();
     if crate::enrichment::attempt_superseded(doc.attempt, job_attempt) {
         return Ok(ExtractOutcome::Superseded);
     }
     if doc.parse_status.is_aborted() {
-        store.finalize_subtask(document_id);
+        job.finalize_subtask();
         return Ok(ExtractOutcome::Done);
     }
-    let Some(version) = store.effective_version(document_id) else {
-        store.finalize_subtask(document_id);
-        return Ok(ExtractOutcome::Done);
-    };
+    let version = job.version.clone();
     if !version.extract_enabled {
-        store.finalize_subtask(document_id);
+        job.finalize_subtask();
         return Ok(ExtractOutcome::Done);
     }
-    let Some(ch) = store.chunks.get(&chunk_id).cloned() else {
-        store.finalize_subtask(document_id);
+    let Some(ch) = job.chunks.get(&chunk_id).cloned() else {
+        job.finalize_subtask();
         return Ok(ExtractOutcome::Done);
     };
 
@@ -75,8 +84,8 @@ pub fn extract_chunk_for_attempt(
         Err(e) => return Err(e),
     };
 
-    if !store.chunks.contains_key(&chunk_id) {
-        store.finalize_subtask(document_id);
+    if !job.chunks.contains_key(&chunk_id) {
+        job.finalize_subtask();
         return Ok(ExtractOutcome::Done);
     }
 
@@ -84,13 +93,13 @@ pub fn extract_chunk_for_attempt(
         if n.name.trim().is_empty() {
             continue;
         }
-        store.upsert_node(ch.product_version_id, ch.document_id, &n.name, ch.id);
+        job.upsert_node(ch.product_version_id, ch.document_id, &n.name, ch.id);
     }
     for r in &graph.relations {
         if r.node1.trim().is_empty() || r.node2.trim().is_empty() {
             continue;
         }
-        store.upsert_rel(
+        job.upsert_rel(
             ch.product_version_id,
             ch.document_id,
             &r.node1,
@@ -98,7 +107,7 @@ pub fn extract_chunk_for_attempt(
             &r.rel_type,
         );
     }
-    store.finalize_subtask(document_id);
+    job.finalize_subtask();
     Ok(ExtractOutcome::Done)
 }
 

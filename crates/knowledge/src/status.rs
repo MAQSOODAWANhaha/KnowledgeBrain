@@ -106,6 +106,15 @@ impl Role {
     pub fn can_admin(self) -> bool {
         matches!(self, Self::Owner | Self::Admin)
     }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "owner" => Self::Owner,
+            "admin" => Self::Admin,
+            "contributor" => Self::Contributor,
+            _ => Self::Viewer,
+        }
+    }
 }
 
 pub const TYPE_DOCUMENT_PROCESS: &str = "document:process";

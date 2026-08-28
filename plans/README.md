@@ -9,7 +9,7 @@
 | 共享平台 | [`platform/README.md`](platform/README.md) | 归属已建立，待按主题继续拆分 |
 | 知识库 | [`knowledge-base/README.md`](knowledge-base/README.md) | 保留现有语义，独立演进 |
 | 招投标 | [`bidding/README.md`](bidding/README.md) | Target V2：动态大纲 + Word 式编制画布 + 导出 |
-| 仓库架构 | [`architecture.md`](architecture.md) | **已确认，实施中**：A+B+C 完成，D1 worker consume 已只走 pool |
+| 仓库架构 | [`architecture.md`](architecture.md) | **已确认，实施中**：D5 列表/检索/产品写路径走 SQL；ingest 仍 hydrate |
 
 ## 规则
 

@@ -1203,13 +1203,16 @@ async fn upsert_line(
     )
     .map_err(|error| validation(&error.to_string()))?;
     if let Some(raw) = body.quantity.as_deref() {
-        bidding::quote::parse_decimal_string(raw, 6).map_err(|error| validation(&error.to_string()))?;
+        bidding::quote::parse_decimal_string(raw, 6)
+            .map_err(|error| validation(&error.to_string()))?;
     }
     if let Some(raw) = body.unit_price.as_deref() {
-        bidding::quote::parse_decimal_string(raw, 6).map_err(|error| validation(&error.to_string()))?;
+        bidding::quote::parse_decimal_string(raw, 6)
+            .map_err(|error| validation(&error.to_string()))?;
     }
     if let Some(raw) = body.entered_amount.as_deref() {
-        bidding::quote::parse_decimal_string(raw, 2).map_err(|error| validation(&error.to_string()))?;
+        bidding::quote::parse_decimal_string(raw, 2)
+            .map_err(|error| validation(&error.to_string()))?;
     }
     bidding::quote::parse_decimal_string(&body.tax_rate, 6)
         .map_err(|error| validation(&error.to_string()))?;
@@ -2255,7 +2258,7 @@ async fn register_kind_router(
     Json(body): Json<RegisterKindRouter>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_admin(&state, &actor)?;
+    require_admin(&state, &actor).await?;
     let pool = require_bid_pool().await?;
     let bytes = body.canonical_payload.as_bytes();
     let digest = platform::sha256_hex(bytes);
@@ -2294,7 +2297,7 @@ async fn promote_kind_router(
     Json(body): Json<PromoteKindRouter>,
 ) -> Result<Json<Value>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_admin(&state, &actor)?;
+    require_admin(&state, &actor).await?;
     let pool = require_bid_pool().await?;
     let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
@@ -2321,7 +2324,7 @@ async fn register_procedural_router(
     Json(body): Json<RegisterKindRouter>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_admin(&state, &actor)?;
+    require_admin(&state, &actor).await?;
     let pool = require_bid_pool().await?;
     let bytes = body.canonical_payload.as_bytes();
     let digest = platform::sha256_hex(bytes);
@@ -2353,7 +2356,7 @@ async fn promote_procedural_router(
     Json(body): Json<PromoteKindRouter>,
 ) -> Result<Json<Value>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_admin(&state, &actor)?;
+    require_admin(&state, &actor).await?;
     let pool = require_bid_pool().await?;
     let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
@@ -2387,7 +2390,7 @@ async fn register_template_contract(
     Json(body): Json<RegisterTemplateContract>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_admin(&state, &actor)?;
+    require_admin(&state, &actor).await?;
     let pool = require_bid_pool().await?;
     let bytes = body.canonical_payload.as_bytes();
     let digest = platform::sha256_hex(bytes);
@@ -2426,7 +2429,7 @@ async fn promote_template_contract(
     Json(body): Json<PromoteKindRouter>,
 ) -> Result<Json<Value>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_admin(&state, &actor)?;
+    require_admin(&state, &actor).await?;
     let pool = require_bid_pool().await?;
     let request = json!({
         "slot":&slot,

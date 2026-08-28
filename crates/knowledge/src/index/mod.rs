@@ -321,21 +321,39 @@ pub fn index_one(
     vector_on: bool,
     keyword_on: bool,
 ) -> Result<(), String> {
-    if chunk.chunk_type == "parent_text" {
-        return Ok(());
-    }
-    let content = chunk.index_content(title);
     let model = store
         .versions
         .get(&chunk.product_version_id)
         .map(|v| v.embedding_model_id.clone())
         .unwrap_or_default();
+    index_one_in(
+        &mut store.embeddings,
+        chunk,
+        title,
+        &model,
+        vector_on,
+        keyword_on,
+    )
+}
+
+pub fn index_one_in(
+    embeddings: &mut std::collections::HashMap<uuid::Uuid, crate::ChunkEmbedding>,
+    chunk: &Chunk,
+    title: &str,
+    model: &str,
+    vector_on: bool,
+    keyword_on: bool,
+) -> Result<(), String> {
+    if chunk.chunk_type == "parent_text" {
+        return Ok(());
+    }
+    let content = chunk.index_content(title);
     let vector = if vector_on {
-        embed_index(&content, &model)?
+        embed_index(&content, model)?
     } else {
         Vec::new()
     };
-    store.embeddings.insert(
+    embeddings.insert(
         chunk.id,
         ChunkEmbedding {
             chunk_id: chunk.id,

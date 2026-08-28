@@ -1,11 +1,9 @@
 use api::{AppState, router_with};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use knowledge::Store;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use sqlx::PgPool;
-use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -53,7 +51,6 @@ async fn contract_pool() -> Option<PgPool> {
 
 fn app() -> axum::Router {
     router_with(AppState {
-        test_catalog: Some(Arc::new(Mutex::new(Store::default()))),
         jwt_secret: "bid-queue-contract-secret".into(),
         bootstrap_key: String::new(),
     })

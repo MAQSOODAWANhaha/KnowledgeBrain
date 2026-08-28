@@ -119,6 +119,270 @@ pub async fn list_workspace_ids(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error>
         .await
 }
 
+fn workspace_from_row(r: sqlx::postgres::PgRow) -> Result<crate::Workspace, sqlx::Error> {
+    let id: Uuid = r.try_get("id")?;
+    let retrieval: crate::RetrievalConfig = r
+        .try_get::<serde_json::Value, _>("retrieval_config")
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let kind_s: String = r.try_get("kind").unwrap_or_else(|_| "product_line".into());
+    Ok(crate::Workspace {
+        id,
+        name: r.try_get("name")?,
+        slug: r.try_get("slug")?,
+        kind: crate::WorkspaceKind::parse(&kind_s),
+        retrieval,
+    })
+}
+
+pub async fn list_workspaces(pool: &PgPool) -> Result<Vec<crate::Workspace>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, name, slug, retrieval_config,
+                COALESCE(kind, 'product_line') AS kind
+         FROM workspaces ORDER BY created_at",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(workspace_from_row).collect()
+}
+
+pub async fn load_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Option<crate::Workspace>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, name, slug, retrieval_config,
+                COALESCE(kind, 'product_line') AS kind
+         FROM workspaces WHERE id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(workspace_from_row).transpose()
+}
+
+pub async fn list_products_in_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<crate::Product>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, kind, name, slug, current_version_id FROM products WHERE workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::new();
+    for p in rows {
+        let id: Uuid = p.try_get("id")?;
+        let kind: String = p.try_get("kind")?;
+        out.push(crate::Product {
+            id,
+            workspace_id,
+            kind: parse_kind(&kind),
+            name: p.try_get("name")?,
+            slug: p.try_get("slug")?,
+            current_version_id: p.try_get("current_version_id")?,
+            embedding_model_id: String::new(),
+        });
+    }
+    Ok(out)
+}
+
+pub async fn load_product(
+    pool: &PgPool,
+    product_id: Uuid,
+) -> Result<Option<crate::Product>, sqlx::Error> {
+    let p = sqlx::query(
+        "SELECT id, workspace_id, kind, name, slug, current_version_id FROM products WHERE id = $1",
+    )
+    .bind(product_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(p) = p else {
+        return Ok(None);
+    };
+    let kind: String = p.try_get("kind")?;
+    Ok(Some(crate::Product {
+        id: p.try_get("id")?,
+        workspace_id: p.try_get("workspace_id")?,
+        kind: parse_kind(&kind),
+        name: p.try_get("name")?,
+        slug: p.try_get("slug")?,
+        current_version_id: p.try_get("current_version_id")?,
+        embedding_model_id: String::new(),
+    }))
+}
+
+pub async fn product_slug_taken(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    slug: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM products WHERE workspace_id = $1 AND slug = $2)",
+    )
+    .bind(workspace_id)
+    .bind(slug)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn list_members_for_workspace(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<Vec<(Uuid, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT user_id, role FROM workspace_members WHERE workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn list_versions_for_product(
+    pool: &PgPool,
+    product_id: Uuid,
+) -> Result<Vec<crate::ProductVersion>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, label, status, cloned_from_version_id, indexing_strategy,
+                image_processing_config, chunking_config,
+                embedding_model_id, summary_model_id, asr_model_id, asr_config,
+                extract_config, wiki_config, question_generation_config
+         FROM product_versions WHERE product_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(product_id)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| product_version_from_row(product_id, row))
+        .collect()
+}
+
+pub async fn load_version(
+    pool: &PgPool,
+    version_id: Uuid,
+) -> Result<Option<crate::ProductVersion>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, product_id, label, status, cloned_from_version_id, indexing_strategy,
+                image_processing_config, chunking_config,
+                embedding_model_id, summary_model_id, asr_model_id, asr_config,
+                extract_config, wiki_config, question_generation_config
+         FROM product_versions WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(version_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let product_id: Uuid = row.try_get("product_id")?;
+    Ok(Some(product_version_from_row(product_id, &row)?))
+}
+
+fn document_from_row(d: sqlx::postgres::PgRow) -> Result<crate::Document, sqlx::Error> {
+    let did: Uuid = d.try_get("id")?;
+    let st: String = d.try_get("parse_status")?;
+    let title: String = d.try_get("title")?;
+    let file_name: String = d.try_get("file_name")?;
+    let file_size: i64 = d.try_get("file_size")?;
+    let file_hash: String = d.try_get("file_hash")?;
+    let object_ref: String = d.try_get("object_ref")?;
+    let vid: Uuid = d.try_get("product_version_id")?;
+    let mut doc = crate::Document::new(vid, title, file_name, file_size, file_hash, object_ref);
+    doc.id = did;
+    doc.parse_status = parse_parse_status(&st);
+    doc.enable_status = d.try_get("enable_status")?;
+    doc.pending_subtasks_count = d.try_get("pending_subtasks_count")?;
+    doc.error_message = d.try_get("error_message")?;
+    doc.attempt = d.try_get("attempt").unwrap_or(1);
+    doc.description = d.try_get("description").unwrap_or_default();
+    if let Ok(sum) = d.try_get::<String, _>("summary_status") {
+        doc.summary_status = match sum.as_str() {
+            "pending" => crate::SummaryStatus::Pending,
+            "processing" => crate::SummaryStatus::Processing,
+            "completed" => crate::SummaryStatus::Completed,
+            "failed" => crate::SummaryStatus::Failed,
+            _ => crate::SummaryStatus::None,
+        };
+    }
+    doc.index_ready = d.try_get("index_ready").unwrap_or(false);
+    doc.doc_type = d.try_get("doc_type").unwrap_or_else(|_| "file".into());
+    if let Ok(Some(raw)) = d.try_get::<Option<serde_json::Value>, _>("source_passages") {
+        doc.source_passages = serde_json::from_value(raw).unwrap_or_default();
+    }
+    if let Ok(Some(raw)) = d.try_get::<Option<serde_json::Value>, _>("process_overrides") {
+        doc.process_overrides = serde_json::from_value(raw).ok();
+    }
+    Ok(doc)
+}
+
+pub async fn list_documents_in_version(
+    pool: &PgPool,
+    version_id: Uuid,
+    parse_status: Option<&str>,
+    keyword: Option<&str>,
+    tag_id: Option<Uuid>,
+) -> Result<Vec<crate::Document>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, title, file_name, file_size, file_hash, object_ref,
+                parse_status, enable_status, pending_subtasks_count,
+                COALESCE(error_message, '') AS error_message,
+                process_overrides,
+                COALESCE(type, 'file') AS doc_type,
+                COALESCE(attempt, 1) AS attempt,
+                COALESCE(description, '') AS description,
+                COALESCE(summary_status, 'none') AS summary_status,
+                source_passages, index_ready, product_version_id
+         FROM documents
+         WHERE product_version_id = $1 AND deleted_at IS NULL
+           AND ($2::text IS NULL OR parse_status = $2)
+           AND (
+             $3::text IS NULL
+             OR title ILIKE '%' || $3 || '%'
+             OR file_name ILIKE '%' || $3 || '%'
+             OR COALESCE(description, '') ILIKE '%' || $3 || '%'
+           )
+           AND (
+             $4::uuid IS NULL
+             OR EXISTS (
+                SELECT 1 FROM document_tags dt
+                WHERE dt.document_id = documents.id AND dt.tag_id = $4
+             )
+           )
+         ORDER BY created_at DESC",
+    )
+    .bind(version_id)
+    .bind(parse_status)
+    .bind(keyword)
+    .bind(tag_id)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(document_from_row).collect()
+}
+
+pub async fn load_document(
+    pool: &PgPool,
+    document_id: Uuid,
+) -> Result<Option<crate::Document>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, title, file_name, file_size, file_hash, object_ref,
+                parse_status, enable_status, pending_subtasks_count,
+                COALESCE(error_message, '') AS error_message,
+                process_overrides,
+                COALESCE(type, 'file') AS doc_type,
+                COALESCE(attempt, 1) AS attempt,
+                COALESCE(description, '') AS description,
+                COALESCE(summary_status, 'none') AS summary_status,
+                source_passages, index_ready, product_version_id
+         FROM documents WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(document_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(document_from_row).transpose()
+}
+
 pub async fn company_workspace_id(pool: &PgPool) -> Result<Option<Uuid>, sqlx::Error> {
     sqlx::query_scalar("SELECT id FROM workspaces WHERE kind = 'company' LIMIT 1")
         .fetch_optional(pool)
@@ -573,6 +837,335 @@ pub async fn hydrate_workspace(
     }
     hydrate_workspace_index(pool, store, workspace_id, &version_ids, &document_ids).await?;
     Ok(true)
+}
+
+/// Load one document plus its version/product/workspace and that document's chunks.
+pub async fn hydrate_document(
+    pool: &PgPool,
+    store: &mut crate::Store,
+    document_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let meta = sqlx::query(
+        "SELECT d.product_version_id, pv.product_id, p.workspace_id
+         FROM documents d
+         JOIN product_versions pv ON pv.id = d.product_version_id
+         JOIN products p ON p.id = pv.product_id
+         WHERE d.id = $1 AND d.deleted_at IS NULL",
+    )
+    .bind(document_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(meta) = meta else {
+        return Ok(false);
+    };
+    let version_id: Uuid = meta.try_get("product_version_id")?;
+    let product_id: Uuid = meta.try_get("product_id")?;
+    let workspace_id: Uuid = meta.try_get("workspace_id")?;
+    hydrate_scope(
+        pool,
+        store,
+        workspace_id,
+        product_id,
+        version_id,
+        &[document_id],
+    )
+    .await?;
+    Ok(true)
+}
+
+/// Load one product version, its documents, and wiki/chunk index for those docs.
+pub async fn hydrate_version(
+    pool: &PgPool,
+    store: &mut crate::Store,
+    version_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let meta = sqlx::query(
+        "SELECT pv.product_id, p.workspace_id
+         FROM product_versions pv
+         JOIN products p ON p.id = pv.product_id
+         WHERE pv.id = $1 AND pv.deleted_at IS NULL",
+    )
+    .bind(version_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(meta) = meta else {
+        return Ok(false);
+    };
+    let product_id: Uuid = meta.try_get("product_id")?;
+    let workspace_id: Uuid = meta.try_get("workspace_id")?;
+    let document_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM documents WHERE product_version_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(version_id)
+    .fetch_all(pool)
+    .await?;
+    hydrate_scope(
+        pool,
+        store,
+        workspace_id,
+        product_id,
+        version_id,
+        &document_ids,
+    )
+    .await?;
+    Ok(true)
+}
+
+fn product_version_from_row(
+    product_id: Uuid,
+    v: &sqlx::postgres::PgRow,
+) -> Result<crate::ProductVersion, sqlx::Error> {
+    let vid: Uuid = v.try_get("id")?;
+    let status: String = v.try_get("status")?;
+    let idx: serde_json::Value = v
+        .try_get("indexing_strategy")
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let asr_cfg: serde_json::Value = v
+        .try_get("asr_config")
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let ext_cfg: serde_json::Value = v
+        .try_get("extract_config")
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let mut pv = crate::ProductVersion::new(product_id, v.try_get("label")?);
+    pv.id = vid;
+    pv.status = parse_version_status(&status);
+    pv.cloned_from = v.try_get("cloned_from_version_id")?;
+    pv.vector_enabled = idx.get("vector").and_then(|x| x.as_bool()).unwrap_or(true);
+    pv.keyword_enabled = idx.get("keyword").and_then(|x| x.as_bool()).unwrap_or(true);
+    pv.wiki_enabled = idx.get("wiki").and_then(|x| x.as_bool()).unwrap_or(true);
+    pv.graph_enabled = idx.get("graph").and_then(|x| x.as_bool()).unwrap_or(true);
+    let img_cfg: serde_json::Value = v
+        .try_get("image_processing_config")
+        .unwrap_or_else(|_| serde_json::json!({}));
+    pv.enable_multimodel = img_cfg
+        .get("enable_multimodel")
+        .and_then(|x| x.as_bool())
+        .or_else(|| idx.get("multimodal").and_then(|x| x.as_bool()))
+        .unwrap_or(true);
+    pv.extract_enabled = ext_cfg
+        .get("enabled")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true);
+    pv.asr_enabled = asr_cfg
+        .get("enabled")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    if let Ok(Some(m)) = v.try_get::<Option<String>, _>("embedding_model_id") {
+        pv.embedding_model_id = m;
+    }
+    if let Ok(Some(m)) = v.try_get::<Option<String>, _>("summary_model_id") {
+        pv.summary_model_id = m;
+    }
+    if let Ok(Some(m)) = v.try_get::<Option<String>, _>("asr_model_id") {
+        pv.asr_model_id = m;
+    }
+    let wiki_cfg: serde_json::Value = v
+        .try_get("wiki_config")
+        .unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(m) = wiki_cfg
+        .get("synthesis_model_id")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        pv.wiki_synthesis_model_id = m.to_string();
+    }
+    let q_cfg: serde_json::Value = v
+        .try_get("question_generation_config")
+        .unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(b) = q_cfg.get("enabled").and_then(|x| x.as_bool()) {
+        pv.question_enabled = b;
+    }
+    if let Some(n) = q_cfg.get("question_count").and_then(|x| x.as_u64()) {
+        pv.question_count = n as usize;
+    }
+    if let Some(s) = q_cfg.get("custom_instructions").and_then(|x| x.as_str()) {
+        pv.question_custom_instructions = s.to_string();
+    }
+    let chunk_cfg: serde_json::Value = v
+        .try_get("chunking_config")
+        .unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(n) = chunk_cfg.get("chunk_size").and_then(|x| x.as_u64()) {
+        pv.chunk_size = n as usize;
+    }
+    if let Some(n) = chunk_cfg.get("chunk_overlap").and_then(|x| x.as_u64()) {
+        pv.chunk_overlap = n as usize;
+    }
+    if let Some(s) = chunk_cfg.get("strategy").and_then(|x| x.as_str()) {
+        pv.chunk_strategy = s.to_string();
+    }
+    pv.enable_parent_child = chunk_cfg
+        .get("enable_parent_child")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    if let Some(n) = chunk_cfg.get("parent_chunk_size").and_then(|x| x.as_u64()) {
+        pv.parent_chunk_size = n as usize;
+    }
+    if let Some(n) = chunk_cfg.get("child_chunk_size").and_then(|x| x.as_u64()) {
+        pv.child_chunk_size = n as usize;
+    }
+    if let Some(seps) = chunk_cfg.get("separators").and_then(|x| x.as_array()) {
+        pv.chunk_separators = seps
+            .iter()
+            .filter_map(|s| s.as_str().map(str::to_string))
+            .collect();
+    }
+    if let Some(n) = chunk_cfg.get("token_limit").and_then(|x| x.as_u64()) {
+        pv.chunk_token_limit = n as usize;
+    }
+    if let Some(langs) = chunk_cfg.get("languages").and_then(|x| x.as_array()) {
+        pv.chunk_languages = langs
+            .iter()
+            .filter_map(|s| s.as_str().map(str::to_string))
+            .collect();
+    }
+    if let Some(rules) = chunk_cfg
+        .get("parser_engine_rules")
+        .and_then(|x| x.as_array())
+    {
+        pv.parser_engine_rules = rules
+            .iter()
+            .filter_map(|r| serde_json::from_value(r.clone()).ok())
+            .collect();
+    }
+    if let Some(s) = chunk_cfg
+        .get("table_metadata_instructions")
+        .and_then(|x| x.as_str())
+    {
+        pv.table_metadata_instructions = s.to_string();
+    }
+    Ok(pv)
+}
+
+async fn hydrate_scope(
+    pool: &PgPool,
+    store: &mut crate::Store,
+    workspace_id: Uuid,
+    product_id: Uuid,
+    version_id: Uuid,
+    document_ids: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, name, slug, retrieval_config,
+                COALESCE(kind, 'product_line') AS kind
+         FROM workspaces WHERE id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(r) = row {
+        let retrieval: crate::RetrievalConfig = r
+            .try_get::<serde_json::Value, _>("retrieval_config")
+            .ok()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        let kind_s: String = r.try_get("kind").unwrap_or_else(|_| "product_line".into());
+        store.workspaces.insert(
+            workspace_id,
+            crate::Workspace {
+                id: workspace_id,
+                name: r.try_get("name")?,
+                slug: r.try_get("slug")?,
+                kind: crate::WorkspaceKind::parse(&kind_s),
+                retrieval,
+            },
+        );
+    }
+    if let Some(p) =
+        sqlx::query("SELECT id, kind, name, slug, current_version_id FROM products WHERE id = $1")
+            .bind(product_id)
+            .fetch_optional(pool)
+            .await?
+    {
+        let kind: String = p.try_get("kind")?;
+        store.products.insert(
+            product_id,
+            crate::Product {
+                id: product_id,
+                workspace_id,
+                kind: parse_kind(&kind),
+                name: p.try_get("name")?,
+                slug: p.try_get("slug")?,
+                current_version_id: p.try_get("current_version_id")?,
+                embedding_model_id: String::new(),
+            },
+        );
+    }
+    if let Some(v) = sqlx::query(
+        "SELECT id, label, status, cloned_from_version_id, indexing_strategy,
+                image_processing_config, chunking_config,
+                embedding_model_id, summary_model_id, asr_model_id, asr_config,
+                extract_config, wiki_config, question_generation_config
+         FROM product_versions WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(version_id)
+    .fetch_optional(pool)
+    .await?
+    {
+        store
+            .versions
+            .insert(version_id, product_version_from_row(product_id, &v)?);
+    }
+    if !document_ids.is_empty() {
+        let docs = sqlx::query(
+            "SELECT id, title, file_name, file_size, file_hash, object_ref,
+                    parse_status, enable_status, pending_subtasks_count,
+                    COALESCE(error_message, '') AS error_message,
+                    process_overrides,
+                    COALESCE(type, 'file') AS doc_type,
+                    COALESCE(attempt, 1) AS attempt,
+                    COALESCE(description, '') AS description,
+                    COALESCE(summary_status, 'none') AS summary_status,
+                    source_passages, index_ready, product_version_id
+             FROM documents WHERE id = ANY($1) AND deleted_at IS NULL",
+        )
+        .bind(document_ids)
+        .fetch_all(pool)
+        .await?;
+        for d in docs {
+            let did: Uuid = d.try_get("id")?;
+            let st: String = d.try_get("parse_status")?;
+            let title: String = d.try_get("title")?;
+            let file_name: String = d.try_get("file_name")?;
+            let file_size: i64 = d.try_get("file_size")?;
+            let file_hash: String = d.try_get("file_hash")?;
+            let object_ref: String = d.try_get("object_ref")?;
+            let vid: Uuid = d.try_get("product_version_id")?;
+            let mut doc =
+                crate::Document::new(vid, title, file_name, file_size, file_hash, object_ref);
+            doc.id = did;
+            doc.parse_status = parse_parse_status(&st);
+            doc.enable_status = d.try_get("enable_status")?;
+            doc.pending_subtasks_count = d.try_get("pending_subtasks_count")?;
+            doc.error_message = d.try_get("error_message")?;
+            doc.attempt = d.try_get("attempt").unwrap_or(1);
+            doc.description = d.try_get("description").unwrap_or_default();
+            if let Ok(sum) = d.try_get::<String, _>("summary_status") {
+                doc.summary_status = match sum.as_str() {
+                    "pending" => crate::SummaryStatus::Pending,
+                    "processing" => crate::SummaryStatus::Processing,
+                    "completed" => crate::SummaryStatus::Completed,
+                    "failed" => crate::SummaryStatus::Failed,
+                    _ => crate::SummaryStatus::None,
+                };
+            }
+            doc.index_ready = d.try_get("index_ready").unwrap_or(false);
+            doc.doc_type = d.try_get("doc_type").unwrap_or_else(|_| "file".into());
+            if let Ok(Some(raw)) = d.try_get::<Option<serde_json::Value>, _>("source_passages") {
+                doc.source_passages = serde_json::from_value(raw).unwrap_or_default();
+            }
+            if let Ok(Some(raw)) = d.try_get::<Option<serde_json::Value>, _>("process_overrides") {
+                doc.process_overrides = serde_json::from_value(raw).ok();
+            }
+            store.documents.insert(did, doc);
+        }
+    }
+    hydrate_workspace_index(pool, store, workspace_id, &[version_id], document_ids).await?;
+    if let Some(p) = store.products.get_mut(&product_id)
+        && let Some(v) = store.versions.get(&version_id)
+    {
+        p.embedding_model_id = v.embedding_model_id.clone();
+    }
+    Ok(())
 }
 
 async fn hydrate_workspace_index(

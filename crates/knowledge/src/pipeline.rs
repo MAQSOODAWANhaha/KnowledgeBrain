@@ -141,7 +141,9 @@ pub fn post_process(store: &mut Store, payload: &serde_json::Value) -> Result<()
         }
     }
     if version.wiki_enabled && text_count + ocr_count > 0 {
-        crate::wiki::enqueue_ingest(store, doc.product_version_id, doc_id);
+        let mut job = crate::WikiJob::from_store(store, doc.product_version_id);
+        crate::wiki::enqueue_ingest_on_job(&mut job, doc.product_version_id, doc_id);
+        job.write_back(store);
     }
     if version.graph_enabled {
         let graph_ids: Vec<Uuid> = store
@@ -275,19 +277,6 @@ pub async fn run_post_process(
     product_version_id: Uuid,
     clone_keep: bool,
 ) -> Result<(), String> {
-    let ws: Option<Uuid> = sqlx::query_scalar(
-        "SELECT p.workspace_id FROM documents d
-         JOIN product_versions pv ON pv.id = d.product_version_id
-         JOIN products p ON p.id = pv.product_id
-         WHERE d.id = $1",
-    )
-    .bind(document_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-    let Some(ws) = ws else {
-        return Ok(());
-    };
     tracing::info!(
         document_id = %document_id,
         clone_keep,
@@ -318,9 +307,12 @@ pub async fn run_post_process(
     )
     .await;
     let mut store = crate::Store::default();
-    crate::hydrate_workspace(pool, &mut store, ws)
+    if !crate::hydrate_document(pool, &mut store, document_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(());
+    }
     post_process(
         &mut store,
         &serde_json::json!({
@@ -575,21 +567,26 @@ pub async fn run_image(
     let ws: Option<Uuid> = crate::document_workspace_id(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
-    let Some(ws) = ws else {
+    let Some(_ws) = ws else {
         return Ok(());
     };
     let mut store = crate::Store::default();
-    crate::hydrate_workspace(pool, &mut store, ws)
+    if !crate::hydrate_document(pool, &mut store, document_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(());
+    }
     if let Some(d) = store.documents.get_mut(&document_id)
         && d.parse_status == crate::ParseStatus::Pending
     {
         d.parse_status = crate::ParseStatus::Processing;
     }
-    if let Err(error) = crate::enrichment::process_image_without_decr(
-        &mut store,
-        document_id,
+    let Some(mut job) = crate::DocJob::from_store(&store, document_id) else {
+        return Ok(());
+    };
+    if let Err(error) = crate::enrichment::process_image_on_job(
+        &mut job,
         image_key,
         image_source_type,
         enable_ocr,
@@ -603,6 +600,7 @@ pub async fn run_image(
         );
         return Err(error);
     }
+    job.write_back(&mut store);
     tracing::info!(
         document_id = %document_id,
         image_key = truncate_key(image_key),
@@ -716,23 +714,14 @@ pub async fn run_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), Stri
         return schedule_semantic_index_v2_if_ready(pool, version_id).await;
     }
     let mut store = crate::Store::default();
-    if let Ok(Some(ws)) = crate::document_workspace_id(
-        pool,
-        claimed
-            .iter()
-            .find_map(|o| o.dedup_key.as_deref().and_then(|s| Uuid::parse_str(s).ok()))
-            .unwrap_or(version_id),
-    )
-    .await
-    {
-        let _ = crate::hydrate_workspace(pool, &mut store, ws).await;
-    }
+    let _ = crate::hydrate_version(pool, &mut store, version_id).await;
     store.versions.entry(version_id).or_insert_with(|| {
         let mut v = crate::ProductVersion::new(Uuid::nil(), "v".into());
         v.id = version_id;
         v.wiki_enabled = true;
         v
     });
+    let mut job = crate::WikiJob::from_store(&store, version_id);
     let mut done = Vec::new();
     let mut slugs = Vec::new();
     let mut ingest_ops = Vec::new();
@@ -743,7 +732,7 @@ pub async fn run_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), Stri
                 .as_deref()
                 .and_then(|s| Uuid::parse_str(s).ok())
             {
-                crate::wiki::enqueue_retract(&mut store, version_id, did, "");
+                crate::wiki::enqueue_retract_on_job(&mut job, version_id, did, "");
                 let _ = crate::delete_wiki_for_document(pool, version_id, did).await;
             }
             done.push(op.id);
@@ -757,7 +746,7 @@ pub async fn run_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), Stri
             done.push(op.id);
             continue;
         };
-        store.documents.entry(did).or_insert_with(|| {
+        job.documents.entry(did).or_insert_with(|| {
             let mut doc = crate::Document::new(
                 version_id,
                 did.to_string(),
@@ -769,12 +758,12 @@ pub async fn run_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), Stri
             doc.id = did;
             doc
         });
-        crate::wiki::enqueue_ingest(&mut store, version_id, did);
-        crate::wiki::set_ingest_fail_count(&mut store, version_id, did, op.fail_count);
+        crate::wiki::enqueue_ingest_on_job(&mut job, version_id, did);
+        crate::wiki::set_ingest_fail_count_on_job(&mut job, version_id, did, op.fail_count);
         ingest_ops.push((op.id, did));
     }
     if !ingest_ops.is_empty() {
-        if let Err(e) = crate::wiki::process_ingest(&mut store, version_id) {
+        if let Err(e) = crate::wiki::process_ingest_on_job(&mut job, version_id) {
             for (_, did) in &ingest_ops {
                 let _ = crate::upsert_span(
                     pool,
@@ -787,7 +776,8 @@ pub async fn run_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), Stri
                 .await;
             }
             for (op_id, did) in &ingest_ops {
-                if let Some(n) = crate::wiki::retryable_ingest_fail_count(&store, version_id, *did)
+                if let Some(n) =
+                    crate::wiki::retryable_ingest_fail_count_on_job(&job, version_id, *did)
                 {
                     crate::retry_pending_op(pool, *op_id, n)
                         .await
@@ -800,9 +790,9 @@ pub async fn run_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), Stri
                 }
             }
         } else {
-            persist_wiki_store(pool, &store, version_id, None).await?;
             for (op_id, did) in &ingest_ops {
-                if let Some(n) = crate::wiki::retryable_ingest_fail_count(&store, version_id, *did)
+                if let Some(n) =
+                    crate::wiki::retryable_ingest_fail_count_on_job(&job, version_id, *did)
                 {
                     crate::retry_pending_op(pool, *op_id, n)
                         .await
@@ -825,6 +815,8 @@ pub async fn run_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), Stri
                 done.push(*op_id);
             }
         }
+        job.write_back(&mut store);
+        persist_wiki_store(pool, &store, version_id, None).await?;
     }
     crate::delete_pending_ids(pool, &done)
         .await
@@ -898,15 +890,14 @@ pub async fn run_wiki_finalize(pool: &PgPool, version_id: Uuid) -> Result<(), St
         return schedule_semantic_index_v2_if_ready(pool, version_id).await;
     }
     let mut store = crate::Store::default();
-    if let Ok(Some(ws)) = crate::version_workspace_id(pool, version_id).await {
-        let _ = crate::hydrate_workspace(pool, &mut store, ws).await;
-    }
+    let _ = crate::hydrate_version(pool, &mut store, version_id).await;
     store.versions.entry(version_id).or_insert_with(|| {
         let mut v = crate::ProductVersion::new(Uuid::nil(), "v".into());
         v.id = version_id;
         v.wiki_enabled = true;
         v
     });
+    let mut job = crate::WikiJob::from_store(&store, version_id);
     for op in &claimed {
         let slug = op.dedup_key.clone().unwrap_or_default();
         let title = op
@@ -915,9 +906,10 @@ pub async fn run_wiki_finalize(pool: &PgPool, version_id: Uuid) -> Result<(), St
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        crate::wiki::enqueue_finalize_op(&mut store, version_id, &op.op, &slug, &title);
+        crate::wiki::enqueue_finalize_op_on_job(&mut job, version_id, &op.op, &slug, &title);
     }
-    crate::wiki::process_finalize(&mut store, version_id)?;
+    crate::wiki::process_finalize_on_job(&mut job, version_id)?;
+    job.write_back(&mut store);
     persist_wiki_store(pool, &store, version_id, None).await?;
     let deferred: Vec<Uuid> = claimed
         .iter()
@@ -1050,18 +1042,18 @@ pub async fn run_summary(
     {
         return schedule_semantic_index_for_document_v2(pool, document_id).await;
     }
-    let ws = crate::document_workspace_id(pool, document_id)
+    let mut store = crate::Store::default();
+    if !crate::hydrate_document(pool, &mut store, document_id)
         .await
-        .map_err(|e| e.to_string())?;
-    let Some(ws) = ws else {
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(());
+    }
+    let Some(mut job) = crate::DocJob::from_store(&store, document_id) else {
         return Ok(());
     };
-    let mut store = crate::Store::default();
-    crate::hydrate_workspace(pool, &mut store, ws)
-        .await
-        .map_err(|e| e.to_string())?;
-    let outcome =
-        crate::enrichment::generate_summary_with(&mut store, document_id, attempt, fallback)?;
+    let outcome = crate::enrichment::generate_summary_on_job(&mut job, attempt, fallback)?;
+    job.write_back(&mut store);
     if matches!(outcome, crate::enrichment::SummaryOutcome::Superseded) {
         return Ok(());
     }
@@ -1101,24 +1093,20 @@ pub async fn run_questions(
     {
         return schedule_semantic_index_for_document_v2(pool, document_id).await;
     }
-    let ws = crate::document_workspace_id(pool, document_id)
+    let mut store = crate::Store::default();
+    if !crate::hydrate_document(pool, &mut store, document_id)
         .await
-        .map_err(|e| e.to_string())?;
-    let Some(ws) = ws else {
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(());
+    }
+    let Some(mut job) = crate::DocJob::from_store(&store, document_id) else {
         return Ok(());
     };
-    let mut store = crate::Store::default();
-    crate::hydrate_workspace(pool, &mut store, ws)
-        .await
-        .map_err(|e| e.to_string())?;
-    let outcome = crate::enrichment::generate_questions_with(
-        &mut store,
-        chunk_ids,
-        prev_ids,
-        next_ids,
-        document_id,
-        attempt,
+    let outcome = crate::enrichment::generate_questions_on_job(
+        &mut job, chunk_ids, prev_ids, next_ids, attempt,
     )?;
+    job.write_back(&mut store);
     if matches!(outcome, crate::enrichment::QuestionOutcome::Superseded) {
         return Ok(());
     }
@@ -1145,18 +1133,18 @@ pub async fn run_extract(
     {
         return schedule_semantic_index_for_document_v2(pool, document_id).await;
     }
-    let ws = crate::document_workspace_id(pool, document_id)
+    let mut store = crate::Store::default();
+    if !crate::hydrate_document(pool, &mut store, document_id)
         .await
-        .map_err(|e| e.to_string())?;
-    let Some(ws) = ws else {
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(());
+    }
+    let Some(mut job) = crate::DocJob::from_store(&store, document_id) else {
         return Ok(());
     };
-    let mut store = crate::Store::default();
-    crate::hydrate_workspace(pool, &mut store, ws)
-        .await
-        .map_err(|e| e.to_string())?;
-    let outcome =
-        crate::graph::extract_chunk_for_attempt(&mut store, chunk_id, document_id, attempt)?;
+    let outcome = crate::graph::extract_chunk_on_job(&mut job, chunk_id, attempt)?;
+    job.write_back(&mut store);
     if matches!(outcome, crate::graph::ExtractOutcome::Superseded) {
         return Ok(());
     }
@@ -1205,16 +1193,13 @@ pub async fn run_list_delete(pool: &PgPool, document_id: Uuid) -> Result<(), Str
 }
 
 pub async fn run_datatable(pool: &PgPool, document_id: Uuid) -> Result<(), String> {
-    let ws = crate::document_workspace_id(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some(ws) = ws else {
-        return Ok(());
-    };
     let mut store = Store::default();
-    crate::hydrate_workspace(pool, &mut store, ws)
+    if !crate::hydrate_document(pool, &mut store, document_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(());
+    }
     datatable_summary(&mut store, document_id)?;
     let table: Vec<_> = store
         .chunks

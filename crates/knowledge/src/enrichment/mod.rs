@@ -12,7 +12,10 @@ pub use chat::{
     chat_complete_limited, chat_complete_wiki, chat_http_configured, chat_messages,
     chat_messages_limited, sample_long_content,
 };
-pub use language::{infer_output_language, language_for_document, normalize_language_tag};
+pub use language::{
+    infer_output_language, language_for_document, language_for_document_parts,
+    normalize_language_tag,
+};
 pub use ocr::sanitize_ocr_text;
 pub use pending::{
     decr_pending, decr_pending_count, pending_count, pending_key, set_pending, set_pending_count,
@@ -36,7 +39,7 @@ pub enum SummaryOutcome {
     Superseded,
 }
 
-use crate::index::index_one;
+use crate::job::DocJob;
 use crate::{Chunk, Store, SummaryStatus};
 use uuid::Uuid;
 
@@ -60,27 +63,34 @@ pub fn generate_summary_with(
     job_attempt: i32,
     fallback: bool,
 ) -> Result<SummaryOutcome, String> {
-    let Some(doc) = store.documents.get(&document_id).cloned() else {
+    let Some(mut job) = DocJob::from_store(store, document_id) else {
         return Ok(SummaryOutcome::Done);
     };
+    let outcome = generate_summary_on_job(&mut job, job_attempt, fallback)?;
+    job.write_back(store);
+    Ok(outcome)
+}
+
+pub fn generate_summary_on_job(
+    job: &mut DocJob,
+    job_attempt: i32,
+    fallback: bool,
+) -> Result<SummaryOutcome, String> {
+    let document_id = job.document.id;
+    let doc = job.document.clone();
     if attempt_superseded(doc.attempt, job_attempt) {
         return Ok(SummaryOutcome::Superseded);
     }
     if doc.parse_status.is_aborted() {
-        store.finalize_subtask(document_id);
+        job.finalize_subtask();
         return Ok(SummaryOutcome::Done);
     }
-    let Some(version) = store.versions.get(&doc.product_version_id).cloned() else {
-        store.finalize_subtask(document_id);
-        return Ok(SummaryOutcome::Done);
-    };
-    if let Some(d) = store.documents.get_mut(&document_id) {
-        d.summary_status = SummaryStatus::Processing;
-    }
-    let mut texts: Vec<_> = store
+    let version = job.version.clone();
+    job.document.summary_status = SummaryStatus::Processing;
+    let mut texts: Vec<_> = job
         .chunks
         .values()
-        .filter(|c| c.document_id == document_id && c.chunk_type == "text")
+        .filter(|c| c.chunk_type == "text")
         .cloned()
         .collect();
     texts.sort_by_key(|c| c.start_at);
@@ -88,13 +98,10 @@ pub fn generate_summary_with(
     let mut body = assemble_by_start_at(&texts);
     body = sample_long_content(&body, SUMMARY_MAX_INPUT);
     if real_text_rune_count(&body) < IMAGE_DOMINATED_RUNES {
-        let extra: String = store
+        let extra: String = job
             .chunks
             .values()
-            .filter(|c| {
-                c.document_id == document_id
-                    && matches!(c.chunk_type.as_str(), "image_ocr" | "image_caption")
-            })
+            .filter(|c| matches!(c.chunk_type.as_str(), "image_ocr" | "image_caption"))
             .map(|c| {
                 if c.chunk_type == "image_ocr" {
                     format!("<image_ocr>{}</image_ocr>", c.content)
@@ -108,14 +115,12 @@ pub fn generate_summary_with(
         body = sample_long_content(&body, SUMMARY_MAX_INPUT);
     }
     if real_text_rune_count(&body) < MIN_SUMMARY_RUNES {
-        if let Some(d) = store.documents.get_mut(&document_id) {
-            d.description.clear();
-            d.summary_status = SummaryStatus::Failed;
-        }
-        store.finalize_subtask(document_id);
+        job.document.description.clear();
+        job.document.summary_status = SummaryStatus::Failed;
+        job.finalize_subtask();
         return Ok(SummaryOutcome::Done);
     }
-    let language = language_for_document(store, document_id);
+    let language = language_for_job(job);
     tracing::info!(%document_id, language = %language, "summary language");
     let system = render_summary_prompt(&language);
     let user = format!("Output language: {language}\n\n{body}");
@@ -128,30 +133,24 @@ pub fn generate_summary_with(
                     .map(|c| c.content.chars().take(500).collect())
                     .unwrap_or_default();
                 if real_text_rune_count(&stem) < MIN_SUMMARY_RUNES {
-                    if let Some(d) = store.documents.get_mut(&document_id) {
-                        d.description.clear();
-                        d.summary_status = SummaryStatus::Failed;
-                    }
-                    store.finalize_subtask(document_id);
+                    job.document.description.clear();
+                    job.document.summary_status = SummaryStatus::Failed;
+                    job.finalize_subtask();
                     return Ok(SummaryOutcome::Done);
                 }
                 stem
             } else if chat_http_configured() && version.summary_model_id != "stub-chat" {
                 return Err(other.err().unwrap_or_else(|| "chat empty".into()));
             } else {
-                if let Some(d) = store.documents.get_mut(&document_id) {
-                    d.summary_status = SummaryStatus::Failed;
-                }
-                store.finalize_subtask(document_id);
+                job.document.summary_status = SummaryStatus::Failed;
+                job.finalize_subtask();
                 return Ok(SummaryOutcome::Done);
             }
         }
     };
-    drop_prior_summary_chunks(store, document_id);
-    if let Some(d) = store.documents.get_mut(&document_id) {
-        d.description = summary.clone();
-        d.summary_status = SummaryStatus::Completed;
-    }
+    drop_prior_summary_chunks_job(job);
+    job.document.description = summary.clone();
+    job.document.summary_status = SummaryStatus::Completed;
     let chunk = Chunk {
         id: Uuid::new_v4(),
         document_id,
@@ -164,16 +163,38 @@ pub fn generate_summary_with(
         parent_chunk_id: parent_id,
         generated_questions: Vec::new(),
     };
-    index_one(
-        store,
+    crate::index::index_one_in(
+        &mut job.embeddings,
         &chunk,
         &doc.title,
+        &version.embedding_model_id,
         version.vector_enabled,
         version.keyword_enabled,
     )?;
-    store.chunks.insert(chunk.id, chunk);
-    store.finalize_subtask(document_id);
+    job.chunks.insert(chunk.id, chunk);
+    job.finalize_subtask();
     Ok(SummaryOutcome::Done)
+}
+
+fn language_for_job(job: &DocJob) -> String {
+    language_for_document_parts(
+        &job.document.title,
+        &job.version.chunk_languages,
+        &job.chunks,
+    )
+}
+
+fn drop_prior_summary_chunks_job(job: &mut DocJob) {
+    let drop: Vec<uuid::Uuid> = job
+        .chunks
+        .values()
+        .filter(|c| c.chunk_type == "summary")
+        .map(|c| c.id)
+        .collect();
+    for id in drop {
+        job.chunks.remove(&id);
+        job.embeddings.remove(&id);
+    }
 }
 
 fn assemble_by_start_at(chunks: &[Chunk]) -> String {
@@ -220,33 +241,46 @@ pub fn generate_questions_with(
     document_id: Uuid,
     job_attempt: i32,
 ) -> Result<QuestionOutcome, String> {
-    let Some(doc) = store.documents.get(&document_id).cloned() else {
+    let Some(mut job) = DocJob::from_store(store, document_id) else {
         return Ok(QuestionOutcome::Done);
     };
+    let outcome = generate_questions_on_job(&mut job, chunk_ids, prev_ids, next_ids, job_attempt)?;
+    job.write_back(store);
+    Ok(outcome)
+}
+
+pub fn generate_questions_on_job(
+    job: &mut DocJob,
+    chunk_ids: &[Uuid],
+    prev_ids: &[Option<Uuid>],
+    next_ids: &[Option<Uuid>],
+    job_attempt: i32,
+) -> Result<QuestionOutcome, String> {
+    let document_id = job.document.id;
+    let doc = job.document.clone();
     if attempt_superseded(doc.attempt, job_attempt) {
         return Ok(QuestionOutcome::Superseded);
     }
     if doc.parse_status.is_aborted() {
-        store.finalize_subtask(document_id);
+        job.finalize_subtask();
         return Ok(QuestionOutcome::Done);
     }
-    let Some(version) = store.effective_version(document_id) else {
-        store.finalize_subtask(document_id);
-        return Ok(QuestionOutcome::Done);
-    };
-    drop_prior_question_chunks(store, chunk_ids);
+    let version = job.version.clone();
+    drop_prior_question_chunks_job(job, chunk_ids);
     let want = version.question_count();
-    let language = language_for_document(store, document_id);
+    let language = language_for_job(job);
     tracing::info!(%document_id, language = %language, "question language");
     for (i, cid) in chunk_ids.iter().enumerate() {
-        let Some(mut ch) = store.chunks.get(cid).cloned() else {
+        let Some(mut ch) = job.chunks.get(cid).cloned() else {
             continue;
         };
         if ch.chunk_type != "text" || ch.content.trim().is_empty() {
             continue;
         }
-        let prev_content = neighbor_content(store, prev_ids.get(i).and_then(|x| *x), &ch, true);
-        let next_content = neighbor_content(store, next_ids.get(i).and_then(|x| *x), &ch, false);
+        let prev_content =
+            neighbor_content_in(&job.chunks, prev_ids.get(i).and_then(|x| *x), &ch, true);
+        let next_content =
+            neighbor_content_in(&job.chunks, next_ids.get(i).and_then(|x| *x), &ch, false);
         let ctx = surrounding_context(&prev_content, &next_content);
         let prompt = append_custom_instructions(
             &render_questions_prompt(&doc.title, &ch.content, want, &language, &ctx),
@@ -286,19 +320,67 @@ pub fn generate_questions_with(
                 parent_chunk_id: Some(ch.id),
                 generated_questions: Vec::new(),
             };
-            index_one(
-                store,
+            crate::index::index_one_in(
+                &mut job.embeddings,
                 &qc,
                 &doc.title,
+                &version.embedding_model_id,
                 version.vector_enabled,
                 version.keyword_enabled,
             )?;
-            store.chunks.insert(qc.id, qc);
+            job.chunks.insert(qc.id, qc);
         }
-        store.chunks.insert(*cid, ch);
+        job.chunks.insert(*cid, ch);
     }
-    store.finalize_subtask(document_id);
+    job.finalize_subtask();
     Ok(QuestionOutcome::Done)
+}
+
+fn neighbor_content_in(
+    chunks: &std::collections::HashMap<Uuid, Chunk>,
+    hinted: Option<Uuid>,
+    ch: &Chunk,
+    prev: bool,
+) -> String {
+    if let Some(id) = hinted
+        && let Some(n) = chunks.get(&id)
+    {
+        return n.content.clone();
+    }
+    let cand = chunks.values().filter(|o| {
+        o.document_id == ch.document_id
+            && o.chunk_type == "text"
+            && o.parent_chunk_id.is_none()
+            && o.id != ch.id
+    });
+    if prev {
+        cand.filter(|o| o.end_at <= ch.start_at)
+            .max_by_key(|o| o.end_at)
+            .map(|o| o.content.clone())
+            .unwrap_or_default()
+    } else {
+        cand.filter(|o| o.start_at >= ch.end_at)
+            .min_by_key(|o| o.start_at)
+            .map(|o| o.content.clone())
+            .unwrap_or_default()
+    }
+}
+
+fn drop_prior_question_chunks_job(job: &mut DocJob, parent_ids: &[Uuid]) {
+    let drop: Vec<Uuid> = job
+        .chunks
+        .values()
+        .filter(|c| {
+            (c.chunk_type == "question"
+                || (c.chunk_type == "text" && c.generated_questions.is_empty()))
+                && c.parent_chunk_id.is_some_and(|p| parent_ids.contains(&p))
+        })
+        .map(|c| c.id)
+        .collect();
+    for id in drop {
+        job.chunks.remove(&id);
+        job.embeddings.remove(&id);
+    }
 }
 
 fn neighbor_content(store: &Store, hinted: Option<Uuid>, ch: &Chunk, prev: bool) -> String {
@@ -402,27 +484,42 @@ fn process_image_core(
     enable_caption: bool,
     decr: bool,
 ) -> Result<(), String> {
-    let Some(doc) = store.documents.get(&document_id).cloned() else {
+    let Some(mut job) = DocJob::from_store(store, document_id) else {
         if decr && decr_pending(store, document_id) {
             enqueue_post_process(store, document_id);
         }
         return Ok(());
     };
+    process_image_on_job(
+        &mut job,
+        image_key,
+        image_source_type,
+        enable_ocr,
+        enable_caption,
+    )?;
+    job.write_back(store);
+    if decr && decr_pending(store, document_id) {
+        enqueue_post_process(store, document_id);
+    }
+    Ok(())
+}
+
+pub fn process_image_on_job(
+    job: &mut DocJob,
+    image_key: &str,
+    image_source_type: &str,
+    enable_ocr: bool,
+    enable_caption: bool,
+) -> Result<(), String> {
+    let document_id = job.document.id;
+    let doc = job.document.clone();
     if doc.parse_status.is_aborted() {
-        if decr && decr_pending(store, document_id) {
-            enqueue_post_process(store, document_id);
-        }
         return Ok(());
     }
-    let Some(version) = store.versions.get(&doc.product_version_id).cloned() else {
-        if decr && decr_pending(store, document_id) {
-            enqueue_post_process(store, document_id);
-        }
-        return Ok(());
-    };
-    drop_prior_image_chunks(store, document_id, image_key);
-    let parent = parent_text_chunk(store, document_id, image_key);
-    let language = language_for_document(store, document_id);
+    let version = job.version.clone();
+    drop_prior_image_chunks_job(job, image_key);
+    let parent = parent_text_chunk_job(job, image_key);
+    let language = language_for_job(job);
     let (ocr, caption) = describe_image(image_key, image_source_type, &language)?;
     let mut parts = Vec::new();
     if enable_ocr {
@@ -447,20 +544,47 @@ fn process_image_core(
             parent_chunk_id: parent,
             generated_questions: Vec::new(),
         };
-        index_one(
-            store,
+        crate::index::index_one_in(
+            &mut job.embeddings,
             &ch,
             &doc.title,
+            &version.embedding_model_id,
             version.vector_enabled,
             version.keyword_enabled,
         )?;
         ch.context_header = image_key.to_string();
-        store.chunks.insert(ch.id, ch);
-    }
-    if decr && decr_pending(store, document_id) {
-        enqueue_post_process(store, document_id);
+        job.chunks.insert(ch.id, ch);
     }
     Ok(())
+}
+
+fn parent_text_chunk_job(job: &DocJob, image_key: &str) -> Option<uuid::Uuid> {
+    let texts: Vec<_> = job
+        .chunks
+        .values()
+        .filter(|c| c.chunk_type == "text")
+        .collect();
+    texts
+        .iter()
+        .find(|c| c.content.contains(image_key))
+        .or(texts.first())
+        .map(|c| c.id)
+}
+
+fn drop_prior_image_chunks_job(job: &mut DocJob, image_key: &str) {
+    let drop: Vec<uuid::Uuid> = job
+        .chunks
+        .values()
+        .filter(|c| {
+            matches!(c.chunk_type.as_str(), "image_ocr" | "image_caption")
+                && c.context_header == image_key
+        })
+        .map(|c| c.id)
+        .collect();
+    for id in drop {
+        job.chunks.remove(&id);
+        job.embeddings.remove(&id);
+    }
 }
 
 /// `scanned_pdf` only when the file is a PDF whose real text is image-dominated.

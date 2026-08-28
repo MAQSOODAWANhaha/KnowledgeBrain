@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Chunk, GraphNode, Store};
+use crate::{Chunk, GraphNode};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -657,7 +657,7 @@ pub fn dedup_candidates(items: Vec<Candidate>) -> Vec<Candidate> {
     out
 }
 
-pub fn collect_text_chunks(store: &Store, document_id: Uuid) -> Vec<Chunk> {
+pub fn collect_text_chunks(store: &crate::WikiJob, document_id: Uuid) -> Vec<Chunk> {
     let mut chunks: Vec<_> = store
         .chunks
         .values()
@@ -905,7 +905,7 @@ pub const TAXONOMY_PROMPT_MAX: usize = 150;
 /// Brain `wikiTaxonomyRelevantTopK`.
 pub const TAXONOMY_TOP_K: usize = 3;
 
-pub fn existing_folder_paths(store: &Store, version_id: Uuid) -> Vec<Vec<String>> {
+pub fn existing_folder_paths(store: &crate::WikiJob, version_id: Uuid) -> Vec<Vec<String>> {
     store
         .wiki_folders
         .values()

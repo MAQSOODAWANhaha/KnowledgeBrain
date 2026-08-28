@@ -11,10 +11,8 @@ pub use taxonomy::{
     PAGE_SYNTHESIS, junk_item_name, page_content_for, parse_extraction, typed_slug,
 };
 
-use crate::index::index_one;
-use crate::{
-    Chunk, Store, TYPE_WIKI_FINALIZE, TYPE_WIKI_INGEST, WikiFolder, WikiPage, WikiPendingOp,
-};
+use crate::job::WikiJob;
+use crate::{Chunk, TYPE_WIKI_FINALIZE, TYPE_WIKI_INGEST, WikiFolder, WikiPage, WikiPendingOp};
 use chrono::{Duration, Utc};
 use taxonomy::{
     Candidate, assemble_body, attach_citations, candidate_slug_prompt, category_for, cite_with_llm,
@@ -70,8 +68,8 @@ pub fn ingest_task_id(version_id: Uuid) -> String {
 }
 
 /// Brain `EnqueueWikiIngest`: persist ingest-lane row, debounce trigger 30s.
-pub fn enqueue_ingest(store: &mut Store, version_id: Uuid, document_id: Uuid) {
-    if is_tombstoned(store, version_id, document_id) {
+pub fn enqueue_ingest_on_job(store: &mut WikiJob, version_id: Uuid, document_id: Uuid) {
+    if is_tombstoned_on_job(store, version_id, document_id) {
         store.finalize_subtask(document_id);
         return;
     }
@@ -94,8 +92,8 @@ pub fn enqueue_ingest(store: &mut Store, version_id: Uuid, document_id: Uuid) {
 }
 
 /// Seed fail_count copied from a PG `task_pending_ops` row before `process_ingest`.
-pub fn set_ingest_fail_count(
-    store: &mut Store,
+pub fn set_ingest_fail_count_on_job(
+    store: &mut WikiJob,
     version_id: Uuid,
     document_id: Uuid,
     fail_count: i32,
@@ -110,8 +108,8 @@ pub fn set_ingest_fail_count(
     }
 }
 
-pub fn retryable_ingest_fail_count(
-    store: &Store,
+pub fn retryable_ingest_fail_count_on_job(
+    store: &WikiJob,
     version_id: Uuid,
     document_id: Uuid,
 ) -> Option<i32> {
@@ -129,13 +127,24 @@ pub fn retryable_ingest_fail_count(
     })
 }
 
-pub fn enqueue_finalize_op(store: &mut Store, version_id: Uuid, op: &str, slug: &str, title: &str) {
+pub fn enqueue_finalize_op_on_job(
+    store: &mut WikiJob,
+    version_id: Uuid,
+    op: &str,
+    slug: &str,
+    title: &str,
+) {
     push_op(store, TYPE_WIKI_FINALIZE, version_id, op, None, slug, title);
 }
 
 /// Brain `EnqueueWikiRetract`: ingest-lane retract, shorter 5s trigger. No FinalizeSubtask.
-pub fn enqueue_retract(store: &mut Store, version_id: Uuid, document_id: Uuid, title: &str) {
-    write_tombstone(store, version_id, document_id);
+pub fn enqueue_retract_on_job(
+    store: &mut WikiJob,
+    version_id: Uuid,
+    document_id: Uuid,
+    title: &str,
+) {
+    write_tombstone_on_job(store, version_id, document_id);
     let slug = slug_for(title, document_id);
     push_op(
         store,
@@ -155,13 +164,13 @@ pub fn enqueue_retract(store: &mut Store, version_id: Uuid, document_id: Uuid, t
     );
 }
 
-pub fn write_tombstone(store: &mut Store, version_id: Uuid, document_id: Uuid) {
+pub fn write_tombstone_on_job(store: &mut WikiJob, version_id: Uuid, document_id: Uuid) {
     store
         .wiki_tombstones
         .insert((version_id, document_id), Utc::now());
 }
 
-pub fn is_tombstoned(store: &Store, version_id: Uuid, document_id: Uuid) -> bool {
+pub fn is_tombstoned_on_job(store: &WikiJob, version_id: Uuid, document_id: Uuid) -> bool {
     store
         .wiki_tombstones
         .get(&(version_id, document_id))
@@ -171,14 +180,14 @@ pub fn is_tombstoned(store: &Store, version_id: Uuid, document_id: Uuid) -> bool
 }
 
 /// Compat: enqueue + process in one call (tests that still call `ingest`).
-pub fn ingest(store: &mut Store, product_version_id: Uuid, document_id: Option<Uuid>) {
+pub fn ingest_on_job(store: &mut WikiJob, product_version_id: Uuid, document_id: Option<Uuid>) {
     if let Some(id) = document_id {
-        enqueue_ingest(store, product_version_id, id);
+        enqueue_ingest_on_job(store, product_version_id, id);
     }
-    let _ = process_ingest(store, product_version_id);
+    let _ = process_ingest_on_job(store, product_version_id);
 }
 
-pub fn process_ingest(store: &mut Store, version_id: Uuid) -> Result<(), String> {
+pub fn process_ingest_on_job(store: &mut WikiJob, version_id: Uuid) -> Result<(), String> {
     let Some(version) = store.versions.get(&version_id).cloned() else {
         clear_lane(store, TYPE_WIKI_INGEST, version_id);
         return Ok(());
@@ -218,7 +227,7 @@ pub fn process_ingest(store: &mut Store, version_id: Uuid) -> Result<(), String>
                     done_ids.push(op.id);
                     continue;
                 };
-                if is_tombstoned(store, version_id, did) {
+                if is_tombstoned_on_job(store, version_id, did) {
                     store.finalize_subtask(did);
                     done_ids.push(op.id);
                     continue;
@@ -334,7 +343,7 @@ pub fn process_ingest(store: &mut Store, version_id: Uuid) -> Result<(), String>
     Ok(())
 }
 
-pub fn process_finalize(store: &mut Store, version_id: Uuid) -> Result<(), String> {
+pub fn process_finalize_on_job(store: &mut WikiJob, version_id: Uuid) -> Result<(), String> {
     let rows = claim_lane(store, TYPE_WIKI_FINALIZE, version_id, 5000);
     if rows.is_empty() {
         return Ok(());
@@ -390,12 +399,12 @@ pub fn process_finalize(store: &mut Store, version_id: Uuid) -> Result<(), Strin
     Ok(())
 }
 
-pub fn finalize(store: &mut Store, product_version_id: Uuid) {
-    let _ = process_finalize(store, product_version_id);
+pub fn finalize_on_job(store: &mut WikiJob, product_version_id: Uuid) {
+    let _ = process_finalize_on_job(store, product_version_id);
 }
 
 /// Last-attempt fail-open: drain ingest-lane slots so parent is not stuck.
-pub fn fail_open_pending(store: &mut Store, version_id: Uuid) {
+pub fn fail_open_pending_on_job(store: &mut WikiJob, version_id: Uuid) {
     let ids: Vec<Uuid> = store
         .wiki_ops
         .iter()
@@ -428,7 +437,7 @@ struct SlugUpdate {
     doc_summary: String,
 }
 
-fn slugs_for_document(store: &Store, version_id: Uuid, document_id: Uuid) -> Vec<String> {
+fn slugs_for_document(store: &WikiJob, version_id: Uuid, document_id: Uuid) -> Vec<String> {
     store
         .wiki
         .values()
@@ -438,7 +447,7 @@ fn slugs_for_document(store: &Store, version_id: Uuid, document_id: Uuid) -> Vec
 }
 
 fn map_document(
-    store: &mut Store,
+    store: &mut WikiJob,
     version_id: Uuid,
     document_id: Uuid,
 ) -> Result<Vec<SlugUpdate>, String> {
@@ -602,7 +611,7 @@ struct ReducePatch {
 }
 
 fn reduce_grouped(
-    store: &mut Store,
+    store: &mut WikiJob,
     version_id: Uuid,
     model: &str,
     grouped: std::collections::HashMap<String, Vec<SlugUpdate>>,
@@ -876,7 +885,7 @@ fn run_reduce_job(model: &str, job: &ReduceJob) -> Option<ReducePatch> {
     })
 }
 
-fn apply_patch(store: &mut Store, version_id: Uuid, patch: ReducePatch) {
+fn apply_patch(store: &mut WikiJob, version_id: Uuid, patch: ReducePatch) {
     let existing = store.wiki.get(&(version_id, patch.slug.clone())).cloned();
     let (id, category_path, folder_id) = if let Some(old) = existing {
         (
@@ -922,7 +931,7 @@ fn apply_patch(store: &mut Store, version_id: Uuid, patch: ReducePatch) {
 }
 
 fn extract_candidates(
-    store: &Store,
+    store: &WikiJob,
     version_id: Uuid,
     document_id: Uuid,
     title: &str,
@@ -992,7 +1001,7 @@ fn extract_candidates(
 }
 
 fn index_wiki_page(
-    store: &mut Store,
+    store: &mut WikiJob,
     version_id: Uuid,
     document_id: Uuid,
     slug: &str,
@@ -1014,11 +1023,23 @@ fn index_wiki_page(
         parent_chunk_id: None,
         generated_questions: Vec::new(),
     };
-    let _ = index_one(store, &ch, title, vector_on, keyword_on);
+    let model = store
+        .versions
+        .get(&version_id)
+        .map(|v| v.embedding_model_id.clone())
+        .unwrap_or_default();
+    let _ = crate::index::index_one_in(
+        &mut store.embeddings,
+        &ch,
+        title,
+        &model,
+        vector_on,
+        keyword_on,
+    );
     store.chunks.insert(ch.id, ch);
 }
 
-fn linkify_version(store: &mut Store, version_id: Uuid) {
+fn linkify_version(store: &mut WikiJob, version_id: Uuid) {
     let refs: Vec<LinkRef> = store
         .wiki
         .values()
@@ -1055,7 +1076,7 @@ fn linkify_version(store: &mut Store, version_id: Uuid) {
     }
 }
 
-fn write_index_page(store: &mut Store, version_id: Uuid) {
+fn write_index_page(store: &mut WikiJob, version_id: Uuid) {
     let mut lines = vec!["# Wiki index".to_string(), String::new()];
     let mut pages: Vec<_> = store
         .wiki
@@ -1096,7 +1117,7 @@ fn write_index_page(store: &mut Store, version_id: Uuid) {
     );
 }
 
-fn plan_and_apply_taxonomy(store: &mut Store, version_id: Uuid, slugs: &[(String, String)]) {
+fn plan_and_apply_taxonomy(store: &mut WikiJob, version_id: Uuid, slugs: &[(String, String)]) {
     let pool = existing_folder_paths(store, version_id);
     let mut items = Vec::new();
     for (slug, title) in slugs {
@@ -1163,7 +1184,7 @@ Reuse existing folders when they fit. Max 3 levels. Do not invent facts."#,
     }
 }
 
-fn ensure_folder_path(store: &mut Store, version_id: Uuid, path: &[String]) -> Option<Uuid> {
+fn ensure_folder_path(store: &mut WikiJob, version_id: Uuid, path: &[String]) -> Option<Uuid> {
     if path.is_empty() {
         return None;
     }
@@ -1199,7 +1220,7 @@ fn ensure_folder_path(store: &mut Store, version_id: Uuid, path: &[String]) -> O
     last
 }
 
-fn prune_empty_folders(store: &mut Store, version_id: Uuid) {
+fn prune_empty_folders(store: &mut WikiJob, version_id: Uuid) {
     let used: Vec<String> = store
         .wiki
         .values()
@@ -1211,7 +1232,7 @@ fn prune_empty_folders(store: &mut Store, version_id: Uuid) {
         .retain(|_, f| f.product_version_id != version_id || used.iter().any(|p| p == &f.path));
 }
 
-fn write_log_page(store: &mut Store, version_id: Uuid) {
+fn write_log_page(store: &mut WikiJob, version_id: Uuid) {
     let mut lines = vec!["# Wiki log".to_string(), String::new()];
     let mut pages: Vec<_> = store
         .wiki
@@ -1229,7 +1250,7 @@ fn write_log_page(store: &mut Store, version_id: Uuid) {
     upsert_system_page(store, version_id, PAGE_LOG, "Log", &lines.join("\n"));
 }
 
-fn write_synthesis_pages(store: &mut Store, version_id: Uuid) {
+fn write_synthesis_pages(store: &mut WikiJob, version_id: Uuid) {
     let entities: Vec<_> = store
         .wiki
         .values()
@@ -1268,7 +1289,13 @@ fn write_synthesis_pages(store: &mut Store, version_id: Uuid) {
     }
 }
 
-fn upsert_system_page(store: &mut Store, version_id: Uuid, slug: &str, title: &str, content: &str) {
+fn upsert_system_page(
+    store: &mut WikiJob,
+    version_id: Uuid,
+    slug: &str,
+    title: &str,
+    content: &str,
+) {
     let id = store
         .wiki
         .get(&(version_id, slug.to_string()))
@@ -1292,7 +1319,7 @@ fn upsert_system_page(store: &mut Store, version_id: Uuid, slug: &str, title: &s
     index_wiki_page(store, version_id, Uuid::nil(), slug, title, content);
 }
 
-fn retract_one(store: &mut Store, version_id: Uuid, op: &WikiPendingOp) {
+fn retract_one(store: &mut WikiJob, version_id: Uuid, op: &WikiPendingOp) {
     if !op.slug.is_empty() {
         store.wiki.remove(&(version_id, op.slug.clone()));
     }
@@ -1303,7 +1330,7 @@ fn retract_one(store: &mut Store, version_id: Uuid, op: &WikiPendingOp) {
     }
 }
 
-fn reduce_slug(store: &mut Store, version_id: Uuid, op: &WikiPendingOp) -> Result<(), String> {
+fn reduce_slug(store: &mut WikiJob, version_id: Uuid, op: &WikiPendingOp) -> Result<(), String> {
     let Some(page) = store.wiki.get(&(version_id, op.slug.clone())).cloned() else {
         return Ok(());
     };
@@ -1330,7 +1357,19 @@ fn reduce_slug(store: &mut Store, version_id: Uuid, op: &WikiPendingOp) -> Resul
     if let Some(mut existing) = existing {
         existing.content = page.content.clone();
         existing.end_at = page.content.chars().count() as i32;
-        index_one(store, &existing, &page.title, vector_on, keyword_on)?;
+        let model = store
+            .versions
+            .get(&version_id)
+            .map(|v| v.embedding_model_id.clone())
+            .unwrap_or_default();
+        crate::index::index_one_in(
+            &mut store.embeddings,
+            &existing,
+            &page.title,
+            &model,
+            vector_on,
+            keyword_on,
+        )?;
         store.chunks.insert(existing.id, existing);
         return Ok(());
     }
@@ -1346,13 +1385,25 @@ fn reduce_slug(store: &mut Store, version_id: Uuid, op: &WikiPendingOp) -> Resul
         parent_chunk_id: None,
         generated_questions: Vec::new(),
     };
-    index_one(store, &ch, &page.title, vector_on, keyword_on)?;
+    let model = store
+        .versions
+        .get(&version_id)
+        .map(|v| v.embedding_model_id.clone())
+        .unwrap_or_default();
+    crate::index::index_one_in(
+        &mut store.embeddings,
+        &ch,
+        &page.title,
+        &model,
+        vector_on,
+        keyword_on,
+    )?;
     store.chunks.insert(ch.id, ch);
     Ok(())
 }
 
 fn push_op(
-    store: &mut Store,
+    store: &mut WikiJob,
     lane: &str,
     version_id: Uuid,
     op: &str,
@@ -1385,7 +1436,12 @@ fn push_op(
     });
 }
 
-fn claim_lane(store: &mut Store, lane: &str, version_id: Uuid, limit: usize) -> Vec<WikiPendingOp> {
+fn claim_lane(
+    store: &mut WikiJob,
+    lane: &str,
+    version_id: Uuid,
+    limit: usize,
+) -> Vec<WikiPendingOp> {
     let stale_before = Utc::now() - Duration::minutes(STALE_CLAIM_MIN as i64);
     let mut out = Vec::new();
     let now = Utc::now();
@@ -1406,7 +1462,7 @@ fn claim_lane(store: &mut Store, lane: &str, version_id: Uuid, limit: usize) -> 
     out
 }
 
-fn trim_ops(store: &mut Store, ids: &[i64]) {
+fn trim_ops(store: &mut WikiJob, ids: &[i64]) {
     store.wiki_ops.retain(|o| {
         if !ids.contains(&o.id) {
             return true;
@@ -1415,14 +1471,14 @@ fn trim_ops(store: &mut Store, ids: &[i64]) {
     });
 }
 
-fn clear_lane(store: &mut Store, lane: &str, version_id: Uuid) {
+fn clear_lane(store: &mut WikiJob, lane: &str, version_id: Uuid) {
     store
         .wiki_ops
         .retain(|o| !(o.lane == lane && o.version_id == version_id));
 }
 
 fn schedule_trigger(
-    store: &mut Store,
+    store: &mut WikiJob,
     task_type: &str,
     version_id: Uuid,
     delay_secs: u64,
@@ -1446,7 +1502,7 @@ fn schedule_trigger(
     );
 }
 
-fn try_slug_lock(store: &mut Store, version_id: Uuid, slug: &str) -> bool {
+fn try_slug_lock(store: &mut WikiJob, version_id: Uuid, slug: &str) -> bool {
     let key = slug_lock_key(version_id, slug);
     let now = Utc::now();
     if let Some(held) = store.wiki_slug_locks.get(&key)
@@ -1458,13 +1514,13 @@ fn try_slug_lock(store: &mut Store, version_id: Uuid, slug: &str) -> bool {
     true
 }
 
-fn release_slug_lock(store: &mut Store, version_id: Uuid, slug: &str) {
+fn release_slug_lock(store: &mut WikiJob, version_id: Uuid, slug: &str) {
     store
         .wiki_slug_locks
         .remove(&slug_lock_key(version_id, slug));
 }
 
-fn reserve_inflight(store: &mut Store, version_id: Uuid) -> bool {
+fn reserve_inflight(store: &mut WikiJob, version_id: Uuid) -> bool {
     let live = store
         .wiki_inflight
         .get(&version_id)
@@ -1476,7 +1532,7 @@ fn reserve_inflight(store: &mut Store, version_id: Uuid) -> bool {
     true
 }
 
-fn release_inflight(store: &mut Store, version_id: Uuid) {
+fn release_inflight(store: &mut WikiJob, version_id: Uuid) {
     store.wiki_inflight.remove(&version_id);
 }
 
@@ -1499,10 +1555,11 @@ mod tests {
     use super::*;
     use crate::{Chunk, Document, ProductVersion};
 
-    fn seed() -> (Store, Uuid, Uuid) {
-        let mut s = Store::default();
+    fn seed() -> (WikiJob, Uuid, Uuid) {
+        let mut s = WikiJob::default();
         let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         let vid = v.id;
+        s.version_id = vid;
         s.versions.insert(vid, v);
         let doc = Document::new(
             vid,
@@ -1557,8 +1614,8 @@ mod tests {
         );
         let did2 = doc2.id;
         s.documents.insert(did2, doc2);
-        enqueue_ingest(&mut s, vid, did);
-        enqueue_ingest(&mut s, vid, did2);
+        enqueue_ingest_on_job(&mut s, vid, did);
+        enqueue_ingest_on_job(&mut s, vid, did2);
         assert_eq!(
             s.wiki_ops
                 .iter()
@@ -1582,8 +1639,8 @@ mod tests {
     #[test]
     fn lanes_do_not_mix() {
         let (mut s, vid, did) = seed();
-        enqueue_ingest(&mut s, vid, did);
-        process_ingest(&mut s, vid).unwrap();
+        enqueue_ingest_on_job(&mut s, vid, did);
+        process_ingest_on_job(&mut s, vid).unwrap();
         assert!(
             s.wiki_ops.iter().all(|o| o.lane == TYPE_WIKI_FINALIZE),
             "ingest lane drained; leftover is finalize"
@@ -1598,7 +1655,7 @@ mod tests {
             .iter()
             .filter(|o| o.lane == TYPE_WIKI_FINALIZE)
             .count();
-        process_finalize(&mut s, vid).unwrap();
+        process_finalize_on_job(&mut s, vid).unwrap();
         assert!(
             s.wiki_ops
                 .iter()
@@ -1617,8 +1674,8 @@ mod tests {
             d.parse_status = crate::ParseStatus::Finalizing;
             d.pending_subtasks_count = 1;
         }
-        write_tombstone(&mut s, vid, did);
-        enqueue_ingest(&mut s, vid, did);
+        write_tombstone_on_job(&mut s, vid, did);
+        enqueue_ingest_on_job(&mut s, vid, did);
         assert_eq!(s.documents[&did].pending_subtasks_count, 0);
         assert!(s.wiki.is_empty());
     }
@@ -1626,7 +1683,7 @@ mod tests {
     #[test]
     fn stale_claim_is_reclaimable() {
         let (mut s, vid, did) = seed();
-        enqueue_ingest(&mut s, vid, did);
+        enqueue_ingest_on_job(&mut s, vid, did);
         s.wiki_ops[0].claimed_at = Some(Utc::now() - Duration::minutes(91));
         let claimed = claim_lane(&mut s, TYPE_WIKI_INGEST, vid, 5);
         assert_eq!(claimed.len(), 1);
@@ -1659,10 +1716,10 @@ mod tests {
                 generated_questions: Vec::new(),
             };
             s.chunks.insert(c.id, c);
-            enqueue_ingest(&mut s, vid, did);
+            enqueue_ingest_on_job(&mut s, vid, did);
         }
         s.queue.clear();
-        process_ingest(&mut s, vid).unwrap();
+        process_ingest_on_job(&mut s, vid).unwrap();
         let remaining = s
             .wiki_ops
             .iter()
@@ -1676,8 +1733,8 @@ mod tests {
     fn wiki_disabled_skips_without_error() {
         let (mut s, vid, did) = seed();
         s.versions.get_mut(&vid).unwrap().wiki_enabled = false;
-        enqueue_ingest(&mut s, vid, did);
-        process_ingest(&mut s, vid).unwrap();
+        enqueue_ingest_on_job(&mut s, vid, did);
+        process_ingest_on_job(&mut s, vid).unwrap();
         let remaining = s
             .wiki_ops
             .iter()
@@ -1693,9 +1750,9 @@ mod tests {
         let slug = summary_slug(did);
         s.wiki_slug_locks
             .insert(slug_lock_key(vid, &slug), Utc::now());
-        enqueue_ingest(&mut s, vid, did);
+        enqueue_ingest_on_job(&mut s, vid, did);
         s.queue.clear();
-        process_ingest(&mut s, vid).unwrap();
+        process_ingest_on_job(&mut s, vid).unwrap();
         assert_eq!(s.documents[&did].pending_subtasks_count, 1);
         let left = s
             .wiki_ops
@@ -1749,9 +1806,9 @@ mod tests {
             c.content = "body of Alpha and Beta".into();
             c.end_at = c.content.chars().count() as i32;
         }
-        enqueue_ingest(&mut s, vid, did);
-        process_ingest(&mut s, vid).unwrap();
-        process_finalize(&mut s, vid).unwrap();
+        enqueue_ingest_on_job(&mut s, vid, did);
+        process_ingest_on_job(&mut s, vid).unwrap();
+        process_finalize_on_job(&mut s, vid).unwrap();
         assert!(
             s.wiki
                 .values()
@@ -1807,8 +1864,8 @@ mod tests {
                 chunk_ids: vec![],
             },
         );
-        enqueue_ingest(&mut s, vid, did);
-        process_ingest(&mut s, vid).unwrap();
+        enqueue_ingest_on_job(&mut s, vid, did);
+        process_ingest_on_job(&mut s, vid).unwrap();
         let first_refs = s
             .wiki
             .values()
@@ -1847,8 +1904,8 @@ mod tests {
                 chunk_ids: vec![c2.id],
             },
         );
-        enqueue_ingest(&mut s, vid, did2);
-        process_ingest(&mut s, vid).unwrap();
+        enqueue_ingest_on_job(&mut s, vid, did2);
+        process_ingest_on_job(&mut s, vid).unwrap();
         let entity = s
             .wiki
             .values()
@@ -1861,8 +1918,8 @@ mod tests {
     #[test]
     fn folder_prune_waits_while_ingest_pending() {
         let (mut s, vid, did) = seed();
-        enqueue_ingest(&mut s, vid, did);
-        process_ingest(&mut s, vid).unwrap();
+        enqueue_ingest_on_job(&mut s, vid, did);
+        process_ingest_on_job(&mut s, vid).unwrap();
         let extra = Document::new(
             vid,
             "More".into(),
@@ -1873,8 +1930,8 @@ mod tests {
         );
         let did2 = extra.id;
         s.documents.insert(did2, extra);
-        enqueue_ingest(&mut s, vid, did2);
-        process_finalize(&mut s, vid).unwrap();
+        enqueue_ingest_on_job(&mut s, vid, did2);
+        process_finalize_on_job(&mut s, vid).unwrap();
         assert!(
             s.wiki_ops
                 .iter()

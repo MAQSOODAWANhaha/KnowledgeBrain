@@ -48,6 +48,44 @@ pub fn infer_output_language(sample: &str) -> String {
     }
 }
 
+pub fn language_for_document_parts(
+    title: &str,
+    chunk_languages: &[String],
+    chunks: &std::collections::HashMap<uuid::Uuid, crate::Chunk>,
+) -> String {
+    if let Some(forced) = env_content_language() {
+        return forced;
+    }
+    if let Some(tag) = chunk_languages
+        .iter()
+        .map(|s| s.trim())
+        .find(|s| !s.is_empty())
+    {
+        return normalize_language_tag(tag);
+    }
+    let mut sample = String::new();
+    sample.push_str(title);
+    sample.push('\n');
+    if sample
+        .chars()
+        .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
+        .count()
+        < 12
+    {
+        for chunk in chunks
+            .values()
+            .filter(|c| matches!(c.chunk_type.as_str(), "text" | "image_ocr"))
+        {
+            sample.push_str(&chunk.content);
+            sample.push('\n');
+            if sample.len() > 6000 {
+                break;
+            }
+        }
+    }
+    infer_output_language(&sample)
+}
+
 pub fn language_for_document(store: &Store, document_id: Uuid) -> String {
     if let Some(forced) = env_content_language() {
         return forced;
