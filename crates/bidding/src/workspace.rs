@@ -417,6 +417,7 @@ fn insert_block(nodes: &mut [Value], blocks: &mut Vec<Value>, operation: &Value)
         .get("block")
         .cloned()
         .ok_or_else(|| invalid("block missing"))?;
+    crate::content_block::validate_content_block(&block).map_err(invalid)?;
     let lineage = uuid(&block, "lineage_id")?;
     if blocks
         .iter()
@@ -449,6 +450,7 @@ fn update_block(blocks: &mut [Value], operation: &Value) -> Result<()> {
         .get("block")
         .cloned()
         .ok_or_else(|| invalid("block missing"))?;
+    crate::content_block::validate_content_block(&next).map_err(invalid)?;
     if uuid(&next, "lineage_id")? != lineage {
         return Err(invalid("updated block lineage changed"));
     }
@@ -506,6 +508,15 @@ fn insert_asset_block(
 ) -> Result<()> {
     let lineage = Uuid::new_v4();
     let asset = uuid(operation, "asset_revision_id")?;
+    let content = crate::content_block::BlockContent::Image {
+        asset_revision_id: asset,
+        width_mm: 120.0,
+        alignment: crate::content_block::ImageAlignment::Center,
+        crop: crate::content_block::Crop { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 },
+        caption: None,
+        alt: String::new(),
+    };
+    let content_sha256 = content.sha256().map_err(|error| invalid(error.to_string()))?;
     let synthetic = json!({
         "kind": "insert_block",
         "node_lineage_id": uuid(operation, "node_lineage_id")?,
@@ -519,8 +530,8 @@ fn insert_asset_block(
             "origin": "human",
             "dependency_sha256": null,
             "stale": false,
-            "content_sha256": "",
-            "content": {"asset_revision_id": asset, "alt": ""}
+            "content_sha256": content_sha256,
+            "content": content
         }
     });
     insert_block(nodes, blocks, &synthetic)
