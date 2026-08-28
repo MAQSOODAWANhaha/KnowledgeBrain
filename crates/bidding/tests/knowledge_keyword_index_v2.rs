@@ -389,9 +389,10 @@ async fn assert_seeded_fixture(pool: PgPool, fixture: Fixture) {
     );
 
     let missing_id = Uuid::new_v4();
-    let missing_error = knowledge::knowledge_index_v2::rebuild_keyword_indexes_v2(&pool, missing_id)
-        .await
-        .unwrap_err();
+    let missing_error =
+        knowledge::knowledge_index_v2::rebuild_keyword_indexes_v2(&pool, missing_id)
+            .await
+            .unwrap_err();
     let database_error = missing_error.as_database_error().unwrap();
     assert_eq!(database_error.code().as_deref(), Some("23503"));
     assert!(
@@ -625,7 +626,10 @@ async fn keyword_tokenizer_rebuild_concurrency_and_acl_are_exact() {
     }
 
     assert_eq!(knowledge::index::KEYWORD_TOKENIZER_V2, TOKENIZER);
-    assert_eq!(knowledge::index::KEYWORD_TOKENIZER_VERSION_V2, TOKENIZER_VERSION);
+    assert_eq!(
+        knowledge::index::KEYWORD_TOKENIZER_VERSION_V2,
+        TOKENIZER_VERSION
+    );
     for (input, expected) in [
         ("Router42 ABC123", "router42 abc123"),
         ("alpha,beta...gamma", "alpha beta gamma"),

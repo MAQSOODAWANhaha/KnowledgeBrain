@@ -32,40 +32,8 @@ pub async fn load_tender_document_process_input_v2(
     frozen_input_sha256: &str,
 ) -> Result<Option<FrozenTenderDocumentRow>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT typed.request_artifact_id,typed.request_revision,typed.frozen_input_sha256,
-                typed.project_id,typed.document_id,typed.document_sha256,
-                typed.role_revision_id,typed.role_revision_sha256,
-                typed.converter_contract_id,typed.converter_contract_sha256,
-                document.file_name,document.media_type,document.original_object_ref,document.byte_length
-           FROM bid_tender_document_process_request_identities typed
-           JOIN bid_async_request_snapshot_artifacts request_value
-             ON request_value.id=typed.request_artifact_id
-            AND request_value.project_id=typed.project_id
-            AND request_value.request_kind='tender_document_process'
-            AND request_value.revision=typed.request_revision
-            AND request_value.frozen_input_sha256=typed.frozen_input_sha256
-           JOIN bid_documents document
-             ON document.project_id=typed.project_id
-            AND document.id=typed.document_id
-            AND document.original_sha256=typed.document_sha256
-           JOIN bid_document_role_revision_artifacts role_value
-             ON role_value.project_id=typed.project_id
-            AND role_value.document_id=typed.document_id
-            AND role_value.id=typed.role_revision_id
-            AND role_value.content_sha256=typed.role_revision_sha256
-           JOIN bid_authoring_contract_artifacts converter
-             ON converter.id=typed.converter_contract_id
-            AND converter.content_sha256=typed.converter_contract_sha256
-            AND converter.contract_kind='converter'
-           JOIN object_registry object_value
-             ON object_value.object_ref=document.original_object_ref
-            AND object_value.digest=document.original_sha256
-            AND object_value.media_type=document.media_type
-            AND object_value.byte_length=document.byte_length
-            AND object_value.state='available'
-          WHERE typed.request_artifact_id=$1
-            AND typed.request_revision=$2
-            AND typed.frozen_input_sha256=$3::kb_sha256",
+        "SELECT * FROM kb_bid_v2_load_tender_document_process_input(
+           $1,$2,$3::kb_sha256)",
     )
     .bind(request_artifact_id)
     .bind(request_revision)
@@ -243,6 +211,29 @@ pub async fn list_tender_documents_v2(
         .await
 }
 
+pub async fn retry_tender_document_v2(
+    pool: &PgPool,
+    project_id: Uuid,
+    document_id: Uuid,
+    request_artifact_id: Uuid,
+    expected_generation: i64,
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_retry_tender_document($1,$2,$3,$4,$5::kb_actor_identity,$6,$7,$8::kb_sha256)",
+    )
+    .bind(project_id)
+    .bind(document_id)
+    .bind(request_artifact_id)
+    .bind(expected_generation)
+    .bind(&context.actor)
+    .bind(&context.idempotency_key)
+    .bind(&context.request.bytes)
+    .bind(&context.request.sha256)
+    .fetch_one(pool)
+    .await
+}
+
 pub async fn patch_document_role_v2(
     pool: &PgPool,
     project_id: Uuid,
@@ -318,6 +309,92 @@ pub async fn list_document_relations_v2(
         .await
 }
 
+pub async fn next_quote_snapshot_revision_v2(
+    pool: &PgPool,
+    project_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_next_quote_snapshot_revision($1,$2::kb_actor_identity)")
+        .bind(project_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+pub struct PublishQuoteSnapshotV2<'a> {
+    pub project_id: Uuid,
+    pub snapshot_id: Uuid,
+    pub expected_revision: i64,
+    pub staging_id: Uuid,
+    pub object_ref: &'a str,
+    pub content_sha256: &'a str,
+    pub canonical_payload: &'a [u8],
+}
+
+pub async fn publish_quote_snapshot_v2(
+    pool: &PgPool,
+    input: PublishQuoteSnapshotV2<'_>,
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_publish_quote_snapshot($1,$2,$3,$4,$5::kb_object_ref,$6::kb_sha256,$7,$8,$9::kb_actor_identity,$10,$11,$12::kb_sha256)")
+        .bind(input.project_id).bind(input.snapshot_id).bind(input.expected_revision).bind(input.staging_id)
+        .bind(input.object_ref).bind(input.content_sha256).bind(input.canonical_payload.len() as i64)
+        .bind(input.canonical_payload).bind(&context.actor).bind(&context.idempotency_key)
+        .bind(&context.request.bytes).bind(&context.request.sha256).fetch_one(pool).await
+}
+
+pub async fn list_quote_snapshots_v2(
+    pool: &PgPool,
+    project_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_list_quote_snapshots($1,$2::kb_actor_identity)")
+        .bind(project_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn get_quote_snapshot_v2(
+    pool: &PgPool,
+    project_id: Uuid,
+    snapshot_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_get_quote_snapshot($1,$2,$3::kb_actor_identity)")
+        .bind(project_id)
+        .bind(snapshot_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn list_document_sets_v2(
+    pool: &PgPool,
+    project_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_list_document_sets($1,$2::kb_actor_identity)")
+        .bind(project_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn get_document_set_v2(
+    pool: &PgPool,
+    project_id: Uuid,
+    document_set_id: Uuid,
+    actor: &str,
+) -> Result<Option<Value>, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_get_document_set($1,$2,$3::kb_actor_identity)")
+        .bind(project_id)
+        .bind(document_set_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
 pub async fn freeze_document_set_v2(
     pool: &PgPool,
     project_id: Uuid,
@@ -349,11 +426,11 @@ pub async fn publish_disposition_set_v2(
     project_id: Uuid,
     document_set_id: Uuid,
     items: &Value,
-    expected_artifact_id: Uuid,
-    expected_sha256: &str,
+    expected: (Uuid, &str),
     request_artifact_id: Uuid,
     context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
+    let (expected_artifact_id, expected_sha256) = expected;
     sqlx::query_scalar(
         "SELECT kb_bid_v2_publish_disposition_set(
           $1,$2,$3,$4,$5::kb_sha256,$6,$7::kb_actor_identity,$8,$9,$10::kb_sha256)",
@@ -378,6 +455,18 @@ pub async fn list_source_units_v2(
     actor: &str,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar("SELECT kb_bid_v2_list_source_units($1,$2::kb_actor_identity)")
+        .bind(project_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn list_structured_forms_v2(
+    pool: &PgPool,
+    project_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_list_structured_forms($1,$2::kb_actor_identity)")
         .bind(project_id)
         .bind(actor)
         .fetch_one(pool)
@@ -447,6 +536,7 @@ pub struct PublishRequirementSupersessionV2<'a> {
     pub old_requirement_revision_id: Uuid,
     pub new_requirement_revision_id: Uuid,
     pub applicability: &'a Value,
+    pub tombstone: bool,
     pub expected_artifact_id: Option<Uuid>,
     pub expected_sha256: Option<&'a str>,
 }
@@ -458,13 +548,14 @@ pub async fn publish_requirement_supersession_v2(
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kb_bid_v2_publish_requirement_supersession(
-          $1,$2,$3,$4,$5,$6,$7::kb_sha256,$8::kb_actor_identity,$9,$10,$11::kb_sha256)",
+          $1,$2,$3,$4,$5,$6,$7,$8::kb_sha256,$9::kb_actor_identity,$10,$11,$12::kb_sha256)",
     )
     .bind(input.project_id)
     .bind(input.lineage_id)
     .bind(input.old_requirement_revision_id)
     .bind(input.new_requirement_revision_id)
     .bind(input.applicability)
+    .bind(input.tombstone)
     .bind(input.expected_artifact_id)
     .bind(input.expected_sha256)
     .bind(&context.actor)
@@ -538,6 +629,58 @@ pub async fn create_outline_candidate_v2(
     .await
 }
 
+pub async fn load_outline_generation_input_v2(
+    pool: &PgPool,
+    request_artifact_id: Uuid,
+    request_revision: i64,
+    frozen_input_sha256: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_load_outline_generation_input($1,$2,$3::kb_sha256)")
+        .bind(request_artifact_id)
+        .bind(request_revision)
+        .bind(frozen_input_sha256)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn publish_outline_generation_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    candidate: (Uuid, &[u8], &str),
+    nodes: &Value,
+) -> Result<Value, sqlx::Error> {
+    let (candidate_id, candidate_payload, candidate_sha256) = candidate;
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_publish_outline_generation($1,$2,$3::kb_sha256,$4,$5,$6::kb_sha256,$7)",
+    )
+    .bind(request.request_artifact_id)
+    .bind(request.request_revision)
+    .bind(&request.frozen_input_sha256)
+    .bind(candidate_id)
+    .bind(candidate_payload)
+    .bind(candidate_sha256)
+    .bind(nodes)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn mark_outline_generation_failed_v2(
+    pool: &PgPool,
+    request_artifact_id: Uuid,
+    request_revision: i64,
+    frozen_input_sha256: &str,
+    error_code: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT kb_bid_v2_mark_outline_generation_failed($1,$2,$3::kb_sha256,$4)")
+        .bind(request_artifact_id)
+        .bind(request_revision)
+        .bind(frozen_input_sha256)
+        .bind(error_code)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
 pub async fn get_async_request_v2(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -572,12 +715,12 @@ pub async fn accept_candidate_v2(
     pool: &PgPool,
     workspace_id: Uuid,
     candidate_id: Uuid,
-    expected_revision_id: Uuid,
-    expected_sha256: &str,
+    expected: (Uuid, &str),
     snapshot: &Value,
     selected_ordinals: &[i32],
     context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
+    let (expected_revision_id, expected_sha256) = expected;
     sqlx::query_scalar(
         "SELECT kb_bid_v2_accept_candidate(
           $1,$2,$3,$4::kb_sha256,$5,$6,$7::kb_actor_identity,$8,$9,$10::kb_sha256)",
@@ -613,6 +756,31 @@ pub async fn reject_candidate_v2(
     .bind(&context.request.sha256)
     .fetch_one(pool)
     .await
+}
+
+pub async fn get_requirement_projection_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_get_requirement_projection($1,$2::kb_actor_identity)")
+        .bind(workspace_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn refresh_requirement_projection_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    expected_artifact_id: Uuid,
+    expected_sha256: &str,
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_refresh_requirement_projection($1,$2,$3::kb_sha256,$4::kb_actor_identity,$5,$6,$7::kb_sha256)")
+        .bind(workspace_id).bind(expected_artifact_id).bind(expected_sha256).bind(&context.actor)
+        .bind(&context.idempotency_key).bind(&context.request.bytes).bind(&context.request.sha256)
+        .fetch_one(pool).await
 }
 
 pub async fn list_workspace_assets_v2(
@@ -665,6 +833,94 @@ pub async fn upload_workspace_asset_v2(
     .await
 }
 
+pub async fn prepare_workspace_attachment_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    source_asset_revision_id: Uuid,
+    page_source_asset_ids: &[Uuid],
+    widths_px: &[i32],
+    heights_px: &[i32],
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    let page_item_ids = (0..page_source_asset_ids.len())
+        .map(|_| Uuid::new_v4())
+        .collect::<Vec<_>>();
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_prepare_workspace_attachment(
+        $1,$2,$3,$4,$5,$6,$7,$8::kb_actor_identity,$9,$10,$11::kb_sha256)",
+    )
+    .bind(workspace_id)
+    .bind(source_asset_revision_id)
+    .bind(Uuid::new_v4())
+    .bind(page_source_asset_ids)
+    .bind(&page_item_ids)
+    .bind(widths_px)
+    .bind(heights_px)
+    .bind(&context.actor)
+    .bind(&context.idempotency_key)
+    .bind(&context.request.bytes)
+    .bind(&context.request.sha256)
+    .fetch_one(pool)
+    .await
+}
+
+#[derive(Debug)]
+pub struct PublishPdfAttachmentPreparationV2<'a> {
+    pub request_artifact_id: Uuid,
+    pub request_revision: i64,
+    pub frozen_input_sha256: &'a str,
+    pub source_asset_revision_id: Uuid,
+    pub preparation_id: Uuid,
+    pub page_item_ids: &'a [Uuid],
+    pub staging_ids: &'a [Uuid],
+    pub object_refs: &'a [String],
+    pub content_sha256s: &'a [String],
+    pub media_types: &'a [String],
+    pub byte_lengths: &'a [i64],
+    pub widths_px: &'a [i32],
+    pub heights_px: &'a [i32],
+}
+
+pub async fn publish_pdf_attachment_preparation_v2(
+    pool: &PgPool,
+    input: PublishPdfAttachmentPreparationV2<'_>,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_publish_pdf_attachment_preparation(
+        $1,$2,$3::kb_sha256,$4,$5,$6,$7,$8::kb_object_ref[],$9::kb_sha256[],$10,
+        $11,$12,$13,$14::kb_actor_identity)",
+    )
+    .bind(input.request_artifact_id)
+    .bind(input.request_revision)
+    .bind(input.frozen_input_sha256)
+    .bind(input.source_asset_revision_id)
+    .bind(input.preparation_id)
+    .bind(input.page_item_ids)
+    .bind(input.staging_ids)
+    .bind(input.object_refs)
+    .bind(input.content_sha256s)
+    .bind(input.media_types)
+    .bind(input.byte_lengths)
+    .bind(input.widths_px)
+    .bind(input.heights_px)
+    .bind("system:submission-export-v2")
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn retire_workspace_asset_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    asset_revision_id: Uuid,
+    reason: &str,
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_retire_workspace_asset($1,$2,$3,$4::kb_actor_identity,$5,$6,$7::kb_sha256)")
+        .bind(workspace_id).bind(asset_revision_id).bind(reason).bind(&context.actor)
+        .bind(&context.idempotency_key).bind(&context.request.bytes).bind(&context.request.sha256)
+        .fetch_one(pool).await
+}
+
 pub async fn create_outline_checkpoint_v2(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -687,6 +943,500 @@ pub async fn create_outline_checkpoint_v2(
     .bind(&context.request.sha256)
     .fetch_one(pool)
     .await
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateContentRequestV2<'a> {
+    pub workspace_id: Uuid,
+    pub expected_revision_id: Uuid,
+    pub expected_sha256: &'a str,
+    pub operation: &'a str,
+    pub target_kind: &'a str,
+    pub target_node_lineage_id: Option<Uuid>,
+    pub fill_policy: &'a str,
+    pub insertion_anchor: Option<&'a Value>,
+    pub evidence_selection_mode: &'a str,
+    pub pick_set_artifact_id: Option<Uuid>,
+}
+
+pub async fn create_content_request_v2(
+    pool: &PgPool,
+    input: CreateContentRequestV2<'_>,
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_create_content_request(
+          $1,$2,$3::kb_sha256,$4,$5,$6,$7,$8,$9,$10,
+          $11::kb_actor_identity,$12,$13,$14::kb_sha256)",
+    )
+    .bind(input.workspace_id)
+    .bind(input.expected_revision_id)
+    .bind(input.expected_sha256)
+    .bind(input.operation)
+    .bind(input.target_kind)
+    .bind(input.target_node_lineage_id)
+    .bind(input.fill_policy)
+    .bind(input.insertion_anchor)
+    .bind(input.evidence_selection_mode)
+    .bind(input.pick_set_artifact_id)
+    .bind(&context.actor)
+    .bind(&context.idempotency_key)
+    .bind(&context.request.bytes)
+    .bind(&context.request.sha256)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn load_content_generation_input_v2(
+    pool: &PgPool,
+    request_artifact_id: Uuid,
+    request_revision: i64,
+    frozen_input_sha256: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_load_content_generation_input($1,$2,$3::kb_sha256)")
+        .bind(request_artifact_id)
+        .bind(request_revision)
+        .bind(frozen_input_sha256)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn publish_content_generation_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    attestation: (Uuid, &str),
+    matches: &Value,
+    candidate: Option<(Uuid, &[u8], &str)>,
+    operations: &Value,
+) -> Result<Value, sqlx::Error> {
+    let (attestation_id, attestation_sha256) = attestation;
+    let (candidate_id, candidate_payload, candidate_sha256) = candidate
+        .map(|(id, payload, sha256)| (Some(id), Some(payload), Some(sha256)))
+        .unwrap_or((None, None, None));
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_publish_content_generation(
+          $1,$2,$3::kb_sha256,$4,$5::kb_sha256,$6,$7,$8,$9::kb_sha256,$10)",
+    )
+    .bind(request.request_artifact_id)
+    .bind(request.request_revision)
+    .bind(&request.frozen_input_sha256)
+    .bind(attestation_id)
+    .bind(attestation_sha256)
+    .bind(matches)
+    .bind(candidate_id)
+    .bind(candidate_payload)
+    .bind(candidate_sha256)
+    .bind(operations)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn mark_content_generation_failed_v2(
+    pool: &PgPool,
+    request_artifact_id: Uuid,
+    request_revision: i64,
+    frozen_input_sha256: &str,
+    error_code: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT kb_bid_v2_mark_content_generation_failed($1,$2,$3::kb_sha256,$4)")
+        .bind(request_artifact_id)
+        .bind(request_revision)
+        .bind(frozen_input_sha256)
+        .bind(error_code)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+pub async fn create_evidence_pick_set_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    matching_report_id: Uuid,
+    selected_item_ids: &[Uuid],
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_create_evidence_pick_set($1,$2,$3,$4::kb_actor_identity,$5,$6,$7::kb_sha256)")
+        .bind(workspace_id).bind(matching_report_id).bind(selected_item_ids)
+        .bind(&context.actor).bind(&context.idempotency_key).bind(&context.request.bytes)
+        .bind(&context.request.sha256).fetch_one(pool).await
+}
+
+pub async fn create_node_evidence_pick_set_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    node_lineage_id: Uuid,
+    matching_report_id: Uuid,
+    selected_item_ids: &[Uuid],
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_create_node_evidence_pick_set($1,$2,$3,$4,$5::kb_actor_identity,$6,$7,$8::kb_sha256)")
+        .bind(workspace_id).bind(node_lineage_id).bind(matching_report_id).bind(selected_item_ids)
+        .bind(&context.actor).bind(&context.idempotency_key).bind(&context.request.bytes)
+        .bind(&context.request.sha256).fetch_one(pool).await
+}
+
+pub async fn get_node_evidence_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    node_lineage_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_get_node_evidence($1,$2,$3::kb_actor_identity)")
+        .bind(workspace_id)
+        .bind(node_lineage_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn list_evidence_pick_sets_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_list_evidence_pick_sets($1,$2::kb_actor_identity)")
+        .bind(workspace_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn get_evidence_overview_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_get_evidence_overview($1,$2::kb_actor_identity)")
+        .bind(workspace_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn get_current_assessments_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_get_current_assessments($1,$2::kb_actor_identity)")
+        .bind(workspace_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn get_preview_html_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor: &str,
+) -> Result<(String, String), sqlx::Error> {
+    let input: Value =
+        sqlx::query_scalar("SELECT kb_bid_v2_load_preview_input($1,$2::kb_actor_identity)")
+            .bind(workspace_id)
+            .bind(actor)
+            .fetch_one(pool)
+            .await?;
+    let workspace = input
+        .get("workspace")
+        .ok_or_else(|| sqlx::Error::Protocol("preview workspace missing".into()))?;
+    let title = input
+        .get("title")
+        .and_then(Value::as_str)
+        .ok_or_else(|| sqlx::Error::Protocol("preview title missing".into()))?;
+    let etag = workspace
+        .get("sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| sqlx::Error::Protocol("preview workspace digest missing".into()))?
+        .to_owned();
+    let mut assets = Vec::new();
+    for value in input
+        .get("assets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let object_ref = value
+            .get("object_ref")
+            .and_then(Value::as_str)
+            .ok_or_else(|| sqlx::Error::Protocol("preview asset object missing".into()))?;
+        let digest = value
+            .get("sha256")
+            .and_then(Value::as_str)
+            .ok_or_else(|| sqlx::Error::Protocol("preview asset digest missing".into()))?
+            .to_owned();
+        if object_ref != format!("objects/{digest}") {
+            return Err(sqlx::Error::Protocol(
+                "preview asset object identity mismatch".into(),
+            ));
+        }
+        let media_type = value
+            .get("media_type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        // Preview uses a PDF source only as attachment metadata; trusted prepared
+        // page images are separate assets and remain byte-verified below.
+        let bytes = if media_type == "application/pdf" {
+            Vec::new()
+        } else {
+            let read_digest = digest.clone();
+            let bytes = tokio::task::spawn_blocking(move || platform::read_blob(&read_digest))
+                .await
+                .map_err(|error| sqlx::Error::Protocol(format!("preview asset join: {error}")))?
+                .map_err(|error| sqlx::Error::Protocol(format!("preview asset read: {error}")))?;
+            if platform::sha256_hex(&bytes) != digest {
+                return Err(sqlx::Error::Protocol(
+                    "preview asset digest mismatch".into(),
+                ));
+            }
+            bytes
+        };
+        assets.push(crate::render_v2::FrozenLayoutAssetV2 {
+            asset_revision_id: value
+                .get("asset_revision_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            sha256: digest,
+            media_type,
+            file_name: value
+                .get("file_name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            bytes,
+        });
+    }
+    let forms = input
+        .get("forms")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let preparations = input
+        .get("preparations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let layout = crate::render_v2::layout_preview_from_workspace_with_resources(
+        title,
+        workspace,
+        &assets,
+        &forms,
+        &preparations,
+        None,
+    )
+    .map_err(sqlx::Error::Protocol)?;
+    Ok((crate::render_v2::render_html(&layout), etag))
+}
+
+pub async fn create_submission_export_request_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    expected: (Uuid, &str),
+    output_mode: &str,
+    format: &str,
+    mode_options: &Value,
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    let (expected_revision_id, expected_sha256) = expected;
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_create_submission_export_request($1,$2,$3::kb_sha256,$4,$5,$6,$7::kb_actor_identity,$8,$9,$10::kb_sha256)",
+    )
+    .bind(workspace_id)
+    .bind(expected_revision_id)
+    .bind(expected_sha256)
+    .bind(output_mode)
+    .bind(format)
+    .bind(mode_options)
+    .bind(&context.actor)
+    .bind(&context.idempotency_key)
+    .bind(&context.request.bytes)
+    .bind(&context.request.sha256)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn list_submission_exports_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_list_submission_exports($1,$2::kb_actor_identity)")
+        .bind(workspace_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn get_submission_export_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    output_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_get_submission_export($1,$2,$3::kb_actor_identity)")
+        .bind(workspace_id)
+        .bind(output_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn get_submission_assessment_report_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    output_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_get_submission_assessment_report($1,$2,$3::kb_actor_identity)",
+    )
+    .bind(workspace_id)
+    .bind(output_id)
+    .bind(actor)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn get_submission_export_object_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    output_id: Uuid,
+    actor: &str,
+) -> Result<Option<Value>, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_get_submission_export_object($1,$2,$3::kb_actor_identity)")
+        .bind(workspace_id)
+        .bind(output_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn load_submission_export_input_v2(
+    pool: &PgPool,
+    request_artifact_id: Uuid,
+    request_revision: i64,
+    frozen_input_sha256: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_load_submission_export_input($1,$2,$3::kb_sha256)")
+        .bind(request_artifact_id)
+        .bind(request_revision)
+        .bind(frozen_input_sha256)
+        .fetch_one(pool)
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_submission_export_v2(
+    pool: &PgPool,
+    request_artifact_id: Uuid,
+    request_revision: i64,
+    frozen_input_sha256: &str,
+    font_staging_id: Uuid,
+    font_object_ref: &str,
+    font_sha256: &str,
+    font_media_type: &str,
+    snapshot_id: Uuid,
+    manifest_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_prepare_submission_export($1,$2,$3::kb_sha256,$4,$5::kb_object_ref,$6::kb_sha256,$7,$8,$9,$10::kb_actor_identity)",
+    )
+    .bind(request_artifact_id)
+    .bind(request_revision)
+    .bind(frozen_input_sha256)
+    .bind(font_staging_id)
+    .bind(font_object_ref)
+    .bind(font_sha256)
+    .bind(font_media_type)
+    .bind(snapshot_id)
+    .bind(manifest_id)
+    .bind(actor)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn load_submission_manifest_render_input_v2(
+    pool: &PgPool,
+    manifest_id: Uuid,
+    manifest_sha256: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_load_submission_manifest_render_input($1,$2::kb_sha256)")
+        .bind(manifest_id)
+        .bind(manifest_sha256)
+        .fetch_one(pool)
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn publish_submission_export_v2(
+    pool: &PgPool,
+    request_artifact_id: Uuid,
+    request_revision: i64,
+    frozen_input_sha256: &str,
+    font_staging_id: Uuid,
+    font_object_ref: &str,
+    font_sha256: &str,
+    font_media_type: &str,
+    snapshot_id: Uuid,
+    manifest_id: Uuid,
+    output_staging_id: Uuid,
+    output_id: Uuid,
+    output_object_ref: &str,
+    output_sha256: &str,
+    output_media_type: &str,
+    output_byte_length: i64,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_publish_submission_export($1,$2,$3::kb_sha256,$4,$5::kb_object_ref,$6::kb_sha256,$7,$8,$9,$10,$11,$12::kb_object_ref,$13::kb_sha256,$14,$15,$16::kb_actor_identity)",
+    )
+    .bind(request_artifact_id)
+    .bind(request_revision)
+    .bind(frozen_input_sha256)
+    .bind(font_staging_id)
+    .bind(font_object_ref)
+    .bind(font_sha256)
+    .bind(font_media_type)
+    .bind(snapshot_id)
+    .bind(manifest_id)
+    .bind(output_staging_id)
+    .bind(output_id)
+    .bind(output_object_ref)
+    .bind(output_sha256)
+    .bind(output_media_type)
+    .bind(output_byte_length)
+    .bind(actor)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn mark_submission_export_failed_v2(
+    pool: &PgPool,
+    request_artifact_id: Uuid,
+    request_revision: i64,
+    frozen_input_sha256: &str,
+    error_code: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT kb_bid_v2_mark_submission_export_failed($1,$2,$3::kb_sha256,$4)")
+        .bind(request_artifact_id)
+        .bind(request_revision)
+        .bind(frozen_input_sha256)
+        .bind(error_code)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+pub async fn async_request_status_v2(
+    pool: &PgPool,
+    request_artifact_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT status FROM bidding_v2_async_requests WHERE id=$1")
+        .bind(request_artifact_id)
+        .fetch_optional(pool)
+        .await
 }
 
 pub async fn load_authoring_job_payload_v2(
@@ -717,6 +1467,23 @@ pub async fn compile_requirement_set_v2(
     .bind("system:requirement-set-compile-v2")
     .fetch_one(pool)
     .await
+}
+
+pub async fn mark_requirement_set_compile_failed_v2(
+    pool: &PgPool,
+    request_artifact_id: Uuid,
+    request_revision: i64,
+    frozen_input_sha256: &str,
+    error_code: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT kb_bid_v2_mark_requirement_set_compile_failed($1,$2,$3::kb_sha256,$4)")
+        .bind(request_artifact_id)
+        .bind(request_revision)
+        .bind(frozen_input_sha256)
+        .bind(error_code)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn mark_tender_document_failed_v2(

@@ -144,7 +144,7 @@ async fn seed_fixture(pool: &PgPool) -> Fixture {
         },
         ChunkFixture {
             id: Uuid::new_v4(),
-            source_type: "image_ocr",
+            source_type: "text",
             content: "trusted gamma",
         },
         ChunkFixture {
@@ -530,6 +530,7 @@ fn frozen_hit(
         "chunk_sha256": knowledge::sha256_hex(chunk.content.as_bytes()),
         "chunk_byte_length": byte_length,
         "source_type": chunk.source_type,
+        "media": null,
         "retrieval_rank": rank,
         "retrieval_raw_score": "1.000000",
         "pre_rerank_rrf_rank": null,

@@ -1,121 +1,58 @@
-# 人工报价与定稿快照（可复用；非 Web 黄金路径）
+# 人工报价与不可变 QuoteSnapshotV1（V2 后端现状）
 
-> Target V2 黄金路径是文件 → 编制 → 导出，不把报价向导做成必经步。`QuoteSnapshot` 仍可作为冻结输入。产品契约见 [`../../docs/bidding/authoring.md`](../../../docs/bidding/authoring.md)，Web 见 [`../frontend-authoring.md`](../frontend-authoring.md)。本文只定义可复用的报价快照实施，不是编制主流程。
+> 招投标 V2 黄金路径固定为 `files → authoring → export`。报价不是向导前置步骤，也没有单独 Web 步骤。权威总契约见 [`../tender-to-submission-v2.md`](../tender-to-submission-v2.md) 与 [`../../../docs/bidding/authoring.md`](../../../docs/bidding/authoring.md)。
 
-报价由人录入和确认；系统只负责结构、计算、限价校验、快照和正式输出一致性。
-
-> 实施状态（2026-08-26）：Rust Decimal、QuoteSnapshotV1 canonical seam、最终 baseline、storage/API 和 Web 报价路径已落位；当前 checkout 的 Rust、强制活库 SQL、HTTP 与 mocked 浏览器回归已通过。fresh runtime 尚未验收，未部署。
+**实施状态（2026-08-28）**：后端已切换为服务端计算、append-only 的 QuoteSnapshotV1；fresh baseline、ObjectRegistry、HTTP、ContentGenerate 冻结输入、Assessment、Preview、DOCX/PDF 和 Manifest 均使用同一不可变 ID/hash。旧 draft/reopen/eligibility/Part/Gate 路径不属于 Target V2，也不保留兼容实现。
 
 ## 1. 边界
 
-Quote 拥有：
+V2 QuoteSnapshot 拥有：
 
-- 一个项目的一条 quote 聚合；
-- draft revision、line、edit version；
-- 行/总计计算与 CNY/税模式校验；
-- immutable `QuoteSnapshotV1`；
-- active finalized pointer 与 eligibility；
-- finalize/reopen/audit/idempotency。
+- project-wide 报价 revision；
+- CNY、含税/未税模式；
+- 服务端逐行及总计计算；
+- 人工逐行确认；
+- 最高限价身份，或无最高限价时的完整人工复核；
+- immutable canonical payload/hash；
+- ObjectRegistry 对象身份、current pointer、audit 和 idempotency receipt。
 
-Quote 不拥有：
+V2 QuoteSnapshot 不拥有：
 
-- 招标事实抽取或 pricing clause；
-- 产品成本和自动报价引擎；
-- 多币种/汇率；
-- submission part 内容编辑器。
+- mutable draft、reopen 或 eligibility 状态机；
+- 自动定价、成本引擎、多币种或汇率；
+- 招标事实抽取；
+- 固定 Part、SubmissionGate 或 PDF 业务阻断；
+- 独立 Web 向导。
 
-## 2. 数据模型
+## 2. 金额合同
 
-```text
-Quote
-  id, project_id UNIQUE
-  current_draft_revision_id NULLable
-  active_finalized_snapshot_id NULLable
-  next_revision
+- currency 固定 `CNY`，金额 scale 固定 2；
+- quantity、unit_price、tax_rate 输入 scale 固定 6；
+- Decimal 全部使用字符串，拒绝 JSON float、指数、正号、负数、多余 scale 和越界；
+- 舍入固定为 midpoint-away-from-zero；
+- 客户端不能提交或覆盖 basis/net/tax/gross/totals。
 
-QuoteRevision
-  id, quote_id, project_id, revision
-  status = draft|finalized|reopened
-  edit_version
-  currency_code = CNY
-  currency_scale = 2
-  tax_mode = tax_inclusive|tax_exclusive
-  title
-  notes NULLable
-  based_on_snapshot_id NULLable
-  actor/timestamps
-
-QuoteLine
-  id, quote_revision_id, ordinal
-  description
-  pricing_mode = unit_price|lump_sum
-  complete
-  quantity, unit, unit_price
-  entered_amount
-  tax_rate
-  basis_amount, net_amount, tax_amount, gross_amount
-  user_confirmed
-
-QuoteSnapshot
-  id, quote_id, revision_id, project_id
-  schema_version = 1
-  canonical_payload, content_sha256
-  title, notes, tax_mode, totals
-  ceiling provenance
-  fact/pricing provenance
-  eligibility
-  finalized actor/time
-```
-
-约束：
-
-- 创建首个 draft 后 `current_draft_revision_id` 与 `active_finalized_snapshot_id` 恰有一个非 NULL；
-- draft pointer 只能引用同 project/quote 且 status=draft 的 revision；
-- active pointer 只能引用同 project/quote 的 finalized snapshot；
-- snapshot payload/hash/totals/provenance immutable；历史 snapshot 不删除；
-- 普通 DB role 不能 UPDATE/DELETE/TRUNCATE snapshot。
-
-## 3. 金额与税
-
-### 3.1 通用表示
-
-- currency 固定 `CNY`；金额 scale=2；
-- quantity、unit_price、tax_rate 可用 scale=6；
-- API/canonical JSON 的 Decimal 一律为字符串，禁止 float、指数、`+`、`-0`；
-- 所有负数拒绝；折扣用非负调整行和 notes 表达；
-- round 固定 half-away-from-zero。
-
-### 3.2 unit price
-
-complete tuple：
+`unit_price`：
 
 ```text
 quantity > 0
 unit 非空
-0 <= unit_price <= 10^12
-basis = round(quantity * unit_price, 2)
+basis = round(quantity × unit_price, 2)
 ```
 
-quantity 上限 `10^9`；乘法中间值必须可放入 `numeric(30,6)`，结果必须可放入 `numeric(20,2)`。
-
-### 3.3 lump sum
-
-complete tuple：
+`lump_sum`：
 
 ```text
 quantity = unit = unit_price = NULL
-0 <= entered_amount <= 10^18 - 0.01
 basis = entered_amount
 ```
 
-### 3.4 税计算
-
-`tax_rate` 范围 `[0,1]`。
+税计算：
 
 ```text
 tax_exclusive:
   net = basis
-  tax = round(net * tax_rate, 2)
+  tax = round(net × tax_rate, 2)
   gross = net + tax
 
 tax_inclusive:
@@ -124,234 +61,99 @@ tax_inclusive:
   tax = gross - net
 ```
 
-totals 按 ordinal 对每条已经舍入至 2 位的 net/tax/gross 分别求和，不重新汇总未舍入中间值。Rust 与 DB 使用同一输入向量重算；任一金额或 total 越界返回 `QUOTE_AMOUNT_OVERFLOW`。
+总计由服务端对已舍入行金额求和。空报价、空 description、未确认行、非法 tuple 或 overflow 均 fail-closed。
 
-空 description、空报价、incomplete line、未 `user_confirmed` line 都禁止 finalize。
+## 3. 最高限价与人工复核
 
-## 4. 最高限价口径
-
-BidProject 的最高限价身份必须包含：
+`ceiling` 只能为 `null` 或冻结：
 
 ```text
-ceiling_price NULLable
-ceiling_currency NULLable (CNY)
-ceiling_basis = tax_inclusive|tax_exclusive|unspecified
-ceiling_revision
-ceiling_identity_sha256
+amount, currency_code=CNY, basis=tax_inclusive|tax_exclusive,
+ceiling_revision, ceiling_identity_sha256
 ```
 
-规则：
+- tax_inclusive 与 gross_total 比较；
+- tax_exclusive 与 net_total 比较；
+- 报价超过明确 ceiling 时拒绝发布；
+- ceiling 缺失时必须提交 `no_ceiling_review`，其中包含 reviewed=true、bounded reason、当前 user actor 和 RFC3339 UTC 时间；
+- ceiling 与 no_ceiling_review 互斥。
 
-- ceiling 为空时 currency 为空，basis 固定 `unspecified`；
-- ceiling 非空时 currency=CNY，basis 可由抽取/人工设置；无法从招标原文确定时保留 `unspecified`，不得猜测；
-- `tax_inclusive` 与 quote `gross_total` 比较；
-- `tax_exclusive` 与 quote `net_total` 比较；
-- `unspecified` + 非空 ceiling 禁止 finalize，返回 `CEILING_BASIS_UNSPECIFIED`；用户必须先明确修改项目事实；
-- 比较值大于 ceiling 拒绝，等于允许；
-- ceiling value/currency/basis/有无状态任一实际变化都 bump `ceiling_revision` 和 digest。
+## 4. QuoteSnapshotV1 canonical payload
 
-这样不会把含税/未税限价静默混用，也不需要在 quote 内再造第二份限价口径。
-
-## 5. QuoteSnapshotV1
-
-### 5.1 canonical payload
-
-唯一 storage seam `build_quote_snapshot_v1` 生成 canonical bytes/hash。顶层固定键序：
+顶层闭合字段：
 
 ```text
-schema_version,quote_id,project_id,revision,currency_code,currency_scale,
-tax_mode,title,notes,lines,net_total,tax_total,gross_total,ceiling,
-no_ceiling_review,fact_revision,pricing_revision,pricing_set_sha256
+schema_version, quote_id, project_id, revision,
+currency_code, currency_scale, tax_mode, title, notes, lines,
+net_total, tax_total, gross_total, ceiling, no_ceiling_review,
+fact_revision, pricing_revision, pricing_set_sha256
 ```
 
-每行固定键序：
+每行闭合字段：
 
 ```text
-id,ordinal,description,pricing_mode,quantity,unit,unit_price,entered_amount,
-tax_rate,basis_amount,net_amount,tax_amount,gross_amount,user_confirmed
+id, ordinal, description, pricing_mode,
+quantity, unit, unit_price, entered_amount, tax_rate,
+basis_amount, net_amount, tax_amount, gross_amount, user_confirmed
 ```
 
-`ceiling` 只能为 `null` 或：
+canonical bytes 由 `crates/bidding/src/quote_snapshot.rs::build_quote_snapshot_v1` 唯一生成：UTF-8、closed schema、稳定字段顺序、UUID 小写连字符、CNY 金额 2 位、计算输入 6 位。`content_sha256` 是这些 exact bytes 的 SHA-256。
 
-```json
-{
-  "amount": "1000000.00",
-  "currency_code": "CNY",
-  "basis": "tax_inclusive",
-  "ceiling_revision": 3,
-  "ceiling_identity_sha256": "<64 lowercase hex>"
-}
-```
+## 5. 数据与发布事务
 
-`no_ceiling_review` 只能为 `null` 或：
-
-```json
-{
-  "reviewed": true,
-  "reason": "招标文件未设置最高限价，已人工复核",
-  "actor_kind": "user",
-  "actor_id": "<uuid>",
-  "at": "<RFC3339 UTC microseconds>"
-}
-```
-
-两者互斥：有 ceiling 就必须有明确 basis 且 no-ceiling review 为 null；无 ceiling 就必须冻结完整人工 review。
-
-### 5.2 字节规则
-
-- UTF-8、无 BOM、无额外空白/额外键；
-- title trim 后 1..256 bytes；notes <=4096 bytes，空白规范为 NULL，但 canonical 键仍显式 `null`；
-- strings 不做 NFC/NFD 转换；quote/backslash/control chars 按固定小写 JSON escape；
-- UUID 小写连字符；time 为 UTC 微秒；digest 为 64 位小写 hex；
-- quantity/unit_price/tax_rate 固定 6 位 string，CNY 金额固定 2 位 string；
-- lines 按 ordinal，hash 为 canonical UTF-8 bytes 的 SHA-256；
-- JSONB 只是解析存储，不能用数据库任意 JSON 输出重新计算 hash。
-
-跨 Rust/SQL exact fixture 至少覆盖中文、escape、notes NULL/非 NULL、有 ceiling、无 ceiling review 和 pricing digest。
-
-## 6. draft 编辑
-
-所有 draft mutation 需要：
+唯一 baseline 使用：
 
 ```text
-durable actor
-idempotency_key
-expected_edit_version
-canonical payload hash
+bid_quote_snapshot_artifacts
+bid_quote_snapshot_object_identities
+bid_quote_snapshot_current
 ```
 
-成功后：
+发布顺序：
 
-- edit version +1；
-- 写 revision/line；
-- 重算预览 totals；
-- 写 audit/receipt；
-- stale quote preview/相关 draft part；
-- 同事务提交。
+1. `kb_bid_v2_next_quote_snapshot_revision` 在 project row lock 下分配数据库 canonical `quote_id + revision`；
+2. Rust 按该 identity 生成 canonical bytes/hash；
+3. API 把 exact bytes 放入 ObjectRegistry staging；
+4. `kb_bid_v2_publish_quote_snapshot` 在单事务中验证 actor、revision CAS、canonical schema、服务端金额、对象 identity；
+5. commit 对象 owner reference，插入 append-only artifact/object identity，推进 current ID/hash/generation；
+6. 写 audit 与首次 idempotency receipt。
 
-建议价格只能由用户显式“应用”成一次普通 draft edit；模型/worker 不能后台写正式 line 或设置 `user_confirmed=true`。
+SQL publication 不信任客户端 totals。普通 runtime role 不能直接 INSERT/UPDATE/DELETE/TRUNCATE QuoteSnapshot 表；PUBLIC 无 execute 权限。
 
-## 7. finalize
+相同 actor、operation、Idempotency-Key 和 request hash 只重放首次 receipt。API replay 创建的临时 staging 必须 abandon，不产生第二个 snapshot 或 owner reference。
 
-请求必须携带：
+## 6. HTTP
 
 ```text
-expected_edit_version
-expected_fact_revision
-expected_ceiling_revision
-expected_ceiling_identity_sha256
-expected_pricing_revision
-expected_pricing_set_sha256
-idempotency_key
+POST /api/v2/bid-projects/{project_id}/quote-snapshots
+GET  /api/v2/bid-projects/{project_id}/quote-snapshots
+GET  /api/v2/bid-projects/{project_id}/quote-snapshots/{snapshot_id}
 ```
 
-锁序：
+POST 只接受人工报价输入；DTO `deny_unknown_fields`。返回 immutable `quote_snapshot_id`、aggregate `quote_id`、revision、SHA、object_ref 和 byte_length。
 
-```text
-project -> quote -> current draft revision -> lines(ordinal)
-```
+不存在 V1 quote route、draft mutation、reopen、兼容读取、双写或 Feature Flag。
 
-单事务：
+## 7. Authoring、Assessment 与 Export
 
-1. project open、pointer/current revision/expected CAS；
-2. draft 非空，全部 line complete + user_confirmed；
-3. DB/Rust 重算每行和 totals；
-4. pricing revision/digest current；
-5. ceiling current：
-   - 有 ceiling：basis 必须明确，按 basis 比较；
-   - 无 ceiling：请求必须含 `no_ceiling_reviewed=true + bounded reason`；
-6. 构建 QuoteSnapshotV1，验证 canonical bytes/hash；
-7. revision -> finalized；
-8. `current_draft=NULL`，active pointer -> 新 eligible snapshot；
-9. 写 audit、stale 和首次 receipt。
+- ContentGenerate request 创建时从 `bid_quote_snapshot_current` 冻结 ID/hash；Worker loader 只读取 typed request 中的该 immutable identity，不追查 live current；
+- fulfillment binding 的 `target_kind=quote` 只接受同 project QuoteSnapshot；
+- Preview 读取当前 immutable snapshot，并通过共享 LayoutDocument 渲染报价表；
+- Assessment input hash 包含 QuoteSnapshot ID/hash；存在 pricing 要求但没有 snapshot 时产生 advisory `QUOTE_SNAPSHOT_MISSING`，不阻断导出；
+- SubmissionExport request 冻结对应 Assessment；RenderSnapshot/Manifest 依赖同一 QuoteSnapshot ID/hash；
+- DOCX/PDF 共用报价布局，不从 mutable draft 或客户端 totals 重算；
+- 报价缺失、风险提示和 stale 都是业务 warning；Schema、CAS、对象、digest 或渲染错误才技术失败。
 
-`expected_fact_revision` 只证明 finalize 时读取的是一致项目事实，不作为持续 eligibility 的全局比较字段。
+## 8. 验收
 
-## 8. eligibility
+必须覆盖：
 
-snapshot 状态：
-
-```text
-eligible
-ineligible_ceiling_changed
-ineligible_pricing_changed
-ineligible_multiple_inputs_changed
-superseded
-```
-
-只允许受控单向变化：eligible -> 单原因/multiple/superseded；单原因 -> multiple/superseded；multiple -> superseded。不得回到 eligible，不得用另一单原因覆盖旧原因。
-
-- ceiling identity 变化：标记 ceiling changed；
-- pricing revision/digest 变化：标记 pricing changed；
-- 两者都发生：multiple；
-- 普通 budget、开标、截止或有效期变化只 stale 实际消费者，不使 quote snapshot ineligible；
-- active pointer 不因 ineligible 自动清空，保留可审计 identity。
-
-可复用规则：eligibility 状态机、ceiling/pricing identity 比较、active pointer 不清空。若 Workspace/render 引用了 QuoteSnapshot，必须冻结同一 snapshot ID/hash，且与当时 ceiling/pricing identity 一致。
-
-当前代码 / 因目标变更待删除：`SubmissionGateV1` 要求正式 PDF 只接受 active + eligible。V2 导出读 `WorkspaceRevision`；缺报价或 ineligible 只进 Assessment，不阻断导出。
-
-## 9. reopen
-
-```text
-reopen(
-  expected_snapshot_id,
-  expected_fact_revision,
-  expected_pricing_revision,
-  idempotency_key
-)
-```
-
-验证 expected snapshot 等于 active（eligible 或 ineligible）后：
-
-- 旧 revision -> reopened；
-- 旧 snapshot -> superseded；
-- 从 snapshot 冻结的 title/notes/lines 逐字段复制到 `next_revision` draft；
-- `based_on_snapshot_id` 指向旧 snapshot；
-- active pointer 清空，current draft 指向新 revision；
-- 不读取被后续 live UI 改动的内容回填。
-
-可复用：reopen 复制冻结 snapshot，不读 live draft；重新 finalize 前没有 eligible active snapshot。
-
-当前代码 / 因目标变更待删除：重新 finalize 前禁止正式 PDF。V2 不把缺 eligible snapshot 做成业务导出门禁。
-
-## 10. Submission 读取
-
-可复用：renderer 只读冻结 snapshot artifact，不读 live draft。Workspace/render 若引用报价，所有引用必须是同一个 QuoteSnapshot ID/hash。
-
-V2 目标：不要求 `6:letter` / `6:quote` 或其它 part key。缺报价、ineligible、identity 不 current 只产生 Assessment，不阻断导出。
-
-当前代码 / 因目标变更待删除（V1 `RequiredPartSet` + `SubmissionGateV1`）：
-
-- 有 active eligible snapshot 时，`6:letter` 与 `6:quote` 必须引用同一个 snapshot ID/hash；
-- 无 eligible snapshot 时，DOCX 可冻结 NULL quote dependency 并使用固定 placeholder/warning；
-- PDF 对 NULL、ineligible、identity 不 current 均拒绝。
-
-## 11. API
-
-```text
-get_quote
-create_quote_draft
-patch_quote_header
-upsert_quote_line / delete_quote_line / reorder_quote_lines
-preview_quote_totals
-finalize_quote
-reopen_quote
-get_quote_snapshot
-```
-
-所有 write DTO 禁止客户端提交计算后 totals、snapshot hash、eligibility 或 active pointer。
-
-## 12. 专题验收
-
-- unit/lump complete tuple、负数、边界、overflow；
-- inclusive/exclusive 税公式与逐行舍入后求和；
-- ceiling inclusive 比 gross、exclusive 比 net、unspecified 拒绝；
-- no-ceiling 完整 review 与 actor；
-- title/notes 中文/escape canonical exact bytes；
-- finalize CAS、并发、pointer 恰一、snapshot immutable；
-- ceiling/pricing 单原因与 multiple eligibility 状态图；
-- reopen 逐字段复制旧 snapshot，不读 live draft；
-- V2：引用报价则冻结同一 snapshot；缺/ineligible 报价走 Assessment，无 PDF hard gate、无 part key；
-- 当前代码对照：DOCX placeholder 与 PDF hard gate、`6:letter`/`6:quote` 同 snapshot（待删除）；
-- 最终实现中不存在 JSON float、自动正式定价或从旧报价格式读取的兼容路径。
+- exclusive/inclusive 税公式与逐行舍入后求和；
+- unit-price/lump-sum closed tuple、负数、scale、unknown field 和 overflow 负例；
+- ceiling gross/net 比较及 no-ceiling 人工复核；
+- HTTP publish/replay 完全相等且无 staging 泄漏；
+- append-only、ObjectRegistry owner、current ID/hash 和 runtime privilege；
+- ContentGenerate loader 冻结同一 QuoteSnapshot；
+- Preview、Assessment、assessment report、RenderSnapshot、Manifest、DOCX/PDF 使用同一 identity；
+- fresh bootstrap 与 migrator re-entry；
+- 最终源码中不存在旧 Part/Gate、mutable draft、reopen、客户端 totals 或兼容路径。

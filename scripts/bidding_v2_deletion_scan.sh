@@ -2,7 +2,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-scope=(crates/bidding/src crates/api/src crates/worker/src crates/platform/src web/src/bid migrations deploy/queue-registry.toml deploy/docker-compose.yml)
+scope=(
+  crates/bidding/src crates/api/src crates/worker/src crates/platform/src web/src/bid migrations
+  ':(glob)deploy/**/*.sh' ':(glob)deploy/**/*.yml' ':(glob)deploy/**/*.yaml'
+  ':(glob)deploy/**/*.toml' ':(glob)deploy/**/Dockerfile*' deploy/queue-registry.toml
+)
 patterns=(
   'BidDeliveryV1|bid-delivery-v1|bid:delivery:v1'
   'SubmissionGateV1|submission_gate'

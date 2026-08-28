@@ -1,10 +1,10 @@
 # 招标文件驱动的投标文件编制 V2 详细设计
 
-> 状态：产品、领域、HTTP、Schema、Job 与 Web 详细合同已确认。唯一执行顺序见 [`authoring-clean-slate-execution.md`](authoring-clean-slate-execution.md)；其中“直接删除 Legacy V1、不兼容、不迁移、不双写、删除 first-launch”的原则和阶段验收覆盖本文旧有 Phase/cutover 描述。本文不得改变 [`../../docs/bidding/authoring.md`](../../docs/bidding/authoring.md) 的“用户主导、Assessment只提示、Word 式画布、clean-slate”目标契约。Web 详细设计见 [`frontend-authoring.md`](frontend-authoring.md)。
+> 状态：产品、领域、HTTP 与后端 Schema/Job 合同已实现；当前执行范围是 Phase 0–7 后端 clean-slate 交付。唯一执行顺序见 [`authoring-clean-slate-execution.md`](authoring-clean-slate-execution.md)；其中“直接删除 Legacy V1、不兼容、不迁移、不双写、删除 first-launch”的原则和阶段验收覆盖本文历史 Phase/cutover 记录。本文不得改变 [`../../docs/bidding/authoring.md`](../../docs/bidding/authoring.md) 的“用户主导、Assessment只提示、Word 式画布、clean-slate”目标契约。Web 详细合同保留在 [`frontend-authoring.md`](frontend-authoring.md)，但不在本轮修改或验收。
 
 ## Context
 
-当前实现已经具备招标文件上传与转换、来源定位、条款/事实抽取、两路知识匹配、人工报价、固定 PartSet、manifest 和 DOCX/PDF 渲染基础，但最终组卷仍依赖固定 `1、2:*、3、4、5、6:*` part key，正文编辑仍是 Markdown Textarea，旧 `SubmissionGateV1` 仍具有业务阻断语义。该名称在本文只用于指认必须删除的旧实现，不属于 Target V2 设计。
+切换前实现曾依赖固定 PartSet、旧 SubmissionGate 和旧组卷路径；这些名称在本文历史 review 记录中只用于说明已删除对象。当前生产招投标后端仅暴露 clean-slate `/api/v2`，不存在 V1 运行模式、旧 Part/Gate、迁移兼容或双写。
 
 面向用户的唯一主流程是：
 
@@ -39,7 +39,7 @@
 
 - 不为未来可能需求预建第二套pipeline、通用调度框架、额外状态机或平行业务概念；优先复用现有上传、DocReader、知识检索和DOCX/PDF能力。
 - artifact、CAS和冻结identity只保留保障来源可追踪、人工编辑不丢失、重试不重复以及导出可复现所必需的部分，不把合同复杂度本身作为交付目标。
-- `migration-manifest.toml`、queue/cutover fixture和Phase 0合同维护不是Phase 1的主任务；仅在当前功能保持一致性确有需要或Phase 7切换时处理。
+- fresh schema、queue registry 与运行合同随各 Phase 同步验证；不引入 migration manifest、first-launch 或 cutover 双模式。
 - 不得通过随意添加`#[allow(...)]`、关闭lint或弱化测试来绕过实现问题；应通过拆分函数、收敛类型或修正根因满足规范。
 - 自动化工具超时本身不等于测试失败；以明确执行完成的测试、构建和验收结果为准。
 - 若某项设计不能直接服务上述五步主流程，应延后、删除或降级为后续增强。
@@ -53,8 +53,8 @@
 - Target V2 不存在 `SubmissionGate`、`Gate PASS` 或 `Gate BLOCK` 业务概念；统一使用 advisory-only 的 `OutlineAssessmentSnapshot` 和 `SubmissionAssessmentSnapshot`。
 - Schema 非法、CAS 冲突、资产丢失、渲染失败等技术错误必须 fail-closed；这是执行失败，不是业务 Gate。
 - 不兼容旧固定 PartSet、旧 schema、旧 API 或历史数据；fresh baseline 一次性切换。
-- 分阶段开发期间允许“未激活的V2源码/Schema/测试fixture”与当前V1实现暂时同库存在，以保证每阶段可编译验证；这不是运行时双模式：V2路由、queue registry和first-launch manifest在Phase 7前不得激活，Phase 7一次性切换并删除V1实现。
-- V1招标输入必须支持 PDF、DOCX、XLSX 和图片；现有 API 只接受 PDF/DOCX，因此 XLSX 与图片需要新增受检 parser adapter。
+- 最终运行时只有 V2 路由、三份 direct fresh baseline 和五类粗粒度 queue；不存在 V1/V2 双模式或 first-launch manifest。
+- V2 招标输入支持 PDF、DOCX、XLSX、PNG、JPEG 与 WebP，全部先经过受检 parser/validator 边界。
 - 每个BidProject恰好拥有一个project-wide SubmissionWorkspace，只生成一份投标文件。
 - UI 采用 Word 式三栏：左侧独立大纲导航、中间按树前序展开的连续画布（聚焦章 Tiptap，其余静态）、右侧当前章证据/提示。不是 Word 桌面应用（无功能区、无用户模板、无邮件合并），也不是 Markdown `#` 大纲。
 - 支持按单章节、子树或整份文档生成，但所有生成都由用户显式触发。
@@ -691,10 +691,10 @@ Phase 0第十二轮P1修复后实现证据（等待独立review verdict）：详
 - [x] 扩展upload magic/container validator；
 - [x] 扩展DocReader proto/ReadResult返回`StructuredSourceUnit`；DocReader只拥有图片/表格的结构来源元数据（XLSX sheet/cell/merge identity、图片原始引用/region），现有`ImageParser`不承担OCR内容生成；
 - [x] 拆分`tender.rs`，复用`outline_and_route`；`TenderDocumentProcess`对独立图片强制使用受检builtin parser路径而非simple byte passthrough，并由Rust侧复用现有enrichment OCR/VLM路径，冻结ObjectRegistry/source identities，发布带revision身份的section/table_row/form_region/attachment_region/image_ocr_region SourceUnit，SourceSpanV2仅作locator；
-- [ ] 实现用户确认/修改document role、typed relation和显式DocumentSetRevision freeze；
-- [ ] 实现每SourceUnitRevision恰好一Disposition、RequirementSourceRevision、RequirementSet、局部supersession和唯一WorkspaceRequirementProjection；
+- [x] 实现用户确认/修改document role、typed relation和显式DocumentSetRevision freeze；
+- [x] 实现每SourceUnitRevision恰好一Disposition、RequirementSourceRevision、RequirementSet、局部supersession和唯一WorkspaceRequirementProjection；
 - [x] `TenderDocumentProcess`只发布单document SourceUnit，不创建或enqueue RequirementSetCompile；
-- [ ] 成功冻结DocumentSet时发布初始DispositionSet并enqueue以project+DocumentSetRevision+DispositionSetRevision唯一的`RequirementSetCompile`，后续DispositionSet publication同样enqueue；RequirementSet使用单调输入栅栏确定性发布，不持久化continuation状态。
+- [x] 成功冻结DocumentSet时发布初始DispositionSet并enqueue以project+DocumentSetRevision+DispositionSetRevision唯一的`RequirementSetCompile`，后续DispositionSet publication同样enqueue；RequirementSet使用单调输入栅栏确定性发布，不持久化continuation状态。
 
 当前实施顺序固定为：先完成role/relation确认与DocumentSet冻结，再提供生成大纲所需的最小RequirementProjection；随后立即进入大纲生成、知识库填充和导出纵向流程。全面合同扩展和治理验收不得插队。
 
@@ -710,60 +710,60 @@ Task 1B实现前发现两项合同缺口：V1 `SourceSpanV2`只有Markdown secti
 
 ### Phase 2：Workspace核心与无AI编辑竖切
 
-- [ ] 创建唯一workspace、node/block/binding lineage与revision、WorkspaceRevision/head、DocumentSettingsRevision和SubmissionFulfillmentEvidenceRevision；binding occurrence纳入WorkspaceRevision，bind/remap/unbind与树/block/settings共用WorkspaceHead CAS且没有独立current pointer；
-- [ ] 实现`ContentBlockV1`封闭serde/schema与Tiptap adapter；
-- [ ] 实现`/api/v2` project/tender/workspace/mutation/assets API；
-- [ ] Web 按 [`frontend-authoring.md`](frontend-authoring.md) 落地 `AuthoringShell`、`OutlineTree`、`DocumentCanvas`（聚焦章 Tiptap，其余静态）；先支持用户从空树人工编制、拖拽调序、插表格/图片并保存。Document Settings 面板不在黄金路径竖切。
-- [ ] 实现409 conflict保留draft；相同Idempotency-Key重放首次request/receipt，若业务状态仍pending则再次尝试Oxana enqueue。
+- [x] 创建唯一workspace、node/block/binding lineage与revision、WorkspaceRevision/head、DocumentSettingsRevision和SubmissionFulfillmentEvidenceRevision；binding occurrence纳入WorkspaceRevision，bind/remap/unbind与树/block/settings共用WorkspaceHead CAS且没有独立current pointer；
+- [x] 实现`ContentBlockV1`封闭serde/schema与Tiptap adapter；
+- [x] 实现`/api/v2` project/tender/workspace/mutation/assets API；
+- Web `AuthoringShell`/`OutlineTree`/`DocumentCanvas` 按 [`frontend-authoring.md`](frontend-authoring.md) 独立交付，本轮后端不修改。
+- [x] 实现409 conflict返回current head；相同Idempotency-Key重放首次request/receipt，若业务状态仍pending则再次尝试Oxana enqueue。
 
 验收：两个并发Workspace编辑者不能互相覆盖；DocumentSet/DispositionSet/RequirementSet并发只冲突各自聚合；rename/move/split/merge/delete保持lineage；bind/remap/unbind保留历史并正确使evidence stale；页面刷新后树、blocks和人工资产一致。
 
 ### Phase 3：动态OutlineCompiler
 
-- [ ] 实现OutlineGenerate request snapshot、agent schema、bounded verifier和一次repair；
-- [ ] 按招标明确组成、表格/表单结构、资格/技术/商务/评分要求编译动态树；
-- [ ] 实现 OutlineCandidate overlay（默认全选、可取消节点）、部分接受、CAS；checkpoint 若生成内容需要则在「填充」时静默建立，界面不得出现「确认后才能改」。
-- [ ] 删除任何固定标题、part key或默认六部分假设。
+- [x] 实现OutlineGenerate request snapshot、agent schema、bounded verifier和一次repair；
+- [x] 按招标明确组成、表格/表单结构、资格/技术/商务/评分要求编译动态树；
+- [x] 实现 OutlineCandidate、按ordinal部分接受与CAS；checkpoint 在准确WorkspaceRevision需要时确定性创建，不形成审批锁。
+- [x] 删除任何固定标题、part key或默认六部分假设。
 
 验收：至少四类golden tender产生不同树形；用户可删除强制节点并仍确认；新文件发布后旧candidate变obsolete、已接受人工树只变stale。
 
 ### Phase 4：知识检索V3、证据选择与图片冻结
 
-- [ ] 在唯一KnowledgeRetrievalPort V3响应中加入可选media identity并保持V2检索排序/scope attestation语义；
-- [ ] matching从route/part目标改为Requirement/OutlineNode目标；显式“匹配资料”调用`ContentGenerate(operation=match_only)`，不定义独立EvidenceMatch job；
-- [ ] 实现EvidenceBundle、NO_EVIDENCE、EvidenceAssetArtifact和ObjectRegistry持有；
-- [ ] 实现人工PickSet与system-proposed selection；
-- [ ] Web右侧Evidence面板支持预览quote/图片、人工改选、单独“匹配资料”和整份文档覆盖概览，不新增强制匹配步骤。
+- [x] 在唯一KnowledgeRetrievalPort V3响应中加入可选media identity并保持V2检索排序/scope attestation语义；
+- [x] matching从route/part目标改为Requirement/OutlineNode目标；显式“匹配资料”调用`ContentGenerate(operation=match_only)`，不定义独立EvidenceMatch job；
+- [x] 实现EvidenceBundle、NO_EVIDENCE、EvidenceAssetArtifact和ObjectRegistry持有；
+- [x] 实现人工PickSet与system-proposed selection；
+- Web Evidence 面板按独立前端计划交付；本轮后端已提供quote/图片、人工改选、节点证据和全文概览API。
 
 验收：技术截图、资质证书和案例图片可由OCR命中并冻结真实图片；删除/替换live知识文档不改变既有candidate；招标输入图片不会混入EvidenceBundle。
 
 ### Phase 5：ContentGenerate与Candidate review
 
-- [ ] 实现node/subtree/workspace三种用户触发范围、`empty_only|append_candidate|missing_requirements_only`和InsertionAnchor；验证后台不会自动创建生成request；
-- [ ] `ContentGenerate(operation=generate)`的system-proposed模式在同一job内检索并冻结证据；人工模式消费指定PickSet，不建立matching continuation；
-- [ ] 实现narrative、response table、structured form、evidence index、quote和deterministic generators；
-- [ ] 校验事实`evidence_ref`、图片identity、表格网格和prompt injection边界；
-- [ ] CandidateReview显示文本/表格操作和图片，允许部分接受。
+- [x] 实现node/subtree/workspace三种用户触发范围、`empty_only|append_candidate|missing_requirements_only`和InsertionAnchor；验证后台不会自动创建生成request；
+- [x] `ContentGenerate(operation=generate)`的system-proposed模式在同一job内检索并冻结证据；人工模式消费指定PickSet，不建立matching continuation；
+- [x] 实现narrative、response table、structured form、evidence index、quote和deterministic generators；
+- [x] 校验事实`evidence_ref`、图片identity、表格网格和prompt injection边界；
+- [x] Candidate API返回文字/表格/图片操作，并按operation ordinal部分接受。
 
 验收：无证据时不生成投标方事实；匹配图片可直接进入candidate；业务事实有冻结引用，连接语言允许无引用；接受candidate不会覆盖接受后发生的人工编辑。
 
 ### Phase 6：Assessment、preview、DOCX/PDF
 
-- [ ] 实现OutlineAssessment与SubmissionAssessment确定性编译，以workspace/projection/scope/settings/asset/QuoteSnapshot组合hash复用结果；不创建Assessment queue job；
-- [ ] 实现WorkspaceRevision引用的DocumentSettingsRevision、共享LayoutDocument、系统RenderStyleContract和HTML全文预览；
-- [ ] 将现有renderer改为遍历node/block occurrence，复用DOCX/PDF图片、CJK字体和PDF附件准备能力；
-- [ ] 在单个SubmissionExport job内实现Assessment → AttachmentPreparation → preparation verify → RenderSnapshot → Manifest → render；冻结输出mode/options；
-- [ ] 输出独立assessment report。
+- [x] 实现OutlineAssessment与SubmissionAssessment确定性编译，以workspace/projection/scope/settings/asset/QuoteSnapshot组合hash复用结果；不创建Assessment queue job；
+- [x] 实现WorkspaceRevision引用的DocumentSettingsRevision、共享LayoutDocument、系统RenderStyleContract和HTML全文预览；
+- [x] renderer遍历node/block occurrence，复用DOCX/PDF图片、CJK字体和PDF附件准备能力；
+- [x] 在单个SubmissionExport job内实现Assessment → AttachmentPreparation → preparation verify → RenderSnapshot → Manifest → render；冻结输出mode/options；
+- [x] 输出独立assessment report。
 
 验收：有高风险业务提示仍返回202并完成DOCX/PDF；非法ContentBlock、资产缺失、digest错误和renderer错误稳定技术失败；同一manifest重放语义一致。
 
 ### Phase 7：删除旧实现并fresh上线
 
-- [ ] 在同一fresh cutover中用已验证的V2 first-launch manifest和queue registry替换active配置，并删除V1 baseline、`required_part_keys`、`technical_part_key`、`template_slot_for_part_key`、Markdown part更新/重生成、SubmissionGateV1及旧SQL表/函数；
-- [ ] 删除`/api/v1/bids/.../parts`、`gate-issues`和所有旧submission endpoints；
-- [ ] 删除PartsPane、`partTitle`、`BidStep=parts`及旧route/query参数；
-- [ ] 只把现有QuoteSnapshot作为专用业务快照接入；删除旧company-profile、submission-profile和procedural专用API/表，不保留双写或compat façade；公司证据使用KnowledgeRetrievalPort/人工资产，流程要求使用通用Requirement/FulfillmentBinding/structured content；
-- [ ] 新增`scripts/bidding_v2_deletion_scan.sh`并更新fresh schema/runtime部署说明；扫描任何非`project_wide` WorkspaceScope、`project_fact|submission_procedure`、独立`EvidenceMatch`/旧细粒度job名、binding current pointer以及自建scheduler/lease/retry/fan-out/fan-in/continuation状态。
+- [x] active配置使用三份direct fresh baseline和queue registry；删除V1 baseline、first-launch、Part key、Markdown part更新/重生成、SubmissionGateV1及旧SQL表/函数；
+- [x] 删除`/api/v1/bids/.../parts`、`gate-issues`和所有旧submission endpoints；
+- [x] 删除PartsPane、`partTitle`、`BidStep=parts`及旧route/query参数；
+- [x] 只把QuoteSnapshot作为专用业务快照接入；删除旧company-profile、submission-profile和procedural专用API/表，不保留双写或compat façade；公司证据使用KnowledgeRetrievalPort/人工资产，流程要求使用通用Requirement/FulfillmentBinding/structured content；
+- [x] 新增`scripts/bidding_v2_deletion_scan.sh`并更新fresh schema/runtime部署说明；扫描任何非`project_wide` WorkspaceScope、`project_fact|submission_procedure`、独立`EvidenceMatch`/旧细粒度job名、binding current pointer以及自建scheduler/lease/retry/fan-out/fan-in/continuation状态。
 
 验收：fresh E2E是唯一上线通路；仓库扫描只允许旧名称出现在删除矩阵/历史说明中，生产源码、SQL、API和Web bundle零命中。
 
@@ -777,18 +777,17 @@ Task 1B实现前发现两项合同缺口：V1 `SourceSpanV2`只有Markdown secti
 - Worker：五类粗粒度job映射、RequirementSetCompile的project+DocumentSet+DispositionSet唯一键、DocumentSet/Disposition publication enqueue owner及单调输入publication fence、Oxana unique/retry/backoff复用、确定性stage identity/首次receipt重放、重复或stale delivery no-op，且无自建scheduler/lease/fan-out/continuation状态；
 - Agent fixture：中文多级编号、表格/扫描表单、局部澄清、prompt injection、超深树、未知字段、伪造asset、无证据hallucination；
 - Renderer golden：动态标题、富文本、复杂表格、知识图片、人工图片、PDF附件、目录、CJK字体；比较HTML/DOCX/PDF的同一settings identity与语义；验证review draft水印及干净submission；
-- Browser E2E：多文件上传→确认role/relation→冻结DocumentSet→要求台账→分别触发本章/子树/全部生成→missing requirements/光标插入→系统建议证据→含文字/图片Candidate→人工表格/图片→并发冲突→有提示导出；断言后台不自动生成、证据只出现在Web/报告。
+- 独立前端交付的 Browser E2E：多文件上传→确认role/relation→冻结DocumentSet→要求台账→分别触发本章/子树/全部生成→missing requirements/光标插入→系统建议证据→含文字/图片Candidate→人工表格/图片→并发冲突→有提示导出；不计入本轮后端验收。
 
 ### 必跑命令
 
 ```bash
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-npm --prefix web run lint
-npm --prefix web run build
-npm --prefix web run test:e2e
 scripts/fresh_schema_acceptance.sh
 scripts/bidding_v2_deletion_scan.sh
+scripts/bidding_v2_phase2_api_e2e.py
+scripts/bidding_v2_export_api_worker_e2e.py
 ```
 
 需要真实依赖的live套件额外运行PostgreSQL、Redis/Oxana、Object storage、DocReader/OCR和配置的chat/VLM provider；未配置时测试必须明确skip，不能伪装通过。

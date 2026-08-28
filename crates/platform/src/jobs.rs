@@ -232,7 +232,10 @@ pub async fn queue_depths() -> std::collections::HashMap<String, i64> {
         ),
         (
             "bid-authoring-v2",
-            storage.enqueued_count(crate::BidAuthoringV2Queue).await.unwrap_or(0),
+            storage
+                .enqueued_count(crate::BidAuthoringV2Queue)
+                .await
+                .unwrap_or(0),
         ),
     ] {
         out.insert(name.into(), n as i64);
@@ -342,7 +345,10 @@ pub async fn queue_job_previews() -> std::collections::HashMap<String, Vec<Strin
         ("wiki", storage.list_queue_jobs(WikiQueue, &opts).await.ok()),
         (
             "bid-authoring-v2",
-            storage.list_queue_jobs(crate::BidAuthoringV2Queue, &opts).await.ok(),
+            storage
+                .list_queue_jobs(crate::BidAuthoringV2Queue, &opts)
+                .await
+                .ok(),
         ),
     ] {
         if let Some(jobs) = jobs {
@@ -1183,6 +1189,5 @@ mod tests {
             before_default,
             "declared_disabled enqueues must not spill onto default"
         );
-
     }
 }

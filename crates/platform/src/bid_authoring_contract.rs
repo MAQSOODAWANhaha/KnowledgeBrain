@@ -191,7 +191,7 @@ pub struct SubmissionExportJobV2 {
 }
 
 macro_rules! request_scoped_job {
-    ($job:ty, $name:expr) => {
+    ($job:ty, $name:expr, $identity_kind:expr) => {
         impl oxana::Job for $job {
             fn name() -> &'static str {
                 $name
@@ -200,7 +200,7 @@ macro_rules! request_scoped_job {
             fn unique_id(&self) -> Option<String> {
                 Some(format!(
                     "{}:{}:{}",
-                    $name,
+                    $identity_kind,
                     self.request.request_artifact_id.hyphenated(),
                     self.request.request_revision
                 ))
@@ -219,11 +219,24 @@ macro_rules! request_scoped_job {
 
 request_scoped_job!(
     TenderDocumentProcessJobV2,
-    BID_TENDER_DOCUMENT_PROCESS_V2_TASK
+    BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
+    "tender_document_process"
 );
-request_scoped_job!(OutlineGenerateJobV2, BID_OUTLINE_GENERATE_V2_TASK);
-request_scoped_job!(ContentGenerateJobV2, BID_CONTENT_GENERATE_V2_TASK);
-request_scoped_job!(SubmissionExportJobV2, BID_SUBMISSION_EXPORT_V2_TASK);
+request_scoped_job!(
+    OutlineGenerateJobV2,
+    BID_OUTLINE_GENERATE_V2_TASK,
+    "outline_generate"
+);
+request_scoped_job!(
+    ContentGenerateJobV2,
+    BID_CONTENT_GENERATE_V2_TASK,
+    "content_generate"
+);
+request_scoped_job!(
+    SubmissionExportJobV2,
+    BID_SUBMISSION_EXPORT_V2_TASK,
+    "submission_export"
+);
 
 impl oxana::Job for RequirementSetCompileJobV2 {
     fn name() -> &'static str {
@@ -503,7 +516,9 @@ mod tests {
         assert_eq!(BID_AUTHORING_V2_CONCURRENCY, 4);
         assert_eq!(BID_AUTHORING_V2_MAX_RETRIES, 3);
         assert_eq!(BID_AUTHORING_V2_UNIQUE_CONFLICT_POLICY, "skip");
-        assert!(BID_AUTHORING_V2_RESURRECT_ON_REPLAY);
+        const {
+            assert!(BID_AUTHORING_V2_RESURRECT_ON_REPLAY);
+        }
         assert_eq!(
             (0..3)
                 .map(BidAuthoringV2OxanaPolicy::retry_delay_seconds)

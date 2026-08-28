@@ -21,7 +21,9 @@ pub struct DocJob {
 impl DocJob {
     pub fn from_store(store: &Store, document_id: Uuid) -> Option<Self> {
         let document = store.documents.get(&document_id)?.clone();
-        let version = store.versions.get(&document.product_version_id)?.clone();
+        let mut version = store.versions.get(&document.product_version_id)?.clone();
+        crate::resolve_process_config(&version, document.process_overrides.as_ref())
+            .apply_to(&mut version);
         let chunks = store
             .chunks
             .iter()

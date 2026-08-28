@@ -17,6 +17,7 @@ AS $$
             'system:bid-convert-worker',
             'system:bid-attachment-preparation',
             'system:bid-extraction-worker',
+            'system:content-generate-v2',
             'system:clause-lifecycle',
             'system:kind-router-promotion',
             'system:maintenance',
@@ -24,7 +25,10 @@ AS $$
             'system:knowledge-document-ingest',
             'system:matching-invalidation',
             'system:matching-publication',
-            'system:retention-consumer'
+            'system:requirement-set-compile-v2',
+            'system:retention-consumer',
+            'system:submission-export-v2',
+            'system:tender-document-process-v2'
         )
 $$;
 
@@ -54,6 +58,16 @@ INSERT INTO platform_role_contracts(role_name, login, purpose) VALUES
     ('kb_runtime_api', true, 'runtime HTTP identity'),
     ('kb_runtime_retention', true, 'exclusive physical object deletion identity'),
     ('kb_runtime_worker', true, 'runtime asynchronous job identity');
+
+-- Runtime identities must not be able to shadow hardened helper dependencies
+-- through attacker-controlled temporary relations.
+DO $$
+BEGIN
+    EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', current_database());
+END
+$$;
+GRANT USAGE ON SCHEMA public TO
+    kb_runtime_api, kb_runtime_worker, kb_runtime_retention;
 
 CREATE TABLE idempotency_requests (
     actor_identity kb_actor_identity NOT NULL,
@@ -400,6 +414,18 @@ BEGIN
     END IF;
 END
 $$;
+
+CREATE FUNCTION kb_register_knowledge_image_object(
+    p_image_artifact_revision_id uuid,p_object_ref kb_object_ref,p_digest kb_sha256,
+    p_media_type text,p_byte_length bigint,p_actor kb_actor_identity
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+    IF p_media_type NOT IN ('image/png','image/jpeg','image/webp') OR p_byte_length<=0 THEN
+      RAISE EXCEPTION 'knowledge image object metadata invalid' USING ERRCODE='23514';
+    END IF;
+    PERFORM kb_object_reference_add(p_object_ref,p_digest,p_media_type,p_byte_length,
+      'knowledge_image_artifact',p_image_artifact_revision_id,'source-media',p_actor);
+END $$;
 
 CREATE FUNCTION kb_object_reference_remove(
     p_object_ref kb_object_ref,
@@ -1026,6 +1052,8 @@ GRANT EXECUTE ON FUNCTION kb_register_knowledge_document_object(uuid, text, kb_a
     kb_object_upload_stage(uuid, kb_object_ref, kb_sha256, text, bigint, kb_actor_identity),
     kb_object_upload_abandon(uuid, kb_actor_identity)
 TO kb_runtime_api, kb_runtime_worker;
+GRANT EXECUTE ON FUNCTION kb_register_knowledge_image_object(uuid,kb_object_ref,kb_sha256,text,bigint,kb_actor_identity)
+TO kb_runtime_worker;
 GRANT EXECUTE ON FUNCTION kb_object_upload_expire()
 TO kb_runtime_retention;
 GRANT EXECUTE ON FUNCTION kb_retention_claim(uuid, text, integer),

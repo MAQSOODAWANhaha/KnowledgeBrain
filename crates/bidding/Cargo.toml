@@ -11,6 +11,7 @@ knowledge-v2-exact-contract-tests = ["knowledge/knowledge-v2-exact-contract-test
 
 [dependencies]
 async-trait = "0.1"
+base64.workspace = true
 chrono.workspace = true
 docparser = { path = "../docparser" }
 docx-rs = "0.4"

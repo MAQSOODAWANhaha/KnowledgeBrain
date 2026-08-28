@@ -97,6 +97,15 @@ mod tests {
         LOCK.lock().await
     }
 
+    async fn admin_test_pool() -> Result<PgPool, sqlx::Error> {
+        let database_url = platform::database_url()
+            .map_err(|error| sqlx::Error::Configuration(Box::new(error)))?;
+        PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await
+    }
+
     async fn retention_role_pool() -> Option<PgPool> {
         let password = match std::env::var("KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD") {
             Ok(password) => password,
@@ -151,7 +160,7 @@ mod tests {
     #[tokio::test]
     async fn expired_upload_staging_is_removed_by_running_retention_expiry_loop() {
         let _guard = db_lock().await;
-        let pool = match platform::connect().await {
+        let pool = match admin_test_pool().await {
             Ok(pool) => pool,
             Err(error)
                 if std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").as_deref() == Ok("1") =>
@@ -216,7 +225,7 @@ mod tests {
         const EXPECTED_BATCH_LIMIT: usize = 100;
 
         let _guard = db_lock().await;
-        let pool = match platform::connect().await {
+        let pool = match admin_test_pool().await {
             Ok(pool) => pool,
             Err(error)
                 if std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").as_deref() == Ok("1") =>

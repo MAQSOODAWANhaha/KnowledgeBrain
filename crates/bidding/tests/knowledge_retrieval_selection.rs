@@ -1,10 +1,10 @@
+use knowledge::PostgresKnowledgeRetrievalAdapter;
 use knowledge::knowledge_retrieval::{
     CompanyEvidenceRequestV1, KNOWLEDGE_EVIDENCE_SCHEMA_V1, KnowledgeRetrievalError,
     KnowledgeRetrievalPort, ProductEvidenceRequestV1, RetrievalPolicyIdentityV1,
 };
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row};
-use knowledge::PostgresKnowledgeRetrievalAdapter;
 use uuid::Uuid;
 
 mod support;

@@ -43,22 +43,19 @@ Workspace
 这是招投标可调用的唯一知识库业务端口：
 
 ```text
-retrieve_product_evidence(ProductEvidenceRequestV1)
-  -> KnowledgeEvidenceBatchV1
-
-retrieve_company_evidence(CompanyEvidenceRequestV1)
-  -> KnowledgeEvidenceBatchV1
+retrieve_evidence_v3(KnowledgeEvidenceScopeV2)
+  -> KnowledgeEvidenceBatchV3
 ```
 
 两个 request 只表达知识库可理解的冻结检索范围、requirement text/identity、版本选择和检索 policy identity；不得包含 BidProject 表名、matching job、part 或 quote 模型。
 
-batch 把完整 eligible scope 与有界命中集合分开：
+V3 batch沿用冻结的V2排序、policy、quota与eligible scope语义，把完整 eligible scope 与有界命中集合分开：
 
 ```text
-KnowledgeEvidenceBatchV1
-  schema_version
+KnowledgeEvidenceBatchV3
+  schema_version = 3
   eligible_versions: EligibleEvidenceVersionV1[]
-  hits: KnowledgeEvidenceHitV1[]
+  hits: KnowledgeEvidenceHitV3[]
 
 EligibleEvidenceVersionV1
   product_id, product_version_id
@@ -66,10 +63,10 @@ EligibleEvidenceVersionV1
   frozen_display_name
 ```
 
-`hits` 使用同一有界 `KnowledgeEvidenceHitV1` 结构：
+`hits` 使用闭合的 `KnowledgeEvidenceHitV3` 结构：
 
 ```text
-schema_version
+schema_version = 3
 document_id, source_chunk_id
 product_id, product_version_id
 workspace_kind = product_line|company
@@ -77,8 +74,11 @@ frozen_document_display_name
 chunk_utf8, chunk_sha256, chunk_byte_length
 quote_start_offset, quote_end_offset, offset_unit=utf8_byte
 retrieval_rank, retrieval_raw_score
-retrieval_contract_version
+retrieval_contract_version = knowledge-evidence-v2
+media: KnowledgeEvidenceMediaV1?
 ```
+
+`source_type=image_ocr`必须携带不可变`media`（image artifact revision、ObjectRegistry ref/digest/media type、尺寸、页码/区域和冻结文件名）；`text|parent_text`必须为`media:null`。未建立可信mapping的OCR chunk在exact、keyword、vector、signal和source所有路径都被排除。
 
 不变量：
 
@@ -95,17 +95,17 @@ retrieval_contract_version
 
 ### 2.1 knowledge-owned scope attestation
 
-知识库拥有检索 scope 的持久化 `kb_knowledge_attest_matching_scope_v1` / `kb_knowledge_verify_matching_scope_v1` 合同。招投标 schedule 只能把端口返回的 `eligible_versions` 与 `hits` 快照交给该合同；只有知识库函数可以将快照与 live Workspace/Product/ProductVersion/Document/chunk 关系比较。
+知识库拥有检索 scope 的持久化 `kb_knowledge_attest_matching_scope_v2`、`kb_knowledge_verify_matching_scope_v2`与图片命中的`kb_knowledge_verify_attested_image_hit_v3`合同。招投标 schedule 只能把端口返回的 `eligible_versions` 与 `hits` 快照交给该合同；只有知识库函数可以将快照与 live Workspace/Product/ProductVersion/Document/chunk 关系比较。
 
 attestation scope 必须携带固定结构 `version_selections={"product_line":[],"company":[]}`。两个 key 都必须存在，每个值都是按 UUID 升序排列且无重复的 version ID 数组；空数组表示该 workspace kind 的全部 current eligible versions，非空数组表示必须精确匹配的冻结子集。未出现在 `workspace_kinds` 的 kind 必须使用空数组，禁止把 product 与 company selection 混在同一无类型列表中。`products` 必须与上述每个 kind 的 effective selection 双向精确一致。
 
 attest 成功后产生 immutable attestation ID、canonical payload 与 SHA-256。招投标 manifest 冻结 attestation ID/hash，deferred verifier 只能以 ID/hash/同一 payload 调用 knowledge verify；不得在招投标函数中直接 join 知识库表。attestation 证明 schedule 时的完整 scope 和 hit 来源，后续 live 资料变化不改写已发布 manifest/report。
 
-### 2.2 招投标图片证据V3评审边界
+### 2.2 招投标图片证据V3边界
 
-当前V2只冻结`image_ocr`文本chunk，不提供可插入投标文件的图片asset identity。为使未激活的bidding V2 baseline能够建立真实复合外键，Phase 0只提前冻结`knowledge_image_artifact_revisions`及`knowledge_image_ocr_chunk_artifact_mappings`存储identity：同一ProductVersion/Document的`image_ocr` chunk映射不可变图片revision。由于first-launch固定先knowledge后shared，knowledge baseline先冻结等价的closed text identity和immutable约束；shared加载ObjectRegistry后，inactive bidding V2 baseline再追加`object_ref + digest + media_type + available`复合FK。该表当前没有publication/query API，也不改变任何retrieval response。
+图片ingestion在同一事务发布chunk、embedding、`knowledge_image_artifact_revisions`、`knowledge_image_ocr_chunk_artifact_mappings`和`knowledge_image_artifact`对象owner reference；输入中的OCR图片身份固定为`objects/{sha256}`，digest、实际图片格式、尺寸、ObjectRegistry byte length及幂等冲突全部fail closed。live资料退休时图片artifact owner继续保留不可变对象。
 
-Phase 4才实现图片ingestion publication、V3 hit/media schema、knowledge-owned verifier和唯一`KnowledgeRetrievalPort`的V3查询行为；不得新增第二个检索/media端口，也不得改变V2排序、quota、eligible scope或scope attestation语义。具体实现范围和验证见独立计划[`../../plans/knowledge-base/bidding-evidence-media-v3.md`](../../plans/knowledge-base/bidding-evidence-media-v3.md)。
+唯一`KnowledgeRetrievalPortV3`返回上述媒体快照，knowledge-owned verifier证明来源链；招投标只冻结验证后的`EvidenceAssetArtifact`及Workspace `ai_evidence` asset，不通过live join回查知识库。没有第二个检索/media端口，也没有V2/V3 runtime双模式；`knowledge-evidence-v2`只表示继续使用冻结的排序/policy合同。具体实现和验证见[`../../plans/knowledge-base/bidding-evidence-media-v3.md`](../../plans/knowledge-base/bidding-evidence-media-v3.md)。
 
 ## 3. 招投标边界
 

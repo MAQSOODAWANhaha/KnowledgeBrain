@@ -48,7 +48,9 @@ pub fn validate_document_settings(value: &Value) -> Result<()> {
         settings.margins_mm.left,
     ];
     if settings.page_size != "A4"
-        || margins.iter().any(|margin| !margin.is_finite() || !(5.0..=80.0).contains(margin))
+        || margins
+            .iter()
+            .any(|margin| !margin.is_finite() || !(5.0..=80.0).contains(margin))
         || settings.cjk_font.is_empty()
         || settings.cjk_font.chars().count() > 128
         || settings.latin_font.is_empty()
@@ -57,12 +59,20 @@ pub fn validate_document_settings(value: &Value) -> Result<()> {
         || !(6.0..=48.0).contains(&settings.body_font_pt)
         || !settings.line_spacing.is_finite()
         || !(0.8..=4.0).contains(&settings.line_spacing)
-        || !matches!(settings.heading_numbering.as_str(), "decimal" | "chinese" | "none")
+        || !matches!(
+            settings.heading_numbering.as_str(),
+            "decimal" | "chinese" | "none"
+        )
         || settings.header.chars().count() > 2_048
         || settings.footer.chars().count() > 2_048
-        || !matches!(settings.page_number.as_str(), "none" | "footer_center" | "footer_outside")
+        || !matches!(
+            settings.page_number.as_str(),
+            "none" | "footer_center" | "footer_outside"
+        )
     {
-        return Err(invalid("document settings are outside the closed V1 contract"));
+        return Err(invalid(
+            "document settings are outside the closed V1 contract",
+        ));
     }
     Ok(())
 }
@@ -117,6 +127,66 @@ pub fn apply_workspace_operations(
 
     for operation in &request.operations {
         let kind = string(operation, "kind")?;
+        let allowed: &[&str] = match kind {
+            "insert_node" => &[
+                "kind",
+                "client_node_ref",
+                "lineage_id",
+                "revision_id",
+                "parent_lineage_id",
+                "ordinal",
+                "title",
+                "semantic_role",
+                "render_role",
+            ],
+            "rename_node" => &["kind", "node_lineage_id", "title"],
+            "move_node" => &["kind", "node_lineage_id", "parent_lineage_id", "ordinal"],
+            "split_node" => &["kind", "node_lineage_id", "titles"],
+            "merge_nodes" => &["kind", "node_lineage_ids", "title"],
+            "delete_node" => &["kind", "node_lineage_id"],
+            "insert_block" => &[
+                "kind",
+                "node_lineage_id",
+                "ordinal",
+                "insertion_anchor",
+                "block",
+            ],
+            "update_block" => &["kind", "block_lineage_id", "block"],
+            "move_block" => &[
+                "kind",
+                "block_lineage_id",
+                "target_node_lineage_id",
+                "ordinal",
+            ],
+            "delete_block" => &["kind", "block_lineage_id"],
+            "insert_asset_block" => &["kind", "node_lineage_id", "asset_revision_id", "ordinal"],
+            "update_document_settings" => &["kind", "settings"],
+            "bind_fulfillment" => &[
+                "kind",
+                "need_occurrence_id",
+                "channel",
+                "requirement_projection_revision_id",
+                "requirement_projection_sha256",
+                "target",
+                "reason",
+                "state",
+            ],
+            "remap_fulfillment" => &[
+                "kind",
+                "binding_lineage_id",
+                "need_occurrence_id",
+                "channel",
+                "requirement_projection_revision_id",
+                "requirement_projection_sha256",
+                "target",
+                "reason",
+                "state",
+            ],
+            "unbind_fulfillment" => &["kind", "binding_lineage_id"],
+            "acknowledge_stale" => &["kind", "dependency_identity_sha256"],
+            other => return Err(invalid(format!("unknown operation kind {other}"))),
+        };
+        exact_keys(operation, allowed)?;
         match kind {
             "insert_node" => insert_node(&mut nodes, operation)?,
             "rename_node" => rename_node(&mut nodes, operation)?,
@@ -153,6 +223,30 @@ pub fn apply_workspace_operations(
         "bindings": bindings,
         "lineage_edges": lineage_edges,
     }))
+}
+
+fn exact_keys(value: &Value, allowed: &[&str]) -> Result<()> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid("operation must be an object"))?;
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(invalid("operation contains unknown fields"));
+    }
+    Ok(())
+}
+
+fn validate_binding_target(value: &Value) -> Result<()> {
+    let kind = string(value, "kind")?;
+    let allowed: &[&str] = match kind {
+        "outline_node" => &["kind", "node_lineage_id"],
+        "response_table" => &["kind", "block_lineage_id"],
+        "structured_form" => &["kind", "form_definition_revision_id"],
+        "quote" => &["kind", "quote_snapshot_id"],
+        _ => return Err(invalid("binding target kind invalid")),
+    };
+    exact_keys(value, allowed)?;
+    uuid(value, allowed[1])?;
+    Ok(())
 }
 
 fn invalid(message: impl Into<String>) -> WorkspaceMutationError {
@@ -234,12 +328,21 @@ fn insert_node(nodes: &mut Vec<Value>, operation: &Value) -> Result<()> {
         node_index(nodes, parent)?;
     }
     let title = string(operation, "title")?.trim();
-    if title.len() > 1024 {
-        return Err(invalid("title too long"));
+    if title.is_empty() || title.len() > 1024 {
+        return Err(invalid("title is empty or too long"));
+    }
+    let lineage_id = optional_uuid(operation, "lineage_id")?.unwrap_or_else(Uuid::new_v4);
+    let revision_id = optional_uuid(operation, "revision_id")?.unwrap_or_else(Uuid::new_v4);
+    if nodes.iter().any(|node| {
+        node.get("lineage_id").and_then(Value::as_str) == Some(lineage_id.to_string().as_str())
+            || node.get("revision_id").and_then(Value::as_str)
+                == Some(revision_id.to_string().as_str())
+    }) {
+        return Err(invalid("node identity already exists"));
     }
     nodes.push(json!({
-        "lineage_id": Uuid::new_v4(),
-        "revision_id": Uuid::new_v4(),
+        "lineage_id": lineage_id,
+        "revision_id": revision_id,
         "parent_lineage_id": parent,
         "ordinal": ordinal(operation, "ordinal")?,
         "title": title,
@@ -285,6 +388,10 @@ fn move_node(nodes: &mut [Value], operation: &Value) -> Result<()> {
     object.insert(
         "ordinal".into(),
         Value::from(ordinal(operation, "ordinal")?),
+    );
+    object.insert(
+        "revision_id".into(),
+        Value::String(Uuid::new_v4().to_string()),
     );
     Ok(())
 }
@@ -500,6 +607,14 @@ fn update_block(blocks: &mut [Value], operation: &Value) -> Result<()> {
         .get("revision")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let old_dependency = blocks[index]
+        .get("dependency_sha256")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let old_stale = blocks[index]
+        .get("stale")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut next = operation
         .get("block")
         .cloned()
@@ -516,6 +631,11 @@ fn update_block(blocks: &mut [Value], operation: &Value) -> Result<()> {
         Value::String(Uuid::new_v4().to_string()),
     );
     object.insert("revision".into(), Value::from(old_revision + 1));
+    object.insert("dependency_sha256".into(), old_dependency.clone());
+    object.insert(
+        "stale".into(),
+        Value::Bool(old_stale || !old_dependency.is_null()),
+    );
     blocks[index] = next;
     Ok(())
 }
@@ -566,11 +686,18 @@ fn insert_asset_block(
         asset_revision_id: asset,
         width_mm: 120.0,
         alignment: crate::content_block::ImageAlignment::Center,
-        crop: crate::content_block::Crop { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 },
+        crop: crate::content_block::Crop {
+            left: 0.0,
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+        },
         caption: None,
         alt: String::new(),
     };
-    let content_sha256 = content.sha256().map_err(|error| invalid(error.to_string()))?;
+    let content_sha256 = content
+        .sha256()
+        .map_err(|error| invalid(error.to_string()))?;
     let synthetic = json!({
         "kind": "insert_block",
         "node_lineage_id": uuid(operation, "node_lineage_id")?,
@@ -593,6 +720,11 @@ fn insert_asset_block(
 
 fn bind_fulfillment(bindings: &mut Vec<Value>, operation: &Value) -> Result<()> {
     uuid(operation, "need_occurrence_id")?;
+    validate_binding_target(
+        operation
+            .get("target")
+            .ok_or_else(|| invalid("binding target missing"))?,
+    )?;
     let mut binding = operation.clone();
     let object = binding
         .as_object_mut()
@@ -607,6 +739,7 @@ fn bind_fulfillment(bindings: &mut Vec<Value>, operation: &Value) -> Result<()> 
         Value::String(Uuid::new_v4().to_string()),
     );
     object.insert("revision".into(), Value::from(1));
+    object.insert("state".into(), Value::String("bound".into()));
     object.insert("stale".into(), Value::Bool(false));
     bindings.push(binding);
     Ok(())
@@ -614,6 +747,11 @@ fn bind_fulfillment(bindings: &mut Vec<Value>, operation: &Value) -> Result<()> 
 
 fn remap_fulfillment(bindings: &mut [Value], operation: &Value) -> Result<()> {
     let lineage = uuid(operation, "binding_lineage_id")?;
+    validate_binding_target(
+        operation
+            .get("target")
+            .ok_or_else(|| invalid("binding target missing"))?,
+    )?;
     let index = bindings
         .iter()
         .position(|value| {
@@ -636,21 +774,37 @@ fn remap_fulfillment(bindings: &mut [Value], operation: &Value) -> Result<()> {
         Value::String(Uuid::new_v4().to_string()),
     );
     object.insert("revision".into(), Value::from(revision));
+    object.insert("state".into(), Value::String("bound".into()));
     object.insert("stale".into(), Value::Bool(false));
     bindings[index] = next;
     Ok(())
 }
 
-fn unbind_fulfillment(bindings: &mut Vec<Value>, operation: &Value) -> Result<()> {
+fn unbind_fulfillment(bindings: &mut [Value], operation: &Value) -> Result<()> {
     let lineage = uuid(operation, "binding_lineage_id")?;
-    let before = bindings.len();
-    bindings.retain(|value| {
-        value.get("binding_lineage_id").and_then(Value::as_str)
-            != Some(lineage.to_string().as_str())
-    });
-    if before == bindings.len() {
-        return Err(invalid("binding missing"));
-    }
+    let index = bindings
+        .iter()
+        .position(|value| {
+            value.get("binding_lineage_id").and_then(Value::as_str)
+                == Some(lineage.to_string().as_str())
+        })
+        .ok_or_else(|| invalid("binding missing"))?;
+    let revision = bindings[index]
+        .get("revision")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        + 1;
+    let object = bindings[index]
+        .as_object_mut()
+        .ok_or_else(|| invalid("binding must be object"))?;
+    object.insert(
+        "binding_revision_id".into(),
+        Value::String(Uuid::new_v4().to_string()),
+    );
+    object.insert("revision".into(), Value::from(revision));
+    object.insert("state".into(), Value::String("unbound".into()));
+    object.insert("reason".into(), Value::String("user_unbound".into()));
+    object.insert("stale".into(), Value::Bool(false));
     Ok(())
 }
 
@@ -799,6 +953,119 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, WorkspaceMutationError::TreeCycle);
+    }
+
+    #[test]
+    fn manual_authoring_round_trip_covers_tree_table_text_image_and_deletion() {
+        fn block(lineage: Uuid, kind: &str, content: Value) -> Value {
+            let typed: crate::content_block::BlockContent =
+                serde_json::from_value(content).unwrap();
+            json!({
+                "schema_version":1,"block_revision_id":Uuid::new_v4(),"lineage_id":lineage,
+                "revision":1,"kind":kind,"content":typed,"origin":"human",
+                "dependency_sha256":null,"stale":false,"content_sha256":typed.sha256().unwrap()
+            })
+        }
+
+        let root = Uuid::new_v4();
+        let child = Uuid::new_v4();
+        let rich_lineage = Uuid::new_v4();
+        let table_lineage = Uuid::new_v4();
+        let asset = Uuid::new_v4();
+        let rich = block(
+            rich_lineage,
+            "rich_text",
+            json!({
+                "type":"rich_text","nodes":[{"kind":"paragraph","content":[{"kind":"text","text":"人工响应","marks":[]}]}]
+            }),
+        );
+        let updated_rich = block(
+            rich_lineage,
+            "rich_text",
+            json!({
+                "type":"rich_text","nodes":[{"kind":"paragraph","content":[{"kind":"text","text":"保存后的人工响应","marks":[]}]}]
+            }),
+        );
+        let table = block(
+            table_lineage,
+            "table",
+            json!({
+                "type":"table","row_count":1,"column_count":1,
+                "cells":[{"row":0,"column":0,"rowspan":1,"colspan":1,"content":[]}],
+                "widths_mm":[100.0],"repeat_header_rows":0
+            }),
+        );
+        let result = apply_workspace_operations(&workspace(), &request(vec![
+            json!({"kind":"insert_node","client_node_ref":"root","lineage_id":root,
+                "revision_id":Uuid::new_v4(),"parent_lineage_id":null,"ordinal":0,
+                "title":"技术方案","semantic_role":"technical","render_role":"section"}),
+            json!({"kind":"insert_node","client_node_ref":"child","lineage_id":child,
+                "revision_id":Uuid::new_v4(),"parent_lineage_id":root,"ordinal":0,
+                "title":"实施细节","semantic_role":"technical","render_role":"section"}),
+            json!({"kind":"insert_block","node_lineage_id":root,"ordinal":0,
+                "insertion_anchor":null,"block":rich}),
+            json!({"kind":"update_block","block_lineage_id":rich_lineage,"block":updated_rich}),
+            json!({"kind":"insert_block","node_lineage_id":root,"ordinal":1,
+                "insertion_anchor":null,"block":table}),
+            json!({"kind":"move_block","block_lineage_id":rich_lineage,
+                "target_node_lineage_id":child,"ordinal":0}),
+            json!({"kind":"move_node","node_lineage_id":child,"parent_lineage_id":null,"ordinal":1}),
+            json!({"kind":"delete_block","block_lineage_id":table_lineage}),
+            json!({"kind":"delete_node","node_lineage_id":child}),
+            json!({"kind":"insert_asset_block","node_lineage_id":root,
+                "asset_revision_id":asset,"ordinal":0})
+        ])).unwrap();
+
+        assert_eq!(result["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(result["nodes"][0]["lineage_id"], root.to_string());
+        assert_eq!(result["blocks"].as_array().unwrap().len(), 1);
+        assert_eq!(result["blocks"][0]["kind"], "image");
+        assert_eq!(
+            result["blocks"][0]["content"]["asset_revision_id"],
+            asset.to_string()
+        );
+    }
+
+    #[test]
+    fn manual_update_cannot_clear_candidate_dependency_or_stale_state() {
+        let node = Uuid::new_v4();
+        let lineage = Uuid::new_v4();
+        let content: crate::content_block::BlockContent = serde_json::from_value(json!({
+            "type":"rich_text","nodes":[{"kind":"paragraph","content":[{
+                "kind":"text","text":"候选内容","marks":[]}]}]
+        }))
+        .unwrap();
+        let original = json!({
+            "schema_version":1,"block_revision_id":Uuid::new_v4(),"lineage_id":lineage,
+            "revision":1,"kind":"rich_text","content":content,"origin":"agent_candidate",
+            "dependency_sha256":"a".repeat(64),"stale":false,
+            "content_sha256":content.sha256().unwrap()
+        });
+        let edited_content: crate::content_block::BlockContent = serde_json::from_value(json!({
+            "type":"rich_text","nodes":[{"kind":"paragraph","content":[{
+                "kind":"text","text":"人工修改候选内容","marks":[]}]}]
+        }))
+        .unwrap();
+        let caller_attempt = json!({
+            "schema_version":1,"block_revision_id":Uuid::new_v4(),"lineage_id":lineage,
+            "revision":1,"kind":"rich_text","content":edited_content,"origin":"human",
+            "dependency_sha256":null,"stale":false,
+            "content_sha256":edited_content.sha256().unwrap()
+        });
+        let result = apply_workspace_operations(
+            &workspace(),
+            &request(vec![
+                json!({"kind":"insert_node","client_node_ref":"root","lineage_id":node,
+                    "revision_id":Uuid::new_v4(),"parent_lineage_id":null,"ordinal":0,
+                    "title":"技术方案","semantic_role":"technical","render_role":"section"}),
+                json!({"kind":"insert_block","node_lineage_id":node,"ordinal":0,
+                    "insertion_anchor":null,"block":original}),
+                json!({"kind":"update_block","block_lineage_id":lineage,"block":caller_attempt}),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(result["blocks"][0]["dependency_sha256"], "a".repeat(64));
+        assert_eq!(result["blocks"][0]["stale"], true);
     }
 
     #[test]

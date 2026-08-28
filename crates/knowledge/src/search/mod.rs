@@ -1661,6 +1661,20 @@ fn product_versions(store: &Store, p: &crate::Product, scope: &str) -> Vec<Uuid>
 mod tests {
     use super::*;
 
+    async fn reset_fresh_schema(pool: &sqlx::PgPool) {
+        for statement in [
+            "DROP SCHEMA public CASCADE",
+            "CREATE SCHEMA public",
+            "GRANT ALL ON SCHEMA public TO CURRENT_USER",
+        ] {
+            sqlx::query(statement)
+                .execute(pool)
+                .await
+                .expect("reset fresh test schema");
+        }
+        platform::apply_fresh_baseline(pool).await.expect("migrate");
+    }
+
     #[test]
     fn over_fetch_caps_and_floor() {
         assert_eq!(over_fetch(10, 1), 50);
@@ -1928,21 +1942,7 @@ mod tests {
             eprintln!("skip: postgres down");
             return;
         };
-        let _ = sqlx::query(
-            "DROP TABLE IF EXISTS
-                wiki_log_entries, wiki_folders, wiki_pages,
-                graph_relations, graph_nodes, chunk_embeddings, chunks,
-                api_keys, models,
-                task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents,
-                product_versions, products, workspace_members, users, workspaces
-             CASCADE",
-        )
-        .execute(&pool)
-        .await;
-        platform::apply_fresh_baseline(&pool)
-            .await
-            .expect("migrate");
+        reset_fresh_schema(&pool).await;
         let owner = Uuid::new_v4();
         crate::insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -1975,8 +1975,8 @@ mod tests {
                 title: "ds",
                 file_name: "ds.txt",
                 file_size: 20,
-                file_hash: "match1",
-                object_ref: "objects/match1",
+                file_hash: "121458e7133ee31878b0530193f304c0bf600aeff873aa89fd37250d8fa5d1ae",
+                object_ref: "objects/121458e7133ee31878b0530193f304c0bf600aeff873aa89fd37250d8fa5d1ae",
             },
         )
         .await
@@ -2049,5 +2049,6 @@ mod tests {
         assert!(!pg.candidates[0].requirements[0].hits.is_empty());
         let v = serde_json::to_value(&pg).unwrap();
         assert!(v.get("best_product_id").is_none());
+        reset_fresh_schema(&pool).await;
     }
 }

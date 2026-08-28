@@ -2,7 +2,9 @@ const SQL: &str = include_str!("../../../migrations/bidding_v2_baseline.sql");
 const KNOWLEDGE_SQL: &str = include_str!("../../../migrations/knowledge_base_baseline.sql");
 const ACTIVE_QUEUE_REGISTRY: &str = include_str!("../../../deploy/queue-registry.toml");
 const PHASE1_LIVE: &str = include_str!("../../../scripts/bidding_v2_phase1_live.sql");
+const PHASE3_LIVE: &str = include_str!("../../../scripts/bidding_v2_phase3_live.sql");
 const API_ROUTER: &str = include_str!("../../api/src/routes.rs");
+const BID_API_ROUTER: &str = include_str!("../../api/src/bid_v2_routes.rs");
 const WORKER: &str = include_str!("../../worker/src/consume.rs");
 
 use knowledge::{LaunchMode, QueueRegistry};
@@ -57,8 +59,10 @@ fn v2_baseline_has_the_complete_authoring_foundation() {
         "bid_evidence_bundle_items",
         "bid_evidence_asset_artifacts",
         "bid_workspace_asset_artifacts",
+        "bid_workspace_asset_retirement_artifacts",
         "bid_outline_assessment_snapshot_artifacts",
         "bid_submission_assessment_snapshot_artifacts",
+        "bid_submission_assessment_snapshot_evidence_items",
         "bid_quote_snapshot_artifacts",
         "bid_renderer_contract_artifacts",
         "bid_render_font_artifacts",
@@ -72,6 +76,7 @@ fn v2_baseline_has_the_complete_authoring_foundation() {
         "bid_render_snapshot_attachment_preparation_items",
         "bid_submission_manifest_artifacts",
         "bid_submission_output_artifacts",
+        "bid_submission_assessment_report_artifacts",
     ] {
         assert!(tables.contains(&table), "missing V2 table {table}");
     }
@@ -98,6 +103,38 @@ fn v2_baseline_has_the_complete_authoring_foundation() {
     assert!(SQL.contains("lifecycle IN ('current','superseded','withdrawn','unresolved')"));
     assert!(SQL.contains("status IN ('ready','has_warnings','has_critical_warnings')"));
     assert!(SQL.contains("mode_options jsonb NOT NULL"));
+    for function in [
+        "kb_bid_v2_get_requirement_projection",
+        "kb_bid_v2_refresh_requirement_projection",
+        "kb_bid_v2_retire_workspace_asset",
+        "kb_bid_v2_create_node_evidence_pick_set",
+        "kb_bid_v2_get_node_evidence",
+        "kb_bid_v2_prepare_workspace_attachment",
+        "kb_bid_v2_load_user_pick_evidence",
+        "kb_bid_v2_publish_quote_snapshot",
+        "kb_bid_v2_prepare_submission_export",
+        "kb_bid_v2_load_submission_manifest_render_input",
+    ] {
+        assert!(
+            SQL.contains(function),
+            "missing V2 resource function {function}"
+        );
+    }
+    for route in [
+        "/fulfillment-bindings",
+        "/nodes/{node_lineage_id}/evidence",
+        "/nodes/{node_lineage_id}/evidence-pick-set",
+        "/assets/{asset_revision_id}",
+        "/document-settings",
+        "/requirement-projection",
+        "/exports/{export_id}/assessment-report",
+        "/quote-snapshots",
+    ] {
+        assert!(
+            BID_API_ROUTER.contains(route),
+            "missing V2 API route {route}"
+        );
+    }
 }
 
 #[test]
@@ -220,6 +257,24 @@ fn reviewed_publication_target_and_render_constraints_are_frozen() {
     assert!(SQL.contains("CREATE TABLE bid_submission_export_request_identities"));
     assert!(SQL.contains("EvidenceAsset knowledge media qualified identity mismatch"));
     assert!(SQL.contains("kb_bid_v2_verify_evidence_bundle_projection"));
+    for issue_code in [
+        "DOCUMENT_INPUT_NOT_READY",
+        "UNRESOLVED_REQUIREMENT",
+        "MANDATORY_REQUIREMENT_UNBOUND",
+        "DEVIATION_REVIEW_REQUIRED",
+        "SCORING_EVIDENCE_MISSING",
+        "STRUCTURED_FORM_INCOMPLETE",
+        "ATTACHMENT_PREPARATION_MISSING",
+        "FULFILLMENT_EVIDENCE_STALE_OR_MISSING",
+        "STALE_CONTENT",
+        "NO_ELIGIBLE_EVIDENCE",
+        "QUOTE_SNAPSHOT_MISSING",
+    ] {
+        assert!(
+            SQL.contains(issue_code),
+            "missing deterministic Assessment issue {issue_code}"
+        );
+    }
     assert!(SQL.contains("canonical_payload-'snapshot_sha256'"));
     assert!(SQL.contains("canonical_payload-'bundle_sha256'"));
     assert!(SQL.contains("kb_bid_v2_manifest_expected_dependencies"));
@@ -296,7 +351,10 @@ fn phase_one_vertical_has_owner_checked_mutations_and_is_active() {
         "kb_bid_v2_list_source_units",
         "kb_bid_v2_list_requirements",
     ] {
-        assert!(SQL.contains(&format!("CREATE FUNCTION {procedure}")), "{procedure}");
+        assert!(
+            SQL.contains(&format!("CREATE FUNCTION {procedure}")),
+            "{procedure}"
+        );
     }
     assert!(SQL.contains("PERFORM kb_bid_v2_require_project_owner"));
     assert!(SQL.contains("kb_bid_v2_idempotency_begin"));
@@ -308,10 +366,41 @@ fn phase_one_vertical_has_owner_checked_mutations_and_is_active() {
     assert!(PHASE1_LIVE.contains("stale document set CAS accepted"));
     assert!(PHASE1_LIVE.contains("source unit lacks exactly one requirement disposition"));
     assert!(API_ROUTER.contains("merge(crate::bid_v2_routes::router())"));
-    let active_worker = WORKER.split("\n#[cfg(test)]").next().expect("worker source");
+    let active_worker = WORKER
+        .split("\n#[cfg(test)]")
+        .next()
+        .expect("worker source");
     assert!(active_worker.contains("queue_with_concurrency::<BidAuthoringV2Queue>"));
     assert!(active_worker.contains("TenderDocumentProcessV2Worker"));
     assert!(active_worker.contains("RequirementSetCompileV2Worker"));
+    assert!(active_worker.contains("OutlineGenerateV2Worker"));
+    assert!(active_worker.contains("ContentGenerateV2Worker"));
+}
+
+#[test]
+fn phase_three_has_async_workers_and_live_evidence_candidate_publication() {
+    for procedure in [
+        "kb_bid_v2_load_outline_generation_input",
+        "kb_bid_v2_publish_outline_generation",
+        "kb_bid_v2_load_content_generation_input",
+        "kb_bid_v2_publish_content_generation",
+        "kb_bid_v2_get_evidence_overview",
+    ] {
+        assert!(
+            SQL.contains(&format!("CREATE FUNCTION {procedure}")),
+            "{procedure}"
+        );
+    }
+    assert!(PHASE1_LIVE.contains("kb_bid_v2_publish_outline_generation"));
+    assert!(PHASE3_LIVE.contains("explicit no-evidence bundle publication failed"));
+    assert!(PHASE3_LIVE.contains("match_only did not complete without a candidate"));
+    let active_worker = WORKER
+        .split("\n#[cfg(test)]")
+        .next()
+        .expect("worker source");
+    assert!(active_worker.contains("run_outline_agent"));
+    assert!(active_worker.contains("run_content_agent"));
+    assert!(active_worker.contains("exactly once"));
 }
 
 #[test]
@@ -319,13 +408,35 @@ fn active_queue_registry_is_v2_only_and_matches_implemented_workers() {
     assert!(!ACTIVE_QUEUE_REGISTRY.contains("bid:delivery:v1"));
     let registry = QueueRegistry::parse(ACTIVE_QUEUE_REGISTRY).expect("closed active registry");
     let expected = [
-        ("bid:tender_document_process:v2", "TenderDocumentProcessV2Handler", LaunchMode::RequiredEnabled),
-        ("bid:requirement_set_compile:v2", "RequirementSetCompileV2Handler", LaunchMode::RequiredEnabled),
-        ("bid:outline_generate:v2", "OutlineGenerateV2Handler", LaunchMode::DeclaredDisabled),
-        ("bid:content_generate:v2", "ContentGenerateV2Handler", LaunchMode::DeclaredDisabled),
-        ("bid:submission_export:v2", "SubmissionExportV2Handler", LaunchMode::DeclaredDisabled),
+        (
+            "bid:tender_document_process:v2",
+            "TenderDocumentProcessV2Handler",
+            LaunchMode::RequiredEnabled,
+        ),
+        (
+            "bid:requirement_set_compile:v2",
+            "RequirementSetCompileV2Handler",
+            LaunchMode::RequiredEnabled,
+        ),
+        (
+            "bid:outline_generate:v2",
+            "OutlineGenerateV2Handler",
+            LaunchMode::RequiredEnabled,
+        ),
+        (
+            "bid:content_generate:v2",
+            "ContentGenerateV2Handler",
+            LaunchMode::RequiredEnabled,
+        ),
+        (
+            "bid:submission_export:v2",
+            "SubmissionExportV2Handler",
+            LaunchMode::RequiredEnabled,
+        ),
     ];
-    let bid_entries: Vec<_> = registry.entries().iter()
+    let bid_entries: Vec<_> = registry
+        .entries()
+        .iter()
         .filter(|entry| entry.task_type.starts_with("bid:"))
         .collect();
     assert_eq!(bid_entries.len(), expected.len());
@@ -334,7 +445,10 @@ fn active_queue_registry_is_v2_only_and_matches_implemented_workers() {
         assert_eq!(entry.physical_queue, BID_AUTHORING_V2_QUEUE);
         assert_eq!(entry.handler, handler);
         assert_eq!(entry.payload_schema, BID_AUTHORING_V2_PAYLOAD_SCHEMA);
-        assert_eq!(entry.payload_version, u32::from(BID_AUTHORING_V2_PAYLOAD_VERSION));
+        assert_eq!(
+            entry.payload_version,
+            u32::from(BID_AUTHORING_V2_PAYLOAD_VERSION)
+        );
         assert_eq!(entry.launch_mode, mode);
     }
 }

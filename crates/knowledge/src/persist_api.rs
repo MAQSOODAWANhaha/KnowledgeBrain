@@ -169,10 +169,7 @@ fn api_key_from_row(r: sqlx::postgres::PgRow) -> Result<crate::ApiKey, sqlx::Err
     })
 }
 
-pub async fn load_api_key(
-    pool: &PgPool,
-    id: Uuid,
-) -> Result<Option<crate::ApiKey>, sqlx::Error> {
+pub async fn load_api_key(pool: &PgPool, id: Uuid) -> Result<Option<crate::ApiKey>, sqlx::Error> {
     let row = sqlx::query(
         "SELECT id, name, key_hash, prefix, scope_type, scope_id, scopes FROM api_keys WHERE id = $1",
     )

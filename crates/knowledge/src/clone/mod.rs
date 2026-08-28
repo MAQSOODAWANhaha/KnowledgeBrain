@@ -194,34 +194,49 @@ pub async fn run_clone(
 mod tests {
     use super::*;
     use crate::{create_workspace_with_library, insert_document, insert_user};
-    use platform::{apply_fresh_baseline, connect};
-    use tokio::sync::Mutex;
+    use platform::apply_fresh_baseline;
+    use tokio::sync::{Mutex, OnceCell};
 
     async fn db_lock() -> tokio::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::const_new(());
         LOCK.lock().await
     }
 
+    async fn connect_test_pool() -> Result<sqlx::PgPool, sqlx::Error> {
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_default();
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(32)
+            .connect(&database_url)
+            .await
+    }
+
+    async fn reset_fresh_schema(pool: &sqlx::PgPool) {
+        for statement in [
+            "DROP SCHEMA public CASCADE",
+            "CREATE SCHEMA public",
+            "GRANT ALL ON SCHEMA public TO CURRENT_USER",
+        ] {
+            sqlx::query(statement)
+                .execute(pool)
+                .await
+                .expect("reset fresh test schema");
+        }
+        apply_fresh_baseline(pool).await.expect("migrate");
+    }
+
+    async fn reset_fresh_schema_once(pool: &sqlx::PgPool) {
+        static RESET: OnceCell<()> = OnceCell::const_new();
+        RESET.get_or_init(|| reset_fresh_schema(pool)).await;
+    }
+
     #[tokio::test]
     async fn keep_new_document_id_adds_registry_owner_and_leaves_source() {
         let _g = db_lock().await;
-        let Ok(pool) = connect().await else {
+        let Ok(pool) = connect_test_pool().await else {
             eprintln!("skip: postgres down");
             return;
         };
-        let _ = sqlx::query(
-            "DROP TABLE IF EXISTS
-                wiki_log_entries, wiki_folders, wiki_pages,
-                graph_relations, graph_nodes, chunk_embeddings, chunks,
-                api_keys, models,
-                task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents,
-                product_versions, products, workspace_members, users, workspaces
-             CASCADE",
-        )
-        .execute(&pool)
-        .await;
-        apply_fresh_baseline(&pool).await.expect("migrate");
+        reset_fresh_schema_once(&pool).await;
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -297,28 +312,17 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(current, Some(src_ver));
+        reset_fresh_schema(&pool).await;
     }
 
     #[tokio::test]
     async fn keep_copies_chunks_when_embedding_matches() {
         let _g = db_lock().await;
-        let Ok(pool) = connect().await else {
+        let Ok(pool) = connect_test_pool().await else {
             eprintln!("skip: postgres down");
             return;
         };
-        let _ = sqlx::query(
-            "DROP TABLE IF EXISTS
-                wiki_log_entries, wiki_folders, wiki_pages,
-                graph_relations, graph_nodes, chunk_embeddings, chunks,
-                api_keys, models,
-                task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents,
-                product_versions, products, workspace_members, users, workspaces
-             CASCADE",
-        )
-        .execute(&pool)
-        .await;
-        apply_fresh_baseline(&pool).await.expect("migrate");
+        reset_fresh_schema_once(&pool).await;
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -340,8 +344,8 @@ mod tests {
                 title: "spec",
                 file_name: "spec.txt",
                 file_size: 8,
-                file_hash: "keep1",
-                object_ref: "objects/keep1",
+                file_hash: "5c58b7bd315c5c6c396aaedfe66d523f6f19ad5c4cd0d180cb4574e215cc0148",
+                object_ref: "objects/5c58b7bd315c5c6c396aaedfe66d523f6f19ad5c4cd0d180cb4574e215cc0148",
             },
         )
         .await
@@ -426,28 +430,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(st, "processing");
+        reset_fresh_schema(&pool).await;
     }
 
     #[tokio::test]
     async fn keep_reparses_when_embedding_models_differ() {
         let _g = db_lock().await;
-        let Ok(pool) = connect().await else {
+        let Ok(pool) = connect_test_pool().await else {
             eprintln!("skip: postgres down");
             return;
         };
-        let _ = sqlx::query(
-            "DROP TABLE IF EXISTS
-                wiki_log_entries, wiki_folders, wiki_pages,
-                graph_relations, graph_nodes, chunk_embeddings, chunks,
-                api_keys, models,
-                task_dead_letters, task_pending_ops, document_processing_spans,
-                document_tags, tags, documents,
-                product_versions, products, workspace_members, users, workspaces
-             CASCADE",
-        )
-        .execute(&pool)
-        .await;
-        apply_fresh_baseline(&pool).await.expect("migrate");
+        reset_fresh_schema_once(&pool).await;
         let owner = Uuid::new_v4();
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
@@ -469,8 +462,8 @@ mod tests {
                 title: "iso",
                 file_name: "iso.txt",
                 file_size: 3,
-                file_hash: "mis1",
-                object_ref: "objects/mis1",
+                file_hash: "90ff7f6f30beadcbfb07c27b3f7059a97b568b23f82ca30bb2d8fc1fd0a53c0e",
+                object_ref: "objects/90ff7f6f30beadcbfb07c27b3f7059a97b568b23f82ca30bb2d8fc1fd0a53c0e",
             },
         )
         .await
@@ -529,5 +522,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+        reset_fresh_schema(&pool).await;
     }
 }

@@ -1,6 +1,6 @@
 # 招投标知识证据图片身份 V3
 
-> 状态：Phase 0存储identity已冻结；Phase 4 publication/retrieval仍待实现和独立评审。本文只补齐招投标插入知识库图片所需的冻结media identity，不改变检索排序、eligible scope、Workspace/Product/Document生命周期或招投标业务模型。
+> 状态：Phase 0存储identity与Phase 4 publication/retrieval均已实现并进入最终验收。本文只补齐招投标插入知识库图片所需的冻结media identity，不改变检索排序、eligible scope、Workspace/Product/Document生命周期或招投标业务模型。
 
 ## Context
 
@@ -99,12 +99,12 @@ knowledge baseline负责：
 ## Steps
 
 - [x] Phase 0在knowledge baseline添加不可变image artifact/mapping存储identity、同Document/ProductVersion约束和ObjectRegistry复合引用；不提供发布/查询行为。
-- [ ] Phase 4冻结`KnowledgeEvidenceMediaV1`和`KnowledgeEvidenceHitV3`canonical schema/golden hash，并补齐publication payload schema。
-- [ ] 修改图片ingestion publication，使image object、artifact和OCR chunk mapping原子成功或整体失败。
-- [ ] 扩展唯一KnowledgeRetrievalPort及storage adapter返回V3 media snapshot；保持V2排序与scope选择代码路径。
-- [ ] 扩展knowledge-owned attest/verify验证media来源链和digest。
-- [ ] 修改招投标consumer把选中media冻结为EvidenceAssetArtifact，不直接join知识库表。
-- [ ] 增加deletion/change测试，证明live资料变化不改写历史V3响应或已冻结投标EvidenceAsset。
+- [x] Phase 4冻结`KnowledgeEvidenceMediaV1`和`KnowledgeEvidenceHitV3`canonical schema/golden hash，并补齐publication payload schema。
+- [x] 修改图片ingestion publication，使image object、artifact和OCR chunk mapping原子成功或整体失败。
+- [x] 扩展唯一KnowledgeRetrievalPort及storage adapter返回V3 media snapshot；保持V2排序与scope选择代码路径。
+- [x] 扩展knowledge-owned attest/verify验证media来源链和digest。
+- [x] 修改招投标consumer把选中media冻结为EvidenceAssetArtifact，不直接join知识库表。
+- [x] 增加deletion/change测试，证明live资料变化不改写历史V3响应或已冻结投标EvidenceAsset。
 
 ## Verification
 

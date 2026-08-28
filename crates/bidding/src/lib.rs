@@ -5,6 +5,8 @@ pub use bid_authoring_contract::*;
 pub mod bid_authoring_v2;
 pub mod content_block;
 pub mod mutation;
+pub mod quote_snapshot;
+pub mod render_v2;
 pub mod tender_process;
 pub mod tender_upload;
 pub mod workspace;

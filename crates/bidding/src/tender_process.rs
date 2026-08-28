@@ -276,7 +276,11 @@ impl TenderVisionEnricher for ExistingTenderVisionEnricher {
             ));
         }
         let result = tokio::task::spawn_blocking(move || {
-            knowledge::enrichment::describe_image(&image_object_ref, &image_source_type, &output_language)
+            knowledge::enrichment::describe_image(
+                &image_object_ref,
+                &image_source_type,
+                &output_language,
+            )
         })
         .await
         .map_err(|_| TenderDocumentProcessError::Vision("vision task join failed".into()))?
@@ -440,7 +444,8 @@ where
             .cloned()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| {
-                knowledge::enrichment::image_source_type(&document.file_name, &converted.markdown).to_string()
+                knowledge::enrichment::image_source_type(&document.file_name, &converted.markdown)
+                    .to_string()
             });
         let language = knowledge::enrichment::infer_output_language(&format!(
             "{}\n{}",
@@ -823,8 +828,9 @@ impl TenderDocumentProcessRepository for PgTenderDocumentProcessRepository {
     }
 
     async fn abandon_staged_object(&self, object: &FrozenObjectIdentity) {
-        let _ = platform::abandon_object_upload(&self.pool, object.staging_id, TENDER_PROCESS_ACTOR)
-            .await;
+        let _ =
+            platform::abandon_object_upload(&self.pool, object.staging_id, TENDER_PROCESS_ACTOR)
+                .await;
     }
 
     async fn publish(

@@ -34,16 +34,16 @@ pub use status::*;
 pub use store::*;
 
 pub use platform::{
-    LaunchMode, LiveBody, QUEUE_DEFAULT, QUEUE_GRAPH, QUEUE_LOW,
-    QUEUE_MULTIMODAL, QUEUE_POSTPROCESS, QUEUE_QUESTION, QUEUE_SUMMARY, QUEUE_WIKI, QueueRegistry,
-    ReadyBody, TYPE_CHUNK_EXTRACT, TYPE_DATATABLE, TYPE_DOCUMENT_PROCESS,
-    TYPE_IMAGE_MULTIMODAL, TYPE_INDEX_DELETE, TYPE_KB_DELETE, TYPE_LIST_DELETE, TYPE_LIST_REPARSE,
-    TYPE_MANUAL_PROCESS, TYPE_POST_PROCESS, TYPE_QUESTION, TYPE_SEMANTIC_INDEX_V2, TYPE_SUMMARY,
-    TYPE_VERSION_CLONE, TYPE_WIKI_FINALIZE, TYPE_WIKI_INGEST, chat_api_key, chat_base_url,
-    chat_model, check_readiness, embedding_api_key, embedding_base_url, embedding_model, first_env,
-    is_audio_type, is_image_type, is_simple_format, is_valid_file_type, is_video, launch_mode,
-    live_body, max_file_bytes, new_id, ready_body, sha256_hex, vlm_api_key, vlm_base_url,
-    vlm_configured, vlm_endpoint_ready, vlm_model,
+    LaunchMode, LiveBody, QUEUE_DEFAULT, QUEUE_GRAPH, QUEUE_LOW, QUEUE_MULTIMODAL,
+    QUEUE_POSTPROCESS, QUEUE_QUESTION, QUEUE_SUMMARY, QUEUE_WIKI, QueueRegistry, ReadyBody,
+    TYPE_CHUNK_EXTRACT, TYPE_DATATABLE, TYPE_DOCUMENT_PROCESS, TYPE_IMAGE_MULTIMODAL,
+    TYPE_INDEX_DELETE, TYPE_KB_DELETE, TYPE_LIST_DELETE, TYPE_LIST_REPARSE, TYPE_MANUAL_PROCESS,
+    TYPE_POST_PROCESS, TYPE_QUESTION, TYPE_SEMANTIC_INDEX_V2, TYPE_SUMMARY, TYPE_VERSION_CLONE,
+    TYPE_WIKI_FINALIZE, TYPE_WIKI_INGEST, chat_api_key, chat_base_url, chat_model, check_readiness,
+    embedding_api_key, embedding_base_url, embedding_model, first_env, is_audio_type,
+    is_image_type, is_simple_format, is_valid_file_type, is_video, launch_mode, live_body,
+    max_file_bytes, new_id, ready_body, sha256_hex, vlm_api_key, vlm_base_url, vlm_configured,
+    vlm_endpoint_ready, vlm_model,
 };
 
 /// Disk write plus in-memory object map. Production bytes still go through platform blobs.

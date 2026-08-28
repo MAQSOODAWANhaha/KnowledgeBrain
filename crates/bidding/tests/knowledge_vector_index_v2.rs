@@ -1,4 +1,8 @@
 use async_trait::async_trait;
+use knowledge::knowledge_index_v2::{
+    VectorEmbeddingInputV2, VectorEmbeddingProviderV2, VectorIndexErrorV2,
+    rebuild_vector_indexes_v2,
+};
 use knowledge::knowledge_retrieval::{
     EMBEDDING_DIMENSION_V2, EMBEDDING_OUTPUT_NORMALIZATION_VERSION_V2,
     EMBEDDING_PROVIDER_PROTOCOL_VERSION_V2, EMBEDDING_REVISION_SCHEMA_V2, EmbeddingRevisionV2,
@@ -7,10 +11,6 @@ use sqlx::PgPool;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
-};
-use knowledge::knowledge_index_v2::{
-    VectorEmbeddingInputV2, VectorEmbeddingProviderV2, VectorIndexErrorV2,
-    rebuild_vector_indexes_v2,
 };
 use tokio::sync::Notify;
 use uuid::Uuid;

@@ -1,10 +1,11 @@
 #![cfg(feature = "knowledge-v2-exact-contract-tests")]
 
+use knowledge::PostgresKnowledgeRetrievalAdapter;
 use knowledge::knowledge_retrieval::{
     EMBEDDING_DIMENSION_V2, EMBEDDING_OUTPUT_NORMALIZATION_VERSION_V2,
     EMBEDDING_PROVIDER_PROTOCOL_VERSION_V2, EMBEDDING_REVISION_SCHEMA_V2, EmbeddingRevisionV2,
     KNOWLEDGE_EVIDENCE_CONTRACT_V2, KNOWLEDGE_EVIDENCE_SCHEMA_V1, KnowledgeEvidenceScopeV2,
-    KnowledgeRetrievalError, KnowledgeRetrievalPortV2, ProductEvidenceRequestV1,
+    KnowledgeRetrievalError, KnowledgeRetrievalPortV3, ProductEvidenceRequestV1,
     RERANK_REQUEST_CONFIG_SHA256_V2, RERANK_REVISION_SCHEMA_V2, RETRIEVAL_A_PRIMARY_COMPARATOR_V2,
     RETRIEVAL_A_VERSION_COMPARATOR_V2, RETRIEVAL_B_EXACT_COMPARATOR_V2,
     RETRIEVAL_C_SEMANTIC_COMPARATOR_V2, RETRIEVAL_CHANNEL_RANK_COMPARATOR_V2,
@@ -21,7 +22,6 @@ use knowledge::knowledge_retrieval::{
     RetrievalRrfPolicyV2,
 };
 use sqlx::PgPool;
-use knowledge::PostgresKnowledgeRetrievalAdapter;
 use uuid::Uuid;
 
 mod support;
@@ -537,8 +537,8 @@ async fn exact_v2_returns_only_complete_trusted_snapshots_deterministically() {
     let policy = register_policy(&pool, 8, 1024, 4096).await;
     let adapter = PostgresKnowledgeRetrievalAdapter::new_exact_only_v2_contract_tests(pool.clone());
     let request = scope("Al PhA 条款", vec![exact, no_hit], policy);
-    let first = adapter.retrieve_evidence_v2(request.clone()).await.unwrap();
-    let second = adapter.retrieve_evidence_v2(request).await.unwrap();
+    let first = adapter.retrieve_evidence_v3(request.clone()).await.unwrap();
+    let second = adapter.retrieve_evidence_v3(request).await.unwrap();
     remove_fixture(&pool, &fixture).await;
 
     assert_eq!(
@@ -588,7 +588,7 @@ async fn exact_v2_fairness_and_quota_fail_closed_are_explicit() {
 
     let fairness_policy = register_policy(&pool, 2, 1024, 4096).await;
     let fairness = adapter
-        .retrieve_evidence_v2(scope("needle", vec![first, second, third], fairness_policy))
+        .retrieve_evidence_v3(scope("needle", vec![first, second, third], fairness_policy))
         .await
         .unwrap();
     assert_eq!(fairness.eligible_versions.len(), 3);
@@ -599,7 +599,7 @@ async fn exact_v2_fairness_and_quota_fail_closed_are_explicit() {
 
     let chunk_policy = register_policy(&pool, 1, 6, 100).await;
     let chunk_error = adapter
-        .retrieve_evidence_v2(scope("needle", vec![oversized], chunk_policy))
+        .retrieve_evidence_v3(scope("needle", vec![oversized], chunk_policy))
         .await;
     assert!(matches!(
         chunk_error,
@@ -608,7 +608,7 @@ async fn exact_v2_fairness_and_quota_fail_closed_are_explicit() {
 
     let total_policy = register_policy(&pool, 2, 100, 11).await;
     let total_error = adapter
-        .retrieve_evidence_v2(scope("needle", vec![first, second], total_policy))
+        .retrieve_evidence_v3(scope("needle", vec![first, second], total_policy))
         .await;
     assert!(matches!(
         total_error,
@@ -632,7 +632,7 @@ async fn exact_v2_revalidates_the_canonical_policy_artifact() {
 
     let valid_policy = register_policy(&pool, 2, 100, 100).await;
     let valid = adapter
-        .retrieve_evidence_v2(scope("needle", vec![version], valid_policy))
+        .retrieve_evidence_v3(scope("needle", vec![version], valid_policy))
         .await
         .unwrap();
     assert_eq!(valid.exact_prefix_hit_count, 1);
@@ -1115,7 +1115,7 @@ async fn embedding_revision_registry_binding_sidecars_and_revocation_are_enforce
     let adapter = PostgresKnowledgeRetrievalAdapter::new_exact_only_v2_contract_tests(pool.clone());
     assert!(
         adapter
-            .retrieve_evidence_v2(scope("needle", vec![version], identity.clone()))
+            .retrieve_evidence_v3(scope("needle", vec![version], identity.clone()))
             .await
             .is_ok()
     );
@@ -1138,7 +1138,7 @@ async fn embedding_revision_registry_binding_sidecars_and_revocation_are_enforce
         .contains("EMBEDDING_REVISION_V2_IMMUTABLE")
     );
     let revoked = adapter
-        .retrieve_evidence_v2(scope("needle", vec![version], identity))
+        .retrieve_evidence_v3(scope("needle", vec![version], identity))
         .await;
     assert!(matches!(
         revoked,
@@ -1248,7 +1248,7 @@ async fn exact_v2_rejects_selected_unknown_mismatched_and_revoked_policy() {
     let policy = register_policy(&pool, 3, 100, 100).await;
 
     let missing = adapter
-        .retrieve_evidence_v2(scope("needle", vec![Uuid::new_v4()], policy.clone()))
+        .retrieve_evidence_v3(scope("needle", vec![Uuid::new_v4()], policy.clone()))
         .await;
     assert!(matches!(
         missing,
@@ -1258,7 +1258,7 @@ async fn exact_v2_rejects_selected_unknown_mismatched_and_revoked_policy() {
     let mut unknown = policy.clone();
     unknown.policy_sha256 = knowledge::sha256_hex(Uuid::new_v4().as_bytes());
     let unknown = adapter
-        .retrieve_evidence_v2(scope("needle", vec![version], unknown))
+        .retrieve_evidence_v3(scope("needle", vec![version], unknown))
         .await;
     assert!(matches!(
         unknown,
@@ -1268,7 +1268,7 @@ async fn exact_v2_rejects_selected_unknown_mismatched_and_revoked_policy() {
     let mut mismatch = policy.clone();
     mismatch.max_hits += 1;
     let mismatch = adapter
-        .retrieve_evidence_v2(scope("needle", vec![version], mismatch))
+        .retrieve_evidence_v3(scope("needle", vec![version], mismatch))
         .await;
     assert!(matches!(
         mismatch,
@@ -1283,7 +1283,7 @@ async fn exact_v2_rejects_selected_unknown_mismatched_and_revoked_policy() {
     .await
     .unwrap();
     let revoked = adapter
-        .retrieve_evidence_v2(scope("needle", vec![version], policy))
+        .retrieve_evidence_v3(scope("needle", vec![version], policy))
         .await;
     assert!(matches!(
         revoked,

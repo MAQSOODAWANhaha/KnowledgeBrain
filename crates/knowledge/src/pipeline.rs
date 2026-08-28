@@ -248,17 +248,12 @@ where
 
 /// Enqueue already returns `Ok(None)` for `DeclaredDisabled` lanes.
 /// Running generators here would re-enable those lanes in-process.
-
-/// Enqueue already returns `Ok(None)` for `DeclaredDisabled` lanes.
-/// Running generators here would re-enable those lanes in-process.
 fn allow_inline_fallback(task_type: &str) -> bool {
     !matches!(
         crate::launch_mode(task_type),
         Ok(Some(crate::LaunchMode::DeclaredDisabled))
     )
 }
-
-/// Invoke `inline` only when the registry does not declare the lane disabled.
 
 /// Invoke `inline` only when the registry does not declare the lane disabled.
 fn run_inline_if_allowed<T>(task_type: &str, inline: impl FnOnce() -> T) -> Option<T> {
@@ -662,8 +657,6 @@ pub async fn run_image(
 }
 
 /// Last-retry DECR so a dead image cannot pin `multimodal:pending`.
-
-/// Last-retry DECR so a dead image cannot pin `multimodal:pending`.
 pub async fn finalize_multimodal(pool: &PgPool, document_id: Uuid, attempt: i32) {
     let current: Option<i32> = sqlx::query_scalar("SELECT attempt FROM documents WHERE id = $1")
         .bind(document_id)
@@ -872,8 +865,6 @@ pub async fn run_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), Stri
     }
     schedule_semantic_index_v2_if_ready(pool, version_id).await
 }
-
-/// Brain ProcessWikiFinalize — finalize lane only, never ingest.
 
 /// Brain ProcessWikiFinalize — finalize lane only, never ingest.
 pub async fn run_wiki_finalize(pool: &PgPool, version_id: Uuid) -> Result<(), String> {

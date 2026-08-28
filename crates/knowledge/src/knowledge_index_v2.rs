@@ -607,6 +607,9 @@ async fn freeze_vector_index_snapshot_v2(
             AND document.enable_status='enabled'
             AND document.index_ready
             AND chunk.chunk_type=ANY($2::text[])
+            AND (chunk.chunk_type<>'image_ocr' OR EXISTS (
+              SELECT 1 FROM public.knowledge_image_ocr_chunk_artifact_mappings mapping
+               WHERE mapping.chunk_id=chunk.id))
           ORDER BY chunk.id",
     )
     .bind(product_version_id)

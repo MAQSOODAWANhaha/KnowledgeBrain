@@ -133,6 +133,8 @@ Workspace拥有：
 - Assessment；
 - render snapshot与输出。
 
+`WorkspaceRevision`直接冻结 `(quote_snapshot_id, quote_snapshot_sha256)`；不得在历史Workspace、Assessment、generation input或render loader中动态解析 `QuoteSnapshotCurrent`。发布新报价时在同一事务中复制当前WorkspaceRevision、绑定新报价、推进WorkspaceHead并使基于旧head的候选/待处理生成请求过期；旧WorkspaceRevision继续解析到旧报价。
+
 每个`BidProject`恰好拥有一个`SubmissionWorkspace`并生成一份投标文件；Workspace scope固定为`project_wide`。
 
 ## 4. 不可变身份链
@@ -279,6 +281,11 @@ RequirementSupersessionEdge
 - ProjectRequirementSet 保存带适用范围的历史；
 - Workspace projection 按自己的 scope 重放 DAG；
 - 对某个 applicability fragment，old 与 successor 的 effective membership 不得同时含糊生效。
+
+V1 canonical applicability 使用封闭表示：`{}` 表示全域，局部范围使用
+`{"fragments":["..."]}`（非空、去重、稳定排序）。RequirementSet 和 WorkspaceProjection item
+冻结 `effective_applicability`；局部替代从 old item 扣除 edge fragments，并只把这些 fragments 加入
+successor。范围重叠、无法从全域安全扣除的部分替代、未知 SourceUnit 或不兼容 DocumentSet 必须拒绝。
 
 用户可以修改、撤销或重新建立 supersession 决定；新决定形成新 revision，不覆盖历史。
 
@@ -506,7 +513,8 @@ repeat_header_rows
 - 逻辑网格每个坐标恰由一个cell覆盖；
 - 合并单元格不得重叠；
 - widths数量等于逻辑列数；
-- 总宽不超过可打印宽度；
+- 总宽不超过 `210mm - left_margin - right_margin`；图片 `width_mm` 使用同一可打印宽度合同；
+- Workspace block或DocumentSettings每次mutation都在CAS事务内执行该校验，超宽直接失败，DOCX/PDF不得各自静默缩放；
 - repeat_header_rows为连续前缀；
 - cell内容只使用允许的RichText结构。
 
@@ -635,7 +643,7 @@ status
 preparation_sha256
 ```
 
-Renderer不得运行时重新转换PDF。页面不完整属于技术失败；用户可以改用 `file_reference` 或替换附件。
+`SubmissionExport` Worker是PDF页面准备的唯一可信执行者：它从冻结source asset digest读取PDF，以固定144 DPI栅格化，逐页登记ObjectRegistry staging/commit，并原子发布包含source/request/renderer identity的preparation attestation。客户端不得提交PDF page-image asset IDs，普通准备API只允许单张图片引用自身。Renderer不得运行时重新转换PDF，只读取已冻结的准备结果；页面不完整、source digest不符、准备工具缺失或对象提交失败均为技术失败。准备完成前，Preview仅显示元数据占位且不读取source PDF bytes；准备完成后，Preview与DOCX/PDF按同一可打印区域等比拟合冻结页面图片。用户可以改用 `file_reference` 或替换附件。
 
 ### 15.3 TenderStructuredFormDefinition
 

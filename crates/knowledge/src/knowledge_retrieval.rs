@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 pub const KNOWLEDGE_EVIDENCE_SCHEMA_V1: u16 = 1;
-pub const KNOWLEDGE_EVIDENCE_SCHEMA_V2: u16 = 2;
+pub const KNOWLEDGE_EVIDENCE_SCHEMA_V3: u16 = 3;
 pub const KNOWLEDGE_EVIDENCE_CONTRACT_V1: &str = "knowledge-evidence-v1";
 pub const KNOWLEDGE_EVIDENCE_CONTRACT_V2: &str = "knowledge-evidence-v2";
 pub const RETRIEVAL_POLICY_SCHEMA_V2: u16 = 2;
@@ -843,12 +843,25 @@ pub enum KnowledgeSourceTypeV2 {
     ImageOcr,
 }
 
-/// Fresh schema-2 snapshot. Its fields intentionally mirror, rather than
-/// flatten or embed, v1 so either schema can evolve only through an explicit
-/// contract change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct KnowledgeEvidenceHitV2 {
+pub struct KnowledgeEvidenceMediaV1 {
+    pub image_artifact_revision_id: Uuid,
+    pub object_ref: String,
+    pub sha256: String,
+    pub media_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub page_ordinal: Option<u32>,
+    pub bounding_region: Option<serde_json::Value>,
+    pub frozen_document_display_name: String,
+}
+
+/// Sole schema-3 retrieval snapshot. Exact/semantic V2 ranking policy remains
+/// frozen, while image OCR sources now carry an immutable media identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeEvidenceHitV3 {
     pub schema_version: u16,
     pub document_id: Uuid,
     pub source_chunk_id: Uuid,
@@ -869,14 +882,15 @@ pub struct KnowledgeEvidenceHitV2 {
     pub pre_rerank_rrf_rank: Option<u32>,
     pub retrieval_contract_version: String,
     pub source_type: KnowledgeSourceTypeV2,
+    pub media: Option<KnowledgeEvidenceMediaV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct KnowledgeEvidenceBatchV2 {
+pub struct KnowledgeEvidenceBatchV3 {
     pub schema_version: u16,
     pub eligible_versions: Vec<EligibleEvidenceVersionV1>,
-    pub hits: Vec<KnowledgeEvidenceHitV2>,
+    pub hits: Vec<KnowledgeEvidenceHitV3>,
     pub exact_prefix_hit_count: u32,
     pub exact_versions_truncated: u64,
     pub exact_hits_truncated: u64,
@@ -1010,15 +1024,15 @@ pub fn validate_evidence_batch(
 
 /// Validates the isolated schema-2 exact-prefix snapshot before a shadow
 /// consumer observes it.
-pub fn validate_evidence_batch_v2(
+pub fn validate_evidence_batch_v3(
     expected_workspace_kind: &str,
-    batch: &KnowledgeEvidenceBatchV2,
+    batch: &KnowledgeEvidenceBatchV3,
     policy: &RetrievalPolicyIdentityV1,
 ) -> Result<(), KnowledgeRetrievalError> {
     let max_hits = usize::try_from(policy.max_hits).map_err(|_| {
         KnowledgeRetrievalError::InvalidHit("v2 max_hits cannot be represented".into())
     })?;
-    if batch.schema_version != KNOWLEDGE_EVIDENCE_SCHEMA_V2
+    if batch.schema_version != KNOWLEDGE_EVIDENCE_SCHEMA_V3
         || policy.contract_version != KNOWLEDGE_EVIDENCE_CONTRACT_V2
         || !matches!(expected_workspace_kind, "product_line" | "company")
         || policy.max_hits == 0
@@ -1073,7 +1087,33 @@ pub fn validate_evidence_batch_v2(
         total_bytes = total_bytes.checked_add(chunk.len() as u64).ok_or_else(|| {
             KnowledgeRetrievalError::InvalidHit("v2 hit byte quota overflow".into())
         })?;
-        if hit.schema_version != KNOWLEDGE_EVIDENCE_SCHEMA_V2
+        let media_valid = match (&hit.source_type, &hit.media) {
+            (KnowledgeSourceTypeV2::ImageOcr, Some(media)) => {
+                !media.image_artifact_revision_id.is_nil()
+                    && media.object_ref == format!("objects/{}", media.sha256)
+                    && media.sha256.len() == 64
+                    && media
+                        .sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    && matches!(
+                        media.media_type.as_str(),
+                        "image/png" | "image/jpeg" | "image/webp"
+                    )
+                    && media.width > 0
+                    && media.height > 0
+                    && media.frozen_document_display_name == hit.frozen_document_display_name
+                    && media
+                        .bounding_region
+                        .as_ref()
+                        .is_none_or(|value| value.is_object())
+            }
+            (KnowledgeSourceTypeV2::ImageOcr, None) => false,
+            (_, None) => true,
+            (_, Some(_)) => false,
+        };
+        if hit.schema_version != KNOWLEDGE_EVIDENCE_SCHEMA_V3
+            || !media_valid
             || hit.workspace_kind != expected_workspace_kind
             || hit.document_id.is_nil()
             || hit.source_chunk_id.is_nil()
@@ -1186,14 +1226,14 @@ pub trait KnowledgeRetrievalPort: Send + Sync {
     ) -> Result<KnowledgeEvidenceBatchV1, KnowledgeRetrievalError>;
 }
 
-/// Shadow/test-only schema-2 seam. It is deliberately separate from the v1
-/// port so production callers cannot accidentally dispatch or fall back.
+/// Sole schema-3 evidence retrieval seam. Ranking and policy remain frozen
+/// at the V2 revision, while each image OCR hit carries immutable media.
 #[async_trait]
-pub trait KnowledgeRetrievalPortV2: Send + Sync {
-    async fn retrieve_evidence_v2(
+pub trait KnowledgeRetrievalPortV3: Send + Sync {
+    async fn retrieve_evidence_v3(
         &self,
         scope: KnowledgeEvidenceScopeV2,
-    ) -> Result<KnowledgeEvidenceBatchV2, KnowledgeRetrievalError>;
+    ) -> Result<KnowledgeEvidenceBatchV3, KnowledgeRetrievalError>;
 }
 
 #[cfg(test)]
@@ -1778,9 +1818,9 @@ mod tests {
         assert!(validate_evidence_batch("product_line", &batch, &policy()).is_err());
     }
 
-    fn hit_v2(chunk: &str) -> KnowledgeEvidenceHitV2 {
-        KnowledgeEvidenceHitV2 {
-            schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V2,
+    fn hit_v3(chunk: &str) -> KnowledgeEvidenceHitV3 {
+        KnowledgeEvidenceHitV3 {
+            schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V3,
             document_id: Uuid::from_u128(1),
             source_chunk_id: Uuid::from_u128(2),
             product_id: Uuid::from_u128(3),
@@ -1798,19 +1838,20 @@ mod tests {
             pre_rerank_rrf_rank: None,
             retrieval_contract_version: KNOWLEDGE_EVIDENCE_CONTRACT_V2.into(),
             source_type: KnowledgeSourceTypeV2::ParentText,
+            media: None,
         }
     }
 
-    fn batch_v2() -> KnowledgeEvidenceBatchV2 {
-        KnowledgeEvidenceBatchV2 {
-            schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V2,
+    fn batch_v3() -> KnowledgeEvidenceBatchV3 {
+        KnowledgeEvidenceBatchV3 {
+            schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V3,
             eligible_versions: vec![EligibleEvidenceVersionV1 {
                 product_id: Uuid::from_u128(3),
                 product_version_id: Uuid::from_u128(4),
                 workspace_kind: "product_line".into(),
                 frozen_display_name: "v2".into(),
             }],
-            hits: vec![hit_v2("中A文")],
+            hits: vec![hit_v3("中A文")],
             exact_prefix_hit_count: 1,
             exact_versions_truncated: 0,
             exact_hits_truncated: 0,
@@ -1818,8 +1859,8 @@ mod tests {
         }
     }
 
-    fn truncated_batch_v2() -> KnowledgeEvidenceBatchV2 {
-        let mut batch = batch_v2();
+    fn truncated_batch_v3() -> KnowledgeEvidenceBatchV3 {
+        let mut batch = batch_v3();
         batch
             .eligible_versions
             .extend([(5, 6), (7, 8)].map(|(product_id, product_version_id)| {
@@ -1830,7 +1871,7 @@ mod tests {
                     frozen_display_name: format!("v{product_version_id}"),
                 }
             }));
-        let mut second_hit = hit_v2("第二");
+        let mut second_hit = hit_v3("第二");
         second_hit.document_id = Uuid::from_u128(9);
         second_hit.source_chunk_id = Uuid::from_u128(10);
         second_hit.product_id = Uuid::from_u128(5);
@@ -1875,13 +1916,13 @@ mod tests {
     }
 
     #[test]
-    fn v2_batch_serialization_and_validation_lock_schema_metrics_and_snapshot() {
-        let batch = batch_v2();
-        validate_evidence_batch_v2("product_line", &batch, &identity_v2()).unwrap();
-        let expected = r#"{"schema_version":2,"eligible_versions":[{"product_id":"00000000-0000-0000-0000-000000000003","product_version_id":"00000000-0000-0000-0000-000000000004","workspace_kind":"product_line","frozen_display_name":"v2"}],"hits":[{"schema_version":2,"document_id":"00000000-0000-0000-0000-000000000001","source_chunk_id":"00000000-0000-0000-0000-000000000002","product_id":"00000000-0000-0000-0000-000000000003","product_version_id":"00000000-0000-0000-0000-000000000004","workspace_kind":"product_line","frozen_document_display_name":"manual.pdf","chunk_utf8":"中A文","chunk_sha256":"3ead192f0e2117995036250588592ff765d9a48bc9f4d35a439a35e09ec23e99","chunk_byte_length":7,"quote_start_offset":0,"quote_end_offset":7,"offset_unit":"utf8_byte","retrieval_rank":1,"retrieval_raw_score":"1.000000","pre_rerank_rrf_rank":null,"retrieval_contract_version":"knowledge-evidence-v2","source_type":"parent_text"}],"exact_prefix_hit_count":1,"exact_versions_truncated":0,"exact_hits_truncated":0,"semantic_hits_truncated":0}"#;
+    fn v3_batch_serialization_and_validation_lock_schema_metrics_and_snapshot() {
+        let batch = batch_v3();
+        validate_evidence_batch_v3("product_line", &batch, &identity_v2()).unwrap();
+        let expected = r#"{"schema_version":3,"eligible_versions":[{"product_id":"00000000-0000-0000-0000-000000000003","product_version_id":"00000000-0000-0000-0000-000000000004","workspace_kind":"product_line","frozen_display_name":"v2"}],"hits":[{"schema_version":3,"document_id":"00000000-0000-0000-0000-000000000001","source_chunk_id":"00000000-0000-0000-0000-000000000002","product_id":"00000000-0000-0000-0000-000000000003","product_version_id":"00000000-0000-0000-0000-000000000004","workspace_kind":"product_line","frozen_document_display_name":"manual.pdf","chunk_utf8":"中A文","chunk_sha256":"3ead192f0e2117995036250588592ff765d9a48bc9f4d35a439a35e09ec23e99","chunk_byte_length":7,"quote_start_offset":0,"quote_end_offset":7,"offset_unit":"utf8_byte","retrieval_rank":1,"retrieval_raw_score":"1.000000","pre_rerank_rrf_rank":null,"retrieval_contract_version":"knowledge-evidence-v2","source_type":"parent_text","media":null}],"exact_prefix_hit_count":1,"exact_versions_truncated":0,"exact_hits_truncated":0,"semantic_hits_truncated":0}"#;
         assert_eq!(serde_json::to_string(&batch).unwrap(), expected);
         assert_eq!(
-            serde_json::from_str::<KnowledgeEvidenceBatchV2>(expected).unwrap(),
+            serde_json::from_str::<KnowledgeEvidenceBatchV3>(expected).unwrap(),
             batch
         );
 
@@ -1890,42 +1931,42 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("exact_prefix_hit_count");
-        assert!(serde_json::from_value::<KnowledgeEvidenceBatchV2>(missing_prefix).is_err());
+        assert!(serde_json::from_value::<KnowledgeEvidenceBatchV3>(missing_prefix).is_err());
 
         let mut bad_score = batch.clone();
         bad_score.hits[0].retrieval_raw_score = "0.999999".into();
-        assert!(validate_evidence_batch_v2("product_line", &bad_score, &identity_v2()).is_err());
+        assert!(validate_evidence_batch_v3("product_line", &bad_score, &identity_v2()).is_err());
         let mut bad_offset = batch.clone();
         bad_offset.hits[0].quote_start_offset = 1;
-        assert!(validate_evidence_batch_v2("product_line", &bad_offset, &identity_v2()).is_err());
+        assert!(validate_evidence_batch_v3("product_line", &bad_offset, &identity_v2()).is_err());
         let mut semantic = batch;
         semantic.exact_prefix_hit_count = 0;
         semantic.hits[0].retrieval_raw_score = "0.999999".into();
         semantic.hits[0].pre_rerank_rrf_rank = Some(1);
         semantic.semantic_hits_truncated = 1;
-        validate_evidence_batch_v2("product_line", &semantic, &identity_v2()).unwrap();
+        validate_evidence_batch_v3("product_line", &semantic, &identity_v2()).unwrap();
     }
 
     #[test]
     fn v2_batch_validation_rejects_impossible_exact_metrics() {
         let policy = identity_v2();
-        let valid_truncated = truncated_batch_v2();
-        validate_evidence_batch_v2("product_line", &valid_truncated, &policy).unwrap();
+        let valid_truncated = truncated_batch_v3();
+        validate_evidence_batch_v3("product_line", &valid_truncated, &policy).unwrap();
 
-        let mut beyond_eligible_bound = batch_v2();
+        let mut beyond_eligible_bound = batch_v3();
         beyond_eligible_bound.exact_versions_truncated = 1;
         beyond_eligible_bound.exact_hits_truncated = 1;
         assert!(
-            validate_evidence_batch_v2("product_line", &beyond_eligible_bound, &policy).is_err()
+            validate_evidence_batch_v3("product_line", &beyond_eligible_bound, &policy).is_err()
         );
 
         let mut fewer_hits_than_versions = valid_truncated.clone();
         fewer_hits_than_versions.exact_hits_truncated = 0;
         assert!(
-            validate_evidence_batch_v2("product_line", &fewer_hits_than_versions, &policy).is_err()
+            validate_evidence_batch_v3("product_line", &fewer_hits_than_versions, &policy).is_err()
         );
 
-        let mut empty_with_truncated_versions = batch_v2();
+        let mut empty_with_truncated_versions = batch_v3();
         empty_with_truncated_versions.hits.clear();
         empty_with_truncated_versions.exact_prefix_hit_count = 0;
         empty_with_truncated_versions
@@ -1934,16 +1975,16 @@ mod tests {
         empty_with_truncated_versions.exact_versions_truncated = 1;
         empty_with_truncated_versions.exact_hits_truncated = 1;
         assert!(
-            validate_evidence_batch_v2("product_line", &empty_with_truncated_versions, &policy)
+            validate_evidence_batch_v3("product_line", &empty_with_truncated_versions, &policy)
                 .is_err()
         );
 
-        let mut empty_with_truncated_hits = batch_v2();
+        let mut empty_with_truncated_hits = batch_v3();
         empty_with_truncated_hits.hits.clear();
         empty_with_truncated_hits.exact_prefix_hit_count = 0;
         empty_with_truncated_hits.exact_hits_truncated = 1;
         assert!(
-            validate_evidence_batch_v2("product_line", &empty_with_truncated_hits, &policy)
+            validate_evidence_batch_v3("product_line", &empty_with_truncated_hits, &policy)
                 .is_err()
         );
 
@@ -1951,7 +1992,7 @@ mod tests {
         incomplete_primary_prefix.hits.pop();
         incomplete_primary_prefix.exact_prefix_hit_count = 1;
         assert!(
-            validate_evidence_batch_v2("product_line", &incomplete_primary_prefix, &policy)
+            validate_evidence_batch_v3("product_line", &incomplete_primary_prefix, &policy)
                 .is_err()
         );
 
@@ -1960,17 +2001,17 @@ mod tests {
         duplicate_version_prefix.hits[1].product_version_id =
             duplicate_version_prefix.hits[0].product_version_id;
         assert!(
-            validate_evidence_batch_v2("product_line", &duplicate_version_prefix, &policy).is_err()
+            validate_evidence_batch_v3("product_line", &duplicate_version_prefix, &policy).is_err()
         );
 
-        let mut semantic_only = batch_v2();
+        let mut semantic_only = batch_v3();
         semantic_only.exact_prefix_hit_count = 0;
         semantic_only.hits[0].retrieval_raw_score = "0.750000".into();
         semantic_only.hits[0].pre_rerank_rrf_rank = Some(1);
-        validate_evidence_batch_v2("product_line", &semantic_only, &policy).unwrap();
+        validate_evidence_batch_v3("product_line", &semantic_only, &policy).unwrap();
 
         semantic_only.hits[0].retrieval_raw_score = "0.75000".into();
-        assert!(validate_evidence_batch_v2("product_line", &semantic_only, &policy).is_err());
+        assert!(validate_evidence_batch_v3("product_line", &semantic_only, &policy).is_err());
     }
 
     #[test]

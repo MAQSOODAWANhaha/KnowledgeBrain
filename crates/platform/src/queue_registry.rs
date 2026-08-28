@@ -232,8 +232,12 @@ mod tests {
     use crate::{
         BID_CONTENT_GENERATE_V2_TASK, BID_OUTLINE_GENERATE_V2_TASK,
         BID_REQUIREMENT_SET_COMPILE_V2_TASK, BID_SUBMISSION_EXPORT_V2_TASK,
-        BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
+        BID_TENDER_DOCUMENT_PROCESS_V2_TASK, BidAuthoringRequestIdentityV2, ContentGenerateJobV2,
+        ContentGenerateOperationV2, OutlineGenerateJobV2, RequirementSetCompileJobV2,
+        SubmissionExportJobV2, SubmissionOutputModeV2, TenderDocumentProcessJobV2,
     };
+    use oxana::Job;
+    use uuid::Uuid;
 
     fn loaded() -> QueueRegistry {
         QueueRegistry::load().expect("repo-relative deploy/queue-registry.toml")
@@ -263,22 +267,109 @@ mod tests {
     }
 
     #[test]
-    fn intake_workers_are_required_and_future_workers_are_declared_disabled() {
+    fn bidding_identity_formulas_equal_oxana_unique_ids() {
         let registry = loaded();
+        let request = BidAuthoringRequestIdentityV2 {
+            request_artifact_id: Uuid::from_u128(1),
+            request_revision: 7,
+            frozen_input_sha256: "a".repeat(64),
+        };
+        let project_id = Uuid::from_u128(2);
+        let document_id = Uuid::from_u128(3);
+        let workspace_id = Uuid::from_u128(4);
+        let disposition_id = Uuid::from_u128(5);
+        let request_formula =
+            |kind: &str| format!("{kind}:{{request_artifact_id}}:{{request_revision}}");
+        let request_unique = |kind: &str| format!("{kind}:{}:7", request.request_artifact_id);
+        let tender = TenderDocumentProcessJobV2 {
+            request: request.clone(),
+            project_id,
+            document_revision_id: document_id,
+        };
+        let outline = OutlineGenerateJobV2 {
+            request: request.clone(),
+            project_id,
+            workspace_id,
+            base_workspace_revision_id: document_id,
+        };
+        let content = ContentGenerateJobV2 {
+            request: request.clone(),
+            project_id,
+            workspace_id,
+            base_workspace_revision_id: document_id,
+            operation: ContentGenerateOperationV2::Generate,
+        };
+        let export = SubmissionExportJobV2 {
+            request: request.clone(),
+            project_id,
+            workspace_id,
+            workspace_revision_id: document_id,
+            output_mode: SubmissionOutputModeV2::Submission,
+        };
+        for (task, kind, actual) in [
+            (
+                BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
+                "tender_document_process",
+                tender.unique_id(),
+            ),
+            (
+                BID_OUTLINE_GENERATE_V2_TASK,
+                "outline_generate",
+                outline.unique_id(),
+            ),
+            (
+                BID_CONTENT_GENERATE_V2_TASK,
+                "content_generate",
+                content.unique_id(),
+            ),
+            (
+                BID_SUBMISSION_EXPORT_V2_TASK,
+                "submission_export",
+                export.unique_id(),
+            ),
+        ] {
+            assert_eq!(
+                registry.entry_for_task(task).unwrap().identity_formula,
+                request_formula(kind)
+            );
+            assert_eq!(actual.as_deref(), Some(request_unique(kind).as_str()));
+        }
+        let compile = RequirementSetCompileJobV2 {
+            request,
+            project_id,
+            document_set_revision_id: document_id,
+            disposition_set_revision_id: disposition_id,
+        };
+        let formula = "requirement_set_compile:{project_id}:{document_set_revision_id}:{disposition_set_revision_id}";
         assert_eq!(
-            registry.launch_mode(BID_TENDER_DOCUMENT_PROCESS_V2_TASK),
-            Some(LaunchMode::RequiredEnabled)
+            registry
+                .entry_for_task(BID_REQUIREMENT_SET_COMPILE_V2_TASK)
+                .unwrap()
+                .identity_formula,
+            formula
         );
         assert_eq!(
-            registry.launch_mode(BID_REQUIREMENT_SET_COMPILE_V2_TASK),
-            Some(LaunchMode::RequiredEnabled)
+            compile.unique_id(),
+            Some(format!(
+                "requirement_set_compile:{project_id}:{document_id}:{disposition_id}"
+            ))
         );
+    }
+
+    #[test]
+    fn all_implemented_v2_workers_are_required() {
+        let registry = loaded();
         for task in [
+            BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
+            BID_REQUIREMENT_SET_COMPILE_V2_TASK,
             BID_OUTLINE_GENERATE_V2_TASK,
             BID_CONTENT_GENERATE_V2_TASK,
             BID_SUBMISSION_EXPORT_V2_TASK,
         ] {
-            assert_eq!(registry.launch_mode(task), Some(LaunchMode::DeclaredDisabled));
+            assert_eq!(
+                registry.launch_mode(task),
+                Some(LaunchMode::RequiredEnabled)
+            );
         }
     }
 

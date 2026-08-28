@@ -5,6 +5,8 @@
 > HTTP、Schema、Job 与领域细节：[`tender-to-submission-v2.md`](tender-to-submission-v2.md)。  
 > Web 交互：[`frontend-authoring.md`](frontend-authoring.md)。  
 > 本文是唯一执行顺序；若旧计划中的 Phase、first-launch、兼容或 cutover 描述与本文冲突，以本文为准。
+>
+> 当前执行范围是 **Phase 0–7 后端 clean-slate 交付**。Web 交互契约保留在 `frontend-authoring.md` 供独立前端交付使用，但不在本轮修改、展示或验收；后端不得为尚未交付的 Web 能力返回 mock 成功。
 
 ## 1. 不可变实施原则
 
@@ -76,7 +78,7 @@
 - 完成 RequirementSource、AtomicRequirement、局部 supersession 与唯一 WorkspaceRequirementProjection。
 - DocumentSet/Disposition publication 在事务内发布唯一 RequirementSetCompile request，提交后使用 Oxana enqueue；唯一键为 project + DocumentSetRevision + DispositionSetRevision。
 - 正式注册 TenderDocumentProcess 和 RequirementSetCompile Worker；不保存 continuation 状态。
-- 文件页支持上传、状态、重试和可选 role/relation 修改；pending/failed/unresolved 只提示，生成时可静默冻结当前集合。
+- 文件 API 支持上传、状态、重试和可选 role/relation 修改；pending/failed/unresolved 只作为业务状态，生成时可静默冻结当前集合。
 
 ### Phase 1 验收
 
@@ -90,12 +92,12 @@
 - 实现 Rust 封闭 ContentBlockV1：RichText、Table、Image、Attachment、StructuredForm、PageBreak、SignaturePlaceholder。
 - 完成 ContentBlockV1 ↔ Tiptap adapter；正文禁止 heading，标题只来自树。
 - 实现 workspace load、mutation、assets、binding 与默认 settings API；所有操作共用 WorkspaceHead `If-Match`。
-- 接通现有 OutlineTree、DocumentCanvas、SectionEditor、draft queue；409 保留草稿，poll 不覆盖人工内容。
-- 本阶段不做完整 Settings UI。
+- mutation API 支持人工建树、调序、正文、表格、图片、附件和恢复；409 返回 current head，幂等 replay 不覆盖人工内容。
+- Settings 交付后端 revision/CAS/API；本轮不修改 Web。
 
 ### Phase 2 验收
 
-空树手建章节 → 增删改名/拖拽/拆合 → 编辑正文 → 插表格/图片/附件 → 保存刷新恢复；并发冲突不丢稿。完成无 AI 可用的第一条产品竖切。
+通过真实 `/api/v2` 从空树手建章节 → 调序/编辑正文 → 插表格/图片/附件 → 保存重新 GET 恢复；并发冲突与幂等 replay 不丢稿。完成无 AI 可用的后端竖切。
 
 ## 5. Phase 3 — 动态 OutlineCompiler
 
@@ -116,7 +118,7 @@
 - 实现 EvidenceBundle、EvidencePickSet、ProposedEvidenceSet、NO_EVIDENCE、EvidenceAssetArtifact 与 ObjectRegistry 持有。
 - `POST .../evidence-matches` 只创建 `ContentGenerate(operation=match_only)` request，不建立 EvidenceMatch Job/Worker/状态机。
 - 知识图片在 retrieval 时返回并由招投标立即冻结，不通过 OCR 文本反查 live 图片。
-- 右侧 Evidence 面板支持 quote/图片、人工改选、章节刷新和全文覆盖概览；匹配不是强制步骤。
+- Evidence API 支持 quote/图片、人工 PickSet、节点证据和全文覆盖概览；匹配不是强制步骤。Web 面板留给独立前端交付。
 
 ### Phase 4 验收
 
@@ -129,7 +131,7 @@
 - system-proposed 模式在同一 Job 内检索并冻结证据；user-pick 模式消费指定 PickSet；不建立 matching continuation。
 - 实现 narrative、response table、structured form、evidence index、quote 和 deterministic generators。
 - 校验业务事实 evidence_ref、bundle membership、图片 identity、表格网格、prompt injection 和封闭 Schema。
-- CandidateReview 展示文字/表格/图片操作并允许部分接受；接受与人工 mutation 共用 Workspace CAS。
+- Candidate API 返回文字/表格/图片操作并允许按 operation ordinal 部分接受；接受与人工 mutation 共用 Workspace CAS。
 - 普通人工保存保留 dependency identity 和 stale；只有接受当前候选、显式核对或确定性重生成可绑定当前输入。
 
 ### Phase 5 验收
@@ -141,7 +143,7 @@
 ### P6-A Assessment 与 Preview
 
 - 实现确定性 OutlineAssessment/SubmissionAssessment；以 workspace/projection/scope/settings/assets/QuoteSnapshot 复合 hash 复用，不创建 Assessment Job。
-- 完成 Settings UI 与共享 LayoutDocument；HTML preview 使用冻结 WorkspaceRevision 和 DocumentSettingsRevision。
+- 完成 Settings revision/API 与共享 LayoutDocument；HTML preview 使用冻结 WorkspaceRevision 和 DocumentSettingsRevision。本轮不修改 Settings UI。
 
 ### P6-B V2 Renderer
 
@@ -164,7 +166,7 @@
 - 只收口已实现能力，不把未完成功能推迟到本阶段。
 - 冻结最终 clean-install bidding schema/bootstrap；不引入 first-launch 或兼容迁移。
 - active queue 只包含五类粗粒度 Job：TenderDocumentProcess、RequirementSetCompile、OutlineGenerate、ContentGenerate、SubmissionExport。
-- 运行全仓删除扫描、Rust unit/SQL live/API/Worker/Agent fixture/Renderer golden/Web unit/Browser E2E。
+- 运行全仓删除扫描、Rust unit/SQL live/API/Worker/Agent fixture/Renderer golden；Web unit/Browser E2E 属独立前端交付，不以本轮后端改动伪造。
 - 更新部署、运行、故障恢复和审计文档。
 
 ## 10. 完成定义
@@ -177,5 +179,5 @@
 4. Assessment 不阻断业务，技术错误 fail-closed；
 5. DOCX/PDF/preview/报告按冻结快照可重放；
 6. 招投标域无 V1、Part/Gate、first-launch、兼容、双写和旧 API/Job/SQL/Web；
-7. fresh 环境、全量测试和浏览器黄金路径通过；
-8. 实现文件、运行注册、Schema、API、Web 与本文阶段及契约一致。
+7. fresh 环境、全量后端测试和真实 API → Redis → Worker 黄金路径通过；
+8. 实现文件、运行注册、Schema 与 API 和本文后端阶段及契约一致；Web 工作树不混入本轮改动。

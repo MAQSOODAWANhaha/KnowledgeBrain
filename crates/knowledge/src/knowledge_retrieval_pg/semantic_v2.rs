@@ -42,6 +42,29 @@ pub(crate) trait EmbeddingCredentialResolverV2: Send + Sync {
     async fn resolve(&self, credential_ref: &str) -> Result<String, KnowledgeRetrievalError>;
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct EnvironmentEmbeddingCredentialResolverV2;
+
+#[async_trait]
+impl EmbeddingCredentialResolverV2 for EnvironmentEmbeddingCredentialResolverV2 {
+    async fn resolve(&self, credential_ref: &str) -> Result<String, KnowledgeRetrievalError> {
+        let variable = credential_ref.strip_prefix("env:").ok_or_else(|| {
+            invalid("embedding/rerank credential reference must use env:<VARIABLE_NAME>")
+        })?;
+        if variable.is_empty()
+            || variable.len() > 128
+            || !variable
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(invalid(
+                "embedding/rerank credential environment name is invalid",
+            ));
+        }
+        std::env::var(variable).map_err(|_| integrity("embedding/rerank credential is unavailable"))
+    }
+}
+
 /// Strict semantic-v2 embedding transport. Endpoint, model, dimensions, and
 /// request shape always come from the validated immutable registry revision.
 #[derive(Clone)]
@@ -59,9 +82,7 @@ impl StrictEmbeddingClientV2 {
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(30))
             .build()
-            .map_err(|error| {
-                integrity(&format!("failed to configure embedding client: {error}"))
-            })?;
+            .map_err(|error| integrity(format!("failed to configure embedding client: {error}")))?;
         Ok(Self { http, credentials })
     }
 
@@ -102,7 +123,7 @@ impl StrictEmbeddingClientV2 {
             }))
             .send()
             .await
-            .map_err(|error| integrity(&format!("embedding provider request failed: {error}")))?;
+            .map_err(|error| integrity(format!("embedding provider request failed: {error}")))?;
         if !response.status().is_success() {
             return Err(embedding_status_error(response.status()));
         }
@@ -116,7 +137,7 @@ impl StrictEmbeddingClientV2 {
                 integrity("embedding provider response exceeds byte limit")
             }
             super::http_v2::BoundedBodyErrorV2::Transport(error) => {
-                integrity(&format!("embedding provider response failed: {error}"))
+                integrity(format!("embedding provider response failed: {error}"))
             }
         })?;
         parse_embedding_response(&response.bytes, &validated.revision)
@@ -154,7 +175,7 @@ fn parse_embedding_response(
     revision: &EmbeddingRevisionV2,
 ) -> Result<QueryEmbeddingV2, KnowledgeRetrievalError> {
     let response: EmbeddingResponseV2 = serde_json::from_slice(bytes)
-        .map_err(|error| integrity(&format!("invalid embedding provider JSON: {error}")))?;
+        .map_err(|error| integrity(format!("invalid embedding provider JSON: {error}")))?;
     if response.model != revision.provider_model_identifier
         || response.model_revision_sha256 != revision.provider_model_revision_sha256
         || response.request_config_sha256 != revision.request_config_sha256
@@ -585,9 +606,10 @@ pub(crate) async fn recall_in_snapshot(
              AND v.product_version_id=c.product_version_id
              AND v.embedding_revision_sha256=$4
           WHERE c.product_version_id=ANY($1::uuid[]) AND d.product_version_id=c.product_version_id
-            AND d.deleted_at IS NULL AND d.enable_status='enabled' AND d.index_ready
-            AND c.chunk_type=ANY($5::text[])
-          ORDER BY c.id",
+AND d.deleted_at IS NULL AND d.enable_status='enabled' AND d.index_ready
+AND c.chunk_type=ANY($5::text[])
+AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))
+ORDER BY c.id",
     )
     .bind(&eligible_vec)
     .bind(&policy.keyword.tokenizer)
@@ -640,13 +662,18 @@ pub(crate) async fn recall_in_snapshot(
             .get(version_id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
+        let input_count = i64::try_from(inputs.len())
+            .map_err(|_| integrity("vector generation count overflow"))?;
+        let computed_snapshot =
+            crate::knowledge_index_v2::source_snapshot_sha256_v2(&marker.0, inputs);
         if marker.0 != policy.embedding.model_revision_sha256
-            || marker.2
-                != i64::try_from(inputs.len())
-                    .map_err(|_| integrity("vector generation count overflow"))?
-            || marker.1 != crate::knowledge_index_v2::source_snapshot_sha256_v2(&marker.0, inputs)
+            || marker.2 != input_count
+            || marker.1 != computed_snapshot
         {
-            return Err(integrity("missing or stale V2 vector generation"));
+            return Err(integrity(format!(
+                "missing or stale V2 vector generation (marker_count={}, input_count={}, marker_snapshot={}, computed_snapshot={})",
+                marker.2, input_count, marker.1, computed_snapshot
+            )));
         }
     }
 
@@ -747,7 +774,8 @@ async fn load_signals(
            JOIN product_versions pv ON pv.id=c.product_version_id JOIN products p ON p.id=pv.product_id
            JOIN workspaces w ON w.id=p.workspace_id
           WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL
-            AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($3::text[])"
+            AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($3::text[])
+            AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))"
     ).bind(workspace_kind).bind(versions).bind(SIGNAL_TYPES.as_slice()).fetch_all(&mut **tx).await.map_err(db)?;
     Ok(rows
         .into_iter()
@@ -779,7 +807,8 @@ async fn load_sources(
            FROM chunks c JOIN documents d ON d.id=c.document_id AND d.product_version_id=c.product_version_id
            JOIN product_versions pv ON pv.id=c.product_version_id JOIN products p ON p.id=pv.product_id JOIN workspaces w ON w.id=p.workspace_id
           WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.enable_status='enabled' AND d.index_ready
-            AND c.chunk_type=ANY($3::text[])"
+            AND c.chunk_type=ANY($3::text[])
+            AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))"
     ).bind(workspace_kind).bind(versions).bind(["text","parent_text","image_ocr"].as_slice()).fetch_all(&mut **tx).await.map_err(db)?;
     Ok(rows
         .into_iter()
@@ -813,7 +842,9 @@ async fn keyword_ranks(
            JOIN product_versions pv ON pv.id=c.product_version_id JOIN products p ON p.id=pv.product_id JOIN workspaces w ON w.id=p.workspace_id
            JOIN chunk_keyword_indexes_v2 k ON k.chunk_id=c.id AND k.tokenizer=$4 AND k.tokenizer_version=$5
           WHERE q.value IS NOT NULL AND w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL
-            AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($8::text[]) AND k.tsv @@ q.value),
+            AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($8::text[])
+AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))
+AND k.tsv @@ q.value),
          chosen AS (SELECT *,row_number() OVER(ORDER BY score DESC,product_id,product_version_id,document_id,id) AS rank FROM scored WHERE score >= $6)
          SELECT id,rank FROM chosen WHERE rank <= $7 ORDER BY rank"
     ).bind(workspace_kind).bind(versions).bind(query).bind(&policy.keyword.tokenizer).bind(&policy.keyword.tokenizer_version)
@@ -847,6 +878,7 @@ async fn vector_ranks(
             AND v.embedding_revision_sha256=$4
           WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL
             AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($5::text[])
+            AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))
             AND ((v.embedding <=> CAST($3 AS vector))::float8)::text IN ('NaN','Infinity','-Infinity')",
     )
     .bind(workspace_kind)
@@ -867,7 +899,8 @@ async fn vector_ranks(
            JOIN chunk_vector_indexes_v2 v ON v.chunk_id=c.id
             AND v.product_version_id=c.product_version_id
             AND v.embedding_revision_sha256=$4
-          WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($7::text[])),
+          WHERE w.kind=$1 AND c.product_version_id=ANY($2::uuid[]) AND d.deleted_at IS NULL AND d.enable_status='enabled' AND d.index_ready AND c.chunk_type=ANY($7::text[])
+AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))),
          scored AS (SELECT *,floor(least(1.0::float8,greatest(0.0::float8,1.0-distance))*1000000)::bigint AS score FROM distances
                     WHERE distance::text NOT IN ('NaN','Infinity','-Infinity')),
          chosen AS (SELECT *,row_number() OVER(ORDER BY score DESC,product_id,product_version_id,document_id,id) AS rank FROM scored WHERE score >= $5)
@@ -909,10 +942,10 @@ async fn load_graph_refs(
     for row in rows {
         let id = row
             .try_get::<Uuid, _>("id")
-            .map_err(|error| integrity(&format!("invalid graph signal id: {error}")))?;
+            .map_err(|error| integrity(format!("invalid graph signal id: {error}")))?;
         let values = row
             .try_get::<Vec<Option<Uuid>>, _>("chunk_ids")
-            .map_err(|error| integrity(&format!("invalid graph chunk_ids: {error}")))?;
+            .map_err(|error| integrity(format!("invalid graph chunk_ids: {error}")))?;
         let mut parsed = Vec::with_capacity(values.len());
         for value in values {
             parsed.push(value.ok_or_else(|| integrity("graph chunk_ids contains NULL"))?);
@@ -1068,7 +1101,7 @@ fn vector_literal(values: &[f32]) -> String {
 fn invalid(message: &str) -> KnowledgeRetrievalError {
     KnowledgeRetrievalError::InvalidRequest(message.into())
 }
-fn integrity(message: &str) -> KnowledgeRetrievalError {
+fn integrity(message: impl Into<String>) -> KnowledgeRetrievalError {
     KnowledgeRetrievalError::Unavailable(message.into())
 }
 fn db(error: sqlx::Error) -> KnowledgeRetrievalError {
@@ -1998,6 +2031,52 @@ pub(super) mod tests {
         for (id, doc, kind, content, header, parent) in &chunks {
             sqlx::query("INSERT INTO chunks(id,product_version_id,document_id,chunk_type,content,context_header,parent_chunk_id) VALUES($1,$2,$3,$4,$5,$6,$7)")
                 .bind(id).bind(version_id).bind(doc).bind(kind).bind(content).bind(header).bind(parent).execute(&mut *tx).await.unwrap();
+        }
+        let image_artifact_id = Uuid::new_v4();
+        let image_content_sha = "1111111111111111111111111111111111111111111111111111111111111111";
+        let image_object_ref = format!("objects/{image_content_sha}");
+        let canonical_media = br#"{"schema_version":3,"fixture":"semantic-v2"}"#;
+        sqlx::query(
+            "INSERT INTO object_registry(object_ref,digest,media_type,byte_length,state)
+             VALUES($1,$2,'image/png',1,'available')",
+        )
+        .bind(&image_object_ref)
+        .bind(image_content_sha)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO knowledge_image_artifact_revisions(
+               id,product_version_id,document_id,revision,object_ref,content_sha256,
+               media_type,width,height,source_image_key,canonical_payload,artifact_sha256)
+             VALUES($1,$2,$3,1,$4,$5,'image/png',1,1,'semantic-v2-fixture',$6,
+                    encode(public.digest($6,'sha256'),'hex'))",
+        )
+        .bind(image_artifact_id)
+        .bind(version_id)
+        .bind(document_id)
+        .bind(&image_object_ref)
+        .bind(image_content_sha)
+        .bind(canonical_media.as_slice())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        for image_chunk_id in [ocr, ocr_ambiguous_one, ocr_ambiguous_two] {
+            sqlx::query(
+                "INSERT INTO knowledge_image_ocr_chunk_artifact_mappings(
+                   chunk_id,product_version_id,document_id,image_artifact_revision_id,
+                   object_ref,content_sha256,media_type)
+                 VALUES($1,$2,$3,$4,$5,$6,'image/png')",
+            )
+            .bind(image_chunk_id)
+            .bind(version_id)
+            .bind(document_id)
+            .bind(image_artifact_id)
+            .bind(&image_object_ref)
+            .bind(image_content_sha)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
         }
         sqlx::query("INSERT INTO graph_nodes(product_version_id,document_id,name,chunk_ids) VALUES($1,$2,'alpha graph',$3),($1,$2,'alpha ambiguous graph',$4)")
             .bind(version_id).bind(document_id).bind(vec![source_two]).bind(vec![source_ambiguous, source_one]).execute(&mut *tx).await.unwrap();

@@ -1618,6 +1618,9 @@ AS $$
      AND document.index_ready
      AND chunk.chunk_type=ANY(ARRAY[
        'text','parent_text','image_ocr','question','summary','image_caption','graph_node','wiki_page'])
+     AND (chunk.chunk_type<>'image_ocr' OR EXISTS (
+       SELECT 1 FROM public.knowledge_image_ocr_chunk_artifact_mappings mapping
+        WHERE mapping.chunk_id=chunk.id))
 $$;
 REVOKE ALL ON FUNCTION kb_knowledge_source_snapshot_v2(uuid,text) FROM PUBLIC;
 
@@ -2360,7 +2363,7 @@ BEGIN
                                               THEN hit ELSE '{}'::jsonb END) key)
                IS DISTINCT FROM ARRAY[
                    'chunk_byte_length','chunk_sha256','chunk_utf8','document_id',
-                   'frozen_document_display_name','id','offset_unit','pre_rerank_rrf_rank',
+                   'frozen_document_display_name','id','media','offset_unit','pre_rerank_rrf_rank',
                    'product_version_artifact_id','quote_end_offset','quote_start_offset',
                    'requirement_artifact_id','retrieval_contract_version','retrieval_rank',
                    'retrieval_raw_score','route_id','source_chunk_id','source_type']::text[]
@@ -2382,6 +2385,21 @@ BEGIN
             OR hit->>'chunk_sha256' !~ '^[0-9a-f]{64}$'
             OR jsonb_typeof(hit->'source_type') IS DISTINCT FROM 'string'
             OR hit->>'source_type' NOT IN ('text','parent_text','image_ocr')
+            OR (hit->>'source_type'='image_ocr' AND (
+              jsonb_typeof(hit->'media') IS DISTINCT FROM 'object'
+              OR (SELECT array_agg(key ORDER BY key) FROM jsonb_object_keys(hit->'media') key)
+                IS DISTINCT FROM ARRAY['bounding_region','frozen_document_display_name','height','image_artifact_revision_id','media_type','object_ref','page_ordinal','sha256','width']::text[]
+              OR (hit#>>'{media,image_artifact_revision_id}') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+              OR hit#>>'{media,object_ref}' IS DISTINCT FROM 'objects/'||(hit#>>'{media,sha256}')
+              OR (hit#>>'{media,sha256}') !~ '^[0-9a-f]{64}$'
+              OR hit#>>'{media,media_type}' NOT IN ('image/png','image/jpeg','image/webp')
+              OR jsonb_typeof(hit#>'{media,width}') IS DISTINCT FROM 'number' OR (hit#>>'{media,width}') !~ '^[1-9][0-9]*$'
+              OR jsonb_typeof(hit#>'{media,height}') IS DISTINCT FROM 'number' OR (hit#>>'{media,height}') !~ '^[1-9][0-9]*$'
+              OR jsonb_typeof(hit#>'{media,page_ordinal}') NOT IN ('null','number')
+              OR (jsonb_typeof(hit#>'{media,page_ordinal}')='number' AND (hit#>>'{media,page_ordinal}') !~ '^(0|[1-9][0-9]*)$')
+              OR jsonb_typeof(hit#>'{media,bounding_region}') NOT IN ('null','object')
+              OR hit#>>'{media,frozen_document_display_name}' IS DISTINCT FROM hit->>'frozen_document_display_name'))
+            OR (hit->>'source_type'<>'image_ocr' AND jsonb_typeof(hit->'media') IS DISTINCT FROM 'null')
             OR jsonb_typeof(hit->'retrieval_contract_version') IS DISTINCT FROM 'string'
             OR hit->>'retrieval_contract_version' IS DISTINCT FROM 'knowledge-evidence-v2'
             OR jsonb_typeof(hit->'offset_unit') IS DISTINCT FROM 'string'
@@ -2416,6 +2434,8 @@ BEGIN
           ) artifact_value ON true
           LEFT JOIN documents document_value ON document_value.id=(hit->>'document_id')::uuid
           LEFT JOIN chunks chunk_value ON chunk_value.id=(hit->>'source_chunk_id')::uuid
+          LEFT JOIN knowledge_image_ocr_chunk_artifact_mappings media_mapping ON media_mapping.chunk_id=chunk_value.id
+          LEFT JOIN knowledge_image_artifact_revisions media_value ON media_value.id=media_mapping.image_artifact_revision_id
          WHERE artifact_value.artifact IS NULL
             OR document_value.product_version_id IS DISTINCT FROM
                (artifact_value.artifact->>'product_version_id')::uuid
@@ -2434,7 +2454,17 @@ BEGIN
             OR hit->>'chunk_sha256' IS DISTINCT FROM encode(public.digest(
                convert_to(chunk_value.content,'UTF8'),'sha256'),'hex')
             OR (hit->>'quote_end_offset')::bigint IS DISTINCT FROM
-               octet_length(convert_to(chunk_value.content,'UTF8'))) THEN
+               octet_length(convert_to(chunk_value.content,'UTF8'))
+            OR (hit->>'source_type'='image_ocr' AND (media_value.id IS NULL
+               OR (hit#>>'{media,image_artifact_revision_id}')::uuid IS DISTINCT FROM media_value.id
+               OR hit#>>'{media,object_ref}' IS DISTINCT FROM media_value.object_ref
+               OR hit#>>'{media,sha256}' IS DISTINCT FROM media_value.content_sha256
+               OR hit#>>'{media,media_type}' IS DISTINCT FROM media_value.media_type
+               OR (hit#>>'{media,width}')::integer IS DISTINCT FROM media_value.width
+               OR (hit#>>'{media,height}')::integer IS DISTINCT FROM media_value.height
+               OR CASE WHEN jsonb_typeof(hit#>'{media,page_ordinal}')='null' THEN NULL
+                  ELSE (hit#>>'{media,page_ordinal}')::integer END IS DISTINCT FROM media_value.page_ordinal
+               OR hit#>'{media,bounding_region}' IS DISTINCT FROM coalesce(media_value.bounding_region,'null'::jsonb)))) THEN
         RAISE EXCEPTION 'KNOWLEDGE_MATCHING_HIT_V2_MISMATCH' USING ERRCODE='23514';
     END IF;
 
@@ -2587,6 +2617,78 @@ $$;
 REVOKE ALL ON FUNCTION kb_knowledge_attest_matching_scope_v2(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION kb_knowledge_verify_matching_scope_v2(uuid,text,jsonb) FROM PUBLIC;
 
+CREATE FUNCTION kb_knowledge_require_matching_attestation_v2(
+  p_attestation_id uuid,p_attestation_sha256 text
+) RETURNS void LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+  PERFORM 1 FROM knowledge_matching_scope_attestations_v2
+    WHERE id=p_attestation_id AND content_sha256=p_attestation_sha256;
+  IF NOT FOUND THEN RAISE EXCEPTION 'KNOWLEDGE_MATCHING_ATTESTATION_V2_MISMATCH' USING ERRCODE='23514'; END IF;
+END $$;
+REVOKE ALL ON FUNCTION kb_knowledge_require_matching_attestation_v2(uuid,text) FROM PUBLIC;
+
+CREATE FUNCTION kb_knowledge_load_matching_attestation_v2(
+  p_attestation_id uuid,p_attestation_sha256 text
+) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE result_value jsonb;
+BEGIN
+  SELECT convert_from(canonical_payload,'UTF8')::jsonb INTO result_value
+    FROM knowledge_matching_scope_attestations_v2
+    WHERE id=p_attestation_id AND content_sha256=p_attestation_sha256;
+  IF result_value IS NULL THEN RAISE EXCEPTION 'KNOWLEDGE_MATCHING_ATTESTATION_V2_MISMATCH' USING ERRCODE='23514'; END IF;
+  RETURN result_value;
+END $$;
+REVOKE ALL ON FUNCTION kb_knowledge_load_matching_attestation_v2(uuid,text) FROM PUBLIC;
+
+CREATE FUNCTION kb_knowledge_verify_attested_text_hit_v2(
+  p_attestation_id uuid,p_attestation_sha256 text,p_requirement_artifact_id uuid,p_item jsonb
+) RETURNS void LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+  PERFORM 1 FROM knowledge_matching_scope_attestations_v2 attestation
+  CROSS JOIN LATERAL jsonb_array_elements(convert_from(attestation.canonical_payload,'UTF8')::jsonb->'frozen_hits') hit
+  CROSS JOIN LATERAL jsonb_array_elements(convert_from(attestation.canonical_payload,'UTF8')::jsonb->'products') product
+  WHERE attestation.id=p_attestation_id AND attestation.content_sha256=p_attestation_sha256
+    AND (hit->>'requirement_artifact_id')::uuid=p_requirement_artifact_id
+    AND hit->>'product_version_artifact_id'=product->>'id'
+    AND hit->>'document_id'=p_item->>'document_id' AND hit->>'source_chunk_id'=p_item->>'source_chunk_id'
+    AND product->>'product_version_id'=p_item->>'product_version_id'
+    AND product->>'workspace_kind'=p_item->>'workspace_kind'
+    AND hit->>'frozen_document_display_name'=p_item->>'frozen_document_display_name'
+    AND hit->>'chunk_utf8'=p_item->>'quote_utf8' AND hit->>'chunk_sha256'=p_item->>'quote_sha256'
+    AND hit->>'quote_start_offset'=p_item->>'quote_start_offset'
+    AND hit->>'quote_end_offset'=p_item->>'quote_end_offset'
+    AND hit->>'retrieval_rank'=p_item->>'retrieval_rank'
+    AND hit->>'retrieval_contract_version'=p_item->>'retrieval_contract_version';
+  IF NOT FOUND THEN RAISE EXCEPTION 'KNOWLEDGE_ATTESTED_TEXT_HIT_V2_MISMATCH' USING ERRCODE='23514'; END IF;
+END $$;
+REVOKE ALL ON FUNCTION kb_knowledge_verify_attested_text_hit_v2(uuid,text,uuid,jsonb) FROM PUBLIC;
+
+CREATE FUNCTION kb_knowledge_verify_attested_image_hit_v3(
+  p_attestation_id uuid,p_attestation_sha256 text,p_requirement_artifact_id uuid,p_item jsonb
+) RETURNS void LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+  PERFORM 1 FROM knowledge_matching_scope_attestations_v2 attestation
+  CROSS JOIN LATERAL jsonb_array_elements(convert_from(attestation.canonical_payload,'UTF8')::jsonb->'frozen_hits') hit
+  CROSS JOIN LATERAL jsonb_array_elements(convert_from(attestation.canonical_payload,'UTF8')::jsonb->'products') product
+  WHERE attestation.id=p_attestation_id AND attestation.content_sha256=p_attestation_sha256
+    AND (hit->>'requirement_artifact_id')::uuid=p_requirement_artifact_id
+    AND hit->>'source_type'='image_ocr' AND hit->>'product_version_artifact_id'=product->>'id'
+    AND hit->>'document_id'=p_item->>'document_id' AND hit->>'source_chunk_id'=p_item->>'source_chunk_id'
+    AND product->>'product_version_id'=p_item->>'product_version_id' AND product->>'workspace_kind'=p_item->>'workspace_kind'
+    AND hit->>'chunk_utf8'=p_item->>'quote_utf8' AND hit->>'chunk_sha256'=p_item->>'quote_sha256'
+    AND hit->>'quote_start_offset'=p_item->>'quote_start_offset' AND hit->>'quote_end_offset'=p_item->>'quote_end_offset'
+    AND hit->>'retrieval_rank'=p_item->>'retrieval_rank' AND hit->>'retrieval_contract_version'=p_item->>'retrieval_contract_version'
+    AND hit#>>'{media,image_artifact_revision_id}'=p_item->>'image_artifact_revision_id'
+    AND hit#>>'{media,object_ref}'=p_item->>'object_ref' AND hit#>>'{media,sha256}'=p_item->>'sha256'
+    AND hit#>>'{media,media_type}'=p_item->>'media_type' AND hit#>>'{media,width}'=p_item->>'width'
+    AND hit#>>'{media,height}'=p_item->>'height'
+    AND hit#>'{media,page_ordinal}' IS NOT DISTINCT FROM coalesce(p_item->'page_ordinal','null'::jsonb)
+    AND hit#>'{media,bounding_region}' IS NOT DISTINCT FROM coalesce(p_item->'bounding_region','null'::jsonb)
+    AND hit#>>'{media,frozen_document_display_name}'=p_item->>'frozen_document_display_name';
+  IF NOT FOUND THEN RAISE EXCEPTION 'KNOWLEDGE_ATTESTED_IMAGE_HIT_V3_MISMATCH' USING ERRCODE='23514'; END IF;
+END $$;
+REVOKE ALL ON FUNCTION kb_knowledge_verify_attested_image_hit_v3(uuid,text,uuid,jsonb) FROM PUBLIC;
+
 CREATE TABLE graph_nodes (
     product_version_id uuid NOT NULL REFERENCES product_versions (id),
     document_id uuid NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
@@ -2656,8 +2758,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
 TO kb_runtime_api, kb_runtime_worker;
 GRANT SELECT ON
     embedding_revisions_v2, rerank_revisions_v2, knowledge_retrieval_policies_v2,
-    product_version_embedding_bindings_v2
+    product_version_embedding_bindings_v2, knowledge_image_artifact_revisions,
+    knowledge_image_ocr_chunk_artifact_mappings
 TO kb_runtime_api, kb_runtime_worker;
+GRANT INSERT ON knowledge_image_artifact_revisions,knowledge_image_ocr_chunk_artifact_mappings
+TO kb_runtime_worker;
 GRANT SELECT ON chunk_keyword_indexes_v2, chunk_vector_indexes_v2,
     product_version_vector_index_generations_v2,
     product_version_keyword_index_generations_v2,
@@ -2678,3 +2783,10 @@ GRANT EXECUTE ON FUNCTION kb_knowledge_keyword_token_stream_v2(text),
     kb_knowledge_lock_semantic_policy_v2(text),
     kb_knowledge_lock_rerank_revision_v2(text)
 TO kb_runtime_api, kb_runtime_worker;
+GRANT EXECUTE ON FUNCTION kb_knowledge_attest_matching_scope_v2(jsonb),
+    kb_knowledge_verify_matching_scope_v2(uuid,text,jsonb),
+    kb_knowledge_require_matching_attestation_v2(uuid,text),
+    kb_knowledge_load_matching_attestation_v2(uuid,text),
+    kb_knowledge_verify_attested_text_hit_v2(uuid,text,uuid,jsonb),
+    kb_knowledge_verify_attested_image_hit_v3(uuid,text,uuid,jsonb)
+TO kb_runtime_worker;

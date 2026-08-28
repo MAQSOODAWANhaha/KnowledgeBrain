@@ -21,7 +21,7 @@ RUN cargo build --release -p api -p worker -p retention -p platform
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl fonts-wqy-zenhei \
+    && apt-get install -y --no-install-recommends ca-certificates curl fonts-wqy-zenhei poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 ARG BIN=api
 COPY --from=builder /src/target/release/api /usr/local/bin/api

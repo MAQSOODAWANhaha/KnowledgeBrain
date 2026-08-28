@@ -22,6 +22,77 @@ SET search_path=pg_catalog,public AS $$
     false)
 $$;
 
+CREATE FUNCTION kb_bid_v2_applicability_valid(value jsonb)
+RETURNS boolean LANGUAGE sql IMMUTABLE PARALLEL SAFE
+SET search_path=pg_catalog,public AS $$
+  SELECT COALESCE(
+    value='{}'::jsonb OR (
+      kb_bid_v2_json_keys_exact(value,ARRAY['fragments'])
+      AND jsonb_typeof(value->'fragments')='array'
+      AND jsonb_array_length(value->'fragments') BETWEEN 1 AND 1024
+      AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(value->'fragments') fragment
+        WHERE jsonb_typeof(fragment)<>'string' OR octet_length(fragment#>>'{}') NOT BETWEEN 1 AND 256)
+      AND jsonb_array_length(value->'fragments')=(SELECT count(DISTINCT fragment#>>'{}')
+        FROM jsonb_array_elements(value->'fragments') fragment)), false)
+$$;
+
+CREATE FUNCTION kb_bid_v2_applicability_fragments(value jsonb)
+RETURNS text[] LANGUAGE sql IMMUTABLE PARALLEL SAFE
+SET search_path=pg_catalog,public AS $$
+  SELECT CASE WHEN NOT kb_bid_v2_applicability_valid(value) THEN NULL
+    WHEN value='{}'::jsonb THEN ARRAY['*']::text[]
+    ELSE ARRAY(SELECT fragment#>>'{}' FROM jsonb_array_elements(value->'fragments') fragment ORDER BY fragment#>>'{}') END
+$$;
+
+CREATE FUNCTION kb_bid_v2_applicability_from_fragments(fragments text[])
+RETURNS jsonb LANGUAGE sql IMMUTABLE PARALLEL SAFE
+SET search_path=pg_catalog,public AS $$
+  SELECT CASE WHEN fragments=ARRAY['*']::text[] THEN '{}'::jsonb
+    ELSE jsonb_build_object('fragments',to_jsonb(ARRAY(SELECT DISTINCT fragment FROM unnest(fragments) fragment ORDER BY fragment))) END
+$$;
+
+CREATE FUNCTION kb_bid_v2_fulfillment_need_ids(value jsonb)
+RETURNS uuid[] LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+SET search_path=pg_catalog,public AS $$
+DECLARE kind text; child jsonb; ids uuid[]:='{}'::uuid[]; child_ids uuid[];
+BEGIN
+  IF jsonb_typeof(value)<>'object' OR jsonb_typeof(value->'kind')<>'string' THEN RETURN NULL; END IF;
+  kind:=value->>'kind';
+  IF kind='need' THEN
+    IF NOT kb_bid_v2_json_keys_exact(value,ARRAY['kind','need_occurrence_id','channel'])
+       OR NOT kb_bid_v2_uuid_text(value->>'need_occurrence_id')
+       OR value->>'channel' NOT IN ('narrative_content','response_table','deviation_statement','structured_form','evidence_attachment','quotation')
+    THEN RETURN NULL; END IF;
+    RETURN ARRAY[(value->>'need_occurrence_id')::uuid];
+  END IF;
+  IF kind NOT IN ('all_of','any_of','at_least')
+     OR (kind IN ('all_of','any_of') AND NOT kb_bid_v2_json_keys_exact(value,ARRAY['kind','children']))
+     OR (kind='at_least' AND NOT kb_bid_v2_json_keys_exact(value,ARRAY['kind','min_count','children']))
+     OR jsonb_typeof(value->'children')<>'array' OR jsonb_array_length(value->'children')=0
+     OR (kind='at_least' AND (jsonb_typeof(value->'min_count')<>'number'
+       OR coalesce(value->>'min_count','')!~'^[1-9][0-9]*$'
+       OR (value->>'min_count')::integer>jsonb_array_length(value->'children')))
+  THEN RETURN NULL; END IF;
+  FOR child IN SELECT item FROM jsonb_array_elements(value->'children') item LOOP
+    child_ids:=kb_bid_v2_fulfillment_need_ids(child); IF child_ids IS NULL THEN RETURN NULL; END IF;
+    ids:=ids||child_ids;
+  END LOOP;
+  RETURN ids;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_fulfillment_expr_valid(value jsonb)
+RETURNS boolean LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path=pg_catalog,public AS $$
+  SELECT ids IS NOT NULL AND cardinality(ids)>0
+    AND cardinality(ids)=(SELECT count(DISTINCT item) FROM unnest(ids) item)
+  FROM (SELECT kb_bid_v2_fulfillment_need_ids(value) ids) validated
+$$;
+
+CREATE FUNCTION kb_bid_v2_deterministic_uuid(value text)
+RETURNS uuid LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path=pg_catalog,public AS $$
+  SELECT (substr(hash,1,12)||'5'||substr(hash,14,3)||'8'||substr(hash,18,15))::uuid
+  FROM (SELECT md5(value) hash) identity_value
+$$;
+
 CREATE FUNCTION kb_bid_v2_uuid_text(value text)
 RETURNS boolean LANGUAGE sql IMMUTABLE PARALLEL SAFE
 SET search_path=pg_catalog,public AS $$
@@ -368,8 +439,8 @@ CREATE TABLE bid_requirement_revision_artifacts (
   lifecycle text NOT NULL CHECK (lifecycle IN ('current','superseded','withdrawn','unresolved')),
   text_utf8 bytea NOT NULL,
   text_sha256 kb_sha256 NOT NULL,
-  fulfillment_expr jsonb NOT NULL CHECK (jsonb_typeof(fulfillment_expr)='object'),
-  applicability jsonb NOT NULL CHECK (jsonb_typeof(applicability)='object'),
+  fulfillment_expr jsonb NOT NULL CHECK (kb_bid_v2_fulfillment_expr_valid(fulfillment_expr)),
+  applicability jsonb NOT NULL CHECK (kb_bid_v2_applicability_valid(applicability)),
   tombstone boolean NOT NULL DEFAULT false,
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
@@ -385,6 +456,7 @@ CREATE TABLE bid_requirement_set_items (
   requirement_set_id uuid NOT NULL,
   project_id uuid NOT NULL,
   requirement_revision_id uuid NOT NULL,
+  effective_applicability jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (kb_bid_v2_applicability_valid(effective_applicability)),
   ordinal integer NOT NULL CHECK (ordinal >= 0),
   PRIMARY KEY(requirement_set_id,requirement_revision_id),
   UNIQUE(requirement_set_id,ordinal),
@@ -406,6 +478,19 @@ CREATE TABLE bid_requirement_source_revision_artifacts (
   FOREIGN KEY(project_id,source_unit_revision_id) REFERENCES bid_source_unit_revision_artifacts(project_id,id)
 );
 
+CREATE FUNCTION kb_bid_v2_guard_published_requirement_source_insert()
+RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM bid_requirement_set_items item
+      WHERE item.requirement_revision_id=NEW.requirement_revision_id) THEN
+    RAISE EXCEPTION 'published RequirementSource identity is immutable' USING ERRCODE='42501';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER bid_requirement_source_published_insert_guard
+BEFORE INSERT ON bid_requirement_source_revision_artifacts
+FOR EACH ROW EXECUTE FUNCTION kb_bid_v2_guard_published_requirement_source_insert();
+
 CREATE TABLE bid_requirement_supersession_revision_artifacts (
   id uuid PRIMARY KEY,
   project_id uuid NOT NULL,
@@ -413,7 +498,11 @@ CREATE TABLE bid_requirement_supersession_revision_artifacts (
   revision bigint NOT NULL CHECK (revision > 0),
   old_requirement_revision_id uuid NOT NULL,
   new_requirement_revision_id uuid NOT NULL,
-  applicability jsonb NOT NULL CHECK (jsonb_typeof(applicability)='object'),
+  old_source_unit_revision_ids uuid[] NOT NULL DEFAULT '{}'::uuid[],
+  new_source_unit_revision_ids uuid[] NOT NULL DEFAULT '{}'::uuid[],
+  amendment_document_relation_revision_id uuid,
+  amendment_document_relation_sha256 kb_sha256,
+  applicability jsonb NOT NULL CHECK (kb_bid_v2_applicability_valid(applicability)),
   tombstone boolean NOT NULL DEFAULT false,
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
@@ -424,6 +513,7 @@ CREATE TABLE bid_requirement_supersession_revision_artifacts (
   FOREIGN KEY(project_id,old_requirement_revision_id) REFERENCES bid_requirement_revision_artifacts(project_id,id),
   FOREIGN KEY(project_id,new_requirement_revision_id) REFERENCES bid_requirement_revision_artifacts(project_id,id),
   CHECK (old_requirement_revision_id<>new_requirement_revision_id),
+  CHECK ((amendment_document_relation_revision_id IS NULL)=(amendment_document_relation_sha256 IS NULL)),
   CHECK (content_sha256=kb_bid_v2_sha256_bytes(canonical_payload))
 );
 
@@ -493,6 +583,7 @@ CREATE TABLE bid_workspace_requirement_projection_items (
   projection_id uuid NOT NULL,
   project_id uuid NOT NULL,
   requirement_revision_id uuid NOT NULL,
+  effective_applicability jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (kb_bid_v2_applicability_valid(effective_applicability)),
   ordinal integer NOT NULL CHECK (ordinal >= 0),
   PRIMARY KEY(projection_id,requirement_revision_id),
   UNIQUE(projection_id,ordinal),
@@ -581,6 +672,7 @@ CREATE TABLE bid_content_block_revision_artifacts (
   origin text NOT NULL CHECK (origin IN ('human','agent_candidate','deterministic')),
   dependency_sha256 kb_sha256,
   stale boolean NOT NULL DEFAULT false,
+  tombstone boolean NOT NULL DEFAULT false,
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -637,6 +729,8 @@ CREATE TABLE bid_workspace_revision_artifacts (
   requirement_projection_id uuid NOT NULL,
   requirement_projection_sha256 kb_sha256 NOT NULL,
   document_settings_revision_id uuid NOT NULL,
+  quote_snapshot_id uuid,
+  quote_snapshot_sha256 kb_sha256,
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
   actor kb_actor_identity NOT NULL,
@@ -647,6 +741,7 @@ CREATE TABLE bid_workspace_revision_artifacts (
   UNIQUE(project_id,workspace_id,id,content_sha256),
   UNIQUE(project_id,workspace_id,id,requirement_projection_id,requirement_projection_sha256),
   UNIQUE(project_id,workspace_id,id,scope_revision_id,requirement_projection_id,document_settings_revision_id),
+  UNIQUE(project_id,workspace_id,id,scope_revision_id,requirement_projection_id,document_settings_revision_id,quote_snapshot_id,quote_snapshot_sha256),
   FOREIGN KEY(project_id,workspace_id) REFERENCES bid_submission_workspaces(project_id,id),
   FOREIGN KEY(project_id,parent_revision_id,parent_sha256) REFERENCES bid_workspace_revision_artifacts(project_id,id,content_sha256),
   FOREIGN KEY(project_id,scope_revision_id) REFERENCES bid_workspace_scope_revision_artifacts(project_id,id),
@@ -654,6 +749,7 @@ CREATE TABLE bid_workspace_revision_artifacts (
     REFERENCES bid_workspace_requirement_projection_artifacts(project_id,workspace_id,id,content_sha256),
   FOREIGN KEY(project_id,document_settings_revision_id) REFERENCES bid_document_settings_revision_artifacts(project_id,id),
   CHECK ((parent_revision_id IS NULL)=(parent_sha256 IS NULL)),
+  CHECK ((quote_snapshot_id IS NULL)=(quote_snapshot_sha256 IS NULL)),
   CHECK (content_sha256=kb_bid_v2_sha256_bytes(canonical_payload))
 );
 
@@ -763,7 +859,7 @@ CREATE TABLE bid_async_request_snapshot_artifacts (
   result_identity jsonb,
   error_code text CHECK (error_code IS NULL OR error_code IN (
     'INPUT_SCHEMA_INVALID','FROZEN_INPUT_MISSING','FROZEN_INPUT_DIGEST_MISMATCH','REQUEST_OBSOLETE',
-    'WORKSPACE_CAS_CONFLICT','AGENT_OUTPUT_INVALID','EVIDENCE_UNAVAILABLE','ASSET_MISSING',
+    'WORKSPACE_CAS_CONFLICT','AGENT_OUTPUT_INVALID','REQUIREMENT_COMPILE_FAILED','EVIDENCE_UNAVAILABLE','ASSET_MISSING',
     'ASSET_DIGEST_MISMATCH','ATTACHMENT_PREPARATION_FAILED','RENDER_SCHEMA_INVALID','RENDERER_FAILED','OBJECT_COMMIT_FAILED'
   )),
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -779,7 +875,7 @@ CREATE TABLE bid_async_request_snapshot_artifacts (
 
 CREATE TABLE bid_async_stage_receipts (
   request_artifact_id uuid NOT NULL REFERENCES bid_async_request_snapshot_artifacts(id),
-  stage_kind text NOT NULL CHECK (stage_kind IN ('conversion','extraction','requirement_compile','evidence_match','agent_generate','assessment','attachment_prepare','render_snapshot','manifest','render','object_commit')),
+  stage_kind text NOT NULL CHECK (stage_kind IN ('conversion','extraction','requirement_compile','evidence_match','agent_generate','assessment','attachment_prepare','render_snapshot','manifest','render','object_commit','package')),
   frozen_input_sha256 kb_sha256 NOT NULL,
   result_identity jsonb NOT NULL CHECK (jsonb_typeof(result_identity)='object'),
   result_sha256 kb_sha256 NOT NULL,
@@ -832,8 +928,10 @@ CREATE TABLE bid_candidate_decision_receipts (
   actor kb_actor_identity NOT NULL,
   accepted_operation_ordinals integer[] NOT NULL,
   resulting_workspace_revision_id uuid,
+  response_payload bytea NOT NULL,
   response_sha256 kb_sha256 NOT NULL,
-  decided_at timestamptz NOT NULL DEFAULT now()
+  decided_at timestamptz NOT NULL DEFAULT now(),
+  CHECK(response_sha256=kb_bid_v2_sha256_bytes(response_payload))
 );
 
 -- V2 artifacts bind the shared ObjectRegistry identity including availability;
@@ -907,6 +1005,7 @@ CREATE TABLE bid_evidence_bundle_items (
   item_payload jsonb NOT NULL CHECK (jsonb_typeof(item_payload)='object'),
   content_sha256 kb_sha256 NOT NULL,
   UNIQUE(evidence_bundle_id,id),
+  UNIQUE(evidence_bundle_id,id,content_sha256),
   UNIQUE(evidence_bundle_id,ordinal),
   UNIQUE(project_id,workspace_id,evidence_bundle_id,id,source_media_revision_id),
   FOREIGN KEY(project_id,workspace_id,evidence_bundle_id)
@@ -992,7 +1091,7 @@ FOR EACH ROW EXECUTE FUNCTION kb_bid_v2_validate_evidence_asset_media_identity()
 -- only bundle_sha256, avoiding an impossible self-referential hash.
 CREATE FUNCTION kb_bid_v2_validate_evidence_bundle_payload()
 RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
-DECLARE p jsonb:=NEW.canonical_payload; item jsonb; keys text[]; bounds jsonb;
+DECLARE p jsonb:=NEW.canonical_payload; item jsonb; bounds jsonb;
 BEGIN
   IF NOT kb_bid_v2_json_keys_exact(p,ARRAY['schema_version','evidence_bundle_id','project_id','workspace_id','workspace_scope','requirement_revision_id','matching_report_id','knowledge_scope_attestation_id','knowledge_scope_attestation_sha256','items','created_at','bundle_sha256'])
      OR p->'schema_version' IS DISTINCT FROM '1'::jsonb OR p->>'workspace_scope' IS DISTINCT FROM 'project_wide'
@@ -1021,6 +1120,9 @@ BEGIN
       RAISE EXCEPTION 'EvidenceBundleV1 malformed item identity' USING ERRCODE='23514';
     END IF;
     IF item->>'kind' IS NOT DISTINCT FROM 'text_quote' THEN
+      PERFORM kb_knowledge_verify_attested_text_hit_v2(
+        (p->>'knowledge_scope_attestation_id')::uuid,p->>'knowledge_scope_attestation_sha256',
+        NEW.requirement_revision_id,item);
       IF NOT kb_bid_v2_json_keys_exact(item,ARRAY['kind','evidence_item_id','document_id','source_chunk_id','product_version_id','workspace_kind','frozen_document_display_name','quote_utf8','quote_sha256','quote_start_offset','quote_end_offset','retrieval_rank','retrieval_contract_version'])
          OR NOT kb_bid_v2_uuid_text(item->>'document_id') OR NOT kb_bid_v2_uuid_text(item->>'source_chunk_id')
          OR NOT kb_bid_v2_uuid_text(item->>'product_version_id') OR jsonb_typeof(item->'workspace_kind') IS DISTINCT FROM 'string' OR COALESCE(item->>'workspace_kind','') NOT IN ('product_line','company')
@@ -1028,37 +1130,32 @@ BEGIN
          OR jsonb_typeof(item->'quote_utf8') IS DISTINCT FROM 'string' OR octet_length(item->>'quote_utf8') NOT BETWEEN 1 AND 1048576
          OR jsonb_typeof(item->'quote_sha256') IS DISTINCT FROM 'string' OR NOT kb_bid_v2_sha256_text(item->>'quote_sha256')
          OR item->>'quote_sha256' IS DISTINCT FROM kb_bid_v2_sha256_bytes(convert_to(item->>'quote_utf8','UTF8'))
-         OR NOT EXISTS (
-           SELECT 1 FROM documents knowledge_document
-           JOIN chunks knowledge_chunk
-             ON knowledge_chunk.id=(item->>'source_chunk_id')::uuid
-            AND knowledge_chunk.document_id=knowledge_document.id
-            AND knowledge_chunk.product_version_id=knowledge_document.product_version_id
-          WHERE knowledge_document.id=(item->>'document_id')::uuid
-            AND knowledge_document.product_version_id=(item->>'product_version_id')::uuid
-            AND knowledge_document.deleted_at IS NULL
-            AND knowledge_document.parse_status='completed'
-            AND knowledge_document.index_ready
-         ) OR COALESCE(item->>'quote_start_offset','') !~ '^(0|[1-9][0-9]*)$'
+         OR COALESCE(item->>'quote_start_offset','') !~ '^(0|[1-9][0-9]*)$'
          OR jsonb_typeof(item->'quote_start_offset') IS DISTINCT FROM 'number' OR jsonb_typeof(item->'quote_end_offset') IS DISTINCT FROM 'number' OR jsonb_typeof(item->'retrieval_rank') IS DISTINCT FROM 'number'
          OR item->>'quote_end_offset' !~ '^[1-9][0-9]*$' OR item->>'retrieval_rank' !~ '^[1-9][0-9]*$'
          OR (item->>'quote_end_offset')::bigint <= (item->>'quote_start_offset')::bigint
          OR jsonb_typeof(item->'retrieval_contract_version') IS DISTINCT FROM 'string' OR octet_length(item->>'retrieval_contract_version') NOT BETWEEN 1 AND 128
       THEN RAISE EXCEPTION 'EvidenceBundleV1 text item invalid' USING ERRCODE='23514'; END IF;
     ELSIF item->>'kind' IS NOT DISTINCT FROM 'image' THEN
-      keys:=ARRAY(SELECT key FROM jsonb_object_keys(item) key ORDER BY key);
-      IF keys<>ARRAY(SELECT key FROM unnest(ARRAY['kind','evidence_item_id','image_artifact_revision_id','object_ref','sha256','media_type','width','height','frozen_document_display_name','page_ordinal','bounding_region']::text[]) key ORDER BY key)
-         AND keys<>ARRAY(SELECT key FROM unnest(ARRAY['kind','evidence_item_id','image_artifact_revision_id','object_ref','sha256','media_type','width','height','frozen_document_display_name','page_ordinal']::text[]) key ORDER BY key)
-         AND keys<>ARRAY(SELECT key FROM unnest(ARRAY['kind','evidence_item_id','image_artifact_revision_id','object_ref','sha256','media_type','width','height','frozen_document_display_name','bounding_region']::text[]) key ORDER BY key)
-         AND keys<>ARRAY(SELECT key FROM unnest(ARRAY['kind','evidence_item_id','image_artifact_revision_id','object_ref','sha256','media_type','width','height','frozen_document_display_name']::text[]) key ORDER BY key)
+      PERFORM kb_knowledge_verify_attested_image_hit_v3(
+        (p->>'knowledge_scope_attestation_id')::uuid,p->>'knowledge_scope_attestation_sha256',
+        NEW.requirement_revision_id,item);
+      IF NOT kb_bid_v2_json_keys_exact(item,ARRAY['kind','evidence_item_id','document_id','source_chunk_id','product_version_id','workspace_kind','frozen_document_display_name','quote_utf8','quote_sha256','quote_start_offset','quote_end_offset','retrieval_rank','retrieval_contract_version','image_artifact_revision_id','object_ref','sha256','media_type','width','height','page_ordinal','bounding_region'])
       THEN RAISE EXCEPTION 'EvidenceBundleV1 image item keys invalid' USING ERRCODE='23514'; END IF;
-      IF NOT kb_bid_v2_uuid_text(item->>'image_artifact_revision_id') OR item->>'object_ref' IS DISTINCT FROM ('objects/'||(item->>'sha256'))
+      IF NOT kb_bid_v2_uuid_text(item->>'document_id') OR NOT kb_bid_v2_uuid_text(item->>'source_chunk_id')
+         OR NOT kb_bid_v2_uuid_text(item->>'product_version_id') OR COALESCE(item->>'workspace_kind','') NOT IN ('product_line','company')
+         OR jsonb_typeof(item->'quote_utf8') IS DISTINCT FROM 'string' OR octet_length(item->>'quote_utf8') NOT BETWEEN 1 AND 1048576
+         OR NOT kb_bid_v2_sha256_text(item->>'quote_sha256') OR item->>'quote_sha256' IS DISTINCT FROM kb_bid_v2_sha256_bytes(convert_to(item->>'quote_utf8','UTF8'))
+         OR COALESCE(item->>'quote_start_offset','')!~'^(0|[1-9][0-9]*)$' OR COALESCE(item->>'quote_end_offset','')!~'^[1-9][0-9]*$'
+         OR COALESCE(item->>'retrieval_rank','')!~'^[1-9][0-9]*$' OR (item->>'quote_end_offset')::bigint<=(item->>'quote_start_offset')::bigint
+         OR jsonb_typeof(item->'retrieval_contract_version') IS DISTINCT FROM 'string'
+         OR NOT kb_bid_v2_uuid_text(item->>'image_artifact_revision_id') OR item->>'object_ref' IS DISTINCT FROM ('objects/'||(item->>'sha256'))
          OR jsonb_typeof(item->'sha256') IS DISTINCT FROM 'string' OR NOT kb_bid_v2_sha256_text(item->>'sha256')
          OR jsonb_typeof(item->'media_type') IS DISTINCT FROM 'string' OR COALESCE(item->>'media_type','') NOT IN ('image/png','image/jpeg','image/webp')
          OR jsonb_typeof(item->'width') IS DISTINCT FROM 'number' OR jsonb_typeof(item->'height') IS DISTINCT FROM 'number'
          OR COALESCE(item->>'width','') !~ '^[1-9][0-9]*$' OR COALESCE(item->>'height','') !~ '^[1-9][0-9]*$'
          OR jsonb_typeof(item->'frozen_document_display_name') IS DISTINCT FROM 'string' OR octet_length(item->>'frozen_document_display_name') NOT BETWEEN 1 AND 1024
-         OR (item ? 'page_ordinal' AND jsonb_typeof(item->'page_ordinal') IS DISTINCT FROM 'null'
+         OR (jsonb_typeof(item->'page_ordinal') IS DISTINCT FROM 'null'
              AND (jsonb_typeof(item->'page_ordinal') IS DISTINCT FROM 'number'
                   OR COALESCE(item->>'page_ordinal','') !~ '^(0|[1-9][0-9]*)$'))
       THEN RAISE EXCEPTION 'EvidenceBundleV1 image item invalid' USING ERRCODE='23514'; END IF;
@@ -1126,7 +1223,7 @@ CREATE TABLE bid_workspace_asset_artifacts (
   file_name text NOT NULL CHECK (octet_length(file_name) BETWEEN 1 AND 1024),
   object_state text NOT NULL DEFAULT 'available' CHECK (object_state='available'),
   byte_length bigint NOT NULL CHECK (byte_length > 0),
-  source text NOT NULL CHECK (source='human_upload'),
+  source text NOT NULL CHECK (source IN ('human_upload','ai_evidence')),
   created_by kb_actor_identity NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id,id),
@@ -1138,20 +1235,36 @@ CREATE TABLE bid_workspace_asset_artifacts (
   CHECK (object_ref='objects/'||content_sha256)
 );
 
+CREATE TABLE bid_workspace_asset_retirement_artifacts (
+  id uuid PRIMARY KEY,
+  project_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
+  asset_revision_id uuid NOT NULL UNIQUE,
+  retired_by kb_actor_identity NOT NULL,
+  reason text NOT NULL CHECK(octet_length(reason) BETWEEN 1 AND 1024),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(project_id,id),
+  FOREIGN KEY(project_id,workspace_id,asset_revision_id)
+    REFERENCES bid_workspace_asset_artifacts(project_id,workspace_id,id)
+);
+
 CREATE TABLE bid_submission_fulfillment_evidence_revision_artifacts (
   id uuid PRIMARY KEY,
   project_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
+  evidence_lineage_id uuid NOT NULL,
+  revision bigint NOT NULL CHECK(revision>0),
   workspace_revision_id uuid NOT NULL,
   binding_revision_id uuid NOT NULL,
   target_revision_id uuid NOT NULL,
   target_kind text NOT NULL CHECK (target_kind IN ('block','table_row','structured_value','asset','quote_snapshot')),
   dependency_sha256 kb_sha256 NOT NULL,
-  stale boolean NOT NULL DEFAULT false,
+  state text NOT NULL CHECK(state IN ('current','stale','withdrawn')),
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id,id),
+  UNIQUE(project_id,evidence_lineage_id,revision),
   FOREIGN KEY(project_id,workspace_id) REFERENCES bid_submission_workspaces(project_id,id),
   FOREIGN KEY(project_id,workspace_revision_id) REFERENCES bid_workspace_revision_artifacts(project_id,id),
   FOREIGN KEY(project_id,binding_revision_id) REFERENCES bid_outline_fulfillment_binding_revision_artifacts(project_id,id),
@@ -1207,6 +1320,7 @@ CREATE TABLE bid_submission_assessment_snapshot_artifacts (
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(workspace_id,assessment_input_sha256),
   UNIQUE(project_id,id),
+  UNIQUE(project_id,workspace_id,id),
   UNIQUE(project_id,workspace_id,id,workspace_revision_id,scope_revision_id,requirement_projection_id,document_settings_revision_id,content_sha256),
   FOREIGN KEY(project_id,workspace_id) REFERENCES bid_submission_workspaces(project_id,id),
   FOREIGN KEY(project_id,workspace_revision_id) REFERENCES bid_workspace_revision_artifacts(project_id,id),
@@ -1216,6 +1330,33 @@ CREATE TABLE bid_submission_assessment_snapshot_artifacts (
   FOREIGN KEY(project_id,workspace_id,workspace_revision_id,scope_revision_id,requirement_projection_id,document_settings_revision_id)
     REFERENCES bid_workspace_revision_artifacts(project_id,workspace_id,id,scope_revision_id,requirement_projection_id,document_settings_revision_id),
   CHECK (content_sha256=kb_bid_v2_sha256_bytes(canonical_payload))
+);
+
+CREATE TABLE bid_submission_assessment_snapshot_evidence_items (
+  assessment_snapshot_id uuid NOT NULL,
+  project_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
+  ordinal integer NOT NULL CHECK (ordinal>=0),
+  selection_id uuid NOT NULL,
+  selection_sha256 kb_sha256 NOT NULL,
+  matching_report_id uuid NOT NULL,
+  evidence_bundle_id uuid NOT NULL,
+  evidence_bundle_sha256 kb_sha256 NOT NULL,
+  evidence_item_id uuid NOT NULL,
+  evidence_item_sha256 kb_sha256 NOT NULL,
+  selection_kind text NOT NULL DEFAULT 'accepted' CHECK (selection_kind='accepted'),
+  PRIMARY KEY(assessment_snapshot_id,ordinal),
+  UNIQUE(assessment_snapshot_id,selection_id,evidence_item_id),
+  FOREIGN KEY(project_id,workspace_id,assessment_snapshot_id)
+    REFERENCES bid_submission_assessment_snapshot_artifacts(project_id,workspace_id,id),
+  FOREIGN KEY(project_id,workspace_id,selection_id,selection_sha256,selection_kind,matching_report_id)
+    REFERENCES bid_evidence_selection_artifacts(project_id,workspace_id,id,content_sha256,selection_kind,matching_report_id),
+  FOREIGN KEY(project_id,workspace_id,matching_report_id)
+    REFERENCES bid_evidence_match_reports(project_id,workspace_id,id),
+  FOREIGN KEY(project_id,workspace_id,evidence_bundle_id,evidence_bundle_sha256)
+    REFERENCES bid_evidence_bundle_artifacts(project_id,workspace_id,id,content_sha256),
+  FOREIGN KEY(evidence_bundle_id,evidence_item_id,evidence_item_sha256)
+    REFERENCES bid_evidence_bundle_items(evidence_bundle_id,id,content_sha256)
 );
 
 CREATE TABLE bid_quote_snapshot_artifacts (
@@ -1251,10 +1392,35 @@ CREATE TABLE bid_quote_snapshot_object_identities (
 CREATE TABLE bid_quote_snapshot_current (
   scope_id uuid PRIMARY KEY REFERENCES bid_projects(id) ON DELETE RESTRICT,
   artifact_id uuid NOT NULL,
+  artifact_sha256 kb_sha256 NOT NULL,
   generation bigint NOT NULL CHECK (generation > 0),
   created_at timestamptz NOT NULL,
-  FOREIGN KEY(scope_id,artifact_id) REFERENCES bid_quote_snapshot_artifacts(project_id,id)
+  FOREIGN KEY(scope_id,artifact_id,artifact_sha256)
+    REFERENCES bid_quote_snapshot_artifacts(project_id,id,content_sha256)
 );
+
+ALTER TABLE bid_workspace_revision_artifacts
+  ADD CONSTRAINT bid_workspace_revision_quote_snapshot_fk
+  FOREIGN KEY(project_id,quote_snapshot_id,quote_snapshot_sha256)
+  REFERENCES bid_quote_snapshot_artifacts(project_id,id,content_sha256);
+ALTER TABLE bid_outline_assessment_snapshot_artifacts
+  ADD CONSTRAINT bid_outline_assessment_quote_snapshot_fk
+  FOREIGN KEY(project_id,quote_snapshot_id,quote_snapshot_sha256)
+  REFERENCES bid_quote_snapshot_artifacts(project_id,id,content_sha256),
+  ADD CONSTRAINT bid_outline_assessment_workspace_quote_fk
+  FOREIGN KEY(project_id,workspace_id,workspace_revision_id,scope_revision_id,requirement_projection_id,
+    document_settings_revision_id,quote_snapshot_id,quote_snapshot_sha256)
+  REFERENCES bid_workspace_revision_artifacts(project_id,workspace_id,id,scope_revision_id,
+    requirement_projection_id,document_settings_revision_id,quote_snapshot_id,quote_snapshot_sha256);
+ALTER TABLE bid_submission_assessment_snapshot_artifacts
+  ADD CONSTRAINT bid_submission_assessment_quote_snapshot_fk
+  FOREIGN KEY(project_id,quote_snapshot_id,quote_snapshot_sha256)
+  REFERENCES bid_quote_snapshot_artifacts(project_id,id,content_sha256),
+  ADD CONSTRAINT bid_submission_assessment_workspace_quote_fk
+  FOREIGN KEY(project_id,workspace_id,workspace_revision_id,scope_revision_id,requirement_projection_id,
+    document_settings_revision_id,quote_snapshot_id,quote_snapshot_sha256)
+  REFERENCES bid_workspace_revision_artifacts(project_id,workspace_id,id,scope_revision_id,
+    requirement_projection_id,document_settings_revision_id,quote_snapshot_id,quote_snapshot_sha256);
 
 -- Bindings use a closed tagged target union. The trigger preserves the compact
 -- target_id wire shape while enforcing the real relational identity for each
@@ -1294,16 +1460,6 @@ $$;
 CREATE TRIGGER bid_outline_fulfillment_binding_target_fk
 BEFORE INSERT ON bid_outline_fulfillment_binding_revision_artifacts
 FOR EACH ROW EXECUTE FUNCTION kb_bid_v2_validate_fulfillment_binding_target();
-
-ALTER TABLE bid_outline_assessment_snapshot_artifacts
-  ADD CONSTRAINT bid_outline_assessment_quote_snapshot_fk
-  FOREIGN KEY(project_id,quote_snapshot_id,quote_snapshot_sha256)
-  REFERENCES bid_quote_snapshot_artifacts(project_id,id,content_sha256);
-
-ALTER TABLE bid_submission_assessment_snapshot_artifacts
-  ADD CONSTRAINT bid_submission_assessment_quote_snapshot_fk
-  FOREIGN KEY(project_id,quote_snapshot_id,quote_snapshot_sha256)
-  REFERENCES bid_quote_snapshot_artifacts(project_id,id,content_sha256);
 
 CREATE TABLE bid_render_style_contract_artifacts (
   id uuid PRIMARY KEY,
@@ -1503,7 +1659,7 @@ CREATE TABLE bid_attachment_preparation_asset_items (
   page_number integer NOT NULL CHECK (page_number>0),
   object_ref kb_object_ref NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
-  media_type text NOT NULL CHECK (media_type IN ('image/png','image/jpeg','image/webp','application/pdf')),
+  media_type text NOT NULL CHECK (media_type IN ('image/png','image/jpeg','image/webp')),
   object_state text NOT NULL DEFAULT 'available' CHECK (object_state='available'),
   geometry jsonb NOT NULL CHECK (jsonb_typeof(geometry)='object'),
   UNIQUE(attachment_preparation_revision_id,ordinal),
@@ -1549,7 +1705,7 @@ BEGIN
        OR jsonb_typeof(page->'page_number') IS DISTINCT FROM 'number' OR page->>'page_number' !~ '^[1-9][0-9]*$'
        OR page->>'object_ref' IS DISTINCT FROM ('objects/'||(page->>'sha256'))
        OR jsonb_typeof(page->'sha256') IS DISTINCT FROM 'string' OR NOT kb_bid_v2_sha256_text(page->>'sha256')
-       OR jsonb_typeof(page->'media_type') IS DISTINCT FROM 'string' OR COALESCE(page->>'media_type','') NOT IN ('image/png','image/jpeg','image/webp','application/pdf')
+       OR jsonb_typeof(page->'media_type') IS DISTINCT FROM 'string' OR COALESCE(page->>'media_type','') NOT IN ('image/png','image/jpeg','image/webp')
        OR NOT kb_bid_v2_json_keys_exact(geometry,ARRAY['width_px','height_px'])
        OR jsonb_typeof(geometry->'width_px') IS DISTINCT FROM 'number' OR geometry->>'width_px' !~ '^[1-9][0-9]*$'
        OR jsonb_typeof(geometry->'height_px') IS DISTINCT FROM 'number' OR geometry->>'height_px' !~ '^[1-9][0-9]*$'
@@ -1581,6 +1737,47 @@ FOR EACH ROW EXECUTE FUNCTION kb_bid_v2_verify_attachment_preparation_projection
 CREATE CONSTRAINT TRIGGER bid_attachment_preparation_page_projection_complete
 AFTER INSERT ON bid_attachment_preparation_asset_items DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION kb_bid_v2_verify_attachment_preparation_projection();
+
+CREATE TABLE bid_attachment_preparation_contract_artifacts (
+  id uuid PRIMARY KEY,
+  version bigint NOT NULL CHECK(version>0),
+  canonical_payload bytea NOT NULL,
+  content_sha256 kb_sha256 NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(id,content_sha256),
+  CHECK(content_sha256=kb_bid_v2_sha256_bytes(canonical_payload))
+);
+INSERT INTO bid_attachment_preparation_contract_artifacts(id,version,canonical_payload,content_sha256)
+SELECT '00000000-0000-5000-8000-000000000305',1,payload,kb_bid_v2_sha256_bytes(payload)
+FROM (VALUES(convert_to('{"kind":"poppler-pdftoppm","version":1,"format":"png","dpi":144}','UTF8'))) seeded(payload);
+
+CREATE TABLE bid_pdf_attachment_preparation_attestations (
+  preparation_revision_id uuid PRIMARY KEY,
+  project_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
+  request_artifact_id uuid NOT NULL,
+  request_revision bigint NOT NULL CHECK(request_revision>0),
+  frozen_input_sha256 kb_sha256 NOT NULL,
+  source_asset_revision_id uuid NOT NULL,
+  source_object_ref kb_object_ref NOT NULL,
+  source_sha256 kb_sha256 NOT NULL,
+  source_media_type text NOT NULL CHECK(source_media_type='application/pdf'),
+  source_object_state text NOT NULL DEFAULT 'available' CHECK(source_object_state='available'),
+  preparation_sha256 kb_sha256 NOT NULL,
+  contract_id uuid NOT NULL,
+  contract_sha256 kb_sha256 NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(request_artifact_id,source_asset_revision_id),
+  UNIQUE(project_id,workspace_id,preparation_revision_id,preparation_sha256),
+  FOREIGN KEY(request_artifact_id) REFERENCES bid_async_request_snapshot_artifacts(id),
+  FOREIGN KEY(project_id,workspace_id,preparation_revision_id,preparation_sha256)
+    REFERENCES bid_attachment_preparation_revision_artifacts(project_id,workspace_id,id,preparation_sha256),
+  FOREIGN KEY(source_asset_revision_id,workspace_id,source_object_ref,source_sha256,source_media_type,source_object_state)
+    REFERENCES bid_workspace_asset_artifacts(id,workspace_id,object_ref,content_sha256,media_type,object_state),
+  FOREIGN KEY(contract_id,contract_sha256)
+    REFERENCES bid_attachment_preparation_contract_artifacts(id,content_sha256),
+  CHECK(source_object_ref='objects/'||source_sha256)
+);
 
 CREATE TABLE bid_render_font_artifacts (
   id uuid PRIMARY KEY,
@@ -1683,7 +1880,6 @@ CREATE TABLE bid_render_snapshot_node_occurrences (
   node_revision_id uuid NOT NULL,
   ordinal integer NOT NULL CHECK (ordinal >= 0),
   PRIMARY KEY(render_snapshot_id,node_occurrence_id),
-  UNIQUE(render_snapshot_id,ordinal),
   FOREIGN KEY(project_id,workspace_revision_id,node_occurrence_id,node_revision_id,ordinal)
     REFERENCES bid_workspace_node_occurrences(project_id,workspace_revision_id,id,node_revision_id,ordinal),
   FOREIGN KEY(project_id,render_snapshot_id,workspace_revision_id)
@@ -1915,7 +2111,7 @@ RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
 DECLARE p jsonb:=NEW.canonical_payload; node jsonb; block jsonb; item jsonb; g jsonb; m jsonb;
 BEGIN
  IF NOT kb_bid_v2_json_keys_exact(p,ARRAY[
-  'schema_version','render_snapshot_id','project_id','workspace_id','workspace_scope','workspace_scope_revision_id',
+  'schema_version','render_snapshot_id','project_id','project_title','workspace_id','workspace_scope','workspace_scope_revision_id',
   'workspace_revision_id','workspace_sha256','outline_checkpoint_id','outline_checkpoint_sha256',
   'requirement_projection_revision_id','requirement_projection_sha256','document_settings_revision_id','document_settings_sha256',
   'submission_assessment_snapshot_id','submission_assessment_snapshot_sha256','output_mode','format','mode_options','ordered_nodes',
@@ -1925,6 +2121,7 @@ BEGIN
   'font_artifact_identities','numbering_policy','toc_policy','snapshot_sha256'])
  OR p->'schema_version' IS DISTINCT FROM '2'::jsonb OR p->'content_block_schema_version' IS DISTINCT FROM '1'::jsonb
  OR EXISTS (SELECT 1 FROM unnest(ARRAY['render_snapshot_id','project_id','workspace_id','workspace_scope_revision_id','workspace_revision_id','outline_checkpoint_id','requirement_projection_revision_id','document_settings_revision_id','submission_assessment_snapshot_id','docx_renderer_contract_id','pdf_renderer_contract_id','style_contract_id']::text[]) key WHERE NOT kb_bid_v2_uuid_text(p->>key))
+ OR jsonb_typeof(p->'project_title') IS DISTINCT FROM 'string' OR octet_length(p->>'project_title') NOT BETWEEN 1 AND 1024
  OR jsonb_typeof(p->'workspace_scope') IS DISTINCT FROM 'string' OR p->>'workspace_scope' IS DISTINCT FROM 'project_wide'
  OR jsonb_typeof(p->'output_mode') IS DISTINCT FROM 'string' OR COALESCE(p->>'output_mode','') NOT IN ('preview','review_draft','submission')
  OR jsonb_typeof(p->'format') IS DISTINCT FROM 'string' OR COALESCE(p->>'format','') NOT IN ('html','docx','pdf')
@@ -2048,7 +2245,7 @@ BEGIN
    'node_occurrence_id',n.node_occurrence_id,'node_revision_id',n.node_revision_id,'parent_occurrence_id',w.parent_occurrence_id,
    'ordinal',n.ordinal,'depth',w.depth,'title',r.title,'render_role',r.render_role,
    'block_occurrences',COALESCE((SELECT jsonb_agg(jsonb_build_object('block_occurrence_id',b.block_occurrence_id,'block_revision_id',b.block_revision_id,'ordinal',b.ordinal,'block_sha256',b.block_sha256) ORDER BY b.ordinal)
-      FROM bid_render_snapshot_block_occurrences b WHERE b.render_snapshot_id=sid AND b.node_occurrence_id=n.node_occurrence_id),'[]'::jsonb)) ORDER BY n.ordinal),'[]'::jsonb)
+      FROM bid_render_snapshot_block_occurrences b WHERE b.render_snapshot_id=sid AND b.node_occurrence_id=n.node_occurrence_id),'[]'::jsonb)) ORDER BY w.depth,n.ordinal,n.node_occurrence_id),'[]'::jsonb)
  INTO actual FROM bid_render_snapshot_node_occurrences n
  JOIN bid_workspace_node_occurrences w ON w.project_id=n.project_id AND w.workspace_revision_id=n.workspace_revision_id AND w.id=n.node_occurrence_id
  JOIN bid_outline_node_revision_artifacts r ON r.project_id=n.project_id AND r.id=n.node_revision_id WHERE n.render_snapshot_id=sid;
@@ -2187,6 +2384,7 @@ CREATE TABLE bid_submission_output_artifacts (
   owner_occurrence text NOT NULL CHECK (octet_length(owner_occurrence) BETWEEN 1 AND 128),
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id,id),
+  UNIQUE(project_id,workspace_id,id),
   FOREIGN KEY(project_id,workspace_id) REFERENCES bid_submission_workspaces(project_id,id),
   FOREIGN KEY(project_id,workspace_id,manifest_id,format)
     REFERENCES bid_submission_manifest_artifacts(project_id,workspace_id,id,format),
@@ -2201,6 +2399,23 @@ CREATE TABLE bid_submission_output_artifacts (
          (format='docx' AND media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'))
 );
 
+CREATE TABLE bid_submission_assessment_report_artifacts (
+  id uuid PRIMARY KEY,
+  project_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
+  submission_output_id uuid NOT NULL UNIQUE,
+  manifest_id uuid NOT NULL,
+  submission_assessment_snapshot_id uuid NOT NULL,
+  canonical_payload bytea NOT NULL,
+  content_sha256 kb_sha256 NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(project_id,id),
+  FOREIGN KEY(project_id,workspace_id,submission_output_id) REFERENCES bid_submission_output_artifacts(project_id,workspace_id,id),
+  FOREIGN KEY(project_id,manifest_id) REFERENCES bid_submission_manifest_artifacts(project_id,id),
+  FOREIGN KEY(project_id,submission_assessment_snapshot_id) REFERENCES bid_submission_assessment_snapshot_artifacts(project_id,id),
+  CHECK(content_sha256=kb_bid_v2_sha256_bytes(canonical_payload))
+);
+
 -- Composite identities close every immutable lineage and pointer. These
 -- constraints reject cross-document/workspace pairings that project-only FKs
 -- cannot distinguish.
@@ -2211,7 +2426,8 @@ ALTER TABLE bid_document_role_current
   ADD FOREIGN KEY(project_id,scope_id,generation,artifact_id)
     REFERENCES bid_document_role_revision_artifacts(project_id,document_id,revision,id);
 ALTER TABLE bid_document_relation_revision_artifacts
-  ADD UNIQUE(project_id,relation_lineage_id,revision,id);
+  ADD UNIQUE(project_id,relation_lineage_id,revision,id),
+  ADD UNIQUE(project_id,id,content_sha256);
 ALTER TABLE bid_document_relation_current
   ADD FOREIGN KEY(project_id,scope_id,generation,artifact_id)
     REFERENCES bid_document_relation_revision_artifacts(project_id,relation_lineage_id,revision,id);
@@ -2260,7 +2476,9 @@ ALTER TABLE bid_requirement_set_current
   ADD FOREIGN KEY(scope_id,document_set_sequence,disposition_set_sequence,artifact_id,artifact_sha256)
     REFERENCES bid_requirement_set_artifacts(project_id,document_set_sequence,disposition_set_sequence,id,content_sha256);
 ALTER TABLE bid_requirement_supersession_revision_artifacts
-  ADD UNIQUE(project_id,lineage_id,revision,id,content_sha256);
+  ADD UNIQUE(project_id,lineage_id,revision,id,content_sha256),
+  ADD FOREIGN KEY(project_id,amendment_document_relation_revision_id,amendment_document_relation_sha256)
+    REFERENCES bid_document_relation_revision_artifacts(project_id,id,content_sha256);
 ALTER TABLE bid_requirement_supersession_current
   ADD FOREIGN KEY(project_id,scope_id,generation,artifact_id,artifact_sha256)
     REFERENCES bid_requirement_supersession_revision_artifacts(project_id,lineage_id,revision,id,content_sha256);
@@ -2451,6 +2669,7 @@ CREATE TABLE bid_outline_generation_request_identities (
   model_contract_sha256 kb_sha256 NOT NULL,
   agent_contract_id uuid NOT NULL,
   agent_contract_sha256 kb_sha256 NOT NULL,
+  structured_form_identities jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(structured_form_identities)='array'),
   UNIQUE(request_artifact_id,request_kind,project_id,workspace_id,request_revision,request_sha256,base_workspace_revision_id,base_workspace_sha256),
   FOREIGN KEY(request_artifact_id,project_id,workspace_id,request_kind,request_revision,request_sha256,frozen_input_sha256)
     REFERENCES bid_async_request_snapshot_artifacts(id,project_id,workspace_id,request_kind,revision,request_sha256,frozen_input_sha256),
@@ -2498,6 +2717,7 @@ CREATE TABLE bid_submission_export_request_identities (
   format text NOT NULL CHECK (format IN ('docx','pdf')),
   mode_options jsonb NOT NULL CHECK (jsonb_typeof(mode_options)='object'),
   UNIQUE(request_artifact_id,request_kind,project_id,workspace_id,request_revision,request_sha256),
+  UNIQUE(request_artifact_id,project_id,workspace_id,request_revision,frozen_input_sha256),
   FOREIGN KEY(request_artifact_id,project_id,workspace_id,request_kind,request_revision,request_sha256,frozen_input_sha256)
     REFERENCES bid_async_request_snapshot_artifacts(id,project_id,workspace_id,request_kind,revision,request_sha256,frozen_input_sha256),
   FOREIGN KEY(project_id,workspace_id,workspace_revision_id,workspace_sha256)
@@ -2527,6 +2747,11 @@ CREATE TABLE bid_submission_export_request_identities (
     OR mode_options @> '{"watermark":null,"include_assessment_notices":false,"include_knowledge_sources":false}'::jsonb
   )
 );
+
+ALTER TABLE bid_pdf_attachment_preparation_attestations
+  ADD CONSTRAINT bid_pdf_attachment_preparation_request_fk
+  FOREIGN KEY(request_artifact_id,project_id,workspace_id,request_revision,frozen_input_sha256)
+  REFERENCES bid_submission_export_request_identities(request_artifact_id,project_id,workspace_id,request_revision,frozen_input_sha256);
 
 CREATE FUNCTION kb_bid_v2_validate_request_contract_kinds()
 RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
@@ -2690,11 +2915,13 @@ BEGIN
     'bid_outline_node_revision_artifacts','bid_content_block_revision_artifacts',
     'bid_outline_fulfillment_binding_revision_artifacts','bid_workspace_revision_artifacts',
     'bid_outline_checkpoint_artifacts','bid_evidence_match_reports','bid_evidence_bundle_artifacts',
-    'bid_evidence_selection_artifacts','bid_evidence_asset_artifacts','bid_workspace_asset_artifacts',
+    'bid_evidence_selection_artifacts','bid_evidence_asset_artifacts','bid_workspace_asset_artifacts','bid_workspace_asset_retirement_artifacts',
     'bid_submission_fulfillment_evidence_revision_artifacts','bid_outline_assessment_snapshot_artifacts',
-    'bid_submission_assessment_snapshot_artifacts','bid_quote_snapshot_artifacts','bid_quote_snapshot_object_identities',
+    'bid_submission_assessment_snapshot_artifacts','bid_submission_assessment_snapshot_evidence_items',
+    'bid_quote_snapshot_artifacts','bid_quote_snapshot_object_identities',
     'bid_render_style_contract_artifacts','bid_authoring_contract_artifacts','bid_renderer_contract_artifacts','bid_render_font_artifacts','bid_attachment_preparation_revision_artifacts','bid_attachment_preparation_asset_items',
-    'bid_render_document_snapshot_artifacts','bid_submission_manifest_artifacts','bid_submission_output_artifacts',
+    'bid_attachment_preparation_contract_artifacts','bid_pdf_attachment_preparation_attestations',
+    'bid_render_document_snapshot_artifacts','bid_submission_manifest_artifacts','bid_submission_output_artifacts','bid_submission_assessment_report_artifacts',
     'bid_document_set_items','bid_source_unit_disposition_set_items','bid_requirement_set_items',
     'bid_workspace_requirement_projection_items','bid_workspace_node_occurrences','bid_workspace_block_occurrences',
     'bid_workspace_binding_occurrences','bid_outline_lineage_edges','bid_async_stage_receipts',
@@ -2888,7 +3115,53 @@ BEGIN
   RETURN 'published';
 END $$;
 
--- Atomic one-document publication seam for the inactive V2 worker. Runtime
+-- Worker-only frozen loader. Runtime workers receive no direct bidding table
+-- access; this SECURITY DEFINER seam verifies the complete typed request,
+-- converter contract, role revision, and available source object identity.
+CREATE FUNCTION kb_bid_v2_load_tender_document_process_input(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256
+) RETURNS TABLE(
+  request_artifact_id uuid,request_revision bigint,frozen_input_sha256 kb_sha256,
+  project_id uuid,document_id uuid,document_sha256 kb_sha256,
+  role_revision_id uuid,role_revision_sha256 kb_sha256,
+  converter_contract_id uuid,converter_contract_sha256 kb_sha256,
+  file_name text,media_type text,original_object_ref kb_object_ref,byte_length bigint
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+  SELECT typed.request_artifact_id,typed.request_revision,typed.frozen_input_sha256,
+    typed.project_id,typed.document_id,typed.document_sha256,
+    typed.role_revision_id,typed.role_revision_sha256,
+    typed.converter_contract_id,typed.converter_contract_sha256,
+    document.file_name,document.media_type,document.original_object_ref,document.byte_length
+  FROM bid_tender_document_process_request_identities typed
+  JOIN bid_async_request_snapshot_artifacts request_value
+    ON request_value.id=typed.request_artifact_id
+   AND request_value.project_id=typed.project_id
+   AND request_value.request_kind='tender_document_process'
+   AND request_value.revision=typed.request_revision
+   AND request_value.frozen_input_sha256=typed.frozen_input_sha256
+  JOIN bid_documents document
+    ON document.project_id=typed.project_id AND document.id=typed.document_id
+   AND document.original_sha256=typed.document_sha256
+  JOIN bid_document_role_revision_artifacts role_value
+    ON role_value.project_id=typed.project_id AND role_value.document_id=typed.document_id
+   AND role_value.id=typed.role_revision_id
+   AND role_value.content_sha256=typed.role_revision_sha256
+  JOIN bid_authoring_contract_artifacts converter
+    ON converter.id=typed.converter_contract_id
+   AND converter.content_sha256=typed.converter_contract_sha256
+   AND converter.contract_kind='converter'
+  JOIN object_registry object_value
+    ON object_value.object_ref=document.original_object_ref
+   AND object_value.digest=document.original_sha256
+   AND object_value.media_type=document.media_type
+   AND object_value.byte_length=document.byte_length
+   AND object_value.state='available'
+  WHERE typed.request_artifact_id=p_request_artifact_id
+    AND typed.request_revision=p_request_revision
+    AND typed.frozen_input_sha256=p_frozen_input_sha256
+$$;
+
+-- Atomic one-document publication seam for the active V2 worker. Runtime
 -- callers cannot insert source/image/unit artifacts directly. Canonical bytes
 -- are passed as hex so PostgreSQL validates the exact SHA rather than relying
 -- on caller JSON serialization.
@@ -2928,6 +3201,7 @@ DECLARE
   prior bid_async_stage_receipts%ROWTYPE;
   expected_ordinal integer:=0;
   image_count integer:=0;
+  form_id uuid; form_payload bytea; form_sha kb_sha256; form_fields jsonb;
 BEGIN
   IF jsonb_typeof(p_source)<>'object'
      OR NOT kb_bid_v2_json_keys_exact(p_source,ARRAY[
@@ -3120,6 +3394,22 @@ BEGIN
       (unit_value->>'source_span_sha256')::kb_sha256,decode(unit_value->>'text_utf8_hex','hex'),
       (unit_value->>'text_sha256')::kb_sha256,decode(unit_value->>'canonical_payload_hex','hex'),
       (unit_value->>'content_sha256')::kb_sha256);
+    IF unit_value->>'unit_kind'='form_region' THEN
+      form_id:=gen_random_uuid();
+      SELECT coalesce(jsonb_agg(jsonb_build_object('field_id','field_'||line.ordinality,
+        'label',coalesce(nullif(btrim(split_part(line.value,':',1)),''),'字段 '||line.ordinality),
+        'field_type','text','required',true) ORDER BY line.ordinality),
+        jsonb_build_array(jsonb_build_object('field_id','field_1','label','表单内容','field_type','text','required',true)))
+      INTO form_fields FROM regexp_split_to_table(convert_from(decode(unit_value->>'text_utf8_hex','hex'),'UTF8'),E'\\r?\\n')
+        WITH ORDINALITY line(value,ordinality) WHERE btrim(line.value)<>'';
+      form_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,
+        'form_definition_revision_id',form_id,'source_unit_revision_id',(unit_value->>'id')::uuid,
+        'title','招标文件表单','fields',form_fields));
+      form_sha:=kb_bid_v2_sha256_bytes(form_payload);
+      INSERT INTO bid_tender_structured_form_definition_artifacts(id,project_id,source_unit_revision_id,
+        schema_version,canonical_payload,content_sha256)
+      VALUES(form_id,p_project_id,(unit_value->>'id')::uuid,1,form_payload,form_sha);
+    END IF;
   END LOOP;
 
 INSERT INTO bid_async_stage_receipts(request_artifact_id,stage_kind,frozen_input_sha256,result_identity,result_sha256)
@@ -3145,7 +3435,9 @@ CREATE VIEW bidding_v2_outputs AS
 CREATE FUNCTION kb_bid_v2_json_payload(p jsonb) RETURNS bytea
 LANGUAGE sql IMMUTABLE AS $$ SELECT convert_to(p::text,'UTF8') $$;
 
-CREATE FUNCTION kb_bid_v2_load_workspace(p_workspace_id uuid) RETURNS jsonb
+CREATE FUNCTION kb_bid_v2_load_workspace_revision(
+  p_workspace_id uuid,p_revision_id uuid,p_revision_sha256 kb_sha256
+) RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
 DECLARE
   w bid_submission_workspaces%ROWTYPE;
@@ -3165,23 +3457,51 @@ DECLARE
   ds_sha kb_sha256;
   projection_id uuid;
   projection_sha kb_sha256;
+  checkpoint_id uuid;
+  checkpoint_sha kb_sha256;
+  quote_value jsonb;
 BEGIN
   SELECT * INTO w FROM bid_submission_workspaces WHERE id=p_workspace_id;
   IF NOT FOUND THEN RETURN NULL; END IF;
-  SELECT * INTO head FROM bid_workspace_heads WHERE scope_id=p_workspace_id;
+  SELECT * INTO rev FROM bid_workspace_revision_artifacts
+    WHERE workspace_id=p_workspace_id AND id=p_revision_id AND content_sha256=p_revision_sha256;
   IF NOT FOUND THEN RETURN NULL; END IF;
-  SELECT * INTO rev FROM bid_workspace_revision_artifacts WHERE id=head.artifact_id AND content_sha256=head.artifact_sha256;
   SELECT * INTO settings FROM bid_document_settings_revision_artifacts WHERE id=rev.document_settings_revision_id;
-  SELECT artifact_id, artifact_sha256 INTO ds_id, ds_sha FROM bid_document_set_current WHERE scope_id=w.project_id;
-  SELECT artifact_id, artifact_sha256 INTO projection_id, projection_sha
-    FROM bid_workspace_requirement_projection_current WHERE scope_id=w.id;
+  SELECT convert_from(quote.canonical_payload,'UTF8')::jsonb||jsonb_build_object(
+      'artifact_id',quote.id,'sha256',quote.content_sha256,
+      'revision',quote.revision,'currency',quote.currency)
+    INTO quote_value FROM bid_quote_snapshot_artifacts quote
+    WHERE quote.project_id=w.project_id AND quote.id=rev.quote_snapshot_id
+      AND quote.content_sha256=rev.quote_snapshot_sha256;
+  projection_id:=rev.requirement_projection_id;
+  projection_sha:=rev.requirement_projection_sha256;
+  SELECT requirement_set.document_set_id, document_set.content_sha256 INTO ds_id, ds_sha
+    FROM bid_workspace_requirement_projection_artifacts projection
+    JOIN bid_requirement_set_artifacts requirement_set ON requirement_set.id=projection.requirement_set_id
+    JOIN bid_document_set_artifacts document_set ON document_set.id=requirement_set.document_set_id
+    WHERE projection.id=projection_id AND projection.content_sha256=projection_sha;
+  SELECT checkpoint.id,checkpoint.content_sha256 INTO checkpoint_id,checkpoint_sha
+    FROM bid_outline_checkpoint_artifacts checkpoint
+    WHERE checkpoint.workspace_id=w.id AND checkpoint.workspace_revision_id=rev.id
+      AND checkpoint.requirement_projection_id=projection_id
+      AND checkpoint.requirement_projection_sha256=projection_sha
+    ORDER BY checkpoint.created_at DESC,checkpoint.id DESC LIMIT 1;
   FOR node_rec IN
+    WITH RECURSIVE ordered_nodes AS (
+      SELECT occurrence.*,ARRAY[lpad(occurrence.ordinal::text,10,'0')||':'||occurrence.id::text] tree_path
+      FROM bid_workspace_node_occurrences occurrence
+      WHERE occurrence.workspace_revision_id=rev.id AND occurrence.parent_occurrence_id IS NULL
+      UNION ALL
+      SELECT child.*,parent.tree_path||(lpad(child.ordinal::text,10,'0')||':'||child.id::text)
+      FROM bid_workspace_node_occurrences child
+      JOIN ordered_nodes parent ON parent.id=child.parent_occurrence_id
+      WHERE child.workspace_revision_id=rev.id
+    )
     SELECT occ.id occ_id, occ.parent_occurrence_id, occ.ordinal, occ.depth,
            n.lineage_id, n.id revision_id, n.title, n.semantic_role, n.render_role, n.tombstone
-      FROM bid_workspace_node_occurrences occ
+      FROM ordered_nodes occ
       JOIN bid_outline_node_revision_artifacts n ON n.id=occ.node_revision_id AND n.project_id=occ.project_id
-     WHERE occ.workspace_revision_id=rev.id
-     ORDER BY occ.depth, occ.ordinal, occ.id
+     ORDER BY occ.tree_path
   LOOP
     SELECT coalesce(array_agg(b.lineage_id ORDER BY bloc.ordinal), ARRAY[]::uuid[])
       INTO block_ids
@@ -3196,6 +3516,7 @@ BEGIN
           JOIN bid_outline_node_revision_artifacts n2 ON n2.id=pocc.node_revision_id
          WHERE pocc.id=node_rec.parent_occurrence_id),
       'ordinal', node_rec.ordinal,
+      'depth', node_rec.depth,
       'title', node_rec.title,
       'semantic_role', node_rec.semantic_role,
       'render_role', node_rec.render_role,
@@ -3253,8 +3574,8 @@ BEGIN
     'revision_id', rev.id,
     'sha256', rev.content_sha256,
     'scope', 'project_wide',
-    'outline_checkpoint_id', NULL,
-    'outline_checkpoint_sha256', NULL,
+    'outline_checkpoint_id', checkpoint_id,
+    'outline_checkpoint_sha256', checkpoint_sha,
     'requirement_projection_revision_id', projection_id,
     'requirement_projection_sha256', projection_sha,
     'document_settings_revision_id', settings.id,
@@ -3265,8 +3586,17 @@ BEGIN
     'nodes', nodes,
     'blocks', blocks,
     'bindings', bindings,
-    'quote_snapshot', NULL
+    'quote_snapshot', quote_value
   );
+END $$;
+
+CREATE FUNCTION kb_bid_v2_load_workspace(p_workspace_id uuid) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE head bid_workspace_heads%ROWTYPE;
+BEGIN
+  SELECT * INTO head FROM bid_workspace_heads WHERE scope_id=p_workspace_id;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  RETURN kb_bid_v2_load_workspace_revision(p_workspace_id,head.artifact_id,head.artifact_sha256);
 END $$;
 
 CREATE FUNCTION kb_bid_create_project_v2(
@@ -3334,11 +3664,13 @@ DECLARE
   head bid_workspace_heads%ROWTYPE;
   cur bid_workspace_revision_artifacts%ROWTYPE;
   w bid_submission_workspaces%ROWTYPE;
-  node jsonb; block jsonb; binding jsonb; edge jsonb;
+  node jsonb; block jsonb; binding jsonb; edge jsonb; deleted record; evidence record;
   lineage uuid; rev uuid; parent uuid; parent_occ uuid; occ uuid; block_occ uuid;
   payload bytea; sha kb_sha256; settings_id uuid; settings_sha kb_sha256;
   new_rev uuid := gen_random_uuid(); new_sha kb_sha256; new_payload bytea;
-  settings jsonb; ordinal int; depth int;
+  settings jsonb; ordinal int; depth int; printable_width numeric;
+  evidence_target uuid; evidence_kind text; evidence_lineage uuid; evidence_revision bigint;
+  evidence_state text; evidence_dependency kb_sha256;
   node_map jsonb := '{}'::jsonb;
 BEGIN
   SELECT * INTO w FROM bid_submission_workspaces WHERE id=p_workspace_id;
@@ -3374,10 +3706,36 @@ BEGIN
         kb_bid_v2_json_payload(node), kb_bid_v2_sha256_bytes(kb_bid_v2_json_payload(node)))
       ON CONFLICT (id) DO NOTHING;
   END LOOP;
+  printable_width:=210
+    -coalesce((settings#>>'{margins_mm,left}')::numeric,25.4)
+    -coalesce((settings#>>'{margins_mm,right}')::numeric,25.4);
   FOR block IN SELECT value FROM jsonb_array_elements(coalesce(p_snapshot->'blocks','[]'::jsonb))
   LOOP
     lineage := (block->>'lineage_id')::uuid;
     rev := coalesce((block->>'block_revision_id')::uuid, gen_random_uuid());
+    IF block->>'kind' IN ('image','attachment_ref') AND NOT EXISTS (
+      SELECT 1 FROM bid_workspace_asset_artifacts asset
+      WHERE asset.project_id=w.project_id AND asset.workspace_id=p_workspace_id
+        AND asset.id=(block#>>'{content,asset_revision_id}')::uuid
+        AND NOT EXISTS (SELECT 1 FROM bid_workspace_asset_retirement_artifacts retired WHERE retired.asset_revision_id=asset.id)
+    ) THEN RAISE EXCEPTION 'WORKSPACE_ASSET_REFERENCE_INVALID' USING ERRCODE='23514'; END IF;
+    IF block->>'kind'='attachment_ref' AND block#>>'{content,render_mode}'='embedded_pages'
+       AND (block#>>'{content,preparation_revision_id}') IS NOT NULL AND NOT EXISTS (
+         SELECT 1 FROM bid_attachment_preparation_revision_artifacts preparation
+         WHERE preparation.project_id=w.project_id AND preparation.workspace_id=p_workspace_id
+           AND preparation.id=(block#>>'{content,preparation_revision_id}')::uuid
+           AND preparation.source_asset_revision_id=(block#>>'{content,asset_revision_id}')::uuid
+           AND preparation.status='ready')
+    THEN RAISE EXCEPTION 'ATTACHMENT_PREPARATION_REFERENCE_INVALID' USING ERRCODE='23514'; END IF;
+    IF block->>'kind'='structured_form' AND NOT EXISTS (
+      SELECT 1 FROM bid_tender_structured_form_definition_artifacts form
+      WHERE form.project_id=w.project_id AND form.id=(block#>>'{content,form_definition_revision_id}')::uuid)
+    THEN RAISE EXCEPTION 'STRUCTURED_FORM_REFERENCE_INVALID' USING ERRCODE='23514'; END IF;
+    IF block->>'kind'='table' AND (SELECT sum((width#>>'{}')::numeric)
+      FROM jsonb_array_elements(block#>'{content,widths_mm}') width)>printable_width
+    THEN RAISE EXCEPTION 'TABLE_EXCEEDS_PRINTABLE_WIDTH' USING ERRCODE='23514'; END IF;
+    IF block->>'kind'='image' AND (block#>>'{content,width_mm}')::numeric>printable_width
+    THEN RAISE EXCEPTION 'IMAGE_EXCEEDS_PRINTABLE_WIDTH' USING ERRCODE='23514'; END IF;
     INSERT INTO bid_content_block_lineages(id,project_id,workspace_id)
       VALUES(lineage,w.project_id,p_workspace_id) ON CONFLICT (id) DO NOTHING;
     INSERT INTO bid_content_block_revision_artifacts(id,project_id,workspace_id,lineage_id,revision,schema_version,block_kind,block_payload,origin,dependency_sha256,stale,canonical_payload,content_sha256)
@@ -3388,10 +3746,55 @@ BEGIN
         kb_bid_v2_json_payload(block), kb_bid_v2_sha256_bytes(kb_bid_v2_json_payload(block)))
       ON CONFLICT (id) DO NOTHING;
   END LOOP;
+  FOR deleted IN
+    SELECT artifact.* FROM bid_workspace_node_occurrences occurrence
+    JOIN bid_outline_node_revision_artifacts artifact ON artifact.id=occurrence.node_revision_id
+    WHERE occurrence.workspace_revision_id=cur.id AND NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements(coalesce(p_snapshot->'nodes','[]'::jsonb)) value
+      WHERE (value->>'lineage_id')::uuid=artifact.lineage_id)
+  LOOP
+    payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'lineage_id',deleted.lineage_id,
+      'revision',deleted.revision+1,'tombstone',true,'deleted_from_workspace_revision_id',cur.id));sha:=kb_bid_v2_sha256_bytes(payload);
+    INSERT INTO bid_outline_node_revision_artifacts(id,project_id,workspace_id,lineage_id,revision,title,
+      semantic_role,render_role,origin,tombstone,canonical_payload,content_sha256)
+    VALUES(gen_random_uuid(),w.project_id,p_workspace_id,deleted.lineage_id,deleted.revision+1,deleted.title,
+      deleted.semantic_role,deleted.render_role,'human',true,payload,sha);
+  END LOOP;
+  FOR deleted IN
+    SELECT DISTINCT artifact.* FROM bid_workspace_block_occurrences occurrence
+    JOIN bid_content_block_revision_artifacts artifact ON artifact.id=occurrence.block_revision_id
+    WHERE occurrence.workspace_revision_id=cur.id AND NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements(coalesce(p_snapshot->'blocks','[]'::jsonb)) value
+      WHERE (value->>'lineage_id')::uuid=artifact.lineage_id)
+  LOOP
+    payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'lineage_id',deleted.lineage_id,
+      'revision',deleted.revision+1,'tombstone',true,'deleted_from_workspace_revision_id',cur.id));sha:=kb_bid_v2_sha256_bytes(payload);
+    INSERT INTO bid_content_block_revision_artifacts(id,project_id,workspace_id,lineage_id,revision,schema_version,
+      block_kind,block_payload,origin,dependency_sha256,stale,tombstone,canonical_payload,content_sha256)
+    VALUES(gen_random_uuid(),w.project_id,p_workspace_id,deleted.lineage_id,deleted.revision+1,1,deleted.block_kind,
+      '{}'::jsonb,'human',deleted.dependency_sha256,true,true,payload,sha);
+  END LOOP;
   FOR binding IN SELECT value FROM jsonb_array_elements(coalesce(p_snapshot->'bindings','[]'::jsonb))
   LOOP
     lineage := (binding->>'binding_lineage_id')::uuid;
     rev := (binding->>'binding_revision_id')::uuid;
+    IF (binding->>'requirement_projection_revision_id')::uuid IS DISTINCT FROM cur.requirement_projection_id
+       OR coalesce(binding->>'state','bound') NOT IN ('bound','unbound','superseded')
+       OR NOT EXISTS (SELECT 1 FROM bid_workspace_requirement_projection_items item
+         JOIN bid_requirement_revision_artifacts requirement ON requirement.id=item.requirement_revision_id
+         WHERE item.projection_id=cur.requirement_projection_id
+           AND (binding->>'need_occurrence_id')::uuid=ANY(kb_bid_v2_fulfillment_need_ids(requirement.fulfillment_expr))) THEN
+      RAISE EXCEPTION 'BINDING_REQUIREMENT_PROJECTION_MISMATCH' USING ERRCODE='23514';
+    END IF;
+    IF coalesce(binding->>'state','bound')='bound' AND (
+      (binding#>>'{target,kind}'='outline_node' AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(p_snapshot->'nodes') value WHERE (value->>'lineage_id')::uuid=(binding#>>'{target,node_lineage_id}')::uuid))
+      OR (binding#>>'{target,kind}'='response_table' AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(p_snapshot->'blocks') value WHERE (value->>'lineage_id')::uuid=(binding#>>'{target,block_lineage_id}')::uuid AND value->>'kind'='table'))
+      OR (binding#>>'{target,kind}'='structured_form' AND NOT EXISTS (SELECT 1 FROM bid_tender_structured_form_definition_artifacts form WHERE form.project_id=w.project_id AND form.id=(binding#>>'{target,form_definition_revision_id}')::uuid))
+      OR (binding#>>'{target,kind}'='quote' AND NOT EXISTS (SELECT 1 FROM bid_quote_snapshot_artifacts quote
+        WHERE quote.project_id=w.project_id AND quote.id=cur.quote_snapshot_id
+          AND quote.content_sha256=cur.quote_snapshot_sha256
+          AND quote.id=(binding#>>'{target,quote_snapshot_id}')::uuid))
+    ) THEN RAISE EXCEPTION 'BINDING_TARGET_INVALID' USING ERRCODE='23514'; END IF;
     INSERT INTO bid_outline_fulfillment_binding_lineages(id,project_id,workspace_id)
       VALUES(lineage,w.project_id,p_workspace_id) ON CONFLICT (id) DO NOTHING;
     INSERT INTO bid_outline_fulfillment_binding_revision_artifacts(
@@ -3406,13 +3809,13 @@ BEGIN
         (binding#>>'{target,block_lineage_id}')::uuid,
         (binding#>>'{target,form_definition_revision_id}')::uuid,
         (binding#>>'{target,quote_snapshot_id}')::uuid),
-      'bound',binding->>'reason',p_actor,kb_bid_v2_json_payload(binding),
+      coalesce(binding->>'state','bound'),binding->>'reason',p_actor,kb_bid_v2_json_payload(binding),
       kb_bid_v2_sha256_bytes(kb_bid_v2_json_payload(binding)))
     ON CONFLICT (id) DO NOTHING;
   END LOOP;
   new_payload := kb_bid_v2_json_payload(p_snapshot); new_sha := kb_bid_v2_sha256_bytes(new_payload);
-  INSERT INTO bid_workspace_revision_artifacts(id,project_id,workspace_id,revision,parent_revision_id,parent_sha256,scope_revision_id,requirement_projection_id,requirement_projection_sha256,document_settings_revision_id,canonical_payload,content_sha256,actor)
-    VALUES(new_rev,w.project_id,p_workspace_id,cur.revision+1,cur.id,cur.content_sha256,cur.scope_revision_id,cur.requirement_projection_id,cur.requirement_projection_sha256,settings_id,new_payload,new_sha,p_actor);
+  INSERT INTO bid_workspace_revision_artifacts(id,project_id,workspace_id,revision,parent_revision_id,parent_sha256,scope_revision_id,requirement_projection_id,requirement_projection_sha256,document_settings_revision_id,quote_snapshot_id,quote_snapshot_sha256,canonical_payload,content_sha256,actor)
+    VALUES(new_rev,w.project_id,p_workspace_id,cur.revision+1,cur.id,cur.content_sha256,cur.scope_revision_id,cur.requirement_projection_id,cur.requirement_projection_sha256,settings_id,cur.quote_snapshot_id,cur.quote_snapshot_sha256,new_payload,new_sha,p_actor);
   -- Insert occurrences in explicit depth order: every parent must already exist.
   FOR node IN
     SELECT value FROM jsonb_array_elements(coalesce(p_snapshot->'nodes','[]'::jsonb))
@@ -3449,6 +3852,76 @@ BEGIN
     VALUES(gen_random_uuid(),w.project_id,new_rev,
       (binding->>'binding_revision_id')::uuid,ordinal);
     ordinal := ordinal+1;
+  END LOOP;
+  FOR evidence IN
+    SELECT binding.*,occurrence.ordinal binding_ordinal FROM bid_workspace_binding_occurrences occurrence
+    JOIN bid_outline_fulfillment_binding_revision_artifacts binding ON binding.id=occurrence.binding_revision_id
+    WHERE occurrence.workspace_revision_id=new_rev AND binding.state='bound'
+      AND binding.requirement_projection_id=cur.requirement_projection_id ORDER BY occurrence.ordinal
+  LOOP
+    evidence_target:=NULL;evidence_kind:=NULL;evidence_dependency:=NULL;evidence_state:='current';
+    IF evidence.target_kind='outline_node' THEN
+      SELECT block.id,'block',block.content_sha256 INTO evidence_target,evidence_kind,evidence_dependency FROM bid_workspace_node_occurrences node_occurrence
+      JOIN bid_outline_node_revision_artifacts node ON node.id=node_occurrence.node_revision_id
+      JOIN bid_workspace_block_occurrences block_occurrence ON block_occurrence.node_occurrence_id=node_occurrence.id
+      JOIN bid_content_block_revision_artifacts block ON block.id=block_occurrence.block_revision_id
+      WHERE node_occurrence.workspace_revision_id=new_rev AND node.lineage_id=evidence.target_id
+      ORDER BY block_occurrence.ordinal LIMIT 1;
+    ELSIF evidence.target_kind='response_table' THEN
+      SELECT block.id,'block',block.content_sha256 INTO evidence_target,evidence_kind,evidence_dependency FROM bid_workspace_block_occurrences block_occurrence
+      JOIN bid_content_block_revision_artifacts block ON block.id=block_occurrence.block_revision_id
+      WHERE block_occurrence.workspace_revision_id=new_rev AND block.lineage_id=evidence.target_id AND block.block_kind='table' LIMIT 1;
+    ELSIF evidence.target_kind='structured_form' THEN
+      SELECT block.id,'structured_value',block.content_sha256 INTO evidence_target,evidence_kind,evidence_dependency FROM bid_workspace_block_occurrences block_occurrence
+      JOIN bid_content_block_revision_artifacts block ON block.id=block_occurrence.block_revision_id
+      WHERE block_occurrence.workspace_revision_id=new_rev AND block.block_kind='structured_form'
+        AND (block.block_payload->>'form_definition_revision_id')::uuid=evidence.target_id LIMIT 1;
+    ELSIF evidence.target_kind='quote' THEN
+      SELECT quote.id,'quote_snapshot',quote.content_sha256 INTO evidence_target,evidence_kind,evidence_dependency
+      FROM bid_quote_snapshot_artifacts quote WHERE quote.id=evidence.target_id AND quote.project_id=w.project_id;
+    END IF;
+    IF evidence_target IS NOT NULL THEN
+      evidence_lineage:=kb_bid_v2_deterministic_uuid('fulfillment-evidence:'||evidence.lineage_id::text||':'||evidence_target::text);
+      SELECT coalesce(max(revision),0)+1 INTO evidence_revision FROM bid_submission_fulfillment_evidence_revision_artifacts
+        WHERE project_id=w.project_id AND evidence_lineage_id=evidence_lineage;
+      SELECT prior.state INTO evidence_state FROM bid_submission_fulfillment_evidence_revision_artifacts prior
+        WHERE prior.project_id=w.project_id AND prior.evidence_lineage_id=evidence_lineage
+        ORDER BY prior.revision DESC LIMIT 1;
+      evidence_state:=coalesce(evidence_state,'current');
+      payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'evidence_lineage_id',evidence_lineage,
+        'revision',evidence_revision,'workspace_revision_id',new_rev,'binding_revision_id',evidence.id,
+        'target_revision_id',evidence_target,'target_kind',evidence_kind,'state',evidence_state,
+        'dependency_sha256',evidence_dependency));sha:=kb_bid_v2_sha256_bytes(payload);
+      INSERT INTO bid_submission_fulfillment_evidence_revision_artifacts(id,project_id,workspace_id,evidence_lineage_id,
+        revision,workspace_revision_id,binding_revision_id,target_revision_id,target_kind,dependency_sha256,state,
+        canonical_payload,content_sha256)
+      VALUES(gen_random_uuid(),w.project_id,p_workspace_id,evidence_lineage,evidence_revision,new_rev,evidence.id,
+        evidence_target,evidence_kind,evidence_dependency,evidence_state,payload,sha);
+    END IF;
+  END LOOP;
+  -- Preserve stale/withdrawn or otherwise non-revalidated evidence across unrelated edits.
+  FOR evidence IN
+    SELECT prior.* FROM bid_submission_fulfillment_evidence_revision_artifacts prior
+    WHERE prior.workspace_revision_id=cur.id AND NOT EXISTS (
+      SELECT 1 FROM bid_submission_fulfillment_evidence_revision_artifacts current_evidence
+      WHERE current_evidence.workspace_revision_id=new_rev
+        AND current_evidence.evidence_lineage_id=prior.evidence_lineage_id)
+  LOOP
+    SELECT coalesce(max(revision),0)+1 INTO evidence_revision
+      FROM bid_submission_fulfillment_evidence_revision_artifacts
+      WHERE project_id=w.project_id AND evidence_lineage_id=evidence.evidence_lineage_id;
+    payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,
+      'evidence_lineage_id',evidence.evidence_lineage_id,'revision',evidence_revision,
+      'workspace_revision_id',new_rev,'binding_revision_id',evidence.binding_revision_id,
+      'target_revision_id',evidence.target_revision_id,'target_kind',evidence.target_kind,
+      'state',evidence.state,'dependency_sha256',evidence.dependency_sha256));
+    sha:=kb_bid_v2_sha256_bytes(payload);
+    INSERT INTO bid_submission_fulfillment_evidence_revision_artifacts(id,project_id,workspace_id,
+      evidence_lineage_id,revision,workspace_revision_id,binding_revision_id,target_revision_id,target_kind,
+      dependency_sha256,state,canonical_payload,content_sha256)
+    VALUES(gen_random_uuid(),w.project_id,p_workspace_id,evidence.evidence_lineage_id,evidence_revision,
+      new_rev,evidence.binding_revision_id,evidence.target_revision_id,evidence.target_kind,
+      evidence.dependency_sha256,evidence.state,payload,sha);
   END LOOP;
   FOR edge IN SELECT value FROM jsonb_array_elements(coalesce(p_snapshot->'lineage_edges','[]'::jsonb))
   LOOP
@@ -3679,7 +4152,12 @@ BEGIN
   RETURN COALESCE((SELECT jsonb_agg(jsonb_build_object(
       'id',d.id,'project_id',d.project_id,'file_name',d.file_name,'media_type',d.media_type,
       'byte_length',d.byte_length,'original_sha256',d.original_sha256,'parse_status',d.parse_status,
-      'conversion_generation',1,'error_code',NULL,
+      'conversion_generation',(SELECT count(*) FROM bid_tender_document_process_request_identities attempt
+        WHERE attempt.project_id=d.project_id AND attempt.document_id=d.id),
+      'error_code',(SELECT request_value.error_code FROM bid_tender_document_process_request_identities attempt
+        JOIN bid_async_request_snapshot_artifacts request_value ON request_value.id=attempt.request_artifact_id
+        WHERE attempt.project_id=d.project_id AND attempt.document_id=d.id
+        ORDER BY request_value.created_at DESC,request_value.id DESC LIMIT 1),
       'document_role',r.role,'role_revision_id',r.id,'role_revision_sha256',r.content_sha256,
       'role_provenance',r.provenance,'source_revision_id',s.id,'source_revision_sha256',s.source_sha256)
       ORDER BY d.created_at,d.id)
@@ -3689,6 +4167,75 @@ BEGIN
     LEFT JOIN LATERAL (SELECT value.id,value.source_sha256 FROM bid_converted_source_artifacts value
       WHERE value.project_id=d.project_id AND value.document_id=d.id ORDER BY value.revision DESC LIMIT 1) s ON true
     WHERE d.project_id=p_project_id),'[]'::jsonb);
+END $$;
+
+CREATE FUNCTION kb_bid_v2_retry_tender_document(
+  p_project_id uuid,p_document_id uuid,p_request_artifact_id uuid,p_expected_generation bigint,p_actor kb_actor_identity,
+  p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE replay bytea; response jsonb; response_bytes bytea; document_value bid_documents%ROWTYPE;
+  role_value bid_document_role_revision_artifacts%ROWTYPE; converter bid_authoring_contract_artifacts%ROWTYPE;
+  frozen_payload bytea; frozen_sha kb_sha256; job_payload jsonb; job_bytes bytea; job_sha kb_sha256;
+  generation_value bigint;
+BEGIN
+  PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
+  replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.tender.retry',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  SELECT * INTO STRICT document_value FROM bid_documents
+    WHERE project_id=p_project_id AND id=p_document_id FOR UPDATE;
+  SELECT count(*) INTO generation_value FROM bid_tender_document_process_request_identities
+    WHERE project_id=p_project_id AND document_id=p_document_id;
+  IF generation_value<>p_expected_generation THEN
+    RAISE EXCEPTION 'TENDER_DOCUMENT_GENERATION_CAS_MISMATCH' USING ERRCODE='40001';
+  END IF;
+  IF document_value.parse_status<>'failed' THEN
+    RAISE EXCEPTION 'TENDER_DOCUMENT_NOT_RETRYABLE' USING ERRCODE='23514';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM bid_projects WHERE id=p_project_id AND status='open') THEN
+    RAISE EXCEPTION 'PROJECT_ENDED' USING ERRCODE='55000';
+  END IF;
+  SELECT role.* INTO STRICT role_value
+    FROM bid_document_role_current head JOIN bid_document_role_revision_artifacts role
+      ON role.project_id=head.project_id AND role.id=head.artifact_id
+    WHERE head.project_id=p_project_id AND head.scope_id=p_document_id;
+  SELECT * INTO STRICT converter FROM bid_authoring_contract_artifacts
+    WHERE id='00000000-0000-5000-8000-000000000001' AND contract_kind='converter';
+  frozen_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'project_id',p_project_id,
+    'document_id',p_document_id,'document_sha256',document_value.original_sha256,
+    'role_revision_id',role_value.id,'role_revision_sha256',role_value.content_sha256,
+    'converter_contract_id',converter.id,'converter_contract_sha256',converter.content_sha256));
+  frozen_sha:=kb_bid_v2_sha256_bytes(frozen_payload);
+  job_payload:=jsonb_build_object('job_kind','tender_document_process','request',jsonb_build_object(
+    'request_artifact_id',p_request_artifact_id,'request_revision',1,'frozen_input_sha256',frozen_sha),
+    'project_id',p_project_id,'document_revision_id',p_document_id);
+  job_bytes:=kb_bid_v2_json_payload(job_payload); job_sha:=kb_bid_v2_sha256_bytes(job_bytes);
+  INSERT INTO bid_async_request_snapshot_artifacts(id,project_id,workspace_id,request_kind,revision,
+    frozen_input_sha256,request_payload,request_sha256,status)
+  VALUES(p_request_artifact_id,p_project_id,NULL,'tender_document_process',1,frozen_sha,job_bytes,job_sha,'pending');
+  INSERT INTO bid_tender_document_process_request_identities(request_artifact_id,project_id,request_revision,
+    request_sha256,frozen_input_sha256,document_id,document_sha256,role_revision_id,role_revision_sha256,
+    converter_contract_id,converter_contract_sha256)
+  VALUES(p_request_artifact_id,p_project_id,1,job_sha,frozen_sha,p_document_id,document_value.original_sha256,
+    role_value.id,role_value.content_sha256,converter.id,converter.content_sha256);
+  UPDATE bid_documents SET parse_status='pending'
+    WHERE project_id=p_project_id AND id=p_document_id;
+  SELECT count(*) INTO generation_value FROM bid_tender_document_process_request_identities
+    WHERE project_id=p_project_id AND document_id=p_document_id;
+  response:=jsonb_build_object('id',p_document_id,'project_id',p_project_id,
+    'file_name',document_value.file_name,'media_type',document_value.media_type,
+    'byte_length',document_value.byte_length,'original_sha256',document_value.original_sha256,
+    'parse_status','pending','conversion_generation',generation_value,'error_code',NULL,
+    'document_role',role_value.role,'role_revision_id',role_value.id,
+    'role_revision_sha256',role_value.content_sha256,'role_provenance',role_value.provenance,
+    'request_artifact_id',p_request_artifact_id,'request_revision',1,'frozen_input_sha256',frozen_sha);
+  response_bytes:=convert_to(response::text,'UTF8');
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,
+    request_sha256,response_sha256,entity_kind,entity_locator,after_revision,after_sha256)
+  VALUES(gen_random_uuid(),1,'bid.v2.tender.retry',p_actor,p_idempotency_key,p_request_sha256,
+    kb_bid_v2_sha256_bytes(response_bytes),'bid_v2_document',jsonb_build_object('document_id',p_document_id),
+    generation_value,document_value.original_sha256);
+  PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.tender.retry',p_idempotency_key,202,response_bytes);
+  RETURN response;
 END $$;
 
 CREATE FUNCTION kb_bid_v2_patch_document_role(
@@ -3813,10 +4360,11 @@ DECLARE
   set_id uuid:=gen_random_uuid(); set_revision bigint; set_payload bytea; set_sha kb_sha256;
   disposition_id uuid:=gen_random_uuid(); disposition_revision bigint; disposition_payload bytea; disposition_sha kb_sha256;
   frozen_payload bytea; frozen_sha kb_sha256; job_payload jsonb; job_bytes bytea; job_sha kb_sha256;
-  item jsonb; item_list jsonb:='[]'::jsonb; disposition_items jsonb:='[]'::jsonb;
+  item jsonb; item_list jsonb:='[]'::jsonb; relation_items jsonb:='[]'::jsonb;
+  disposition_items jsonb:='[]'::jsonb; warnings jsonb:='[]'::jsonb;
   document_key uuid; role_value bid_document_role_revision_artifacts%ROWTYPE;
   source_value bid_converted_source_artifacts%ROWTYPE; unit_value bid_source_unit_revision_artifacts%ROWTYPE;
-  ordinal_value integer:=0;
+  document_status text; source_disposition text; ordinal_value integer:=0;
 BEGIN
   PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
   replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.document_set.freeze',p_idempotency_key,p_request_bytes,p_request_sha256);
@@ -3836,20 +4384,41 @@ BEGIN
         ON role_artifact.project_id=role_head.project_id AND role_artifact.id=role_head.artifact_id
       JOIN bid_documents document_value ON document_value.project_id=role_artifact.project_id
         AND document_value.id=role_artifact.document_id
-      WHERE role_head.scope_id=document_key AND role_artifact.project_id=p_project_id
-        AND document_value.parse_status='ready';
-    SELECT source_artifact.* INTO STRICT source_value FROM bid_converted_source_artifacts source_artifact
+      WHERE role_head.scope_id=document_key AND role_artifact.project_id=p_project_id;
+    SELECT document_value.parse_status INTO STRICT document_status FROM bid_documents document_value
+      WHERE document_value.project_id=p_project_id AND document_value.id=document_key;
+    source_value:=NULL;
+    SELECT source_artifact.* INTO source_value FROM bid_converted_source_artifacts source_artifact
       WHERE source_artifact.project_id=p_project_id AND source_artifact.document_id=document_key
       ORDER BY source_artifact.revision DESC LIMIT 1;
+    IF document_status<>'ready' THEN source_value:=NULL; END IF;
+    source_disposition:=CASE WHEN document_status='ready' AND source_value.id IS NOT NULL THEN 'ready'
+      WHEN document_status='failed' THEN 'failed' WHEN document_status='pending' THEN 'pending' ELSE 'unresolved' END;
     item:=jsonb_build_object('document_id',document_key,'document_sha256',
       (SELECT original_sha256 FROM bid_documents WHERE id=document_key),'role_revision_id',role_value.id,
       'role_revision_sha256',role_value.content_sha256,'source_revision_id',source_value.id,
-      'source_revision_sha256',source_value.source_sha256,'disposition','ready','ordinal',ordinal_value);
+      'source_revision_sha256',source_value.source_sha256,'disposition',source_disposition,'ordinal',ordinal_value);
     item_list:=item_list||jsonb_build_array(item);
+    IF source_disposition<>'ready' THEN
+      warnings:=warnings||jsonb_build_array(jsonb_build_object(
+        'code','DOCUMENT_INPUT_NOT_READY','document_id',document_key,
+        'disposition',source_disposition,'message','DocumentSet froze the available inputs; this document was not ready'));
+    END IF;
     ordinal_value:=ordinal_value+1;
   END LOOP;
+  SELECT coalesce(jsonb_agg(jsonb_build_object(
+      'relation_lineage_id',relation.relation_lineage_id,'relation_revision_id',relation.id,
+      'relation_sha256',relation.content_sha256,'from_document_id',relation.from_document_id,
+      'to_document_id',relation.to_document_id,'relation_kind',relation.relation_kind,
+      'applicability',relation.applicability) ORDER BY relation.relation_lineage_id),'[]'::jsonb)
+    INTO relation_items
+    FROM bid_document_relation_current relation_head
+    JOIN bid_document_relation_revision_artifacts relation ON relation.id=relation_head.artifact_id
+    WHERE relation.project_id=p_project_id AND NOT relation.tombstone
+      AND relation.from_document_id=ANY(p_document_ids) AND relation.to_document_id=ANY(p_document_ids);
   set_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'project_id',p_project_id,
-    'revision',set_revision,'items',item_list)); set_sha:=kb_bid_v2_sha256_bytes(set_payload);
+    'revision',set_revision,'items',item_list,'relations',relation_items));
+  set_sha:=kb_bid_v2_sha256_bytes(set_payload);
   INSERT INTO bid_document_set_artifacts(id,project_id,revision,canonical_payload,content_sha256,actor)
   VALUES(set_id,p_project_id,set_revision,set_payload,set_sha,p_actor);
   INSERT INTO bid_document_set_items(document_set_id,project_id,document_id,ordinal,role_revision_id,source_revision_id,disposition)
@@ -3869,11 +4438,15 @@ BEGIN
         ON unit_artifact.project_id=set_item.project_id AND unit_artifact.source_revision_id=set_item.source_revision_id
       WHERE set_item.document_set_id=set_id ORDER BY set_item.ordinal,unit_artifact.ordinal,unit_artifact.id
   LOOP
+    source_disposition:=CASE WHEN unit_value.unit_kind IN ('table_row','form_region')
+      OR convert_from(unit_value.text_utf8,'UTF8')~*'(必须|应当|不得|须|must|shall|required|要求|资格|评分|报价)'
+      THEN 'requirement' ELSE 'unresolved' END;
     disposition_items:=disposition_items||jsonb_build_array(jsonb_build_object(
-      'source_unit_revision_id',unit_value.id,'disposition','requirement','reason','initial_compile','ordinal',ordinal_value));
+      'source_unit_revision_id',unit_value.id,'disposition',source_disposition,
+      'reason',CASE WHEN source_disposition='requirement' THEN 'deterministic_requirement_signal' ELSE 'initial_uncertain' END,
+      'ordinal',ordinal_value));
     ordinal_value:=ordinal_value+1;
   END LOOP;
-  IF ordinal_value=0 THEN RAISE EXCEPTION 'DOCUMENT_SET_HAS_NO_SOURCE_UNITS' USING ERRCODE='23514'; END IF;
   disposition_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'project_id',p_project_id,
     'document_set_id',set_id,'revision',disposition_revision,'items',disposition_items));
   disposition_sha:=kb_bid_v2_sha256_bytes(disposition_payload);
@@ -3905,7 +4478,8 @@ BEGIN
   VALUES(p_request_artifact_id,p_project_id,1,job_sha,frozen_sha,set_id,set_sha,disposition_id,disposition_sha);
   response:=jsonb_build_object('artifact_id',set_id,'sha256',set_sha,'revision',set_revision,
     'disposition_set_artifact_id',disposition_id,'disposition_set_sha256',disposition_sha,
-    'request_artifact_id',p_request_artifact_id,'request_revision',1,'frozen_input_sha256',frozen_sha);
+    'request_artifact_id',p_request_artifact_id,'request_revision',1,'frozen_input_sha256',frozen_sha,
+    'warnings',warnings);
   response_bytes:=convert_to(response::text,'UTF8');
   INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,
     request_sha256,response_sha256,entity_kind,entity_locator,before_revision,before_sha256,after_revision,after_sha256)
@@ -3914,6 +4488,39 @@ BEGIN
     head.generation,head.artifact_sha256,set_revision,set_sha);
   PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.document_set.freeze',p_idempotency_key,201,response_bytes);
   RETURN response;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_list_document_sets(
+  p_project_id uuid,p_actor kb_actor_identity
+) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+  PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
+  RETURN coalesce((SELECT jsonb_agg(jsonb_build_object(
+    'artifact_id',document_set.id,'sha256',document_set.content_sha256,'revision',document_set.revision,
+    'items',coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'document_id',item.document_id,'ordinal',item.ordinal,'role_revision_id',item.role_revision_id,
+      'source_revision_id',item.source_revision_id,'disposition',item.disposition)
+      ORDER BY item.ordinal,item.document_id) FROM bid_document_set_items item
+      WHERE item.document_set_id=document_set.id),'[]'::jsonb))
+    ORDER BY document_set.revision DESC,document_set.id DESC)
+    FROM bid_document_set_artifacts document_set WHERE document_set.project_id=p_project_id),'[]'::jsonb);
+END $$;
+
+CREATE FUNCTION kb_bid_v2_get_document_set(
+  p_project_id uuid,p_document_set_id uuid,p_actor kb_actor_identity
+) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE result_value jsonb;
+BEGIN
+  PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
+  SELECT jsonb_build_object('artifact_id',document_set.id,'sha256',document_set.content_sha256,
+    'revision',document_set.revision,'items',coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'document_id',item.document_id,'ordinal',item.ordinal,'role_revision_id',item.role_revision_id,
+      'source_revision_id',item.source_revision_id,'disposition',item.disposition)
+      ORDER BY item.ordinal,item.document_id) FROM bid_document_set_items item
+      WHERE item.document_set_id=document_set.id),'[]'::jsonb))
+    INTO result_value FROM bid_document_set_artifacts document_set
+    WHERE document_set.project_id=p_project_id AND document_set.id=p_document_set_id;
+  RETURN result_value;
 END $$;
 
 CREATE FUNCTION kb_bid_v2_publish_disposition_set(
@@ -4043,6 +4650,132 @@ BEGIN
     WHERE u.project_id=p_project_id),'[]'::jsonb);
 END $$;
 
+CREATE FUNCTION kb_bid_v2_list_structured_forms(
+  p_project_id uuid,p_actor kb_actor_identity
+) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+  PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
+  RETURN coalesce((SELECT jsonb_agg(convert_from(form.canonical_payload,'UTF8')::jsonb||jsonb_build_object(
+    'form_definition_revision_id',form.id,'source_unit_revision_id',form.source_unit_revision_id,
+    'canonical_sha256',form.content_sha256) ORDER BY source.document_id,source.ordinal,form.id)
+    FROM bid_tender_structured_form_definition_artifacts form
+    JOIN bid_source_unit_revision_artifacts source ON source.project_id=form.project_id
+      AND source.id=form.source_unit_revision_id
+    WHERE form.project_id=p_project_id),'[]'::jsonb);
+END $$;
+
+CREATE FUNCTION kb_bid_v2_advance_workspace_projection(
+  p_workspace_id uuid,p_expected_projection_id uuid,p_expected_projection_sha256 kb_sha256,
+  p_new_projection_id uuid,p_new_projection_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE workspace bid_submission_workspaces%ROWTYPE; head bid_workspace_heads%ROWTYPE;
+  old_revision bid_workspace_revision_artifacts%ROWTYPE; settings bid_document_settings_revision_artifacts%ROWTYPE;
+  new_revision_id uuid:=gen_random_uuid(); new_revision bigint; payload bytea; digest kb_sha256;
+  node record; block record; binding record; edge record; evidence record; node_map jsonb:='{}'::jsonb;
+  new_occurrence_id uuid; new_parent_id uuid; evidence_revision bigint; evidence_payload bytea; evidence_sha kb_sha256;
+BEGIN
+  SELECT * INTO STRICT workspace FROM bid_submission_workspaces WHERE id=p_workspace_id;
+  SELECT * INTO STRICT head FROM bid_workspace_heads WHERE scope_id=p_workspace_id FOR UPDATE;
+  SELECT * INTO STRICT old_revision FROM bid_workspace_revision_artifacts WHERE id=head.artifact_id;
+  IF old_revision.requirement_projection_id IS DISTINCT FROM p_expected_projection_id OR
+     old_revision.requirement_projection_sha256 IS DISTINCT FROM p_expected_projection_sha256 THEN
+    RAISE EXCEPTION 'WORKSPACE_PROJECTION_CAS_MISMATCH' USING ERRCODE='40001';
+  END IF;
+  PERFORM 1 FROM bid_workspace_requirement_projection_artifacts
+    WHERE id=p_new_projection_id AND project_id=workspace.project_id AND workspace_id=p_workspace_id
+      AND content_sha256=p_new_projection_sha256;
+  IF NOT FOUND THEN RAISE EXCEPTION 'NEW_WORKSPACE_PROJECTION_INVALID' USING ERRCODE='23514'; END IF;
+  SELECT * INTO STRICT settings FROM bid_document_settings_revision_artifacts
+    WHERE id=old_revision.document_settings_revision_id;
+  SELECT coalesce(max(revision),0)+1 INTO new_revision FROM bid_workspace_revision_artifacts
+    WHERE workspace_id=p_workspace_id;
+  payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'reason','requirement_projection_advanced',
+    'parent_revision_id',old_revision.id,'parent_sha256',old_revision.content_sha256,
+    'scope_revision_id',old_revision.scope_revision_id,
+    'requirement_projection_id',p_new_projection_id,'requirement_projection_sha256',p_new_projection_sha256,
+    'document_settings_revision_id',settings.id,'document_settings_sha256',settings.content_sha256,
+    'node_revision_ids',coalesce((SELECT jsonb_agg(node_revision_id ORDER BY depth,ordinal,id)
+      FROM bid_workspace_node_occurrences WHERE workspace_revision_id=old_revision.id),'[]'::jsonb),
+    'block_revision_ids',coalesce((SELECT jsonb_agg(block_revision_id ORDER BY ordinal,id)
+      FROM bid_workspace_block_occurrences WHERE workspace_revision_id=old_revision.id),'[]'::jsonb),
+    'binding_revision_ids',coalesce((SELECT jsonb_agg(binding_revision_id ORDER BY ordinal,id)
+      FROM bid_workspace_binding_occurrences WHERE workspace_revision_id=old_revision.id),'[]'::jsonb)));
+  digest:=kb_bid_v2_sha256_bytes(payload);
+  INSERT INTO bid_workspace_revision_artifacts(id,project_id,workspace_id,revision,parent_revision_id,parent_sha256,
+    scope_revision_id,requirement_projection_id,requirement_projection_sha256,document_settings_revision_id,
+    quote_snapshot_id,quote_snapshot_sha256,canonical_payload,content_sha256,actor)
+  VALUES(new_revision_id,workspace.project_id,p_workspace_id,new_revision,old_revision.id,old_revision.content_sha256,
+    old_revision.scope_revision_id,p_new_projection_id,p_new_projection_sha256,old_revision.document_settings_revision_id,
+    old_revision.quote_snapshot_id,old_revision.quote_snapshot_sha256,
+    payload,digest,'system:requirement-set-compile-v2');
+  FOR node IN SELECT * FROM bid_workspace_node_occurrences WHERE workspace_revision_id=old_revision.id
+    ORDER BY depth,ordinal,id
+  LOOP
+    new_occurrence_id:=gen_random_uuid();
+    new_parent_id:=CASE WHEN node.parent_occurrence_id IS NULL THEN NULL
+      ELSE (node_map->>node.parent_occurrence_id::text)::uuid END;
+    INSERT INTO bid_workspace_node_occurrences(id,project_id,workspace_revision_id,node_revision_id,
+      parent_occurrence_id,ordinal,depth)
+    VALUES(new_occurrence_id,workspace.project_id,new_revision_id,node.node_revision_id,
+      new_parent_id,node.ordinal,node.depth);
+    node_map:=node_map||jsonb_build_object(node.id::text,new_occurrence_id);
+  END LOOP;
+  FOR block IN SELECT * FROM bid_workspace_block_occurrences WHERE workspace_revision_id=old_revision.id
+    ORDER BY ordinal,id
+  LOOP
+    INSERT INTO bid_workspace_block_occurrences(id,project_id,workspace_revision_id,node_occurrence_id,
+      block_revision_id,ordinal)
+    VALUES(gen_random_uuid(),workspace.project_id,new_revision_id,
+      (node_map->>block.node_occurrence_id::text)::uuid,block.block_revision_id,block.ordinal);
+  END LOOP;
+  FOR binding IN SELECT * FROM bid_workspace_binding_occurrences WHERE workspace_revision_id=old_revision.id
+    ORDER BY ordinal,id
+  LOOP
+    INSERT INTO bid_workspace_binding_occurrences(id,project_id,workspace_revision_id,binding_revision_id,ordinal)
+    VALUES(gen_random_uuid(),workspace.project_id,new_revision_id,binding.binding_revision_id,binding.ordinal);
+  END LOOP;
+  FOR evidence IN SELECT * FROM bid_submission_fulfillment_evidence_revision_artifacts
+    WHERE workspace_revision_id=old_revision.id ORDER BY evidence_lineage_id
+  LOOP
+    SELECT coalesce(max(revision),0)+1 INTO evidence_revision
+      FROM bid_submission_fulfillment_evidence_revision_artifacts
+      WHERE project_id=workspace.project_id AND evidence_lineage_id=evidence.evidence_lineage_id;
+    evidence_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,
+      'evidence_lineage_id',evidence.evidence_lineage_id,'revision',evidence_revision,
+      'workspace_revision_id',new_revision_id,'binding_revision_id',evidence.binding_revision_id,
+      'target_revision_id',evidence.target_revision_id,'target_kind',evidence.target_kind,
+      'state','stale','dependency_sha256',evidence.dependency_sha256));
+    evidence_sha:=kb_bid_v2_sha256_bytes(evidence_payload);
+    INSERT INTO bid_submission_fulfillment_evidence_revision_artifacts(id,project_id,workspace_id,
+      evidence_lineage_id,revision,workspace_revision_id,binding_revision_id,target_revision_id,target_kind,
+      dependency_sha256,state,canonical_payload,content_sha256)
+    VALUES(gen_random_uuid(),workspace.project_id,p_workspace_id,evidence.evidence_lineage_id,evidence_revision,
+      new_revision_id,evidence.binding_revision_id,evidence.target_revision_id,evidence.target_kind,
+      evidence.dependency_sha256,'stale',evidence_payload,evidence_sha);
+  END LOOP;
+  FOR edge IN SELECT * FROM bid_outline_lineage_edges WHERE workspace_revision_id=old_revision.id
+  LOOP
+    INSERT INTO bid_outline_lineage_edges(id,project_id,workspace_id,operation,from_lineage_id,to_lineage_id,
+      workspace_revision_id,created_at)
+    VALUES(gen_random_uuid(),workspace.project_id,p_workspace_id,edge.operation,edge.from_lineage_id,
+      edge.to_lineage_id,new_revision_id,edge.created_at);
+  END LOOP;
+  IF NOT kb_bid_v2_advance_workspace_head(p_workspace_id,old_revision.id,old_revision.content_sha256,
+      new_revision_id,digest) THEN
+    RAISE EXCEPTION 'WORKSPACE_HEAD_CAS_MISMATCH' USING ERRCODE='40001';
+  END IF;
+  UPDATE bid_candidate_artifacts SET state='obsolete',decided_at=clock_timestamp()
+    WHERE workspace_id=p_workspace_id AND base_workspace_revision_id=old_revision.id AND state='proposed';
+  UPDATE bid_async_request_snapshot_artifacts request_value SET status='obsolete',finished_at=clock_timestamp()
+    WHERE request_value.status='pending' AND request_value.id IN (
+      SELECT request_artifact_id FROM bid_outline_generation_request_identities
+        WHERE workspace_id=p_workspace_id AND base_workspace_revision_id=old_revision.id
+      UNION ALL
+      SELECT request_artifact_id FROM bid_content_generation_request_identities
+        WHERE workspace_id=p_workspace_id AND base_workspace_revision_id=old_revision.id);
+  RETURN jsonb_build_object('revision_id',new_revision_id,'sha256',digest);
+END $$;
+
 CREATE FUNCTION kb_bid_v2_compile_requirement_set(
   p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256,
   p_actor kb_actor_identity
@@ -4056,7 +4789,7 @@ DECLARE
   requirement_kind text; requiredness text; policy text; requirement_items jsonb:='[]'::jsonb;
   set_id uuid:=gen_random_uuid(); set_revision bigint; set_payload bytea; set_sha kb_sha256;
   projection_id uuid:=gen_random_uuid(); projection_revision bigint; projection_payload bytea; projection_sha kb_sha256;
-  ordinal_value integer:=0; result_value jsonb; result_sha kb_sha256; prior bid_async_stage_receipts%ROWTYPE;
+  ordinal_value integer:=0; publication_status text; result_value jsonb; result_sha kb_sha256; prior bid_async_stage_receipts%ROWTYPE;
 BEGIN
   IF p_actor<>'system:requirement-set-compile-v2' THEN
     RAISE EXCEPTION 'SYSTEM_ACTOR_REQUIRED' USING ERRCODE='42501';
@@ -4072,8 +4805,12 @@ BEGIN
   IF request_value.status<>'pending' THEN
     RAISE EXCEPTION 'REQUIREMENT_COMPILE_REQUEST_NOT_PENDING' USING ERRCODE='23514';
   END IF;
-  SELECT * INTO current_value FROM bid_requirement_set_current WHERE scope_id=typed.project_id FOR UPDATE;
-  set_revision:=COALESCE(current_value.generation,0)+1;
+  -- Serialize artifact revision allocation independently from publication generation.
+  -- Multiple frozen compile requests may complete out of order; each still needs a
+  -- unique immutable artifact revision before the newer-input publication check.
+  PERFORM 1 FROM bid_projects WHERE id=typed.project_id FOR UPDATE;
+  SELECT coalesce(max(revision),0)+1 INTO set_revision
+    FROM bid_requirement_set_artifacts WHERE project_id=typed.project_id;
   FOR source_value IN
     SELECT u.* FROM bid_source_unit_disposition_set_items disposition
       JOIN bid_source_unit_revision_artifacts u ON u.project_id=disposition.project_id
@@ -4096,21 +4833,25 @@ BEGIN
     requirement_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'lineage_id',requirement_lineage,
       'revision',1,'requirement_kind',requirement_kind,'requiredness',requiredness,'compliance_policy',policy,
       'lifecycle','current','text',convert_from(source_value.text_utf8,'UTF8'),
-      'fulfillment_expr',jsonb_build_object('kind','content_or_evidence'),
-      'applicability',jsonb_build_object('source_unit_revision_id',source_value.id)));
+      'fulfillment_expr',jsonb_build_object('kind','need','need_occurrence_id',requirement_id,'channel','narrative_content'),
+      'applicability',jsonb_build_object('fragments',jsonb_build_array('source_unit:'||source_value.id::text))));
     requirement_sha:=kb_bid_v2_sha256_bytes(requirement_payload);
     INSERT INTO bid_requirement_revision_artifacts(id,project_id,lineage_id,revision,requirement_kind,
       requiredness,compliance_policy,lifecycle,text_utf8,text_sha256,fulfillment_expr,applicability,tombstone,
       canonical_payload,content_sha256,actor)
     VALUES(requirement_id,typed.project_id,requirement_lineage,1,requirement_kind,requiredness,policy,'current',
-      source_value.text_utf8,source_value.text_sha256,jsonb_build_object('kind','content_or_evidence'),
-      jsonb_build_object('source_unit_revision_id',source_value.id),false,requirement_payload,requirement_sha,p_actor);
+      source_value.text_utf8,source_value.text_sha256,
+      jsonb_build_object('kind','need','need_occurrence_id',requirement_id,'channel','narrative_content'),
+      jsonb_build_object('fragments',jsonb_build_array('source_unit:'||source_value.id::text)),false,
+      requirement_payload,requirement_sha,p_actor);
     INSERT INTO bid_requirement_source_revision_artifacts(id,project_id,requirement_revision_id,
       source_unit_revision_id,quote_start_offset,quote_end_offset,quote_sha256)
     VALUES(gen_random_uuid(),typed.project_id,requirement_id,source_value.id,0,
       octet_length(source_value.text_utf8),source_value.text_sha256);
     requirement_items:=requirement_items||jsonb_build_array(jsonb_build_object('requirement_revision_id',requirement_id,
-      'content_sha256',requirement_sha,'ordinal',ordinal_value));
+      'content_sha256',requirement_sha,
+      'effective_applicability',jsonb_build_object('fragments',jsonb_build_array('source_unit:'||source_value.id::text)),
+      'ordinal',ordinal_value));
     ordinal_value:=ordinal_value+1;
   END LOOP;
   set_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'project_id',typed.project_id,
@@ -4123,10 +4864,20 @@ BEGIN
     typed.disposition_set_revision_id,s.revision,set_revision,set_payload,set_sha
     FROM bid_document_set_artifacts d,bid_source_unit_disposition_set_artifacts s
     WHERE d.id=typed.document_set_revision_id AND s.id=typed.disposition_set_revision_id;
-  INSERT INTO bid_requirement_set_items(requirement_set_id,project_id,requirement_revision_id,ordinal)
-  SELECT set_id,typed.project_id,(value->>'requirement_revision_id')::uuid,(value->>'ordinal')::integer
-    FROM jsonb_array_elements(requirement_items);
-  PERFORM kb_bid_v2_publish_requirement_set(set_id,set_sha);
+  INSERT INTO bid_requirement_set_items(requirement_set_id,project_id,requirement_revision_id,effective_applicability,ordinal)
+  SELECT set_id,typed.project_id,(value->>'requirement_revision_id')::uuid,value->'effective_applicability',
+    (value->>'ordinal')::integer FROM jsonb_array_elements(requirement_items);
+  publication_status:=kb_bid_v2_publish_requirement_set(set_id,set_sha);
+  IF publication_status='obsolete' THEN
+    result_value:=jsonb_build_object('requirement_set_id',set_id,'requirement_set_sha256',set_sha,
+      'requirement_count',ordinal_value,'status','obsolete','replayed',false);
+    result_sha:=kb_bid_v2_sha256_bytes(convert_to(result_value::text,'UTF8'));
+    INSERT INTO bid_async_stage_receipts(request_artifact_id,stage_kind,frozen_input_sha256,result_identity,result_sha256)
+    VALUES(p_request_artifact_id,'requirement_compile',p_frozen_input_sha256,result_value,result_sha);
+    UPDATE bid_async_request_snapshot_artifacts SET status='obsolete',result_identity=result_value,
+      finished_at=clock_timestamp() WHERE id=p_request_artifact_id;
+    RETURN result_value;
+  END IF;
   SELECT * INTO STRICT workspace_value FROM bid_submission_workspaces WHERE project_id=typed.project_id;
   SELECT * INTO STRICT projection_head FROM bid_workspace_requirement_projection_current
     WHERE scope_id=workspace_value.id FOR UPDATE;
@@ -4137,13 +4888,15 @@ BEGIN
   INSERT INTO bid_workspace_requirement_projection_artifacts(id,project_id,workspace_id,requirement_set_id,
     revision,canonical_payload,content_sha256)
   VALUES(projection_id,typed.project_id,workspace_value.id,set_id,projection_revision,projection_payload,projection_sha);
-  INSERT INTO bid_workspace_requirement_projection_items(projection_id,project_id,requirement_revision_id,ordinal)
-  SELECT projection_id,typed.project_id,(value->>'requirement_revision_id')::uuid,(value->>'ordinal')::integer
-    FROM jsonb_array_elements(requirement_items);
+  INSERT INTO bid_workspace_requirement_projection_items(projection_id,project_id,requirement_revision_id,effective_applicability,ordinal)
+  SELECT projection_id,typed.project_id,(value->>'requirement_revision_id')::uuid,value->'effective_applicability',
+    (value->>'ordinal')::integer FROM jsonb_array_elements(requirement_items);
   IF NOT kb_bid_v2_advance_requirement_projection(typed.project_id,workspace_value.id,
       projection_head.artifact_id,projection_head.artifact_sha256,projection_id,projection_sha) THEN
     RAISE EXCEPTION 'REQUIREMENT_PROJECTION_CAS_MISMATCH' USING ERRCODE='40001';
   END IF;
+  PERFORM kb_bid_v2_advance_workspace_projection(workspace_value.id,
+    projection_head.artifact_id,projection_head.artifact_sha256,projection_id,projection_sha);
   result_value:=jsonb_build_object('requirement_set_id',set_id,'requirement_set_sha256',set_sha,
     'requirement_count',ordinal_value,'requirement_projection_id',projection_id,
     'requirement_projection_sha256',projection_sha,'replayed',false);
@@ -4153,6 +4906,22 @@ BEGIN
   UPDATE bid_async_request_snapshot_artifacts SET status='succeeded',result_identity=result_value,
     finished_at=clock_timestamp() WHERE id=p_request_artifact_id;
   RETURN result_value;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_mark_requirement_set_compile_failed(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256,p_error_code text
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+  PERFORM 1 FROM bid_requirement_set_compile_request_identities
+    WHERE request_artifact_id=p_request_artifact_id AND request_revision=p_request_revision
+      AND frozen_input_sha256=p_frozen_input_sha256;
+  IF NOT FOUND THEN RAISE EXCEPTION 'FROZEN_INPUT_MISSING' USING ERRCODE='P0002'; END IF;
+  UPDATE bid_async_request_snapshot_artifacts SET status='failed',
+    error_code=CASE WHEN p_error_code IN ('INPUT_SCHEMA_INVALID','FROZEN_INPUT_MISSING',
+      'FROZEN_INPUT_DIGEST_MISMATCH','REQUEST_OBSOLETE') THEN p_error_code
+      ELSE 'REQUIREMENT_COMPILE_FAILED' END,
+    finished_at=clock_timestamp()
+    WHERE id=p_request_artifact_id AND request_kind='requirement_set_compile' AND status='pending';
 END $$;
 
 CREATE FUNCTION kb_bid_v2_patch_requirement(
@@ -4177,8 +4946,8 @@ BEGIN
      OR p_requiredness NOT IN ('mandatory','optional','informational')
      OR p_compliance_policy NOT IN ('must_comply','explicit_response','deviation_allowed','scored')
      OR p_lifecycle NOT IN ('current','superseded','withdrawn','unresolved')
-     OR octet_length(p_text)=0 OR jsonb_typeof(p_fulfillment_expr)<>'object'
-     OR jsonb_typeof(p_applicability)<>'object' THEN
+     OR octet_length(p_text)=0 OR NOT kb_bid_v2_fulfillment_expr_valid(p_fulfillment_expr)
+     OR NOT kb_bid_v2_applicability_valid(p_applicability) THEN
     RAISE EXCEPTION 'REQUIREMENT_PATCH_INVALID' USING ERRCODE='23514';
   END IF;
   SELECT * INTO STRICT head FROM bid_requirement_set_current WHERE scope_id=p_project_id FOR UPDATE;
@@ -4215,6 +4984,8 @@ BEGIN
     WHERE project_id=p_project_id AND requirement_revision_id=old_requirement.id;
   SELECT jsonb_agg(jsonb_build_object('requirement_revision_id',
       CASE WHEN item.requirement_revision_id=old_requirement.id THEN new_requirement_id ELSE item.requirement_revision_id END,
+      'effective_applicability',CASE WHEN item.requirement_revision_id=old_requirement.id
+        THEN p_applicability ELSE item.effective_applicability END,
       'ordinal',item.ordinal) ORDER BY item.ordinal) INTO set_items
     FROM bid_requirement_set_items item WHERE item.requirement_set_id=old_set.id;
   new_set_revision:=head.generation+1;
@@ -4225,9 +4996,9 @@ BEGIN
     disposition_set_id,disposition_set_sequence,revision,canonical_payload,content_sha256)
   VALUES(new_set_id,p_project_id,old_set.document_set_id,old_set.document_set_sequence,
     old_set.disposition_set_id,old_set.disposition_set_sequence,new_set_revision,set_payload,set_sha);
-  INSERT INTO bid_requirement_set_items(requirement_set_id,project_id,requirement_revision_id,ordinal)
-  SELECT new_set_id,p_project_id,(item->>'requirement_revision_id')::uuid,(item->>'ordinal')::integer
-    FROM jsonb_array_elements(set_items) item;
+  INSERT INTO bid_requirement_set_items(requirement_set_id,project_id,requirement_revision_id,effective_applicability,ordinal)
+  SELECT new_set_id,p_project_id,(item->>'requirement_revision_id')::uuid,item->'effective_applicability',
+    (item->>'ordinal')::integer FROM jsonb_array_elements(set_items) item;
   IF NOT kb_bid_v2_advance_requirement_set(p_project_id,p_expected_set_id,p_expected_set_sha256,
       new_set_id,set_sha) THEN RAISE EXCEPTION 'REQUIREMENT_SET_CAS_MISMATCH' USING ERRCODE='40001'; END IF;
   SELECT * INTO STRICT workspace_value FROM bid_submission_workspaces WHERE project_id=p_project_id;
@@ -4240,13 +5011,15 @@ BEGIN
   INSERT INTO bid_workspace_requirement_projection_artifacts(id,project_id,workspace_id,requirement_set_id,
     revision,canonical_payload,content_sha256)
   VALUES(projection_id,p_project_id,workspace_value.id,new_set_id,projection_revision,projection_payload,projection_sha);
-  INSERT INTO bid_workspace_requirement_projection_items(projection_id,project_id,requirement_revision_id,ordinal)
-  SELECT projection_id,p_project_id,(item->>'requirement_revision_id')::uuid,(item->>'ordinal')::integer
-    FROM jsonb_array_elements(set_items) item;
+  INSERT INTO bid_workspace_requirement_projection_items(projection_id,project_id,requirement_revision_id,effective_applicability,ordinal)
+  SELECT projection_id,p_project_id,(item->>'requirement_revision_id')::uuid,item->'effective_applicability',
+    (item->>'ordinal')::integer FROM jsonb_array_elements(set_items) item;
   IF NOT kb_bid_v2_advance_requirement_projection(p_project_id,workspace_value.id,
       projection_head.artifact_id,projection_head.artifact_sha256,projection_id,projection_sha) THEN
     RAISE EXCEPTION 'REQUIREMENT_PROJECTION_CAS_MISMATCH' USING ERRCODE='40001';
   END IF;
+  PERFORM kb_bid_v2_advance_workspace_projection(workspace_value.id,
+    projection_head.artifact_id,projection_head.artifact_sha256,projection_id,projection_sha);
   response:=jsonb_build_object('requirement_revision_id',new_requirement_id,
     'lineage_id',old_requirement.lineage_id,'revision',new_requirement_revision,
     'content_sha256',requirement_sha,'requirement_set_id',new_set_id,
@@ -4264,48 +5037,225 @@ END $$;
 
 CREATE FUNCTION kb_bid_v2_publish_requirement_supersession(
   p_project_id uuid,p_lineage_id uuid,p_old_requirement_revision_id uuid,p_new_requirement_revision_id uuid,
-  p_applicability jsonb,p_expected_artifact_id uuid,p_expected_sha256 kb_sha256,
+  p_applicability jsonb,p_tombstone boolean,p_expected_artifact_id uuid,p_expected_sha256 kb_sha256,
   p_actor kb_actor_identity,p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
 ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
 DECLARE replay bytea; response jsonb; response_bytes bytea;
-  head bid_requirement_supersession_current%ROWTYPE; new_id uuid:=gen_random_uuid(); new_revision bigint;
-  payload bytea; sha kb_sha256;
+  head bid_requirement_supersession_current%ROWTYPE; head_exists boolean:=false;
+  prior_edge bid_requirement_supersession_revision_artifacts%ROWTYPE;
+  new_id uuid:=gen_random_uuid(); new_revision bigint;
+  payload bytea; sha kb_sha256; set_head bid_requirement_set_current%ROWTYPE;
+  old_set bid_requirement_set_artifacts%ROWTYPE; old_requirement bid_requirement_revision_artifacts%ROWTYPE;
+  new_requirement bid_requirement_revision_artifacts%ROWTYPE; old_effective jsonb; new_effective jsonb;
+  prior_old_effective jsonb; prior_new_effective jsonb; base_items jsonb;
+  old_fragments text[]; new_fragments text[]; edge_fragments text[]; remaining_fragments text[];
+  prior_fragments text[]; restored_old_fragments text[]; restored_new_fragments text[];
+  prior_old_ordinal integer; prior_new_ordinal integer;
+  old_sources uuid[]; new_sources uuid[]; relation_identity jsonb;
+  new_set_id uuid:=gen_random_uuid(); set_payload bytea; set_sha kb_sha256; set_items jsonb;
+  workspace_value bid_submission_workspaces%ROWTYPE; projection_head bid_workspace_requirement_projection_current%ROWTYPE;
+  projection_id uuid:=gen_random_uuid(); projection_payload bytea; projection_sha kb_sha256; projection_revision bigint;
 BEGIN
   PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
   replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.requirement.supersession',p_idempotency_key,p_request_bytes,p_request_sha256);
   IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
-  IF p_old_requirement_revision_id=p_new_requirement_revision_id OR jsonb_typeof(p_applicability)<>'object'
-     OR NOT EXISTS(SELECT 1 FROM bid_requirement_revision_artifacts WHERE project_id=p_project_id AND id=p_old_requirement_revision_id)
-     OR NOT EXISTS(SELECT 1 FROM bid_requirement_revision_artifacts WHERE project_id=p_project_id AND id=p_new_requirement_revision_id) THEN
+  IF p_old_requirement_revision_id=p_new_requirement_revision_id
+     OR NOT kb_bid_v2_applicability_valid(p_applicability) THEN
     RAISE EXCEPTION 'REQUIREMENT_SUPERSESSION_INVALID' USING ERRCODE='23514';
   END IF;
+  SELECT * INTO STRICT set_head FROM bid_requirement_set_current WHERE scope_id=p_project_id FOR UPDATE;
+  SELECT * INTO STRICT old_set FROM bid_requirement_set_artifacts WHERE id=set_head.artifact_id;
   SELECT * INTO head FROM bid_requirement_supersession_current WHERE scope_id=p_lineage_id FOR UPDATE;
-  IF FOUND THEN
+  head_exists:=FOUND;
+  IF head_exists THEN
     IF head.project_id<>p_project_id OR head.artifact_id IS DISTINCT FROM p_expected_artifact_id
        OR head.artifact_sha256 IS DISTINCT FROM p_expected_sha256 THEN
       RAISE EXCEPTION 'REQUIREMENT_SUPERSESSION_CAS_MISMATCH' USING ERRCODE='40001';
     END IF;
+    SELECT * INTO STRICT prior_edge FROM bid_requirement_supersession_revision_artifacts WHERE id=head.artifact_id;
     new_revision:=head.generation+1;
   ELSE
-    IF p_expected_artifact_id IS NOT NULL OR p_expected_sha256 IS NOT NULL THEN
+    IF p_expected_artifact_id IS NOT NULL OR p_expected_sha256 IS NOT NULL OR p_tombstone THEN
       RAISE EXCEPTION 'REQUIREMENT_SUPERSESSION_CAS_MISMATCH' USING ERRCODE='40001';
     END IF;
     new_revision:=1;
   END IF;
+  IF p_tombstone AND (prior_edge.old_requirement_revision_id IS DISTINCT FROM p_old_requirement_revision_id
+      OR prior_edge.new_requirement_revision_id IS DISTINCT FROM p_new_requirement_revision_id
+      OR prior_edge.applicability IS DISTINCT FROM p_applicability) THEN
+    RAISE EXCEPTION 'REQUIREMENT_SUPERSESSION_TOMBSTONE_IDENTITY_MISMATCH' USING ERRCODE='23514';
+  END IF;
+  IF head_exists AND NOT prior_edge.tombstone THEN
+    SELECT effective_applicability,ordinal INTO prior_old_effective,prior_old_ordinal
+      FROM bid_requirement_set_items WHERE requirement_set_id=old_set.id
+        AND requirement_revision_id=prior_edge.old_requirement_revision_id;
+    SELECT effective_applicability,ordinal INTO prior_new_effective,prior_new_ordinal
+      FROM bid_requirement_set_items WHERE requirement_set_id=old_set.id
+        AND requirement_revision_id=prior_edge.new_requirement_revision_id;
+    prior_fragments:=kb_bid_v2_applicability_fragments(prior_edge.applicability);
+    restored_old_fragments:=ARRAY(SELECT DISTINCT fragment FROM unnest(
+      coalesce(kb_bid_v2_applicability_fragments(prior_old_effective),'{}'::text[])||prior_fragments) fragment ORDER BY fragment);
+    restored_new_fragments:=ARRAY(SELECT fragment FROM unnest(
+      coalesce(kb_bid_v2_applicability_fragments(prior_new_effective),'{}'::text[])) fragment
+      WHERE NOT fragment=ANY(prior_fragments) ORDER BY fragment);
+    SELECT jsonb_agg(jsonb_build_object('requirement_revision_id',requirement_revision_id,
+        'effective_applicability',effective_applicability,'ordinal',ordinal) ORDER BY ordinal,requirement_revision_id)
+      INTO base_items FROM (
+        SELECT item.requirement_revision_id,item.effective_applicability,item.ordinal
+        FROM bid_requirement_set_items item WHERE item.requirement_set_id=old_set.id
+          AND item.requirement_revision_id NOT IN (
+            prior_edge.old_requirement_revision_id,prior_edge.new_requirement_revision_id)
+        UNION ALL
+        SELECT prior_edge.old_requirement_revision_id,kb_bid_v2_applicability_from_fragments(restored_old_fragments),
+          coalesce(prior_old_ordinal,prior_new_ordinal,0)
+        UNION ALL
+        SELECT prior_edge.new_requirement_revision_id,kb_bid_v2_applicability_from_fragments(restored_new_fragments),
+          coalesce(prior_new_ordinal,prior_old_ordinal,0) WHERE cardinality(restored_new_fragments)>0
+      ) restored;
+  ELSE
+    SELECT jsonb_agg(jsonb_build_object('requirement_revision_id',item.requirement_revision_id,
+        'effective_applicability',item.effective_applicability,'ordinal',item.ordinal)
+        ORDER BY item.ordinal,item.requirement_revision_id) INTO base_items
+      FROM bid_requirement_set_items item WHERE item.requirement_set_id=old_set.id;
+  END IF;
+  SELECT * INTO STRICT old_requirement FROM bid_requirement_revision_artifacts
+    WHERE project_id=p_project_id AND id=p_old_requirement_revision_id
+      AND EXISTS (SELECT 1 FROM jsonb_array_elements(base_items) item
+        WHERE (item->>'requirement_revision_id')::uuid=p_old_requirement_revision_id);
+  SELECT item->'effective_applicability' INTO STRICT old_effective FROM jsonb_array_elements(base_items) item
+    WHERE (item->>'requirement_revision_id')::uuid=p_old_requirement_revision_id;
+  SELECT * INTO STRICT new_requirement FROM bid_requirement_revision_artifacts
+    WHERE project_id=p_project_id AND id=p_new_requirement_revision_id;
+  SELECT item->'effective_applicability' INTO new_effective FROM jsonb_array_elements(base_items) item
+    WHERE (item->>'requirement_revision_id')::uuid=p_new_requirement_revision_id;
+  old_fragments:=kb_bid_v2_applicability_fragments(old_effective);
+  new_fragments:=kb_bid_v2_applicability_fragments(new_requirement.applicability);
+  edge_fragments:=kb_bid_v2_applicability_fragments(p_applicability);
+  IF (old_fragments=ARRAY['*']::text[] AND edge_fragments<>ARRAY['*']::text[])
+     OR (old_fragments<>ARRAY['*']::text[] AND NOT edge_fragments<@old_fragments)
+     OR (new_fragments<>ARRAY['*']::text[] AND NOT edge_fragments<@new_fragments)
+     OR (new_effective IS NOT NULL AND edge_fragments&&kb_bid_v2_applicability_fragments(new_effective)) THEN
+    RAISE EXCEPTION 'REQUIREMENT_SUPERSESSION_APPLICABILITY_AMBIGUOUS' USING ERRCODE='23514';
+  END IF;
+  remaining_fragments:=ARRAY(SELECT fragment FROM unnest(old_fragments) fragment
+    WHERE NOT fragment=ANY(edge_fragments) ORDER BY fragment);
+  SELECT array_agg(source_unit_revision_id ORDER BY source_unit_revision_id) INTO old_sources
+    FROM bid_requirement_source_revision_artifacts WHERE project_id=p_project_id
+      AND requirement_revision_id=p_old_requirement_revision_id;
+  SELECT array_agg(source_unit_revision_id ORDER BY source_unit_revision_id) INTO new_sources
+    FROM bid_requirement_source_revision_artifacts WHERE project_id=p_project_id
+      AND requirement_revision_id=p_new_requirement_revision_id;
+  IF coalesce(cardinality(old_sources),0)=0 OR coalesce(cardinality(new_sources),0)=0
+     OR EXISTS (SELECT 1 FROM unnest(old_sources||new_sources) source_ids(source_id)
+       JOIN bid_source_unit_revision_artifacts source ON source.project_id=p_project_id AND source.id=source_ids.source_id
+       WHERE NOT EXISTS (SELECT 1 FROM bid_document_set_items set_item
+         WHERE set_item.document_set_id=old_set.document_set_id AND set_item.document_id=source.document_id)) THEN
+    RAISE EXCEPTION 'REQUIREMENT_SUPERSESSION_SOURCE_SET_INVALID' USING ERRCODE='23514';
+  END IF;
+  SELECT jsonb_build_object('relation_lineage_id',relation.relation_lineage_id,
+      'relation_revision_id',relation.id,'relation_sha256',relation.content_sha256,
+      'relation_kind',relation.relation_kind,'applicability',relation.applicability)
+    INTO relation_identity
+    FROM bid_document_relation_current relation_head
+    JOIN bid_document_relation_revision_artifacts relation ON relation.id=relation_head.artifact_id
+    WHERE relation.project_id=p_project_id AND NOT relation.tombstone
+      AND EXISTS (SELECT 1 FROM bid_source_unit_revision_artifacts old_source
+        WHERE old_source.id=ANY(old_sources) AND old_source.document_id IN (relation.from_document_id,relation.to_document_id))
+      AND EXISTS (SELECT 1 FROM bid_source_unit_revision_artifacts new_source
+        WHERE new_source.id=ANY(new_sources) AND new_source.document_id IN (relation.from_document_id,relation.to_document_id))
+    ORDER BY relation.relation_lineage_id LIMIT 1;
+  IF relation_identity IS NULL AND EXISTS (
+      SELECT 1 FROM bid_source_unit_revision_artifacts old_source,bid_source_unit_revision_artifacts new_source
+      WHERE old_source.id=ANY(old_sources) AND new_source.id=ANY(new_sources)
+        AND old_source.document_id<>new_source.document_id) THEN
+    RAISE EXCEPTION 'REQUIREMENT_SUPERSESSION_DOCUMENT_RELATION_MISSING' USING ERRCODE='23514';
+  END IF;
+  IF NOT p_tombstone AND EXISTS (WITH RECURSIVE reachable(node) AS (
+      SELECT p_new_requirement_revision_id
+      UNION
+      SELECT edge.new_requirement_revision_id FROM reachable path
+      JOIN bid_requirement_supersession_current current_edge ON current_edge.project_id=p_project_id AND current_edge.scope_id<>p_lineage_id
+      JOIN bid_requirement_supersession_revision_artifacts edge ON edge.id=current_edge.artifact_id
+        AND edge.old_requirement_revision_id=path.node AND NOT edge.tombstone)
+    SELECT 1 FROM reachable WHERE node=p_old_requirement_revision_id) THEN
+    RAISE EXCEPTION 'REQUIREMENT_SUPERSESSION_CYCLE' USING ERRCODE='23514';
+  END IF;
   payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'lineage_id',p_lineage_id,
     'revision',new_revision,'old_requirement_revision_id',p_old_requirement_revision_id,
-    'new_requirement_revision_id',p_new_requirement_revision_id,'applicability',p_applicability,'tombstone',false));
+    'new_requirement_revision_id',p_new_requirement_revision_id,'old_source_unit_revision_ids',to_jsonb(old_sources),
+    'new_source_unit_revision_ids',to_jsonb(new_sources),'amendment_document_relation',relation_identity,
+    'applicability',p_applicability,'tombstone',p_tombstone));
   sha:=kb_bid_v2_sha256_bytes(payload);
   INSERT INTO bid_requirement_supersession_revision_artifacts(id,project_id,lineage_id,revision,
-    old_requirement_revision_id,new_requirement_revision_id,applicability,tombstone,canonical_payload,
-    content_sha256,actor)
+    old_requirement_revision_id,new_requirement_revision_id,old_source_unit_revision_ids,
+    new_source_unit_revision_ids,amendment_document_relation_revision_id,amendment_document_relation_sha256,
+    applicability,tombstone,canonical_payload,content_sha256,actor)
   VALUES(new_id,p_project_id,p_lineage_id,new_revision,p_old_requirement_revision_id,
-    p_new_requirement_revision_id,p_applicability,false,payload,sha,p_actor);
+    p_new_requirement_revision_id,old_sources,new_sources,
+    (relation_identity->>'relation_revision_id')::uuid,(relation_identity->>'relation_sha256')::kb_sha256,
+    p_applicability,p_tombstone,payload,sha,p_actor);
   IF NOT kb_bid_v2_advance_requirement_supersession(p_project_id,p_lineage_id,
       p_expected_artifact_id,p_expected_sha256,new_id,sha) THEN
     RAISE EXCEPTION 'REQUIREMENT_SUPERSESSION_CAS_MISMATCH' USING ERRCODE='40001'; END IF;
+  SELECT jsonb_agg(jsonb_build_object('requirement_revision_id',requirement_revision_id,
+      'effective_applicability',effective_applicability,'ordinal',new_ordinal)
+      ORDER BY new_ordinal) INTO set_items FROM (
+    SELECT item.requirement_revision_id,item.effective_applicability,
+      row_number() OVER(ORDER BY item.source_ordinal,item.requirement_revision_id)-1 new_ordinal
+    FROM (
+      SELECT (base_item->>'requirement_revision_id')::uuid requirement_revision_id,
+        base_item->'effective_applicability' effective_applicability,
+        (base_item->>'ordinal')::integer source_ordinal
+      FROM jsonb_array_elements(base_items) base_item
+      WHERE p_tombstone OR (base_item->>'requirement_revision_id')::uuid
+        NOT IN (p_old_requirement_revision_id,p_new_requirement_revision_id)
+      UNION ALL
+      SELECT p_old_requirement_revision_id,kb_bid_v2_applicability_from_fragments(remaining_fragments),
+        (SELECT (base_item->>'ordinal')::integer FROM jsonb_array_elements(base_items) base_item
+          WHERE (base_item->>'requirement_revision_id')::uuid=p_old_requirement_revision_id)
+      WHERE NOT p_tombstone AND cardinality(remaining_fragments)>0
+      UNION ALL
+      SELECT p_new_requirement_revision_id,kb_bid_v2_applicability_from_fragments(
+          CASE WHEN new_effective IS NULL THEN edge_fragments
+            ELSE kb_bid_v2_applicability_fragments(new_effective)||edge_fragments END),
+        (SELECT (base_item->>'ordinal')::integer FROM jsonb_array_elements(base_items) base_item
+          WHERE (base_item->>'requirement_revision_id')::uuid=p_old_requirement_revision_id)
+      WHERE NOT p_tombstone
+    ) item) effective;
+    set_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'project_id',p_project_id,
+      'document_set_revision_id',old_set.document_set_id,'disposition_set_revision_id',old_set.disposition_set_id,
+      'revision',set_head.generation+1,'supersession_revision_id',new_id,'items',set_items));
+    set_sha:=kb_bid_v2_sha256_bytes(set_payload);
+    INSERT INTO bid_requirement_set_artifacts(id,project_id,document_set_id,document_set_sequence,
+      disposition_set_id,disposition_set_sequence,revision,canonical_payload,content_sha256)
+    VALUES(new_set_id,p_project_id,old_set.document_set_id,old_set.document_set_sequence,
+      old_set.disposition_set_id,old_set.disposition_set_sequence,set_head.generation+1,set_payload,set_sha);
+    INSERT INTO bid_requirement_set_items(requirement_set_id,project_id,requirement_revision_id,effective_applicability,ordinal)
+    SELECT new_set_id,p_project_id,(item->>'requirement_revision_id')::uuid,item->'effective_applicability',
+      (item->>'ordinal')::integer FROM jsonb_array_elements(set_items) item;
+    IF NOT kb_bid_v2_advance_requirement_set(p_project_id,set_head.artifact_id,set_head.artifact_sha256,new_set_id,set_sha) THEN
+      RAISE EXCEPTION 'REQUIREMENT_SET_CAS_MISMATCH' USING ERRCODE='40001'; END IF;
+    SELECT * INTO STRICT workspace_value FROM bid_submission_workspaces WHERE project_id=p_project_id;
+    SELECT * INTO STRICT projection_head FROM bid_workspace_requirement_projection_current WHERE scope_id=workspace_value.id FOR UPDATE;
+    projection_revision:=projection_head.generation+1;
+    projection_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'workspace_id',workspace_value.id,
+      'requirement_set_id',new_set_id,'revision',projection_revision,'supersession_revision_id',new_id,'items',set_items));
+    projection_sha:=kb_bid_v2_sha256_bytes(projection_payload);
+    INSERT INTO bid_workspace_requirement_projection_artifacts(id,project_id,workspace_id,requirement_set_id,
+      revision,canonical_payload,content_sha256)
+    VALUES(projection_id,p_project_id,workspace_value.id,new_set_id,projection_revision,projection_payload,projection_sha);
+    INSERT INTO bid_workspace_requirement_projection_items(projection_id,project_id,requirement_revision_id,effective_applicability,ordinal)
+    SELECT projection_id,p_project_id,(item->>'requirement_revision_id')::uuid,item->'effective_applicability',
+      (item->>'ordinal')::integer FROM jsonb_array_elements(set_items) item;
+    IF NOT kb_bid_v2_advance_requirement_projection(p_project_id,workspace_value.id,projection_head.artifact_id,
+      projection_head.artifact_sha256,projection_id,projection_sha) THEN
+      RAISE EXCEPTION 'REQUIREMENT_PROJECTION_CAS_MISMATCH' USING ERRCODE='40001'; END IF;
+    PERFORM kb_bid_v2_advance_workspace_projection(workspace_value.id,projection_head.artifact_id,
+      projection_head.artifact_sha256,projection_id,projection_sha);
   response:=jsonb_build_object('artifact_id',new_id,'lineage_id',p_lineage_id,
-    'revision',new_revision,'sha256',sha);
+    'revision',new_revision,'sha256',sha,'tombstone',p_tombstone,
+    'requirement_set_id',new_set_id,'requirement_set_sha256',set_sha,
+    'requirement_projection_id',projection_id,'requirement_projection_sha256',projection_sha);
   response_bytes:=convert_to(response::text,'UTF8');
   INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,
     response_sha256,entity_kind,entity_locator,after_revision,after_sha256)
@@ -4328,6 +5278,9 @@ BEGIN
       'requirement_kind',r.requirement_kind,'requiredness',r.requiredness,
       'compliance_policy',r.compliance_policy,'lifecycle',r.lifecycle,
       'text',convert_from(r.text_utf8,'UTF8'),'content_sha256',r.content_sha256,
+      'requirement_set_id',current_value.artifact_id,'requirement_set_sha256',current_value.artifact_sha256,
+      'fulfillment_expr',r.fulfillment_expr,'applicability',r.applicability,
+      'effective_applicability',item.effective_applicability,
       'source_unit_revision_ids',COALESCE((SELECT jsonb_agg(source.source_unit_revision_id ORDER BY source.id)
         FROM bid_requirement_source_revision_artifacts source
         WHERE source.project_id=r.project_id AND source.requirement_revision_id=r.id),'[]'::jsonb))
@@ -4343,7 +5296,7 @@ INSERT INTO bid_authoring_contract_artifacts(id,contract_kind,schema_version,can
 SELECT id,kind,1,payload,kb_bid_v2_sha256_bytes(payload) FROM (VALUES
   ('00000000-0000-5000-8000-000000000101'::uuid,'prompt',convert_to('{"kind":"outline_prompt","version":1}','UTF8')),
   ('00000000-0000-5000-8000-000000000102'::uuid,'template',convert_to('{"kind":"outline_template","version":1}','UTF8')),
-  ('00000000-0000-5000-8000-000000000103'::uuid,'model',convert_to('{"kind":"deterministic_outline","version":1}','UTF8')),
+  ('00000000-0000-5000-8000-000000000103'::uuid,'model',convert_to('{"kind":"configured_chat_model","operation":"outline","version":1}','UTF8')),
   ('00000000-0000-5000-8000-000000000104'::uuid,'agent',convert_to('{"kind":"outline_agent","version":1}','UTF8'))
 ) seeded(id,kind,payload) ON CONFLICT (id) DO NOTHING;
 
@@ -4352,21 +5305,20 @@ CREATE FUNCTION kb_bid_v2_create_outline_candidate(
   p_document_set_id uuid,p_document_set_sha256 kb_sha256,p_actor kb_actor_identity,
   p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
 ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
-DECLARE w bid_submission_workspaces%ROWTYPE; head bid_workspace_heads%ROWTYPE;
+DECLARE workspace bid_submission_workspaces%ROWTYPE; head bid_workspace_heads%ROWTYPE;
   workspace_rev bid_workspace_revision_artifacts%ROWTYPE;
   projection bid_workspace_requirement_projection_artifacts%ROWTYPE;
   requirement_set bid_requirement_set_artifacts%ROWTYPE;
   disposition bid_source_unit_disposition_set_artifacts%ROWTYPE;
   scope_rev bid_workspace_scope_revision_artifacts%ROWTYPE;
-  request_id uuid:=gen_random_uuid(); candidate_id uuid:=gen_random_uuid();
-  frozen_payload bytea; frozen_sha kb_sha256; candidate_payload bytea; candidate_sha kb_sha256;
-  response jsonb; response_bytes bytea; replay bytea; nodes jsonb;
+  request_id uuid:=gen_random_uuid(); frozen_payload bytea; frozen_sha kb_sha256;
+  response jsonb; response_bytes bytea; replay bytea; form_identities jsonb;
   prompt_sha kb_sha256; template_sha kb_sha256; model_sha kb_sha256; agent_sha kb_sha256;
 BEGIN
   replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.outline.generate',p_idempotency_key,p_request_bytes,p_request_sha256);
   IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
-  SELECT * INTO STRICT w FROM bid_submission_workspaces WHERE id=p_workspace_id;
-  PERFORM kb_bid_v2_require_project_owner(w.project_id,p_actor);
+  SELECT * INTO STRICT workspace FROM bid_submission_workspaces WHERE id=p_workspace_id;
+  PERFORM kb_bid_v2_require_project_owner(workspace.project_id,p_actor);
   SELECT * INTO STRICT head FROM bid_workspace_heads WHERE scope_id=p_workspace_id FOR SHARE;
   IF head.artifact_id IS DISTINCT FROM p_expected_revision_id OR head.artifact_sha256 IS DISTINCT FROM p_expected_sha256 THEN
     RAISE EXCEPTION 'WORKSPACE_HEAD_CAS_MISMATCH' USING ERRCODE='40001';
@@ -4385,74 +5337,203 @@ BEGIN
   SELECT content_sha256 INTO STRICT template_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000102';
   SELECT content_sha256 INTO STRICT model_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000103';
   SELECT content_sha256 INTO STRICT agent_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000104';
+  SELECT coalesce(jsonb_agg(jsonb_build_object('form_definition_revision_id',form.id,
+      'form_definition_sha256',form.content_sha256,'source_unit_revision_id',form.source_unit_revision_id)
+      ORDER BY form.source_unit_revision_id,form.id),'[]'::jsonb) INTO form_identities
+    FROM bid_tender_structured_form_definition_artifacts form
+    JOIN bid_source_unit_disposition_set_items disposition_item
+      ON disposition_item.project_id=form.project_id AND disposition_item.source_unit_revision_id=form.source_unit_revision_id
+    JOIN bid_source_unit_revision_artifacts source ON source.project_id=form.project_id AND source.id=form.source_unit_revision_id
+    JOIN bid_document_set_items document_item ON document_item.project_id=source.project_id
+      AND document_item.document_set_id=p_document_set_id AND document_item.document_id=source.document_id
+    WHERE disposition_item.disposition_set_id=disposition.id;
   frozen_payload:=kb_bid_v2_json_payload(jsonb_build_object(
     'workspace_revision_id',workspace_rev.id,'workspace_sha256',workspace_rev.content_sha256,
     'document_set_revision_id',p_document_set_id,'document_set_sha256',p_document_set_sha256,
     'requirement_projection_revision_id',projection.id,'requirement_projection_sha256',projection.content_sha256,
-    'scope_revision_id',scope_rev.id,'scope_revision_sha256',scope_rev.content_sha256));
+    'scope_revision_id',scope_rev.id,'scope_revision_sha256',scope_rev.content_sha256,
+    'prompt_contract_sha256',prompt_sha,'template_contract_sha256',template_sha,
+    'model_contract_sha256',model_sha,'agent_contract_sha256',agent_sha,
+    'structured_form_identities',form_identities));
   frozen_sha:=kb_bid_v2_sha256_bytes(frozen_payload);
-  SELECT coalesce(jsonb_agg(jsonb_build_object(
-    'client_node_ref','outline-'||category,
-    'parent_client_node_ref',NULL,'ordinal',ordinal,'title',title,
-    'semantic_role',semantic_role,'render_role','section') ORDER BY ordinal),'[]'::jsonb)
-  INTO nodes FROM (
-    SELECT category,min(ordinal) ordinal,min(title) title,min(semantic_role) semantic_role FROM (
-      SELECT r.requirement_category category,
-        CASE r.requirement_category WHEN 'qualification' THEN 0 WHEN 'technical' THEN 1
-          WHEN 'commercial' THEN 2 WHEN 'quotation' THEN 3 WHEN 'deviation' THEN 4 ELSE 5 END ordinal,
-        CASE r.requirement_category WHEN 'qualification' THEN '资格响应' WHEN 'technical' THEN '技术方案'
-          WHEN 'commercial' THEN '商务响应' WHEN 'quotation' THEN '报价文件'
-          WHEN 'deviation' THEN '偏差响应' ELSE '其他要求' END title,
-        CASE r.requirement_category WHEN 'qualification' THEN 'qualification' WHEN 'technical' THEN 'technical'
-          WHEN 'commercial' THEN 'commercial' WHEN 'quotation' THEN 'quotation'
-          WHEN 'deviation' THEN 'deviation' ELSE 'other' END semantic_role
-      FROM bid_workspace_requirement_projection_items item
-      JOIN bid_requirement_revision_artifacts r ON r.project_id=item.project_id AND r.id=item.requirement_revision_id
-      WHERE item.projection_id=projection.id
-    ) categories GROUP BY category
-  ) outline;
-  IF jsonb_array_length(nodes)=0 THEN
-    nodes:=jsonb_build_array(jsonb_build_object('client_node_ref','outline-technical',
-      'parent_client_node_ref',NULL,'ordinal',0,'title','技术方案','semantic_role','technical','render_role','section'));
-  END IF;
-  candidate_payload:=kb_bid_v2_json_payload(jsonb_build_object('nodes',nodes,'notices','[]'::jsonb));
-  candidate_sha:=kb_bid_v2_sha256_bytes(candidate_payload);
   INSERT INTO bid_async_request_snapshot_artifacts(
-    id,project_id,workspace_id,request_kind,revision,frozen_input_sha256,request_payload,request_sha256,
-    status,result_identity,finished_at)
-  VALUES(request_id,w.project_id,p_workspace_id,'outline_generate',1,frozen_sha,p_request_bytes,p_request_sha256,
-    'succeeded',jsonb_build_object('artifact_id',candidate_id,'sha256',candidate_sha),clock_timestamp());
+    id,project_id,workspace_id,request_kind,revision,frozen_input_sha256,request_payload,request_sha256,status)
+  VALUES(request_id,workspace.project_id,p_workspace_id,'outline_generate',1,frozen_sha,p_request_bytes,p_request_sha256,'pending');
   INSERT INTO bid_outline_generation_request_identities(
     request_artifact_id,project_id,workspace_id,request_revision,request_sha256,frozen_input_sha256,
     base_workspace_revision_id,base_workspace_sha256,document_set_revision_id,document_set_sha256,
     disposition_set_revision_id,disposition_set_sha256,requirement_set_revision_id,requirement_set_sha256,
     requirement_projection_id,requirement_projection_sha256,scope_revision_id,scope_revision_sha256,
     prompt_contract_id,prompt_contract_sha256,template_contract_id,template_contract_sha256,
-    model_contract_id,model_contract_sha256,agent_contract_id,agent_contract_sha256)
-  VALUES(request_id,w.project_id,p_workspace_id,1,p_request_sha256,frozen_sha,workspace_rev.id,workspace_rev.content_sha256,
-    p_document_set_id,p_document_set_sha256,disposition.id,disposition.content_sha256,
-    requirement_set.id,requirement_set.content_sha256,projection.id,projection.content_sha256,
-    scope_rev.id,scope_rev.content_sha256,
+    model_contract_id,model_contract_sha256,agent_contract_id,agent_contract_sha256,structured_form_identities)
+  VALUES(request_id,workspace.project_id,p_workspace_id,1,p_request_sha256,frozen_sha,
+    workspace_rev.id,workspace_rev.content_sha256,p_document_set_id,p_document_set_sha256,
+    disposition.id,disposition.content_sha256,requirement_set.id,requirement_set.content_sha256,
+    projection.id,projection.content_sha256,scope_rev.id,scope_rev.content_sha256,
     '00000000-0000-5000-8000-000000000101',prompt_sha,
     '00000000-0000-5000-8000-000000000102',template_sha,
     '00000000-0000-5000-8000-000000000103',model_sha,
-    '00000000-0000-5000-8000-000000000104',agent_sha);
-  INSERT INTO bid_candidate_artifacts(id,project_id,workspace_id,candidate_kind,
-    base_workspace_revision_id,base_workspace_sha256,request_artifact_id,request_kind,
-    request_revision,request_sha256,request_operation,state,canonical_payload,content_sha256)
-  VALUES(candidate_id,w.project_id,p_workspace_id,'outline',workspace_rev.id,workspace_rev.content_sha256,
-    request_id,'outline_generate',1,p_request_sha256,'outline_generate','proposed',candidate_payload,candidate_sha);
-  response:=jsonb_build_object('request_artifact_id',request_id,'kind','OutlineGenerate','status','succeeded',
-    'result_identity',jsonb_build_object('artifact_id',candidate_id,'sha256',candidate_sha),'error_code',NULL);
+    '00000000-0000-5000-8000-000000000104',agent_sha,form_identities);
+  response:=jsonb_build_object('request_artifact_id',request_id,'kind','OutlineGenerate','status','pending',
+    'result_identity',NULL,'error_code',NULL,'request_revision',1,'request_sha256',p_request_sha256,
+    'frozen_input_sha256',frozen_sha,'project_id',workspace.project_id,'workspace_id',p_workspace_id,
+    'base_workspace_revision_id',workspace_rev.id);
   response_bytes:=convert_to(response::text,'UTF8');
-  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
-    entity_kind,entity_locator,before_revision,before_sha256,after_revision,after_sha256)
-  VALUES(gen_random_uuid(),1,'bid.v2.outline.generate',p_actor,p_idempotency_key,p_request_sha256,
-    kb_bid_v2_sha256_bytes(response_bytes),'bid_v2_candidate',jsonb_build_object('workspace_id',p_workspace_id,'candidate_id',candidate_id),
-    (SELECT generation FROM bid_workspace_heads WHERE scope_id=p_workspace_id),workspace_rev.content_sha256,
-    (SELECT generation FROM bid_workspace_heads WHERE scope_id=p_workspace_id),workspace_rev.content_sha256);
   PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.outline.generate',p_idempotency_key,202,response_bytes);
   RETURN response;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_load_outline_generation_input(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE typed bid_outline_generation_request_identities%ROWTYPE;
+BEGIN
+  SELECT * INTO STRICT typed FROM bid_outline_generation_request_identities
+    WHERE request_artifact_id=p_request_artifact_id AND request_revision=p_request_revision
+      AND frozen_input_sha256=p_frozen_input_sha256;
+  RETURN jsonb_build_object('schema_version',1,'request_artifact_id',typed.request_artifact_id,
+    'project_id',typed.project_id,'workspace_id',typed.workspace_id,
+    'base_workspace_revision_id',typed.base_workspace_revision_id,'base_workspace_sha256',typed.base_workspace_sha256,
+    'document_set_revision_id',typed.document_set_revision_id,'document_set_sha256',typed.document_set_sha256,
+    'disposition_set_revision_id',typed.disposition_set_revision_id,
+    'disposition_set_sha256',typed.disposition_set_sha256,
+    'requirement_set_revision_id',typed.requirement_set_revision_id,
+    'requirement_set_sha256',typed.requirement_set_sha256,
+    'requirement_projection_revision_id',typed.requirement_projection_id,
+    'requirement_projection_sha256',typed.requirement_projection_sha256,
+    'workspace_scope_revision_id',typed.scope_revision_id,'workspace_scope_sha256',typed.scope_revision_sha256,
+    'prompt_contract_id',typed.prompt_contract_id,'prompt_contract_sha256',typed.prompt_contract_sha256,
+    'template_contract_id',typed.template_contract_id,'template_contract_sha256',typed.template_contract_sha256,
+    'model_contract_id',typed.model_contract_id,'model_contract_sha256',typed.model_contract_sha256,
+    'agent_contract_id',typed.agent_contract_id,'agent_contract_sha256',typed.agent_contract_sha256,
+    'workspace_scope',(SELECT convert_from(scope.canonical_payload,'UTF8')::jsonb
+      FROM bid_workspace_scope_revision_artifacts scope
+      WHERE scope.id=typed.scope_revision_id AND scope.content_sha256=typed.scope_revision_sha256),
+    'document_set',jsonb_build_object('artifact_id',typed.document_set_revision_id,
+      'sha256',typed.document_set_sha256,
+      'relations',coalesce((SELECT convert_from(document_set.canonical_payload,'UTF8')::jsonb->'relations'
+        FROM bid_document_set_artifacts document_set WHERE document_set.id=typed.document_set_revision_id),'[]'::jsonb),
+      'items',coalesce((SELECT convert_from(document_set.canonical_payload,'UTF8')::jsonb->'items'
+        FROM bid_document_set_artifacts document_set
+        WHERE document_set.id=typed.document_set_revision_id
+          AND document_set.content_sha256=typed.document_set_sha256),'[]'::jsonb)),
+    'source_units',coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'source_unit_revision_id',source.id,'document_id',source.document_id,
+      'source_revision_id',source.source_revision_id,'unit_kind',source.unit_kind,'ordinal',source.ordinal,
+      'source_locator',source.source_locator,'source_span_sha256',source.source_span_sha256,
+      'text',convert_from(source.text_utf8,'UTF8'),'text_sha256',source.text_sha256,
+      'disposition',disposition.disposition,'disposition_reason',disposition.reason)
+      ORDER BY set_item.ordinal,source.ordinal,source.id)
+      FROM bid_source_unit_disposition_set_items disposition
+      JOIN bid_source_unit_revision_artifacts source
+        ON source.project_id=disposition.project_id AND source.id=disposition.source_unit_revision_id
+      JOIN bid_document_set_items set_item ON set_item.document_set_id=typed.document_set_revision_id
+        AND set_item.project_id=source.project_id AND set_item.document_id=source.document_id
+      WHERE disposition.disposition_set_id=typed.disposition_set_revision_id),'[]'::jsonb),
+    'structured_forms',coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'form_definition_revision_id',form.id,'form_definition_sha256',form.content_sha256,
+      'source_unit_revision_id',form.source_unit_revision_id,
+      'definition',convert_from(form.canonical_payload,'UTF8')::jsonb)
+      ORDER BY form.source_unit_revision_id,form.id)
+      FROM jsonb_array_elements(typed.structured_form_identities) identity_value
+      JOIN bid_tender_structured_form_definition_artifacts form
+        ON form.id=(identity_value->>'form_definition_revision_id')::uuid
+          AND form.content_sha256=(identity_value->>'form_definition_sha256')::kb_sha256
+          AND form.source_unit_revision_id=(identity_value->>'source_unit_revision_id')::uuid),'[]'::jsonb),
+    'requirements',coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'need_occurrence_id',requirement.id,'requirement_revision_id',requirement.id,
+      'requirement_text',convert_from(requirement.text_utf8,'UTF8'),'requirement_kind',requirement.requirement_kind,
+      'requiredness',requirement.requiredness,'compliance_policy',requirement.compliance_policy,
+      'applicability',requirement.applicability,'effective_applicability',item.effective_applicability,
+      'source_unit_revision_ids',coalesce((SELECT jsonb_agg(source.source_unit_revision_id ORDER BY source.source_unit_revision_id)
+        FROM bid_requirement_source_revision_artifacts source WHERE source.requirement_revision_id=requirement.id),'[]'::jsonb))
+      ORDER BY item.ordinal,requirement.id)
+      FROM bid_workspace_requirement_projection_items item
+      JOIN bid_requirement_revision_artifacts requirement ON requirement.project_id=item.project_id AND requirement.id=item.requirement_revision_id
+      WHERE item.projection_id=typed.requirement_projection_id),'[]'::jsonb),
+    'current_outline',coalesce((SELECT jsonb_agg(jsonb_build_object('node_lineage_id',node.lineage_id,
+      'node_revision_id',node.id,'parent_lineage_id',parent_node.lineage_id,'ordinal',occurrence.ordinal,
+      'title',node.title,'semantic_role',node.semantic_role,'render_role',node.render_role)
+      ORDER BY occurrence.depth,occurrence.ordinal,node.id)
+      FROM bid_workspace_node_occurrences occurrence JOIN bid_outline_node_revision_artifacts node
+        ON node.project_id=occurrence.project_id AND node.id=occurrence.node_revision_id
+      LEFT JOIN bid_workspace_node_occurrences parent_occurrence ON parent_occurrence.id=occurrence.parent_occurrence_id
+      LEFT JOIN bid_outline_node_revision_artifacts parent_node ON parent_node.id=parent_occurrence.node_revision_id
+      WHERE occurrence.project_id=typed.project_id AND occurrence.workspace_revision_id=typed.base_workspace_revision_id),'[]'::jsonb));
+END $$;
+
+CREATE FUNCTION kb_bid_v2_publish_outline_generation(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256,
+  p_candidate_id uuid,p_candidate_payload bytea,p_candidate_sha256 kb_sha256,p_nodes jsonb
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE typed bid_outline_generation_request_identities%ROWTYPE; request_value bid_async_request_snapshot_artifacts%ROWTYPE;
+  candidate_json jsonb; node_value jsonb; ordinal_value integer:=0; published_identity jsonb;
+BEGIN
+  SELECT * INTO STRICT typed FROM bid_outline_generation_request_identities
+    WHERE request_artifact_id=p_request_artifact_id AND request_revision=p_request_revision
+      AND frozen_input_sha256=p_frozen_input_sha256 FOR UPDATE;
+  SELECT * INTO STRICT request_value FROM bid_async_request_snapshot_artifacts WHERE id=p_request_artifact_id FOR UPDATE;
+  IF request_value.status='succeeded' THEN RETURN request_value.result_identity; END IF;
+  IF request_value.status<>'pending' OR p_candidate_id IS NULL OR p_candidate_payload IS NULL
+     OR p_candidate_sha256 IS NULL OR p_candidate_sha256<>kb_bid_v2_sha256_bytes(p_candidate_payload)
+     OR jsonb_typeof(p_nodes)<>'array' OR jsonb_array_length(p_nodes) NOT BETWEEN 1 AND 1000 THEN
+    RAISE EXCEPTION 'AGENT_OUTPUT_INVALID' USING ERRCODE='23514';
+  END IF;
+  candidate_json:=convert_from(p_candidate_payload,'UTF8')::jsonb;
+  IF NOT kb_bid_v2_json_keys_exact(candidate_json,ARRAY['schema_version','nodes','bindings','notices'])
+     OR candidate_json->'schema_version' IS DISTINCT FROM '1'::jsonb OR candidate_json->'nodes' IS DISTINCT FROM p_nodes
+     OR (SELECT count(*) FROM jsonb_array_elements(p_nodes) node WHERE jsonb_typeof(node->'parent_client_node_ref')='null')<>1
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements(p_nodes) node GROUP BY node->>'client_node_ref' HAVING count(*)<>1)
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements(p_nodes) node
+       WHERE jsonb_typeof(node)<>'object' OR NOT kb_bid_v2_json_keys_exact(node,ARRAY['client_node_ref','parent_client_node_ref','ordinal','title','semantic_role','render_role','origin_source_unit_revision_ids'])
+         OR (jsonb_typeof(node->'parent_client_node_ref')<>'null' AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(p_nodes) parent WHERE parent->>'client_node_ref'=node->>'parent_client_node_ref')))
+     OR EXISTS (SELECT 1 FROM (SELECT node->'parent_client_node_ref' parent,count(*) count_value,
+          count(DISTINCT (node->>'ordinal')::integer) distinct_value,min((node->>'ordinal')::integer) min_value,max((node->>'ordinal')::integer) max_value
+        FROM jsonb_array_elements(p_nodes) node GROUP BY node->'parent_client_node_ref') siblings
+        WHERE distinct_value<>count_value OR min_value<>0 OR max_value<>count_value-1)
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements(p_nodes) node,
+          jsonb_array_elements_text(node->'origin_source_unit_revision_ids') source_id
+        WHERE NOT EXISTS (SELECT 1 FROM bid_workspace_requirement_projection_items projection_item
+          JOIN bid_requirement_source_revision_artifacts source ON source.requirement_revision_id=projection_item.requirement_revision_id
+          WHERE projection_item.projection_id=typed.requirement_projection_id AND source.source_unit_revision_id=source_id::uuid))
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements(candidate_json->'bindings') binding
+        WHERE NOT EXISTS (SELECT 1 FROM bid_workspace_requirement_projection_items projection_item
+          JOIN bid_requirement_revision_artifacts requirement ON requirement.id=projection_item.requirement_revision_id
+          WHERE projection_item.projection_id=typed.requirement_projection_id
+            AND (binding->>'need_occurrence_id')::uuid=ANY(kb_bid_v2_fulfillment_need_ids(requirement.fulfillment_expr)))
+          OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(p_nodes) node WHERE node->>'client_node_ref'=binding->>'target_client_node_ref'))
+  THEN RAISE EXCEPTION 'AGENT_OUTPUT_INVALID' USING ERRCODE='23514'; END IF;
+  INSERT INTO bid_candidate_artifacts(id,project_id,workspace_id,candidate_kind,base_workspace_revision_id,
+    base_workspace_sha256,request_artifact_id,request_kind,request_revision,request_sha256,
+    request_operation,state,canonical_payload,content_sha256)
+  VALUES(p_candidate_id,typed.project_id,typed.workspace_id,'outline',typed.base_workspace_revision_id,
+    typed.base_workspace_sha256,p_request_artifact_id,'outline_generate',typed.request_revision,typed.request_sha256,
+    'outline_generate','proposed',p_candidate_payload,p_candidate_sha256);
+  FOR node_value IN SELECT value FROM jsonb_array_elements(p_nodes) LOOP
+    INSERT INTO bid_candidate_operations(candidate_id,ordinal,operation,operation_sha256)
+    VALUES(p_candidate_id,ordinal_value,node_value,kb_bid_v2_sha256_bytes(convert_to(node_value::text,'UTF8')));
+    ordinal_value:=ordinal_value+1;
+  END LOOP;
+  published_identity:=jsonb_build_object('artifact_id',p_candidate_id,'sha256',p_candidate_sha256);
+  INSERT INTO bid_async_stage_receipts(request_artifact_id,stage_kind,frozen_input_sha256,result_identity,result_sha256)
+  VALUES(p_request_artifact_id,'agent_generate',p_frozen_input_sha256,published_identity,p_candidate_sha256);
+  UPDATE bid_async_request_snapshot_artifacts SET status='succeeded',result_identity=published_identity,
+    finished_at=clock_timestamp() WHERE id=p_request_artifact_id;
+  RETURN published_identity;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_mark_outline_generation_failed(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256,p_error_code text
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+  PERFORM 1 FROM bid_outline_generation_request_identities
+    WHERE request_artifact_id=p_request_artifact_id AND request_revision=p_request_revision
+      AND frozen_input_sha256=p_frozen_input_sha256;
+  IF NOT FOUND THEN RAISE EXCEPTION 'FROZEN_INPUT_MISSING' USING ERRCODE='P0002'; END IF;
+  UPDATE bid_async_request_snapshot_artifacts SET status='failed',
+    error_code=CASE WHEN p_error_code IN ('INPUT_SCHEMA_INVALID','FROZEN_INPUT_MISSING','FROZEN_INPUT_DIGEST_MISMATCH',
+      'REQUEST_OBSOLETE','WORKSPACE_CAS_CONFLICT','AGENT_OUTPUT_INVALID') THEN p_error_code ELSE 'AGENT_OUTPUT_INVALID' END,
+    finished_at=clock_timestamp() WHERE id=p_request_artifact_id AND status='pending';
 END $$;
 
 CREATE FUNCTION kb_bid_v2_get_async_request(
@@ -4495,7 +5576,9 @@ CREATE FUNCTION kb_bid_v2_accept_candidate(
   p_snapshot jsonb,p_selected_ordinals integer[],p_actor kb_actor_identity,p_idempotency_key text,
   p_request_bytes bytea,p_request_sha256 kb_sha256
 ) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
-DECLARE candidate bid_candidate_artifacts%ROWTYPE; replay bytea; response jsonb; response_bytes bytea;
+DECLARE candidate bid_candidate_artifacts%ROWTYPE; head bid_workspace_heads%ROWTYPE;
+  replay bytea; response jsonb; response_bytes bytea; candidate_payload jsonb;
+  selection record; accepted_id uuid; accepted_json jsonb; accepted_payload bytea; accepted_sha kb_sha256;
   before_generation bigint; after_generation bigint;
 BEGIN
   replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.candidate.accept',p_idempotency_key,p_request_bytes,p_request_sha256);
@@ -4503,20 +5586,79 @@ BEGIN
   SELECT * INTO STRICT candidate FROM bid_candidate_artifacts
     WHERE id=p_candidate_id AND workspace_id=p_workspace_id FOR UPDATE;
   PERFORM kb_bid_v2_require_project_owner(candidate.project_id,p_actor);
+  IF candidate.state='accepted' THEN
+    SELECT response_payload INTO STRICT response_bytes FROM bid_candidate_decision_receipts WHERE candidate_id=p_candidate_id;
+    PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.candidate.accept',p_idempotency_key,200,response_bytes);
+    RETURN convert_from(response_bytes,'UTF8')::jsonb;
+  END IF;
   IF candidate.state<>'proposed' THEN RAISE EXCEPTION 'CANDIDATE_NOT_PROPOSED' USING ERRCODE='23514'; END IF;
+  SELECT * INTO STRICT head FROM bid_workspace_heads WHERE scope_id=p_workspace_id FOR UPDATE;
+  IF head.artifact_id IS DISTINCT FROM candidate.base_workspace_revision_id OR
+     head.artifact_sha256 IS DISTINCT FROM candidate.base_workspace_sha256 THEN
+    UPDATE bid_candidate_artifacts SET state='obsolete',decided_at=clock_timestamp() WHERE id=p_candidate_id;
+    response:=jsonb_build_object('candidate_id',p_candidate_id,'status','obsolete',
+      'error_code','CANDIDATE_OBSOLETE','current_workspace_revision_id',head.artifact_id,
+      'current_workspace_sha256',head.artifact_sha256);
+    response_bytes:=convert_to(response::text,'UTF8');
+    INSERT INTO bid_candidate_decision_receipts(candidate_id,actor,accepted_operation_ordinals,response_payload,response_sha256)
+    VALUES(p_candidate_id,p_actor,ARRAY[]::integer[],response_bytes,kb_bid_v2_sha256_bytes(response_bytes));
+    PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.candidate.accept',p_idempotency_key,409,response_bytes);
+    RETURN response;
+  END IF;
   IF candidate.base_workspace_revision_id IS DISTINCT FROM p_expected_revision_id OR
      candidate.base_workspace_sha256 IS DISTINCT FROM p_expected_sha256 THEN
     RAISE EXCEPTION 'CANDIDATE_BASE_CAS_MISMATCH' USING ERRCODE='40001';
   END IF;
-  SELECT generation INTO STRICT before_generation FROM bid_workspace_heads WHERE scope_id=p_workspace_id;
+  IF cardinality(coalesce(p_selected_ordinals,ARRAY[]::integer[]))<>
+       (SELECT count(DISTINCT ordinal) FROM unnest(coalesce(p_selected_ordinals,ARRAY[]::integer[])) ordinal)
+     OR EXISTS (SELECT 1 FROM unnest(coalesce(p_selected_ordinals,ARRAY[]::integer[])) selected
+       WHERE NOT EXISTS (SELECT 1 FROM bid_candidate_operations operation
+         WHERE operation.candidate_id=p_candidate_id AND operation.ordinal=selected))
+     OR (EXISTS (SELECT 1 FROM bid_candidate_operations WHERE candidate_id=p_candidate_id)
+       AND cardinality(coalesce(p_selected_ordinals,ARRAY[]::integer[]))=0) THEN
+    RAISE EXCEPTION 'CANDIDATE_SELECTION_INVALID' USING ERRCODE='23514';
+  END IF;
+  before_generation:=head.generation;
   response:=kb_bid_v2_commit_workspace_mutation(p_workspace_id,p_expected_revision_id,p_expected_sha256,p_snapshot,p_actor);
   UPDATE bid_candidate_artifacts SET state='accepted',decided_at=clock_timestamp() WHERE id=p_candidate_id;
+  candidate_payload:=convert_from(candidate.canonical_payload,'UTF8')::jsonb;
+  FOR selection IN
+    SELECT selected.matching_report_id,array_agg(DISTINCT selected.item_id ORDER BY selected.item_id) item_ids
+    FROM (
+      SELECT bundle.matching_report_id,(claim->>'evidence_item_id')::uuid item_id
+      FROM jsonb_array_elements(coalesce(candidate_payload->'factual_claims','[]'::jsonb)) claim
+      JOIN bid_evidence_bundle_artifacts bundle ON bundle.id=(claim->>'evidence_bundle_id')::uuid
+      WHERE EXISTS (SELECT 1 FROM bid_candidate_operations operation
+        WHERE operation.candidate_id=p_candidate_id AND operation.ordinal=ANY(coalesce(p_selected_ordinals,ARRAY[]::integer[]))
+          AND operation.operation->>'client_operation_ref'=claim->>'client_operation_ref')
+      UNION ALL
+      SELECT bundle.matching_report_id,item.id
+      FROM bid_candidate_operations operation
+      JOIN bid_content_generation_request_evidence_bundles link ON link.request_artifact_id=candidate.request_artifact_id
+      JOIN bid_evidence_bundle_artifacts bundle ON bundle.id=link.evidence_bundle_id
+      JOIN bid_evidence_bundle_items item ON item.evidence_bundle_id=bundle.id
+        AND item.id=(operation.operation#>>'{block,content,asset_revision_id}')::uuid AND item.item_kind='image'
+      WHERE operation.candidate_id=p_candidate_id
+        AND operation.ordinal=ANY(coalesce(p_selected_ordinals,ARRAY[]::integer[]))
+        AND operation.operation#>>'{block,kind}'='image'
+    ) selected GROUP BY selected.matching_report_id
+  LOOP
+    accepted_id:=kb_bid_v2_deterministic_uuid(p_candidate_id::text||':'||selection.matching_report_id::text||':accepted');
+    accepted_json:=jsonb_build_object('schema_version',1,'selection_id',accepted_id,
+      'selection_kind','accepted','matching_report_id',selection.matching_report_id,
+      'candidate_id',p_candidate_id,'selected_evidence_item_ids',selection.item_ids);
+    accepted_payload:=kb_bid_v2_json_payload(accepted_json);accepted_sha:=kb_bid_v2_sha256_bytes(accepted_payload);
+    INSERT INTO bid_evidence_selection_artifacts(id,project_id,workspace_id,selection_kind,matching_report_id,
+      canonical_payload,content_sha256,actor)
+    VALUES(accepted_id,candidate.project_id,p_workspace_id,'accepted',selection.matching_report_id,
+      accepted_payload,accepted_sha,p_actor);
+  END LOOP;
   SELECT generation INTO STRICT after_generation FROM bid_workspace_heads WHERE scope_id=p_workspace_id;
   response_bytes:=convert_to(response::text,'UTF8');
   INSERT INTO bid_candidate_decision_receipts(candidate_id,actor,accepted_operation_ordinals,
-    resulting_workspace_revision_id,response_sha256)
+    resulting_workspace_revision_id,response_payload,response_sha256)
   VALUES(p_candidate_id,p_actor,coalesce(p_selected_ordinals,ARRAY[]::integer[]),
-    (response->>'revision_id')::uuid,kb_bid_v2_sha256_bytes(response_bytes));
+    (response->>'revision_id')::uuid,response_bytes,kb_bid_v2_sha256_bytes(response_bytes));
   INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
     entity_kind,entity_locator,before_revision,before_sha256,after_revision,after_sha256)
   VALUES(gen_random_uuid(),1,'bid.v2.candidate.accept',p_actor,p_idempotency_key,p_request_sha256,
@@ -4541,8 +5683,8 @@ BEGIN
   UPDATE bid_candidate_artifacts SET state='rejected',decided_at=clock_timestamp() WHERE id=p_candidate_id;
   response:=kb_bid_v2_get_candidate(p_workspace_id,p_candidate_id,p_actor);
   response_bytes:=convert_to(response::text,'UTF8');
-  INSERT INTO bid_candidate_decision_receipts(candidate_id,actor,accepted_operation_ordinals,response_sha256)
-  VALUES(p_candidate_id,p_actor,ARRAY[]::integer[],kb_bid_v2_sha256_bytes(response_bytes));
+  INSERT INTO bid_candidate_decision_receipts(candidate_id,actor,accepted_operation_ordinals,response_payload,response_sha256)
+  VALUES(p_candidate_id,p_actor,ARRAY[]::integer[],response_bytes,kb_bid_v2_sha256_bytes(response_bytes));
   PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.candidate.reject',p_idempotency_key,200,response_bytes);
   RETURN response;
 END $$;
@@ -4581,6 +5723,61 @@ BEGIN
   RETURN kb_bid_v2_load_workspace(p_workspace_id);
 END $$;
 
+CREATE FUNCTION kb_bid_v2_get_requirement_projection(
+  p_workspace_id uuid,p_actor kb_actor_identity
+) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE workspace bid_submission_workspaces%ROWTYPE; current_value bid_workspace_requirement_projection_current%ROWTYPE;
+BEGIN
+  SELECT * INTO STRICT workspace FROM bid_submission_workspaces WHERE id=p_workspace_id;
+  PERFORM kb_bid_v2_require_project_owner(workspace.project_id,p_actor);
+  SELECT * INTO STRICT current_value FROM bid_workspace_requirement_projection_current WHERE scope_id=p_workspace_id;
+  RETURN (SELECT jsonb_build_object('artifact_id',projection.id,'sha256',projection.content_sha256,
+    'revision',projection.revision,'requirement_set_id',projection.requirement_set_id,
+    'items',coalesce((SELECT jsonb_agg(jsonb_build_object('requirement_revision_id',item.requirement_revision_id,
+      'effective_applicability',item.effective_applicability,'ordinal',item.ordinal)
+      ORDER BY item.ordinal,item.requirement_revision_id)
+      FROM bid_workspace_requirement_projection_items item WHERE item.projection_id=projection.id),'[]'::jsonb))
+    FROM bid_workspace_requirement_projection_artifacts projection WHERE projection.id=current_value.artifact_id);
+END $$;
+
+CREATE FUNCTION kb_bid_v2_refresh_requirement_projection(
+  p_workspace_id uuid,p_expected_artifact_id uuid,p_expected_sha256 kb_sha256,p_actor kb_actor_identity,
+  p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE workspace bid_submission_workspaces%ROWTYPE; current_value bid_workspace_requirement_projection_current%ROWTYPE;
+  head bid_workspace_heads%ROWTYPE; replay bytea; response jsonb; response_bytes bytea; before_generation bigint;
+BEGIN
+  replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.requirement-projection.refresh',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  SELECT * INTO STRICT workspace FROM bid_submission_workspaces WHERE id=p_workspace_id;
+  PERFORM kb_bid_v2_require_project_owner(workspace.project_id,p_actor);
+  SELECT * INTO STRICT current_value FROM bid_workspace_requirement_projection_current WHERE scope_id=p_workspace_id FOR SHARE;
+  IF current_value.artifact_id IS DISTINCT FROM p_expected_artifact_id OR current_value.artifact_sha256 IS DISTINCT FROM p_expected_sha256 THEN
+    RAISE EXCEPTION 'REQUIREMENT_PROJECTION_CAS_MISMATCH' USING ERRCODE='40001';
+  END IF;
+  SELECT * INTO STRICT head FROM bid_workspace_heads WHERE scope_id=p_workspace_id;before_generation:=head.generation;
+  IF EXISTS (SELECT 1 FROM bid_workspace_revision_artifacts revision WHERE revision.id=head.artifact_id
+    AND revision.requirement_projection_id=current_value.artifact_id
+    AND revision.requirement_projection_sha256=current_value.artifact_sha256) THEN
+    response:=kb_bid_v2_load_workspace(p_workspace_id);
+  ELSE
+    PERFORM kb_bid_v2_advance_workspace_projection(p_workspace_id,
+      (SELECT requirement_projection_id FROM bid_workspace_revision_artifacts WHERE id=head.artifact_id),
+      (SELECT requirement_projection_sha256 FROM bid_workspace_revision_artifacts WHERE id=head.artifact_id),
+      current_value.artifact_id,current_value.artifact_sha256);
+    response:=kb_bid_v2_load_workspace(p_workspace_id);
+  END IF;
+  response_bytes:=convert_to(response::text,'UTF8');
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
+    entity_kind,entity_locator,before_revision,before_sha256,after_revision,after_sha256)
+  SELECT gen_random_uuid(),1,'bid.v2.requirement-projection.refresh',p_actor,p_idempotency_key,p_request_sha256,
+    kb_bid_v2_sha256_bytes(response_bytes),'bid_v2_workspace',jsonb_build_object('workspace_id',p_workspace_id),
+    before_generation,head.artifact_sha256,workspace_head.generation,workspace_head.artifact_sha256
+  FROM bid_workspace_heads workspace_head WHERE workspace_head.scope_id=p_workspace_id;
+  PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.requirement-projection.refresh',p_idempotency_key,200,response_bytes);
+  RETURN response;
+END $$;
+
 CREATE FUNCTION kb_bid_v2_list_workspace_assets(
   p_workspace_id uuid,p_actor kb_actor_identity
 ) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
@@ -4593,7 +5790,8 @@ BEGIN
     'asset_revision_id',a.id,'media_type',a.media_type,'file_name',a.file_name,
     'byte_length',a.byte_length,'object_ref',a.object_ref,'content_sha256',a.content_sha256
   ) ORDER BY a.created_at,a.id) FROM bid_workspace_asset_artifacts a
-    WHERE a.workspace_id=p_workspace_id),'[]'::jsonb);
+    WHERE a.workspace_id=p_workspace_id AND NOT EXISTS (
+      SELECT 1 FROM bid_workspace_asset_retirement_artifacts retirement WHERE retirement.asset_revision_id=a.id)),'[]'::jsonb);
 END $$;
 
 CREATE FUNCTION kb_bid_v2_upload_workspace_asset(
@@ -4625,6 +5823,219 @@ BEGIN
   VALUES(gen_random_uuid(),1,'bid.v2.workspace.asset.upload',p_actor,p_idempotency_key,p_request_sha256,
     kb_bid_v2_sha256_bytes(response_bytes),'bid_v2_workspace_asset',jsonb_build_object('workspace_id',p_workspace_id,'asset_id',p_asset_id),1,p_content_sha256);
   PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.workspace.asset.upload',p_idempotency_key,201,response_bytes);
+  RETURN response;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_prepare_workspace_attachment(
+  p_workspace_id uuid,p_source_asset_revision_id uuid,p_preparation_id uuid,
+  p_page_source_asset_ids uuid[],p_page_item_ids uuid[],p_widths_px integer[],p_heights_px integer[],
+  p_actor kb_actor_identity,p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE source_asset bid_workspace_asset_artifacts%ROWTYPE; replay bytea; next_revision bigint;
+  page_assets jsonb; payload jsonb; preparation_sha kb_sha256; response jsonb; response_bytes bytea;
+BEGIN
+  replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.workspace.attachment.prepare',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  SELECT * INTO STRICT source_asset FROM bid_workspace_asset_artifacts
+    WHERE workspace_id=p_workspace_id AND id=p_source_asset_revision_id FOR SHARE;
+  PERFORM kb_bid_v2_require_project_owner(source_asset.project_id,p_actor);
+  IF source_asset.media_type NOT IN ('image/png','image/jpeg','image/webp')
+     OR EXISTS (SELECT 1 FROM bid_workspace_asset_retirement_artifacts WHERE asset_revision_id=source_asset.id)
+     OR p_page_source_asset_ids IS DISTINCT FROM ARRAY[source_asset.id]
+     OR cardinality(coalesce(p_page_source_asset_ids,ARRAY[]::uuid[]))<>1
+     OR cardinality(p_page_source_asset_ids)<>cardinality(p_page_item_ids)
+     OR cardinality(p_page_source_asset_ids)<>cardinality(p_widths_px)
+     OR cardinality(p_page_source_asset_ids)<>cardinality(p_heights_px)
+     OR cardinality(p_page_item_ids)<>(SELECT count(DISTINCT id) FROM unnest(p_page_item_ids) id)
+     OR EXISTS (SELECT 1 FROM generate_subscripts(p_page_source_asset_ids,1) position
+       WHERE p_widths_px[position]<=0 OR p_heights_px[position]<=0
+       OR NOT EXISTS (SELECT 1 FROM bid_workspace_asset_artifacts page
+         WHERE page.project_id=source_asset.project_id AND page.workspace_id=p_workspace_id
+           AND page.id=p_page_source_asset_ids[position]
+           AND page.media_type IN ('image/png','image/jpeg','image/webp')
+           AND NOT EXISTS (SELECT 1 FROM bid_workspace_asset_retirement_artifacts retired
+             WHERE retired.asset_revision_id=page.id)))
+  THEN RAISE EXCEPTION 'ATTACHMENT_FORMAT_UNSUPPORTED' USING ERRCODE='23514'; END IF;
+  SELECT coalesce(max(revision),0)+1 INTO next_revision FROM bid_attachment_preparation_revision_artifacts
+    WHERE workspace_id=p_workspace_id AND source_asset_revision_id=p_source_asset_revision_id;
+  SELECT jsonb_agg(jsonb_build_object('page_asset_id',p_page_item_ids[position],
+    'page_number',position,'object_ref',page.object_ref,'sha256',page.content_sha256,'media_type',page.media_type,
+    'geometry',jsonb_build_object('width_px',p_widths_px[position],'height_px',p_heights_px[position])) ORDER BY position)
+  INTO page_assets FROM generate_subscripts(p_page_source_asset_ids,1) position
+  JOIN bid_workspace_asset_artifacts page ON page.id=p_page_source_asset_ids[position];
+  payload:=jsonb_build_object('schema_version',1,'attachment_preparation_revision_id',p_preparation_id,
+    'project_id',source_asset.project_id,'workspace_id',p_workspace_id,'source_asset_revision_id',source_asset.id,
+    'revision',next_revision,'status','ready','page_assets',page_assets);
+  preparation_sha:=kb_bid_v2_sha256_bytes(convert_to(payload::text,'UTF8'));
+  payload:=payload||jsonb_build_object('preparation_sha256',preparation_sha);
+  INSERT INTO bid_attachment_preparation_revision_artifacts(id,project_id,workspace_id,source_asset_revision_id,
+    revision,status,page_assets,canonical_payload,preparation_sha256)
+  VALUES(p_preparation_id,source_asset.project_id,p_workspace_id,source_asset.id,next_revision,'ready',page_assets,payload,preparation_sha);
+  INSERT INTO bid_attachment_preparation_asset_items(id,project_id,workspace_id,attachment_preparation_revision_id,
+    ordinal,page_number,object_ref,content_sha256,media_type,geometry)
+  SELECT p_page_item_ids[position],source_asset.project_id,p_workspace_id,p_preparation_id,position-1,position,
+    page.object_ref,page.content_sha256,page.media_type,
+    jsonb_build_object('width_px',p_widths_px[position],'height_px',p_heights_px[position])
+  FROM generate_subscripts(p_page_source_asset_ids,1) position
+  JOIN bid_workspace_asset_artifacts page ON page.id=p_page_source_asset_ids[position];
+  INSERT INTO object_owner_references(object_ref,owner_kind,owner_id,occurrence,created_by)
+  SELECT page.object_ref,'bid_attachment_preparation',p_preparation_id,'page:'||position,p_actor
+  FROM generate_subscripts(p_page_source_asset_ids,1) position
+  JOIN bid_workspace_asset_artifacts page ON page.id=p_page_source_asset_ids[position];
+  SET CONSTRAINTS ALL IMMEDIATE;
+  response:=jsonb_build_object('attachment_preparation_revision_id',p_preparation_id,'revision',next_revision,
+    'status','ready','preparation_sha256',preparation_sha,'source_asset_revision_id',source_asset.id,'page_assets',page_assets);
+  response_bytes:=convert_to(response::text,'UTF8');
+  PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.workspace.attachment.prepare',p_idempotency_key,201,response_bytes);
+  RETURN response;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_publish_pdf_attachment_preparation(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256,
+  p_source_asset_revision_id uuid,p_preparation_id uuid,p_page_item_ids uuid[],p_staging_ids uuid[],
+  p_object_refs kb_object_ref[],p_content_sha256s kb_sha256[],p_media_types text[],p_byte_lengths bigint[],
+  p_widths_px integer[],p_heights_px integer[],p_actor kb_actor_identity
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE typed bid_submission_export_request_identities%ROWTYPE; request_value bid_async_request_snapshot_artifacts%ROWTYPE;
+  source_asset bid_workspace_asset_artifacts%ROWTYPE; existing record; next_revision bigint;
+  page_assets jsonb:='[]'::jsonb; payload jsonb; preparation_sha kb_sha256; contract_sha kb_sha256;
+  position integer; response jsonb; item_count integer:=cardinality(coalesce(p_page_item_ids,ARRAY[]::uuid[]));
+BEGIN
+  IF p_actor<>'system:submission-export-v2' THEN
+    RAISE EXCEPTION 'SYSTEM_ACTOR_REQUIRED' USING ERRCODE='42501';
+  END IF;
+  SELECT * INTO STRICT typed FROM bid_submission_export_request_identities
+    WHERE request_artifact_id=p_request_artifact_id AND request_revision=p_request_revision
+      AND frozen_input_sha256=p_frozen_input_sha256;
+  SELECT * INTO STRICT request_value FROM bid_async_request_snapshot_artifacts
+    WHERE id=p_request_artifact_id AND status='pending' FOR UPDATE;
+  SELECT preparation.*,attestation.preparation_sha256 attested_sha INTO existing
+    FROM bid_pdf_attachment_preparation_attestations attestation
+    JOIN bid_attachment_preparation_revision_artifacts preparation
+      ON preparation.id=attestation.preparation_revision_id
+    WHERE attestation.request_artifact_id=p_request_artifact_id
+      AND attestation.source_asset_revision_id=p_source_asset_revision_id;
+  IF FOUND THEN
+    RETURN existing.canonical_payload||jsonb_build_object('replayed',true);
+  END IF;
+  SELECT * INTO STRICT source_asset FROM bid_workspace_asset_artifacts
+    WHERE project_id=typed.project_id AND workspace_id=typed.workspace_id
+      AND id=p_source_asset_revision_id AND media_type='application/pdf'
+      AND NOT EXISTS (SELECT 1 FROM bid_workspace_asset_retirement_artifacts retired
+        WHERE retired.asset_revision_id=bid_workspace_asset_artifacts.id) FOR SHARE;
+  IF NOT EXISTS (SELECT 1 FROM bid_workspace_block_occurrences occurrence
+      JOIN bid_content_block_revision_artifacts block ON block.id=occurrence.block_revision_id
+      WHERE occurrence.workspace_revision_id=typed.workspace_revision_id
+        AND block.block_kind='attachment_ref' AND block.block_payload->>'render_mode'='embedded_pages'
+        AND (block.block_payload->>'asset_revision_id')::uuid=source_asset.id) THEN
+    RAISE EXCEPTION 'FROZEN_PDF_ATTACHMENT_NOT_FOUND' USING ERRCODE='23514';
+  END IF;
+  IF item_count NOT BETWEEN 1 AND 10000
+     OR item_count<>cardinality(p_staging_ids) OR item_count<>cardinality(p_object_refs)
+     OR item_count<>cardinality(p_content_sha256s) OR item_count<>cardinality(p_media_types)
+     OR item_count<>cardinality(p_byte_lengths) OR item_count<>cardinality(p_widths_px)
+     OR item_count<>cardinality(p_heights_px)
+     OR item_count<>(SELECT count(DISTINCT id) FROM unnest(p_page_item_ids) id)
+     OR EXISTS (SELECT 1 FROM generate_subscripts(p_page_item_ids,1) item
+       WHERE p_object_refs[item] IS DISTINCT FROM 'objects/'||p_content_sha256s[item]
+         OR p_media_types[item] IS DISTINCT FROM 'image/png'
+         OR p_byte_lengths[item]<=0 OR p_widths_px[item]<=0 OR p_heights_px[item]<=0)
+  THEN RAISE EXCEPTION 'PDF_ATTACHMENT_PAGE_SET_INVALID' USING ERRCODE='23514'; END IF;
+  SELECT content_sha256 INTO STRICT contract_sha FROM bid_attachment_preparation_contract_artifacts
+    WHERE id='00000000-0000-5000-8000-000000000305';
+  SELECT coalesce(max(revision),0)+1 INTO next_revision FROM bid_attachment_preparation_revision_artifacts
+    WHERE workspace_id=typed.workspace_id AND source_asset_revision_id=source_asset.id;
+  FOR position IN SELECT generate_subscripts(p_page_item_ids,1) LOOP
+    PERFORM kb_object_upload_commit(p_staging_ids[position],p_object_refs[position],p_content_sha256s[position],
+      p_media_types[position],p_byte_lengths[position],'bid_attachment_preparation',p_preparation_id,
+      'page:'||position,p_actor);
+    page_assets:=page_assets||jsonb_build_array(jsonb_build_object('page_asset_id',p_page_item_ids[position],
+      'page_number',position,'object_ref',p_object_refs[position],'sha256',p_content_sha256s[position],
+      'media_type',p_media_types[position],
+      'geometry',jsonb_build_object('width_px',p_widths_px[position],'height_px',p_heights_px[position])));
+  END LOOP;
+  payload:=jsonb_build_object('schema_version',1,'attachment_preparation_revision_id',p_preparation_id,
+    'project_id',typed.project_id,'workspace_id',typed.workspace_id,'source_asset_revision_id',source_asset.id,
+    'revision',next_revision,'status','ready','page_assets',page_assets);
+  preparation_sha:=kb_bid_v2_sha256_bytes(convert_to(payload::text,'UTF8'));
+  payload:=payload||jsonb_build_object('preparation_sha256',preparation_sha);
+  INSERT INTO bid_attachment_preparation_revision_artifacts(id,project_id,workspace_id,source_asset_revision_id,
+    revision,status,page_assets,canonical_payload,preparation_sha256)
+  VALUES(p_preparation_id,typed.project_id,typed.workspace_id,source_asset.id,next_revision,'ready',
+    page_assets,payload,preparation_sha);
+  FOR position IN SELECT generate_subscripts(p_page_item_ids,1) LOOP
+    INSERT INTO bid_attachment_preparation_asset_items(id,project_id,workspace_id,
+      attachment_preparation_revision_id,ordinal,page_number,object_ref,content_sha256,media_type,geometry)
+    VALUES(p_page_item_ids[position],typed.project_id,typed.workspace_id,p_preparation_id,position-1,position,
+      p_object_refs[position],p_content_sha256s[position],p_media_types[position],
+      jsonb_build_object('width_px',p_widths_px[position],'height_px',p_heights_px[position]));
+  END LOOP;
+  INSERT INTO bid_pdf_attachment_preparation_attestations(preparation_revision_id,project_id,workspace_id,
+    request_artifact_id,request_revision,frozen_input_sha256,source_asset_revision_id,source_object_ref,source_sha256,
+    source_media_type,preparation_sha256,contract_id,contract_sha256)
+  VALUES(p_preparation_id,typed.project_id,typed.workspace_id,p_request_artifact_id,p_request_revision,p_frozen_input_sha256,
+    source_asset.id,source_asset.object_ref,source_asset.content_sha256,source_asset.media_type,preparation_sha,
+    '00000000-0000-5000-8000-000000000305',contract_sha);
+  SET CONSTRAINTS ALL IMMEDIATE;
+  response:=payload||jsonb_build_object('replayed',false);
+  RETURN response;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_resolve_export_attachment_preparation(
+  p_request_artifact_id uuid,p_workspace_revision_id uuid,p_block_revision_id uuid
+) RETURNS uuid LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE block_value bid_content_block_revision_artifacts%ROWTYPE; source_asset bid_workspace_asset_artifacts%ROWTYPE;
+  result uuid;
+BEGIN
+  SELECT block.* INTO STRICT block_value FROM bid_workspace_block_occurrences occurrence
+    JOIN bid_content_block_revision_artifacts block ON block.id=occurrence.block_revision_id
+    WHERE occurrence.workspace_revision_id=p_workspace_revision_id
+      AND occurrence.block_revision_id=p_block_revision_id AND block.block_kind='attachment_ref';
+  SELECT * INTO STRICT source_asset FROM bid_workspace_asset_artifacts
+    WHERE id=(block_value.block_payload->>'asset_revision_id')::uuid
+      AND workspace_id=block_value.workspace_id;
+  IF source_asset.media_type='application/pdf' THEN
+    SELECT attestation.preparation_revision_id INTO result
+      FROM bid_pdf_attachment_preparation_attestations attestation
+      JOIN bid_attachment_preparation_revision_artifacts preparation
+        ON preparation.id=attestation.preparation_revision_id AND preparation.status='ready'
+      WHERE attestation.request_artifact_id=p_request_artifact_id
+        AND attestation.source_asset_revision_id=source_asset.id;
+  ELSE
+    result:=nullif(block_value.block_payload->>'preparation_revision_id','')::uuid;
+  END IF;
+  RETURN result;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_retire_workspace_asset(
+  p_workspace_id uuid,p_asset_revision_id uuid,p_reason text,p_actor kb_actor_identity,
+  p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE asset bid_workspace_asset_artifacts%ROWTYPE; head bid_workspace_heads%ROWTYPE;
+  replay bytea; response jsonb; response_bytes bytea; retirement_id uuid:=gen_random_uuid();
+BEGIN
+  replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.workspace.asset.retire',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  SELECT * INTO STRICT asset FROM bid_workspace_asset_artifacts
+    WHERE id=p_asset_revision_id AND workspace_id=p_workspace_id FOR SHARE;
+  PERFORM kb_bid_v2_require_project_owner(asset.project_id,p_actor);
+  SELECT * INTO STRICT head FROM bid_workspace_heads WHERE scope_id=p_workspace_id;
+  IF EXISTS (SELECT 1 FROM bid_workspace_block_occurrences occurrence
+    JOIN bid_content_block_revision_artifacts block ON block.id=occurrence.block_revision_id
+    WHERE occurrence.workspace_revision_id=head.artifact_id
+      AND block.block_kind IN ('image','attachment_ref')
+      AND convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,asset_revision_id}'=p_asset_revision_id::text) THEN
+    RAISE EXCEPTION 'ASSET_IN_CURRENT_WORKSPACE' USING ERRCODE='23514';
+  END IF;
+  INSERT INTO bid_workspace_asset_retirement_artifacts(id,project_id,workspace_id,asset_revision_id,retired_by,reason)
+  VALUES(retirement_id,asset.project_id,p_workspace_id,p_asset_revision_id,p_actor,p_reason);
+  response:=jsonb_build_object('asset_revision_id',p_asset_revision_id,'status','retired','retirement_id',retirement_id);
+  response_bytes:=convert_to(response::text,'UTF8');
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
+    entity_kind,entity_locator,after_revision,after_sha256)
+  VALUES(gen_random_uuid(),1,'bid.v2.workspace.asset.retire',p_actor,p_idempotency_key,p_request_sha256,
+    kb_bid_v2_sha256_bytes(response_bytes),'bid_v2_workspace_asset',jsonb_build_object('workspace_id',p_workspace_id,'asset_id',p_asset_revision_id),1,asset.content_sha256);
+  PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.workspace.asset.retire',p_idempotency_key,200,response_bytes);
   RETURN response;
 END $$;
 
@@ -4664,6 +6075,1819 @@ BEGIN
   RETURN response;
 END $$;
 
+-- Frozen authoring contracts used by the first production ContentGenerate worker.
+INSERT INTO bid_authoring_contract_artifacts(id,contract_kind,schema_version,canonical_payload,content_sha256)
+SELECT id,kind,1,payload,kb_bid_v2_sha256_bytes(payload) FROM (VALUES
+  ('00000000-0000-5000-8000-000000000201'::uuid,'matching_policy',convert_to('{"kind":"workspace_scope_v2","version":1}','UTF8')),
+  ('00000000-0000-5000-8000-000000000202'::uuid,'prompt',convert_to('{"kind":"content_prompt","version":1}','UTF8')),
+  ('00000000-0000-5000-8000-000000000203'::uuid,'template',convert_to('{"kind":"content_template","version":1}','UTF8')),
+  ('00000000-0000-5000-8000-000000000204'::uuid,'model',convert_to('{"kind":"configured_chat_model","operation":"content","version":1}','UTF8')),
+  ('00000000-0000-5000-8000-000000000205'::uuid,'agent',convert_to('{"kind":"content_agent","version":1}','UTF8'))
+) seeded(id,kind,payload) ON CONFLICT (id) DO NOTHING;
+INSERT INTO bid_render_style_contract_artifacts(id,version,schema_version,canonical_payload,content_sha256)
+SELECT '00000000-0000-5000-8000-000000000301'::uuid,1000,1,payload,kb_bid_v2_sha256_bytes(payload)
+FROM (VALUES(convert_to('{"kind":"default_bid_style","version":1}','UTF8'))) seeded(payload)
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO bid_renderer_contract_artifacts(id,format,version,schema_version,canonical_payload,content_sha256,approved_at)
+SELECT id,format,1,1,payload,kb_bid_v2_sha256_bytes(payload),'2026-01-01T00:00:00Z'::timestamptz FROM (VALUES
+('00000000-0000-5000-8000-000000000302'::uuid,'docx',convert_to('{"kind":"knowledgebrain.bid.v2.docx","version":1}','UTF8')),
+('00000000-0000-5000-8000-000000000303'::uuid,'pdf',convert_to('{"kind":"knowledgebrain.bid.v2.pdf","font_sha256":"5d0df56f107605387e0de494b22dfc7fb05d8d79ffd981474e7be11dbe571882","version":1}','UTF8'))
+) seeded(id,format,payload) ON CONFLICT (id) DO NOTHING;
+
+CREATE FUNCTION kb_bid_v2_create_content_request(
+  p_workspace_id uuid,p_expected_revision_id uuid,p_expected_sha256 kb_sha256,
+  p_request_operation text,p_target_kind text,p_target_node_lineage_id uuid,p_fill_policy text,
+  p_insertion_anchor jsonb,p_evidence_selection_mode text,p_pick_set_artifact_id uuid,
+  p_actor kb_actor_identity,p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE workspace bid_submission_workspaces%ROWTYPE; head bid_workspace_heads%ROWTYPE;
+  revision bid_workspace_revision_artifacts%ROWTYPE; checkpoint bid_outline_checkpoint_artifacts%ROWTYPE;
+  settings bid_document_settings_revision_artifacts%ROWTYPE; scope bid_workspace_scope_revision_artifacts%ROWTYPE;
+  projection bid_workspace_requirement_projection_artifacts%ROWTYPE;
+  target_node bid_outline_node_revision_artifacts%ROWTYPE; pick_set bid_evidence_selection_artifacts%ROWTYPE;
+  request_id uuid:=gen_random_uuid(); frozen_payload bytea; frozen_sha kb_sha256;
+  selection_sha kb_sha256; replay bytea; response jsonb; response_bytes bytea; operation_name text;
+  matching_sha kb_sha256; prompt_sha kb_sha256; template_sha kb_sha256; model_sha kb_sha256; agent_sha kb_sha256;
+  style_sha kb_sha256; quote_id uuid; quote_sha kb_sha256;
+BEGIN
+  IF p_request_operation NOT IN ('match_only','generate') OR p_target_kind NOT IN ('node','subtree','workspace')
+     OR p_fill_policy NOT IN ('empty_only','append_candidate','missing_requirements_only')
+     OR p_evidence_selection_mode NOT IN ('system_proposed','user_pick_set') THEN
+    RAISE EXCEPTION 'CONTENT_GENERATION_INPUT_INVALID' USING ERRCODE='23514';
+  END IF;
+  operation_name:=CASE p_request_operation WHEN 'match_only' THEN 'bid.v2.evidence.match' ELSE 'bid.v2.content.generate' END;
+  replay:=kb_bid_v2_idempotency_begin(p_actor,operation_name,p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  SELECT * INTO STRICT workspace FROM bid_submission_workspaces WHERE id=p_workspace_id;
+  PERFORM kb_bid_v2_require_project_owner(workspace.project_id,p_actor);
+  SELECT * INTO STRICT head FROM bid_workspace_heads WHERE scope_id=p_workspace_id FOR SHARE;
+  IF head.artifact_id IS DISTINCT FROM p_expected_revision_id OR head.artifact_sha256 IS DISTINCT FROM p_expected_sha256 THEN
+    RAISE EXCEPTION 'WORKSPACE_HEAD_CAS_MISMATCH' USING ERRCODE='40001';
+  END IF;
+  SELECT * INTO STRICT revision FROM bid_workspace_revision_artifacts WHERE id=head.artifact_id;
+  SELECT * INTO STRICT projection FROM bid_workspace_requirement_projection_artifacts
+    WHERE id=revision.requirement_projection_id AND content_sha256=revision.requirement_projection_sha256;
+  SELECT * INTO STRICT checkpoint FROM bid_outline_checkpoint_artifacts
+    WHERE workspace_id=p_workspace_id AND workspace_revision_id=revision.id
+      AND requirement_projection_id=revision.requirement_projection_id
+      AND requirement_projection_sha256=revision.requirement_projection_sha256
+    ORDER BY created_at DESC,id DESC LIMIT 1;
+  SELECT * INTO STRICT settings FROM bid_document_settings_revision_artifacts
+    WHERE id=revision.document_settings_revision_id;
+  SELECT * INTO STRICT scope FROM bid_workspace_scope_revision_artifacts
+    WHERE id=revision.scope_revision_id;
+  quote_id:=revision.quote_snapshot_id;
+  quote_sha:=revision.quote_snapshot_sha256;
+  IF p_target_kind IN ('node','subtree') THEN
+    IF p_target_node_lineage_id IS NULL THEN RAISE EXCEPTION 'CONTENT_TARGET_INVALID' USING ERRCODE='23514'; END IF;
+    SELECT node.* INTO STRICT target_node FROM bid_outline_node_revision_artifacts node
+      JOIN bid_workspace_node_occurrences occurrence ON occurrence.project_id=node.project_id
+        AND occurrence.node_revision_id=node.id AND occurrence.workspace_revision_id=revision.id
+      WHERE node.project_id=workspace.project_id AND node.workspace_id=p_workspace_id
+        AND node.lineage_id=p_target_node_lineage_id;
+  ELSIF p_target_node_lineage_id IS NOT NULL THEN
+    RAISE EXCEPTION 'CONTENT_TARGET_INVALID' USING ERRCODE='23514';
+  END IF;
+  IF p_evidence_selection_mode='user_pick_set' THEN
+    SELECT * INTO STRICT pick_set FROM bid_evidence_selection_artifacts
+      WHERE id=p_pick_set_artifact_id AND project_id=workspace.project_id AND workspace_id=p_workspace_id
+        AND selection_kind='user_pick_set';
+    IF p_target_kind IN ('node','subtree') AND NOT EXISTS (SELECT 1 FROM bid_evidence_match_reports report
+      WHERE report.id=pick_set.matching_report_id AND report.node_lineage_id=p_target_node_lineage_id) THEN
+      RAISE EXCEPTION 'EVIDENCE_PICK_SET_TARGET_MISMATCH' USING ERRCODE='23514';
+    END IF;
+  ELSIF p_pick_set_artifact_id IS NOT NULL THEN
+    RAISE EXCEPTION 'EVIDENCE_SELECTION_INVALID' USING ERRCODE='23514';
+  END IF;
+  SELECT content_sha256 INTO STRICT matching_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000201';
+  SELECT content_sha256 INTO STRICT prompt_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000202';
+  SELECT content_sha256 INTO STRICT template_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000203';
+  SELECT content_sha256 INTO STRICT model_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000204';
+  SELECT content_sha256 INTO STRICT agent_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000205';
+  SELECT content_sha256 INTO STRICT style_sha FROM bid_render_style_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000301';
+  selection_sha:=kb_bid_v2_sha256_bytes(kb_bid_v2_json_payload(jsonb_build_object(
+    'mode',p_evidence_selection_mode,'pick_set_artifact_id',p_pick_set_artifact_id,
+    'pick_set_sha256',CASE WHEN p_evidence_selection_mode='user_pick_set' THEN pick_set.content_sha256 END,
+    'matching_report_id',CASE WHEN p_evidence_selection_mode='user_pick_set' THEN pick_set.matching_report_id END)));
+  frozen_payload:=kb_bid_v2_json_payload(jsonb_build_object(
+    'workspace_revision_id',revision.id,'workspace_sha256',revision.content_sha256,
+    'requirement_projection_id',projection.id,'requirement_projection_sha256',projection.content_sha256,
+    'outline_checkpoint_id',checkpoint.id,'outline_checkpoint_sha256',checkpoint.content_sha256,
+    'scope_revision_id',revision.scope_revision_id,'scope_revision_sha256',scope.content_sha256,
+    'document_settings_revision_id',settings.id,'document_settings_sha256',settings.content_sha256,
+    'quote_snapshot_id',quote_id,'quote_snapshot_sha256',quote_sha,
+    'render_style_contract_id','00000000-0000-5000-8000-000000000301','render_style_contract_sha256',style_sha,
+    'target_kind',p_target_kind,'target_node_lineage_id',p_target_node_lineage_id,
+    'fill_policy',p_fill_policy,'insertion_anchor',p_insertion_anchor,'evidence_selection_sha256',selection_sha));
+  frozen_sha:=kb_bid_v2_sha256_bytes(frozen_payload);
+  INSERT INTO bid_async_request_snapshot_artifacts(id,project_id,workspace_id,request_kind,revision,
+    frozen_input_sha256,request_payload,request_sha256,status)
+  VALUES(request_id,workspace.project_id,p_workspace_id,'content_generate',1,frozen_sha,p_request_bytes,p_request_sha256,'pending');
+  INSERT INTO bid_content_generation_request_identities(
+    request_artifact_id,project_id,workspace_id,request_revision,request_sha256,frozen_input_sha256,
+    request_operation,base_workspace_revision_id,base_workspace_sha256,
+    requirement_projection_id,requirement_projection_sha256,outline_checkpoint_id,outline_checkpoint_sha256,
+    scope_revision_id,scope_revision_sha256,document_settings_revision_id,document_settings_sha256,
+    render_style_contract_id,render_style_contract_sha256,evidence_selection_mode,evidence_selection_sha256,
+    pick_set_kind,pick_set_artifact_id,pick_set_sha256,pick_set_matching_report_id,
+    matching_policy_id,matching_policy_sha256,quote_snapshot_id,quote_snapshot_sha256,
+    prompt_contract_id,prompt_contract_sha256,template_contract_id,template_contract_sha256,model_contract_id,model_contract_sha256,
+    agent_contract_id,agent_contract_sha256,target_kind,target_node_lineage_id,target_node_revision_id,
+    target_workspace_revision_id,fill_policy,insertion_node_revision_id,insertion_block_revision_id,insertion_utf8_offset)
+  VALUES(request_id,workspace.project_id,p_workspace_id,1,p_request_sha256,frozen_sha,p_request_operation,
+    revision.id,revision.content_sha256,projection.id,projection.content_sha256,checkpoint.id,checkpoint.content_sha256,
+    revision.scope_revision_id,scope.content_sha256,settings.id,settings.content_sha256,
+    '00000000-0000-5000-8000-000000000301',style_sha,p_evidence_selection_mode,selection_sha,
+    CASE WHEN p_evidence_selection_mode='user_pick_set' THEN 'user_pick_set' END,
+    CASE WHEN p_evidence_selection_mode='user_pick_set' THEN pick_set.id END,
+    CASE WHEN p_evidence_selection_mode='user_pick_set' THEN pick_set.content_sha256 END,
+    CASE WHEN p_evidence_selection_mode='user_pick_set' THEN pick_set.matching_report_id END,
+    CASE WHEN p_evidence_selection_mode='system_proposed' THEN '00000000-0000-5000-8000-000000000201'::uuid END,
+    CASE WHEN p_evidence_selection_mode='system_proposed' THEN matching_sha END,
+    quote_id,quote_sha,'00000000-0000-5000-8000-000000000202',prompt_sha,'00000000-0000-5000-8000-000000000203',template_sha,
+    '00000000-0000-5000-8000-000000000204',model_sha,'00000000-0000-5000-8000-000000000205',agent_sha,
+    p_target_kind,CASE WHEN p_target_kind IN ('node','subtree') THEN target_node.lineage_id END,
+    CASE WHEN p_target_kind IN ('node','subtree') THEN target_node.id END,
+    CASE WHEN p_target_kind='workspace' THEN revision.id END,p_fill_policy,
+    CASE WHEN p_insertion_anchor IS NOT NULL THEN (p_insertion_anchor->>'node_revision_id')::uuid END,
+    CASE WHEN p_insertion_anchor IS NOT NULL AND jsonb_typeof(p_insertion_anchor->'block_revision_id')<>'null' THEN (p_insertion_anchor->>'block_revision_id')::uuid END,
+    CASE WHEN p_insertion_anchor IS NOT NULL AND jsonb_typeof(p_insertion_anchor->'utf8_offset')<>'null' THEN (p_insertion_anchor->>'utf8_offset')::bigint END);
+  response:=jsonb_build_object('request_artifact_id',request_id,'kind','ContentGenerate','status','pending',
+    'result_identity',NULL,'error_code',NULL,'request_revision',1,'request_sha256',p_request_sha256,
+    'frozen_input_sha256',frozen_sha,'project_id',workspace.project_id,
+    'workspace_id',p_workspace_id,'base_workspace_revision_id',revision.id,
+    'operation',p_request_operation);
+  response_bytes:=convert_to(response::text,'UTF8');
+  PERFORM kb_bid_v2_idempotency_complete(p_actor,operation_name,p_idempotency_key,202,response_bytes);
+  RETURN response;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_load_content_generation_input(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE typed bid_content_generation_request_identities%ROWTYPE;
+BEGIN
+  SELECT * INTO STRICT typed FROM bid_content_generation_request_identities
+    WHERE request_artifact_id=p_request_artifact_id AND request_revision=p_request_revision
+      AND frozen_input_sha256=p_frozen_input_sha256;
+  RETURN jsonb_build_object(
+    'request_artifact_id',typed.request_artifact_id,'project_id',typed.project_id,'workspace_id',typed.workspace_id,
+    'operation',typed.request_operation,'base_workspace_revision_id',typed.base_workspace_revision_id,
+    'base_workspace_sha256',typed.base_workspace_sha256,'target_kind',typed.target_kind,
+    'target_node_lineage_id',typed.target_node_lineage_id,'fill_policy',typed.fill_policy,
+    'evidence_selection_mode',typed.evidence_selection_mode,'pick_set_artifact_id',typed.pick_set_artifact_id,
+    'generation_dependency_sha256',typed.frozen_input_sha256,
+    'quote_snapshot',CASE WHEN typed.quote_snapshot_id IS NULL THEN NULL ELSE (
+      SELECT convert_from(quote.canonical_payload,'UTF8')::jsonb||jsonb_build_object(
+        'artifact_id',quote.id,'sha256',quote.content_sha256)
+      FROM bid_quote_snapshot_artifacts quote WHERE quote.project_id=typed.project_id
+        AND quote.id=typed.quote_snapshot_id AND quote.content_sha256=typed.quote_snapshot_sha256) END,
+    'insertion_anchor',CASE WHEN typed.insertion_node_revision_id IS NULL THEN NULL ELSE jsonb_build_object(
+      'node_revision_id',typed.insertion_node_revision_id,'block_revision_id',typed.insertion_block_revision_id,
+      'utf8_offset',typed.insertion_utf8_offset) END,
+    'target_nodes',coalesce((WITH RECURSIVE target_occurrences AS (
+      SELECT occurrence.* FROM bid_workspace_node_occurrences occurrence
+      JOIN bid_outline_node_revision_artifacts node ON node.project_id=occurrence.project_id AND node.id=occurrence.node_revision_id
+      WHERE occurrence.project_id=typed.project_id AND occurrence.workspace_revision_id=typed.base_workspace_revision_id
+        AND (typed.target_kind='workspace' OR node.lineage_id=typed.target_node_lineage_id)
+      UNION ALL
+      SELECT child.* FROM bid_workspace_node_occurrences child
+      JOIN target_occurrences parent ON parent.id=child.parent_occurrence_id
+      WHERE typed.target_kind='subtree' AND child.workspace_revision_id=typed.base_workspace_revision_id
+    ) SELECT jsonb_agg(jsonb_build_object(
+      'node_lineage_id',node.lineage_id,'node_revision_id',node.id,'title',node.title,
+      'block_count',(SELECT count(*) FROM bid_workspace_block_occurrences block
+        WHERE block.project_id=typed.project_id AND block.workspace_revision_id=typed.base_workspace_revision_id
+          AND block.node_occurrence_id=occurrence.id),
+      'blocks',coalesce((SELECT jsonb_agg(jsonb_build_object('block_lineage_id',block.lineage_id,
+        'block_revision_id',block.id,'ordinal',block_occurrence.ordinal) ORDER BY block_occurrence.ordinal)
+        FROM bid_workspace_block_occurrences block_occurrence
+        JOIN bid_content_block_revision_artifacts block ON block.project_id=block_occurrence.project_id
+          AND block.id=block_occurrence.block_revision_id
+        WHERE block_occurrence.workspace_revision_id=typed.base_workspace_revision_id
+          AND block_occurrence.node_occurrence_id=occurrence.id),'[]'::jsonb))
+      ORDER BY occurrence.depth,occurrence.ordinal,node.id)
+      FROM target_occurrences occurrence
+      JOIN bid_outline_node_revision_artifacts node ON node.project_id=occurrence.project_id AND node.id=occurrence.node_revision_id),'[]'::jsonb),
+    'requirements',coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'requirement_revision_id',requirement.id,'requirement_text',convert_from(requirement.text_utf8,'UTF8'),
+      'requirement_identity_sha256',kb_bid_v2_sha256_bytes(requirement.text_utf8),
+      'requirement_kind',requirement.requirement_kind,'mandatory',requirement.requiredness='mandatory',
+    'effective_applicability',item.effective_applicability)
+      ORDER BY item.ordinal,requirement.id)
+      FROM bid_workspace_requirement_projection_items item
+      JOIN bid_requirement_revision_artifacts requirement ON requirement.project_id=item.project_id AND requirement.id=item.requirement_revision_id
+      WHERE item.projection_id=typed.requirement_projection_id
+        AND (typed.fill_policy<>'missing_requirements_only' OR NOT EXISTS (
+          SELECT 1 FROM bid_workspace_binding_occurrences binding_occurrence
+          JOIN bid_outline_fulfillment_binding_revision_artifacts binding ON binding.id=binding_occurrence.binding_revision_id
+          JOIN bid_submission_fulfillment_evidence_revision_artifacts evidence ON evidence.binding_revision_id=binding.id
+            AND evidence.workspace_revision_id=typed.base_workspace_revision_id AND evidence.state='current'
+          WHERE binding_occurrence.workspace_revision_id=typed.base_workspace_revision_id AND binding.state='bound'
+            AND binding.need_occurrence_id=ANY(kb_bid_v2_fulfillment_need_ids(requirement.fulfillment_expr))))
+        AND (typed.evidence_selection_mode<>'user_pick_set' OR requirement.id=(SELECT report.requirement_revision_id
+          FROM bid_evidence_selection_artifacts selection JOIN bid_evidence_match_reports report ON report.id=selection.matching_report_id
+          WHERE selection.id=typed.pick_set_artifact_id))),'[]'::jsonb));
+END $$;
+
+CREATE FUNCTION kb_bid_v2_load_user_pick_evidence(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE typed bid_content_generation_request_identities%ROWTYPE; result_value jsonb;
+BEGIN
+  SELECT * INTO STRICT typed FROM bid_content_generation_request_identities
+    WHERE request_artifact_id=p_request_artifact_id AND request_revision=p_request_revision
+      AND frozen_input_sha256=p_frozen_input_sha256 AND evidence_selection_mode='user_pick_set';
+  SELECT jsonb_build_object('attestation_id',report.knowledge_scope_attestation_id,
+      'attestation_sha256',report.knowledge_scope_attestation_sha256,
+      'canonical_scope',kb_knowledge_load_matching_attestation_v2(
+        report.knowledge_scope_attestation_id,report.knowledge_scope_attestation_sha256),
+      'requirement_revision_id',report.requirement_revision_id,'evidence_bundle_id',bundle.id,
+      'items',coalesce((SELECT jsonb_agg(item.item_payload ORDER BY item.ordinal)
+        FROM bid_evidence_bundle_items item WHERE item.evidence_bundle_id=bundle.id
+          AND item.id IN (SELECT jsonb_array_elements_text(
+            convert_from(selection.canonical_payload,'UTF8')::jsonb->'selected_evidence_item_ids')::uuid)),'[]'::jsonb))
+    INTO result_value
+    FROM bid_evidence_selection_artifacts selection
+    JOIN bid_evidence_match_reports report ON report.id=selection.matching_report_id
+    JOIN bid_evidence_bundle_artifacts bundle ON bundle.matching_report_id=report.id
+    WHERE selection.id=typed.pick_set_artifact_id AND selection.content_sha256=typed.pick_set_sha256
+      AND selection.matching_report_id=typed.pick_set_matching_report_id AND selection.selection_kind='user_pick_set'
+      AND selection.project_id=typed.project_id AND selection.workspace_id=typed.workspace_id
+      AND report.requirement_revision_id IN (SELECT requirement_revision_id
+        FROM bid_workspace_requirement_projection_items WHERE projection_id=typed.requirement_projection_id)
+      AND (SELECT count(*) FROM bid_evidence_bundle_items item WHERE item.evidence_bundle_id=bundle.id
+        AND item.id IN (SELECT jsonb_array_elements_text(
+          convert_from(selection.canonical_payload,'UTF8')::jsonb->'selected_evidence_item_ids')::uuid))
+        =jsonb_array_length(convert_from(selection.canonical_payload,'UTF8')::jsonb->'selected_evidence_item_ids');
+  IF result_value IS NULL THEN RAISE EXCEPTION 'FROZEN_USER_PICK_SET_INVALID' USING ERRCODE='23514'; END IF;
+  PERFORM kb_knowledge_require_matching_attestation_v2(
+    (result_value->>'attestation_id')::uuid,(result_value->>'attestation_sha256')::kb_sha256);
+  RETURN result_value;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_publish_content_generation(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256,
+  p_attestation_id uuid,p_attestation_sha256 kb_sha256,p_matches jsonb,
+  p_candidate_id uuid,p_candidate_payload bytea,p_candidate_sha256 kb_sha256,p_operations jsonb
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE typed bid_content_generation_request_identities%ROWTYPE; request_value bid_async_request_snapshot_artifacts%ROWTYPE;
+  requirement record; requirement_match jsonb; evidence_item jsonb; evidence_items jsonb;
+  report_id uuid; report_payload bytea; report_sha kb_sha256; bundle_id uuid; item_id uuid;
+  selection_id uuid; selection_json jsonb; selection_payload bytea; selection_sha kb_sha256;
+  item_payload jsonb; bundle_bare jsonb; bundle_payload jsonb; bundle_sha kb_sha256; created timestamptz;
+  candidate_json jsonb; ordinal_value integer:=0; item_ordinal integer; operation_value jsonb; published_identity jsonb; result_sha kb_sha256;
+BEGIN
+  SELECT * INTO STRICT typed FROM bid_content_generation_request_identities
+    WHERE request_artifact_id=p_request_artifact_id AND request_revision=p_request_revision
+      AND frozen_input_sha256=p_frozen_input_sha256 FOR UPDATE;
+  SELECT * INTO STRICT request_value FROM bid_async_request_snapshot_artifacts WHERE id=p_request_artifact_id FOR UPDATE;
+  IF request_value.status='succeeded' THEN RETURN request_value.result_identity; END IF;
+  IF request_value.status<>'pending' THEN RAISE EXCEPTION 'REQUEST_NOT_PENDING' USING ERRCODE='23514'; END IF;
+  PERFORM kb_knowledge_require_matching_attestation_v2(p_attestation_id,p_attestation_sha256);
+  IF jsonb_typeof(p_matches)<>'array'
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements(p_matches) value
+       WHERE NOT kb_bid_v2_json_keys_exact(value,ARRAY['requirement_revision_id','evidence_bundle_id','items'])
+         OR NOT kb_bid_v2_uuid_text(value->>'requirement_revision_id')
+         OR NOT kb_bid_v2_uuid_text(value->>'evidence_bundle_id') OR jsonb_typeof(value->'items')<>'array')
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements(p_matches) value GROUP BY value->>'requirement_revision_id' HAVING count(*)<>1)
+     OR (typed.evidence_selection_mode='system_proposed' AND EXISTS (SELECT 1 FROM bid_workspace_requirement_projection_items item
+       WHERE item.projection_id=typed.requirement_projection_id AND NOT EXISTS (
+         SELECT 1 FROM jsonb_array_elements(p_matches) value
+         WHERE (value->>'requirement_revision_id')::uuid=item.requirement_revision_id)))
+     OR EXISTS (SELECT 1 FROM jsonb_array_elements(p_matches) value WHERE NOT EXISTS (
+         SELECT 1 FROM bid_workspace_requirement_projection_items item
+         WHERE item.projection_id=typed.requirement_projection_id
+           AND item.requirement_revision_id=(value->>'requirement_revision_id')::uuid)) THEN
+    RAISE EXCEPTION 'EVIDENCE_ATTESTATION_INVALID' USING ERRCODE='23514';
+  END IF;
+  FOR requirement IN
+    SELECT revision.id FROM bid_workspace_requirement_projection_items item
+    JOIN bid_requirement_revision_artifacts revision ON revision.project_id=item.project_id AND revision.id=item.requirement_revision_id
+    WHERE item.projection_id=typed.requirement_projection_id
+      AND EXISTS (SELECT 1 FROM jsonb_array_elements(p_matches) value
+        WHERE (value->>'requirement_revision_id')::uuid=revision.id)
+    ORDER BY item.ordinal,revision.id
+  LOOP
+    SELECT value INTO STRICT requirement_match FROM jsonb_array_elements(p_matches) value
+      WHERE (value->>'requirement_revision_id')::uuid=requirement.id;
+    report_id:=gen_random_uuid(); bundle_id:=(requirement_match->>'evidence_bundle_id')::uuid; created:=clock_timestamp();
+    report_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',2,'request_artifact_id',p_request_artifact_id,
+      'requirement_revision_id',requirement.id,'retrieval_contract_version','knowledge-evidence-v2',
+      'matches',requirement_match->'items'));
+    report_sha:=kb_bid_v2_sha256_bytes(report_payload);
+    INSERT INTO bid_evidence_match_reports(id,project_id,workspace_id,requirement_revision_id,node_lineage_id,
+      retrieval_contract_version,knowledge_scope_attestation_id,knowledge_scope_attestation_sha256,
+      canonical_payload,content_sha256)
+    VALUES(report_id,typed.project_id,typed.workspace_id,requirement.id,typed.target_node_lineage_id,
+      'knowledge-evidence-v2',p_attestation_id,p_attestation_sha256,report_payload,report_sha);
+    evidence_items:='[]'::jsonb;
+    IF jsonb_array_length(requirement_match->'items')=0 THEN
+      item_id:=kb_bid_v2_deterministic_uuid(p_request_artifact_id::text||':'||requirement.id::text||':no-evidence');
+      item_payload:=jsonb_build_object('kind','no_evidence','evidence_item_id',item_id,'reason_code','NO_MATCHING_HIT');
+      evidence_items:=jsonb_build_array(item_payload);
+    ELSE
+      FOR evidence_item IN SELECT value FROM jsonb_array_elements(requirement_match->'items') LOOP
+        IF evidence_item->>'kind' NOT IN ('text_quote','image')
+           OR NOT kb_bid_v2_uuid_text(evidence_item->>'evidence_item_id') THEN
+          RAISE EXCEPTION 'EVIDENCE_ATTESTATION_INVALID' USING ERRCODE='23514';
+        END IF;
+        item_id:=(evidence_item->>'evidence_item_id')::uuid;
+        item_payload:=evidence_item;
+        evidence_items:=evidence_items||jsonb_build_array(item_payload);
+      END LOOP;
+    END IF;
+    bundle_bare:=jsonb_build_object('schema_version',1,'evidence_bundle_id',bundle_id,'project_id',typed.project_id,
+      'workspace_id',typed.workspace_id,'workspace_scope','project_wide','requirement_revision_id',requirement.id,
+      'matching_report_id',report_id,'knowledge_scope_attestation_id',p_attestation_id,
+      'knowledge_scope_attestation_sha256',p_attestation_sha256,'items',evidence_items,
+      'created_at',to_char(created AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+    bundle_sha:=kb_bid_v2_sha256_bytes(convert_to(bundle_bare::text,'UTF8'));
+    bundle_payload:=bundle_bare||jsonb_build_object('bundle_sha256',bundle_sha);
+    INSERT INTO bid_evidence_bundle_artifacts(id,project_id,workspace_id,requirement_revision_id,matching_report_id,
+      canonical_payload,content_sha256,created_at)
+    VALUES(bundle_id,typed.project_id,typed.workspace_id,requirement.id,report_id,bundle_payload,bundle_sha,created);
+    item_ordinal:=0;
+    FOR item_payload IN SELECT value FROM jsonb_array_elements(evidence_items) LOOP
+      INSERT INTO bid_evidence_bundle_items(id,project_id,workspace_id,evidence_bundle_id,ordinal,item_kind,
+        source_media_revision_id,item_payload,content_sha256)
+      VALUES((item_payload->>'evidence_item_id')::uuid,typed.project_id,typed.workspace_id,bundle_id,item_ordinal,
+        item_payload->>'kind',CASE WHEN item_payload->>'kind'='image' THEN (item_payload->>'image_artifact_revision_id')::uuid END,
+        item_payload,kb_bid_v2_sha256_bytes(convert_to(item_payload::text,'UTF8')));
+      IF item_payload->>'kind'='image' THEN
+        INSERT INTO bid_evidence_asset_artifacts(id,project_id,workspace_id,evidence_bundle_id,evidence_item_id,
+          image_artifact_revision_id,object_ref,content_sha256,media_type,width,height,page_ordinal,bounding_region)
+        VALUES((item_payload->>'evidence_item_id')::uuid,typed.project_id,typed.workspace_id,bundle_id,
+          (item_payload->>'evidence_item_id')::uuid,(item_payload->>'image_artifact_revision_id')::uuid,
+          (item_payload->>'object_ref')::kb_object_ref,(item_payload->>'sha256')::kb_sha256,item_payload->>'media_type',
+          (item_payload->>'width')::integer,(item_payload->>'height')::integer,
+          CASE WHEN jsonb_typeof(item_payload->'page_ordinal')='null' THEN NULL ELSE (item_payload->>'page_ordinal')::integer END,
+          CASE WHEN jsonb_typeof(item_payload->'bounding_region')='null' THEN NULL ELSE item_payload->'bounding_region' END);
+        INSERT INTO object_owner_references(object_ref,owner_kind,owner_id,occurrence,created_by)
+        VALUES((item_payload->>'object_ref')::kb_object_ref,'bid_evidence_asset',(item_payload->>'evidence_item_id')::uuid,
+          'frozen-media','system:content-generate-v2');
+        INSERT INTO bid_workspace_asset_artifacts(id,project_id,workspace_id,object_ref,content_sha256,
+          media_type,file_name,byte_length,source,created_by)
+        SELECT (item_payload->>'evidence_item_id')::uuid,typed.project_id,typed.workspace_id,
+          registry.object_ref,registry.digest,registry.media_type,item_payload->>'frozen_document_display_name',
+          registry.byte_length,'ai_evidence','system:content-generate-v2'
+        FROM object_registry registry WHERE registry.object_ref=(item_payload->>'object_ref')::kb_object_ref
+          AND registry.digest=(item_payload->>'sha256')::kb_sha256 AND registry.state='available';
+        IF NOT FOUND THEN RAISE EXCEPTION 'EVIDENCE_MEDIA_OBJECT_UNAVAILABLE' USING ERRCODE='23514'; END IF;
+        INSERT INTO object_owner_references(object_ref,owner_kind,owner_id,occurrence,created_by)
+        VALUES((item_payload->>'object_ref')::kb_object_ref,'bid_workspace_asset',(item_payload->>'evidence_item_id')::uuid,
+          'evidence-media','system:content-generate-v2');
+      END IF;
+      item_ordinal:=item_ordinal+1;
+    END LOOP;
+    IF typed.evidence_selection_mode='system_proposed' THEN
+      selection_id:=kb_bid_v2_deterministic_uuid(p_request_artifact_id::text||':'||report_id::text||':system-proposed');
+      selection_json:=jsonb_build_object('schema_version',1,'selection_id',selection_id,
+        'selection_kind','system_proposed','matching_report_id',report_id,
+        'selected_evidence_item_ids',coalesce((SELECT jsonb_agg((item->>'evidence_item_id')::uuid ORDER BY ordinal)
+          FROM jsonb_array_elements(evidence_items) WITH ORDINALITY value(item,ordinal)
+          WHERE item->>'kind'<>'no_evidence'),'[]'::jsonb));
+      selection_payload:=kb_bid_v2_json_payload(selection_json);selection_sha:=kb_bid_v2_sha256_bytes(selection_payload);
+      INSERT INTO bid_evidence_selection_artifacts(id,project_id,workspace_id,selection_kind,matching_report_id,
+        canonical_payload,content_sha256,actor)
+      VALUES(selection_id,typed.project_id,typed.workspace_id,'system_proposed',report_id,
+        selection_payload,selection_sha,NULL);
+    END IF;
+    INSERT INTO bid_content_generation_request_evidence_bundles(request_artifact_id,project_id,workspace_id,ordinal,
+      evidence_bundle_id,evidence_bundle_sha256)
+    VALUES(p_request_artifact_id,typed.project_id,typed.workspace_id,ordinal_value,bundle_id,bundle_sha);
+    ordinal_value:=ordinal_value+1;
+  END LOOP;
+  result_sha:=kb_bid_v2_sha256_bytes(kb_bid_v2_json_payload(jsonb_build_object('evidence_bundle_count',ordinal_value)));
+  INSERT INTO bid_async_stage_receipts(request_artifact_id,stage_kind,frozen_input_sha256,result_identity,result_sha256)
+  VALUES(p_request_artifact_id,'evidence_match',p_frozen_input_sha256,
+    jsonb_build_object('evidence_bundle_count',ordinal_value),result_sha);
+  IF typed.request_operation='generate' THEN
+    IF p_candidate_id IS NULL OR p_candidate_payload IS NULL OR p_candidate_sha256 IS NULL
+       OR p_candidate_sha256<>kb_bid_v2_sha256_bytes(p_candidate_payload) THEN
+      RAISE EXCEPTION 'AGENT_OUTPUT_INVALID' USING ERRCODE='23514';
+    END IF;
+    candidate_json:=convert_from(p_candidate_payload,'UTF8')::jsonb;
+    IF NOT kb_bid_v2_json_keys_exact(candidate_json,ARRAY['schema_version','operations','factual_claims','notices'])
+       OR candidate_json->'schema_version' IS DISTINCT FROM '1'::jsonb
+       OR jsonb_typeof(candidate_json->'operations') IS DISTINCT FROM 'array'
+       OR jsonb_typeof(candidate_json->'factual_claims') IS DISTINCT FROM 'array'
+       OR jsonb_typeof(candidate_json->'notices') IS DISTINCT FROM 'array'
+       OR candidate_json->'operations' IS DISTINCT FROM p_operations THEN
+      RAISE EXCEPTION 'AGENT_OUTPUT_INVALID' USING ERRCODE='23514';
+    END IF;
+    IF EXISTS (SELECT 1 FROM jsonb_array_elements(candidate_json->'factual_claims') claim
+         WHERE NOT kb_bid_v2_json_keys_exact(claim,ARRAY['client_operation_ref','utf8_start','utf8_end','evidence_bundle_id','evidence_item_id'])
+           OR NOT kb_bid_v2_uuid_text(claim->>'evidence_bundle_id') OR NOT kb_bid_v2_uuid_text(claim->>'evidence_item_id')
+           OR coalesce(claim->>'utf8_start','')!~'^(0|[1-9][0-9]*)$' OR coalesce(claim->>'utf8_end','')!~'^[1-9][0-9]*$'
+           OR (claim->>'utf8_end')::bigint<=(claim->>'utf8_start')::bigint
+           OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(candidate_json->'operations') operation
+             WHERE operation->>'client_operation_ref'=claim->>'client_operation_ref')
+           OR NOT EXISTS (SELECT 1 FROM bid_content_generation_request_evidence_bundles request_bundle
+             JOIN bid_evidence_bundle_items item ON item.evidence_bundle_id=request_bundle.evidence_bundle_id
+             WHERE request_bundle.request_artifact_id=p_request_artifact_id
+               AND request_bundle.evidence_bundle_id=(claim->>'evidence_bundle_id')::uuid
+               AND item.id=(claim->>'evidence_item_id')::uuid AND item.item_kind<>'no_evidence'))
+       OR EXISTS (SELECT 1 FROM jsonb_path_query(candidate_json->'operations',
+           'strict $.** ? (@.kind == "evidence_ref")') reference
+         WHERE NOT kb_bid_v2_uuid_text(reference->>'evidence_bundle_id')
+           OR NOT kb_bid_v2_uuid_text(reference->>'evidence_item_id')
+           OR NOT EXISTS (SELECT 1 FROM bid_content_generation_request_evidence_bundles request_bundle
+             JOIN bid_evidence_bundle_items item ON item.evidence_bundle_id=request_bundle.evidence_bundle_id
+             WHERE request_bundle.request_artifact_id=p_request_artifact_id
+               AND request_bundle.evidence_bundle_id=(reference->>'evidence_bundle_id')::uuid
+               AND item.id=(reference->>'evidence_item_id')::uuid AND item.item_kind<>'no_evidence'))
+       OR EXISTS (SELECT 1 FROM jsonb_array_elements(candidate_json->'operations') operation
+         WHERE operation#>>'{block,kind}'='image' AND (
+           NOT kb_bid_v2_uuid_text(operation#>>'{block,content,asset_revision_id}')
+           OR NOT EXISTS (SELECT 1 FROM bid_content_generation_request_evidence_bundles request_bundle
+             JOIN bid_evidence_bundle_items item ON item.evidence_bundle_id=request_bundle.evidence_bundle_id
+             WHERE request_bundle.request_artifact_id=p_request_artifact_id
+               AND item.id=(operation#>>'{block,content,asset_revision_id}')::uuid AND item.item_kind='image'))) THEN
+      RAISE EXCEPTION 'AGENT_EVIDENCE_REFERENCE_INVALID' USING ERRCODE='23514';
+    END IF;
+    INSERT INTO bid_candidate_artifacts(id,project_id,workspace_id,candidate_kind,
+      base_workspace_revision_id,base_workspace_sha256,request_artifact_id,request_kind,request_revision,
+      request_sha256,request_operation,state,canonical_payload,content_sha256)
+    VALUES(p_candidate_id,typed.project_id,typed.workspace_id,'content',typed.base_workspace_revision_id,
+      typed.base_workspace_sha256,p_request_artifact_id,'content_generate',typed.request_revision,
+      typed.request_sha256,'generate','proposed',p_candidate_payload,p_candidate_sha256);
+    ordinal_value:=0;
+    FOR operation_value IN SELECT value FROM jsonb_array_elements(candidate_json->'operations') LOOP
+      INSERT INTO bid_candidate_operations(candidate_id,ordinal,operation,operation_sha256)
+      VALUES(p_candidate_id,ordinal_value,operation_value,
+        kb_bid_v2_sha256_bytes(convert_to(operation_value::text,'UTF8')));
+      ordinal_value:=ordinal_value+1;
+    END LOOP;
+    INSERT INTO bid_async_stage_receipts(request_artifact_id,stage_kind,frozen_input_sha256,result_identity,result_sha256)
+    VALUES(p_request_artifact_id,'agent_generate',p_frozen_input_sha256,
+      jsonb_build_object('artifact_id',p_candidate_id,'sha256',p_candidate_sha256),p_candidate_sha256);
+    published_identity:=jsonb_build_object('artifact_id',p_candidate_id,'sha256',p_candidate_sha256);
+  ELSE
+    published_identity:=jsonb_build_object('artifact_id',p_request_artifact_id,'sha256',result_sha);
+  END IF;
+  UPDATE bid_async_request_snapshot_artifacts SET status='succeeded',result_identity=published_identity,
+    finished_at=clock_timestamp() WHERE id=p_request_artifact_id;
+  RETURN published_identity;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_mark_content_generation_failed(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256,p_error_code text
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+  PERFORM 1 FROM bid_content_generation_request_identities
+    WHERE request_artifact_id=p_request_artifact_id AND request_revision=p_request_revision
+      AND frozen_input_sha256=p_frozen_input_sha256;
+  IF NOT FOUND THEN RAISE EXCEPTION 'FROZEN_INPUT_MISSING' USING ERRCODE='P0002'; END IF;
+  UPDATE bid_async_request_snapshot_artifacts SET status='failed',
+    error_code=CASE WHEN p_error_code IN ('INPUT_SCHEMA_INVALID','FROZEN_INPUT_MISSING','FROZEN_INPUT_DIGEST_MISMATCH',
+      'REQUEST_OBSOLETE','WORKSPACE_CAS_CONFLICT','AGENT_OUTPUT_INVALID','EVIDENCE_UNAVAILABLE')
+      THEN p_error_code ELSE 'AGENT_OUTPUT_INVALID' END,
+    finished_at=clock_timestamp()
+  WHERE id=p_request_artifact_id AND status='pending';
+END $$;
+
+CREATE FUNCTION kb_bid_v2_create_evidence_pick_set(
+  p_workspace_id uuid,p_matching_report_id uuid,p_selected_item_ids uuid[],p_actor kb_actor_identity,
+  p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE report bid_evidence_match_reports%ROWTYPE; selection_id uuid:=gen_random_uuid();
+  replay bytea; payload_json jsonb; payload bytea; digest kb_sha256; response jsonb; response_bytes bytea;
+BEGIN
+  replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.evidence-pick-set.create',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  SELECT * INTO STRICT report FROM bid_evidence_match_reports
+    WHERE id=p_matching_report_id AND workspace_id=p_workspace_id;
+  PERFORM kb_bid_v2_require_project_owner(report.project_id,p_actor);
+  IF cardinality(coalesce(p_selected_item_ids,ARRAY[]::uuid[]))=0
+     OR cardinality(p_selected_item_ids)<>(SELECT count(DISTINCT id) FROM unnest(p_selected_item_ids) id)
+     OR NOT EXISTS (SELECT 1 FROM bid_evidence_bundle_artifacts bundle
+       WHERE bundle.matching_report_id=p_matching_report_id
+       AND (SELECT count(*) FROM bid_evidence_bundle_items item
+         WHERE item.evidence_bundle_id=bundle.id AND item.item_kind<>'no_evidence'
+           AND item.id=ANY(p_selected_item_ids))=cardinality(p_selected_item_ids)) THEN
+    RAISE EXCEPTION 'EVIDENCE_PICK_SET_INVALID' USING ERRCODE='23514';
+  END IF;
+  payload_json:=jsonb_build_object('schema_version',1,'selection_id',selection_id,
+    'selection_kind','user_pick_set','matching_report_id',p_matching_report_id,
+    'selected_evidence_item_ids',to_jsonb(p_selected_item_ids));
+  payload:=kb_bid_v2_json_payload(payload_json);digest:=kb_bid_v2_sha256_bytes(payload);
+  INSERT INTO bid_evidence_selection_artifacts(id,project_id,workspace_id,selection_kind,matching_report_id,
+    canonical_payload,content_sha256,actor)
+  VALUES(selection_id,report.project_id,p_workspace_id,'user_pick_set',p_matching_report_id,payload,digest,p_actor);
+  response:=payload_json||jsonb_build_object('sha256',digest);response_bytes:=convert_to(response::text,'UTF8');
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
+    entity_kind,entity_locator,after_revision,after_sha256)
+  VALUES(gen_random_uuid(),1,'bid.v2.evidence-pick-set.create',p_actor,p_idempotency_key,p_request_sha256,
+    kb_bid_v2_sha256_bytes(response_bytes),'evidence_pick_set',jsonb_build_object('workspace_id',p_workspace_id,'selection_id',selection_id),1,digest);
+  PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.evidence-pick-set.create',p_idempotency_key,201,response_bytes);
+  RETURN response;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_list_evidence_pick_sets(p_workspace_id uuid,p_actor kb_actor_identity)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE project_id uuid;
+BEGIN
+  SELECT workspace.project_id INTO STRICT project_id FROM bid_submission_workspaces workspace WHERE workspace.id=p_workspace_id;
+  PERFORM kb_bid_v2_require_project_owner(project_id,p_actor);
+  RETURN coalesce((SELECT jsonb_agg(convert_from(selection.canonical_payload,'UTF8')::jsonb
+    ||jsonb_build_object('sha256',selection.content_sha256) ORDER BY selection.created_at,selection.id)
+    FROM bid_evidence_selection_artifacts selection WHERE selection.workspace_id=p_workspace_id
+      AND selection.selection_kind='user_pick_set'),'[]'::jsonb);
+END $$;
+
+CREATE FUNCTION kb_bid_v2_create_node_evidence_pick_set(
+  p_workspace_id uuid,p_node_lineage_id uuid,p_matching_report_id uuid,p_selected_item_ids uuid[],
+  p_actor kb_actor_identity,p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+  PERFORM 1 FROM bid_evidence_match_reports report
+  WHERE report.id=p_matching_report_id AND report.workspace_id=p_workspace_id
+    AND report.node_lineage_id=p_node_lineage_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'NODE_EVIDENCE_REPORT_NOT_FOUND' USING ERRCODE='P0002'; END IF;
+  RETURN kb_bid_v2_create_evidence_pick_set(p_workspace_id,p_matching_report_id,p_selected_item_ids,
+    p_actor,p_idempotency_key,p_request_bytes,p_request_sha256);
+END $$;
+
+CREATE FUNCTION kb_bid_v2_get_node_evidence(
+  p_workspace_id uuid,p_node_lineage_id uuid,p_actor kb_actor_identity
+) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE project_id uuid;
+BEGIN
+  SELECT workspace.project_id INTO STRICT project_id FROM bid_submission_workspaces workspace WHERE workspace.id=p_workspace_id;
+  PERFORM kb_bid_v2_require_project_owner(project_id,p_actor);
+  IF NOT EXISTS (SELECT 1 FROM bid_outline_node_lineages lineage
+    WHERE lineage.id=p_node_lineage_id AND lineage.workspace_id=p_workspace_id) THEN
+    RAISE EXCEPTION 'NODE_NOT_FOUND' USING ERRCODE='P0002';
+  END IF;
+  RETURN jsonb_build_object('node_lineage_id',p_node_lineage_id,
+    'bundles',coalesce((SELECT jsonb_agg(bundle.canonical_payload
+      ORDER BY bundle.created_at,bundle.id) FROM bid_evidence_bundle_artifacts bundle
+      JOIN bid_evidence_match_reports report ON report.id=bundle.matching_report_id
+      WHERE bundle.workspace_id=p_workspace_id AND report.node_lineage_id=p_node_lineage_id),'[]'::jsonb),
+    'pick_sets',coalesce((SELECT jsonb_agg(convert_from(selection.canonical_payload,'UTF8')::jsonb
+      ORDER BY selection.created_at,selection.id) FROM bid_evidence_selection_artifacts selection
+      JOIN bid_evidence_match_reports report ON report.id=selection.matching_report_id
+      WHERE selection.workspace_id=p_workspace_id AND selection.selection_kind='user_pick_set'
+        AND report.node_lineage_id=p_node_lineage_id),'[]'::jsonb));
+END $$;
+
+CREATE FUNCTION kb_bid_v2_get_evidence_overview(p_workspace_id uuid,p_actor kb_actor_identity)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE project_id uuid;
+BEGIN
+  SELECT workspace.project_id INTO STRICT project_id FROM bid_submission_workspaces workspace WHERE workspace.id=p_workspace_id;
+  PERFORM kb_bid_v2_require_project_owner(project_id,p_actor);
+  RETURN jsonb_build_object(
+    'node_lineage_id',NULL,
+    'covered_requirement_ids',coalesce((SELECT jsonb_agg(DISTINCT bundle.requirement_revision_id)
+      FROM bid_evidence_bundle_artifacts bundle WHERE bundle.workspace_id=p_workspace_id
+        AND EXISTS (SELECT 1 FROM bid_evidence_bundle_items item
+          WHERE item.evidence_bundle_id=bundle.id AND item.item_kind<>'no_evidence')),'[]'::jsonb),
+    'missing_requirement_ids',coalesce((SELECT jsonb_agg(DISTINCT bundle.requirement_revision_id)
+      FROM bid_evidence_bundle_artifacts bundle WHERE bundle.workspace_id=p_workspace_id
+        AND NOT EXISTS (SELECT 1 FROM bid_evidence_bundle_items item
+          WHERE item.evidence_bundle_id=bundle.id AND item.item_kind<>'no_evidence')),'[]'::jsonb),
+    'bundles',coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'evidence_bundle_id',bundle.id,'title',CASE WHEN EXISTS (SELECT 1 FROM bid_evidence_bundle_items item
+        WHERE item.evidence_bundle_id=bundle.id AND item.item_kind<>'no_evidence') THEN '证据包' ELSE '未找到可用证据' END,
+      'requirement_revision_id',bundle.requirement_revision_id,'matching_report_id',bundle.matching_report_id,
+      'sha256',bundle.content_sha256,'items',bundle.canonical_payload->'items')
+      ORDER BY bundle.created_at,bundle.id) FROM bid_evidence_bundle_artifacts bundle
+      WHERE bundle.workspace_id=p_workspace_id),'[]'::jsonb));
+END $$;
+
+CREATE FUNCTION kb_bid_v2_quote_snapshot_payload_valid(
+  p_payload jsonb,p_project_id uuid,p_quote_id uuid,p_revision bigint,p_actor kb_actor_identity
+) RETURNS boolean LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE SET search_path=pg_catalog,public AS $$
+DECLARE line jsonb; ordinal bigint:=0; basis numeric; net numeric; tax numeric; gross numeric;
+  quantity numeric; unit_price numeric; tax_rate numeric; net_total numeric:=0; tax_total numeric:=0; gross_total numeric:=0;
+BEGIN
+  IF NOT kb_bid_v2_json_keys_exact(p_payload,ARRAY['schema_version','quote_id','project_id','revision','currency_code','currency_scale',
+      'tax_mode','title','notes','lines','net_total','tax_total','gross_total','ceiling','no_ceiling_review','fact_revision','pricing_revision','pricing_set_sha256'])
+    OR p_payload->>'schema_version'<>'1' OR p_payload->>'quote_id'<>p_quote_id::text
+    OR p_payload->>'project_id'<>p_project_id::text OR p_payload->>'revision'<>p_revision::text
+    OR p_payload->>'currency_code'<>'CNY' OR p_payload->>'currency_scale'<>'2'
+    OR p_payload->>'tax_mode' NOT IN ('tax_inclusive','tax_exclusive')
+    OR jsonb_typeof(p_payload->'title')<>'string' OR octet_length(btrim(p_payload->>'title')) NOT BETWEEN 1 AND 256
+    OR (jsonb_typeof(p_payload->'notes') NOT IN ('string','null'))
+    OR (jsonb_typeof(p_payload->'notes')='string' AND octet_length(p_payload->>'notes')>4096)
+    OR jsonb_typeof(p_payload->'lines')<>'array' OR jsonb_array_length(p_payload->'lines') NOT BETWEEN 1 AND 10000
+    OR jsonb_typeof(p_payload->'ceiling')<>'null' OR jsonb_typeof(p_payload->'fact_revision')<>'null'
+    OR jsonb_typeof(p_payload->'pricing_revision')<>'null' OR jsonb_typeof(p_payload->'pricing_set_sha256')<>'null'
+    OR NOT kb_bid_v2_json_keys_exact(p_payload->'no_ceiling_review',ARRAY['reviewed','reason','actor_kind','actor_id','at'])
+    OR p_payload#>>'{no_ceiling_review,reviewed}'<>'true' OR p_payload#>>'{no_ceiling_review,actor_kind}'<>'user'
+    OR p_payload#>>'{no_ceiling_review,actor_id}'<>substr(p_actor,6)
+    OR octet_length(btrim(p_payload#>>'{no_ceiling_review,reason}')) NOT BETWEEN 1 AND 1024
+    OR coalesce(p_payload#>>'{no_ceiling_review,at}','') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$'
+  THEN RETURN false; END IF;
+  FOR line IN SELECT value FROM jsonb_array_elements(p_payload->'lines') value LOOP
+    IF NOT kb_bid_v2_json_keys_exact(line,ARRAY['id','ordinal','description','pricing_mode','quantity','unit','unit_price','entered_amount',
+        'tax_rate','basis_amount','net_amount','tax_amount','gross_amount','user_confirmed'])
+      OR NOT kb_bid_v2_uuid_text(line->>'id') OR line->>'ordinal'<>ordinal::text
+      OR jsonb_typeof(line->'description')<>'string' OR octet_length(btrim(line->>'description')) NOT BETWEEN 1 AND 4096
+      OR line->>'pricing_mode' NOT IN ('unit_price','lump_sum') OR line->>'user_confirmed'<>'true'
+      OR coalesce(line->>'tax_rate','') !~ '^(0|1)\.[0-9]{6}$'
+      OR coalesce(line->>'basis_amount','') !~ '^(0|[1-9][0-9]{0,17})\.[0-9]{2}$'
+      OR coalesce(line->>'net_amount','') !~ '^(0|[1-9][0-9]{0,17})\.[0-9]{2}$'
+      OR coalesce(line->>'tax_amount','') !~ '^(0|[1-9][0-9]{0,17})\.[0-9]{2}$'
+      OR coalesce(line->>'gross_amount','') !~ '^(0|[1-9][0-9]{0,17})\.[0-9]{2}$'
+    THEN RETURN false; END IF;
+    tax_rate:=(line->>'tax_rate')::numeric;
+    IF line->>'pricing_mode'='unit_price' THEN
+      IF jsonb_typeof(line->'quantity')<>'string' OR coalesce(line->>'quantity','') !~ '^(0|[1-9][0-9]{0,8})\.[0-9]{6}$'
+        OR (line->>'quantity')::numeric<=0 OR jsonb_typeof(line->'unit')<>'string'
+        OR octet_length(btrim(line->>'unit')) NOT BETWEEN 1 AND 64
+        OR jsonb_typeof(line->'unit_price')<>'string' OR coalesce(line->>'unit_price','') !~ '^(0|[1-9][0-9]{0,11})\.[0-9]{6}$'
+        OR jsonb_typeof(line->'entered_amount')<>'null' THEN RETURN false; END IF;
+      quantity:=(line->>'quantity')::numeric;unit_price:=(line->>'unit_price')::numeric;
+      basis:=round(quantity*unit_price,2);
+    ELSE
+      IF jsonb_typeof(line->'quantity')<>'null' OR jsonb_typeof(line->'unit')<>'null'
+        OR jsonb_typeof(line->'unit_price')<>'null' OR jsonb_typeof(line->'entered_amount')<>'string'
+        OR coalesce(line->>'entered_amount','') !~ '^(0|[1-9][0-9]{0,17})\.[0-9]{2}$' THEN RETURN false; END IF;
+      basis:=(line->>'entered_amount')::numeric;
+    END IF;
+    IF p_payload->>'tax_mode'='tax_exclusive' THEN net:=basis;tax:=round(net*tax_rate,2);gross:=net+tax;
+    ELSE gross:=basis;net:=round(gross/(1+tax_rate),2);tax:=gross-net; END IF;
+    IF basis<>(line->>'basis_amount')::numeric OR net<>(line->>'net_amount')::numeric
+      OR tax<>(line->>'tax_amount')::numeric OR gross<>(line->>'gross_amount')::numeric THEN RETURN false; END IF;
+    net_total:=net_total+net;tax_total:=tax_total+tax;gross_total:=gross_total+gross;ordinal:=ordinal+1;
+  END LOOP;
+  RETURN coalesce(p_payload->>'net_total','')~'^(0|[1-9][0-9]{0,17})\.[0-9]{2}$'
+    AND coalesce(p_payload->>'tax_total','')~'^(0|[1-9][0-9]{0,17})\.[0-9]{2}$'
+    AND coalesce(p_payload->>'gross_total','')~'^(0|[1-9][0-9]{0,17})\.[0-9]{2}$'
+    AND net_total=(p_payload->>'net_total')::numeric AND tax_total=(p_payload->>'tax_total')::numeric
+    AND gross_total=(p_payload->>'gross_total')::numeric;
+EXCEPTION WHEN OTHERS THEN RETURN false;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_next_quote_snapshot_revision(p_project_id uuid,p_actor kb_actor_identity)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+  PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
+  RETURN jsonb_build_object('quote_id',kb_bid_v2_deterministic_uuid('quote:'||p_project_id::text),
+    'next_revision',coalesce((SELECT max(revision)+1 FROM bid_quote_snapshot_artifacts WHERE project_id=p_project_id),1));
+END $$;
+
+CREATE FUNCTION kb_bid_v2_advance_workspace_quote(
+  p_project_id uuid,p_quote_snapshot_id uuid,p_quote_snapshot_sha256 kb_sha256,p_actor kb_actor_identity
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE workspace bid_submission_workspaces%ROWTYPE; head bid_workspace_heads%ROWTYPE;
+  old_revision bid_workspace_revision_artifacts%ROWTYPE; new_revision_id uuid:=gen_random_uuid();
+  new_revision bigint; payload bytea; digest kb_sha256; node record; block record; binding record;
+  edge record; evidence record; checkpoint record; node_map jsonb:='{}'::jsonb; new_occurrence_id uuid;
+  new_parent_id uuid; evidence_revision bigint; evidence_payload bytea; evidence_sha kb_sha256;
+  checkpoint_payload bytea; checkpoint_sha kb_sha256;
+BEGIN
+  SELECT * INTO STRICT workspace FROM bid_submission_workspaces WHERE project_id=p_project_id;
+  SELECT * INTO STRICT head FROM bid_workspace_heads WHERE scope_id=workspace.id FOR UPDATE;
+  SELECT * INTO STRICT old_revision FROM bid_workspace_revision_artifacts
+    WHERE id=head.artifact_id AND content_sha256=head.artifact_sha256;
+  PERFORM 1 FROM bid_quote_snapshot_artifacts
+    WHERE project_id=p_project_id AND id=p_quote_snapshot_id AND content_sha256=p_quote_snapshot_sha256;
+  IF NOT FOUND THEN RAISE EXCEPTION 'QUOTE_SNAPSHOT_IDENTITY_INVALID' USING ERRCODE='23514'; END IF;
+  IF old_revision.quote_snapshot_id IS NOT DISTINCT FROM p_quote_snapshot_id
+     AND old_revision.quote_snapshot_sha256 IS NOT DISTINCT FROM p_quote_snapshot_sha256 THEN
+    RETURN jsonb_build_object('revision_id',old_revision.id,'sha256',old_revision.content_sha256,'replayed',true);
+  END IF;
+  SELECT coalesce(max(revision),0)+1 INTO new_revision FROM bid_workspace_revision_artifacts
+    WHERE workspace_id=workspace.id;
+  payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'reason','quote_snapshot_advanced',
+    'parent_revision_id',old_revision.id,'parent_sha256',old_revision.content_sha256,
+    'scope_revision_id',old_revision.scope_revision_id,
+    'requirement_projection_id',old_revision.requirement_projection_id,
+    'requirement_projection_sha256',old_revision.requirement_projection_sha256,
+    'document_settings_revision_id',old_revision.document_settings_revision_id,
+    'quote_snapshot_id',p_quote_snapshot_id,'quote_snapshot_sha256',p_quote_snapshot_sha256,
+    'node_revision_ids',coalesce((SELECT jsonb_agg(node_revision_id ORDER BY depth,ordinal,id)
+      FROM bid_workspace_node_occurrences WHERE workspace_revision_id=old_revision.id),'[]'::jsonb),
+    'block_revision_ids',coalesce((SELECT jsonb_agg(block_revision_id ORDER BY ordinal,id)
+      FROM bid_workspace_block_occurrences WHERE workspace_revision_id=old_revision.id),'[]'::jsonb),
+    'binding_revision_ids',coalesce((SELECT jsonb_agg(binding_revision_id ORDER BY ordinal,id)
+      FROM bid_workspace_binding_occurrences WHERE workspace_revision_id=old_revision.id),'[]'::jsonb)));
+  digest:=kb_bid_v2_sha256_bytes(payload);
+  INSERT INTO bid_workspace_revision_artifacts(id,project_id,workspace_id,revision,parent_revision_id,parent_sha256,
+    scope_revision_id,requirement_projection_id,requirement_projection_sha256,document_settings_revision_id,
+    quote_snapshot_id,quote_snapshot_sha256,canonical_payload,content_sha256,actor)
+  VALUES(new_revision_id,p_project_id,workspace.id,new_revision,old_revision.id,old_revision.content_sha256,
+    old_revision.scope_revision_id,old_revision.requirement_projection_id,old_revision.requirement_projection_sha256,
+    old_revision.document_settings_revision_id,p_quote_snapshot_id,p_quote_snapshot_sha256,payload,digest,p_actor);
+  FOR node IN SELECT * FROM bid_workspace_node_occurrences WHERE workspace_revision_id=old_revision.id
+    ORDER BY depth,ordinal,id
+  LOOP
+    new_occurrence_id:=gen_random_uuid();
+    new_parent_id:=CASE WHEN node.parent_occurrence_id IS NULL THEN NULL
+      ELSE (node_map->>node.parent_occurrence_id::text)::uuid END;
+    INSERT INTO bid_workspace_node_occurrences(id,project_id,workspace_revision_id,node_revision_id,
+      parent_occurrence_id,ordinal,depth)
+    VALUES(new_occurrence_id,p_project_id,new_revision_id,node.node_revision_id,new_parent_id,node.ordinal,node.depth);
+    node_map:=node_map||jsonb_build_object(node.id::text,new_occurrence_id);
+  END LOOP;
+  FOR block IN SELECT * FROM bid_workspace_block_occurrences WHERE workspace_revision_id=old_revision.id
+    ORDER BY ordinal,id
+  LOOP
+    INSERT INTO bid_workspace_block_occurrences(id,project_id,workspace_revision_id,node_occurrence_id,
+      block_revision_id,ordinal)
+    VALUES(gen_random_uuid(),p_project_id,new_revision_id,
+      (node_map->>block.node_occurrence_id::text)::uuid,block.block_revision_id,block.ordinal);
+  END LOOP;
+  FOR binding IN SELECT * FROM bid_workspace_binding_occurrences WHERE workspace_revision_id=old_revision.id
+    ORDER BY ordinal,id
+  LOOP
+    INSERT INTO bid_workspace_binding_occurrences(id,project_id,workspace_revision_id,binding_revision_id,ordinal)
+    VALUES(gen_random_uuid(),p_project_id,new_revision_id,binding.binding_revision_id,binding.ordinal);
+  END LOOP;
+  FOR evidence IN SELECT * FROM bid_submission_fulfillment_evidence_revision_artifacts
+    WHERE workspace_revision_id=old_revision.id ORDER BY evidence_lineage_id
+  LOOP
+    SELECT coalesce(max(revision),0)+1 INTO evidence_revision
+      FROM bid_submission_fulfillment_evidence_revision_artifacts
+      WHERE project_id=p_project_id AND evidence_lineage_id=evidence.evidence_lineage_id;
+    evidence_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,
+      'evidence_lineage_id',evidence.evidence_lineage_id,'revision',evidence_revision,
+      'workspace_revision_id',new_revision_id,'binding_revision_id',evidence.binding_revision_id,
+      'target_revision_id',evidence.target_revision_id,'target_kind',evidence.target_kind,
+      'state','stale','dependency_sha256',evidence.dependency_sha256));
+    evidence_sha:=kb_bid_v2_sha256_bytes(evidence_payload);
+    INSERT INTO bid_submission_fulfillment_evidence_revision_artifacts(id,project_id,workspace_id,
+      evidence_lineage_id,revision,workspace_revision_id,binding_revision_id,target_revision_id,target_kind,
+      dependency_sha256,state,canonical_payload,content_sha256)
+    VALUES(gen_random_uuid(),p_project_id,workspace.id,evidence.evidence_lineage_id,evidence_revision,
+      new_revision_id,evidence.binding_revision_id,evidence.target_revision_id,evidence.target_kind,
+      evidence.dependency_sha256,'stale',evidence_payload,evidence_sha);
+  END LOOP;
+  FOR edge IN SELECT * FROM bid_outline_lineage_edges WHERE workspace_revision_id=old_revision.id
+  LOOP
+    INSERT INTO bid_outline_lineage_edges(id,project_id,workspace_id,operation,from_lineage_id,to_lineage_id,
+      workspace_revision_id,created_at)
+    VALUES(gen_random_uuid(),p_project_id,workspace.id,edge.operation,edge.from_lineage_id,
+      edge.to_lineage_id,new_revision_id,edge.created_at);
+  END LOOP;
+  FOR checkpoint IN SELECT * FROM bid_outline_checkpoint_artifacts
+    WHERE workspace_revision_id=old_revision.id ORDER BY created_at DESC,id DESC LIMIT 1
+  LOOP
+    checkpoint_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,
+      'workspace_id',workspace.id,'workspace_revision_id',new_revision_id,'workspace_sha256',digest,
+      'requirement_projection_id',old_revision.requirement_projection_id,
+      'requirement_projection_sha256',old_revision.requirement_projection_sha256));
+    checkpoint_sha:=kb_bid_v2_sha256_bytes(checkpoint_payload);
+    INSERT INTO bid_outline_checkpoint_artifacts(id,project_id,workspace_id,workspace_revision_id,
+      requirement_projection_id,requirement_projection_sha256,canonical_payload,content_sha256,actor)
+    VALUES(gen_random_uuid(),p_project_id,workspace.id,new_revision_id,old_revision.requirement_projection_id,
+      old_revision.requirement_projection_sha256,checkpoint_payload,checkpoint_sha,p_actor);
+  END LOOP;
+  IF NOT kb_bid_v2_advance_workspace_head(workspace.id,old_revision.id,old_revision.content_sha256,
+      new_revision_id,digest) THEN
+    RAISE EXCEPTION 'WORKSPACE_HEAD_CAS_MISMATCH' USING ERRCODE='40001';
+  END IF;
+  UPDATE bid_candidate_artifacts SET state='obsolete',decided_at=clock_timestamp()
+    WHERE workspace_id=workspace.id AND base_workspace_revision_id=old_revision.id AND state='proposed';
+  UPDATE bid_async_request_snapshot_artifacts request_value SET status='obsolete',finished_at=clock_timestamp()
+    WHERE request_value.status='pending' AND request_value.id IN (
+      SELECT request_artifact_id FROM bid_outline_generation_request_identities
+        WHERE workspace_id=workspace.id AND base_workspace_revision_id=old_revision.id
+      UNION ALL
+      SELECT request_artifact_id FROM bid_content_generation_request_identities
+        WHERE workspace_id=workspace.id AND base_workspace_revision_id=old_revision.id);
+  RETURN jsonb_build_object('revision_id',new_revision_id,'sha256',digest,'replayed',false);
+END $$;
+
+CREATE FUNCTION kb_bid_v2_publish_quote_snapshot(
+  p_project_id uuid,p_snapshot_id uuid,p_expected_revision bigint,p_staging_id uuid,
+  p_object_ref kb_object_ref,p_content_sha256 kb_sha256,p_byte_length bigint,p_canonical_payload bytea,
+  p_actor kb_actor_identity,p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE replay bytea; response jsonb; response_bytes bytea; project_status text; actual_revision bigint;
+  quote_id uuid:=kb_bid_v2_deterministic_uuid('quote:'||p_project_id::text);payload jsonb; workspace_receipt jsonb;
+BEGIN
+  PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
+  replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.quote_snapshot.publish',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  SELECT status INTO STRICT project_status FROM bid_projects WHERE id=p_project_id FOR UPDATE;
+  IF project_status<>'open' THEN RAISE EXCEPTION 'PROJECT_ENDED' USING ERRCODE='55000'; END IF;
+  SELECT coalesce(max(revision)+1,1) INTO actual_revision FROM bid_quote_snapshot_artifacts WHERE project_id=p_project_id;
+  IF p_expected_revision<>actual_revision THEN RAISE EXCEPTION 'QUOTE_REVISION_CONFLICT' USING ERRCODE='40001'; END IF;
+  IF p_content_sha256<>kb_bid_v2_sha256_bytes(p_canonical_payload) OR p_object_ref<>'objects/'||p_content_sha256
+    OR p_byte_length<>octet_length(p_canonical_payload) THEN RAISE EXCEPTION 'QUOTE_SNAPSHOT_OBJECT_IDENTITY_INVALID' USING ERRCODE='23514'; END IF;
+  payload:=convert_from(p_canonical_payload,'UTF8')::jsonb;
+  IF NOT kb_bid_v2_quote_snapshot_payload_valid(payload,p_project_id,quote_id,p_expected_revision,p_actor)
+    THEN RAISE EXCEPTION 'QUOTE_SNAPSHOT_SCHEMA_INVALID' USING ERRCODE='23514'; END IF;
+  PERFORM kb_object_upload_commit(p_staging_id,p_object_ref,p_content_sha256,'application/json',p_byte_length,
+    'bid_quote_snapshot',p_snapshot_id,'canonical',p_actor);
+  INSERT INTO bid_quote_snapshot_artifacts(id,project_id,revision,currency,canonical_payload,content_sha256,actor)
+  VALUES(p_snapshot_id,p_project_id,p_expected_revision,'CNY',p_canonical_payload,p_content_sha256,p_actor);
+  INSERT INTO bid_quote_snapshot_object_identities(quote_snapshot_id,project_id,object_ref,content_sha256)
+  VALUES(p_snapshot_id,p_project_id,p_object_ref,p_content_sha256);
+  INSERT INTO bid_quote_snapshot_current(scope_id,artifact_id,artifact_sha256,generation,created_at)
+  VALUES(p_project_id,p_snapshot_id,p_content_sha256,p_expected_revision,clock_timestamp())
+  ON CONFLICT(scope_id) DO UPDATE SET artifact_id=EXCLUDED.artifact_id,
+    artifact_sha256=EXCLUDED.artifact_sha256,generation=EXCLUDED.generation,
+    created_at=bid_quote_snapshot_current.created_at;
+  workspace_receipt:=kb_bid_v2_advance_workspace_quote(p_project_id,p_snapshot_id,p_content_sha256,p_actor);
+  response:=jsonb_build_object('quote_snapshot_id',p_snapshot_id,'quote_id',quote_id,'revision',p_expected_revision,
+    'currency','CNY','sha256',p_content_sha256,'object_ref',p_object_ref,'byte_length',p_byte_length,
+    'workspace_revision',workspace_receipt);
+  response_bytes:=convert_to(response::text,'UTF8');
+  INSERT INTO audit_events(id,schema_version,operation,actor_identity,idempotency_key,request_sha256,response_sha256,
+    entity_kind,entity_locator,after_revision,after_sha256)
+  VALUES(gen_random_uuid(),1,'bid.v2.quote_snapshot.publish',p_actor,p_idempotency_key,p_request_sha256,
+    kb_bid_v2_sha256_bytes(response_bytes),'bid_quote_snapshot',jsonb_build_object('project_id',p_project_id,'quote_snapshot_id',p_snapshot_id),
+    p_expected_revision,p_content_sha256);
+  PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.quote_snapshot.publish',p_idempotency_key,201,response_bytes);
+  RETURN response;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_list_quote_snapshots(p_project_id uuid,p_actor kb_actor_identity)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+  PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
+  RETURN coalesce((SELECT jsonb_agg(convert_from(snapshot.canonical_payload,'UTF8')::jsonb||jsonb_build_object(
+      'quote_snapshot_id',snapshot.id,'sha256',snapshot.content_sha256,'object_ref',object_identity.object_ref,
+      'created_at',snapshot.created_at,'is_current',current_value.artifact_id=snapshot.id) ORDER BY snapshot.revision DESC)
+    FROM bid_quote_snapshot_artifacts snapshot JOIN bid_quote_snapshot_object_identities object_identity ON object_identity.quote_snapshot_id=snapshot.id
+    LEFT JOIN bid_quote_snapshot_current current_value ON current_value.scope_id=snapshot.project_id
+    WHERE snapshot.project_id=p_project_id),'[]'::jsonb);
+END $$;
+
+CREATE FUNCTION kb_bid_v2_get_quote_snapshot(p_project_id uuid,p_snapshot_id uuid,p_actor kb_actor_identity)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE result jsonb;
+BEGIN
+  PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
+  SELECT convert_from(snapshot.canonical_payload,'UTF8')::jsonb||jsonb_build_object(
+      'quote_snapshot_id',snapshot.id,'sha256',snapshot.content_sha256,'object_ref',object_identity.object_ref,
+      'created_at',snapshot.created_at,'is_current',current_value.artifact_id=snapshot.id)
+    INTO result FROM bid_quote_snapshot_artifacts snapshot JOIN bid_quote_snapshot_object_identities object_identity ON object_identity.quote_snapshot_id=snapshot.id
+    LEFT JOIN bid_quote_snapshot_current current_value ON current_value.scope_id=snapshot.project_id
+    WHERE snapshot.project_id=p_project_id AND snapshot.id=p_snapshot_id;
+  IF result IS NULL THEN RAISE EXCEPTION 'QUOTE_SNAPSHOT_NOT_FOUND' USING ERRCODE='P0002'; END IF;
+  RETURN result;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_get_current_assessments(
+  p_workspace_id uuid,p_actor kb_actor_identity
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE workspace bid_submission_workspaces%ROWTYPE; head bid_workspace_heads%ROWTYPE;
+  revision bid_workspace_revision_artifacts%ROWTYPE; asset_sha kb_sha256; input_payload bytea; input_sha kb_sha256;
+  quote_id uuid; quote_sha kb_sha256;
+  outline_id uuid:=gen_random_uuid(); submission_id uuid:=gen_random_uuid();
+  outline_existing uuid; submission_existing uuid; requirement_id uuid;
+  outline_issues jsonb:='[]'::jsonb; submission_issues jsonb:='[]'::jsonb;
+  outline_status text; submission_status text; payload bytea; digest kb_sha256;
+BEGIN
+  SELECT * INTO STRICT workspace FROM bid_submission_workspaces WHERE id=p_workspace_id;
+  PERFORM kb_bid_v2_require_project_owner(workspace.project_id,p_actor);
+  SELECT * INTO STRICT head FROM bid_workspace_heads WHERE scope_id=p_workspace_id;
+  SELECT * INTO STRICT revision FROM bid_workspace_revision_artifacts
+    WHERE id=head.artifact_id AND content_sha256=head.artifact_sha256;
+  quote_id:=revision.quote_snapshot_id;
+  quote_sha:=revision.quote_snapshot_sha256;
+  asset_sha:=kb_bid_v2_sha256_bytes(kb_bid_v2_json_payload(coalesce((SELECT jsonb_agg(jsonb_build_object(
+    'asset_revision_id',asset.id,'sha256',asset.content_sha256,'media_type',asset.media_type)
+    ORDER BY asset.id) FROM bid_workspace_asset_artifacts asset WHERE asset.workspace_id=p_workspace_id AND EXISTS (
+      SELECT 1 FROM bid_workspace_block_occurrences occurrence
+      JOIN bid_content_block_revision_artifacts block ON block.id=occurrence.block_revision_id
+      WHERE occurrence.workspace_revision_id=revision.id
+        AND block.block_payload->>'asset_revision_id'=asset.id::text)),'[]'::jsonb)));
+  input_payload:=kb_bid_v2_json_payload(jsonb_build_object('workspace_revision_id',revision.id,
+    'workspace_sha256',revision.content_sha256,'scope_revision_id',revision.scope_revision_id,
+    'requirement_projection_id',revision.requirement_projection_id,
+    'requirement_projection_sha256',revision.requirement_projection_sha256,
+    'document_settings_revision_id',revision.document_settings_revision_id,'asset_set_sha256',asset_sha,
+    'quote_snapshot_id',quote_id,'quote_snapshot_sha256',quote_sha));
+  input_sha:=kb_bid_v2_sha256_bytes(input_payload);
+  IF NOT EXISTS (SELECT 1 FROM bid_workspace_node_occurrences WHERE workspace_revision_id=revision.id) THEN
+    outline_issues:=outline_issues||jsonb_build_array(jsonb_build_object('issue_id',kb_bid_v2_deterministic_uuid(input_sha||':OUTLINE_EMPTY'),
+      'code','OUTLINE_EMPTY','severity','high','message','大纲为空，请先创建或接受章节结构'));
+  END IF;
+  FOR requirement_id IN SELECT requirement.id FROM bid_workspace_requirement_projection_items item
+    JOIN bid_requirement_revision_artifacts requirement ON requirement.project_id=item.project_id
+      AND requirement.id=item.requirement_revision_id
+    WHERE item.projection_id=revision.requirement_projection_id AND requirement.requiredness='mandatory'
+      AND requirement.lifecycle='current' AND NOT EXISTS (
+        SELECT 1 FROM bid_workspace_binding_occurrences occurrence
+        JOIN bid_outline_fulfillment_binding_revision_artifacts binding
+          ON binding.project_id=occurrence.project_id AND binding.id=occurrence.binding_revision_id
+        WHERE occurrence.workspace_revision_id=revision.id
+          AND binding.need_occurrence_id=ANY(kb_bid_v2_fulfillment_need_ids(requirement.fulfillment_expr))
+          AND binding.requirement_projection_id=revision.requirement_projection_id AND binding.state='bound')
+  LOOP
+    outline_issues:=outline_issues||jsonb_build_array(jsonb_build_object('issue_id',kb_bid_v2_deterministic_uuid(input_sha||':MANDATORY_REQUIREMENT_UNBOUND:'||requirement_id::text),
+      'code','MANDATORY_REQUIREMENT_UNBOUND','severity','high','message','必选要求尚未映射到投标内容'));
+  END LOOP;
+  submission_issues:=outline_issues;
+  IF quote_id IS NULL AND EXISTS (SELECT 1 FROM bid_workspace_requirement_projection_items item
+      JOIN bid_requirement_revision_artifacts requirement ON requirement.project_id=item.project_id
+        AND requirement.id=item.requirement_revision_id
+      WHERE item.projection_id=revision.requirement_projection_id
+        AND requirement.lifecycle='current' AND requirement.requirement_kind='pricing') THEN
+    submission_issues:=submission_issues||jsonb_build_array(jsonb_build_object(
+      'issue_id',kb_bid_v2_deterministic_uuid(input_sha||':QUOTE_SNAPSHOT_MISSING'),
+      'code','QUOTE_SNAPSHOT_MISSING','severity','warning',
+      'message','报价要求存在但尚未冻结报价快照，请复核'));
+  END IF;
+  IF EXISTS (SELECT 1 FROM bid_workspace_requirement_projection_artifacts projection
+      JOIN bid_requirement_set_artifacts requirement_set ON requirement_set.id=projection.requirement_set_id
+      JOIN bid_document_set_items item ON item.document_set_id=requirement_set.document_set_id
+      WHERE projection.id=revision.requirement_projection_id AND item.disposition<>'ready') THEN
+    submission_issues:=submission_issues||jsonb_build_array(jsonb_build_object(
+      'issue_id',kb_bid_v2_deterministic_uuid(input_sha||':DOCUMENT_INPUT_NOT_READY'),
+      'code','DOCUMENT_INPUT_NOT_READY','severity','warning',
+      'message','部分当前招标文件尚未成功解析，评估仅覆盖已就绪输入'));
+  END IF;
+  IF EXISTS (SELECT 1 FROM bid_workspace_requirement_projection_items item
+      JOIN bid_requirement_revision_artifacts requirement ON requirement.project_id=item.project_id
+        AND requirement.id=item.requirement_revision_id
+      WHERE item.projection_id=revision.requirement_projection_id AND requirement.lifecycle='unresolved') THEN
+    submission_issues:=submission_issues||jsonb_build_array(jsonb_build_object(
+      'issue_id',kb_bid_v2_deterministic_uuid(input_sha||':UNRESOLVED_REQUIREMENT'),
+      'code','UNRESOLVED_REQUIREMENT','severity','warning','message','存在尚未消歧的招标要求，请人工复核'));
+  END IF;
+  IF EXISTS (SELECT 1 FROM bid_workspace_requirement_projection_items item
+      JOIN bid_requirement_revision_artifacts requirement ON requirement.project_id=item.project_id
+        AND requirement.id=item.requirement_revision_id
+      WHERE item.projection_id=revision.requirement_projection_id AND requirement.lifecycle='current'
+        AND requirement.compliance_policy='deviation_allowed' AND NOT EXISTS (
+          SELECT 1 FROM bid_workspace_binding_occurrences occurrence
+          JOIN bid_outline_fulfillment_binding_revision_artifacts binding ON binding.id=occurrence.binding_revision_id
+          JOIN bid_submission_fulfillment_evidence_revision_artifacts evidence ON evidence.binding_revision_id=binding.id
+            AND evidence.workspace_revision_id=revision.id AND evidence.state='current'
+          WHERE occurrence.workspace_revision_id=revision.id AND binding.state='bound'
+            AND binding.requirement_projection_id=revision.requirement_projection_id
+            AND binding.need_occurrence_id=ANY(kb_bid_v2_fulfillment_need_ids(requirement.fulfillment_expr)))) THEN
+    submission_issues:=submission_issues||jsonb_build_array(jsonb_build_object(
+      'issue_id',kb_bid_v2_deterministic_uuid(input_sha||':DEVIATION_REVIEW_REQUIRED'),
+      'code','DEVIATION_REVIEW_REQUIRED','severity','warning','message','允许偏离的要求尚无当前履约依据，请复核偏离说明'));
+  END IF;
+  IF EXISTS (SELECT 1 FROM bid_workspace_requirement_projection_items item
+      JOIN bid_requirement_revision_artifacts requirement ON requirement.project_id=item.project_id
+        AND requirement.id=item.requirement_revision_id
+      WHERE item.projection_id=revision.requirement_projection_id AND requirement.lifecycle='current'
+        AND requirement.compliance_policy='scored' AND NOT EXISTS (
+          SELECT 1 FROM bid_workspace_binding_occurrences occurrence
+          JOIN bid_outline_fulfillment_binding_revision_artifacts binding ON binding.id=occurrence.binding_revision_id
+          JOIN bid_submission_fulfillment_evidence_revision_artifacts evidence ON evidence.binding_revision_id=binding.id
+            AND evidence.workspace_revision_id=revision.id AND evidence.state='current'
+          WHERE occurrence.workspace_revision_id=revision.id AND binding.state='bound'
+            AND binding.requirement_projection_id=revision.requirement_projection_id
+            AND binding.need_occurrence_id=ANY(kb_bid_v2_fulfillment_need_ids(requirement.fulfillment_expr)))) THEN
+    submission_issues:=submission_issues||jsonb_build_array(jsonb_build_object(
+      'issue_id',kb_bid_v2_deterministic_uuid(input_sha||':SCORING_EVIDENCE_MISSING'),
+      'code','SCORING_EVIDENCE_MISSING','severity','warning','message','评分项缺少当前履约依据，可能造成评分损失'));
+  END IF;
+  IF EXISTS (SELECT 1 FROM bid_workspace_block_occurrences occurrence
+      JOIN bid_content_block_revision_artifacts block ON block.id=occurrence.block_revision_id
+      WHERE occurrence.workspace_revision_id=revision.id AND block.block_kind='structured_form'
+        AND (jsonb_array_length(coalesce(block.block_payload->'field_values','[]'::jsonb))=0 OR EXISTS (
+          SELECT 1 FROM jsonb_array_elements(coalesce(block.block_payload->'field_values','[]'::jsonb)) field
+          WHERE btrim(coalesce(field->>'value',''))=''))) THEN
+    submission_issues:=submission_issues||jsonb_build_array(jsonb_build_object(
+      'issue_id',kb_bid_v2_deterministic_uuid(input_sha||':STRUCTURED_FORM_INCOMPLETE'),
+      'code','STRUCTURED_FORM_INCOMPLETE','severity','warning','message','存在未填写完整的结构化响应表单'));
+  END IF;
+  IF EXISTS (SELECT 1 FROM bid_workspace_block_occurrences occurrence
+      JOIN bid_content_block_revision_artifacts block ON block.id=occurrence.block_revision_id
+      WHERE occurrence.workspace_revision_id=revision.id AND block.block_kind='attachment_ref'
+        AND nullif(block.block_payload->>'preparation_revision_id','') IS NULL) THEN
+    submission_issues:=submission_issues||jsonb_build_array(jsonb_build_object(
+      'issue_id',kb_bid_v2_deterministic_uuid(input_sha||':ATTACHMENT_PREPARATION_MISSING'),
+      'code','ATTACHMENT_PREPARATION_MISSING','severity','warning','message','存在尚未准备为可渲染版本的附件'));
+  END IF;
+  IF EXISTS (SELECT 1 FROM bid_workspace_requirement_projection_items item
+      JOIN bid_requirement_revision_artifacts requirement ON requirement.project_id=item.project_id
+        AND requirement.id=item.requirement_revision_id
+      WHERE item.projection_id=revision.requirement_projection_id AND requirement.requiredness='mandatory'
+        AND requirement.lifecycle='current' AND EXISTS (
+          SELECT 1 FROM bid_workspace_binding_occurrences occurrence
+          JOIN bid_outline_fulfillment_binding_revision_artifacts binding
+            ON binding.project_id=occurrence.project_id AND binding.id=occurrence.binding_revision_id
+          WHERE occurrence.workspace_revision_id=revision.id AND binding.state='bound'
+            AND binding.requirement_projection_id=revision.requirement_projection_id
+            AND binding.need_occurrence_id=ANY(kb_bid_v2_fulfillment_need_ids(requirement.fulfillment_expr)))
+        AND NOT EXISTS (
+          SELECT 1 FROM bid_workspace_binding_occurrences occurrence
+          JOIN bid_outline_fulfillment_binding_revision_artifacts binding
+            ON binding.project_id=occurrence.project_id AND binding.id=occurrence.binding_revision_id
+          JOIN bid_submission_fulfillment_evidence_revision_artifacts evidence
+            ON evidence.binding_revision_id=binding.id AND evidence.workspace_revision_id=revision.id
+          WHERE occurrence.workspace_revision_id=revision.id AND binding.state='bound'
+            AND binding.requirement_projection_id=revision.requirement_projection_id
+            AND binding.need_occurrence_id=ANY(kb_bid_v2_fulfillment_need_ids(requirement.fulfillment_expr))
+            AND evidence.state='current')) THEN
+    submission_issues:=submission_issues||jsonb_build_array(jsonb_build_object(
+      'issue_id',kb_bid_v2_deterministic_uuid(input_sha||':FULFILLMENT_EVIDENCE_STALE_OR_MISSING'),
+      'code','FULFILLMENT_EVIDENCE_STALE_OR_MISSING','severity','warning',
+      'message','部分必选要求的履约证据缺失或已过期，请复核'));
+  END IF;
+  IF EXISTS (SELECT 1 FROM bid_workspace_block_occurrences occurrence
+      JOIN bid_content_block_revision_artifacts block ON block.project_id=occurrence.project_id
+        AND block.id=occurrence.block_revision_id
+      WHERE occurrence.workspace_revision_id=revision.id AND block.stale) THEN
+    submission_issues:=submission_issues||jsonb_build_array(jsonb_build_object('issue_id',kb_bid_v2_deterministic_uuid(input_sha||':STALE_CONTENT'),
+      'code','STALE_CONTENT','severity','warning','message','存在依赖已变化的内容块，请复核'));
+  END IF;
+  IF EXISTS (SELECT 1 FROM bid_workspace_requirement_projection_items item
+      JOIN bid_requirement_revision_artifacts requirement ON requirement.project_id=item.project_id
+        AND requirement.id=item.requirement_revision_id
+      WHERE item.projection_id=revision.requirement_projection_id AND requirement.requiredness='mandatory'
+        AND requirement.lifecycle='current' AND NOT EXISTS (
+          SELECT 1 FROM bid_evidence_selection_artifacts selection
+          JOIN bid_evidence_match_reports report ON report.id=selection.matching_report_id
+          WHERE selection.workspace_id=p_workspace_id AND selection.selection_kind='accepted'
+            AND report.requirement_revision_id=requirement.id
+            AND jsonb_array_length(convert_from(selection.canonical_payload,'UTF8')::jsonb->'selected_evidence_item_ids')>0)) THEN
+    submission_issues:=submission_issues||jsonb_build_array(jsonb_build_object('issue_id',kb_bid_v2_deterministic_uuid(input_sha||':NO_ELIGIBLE_EVIDENCE'),
+      'code','NO_ELIGIBLE_EVIDENCE','severity','warning','message','部分必选要求没有可用企业证据，仍可导出但必须人工复核'));
+  END IF;
+  outline_status:=CASE WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(outline_issues) issue WHERE issue->>'severity'='high')
+    THEN 'has_critical_warnings' WHEN jsonb_array_length(outline_issues)>0 THEN 'has_warnings' ELSE 'ready' END;
+  submission_status:=CASE WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(submission_issues) issue WHERE issue->>'severity'='high')
+    THEN 'has_critical_warnings' WHEN jsonb_array_length(submission_issues)>0 THEN 'has_warnings' ELSE 'ready' END;
+  SELECT id INTO outline_existing FROM bid_outline_assessment_snapshot_artifacts
+    WHERE workspace_id=p_workspace_id AND assessment_input_sha256=input_sha;
+  IF outline_existing IS NULL THEN
+    payload:=kb_bid_v2_json_payload(jsonb_build_object('assessment_snapshot_id',outline_id,'assessment_kind','outline',
+      'workspace_revision_id',revision.id,'workspace_sha256',revision.content_sha256,
+      'scope_revision_id',revision.scope_revision_id,'requirement_projection_id',revision.requirement_projection_id,
+      'requirement_projection_sha256',revision.requirement_projection_sha256,
+      'document_settings_revision_id',revision.document_settings_revision_id,'asset_set_sha256',asset_sha,
+      'quote_snapshot',CASE WHEN quote_id IS NULL THEN NULL ELSE jsonb_build_object('artifact_id',quote_id,'sha256',quote_sha) END,
+      'assessment_input_sha256',input_sha,'status',outline_status,'issues',outline_issues)); digest:=kb_bid_v2_sha256_bytes(payload);
+    INSERT INTO bid_outline_assessment_snapshot_artifacts(id,project_id,workspace_id,workspace_revision_id,
+      requirement_projection_id,scope_revision_id,document_settings_revision_id,asset_set_sha256,
+      quote_snapshot_id,quote_snapshot_sha256,status,assessment_input_sha256,canonical_payload,content_sha256)
+    VALUES(outline_id,workspace.project_id,p_workspace_id,revision.id,revision.requirement_projection_id,
+      revision.scope_revision_id,revision.document_settings_revision_id,asset_sha,
+      quote_id,quote_sha,outline_status,input_sha,payload,digest);
+  ELSE outline_id:=outline_existing; END IF;
+  SELECT id INTO submission_existing FROM bid_submission_assessment_snapshot_artifacts
+    WHERE workspace_id=p_workspace_id AND assessment_input_sha256=input_sha;
+  IF submission_existing IS NULL THEN
+    payload:=kb_bid_v2_json_payload(jsonb_build_object('assessment_snapshot_id',submission_id,'assessment_kind','submission',
+      'workspace_revision_id',revision.id,'workspace_sha256',revision.content_sha256,
+      'scope_revision_id',revision.scope_revision_id,'requirement_projection_id',revision.requirement_projection_id,
+      'requirement_projection_sha256',revision.requirement_projection_sha256,
+      'document_settings_revision_id',revision.document_settings_revision_id,'asset_set_sha256',asset_sha,
+      'quote_snapshot',CASE WHEN quote_id IS NULL THEN NULL ELSE jsonb_build_object('artifact_id',quote_id,'sha256',quote_sha) END,
+      'assessment_input_sha256',input_sha,'status',submission_status,'issues',submission_issues)); digest:=kb_bid_v2_sha256_bytes(payload);
+    INSERT INTO bid_submission_assessment_snapshot_artifacts(id,project_id,workspace_id,workspace_revision_id,
+      requirement_projection_id,scope_revision_id,document_settings_revision_id,asset_set_sha256,
+      quote_snapshot_id,quote_snapshot_sha256,status,assessment_input_sha256,canonical_payload,content_sha256)
+    VALUES(submission_id,workspace.project_id,p_workspace_id,revision.id,revision.requirement_projection_id,
+      revision.scope_revision_id,revision.document_settings_revision_id,asset_sha,
+      quote_id,quote_sha,submission_status,input_sha,payload,digest);
+    INSERT INTO bid_submission_assessment_snapshot_evidence_items(assessment_snapshot_id,project_id,workspace_id,
+      ordinal,selection_id,selection_sha256,matching_report_id,evidence_bundle_id,evidence_bundle_sha256,
+      evidence_item_id,evidence_item_sha256)
+    SELECT submission_id,workspace.project_id,p_workspace_id,row_number() OVER (
+        ORDER BY frozen.selection_id,frozen.item_ordinal,frozen.evidence_item_id)-1,
+      frozen.selection_id,frozen.selection_sha256,frozen.matching_report_id,frozen.evidence_bundle_id,
+      frozen.evidence_bundle_sha256,frozen.evidence_item_id,frozen.evidence_item_sha256
+    FROM (
+      SELECT DISTINCT ON (selection.id,item.id) selection.id selection_id,selection.content_sha256 selection_sha256,
+        selection.matching_report_id,bundle.id evidence_bundle_id,bundle.content_sha256 evidence_bundle_sha256,
+        item.id evidence_item_id,item.content_sha256 evidence_item_sha256,item.ordinal item_ordinal
+      FROM bid_evidence_selection_artifacts selection
+      JOIN bid_evidence_bundle_artifacts bundle ON bundle.matching_report_id=selection.matching_report_id
+      JOIN bid_evidence_bundle_items item ON item.evidence_bundle_id=bundle.id
+      JOIN bid_candidate_artifacts candidate ON candidate.id=(convert_from(selection.canonical_payload,'UTF8')::jsonb->>'candidate_id')::uuid
+      JOIN bid_candidate_decision_receipts receipt ON receipt.candidate_id=candidate.id
+      JOIN bid_candidate_operations operation ON operation.candidate_id=candidate.id
+        AND operation.ordinal=ANY(receipt.accepted_operation_ordinals)
+      JOIN bid_workspace_block_occurrences occurrence ON occurrence.workspace_revision_id=revision.id
+      JOIN bid_content_block_revision_artifacts current_block ON current_block.id=occurrence.block_revision_id
+        AND current_block.lineage_id=(operation.operation#>>'{block,lineage_id}')::uuid
+      WHERE selection.workspace_id=p_workspace_id AND selection.selection_kind='accepted'
+        AND item.id IN (SELECT jsonb_array_elements_text(
+          convert_from(selection.canonical_payload,'UTF8')::jsonb->'selected_evidence_item_ids')::uuid)
+        AND (operation.operation#>>'{block,content,asset_revision_id}'=item.id::text OR EXISTS (
+          SELECT 1 FROM jsonb_array_elements(convert_from(candidate.canonical_payload,'UTF8')::jsonb->'factual_claims') claim
+          WHERE claim->>'client_operation_ref'=operation.operation->>'client_operation_ref'
+            AND claim->>'evidence_bundle_id'=bundle.id::text AND claim->>'evidence_item_id'=item.id::text))
+      ORDER BY selection.id,item.id,operation.ordinal
+    ) frozen;
+  ELSE submission_id:=submission_existing; END IF;
+  RETURN jsonb_build_object(
+    'outline',(SELECT convert_from(canonical_payload,'UTF8')::jsonb FROM bid_outline_assessment_snapshot_artifacts WHERE id=outline_id),
+    'submission',(SELECT convert_from(canonical_payload,'UTF8')::jsonb FROM bid_submission_assessment_snapshot_artifacts WHERE id=submission_id));
+END $$;
+
+CREATE FUNCTION kb_bid_v2_load_preview_input(p_workspace_id uuid,p_actor kb_actor_identity)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE workspace bid_submission_workspaces%ROWTYPE; title text; revision_id uuid; workspace_value jsonb;
+BEGIN
+  SELECT * INTO STRICT workspace FROM bid_submission_workspaces WHERE id=p_workspace_id;
+  PERFORM kb_bid_v2_require_project_owner(workspace.project_id,p_actor);
+  SELECT project.title INTO STRICT title FROM bid_projects project WHERE project.id=workspace.project_id;
+  SELECT artifact_id INTO STRICT revision_id FROM bid_workspace_heads WHERE scope_id=p_workspace_id;
+  workspace_value:=kb_bid_v2_load_workspace(p_workspace_id);
+  RETURN jsonb_build_object('title',title,'workspace',workspace_value,
+    'assets',coalesce((SELECT jsonb_agg(value ORDER BY value->>'asset_revision_id') FROM (
+      SELECT jsonb_build_object('asset_revision_id',asset.id,'object_ref',asset.object_ref,'sha256',asset.content_sha256,
+        'media_type',asset.media_type,'file_name',asset.file_name) value
+      FROM bid_workspace_asset_artifacts asset WHERE asset.workspace_id=p_workspace_id AND EXISTS (
+        SELECT 1 FROM bid_workspace_block_occurrences occurrence
+        JOIN bid_content_block_revision_artifacts block ON block.id=occurrence.block_revision_id
+        WHERE occurrence.workspace_revision_id=revision_id AND block.block_kind IN ('image','attachment_ref')
+          AND (block.block_payload->>'asset_revision_id')::uuid=asset.id)
+      UNION ALL
+      SELECT jsonb_build_object('asset_revision_id',page.id,'object_ref',page.object_ref,'sha256',page.content_sha256,
+        'media_type',page.media_type,'file_name','attachment-page-'||page.page_number) value
+      FROM bid_attachment_preparation_asset_items page JOIN bid_attachment_preparation_revision_artifacts preparation
+        ON preparation.id=page.attachment_preparation_revision_id
+      WHERE preparation.workspace_id=p_workspace_id AND preparation.status='ready' AND EXISTS (
+        SELECT 1 FROM bid_workspace_block_occurrences occurrence
+        JOIN bid_content_block_revision_artifacts block ON block.id=occurrence.block_revision_id
+        WHERE occurrence.workspace_revision_id=revision_id AND block.block_kind='attachment_ref'
+          AND ((block.block_payload->>'preparation_revision_id')::uuid=preparation.id
+            OR ((block.block_payload->>'preparation_revision_id') IS NULL AND preparation.id=(
+              SELECT attestation.preparation_revision_id
+              FROM bid_pdf_attachment_preparation_attestations attestation
+              JOIN bid_submission_export_request_identities request_value
+                ON request_value.request_artifact_id=attestation.request_artifact_id
+              WHERE request_value.workspace_revision_id=revision_id
+                AND attestation.source_asset_revision_id=(block.block_payload->>'asset_revision_id')::uuid
+              ORDER BY attestation.created_at DESC,attestation.preparation_revision_id DESC LIMIT 1)))
+      )
+    ) resources),'[]'::jsonb),
+    'forms',coalesce((SELECT jsonb_agg(convert_from(form.canonical_payload,'UTF8')::jsonb ORDER BY form.id)
+      FROM bid_tender_structured_form_definition_artifacts form WHERE form.project_id=workspace.project_id AND EXISTS (
+        SELECT 1 FROM bid_workspace_block_occurrences occurrence
+        JOIN bid_content_block_revision_artifacts block ON block.id=occurrence.block_revision_id
+        WHERE occurrence.workspace_revision_id=revision_id AND block.block_kind='structured_form'
+          AND (block.block_payload->>'form_definition_revision_id')::uuid=form.id)),'[]'::jsonb),
+    'preparations',coalesce((SELECT jsonb_agg(preparation.canonical_payload ORDER BY preparation.id)
+      FROM bid_attachment_preparation_revision_artifacts preparation
+      WHERE preparation.workspace_id=p_workspace_id AND preparation.status='ready' AND EXISTS (
+        SELECT 1 FROM bid_workspace_block_occurrences occurrence
+        JOIN bid_content_block_revision_artifacts block ON block.id=occurrence.block_revision_id
+        WHERE occurrence.workspace_revision_id=revision_id AND block.block_kind='attachment_ref'
+          AND ((block.block_payload->>'preparation_revision_id')::uuid=preparation.id
+            OR ((block.block_payload->>'preparation_revision_id') IS NULL AND preparation.id=(
+              SELECT attestation.preparation_revision_id
+              FROM bid_pdf_attachment_preparation_attestations attestation
+              JOIN bid_submission_export_request_identities request_value
+                ON request_value.request_artifact_id=attestation.request_artifact_id
+              WHERE request_value.workspace_revision_id=revision_id
+                AND attestation.source_asset_revision_id=(block.block_payload->>'asset_revision_id')::uuid
+              ORDER BY attestation.created_at DESC,attestation.preparation_revision_id DESC LIMIT 1))))),'[]'::jsonb));
+END $$;
+
+CREATE FUNCTION kb_bid_v2_get_preview_html(p_workspace_id uuid,p_actor kb_actor_identity)
+RETURNS text LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE workspace_value jsonb; node jsonb; block jsonb; html text:='<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>投标文件预览</title></head><body>';
+BEGIN
+  workspace_value:=kb_bid_v2_load_workspace_for_actor(p_workspace_id,p_actor);
+  FOR node IN SELECT value FROM jsonb_array_elements(workspace_value->'nodes') ORDER BY (value->>'ordinal')::integer LOOP
+    html:=html||'<section><h2>'||replace(replace(replace(node->>'title','&','&amp;'),'<','&lt;'),'>','&gt;')||'</h2>';
+    FOR block IN SELECT item.value FROM jsonb_array_elements(workspace_value->'blocks') item
+      WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(node->'block_lineage_ids') id WHERE id=block->>'lineage_id')
+    LOOP
+      IF block->>'kind'='rich_text' THEN
+        html:=html||'<p>'||replace(replace(replace(coalesce((SELECT string_agg(inline->>'text','')
+          FROM jsonb_array_elements(block#>'{content,nodes}') rich
+          CROSS JOIN LATERAL jsonb_array_elements(coalesce(rich->'content','[]'::jsonb)) inline
+          WHERE inline->>'kind'='text'),''),'&','&amp;'),'<','&lt;'),'>','&gt;')||'</p>';
+      ELSIF block->>'kind'='page_break' THEN html:=html||'<hr class="page-break">';
+      ELSE html:=html||'<div data-block-kind="'||block->>'kind'||'">['||block->>'kind'||']</div>';
+      END IF;
+    END LOOP;
+    html:=html||'</section>';
+  END LOOP;
+  RETURN html||'</body></html>';
+END $$;
+
+CREATE FUNCTION kb_bid_v2_create_submission_export_request(
+  p_workspace_id uuid,p_expected_revision_id uuid,p_expected_sha256 kb_sha256,
+  p_output_mode text,p_format text,p_mode_options jsonb,p_actor kb_actor_identity,
+  p_idempotency_key text,p_request_bytes bytea,p_request_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE workspace bid_submission_workspaces%ROWTYPE; head bid_workspace_heads%ROWTYPE;
+  revision bid_workspace_revision_artifacts%ROWTYPE; checkpoint bid_outline_checkpoint_artifacts%ROWTYPE;
+  scope bid_workspace_scope_revision_artifacts%ROWTYPE; settings bid_document_settings_revision_artifacts%ROWTYPE;
+  assessment bid_submission_assessment_snapshot_artifacts%ROWTYPE;
+  style_sha kb_sha256; request_id uuid:=gen_random_uuid(); frozen_payload bytea; frozen_sha kb_sha256;
+  checkpoint_payload bytea; checkpoint_sha kb_sha256; replay bytea; response jsonb; response_bytes bytea;
+BEGIN
+  SELECT * INTO STRICT workspace FROM bid_submission_workspaces WHERE id=p_workspace_id;
+  PERFORM kb_bid_v2_require_project_owner(workspace.project_id,p_actor);
+  replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.submission-export.create',p_idempotency_key,p_request_bytes,p_request_sha256);
+  IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
+  IF p_output_mode NOT IN ('review_draft','submission') OR p_format NOT IN ('docx','pdf') OR
+     NOT kb_bid_v2_json_keys_exact(p_mode_options,ARRAY['watermark','include_assessment_notices','include_knowledge_sources']) THEN
+    RAISE EXCEPTION 'SUBMISSION_EXPORT_OPTIONS_INVALID' USING ERRCODE='23514';
+  END IF;
+  IF p_output_mode='submission' AND p_mode_options IS DISTINCT FROM
+      '{"watermark":null,"include_assessment_notices":false,"include_knowledge_sources":false}'::jsonb THEN
+    RAISE EXCEPTION 'SUBMISSION_EXPORT_OPTIONS_INVALID' USING ERRCODE='23514';
+  END IF;
+  SELECT * INTO STRICT head FROM bid_workspace_heads WHERE scope_id=p_workspace_id FOR UPDATE;
+  IF head.artifact_id IS DISTINCT FROM p_expected_revision_id OR head.artifact_sha256 IS DISTINCT FROM p_expected_sha256 THEN
+    RAISE EXCEPTION 'WORKSPACE_HEAD_CAS_MISMATCH' USING ERRCODE='40001';
+  END IF;
+  SELECT * INTO STRICT revision FROM bid_workspace_revision_artifacts WHERE id=head.artifact_id;
+  SELECT * INTO checkpoint FROM bid_outline_checkpoint_artifacts
+    WHERE workspace_id=p_workspace_id AND workspace_revision_id=revision.id
+      AND requirement_projection_id=revision.requirement_projection_id
+      AND requirement_projection_sha256=revision.requirement_projection_sha256
+    ORDER BY created_at DESC,id DESC LIMIT 1;
+  IF NOT FOUND THEN
+    checkpoint_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'workspace_id',p_workspace_id,
+      'workspace_revision_id',revision.id,'workspace_sha256',revision.content_sha256,
+      'requirement_projection_id',revision.requirement_projection_id,
+      'requirement_projection_sha256',revision.requirement_projection_sha256));
+    checkpoint_sha:=kb_bid_v2_sha256_bytes(checkpoint_payload);
+    INSERT INTO bid_outline_checkpoint_artifacts(id,project_id,workspace_id,workspace_revision_id,
+      requirement_projection_id,requirement_projection_sha256,canonical_payload,content_sha256,actor)
+    VALUES(kb_bid_v2_deterministic_uuid('submission-export-checkpoint:'||revision.id::text),workspace.project_id,
+      p_workspace_id,revision.id,revision.requirement_projection_id,revision.requirement_projection_sha256,
+      checkpoint_payload,checkpoint_sha,p_actor)
+    RETURNING * INTO checkpoint;
+  END IF;
+  SELECT * INTO STRICT scope FROM bid_workspace_scope_revision_artifacts WHERE id=revision.scope_revision_id;
+  SELECT * INTO STRICT settings FROM bid_document_settings_revision_artifacts WHERE id=revision.document_settings_revision_id;
+  SELECT content_sha256 INTO STRICT style_sha FROM bid_render_style_contract_artifacts
+    WHERE id='00000000-0000-5000-8000-000000000301';
+  frozen_payload:=kb_bid_v2_json_payload(jsonb_build_object('workspace_revision_id',revision.id,
+    'workspace_sha256',revision.content_sha256,'outline_checkpoint_id',checkpoint.id,
+    'outline_checkpoint_sha256',checkpoint.content_sha256,'requirement_projection_id',revision.requirement_projection_id,
+    'requirement_projection_sha256',revision.requirement_projection_sha256,'scope_revision_id',scope.id,
+    'scope_revision_sha256',scope.content_sha256,'document_settings_revision_id',settings.id,
+    'document_settings_sha256',settings.content_sha256,'render_style_contract_id','00000000-0000-5000-8000-000000000301',
+    'render_style_contract_sha256',style_sha,'output_mode',p_output_mode,'format',p_format,'mode_options',p_mode_options));
+  frozen_sha:=kb_bid_v2_sha256_bytes(frozen_payload);
+  INSERT INTO bid_async_request_snapshot_artifacts(id,project_id,workspace_id,request_kind,revision,
+    frozen_input_sha256,request_payload,request_sha256,status)
+  VALUES(request_id,workspace.project_id,p_workspace_id,'submission_export',1,frozen_sha,p_request_bytes,p_request_sha256,'pending');
+  INSERT INTO bid_submission_export_request_identities(request_artifact_id,project_id,workspace_id,request_revision,
+    request_sha256,frozen_input_sha256,workspace_revision_id,workspace_sha256,outline_checkpoint_id,
+    outline_checkpoint_sha256,requirement_projection_id,requirement_projection_sha256,scope_revision_id,
+    scope_revision_sha256,document_settings_revision_id,document_settings_sha256,render_style_contract_id,
+    render_style_contract_sha256,output_mode,format,mode_options)
+  VALUES(request_id,workspace.project_id,p_workspace_id,1,p_request_sha256,frozen_sha,revision.id,revision.content_sha256,
+    checkpoint.id,checkpoint.content_sha256,revision.requirement_projection_id,revision.requirement_projection_sha256,
+    scope.id,scope.content_sha256,settings.id,settings.content_sha256,'00000000-0000-5000-8000-000000000301',
+    style_sha,p_output_mode,p_format,p_mode_options);
+  PERFORM kb_bid_v2_get_current_assessments(p_workspace_id,p_actor);
+  SELECT * INTO STRICT assessment FROM bid_submission_assessment_snapshot_artifacts
+    WHERE workspace_id=p_workspace_id AND workspace_revision_id=revision.id
+    ORDER BY created_at DESC,id DESC LIMIT 1;
+  INSERT INTO bid_async_stage_receipts(request_artifact_id,stage_kind,frozen_input_sha256,result_identity,result_sha256)
+  VALUES(request_id,'assessment',frozen_sha,
+    jsonb_build_object('artifact_id',assessment.id,'sha256',assessment.content_sha256),assessment.content_sha256);
+  response:=jsonb_build_object('request_artifact_id',request_id,'kind','SubmissionExport','status','pending',
+    'result_identity',NULL,'error_code',NULL,'request_revision',1,'request_sha256',p_request_sha256,
+    'frozen_input_sha256',frozen_sha,'project_id',workspace.project_id,'workspace_id',p_workspace_id,
+    'base_workspace_revision_id',revision.id);
+  response_bytes:=convert_to(response::text,'UTF8');
+  PERFORM kb_bid_v2_idempotency_complete(p_actor,'bid.v2.submission-export.create',p_idempotency_key,202,response_bytes);
+  RETURN response;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_load_submission_export_input(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE typed bid_submission_export_request_identities%ROWTYPE; owner_actor kb_actor_identity;
+BEGIN
+  SELECT * INTO STRICT typed FROM bid_submission_export_request_identities
+    WHERE request_artifact_id=p_request_artifact_id AND request_revision=p_request_revision
+      AND frozen_input_sha256=p_frozen_input_sha256;
+  SELECT ('user:'||owner_user_id)::kb_actor_identity INTO STRICT owner_actor
+    FROM bid_projects WHERE id=typed.project_id;
+  RETURN jsonb_build_object('request',to_jsonb(typed),
+    'project_title',(SELECT title FROM bid_projects WHERE id=typed.project_id),
+    'workspace',kb_bid_v2_load_workspace_revision(typed.workspace_id,typed.workspace_revision_id,typed.workspace_sha256),
+    'assets',coalesce((SELECT jsonb_agg(item ORDER BY item->>'asset_revision_id') FROM (
+      SELECT jsonb_build_object('asset_revision_id',asset.id,'object_ref',asset.object_ref,
+        'sha256',asset.content_sha256,'media_type',asset.media_type,'file_name',asset.file_name,
+        'provenance','manual_workspace') item
+      FROM bid_workspace_asset_artifacts asset WHERE asset.workspace_id=typed.workspace_id AND EXISTS (
+        SELECT 1 FROM bid_workspace_block_occurrences occurrence JOIN bid_content_block_revision_artifacts block
+          ON block.project_id=occurrence.project_id AND block.id=occurrence.block_revision_id
+        WHERE occurrence.workspace_revision_id=typed.workspace_revision_id
+          AND block.block_kind IN ('image','attachment_ref')
+          AND (convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,asset_revision_id}')::uuid=asset.id)
+      UNION ALL
+      SELECT jsonb_build_object('asset_revision_id',page.id,'object_ref',page.object_ref,
+        'sha256',page.content_sha256,'media_type',page.media_type,'file_name','附件第'||page.page_number||'页',
+        'width_px',page.geometry->'width_px','height_px',page.geometry->'height_px','provenance','prepared_attachment') item
+      FROM bid_attachment_preparation_asset_items page
+      JOIN bid_attachment_preparation_revision_artifacts preparation
+        ON preparation.id=page.attachment_preparation_revision_id
+      WHERE preparation.workspace_id=typed.workspace_id AND preparation.status='ready' AND EXISTS (
+        SELECT 1 FROM bid_workspace_block_occurrences occurrence JOIN bid_content_block_revision_artifacts block
+          ON block.project_id=occurrence.project_id AND block.id=occurrence.block_revision_id
+        WHERE occurrence.workspace_revision_id=typed.workspace_revision_id AND block.block_kind='attachment_ref'
+          AND convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,render_mode}'='embedded_pages'
+          AND kb_bid_v2_resolve_export_attachment_preparation(p_request_artifact_id,
+            typed.workspace_revision_id,occurrence.block_revision_id)=preparation.id)
+      UNION ALL
+      SELECT jsonb_build_object('asset_revision_id',quote_object.quote_snapshot_id,
+        'object_ref',quote_object.object_ref,'sha256',quote_object.content_sha256,
+        'media_type',quote_object.media_type,'file_name','quote-snapshot.json','provenance','quote_snapshot') item
+      FROM bid_async_stage_receipts receipt
+      JOIN bid_submission_assessment_snapshot_artifacts assessment
+        ON assessment.id=(receipt.result_identity->>'artifact_id')::uuid
+        AND assessment.content_sha256=receipt.result_identity->>'sha256'
+      JOIN bid_quote_snapshot_object_identities quote_object
+        ON quote_object.project_id=assessment.project_id
+        AND quote_object.quote_snapshot_id=assessment.quote_snapshot_id
+        AND quote_object.content_sha256=assessment.quote_snapshot_sha256
+      WHERE receipt.request_artifact_id=p_request_artifact_id AND receipt.stage_kind='assessment'
+        AND receipt.frozen_input_sha256=p_frozen_input_sha256
+    ) frozen_asset),'[]'::jsonb),
+    'form_definitions',coalesce((SELECT jsonb_agg(convert_from(form.canonical_payload,'UTF8')::jsonb ORDER BY form.id)
+      FROM bid_tender_structured_form_definition_artifacts form WHERE EXISTS (
+        SELECT 1 FROM bid_workspace_block_occurrences occurrence JOIN bid_content_block_revision_artifacts block
+          ON block.project_id=occurrence.project_id AND block.id=occurrence.block_revision_id
+        WHERE occurrence.workspace_revision_id=typed.workspace_revision_id AND block.block_kind='structured_form'
+          AND (convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,form_definition_revision_id}')::uuid=form.id)),'[]'::jsonb),
+    'attachment_preparations',coalesce((SELECT jsonb_agg(preparation.canonical_payload ORDER BY preparation.id)
+      FROM bid_attachment_preparation_revision_artifacts preparation
+      WHERE preparation.workspace_id=typed.workspace_id AND preparation.status='ready' AND EXISTS (
+        SELECT 1 FROM bid_workspace_block_occurrences occurrence JOIN bid_content_block_revision_artifacts block
+          ON block.project_id=occurrence.project_id AND block.id=occurrence.block_revision_id
+        WHERE occurrence.workspace_revision_id=typed.workspace_revision_id AND block.block_kind='attachment_ref'
+          AND convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,render_mode}'='embedded_pages'
+          AND kb_bid_v2_resolve_export_attachment_preparation(p_request_artifact_id,
+            typed.workspace_revision_id,occurrence.block_revision_id)=preparation.id)),'[]'::jsonb));
+END $$;
+
+CREATE FUNCTION kb_bid_v2_transition_submission_export(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256,
+  p_font_staging_id uuid,p_font_object_ref kb_object_ref,p_font_sha256 kb_sha256,p_font_media_type text,
+  p_snapshot_id uuid,p_manifest_id uuid,p_output_staging_id uuid,p_output_id uuid,
+  p_output_object_ref kb_object_ref,p_output_sha256 kb_sha256,p_output_media_type text,p_output_byte_length bigint,
+  p_actor kb_actor_identity
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE typed bid_submission_export_request_identities%ROWTYPE; request_value bid_async_request_snapshot_artifacts%ROWTYPE;
+  revision bid_workspace_revision_artifacts%ROWTYPE; settings bid_document_settings_revision_artifacts%ROWTYPE;
+  assessment bid_submission_assessment_snapshot_artifacts%ROWTYPE; docx_contract bid_renderer_contract_artifacts%ROWTYPE;
+  pdf_contract bid_renderer_contract_artifacts%ROWTYPE; snapshot_id uuid:=p_snapshot_id; manifest_id uuid:=p_manifest_id;
+  nodes jsonb; assets jsonb; forms jsonb; preparations jsonb; font_items jsonb; payload jsonb; snapshot_sha kb_sha256;
+  manifest_payload bytea; manifest_sha kb_sha256; published_identity jsonb; result_sha kb_sha256; dependency record;
+  report_id uuid:=kb_bid_v2_deterministic_uuid(p_output_id::text||':assessment-report'); report_payload bytea; report_sha kb_sha256;
+  operation_sha kb_sha256:=kb_bid_v2_sha256_bytes(convert_to('{"kind":"layout_document_v2","version":1}','UTF8'));
+  ordinal_value integer:=0; prior bid_async_stage_receipts%ROWTYPE;
+  prepared_manifest bid_submission_manifest_artifacts%ROWTYPE;
+  prepared_snapshot bid_render_document_snapshot_artifacts%ROWTYPE;
+BEGIN
+  SELECT request_row.* INTO STRICT request_value FROM bid_async_request_snapshot_artifacts request_row
+    WHERE request_row.id=p_request_artifact_id AND request_row.revision=p_request_revision
+      AND request_row.frozen_input_sha256=p_frozen_input_sha256 FOR UPDATE;
+  IF request_value.status='succeeded' THEN
+    SELECT * INTO STRICT prior FROM bid_async_stage_receipts WHERE request_artifact_id=p_request_artifact_id AND stage_kind='package';
+    RETURN prior.result_identity;
+  END IF;
+  IF request_value.status<>'pending' THEN RAISE EXCEPTION 'SUBMISSION_EXPORT_NOT_PENDING' USING ERRCODE='23514'; END IF;
+  SELECT * INTO STRICT typed FROM bid_submission_export_request_identities WHERE request_artifact_id=p_request_artifact_id;
+  SELECT * INTO prior FROM bid_async_stage_receipts
+    WHERE request_artifact_id=p_request_artifact_id AND stage_kind='manifest'
+      AND frozen_input_sha256=p_frozen_input_sha256;
+  IF p_output_id IS NOT NULL AND FOUND THEN
+    SELECT * INTO STRICT prepared_manifest FROM bid_submission_manifest_artifacts
+      WHERE id=(prior.result_identity->>'artifact_id')::uuid
+        AND content_sha256=prior.result_identity->>'sha256';
+    SELECT * INTO STRICT prepared_snapshot FROM bid_render_document_snapshot_artifacts
+      WHERE id=prepared_manifest.render_snapshot_id;
+    IF prepared_manifest.id<>p_manifest_id OR prepared_snapshot.id<>p_snapshot_id
+      OR NOT EXISTS (SELECT 1 FROM bid_render_snapshot_font_items font
+        WHERE font.render_snapshot_id=prepared_snapshot.id AND font.object_ref=p_font_object_ref
+          AND font.content_sha256=p_font_sha256 AND font.media_type=p_font_media_type) THEN
+      RAISE EXCEPTION 'PREPARED_EXPORT_IDENTITY_MISMATCH' USING ERRCODE='23514';
+    END IF;
+    IF p_output_object_ref<>'objects/'||p_output_sha256 OR p_output_byte_length<=0 OR
+       (typed.format='pdf' AND p_output_media_type<>'application/pdf') OR
+       (typed.format='docx' AND p_output_media_type<>'application/vnd.openxmlformats-officedocument.wordprocessingml.document') THEN
+      RAISE EXCEPTION 'SUBMISSION_OUTPUT_IDENTITY_INVALID' USING ERRCODE='23514';
+    END IF;
+    PERFORM 1 FROM object_registry WHERE object_ref=p_output_object_ref AND digest=p_output_sha256
+      AND media_type=p_output_media_type AND byte_length=p_output_byte_length AND state='available';
+    IF NOT FOUND THEN RAISE EXCEPTION 'SUBMISSION_OUTPUT_NOT_AVAILABLE' USING ERRCODE='23514'; END IF;
+    PERFORM kb_object_upload_commit(p_output_staging_id,p_output_object_ref,p_output_sha256,p_output_media_type,
+      p_output_byte_length,'bid_submission_output',p_output_id,
+      'output:'||typed.project_id||':'||typed.workspace_id||':'||prepared_manifest.id,p_actor);
+    SELECT * INTO STRICT assessment FROM bid_submission_assessment_snapshot_artifacts
+      WHERE id=prepared_snapshot.submission_assessment_snapshot_id
+        AND content_sha256=prepared_snapshot.submission_assessment_snapshot_sha256;
+    INSERT INTO bid_submission_output_artifacts(id,project_id,workspace_id,manifest_id,format,object_ref,content_sha256,
+      media_type,byte_length,owner_id,owner_occurrence)
+    VALUES(p_output_id,typed.project_id,typed.workspace_id,prepared_manifest.id,typed.format,p_output_object_ref,p_output_sha256,
+      p_output_media_type,p_output_byte_length,p_output_id,
+      'output:'||typed.project_id||':'||typed.workspace_id||':'||prepared_manifest.id);
+    report_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'assessment_report_id',report_id,
+      'submission_output_id',p_output_id,'manifest_id',prepared_manifest.id,
+      'submission_assessment_snapshot_id',assessment.id,'submission_assessment_snapshot_sha256',assessment.content_sha256,
+      'assessment',convert_from(assessment.canonical_payload,'UTF8')::jsonb,
+      'selected_evidence',coalesce((SELECT jsonb_agg(jsonb_build_object(
+        'selection_id',frozen.selection_id,'matching_report_id',frozen.matching_report_id,
+        'selected_evidence_item_ids',frozen.item_ids,'items',frozen.items) ORDER BY frozen.first_ordinal)
+        FROM (SELECT evidence.selection_id,evidence.matching_report_id,min(evidence.ordinal) first_ordinal,
+          jsonb_agg(item.id ORDER BY evidence.ordinal) item_ids,
+          jsonb_agg(item.item_payload ORDER BY evidence.ordinal) items
+          FROM bid_submission_assessment_snapshot_evidence_items evidence
+          JOIN bid_evidence_bundle_items item ON item.evidence_bundle_id=evidence.evidence_bundle_id
+            AND item.id=evidence.evidence_item_id AND item.content_sha256=evidence.evidence_item_sha256
+          WHERE evidence.assessment_snapshot_id=assessment.id
+          GROUP BY evidence.selection_id,evidence.matching_report_id) frozen),'[]'::jsonb)));
+    report_sha:=kb_bid_v2_sha256_bytes(report_payload);
+    INSERT INTO bid_submission_assessment_report_artifacts(id,project_id,workspace_id,submission_output_id,manifest_id,
+      submission_assessment_snapshot_id,canonical_payload,content_sha256)
+    VALUES(report_id,typed.project_id,typed.workspace_id,p_output_id,prepared_manifest.id,assessment.id,report_payload,report_sha);
+    published_identity:=jsonb_build_object('artifact_id',p_output_id,'sha256',p_output_sha256,
+      'manifest_id',prepared_manifest.id,'render_snapshot_id',prepared_snapshot.id,'format',typed.format);
+    result_sha:=kb_bid_v2_sha256_bytes(convert_to(published_identity::text,'UTF8'));
+    INSERT INTO bid_async_stage_receipts(request_artifact_id,stage_kind,frozen_input_sha256,result_identity,result_sha256)
+    VALUES(p_request_artifact_id,'render',p_frozen_input_sha256,
+        jsonb_build_object('artifact_id',p_output_id,'sha256',p_output_sha256),p_output_sha256),
+      (p_request_artifact_id,'object_commit',p_frozen_input_sha256,
+        jsonb_build_object('artifact_id',p_output_id,'sha256',p_output_sha256),p_output_sha256),
+      (p_request_artifact_id,'package',p_frozen_input_sha256,published_identity,result_sha);
+    UPDATE bid_async_request_snapshot_artifacts SET status='succeeded',result_identity=published_identity,
+      finished_at=clock_timestamp() WHERE id=p_request_artifact_id;
+    RETURN published_identity;
+  END IF;
+  IF p_output_id IS NULL AND FOUND THEN
+    RETURN prior.result_identity||jsonb_build_object('replayed',true);
+  END IF;
+  IF p_output_id IS NOT NULL THEN
+    RAISE EXCEPTION 'SUBMISSION_EXPORT_NOT_PREPARED' USING ERRCODE='23514';
+  END IF;
+  IF p_font_object_ref<>'objects/'||p_font_sha256 OR p_font_sha256<>'5d0df56f107605387e0de494b22dfc7fb05d8d79ffd981474e7be11dbe571882'
+     OR p_font_media_type<>'font/otf' THEN RAISE EXCEPTION 'RENDER_FONT_IDENTITY_INVALID' USING ERRCODE='23514'; END IF;
+  PERFORM 1 FROM object_registry WHERE object_ref=p_font_object_ref AND digest=p_font_sha256
+    AND media_type=p_font_media_type AND state='available';
+  IF NOT FOUND THEN RAISE EXCEPTION 'RENDER_FONT_NOT_AVAILABLE' USING ERRCODE='23514'; END IF;
+  PERFORM kb_object_upload_commit(p_font_staging_id,p_font_object_ref,p_font_sha256,p_font_media_type,
+    (SELECT byte_length FROM object_registry WHERE object_ref=p_font_object_ref),
+    'bid_render_font','00000000-0000-5000-8000-000000000304','font:cjk',p_actor);
+  SELECT * INTO STRICT revision FROM bid_workspace_revision_artifacts
+    WHERE id=typed.workspace_revision_id AND content_sha256=typed.workspace_sha256;
+  SELECT * INTO STRICT settings FROM bid_document_settings_revision_artifacts
+    WHERE id=typed.document_settings_revision_id AND content_sha256=typed.document_settings_sha256;
+  SELECT * INTO STRICT prior FROM bid_async_stage_receipts
+    WHERE request_artifact_id=p_request_artifact_id AND stage_kind='assessment'
+      AND frozen_input_sha256=p_frozen_input_sha256;
+  SELECT * INTO STRICT assessment FROM bid_submission_assessment_snapshot_artifacts
+    WHERE id=(prior.result_identity->>'artifact_id')::uuid
+      AND content_sha256=prior.result_identity->>'sha256'
+      AND workspace_id=typed.workspace_id AND workspace_revision_id=typed.workspace_revision_id;
+  IF assessment.quote_snapshot_id IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM bid_quote_snapshot_object_identities quote_object
+      WHERE quote_object.project_id=typed.project_id
+        AND quote_object.quote_snapshot_id=assessment.quote_snapshot_id
+        AND quote_object.content_sha256=assessment.quote_snapshot_sha256) THEN
+    RAISE EXCEPTION 'QUOTE_SNAPSHOT_OBJECT_MISSING' USING ERRCODE='23514';
+  END IF;
+  SELECT * INTO STRICT docx_contract FROM bid_renderer_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000302';
+  SELECT * INTO STRICT pdf_contract FROM bid_renderer_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000303';
+  INSERT INTO bid_render_font_artifacts(id,object_ref,content_sha256,media_type,family,script)
+  VALUES('00000000-0000-5000-8000-000000000304',p_font_object_ref,p_font_sha256,p_font_media_type,'Noto Sans JP','cjk')
+  ON CONFLICT(id) DO NOTHING;
+  IF EXISTS (SELECT 1 FROM bid_workspace_block_occurrences occurrence JOIN bid_content_block_revision_artifacts block
+      ON block.project_id=occurrence.project_id AND block.id=occurrence.block_revision_id
+      WHERE occurrence.workspace_revision_id=typed.workspace_revision_id AND block.block_kind='attachment_ref'
+        AND convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,render_mode}'='embedded_pages'
+        AND NOT EXISTS (SELECT 1 FROM bid_attachment_preparation_revision_artifacts preparation
+          WHERE preparation.id=kb_bid_v2_resolve_export_attachment_preparation(p_request_artifact_id,
+              typed.workspace_revision_id,occurrence.block_revision_id)
+            AND preparation.project_id=typed.project_id AND preparation.workspace_id=typed.workspace_id
+            AND preparation.source_asset_revision_id=(convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,asset_revision_id}')::uuid
+            AND preparation.status='ready')) THEN
+    RAISE EXCEPTION 'ATTACHMENT_PREPARATION_REQUIRED' USING ERRCODE='23514';
+  END IF;
+  SELECT coalesce(jsonb_agg(jsonb_build_object('node_occurrence_id',occurrence.id,'node_revision_id',node.id,
+    'parent_occurrence_id',occurrence.parent_occurrence_id,'ordinal',occurrence.ordinal,'depth',occurrence.depth,
+    'title',node.title,'render_role',node.render_role,'block_occurrences',coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'block_occurrence_id',block_occurrence.id,'block_revision_id',block.id,'ordinal',block_occurrence.ordinal,
+      'block_sha256',block.content_sha256) ORDER BY block_occurrence.ordinal,block_occurrence.id)
+      FROM bid_workspace_block_occurrences block_occurrence JOIN bid_content_block_revision_artifacts block
+        ON block.project_id=block_occurrence.project_id AND block.id=block_occurrence.block_revision_id
+      WHERE block_occurrence.workspace_revision_id=typed.workspace_revision_id AND block_occurrence.node_occurrence_id=occurrence.id),'[]'::jsonb))
+      ORDER BY occurrence.depth,occurrence.ordinal,occurrence.id),'[]'::jsonb) INTO nodes
+  FROM bid_workspace_node_occurrences occurrence JOIN bid_outline_node_revision_artifacts node
+    ON node.project_id=occurrence.project_id AND node.id=occurrence.node_revision_id
+  WHERE occurrence.workspace_revision_id=typed.workspace_revision_id;
+  SELECT coalesce(jsonb_agg(item ORDER BY item->>'asset_revision_id'),'[]'::jsonb) INTO assets FROM (
+    SELECT jsonb_build_object('asset_revision_id',asset.id,'object_ref',asset.object_ref,'sha256',asset.content_sha256,
+      'media_type',asset.media_type,'provenance','manual_workspace') item
+    FROM bid_workspace_asset_artifacts asset WHERE asset.workspace_id=typed.workspace_id AND EXISTS (
+      SELECT 1 FROM bid_workspace_block_occurrences occurrence JOIN bid_content_block_revision_artifacts block
+        ON block.project_id=occurrence.project_id AND block.id=occurrence.block_revision_id
+      WHERE occurrence.workspace_revision_id=typed.workspace_revision_id AND block.block_kind IN ('image','attachment_ref')
+        AND (convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,asset_revision_id}')::uuid=asset.id)
+    UNION ALL
+    SELECT jsonb_build_object('asset_revision_id',page.id,'object_ref',page.object_ref,'sha256',page.content_sha256,
+      'media_type',page.media_type,'provenance','prepared_attachment') item
+    FROM bid_attachment_preparation_asset_items page JOIN bid_attachment_preparation_revision_artifacts preparation
+      ON preparation.id=page.attachment_preparation_revision_id
+    WHERE preparation.workspace_id=typed.workspace_id AND preparation.status='ready' AND EXISTS (
+      SELECT 1 FROM bid_workspace_block_occurrences occurrence JOIN bid_content_block_revision_artifacts block
+        ON block.project_id=occurrence.project_id AND block.id=occurrence.block_revision_id
+      WHERE occurrence.workspace_revision_id=typed.workspace_revision_id AND block.block_kind='attachment_ref'
+        AND convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,render_mode}'='embedded_pages'
+        AND kb_bid_v2_resolve_export_attachment_preparation(p_request_artifact_id,
+          typed.workspace_revision_id,occurrence.block_revision_id)=preparation.id)
+    UNION ALL
+    SELECT jsonb_build_object('asset_revision_id',quote_object.quote_snapshot_id,
+      'object_ref',quote_object.object_ref,'sha256',quote_object.content_sha256,
+      'media_type',quote_object.media_type,'provenance','quote_snapshot') item
+    FROM bid_quote_snapshot_object_identities quote_object
+    WHERE quote_object.project_id=typed.project_id
+      AND quote_object.quote_snapshot_id=assessment.quote_snapshot_id
+      AND quote_object.content_sha256=assessment.quote_snapshot_sha256
+  ) render_asset;
+  SELECT coalesce(jsonb_agg(jsonb_build_object('form_definition_revision_id',form.id,
+    'canonical_sha256',form.content_sha256) ORDER BY form.id),'[]'::jsonb) INTO forms
+  FROM bid_tender_structured_form_definition_artifacts form WHERE EXISTS (
+    SELECT 1 FROM bid_workspace_block_occurrences occurrence JOIN bid_content_block_revision_artifacts block
+      ON block.project_id=occurrence.project_id AND block.id=occurrence.block_revision_id
+    WHERE occurrence.workspace_revision_id=typed.workspace_revision_id AND block.block_kind='structured_form'
+      AND (convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,form_definition_revision_id}')::uuid=form.id);
+  SELECT coalesce(jsonb_agg(jsonb_build_object('attachment_preparation_revision_id',preparation.id,
+    'status',preparation.status,'canonical_sha256',preparation.preparation_sha256) ORDER BY preparation.id),'[]'::jsonb)
+    INTO preparations FROM bid_attachment_preparation_revision_artifacts preparation
+    WHERE preparation.workspace_id=typed.workspace_id AND preparation.status='ready' AND EXISTS (
+      SELECT 1 FROM bid_workspace_block_occurrences occurrence JOIN bid_content_block_revision_artifacts block
+        ON block.project_id=occurrence.project_id AND block.id=occurrence.block_revision_id
+      WHERE occurrence.workspace_revision_id=typed.workspace_revision_id AND block.block_kind='attachment_ref'
+        AND convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,render_mode}'='embedded_pages'
+        AND kb_bid_v2_resolve_export_attachment_preparation(p_request_artifact_id,
+          typed.workspace_revision_id,occurrence.block_revision_id)=preparation.id);
+  font_items:=jsonb_build_array(jsonb_build_object('font_artifact_id','00000000-0000-5000-8000-000000000304',
+    'object_ref',p_font_object_ref,'sha256',p_font_sha256,'media_type',p_font_media_type,'family','Noto Sans JP','script','cjk'));
+  payload:=jsonb_build_object('schema_version',2,'render_snapshot_id',snapshot_id,'project_id',typed.project_id,
+    'project_title',(SELECT title FROM bid_projects WHERE id=typed.project_id),'workspace_id',typed.workspace_id,'workspace_scope','project_wide','workspace_scope_revision_id',typed.scope_revision_id,
+    'workspace_revision_id',typed.workspace_revision_id,'workspace_sha256',typed.workspace_sha256,
+    'outline_checkpoint_id',typed.outline_checkpoint_id,'outline_checkpoint_sha256',typed.outline_checkpoint_sha256,
+    'requirement_projection_revision_id',typed.requirement_projection_id,'requirement_projection_sha256',typed.requirement_projection_sha256,
+    'document_settings_revision_id',typed.document_settings_revision_id,'document_settings_sha256',typed.document_settings_sha256,
+    'submission_assessment_snapshot_id',assessment.id,'submission_assessment_snapshot_sha256',assessment.content_sha256,
+    'output_mode',typed.output_mode,'format',typed.format,'mode_options',typed.mode_options,'ordered_nodes',nodes,'assets',assets,
+    'form_definition_occurrences',forms,'attachment_preparation_occurrences',preparations,'content_block_schema_version',1,
+    'content_block_schema_sha256','4d0027af37854644f824b8df208cfffddb4ab9612abd367219fc725f8dead696',
+    'render_operation_contract_version',1,'render_operation_contract_sha256',operation_sha,
+    'docx_renderer_contract_id',docx_contract.id,'docx_renderer_contract_sha256',docx_contract.content_sha256,
+    'pdf_renderer_contract_id',pdf_contract.id,'pdf_renderer_contract_sha256',pdf_contract.content_sha256,
+    'style_contract_id',typed.render_style_contract_id,'style_contract_sha256',typed.render_style_contract_sha256,
+    'page_geometry',jsonb_build_object('page_size','A4','width_mm',210,'height_mm',297,
+      'margins_mm',coalesce(settings.settings->'margins_mm','{"top":25.4,"right":25.4,"bottom":25.4,"left":25.4}'::jsonb)),
+    'font_artifact_identities',font_items,'numbering_policy',coalesce(settings.settings->>'heading_numbering','decimal'),
+    'toc_policy','included');
+  snapshot_sha:=kb_bid_v2_sha256_bytes(convert_to(payload::text,'UTF8'));
+  payload:=payload||jsonb_build_object('snapshot_sha256',snapshot_sha);
+  INSERT INTO bid_render_document_snapshot_artifacts(id,project_id,workspace_id,schema_version,workspace_revision_id,
+    workspace_sha256,scope_revision_id,outline_checkpoint_id,outline_checkpoint_sha256,requirement_projection_id,
+    requirement_projection_sha256,document_settings_revision_id,document_settings_sha256,
+    submission_assessment_snapshot_id,submission_assessment_snapshot_sha256,output_mode,format,mode_options,
+    content_block_schema_version,content_block_schema_sha256,render_operation_contract_version,render_operation_contract_sha256,
+    docx_renderer_contract_id,docx_renderer_contract_sha256,pdf_renderer_contract_id,pdf_renderer_contract_sha256,
+    style_contract_id,style_contract_sha256,page_size,page_width_mm,page_height_mm,margins_mm,numbering_policy,toc_policy,
+    canonical_payload,content_sha256)
+  VALUES(snapshot_id,typed.project_id,typed.workspace_id,2,typed.workspace_revision_id,typed.workspace_sha256,typed.scope_revision_id,
+    typed.outline_checkpoint_id,typed.outline_checkpoint_sha256,typed.requirement_projection_id,typed.requirement_projection_sha256,
+    typed.document_settings_revision_id,typed.document_settings_sha256,assessment.id,assessment.content_sha256,typed.output_mode,
+    typed.format,typed.mode_options,1,'4d0027af37854644f824b8df208cfffddb4ab9612abd367219fc725f8dead696',1,operation_sha,
+    docx_contract.id,docx_contract.content_sha256,pdf_contract.id,pdf_contract.content_sha256,typed.render_style_contract_id,
+    typed.render_style_contract_sha256,'A4',210,297,payload#>'{page_geometry,margins_mm}',payload->>'numbering_policy',
+    payload->>'toc_policy',payload,snapshot_sha);
+  INSERT INTO bid_render_snapshot_node_occurrences(render_snapshot_id,project_id,workspace_revision_id,node_occurrence_id,node_revision_id,ordinal)
+    SELECT snapshot_id,typed.project_id,typed.workspace_revision_id,id,node_revision_id,ordinal
+    FROM bid_workspace_node_occurrences WHERE workspace_revision_id=typed.workspace_revision_id;
+  INSERT INTO bid_render_snapshot_block_occurrences(render_snapshot_id,project_id,workspace_revision_id,node_occurrence_id,
+    block_occurrence_id,block_revision_id,block_sha256,ordinal)
+    SELECT snapshot_id,typed.project_id,typed.workspace_revision_id,occurrence.node_occurrence_id,occurrence.id,occurrence.block_revision_id,
+      block.content_sha256,occurrence.ordinal FROM bid_workspace_block_occurrences occurrence JOIN bid_content_block_revision_artifacts block
+      ON block.project_id=occurrence.project_id AND block.id=occurrence.block_revision_id
+    WHERE occurrence.workspace_revision_id=typed.workspace_revision_id;
+  INSERT INTO bid_render_snapshot_asset_items(render_snapshot_id,ordinal,asset_revision_id,object_ref,content_sha256,media_type,provenance)
+    SELECT snapshot_id,row_number() OVER(ORDER BY item.asset_revision_id)-1,item.asset_revision_id,item.object_ref,
+      item.content_sha256,item.media_type,item.provenance FROM (
+      SELECT asset.id asset_revision_id,asset.object_ref,asset.content_sha256,asset.media_type,'manual_workspace'::text provenance
+      FROM bid_workspace_asset_artifacts asset WHERE asset.workspace_id=typed.workspace_id AND EXISTS (
+        SELECT 1 FROM bid_workspace_block_occurrences occurrence JOIN bid_content_block_revision_artifacts block
+          ON block.project_id=occurrence.project_id AND block.id=occurrence.block_revision_id
+        WHERE occurrence.workspace_revision_id=typed.workspace_revision_id AND block.block_kind IN ('image','attachment_ref')
+          AND (convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,asset_revision_id}')::uuid=asset.id)
+      UNION ALL
+      SELECT page.id,page.object_ref,page.content_sha256,page.media_type,'prepared_attachment'::text
+      FROM bid_attachment_preparation_asset_items page JOIN bid_attachment_preparation_revision_artifacts preparation
+        ON preparation.id=page.attachment_preparation_revision_id
+      WHERE preparation.workspace_id=typed.workspace_id AND preparation.status='ready' AND EXISTS (
+        SELECT 1 FROM bid_workspace_block_occurrences occurrence JOIN bid_content_block_revision_artifacts block
+          ON block.project_id=occurrence.project_id AND block.id=occurrence.block_revision_id
+        WHERE occurrence.workspace_revision_id=typed.workspace_revision_id AND block.block_kind='attachment_ref'
+          AND convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,render_mode}'='embedded_pages'
+          AND kb_bid_v2_resolve_export_attachment_preparation(p_request_artifact_id,
+            typed.workspace_revision_id,occurrence.block_revision_id)=preparation.id)
+      UNION ALL
+      SELECT quote_object.quote_snapshot_id,quote_object.object_ref,quote_object.content_sha256,
+        quote_object.media_type,'quote_snapshot'::text
+      FROM bid_quote_snapshot_object_identities quote_object
+      WHERE quote_object.project_id=typed.project_id
+        AND quote_object.quote_snapshot_id=assessment.quote_snapshot_id
+        AND quote_object.content_sha256=assessment.quote_snapshot_sha256
+    ) item;
+  INSERT INTO bid_render_snapshot_font_items(render_snapshot_id,ordinal,font_artifact_id,object_ref,content_sha256,media_type,family,script)
+    VALUES(snapshot_id,0,'00000000-0000-5000-8000-000000000304',p_font_object_ref,p_font_sha256,p_font_media_type,'Noto Sans JP','cjk');
+  INSERT INTO bid_render_snapshot_form_definition_items(render_snapshot_id,project_id,workspace_id,ordinal,form_definition_revision_id,canonical_sha256)
+    SELECT snapshot_id,typed.project_id,typed.workspace_id,row_number() OVER(ORDER BY form.id)-1,form.id,form.content_sha256
+    FROM bid_tender_structured_form_definition_artifacts form WHERE EXISTS (
+      SELECT 1 FROM bid_workspace_block_occurrences occurrence JOIN bid_content_block_revision_artifacts block
+      ON block.project_id=occurrence.project_id AND block.id=occurrence.block_revision_id
+      WHERE occurrence.workspace_revision_id=typed.workspace_revision_id AND block.block_kind='structured_form'
+        AND (convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,form_definition_revision_id}')::uuid=form.id);
+  INSERT INTO bid_render_snapshot_attachment_preparation_items(render_snapshot_id,project_id,workspace_id,ordinal,
+    attachment_preparation_revision_id,preparation_status,canonical_sha256)
+    SELECT snapshot_id,typed.project_id,typed.workspace_id,row_number() OVER(ORDER BY preparation.id)-1,
+      preparation.id,preparation.status,preparation.preparation_sha256
+    FROM bid_attachment_preparation_revision_artifacts preparation
+    WHERE preparation.workspace_id=typed.workspace_id AND preparation.status='ready' AND EXISTS (
+      SELECT 1 FROM bid_workspace_block_occurrences occurrence JOIN bid_content_block_revision_artifacts block
+        ON block.project_id=occurrence.project_id AND block.id=occurrence.block_revision_id
+      WHERE occurrence.workspace_revision_id=typed.workspace_revision_id AND block.block_kind='attachment_ref'
+        AND convert_from(block.canonical_payload,'UTF8')::jsonb#>>'{content,render_mode}'='embedded_pages'
+        AND kb_bid_v2_resolve_export_attachment_preparation(p_request_artifact_id,
+          typed.workspace_revision_id,occurrence.block_revision_id)=preparation.id);
+  manifest_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'manifest_id',manifest_id,
+    'render_snapshot_id',snapshot_id,'render_snapshot_sha256',snapshot_sha,'output_mode',typed.output_mode,
+    'format',typed.format,'mode_options',typed.mode_options));
+  manifest_sha:=kb_bid_v2_sha256_bytes(manifest_payload);
+  INSERT INTO bid_submission_manifest_artifacts(id,project_id,workspace_id,render_snapshot_id,output_mode,format,
+    mode_options,canonical_payload,content_sha256)
+  VALUES(manifest_id,typed.project_id,typed.workspace_id,snapshot_id,typed.output_mode,typed.format,typed.mode_options,
+    manifest_payload,manifest_sha);
+  FOR dependency IN SELECT * FROM kb_bid_v2_manifest_expected_dependencies(manifest_id)
+    ORDER BY dependency_kind,dependency_id LOOP
+    INSERT INTO bid_submission_manifest_dependencies(manifest_id,dependency_kind,dependency_id,dependency_sha256,ordinal)
+    VALUES(manifest_id,dependency.dependency_kind,dependency.dependency_id,dependency.dependency_sha256,ordinal_value);
+    ordinal_value:=ordinal_value+1;
+  END LOOP;
+  published_identity:=jsonb_build_object('artifact_id',manifest_id,'sha256',manifest_sha,
+    'render_snapshot_id',snapshot_id,'render_snapshot_sha256',snapshot_sha,'format',typed.format);
+  INSERT INTO bid_async_stage_receipts(request_artifact_id,stage_kind,frozen_input_sha256,result_identity,result_sha256)
+  VALUES(p_request_artifact_id,'attachment_prepare',p_frozen_input_sha256,
+      jsonb_build_object('artifact_id',kb_bid_v2_deterministic_uuid(p_request_artifact_id::text||':attachment-prepare'),
+        'sha256',kb_bid_v2_sha256_bytes(convert_to(preparations::text,'UTF8'))),
+      kb_bid_v2_sha256_bytes(convert_to(preparations::text,'UTF8'))),
+    (p_request_artifact_id,'render_snapshot',p_frozen_input_sha256,
+      jsonb_build_object('artifact_id',snapshot_id,'sha256',snapshot_sha),snapshot_sha),
+    (p_request_artifact_id,'manifest',p_frozen_input_sha256,published_identity,manifest_sha);
+  RETURN published_identity;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_prepare_submission_export(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256,
+  p_font_staging_id uuid,p_font_object_ref kb_object_ref,p_font_sha256 kb_sha256,p_font_media_type text,
+  p_snapshot_id uuid,p_manifest_id uuid,p_actor kb_actor_identity
+) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+  SELECT kb_bid_v2_transition_submission_export($1,$2,$3,$4,$5,$6,$7,$8,$9,
+    NULL::uuid,NULL::uuid,NULL::kb_object_ref,NULL::kb_sha256,NULL::text,NULL::bigint,$10)
+$$;
+
+CREATE FUNCTION kb_bid_v2_publish_submission_export(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256,
+  p_font_staging_id uuid,p_font_object_ref kb_object_ref,p_font_sha256 kb_sha256,p_font_media_type text,
+  p_snapshot_id uuid,p_manifest_id uuid,p_output_staging_id uuid,p_output_id uuid,
+  p_output_object_ref kb_object_ref,p_output_sha256 kb_sha256,p_output_media_type text,p_output_byte_length bigint,
+  p_actor kb_actor_identity
+) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+  IF p_font_staging_id IS NULL OR p_font_object_ref IS NULL OR p_font_sha256 IS NULL
+    OR p_font_media_type IS NULL OR p_snapshot_id IS NULL OR p_manifest_id IS NULL THEN
+    RAISE EXCEPTION 'PREPARED_EXPORT_IDENTITY_MISMATCH' USING ERRCODE='23514';
+  END IF;
+  IF p_output_staging_id IS NULL OR p_output_id IS NULL OR p_output_object_ref IS NULL
+    OR p_output_sha256 IS NULL OR p_output_media_type IS NULL OR p_output_byte_length IS NULL THEN
+    RAISE EXCEPTION 'SUBMISSION_OUTPUT_IDENTITY_INVALID' USING ERRCODE='23514';
+  END IF;
+  RETURN kb_bid_v2_transition_submission_export(p_request_artifact_id,p_request_revision,p_frozen_input_sha256,
+    p_font_staging_id,p_font_object_ref,p_font_sha256,p_font_media_type,p_snapshot_id,p_manifest_id,
+    p_output_staging_id,p_output_id,p_output_object_ref,p_output_sha256,p_output_media_type,p_output_byte_length,p_actor);
+END $$;
+
+CREATE FUNCTION kb_bid_v2_load_submission_manifest_render_input(
+  p_manifest_id uuid,p_manifest_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE manifest bid_submission_manifest_artifacts%ROWTYPE;
+  snapshot bid_render_document_snapshot_artifacts%ROWTYPE; result_value jsonb; workspace_value jsonb; quote_value jsonb;
+BEGIN
+  SELECT * INTO STRICT manifest FROM bid_submission_manifest_artifacts
+    WHERE id=p_manifest_id AND content_sha256=p_manifest_sha256;
+  SELECT * INTO STRICT snapshot FROM bid_render_document_snapshot_artifacts
+    WHERE id=manifest.render_snapshot_id
+      AND content_sha256=(convert_from(manifest.canonical_payload,'UTF8')::jsonb->>'render_snapshot_sha256')::kb_sha256;
+  SELECT convert_from(quote.canonical_payload,'UTF8')::jsonb||jsonb_build_object(
+      'artifact_id',quote.id,'sha256',quote.content_sha256)
+    INTO quote_value FROM bid_submission_assessment_snapshot_artifacts assessment
+    JOIN bid_quote_snapshot_artifacts quote ON quote.project_id=assessment.project_id
+      AND quote.id=assessment.quote_snapshot_id AND quote.content_sha256=assessment.quote_snapshot_sha256
+    WHERE assessment.id=snapshot.submission_assessment_snapshot_id
+      AND assessment.content_sha256=snapshot.submission_assessment_snapshot_sha256;
+  workspace_value:=kb_bid_v2_load_workspace_revision(
+    snapshot.workspace_id,snapshot.workspace_revision_id,snapshot.workspace_sha256);
+  IF workspace_value IS NULL THEN RAISE EXCEPTION 'MANIFEST_WORKSPACE_IDENTITY_INVALID' USING ERRCODE='23514'; END IF;
+  workspace_value:=jsonb_set(workspace_value,'{quote_snapshot}',coalesce(quote_value,'null'::jsonb),true);
+  result_value:=jsonb_build_object(
+    'request',jsonb_build_object('output_mode',snapshot.output_mode,'format',snapshot.format,'mode_options',snapshot.mode_options),
+    'project_title',snapshot.canonical_payload->>'project_title',
+    'workspace',workspace_value,
+    'assets',coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'asset_revision_id',item.asset_revision_id,'object_ref',item.object_ref,'sha256',item.content_sha256,
+      'media_type',item.media_type,'file_name',coalesce(asset.file_name,
+        CASE WHEN item.provenance='prepared_attachment' THEN '附件第'||page.page_number||'页'
+             WHEN item.provenance='quote_snapshot' THEN 'quote-snapshot.json' END),
+      'provenance',item.provenance) ORDER BY item.ordinal)
+      FROM bid_render_snapshot_asset_items item
+      LEFT JOIN bid_workspace_asset_artifacts asset ON asset.id=item.asset_revision_id
+      LEFT JOIN bid_attachment_preparation_asset_items page ON page.id=item.asset_revision_id
+      WHERE item.render_snapshot_id=snapshot.id),'[]'::jsonb),
+    'form_definitions',coalesce((SELECT jsonb_agg(convert_from(form.canonical_payload,'UTF8')::jsonb ORDER BY item.ordinal)
+      FROM bid_render_snapshot_form_definition_items item
+      JOIN bid_tender_structured_form_definition_artifacts form
+        ON form.project_id=item.project_id AND form.id=item.form_definition_revision_id
+          AND form.content_sha256=item.canonical_sha256
+      WHERE item.render_snapshot_id=snapshot.id),'[]'::jsonb),
+    'attachment_preparations',coalesce((SELECT jsonb_agg(preparation.canonical_payload ORDER BY item.ordinal)
+      FROM bid_render_snapshot_attachment_preparation_items item
+      JOIN bid_attachment_preparation_revision_artifacts preparation
+        ON preparation.project_id=item.project_id AND preparation.id=item.attachment_preparation_revision_id
+          AND preparation.status=item.preparation_status AND preparation.preparation_sha256=item.canonical_sha256
+      WHERE item.render_snapshot_id=snapshot.id),'[]'::jsonb),
+    'prepared_manifest',jsonb_build_object('manifest_id',manifest.id,'manifest_sha256',manifest.content_sha256,
+      'render_snapshot_id',snapshot.id,'render_snapshot_sha256',snapshot.content_sha256));
+  RETURN result_value;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_mark_submission_export_failed(
+  p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256,p_error_code text
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+  UPDATE bid_async_request_snapshot_artifacts SET status='failed',error_code=p_error_code,finished_at=clock_timestamp()
+  WHERE id=p_request_artifact_id AND request_kind='submission_export' AND revision=p_request_revision
+    AND frozen_input_sha256=p_frozen_input_sha256 AND status='pending';
+END $$;
+
+CREATE FUNCTION kb_bid_v2_list_submission_exports(p_workspace_id uuid,p_actor kb_actor_identity)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE workspace bid_submission_workspaces%ROWTYPE;
+BEGIN
+ SELECT * INTO STRICT workspace FROM bid_submission_workspaces WHERE id=p_workspace_id;
+ PERFORM kb_bid_v2_require_project_owner(workspace.project_id,p_actor);
+ RETURN coalesce((SELECT jsonb_agg(jsonb_build_object('export_id',output.id,'manifest_id',output.manifest_id,
+   'format',output.format,'mode',manifest.output_mode,'status','ready','sha256',output.content_sha256,
+   'byte_length',output.byte_length,'created_at',output.created_at) ORDER BY output.created_at DESC,output.id DESC)
+   FROM bid_submission_output_artifacts output JOIN bid_submission_manifest_artifacts manifest ON manifest.id=output.manifest_id
+   WHERE output.workspace_id=p_workspace_id),'[]'::jsonb);
+END $$;
+
+CREATE FUNCTION kb_bid_v2_get_submission_export(p_workspace_id uuid,p_output_id uuid,p_actor kb_actor_identity)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE workspace bid_submission_workspaces%ROWTYPE; result jsonb;
+BEGIN
+ SELECT * INTO STRICT workspace FROM bid_submission_workspaces WHERE id=p_workspace_id;
+ PERFORM kb_bid_v2_require_project_owner(workspace.project_id,p_actor);
+ SELECT jsonb_build_object('export_id',output.id,'manifest_id',output.manifest_id,'render_snapshot_id',manifest.render_snapshot_id,
+   'format',output.format,'mode',manifest.output_mode,'mode_options',manifest.mode_options,'status','ready',
+   'sha256',output.content_sha256,'byte_length',output.byte_length,'media_type',output.media_type,
+   'assessment_report_id',report.id,'assessment_report_sha256',report.content_sha256,'created_at',output.created_at,
+   'attachment_preparations',coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'attachment_preparation_revision_id',dependency.dependency_id,'sha256',dependency.dependency_sha256)
+      ORDER BY dependency.ordinal)
+     FROM bid_submission_manifest_dependencies dependency
+     WHERE dependency.manifest_id=manifest.id AND dependency.dependency_kind='attachment_preparation'),'[]'::jsonb))
+ INTO result FROM bid_submission_output_artifacts output JOIN bid_submission_manifest_artifacts manifest ON manifest.id=output.manifest_id
+ JOIN bid_submission_assessment_report_artifacts report ON report.submission_output_id=output.id
+ WHERE output.id=p_output_id AND output.workspace_id=p_workspace_id;
+ IF result IS NULL THEN RAISE EXCEPTION 'SUBMISSION_EXPORT_NOT_FOUND' USING ERRCODE='P0002'; END IF;
+ RETURN result;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_get_submission_assessment_report(p_workspace_id uuid,p_output_id uuid,p_actor kb_actor_identity)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE workspace bid_submission_workspaces%ROWTYPE; result jsonb;
+BEGIN
+ SELECT * INTO STRICT workspace FROM bid_submission_workspaces WHERE id=p_workspace_id;
+ PERFORM kb_bid_v2_require_project_owner(workspace.project_id,p_actor);
+ SELECT convert_from(report.canonical_payload,'UTF8')::jsonb||jsonb_build_object('content_sha256',report.content_sha256)
+ INTO result FROM bid_submission_assessment_report_artifacts report
+ WHERE report.submission_output_id=p_output_id AND report.workspace_id=p_workspace_id;
+ IF result IS NULL THEN RAISE EXCEPTION 'ASSESSMENT_REPORT_NOT_FOUND' USING ERRCODE='P0002'; END IF;
+ RETURN result;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_get_submission_export_object(p_workspace_id uuid,p_output_id uuid,p_actor kb_actor_identity)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE workspace bid_submission_workspaces%ROWTYPE;
+BEGIN
+ SELECT * INTO STRICT workspace FROM bid_submission_workspaces WHERE id=p_workspace_id;
+ PERFORM kb_bid_v2_require_project_owner(workspace.project_id,p_actor);
+ RETURN (SELECT jsonb_build_object('object_ref',object_ref,'sha256',content_sha256,'media_type',media_type,
+   'byte_length',byte_length,'file_name','submission.'||format) FROM bid_submission_output_artifacts
+   WHERE id=p_output_id AND workspace_id=p_workspace_id);
+END $$;
+
 -- Publication is the only path that marks a tender document ready.
 CREATE FUNCTION kb_bid_v2_mark_tender_document_failed(
   p_request_artifact_id uuid,p_error_code text
@@ -4686,31 +7910,72 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
 GRANT SELECT ON bidding_v2_projects,bidding_v2_workspace_heads,bidding_v2_async_requests,bidding_v2_outputs
   TO kb_runtime_api,kb_runtime_worker;
 GRANT EXECUTE ON FUNCTION kb_bid_v2_publish_requirement_set(uuid,kb_sha256),
+  kb_bid_v2_load_tender_document_process_input(uuid,bigint,kb_sha256),
   kb_bid_v2_publish_tender_document_process(uuid,bigint,kb_sha256,uuid,uuid,kb_sha256,jsonb,jsonb,jsonb,kb_actor_identity),
   kb_bid_v2_compile_requirement_set(uuid,bigint,kb_sha256,kb_actor_identity),
+  kb_bid_v2_mark_requirement_set_compile_failed(uuid,bigint,kb_sha256,text),
+  kb_bid_v2_load_outline_generation_input(uuid,bigint,kb_sha256),
+  kb_bid_v2_publish_outline_generation(uuid,bigint,kb_sha256,uuid,bytea,kb_sha256,jsonb),
+  kb_bid_v2_mark_outline_generation_failed(uuid,bigint,kb_sha256,text),
+  kb_bid_v2_load_content_generation_input(uuid,bigint,kb_sha256),
+  kb_bid_v2_load_user_pick_evidence(uuid,bigint,kb_sha256),
+  kb_bid_v2_publish_content_generation(uuid,bigint,kb_sha256,uuid,kb_sha256,jsonb,uuid,bytea,kb_sha256,jsonb),
+  kb_bid_v2_mark_content_generation_failed(uuid,bigint,kb_sha256,text),
+  kb_bid_v2_load_submission_export_input(uuid,bigint,kb_sha256),
+  kb_bid_v2_publish_pdf_attachment_preparation(uuid,bigint,kb_sha256,uuid,uuid,uuid[],uuid[],kb_object_ref[],kb_sha256[],text[],bigint[],integer[],integer[],kb_actor_identity),
+  kb_bid_v2_prepare_submission_export(uuid,bigint,kb_sha256,uuid,kb_object_ref,kb_sha256,text,uuid,uuid,kb_actor_identity),
+  kb_bid_v2_load_submission_manifest_render_input(uuid,kb_sha256),
+  kb_bid_v2_publish_submission_export(uuid,bigint,kb_sha256,uuid,kb_object_ref,kb_sha256,text,uuid,uuid,uuid,uuid,kb_object_ref,kb_sha256,text,bigint,kb_actor_identity),
+  kb_bid_v2_mark_submission_export_failed(uuid,bigint,kb_sha256,text),
   kb_bid_v2_mark_tender_document_failed(uuid,text)
   TO kb_runtime_worker;
 GRANT EXECUTE ON FUNCTION kb_bid_v2_create_project(uuid,text,uuid,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_list_projects(uuid,kb_actor_identity),
   kb_bid_v2_get_project(uuid,kb_actor_identity),
+  kb_bid_v2_next_quote_snapshot_revision(uuid,kb_actor_identity),
+  kb_bid_v2_publish_quote_snapshot(uuid,uuid,bigint,uuid,kb_object_ref,kb_sha256,bigint,bytea,kb_actor_identity,text,bytea,kb_sha256),
+  kb_bid_v2_list_quote_snapshots(uuid,kb_actor_identity),
+  kb_bid_v2_get_quote_snapshot(uuid,uuid,kb_actor_identity),
   kb_bid_v2_end_project(uuid,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_upload_tender_document(uuid,uuid,uuid,uuid,text,text,bigint,kb_object_ref,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
+  kb_bid_v2_retry_tender_document(uuid,uuid,uuid,bigint,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_list_tender_documents(uuid,kb_actor_identity),
   kb_bid_v2_patch_document_role(uuid,uuid,text,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_upsert_document_relation(uuid,uuid,uuid,uuid,text,jsonb,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_list_document_relations(uuid,kb_actor_identity),
+  kb_bid_v2_list_document_sets(uuid,kb_actor_identity),
+  kb_bid_v2_get_document_set(uuid,uuid,kb_actor_identity),
   kb_bid_v2_freeze_document_set(uuid,uuid[],uuid,kb_sha256,uuid,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_publish_disposition_set(uuid,uuid,jsonb,uuid,kb_sha256,uuid,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_list_source_units(uuid,kb_actor_identity),
+  kb_bid_v2_list_structured_forms(uuid,kb_actor_identity),
   kb_bid_v2_list_requirements(uuid,kb_actor_identity),
   kb_bid_v2_patch_requirement(uuid,uuid,uuid,kb_sha256,text,text,text,text,text,jsonb,jsonb,kb_actor_identity,text,bytea,kb_sha256),
-  kb_bid_v2_publish_requirement_supersession(uuid,uuid,uuid,uuid,jsonb,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
+  kb_bid_v2_publish_requirement_supersession(uuid,uuid,uuid,uuid,jsonb,boolean,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_load_workspace_for_actor(uuid,kb_actor_identity),
+  kb_bid_v2_get_requirement_projection(uuid,kb_actor_identity),
+  kb_bid_v2_refresh_requirement_projection(uuid,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_list_workspace_assets(uuid,kb_actor_identity),
   kb_bid_v2_upload_workspace_asset(uuid,uuid,uuid,text,text,bigint,kb_object_ref,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
+  kb_bid_v2_prepare_workspace_attachment(uuid,uuid,uuid,uuid[],uuid[],integer[],integer[],kb_actor_identity,text,bytea,kb_sha256),
+  kb_bid_v2_retire_workspace_asset(uuid,uuid,text,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_create_outline_checkpoint(uuid,uuid,kb_sha256,uuid,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_commit_workspace_mutation_idempotent(uuid,uuid,kb_sha256,jsonb,kb_actor_identity,text,bytea,kb_sha256),
   kb_bid_v2_create_outline_candidate(uuid,uuid,kb_sha256,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256),
+  kb_bid_v2_create_content_request(uuid,uuid,kb_sha256,text,text,uuid,text,jsonb,text,uuid,kb_actor_identity,text,bytea,kb_sha256),
+  kb_bid_v2_create_evidence_pick_set(uuid,uuid,uuid[],kb_actor_identity,text,bytea,kb_sha256),
+  kb_bid_v2_create_node_evidence_pick_set(uuid,uuid,uuid,uuid[],kb_actor_identity,text,bytea,kb_sha256),
+  kb_bid_v2_list_evidence_pick_sets(uuid,kb_actor_identity),
+  kb_bid_v2_get_node_evidence(uuid,uuid,kb_actor_identity),
+  kb_bid_v2_get_evidence_overview(uuid,kb_actor_identity),
+  kb_bid_v2_get_current_assessments(uuid,kb_actor_identity),
+  kb_bid_v2_load_preview_input(uuid,kb_actor_identity),
+  kb_bid_v2_get_preview_html(uuid,kb_actor_identity),
+  kb_bid_v2_create_submission_export_request(uuid,uuid,kb_sha256,text,text,jsonb,kb_actor_identity,text,bytea,kb_sha256),
+  kb_bid_v2_list_submission_exports(uuid,kb_actor_identity),
+  kb_bid_v2_get_submission_export(uuid,uuid,kb_actor_identity),
+  kb_bid_v2_get_submission_assessment_report(uuid,uuid,kb_actor_identity),
+  kb_bid_v2_get_submission_export_object(uuid,uuid,kb_actor_identity),
   kb_bid_v2_get_async_request(uuid,uuid,kb_actor_identity),
   kb_bid_v2_get_candidate(uuid,uuid,kb_actor_identity),
   kb_bid_v2_accept_candidate(uuid,uuid,uuid,kb_sha256,jsonb,integer[],kb_actor_identity,text,bytea,kb_sha256),
