@@ -1,6 +1,6 @@
 # KnowledgeBrain
 
-Product-document knowledge service. Documentation: [`docs/README.md`](docs/README.md). Knowledge-base domain: [`docs/knowledge-base/domain.md`](docs/knowledge-base/domain.md). Bidding target: [`docs/bidding/domain.md`](docs/bidding/domain.md).
+Product-document knowledge service. Product: [`PRODUCT.md`](PRODUCT.md). Design: [`DESIGN.md`](DESIGN.md). Documentation: [`docs/README.md`](docs/README.md). Knowledge-base domain: [`docs/knowledge-base/domain.md`](docs/knowledge-base/domain.md). Bidding target: [`docs/bidding/authoring.md`](docs/bidding/authoring.md) (current-code contrast, not wholesale deletion: [`docs/bidding/current-code.md`](docs/bidding/current-code.md)).
 
 HTTP (`/api/v1`) validates, persists, and enqueues only. Parse / chunk / vector / wiki / graph run in `worker`. Task progress: `GET /api/v1/documents/{id}/timeline`.
 
@@ -15,7 +15,7 @@ cp deploy/.env.example deploy/.env
 KNOWLEDGEBRAIN_FIRST_LAUNCH_FRESH=required deploy/compose-first-launch.sh
 ```
 
-The fixed fresh baseline is exactly `knowledge_base_baseline`, `shared_platform_baseline`, and `bidding_v1_baseline`; there is no incremental bidding chain. Production is still intentionally blocked: the orchestrator fails before Docker while reviewed runtime completion is `false`. API, worker, and the independent retention consumer only verify the exact manifest identity and never migrate. After verified runtime acceptance, use `deploy/compose-runtime-restart.sh` for restarts.
+The launchable fresh baseline is still exactly `knowledge_base_baseline`, `shared_platform_baseline`, and `bidding_v1_baseline` (current schema slice, not the product end state; Phase 7 replaces the bidding slice with `bidding_v2_baseline`). There is no incremental bidding chain. Production is still intentionally blocked: the orchestrator fails before Docker while reviewed runtime completion is `false`. API, worker, and the independent retention consumer only verify the exact manifest identity and never migrate. After verified runtime acceptance, use `deploy/compose-runtime-restart.sh` for restarts.
 
 ## Local rust (infra only)
 

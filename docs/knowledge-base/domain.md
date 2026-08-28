@@ -90,7 +90,7 @@ retrieval_contract_version
 - company hit 不构成产品排名；
 - quote 是 chunk 的连续 UTF-8 byte slice，offset/digest/length 可验证；
 - 文件显示名和 chunk bytes 是检索时快照，便于调用方立即冻结；
-- 知识库不接收也不保存招投标 candidate/decision/report/pick；
+- 知识库不接收也不保存招投标 Candidate、EvidenceBundle、MatchingReport 或人工选择；编制侧如何采用检索结果见 [`../bidding/authoring.md`](../bidding/authoring.md)；
 - 端口返回以后 live Document 的修改或删除，不改写调用方已冻结 artifact。
 
 ### 2.1 knowledge-owned scope attestation

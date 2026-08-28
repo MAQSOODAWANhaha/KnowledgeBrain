@@ -214,6 +214,10 @@ docker exec -i -e PGPASSWORD=knowledgebrain "$container" \
   psql -X -v ON_ERROR_STOP=1 -U knowledgebrain -d knowledgebrain \
   < scripts/bidding_v2_phase0_live.sql >/dev/null
 
+docker exec -i -e PGPASSWORD=knowledgebrain "$container" \
+  psql -X -v ON_ERROR_STOP=1 -U knowledgebrain -d knowledgebrain \
+  < scripts/bidding_v2_phase1_live.sql >/dev/null
+
 render_payload=$(docker exec -e PGPASSWORD=knowledgebrain "$container" \
   psql -X -U knowledgebrain -d knowledgebrain -Atc \
   "SELECT canonical_payload::text FROM bid_render_document_snapshot_artifacts WHERE id='00000000-0000-4000-8000-000000000127'")
@@ -248,4 +252,4 @@ if rg -n '\\\\if false' scripts/bidding_v2_phase0_live.sql; then
   exit 1
 fi
 
-echo "V2 live fresh-schema: five aggregates, attested evidence, closed canonical render/evidence, exact projections, manifest dependencies and negative DML: PASS"
+echo "V2 live fresh-schema: Phase 0 contracts plus Phase 1 owner/idempotency, role/relation, DocumentSet and RequirementProjection: PASS"

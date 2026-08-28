@@ -1,4 +1,4 @@
-import { Button, SegmentedControl } from "@mantine/core";
+import type { ChangeEvent } from "react";
 import type { BidV2Session, BidV2State, InspectorTab } from "./session";
 
 const TABS: { value: InspectorTab; label: string }[] = [
@@ -16,15 +16,26 @@ export function InspectorPanel({
   state: BidV2State;
 }) {
   const nodeId = state.selectedNodeLineageId;
+  const node = nodeId ? session.findNode(nodeId) : null;
+
+  function onTab(event: ChangeEvent<HTMLSelectElement>) {
+    session.setInspectorTab(event.currentTarget.value as InspectorTab);
+  }
+
   return (
     <>
-      <SegmentedControl
-        fullWidth
-        size="xs"
+      <select
+        className="in"
         value={state.inspectorTab}
-        data={TABS}
-        onChange={(value) => session.setInspectorTab(value as InspectorTab)}
-      />
+        onChange={onTab}
+        data-testid="inspector-tab"
+      >
+        {TABS.map((tab) => (
+          <option key={tab.value} value={tab.value}>
+            {tab.label}
+          </option>
+        ))}
+      </select>
       {state.inspectorTab === "requirements" && (
         <div className="stack" style={{ marginTop: 12 }}>
           <p className="lbl">本章要求</p>
@@ -41,25 +52,26 @@ export function InspectorPanel({
       {state.inspectorTab === "evidence" && (
         <div className="stack" style={{ marginTop: 12 }}>
           <p className="lbl">知识证据</p>
-          <SegmentedControl
-            size="xs"
+          <select
+            className="in"
             value={state.evidenceMode}
-            data={[
-              { value: "system_proposed", label: "系统建议" },
-              { value: "user_pick_set", label: "人工先选" },
-            ]}
-            onChange={(value) =>
-              session.setEvidenceMode(value as BidV2State["evidenceMode"])
+            onChange={(event) =>
+              session.setEvidenceMode(
+                event.currentTarget.value as BidV2State["evidenceMode"],
+              )
             }
-          />
-          <Button
-            size="compact-sm"
-            variant="default"
+          >
+            <option value="system_proposed">系统建议</option>
+            <option value="user_pick_set">人工先选</option>
+          </select>
+          <button
+            type="button"
+            className="btn ghost"
             disabled={state.ended || !nodeId}
             onClick={() => nodeId && void session.matchEvidence(nodeId)}
           >
             匹配资料
-          </Button>
+          </button>
           {(state.evidenceOverview?.bundles ?? []).map((bundle) => (
             <div key={bundle.evidence_bundle_id} className="note">
               {bundle.title}
@@ -73,9 +85,35 @@ export function InspectorPanel({
       {state.inspectorTab === "assets" && (
         <div className="stack" style={{ marginTop: 12 }}>
           <p className="lbl">本次人工资产</p>
+          <label className="note">
+            上传
+            <input
+              type="file"
+              onChange={(event) => {
+                const file = event.currentTarget.files?.[0];
+                if (file) void session.uploadAsset(file);
+                event.currentTarget.value = "";
+              }}
+            />
+          </label>
           {state.assets.map((asset) => (
             <div key={asset.asset_revision_id} className="note">
-              {asset.file_name}
+              {asset.file_name}{" "}
+              <button
+                type="button"
+                className="btn ghost"
+                disabled={state.ended || !nodeId}
+                onClick={() =>
+                  nodeId &&
+                  void session.insertAssetBlock(
+                    nodeId,
+                    asset.asset_revision_id,
+                    node?.block_lineage_ids.length ?? 0,
+                  )
+                }
+              >
+                插入本章
+              </button>
             </div>
           ))}
           {state.assets.length === 0 && (

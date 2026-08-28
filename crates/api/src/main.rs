@@ -6,11 +6,11 @@ use tokio::signal::unix::{SignalKind, signal};
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
-    runtime::init_tracing();
-    let pool = storage::connect()
+    platform::init_tracing();
+    let pool = platform::connect()
         .await
         .unwrap_or_else(|e| panic!("postgres schema verification failed: {e}"));
-    storage::require_production_first_launch_verified(&pool)
+    platform::require_production_first_launch_verified(&pool)
         .await
         .unwrap_or_else(|error| panic!("production first-launch gate failed: {error}"));
     let addr = bind_addr();

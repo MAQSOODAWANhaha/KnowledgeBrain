@@ -77,8 +77,26 @@ function workspace(over: Record<string, unknown> = {}) {
   };
 }
 
+function readyDocument() {
+  return {
+    id: "19191919-1919-1919-1919-191919191919",
+    project_id: PROJECT,
+    file_name: "tender.pdf",
+    media_type: "application/pdf",
+    byte_length: 12,
+    document_role: "primary_tender",
+    role_revision_id: "19191919-1919-1919-1919-191919191919",
+    role_revision_sha256: SHA,
+    role_provenance: "system_suggested",
+    parse_status: "ready",
+    conversion_generation: 1,
+    error_code: null,
+    original_sha256: SHA,
+  };
+}
+
 async function mockApi(page: Page) {
-  const documents: Array<Record<string, unknown>> = [];
+  const documents: Array<Record<string, unknown>> = [readyDocument()];
   await page.route("**/api/**", async (route) => {
     const req = route.request();
     const url = new URL(req.url());
@@ -104,19 +122,9 @@ async function mockApi(page: Page) {
     if (p.endsWith("/tender-documents") && method === "GET")
       return json({ documents });
     if (p.endsWith("/tender-documents") && method === "POST") {
-      documents.push({
-        id: "19191919-1919-1919-1919-191919191919",
-        project_id: PROJECT,
-        file_name: "tender.pdf",
-        media_type: "application/pdf",
-        byte_length: 12,
-        document_role: "primary_tender",
-        parse_status: "completed",
-        conversion_generation: 1,
-        error_code: null,
-        original_sha256: SHA,
-      });
-      return json(documents[0]);
+      const uploaded = readyDocument();
+      documents.push(uploaded);
+      return json(uploaded);
     }
     if (p.endsWith("/tender-document-relations"))
       return json({ relations: [] });
@@ -129,6 +137,62 @@ async function mockApi(page: Page) {
       return json(workspace());
     }
     if (p.endsWith("/mutations") && method === "POST") return json(workspace());
+    if (p.endsWith("/document-set-revisions") && method === "POST") {
+      return json({
+        artifact_id: "17171717-1717-1717-1717-171717171717",
+        sha256: SHA,
+      });
+    }
+    if (p.endsWith("/outline-candidates") && method === "POST") {
+      return json({
+        request_artifact_id: "outline-req",
+        kind: "OutlineGenerate",
+        status: "succeeded",
+        result_identity: { artifact_id: "cand-outline", sha256: SHA },
+      });
+    }
+    if (p.endsWith("/content-candidates") && method === "POST") {
+      return json({
+        request_artifact_id: "content-req",
+        kind: "ContentGenerate",
+        status: "succeeded",
+        result_identity: { artifact_id: "cand-content", sha256: SHA },
+      });
+    }
+    if (p.includes("/requests/")) {
+      return json({
+        request_artifact_id: "outline-req",
+        kind: "OutlineGenerate",
+        status: "succeeded",
+        result_identity: { artifact_id: "cand-outline", sha256: SHA },
+      });
+    }
+    if (p.includes("/candidates/") && method === "GET") {
+      return json({
+        candidate_id: "cand-outline",
+        kind: "outline",
+        status: "proposed",
+        base_workspace_revision_id: "14141414-1414-1414-1414-141414141414",
+        base_workspace_sha256: SHA,
+        nodes: [
+          {
+            client_node_ref: "n1",
+            parent_client_node_ref: null,
+            ordinal: 0,
+            title: "投标文件",
+          },
+        ],
+        notices: [],
+      });
+    }
+    if (p.includes("/candidates/") && method === "POST") {
+      return json(
+        workspace({
+          document_set_revision_id: "17171717-1717-1717-1717-171717171717",
+          document_set_sha256: SHA,
+        }),
+      );
+    }
     if (p.endsWith("/assessments/current")) {
       return json({
         outline: {
@@ -167,7 +231,7 @@ async function mockApi(page: Page) {
   });
 }
 
-test("V2 wizard, upload, authoring tree and export are visible without Gate", async ({
+test("V2 golden path: files, authoring canvas, outline candidate, export without Gate", async ({
   page,
 }) => {
   await mockApi(page);
@@ -180,20 +244,22 @@ test("V2 wizard, upload, authoring tree and export are visible without Gate", as
   await expect(page.getByTestId("upload-drop")).toBeVisible();
   await expect(page.getByTestId("wizard-facts")).toHaveCount(0);
   await expect(page.getByTestId("wizard-parts")).toHaveCount(0);
+  await expect(page.getByTestId("wizard-requirements")).toHaveCount(0);
+  await expect(page.getByTestId("wizard-preview")).toHaveCount(0);
   await expect(page.getByTestId("gate-issues")).toHaveCount(0);
-
-  await activateWithKeyboard(page.getByTestId("wizard-requirements"));
-  await expect(page.getByTestId("freeze-document-set")).toBeVisible();
 
   await activateWithKeyboard(page.getByTestId("wizard-authoring"));
   await expect(page.getByTestId("outline-tree")).toBeVisible();
+  await expect(page.getByTestId("document-canvas")).toBeVisible();
   await expect(page.getByTestId("section-editor")).toBeVisible();
   await expect(page.getByTestId(`outline-node-${ROOT_NODE}`)).toContainText(
     "投标文件",
   );
-
-  await activateWithKeyboard(page.getByTestId("wizard-preview"));
-  await expect(page.getByTestId("full-preview")).toBeVisible();
+  await expect(page.getByTestId(`canvas-section-${ROOT_NODE}`)).toBeVisible();
+  await expect(page.getByTestId("generate-outline")).toBeEnabled();
+  await activateWithKeyboard(page.getByTestId("generate-outline"));
+  await expect(page.getByTestId("candidate-review")).toBeVisible();
+  await expect(page.getByTestId("generate-outline")).toBeEnabled();
 
   await activateWithKeyboard(page.getByTestId("wizard-export"));
   await expect(page.getByTestId("export-docx")).toBeVisible();

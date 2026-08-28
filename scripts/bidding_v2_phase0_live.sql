@@ -33,10 +33,12 @@ INSERT INTO bid_documents(id,project_id,file_name,media_type,byte_length,origina
 INSERT INTO bid_document_role_revision_artifacts(id,project_id,document_id,revision,role,provenance,canonical_payload,content_sha256,actor) VALUES
  ('00000000-0000-4000-8000-000000000021','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000011',1,'primary_tender','human_confirmed',convert_to('role1','UTF8'),encode(digest(convert_to('role1','UTF8'),'sha256'),'hex'),'user:00000000-0000-4000-8000-000000000001'),
  ('00000000-0000-4000-8000-000000000029','00000000-0000-4000-8000-000000000019','00000000-0000-4000-8000-000000000013',1,'primary_tender','human_confirmed',convert_to('role2','UTF8'),encode(digest(convert_to('role2','UTF8'),'sha256'),'hex'),'user:00000000-0000-4000-8000-000000000001');
-INSERT INTO bid_converted_source_artifacts(id,project_id,document_id,revision,source_object_ref,source_sha256,converter_contract_sha256,image_asset_set_sha256) VALUES
- ('00000000-0000-4000-8000-000000000031','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000011',1,'objects/'||repeat('d',64),repeat('d',64),repeat('e',64),repeat('f',64)),
- ('00000000-0000-4000-8000-000000000032','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000012',1,'objects/'||repeat('1',64),repeat('1',64),repeat('e',64),repeat('f',64)),
- ('00000000-0000-4000-8000-000000000039','00000000-0000-4000-8000-000000000019','00000000-0000-4000-8000-000000000013',1,'objects/'||repeat('2',64),repeat('2',64),repeat('e',64),repeat('f',64));
+INSERT INTO bid_authoring_contract_artifacts(id,contract_kind,schema_version,canonical_payload,content_sha256) VALUES
+ ('00000000-0000-4000-8000-000000000190','converter',1,convert_to('converter1','UTF8'),encode(digest(convert_to('converter1','UTF8'),'sha256'),'hex'));
+INSERT INTO bid_converted_source_artifacts(id,project_id,document_id,revision,source_object_ref,source_sha256,converter_contract_id,converter_contract_sha256,image_asset_set_sha256) VALUES
+ ('00000000-0000-4000-8000-000000000031','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000011',1,'objects/'||repeat('d',64),repeat('d',64),'00000000-0000-4000-8000-000000000190',encode(digest(convert_to('converter1','UTF8'),'sha256'),'hex'),repeat('f',64)),
+ ('00000000-0000-4000-8000-000000000032','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000012',1,'objects/'||repeat('1',64),repeat('1',64),'00000000-0000-4000-8000-000000000190',encode(digest(convert_to('converter1','UTF8'),'sha256'),'hex'),repeat('f',64)),
+ ('00000000-0000-4000-8000-000000000039','00000000-0000-4000-8000-000000000019','00000000-0000-4000-8000-000000000013',1,'objects/'||repeat('2',64),repeat('2',64),'00000000-0000-4000-8000-000000000190',encode(digest(convert_to('converter1','UTF8'),'sha256'),'hex'),repeat('f',64));
 
 -- DocumentSet: advance, replay, stale CAS, composite identity and append-only.
 INSERT INTO bid_document_set_artifacts(id,project_id,revision,canonical_payload,content_sha256,actor) VALUES
@@ -504,7 +506,6 @@ INSERT INTO bid_render_style_contract_artifacts(id,version,schema_version,canoni
 -- Eleventh-round typed request/candidate contracts. Every generic request and
 -- its one matching projection are committed atomically.
 INSERT INTO bid_authoring_contract_artifacts(id,contract_kind,schema_version,canonical_payload,content_sha256) VALUES
- ('00000000-0000-4000-8000-000000000190','converter',1,convert_to('converter1','UTF8'),encode(digest(convert_to('converter1','UTF8'),'sha256'),'hex')),
  ('00000000-0000-4000-8000-000000000191','prompt',1,convert_to('prompt1','UTF8'),encode(digest(convert_to('prompt1','UTF8'),'sha256'),'hex')),
  ('00000000-0000-4000-8000-000000000192','template',1,convert_to('template1','UTF8'),encode(digest(convert_to('template1','UTF8'),'sha256'),'hex')),
  ('00000000-0000-4000-8000-000000000193','model',1,convert_to('model1','UTF8'),encode(digest(convert_to('model1','UTF8'),'sha256'),'hex')),

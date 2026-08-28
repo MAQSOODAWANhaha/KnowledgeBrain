@@ -21,18 +21,18 @@ pub fn router() -> Router {
         .route("/ready", get(ready))
 }
 
-async fn live() -> Json<storage::LiveBody> {
-    Json(storage::live_body("worker"))
+async fn live() -> Json<knowledge::LiveBody> {
+    Json(platform::live_body("worker"))
 }
 
-async fn ready() -> (StatusCode, Json<storage::ReadyBody>) {
-    let check = storage::check_readiness().await;
+async fn ready() -> (StatusCode, Json<knowledge::ReadyBody>) {
+    let check = knowledge::check_readiness().await;
     let status = if check.is_ready() {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    (status, Json(storage::ready_body("worker", &check)))
+    (status, Json(platform::ready_body("worker", &check)))
 }
 
 pub async fn bind() -> std::io::Result<TcpListener> {

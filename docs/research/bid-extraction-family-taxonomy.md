@@ -1,10 +1,12 @@
 # 招标抽取：技术 / 商务分类是否过宽
 
 | 项 | 值 |
-|---|---|
+| --- | --- |
 | 状态 | **调研结论（对照仓库 primary sources；不是改规格）** |
 | 问题 | 技术和商务是否过宽；条件 / 资质 / 报价 / 时间去哪了 |
 | 依据 | 仓库源码与领域草案（primary）；法规篇章仅作对照 |
+
+> 本文是调研当时的分类学笔记，不是当前产品契约。当时对照的是 V1 ①～⑥ / 两路匹配成稿。当前 Target V2 以 [`../bidding/authoring.md`](../bidding/authoring.md) 为准：动态大纲、Word 式编制画布、知识填充、Assessment 只提示。下文写「当前目标已扩展为①～⑥」只记录调研时状态。
 
 ## 结论
 
@@ -13,7 +15,7 @@
 条件、资质、报价、时间**不是**四个未入库的 family。它们在现实现里分别落到：
 
 | 日常说法 | 实际落点 |
-|---|---|
+| --- | --- |
 | 资质 / 资格 / 证照 / 业绩 | **商务**（有 heading + signal；打 company 资料） |
 | 技术规格 / 性能 / 接口 / **系统**响应时间 | **技术**（打产品线） |
 | 「条件」 | 大纲标题后缀，不是 family |
@@ -68,14 +70,14 @@ CREATE TABLE IF NOT EXISTS bid_clauses (
 
 HTTP / 手补同一约束：`family must be technical or commercial`（`crates/api/src/routes.rs` patch / add）。UI 分组只有商务表 vs 技术段表；检查器两个按钮是「技术条款 / 商务条款」，冲突时也只能改这两类（`web/src/bid/Inspector.tsx`、`web/src/bid/helpers.ts` `liveClauses`、`web/src/bid/ClauseTable.tsx`）。
 
-当时领域草案写明第一期**没有** `procedural`，没有 scored/weight，没有作废链；该结论已被 `docs/bidding/domain.md` 的最终①～⑥目标替代。
+当时领域草案写明第一期**没有** `procedural`，没有 scored/weight，没有作废链；其后 V1 曾把目标扩到 ①～⑥。那不是现在的产品目标。
 
 ### 1.2 Policy 两个 family 的语义（不是「一切商务条款」）
 
 `crates/bid/config/cn-tender-v2.json`：
 
 | family | 名称 | 定义（摘） | heading_hints | 正文 signals |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `technical` | 技术条款 | 产品 / 设备 / 软件 / 服务**交付本身**的功能、性能、容量、接口、兼容、实施和技术服务 | 技术规格、技术要求、采购需求、功能要求、性能指标、服务要求、技术参数 | 吞吐量、转发性能、接口、端口、容量、并发、兼容、支持、IP等级、防护等级、**响应时间** |
 | `commercial` | 商务/**资格**条款 | 投标**主体**资格、法定证照、财务信用、资质认证、业绩案例、合同和商务响应**材料** | 资格审查、资质要求、商务要求、商务条款、业绩、注册资本、投标人资格、资格条件、类似项目、服务能力 | 注册资本、投标人资格、营业执照、类似项目、业绩、资质、认证、ISO、财务、信用、合同、许可证 |
 
@@ -107,7 +109,7 @@ pub fn hint_family(policy: &ExtractionPolicy, path: &str) -> &'static str {
 ### 1.4 skip / unknown / 非需求：三层不同东西
 
 | 层 | 取值 | 作用 |
-|---|---|---|
+| --- | --- | --- |
 | Section `hint_family` | technical / commercial / **skip** / **unknown** | 标题 prior，**不是**抽不抽的门闩（领域草案 §4.2） |
 | Span `candidate` | bool | 覆盖检查与 heuristic / sweep 的工作集 |
 | Clause `family` | technical / commercial | 确认后进哪条匹配路 |
@@ -136,13 +138,13 @@ Agent 的 `list_outline` / 首轮 Outline **仍列出 skip 段**（含 `candidat
 ### 1.6 匹配与成稿：family 决定打哪、进哪一册
 
 | 路 | 条款 | 作业 | `/match` | 成稿 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 技术 | 已确认 `family=technical` | `job_kind=technical` + 勾选段 `unit_id` | `scope=product_lines`，`include_library=false` | ② 点对点、③ 偏离；must 锚只计技术 |
 | 商务 | 已确认 `family=commercial` | `job_kind=commercial`，`unit_id` 必须空 | `scope=company`，按条款展平 library 文档 | ④ 命中文件名、⑤ must miss |
 
 实现：`crates/bid/src/lib.rs` `run_claimed_match_job`、`coverage_for`（**只**对已确认技术条款现算 cover/unmet）；`crates/bid/src/booklet.rs` part `4` / `5`；`crates/search/src/lib.rs` `matching_pg` 遇 `scope=company` 走 `matching_company_pg`。商务**不**进产品 `score`，**不**进技术勾选段（当时领域草案 §5.1–5.3）。公司资料夹是资质证照 / 体系认证 / 业绩案例 / 服务能力（当前边界见 `docs/knowledge-base/README.md`；另见 `DESIGN.md`、`web/src/assets/Assets.tsx`）。
 
-产品目的（`PRODUCT.md`）：拆条款 → 人确认 → 先商务再技术段 → 成稿 ①～⑤。⑥ 函/报价模板不做。
+当时产品目的（旧 `PRODUCT.md`）：拆条款 → 人确认 → 先商务再技术段 → 成稿 ①～⑤。⑥ 函/报价模板当时不做。现目标见编制契约，不再按分册。
 
 ---
 
@@ -172,7 +174,7 @@ Policy 没有 `condition` 类型。「条件」出现在：
 
 领域 / 产品：
 
-- 成稿 ⑥ = 投标函 / 授权 / **报价** / 保证金 / 实施计划，在当时草案中延期；当前已纳入 `docs/bidding/domain.md` 最终范围。
+- 成稿 ⑥ = 投标函 / 授权 / **报价** / 保证金 / 实施计划，在当时草案中延期；后来写进 V1 `domain.md` 现码对照，不是现在的产品目标。
 - 「报价、成本、折扣：若以后做，只活在投标平台，不进知识库检索。」
 - skip 标题含**保证金、投标函、授权委托**，**不含报价**。
 
@@ -188,7 +190,7 @@ Policy 没有 `condition` 类型。「条件」出现在：
 ### 2.4 时间 — 三种完全不同的「时间」
 
 | 种类 | 落点 |
-|---|---|
+| --- | --- |
 | 项目跟踪用招标结束日 | `BidProject.expires_at`，建项人手填；① 扉页「截止日」；**不从招标正文抽**（领域草案 §0、§2；`booklet.rs` part `1`） |
 | 投标截止 / 递交 / 开标 | 通常在须知 / 递交 / 前附表 → **skip**；Golden 要求不要抽「截止时间前递交」 |
 | **系统**响应时间 | 技术 signal「响应时间」；Golden-02「系统响应时间不得超过2秒」→ technical must。键值表 `\| 最大响应时间 \| 2秒 \|` 整行候选，无「不得 / 不超过」则 `must=false`（`reconcile.rs` / `coverage.rs` 测例） |
@@ -199,7 +201,7 @@ Policy 没有 `condition` 类型。「条件」出现在：
 ### 2.5 交货期、付款、废标、保证金、评分办法
 
 | 主题 | 分类 | 证据 |
-|---|---|---|
+| --- | --- | --- |
 | 交货 / 工期 | 无类型；候选则易 `family_conflict` / 默认技术 | Policy signals 无「交货」「工期」 |
 | 付款 / 支付 | 无类型。商务 signal 有「财务」「合同」，不等于付款节点。确认成商务会拿证照库去打付款条款 | 87 号第二十条（十）单独列支付；本 Policy 无对应 hint |
 | 废标 / 否决 / 无效 | 不是 family；`must.hard` / `veto`。skip 段因 veto **重开** | Golden-02 须知里「否则废标」的许可证条款被抽为商务 must |
@@ -216,7 +218,7 @@ Policy 没有 `condition` 类型。「条件」出现在：
 
 ## 3. 对「这一产品」技术 / 商务是否过宽
 
-当时产品链路：`拆条款 → 人按段确认 → 技术按勾选段匹配产品 / 商务按条款找公司资料 → 成稿 ①～⑤`；当前目标已扩展为①～⑥，见 `docs/bidding/domain.md`。
+当时产品链路：`拆条款 → 人按段确认 → 技术按勾选段匹配产品 / 商务按条款找公司资料 → 成稿 ①～⑤`；其后 V1 目标曾扩到 ①～⑥。**现在的产品目标**已改为动态大纲 + Word 式编制画布，见 [`../bidding/authoring.md`](../bidding/authoring.md)，不再以固定分册为目标。
 
 要分清两件事：
 
@@ -226,7 +228,7 @@ Policy 没有 `condition` 类型。「条件」出现在：
 本产品只要（1）。（2）里大部分第一期明确不做：包件、procedural、⑥、结构化金额 / 证过期、评分办法字段。
 
 | 缺失「类型」 | 会不会弄坏匹配 / 成稿 / 人确认 | 只是 UI 标签？ |
-|---|---|---|
+| --- | --- | --- |
 | 资质 / 业绩 / 证照（已在商务内） | 不会；这就是商务路 | 显示「资格 / 体系 / 业绩」不改 enum 也能做 |
 | 技术指标（已在技术内） | 不会 | 显示「性能 / 接口」同理 |
 | 报价 / 限价 | **若抽出并确认** → 错 scope；**若 skip / 人驳回** → 不进 ①～⑤，符合第一期 | 不需要新 family 才能「不匹配」 |

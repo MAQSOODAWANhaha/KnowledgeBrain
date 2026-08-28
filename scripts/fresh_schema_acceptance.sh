@@ -43,7 +43,7 @@ for function_name in sorted(set(trigger_functions)):
     assert "SET search_path = pg_catalog, public" in header.group(0), function_name
 PY
 
-cargo build -q -p migrator -p first-launch-verifier -p api -p worker -p retention
+cargo build -q -p platform -p api -p worker -p retention
 
 container="kb-fresh-schema-${GITHUB_RUN_ID:-local}-$$"
 port="${KNOWLEDGEBRAIN_SCHEMA_TEST_PORT:-55439}"

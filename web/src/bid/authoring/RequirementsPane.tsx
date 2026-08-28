@@ -1,5 +1,11 @@
 import { Button, Select } from "@mantine/core";
-import { DOCUMENT_ROLES, type DocumentRole } from "../api/types";
+import { useState } from "react";
+import {
+  DOCUMENT_RELATIONS,
+  DOCUMENT_ROLES,
+  type DocumentRelationKind,
+  type DocumentRole,
+} from "../api/types";
 import { DOCUMENT_ROLE_LABEL } from "../helpers";
 import type { BidV2Session, BidV2State } from "./session";
 
@@ -16,6 +22,19 @@ export function RequirementsPane({
         sha256: state.workspace.document_set_sha256 ?? "",
       }
     : null;
+  const [fromDocumentId, setFromDocumentId] = useState<string | null>(null);
+  const [toDocumentId, setToDocumentId] = useState<string | null>(null);
+  const [relationKind, setRelationKind] =
+    useState<DocumentRelationKind>("complements");
+  const documentsReady =
+    state.documents.length > 0 &&
+    state.documents.every(
+      (doc) => doc.parse_status === "ready" || doc.parse_status === "completed",
+    );
+  const documentOptions = state.documents.map((doc) => ({
+    value: doc.id,
+    label: doc.file_name,
+  }));
   return (
     <div className="stack">
       <div className="card">
@@ -23,7 +42,7 @@ export function RequirementsPane({
           <h3 className="h3">文件角色与冻结</h3>
           <Button
             data-testid="freeze-document-set"
-            disabled={state.ended || state.documents.length === 0}
+            disabled={state.ended || !documentsReady}
             onClick={() =>
               void session.freezeDocumentSet(
                 state.documents.map((doc) => doc.id),
@@ -35,7 +54,7 @@ export function RequirementsPane({
           </Button>
         </div>
         <p className="note">
-          冻结后编译要求台账。pending/失败文件只提示，不阻断后续编制。
+          确认文件角色和关系；所有文件解析完成后冻结文件集并编译要求台账。
         </p>
         <table className="grid">
           <thead>
@@ -60,11 +79,14 @@ export function RequirementsPane({
                     allowDeselect={false}
                     disabled={state.ended}
                     onChange={(value) => {
-                      if (!value || !expected) return;
+                      if (!value) return;
                       void session.setDocumentRole(
                         doc.id,
                         value as DocumentRole,
-                        expected,
+                        {
+                          artifact_id: doc.role_revision_id,
+                          sha256: doc.role_revision_sha256,
+                        },
                       );
                     }}
                   />
@@ -74,6 +96,67 @@ export function RequirementsPane({
             ))}
           </tbody>
         </table>
+        <h4 className="h3">文件关系</h4>
+        <div className="row">
+          <Select
+            placeholder="来源文件"
+            data={documentOptions}
+            value={fromDocumentId}
+            onChange={setFromDocumentId}
+            disabled={state.ended}
+          />
+          <Select
+            placeholder="目标文件"
+            data={documentOptions.filter(
+              (option) => option.value !== fromDocumentId,
+            )}
+            value={toDocumentId}
+            onChange={setToDocumentId}
+            disabled={state.ended}
+          />
+          <Select
+            data={DOCUMENT_RELATIONS.map((kind) => ({
+              value: kind,
+              label: kind,
+            }))}
+            value={relationKind}
+            allowDeselect={false}
+            onChange={(value) =>
+              value && setRelationKind(value as DocumentRelationKind)
+            }
+            disabled={state.ended}
+          />
+          <Button
+            disabled={
+              state.ended ||
+              !fromDocumentId ||
+              !toDocumentId ||
+              fromDocumentId === toDocumentId
+            }
+            onClick={() => {
+              if (!fromDocumentId || !toDocumentId) return;
+              void session.addDocumentRelation(
+                fromDocumentId,
+                toDocumentId,
+                relationKind,
+              );
+            }}
+          >
+            确认关系
+          </Button>
+        </div>
+        {state.relations.map((relation) => (
+          <div key={relation.lineage_id} className="note">
+            {state.documents.find(
+              (doc) => doc.id === relation.from_document_id,
+            )?.file_name ?? relation.from_document_id}
+            {" → "}
+            {relation.relation_kind}
+            {" → "}
+            {state.documents.find((doc) => doc.id === relation.to_document_id)
+              ?.file_name ?? relation.to_document_id}
+          </div>
+        ))}
       </div>
       <div className="card">
         <h3 className="h3">来源单元</h3>

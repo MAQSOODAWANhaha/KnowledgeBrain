@@ -1,9 +1,15 @@
-import { Button, TextInput } from "@mantine/core";
 import { useState } from "react";
 import { go } from "../../hash";
-import type { BidV2Session, BidV2State } from "./session";
 import { authoringHref } from "./routes";
-import type { OutlineNodeView } from "./tree";
+import type { BidV2Session, BidV2State } from "./session";
+import {
+  dropMove,
+  dropPlacementFromRatio,
+  type DropPlacement,
+  type OutlineNodeView,
+} from "./tree";
+
+type DropHint = { targetId: string; placement: DropPlacement };
 
 function NodeRow({
   session,
@@ -11,12 +17,18 @@ function NodeRow({
   node,
   depth,
   siblings,
+  dropHint,
+  setDropHint,
+  onSplit,
 }: {
   session: BidV2Session;
   state: BidV2State;
   node: OutlineNodeView;
   depth: number;
   siblings: OutlineNodeView[];
+  dropHint: DropHint | null;
+  setDropHint: (hint: DropHint | null) => void;
+  onSplit: (node: OutlineNodeView) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(node.title);
@@ -27,6 +39,8 @@ function NodeRow({
   const children = session.childrenOf(node.lineage_id);
   const projectId = state.route?.projectId ?? "";
   const ended = state.ended;
+  const hintClass =
+    dropHint?.targetId === node.lineage_id ? ` drop-${dropHint.placement}` : "";
 
   function href() {
     return `#${authoringHref(projectId, "authoring", node.lineage_id)}`;
@@ -35,13 +49,48 @@ function NodeRow({
   return (
     <>
       <div
-        className={`outline-row${selected ? " on" : ""}`}
+        className={`outline-row${selected ? " on" : ""}${hintClass}`}
         data-testid={`outline-node-${node.lineage_id}`}
         style={{ paddingLeft: 8 + depth * 14 }}
+        draggable={!ended && !editing}
+        onDragStart={(event) => {
+          event.dataTransfer.setData("text/plain", node.lineage_id);
+          event.dataTransfer.effectAllowed = "move";
+        }}
+        onDragOver={(event) => {
+          event.preventDefault();
+          const rect = event.currentTarget.getBoundingClientRect();
+          const ratio = (event.clientY - rect.top) / Math.max(rect.height, 1);
+          setDropHint({
+            targetId: node.lineage_id,
+            placement: dropPlacementFromRatio(ratio),
+          });
+        }}
+        onDragLeave={() => setDropHint(null)}
+        onDrop={(event) => {
+          event.preventDefault();
+          const dragged = event.dataTransfer.getData("text/plain");
+          const placement =
+            dropHint?.targetId === node.lineage_id
+              ? dropHint.placement
+              : "child";
+          setDropHint(null);
+          try {
+            const move = dropMove(
+              session.tree(),
+              dragged,
+              node.lineage_id,
+              placement,
+            );
+            void session.moveNode(dragged, move.parentLineageId, move.ordinal);
+          } catch {
+            /* illegal drop is ignored */
+          }
+        }}
       >
         {editing ? (
-          <TextInput
-            size="xs"
+          <input
+            className="in"
             value={title}
             data-testid="outline-rename-input"
             onChange={(event) => setTitle(event.currentTarget.value)}
@@ -68,6 +117,9 @@ function NodeRow({
               event.preventDefault();
               session.selectNode(node.lineage_id);
               go(authoringHref(projectId, "authoring", node.lineage_id));
+              document
+                .getElementById(`canvas-section-${node.lineage_id}`)
+                ?.scrollIntoView({ behavior: "smooth", block: "start" });
             }}
           >
             <em>{node.title}</em>
@@ -167,17 +219,7 @@ function NodeRow({
             <button
               type="button"
               title="拆成两节"
-              onClick={() => {
-                const second = window.prompt(
-                  "第二节标题",
-                  `${node.title}（续）`,
-                );
-                if (!second?.trim()) return;
-                void session.splitNode(node.lineage_id, [
-                  node.title,
-                  second.trim(),
-                ]);
-              }}
+              onClick={() => onSplit(node)}
             >
               拆
             </button>
@@ -215,6 +257,9 @@ function NodeRow({
           node={child}
           depth={depth + 1}
           siblings={children}
+          dropHint={dropHint}
+          setDropHint={setDropHint}
+          onSplit={onSplit}
         />
       ))}
     </>
@@ -229,6 +274,10 @@ export function OutlineTree({
   state: BidV2State;
 }) {
   const roots = session.tree().roots;
+  const [dropHint, setDropHint] = useState<DropHint | null>(null);
+  const [splitFor, setSplitFor] = useState<OutlineNodeView | null>(null);
+  const [splitTitle, setSplitTitle] = useState("");
+
   return (
     <div data-testid="outline-tree">
       <div className="side-sec">大纲</div>
@@ -241,14 +290,20 @@ export function OutlineTree({
             node={node}
             depth={0}
             siblings={roots}
+            dropHint={dropHint}
+            setDropHint={setDropHint}
+            onSplit={(current) => {
+              setSplitFor(current);
+              setSplitTitle(`${current.title}（续）`);
+            }}
           />
         ))}
       </nav>
       {!state.ended && (
         <div className="wrap" style={{ paddingTop: 8 }}>
-          <Button
-            size="compact-sm"
-            variant="default"
+          <button
+            type="button"
+            className="btn ghost"
             data-testid="outline-add-root"
             disabled={roots.length > 0}
             onClick={() =>
@@ -260,7 +315,40 @@ export function OutlineTree({
             }
           >
             添加根章节
-          </Button>
+          </button>
+        </div>
+      )}
+      {splitFor && (
+        <div className="card" data-testid="outline-split-dialog">
+          <p className="lbl">拆成两节</p>
+          <input
+            className="in"
+            value={splitTitle}
+            onChange={(event) => setSplitTitle(event.currentTarget.value)}
+          />
+          <div className="row" style={{ marginTop: 8 }}>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                if (!splitTitle.trim()) return;
+                void session.splitNode(splitFor.lineage_id, [
+                  splitFor.title,
+                  splitTitle.trim(),
+                ]);
+                setSplitFor(null);
+              }}
+            >
+              拆分
+            </button>
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={() => setSplitFor(null)}
+            >
+              取消
+            </button>
+          </div>
         </div>
       )}
     </div>

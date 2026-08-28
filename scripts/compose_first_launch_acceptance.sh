@@ -106,7 +106,7 @@ cleanup_docker
 
 # Build every accepted application byte before freezing it into one immutable
 # image. Compose never mounts the mutable checkout or target directory.
-cargo build -p migrator -p first-launch-verifier -p api -p worker -p retention
+cargo build -p platform -p api -p worker -p retention
 npm --prefix web run build
 assert_acceptance_source_identity
 KB_ACCEPT_BINARY_SHA256=$(jq -n \

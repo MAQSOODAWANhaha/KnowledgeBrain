@@ -107,6 +107,18 @@ export function buildExportRequest(input: ExportRequest): ExportRequest {
   return input;
 }
 
+export function selectedOutlineRefs(
+  nodes: Array<{ client_node_ref: string }>,
+  refs: string[],
+): string[] {
+  const allowed = new Set(nodes.map((node) => node.client_node_ref));
+  const unique = [...new Set(refs)].filter((ref) => allowed.has(ref));
+  if (unique.length === 0) {
+    throw new AuthoringLogicError("CANDIDATE_OP_EMPTY", "至少选择一个候选节点");
+  }
+  return unique;
+}
+
 export function selectedOperationIndexes(
   total: number,
   indexes: number[],

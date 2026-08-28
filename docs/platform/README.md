@@ -10,7 +10,7 @@
 ## 共享平台拥有
 
 - LDAP/本地登录、JWT、API key 与 authenticated-global 访问边界；
-- API/worker/docreader 进程拓扑、队列注册、claim/lease/heartbeat/reaper；
+- API/worker/docreader 进程拓扑、队列注册；Oxana 负责 retry/resurrection/dead queue，业务表不保存 claim/lease；
 - 通用 actor identity、幂等结果、append-only audit 基础设施；
 - `ObjectRegistry`、对象引用、retention outbox 与受控物理删除；
 - 维护门、健康检查、日志、tracing、metrics 与部署验收基础；
@@ -19,7 +19,7 @@
 ## 共享平台不拥有
 
 - Workspace、Product、Document、chunk、index 与 retrieval 语义；
-- BidProject、条款、匹配报告、报价、组卷、SubmissionGate；
+- BidProject、SubmissionWorkspace、大纲、ContentBlock、Candidate、Assessment、报价快照与导出；
 - 任何“为了某个调用方方便”而复制出的知识库或招投标状态。
 
 ## 使用规则
@@ -31,7 +31,7 @@
 
 ## 当前参考
 
-- 招标文件驱动的投标文件编制工作区：[目标契约](./tender-to-submission-authoring.md)（产品与交互目标；招投标业务状态仍归招投标领域）
+- 招标文件驱动的投标文件编制工作区：[目标契约](../bidding/authoring.md)（产品、领域与 Web 编制交互；招投标业务状态仍归招投标领域）
 - 仓库实现快照（非规范）：[`../research/repository-implementation-snapshot.md`](../research/repository-implementation-snapshot.md)
 - 共享机制计划：[`../../plans/platform/README.md`](../../plans/platform/README.md)
 - fresh baseline、actor/idempotency/audit、ObjectRegistry 与 retention：[`../../plans/platform/runtime-foundation.md`](../../plans/platform/runtime-foundation.md)

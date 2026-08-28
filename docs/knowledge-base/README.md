@@ -16,11 +16,11 @@
 
 ## 与招投标的边界
 
-招投标不得直接读取知识库表、复用知识库 `Document` 状态机或把招标文件写入产品索引。唯一跨域契约及 DTO 由 [`domain.md`](domain.md) 的 `KnowledgeRetrievalPort` 定义；招投标负责冻结采用证据。
+招投标不得直接读取知识库表、复用知识库 `Document` 状态机或把招标文件写入产品索引。唯一跨域契约及 DTO 由 [`current-code.md`](current-code.md) 的 `KnowledgeRetrievalPort` 定义；招投标负责冻结采用证据。招投标如何用这些证据填进大纲/画布，见 [`../bidding/authoring.md`](../bidding/authoring.md)，不在知识库重写编制流程。
 
 ## 当前文档
 
-- 知识库领域真源：[`domain.md`](domain.md)
+- 知识库领域真源：[`current-code.md`](current-code.md)
 - 仓库实现快照（非规范）：[`../research/repository-implementation-snapshot.md`](../research/repository-implementation-snapshot.md)
 - 文档详情计划：[`../../plans/knowledge-base/document-detail.md`](../../plans/knowledge-base/document-detail.md)
 - 检索融合与可选重排计划：[`../../plans/knowledge-base/retrieval-ranking.md`](../../plans/knowledge-base/retrieval-ranking.md)

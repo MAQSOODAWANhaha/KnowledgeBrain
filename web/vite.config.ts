@@ -1,7 +1,9 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-const apiTarget = process.env.KB_LIVE_API_URL || "http://127.0.0.1:28080";
+const apiTarget =
+  (globalThis as { process?: { env?: Record<string, string | undefined> } })
+    .process?.env?.KB_LIVE_API_URL || "http://127.0.0.1:28080";
 
 export default defineConfig({
   plugins: [react()],

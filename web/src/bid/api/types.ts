@@ -47,17 +47,28 @@ export type TenderDocumentView = {
   media_type: string;
   byte_length: number;
   document_role: DocumentRole;
-  parse_status: "pending" | "processing" | "completed" | "failed";
+  role_revision_id: string;
+  role_revision_sha256: string;
+  role_provenance: "system_suggested" | "human_confirmed" | "human_modified";
+  parse_status:
+    | "pending"
+    | "processing"
+    | "ready"
+    | "completed"
+    | "failed";
   conversion_generation: number;
   error_code: string | null;
   original_sha256: string;
 };
 
 export type TenderRelationView = {
-  id: string;
+  lineage_id: string;
+  revision_id: string;
+  revision_sha256: string;
   from_document_id: string;
   to_document_id: string;
-  kind: DocumentRelationKind;
+  relation_kind: DocumentRelationKind;
+  applicability: Record<string, unknown>;
 };
 
 export type SourceUnitDisposition =
@@ -83,8 +94,12 @@ export type RequirementView = {
   lineage_id: string;
   text: string;
   requiredness: "mandatory" | "optional" | "informational";
-  compliance_policy: "strict" | "substantive" | "advisory";
-  lifecycle: "active" | "superseded" | "withdrawn";
+  compliance_policy:
+    | "must_comply"
+    | "explicit_response"
+    | "deviation_allowed"
+    | "scored";
+  lifecycle: "current" | "superseded" | "withdrawn";
   source_unit_revision_ids: string[];
 };
 

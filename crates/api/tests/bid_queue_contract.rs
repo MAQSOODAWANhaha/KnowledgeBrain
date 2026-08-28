@@ -1,7 +1,7 @@
 use api::{AppState, router_with};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use domain::Store;
+use knowledge::Store;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -14,7 +14,7 @@ fn redis_contract_required() -> bool {
 }
 
 async fn contract_pool() -> Option<PgPool> {
-    let pool = match storage::connect().await {
+    let pool = match platform::connect().await {
         Ok(pool) => pool,
         Err(error) if std::env::var_os("DATABASE_URL").is_some() => {
             panic!("connect required Bid queue contract database: {error}")
@@ -53,7 +53,7 @@ async fn contract_pool() -> Option<PgPool> {
 
 fn app() -> axum::Router {
     router_with(AppState {
-        store: Arc::new(Mutex::new(Store::default())),
+        test_catalog: Some(Arc::new(Mutex::new(Store::default()))),
         jwt_secret: "bid-queue-contract-secret".into(),
         bootstrap_key: String::new(),
     })
@@ -134,9 +134,9 @@ async fn matching_schedule_503_retry_keeps_the_first_target_receipt() {
             return;
         }
     };
-    let queue = runtime::connect().expect("configure live Bid queue storage");
+    let queue = platform::oxana_connect().expect("configure live Bid queue storage");
     let initial_queue_depth = queue
-        .enqueued_count(runtime::BidDeliveryV1Queue)
+        .enqueued_count(platform::BidDeliveryV1Queue)
         .await
         .expect("connect live Bid queue");
     let owner_id = Uuid::new_v4();
@@ -146,7 +146,7 @@ async fn matching_schedule_503_retry_keeps_the_first_target_receipt() {
         .execute(&pool)
         .await
         .unwrap();
-    let token = auth::issue_jwt(owner_id, "bid-queue-contract-secret").unwrap();
+    let token = platform::issue_jwt(owner_id, "bid-queue-contract-secret").unwrap();
     let app = app();
 
     let project_id = Uuid::new_v4();
@@ -180,7 +180,7 @@ async fn matching_schedule_503_retry_keeps_the_first_target_receipt() {
     assert_eq!(replay.1["target_revision"], 1);
     assert_eq!(
         queue
-            .enqueued_count(runtime::BidDeliveryV1Queue)
+            .enqueued_count(platform::BidDeliveryV1Queue)
             .await
             .unwrap(),
         initial_queue_depth + 1
@@ -193,7 +193,7 @@ async fn matching_schedule_503_retry_keeps_the_first_target_receipt() {
     assert_eq!(next.1["target_revision"], 2);
     assert_eq!(
         queue
-            .enqueued_count(runtime::BidDeliveryV1Queue)
+            .enqueued_count(platform::BidDeliveryV1Queue)
             .await
             .unwrap(),
         initial_queue_depth + 2
@@ -211,7 +211,7 @@ async fn matching_schedule_503_retry_keeps_the_first_target_receipt() {
     assert!(empty_replay.1["job_id"].is_null());
     assert_eq!(
         queue
-            .enqueued_count(runtime::BidDeliveryV1Queue)
+            .enqueued_count(platform::BidDeliveryV1Queue)
             .await
             .unwrap(),
         initial_queue_depth + 2
@@ -230,8 +230,8 @@ async fn matching_schedule_503_retry_keeps_the_first_target_receipt() {
 
     for (target_id, revision) in [(first_target, 1), (second_target, 2), (later_target, 1)] {
         queue
-            .delete_unique_job(&runtime::BidDeliveryV1Job::new(
-                runtime::BidDeliveryTargetKind::MatchingSchedule,
+            .delete_unique_job(&platform::BidDeliveryV1Job::new(
+                platform::BidDeliveryTargetKind::MatchingSchedule,
                 target_id,
                 revision,
             ))
@@ -240,7 +240,7 @@ async fn matching_schedule_503_retry_keeps_the_first_target_receipt() {
     }
     assert_eq!(
         queue
-            .enqueued_count(runtime::BidDeliveryV1Queue)
+            .enqueued_count(platform::BidDeliveryV1Queue)
             .await
             .unwrap(),
         initial_queue_depth

@@ -1,7 +1,7 @@
 # WeKnora 解析 / 抽取对照基线
 
 | 项 | 值 |
-|---|---|
+| --- | --- |
 | 状态 | **调研快照**（供后续对齐跟踪，不是本仓规格） |
 | 快照日期 | 2026-08-20 |
 | 对照对象 | [Tencent/WeKnora](https://github.com/Tencent/WeKnora) |
@@ -11,8 +11,7 @@
 | **v0.7.2 commit** | `3d5d8bfcdfeeea266b292b71cea616847af28d0f`（lightweight tag，2026-08-07T03:37:05Z） |
 | 上一标签 | `v0.7.1`（2026-07-24）、`v0.7.0`（2026-07-17） |
 | 本仓规格 | `docs/knowledge-base/domain.md`；实现对照见 `docs/research/repository-implementation-snapshot.md` |
-| 本仓投标 | `docs/bidding/domain.md` |
-| 本仓历史改进方案 | `plans/archive/platform/parse-extract-weknora-parity-legacy.md`（已执行一轮；因混合多个领域现已归档） |
+| 本仓投标 | [`../bidding/authoring.md`](../bidding/authoring.md) |
 
 本文只记录 **WeKnora 公开实现在快照日的机制**，以及当时对本仓「抽不全 / 内容不对」的对照结论。  
 **不是** KnowledgeBrain 的运行规格；领域规格以 `docs/knowledge-base/domain.md` 为准。
@@ -34,7 +33,7 @@ curl -sS https://api.github.com/repos/Tencent/WeKnora/releases/latest | jq -r '.
 续跟时在文末「变更日志」加一行：日期、新 SHA/tag、改了哪条机制、对本仓是否仍适用。  
 本仓 fork 对照路径：`/opt/workspace/code/brain`（若仍在）。
 
-证据范围（快照日）：WeKnora 公开仓库与文档。**没有**把 KnowledgeBrain 源码送进那次抓取；本仓差距以当时阅读 + 后续历史计划 `plans/archive/platform/parse-extract-weknora-parity-legacy.md` 为准。
+证据范围（快照日）：WeKnora 公开仓库与文档。**没有**把 KnowledgeBrain 源码送进那次抓取；本仓差距以当时阅读为准。
 
 ---
 
@@ -42,8 +41,8 @@ curl -sS https://api.github.com/repos/Tencent/WeKnora/releases/latest | jq -r '.
 
 企业级 LLM 知识框架：原始文档 → 可查询 RAG、可编排 Agent、可自维护 Wiki。
 
-- 仓库：https://github.com/Tencent/WeKnora  
-- 产品：https://weknora.weixin.qq.com  
+- 仓库：<https://github.com/Tencent/WeKnora>  
+- 产品：<https://weknora.weixin.qq.com>  
 - 文档站：仓库内 `website-docs/`（v0.7.2 起正式 VitePress）
 
 三条能力：RAG 问答、ReAct Agent（检索 / MCP / 联网）、Wiki Mode（文档蒸馏成互链 Markdown + 图谱，可编辑、有修订、可回滚）。
@@ -57,7 +56,7 @@ curl -sS https://api.github.com/repos/Tencent/WeKnora/releases/latest | jq -r '.
 「提取不全、内容不对」在 WeKnora **不是同一阶段**：
 
 | 阶段 | 产出 | 失败时的典型症状 |
-|---|---|---|
+| --- | --- | --- |
 | 文档转换（Python docreader） | Markdown + 图片引用 | 缺页、乱序、表格丢格、扫描页空白 |
 | Go 侧 OCR / VLM / ASR | 图/扫描页文字与 caption | 图里字没了，但文本页看起来「成功」 |
 | 切块 | parent/child chunks | 段落切断、检索碎片、上下文错位 |
@@ -141,7 +140,7 @@ MinerU 自托管超时约 1000s，`return_md=true, return_images=true`。PaddleO
 公开 bug（快照时已 closed，仍是高发区）：
 
 | Issue | 现象 | 关联 |
-|---|---|---|
+| --- | --- | --- |
 | [#2634](https://github.com/Tencent/WeKnora/issues/2634) | Word 合并单元格表只解析出第一行有内容 | #2657 |
 | [#2648](https://github.com/Tencent/WeKnora/issues/2648) | 含图 xlsx 在 `ExcelParser` / `fill_merged_cells_xlsx` 报 `'Typed' object has no attribute 'to_tree'` | #2663 |
 | [#2552](https://github.com/Tencent/WeKnora/issues/2552) | PDF `PDFium: Data format error`，38ms 失败 | — |
@@ -186,6 +185,6 @@ xlsx 有 `fill_merged_cells_xlsx`。DocxParser 的 colspan 是相邻相同文本
 ## 变更日志
 
 | 日期 | WeKnora 锚点 | 本仓动作 |
-|---|---|---|
-| 2026-08-20 | main `ba03be77…`；release `v0.7.2` = `3d5d8bfc…` | 首次写入本文；历史方案现存于 `plans/archive/platform/parse-extract-weknora-parity-legacy.md` |
+| --- | --- | --- |
+| 2026-08-20 | main `ba03be77…`；release `v0.7.2` = `3d5d8bfc…` | 首次写入本文 |
 | 2026-08-21 | 同上 | 方案二期：解析统一。anydoc 已集成，office 默认 anydoc（有意不同于 WeKnora 空引擎=MarkItDown）；PDF 仍 builtin。VLM 必配禁止 stub。 |

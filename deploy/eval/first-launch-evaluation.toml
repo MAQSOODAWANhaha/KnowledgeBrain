@@ -6,11 +6,11 @@ status = "inconclusive"
 git_head = "2d84efaf6e777906adff18ee5b7e155bc6109623"
 dirty = true
 commands = [
-  "cargo test -p bid matching",
-  "cargo test -p domain first_launch_evaluation",
-  "cargo test -p domain image_lock",
+  "cargo test -p bidding matching",
+  "cargo test -p platform first_launch_evaluation",
+  "cargo test -p platform image_lock",
 ]
 provider = "none"
 model = ""
 fixture_hash = ""
-notes = "Real provider evaluation was NOT run. provider remains none; status remains inconclusive. cargo test -p bid matching exit_code=0; cargo test -p domain first_launch_evaluation exit_code=0; cargo test -p domain image_lock exit_code=0. These cargo tests are not a provider eval and must not promote phase_1d_runtime_complete."
+notes = "Real provider evaluation was NOT run. provider remains none; status remains inconclusive. cargo test -p bidding matching exit_code=0; cargo test -p platform first_launch_evaluation exit_code=0; cargo test -p platform image_lock exit_code=0. These cargo tests are not a provider eval and must not promote phase_1d_runtime_complete."

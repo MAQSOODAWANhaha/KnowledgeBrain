@@ -157,7 +157,7 @@ async fn require_bid_project_owner(
     };
     let actor = actor_from(request.headers(), &state).await?;
     let pool = require_bid_pool().await?;
-    let project = storage::bidding::get_project(&pool, project_id)
+    let project = bidding::bidding::get_project(&pool, project_id)
         .await
         .map_err(map_sql)?
         .ok_or_else(|| not_found("bid"))?;
@@ -263,7 +263,7 @@ fn map_sql(error: sqlx::Error) -> ApiErr {
 enum BidApiErr {
     Shared(ApiErr),
     QueueUnavailable {
-        target_kind: runtime::BidDeliveryTargetKind,
+        target_kind: platform::BidDeliveryTargetKind,
         target_id: Uuid,
         target_revision: i64,
         error: String,
@@ -304,22 +304,22 @@ impl IntoResponse for BidApiErr {
 }
 
 async fn enqueue_bid_target(
-    target_kind: runtime::BidDeliveryTargetKind,
+    target_kind: platform::BidDeliveryTargetKind,
     target_id: Uuid,
     target_revision: i64,
 ) -> Result<String, BidApiErr> {
-    let storage = runtime::connect().map_err(|error| BidApiErr::QueueUnavailable {
+    let storage = platform::oxana_connect().map_err(|error| BidApiErr::QueueUnavailable {
         target_kind,
         target_id,
         target_revision,
         error: error.to_string(),
     })?;
-    match runtime::BidDeliveryEnqueuer::new(storage)
+    match platform::BidDeliveryEnqueuer::new(storage)
         .enqueue(target_kind, target_id, target_revision)
         .await
     {
-        runtime::BidDeliveryEnqueueOutcome::Accepted { job_id } => Ok(job_id),
-        runtime::BidDeliveryEnqueueOutcome::Indeterminate { error } => {
+        platform::BidDeliveryEnqueueOutcome::Accepted { job_id } => Ok(job_id),
+        platform::BidDeliveryEnqueueOutcome::Indeterminate { error } => {
             Err(BidApiErr::QueueUnavailable {
                 target_kind,
                 target_id,
@@ -362,9 +362,9 @@ fn target_identity(
 async fn validate_uploaded_bytes(
     bytes: Vec<u8>,
     allow_pdf: bool,
-) -> Result<(Vec<u8>, storage::bid_submission::ValidatedUpload), ApiErr> {
+) -> Result<(Vec<u8>, bidding::bid_submission::ValidatedUpload), ApiErr> {
     tokio::task::spawn_blocking(move || {
-        storage::bid_submission::validate_upload_bytes(&bytes, allow_pdf)
+        bidding::bid_submission::validate_upload_bytes(&bytes, allow_pdf)
             .map(|metadata| (bytes, metadata))
     })
     .await
@@ -382,7 +382,7 @@ async fn stage_uploaded_bytes(
     actor: &str,
 ) -> Result<(), ApiErr> {
     let byte_length = i64::try_from(bytes.len()).map_err(|_| validation("file too large"))?;
-    storage::stage_object_upload(
+    platform::stage_object_upload(
         pool,
         staging_id,
         object_ref,
@@ -393,9 +393,9 @@ async fn stage_uploaded_bytes(
     )
     .await
     .map_err(map_sql)?;
-    if let Err(error) = storage::write_blob_async(digest, bytes).await {
+    if let Err(error) = platform::write_blob_async(digest, bytes).await {
         tracing::error!(%error, %object_ref, %staging_id, "staged object write failed");
-        let _ = storage::abandon_object_upload(pool, staging_id, actor).await;
+        let _ = platform::abandon_object_upload(pool, staging_id, actor).await;
         return Err(fail(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL",
@@ -406,13 +406,13 @@ async fn stage_uploaded_bytes(
 }
 
 async fn abandon_staged_upload(pool: &sqlx::PgPool, staging_id: Uuid, actor: &str) {
-    if let Err(error) = storage::abandon_object_upload(pool, staging_id, actor).await {
+    if let Err(error) = platform::abandon_object_upload(pool, staging_id, actor).await {
         tracing::error!(%error, %staging_id, "failed to abandon object upload staging");
     }
 }
 
-async fn require_open(pool: &sqlx::PgPool, id: Uuid) -> Result<storage::bidding::Project, ApiErr> {
-    let project = storage::bidding::get_project(pool, id)
+async fn require_open(pool: &sqlx::PgPool, id: Uuid) -> Result<bidding::bidding::Project, ApiErr> {
+    let project = bidding::bidding::get_project(pool, id)
         .await
         .map_err(map_sql)?
         .ok_or_else(|| not_found("bid"))?;
@@ -422,7 +422,7 @@ async fn require_open(pool: &sqlx::PgPool, id: Uuid) -> Result<storage::bidding:
     Ok(project)
 }
 
-fn project_json(project: &storage::bidding::Project) -> Value {
+fn project_json(project: &bidding::bidding::Project) -> Value {
     json!({
         "id": project.id,
         "title": project.title,
@@ -459,7 +459,7 @@ async fn list_bids(
         }
     };
     let pool = require_bid_pool().await?;
-    let projects = storage::bidding::list_projects(&pool, owner)
+    let projects = bidding::bidding::list_projects(&pool, owner)
         .await
         .map_err(map_sql)?;
     Ok(Json(json!(
@@ -488,13 +488,13 @@ async fn create_bid(
     };
     let pool = require_bid_pool().await?;
     let id = Uuid::new_v4();
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         actor_identity,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
-    let created = storage::bidding::create_project(
+    let created = bidding::bidding::create_project(
         &pool,
         id,
         &body.title,
@@ -515,32 +515,32 @@ async fn get_bid(
 ) -> Result<Json<Value>, ApiErr> {
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
-    let project = storage::bidding::get_project(&pool, id)
+    let project = bidding::bidding::get_project(&pool, id)
         .await
         .map_err(map_sql)?
         .ok_or_else(|| not_found("bid"))?;
-    let documents = storage::bidding::list_documents(&pool, id)
+    let documents = bidding::bidding::list_documents(&pool, id)
         .await
         .map_err(map_sql)?;
-    let quote = storage::bid_quote::quote_state(&pool, id)
+    let quote = bidding::bid_quote::quote_state(&pool, id)
         .await
         .map_err(map_sql)?;
-    let suggestions = storage::bidding::current_fact_suggestions(&pool, id)
+    let suggestions = bidding::bidding::current_fact_suggestions(&pool, id)
         .await
         .map_err(map_sql)?;
-    let clauses = storage::bidding::list_clauses(&pool, id, false)
+    let clauses = bidding::bidding::list_clauses(&pool, id, false)
         .await
         .map_err(map_sql)?;
-    let matching = storage::bid_matching::matching_overview(&pool, id)
+    let matching = bidding::bid_matching::matching_overview(&pool, id)
         .await
         .map_err(map_sql)?;
-    let clause_sets = storage::bid_submission::clause_set_identities(&pool, id)
+    let clause_sets = bidding::bid_submission::clause_set_identities(&pool, id)
         .await
         .map_err(map_sql)?;
-    let parts = storage::bid_submission::current_part_status(&pool, id)
+    let parts = bidding::bid_submission::current_part_status(&pool, id)
         .await
         .map_err(map_sql)?;
-    let outputs = storage::bid_submission::list_outputs(&pool, id)
+    let outputs = bidding::bid_submission::list_outputs(&pool, id)
         .await
         .map_err(map_sql)?;
     let files = documents.len() as i64;
@@ -595,7 +595,7 @@ async fn get_bid(
         "matching": matching,
         "parts": parts,
         "outputs": outputs,
-        "derived": bid::derived_status(
+        "derived": bidding::derived_status(
             files,
             ready,
             drafts,
@@ -620,14 +620,14 @@ async fn end_bid(
 ) -> Result<Json<Value>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bidding::end_project(&pool, id, body.expected_fact_revision, &context)
+        bidding::bidding::end_project(&pool, id, body.expected_fact_revision, &context)
             .await
             .map_err(map_sql)?,
     ))
@@ -641,7 +641,7 @@ async fn list_documents(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     Ok(Json(json!({
-        "documents": storage::bidding::list_documents(&pool, id).await.map_err(map_sql)?
+        "documents": bidding::bidding::list_documents(&pool, id).await.map_err(map_sql)?
     })))
 }
 
@@ -673,7 +673,7 @@ async fn upload_document(
     if bytes.is_empty() {
         return Err(validation("file required").into());
     }
-    let validated = bid::tender_upload::validate_tender_upload(
+    let validated = bidding::tender_upload::validate_tender_upload(
         &file_name,
         declared_media_type.as_deref(),
         &bytes,
@@ -681,8 +681,8 @@ async fn upload_document(
     .map_err(|error| validation(&error.to_string()))?;
     let media_type = validated.media_type;
     let actor = durable_human_actor(&actor)?;
-    let digest = domain::sha256_hex(&bytes);
-    let object_ref = storage::object_ref(&digest);
+    let digest = platform::sha256_hex(&bytes);
+    let object_ref = platform::object_ref(&digest);
     let document_id = Uuid::new_v4();
     let payload = json!({
         "project_id": id,
@@ -691,7 +691,7 @@ async fn upload_document(
         "byte_length": bytes.len(),
         "original_sha256": digest
     });
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         actor.clone(),
         required_idempotency_key(&headers)?,
         &payload,
@@ -708,10 +708,10 @@ async fn upload_document(
         &actor,
     )
     .await?;
-    let created = storage::bidding::upload_document(
+    let created = bidding::bidding::upload_document(
         &pool,
         staging_id,
-        storage::bidding::UploadDocument {
+        bidding::bidding::UploadDocument {
             id: document_id,
             project_id: id,
             file_name: &file_name,
@@ -729,7 +729,7 @@ async fn upload_document(
     let created = created.map_err(map_sql)?;
     let (target_id, target_revision) = target_identity(&created, "id", "conversion_generation")?;
     enqueue_bid_target(
-        runtime::BidDeliveryTargetKind::DocumentConversion,
+        platform::BidDeliveryTargetKind::DocumentConversion,
         target_id,
         target_revision,
     )
@@ -751,13 +751,13 @@ async fn retry_document(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
-    let result = storage::bidding::retry_document_conversion(
+    let result = bidding::bidding::retry_document_conversion(
         &pool,
         id,
         did,
@@ -769,7 +769,7 @@ async fn retry_document(
     let (target_id, target_revision) =
         target_identity(&result, "document_id", "conversion_generation")?;
     enqueue_bid_target(
-        runtime::BidDeliveryTargetKind::DocumentConversion,
+        platform::BidDeliveryTargetKind::DocumentConversion,
         target_id,
         target_revision,
     )
@@ -786,7 +786,7 @@ async fn list_clauses(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     let history = query.get("include_history").map(String::as_str) == Some("true");
-    let clauses = storage::bidding::list_clauses(&pool, id, history)
+    let clauses = bidding::bidding::list_clauses(&pool, id, history)
         .await
         .map_err(map_sql)?;
     Ok(Json(json!({ "clauses": clauses })))
@@ -806,14 +806,14 @@ async fn create_clause(
     Path(id): Path<Uuid>,
     Json(body): Json<NewClause>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
-    if body.kind.parse::<bid::tender::ClauseKind>().is_err() {
+    if body.kind.parse::<bidding::tender::ClauseKind>().is_err() {
         return Err(validation("kind must be a server-owned clause kind"));
     }
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
     let clause_id = Uuid::new_v4();
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
@@ -822,7 +822,7 @@ async fn create_clause(
     Ok((
         StatusCode::CREATED,
         Json(
-            storage::bidding::create_clause(
+            bidding::bidding::create_clause(
                 &pool, clause_id, id, &body.text, &body.kind, body.must, &context,
             )
             .await
@@ -852,14 +852,14 @@ async fn mutate_clause(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bidding::mutate_clause(
+        bidding::bidding::mutate_clause(
             &pool,
             id,
             cid,
@@ -880,7 +880,7 @@ async fn list_facts(
 ) -> Result<Json<Value>, ApiErr> {
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
-    let project = storage::bidding::get_project(&pool, id)
+    let project = bidding::bidding::get_project(&pool, id)
         .await
         .map_err(map_sql)?
         .ok_or_else(|| not_found("bid"))?;
@@ -899,8 +899,8 @@ async fn list_facts(
             "bid_valid_until": project.bid_valid_until,
             "bid_valid_days": project.bid_valid_days
         },
-        "suggestions": storage::bidding::current_fact_suggestions(&pool, id).await.map_err(map_sql)?,
-        "history": storage::bidding::fact_suggestion_history(&pool, id).await.map_err(map_sql)?
+        "suggestions": bidding::bidding::current_fact_suggestions(&pool, id).await.map_err(map_sql)?,
+        "history": bidding::bidding::fact_suggestion_history(&pool, id).await.map_err(map_sql)?
     })))
 }
 
@@ -924,16 +924,16 @@ async fn mutate_fact(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bidding::mutate_fact(
+        bidding::bidding::mutate_fact(
             &pool,
-            storage::bidding::FactMutation {
+            bidding::bidding::FactMutation {
                 project_id: id,
                 action: &body.action,
                 candidate_id: body.candidate_id,
@@ -958,7 +958,7 @@ async fn list_units(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     Ok(Json(json!({
-        "units": bid::list_match_units(&pool, id).await.map_err(|error| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", error))?
+        "units": bidding::list_match_units(&pool, id).await.map_err(|error| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", error))?
     })))
 }
 
@@ -971,20 +971,20 @@ async fn schedule_match(
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
     let payload = json!({ "schema_version": 1, "project_id": id });
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &payload,
     )
     .map_err(|error| validation(&error.to_string()))?;
-    let target = storage::bid_matching::bind_schedule_target(&pool, id, &context)
+    let target = bidding::bid_matching::bind_schedule_target(&pool, id, &context)
         .await
         .map_err(map_sql)?;
     let Some(target) = target else {
         return Ok((StatusCode::OK, Json(json!({ "job_id": null }))));
     };
     enqueue_bid_target(
-        runtime::BidDeliveryTargetKind::MatchingSchedule,
+        platform::BidDeliveryTargetKind::MatchingSchedule,
         target.id,
         target.mutation_watermark,
     )
@@ -1006,7 +1006,7 @@ async fn get_matching(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     Ok(Json(
-        storage::bid_matching::matching_overview(&pool, id)
+        bidding::bid_matching::matching_overview(&pool, id)
             .await
             .map_err(map_sql)?,
     ))
@@ -1019,7 +1019,7 @@ async fn get_matching_report(
 ) -> Result<Json<Value>, ApiErr> {
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
-    storage::bid_matching::matching_report_artifact_json(&pool, project_id, report_id)
+    bidding::bid_matching::matching_report_artifact_json(&pool, project_id, report_id)
         .await
         .map_err(map_sql)?
         .ok_or_else(|| not_found("matching report"))
@@ -1034,7 +1034,7 @@ async fn get_route_pick_set(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     Ok(Json(
-        storage::bid_matching::route_pick_set_json(&pool, project_id, route_id)
+        bidding::bid_matching::route_pick_set_json(&pool, project_id, route_id)
             .await
             .map_err(map_sql)?,
     ))
@@ -1046,7 +1046,7 @@ struct ReplaceRoutePickSetBody {
     source_report_artifact_id: Uuid,
     report_sha256: String,
     expected_revision: i64,
-    items: Vec<storage::bid_matching::PickSelectionV1>,
+    items: Vec<bidding::bid_matching::PickSelectionV1>,
 }
 
 async fn replace_route_pick_set(
@@ -1054,20 +1054,20 @@ async fn replace_route_pick_set(
     headers: HeaderMap,
     Path((project_id, route_id)): Path<(Uuid, Uuid)>,
     Json(body): Json<ReplaceRoutePickSetBody>,
-) -> Result<Json<storage::bid_matching::PickSetReceiptV1>, ApiErr> {
+) -> Result<Json<bidding::bid_matching::PickSetReceiptV1>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, project_id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_matching::replace_route_pick_set(
+        bidding::bid_matching::replace_route_pick_set(
             &pool,
-            storage::bid_matching::ReplaceRoutePickSetV1 {
+            bidding::bid_matching::ReplaceRoutePickSetV1 {
                 project_id,
                 route_id,
                 source_report_artifact_id: body.source_report_artifact_id,
@@ -1090,7 +1090,7 @@ async fn get_quote(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     Ok(Json(
-        storage::bid_quote::quote_state(&pool, id)
+        bidding::bid_quote::quote_state(&pool, id)
             .await
             .map_err(map_sql)?,
     ))
@@ -1112,7 +1112,7 @@ async fn create_quote_draft(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
@@ -1121,7 +1121,7 @@ async fn create_quote_draft(
     Ok((
         StatusCode::CREATED,
         Json(
-            storage::bid_quote::create_quote_draft(
+            bidding::bid_quote::create_quote_draft(
                 &pool,
                 id,
                 &body.tax_mode,
@@ -1152,14 +1152,14 @@ async fn patch_quote(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_quote::patch_quote_header(
+        bidding::bid_quote::patch_quote_header(
             &pool,
             id,
             body.expected_edit_version,
@@ -1196,27 +1196,27 @@ async fn upsert_line(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     if let Some(raw) = body.quantity.as_deref() {
-        bid::quote::parse_decimal_string(raw, 6).map_err(|error| validation(&error.to_string()))?;
+        bidding::quote::parse_decimal_string(raw, 6).map_err(|error| validation(&error.to_string()))?;
     }
     if let Some(raw) = body.unit_price.as_deref() {
-        bid::quote::parse_decimal_string(raw, 6).map_err(|error| validation(&error.to_string()))?;
+        bidding::quote::parse_decimal_string(raw, 6).map_err(|error| validation(&error.to_string()))?;
     }
     if let Some(raw) = body.entered_amount.as_deref() {
-        bid::quote::parse_decimal_string(raw, 2).map_err(|error| validation(&error.to_string()))?;
+        bidding::quote::parse_decimal_string(raw, 2).map_err(|error| validation(&error.to_string()))?;
     }
-    bid::quote::parse_decimal_string(&body.tax_rate, 6)
+    bidding::quote::parse_decimal_string(&body.tax_rate, 6)
         .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_quote::upsert_quote_line(
+        bidding::bid_quote::upsert_quote_line(
             &pool,
-            storage::bid_quote::UpsertQuoteLine {
+            bidding::bid_quote::UpsertQuoteLine {
                 project_id: id,
                 line_id,
                 expected_edit_version: body.expected_edit_version,
@@ -1251,14 +1251,14 @@ async fn delete_line(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_quote::delete_quote_line(
+        bidding::bid_quote::delete_quote_line(
             &pool,
             id,
             line_id,
@@ -1285,14 +1285,14 @@ async fn reorder_lines(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_quote::reorder_quote_lines(
+        bidding::bid_quote::reorder_quote_lines(
             &pool,
             id,
             body.expected_edit_version,
@@ -1312,7 +1312,7 @@ async fn preview_quote(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     Ok(Json(
-        storage::bid_quote::preview_quote_totals(&pool, id)
+        bidding::bid_quote::preview_quote_totals(&pool, id)
             .await
             .map_err(map_sql)?,
     ))
@@ -1340,16 +1340,16 @@ async fn finalize_quote(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_quote::finalize_quote(
+        bidding::bid_quote::finalize_quote(
             &pool,
-            storage::bid_quote::FinalizeQuote {
+            bidding::bid_quote::FinalizeQuote {
                 project_id: id,
                 expected_edit_version: body.expected_edit_version,
                 expected_fact_revision: body.expected_fact_revision,
@@ -1383,14 +1383,14 @@ async fn reopen_quote(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_quote::reopen_quote(
+        bidding::bid_quote::reopen_quote(
             &pool,
             id,
             body.expected_snapshot_id,
@@ -1410,7 +1410,7 @@ async fn get_snapshot(
 ) -> Result<Json<Value>, ApiErr> {
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
-    storage::bid_quote::get_quote_snapshot(&pool, id, sid)
+    bidding::bid_quote::get_quote_snapshot(&pool, id, sid)
         .await
         .map_err(map_sql)?
         .ok_or_else(|| not_found("quote snapshot"))
@@ -1425,7 +1425,7 @@ async fn get_company_profile(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     Ok(Json(
-        storage::bid_submission::current_company_profile(&pool, id)
+        bidding::bid_submission::current_company_profile(&pool, id)
             .await
             .map_err(map_sql)?
             .unwrap_or(Value::Null),
@@ -1453,16 +1453,16 @@ async fn update_company_profile(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_submission::update_company_profile(
+        bidding::bid_submission::update_company_profile(
             &pool,
-            storage::bid_submission::UpdateCompanyProfile {
+            bidding::bid_submission::UpdateCompanyProfile {
                 project_id: id,
                 expected_revision: body.expected_revision,
                 legal_name: &body.legal_name,
@@ -1488,7 +1488,7 @@ async fn get_submission_profile(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     Ok(Json(
-        storage::bid_submission::current_submission_profile(&pool, id)
+        bidding::bid_submission::current_submission_profile(&pool, id)
             .await
             .map_err(map_sql)?
             .unwrap_or(Value::Null),
@@ -1518,16 +1518,16 @@ async fn update_submission_profile(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_submission::update_submission_profile(
+        bidding::bid_submission::update_submission_profile(
             &pool,
-            storage::bid_submission::UpdateSubmissionProfile {
+            bidding::bid_submission::UpdateSubmissionProfile {
                 project_id: id,
                 expected_revision: body.expected_revision,
                 buyer_name: &body.buyer_name,
@@ -1553,7 +1553,7 @@ async fn list_procedural(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     Ok(Json(json!({
-        "classifications": storage::bid_submission::list_procedural_classifications(&pool, id).await.map_err(map_sql)?
+        "classifications": bidding::bid_submission::list_procedural_classifications(&pool, id).await.map_err(map_sql)?
     })))
 }
 
@@ -1572,14 +1572,14 @@ async fn override_classification(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_submission::override_procedural_classification(
+        bidding::bid_submission::override_procedural_classification(
             &pool,
             id,
             cid,
@@ -1620,14 +1620,14 @@ async fn resolve_requirement(
     validate_resolve_body(&body)?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_submission::resolve_procedural_requirement(
+        bidding::bid_submission::resolve_procedural_requirement(
             &pool,
             id,
             cid,
@@ -1670,13 +1670,13 @@ async fn upload_attachment(
     }
     let (bytes, metadata) = validate_uploaded_bytes(bytes, true).await?;
     let actor = durable_human_actor(&actor)?;
-    let digest = domain::sha256_hex(&bytes);
-    let object_ref = storage::object_ref(&digest);
+    let digest = platform::sha256_hex(&bytes);
+    let object_ref = platform::object_ref(&digest);
     let attachment_id = Uuid::new_v4();
     let payload = json!({"project_id":id,"kind":kind,"digest":digest,
         "media_type":metadata.media_type,"byte_length":metadata.byte_length,
         "pixel_width":metadata.pixel_width,"pixel_height":metadata.pixel_height});
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         actor.clone(),
         required_idempotency_key(&headers)?,
         &payload,
@@ -1693,9 +1693,9 @@ async fn upload_attachment(
         &actor,
     )
     .await?;
-    let uploaded = storage::bid_submission::upload_attachment(
+    let uploaded = bidding::bid_submission::upload_attachment(
         &pool,
-        storage::bid_submission::UploadAttachment {
+        bidding::bid_submission::UploadAttachment {
             staging_id,
             id: attachment_id,
             project_id: id,
@@ -1724,7 +1724,7 @@ async fn upload_attachment(
             "preparation_target_revision",
         )?;
         enqueue_bid_target(
-            runtime::BidDeliveryTargetKind::AttachmentPreparation,
+            platform::BidDeliveryTargetKind::AttachmentPreparation,
             target_id,
             target_revision,
         )
@@ -1759,18 +1759,18 @@ async fn mutate_attachment(
     require_open(&pool, id).await?;
     if action == "validate" {
         let (digest, media_type, byte_length, pixel_width, pixel_height) =
-            storage::bid_submission::attachment_validation_input(&pool, id, aid)
+            bidding::bid_submission::attachment_validation_input(&pool, id, aid)
                 .await
                 .map_err(map_sql)?
                 .ok_or_else(|| not_found("attachment"))?;
         let digest_for_read = digest.clone();
-        let bytes = tokio::task::spawn_blocking(move || storage::read_blob(&digest_for_read))
+        let bytes = tokio::task::spawn_blocking(move || platform::read_blob(&digest_for_read))
             .await
             .map_err(|_| validation("attachment validation task failed"))?
             .map_err(|_| validation("attachment bytes unavailable"))?;
-        let actual = storage::bid_submission::validate_upload_bytes(&bytes, true)
+        let actual = bidding::bid_submission::validate_upload_bytes(&bytes, true)
             .map_err(|error| validation(&error.to_string()))?;
-        if domain::sha256_hex(&bytes) != digest
+        if platform::sha256_hex(&bytes) != digest
             || actual.media_type != media_type
             || actual.byte_length != byte_length
             || actual.pixel_width != pixel_width
@@ -1779,14 +1779,14 @@ async fn mutate_attachment(
             return Err(validation("attachment validation identity mismatch"));
         }
     }
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_submission::mutate_attachment(
+        bidding::bid_submission::mutate_attachment(
             &pool,
             id,
             aid,
@@ -1828,13 +1828,13 @@ async fn upload_shot(
     }
     let (bytes, metadata) = validate_uploaded_bytes(bytes, false).await?;
     let actor = durable_human_actor(&actor)?;
-    let digest = domain::sha256_hex(&bytes);
-    let object_ref = storage::object_ref(&digest);
+    let digest = platform::sha256_hex(&bytes);
+    let object_ref = platform::object_ref(&digest);
     let shot_id = Uuid::new_v4();
     let payload = json!({"project_id":id,"digest":digest,
         "media_type":metadata.media_type,"byte_length":metadata.byte_length,
         "pixel_width":metadata.pixel_width,"pixel_height":metadata.pixel_height});
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         actor.clone(),
         required_idempotency_key(&headers)?,
         &payload,
@@ -1857,9 +1857,9 @@ async fn upload_shot(
         &actor,
     )
     .await?;
-    let uploaded = storage::bid_submission::upload_shot_artifact(
+    let uploaded = bidding::bid_submission::upload_shot_artifact(
         &pool,
-        storage::bid_submission::UploadShotArtifact {
+        bidding::bid_submission::UploadShotArtifact {
             staging_id,
             id: shot_id,
             project_id: id,
@@ -1888,14 +1888,14 @@ async fn replace_shots(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_submission::replace_shot_set(
+        bidding::bid_submission::replace_shot_set(
             &pool,
             id,
             body.expected_revision,
@@ -1915,8 +1915,8 @@ async fn list_parts(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     Ok(Json(json!({
-        "required_part_keys": storage::bid_submission::required_part_keys(&pool, id).await.map_err(map_sql)?,
-        "parts": storage::bid_submission::current_part_status(&pool, id).await.map_err(map_sql)?
+        "required_part_keys": bidding::bid_submission::required_part_keys(&pool, id).await.map_err(map_sql)?,
+        "parts": bidding::bid_submission::current_part_status(&pool, id).await.map_err(map_sql)?
     })))
 }
 
@@ -1927,7 +1927,7 @@ async fn get_part(
 ) -> Result<Json<Value>, ApiErr> {
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
-    storage::bid_submission::get_part(&pool, id, &key)
+    bidding::bid_submission::get_part(&pool, id, &key)
         .await
         .map_err(map_sql)?
         .ok_or_else(|| not_found("part"))
@@ -1942,7 +1942,7 @@ async fn list_attachments(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     Ok(Json(json!({
-        "attachments": storage::bid_submission::list_attachments(&pool, id).await.map_err(map_sql)?
+        "attachments": bidding::bid_submission::list_attachments(&pool, id).await.map_err(map_sql)?
     })))
 }
 
@@ -1954,7 +1954,7 @@ async fn get_shots(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     Ok(Json(json!({
-        "shot_set": storage::bid_submission::current_shot_set(&pool, id).await.map_err(map_sql)?
+        "shot_set": bidding::bid_submission::current_shot_set(&pool, id).await.map_err(map_sql)?
     })))
 }
 
@@ -1966,7 +1966,7 @@ async fn list_outputs(
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     Ok(Json(json!({
-        "outputs": storage::bid_submission::list_outputs(&pool, id).await.map_err(map_sql)?
+        "outputs": bidding::bid_submission::list_outputs(&pool, id).await.map_err(map_sql)?
     })))
 }
 
@@ -1982,20 +1982,20 @@ async fn update_part(
     Path((id, key)): Path<(Uuid, String)>,
     Json(body): Json<UpdatePart>,
 ) -> Result<Json<Value>, ApiErr> {
-    if bid::submission::template_slot_for_part_key(&key).is_none() {
+    if bidding::submission::template_slot_for_part_key(&key).is_none() {
         return Err(validation("unknown part key"));
     }
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_submission::update_part(
+        bidding::bid_submission::update_part(
             &pool,
             id,
             &key,
@@ -2024,14 +2024,14 @@ async fn regenerate_part(
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bid_submission::regenerate_part(
+        bidding::bid_submission::regenerate_part(
             &pool,
             id,
             &key,
@@ -2054,7 +2054,7 @@ async fn list_gate_issues(
     let pool = require_bid_pool().await?;
     let format = query.get("format").map(String::as_str).unwrap_or("pdf");
     Ok(Json(
-        storage::bid_submission::list_gate_issues(&pool, id, format)
+        bidding::bid_submission::list_gate_issues(&pool, id, format)
             .await
             .map_err(map_sql)?,
     ))
@@ -2075,7 +2075,7 @@ async fn create_manifest(
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
     let manifest_id = Uuid::new_v4();
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
@@ -2084,7 +2084,7 @@ async fn create_manifest(
     Ok((
         StatusCode::CREATED,
         Json(
-            storage::bid_submission::create_submission_manifest(
+            bidding::bid_submission::create_submission_manifest(
                 &pool,
                 manifest_id,
                 id,
@@ -2113,7 +2113,7 @@ async fn render_manifest(
     require_open(&pool, id).await?;
     let actor = durable_human_actor(&actor)?;
     let idempotency_key = required_idempotency_key(&headers)?;
-    let input = storage::bid_submission::manifest_render_input(&pool, id, mid)
+    let input = bidding::bid_submission::manifest_render_input(&pool, id, mid)
         .await
         .map_err(map_sql)?;
     if input.get("content_sha256").and_then(Value::as_str)
@@ -2127,11 +2127,11 @@ async fn render_manifest(
         .into());
     }
     let format = match input.get("format").and_then(Value::as_str) {
-        Some("pdf") => bid::submission::GateFormat::Pdf,
-        Some("docx") => bid::submission::GateFormat::Docx,
+        Some("pdf") => bidding::submission::GateFormat::Pdf,
+        Some("docx") => bidding::submission::GateFormat::Docx,
         _ => return Err(validation("invalid manifest format").into()),
     };
-    if input.get("renderer_contract") != Some(&bid::renderer_contract_identity(format)) {
+    if input.get("renderer_contract") != Some(&bidding::renderer_contract_identity(format)) {
         return Err(fail(
             StatusCode::CONFLICT,
             "RENDERER_CONTRACT_MISMATCH",
@@ -2139,9 +2139,9 @@ async fn render_manifest(
         )
         .into());
     }
-    let context = storage::bidding::MutationContext::new(actor, idempotency_key, &body)
+    let context = bidding::bidding::MutationContext::new(actor, idempotency_key, &body)
         .map_err(|error| validation(&error.to_string()))?;
-    let scheduled = storage::bid_submission::schedule_submission_render(
+    let scheduled = bidding::bid_submission::schedule_submission_render(
         &pool,
         Uuid::new_v4(),
         id,
@@ -2164,7 +2164,7 @@ async fn render_manifest(
         })?;
     let (_, target_revision) = target_identity(&scheduled, "render_job_id", "target_revision")?;
     enqueue_bid_target(
-        runtime::BidDeliveryTargetKind::SubmissionRender,
+        platform::BidDeliveryTargetKind::SubmissionRender,
         render_job_id,
         target_revision,
     )
@@ -2186,7 +2186,7 @@ async fn get_render_job(
 ) -> Result<Json<Value>, ApiErr> {
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
-    let job = storage::bid_submission::get_submission_render_job(&pool, id, jid)
+    let job = bidding::bid_submission::get_submission_render_job(&pool, id, jid)
         .await
         .map_err(map_sql)?
         .ok_or_else(|| not_found("submission render job"))?;
@@ -2200,7 +2200,7 @@ async fn download_output(
 ) -> Result<impl IntoResponse, ApiErr> {
     let _ = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
-    let meta = storage::bid_submission::download_submission_output(&pool, id, oid)
+    let meta = bidding::bid_submission::download_submission_output(&pool, id, oid)
         .await
         .map_err(map_sql)?;
     let hash = meta
@@ -2218,8 +2218,8 @@ async fn download_output(
         .and_then(Value::as_str)
         .unwrap_or("pdf")
         .to_string();
-    let bytes = storage::read_blob(&hash).map_err(|_| not_found("submission artifact bytes"))?;
-    if object_ref != storage::object_ref(&hash) || domain::sha256_hex(&bytes) != hash {
+    let bytes = platform::read_blob(&hash).map_err(|_| not_found("submission artifact bytes"))?;
+    if object_ref != platform::object_ref(&hash) || platform::sha256_hex(&bytes) != hash {
         return Err(fail(
             StatusCode::INTERNAL_SERVER_ERROR,
             "SUBMISSION_ARTIFACT_IDENTITY_MISMATCH",
@@ -2258,8 +2258,8 @@ async fn register_kind_router(
     require_admin(&state, &actor)?;
     let pool = require_bid_pool().await?;
     let bytes = body.canonical_payload.as_bytes();
-    let digest = domain::sha256_hex(bytes);
-    let context = storage::bidding::MutationContext::new(
+    let digest = platform::sha256_hex(bytes);
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
@@ -2268,7 +2268,7 @@ async fn register_kind_router(
     Ok((
         StatusCode::CREATED,
         Json(
-            storage::bidding::register_kind_router_contract(
+            bidding::bidding::register_kind_router_contract(
                 &pool,
                 &body.version,
                 bytes,
@@ -2296,14 +2296,14 @@ async fn promote_kind_router(
     let actor = actor_from(&headers, &state).await?;
     require_admin(&state, &actor)?;
     let pool = require_bid_pool().await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bidding::promote_kind_router(
+        bidding::bidding::promote_kind_router(
             &pool,
             &body.target_version,
             &body.expected_current_version,
@@ -2324,8 +2324,8 @@ async fn register_procedural_router(
     require_admin(&state, &actor)?;
     let pool = require_bid_pool().await?;
     let bytes = body.canonical_payload.as_bytes();
-    let digest = domain::sha256_hex(bytes);
-    let context = storage::bidding::MutationContext::new(
+    let digest = platform::sha256_hex(bytes);
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
@@ -2334,7 +2334,7 @@ async fn register_procedural_router(
     Ok((
         StatusCode::CREATED,
         Json(
-            storage::bidding::register_procedural_router_contract(
+            bidding::bidding::register_procedural_router_contract(
                 &pool,
                 &body.version,
                 bytes,
@@ -2355,14 +2355,14 @@ async fn promote_procedural_router(
     let actor = actor_from(&headers, &state).await?;
     require_admin(&state, &actor)?;
     let pool = require_bid_pool().await?;
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &body,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bidding::promote_procedural_router(
+        bidding::bidding::promote_procedural_router(
             &pool,
             &body.target_version,
             &body.expected_current_version,
@@ -2390,13 +2390,13 @@ async fn register_template_contract(
     require_admin(&state, &actor)?;
     let pool = require_bid_pool().await?;
     let bytes = body.canonical_payload.as_bytes();
-    let digest = domain::sha256_hex(bytes);
+    let digest = platform::sha256_hex(bytes);
     let request = json!({
         "slot":&slot,
         "version":&body.version,
         "canonical_payload":&body.canonical_payload
     });
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &request,
@@ -2405,7 +2405,7 @@ async fn register_template_contract(
     Ok((
         StatusCode::CREATED,
         Json(
-            storage::bidding::register_template_contract(
+            bidding::bidding::register_template_contract(
                 &pool,
                 &slot,
                 &body.version,
@@ -2434,14 +2434,14 @@ async fn promote_template_contract(
         "expected_current_version":&body.expected_current_version,
         "expected_promotion_generation":body.expected_promotion_generation
     });
-    let context = storage::bidding::MutationContext::new(
+    let context = bidding::bidding::MutationContext::new(
         durable_human_actor(&actor)?,
         required_idempotency_key(&headers)?,
         &request,
     )
     .map_err(|error| validation(&error.to_string()))?;
     Ok(Json(
-        storage::bidding::promote_template_contract(
+        bidding::bidding::promote_template_contract(
             &pool,
             &slot,
             &body.target_version,
@@ -2537,7 +2537,7 @@ mod tests {
     async fn queue_unavailable_response_preserves_retry_identity() {
         let target_id = Uuid::new_v4();
         let response = BidApiErr::QueueUnavailable {
-            target_kind: runtime::BidDeliveryTargetKind::SubmissionRender,
+            target_kind: platform::BidDeliveryTargetKind::SubmissionRender,
             target_id,
             target_revision: 1,
             error: "redis unavailable".into(),

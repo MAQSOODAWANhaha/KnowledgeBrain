@@ -2,11 +2,11 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | 招投标 clean-slate V1 平台依赖方案已批准并固化，待最终验收 |
+| 状态 | 平台依赖已批准并固化，待最终验收 |
 | 所有者 | Shared Platform |
 | 消费方 | 知识库、招投标 |
 
-本文是 fresh baseline、共享 actor/idempotency/audit、`ObjectRegistry` 和 retention 的唯一活动定义。队列能力由 [`queue-runtime.md`](queue-runtime.md) 定义；业务领域只定义自己的 target、业务引用和消费门禁。
+本文是 fresh baseline、共享 actor/idempotency/audit、`ObjectRegistry` 和 retention 的唯一活动定义。队列能力由 [`queue-runtime.md`](queue-runtime.md) 定义；业务领域只定义自己的 target、业务引用和消费门禁。招投标**产品**目标是 Target V2（[`../../docs/bidding/authoring.md`](../../docs/bidding/authoring.md)），不是 ①～⑥ / Gate。当前 first-launch 仍加载 `bidding_v1_baseline`，Phase 7 才切到 `bidding_v2_baseline`。
 
 ## 1. 所有权边界
 
@@ -32,7 +32,7 @@
 ```text
 knowledge_base_baseline.sql   # 现有知识库语义，重排不改业务
 shared_platform_baseline.sql  # 本文拥有的运行时基础
-bidding_v1_baseline.sql       # 最终招投标 V1
+bidding_v1_baseline.sql       # 当前仍在用的招投标切片；产品目标是 V2，Phase 7 替换为 bidding_v2_baseline
 ```
 
 必须满足：

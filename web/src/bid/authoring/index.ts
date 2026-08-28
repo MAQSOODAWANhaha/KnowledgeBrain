@@ -1,4 +1,8 @@
-export { AUTHORING_STEPS, authoringHref, parseAuthoringRoute } from "./routes";
+export {
+  AUTHORING_STEPS,
+  authoringHref,
+  parseAuthoringRoute,
+} from "./routes";
 export type { AuthoringRoute, AuthoringStep } from "./routes";
 export { createBidV2Session, shouldPoll } from "./session";
 export type {
@@ -14,7 +18,9 @@ export { applyEditorModel, contentBlockToEditorModel } from "./adapter";
 export type { EditorModel, TiptapNode } from "./adapter";
 export {
   childrenOf,
+  dropMove,
   findNode,
+  flattenPreorder,
   outlineIndex,
   subtreeLineageIds,
 } from "./tree";

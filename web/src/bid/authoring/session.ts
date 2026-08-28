@@ -8,6 +8,7 @@ import type {
   AsyncRequestView,
   BidProjectView,
   CandidateView,
+  DocumentRelationKind,
   DocumentRole,
   EvidenceOverview,
   ExpectedPointer,
@@ -42,6 +43,7 @@ import {
   buildExportRequest,
   buildOutlineCandidateRequest,
   selectedOperationIndexes,
+  selectedOutlineRefs,
   type EvidenceMode,
   type ExportFormat,
   type ExportMode,
@@ -105,6 +107,7 @@ export type BidV2State = {
   selectedNodeLineageId: string | null;
   candidate: CandidateView | null;
   selectedOperationIndexes: number[];
+  selectedOutlineNodeRefs: string[];
   assessments: CurrentAssessments | null;
   previewHtml: string | null;
   exports: ExportView[];
@@ -133,6 +136,7 @@ export type BidV2Session = {
   dispose: () => void;
   applyRoute: (route: AuthoringRoute) => Promise<void>;
   refresh: () => Promise<void>;
+  poll: () => Promise<void>;
   uploadTenderDocuments: (files: File[]) => Promise<void>;
   retryTenderDocument: (
     documentId: string,
@@ -142,6 +146,11 @@ export type BidV2Session = {
     documentId: string,
     role: DocumentRole,
     expected: ExpectedPointer,
+  ) => Promise<void>;
+  addDocumentRelation: (
+    fromDocumentId: string,
+    toDocumentId: string,
+    relationKind: DocumentRelationKind,
   ) => Promise<void>;
   freezeDocumentSet: (
     documentIds: string[],
@@ -177,6 +186,12 @@ export type BidV2Session = {
   insertTableBlock: (nodeLineageId: string, ordinal: number) => void;
   insertPageBreak: (nodeLineageId: string, ordinal: number) => void;
   insertSignature: (nodeLineageId: string, ordinal: number) => void;
+  insertAssetBlock: (
+    nodeLineageId: string,
+    assetRevisionId: string,
+    ordinal: number,
+  ) => Promise<void>;
+  uploadAsset: (file: File) => Promise<void>;
   save: () => Promise<void>;
   resolveConflict: (choice: "keep_local" | "take_server") => Promise<void>;
   generateOutline: () => Promise<void>;
@@ -187,6 +202,7 @@ export type BidV2Session = {
   ) => Promise<void>;
   matchEvidence: (nodeLineageId: string) => Promise<void>;
   toggleCandidateOperation: (index: number, selected: boolean) => void;
+  toggleOutlineNode: (clientNodeRef: string, selected: boolean) => void;
   acceptCandidate: () => Promise<void>;
   rejectCandidate: () => Promise<void>;
   confirmOutlineCheckpoint: () => Promise<void>;
@@ -209,12 +225,13 @@ function emptyState(): BidV2State {
     drafts: {},
     draftStatus: "clean",
     conflict: null,
-    inspectorTab: "requirements",
+    inspectorTab: "evidence",
     evidenceMode: "system_proposed",
     fillPolicy: "empty_only",
     selectedNodeLineageId: null,
     candidate: null,
     selectedOperationIndexes: [],
+    selectedOutlineNodeRefs: [],
     assessments: null,
     previewHtml: null,
     exports: [],
@@ -320,17 +337,23 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
       extra.route?.nodeLineageId ??
       state.route?.nodeLineageId ??
       null;
+    const requested =
+      extra.selectedNodeLineageId !== undefined &&
+      extra.selectedNodeLineageId !== null
+        ? extra.selectedNodeLineageId
+        : selected;
     const exists = envelope.workspace.nodes.some(
-      (node) => node.lineage_id === selected,
+      (node) => node.lineage_id === requested,
     );
+    const { selectedNodeLineageId: _ignored, ...rest } = extra;
     setState({
       workspace: envelope.workspace,
       etag: envelope.etag,
       ended: state.project?.status === "ended",
       selectedNodeLineageId: exists
-        ? selected
+        ? requested
         : (envelope.workspace.nodes[0]?.lineage_id ?? null),
-      ...extra,
+      ...rest,
     });
   }
 
@@ -354,6 +377,163 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
       () => undefined,
     );
     return run;
+  }
+
+  async function hydrateCandidate(
+    workspaceId: string,
+    candidateId: string,
+  ): Promise<void> {
+    const candidate = await deps.api.getCandidate(workspaceId, candidateId);
+    if (candidate.kind === "content") {
+      setState({
+        candidate,
+        selectedOperationIndexes:
+          candidate.status === "proposed"
+            ? candidate.operations.map((_, index) => index)
+            : [],
+        selectedOutlineNodeRefs: [],
+      });
+      return;
+    }
+    setState({
+      candidate,
+      selectedOutlineNodeRefs:
+        candidate.status === "proposed"
+          ? candidate.nodes.map((node) => node.client_node_ref)
+          : [],
+      selectedOperationIndexes: [],
+    });
+  }
+
+  const downloadedExports = new Set<string>();
+  const requestModes = new Map<
+    string,
+    "candidate" | "evidence" | "export"
+  >();
+
+  function isReadyDocument(status: TenderDocumentView["parse_status"]): boolean {
+    return status === "ready" || status === "completed";
+  }
+
+  function triggerDownload(blob: Blob, filename: string): void {
+    if (typeof document === "undefined") return;
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function fulfillExport(request: AsyncRequestView): Promise<void> {
+    const exportId = request.result_identity?.artifact_id;
+    if (!exportId || !state.workspace || downloadedExports.has(exportId))
+      return;
+    const exports = await deps.api.listExports(state.workspace.workspace_id);
+    setState({ exports, error: null });
+    const blob = await deps.api.downloadExport(
+      state.workspace.workspace_id,
+      exportId,
+    );
+    const listed = exports.find((item) => item.export_id === exportId);
+    const filename = `${listed?.mode ?? "submission"}.${listed?.format ?? "docx"}`;
+    triggerDownload(blob, filename);
+    downloadedExports.add(exportId);
+  }
+
+  async function rememberRequest(
+    request: AsyncRequestView,
+    mode: "candidate" | "evidence" | "export",
+  ): Promise<void> {
+    requestModes.set(request.request_artifact_id, mode);
+    setState({
+      asyncRequests: [
+        ...state.asyncRequests.filter(
+          (item) => item.request_artifact_id !== request.request_artifact_id,
+        ),
+        request,
+      ],
+      error: null,
+    });
+    if (request.status !== "succeeded" || !request.result_identity) return;
+    if (!state.workspace) return;
+    if (mode === "candidate") {
+      await hydrateCandidate(
+        state.workspace.workspace_id,
+        request.result_identity.artifact_id,
+      );
+      return;
+    }
+    if (mode === "evidence") {
+      const evidenceOverview = await deps.api
+        .getEvidenceOverview(state.workspace.workspace_id)
+        .catch(() => state.evidenceOverview);
+      setState({ evidenceOverview });
+      return;
+    }
+    await fulfillExport(request);
+  }
+
+  async function pollJobs(): Promise<void> {
+    if (disposed || !state.route) return;
+    const projectId = state.route.projectId;
+    try {
+      if (
+        state.route.step === "files" ||
+        state.route.step === "authoring" ||
+        state.documents.some(
+          (doc) =>
+            doc.parse_status === "pending" || doc.parse_status === "processing",
+        )
+      ) {
+        const documents = await deps.api.listTenderDocuments(projectId);
+        setState({ documents });
+      }
+      const workspaceId = state.workspace?.workspace_id;
+      if (!workspaceId) return;
+      const nextRequests: AsyncRequestView[] = [];
+      for (const request of state.asyncRequests) {
+        if (request.status !== "pending") {
+          nextRequests.push(request);
+          continue;
+        }
+        try {
+          const latest = await deps.api.getRequest(
+            workspaceId,
+            request.request_artifact_id,
+          );
+          if (latest.status === "succeeded" && latest.result_identity) {
+            const mode =
+              requestModes.get(latest.request_artifact_id) ??
+              (latest.kind === "SubmissionExport"
+                ? "export"
+                : latest.kind === "OutlineGenerate" ||
+                    latest.kind === "ContentGenerate"
+                  ? "candidate"
+                  : "evidence");
+            if (mode === "candidate") {
+              await hydrateCandidate(
+                workspaceId,
+                latest.result_identity.artifact_id,
+              );
+            } else if (mode === "export") {
+              await fulfillExport(latest);
+            } else if (mode === "evidence") {
+              const evidenceOverview = await deps.api
+                .getEvidenceOverview(workspaceId)
+                .catch(() => state.evidenceOverview);
+              setState({ evidenceOverview });
+            }
+          }
+          nextRequests.push(latest);
+        } catch {
+          nextRequests.push(request);
+        }
+      }
+      setState({ asyncRequests: nextRequests });
+    } catch {
+      /* polling is best-effort and must not clobber drafts */
+    }
   }
 
   function takeAttempt(reuseOnUncertain: boolean): MutationAttempt {
@@ -421,7 +601,7 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
       if (signal.aborted) return;
       const ended = project.status === "ended";
       setState({ project, ended });
-      if (route.step === "files" || route.step === "requirements") {
+      if (route.step === "files" || route.step === "authoring") {
         const [documents, relations] = await Promise.all([
           deps.api.listTenderDocuments(route.projectId, signal),
           deps.api
@@ -431,29 +611,20 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
         if (signal.aborted) return;
         setState({ documents, relations });
       }
-      if (route.step === "requirements") {
-        const [sourceUnits, requirements] = await Promise.all([
-          deps.api.listSourceUnits(route.projectId, signal),
-          deps.api.listRequirements(route.projectId, signal),
-        ]);
-        if (signal.aborted) return;
-        setState({ sourceUnits, requirements });
-      }
-      if (
-        route.step === "authoring" ||
-        route.step === "preview" ||
-        route.step === "export" ||
-        route.step === "quote"
-      ) {
+      if (route.step === "authoring" || route.step === "export") {
         const envelope = await deps.api.getProjectWorkspace(
           route.projectId,
           signal,
         );
         if (signal.aborted) return;
-        applyWorkspace(envelope, {
-          selectedNodeLineageId: route.nodeLineageId,
-          route,
-        });
+        if (hasDrafts(state.drafts)) {
+          setState({ route });
+        } else {
+          applyWorkspace(envelope, {
+            selectedNodeLineageId: route.nodeLineageId,
+            route,
+          });
+        }
       }
       if (route.step === "authoring" && state.workspace) {
         const [assessments, evidenceOverview, assets] = await Promise.all([
@@ -469,14 +640,6 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
         ]);
         if (signal.aborted) return;
         setState({ assessments, evidenceOverview, assets });
-      }
-      if (route.step === "preview" && state.workspace) {
-        const previewHtml = await deps.api.getPreviewHtml(
-          state.workspace.workspace_id,
-          signal,
-        );
-        if (signal.aborted) return;
-        setState({ previewHtml });
       }
       if (route.step === "export" && state.workspace) {
         const [exports, assessments] = await Promise.all([
@@ -593,8 +756,10 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
       loadAbort?.abort();
       listeners.clear();
     },
-    applyRoute: (route) => load(route),
-    refresh: () => (state.route ? load(state.route) : Promise.resolve()),
+    applyRoute: (route) => enqueue(() => load(route)),
+    refresh: () =>
+      enqueue(() => (state.route ? load(state.route) : Promise.resolve())),
+    poll: () => enqueue(() => pollJobs()),
     async uploadTenderDocuments(files) {
       assertEditable();
       if (!state.route) throw new AuthoringLogicError("NO_ROUTE", "未选择项目");
@@ -658,6 +823,26 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
           state.route.projectId,
         );
         setState({ documents, error: null });
+      } catch (error) {
+        fail(error);
+      }
+    },
+    async addDocumentRelation(fromDocumentId, toDocumentId, relationKind) {
+      assertEditable();
+      if (!state.route) throw new AuthoringLogicError("NO_ROUTE", "未选择项目");
+      try {
+        await deps.api.upsertDocumentRelation(
+          state.route.projectId,
+          {
+            from_document_id: fromDocumentId,
+            to_document_id: toDocumentId,
+            relation_kind: relationKind,
+            applicability: {},
+          },
+          createMutationAttempt(),
+        );
+        const relations = await deps.api.listRelations(state.route.projectId);
+        setState({ relations, error: null });
       } catch (error) {
         fail(error);
       }
@@ -775,6 +960,39 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
         },
       });
     },
+    insertAssetBlock: (nodeLineageId, assetRevisionId, ordinal) =>
+      enqueue(async () => {
+        await commitOperations([
+          ops.insertAssetBlock({
+            node_lineage_id: nodeLineageId,
+            asset_revision_id: assetRevisionId,
+            ordinal,
+          }),
+        ]);
+      }).catch(fail),
+    async uploadAsset(file) {
+      assertEditable();
+      const { workspace } = head();
+      try {
+        const asset = await deps.api.uploadAsset(
+          workspace.workspace_id,
+          file,
+          createMutationAttempt(),
+        );
+        const assets = await deps.api.listAssets(workspace.workspace_id);
+        setState({ assets, error: null });
+        const nodeId = state.selectedNodeLineageId;
+        if (!nodeId) return;
+        const node = findNode(tree(), nodeId);
+        await session.insertAssetBlock(
+          nodeId,
+          asset.asset_revision_id,
+          node?.block_lineage_ids.length ?? 0,
+        );
+      } catch (error) {
+        fail(error);
+      }
+    },
     save: () =>
       enqueue(async () => {
         if (state.conflict) throw new CasConflictError();
@@ -835,41 +1053,64 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
     },
     generateOutline: () =>
       enqueue(async () => {
-        assertEditable();
-        const { workspace, etag } = head();
-        if (
-          !workspace.document_set_revision_id ||
-          !workspace.document_set_sha256
-        ) {
-          throw new AuthoringLogicError(
-            "NO_DOCUMENT_SET",
-            "请先冻结招标文件集再生成大纲",
-          );
-        }
-        const body = buildOutlineCandidateRequest({
-          expected_workspace_revision_id: workspace.revision_id,
-          document_set_revision_id: workspace.document_set_revision_id,
-          document_set_sha256: workspace.document_set_sha256,
-        });
         try {
+          assertEditable();
+          if (!state.route)
+            throw new AuthoringLogicError("NO_ROUTE", "未选择项目");
+          let current = head();
+          let docs = state.documents;
+          if (docs.length === 0) {
+            docs = await deps.api.listTenderDocuments(state.route.projectId);
+            setState({ documents: docs });
+          }
+          const ready = docs.filter((doc) => isReadyDocument(doc.parse_status));
+          if (ready.length === 0) {
+            throw new AuthoringLogicError(
+              "NO_READY_DOCUMENTS",
+              "请等待招标文件解析完成后再生成大纲",
+            );
+          }
+          if (
+            !current.workspace.document_set_revision_id ||
+            !current.workspace.document_set_sha256
+          ) {
+            throw new AuthoringLogicError(
+              "NO_DOCUMENT_SET",
+              "工作区缺少 DocumentSet 指针，无法冻结",
+            );
+          }
+          const pointer = await deps.api.freezeDocumentSet(
+            state.route.projectId,
+            ready.map((doc) => doc.id),
+            {
+              artifact_id: current.workspace.document_set_revision_id,
+              sha256: current.workspace.document_set_sha256,
+            },
+            createMutationAttempt(),
+          );
+          const envelope = await deps.api.getProjectWorkspace(
+            state.route.projectId,
+          );
+          applyWorkspace(envelope);
+          current = head();
+          const setId =
+            current.workspace.document_set_revision_id ?? pointer.artifact_id;
+          const setSha =
+            current.workspace.document_set_sha256 ?? pointer.sha256;
+          const body = buildOutlineCandidateRequest({
+            expected_workspace_revision_id: current.workspace.revision_id,
+            document_set_revision_id: setId,
+            document_set_sha256: setSha,
+          });
           const request = await deps.api.createOutlineCandidate(
-            workspace.workspace_id,
+            current.workspace.workspace_id,
             body,
             {
               attempt: createMutationAttempt(),
-              ifMatch: etag,
+              ifMatch: current.etag,
             },
           );
-          setState({
-            asyncRequests: [
-              ...state.asyncRequests.filter(
-                (item) =>
-                  item.request_artifact_id !== request.request_artifact_id,
-              ),
-              request,
-            ],
-            error: null,
-          });
+          await rememberRequest(request, "candidate");
         } catch (error) {
           fail(error);
         }
@@ -877,34 +1118,40 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
     generateContent: (target, nodeLineageId, insertionAnchor) =>
       enqueue(async () => {
         assertEditable();
-        const { workspace, etag } = head();
+        let current = head();
+        if (!current.workspace.outline_checkpoint_id) {
+          await deps.api.createOutlineCheckpoint(
+            current.workspace.workspace_id,
+            {
+              artifact_id: current.workspace.revision_id,
+              sha256: current.workspace.sha256,
+            },
+            createMutationAttempt(),
+          );
+          const envelope = await deps.api.getWorkspace(
+            current.workspace.workspace_id,
+          );
+          applyWorkspace(envelope);
+          current = head();
+        }
         const body = buildContentCandidateRequest({
           target,
           node_lineage_id: nodeLineageId,
           fill_policy: state.fillPolicy,
           insertion_anchor: insertionAnchor ?? null,
           selection_mode: state.evidenceMode,
-          expected_workspace_revision_id: workspace.revision_id,
+          expected_workspace_revision_id: current.workspace.revision_id,
         });
         try {
           const request = await deps.api.createContentCandidate(
-            workspace.workspace_id,
+            current.workspace.workspace_id,
             body,
             {
               attempt: createMutationAttempt(),
-              ifMatch: etag,
+              ifMatch: current.etag,
             },
           );
-          setState({
-            asyncRequests: [
-              ...state.asyncRequests.filter(
-                (item) =>
-                  item.request_artifact_id !== request.request_artifact_id,
-              ),
-              request,
-            ],
-            error: null,
-          });
+          await rememberRequest(request, "candidate");
         } catch (error) {
           fail(error);
         }
@@ -923,16 +1170,7 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
               ifMatch: etag,
             },
           );
-          setState({
-            asyncRequests: [
-              ...state.asyncRequests.filter(
-                (item) =>
-                  item.request_artifact_id !== request.request_artifact_id,
-              ),
-              request,
-            ],
-            error: null,
-          });
+          await rememberRequest(request, "evidence");
         } catch (error) {
           fail(error);
         }
@@ -944,6 +1182,14 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
       if (selected) next.add(index);
       else next.delete(index);
       setState({ selectedOperationIndexes: [...next].sort((a, b) => a - b) });
+    },
+    toggleOutlineNode(clientNodeRef, selected) {
+      const candidate = state.candidate;
+      if (!candidate || candidate.kind !== "outline") return;
+      const next = new Set(state.selectedOutlineNodeRefs);
+      if (selected) next.add(clientNodeRef);
+      else next.delete(clientNodeRef);
+      setState({ selectedOutlineNodeRefs: [...next] });
     },
     acceptCandidate: () =>
       enqueue(async () => {
@@ -970,8 +1216,9 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
             : {
                 expected_workspace_revision_id: workspace.revision_id,
                 expected_workspace_sha256: workspace.sha256,
-                client_node_refs: candidate.nodes.map(
-                  (node) => node.client_node_ref,
+                client_node_refs: selectedOutlineRefs(
+                  candidate.nodes,
+                  state.selectedOutlineNodeRefs,
                 ),
               };
         try {
@@ -987,6 +1234,7 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
           applyWorkspace(envelope, {
             candidate: null,
             selectedOperationIndexes: [],
+            selectedOutlineNodeRefs: [],
             error: null,
           });
         } catch (error) {
@@ -1011,6 +1259,7 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
           setState({
             candidate: rejected,
             selectedOperationIndexes: [],
+            selectedOutlineNodeRefs: [],
             error: null,
           });
         } catch (error) {
@@ -1072,10 +1321,7 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
               ifMatch: etag,
             },
           );
-          setState({
-            asyncRequests: [...state.asyncRequests, request],
-            error: null,
-          });
+          await rememberRequest(request, "export");
         } catch (error) {
           fail(error);
         }

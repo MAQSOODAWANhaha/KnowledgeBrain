@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 const UPLOAD_STAGING_EXPIRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 async fn expire_upload_staging_once(pool: &PgPool) -> Result<i32, sqlx::Error> {
-    storage::expire_object_uploads(pool).await
+    platform::expire_object_uploads(pool).await
 }
 
 fn spawn_upload_staging_expiry(pool: PgPool, interval: Duration) -> tokio::task::JoinHandle<()> {
@@ -31,11 +31,11 @@ async fn run_upload_staging_expiry(pool: PgPool, expiry_interval: Duration) {
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
-    runtime::init_tracing();
-    let pool = storage::connect()
+    platform::init_tracing();
+    let pool = platform::connect()
         .await
         .unwrap_or_else(|error| panic!("retention schema verification failed: {error}"));
-    storage::require_production_first_launch_verified(&pool)
+    platform::require_production_first_launch_verified(&pool)
         .await
         .unwrap_or_else(|error| panic!("retention first-launch gate failed: {error}"));
 
@@ -44,7 +44,7 @@ async fn main() {
     let consumer_pool = pool.clone();
     tokio::spawn(async move {
         loop {
-            match storage::process_one_retention_item(&consumer_pool, "retention-v1").await {
+            match platform::process_one_retention_item(&consumer_pool, "retention-v1").await {
                 Ok(true) => continue,
                 Ok(false) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
                 Err(error) => {
@@ -59,20 +59,20 @@ async fn main() {
     let app = Router::new()
         .route(
             "/live",
-            get(|| async { Json(storage::live_body("retention")) }),
+            get(|| async { Json(platform::live_body("retention")) }),
         )
         .route(
             "/ready",
             get(move || {
                 let pool = probe_pool.clone();
                 async move {
-                    let check = storage::inspect_readiness(&pool).await;
+                    let check = platform::inspect_readiness(&pool).await;
                     let status = if check.is_ready() {
                         StatusCode::OK
                     } else {
                         StatusCode::SERVICE_UNAVAILABLE
                     };
-                    (status, Json(storage::ready_body("retention", &check)))
+                    (status, Json(platform::ready_body("retention", &check)))
                 }
             }),
         );
@@ -113,7 +113,7 @@ mod tests {
                 return None;
             }
         };
-        let database_url = storage::database_url().expect("retention readiness database URL");
+        let database_url = platform::database_url().expect("retention readiness database URL");
         let options = PgConnectOptions::from_str(&database_url)
             .expect("parse retention readiness database URL")
             .username("kb_runtime_retention")
@@ -141,9 +141,9 @@ mod tests {
         let Some(pool) = retention_role_pool().await else {
             return;
         };
-        match storage::inspect_readiness(&pool).await {
-            storage::ReadyCheck::Ready { gate_mode, .. }
-            | storage::ReadyCheck::NotReady {
+        match platform::inspect_readiness(&pool).await {
+            platform::ReadyCheck::Ready { gate_mode, .. }
+            | platform::ReadyCheck::NotReady {
                 gate_mode: Some(gate_mode),
                 ..
             } => assert!(!gate_mode.is_empty()),
@@ -154,7 +154,7 @@ mod tests {
     #[tokio::test]
     async fn expired_upload_staging_is_removed_by_running_retention_expiry_loop() {
         let _guard = db_lock().await;
-        let pool = match storage::connect().await {
+        let pool = match platform::connect().await {
             Ok(pool) => pool,
             Err(error)
                 if std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").as_deref() == Ok("1") =>
@@ -166,13 +166,13 @@ mod tests {
                 return;
             }
         };
-        storage::apply_fresh_baseline(&pool).await.unwrap();
+        platform::apply_fresh_baseline(&pool).await.unwrap();
         let staging_id = Uuid::new_v4();
         let actor = format!("user:{}", Uuid::new_v4());
         let bytes = b"expired retention staging";
-        let digest = domain::sha256_hex(bytes);
-        let object_ref = storage::object_ref(&digest);
-        storage::stage_object_upload(
+        let digest = platform::sha256_hex(bytes);
+        let object_ref = platform::object_ref(&digest);
+        platform::stage_object_upload(
             &pool,
             staging_id,
             &object_ref,
@@ -219,7 +219,7 @@ mod tests {
         const EXPECTED_BATCH_LIMIT: usize = 100;
 
         let _guard = db_lock().await;
-        let pool = match storage::connect().await {
+        let pool = match platform::connect().await {
             Ok(pool) => pool,
             Err(error)
                 if std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").as_deref() == Ok("1") =>
@@ -231,13 +231,13 @@ mod tests {
                 return;
             }
         };
-        storage::apply_fresh_baseline(&pool).await.unwrap();
+        platform::apply_fresh_baseline(&pool).await.unwrap();
         let actor = format!("user:{}", Uuid::new_v4());
         let bytes = b"bounded retention staging";
-        let digest = domain::sha256_hex(bytes);
-        let object_ref = storage::object_ref(&digest);
+        let digest = platform::sha256_hex(bytes);
+        let object_ref = platform::object_ref(&digest);
         for _ in 0..=EXPECTED_BATCH_LIMIT {
-            storage::stage_object_upload(
+            platform::stage_object_upload(
                 &pool,
                 Uuid::new_v4(),
                 &object_ref,

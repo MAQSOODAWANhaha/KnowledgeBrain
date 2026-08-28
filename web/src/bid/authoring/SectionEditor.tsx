@@ -1,4 +1,3 @@
-import { Button } from "@mantine/core";
 import type { Content } from "@tiptap/core";
 import Link from "@tiptap/extension-link";
 import { Table } from "@tiptap/extension-table";
@@ -9,10 +8,13 @@ import Underline from "@tiptap/extension-underline";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useMemo } from "react";
-import type { ContentBlockV1 } from "./contentBlock";
 import { contentBlockToEditorModel, type TiptapNode } from "./adapter";
+import { blocksForNode } from "./blocks";
+import type { ContentBlockV1 } from "./contentBlock";
 import { EvidenceRef } from "./EvidenceRef";
 import type { BidV2Session, BidV2State } from "./session";
+import { StaticBlock } from "./StaticBlock";
+import type { OutlineNodeView } from "./tree";
 
 const RICH_EXTENSIONS = [
   StarterKit.configure({
@@ -45,18 +47,22 @@ const TABLE_EXTENSIONS = [
 function RichBlockEditor({
   block,
   ended,
+  drafted,
   onChange,
 }: {
   block: ContentBlockV1;
   ended: boolean;
+  drafted: boolean;
   onChange: (doc: TiptapNode) => void;
 }) {
-  const model = contentBlockToEditorModel(block);
-  const doc = (
-    model.kind === "rich_text" || model.kind === "table"
-      ? model.doc
-      : { type: "doc", content: [{ type: "paragraph" }] }
-  ) as Content;
+  const doc = useMemo(() => {
+    const model = contentBlockToEditorModel(block);
+    return (
+      model.kind === "rich_text" || model.kind === "table"
+        ? model.doc
+        : { type: "doc", content: [{ type: "paragraph" }] }
+    ) as Content;
+  }, [block]);
   const editor = useEditor({
     extensions: block.kind === "table" ? TABLE_EXTENSIONS : RICH_EXTENSIONS,
     content: doc,
@@ -73,10 +79,12 @@ function RichBlockEditor({
 
   useEffect(() => {
     if (!editor) return;
+    if (drafted) return;
+    const current = JSON.stringify(editor.getJSON());
+    const next = JSON.stringify(doc);
+    if (current === next) return;
     editor.commands.setContent(doc);
-    // Identity change only — typing updates drafts without resetting the cursor.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor, block.lineage_id, block.revision]);
+  }, [editor, block.lineage_id, drafted, block.content_sha256, doc]);
 
   if (!editor) return null;
   return (
@@ -153,6 +161,49 @@ function FormatBar({ editor, table }: { editor: Editor; table: boolean }) {
   );
 }
 
+export function SectionBlocks({
+  session,
+  state,
+  node,
+  live,
+}: {
+  session: BidV2Session;
+  state: BidV2State;
+  node: OutlineNodeView;
+  live: boolean;
+}) {
+  const blocks = blocksForNode(node, state.workspace?.blocks, state.drafts);
+  return (
+    <>
+      {blocks.length === 0 && live && (
+        <p className="note">这一章还是空的。插入段落，或点「生成本章」。</p>
+      )}
+      {blocks.map((block) => (
+        <div
+          key={block.lineage_id}
+          className="block-card"
+          data-testid={`content-block-${block.kind}`}
+        >
+          {live && (block.kind === "rich_text" || block.kind === "table") ? (
+            <RichBlockEditor
+              block={block}
+              ended={state.ended}
+              drafted={Boolean(state.drafts[block.lineage_id])}
+              onChange={(doc) =>
+                block.kind === "table"
+                  ? session.editTable(block.lineage_id, doc)
+                  : session.editRichText(block.lineage_id, doc)
+              }
+            />
+          ) : (
+            <StaticBlock block={block} />
+          )}
+        </div>
+      ))}
+    </>
+  );
+}
+
 export function SectionEditor({
   session,
   state,
@@ -162,34 +213,6 @@ export function SectionEditor({
 }) {
   const nodeId = state.selectedNodeLineageId;
   const node = nodeId ? session.findNode(nodeId) : null;
-  const draftBlocks = useMemo(
-    () =>
-      Object.values(state.drafts).filter(
-        (draft) => draft.nodeLineageId === nodeId,
-      ),
-    [state.drafts, nodeId],
-  );
-
-  const blocks: ContentBlockV1[] = [];
-  if (node && state.workspace) {
-    for (const lineageId of node.block_lineage_ids) {
-      const drafted = state.drafts[lineageId]?.block;
-      const stored = state.workspace.blocks.find(
-        (item) => item.lineage_id === lineageId,
-      );
-      if (drafted) blocks.push(drafted);
-      else if (stored) blocks.push(stored);
-    }
-    for (const draft of draftBlocks) {
-      if (
-        draft.op === "insert" &&
-        !blocks.some((block) => block.lineage_id === draft.blockLineageId)
-      ) {
-        blocks.push(draft.block);
-      }
-    }
-  }
-
   if (!node) {
     return (
       <div className="card">
@@ -198,116 +221,12 @@ export function SectionEditor({
       </div>
     );
   }
-
   return (
     <div className="ed-page" data-testid="section-editor">
-      <div className="ed-toolbar">
-        <strong>{node.title}</strong>
-        <span className="chip gray">{state.draftStatus}</span>
-        <Button
-          size="compact-sm"
-          variant="default"
-          disabled={state.ended}
-          onClick={() =>
-            session.insertRichTextBlock(node.lineage_id, blocks.length)
-          }
-        >
-          插入段落
-        </Button>
-        <Button
-          size="compact-sm"
-          variant="default"
-          disabled={state.ended}
-          onClick={() =>
-            session.insertTableBlock(node.lineage_id, blocks.length)
-          }
-        >
-          插入表格
-        </Button>
-        <Button
-          size="compact-sm"
-          variant="default"
-          disabled={state.ended}
-          onClick={() =>
-            session.insertPageBreak(node.lineage_id, blocks.length)
-          }
-        >
-          分页
-        </Button>
-        <Button
-          size="compact-sm"
-          variant="default"
-          disabled={state.ended}
-          onClick={() =>
-            session.insertSignature(node.lineage_id, blocks.length)
-          }
-        >
-          签章占位
-        </Button>
-        <Button
-          size="compact-sm"
-          disabled={state.ended || state.draftStatus === "clean"}
-          onClick={() => void session.save()}
-        >
-          保存
-        </Button>
-      </div>
-      {state.conflict && (
-        <div className="banner warn" data-testid="authoring-conflict">
-          工作区已更新。
-          <Button
-            size="compact-xs"
-            ml="sm"
-            onClick={() => void session.resolveConflict("keep_local")}
-          >
-            保留本地
-          </Button>
-          <Button
-            size="compact-xs"
-            variant="default"
-            ml="sm"
-            onClick={() => void session.resolveConflict("take_server")}
-          >
-            使用服务器
-          </Button>
-        </div>
-      )}
-      <div className="ed-stage">
+      <div className="ed-stage canvas-stage">
         <div className="ed-doc">
           <div className="ed-sheet">
-            {blocks.length === 0 && (
-              <p className="note">
-                这一章还是空的。插入段落，或点「生成本章」。
-              </p>
-            )}
-            {blocks.map((block) => (
-              <div
-                key={block.lineage_id}
-                className="block-card"
-                data-testid={`content-block-${block.kind}`}
-              >
-                {block.kind === "rich_text" || block.kind === "table" ? (
-                  <RichBlockEditor
-                    block={block}
-                    ended={state.ended}
-                    onChange={(doc) =>
-                      block.kind === "table"
-                        ? session.editTable(block.lineage_id, doc)
-                        : session.editRichText(block.lineage_id, doc)
-                    }
-                  />
-                ) : block.kind === "page_break" ? (
-                  <p className="note">— 分页符 —</p>
-                ) : block.kind === "signature_placeholder" ? (
-                  <p className="note">签章占位：{block.content.label}</p>
-                ) : (
-                  <p className="note">
-                    {block.kind}
-                    {block.stale ? " · stale" : ""}
-                  </p>
-                )}
-              </div>
-            ))}
+            <SectionBlocks session={session} state={state} node={node} live />
           </div>
         </div>
       </div>

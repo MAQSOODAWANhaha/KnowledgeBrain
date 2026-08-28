@@ -5,11 +5,11 @@ use worker::consume::{AppCtx, run_core};
 #[tokio::main]
 async fn main() {
     let _ = dotenvy::dotenv();
-    runtime::init_tracing();
-    let pool = storage::connect()
+    platform::init_tracing();
+    let pool = platform::connect()
         .await
         .unwrap_or_else(|e| panic!("postgres initialization failed: {e}"));
-    storage::require_production_first_launch_verified(&pool)
+    platform::require_production_first_launch_verified(&pool)
         .await
         .unwrap_or_else(|error| panic!("production first-launch gate failed: {error}"));
     let probe_addr = worker::probe::probe_addr();
@@ -25,7 +25,7 @@ async fn main() {
 async fn consume_loop(pool: sqlx::PgPool) {
     let mut backoff = std::time::Duration::from_secs(1);
     loop {
-        match runtime::connect_verified().await {
+        match platform::connect_verified().await {
             Ok(_) => {
                 backoff = std::time::Duration::from_secs(1);
                 tracing::info!("worker ready");

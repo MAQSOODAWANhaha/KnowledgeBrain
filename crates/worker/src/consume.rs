@@ -1,12 +1,13 @@
 //! oxana `default` consumer: convert only (ticket 09).
 
 use async_trait::async_trait;
-use runtime::{
-    BidDeliveryTargetKind, BidDeliveryV1Job, BidDeliveryV1Queue, BidDeliveryV1Worker, DatatableJob,
-    DefaultQueue, DocumentProcessJob, ExtractJob, HousekeepJob, ImageMultimodalJob, IndexDeleteJob,
-    KbDeleteJob, KnowledgeSemanticIndexV2Job, ListDeleteJob, ListReparseJob, LowQueue,
-    PostProcessJob, PostprocessQueue, QuestionJob, SummaryJob, SummaryQueue, VersionCloneJob,
-    WikiFinalizeJob, WikiIngestJob, WikiQueue,
+use platform::{
+    BidAuthoringJobPayloadV2, BidDeliveryTargetKind, BidDeliveryV1Job, BidDeliveryV1Queue,
+    BidDeliveryV1Worker, DatatableJob, DefaultQueue, DocumentProcessJob, ExtractJob, HousekeepJob,
+    ImageMultimodalJob, IndexDeleteJob, KbDeleteJob, KnowledgeSemanticIndexV2Job, ListDeleteJob,
+    ListReparseJob, LowQueue, PostProcessJob, PostprocessQueue, QuestionJob,
+    RequirementSetCompileJobV2, SummaryJob, SummaryQueue, TenderDocumentProcessJobV2,
+    VersionCloneJob, WikiFinalizeJob, WikiIngestJob, WikiQueue,
 };
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -40,6 +41,111 @@ impl std::fmt::Display for JobErr {
 
 impl std::error::Error for JobErr {}
 
+pub struct TenderDocumentProcessV2Worker {
+    pool: Option<PgPool>,
+}
+
+impl oxana::FromContext<AppCtx> for TenderDocumentProcessV2Worker {
+    fn from_context(ctx: &AppCtx) -> Self {
+        Self {
+            pool: ctx.pool.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl oxana::Worker<TenderDocumentProcessJobV2> for TenderDocumentProcessV2Worker {
+    type Error = JobErr;
+
+    fn max_retries(&self, _job: &TenderDocumentProcessJobV2) -> u32 {
+        platform::BID_AUTHORING_V2_MAX_RETRIES
+    }
+
+    fn retry_delay(&self, _job: &TenderDocumentProcessJobV2, retries: u32) -> u64 {
+        platform::BidAuthoringV2OxanaPolicy::retry_delay_seconds(retries)
+    }
+
+    async fn process(
+        &self,
+        job: TenderDocumentProcessJobV2,
+        ctx: &oxana::JobContext,
+    ) -> Result<(), Self::Error> {
+        let Some(pool) = &self.pool else {
+            return Err(JobErr("postgres not configured".into()));
+        };
+        let request_artifact_id = job.request.request_artifact_id;
+        let payload = BidAuthoringJobPayloadV2::TenderDocumentProcess {
+            request: job.request,
+            project_id: job.project_id,
+            document_revision_id: job.document_revision_id,
+        };
+        let service = bidding::tender_process::TenderDocumentProcessService::new(
+            bidding::tender_process::PgTenderDocumentProcessRepository::new(pool.clone()),
+            bidding::tender_process::DocParserTenderSourceConverter,
+            bidding::tender_process::ExistingTenderVisionEnricher,
+            bidding::tender_process::InactiveTenderProcessTransport,
+        );
+        match service.process(&payload).await {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                if ctx.meta.retries >= platform::BID_AUTHORING_V2_MAX_RETRIES {
+                    let _ = bidding::bid_authoring_v2::mark_tender_document_failed_v2(
+                        pool,
+                        request_artifact_id,
+                        "AGENT_OUTPUT_INVALID",
+                    )
+                    .await;
+                }
+                Err(JobErr(error.to_string()))
+            }
+        }
+    }
+}
+
+pub struct RequirementSetCompileV2Worker {
+    pool: Option<PgPool>,
+}
+
+impl oxana::FromContext<AppCtx> for RequirementSetCompileV2Worker {
+    fn from_context(ctx: &AppCtx) -> Self {
+        Self {
+            pool: ctx.pool.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl oxana::Worker<RequirementSetCompileJobV2> for RequirementSetCompileV2Worker {
+    type Error = JobErr;
+
+    fn max_retries(&self, _job: &RequirementSetCompileJobV2) -> u32 {
+        platform::BID_AUTHORING_V2_MAX_RETRIES
+    }
+
+    fn retry_delay(&self, _job: &RequirementSetCompileJobV2, retries: u32) -> u64 {
+        platform::BidAuthoringV2OxanaPolicy::retry_delay_seconds(retries)
+    }
+
+    async fn process(
+        &self,
+        job: RequirementSetCompileJobV2,
+        _ctx: &oxana::JobContext,
+    ) -> Result<(), Self::Error> {
+        let Some(pool) = &self.pool else {
+            return Err(JobErr("postgres not configured".into()));
+        };
+        bidding::bid_authoring_v2::compile_requirement_set_v2(
+            pool,
+            job.request.request_artifact_id,
+            job.request.request_revision,
+            &job.request.frozen_input_sha256,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| JobErr(error.to_string()))
+    }
+}
+
 fn truncate_key(key: &str) -> &str {
     let t = key.trim_start_matches("objects/").trim_start_matches('/');
     match t.char_indices().nth(16) {
@@ -53,7 +159,7 @@ impl oxana::Worker<DocumentProcessJob> for DocumentProcessWorker {
     type Error = JobErr;
 
     fn max_retries(&self, _job: &DocumentProcessJob) -> u32 {
-        runtime::DOCUMENT_PROCESS_MAX_RETRY
+        platform::DOCUMENT_PROCESS_MAX_RETRY
     }
 
     async fn process(
@@ -65,7 +171,7 @@ impl oxana::Worker<DocumentProcessJob> for DocumentProcessWorker {
             return Err(JobErr("postgres not configured".into()));
         };
         let result = match tokio::time::timeout(
-            std::time::Duration::from_secs(runtime::DOCUMENT_PROCESS_TIMEOUT_SECS),
+            std::time::Duration::from_secs(platform::DOCUMENT_PROCESS_TIMEOUT_SECS),
             convert_document(
                 pool,
                 job.document_id,
@@ -80,8 +186,8 @@ impl oxana::Worker<DocumentProcessJob> for DocumentProcessWorker {
             Err(_) => Err("document process timeout after 2h".into()),
         };
         if let Err(e) = &result
-            && ctx.meta.retries >= runtime::DOCUMENT_PROCESS_MAX_RETRY
-            && storage::document_parse_status(pool, job.document_id)
+            && ctx.meta.retries >= platform::DOCUMENT_PROCESS_MAX_RETRY
+            && knowledge::document_parse_status(pool, job.document_id)
                 .await
                 .ok()
                 .flatten()
@@ -141,27 +247,27 @@ pub async fn convert_document(
     else {
         return Err("document missing".into());
     };
-    let overrides: Option<domain::ProcessOverrides> = overrides_raw
+    let overrides: Option<knowledge::ProcessOverrides> = overrides_raw
         .and_then(|v| serde_json::from_value(v).ok())
-        .filter(|o: &domain::ProcessOverrides| !o.is_empty());
+        .filter(|o: &knowledge::ProcessOverrides| !o.is_empty());
     if let Some(o) = &overrides
         && let Some(v) = o.asr_config.as_ref().and_then(|a| a.enabled)
     {
         asr_enabled = v;
     }
     let ext = file_name.rsplit('.').next().unwrap_or("txt");
-    let parser_engine = domain::parser_engine_for(&chunking_cfg, overrides.as_ref(), ext);
+    let parser_engine = knowledge::parser_engine_for(&chunking_cfg, overrides.as_ref(), ext);
     if parse_status == "completed" {
         return schedule_semantic_index_v2_if_ready(pool, version_id).await;
     }
     if matches!(parse_status.as_str(), "cancelled" | "deleting") {
         return Ok(());
     }
-    let flipped = storage::try_set_processing(pool, document_id)
+    let flipped = knowledge::try_set_processing(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
     if !flipped {
-        return match storage::document_parse_status(pool, document_id)
+        return match knowledge::document_parse_status(pool, document_id)
             .await
             .map_err(|error| error.to_string())?
             .as_deref()
@@ -170,7 +276,7 @@ pub async fn convert_document(
             _ => Ok(()),
         };
     }
-    let _ = storage::open_attempt(pool, document_id, attempt).await;
+    let _ = knowledge::open_attempt(pool, document_id, attempt).await;
     tracing::info!(
         document_id = %document_id,
         file = %file_name,
@@ -179,58 +285,58 @@ pub async fn convert_document(
         "parse convert start"
     );
     if !passages.is_empty() {
-        let _ = storage::start_span(
+        let _ = knowledge::start_span(
             pool,
             document_id,
             attempt,
-            obs::SPAN_DOCREADER,
-            Some(obs::ROOT_NAME),
+            knowledge::obs::SPAN_DOCREADER,
+            Some(knowledge::obs::ROOT_NAME),
             Some(serde_json::json!({"engine": "passages"})),
         )
         .await;
-        let _ = storage::finish_span(
+        let _ = knowledge::finish_span(
             pool,
             document_id,
             attempt,
-            obs::SPAN_DOCREADER,
-            obs::STATUS_DONE,
+            knowledge::obs::SPAN_DOCREADER,
+            knowledge::obs::STATUS_DONE,
             Some(serde_json::json!({"engine": "passages"})),
         )
         .await;
-        let _ = storage::start_span(
+        let _ = knowledge::start_span(
             pool,
             document_id,
             attempt,
-            obs::SPAN_CHUNKING,
-            Some(obs::ROOT_NAME),
+            knowledge::obs::SPAN_CHUNKING,
+            Some(knowledge::obs::ROOT_NAME),
             None,
         )
         .await;
         let indexed = persist_passage_index(pool, document_id, version_id, passages).await?;
-        let _ = storage::finish_span(
+        let _ = knowledge::finish_span(
             pool,
             document_id,
             attempt,
-            obs::SPAN_CHUNKING,
-            obs::STATUS_DONE,
+            knowledge::obs::SPAN_CHUNKING,
+            knowledge::obs::STATUS_DONE,
             Some(serde_json::json!({"passages": passages.len()})),
         )
         .await;
-        let _ = storage::start_span(
+        let _ = knowledge::start_span(
             pool,
             document_id,
             attempt,
-            obs::SPAN_EMBEDDING,
-            Some(obs::ROOT_NAME),
+            knowledge::obs::SPAN_EMBEDDING,
+            Some(knowledge::obs::ROOT_NAME),
             None,
         )
         .await;
-        let _ = storage::finish_span(
+        let _ = knowledge::finish_span(
             pool,
             document_id,
             attempt,
-            obs::SPAN_EMBEDDING,
-            obs::STATUS_DONE,
+            knowledge::obs::SPAN_EMBEDDING,
+            knowledge::obs::STATUS_DONE,
             None,
         )
         .await;
@@ -246,24 +352,24 @@ pub async fn convert_document(
     let mut convert_image_source = String::new();
     let prior_spans = document_stage_spans(pool, document_id, attempt).await;
     let markdown = if manual {
-        let bytes = storage::read_blob(&file_hash).map_err(|e| e.to_string())?;
+        let bytes = platform::read_blob(&file_hash).map_err(|e| e.to_string())?;
         let md = String::from_utf8_lossy(&bytes).into_owned();
-        let _ = storage::start_span(
+        let _ = knowledge::start_span(
             pool,
             document_id,
             attempt,
-            obs::SPAN_DOCREADER,
-            Some(obs::ROOT_NAME),
+            knowledge::obs::SPAN_DOCREADER,
+            Some(knowledge::obs::ROOT_NAME),
             Some(serde_json::json!({"engine": "manual", "file": file_name})),
         )
         .await;
-        let _ = storage::write_blob_async(&format!("{file_hash}.md"), md.as_bytes()).await;
-        let _ = storage::finish_span(
+        let _ = platform::write_blob_async(&format!("{file_hash}.md"), md.as_bytes()).await;
+        let _ = knowledge::finish_span(
             pool,
             document_id,
             attempt,
-            obs::SPAN_DOCREADER,
-            obs::STATUS_DONE,
+            knowledge::obs::SPAN_DOCREADER,
+            knowledge::obs::STATUS_DONE,
             Some(serde_json::json!({"engine": "manual", "markdown_bytes": md.len()})),
         )
         .await;
@@ -277,15 +383,15 @@ pub async fn convert_document(
         );
         md
     } else {
-        let bytes = storage::read_blob(&file_hash).map_err(|e| e.to_string())?;
+        let bytes = platform::read_blob(&file_hash).map_err(|e| e.to_string())?;
         let (is_url, url) = parse_stored_url(&bytes);
         let engine = docparser::resolve_engine(&parser_engine, ext, is_url);
-        let _ = storage::start_span(
+        let _ = knowledge::start_span(
             pool,
             document_id,
             attempt,
-            obs::SPAN_DOCREADER,
-            Some(obs::ROOT_NAME),
+            knowledge::obs::SPAN_DOCREADER,
+            Some(knowledge::obs::ROOT_NAME),
             Some(serde_json::json!({"engine": engine, "file": file_name})),
         )
         .await;
@@ -294,7 +400,7 @@ pub async fn convert_document(
                 pool,
                 document_id,
                 attempt,
-                obs::SPAN_DOCREADER,
+                knowledge::obs::SPAN_DOCREADER,
                 docparser::NOT_CONFIGURED,
             )
             .await?;
@@ -318,8 +424,14 @@ pub async fn convert_document(
         {
             Ok(r) => r,
             Err(e) => {
-                return fail_stage_retryable(pool, document_id, attempt, obs::SPAN_DOCREADER, &e.0)
-                    .await;
+                return fail_stage_retryable(
+                    pool,
+                    document_id,
+                    attempt,
+                    knowledge::obs::SPAN_DOCREADER,
+                    &e.0,
+                )
+                .await;
             }
         };
         if !result.error.is_empty() {
@@ -330,7 +442,7 @@ pub async fn convert_document(
                     pool,
                     document_id,
                     attempt,
-                    obs::SPAN_DOCREADER,
+                    knowledge::obs::SPAN_DOCREADER,
                     &result.error,
                 )
                 .await?;
@@ -340,7 +452,7 @@ pub async fn convert_document(
                 pool,
                 document_id,
                 attempt,
-                obs::SPAN_DOCREADER,
+                knowledge::obs::SPAN_DOCREADER,
                 &result.error,
             )
             .await;
@@ -354,7 +466,7 @@ pub async fn convert_document(
                         pool,
                         document_id,
                         attempt,
-                        obs::SPAN_DOCREADER,
+                        knowledge::obs::SPAN_DOCREADER,
                         &e,
                     )
                     .await;
@@ -368,7 +480,7 @@ pub async fn convert_document(
                         pool,
                         document_id,
                         attempt,
-                        obs::SPAN_DOCREADER,
+                        knowledge::obs::SPAN_DOCREADER,
                         &result.error,
                     )
                     .await?;
@@ -378,7 +490,7 @@ pub async fn convert_document(
                     pool,
                     document_id,
                     attempt,
-                    obs::SPAN_DOCREADER,
+                    knowledge::obs::SPAN_DOCREADER,
                     &result.error,
                 )
                 .await;
@@ -393,14 +505,14 @@ pub async fn convert_document(
             "parse convert done"
         );
         result.markdown = persist_and_rewrite_images(&result).await;
-        let _ =
-            storage::write_blob_async(&format!("{file_hash}.md"), result.markdown.as_bytes()).await;
-        let _ = storage::finish_span(
+        let _ = platform::write_blob_async(&format!("{file_hash}.md"), result.markdown.as_bytes())
+            .await;
+        let _ = knowledge::finish_span(
             pool,
             document_id,
             attempt,
-            obs::SPAN_DOCREADER,
-            obs::STATUS_DONE,
+            knowledge::obs::SPAN_DOCREADER,
+            knowledge::obs::STATUS_DONE,
             Some(serde_json::json!({
                 "engine": engine,
                 "markdown_bytes": result.markdown.len(),
@@ -420,75 +532,76 @@ pub async fn convert_document(
     let mut opts = version_index_opts(pool, version_id).await;
     apply_chunking_overrides(&mut opts, overrides.as_ref());
     let prior_spans = document_stage_spans(pool, document_id, attempt).await;
-    let existing_chunks = storage::load_document_chunks(pool, document_id)
+    let existing_chunks = knowledge::load_document_chunks(pool, document_id)
         .await
         .unwrap_or_default();
-    let chunks =
-        if obs::stage_satisfied(&prior_spans, obs::SPAN_CHUNKING) && !existing_chunks.is_empty() {
-            tracing::info!(
-                document_id = %document_id,
-                chunks = existing_chunks.len(),
-                "parse chunking reuse"
-            );
-            existing_chunks
-        } else {
-            let _ = storage::start_span(
-                pool,
-                document_id,
-                attempt,
-                obs::SPAN_CHUNKING,
-                Some(obs::ROOT_NAME),
-                None,
-            )
-            .await;
-            let split = chunker::split_from_config(
-                &markdown,
-                version_id,
-                document_id,
-                chunker::SplitterConfig {
-                    chunk_size: opts.size,
-                    chunk_overlap: opts.overlap,
-                    strategy: opts.strategy.clone(),
-                    separators: opts.separators.clone(),
-                    token_limit: opts.token_limit,
-                    languages: opts.languages.clone(),
-                },
-                opts.parent_child,
-                opts.parent_size,
-                opts.child_size,
-            );
-            let kept = index::keep_nonempty_chunks(split);
-            storage::delete_graph_for_document(pool, document_id)
-                .await
-                .map_err(|e| e.to_string())?;
-            storage::replace_document_chunks(pool, document_id, &kept, &[])
-                .await
-                .map_err(|e| e.to_string())?;
-            let _ = storage::finish_span(
-                pool,
-                document_id,
-                attempt,
-                obs::SPAN_CHUNKING,
-                obs::STATUS_DONE,
-                Some(serde_json::json!({"chunks": kept.len()})),
-            )
-            .await;
-            tracing::info!(
-                document_id = %document_id,
-                chunks = kept.len(),
-                "parse chunking done"
-            );
-            kept
-        };
-    if obs::stage_satisfied(&prior_spans, obs::SPAN_EMBEDDING) {
+    let chunks = if knowledge::obs::stage_satisfied(&prior_spans, knowledge::obs::SPAN_CHUNKING)
+        && !existing_chunks.is_empty()
+    {
+        tracing::info!(
+            document_id = %document_id,
+            chunks = existing_chunks.len(),
+            "parse chunking reuse"
+        );
+        existing_chunks
+    } else {
+        let _ = knowledge::start_span(
+            pool,
+            document_id,
+            attempt,
+            knowledge::obs::SPAN_CHUNKING,
+            Some(knowledge::obs::ROOT_NAME),
+            None,
+        )
+        .await;
+        let split = knowledge::chunker::split_from_config(
+            &markdown,
+            version_id,
+            document_id,
+            knowledge::chunker::SplitterConfig {
+                chunk_size: opts.size,
+                chunk_overlap: opts.overlap,
+                strategy: opts.strategy.clone(),
+                separators: opts.separators.clone(),
+                token_limit: opts.token_limit,
+                languages: opts.languages.clone(),
+            },
+            opts.parent_child,
+            opts.parent_size,
+            opts.child_size,
+        );
+        let kept = knowledge::index::keep_nonempty_chunks(split);
+        knowledge::delete_graph_for_document(pool, document_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        knowledge::replace_document_chunks(pool, document_id, &kept, &[])
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = knowledge::finish_span(
+            pool,
+            document_id,
+            attempt,
+            knowledge::obs::SPAN_CHUNKING,
+            knowledge::obs::STATUS_DONE,
+            Some(serde_json::json!({"chunks": kept.len()})),
+        )
+        .await;
+        tracing::info!(
+            document_id = %document_id,
+            chunks = kept.len(),
+            "parse chunking done"
+        );
+        kept
+    };
+    if knowledge::obs::stage_satisfied(&prior_spans, knowledge::obs::SPAN_EMBEDDING) {
         return Ok(());
     }
-    let _ = storage::start_span(
+    let _ = knowledge::start_span(
         pool,
         document_id,
         attempt,
-        obs::SPAN_EMBEDDING,
-        Some(obs::ROOT_NAME),
+        knowledge::obs::SPAN_EMBEDDING,
+        Some(knowledge::obs::ROOT_NAME),
         None,
     )
     .await;
@@ -498,16 +611,22 @@ pub async fn convert_document(
         {
             Ok(v) => v,
             Err(e) => {
-                return fail_stage_retryable(pool, document_id, attempt, obs::SPAN_EMBEDDING, &e)
-                    .await;
+                return fail_stage_retryable(
+                    pool,
+                    document_id,
+                    attempt,
+                    knowledge::obs::SPAN_EMBEDDING,
+                    &e,
+                )
+                .await;
             }
         };
-    let _ = storage::finish_span(
+    let _ = knowledge::finish_span(
         pool,
         document_id,
         attempt,
-        obs::SPAN_EMBEDDING,
-        obs::STATUS_DONE,
+        knowledge::obs::SPAN_EMBEDDING,
+        knowledge::obs::STATUS_DONE,
         None,
     )
     .await;
@@ -516,8 +635,8 @@ pub async fn convert_document(
         chunks = chunks.len(),
         "parse embedding done"
     );
-    let images = enrichment::markdown_image_keys(&markdown);
-    let mut mm = storage::version_multimodal_enabled(pool, version_id)
+    let images = knowledge::enrichment::markdown_image_keys(&markdown);
+    let mut mm = knowledge::version_multimodal_enabled(pool, version_id)
         .await
         .unwrap_or(false);
     if let Some(v) = overrides.as_ref().and_then(|o| o.enable_multimodel) {
@@ -535,7 +654,7 @@ pub async fn convert_document(
                 text_count,
                 &mm_images,
                 if convert_image_source.is_empty() {
-                    enrichment::image_source_type(&file_name, &markdown)
+                    knowledge::enrichment::image_source_type(&file_name, &markdown)
                 } else {
                     convert_image_source.as_str()
                 },
@@ -561,11 +680,11 @@ async fn persist_passage_index(
     if !file_hash.is_empty() {
         let joined = passages.join("\n\n");
         let _ =
-            storage::write_blob_async(format!("{file_hash}.md").as_str(), joined.as_bytes()).await;
+            platform::write_blob_async(format!("{file_hash}.md").as_str(), joined.as_bytes()).await;
     }
-    let chunks: Vec<domain::Chunk> = passages
+    let chunks: Vec<knowledge::Chunk> = passages
         .iter()
-        .map(|text| domain::Chunk {
+        .map(|text| knowledge::Chunk {
             id: Uuid::new_v4(),
             document_id,
             product_version_id: version_id,
@@ -618,23 +737,23 @@ async fn after_index_fanout(
     file_name: &str,
 ) -> Result<(), String> {
     if !images.is_empty() {
-        if !domain::vlm_configured() {
-            let _ = storage::skip_span(
+        if !platform::vlm_configured() {
+            let _ = knowledge::skip_span(
                 pool,
                 document_id,
                 attempt,
-                obs::SPAN_MULTIMODAL,
+                knowledge::obs::SPAN_MULTIMODAL,
                 "vlm not configured",
             )
             .await;
-            let _ = storage::set_parse_status(
+            let _ = knowledge::set_parse_status(
                 pool,
                 document_id,
                 "finalizing",
                 "ocr_error: vlm not configured; caption_error: vlm not configured",
             )
             .await;
-            let _ = storage::set_index_ready(pool, document_id, false).await;
+            let _ = knowledge::set_index_ready(pool, document_id, false).await;
             tracing::warn!(
                 document_id = %document_id,
                 reason = "vlm not configured",
@@ -646,12 +765,12 @@ async fn after_index_fanout(
             }
             return Ok(());
         }
-        let _ = storage::start_span(
+        let _ = knowledge::start_span(
             pool,
             document_id,
             attempt,
-            obs::SPAN_MULTIMODAL,
-            Some(obs::ROOT_NAME),
+            knowledge::obs::SPAN_MULTIMODAL,
+            Some(knowledge::obs::ROOT_NAME),
             Some(serde_json::json!({"images": images.len()})),
         )
         .await;
@@ -660,11 +779,10 @@ async fn after_index_fanout(
             images = images.len(),
             "parse multimodal enqueue"
         );
-        let mut pending = domain::Store::default();
-        enrichment::set_pending(&mut pending, document_id, images.len() as i32);
+        knowledge::enrichment::set_pending_count(document_id, images.len() as i32);
         let mut leftover = images.len() as i32;
         for key in images {
-            match runtime::enqueue_image_multimodal(
+            match platform::enqueue_image_multimodal(
                 document_id,
                 key,
                 file_name,
@@ -677,27 +795,27 @@ async fn after_index_fanout(
                 Ok(Some(_)) => {}
                 Ok(None) | Err(_) => {
                     leftover -= 1;
-                    enrichment::decr_pending(&mut pending, document_id);
+                    knowledge::enrichment::decr_pending_count(document_id);
                 }
             }
         }
         if leftover <= 0 {
-            let _ = storage::skip_span(
+            let _ = knowledge::skip_span(
                 pool,
                 document_id,
                 attempt,
-                obs::SPAN_MULTIMODAL,
+                knowledge::obs::SPAN_MULTIMODAL,
                 "enqueue failed",
             )
             .await;
-            let _ = storage::set_parse_status(
+            let _ = knowledge::set_parse_status(
                 pool,
                 document_id,
                 "finalizing",
                 "ocr_error: image enqueue failed; caption_error: image enqueue failed",
             )
             .await;
-            let _ = storage::set_index_ready(pool, document_id, false).await;
+            let _ = knowledge::set_index_ready(pool, document_id, false).await;
             tracing::warn!(
                 document_id = %document_id,
                 reason = "enqueue failed",
@@ -709,23 +827,23 @@ async fn after_index_fanout(
         }
         return Ok(());
     }
-    let _ = storage::skip_span(
+    let _ = knowledge::skip_span(
         pool,
         document_id,
         attempt,
-        obs::SPAN_MULTIMODAL,
+        knowledge::obs::SPAN_MULTIMODAL,
         "no images",
     )
     .await;
-    let _ = storage::set_index_ready(pool, document_id, true).await;
+    let _ = knowledge::set_index_ready(pool, document_id, true).await;
     tracing::info!(document_id = %document_id, index_ready = true, "parse completed");
     if text_count == 0 {
-        let _ = storage::set_parse_status(pool, document_id, "completed", "").await;
-        let _ = storage::skip_span(
+        let _ = knowledge::set_parse_status(pool, document_id, "completed", "").await;
+        let _ = knowledge::skip_span(
             pool,
             document_id,
             attempt,
-            obs::SPAN_POSTPROCESS,
+            knowledge::obs::SPAN_POSTPROCESS,
             "no further work",
         )
         .await;
@@ -751,7 +869,7 @@ struct VersionIndexOpts {
 
 fn apply_chunking_overrides(
     opts: &mut VersionIndexOpts,
-    overrides: Option<&domain::ProcessOverrides>,
+    overrides: Option<&knowledge::ProcessOverrides>,
 ) {
     let Some(o) = overrides else {
         return;
@@ -860,19 +978,19 @@ async fn persist_indexed_chunks(
     pool: &PgPool,
     document_id: Uuid,
     _version_id: Uuid,
-    chunks: &[domain::Chunk],
+    chunks: &[knowledge::Chunk],
     vector_on: bool,
     keyword_on: bool,
 ) -> Result<PersistIndexResult, String> {
     if status_aborted(document_parse_status(pool, document_id).await.as_deref()) {
         return Ok(PersistIndexResult::Aborted);
     }
-    let kept = index::keep_nonempty_chunks(chunks.to_vec());
-    storage::delete_graph_for_document(pool, document_id)
+    let kept = knowledge::index::keep_nonempty_chunks(chunks.to_vec());
+    knowledge::delete_graph_for_document(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
     // Chunk rows first so an embed failure does not throw away the split.
-    storage::replace_document_chunks(pool, document_id, &kept, &[])
+    knowledge::replace_document_chunks(pool, document_id, &kept, &[])
         .await
         .map_err(|e| e.to_string())?;
     persist_document_embeddings(pool, document_id, &kept, vector_on, keyword_on).await
@@ -881,7 +999,7 @@ async fn persist_indexed_chunks(
 async fn persist_document_embeddings(
     pool: &PgPool,
     document_id: Uuid,
-    chunks: &[domain::Chunk],
+    chunks: &[knowledge::Chunk],
     vector_on: bool,
     keyword_on: bool,
 ) -> Result<PersistIndexResult, String> {
@@ -903,17 +1021,18 @@ async fn persist_document_embeddings(
     .fetch_one(pool)
     .await
     .unwrap_or_default();
-    let embeddings = index::index_chunks(chunks, &title, vector_on, keyword_on, &model_id)?;
+    let embeddings =
+        knowledge::index::index_chunks(chunks, &title, vector_on, keyword_on, &model_id)?;
     if status_aborted(document_parse_status(pool, document_id).await.as_deref()) {
         return Ok(PersistIndexResult::Aborted);
     }
-    storage::replace_document_embeddings(pool, document_id, &embeddings)
+    knowledge::replace_document_embeddings(pool, document_id, &embeddings)
         .await
         .map_err(|e| e.to_string())?;
     let st = document_parse_status(pool, document_id).await;
     if status_aborted(st.as_deref()) {
         if st.as_deref() == Some("deleting") {
-            let _ = storage::purge_document_index(pool, document_id).await;
+            let _ = knowledge::purge_document_index(pool, document_id).await;
         }
         return Ok(PersistIndexResult::Aborted);
     }
@@ -930,8 +1049,12 @@ async fn persist_document_embeddings(
     Ok(PersistIndexResult::Written { text_count })
 }
 
-async fn document_stage_spans(pool: &PgPool, document_id: Uuid, attempt: i32) -> Vec<domain::Span> {
-    storage::list_spans_attempt(pool, document_id, attempt)
+async fn document_stage_spans(
+    pool: &PgPool,
+    document_id: Uuid,
+    attempt: i32,
+) -> Vec<knowledge::Span> {
+    knowledge::list_spans_attempt(pool, document_id, attempt)
         .await
         .unwrap_or_default()
         .into_iter()
@@ -939,8 +1062,11 @@ async fn document_stage_spans(pool: &PgPool, document_id: Uuid, attempt: i32) ->
         .collect()
 }
 
-fn reused_image_source(spans: &[domain::Span]) -> String {
-    let Some(span) = spans.iter().find(|s| s.name == obs::SPAN_DOCREADER) else {
+fn reused_image_source(spans: &[knowledge::Span]) -> String {
+    let Some(span) = spans
+        .iter()
+        .find(|s| s.name == knowledge::obs::SPAN_DOCREADER)
+    else {
         return String::new();
     };
     image_source_from_docreader_output(span.output.as_ref())
@@ -963,11 +1089,11 @@ fn image_source_from_docreader_output(output: Option<&serde_json::Value>) -> Str
     String::new()
 }
 
-fn reused_markdown(spans: &[domain::Span], file_hash: &str) -> Option<String> {
-    if !obs::stage_satisfied(spans, obs::SPAN_DOCREADER) {
+fn reused_markdown(spans: &[knowledge::Span], file_hash: &str) -> Option<String> {
+    if !knowledge::obs::stage_satisfied(spans, knowledge::obs::SPAN_DOCREADER) {
         return None;
     }
-    let bytes = storage::read_blob(&format!("{file_hash}.md")).ok()?;
+    let bytes = platform::read_blob(&format!("{file_hash}.md")).ok()?;
     if bytes.is_empty() {
         return None;
     }
@@ -994,7 +1120,7 @@ async fn persist_and_rewrite_images(result: &docparser::ReadResult) -> String {
     }
     let _ = tokio::task::spawn_blocking(move || {
         for (hash, data) in blobs {
-            if let Err(e) = storage::write_blob(&hash, &data) {
+            if let Err(e) = platform::write_blob(&hash, &data) {
                 tracing::warn!(hash = %hash, error = %e, "image persist failed");
             }
         }
@@ -1004,23 +1130,23 @@ async fn persist_and_rewrite_images(result: &docparser::ReadResult) -> String {
 }
 
 async fn maybe_start_postprocess(pool: &PgPool, document_id: Uuid, version_id: Uuid, attempt: i32) {
-    let rows = storage::list_spans_attempt(pool, document_id, attempt)
+    let rows = knowledge::list_spans_attempt(pool, document_id, attempt)
         .await
         .unwrap_or_default();
     let spans: Vec<_> = rows.into_iter().map(|r| r.into_span()).collect();
-    if !obs::can_start_stage_or_legacy(obs::SPAN_POSTPROCESS, &spans) {
+    if !knowledge::obs::can_start_stage_or_legacy(knowledge::obs::SPAN_POSTPROCESS, &spans) {
         return;
     }
-    let _ = storage::start_span(
+    let _ = knowledge::start_span(
         pool,
         document_id,
         attempt,
-        obs::SPAN_POSTPROCESS,
-        Some(obs::ROOT_NAME),
+        knowledge::obs::SPAN_POSTPROCESS,
+        Some(knowledge::obs::ROOT_NAME),
         None,
     )
     .await;
-    let _ = runtime::enqueue_post_process(document_id, version_id, false).await;
+    let _ = platform::enqueue_post_process(document_id, version_id, false).await;
 }
 
 async fn fail_stage_retryable(
@@ -1030,16 +1156,16 @@ async fn fail_stage_retryable(
     stage: &str,
     message: &str,
 ) -> Result<(), String> {
-    let _ = storage::finish_span(
+    let _ = knowledge::finish_span(
         pool,
         document_id,
         attempt,
         stage,
-        obs::STATUS_FAILED,
+        knowledge::obs::STATUS_FAILED,
         Some(serde_json::json!({"error": message})),
     )
     .await;
-    let _ = storage::cancel_dependent_stages(pool, document_id, attempt, stage).await;
+    let _ = knowledge::cancel_dependent_stages(pool, document_id, attempt, stage).await;
     tracing::error!(document_id = %document_id, stage, error = %message, "parse stage fail");
     Err(message.into())
 }
@@ -1051,22 +1177,22 @@ async fn fail_pipeline(
     stage: &str,
     message: &str,
 ) -> Result<(), String> {
-    let _ = storage::finish_span(
+    let _ = knowledge::finish_span(
         pool,
         document_id,
         attempt,
         stage,
-        obs::STATUS_FAILED,
+        knowledge::obs::STATUS_FAILED,
         Some(serde_json::json!({"error": message})),
     )
     .await;
-    let _ = storage::cancel_dependent_stages(pool, document_id, attempt, stage).await;
-    let _ = storage::finish_span(
+    let _ = knowledge::cancel_dependent_stages(pool, document_id, attempt, stage).await;
+    let _ = knowledge::finish_span(
         pool,
         document_id,
         attempt,
-        obs::ROOT_NAME,
-        obs::STATUS_FAILED,
+        knowledge::obs::ROOT_NAME,
+        knowledge::obs::STATUS_FAILED,
         Some(serde_json::json!({"error": message})),
     )
     .await;
@@ -1081,11 +1207,12 @@ async fn fail_now(
     message: &str,
 ) -> Result<(), String> {
     let _ = attempt;
-    storage::set_parse_status(pool, document_id, "failed", message)
+    knowledge::set_parse_status(pool, document_id, "failed", message)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = storage::insert_dead_letter(pool, domain::TYPE_DOCUMENT_PROCESS, document_id, message)
-        .await;
+    let _ =
+        knowledge::insert_dead_letter(pool, platform::TYPE_DOCUMENT_PROCESS, document_id, message)
+            .await;
     Ok(())
 }
 
@@ -1122,14 +1249,14 @@ impl oxana::Worker<VersionCloneJob> for VersionCloneWorker {
 }
 
 pub async fn process_version_clone(pool: &PgPool, job: &VersionCloneJob) -> Result<(), String> {
-    let diffs: Vec<clone::CloneDiff> = match &job.diffs {
+    let diffs: Vec<knowledge::clone::CloneDiff> = match &job.diffs {
         serde_json::Value::Array(a) => a
             .iter()
             .filter_map(|v| serde_json::from_value(v.clone()).ok())
             .collect(),
         _ => Vec::new(),
     };
-    let follow = clone::run_clone(
+    let follow = knowledge::clone::run_clone(
         pool,
         job.source_version_id,
         job.target_version_id,
@@ -1138,12 +1265,13 @@ pub async fn process_version_clone(pool: &PgPool, job: &VersionCloneJob) -> Resu
     )
     .await?;
     for f in follow {
-        if f.clone_keep || f.task_type == domain::TYPE_POST_PROCESS {
+        if f.clone_keep || f.task_type == platform::TYPE_POST_PROCESS {
             let _ =
-                runtime::enqueue_post_process(f.document_id, f.product_version_id, f.clone_keep)
+                platform::enqueue_post_process(f.document_id, f.product_version_id, f.clone_keep)
                     .await;
         } else {
-            let _ = runtime::enqueue_document_process(f.document_id, f.product_version_id, 1).await;
+            let _ =
+                platform::enqueue_document_process(f.document_id, f.product_version_id, 1).await;
         }
     }
     Ok(())
@@ -1178,7 +1306,7 @@ impl oxana::Worker<PostProcessJob> for PostProcessWorker {
             return Err(JobErr("postgres not configured".into()));
         };
         let result = match tokio::time::timeout(
-            std::time::Duration::from_secs(runtime::POST_PROCESS_TIMEOUT_SECS),
+            std::time::Duration::from_secs(platform::POST_PROCESS_TIMEOUT_SECS),
             process_post_process(
                 pool,
                 job.document_id,
@@ -1193,7 +1321,7 @@ impl oxana::Worker<PostProcessJob> for PostProcessWorker {
         };
         if let Err(e) = &result
             && ctx.meta.retries >= 3
-            && storage::document_parse_status(pool, job.document_id)
+            && knowledge::document_parse_status(pool, job.document_id)
                 .await
                 .ok()
                 .flatten()
@@ -1208,18 +1336,18 @@ impl oxana::Worker<PostProcessJob> for PostProcessWorker {
 
 pub struct KnowledgeSemanticIndexV2Worker {
     pool: Option<PgPool>,
-    provider: Option<Arc<dyn storage::knowledge_index_v2::VectorEmbeddingProviderV2>>,
+    provider: Option<Arc<dyn knowledge::knowledge_index_v2::VectorEmbeddingProviderV2>>,
     provider_configuration_error: Option<String>,
 }
 
 impl oxana::FromContext<AppCtx> for KnowledgeSemanticIndexV2Worker {
     fn from_context(ctx: &AppCtx) -> Self {
-        let provider_result = storage::knowledge_index_v2::StrictVectorEmbeddingClientV2::new(
-            Arc::new(storage::knowledge_index_v2::EnvironmentEmbeddingCredentialResolverV2),
+        let provider_result = knowledge::knowledge_index_v2::StrictVectorEmbeddingClientV2::new(
+            Arc::new(knowledge::knowledge_index_v2::EnvironmentEmbeddingCredentialResolverV2),
         );
         let provider_configuration_error = provider_result.as_ref().err().map(ToString::to_string);
         let provider = provider_result.ok().map(|provider| {
-            Arc::new(provider) as Arc<dyn storage::knowledge_index_v2::VectorEmbeddingProviderV2>
+            Arc::new(provider) as Arc<dyn knowledge::knowledge_index_v2::VectorEmbeddingProviderV2>
         });
         Self {
             pool: ctx.pool.clone(),
@@ -1234,11 +1362,11 @@ impl oxana::Worker<KnowledgeSemanticIndexV2Job> for KnowledgeSemanticIndexV2Work
     type Error = JobErr;
 
     fn max_retries(&self, _job: &KnowledgeSemanticIndexV2Job) -> u32 {
-        runtime::SEMANTIC_INDEX_V2_MAX_RETRY
+        platform::SEMANTIC_INDEX_V2_MAX_RETRY
     }
 
     fn retry_delay(&self, _job: &KnowledgeSemanticIndexV2Job, _retries: u32) -> u64 {
-        runtime::SEMANTIC_INDEX_V2_RETRY_DELAY_SECS
+        platform::SEMANTIC_INDEX_V2_RETRY_DELAY_SECS
     }
 
     async fn process(
@@ -1256,7 +1384,7 @@ impl oxana::Worker<KnowledgeSemanticIndexV2Job> for KnowledgeSemanticIndexV2Work
             "knowledge semantic index v2 attempt"
         );
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(runtime::SEMANTIC_INDEX_V2_TIMEOUT_SECS),
+            std::time::Duration::from_secs(platform::SEMANTIC_INDEX_V2_TIMEOUT_SECS),
             process_semantic_index_intent_v2(
                 pool,
                 job.target_id,
@@ -1279,7 +1407,7 @@ impl oxana::Worker<KnowledgeSemanticIndexV2Job> for KnowledgeSemanticIndexV2Work
             }
             Err(_) => {
                 let detail = "semantic index v2 timeout after 2h";
-                storage::knowledge_index_v2::record_semantic_index_error_v2(
+                knowledge::knowledge_index_v2::record_semantic_index_error_v2(
                     pool,
                     job.target_id,
                     job.target_revision,
@@ -1300,9 +1428,9 @@ impl oxana::Worker<KnowledgeSemanticIndexV2Job> for KnowledgeSemanticIndexV2Work
 }
 
 async fn enqueue_semantic_index_v2_target(
-    target: &storage::knowledge_index_v2::SemanticIndexIntentV2,
+    target: &knowledge::knowledge_index_v2::SemanticIndexIntentV2,
 ) -> Result<(), JobErr> {
-    match runtime::enqueue_semantic_index_v2(target.id, target.target_revision).await {
+    match platform::enqueue_semantic_index_v2(target.id, target.target_revision).await {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err(JobErr("semantic index v2 queue unavailable".into())),
         Err(error) => Err(JobErr(error)),
@@ -1326,21 +1454,21 @@ pub async fn process_semantic_index_intent_v2(
     pool: &PgPool,
     target_id: Uuid,
     target_revision: i64,
-    provider: Option<&dyn storage::knowledge_index_v2::VectorEmbeddingProviderV2>,
+    provider: Option<&dyn knowledge::knowledge_index_v2::VectorEmbeddingProviderV2>,
     provider_configuration_error: Option<&str>,
-) -> Result<Option<storage::knowledge_index_v2::SemanticIndexIntentV2>, String> {
-    use storage::knowledge_index_v2::{
+) -> Result<Option<knowledge::knowledge_index_v2::SemanticIndexIntentV2>, String> {
+    use knowledge::knowledge_index_v2::{
         SemanticIndexCompletionV2, SemanticIndexPreflightV2, VectorIndexErrorV2,
     };
 
     let Some(intent) =
-        storage::knowledge_index_v2::semantic_index_intent_v2(pool, target_id, target_revision)
+        knowledge::knowledge_index_v2::semantic_index_intent_v2(pool, target_id, target_revision)
             .await
             .map_err(|error| error.to_string())?
     else {
         return Ok(None);
     };
-    match storage::knowledge_index_v2::preflight_semantic_index_intent_v2(
+    match knowledge::knowledge_index_v2::preflight_semantic_index_intent_v2(
         pool,
         target_id,
         target_revision,
@@ -1351,7 +1479,7 @@ pub async fn process_semantic_index_intent_v2(
         SemanticIndexPreflightV2::Current => {}
         SemanticIndexPreflightV2::PendingDerived => {
             let detail = "semantic source has pending derived work";
-            let _ = storage::knowledge_index_v2::record_semantic_index_intent_v2(
+            let _ = knowledge::knowledge_index_v2::record_semantic_index_intent_v2(
                 pool,
                 &intent,
                 "retryable",
@@ -1374,7 +1502,7 @@ pub async fn process_semantic_index_intent_v2(
             provider_configuration_error
                 .unwrap_or("strict V2 vector provider could not be configured"),
         );
-        storage::knowledge_index_v2::record_semantic_index_intent_v2(
+        knowledge::knowledge_index_v2::record_semantic_index_intent_v2(
             pool,
             &intent,
             "terminal",
@@ -1387,19 +1515,20 @@ pub async fn process_semantic_index_intent_v2(
     };
 
     let result = async {
-        storage::knowledge_index_v2::rebuild_semantic_keyword_indexes_v2(pool, &intent).await?;
-        let has_vector = storage::knowledge_index_v2::semantic_vector_generation_matches_intent_v2(
-            pool, &intent,
-        )
-        .await
-        .map_err(VectorIndexErrorV2::Database)?;
+        knowledge::knowledge_index_v2::rebuild_semantic_keyword_indexes_v2(pool, &intent).await?;
+        let has_vector =
+            knowledge::knowledge_index_v2::semantic_vector_generation_matches_intent_v2(
+                pool, &intent,
+            )
+            .await
+            .map_err(VectorIndexErrorV2::Database)?;
         if !has_vector {
-            storage::knowledge_index_v2::rebuild_vector_indexes_for_intent_v2(
+            knowledge::knowledge_index_v2::rebuild_vector_indexes_for_intent_v2(
                 pool, &intent, provider,
             )
             .await?;
         }
-        storage::knowledge_index_v2::complete_semantic_index_intent_v2(pool, &intent)
+        knowledge::knowledge_index_v2::complete_semantic_index_intent_v2(pool, &intent)
             .await
             .map_err(VectorIndexErrorV2::Database)
     }
@@ -1423,7 +1552,7 @@ pub async fn process_semantic_index_intent_v2(
         Ok(SemanticIndexCompletionV2::Terminal) => Ok(None),
         Ok(SemanticIndexCompletionV2::PendingDerived | SemanticIndexCompletionV2::NotReady) => {
             let detail = "semantic readiness is not yet publishable";
-            let _ = storage::knowledge_index_v2::record_semantic_index_intent_v2(
+            let _ = knowledge::knowledge_index_v2::record_semantic_index_intent_v2(
                 pool,
                 &intent,
                 "retryable",
@@ -1435,7 +1564,7 @@ pub async fn process_semantic_index_intent_v2(
         }
         Err(VectorIndexErrorV2::SnapshotChanged(error)) => {
             let detail = bounded_semantic_index_error_detail(&error);
-            storage::knowledge_index_v2::record_semantic_index_intent_v2(
+            knowledge::knowledge_index_v2::record_semantic_index_intent_v2(
                 pool,
                 &intent,
                 "superseded",
@@ -1448,7 +1577,7 @@ pub async fn process_semantic_index_intent_v2(
         }
         Err(VectorIndexErrorV2::PendingDerived(error)) => {
             let detail = bounded_semantic_index_error_detail(&error);
-            let _ = storage::knowledge_index_v2::record_semantic_index_intent_v2(
+            let _ = knowledge::knowledge_index_v2::record_semantic_index_intent_v2(
                 pool,
                 &intent,
                 "retryable",
@@ -1460,7 +1589,7 @@ pub async fn process_semantic_index_intent_v2(
         }
         Err(VectorIndexErrorV2::InvalidConfiguration(error)) => {
             let detail = bounded_semantic_index_error_detail(&error);
-            storage::knowledge_index_v2::record_semantic_index_intent_v2(
+            knowledge::knowledge_index_v2::record_semantic_index_intent_v2(
                 pool,
                 &intent,
                 "terminal",
@@ -1480,7 +1609,7 @@ pub async fn process_semantic_index_intent_v2(
                 | VectorIndexErrorV2::PendingDerived(_)
                 | VectorIndexErrorV2::SnapshotChanged(_) => unreachable!(),
             };
-            let _ = storage::knowledge_index_v2::record_semantic_index_intent_v2(
+            let _ = knowledge::knowledge_index_v2::record_semantic_index_intent_v2(
                 pool,
                 &intent,
                 "retryable",
@@ -1496,9 +1625,9 @@ pub async fn process_semantic_index_intent_v2(
 async fn prepare_semantic_index_v2_successor(
     pool: &PgPool,
     product_version_id: Uuid,
-) -> Result<Option<storage::knowledge_index_v2::SemanticIndexIntentV2>, String> {
-    use storage::knowledge_index_v2::SemanticIndexPreparationV2;
-    match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(pool, product_version_id)
+) -> Result<Option<knowledge::knowledge_index_v2::SemanticIndexIntentV2>, String> {
+    use knowledge::knowledge_index_v2::SemanticIndexPreparationV2;
+    match knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(pool, product_version_id)
         .await
         .map_err(|error| error.to_string())?
     {
@@ -1518,7 +1647,7 @@ pub async fn schedule_semantic_index_v2_if_ready(
     product_version_id: Uuid,
 ) -> Result<(), String> {
     schedule_semantic_index_v2_if_ready_with(pool, product_version_id, |target_id, revision| {
-        runtime::enqueue_semantic_index_v2(target_id, revision)
+        platform::enqueue_semantic_index_v2(target_id, revision)
     })
     .await
 }
@@ -1532,8 +1661,8 @@ where
     F: FnOnce(Uuid, i64) -> Fut,
     Fut: std::future::Future<Output = Result<Option<String>, String>>,
 {
-    use storage::knowledge_index_v2::SemanticIndexPreparationV2;
-    match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(pool, product_version_id)
+    use knowledge::knowledge_index_v2::SemanticIndexPreparationV2;
+    match knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(pool, product_version_id)
         .await
         .map_err(|error| error.to_string())?
     {
@@ -1552,304 +1681,13 @@ where
     }
 }
 
-/// Enqueue already returns `Ok(None)` for `DeclaredDisabled` lanes.
-/// Running generators here would re-enable those lanes in-process.
-fn allow_inline_fallback(task_type: &str) -> bool {
-    !matches!(
-        domain::launch_mode(task_type),
-        Ok(Some(domain::LaunchMode::DeclaredDisabled))
-    )
-}
-
-/// Invoke `inline` only when the registry does not declare the lane disabled.
-fn run_inline_if_allowed<T>(task_type: &str, inline: impl FnOnce() -> T) -> Option<T> {
-    allow_inline_fallback(task_type).then(inline)
-}
-
-#[tracing::instrument(
-    name = "parse.postprocess",
-    skip_all,
-    fields(document_id = %document_id, clone_keep)
-)]
 pub async fn process_post_process(
     pool: &PgPool,
     document_id: Uuid,
     product_version_id: Uuid,
     clone_keep: bool,
 ) -> Result<(), String> {
-    let ws: Option<Uuid> = sqlx::query_scalar(
-        "SELECT p.workspace_id FROM documents d
-         JOIN product_versions pv ON pv.id = d.product_version_id
-         JOIN products p ON p.id = pv.product_id
-         WHERE d.id = $1",
-    )
-    .bind(document_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-    let Some(ws) = ws else {
-        return Ok(());
-    };
-    tracing::info!(
-        document_id = %document_id,
-        clone_keep,
-        "parse postprocess start"
-    );
-    let attempt: i32 =
-        sqlx::query_scalar("SELECT COALESCE(attempt, 1) FROM documents WHERE id = $1")
-            .bind(document_id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(1);
-    let rows = storage::list_spans_attempt(pool, document_id, attempt)
-        .await
-        .unwrap_or_default();
-    let spans: Vec<_> = rows.into_iter().map(|r| r.into_span()).collect();
-    if !obs::can_start_stage_or_legacy(obs::SPAN_POSTPROCESS, &spans) {
-        return Err("postprocess waiting for embedding and multimodal".into());
-    }
-    let _ = storage::start_span(
-        pool,
-        document_id,
-        attempt,
-        obs::SPAN_POSTPROCESS,
-        Some(obs::ROOT_NAME),
-        None,
-    )
-    .await;
-    let mut store = domain::Store::default();
-    storage::hydrate_workspace(pool, &mut store, ws)
-        .await
-        .map_err(|e| e.to_string())?;
-    crate::post_process(
-        &mut store,
-        &serde_json::json!({
-            "document_id": document_id,
-            "clone_keep": clone_keep
-        }),
-    )?;
-    let Some(doc) = store.documents.get(&document_id).cloned() else {
-        return Ok(());
-    };
-    if doc.parse_status.is_aborted() {
-        let _ =
-            storage::skip_span(pool, document_id, attempt, obs::SPAN_POSTPROCESS, "aborted").await;
-        return Ok(());
-    }
-    if doc.parse_status == domain::ParseStatus::Completed {
-        storage::set_document_progress(pool, document_id, "completed", 0)
-            .await
-            .map_err(|e| e.to_string())?;
-        let _ = storage::set_summary_status(pool, document_id, "none").await;
-        finish_postprocess_spans(pool, document_id, attempt).await;
-        return schedule_semantic_index_v2_if_ready(pool, product_version_id).await;
-    }
-    if doc.parse_status != domain::ParseStatus::Finalizing {
-        finish_postprocess_spans(pool, document_id, attempt).await;
-        return Ok(());
-    }
-    let wiki_on = store
-        .versions
-        .get(&product_version_id)
-        .map(|v| v.wiki_enabled)
-        .unwrap_or(false);
-    let wiki_trigger = wiki_on
-        && store
-            .queue
-            .iter()
-            .any(|j| j.task_type == domain::TYPE_WIKI_INGEST);
-    if wiki_trigger {
-        storage::enqueue_pending_op(
-            pool,
-            domain::TYPE_WIKI_INGEST,
-            product_version_id,
-            wiki::OP_INGEST,
-            Some(&document_id.to_string()),
-            serde_json::json!({"document_id": document_id}),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    }
-    if !storage::set_finalizing(pool, document_id, doc.pending_subtasks_count)
-        .await
-        .map_err(|e| e.to_string())?
-    {
-        finish_postprocess_spans(pool, document_id, attempt).await;
-        return Ok(());
-    }
-    if matches!(doc.summary_status, domain::SummaryStatus::Pending) {
-        let _ = storage::set_summary_status(pool, document_id, "pending").await;
-    }
-    if store
-        .queue
-        .iter()
-        .any(|j| j.task_type == domain::TYPE_SUMMARY)
-    {
-        match runtime::enqueue_summary(document_id, attempt).await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                enrichment::generate_summary(&mut store, document_id);
-                let _ = storage::persist_summary_chunks(pool, &store, document_id).await;
-                if let Some(d) = store.documents.get(&document_id) {
-                    let st = match d.summary_status {
-                        domain::SummaryStatus::Completed => "completed",
-                        domain::SummaryStatus::Failed => "failed",
-                        domain::SummaryStatus::Pending => "pending",
-                        domain::SummaryStatus::Processing => "processing",
-                        domain::SummaryStatus::None => "none",
-                    };
-                    let _ =
-                        storage::set_document_description(pool, document_id, &d.description).await;
-                    let _ = storage::set_summary_status(pool, document_id, st).await;
-                }
-                let _ = storage::finalize_subtask(pool, document_id).await;
-            }
-            Err(_) => {
-                let _ = storage::finalize_subtask(pool, document_id).await;
-            }
-        }
-    }
-    let question_jobs: Vec<domain::Job> = store
-        .queue
-        .iter()
-        .filter(|j| j.task_type == domain::TYPE_QUESTION)
-        .cloned()
-        .collect();
-    for (batch, j) in question_jobs.into_iter().enumerate() {
-        let ids: Vec<Uuid> = j
-            .payload
-            .get("chunk_ids")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().and_then(|s| Uuid::parse_str(s).ok()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let parse_opt = |key: &str| {
-            j.payload
-                .get(key)
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .map(|x| x.as_str().and_then(|s| Uuid::parse_str(s).ok()))
-                        .collect::<Vec<Option<Uuid>>>()
-                })
-                .unwrap_or_default()
-        };
-        let prev_ids = parse_opt("prev_ids");
-        let next_ids = parse_opt("next_ids");
-        match runtime::enqueue_question_neighbors(
-            document_id,
-            ids.clone(),
-            prev_ids.clone(),
-            next_ids.clone(),
-            attempt,
-            batch as u32,
-        )
-        .await
-        {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                if run_inline_if_allowed(domain::TYPE_QUESTION, || {
-                    enrichment::generate_questions_with(
-                        &mut store,
-                        &ids,
-                        &prev_ids,
-                        &next_ids,
-                        document_id,
-                        attempt,
-                    )
-                })
-                .is_some()
-                {
-                    let _ =
-                        storage::persist_question_updates(pool, &store, document_id, &ids).await;
-                }
-                let _ = storage::finalize_subtask(pool, document_id).await;
-            }
-            Err(_) => {
-                let _ = storage::finalize_subtask(pool, document_id).await;
-            }
-        }
-    }
-    let extracts: Vec<(Uuid, Uuid)> = store
-        .queue
-        .iter()
-        .filter(|j| j.task_type == domain::TYPE_CHUNK_EXTRACT)
-        .filter_map(|j| {
-            let cid = j
-                .payload
-                .get("chunk_id")
-                .and_then(|v| v.as_str())
-                .and_then(|s| Uuid::parse_str(s).ok())?;
-            let did = j
-                .payload
-                .get("document_id")
-                .and_then(|v| v.as_str())
-                .and_then(|s| Uuid::parse_str(s).ok())?;
-            Some((cid, did))
-        })
-        .collect();
-    for (cid, did) in &extracts {
-        match runtime::enqueue_extract(*cid, *did, attempt).await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                if let Some(outcome) = run_inline_if_allowed(domain::TYPE_CHUNK_EXTRACT, || {
-                    graph::extract_chunk(&mut store, *cid, *did)
-                }) {
-                    outcome?;
-                    let _ = storage::persist_graph_for_document(pool, &store, document_id).await;
-                    let _ = graph::sync_document(&store, document_id);
-                }
-                let _ = storage::finalize_subtask(pool, document_id).await;
-            }
-            Err(_) => {
-                let _ = storage::finalize_subtask(pool, document_id).await;
-            }
-        }
-    }
-    if wiki_trigger {
-        match runtime::enqueue_wiki_ingest(product_version_id).await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                let _ = process_wiki_ingest(pool, product_version_id).await;
-            }
-            Err(_) => {
-                let _ = storage::finalize_subtask(pool, document_id).await;
-            }
-        }
-    }
-    finish_postprocess_spans(pool, document_id, attempt).await;
-    tracing::info!(
-        document_id = %document_id,
-        clone_keep,
-        "parse postprocess done"
-    );
-    schedule_semantic_index_v2_if_ready(pool, product_version_id).await
-}
-
-async fn finish_postprocess_spans(pool: &PgPool, document_id: Uuid, attempt: i32) {
-    let _ = storage::finish_span(
-        pool,
-        document_id,
-        attempt,
-        obs::SPAN_POSTPROCESS,
-        obs::STATUS_DONE,
-        None,
-    )
-    .await;
-    let _ = storage::finish_span(
-        pool,
-        document_id,
-        attempt,
-        obs::ROOT_NAME,
-        obs::STATUS_DONE,
-        None,
-    )
-    .await;
+    knowledge::pipeline::run_post_process(pool, document_id, product_version_id, clone_keep).await
 }
 
 pub struct HousekeepWorker {
@@ -1869,7 +1707,7 @@ impl oxana::Worker<HousekeepJob> for HousekeepWorker {
     type Error = JobErr;
 
     fn cron_schedule() -> Option<String> {
-        Some(runtime::HOUSEKEEP_CRON.into())
+        Some(platform::HOUSEKEEP_CRON.into())
     }
 
     fn cron_queue_config() -> Option<oxana::QueueConfig> {
@@ -1881,13 +1719,13 @@ impl oxana::Worker<HousekeepJob> for HousekeepWorker {
         _job: HousekeepJob,
         _ctx: &oxana::JobContext,
     ) -> Result<(), Self::Error> {
-        if !runtime::housekeep_enabled() {
+        if !platform::housekeep_enabled() {
             return Ok(());
         }
         let Some(pool) = &self.pool else {
             return Err(JobErr("postgres not configured".into()));
         };
-        storage::housekeep_documents(pool, runtime::HOUSEKEEP_STALE_SECS)
+        knowledge::housekeep_documents(pool, platform::HOUSEKEEP_STALE_SECS)
             .await
             .map_err(|e| JobErr(e.to_string()))?;
         Ok(())
@@ -1907,7 +1745,7 @@ impl oxana::FromContext<AppCtx> for BidDeliveryHandler {
 }
 
 #[async_trait]
-impl runtime::BidDeliveryV1Handler for BidDeliveryHandler {
+impl platform::BidDeliveryV1Handler for BidDeliveryHandler {
     type Error = JobErr;
 
     async fn handle(&self, delivery: BidDeliveryV1Job) -> Result<(), Self::Error> {
@@ -1916,7 +1754,7 @@ impl runtime::BidDeliveryV1Handler for BidDeliveryHandler {
         };
         match delivery.target_kind {
             BidDeliveryTargetKind::DocumentConversion => {
-                let successor = bid::tender::convert_and_schedule_document(
+                let successor = bidding::tender::convert_and_schedule_document(
                     pool,
                     delivery.target_id,
                     delivery.target_revision,
@@ -1934,7 +1772,7 @@ impl runtime::BidDeliveryV1Handler for BidDeliveryHandler {
                 }
                 Ok(())
             }
-            BidDeliveryTargetKind::ExtractionTarget => bid::tender::run_extraction_target(
+            BidDeliveryTargetKind::ExtractionTarget => bidding::tender::run_extraction_target(
                 pool,
                 delivery.target_id,
                 delivery.target_revision,
@@ -1946,7 +1784,7 @@ impl runtime::BidDeliveryV1Handler for BidDeliveryHandler {
                     .await
                     .map_err(JobErr)
             }
-            BidDeliveryTargetKind::MatchingJob => bid::matching::run_match_route_v1(
+            BidDeliveryTargetKind::MatchingJob => bidding::matching::run_match_route_v1(
                 pool,
                 delivery.target_id,
                 delivery.target_revision,
@@ -1973,7 +1811,7 @@ async fn process_attachment_preparation(
 ) -> Result<(), JobErr> {
     let attachment_revision = i32::try_from(target_revision)
         .map_err(|_| JobErr("attachment preparation target revision is invalid".into()))?;
-    let Some(target) = storage::bid_submission::load_attachment_preparation(
+    let Some(target) = bidding::bid_submission::load_attachment_preparation(
         pool,
         preparation_job_id,
         attachment_revision,
@@ -1989,7 +1827,7 @@ async fn process_attachment_preparation(
         Err(detail) => {
             let error_code = attachment_preparation_error_code(&detail);
             let retryable = attachment_preparation_error_retryable(error_code);
-            let status = storage::bid_submission::fail_attachment_preparation(
+            let status = bidding::bid_submission::fail_attachment_preparation(
                 pool,
                 target.preparation_job_id,
                 attachment_revision,
@@ -2021,19 +1859,19 @@ async fn process_attachment_preparation(
 
 async fn prepare_attachment_pdf_pages(
     pool: &PgPool,
-    target: &storage::bid_submission::AttachmentPreparationTarget,
+    target: &bidding::bid_submission::AttachmentPreparationTarget,
     attachment_revision: i32,
 ) -> Result<serde_json::Value, String> {
     let digest = target.content_sha256.clone();
     let expected_bytes = target.byte_length;
     let expected_ref = target.object_ref.clone();
     let bytes = tokio::task::spawn_blocking(move || {
-        let bytes = storage::read_blob(&digest)
+        let bytes = platform::read_blob(&digest)
             .map_err(|error| format!("ATTACHMENT_SOURCE_BYTES_MISSING: {error}"))?;
-        let metadata = storage::bid_submission::validate_upload_bytes(&bytes, true)
+        let metadata = bidding::bid_submission::validate_upload_bytes(&bytes, true)
             .map_err(|error| format!("ATTACHMENT_SOURCE_INVALID: {error}"))?;
-        if domain::sha256_hex(&bytes) != digest
-            || storage::object_ref(&digest) != expected_ref
+        if platform::sha256_hex(&bytes) != digest
+            || platform::object_ref(&digest) != expected_ref
             || metadata.media_type != "application/pdf"
             || metadata.byte_length != expected_bytes
         {
@@ -2073,7 +1911,7 @@ async fn prepare_attachment_pdf_pages(
     for (page_ordinal, image) in converted.images.into_iter().enumerate() {
         let page_bytes = image.data;
         let (page_bytes, metadata) = tokio::task::spawn_blocking(move || {
-            let metadata = storage::bid_submission::validate_upload_bytes(&page_bytes, false)
+            let metadata = bidding::bid_submission::validate_upload_bytes(&page_bytes, false)
                 .map_err(|error| format!("ATTACHMENT_RENDER_PAGE_INVALID: {error}"))?;
             Ok::<_, String>((page_bytes, metadata))
         })
@@ -2085,14 +1923,14 @@ async fn prepare_attachment_pdf_pages(
         if total_bytes > 256 * 1024 * 1024 {
             return Err("ATTACHMENT_RENDER_PAGE_QUOTA_EXCEEDED".into());
         }
-        let page_digest = domain::sha256_hex(&page_bytes);
-        let page_object_ref = storage::object_ref(&page_digest);
+        let page_digest = platform::sha256_hex(&page_bytes);
+        let page_object_ref = platform::object_ref(&page_digest);
         let staging_id = Uuid::new_v4();
         // Register the identity before the cancellable database await. The
         // server may commit staging even when this future is dropped before it
         // receives the response; the guard must still know what to abandon.
         staging.push(staging_id);
-        storage::stage_object_upload(
+        platform::stage_object_upload(
             pool,
             staging_id,
             &page_object_ref,
@@ -2103,7 +1941,7 @@ async fn prepare_attachment_pdf_pages(
         )
         .await
         .map_err(|error| format!("ATTACHMENT_RENDER_PAGE_STAGE_FAILED: {error}"))?;
-        storage::write_blob_async(&page_digest, &page_bytes)
+        platform::write_blob_async(&page_digest, &page_bytes)
             .await
             .map_err(|error| format!("ATTACHMENT_RENDER_PAGE_WRITE_FAILED: {error}"))?;
         pages.push(serde_json::json!({
@@ -2117,7 +1955,7 @@ async fn prepare_attachment_pdf_pages(
             "pixel_height":metadata.pixel_height,
         }));
     }
-    let published = storage::bid_submission::publish_attachment_preparation(
+    let published = bidding::bid_submission::publish_attachment_preparation(
         pool,
         target.preparation_job_id,
         attachment_revision,
@@ -2177,7 +2015,7 @@ const STAGING_ABANDON_RETRY_DELAY: std::time::Duration = std::time::Duration::fr
 async fn abandon_staging_with_retry(pool: &PgPool, staging_id: Uuid, actor: &str) {
     let mut last_error = None;
     for attempt in 1..=STAGING_ABANDON_ATTEMPTS {
-        match storage::abandon_object_upload(pool, staging_id, actor).await {
+        match platform::abandon_object_upload(pool, staging_id, actor).await {
             Ok(true) => return,
             Ok(false) => last_error = None,
             Err(error) => last_error = Some(error.to_string()),
@@ -2225,8 +2063,9 @@ impl Drop for AttachmentPageStagingGuard {
 async fn enqueue_bid_targets(
     targets: impl IntoIterator<Item = (BidDeliveryTargetKind, Uuid, i64)>,
 ) -> Result<(), String> {
-    let enqueuer =
-        runtime::BidDeliveryEnqueuer::new(runtime::connect().map_err(|error| error.to_string())?);
+    let enqueuer = platform::BidDeliveryEnqueuer::new(
+        platform::oxana_connect().map_err(|error| error.to_string())?,
+    );
     enqueue_bid_targets_with(targets, move |target_kind, target_id, target_revision| {
         let enqueuer = enqueuer.clone();
         async move {
@@ -2244,12 +2083,12 @@ async fn enqueue_bid_targets_with<F, Fut>(
 ) -> Result<(), String>
 where
     F: FnMut(BidDeliveryTargetKind, Uuid, i64) -> Fut,
-    Fut: std::future::Future<Output = runtime::BidDeliveryEnqueueOutcome>,
+    Fut: std::future::Future<Output = platform::BidDeliveryEnqueueOutcome>,
 {
     for (target_kind, target_id, target_revision) in targets {
         match enqueue(target_kind, target_id, target_revision).await {
-            runtime::BidDeliveryEnqueueOutcome::Accepted { .. } => {}
-            runtime::BidDeliveryEnqueueOutcome::Indeterminate { error } => {
+            platform::BidDeliveryEnqueueOutcome::Accepted { .. } => {}
+            platform::BidDeliveryEnqueueOutcome::Indeterminate { error } => {
                 return Err(format!(
                     "{} target {target_id} revision {target_revision} enqueue failed: {error}",
                     target_kind.as_str()
@@ -2265,12 +2104,12 @@ async fn process_matching_schedule(
     schedule_intent_id: Uuid,
     target_revision: i64,
 ) -> Result<(), String> {
-    let Some(receipt) = storage::bid_matching::execute_schedule(
+    let Some(receipt) = bidding::bid_matching::execute_schedule(
         pool,
         schedule_intent_id,
         target_revision,
-        bid::matching_schedule_environment(),
-        &storage::bid_matching::ScheduleMutationContext::system(),
+        bidding::matching_schedule_environment(),
+        &bidding::bid_matching::ScheduleMutationContext::system(),
     )
     .await
     .map_err(|error| error.to_string())?
@@ -2292,7 +2131,7 @@ async fn process_submission_render(
     target_revision: i64,
 ) -> Result<(), JobErr> {
     let Some(target) =
-        storage::bid_submission::load_submission_render(pool, render_job_id, target_revision)
+        bidding::bid_submission::load_submission_render(pool, render_job_id, target_revision)
             .await
             .map_err(|error| JobErr(error.to_string()))?
     else {
@@ -2304,7 +2143,7 @@ async fn process_submission_render(
         Err(detail) => {
             let error_code = submission_render_error_code(&detail);
             let retryable = submission_render_error_retryable(error_code, &detail);
-            let status = storage::bid_submission::fail_submission_render(
+            let status = bidding::bid_submission::fail_submission_render(
                 pool,
                 target.render_job_id,
                 target_revision,
@@ -2408,11 +2247,11 @@ fn submission_render_error_retryable(error_code: &str, detail: &str) -> bool {
 
 async fn render_submission_manifest(
     pool: &PgPool,
-    target: &storage::bid_submission::SubmissionRenderTarget,
+    target: &bidding::bid_submission::SubmissionRenderTarget,
     target_revision: i64,
 ) -> Result<serde_json::Value, String> {
     let input =
-        storage::bid_submission::manifest_render_input(pool, target.project_id, target.manifest_id)
+        bidding::bid_submission::manifest_render_input(pool, target.project_id, target.manifest_id)
             .await
             .map_err(|error| error.to_string())?;
     if input
@@ -2423,11 +2262,11 @@ async fn render_submission_manifest(
         return Err("MANIFEST_SHA256_MISMATCH".into());
     }
     let format = match input.get("format").and_then(serde_json::Value::as_str) {
-        Some("pdf") => bid::submission::GateFormat::Pdf,
-        Some("docx") => bid::submission::GateFormat::Docx,
+        Some("pdf") => bidding::submission::GateFormat::Pdf,
+        Some("docx") => bidding::submission::GateFormat::Docx,
         _ => return Err("invalid manifest format".into()),
     };
-    if input.get("renderer_contract") != Some(&bid::renderer_contract_identity(format)) {
+    if input.get("renderer_contract") != Some(&bidding::renderer_contract_identity(format)) {
         return Err("RENDERER_CONTRACT_MISMATCH".into());
     }
     let parts = input
@@ -2459,7 +2298,7 @@ async fn render_submission_manifest(
             .and_then(serde_json::Value::as_str)
             .and_then(|value| Uuid::parse_str(value).ok())
             .ok_or_else(|| "manifest asset id invalid".to_string())?;
-        let stored = storage::bid_submission::read_manifest_render_asset(
+        let stored = bidding::bid_submission::read_manifest_render_asset(
             pool,
             target.project_id,
             target.manifest_id,
@@ -2472,7 +2311,7 @@ async fn render_submission_manifest(
         let occurrence_ordinal = u32::try_from(stored.occurrence_ordinal)
             .map_err(|_| "manifest occurrence ordinal invalid".to_string())?;
         let locator = match stored.source_kind.as_str() {
-            "bid_shot" => bid::ManifestRenderAssetLocator::BidShot {
+            "bid_shot" => bidding::ManifestRenderAssetLocator::BidShot {
                 placement_ordinal: stored
                     .source_locator
                     .get("placement_ordinal")
@@ -2486,7 +2325,7 @@ async fn render_submission_manifest(
                     .and_then(|value| Uuid::parse_str(value).ok())
                     .ok_or_else(|| "bid shot artifact locator invalid".to_string())?,
             },
-            "markdown_object" => bid::ManifestRenderAssetLocator::MarkdownObject {
+            "markdown_object" => bidding::ManifestRenderAssetLocator::MarkdownObject {
                 part_key: stored
                     .source_locator
                     .get("part_key")
@@ -2496,7 +2335,7 @@ async fn render_submission_manifest(
                 occurrence_ordinal,
             },
             "procedural_attachment" => {
-                bid::ManifestRenderAssetLocator::ProceduralAttachmentOriginal {
+                bidding::ManifestRenderAssetLocator::ProceduralAttachmentOriginal {
                     part_key: stored
                         .source_locator
                         .get("part_key")
@@ -2526,7 +2365,7 @@ async fn render_submission_manifest(
                 }
             }
             "procedural_attachment_page" => {
-                bid::ManifestRenderAssetLocator::ProceduralAttachmentPage {
+                bidding::ManifestRenderAssetLocator::ProceduralAttachmentPage {
                     part_key: stored
                         .source_locator
                         .get("part_key")
@@ -2561,7 +2400,7 @@ async fn render_submission_manifest(
             }
             _ => return Err("manifest asset source kind invalid".into()),
         };
-        assets.push(bid::ManifestRenderAsset {
+        assets.push(bidding::ManifestRenderAsset {
             manifest_ordinal,
             locator,
             object_ref: stored.object_ref,
@@ -2572,12 +2411,12 @@ async fn render_submission_manifest(
             bytes: stored.bytes,
         });
     }
-    let bytes = bid::render_manifest_document(format, "投标文件", &parts, &assets)?;
-    let digest = domain::sha256_hex(&bytes);
-    let object_ref = storage::object_ref(&digest);
+    let bytes = bidding::render_manifest_document(format, "投标文件", &parts, &assets)?;
+    let digest = platform::sha256_hex(&bytes);
+    let object_ref = platform::object_ref(&digest);
     let media_type = match format {
-        bid::submission::GateFormat::Pdf => "application/pdf",
-        bid::submission::GateFormat::Docx => {
+        bidding::submission::GateFormat::Pdf => "application/pdf",
+        bidding::submission::GateFormat::Docx => {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         }
     };
@@ -2593,12 +2432,12 @@ async fn render_submission_manifest(
     )
     .await
     .map_err(|error| error.to_string())?;
-    storage::write_blob_async(&digest, &bytes)
+    platform::write_blob_async(&digest, &bytes)
         .await
         .map_err(|error| error.to_string())?;
-    let published = storage::bid_submission::publish_submission_output(
+    let published = bidding::bid_submission::publish_submission_output(
         pool,
-        storage::bid_submission::PublishSubmissionOutput {
+        bidding::bid_submission::PublishSubmissionOutput {
             staging_id,
             id: Uuid::new_v4(),
             render_job_id: target.render_job_id,
@@ -2633,7 +2472,7 @@ impl SubmissionStagingGuard {
         // Hold the cleanup identity before the cancellable database await. The
         // server can commit staging before this future receives its response.
         let guard = Self::new(pool.clone(), staging_id, actor);
-        storage::stage_object_upload(
+        platform::stage_object_upload(
             &pool,
             staging_id,
             object_ref,
@@ -2713,7 +2552,7 @@ impl oxana::Worker<ImageMultimodalJob> for ImageMultimodalWorker {
         if let Err(e) = &result
             && ctx.meta.retries >= 3
         {
-            let _ = storage::set_parse_status(
+            let _ = knowledge::set_parse_status(
                 pool,
                 job.document_id,
                 "finalizing",
@@ -2727,11 +2566,6 @@ impl oxana::Worker<ImageMultimodalJob> for ImageMultimodalWorker {
     }
 }
 
-#[tracing::instrument(
-    name = "parse.image",
-    skip_all,
-    fields(document_id = %document_id, attempt)
-)]
 pub async fn process_image_pg(
     pool: &PgPool,
     document_id: Uuid,
@@ -2741,131 +2575,24 @@ pub async fn process_image_pg(
     enable_caption: bool,
     attempt: i32,
 ) -> Result<(), String> {
-    let current: Option<i32> = sqlx::query_scalar("SELECT attempt FROM documents WHERE id = $1")
-        .bind(document_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    if current.is_some_and(|n| n != attempt) {
-        return Ok(());
-    }
-    let ws: Option<Uuid> = storage::document_workspace_id(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some(ws) = ws else {
-        return Ok(());
-    };
-    let mut store = domain::Store::default();
-    storage::hydrate_workspace(pool, &mut store, ws)
-        .await
-        .map_err(|e| e.to_string())?;
-    if let Some(d) = store.documents.get_mut(&document_id)
-        && d.parse_status == domain::ParseStatus::Pending
-    {
-        d.parse_status = domain::ParseStatus::Processing;
-    }
-    if let Err(error) = enrichment::process_image_without_decr(
-        &mut store,
+    knowledge::pipeline::run_image(
+        pool,
         document_id,
         image_key,
         image_source_type,
         enable_ocr,
         enable_caption,
-    ) {
-        tracing::warn!(
-            document_id = %document_id,
-            image_key = truncate_key(image_key),
-            error = %error,
-            "parse image fail"
-        );
-        return Err(error);
-    }
-    tracing::info!(
-        document_id = %document_id,
-        image_key = truncate_key(image_key),
-        ocr = enable_ocr,
-        caption = enable_caption,
-        "parse image done"
-    );
-    let image_chunks: Vec<_> = store
-        .chunks
-        .values()
-        .filter(|c| {
-            c.document_id == document_id
-                && c.context_header == image_key
-                && matches!(c.chunk_type.as_str(), "image_ocr" | "image_caption")
-        })
-        .cloned()
-        .collect();
-    let ids: std::collections::HashSet<_> = image_chunks.iter().map(|c| c.id).collect();
-    let embeddings: Vec<_> = store
-        .embeddings
-        .values()
-        .filter(|e| ids.contains(&e.chunk_id))
-        .cloned()
-        .collect();
-    storage::delete_image_chunks(pool, document_id, image_key)
-        .await
-        .map_err(|e| e.to_string())?;
-    storage::insert_document_chunks(pool, &image_chunks, &embeddings)
-        .await
-        .map_err(|e| e.to_string())?;
-    if enrichment::decr_pending(&mut store, document_id) {
-        let _ = storage::set_index_ready(pool, document_id, true).await;
-        let vid = store
-            .documents
-            .get(&document_id)
-            .map(|d| d.product_version_id)
-            .unwrap_or_default();
-        let tracked = storage::list_spans_attempt(pool, document_id, attempt)
-            .await
-            .unwrap_or_default()
-            .iter()
-            .any(|r| r.name == obs::SPAN_MULTIMODAL);
-        if tracked {
-            let _ = storage::finish_span(
-                pool,
-                document_id,
-                attempt,
-                obs::SPAN_MULTIMODAL,
-                obs::STATUS_DONE,
-                None,
-            )
-            .await;
-            maybe_start_postprocess(pool, document_id, vid, attempt).await;
-        } else {
-            let _ = runtime::enqueue_post_process(document_id, vid, false).await;
-        }
-    }
-    Ok(())
+        attempt,
+    )
+    .await
 }
 
-/// Last-retry DECR so a dead image cannot pin `multimodal:pending`.
 async fn finalize_multimodal_pg(pool: &PgPool, document_id: Uuid, attempt: i32) {
-    let current: Option<i32> = sqlx::query_scalar("SELECT attempt FROM documents WHERE id = $1")
-        .bind(document_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
-    if current.is_some_and(|n| n != attempt) {
-        return;
-    }
-    let mut tmp = domain::Store::default();
-    if !enrichment::decr_pending(&mut tmp, document_id) {
-        return;
-    }
-    let vid: Option<Uuid> =
-        sqlx::query_scalar("SELECT product_version_id FROM documents WHERE id = $1")
-            .bind(document_id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
-    let Some(vid) = vid else {
-        return;
-    };
-    maybe_start_postprocess(pool, document_id, vid, attempt).await;
+    knowledge::pipeline::finalize_multimodal(pool, document_id, attempt).await
+}
+
+pub async fn process_wiki_finalize(pool: &PgPool, version_id: Uuid) -> Result<(), String> {
+    knowledge::pipeline::run_wiki_finalize(pool, version_id).await
 }
 
 pub struct WikiIngestWorker {
@@ -2889,7 +2616,7 @@ impl oxana::Worker<WikiIngestJob> for WikiIngestWorker {
     }
 
     fn retry_delay(&self, _job: &WikiIngestJob, _retries: u32) -> u64 {
-        runtime::WIKI_LOCK_RETRY_SECS
+        platform::WIKI_LOCK_RETRY_SECS
     }
 
     async fn process(
@@ -2940,326 +2667,8 @@ impl oxana::Worker<WikiFinalizeJob> for WikiFinalizeWorker {
     }
 }
 
-/// Brain ProcessWikiIngest on PG `task_pending_ops` ingest lane only.
 pub async fn process_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), String> {
-    if !storage::version_wiki_enabled(pool, version_id)
-        .await
-        .map_err(|e| e.to_string())?
-    {
-        tracing::info!(%version_id, "wiki ingest skipped: not enabled");
-        let _ = storage::drop_pending_ops(pool, domain::TYPE_WIKI_INGEST, version_id).await;
-        return schedule_semantic_index_v2_if_ready(pool, version_id).await;
-    }
-    let claimed = storage::claim_pending_batch(
-        pool,
-        domain::TYPE_WIKI_INGEST,
-        version_id,
-        wiki::BATCH_DOCS as i64,
-        wiki::STALE_CLAIM_MIN as i64,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    if claimed.is_empty() {
-        return schedule_semantic_index_v2_if_ready(pool, version_id).await;
-    }
-    let mut store = domain::Store::default();
-    if let Ok(Some(ws)) = storage::document_workspace_id(
-        pool,
-        claimed
-            .iter()
-            .find_map(|o| o.dedup_key.as_deref().and_then(|s| Uuid::parse_str(s).ok()))
-            .unwrap_or(version_id),
-    )
-    .await
-    {
-        let _ = storage::hydrate_workspace(pool, &mut store, ws).await;
-    }
-    store.versions.entry(version_id).or_insert_with(|| {
-        let mut v = domain::ProductVersion::new(Uuid::nil(), "v".into());
-        v.id = version_id;
-        v.wiki_enabled = true;
-        v
-    });
-    let mut done = Vec::new();
-    let mut slugs = Vec::new();
-    let mut ingest_ops = Vec::new();
-    for op in &claimed {
-        if op.op == wiki::OP_RETRACT {
-            if let Some(did) = op
-                .dedup_key
-                .as_deref()
-                .and_then(|s| Uuid::parse_str(s).ok())
-            {
-                wiki::enqueue_retract(&mut store, version_id, did, "");
-                let _ = storage::delete_wiki_for_document(pool, version_id, did).await;
-            }
-            done.push(op.id);
-            continue;
-        }
-        let Some(did) = op
-            .dedup_key
-            .as_deref()
-            .and_then(|s| Uuid::parse_str(s).ok())
-        else {
-            done.push(op.id);
-            continue;
-        };
-        store.documents.entry(did).or_insert_with(|| {
-            let mut doc = domain::Document::new(
-                version_id,
-                did.to_string(),
-                "doc.txt".into(),
-                0,
-                String::new(),
-                String::new(),
-            );
-            doc.id = did;
-            doc
-        });
-        wiki::enqueue_ingest(&mut store, version_id, did);
-        wiki::set_ingest_fail_count(&mut store, version_id, did, op.fail_count);
-        ingest_ops.push((op.id, did));
-    }
-    if !ingest_ops.is_empty() {
-        if let Err(e) = wiki::process_ingest(&mut store, version_id) {
-            for (_, did) in &ingest_ops {
-                let _ = storage::upsert_span(
-                    pool,
-                    *did,
-                    1,
-                    "wiki.ingest",
-                    "failed",
-                    Some(serde_json::json!({"error": e})),
-                )
-                .await;
-            }
-            for (op_id, did) in &ingest_ops {
-                if let Some(n) = wiki::retryable_ingest_fail_count(&store, version_id, *did) {
-                    storage::retry_pending_op(pool, *op_id, n)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                } else {
-                    storage::finalize_subtask(pool, *did)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    done.push(*op_id);
-                }
-            }
-        } else {
-            persist_wiki_store(pool, &store, version_id, None).await?;
-            for (op_id, did) in &ingest_ops {
-                if let Some(n) = wiki::retryable_ingest_fail_count(&store, version_id, *did) {
-                    storage::retry_pending_op(pool, *op_id, n)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    continue;
-                }
-                storage::finalize_subtask(pool, *did)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let _ = storage::upsert_span(
-                    pool,
-                    *did,
-                    1,
-                    "wiki.ingest",
-                    "done",
-                    Some(serde_json::json!({"version_id": version_id})),
-                )
-                .await;
-                slugs.push(*did);
-                done.push(*op_id);
-            }
-        }
-    }
-    storage::delete_pending_ids(pool, &done)
-        .await
-        .map_err(|e| e.to_string())?;
-    for did in slugs {
-        storage::enqueue_pending_op(
-            pool,
-            domain::TYPE_WIKI_FINALIZE,
-            version_id,
-            wiki::OP_SLUG,
-            Some(&did.to_string()),
-            serde_json::json!({"document_id": did}),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        let _ = storage::enqueue_pending_op(
-            pool,
-            domain::TYPE_WIKI_FINALIZE,
-            version_id,
-            wiki::OP_CHANGE,
-            None,
-            serde_json::json!({"document_id": did}),
-        )
-        .await;
-        let _ = storage::enqueue_pending_op(
-            pool,
-            domain::TYPE_WIKI_FINALIZE,
-            version_id,
-            wiki::OP_FOLDER_PRUNE,
-            None,
-            serde_json::json!({}),
-        )
-        .await;
-    }
-    if storage::count_pending(pool, domain::TYPE_WIKI_FINALIZE, version_id)
-        .await
-        .map_err(|e| e.to_string())?
-        > 0
-    {
-        let _ = runtime::enqueue_wiki_finalize(version_id).await;
-    }
-    if storage::count_pending(pool, domain::TYPE_WIKI_INGEST, version_id)
-        .await
-        .map_err(|e| e.to_string())?
-        > 0
-    {
-        let delay = if done.len() < claimed.len() {
-            wiki::LOCK_RETRY_SECS
-        } else {
-            wiki::FOLLOW_UP_DEBOUNCE_SECS
-        };
-        let _ = runtime::enqueue_wiki_ingest_in(version_id, delay).await;
-    }
-    schedule_semantic_index_v2_if_ready(pool, version_id).await
-}
-
-/// Brain ProcessWikiFinalize — finalize lane only, never ingest.
-pub async fn process_wiki_finalize(pool: &PgPool, version_id: Uuid) -> Result<(), String> {
-    let claimed = storage::claim_pending_batch(
-        pool,
-        domain::TYPE_WIKI_FINALIZE,
-        version_id,
-        5000,
-        wiki::STALE_CLAIM_MIN as i64,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    if claimed.is_empty() {
-        return schedule_semantic_index_v2_if_ready(pool, version_id).await;
-    }
-    let mut store = domain::Store::default();
-    if let Ok(Some(ws)) = storage::version_workspace_id(pool, version_id).await {
-        let _ = storage::hydrate_workspace(pool, &mut store, ws).await;
-    }
-    store.versions.entry(version_id).or_insert_with(|| {
-        let mut v = domain::ProductVersion::new(Uuid::nil(), "v".into());
-        v.id = version_id;
-        v.wiki_enabled = true;
-        v
-    });
-    for op in &claimed {
-        let slug = op.dedup_key.clone().unwrap_or_default();
-        let title = op
-            .payload
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        wiki::enqueue_finalize_op(&mut store, version_id, &op.op, &slug, &title);
-    }
-    wiki::process_finalize(&mut store, version_id)?;
-    persist_wiki_store(pool, &store, version_id, None).await?;
-    let deferred: Vec<Uuid> = claimed
-        .iter()
-        .filter(|op| {
-            store.wiki_ops.iter().any(|o| {
-                o.lane == domain::TYPE_WIKI_FINALIZE
-                    && o.version_id == version_id
-                    && o.op == op.op
-                    && (op.dedup_key.as_deref().unwrap_or("").is_empty()
-                        || o.slug == op.dedup_key.as_deref().unwrap_or_default())
-            })
-        })
-        .map(|op| op.id)
-        .collect();
-    let done: Vec<Uuid> = claimed
-        .iter()
-        .map(|op| op.id)
-        .filter(|id| !deferred.contains(id))
-        .collect();
-    storage::delete_pending_ids(pool, &done)
-        .await
-        .map_err(|e| e.to_string())?;
-    storage::unclaim_pending_ids(pool, &deferred)
-        .await
-        .map_err(|e| e.to_string())?;
-    if !deferred.is_empty() {
-        let _ = runtime::enqueue_wiki_finalize_in(version_id, wiki::LOCK_RETRY_SECS).await;
-    }
-    schedule_semantic_index_v2_if_ready(pool, version_id).await
-}
-
-async fn persist_wiki_store(
-    pool: &PgPool,
-    store: &domain::Store,
-    version_id: Uuid,
-    document_id: Option<Uuid>,
-) -> Result<(), String> {
-    for page in store
-        .wiki
-        .values()
-        .filter(|p| p.product_version_id == version_id)
-    {
-        let _ = storage::upsert_wiki_page(pool, page, document_id).await;
-    }
-    for folder in store
-        .wiki_folders
-        .values()
-        .filter(|f| f.product_version_id == version_id)
-    {
-        let _ = storage::upsert_wiki_folder(pool, folder).await;
-    }
-    let owner = match document_id {
-        Some(id) => Some(id),
-        None => store
-            .documents
-            .values()
-            .find(|d| d.product_version_id == version_id)
-            .map(|d| d.id),
-    };
-    let mut wiki_chunks: Vec<_> = store
-        .chunks
-        .values()
-        .filter(|c| {
-            c.product_version_id == version_id
-                && c.chunk_type == "wiki_page"
-                && document_id.is_none_or(|did| c.document_id == did || c.document_id.is_nil())
-        })
-        .cloned()
-        .collect();
-    if let Some(oid) = owner {
-        for c in &mut wiki_chunks {
-            if c.document_id.is_nil() {
-                c.document_id = oid;
-            }
-        }
-    }
-    wiki_chunks.retain(|c| !c.document_id.is_nil());
-    if wiki_chunks.is_empty() {
-        return Ok(());
-    }
-    let slugs: Vec<String> = wiki_chunks
-        .iter()
-        .map(|c| c.context_header.clone())
-        .collect();
-    let owner_ids: std::collections::HashSet<_> =
-        wiki_chunks.iter().map(|c| c.document_id).collect();
-    let wiki_emb: Vec<_> = wiki_chunks
-        .iter()
-        .filter_map(|c| {
-            let mut e = store.embeddings.get(&c.id).cloned()?;
-            if e.document_id.is_nil() && owner_ids.contains(&c.document_id) {
-                e.document_id = c.document_id;
-            }
-            Some(e)
-        })
-        .collect();
-    storage::replace_wiki_page_chunks(pool, version_id, &slugs, &wiki_chunks, &wiki_emb)
-        .await
-        .map_err(|e| e.to_string())
+    knowledge::pipeline::run_wiki_ingest(pool, version_id).await
 }
 
 async fn schedule_semantic_index_for_document_v2(
@@ -3285,46 +2694,7 @@ pub async fn process_summary_pg(
     attempt: i32,
     fallback: bool,
 ) -> Result<(), String> {
-    if storage::document_parse_status(pool, document_id)
-        .await
-        .map_err(|error| error.to_string())?
-        .as_deref()
-        == Some("completed")
-    {
-        return schedule_semantic_index_for_document_v2(pool, document_id).await;
-    }
-    let ws = storage::document_workspace_id(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some(ws) = ws else {
-        return Ok(());
-    };
-    let mut store = domain::Store::default();
-    storage::hydrate_workspace(pool, &mut store, ws)
-        .await
-        .map_err(|e| e.to_string())?;
-    let outcome = enrichment::generate_summary_with(&mut store, document_id, attempt, fallback)?;
-    if matches!(outcome, enrichment::SummaryOutcome::Superseded) {
-        return Ok(());
-    }
-    storage::persist_summary_chunks(pool, &store, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    if let Some(d) = store.documents.get(&document_id) {
-        let _ = storage::set_document_description(pool, document_id, &d.description).await;
-        let st = match d.summary_status {
-            domain::SummaryStatus::Completed => "completed",
-            domain::SummaryStatus::Failed => "failed",
-            domain::SummaryStatus::Pending => "pending",
-            domain::SummaryStatus::Processing => "processing",
-            domain::SummaryStatus::None => "none",
-        };
-        let _ = storage::set_summary_status(pool, document_id, st).await;
-    }
-    storage::finalize_subtask(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    schedule_semantic_index_for_document_v2(pool, document_id).await
+    knowledge::pipeline::run_summary(pool, document_id, attempt, fallback).await
 }
 
 pub async fn process_questions_pg(
@@ -3335,42 +2705,8 @@ pub async fn process_questions_pg(
     next_ids: &[Option<Uuid>],
     attempt: i32,
 ) -> Result<(), String> {
-    if storage::document_parse_status(pool, document_id)
+    knowledge::pipeline::run_questions(pool, document_id, chunk_ids, prev_ids, next_ids, attempt)
         .await
-        .map_err(|error| error.to_string())?
-        .as_deref()
-        == Some("completed")
-    {
-        return schedule_semantic_index_for_document_v2(pool, document_id).await;
-    }
-    let ws = storage::document_workspace_id(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some(ws) = ws else {
-        return Ok(());
-    };
-    let mut store = domain::Store::default();
-    storage::hydrate_workspace(pool, &mut store, ws)
-        .await
-        .map_err(|e| e.to_string())?;
-    let outcome = enrichment::generate_questions_with(
-        &mut store,
-        chunk_ids,
-        prev_ids,
-        next_ids,
-        document_id,
-        attempt,
-    )?;
-    if matches!(outcome, enrichment::QuestionOutcome::Superseded) {
-        return Ok(());
-    }
-    storage::persist_question_updates(pool, &store, document_id, chunk_ids)
-        .await
-        .map_err(|e| e.to_string())?;
-    storage::finalize_subtask(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    schedule_semantic_index_for_document_v2(pool, document_id).await
 }
 
 pub async fn process_extract_pg(
@@ -3379,78 +2715,15 @@ pub async fn process_extract_pg(
     document_id: Uuid,
     attempt: i32,
 ) -> Result<(), String> {
-    if storage::document_parse_status(pool, document_id)
-        .await
-        .map_err(|error| error.to_string())?
-        .as_deref()
-        == Some("completed")
-    {
-        return schedule_semantic_index_for_document_v2(pool, document_id).await;
-    }
-    let ws = storage::document_workspace_id(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some(ws) = ws else {
-        return Ok(());
-    };
-    let mut store = domain::Store::default();
-    storage::hydrate_workspace(pool, &mut store, ws)
-        .await
-        .map_err(|e| e.to_string())?;
-    let outcome = graph::extract_chunk_for_attempt(&mut store, chunk_id, document_id, attempt)?;
-    if matches!(outcome, graph::ExtractOutcome::Superseded) {
-        return Ok(());
-    }
-    storage::persist_graph_for_document(pool, &store, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let _ = graph::sync_document(&store, document_id);
-    storage::finalize_subtask(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    schedule_semantic_index_for_document_v2(pool, document_id).await
+    knowledge::pipeline::run_extract(pool, chunk_id, document_id, attempt).await
 }
 
 pub async fn process_list_delete_pg(pool: &PgPool, document_id: Uuid) -> Result<(), String> {
-    let status = storage::document_parse_status(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    if status.as_deref() != Some("deleting") {
-        return Ok(());
-    }
-    let ws = storage::document_workspace_id(pool, document_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let vid: Option<Uuid> =
-        sqlx::query_scalar("SELECT product_version_id FROM documents WHERE id = $1")
-            .bind(document_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-    if let Some(vid) = vid {
-        let _ = storage::delete_wiki_for_document(pool, vid, document_id).await;
-        let _ = graph::delete_document(vid, document_id);
-    }
-    let _ = storage::purge_document_index(pool, document_id).await;
-    let _ = runtime::enqueue_index_delete(document_id).await;
-    storage::release_knowledge_document_object(
-        pool,
-        document_id,
-        "system:knowledge-document-delete",
-        &format!("knowledge-document-delete:{document_id}"),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    if let Some(ws) = ws {
-        let mut store = domain::Store::default();
-        let _ = storage::hydrate_workspace(pool, &mut store, ws).await;
-        crate::delete_document(&mut store, document_id);
-    }
-    Ok(())
+    knowledge::pipeline::run_list_delete(pool, document_id).await
 }
 
 pub async fn process_kb_delete_pg(pool: &PgPool, product_version_id: Uuid) -> Result<(), String> {
-    let _ = storage::cancel_active_docs_for_versions(pool, &[product_version_id]).await;
+    let _ = knowledge::cancel_active_docs_for_versions(pool, &[product_version_id]).await;
     sqlx::query(
         "UPDATE documents SET parse_status = 'deleting', updated_at = now()
          WHERE product_version_id = $1 AND deleted_at IS NULL",
@@ -3489,7 +2762,7 @@ pub async fn process_kb_delete_pg(pool: &PgPool, product_version_id: Uuid) -> Re
             .await
             .map_err(|e| e.to_string())?;
     if let Some(pid) = pid {
-        let _ = storage::delete_empty_product(pool, pid).await;
+        let _ = knowledge::delete_empty_product(pool, pid).await;
     }
     Ok(())
 }
@@ -3501,23 +2774,23 @@ pub async fn process_reparse_pg(pool: &PgPool, document_id: Uuid) -> Result<(), 
             .fetch_optional(pool)
             .await
             .map_err(|e| e.to_string())?;
-    storage::purge_document_index(pool, document_id)
+    knowledge::purge_document_index(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = runtime::enqueue_index_delete(document_id).await;
+    let _ = platform::enqueue_index_delete(document_id).await;
     if let Some(vid) = vid {
-        let _ = storage::delete_wiki_for_document(pool, vid, document_id).await;
-        let _ = graph::delete_document(vid, document_id);
+        let _ = knowledge::delete_wiki_for_document(pool, vid, document_id).await;
+        let _ = knowledge::graph::delete_document(vid, document_id);
         sqlx::query("DELETE FROM task_pending_ops WHERE dedup_key = $1")
             .bind(document_id.to_string())
             .execute(pool)
             .await
             .map_err(|e| e.to_string())?;
     }
-    let attempt = storage::bump_document_attempt(pool, document_id)
+    let attempt = knowledge::bump_document_attempt(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = storage::open_attempt(pool, document_id, attempt).await;
+    let _ = knowledge::open_attempt(pool, document_id, attempt).await;
     let vid = vid.unwrap_or_default();
     let source: Option<(String, Option<serde_json::Value>)> = sqlx::query_as(
         "SELECT COALESCE(type, 'file'), source_passages FROM documents WHERE id = $1",
@@ -3530,13 +2803,13 @@ pub async fn process_reparse_pg(pool: &PgPool, document_id: Uuid) -> Result<(), 
         Some((kind, Some(raw))) if kind == "passage" => {
             let passages: Vec<String> = serde_json::from_value(raw.clone()).unwrap_or_default();
             let _ =
-                runtime::enqueue_document_process_with(document_id, vid, attempt, passages).await;
+                platform::enqueue_document_process_with(document_id, vid, attempt, passages).await;
         }
         Some((kind, _)) if kind == "manual" => {
-            let _ = runtime::enqueue_manual_process(document_id, vid, attempt).await;
+            let _ = platform::enqueue_manual_process(document_id, vid, attempt).await;
         }
         _ => {
-            let _ = runtime::enqueue_document_process(document_id, vid, attempt).await;
+            let _ = platform::enqueue_document_process(document_id, vid, attempt).await;
         }
     }
     let file_name: Option<String> =
@@ -3555,7 +2828,7 @@ pub async fn process_reparse_pg(pool: &PgPool, document_id: Uuid) -> Result<(), 
             "csv" | "xlsx" | "xls"
         )
     }) {
-        let _ = runtime::enqueue_datatable(document_id).await;
+        let _ = platform::enqueue_datatable(document_id).await;
     }
     Ok(())
 }
@@ -3656,7 +2929,7 @@ impl oxana::Worker<QuestionJob> for QuestionWorker {
         )
         .await;
         if result.is_err() && ctx.meta.retries >= 3 {
-            let _ = storage::finalize_subtask(pool, job.document_id).await;
+            let _ = knowledge::finalize_subtask(pool, job.document_id).await;
             let _ = schedule_semantic_index_for_document_v2(pool, job.document_id).await;
         }
         result.map_err(JobErr)
@@ -3689,7 +2962,7 @@ impl oxana::Worker<ExtractJob> for ExtractWorker {
         };
         let result = process_extract_pg(pool, job.chunk_id, job.document_id, job.attempt).await;
         if result.is_err() && ctx.meta.retries >= 3 {
-            let _ = storage::finalize_subtask(pool, job.document_id).await;
+            let _ = knowledge::finalize_subtask(pool, job.document_id).await;
             let _ = schedule_semantic_index_for_document_v2(pool, job.document_id).await;
         }
         result.map_err(JobErr)
@@ -3700,47 +2973,7 @@ simple_worker!(
     DatatableWorker,
     DatatableJob,
     |pool: PgPool, job: DatatableJob| async move {
-        let ws = storage::document_workspace_id(&pool, job.document_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let Some(ws) = ws else {
-            return Ok(());
-        };
-        let mut store = domain::Store::default();
-        storage::hydrate_workspace(&pool, &mut store, ws)
-            .await
-            .map_err(|e| e.to_string())?;
-        crate::handle(
-            &mut store,
-            &domain::Job {
-                id: Uuid::new_v4(),
-                task_type: domain::TYPE_DATATABLE.into(),
-                queue: domain::QUEUE_SUMMARY.into(),
-                payload: serde_json::json!({"document_id": job.document_id}),
-                retries: 0,
-                max_retry: 3,
-            },
-        )?;
-        let table: Vec<_> = store
-            .chunks
-            .values()
-            .filter(|c| {
-                c.document_id == job.document_id
-                    && matches!(c.chunk_type.as_str(), "table_summary" | "table_column")
-            })
-            .cloned()
-            .collect();
-        let embeds: Vec<_> = table
-            .iter()
-            .filter_map(|c| store.embeddings.get(&c.id).cloned())
-            .collect();
-        storage::delete_chunks_by_types(&pool, job.document_id, &["table_summary", "table_column"])
-            .await
-            .map_err(|e| e.to_string())?;
-        storage::append_document_chunks(&pool, &table, &embeds)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
+        knowledge::pipeline::run_datatable(&pool, job.document_id).await
     }
 );
 simple_worker!(
@@ -3766,7 +2999,7 @@ simple_worker!(
     IndexDeleteWorker,
     IndexDeleteJob,
     |pool: PgPool, job: IndexDeleteJob| async move {
-        storage::purge_document_index(&pool, job.document_id)
+        knowledge::purge_document_index(&pool, job.document_id)
             .await
             .map_err(|e| e.to_string())
     }
@@ -3793,12 +3026,12 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
     };
     let timeout = std::time::Duration::from_secs(2);
     let core = {
-        let storage = runtime::connect().map_err(|e| e.to_string())?;
+        let storage = platform::oxana_connect().map_err(|e| e.to_string())?;
         storage
             .runtime(ctx.clone())
-            .queue_with_concurrency::<DefaultQueue>(runtime::runtime_concurrency("CORE", 8))
+            .queue_with_concurrency::<DefaultQueue>(platform::runtime_concurrency("CORE", 8))
             .worker::<DocumentProcessWorker, DocumentProcessJob>()
-            .queue_with_concurrency::<BidDeliveryV1Queue>(runtime::runtime_concurrency(
+            .queue_with_concurrency::<BidDeliveryV1Queue>(platform::runtime_concurrency(
                 "BID_DELIVERY",
                 4,
             ))
@@ -3808,10 +3041,10 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .run()
     };
     let post = {
-        let storage = runtime::connect().map_err(|e| e.to_string())?;
+        let storage = platform::oxana_connect().map_err(|e| e.to_string())?;
         storage
             .runtime(ctx.clone())
-            .queue_with_concurrency::<PostprocessQueue>(runtime::runtime_concurrency(
+            .queue_with_concurrency::<PostprocessQueue>(platform::runtime_concurrency(
                 "POSTPROCESS",
                 2,
             ))
@@ -3821,9 +3054,9 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .shutdown_timeout(timeout)
             .run()
     };
-    let enrich_n = runtime::runtime_concurrency("ENRICHMENT", 12);
+    let enrich_n = platform::runtime_concurrency("ENRICHMENT", 12);
     let enrich = {
-        let storage = runtime::connect().map_err(|e| e.to_string())?;
+        let storage = platform::oxana_connect().map_err(|e| e.to_string())?;
         storage
             .runtime(ctx.clone())
             .queue_with_concurrency::<SummaryQueue>(enrich_n)
@@ -3833,9 +3066,9 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .shutdown_timeout(timeout)
             .run()
     };
-    let maint_n = runtime::runtime_concurrency("MAINTENANCE", 4);
+    let maint_n = platform::runtime_concurrency("MAINTENANCE", 4);
     let maint = {
-        let storage = runtime::connect().map_err(|e| e.to_string())?;
+        let storage = platform::oxana_connect().map_err(|e| e.to_string())?;
         storage
             .runtime(ctx.clone())
             .queue_with_concurrency::<LowQueue>(maint_n)
@@ -3848,9 +3081,9 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .shutdown_timeout(timeout)
             .run()
     };
-    let shared_n = runtime::runtime_concurrency("SHARED", 6);
+    let shared_n = platform::runtime_concurrency("SHARED", 6);
     let shared = {
-        let storage = runtime::connect().map_err(|e| e.to_string())?;
+        let storage = platform::oxana_connect().map_err(|e| e.to_string())?;
         storage
             .runtime(ctx.clone())
             .queue_with_concurrency::<SummaryQueue>(shared_n)
@@ -3860,10 +3093,10 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .run()
     };
     let wiki_rt = {
-        let storage = runtime::connect().map_err(|e| e.to_string())?;
+        let storage = platform::oxana_connect().map_err(|e| e.to_string())?;
         storage
             .runtime(ctx)
-            .queue_with_concurrency::<WikiQueue>(runtime::runtime_concurrency("WIKI", 8))
+            .queue_with_concurrency::<WikiQueue>(platform::runtime_concurrency("WIKI", 8))
             .worker::<WikiIngestWorker, WikiIngestJob>()
             .worker::<WikiFinalizeWorker, WikiFinalizeJob>()
             .shutdown_on(shut(stop_rx.clone()))
@@ -3890,13 +3123,11 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use knowledge::{create_workspace_with_library, insert_document, insert_user};
+    use platform::{apply_fresh_baseline, connect, write_blob};
     use std::{
         collections::VecDeque,
         sync::atomic::{AtomicUsize, Ordering},
-    };
-    use storage::{
-        apply_fresh_baseline, connect, create_workspace_with_library, insert_document, insert_user,
-        write_blob,
     };
 
     #[derive(Clone, Copy)]
@@ -3911,13 +3142,13 @@ mod tests {
     }
 
     #[async_trait]
-    impl storage::knowledge_index_v2::VectorEmbeddingProviderV2 for LifecycleProvider {
+    impl knowledge::knowledge_index_v2::VectorEmbeddingProviderV2 for LifecycleProvider {
         async fn embed_batch(
             &self,
-            _revision: &domain::knowledge_retrieval::EmbeddingRevisionV2,
+            _revision: &knowledge::knowledge_retrieval::EmbeddingRevisionV2,
             _credential_ref: &str,
-            inputs: &[storage::knowledge_index_v2::VectorEmbeddingInputV2],
-        ) -> Result<Vec<Vec<f32>>, storage::knowledge_index_v2::VectorIndexErrorV2> {
+            inputs: &[knowledge::knowledge_index_v2::VectorEmbeddingInputV2],
+        ) -> Result<Vec<Vec<f32>>, knowledge::knowledge_index_v2::VectorIndexErrorV2> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             match self
                 .results
@@ -3936,7 +3167,7 @@ mod tests {
                     })
                     .collect()),
                 LifecycleProviderResult::Unavailable => Err(
-                    storage::knowledge_index_v2::VectorIndexErrorV2::Unavailable(
+                    knowledge::knowledge_index_v2::VectorIndexErrorV2::Unavailable(
                         "injected provider timeout".into(),
                     ),
                 ),
@@ -3951,19 +3182,19 @@ mod tests {
     }
 
     #[async_trait]
-    impl storage::knowledge_index_v2::VectorEmbeddingProviderV2 for PendingAfterLifecycleProvider {
+    impl knowledge::knowledge_index_v2::VectorEmbeddingProviderV2 for PendingAfterLifecycleProvider {
         async fn embed_batch(
             &self,
-            _revision: &domain::knowledge_retrieval::EmbeddingRevisionV2,
+            _revision: &knowledge::knowledge_retrieval::EmbeddingRevisionV2,
             _credential_ref: &str,
-            inputs: &[storage::knowledge_index_v2::VectorEmbeddingInputV2],
-        ) -> Result<Vec<Vec<f32>>, storage::knowledge_index_v2::VectorIndexErrorV2> {
+            inputs: &[knowledge::knowledge_index_v2::VectorEmbeddingInputV2],
+        ) -> Result<Vec<Vec<f32>>, knowledge::knowledge_index_v2::VectorIndexErrorV2> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             sqlx::query("UPDATE documents SET pending_subtasks_count=1 WHERE id=$1")
                 .bind(self.document_id)
                 .execute(&self.pool)
                 .await
-                .map_err(storage::knowledge_index_v2::VectorIndexErrorV2::Database)?;
+                .map_err(knowledge::knowledge_index_v2::VectorIndexErrorV2::Database)?;
             Ok(inputs
                 .iter()
                 .enumerate()
@@ -3981,14 +3212,14 @@ mod tests {
     }
 
     #[async_trait]
-    impl storage::knowledge_index_v2::EmbeddingCredentialResolverV2 for MissingLifecycleCredential {
+    impl knowledge::knowledge_index_v2::EmbeddingCredentialResolverV2 for MissingLifecycleCredential {
         async fn resolve(
             &self,
             _credential_ref: &str,
-        ) -> Result<String, storage::knowledge_index_v2::VectorIndexErrorV2> {
+        ) -> Result<String, knowledge::knowledge_index_v2::VectorIndexErrorV2> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(
-                storage::knowledge_index_v2::VectorIndexErrorV2::InvalidConfiguration(
+                knowledge::knowledge_index_v2::VectorIndexErrorV2::InvalidConfiguration(
                     "injected missing credential reference".into(),
                 ),
             )
@@ -4034,11 +3265,11 @@ mod tests {
             first_calls.push((kind, id, revision));
             call_ordinal += 1;
             std::future::ready(if call_ordinal == 1 {
-                runtime::BidDeliveryEnqueueOutcome::Accepted {
+                platform::BidDeliveryEnqueueOutcome::Accepted {
                     job_id: format!("{}:{id}:{revision}", kind.as_str()),
                 }
             } else {
-                runtime::BidDeliveryEnqueueOutcome::Indeterminate {
+                platform::BidDeliveryEnqueueOutcome::Indeterminate {
                     error: "injected Redis failure".into(),
                 }
             })
@@ -4050,7 +3281,7 @@ mod tests {
         let mut retry_calls = Vec::new();
         enqueue_bid_targets_with(targets.clone(), |kind, id, revision| {
             retry_calls.push((kind, id, revision));
-            std::future::ready(runtime::BidDeliveryEnqueueOutcome::Accepted {
+            std::future::ready(platform::BidDeliveryEnqueueOutcome::Accepted {
                 job_id: format!("{}:{id}:{revision}", kind.as_str()),
             })
         })
@@ -4268,29 +3499,32 @@ mod tests {
         let w = WikiIngestWorker { pool: None };
         let job = WikiIngestJob {
             product_version_id: Uuid::new_v4(),
-            task_type: domain::TYPE_WIKI_INGEST.to_string(),
+            task_type: platform::TYPE_WIKI_INGEST.to_string(),
         };
         assert_eq!(
             oxana::Worker::<WikiIngestJob>::retry_delay(&w, &job, 0),
-            runtime::WIKI_LOCK_RETRY_SECS
+            platform::WIKI_LOCK_RETRY_SECS
         );
         assert_eq!(
             oxana::Worker::<WikiIngestJob>::retry_delay(&w, &job, 4),
-            runtime::WIKI_LOCK_RETRY_SECS
+            platform::WIKI_LOCK_RETRY_SECS
         );
         assert_eq!(
-            wiki::INGEST_DEBOUNCE_SECS,
-            runtime::WIKI_INGEST_DEBOUNCE_SECS
+            knowledge::wiki::INGEST_DEBOUNCE_SECS,
+            platform::WIKI_INGEST_DEBOUNCE_SECS
         );
         assert_eq!(
-            wiki::FINALIZE_DEBOUNCE_SECS,
-            runtime::WIKI_FINALIZE_DEBOUNCE_SECS
+            knowledge::wiki::FINALIZE_DEBOUNCE_SECS,
+            platform::WIKI_FINALIZE_DEBOUNCE_SECS
         );
         assert_eq!(
-            wiki::FOLLOW_UP_DEBOUNCE_SECS,
-            runtime::WIKI_FOLLOW_UP_DEBOUNCE_SECS
+            knowledge::wiki::FOLLOW_UP_DEBOUNCE_SECS,
+            platform::WIKI_FOLLOW_UP_DEBOUNCE_SECS
         );
-        assert_eq!(wiki::LOCK_RETRY_SECS, runtime::WIKI_LOCK_RETRY_SECS);
+        assert_eq!(
+            knowledge::wiki::LOCK_RETRY_SECS,
+            platform::WIKI_LOCK_RETRY_SECS
+        );
     }
 
     #[tokio::test]
@@ -4321,11 +3555,11 @@ mod tests {
             .await
             .unwrap();
         let did = Uuid::new_v4();
-        let hash = domain::sha256_hex(b"keep");
+        let hash = platform::sha256_hex(b"keep");
         write_blob(&hash, b"keep").unwrap();
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: seeded.library_version_id,
                 title: "k",
@@ -4390,7 +3624,7 @@ mod tests {
         let did = Uuid::new_v4();
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: seeded.library_version_id,
                 title: "empty",
@@ -4407,7 +3641,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let blank = domain::Chunk {
+        let blank = knowledge::Chunk {
             id: Uuid::new_v4(),
             document_id: did,
             product_version_id: seeded.library_version_id,
@@ -4484,11 +3718,11 @@ mod tests {
             .await
             .unwrap();
         let did = Uuid::new_v4();
-        let hash = domain::sha256_hex(b"body");
+        let hash = platform::sha256_hex(b"body");
         write_blob(&hash, b"body").unwrap();
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: seeded.library_version_id,
                 title: "t",
@@ -4505,7 +3739,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let ch = domain::Chunk {
+        let ch = knowledge::Chunk {
             id: Uuid::new_v4(),
             document_id: did,
             product_version_id: seeded.library_version_id,
@@ -4587,11 +3821,11 @@ mod tests {
             .await
             .unwrap();
         let did = Uuid::new_v4();
-        let hash = domain::sha256_hex(b"hello reuse");
+        let hash = platform::sha256_hex(b"hello reuse");
         write_blob(&hash, b"hello reuse").unwrap();
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: seeded.library_version_id,
                 title: "r",
@@ -4691,11 +3925,11 @@ mod tests {
             .await
             .unwrap();
         let did = Uuid::new_v4();
-        let hash = domain::sha256_hex(b"hello worker");
+        let hash = platform::sha256_hex(b"hello worker");
         write_blob(&hash, b"hello worker").unwrap();
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: seeded.library_version_id,
                 title: "a",
@@ -4737,7 +3971,7 @@ mod tests {
         assert_eq!(map.get("embedding").map(String::as_str), Some("done"));
         assert_eq!(map.get("multimodal").map(String::as_str), Some("skipped"));
         assert_eq!(map.get("postprocess").map(String::as_str), Some("running"));
-        assert!(storage::blob_exists(&format!("{hash}.md")));
+        assert!(platform::blob_exists(&format!("{hash}.md")));
         let enabled: String =
             sqlx::query_scalar("SELECT enable_status FROM documents WHERE id = $1")
                 .bind(did)
@@ -4789,11 +4023,11 @@ mod tests {
             .await
             .unwrap();
         let did = Uuid::new_v4();
-        let hash = domain::sha256_hex(b"%PDF-1.4");
+        let hash = platform::sha256_hex(b"%PDF-1.4");
         write_blob(&hash, b"%PDF-1.4").unwrap();
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: seeded.library_version_id,
                 title: "p",
@@ -4875,11 +4109,11 @@ mod tests {
         .unwrap();
         let body = b"See ![p](images/p1.jpg) in the guide.";
         let did = Uuid::new_v4();
-        let hash = domain::sha256_hex(body);
+        let hash = platform::sha256_hex(body);
         write_blob(&hash, body).unwrap();
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: seeded.library_version_id,
                 title: "g",
@@ -4892,18 +4126,18 @@ mod tests {
         .await
         .unwrap();
         convert_document(&pool, did, 1, &[], false).await.unwrap();
-        if domain::vlm_configured() {
-            let Ok(storage) = runtime::connect() else {
+        if platform::vlm_configured() {
+            let Ok(storage) = platform::oxana_connect() else {
                 eprintln!("skip: redis down");
                 return;
             };
             let n = storage
-                .enqueued_count(runtime::MultimodalQueue)
+                .enqueued_count(platform::MultimodalQueue)
                 .await
                 .unwrap();
             assert!(n >= 1, "image:multimodal must be enqueued, got {n}");
-            assert_eq!(enrichment::pending_count(did), Some(1));
-            let _ = storage.wipe_queue(runtime::MultimodalQueue).await;
+            assert_eq!(knowledge::enrichment::pending_count(did), Some(1));
+            let _ = storage.wipe_queue(platform::MultimodalQueue).await;
         } else {
             let (status, err): (String, String) = sqlx::query_as(
                 "SELECT parse_status, COALESCE(error_message,'') FROM documents WHERE id = $1",
@@ -4951,11 +4185,11 @@ mod tests {
             .await
             .unwrap();
         let did = Uuid::new_v4();
-        let hash = domain::sha256_hex(b"RIFF");
+        let hash = platform::sha256_hex(b"RIFF");
         write_blob(&hash, b"RIFF").unwrap();
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: seeded.library_version_id,
                 title: "a",
@@ -5016,11 +4250,11 @@ mod tests {
         .unwrap();
         let did = Uuid::new_v4();
         let bytes = b"RIFFWAVE";
-        let hash = domain::sha256_hex(bytes);
+        let hash = platform::sha256_hex(bytes);
         write_blob(&hash, bytes).unwrap();
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: seeded.library_version_id,
                 title: "a",
@@ -5039,7 +4273,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, "processing");
-        let md = String::from_utf8(storage::read_blob(&format!("{hash}.md")).unwrap()).unwrap();
+        let md = String::from_utf8(platform::read_blob(&format!("{hash}.md")).unwrap()).unwrap();
         assert_eq!(md, "[stub-asr:talk.wav:8]");
     }
 
@@ -5080,10 +4314,10 @@ mod tests {
             .await
             .unwrap();
         let did = Uuid::new_v4();
-        let hash = domain::sha256_hex(b"unused");
+        let hash = platform::sha256_hex(b"unused");
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: seeded.library_version_id,
                 title: "p",
@@ -5118,7 +4352,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(texts, vec!["first passage", "second passage"]);
-        storage::set_document_source(
+        knowledge::set_document_source(
             &pool,
             did,
             "passage",
@@ -5171,11 +4405,11 @@ mod tests {
             .unwrap();
         let body = b"url:https://example.com/doc";
         let did = Uuid::new_v4();
-        let hash = domain::sha256_hex(body);
+        let hash = platform::sha256_hex(body);
         write_blob(&hash, body).unwrap();
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: seeded.library_version_id,
                 title: "u",
@@ -5228,11 +4462,11 @@ mod tests {
             .unwrap();
         let vid = seeded.library_version_id;
         let did = Uuid::new_v4();
-        let hash = domain::sha256_hex(b"wiki body");
+        let hash = platform::sha256_hex(b"wiki body");
         write_blob(&hash, b"wiki body").unwrap();
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: vid,
                 title: "w",
@@ -5253,10 +4487,10 @@ mod tests {
         .await
         .unwrap();
         let cid = Uuid::new_v4();
-        storage::replace_document_chunks(
+        knowledge::replace_document_chunks(
             &pool,
             did,
-            &[domain::Chunk {
+            &[knowledge::Chunk {
                 id: cid,
                 document_id: did,
                 product_version_id: vid,
@@ -5272,31 +4506,31 @@ mod tests {
         )
         .await
         .unwrap();
-        storage::enqueue_pending_op(
+        knowledge::enqueue_pending_op(
             &pool,
-            domain::TYPE_WIKI_INGEST,
+            platform::TYPE_WIKI_INGEST,
             vid,
-            wiki::OP_INGEST,
+            knowledge::wiki::OP_INGEST,
             Some(&did.to_string()),
             serde_json::json!({"document_id": did}),
         )
         .await
         .unwrap();
-        storage::enqueue_pending_op(
+        knowledge::enqueue_pending_op(
             &pool,
-            domain::TYPE_WIKI_FINALIZE,
+            platform::TYPE_WIKI_FINALIZE,
             vid,
-            wiki::OP_SLUG,
+            knowledge::wiki::OP_SLUG,
             Some("preexisting"),
             serde_json::json!({}),
         )
         .await
         .unwrap();
         process_wiki_ingest(&pool, vid).await.unwrap();
-        let ingest_left = storage::count_pending(&pool, domain::TYPE_WIKI_INGEST, vid)
+        let ingest_left = knowledge::count_pending(&pool, platform::TYPE_WIKI_INGEST, vid)
             .await
             .unwrap();
-        let finalize_left = storage::count_pending(&pool, domain::TYPE_WIKI_FINALIZE, vid)
+        let finalize_left = knowledge::count_pending(&pool, platform::TYPE_WIKI_FINALIZE, vid)
             .await
             .unwrap();
         assert_eq!(ingest_left, 0);
@@ -5340,11 +4574,11 @@ mod tests {
         assert!(wiki_chunks >= 1, "wiki_page chunk persisted");
 
         process_wiki_finalize(&pool, vid).await.unwrap();
-        let finalize_after = storage::count_pending(&pool, domain::TYPE_WIKI_FINALIZE, vid)
+        let finalize_after = knowledge::count_pending(&pool, platform::TYPE_WIKI_FINALIZE, vid)
             .await
             .unwrap();
         assert_eq!(finalize_after, 0);
-        let ingest_after = storage::count_pending(&pool, domain::TYPE_WIKI_INGEST, vid)
+        let ingest_after = knowledge::count_pending(&pool, platform::TYPE_WIKI_INGEST, vid)
             .await
             .unwrap();
         assert_eq!(ingest_after, 0);
@@ -5421,7 +4655,7 @@ mod tests {
         let src_doc = Uuid::new_v4();
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: src_doc,
                 product_version_id: src,
                 title: "iso",
@@ -5434,7 +4668,7 @@ mod tests {
         .await
         .unwrap();
         let dst = Uuid::new_v4();
-        storage::insert_version_cloning(&pool, dst, seeded.library_id, "2026", src)
+        knowledge::insert_version_cloning(&pool, dst, seeded.library_id, "2026", src)
             .await
             .unwrap();
         process_version_clone(
@@ -5444,7 +4678,7 @@ mod tests {
                 target_version_id: dst,
                 diffs: serde_json::json!([]),
                 make_current: false,
-                task_type: domain::TYPE_VERSION_CLONE.into(),
+                task_type: platform::TYPE_VERSION_CLONE.into(),
             },
         )
         .await
@@ -5567,7 +4801,7 @@ mod tests {
         let did = Uuid::new_v4();
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: seeded.library_version_id,
                 title: "keep",
@@ -5588,10 +4822,10 @@ mod tests {
         .await
         .unwrap();
         let cid = Uuid::new_v4();
-        storage::replace_document_chunks(
+        knowledge::replace_document_chunks(
             &pool,
             did,
-            &[domain::Chunk {
+            &[knowledge::Chunk {
                 id: cid,
                 document_id: did,
                 product_version_id: seeded.library_version_id,
@@ -5603,12 +4837,12 @@ mod tests {
                 parent_chunk_id: None,
                 generated_questions: vec![],
             }],
-            &[domain::ChunkEmbedding {
+            &[knowledge::ChunkEmbedding {
                 chunk_id: cid,
                 product_version_id: seeded.library_version_id,
                 document_id: did,
                 content: "throughput keep".into(),
-                vector: vec![0.1; models::EMBEDDING_DIM],
+                vector: vec![0.1; knowledge::models::EMBEDDING_DIM],
                 tsv: String::new(),
             }],
         )
@@ -5631,7 +4865,7 @@ mod tests {
         assert_eq!(status, "finalizing");
         assert!(pending >= 1, "clone_keep should count wiki/graph");
         let wiki_n =
-            storage::count_pending(&pool, domain::TYPE_WIKI_INGEST, seeded.library_version_id)
+            knowledge::count_pending(&pool, platform::TYPE_WIKI_INGEST, seeded.library_version_id)
                 .await
                 .unwrap();
         assert!(
@@ -5675,7 +4909,7 @@ mod tests {
         let did = Uuid::new_v4();
         insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: seeded.library_version_id,
                 title: "spec",
@@ -5698,10 +4932,10 @@ mod tests {
         let body = "The product delivers forty gigabit throughput on the line card. \
                     Operators use this guide to install the switch in a rack and verify ISO9001.";
         let cid = Uuid::new_v4();
-        storage::replace_document_chunks(
+        knowledge::replace_document_chunks(
             &pool,
             did,
-            &[domain::Chunk {
+            &[knowledge::Chunk {
                 id: cid,
                 document_id: did,
                 product_version_id: seeded.library_version_id,
@@ -5713,12 +4947,12 @@ mod tests {
                 parent_chunk_id: None,
                 generated_questions: vec![],
             }],
-            &[domain::ChunkEmbedding {
+            &[knowledge::ChunkEmbedding {
                 chunk_id: cid,
                 product_version_id: seeded.library_version_id,
                 document_id: did,
                 content: body.into(),
-                vector: vec![0.1; models::EMBEDDING_DIM],
+                vector: vec![0.1; knowledge::models::EMBEDDING_DIM],
                 tsv: String::new(),
             }],
         )
@@ -5726,7 +4960,7 @@ mod tests {
         .unwrap();
         let image =
             process_image_pg(&pool, did, "images/p1.jpg", "scanned_pdf", true, true, 1).await;
-        if domain::vlm_configured() {
+        if platform::vlm_configured() {
             image.unwrap();
             let text_n: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM chunks WHERE document_id = $1 AND chunk_type = 'text'",
@@ -5775,12 +5009,12 @@ mod tests {
 
     #[tokio::test]
     async fn semantic_index_v2_business_lifecycle_is_fenced() {
-        use domain::knowledge_retrieval::{
+        use knowledge::knowledge_index_v2::SemanticIndexPreparationV2;
+        use knowledge::knowledge_retrieval::{
             EMBEDDING_DIMENSION_V2, EMBEDDING_OUTPUT_NORMALIZATION_VERSION_V2,
             EMBEDDING_PROVIDER_PROTOCOL_VERSION_V2, EMBEDDING_REVISION_SCHEMA_V2,
             EmbeddingRevisionV2,
         };
-        use storage::knowledge_index_v2::SemanticIndexPreparationV2;
 
         let _g = db_lock().await;
         let database_url = std::env::var("DATABASE_URL").unwrap_or_default();
@@ -5819,14 +5053,14 @@ mod tests {
         let version_id = Uuid::new_v4();
         let document_id = Uuid::new_v4();
         let chunk_id = Uuid::new_v4();
-        let file_hash = domain::sha256_hex(document_id.as_bytes());
+        let file_hash = platform::sha256_hex(document_id.as_bytes());
         let object_ref = format!("objects/{file_hash}");
         let revision = EmbeddingRevisionV2 {
             schema_version: EMBEDDING_REVISION_SCHEMA_V2,
             provider_protocol_version: EMBEDDING_PROVIDER_PROTOCOL_VERSION_V2.into(),
             provider_model_identifier: format!("lifecycle-v2-{version_id}@2025-01-15"),
-            provider_model_revision_sha256: domain::sha256_hex(b"lifecycle-v2-model"),
-            endpoint_config_sha256: domain::sha256_hex(b"lifecycle-v2-endpoint"),
+            provider_model_revision_sha256: platform::sha256_hex(b"lifecycle-v2-model"),
+            endpoint_config_sha256: platform::sha256_hex(b"lifecycle-v2-endpoint"),
             endpoint_identity: "https://embeddings.example.test/v1/embeddings".into(),
             dimension: EMBEDDING_DIMENSION_V2,
             request_config_sha256: EmbeddingRevisionV2::canonical_request_config_sha256(),
@@ -5852,7 +5086,7 @@ mod tests {
         .unwrap();
 
         let unbound =
-            storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
+            knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
                 .await
                 .unwrap();
         assert_eq!(unbound, SemanticIndexPreparationV2::Unbound);
@@ -5873,14 +5107,15 @@ mod tests {
         sqlx::query("INSERT INTO product_version_embedding_bindings_v2(product_version_id,embedding_revision_sha256) VALUES($1,$2)")
             .bind(version_id).bind(&revision_sha256).execute(&pool).await.unwrap();
 
-        let empty_intent =
-            match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
-                .await
-                .unwrap()
-            {
-                SemanticIndexPreparationV2::Enqueue(intent) => intent,
-                other => panic!("expected empty bound intent, got {other:?}"),
-            };
+        let empty_intent = match knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(
+            &pool, version_id,
+        )
+        .await
+        .unwrap()
+        {
+            SemanticIndexPreparationV2::Enqueue(intent) => intent,
+            other => panic!("expected empty bound intent, got {other:?}"),
+        };
         let empty_provider = LifecycleProvider {
             calls: AtomicUsize::new(0),
             results: std::sync::Mutex::new(VecDeque::new()),
@@ -5895,7 +5130,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(empty_provider.calls.load(Ordering::SeqCst), 0);
-        let empty_completed = storage::knowledge_index_v2::semantic_index_intent_v2(
+        let empty_completed = knowledge::knowledge_index_v2::semantic_index_intent_v2(
             &pool,
             empty_intent.id,
             empty_intent.target_revision,
@@ -5934,21 +5169,22 @@ mod tests {
             .bind(chunk_id).bind(version_id).bind(document_id).execute(&pool).await.unwrap();
 
         assert_eq!(
-            storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
+            knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
                 .await
                 .unwrap(),
             SemanticIndexPreparationV2::PendingDerived
         );
         sqlx::query("UPDATE documents SET parse_status='completed',pending_subtasks_count=0,summary_status='completed' WHERE id=$1")
             .bind(document_id).execute(&pool).await.unwrap();
-        let source_intent =
-            match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
-                .await
-                .unwrap()
-            {
-                SemanticIndexPreparationV2::Enqueue(intent) => intent,
-                other => panic!("expected settled source intent, got {other:?}"),
-            };
+        let source_intent = match knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(
+            &pool, version_id,
+        )
+        .await
+        .unwrap()
+        {
+            SemanticIndexPreparationV2::Enqueue(intent) => intent,
+            other => panic!("expected settled source intent, got {other:?}"),
+        };
         let scheduled_targets = Arc::new(std::sync::Mutex::new(Vec::new()));
         let first_calls = scheduled_targets.clone();
         assert!(
@@ -5982,7 +5218,7 @@ mod tests {
             "parent retry must replay the same unique business target"
         );
         assert_eq!(
-            storage::document_parse_status(&pool, document_id)
+            knowledge::document_parse_status(&pool, document_id)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -5999,7 +5235,7 @@ mod tests {
                 LifecycleProviderResult::Unavailable,
             ])),
         };
-        for _ in 0..=runtime::SEMANTIC_INDEX_V2_MAX_RETRY {
+        for _ in 0..=platform::SEMANTIC_INDEX_V2_MAX_RETRY {
             assert!(
                 process_semantic_index_intent_v2(
                     &pool,
@@ -6012,7 +5248,7 @@ mod tests {
                 .is_err()
             );
         }
-        let retryable = storage::knowledge_index_v2::semantic_index_intent_v2(
+        let retryable = knowledge::knowledge_index_v2::semantic_index_intent_v2(
             &pool,
             source_intent.id,
             source_intent.target_revision,
@@ -6043,7 +5279,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(restarted_provider.calls.load(Ordering::SeqCst), 1);
-        let ready = storage::knowledge_index_v2::semantic_index_intent_v2(
+        let ready = knowledge::knowledge_index_v2::semantic_index_intent_v2(
             &pool,
             source_intent.id,
             source_intent.target_revision,
@@ -6105,14 +5341,15 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let aba_b =
-            match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
-                .await
-                .unwrap()
-            {
-                SemanticIndexPreparationV2::Enqueue(intent) => intent,
-                other => panic!("expected ABA generation B target, got {other:?}"),
-            };
+        let aba_b = match knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(
+            &pool, version_id,
+        )
+        .await
+        .unwrap()
+        {
+            SemanticIndexPreparationV2::Enqueue(intent) => intent,
+            other => panic!("expected ABA generation B target, got {other:?}"),
+        };
         let aba_b_provider = LifecycleProvider {
             calls: AtomicUsize::new(0),
             results: std::sync::Mutex::new(VecDeque::new()),
@@ -6133,14 +5370,15 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let aba_a =
-            match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
-                .await
-                .unwrap()
-            {
-                SemanticIndexPreparationV2::Enqueue(intent) => intent,
-                other => panic!("expected a new ABA generation A target, got {other:?}"),
-            };
+        let aba_a = match knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(
+            &pool, version_id,
+        )
+        .await
+        .unwrap()
+        {
+            SemanticIndexPreparationV2::Enqueue(intent) => intent,
+            other => panic!("expected a new ABA generation A target, got {other:?}"),
+        };
         assert_eq!(
             aba_a.source_snapshot_sha256,
             source_intent.source_snapshot_sha256
@@ -6166,7 +5404,7 @@ mod tests {
             "pending derived work introduced after provider I/O must fence publication"
         );
         assert_eq!(pending_after_provider.calls.load(Ordering::SeqCst), 1);
-        let aba_pending = storage::knowledge_index_v2::semantic_index_intent_v2(
+        let aba_pending = knowledge::knowledge_index_v2::semantic_index_intent_v2(
             &pool,
             aba_a.id,
             aba_a.target_revision,
@@ -6206,27 +5444,29 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let stale_intent =
-            match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
-                .await
-                .unwrap()
-            {
-                SemanticIndexPreparationV2::Enqueue(intent) => intent,
-                other => panic!("expected stale source intent, got {other:?}"),
-            };
+        let stale_intent = match knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(
+            &pool, version_id,
+        )
+        .await
+        .unwrap()
+        {
+            SemanticIndexPreparationV2::Enqueue(intent) => intent,
+            other => panic!("expected stale source intent, got {other:?}"),
+        };
         sqlx::query("UPDATE chunks SET content='new immutable source generation' WHERE id=$1")
             .bind(chunk_id)
             .execute(&pool)
             .await
             .unwrap();
-        let terminal_intent =
-            match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
-                .await
-                .unwrap()
-            {
-                SemanticIndexPreparationV2::Enqueue(intent) => intent,
-                other => panic!("expected newer source intent, got {other:?}"),
-            };
+        let terminal_intent = match knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(
+            &pool, version_id,
+        )
+        .await
+        .unwrap()
+        {
+            SemanticIndexPreparationV2::Enqueue(intent) => intent,
+            other => panic!("expected newer source intent, got {other:?}"),
+        };
         let stale_provider = LifecycleProvider {
             calls: AtomicUsize::new(0),
             results: std::sync::Mutex::new(VecDeque::new()),
@@ -6245,7 +5485,7 @@ mod tests {
             0,
             "superseded delivery must not reach the provider"
         );
-        let stale = storage::knowledge_index_v2::semantic_index_intent_v2(
+        let stale = knowledge::knowledge_index_v2::semantic_index_intent_v2(
             &pool,
             stale_intent.id,
             stale_intent.target_revision,
@@ -6260,7 +5500,7 @@ mod tests {
             "stale delivery must replay exactly the current successor target"
         );
         let credential_calls = Arc::new(AtomicUsize::new(0));
-        let strict = storage::knowledge_index_v2::StrictVectorEmbeddingClientV2::new(Arc::new(
+        let strict = knowledge::knowledge_index_v2::StrictVectorEmbeddingClientV2::new(Arc::new(
             MissingLifecycleCredential {
                 calls: credential_calls.clone(),
             },
@@ -6289,7 +5529,7 @@ mod tests {
             1,
             "terminal intent must never be reserved twice"
         );
-        let terminal = storage::knowledge_index_v2::semantic_index_intent_v2(
+        let terminal = knowledge::knowledge_index_v2::semantic_index_intent_v2(
             &pool,
             terminal_intent.id,
             terminal_intent.target_revision,
@@ -6339,14 +5579,15 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        let revoked_intent =
-            match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
-                .await
-                .unwrap()
-            {
-                SemanticIndexPreparationV2::Enqueue(intent) => intent,
-                other => panic!("expected pre-revocation intent, got {other:?}"),
-            };
+        let revoked_intent = match knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(
+            &pool, version_id,
+        )
+        .await
+        .unwrap()
+        {
+            SemanticIndexPreparationV2::Enqueue(intent) => intent,
+            other => panic!("expected pre-revocation intent, got {other:?}"),
+        };
         sqlx::query("UPDATE embedding_revisions_v2 SET support_state='revoked',updated_at=clock_timestamp() WHERE revision_sha256=$1")
             .bind(&revision_sha256).execute(&pool).await.unwrap();
         let revoked_provider = LifecycleProvider {
@@ -6367,7 +5608,7 @@ mod tests {
             0,
             "revoked revision must fence before provider I/O"
         );
-        let revoked = storage::knowledge_index_v2::semantic_index_intent_v2(
+        let revoked = knowledge::knowledge_index_v2::semantic_index_intent_v2(
             &pool,
             revoked_intent.id,
             revoked_intent.target_revision,
@@ -6377,7 +5618,7 @@ mod tests {
         .unwrap();
         assert_eq!(revoked.status, "terminal");
         assert_eq!(
-            storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
+            knowledge::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
                 .await
                 .unwrap(),
             SemanticIndexPreparationV2::Terminal(revoked.clone()),
@@ -6455,8 +5696,8 @@ mod tests {
         let staging_id = Uuid::new_v4();
         let actor = format!("user:{}", Uuid::new_v4());
         let bytes = b"cancelled submission output";
-        let digest = domain::sha256_hex(bytes);
-        let object_ref = storage::object_ref(&digest);
+        let digest = platform::sha256_hex(bytes);
+        let object_ref = platform::object_ref(&digest);
         let staging = SubmissionStagingGuard::new(pool.clone(), staging_id, &actor);
         let delayed_pool = pool.clone();
         let delayed_actor = actor.clone();
@@ -6464,7 +5705,7 @@ mod tests {
         let delayed_digest = digest.clone();
         let delayed_stage = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            storage::stage_object_upload(
+            platform::stage_object_upload(
                 &delayed_pool,
                 staging_id,
                 &delayed_object_ref,

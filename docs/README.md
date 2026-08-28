@@ -9,7 +9,7 @@
 1. 每条规范只能有一个权威定义位置；其它文档只链接，不复制另一份规则。
 2. `docs/` 描述已确认的当前目标与领域边界；它不等于“代码已经实现”。实现状态必须由代码、测试和运行验收分别证明。
 3. `plans/` 描述如何到达目标。计划完成后，稳定结论回写到对应的 `docs/<domain>/`。
-4. 历史评审、调查报告和旧实施草案不是当前规范；冲突时以本页链接的领域文档为准。
+4. 调研材料不是当前规范；过期实施草案直接删除。冲突时以本页链接的领域文档为准。
 5. 跨领域能力由所属领域定义，通过端口使用；禁止在调用方重新定义被调用领域的数据模型。
 
 ## 领域
@@ -18,7 +18,7 @@
 | --- | --- | --- |
 | 共享平台 | [`platform/README.md`](platform/README.md) | 鉴权、运行时、队列、幂等与审计基础设施、对象注册表、可观测性 |
 | 知识库 | [`knowledge-base/README.md`](knowledge-base/README.md) | Workspace、Product、ProductVersion、Document、解析、索引、检索 |
-| 招投标 | [`bidding/README.md`](bidding/README.md) | BidProject、招标文件、条款、匹配决策、报价、组卷与正式导出 |
+| 招投标 | [`bidding/README.md`](bidding/README.md) | BidProject、招标文件、动态大纲、Word 式编制画布、知识填充、Assessment 与导出。权威契约：[编制工作区](bidding/authoring.md) |
 | 调研材料 | [`research/README.md`](research/README.md) | 外部对标、实验和非规范性分析 |
 
 ## 现有综合规格

@@ -1,14 +1,14 @@
 # KnowledgeBrain 仓库实现快照
 
 | 项 | 值 |
-|---|---|
+| --- | --- |
 | 状态 | **非规范性实现快照**（用于迁移排查，不定义最终领域契约） |
 | 日期 | 2026-08-19 |
 | 仓库 | `/opt/workspace/code/KnowledgeBrain` |
 | 管线对照 | `/opt/workspace/code/brain`（WeKnora）。任务类型、队列名、`parse_status`、分块算法、Wiki/图谱作用域与 brain **同语义** |
-| 投标 | 同仓部署；最终领域目标见 [`../bidding/domain.md`](../bidding/domain.md) |
+| 投标 | 同仓部署；当前目标见 [`../bidding/authoring.md`](../bidding/authoring.md) |
 
-本文描述当前知识库与共享运行时实现。招投标旧表、旧 `/match` 调用和旧导出仅作为迁移前现状，不构成目标规范；冲突时以 [`../bidding/domain.md`](../bidding/domain.md) 和 [`../../plans/bidding/README.md`](../../plans/bidding/README.md) 为准。
+本文描述迁移前知识库与共享运行时实现。招投标旧表、旧 `/match` 调用和旧导出仅作为现状，不构成目标规范；冲突时以编制契约和 [`../../plans/bidding/README.md`](../../plans/bidding/README.md) 为准。[`../bidding/current-code.md`](../bidding/current-code.md) 只是 V1 删除快照。
 
 ---
 
@@ -17,7 +17,7 @@
 ### 1.1 进程
 
 | 进程 | 路径 | 端口 | 职责 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `api` | `crates/api` | `:8080` | HTTP：LDAP/JWT/API key、领域 CRUD、入队、检索、文件代理、投标 CRUD、静态前端（`KNOWLEDGEBRAIN_WEB_ROOT`）、`/system/parser-engines`、`/ops/oxana` |
 | `worker` | `crates/worker` | 无 | 6 个 oxana Runtime + 投标队列（`bid:convert` / `bid:extract` / `bid:match`） |
 | `docreader` | `services/docreader` | gRPC `:50051` | 文件/URL → Markdown + 图片字节 |
@@ -135,7 +135,7 @@ prometheus = "0.14"
 两条正交轴：
 
 | 轴 | 实体 | 回答的问题 |
-|---|---|---|
+| --- | --- | --- |
 | 快照 | `ProductVersion` | 哪一套（产品发版 / 资料批次） |
 | 分类 | `Tag` | 哪一类（手册 / 规格 / 营业执照 / ISO） |
 
@@ -154,7 +154,7 @@ Workspace kind=company            恰好一条（slug=company）
         └── ProductVersion        资料批次
               └── Document        必须进向量，商务 /match 才打得到
 
-BidProject                        与 Workspace 平级；领域边界见 ../bidding/domain.md
+BidProject                        与 Workspace 平级；领域边界见 ../bidding/current-code.md
 ```
 
 文档只挂在某一个 `ProductVersion` 上，不跨版本共享同一 `document_id`。Workspace 不直接存知识。Wiki 一本、图谱一份，按 `product_version_id` 隔离。TAG 不改变归属、不改变 Wiki/图谱命名空间、不替代 Version。
@@ -164,7 +164,7 @@ BidProject                        与 Workspace 平级；领域边界见 ../bidd
 对照：
 
 | brain | 本系统 |
-|---|---|
+| --- | --- |
 | Tenant | Workspace |
 | KnowledgeBase | ProductVersion |
 | Knowledge | Document |
@@ -225,7 +225,7 @@ BidProject                        与 Workspace 平级；领域边界见 ../bidd
 **retrieval_config**（挂 `workspaces.retrieval_config jsonb`，缺省如下）：
 
 | 项 | 默认 | 含义 |
-|---|---:|---|
+| --- | ---: | --- |
 | `vector_threshold` | 0.15 | 向量命中下限（0–1） |
 | `keyword_threshold` | 0.3 | 关键词命中下限（0–1） |
 | `embedding_top_k` | 50 | 单目标向量召回上限 |
@@ -253,7 +253,7 @@ BidProject                        与 Workspace 平级；领域边界见 ../bidd
 
 ### 2.4 招投标边界
 
-知识库 schema 不定义 BidProject、条款、匹配报告、报价或组卷状态。招投标最终模型、API 和旧 catalog 删除矩阵只见 [`../bidding/domain.md`](../bidding/domain.md) 与 [`../../plans/bidding/implementation-acceptance.md`](../../plans/bidding/implementation-acceptance.md)。
+知识库 schema 不定义 BidProject、条款、匹配报告、报价或组卷状态。招投标**当前产品目标**见 [`../bidding/authoring.md`](../bidding/authoring.md)。[`../bidding/current-code.md`](../bidding/current-code.md) 与 [`../../plans/bidding/current-code/implementation-acceptance.md`](../../plans/bidding/current-code/implementation-acceptance.md) 只描述现码 / V1 runtime，不是目标。
 
 ---
 
@@ -290,7 +290,7 @@ knowledge:post_process    queue postprocess
 6 个 oxana Runtime，队列 key 与 brain 相同：
 
 | Runtime | 并发 | Queue key | Task type |
-|---|---:|---|---|
+| --- | ---: | --- | --- |
 | core | 8 | `default` | `document:process`, `manual:process` |
 | postprocess | 2 | `postprocess` | `knowledge:post_process` |
 | enrichment | 12 | `summary`, `multimodal`, `graph`, `question` | `summary:generation`, `datatable:summary`, `image:multimodal`, `chunk:extract`, `question:generation` |
@@ -320,7 +320,7 @@ pending → processing → finalizing → completed
 ```
 
 | 状态 | 含义 |
-|---|---|
+| --- | --- |
 | pending | 已入库，等 worker |
 | processing | 解析 / 分块 / 向量进行中 |
 | finalizing | 主索引完成，enrichment 未完，仍可检索 |
@@ -356,7 +356,7 @@ docreader → chunking → embedding
 序列化只用新字段。反序列化按类型 alias：`knowledge_id`→`document_id`，`knowledge_base_id`→`product_version_id`。`tenant_id` 丢弃，不写入 `workspace_id`。
 
 | 类型 | 必有字段 |
-|---|---|
+| --- | --- |
 | `DocumentProcessPayload` | `document_id`, `product_version_id`, 文件/URL/passages, `attempt` |
 | `KnowledgePostProcessPayload` | 同上 + `clone_keep: bool` 默认 false |
 | `ExtractChunkPayload` | `chunk_id`, `document_id`, `attempt`；`product_version_id` 可从 chunk 行读 |
@@ -370,7 +370,7 @@ docreader → chunking → embedding
 前缀 `/api/v1`。鉴权：`Authorization: Bearer <jwt>` 或 `X-API-Key`。
 
 | 方法 | 路径 |
-|---|---|
+| --- | --- |
 | POST | `/auth/login`（LDAP；`/auth/register` **关闭**，410） |
 | GET/PATCH | `/me` |
 | GET/POST | `/workspaces` |
@@ -456,7 +456,7 @@ SSRF：拦 loopback / 链路本地 / 私网 / `169.254.169.254` / DNS rebinding�
 **与 WeKnora 的差别（有意）：** 上游空引擎 = DocReader/MarkItDown；本仓 anydoc 已进程内集成。anydoc 明显更好的类型（docx/doc/xlsx/xls/pptx/ppt 的表与结构）**默认 anydoc**，不跟上游用 MarkItDown 当默认。PDF / 扫描页仍 builtin（版面 + 栅格化 OCR），anydoc 无文本层时回退 builtin。版本 `parser_engine_rules` 可覆盖。
 
 | engine | 实现 |
-|---|---|
+| --- | --- |
 | `simple` | Rust SimpleFormatReader |
 | `anydoc` | 进程内 anydoc 0.1.9（docx/doc/pptx/ppt/xlsx/xls/odf/rtf/epub/csv/pdf）。不经 DocReader。纯 URL 拒绝。无文字层 PDF 回退 builtin，并打 `anydoc_fallback=scanned_pdf` / `image_source_type=scanned_pdf`。成功结果带 `parser` / `anydoc_version` / `source_format`。抽图开关：`parser_engine_overrides.anydoc_extract_images`。开启抽图时走文档模型：把 `ImageSource::Asset` 改写成 `images/image-N.ext` 后再序列化，图片留在原段落/表格/列表位置；`to_document` 失败则回退纯文本并记 `anydoc_assets_error`。 |
 | `mineru` / `mineru_cloud` | Rust HTTP |
@@ -483,7 +483,7 @@ DocReader 子超时 30min。`ReadResult.Error` 或 transport：非最后一次 r
 整包移植 `brain/internal/infrastructure/chunker`。配置映射 `buildSplitterConfigFromChunking`：默认 size=512、overlap=80、分隔符 `\n\n` / `\n` / `。`。父子：父 4096 overlap=base，子 384 overlap=size/5。
 
 | Strategy | 链 |
-|---|---|
+| --- | --- |
 | `auto` | Profiler → heading → heuristic → **legacy 永远兜底** |
 | `heading` / `heuristic` | 该 tier → legacy |
 | `legacy` / `recursive` / `""` | 仅 legacy（空串不是 auto） |
@@ -516,10 +516,10 @@ index_content = titlePrefix + EmbeddingContent()
 EmbeddingContent() = ContextHeader=="" ? trim(Content) : ContextHeader + "\n\n" + trim(Content)
 ```
 
-7. `vector_enabled`：写入 `embedding`（模型维度，HNSW cosine）。
-8. `keyword_enabled`：同一行写 `tsv`（GIN）。两开关都关则跳过 BatchIndex。
-9. `enable_status=enabled`，写 `processed_at`。若还有多模态或 text chunk：`parse_status` 保持 `processing`。若既无 text 也无多模态：直接 `completed`，并置 `index_ready=true`。
-10. `EnableMultimodel && StoredImages>0`：设 Redis `multimodal:pending:{document_id}=N`，入队 N 条 `image:multimodal`。此时 **`index_ready` 仍为 false**。否则立刻置 `index_ready=true` 并 enqueue `knowledge:post_process`。
+1. `vector_enabled`：写入 `embedding`（模型维度，HNSW cosine）。
+2. `keyword_enabled`：同一行写 `tsv`（GIN）。两开关都关则跳过 BatchIndex。
+3. `enable_status=enabled`，写 `processed_at`。若还有多模态或 text chunk：`parse_status` 保持 `processing`。若既无 text 也无多模态：直接 `completed`，并置 `index_ready=true`。
+4. `EnableMultimodel && StoredImages>0`：设 Redis `multimodal:pending:{document_id}=N`，入队 N 条 `image:multimodal`。此时 **`index_ready` 仍为 false**。否则立刻置 `index_ready=true` 并 enqueue `knowledge:post_process`。
 
 检索过滤 `enable_status=enabled`。`parse_status=finalizing` 的文档已可搜。投标商务自动重搜与招标切条另看 `index_ready`。
 
@@ -547,7 +547,7 @@ expected = (summary?1:0) + questionBatchCount + (wiki?1:0) + graphChunkCount
 `clone_keep=true`：summary/question=0，只计 wiki+graph。行必须是 `processing`，本 handler 调 `SetFinalizing`。`expected==0` → 直接 `completed`。`graph_enabled` 即入队 `chunk:extract`，**无 `NEO4J_ENABLE` 门闩**。Wiki 计 1，编排器不对 wiki shortfall。owned slot 入队失败则 detached `FinalizeSubtask`。入口 abort → 不 fan-out。
 
 | text | ocr | q | embed | wiki | graph | N |
-|---:|---:|---|---|---|---|---:|
+| ---: | ---: | --- | --- | --- | --- | ---: |
 | 0 | 0 | * | * | * | * | 0 |
 | 25 | 0 | T | T | T | T | 29 |
 | 25 | 3 | T | T | T | T | 32 |
@@ -574,7 +574,7 @@ expected = (summary?1:0) + questionBatchCount + (wiki?1:0) + graphChunkCount
 对照 `wiki_ingest.go` / `wiki_ingest_batch.go`。ScopeID = `product_version_id`。
 
 | 常量 | 值 |
-|---|---|
+| --- | --- |
 | ingest 防抖 | 30s |
 | retract 防抖 | 5s |
 | finalize 防抖 | 20s |
@@ -649,7 +649,7 @@ POST /api/v1/search
 产品闭集。问答机器人指定型号、投标组稿锁版本，走这里。
 
 | 请求 | 目标 |
-|---|---|
+| --- | --- |
 | `product_id` + `version_id` | 该一个版本 |
 | `product_id` 无 version | 该 Product 全部 `active` 版本 |
 | `product_id`（kind=product）且 `include_library=true` | 上式 ∪ 本 Workspace 内所有 `kind=library` 的 `current_version`（仅 `active`） |
@@ -661,7 +661,7 @@ POST /api/v1/search
 
 ### 7.2 招投标证据检索边界
 
-招投标不调用本章旧 `/match` HTTP 兼容协议，也不向知识库传 BidProject、clause、route 或 part 模型。唯一跨域契约是 [`../knowledge-base/domain.md`](../knowledge-base/domain.md) 定义的 `KnowledgeRetrievalPort`；招投标侧的冻结、验证、打分、decision 与 publication 见 [`../../plans/bidding/matching.md`](../../plans/bidding/matching.md)。
+招投标不调用本章旧 `/match` HTTP 兼容协议，也不向知识库传 BidProject、clause、route 或 part 模型。唯一跨域契约是 [`../knowledge-base/domain.md`](../knowledge-base/domain.md) 定义的 `KnowledgeRetrievalPort`；招投标侧的冻结、验证、打分、decision 与 publication 见 [`../../plans/bidding/current-code/matching.md`](../../plans/bidding/current-code/matching.md)。
 
 ### 7.3 共同规则
 
@@ -736,7 +736,7 @@ Housekeeping：oxana cron 每 5min。`processing`/`finalizing` 超过 `DocumentP
 ## 10. 实现顺序
 
 | # | 交付 | 产出 |
-|---|---|---|
+| --- | --- | --- |
 | 00 | 骨架 | workspace、proto、CI、compose |
 | 01 | 领域 | 表 0001（kind、tags、wiki/pending/DL 列、retrieval_config）、状态机；种默认 library |
 | 01b | 模型目录 | models、ModelService |

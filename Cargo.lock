@@ -204,23 +204,18 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "api"
 version = "0.1.0"
 dependencies = [
- "auth",
  "axum",
- "bid",
+ "bidding",
  "chrono",
  "docparser",
- "domain",
  "dotenvy",
  "http-body-util",
- "models",
- "obs",
+ "knowledge",
  "oxana-web",
- "runtime",
- "search",
+ "platform",
  "serde",
  "serde_json",
  "sqlx",
- "storage",
  "tokio",
  "tower",
  "tower-http",
@@ -390,19 +385,6 @@ name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
-
-[[package]]
-name = "auth"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "domain",
- "hex",
- "jsonwebtoken",
- "serde",
- "sha2 0.11.0",
- "uuid",
-]
 
 [[package]]
 name = "autocfg"
@@ -623,30 +605,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "bid"
+name = "bidding"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
  "docparser",
  "docx-rs",
- "domain",
- "enrichment",
  "hex",
  "image",
- "index",
+ "knowledge",
  "lopdf 0.44.0",
+ "oxana",
+ "platform",
  "printpdf",
  "pulldown-cmark",
  "regex",
  "roxmltree",
- "runtime",
  "rust_decimal",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
- "storage",
  "thiserror",
  "tokio",
  "tracing",
@@ -930,15 +910,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chunker"
-version = "0.1.0"
-dependencies = [
- "domain",
- "regex",
- "uuid",
-]
-
-[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -956,20 +927,6 @@ checksum = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
 dependencies = [
  "crypto-common 0.2.2",
  "inout 0.2.2",
-]
-
-[[package]]
-name = "clone"
-version = "0.1.0"
-dependencies = [
- "domain",
- "models",
- "serde",
- "serde_json",
- "sqlx",
- "storage",
- "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -1406,7 +1363,7 @@ name = "docparser"
 version = "0.1.0"
 dependencies = [
  "anydoc",
- "domain",
+ "platform",
  "prost",
  "protoc-bin-vendored",
  "reqwest",
@@ -1436,21 +1393,6 @@ dependencies = [
  "smallvec",
  "thiserror",
  "zip",
-]
-
-[[package]]
-name = "domain"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "hex",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror",
- "toml",
- "uuid",
 ]
 
 [[package]]
@@ -1558,23 +1500,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "enrichment"
-version = "0.1.0"
-dependencies = [
- "base64",
- "domain",
- "index",
- "models",
- "redis",
- "regex",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -1751,17 +1676,6 @@ name = "find-msvc-tools"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
-
-[[package]]
-name = "first-launch-verifier"
-version = "0.1.0"
-dependencies = [
- "dotenvy",
- "runtime",
- "storage",
- "tokio",
- "tracing",
-]
 
 [[package]]
 name = "fixedbitset"
@@ -2022,18 +1936,6 @@ name = "glyph-names"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3531d702d6c1a3ba92a5fb55a404c7b8c476c8e7ca249951077afcbe4bc807f"
-
-[[package]]
-name = "graph"
-version = "0.1.0"
-dependencies = [
- "domain",
- "enrichment",
- "reqwest",
- "serde",
- "serde_json",
- "uuid",
-]
 
 [[package]]
 name = "grid"
@@ -2536,18 +2438,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "index"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "domain",
- "models",
- "serde_json",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2763,6 +2653,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "knowledge"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "docparser",
+ "hex",
+ "image",
+ "platform",
+ "redis",
+ "regex",
+ "reqwest",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2970,17 +2885,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
-name = "migrator"
-version = "0.1.0"
-dependencies = [
- "dotenvy",
- "runtime",
- "storage",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3025,15 +2929,6 @@ checksum = "0204e2cac68f5b2e35b7ec8cb5d906f6e58e78dad8066a30b6ee54da99bb03dd"
 dependencies = [
  "libc",
  "winapi",
-]
-
-[[package]]
-name = "models"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -3209,17 +3104,6 @@ checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
 dependencies = [
  "hermit-abi",
  "libc",
-]
-
-[[package]]
-name = "obs"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "domain",
- "serde",
- "serde_json",
- "uuid",
 ]
 
 [[package]]
@@ -3550,6 +3434,31 @@ name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
+
+[[package]]
+name = "platform"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dotenvy",
+ "hex",
+ "hmac 0.13.0",
+ "jsonwebtoken",
+ "oxana",
+ "redis",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
 
 [[package]]
 name = "png"
@@ -4321,11 +4230,9 @@ name = "retention"
 version = "0.1.0"
 dependencies = [
  "axum",
- "domain",
  "dotenvy",
- "runtime",
+ "platform",
  "sqlx",
- "storage",
  "tokio",
  "tracing",
  "uuid",
@@ -4417,23 +4324,6 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "runtime"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "domain",
- "oxana",
- "redis",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -4610,21 +4500,6 @@ name = "seahash"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
-
-[[package]]
-name = "search"
-version = "0.1.0"
-dependencies = [
- "domain",
- "enrichment",
- "index",
- "serde",
- "serde_json",
- "sqlx",
- "storage",
- "tokio",
- "uuid",
-]
 
 [[package]]
 name = "sec1"
@@ -5144,29 +5019,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "storage"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "domain",
- "hex",
- "hmac 0.13.0",
- "image",
- "models",
- "reqwest",
- "rust_decimal",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sqlx",
- "thiserror",
- "tokio",
- "toml",
- "uuid",
-]
 
 [[package]]
 name = "stringprep"
@@ -5978,19 +5830,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "626c4bac6755d76ffc12cb01b2eac751db1996b9e0041de9aa02c8c211ddc82c"
 
 [[package]]
-name = "wiki"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "domain",
- "enrichment",
- "index",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6192,26 +6031,17 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
- "bid",
- "chunker",
- "clone",
+ "bidding",
  "docparser",
- "domain",
  "dotenvy",
- "enrichment",
- "graph",
- "index",
- "models",
- "obs",
+ "knowledge",
  "oxana",
- "runtime",
+ "platform",
  "serde_json",
  "sqlx",
- "storage",
  "tokio",
  "tracing",
  "uuid",
- "wiki",
 ]
 
 [[package]]

@@ -16,7 +16,7 @@ pub use engines::{EngineCatalog, EngineInfo, list_all_engines, local_engines, me
 pub use grpc::{ConvertRequest, DOCREADER_TIMEOUT, reader_addr};
 pub use images::{rewrite_images, rewrite_inline};
 
-use domain::{is_audio_type, is_image_type, is_simple_format};
+use platform::{is_audio_type, is_image_type, is_simple_format};
 
 pub const NOT_CONFIGURED: &str = "Document parsing service is not configured. Please use text/paragraph import or set DOCREADER_ADDR.";
 
@@ -279,6 +279,16 @@ pub async fn convert_tender_source(
     convert("builtin", file_name, &ext, false, bytes, "", file_name).await
 }
 
+fn default_engine_for_ext(ext: &str) -> String {
+    match ext {
+        "docx" | "doc" | "docm" | "xlsx" | "xls" | "xlsm" | "pptx" | "ppt" | "pptm" => {
+            "anydoc".into()
+        }
+        "pdf" => "builtin".into(),
+        _ => String::new(),
+    }
+}
+
 pub async fn convert_to_markdown(
     file_name: &str,
     bytes: Vec<u8>,
@@ -288,7 +298,7 @@ pub async fn convert_to_markdown(
         .next()
         .unwrap_or("txt")
         .to_ascii_lowercase();
-    let engine = domain::parser_engine_for(&serde_json::json!({}), None, &ext);
+    let engine = default_engine_for_ext(&ext);
     convert(&engine, file_name, &ext, false, bytes, "", file_name).await
 }
 

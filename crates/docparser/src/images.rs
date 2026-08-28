@@ -9,7 +9,7 @@ pub fn rewrite_inline(result: &ReadResult) -> (String, Vec<(String, Vec<u8>)>) {
         if img.data.is_empty() {
             continue;
         }
-        let hash = domain::sha256_hex(&img.data);
+        let hash = platform::sha256_hex(&img.data);
         let key = format!("objects/{hash}");
         replace_ref(&mut md, img, &key);
         blobs.push((hash, img.data.clone()));
@@ -32,7 +32,7 @@ pub async fn rewrite_images(result: &ReadResult) -> (String, Vec<(String, Vec<u8
     for url in candidates.into_iter().take(MAX_REMOTE_IMAGES) {
         match fetch_image(&url).await {
             Ok(data) if !data.is_empty() => {
-                let hash = domain::sha256_hex(&data);
+                let hash = platform::sha256_hex(&data);
                 let key = format!("objects/{hash}");
                 md = md.replace(&url, &key);
                 blobs.push((hash, data));
@@ -51,7 +51,7 @@ pub async fn rewrite_images(result: &ReadResult) -> (String, Vec<(String, Vec<u8
 fn remote_image_candidates(md: &str) -> Vec<String> {
     remote_urls(md)
         .into_iter()
-        .filter(|url| looks_like_image_url(url) && !domain::url_blocked(url))
+        .filter(|url| looks_like_image_url(url) && !platform::url_blocked(url))
         .collect()
 }
 
@@ -119,7 +119,7 @@ fn join_redirect(current: &str, location: &str) -> Result<String, String> {
 }
 
 async fn fetch_image(url: &str) -> Result<Vec<u8>, String> {
-    if domain::url_blocked(url) {
+    if platform::url_blocked(url) {
         return Err("url failed SSRF check".into());
     }
     let client = reqwest::Client::builder()
@@ -129,7 +129,7 @@ async fn fetch_image(url: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())?;
     let mut current = url.to_string();
     for _ in 0..=3 {
-        if domain::url_blocked(&current) {
+        if platform::url_blocked(&current) {
             return Err("url failed SSRF check".into());
         }
         let resp = client
@@ -186,14 +186,14 @@ mod tests {
         let key = format!("objects/{}", blobs[0].0);
         assert!(md.contains(&key), "{md}");
         assert!(!md.contains("images/p.png"));
-        assert_eq!(blobs[0].0, domain::sha256_hex(b"PNGDATA"));
+        assert_eq!(blobs[0].0, platform::sha256_hex(b"PNGDATA"));
     }
 
     #[test]
     fn redirect_to_loopback_is_blocked() {
         let next =
             join_redirect("https://example.com/a.png", "http://127.0.0.1/secret.png").unwrap();
-        assert!(domain::url_blocked(&next));
+        assert!(platform::url_blocked(&next));
         let rel = join_redirect("https://example.com/dir/a.png", "../b.png").unwrap();
         assert_eq!(rel, "https://example.com/b.png");
     }

@@ -3,7 +3,7 @@
 use api::{AppState, router_with};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use domain::Store;
+use knowledge::Store;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -21,7 +21,7 @@ const ONE_PIXEL_PNG: &[u8] = &[
 
 fn app() -> axum::Router {
     router_with(AppState {
-        store: Arc::new(Mutex::new(Store::default())),
+        test_catalog: Some(Arc::new(Mutex::new(Store::default()))),
         jwt_secret: "submission-contract-secret".into(),
         bootstrap_key: String::new(),
     })
@@ -317,7 +317,7 @@ fn minimal_pdf() -> Vec<u8> {
 }
 
 async fn live_submission_pool() -> Option<PgPool> {
-    let pool = match storage::connect().await {
+    let pool = match platform::connect().await {
         Ok(pool) => pool,
         Err(error) if std::env::var_os("DATABASE_URL").is_some() => {
             panic!("connect live Submission HTTP contract database: {error}")
@@ -387,7 +387,7 @@ async fn live_submission_pool() -> Option<PgPool> {
 
 async fn live_actor(pool: &PgPool) -> (axum::Router, String) {
     let user_id = Uuid::new_v4();
-    storage::insert_user(
+    knowledge::insert_user(
         pool,
         user_id,
         &format!("submission-contract-{user_id}@invalid.test"),
@@ -395,7 +395,7 @@ async fn live_actor(pool: &PgPool) -> (axum::Router, String) {
     )
     .await
     .unwrap();
-    let token = auth::issue_jwt(user_id, "submission-contract-secret").unwrap();
+    let token = platform::issue_jwt(user_id, "submission-contract-secret").unwrap();
     (app(), token)
 }
 
@@ -458,8 +458,8 @@ async fn procedural_listing_includes_frozen_segment_text() {
     let segment_id = Uuid::new_v4();
     let classification_id = Uuid::new_v4();
     let segment_text = "提交授权委托书原件";
-    let segment_sha256 = domain::sha256_hex(segment_text.as_bytes());
-    let stable_key = domain::sha256_hex(format!("{clause_id}:{segment_sha256}").as_bytes());
+    let segment_sha256 = platform::sha256_hex(segment_text.as_bytes());
+    let stable_key = platform::sha256_hex(format!("{clause_id}:{segment_sha256}").as_bytes());
 
     sqlx::query(
         "INSERT INTO bid_clauses(
@@ -708,7 +708,7 @@ async fn bid_routes_and_list_are_isolated_by_project_owner() {
     };
     let (app, owner_a_token) = live_actor(&pool).await;
     let owner_b = Uuid::new_v4();
-    storage::insert_user(
+    knowledge::insert_user(
         &pool,
         owner_b,
         &format!("submission-owner-{owner_b}@invalid.test"),
@@ -716,7 +716,7 @@ async fn bid_routes_and_list_are_isolated_by_project_owner() {
     )
     .await
     .unwrap();
-    let owner_b_token = auth::issue_jwt(owner_b, "submission-contract-secret").unwrap();
+    let owner_b_token = platform::issue_jwt(owner_b, "submission-contract-secret").unwrap();
     let project_a = create_project(&app, &owner_a_token, "Owner A project").await;
     let project_b = create_project(&app, &owner_b_token, "Owner B project").await;
 
@@ -871,7 +871,7 @@ async fn bid_sql_error_contracts_map_to_stable_http_statuses() {
     );
 
     let other_owner = Uuid::new_v4();
-    storage::insert_user(
+    knowledge::insert_user(
         &pool,
         other_owner,
         &format!("submission-error-owner-{other_owner}@invalid.test"),
@@ -879,7 +879,7 @@ async fn bid_sql_error_contracts_map_to_stable_http_statuses() {
     )
     .await
     .unwrap();
-    let other_token = auth::issue_jwt(other_owner, "submission-contract-secret").unwrap();
+    let other_token = platform::issue_jwt(other_owner, "submission-contract-secret").unwrap();
     let (hidden_status, hidden_body) = call(
         &app,
         json_request(

@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 anydoc = "=0.1.9"
-domain = { path = "../domain" }
+platform = { path = "../platform" }
 prost.workspace = true
 reqwest.workspace = true
 serde.workspace = true

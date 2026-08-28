@@ -3,7 +3,7 @@
 use api::{AppState, router_with};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use domain::Store;
+use knowledge::Store;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -12,7 +12,7 @@ use tower::ServiceExt;
 fn app() -> (axum::Router, Arc<Mutex<Store>>) {
     let store = Arc::new(Mutex::new(Store::default()));
     let router = router_with(AppState {
-        store: store.clone(),
+        test_catalog: Some(store.clone()),
         jwt_secret: "secret".into(),
         bootstrap_key: String::new(),
     });
@@ -21,12 +21,12 @@ fn app() -> (axum::Router, Arc<Mutex<Store>>) {
 
 fn seed_user(store: &Arc<Mutex<Store>>, email: &str) -> (String, String) {
     let id = uuid::Uuid::new_v4();
-    let hash = auth::hash_password("pw");
+    let hash = platform::hash_password("pw");
     {
         let mut s = store.lock().unwrap();
         s.users.insert(
             id,
-            domain::User {
+            knowledge::User {
                 id,
                 email: email.into(),
                 password_hash: hash,
@@ -35,7 +35,7 @@ fn seed_user(store: &Arc<Mutex<Store>>, email: &str) -> (String, String) {
         );
         s.users_by_email.insert(email.into(), id);
     }
-    let token = auth::issue_jwt(id, "secret").unwrap();
+    let token = platform::issue_jwt(id, "secret").unwrap();
     (token, id.to_string())
 }
 
@@ -411,7 +411,7 @@ async fn ingest_enqueue_fail_returns_200_and_failed_row() {
     let store = Arc::new(Mutex::new(Store::default()));
     store.lock().unwrap().enqueue_fail = true;
     let app = router_with(AppState {
-        store: store.clone(),
+        test_catalog: Some(store.clone()),
         jwt_secret: "secret".into(),
         bootstrap_key: String::new(),
     });

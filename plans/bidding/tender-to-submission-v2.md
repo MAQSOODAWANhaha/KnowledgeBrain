@@ -1,26 +1,48 @@
 # 招标文件驱动的投标文件编制 V2 实施方案
 
-> 状态：产品选择与技术边界已确认，第一轮审查修订已完成，等待复审。本文只描述如何实现 [`../../docs/platform/tender-to-submission-authoring.md`](../../docs/platform/tender-to-submission-authoring.md)，不得改变其“用户主导、Assessment只提示、clean-slate”的目标契约。
+> 状态：核心产品流程、Web 编制面与实现优先级已确认；Phase 0 已关闭，后续按用户可运行的纵向主流程推进。本文只描述如何实现 [`../../docs/bidding/authoring.md`](../../docs/bidding/authoring.md)，不得改变其“用户主导、Assessment只提示、Word 式画布、clean-slate”的目标契约。Web 黄金路径落地见 [`frontend-authoring.md`](frontend-authoring.md)。
 
 ## Context
 
 当前实现已经具备招标文件上传与转换、来源定位、条款/事实抽取、两路知识匹配、人工报价、固定 PartSet、manifest 和 DOCX/PDF 渲染基础，但最终组卷仍依赖固定 `1、2:*、3、4、5、6:*` part key，正文编辑仍是 Markdown Textarea，旧 `SubmissionGateV1` 仍具有业务阻断语义。该名称在本文只用于指认必须删除的旧实现，不属于 Target V2 设计。
 
-目标是 clean-slate 重构为：
+面向用户的唯一主流程是：
+
+```text
+上传招标文件 → 解析招标内容 → 生成并编辑投标大纲 → 从知识库填充内容 → 导出投标文件
+```
+
+用户看见的步骤只有 **文件 → 编制 → 导出**。freeze / checkpoint / 台账是后台身份，不是「确认后才能改」的界面。
+
+该主流程在当前领域设计中的内部映射是：
 
 ```text
 同一 BidProject 的多份招标文件
-→ 冻结 TenderDocumentSetRevision
+→ 冻结 TenderDocumentSetRevision（生成大纲时如需要则静默）
 → SourceUnit 与原子要求台账
 → WorkspaceRequirementProjection
-→ AI 建议的可编辑大纲树
-→ 用户确认 OutlineCheckpoint
-→ 按节点匹配知识与生成 ContentCandidate
-→ 用户全阶段编辑树、文字、表格、图片、表单和附件
+→ AI 建议的可编辑大纲树（Candidate overlay）
+→ 用户在 Word 式连续画布改树、改字
+→ 按节点匹配知识与生成 ContentCandidate（填充时如需要则静默 checkpoint）
 → advisory-only Assessment
 → RenderDocumentSnapshotV2
 → DOCX/PDF
 ```
+
+## 实现优先级与简化约束
+
+1. **P0：跑通主流程。** 优先交付上传、解析、大纲、知识库填充和导出五个可操作步骤；每个阶段都必须形成用户可验证的纵向切片。
+2. **P1：补齐主流程必需能力。** 包括人工修改、来源追踪、失败重试、基本并发保护和可重复导出；只实现当前切片真实需要的边界。
+3. **P2：体验与治理增强。** 高级Assessment、复杂资产治理、全面负例矩阵和切换治理在主流程稳定后继续，不得阻塞P0。
+
+实施必须遵守：
+
+- 不为未来可能需求预建第二套pipeline、通用调度框架、额外状态机或平行业务概念；优先复用现有上传、DocReader、知识检索和DOCX/PDF能力。
+- artifact、CAS和冻结identity只保留保障来源可追踪、人工编辑不丢失、重试不重复以及导出可复现所必需的部分，不把合同复杂度本身作为交付目标。
+- `migration-manifest.toml`、queue/cutover fixture和Phase 0合同维护不是Phase 1的主任务；仅在当前功能保持一致性确有需要或Phase 7切换时处理。
+- 不得通过随意添加`#[allow(...)]`、关闭lint或弱化测试来绕过实现问题；应通过拆分函数、收敛类型或修正根因满足规范。
+- 自动化工具超时本身不等于测试失败；以明确执行完成的测试、构建和验收结果为准。
+- 若某项设计不能直接服务上述五步主流程，应延后、删除或降级为后续增强。
 
 ## 已确认产品原则
 
@@ -34,7 +56,7 @@
 - 分阶段开发期间允许“未激活的V2源码/Schema/测试fixture”与当前V1实现暂时同库存在，以保证每阶段可编译验证；这不是运行时双模式：V2路由、queue registry和first-launch manifest在Phase 7前不得激活，Phase 7一次性切换并删除V1实现。
 - V1招标输入必须支持 PDF、DOCX、XLSX 和图片；现有 API 只接受 PDF/DOCX，因此 XLSX 与图片需要新增受检 parser adapter。
 - 每个BidProject恰好拥有一个project-wide SubmissionWorkspace，只生成一份投标文件。
-- UI采用“左侧大纲树 + 中间当前章节结构化编辑 + 右侧要求/证据 + 全文预览”，不模拟完整 Word 桌面应用。
+- UI 采用 Word 式三栏：左侧独立大纲导航、中间按树前序展开的连续画布（聚焦章 Tiptap，其余静态）、右侧当前章证据/提示。不是 Word 桌面应用（无功能区、无用户模板、无邮件合并），也不是 Markdown `#` 大纲。
 - 支持按单章节、子树或整份文档生成，但所有生成都由用户显式触发。
 - 招标文件是输入源，只用于解析项目要求、表格结构、固定格式提示和大纲依据；不得把招标方提供的图片或附件自动当作投标方证明材料插入输出。
 - 输出正文和图片只允许来自：知识库冻结证据、用户在当前Workspace人工插入的文字/资产、冻结QuoteSnapshot，以及基于上述来源生成的结构化内容。
@@ -42,7 +64,7 @@
 
 ## Approach
 
-采用纵向深模块加不可变身份链：
+按可运行的纵向切片推进；仅在主流程需要的位置使用深模块和不可变身份链，避免先横向铺开全部合同：
 
 ```text
 TenderDocumentSetRevision
@@ -63,27 +85,27 @@ TenderDocumentSetRevision
 
 ### 1. UI：投标文件编制工作区
 
-负责：
+黄金路径只做三步，细节以契约 §2.4 和 [`frontend-authoring.md`](frontend-authoring.md) 为准：
 
-- 项目文件集合与解析状态；
-- 要求台账和来源检查；
-- 三栏大纲/正文/要求证据工作区：左侧树、中间当前章节、右侧来源/证据；
-- 树节点新增、删除、改名、移动、拆分、合并和恢复；
-- 富文本、表格、结构化表单、图片、附件、分页和签章占位编辑；
-- AI 大纲/内容候选 diff 与逐块接受；
-- Assessment 提示、stale、评分缺口和独立检查报告；
-- 独立全文预览模式，使用结构化 WorkspaceRevision 渲染而不是直接预览编辑器内部 JSON；
-- DOCX/PDF 预览及导出。
+- 文件：项目文件集合与解析状态；
+- 编制：Word 式三栏。左独立大纲（点击跳转、拖拽调序/层级、增删改名拆合）；中 `DocumentCanvas` 按树前序叠章，聚焦章活 Tiptap，其余静态可点；右当前章证据/生成状态/提示；
+- 导出：当前 `WorkspaceRevision` 的 DOCX/PDF；业务提示不禁用按钮。
+
+另外：
+
+- AI 大纲/内容候选只 overlay，默认全选、可取消或部分接受；
+- 生成中、有候选、已 checkpoint 都不锁编辑器；
+- 独立 HTML preview 若保留，只渲染冻结 WorkspaceRevision，不读 Tiptap 内存 JSON；
+- 要求台账、报价、Document Settings 不是黄金路径必经步。
 
 可复用现有实现：
 
-- `web/src/bid/Workbench.tsx` 的项目数据加载和步骤容器；
+- `web/src/bid/Workbench.tsx` 的项目数据加载；收成 files / authoring / export；
 - `web/src/bid/FilesPane.tsx` 的多文件上传状态；
-- `web/src/bid/MatchingPane.tsx`、`MaterialsPane.tsx` 的证据选择交互；
-- `web/src/bid/QuotePane.tsx` 的人工报价；
-- `web/src/bid/gfm.tsx` 仅作为旧内容预览/迁移参考，不作为 V2 编辑真源。
+- `web/src/bid/authoring/OutlineTree.tsx`、`SectionEditor.tsx`、`adapter.ts`、`drafts.ts`；
+- `web/src/bid/gfm.tsx` 仅作为旧内容参考，不作为 V2 编辑真源。
 
-计划新增：`AuthoringShell`、`OutlineTree`、`SectionEditor`、`FullDocumentPreview`、`RequirementInspector`、`CandidateReview`、`AssessmentDrawer`、`WorkspaceAssetLibrary`。编辑器采用 Tiptap/ProseMirror Adapter，前端编辑状态必须转换为后端拥有的 `ContentBlockV1`，不得把第三方编辑器 JSON 直接作为领域真源。
+计划新增：`AuthoringShell`、`DocumentCanvas`、`StaticBlock`、`CandidateReview`。编辑器采用 Tiptap Adapter，前端编辑状态必须转换为后端拥有的 `ContentBlockV1`，不得把第三方编辑器 JSON 直接作为领域真源。
 
 ### 2. HTTP API 与 application interface
 
@@ -470,28 +492,25 @@ GET workspace/preview返回`ETag=workspace_sha256`。Workspace树/block/settings
 
 ### 14. Web状态、编辑器与交互
 
-Hash route从固定`part`改为稳定workspace/node identity：
+Hash route 黄金路径只有三步，编制步用稳定 node lineage：
 
 ```text
 #/bids/:projectId/files
-#/bids/:projectId/requirements
-#/bids/:projectId/quote
 #/bids/:projectId/authoring/:nodeLineageId?
-#/bids/:projectId/preview
 #/bids/:projectId/export
 ```
 
-`AuthoringShell`布局：
+`requirements` / `quote` / `preview` 若仍存在，只是次入口，不得做成向导前置锁。布局与交互不得偏离契约 §2.4：
 
-- 左：可拖拽OutlineTree，节点增删改名、移动、split/merge；
-- 中：当前SectionEditor，支持RichText、table/structured form、image、attachment、page break和signature placeholder；
-- 右：Tender Requirements、Knowledge Evidence、Manual Assets、Assessment四个tab；Knowledge Evidence同时提供当前章节和整份文档覆盖概览，不设置强制独立匹配步骤；
-- 顶部：生成本章/子树/全部空章节、证据模式、Candidate review和Document Settings入口；
-- 独立Preview route：展示后端`render/html.rs`基于冻结WorkspaceRevision生成的全文，不直接渲染Tiptap内部JSON。
+- 左：可拖拽 OutlineTree，点击只负责跳转；节点增删改名、移动、split/merge；
+- 中：`DocumentCanvas` 按树前序把各章叠成一篇；聚焦章 Tiptap，其余静态渲染、点击后聚焦；章标题来自树，正文关闭 heading；
+- 右：当前章证据、生成状态、Assessment 提示；不设置强制独立匹配步骤；
+- 顶部：生成大纲、填充（本章 / 全部空章）、导出 DOCX/PDF；
+- 可选独立 Preview：后端基于冻结 WorkspaceRevision 生成 HTML，不直接渲染 Tiptap 内部 JSON。
 
-引入Tiptap packages：React、StarterKit、Underline、Link、Table/Row/Header/Cell、Image和自定义EvidenceRef extension。`editorAdapter.ts`是唯一的Tiptap JSON ↔ `ContentBlockV1`转换点；领域API和数据库从不保存第三方editor schema。
+Tiptap packages：React、StarterKit、Underline、Link、Table/Row/Header/Cell、Image 和自定义 EvidenceRef。`adapter.ts` 是唯一的 Tiptap JSON ↔ `ContentBlockV1` 转换点；领域 API 和数据库从不保存第三方 editor schema。
 
-编辑器保存使用短延迟autosave加显式保存：本地draft只有收到新WorkspaceRevision receipt后才清除。409时保留draft，加载server head并显示冲突选择，不做last-write-wins。CandidateReview按operation显示文本/表格diff和图片缩略图，允许部分接受；系统建议证据与Candidate一起确认。
+树 mutation 立即 CAS。正文短防抖 autosave；本地 draft 只有收到新 WorkspaceRevision receipt 后才清除。刷新与轮询不得冲掉未保存草稿。409 时保留 draft，不做 last-write-wins。CandidateReview 显示大纲树 diff 或文本/表格/图片 diff，允许部分接受；过期候选不覆盖人改。
 
 ### 15. Render实现
 
@@ -511,17 +530,19 @@ Hash route从固定`part`改为稳定workspace/node identity：
 
 ### 规范与计划
 
-- `docs/platform/tender-to-submission-authoring.md`
-- `docs/bidding/domain.md`
+- `PRODUCT.md`、`DESIGN.md`
+- `docs/bidding/authoring.md`
+- `plans/bidding/frontend-authoring.md`
+- `docs/bidding/current-code.md`
 - `docs/knowledge-base/domain.md`（链接独立评审的V3 media合同）
 - `plans/knowledge-base/bidding-evidence-media-v3.md`
 - `plans/knowledge-base/README.md`
 - `docs/bidding/README.md`
 - `plans/bidding/README.md`
-- `plans/bidding/tender-publication.md`
-- `plans/bidding/matching.md`
-- `plans/bidding/submission-export.md`
-- `plans/bidding/implementation-acceptance.md`
+- `plans/bidding/current-code/tender-publication.md`
+- `plans/bidding/current-code/matching.md`
+- `plans/bidding/current-code/submission-export.md`
+- `plans/bidding/current-code/implementation-acceptance.md`
 
 ### Parser、Rust与数据库
 
@@ -543,12 +564,13 @@ Hash route从固定`part`改为稳定workspace/node identity：
 
 ### Web
 
-- `web/package.json`（新增Tiptap/ProseMirror编辑器依赖）；
-- `web/src/api.ts`拆出`web/src/bid/api/*`的V2 DTO/client；
-- `web/src/hash.ts`删除`part`路由；
-- `web/src/bid/Workbench.tsx`、`Sidebar.tsx`、`FilesPane.tsx`；
-- 删除`web/src/bid/PartsPane.tsx`，新增`web/src/bid/authoring/*`；
-- 更新`web/e2e/bid-v1-flow.spec.ts`、`bid-v1-live.spec.ts`为V2资源和动态树场景。
+Web 文件级步骤以 [`frontend-authoring.md`](frontend-authoring.md) 为准，不在本文重写交互。至少包括：
+
+- `web/package.json`（Tiptap 已在 `web/`，不要在仓库根另起一份）；
+- `web/src/bid/Workbench.tsx` 收成 files / authoring / export；
+- 新增 `DocumentCanvas`、`StaticBlock`、`CandidateReview`；
+- `OutlineTree` 拖拽、`SectionEditor` 收成聚焦章编辑器；
+- 删除 `part` 路由与 Markdown 编辑真源；更新 E2E 为黄金路径。
 
 ## Reuse
 
@@ -566,7 +588,7 @@ Hash route从固定`part`改为稳定workspace/node identity：
 
 ### Phase 0：冻结合同和fresh cutover边界
 
-- [x] 更新`docs/bidding/domain.md`、knowledge retrieval V3合同和各旧bidding计划，使其引用本文而不继续定义fixed Part/Gate；
+- [x] 更新`docs/bidding/current-code.md`、knowledge retrieval V3合同和各旧bidding计划，使其引用本文而不继续定义fixed Part/Gate；
 - [x] 将ContentBlockV1、workspace operation、agent input/output、EvidenceBundle、Assessment和RenderSnapshot JSON Schema放入`crates/bid/schemas/`并加golden hash测试；
 - [x] 定义尚未注册到active runtime的`TenderDocumentProcess|RequirementSetCompile|OutlineGenerate|ContentGenerate(match_only|generate)|SubmissionExport`五类V2 job payload、稳定request identity和错误码；新增独立V2 queue-registry fixture验证queue/task、handler、snapshot与能力，并新增不注册到active worker的Oxana Queue/Job/Worker policy contract来冻结concurrency/unique/retry/backoff所有权；
 - [x] 新建`bidding_v2_baseline.sql`和独立first-launch V2 manifest fixture，增加空库V2 baseline测试；不得在本阶段替换active manifest/queue registry或删除V1，以保持现有构建与测试可运行。
@@ -668,11 +690,13 @@ Phase 0第十二轮P1修复后实现证据（等待独立review verdict）：详
 
 - [x] 扩展upload magic/container validator；
 - [x] 扩展DocReader proto/ReadResult返回`StructuredSourceUnit`；DocReader只拥有图片/表格的结构来源元数据（XLSX sheet/cell/merge identity、图片原始引用/region），现有`ImageParser`不承担OCR内容生成；
-- [ ] 拆分`tender.rs`，复用`outline_and_route`；`TenderDocumentProcess`对独立图片强制使用受检builtin parser路径而非simple byte passthrough，并由Rust侧复用现有enrichment OCR/VLM路径，冻结ObjectRegistry/source identities，发布带revision身份的section/table_row/form_region/attachment_region/image_ocr_region SourceUnit，SourceSpanV2仅作locator；
+- [x] 拆分`tender.rs`，复用`outline_and_route`；`TenderDocumentProcess`对独立图片强制使用受检builtin parser路径而非simple byte passthrough，并由Rust侧复用现有enrichment OCR/VLM路径，冻结ObjectRegistry/source identities，发布带revision身份的section/table_row/form_region/attachment_region/image_ocr_region SourceUnit，SourceSpanV2仅作locator；
 - [ ] 实现用户确认/修改document role、typed relation和显式DocumentSetRevision freeze；
 - [ ] 实现每SourceUnitRevision恰好一Disposition、RequirementSourceRevision、RequirementSet、局部supersession和唯一WorkspaceRequirementProjection；
-- [ ] `TenderDocumentProcess`只发布单document SourceUnit，不创建或enqueue RequirementSetCompile；
+- [x] `TenderDocumentProcess`只发布单document SourceUnit，不创建或enqueue RequirementSetCompile；
 - [ ] 成功冻结DocumentSet时发布初始DispositionSet并enqueue以project+DocumentSetRevision+DispositionSetRevision唯一的`RequirementSetCompile`，后续DispositionSet publication同样enqueue；RequirementSet使用单调输入栅栏确定性发布，不持久化continuation状态。
+
+当前实施顺序固定为：先完成role/relation确认与DocumentSet冻结，再提供生成大纲所需的最小RequirementProjection；随后立即进入大纲生成、知识库填充和导出纵向流程。全面合同扩展和治理验收不得插队。
 
 验收：PDF、DOCX、含多sheet/合并单元格的XLSX、PNG/JPEG/WebP fixture都可上传；role/relation可确认；用户可冻结文件集；来源能回到文件/page/sheet/cell/attachment region，独立或扫描图片OCR发布`image_ocr_region`；每个SourceUnit恰好一个disposition；一份amendment只替代指定Requirement。
 
@@ -689,7 +713,7 @@ Task 1B实现前发现两项合同缺口：V1 `SourceSpanV2`只有Markdown secti
 - [ ] 创建唯一workspace、node/block/binding lineage与revision、WorkspaceRevision/head、DocumentSettingsRevision和SubmissionFulfillmentEvidenceRevision；binding occurrence纳入WorkspaceRevision，bind/remap/unbind与树/block/settings共用WorkspaceHead CAS且没有独立current pointer；
 - [ ] 实现`ContentBlockV1`封闭serde/schema与Tiptap adapter；
 - [ ] 实现`/api/v2` project/tender/workspace/mutation/assets API；
-- [ ] 新建AuthoringShell、OutlineTree、SectionEditor和受控DocumentSettings面板，先支持用户从空树人工编制、插表格/图片并保存；
+- [ ] Web 按 [`frontend-authoring.md`](frontend-authoring.md) 落地 `AuthoringShell`、`OutlineTree`、`DocumentCanvas`（聚焦章 Tiptap，其余静态）；先支持用户从空树人工编制、拖拽调序、插表格/图片并保存。Document Settings 面板不在黄金路径竖切。
 - [ ] 实现409 conflict保留draft；相同Idempotency-Key重放首次request/receipt，若业务状态仍pending则再次尝试Oxana enqueue。
 
 验收：两个并发Workspace编辑者不能互相覆盖；DocumentSet/DispositionSet/RequirementSet并发只冲突各自聚合；rename/move/split/merge/delete保持lineage；bind/remap/unbind保留历史并正确使evidence stale；页面刷新后树、blocks和人工资产一致。
@@ -698,7 +722,7 @@ Task 1B实现前发现两项合同缺口：V1 `SourceSpanV2`只有Markdown secti
 
 - [ ] 实现OutlineGenerate request snapshot、agent schema、bounded verifier和一次repair；
 - [ ] 按招标明确组成、表格/表单结构、资格/技术/商务/评分要求编译动态树；
-- [ ] 实现OutlineCandidate review、部分接受、CAS和OutlineCheckpoint；
+- [ ] 实现 OutlineCandidate overlay（默认全选、可取消节点）、部分接受、CAS；checkpoint 若生成内容需要则在「填充」时静默建立，界面不得出现「确认后才能改」。
 - [ ] 删除任何固定标题、part key或默认六部分假设。
 
 验收：至少四类golden tender产生不同树形；用户可删除强制节点并仍确认；新文件发布后旧candidate变obsolete、已接受人工树只变stale。
@@ -773,7 +797,7 @@ scripts/bidding_v2_deletion_scan.sh
 
 - 输入格式：PDF、DOCX、XLSX、PNG、JPEG、WebP；图片执行OCR和要求提取；
 - 输入/输出边界：招标文件只驱动要求、大纲和结构；投标正文/图片来自知识库匹配、人工输入/插入及冻结QuoteSnapshot；
-- UI：树/章节编辑/要求证据三栏，加独立全文预览；不模拟完整Word；
+- UI：Word 式左树 / 中连续画布 / 右证据提示；Tiptap WYSIWYG；不是 Word 桌面应用，也不是 Markdown 大纲；
 - 生成：单章节、子树和整份均支持，全部由用户触发；
 - XLSX：只解析内容和表格结构，不实现Excel编辑，不作为输出模板；
 - 输出样式：不使用用户模板；用户可修改受控全局DocumentSettings，系统`RenderStyleContractV1`据此把结构化树和ContentBlock生成DOCX/PDF；

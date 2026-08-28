@@ -47,7 +47,7 @@ where
 {
     delete::<H, T, AppState>(h)
 }
-use domain::{
+use knowledge::{
     ApiKey, Document, ParseStatus, Product, ProductKind, ProductVersion, Role, Store,
     TYPE_DATATABLE, TYPE_DOCUMENT_PROCESS, TYPE_KB_DELETE, TYPE_LIST_DELETE, TYPE_LIST_REPARSE,
     TYPE_MANUAL_PROCESS, Tag, User, VersionStatus, Workspace, is_audio_type, is_image_type,
@@ -56,6 +56,7 @@ use domain::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
 use uuid::Uuid;
 
 pub fn build(state: AppState) -> Router {
@@ -186,9 +187,9 @@ pub fn build(state: AppState) -> Router {
         .route("/metrics", get_s(metrics))
         .merge(crate::bid_routes::router(state.clone()))
         .layer(DefaultBodyLimit::max(
-            domain::max_file_bytes() + 1024 * 1024,
+            platform::max_file_bytes() + 1024 * 1024,
         ));
-    let app = if let Some((storage, catalog)) = runtime::dashboard_catalog() {
+    let app = if let Some((storage, catalog)) = platform::dashboard_catalog() {
         let ui = oxana_web::router(oxana_web::OxanaWebState::new(
             storage,
             catalog,
@@ -225,7 +226,7 @@ async fn oxana_admin_gate(
     next: Next,
 ) -> Result<Response, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_admin(&state, &actor)?;
+    require_admin(&state, &actor).await?;
     Ok(next.run(request).await)
 }
 
@@ -236,18 +237,18 @@ async fn health(State(_state): State<AppState>) -> Json<HealthBody> {
     })
 }
 
-async fn live() -> Json<storage::LiveBody> {
-    Json(storage::live_body("api"))
+async fn live() -> Json<knowledge::LiveBody> {
+    Json(platform::live_body("api"))
 }
 
-async fn ready() -> (StatusCode, Json<storage::ReadyBody>) {
-    let check = storage::check_readiness().await;
+async fn ready() -> (StatusCode, Json<knowledge::ReadyBody>) {
+    let check = knowledge::check_readiness().await;
     let status = if check.is_ready() {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    (status, Json(storage::ready_body("api", &check)))
+    (status, Json(platform::ready_body("api", &check)))
 }
 
 pub(crate) type ApiErr = (StatusCode, Json<ErrorBody>);
@@ -335,51 +336,90 @@ fn merge_catalog(dst: &mut Store, src: Store) {
     dst.wiki.extend(src.wiki);
 }
 
-pub(crate) async fn ensure_workspace(state: &AppState, workspace_id: Uuid) {
-    let Ok(pool) = storage::connect().await else {
+struct Catalog {
+    store: Store,
+    sink: Option<std::sync::Arc<std::sync::Mutex<Store>>>,
+}
+
+impl Drop for Catalog {
+    fn drop(&mut self) {
+        if let Some(sink) = &self.sink
+            && let Ok(mut guard) = sink.lock()
+        {
+            *guard = std::mem::take(&mut self.store);
+        }
+    }
+}
+
+impl Deref for Catalog {
+    type Target = Store;
+    fn deref(&self) -> &Store {
+        &self.store
+    }
+}
+
+impl DerefMut for Catalog {
+    fn deref_mut(&mut self) -> &mut Store {
+        &mut self.store
+    }
+}
+
+/// Tests snapshot the in-memory catalog and write it back on drop.
+/// Production gets an empty local Store that `ensure_workspace` fills from Postgres.
+async fn lock(state: &AppState) -> Result<Catalog, ApiErr> {
+    if let Some(sink) = &state.test_catalog {
+        let store = sink.lock().map_err(|_| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "VALIDATION",
+                "store lock",
+            )
+        })?
+        .clone();
+        return Ok(Catalog {
+            store,
+            sink: Some(sink.clone()),
+        });
+    }
+    Ok(Catalog {
+        store: Store::default(),
+        sink: None,
+    })
+}
+
+pub(crate) async fn ensure_workspace(store: &mut Store, workspace_id: Uuid) {
+    let Ok(pool) = platform::connect().await else {
         return;
     };
     let mut tmp = Store::default();
-    if !storage::hydrate_workspace(&pool, &mut tmp, workspace_id)
+    if !knowledge::hydrate_workspace(&pool, &mut tmp, workspace_id)
         .await
         .unwrap_or(false)
     {
         return;
     }
-    if let Ok(mut s) = lock(state) {
-        merge_catalog(&mut s, tmp);
-    }
+    merge_catalog(store, tmp);
 }
 
-async fn ensure_user_workspaces(state: &AppState, user_id: Uuid) {
-    let Ok(pool) = storage::connect().await else {
+async fn ensure_user_workspaces(store: &mut Store, user_id: Uuid) {
+    let Ok(pool) = platform::connect().await else {
         return;
     };
-    let Ok(ids) = storage::workspaces_for_user(&pool, user_id).await else {
+    let Ok(ids) = knowledge::workspaces_for_user(&pool, user_id).await else {
         return;
     };
     for id in ids {
-        ensure_workspace(state, id).await;
+        ensure_workspace(store, id).await;
     }
 }
 
-async fn ensure_product(state: &AppState, product_id: Uuid) {
-    let Ok(pool) = storage::connect().await else {
+async fn ensure_product(store: &mut Store, product_id: Uuid) {
+    let Ok(pool) = platform::connect().await else {
         return;
     };
-    if let Ok(Some(ws)) = storage::product_workspace_id(&pool, product_id).await {
-        ensure_workspace(state, ws).await;
+    if let Ok(Some(ws)) = knowledge::product_workspace_id(&pool, product_id).await {
+        ensure_workspace(store, ws).await;
     }
-}
-
-fn lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, Store>, ApiErr> {
-    state.store.lock().map_err(|_| {
-        fail(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "VALIDATION",
-            "store lock",
-        )
-    })
 }
 
 #[derive(Clone)]
@@ -403,17 +443,17 @@ pub(crate) async fn actor_from(headers: &HeaderMap, state: &AppState) -> Result<
         if !state.bootstrap_key.is_empty() && raw == state.bootstrap_key {
             return Ok(Actor::Bootstrap);
         }
-        let hash = auth::hash_password(raw);
+        let hash = platform::hash_password(raw);
         {
-            let s = lock(state)?;
+            let s = lock(state).await?;
             if let Some(key) = s.api_keys.values().find(|k| k.key_hash == hash).cloned() {
                 return Ok(Actor::Key(key));
             }
         }
-        if let Ok(pool) = storage::connect().await
-            && let Ok(Some(key)) = storage::find_api_key_by_hash(&pool, &hash).await
+        if let Ok(pool) = platform::connect().await
+            && let Ok(Some(key)) = knowledge::find_api_key_by_hash(&pool, &hash).await
         {
-            if let Ok(mut s) = lock(state) {
+            if let Ok(mut s) = lock(state).await {
                 s.api_keys.insert(key.id, key.clone());
             }
             return Ok(Actor::Key(key));
@@ -425,7 +465,7 @@ pub(crate) async fn actor_from(headers: &HeaderMap, state: &AppState) -> Result<
         .and_then(|v| v.to_str().ok())
         .ok_or_else(unauthorized)?;
     let token = raw.strip_prefix("Bearer ").ok_or_else(unauthorized)?;
-    let uid = auth::parse_jwt(token, &state.jwt_secret).map_err(|_| unauthorized())?;
+    let uid = platform::parse_jwt(token, &state.jwt_secret).map_err(|_| unauthorized())?;
     Ok(Actor::User(uid))
 }
 
@@ -489,10 +529,10 @@ async fn register_local(
     State(state): State<AppState>,
     Json(body): Json<AuthBody>,
 ) -> Result<Json<TokenBody>, ApiErr> {
-    let hash = auth::hash_password(&body.password);
+    let hash = platform::hash_password(&body.password);
     let email = body.email.clone();
     let id = {
-        let mut s = lock(&state)?;
+        let mut s = lock(&state).await?;
         if s.users_by_email.contains_key(&body.email) {
             return Err(fail(StatusCode::CONFLICT, "CONFLICT", "email taken"));
         }
@@ -509,10 +549,10 @@ async fn register_local(
         s.users_by_email.insert(body.email, id);
         id
     };
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::insert_user(&pool, id, &email, Some(&hash)).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::insert_user(&pool, id, &email, Some(&hash)).await;
     }
-    let token = auth::issue_jwt(id, &state.jwt_secret).map_err(|e| validation(&e.to_string()))?;
+    let token = platform::issue_jwt(id, &state.jwt_secret).map_err(|e| validation(&e.to_string()))?;
     Ok(Json(TokenBody { token, user_id: id }))
 }
 
@@ -520,7 +560,7 @@ async fn login(
     State(state): State<AppState>,
     Json(body): Json<AuthBody>,
 ) -> Result<Json<TokenBody>, ApiErr> {
-    if auth::local_open() {
+    if platform::local_open() {
         let email = {
             let t = body.email.trim();
             if t.is_empty() {
@@ -531,13 +571,13 @@ async fn login(
         };
         let id = ensure_local_user(&state, &email).await?;
         let token =
-            auth::issue_jwt(id, &state.jwt_secret).map_err(|e| validation(&e.to_string()))?;
+            platform::issue_jwt(id, &state.jwt_secret).map_err(|e| validation(&e.to_string()))?;
         return Ok(Json(TokenBody { token, user_id: id }));
     }
-    if !auth::ldap_url().is_empty() {
-        let dn = auth::ldap_bind(&body.email, &body.password).map_err(|_| unauthorized())?;
+    if !platform::ldap_url().is_empty() {
+        let dn = platform::ldap_bind(&body.email, &body.password).map_err(|_| unauthorized())?;
         let id = {
-            let mut s = lock(&state)?;
+            let mut s = lock(&state).await?;
             if let Some(id) = s.users_by_email.get(&body.email).copied() {
                 if let Some(u) = s.users.get_mut(&id) {
                     u.ldap_dn = dn.clone();
@@ -558,23 +598,23 @@ async fn login(
                 id
             }
         };
-        if let Ok(pool) = storage::connect().await {
-            let _ = storage::insert_user(&pool, id, &body.email, None).await;
+        if let Ok(pool) = platform::connect().await {
+            let _ = knowledge::insert_user(&pool, id, &body.email, None).await;
         }
         let token =
-            auth::issue_jwt(id, &state.jwt_secret).map_err(|e| validation(&e.to_string()))?;
+            platform::issue_jwt(id, &state.jwt_secret).map_err(|e| validation(&e.to_string()))?;
         return Ok(Json(TokenBody { token, user_id: id }));
     }
     let mem = {
-        let s = lock(&state)?;
+        let s = lock(&state).await?;
         s.users_by_email
             .get(&body.email)
             .and_then(|id| s.users.get(id).cloned())
     };
     let u = if let Some(u) = mem {
         u
-    } else if let Ok(pool) = storage::connect().await {
-        let row = storage::find_user_by_email(&pool, &body.email)
+    } else if let Ok(pool) = platform::connect().await {
+        let row = knowledge::find_user_by_email(&pool, &body.email)
             .await
             .ok()
             .flatten()
@@ -585,7 +625,7 @@ async fn login(
             password_hash: row.2,
             ldap_dn: String::new(),
         };
-        if let Ok(mut s) = lock(&state) {
+        if let Ok(mut s) = lock(&state).await {
             s.users_by_email.insert(u.email.clone(), u.id);
             s.users.insert(u.id, u.clone());
         }
@@ -593,10 +633,10 @@ async fn login(
     } else {
         return Err(unauthorized());
     };
-    if !auth::verify_password(&body.password, &u.password_hash) {
+    if !platform::verify_password(&body.password, &u.password_hash) {
         return Err(unauthorized());
     }
-    let token = auth::issue_jwt(u.id, &state.jwt_secret).map_err(|e| validation(&e.to_string()))?;
+    let token = platform::issue_jwt(u.id, &state.jwt_secret).map_err(|e| validation(&e.to_string()))?;
     Ok(Json(TokenBody {
         token,
         user_id: u.id,
@@ -611,15 +651,15 @@ struct MeBody {
 
 async fn ensure_local_user(state: &AppState, email: &str) -> Result<Uuid, ApiErr> {
     {
-        let s = lock(state)?;
+        let s = lock(state).await?;
         if let Some(id) = s.users_by_email.get(email).copied() {
             return Ok(id);
         }
     }
-    if let Ok(pool) = storage::connect().await
-        && let Ok(Some((id, db_email, hash))) = storage::find_user_by_email(&pool, email).await
+    if let Ok(pool) = platform::connect().await
+        && let Ok(Some((id, db_email, hash))) = knowledge::find_user_by_email(&pool, email).await
     {
-        if let Ok(mut s) = lock(state) {
+        if let Ok(mut s) = lock(state).await {
             s.users.insert(
                 id,
                 User {
@@ -635,7 +675,7 @@ async fn ensure_local_user(state: &AppState, email: &str) -> Result<Uuid, ApiErr
     }
     let id = Uuid::new_v4();
     {
-        let mut s = lock(state)?;
+        let mut s = lock(state).await?;
         s.users.insert(
             id,
             User {
@@ -647,8 +687,8 @@ async fn ensure_local_user(state: &AppState, email: &str) -> Result<Uuid, ApiErr
         );
         s.users_by_email.insert(email.into(), id);
     }
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::insert_user(&pool, id, email, None).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::insert_user(&pool, id, email, None).await;
     }
     Ok(id)
 }
@@ -656,7 +696,7 @@ async fn ensure_local_user(state: &AppState, email: &str) -> Result<Uuid, ApiErr
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<MeBody>, ApiErr> {
     let uid = user_from(&headers, &state).await?;
     {
-        let s = lock(&state)?;
+        let s = lock(&state).await?;
         if let Some(u) = s.users.get(&uid) {
             return Ok(Json(MeBody {
                 id: u.id,
@@ -664,10 +704,10 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Me
             }));
         }
     }
-    if let Ok(pool) = storage::connect().await
-        && let Ok(Some((id, email))) = storage::find_user_by_id(&pool, uid).await
+    if let Ok(pool) = platform::connect().await
+        && let Ok(Some((id, email))) = knowledge::find_user_by_id(&pool, uid).await
     {
-        if let Ok(mut s) = lock(&state) {
+        if let Ok(mut s) = lock(&state).await {
             s.users.insert(
                 id,
                 User {
@@ -696,15 +736,15 @@ async fn patch_me(
 ) -> Result<Json<MeBody>, ApiErr> {
     let uid = user_from(&headers, &state).await?;
     let email = {
-        let mut s = lock(&state)?;
+        let mut s = lock(&state).await?;
         let u = s.users.get_mut(&uid).ok_or_else(|| not_found("user"))?;
         if let Some(e) = body.email {
             u.email = e;
         }
         u.email.clone()
     };
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::update_user_email(&pool, uid, &email).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::update_user_email(&pool, uid, &email).await;
     }
     Ok(Json(MeBody { id: uid, email }))
 }
@@ -724,18 +764,18 @@ async fn create_workspace(
 ) -> Result<(StatusCode, Json<WorkspaceView>), ApiErr> {
     let uid = user_from(&headers, &state).await?;
     let kind = match body.kind.as_deref() {
-        Some("company") => domain::WorkspaceKind::Company,
-        _ => domain::WorkspaceKind::ProductLine,
+        Some("company") => knowledge::WorkspaceKind::Company,
+        _ => knowledge::WorkspaceKind::ProductLine,
     };
     let (view, ws_id, ws_name, ws_slug, kind_s) = {
-        let mut s = lock(&state)?;
+        let mut s = lock(&state).await?;
         if s.workspaces.values().any(|w| w.slug == body.slug) {
             return Err(fail(StatusCode::CONFLICT, "CONFLICT", "slug taken"));
         }
-        if kind == domain::WorkspaceKind::Company
+        if kind == knowledge::WorkspaceKind::Company
             && s.workspaces
                 .values()
-                .any(|w| w.kind == domain::WorkspaceKind::Company)
+                .any(|w| w.kind == knowledge::WorkspaceKind::Company)
         {
             return Err(fail(
                 StatusCode::CONFLICT,
@@ -762,9 +802,9 @@ async fn create_workspace(
         s.workspaces.insert(ws.id, ws);
         ids
     };
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::insert_workspace_kind(&pool, ws_id, &ws_name, &ws_slug, kind_s).await;
-        let _ = storage::insert_member(&pool, ws_id, uid, "owner").await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::insert_workspace_kind(&pool, ws_id, &ws_name, &ws_slug, kind_s).await;
+        let _ = knowledge::insert_member(&pool, ws_id, uid, "owner").await;
     }
     Ok((StatusCode::CREATED, Json(view)))
 }
@@ -774,7 +814,7 @@ struct WorkspaceView {
     id: Uuid,
     name: String,
     slug: String,
-    kind: domain::WorkspaceKind,
+    kind: knowledge::WorkspaceKind,
 }
 
 impl WorkspaceView {
@@ -793,17 +833,17 @@ async fn list_workspaces(
     headers: HeaderMap,
 ) -> Result<Json<Vec<WorkspaceView>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::ensure_company_workspace(&pool).await;
-        if let Ok(ids) = storage::list_workspace_ids(&pool).await {
+                let mut s = lock(&state).await?;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::ensure_company_workspace(&pool).await;
+        if let Ok(ids) = knowledge::list_workspace_ids(&pool).await {
             for id in ids {
-                ensure_workspace(&state, id).await;
+                ensure_workspace(&mut s,  id).await;
             }
         }
     } else if let Some(uid) = actor.user_id() {
-        ensure_user_workspaces(&state, uid).await;
+        ensure_user_workspaces(&mut s,  uid).await;
     }
-    let s = lock(&state)?;
     let out = s
         .workspaces
         .values()
@@ -819,8 +859,8 @@ async fn get_workspace(
     Path(id): Path<Uuid>,
 ) -> Result<Json<WorkspaceView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_workspace(&state, id).await;
-    let s = lock(&state)?;
+    let mut s = lock(&state).await?;
+    ensure_workspace(&mut s, id).await;
     require_ws(&s, id, &actor, false, false)?;
     let w = s
         .workspaces
@@ -841,9 +881,9 @@ async fn patch_workspace(
     Json(body): Json<PatchWs>,
 ) -> Result<Json<WorkspaceView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_workspace(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_workspace(&mut s,  id).await;
     let view = {
-        let mut s = lock(&state)?;
         require_ws(&s, id, &actor, false, true)?;
         let w = s
             .workspaces
@@ -854,8 +894,8 @@ async fn patch_workspace(
         }
         WorkspaceView::from(w)
     };
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::update_workspace_name(&pool, id, &view.name).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::update_workspace_name(&pool, id, &view.name).await;
     }
     Ok(Json(view))
 }
@@ -866,9 +906,9 @@ async fn delete_workspace(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_workspace(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_workspace(&mut s,  id).await;
     let versions = {
-        let mut s = lock(&state)?;
         require_ws(&s, id, &actor, false, true)?;
         let versions: Vec<_> = s
             .products
@@ -884,7 +924,7 @@ async fn delete_workspace(
         for vid in &versions {
             s.enqueue(
                 TYPE_KB_DELETE,
-                domain::QUEUE_LOW,
+                platform::QUEUE_LOW,
                 json!({ "product_version_id": vid }),
             );
         }
@@ -902,20 +942,20 @@ async fn delete_workspace(
         s.workspaces.remove(&id);
         versions
     };
-    if let Ok(pool) = storage::connect().await {
+    if let Ok(pool) = platform::connect().await {
         let mut vids = versions.clone();
-        if let Ok(pg) = storage::version_ids_for_workspace(&pool, id).await {
+        if let Ok(pg) = knowledge::version_ids_for_workspace(&pool, id).await {
             for v in pg {
                 if !vids.contains(&v) {
                     vids.push(v);
                 }
             }
         }
-        let _ = storage::cancel_active_docs_for_versions(&pool, &vids).await;
+        let _ = knowledge::cancel_active_docs_for_versions(&pool, &vids).await;
         for vid in vids {
-            let _ = runtime::enqueue_kb_delete(vid).await;
+            let _ = platform::enqueue_kb_delete(vid).await;
         }
-        let _ = storage::retire_workspace(&pool, id).await;
+        let _ = knowledge::retire_workspace(&pool, id).await;
     }
     Ok(StatusCode::ACCEPTED)
 }
@@ -932,8 +972,8 @@ async fn list_members(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<MemberView>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_workspace(&state, id).await;
-    let s = lock(&state)?;
+    let mut s = lock(&state).await?;
+    ensure_workspace(&mut s, id).await;
     require_ws(&s, id, &actor, false, false)?;
     let out = s
         .members
@@ -960,14 +1000,14 @@ async fn add_member(
     Json(body): Json<AddMember>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_workspace(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_workspace(&mut s,  id).await;
     {
-        let mut s = lock(&state)?;
         require_ws(&s, id, &actor, false, true)?;
         s.members.insert((id, body.user_id), body.role);
     }
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::insert_member(&pool, id, body.user_id, role_name(body.role)).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::insert_member(&pool, id, body.user_id, role_name(body.role)).await;
     }
     Ok(StatusCode::CREATED)
 }
@@ -993,14 +1033,14 @@ async fn patch_member(
     Json(body): Json<PatchMember>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_workspace(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_workspace(&mut s,  id).await;
     {
-        let mut s = lock(&state)?;
         require_ws(&s, id, &actor, false, true)?;
         s.members.insert((id, user_id), body.role);
     }
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::upsert_member(&pool, id, user_id, role_name(body.role)).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::upsert_member(&pool, id, user_id, role_name(body.role)).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1011,14 +1051,14 @@ async fn remove_member(
     Path((id, user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_workspace(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_workspace(&mut s,  id).await;
     {
-        let mut s = lock(&state)?;
         require_ws(&s, id, &actor, false, true)?;
         s.members.remove(&(id, user_id));
     }
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::delete_member(&pool, id, user_id).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::delete_member(&pool, id, user_id).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1027,10 +1067,10 @@ async fn get_retrieval(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<domain::RetrievalConfig>, ApiErr> {
+) -> Result<Json<knowledge::RetrievalConfig>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_workspace(&state, id).await;
-    let s = lock(&state)?;
+    let mut s = lock(&state).await?;
+    ensure_workspace(&mut s, id).await;
     require_ws(&s, id, &actor, false, false)?;
     let w = s
         .workspaces
@@ -1043,12 +1083,12 @@ async fn patch_retrieval(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-    Json(body): Json<domain::RetrievalConfig>,
-) -> Result<Json<domain::RetrievalConfig>, ApiErr> {
+    Json(body): Json<knowledge::RetrievalConfig>,
+) -> Result<Json<knowledge::RetrievalConfig>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_workspace(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_workspace(&mut s,  id).await;
     let view = {
-        let mut s = lock(&state)?;
         require_ws(&s, id, &actor, false, true)?;
         let w = s
             .workspaces
@@ -1057,8 +1097,8 @@ async fn patch_retrieval(
         w.retrieval = body;
         w.retrieval.clone()
     };
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::set_retrieval_config(
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::set_retrieval_config(
             &pool,
             id,
             view.vector_threshold,
@@ -1113,8 +1153,8 @@ async fn list_products(
     Query(q): Query<KindQ>,
 ) -> Result<Json<Vec<ProductView>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_workspace(&state, id).await;
-    let s = lock(&state)?;
+    let mut s = lock(&state).await?;
+    ensure_workspace(&mut s, id).await;
     require_ws(&s, id, &actor, false, false)?;
     let out = s
         .products
@@ -1137,9 +1177,9 @@ async fn create_product(
     Json(body): Json<NewProduct>,
 ) -> Result<(StatusCode, Json<ProductView>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_workspace(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_workspace(&mut s,  id).await;
     let (view, pid, pname, pslug, pkind) = {
-        let mut s = lock(&state)?;
         require_ws(&s, id, &actor, true, false)?;
         if s.products
             .values()
@@ -1148,7 +1188,7 @@ async fn create_product(
             return Err(fail(StatusCode::CONFLICT, "CONFLICT", "slug taken"));
         }
         let ws_kind = s.workspaces.get(&id).map(|w| w.kind).unwrap_or_default();
-        let kind = if ws_kind == domain::WorkspaceKind::Company {
+        let kind = if ws_kind == knowledge::WorkspaceKind::Company {
             ProductKind::Library
         } else {
             match body.kind.as_deref() {
@@ -1176,8 +1216,8 @@ async fn create_product(
         s.products.insert(p.id, p);
         (view, pid, pname, pslug, pkind)
     };
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::insert_product(&pool, pid, id, pkind, &pname, &pslug, None).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::insert_product(&pool, pid, id, pkind, &pname, &pslug, None).await;
     }
     Ok((StatusCode::CREATED, Json(view)))
 }
@@ -1188,8 +1228,8 @@ async fn get_product(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ProductView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
-    let s = lock(&state)?;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s, id).await;
     let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
     require_ws(&s, p.workspace_id, &actor, false, false)?;
     Ok(Json(ProductView::from(p)))
@@ -1207,9 +1247,9 @@ async fn patch_product(
     Json(body): Json<PatchProduct>,
 ) -> Result<Json<ProductView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s,  id).await;
     let view = {
-        let mut s = lock(&state)?;
         let ws = s
             .products
             .get(&id)
@@ -1222,8 +1262,8 @@ async fn patch_product(
         }
         ProductView::from(p)
     };
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::update_product_name(&pool, id, &view.name).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::update_product_name(&pool, id, &view.name).await;
     }
     Ok(Json(view))
 }
@@ -1234,9 +1274,9 @@ async fn delete_product(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s,  id).await;
     let vids = {
-        let mut s = lock(&state)?;
         let p = s
             .products
             .get(&id)
@@ -1259,7 +1299,7 @@ async fn delete_product(
         for vid in &vids {
             s.enqueue(
                 TYPE_KB_DELETE,
-                domain::QUEUE_LOW,
+                platform::QUEUE_LOW,
                 json!({ "product_version_id": vid }),
             );
         }
@@ -1275,18 +1315,18 @@ async fn delete_product(
         }
         vids
     };
-    if let Ok(pool) = storage::connect().await {
+    if let Ok(pool) = platform::connect().await {
         let mut all = vids.clone();
-        if let Ok(pg) = storage::version_ids_for_product(&pool, id).await {
+        if let Ok(pg) = knowledge::version_ids_for_product(&pool, id).await {
             for v in pg {
                 if !all.contains(&v) {
                     all.push(v);
                 }
             }
         }
-        let _ = storage::cancel_active_docs_for_versions(&pool, &all).await;
+        let _ = knowledge::cancel_active_docs_for_versions(&pool, &all).await;
         for vid in all {
-            let _ = runtime::enqueue_kb_delete(vid).await;
+            let _ = platform::enqueue_kb_delete(vid).await;
         }
     }
     Ok(StatusCode::ACCEPTED)
@@ -1384,8 +1424,8 @@ async fn list_versions(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<VersionView>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
-    let s = lock(&state)?;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s, id).await;
     let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
     require_ws(&s, p.workspace_id, &actor, false, false)?;
     let out = s
@@ -1404,7 +1444,8 @@ async fn create_version(
     Json(body): Json<NewVersion>,
 ) -> Result<(StatusCode, Json<VersionView>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s,  id).await;
     let clone_from = body.clone_from;
     let make_current = body.make_current;
     let diffs: Vec<serde_json::Value> = body
@@ -1413,7 +1454,6 @@ async fn create_version(
         .map(|d| json!({"op": d.op, "source_document_id": d.source_document_id}))
         .collect();
     let (view, view_id, label, made_current) = {
-        let mut s = lock(&state)?;
         let p = s
             .products
             .get(&id)
@@ -1468,18 +1508,18 @@ async fn create_version(
         let view = version_view(&s, s.versions.get(&view_id).unwrap());
         (view, view_id, label, made_current)
     };
-    if let Ok(pool) = storage::connect().await {
+    if let Ok(pool) = platform::connect().await {
         if let Some(src) = clone_from {
-            let _ = storage::insert_version_cloning(&pool, view_id, id, &label, src).await;
+            let _ = knowledge::insert_version_cloning(&pool, view_id, id, &label, src).await;
         } else {
-            let _ = storage::insert_version(&pool, view_id, id, &label, "active", None).await;
+            let _ = knowledge::insert_version(&pool, view_id, id, &label, "active", None).await;
         }
         if made_current {
-            let _ = storage::set_product_current(&pool, id, view_id).await;
+            let _ = knowledge::set_product_current(&pool, id, view_id).await;
         }
     }
     if let Some(src) = clone_from {
-        let _ = runtime::enqueue_version_clone(src, view_id, json!(diffs), make_current).await;
+        let _ = platform::enqueue_version_clone(src, view_id, json!(diffs), make_current).await;
     }
     Ok((StatusCode::CREATED, Json(view)))
 }
@@ -1490,8 +1530,8 @@ async fn get_version(
     Path((id, version_id)): Path<(Uuid, String)>,
 ) -> Result<Json<VersionView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
-    let s = lock(&state)?;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s, id).await;
     let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
     require_ws(&s, p.workspace_id, &actor, false, false)?;
     let vid = resolve_write_version(&s, id, &version_id)?;
@@ -1543,9 +1583,9 @@ async fn patch_version(
     Json(body): Json<PatchVersion>,
 ) -> Result<Json<VersionView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s,  id).await;
     let (view, vid, cfg) = {
-        let mut s = lock(&state)?;
         let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
         require_ws(&s, p.workspace_id, &actor, false, true)?;
         let vid = resolve_write_version(&s, id, &version_id)?;
@@ -1627,7 +1667,7 @@ async fn patch_version(
         }
         let view = version_view(&s, s.versions.get(&vid).unwrap());
         let v = s.versions.get(&vid).unwrap();
-        let cfg = storage::VersionConfig {
+        let cfg = knowledge::VersionConfig {
             status: Some(version_status_str(view.status).into()),
             chunking: Some(json!({
                 "chunk_size": v.chunk_size,
@@ -1665,8 +1705,8 @@ async fn patch_version(
         };
         (view, vid, cfg)
     };
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::update_version_config(&pool, vid, cfg).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::update_version_config(&pool, vid, cfg).await;
     }
     Ok(Json(view))
 }
@@ -1677,9 +1717,9 @@ async fn delete_version(
     Path((id, version_id)): Path<(Uuid, String)>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s,  id).await;
     let vid = {
-        let mut s = lock(&state)?;
         let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
         require_ws(&s, p.workspace_id, &actor, false, true)?;
         let vid = resolve_write_version(&s, id, &version_id)?;
@@ -1703,15 +1743,15 @@ async fn delete_version(
         }
         s.enqueue(
             TYPE_KB_DELETE,
-            domain::QUEUE_LOW,
+            platform::QUEUE_LOW,
             json!({ "product_version_id": vid }),
         );
         vid
     };
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::cancel_active_docs_for_versions(&pool, &[vid]).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::cancel_active_docs_for_versions(&pool, &[vid]).await;
     }
-    let _ = runtime::enqueue_kb_delete(vid).await;
+    let _ = platform::enqueue_kb_delete(vid).await;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -1727,9 +1767,9 @@ async fn set_current(
     Json(body): Json<SetCurrent>,
 ) -> Result<Json<ProductView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s,  id).await;
     let view = {
-        let mut s = lock(&state)?;
         let p = s
             .products
             .get(&id)
@@ -1752,8 +1792,8 @@ async fn set_current(
         s.products.get_mut(&id).unwrap().embedding_model_id = v.embedding_model_id.clone();
         ProductView::from(s.products.get(&id).unwrap())
     };
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::set_product_current(&pool, id, body.version_id).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::set_product_current(&pool, id, body.version_id).await;
     }
     Ok(Json(view))
 }
@@ -1762,7 +1802,7 @@ fn embedding_mismatch(store: &Store, workspace_id: Uuid, incoming: &str) -> Opti
     for p in store
         .products
         .values()
-        .filter(|p| p.workspace_id == workspace_id && p.kind == domain::ProductKind::Product)
+        .filter(|p| p.workspace_id == workspace_id && p.kind == knowledge::ProductKind::Product)
     {
         if let Some(vid) = p.current_version_id
             && let Some(ver) = store.versions.get(&vid)
@@ -1838,8 +1878,8 @@ async fn list_documents(
     Query(q): Query<DocListQ>,
 ) -> Result<Json<Vec<DocView>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
-    let s = lock(&state)?;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s, id).await;
     let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
     require_ws(&s, p.workspace_id, &actor, false, false)?;
     let vid = resolve_write_version(&s, id, &version_id)?;
@@ -1875,7 +1915,7 @@ fn enqueue_process(s: &mut Store, doc: &Document, extra: serde_json::Value) -> R
     payload["document_id"] = json!(doc.id);
     payload["product_version_id"] = json!(doc.product_version_id);
     payload["attempt"] = json!(doc.attempt);
-    s.try_enqueue(TYPE_DOCUMENT_PROCESS, domain::QUEUE_DEFAULT, payload)
+    s.try_enqueue(TYPE_DOCUMENT_PROCESS, platform::QUEUE_DEFAULT, payload)
         .map(|_| ())
 }
 
@@ -1886,7 +1926,7 @@ struct PendingIngest<'a> {
     bytes: &'a [u8],
     tag_ids: &'a [Uuid],
     ws: Uuid,
-    overrides: Option<domain::ProcessOverrides>,
+    overrides: Option<knowledge::ProcessOverrides>,
 }
 
 fn insert_pending(s: &mut Store, req: PendingIngest<'_>) -> Result<Document, ApiErr> {
@@ -1905,7 +1945,7 @@ fn insert_pending(s: &mut Store, req: PendingIngest<'_>) -> Result<Document, Api
     if !is_valid_file_type(&file_name) {
         return Err(validation("file type not allowed"));
     }
-    if bytes.len() > domain::max_file_bytes() {
+    if bytes.len() > platform::max_file_bytes() {
         return Err(validation("file too large"));
     }
     let version = s.versions.get(&vid).ok_or_else(|| not_found("version"))?;
@@ -1914,7 +1954,7 @@ fn insert_pending(s: &mut Store, req: PendingIngest<'_>) -> Result<Document, Api
             && p.slug == "library"
             && s.workspaces
                 .get(&p.workspace_id)
-                .is_some_and(|w| w.kind == domain::WorkspaceKind::ProductLine);
+                .is_some_and(|w| w.kind == knowledge::WorkspaceKind::ProductLine);
         if frozen {
             return Err(fail(
                 StatusCode::CONFLICT,
@@ -1923,14 +1963,14 @@ fn insert_pending(s: &mut Store, req: PendingIngest<'_>) -> Result<Document, Api
             ));
         }
     }
-    let eff = domain::resolve_process_config(version, overrides.as_ref());
-    if is_image_type(&file_name) && (!eff.enable_multimodel || !domain::vlm_configured()) {
+    let eff = knowledge::resolve_process_config(version, overrides.as_ref());
+    if is_image_type(&file_name) && (!eff.enable_multimodel || !platform::vlm_configured()) {
         return Err(validation("image requires VLM configuration"));
     }
     if is_audio_type(&file_name) && !eff.asr_enabled {
         return Err(validation("audio requires ASR configuration"));
     }
-    let hash = domain::sha256_hex(bytes);
+    let hash = platform::sha256_hex(bytes);
     if let Some(existing) = s.find_duplicate(vid, &file_name, bytes.len() as i64, &hash) {
         return Err(fail(
             StatusCode::CONFLICT,
@@ -1938,7 +1978,7 @@ fn insert_pending(s: &mut Store, req: PendingIngest<'_>) -> Result<Document, Api
             format!("duplicate file {existing}"),
         ));
     }
-    let (hash, key) = storage::put(s, bytes);
+    let (hash, key) = knowledge::put(s, bytes);
     for t in tag_ids {
         let tag = s.tags.get(t).ok_or_else(|| validation("unknown tag"))?;
         if tag.workspace_id != ws {
@@ -1950,7 +1990,7 @@ fn insert_pending(s: &mut Store, req: PendingIngest<'_>) -> Result<Document, Api
     if file_name.ends_with(".csv") || file_name.ends_with(".xlsx") || file_name.ends_with(".xls") {
         let _ = s.try_enqueue(
             TYPE_DATATABLE,
-            domain::QUEUE_SUMMARY,
+            platform::QUEUE_SUMMARY,
             json!({ "document_id": doc.id }),
         );
     }
@@ -1967,16 +2007,16 @@ fn insert_pending(s: &mut Store, req: PendingIngest<'_>) -> Result<Document, Api
 }
 
 async fn persist_ingest_row(doc: &Document, tag_ids: &[Uuid]) -> Result<(), ApiErr> {
-    let Ok(pool) = storage::connect().await else {
+    let Ok(pool) = platform::connect().await else {
         return Ok(());
     };
-    let version_in_pg = storage::version_exists(&pool, doc.product_version_id)
+    let version_in_pg = knowledge::version_exists(&pool, doc.product_version_id)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", e.to_string()))?;
     if !version_in_pg {
         return Ok(());
     }
-    if let Ok(Some(existing)) = storage::find_duplicate_document(
+    if let Ok(Some(existing)) = knowledge::find_duplicate_document(
         &pool,
         doc.product_version_id,
         &doc.file_name,
@@ -1992,9 +2032,9 @@ async fn persist_ingest_row(doc: &Document, tag_ids: &[Uuid]) -> Result<(), ApiE
             format!("duplicate file {existing}"),
         ));
     }
-    if let Err(e) = storage::insert_document(
+    if let Err(e) = knowledge::insert_document(
         &pool,
-        storage::NewDocument {
+        knowledge::NewDocument {
             id: doc.id,
             product_version_id: doc.product_version_id,
             title: &doc.title,
@@ -2006,8 +2046,8 @@ async fn persist_ingest_row(doc: &Document, tag_ids: &[Uuid]) -> Result<(), ApiE
     )
     .await
     {
-        if storage::is_unique_violation(&e) {
-            let existing = storage::find_duplicate_document(
+        if knowledge::is_unique_violation(&e) {
+            let existing = knowledge::find_duplicate_document(
                 &pool,
                 doc.product_version_id,
                 &doc.file_name,
@@ -2030,14 +2070,14 @@ async fn persist_ingest_row(doc: &Document, tag_ids: &[Uuid]) -> Result<(), ApiE
             e.to_string(),
         ));
     }
-    let _ = storage::set_document_source(&pool, doc.id, &doc.doc_type, &doc.source_passages).await;
-    let _ = storage::insert_document_tags(&pool, doc.id, tag_ids).await;
+    let _ = knowledge::set_document_source(&pool, doc.id, &doc.doc_type, &doc.source_passages).await;
+    let _ = knowledge::insert_document_tags(&pool, doc.id, tag_ids).await;
     if let Some(o) = &doc.process_overrides {
-        let _ = storage::set_process_overrides(&pool, doc.id, o).await;
+        let _ = knowledge::set_process_overrides(&pool, doc.id, o).await;
     }
-    let _ = storage::open_attempt(&pool, doc.id, doc.attempt).await;
+    let _ = knowledge::open_attempt(&pool, doc.id, doc.attempt).await;
     if doc.parse_status == ParseStatus::Failed {
-        let _ = storage::set_parse_status(&pool, doc.id, "failed", &doc.error_message).await;
+        let _ = knowledge::set_parse_status(&pool, doc.id, "failed", &doc.error_message).await;
     }
     Ok(())
 }
@@ -2046,27 +2086,25 @@ async fn persist_failed_row(doc: &Document) {
     if doc.parse_status != ParseStatus::Failed {
         return;
     }
-    let Ok(pool) = storage::connect().await else {
+    let Ok(pool) = platform::connect().await else {
         return;
     };
-    if !storage::version_exists(&pool, doc.product_version_id)
+    if !knowledge::version_exists(&pool, doc.product_version_id)
         .await
         .unwrap_or(false)
     {
         return;
     }
-    let _ = storage::set_parse_status(&pool, doc.id, "failed", &doc.error_message).await;
+    let _ = knowledge::set_parse_status(&pool, doc.id, "failed", &doc.error_message).await;
 }
 
-fn rollback_ingest(state: &AppState, doc: &Document) {
-    if let Ok(mut s) = lock(state) {
-        s.documents.remove(&doc.id);
-        s.document_tags.retain(|(id, _)| *id != doc.id);
-        s.queue.retain(|j| {
-            j.payload.get("document_id").and_then(|v| v.as_str()) != Some(&doc.id.to_string())
-        });
-        storage::discard_unpersisted_object(&mut s, &doc.file_hash);
-    }
+fn rollback_ingest(store: &mut Store, doc: &Document) {
+    store.documents.remove(&doc.id);
+    store.document_tags.retain(|(id, _)| *id != doc.id);
+    store.queue.retain(|j| {
+        j.payload.get("document_id").and_then(|v| v.as_str()) != Some(&doc.id.to_string())
+    });
+    knowledge::discard_unpersisted_object(store, &doc.file_hash);
 }
 
 fn resolve_write_version(s: &Store, product_id: Uuid, version_id: &str) -> Result<Uuid, ApiErr> {
@@ -2081,19 +2119,19 @@ fn resolve_write_version(s: &Store, product_id: Uuid, version_id: &str) -> Resul
         .ok_or_else(|| not_found("version"))
 }
 
-async fn ensure_document(state: &AppState, document_id: Uuid) {
-    if let Ok(pool) = storage::connect().await
-        && let Ok(Some(ws)) = storage::document_workspace_id(&pool, document_id).await
+async fn ensure_document(store: &mut Store, document_id: Uuid) {
+    if let Ok(pool) = platform::connect().await
+        && let Ok(Some(ws)) = knowledge::document_workspace_id(&pool, document_id).await
     {
-        ensure_workspace(state, ws).await;
+        ensure_workspace(store, ws).await;
     }
 }
 
-async fn push_document_job(s: &std::sync::Mutex<domain::Store>, doc: &mut Document) {
+async fn push_document_job(store: &mut Store, doc: &mut Document) {
     if doc.parse_status == ParseStatus::Failed {
         return;
     }
-    match runtime::enqueue_document_process(doc.id, doc.product_version_id, doc.attempt).await {
+    match platform::enqueue_document_process(doc.id, doc.product_version_id, doc.attempt).await {
         Ok(_) => {
             tracing::info!(
                 document_id = %doc.id,
@@ -2102,11 +2140,9 @@ async fn push_document_job(s: &std::sync::Mutex<domain::Store>, doc: &mut Docume
             );
         }
         Err(e) => {
-            if let Ok(mut store) = s.lock() {
-                store.fail_document(doc.id, &e);
-                if let Some(d) = store.documents.get(&doc.id) {
-                    *doc = d.clone();
-                }
+            store.fail_document(doc.id, &e);
+            if let Some(d) = store.documents.get(&doc.id) {
+                *doc = d.clone();
             }
         }
     }
@@ -2119,7 +2155,8 @@ async fn ingest_file(
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<DocView>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s,  id).await;
     let mut file_name = String::from("upload.txt");
     let mut bytes = Vec::new();
     let mut tag_ids = Vec::new();
@@ -2148,14 +2185,13 @@ async fn ingest_file(
             }
         } else if name == "process_config" {
             let t = field.text().await.map_err(|e| validation(&e.to_string()))?;
-            overrides = serde_json::from_str::<domain::ProcessOverrides>(&t).ok();
+            overrides = serde_json::from_str::<knowledge::ProcessOverrides>(&t).ok();
         }
     }
     if bytes.is_empty() {
         return Err(validation("empty file"));
     }
     let mut doc = {
-        let mut s = lock(&state)?;
         let p = s
             .products
             .get(&id)
@@ -2178,16 +2214,16 @@ async fn ingest_file(
         )?
     };
     if let Err(e) = persist_ingest_row(&doc, &tag_ids).await {
-        rollback_ingest(&state, &doc);
+        rollback_ingest(&mut s, &doc);
         return Err(e);
     }
     if doc.file_name.ends_with(".csv")
         || doc.file_name.ends_with(".xlsx")
         || doc.file_name.ends_with(".xls")
     {
-        let _ = runtime::enqueue_datatable(doc.id).await;
+        let _ = platform::enqueue_datatable(doc.id).await;
     }
-    push_document_job(&state.store, &mut doc).await;
+    push_document_job(&mut s, &mut doc).await;
     persist_failed_row(&doc).await;
     Ok((ingest_status(&doc), Json(DocView::from(&doc))))
 }
@@ -2198,7 +2234,7 @@ struct UrlIn {
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
-    process_config: Option<domain::ProcessOverrides>,
+    process_config: Option<knowledge::ProcessOverrides>,
 }
 
 async fn ingest_url(
@@ -2208,14 +2244,14 @@ async fn ingest_url(
     Json(body): Json<UrlIn>,
 ) -> Result<(StatusCode, Json<DocView>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
-    if domain::url_blocked(&body.url) {
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s,  id).await;
+    if platform::url_blocked(&body.url) {
         return Err(validation("url failed SSRF check"));
     }
     let name = body.title.unwrap_or_else(|| "remote.md".into());
     let bytes = format!("url:{}", body.url).into_bytes();
     let mut doc = {
-        let mut s = lock(&state)?;
         let p = s
             .products
             .get(&id)
@@ -2243,10 +2279,10 @@ async fn ingest_url(
         doc
     };
     if let Err(e) = persist_ingest_row(&doc, &[]).await {
-        rollback_ingest(&state, &doc);
+        rollback_ingest(&mut s, &doc);
         return Err(e);
     }
-    push_document_job(&state.store, &mut doc).await;
+    push_document_job(&mut s, &mut doc).await;
     persist_failed_row(&doc).await;
     Ok((ingest_status(&doc), Json(DocView::from(&doc))))
 }
@@ -2266,7 +2302,7 @@ struct PassageIn {
     #[serde(default)]
     tag_ids: Vec<Uuid>,
     #[serde(default)]
-    process_config: Option<domain::ProcessOverrides>,
+    process_config: Option<knowledge::ProcessOverrides>,
 }
 
 async fn ingest_passage(
@@ -2276,11 +2312,11 @@ async fn ingest_passage(
     Json(body): Json<PassageIn>,
 ) -> Result<(StatusCode, Json<DocView>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s,  id).await;
     let joined = body.passages.join("\n");
     let bytes = joined.as_bytes();
     let mut doc = {
-        let mut s = lock(&state)?;
         let p = s
             .products
             .get(&id)
@@ -2313,10 +2349,10 @@ async fn ingest_passage(
         doc
     };
     if let Err(e) = persist_ingest_row(&doc, &body.tag_ids).await {
-        rollback_ingest(&state, &doc);
+        rollback_ingest(&mut s, &doc);
         return Err(e);
     }
-    match runtime::enqueue_document_process_with(
+    match platform::enqueue_document_process_with(
         doc.id,
         doc.product_version_id,
         doc.attempt,
@@ -2326,7 +2362,7 @@ async fn ingest_passage(
     {
         Ok(_) => {}
         Err(e) => {
-            if let Ok(mut store) = lock(&state) {
+            if let Ok(mut store) = lock(&state).await {
                 store.fail_document(doc.id, &e);
                 if let Some(d) = store.documents.get(&doc.id) {
                     doc = d.clone();
@@ -2345,7 +2381,7 @@ struct ManualIn {
     #[serde(default)]
     tag_ids: Vec<Uuid>,
     #[serde(default)]
-    process_config: Option<domain::ProcessOverrides>,
+    process_config: Option<knowledge::ProcessOverrides>,
 }
 
 async fn ingest_manual(
@@ -2355,7 +2391,8 @@ async fn ingest_manual(
     Json(body): Json<ManualIn>,
 ) -> Result<(StatusCode, Json<DocView>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s,  id).await;
     if body.content.trim().is_empty() {
         return Err(validation("content required"));
     }
@@ -2366,7 +2403,6 @@ async fn ingest_manual(
         format!("{}.md", body.title)
     };
     let mut doc = {
-        let mut s = lock(&state)?;
         let p = s
             .products
             .get(&id)
@@ -2399,13 +2435,13 @@ async fn ingest_manual(
         doc
     };
     if let Err(e) = persist_ingest_row(&doc, &body.tag_ids).await {
-        rollback_ingest(&state, &doc);
+        rollback_ingest(&mut s, &doc);
         return Err(e);
     }
-    match runtime::enqueue_manual_process(doc.id, doc.product_version_id, doc.attempt).await {
+    match platform::enqueue_manual_process(doc.id, doc.product_version_id, doc.attempt).await {
         Ok(_) => {}
         Err(e) => {
-            if let Ok(mut store) = lock(&state) {
+            if let Ok(mut store) = lock(&state).await {
                 store.fail_document(doc.id, &e);
                 if let Some(d) = store.documents.get(&doc.id) {
                     doc = d.clone();
@@ -2423,12 +2459,12 @@ async fn get_document(
     Path(id): Path<Uuid>,
 ) -> Result<Json<DocView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    if let Ok(pool) = storage::connect().await
-        && let Ok(Some(ws)) = storage::document_workspace_id(&pool, id).await
+        let mut s = lock(&state).await?;
+    if let Ok(pool) = platform::connect().await
+        && let Ok(Some(ws)) = knowledge::document_workspace_id(&pool, id).await
     {
-        ensure_workspace(&state, ws).await;
+        ensure_workspace(&mut s,  ws).await;
     }
-    let s = lock(&state)?;
     let d = s.documents.get(&id).ok_or_else(|| not_found("document"))?;
     let vid = d.product_version_id;
     let pid = s
@@ -2451,13 +2487,13 @@ async fn document_content(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    if let Ok(pool) = storage::connect().await
-        && let Ok(Some(ws)) = storage::document_workspace_id(&pool, id).await
+        let mut s = lock(&state).await?;
+    if let Ok(pool) = platform::connect().await
+        && let Ok(Some(ws)) = knowledge::document_workspace_id(&pool, id).await
     {
-        ensure_workspace(&state, ws).await;
+        ensure_workspace(&mut s,  ws).await;
     }
     let meta = {
-        let s = lock(&state)?;
         let d = s.documents.get(&id).ok_or_else(|| not_found("document"))?;
         let vid = d.product_version_id;
         let pid = s
@@ -2473,16 +2509,15 @@ async fn document_content(
         require_ws(&s, ws, &actor, false, false)?;
         d.clone()
     };
-    let mut chunks: Vec<domain::Chunk> = {
-        let s = lock(&state)?;
+    let mut chunks: Vec<knowledge::Chunk> = {
         s.chunks
             .values()
             .filter(|c| c.document_id == id)
             .cloned()
             .collect()
     };
-    if let Ok(pool) = storage::connect().await
-        && let Ok(pg) = storage::load_document_chunks(&pool, id).await
+    if let Ok(pool) = platform::connect().await
+        && let Ok(pg) = knowledge::load_document_chunks(&pool, id).await
         && !pg.is_empty()
     {
         chunks = pg;
@@ -2491,7 +2526,7 @@ async fn document_content(
     let mut markdown = meta.markdown.clone();
     if markdown.is_empty()
         && !meta.file_hash.is_empty()
-        && let Ok(bytes) = storage::read_blob(&format!("{}.md", meta.file_hash))
+        && let Ok(bytes) = platform::read_blob(&format!("{}.md", meta.file_hash))
     {
         markdown = String::from_utf8_lossy(&bytes).into_owned();
     }
@@ -2524,9 +2559,9 @@ async fn delete_document(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_document(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_document(&mut s, id).await;
     {
-        let mut s = lock(&state)?;
         let d = s
             .documents
             .get(&id)
@@ -2540,21 +2575,21 @@ async fn delete_document(
         }
         s.enqueue(
             TYPE_LIST_DELETE,
-            domain::QUEUE_LOW,
+            platform::QUEUE_LOW,
             json!({ "document_ids": [id] }),
         );
     }
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::set_parse_status(&pool, id, "deleting", "").await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::set_parse_status(&pool, id, "deleting", "").await;
     }
-    let _ = runtime::enqueue_list_delete(id).await;
+    let _ = platform::enqueue_list_delete(id).await;
     Ok(StatusCode::ACCEPTED)
 }
 
 #[derive(Deserialize, Default)]
 struct ReparseIn {
     #[serde(default)]
-    process_config: Option<domain::ProcessOverrides>,
+    process_config: Option<knowledge::ProcessOverrides>,
 }
 
 async fn reparse_document(
@@ -2564,9 +2599,9 @@ async fn reparse_document(
     body: Option<Json<ReparseIn>>,
 ) -> Result<Json<DocView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_document(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_document(&mut s, id).await;
     let doc = {
-        let mut s = lock(&state)?;
         let d = s
             .documents
             .get(&id)
@@ -2585,18 +2620,18 @@ async fn reparse_document(
         }
         s.enqueue(
             TYPE_LIST_REPARSE,
-            domain::QUEUE_LOW,
+            platform::QUEUE_LOW,
             json!({ "document_ids": [id] }),
         );
         s.documents.get(&id).unwrap().clone()
     };
-    if let Ok(pool) = storage::connect().await {
+    if let Ok(pool) = platform::connect().await {
         if let Some(o) = &doc.process_overrides {
-            let _ = storage::set_process_overrides(&pool, id, o).await;
+            let _ = knowledge::set_process_overrides(&pool, id, o).await;
         }
-        let _ = storage::mark_reparse_queued(&pool, id).await;
+        let _ = knowledge::mark_reparse_queued(&pool, id).await;
     }
-    runtime::enqueue_list_reparse(id)
+    platform::enqueue_list_reparse(id)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", e))?;
     Ok(Json(DocView::from(&doc)))
@@ -2608,9 +2643,9 @@ async fn cancel_document(
     Path(id): Path<Uuid>,
 ) -> Result<Json<DocView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_document(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_document(&mut s, id).await;
     let view = {
-        let mut s = lock(&state)?;
         let d = s
             .documents
             .get(&id)
@@ -2624,8 +2659,8 @@ async fn cancel_document(
         }
         DocView::from(s.documents.get(&id).unwrap())
     };
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::set_parse_status(&pool, id, "cancelled", "").await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::set_parse_status(&pool, id, "cancelled", "").await;
     }
     Ok(Json(view))
 }
@@ -2642,13 +2677,13 @@ async fn timeline(
     Query(q): Query<TimelineQuery>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    if let Ok(pool) = storage::connect().await
-        && let Ok(Some(ws)) = storage::document_workspace_id(&pool, id).await
+        let mut s = lock(&state).await?;
+    if let Ok(pool) = platform::connect().await
+        && let Ok(Some(ws)) = knowledge::document_workspace_id(&pool, id).await
     {
-        ensure_workspace(&state, ws).await;
+        ensure_workspace(&mut s,  ws).await;
     }
     let (parse_status, mem_attempt, mem_spans, err_msg) = {
-        let s = lock(&state)?;
         let d = s.documents.get(&id).ok_or_else(|| not_found("document"))?;
         let pid = s
             .versions
@@ -2674,21 +2709,21 @@ async fn timeline(
     };
     let mut latest = mem_attempt;
     let mut rows = mem_spans;
-    if let Ok(pool) = storage::connect().await {
-        if let Ok(n) = storage::latest_span_attempt(&pool, id).await
+    if let Ok(pool) = platform::connect().await {
+        if let Ok(n) = knowledge::latest_span_attempt(&pool, id).await
             && n > 0
         {
             latest = n;
         }
         let want = q.attempt.filter(|n| *n > 0).unwrap_or(latest);
-        if let Ok(pg) = storage::list_spans_attempt(&pool, id, want).await
+        if let Ok(pg) = knowledge::list_spans_attempt(&pool, id, want).await
             && !pg.is_empty()
         {
             rows = pg.into_iter().map(|r| r.into_span()).collect();
         }
     }
     let attempt = q.attempt.filter(|n| *n > 0).unwrap_or(latest);
-    let (trace, current_stage, last_fail) = obs::build_trace(attempt, &parse_status, &rows);
+    let (trace, current_stage, last_fail) = knowledge::obs::build_trace(attempt, &parse_status, &rows);
     let last_error = last_fail
         .map(|f| {
             json!({
@@ -2700,7 +2735,7 @@ async fn timeline(
         .or_else(|| {
             if parse_status == "failed" && !err_msg.is_empty() {
                 Some(json!({
-                    "stage": obs::ROOT_NAME,
+                    "stage": knowledge::obs::ROOT_NAME,
                     "code": "PARSE_FAILED",
                     "message": err_msg,
                 }))
@@ -2731,8 +2766,8 @@ async fn list_tags(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<Tag>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_workspace(&state, id).await;
-    let s = lock(&state)?;
+    let mut s = lock(&state).await?;
+    ensure_workspace(&mut s, id).await;
     require_ws(&s, id, &actor, false, false)?;
     Ok(Json(
         s.tags
@@ -2750,9 +2785,9 @@ async fn create_tag(
     Json(body): Json<NewTag>,
 ) -> Result<(StatusCode, Json<Tag>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_workspace(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_workspace(&mut s,  id).await;
     let tag = {
-        let mut s = lock(&state)?;
         require_ws(&s, id, &actor, true, false)?;
         let tag = Tag {
             id: Uuid::new_v4(),
@@ -2763,8 +2798,8 @@ async fn create_tag(
         s.tags.insert(tag.id, tag.clone());
         tag
     };
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::insert_tag(&pool, tag.id, tag.workspace_id, &tag.name, &tag.slug).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::insert_tag(&pool, tag.id, tag.workspace_id, &tag.name, &tag.slug).await;
     }
     Ok((StatusCode::CREATED, Json(tag)))
 }
@@ -2775,9 +2810,9 @@ async fn delete_tag(
     Path((id, tag_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_workspace(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_workspace(&mut s,  id).await;
     {
-        let mut s = lock(&state)?;
         require_ws(&s, id, &actor, false, true)?;
         let Some(tag) = s.tags.get(&tag_id).cloned() else {
             return Err(not_found("tag"));
@@ -2788,8 +2823,8 @@ async fn delete_tag(
         s.tags.remove(&tag_id);
         s.document_tags.retain(|(_, t)| *t != tag_id);
     }
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::delete_tag(&pool, tag_id).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::delete_tag(&pool, tag_id).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2806,9 +2841,9 @@ async fn put_tags(
     Json(body): Json<PutTags>,
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_document(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_document(&mut s, id).await;
     let kept = {
-        let mut s = lock(&state)?;
         let d = s
             .documents
             .get(&id)
@@ -2827,8 +2862,8 @@ async fn put_tags(
         }
         kept
     };
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::replace_document_tags(&pool, id, &kept).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::replace_document_tags(&pool, id, &kept).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2837,15 +2872,15 @@ async fn wiki_pages(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((id, vid)): Path<(Uuid, String)>,
-) -> Result<Json<Vec<domain::WikiPage>>, ApiErr> {
+) -> Result<Json<Vec<knowledge::WikiPage>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
-    if let Ok(pool) = storage::connect().await
-        && let Ok(Some(ws)) = storage::product_workspace_id(&pool, id).await
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s,  id).await;
+    if let Ok(pool) = platform::connect().await
+        && let Ok(Some(ws)) = knowledge::product_workspace_id(&pool, id).await
     {
-        ensure_workspace(&state, ws).await;
+        ensure_workspace(&mut s,  ws).await;
     }
-    let s = lock(&state)?;
     let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
     require_ws(&s, p.workspace_id, &actor, false, false)?;
     let version = resolve_write_version(&s, id, &vid)?;
@@ -2862,10 +2897,10 @@ async fn wiki_page(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((id, vid, slug)): Path<(Uuid, String, String)>,
-) -> Result<Json<domain::WikiPage>, ApiErr> {
+) -> Result<Json<knowledge::WikiPage>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
-    let s = lock(&state)?;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s, id).await;
     let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
     require_ws(&s, p.workspace_id, &actor, false, false)?;
     let version = resolve_write_version(&s, id, &vid)?;
@@ -2882,15 +2917,14 @@ async fn wiki_folders(
     Path((id, vid)): Path<(Uuid, String)>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s,  id).await;
     let version = {
-        let s = lock(&state)?;
         let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
         require_ws(&s, p.workspace_id, &actor, false, false)?;
         resolve_write_version(&s, id, &vid)?
     };
     let mut folders = {
-        let s = lock(&state)?;
         s.wiki_folders
             .values()
             .filter(|f| f.product_version_id == version)
@@ -2905,8 +2939,8 @@ async fn wiki_folders(
             .collect::<Vec<_>>()
     };
     if folders.is_empty()
-        && let Ok(pool) = storage::connect().await
-        && let Ok(rows) = storage::list_wiki_folders(&pool, version).await
+        && let Ok(pool) = platform::connect().await
+        && let Ok(rows) = knowledge::list_wiki_folders(&pool, version).await
     {
         folders = rows
             .into_iter()
@@ -2930,7 +2964,8 @@ async fn version_file(
     Query(q): Query<FileQuery>,
 ) -> Result<Vec<u8>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, id).await;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s,  id).await;
     let hash = q.key.trim_start_matches("objects/");
     if hash.is_empty() {
         return Err(not_found("file"));
@@ -2941,7 +2976,6 @@ async fn version_file(
         format!("objects/{hash}")
     };
     let resolved = {
-        let s = lock(&state)?;
         let p = s.products.get(&id).ok_or_else(|| not_found("product"))?;
         require_ws(&s, p.workspace_id, &actor, false, false)?;
         let version = resolve_write_version(&s, id, &vid)?;
@@ -2950,15 +2984,15 @@ async fn version_file(
     };
     let mut allowed = resolved.1;
     if !allowed
-        && let Ok(pool) = storage::connect().await
-        && let Ok(hit) = storage::version_references_object(&pool, resolved.0, &key, hash).await
+        && let Ok(pool) = platform::connect().await
+        && let Ok(hit) = knowledge::version_references_object(&pool, resolved.0, &key, hash).await
     {
         allowed = hit;
     }
     if !allowed {
         return Err(not_found("file"));
     }
-    storage::read_blob(hash).map_err(|_| not_found("file"))
+    platform::read_blob(hash).map_err(|_| not_found("file"))
 }
 
 fn version_references_key(s: &Store, version_id: Uuid, key: &str, hash: &str) -> bool {
@@ -2997,13 +3031,13 @@ async fn list_models(
     headers: HeaderMap,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_admin(&state, &actor)?;
+    require_admin(&state, &actor).await?;
     let mut out = vec![
-        json!({"id": "stub-emb", "kind": "embedding", "dimension": models::EMBEDDING_DIM}),
+        json!({"id": "stub-emb", "kind": "embedding", "dimension": knowledge::models::EMBEDDING_DIM}),
         json!({"id": "stub-chat", "kind": "chat", "dimension": 0}),
     ];
-    if let Ok(pool) = storage::connect().await
-        && let Ok(rows) = storage::list_models(&pool).await
+    if let Ok(pool) = platform::connect().await
+        && let Ok(rows) = knowledge::list_models(&pool).await
     {
         for (id, kind, dim) in rows {
             if !out.iter().any(|m| m["id"] == id) {
@@ -3021,11 +3055,11 @@ async fn create_model(
 ) -> Result<(StatusCode, Json<NewModel>), ApiErr> {
     let actor = actor_from(&headers, &state).await?;
     {
-        require_admin(&state, &actor)?;
+        require_admin(&state, &actor).await?;
     }
-    let pool = storage::connect().await.ok();
+    let pool = platform::connect().await.ok();
     if let Some(pool) = pool {
-        let _ = storage::upsert_model(&pool, &body.id, &body.kind, body.dimension).await;
+        let _ = knowledge::upsert_model(&pool, &body.id, &body.kind, body.dimension).await;
     }
     Ok((StatusCode::CREATED, Json(body)))
 }
@@ -3038,31 +3072,61 @@ async fn patch_model(
 ) -> Result<Json<NewModel>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
     {
-        require_admin(&state, &actor)?;
+        require_admin(&state, &actor).await?;
     }
     let mut body = body;
     body.id = id;
-    let pool = storage::connect().await.ok();
+    let pool = platform::connect().await.ok();
     if let Some(pool) = pool {
-        let _ = storage::upsert_model(&pool, &body.id, &body.kind, body.dimension).await;
+        let _ = knowledge::upsert_model(&pool, &body.id, &body.kind, body.dimension).await;
     }
     Ok(Json(body))
 }
 
-pub(crate) fn require_admin(state: &AppState, actor: &Actor) -> Result<(), ApiErr> {
-    {
-        let s = lock(state)?;
-        let admin = match actor {
-            Actor::Bootstrap => true,
-            Actor::Key(k) => k.scopes.iter().any(|x| x == "admin"),
-            Actor::User(uid) => s
-                .members
-                .iter()
-                .any(|((_, u), r)| *u == *uid && r.can_admin()),
-        };
-        if !admin {
-            return Err(forbidden());
+pub(crate) async fn require_admin(state: &AppState, actor: &Actor) -> Result<(), ApiErr> {
+    let admin = match actor {
+        Actor::Bootstrap => true,
+        Actor::Key(k) => k.scopes.iter().any(|x| x == "admin"),
+        Actor::User(uid) => {
+            if let Some(catalog) = &state.test_catalog {
+                if catalog.lock().ok().is_some_and(|s| {
+                    s.members
+                        .iter()
+                        .any(|((_, user_id), role)| *user_id == *uid && role.can_admin())
+                }) {
+                    true
+                } else if let Ok(pool) = platform::connect().await {
+                    sqlx::query_scalar(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM workspace_members
+                            WHERE user_id=$1 AND role IN ('owner','admin')
+                         )",
+                    )
+                    .bind(uid)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap_or(false)
+                } else {
+                    false
+                }
+            } else if let Ok(pool) = platform::connect().await {
+                sqlx::query_scalar(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM workspace_members
+                        WHERE user_id=$1 AND role IN ('owner','admin')
+                     )",
+                )
+                .bind(uid)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or(false)
+            } else {
+                false
+            }
         }
+    };
+    if !admin {
+        return Err(forbidden());
     }
     Ok(())
 }
@@ -3072,9 +3136,9 @@ async fn ops_oxana(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    require_admin(&state, &actor)?;
-    let queues = runtime::queue_depths().await;
-    let jobs = runtime::queue_job_previews().await;
+    require_admin(&state, &actor).await?;
+    let queues = platform::queue_depths().await;
+    let jobs = platform::queue_job_previews().await;
     Ok(Json(json!({
         "queues": queues,
         "jobs": jobs,
@@ -3096,7 +3160,7 @@ async fn metrics() -> ([(axum::http::header::HeaderName, &'static str); 1], Stri
 async fn do_search(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(mut req): Json<search::SearchRequest>,
+    Json(mut req): Json<knowledge::search::SearchRequest>,
 ) -> Result<Json<serde_json::Value>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
     if req.scope.is_some() {
@@ -3104,30 +3168,31 @@ async fn do_search(
         req.expand_graph = false;
         req.include_library = false;
     }
-    hydrate_search_workspace(&state, &actor, &req).await;
+    let mut s = lock(&state).await?;
+    hydrate_search_workspace(&mut s, &actor, &req).await;
     if !matches!(req.mode.as_str(), "assembly" | "matching") {
         return Err(validation("mode must be assembly or matching"));
     }
     if req.mode == "matching" {
         let mem = {
-            let s = lock(&state)?;
+            let s = lock(&state).await?;
             if req.scope.is_none() {
                 let ws = infer_workspace(&s, &actor, &req)?;
                 req.workspace_id = Some(ws);
             }
-            search::matching(&s, &req)
+            knowledge::search::matching(&s, &req)
         };
         let out = match mem {
             Ok(r) if matching_has_hits(&r) => r,
-            Ok(empty) => match storage::connect().await {
-                Ok(pool) => search::matching_pg(&pool, &req).await.map_err(map_search)?,
+            Ok(empty) => match platform::connect().await {
+                Ok(pool) => knowledge::search::matching_pg(&pool, &req).await.map_err(map_search)?,
                 Err(_) => empty,
             },
             Err(e) if e.code == "NOT_FOUND" || e.code == "VALIDATION" => {
-                let Ok(pool) = storage::connect().await else {
+                let Ok(pool) = platform::connect().await else {
                     return Err(map_search(e));
                 };
-                match search::matching_pg(&pool, &req).await {
+                match knowledge::search::matching_pg(&pool, &req).await {
                     Ok(pg) => pg,
                     Err(pg_err) => return Err(map_search(pg_err)),
                 }
@@ -3139,16 +3204,16 @@ async fn do_search(
         return Ok(Json(v));
     }
     let mem = {
-        let s = lock(&state)?;
+        let s = lock(&state).await?;
         let ws = infer_workspace(&s, &actor, &req)?;
         req.workspace_id = Some(ws);
-        search::assembly(&s, &req)
+        knowledge::search::assembly(&s, &req)
     };
     match mem {
         Ok(r) if !r.hits.is_empty() => Ok(Json(serde_json::to_value(&r).unwrap())),
         Ok(empty) => {
-            if let Ok(pool) = storage::connect().await {
-                match search::assembly_pg(&pool, &req).await {
+            if let Ok(pool) = platform::connect().await {
+                match knowledge::search::assembly_pg(&pool, &req).await {
                     Ok(pg) if !pg.hits.is_empty() => {
                         return Ok(Json(serde_json::to_value(&pg).unwrap()));
                     }
@@ -3163,9 +3228,9 @@ async fn do_search(
         }
         Err(e) => {
             if matches!(e.code, "NOT_FOUND" | "VALIDATION")
-                && let Ok(pool) = storage::connect().await
+                && let Ok(pool) = platform::connect().await
             {
-                match search::assembly_pg(&pool, &req).await {
+                match knowledge::search::assembly_pg(&pool, &req).await {
                     Ok(pg) => return Ok(Json(serde_json::to_value(&pg).unwrap())),
                     Err(pg_err) => return Err(map_search(pg_err)),
                 }
@@ -3178,8 +3243,8 @@ async fn do_search(
 async fn do_match(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(mut req): Json<search::SearchRequest>,
-) -> Result<Json<search::MatchingResponse>, ApiErr> {
+    Json(mut req): Json<knowledge::search::SearchRequest>,
+) -> Result<Json<knowledge::search::MatchingResponse>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
     req.mode = "matching".into();
     if req.scope.is_some() {
@@ -3187,14 +3252,15 @@ async fn do_match(
         req.expand_graph = false;
         req.include_library = false;
     }
-    hydrate_search_workspace(&state, &actor, &req).await;
+    let mut s = lock(&state).await?;
+    hydrate_search_workspace(&mut s, &actor, &req).await;
     let mem = {
-        let s = lock(&state)?;
+        let s = lock(&state).await?;
         if req.scope.is_none() {
             let ws = infer_workspace(&s, &actor, &req)?;
             req.workspace_id = Some(ws);
         }
-        search::matching(&s, &req)
+        knowledge::search::matching(&s, &req)
     };
     match mem {
         Ok(r) if matching_has_hits(&r) => {
@@ -3207,8 +3273,8 @@ async fn do_match(
             Ok(Json(r))
         }
         Ok(empty) => {
-            if let Ok(pool) = storage::connect().await {
-                match search::matching_pg(&pool, &req).await {
+            if let Ok(pool) = platform::connect().await {
+                match knowledge::search::matching_pg(&pool, &req).await {
                     Ok(pg) if matching_has_hits(&pg) => return Ok(Json(pg)),
                     Ok(_) if !empty.candidates.is_empty() => return Ok(Json(empty)),
                     Ok(pg) => return Ok(Json(pg)),
@@ -3219,8 +3285,8 @@ async fn do_match(
             Ok(Json(empty))
         }
         Err(e) if e.code == "NOT_FOUND" || e.code == "VALIDATION" => {
-            if let Ok(pool) = storage::connect().await {
-                return match search::matching_pg(&pool, &req).await {
+            if let Ok(pool) = platform::connect().await {
+                return match knowledge::search::matching_pg(&pool, &req).await {
                     Ok(pg) => Ok(Json(pg)),
                     Err(pg_err) => Err(map_search(pg_err)),
                 };
@@ -3231,31 +3297,35 @@ async fn do_match(
     }
 }
 
-async fn hydrate_search_workspace(state: &AppState, actor: &Actor, req: &search::SearchRequest) {
+async fn hydrate_search_workspace(
+    store: &mut Store,
+    actor: &Actor,
+    req: &knowledge::search::SearchRequest,
+) {
     if let Some(ws) = req.workspace_id {
-        ensure_workspace(state, ws).await;
+        ensure_workspace(store, ws).await;
         return;
     }
     if let Some(pid) = req.product_id {
-        ensure_product(state, pid).await;
+        ensure_product(store, pid).await;
         return;
     }
     match actor {
-        Actor::User(uid) => ensure_user_workspaces(state, *uid).await,
-        Actor::Key(k) if k.scope_type == "workspace" => ensure_workspace(state, k.scope_id).await,
-        Actor::Key(k) if k.scope_type == "product" => ensure_product(state, k.scope_id).await,
+        Actor::User(uid) => ensure_user_workspaces(store, *uid).await,
+        Actor::Key(k) if k.scope_type == "workspace" => ensure_workspace(store, k.scope_id).await,
+        Actor::Key(k) if k.scope_type == "product" => ensure_product(store, k.scope_id).await,
         _ => {}
     }
 }
 
-fn matching_has_hits(r: &search::MatchingResponse) -> bool {
+fn matching_has_hits(r: &knowledge::search::MatchingResponse) -> bool {
     r.candidates
         .iter()
         .any(|c| c.requirements.iter().any(|req| req.hit))
         || r.clauses.iter().any(|c| c.outcome == "hit")
 }
 
-fn infer_workspace(s: &Store, actor: &Actor, req: &search::SearchRequest) -> Result<Uuid, ApiErr> {
+fn infer_workspace(s: &Store, actor: &Actor, req: &knowledge::search::SearchRequest) -> Result<Uuid, ApiErr> {
     if let Some(pid) = req.product_id {
         let p = s.products.get(&pid).ok_or_else(|| not_found("product"))?;
         require_ws(s, p.workspace_id, actor, false, false)?;
@@ -3288,7 +3358,7 @@ fn infer_workspace(s: &Store, actor: &Actor, req: &search::SearchRequest) -> Res
     }
 }
 
-fn map_search(e: search::SearchError) -> ApiErr {
+fn map_search(e: knowledge::search::SearchError) -> ApiErr {
     let status = match e.code {
         "NOT_FOUND" => StatusCode::NOT_FOUND,
         "EMBEDDING_MISMATCH" => StatusCode::BAD_REQUEST,
@@ -3316,7 +3386,7 @@ struct AnswerIn {
 #[derive(Serialize)]
 struct AnswerOut {
     answer: String,
-    hits: Vec<search::Hit>,
+    hits: Vec<knowledge::search::Hit>,
     citations: Vec<HashMap<String, serde_json::Value>>,
 }
 
@@ -3326,9 +3396,9 @@ async fn do_answer(
     Json(body): Json<AnswerIn>,
 ) -> Result<Json<AnswerOut>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    ensure_product(&state, body.product_id).await;
+    let mut s = lock(&state).await?;
+    ensure_product(&mut s,  body.product_id).await;
     {
-        let s = lock(&state)?;
         let p = s
             .products
             .get(&body.product_id)
@@ -3338,7 +3408,7 @@ async fn do_answer(
             return Err(validation("product has no current version"));
         }
     }
-    let req = search::AnswerRequest {
+    let req = knowledge::search::AnswerRequest {
         query: body.query,
         product_id: body.product_id,
         version_id: body.version_id,
@@ -3346,22 +3416,12 @@ async fn do_answer(
         tag_ids: body.tag_ids,
         context: body.context,
     };
-    let store = state.store.clone();
     let req2 = req.clone();
-    let mut res = tokio::task::spawn_blocking(move || {
-        let s = store.lock().map_err(|_| search::SearchError {
-            code: "INTERNAL",
-            message: "store lock".into(),
-        })?;
-        search::answer(&s, &req)
-    })
-    .await
-    .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", e.to_string()))?
-    .map_err(map_search)?;
+    let mut res = knowledge::search::answer(&s, &req).map_err(map_search)?;
     if res.hits.is_empty()
-        && let Ok(pool) = storage::connect().await
+        && let Ok(pool) = platform::connect().await
     {
-        let sreq = search::SearchRequest {
+        let sreq = knowledge::search::SearchRequest {
             mode: "assembly".into(),
             query: Some(req2.query.clone()),
             product_id: Some(req2.product_id),
@@ -3379,15 +3439,15 @@ async fn do_answer(
             group_by: "none".into(),
             tender_text: None,
         };
-        if let Ok(pg) = search::assembly_pg(&pool, &sreq).await
+        if let Ok(pg) = knowledge::search::assembly_pg(&pool, &sreq).await
             && !pg.hits.is_empty()
         {
-            let model = storage::current_summary_model(&pool, req2.product_id)
+            let model = knowledge::current_summary_model(&pool, req2.product_id)
                 .await
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| "stub-chat".into());
-            res = search::answer_from_hits(&req2.query, &req2.context, pg.hits, &model);
+            res = knowledge::search::answer_from_hits(&req2.query, &req2.context, pg.hits, &model);
         }
     }
     let citations = res
@@ -3412,10 +3472,10 @@ async fn do_answer(
 async fn dead_letters(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<domain::DeadLetter>>, ApiErr> {
+) -> Result<Json<Vec<knowledge::DeadLetter>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
     let mut out = {
-        let s = lock(&state)?;
+        let s = lock(&state).await?;
         let admin = match &actor {
             Actor::Bootstrap => true,
             Actor::Key(k) => k.scopes.iter().any(|x| x == "admin"),
@@ -3429,8 +3489,8 @@ async fn dead_letters(
         }
         s.dead_letters.clone()
     };
-    if let Ok(pool) = storage::connect().await
-        && let Ok(pg) = storage::list_dead_letters(&pool).await
+    if let Ok(pool) = platform::connect().await
+        && let Ok(pg) = knowledge::list_dead_letters(&pool).await
     {
         out.extend(pg);
     }
@@ -3450,7 +3510,7 @@ async fn list_queues(
 ) -> Result<Json<QueueView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
     let (memory, dead_letters) = {
-        let s = lock(&state)?;
+        let s = lock(&state).await?;
         let admin = match &actor {
             Actor::Bootstrap => true,
             Actor::Key(k) => k.scopes.iter().any(|x| x == "admin"),
@@ -3470,11 +3530,11 @@ async fn list_queues(
     };
     let mut pending_ops = HashMap::new();
     let mut dead_letters = dead_letters;
-    if let Ok(pool) = storage::connect().await {
-        if let Ok(rows) = storage::pending_op_counts(&pool).await {
+    if let Ok(pool) = platform::connect().await {
+        if let Ok(rows) = knowledge::pending_op_counts(&pool).await {
             pending_ops = rows;
         }
-        if let Ok(n) = storage::count_dead_letters(&pool).await {
+        if let Ok(n) = knowledge::count_dead_letters(&pool).await {
             dead_letters += n as usize;
         }
     }
@@ -3531,7 +3591,7 @@ async fn create_api_key(
         return Err(validation("scope_type must be workspace or product"));
     }
     let (view, persist) = {
-        let mut s = lock(&state)?;
+        let mut s = lock(&state).await?;
         require_ws(&s, id, &actor, false, true)?;
         let scope_id = if body.scope_type == "workspace" {
             id
@@ -3549,7 +3609,7 @@ async fn create_api_key(
         let key = ApiKey {
             id: Uuid::new_v4(),
             name: body.name,
-            key_hash: auth::hash_password(&raw),
+            key_hash: platform::hash_password(&raw),
             prefix: raw.chars().take(10).collect(),
             scope_type: body.scope_type,
             scope_id,
@@ -3576,10 +3636,10 @@ async fn create_api_key(
         s.api_keys.insert(key.id, key);
         (view, persist)
     };
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::insert_api_key(
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::insert_api_key(
             &pool,
-            storage::NewApiKey {
+            knowledge::NewApiKey {
                 id: persist.0,
                 name: &persist.1,
                 key_hash: &persist.2,
@@ -3600,7 +3660,7 @@ async fn list_api_keys(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<ApiKeyView>>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
-    let s = lock(&state)?;
+    let s = lock(&state).await?;
     require_ws(&s, id, &actor, false, true)?;
     let out = s
         .api_keys
@@ -3632,7 +3692,7 @@ async fn delete_api_key(
 ) -> Result<StatusCode, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
     {
-        let mut s = lock(&state)?;
+        let mut s = lock(&state).await?;
         require_ws(&s, id, &actor, false, true)?;
         let k = s
             .api_keys
@@ -3648,23 +3708,23 @@ async fn delete_api_key(
         }
         s.api_keys.remove(&key_id);
     }
-    if let Ok(pool) = storage::connect().await {
-        let _ = storage::delete_api_key(&pool, key_id).await;
+    if let Ok(pool) = platform::connect().await {
+        let _ = knowledge::delete_api_key(&pool, key_id).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn global_file(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<FileQuery>,
 ) -> Result<Vec<u8>, ApiErr> {
-    let _actor = actor_from(&headers, &_state).await?;
+    let _actor = actor_from(&headers, &state).await?;
     let hash = q.key.trim_start_matches("objects/");
     if hash.is_empty() {
         return Err(not_found("file"));
     }
-    storage::read_blob(hash).map_err(|_| not_found("file"))
+    platform::read_blob(hash).map_err(|_| not_found("file"))
 }
 
 pub(crate) fn durable_human_actor(actor: &Actor) -> Result<String, ApiErr> {
@@ -3690,7 +3750,7 @@ pub(crate) fn required_idempotency_key(headers: &HeaderMap) -> Result<String, Ap
 }
 
 pub(crate) async fn require_bid_pool() -> Result<sqlx::PgPool, ApiErr> {
-    storage::connect().await.map_err(|error| {
+    platform::connect().await.map_err(|error| {
         tracing::error!(error = %error, "bid database unavailable");
         fail(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -3759,16 +3819,16 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_workspace_merges_tags_graph_wiki_chunks_into_live_store() {
-        let Ok(pool) = storage::connect().await else {
+        let Ok(pool) = platform::connect().await else {
             eprintln!("skip: postgres down");
             return;
         };
         let owner = Uuid::new_v4();
-        storage::insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
+        knowledge::insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
             .unwrap();
         let slug = format!("merge-{}", owner.simple());
-        let seeded = storage::create_workspace_with_library(&pool, owner, "Merge", &slug)
+        let seeded = knowledge::create_workspace_with_library(&pool, owner, "Merge", &slug)
             .await
             .unwrap();
         let tag_id = Uuid::new_v4();
@@ -3781,9 +3841,9 @@ mod tests {
         let did = Uuid::new_v4();
         let file_hash = "aa".repeat(32);
         let object_ref = format!("objects/{file_hash}");
-        storage::insert_document(
+        knowledge::insert_document(
             &pool,
-            storage::NewDocument {
+            knowledge::NewDocument {
                 id: did,
                 product_version_id: seeded.library_version_id,
                 title: "cert",
@@ -3802,10 +3862,10 @@ mod tests {
             .await
             .unwrap();
         let cid = Uuid::new_v4();
-        storage::replace_document_chunks(
+        knowledge::replace_document_chunks(
             &pool,
             did,
-            &[domain::Chunk {
+            &[knowledge::Chunk {
                 id: cid,
                 document_id: did,
                 product_version_id: seeded.library_version_id,
@@ -3817,12 +3877,12 @@ mod tests {
                 parent_chunk_id: None,
                 generated_questions: vec![],
             }],
-            &[domain::ChunkEmbedding {
+            &[knowledge::ChunkEmbedding {
                 chunk_id: cid,
                 product_version_id: seeded.library_version_id,
                 document_id: did,
                 content: "iso certified".into(),
-                vector: vec![0.3; models::EMBEDDING_DIM],
+                vector: vec![0.3; knowledge::models::EMBEDDING_DIM],
                 tsv: String::new(),
             }],
         )
@@ -3858,15 +3918,19 @@ mod tests {
         .await
         .unwrap();
 
+        let catalog = Arc::new(Mutex::new(Store::default()));
         let state = AppState {
-            store: Arc::new(Mutex::new(Store::default())),
+            test_catalog: Some(catalog.clone()),
             jwt_secret: "secret".into(),
             bootstrap_key: String::new(),
         };
-        assert!(state.store.lock().unwrap().workspaces.is_empty());
-        ensure_workspace(&state, seeded.workspace_id).await;
+        assert!(catalog.lock().unwrap().workspaces.is_empty());
         {
-            let s = state.store.lock().unwrap();
+            let mut s = catalog.lock().unwrap();
+            ensure_workspace(&mut s, seeded.workspace_id).await;
+        }
+        {
+            let s = catalog.lock().unwrap();
             assert!(s.workspaces.contains_key(&seeded.workspace_id));
             assert!(
                 s.tags.contains_key(&tag_id),
@@ -3892,28 +3956,32 @@ mod tests {
             );
         }
 
+        let catalog_store = Arc::new(Mutex::new(Store::default()));
         let catalog_only = AppState {
-            store: Arc::new(Mutex::new(Store::default())),
+            test_catalog: Some(catalog_store.clone()),
             jwt_secret: "secret".into(),
             bootstrap_key: String::new(),
         };
         {
-            let mut s = catalog_only.store.lock().unwrap();
+            let mut s = catalog_store.lock().unwrap();
             s.workspaces.insert(
                 seeded.workspace_id,
-                domain::Workspace {
+                knowledge::Workspace {
                     id: seeded.workspace_id,
                     name: "Merge".into(),
                     slug: slug.clone(),
                     kind: Default::default(),
-                    retrieval: domain::RetrievalConfig::default(),
+                    retrieval: knowledge::RetrievalConfig::default(),
                 },
             );
             assert!(s.tags.is_empty());
             assert!(s.chunks.is_empty());
         }
-        ensure_workspace(&catalog_only, seeded.workspace_id).await;
-        let s = catalog_only.store.lock().unwrap();
+        {
+            let mut s = catalog_store.lock().unwrap();
+            ensure_workspace(&mut s, seeded.workspace_id).await;
+        }
+        let s = catalog_store.lock().unwrap();
         assert!(
             s.tags.contains_key(&tag_id),
             "catalog already present must still merge tags"

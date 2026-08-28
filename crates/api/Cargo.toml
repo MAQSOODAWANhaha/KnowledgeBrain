@@ -6,23 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-auth = { path = "../auth" }
-bid = { path = "../bid" }
 axum.workspace = true
+bidding = { path = "../bidding" }
 chrono.workspace = true
 dotenvy.workspace = true
 docparser = { path = "../docparser" }
-domain = { path = "../domain" }
-models = { path = "../models" }
-obs = { path = "../obs" }
 http-body-util.workspace = true
+knowledge = { path = "../knowledge" }
 oxana-web.workspace = true
-runtime = { path = "../runtime" }
-search = { path = "../search" }
+platform = { path = "../platform" }
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
-storage = { path = "../storage" }
 tokio.workspace = true
 tower.workspace = true
 tracing.workspace = true
@@ -30,7 +25,6 @@ tower-http = { workspace = true, features = ["cors", "fs"] }
 uuid.workspace = true
 
 [dev-dependencies]
-auth = { path = "../auth" }
 http-body-util.workspace = true
 sqlx.workspace = true
 tokio = { workspace = true, features = ["process", "io-util"] }

@@ -202,3 +202,68 @@ export function assertCanMerge(
     throw new AuthoringLogicError("MERGE_NODES", "合并至少两个不同节点");
   return unique.map((id) => assertCanRename(index, id));
 }
+
+export type FlattenedNode = OutlineNodeView & { depth: number };
+
+export function flattenPreorder(index: OutlineIndex): FlattenedNode[] {
+  const out: FlattenedNode[] = [];
+  function walk(parentId: string | null, depth: number): void {
+    for (const node of childrenOf(index, parentId)) {
+      out.push({ ...node, depth });
+      walk(node.lineage_id, depth + 1);
+    }
+  }
+  walk(null, 0);
+  return out;
+}
+
+export type DropPlacement = "before" | "after" | "child";
+
+export type DropMove = {
+  parentLineageId: string | null;
+  ordinal: number;
+};
+
+export function dropPlacementFromRatio(yRatio: number): DropPlacement {
+  if (yRatio < 0.28) return "before";
+  if (yRatio > 0.72) return "after";
+  return "child";
+}
+
+export function dropMove(
+  index: OutlineIndex,
+  draggedId: string,
+  targetId: string,
+  placement: DropPlacement,
+): DropMove {
+  if (draggedId === targetId) {
+    const current = assertCanRename(index, draggedId);
+    return {
+      parentLineageId: current.parent_lineage_id,
+      ordinal: current.ordinal,
+    };
+  }
+  const target = assertCanRename(index, targetId);
+  let parentLineageId: string | null;
+  let ordinal: number;
+  if (placement === "child") {
+    parentLineageId = target.lineage_id;
+    ordinal = childrenOf(index, parentLineageId).filter(
+      (item) => item.lineage_id !== draggedId,
+    ).length;
+  } else {
+    parentLineageId = target.parent_lineage_id;
+    const siblings = childrenOf(index, parentLineageId).filter(
+      (item) => item.lineage_id !== draggedId,
+    );
+    const targetIndex = siblings.findIndex(
+      (item) => item.lineage_id === targetId,
+    );
+    if (targetIndex < 0) {
+      throw new AuthoringLogicError("TREE_NODE", "放置目标不在同级列表中");
+    }
+    ordinal = placement === "before" ? targetIndex : targetIndex + 1;
+  }
+  assertCanMove(index, draggedId, parentLineageId, ordinal);
+  return { parentLineageId, ordinal };
+}

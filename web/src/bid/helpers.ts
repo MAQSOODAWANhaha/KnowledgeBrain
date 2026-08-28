@@ -1,7 +1,7 @@
 import type { TenderDocumentView } from "./api/types";
 
 export function fileLabel(s: string): string {
-  if (s === "completed") return "已解析";
+  if (s === "completed" || s === "ready") return "已解析";
   if (s === "processing") return "解析中";
   if (s === "pending") return "排队解析";
   if (s === "failed") return "解析失败";

@@ -16,8 +16,7 @@ cp deploy/.env.example deploy/.env
 KNOWLEDGEBRAIN_FIRST_LAUNCH_FRESH=required deploy/compose-first-launch.sh
 ```
 
-当前固定 manifest 只有 `knowledge_base_baseline`、`shared_platform_baseline`、`bidding_v1_baseline` 三个 fresh slices；bootstrap role/extension 脚本也由 manifest 校验 checksum。生产仍明确不可部署，因为 runtime-completion artifact 保持 incomplete 且没有环境变量绕过。只有 final API/Web、真实对象卷、PDF、恢复、readiness、image 和 topology 证据闭合后，orchestrator 才会销毁专用 volumes、执行一次性 migrate/verifier handoff，并启动 runtime profile。禁止对已有安装运行。
-
+当前固定 manifest 只有 `knowledge_base_baseline`、`shared_platform_baseline`、`bidding_v1_baseline` 三个 fresh slices；bootstrap role/extension 脚本也由 manifest 校验 checksum。`bidding_v1_baseline` 是**现在还能 first-launch 的切片**，不是产品终态。招投标产品目标是 Target V2（[`../docs/bidding/authoring.md`](../docs/bidding/authoring.md)），Phase 7 用 `bidding_v2_baseline` 替换 v1 切片。生产仍明确不可部署，因为 runtime-completion artifact 保持 incomplete 且没有环境变量绕过。只有 final API/Web、真实对象卷、PDF、恢复、readiness、image 和 topology 证据闭合后，orchestrator 才会销毁专用 volumes、执行一次性 migrate/verifier handoff，并启动 runtime profile。禁止对已有安装运行。
 
 ```bash
 deploy/compose-runtime-restart.sh
@@ -53,7 +52,7 @@ DocReader 本机：`cd services/docreader && PYTHONPATH=.. uv run python main.py
 ## 端口（默认）
 
 | 服务 | 容器 | 主机 |
-|---|---|---|
+| --- | --- | --- |
 | api | 8080 | 18080 |
 | retention probe | 8082 | internal |
 | docreader | 50051 | 15051 |
@@ -67,7 +66,7 @@ DocReader 本机：`cd services/docreader && PYTHONPATH=.. uv run python main.py
 ## 镜像
 
 | 文件 | 产物 |
-|---|---|
+| --- | --- |
 | `Dockerfile.rust` | `api`、`worker`、`retention`（对应 `BIN`）；Node 构建阶段同时产出并内置 `/web` SPA |
 | `Dockerfile.docreader` | Python gRPC DocReader |
 

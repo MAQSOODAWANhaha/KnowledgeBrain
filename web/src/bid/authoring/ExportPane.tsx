@@ -1,5 +1,3 @@
-import { Button } from "@mantine/core";
-import { exportAllowed } from "./assessment";
 import type { BidV2Session, BidV2State } from "./session";
 
 export function ExportPane({
@@ -9,42 +7,52 @@ export function ExportPane({
   session: BidV2Session;
   state: BidV2State;
 }) {
-  const allowed = exportAllowed({
-    assessment: state.assessments?.submission ?? null,
-    technicalReady: !state.error?.technical,
-  });
   const issues = state.assessments?.submission?.issues ?? [];
+  const blocked = state.ended || !state.workspace;
   return (
     <div className="stack">
       <div className="card">
         <h3 className="h3">导出</h3>
-        <p className="note">
-          业务提示不阻断导出。缺资产、digest 错误等技术失败才会停。
-        </p>
+        <p className="note">导出当前稿。改完可以再导一份。业务提示不阻断。</p>
         <div className="row" style={{ marginTop: 16 }}>
-          <Button
+          <button
+            type="button"
+            className="btn"
             data-testid="export-docx"
-            disabled={state.ended || !allowed.allowed}
+            disabled={blocked}
             onClick={() => void session.exportDocument("submission", "docx")}
           >
             导出 DOCX
-          </Button>
-          <Button
+          </button>
+          <button
+            type="button"
+            className="btn ghost"
             data-testid="export-pdf"
-            variant="default"
-            disabled={state.ended || !allowed.allowed}
+            disabled={blocked}
             onClick={() => void session.exportDocument("submission", "pdf")}
           >
             导出 PDF
-          </Button>
-          <Button
-            variant="default"
-            disabled={state.ended}
+          </button>
+          <button
+            type="button"
+            className="btn ghost"
+            disabled={blocked}
             onClick={() => void session.exportDocument("review_draft", "pdf")}
           >
             预审稿 PDF
-          </Button>
+          </button>
         </div>
+        {state.asyncRequests
+          .filter((request) => request.kind === "SubmissionExport")
+          .map((request) => (
+            <p
+              key={request.request_artifact_id}
+              className="note"
+              data-testid="export-status"
+            >
+              导出 {request.status}
+            </p>
+          ))}
       </div>
       <div className="card" data-testid="assessment-report">
         <h3 className="h3">检查报告（提示）</h3>

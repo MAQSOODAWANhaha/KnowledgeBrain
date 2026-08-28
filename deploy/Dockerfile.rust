@@ -20,7 +20,7 @@ COPY deploy/first-launch/intended-state.toml deploy/first-launch/intended-state.
 COPY deploy/first-launch/catalog-row-allowlist.toml deploy/first-launch/catalog-row-allowlist.toml
 COPY deploy/first-launch/migration-manifest.toml deploy/first-launch/migration-manifest.toml
 COPY deploy/postgres-init/010-runtime-identities.sh deploy/postgres-init/010-runtime-identities.sh
-RUN cargo build --release -p api -p worker -p retention -p migrator -p first-launch-verifier
+RUN cargo build --release -p api -p worker -p retention -p platform
 
 FROM debian:bookworm-slim
 RUN apt-get update \

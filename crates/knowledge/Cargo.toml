@@ -1,0 +1,31 @@
+[package]
+name = "knowledge"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+knowledge-v2-exact-contract-tests = []
+
+[dependencies]
+async-trait = "0.1"
+base64.workspace = true
+chrono.workspace = true
+docparser = { path = "../docparser" }
+hex.workspace = true
+image = "0.25"
+platform = { path = "../platform" }
+redis.workspace = true
+rust_decimal.workspace = true
+regex = "1"
+reqwest.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true

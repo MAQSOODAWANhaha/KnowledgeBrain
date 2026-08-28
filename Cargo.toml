@@ -1,26 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/domain",
-  "crates/auth",
-  "crates/models",
-  "crates/runtime",
-  "crates/api",
+  "crates/platform",
+  "crates/knowledge",
   "crates/docparser",
-  "crates/chunker",
-  "crates/index",
-  "crates/enrichment",
-  "crates/graph",
-  "crates/wiki",
-  "crates/clone",
-  "crates/search",
-  "crates/bid",
-  "crates/obs",
-  "crates/storage",
+  "crates/bidding",
+  "crates/api",
   "crates/worker",
   "crates/retention",
-  "crates/migrator",
-  "crates/first-launch-verifier",
 ]
 
 [workspace.package]

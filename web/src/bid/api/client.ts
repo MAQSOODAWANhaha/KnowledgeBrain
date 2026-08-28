@@ -15,6 +15,7 @@ import type {
   BidProjectView,
   CandidateView,
   CurrentAssessmentsView,
+  DocumentRelationKind,
   DocumentRole,
   EvidenceOverview,
   ExpectedPointer,
@@ -88,6 +89,19 @@ export type BidV2Api = {
     projectId: string,
     signal?: AbortSignal,
   ): Promise<TenderRelationView[]>;
+  upsertDocumentRelation(
+    projectId: string,
+    body: {
+      lineage_id?: string;
+      from_document_id: string;
+      to_document_id: string;
+      relation_kind: DocumentRelationKind;
+      applicability: Record<string, unknown>;
+      expected_artifact_id?: string;
+      expected_sha256?: string;
+    },
+    attempt: MutationAttempt,
+  ): Promise<TenderRelationView>;
   createOutlineCandidate(
     workspaceId: string,
     body: OutlineCandidateRequest,
@@ -97,6 +111,11 @@ export type BidV2Api = {
     workspaceId: string,
     body: ContentCandidateRequest,
     opts: V2RequestOptions,
+  ): Promise<AsyncRequestView>;
+  getRequest(
+    workspaceId: string,
+    requestArtifactId: string,
+    signal?: AbortSignal,
   ): Promise<AsyncRequestView>;
   getCandidate(
     workspaceId: string,
@@ -306,6 +325,14 @@ export function createBidV2Client(): BidV2Api {
       });
       return Array.isArray(data) ? data : data.relations;
     },
+    async upsertDocumentRelation(projectId, body, attempt) {
+      const { data } = await v2Request<TenderRelationView>(
+        `/api/v2/bid-projects/${projectId}/tender-document-relations`,
+        { method: "POST", body: JSON.stringify(body) },
+        { attempt },
+      );
+      return data;
+    },
     async createOutlineCandidate(workspaceId, body, opts) {
       const { data } = await v2Request<AsyncRequestView>(
         `/api/v2/submission-workspaces/${workspaceId}/outline-candidates`,
@@ -319,6 +346,13 @@ export function createBidV2Client(): BidV2Api {
         `/api/v2/submission-workspaces/${workspaceId}/content-candidates`,
         { method: "POST", body: JSON.stringify(body) },
         opts,
+      );
+      return data;
+    },
+    async getRequest(workspaceId, requestArtifactId, signal) {
+      const { data } = await v2Request<AsyncRequestView>(
+        `/api/v2/submission-workspaces/${workspaceId}/requests/${requestArtifactId}`,
+        { signal },
       );
       return data;
     },

@@ -45,12 +45,23 @@ export function useBidV2Session(route: AuthoringRoute | null): {
 
   useEffect(() => {
     if (!projectId || !step) return;
-    void session.applyRoute({ projectId, step, nodeLineageId });
-  }, [session, projectId, step, nodeLineageId]);
+    void session.applyRoute({
+      projectId,
+      step,
+      nodeLineageId,
+    });
+    // Hash node changes must not reload workspace and wipe drafts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, projectId, step]);
+
+  useEffect(() => {
+    if (step !== "authoring" || !nodeLineageId) return;
+    session.selectNode(nodeLineageId);
+  }, [session, step, nodeLineageId]);
 
   useEffect(() => {
     if (!poll) return;
-    const timer = window.setInterval(() => void session.refresh(), 5000);
+    const timer = window.setInterval(() => void session.poll(), 5000);
     return () => window.clearInterval(timer);
   }, [session, poll]);
 

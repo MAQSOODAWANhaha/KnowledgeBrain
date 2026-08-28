@@ -15,26 +15,17 @@ path = "src/main.rs"
 [dependencies]
 async-trait = "0.1"
 axum.workspace = true
-chunker = { path = "../chunker" }
-clone = { path = "../clone" }
+bidding = { path = "../bidding" }
 docparser = { path = "../docparser" }
 dotenvy.workspace = true
-bid = { path = "../bid" }
-domain = { path = "../domain" }
-enrichment = { path = "../enrichment" }
-graph = { path = "../graph" }
-index = { path = "../index" }
-models = { path = "../models" }
-obs = { path = "../obs" }
+knowledge = { path = "../knowledge" }
 oxana.workspace = true
-runtime = { path = "../runtime" }
+platform = { path = "../platform" }
 serde_json.workspace = true
 sqlx.workspace = true
-storage = { path = "../storage" }
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-wiki = { path = "../wiki" }
 
 [dev-dependencies]
-storage = { path = "../storage", features = ["first-launch-migration"] }
+platform = { path = "../platform" }

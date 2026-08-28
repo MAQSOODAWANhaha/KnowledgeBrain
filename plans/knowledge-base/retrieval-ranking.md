@@ -8,7 +8,7 @@
 | 次要消费方 | `POST /search`，仅在招投标切流后复用 |
 | 明确排除 | `POST /answer`、LLM rerank、Matching decision/verifier 改造 |
 
-本文是招投标证据检索准确度与稳定性的唯一活动实施定义。WeKnora 只提供「多路召回 → 融合 → 专用 rerank」的分层参考，不是本方案的第二真源。
+本文是招投标证据检索准确度与稳定性的唯一活动实施定义。消费方是 Target V2 的知识填充 / EvidenceBundle（[`../../docs/bidding/authoring.md`](../../docs/bidding/authoring.md)），不是 ①～⑥ 组卷。WeKnora 只提供「多路召回 → 融合 → 专用 rerank」的分层参考，不是本方案的第二真源。
 
 ## 1. 当前合同事实与审查决定
 
@@ -280,7 +280,7 @@ Bidding 必须扩展现有 schedule intent/recovery fence：
 | Bidding baseline/runtime | `migrations/bidding_v1_baseline.sql`, 必要 runtime seam | v2 schedule identity、retry/terminal 状态与 fence |
 | Matching workflow | `crates/bid/src/matching/workflow.rs` | 仅增加不变量回归测试；生产 verifier/代数不改 |
 | Evaluation | `testdata/retrieval_eval.json` 及 focused tests | shadow、quota、rerank equal-score/乱序、schedule restart/terminal、attest/verify tamper、真实条款 fixture |
-| Docs | `docs/knowledge-base/domain.md`, `plans/bidding/matching.md` | 实施并批准切流后回写稳定合同与消费方 policy |
+| Docs | `docs/knowledge-base/domain.md`, `plans/bidding/current-code/matching.md` | 实施并批准切流后回写稳定合同与消费方 policy |
 | Deferred | `crates/search/*` | P5 才复用，不进入招投标切流 PR |
 
 ## 11. PR 切片

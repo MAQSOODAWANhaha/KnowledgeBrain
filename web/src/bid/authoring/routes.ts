@@ -1,10 +1,7 @@
 export const AUTHORING_STEPS = [
   { key: "files", n: "1", label: "文件" },
-  { key: "requirements", n: "2", label: "要求" },
-  { key: "quote", n: "3", label: "报价" },
-  { key: "authoring", n: "4", label: "编制" },
-  { key: "preview", n: "5", label: "预览" },
-  { key: "export", n: "6", label: "导出" },
+  { key: "authoring", n: "2", label: "编制" },
+  { key: "export", n: "3", label: "导出" },
 ] as const;
 
 export type AuthoringStep = (typeof AUTHORING_STEPS)[number]["key"];
