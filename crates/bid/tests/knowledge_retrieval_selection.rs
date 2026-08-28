@@ -18,6 +18,182 @@ struct SelectionFixture {
     company_version_id: Uuid,
 }
 
+struct V1GoldenFixture {
+    workspace_id: Uuid,
+    product_id: Uuid,
+    version_id: Uuid,
+    document_id: Uuid,
+    trusted_chunk_id: Uuid,
+    derived_chunk_id: Uuid,
+    filtered_chunk_id: Uuid,
+    object_ref: String,
+}
+
+fn golden_uuid(suffix: u8) -> Uuid {
+    Uuid::parse_str(&format!("d1000000-0000-4000-8000-{suffix:012x}"))
+        .expect("fixed V1 golden UUID")
+}
+
+async fn remove_v1_golden_fixture(pool: &PgPool, fixture: &V1GoldenFixture) {
+    sqlx::query("DELETE FROM chunks WHERE document_id=$1")
+        .bind(fixture.document_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "DELETE FROM object_owner_references
+          WHERE owner_kind='knowledge_document' AND owner_id=$1",
+    )
+    .bind(fixture.document_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM documents WHERE id=$1")
+        .bind(fixture.document_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM object_registry WHERE object_ref=$1")
+        .bind(&fixture.object_ref)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE products SET current_version_id=NULL WHERE id=$1")
+        .bind(fixture.product_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM product_versions WHERE id=$1")
+        .bind(fixture.version_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM products WHERE id=$1")
+        .bind(fixture.product_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM workspaces WHERE id=$1")
+        .bind(fixture.workspace_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn seed_v1_golden_fixture(pool: &PgPool) -> V1GoldenFixture {
+    let document_id = golden_uuid(4);
+    let fixture = V1GoldenFixture {
+        workspace_id: golden_uuid(1),
+        product_id: golden_uuid(2),
+        version_id: golden_uuid(3),
+        document_id,
+        trusted_chunk_id: golden_uuid(5),
+        derived_chunk_id: golden_uuid(6),
+        filtered_chunk_id: golden_uuid(7),
+        object_ref: format!("objects/{}", domain::sha256_hex(document_id.as_bytes())),
+    };
+    remove_v1_golden_fixture(pool, &fixture).await;
+
+    sqlx::query(
+        "INSERT INTO workspaces(id,name,slug,kind)
+         VALUES($1,'V1 adapter byte golden','v1-adapter-byte-golden','product_line')",
+    )
+    .bind(fixture.workspace_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO products(id,workspace_id,kind,name,slug)
+         VALUES($1,$2,'product','V1 adapter byte golden','v1-adapter-byte-golden')",
+    )
+    .bind(fixture.product_id)
+    .bind(fixture.workspace_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO product_versions(id,product_id,label,status)
+         VALUES($1,$2,'v1-byte-golden','active')",
+    )
+    .bind(fixture.version_id)
+    .bind(fixture.product_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE products SET current_version_id=$2 WHERE id=$1")
+        .bind(fixture.product_id)
+        .bind(fixture.version_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    let file_hash = domain::sha256_hex(fixture.document_id.as_bytes());
+    sqlx::query(
+        "INSERT INTO object_registry(object_ref,digest,media_type,byte_length,state)
+         VALUES($1,$2,'text/plain',1,'available')",
+    )
+    .bind(&fixture.object_ref)
+    .bind(&file_hash)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO object_owner_references(
+             object_ref,owner_kind,owner_id,occurrence,created_by)
+         VALUES($1,'knowledge_document',$2,'original','system:knowledge-document-ingest')",
+    )
+    .bind(&fixture.object_ref)
+    .bind(fixture.document_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO documents(
+             id,product_version_id,type,title,parse_status,enable_status,index_ready,
+             file_name,file_size,file_hash,object_ref)
+         VALUES($1,$2,'file','V1 adapter byte golden','completed','enabled',true,
+                'v1-golden.txt',1,$3,$4)",
+    )
+    .bind(fixture.document_id)
+    .bind(fixture.version_id)
+    .bind(&file_hash)
+    .bind(&fixture.object_ref)
+    .execute(pool)
+    .await
+    .unwrap();
+    for (chunk_id, chunk_type, content) in [
+        (
+            fixture.trusted_chunk_id,
+            "text",
+            "selection contract requirement trusted",
+        ),
+        (
+            fixture.derived_chunk_id,
+            "question",
+            "selection contract requirement derived",
+        ),
+        (
+            fixture.filtered_chunk_id,
+            "parent_text",
+            "unrelated filtered bytes",
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO chunks(id,product_version_id,document_id,chunk_type,content)
+             VALUES($1,$2,$3,$4,$5)",
+        )
+        .bind(chunk_id)
+        .bind(fixture.version_id)
+        .bind(fixture.document_id)
+        .bind(chunk_type)
+        .bind(content)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    fixture
+}
+
 fn retrieval_policy() -> RetrievalPolicyIdentityV1 {
     RetrievalPolicyIdentityV1 {
         contract_version: "knowledge-evidence-v1".into(),
@@ -254,6 +430,44 @@ async fn adapter_enforces_exact_unique_current_workspace_kind_selection() {
         wrong_company_kind,
         Err(KnowledgeRetrievalError::InvalidRequest(_))
     ));
+}
+
+#[tokio::test]
+async fn populated_v1_adapter_output_bytes_and_behavior_are_frozen() {
+    let Some(pool) = support::connect_postgres_contract("KnowledgeSelectionV1ByteGolden").await
+    else {
+        return;
+    };
+    let fixture = seed_v1_golden_fixture(&pool).await;
+    let adapter = PostgresKnowledgeRetrievalAdapter::new(pool.clone());
+    let batch = adapter
+        .retrieve_product_evidence(product_request(vec![fixture.version_id]))
+        .await
+        .unwrap();
+
+    let serialized = serde_json::to_string(&batch).unwrap();
+    let expected = r#"{"schema_version":1,"eligible_versions":[{"product_id":"d1000000-0000-4000-8000-000000000002","product_version_id":"d1000000-0000-4000-8000-000000000003","workspace_kind":"product_line","frozen_display_name":"d1000000-0000-4000-8000-000000000003"}],"hits":[{"schema_version":1,"document_id":"d1000000-0000-4000-8000-000000000004","source_chunk_id":"d1000000-0000-4000-8000-000000000005","product_id":"d1000000-0000-4000-8000-000000000002","product_version_id":"d1000000-0000-4000-8000-000000000003","workspace_kind":"product_line","frozen_document_display_name":"v1-golden.txt","chunk_utf8":"selection contract requirement trusted","chunk_sha256":"485acdf0997030c13cf75504ec98b5a46205f13f4d40077110b057d92d99f91a","chunk_byte_length":38,"quote_start_offset":0,"quote_end_offset":38,"offset_unit":"utf8_byte","retrieval_rank":1,"retrieval_raw_score":"1.000000","retrieval_contract_version":"knowledge-evidence-v1"},{"schema_version":1,"document_id":"d1000000-0000-4000-8000-000000000004","source_chunk_id":"d1000000-0000-4000-8000-000000000006","product_id":"d1000000-0000-4000-8000-000000000002","product_version_id":"d1000000-0000-4000-8000-000000000003","workspace_kind":"product_line","frozen_document_display_name":"v1-golden.txt","chunk_utf8":"selection contract requirement derived","chunk_sha256":"bd79bb21b33035dbcbb87551ba46f7573cc84ebd5fe983473bc22ced364c0052","chunk_byte_length":38,"quote_start_offset":0,"quote_end_offset":38,"offset_unit":"utf8_byte","retrieval_rank":2,"retrieval_raw_score":"1.000000","retrieval_contract_version":"knowledge-evidence-v1"}]}"#;
+    assert_eq!(serialized.as_bytes(), expected.as_bytes());
+
+    let returned_chunk_ids = batch
+        .hits
+        .iter()
+        .map(|hit| hit.source_chunk_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        returned_chunk_ids,
+        vec![fixture.trusted_chunk_id, fixture.derived_chunk_id]
+    );
+    assert!(!returned_chunk_ids.contains(&fixture.filtered_chunk_id));
+    let returned_source_types: Vec<String> =
+        sqlx::query_scalar("SELECT chunk_type FROM chunks WHERE id=ANY($1::uuid[]) ORDER BY id")
+            .bind(&returned_chunk_ids)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(returned_source_types, vec!["text", "question"]);
+
+    remove_v1_golden_fixture(&pool, &fixture).await;
 }
 
 #[tokio::test]

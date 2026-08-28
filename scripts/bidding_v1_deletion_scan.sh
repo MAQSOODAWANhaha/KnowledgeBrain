@@ -9,7 +9,6 @@ scan() {
   shift
   if rg -n --glob '!target/**' --glob '!web/dist/**' --glob '!web/node_modules/**' \
       --glob '!web/playwright-report/**' --glob '!web/test-results/**' \
-      --glob '!deploy/first-launch/catalog-row-allowlist.toml' \
       --glob '!migrations/bidding_v1_extra_functions.sql' \
       -e "$pattern" "$@"; then
     echo "deletion-scan hit: $pattern" >&2
@@ -40,13 +39,42 @@ scan '/api/v1/bids/.*/export' crates/api/src
 scan 'step=booklet' web/src
 scan '/booklet/' web/src
 
+# Oxana owns enqueue, retry, delay, membership, heartbeat, resurrection and the
+# dead queue. Bid keeps only business revision/current CAS and immutable staging.
+scan 'replay_orphaned_local_jobs|LiveRecoveryV1|TYPE_LIVE_RECOVERY|QUEUE_LIVE_RECOVERY|enqueue_live_recovery|bid_recovery' \
+  crates/domain/src crates/runtime/src crates/storage/src crates/worker/src
+scan 'oxanus:' \
+  crates/runtime/src/work_transport.rs crates/worker/src/consume.rs crates/worker/src/main.rs \
+  crates/storage/src/bid_matching.rs \
+  crates/storage/src/bid_submission.rs crates/storage/src/bidding.rs
+scan 'bid_(delivery_attempts|delivery_settlements|delivery_successors|queue_memberships|dispatch_heads|dispatch_intents|repair_obligations|rejected_deliveries)' \
+  migrations/bidding_v1_baseline.sql crates/api/src crates/bid/src crates/domain/src \
+  crates/runtime/src crates/storage/src crates/worker/src
+scan 'attempt_count|max_attempts|retry_backoff|retry_schedule|dead_queue|queue_membership' \
+  migrations/bidding_v1_baseline.sql crates/api/src/bid_routes.rs crates/bid/src \
+  crates/domain/src/intended_state.rs crates/domain/src/queue_registry.rs crates/domain/src/status.rs \
+  crates/runtime/src/work_transport.rs \
+  crates/storage/src/bid_matching.rs crates/storage/src/bid_submission.rs \
+  crates/storage/src/bidding.rs crates/worker/src/consume.rs
+scan 'delivery_generation([[:space:]]*[:.]|[[:space:]]+bigint)|next_enqueue_at([[:space:]]*[:.=]|[[:space:]]+timestamptz)|fn (run_bid_delivery_reconciler|reconcile_bid_deliveries_once)|run_bid_delivery_reconciler\(|reconcile_bid_deliveries_once\(|reserve_due_deliveries\(|reap_expired_deliveries\(' \
+  migrations/bidding_v1_baseline.sql crates/api/src/bid_routes.rs crates/bid/src \
+  crates/runtime/src/work_transport.rs \
+  crates/storage/src/bid_matching.rs crates/storage/src/bid_submission.rs \
+  crates/storage/src/bidding.rs crates/worker/src/consume.rs
+scan 'bid_(document_conversion_attempts|extraction_attempts|matching_job_claims)' \
+  migrations/bidding_v1_baseline.sql
+scan 'kb_bid_(reserve_due_deliveries|reclaim_stale_conversions|reclaim_stale_extractions|matching_reap|reap_attachment_preparations|reap_submission_renders|heartbeat_document_conversion|heartbeat_extraction|matching_heartbeat|heartbeat_attachment_preparation|heartbeat_submission_render)\(' \
+  migrations/bidding_v1_baseline.sql crates/storage/src crates/bid/src crates/worker/src
+scan 'run_with_heartbeat|LeaseRun' crates/bid/src crates/worker/src
+
 if rg -n --glob '!target/**' -e 'value === "booklet"' web/src/hash.ts; then
   echo "deletion-scan hit: booklet alias in hash.ts" >&2
   fail=1
 fi
 
 if [ -e crates/storage/src/bid.rs ] || [ -e crates/storage/src/bid_extract_publication.rs ] \
-   || [ -e crates/bid/src/booklet.rs ] || [ -e crates/bid/src/export.rs ]; then
+   || [ -e crates/bid/src/booklet.rs ] || [ -e crates/bid/src/export.rs ] \
+   || [ -e crates/runtime/src/lease.rs ]; then
   echo "deleted modules still present" >&2
   fail=1
 fi

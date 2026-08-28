@@ -8,7 +8,7 @@ if ! docker info >/dev/null 2>&1; then
     echo "docker is required for mandatory Compose runtime/PDF acceptance" >&2
     exit 1
   fi
-  echo "SKIPPED: docker unavailable; compose first-launch/restart/reclaim/render/retention not executed"
+  echo "SKIPPED: docker unavailable; compose first-launch/restart/render/retention not executed"
   exit 0
 fi
 
@@ -47,6 +47,11 @@ else
   ACCEPTANCE_GIT_DIRTY=false
 fi
 export ACCEPTANCE_GIT_SHA ACCEPTANCE_GIT_DIFF_SHA256 ACCEPTANCE_GIT_DIRTY
+if [ "${KNOWLEDGEBRAIN_REQUIRE_CLEAN_ACCEPTANCE:-0}" = "1" ] &&
+  [ "$ACCEPTANCE_GIT_DIRTY" != "false" ]; then
+  echo "mandatory Compose acceptance requires a clean checkout" >&2
+  exit 1
+fi
 
 assert_acceptance_source_identity() {
   current_git_sha=$(git rev-parse HEAD)
@@ -269,7 +274,7 @@ printf '%s\n' \
     'PGPASSWORD="$POSTGRES_PASSWORD" psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
     >/dev/null
 
-# Reclaim / render / retention probes against the live acceptance stack.
+# Render / retention probes against the live acceptance stack.
 # These prove role grants and process liveness; they do not invent PDF hashes.
 role_psql() {
   role=$1 password=$2
@@ -284,7 +289,6 @@ expect_denied() {
     exit 1
   fi
 }
-role_psql kb_runtime_worker acceptance-worker -Atc "SELECT kb_bid_reclaim_stale_conversions()" >/dev/null
 role_psql kb_runtime_worker acceptance-worker -Atc "SELECT kb_bid_housekeep_end_expired()" >/dev/null
 expect_denied kb_runtime_api acceptance-api "INSERT INTO bid_projects(id,title,owner_user_id,ends_at,fact_sha256,ceiling_identity_sha256,created_by) VALUES(gen_random_uuid(),'x',gen_random_uuid(),now(),repeat('0',64),repeat('0',64),'system:test')"
 expect_denied kb_runtime_retention acceptance-retention "SELECT count(*) FROM bid_projects"

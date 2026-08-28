@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:knowledgebrain:bid:submission-assessment-snapshot:v1",
+  "title": "SubmissionAssessmentSnapshotV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "assessment_snapshot_id",
+    "project_id",
+    "workspace_id",
+    "workspace_scope",
+    "workspace_revision_id",
+    "requirement_projection_revision_id",
+    "document_settings_revision_id",
+    "asset_set_sha256",
+    "assessment_input_sha256",
+    "issues",
+    "created_at",
+    "assessment_sha256",
+    "workspace_scope_revision_id",
+    "workspace_scope_sha256",
+    "workspace_sha256",
+    "requirement_projection_sha256",
+    "document_settings_sha256",
+    "status",
+    "asset_identities",
+    "quote_snapshot"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "assessment_snapshot_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "project_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "workspace_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "workspace_scope": {
+      "const": "project_wide"
+    },
+    "workspace_revision_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "requirement_projection_revision_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "document_settings_revision_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "asset_set_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "assessment_input_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "issues": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "$ref": "#/$defs/issue"
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "assessment_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "workspace_scope_revision_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "workspace_scope_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "workspace_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "requirement_projection_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "document_settings_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "status": {
+      "enum": [
+        "ready",
+        "has_warnings",
+        "has_critical_warnings"
+      ]
+    },
+    "asset_identities": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "$ref": "#/$defs/frozenIdentity"
+      }
+    },
+    "quote_snapshot": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/frozenIdentity"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issue_id",
+        "code",
+        "severity",
+        "message",
+        "target_revision_id"
+      ],
+      "properties": {
+        "issue_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "code": {
+          "enum": [
+            "REQUIREMENT_UNFULFILLED",
+            "EVIDENCE_MISSING",
+            "EVIDENCE_STALE",
+            "UNSUPPORTED_FACT",
+            "ASSET_MISSING",
+            "QUOTE_MISSING",
+            "QUOTE_STALE",
+            "ATTACHMENT_MISSING",
+            "STRUCTURED_FORM_DEVIATION",
+            "SCORING_GAP",
+            "CONTENT_STALE",
+            "FORMAT_DEVIATION"
+          ]
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "warning",
+            "high"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "target_revision_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "frozenIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "sha256"
+      ],
+      "properties": {
+        "artifact_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

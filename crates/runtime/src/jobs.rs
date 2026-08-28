@@ -6,6 +6,9 @@ use uuid::Uuid;
 pub const DOCUMENT_PROCESS_MAX_RETRY: u32 = 3;
 pub const DOCUMENT_PROCESS_TIMEOUT_SECS: u64 = 2 * 60 * 60;
 pub const POST_PROCESS_TIMEOUT_SECS: u64 = 30 * 60;
+pub const SEMANTIC_INDEX_V2_MAX_RETRY: u32 = 3;
+pub const SEMANTIC_INDEX_V2_RETRY_DELAY_SECS: u64 = 10;
+pub const SEMANTIC_INDEX_V2_TIMEOUT_SECS: u64 = 2 * 60 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
 #[oxana(unique_id = "document:process:{document_id}:{attempt}", on_conflict = Skip)]
@@ -50,6 +53,17 @@ pub struct PostProcessJob {
 #[derive(oxana::Queue)]
 #[oxana(key = "postprocess", concurrency = Dynamic(2))]
 pub struct PostprocessQueue;
+
+#[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
+#[oxana(
+    unique_id = "knowledge:semantic_index:v2:{target_id}:{target_revision}",
+    on_conflict = Skip,
+    resurrect = true
+)]
+pub struct KnowledgeSemanticIndexV2Job {
+    pub target_id: Uuid,
+    pub target_revision: i64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
 #[oxana(unique_id = "summary:generation:{document_id}:{attempt}", on_conflict = Skip)]
@@ -166,574 +180,6 @@ pub struct WikiFinalizeJob {
 #[oxana(key = "wiki", concurrency = Dynamic(8))]
 pub struct WikiQueue;
 
-pub const BID_CONVERT_V1_SCHEMA: &str = "bid-convert/v1";
-pub const BID_CONVERT_V1_PAYLOAD_VERSION: u16 = 1;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BidConversionV1Snapshots {
-    pub conversion_snapshot_id: Uuid,
-    pub feature_snapshot_id: Uuid,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, oxana::Job)]
-#[serde(deny_unknown_fields)]
-#[oxana(unique_id = "bid:convert:{document_id}", on_conflict = Skip)]
-pub struct BidConvertJob {
-    pub document_id: Uuid,
-    pub conversion_snapshot_id: Uuid,
-    pub feature_snapshot_id: Uuid,
-    pub payload_version: u16,
-    pub task_type: String,
-}
-
-impl BidConvertJob {
-    pub fn new(document_id: Uuid, snapshots: BidConversionV1Snapshots) -> Result<Self, String> {
-        let job = Self {
-            document_id,
-            conversion_snapshot_id: snapshots.conversion_snapshot_id,
-            feature_snapshot_id: snapshots.feature_snapshot_id,
-            payload_version: BID_CONVERT_V1_PAYLOAD_VERSION,
-            task_type: domain::TYPE_BID_CONVERT.to_string(),
-        };
-        job.validate()?;
-        Ok(job)
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        validate_bid_snapshot_job(
-            self.payload_version,
-            BID_CONVERT_V1_PAYLOAD_VERSION,
-            &self.task_type,
-            domain::TYPE_BID_CONVERT,
-            &[
-                self.document_id,
-                self.conversion_snapshot_id,
-                self.feature_snapshot_id,
-            ],
-            "bid-convert",
-        )
-    }
-}
-
-pub const BID_PREPARE_ATTACHMENT_V1_SCHEMA: &str = "bid-prepare-attachment/v1";
-pub const BID_PREPARE_ATTACHMENT_V1_PAYLOAD_VERSION: u16 = 1;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, oxana::Job)]
-#[serde(deny_unknown_fields)]
-#[oxana(unique_id = "bid:prepare-attachment:v1:{preparation_job_id}", on_conflict = Skip)]
-pub struct BidPrepareAttachmentV1Job {
-    pub preparation_job_id: Uuid,
-    pub conversion_snapshot_id: Uuid,
-    pub feature_snapshot_id: Uuid,
-    pub payload_version: u16,
-    pub task_type: String,
-}
-
-impl BidPrepareAttachmentV1Job {
-    pub fn new(
-        preparation_job_id: Uuid,
-        snapshots: BidConversionV1Snapshots,
-    ) -> Result<Self, String> {
-        let job = Self {
-            preparation_job_id,
-            conversion_snapshot_id: snapshots.conversion_snapshot_id,
-            feature_snapshot_id: snapshots.feature_snapshot_id,
-            payload_version: BID_PREPARE_ATTACHMENT_V1_PAYLOAD_VERSION,
-            task_type: domain::TYPE_BID_PREPARE_ATTACHMENT_V1.to_string(),
-        };
-        job.validate()?;
-        Ok(job)
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        validate_bid_snapshot_job(
-            self.payload_version,
-            BID_PREPARE_ATTACHMENT_V1_PAYLOAD_VERSION,
-            &self.task_type,
-            domain::TYPE_BID_PREPARE_ATTACHMENT_V1,
-            &[
-                self.preparation_job_id,
-                self.conversion_snapshot_id,
-                self.feature_snapshot_id,
-            ],
-            "bid-prepare-attachment",
-        )
-    }
-}
-
-pub const BID_EXTRACT_V1_SCHEMA: &str = "bid-extract/v1";
-pub const BID_EXTRACT_V1_PAYLOAD_VERSION: u16 = 1;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BidExtractV1Snapshots {
-    pub target_config_snapshot_id: Uuid,
-    pub feature_snapshot_id: Uuid,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, oxana::Job)]
-#[serde(deny_unknown_fields)]
-#[oxana(unique_id = "bid:extract:{run_id}", on_conflict = Skip)]
-pub struct BidExtractJob {
-    pub run_id: Uuid,
-    pub project_id: Uuid,
-    pub document_id: Option<Uuid>,
-    pub target_config_snapshot_id: Uuid,
-    pub feature_snapshot_id: Uuid,
-    pub payload_version: u16,
-    pub task_type: String,
-}
-
-impl BidExtractJob {
-    pub fn new(
-        run_id: Uuid,
-        project_id: Uuid,
-        document_id: Option<Uuid>,
-        snapshots: BidExtractV1Snapshots,
-    ) -> Result<Self, String> {
-        let job = Self {
-            run_id,
-            project_id,
-            document_id,
-            target_config_snapshot_id: snapshots.target_config_snapshot_id,
-            feature_snapshot_id: snapshots.feature_snapshot_id,
-            payload_version: BID_EXTRACT_V1_PAYLOAD_VERSION,
-            task_type: domain::TYPE_BID_EXTRACT.to_string(),
-        };
-        job.validate()?;
-        Ok(job)
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        validate_bid_snapshot_job(
-            self.payload_version,
-            BID_EXTRACT_V1_PAYLOAD_VERSION,
-            &self.task_type,
-            domain::TYPE_BID_EXTRACT,
-            &[
-                self.run_id,
-                self.project_id,
-                self.target_config_snapshot_id,
-                self.feature_snapshot_id,
-            ],
-            "bid-extract",
-        )?;
-        if self
-            .document_id
-            .is_some_and(|document_id| document_id.is_nil())
-        {
-            return Err("rejected bid-extract document_id".into());
-        }
-        Ok(())
-    }
-}
-
-#[derive(oxana::Queue)]
-#[oxana(key = "bid-convert-v1", concurrency = Dynamic(4))]
-pub struct BidConvertV1Queue;
-
-#[derive(oxana::Queue)]
-#[oxana(key = "bid-extract-v1", concurrency = Dynamic(4))]
-pub struct BidExtractV1Queue;
-
-#[derive(oxana::Queue)]
-#[oxana(key = "bid-matching-v1", concurrency = Dynamic(4))]
-pub struct BidMatchingV1Queue;
-
-#[derive(oxana::Queue)]
-#[oxana(key = "bid-render-v1", concurrency = Dynamic(2))]
-pub struct BidRenderV1Queue;
-
-pub const BID_MATCH_ROUTE_V1_SCHEMA: &str = "bid-match-route/v1";
-pub const BID_MATCH_ROUTE_V1_PAYLOAD_VERSION: u16 = 1;
-pub const BID_MATCH_ROUTE_V1_TRACE_ID_MAX: usize = 128;
-
-#[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
-#[oxana(unique_id = "bid:match-route:v1:{job_id}", on_conflict = Skip)]
-pub struct BidMatchRouteV1Job {
-    pub job_id: Uuid,
-    pub config_snapshot_id: Uuid,
-    pub feature_snapshot_id: Uuid,
-    pub score_policy_snapshot_id: Uuid,
-    pub verifier_policy_snapshot_id: Uuid,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_id: Option<String>,
-    pub payload_version: u16,
-    pub task_type: String,
-}
-
-impl BidMatchRouteV1Job {
-    pub fn new(
-        job_id: Uuid,
-        snapshots: BidMatchRouteV1Snapshots,
-        trace_id: Option<String>,
-    ) -> Result<Self, String> {
-        let trace_id = match trace_id {
-            Some(value) => Some(bounded_opaque_trace_id(value)?),
-            None => None,
-        };
-        Ok(Self {
-            job_id,
-            config_snapshot_id: snapshots.config_snapshot_id,
-            feature_snapshot_id: snapshots.feature_snapshot_id,
-            score_policy_snapshot_id: snapshots.score_policy_snapshot_id,
-            verifier_policy_snapshot_id: snapshots.verifier_policy_snapshot_id,
-            trace_id,
-            payload_version: BID_MATCH_ROUTE_V1_PAYLOAD_VERSION,
-            task_type: domain::TYPE_BID_MATCH_ROUTE_V1.to_string(),
-        })
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        if self.payload_version != BID_MATCH_ROUTE_V1_PAYLOAD_VERSION {
-            return Err("rejected bid-match-route payload_version".into());
-        }
-        if self.task_type != domain::TYPE_BID_MATCH_ROUTE_V1 {
-            return Err("rejected bid-match-route task_type".into());
-        }
-        if let Some(trace_id) = &self.trace_id {
-            bounded_opaque_trace_id(trace_id.clone())?;
-        }
-        Ok(())
-    }
-}
-
-pub const BID_RENDER_SUBMISSION_V1_SCHEMA: &str = "bid-render-submission/v1";
-pub const BID_RENDER_SUBMISSION_V1_PAYLOAD_VERSION: u16 = 1;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BidRenderSubmissionV1Snapshots {
-    pub submission_render_job_snapshot_id: Uuid,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, oxana::Job)]
-#[serde(deny_unknown_fields)]
-#[oxana(
-    unique_id = "bid:render-submission:v1:{render_job_id}",
-    on_conflict = Skip
-)]
-pub struct BidRenderSubmissionV1Job {
-    pub render_job_id: Uuid,
-    pub submission_render_job_snapshot_id: Uuid,
-    pub payload_version: u16,
-    pub task_type: String,
-}
-
-impl BidRenderSubmissionV1Job {
-    pub fn new(
-        render_job_id: Uuid,
-        snapshots: BidRenderSubmissionV1Snapshots,
-    ) -> Result<Self, String> {
-        let job = Self {
-            render_job_id,
-            submission_render_job_snapshot_id: snapshots.submission_render_job_snapshot_id,
-            payload_version: BID_RENDER_SUBMISSION_V1_PAYLOAD_VERSION,
-            task_type: domain::TYPE_BID_RENDER_SUBMISSION_V1.to_string(),
-        };
-        job.validate()?;
-        Ok(job)
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        validate_bid_snapshot_job(
-            self.payload_version,
-            BID_RENDER_SUBMISSION_V1_PAYLOAD_VERSION,
-            &self.task_type,
-            domain::TYPE_BID_RENDER_SUBMISSION_V1,
-            &[self.render_job_id, self.submission_render_job_snapshot_id],
-            "bid-render-submission",
-        )
-    }
-}
-
-fn validate_bid_snapshot_job(
-    payload_version: u16,
-    expected_payload_version: u16,
-    task_type: &str,
-    expected_task_type: &str,
-    required_ids: &[Uuid],
-    contract_name: &str,
-) -> Result<(), String> {
-    if payload_version != expected_payload_version || task_type != expected_task_type {
-        return Err(format!("rejected {contract_name} payload contract"));
-    }
-    if required_ids.iter().any(Uuid::is_nil) {
-        return Err(format!("rejected {contract_name} snapshot identity"));
-    }
-    Ok(())
-}
-
-pub const LIVE_RECOVERY_V1_SCHEMA: &str = "live-recovery/v1";
-pub const LIVE_RECOVERY_V1_PAYLOAD_VERSION: u16 = 1;
-pub const LIVE_RECOVERY_V1_MAX_ORIGINAL_SNAPSHOTS: usize = 16;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LiveRecoveryKind {
-    DirtyManifest,
-    OrphanTarget,
-    OrphanMatchJob,
-}
-
-impl std::fmt::Display for LiveRecoveryKind {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::DirtyManifest => "dirty_manifest",
-            Self::OrphanTarget => "orphan_target",
-            Self::OrphanMatchJob => "orphan_match_job",
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LiveRecoveryTargetKind {
-    DocumentConversion,
-    ExtractionTarget,
-    AttachmentPreparation,
-    SubmissionRender,
-    MatchingManifest,
-    MatchingJob,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LiveRecoveryObservedStage {
-    Dirty,
-    Pending,
-    Processing,
-    Running,
-    Publishing,
-    Terminal,
-}
-
-impl LiveRecoveryObservedStage {
-    fn requires_heartbeat(self) -> bool {
-        matches!(self, Self::Processing | Self::Running | Self::Publishing)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LiveRecoveryOriginalSnapshotKind {
-    SourceArtifact,
-    TargetConfig,
-    ConversionConfig,
-    MatchingManifest,
-    SubmissionRenderJob,
-    MatchingConfig,
-    Feature,
-    ScorePolicy,
-    VerifierPolicy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LiveRecoveryOriginalSnapshotV1 {
-    pub snapshot_kind: LiveRecoveryOriginalSnapshotKind,
-    pub snapshot_id: Uuid,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveRecoveryObservationV1 {
-    pub generation: i64,
-    pub watermark: i64,
-    pub stage: LiveRecoveryObservedStage,
-    pub heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub owner_token: Option<Uuid>,
-    pub attempt: Option<i32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveRecoverySnapshotRefsV1 {
-    pub recovery_policy_snapshot_id: Uuid,
-    pub feature_snapshot_id: Uuid,
-    pub original_snapshots: Vec<LiveRecoveryOriginalSnapshotV1>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, oxana::Job)]
-#[serde(deny_unknown_fields)]
-#[oxana(
-    unique_id = "system:live-recovery:v1:{recovery_kind}:{durable_id}:{generation}:{recovery_epoch}",
-    on_conflict = Skip,
-    resurrect = true
-)]
-pub struct LiveRecoveryV1Job {
-    pub recovery_kind: LiveRecoveryKind,
-    pub target_kind: LiveRecoveryTargetKind,
-    pub durable_id: Uuid,
-    pub generation: i64,
-    pub observed_watermark: i64,
-    pub observed_stage: LiveRecoveryObservedStage,
-    #[serde(deserialize_with = "deserialize_required_option")]
-    pub observed_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(deserialize_with = "deserialize_required_option")]
-    pub observed_owner_token: Option<Uuid>,
-    #[serde(deserialize_with = "deserialize_required_option")]
-    pub observed_attempt: Option<i32>,
-    pub recovery_epoch: i64,
-    pub recovery_policy_snapshot_id: Uuid,
-    pub feature_snapshot_id: Uuid,
-    pub original_snapshots: Vec<LiveRecoveryOriginalSnapshotV1>,
-    pub payload_version: u16,
-    pub task_type: String,
-}
-
-impl LiveRecoveryV1Job {
-    pub fn new(
-        recovery_kind: LiveRecoveryKind,
-        target_kind: LiveRecoveryTargetKind,
-        durable_id: Uuid,
-        observed: LiveRecoveryObservationV1,
-        recovery_epoch: i64,
-        snapshots: LiveRecoverySnapshotRefsV1,
-    ) -> Result<Self, String> {
-        let job = Self {
-            recovery_kind,
-            target_kind,
-            durable_id,
-            generation: observed.generation,
-            observed_watermark: observed.watermark,
-            observed_stage: observed.stage,
-            observed_heartbeat_at: observed.heartbeat_at,
-            observed_owner_token: observed.owner_token,
-            observed_attempt: observed.attempt,
-            recovery_epoch,
-            recovery_policy_snapshot_id: snapshots.recovery_policy_snapshot_id,
-            feature_snapshot_id: snapshots.feature_snapshot_id,
-            original_snapshots: snapshots.original_snapshots,
-            payload_version: LIVE_RECOVERY_V1_PAYLOAD_VERSION,
-            task_type: domain::TYPE_SYSTEM_LIVE_RECOVERY_V1.to_string(),
-        };
-        job.validate()?;
-        Ok(job)
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        if self.payload_version != LIVE_RECOVERY_V1_PAYLOAD_VERSION
-            || self.task_type != domain::TYPE_SYSTEM_LIVE_RECOVERY_V1
-        {
-            return Err("rejected live-recovery payload contract".into());
-        }
-        if self.durable_id.is_nil()
-            || self.generation <= 0
-            || self.observed_watermark < 0
-            || self.recovery_epoch <= 0
-            || self.recovery_policy_snapshot_id.is_nil()
-            || self.feature_snapshot_id.is_nil()
-        {
-            return Err("rejected live-recovery durable identity".into());
-        }
-        let has_active_owner = self.observed_heartbeat_at.is_some()
-            && self.observed_owner_token.is_some()
-            && self.observed_attempt.is_some_and(|attempt| attempt > 0);
-        let has_any_owner_field = self.observed_heartbeat_at.is_some()
-            || self.observed_owner_token.is_some()
-            || self.observed_attempt.is_some();
-        if self
-            .observed_owner_token
-            .is_some_and(|owner_token| owner_token.is_nil())
-            || self.observed_attempt.is_some_and(|attempt| attempt <= 0)
-            || self.observed_stage.requires_heartbeat() != has_active_owner
-            || (!self.observed_stage.requires_heartbeat() && has_any_owner_field)
-        {
-            return Err("rejected live-recovery observed owner".into());
-        }
-        let kind_matches_target = match self.recovery_kind {
-            LiveRecoveryKind::DirtyManifest => {
-                self.target_kind == LiveRecoveryTargetKind::MatchingManifest
-                    && self.observed_stage == LiveRecoveryObservedStage::Dirty
-            }
-            LiveRecoveryKind::OrphanMatchJob => {
-                self.target_kind == LiveRecoveryTargetKind::MatchingJob
-            }
-            LiveRecoveryKind::OrphanTarget => !matches!(
-                self.target_kind,
-                LiveRecoveryTargetKind::MatchingManifest | LiveRecoveryTargetKind::MatchingJob
-            ),
-        };
-        if !kind_matches_target {
-            return Err("rejected live-recovery kind/target contract".into());
-        }
-        if self.original_snapshots.len() > LIVE_RECOVERY_V1_MAX_ORIGINAL_SNAPSHOTS {
-            return Err("rejected live-recovery original snapshot count".into());
-        }
-        let mut seen = std::collections::HashSet::new();
-        for snapshot in &self.original_snapshots {
-            if snapshot.snapshot_id.is_nil() || !seen.insert(snapshot.snapshot_kind) {
-                return Err("rejected live-recovery original snapshot identity".into());
-            }
-        }
-        let expected_snapshot_kinds: &[LiveRecoveryOriginalSnapshotKind] = match self.target_kind {
-            LiveRecoveryTargetKind::MatchingManifest => &[
-                LiveRecoveryOriginalSnapshotKind::MatchingConfig,
-                LiveRecoveryOriginalSnapshotKind::Feature,
-                LiveRecoveryOriginalSnapshotKind::ScorePolicy,
-                LiveRecoveryOriginalSnapshotKind::VerifierPolicy,
-            ],
-            LiveRecoveryTargetKind::DocumentConversion => &[
-                LiveRecoveryOriginalSnapshotKind::ConversionConfig,
-                LiveRecoveryOriginalSnapshotKind::Feature,
-            ],
-            LiveRecoveryTargetKind::ExtractionTarget => &[
-                LiveRecoveryOriginalSnapshotKind::SourceArtifact,
-                LiveRecoveryOriginalSnapshotKind::TargetConfig,
-                LiveRecoveryOriginalSnapshotKind::Feature,
-            ],
-            LiveRecoveryTargetKind::AttachmentPreparation => &[
-                LiveRecoveryOriginalSnapshotKind::ConversionConfig,
-                LiveRecoveryOriginalSnapshotKind::Feature,
-            ],
-            LiveRecoveryTargetKind::SubmissionRender => {
-                &[LiveRecoveryOriginalSnapshotKind::SubmissionRenderJob]
-            }
-            LiveRecoveryTargetKind::MatchingJob => &[
-                LiveRecoveryOriginalSnapshotKind::MatchingManifest,
-                LiveRecoveryOriginalSnapshotKind::MatchingConfig,
-                LiveRecoveryOriginalSnapshotKind::Feature,
-                LiveRecoveryOriginalSnapshotKind::ScorePolicy,
-                LiveRecoveryOriginalSnapshotKind::VerifierPolicy,
-            ],
-        };
-        if seen.len() != expected_snapshot_kinds.len()
-            || expected_snapshot_kinds
-                .iter()
-                .any(|snapshot_kind| !seen.contains(snapshot_kind))
-        {
-            return Err("rejected live-recovery original snapshot contract".into());
-        }
-        Ok(())
-    }
-}
-
-fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BidMatchRouteV1Snapshots {
-    pub config_snapshot_id: Uuid,
-    pub feature_snapshot_id: Uuid,
-    pub score_policy_snapshot_id: Uuid,
-    pub verifier_policy_snapshot_id: Uuid,
-}
-
-fn bounded_opaque_trace_id(value: String) -> Result<String, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty()
-        || trimmed.len() > BID_MATCH_ROUTE_V1_TRACE_ID_MAX
-        || !trimmed
-            .bytes()
-            .all(|b| b.is_ascii_graphic() || b == b'-' || b == b'_' || b == b':')
-    {
-        return Err("rejected bid-match-route trace_id".into());
-    }
-    Ok(trimmed.to_string())
-}
-
 /// Periodic sweep; oxana cron on `low` every 5 minutes (`HOUSEKEEP_CRON`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, oxana::Job)]
 #[oxana(resurrect = false)]
@@ -785,23 +231,11 @@ pub async fn queue_depths() -> std::collections::HashMap<String, i64> {
             storage.enqueued_count(GraphQueue).await.unwrap_or(0),
         ),
         (
-            "bid-convert-v1",
-            storage.enqueued_count(BidConvertV1Queue).await.unwrap_or(0),
-        ),
-        (
-            "bid-extract-v1",
-            storage.enqueued_count(BidExtractV1Queue).await.unwrap_or(0),
-        ),
-        (
-            "bid-matching-v1",
+            "bid-delivery-v1",
             storage
-                .enqueued_count(BidMatchingV1Queue)
+                .enqueued_count(crate::BidDeliveryV1Queue)
                 .await
                 .unwrap_or(0),
-        ),
-        (
-            "bid-render-v1",
-            storage.enqueued_count(BidRenderV1Queue).await.unwrap_or(0),
         ),
     ] {
         out.insert(name.into(), n as i64);
@@ -820,82 +254,6 @@ pub async fn connect_verified() -> Result<oxana::Storage, String> {
         .await
         .map_err(|error| error.to_string())?;
     Ok(storage)
-}
-
-/// Docker restart reuses hostname+pid, so oxana will not treat this process as dead.
-/// Move leftover jobs from our processing list back onto their queues before workers start.
-pub async fn replay_orphaned_local_jobs() -> Result<usize, String> {
-    let client = redis::Client::open(redis_url()).map_err(|e| e.to_string())?;
-    let mut con = client
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| e.to_string())?;
-    let pid = std::process::id();
-    let mut hosts = vec![gethostname::gethostname().to_string_lossy().into_owned()];
-    if let Ok(file_host) = std::fs::read_to_string("/etc/hostname") {
-        let file_host = file_host.trim().to_string();
-        if !file_host.is_empty() && !hosts.iter().any(|h| h == &file_host) {
-            hosts.push(file_host);
-        }
-    }
-    let mut n = 0usize;
-    for host in hosts {
-        let key = format!("oxanus:processing:{host}-{pid}");
-        n += replay_processing_list(&mut con, &key).await?;
-    }
-    Ok(n)
-}
-
-async fn replay_processing_list(
-    con: &mut redis::aio::MultiplexedConnection,
-    key: &str,
-) -> Result<usize, String> {
-    let mut n = 0usize;
-    loop {
-        let id: Option<String> = redis::cmd("LPOP")
-            .arg(key)
-            .query_async(&mut *con)
-            .await
-            .map_err(|e| e.to_string())?;
-        let Some(id) = id else {
-            break;
-        };
-        let raw: Option<String> = redis::cmd("HGET")
-            .arg("oxanus:jobs")
-            .arg(&id)
-            .query_async(&mut *con)
-            .await
-            .map_err(|e| e.to_string())?;
-        let Some(raw) = raw else {
-            continue;
-        };
-        let env: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
-        let resurrect = env
-            .pointer("/meta/resurrect")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        if resurrect {
-            let queue = env
-                .get("queue")
-                .and_then(|v| v.as_str())
-                .unwrap_or("default");
-            let _: () = redis::cmd("LPUSH")
-                .arg(format!("oxanus:queue:{queue}"))
-                .arg(&id)
-                .query_async(&mut *con)
-                .await
-                .map_err(|e| e.to_string())?;
-            n += 1;
-        } else {
-            let _: () = redis::cmd("HDEL")
-                .arg("oxanus:jobs")
-                .arg(&id)
-                .query_async(&mut *con)
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(n)
 }
 
 /// Pool build is lazy: `from_url` succeeds even when Redis is down.
@@ -944,9 +302,7 @@ pub fn dashboard_catalog() -> Option<(oxana::Storage, oxana::Catalog)> {
         .queue::<GraphQueue>()
         .queue::<MultimodalQueue>()
         .queue::<WikiQueue>()
-        .queue::<BidConvertV1Queue>()
-        .queue::<BidExtractV1Queue>()
-        .queue::<BidMatchingV1Queue>();
+        .queue::<crate::BidDeliveryV1Queue>();
     let catalog = builder.catalog();
     Some((storage, catalog))
 }
@@ -988,23 +344,11 @@ pub async fn queue_job_previews() -> std::collections::HashMap<String, Vec<Strin
         ),
         ("wiki", storage.list_queue_jobs(WikiQueue, &opts).await.ok()),
         (
-            "bid-convert-v1",
-            storage.list_queue_jobs(BidConvertV1Queue, &opts).await.ok(),
-        ),
-        (
-            "bid-extract-v1",
-            storage.list_queue_jobs(BidExtractV1Queue, &opts).await.ok(),
-        ),
-        (
-            "bid-matching-v1",
+            "bid-delivery-v1",
             storage
-                .list_queue_jobs(BidMatchingV1Queue, &opts)
+                .list_queue_jobs(crate::BidDeliveryV1Queue, &opts)
                 .await
                 .ok(),
-        ),
-        (
-            "bid-render-v1",
-            storage.list_queue_jobs(BidRenderV1Queue, &opts).await.ok(),
         ),
     ] {
         if let Some(jobs) = jobs {
@@ -1092,6 +436,32 @@ pub async fn enqueue_post_process(
                     product_version_id,
                     clone_keep,
                     task_type: domain::TYPE_POST_PROCESS.to_string(),
+                },
+            )
+            .await,
+    )
+}
+
+pub async fn enqueue_semantic_index_v2(
+    target_id: Uuid,
+    target_revision: i64,
+) -> Result<Option<String>, String> {
+    let Ok(storage) = connect() else {
+        return Ok(None);
+    };
+    tracing::debug!(
+        target_id = %target_id,
+        target_revision,
+        job = domain::TYPE_SEMANTIC_INDEX_V2,
+        "enqueue"
+    );
+    oxana_id(
+        storage
+            .enqueue(
+                PostprocessQueue,
+                KnowledgeSemanticIndexV2Job {
+                    target_id,
+                    target_revision,
                 },
             )
             .await,
@@ -1371,91 +741,6 @@ pub async fn enqueue_wiki_finalize(product_version_id: Uuid) -> Result<Option<St
     enqueue_wiki_finalize_in(product_version_id, WIKI_FINALIZE_DEBOUNCE_SECS).await
 }
 
-pub async fn enqueue_bid_convert_with_snapshots(
-    document_id: Uuid,
-    snapshots: BidConversionV1Snapshots,
-) -> Result<Option<String>, String> {
-    let job = BidConvertJob::new(document_id, snapshots)?;
-    let Ok(storage) = connect() else {
-        return Ok(None);
-    };
-    tracing::debug!(document_id = %document_id, job = "bid:convert", "enqueue");
-    oxana_id(storage.enqueue(BidConvertV1Queue, job).await)
-}
-
-pub async fn enqueue_bid_prepare_attachment_v1_with_snapshots(
-    preparation_job_id: Uuid,
-    snapshots: BidConversionV1Snapshots,
-) -> Result<Option<String>, String> {
-    let job = BidPrepareAttachmentV1Job::new(preparation_job_id, snapshots)?;
-    let Ok(storage) = connect() else {
-        return Ok(None);
-    };
-    tracing::debug!(%preparation_job_id,job="bid:prepare-attachment:v1","enqueue");
-    oxana_id(storage.enqueue(BidConvertV1Queue, job).await)
-}
-
-pub async fn enqueue_bid_extract_with_snapshots(
-    run_id: Uuid,
-    project_id: Uuid,
-    document_id: Option<Uuid>,
-    snapshots: BidExtractV1Snapshots,
-) -> Result<Option<String>, String> {
-    let job = BidExtractJob::new(run_id, project_id, document_id, snapshots)?;
-    let Ok(storage) = connect() else {
-        return Ok(None);
-    };
-    tracing::debug!(
-        run_id = %run_id,
-        project_id = %project_id,
-        document_id = ?document_id,
-        job = "bid:extract",
-        "enqueue"
-    );
-    oxana_id(storage.enqueue(BidExtractV1Queue, job).await)
-}
-
-pub async fn enqueue_bid_match_route_v1(
-    job_id: Uuid,
-    snapshots: BidMatchRouteV1Snapshots,
-    trace_id: Option<String>,
-) -> Result<Option<String>, String> {
-    let job = BidMatchRouteV1Job::new(job_id, snapshots, trace_id)?;
-    let Ok(storage) = connect() else {
-        return Ok(None);
-    };
-    tracing::debug!(job_id = %job_id, job = "bid:match-route:v1", "enqueue");
-    oxana_id(storage.enqueue(BidMatchingV1Queue, job).await)
-}
-
-pub async fn enqueue_bid_render_submission_v1_with_snapshots(
-    render_job_id: Uuid,
-    snapshots: BidRenderSubmissionV1Snapshots,
-) -> Result<Option<String>, String> {
-    let job = BidRenderSubmissionV1Job::new(render_job_id, snapshots)?;
-    let Ok(storage) = connect() else {
-        return Ok(None);
-    };
-    tracing::debug!(%render_job_id, job = "bid:render-submission:v1", "enqueue");
-    oxana_id(storage.enqueue(BidRenderV1Queue, job).await)
-}
-
-pub async fn enqueue_live_recovery_v1(job: LiveRecoveryV1Job) -> Result<Option<String>, String> {
-    job.validate()?;
-    let Ok(storage) = connect() else {
-        return Ok(None);
-    };
-    tracing::debug!(
-        recovery_kind = %job.recovery_kind,
-        durable_id = %job.durable_id,
-        generation = job.generation,
-        recovery_epoch = job.recovery_epoch,
-        job = "system:live-recovery:v1",
-        "enqueue"
-    );
-    oxana_id(storage.enqueue(LowQueue, job).await)
-}
-
 pub async fn enqueue_wiki_finalize_in(
     product_version_id: Uuid,
     delay_secs: u64,
@@ -1564,498 +849,39 @@ mod tests {
     }
 
     #[test]
-    fn bid_match_route_v1_identity_schema_and_queue_key() {
-        let job_id = Uuid::from_u128(1);
-        let job = BidMatchRouteV1Job::new(
-            job_id,
-            BidMatchRouteV1Snapshots {
-                config_snapshot_id: Uuid::from_u128(2),
-                feature_snapshot_id: Uuid::from_u128(3),
-                score_policy_snapshot_id: Uuid::from_u128(4),
-                verifier_policy_snapshot_id: Uuid::from_u128(5),
-            },
-            Some("trace:route-1".into()),
-        )
-        .unwrap();
-        assert_eq!(BID_MATCH_ROUTE_V1_SCHEMA, "bid-match-route/v1");
-        assert_eq!(job.payload_version, BID_MATCH_ROUTE_V1_PAYLOAD_VERSION);
-        assert_eq!(job.task_type, domain::TYPE_BID_MATCH_ROUTE_V1);
-        assert_eq!(
-            <BidMatchRouteV1Job as oxana::Job>::unique_id(&job),
-            Some(format!("bid:match-route:v1:{job_id}"))
-        );
-        match <BidMatchingV1Queue as oxana::Queue>::to_config().kind {
-            oxana::QueueKind::Static { key } => assert_eq!(key, domain::QUEUE_BID_MATCHING_V1),
-            other => panic!("bid-matching-v1 queue must be static, got {other:?}"),
-        }
-        assert_eq!(
-            crate::queue_for(domain::TYPE_BID_MATCH_ROUTE_V1),
-            domain::QUEUE_BID_MATCHING_V1
-        );
-    }
-
-    #[test]
-    fn bid_render_submission_v1_identity_schema_and_queue_key() {
-        let render_job_id = Uuid::from_u128(4);
-        let job = BidRenderSubmissionV1Job::new(
-            render_job_id,
-            BidRenderSubmissionV1Snapshots {
-                submission_render_job_snapshot_id: Uuid::from_u128(5),
-            },
-        )
-        .unwrap();
-        assert_eq!(BID_RENDER_SUBMISSION_V1_SCHEMA, "bid-render-submission/v1");
-        assert_eq!(
-            job.payload_version,
-            BID_RENDER_SUBMISSION_V1_PAYLOAD_VERSION
-        );
-        assert_eq!(job.task_type, domain::TYPE_BID_RENDER_SUBMISSION_V1);
-        assert_eq!(job.render_job_id, render_job_id);
-        assert_eq!(
-            <BidRenderSubmissionV1Job as oxana::Job>::unique_id(&job),
-            Some(format!("bid:render-submission:v1:{render_job_id}"))
-        );
-        match <BidRenderV1Queue as oxana::Queue>::to_config().kind {
-            oxana::QueueKind::Static { key } => assert_eq!(key, domain::QUEUE_BID_RENDER_V1),
-            other => panic!("bid-render-v1 queue must be static, got {other:?}"),
-        }
-        assert_eq!(
-            crate::queue_for(domain::TYPE_BID_RENDER_SUBMISSION_V1),
-            domain::QUEUE_BID_RENDER_V1
-        );
-    }
-
-    #[test]
-    fn bid_pipeline_v1_snapshot_contracts_are_required_and_non_nil() {
-        let conversion_snapshots = BidConversionV1Snapshots {
-            conversion_snapshot_id: Uuid::from_u128(0x21),
-            feature_snapshot_id: Uuid::from_u128(0x22),
-        };
-        let extract_snapshots = BidExtractV1Snapshots {
-            target_config_snapshot_id: Uuid::from_u128(0x31),
-            feature_snapshot_id: Uuid::from_u128(0x32),
-        };
-        let jobs = [
-            (
-                serde_json::to_value(
-                    BidConvertJob::new(Uuid::from_u128(1), conversion_snapshots).unwrap(),
-                )
-                .unwrap(),
-                vec!["conversion_snapshot_id", "feature_snapshot_id"],
-            ),
-            (
-                serde_json::to_value(
-                    BidPrepareAttachmentV1Job::new(Uuid::from_u128(2), conversion_snapshots)
-                        .unwrap(),
-                )
-                .unwrap(),
-                vec!["conversion_snapshot_id", "feature_snapshot_id"],
-            ),
-            (
-                serde_json::to_value(
-                    BidExtractJob::new(
-                        Uuid::from_u128(3),
-                        Uuid::from_u128(4),
-                        Some(Uuid::from_u128(5)),
-                        extract_snapshots,
-                    )
-                    .unwrap(),
-                )
-                .unwrap(),
-                vec!["target_config_snapshot_id", "feature_snapshot_id"],
-            ),
-            (
-                serde_json::to_value(
-                    BidRenderSubmissionV1Job::new(
-                        Uuid::from_u128(6),
-                        BidRenderSubmissionV1Snapshots {
-                            submission_render_job_snapshot_id: Uuid::from_u128(7),
-                        },
-                    )
-                    .unwrap(),
-                )
-                .unwrap(),
-                vec!["submission_render_job_snapshot_id"],
-            ),
-        ];
-        for (job, snapshot_fields) in jobs {
-            for field in snapshot_fields {
-                let mut missing = job.clone();
-                missing.as_object_mut().unwrap().remove(field);
-                assert!(
-                    serde_json::from_value::<serde_json::Value>(missing.clone()).is_ok(),
-                    "fixture must remain valid JSON"
-                );
-                let type_rejects_missing = match job["task_type"].as_str().unwrap() {
-                    domain::TYPE_BID_CONVERT => {
-                        serde_json::from_value::<BidConvertJob>(missing).is_err()
-                    }
-                    domain::TYPE_BID_PREPARE_ATTACHMENT_V1 => {
-                        serde_json::from_value::<BidPrepareAttachmentV1Job>(missing).is_err()
-                    }
-                    domain::TYPE_BID_EXTRACT => {
-                        serde_json::from_value::<BidExtractJob>(missing).is_err()
-                    }
-                    domain::TYPE_BID_RENDER_SUBMISSION_V1 => {
-                        serde_json::from_value::<BidRenderSubmissionV1Job>(missing).is_err()
-                    }
-                    other => panic!("unexpected task type {other}"),
-                };
-                assert!(type_rejects_missing, "missing {field} must be rejected");
-            }
-        }
-
-        assert!(
-            BidConvertJob::new(
-                Uuid::from_u128(1),
-                BidConversionV1Snapshots {
-                    conversion_snapshot_id: Uuid::nil(),
-                    feature_snapshot_id: Uuid::from_u128(2),
-                },
-            )
-            .is_err()
-        );
-        assert!(
-            BidPrepareAttachmentV1Job::new(
-                Uuid::from_u128(1),
-                BidConversionV1Snapshots {
-                    conversion_snapshot_id: Uuid::from_u128(2),
-                    feature_snapshot_id: Uuid::nil(),
-                },
-            )
-            .is_err()
-        );
-        assert!(
-            BidExtractJob::new(
-                Uuid::from_u128(1),
-                Uuid::from_u128(2),
-                None,
-                BidExtractV1Snapshots {
-                    target_config_snapshot_id: Uuid::nil(),
-                    feature_snapshot_id: Uuid::from_u128(3),
-                },
-            )
-            .is_err()
-        );
-        assert!(
-            BidRenderSubmissionV1Job::new(
-                Uuid::from_u128(1),
-                BidRenderSubmissionV1Snapshots {
-                    submission_render_job_snapshot_id: Uuid::nil(),
-                },
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn live_recovery_v1_identity_matches_registry_contract() {
-        let durable_id = Uuid::from_u128(0x7a11);
-        let job = live_recovery_job(
-            LiveRecoveryKind::OrphanTarget,
-            LiveRecoveryTargetKind::ExtractionTarget,
-            durable_id,
-        );
-
-        assert_eq!(LIVE_RECOVERY_V1_SCHEMA, "live-recovery/v1");
-        assert_eq!(job.payload_version, LIVE_RECOVERY_V1_PAYLOAD_VERSION);
-        assert_eq!(job.task_type, domain::TYPE_SYSTEM_LIVE_RECOVERY_V1);
-        assert_eq!(job.recovery_kind, LiveRecoveryKind::OrphanTarget);
-        assert_eq!(job.target_kind, LiveRecoveryTargetKind::ExtractionTarget);
-        assert_eq!(job.durable_id, durable_id);
-        assert_eq!(job.generation, 7);
-        assert_eq!(job.observed_watermark, 11);
-        assert_eq!(job.observed_stage, LiveRecoveryObservedStage::Running);
-        assert!(job.observed_heartbeat_at.is_some());
-        assert!(job.observed_owner_token.is_some());
-        assert_eq!(job.observed_attempt, Some(3));
-        assert_eq!(job.recovery_epoch, 42);
-        assert_eq!(
-            <LiveRecoveryV1Job as oxana::Job>::unique_id(&job),
-            Some(format!(
-                "system:live-recovery:v1:orphan_target:{durable_id}:7:42"
-            ))
-        );
-    }
-
-    #[test]
-    fn live_recovery_v1_rejects_invalid_contract_fields() {
-        let durable_id = Uuid::from_u128(0x7a11);
-        let mut job = live_recovery_job(
-            LiveRecoveryKind::OrphanTarget,
-            LiveRecoveryTargetKind::ExtractionTarget,
-            durable_id,
-        );
-        job.durable_id = Uuid::nil();
-        assert!(job.validate().is_err());
-        job.durable_id = durable_id;
-        job.generation = 0;
-        assert!(job.validate().is_err());
-        job.generation = 7;
-        job.observed_watermark = -1;
-        assert!(job.validate().is_err());
-        job.observed_watermark = 11;
-        job.recovery_epoch = 0;
-        assert!(job.validate().is_err());
-        job.recovery_epoch = 42;
-        job.observed_heartbeat_at = None;
-        assert!(job.validate().is_err());
-        job.observed_owner_token = None;
-        job.observed_attempt = None;
-        job.observed_stage = LiveRecoveryObservedStage::Pending;
-        assert!(job.validate().is_ok());
-        job.observed_owner_token = Some(Uuid::from_u128(0x61));
-        assert!(job.validate().is_err());
-        job.observed_owner_token = None;
-        job.target_kind = LiveRecoveryTargetKind::MatchingJob;
-        assert!(job.validate().is_err());
-        job.target_kind = LiveRecoveryTargetKind::ExtractionTarget;
-        job.original_snapshots[0].snapshot_id = Uuid::nil();
-        assert!(job.validate().is_err());
-        job.original_snapshots[0].snapshot_id = Uuid::from_u128(0x51);
-        job.original_snapshots.push(job.original_snapshots[0]);
-        assert!(job.validate().is_err());
-        job.original_snapshots.pop();
-        job.original_snapshots = (0..=LIVE_RECOVERY_V1_MAX_ORIGINAL_SNAPSHOTS)
-            .map(|index| LiveRecoveryOriginalSnapshotV1 {
-                snapshot_kind: LiveRecoveryOriginalSnapshotKind::TargetConfig,
-                snapshot_id: Uuid::from_u128(0x100 + index as u128),
-            })
-            .collect();
-        assert!(job.validate().is_err());
-        job.original_snapshots = original_snapshots(LiveRecoveryTargetKind::ExtractionTarget);
-        job.payload_version += 1;
-        assert!(job.validate().is_err());
-        job.payload_version = LIVE_RECOVERY_V1_PAYLOAD_VERSION;
-        job.task_type = "system:other".into();
-        assert!(job.validate().is_err());
-    }
-
-    #[test]
-    fn live_recovery_v1_requires_every_payload_field() {
-        let serialized = serde_json::to_value(live_recovery_job(
-            LiveRecoveryKind::DirtyManifest,
-            LiveRecoveryTargetKind::MatchingManifest,
-            Uuid::from_u128(0x7a12),
-        ))
-        .unwrap();
-        let fields = [
-            "recovery_kind",
-            "target_kind",
-            "durable_id",
-            "generation",
-            "observed_watermark",
-            "observed_stage",
-            "observed_heartbeat_at",
-            "observed_owner_token",
-            "observed_attempt",
-            "recovery_epoch",
-            "recovery_policy_snapshot_id",
-            "feature_snapshot_id",
-            "original_snapshots",
-            "payload_version",
-            "task_type",
-        ];
-        for field in fields {
-            let mut incomplete = serialized.clone();
-            incomplete.as_object_mut().unwrap().remove(field);
-            assert!(
-                serde_json::from_value::<LiveRecoveryV1Job>(incomplete).is_err(),
-                "missing {field} must be rejected"
-            );
-        }
-        let mut unknown = serialized;
-        unknown["unexpected"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<LiveRecoveryV1Job>(unknown).is_err());
-    }
-
-    #[test]
-    fn live_recovery_v1_redelivery_round_trip_preserves_identity() {
-        let job = live_recovery_job(
-            LiveRecoveryKind::OrphanMatchJob,
-            LiveRecoveryTargetKind::MatchingJob,
-            Uuid::from_u128(0x7a13),
-        );
-        let unique_id = <LiveRecoveryV1Job as oxana::Job>::unique_id(&job);
-        let bytes = serde_json::to_vec(&job).unwrap();
-        let redelivered: LiveRecoveryV1Job = serde_json::from_slice(&bytes).unwrap();
-
-        redelivered.validate().unwrap();
-        assert_eq!(redelivered, job);
-        assert_eq!(
-            <LiveRecoveryV1Job as oxana::Job>::unique_id(&redelivered),
-            unique_id
-        );
-    }
-
-    fn live_recovery_job(
-        recovery_kind: LiveRecoveryKind,
-        target_kind: LiveRecoveryTargetKind,
-        durable_id: Uuid,
-    ) -> LiveRecoveryV1Job {
-        let (stage, heartbeat_at, owner_token, attempt) =
-            if recovery_kind == LiveRecoveryKind::DirtyManifest {
-                (LiveRecoveryObservedStage::Dirty, None, None, None)
-            } else {
-                (
-                    LiveRecoveryObservedStage::Running,
-                    Some(
-                        chrono::DateTime::parse_from_rfc3339("2026-08-26T12:00:00Z")
-                            .unwrap()
-                            .with_timezone(&chrono::Utc),
-                    ),
-                    Some(Uuid::from_u128(0x61)),
-                    Some(3),
-                )
-            };
-        LiveRecoveryV1Job::new(
-            recovery_kind,
-            target_kind,
-            durable_id,
-            LiveRecoveryObservationV1 {
-                generation: 7,
-                watermark: 11,
-                stage,
-                heartbeat_at,
-                owner_token,
-                attempt,
-            },
-            42,
-            LiveRecoverySnapshotRefsV1 {
-                recovery_policy_snapshot_id: Uuid::from_u128(0x41),
-                feature_snapshot_id: Uuid::from_u128(0x42),
-                original_snapshots: original_snapshots(target_kind),
-            },
-        )
-        .unwrap()
-    }
-
-    fn original_snapshots(
-        target_kind: LiveRecoveryTargetKind,
-    ) -> Vec<LiveRecoveryOriginalSnapshotV1> {
-        let kinds: &[LiveRecoveryOriginalSnapshotKind] = match target_kind {
-            LiveRecoveryTargetKind::MatchingManifest => &[
-                LiveRecoveryOriginalSnapshotKind::MatchingConfig,
-                LiveRecoveryOriginalSnapshotKind::Feature,
-                LiveRecoveryOriginalSnapshotKind::ScorePolicy,
-                LiveRecoveryOriginalSnapshotKind::VerifierPolicy,
-            ],
-            LiveRecoveryTargetKind::DocumentConversion => &[
-                LiveRecoveryOriginalSnapshotKind::ConversionConfig,
-                LiveRecoveryOriginalSnapshotKind::Feature,
-            ],
-            LiveRecoveryTargetKind::ExtractionTarget => &[
-                LiveRecoveryOriginalSnapshotKind::SourceArtifact,
-                LiveRecoveryOriginalSnapshotKind::TargetConfig,
-                LiveRecoveryOriginalSnapshotKind::Feature,
-            ],
-            LiveRecoveryTargetKind::AttachmentPreparation => &[
-                LiveRecoveryOriginalSnapshotKind::ConversionConfig,
-                LiveRecoveryOriginalSnapshotKind::Feature,
-            ],
-            LiveRecoveryTargetKind::SubmissionRender => {
-                &[LiveRecoveryOriginalSnapshotKind::SubmissionRenderJob]
-            }
-            LiveRecoveryTargetKind::MatchingJob => &[
-                LiveRecoveryOriginalSnapshotKind::MatchingManifest,
-                LiveRecoveryOriginalSnapshotKind::MatchingConfig,
-                LiveRecoveryOriginalSnapshotKind::Feature,
-                LiveRecoveryOriginalSnapshotKind::ScorePolicy,
-                LiveRecoveryOriginalSnapshotKind::VerifierPolicy,
-            ],
-        };
-        kinds
-            .iter()
-            .enumerate()
-            .map(|(index, snapshot_kind)| LiveRecoveryOriginalSnapshotV1 {
-                snapshot_kind: *snapshot_kind,
-                snapshot_id: Uuid::from_u128(0x51 + index as u128),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn unknown_old_bid_match_payload_is_rejected_not_default() {
-        assert!(crate::rejected_legacy_bid_match_task("bid:match"));
-        assert!(crate::rejected_legacy_bid_match_task("bid:match-route"));
-        assert_ne!(crate::queue_for("bid:match"), domain::QUEUE_DEFAULT);
-        assert_ne!(crate::queue_for("bid:match-route"), domain::QUEUE_DEFAULT);
-        let old = serde_json::json!({
-            "job_id": Uuid::from_u128(1),
-            "project_id": Uuid::from_u128(2),
-            "debounce_key": "same-snapshot",
-            "task_type": "bid:match"
-        });
-        assert!(serde_json::from_value::<BidMatchRouteV1Job>(old).is_err());
-    }
-
-    #[test]
-    fn bid_extract_pipeline_queues_keep_durable_ids_and_leave_default() {
-        let document_id = Uuid::from_u128(1);
-        let run_id = Uuid::from_u128(2);
-        let preparation_job_id = Uuid::from_u128(3);
-        let conversion_snapshots = BidConversionV1Snapshots {
-            conversion_snapshot_id: Uuid::from_u128(5),
-            feature_snapshot_id: Uuid::from_u128(6),
-        };
-        let convert = BidConvertJob::new(document_id, conversion_snapshots).unwrap();
-        let prepare =
-            BidPrepareAttachmentV1Job::new(preparation_job_id, conversion_snapshots).unwrap();
-        let extract = BidExtractJob::new(
-            run_id,
-            Uuid::from_u128(4),
-            Some(document_id),
-            BidExtractV1Snapshots {
-                target_config_snapshot_id: Uuid::from_u128(7),
-                feature_snapshot_id: Uuid::from_u128(8),
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            <BidConvertJob as oxana::Job>::unique_id(&convert),
-            Some(format!("bid:convert:{document_id}"))
-        );
-        assert_eq!(
-            <BidPrepareAttachmentV1Job as oxana::Job>::unique_id(&prepare),
-            Some(format!("bid:prepare-attachment:v1:{preparation_job_id}"))
-        );
-        assert_eq!(
-            <BidExtractJob as oxana::Job>::unique_id(&extract),
-            Some(format!("bid:extract:{run_id}"))
-        );
-        match <BidConvertV1Queue as oxana::Queue>::to_config().kind {
-            oxana::QueueKind::Static { key } => assert_eq!(key, domain::QUEUE_BID_CONVERT_V1),
-            other => panic!("bid-convert-v1 queue must be static, got {other:?}"),
-        }
-        match <BidExtractV1Queue as oxana::Queue>::to_config().kind {
-            oxana::QueueKind::Static { key } => assert_eq!(key, domain::QUEUE_BID_EXTRACT_V1),
-            other => panic!("bid-extract-v1 queue must be static, got {other:?}"),
-        }
-        assert_eq!(
-            crate::queue_for(domain::TYPE_BID_CONVERT),
-            domain::QUEUE_BID_CONVERT_V1
-        );
-        assert_eq!(
-            crate::queue_for(domain::TYPE_BID_PREPARE_ATTACHMENT_V1),
-            domain::QUEUE_BID_CONVERT_V1
-        );
-        assert_eq!(
-            crate::queue_for(domain::TYPE_BID_EXTRACT),
-            domain::QUEUE_BID_EXTRACT_V1
-        );
-        assert_ne!(
-            crate::queue_for(domain::TYPE_BID_CONVERT),
-            domain::QUEUE_DEFAULT
-        );
-        assert_ne!(crate::queue_for("not-a-real-task"), domain::QUEUE_DEFAULT);
-        assert_eq!(crate::queue_for("not-a-real-task"), "rejected:unknown");
-    }
-
-    #[test]
     fn max_retry_is_three() {
         assert_eq!(DOCUMENT_PROCESS_MAX_RETRY, 3);
+        assert_eq!(SEMANTIC_INDEX_V2_MAX_RETRY, 3);
+        assert_eq!(SEMANTIC_INDEX_V2_RETRY_DELAY_SECS, 10);
         assert_eq!(DOCUMENT_PROCESS_TIMEOUT_SECS, 2 * 60 * 60);
         assert_eq!(POST_PROCESS_TIMEOUT_SECS, 30 * 60);
+        assert_eq!(SEMANTIC_INDEX_V2_TIMEOUT_SECS, 2 * 60 * 60);
+    }
+
+    #[test]
+    fn semantic_index_v2_identity_is_immutable_and_uses_postprocess_queue() {
+        let target_id = Uuid::parse_str("018f3000-7d47-7a1b-9bb8-b3880f15478a").unwrap();
+        let job = KnowledgeSemanticIndexV2Job {
+            target_id,
+            target_revision: 7,
+        };
+        assert_eq!(
+            oxana::Job::unique_id(&job).as_deref(),
+            Some("knowledge:semantic_index:v2:018f3000-7d47-7a1b-9bb8-b3880f15478a:7")
+        );
+        assert!(matches!(
+            oxana::Job::on_conflict(&job),
+            oxana::JobConflictStrategy::Skip
+        ));
+        assert!(<KnowledgeSemanticIndexV2Job as oxana::Job>::should_resurrect());
+        assert_eq!(
+            serde_json::to_value(&job).unwrap(),
+            serde_json::json!({"target_id": target_id, "target_revision": 7})
+        );
+        match <PostprocessQueue as oxana::Queue>::to_config().kind {
+            oxana::QueueKind::Static { key } => assert_eq!(key, domain::QUEUE_POSTPROCESS),
+            other => panic!("postprocess queue must be static, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2204,76 +1030,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bid_convert_lands_on_bid_convert_v1_not_default() {
-        let Some(storage) = redis_test_storage("bid_convert_lands_on_bid_convert_v1_not_default")
-        else {
-            return;
-        };
-        let _guard = redis_test_lock().await;
-        storage
-            .wipe_queue(DefaultQueue)
-            .await
-            .expect("wipe default queue");
-        storage
-            .wipe_queue(BidConvertV1Queue)
-            .await
-            .expect("wipe bid-convert-v1");
-        storage
-            .wipe_queue(BidExtractV1Queue)
-            .await
-            .expect("wipe bid-extract-v1");
-        let before_default = storage.enqueued_count(DefaultQueue).await.unwrap();
-        let convert_id = Uuid::new_v4();
-        let preparation_id = Uuid::new_v4();
-        let extract_id = Uuid::new_v4();
-        let conversion_snapshots = BidConversionV1Snapshots {
-            conversion_snapshot_id: Uuid::new_v4(),
-            feature_snapshot_id: Uuid::new_v4(),
-        };
-        assert!(
-            enqueue_bid_convert_with_snapshots(convert_id, conversion_snapshots)
-                .await
-                .expect("convert")
-                .is_some()
-        );
-        assert!(
-            enqueue_bid_prepare_attachment_v1_with_snapshots(preparation_id, conversion_snapshots,)
-                .await
-                .expect("attachment preparation")
-                .is_some()
-        );
-        assert!(
-            enqueue_bid_extract_with_snapshots(
-                extract_id,
-                Uuid::new_v4(),
-                Some(convert_id),
-                BidExtractV1Snapshots {
-                    target_config_snapshot_id: Uuid::new_v4(),
-                    feature_snapshot_id: Uuid::new_v4(),
-                },
-            )
-            .await
-            .expect("extract")
-            .is_some()
-        );
-        assert_eq!(
-            storage.enqueued_count(DefaultQueue).await.unwrap(),
-            before_default,
-            "bid extract-pipeline jobs must not land on default"
-        );
-        assert!(storage.enqueued_count(BidConvertV1Queue).await.unwrap() >= 1);
-        assert!(storage.enqueued_count(BidExtractV1Queue).await.unwrap() >= 1);
-        storage
-            .wipe_queue(BidConvertV1Queue)
-            .await
-            .expect("wipe bid-convert-v1");
-        storage
-            .wipe_queue(BidExtractV1Queue)
-            .await
-            .expect("wipe bid-extract-v1");
-    }
-
-    #[tokio::test]
     async fn declared_disabled_enqueues_return_ok_none_without_increasing_queue_counts() {
         let Some(storage) = redis_live_if_up(
             "declared_disabled_enqueues_return_ok_none_without_increasing_queue_counts",
@@ -2325,103 +1081,8 @@ mod tests {
             "declared_disabled enqueues must not spill onto default"
         );
 
-        for task_type in [
-            domain::TYPE_BID_CONVERT,
-            domain::TYPE_BID_EXTRACT,
-            domain::TYPE_BID_MATCH_ROUTE_V1,
-            domain::TYPE_BID_RENDER_SUBMISSION_V1,
-        ] {
-            let mapped = crate::queue_for(task_type);
-            assert_ne!(mapped, domain::QUEUE_DEFAULT);
-            assert!(!mapped.starts_with("rejected:"));
-        }
-    }
-
-    #[tokio::test]
-    async fn legacy_replay_mixed_list_can_move_bid_delivery_membership() {
-        let Some(_storage) =
-            redis_live_if_up("legacy_replay_mixed_list_can_move_bid_delivery_membership").await
-        else {
-            return;
-        };
-        let _guard = redis_test_lock().await;
-        let client = redis::Client::open(redis_url()).expect("configure Redis client");
-        let mut connection = client
-            .get_multiplexed_async_connection()
-            .await
-            .expect("connect to Redis");
-        let fixture_id = Uuid::new_v4();
-        let processing_key = format!("oxanus:processing:bid-replay-fixture-{fixture_id}");
-        let queue = format!("bid-replay-fixture-{fixture_id}");
-        let queue_key = format!("oxanus:queue:{queue}");
-        let missing_id = format!("bid:delivery:v1/{}", Uuid::new_v4());
-        let true_id = format!("bid:delivery:v1/{}", Uuid::new_v4());
-        let false_id = format!("bid:delivery:v1/{}", Uuid::new_v4());
-
-        for (id, meta) in [
-            (&missing_id, serde_json::json!({})),
-            (&true_id, serde_json::json!({ "resurrect": true })),
-            (&false_id, serde_json::json!({ "resurrect": false })),
-        ] {
-            let raw = serde_json::json!({
-                "id": id,
-                "queue": queue,
-                "job": { "name": "bid:delivery:v1", "args": {} },
-                "meta": meta
-            })
-            .to_string();
-            let _: i64 = redis::cmd("HSET")
-                .arg("oxanus:jobs")
-                .arg(id)
-                .arg(raw)
-                .query_async(&mut connection)
-                .await
-                .expect("seed job hash");
-            let _: i64 = redis::cmd("RPUSH")
-                .arg(&processing_key)
-                .arg(id)
-                .query_async(&mut connection)
-                .await
-                .expect("seed processing list");
-        }
-
-        assert_eq!(
-            replay_processing_list(&mut connection, &processing_key)
-                .await
-                .expect("replay mixed fixture"),
-            2
-        );
-        let replayed: Vec<String> = redis::cmd("LRANGE")
-            .arg(&queue_key)
-            .arg(0)
-            .arg(-1)
-            .query_async(&mut connection)
-            .await
-            .expect("read replayed queue");
-        assert!(replayed.contains(&missing_id));
-        assert!(replayed.contains(&true_id));
-        assert!(!replayed.contains(&false_id));
-        let false_job: Option<String> = redis::cmd("HGET")
-            .arg("oxanus:jobs")
-            .arg(&false_id)
-            .query_async(&mut connection)
-            .await
-            .expect("read resurrect=false job");
-        assert!(false_job.is_none());
-
-        let _: i64 = redis::cmd("DEL")
-            .arg(&processing_key)
-            .arg(&queue_key)
-            .query_async(&mut connection)
-            .await
-            .expect("delete fixture lists");
-        let _: i64 = redis::cmd("HDEL")
-            .arg("oxanus:jobs")
-            .arg(&missing_id)
-            .arg(&true_id)
-            .arg(&false_id)
-            .query_async(&mut connection)
-            .await
-            .expect("delete fixture hash fields");
+        let mapped = crate::queue_for(domain::TYPE_BID_DELIVERY_V1);
+        assert_eq!(mapped, domain::QUEUE_BID_DELIVERY_V1);
+        assert_ne!(mapped, domain::QUEUE_DEFAULT);
     }
 }

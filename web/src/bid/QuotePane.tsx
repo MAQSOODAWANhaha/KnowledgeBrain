@@ -1,5 +1,5 @@
 import { Button, Checkbox, Select, TextInput } from "@mantine/core";
-import type { Project, QuoteLine, QuoteState } from "../api";
+import type { QuoteLine, QuoteState } from "../api";
 
 export function QuotePane({
   project,
@@ -18,7 +18,7 @@ export function QuotePane({
   onFinalize,
   onReopen,
 }: {
-  project: Project;
+  project: { ceiling_price: string | null };
   quote: QuoteState;
   preview?: { net_total?: string; tax_total?: string; gross_total?: string };
   ended: boolean;
@@ -39,7 +39,12 @@ export function QuotePane({
       <div className="card">
         <h3 className="h3">还没有报价草稿</h3>
         <p className="note">价格由人录入。系统不算正式价。</p>
-        <Button data-testid="quote-create" mt="md" disabled={ended || saving} onClick={onCreate}>
+        <Button
+          data-testid="quote-create"
+          mt="md"
+          disabled={ended || saving}
+          onClick={onCreate}
+        >
           创建报价草稿
         </Button>
       </div>
@@ -52,7 +57,8 @@ export function QuotePane({
       <div className="card">
         <h3 className="h3">{draft ? "报价草稿" : "已定稿"}</h3>
         <p className="note">
-          {quote.tax_mode} · {quote.status || quote.pointer} · eligibility {quote.eligibility || "—"}
+          {quote.tax_mode} · {quote.status || quote.pointer} · eligibility{" "}
+          {quote.eligibility || "—"}
         </p>
         {draft && (
           <div className="stack" style={{ marginTop: 12 }}>
@@ -62,7 +68,13 @@ export function QuotePane({
               defaultValue={quote.title ?? ""}
               key={quote.edit_version}
               disabled={saving}
-              onBlur={(e) => onPatch(e.currentTarget.value, quote.tax_mode || "tax_exclusive", quote.notes || "")}
+              onBlur={(e) =>
+                onPatch(
+                  e.currentTarget.value,
+                  quote.tax_mode || "tax_exclusive",
+                  quote.notes || "",
+                )
+              }
             />
             <Select
               label="税模式"
@@ -73,13 +85,20 @@ export function QuotePane({
               value={quote.tax_mode}
               allowDeselect={false}
               disabled={saving}
-              onChange={(v) => onPatch(quote.title || "报价", v || "tax_exclusive", quote.notes || "")}
+              onChange={(v) =>
+                onPatch(
+                  quote.title || "报价",
+                  v || "tax_exclusive",
+                  quote.notes || "",
+                )
+              }
             />
           </div>
         )}
         {preview && (
           <p className="note">
-            净 {preview.net_total} · 税 {preview.tax_total} · 含税 {preview.gross_total}
+            净 {preview.net_total} · 税 {preview.tax_total} · 含税{" "}
+            {preview.gross_total}
           </p>
         )}
         {!project.ceiling_price && draft && (
@@ -89,7 +108,9 @@ export function QuotePane({
               label="招标未设最高限价，已人工复核"
               checked={noCeiling}
               disabled={saving}
-              onChange={(e) => onNoCeiling(e.currentTarget.checked, noCeilingReason)}
+              onChange={(e) =>
+                onNoCeiling(e.currentTarget.checked, noCeilingReason)
+              }
             />
             <TextInput
               mt="sm"
@@ -102,12 +123,21 @@ export function QuotePane({
         )}
         <div className="row" style={{ marginTop: 16 }}>
           {draft && (
-            <Button data-testid="quote-finalize" disabled={ended || saving} onClick={onFinalize}>
+            <Button
+              data-testid="quote-finalize"
+              disabled={ended || saving}
+              onClick={onFinalize}
+            >
               定稿
             </Button>
           )}
           {!draft && quote.snapshot_id && (
-            <Button data-testid="quote-reopen" variant="default" disabled={ended || saving} onClick={onReopen}>
+            <Button
+              data-testid="quote-reopen"
+              variant="default"
+              disabled={ended || saving}
+              onClick={onReopen}
+            >
               重开
             </Button>
           )}
@@ -117,7 +147,12 @@ export function QuotePane({
         <div className="card pad-0">
           <div className="toolbar">
             <span>行</span>
-            <Button data-testid="quote-add-line" size="compact-sm" disabled={ended || saving} onClick={onAddLine}>
+            <Button
+              data-testid="quote-add-line"
+              size="compact-sm"
+              disabled={ended || saving}
+              onClick={onAddLine}
+            >
               增行
             </Button>
           </div>
@@ -146,7 +181,11 @@ export function QuotePane({
                       disabled={saving}
                       onBlur={(e) => {
                         const description = e.currentTarget.value;
-                        if (description !== line.description) onUpdateLine(line, { description, user_confirmed: false });
+                        if (description !== line.description)
+                          onUpdateLine(line, {
+                            description,
+                            user_confirmed: false,
+                          });
                       }}
                     />
                   </td>
@@ -190,7 +229,11 @@ export function QuotePane({
                         disabled={saving}
                         onBlur={(e) => {
                           const quantity = nullable(e.currentTarget.value);
-                          if (quantity !== line.quantity) onUpdateLine(line, { quantity, user_confirmed: false });
+                          if (quantity !== line.quantity)
+                            onUpdateLine(line, {
+                              quantity,
+                              user_confirmed: false,
+                            });
                         }}
                       />
                     ) : (
@@ -206,7 +249,8 @@ export function QuotePane({
                         disabled={saving}
                         onBlur={(e) => {
                           const unit = nullable(e.currentTarget.value);
-                          if (unit !== line.unit) onUpdateLine(line, { unit, user_confirmed: false });
+                          if (unit !== line.unit)
+                            onUpdateLine(line, { unit, user_confirmed: false });
                         }}
                       />
                     ) : (
@@ -222,7 +266,11 @@ export function QuotePane({
                         disabled={saving}
                         onBlur={(e) => {
                           const unitPrice = nullable(e.currentTarget.value);
-                          if (unitPrice !== line.unit_price) onUpdateLine(line, { unit_price: unitPrice, user_confirmed: false });
+                          if (unitPrice !== line.unit_price)
+                            onUpdateLine(line, {
+                              unit_price: unitPrice,
+                              user_confirmed: false,
+                            });
                         }}
                       />
                     ) : (
@@ -239,7 +287,10 @@ export function QuotePane({
                         onBlur={(e) => {
                           const enteredAmount = nullable(e.currentTarget.value);
                           if (enteredAmount !== line.entered_amount) {
-                            onUpdateLine(line, { entered_amount: enteredAmount, user_confirmed: false });
+                            onUpdateLine(line, {
+                              entered_amount: enteredAmount,
+                              user_confirmed: false,
+                            });
                           }
                         }}
                       />
@@ -255,7 +306,11 @@ export function QuotePane({
                       disabled={saving}
                       onBlur={(e) => {
                         const taxRate = e.currentTarget.value.trim();
-                        if (taxRate !== line.tax_rate) onUpdateLine(line, { tax_rate: taxRate, user_confirmed: false });
+                        if (taxRate !== line.tax_rate)
+                          onUpdateLine(line, {
+                            tax_rate: taxRate,
+                            user_confirmed: false,
+                          });
                       }}
                     />
                   </td>
@@ -264,11 +319,21 @@ export function QuotePane({
                       data-testid={`quote-line-confirmed-${line.id}`}
                       checked={line.user_confirmed}
                       disabled={saving}
-                      onChange={(e) => onUpdateLine(line, { user_confirmed: e.currentTarget.checked })}
+                      onChange={(e) =>
+                        onUpdateLine(line, {
+                          user_confirmed: e.currentTarget.checked,
+                        })
+                      }
                     />
                   </td>
                   <td>
-                    <Button size="compact-sm" variant="subtle" color="red" disabled={saving} onClick={() => onDeleteLine(line)}>
+                    <Button
+                      size="compact-sm"
+                      variant="subtle"
+                      color="red"
+                      disabled={saving}
+                      onClick={() => onDeleteLine(line)}
+                    >
                       删
                     </Button>
                   </td>

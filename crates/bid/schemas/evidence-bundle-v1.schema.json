@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:knowledgebrain:bid:evidence-bundle:v1",
+  "title": "EvidenceBundleV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "evidence_bundle_id", "project_id", "workspace_id", "workspace_scope", "requirement_revision_id", "matching_report_id", "knowledge_scope_attestation_id", "knowledge_scope_attestation_sha256", "items", "created_at", "bundle_sha256"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evidence_bundle_id": { "$ref": "#/$defs/uuid" },
+    "project_id": { "$ref": "#/$defs/uuid" },
+    "workspace_id": { "$ref": "#/$defs/uuid" },
+    "workspace_scope": { "const": "project_wide" },
+    "requirement_revision_id": { "$ref": "#/$defs/uuid" },
+    "matching_report_id": { "$ref": "#/$defs/uuid" },
+    "knowledge_scope_attestation_id": { "$ref": "#/$defs/uuid" },
+    "knowledge_scope_attestation_sha256": { "$ref": "#/$defs/sha256" },
+    "items": { "type": "array", "minItems": 1, "maxItems": 100000, "items": { "$ref": "#/$defs/item" } },
+    "created_at": { "type": "string", "format": "date-time" },
+    "bundle_sha256": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "textItem": { "type": "object", "additionalProperties": false, "required": ["kind", "evidence_item_id", "document_id", "source_chunk_id", "product_version_id", "workspace_kind", "frozen_document_display_name", "quote_utf8", "quote_sha256", "quote_start_offset", "quote_end_offset", "retrieval_rank", "retrieval_contract_version"], "properties": { "kind": { "const": "text_quote" }, "evidence_item_id": { "$ref": "#/$defs/uuid" }, "document_id": { "$ref": "#/$defs/uuid" }, "source_chunk_id": { "$ref": "#/$defs/uuid" }, "product_version_id": { "$ref": "#/$defs/uuid" }, "workspace_kind": { "enum": ["product_line", "company"] }, "frozen_document_display_name": { "type": "string", "minLength": 1, "maxLength": 1024 }, "quote_utf8": { "type": "string", "minLength": 1, "maxLength": 1048576 }, "quote_sha256": { "$ref": "#/$defs/sha256" }, "quote_start_offset": { "type": "integer", "minimum": 0 }, "quote_end_offset": { "type": "integer", "minimum": 1 }, "retrieval_rank": { "type": "integer", "minimum": 1 }, "retrieval_contract_version": { "type": "string", "minLength": 1, "maxLength": 128 } } },
+    "mediaItem": { "type": "object", "additionalProperties": false, "required": ["kind", "evidence_item_id", "image_artifact_revision_id", "object_ref", "sha256", "media_type", "width", "height", "frozen_document_display_name"], "properties": { "kind": { "const": "image" }, "evidence_item_id": { "$ref": "#/$defs/uuid" }, "image_artifact_revision_id": { "$ref": "#/$defs/uuid" }, "object_ref": { "type": "string", "pattern": "^objects/[0-9a-f]{64}$" }, "sha256": { "$ref": "#/$defs/sha256" }, "media_type": { "enum": ["image/png", "image/jpeg", "image/webp"] }, "width": { "type": "integer", "minimum": 1 }, "height": { "type": "integer", "minimum": 1 }, "page_ordinal": { "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }] }, "bounding_region": { "anyOf": [{ "$ref": "#/$defs/bounds" }, { "type": "null" }] }, "frozen_document_display_name": { "type": "string", "minLength": 1, "maxLength": 1024 } } },
+    "noEvidenceItem": { "type": "object", "additionalProperties": false, "required": ["kind", "evidence_item_id", "reason_code"], "properties": { "kind": { "const": "no_evidence" }, "evidence_item_id": { "$ref": "#/$defs/uuid" }, "reason_code": { "enum": ["NO_ELIGIBLE_VERSION", "NO_MATCHING_HIT", "MATCH_TRUNCATED", "SOURCE_UNAVAILABLE"] } } },
+    "bounds": { "type": "object", "additionalProperties": false, "required": ["left", "top", "right", "bottom"], "properties": { "left": { "type": "number", "minimum": 0, "maximum": 1 }, "top": { "type": "number", "minimum": 0, "maximum": 1 }, "right": { "type": "number", "minimum": 0, "maximum": 1 }, "bottom": { "type": "number", "minimum": 0, "maximum": 1 } } },
+    "item": { "oneOf": [{ "$ref": "#/$defs/textItem" }, { "$ref": "#/$defs/mediaItem" }, { "$ref": "#/$defs/noEvidenceItem" }] }
+  }
+}

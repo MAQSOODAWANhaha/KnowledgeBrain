@@ -247,13 +247,7 @@ fn disabled_lanes_ready(
     if intended_disabled != registry_disabled || intended_disabled != expected_disabled {
         return false;
     }
-    [
-        domain::TYPE_BID_CONVERT,
-        domain::TYPE_BID_EXTRACT,
-        domain::TYPE_BID_MATCH_ROUTE_V1,
-    ]
-    .into_iter()
-    .all(|task_type| {
+    [domain::TYPE_BID_DELIVERY_V1].into_iter().all(|task_type| {
         intended
             .lane_for_task(task_type)
             .is_some_and(|lane| lane.state == domain::FeatureState::Enabled)

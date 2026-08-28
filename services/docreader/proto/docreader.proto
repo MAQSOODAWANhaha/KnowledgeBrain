@@ -40,12 +40,126 @@ message ImageRef {
   bytes  image_data = 5;     // inline bytes fallback
 }
 
+// Parser-internal structure only. TenderDocumentProcess converts image regions
+// to immutable image_ocr_region SourceUnits after OCR; DocReader never claims
+// OCR text for an image.
+enum StructuredSourceUnitKind {
+  STRUCTURED_SOURCE_UNIT_KIND_UNSPECIFIED = 0;
+  STRUCTURED_SOURCE_UNIT_KIND_SECTION = 1;
+  STRUCTURED_SOURCE_UNIT_KIND_TABLE_ROW = 2;
+  STRUCTURED_SOURCE_UNIT_KIND_TABLE_REGION = 3;
+  STRUCTURED_SOURCE_UNIT_KIND_FORM_REGION = 4;
+  STRUCTURED_SOURCE_UNIT_KIND_ATTACHMENT_REGION = 5;
+  STRUCTURED_SOURCE_UNIT_KIND_IMAGE_REGION = 6;
+}
+
+message DocumentLocator {
+  uint32 section_ordinal = 1;
+  optional uint32 table_ordinal = 2;
+  optional uint32 row_ordinal = 3;
+  string heading_path = 4;
+  optional uint32 form_ordinal = 5;
+}
+
+message PageLocator {
+  uint32 page_ordinal = 1; // zero based
+  optional double left = 2;
+  optional double top = 3;
+  optional double right = 4;
+  optional double bottom = 5;
+}
+
+message SpreadsheetCell {
+  string address = 1;
+  uint32 row = 2;    // one based, matching XLSX
+  uint32 column = 3; // one based, matching XLSX
+  string text = 4;
+}
+
+message SpreadsheetRange {
+  string a1_range = 1;
+  uint32 start_row = 2;
+  uint32 start_column = 3;
+  uint32 end_row = 4;
+  uint32 end_column = 5;
+}
+
+message SpreadsheetTableIdentity {
+  string name = 1;
+  string display_name = 2;
+  string a1_range = 3;
+}
+
+message SpreadsheetLocator {
+  uint32 sheet_ordinal = 1;
+  string sheet_name = 2;
+  SpreadsheetRange region = 3;
+  repeated SpreadsheetCell cells = 4;
+  repeated SpreadsheetRange merged_ranges = 5;
+  repeated SpreadsheetTableIdentity defined_tables = 6;
+}
+
+message ParagraphImageParent {
+  optional uint32 section_ordinal = 1;
+  optional uint32 paragraph_ordinal = 2;
+}
+
+message TableCellImageParent {
+  optional uint32 section_ordinal = 1;
+  optional uint32 table_ordinal = 2;
+  optional uint32 row_ordinal = 3;
+  optional uint32 cell_ordinal = 4;
+}
+
+message FormImageParent {
+  optional uint32 section_ordinal = 1;
+  optional uint32 form_ordinal = 2;
+}
+
+message ImageLocator {
+  string original_ref = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  string media_type = 4;
+  optional uint32 page_ordinal = 5;
+  reserved 6, 7;
+  optional double left = 8;
+  optional double top = 9;
+  optional double right = 10;
+  optional double bottom = 11;
+  oneof compound_parent {
+    ParagraphImageParent paragraph_parent = 12;
+    TableCellImageParent table_cell_parent = 13;
+    FormImageParent form_parent = 14;
+  }
+}
+
+message AttachmentLocator {
+  string part_name = 1;
+  string relationship_type = 2;
+}
+
+message StructuredSourceUnit {
+  string key = 1; // deterministic within the parsed document
+  uint32 ordinal = 2;
+  StructuredSourceUnitKind kind = 3;
+  string text = 4;
+  oneof locator {
+    DocumentLocator document = 5;
+    PageLocator page = 6;
+    SpreadsheetLocator spreadsheet = 7;
+    ImageLocator image = 8;
+    AttachmentLocator attachment = 9;
+  }
+}
+
 message ReadResponse {
   string markdown_content = 1;
   repeated ImageRef image_refs = 2;
   string image_dir_path = 3;
   map<string, string> metadata = 4;
   string error = 5;
+  repeated StructuredSourceUnit structured_source_units = 6;
 }
 
 // Metadata header for a streamed read. Sent exactly once, before any image.
@@ -55,6 +169,7 @@ message ReadStreamMeta {
   map<string, string> metadata = 3;
   string error = 4;
   uint32 image_count = 5; // best-effort total image count (0 if unknown)
+  repeated StructuredSourceUnit structured_source_units = 6;
 }
 
 // One frame of a ReadStream. The first frame carries `meta`; every subsequent

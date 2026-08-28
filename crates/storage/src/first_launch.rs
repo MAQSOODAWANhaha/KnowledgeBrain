@@ -1896,8 +1896,8 @@ async fn verify_finalized_runtime_topology(
          SELECT
            (SELECT count(*)=13 AND bool_and(role_value.rolcanlogin=governed.login
               AND role_value.rolinherit=governed.inherit_value
-              AND (NOT governed.password_absent
-                OR pg_catalog.kb_launch_role_password_absent(role_value.rolname))
+              AND pg_catalog.kb_launch_role_password_absent(role_value.rolname)
+                    = governed.password_absent
               AND NOT role_value.rolsuper
               AND NOT role_value.rolcreatedb AND NOT role_value.rolcreaterole
               AND NOT role_value.rolreplication AND NOT role_value.rolbypassrls

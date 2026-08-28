@@ -229,10 +229,10 @@ pub fn declared_disabled_tasks() -> Result<Vec<&'static str>, QueueRegistryError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        TYPE_BID_CONVERT, TYPE_BID_EXTRACT, TYPE_BID_MATCH_ROUTE_V1,
-        TYPE_BID_PREPARE_ATTACHMENT_V1, TYPE_BID_RENDER_SUBMISSION_V1,
-    };
+    use crate::TYPE_BID_DELIVERY_V1;
+
+    const BID_AUTHORING_V2_FIXTURE: &str =
+        include_str!("../../../deploy/authoring-v2/queue-registry.toml");
 
     const DOCUMENTED_QUEUES: &[&str] = &[
         "default",
@@ -243,10 +243,7 @@ mod tests {
         "question",
         "wiki",
         "low",
-        "bid-convert-v1",
-        "bid-extract-v1",
-        "bid-matching-v1",
-        "bid-render-v1",
+        "bid-delivery-v1",
     ];
 
     fn loaded() -> QueueRegistry {
@@ -260,7 +257,7 @@ mod tests {
         assert_eq!(registry.schema_version, 1);
         assert_eq!(registry.release_id, "kb-queue-registry-v1");
         assert_eq!(registry.minimum_worker_protocol, 1);
-        assert_eq!(registry.entries().len(), 22);
+        assert_eq!(registry.entries().len(), 18);
     }
 
     #[test]
@@ -271,58 +268,19 @@ mod tests {
             .iter()
             .filter(|entry| entry.task_type.starts_with("bid:"))
             .collect();
-        assert_eq!(bid.len(), 5);
+        assert_eq!(bid.len(), 1);
 
-        let convert = registry
-            .entry_for_task(TYPE_BID_CONVERT)
-            .expect("bid:convert");
-        assert_eq!(convert.physical_queue, "bid-convert-v1");
-        assert_eq!(convert.payload_schema, "bid-convert/v1");
-        assert_eq!(convert.identity_formula, "bid:convert:{document_id}");
-        assert_eq!(convert.handler, "BidConvertV1Handler");
-        assert_eq!(convert.launch_mode, LaunchMode::RequiredEnabled);
-
-        let prepare = registry
-            .entry_for_task(TYPE_BID_PREPARE_ATTACHMENT_V1)
-            .expect("bid:prepare-attachment:v1");
-        assert_eq!(prepare.physical_queue, "bid-convert-v1");
-        assert_eq!(prepare.payload_schema, "bid-prepare-attachment/v1");
+        let delivery = registry
+            .entry_for_task(TYPE_BID_DELIVERY_V1)
+            .expect("bid:delivery:v1");
+        assert_eq!(delivery.physical_queue, "bid-delivery-v1");
+        assert_eq!(delivery.payload_schema, "bid-delivery/v1");
         assert_eq!(
-            prepare.identity_formula,
-            "bid:prepare-attachment:v1:{preparation_job_id}"
+            delivery.identity_formula,
+            "{target_kind}:{target_id}:{target_revision}"
         );
-        assert_eq!(prepare.handler, "BidPrepareAttachmentV1Handler");
-        assert_eq!(prepare.launch_mode, LaunchMode::RequiredEnabled);
-
-        let extract = registry
-            .entry_for_task(TYPE_BID_EXTRACT)
-            .expect("bid:extract");
-        assert_eq!(extract.physical_queue, "bid-extract-v1");
-        assert_eq!(extract.payload_schema, "bid-extract/v1");
-        assert_eq!(extract.identity_formula, "bid:extract:{run_id}");
-        assert_eq!(extract.handler, "BidExtractV1Handler");
-        assert_eq!(extract.launch_mode, LaunchMode::RequiredEnabled);
-
-        let matching = registry
-            .entry_for_task(TYPE_BID_MATCH_ROUTE_V1)
-            .expect("bid:match-route:v1");
-        assert_eq!(matching.physical_queue, "bid-matching-v1");
-        assert_eq!(matching.payload_schema, "bid-match-route/v1");
-        assert_eq!(matching.identity_formula, "bid:match-route:v1:{job_id}");
-        assert_eq!(matching.handler, "BidMatchRouteV1Handler");
-        assert_eq!(matching.launch_mode, LaunchMode::RequiredEnabled);
-
-        let render = registry
-            .entry_for_task(TYPE_BID_RENDER_SUBMISSION_V1)
-            .expect("bid:render-submission:v1");
-        assert_eq!(render.physical_queue, "bid-render-v1");
-        assert_eq!(render.payload_schema, "bid-render-submission/v1");
-        assert_eq!(
-            render.identity_formula,
-            "bid:render-submission:v1:{render_job_id}"
-        );
-        assert_eq!(render.handler, "BidRenderSubmissionV1Handler");
-        assert_eq!(render.launch_mode, LaunchMode::RequiredEnabled);
+        assert_eq!(delivery.handler, "BidDeliveryV1Handler");
+        assert_eq!(delivery.launch_mode, LaunchMode::RequiredEnabled);
     }
 
     #[test]
@@ -373,7 +331,7 @@ mod tests {
         }
         assert!(
             registry
-                .entry_for_task(TYPE_BID_CONVERT)
+                .entry_for_task(TYPE_BID_DELIVERY_V1)
                 .unwrap()
                 .physical_queue
                 != "default"
@@ -412,6 +370,48 @@ mod tests {
     fn embedded_registry_matches_checked_in() {
         let embedded = QueueRegistry::parse(EMBEDDED_REGISTRY).expect("embedded registry");
         assert_eq!(embedded, loaded());
+    }
+
+    #[test]
+    fn inactive_bid_authoring_v2_fixture_is_closed_and_not_active() {
+        let fixture = QueueRegistry::parse(BID_AUTHORING_V2_FIXTURE).expect("V2 fixture");
+        assert_eq!(fixture.release_id, "kb-bid-authoring-v2-phase0-fixture");
+        assert_eq!(fixture.entries().len(), 5);
+        assert!(fixture.entries().iter().all(|entry| {
+            entry.physical_queue == "bid-authoring-v2"
+                && entry.task_type.starts_with("bid:")
+                && entry.task_type.ends_with(":v2")
+                && entry.payload_schema == "bid-authoring/v2"
+                && entry.launch_mode == LaunchMode::DeclaredDisabled
+        }));
+        let active = loaded();
+        assert!(
+            active
+                .entries()
+                .iter()
+                .all(|entry| entry.physical_queue != "bid-authoring-v2")
+        );
+        assert!(
+            fixture
+                .entries()
+                .iter()
+                .all(|entry| active.entry_for_task(&entry.task_type).is_none())
+        );
+        let kinds: BTreeSet<&str> = fixture
+            .entries()
+            .iter()
+            .map(|entry| entry.task_type.as_str())
+            .collect();
+        assert_eq!(
+            kinds,
+            BTreeSet::from([
+                "bid:content_generate:v2",
+                "bid:outline_generate:v2",
+                "bid:requirement_set_compile:v2",
+                "bid:submission_export:v2",
+                "bid:tender_document_process:v2",
+            ])
+        );
     }
 
     #[test]

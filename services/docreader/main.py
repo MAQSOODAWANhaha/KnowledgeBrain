@@ -16,6 +16,17 @@ from docreader import config
 from docreader.config import CONFIG
 from docreader.parser import Parser
 from docreader.proto import docreader_pb2_grpc
+from docreader.models.document import (
+    AttachmentLocator,
+    DocumentLocator,
+    FormImageParent,
+    ImageLocator,
+    PageLocator,
+    ParagraphImageParent,
+    SpreadsheetLocator,
+    TableCellImageParent,
+    StructuredSourceUnitKind,
+)
 from docreader.parser.registry import registry
 from docreader.proto.docreader_pb2 import (
     ReadRequest,
@@ -25,6 +36,13 @@ from docreader.proto.docreader_pb2 import (
     ReadStreamResponse,
     ListEnginesResponse,
     ParserEngineInfo,
+    StructuredSourceUnit as ProtoStructuredSourceUnit,
+    STRUCTURED_SOURCE_UNIT_KIND_SECTION,
+    STRUCTURED_SOURCE_UNIT_KIND_TABLE_ROW,
+    STRUCTURED_SOURCE_UNIT_KIND_TABLE_REGION,
+    STRUCTURED_SOURCE_UNIT_KIND_FORM_REGION,
+    STRUCTURED_SOURCE_UNIT_KIND_ATTACHMENT_REGION,
+    STRUCTURED_SOURCE_UNIT_KIND_IMAGE_REGION,
 )
 from docreader.utils.request import init_logging_request_id, request_id_context
 
@@ -121,6 +139,96 @@ def _mime_for_ref(ref_path: str) -> tuple[str, str]:
     return fname, mime_map.get(ext, "application/octet-stream")
 
 
+def _structured_unit_to_proto(unit):
+    kinds = {
+        StructuredSourceUnitKind.SECTION: STRUCTURED_SOURCE_UNIT_KIND_SECTION,
+        StructuredSourceUnitKind.TABLE_ROW: STRUCTURED_SOURCE_UNIT_KIND_TABLE_ROW,
+        StructuredSourceUnitKind.TABLE_REGION: STRUCTURED_SOURCE_UNIT_KIND_TABLE_REGION,
+        StructuredSourceUnitKind.FORM_REGION: STRUCTURED_SOURCE_UNIT_KIND_FORM_REGION,
+        StructuredSourceUnitKind.ATTACHMENT_REGION: STRUCTURED_SOURCE_UNIT_KIND_ATTACHMENT_REGION,
+        StructuredSourceUnitKind.IMAGE_REGION: STRUCTURED_SOURCE_UNIT_KIND_IMAGE_REGION,
+    }
+    proto = ProtoStructuredSourceUnit(
+        key=unit.key, ordinal=unit.ordinal, kind=kinds[unit.kind], text=unit.text
+    )
+    locator = unit.locator
+    if isinstance(locator, DocumentLocator):
+        proto.document.section_ordinal = locator.section_ordinal
+        proto.document.heading_path = locator.heading_path
+        if locator.table_ordinal is not None:
+            proto.document.table_ordinal = locator.table_ordinal
+        if locator.row_ordinal is not None:
+            proto.document.row_ordinal = locator.row_ordinal
+        if locator.form_ordinal is not None:
+            setattr(proto.document, "form_ordinal", locator.form_ordinal)
+    elif isinstance(locator, PageLocator):
+        proto.page.page_ordinal = locator.page_ordinal
+        for name in ("left", "top", "right", "bottom"):
+            value = getattr(locator, name)
+            if value is not None:
+                setattr(proto.page, name, value)
+    elif isinstance(locator, SpreadsheetLocator):
+        proto.spreadsheet.sheet_ordinal = locator.sheet_ordinal
+        proto.spreadsheet.sheet_name = locator.sheet_name
+        _range_to_proto(locator.region, proto.spreadsheet.region)
+        for cell in locator.cells:
+            proto.spreadsheet.cells.add(
+                address=cell.address, row=cell.row, column=cell.column, text=cell.text
+            )
+        for merged in locator.merged_ranges:
+            _range_to_proto(merged, proto.spreadsheet.merged_ranges.add())
+        for table in locator.defined_tables:
+            proto.spreadsheet.defined_tables.add(
+                name=table.name,
+                display_name=table.display_name,
+                a1_range=table.a1_range,
+            )
+    elif isinstance(locator, ImageLocator):
+        proto.image.original_ref = locator.original_ref
+        proto.image.width = locator.width
+        proto.image.height = locator.height
+        proto.image.media_type = locator.media_type
+        for name in ("page_ordinal", "left", "top", "right", "bottom"):
+            value = getattr(locator, name)
+            if value is not None:
+                setattr(proto.image, name, value)
+        parent = locator.compound_parent
+        if isinstance(parent, ParagraphImageParent):
+            target = getattr(proto.image, "paragraph_parent")
+            target.section_ordinal = parent.section_ordinal
+            target.paragraph_ordinal = parent.paragraph_ordinal
+        elif isinstance(parent, TableCellImageParent):
+            target = getattr(proto.image, "table_cell_parent")
+            target.section_ordinal = parent.section_ordinal
+            target.table_ordinal = parent.table_ordinal
+            target.row_ordinal = parent.row_ordinal
+            target.cell_ordinal = parent.cell_ordinal
+        elif isinstance(parent, FormImageParent):
+            target = getattr(proto.image, "form_parent")
+            target.section_ordinal = parent.section_ordinal
+            target.form_ordinal = parent.form_ordinal
+        elif parent is not None:
+            raise TypeError(f"unsupported compound image parent {type(parent)!r}")
+    elif isinstance(locator, AttachmentLocator):
+        proto.attachment.part_name = locator.part_name
+        proto.attachment.relationship_type = locator.relationship_type
+    else:
+        raise TypeError(f"unsupported structured locator {type(locator)!r}")
+    return proto
+
+
+def _range_to_proto(source, target) -> None:
+    target.a1_range = source.a1_range
+    target.start_row = source.start_row
+    target.start_column = source.start_column
+    target.end_row = source.end_row
+    target.end_column = source.end_column
+
+
+def _structured_units_to_proto(units):
+    return [_structured_unit_to_proto(unit) for unit in units]
+
+
 def _iter_image_refs(images: dict):
     """Yield ImageRef one at a time, freeing each source entry as we go.
 
@@ -194,7 +302,9 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
             try:
                 result, source_desc = self._parse_request(request)
 
-                if not result or not result.content:
+                if not result or (
+                    not result.content and not result.structured_source_units
+                ):
                     error_msg = f"Failed to parse: {source_desc}"
                     logger.error(error_msg)
                     return ReadResponse(error=error_msg)
@@ -209,6 +319,9 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
                     metadata={k: _c(str(v)) for k, v in result.metadata.items()}
                     if result.metadata
                     else {},
+                    structured_source_units=_structured_units_to_proto(
+                        result.structured_source_units
+                    ),
                 )
                 logger.info(
                     "Read response: content_len=%d, images=%d",
@@ -242,7 +355,9 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
                 yield ReadStreamResponse(meta=ReadStreamMeta(error=str(e)))
                 return
 
-            if not result or not result.content:
+            if not result or (
+                not result.content and not result.structured_source_units
+            ):
                 error_msg = f"Failed to parse: {source_desc}"
                 logger.error(error_msg)
                 yield ReadStreamResponse(meta=ReadStreamMeta(error=error_msg))
@@ -258,6 +373,9 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
                     if result.metadata
                     else {},
                     image_count=image_count,
+                    structured_source_units=_structured_units_to_proto(
+                        result.structured_source_units
+                    ),
                 )
             )
 

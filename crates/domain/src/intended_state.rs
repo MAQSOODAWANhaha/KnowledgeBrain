@@ -175,10 +175,7 @@ fn locate_state_path() -> Result<PathBuf, IntendedStateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        TYPE_BID_CONVERT, TYPE_BID_EXTRACT, TYPE_BID_MATCH_ROUTE_V1, TYPE_BID_RENDER_SUBMISSION_V1,
-        TYPE_CHUNK_EXTRACT, TYPE_IMAGE_MULTIMODAL, TYPE_QUESTION,
-    };
+    use crate::{TYPE_BID_DELIVERY_V1, TYPE_CHUNK_EXTRACT, TYPE_IMAGE_MULTIMODAL, TYPE_QUESTION};
 
     fn loaded() -> IntendedState {
         IntendedState::load().expect("repo-relative deploy/first-launch/intended-state.toml")
@@ -212,12 +209,7 @@ mod tests {
         assert_eq!(state.contract, "bid-matching-v1");
         let registry = QueueRegistry::load().expect("queue registry");
         assert_eq!(state.lanes().len(), registry.entries().len());
-        assert_eq!(
-            state
-                .lane_for_task("system:live-recovery:v1")
-                .map(|lane| lane.state),
-            Some(FeatureState::Enabled)
-        );
+        assert!(state.lane_for_task("system:live-recovery:v1").is_none());
         assert_eq!(
             state
                 .lane_for_task("system:maintenance-housekeep:v1")
@@ -239,18 +231,12 @@ mod tests {
     #[test]
     fn bid_lanes_enabled() {
         let state = loaded();
-        for task_type in [
-            TYPE_BID_CONVERT,
-            TYPE_BID_EXTRACT,
-            TYPE_BID_MATCH_ROUTE_V1,
-            TYPE_BID_RENDER_SUBMISSION_V1,
-        ] {
-            assert_eq!(
-                state.lane_for_task(task_type).map(|lane| lane.state),
-                Some(FeatureState::Enabled),
-                "{task_type} must be enabled"
-            );
-        }
+        assert_eq!(
+            state
+                .lane_for_task(TYPE_BID_DELIVERY_V1)
+                .map(|lane| lane.state),
+            Some(FeatureState::Enabled)
+        );
     }
 
     #[test]

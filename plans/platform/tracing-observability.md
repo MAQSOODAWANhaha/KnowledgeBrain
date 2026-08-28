@@ -9,7 +9,7 @@ This change does two things:
 1. **One logging stack** — `tracing` events + `tracing-subscriber` fmt/env-filter, initialized once in api/worker.
 2. **Process logs you can follow** — convert, chunk, VLM, extract/eval sections emit start → progress → done/fail lines with ids, not bodies.
 
-Queue depth is already a different surface: admin `GET /api/v1/ops/oxana` and UI `/api/v1/ops/oxana/web`. That panel stays, but it only represents Redis transport. It replaces neither worker logs nor domain durable-dispatch backlog/oldest-due metrics.
+Queue depth is already a different surface: admin `GET /api/v1/ops/oxana` and UI `/api/v1/ops/oxana/web`. That panel stays and is the only queued/running/retrying/dead transport view；业务查询只展示target的`pending|completed|failed|cancelled`与bounded last error，不再维护durable-dispatch backlog/oldest-due metrics。
 
 `document_processing_spans` (obs crate) stays the product timeline for the SPA. Tracing is for operators watching containers.
 
@@ -30,16 +30,16 @@ Rules:
 Noise control:
 
 | Level | When |
-|---|---|
+| --- | --- |
 | `info` | Stage start/done, enqueue, per tender **section** result, per knowledge **image** OCR result, run summary |
-| `warn` | thin / tables_flat, VLM missing, lease steal/reclaim, fallback, retry |
+| `warn` | thin / tables_flat, VLM missing, fallback, Oxana retry/dead/resurrect |
 | `error` | Stage/run failure with bounded message |
 | `debug` | Per-family agent round, tool-call count, span sweep — `RUST_LOG=bid=debug` |
 
 ## Files to modify
 
 | File | Change |
-|---|---|
+| --- | --- |
 | `crates/runtime/src/lib.rs` | Keep single `init_tracing()`; disable ansi in Docker if `NO_COLOR`/`TERM=dumb` (compose can set `NO_COLOR=1`) |
 | `crates/api/src/main.rs` | Drop unused `log_ready`; `api exiting` → `tracing::info!` |
 | `crates/worker/src/main.rs` | Drop unused `log_line`; `worker exiting` → `tracing::info!` |
@@ -49,8 +49,8 @@ Noise control:
 | `crates/docparser/src/images.rs` | Remote rewrite cap/fail → `warn!` |
 | `crates/docparser/src/lib.rs` | Convert start/fallback (`anydoc_fallback`) at `info`/`warn` |
 | `crates/enrichment/src/lib.rs` | `describe_image` fail/not-configured → `warn!`/`error!` (no image payload) |
-| `crates/api/src/bid_routes.rs` | Bid DB/query failures → `error!`; target+dispatch stage at `info`，不记录 commit 后 enqueue |
-| `crates/runtime/src/jobs.rs` | Knowledge enqueue 与平台 transport offer at `debug`；Bid 业务字段只从 durable dispatch 记录 |
+| `crates/api/src/bid_routes.rs` | Bid DB/query failures → `error!`; target创建与enqueue accepted/unavailable at `info`/`warn` |
+| `crates/runtime/src/jobs.rs` | Knowledge enqueue at `debug`；Bid transport 只记录 target kind/id/revision与Oxana job ID |
 | `crates/graph/src/neo4j.rs` | `skip: neo4j` → `debug!` |
 | `crates/storage/src/s3.rs` | `skip: s3` → `debug!` |
 | `deploy/.env.example` | Document `RUST_LOG=info` |
@@ -75,7 +75,7 @@ Do **not** touch: `crates/*/tests`, `storage/src/persist.rs` skip lines, `bid/sr
 ### Knowledge parse (`worker::consume::convert_document`)
 
 | Event | Level | Fields |
-|---|---|---|
+| --- | --- | --- |
 | `parse convert start` | info | `document_id`, `file`, `engine`, `attempt` |
 | `parse convert reuse` | info | `document_id`, `md_bytes` |
 | `parse convert done` | info | `document_id`, `parser`, `md_bytes`, `images`, `anydoc_fallback` |
@@ -93,12 +93,12 @@ Instrument: `convert_document`, `process_image_pg`, `process_post_process`.
 ### Tender convert + extract (eval)
 
 | Event | Level | Fields |
-|---|---|---|
+| --- | --- | --- |
 | `bid_convert start` | info | `document_id`, `file` |
 | `bid_convert parsed` | info | `document_id`, `file`, `parser`, `images`, `anydoc_fallback` |
 | `bid_convert quality` | warn | `document_id`, `note=thin\|tables_flat` |
 | `bid_convert done` / `fail` | info / error | `document_id`, `retryable` on fail |
-| `bid extraction dispatch staged` | info | `document_id`, `dispatch_id`, `target_id`, `project_id` |
+| `bid extraction target created` | info | `document_id`, `target_id`, `project_id`, `target_revision` |
 | `bid_extract start` | info | `run_id`, `document_id`, `file`, `sections`, `mode`, `model` |
 | `bid_extract section done` | info | `run_id`, `document_id`, `section_key`, `clauses`, `rounds`, `fallbacks` |
 | `bid_extract section fail` | warn | `run_id`, `document_id`, `section_key`, `error` (bounded) |
@@ -112,11 +112,12 @@ Instrument: `convert_document`, `extract_run`, `extract_one_document`.
 ### API / runtime
 
 | Event | Level | Fields |
-|---|---|---|
-| enqueue knowledge process / Bid dispatch staged | info | `document_id`, `job` 或 `dispatch_id`,`target_kind` |
+| --- | --- | --- |
+| enqueue knowledge process / Bid delivery | info | `document_id`, `job` 或 `target_kind`,`target_id`,`target_revision`,`oxana_job_id` |
 | `bid database unavailable` | error | `error` |
 | `bid {op} failed` | error | `operation`, `error` |
-| target-local lease repair / stale offer noop | warn | `dispatch_id`,`target_kind`,`target_id`,`offer` |
+| stale target revision noop | warn | `target_kind`,`target_id`,`target_revision` |
+| Oxana retry/dead/resurrect | warn | 使用 Oxana 原生日志与 metrics，不在业务表镜像 phase |
 
 ## eprintln inventory
 
@@ -131,8 +132,8 @@ Instrument: `convert_document`, `extract_run`, `extract_one_document`.
 - [ ] Convert api/worker leftover stdout helpers.
 - [ ] Knowledge convert path: start/reuse/done/fail, chunk, embed, multimodal hold/enqueue, image, postprocess.
 - [ ] Bid convert + extract: start/parsed/quality/done/fail, per-section, run summary; family at debug.
-- [ ] API bid error helpers + target/dispatch atomic stage。
-- [ ] Target-local repair、duplicate/stale offer 与 poison `warn!`。
+- [ ] API bid error helpers + idempotent target create/enqueue。
+- [ ] Duplicate/stale target revision 与 poison `warn!`；retry/dead/resurrect 使用 Oxana 原生观测。
 - [ ] Doc: `docs/research/repository-implementation-snapshot.md` §9 one paragraph; `.env.example` `RUST_LOG`.
 - [ ] Rebuild **api + worker** images (runtime is in both). Do not wipe volumes.
 - [ ] No `#[allow(clippy::…)]` for this work.

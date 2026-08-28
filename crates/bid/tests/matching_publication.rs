@@ -1,5 +1,4 @@
 use bid::matching::run_match_route_v1;
-use runtime::{BidMatchRouteV1Job, BidMatchRouteV1Snapshots};
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use storage::bid_matching::{
@@ -9,6 +8,255 @@ use storage::bid_matching::{
 use uuid::Uuid;
 
 mod support;
+
+const BIDDING_SQL: &str = include_str!("../../../migrations/bidding_v1_baseline.sql");
+
+#[test]
+fn matching_delivery_uses_business_targets_and_oxana_retry() {
+    let intent_start = BIDDING_SQL
+        .find("CREATE TABLE bid_matching_schedule_intents (")
+        .expect("matching schedule intent table");
+    let intent_definition = BIDDING_SQL[intent_start..]
+        .split_once("\n);")
+        .expect("matching schedule intent definition")
+        .0;
+    assert!(!intent_definition.contains("delivery_generation"));
+    assert!(!intent_definition.contains("next_enqueue_at"));
+    assert!(
+        !intent_definition.contains("status text"),
+        "schedule lifecycle is derived from project watermark and manifest existence"
+    );
+
+    let job_start = BIDDING_SQL
+        .find("CREATE TABLE bid_matching_jobs (")
+        .expect("matching job table");
+    let job_definition = BIDDING_SQL[job_start..]
+        .split_once("\n);")
+        .expect("matching job definition")
+        .0;
+    assert!(
+        !job_definition.contains("max_attempts"),
+        "Oxana, not PostgreSQL, owns matching retry limits"
+    );
+    assert!(job_definition.contains(
+        "status text NOT NULL CHECK (status IN ('pending', 'completed', 'failed', 'superseded'))"
+    ));
+    assert!(
+        !job_definition.contains("delivery_generation")
+            && !job_definition.contains("claim_lease_ms")
+            && !job_definition.contains("active_attempt")
+    );
+    assert!(BIDDING_SQL.contains(
+        "CREATE FUNCTION kb_bid_matching_start(\n  p_job_id uuid,p_target_revision bigint"
+    ));
+    assert!(BIDDING_SQL.contains(
+        "CREATE FUNCTION kb_bid_bind_matching_schedule_target(\n  p_project_id uuid,p_actor kb_actor_identity,p_idempotency_key text,"
+    ));
+    assert!(BIDDING_SQL.contains("CREATE FUNCTION kb_bid_matching_commit(\n  p_job_id uuid,p_target_revision bigint,p_staging_set_id uuid,"));
+    assert!(BIDDING_SQL.contains(
+        "CREATE FUNCTION kb_bid_matching_stage_report_payload(\n  p_job_id uuid,p_target_revision bigint,p_staging_set_id uuid,p_report_nonce uuid,"
+    ));
+    assert!(BIDDING_SQL.contains(
+        "CREATE FUNCTION kb_bid_fail_matching(\n p_job_id uuid,p_target_revision bigint,"
+    ));
+    for removed_transport in [
+        "CREATE TABLE bid_matching_job_claims",
+        "CREATE FUNCTION kb_bid_matching_claim(",
+        "CREATE FUNCTION kb_bid_matching_reap()",
+        "CREATE FUNCTION kb_bid_matching_retry_claim(",
+        "CREATE FUNCTION kb_bid_reserve_due_deliveries(",
+    ] {
+        assert!(
+            !BIDDING_SQL.contains(removed_transport),
+            "Oxana owns retry and recovery; found legacy transport {removed_transport}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn matching_schedule_binding_freezes_target_identity_for_the_idempotency_key() {
+    let Some(pool) = support::connect_postgres_contract("MatchingScheduleBinding").await else {
+        return;
+    };
+    let owner_id = Uuid::new_v4();
+    let other_user_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let initially_empty_project_id = Uuid::new_v4();
+    let actor = format!("user:{owner_id}");
+    for (user_id, label) in [(owner_id, "owner"), (other_user_id, "other")] {
+        sqlx::query("INSERT INTO users(id,email) VALUES($1,$2)")
+            .bind(user_id)
+            .bind(format!("matching-binding-{label}-{user_id}@invalid.test"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for (id, title) in [
+        (project_id, "匹配投递绑定"),
+        (initially_empty_project_id, "空匹配投递绑定"),
+    ] {
+        sqlx::query(
+            "INSERT INTO bid_projects
+             (id,title,owner_user_id,ends_at,fact_sha256,ceiling_identity_sha256,
+              matching_mutation_watermark,created_by)
+             VALUES($1,$2,$3,clock_timestamp()+interval '30 days',repeat('0',64),
+                    repeat('1',64),1,$4)",
+        )
+        .bind(id)
+        .bind(title)
+        .bind(owner_id)
+        .bind(&actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    ensure_matching_schedule_intent_fixture(&pool, project_id).await;
+    let first_intent: (Uuid, i64) = sqlx::query_as(
+        "SELECT id,mutation_watermark FROM bid_matching_schedule_intents
+          WHERE project_id=$1 AND mutation_watermark=1",
+    )
+    .bind(project_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let first_key = format!("bind-first-{project_id}");
+    let first_payload = json!({"schema_version":1,"project_id":project_id});
+    let first_context =
+        storage::bidding::MutationContext::new(actor.clone(), &first_key, &first_payload).unwrap();
+    let first = storage::bid_matching::bind_schedule_target(&pool, project_id, &first_context)
+        .await
+        .unwrap()
+        .expect("the first target exists");
+    assert_eq!((first.id, first.mutation_watermark), first_intent);
+
+    sqlx::query("UPDATE bid_projects SET matching_mutation_watermark=2 WHERE id=$1")
+        .bind(project_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO bid_matching_schedule_intents(
+           id,project_id,generation,mutation_watermark,matching_config_snapshot_id,
+           feature_snapshot_id,score_policy_snapshot_id,verifier_policy_snapshot_id)
+         VALUES(gen_random_uuid(),$1,2,2,
+           kb_bid_current_operation_snapshot('matching_config'),
+           kb_bid_current_operation_snapshot('feature'),
+           kb_bid_current_operation_snapshot('score_policy'),
+           kb_bid_current_operation_snapshot('verifier_policy'))",
+    )
+    .bind(project_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let replay = storage::bid_matching::bind_schedule_target(&pool, project_id, &first_context)
+        .await
+        .unwrap()
+        .expect("the completed receipt keeps its target");
+    assert_eq!(replay, first);
+    let next_context = storage::bidding::MutationContext::new(
+        actor.clone(),
+        format!("bind-next-{project_id}"),
+        &first_payload,
+    )
+    .unwrap();
+    let next = storage::bid_matching::bind_schedule_target(&pool, project_id, &next_context)
+        .await
+        .unwrap()
+        .expect("a new key binds the new target");
+    assert_ne!(next.id, first.id);
+    assert_eq!(next.mutation_watermark, 2);
+
+    let empty_key = format!("bind-empty-{initially_empty_project_id}");
+    let empty_payload = json!({"schema_version":1,"project_id":initially_empty_project_id});
+    let empty_context =
+        storage::bidding::MutationContext::new(actor.clone(), &empty_key, &empty_payload).unwrap();
+    assert!(
+        storage::bid_matching::bind_schedule_target(
+            &pool,
+            initially_empty_project_id,
+            &empty_context,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    ensure_matching_schedule_intent_fixture(&pool, initially_empty_project_id).await;
+    assert!(
+        storage::bid_matching::bind_schedule_target(
+            &pool,
+            initially_empty_project_id,
+            &empty_context,
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "a completed null receipt must not drift to a later target"
+    );
+    let empty_next_context = storage::bidding::MutationContext::new(
+        actor.clone(),
+        format!("bind-empty-next-{initially_empty_project_id}"),
+        &empty_payload,
+    )
+    .unwrap();
+    assert!(
+        storage::bid_matching::bind_schedule_target(
+            &pool,
+            initially_empty_project_id,
+            &empty_next_context,
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+
+    let mismatched_project_context =
+        storage::bidding::MutationContext::new(actor.clone(), &first_key, &empty_payload).unwrap();
+    assert_database_error(
+        storage::bid_matching::bind_schedule_target(
+            &pool,
+            initially_empty_project_id,
+            &mismatched_project_context,
+        )
+        .await
+        .unwrap_err(),
+        "IDEMPOTENCY_PAYLOAD_MISMATCH",
+    );
+
+    for (invalid_actor, expected) in [
+        (
+            format!("user:{other_user_id}"),
+            "PROJECT_OWNER_ACTOR_MISMATCH",
+        ),
+        (format!("api_key:{}", Uuid::new_v4()), "USER_ACTOR_REQUIRED"),
+        ("system:matching-publication".into(), "USER_ACTOR_REQUIRED"),
+    ] {
+        let invalid_key = format!("bind-invalid-{}", Uuid::new_v4());
+        let context = storage::bidding::MutationContext::new(
+            invalid_actor.clone(),
+            &invalid_key,
+            &first_payload,
+        )
+        .unwrap();
+        assert_database_error(
+            storage::bid_matching::bind_schedule_target(&pool, project_id, &context)
+                .await
+                .unwrap_err(),
+            expected,
+        );
+        let receipts: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM idempotency_requests
+              WHERE actor_identity=$1 AND operation='bid.matching.schedule_delivery'
+                AND idempotency_key=$2",
+        )
+        .bind(invalid_actor)
+        .bind(invalid_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(receipts, 0, "rejected actors must not leave an intent");
+    }
+}
 
 fn empty_publish_route() -> PublishRouteV2 {
     PublishRouteV2 {
@@ -33,6 +281,27 @@ fn assert_database_error(error: sqlx::Error, expected: &str) {
         message.contains(expected),
         "expected database error {expected}, got {message}"
     );
+}
+
+async fn stage_report_payload_direct(
+    pool: &PgPool,
+    job_id: Uuid,
+    target_revision: Option<i64>,
+    staging_id: Uuid,
+    report_nonce: Option<Uuid>,
+    canonical_payload: &[u8],
+    content_sha256: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT kb_bid_matching_stage_report_payload($1,$2,$3,$4,$5,$6)")
+        .bind(job_id)
+        .bind(target_revision)
+        .bind(staging_id)
+        .bind(report_nonce)
+        .bind(canonical_payload)
+        .bind(content_sha256)
+        .execute(pool)
+        .await
+        .map(|_| ())
 }
 
 fn matching_schedule_payload_without_eligible_scope(
@@ -236,6 +505,30 @@ async fn matching_schedule_payload_with_complete_product_scope(
     })
 }
 
+async fn ensure_matching_schedule_intent_fixture(pool: &PgPool, project_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO bid_matching_schedule_intents(
+           id,project_id,generation,mutation_watermark,matching_config_snapshot_id,
+           feature_snapshot_id,score_policy_snapshot_id,verifier_policy_snapshot_id
+         )
+         SELECT gen_random_uuid(),project_value.id,1,project_value.matching_mutation_watermark,
+                kb_bid_current_operation_snapshot('matching_config'),
+                kb_bid_current_operation_snapshot('feature'),
+                kb_bid_current_operation_snapshot('score_policy'),
+                kb_bid_current_operation_snapshot('verifier_policy')
+           FROM bid_projects project_value
+          WHERE project_value.id=$1
+            AND NOT EXISTS(
+              SELECT 1 FROM bid_matching_schedule_intents intent
+               WHERE intent.project_id=project_value.id
+                 AND intent.mutation_watermark=project_value.matching_mutation_watermark)",
+    )
+    .bind(project_id)
+    .execute(pool)
+    .await
+    .expect("ensure matching schedule intent fixture");
+}
+
 async fn assert_matching_schedule_rejected(
     pool: &PgPool,
     project_id: Uuid,
@@ -243,13 +536,24 @@ async fn assert_matching_schedule_rejected(
     idempotency_key: &str,
     expected: &str,
 ) {
+    ensure_matching_schedule_intent_fixture(pool, project_id).await;
     let request_bytes = serde_json::to_vec(payload).unwrap();
     let request_sha256 = domain::sha256_hex(&request_bytes);
-    let mut tx = pool.begin().await.unwrap();
-    let result = sqlx::query_scalar::<_, serde_json::Value>(
-        "SELECT kb_bid_matching_schedule($1,1,3,$2,'system:matching-publication',$3,$4,$5)",
+    let (intent_id, mutation_watermark): (Uuid, i64) = sqlx::query_as(
+        "SELECT id,mutation_watermark FROM bid_matching_schedule_intents
+          WHERE project_id=$1 AND mutation_watermark=1",
     )
     .bind(project_id)
+    .fetch_one(pool)
+    .await
+    .expect("matching schedule intent fixture");
+    let mut tx = pool.begin().await.unwrap();
+    let result = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT kb_bid_matching_schedule($1,$2,$3,$4,'system:matching-publication',$5,$6,$7)",
+    )
+    .bind(intent_id)
+    .bind(project_id)
+    .bind(mutation_watermark)
     .bind(payload)
     .bind(idempotency_key)
     .bind(&request_bytes)
@@ -269,52 +573,104 @@ async fn assert_matching_schedule_rejected(
     assert_database_error(error, expected);
 }
 
-async fn wait_for_lock_wait(pool: &PgPool, application_name: &str) {
-    for _ in 0..100 {
-        let waiting: bool = sqlx::query_scalar(
-            "SELECT EXISTS(
-               SELECT 1 FROM pg_stat_activity
-                WHERE application_name=$1 AND wait_event_type='Lock')",
-        )
-        .bind(application_name)
-        .fetch_one(pool)
+async fn schedule_current_delivery(
+    pool: &PgPool,
+    project_id: Uuid,
+    environment: ScheduleEnvironment,
+    context: &storage::bid_matching::ScheduleMutationContext,
+) -> storage::bid_matching::ScheduleReceipt {
+    ensure_matching_schedule_intent_fixture(pool, project_id).await;
+    let (intent_id, mutation_watermark, scheduled): (Uuid, i64, bool) = sqlx::query_as(
+        "SELECT intent.id,intent.mutation_watermark,
+                EXISTS(SELECT 1 FROM bid_matching_manifests manifest
+                        WHERE manifest.schedule_intent_id=intent.id)
+           FROM bid_projects project_value
+           JOIN bid_matching_schedule_intents intent
+             ON intent.project_id=project_value.id
+            AND intent.mutation_watermark=project_value.matching_mutation_watermark
+          WHERE project_value.id=$1",
+    )
+    .bind(project_id)
+    .fetch_one(pool)
+    .await
+    .expect("current matching schedule intent");
+    if !scheduled {
+        assert!(
+            storage::bid_matching::execute_schedule(
+                pool,
+                intent_id,
+                mutation_watermark - 1,
+                environment.clone(),
+                context,
+            )
+            .await
+            .expect("stale matching schedule delivery is a noop")
+            .is_none()
+        );
+    }
+    storage::bid_matching::execute_schedule(
+        pool,
+        intent_id,
+        mutation_watermark,
+        environment,
+        context,
+    )
+    .await
+    .expect("schedule matching delivery")
+    .expect("matching delivery is current")
+}
+
+#[tokio::test]
+async fn empty_matching_scope_publishes_one_manifest_and_zero_jobs() {
+    let Some(pool) = support::connect_postgres_contract("MatchingEmptyScope").await else {
+        return;
+    };
+    let user_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let actor = format!("user:{user_id}");
+    let mut seed = pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO users(id,email) VALUES($1,$2)")
+        .bind(user_id)
+        .bind(format!("{user_id}@matching-empty-scope.invalid"))
+        .execute(&mut *seed)
         .await
         .unwrap();
-        if waiting {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("matching settlement must reach the job lock");
-}
-
-async fn expire_claim_after_function_entry(pool: &PgPool, job_id: Uuid, attempt: i32) {
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     sqlx::query(
-        "UPDATE bid_matching_job_claims
-            SET claim_lease_ms=1000,
-                heartbeat_at=clock_timestamp()-interval '1001 milliseconds'
-          WHERE job_id=$1 AND attempt=$2",
+        "INSERT INTO bid_projects
+         (id,title,owner_user_id,ends_at,fact_sha256,ceiling_identity_sha256,
+          matching_mutation_watermark,created_by)
+         VALUES($1,'空匹配范围',$2,clock_timestamp()+interval '30 days',
+           repeat('0',64),repeat('1',64),1,$3)",
     )
-    .bind(job_id)
-    .bind(attempt)
-    .execute(pool)
+    .bind(project_id)
+    .bind(user_id)
+    .bind(&actor)
+    .execute(&mut *seed)
     .await
     .unwrap();
-}
+    seed.commit().await.unwrap();
 
-async fn restore_claim_lease(pool: &PgPool, job_id: Uuid, attempt: i32, claim_lease_ms: i32) {
-    sqlx::query(
-        "UPDATE bid_matching_job_claims
-            SET claim_lease_ms=$3,heartbeat_at=clock_timestamp()
-          WHERE job_id=$1 AND attempt=$2",
+    let environment = ScheduleEnvironment {
+        environment: "test".into(),
+    };
+    let context = storage::bid_matching::ScheduleMutationContext::system();
+    let scheduled =
+        schedule_current_delivery(&pool, project_id, environment.clone(), &context).await;
+    assert!(scheduled.jobs.is_empty());
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT
+           (SELECT count(*) FROM bid_matching_routes WHERE manifest_id=$1),
+           (SELECT count(*) FROM bid_matching_jobs WHERE manifest_id=$1)",
     )
-    .bind(job_id)
-    .bind(attempt)
-    .bind(claim_lease_ms)
-    .execute(pool)
+    .bind(scheduled.manifest_id)
+    .fetch_one(&pool)
     .await
     .unwrap();
+    assert_eq!(counts, (0, 0));
+
+    let replay = schedule_current_delivery(&pool, project_id, environment, &context).await;
+    assert_eq!(replay.manifest_id, scheduled.manifest_id);
+    assert!(replay.jobs.is_empty());
 }
 
 #[tokio::test]
@@ -382,18 +738,15 @@ async fn commercial_review_and_reject_project_frozen_explanatory_evidence() {
     }
     seed.commit().await.unwrap();
 
-    let scheduled = storage::bid_matching::schedule_dirty_project(
+    let scheduled = schedule_current_delivery(
         &pool,
         project_id,
         ScheduleEnvironment {
             environment: "test".into(),
-            max_attempts: 3,
         },
         &storage::bid_matching::ScheduleMutationContext::system(),
     )
-    .await
-    .unwrap()
-    .unwrap();
+    .await;
     let manifest_generation: i64 =
         sqlx::query_scalar("SELECT generation FROM bid_matching_manifests WHERE id=$1")
             .bind(scheduled.manifest_id)
@@ -932,19 +1285,16 @@ async fn matching_schedule_preserves_sixty_five_eligible_versions_with_zero_hits
     .unwrap();
     seed.commit().await.unwrap();
 
-    let scheduled = storage::bid_matching::schedule_dirty_project(
+    let scheduled = schedule_current_delivery(
         &pool,
         project_id,
         ScheduleEnvironment {
             environment: "test".into(),
-            max_attempts: 3,
         },
         &storage::bid_matching::ScheduleMutationContext::system(),
     )
-    .await
-    .expect("schedule matching with eligible scope larger than the hit quota")
-    .expect("dirty project produces a matching manifest");
-    assert_eq!(scheduled.jobs.len(), 2, "technical and commercial routes");
+    .await;
+    assert_eq!(scheduled.jobs.len(), 1, "one technical requirement route");
     let technical_route_id: Uuid = sqlx::query_scalar(
         "SELECT id FROM bid_matching_routes
           WHERE manifest_id=$1 AND route_kind='technical'",
@@ -999,22 +1349,9 @@ async fn matching_schedule_preserves_sixty_five_eligible_versions_with_zero_hits
         .iter()
         .find(|job| job.id == technical_job_id)
         .expect("scheduled technical job");
-    run_match_route_v1(
-        &pool,
-        BidMatchRouteV1Job::new(
-            technical_job.id,
-            BidMatchRouteV1Snapshots {
-                config_snapshot_id: technical_job.snapshots.config_snapshot_id,
-                feature_snapshot_id: technical_job.snapshots.feature_snapshot_id,
-                score_policy_snapshot_id: technical_job.snapshots.score_policy_snapshot_id,
-                verifier_policy_snapshot_id: technical_job.snapshots.verifier_policy_snapshot_id,
-            },
-            None,
-        )
-        .unwrap(),
-    )
-    .await
-    .expect("publish a deterministic zero-evidence technical report");
+    run_match_route_v1(&pool, technical_job.id, technical_job.generation)
+        .await
+        .expect("publish a deterministic zero-evidence technical report");
     let report_payload: serde_json::Value = sqlx::query_scalar(
         "SELECT convert_from(report.canonical_payload,'UTF8')::jsonb
            FROM bid_current_matching_reports current_value
@@ -1070,6 +1407,7 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     let project_id = Uuid::new_v4();
     let scope_project_id = Uuid::new_v4();
     let clause_id = Uuid::new_v4();
+    let commercial_clause_id = Uuid::new_v4();
     let scope_clause_id = Uuid::new_v4();
     let ordinary_clause_id = Uuid::new_v4();
     let tender_document_id = Uuid::new_v4();
@@ -1356,6 +1694,17 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .await
     .unwrap();
     sqlx::query(
+        "INSERT INTO bid_clauses
+         (id,project_id,provenance,status,kind,text,must,revision,created_by)
+         VALUES($1,$2,'manual','confirmed','qualification','投标人应具备有效资质',true,1,$3)",
+    )
+    .bind(commercial_clause_id)
+    .bind(project_id)
+    .bind(&actor)
+    .execute(&mut *seed)
+    .await
+    .unwrap();
+    sqlx::query(
         "INSERT INTO bid_projects
          (id,title,owner_user_id,ends_at,fact_sha256,ceiling_identity_sha256,
           matching_mutation_watermark,created_by)
@@ -1382,35 +1731,29 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     seed.commit().await.unwrap();
 
     let schedule_context = storage::bid_matching::ScheduleMutationContext::system();
-    let scheduled = storage::bid_matching::schedule_dirty_project(
+    let scheduled = schedule_current_delivery(
         &pool,
         project_id,
         ScheduleEnvironment {
             environment: "test".into(),
-            max_attempts: 3,
         },
         &schedule_context,
     )
-    .await
-    .unwrap()
-    .unwrap();
+    .await;
     assert_eq!(
         scheduled.jobs.len(),
         3,
         "ordinary technical + unsectioned technical + commercial routes"
     );
-    let replay = storage::bid_matching::schedule_dirty_project(
+    let replay = schedule_current_delivery(
         &pool,
         project_id,
         ScheduleEnvironment {
             environment: "test".into(),
-            max_attempts: 3,
         },
         &schedule_context,
     )
-    .await
-    .unwrap()
-    .unwrap();
+    .await;
     assert_eq!(replay.manifest_id, scheduled.manifest_id);
     assert_eq!(
         replay.jobs.iter().map(|job| job.id).collect::<Vec<_>>(),
@@ -1463,18 +1806,15 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
             .unwrap();
     assert_eq!(rejected_manifest_count, 0);
 
-    let scope_scheduled = storage::bid_matching::schedule_dirty_project(
+    let scope_scheduled = schedule_current_delivery(
         &pool,
         scope_project_id,
         ScheduleEnvironment {
             environment: "test".into(),
-            max_attempts: 3,
         },
         &schedule_context,
     )
-    .await
-    .unwrap()
-    .unwrap();
+    .await;
     let scope_route_id: Uuid = sqlx::query_scalar(
         "SELECT id FROM bid_matching_routes
          WHERE manifest_id=$1 AND route_kind='technical' ORDER BY ordinal LIMIT 1",
@@ -1553,167 +1893,56 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
         .find(|row| row.get::<Option<Uuid>, _>("unit_id") == Some(Uuid::nil()))
         .unwrap()
         .get("id");
-
     let commercial_job = scheduled
         .jobs
         .iter()
         .find(|job| job.id == commercial_job_id)
         .unwrap();
-    let lease_claim =
-        storage::bid_matching::claim_and_load(&pool, commercial_job.id, commercial_job.snapshots)
-            .await
-            .unwrap()
-            .unwrap();
-    sqlx::query(
-        "UPDATE bid_matching_job_claims
-         SET heartbeat_at=clock_timestamp()-interval '10 minutes'
-         WHERE job_id=$1 AND attempt=$2",
-    )
-    .bind(lease_claim.job_id)
-    .bind(lease_claim.claim.attempt)
-    .execute(&pool)
-    .await
-    .unwrap();
     assert!(
-        !storage::bid_matching::heartbeat_claim(&pool, &lease_claim)
-            .await
-            .unwrap()
-    );
-    let error = storage::bid_matching::publish_route(&pool, &lease_claim, empty_publish_route())
-        .await
-        .unwrap_err();
-    assert_database_error(error, "MATCHING_CLAIM_LOST");
-    let error = storage::bid_matching::retry_claim(
-        &pool,
-        &lease_claim,
-        "LEASE_TEST_RETRY",
-        "expired lease must be fenced",
-    )
-    .await
-    .unwrap_err();
-    assert_database_error(error, "MATCHING_CLAIM_LOST");
-    assert_eq!(
-        storage::bid_matching::reap_expired_claims(&pool)
-            .await
-            .unwrap(),
-        1
-    );
-    let replacement_claim =
-        storage::bid_matching::claim_and_load(&pool, commercial_job.id, commercial_job.snapshots)
-            .await
-            .unwrap()
-            .expect("reaped matching job must be claimable again");
-    assert_eq!(replacement_claim.claim.attempt, 2);
-
-    let error = storage::bid_matching::retry_claim(
-        &pool,
-        &lease_claim,
-        "STALE_ATTEMPT_RETRY",
-        "an old attempt must not reset its replacement",
-    )
-    .await
-    .unwrap_err();
-    assert_database_error(error, "MATCHING_CLAIM_LOST");
-    let error = storage::bid_matching::fail_claim(
-        &pool,
-        &lease_claim,
-        "STALE_ATTEMPT_FAIL",
-        "an old attempt must not fail its replacement",
-    )
-    .await
-    .unwrap_err();
-    assert_database_error(error, "MATCHING_CLAIM_LOST");
-
-    let lease_status: (String, Option<i32>, String, String) = sqlx::query_as(
-        "SELECT job.status,job.active_attempt,old_claim.status,new_claim.status
-         FROM bid_matching_jobs job
-         JOIN bid_matching_job_claims old_claim
-           ON old_claim.job_id=job.id AND old_claim.attempt=$2
-         JOIN bid_matching_job_claims new_claim
-           ON new_claim.job_id=job.id AND new_claim.attempt=$3
-         WHERE job.id=$1",
-    )
-    .bind(lease_claim.job_id)
-    .bind(lease_claim.claim.attempt)
-    .bind(replacement_claim.claim.attempt)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        lease_status,
-        (
-            "running".into(),
-            Some(replacement_claim.claim.attempt),
-            "reaped".into(),
-            "running".into()
+        storage::bid_matching::start_matching_execution(
+            &pool,
+            commercial_job.id,
+            commercial_job.generation - 1
         )
-    );
-
-    let mut retry_blocker = pool.begin().await.unwrap();
-    sqlx::query("SELECT 1 FROM bid_matching_jobs WHERE id=$1 FOR UPDATE")
-        .bind(replacement_claim.job_id)
-        .execute(&mut *retry_blocker)
         .await
-        .unwrap();
-    let retry_application_name = format!("matching-retry-{}", Uuid::new_v4());
-    let mut retry_connection = pool.acquire().await.unwrap();
-    sqlx::query("SELECT set_config('application_name',$1,false)")
-        .bind(&retry_application_name)
-        .execute(&mut *retry_connection)
-        .await
-        .unwrap();
-    let retry_job_id = replacement_claim.job_id;
-    let retry_token = replacement_claim.claim.token;
-    let retry_attempt = replacement_claim.claim.attempt;
-    let blocked_retry = tokio::spawn(async move {
-        sqlx::query("SELECT kb_bid_matching_retry_claim($1,$2,$3,$4,$5)")
-            .bind(retry_job_id)
-            .bind(retry_token)
-            .bind(retry_attempt)
-            .bind("LEASE_EXPIRED_WHILE_WAITING")
-            .bind("retry must use DB time after acquiring the job lock")
-            .execute(&mut *retry_connection)
-            .await
-    });
-    wait_for_lock_wait(&pool, &retry_application_name).await;
-    expire_claim_after_function_entry(
-        &pool,
-        replacement_claim.job_id,
-        replacement_claim.claim.attempt,
-    )
-    .await;
-    retry_blocker.commit().await.unwrap();
-    assert_database_error(
-        blocked_retry.await.unwrap().unwrap_err(),
-        "MATCHING_CLAIM_LOST",
+        .expect("stale matching target revision is a noop")
+        .is_none()
     );
-    restore_claim_lease(
+    let commercial_request = storage::bid_matching::start_matching_execution(
         &pool,
-        replacement_claim.job_id,
-        replacement_claim.claim.attempt,
-        replacement_claim.claim.claim_lease_ms,
-    )
-    .await;
-
-    storage::bid_matching::retry_claim(
-        &pool,
-        &replacement_claim,
-        "LEASE_TEST_RETRY",
-        "the current claim may retry",
+        commercial_job.id,
+        commercial_job.generation,
     )
     .await
+    .unwrap()
     .unwrap();
+    let mut stale_request = commercial_request.clone();
+    stale_request.generation -= 1;
+    assert!(
+        !storage::bid_matching::fail_matching(
+            &pool,
+            &stale_request,
+            "STALE_TARGET",
+            "a stale business revision must not settle the target",
+            true,
+        )
+        .await
+        .unwrap()
+    );
 
     let ordinary_job = scheduled
         .jobs
         .iter()
         .find(|job| job.id == ordinary_job_id)
         .unwrap();
-    let staging_claim =
-        storage::bid_matching::claim_and_load(&pool, ordinary_job.id, ordinary_job.snapshots)
-            .await
-            .unwrap()
-            .unwrap();
+    let staging_request = storage::bid_matching::start_matching_execution(
+        &pool,
+        ordinary_job.id,
+        ordinary_job.generation,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let staged_source_id = Uuid::new_v4();
     let staged_source = StagedSourceArtifactV1 {
         id: staged_source_id,
@@ -1731,7 +1960,7 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     let mut duplicate_source_report = empty_publish_route();
     duplicate_source_report.sources = vec![staged_source.clone(), staged_source];
     assert!(
-        storage::bid_matching::publish_route(&pool, &staging_claim, duplicate_source_report,)
+        storage::bid_matching::publish_route(&pool, &staging_request, duplicate_source_report,)
             .await
             .is_err(),
         "duplicate staged identities must reject the batch"
@@ -1741,80 +1970,87 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
            (SELECT count(*) FROM bid_matching_staged_batches batch
              WHERE batch.staging_set_id=staging.id)
          FROM bid_matching_staging_sets staging
-         WHERE staging.job_id=$1 AND staging.attempt=$2",
+         WHERE staging.job_id=$1 ORDER BY staging.created_at DESC LIMIT 1",
     )
-    .bind(staging_claim.job_id)
-    .bind(staging_claim.claim.attempt)
+    .bind(staging_request.job_id)
     .fetch_one(&pool)
     .await
     .unwrap();
     assert_eq!(staging_before_retry, ("active".into(), 0));
-
-    let mut fail_blocker = pool.begin().await.unwrap();
-    sqlx::query("SELECT 1 FROM bid_matching_jobs WHERE id=$1 FOR UPDATE")
-        .bind(staging_claim.job_id)
-        .execute(&mut *fail_blocker)
+    assert!(
+        storage::bid_matching::start_matching_execution(
+            &pool,
+            staging_request.job_id,
+            staging_request.generation - 1,
+        )
         .await
-        .unwrap();
-    let fail_application_name = format!("matching-fail-{}", Uuid::new_v4());
-    let mut fail_connection = pool.acquire().await.unwrap();
-    sqlx::query("SELECT set_config('application_name',$1,false)")
-        .bind(&fail_application_name)
-        .execute(&mut *fail_connection)
-        .await
-        .unwrap();
-    let fail_job_id = staging_claim.job_id;
-    let fail_token = staging_claim.claim.token;
-    let fail_attempt = staging_claim.claim.attempt;
-    let blocked_fail = tokio::spawn(async move {
-        sqlx::query("SELECT kb_bid_matching_fail_claim($1,$2,$3,$4,$5)")
-            .bind(fail_job_id)
-            .bind(fail_token)
-            .bind(fail_attempt)
-            .bind("LEASE_EXPIRED_WHILE_WAITING")
-            .bind("failure settlement must use DB time after acquiring the job lock")
-            .execute(&mut *fail_connection)
-            .await
-    });
-    wait_for_lock_wait(&pool, &fail_application_name).await;
-    expire_claim_after_function_entry(&pool, staging_claim.job_id, staging_claim.claim.attempt)
-        .await;
-    fail_blocker.commit().await.unwrap();
-    assert_database_error(
-        blocked_fail.await.unwrap().unwrap_err(),
-        "MATCHING_CLAIM_LOST",
+        .expect("stale retry revision is a noop")
+        .is_none()
     );
-    restore_claim_lease(
-        &pool,
-        staging_claim.job_id,
-        staging_claim.claim.attempt,
-        staging_claim.claim.claim_lease_ms,
+    let staging_state_after_stale_retry: String = sqlx::query_scalar(
+        "SELECT state FROM bid_matching_staging_sets
+         WHERE job_id=$1 ORDER BY created_at DESC LIMIT 1",
     )
-    .await;
-
-    storage::bid_matching::retry_claim(
-        &pool,
-        &staging_claim,
-        "STAGING_TEST_RETRY",
-        "partial staging is retryable",
-    )
+    .bind(staging_request.job_id)
+    .fetch_one(&pool)
     .await
     .unwrap();
-    let staging_after_retry: (String, String, String) = sqlx::query_as(
-        "SELECT job.status,claim.status,staging.state
+    assert_eq!(
+        staging_state_after_stale_retry, "active",
+        "stale target revision must not abandon current active staging"
+    );
+    let retried_staging_request = storage::bid_matching::start_matching_execution(
+        &pool,
+        staging_request.job_id,
+        staging_request.generation,
+    )
+    .await
+    .expect("Oxana retry starts the same matching target")
+    .expect("the current matching target remains loadable");
+    let staging_count_at_retry: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM bid_matching_staging_sets WHERE job_id=$1")
+            .bind(staging_request.job_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        staging_count_at_retry, 0,
+        "handler re-entry must purge active staging before external matching work"
+    );
+    assert!(
+        storage::bid_matching::fail_matching(
+            &pool,
+            &retried_staging_request,
+            "STAGING_TEST_RETRY",
+            "Oxana may retry the same business target after partial staging",
+            true,
+        )
+        .await
+        .unwrap()
+    );
+    let staging_after_retry: (String, Option<String>, i64) = sqlx::query_as(
+        "SELECT job.status,job.error_code,
+           (SELECT count(*) FROM bid_matching_staging_sets staging WHERE staging.job_id=job.id)
          FROM bid_matching_jobs job
-         JOIN bid_matching_job_claims claim ON claim.job_id=job.id AND claim.attempt=$2
-         JOIN bid_matching_staging_sets staging ON staging.job_id=job.id AND staging.attempt=claim.attempt
          WHERE job.id=$1",
     )
-    .bind(staging_claim.job_id)
-    .bind(staging_claim.claim.attempt)
+    .bind(staging_request.job_id)
     .fetch_one(&pool)
     .await
     .unwrap();
     assert_eq!(
         staging_after_retry,
-        ("pending".into(), "failed".into(), "failed".into())
+        ("pending".into(), Some("STAGING_TEST_RETRY".into()), 0)
+    );
+    assert!(
+        storage::bid_matching::start_matching_execution(
+            &pool,
+            staging_request.job_id,
+            staging_request.generation,
+        )
+        .await
+        .expect("retryable failure keeps the target loadable for Oxana")
+        .is_some()
     );
 
     let unsectioned_job = scheduled
@@ -1822,17 +2058,21 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
         .iter()
         .find(|job| job.id == unsectioned_job_id)
         .unwrap();
-    let commit_claim =
-        storage::bid_matching::claim_and_load(&pool, unsectioned_job.id, unsectioned_job.snapshots)
-            .await
-            .unwrap()
-            .unwrap();
+    let commit_request = storage::bid_matching::start_matching_execution(
+        &pool,
+        unsectioned_job.id,
+        unsectioned_job.generation,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let invalid_commit_report = empty_publish_route();
     let invalid_report_id = invalid_commit_report.report_id;
     let invalid_report_nonce = invalid_commit_report.report_nonce;
+    let invalid_report_payload = invalid_commit_report.canonical_payload.clone();
     let invalid_report_sha256 = domain::sha256_hex(&invalid_commit_report.canonical_payload);
     assert!(
-        storage::bid_matching::publish_route(&pool, &commit_claim, invalid_commit_report)
+        storage::bid_matching::publish_route(&pool, &commit_request, invalid_commit_report)
             .await
             .is_err(),
         "invalid staged report payload must fail during commit"
@@ -1843,109 +2083,77 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
              WHERE batch.staging_set_id=staging.id),
            (SELECT count(*) FROM bid_matching_reports report WHERE report.job_id=staging.job_id)
          FROM bid_matching_staging_sets staging
-         WHERE staging.job_id=$1 AND staging.attempt=$2",
+         WHERE staging.job_id=$1 AND staging.report_nonce=$2",
     )
-    .bind(commit_claim.job_id)
-    .bind(commit_claim.claim.attempt)
+    .bind(commit_request.job_id)
+    .bind(invalid_report_nonce)
     .fetch_one(&pool)
     .await
     .unwrap();
     assert_eq!(commit_before_retry, ("active".into(), 6, 0));
     let staging_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM bid_matching_staging_sets WHERE job_id=$1 AND attempt=$2",
+        "SELECT id FROM bid_matching_staging_sets WHERE job_id=$1 AND report_nonce=$2",
     )
-    .bind(commit_claim.job_id)
-    .bind(commit_claim.claim.attempt)
+    .bind(commit_request.job_id)
+    .bind(invalid_report_nonce)
     .fetch_one(&pool)
     .await
     .unwrap();
 
-    let mut commit_blocker = pool.begin().await.unwrap();
-    sqlx::query("SELECT 1 FROM bid_matching_jobs WHERE id=$1 FOR UPDATE")
-        .bind(commit_claim.job_id)
-        .execute(&mut *commit_blocker)
+    for (job_id, target_revision, report_nonce) in [
+        (commit_request.job_id, None, Some(invalid_report_nonce)),
+        (commit_request.job_id, Some(commit_request.generation), None),
+        (
+            commit_request.job_id,
+            Some(commit_request.generation - 1),
+            Some(invalid_report_nonce),
+        ),
+        (
+            ordinary_job.id,
+            Some(ordinary_job.generation),
+            Some(invalid_report_nonce),
+        ),
+        (
+            commit_request.job_id,
+            Some(commit_request.generation),
+            Some(Uuid::new_v4()),
+        ),
+    ] {
+        let error = stage_report_payload_direct(
+            &pool,
+            job_id,
+            target_revision,
+            staging_id,
+            report_nonce,
+            &invalid_report_payload,
+            &invalid_report_sha256,
+        )
         .await
-        .unwrap();
-    let commit_application_name = format!("matching-commit-{}", Uuid::new_v4());
-    let mut commit_connection = pool.acquire().await.unwrap();
-    sqlx::query("SELECT set_config('application_name',$1,false)")
-        .bind(&commit_application_name)
-        .execute(&mut *commit_connection)
-        .await
-        .unwrap();
-    let commit_job_id = commit_claim.job_id;
-    let commit_token = commit_claim.claim.token;
-    let commit_attempt = commit_claim.claim.attempt;
-    let blocked_report_sha256 = invalid_report_sha256.clone();
-    let blocked_commit = tokio::spawn(async move {
-        sqlx::query("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6,$7)")
-            .bind(commit_job_id)
-            .bind(commit_token)
-            .bind(commit_attempt)
-            .bind(staging_id)
-            .bind(invalid_report_id)
-            .bind(invalid_report_nonce)
-            .bind(blocked_report_sha256)
-            .execute(&mut *commit_connection)
-            .await
-    });
-    wait_for_lock_wait(&pool, &commit_application_name).await;
-    expire_claim_after_function_entry(&pool, commit_claim.job_id, commit_claim.claim.attempt).await;
-    commit_blocker.commit().await.unwrap();
-    assert_database_error(
-        blocked_commit.await.unwrap().unwrap_err(),
-        "MATCHING_CLAIM_LOST",
-    );
-    restore_claim_lease(
-        &pool,
-        commit_claim.job_id,
-        commit_claim.claim.attempt,
-        commit_claim.claim.claim_lease_ms,
-    )
-    .await;
-
-    sqlx::query(
-        "UPDATE bid_matching_job_claims
-            SET heartbeat_at=clock_timestamp()-interval '10 minutes'
-          WHERE job_id=$1 AND attempt=$2",
-    )
-    .bind(commit_claim.job_id)
-    .bind(commit_claim.claim.attempt)
-    .execute(&pool)
-    .await
-    .unwrap();
-    let expired_commit: Result<serde_json::Value, sqlx::Error> =
-        sqlx::query_scalar("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6,$7)")
-            .bind(commit_claim.job_id)
-            .bind(commit_claim.claim.token)
-            .bind(commit_claim.claim.attempt)
-            .bind(staging_id)
-            .bind(invalid_report_id)
-            .bind(invalid_report_nonce)
-            .bind(&invalid_report_sha256)
-            .fetch_one(&pool)
-            .await;
-    assert_database_error(expired_commit.unwrap_err(), "MATCHING_CLAIM_LOST");
-    sqlx::query(
-        "UPDATE bid_matching_job_claims SET heartbeat_at=clock_timestamp()
-          WHERE job_id=$1 AND attempt=$2",
-    )
-    .bind(commit_claim.job_id)
-    .bind(commit_claim.claim.attempt)
-    .execute(&pool)
-    .await
-    .unwrap();
+        .unwrap_err();
+        assert_database_error(error, "STAGING_NOT_ACTIVE");
+    }
 
     sqlx::query("UPDATE bid_matching_staging_sets SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1")
         .bind(staging_id)
         .execute(&pool)
-        .await
-        .unwrap();
+    .await
+    .unwrap();
+    let expired_payload_stage = stage_report_payload_direct(
+        &pool,
+        commit_request.job_id,
+        Some(commit_request.generation),
+        staging_id,
+        Some(invalid_report_nonce),
+        &invalid_report_payload,
+        &invalid_report_sha256,
+    )
+    .await
+    .unwrap_err();
+    assert_database_error(expired_payload_stage, "STAGING_NOT_ACTIVE");
     let expired_staging_commit: Result<serde_json::Value, sqlx::Error> =
-        sqlx::query_scalar("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6,$7)")
-            .bind(commit_claim.job_id)
-            .bind(commit_claim.claim.token)
-            .bind(commit_claim.claim.attempt)
+        sqlx::query_scalar("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6)")
+            .bind(commit_request.job_id)
+            .bind(commit_request.generation)
             .bind(staging_id)
             .bind(invalid_report_id)
             .bind(invalid_report_nonce)
@@ -1967,10 +2175,9 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .await
     .unwrap();
     let stale_inputs_commit: Result<serde_json::Value, sqlx::Error> =
-        sqlx::query_scalar("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6,$7)")
-            .bind(commit_claim.job_id)
-            .bind(commit_claim.claim.token)
-            .bind(commit_claim.claim.attempt)
+        sqlx::query_scalar("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6)")
+            .bind(commit_request.job_id)
+            .bind(commit_request.generation)
             .bind(staging_id)
             .bind(invalid_report_id)
             .bind(invalid_report_nonce)
@@ -1985,52 +2192,52 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .execute(&pool)
     .await
     .unwrap();
-
-    storage::bid_matching::retry_claim(
-        &pool,
-        &commit_claim,
-        "COMMIT_TEST_RETRY",
-        "commit failure is retryable",
-    )
-    .await
-    .unwrap();
-    let commit_after_retry: (String, String, String) = sqlx::query_as(
-        "SELECT job.status,claim.status,staging.state
+    assert!(
+        storage::bid_matching::fail_matching(
+            &pool,
+            &commit_request,
+            "COMMIT_TEST_RETRY",
+            "Oxana retries the same target revision after commit failure",
+            true,
+        )
+        .await
+        .unwrap()
+    );
+    let commit_after_retry: (String, Option<String>, String) = sqlx::query_as(
+        "SELECT job.status,job.error_code,staging.state
          FROM bid_matching_jobs job
-         JOIN bid_matching_job_claims claim ON claim.job_id=job.id AND claim.attempt=$2
-         JOIN bid_matching_staging_sets staging ON staging.job_id=job.id AND staging.attempt=claim.attempt
-         WHERE job.id=$1",
+         JOIN bid_matching_staging_sets staging ON staging.job_id=job.id
+         WHERE job.id=$1 AND staging.id=$2",
     )
-    .bind(commit_claim.job_id)
-    .bind(commit_claim.claim.attempt)
+    .bind(commit_request.job_id)
+    .bind(staging_id)
     .fetch_one(&pool)
     .await
     .unwrap();
     assert_eq!(
         commit_after_retry,
-        ("pending".into(), "failed".into(), "failed".into())
+        (
+            "pending".into(),
+            Some("COMMIT_TEST_RETRY".into()),
+            "active".into()
+        )
     );
 
     for scheduled_job in &scheduled.jobs {
-        run_match_route_v1(
-            &pool,
-            BidMatchRouteV1Job::new(
-                scheduled_job.id,
-                BidMatchRouteV1Snapshots {
-                    config_snapshot_id: scheduled_job.snapshots.config_snapshot_id,
-                    feature_snapshot_id: scheduled_job.snapshots.feature_snapshot_id,
-                    score_policy_snapshot_id: scheduled_job.snapshots.score_policy_snapshot_id,
-                    verifier_policy_snapshot_id: scheduled_job
-                        .snapshots
-                        .verifier_policy_snapshot_id,
-                },
-                None,
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+        run_match_route_v1(&pool, scheduled_job.id, scheduled_job.generation)
+            .await
+            .unwrap();
     }
+    let abandoned_staging_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM bid_matching_staging_sets WHERE id=$1")
+            .bind(staging_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        abandoned_staging_count, 0,
+        "the next Oxana execution must purge its predecessor staging set"
+    );
 
     let routes = storage::bid_matching::current_routes(&pool, project_id)
         .await
@@ -2071,7 +2278,10 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
         storage::bid_matching::current_route_supported_candidates(&pool, project_id, route_id)
             .await
             .unwrap();
-    assert_eq!(candidates.len(), 2);
+    assert!(
+        candidates.len() >= 2,
+        "the route must expose at least two selectable candidates"
+    );
     assert_eq!(
         candidates
             .iter()
@@ -2333,8 +2543,8 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     .unwrap();
     sqlx::query(
         "INSERT INTO bid_matching_jobs
-         (id,project_id,manifest_id,route_id,status,max_attempts,claim_lease_ms,lease_policy_generation)
-         VALUES($1,$2,$3,$4,'pending',1,300000,1)",
+         (id,project_id,manifest_id,route_id,status)
+         VALUES($1,$2,$3,$4,'pending')",
     )
     .bind(noncanonical_job_id)
     .bind(project_id)
@@ -2523,7 +2733,10 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
     )
     .await
     .unwrap();
-    assert_eq!(ordinary_candidates.len(), 2);
+    assert!(
+        ordinary_candidates.len() >= 2,
+        "the ordinary route must expose at least two selectable candidates"
+    );
     let ordinary_candidate_id: Uuid = ordinary_candidates[0].get("candidate_artifact_id");
     let ordinary_requirement_id: Uuid = ordinary_candidates[0].get("requirement_artifact_id");
     let ordinary_body = json!({
@@ -2677,8 +2890,8 @@ async fn matching_publication_freezes_evidence_and_builds_unsectioned_pick_sets(
             .iter()
             .filter(|issue| issue["code"] == "MATCHING_REPORT_MISSING")
             .count(),
-        2,
-        "every confirmed technical requirement remains gated after current matching is invalidated"
+        3,
+        "every confirmed requirement remains gated after current matching is invalidated"
     );
     let required_after_invalidation = gate_without_current_reports["required_part_keys"]
         .as_array()

@@ -269,45 +269,53 @@ pub async fn retry_document_conversion(
 }
 
 #[derive(Debug, Clone)]
-pub struct ConversionClaim {
+pub struct ConversionTarget {
     pub project_id: Uuid,
     pub file_name: String,
     pub object_ref: String,
     pub conversion_generation: i32,
-    pub claim_lease_ms: i32,
 }
 
-pub async fn claim_document_conversion(
+pub async fn load_document_conversion(
     pool: &PgPool,
     document_id: Uuid,
-    claim_token: Uuid,
-    claimed_by: &str,
-) -> Result<Option<ConversionClaim>, sqlx::Error> {
-    let row = sqlx::query("SELECT * FROM kb_bid_claim_document_conversion($1,$2,$3)")
+    conversion_generation: i32,
+) -> Result<Option<ConversionTarget>, sqlx::Error> {
+    let row = sqlx::query("SELECT * FROM kb_bid_load_document_conversion($1,$2)")
         .bind(document_id)
-        .bind(claim_token)
-        .bind(claimed_by)
+        .bind(conversion_generation)
         .fetch_optional(pool)
         .await?;
-    Ok(row.map(|row| ConversionClaim {
+    Ok(row.map(|row| ConversionTarget {
         project_id: row.get("project_id"),
         file_name: row.get("file_name"),
         object_ref: row.get("object_ref"),
         conversion_generation: row.get("conversion_generation"),
-        claim_lease_ms: row.get("claim_lease_ms"),
     }))
 }
 
-pub async fn heartbeat_document_conversion(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractionSuccessor {
+    pub target_id: Uuid,
+    pub extraction_generation: i32,
+}
+
+pub async fn document_conversion_successor(
     pool: &PgPool,
     document_id: Uuid,
-    claim_token: Uuid,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT kb_bid_heartbeat_document_conversion($1,$2)")
+    conversion_generation: i32,
+) -> Result<Option<ExtractionSuccessor>, sqlx::Error> {
+    sqlx::query_as::<_, (Uuid, i32)>("SELECT * FROM kb_bid_document_conversion_successor($1,$2)")
         .bind(document_id)
-        .bind(claim_token)
-        .fetch_one(pool)
+        .bind(conversion_generation)
+        .fetch_optional(pool)
         .await
+        .map(|value| {
+            value.map(|(target_id, extraction_generation)| ExtractionSuccessor {
+                target_id,
+                extraction_generation,
+            })
+        })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -322,7 +330,7 @@ pub struct ConvertedSourceImageUpload {
 
 pub struct CompleteDocumentConversion<'a> {
     pub document_id: Uuid,
-    pub claim_token: Uuid,
+    pub conversion_generation: i32,
     pub source_artifact_id: Uuid,
     pub markdown: &'a [u8],
     pub converter_contract_version: &'a str,
@@ -345,7 +353,7 @@ pub async fn complete_document_conversion(
         "SELECT kb_bid_complete_document_conversion($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
     )
     .bind(input.document_id)
-    .bind(input.claim_token)
+    .bind(input.conversion_generation)
     .bind(input.source_artifact_id)
     .bind(input.markdown)
     .bind(input.converter_contract_version)
@@ -363,15 +371,17 @@ pub async fn complete_document_conversion(
 pub async fn fail_document_conversion(
     pool: &PgPool,
     document_id: Uuid,
-    claim_token: Uuid,
+    conversion_generation: i32,
     error_code: &str,
-    retry: bool,
+    error_detail: &str,
+    retryable: bool,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT kb_bid_fail_document_conversion($1,$2,$3,$4)")
+    sqlx::query_scalar("SELECT kb_bid_fail_document_conversion($1,$2,$3,$4,$5)")
         .bind(document_id)
-        .bind(claim_token)
+        .bind(conversion_generation)
         .bind(error_code)
-        .bind(retry)
+        .bind(error_detail)
+        .bind(retryable)
         .fetch_one(pool)
         .await
 }
@@ -430,58 +440,37 @@ pub async fn schedule_extraction(
 }
 
 #[derive(Debug, Clone)]
-pub struct ExtractionClaim {
+pub struct ExtractionTarget {
     pub project_id: Uuid,
     pub document_id: Uuid,
     pub source_artifact_id: Uuid,
     pub conversion_generation: i32,
     pub extraction_generation: i32,
-    pub attempt: i32,
-    pub claim_lease_ms: i32,
 }
 
-pub async fn claim_extraction(
+pub async fn load_extraction(
     pool: &PgPool,
     target_id: Uuid,
-    claim_token: Uuid,
-    claimed_by: &str,
-) -> Result<Option<ExtractionClaim>, sqlx::Error> {
-    let row = sqlx::query("SELECT * FROM kb_bid_claim_extraction($1,$2,$3)")
+    extraction_generation: i32,
+) -> Result<Option<ExtractionTarget>, sqlx::Error> {
+    let row = sqlx::query("SELECT * FROM kb_bid_load_extraction($1,$2)")
         .bind(target_id)
-        .bind(claim_token)
-        .bind(claimed_by)
+        .bind(extraction_generation)
         .fetch_optional(pool)
         .await?;
-    Ok(row.map(|row| ExtractionClaim {
+    Ok(row.map(|row| ExtractionTarget {
         project_id: row.get("project_id"),
         document_id: row.get("document_id"),
         source_artifact_id: row.get("source_artifact_id"),
         conversion_generation: row.get("conversion_generation"),
         extraction_generation: row.get("extraction_generation"),
-        attempt: row.get("attempt"),
-        claim_lease_ms: row.get("claim_lease_ms"),
     }))
-}
-
-pub async fn heartbeat_extraction(
-    pool: &PgPool,
-    target_id: Uuid,
-    claim_token: Uuid,
-    attempt: i32,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT kb_bid_heartbeat_extraction($1,$2,$3)")
-        .bind(target_id)
-        .bind(claim_token)
-        .bind(attempt)
-        .fetch_one(pool)
-        .await
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PublishSection<'a> {
     pub target_id: Uuid,
-    pub attempt: i32,
-    pub claim_token: Uuid,
+    pub extraction_generation: i32,
     pub section_key: &'a str,
     pub heading_path: &'a Value,
     pub parent_start_offset: i64,
@@ -496,11 +485,10 @@ pub async fn publish_extraction_section(
     context: &MutationContext,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT kb_bid_publish_extraction_section($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+        "SELECT kb_bid_publish_extraction_section($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
     )
     .bind(input.target_id)
-    .bind(input.attempt)
-    .bind(input.claim_token)
+    .bind(input.extraction_generation)
     .bind(input.section_key)
     .bind(input.heading_path)
     .bind(input.parent_start_offset)
@@ -518,17 +506,17 @@ pub async fn publish_extraction_section(
 pub async fn fail_extraction(
     pool: &PgPool,
     target_id: Uuid,
-    attempt: i32,
-    claim_token: Uuid,
+    extraction_generation: i32,
     error_code: &str,
-    retry: bool,
+    error_detail: &str,
+    retryable: bool,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar("SELECT kb_bid_fail_extraction($1,$2,$3,$4,$5)")
         .bind(target_id)
-        .bind(attempt)
-        .bind(claim_token)
+        .bind(extraction_generation)
         .bind(error_code)
-        .bind(retry)
+        .bind(error_detail)
+        .bind(retryable)
         .fetch_one(pool)
         .await
 }

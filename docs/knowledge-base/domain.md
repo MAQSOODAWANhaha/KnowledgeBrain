@@ -101,6 +101,12 @@ attestation scope 必须携带固定结构 `version_selections={"product_line":[
 
 attest 成功后产生 immutable attestation ID、canonical payload 与 SHA-256。招投标 manifest 冻结 attestation ID/hash，deferred verifier 只能以 ID/hash/同一 payload 调用 knowledge verify；不得在招投标函数中直接 join 知识库表。attestation 证明 schedule 时的完整 scope 和 hit 来源，后续 live 资料变化不改写已发布 manifest/report。
 
+### 2.2 招投标图片证据V3评审边界
+
+当前V2只冻结`image_ocr`文本chunk，不提供可插入投标文件的图片asset identity。为使未激活的bidding V2 baseline能够建立真实复合外键，Phase 0只提前冻结`knowledge_image_artifact_revisions`及`knowledge_image_ocr_chunk_artifact_mappings`存储identity：同一ProductVersion/Document的`image_ocr` chunk映射不可变图片revision。由于first-launch固定先knowledge后shared，knowledge baseline先冻结等价的closed text identity和immutable约束；shared加载ObjectRegistry后，inactive bidding V2 baseline再追加`object_ref + digest + media_type + available`复合FK。该表当前没有publication/query API，也不改变任何retrieval response。
+
+Phase 4才实现图片ingestion publication、V3 hit/media schema、knowledge-owned verifier和唯一`KnowledgeRetrievalPort`的V3查询行为；不得新增第二个检索/media端口，也不得改变V2排序、quota、eligible scope或scope attestation语义。具体实现范围和验证见独立计划[`../../plans/knowledge-base/bidding-evidence-media-v3.md`](../../plans/knowledge-base/bidding-evidence-media-v3.md)。
+
 ## 3. 招投标边界
 
 招投标：

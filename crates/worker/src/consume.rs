@@ -2,14 +2,14 @@
 
 use async_trait::async_trait;
 use runtime::{
-    BidConvertJob, BidConvertV1Queue, BidExtractJob, BidExtractV1Queue, BidMatchRouteV1Job,
-    BidMatchingV1Queue, BidPrepareAttachmentV1Job, BidRenderSubmissionV1Job, BidRenderV1Queue,
-    DatatableJob, DefaultQueue, DocumentProcessJob, ExtractJob, HousekeepJob, ImageMultimodalJob,
-    IndexDeleteJob, KbDeleteJob, ListDeleteJob, ListReparseJob, LiveRecoveryV1Job, LowQueue,
+    BidDeliveryTargetKind, BidDeliveryV1Job, BidDeliveryV1Queue, BidDeliveryV1Worker, DatatableJob,
+    DefaultQueue, DocumentProcessJob, ExtractJob, HousekeepJob, ImageMultimodalJob, IndexDeleteJob,
+    KbDeleteJob, KnowledgeSemanticIndexV2Job, ListDeleteJob, ListReparseJob, LowQueue,
     PostProcessJob, PostprocessQueue, QuestionJob, SummaryJob, SummaryQueue, VersionCloneJob,
     WikiFinalizeJob, WikiIngestJob, WikiQueue,
 };
 use sqlx::PgPool;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -81,6 +81,12 @@ impl oxana::Worker<DocumentProcessJob> for DocumentProcessWorker {
         };
         if let Err(e) = &result
             && ctx.meta.retries >= runtime::DOCUMENT_PROCESS_MAX_RETRY
+            && storage::document_parse_status(pool, job.document_id)
+                .await
+                .ok()
+                .flatten()
+                .as_deref()
+                != Some("completed")
         {
             let _ = fail_now(pool, job.document_id, job.attempt, e).await;
         }
@@ -145,17 +151,24 @@ pub async fn convert_document(
     }
     let ext = file_name.rsplit('.').next().unwrap_or("txt");
     let parser_engine = domain::parser_engine_for(&chunking_cfg, overrides.as_ref(), ext);
-    if matches!(
-        parse_status.as_str(),
-        "cancelled" | "deleting" | "completed"
-    ) {
+    if parse_status == "completed" {
+        return schedule_semantic_index_v2_if_ready(pool, version_id).await;
+    }
+    if matches!(parse_status.as_str(), "cancelled" | "deleting") {
         return Ok(());
     }
     let flipped = storage::try_set_processing(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
     if !flipped {
-        return Ok(());
+        return match storage::document_parse_status(pool, document_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .as_deref()
+        {
+            Some("completed") => schedule_semantic_index_v2_if_ready(pool, version_id).await,
+            _ => Ok(()),
+        };
     }
     let _ = storage::open_attempt(pool, document_id, attempt).await;
     tracing::info!(
@@ -225,7 +238,7 @@ pub async fn convert_document(
             PersistIndexResult::Aborted => {}
             PersistIndexResult::Written { text_count } => {
                 after_index_fanout(pool, document_id, version_id, attempt, text_count, &[], "")
-                    .await;
+                    .await?;
             }
         }
         return Ok(());
@@ -527,7 +540,7 @@ pub async fn convert_document(
                     convert_image_source.as_str()
                 },
             )
-            .await;
+            .await?;
         }
     }
     Ok(())
@@ -603,7 +616,7 @@ async fn after_index_fanout(
     text_count: usize,
     images: &[String],
     file_name: &str,
-) {
+) -> Result<(), String> {
     if !images.is_empty() {
         if !domain::vlm_configured() {
             let _ = storage::skip_span(
@@ -631,7 +644,7 @@ async fn after_index_fanout(
             if text_count > 0 {
                 maybe_start_postprocess(pool, document_id, version_id, attempt).await;
             }
-            return;
+            return Ok(());
         }
         let _ = storage::start_span(
             pool,
@@ -694,7 +707,7 @@ async fn after_index_fanout(
                 maybe_start_postprocess(pool, document_id, version_id, attempt).await;
             }
         }
-        return;
+        return Ok(());
     }
     let _ = storage::skip_span(
         pool,
@@ -706,7 +719,6 @@ async fn after_index_fanout(
     .await;
     let _ = storage::set_index_ready(pool, document_id, true).await;
     tracing::info!(document_id = %document_id, index_ready = true, "parse completed");
-    let _ = bid::maybe_rematch_company_doc(pool, document_id).await;
     if text_count == 0 {
         let _ = storage::set_parse_status(pool, document_id, "completed", "").await;
         let _ = storage::skip_span(
@@ -717,9 +729,10 @@ async fn after_index_fanout(
             "no further work",
         )
         .await;
-        return;
+        return schedule_semantic_index_v2_if_ready(pool, version_id).await;
     }
     maybe_start_postprocess(pool, document_id, version_id, attempt).await;
+    schedule_semantic_index_v2_if_ready(pool, version_id).await
 }
 
 struct VersionIndexOpts {
@@ -1180,10 +1193,362 @@ impl oxana::Worker<PostProcessJob> for PostProcessWorker {
         };
         if let Err(e) = &result
             && ctx.meta.retries >= 3
+            && storage::document_parse_status(pool, job.document_id)
+                .await
+                .ok()
+                .flatten()
+                .as_deref()
+                != Some("completed")
         {
             let _ = fail_now(pool, job.document_id, 0, e).await;
         }
         result.map_err(JobErr)
+    }
+}
+
+pub struct KnowledgeSemanticIndexV2Worker {
+    pool: Option<PgPool>,
+    provider: Option<Arc<dyn storage::knowledge_index_v2::VectorEmbeddingProviderV2>>,
+    provider_configuration_error: Option<String>,
+}
+
+impl oxana::FromContext<AppCtx> for KnowledgeSemanticIndexV2Worker {
+    fn from_context(ctx: &AppCtx) -> Self {
+        let provider_result = storage::knowledge_index_v2::StrictVectorEmbeddingClientV2::new(
+            Arc::new(storage::knowledge_index_v2::EnvironmentEmbeddingCredentialResolverV2),
+        );
+        let provider_configuration_error = provider_result.as_ref().err().map(ToString::to_string);
+        let provider = provider_result.ok().map(|provider| {
+            Arc::new(provider) as Arc<dyn storage::knowledge_index_v2::VectorEmbeddingProviderV2>
+        });
+        Self {
+            pool: ctx.pool.clone(),
+            provider,
+            provider_configuration_error,
+        }
+    }
+}
+
+#[async_trait]
+impl oxana::Worker<KnowledgeSemanticIndexV2Job> for KnowledgeSemanticIndexV2Worker {
+    type Error = JobErr;
+
+    fn max_retries(&self, _job: &KnowledgeSemanticIndexV2Job) -> u32 {
+        runtime::SEMANTIC_INDEX_V2_MAX_RETRY
+    }
+
+    fn retry_delay(&self, _job: &KnowledgeSemanticIndexV2Job, _retries: u32) -> u64 {
+        runtime::SEMANTIC_INDEX_V2_RETRY_DELAY_SECS
+    }
+
+    async fn process(
+        &self,
+        job: KnowledgeSemanticIndexV2Job,
+        ctx: &oxana::JobContext,
+    ) -> Result<(), Self::Error> {
+        let Some(pool) = &self.pool else {
+            return Err(JobErr("postgres not configured".into()));
+        };
+        tracing::info!(
+            target_id = %job.target_id,
+            target_revision = job.target_revision,
+            oxana_retry = ctx.meta.retries,
+            "knowledge semantic index v2 attempt"
+        );
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(runtime::SEMANTIC_INDEX_V2_TIMEOUT_SECS),
+            process_semantic_index_intent_v2(
+                pool,
+                job.target_id,
+                job.target_revision,
+                self.provider.as_deref(),
+                self.provider_configuration_error.as_deref(),
+            ),
+        )
+        .await;
+        let successor = match result {
+            Ok(Ok(successor)) => successor,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    target_id = %job.target_id,
+                    target_revision = job.target_revision,
+                    error = %error,
+                    "knowledge semantic index v2 retryable failure"
+                );
+                return Err(JobErr(error));
+            }
+            Err(_) => {
+                let detail = "semantic index v2 timeout after 2h";
+                storage::knowledge_index_v2::record_semantic_index_error_v2(
+                    pool,
+                    job.target_id,
+                    job.target_revision,
+                    "retryable",
+                    "WORKER_TIMEOUT",
+                    detail,
+                )
+                .await
+                .map_err(|error| JobErr(error.to_string()))?;
+                return Err(JobErr(detail.into()));
+            }
+        };
+        if let Some(successor) = successor {
+            enqueue_semantic_index_v2_target(&successor).await?;
+        }
+        Ok(())
+    }
+}
+
+async fn enqueue_semantic_index_v2_target(
+    target: &storage::knowledge_index_v2::SemanticIndexIntentV2,
+) -> Result<(), JobErr> {
+    match runtime::enqueue_semantic_index_v2(target.id, target.target_revision).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(JobErr("semantic index v2 queue unavailable".into())),
+        Err(error) => Err(JobErr(error)),
+    }
+}
+
+fn bounded_semantic_index_error_detail(error: &str) -> String {
+    let mut end = error.len().min(512);
+    while !error.is_char_boundary(end) {
+        end -= 1;
+    }
+    let detail = error[..end].trim();
+    if detail.is_empty() {
+        "semantic index v2 failure".into()
+    } else {
+        detail.into()
+    }
+}
+
+pub async fn process_semantic_index_intent_v2(
+    pool: &PgPool,
+    target_id: Uuid,
+    target_revision: i64,
+    provider: Option<&dyn storage::knowledge_index_v2::VectorEmbeddingProviderV2>,
+    provider_configuration_error: Option<&str>,
+) -> Result<Option<storage::knowledge_index_v2::SemanticIndexIntentV2>, String> {
+    use storage::knowledge_index_v2::{
+        SemanticIndexCompletionV2, SemanticIndexPreflightV2, VectorIndexErrorV2,
+    };
+
+    let Some(intent) =
+        storage::knowledge_index_v2::semantic_index_intent_v2(pool, target_id, target_revision)
+            .await
+            .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    match storage::knowledge_index_v2::preflight_semantic_index_intent_v2(
+        pool,
+        target_id,
+        target_revision,
+    )
+    .await
+    .map_err(|error| error.to_string())?
+    {
+        SemanticIndexPreflightV2::Current => {}
+        SemanticIndexPreflightV2::PendingDerived => {
+            let detail = "semantic source has pending derived work";
+            let _ = storage::knowledge_index_v2::record_semantic_index_intent_v2(
+                pool,
+                &intent,
+                "retryable",
+                "PENDING_DERIVED",
+                detail,
+            )
+            .await;
+            return Err(detail.into());
+        }
+        SemanticIndexPreflightV2::Superseded => {
+            return prepare_semantic_index_v2_successor(pool, intent.product_version_id).await;
+        }
+        SemanticIndexPreflightV2::Completed
+        | SemanticIndexPreflightV2::Terminal
+        | SemanticIndexPreflightV2::Duplicate => return Ok(None),
+    }
+
+    let Some(provider) = provider else {
+        let detail = bounded_semantic_index_error_detail(
+            provider_configuration_error
+                .unwrap_or("strict V2 vector provider could not be configured"),
+        );
+        storage::knowledge_index_v2::record_semantic_index_intent_v2(
+            pool,
+            &intent,
+            "terminal",
+            "CLIENT_CONFIGURATION_INVALID",
+            &detail,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        return Ok(None);
+    };
+
+    let result = async {
+        storage::knowledge_index_v2::rebuild_semantic_keyword_indexes_v2(pool, &intent).await?;
+        let has_vector = storage::knowledge_index_v2::semantic_vector_generation_matches_intent_v2(
+            pool, &intent,
+        )
+        .await
+        .map_err(VectorIndexErrorV2::Database)?;
+        if !has_vector {
+            storage::knowledge_index_v2::rebuild_vector_indexes_for_intent_v2(
+                pool, &intent, provider,
+            )
+            .await?;
+        }
+        storage::knowledge_index_v2::complete_semantic_index_intent_v2(pool, &intent)
+            .await
+            .map_err(VectorIndexErrorV2::Database)
+    }
+    .await;
+
+    match result {
+        Ok(SemanticIndexCompletionV2::Completed | SemanticIndexCompletionV2::Duplicate) => {
+            tracing::info!(
+                target_id = %intent.id,
+                target_revision = intent.target_revision,
+                product_version_id = %intent.product_version_id,
+                source_snapshot_sha256 = %intent.source_snapshot_sha256,
+                embedding_revision_sha256 = %intent.embedding_revision_sha256,
+                "knowledge semantic index v2 ready"
+            );
+            Ok(None)
+        }
+        Ok(SemanticIndexCompletionV2::Superseded) => {
+            prepare_semantic_index_v2_successor(pool, intent.product_version_id).await
+        }
+        Ok(SemanticIndexCompletionV2::Terminal) => Ok(None),
+        Ok(SemanticIndexCompletionV2::PendingDerived | SemanticIndexCompletionV2::NotReady) => {
+            let detail = "semantic readiness is not yet publishable";
+            let _ = storage::knowledge_index_v2::record_semantic_index_intent_v2(
+                pool,
+                &intent,
+                "retryable",
+                "SEMANTIC_SOURCE_NOT_SETTLED",
+                detail,
+            )
+            .await;
+            Err(detail.into())
+        }
+        Err(VectorIndexErrorV2::SnapshotChanged(error)) => {
+            let detail = bounded_semantic_index_error_detail(&error);
+            storage::knowledge_index_v2::record_semantic_index_intent_v2(
+                pool,
+                &intent,
+                "superseded",
+                "SOURCE_GENERATION_CHANGED",
+                &detail,
+            )
+            .await
+            .map_err(|record_error| record_error.to_string())?;
+            prepare_semantic_index_v2_successor(pool, intent.product_version_id).await
+        }
+        Err(VectorIndexErrorV2::PendingDerived(error)) => {
+            let detail = bounded_semantic_index_error_detail(&error);
+            let _ = storage::knowledge_index_v2::record_semantic_index_intent_v2(
+                pool,
+                &intent,
+                "retryable",
+                "PENDING_DERIVED",
+                &detail,
+            )
+            .await;
+            Err(detail)
+        }
+        Err(VectorIndexErrorV2::InvalidConfiguration(error)) => {
+            let detail = bounded_semantic_index_error_detail(&error);
+            storage::knowledge_index_v2::record_semantic_index_intent_v2(
+                pool,
+                &intent,
+                "terminal",
+                "INVALID_IMMUTABLE_CONFIGURATION",
+                &detail,
+            )
+            .await
+            .map_err(|record_error| record_error.to_string())?;
+            Ok(None)
+        }
+        Err(error @ (VectorIndexErrorV2::Unavailable(_) | VectorIndexErrorV2::Database(_))) => {
+            let detail = bounded_semantic_index_error_detail(&error.to_string());
+            let error_code = match error {
+                VectorIndexErrorV2::Unavailable(_) => "PROVIDER_UNAVAILABLE",
+                VectorIndexErrorV2::Database(_) => "DATABASE_UNAVAILABLE",
+                VectorIndexErrorV2::InvalidConfiguration(_)
+                | VectorIndexErrorV2::PendingDerived(_)
+                | VectorIndexErrorV2::SnapshotChanged(_) => unreachable!(),
+            };
+            let _ = storage::knowledge_index_v2::record_semantic_index_intent_v2(
+                pool,
+                &intent,
+                "retryable",
+                error_code,
+                &detail,
+            )
+            .await;
+            Err(detail)
+        }
+    }
+}
+
+async fn prepare_semantic_index_v2_successor(
+    pool: &PgPool,
+    product_version_id: Uuid,
+) -> Result<Option<storage::knowledge_index_v2::SemanticIndexIntentV2>, String> {
+    use storage::knowledge_index_v2::SemanticIndexPreparationV2;
+    match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(pool, product_version_id)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        SemanticIndexPreparationV2::Enqueue(successor) => Ok(Some(successor)),
+        SemanticIndexPreparationV2::PendingDerived => {
+            Err("semantic successor source has pending derived work".into())
+        }
+        SemanticIndexPreparationV2::Unbound
+        | SemanticIndexPreparationV2::Ready(_)
+        | SemanticIndexPreparationV2::Terminal(_)
+        | SemanticIndexPreparationV2::Superseded(_) => Ok(None),
+    }
+}
+
+pub async fn schedule_semantic_index_v2_if_ready(
+    pool: &PgPool,
+    product_version_id: Uuid,
+) -> Result<(), String> {
+    schedule_semantic_index_v2_if_ready_with(pool, product_version_id, |target_id, revision| {
+        runtime::enqueue_semantic_index_v2(target_id, revision)
+    })
+    .await
+}
+
+async fn schedule_semantic_index_v2_if_ready_with<F, Fut>(
+    pool: &PgPool,
+    product_version_id: Uuid,
+    enqueue: F,
+) -> Result<(), String>
+where
+    F: FnOnce(Uuid, i64) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<String>, String>>,
+{
+    use storage::knowledge_index_v2::SemanticIndexPreparationV2;
+    match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(pool, product_version_id)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        SemanticIndexPreparationV2::Enqueue(intent) => {
+            match enqueue(intent.id, intent.target_revision).await {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => Err("semantic index v2 queue unavailable".into()),
+                Err(error) => Err(error),
+            }
+        }
+        SemanticIndexPreparationV2::Unbound
+        | SemanticIndexPreparationV2::PendingDerived
+        | SemanticIndexPreparationV2::Ready(_)
+        | SemanticIndexPreparationV2::Terminal(_)
+        | SemanticIndexPreparationV2::Superseded(_) => Ok(()),
     }
 }
 
@@ -1279,7 +1644,7 @@ pub async fn process_post_process(
             .map_err(|e| e.to_string())?;
         let _ = storage::set_summary_status(pool, document_id, "none").await;
         finish_postprocess_spans(pool, document_id, attempt).await;
-        return Ok(());
+        return schedule_semantic_index_v2_if_ready(pool, product_version_id).await;
     }
     if doc.parse_status != domain::ParseStatus::Finalizing {
         finish_postprocess_spans(pool, document_id, attempt).await;
@@ -1463,7 +1828,7 @@ pub async fn process_post_process(
         clone_keep,
         "parse postprocess done"
     );
-    Ok(())
+    schedule_semantic_index_v2_if_ready(pool, product_version_id).await
 }
 
 async fn finish_postprocess_spans(pool: &PgPool, document_id: Uuid, attempt: i32) {
@@ -1529,11 +1894,11 @@ impl oxana::Worker<HousekeepJob> for HousekeepWorker {
     }
 }
 
-pub struct LiveRecoveryV1Handler {
+pub struct BidDeliveryHandler {
     pool: Option<PgPool>,
 }
 
-impl oxana::FromContext<AppCtx> for LiveRecoveryV1Handler {
+impl oxana::FromContext<AppCtx> for BidDeliveryHandler {
     fn from_context(ctx: &AppCtx) -> Self {
         Self {
             pool: ctx.pool.clone(),
@@ -1542,213 +1907,113 @@ impl oxana::FromContext<AppCtx> for LiveRecoveryV1Handler {
 }
 
 #[async_trait]
-impl oxana::Worker<LiveRecoveryV1Job> for LiveRecoveryV1Handler {
+impl runtime::BidDeliveryV1Handler for BidDeliveryHandler {
     type Error = JobErr;
 
-    fn max_retries(&self, _job: &LiveRecoveryV1Job) -> u32 {
-        3
-    }
-
-    async fn process(
-        &self,
-        job: LiveRecoveryV1Job,
-        _ctx: &oxana::JobContext,
-    ) -> Result<(), Self::Error> {
-        job.validate().map_err(JobErr)?;
+    async fn handle(&self, delivery: BidDeliveryV1Job) -> Result<(), Self::Error> {
         let Some(pool) = &self.pool else {
             return Err(JobErr("postgres not configured".into()));
         };
-        crate::live_recovery::process(pool, job)
+        match delivery.target_kind {
+            BidDeliveryTargetKind::DocumentConversion => {
+                let successor = bid::tender::convert_and_schedule_document(
+                    pool,
+                    delivery.target_id,
+                    delivery.target_revision,
+                )
+                .await
+                .map_err(JobErr)?;
+                if let Some((target_id, target_revision)) = successor {
+                    enqueue_bid_targets([(
+                        BidDeliveryTargetKind::ExtractionTarget,
+                        target_id,
+                        target_revision,
+                    )])
+                    .await
+                    .map_err(JobErr)?;
+                }
+                Ok(())
+            }
+            BidDeliveryTargetKind::ExtractionTarget => bid::tender::run_extraction_target(
+                pool,
+                delivery.target_id,
+                delivery.target_revision,
+            )
             .await
-            .map_err(JobErr)
-    }
-}
-
-pub struct BidConvertWorker {
-    pool: Option<PgPool>,
-}
-
-impl oxana::FromContext<AppCtx> for BidConvertWorker {
-    fn from_context(ctx: &AppCtx) -> Self {
-        Self {
-            pool: ctx.pool.clone(),
+            .map_err(JobErr),
+            BidDeliveryTargetKind::MatchingSchedule => {
+                process_matching_schedule(pool, delivery.target_id, delivery.target_revision)
+                    .await
+                    .map_err(JobErr)
+            }
+            BidDeliveryTargetKind::MatchingJob => bid::matching::run_match_route_v1(
+                pool,
+                delivery.target_id,
+                delivery.target_revision,
+            )
+            .await
+            .map_err(JobErr),
+            BidDeliveryTargetKind::AttachmentPreparation => {
+                process_attachment_preparation(pool, delivery.target_id, delivery.target_revision)
+                    .await
+            }
+            BidDeliveryTargetKind::SubmissionRender => {
+                process_submission_render(pool, delivery.target_id, delivery.target_revision).await
+            }
         }
-    }
-}
-
-#[async_trait]
-impl oxana::Worker<BidConvertJob> for BidConvertWorker {
-    type Error = JobErr;
-
-    fn max_retries(&self, _job: &BidConvertJob) -> u32 {
-        3
-    }
-
-    async fn process(
-        &self,
-        job: BidConvertJob,
-        _ctx: &oxana::JobContext,
-    ) -> Result<(), Self::Error> {
-        job.validate().map_err(JobErr)?;
-        let Some(pool) = &self.pool else {
-            return Err(JobErr("postgres not configured".into()));
-        };
-        let snapshots = storage::bid_recovery::conversion_snapshots(pool, job.document_id)
-            .await
-            .map_err(|error| JobErr(error.to_string()))?
-            .ok_or_else(|| JobErr("bid conversion snapshot intent is missing".into()))?;
-        if snapshots.conversion_snapshot_id != job.conversion_snapshot_id
-            || snapshots.feature_snapshot_id != job.feature_snapshot_id
-        {
-            return Err(JobErr("bid conversion snapshot fence changed".into()));
-        }
-        let target_id = bid::tender::convert_and_schedule_document(pool, job.document_id)
-            .await
-            .map_err(JobErr)?;
-        let Some(target_id) = target_id else {
-            return Ok(());
-        };
-        let document = storage::bidding::get_document(pool, job.document_id)
-            .await
-            .map_err(|error| JobErr(error.to_string()))?
-            .ok_or_else(|| JobErr("converted bid document disappeared".into()))?;
-        tracing::info!(
-            document_id = %job.document_id,
-            target_id = %target_id,
-            project_id = %document.project_id,
-            "bid_convert queued frozen extraction target"
-        );
-        let snapshots = storage::bid_recovery::extraction_snapshots(pool, target_id)
-            .await
-            .map_err(|error| JobErr(error.to_string()))?
-            .ok_or_else(|| JobErr("bid extraction snapshot intent is missing".into()))?;
-        let _ = runtime::enqueue_bid_extract_with_snapshots(
-            target_id,
-            document.project_id,
-            Some(job.document_id),
-            runtime::BidExtractV1Snapshots {
-                target_config_snapshot_id: snapshots.target_config_snapshot_id,
-                feature_snapshot_id: snapshots.feature_snapshot_id,
-            },
-        )
-        .await;
-        Ok(())
     }
 }
 
 const ATTACHMENT_PREPARATION_ACTOR: &str = "system:bid-attachment-preparation";
 
-pub struct BidPrepareAttachmentV1Handler {
-    pool: Option<PgPool>,
-}
-
-impl oxana::FromContext<AppCtx> for BidPrepareAttachmentV1Handler {
-    fn from_context(ctx: &AppCtx) -> Self {
-        Self {
-            pool: ctx.pool.clone(),
-        }
-    }
-}
-
-#[async_trait]
-impl oxana::Worker<BidPrepareAttachmentV1Job> for BidPrepareAttachmentV1Handler {
-    type Error = JobErr;
-
-    fn max_retries(&self, _job: &BidPrepareAttachmentV1Job) -> u32 {
-        3
-    }
-
-    async fn process(
-        &self,
-        job: BidPrepareAttachmentV1Job,
-        _ctx: &oxana::JobContext,
-    ) -> Result<(), Self::Error> {
-        job.validate().map_err(JobErr)?;
-        let Some(pool) = &self.pool else {
-            return Err(JobErr("postgres not configured".into()));
-        };
-        let snapshots =
-            storage::bid_recovery::attachment_preparation_snapshots(pool, job.preparation_job_id)
-                .await
-                .map_err(|error| JobErr(error.to_string()))?
-                .ok_or_else(|| {
-                    JobErr("attachment preparation snapshot intent is missing".into())
-                })?;
-        if snapshots.conversion_snapshot_id != job.conversion_snapshot_id
-            || snapshots.feature_snapshot_id != job.feature_snapshot_id
-        {
-            return Err(JobErr(
-                "attachment preparation snapshot fence changed".into(),
-            ));
-        }
-        let claim_token = Uuid::new_v4();
-        let Some(claim) = storage::bid_submission::claim_attachment_preparation(
-            pool,
-            job.preparation_job_id,
-            claim_token,
-        )
-        .await
-        .map_err(|error| JobErr(error.to_string()))?
-        else {
-            return Ok(());
-        };
-        let preparation = runtime::run_with_heartbeat(
-            std::time::Duration::from_millis(claim.claim_lease_ms as u64),
-            prepare_attachment_pdf_pages(pool, &claim, claim_token),
-            || async {
-                storage::bid_submission::heartbeat_attachment_preparation(
-                    pool,
-                    claim.preparation_job_id,
-                    claim_token,
-                )
-                .await
-                .map_err(|error| error.to_string())
-            },
-        )
-        .await;
-        let result = match preparation {
-            runtime::LeaseRun::Completed(result) => result,
-            runtime::LeaseRun::Lost => {
-                tracing::warn!(
-                    preparation_job_id=%claim.preparation_job_id,
-                    attachment_id=%claim.attachment_id,
-                    "attachment preparation stopped after losing its claim lease"
-                );
-                return Ok(());
-            }
-            runtime::LeaseRun::HeartbeatFailed(error) => Err(error),
-        };
-        match result {
-            Ok(_) => Ok(()),
-            Err(detail) => {
-                let error_code = attachment_preparation_error_code(&detail);
-                let retryable = attachment_preparation_error_retryable(error_code);
-                let status = storage::bid_submission::fail_attachment_preparation(
-                    pool,
-                    claim.preparation_job_id,
-                    claim_token,
-                    error_code,
-                    &detail,
-                    retryable,
-                )
-                .await
-                .map_err(|error| JobErr(error.to_string()))?;
-                match status.as_deref() {
-                    Some("pending") => Err(JobErr(detail)),
-                    Some("failed") => {
-                        tracing::error!(
-                            preparation_job_id=%claim.preparation_job_id,
-                            attachment_id=%claim.attachment_id,
-                            %error_code,
-                            "attachment preparation reached durable failed state"
-                        );
-                        Ok(())
-                    }
-                    Some("cancelled") | None => Ok(()),
-                    Some(other) => Err(JobErr(format!(
-                        "attachment preparation returned invalid status {other}"
-                    ))),
+async fn process_attachment_preparation(
+    pool: &PgPool,
+    preparation_job_id: Uuid,
+    target_revision: i64,
+) -> Result<(), JobErr> {
+    let attachment_revision = i32::try_from(target_revision)
+        .map_err(|_| JobErr("attachment preparation target revision is invalid".into()))?;
+    let Some(target) = storage::bid_submission::load_attachment_preparation(
+        pool,
+        preparation_job_id,
+        attachment_revision,
+    )
+    .await
+    .map_err(|error| JobErr(error.to_string()))?
+    else {
+        return Ok(());
+    };
+    let result = prepare_attachment_pdf_pages(pool, &target, attachment_revision).await;
+    match result {
+        Ok(_) => Ok(()),
+        Err(detail) => {
+            let error_code = attachment_preparation_error_code(&detail);
+            let retryable = attachment_preparation_error_retryable(error_code);
+            let status = storage::bid_submission::fail_attachment_preparation(
+                pool,
+                target.preparation_job_id,
+                attachment_revision,
+                error_code,
+                &detail,
+                retryable,
+            )
+            .await
+            .map_err(|error| JobErr(error.to_string()))?;
+            match status.as_deref() {
+                Some("pending") => Err(JobErr(detail)),
+                Some("failed") => {
+                    tracing::error!(
+                        preparation_job_id=%target.preparation_job_id,
+                        attachment_id=%target.attachment_id,
+                        %error_code,
+                        "attachment preparation reached durable failed state"
+                    );
+                    Ok(())
                 }
+                Some("cancelled") | None => Ok(()),
+                Some(other) => Err(JobErr(format!(
+                    "attachment preparation returned invalid status {other}"
+                ))),
             }
         }
     }
@@ -1756,12 +2021,12 @@ impl oxana::Worker<BidPrepareAttachmentV1Job> for BidPrepareAttachmentV1Handler 
 
 async fn prepare_attachment_pdf_pages(
     pool: &PgPool,
-    claim: &storage::bid_submission::AttachmentPreparationClaim,
-    claim_token: Uuid,
+    target: &storage::bid_submission::AttachmentPreparationTarget,
+    attachment_revision: i32,
 ) -> Result<serde_json::Value, String> {
-    let digest = claim.content_sha256.clone();
-    let expected_bytes = claim.byte_length;
-    let expected_ref = claim.object_ref.clone();
+    let digest = target.content_sha256.clone();
+    let expected_bytes = target.byte_length;
+    let expected_ref = target.object_ref.clone();
     let bytes = tokio::task::spawn_blocking(move || {
         let bytes = storage::read_blob(&digest)
             .map_err(|error| format!("ATTACHMENT_SOURCE_BYTES_MISSING: {error}"))?;
@@ -1854,8 +2119,8 @@ async fn prepare_attachment_pdf_pages(
     }
     let published = storage::bid_submission::publish_attachment_preparation(
         pool,
-        claim.preparation_job_id,
-        claim_token,
+        target.preparation_job_id,
+        attachment_revision,
         &serde_json::Value::Array(pages),
         ATTACHMENT_PREPARATION_ACTOR,
     )
@@ -1957,181 +2222,114 @@ impl Drop for AttachmentPageStagingGuard {
     }
 }
 
-pub struct BidExtractWorker {
-    pool: Option<PgPool>,
-}
-
-impl oxana::FromContext<AppCtx> for BidExtractWorker {
-    fn from_context(ctx: &AppCtx) -> Self {
-        Self {
-            pool: ctx.pool.clone(),
-        }
-    }
-}
-
-#[async_trait]
-impl oxana::Worker<BidExtractJob> for BidExtractWorker {
-    type Error = JobErr;
-
-    async fn process(
-        &self,
-        job: BidExtractJob,
-        _ctx: &oxana::JobContext,
-    ) -> Result<(), Self::Error> {
-        job.validate().map_err(JobErr)?;
-        let Some(pool) = &self.pool else {
-            return Err(JobErr("postgres not configured".into()));
-        };
-        let snapshots = storage::bid_recovery::extraction_snapshots(pool, job.run_id)
-            .await
-            .map_err(|error| JobErr(error.to_string()))?
-            .ok_or_else(|| JobErr("bid extraction snapshot intent is missing".into()))?;
-        if snapshots.target_config_snapshot_id != job.target_config_snapshot_id
-            || snapshots.feature_snapshot_id != job.feature_snapshot_id
-        {
-            return Err(JobErr("bid extraction snapshot fence changed".into()));
-        }
-        bid::tender::run_extraction_target(pool, job.run_id, job.project_id, job.document_id)
-            .await
-            .map_err(JobErr)
-    }
-}
-
-pub struct BidMatchRouteV1Handler {
-    pool: Option<PgPool>,
-}
-
-impl oxana::FromContext<AppCtx> for BidMatchRouteV1Handler {
-    fn from_context(ctx: &AppCtx) -> Self {
-        Self {
-            pool: ctx.pool.clone(),
-        }
-    }
-}
-
-#[async_trait]
-impl oxana::Worker<BidMatchRouteV1Job> for BidMatchRouteV1Handler {
-    type Error = JobErr;
-
-    fn max_retries(&self, _job: &BidMatchRouteV1Job) -> u32 {
-        0
-    }
-
-    async fn process(
-        &self,
-        job: BidMatchRouteV1Job,
-        _ctx: &oxana::JobContext,
-    ) -> Result<(), Self::Error> {
-        let Some(pool) = &self.pool else {
-            return Err(JobErr("postgres not configured".into()));
-        };
-        bid::matching::run_match_route_v1(pool, job)
-            .await
-            .map_err(JobErr)
-    }
-}
-
-pub struct BidRenderSubmissionV1Handler {
-    pool: Option<PgPool>,
-}
-
-impl oxana::FromContext<AppCtx> for BidRenderSubmissionV1Handler {
-    fn from_context(ctx: &AppCtx) -> Self {
-        Self {
-            pool: ctx.pool.clone(),
-        }
-    }
-}
-
-#[async_trait]
-impl oxana::Worker<BidRenderSubmissionV1Job> for BidRenderSubmissionV1Handler {
-    type Error = JobErr;
-
-    fn max_retries(&self, _job: &BidRenderSubmissionV1Job) -> u32 {
-        3
-    }
-
-    async fn process(
-        &self,
-        job: BidRenderSubmissionV1Job,
-        _ctx: &oxana::JobContext,
-    ) -> Result<(), Self::Error> {
-        job.validate().map_err(JobErr)?;
-        let Some(pool) = &self.pool else {
-            return Err(JobErr("postgres not configured".into()));
-        };
-        let snapshots = storage::bid_recovery::submission_render_snapshots(pool, job.render_job_id)
-            .await
-            .map_err(|error| JobErr(error.to_string()))?
-            .ok_or_else(|| JobErr("submission render snapshot intent is missing".into()))?;
-        if snapshots.submission_render_job_snapshot_id != job.submission_render_job_snapshot_id {
-            return Err(JobErr("submission render snapshot fence changed".into()));
-        }
-        let claim_token = Uuid::new_v4();
-        let Some(claim) =
-            storage::bid_submission::claim_submission_render(pool, job.render_job_id, claim_token)
+async fn enqueue_bid_targets(
+    targets: impl IntoIterator<Item = (BidDeliveryTargetKind, Uuid, i64)>,
+) -> Result<(), String> {
+    let enqueuer =
+        runtime::BidDeliveryEnqueuer::new(runtime::connect().map_err(|error| error.to_string())?);
+    enqueue_bid_targets_with(targets, move |target_kind, target_id, target_revision| {
+        let enqueuer = enqueuer.clone();
+        async move {
+            enqueuer
+                .enqueue(target_kind, target_id, target_revision)
                 .await
-                .map_err(|error| JobErr(error.to_string()))?
-        else {
-            return Ok(());
-        };
-        let render = runtime::run_with_heartbeat(
-            std::time::Duration::from_millis(claim.claim_lease_ms as u64),
-            render_submission_manifest(pool, &claim, claim_token),
-            || async {
-                storage::bid_submission::heartbeat_submission_render(
-                    pool,
-                    claim.render_job_id,
-                    claim_token,
-                )
-                .await
-                .map_err(|error| error.to_string())
-            },
-        )
-        .await;
-        let result = match render {
-            runtime::LeaseRun::Completed(result) => result,
-            runtime::LeaseRun::Lost => {
-                tracing::warn!(
-                    render_job_id = %claim.render_job_id,
-                    "submission render stopped after losing its claim lease"
-                );
-                return Ok(());
+        }
+    })
+    .await
+}
+
+async fn enqueue_bid_targets_with<F, Fut>(
+    targets: impl IntoIterator<Item = (BidDeliveryTargetKind, Uuid, i64)>,
+    mut enqueue: F,
+) -> Result<(), String>
+where
+    F: FnMut(BidDeliveryTargetKind, Uuid, i64) -> Fut,
+    Fut: std::future::Future<Output = runtime::BidDeliveryEnqueueOutcome>,
+{
+    for (target_kind, target_id, target_revision) in targets {
+        match enqueue(target_kind, target_id, target_revision).await {
+            runtime::BidDeliveryEnqueueOutcome::Accepted { .. } => {}
+            runtime::BidDeliveryEnqueueOutcome::Indeterminate { error } => {
+                return Err(format!(
+                    "{} target {target_id} revision {target_revision} enqueue failed: {error}",
+                    target_kind.as_str()
+                ));
             }
-            runtime::LeaseRun::HeartbeatFailed(error) => Err(error),
-        };
-        match result {
-            Ok(_) => Ok(()),
-            Err(detail) => {
-                let error_code = submission_render_error_code(&detail);
-                let retryable = submission_render_error_retryable(error_code, &detail);
-                let status = storage::bid_submission::fail_submission_render(
-                    pool,
-                    claim.render_job_id,
-                    claim_token,
-                    error_code,
-                    &detail,
-                    retryable,
-                )
-                .await
-                .map_err(|error| JobErr(error.to_string()))?;
-                match status.as_deref() {
-                    Some("pending") => Err(JobErr(detail)),
-                    Some("failed") => {
-                        tracing::error!(
-                            render_job_id = %claim.render_job_id,
-                            %error_code,
-                            "submission render reached durable failed state"
-                        );
-                        Ok(())
-                    }
-                    _ => {
-                        tracing::warn!(
-                            render_job_id = %claim.render_job_id,
-                            "submission render claim was already fenced"
-                        );
-                        Ok(())
-                    }
+        }
+    }
+    Ok(())
+}
+
+async fn process_matching_schedule(
+    pool: &PgPool,
+    schedule_intent_id: Uuid,
+    target_revision: i64,
+) -> Result<(), String> {
+    let Some(receipt) = storage::bid_matching::execute_schedule(
+        pool,
+        schedule_intent_id,
+        target_revision,
+        bid::matching_schedule_environment(),
+        &storage::bid_matching::ScheduleMutationContext::system(),
+    )
+    .await
+    .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    enqueue_bid_targets(
+        receipt
+            .jobs
+            .into_iter()
+            .map(|job| (BidDeliveryTargetKind::MatchingJob, job.id, job.generation)),
+    )
+    .await
+}
+
+async fn process_submission_render(
+    pool: &PgPool,
+    render_job_id: Uuid,
+    target_revision: i64,
+) -> Result<(), JobErr> {
+    let Some(target) =
+        storage::bid_submission::load_submission_render(pool, render_job_id, target_revision)
+            .await
+            .map_err(|error| JobErr(error.to_string()))?
+    else {
+        return Ok(());
+    };
+    let result = render_submission_manifest(pool, &target, target_revision).await;
+    match result {
+        Ok(_) => Ok(()),
+        Err(detail) => {
+            let error_code = submission_render_error_code(&detail);
+            let retryable = submission_render_error_retryable(error_code, &detail);
+            let status = storage::bid_submission::fail_submission_render(
+                pool,
+                target.render_job_id,
+                target_revision,
+                error_code,
+                &detail,
+                retryable,
+            )
+            .await
+            .map_err(|error| JobErr(error.to_string()))?;
+            match status.as_deref() {
+                Some("pending") => Err(JobErr(detail)),
+                Some("failed") => {
+                    tracing::error!(
+                        render_job_id = %target.render_job_id,
+                        %error_code,
+                        "submission render reached durable failed state"
+                    );
+                    Ok(())
+                }
+                _ => {
+                    tracing::warn!(
+                        render_job_id = %target.render_job_id,
+                        "submission render target was already settled"
+                    );
+                    Ok(())
                 }
             }
         }
@@ -2210,17 +2408,17 @@ fn submission_render_error_retryable(error_code: &str, detail: &str) -> bool {
 
 async fn render_submission_manifest(
     pool: &PgPool,
-    claim: &storage::bid_submission::SubmissionRenderClaim,
-    claim_token: Uuid,
+    target: &storage::bid_submission::SubmissionRenderTarget,
+    target_revision: i64,
 ) -> Result<serde_json::Value, String> {
     let input =
-        storage::bid_submission::manifest_render_input(pool, claim.project_id, claim.manifest_id)
+        storage::bid_submission::manifest_render_input(pool, target.project_id, target.manifest_id)
             .await
             .map_err(|error| error.to_string())?;
     if input
         .get("content_sha256")
         .and_then(serde_json::Value::as_str)
-        != Some(claim.expected_manifest_sha256.as_str())
+        != Some(target.expected_manifest_sha256.as_str())
     {
         return Err("MANIFEST_SHA256_MISMATCH".into());
     }
@@ -2263,8 +2461,8 @@ async fn render_submission_manifest(
             .ok_or_else(|| "manifest asset id invalid".to_string())?;
         let stored = storage::bid_submission::read_manifest_render_asset(
             pool,
-            claim.project_id,
-            claim.manifest_id,
+            target.project_id,
+            target.manifest_id,
             asset_id,
         )
         .await
@@ -2391,7 +2589,7 @@ async fn render_submission_manifest(
         &digest,
         media_type,
         bytes.len() as i64,
-        &claim.requested_by,
+        &target.requested_by,
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -2403,8 +2601,8 @@ async fn render_submission_manifest(
         storage::bid_submission::PublishSubmissionOutput {
             staging_id,
             id: Uuid::new_v4(),
-            render_job_id: claim.render_job_id,
-            claim_token,
+            render_job_id: target.render_job_id,
+            target_revision,
             object_ref: &object_ref,
             digest: &digest,
             byte_length: bytes.len() as i64,
@@ -2614,7 +2812,6 @@ pub async fn process_image_pg(
         .map_err(|e| e.to_string())?;
     if enrichment::decr_pending(&mut store, document_id) {
         let _ = storage::set_index_ready(pool, document_id, true).await;
-        let _ = bid::maybe_rematch_company_doc(pool, document_id).await;
         let vid = store
             .documents
             .get(&document_id)
@@ -2751,7 +2948,7 @@ pub async fn process_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), 
     {
         tracing::info!(%version_id, "wiki ingest skipped: not enabled");
         let _ = storage::drop_pending_ops(pool, domain::TYPE_WIKI_INGEST, version_id).await;
-        return Ok(());
+        return schedule_semantic_index_v2_if_ready(pool, version_id).await;
     }
     let claimed = storage::claim_pending_batch(
         pool,
@@ -2763,7 +2960,7 @@ pub async fn process_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), 
     .await
     .map_err(|e| e.to_string())?;
     if claimed.is_empty() {
-        return Ok(());
+        return schedule_semantic_index_v2_if_ready(pool, version_id).await;
     }
     let mut store = domain::Store::default();
     if let Ok(Some(ws)) = storage::document_workspace_id(
@@ -2926,7 +3123,7 @@ pub async fn process_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), 
         };
         let _ = runtime::enqueue_wiki_ingest_in(version_id, delay).await;
     }
-    Ok(())
+    schedule_semantic_index_v2_if_ready(pool, version_id).await
 }
 
 /// Brain ProcessWikiFinalize — finalize lane only, never ingest.
@@ -2941,7 +3138,7 @@ pub async fn process_wiki_finalize(pool: &PgPool, version_id: Uuid) -> Result<()
     .await
     .map_err(|e| e.to_string())?;
     if claimed.is_empty() {
-        return Ok(());
+        return schedule_semantic_index_v2_if_ready(pool, version_id).await;
     }
     let mut store = domain::Store::default();
     if let Ok(Some(ws)) = storage::version_workspace_id(pool, version_id).await {
@@ -2992,7 +3189,7 @@ pub async fn process_wiki_finalize(pool: &PgPool, version_id: Uuid) -> Result<()
     if !deferred.is_empty() {
         let _ = runtime::enqueue_wiki_finalize_in(version_id, wiki::LOCK_RETRY_SECS).await;
     }
-    Ok(())
+    schedule_semantic_index_v2_if_ready(pool, version_id).await
 }
 
 async fn persist_wiki_store(
@@ -3065,12 +3262,37 @@ async fn persist_wiki_store(
         .map_err(|e| e.to_string())
 }
 
+async fn schedule_semantic_index_for_document_v2(
+    pool: &PgPool,
+    document_id: Uuid,
+) -> Result<(), String> {
+    let product_version_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT product_version_id FROM documents WHERE id=$1 AND deleted_at IS NULL",
+    )
+    .bind(document_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| error.to_string())?;
+    if let Some(product_version_id) = product_version_id {
+        schedule_semantic_index_v2_if_ready(pool, product_version_id).await?;
+    }
+    Ok(())
+}
+
 pub async fn process_summary_pg(
     pool: &PgPool,
     document_id: Uuid,
     attempt: i32,
     fallback: bool,
 ) -> Result<(), String> {
+    if storage::document_parse_status(pool, document_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .as_deref()
+        == Some("completed")
+    {
+        return schedule_semantic_index_for_document_v2(pool, document_id).await;
+    }
     let ws = storage::document_workspace_id(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -3102,7 +3324,7 @@ pub async fn process_summary_pg(
     storage::finalize_subtask(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(())
+    schedule_semantic_index_for_document_v2(pool, document_id).await
 }
 
 pub async fn process_questions_pg(
@@ -3113,6 +3335,14 @@ pub async fn process_questions_pg(
     next_ids: &[Option<Uuid>],
     attempt: i32,
 ) -> Result<(), String> {
+    if storage::document_parse_status(pool, document_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .as_deref()
+        == Some("completed")
+    {
+        return schedule_semantic_index_for_document_v2(pool, document_id).await;
+    }
     let ws = storage::document_workspace_id(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -3140,7 +3370,7 @@ pub async fn process_questions_pg(
     storage::finalize_subtask(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(())
+    schedule_semantic_index_for_document_v2(pool, document_id).await
 }
 
 pub async fn process_extract_pg(
@@ -3149,6 +3379,14 @@ pub async fn process_extract_pg(
     document_id: Uuid,
     attempt: i32,
 ) -> Result<(), String> {
+    if storage::document_parse_status(pool, document_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .as_deref()
+        == Some("completed")
+    {
+        return schedule_semantic_index_for_document_v2(pool, document_id).await;
+    }
     let ws = storage::document_workspace_id(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -3170,7 +3408,7 @@ pub async fn process_extract_pg(
     storage::finalize_subtask(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(())
+    schedule_semantic_index_for_document_v2(pool, document_id).await
 }
 
 pub async fn process_list_delete_pg(pool: &PgPool, document_id: Uuid) -> Result<(), String> {
@@ -3419,6 +3657,7 @@ impl oxana::Worker<QuestionJob> for QuestionWorker {
         .await;
         if result.is_err() && ctx.meta.retries >= 3 {
             let _ = storage::finalize_subtask(pool, job.document_id).await;
+            let _ = schedule_semantic_index_for_document_v2(pool, job.document_id).await;
         }
         result.map_err(JobErr)
     }
@@ -3451,6 +3690,7 @@ impl oxana::Worker<ExtractJob> for ExtractWorker {
         let result = process_extract_pg(pool, job.chunk_id, job.document_id, job.attempt).await;
         if result.is_err() && ctx.meta.retries >= 3 {
             let _ = storage::finalize_subtask(pool, job.document_id).await;
+            let _ = schedule_semantic_index_for_document_v2(pool, job.document_id).await;
         }
         result.map_err(JobErr)
     }
@@ -3532,23 +3772,23 @@ simple_worker!(
     }
 );
 
+async fn wait_for_worker_shutdown(mut stop: tokio::sync::watch::Receiver<bool>) {
+    while !*stop.borrow() {
+        if stop.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
-    let stop = std::sync::Arc::new(tokio::sync::Notify::new());
-    let recovery_pool = ctx
-        .pool
-        .clone()
-        .ok_or_else(|| "postgres not configured".to_string())?;
-    let stopper = stop.clone();
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let signal_stop = stop_tx.clone();
     let signal_task = tokio::spawn(async move {
         shutdown_signal().await;
-        stopper.notify_waiters();
+        let _ = signal_stop.send(true);
     });
-    let recovery_task = tokio::spawn(crate::live_recovery::run_discovery_loop(
-        recovery_pool,
-        stop.clone(),
-    ));
-    let shut = |n: std::sync::Arc<tokio::sync::Notify>| async move {
-        n.notified().await;
+    let shut = |stop: tokio::sync::watch::Receiver<bool>| async move {
+        wait_for_worker_shutdown(stop).await;
         Ok::<(), std::io::Error>(())
     };
     let timeout = std::time::Duration::from_secs(2);
@@ -3558,28 +3798,12 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .runtime(ctx.clone())
             .queue_with_concurrency::<DefaultQueue>(runtime::runtime_concurrency("CORE", 8))
             .worker::<DocumentProcessWorker, DocumentProcessJob>()
-            .queue_with_concurrency::<BidConvertV1Queue>(runtime::runtime_concurrency(
-                "BID_CONVERT",
+            .queue_with_concurrency::<BidDeliveryV1Queue>(runtime::runtime_concurrency(
+                "BID_DELIVERY",
                 4,
             ))
-            .worker::<BidConvertWorker, BidConvertJob>()
-            .worker::<BidPrepareAttachmentV1Handler, BidPrepareAttachmentV1Job>()
-            .queue_with_concurrency::<BidExtractV1Queue>(runtime::runtime_concurrency(
-                "BID_EXTRACT",
-                4,
-            ))
-            .worker::<BidExtractWorker, BidExtractJob>()
-            .queue_with_concurrency::<BidMatchingV1Queue>(runtime::runtime_concurrency(
-                "BID_MATCHING",
-                4,
-            ))
-            .worker::<BidMatchRouteV1Handler, BidMatchRouteV1Job>()
-            .queue_with_concurrency::<BidRenderV1Queue>(runtime::runtime_concurrency(
-                "BID_RENDER",
-                2,
-            ))
-            .worker::<BidRenderSubmissionV1Handler, BidRenderSubmissionV1Job>()
-            .shutdown_on(shut(stop.clone()))
+            .worker::<BidDeliveryV1Worker<BidDeliveryHandler>, BidDeliveryV1Job>()
+            .shutdown_on(shut(stop_rx.clone()))
             .shutdown_timeout(timeout)
             .run()
     };
@@ -3592,7 +3816,8 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
                 2,
             ))
             .worker::<PostProcessWorker, PostProcessJob>()
-            .shutdown_on(shut(stop.clone()))
+            .worker::<KnowledgeSemanticIndexV2Worker, KnowledgeSemanticIndexV2Job>()
+            .shutdown_on(shut(stop_rx.clone()))
             .shutdown_timeout(timeout)
             .run()
     };
@@ -3604,7 +3829,7 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .queue_with_concurrency::<SummaryQueue>(enrich_n)
             .worker::<SummaryWorker, SummaryJob>()
             .worker::<DatatableWorker, DatatableJob>()
-            .shutdown_on(shut(stop.clone()))
+            .shutdown_on(shut(stop_rx.clone()))
             .shutdown_timeout(timeout)
             .run()
     };
@@ -3619,8 +3844,7 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .worker::<KbDeleteWorker, KbDeleteJob>()
             .worker::<ListReparseWorker, ListReparseJob>()
             .worker::<IndexDeleteWorker, IndexDeleteJob>()
-            .worker::<LiveRecoveryV1Handler, LiveRecoveryV1Job>()
-            .shutdown_on(shut(stop.clone()))
+            .shutdown_on(shut(stop_rx.clone()))
             .shutdown_timeout(timeout)
             .run()
     };
@@ -3631,7 +3855,7 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .runtime(ctx.clone())
             .queue_with_concurrency::<SummaryQueue>(shared_n)
             .worker::<SummaryWorker, SummaryJob>()
-            .shutdown_on(shut(stop.clone()))
+            .shutdown_on(shut(stop_rx.clone()))
             .shutdown_timeout(timeout)
             .run()
     };
@@ -3642,19 +3866,16 @@ pub async fn run_core(ctx: AppCtx) -> Result<(), String> {
             .queue_with_concurrency::<WikiQueue>(runtime::runtime_concurrency("WIKI", 8))
             .worker::<WikiIngestWorker, WikiIngestJob>()
             .worker::<WikiFinalizeWorker, WikiFinalizeJob>()
-            .shutdown_on(shut(stop.clone()))
+            .shutdown_on(shut(stop_rx.clone()))
             .shutdown_timeout(timeout)
             .run()
     };
     let result = tokio::try_join!(core, post, enrich, maint, shared, wiki_rt)
         .map(|_| ())
         .map_err(|e| e.to_string());
-    stop.notify_waiters();
-    let recovery_result = recovery_task
-        .await
-        .map_err(|error| format!("live-recovery discovery task failed: {error}"))?;
+    let _ = stop_tx.send(true);
     signal_task.abort();
-    result.and(recovery_result)
+    result
 }
 
 async fn shutdown_signal() {
@@ -3669,10 +3890,174 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        collections::VecDeque,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
     use storage::{
         apply_fresh_baseline, connect, create_workspace_with_library, insert_document, insert_user,
         write_blob,
     };
+
+    #[derive(Clone, Copy)]
+    enum LifecycleProviderResult {
+        Success,
+        Unavailable,
+    }
+
+    struct LifecycleProvider {
+        calls: AtomicUsize,
+        results: std::sync::Mutex<VecDeque<LifecycleProviderResult>>,
+    }
+
+    #[async_trait]
+    impl storage::knowledge_index_v2::VectorEmbeddingProviderV2 for LifecycleProvider {
+        async fn embed_batch(
+            &self,
+            _revision: &domain::knowledge_retrieval::EmbeddingRevisionV2,
+            _credential_ref: &str,
+            inputs: &[storage::knowledge_index_v2::VectorEmbeddingInputV2],
+        ) -> Result<Vec<Vec<f32>>, storage::knowledge_index_v2::VectorIndexErrorV2> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self
+                .results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(LifecycleProviderResult::Success)
+            {
+                LifecycleProviderResult::Success => Ok(inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| {
+                        let mut vector = vec![0.0; 1024];
+                        vector[index % 1024] = 1.0;
+                        vector
+                    })
+                    .collect()),
+                LifecycleProviderResult::Unavailable => Err(
+                    storage::knowledge_index_v2::VectorIndexErrorV2::Unavailable(
+                        "injected provider timeout".into(),
+                    ),
+                ),
+            }
+        }
+    }
+
+    struct PendingAfterLifecycleProvider {
+        pool: PgPool,
+        document_id: Uuid,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl storage::knowledge_index_v2::VectorEmbeddingProviderV2 for PendingAfterLifecycleProvider {
+        async fn embed_batch(
+            &self,
+            _revision: &domain::knowledge_retrieval::EmbeddingRevisionV2,
+            _credential_ref: &str,
+            inputs: &[storage::knowledge_index_v2::VectorEmbeddingInputV2],
+        ) -> Result<Vec<Vec<f32>>, storage::knowledge_index_v2::VectorIndexErrorV2> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            sqlx::query("UPDATE documents SET pending_subtasks_count=1 WHERE id=$1")
+                .bind(self.document_id)
+                .execute(&self.pool)
+                .await
+                .map_err(storage::knowledge_index_v2::VectorIndexErrorV2::Database)?;
+            Ok(inputs
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    let mut vector = vec![0.0; 1024];
+                    vector[index % 1024] = 1.0;
+                    vector
+                })
+                .collect())
+        }
+    }
+
+    struct MissingLifecycleCredential {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl storage::knowledge_index_v2::EmbeddingCredentialResolverV2 for MissingLifecycleCredential {
+        async fn resolve(
+            &self,
+            _credential_ref: &str,
+        ) -> Result<String, storage::knowledge_index_v2::VectorIndexErrorV2> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(
+                storage::knowledge_index_v2::VectorIndexErrorV2::InvalidConfiguration(
+                    "injected missing credential reference".into(),
+                ),
+            )
+        }
+    }
+
+    #[test]
+    fn semantic_index_v2_uses_the_native_three_by_ten_oxana_policy() {
+        let job = KnowledgeSemanticIndexV2Job {
+            target_id: Uuid::parse_str("018f3000-7d47-7a1b-9bb8-b3880f15478a").unwrap(),
+            target_revision: 7,
+        };
+        let worker = KnowledgeSemanticIndexV2Worker {
+            pool: None,
+            provider: None,
+            provider_configuration_error: None,
+        };
+        assert_eq!(
+            <KnowledgeSemanticIndexV2Worker as oxana::Worker<
+                KnowledgeSemanticIndexV2Job,
+            >>::max_retries(&worker, &job),
+            3
+        );
+        for retries in 0..=3 {
+            assert_eq!(
+                <KnowledgeSemanticIndexV2Worker as oxana::Worker<
+                    KnowledgeSemanticIndexV2Job,
+                >>::retry_delay(&worker, &job, retries),
+                10
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bid_delivery_partial_enqueue_replays_identical_children_on_second_attempt() {
+        let targets = vec![
+            (BidDeliveryTargetKind::MatchingJob, Uuid::new_v4(), 7),
+            (BidDeliveryTargetKind::MatchingJob, Uuid::new_v4(), 7),
+        ];
+        let mut first_calls = Vec::new();
+        let mut call_ordinal = 0_usize;
+        let first = enqueue_bid_targets_with(targets.clone(), |kind, id, revision| {
+            first_calls.push((kind, id, revision));
+            call_ordinal += 1;
+            std::future::ready(if call_ordinal == 1 {
+                runtime::BidDeliveryEnqueueOutcome::Accepted {
+                    job_id: format!("{}:{id}:{revision}", kind.as_str()),
+                }
+            } else {
+                runtime::BidDeliveryEnqueueOutcome::Indeterminate {
+                    error: "injected Redis failure".into(),
+                }
+            })
+        })
+        .await;
+        assert!(first.is_err(), "partial enqueue must retry the parent job");
+        assert_eq!(first_calls, targets);
+
+        let mut retry_calls = Vec::new();
+        enqueue_bid_targets_with(targets.clone(), |kind, id, revision| {
+            retry_calls.push((kind, id, revision));
+            std::future::ready(runtime::BidDeliveryEnqueueOutcome::Accepted {
+                job_id: format!("{}:{id}:{revision}", kind.as_str()),
+            })
+        })
+        .await
+        .expect("the parent retry replays both deterministic child identities");
+        assert_eq!(retry_calls, targets);
+    }
 
     #[test]
     fn reuse_reads_scanned_pdf_from_docreader_span() {
@@ -3855,22 +4240,19 @@ mod tests {
 
     #[test]
     fn attachment_preparation_worker_matches_durable_contract() {
-        let worker = BidPrepareAttachmentV1Handler { pool: None };
-        let job = BidPrepareAttachmentV1Job::new(
+        let worker = BidDeliveryV1Worker::new(BidDeliveryHandler { pool: None });
+        let job = BidDeliveryV1Job::new(
+            BidDeliveryTargetKind::AttachmentPreparation,
             Uuid::from_u128(1),
-            runtime::BidConversionV1Snapshots {
-                conversion_snapshot_id: Uuid::from_u128(2),
-                feature_snapshot_id: Uuid::from_u128(3),
-            },
-        )
-        .unwrap();
+            1,
+        );
 
         assert_eq!(
             ATTACHMENT_PREPARATION_ACTOR,
             "system:bid-attachment-preparation"
         );
         assert_eq!(
-            oxana::Worker::<BidPrepareAttachmentV1Job>::max_retries(&worker, &job),
+            oxana::Worker::<BidDeliveryV1Job>::max_retries(&worker, &job),
             3,
             "one initial attempt plus three queue retries must match four durable attempts"
         );
@@ -4054,7 +4436,8 @@ mod tests {
             &[],
             "e.txt",
         )
-        .await;
+        .await
+        .unwrap();
         let (parse, enable, summary): (String, String, String) = sqlx::query_as(
             "SELECT parse_status, enable_status, summary_status FROM documents WHERE id = $1",
         )
@@ -5107,23 +5490,51 @@ mod tests {
     }
 
     #[test]
-    fn live_recovery_uses_typed_producer_instead_of_an_empty_cron_payload() {
+    fn run_core_registers_the_single_bid_delivery_worker() {
+        let src = include_str!("consume.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("production worker source");
         assert!(
-            <LiveRecoveryV1Handler as oxana::Worker<LiveRecoveryV1Job>>::cron_schedule().is_none()
+            src.contains(".worker::<BidDeliveryV1Worker<BidDeliveryHandler>, BidDeliveryV1Job>()")
         );
-        let src = include_str!("consume.rs");
-        assert!(src.contains("live_recovery::run_discovery_loop"));
+        assert!(!src.contains("run_bid_delivery_reconciler"));
+        assert!(!src.contains("reserve_due_deliveries"));
+        assert!(!src.contains("reap_expired_deliveries"));
+    }
+
+    #[tokio::test]
+    async fn worker_shutdown_state_is_persistent() {
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        stop_tx.send(true).unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            wait_for_worker_shutdown(stop_rx),
+        )
+        .await
+        .expect("a receiver created before shutdown must observe the persisted stop state");
     }
 
     #[test]
-    fn run_core_registers_live_recovery_without_maintenance_housekeep() {
-        let src = include_str!("consume.rs");
-        let live_registration =
-            concat!(".worker::<LiveRecoveryV1Handler, ", "LiveRecoveryV1Job>()");
-        let maintenance_registration = concat!(".worker::<HousekeepWorker, ", "HousekeepJob>()");
-
-        assert!(src.contains(live_registration));
-        assert!(!src.contains(maintenance_registration));
+    fn target_kind_mapping_covers_all_six_business_targets() {
+        for (value, expected) in [
+            (
+                "document_conversion",
+                BidDeliveryTargetKind::DocumentConversion,
+            ),
+            ("extraction_target", BidDeliveryTargetKind::ExtractionTarget),
+            ("matching_schedule", BidDeliveryTargetKind::MatchingSchedule),
+            ("matching_job", BidDeliveryTargetKind::MatchingJob),
+            (
+                "attachment_preparation",
+                BidDeliveryTargetKind::AttachmentPreparation,
+            ),
+            ("submission_render", BidDeliveryTargetKind::SubmissionRender),
+        ] {
+            assert_eq!(value.parse::<BidDeliveryTargetKind>().unwrap(), expected);
+        }
+        assert!("unknown".parse::<BidDeliveryTargetKind>().is_err());
     }
 
     #[tokio::test]
@@ -5363,6 +5774,669 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn semantic_index_v2_business_lifecycle_is_fenced() {
+        use domain::knowledge_retrieval::{
+            EMBEDDING_DIMENSION_V2, EMBEDDING_OUTPUT_NORMALIZATION_VERSION_V2,
+            EMBEDDING_PROVIDER_PROTOCOL_VERSION_V2, EMBEDDING_REVISION_SCHEMA_V2,
+            EmbeddingRevisionV2,
+        };
+        use storage::knowledge_index_v2::SemanticIndexPreparationV2;
+
+        let _g = db_lock().await;
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_default();
+        let pool = match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(8)
+            .connect(&database_url)
+            .await
+        {
+            Ok(pool) => pool,
+            Err(error)
+                if std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").as_deref() == Ok("1") =>
+            {
+                panic!("required semantic-index V2 PostgreSQL test unavailable: {error}")
+            }
+            Err(error) => {
+                eprintln!("skip: postgres down: {error}");
+                return;
+            }
+        };
+        let schema_ready: bool = sqlx::query_scalar(
+            "SELECT to_regprocedure('kb_knowledge_prepare_semantic_index_intent_v2(uuid)') IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(false);
+        if !schema_ready {
+            if std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").as_deref() == Ok("1") {
+                panic!("required semantic-index V2 schema is unavailable");
+            }
+            eprintln!("skip: semantic-index V2 schema unavailable");
+            return;
+        }
+
+        let workspace_id = Uuid::new_v4();
+        let product_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let document_id = Uuid::new_v4();
+        let chunk_id = Uuid::new_v4();
+        let file_hash = domain::sha256_hex(document_id.as_bytes());
+        let object_ref = format!("objects/{file_hash}");
+        let revision = EmbeddingRevisionV2 {
+            schema_version: EMBEDDING_REVISION_SCHEMA_V2,
+            provider_protocol_version: EMBEDDING_PROVIDER_PROTOCOL_VERSION_V2.into(),
+            provider_model_identifier: format!("lifecycle-v2-{version_id}@2025-01-15"),
+            provider_model_revision_sha256: domain::sha256_hex(b"lifecycle-v2-model"),
+            endpoint_config_sha256: domain::sha256_hex(b"lifecycle-v2-endpoint"),
+            endpoint_identity: "https://embeddings.example.test/v1/embeddings".into(),
+            dimension: EMBEDDING_DIMENSION_V2,
+            request_config_sha256: EmbeddingRevisionV2::canonical_request_config_sha256(),
+            output_normalization_version: EMBEDDING_OUTPUT_NORMALIZATION_VERSION_V2.into(),
+        };
+        let revision_sha256 = revision.sha256().unwrap();
+
+        sqlx::query("INSERT INTO workspaces(id,name,slug,kind) VALUES($1,'semantic lifecycle',$2,'product_line')")
+            .bind(workspace_id)
+            .bind(format!("semantic-lifecycle-{workspace_id}"))
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO products(id,workspace_id,kind,name,slug) VALUES($1,$2,'product','semantic lifecycle',$3)")
+            .bind(product_id).bind(workspace_id)
+            .bind(format!("semantic-lifecycle-{product_id}"))
+            .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO product_versions(id,product_id,label,status) VALUES($1,$2,'v2','active')",
+        )
+        .bind(version_id)
+        .bind(product_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let unbound =
+            storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
+                .await
+                .unwrap();
+        assert_eq!(unbound, SemanticIndexPreparationV2::Unbound);
+
+        sqlx::query("INSERT INTO embedding_revisions_v2(revision_sha256,canonical_revision_payload,schema_version,provider_protocol_version,provider_model_identifier,provider_model_revision_sha256,endpoint_config_sha256,endpoint_identity,dimension,request_config_sha256,output_normalization_version,credential_ref) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'env:KNOWLEDGEBRAIN_TEST_MISSING_SEMANTIC_V2')")
+            .bind(&revision_sha256)
+            .bind(revision.canonical_bytes().unwrap())
+            .bind(i16::try_from(revision.schema_version).unwrap())
+            .bind(&revision.provider_protocol_version)
+            .bind(&revision.provider_model_identifier)
+            .bind(&revision.provider_model_revision_sha256)
+            .bind(&revision.endpoint_config_sha256)
+            .bind(&revision.endpoint_identity)
+            .bind(i32::try_from(revision.dimension).unwrap())
+            .bind(&revision.request_config_sha256)
+            .bind(&revision.output_normalization_version)
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO product_version_embedding_bindings_v2(product_version_id,embedding_revision_sha256) VALUES($1,$2)")
+            .bind(version_id).bind(&revision_sha256).execute(&pool).await.unwrap();
+
+        let empty_intent =
+            match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
+                .await
+                .unwrap()
+            {
+                SemanticIndexPreparationV2::Enqueue(intent) => intent,
+                other => panic!("expected empty bound intent, got {other:?}"),
+            };
+        let empty_provider = LifecycleProvider {
+            calls: AtomicUsize::new(0),
+            results: std::sync::Mutex::new(VecDeque::new()),
+        };
+        process_semantic_index_intent_v2(
+            &pool,
+            empty_intent.id,
+            empty_intent.target_revision,
+            Some(&empty_provider),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(empty_provider.calls.load(Ordering::SeqCst), 0);
+        let empty_completed = storage::knowledge_index_v2::semantic_index_intent_v2(
+            &pool,
+            empty_intent.id,
+            empty_intent.target_revision,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(empty_completed.status, "completed");
+        for statement in [
+            "UPDATE knowledge_semantic_index_intents_v2 SET source_snapshot_sha256=repeat('0',64) WHERE id=$1",
+            "DELETE FROM knowledge_semantic_index_intents_v2 WHERE id=$1",
+        ] {
+            let immutable_error = sqlx::query(statement)
+                .bind(empty_intent.id)
+                .execute(&pool)
+                .await
+                .unwrap_err();
+            assert!(
+                immutable_error
+                    .as_database_error()
+                    .is_some_and(|error| error
+                        .message()
+                        .contains("KNOWLEDGE_SEMANTIC_INDEX_INTENT_V2_IMMUTABLE")),
+                "intent identity/history must be immutable: {immutable_error}"
+            );
+        }
+
+        sqlx::query("INSERT INTO object_registry(object_ref,digest,media_type,byte_length,state) VALUES($1,$2,'text/plain',0,'available')")
+            .bind(&object_ref).bind(&file_hash).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO object_owner_references(object_ref,owner_kind,owner_id,occurrence,created_by) VALUES($1,'knowledge_document',$2,'original','system:knowledge-document-ingest')")
+            .bind(&object_ref).bind(document_id).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO documents(id,product_version_id,title,parse_status,pending_subtasks_count,summary_status,enable_status,index_ready,file_name,file_size,file_hash,object_ref) VALUES($1,$2,'lifecycle','finalizing',1,'pending','enabled',true,$3,0,$4,$5)")
+            .bind(document_id).bind(version_id).bind(format!("{document_id}.txt"))
+            .bind(&file_hash).bind(&object_ref).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO chunks(id,product_version_id,document_id,chunk_type,content,context_header) VALUES($1,$2,$3,'text','settled source','# lifecycle')")
+            .bind(chunk_id).bind(version_id).bind(document_id).execute(&pool).await.unwrap();
+
+        assert_eq!(
+            storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
+                .await
+                .unwrap(),
+            SemanticIndexPreparationV2::PendingDerived
+        );
+        sqlx::query("UPDATE documents SET parse_status='completed',pending_subtasks_count=0,summary_status='completed' WHERE id=$1")
+            .bind(document_id).execute(&pool).await.unwrap();
+        let source_intent =
+            match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
+                .await
+                .unwrap()
+            {
+                SemanticIndexPreparationV2::Enqueue(intent) => intent,
+                other => panic!("expected settled source intent, got {other:?}"),
+            };
+        let scheduled_targets = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let first_calls = scheduled_targets.clone();
+        assert!(
+            schedule_semantic_index_v2_if_ready_with(&pool, version_id, move |id, revision| {
+                let first_calls = first_calls.clone();
+                async move {
+                    first_calls.lock().unwrap().push((id, revision));
+                    Ok(None)
+                }
+            })
+            .await
+            .is_err(),
+            "queue unavailability must remain an Oxana-retryable parent error"
+        );
+        let second_calls = scheduled_targets.clone();
+        schedule_semantic_index_v2_if_ready_with(&pool, version_id, move |id, revision| {
+            let second_calls = second_calls.clone();
+            async move {
+                second_calls.lock().unwrap().push((id, revision));
+                Ok(Some("accepted".into()))
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            scheduled_targets.lock().unwrap().as_slice(),
+            &[
+                (source_intent.id, source_intent.target_revision),
+                (source_intent.id, source_intent.target_revision),
+            ],
+            "parent retry must replay the same unique business target"
+        );
+        assert_eq!(
+            storage::document_parse_status(&pool, document_id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("completed"),
+            "V2 enqueue failure must not rewrite completed V1 status"
+        );
+
+        let unavailable_provider = LifecycleProvider {
+            calls: AtomicUsize::new(0),
+            results: std::sync::Mutex::new(VecDeque::from([
+                LifecycleProviderResult::Unavailable,
+                LifecycleProviderResult::Unavailable,
+                LifecycleProviderResult::Unavailable,
+                LifecycleProviderResult::Unavailable,
+            ])),
+        };
+        for _ in 0..=runtime::SEMANTIC_INDEX_V2_MAX_RETRY {
+            assert!(
+                process_semantic_index_intent_v2(
+                    &pool,
+                    source_intent.id,
+                    source_intent.target_revision,
+                    Some(&unavailable_provider),
+                    None,
+                )
+                .await
+                .is_err()
+            );
+        }
+        let retryable = storage::knowledge_index_v2::semantic_index_intent_v2(
+            &pool,
+            source_intent.id,
+            source_intent.target_revision,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(retryable.status, "pending");
+        assert_eq!(
+            retryable.last_error_code.as_deref(),
+            Some("PROVIDER_UNAVAILABLE")
+        );
+
+        assert_eq!(unavailable_provider.calls.load(Ordering::SeqCst), 4);
+        // A fresh provider instance models native dead-job revival: the
+        // business target remained pending and the same envelope can run again.
+        let restarted_provider = LifecycleProvider {
+            calls: AtomicUsize::new(0),
+            results: std::sync::Mutex::new(VecDeque::from([LifecycleProviderResult::Success])),
+        };
+        process_semantic_index_intent_v2(
+            &pool,
+            source_intent.id,
+            source_intent.target_revision,
+            Some(&restarted_provider),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(restarted_provider.calls.load(Ordering::SeqCst), 1);
+        let ready = storage::knowledge_index_v2::semantic_index_intent_v2(
+            &pool,
+            source_intent.id,
+            source_intent.target_revision,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(ready.status, "completed");
+        assert_eq!(
+            ready.generation_marker_sha256.as_deref(),
+            Some(source_intent.source_snapshot_sha256.as_str())
+        );
+        let complete_generation: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+               SELECT 1
+                 FROM product_version_keyword_index_generations_v2 keyword_generation
+                 JOIN product_version_vector_index_generations_v2 vector_generation
+                   ON vector_generation.product_version_id=keyword_generation.product_version_id
+                  AND vector_generation.embedding_revision_sha256=keyword_generation.embedding_revision_sha256
+                  AND vector_generation.source_snapshot_sha256=keyword_generation.source_snapshot_sha256
+                 JOIN knowledge_semantic_index_intents_v2 intent
+                   ON intent.product_version_id=keyword_generation.product_version_id
+                  AND intent.embedding_revision_sha256=keyword_generation.embedding_revision_sha256
+                  AND intent.source_snapshot_sha256=keyword_generation.source_snapshot_sha256
+                  AND intent.status='completed'
+                  AND intent.generation_marker_sha256=intent.source_snapshot_sha256
+                WHERE keyword_generation.product_version_id=$1
+                  AND keyword_generation.source_snapshot_sha256=$2)",
+        )
+        .bind(version_id)
+        .bind(&source_intent.source_snapshot_sha256)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(complete_generation);
+        process_semantic_index_intent_v2(
+            &pool,
+            source_intent.id,
+            source_intent.target_revision,
+            Some(&restarted_provider),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            restarted_provider.calls.load(Ordering::SeqCst),
+            1,
+            "duplicate delivery must noop"
+        );
+        let v1_ready: bool = sqlx::query_scalar("SELECT index_ready FROM documents WHERE id=$1")
+            .bind(document_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(v1_ready, "V1 document readiness must remain unchanged");
+
+        sqlx::query("UPDATE chunks SET content='aba generation b' WHERE id=$1")
+            .bind(chunk_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let aba_b =
+            match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
+                .await
+                .unwrap()
+            {
+                SemanticIndexPreparationV2::Enqueue(intent) => intent,
+                other => panic!("expected ABA generation B target, got {other:?}"),
+            };
+        let aba_b_provider = LifecycleProvider {
+            calls: AtomicUsize::new(0),
+            results: std::sync::Mutex::new(VecDeque::new()),
+        };
+        process_semantic_index_intent_v2(
+            &pool,
+            aba_b.id,
+            aba_b.target_revision,
+            Some(&aba_b_provider),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(aba_b_provider.calls.load(Ordering::SeqCst), 1);
+
+        sqlx::query("UPDATE chunks SET content='settled source' WHERE id=$1")
+            .bind(chunk_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let aba_a =
+            match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
+                .await
+                .unwrap()
+            {
+                SemanticIndexPreparationV2::Enqueue(intent) => intent,
+                other => panic!("expected a new ABA generation A target, got {other:?}"),
+            };
+        assert_eq!(
+            aba_a.source_snapshot_sha256,
+            source_intent.source_snapshot_sha256
+        );
+        assert!(aba_a.target_revision > aba_b.target_revision);
+        assert_ne!(aba_a.id, source_intent.id);
+
+        let pending_after_provider = PendingAfterLifecycleProvider {
+            pool: pool.clone(),
+            document_id,
+            calls: AtomicUsize::new(0),
+        };
+        assert!(
+            process_semantic_index_intent_v2(
+                &pool,
+                aba_a.id,
+                aba_a.target_revision,
+                Some(&pending_after_provider),
+                None,
+            )
+            .await
+            .is_err(),
+            "pending derived work introduced after provider I/O must fence publication"
+        );
+        assert_eq!(pending_after_provider.calls.load(Ordering::SeqCst), 1);
+        let aba_pending = storage::knowledge_index_v2::semantic_index_intent_v2(
+            &pool,
+            aba_a.id,
+            aba_a.target_revision,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(aba_pending.status, "pending");
+        sqlx::query("UPDATE documents SET pending_subtasks_count=0 WHERE id=$1")
+            .bind(document_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let aba_retry_provider = LifecycleProvider {
+            calls: AtomicUsize::new(0),
+            results: std::sync::Mutex::new(VecDeque::new()),
+        };
+        process_semantic_index_intent_v2(
+            &pool,
+            aba_a.id,
+            aba_a.target_revision,
+            Some(&aba_retry_provider),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            aba_retry_provider.calls.load(Ordering::SeqCst),
+            0,
+            "the already fenced vector generation is reused without duplicate provider I/O"
+        );
+
+        let prior_marker: String = sqlx::query_scalar("SELECT source_snapshot_sha256 FROM product_version_vector_index_generations_v2 WHERE product_version_id=$1")
+            .bind(version_id).fetch_one(&pool).await.unwrap();
+        sqlx::query("UPDATE chunks SET content='stale source generation' WHERE id=$1")
+            .bind(chunk_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let stale_intent =
+            match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
+                .await
+                .unwrap()
+            {
+                SemanticIndexPreparationV2::Enqueue(intent) => intent,
+                other => panic!("expected stale source intent, got {other:?}"),
+            };
+        sqlx::query("UPDATE chunks SET content='new immutable source generation' WHERE id=$1")
+            .bind(chunk_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let terminal_intent =
+            match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
+                .await
+                .unwrap()
+            {
+                SemanticIndexPreparationV2::Enqueue(intent) => intent,
+                other => panic!("expected newer source intent, got {other:?}"),
+            };
+        let stale_provider = LifecycleProvider {
+            calls: AtomicUsize::new(0),
+            results: std::sync::Mutex::new(VecDeque::new()),
+        };
+        let stale_successor = process_semantic_index_intent_v2(
+            &pool,
+            stale_intent.id,
+            stale_intent.target_revision,
+            Some(&stale_provider),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stale_provider.calls.load(Ordering::SeqCst),
+            0,
+            "superseded delivery must not reach the provider"
+        );
+        let stale = storage::knowledge_index_v2::semantic_index_intent_v2(
+            &pool,
+            stale_intent.id,
+            stale_intent.target_revision,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(stale.status, "superseded");
+        assert_eq!(
+            stale_successor.as_ref().map(|successor| successor.id),
+            Some(terminal_intent.id),
+            "stale delivery must replay exactly the current successor target"
+        );
+        let credential_calls = Arc::new(AtomicUsize::new(0));
+        let strict = storage::knowledge_index_v2::StrictVectorEmbeddingClientV2::new(Arc::new(
+            MissingLifecycleCredential {
+                calls: credential_calls.clone(),
+            },
+        ))
+        .unwrap();
+        process_semantic_index_intent_v2(
+            &pool,
+            terminal_intent.id,
+            terminal_intent.target_revision,
+            Some(&strict),
+            None,
+        )
+        .await
+        .unwrap();
+        process_semantic_index_intent_v2(
+            &pool,
+            terminal_intent.id,
+            terminal_intent.target_revision,
+            Some(&strict),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            credential_calls.load(Ordering::SeqCst),
+            1,
+            "terminal intent must never be reserved twice"
+        );
+        let terminal = storage::knowledge_index_v2::semantic_index_intent_v2(
+            &pool,
+            terminal_intent.id,
+            terminal_intent.target_revision,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(terminal.status, "terminal");
+        assert_eq!(
+            terminal.last_error_code.as_deref(),
+            Some("INVALID_IMMUTABLE_CONFIGURATION")
+        );
+        let retained_marker: String = sqlx::query_scalar("SELECT source_snapshot_sha256 FROM product_version_vector_index_generations_v2 WHERE product_version_id=$1")
+            .bind(version_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            retained_marker, prior_marker,
+            "failed publication must preserve the prior complete generation"
+        );
+        let current_snapshot: String = sqlx::query_scalar(
+            "SELECT source_snapshot_sha256 FROM kb_knowledge_source_snapshot_v2($1,$2)",
+        )
+        .bind(version_id)
+        .bind(&revision_sha256)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let stale_ready: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+               SELECT 1 FROM knowledge_semantic_index_intents_v2
+                WHERE product_version_id=$1 AND embedding_revision_sha256=$2
+                  AND source_snapshot_sha256=$3 AND status='completed'
+                  AND generation_marker_sha256=$3)",
+        )
+        .bind(version_id)
+        .bind(&revision_sha256)
+        .bind(&current_snapshot)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !stale_ready,
+            "a failed new source generation must never be retrieval-ready"
+        );
+
+        sqlx::query("UPDATE chunks SET content='revision fence generation' WHERE id=$1")
+            .bind(chunk_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let revoked_intent =
+            match storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
+                .await
+                .unwrap()
+            {
+                SemanticIndexPreparationV2::Enqueue(intent) => intent,
+                other => panic!("expected pre-revocation intent, got {other:?}"),
+            };
+        sqlx::query("UPDATE embedding_revisions_v2 SET support_state='revoked',updated_at=clock_timestamp() WHERE revision_sha256=$1")
+            .bind(&revision_sha256).execute(&pool).await.unwrap();
+        let revoked_provider = LifecycleProvider {
+            calls: AtomicUsize::new(0),
+            results: std::sync::Mutex::new(VecDeque::new()),
+        };
+        process_semantic_index_intent_v2(
+            &pool,
+            revoked_intent.id,
+            revoked_intent.target_revision,
+            Some(&revoked_provider),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            revoked_provider.calls.load(Ordering::SeqCst),
+            0,
+            "revoked revision must fence before provider I/O"
+        );
+        let revoked = storage::knowledge_index_v2::semantic_index_intent_v2(
+            &pool,
+            revoked_intent.id,
+            revoked_intent.target_revision,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(revoked.status, "terminal");
+        assert_eq!(
+            storage::knowledge_index_v2::prepare_semantic_index_intent_v2(&pool, version_id)
+                .await
+                .unwrap(),
+            SemanticIndexPreparationV2::Terminal(revoked.clone()),
+            "terminal immutable generation must not be re-enqueued"
+        );
+
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("ALTER TABLE public.embedding_revisions_v2 DISABLE TRIGGER USER")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM chunks WHERE product_version_id=$1")
+            .bind(version_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM object_owner_references WHERE object_ref=$1")
+            .bind(&object_ref)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM documents WHERE id=$1")
+            .bind(document_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM object_registry WHERE object_ref=$1")
+            .bind(&object_ref)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM product_versions WHERE id=$1")
+            .bind(version_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM embedding_revisions_v2 WHERE revision_sha256=$1")
+            .bind(&revision_sha256)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE public.embedding_revisions_v2 ENABLE TRIGGER USER")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM products WHERE id=$1")
+            .bind(product_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM workspaces WHERE id=$1")
+            .bind(workspace_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn submission_staging_is_abandoned_when_the_render_future_is_cancelled() {
         let _g = db_lock().await;
         let pool = match connect().await {
@@ -5402,16 +6476,15 @@ mod tests {
             .await
         });
 
-        let result = runtime::run_with_heartbeat(
-            std::time::Duration::from_millis(3),
-            async move {
-                let _staging = staging;
-                std::future::pending::<Result<(), String>>().await
-            },
-            || async { Ok::<bool, String>(false) },
-        )
-        .await;
-        assert!(matches!(result, runtime::LeaseRun::Lost));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let render = tokio::spawn(async move {
+            let _staging = staging;
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.unwrap();
+        render.abort();
+        let _ = render.await;
         delayed_stage.await.unwrap().unwrap();
 
         let mut remaining = 1_i64;

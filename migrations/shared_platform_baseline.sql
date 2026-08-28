@@ -177,146 +177,6 @@ CREATE TRIGGER maintenance_gate_audit_no_truncate
 BEFORE TRUNCATE ON maintenance_gate_audit
 FOR EACH STATEMENT EXECUTE FUNCTION kb_reject_append_only();
 
--- Open-operation recovery has independent immutable policy/feature snapshots
--- and its own durable claim ledger. Runtime workers can only use the checked
--- bidding recovery functions granted by the bidding baseline; they receive no
--- direct DML on these control-plane relations.
-CREATE TABLE live_recovery_policy_snapshots (
-    id uuid PRIMARY KEY,
-    schema_version smallint NOT NULL CHECK (schema_version = 1),
-    claim_lease_ms integer NOT NULL CHECK (claim_lease_ms BETWEEN 5000 AND 300000),
-    max_batch_size integer NOT NULL CHECK (max_batch_size BETWEEN 1 AND 128),
-    max_global_concurrency integer NOT NULL CHECK (max_global_concurrency BETWEEN 1 AND 32),
-    max_concurrency_by_kind jsonb NOT NULL CHECK (
-        jsonb_typeof(max_concurrency_by_kind) = 'object'
-        AND max_concurrency_by_kind ?& ARRAY['dirty_manifest','orphan_target','orphan_match_job']
-        AND max_concurrency_by_kind
-              - 'dirty_manifest' - 'orphan_target' - 'orphan_match_job' = '{}'::jsonb
-        AND (max_concurrency_by_kind->>'dirty_manifest')::integer BETWEEN 1 AND 32
-        AND (max_concurrency_by_kind->>'orphan_target')::integer BETWEEN 1 AND 32
-        AND (max_concurrency_by_kind->>'orphan_match_job')::integer BETWEEN 1 AND 32
-    ),
-    canonical_payload bytea NOT NULL,
-    content_sha256 kb_sha256 NOT NULL UNIQUE,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    CHECK (octet_length(canonical_payload) BETWEEN 1 AND 4096),
-    CHECK (content_sha256 = encode(digest(canonical_payload, 'sha256'), 'hex'))
-);
-CREATE TRIGGER live_recovery_policy_snapshots_immutable
-BEFORE UPDATE OR DELETE ON live_recovery_policy_snapshots
-FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
-CREATE TRIGGER live_recovery_policy_snapshots_no_truncate
-BEFORE TRUNCATE ON live_recovery_policy_snapshots
-FOR EACH STATEMENT EXECUTE FUNCTION kb_reject_append_only();
-
-CREATE TABLE live_recovery_feature_snapshots (
-    id uuid PRIMARY KEY,
-    schema_version smallint NOT NULL CHECK (schema_version = 1),
-    live_recovery_enabled boolean NOT NULL,
-    intended_state_sha256 kb_sha256 NOT NULL,
-    canonical_payload bytea NOT NULL,
-    content_sha256 kb_sha256 NOT NULL UNIQUE,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    CHECK (octet_length(canonical_payload) BETWEEN 1 AND 4096),
-    CHECK (content_sha256 = encode(digest(canonical_payload, 'sha256'), 'hex'))
-);
-CREATE TRIGGER live_recovery_feature_snapshots_immutable
-BEFORE UPDATE OR DELETE ON live_recovery_feature_snapshots
-FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
-CREATE TRIGGER live_recovery_feature_snapshots_no_truncate
-BEFORE TRUNCATE ON live_recovery_feature_snapshots
-FOR EACH STATEMENT EXECUTE FUNCTION kb_reject_append_only();
-
-INSERT INTO live_recovery_policy_snapshots(
-    id,schema_version,claim_lease_ms,max_batch_size,max_global_concurrency,
-    max_concurrency_by_kind,canonical_payload,content_sha256,created_at
-)
-SELECT '638e256e-b95f-55af-a335-dad1f72f1592',1,60000,32,8,
-       '{"dirty_manifest":1,"orphan_match_job":2,"orphan_target":4}'::jsonb,
-       payload,encode(digest(payload,'sha256'),'hex'),'1970-01-01 UTC'
-  FROM (VALUES (convert_to(
-    '{"claim_lease_ms":60000,"max_batch_size":32,"max_concurrency_by_kind":{"dirty_manifest":1,"orphan_match_job":2,"orphan_target":4},"max_global_concurrency":8,"schema_version":1}',
-    'UTF8'))) AS seed(payload);
-
-INSERT INTO live_recovery_feature_snapshots(
-    id,schema_version,live_recovery_enabled,intended_state_sha256,
-    canonical_payload,content_sha256,created_at
-)
-SELECT '87c935bb-4d16-5ba3-a4c3-28eab0d92960',1,true,
-       '8fb8882fa007b69a9d704d8d86b16fff6ffc7c5c4d01a697dec484c34bad4ce0',
-       payload,encode(digest(payload,'sha256'),'hex'),'1970-01-01 UTC'
-  FROM (VALUES (convert_to(
-    '{"intended_state_sha256":"8fb8882fa007b69a9d704d8d86b16fff6ffc7c5c4d01a697dec484c34bad4ce0","live_recovery_enabled":true,"schema_version":1,"task_type":"system:live-recovery:v1"}',
-    'UTF8'))) AS seed(payload);
-
-CREATE TABLE live_recovery_configuration (
-    singleton_key boolean PRIMARY KEY DEFAULT true CHECK (singleton_key),
-    policy_snapshot_id uuid NOT NULL REFERENCES live_recovery_policy_snapshots(id) ON DELETE RESTRICT,
-    feature_snapshot_id uuid NOT NULL REFERENCES live_recovery_feature_snapshots(id) ON DELETE RESTRICT
-);
-INSERT INTO live_recovery_configuration(singleton_key,policy_snapshot_id,feature_snapshot_id)
-VALUES(true,'638e256e-b95f-55af-a335-dad1f72f1592','87c935bb-4d16-5ba3-a4c3-28eab0d92960');
-
-CREATE TABLE system_live_recovery_claims (
-    id uuid PRIMARY KEY,
-    recovery_kind text NOT NULL CHECK (recovery_kind IN (
-        'dirty_manifest','orphan_target','orphan_match_job'
-    )),
-    target_kind text NOT NULL CHECK (target_kind IN (
-        'matching_manifest','document_conversion','extraction_target',
-        'attachment_preparation','submission_render','matching_job'
-    )),
-    durable_id uuid NOT NULL,
-    generation bigint NOT NULL CHECK (generation > 0),
-    observed_watermark bigint NOT NULL CHECK (observed_watermark >= 0),
-    observed_stage text NOT NULL CHECK (octet_length(observed_stage) BETWEEN 1 AND 64),
-    observed_heartbeat_at timestamptz,
-    observed_owner_token uuid,
-    observed_attempt integer CHECK (observed_attempt IS NULL OR observed_attempt > 0),
-    recovery_epoch bigint NOT NULL CHECK (recovery_epoch > 0),
-    policy_snapshot_id uuid NOT NULL REFERENCES live_recovery_policy_snapshots(id) ON DELETE RESTRICT,
-    feature_snapshot_id uuid NOT NULL REFERENCES live_recovery_feature_snapshots(id) ON DELETE RESTRICT,
-    original_snapshots jsonb NOT NULL CHECK (
-        jsonb_typeof(original_snapshots) = 'array'
-        AND jsonb_array_length(original_snapshots) <= 8
-        AND octet_length(original_snapshots::text) <= 4096
-    ),
-    status text NOT NULL CHECK (status IN ('pending','running','completed','noop','failed')),
-    claim_token uuid,
-    attempt integer NOT NULL DEFAULT 0 CHECK (attempt BETWEEN 0 AND 1000),
-    claimed_by text CHECK (claimed_by IS NULL OR octet_length(claimed_by) BETWEEN 1 AND 128),
-    claim_lease_ms integer NOT NULL CHECK (claim_lease_ms BETWEEN 5000 AND 300000),
-    heartbeat_at timestamptz,
-    action_applied boolean NOT NULL DEFAULT false,
-    last_error_code text CHECK (last_error_code IS NULL OR octet_length(last_error_code) BETWEEN 1 AND 128),
-    terminal_code text CHECK (terminal_code IS NULL OR octet_length(terminal_code) BETWEEN 1 AND 128),
-    receipt jsonb CHECK (receipt IS NULL OR (
-        jsonb_typeof(receipt) = 'object' AND octet_length(receipt::text) <= 8192
-    )),
-    discovered_at timestamptz NOT NULL DEFAULT now(),
-    completed_at timestamptz,
-    UNIQUE (recovery_kind,durable_id,generation,recovery_epoch),
-    CHECK (
-        (status = 'pending' AND claim_token IS NULL AND claimed_by IS NULL AND heartbeat_at IS NULL
-            AND completed_at IS NULL AND terminal_code IS NULL AND receipt IS NULL)
-        OR
-        (status = 'running' AND claim_token IS NOT NULL AND claimed_by IS NOT NULL
-            AND heartbeat_at IS NOT NULL AND completed_at IS NULL AND terminal_code IS NULL AND receipt IS NULL)
-        OR
-        (status IN ('completed','noop','failed') AND completed_at IS NOT NULL
-            AND terminal_code IS NOT NULL)
-    )
-);
-CREATE UNIQUE INDEX system_live_recovery_claims_active_identity_idx
-    ON system_live_recovery_claims(recovery_kind,durable_id)
-    WHERE status IN ('pending','running');
-CREATE INDEX system_live_recovery_claims_pending_idx
-    ON system_live_recovery_claims(recovery_epoch,discovered_at,id)
-    WHERE status = 'pending';
-CREATE INDEX system_live_recovery_claims_running_idx
-    ON system_live_recovery_claims(heartbeat_at,id)
-    WHERE status = 'running';
-
 CREATE TABLE queue_contract_artifacts (
     contract_key text NOT NULL,
     version integer NOT NULL CHECK (version > 0),
@@ -338,8 +198,8 @@ INSERT INTO queue_contract_artifacts(
     contract_key, version, schema_version, canonical_payload, content_sha256, created_at
 )
 VALUES
- ('bid.render-submission.v1', 1, 1, '{"queue":"bid-render-v1","schema_version":1,"task_type":"bid:render-submission:v1"}',
-  encode(digest(convert_to('{"queue":"bid-render-v1","schema_version":1,"task_type":"bid:render-submission:v1"}', 'UTF8'), 'sha256'), 'hex'),
+ ('bid.delivery.v1', 1, 1, '{"queue":"bid-delivery-v1","schema_version":1,"task_type":"bid:delivery:v1"}',
+  encode(digest(convert_to('{"queue":"bid-delivery-v1","schema_version":1,"task_type":"bid:delivery:v1"}', 'UTF8'), 'sha256'), 'hex'),
   '1970-01-01 UTC'),
  ('document.process', 1, 1, '{"claim_lease_ms":300000,"queue":"default","schema_version":1}',
   encode(digest(convert_to('{"claim_lease_ms":300000,"queue":"default","schema_version":1}', 'UTF8'), 'sha256'), 'hex'),
@@ -348,7 +208,7 @@ VALUES
   encode(digest(convert_to('{"claim_lease_ms":60000,"queue":"retention","schema_version":1}', 'UTF8'), 'sha256'), 'hex'),
   '1970-01-01 UTC');
 INSERT INTO queue_contract_current(contract_key, version, generation)
-VALUES ('bid.render-submission.v1', 1, 0),
+VALUES ('bid.delivery.v1', 1, 0),
        ('document.process', 1, 0),
        ('object.retention', 1, 0);
 CREATE TRIGGER queue_contract_artifacts_immutable

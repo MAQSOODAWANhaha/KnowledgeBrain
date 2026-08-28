@@ -1,104 +1,87 @@
 //! Worker handler for one frozen matching route.
 
 use super::{
-    CandidateBusinessValue, EvidenceVerifier, LexicalEvidenceVerifier, MatchError,
-    MatchingReportV1, MatchingWorkflow, QualityStatus, SystemDecision, VerifierSupport,
+    CandidateBusinessValue, EvidenceVerifier, LexicalEvidenceVerifier, MatchingReportV1,
+    MatchingWorkflow, QualityStatus, SystemDecision, VerifierSupport,
 };
-use runtime::BidMatchRouteV1Job;
 use sqlx::PgPool;
-use std::time::Duration;
 use storage::bid_matching::{
-    ClaimedMatchingRequest, EnvelopeSnapshotIdentity, PublishReceipt, PublishRouteV2,
-    StagedCandidateGroupV1, StagedCandidateV1, StagedDecisionV1, StagedEvidenceV1,
-    StagedSourceArtifactV1,
+    MatchingRequest, PublishReceipt, PublishRouteV2, StagedCandidateGroupV1, StagedCandidateV1,
+    StagedDecisionV1, StagedEvidenceV1, StagedSourceArtifactV1,
 };
-use tokio::sync::watch;
 use uuid::Uuid;
 
-pub async fn run_match_route_v1(pool: &PgPool, job: BidMatchRouteV1Job) -> Result<(), String> {
-    job.validate()?;
-    dispatch(pool, job, MatchingWorkflow::new(LexicalEvidenceVerifier)).await
+pub async fn run_match_route_v1(
+    pool: &PgPool,
+    job_id: Uuid,
+    target_revision: i64,
+) -> Result<(), String> {
+    dispatch(
+        pool,
+        job_id,
+        target_revision,
+        MatchingWorkflow::new(LexicalEvidenceVerifier),
+    )
+    .await
 }
 
 async fn dispatch<V>(
     pool: &PgPool,
-    job: BidMatchRouteV1Job,
+    job_id: Uuid,
+    target_revision: i64,
     workflow: MatchingWorkflow<V>,
 ) -> Result<(), String>
 where
     V: EvidenceVerifier,
 {
-    let snapshots = EnvelopeSnapshotIdentity {
-        config_snapshot_id: job.config_snapshot_id,
-        feature_snapshot_id: job.feature_snapshot_id,
-        score_policy_snapshot_id: job.score_policy_snapshot_id,
-        verifier_policy_snapshot_id: job.verifier_policy_snapshot_id,
-    };
-    let Some(claimed) = storage::bid_matching::claim_and_load(pool, job.job_id, snapshots)
-        .await
-        .map_err(|error| error.to_string())?
+    let Some(request) =
+        storage::bid_matching::start_matching_execution(pool, job_id, target_revision)
+            .await
+            .map_err(|error| error.to_string())?
     else {
         return Ok(());
     };
-
-    let (stop_tx, stop_rx) = watch::channel(false);
-    let heartbeat = tokio::spawn(heartbeat_loop(pool.clone(), claimed.clone(), stop_rx));
-    let result = match workflow.execute(&claimed, Uuid::new_v4()).await {
-        Ok(report) => publish_report(pool, &claimed, report).await,
-        Err(error) if error.is_retryable() => retry(pool, &claimed, &error).await,
-        Err(error) => fail(pool, &claimed, error.code(), error.detail()).await,
-    };
-    let _ = stop_tx.send(true);
-    let heartbeat_result = heartbeat
-        .await
-        .map_err(|error| format!("matching heartbeat task failed: {error}"))?;
-    result?;
-    heartbeat_result
-}
-
-async fn heartbeat_loop(
-    pool: PgPool,
-    claimed: ClaimedMatchingRequest,
-    mut stop: watch::Receiver<bool>,
-) -> Result<(), String> {
-    let interval_ms = (i64::from(claimed.claim.claim_lease_ms) / 3)
-        .min(900_000 / 3)
-        .clamp(1_000, 5 * 60 * 1000);
-    loop {
-        tokio::select! {
-            changed = stop.changed() => {
-                if changed.is_err() || *stop.borrow() {
-                    return Ok(());
-                }
-            },
-            _ = tokio::time::sleep(Duration::from_millis(interval_ms as u64)) => {
-                match storage::bid_matching::heartbeat_claim(&pool, &claimed).await {
-                    Ok(true) => {}
-                    Ok(false) => return Err("matching claim lease lost".into()),
-                    Err(error) => return Err(format!("matching heartbeat failed: {error}")),
-                }
-            }
+    match workflow.execute(&request, Uuid::new_v4()).await {
+        Ok(report) => publish_report(pool, &request, report).await,
+        Err(error) => {
+            settle(
+                pool,
+                &request,
+                error.code(),
+                error.detail(),
+                error.is_retryable(),
+            )
+            .await
         }
     }
 }
 
 async fn publish_report(
     pool: &PgPool,
-    claimed: &ClaimedMatchingRequest,
+    request: &MatchingRequest,
     report: MatchingReportV1,
 ) -> Result<(), String> {
-    let transport = report_transport(&report)?;
-    match storage::bid_matching::publish_route(pool, claimed, transport)
-        .await
-        .map_err(|error| error.to_string())?
-    {
+    let transport = report_transport(&report);
+    let receipt = match storage::bid_matching::publish_route(pool, request, transport).await {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            return settle_retryable(
+                pool,
+                request,
+                "MATCHING_REPORT_PUBLISH_FAILED",
+                &error.to_string(),
+            )
+            .await;
+        }
+    };
+    match receipt {
         PublishReceipt::Committed { .. }
         | PublishReceipt::Replayed { .. }
         | PublishReceipt::Stale => Ok(()),
     }
 }
 
-fn report_transport(report: &MatchingReportV1) -> Result<PublishRouteV2, String> {
+fn report_transport(report: &MatchingReportV1) -> PublishRouteV2 {
     let sources = report
         .source_artifacts
         .iter()
@@ -190,7 +173,7 @@ fn report_transport(report: &MatchingReportV1) -> Result<PublishRouteV2, String>
             }
         })
         .collect();
-    Ok(PublishRouteV2 {
+    PublishRouteV2 {
         report_id: report.payload.report_id,
         report_nonce: stable_child_id(report.payload.report_id, "nonce", 0),
         canonical_payload: report.canonical_bytes(),
@@ -200,7 +183,7 @@ fn report_transport(report: &MatchingReportV1) -> Result<PublishRouteV2, String>
         decisions,
         candidate_groups,
         reason_codes: report.payload.reason_codes.clone(),
-    })
+    }
 }
 
 fn stable_child_id(parent: Uuid, tag: &str, ordinal: usize) -> Uuid {
@@ -232,31 +215,41 @@ fn quality(value: QualityStatus) -> &'static str {
     }
 }
 
-async fn retry(
+async fn settle_retryable(
     pool: &PgPool,
-    claimed: &ClaimedMatchingRequest,
-    error: &MatchError,
-) -> Result<(), String> {
-    let updated = storage::bid_matching::retry_claim(pool, claimed, error.code(), error.detail())
-        .await
-        .map_err(|db| db.to_string())?;
-    updated
-        .then_some(())
-        .ok_or_else(|| "matching retry claim fence lost".into())
-}
-
-async fn fail(
-    pool: &PgPool,
-    claimed: &ClaimedMatchingRequest,
+    request: &MatchingRequest,
     code: &str,
     detail: &str,
 ) -> Result<(), String> {
-    let updated = storage::bid_matching::fail_claim(pool, claimed, code, detail)
+    let updated = storage::bid_matching::fail_matching(pool, request, code, detail, true)
+        .await
+        .map_err(|db| db.to_string())?;
+    retryable_settlement_result(updated, code, detail)
+}
+
+fn retryable_settlement_result(updated: bool, code: &str, detail: &str) -> Result<(), String> {
+    if updated {
+        Err(format!("{code}: {detail}"))
+    } else {
+        Ok(())
+    }
+}
+
+async fn settle(
+    pool: &PgPool,
+    request: &MatchingRequest,
+    code: &str,
+    detail: &str,
+    retryable: bool,
+) -> Result<(), String> {
+    let updated = storage::bid_matching::fail_matching(pool, request, code, detail, retryable)
         .await
         .map_err(|error| error.to_string())?;
-    updated
-        .then_some(())
-        .ok_or_else(|| "matching failure claim fence lost".into())
+    if retryable {
+        retryable_settlement_result(updated, code, detail)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -305,12 +298,28 @@ mod tests {
                 ai_span_id: None,
             },
         };
-        let transport = report_transport(&report).unwrap();
+        let transport = report_transport(&report);
         assert!(
             !String::from_utf8(transport.canonical_payload)
                 .unwrap()
                 .contains("1.000000")
         );
         assert_eq!(CanonicalDecimal::new(Decimal::ONE).decimal(), Decimal::ONE);
+    }
+
+    #[test]
+    fn retryable_settlement_retries_only_after_releasing_the_claim() {
+        assert_eq!(
+            retryable_settlement_result(true, "MATCHING_PUBLISH_FAILED", "database unavailable"),
+            Err("MATCHING_PUBLISH_FAILED: database unavailable".into())
+        );
+        assert_eq!(
+            retryable_settlement_result(
+                false,
+                "MATCHING_PUBLISH_FAILED",
+                "matching claim fence lost"
+            ),
+            Ok(())
+        );
     }
 }

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@mantine/core";
 import { Dropzone } from "@mantine/dropzone";
-import type { BidDoc } from "../api";
+import type { TenderDocumentView } from "./api/types";
+import { TENDER_INPUT_ACCEPT } from "./authoring/media";
 import { fileStage } from "./helpers";
 
 export function FilesPane({
@@ -13,20 +14,22 @@ export function FilesPane({
   onUpload,
   onRetry,
 }: {
-  docs: BidDoc[];
+  docs: TenderDocumentView[];
   ended: boolean;
   uploading?: boolean;
   pendingNames?: string[];
   focusId?: string | null;
   onUpload: (files: File[]) => void;
-  onRetry: (doc: BidDoc) => void;
+  onRetry: (doc: TenderDocumentView) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragOn, setDragOn] = useState(false);
 
   useEffect(() => {
     if (!focusId) return;
-    document.getElementById(`bid-doc-${focusId}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    document
+      .getElementById(`bid-doc-${focusId}`)
+      ?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [focusId]);
 
   function take(files: File[]) {
@@ -35,7 +38,10 @@ export function FilesPane({
   }
 
   async function filesFromEvent(event: unknown): Promise<File[]> {
-    const ev = event as { dataTransfer?: DataTransfer; target?: EventTarget | null };
+    const ev = event as {
+      dataTransfer?: DataTransfer;
+      target?: EventTarget | null;
+    };
     const fromDt = ev.dataTransfer?.files;
     if (fromDt && fromDt.length) return Array.from(fromDt);
     const fromInput = (ev.target as HTMLInputElement | null)?.files;
@@ -58,11 +64,25 @@ export function FilesPane({
           onDragLeave={() => setDragOn(false)}
           className={`drop ${dragOn ? "on" : ""}`}
           data-testid="upload-drop"
-          style={{ cursor: uploading ? "wait" : "pointer", padding: empty ? "56px 24px" : undefined }}
+          style={{
+            cursor: uploading ? "wait" : "pointer",
+            padding: empty ? "56px 24px" : undefined,
+          }}
         >
-          <b>{uploading ? "正在上传…" : empty ? "还没有招标文件" : "把招标文件或补遗拖到这里"}</b>
-          {uploading ? "请稍候，传完会自动解析并抽条款。" : "点此也可选文件。只挂在本标，不要丢进知识资产。"}
-          <div className="row" style={{ justifyContent: "center", marginTop: 14 }}>
+          <b>
+            {uploading
+              ? "正在上传…"
+              : empty
+                ? "还没有招标文件"
+                : "把招标文件或补遗拖到这里"}
+          </b>
+          {uploading
+            ? "请稍候，传完会按文件独立解析。"
+            : "支持 PDF / Word(.docx) / Excel / PNG / JPEG / WebP。只挂在本标，不要丢进知识资产。"}
+          <div
+            className="row"
+            style={{ justifyContent: "center", marginTop: 14 }}
+          >
             <Button
               disabled={uploading}
               onClick={(e) => {
@@ -81,6 +101,7 @@ export function FilesPane({
         type="file"
         multiple
         hidden
+        accept={TENDER_INPUT_ACCEPT}
         onChange={(e) => {
           const list = e.target.files;
           if (list?.length) take(Array.from(list));
@@ -96,7 +117,11 @@ export function FilesPane({
           {pendingNames
             .filter((n) => !docs.some((d) => d.file_name === n))
             .map((n) => (
-              <div key={`p-${n}`} className="item" style={{ gridTemplateColumns: "1fr auto" }}>
+              <div
+                key={`p-${n}`}
+                className="item"
+                style={{ gridTemplateColumns: "1fr auto" }}
+              >
                 <div>
                   <div className="name">{n}</div>
                   <div className="desc">正在上传</div>
@@ -107,13 +132,22 @@ export function FilesPane({
           {docs.map((d) => {
             const stage = fileStage(d);
             return (
-              <div key={d.id} id={`bid-doc-${d.id}`} className={`item file-row${stage.tone === "rose" ? " fail" : ""}${focusId === d.id ? " on" : ""}`}>
+              <div
+                key={d.id}
+                id={`bid-doc-${d.id}`}
+                className={`item file-row${stage.tone === "rose" ? " fail" : ""}${focusId === d.id ? " on" : ""}`}
+              >
                 <div>
                   <div className="name">{d.file_name}</div>
                   <div className="desc">{stage.desc}</div>
                 </div>
                 <span className={`chip ${stage.tone}`}>{stage.label}</span>
-                <Button variant="default" size="compact-sm" disabled={ended || !stage.retryable} onClick={() => onRetry(d)}>
+                <Button
+                  variant="default"
+                  size="compact-sm"
+                  disabled={ended || !stage.retryable}
+                  onClick={() => onRetry(d)}
+                >
                   重试
                 </Button>
               </div>

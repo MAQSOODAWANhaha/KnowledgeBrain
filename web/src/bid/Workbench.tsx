@@ -1,43 +1,24 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button } from "@mantine/core";
+import { useEffect, useState } from "react";
+import { Button, Select } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import {
-  ApiError,
-  type BidDoc,
-  type Candidate,
-  type Clause,
-  type CompanyProfile,
-  type Derived,
-  type FactSuggestion,
-  type GateIssue,
-  type MatchUnit,
-  type MutationAttempt,
-  type PartStatus,
-  type ProceduralAttachment,
-  type ProceduralClassification,
-  type Project,
-  type QuoteLine,
-  type QuoteState,
-  type RoutePickSet,
-  type SubmissionProfile,
-  api,
-  createMutationAttempt,
-  createSubmissionExportAttempt,
-  exportSubmission,
-} from "../api";
+import { ApiError, type QuoteLine, type QuoteState, api } from "../api";
 import { Crumbs } from "../Crumbs";
-import { BID_STEPS, type BidStep, bidHref, parseBidRoute, useHash } from "../hash";
+import { parseBidRoute, useHash } from "../hash";
 import { Shell } from "../Shell";
-import { ClauseTable } from "./ClauseTable";
-import { FactsPane } from "./FactsPane";
 import { FilesPane } from "./FilesPane";
-import { Inspector } from "./Inspector";
-import { MatchingPane } from "./MatchingPane";
-import { MaterialsPane } from "./MaterialsPane";
-import { PartsPane } from "./PartsPane";
 import { QuotePane } from "./QuotePane";
-import { BidSidebar } from "./Sidebar";
-import { liveClauses, partTitle } from "./helpers";
+import { ExportPane } from "./authoring/ExportPane";
+import { InspectorPanel } from "./authoring/InspectorPanel";
+import { OutlineTree } from "./authoring/OutlineTree";
+import { PreviewPane } from "./authoring/PreviewPane";
+import { RequirementsPane } from "./authoring/RequirementsPane";
+import { SectionEditor } from "./authoring/SectionEditor";
+import {
+  AUTHORING_STEPS,
+  authoringHref,
+  type AuthoringStep,
+} from "./authoring/routes";
+import { useBidV2Session } from "./authoring/useBidV2Session";
 
 function toast(msg: string, color: "blue" | "red" = "blue") {
   notifications.show({ message: msg, color });
@@ -47,50 +28,27 @@ function errMsg(e: unknown): string {
   return e instanceof ApiError ? e.message : String(e);
 }
 
-function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
-}
-
-async function readOr<T>(request: Promise<T>, fallback: T): Promise<T> {
-  try {
-    return await request;
-  } catch (error) {
-    if (isAbortError(error)) throw error;
-    return fallback;
-  }
-}
-
-function pickRouteKey(projectId: string, routeId: string): string {
-  return `${projectId}:${routeId}`;
-}
-
-function pickCandidateKey(projectId: string, routeId: string, candidateId: string): string {
-  return `${pickRouteKey(projectId, routeId)}:${candidateId}`;
-}
-
-function routeHasPendingPicks(counts: Map<string, number>, routeKey: string): boolean {
-  const prefix = `${routeKey}:`;
-  return Array.from(counts).some(([key, count]) => count > 0 && key.startsWith(prefix));
-}
-
-async function uploadContentSha256(file: File): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function Wizard({ id, step }: { id: string; step: BidStep }) {
-  const cur = BID_STEPS.findIndex((s) => s.key === step);
+function Wizard({
+  projectId,
+  step,
+}: {
+  projectId: string;
+  step: AuthoringStep;
+}) {
+  const cur = AUTHORING_STEPS.findIndex((item) => item.key === step);
   return (
     <nav className="wizard">
-      {BID_STEPS.map((it, i) => (
+      {AUTHORING_STEPS.map((item, index) => (
         <a
-          key={it.key}
-          data-testid={`wizard-${it.key}`}
-          className={it.key === step ? "on" : i < cur ? "done" : undefined}
-          href={`#${bidHref(id, it.key, { step: it.key })}`}
+          key={item.key}
+          data-testid={`wizard-${item.key}`}
+          className={
+            item.key === step ? "on" : index < cur ? "done" : undefined
+          }
+          href={`#${authoringHref(projectId, item.key)}`}
         >
-          <i>{it.n}</i>
-          <span>{it.label}</span>
+          <i>{item.n}</i>
+          <span>{item.label}</span>
         </a>
       ))}
     </nav>
@@ -100,464 +58,70 @@ function Wizard({ id, step }: { id: string; step: BidStep }) {
 export function Workbench({ email }: { email: string }) {
   const path = useHash();
   const route = parseBidRoute(path);
-  const id = route?.id ?? "";
-  const step: BidStep = route?.step ?? "files";
-  const view = route?.view ?? "files";
-  const part = route?.part ?? "1";
-  const pane = route?.pane ?? "table";
-  const doc = route?.doc ?? null;
-
-  const [project, setProject] = useState<Project | null>(null);
-  const [derived, setDerived] = useState<Derived | null>(null);
-  const [docs, setDocs] = useState<BidDoc[]>([]);
-  const [clauses, setClauses] = useState<Clause[]>([]);
-  const [units, setUnits] = useState<MatchUnit[]>([]);
-  const [suggestions, setSuggestions] = useState<FactSuggestion[]>([]);
+  const { session, state } = useBidV2Session(route);
+  const projectId = route?.projectId ?? "";
+  const step: AuthoringStep = route?.step ?? "files";
+  const ended = state.ended;
   const [quote, setQuote] = useState<QuoteState>({ exists: false });
-  const [preview, setPreview] = useState<{ net_total?: string; tax_total?: string; gross_total?: string }>();
-  const [matching, setMatching] = useState<Awaited<ReturnType<typeof api.matching>>>();
-  const [pickSet, setPickSet] = useState<RoutePickSet | null>(null);
-  const [company, setCompany] = useState<CompanyProfile>({});
-  const [companySnapshot, setCompanySnapshot] = useState<CompanyProfile>({});
-  const [submission, setSubmission] = useState<SubmissionProfile>({});
-  const [submissionSnapshot, setSubmissionSnapshot] = useState<SubmissionProfile>({});
-  const [classifications, setClassifications] = useState<ProceduralClassification[]>([]);
-  const [attachments, setAttachments] = useState<ProceduralAttachment[]>([]);
-  const [parts, setParts] = useState<PartStatus[]>([]);
-  const [requiredKeys, setRequiredKeys] = useState<string[]>([]);
-  const [clauseSets, setClauseSets] = useState<Array<{ set_kind: string; revision: number; content_sha256: string }>>([]);
-
-  const [partMarkdown, setPartMarkdown] = useState("");
-  const [partRevision, setPartRevision] = useState(0);
-  const [partDependencySha, setPartDependencySha] = useState<string | null>(null);
-  const [partStale, setPartStale] = useState(false);
-  const [loadedPartIdentity, setLoadedPartIdentity] = useState<string | null>(null);
-  const [gate, setGate] = useState<{ status: string; issues: GateIssue[] }>();
-  const [selected, setSelected] = useState<string | null>(null);
-  const [addText, setAddText] = useState("");
-  const [addKind, setAddKind] = useState("technical");
-  const [addMust, setAddMust] = useState(false);
-  const [factDrafts, setFactDrafts] = useState<Record<string, string>>({});
-  const [noCeiling, setNoCeiling] = useState(false);
-  const [noCeilingReason, setNoCeilingReason] = useState("招标文件未设置最高限价，已人工复核");
+  const [quotePreview, setQuotePreview] = useState<{
+    net_total?: string;
+    tax_total?: string;
+    gross_total?: string;
+  }>();
   const [quoteSaving, setQuoteSaving] = useState(false);
-  const [companySaving, setCompanySaving] = useState(false);
-  const [submissionSaving, setSubmissionSaving] = useState(false);
-  const [companyDraftDirty, setCompanyDraftDirty] = useState(false);
-  const [submissionDraftDirty, setSubmissionDraftDirty] = useState(false);
-  const [pendingPickKeys, setPendingPickKeys] = useState<Set<string>>(new Set());
-  const [optimisticPick, setOptimisticPick] = useState<{ routeId: string; candidateIds: Set<string> } | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [pendingNames, setPendingNames] = useState<string[]>([]);
-  const [partPreview, setPartPreview] = useState(pane !== "draft");
-  const dirtyPart = useRef(false);
-  const activePartIdentity = useRef<string | null>(null);
-  const partLoadSequence = useRef(0);
-  const uploadRetryAttempts = useRef(new Map<string, MutationAttempt[]>());
-  const submissionExportAttempts = useRef(new Map<string, ReturnType<typeof createSubmissionExportAttempt>>());
-  const companyDirty = useRef(false);
-  const submissionDirty = useRef(false);
-  const activeProjectId = useRef(id);
-  const loadAbort = useRef<AbortController | null>(null);
-  const pickMutationTails = useRef(new Map<string, Promise<void>>());
-  const pendingPickCounts = useRef(new Map<string, number>());
-  const ended = project?.status === "ended";
-  const partIdentity = step === "parts" ? `${id}:${part}` : null;
-  const partReady = partIdentity !== null && loadedPartIdentity === partIdentity;
-  activePartIdentity.current = partIdentity;
-  activeProjectId.current = id;
-
-  async function uploadWithAttempt<T>(
-    operation: string,
-    file: File,
-    request: (attempt: MutationAttempt) => Promise<T>,
-  ): Promise<T> {
-    const contentSha256 = await uploadContentSha256(file);
-    const attemptKey = `${id}:${operation}:${file.name}:${file.type}:${file.size}:${contentSha256}`;
-    const retryQueue = uploadRetryAttempts.current.get(attemptKey);
-    const attempt = retryQueue?.shift() ?? createMutationAttempt();
-    if (retryQueue?.length === 0) uploadRetryAttempts.current.delete(attemptKey);
-    try {
-      return await request(attempt);
-    } catch (error) {
-      if (!(error instanceof ApiError)) {
-        const pending = uploadRetryAttempts.current.get(attemptKey) ?? [];
-        pending.push(attempt);
-        uploadRetryAttempts.current.set(attemptKey, pending);
-      }
-      throw error;
-    }
-  }
-
-  const load = useCallback(async () => {
-    const requestedProjectId = id;
-    if (!requestedProjectId || activeProjectId.current !== requestedProjectId) return;
-    const controller = new AbortController();
-    loadAbort.current?.abort();
-    loadAbort.current = controller;
-    const { signal } = controller;
-    try {
-      const [detail, clausePage, unitPage, factPage, partPage] = await Promise.all([
-        api.bid(id, signal),
-        readOr(api.clauses(id, false, signal), { clauses: [] }),
-        readOr(api.units(id, signal), { units: [] }),
-        readOr(api.facts(id, signal), {
-          project_facts: undefined,
-          suggestions: [] as FactSuggestion[],
-          history: [] as unknown[],
-        }),
-        readOr(api.parts(id, signal), { required_part_keys: [] as string[], parts: [] as PartStatus[] }),
-      ]);
-      if (signal.aborted || activeProjectId.current !== requestedProjectId) return;
-      setProject(detail.project);
-      setDerived(detail.derived);
-      setDocs(detail.documents);
-      setPendingNames((names) => names.filter((n) => !detail.documents.some((d) => d.file_name === n)));
-      setQuote(detail.quote ?? { exists: false });
-      setMatching(detail.matching);
-      setClauses(clausePage.clauses);
-      setUnits(unitPage.units);
-      setSuggestions(factPage.suggestions ?? detail.facts?.suggestions ?? []);
-      setRequiredKeys(partPage.required_part_keys ?? []);
-      setParts(partPage.parts ?? []);
-      setClauseSets(detail.clause_sets ?? []);
-      const pool = liveClauses(clausePage.clauses, view);
-      setSelected((cur) => (cur && pool.some((x) => x.id === cur) ? cur : pool[0]?.id ?? null));
-      if (step === "matching") {
-        const routeId =
-          view === "commercial"
-            ? unitPage.units.find((u) => u.kind === "commercial")?.route_id
-            : view === "unsectioned"
-              ? unitPage.units.find((u) => u.kind === "unsectioned")?.route_id
-              : unitPage.units.find((u) => u.id === view)?.route_id;
-        if (routeId) {
-          const set = await readOr(api.routePickSet(id, routeId, signal), null);
-          if (signal.aborted || activeProjectId.current !== requestedProjectId) return;
-          setPickSet(set);
-          if (set && !routeHasPendingPicks(pendingPickCounts.current, pickRouteKey(id, routeId))) {
-            setOptimisticPick({
-              routeId,
-              candidateIds: new Set(set.items.map((item) => item.candidate_artifact_id)),
-            });
-          }
-        } else {
-          setPickSet(null);
-          setOptimisticPick(null);
-        }
-      }
-      if (step === "quote") {
-        const [cp, sp, pr, at, pv] = await Promise.all([
-          readOr(api.companyProfile(id, signal), undefined),
-          readOr(api.submissionProfile(id, signal), undefined),
-          readOr(api.procedural(id, signal), { classifications: [] }),
-          readOr(api.attachments(id, signal), { attachments: [] }),
-          readOr(api.previewQuote(id, signal), undefined),
-        ]);
-        if (signal.aborted || activeProjectId.current !== requestedProjectId) return;
-        if (cp !== undefined) {
-          const snapshot = cp ?? {};
-          setCompanySnapshot(snapshot);
-          if (!companyDirty.current) setCompany(snapshot);
-        }
-        if (sp !== undefined) {
-          const snapshot = sp ?? {};
-          setSubmissionSnapshot(snapshot);
-          if (!submissionDirty.current) setSubmission(snapshot);
-        }
-        setClassifications(pr.classifications ?? []);
-        setAttachments(at.attachments ?? []);
-        setPreview(pv);
-      }
-      if (step === "parts") {
-        const requestedPartIdentity = `${id}:${part}`;
-        const loadSequence = ++partLoadSequence.current;
-        const current = await readOr(api.part(id, part, signal), null);
-        if (
-          activePartIdentity.current === requestedPartIdentity &&
-          partLoadSequence.current === loadSequence &&
-          !dirtyPart.current
-        ) {
-          setPartMarkdown(current?.markdown ?? "");
-          setPartRevision(current?.content_revision ?? 0);
-          setPartDependencySha(current?.dependency_sha256 ?? null);
-          setPartStale(!!current?.stale);
-          setLoadedPartIdentity(requestedPartIdentity);
-        }
-        const g = await readOr(api.gateIssues(id, "pdf", signal), undefined);
-        if (g) setGate({ status: g.status, issues: g.issues });
-      }
-    } catch (e) {
-      if (!isAbortError(e)) toast(errMsg(e), "red");
-    } finally {
-      if (loadAbort.current === controller) loadAbort.current = null;
-    }
-  }, [id, part, step, view]);
+  const [noCeiling, setNoCeiling] = useState(false);
+  const [noCeilingReason, setNoCeilingReason] = useState(
+    "招标文件未设置最高限价，已人工复核",
+  );
 
   useEffect(() => {
-    uploadRetryAttempts.current.clear();
-    submissionExportAttempts.current.clear();
-    companyDirty.current = false;
-    submissionDirty.current = false;
-    setCompanyDraftDirty(false);
-    setSubmissionDraftDirty(false);
-    setCompanySaving(false);
-    setSubmissionSaving(false);
-    setCompany({});
-    setCompanySnapshot({});
-    setSubmission({});
-    setSubmissionSnapshot({});
-    setOptimisticPick(null);
-  }, [id]);
+    if (state.error) toast(state.error.message, "red");
+  }, [state.error]);
 
   useEffect(() => {
-    dirtyPart.current = false;
-    void load();
-    const timer = window.setInterval(() => void load(), 5000);
+    if (step !== "quote" || !projectId) return;
+    let cancelled = false;
+    void Promise.all([
+      api.quote(projectId).catch(() => ({ exists: false }) as QuoteState),
+      api.previewQuote(projectId).catch(() => undefined),
+    ]).then(([nextQuote, preview]) => {
+      if (cancelled) return;
+      setQuote(nextQuote);
+      setQuotePreview(preview);
+    });
     return () => {
-      window.clearInterval(timer);
-      loadAbort.current?.abort();
+      cancelled = true;
     };
-  }, [load]);
+  }, [step, projectId]);
 
-  useEffect(() => {
-    if (project?.ceiling_price) setNoCeiling(false);
-  }, [project?.ceiling_price]);
-
-  const live = useMemo(() => liveClauses(clauses, view), [clauses, view]);
-  const cur = live.find((c) => c.id === selected) ?? live[0] ?? null;
-  const pendingPickCandidateIds = useMemo(() => {
-    if (!pickSet) return new Set<string>();
-    const prefix = `${pickRouteKey(id, pickSet.route_id)}:`;
-    return new Set(
-      Array.from(pendingPickKeys)
-        .filter((key) => key.startsWith(prefix))
-        .map((key) => key.slice(prefix.length)),
-    );
-  }, [id, pendingPickKeys, pickSet]);
-
-  async function mutateClause(c: Clause, action: "patch" | "confirm" | "unconfirm" | "reject", patch?: Record<string, unknown>) {
-    try {
-      await api.mutateClause(id, c.id, { action, expected_revision: c.revision, patch });
-      await load();
-    } catch (e) {
-      toast(errMsg(e), "red");
-    }
-  }
-
-  async function setFact(field: string, raw: string, basis = project?.ceiling_basis ?? "unspecified") {
-    if (!project) return;
-    let typed: unknown = raw;
-    if (field === "bid_valid_days") typed = Number(raw);
-    if (field === "budget_amount") typed = { amount: raw, currency_code: "CNY" };
-    if (field === "ceiling_price" || field === "ceiling_basis") {
-      const amount = field === "ceiling_price" ? raw : project.ceiling_price || raw;
-      if (!amount) {
-        toast("先写入最高限价金额", "red");
-        return;
-      }
-      typed = { amount, currency_code: "CNY", basis: field === "ceiling_basis" ? raw : basis };
-      field = "ceiling_price";
-    }
-    try {
-      await api.mutateFact(id, {
-        action: "set",
-        expected_fact_revision: project.fact_revision,
-        field,
-        typed_value: typed,
-      });
-      toast("已写入事实");
-      await load();
-    } catch (e) {
-      toast(errMsg(e), "red");
-    }
-  }
-
-  async function clearFact(field: string) {
-    if (!project) return;
-    try {
-      await api.mutateFact(id, {
-        action: "clear",
-        expected_fact_revision: project.fact_revision,
-        field,
-      });
-      toast("已清除事实");
-      await load();
-    } catch (e) {
-      toast(errMsg(e), "red");
-    }
-  }
-
-  function runQuoteMutation(request: () => Promise<unknown>, successMessage?: string) {
+  function runQuote(request: () => Promise<unknown>, success?: string) {
     if (quoteSaving) return;
     setQuoteSaving(true);
     void request()
       .then(async () => {
-        if (successMessage) toast(successMessage);
-        await load();
+        if (success) toast(success);
+        setQuote(await api.quote(projectId));
+        setQuotePreview(
+          await api.previewQuote(projectId).catch(() => undefined),
+        );
       })
-      .catch((e) => toast(errMsg(e), "red"))
+      .catch((error) => toast(errMsg(error), "red"))
       .finally(() => setQuoteSaving(false));
   }
 
-  function queuePickMutation(candidate: Candidate, include: boolean) {
-    const routeId = pickSet?.route_id;
-    if (!routeId) return;
-    const routeKey = pickRouteKey(id, routeId);
-    const candidateKey = pickCandidateKey(id, routeId, candidate.candidate_artifact_id);
-    pendingPickCounts.current.set(candidateKey, (pendingPickCounts.current.get(candidateKey) ?? 0) + 1);
-    setPendingPickKeys(new Set(pendingPickCounts.current.keys()));
-    setOptimisticPick((current) => {
-      const candidateIds = new Set(
-        current?.routeId === routeId
-          ? current.candidateIds
-          : (pickSet.items.map((item) => item.candidate_artifact_id)),
-      );
-      if (include) candidateIds.add(candidate.candidate_artifact_id);
-      else candidateIds.delete(candidate.candidate_artifact_id);
-      return { routeId, candidateIds };
-    });
-
-    let finalSet: RoutePickSet | null = null;
-    const previous = pickMutationTails.current.get(routeKey) ?? Promise.resolve();
-    const operation = previous
-      .then(async () => {
-        for (let attempt = 0; attempt < 2; attempt += 1) {
-          const current = await api.routePickSet(id, routeId);
-          if (!current.source_report_artifact_id || !current.report_sha256) {
-            throw new Error("当前匹配报告身份不完整，无法保存选择");
-          }
-          const items = current.items
-            .filter((item) => include || item.candidate_artifact_id !== candidate.candidate_artifact_id)
-            .map((item) => ({
-              requirement_artifact_id: item.requirement_artifact_id,
-              candidate_artifact_id: item.candidate_artifact_id,
-            }));
-          if (include && !items.some((item) => item.candidate_artifact_id === candidate.candidate_artifact_id)) {
-            items.push({
-              requirement_artifact_id: candidate.requirement_artifact_id,
-              candidate_artifact_id: candidate.candidate_artifact_id,
-            });
-          }
-          try {
-            await api.replaceRoutePickSet(id, routeId, {
-              source_report_artifact_id: current.source_report_artifact_id,
-              report_sha256: current.report_sha256,
-              expected_revision: current.revision,
-              items,
-            });
-            finalSet = await api.routePickSet(id, routeId);
-            setPickSet((active) => (active?.route_id === routeId ? finalSet : active));
-            return;
-          } catch (error) {
-            if (!(error instanceof ApiError) || error.status !== 409 || attempt > 0) throw error;
-            toast("选择已被其他操作更新，正在基于最新版本重试");
-          }
-        }
-      })
-      .catch(async (error) => {
-        toast(
-          error instanceof ApiError && error.status === 409
-            ? "选择再次发生冲突，已同步最新结果，请重试本次选择"
-            : errMsg(error),
-          "red",
-        );
-        finalSet = await api.routePickSet(id, routeId).catch(() => null);
-        if (finalSet) setPickSet((active) => (active?.route_id === routeId ? finalSet : active));
-      })
-      .finally(() => {
-        const remaining = (pendingPickCounts.current.get(candidateKey) ?? 1) - 1;
-        if (remaining > 0) pendingPickCounts.current.set(candidateKey, remaining);
-        else pendingPickCounts.current.delete(candidateKey);
-        setPendingPickKeys(new Set(pendingPickCounts.current.keys()));
-        if (finalSet && !routeHasPendingPicks(pendingPickCounts.current, routeKey)) {
-          setOptimisticPick((active) =>
-            active?.routeId === routeId
-              ? {
-                  routeId,
-                  candidateIds: new Set(finalSet?.items.map((item) => item.candidate_artifact_id) ?? []),
-                }
-              : active,
-          );
-        }
-      });
-    pickMutationTails.current.set(routeKey, operation);
-    void operation.then(() => {
-      if (pickMutationTails.current.get(routeKey) === operation) pickMutationTails.current.delete(routeKey);
-    });
-  }
-
-  async function doExport(format: "docx" | "pdf") {
-    const attemptKey = `${id}:${format}`;
-    const attempt = submissionExportAttempts.current.get(attemptKey) ?? createSubmissionExportAttempt();
-    submissionExportAttempts.current.set(attemptKey, attempt);
-    try {
-      await exportSubmission(id, format, attempt);
-      submissionExportAttempts.current.delete(attemptKey);
-      toast(format === "pdf" ? "正式 PDF 已下载" : "过程 Word 已下载");
-    } catch (e) {
-      if (e instanceof ApiError && e.code !== "SUBMISSION_RENDER_TIMEOUT") {
-        submissionExportAttempts.current.delete(attemptKey);
-      }
-      toast(errMsg(e), "red");
-    }
-  }
-
-  if (!route || !project || !derived) {
-    return (
-      <Shell root="bids" email={email} crumbs={<Crumbs items={[{ label: "投标项目" }]} />} title="投标">
-        <div className="wrap">加载中…</div>
-      </Shell>
-    );
-  }
-
-  const extra = (
-    <>
-      {ended ? (
-        <span className="chip gray">已结束</span>
-      ) : (
-        <Button
-          variant="default"
-          onClick={() => {
-            void api
-              .endBid(id, project.fact_revision)
-              .then(() => {
-                toast("本标已结束");
-                void load();
-              })
-              .catch((e) => toast(errMsg(e), "red"));
-          }}
-        >
-          结束本标
-        </Button>
-      )}
-      <Button data-testid="export-docx" variant="default" onClick={() => void doExport("docx")}>
-        过程 Word
-      </Button>
-      <Button data-testid="export-pdf" onClick={() => void doExport("pdf")}>
-        正式 PDF
-      </Button>
-    </>
-  );
-
-  const inspector =
-    step === "facts" || step === "matching" ? (
-      <Inspector
-        step={step}
-        cur={cur}
-        ended={ended}
-        pickSet={pickSet}
-        selectedCandidateIds={
-          optimisticPick && optimisticPick.routeId === pickSet?.route_id ? optimisticPick.candidateIds : undefined
-        }
-        pendingCandidateIds={pendingPickCandidateIds}
-        onPatch={(c, patch) => void mutateClause(c, "patch", patch)}
-        onConfirm={(c) => void mutateClause(c, "confirm")}
-        onUnconfirm={(c) => void mutateClause(c, "unconfirm")}
-        onPickToggle={(candidate: Candidate, include: boolean) => {
-          queuePickMutation(candidate, include);
-        }}
-      />
-    ) : undefined;
+  const title =
+    step === "files"
+      ? "招标文件"
+      : step === "requirements"
+        ? "要求台账"
+        : step === "quote"
+          ? "报价"
+          : step === "authoring"
+            ? (session.findNode(state.selectedNodeLineageId ?? "")?.title ??
+              "编制")
+            : step === "preview"
+              ? "全文预览"
+              : "导出";
 
   return (
     <Shell
@@ -567,153 +131,146 @@ export function Workbench({ email }: { email: string }) {
         <Crumbs
           items={[
             { label: "投标项目", href: "/" },
-            { label: project.title, href: bidHref(id, "files", { step: "files" }) },
-            { label: BID_STEPS.find((s) => s.key === step)?.label ?? "" },
+            {
+              label: state.project?.title ?? "本标",
+              href: authoringHref(projectId, "files"),
+            },
+            { label: title },
           ]}
         />
       }
-      title={
-        step === "parts"
-          ? partTitle(part, units)
-          : step === "files"
-            ? "招标文件"
-            : BID_STEPS.find((s) => s.key === step)?.label ?? "投标"
-      }
-      extra={extra}
-      find={false}
+      title={title}
       steps={
-        <div className="work-nav">
-          <Wizard id={id} step={step} />
-        </div>
+        projectId ? <Wizard projectId={projectId} step={step} /> : undefined
+      }
+      extra={
+        step === "authoring" ? (
+          <div className="row">
+            <Select
+              size="xs"
+              w={160}
+              value={state.fillPolicy}
+              allowDeselect={false}
+              data={[
+                { value: "empty_only", label: "只填空章" },
+                { value: "append_candidate", label: "追加候选" },
+                { value: "missing_requirements_only", label: "只补缺项" },
+              ]}
+              onChange={(value) =>
+                value && session.setFillPolicy(value as typeof state.fillPolicy)
+              }
+            />
+            <Button
+              size="compact-sm"
+              variant="default"
+              disabled={ended}
+              onClick={() => void session.generateOutline()}
+            >
+              生成大纲
+            </Button>
+            <Button
+              size="compact-sm"
+              variant="default"
+              disabled={ended || !state.selectedNodeLineageId}
+              onClick={() =>
+                void session.generateContent(
+                  "node",
+                  state.selectedNodeLineageId ?? undefined,
+                )
+              }
+            >
+              生成本章
+            </Button>
+            <Button
+              size="compact-sm"
+              variant="default"
+              disabled={ended || !state.selectedNodeLineageId}
+              onClick={() =>
+                void session.generateContent(
+                  "subtree",
+                  state.selectedNodeLineageId ?? undefined,
+                )
+              }
+            >
+              生成子树
+            </Button>
+            <Button
+              size="compact-sm"
+              variant="default"
+              disabled={ended}
+              onClick={() => void session.generateContent("workspace")}
+            >
+              生成全部空章节
+            </Button>
+            <Button
+              size="compact-sm"
+              disabled={ended}
+              onClick={() => void session.save()}
+            >
+              保存
+            </Button>
+          </div>
+        ) : undefined
       }
       tree={
-        <BidSidebar
-          id={id}
-          step={step}
-          view={view}
-          part={part}
-          doc={doc}
-          units={units}
-          parts={parts}
-          requiredKeys={requiredKeys}
-          clauses={clauses}
-          docs={docs}
-        />
+        step === "authoring" ? (
+          <OutlineTree session={session} state={state} />
+        ) : (
+          <>
+            <div className="side-sec">本标</div>
+            <nav className="sidenav">
+              {step === "files" &&
+                state.documents.map((doc) => (
+                  <a
+                    key={doc.id}
+                    href={`#${authoringHref(projectId, "files")}`}
+                  >
+                    <em>{doc.file_name}</em>
+                  </a>
+                ))}
+              {step !== "files" && (
+                <a className="on" href={`#${authoringHref(projectId, step)}`}>
+                  <em>{title}</em>
+                </a>
+              )}
+            </nav>
+          </>
+        )
       }
-      inspector={inspector}
-      className={step === "parts" ? "ed-page" : undefined}
+      inspector={
+        step === "authoring" ? (
+          <InspectorPanel session={session} state={state} />
+        ) : undefined
+      }
     >
       {step === "files" && (
-        <div className="wrap stack">
+        <div className="wrap">
           <FilesPane
-            docs={docs}
+            docs={state.documents}
             ended={ended}
-            uploading={uploading}
-            pendingNames={pendingNames}
-            focusId={doc}
-            onUpload={(files) => {
-              setUploading(true);
-              setPendingNames(files.map((f) => f.name));
-              void Promise.all(
-                files.map((file) =>
-                  uploadWithAttempt("document", file, (attempt) => api.uploadDoc(id, file, attempt)),
-                ),
+            uploading={state.busy && state.pendingUploads.length > 0}
+            pendingNames={state.pendingUploads}
+            onUpload={(files) => void session.uploadTenderDocuments(files)}
+            onRetry={(doc) =>
+              void session.retryTenderDocument(
+                doc.id,
+                doc.conversion_generation,
               )
-                .then(() => {
-                  toast("已上传，正在解析");
-                  return load();
-                })
-                .catch((e) => toast(errMsg(e), "red"))
-                .finally(() => setUploading(false));
-            }}
-            onRetry={(d) => {
-              void api
-                .retryDoc(id, d.id, d.conversion_generation)
-                .then(() => load())
-                .catch((e) => toast(errMsg(e), "red"));
-            }}
+            }
           />
         </div>
       )}
-      {step === "facts" && view === "facts" && (
+      {step === "requirements" && (
         <div className="wrap">
-          <FactsPane
-            project={project}
-            suggestions={suggestions}
-            drafts={factDrafts}
-            ended={ended}
-            onAccept={(s) => {
-              void api
-                .mutateFact(id, {
-                  action: "accept",
-                  expected_fact_revision: project.fact_revision,
-                  candidate_id: s.id,
-                })
-                .then(() => load())
-                .catch((e) => toast(errMsg(e), "red"));
-            }}
-            onSet={(field, value) => void setFact(field, value)}
-            onClear={(field) => void clearFact(field)}
-            onChangeDraft={(field, value) => setFactDrafts((cur) => ({ ...cur, [field]: value }))}
-            onChangeCeilingBasis={(basis) => void setFact("ceiling_basis", basis)}
-          />
+          <RequirementsPane session={session} state={state} />
         </div>
       )}
-      {step === "facts" && view !== "facts" && (
-        <div className="wrap">
-          <ClauseTable
-            live={live}
-            selected={selected}
-            ended={ended}
-            addText={addText}
-            addKind={addKind}
-            addMust={addMust}
-            onSelect={setSelected}
-            onConfirm={(c) => void mutateClause(c, "confirm")}
-            onReject={(c) => void mutateClause(c, "reject")}
-            onAddText={setAddText}
-            onAddKind={setAddKind}
-            onAddMust={setAddMust}
-            onAdd={() => {
-              void api
-                .addClause(id, { text: addText.trim(), kind: addKind, must: addMust })
-                .then(() => {
-                  setAddText("");
-                  toast("已添加草稿");
-                  return load();
-                })
-                .catch((e) => toast(errMsg(e), "red"));
-            }}
-          />
-        </div>
-      )}
-      {step === "matching" && (
-        <div className="wrap">
-          <MatchingPane
-            view={view}
-            clauses={clauses}
-            units={units}
-            matching={matching}
-            pickSet={pickSet}
-            ended={ended}
-            onSchedule={() => {
-              void api
-                .rematch(id)
-                .then(() => {
-                  toast("已调度匹配");
-                  return load();
-                })
-                .catch((e) => toast(errMsg(e), "red"));
-            }}
-          />
-        </div>
-      )}
-      {step === "quote" && view === "quote" && (
+      {step === "quote" && (
         <div className="wrap">
           <QuotePane
-            project={project}
+            project={{ ceiling_price: null }}
             quote={quote}
-            preview={preview}
+            preview={quotePreview}
             ended={ended}
             saving={quoteSaving}
             noCeiling={noCeiling}
@@ -722,26 +279,28 @@ export function Workbench({ email }: { email: string }) {
               setNoCeiling(reviewed);
               setNoCeilingReason(reason);
             }}
-            onCreate={() => {
-              runQuoteMutation(() =>
-                api.createQuoteDraft(id, { tax_mode: "tax_exclusive", title: `${project.title} 报价` }),
-              );
-            }}
-            onPatch={(title, taxMode, notes) => {
-              if (!quote.edit_version && quote.edit_version !== 0) return;
-              runQuoteMutation(() =>
-                api.patchQuote(id, {
+            onCreate={() =>
+              runQuote(() =>
+                api.createQuoteDraft(projectId, {
+                  tax_mode: "tax_exclusive",
+                  title: `${state.project?.title ?? ""} 报价`,
+                }),
+              )
+            }
+            onPatch={(titleText, taxMode, notes) => {
+              if (quote.edit_version == null) return;
+              runQuote(() =>
+                api.patchQuote(projectId, {
                   expected_edit_version: quote.edit_version ?? 0,
                   tax_mode: taxMode,
-                  title,
+                  title: titleText,
                   notes,
                 }),
               );
             }}
-            onAddLine={() => {
-              const lineId = crypto.randomUUID();
-              runQuoteMutation(() =>
-                api.upsertQuoteLine(id, lineId, {
+            onAddLine={() =>
+              runQuote(() =>
+                api.upsertQuoteLine(projectId, crypto.randomUUID(), {
                   expected_edit_version: quote.edit_version ?? 0,
                   ordinal: (quote.lines?.length ?? 0) + 1,
                   description: "新报价行",
@@ -753,12 +312,12 @@ export function Workbench({ email }: { email: string }) {
                   tax_rate: "0.130000",
                   user_confirmed: false,
                 }),
-              );
-            }}
+              )
+            }
             onUpdateLine={(line: QuoteLine, patch) => {
               const next = { ...line, ...patch };
-              runQuoteMutation(() =>
-                api.upsertQuoteLine(id, line.id, {
+              runQuote(() =>
+                api.upsertQuoteLine(projectId, line.id, {
                   expected_edit_version: quote.edit_version ?? 0,
                   ordinal: next.ordinal,
                   description: next.description,
@@ -772,223 +331,52 @@ export function Workbench({ email }: { email: string }) {
                 }),
               );
             }}
-            onDeleteLine={(line) => {
-              runQuoteMutation(() => api.deleteQuoteLine(id, line.id, quote.edit_version ?? 0));
-            }}
-            onFinalize={() => {
-              const pricingSet = clauseSets.find((s) => s.set_kind === "pricing");
-              if (!pricingSet) {
-                toast("缺少价格条款集，无法定稿报价", "red");
-                return;
-              }
-              runQuoteMutation(
+            onDeleteLine={(line) =>
+              runQuote(() =>
+                api.deleteQuoteLine(
+                  projectId,
+                  line.id,
+                  quote.edit_version ?? 0,
+                ),
+              )
+            }
+            onFinalize={() =>
+              runQuote(
                 () =>
-                  api.finalizeQuote(id, {
-                  expected_edit_version: quote.edit_version ?? 0,
-                  expected_fact_revision: project.fact_revision,
-                  expected_ceiling_revision: project.ceiling_revision,
-                  expected_ceiling_identity_sha256: project.ceiling_identity_sha256,
-                  expected_pricing_revision: pricingSet.revision,
-                  expected_pricing_set_sha256: pricingSet.content_sha256,
-                  no_ceiling_reviewed: !project.ceiling_price && noCeiling,
-                  no_ceiling_reason: noCeilingReason,
+                  api.finalizeQuote(projectId, {
+                    expected_edit_version: quote.edit_version ?? 0,
+                    expected_fact_revision: 0,
+                    expected_ceiling_revision: 0,
+                    expected_ceiling_identity_sha256: "0".repeat(64),
+                    expected_pricing_revision: 0,
+                    expected_pricing_set_sha256: "0".repeat(64),
+                    no_ceiling_reviewed: noCeiling,
+                    no_ceiling_reason: noCeilingReason,
                   }),
                 "报价已定稿",
-              );
-            }}
+              )
+            }
             onReopen={() => {
-              const snapshotId = quote.snapshot_id;
-              if (!snapshotId) return;
-              runQuoteMutation(() =>
-                api.reopenQuote(id, {
-                  expected_snapshot_id: snapshotId,
-                  expected_fact_revision: project.fact_revision,
-                  expected_pricing_revision: clauseSets.find((s) => s.set_kind === "pricing")?.revision ?? 0,
+              if (!quote.snapshot_id) return;
+              runQuote(() =>
+                api.reopenQuote(projectId, {
+                  expected_snapshot_id: quote.snapshot_id as string,
+                  expected_fact_revision: 0,
+                  expected_pricing_revision: 0,
                 }),
               );
             }}
           />
         </div>
       )}
-      {step === "quote" && view !== "quote" && (
-        <div className="wrap">
-          <MaterialsPane
-            view={view}
-            company={company}
-            submission={submission}
-            classifications={classifications}
-            attachments={attachments}
-            ended={ended}
-            companyDirty={companyDraftDirty}
-            submissionDirty={submissionDraftDirty}
-            companySaving={companySaving}
-            submissionSaving={submissionSaving}
-            onChangeCompany={(body) => {
-              companyDirty.current = true;
-              setCompanyDraftDirty(true);
-              setCompany(body);
-            }}
-            onChangeSubmission={(body) => {
-              submissionDirty.current = true;
-              setSubmissionDraftDirty(true);
-              setSubmission(body);
-            }}
-            onResetCompany={() => {
-              companyDirty.current = false;
-              setCompanyDraftDirty(false);
-              setCompany(companySnapshot);
-            }}
-            onResetSubmission={() => {
-              submissionDirty.current = false;
-              setSubmissionDraftDirty(false);
-              setSubmission(submissionSnapshot);
-            }}
-            onSaveCompany={() => {
-              if (companySaving) return;
-              const projectId = id;
-              const draft = company;
-              setCompanySaving(true);
-              void api
-                .updateCompanyProfile(projectId, {
-                  expected_revision: Number(draft.revision ?? 0),
-                  legal_name: draft.legal_name || "",
-                  unified_social_credit_code: draft.unified_social_credit_code || "",
-                  registered_address: draft.registered_address || "",
-                  legal_representative: draft.legal_representative || "",
-                  contact_name: draft.contact_name || "",
-                  contact_phone: draft.contact_phone || "",
-                  contact_email: draft.contact_email || "",
-                })
-                .then((saved) => {
-                  if (activeProjectId.current !== projectId) return;
-                  const snapshot = { ...draft, revision: saved.revision };
-                  companyDirty.current = false;
-                  setCompanyDraftDirty(false);
-                  setCompanySnapshot(snapshot);
-                  setCompany(snapshot);
-                  toast("公司资料已保存");
-                  return load();
-                })
-                .catch(async (error) => {
-                  if (activeProjectId.current !== projectId) return;
-                  if (error instanceof ApiError && error.status === 409) {
-                    const latest = await api.companyProfile(projectId).catch(() => null);
-                    if (latest) setCompanySnapshot(latest);
-                    toast("公司资料已在其他位置更新。草稿已保留，可重置后重新填写。", "red");
-                    return;
-                  }
-                  toast(errMsg(error), "red");
-                })
-                .finally(() => {
-                  if (activeProjectId.current === projectId) setCompanySaving(false);
-                });
-            }}
-            onSaveSubmission={() => {
-              if (submissionSaving) return;
-              if (!submission.submission_date?.trim()) {
-                toast("请填写投标日期", "red");
-                return;
-              }
-              const projectId = id;
-              const draft = submission;
-              setSubmissionSaving(true);
-              void api
-                .updateSubmissionProfile(projectId, {
-                  expected_revision: Number(draft.revision ?? 0),
-                  buyer_name: draft.buyer_name || "",
-                  project_code: draft.project_code || "",
-                  authorized_representative: draft.authorized_representative || "",
-                  submission_date: draft.submission_date,
-                  submission_place: draft.submission_place || "",
-                  seal_confirmed: !!draft.seal_confirmed,
-                  signature_confirmed: !!draft.signature_confirmed,
-                })
-                .then((saved) => {
-                  if (activeProjectId.current !== projectId) return;
-                  const snapshot = { ...draft, revision: saved.revision };
-                  submissionDirty.current = false;
-                  setSubmissionDraftDirty(false);
-                  setSubmissionSnapshot(snapshot);
-                  setSubmission(snapshot);
-                  toast("投标资料已保存");
-                  return load();
-                })
-                .catch(async (error) => {
-                  if (activeProjectId.current !== projectId) return;
-                  if (error instanceof ApiError && error.status === 409) {
-                    const latest = await api.submissionProfile(projectId).catch(() => null);
-                    if (latest) setSubmissionSnapshot(latest);
-                    toast("投标资料已在其他位置更新。草稿已保留，可重置后重新填写。", "red");
-                    return;
-                  }
-                  toast(errMsg(error), "red");
-                })
-                .finally(() => {
-                  if (activeProjectId.current === projectId) setSubmissionSaving(false);
-                });
-            }}
-            onOverride={(cid, kind, reason) => {
-              void api.overrideClassification(id, cid, { effective_kind: kind, reason }).then(() => load()).catch((e) => toast(errMsg(e), "red"));
-            }}
-            onResolve={(cid, resolution, attachmentId, reason) => {
-              void api
-                .resolveRequirement(id, cid, { resolution, attachment_id: attachmentId, reason })
-                .then(() => load())
-                .catch((e) => toast(errMsg(e), "red"));
-            }}
-            onUpload={(kind, file) => {
-              void uploadWithAttempt(`attachment:${kind}`, file, (attempt) =>
-                api.uploadAttachment(id, kind, file, attempt),
-              )
-                .then(() => load())
-                .catch((e) => toast(errMsg(e), "red"));
-            }}
-            onAttachAction={(aid, action, revision) => {
-              void api.mutateAttachment(id, aid, action, revision).then(() => load()).catch((e) => toast(errMsg(e), "red"));
-            }}
-          />
-        </div>
+      {step === "authoring" && (
+        <SectionEditor session={session} state={state} />
       )}
-      {step === "parts" && (
-        <PartsPane
-          partKey={part}
-          markdown={partMarkdown}
-          stale={partStale}
-          ended={ended}
-          ready={partReady}
-          preview={partPreview}
-          units={units}
-          gate={gate}
-          onChange={(text) => {
-            dirtyPart.current = true;
-            setPartMarkdown(text);
-          }}
-          onSave={() => {
-            if (!partReady) return;
-            void api
-              .updatePart(id, part, partRevision, partMarkdown)
-              .then(() => {
-                dirtyPart.current = false;
-                toast("已保存");
-                return load();
-              })
-              .catch((e) => toast(errMsg(e), "red"));
-          }}
-          onRegen={() => {
-            if (!partReady) return;
-            void api
-              .regeneratePart(id, part, {
-                expected_content_revision: partRevision,
-                expected_dependency_sha256: partDependencySha,
-              })
-              .then(() => {
-                dirtyPart.current = false;
-                return load();
-              })
-              .catch((e) => toast(errMsg(e), "red"));
-          }}
-          onPreview={setPartPreview}
-        />
+      {step === "preview" && <PreviewPane state={state} />}
+      {step === "export" && (
+        <div className="wrap">
+          <ExportPane session={session} state={state} />
+        </div>
       )}
     </Shell>
   );

@@ -1,7 +1,7 @@
 //! Final V1 storage adapter for `MatchingPublication`.
 //!
-//! The application interface is intentionally small: schedule, claim/load,
-//! heartbeat, publish, and replace a route pick set.  The large-artifact
+//! The application interface is intentionally small: schedule, load, publish,
+//! and replace a route pick set. The large-artifact
 //! Open/Stage/Commit protocol is private to this implementation.
 
 use domain::knowledge_retrieval::{
@@ -15,8 +15,6 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
-const CLAIM_LEASE_MS: i32 = 300_000;
-const LEASE_POLICY_GENERATION: i64 = 1;
 const STAGING_TTL_MS: i64 = 900_000;
 const MAX_BATCH_BYTES: usize = 1024 * 1024;
 const MAX_BATCH_ITEMS: usize = 10_000;
@@ -51,6 +49,7 @@ pub struct EnvelopeSnapshotIdentity {
 #[derive(Debug, Clone)]
 pub struct ScheduledJob {
     pub id: Uuid,
+    pub generation: i64,
     pub snapshots: EnvelopeSnapshotIdentity,
 }
 
@@ -63,7 +62,6 @@ pub struct ScheduleReceipt {
 #[derive(Debug, Clone)]
 pub struct ScheduleEnvironment {
     pub environment: String,
-    pub max_attempts: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -101,14 +99,6 @@ impl ScheduleMutationContext {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MatchClaim {
-    pub token: Uuid,
-    pub attempt: i32,
-    pub claim_lease_ms: i32,
-    pub lease_policy_generation: i64,
-}
-
 #[derive(Debug, Clone)]
 pub struct LoadedRequirement {
     pub id: Uuid,
@@ -137,7 +127,7 @@ pub struct LoadedFrozenHit {
 }
 
 #[derive(Debug, Clone)]
-pub struct ClaimedMatchingRequest {
+pub struct MatchingRequest {
     pub job_id: Uuid,
     pub manifest_id: Uuid,
     pub project_id: Uuid,
@@ -146,7 +136,6 @@ pub struct ClaimedMatchingRequest {
     pub route_id: Uuid,
     pub route: MatchRoute,
     pub empty_policy: String,
-    pub claim: MatchClaim,
     pub requirements: Vec<LoadedRequirement>,
     pub frozen_hits: Vec<LoadedFrozenHit>,
 }
@@ -348,64 +337,95 @@ pub async fn mark_project_matching_mutation(
     Ok(())
 }
 
-pub async fn schedule_dirty_project(
-    pool: &PgPool,
-    project_id: Uuid,
-    environment: ScheduleEnvironment,
-    context: &ScheduleMutationContext,
-) -> Result<Option<ScheduleReceipt>, sqlx::Error> {
-    let port = crate::knowledge_retrieval::PostgresKnowledgeRetrievalAdapter::new(pool.clone());
-    schedule_dirty_project_with_port(pool, project_id, environment, context, &port).await
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScheduleTarget {
+    pub id: Uuid,
+    pub mutation_watermark: i64,
 }
 
-async fn schedule_dirty_project_with_port<P: KnowledgeRetrievalPort>(
+pub async fn bind_schedule_target(
     pool: &PgPool,
     project_id: Uuid,
-    environment: ScheduleEnvironment,
-    context: &ScheduleMutationContext,
-    port: &P,
-) -> Result<Option<ScheduleReceipt>, sqlx::Error> {
-    schedule_project_with_port(pool, project_id, environment, context, port, None).await
+    context: &crate::bidding::MutationContext,
+) -> Result<Option<ScheduleTarget>, sqlx::Error> {
+    let receipt: serde_json::Value =
+        sqlx::query_scalar("SELECT kb_bid_bind_matching_schedule_target($1,$2,$3,$4,$5)")
+            .bind(project_id)
+            .bind(&context.actor)
+            .bind(&context.idempotency_key)
+            .bind(&context.request.bytes)
+            .bind(&context.request.sha256)
+            .fetch_one(pool)
+            .await?;
+    match (
+        receipt.get("target_id").filter(|value| !value.is_null()),
+        receipt
+            .get("target_revision")
+            .filter(|value| !value.is_null()),
+    ) {
+        (None, None) => Ok(None),
+        (Some(id), Some(revision)) => Ok(Some(ScheduleTarget {
+            id: id
+                .as_str()
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .ok_or_else(|| protocol("matching target receipt has an invalid target_id"))?,
+            mutation_watermark: revision.as_i64().ok_or_else(|| {
+                protocol("matching target receipt has an invalid target_revision")
+            })?,
+        })),
+        _ => Err(protocol("matching target receipt is incomplete")),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
-struct RecoveryScheduleFence {
+struct ScheduleFence {
     intent_id: Uuid,
     watermark: i64,
     snapshots: EnvelopeSnapshotIdentity,
 }
 
-pub async fn schedule_recovery_intent(
+pub async fn execute_schedule(
     pool: &PgPool,
     intent_id: Uuid,
-    project_id: Uuid,
-    expected_watermark: i64,
-    expected_snapshots: EnvelopeSnapshotIdentity,
+    mutation_watermark: i64,
     environment: ScheduleEnvironment,
     context: &ScheduleMutationContext,
 ) -> Result<Option<ScheduleReceipt>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT project_id,mutation_watermark,
+                matching_config_snapshot_id,feature_snapshot_id,
+                score_policy_snapshot_id,verifier_policy_snapshot_id
+           FROM bid_matching_schedule_intents WHERE id=$1",
+    )
+    .bind(intent_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if row.get::<i64, _>("mutation_watermark") != mutation_watermark {
+        return Ok(None);
+    }
+    let project_id = row.get("project_id");
     let port = crate::knowledge_retrieval::PostgresKnowledgeRetrievalAdapter::new(pool.clone());
-    let result = schedule_project_with_port(
+    schedule_project_with_port(
         pool,
         project_id,
         environment,
         context,
         &port,
-        Some(RecoveryScheduleFence {
+        ScheduleFence {
             intent_id,
-            watermark: expected_watermark,
-            snapshots: expected_snapshots,
-        }),
+            watermark: row.get("mutation_watermark"),
+            snapshots: EnvelopeSnapshotIdentity {
+                config_snapshot_id: row.get("matching_config_snapshot_id"),
+                feature_snapshot_id: row.get("feature_snapshot_id"),
+                score_policy_snapshot_id: row.get("score_policy_snapshot_id"),
+                verifier_policy_snapshot_id: row.get("verifier_policy_snapshot_id"),
+            },
+        },
     )
-    .await;
-    match result {
-        Err(sqlx::Error::Database(error))
-            if error.message().contains("MATCHING_SCHEDULE_FENCE_LOST") =>
-        {
-            Ok(None)
-        }
-        other => other,
-    }
+    .await
 }
 
 async fn schedule_project_with_port<P: KnowledgeRetrievalPort>(
@@ -414,81 +434,63 @@ async fn schedule_project_with_port<P: KnowledgeRetrievalPort>(
     environment: ScheduleEnvironment,
     context: &ScheduleMutationContext,
     port: &P,
-    recovery_fence: Option<RecoveryScheduleFence>,
+    schedule_fence: ScheduleFence,
 ) -> Result<Option<ScheduleReceipt>, sqlx::Error> {
-    if !(1..=32).contains(&environment.max_attempts)
-        || !matches!(
-            environment.environment.as_str(),
-            "development" | "test" | "production"
-        )
-    {
+    if !matches!(
+        environment.environment.as_str(),
+        "development" | "test" | "production"
+    ) {
         return Err(protocol("invalid matching scheduling policy"));
     }
-    let project = if let Some(fence) = recovery_fence {
-        sqlx::query(
-            "SELECT project.status,project.matching_mutation_watermark
+    let project = sqlx::query(
+        "SELECT project.status,project.matching_mutation_watermark
                FROM bidding_projects project
                JOIN bid_matching_schedule_intents intent ON intent.project_id=project.id
               WHERE project.id=$1 AND intent.id=$2
+                AND project.status='open'
                 AND intent.mutation_watermark=$3
                 AND project.matching_mutation_watermark=$3
                 AND intent.matching_config_snapshot_id=$4
                 AND intent.feature_snapshot_id=$5
                 AND intent.score_policy_snapshot_id=$6
                 AND intent.verifier_policy_snapshot_id=$7",
-        )
-        .bind(project_id)
-        .bind(fence.intent_id)
-        .bind(fence.watermark)
-        .bind(fence.snapshots.config_snapshot_id)
-        .bind(fence.snapshots.feature_snapshot_id)
-        .bind(fence.snapshots.score_policy_snapshot_id)
-        .bind(fence.snapshots.verifier_policy_snapshot_id)
-        .fetch_optional(pool)
-        .await?
-    } else {
-        sqlx::query("SELECT status,matching_mutation_watermark FROM bidding_projects WHERE id=$1")
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await?
+    )
+    .bind(project_id)
+    .bind(schedule_fence.intent_id)
+    .bind(schedule_fence.watermark)
+    .bind(schedule_fence.snapshots.config_snapshot_id)
+    .bind(schedule_fence.snapshots.feature_snapshot_id)
+    .bind(schedule_fence.snapshots.score_policy_snapshot_id)
+    .bind(schedule_fence.snapshots.verifier_policy_snapshot_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(_) = project else {
+        return Ok(None);
     };
-    let Some(project) = project else {
-        return if recovery_fence.is_some() {
-            Ok(None)
-        } else {
-            Err(protocol("bid project does not exist"))
-        };
-    };
-    if project.get::<String, _>("status") != "open" {
-        return Err(protocol("bid project is not open"));
-    }
-    let watermark: i64 = recovery_fence
-        .map(|fence| fence.watermark)
-        .unwrap_or_else(|| project.get("matching_mutation_watermark"));
+    let watermark = schedule_fence.watermark;
     let (actor, idempotency_key) = context.identity(project_id, watermark);
     let request_bytes = serde_json::to_vec(&serde_json::json!({
         "schema_version": 1,
         "project_id": project_id,
         "expected_watermark": watermark,
-        "environment": environment.environment,
-        "max_attempts": environment.max_attempts
+        "environment": environment.environment
     }))
     .expect("matching schedule request serializes");
     let request_sha256 = sha256_hex(&request_bytes);
     let already_scheduled: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM bidding_current_routes WHERE project_id=$1 AND mutation_watermark=$2)",
+        "SELECT EXISTS(
+           SELECT 1 FROM bid_matching_manifests WHERE schedule_intent_id=$1)",
     )
-    .bind(project_id)
-    .bind(watermark)
+    .bind(schedule_fence.intent_id)
     .fetch_one(pool)
     .await?;
     if already_scheduled {
         return persist_schedule(
             pool,
             PersistScheduleInput {
+                schedule_intent_id: schedule_fence.intent_id,
                 project_id,
                 watermark,
-                max_attempts: environment.max_attempts,
                 payload: &serde_json::json!({}),
                 actor: &actor,
                 idempotency_key: &idempotency_key,
@@ -514,9 +516,12 @@ async fn schedule_project_with_port<P: KnowledgeRetrievalPort>(
 
     let manifest_id = Uuid::new_v4();
     let mut technical_units = BTreeSet::new();
+    let mut has_commercial_requirements = false;
     for row in &clause_rows {
         if row.get::<String, _>("family") == "technical" {
             technical_units.insert(row.get::<Uuid, _>("unit_id"));
+        } else {
+            has_commercial_requirements = true;
         }
     }
     let mut routes = Vec::new();
@@ -529,18 +534,19 @@ async fn schedule_project_with_port<P: KnowledgeRetrievalPort>(
             scope_sha256: sha256_hex(format!("technical:{unit_id}").as_bytes()),
         });
     }
-    routes.push(FrozenRouteInput {
-        id: Uuid::new_v4(),
-        route: MatchRoute::Commercial,
-        ordinal: routes.len() as u32,
-        empty_policy: "clear_route".into(),
-        scope_sha256: sha256_hex(b"commercial"),
-    });
+    if has_commercial_requirements {
+        routes.push(FrozenRouteInput {
+            id: Uuid::new_v4(),
+            route: MatchRoute::Commercial,
+            ordinal: routes.len() as u32,
+            empty_policy: "clear_route".into(),
+            scope_sha256: sha256_hex(b"commercial"),
+        });
+    }
     let commercial_route = routes
         .iter()
         .find(|route| route.route == MatchRoute::Commercial)
-        .expect("commercial route exists")
-        .id;
+        .map(|route| route.id);
     let route_by_unit: HashMap<Uuid, Uuid> = routes
         .iter()
         .filter_map(|route| match route.route {
@@ -554,7 +560,7 @@ async fn schedule_project_with_port<P: KnowledgeRetrievalPort>(
         let route_id = if family == "technical" {
             route_by_unit[&row.get::<Uuid, _>("unit_id")]
         } else {
-            commercial_route
+            commercial_route.expect("commercial requirements create a commercial route")
         };
         let text: String = row.get("text");
         requirements.push(FrozenRequirementInput {
@@ -783,9 +789,9 @@ async fn schedule_project_with_port<P: KnowledgeRetrievalPort>(
     persist_schedule(
         pool,
         PersistScheduleInput {
+            schedule_intent_id: schedule_fence.intent_id,
             project_id,
             watermark,
-            max_attempts: environment.max_attempts,
             payload: &payload,
             actor: &actor,
             idempotency_key: &idempotency_key,
@@ -797,9 +803,9 @@ async fn schedule_project_with_port<P: KnowledgeRetrievalPort>(
 }
 
 struct PersistScheduleInput<'a> {
+    schedule_intent_id: Uuid,
     project_id: Uuid,
     watermark: i64,
-    max_attempts: i32,
     payload: &'a serde_json::Value,
     actor: &'a str,
     idempotency_key: &'a str,
@@ -813,9 +819,9 @@ async fn persist_schedule(
 ) -> Result<Option<ScheduleReceipt>, sqlx::Error> {
     let scheduled: Option<serde_json::Value> =
         sqlx::query_scalar("SELECT kb_bid_matching_schedule($1,$2,$3,$4,$5,$6,$7,$8)")
+            .bind(input.schedule_intent_id)
             .bind(input.project_id)
             .bind(input.watermark)
-            .bind(input.max_attempts)
             .bind(input.payload)
             .bind(input.actor)
             .bind(input.idempotency_key)
@@ -838,36 +844,40 @@ async fn persist_schedule(
         verifier_policy_snapshot_id: uuid_json_field(&scheduled, "verifier_policy_snapshot_id")?,
     };
     let jobs = scheduled
-        .get("job_ids")
+        .get("jobs")
         .and_then(|value| value.as_array())
         .ok_or_else(|| protocol("matching schedule receipt missing jobs"))?
         .iter()
-        .filter_map(|value| value.as_str().and_then(|value| Uuid::parse_str(value).ok()))
-        .map(|id| ScheduledJob { id, snapshots })
-        .collect();
+        .map(|value| {
+            Ok(ScheduledJob {
+                id: uuid_json_field(value, "id")?,
+                generation: value
+                    .get("generation")
+                    .and_then(serde_json::Value::as_i64)
+                    .ok_or_else(|| protocol("matching schedule job generation missing"))?,
+                snapshots,
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
     Ok(Some(ScheduleReceipt { manifest_id, jobs }))
 }
 
-pub async fn claim_and_load(
+pub async fn start_matching_execution(
     pool: &PgPool,
     job_id: Uuid,
-    snapshots: EnvelopeSnapshotIdentity,
-) -> Result<Option<ClaimedMatchingRequest>, sqlx::Error> {
-    let token = Uuid::new_v4();
-    let claimed: Option<serde_json::Value> =
-        sqlx::query_scalar("SELECT kb_bid_matching_claim($1,$2,$3,$4,$5,$6)")
-            .bind(job_id)
-            .bind(token)
-            .bind(snapshots.config_snapshot_id)
-            .bind(snapshots.feature_snapshot_id)
-            .bind(snapshots.score_policy_snapshot_id)
-            .bind(snapshots.verifier_policy_snapshot_id)
-            .fetch_one(pool)
-            .await?;
-    let Some(claimed) = claimed else {
-        return Ok(None);
-    };
+    generation: i64,
+) -> Result<Option<MatchingRequest>, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    let started: bool = sqlx::query_scalar("SELECT kb_bid_matching_start($1,$2)")
+        .bind(job_id)
+        .bind(generation)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !started {
+        return Ok(None);
+    }
+    // kb_bid_matching_start retains the project and job row locks in this
+    // transaction while the frozen request is loaded.
     let job = sqlx::query(
         "SELECT j.*,m.generation,m.mutation_watermark,r.route_kind,r.unit_id,r.empty_policy
            FROM bid_matching_jobs j
@@ -878,31 +888,15 @@ pub async fn claim_and_load(
     .bind(job_id)
     .fetch_one(&mut *tx)
     .await?;
-    let attempt = claimed
-        .get("attempt")
-        .and_then(|value| value.as_i64())
-        .ok_or_else(|| protocol("matching claim missing attempt"))? as i32;
-    let lease_ms = claimed
-        .get("claim_lease_ms")
-        .and_then(|value| value.as_i64())
-        .unwrap_or(CLAIM_LEASE_MS as i64) as i32;
-    let lease_generation = claimed
-        .get("lease_policy_generation")
-        .and_then(|value| value.as_i64())
-        .unwrap_or(LEASE_POLICY_GENERATION);
-    let request = load_claimed(&mut tx, &job, token, attempt, lease_ms, lease_generation).await?;
+    let request = load_matching_request(&mut tx, &job).await?;
     tx.commit().await?;
     Ok(Some(request))
 }
 
-async fn load_claimed(
+async fn load_matching_request(
     tx: &mut Transaction<'_, Postgres>,
     job: &sqlx::postgres::PgRow,
-    token: Uuid,
-    attempt: i32,
-    lease_ms: i32,
-    lease_generation: i64,
-) -> Result<ClaimedMatchingRequest, sqlx::Error> {
+) -> Result<MatchingRequest, sqlx::Error> {
     let route_id: Uuid = job.get("route_id");
     let requirements = sqlx::query(
         "SELECT id,ordinal,requirement_text,requirement_sha256
@@ -957,7 +951,7 @@ async fn load_claimed(
     } else {
         MatchRoute::Commercial
     };
-    Ok(ClaimedMatchingRequest {
+    Ok(MatchingRequest {
         job_id: job.get("id"),
         manifest_id: job.get("manifest_id"),
         project_id: job.get("project_id"),
@@ -966,36 +960,14 @@ async fn load_claimed(
         route_id,
         route,
         empty_policy: job.get("empty_policy"),
-        claim: MatchClaim {
-            token,
-            attempt,
-            claim_lease_ms: lease_ms,
-            lease_policy_generation: lease_generation,
-        },
         requirements,
         frozen_hits,
     })
 }
 
-pub async fn heartbeat_claim(
-    pool: &PgPool,
-    request: &ClaimedMatchingRequest,
-) -> Result<bool, sqlx::Error> {
-    let ok: bool = sqlx::query_scalar("SELECT kb_bid_matching_heartbeat($1,$2,$3,$4,$5,$6)")
-        .bind(request.job_id)
-        .bind(request.claim.token)
-        .bind(request.claim.attempt)
-        .bind(request.claim.claim_lease_ms)
-        .bind(request.claim.lease_policy_generation)
-        .bind(STAGING_TTL_MS as i32)
-        .fetch_one(pool)
-        .await?;
-    if ok { Ok(true) } else { Ok(false) }
-}
-
 pub async fn publish_route(
     pool: &PgPool,
-    claimed: &ClaimedMatchingRequest,
+    request: &MatchingRequest,
     report: PublishRouteV2,
 ) -> Result<PublishReceipt, sqlx::Error> {
     // The adapter is the single authority that derives the persisted report
@@ -1008,7 +980,7 @@ pub async fn publish_route(
            LEFT JOIN bidding_matching_report_history report ON report.id=job.completed_report_id
           WHERE job.id=$1",
         )
-        .bind(claimed.job_id)
+        .bind(request.job_id)
         .fetch_optional(pool)
         .await?
         && status == "completed"
@@ -1020,22 +992,24 @@ pub async fn publish_route(
             &report_sha256,
         );
     }
+    cleanup_staging(pool).await?;
     let batches = stage_collections(&report)?;
-    let staging_id = open_staging_set(pool, claimed, &report, &batches).await?;
+    let staging_id = open_staging_set(pool, request, &report, &batches).await?;
     stage_report_payload_for_set(
         pool,
-        claimed,
+        request,
         staging_id,
+        report.report_nonce,
         &report.canonical_payload,
         &report_sha256,
     )
     .await?;
     for batch in batches {
-        stage_batch(pool, claimed, staging_id, batch).await?;
+        stage_batch(pool, request, staging_id, batch).await?;
     }
     commit_staged_route(
         pool,
-        claimed,
+        request,
         staging_id,
         report.report_id,
         report.report_nonce,
@@ -1071,7 +1045,7 @@ struct StageBatch {
 
 async fn open_staging_set(
     pool: &PgPool,
-    claimed: &ClaimedMatchingRequest,
+    request: &MatchingRequest,
     report: &PublishRouteV2,
     batches: &[StageBatch],
 ) -> Result<Uuid, sqlx::Error> {
@@ -1085,14 +1059,13 @@ async fn open_staging_set(
         .sum::<i64>();
     let open_hash = sha256_hex(
         format!(
-            "OpenStagingSetV1:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
-            claimed.job_id,
-            claimed.claim.attempt,
-            claimed.route_id,
-            claimed.manifest_id,
-            claimed.project_id,
-            claimed.generation,
-            claimed.mutation_watermark,
+            "OpenStagingSetV1:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            request.job_id,
+            request.route_id,
+            request.manifest_id,
+            request.project_id,
+            request.generation,
+            request.mutation_watermark,
             report.report_nonce,
             batches.len(),
             expected_item_count,
@@ -1101,14 +1074,13 @@ async fn open_staging_set(
         .as_bytes(),
     );
     let payload = serde_json::json!({
-        "job_id": claimed.job_id,
-        "claim_token": claimed.claim.token,
-        "attempt": claimed.claim.attempt,
-        "route_id": claimed.route_id,
-        "manifest_id": claimed.manifest_id,
-        "project_id": claimed.project_id,
-        "generation": claimed.generation,
-        "mutation_watermark": claimed.mutation_watermark,
+        "job_id": request.job_id,
+        "route_id": request.route_id,
+        "target_revision": request.generation,
+        "manifest_id": request.manifest_id,
+        "project_id": request.project_id,
+        "generation": request.generation,
+        "mutation_watermark": request.mutation_watermark,
         "report_nonce": report.report_nonce,
         "open_payload_sha256": open_hash,
         "expected_batch_count": batches.len(),
@@ -1183,16 +1155,15 @@ fn split_collection<T: Serialize>(
 
 async fn stage_batch(
     pool: &PgPool,
-    claimed: &ClaimedMatchingRequest,
+    request: &MatchingRequest,
     staging_id: Uuid,
     batch: StageBatch,
 ) -> Result<(), sqlx::Error> {
     let items = stage_batch_items(batch.kind, &batch.bytes)?;
     let payload = serde_json::json!({
         "staging_set_id": staging_id,
-        "job_id": claimed.job_id,
-        "claim_token": claimed.claim.token,
-        "attempt": claimed.claim.attempt,
+        "job_id": request.job_id,
+        "target_revision": request.generation,
         "batch_ordinal": batch.ordinal,
         "collection_kind": batch.kind,
         "canonical_items_b64": base64_encode(&batch.bytes),
@@ -1233,17 +1204,16 @@ fn stage_batch_items(kind: &str, bytes: &[u8]) -> Result<serde_json::Value, sqlx
 
 async fn commit_staged_route(
     pool: &PgPool,
-    claimed: &ClaimedMatchingRequest,
+    request: &MatchingRequest,
     staging_id: Uuid,
     report_id: Uuid,
     report_nonce: Uuid,
     expected_report_sha256: &str,
 ) -> Result<PublishReceipt, sqlx::Error> {
     let receipt: serde_json::Value =
-        sqlx::query_scalar("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6,$7)")
-            .bind(claimed.job_id)
-            .bind(claimed.claim.token)
-            .bind(claimed.claim.attempt)
+        sqlx::query_scalar("SELECT kb_bid_matching_commit($1,$2,$3,$4,$5,$6)")
+            .bind(request.job_id)
+            .bind(request.generation)
             .bind(staging_id)
             .bind(report_id)
             .bind(report_nonce)
@@ -1259,16 +1229,20 @@ async fn commit_staged_route(
 
 async fn stage_report_payload_for_set(
     pool: &PgPool,
-    _claimed: &ClaimedMatchingRequest,
+    request: &MatchingRequest,
     staging_id: Uuid,
+    report_nonce: Uuid,
     canonical_payload: &[u8],
     content_sha256: &str,
 ) -> Result<(), sqlx::Error> {
     if sha256_hex(canonical_payload) != content_sha256 {
         return Err(protocol("REPORT_HASH_MISMATCH"));
     }
-    sqlx::query("SELECT kb_bid_matching_stage_report_payload($1,$2,$3)")
+    sqlx::query("SELECT kb_bid_matching_stage_report_payload($1,$2,$3,$4,$5,$6)")
+        .bind(request.job_id)
+        .bind(request.generation)
         .bind(staging_id)
+        .bind(report_nonce)
         .bind(canonical_payload)
         .bind(content_sha256)
         .execute(pool)
@@ -1276,75 +1250,28 @@ async fn stage_report_payload_for_set(
     Ok(())
 }
 
-pub async fn retry_claim(
+pub async fn fail_matching(
     pool: &PgPool,
-    claimed: &ClaimedMatchingRequest,
+    request: &MatchingRequest,
     code: &str,
     detail: &str,
+    retryable: bool,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query("SELECT kb_bid_matching_retry_claim($1,$2,$3,$4,$5)")
-        .bind(claimed.job_id)
-        .bind(claimed.claim.token)
-        .bind(claimed.claim.attempt)
+    sqlx::query_scalar("SELECT kb_bid_fail_matching($1,$2,$3,$4,$5)")
+        .bind(request.job_id)
+        .bind(request.generation)
         .bind(code)
         .bind(bound_detail(detail))
-        .execute(pool)
-        .await?;
-    Ok(true)
+        .bind(retryable)
+        .fetch_one(pool)
+        .await
 }
 
-pub async fn fail_claim(
-    pool: &PgPool,
-    claimed: &ClaimedMatchingRequest,
-    code: &str,
-    detail: &str,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query("SELECT kb_bid_matching_fail_claim($1,$2,$3,$4,$5)")
-        .bind(claimed.job_id)
-        .bind(claimed.claim.token)
-        .bind(claimed.claim.attempt)
-        .bind(code)
-        .bind(bound_detail(detail))
-        .execute(pool)
-        .await?;
-    Ok(true)
-}
-
-pub async fn reap_expired_claims(pool: &PgPool) -> Result<u64, sqlx::Error> {
-    let n: i32 = sqlx::query_scalar("SELECT kb_bid_matching_reap()")
+async fn cleanup_staging(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let n: i32 = sqlx::query_scalar("SELECT kb_bid_cleanup_matching_staging()")
         .fetch_one(pool)
         .await?;
     Ok(n as u64)
-}
-
-pub async fn pending_route_envelopes(
-    pool: &PgPool,
-) -> Result<Vec<PendingRouteEnvelope>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT id,matching_config_snapshot_id,feature_snapshot_id,
-      score_policy_snapshot_id,verifier_policy_snapshot_id
-      FROM bid_matching_jobs WHERE status='pending' ORDER BY created_at,id",
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| PendingRouteEnvelope {
-            job_id: row.get("id"),
-            snapshots: EnvelopeSnapshotIdentity {
-                config_snapshot_id: row.get("matching_config_snapshot_id"),
-                feature_snapshot_id: row.get("feature_snapshot_id"),
-                score_policy_snapshot_id: row.get("score_policy_snapshot_id"),
-                verifier_policy_snapshot_id: row.get("verifier_policy_snapshot_id"),
-            },
-        })
-        .collect())
-}
-
-#[derive(Debug, Clone)]
-pub struct PendingRouteEnvelope {
-    pub job_id: Uuid,
-    pub snapshots: EnvelopeSnapshotIdentity,
 }
 
 pub async fn current_routes(

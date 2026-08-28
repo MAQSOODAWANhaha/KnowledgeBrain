@@ -1,6 +1,8 @@
-# 两路匹配与不可变发布
+# 两路匹配与不可变发布（Legacy V1实现快照）
 
-本文定义 `MatchingPublication` 的最终 V1。它消费 confirmed matching clauses 和知识库检索端口，发布可验证的 immutable report，并管理人工选择集。
+> Target V2节点级EvidenceBundle、选择模式和图片media identity见[`../../docs/platform/tender-to-submission-authoring.md`](../../docs/platform/tender-to-submission-authoring.md)、[`tender-to-submission-v2.md`](tender-to-submission-v2.md)及[`../knowledge-base/bidding-evidence-media-v3.md`](../knowledge-base/bidding-evidence-media-v3.md)。本文只用于V1匹配实现删除/复用定位，不再定义目标route/part模型。
+
+本文记录`MatchingPublication`的V1实现快照。
 
 ## 1. 边界
 
@@ -8,7 +10,7 @@ Matching 拥有：
 
 - project matching mutation watermark；
 - frozen manifest、route 与 route membership；
-- job/attempt/claim/lease；
+- matching job target/revision 与 staging；
 - frozen retrieved source chunks、candidate、evidence、decision、report；
 - current report projection；
 - `RoutePickSetV1` 与 `ProjectPickSetV1`。
@@ -24,7 +26,6 @@ Open/Stage/Commit 是 Matching storage adapter 的内部发布机制。applicati
 
 ```text
 execute_schedule(schedule_target_identity)
-claim_route(job_identity)
 execute_route(frozen_route_scope)
 publish_route(matching_report)
 ```
@@ -35,14 +36,13 @@ publish_route(matching_report)
 
 1. 推进 `matching_mutation_watermark`；
 2. 使旧 current report/pick/consumer stale；
-3. 创建 immutable base async target 与 typed matching schedule target，冻结 generation、watermark 和 config/feature/score/verifier snapshots；
-4. `stage` 对应 dispatch intent。
+3. 创建唯一的 immutable matching schedule target，冻结 generation、watermark 和 config/feature/score/verifier snapshots。
 
 不得只增加 watermark 后依赖全局 dirty scan，也不得在恢复时读取 current snapshot 临时补 schedule intent。
 
-schedule executor 从 durable target 取得冻结合同，调用 `KnowledgeRetrievalPort` 后，在一个 fenced transaction 中创建 manifest、`0..N` matching jobs、等量 job dispatch intents，并终结 schedule target/dispatch。事务失败时 manifest、job 和 child intent 全部不可见；成功后不再进行第二次 DB 调用或 commit 后 enqueue。完整 delivery/恢复合同见 [`durable-dispatch.md`](durable-dispatch.md)。
+触发 mutation commit 后单次 enqueue schedule；失败时调用方收到可重试错误并以同一幂等 key 重放。schedule executor 从 target 取得冻结合同，调用 `KnowledgeRetrievalPort` 后，在一个 current-watermark fenced transaction 中创建 manifest 与 `0..N` matching job targets。事务失败时 manifest 和 job 全部不可见；commit 后逐个 enqueue job target，部分失败时父 schedule job 由 Oxana retry，并只重放相同 child unique job。完整 transport 合同见 [`durable-dispatch.md`](durable-dispatch.md)。
 
-零 route 是合法的 `noop_empty_scope` 终态：事务仍发布可审计的 empty manifest，不创建 matching job 或 child dispatch intent，并把 schedule target/dispatch 一并终结。旧 current report、route pick 与 project pick 已由触发本次 schedule 的 mutation 按 watermark 标记 stale，不得因零 route 继续保留为 current，也不得由恢复流程临时补造空 job。
+零 route 是合法的 `noop_empty_scope` 终态：事务仍发布可审计的 empty manifest，不创建 matching job；manifest 的存在即表示 schedule target 已完成。旧 current report、route pick 与 project pick 已由触发本次 schedule 的 mutation 按 watermark 标记 stale，不得因零 route 继续保留为 current，也不得由恢复流程临时补造空 job。
 
 ## 2. 两路知识检索
 
@@ -213,30 +213,29 @@ items 按 `(source_chunk_artifact_id,start_offset,end_offset,quote bytes)` 排�
 
 大报告不能放入单个 JSON commit 请求，因此 adapter 使用 Open -> Stage -> Commit；这三个 wire DTO 不向业务模块泄漏。
 
-### 6.1 claim 与 lease
+### 6.1 执行身份
 
-claim 成功时冻结：
+matching target 与 Oxana unique job 固定：
 
 ```text
-claim_token, attempt
-claimed_at, heartbeat_at
-claim_lease_ms, lease_policy_generation
+job_id, route_id, target_revision
+manifest_id, project_id, generation, mutation_watermark
 ```
 
-同一 attempt 不可修改 lease。heartbeat、stage、commit、cleanup 和 reaper 都用 DB time 与冻结 lease；调用者不能自由传 `stale_secs`。
+Oxana retry、process crash resurrection 和 dead revive 都复用同一 `job_id`。PostgreSQL 不保存 transport attempt、claim、lease 或 heartbeat；每次执行使用新的`report_nonce`，最终commit只校验business generation/watermark/current pointer。
 
 ### 6.2 OpenStagingSetV1
 
 Open 显式创建 active staging set，绑定：
 
 ```text
-job_id, route_id, claim_token, attempt
+job_id, route_id, target_revision
 manifest_id, project_id, generation, mutation_watermark
-report_nonce, claim lease/policy
+report_nonce
 status, expires_at
 ```
 
-每个 `(job,claim,attempt,route)` 最多一个 active set。同 key/payload 幂等重放首次 receipt；异 payload 返回稳定 mismatch。project 级 active sets、rows、chunk bytes 和 evidence bytes 有硬上限。
+每个 `(job_id,route_id,target_revision)` 最多一个 active set。每次handler执行开始时，先原子abandon并清理该job遗留的未消费set，再用新的`report_nonce` Open；同一次执行的同key/payload重放首次receipt，异payload返回稳定mismatch。project级active sets、rows、chunk bytes和evidence bytes有硬上限。
 
 ### 6.3 StageRouteBatchV1
 
@@ -251,19 +250,13 @@ candidate_groups
 reason_codes
 ```
 
-request 绑定 staging set、job/route/token/attempt、report nonce、batch ordinal、collection kind、canonical items 和 payload hash。单批 canonical JSON 有硬上限；`(staging_set_id,batch_ordinal)` 唯一，同 hash 重放首次 receipt，异 hash 冲突。
+request 绑定 staging set、job/route/target revision、report nonce、batch ordinal、collection kind、canonical items 和 payload hash。单批 canonical JSON 有硬上限；`(staging_set_id,batch_ordinal)` 唯一，同 hash 重放首次 receipt，异 hash 冲突。
 
-每次 batch 在 `project -> job -> staging set` 锁内检查 current claim、heartbeat freshness、TTL、scope、item schema 和累计配额。
+每次 batch 在 `project -> job -> staging set` 锁内检查 current target revision、TTL、scope、item schema 和累计配额。成功 stage 可顺延临时数据 cleanup TTL，但不续租 job、不影响 Oxana retry。
 
-### 6.4 heartbeat
+### 6.4 Oxana retry 与 resurrection
 
-worker 在 claim 后周期 heartbeat，间隔为：
-
-```text
-min(claim_lease_ms / 3, staging_ttl / 3, 5 minutes)
-```
-
-heartbeat 用 token CAS 更新 DB time，并延长该 claim 唯一 active staging TTL。SQL/连接/timeout、CAS loss、lease 过期或 set 非 active 都立即停止 stage/commit。
+worker 不启动业务 heartbeat。handler 返回的可重试错误、进程崩溃和 retry 耗尽分别由 Oxana retry、resurrection 和 dead queue 处理。相同 job ID重进时先清理未消费staging，再按同一target revision从冻结输入重算；不推进transport generation，也不尝试拼接两次provider输出。
 
 ### 6.5 CommitRouteV2
 
@@ -272,7 +265,7 @@ Commit 只发送 fixed header、expected counts/bytes、expected batch count、r
 单事务验证：
 
 1. completed idempotency receipt 是否可直接重放；
-2. project/job/route/claim/attempt/manifest/generation/watermark current；
+2. project/job/route/target revision/manifest/generation/watermark current；
 3. staging active、未过期、nonce 一致；
 4. batch ordinals 连续且 counts/bytes 完全相等；
 5. source/evidence/candidate/decision/group FK 与 scope；
@@ -284,13 +277,13 @@ Commit 只发送 fixed header、expected counts/bytes、expected batch count、r
 
 任何失败不发布 current report。旧单 JSON `CommitRoute` 路径必须删除。
 
-### 6.6 cleanup/reaper
+### 6.6 staging cleanup
 
 - active set TTL 到期 -> expired 并释放配额；
-- claim lease 过期由 matching target-local repair 以冻结 policy 精确终结旧 attempt，并在同一事务推进下一 dispatch offer；
+- 普通可重试错误直接返回 `Err`，由 Oxana 对同一 unique job重试；不修改transport attempt、不另行enqueue；
 - failed/expired staged rows 可物理清理，但 immutable committed artifacts 不受影响；
-- cleanup/repair 使用 token/CAS 和 allowlisted system actor；
-- terminal staging 不可续期或继续收 batch。
+- cleanup 使用 target/job identity、CAS 和 allowlisted system actor，只回收临时业务数据；
+- cleanup 不触发retry、revive或enqueue；terminal staging 不可继续收 batch。
 
 ## 7. 人工选择
 
@@ -355,9 +348,9 @@ selected_by, selected_at
 - report canonical bytes 的 Rust/SQL exact fixture；
 - source quote 多字节 offset、live 文档删除后历史重放；
 - route ordinal 与 selected comparator 负例；
-- Open/Stage/Commit 同 key replay、异 payload、lease loss、TTL、配额、batch gap；
+- Open/Stage/Commit 同执行key replay、异payload、retry先清旧staging、stale target revision、TTL、配额、batch gap；
 - commit header 错配、report hash 错配、CAS loss 零 current 写；
-- reaper/cleanup/terminal purge/counter release；
+- staging cleanup不触发enqueue、terminal purge/counter release；
 - technical 全 supported 可选择 1..N；
 - 普通 unit + unsectioned 混合 ProjectPickSet 正例，以及错误 report/nil/part 映射负例；
 - 最终代码中不存在旧 `CommitRoute`、live evidence fallback 或按 requirement 任取首个 candidate 的重建路径。

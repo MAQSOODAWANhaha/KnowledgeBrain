@@ -1,16 +1,15 @@
 //! Queue names, pool labels, housekeeping, and oxana enqueue.
 
+mod bid_authoring_contract;
+pub use bid_authoring_contract::*;
 mod jobs;
 pub use jobs::*;
-mod lease;
-pub use lease::*;
 mod work_transport;
 pub use work_transport::*;
 
 use chrono::{Duration, Utc};
 use domain::{
-    ParseStatus, QUEUE_BID_CONVERT_V1, QUEUE_BID_EXTRACT_V1, QUEUE_BID_MATCHING_V1,
-    QUEUE_BID_RENDER_V1, QUEUE_DEFAULT, QUEUE_GRAPH, QUEUE_LOW, QUEUE_MULTIMODAL,
+    ParseStatus, QUEUE_BID_DELIVERY_V1, QUEUE_DEFAULT, QUEUE_GRAPH, QUEUE_LOW, QUEUE_MULTIMODAL,
     QUEUE_POSTPROCESS, QUEUE_QUESTION, QUEUE_SUMMARY, QUEUE_WIKI, Store,
 };
 
@@ -35,11 +34,6 @@ pub fn init_tracing() {
         .try_init();
 }
 
-pub fn rejected_legacy_bid_match_task(task_type: &str) -> bool {
-    matches!(task_type, "bid:match" | "bid:match-route")
-        || (task_type.starts_with("bid:match") && task_type != domain::TYPE_BID_MATCH_ROUTE_V1)
-}
-
 fn declared_disabled_task(task_type: &str) -> bool {
     match domain::launch_mode(task_type) {
         Ok(Some(domain::LaunchMode::DeclaredDisabled)) => true,
@@ -52,19 +46,13 @@ fn declared_disabled_task(task_type: &str) -> bool {
 }
 
 pub fn queue_for(task_type: &str) -> &'static str {
-    if rejected_legacy_bid_match_task(task_type) {
-        return "rejected:bid-match";
-    }
     if declared_disabled_task(task_type) {
         return "rejected:declared-disabled";
     }
     match task_type {
         domain::TYPE_DOCUMENT_PROCESS | domain::TYPE_MANUAL_PROCESS => QUEUE_DEFAULT,
-        domain::TYPE_BID_CONVERT | domain::TYPE_BID_PREPARE_ATTACHMENT_V1 => QUEUE_BID_CONVERT_V1,
-        domain::TYPE_BID_EXTRACT => QUEUE_BID_EXTRACT_V1,
-        domain::TYPE_BID_MATCH_ROUTE_V1 => QUEUE_BID_MATCHING_V1,
-        domain::TYPE_BID_RENDER_SUBMISSION_V1 => QUEUE_BID_RENDER_V1,
-        domain::TYPE_POST_PROCESS => QUEUE_POSTPROCESS,
+        domain::TYPE_BID_DELIVERY_V1 => QUEUE_BID_DELIVERY_V1,
+        domain::TYPE_POST_PROCESS | domain::TYPE_SEMANTIC_INDEX_V2 => QUEUE_POSTPROCESS,
         domain::TYPE_SUMMARY | domain::TYPE_DATATABLE => QUEUE_SUMMARY,
         domain::TYPE_IMAGE_MULTIMODAL => QUEUE_MULTIMODAL,
         domain::TYPE_CHUNK_EXTRACT => QUEUE_GRAPH,
@@ -74,8 +62,7 @@ pub fn queue_for(task_type: &str) -> &'static str {
         | domain::TYPE_KB_DELETE
         | domain::TYPE_LIST_DELETE
         | domain::TYPE_LIST_REPARSE
-        | domain::TYPE_INDEX_DELETE
-        | domain::TYPE_SYSTEM_LIVE_RECOVERY_V1 => QUEUE_LOW,
+        | domain::TYPE_INDEX_DELETE => QUEUE_LOW,
         _ => "rejected:unknown",
     }
 }
@@ -147,32 +134,20 @@ mod tests {
         assert_eq!(queue_for(domain::TYPE_DOCUMENT_PROCESS), "default");
         assert_eq!(queue_for(domain::TYPE_MANUAL_PROCESS), "default");
         assert_eq!(
-            queue_for(domain::TYPE_BID_CONVERT),
-            domain::QUEUE_BID_CONVERT_V1
-        );
-        assert_eq!(
-            queue_for(domain::TYPE_BID_PREPARE_ATTACHMENT_V1),
-            domain::QUEUE_BID_CONVERT_V1
-        );
-        assert_eq!(
-            queue_for(domain::TYPE_BID_EXTRACT),
-            domain::QUEUE_BID_EXTRACT_V1
-        );
-        assert_eq!(
-            queue_for(domain::TYPE_BID_MATCH_ROUTE_V1),
-            domain::QUEUE_BID_MATCHING_V1
-        );
-        assert_eq!(
-            queue_for(domain::TYPE_BID_RENDER_SUBMISSION_V1),
-            domain::QUEUE_BID_RENDER_V1
+            queue_for(domain::TYPE_BID_DELIVERY_V1),
+            domain::QUEUE_BID_DELIVERY_V1
         );
         assert_eq!(queue_for(domain::TYPE_POST_PROCESS), "postprocess");
+        assert_eq!(queue_for(domain::TYPE_SEMANTIC_INDEX_V2), "postprocess");
         assert_eq!(queue_for(domain::TYPE_KB_DELETE), "low");
         assert_eq!(queue_for(domain::TYPE_WIKI_INGEST), "wiki");
-        assert_ne!(queue_for(domain::TYPE_BID_CONVERT), domain::QUEUE_DEFAULT);
+        assert_ne!(
+            queue_for(domain::TYPE_BID_DELIVERY_V1),
+            domain::QUEUE_DEFAULT
+        );
         assert_ne!(queue_for("not-a-real-task"), domain::QUEUE_DEFAULT);
         assert_eq!(queue_for("not-a-real-task"), "rejected:unknown");
-        assert_eq!(queue_for("bid:match"), "rejected:bid-match");
+        assert_eq!(queue_for("bid:match"), "rejected:unknown");
         assert_eq!(
             queue_for(domain::TYPE_IMAGE_MULTIMODAL),
             "rejected:declared-disabled"
@@ -195,14 +170,6 @@ mod tests {
         assert_eq!(HOUSEKEEP_CRON, "0 */5 * * * *");
         assert_eq!(HOUSEKEEP_STALE_SECS, 2 * 3600 + 10 * 60);
         assert_eq!(HOUSEKEEP_EXTRACT_STALE_SECS, 90);
-    }
-
-    #[test]
-    fn live_recovery_required_lane_maps_to_low_queue() {
-        assert_eq!(
-            queue_for(domain::TYPE_SYSTEM_LIVE_RECOVERY_V1),
-            domain::QUEUE_LOW
-        );
     }
 
     #[test]
@@ -236,18 +203,7 @@ mod tests {
             .iter()
             .map(|entry| entry.task_type.as_str())
             .collect();
-        for constant in [
-            domain::TYPE_BID_CONVERT,
-            domain::TYPE_BID_PREPARE_ATTACHMENT_V1,
-            domain::TYPE_BID_EXTRACT,
-            domain::TYPE_BID_MATCH_ROUTE_V1,
-            domain::TYPE_BID_RENDER_SUBMISSION_V1,
-        ] {
-            assert!(
-                task_types.contains(constant),
-                "registry must include domain constant {constant}"
-            );
-        }
+        assert!(task_types.contains(domain::TYPE_BID_DELIVERY_V1));
     }
 
     #[test]

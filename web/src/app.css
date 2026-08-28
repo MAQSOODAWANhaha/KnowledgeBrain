@@ -21,8 +21,11 @@
   --pine-soft: #e6f6ea;
   --rose: #d70015;
   --rose-soft: #fde8ea;
-  --shadow: 0 1px 2px rgba(29, 29, 31, 0.04), 0 10px 28px rgba(29, 29, 31, 0.045);
-  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Noto Sans SC", sans-serif;
+  --shadow:
+    0 1px 2px rgba(29, 29, 31, 0.04), 0 10px 28px rgba(29, 29, 31, 0.045);
+  --sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+    "Noto Sans SC", sans-serif;
   --r-card: 12px;
   --r-in: 12px;
   --r-ctl: 10px;
@@ -292,7 +295,7 @@ a {
 }
 
 .side-find kbd {
-  font: 550 11px/1 var(--sans);
+  font: 550 11px / 1 var(--sans);
   color: var(--faint);
   background: #fff;
   border: 1px solid var(--line);
@@ -1573,4 +1576,92 @@ table.grid tr:hover td {
   border-radius: 8px;
   border: 1px solid var(--line-soft);
   background: #fff;
+}
+
+.outline-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+}
+.outline-row.on > a {
+  color: var(--iris-ink);
+}
+.outline-row a {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.outline-ops {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+}
+.outline-row:hover .outline-ops,
+.outline-row.on .outline-ops {
+  opacity: 1;
+}
+.outline-ops button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.outline-ops button:hover:not(:disabled) {
+  background: var(--fill);
+  color: var(--ink);
+}
+.outline-ops button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.block-card {
+  margin-bottom: 16px;
+}
+.preview-frame {
+  width: 100%;
+  min-height: 70vh;
+  border: 0;
+  background: #fff;
+}
+.ProseMirror {
+  min-height: 120px;
+  outline: none;
+}
+.ProseMirror p {
+  margin: 0 0 10px;
+}
+.ProseMirror table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.ProseMirror th,
+.ProseMirror td {
+  border: 1px solid var(--line);
+  padding: 6px 8px;
+  vertical-align: top;
+}
+.fmt-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.fmt-bar button {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 6px;
+  min-width: 28px;
+  height: 28px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--ink);
+}
+.fmt-bar button:hover {
+  background: var(--fill);
 }

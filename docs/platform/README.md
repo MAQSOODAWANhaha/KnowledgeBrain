@@ -31,6 +31,7 @@
 
 ## 当前参考
 
+- 招标文件驱动的投标文件编制工作区：[目标契约](./tender-to-submission-authoring.md)（产品与交互目标；招投标业务状态仍归招投标领域）
 - 仓库实现快照（非规范）：[`../research/repository-implementation-snapshot.md`](../research/repository-implementation-snapshot.md)
 - 共享机制计划：[`../../plans/platform/README.md`](../../plans/platform/README.md)
 - fresh baseline、actor/idempotency/audit、ObjectRegistry 与 retention：[`../../plans/platform/runtime-foundation.md`](../../plans/platform/runtime-foundation.md)

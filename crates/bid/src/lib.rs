@@ -5,6 +5,8 @@ pub mod quote;
 mod render;
 pub mod submission;
 pub mod tender;
+pub mod tender_process;
+pub mod tender_upload;
 
 pub use render::{
     ManifestRenderAsset, ManifestRenderAssetLocator, render_manifest_document,
@@ -286,82 +288,7 @@ pub fn matching_schedule_environment() -> storage::bid_matching::ScheduleEnviron
         _ => "development",
     }
     .to_string();
-    storage::bid_matching::ScheduleEnvironment {
-        environment,
-        max_attempts: 3,
-    }
-}
-
-pub async fn schedule_dirty_and_enqueue(
-    pool: &sqlx::PgPool,
-    project_id: Uuid,
-    context: storage::bid_matching::ScheduleMutationContext,
-) -> Result<Option<Uuid>, String> {
-    let receipt = storage::bid_matching::schedule_dirty_project(
-        pool,
-        project_id,
-        matching_schedule_environment(),
-        &context,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let Some(receipt) = receipt else {
-        return Ok(None);
-    };
-    let mut last = None;
-    for job in receipt.jobs {
-        let _ = runtime::enqueue_bid_match_route_v1(
-            job.id,
-            runtime::BidMatchRouteV1Snapshots {
-                config_snapshot_id: job.snapshots.config_snapshot_id,
-                feature_snapshot_id: job.snapshots.feature_snapshot_id,
-                score_policy_snapshot_id: job.snapshots.score_policy_snapshot_id,
-                verifier_policy_snapshot_id: job.snapshots.verifier_policy_snapshot_id,
-            },
-            None,
-        )
-        .await;
-        last = Some(job.id);
-    }
-    Ok(last)
-}
-
-pub async fn maybe_rematch_company_doc(
-    pool: &sqlx::PgPool,
-    _document_id: Uuid,
-) -> Result<(), String> {
-    let projects = storage::bid_submission::dirty_match_projects(pool)
-        .await
-        .map_err(|error| error.to_string())?;
-    for project_id in projects {
-        let _ = schedule_dirty_and_enqueue(
-            pool,
-            project_id,
-            storage::bid_matching::ScheduleMutationContext::system(),
-        )
-        .await;
-    }
-    Ok(())
-}
-
-pub async fn enqueue_pending_route_jobs(pool: &sqlx::PgPool) -> Result<usize, String> {
-    let jobs = storage::bid_matching::pending_route_envelopes(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    for job in &jobs {
-        let _ = runtime::enqueue_bid_match_route_v1(
-            job.job_id,
-            runtime::BidMatchRouteV1Snapshots {
-                config_snapshot_id: job.snapshots.config_snapshot_id,
-                feature_snapshot_id: job.snapshots.feature_snapshot_id,
-                score_policy_snapshot_id: job.snapshots.score_policy_snapshot_id,
-                verifier_policy_snapshot_id: job.snapshots.verifier_policy_snapshot_id,
-            },
-            None,
-        )
-        .await;
-    }
-    Ok(jobs.len())
+    storage::bid_matching::ScheduleEnvironment { environment }
 }
 
 pub fn derived_status(

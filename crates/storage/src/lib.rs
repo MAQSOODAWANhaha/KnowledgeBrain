@@ -1,11 +1,12 @@
 //! Object bytes keyed as `objects/{sha256}`. Postgres migrate + workspace seed.
 
+pub mod bid_authoring_v2;
 pub mod bid_matching;
 pub mod bid_quote;
-pub mod bid_recovery;
 pub mod bid_submission;
 pub mod bidding;
 mod first_launch;
+pub mod knowledge_index_v2;
 pub mod knowledge_retrieval;
 mod object_registry;
 mod persist;

@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0f\x64ocreader.proto\x12\tdocreader\"\xba\x01\n\nReadConfig\x12\x15\n\rparser_engine\x18\x01 \x01(\t\x12Q\n\x17parser_engine_overrides\x18\x02 \x03(\x0b\x32\x30.docreader.ReadConfig.ParserEngineOverridesEntry\x1a<\n\x1aParserEngineOverridesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01J\x04\x08\x03\x10\x04\"\xa0\x01\n\x0bReadRequest\x12\x14\n\x0c\x66ile_content\x18\x01 \x01(\x0c\x12\x11\n\tfile_name\x18\x02 \x01(\t\x12\x11\n\tfile_type\x18\x03 \x01(\t\x12\x0b\n\x03url\x18\x04 \x01(\t\x12\r\n\x05title\x18\x05 \x01(\t\x12%\n\x06\x63onfig\x18\x06 \x01(\x0b\x32\x15.docreader.ReadConfig\x12\x12\n\nrequest_id\x18\x07 \x01(\t\"n\n\x08ImageRef\x12\x10\n\x08\x66ilename\x18\x01 \x01(\t\x12\x14\n\x0coriginal_ref\x18\x02 \x01(\t\x12\x11\n\tmime_type\x18\x03 \x01(\t\x12\x13\n\x0bstorage_key\x18\x04 \x01(\t\x12\x12\n\nimage_data\x18\x05 \x01(\x0c\"\xe2\x01\n\x0cReadResponse\x12\x18\n\x10markdown_content\x18\x01 \x01(\t\x12\'\n\nimage_refs\x18\x02 \x03(\x0b\x32\x13.docreader.ImageRef\x12\x16\n\x0eimage_dir_path\x18\x03 \x01(\t\x12\x37\n\x08metadata\x18\x04 \x03(\x0b\x32%.docreader.ReadResponse.MetadataEntry\x12\r\n\x05\x65rror\x18\x05 \x01(\t\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xd2\x01\n\x0eReadStreamMeta\x12\x18\n\x10markdown_content\x18\x01 \x01(\t\x12\x16\n\x0eimage_dir_path\x18\x02 \x01(\t\x12\x39\n\x08metadata\x18\x03 \x03(\x0b\x32\'.docreader.ReadStreamMeta.MetadataEntry\x12\r\n\x05\x65rror\x18\x04 \x01(\t\x12\x13\n\x0bimage_count\x18\x05 \x01(\r\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"p\n\x12ReadStreamResponse\x12)\n\x04meta\x18\x01 \x01(\x0b\x32\x19.docreader.ReadStreamMetaH\x00\x12$\n\x05image\x18\x02 \x01(\x0b\x32\x13.docreader.ImageRefH\x00\x42\t\n\x07payload\"\x9a\x01\n\x12ListEnginesRequest\x12L\n\x10\x63onfig_overrides\x18\x01 \x03(\x0b\x32\x32.docreader.ListEnginesRequest.ConfigOverridesEntry\x1a\x36\n\x14\x43onfigOverridesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"x\n\x10ParserEngineInfo\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x02 \x01(\t\x12\x12\n\nfile_types\x18\x03 \x03(\t\x12\x11\n\tavailable\x18\x04 \x01(\x08\x12\x1a\n\x12unavailable_reason\x18\x05 \x01(\t\"C\n\x13ListEnginesResponse\x12,\n\x07\x65ngines\x18\x01 \x03(\x0b\x32\x1b.docreader.ParserEngineInfo2\xdf\x01\n\tDocReader\x12\x39\n\x04Read\x12\x16.docreader.ReadRequest\x1a\x17.docreader.ReadResponse\"\x00\x12G\n\nReadStream\x12\x16.docreader.ReadRequest\x1a\x1d.docreader.ReadStreamResponse\"\x00\x30\x01\x12N\n\x0bListEngines\x12\x1d.docreader.ListEnginesRequest\x1a\x1e.docreader.ListEnginesResponse\"\x00\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0f\x64ocreader.proto\x12\tdocreader\"\xba\x01\n\nReadConfig\x12\x15\n\rparser_engine\x18\x01 \x01(\t\x12Q\n\x17parser_engine_overrides\x18\x02 \x03(\x0b\x32\x30.docreader.ReadConfig.ParserEngineOverridesEntry\x1a<\n\x1aParserEngineOverridesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01J\x04\x08\x03\x10\x04\"\xa0\x01\n\x0bReadRequest\x12\x14\n\x0c\x66ile_content\x18\x01 \x01(\x0c\x12\x11\n\tfile_name\x18\x02 \x01(\t\x12\x11\n\tfile_type\x18\x03 \x01(\t\x12\x0b\n\x03url\x18\x04 \x01(\t\x12\r\n\x05title\x18\x05 \x01(\t\x12%\n\x06\x63onfig\x18\x06 \x01(\x0b\x32\x15.docreader.ReadConfig\x12\x12\n\nrequest_id\x18\x07 \x01(\t\"n\n\x08ImageRef\x12\x10\n\x08\x66ilename\x18\x01 \x01(\t\x12\x14\n\x0coriginal_ref\x18\x02 \x01(\t\x12\x11\n\tmime_type\x18\x03 \x01(\t\x12\x13\n\x0bstorage_key\x18\x04 \x01(\t\x12\x12\n\nimage_data\x18\x05 \x01(\x0c\"\xc4\x01\n\x0f\x44ocumentLocator\x12\x17\n\x0fsection_ordinal\x18\x01 \x01(\r\x12\x1a\n\rtable_ordinal\x18\x02 \x01(\rH\x00\x88\x01\x01\x12\x18\n\x0brow_ordinal\x18\x03 \x01(\rH\x01\x88\x01\x01\x12\x14\n\x0cheading_path\x18\x04 \x01(\t\x12\x19\n\x0c\x66orm_ordinal\x18\x05 \x01(\rH\x02\x88\x01\x01\x42\x10\n\x0e_table_ordinalB\x0e\n\x0c_row_ordinalB\x0f\n\r_form_ordinal\"\x97\x01\n\x0bPageLocator\x12\x14\n\x0cpage_ordinal\x18\x01 \x01(\r\x12\x11\n\x04left\x18\x02 \x01(\x01H\x00\x88\x01\x01\x12\x10\n\x03top\x18\x03 \x01(\x01H\x01\x88\x01\x01\x12\x12\n\x05right\x18\x04 \x01(\x01H\x02\x88\x01\x01\x12\x13\n\x06\x62ottom\x18\x05 \x01(\x01H\x03\x88\x01\x01\x42\x07\n\x05_leftB\x06\n\x04_topB\x08\n\x06_rightB\t\n\x07_bottom\"M\n\x0fSpreadsheetCell\x12\x0f\n\x07\x61\x64\x64ress\x18\x01 \x01(\t\x12\x0b\n\x03row\x18\x02 \x01(\r\x12\x0e\n\x06\x63olumn\x18\x03 \x01(\r\x12\x0c\n\x04text\x18\x04 \x01(\t\"r\n\x10SpreadsheetRange\x12\x10\n\x08\x61\x31_range\x18\x01 \x01(\t\x12\x11\n\tstart_row\x18\x02 \x01(\r\x12\x14\n\x0cstart_column\x18\x03 \x01(\r\x12\x0f\n\x07\x65nd_row\x18\x04 \x01(\r\x12\x12\n\nend_column\x18\x05 \x01(\r\"P\n\x18SpreadsheetTableIdentity\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x14\n\x0c\x64isplay_name\x18\x02 \x01(\t\x12\x10\n\x08\x61\x31_range\x18\x03 \x01(\t\"\x88\x02\n\x12SpreadsheetLocator\x12\x15\n\rsheet_ordinal\x18\x01 \x01(\r\x12\x12\n\nsheet_name\x18\x02 \x01(\t\x12+\n\x06region\x18\x03 \x01(\x0b\x32\x1b.docreader.SpreadsheetRange\x12)\n\x05\x63\x65lls\x18\x04 \x03(\x0b\x32\x1a.docreader.SpreadsheetCell\x12\x32\n\rmerged_ranges\x18\x05 \x03(\x0b\x32\x1b.docreader.SpreadsheetRange\x12;\n\x0e\x64\x65\x66ined_tables\x18\x06 \x03(\x0b\x32#.docreader.SpreadsheetTableIdentity\"~\n\x14ParagraphImageParent\x12\x1c\n\x0fsection_ordinal\x18\x01 \x01(\rH\x00\x88\x01\x01\x12\x1e\n\x11paragraph_ordinal\x18\x02 \x01(\rH\x01\x88\x01\x01\x42\x12\n\x10_section_ordinalB\x14\n\x12_paragraph_ordinal\"\xcc\x01\n\x14TableCellImageParent\x12\x1c\n\x0fsection_ordinal\x18\x01 \x01(\rH\x00\x88\x01\x01\x12\x1a\n\rtable_ordinal\x18\x02 \x01(\rH\x01\x88\x01\x01\x12\x18\n\x0brow_ordinal\x18\x03 \x01(\rH\x02\x88\x01\x01\x12\x19\n\x0c\x63\x65ll_ordinal\x18\x04 \x01(\rH\x03\x88\x01\x01\x42\x12\n\x10_section_ordinalB\x10\n\x0e_table_ordinalB\x0e\n\x0c_row_ordinalB\x0f\n\r_cell_ordinal\"o\n\x0f\x46ormImageParent\x12\x1c\n\x0fsection_ordinal\x18\x01 \x01(\rH\x00\x88\x01\x01\x12\x19\n\x0c\x66orm_ordinal\x18\x02 \x01(\rH\x01\x88\x01\x01\x42\x12\n\x10_section_ordinalB\x0f\n\r_form_ordinal\"\xc4\x03\n\x0cImageLocator\x12\x14\n\x0coriginal_ref\x18\x01 \x01(\t\x12\r\n\x05width\x18\x02 \x01(\r\x12\x0e\n\x06height\x18\x03 \x01(\r\x12\x12\n\nmedia_type\x18\x04 \x01(\t\x12\x19\n\x0cpage_ordinal\x18\x05 \x01(\rH\x01\x88\x01\x01\x12\x11\n\x04left\x18\x08 \x01(\x01H\x02\x88\x01\x01\x12\x10\n\x03top\x18\t \x01(\x01H\x03\x88\x01\x01\x12\x12\n\x05right\x18\n \x01(\x01H\x04\x88\x01\x01\x12\x13\n\x06\x62ottom\x18\x0b \x01(\x01H\x05\x88\x01\x01\x12;\n\x10paragraph_parent\x18\x0c \x01(\x0b\x32\x1f.docreader.ParagraphImageParentH\x00\x12<\n\x11table_cell_parent\x18\r \x01(\x0b\x32\x1f.docreader.TableCellImageParentH\x00\x12\x31\n\x0b\x66orm_parent\x18\x0e \x01(\x0b\x32\x1a.docreader.FormImageParentH\x00\x42\x11\n\x0f\x63ompound_parentB\x0f\n\r_page_ordinalB\x07\n\x05_leftB\x06\n\x04_topB\x08\n\x06_rightB\t\n\x07_bottomJ\x04\x08\x06\x10\x07J\x04\x08\x07\x10\x08\"A\n\x11\x41ttachmentLocator\x12\x11\n\tpart_name\x18\x01 \x01(\t\x12\x19\n\x11relationship_type\x18\x02 \x01(\t\"\xec\x02\n\x14StructuredSourceUnit\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\x0f\n\x07ordinal\x18\x02 \x01(\r\x12\x31\n\x04kind\x18\x03 \x01(\x0e\x32#.docreader.StructuredSourceUnitKind\x12\x0c\n\x04text\x18\x04 \x01(\t\x12.\n\x08\x64ocument\x18\x05 \x01(\x0b\x32\x1a.docreader.DocumentLocatorH\x00\x12&\n\x04page\x18\x06 \x01(\x0b\x32\x16.docreader.PageLocatorH\x00\x12\x34\n\x0bspreadsheet\x18\x07 \x01(\x0b\x32\x1d.docreader.SpreadsheetLocatorH\x00\x12(\n\x05image\x18\x08 \x01(\x0b\x32\x17.docreader.ImageLocatorH\x00\x12\x32\n\nattachment\x18\t \x01(\x0b\x32\x1c.docreader.AttachmentLocatorH\x00\x42\t\n\x07locator\"\xa4\x02\n\x0cReadResponse\x12\x18\n\x10markdown_content\x18\x01 \x01(\t\x12\'\n\nimage_refs\x18\x02 \x03(\x0b\x32\x13.docreader.ImageRef\x12\x16\n\x0eimage_dir_path\x18\x03 \x01(\t\x12\x37\n\x08metadata\x18\x04 \x03(\x0b\x32%.docreader.ReadResponse.MetadataEntry\x12\r\n\x05\x65rror\x18\x05 \x01(\t\x12@\n\x17structured_source_units\x18\x06 \x03(\x0b\x32\x1f.docreader.StructuredSourceUnit\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\x94\x02\n\x0eReadStreamMeta\x12\x18\n\x10markdown_content\x18\x01 \x01(\t\x12\x16\n\x0eimage_dir_path\x18\x02 \x01(\t\x12\x39\n\x08metadata\x18\x03 \x03(\x0b\x32\'.docreader.ReadStreamMeta.MetadataEntry\x12\r\n\x05\x65rror\x18\x04 \x01(\t\x12\x13\n\x0bimage_count\x18\x05 \x01(\r\x12@\n\x17structured_source_units\x18\x06 \x03(\x0b\x32\x1f.docreader.StructuredSourceUnit\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"p\n\x12ReadStreamResponse\x12)\n\x04meta\x18\x01 \x01(\x0b\x32\x19.docreader.ReadStreamMetaH\x00\x12$\n\x05image\x18\x02 \x01(\x0b\x32\x13.docreader.ImageRefH\x00\x42\t\n\x07payload\"\x9a\x01\n\x12ListEnginesRequest\x12L\n\x10\x63onfig_overrides\x18\x01 \x03(\x0b\x32\x32.docreader.ListEnginesRequest.ConfigOverridesEntry\x1a\x36\n\x14\x43onfigOverridesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"x\n\x10ParserEngineInfo\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x02 \x01(\t\x12\x12\n\nfile_types\x18\x03 \x03(\t\x12\x11\n\tavailable\x18\x04 \x01(\x08\x12\x1a\n\x12unavailable_reason\x18\x05 \x01(\t\"C\n\x13ListEnginesResponse\x12,\n\x07\x65ngines\x18\x01 \x03(\x0b\x32\x1b.docreader.ParserEngineInfo*\xd7\x02\n\x18StructuredSourceUnitKind\x12+\n\'STRUCTURED_SOURCE_UNIT_KIND_UNSPECIFIED\x10\x00\x12\'\n#STRUCTURED_SOURCE_UNIT_KIND_SECTION\x10\x01\x12)\n%STRUCTURED_SOURCE_UNIT_KIND_TABLE_ROW\x10\x02\x12,\n(STRUCTURED_SOURCE_UNIT_KIND_TABLE_REGION\x10\x03\x12+\n\'STRUCTURED_SOURCE_UNIT_KIND_FORM_REGION\x10\x04\x12\x31\n-STRUCTURED_SOURCE_UNIT_KIND_ATTACHMENT_REGION\x10\x05\x12,\n(STRUCTURED_SOURCE_UNIT_KIND_IMAGE_REGION\x10\x06\x32\xdf\x01\n\tDocReader\x12\x39\n\x04Read\x12\x16.docreader.ReadRequest\x1a\x17.docreader.ReadResponse\"\x00\x12G\n\nReadStream\x12\x16.docreader.ReadRequest\x1a\x1d.docreader.ReadStreamResponse\"\x00\x30\x01\x12N\n\x0bListEngines\x12\x1d.docreader.ListEnginesRequest\x1a\x1e.docreader.ListEnginesResponse\"\x00\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -39,6 +39,8 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_READSTREAMMETA_METADATAENTRY']._serialized_options = b'8\001'
   _globals['_LISTENGINESREQUEST_CONFIGOVERRIDESENTRY']._loaded_options = None
   _globals['_LISTENGINESREQUEST_CONFIGOVERRIDESENTRY']._serialized_options = b'8\001'
+  _globals['_STRUCTUREDSOURCEUNITKIND']._serialized_start=3765
+  _globals['_STRUCTUREDSOURCEUNITKIND']._serialized_end=4108
   _globals['_READCONFIG']._serialized_start=31
   _globals['_READCONFIG']._serialized_end=217
   _globals['_READCONFIG_PARSERENGINEOVERRIDESENTRY']._serialized_start=151
@@ -47,24 +49,48 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_READREQUEST']._serialized_end=380
   _globals['_IMAGEREF']._serialized_start=382
   _globals['_IMAGEREF']._serialized_end=492
-  _globals['_READRESPONSE']._serialized_start=495
-  _globals['_READRESPONSE']._serialized_end=721
-  _globals['_READRESPONSE_METADATAENTRY']._serialized_start=674
-  _globals['_READRESPONSE_METADATAENTRY']._serialized_end=721
-  _globals['_READSTREAMMETA']._serialized_start=724
-  _globals['_READSTREAMMETA']._serialized_end=934
-  _globals['_READSTREAMMETA_METADATAENTRY']._serialized_start=674
-  _globals['_READSTREAMMETA_METADATAENTRY']._serialized_end=721
-  _globals['_READSTREAMRESPONSE']._serialized_start=936
-  _globals['_READSTREAMRESPONSE']._serialized_end=1048
-  _globals['_LISTENGINESREQUEST']._serialized_start=1051
-  _globals['_LISTENGINESREQUEST']._serialized_end=1205
-  _globals['_LISTENGINESREQUEST_CONFIGOVERRIDESENTRY']._serialized_start=1151
-  _globals['_LISTENGINESREQUEST_CONFIGOVERRIDESENTRY']._serialized_end=1205
-  _globals['_PARSERENGINEINFO']._serialized_start=1207
-  _globals['_PARSERENGINEINFO']._serialized_end=1327
-  _globals['_LISTENGINESRESPONSE']._serialized_start=1329
-  _globals['_LISTENGINESRESPONSE']._serialized_end=1396
-  _globals['_DOCREADER']._serialized_start=1399
-  _globals['_DOCREADER']._serialized_end=1622
+  _globals['_DOCUMENTLOCATOR']._serialized_start=495
+  _globals['_DOCUMENTLOCATOR']._serialized_end=691
+  _globals['_PAGELOCATOR']._serialized_start=694
+  _globals['_PAGELOCATOR']._serialized_end=845
+  _globals['_SPREADSHEETCELL']._serialized_start=847
+  _globals['_SPREADSHEETCELL']._serialized_end=924
+  _globals['_SPREADSHEETRANGE']._serialized_start=926
+  _globals['_SPREADSHEETRANGE']._serialized_end=1040
+  _globals['_SPREADSHEETTABLEIDENTITY']._serialized_start=1042
+  _globals['_SPREADSHEETTABLEIDENTITY']._serialized_end=1122
+  _globals['_SPREADSHEETLOCATOR']._serialized_start=1125
+  _globals['_SPREADSHEETLOCATOR']._serialized_end=1389
+  _globals['_PARAGRAPHIMAGEPARENT']._serialized_start=1391
+  _globals['_PARAGRAPHIMAGEPARENT']._serialized_end=1517
+  _globals['_TABLECELLIMAGEPARENT']._serialized_start=1520
+  _globals['_TABLECELLIMAGEPARENT']._serialized_end=1724
+  _globals['_FORMIMAGEPARENT']._serialized_start=1726
+  _globals['_FORMIMAGEPARENT']._serialized_end=1837
+  _globals['_IMAGELOCATOR']._serialized_start=1840
+  _globals['_IMAGELOCATOR']._serialized_end=2292
+  _globals['_ATTACHMENTLOCATOR']._serialized_start=2294
+  _globals['_ATTACHMENTLOCATOR']._serialized_end=2359
+  _globals['_STRUCTUREDSOURCEUNIT']._serialized_start=2362
+  _globals['_STRUCTUREDSOURCEUNIT']._serialized_end=2726
+  _globals['_READRESPONSE']._serialized_start=2729
+  _globals['_READRESPONSE']._serialized_end=3021
+  _globals['_READRESPONSE_METADATAENTRY']._serialized_start=2974
+  _globals['_READRESPONSE_METADATAENTRY']._serialized_end=3021
+  _globals['_READSTREAMMETA']._serialized_start=3024
+  _globals['_READSTREAMMETA']._serialized_end=3300
+  _globals['_READSTREAMMETA_METADATAENTRY']._serialized_start=2974
+  _globals['_READSTREAMMETA_METADATAENTRY']._serialized_end=3021
+  _globals['_READSTREAMRESPONSE']._serialized_start=3302
+  _globals['_READSTREAMRESPONSE']._serialized_end=3414
+  _globals['_LISTENGINESREQUEST']._serialized_start=3417
+  _globals['_LISTENGINESREQUEST']._serialized_end=3571
+  _globals['_LISTENGINESREQUEST_CONFIGOVERRIDESENTRY']._serialized_start=3517
+  _globals['_LISTENGINESREQUEST_CONFIGOVERRIDESENTRY']._serialized_end=3571
+  _globals['_PARSERENGINEINFO']._serialized_start=3573
+  _globals['_PARSERENGINEINFO']._serialized_end=3693
+  _globals['_LISTENGINESRESPONSE']._serialized_start=3695
+  _globals['_LISTENGINESRESPONSE']._serialized_end=3762
+  _globals['_DOCREADER']._serialized_start=4111
+  _globals['_DOCREADER']._serialized_end=4334
 # @@protoc_insertion_point(module_scope)

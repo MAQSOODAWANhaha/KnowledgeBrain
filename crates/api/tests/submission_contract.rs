@@ -172,20 +172,10 @@ fn crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
-fn minimal_docx() -> Vec<u8> {
-    let files: [(&str, &[u8]); 2] = [
-        (
-            "[Content_Types].xml",
-            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
-        ),
-        (
-            "word/document.xml",
-            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Tender</w:t></w:r></w:p></w:body></w:document>"#,
-        ),
-    ];
+fn stored_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
     let mut output = Vec::new();
     let mut central_entries = Vec::new();
-    for (name, data) in files {
+    for &(name, data) in files {
         let name = name.as_bytes();
         let checksum = crc32(data);
         let local_offset = output.len() as u32;
@@ -238,6 +228,92 @@ fn minimal_docx() -> Vec<u8> {
     output.extend_from_slice(&central_offset.to_le_bytes());
     output.extend_from_slice(&0u16.to_le_bytes());
     output
+}
+
+fn minimal_docx() -> Vec<u8> {
+    stored_zip(&[
+        (
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+        ),
+        (
+            "_rels/.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+        ),
+        (
+            "word/document.xml",
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Tender</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#,
+        ),
+        (
+            "word/_rels/document.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#,
+        ),
+    ])
+}
+
+fn xlsx_with_sheet(sheet_xml: &[u8]) -> Vec<u8> {
+    stored_zip(&[
+        (
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+        ),
+        (
+            "_rels/.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/workbook.xml",
+            br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+        ),
+        ("xl/worksheets/sheet1.xml", sheet_xml),
+    ])
+}
+
+fn minimal_xlsx() -> Vec<u8> {
+    xlsx_with_sheet(
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:A1"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Tender</t></is></c></row></sheetData></worksheet>"#,
+    )
+}
+
+fn sparse_xlsx() -> Vec<u8> {
+    xlsx_with_sheet(
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:XFD1048576"/><sheetData><row r="1048576"><c r="XFD1048576" t="inlineStr"><is><t>bomb</t></is></c></row></sheetData></worksheet>"#,
+    )
+}
+
+fn minimal_pdf() -> Vec<u8> {
+    let objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>".as_slice(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".as_slice(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << >> >>".as_slice(),
+    ];
+    let mut result = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, value) in objects.iter().enumerate() {
+        offsets.push(result.len());
+        result.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        result.extend_from_slice(value);
+        result.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = result.len();
+    result.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        result.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    result.extend_from_slice(
+        format!(
+            "trailer << /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    result
 }
 
 async fn live_submission_pool() -> Option<PgPool> {
@@ -1301,8 +1377,8 @@ async fn tender_upload_validates_bytes_before_staging_and_persists_media_type() 
             &project,
             &pdf_key,
             "tender.pdf",
-            "application/octet-stream",
-            b"not a PDF",
+            "application/pdf",
+            b"%PDF-1.7\n%%EOF\n",
         ),
     )
     .await;
@@ -1316,6 +1392,24 @@ async fn tender_upload_validates_bytes_before_staging_and_persists_media_type() 
         "{invalid_pdf_body}"
     );
 
+    let (wrong_mime_status, wrong_mime_body) = call(
+        &app,
+        document_upload_request_with_key(
+            &token,
+            &project,
+            &Uuid::new_v4().to_string(),
+            "tender.pdf",
+            "application/octet-stream",
+            &minimal_pdf(),
+        ),
+    )
+    .await;
+    assert_eq!(
+        wrong_mime_status,
+        StatusCode::BAD_REQUEST,
+        "{wrong_mime_body}"
+    );
+
     let (pdf_status, pdf_body) = call(
         &app,
         document_upload_request_with_key(
@@ -1323,8 +1417,8 @@ async fn tender_upload_validates_bytes_before_staging_and_persists_media_type() 
             &project,
             &pdf_key,
             "tender.pdf",
-            "application/octet-stream",
-            b"%PDF-1.7\n%%EOF\n",
+            "application/pdf",
+            &minimal_pdf(),
         ),
     )
     .await;
@@ -1338,7 +1432,7 @@ async fn tender_upload_validates_bytes_before_staging_and_persists_media_type() 
             &project,
             &docx_key,
             "tender.docx",
-            "application/octet-stream",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             b"PK\x03\x04not-a-docx-package",
         ),
     )
@@ -1360,12 +1454,42 @@ async fn tender_upload_validates_bytes_before_staging_and_persists_media_type() 
             &project,
             &docx_key,
             "tender.docx",
-            "application/octet-stream",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             &minimal_docx(),
         ),
     )
     .await;
     assert_eq!(docx_status, StatusCode::CREATED, "{docx_body}");
+
+    let (sparse_status, sparse_body) = call(
+        &app,
+        document_upload_request_with_key(
+            &token,
+            &project,
+            &Uuid::new_v4().to_string(),
+            "sparse.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            &sparse_xlsx(),
+        ),
+    )
+    .await;
+    assert_eq!(sparse_status, StatusCode::BAD_REQUEST, "{sparse_body}");
+    assert_eq!(sparse_body["error"]["code"], "VALIDATION", "{sparse_body}");
+
+    let xlsx_key = Uuid::new_v4().to_string();
+    let (xlsx_status, xlsx_body) = call(
+        &app,
+        document_upload_request_with_key(
+            &token,
+            &project,
+            &xlsx_key,
+            "tender.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            &minimal_xlsx(),
+        ),
+    )
+    .await;
+    assert_eq!(xlsx_status, StatusCode::CREATED, "{xlsx_body}");
 
     let (list_status, list_body) = call(
         &app,
@@ -1387,10 +1511,18 @@ async fn tender_upload_validates_bytes_before_staging_and_persists_media_type() 
         .iter()
         .find(|document| document["id"] == docx_body["id"])
         .unwrap();
+    let xlsx = documents
+        .iter()
+        .find(|document| document["id"] == xlsx_body["id"])
+        .unwrap();
     assert_eq!(pdf["media_type"], "application/pdf");
     assert_eq!(
         docx["media_type"],
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+    assert_eq!(
+        xlsx["media_type"],
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     );
 }
 

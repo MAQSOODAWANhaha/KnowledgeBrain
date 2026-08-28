@@ -17,7 +17,9 @@ function flatten(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node);
   if (Array.isArray(node)) return node.map(flatten).join("");
   if (typeof node === "object" && "props" in node) {
-    return flatten((node as { props?: { children?: ReactNode } }).props?.children);
+    return flatten(
+      (node as { props?: { children?: ReactNode } }).props?.children,
+    );
   }
   return "";
 }
@@ -38,7 +40,8 @@ export function formatPlainLayout(text: string): string {
     .split("\n")
     .map((line) => {
       const trimmed = line.trimEnd();
-      if (LEADER.test(trimmed) && /\d+\s*$/.test(trimmed.trim())) return collapseLeaders(trimmed);
+      if (LEADER.test(trimmed) && /\d+\s*$/.test(trimmed.trim()))
+        return collapseLeaders(trimmed);
       return trimmed;
     })
     .join("\n");
@@ -53,7 +56,11 @@ function isolatePdfLayout(markdown: string): string {
       if (out.length && out[out.length - 1] !== "") out.push("");
       continue;
     }
-    if (/^#/.test(trimmed) || trimmed.startsWith("|") || trimmed.startsWith("```")) {
+    if (
+      /^#/.test(trimmed) ||
+      trimmed.startsWith("|") ||
+      trimmed.startsWith("```")
+    ) {
       out.push(line);
       continue;
     }
@@ -136,7 +143,9 @@ function heading(tag: "h1" | "h2" | "h3" | "h4") {
 }
 
 export function GfmPreview({ markdown }: { markdown: string }) {
-  const src = rewriteTocLinks(isolatePdfLayout(markdown.replace(/<!--[\s\S]*?-->/g, "")));
+  const src = rewriteTocLinks(
+    isolatePdfLayout(markdown.replace(/<!--[\s\S]*?-->/g, "")),
+  );
   return (
     <div className="md-doc">
       <Markdown
@@ -149,12 +158,15 @@ export function GfmPreview({ markdown }: { markdown: string }) {
             if (inPage) {
               return (
                 <a
-                  href={typeof location !== "undefined" ? location.hash || "#" : "#"}
+                  href={
+                    typeof location !== "undefined" ? location.hash || "#" : "#"
+                  }
                   onClick={(e) => {
                     e.preventDefault();
                     const id = raw.replace(/^#/, "");
                     const el =
-                      document.getElementById(id) || document.getElementById(slug(flatten(children)));
+                      document.getElementById(id) ||
+                      document.getElementById(slug(flatten(children)));
                     el?.scrollIntoView({ block: "start", behavior: "smooth" });
                   }}
                 >

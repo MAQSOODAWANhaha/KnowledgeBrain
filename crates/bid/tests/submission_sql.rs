@@ -19,7 +19,7 @@ async fn live_test_pool() -> Option<PgPool> {
 async fn final_submission_schema_is_ready(pool: &PgPool) -> bool {
     sqlx::query_scalar(
         "SELECT to_regprocedure(
-           'kb_bid_publish_submission_output(uuid,uuid,uuid,uuid,kb_object_ref,kb_sha256,bigint)'
+           'kb_bid_publish_submission_output(uuid,uuid,uuid,bigint,kb_object_ref,kb_sha256,bigint)'
          ) IS NOT NULL
          AND to_regprocedure(
            'kb_bid_create_submission_manifest(uuid,uuid,text,kb_actor_identity,text,bytea,kb_sha256)'
@@ -34,13 +34,10 @@ async fn final_submission_schema_is_ready(pool: &PgPool) -> bool {
            'kb_bid_get_submission_render_job(uuid,uuid)'
          ) IS NOT NULL
          AND to_regprocedure(
-           'kb_bid_claim_submission_render(uuid,uuid)'
+           'kb_bid_load_submission_render(uuid,bigint)'
          ) IS NOT NULL
          AND to_regprocedure(
-           'kb_bid_heartbeat_submission_render(uuid,uuid)'
-         ) IS NOT NULL
-         AND to_regprocedure(
-           'kb_bid_reap_submission_renders()'
+           'kb_bid_fail_submission_render(uuid,bigint,text,text,boolean)'
          ) IS NOT NULL
          AND to_regprocedure(
            'kb_bid_upload_shot_artifact(uuid,uuid,uuid,kb_object_ref,kb_sha256,text,bigint,integer,integer,kb_actor_identity,text,bytea,kb_sha256)'
@@ -49,10 +46,13 @@ async fn final_submission_schema_is_ready(pool: &PgPool) -> bool {
            'kb_bid_upload_attachment(uuid,uuid,uuid,text,kb_object_ref,kb_sha256,text,bigint,integer,integer,kb_actor_identity,text,bytea,kb_sha256)'
          ) IS NOT NULL
          AND to_regprocedure(
-           'kb_bid_claim_attachment_preparation(uuid,uuid)'
+           'kb_bid_load_attachment_preparation(uuid,integer)'
          ) IS NOT NULL
          AND to_regprocedure(
-           'kb_bid_publish_attachment_preparation(uuid,uuid,jsonb,kb_actor_identity)'
+           'kb_bid_publish_attachment_preparation(uuid,integer,jsonb,kb_actor_identity)'
+         ) IS NOT NULL
+         AND to_regprocedure(
+           'kb_bid_fail_attachment_preparation(uuid,integer,text,text,boolean)'
          ) IS NOT NULL",
     )
     .fetch_one(pool)
@@ -294,11 +294,11 @@ async fn create_manifest(pool: &PgPool, seed: &SubmissionSeed, format: &str) -> 
         .expect("create submission manifest")
 }
 
-async fn schedule_and_claim_render(
+async fn schedule_and_load_render(
     pool: &PgPool,
     seed: &SubmissionSeed,
     manifest: &Value,
-) -> (Uuid, Uuid, storage::bid_submission::SubmissionRenderClaim) {
+) -> (Uuid, storage::bid_submission::SubmissionRenderTarget) {
     let manifest_id: Uuid = manifest["manifest_id"].as_str().unwrap().parse().unwrap();
     let manifest_sha256 = manifest["content_sha256"].as_str().unwrap();
     let render_job_id = Uuid::new_v4();
@@ -319,12 +319,11 @@ async fn schedule_and_claim_render(
     .await
     .expect("schedule submission render");
     assert_eq!(scheduled["status"], "pending");
-    let claim_token = Uuid::new_v4();
-    let claim = storage::bid_submission::claim_submission_render(pool, render_job_id, claim_token)
+    let target = storage::bid_submission::load_submission_render(pool, render_job_id, 1)
         .await
-        .expect("claim submission render")
-        .expect("pending render must be claimable");
-    (render_job_id, claim_token, claim)
+        .expect("load submission render")
+        .expect("pending render must be loadable");
+    (render_job_id, target)
 }
 
 #[tokio::test]
@@ -394,6 +393,16 @@ async fn procedural_text_change_terminals_previous_classification_and_decision()
         return;
     }
     let seed = seed_project(&pool).await;
+    sqlx::query(
+        "INSERT INTO bid_clause_set_identities(project_id,set_kind,revision,content_sha256,updated_at)
+         VALUES($1,'procedural',0,
+           encode(public.digest(convert_to('ClauseSetV1:procedural:','UTF8'),'sha256'),'hex'),
+           clock_timestamp())",
+    )
+    .bind(seed.project_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let clause_id = Uuid::new_v4();
     let create_context = storage::bidding::MutationContext::new(
         seed.actor.clone(),
@@ -907,7 +916,7 @@ async fn publishing_a_manifest_rejects_when_current_identity_changed() {
     }
     let seed = seed_project(&pool).await;
     let manifest = create_manifest(&pool, &seed, "docx").await;
-    let (render_job_id, claim_token, _) = schedule_and_claim_render(&pool, &seed, &manifest).await;
+    let (render_job_id, _) = schedule_and_load_render(&pool, &seed, &manifest).await;
 
     sqlx::query(
         "UPDATE bid_clause_set_identities
@@ -920,8 +929,8 @@ async fn publishing_a_manifest_rejects_when_current_identity_changed() {
     .unwrap();
 
     let output_id = Uuid::new_v4();
-    let output_bytes = b"old manifest output";
-    let output_sha256 = domain::sha256_hex(output_bytes);
+    let output_bytes = format!("old manifest output {output_id}").into_bytes();
+    let output_sha256 = domain::sha256_hex(&output_bytes);
     let output_ref = format!("objects/{output_sha256}");
     let staging_id = stage_object(
         &pool,
@@ -937,7 +946,7 @@ async fn publishing_a_manifest_rejects_when_current_identity_changed() {
             .bind(staging_id)
             .bind(output_id)
             .bind(render_job_id)
-            .bind(claim_token)
+            .bind(1_i64)
             .bind(output_ref)
             .bind(output_sha256)
             .bind(output_bytes.len() as i64)
@@ -954,7 +963,7 @@ async fn publishing_a_manifest_rejects_when_current_identity_changed() {
 }
 
 #[tokio::test]
-async fn submission_render_job_is_idempotent_fenced_and_terminally_observable() {
+async fn submission_render_job_is_idempotent_revision_fenced_and_terminally_observable() {
     let Some(pool) = live_test_pool().await else {
         return;
     };
@@ -996,37 +1005,40 @@ async fn submission_render_job_is_idempotent_fenced_and_terminally_observable() 
     .expect("replay render schedule");
     assert_eq!(first["render_job_id"], render_job_id.to_string());
     assert_eq!(replay["render_job_id"], render_job_id.to_string());
+    assert_eq!(first["target_revision"], 1);
     assert_eq!(first["status"], "pending");
 
-    let first_claim_token = Uuid::new_v4();
-    let first_claim =
-        storage::bid_submission::claim_submission_render(&pool, render_job_id, first_claim_token)
-            .await
-            .unwrap()
-            .expect("pending job must be claimable");
-    assert_eq!(first_claim.attempt_count, 1);
     assert!(
-        storage::bid_submission::claim_submission_render(&pool, render_job_id, Uuid::new_v4())
+        storage::bid_submission::load_submission_render(&pool, render_job_id, 2)
             .await
             .unwrap()
             .is_none(),
-        "running job must reject a concurrent claim"
+        "a stale target revision must not load the render target"
     );
-    assert!(
-        !storage::bid_submission::heartbeat_submission_render(
+    let target = storage::bid_submission::load_submission_render(&pool, render_job_id, 1)
+        .await
+        .unwrap()
+        .expect("current target revision must be loadable");
+    assert_eq!(target.render_job_id, render_job_id);
+    assert_eq!(target.target_revision, 1);
+    assert_eq!(
+        storage::bid_submission::fail_submission_render(
             &pool,
             render_job_id,
-            Uuid::new_v4(),
+            2,
+            "OBJECT_STORE_UNAVAILABLE",
+            "stale retry",
+            true,
         )
         .await
         .unwrap(),
-        "wrong claim token must be fenced"
+        None
     );
     assert_eq!(
         storage::bid_submission::fail_submission_render(
             &pool,
             render_job_id,
-            first_claim_token,
+            1,
             "OBJECT_STORE_UNAVAILABLE",
             "temporary object store failure",
             true,
@@ -1037,19 +1049,12 @@ async fn submission_render_job_is_idempotent_fenced_and_terminally_observable() 
         Some("pending")
     );
     assert!(
-        storage::bid_submission::pending_submission_renders(&pool)
+        storage::bid_submission::load_submission_render(&pool, render_job_id, 1)
             .await
             .unwrap()
-            .contains(&render_job_id)
+            .is_some(),
+        "Oxana retry must be able to reload the same pending target"
     );
-
-    let second_claim_token = Uuid::new_v4();
-    let second_claim =
-        storage::bid_submission::claim_submission_render(&pool, render_job_id, second_claim_token)
-            .await
-            .unwrap()
-            .expect("retryable render must become claimable again");
-    assert_eq!(second_claim.attempt_count, 2);
 
     let output_id = Uuid::new_v4();
     let output_bytes = b"durable render output";
@@ -1064,20 +1069,22 @@ async fn submission_render_job_is_idempotent_fenced_and_terminally_observable() 
         &seed.actor,
     )
     .await;
-    let fenced: Result<Value, sqlx::Error> =
-        sqlx::query_scalar("SELECT kb_bid_publish_submission_output($1,$2,$3,$4,$5,$6,$7)")
-            .bind(staging_id)
-            .bind(output_id)
-            .bind(render_job_id)
-            .bind(first_claim_token)
-            .bind(&output_ref)
-            .bind(&output_sha256)
-            .bind(output_bytes.len() as i64)
-            .fetch_one(&pool)
-            .await;
+    let stale_revision = storage::bid_submission::publish_submission_output(
+        &pool,
+        storage::bid_submission::PublishSubmissionOutput {
+            staging_id,
+            id: output_id,
+            render_job_id,
+            target_revision: 2,
+            object_ref: &output_ref,
+            digest: &output_sha256,
+            byte_length: output_bytes.len() as i64,
+        },
+    )
+    .await;
     assert_database_error(
-        fenced.expect_err("stale render claim must not publish"),
-        "SUBMISSION_RENDER_CLAIM_LOST",
+        stale_revision.expect_err("stale target revision must not publish"),
+        "SUBMISSION_RENDER_REVISION_STALE",
     );
     let published = storage::bid_submission::publish_submission_output(
         &pool,
@@ -1085,15 +1092,22 @@ async fn submission_render_job_is_idempotent_fenced_and_terminally_observable() 
             staging_id,
             id: output_id,
             render_job_id,
-            claim_token: second_claim_token,
+            target_revision: 1,
             object_ref: &output_ref,
             digest: &output_sha256,
             byte_length: output_bytes.len() as i64,
         },
     )
     .await
-    .expect("current claim publishes and completes atomically");
+    .expect("current target revision publishes and completes atomically");
     assert_eq!(published["output_id"], output_id.to_string());
+    assert!(
+        storage::bid_submission::load_submission_render(&pool, render_job_id, 1)
+            .await
+            .unwrap()
+            .is_none(),
+        "completed target must not be loaded again"
+    );
     let completed =
         storage::bid_submission::get_submission_render_job(&pool, seed.project_id, render_job_id)
             .await
@@ -1103,13 +1117,12 @@ async fn submission_render_job_is_idempotent_fenced_and_terminally_observable() 
     assert_eq!(completed["output_id"], output_id.to_string());
 
     let failed_manifest = create_manifest(&pool, &seed, "docx").await;
-    let (failed_job_id, failed_claim_token, _) =
-        schedule_and_claim_render(&pool, &seed, &failed_manifest).await;
+    let (failed_job_id, _) = schedule_and_load_render(&pool, &seed, &failed_manifest).await;
     assert_eq!(
         storage::bid_submission::fail_submission_render(
             &pool,
             failed_job_id,
-            failed_claim_token,
+            1,
             "SUBMISSION_END_STATE_CHANGED",
             "manifest dependencies changed",
             false,
@@ -1127,280 +1140,11 @@ async fn submission_render_job_is_idempotent_fenced_and_terminally_observable() 
     assert_eq!(failed["status"], "failed");
     assert_eq!(failed["error_code"], "SUBMISSION_END_STATE_CHANGED");
     assert!(
-        storage::bid_submission::get_submission_render_job(&pool, Uuid::new_v4(), failed_job_id,)
+        storage::bid_submission::get_submission_render_job(&pool, Uuid::new_v4(), failed_job_id)
             .await
             .unwrap()
             .is_none(),
         "render job lookup must stay project scoped"
-    );
-
-    let exhausted_manifest = create_manifest(&pool, &seed, "docx").await;
-    let exhausted_manifest_id: Uuid = exhausted_manifest["manifest_id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-    let exhausted_manifest_sha256 = exhausted_manifest["content_sha256"].as_str().unwrap();
-    let exhausted_job_id = Uuid::new_v4();
-    let exhausted_context = storage::bidding::MutationContext::new(
-        seed.actor.clone(),
-        format!("render-exhausted-{exhausted_manifest_id}"),
-        &json!({"expected_manifest_sha256":exhausted_manifest_sha256}),
-    )
-    .unwrap();
-    storage::bid_submission::schedule_submission_render(
-        &pool,
-        exhausted_job_id,
-        seed.project_id,
-        exhausted_manifest_id,
-        exhausted_manifest_sha256,
-        &exhausted_context,
-    )
-    .await
-    .expect("schedule render whose retries will exhaust");
-    for attempt in 1..=4 {
-        let claim_token = Uuid::new_v4();
-        let claim =
-            storage::bid_submission::claim_submission_render(&pool, exhausted_job_id, claim_token)
-                .await
-                .unwrap()
-                .expect("retryable render must remain claimable before exhaustion");
-        assert_eq!(claim.attempt_count, attempt);
-        let status = storage::bid_submission::fail_submission_render(
-            &pool,
-            exhausted_job_id,
-            claim_token,
-            "SUBMISSION_RENDER_FAILED",
-            "temporary object store timeout",
-            true,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            status.as_deref(),
-            Some(if attempt < 4 { "pending" } else { "failed" })
-        );
-    }
-    let exhausted = storage::bid_submission::get_submission_render_job(
-        &pool,
-        seed.project_id,
-        exhausted_job_id,
-    )
-    .await
-    .unwrap()
-    .expect("exhausted render job remains observable");
-    assert_eq!(exhausted["status"], "failed");
-    assert_eq!(exhausted["attempt_count"], 4);
-    assert_eq!(exhausted["error_code"], "SUBMISSION_RENDER_FAILED");
-}
-
-#[tokio::test]
-async fn submission_render_reaper_is_concurrent_idempotent_and_fences_old_claim() {
-    let Some(pool) = live_test_pool().await else {
-        return;
-    };
-    if !support::require_final_schema("Submission", final_submission_schema_is_ready(&pool).await) {
-        return;
-    }
-    let seed = seed_project(&pool).await;
-    let manifest = create_manifest(&pool, &seed, "docx").await;
-    let (render_job_id, old_claim_token, first_claim) =
-        schedule_and_claim_render(&pool, &seed, &manifest).await;
-    assert_eq!(first_claim.attempt_count, 1);
-
-    let fresh_manifest = create_manifest(&pool, &seed, "docx").await;
-    let (fresh_job_id, fresh_claim_token, fresh_claim) =
-        schedule_and_claim_render(&pool, &seed, &fresh_manifest).await;
-    assert_eq!(fresh_claim.attempt_count, 1);
-
-    let aged = sqlx::query(
-        "UPDATE bid_submission_render_jobs
-            SET heartbeat_at=clock_timestamp()
-              - make_interval(secs => claim_lease_ms::double precision / 1000.0)
-              - interval '1 second'
-          WHERE id=$1 AND status='running' AND claim_token=$2",
-    )
-    .bind(render_job_id)
-    .bind(old_claim_token)
-    .execute(&pool)
-    .await
-    .expect("age the target render claim");
-    assert_eq!(aged.rows_affected(), 1);
-    assert!(
-        !storage::bid_submission::heartbeat_submission_render(
-            &pool,
-            render_job_id,
-            old_claim_token,
-        )
-        .await
-        .unwrap(),
-        "an expired claim must not be revived before the reaper runs"
-    );
-    assert_eq!(
-        storage::bid_submission::fail_submission_render(
-            &pool,
-            render_job_id,
-            old_claim_token,
-            "STALE_OWNER",
-            "expired owner must be fenced",
-            true,
-        )
-        .await
-        .unwrap(),
-        None,
-        "an expired claim must not settle the durable job"
-    );
-    let expired_output_id = Uuid::new_v4();
-    let expired_output_bytes = b"expired owner output";
-    let expired_output_sha256 = domain::sha256_hex(expired_output_bytes);
-    let expired_output_ref = format!("objects/{expired_output_sha256}");
-    let expired_staging_id = stage_object(
-        &pool,
-        &expired_output_ref,
-        &expired_output_sha256,
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        expired_output_bytes.len() as i64,
-        &seed.actor,
-    )
-    .await;
-    let expired_publish: Result<Value, sqlx::Error> =
-        sqlx::query_scalar("SELECT kb_bid_publish_submission_output($1,$2,$3,$4,$5,$6,$7)")
-            .bind(expired_staging_id)
-            .bind(expired_output_id)
-            .bind(render_job_id)
-            .bind(old_claim_token)
-            .bind(&expired_output_ref)
-            .bind(&expired_output_sha256)
-            .bind(expired_output_bytes.len() as i64)
-            .fetch_one(&pool)
-            .await;
-    assert_database_error(
-        expired_publish.expect_err("expired claim must not publish before reaping"),
-        "SUBMISSION_RENDER_CLAIM_LOST",
-    );
-    assert!(
-        storage::abandon_object_upload(&pool, expired_staging_id, &seed.actor)
-            .await
-            .unwrap()
-    );
-
-    let left_pool = pool.clone();
-    let right_pool = pool.clone();
-    let (left_reaped, right_reaped) = tokio::join!(
-        storage::bid_submission::reap_submission_renders(&left_pool),
-        storage::bid_submission::reap_submission_renders(&right_pool),
-    );
-    assert!(
-        left_reaped.unwrap() + right_reaped.unwrap() >= 1,
-        "one concurrent reaper must recover the expired target"
-    );
-
-    let target: (String, i32, bool, bool, Option<String>) = sqlx::query_as(
-        "SELECT status,attempt_count,claim_token IS NULL,heartbeat_at IS NULL,error_code
-           FROM bid_submission_render_jobs WHERE id=$1",
-    )
-    .bind(render_job_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        target,
-        (
-            "pending".into(),
-            1,
-            true,
-            true,
-            Some("CLAIM_LEASE_EXPIRED".into())
-        )
-    );
-    let fresh: (String, i32, Option<Uuid>) = sqlx::query_as(
-        "SELECT status,attempt_count,claim_token
-           FROM bid_submission_render_jobs WHERE id=$1",
-    )
-    .bind(fresh_job_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(fresh, ("running".into(), 1, Some(fresh_claim_token)));
-    assert!(
-        !storage::bid_submission::heartbeat_submission_render(
-            &pool,
-            render_job_id,
-            old_claim_token,
-        )
-        .await
-        .unwrap(),
-        "the reaped claim token must not regain the lease"
-    );
-
-    let output_id = Uuid::new_v4();
-    let output_bytes = b"stale reaper output";
-    let output_sha256 = domain::sha256_hex(output_bytes);
-    let output_ref = format!("objects/{output_sha256}");
-    let staging_id = stage_object(
-        &pool,
-        &output_ref,
-        &output_sha256,
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        output_bytes.len() as i64,
-        &seed.actor,
-    )
-    .await;
-    let stale_publish: Result<Value, sqlx::Error> =
-        sqlx::query_scalar("SELECT kb_bid_publish_submission_output($1,$2,$3,$4,$5,$6,$7)")
-            .bind(staging_id)
-            .bind(output_id)
-            .bind(render_job_id)
-            .bind(old_claim_token)
-            .bind(&output_ref)
-            .bind(&output_sha256)
-            .bind(output_bytes.len() as i64)
-            .fetch_one(&pool)
-            .await;
-    assert_database_error(
-        stale_publish.expect_err("reaped claim must not publish"),
-        "SUBMISSION_RENDER_CLAIM_LOST",
-    );
-    assert!(
-        storage::abandon_object_upload(&pool, staging_id, &seed.actor)
-            .await
-            .unwrap()
-    );
-
-    let second_claim_token = Uuid::new_v4();
-    let second_claim =
-        storage::bid_submission::claim_submission_render(&pool, render_job_id, second_claim_token)
-            .await
-            .unwrap()
-            .expect("reaped render must be claimable again");
-    assert_eq!(second_claim.attempt_count, 2);
-    assert_eq!(
-        storage::bid_submission::fail_submission_render(
-            &pool,
-            render_job_id,
-            second_claim_token,
-            "TEST_COMPLETE",
-            "reaper contract fixture cleanup",
-            false,
-        )
-        .await
-        .unwrap()
-        .as_deref(),
-        Some("failed")
-    );
-    assert_eq!(
-        storage::bid_submission::fail_submission_render(
-            &pool,
-            fresh_job_id,
-            fresh_claim_token,
-            "TEST_COMPLETE",
-            "fresh claim contract fixture cleanup",
-            false,
-        )
-        .await
-        .unwrap()
-        .as_deref(),
-        Some("failed")
     );
 }
 
@@ -1967,49 +1711,7 @@ async fn pdf_attachment_preparation_requires_a_contiguous_frozen_page_set() {
         return;
     }
     let seed = seed_project(&pool).await;
-    let attachment_id = Uuid::new_v4();
-    let original = format!("%PDF-1.7\n% {attachment_id}\n%%EOF\n").into_bytes();
-    let original_digest = domain::sha256_hex(&original);
-    let original_ref = format!("objects/{original_digest}");
-    let original_staging = stage_object(
-        &pool,
-        &original_ref,
-        &original_digest,
-        "application/pdf",
-        original.len() as i64,
-        &seed.actor,
-    )
-    .await;
-    let request = json!({
-        "attachment_id": attachment_id,
-        "project_id": seed.project_id,
-        "kind": "bid_bond",
-    });
-    let (request_bytes, request_sha256) = request_identity(&request);
-    let uploaded: Value = sqlx::query_scalar(
-        "SELECT kb_bid_upload_attachment(
-           $1,$2,$3,'bid_bond',$4,$5,'application/pdf',$6,NULL,NULL,$7,$8,$9,$10)",
-    )
-    .bind(original_staging)
-    .bind(attachment_id)
-    .bind(seed.project_id)
-    .bind(&original_ref)
-    .bind(&original_digest)
-    .bind(original.len() as i64)
-    .bind(&seed.actor)
-    .bind(format!("attachment-gap-{attachment_id}"))
-    .bind(request_bytes)
-    .bind(request_sha256)
-    .fetch_one(&pool)
-    .await
-    .expect("upload PDF before preparing its frozen pages");
-    assert_eq!(uploaded["preparation_status"], "pending");
-    assert_eq!(uploaded["render_page_count"], 0);
-    let preparation_job_id: Uuid = uploaded["preparation_job_id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
+    let (attachment_id, preparation_job_id) = upload_pending_pdf_attachment(&pool, &seed).await;
 
     let validate_request = json!({
         "attachment_id": attachment_id,
@@ -2018,7 +1720,7 @@ async fn pdf_attachment_preparation_requires_a_contiguous_frozen_page_set() {
     });
     let (validate_bytes, validate_sha256) = request_identity(&validate_request);
     let validation: Result<Value, sqlx::Error> =
-        sqlx::query_scalar("SELECT kb_bid_mutate_attachment($1,$2,'validate',1,NULL,$3,$4,$5,$6)")
+        sqlx::query_scalar("SELECT kb_bid_mutate_attachment($1,$2,validate,1,NULL,$3,$4,$5,$6)")
             .bind(seed.project_id)
             .bind(attachment_id)
             .bind(&seed.actor)
@@ -2032,46 +1734,31 @@ async fn pdf_attachment_preparation_requires_a_contiguous_frozen_page_set() {
         "ATTACHMENT_PREPARATION_INCOMPLETE",
     );
 
+    assert!(
+        storage::bid_submission::load_attachment_preparation(&pool, preparation_job_id, 2)
+            .await
+            .unwrap()
+            .is_none(),
+        "a stale attachment revision must not load the target"
+    );
+    let target = storage::bid_submission::load_attachment_preparation(&pool, preparation_job_id, 1)
+        .await
+        .unwrap()
+        .expect("current attachment revision must load the target");
+    assert_eq!(target.preparation_job_id, preparation_job_id);
+    assert_eq!(target.attachment_revision, 1);
+
     let worker_actor = "system:bid-attachment-preparation";
-    let page = unique_png(Uuid::new_v4());
-    let page_digest = domain::sha256_hex(&page);
-    let page_ref = format!("objects/{page_digest}");
-    let page_staging = stage_object(
+    let (page_staging, page) = stage_render_page(&pool, 1).await;
+    let invalid_pages = json!([page]);
+    let result = storage::bid_submission::publish_attachment_preparation(
         &pool,
-        &page_ref,
-        &page_digest,
-        "image/png",
-        page.len() as i64,
+        preparation_job_id,
+        1,
+        &invalid_pages,
         worker_actor,
     )
     .await;
-    let render_pages = json!([{
-        "staging_id": page_staging,
-        "page_ordinal": 1,
-        "object_ref": page_ref,
-        "digest": page_digest,
-        "media_type": "image/png",
-        "byte_length": page.len(),
-        "pixel_width": 2,
-        "pixel_height": 2,
-    }]);
-    let claim_token = Uuid::new_v4();
-    let claim: Option<Value> =
-        sqlx::query_scalar("SELECT kb_bid_claim_attachment_preparation($1,$2)")
-            .bind(preparation_job_id)
-            .bind(claim_token)
-            .fetch_one(&pool)
-            .await
-            .expect("claim PDF attachment preparation");
-    assert!(claim.is_some());
-    let result: Result<Value, sqlx::Error> =
-        sqlx::query_scalar("SELECT kb_bid_publish_attachment_preparation($1,$2,$3,$4)")
-            .bind(preparation_job_id)
-            .bind(claim_token)
-            .bind(&render_pages)
-            .bind(worker_actor)
-            .fetch_one(&pool)
-            .await;
     assert_database_error(
         result.expect_err("a PDF page set starting at ordinal one must reject"),
         "ATTACHMENT_RENDER_PAGE_SET_INVALID",
@@ -2085,38 +1772,33 @@ async fn pdf_attachment_preparation_requires_a_contiguous_frozen_page_set() {
     .unwrap();
     let page_owner_rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM object_owner_references
-          WHERE owner_kind='bid_attachment_page' AND owner_id=$1",
+          WHERE owner_kind=bid_attachment_page AND owner_id=$1",
     )
     .bind(attachment_id)
     .fetch_one(&pool)
     .await
     .unwrap();
     assert_eq!((page_rows, page_owner_rows), (0, 0));
-    let failed: Option<String> = sqlx::query_scalar(
-        "SELECT kb_bid_fail_attachment_preparation($1,$2,'INVALID_PAGE_SET',$3,true)",
-    )
-    .bind(preparation_job_id)
-    .bind(claim_token)
-    .bind("page ordinals must start at zero")
-    .fetch_one(&pool)
-    .await
-    .expect("settle the rejected preparation claim");
-    assert_eq!(failed.as_deref(), Some("pending"));
+    assert_eq!(
+        storage::bid_submission::fail_attachment_preparation(
+            &pool,
+            preparation_job_id,
+            1,
+            "INVALID_PAGE_SET",
+            "page ordinals must start at zero",
+            true,
+        )
+        .await
+        .unwrap()
+        .as_deref(),
+        Some("pending")
+    );
     assert!(
         storage::abandon_object_upload(&pool, page_staging, worker_actor)
             .await
             .unwrap()
     );
 
-    let second_claim_token = Uuid::new_v4();
-    let second_claim: Option<Value> =
-        sqlx::query_scalar("SELECT kb_bid_claim_attachment_preparation($1,$2)")
-            .bind(preparation_job_id)
-            .bind(second_claim_token)
-            .fetch_one(&pool)
-            .await
-            .expect("reclaim preparation after retryable page-set failure");
-    assert!(second_claim.is_some());
     let (page_zero_staging, page_zero) = stage_render_page(&pool, 0).await;
     let unavailable_page = unique_png(Uuid::new_v4());
     let unavailable_digest = domain::sha256_hex(&unavailable_page);
@@ -2130,14 +1812,14 @@ async fn pdf_attachment_preparation_requires_a_contiguous_frozen_page_set() {
         "pixel_width": 2,
         "pixel_height": 2,
     });
-    let partial_publish: Result<Value, sqlx::Error> =
-        sqlx::query_scalar("SELECT kb_bid_publish_attachment_preparation($1,$2,$3,$4)")
-            .bind(preparation_job_id)
-            .bind(second_claim_token)
-            .bind(json!([page_zero, page_one]))
-            .bind(worker_actor)
-            .fetch_one(&pool)
-            .await;
+    let partial_publish = storage::bid_submission::publish_attachment_preparation(
+        &pool,
+        preparation_job_id,
+        1,
+        &json!([page_zero, page_one]),
+        worker_actor,
+    )
+    .await;
     partial_publish.expect_err("missing second staging row must roll back the complete page set");
     let page_rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM bid_attachment_render_pages WHERE attachment_id=$1",
@@ -2148,7 +1830,7 @@ async fn pdf_attachment_preparation_requires_a_contiguous_frozen_page_set() {
     .unwrap();
     let page_owner_rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM object_owner_references
-          WHERE owner_kind='bid_attachment_page' AND owner_id=$1",
+          WHERE owner_kind=bid_attachment_page AND owner_id=$1",
     )
     .bind(attachment_id)
     .fetch_one(&pool)
@@ -2164,16 +1846,20 @@ async fn pdf_attachment_preparation_requires_a_contiguous_frozen_page_set() {
         (page_rows, page_owner_rows, page_zero_staging_rows),
         (0, 0, 1)
     );
-    let failed: Option<String> = sqlx::query_scalar(
-        "SELECT kb_bid_fail_attachment_preparation($1,$2,'STAGING_MISSING',$3,true)",
-    )
-    .bind(preparation_job_id)
-    .bind(second_claim_token)
-    .bind("a page staging row disappeared before publication")
-    .fetch_one(&pool)
-    .await
-    .expect("settle atomic publication failure");
-    assert_eq!(failed.as_deref(), Some("pending"));
+    assert_eq!(
+        storage::bid_submission::fail_attachment_preparation(
+            &pool,
+            preparation_job_id,
+            1,
+            "STAGING_MISSING",
+            "a page staging row disappeared before publication",
+            true,
+        )
+        .await
+        .unwrap()
+        .as_deref(),
+        Some("pending")
+    );
     assert!(
         storage::abandon_object_upload(&pool, page_zero_staging, worker_actor)
             .await
@@ -2182,7 +1868,7 @@ async fn pdf_attachment_preparation_requires_a_contiguous_frozen_page_set() {
 }
 
 #[tokio::test]
-async fn attachment_preparation_reaper_fences_expired_owner_and_allows_reclaim() {
+async fn attachment_preparation_retries_are_owned_by_oxana_and_do_not_exhaust_in_db() {
     let Some(pool) = live_test_pool().await else {
         return;
     };
@@ -2190,88 +1876,77 @@ async fn attachment_preparation_reaper_fences_expired_owner_and_allows_reclaim()
         return;
     }
     let seed = seed_project(&pool).await;
-    let (attachment_id, preparation_job_id) = upload_pending_pdf_attachment(&pool, &seed).await;
-    let expired_token = Uuid::new_v4();
-    let claim: Option<Value> =
-        sqlx::query_scalar("SELECT kb_bid_claim_attachment_preparation($1,$2)")
-            .bind(preparation_job_id)
-            .bind(expired_token)
-            .fetch_one(&pool)
+    let (_, preparation_job_id) = upload_pending_pdf_attachment(&pool, &seed).await;
+
+    for retry in 1..=6 {
+        let target =
+            storage::bid_submission::load_attachment_preparation(&pool, preparation_job_id, 1)
+                .await
+                .unwrap()
+                .expect("Oxana retry must reload the same pending preparation target");
+        assert_eq!(target.preparation_job_id, preparation_job_id);
+        assert_eq!(
+            storage::bid_submission::fail_attachment_preparation(
+                &pool,
+                preparation_job_id,
+                1,
+                "OBJECT_STORE_UNAVAILABLE",
+                "temporary page staging outage",
+                true,
+            )
             .await
-            .expect("claim PDF preparation before simulating lease expiry");
-    assert!(claim.is_some());
-    sqlx::query(
-        "UPDATE bid_attachment_preparation_jobs
-            SET heartbeat_at=clock_timestamp()-make_interval(secs=>claim_lease_ms/1000.0)-interval '1 second'
-          WHERE id=$1",
-    )
-    .bind(preparation_job_id)
-    .execute(&pool)
-    .await
-    .unwrap();
+            .unwrap()
+            .as_deref(),
+            Some("pending"),
+            "retry {retry}"
+        );
+        let durable_status: String =
+            sqlx::query_scalar("SELECT status FROM bid_attachment_preparation_jobs WHERE id=$1")
+                .bind(preparation_job_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(durable_status, "pending");
+    }
 
-    let renewed: bool = sqlx::query_scalar("SELECT kb_bid_heartbeat_attachment_preparation($1,$2)")
-        .bind(preparation_job_id)
-        .bind(expired_token)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert!(!renewed, "an expired lease must not be revived");
-    let stale_publish: Result<Value, sqlx::Error> =
-        sqlx::query_scalar("SELECT kb_bid_publish_attachment_preparation($1,$2,'[]'::jsonb,$3)")
-            .bind(preparation_job_id)
-            .bind(expired_token)
-            .bind("system:bid-attachment-preparation")
-            .fetch_one(&pool)
-            .await;
-    assert_database_error(
-        stale_publish.expect_err("expired attachment preparation owner must be fenced"),
-        "ATTACHMENT_PREPARATION_CLAIM_LOST",
-    );
-
-    let reaped: i32 = sqlx::query_scalar("SELECT kb_bid_reap_attachment_preparations()")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(reaped, 1);
-    let reaped_state: (String, Option<Uuid>, String) = sqlx::query_as(
-        "SELECT status,claim_token,error_code
-           FROM bid_attachment_preparation_jobs WHERE id=$1",
-    )
-    .bind(preparation_job_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
     assert_eq!(
-        reaped_state,
-        ("pending".into(), None, "CLAIM_LEASE_EXPIRED".into())
+        storage::bid_submission::fail_attachment_preparation(
+            &pool,
+            preparation_job_id,
+            2,
+            "ATTACHMENT_CONVERSION_INVALID",
+            "stale revision",
+            false,
+        )
+        .await
+        .unwrap(),
+        None
     );
-
-    let reclaim_token = Uuid::new_v4();
-    let reclaim: Option<Value> =
-        sqlx::query_scalar("SELECT kb_bid_claim_attachment_preparation($1,$2)")
-            .bind(preparation_job_id)
-            .bind(reclaim_token)
-            .fetch_one(&pool)
+    assert_eq!(
+        storage::bid_submission::fail_attachment_preparation(
+            &pool,
+            preparation_job_id,
+            1,
+            "ATTACHMENT_CONVERSION_INVALID",
+            "deterministic conversion failure",
+            false,
+        )
+        .await
+        .unwrap()
+        .as_deref(),
+        Some("failed")
+    );
+    assert!(
+        storage::bid_submission::load_attachment_preparation(&pool, preparation_job_id, 1)
             .await
-            .expect("reclaim reaped PDF preparation");
-    assert!(reclaim.is_some());
-    let (_, page) = stage_render_page(&pool, 0).await;
-    let prepared: Value =
-        sqlx::query_scalar("SELECT kb_bid_publish_attachment_preparation($1,$2,$3,$4)")
-            .bind(preparation_job_id)
-            .bind(reclaim_token)
-            .bind(json!([page]))
-            .bind("system:bid-attachment-preparation")
-            .fetch_one(&pool)
-            .await
-            .expect("new preparation owner publishes after reaping old lease");
-    assert_eq!(prepared["attachment_id"], attachment_id.to_string());
-    assert_eq!(prepared["status"], "completed");
+            .unwrap()
+            .is_none(),
+        "a terminally failed target must not load again"
+    );
 }
 
 #[tokio::test]
-async fn rejecting_or_deleting_attachment_cancels_and_fences_running_preparation() {
+async fn rejecting_or_deleting_attachment_cancels_and_fences_pending_preparation() {
     let Some(pool) = live_test_pool().await else {
         return;
     };
@@ -2284,15 +1959,12 @@ async fn rejecting_or_deleting_attachment_cancels_and_fences_running_preparation
         ("delete", "ATTACHMENT_DELETED"),
     ] {
         let (attachment_id, preparation_job_id) = upload_pending_pdf_attachment(&pool, &seed).await;
-        let claim_token = Uuid::new_v4();
-        let claim: Option<Value> =
-            sqlx::query_scalar("SELECT kb_bid_claim_attachment_preparation($1,$2)")
-                .bind(preparation_job_id)
-                .bind(claim_token)
-                .fetch_one(&pool)
+        assert!(
+            storage::bid_submission::load_attachment_preparation(&pool, preparation_job_id, 1)
                 .await
-                .expect("claim preparation before attachment cancellation");
-        assert!(claim.is_some());
+                .unwrap()
+                .is_some()
+        );
 
         let request = json!({
             "attachment_id": attachment_id,
@@ -2306,46 +1978,39 @@ async fn rejecting_or_deleting_attachment_cancels_and_fences_running_preparation
                 .bind(attachment_id)
                 .bind(action)
                 .bind(&seed.actor)
-                .bind(format!("{action}-running-preparation-{attachment_id}"))
+                .bind(format!("{action}-pending-preparation-{attachment_id}"))
                 .bind(request_bytes)
                 .bind(request_sha256)
                 .fetch_one(&pool)
                 .await
                 .unwrap_or_else(|error| {
-                    panic!("{action} attachment with running preparation: {error}")
+                    panic!("{action} attachment with pending preparation: {error}")
                 });
-        let job_state: (String, Option<Uuid>, String) = sqlx::query_as(
-            "SELECT status,claim_token,error_code
+        let job_state: (String, String) = sqlx::query_as(
+            "SELECT status,error_code
                FROM bid_attachment_preparation_jobs WHERE id=$1",
         )
         .bind(preparation_job_id)
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(
-            job_state,
-            ("cancelled".into(), None, expected_error_code.into())
-        );
-        let heartbeat: bool =
-            sqlx::query_scalar("SELECT kb_bid_heartbeat_attachment_preparation($1,$2)")
-                .bind(preparation_job_id)
-                .bind(claim_token)
-                .fetch_one(&pool)
+        assert_eq!(job_state, ("cancelled".into(), expected_error_code.into()));
+        assert!(
+            storage::bid_submission::load_attachment_preparation(&pool, preparation_job_id, 1)
                 .await
-                .unwrap();
-        assert!(!heartbeat);
-        let stale_publish: Result<Value, sqlx::Error> = sqlx::query_scalar(
-            "SELECT kb_bid_publish_attachment_preparation($1,$2,'[]'::jsonb,$3)",
-        )
-        .bind(preparation_job_id)
-        .bind(claim_token)
-        .bind("system:bid-attachment-preparation")
-        .fetch_one(&pool)
-        .await;
-        assert_database_error(
-            stale_publish.expect_err("cancelled preparation owner must be fenced"),
-            "ATTACHMENT_PREPARATION_CLAIM_LOST",
+                .unwrap()
+                .is_none()
         );
+        let stale = storage::bid_submission::publish_attachment_preparation(
+            &pool,
+            preparation_job_id,
+            1,
+            &json!([]),
+            "system:bid-attachment-preparation",
+        )
+        .await
+        .expect("cancelled preparation resolves as stale");
+        assert_eq!(stale["status"], "stale");
     }
 }
 
@@ -2569,24 +2234,20 @@ async fn confirmed_pdf_attachment_is_frozen_into_manifest_and_rendered_from_page
             "pixel_height": 2,
         }));
     }
-    let claim_token = Uuid::new_v4();
-    let claim: Option<Value> =
-        sqlx::query_scalar("SELECT kb_bid_claim_attachment_preparation($1,$2)")
-            .bind(preparation_job_id)
-            .bind(claim_token)
-            .fetch_one(&pool)
-            .await
-            .expect("claim PDF attachment preparation");
-    assert!(claim.is_some());
-    let prepared: Value =
-        sqlx::query_scalar("SELECT kb_bid_publish_attachment_preparation($1,$2,$3,$4)")
-            .bind(preparation_job_id)
-            .bind(claim_token)
-            .bind(json!(render_pages))
-            .bind(worker_actor)
-            .fetch_one(&pool)
-            .await
-            .expect("publish the frozen PDF page set");
+    let target = storage::bid_submission::load_attachment_preparation(&pool, preparation_job_id, 1)
+        .await
+        .unwrap()
+        .expect("load PDF attachment preparation");
+    assert_eq!(target.attachment_id, attachment_id);
+    let prepared = storage::bid_submission::publish_attachment_preparation(
+        &pool,
+        preparation_job_id,
+        1,
+        &json!(render_pages),
+        worker_actor,
+    )
+    .await
+    .expect("publish the frozen PDF page set");
     assert_eq!(prepared["status"], "completed");
     assert_eq!(prepared["render_page_count"], 2);
 

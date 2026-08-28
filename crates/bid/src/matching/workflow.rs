@@ -1,4 +1,4 @@
-//! Deterministic report builder over an already-frozen claim.
+//! Deterministic report builder over an already-frozen matching request.
 
 use super::{
     CandidateBusinessValue, CandidateGroupV1, CanonicalDecimal, CoverageCountsV1,
@@ -11,7 +11,7 @@ use super::{
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use storage::bid_matching::{ClaimedMatchingRequest, LoadedFrozenHit, LoadedRequirement};
+use storage::bid_matching::{LoadedFrozenHit, LoadedRequirement, MatchingRequest};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -152,31 +152,31 @@ where
 
     pub async fn execute(
         &self,
-        claimed: &ClaimedMatchingRequest,
+        request: &MatchingRequest,
         report_id: Uuid,
     ) -> Result<MatchingReportV1, MatchError> {
-        let route = match claimed.route {
+        let route = match request.route {
             storage::bid_matching::MatchRoute::Technical { unit_id } => {
                 MatchRoute::Technical { unit_id }
             }
             storage::bid_matching::MatchRoute::Commercial => MatchRoute::Commercial,
         };
         let empty_disposition =
-            claimed
+            request
                 .requirements
                 .is_empty()
-                .then_some(if claimed.empty_policy == "skip_unit" {
+                .then_some(if request.empty_policy == "skip_unit" {
                     EmptyDisposition::SkipUnit
                 } else {
                     EmptyDisposition::ClearRoute
                 });
 
-        let requirements: HashMap<Uuid, &LoadedRequirement> = claimed
+        let requirements: HashMap<Uuid, &LoadedRequirement> = request
             .requirements
             .iter()
             .map(|row| (row.id, row))
             .collect();
-        if requirements.len() != claimed.requirements.len() {
+        if requirements.len() != request.requirements.len() {
             return Err(MatchError::fatal(
                 "INVALID_FROZEN_SCOPE",
                 "duplicate requirement artifact identity",
@@ -189,12 +189,12 @@ where
         > = BTreeMap::new();
         let mut candidates = Vec::new();
         let mut dedup = HashSet::new();
-        for loaded in &claimed.frozen_hits {
+        for loaded in &request.frozen_hits {
             let Some(requirement) = requirements.get(&loaded.requirement_artifact_id).copied()
             else {
                 return Err(MatchError::fatal(
                     "INVALID_FROZEN_SCOPE",
-                    "hit requirement is outside the claimed route",
+                    "hit requirement is outside the frozen route",
                 ));
             };
             let hit = frozen_hit(loaded)?;
@@ -307,8 +307,8 @@ where
         }
 
         candidates.sort_by(candidate_order);
-        let mut decisions = Vec::with_capacity(claimed.requirements.len());
-        for requirement in &claimed.requirements {
+        let mut decisions = Vec::with_capacity(request.requirements.len());
+        for requirement in &request.requirements {
             let rows: Vec<usize> = candidates
                 .iter()
                 .enumerate()
@@ -408,16 +408,16 @@ where
             .map(SourceChunkProjectionV1::from)
             .collect();
         let report = MatchingReportV1 {
-            project_id: claimed.project_id,
+            project_id: request.project_id,
             payload: MatchingReportPayloadV1 {
                 schema_version: MATCHING_REPORT_SCHEMA_V1,
                 report_id,
-                manifest_id: claimed.manifest_id,
-                job_id: claimed.job_id,
-                route_id: claimed.route_id,
+                manifest_id: request.manifest_id,
+                job_id: request.job_id,
+                route_id: request.route_id,
                 route,
-                generation: claimed.generation,
-                mutation_watermark: claimed.mutation_watermark,
+                generation: request.generation,
+                mutation_watermark: request.mutation_watermark,
                 empty_disposition,
                 coverage,
                 quality_status,
@@ -531,7 +531,7 @@ fn candidate_groups(candidates: &[MatchingCandidateV1]) -> Vec<CandidateGroupV1>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use storage::bid_matching::{MatchClaim, MatchRoute as StorageRoute};
+    use storage::bid_matching::MatchRoute as StorageRoute;
 
     fn requirement(id: u128, ordinal: u32) -> LoadedRequirement {
         LoadedRequirement {
@@ -564,11 +564,8 @@ mod tests {
         }
     }
 
-    fn claim(
-        requirements: Vec<LoadedRequirement>,
-        hits: Vec<LoadedFrozenHit>,
-    ) -> ClaimedMatchingRequest {
-        ClaimedMatchingRequest {
+    fn claim(requirements: Vec<LoadedRequirement>, hits: Vec<LoadedFrozenHit>) -> MatchingRequest {
+        MatchingRequest {
             job_id: Uuid::from_u128(1),
             manifest_id: Uuid::from_u128(2),
             project_id: Uuid::from_u128(3),
@@ -579,12 +576,6 @@ mod tests {
                 unit_id: Uuid::nil(),
             },
             empty_policy: "clear_route".into(),
-            claim: MatchClaim {
-                token: Uuid::from_u128(5),
-                attempt: 1,
-                claim_lease_ms: 300_000,
-                lease_policy_generation: 1,
-            },
             requirements,
             frozen_hits: hits,
         }

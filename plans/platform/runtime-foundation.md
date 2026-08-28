@@ -20,11 +20,10 @@
 
 业务领域拥有：
 
-- 业务 target、status、generation、claim、lease 和结果；
+- 业务 target、status、generation/revision 和结果；
 - artifact、current pointer、operation 和 payload；
-- Redis 完全丢失时从 durable target 发起的兜底投递。
 
-平台和业务都不得复制 Oxana 的 retry、resurrection、queue membership 或 dead-job 状态机。
+平台和业务都不得复制 Oxana 的 retry、resurrection、queue membership、claim/heartbeat 或 dead-job 状态机。
 
 ## 2. Fresh baseline manifest
 
@@ -82,9 +81,9 @@ audit envelope 至少冻结 operation、actor、request/response identity、befo
 - Oxana 精确锁定为 crates.io 2.1.3，完整 source/checksum 只由 `Cargo.lock` 固化；
 - 构建与 CI 使用 `cargo --locked`，禁止 fork、vendor、Git/path/patch/source replacement；
 - workspace image 从干净、已提交候选构建，部署证据记录 candidate SHA、`Cargo.lock` SHA 和实际 image digest；
-- worker 的显式 shutdown、SIGINT 和 SIGTERM 汇聚到一个 cancellation token；
-- handler 子进程与 heartbeat 使用同一 scope，退出时 cancel，最多等待 5 秒，随后 kill process group、wait/reap 并 join；
-- 不增加独立 `bid-dispatcher` service、DSN、credential 或 activation hold；轻量 due reconciler运行在现有 worker 中。
+- worker 的 shutdown、SIGINT、SIGTERM 和进程 heartbeat/resurrection 直接使用 Oxana runtime；
+- handler 自己启动的外部子进程在退出时 cancel，最多等待 5 秒，随后 kill process group、wait/reap；
+- 不增加独立 `bid-dispatcher`、reconciler、DSN、credential 或 activation hold。
 
 ## 5. ObjectRegistry
 
@@ -113,14 +112,14 @@ retention outbox/tombstone
 
 物理删除由独立 retention role/consumer 执行，投递、失败重试和进程崩溃恢复复用 [`queue-runtime.md`](queue-runtime.md)：
 
-1. claim 时再次确认对象为 `deleting` 且不存在 reference；
+1. 执行前再次确认对象为 `deleting` 且不存在 reference；
 2. 删除 blob 成功后原子写 tombstone/receipt 并转为 `deleted`；
-3. PostgreSQL outbox row是durable删除intent，claim token/lease只防止旧owner发布错误结果；
-4. Oxana负责handler retry/resurrection，Redis全丢时由outbox due scan重新enqueue；
-5. duplicate或lease lost不得重复释放业务reference，也不得删除仍有引用的对象；
+3. PostgreSQL outbox row只表达durable删除intent，不保存队列phase、retry或claim；
+4. transaction commit后单次enqueue；失败返回可重试错误，同一业务幂等key重放；
+5. Oxana负责handler retry/resurrection/dead queue，duplicate通过对象状态和receipt幂等收敛；
 6. 日志、audit 和 receipt 不记录对象内容或 secret。
 
-`object_upload_staging` expiry 每五分钟处理固定上限 100 条；超出部分由后续 tick 按 `expires_at,id` 继续。它只负责发现到期业务intent，不实现第二套retry或queue membership状态机。
+`object_upload_staging` expiry 由 Oxana cron 每五分钟处理固定上限 100 条；超出部分由后续 occurrence 按 `expires_at,id` 继续。它只发现到期业务数据，不重投普通 job、不实现第二套 retry 或 queue membership 状态机。
 
 ## 7. 实施与验收
 
@@ -133,7 +132,7 @@ PR1 建立 baseline manifest、actor/idempotency/audit、`ObjectRegistry`、通�
 - 应用重复启动只验证 schema，不执行 DDL；
 - object key、digest、MIME/bytes、owner scope 和 reference 一致性；
 - 有引用拒绝删除、释放后删除、并发 add-reference/delete 竞态；
-- retention crash、lease reclaim、响应丢失、重试与幂等 receipt；
+- retention worker crash由Oxana resurrection恢复、响应丢失、retry/dead revive与幂等 receipt；
 - [`queue-runtime.md`](queue-runtime.md) 定义的版本、retry、resurrection 和 shutdown 验收；
 - `rg` 与 catalog denylist 证明旧 refcount、公开删除函数和 runtime repair 已不存在；
 - Compose 空对象卷下的上传、读取、引用保护和最终回收实测；

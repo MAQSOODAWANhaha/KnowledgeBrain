@@ -1,8 +1,10 @@
-# 招投标最终 V1 完整方案
+# 招投标方案导航（Target V2实施 / Legacy V1删除定位）
+
+> Target V2唯一实施方案是[`tender-to-submission-v2.md`](tender-to-submission-v2.md)，唯一产品契约是[`../../docs/platform/tender-to-submission-authoring.md`](../../docs/platform/tender-to-submission-authoring.md)。下文及旧专题中的固定PartSet、SubmissionGateV1和专用profile/procedural流程仅描述待删除的V1实现，不得作为Target V2要求。
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | **最终 V1 与 Oxana 2.1.3 简化队列方案已批准并固化；运行时代码尚未按新方案实施或验收** |
+| 状态 | **Target V2分阶段实现中；Legacy V1方案只保留为删除与回归定位** |
 | 日期 | 2026-08-27 |
 | 业务 | 网络安全产品与服务应标（乙方） |
 | 部署 | clean-slate fresh redeploy |
@@ -16,7 +18,7 @@
 | [`matching.md`](matching.md) | 两路检索、不可变证据、MatchingReportV1、选择集和匹配发布 |
 | [`quote.md`](quote.md) | CNY Decimal、限价口径、QuoteSnapshotV1、finalize/reopen |
 | [`submission-export.md`](submission-export.md) | ①～⑥、程序材料、stale、manifest、ObjectRegistry 使用、DOCX/PDF |
-| [`durable-dispatch.md`](durable-dispatch.md) | 现有业务 target、generation/lease fencing、Oxana 消费和 Redis 全丢兜底 |
+| [`durable-dispatch.md`](durable-dispatch.md) | 现有业务 target/revision、幂等publish、Oxana原生retry/resurrection/dead queue |
 | [`implementation-acceptance.md`](implementation-acceptance.md) | 最终 baseline、删除矩阵、PR0～PR9、测试与运行验收 |
 
 已被替代的旧方案和评审只保存在 [`../archive/README.md`](../archive/README.md)，不再留旧路径兼容副本。
@@ -25,7 +27,7 @@
 
 ## 当前实施状态
 
-当前仓库已落位大部分 clean-slate V1 产品主链，但简化后的异步投递尚未实施；当前工作树仍含将被替换的 Bid 两跳 live-recovery、commit 后 best-effort enqueue和未采用的复杂 dispatch 草稿。最终实现只复用 Oxana retry/resurrection，并以现有业务 target承担 durable intent，准确边界见平台 [`queue-runtime.md`](../platform/queue-runtime.md)。
+当前仓库已落位大部分 clean-slate V1 产品主链，但简化后的异步投递尚未实施；当前工作树仍含将被替换的 Bid 两跳 live-recovery、commit 后忽略enqueue错误和未采用的复杂 dispatch 草稿。最终实现直接复用 Oxana retry/resurrection/dead queue，业务 target只承担业务意图与幂等publish，准确边界见平台 [`queue-runtime.md`](../platform/queue-runtime.md)。
 
 | 层次 | 当前证据 |
 | --- | --- |
@@ -99,19 +101,19 @@ Shared Platform
 
 鉴权、actor identity、幂等/audit 基础表、运行时队列、维护门、对象注册与物理删除归共享平台。业务模块只使用平台接口；fresh baseline 编排与 `ObjectRegistry`/retention 内部协议见 [`../platform/runtime-foundation.md`](../platform/runtime-foundation.md)，Oxana/Redis transport interface 见 [`../platform/queue-runtime.md`](../platform/queue-runtime.md)。
 
-Matching 的 Open/Stage/Commit 是大 artifact 的 adapter 内部协议。application service 只表达“执行并发布 route”，不能让 staging set、claim token 或 batch ordinal 泄漏到其它业务模块。
+Matching 的 Open/Stage/Commit 是大 artifact 的 adapter 内部协议。application service 只表达“执行并发布 route”，不能让 staging set、Oxana job identity 或 batch ordinal 泄漏到其它业务模块。
 
 ### 3.3 Durable dispatch
 
-招投标现有业务 target就是durable intent，完整合同只在 [`durable-dispatch.md`](durable-dispatch.md) 定义。target与业务mutation同事务提交；Oxana负责enqueue、retry、并发消费和worker crash resurrection，PostgreSQL只保留delivery generation、业务claim/lease和fenced publish。API不在commit后best-effort enqueue，也不建立dispatch head/intent/attempt/successor等第二套队列状态机。
+招投标现有业务 target只保存业务意图和结果，完整合同只在 [`durable-dispatch.md`](durable-dispatch.md) 定义。Oxana负责enqueue、retry、并发消费、worker crash resurrection和dead queue；PostgreSQL只保留业务generation/revision与幂等publish。API在幂等业务transaction提交后单次enqueue，成功才返回`202`，失败返回可重试`503`；不建立dispatch head/intent/attempt/successor等第二套队列状态机。
 
-轻量due reconciler运行在现有worker中，只处理Redis完全丢失或任务长期未终结的兜底重新投递；不得保留独立`system:live-recovery:v1` queue hop、泛化housekeep扫描或独立dispatcher服务。
+不得保留due reconciler、pending target自动重投、独立`system:live-recovery:v1` queue hop、泛化housekeep扫描或独立dispatcher服务。retry耗尽使用Oxana dead queue与oxana-web `revive_all_dead`；Redis volume删除属于基础设施恢复，不在业务层重建队列。
 
 ## 4. 五个深模块
 
 ### 4.1 TenderPublication
 
-把一个已转换的招标 source generation 变成可审计的 current publication。它拥有 target/generation/claim fencing、section/span candidates、fact suggestions、clause candidates 和原子 publish。
+把一个已转换的招标 source generation 变成可审计的 current publication。它拥有 target/business generation、section/span candidates、fact suggestions、clause candidates 和 current-revision fenced publish。
 
 输出：冻结来源、current sections、current fact suggestion projection、current draft clauses。
 
@@ -131,7 +133,7 @@ Matching 的 Open/Stage/Commit 是大 artifact 的 adapter 内部协议。applic
 
 ### 4.5 Submission
 
-拥有 company/submission profile、程序材料分类与 resolution、附件 durable preparation、parts、dependency/stale、manifest、render assets 和导出门禁。PDF 附件上传只提交原对象和 durable job，worker 通过 lease/heartbeat/reaper 生成并原子发布冻结页面；preparation 未完成时 Gate 拒绝。Submission 只读其它模块发布的 identity/artifact。
+拥有 company/submission profile、程序材料分类与 resolution、附件 preparation target、parts、dependency/stale、manifest、render assets 和导出门禁。PDF 附件 worker依靠Oxana retry/resurrection执行，并通过target revision与幂等事务原子发布冻结页面；preparation 未完成时 Gate 拒绝。Submission 只读其它模块发布的 identity/artifact。
 
 ## 5. 关键不变量
 
@@ -203,12 +205,12 @@ baseline 必须一次建立：
 - matching job/artifacts/current projections/picks；
 - quote draft/snapshot/current pointer；
 - profiles/procedural/parts/manifest/render assets；
-- 六类现有业务target上的delivery generation、next enqueue、业务claim/lease和result/error字段；
+- 六类现有业务target上的business generation/revision、result和bounded error字段；
 - functions、triggers、views、ACL 和 seed contract artifacts。
 
 ### 7.2 权限
 
-招投标API和worker只获得各自受检函数与必要read view权限；不能直接改不可变artifact、current pointer、ObjectRegistry或retention outbox。due reconciler复用现有worker role，只能调用bounded reserve/reap函数；V1不新增dispatcher role、DSN或service。平台角色与retention权限由[`../platform/runtime-foundation.md`](../platform/runtime-foundation.md)定义，fresh-schema acceptance验证allow/deny矩阵。
+招投标API和worker只获得各自受检函数与必要read view权限；不能直接改不可变artifact、current pointer、ObjectRegistry或retention outbox。V1不新增reconciler/dispatcher role、DSN或service，也不授予读取Oxana私有Redis状态的权限。平台角色与retention权限由[`../platform/runtime-foundation.md`](../platform/runtime-foundation.md)定义，fresh-schema acceptance验证allow/deny矩阵。
 
 V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用户拥有的项目，所有 `/api/v1/bids/{project_id}/...` 路径先校验 owner。当前模型没有 Bid 成员或 API-key-to-Bid scope relation，因此这两类访问必须 fail-closed；若未来需要协作成员，先增加显式 membership/scope artifact 与受检授权合同，不能把“已认证”当作“可访问任意 Bid”。
 
@@ -216,18 +218,18 @@ V1 的 project 访问边界是 `owner_user_id`：项目列表只返回当前用�
 
 | 阶段 | 当前实现状态 | 完成证据 |
 | --- | --- | --- |
-| PR0 | 产品基线与Oxana简化方案已批准并固化 | 2026-08-27职责边界、故障收敛、活动目录一致性与`diff --check`通过 |
+| PR0 | 产品基线与 Oxana 原生能力简化方案均已批准 | 以已批准职责边界实施；不得恢复第二套队列状态机 |
 | PR1 | 原 baseline 主体已落位；dispatch schema/ACL/checksum 尚待替换 | fresh-schema/catalog/seed/ACL 必须在替换后重跑 |
 | PR2 | TenderPublication、ClauseLifecycle、KindRouter和facts主体已落位；dispatch与parser边界待收口 | publication/promotion/concurrency强制活库套件待重跑 |
-| PR3 | MatchingPublication主体已落位；schedule/job dispatch待替换 | matching/lease/fanout/pick强制活库套件待重跑 |
+| PR3 | MatchingPublication主体已落位；schedule/job transport待简化 | matching/staging/fanout/pick强制活库套件待重跑 |
 | PR4 | Quote主体已落位 | quote/HTTP/Web最终门禁待重跑 |
 | PR5 | Submission主体已落位；attachment/render dispatch待替换 | submission/renderer/worker/fresh PDF待重跑 |
 | PR6 | API routes与模块化Web工作台已落位 | HTTP、lint/build、mocked与live Playwright待最终重跑 |
 | PR7 | 旧transport seam已有部分实现；须按简化合同调整 | Oxana 2.1.3原生retry/Skip/resurrection和cleanup活Redis验收 |
-| PR8 | 未完成 | 六类target最小delivery字段、worker内reconciler、generation/token/lease fencing及旧Bid recovery/复杂dispatch草稿删除 |
+| PR8 | 未完成 | 六类target business-revision fencing、幂等enqueue/successor重放及旧Bid recovery/复杂dispatch草稿删除 |
 | PR9 | 未完成 | 干净已 push 候选 SHA 的 clean-slate Compose、全量故障矩阵、真实浏览器/PDF、retention、强制资源清理、证据绑定与受审计 cutover；`phase_1d_runtime_complete=false` |
 
-PR7先固化并实测Oxana 2.1.3原生retry/resurrection；PR8逐类接入现有target，并在同一改动删除旧owner，不补建sidecar aggregate、不双写、不启动第二个dispatcher。发布版Oxana结果不能证明业务完成；业务正确性只由target generation、claim/lease和原子publish保证。
+PR7先固化并实测Oxana 2.1.3原生retry/resurrection/dead `revive_all_dead`；PR8逐类接入现有target，并在同一改动删除旧owner，不补建sidecar aggregate、不双写、不启动reconciler/dispatcher。发布版Oxana结果不能证明业务完成；业务正确性只由target business revision和幂等原子publish保证。
 
 ## 9. 验收口径
 

@@ -63,6 +63,86 @@ pub fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
+pub const KEYWORD_TOKENIZER_V2: &str = domain::knowledge_retrieval::RETRIEVAL_KEYWORD_TOKENIZER_V2;
+pub const KEYWORD_TOKENIZER_VERSION_V2: &str =
+    domain::knowledge_retrieval::RETRIEVAL_KEYWORD_TOKENIZER_VERSION_V2;
+
+fn is_cjk_ideograph_v2(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3400..=0x4dbf
+            | 0x4e00..=0x9fff
+            | 0xf900..=0xfaff
+            | 0x20000..=0x2ebef
+            | 0x2ebf0..=0x2ee5f
+            | 0x2f800..=0x2fa1f
+            | 0x30000..=0x323af
+    )
+}
+
+/// Tokenizes the fixed V2 keyword policy without changing the legacy tokenizer.
+pub fn keyword_tokens_v2(text: &str) -> Vec<String> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum RunKind {
+        Ascii,
+        Cjk,
+    }
+
+    fn flush(tokens: &mut Vec<String>, kind: &mut Option<RunKind>, run: &mut String) {
+        match *kind {
+            Some(RunKind::Ascii) => tokens.push(std::mem::take(run)),
+            Some(RunKind::Cjk) => {
+                let characters: Vec<char> = run.chars().collect();
+                if characters.len() == 1 {
+                    tokens.push(std::mem::take(run));
+                } else {
+                    tokens.extend(
+                        characters
+                            .windows(2)
+                            .map(|pair| pair.iter().collect::<String>()),
+                    );
+                    run.clear();
+                }
+            }
+            None => {}
+        }
+        *kind = None;
+    }
+
+    let mut tokens = Vec::new();
+    let mut kind = None;
+    let mut run = String::new();
+    for character in text.chars() {
+        let next_kind = if character.is_ascii_alphanumeric() {
+            Some(RunKind::Ascii)
+        } else if is_cjk_ideograph_v2(character) {
+            Some(RunKind::Cjk)
+        } else {
+            None
+        };
+        if next_kind != kind {
+            flush(&mut tokens, &mut kind, &mut run);
+        }
+        match next_kind {
+            Some(RunKind::Ascii) => {
+                kind = next_kind;
+                run.push(character.to_ascii_lowercase());
+            }
+            Some(RunKind::Cjk) => {
+                kind = next_kind;
+                run.push(character);
+            }
+            None => {}
+        }
+    }
+    flush(&mut tokens, &mut kind, &mut run);
+    tokens
+}
+
+pub fn keyword_token_stream_v2(text: &str) -> String {
+    keyword_tokens_v2(text).join(" ")
+}
+
 pub fn cosine(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -335,6 +415,32 @@ mod tests {
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn keyword_tokenizer_v2_goldens() {
+        assert_eq!(KEYWORD_TOKENIZER_V2, "latin-numeric-cjk-bigram");
+        assert_eq!(KEYWORD_TOKENIZER_VERSION_V2, "v1");
+        for (input, expected) in [
+            ("Router42 ABC123", "router42 abc123"),
+            ("alpha,beta...gamma", "alpha beta gamma"),
+            ("知识大脑", "知识 识大 大脑"),
+            ("中", "中"),
+            ("A\t B\n\rC", "a b c"),
+            ("abc中国XYZ", "abc 中国 xyz"),
+            ("café🙂naïve", "caf na ve"),
+            ("𠀀𠀁", "𠀀𠀁"),
+            ("\u{2ebef}\u{2ebf0}", "\u{2ebef}\u{2ebf0}"),
+            ("\u{2ee5f}\u{2ee60}", "\u{2ee5f}"),
+            ("A中B", "a 中 b"),
+            ("", ""),
+        ] {
+            assert_eq!(keyword_token_stream_v2(input), expected, "input={input:?}");
+        }
+        assert_eq!(
+            keyword_tokens_v2("repeat repeat 中国中国"),
+            ["repeat", "repeat", "中国", "国中", "中国"]
+        );
+    }
 
     #[test]
     fn parent_text_not_vectorized() {

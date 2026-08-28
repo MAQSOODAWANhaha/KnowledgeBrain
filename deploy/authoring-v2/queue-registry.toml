@@ -1,0 +1,67 @@
+format = 1
+schema_version = 1
+release_id = "kb-bid-authoring-v2-phase0-fixture"
+minimum_worker_protocol = 1
+
+# Inactive Phase 0 fixture. It is not loaded by QueueRegistry::load and is not
+# registered in deploy/queue-registry.toml before the Phase 7 fresh cutover.
+
+[[entries]]
+physical_queue = "bid-authoring-v2"
+task_type = "bid:tender_document_process:v2"
+payload_schema = "bid-authoring/v2"
+payload_version = 1
+identity_formula = "tender_document_process:{request_artifact_id}:{request_revision}"
+protocol = 1
+handler = "TenderDocumentProcessV2Handler"
+snapshots = ["request", "document", "parser_contract"]
+capabilities = ["postgresql", "object_store", "docreader", "ocr", "vlm"]
+launch_mode = "declared_disabled"
+
+[[entries]]
+physical_queue = "bid-authoring-v2"
+task_type = "bid:requirement_set_compile:v2"
+payload_schema = "bid-authoring/v2"
+payload_version = 1
+identity_formula = "requirement_set_compile:{project_id}:{document_set_revision_id}:{disposition_set_revision_id}"
+protocol = 1
+handler = "RequirementSetCompileV2Handler"
+snapshots = ["request", "document_set", "disposition_set"]
+capabilities = ["postgresql"]
+launch_mode = "declared_disabled"
+
+[[entries]]
+physical_queue = "bid-authoring-v2"
+task_type = "bid:outline_generate:v2"
+payload_schema = "bid-authoring/v2"
+payload_version = 1
+identity_formula = "outline_generate:{request_artifact_id}:{request_revision}"
+protocol = 1
+handler = "OutlineGenerateV2Handler"
+snapshots = ["request", "workspace", "requirement_projection", "prompt", "model"]
+capabilities = ["postgresql", "chat"]
+launch_mode = "declared_disabled"
+
+[[entries]]
+physical_queue = "bid-authoring-v2"
+task_type = "bid:content_generate:v2"
+payload_schema = "bid-authoring/v2"
+payload_version = 1
+identity_formula = "content_generate:{request_artifact_id}:{request_revision}"
+protocol = 1
+handler = "ContentGenerateV2Handler"
+snapshots = ["request", "workspace", "requirement_projection", "evidence", "prompt", "model"]
+capabilities = ["postgresql", "chat", "embedding", "index", "object_store"]
+launch_mode = "declared_disabled"
+
+[[entries]]
+physical_queue = "bid-authoring-v2"
+task_type = "bid:submission_export:v2"
+payload_schema = "bid-authoring/v2"
+payload_version = 1
+identity_formula = "submission_export:{request_artifact_id}:{request_revision}"
+protocol = 1
+handler = "SubmissionExportV2Handler"
+snapshots = ["request", "workspace", "assessment", "render", "style", "font", "assets"]
+capabilities = ["postgresql", "object_store", "docx", "pdf"]
+launch_mode = "declared_disabled"

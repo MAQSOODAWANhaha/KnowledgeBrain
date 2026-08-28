@@ -19,7 +19,7 @@ struct PublicationSeed {
 async fn final_tender_schema_is_ready(pool: &PgPool) -> bool {
     sqlx::query_scalar(
         "SELECT to_regprocedure(
-          'kb_bid_publish_extraction_section(uuid,integer,uuid,text,jsonb,bigint,bigint,uuid,jsonb,kb_actor_identity,text,bytea,kb_sha256)'
+          'kb_bid_publish_extraction_section(uuid,integer,text,jsonb,bigint,bigint,uuid,jsonb,kb_actor_identity,text,bytea,kb_sha256)'
          ) IS NOT NULL",
     )
     .fetch_one(pool)
@@ -117,41 +117,28 @@ async fn seed_publication(pool: &PgPool, markdown: &str) -> PublicationSeed {
     }
 }
 
-async fn seed_running_target(
+async fn seed_pending_target(
     pool: &PgPool,
     seed: &PublicationSeed,
     target_id: Uuid,
     extraction_generation: i32,
-    claim_token: Uuid,
 ) {
-    let mut tx = pool.begin().await.unwrap();
     sqlx::query(
         "INSERT INTO bid_extraction_targets
          (id,project_id,document_id,source_artifact_id,conversion_generation,
           extraction_generation,router_contract_version,policy_version,prompt_version,
-          output_schema_version,expected_section_count,state)
+         output_schema_version,expected_section_count,state)
          VALUES($1,$2,$3,$4,1,$5,'kind-router-v1','requirement-span-v1',
-          'bounded-tender-publication-v1',1,1,'running')",
+          'bounded-tender-publication-v1',1,1,'pending')",
     )
     .bind(target_id)
     .bind(seed.project_id)
     .bind(seed.document_id)
     .bind(seed.source_artifact_id)
     .bind(extraction_generation)
-    .execute(&mut *tx)
+    .execute(pool)
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO bid_extraction_attempts
-         (target_id,attempt,claim_token,claimed_by,claim_lease_ms,claimed_at,heartbeat_at,status)
-         VALUES($1,1,$2,'tender-publication-test',300000,clock_timestamp(),clock_timestamp(),'running')",
-    )
-    .bind(target_id)
-    .bind(claim_token)
-    .execute(&mut *tx)
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
 }
 
 fn publication_context(
@@ -191,15 +178,13 @@ async fn publication_is_atomic_and_fact_accept_race_is_linearizable() {
     let seed = seed_publication(&pool, markdown).await;
 
     let first_target_id = Uuid::new_v4();
-    let first_claim_token = Uuid::new_v4();
-    seed_running_target(&pool, &seed, first_target_id, 1, first_claim_token).await;
+    seed_pending_target(&pool, &seed, first_target_id, 1).await;
     let first_context = publication_context(&seed, first_target_id, "first", &graph);
     let first = storage::bidding::publish_extraction_section(
         &pool,
         PublishSection {
             target_id: first_target_id,
-            attempt: 1,
-            claim_token: first_claim_token,
+            extraction_generation: 1,
             section_key: &section.key,
             heading_path: &json!(section.heading_path),
             parent_start_offset: section.parent_start_offset as i64,
@@ -216,8 +201,7 @@ async fn publication_is_atomic_and_fact_accept_race_is_linearizable() {
     let old_clause_id: Uuid = first["clauses"][0]["id"].as_str().unwrap().parse().unwrap();
 
     let second_target_id = Uuid::new_v4();
-    let second_claim_token = Uuid::new_v4();
-    seed_running_target(&pool, &seed, second_target_id, 2, second_claim_token).await;
+    seed_pending_target(&pool, &seed, second_target_id, 2).await;
     let mut invalid_graph = graph.clone();
     let invalid_segment = invalid_graph
         .as_array_mut()
@@ -231,8 +215,7 @@ async fn publication_is_atomic_and_fact_accept_race_is_linearizable() {
         &pool,
         PublishSection {
             target_id: second_target_id,
-            attempt: 1,
-            claim_token: second_claim_token,
+            extraction_generation: 2,
             section_key: &section.key,
             heading_path: &json!(section.heading_path),
             parent_start_offset: section.parent_start_offset as i64,
@@ -306,8 +289,7 @@ async fn publication_is_atomic_and_fact_accept_race_is_linearizable() {
         &pool,
         PublishSection {
             target_id: second_target_id,
-            attempt: 1,
-            claim_token: second_claim_token,
+            extraction_generation: 2,
             section_key: &section.key,
             heading_path: &heading_path,
             parent_start_offset: section.parent_start_offset as i64,
@@ -365,14 +347,12 @@ async fn kind_router_promotions_refresh_generation_two_and_three_markers() {
     let graph = section.candidate_graph();
     let seed = seed_publication(&pool, markdown).await;
     let target_id = Uuid::new_v4();
-    let claim_token = Uuid::new_v4();
-    seed_running_target(&pool, &seed, target_id, 1, claim_token).await;
+    seed_pending_target(&pool, &seed, target_id, 1).await;
     let publication = storage::bidding::publish_extraction_section(
         &pool,
         PublishSection {
             target_id,
-            attempt: 1,
-            claim_token,
+            extraction_generation: 1,
             section_key: &section.key,
             heading_path: &json!(section.heading_path),
             parent_start_offset: section.parent_start_offset as i64,
@@ -723,7 +703,7 @@ async fn kind_router_promotions_refresh_generation_two_and_three_markers() {
 }
 
 #[tokio::test]
-async fn extraction_reaper_terminates_only_the_expired_attempt() {
+async fn extraction_retry_uses_queue_redelivery_for_the_same_business_revision() {
     let Some(pool) = support::connect_postgres_contract("TenderPublication").await else {
         return;
     };
@@ -735,297 +715,60 @@ async fn extraction_reaper_terminates_only_the_expired_attempt() {
     }
     let seed = seed_publication(&pool, "# 技术要求\n系统必须支持国密协议。").await;
     let target_id = Uuid::new_v4();
-    let old_claim_token = Uuid::new_v4();
-    seed_running_target(&pool, &seed, target_id, 1, old_claim_token).await;
-    sqlx::query(
-        "UPDATE bid_extraction_attempts
-            SET heartbeat_at=clock_timestamp()-interval '10 minutes'
-          WHERE target_id=$1 AND attempt=1 AND claim_token=$2",
-    )
-    .bind(target_id)
-    .bind(old_claim_token)
-    .execute(&pool)
-    .await
-    .unwrap();
+    seed_pending_target(&pool, &seed, target_id, 1).await;
 
-    let reclaimed = storage::bid_submission::reclaim_stale_extractions(&pool)
+    let target = storage::bidding::load_extraction(&pool, target_id, 1)
         .await
-        .unwrap();
-    assert!(reclaimed.iter().any(|row| row.0 == target_id));
-    let old_status: String = sqlx::query_scalar(
-        "SELECT status FROM bid_extraction_attempts WHERE target_id=$1 AND attempt=1",
-    )
-    .bind(target_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(old_status, "reaped");
-
-    let new_claim_token = Uuid::new_v4();
-    let new_claim = storage::bidding::claim_extraction(
-        &pool,
-        target_id,
-        new_claim_token,
-        "reaper-regression-test",
-    )
-    .await
-    .unwrap()
-    .expect("reaped target must be claimable");
-    assert_eq!(new_claim.attempt, 2);
+        .unwrap()
+        .expect("the current business revision must be loadable");
+    assert_eq!(target.extraction_generation, 1);
     assert!(
-        storage::bid_submission::reclaim_stale_extractions(&pool)
+        storage::bidding::load_extraction(&pool, target_id, 2)
             .await
             .unwrap()
-            .iter()
-            .all(|row| row.0 != target_id),
-        "the old expired attempt must not reap its healthy successor"
+            .is_none(),
+        "a stale business revision must be ignored"
     );
-    let state: String = sqlx::query_scalar("SELECT state FROM bid_extraction_targets WHERE id=$1")
-        .bind(target_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(state, "running");
+
     assert!(
         storage::bidding::fail_extraction(
             &pool,
             target_id,
-            new_claim.attempt,
-            new_claim_token,
-            "TEST_COMPLETE",
+            1,
+            "TEST_RETRYABLE",
+            "queue may redeliver",
+            true,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        storage::bidding::load_extraction(&pool, target_id, 1)
+            .await
+            .unwrap()
+            .is_some(),
+        "retryable failure must leave the revision available for queue redelivery"
+    );
+
+    assert!(
+        storage::bidding::fail_extraction(
+            &pool,
+            target_id,
+            1,
+            "TEST_TERMINAL",
+            "do not redeliver",
             false,
         )
         .await
         .unwrap()
     );
-}
-
-#[tokio::test]
-async fn conversion_reaper_rejects_renewal_after_logical_expiry() {
-    let Some(pool) = support::connect_postgres_contract("TenderPublication").await else {
-        return;
-    };
-    if !support::require_final_schema(
-        "TenderPublication",
-        final_tender_schema_is_ready(&pool).await,
-    ) {
-        return;
-    }
-    let mut reaper_guard = pool.begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock(2026082401)")
-        .execute(&mut *reaper_guard)
-        .await
-        .unwrap();
-    let seed = seed_publication(&pool, "# 技术要求\n系统必须支持国密协议。").await;
-    let document_id = Uuid::new_v4();
-    let claim_token = Uuid::new_v4();
-    let digest = "3".repeat(64);
-    sqlx::query(
-        "INSERT INTO bid_documents
-         (id,project_id,file_name,media_type,byte_length,original_object_ref,original_sha256,
-          conversion_generation,parse_status)
-         VALUES($1,$2,'lease-race.docx','application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-           1,$3,$4,1,'processing')",
-    )
-    .bind(document_id)
-    .bind(seed.project_id)
-    .bind(format!("objects/{digest}"))
-    .bind(&digest)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO bid_document_conversion_attempts
-         (document_id,conversion_generation,attempt,claim_token,claimed_by,claim_lease_ms,
-          claimed_at,heartbeat_at,status)
-         VALUES($1,1,1,$2,'conversion-reaper-race',300000,
-           clock_timestamp()-interval '10 minutes',clock_timestamp()-interval '10 minutes','running')",
-    )
-    .bind(document_id)
-    .bind(claim_token)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let mut blocker = pool.begin().await.unwrap();
-    sqlx::query("SELECT 1 FROM bid_documents WHERE id=$1 FOR UPDATE")
-        .bind(document_id)
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-
-    let application_name = format!("conversion-reaper-{}", Uuid::new_v4());
-    let mut reaper_connection = pool.acquire().await.unwrap();
-    sqlx::query("SELECT set_config('application_name',$1,false)")
-        .bind(&application_name)
-        .execute(&mut *reaper_connection)
-        .await
-        .unwrap();
-    let reaper = tokio::spawn(async move {
-        sqlx::query_scalar::<_, Vec<Uuid>>("SELECT kb_bid_reclaim_stale_conversions()")
-            .fetch_one(&mut *reaper_connection)
-            .await
-    });
-
-    let mut waiting = false;
-    for _ in 0..100 {
-        waiting = sqlx::query_scalar(
-            "SELECT EXISTS(
-               SELECT 1 FROM pg_stat_activity
-                WHERE application_name=$1 AND wait_event_type='Lock')",
-        )
-        .bind(&application_name)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        if waiting {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
     assert!(
-        waiting,
-        "reaper must reach the document lock before renewal"
-    );
-    assert!(
-        !storage::bidding::heartbeat_document_conversion(&pool, document_id, claim_token)
+        storage::bidding::load_extraction(&pool, target_id, 1)
             .await
-            .unwrap(),
-        "an already expired owner must not renew while reaper is waiting"
+            .unwrap()
+            .is_none(),
+        "terminal failure must close the business revision"
     );
-    blocker.commit().await.unwrap();
-
-    let reaped = reaper.await.unwrap().unwrap();
-    assert_eq!(reaped, vec![document_id]);
-    let state: (String, String) = sqlx::query_as(
-        "SELECT document.parse_status,attempt.status
-           FROM bid_documents document
-           JOIN bid_document_conversion_attempts attempt
-             ON attempt.document_id=document.id AND attempt.conversion_generation=document.conversion_generation
-          WHERE document.id=$1 AND attempt.claim_token=$2",
-    )
-    .bind(document_id)
-    .bind(claim_token)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(state, ("pending".into(), "reaped".into()));
-    reaper_guard.rollback().await.unwrap();
-}
-
-#[tokio::test]
-async fn conversion_reaper_rechecks_the_exact_attempt_after_waiting_for_a_lock() {
-    let Some(pool) = support::connect_postgres_contract("TenderPublication").await else {
-        return;
-    };
-    if !support::require_final_schema(
-        "TenderPublication",
-        final_tender_schema_is_ready(&pool).await,
-    ) {
-        return;
-    }
-    let mut reaper_guard = pool.begin().await.unwrap();
-    sqlx::query("SELECT pg_advisory_xact_lock(2026082401)")
-        .execute(&mut *reaper_guard)
-        .await
-        .unwrap();
-    let seed = seed_publication(&pool, "# 技术要求\n系统必须支持国密协议。").await;
-    let document_id = Uuid::new_v4();
-    let claim_token = Uuid::new_v4();
-    let digest = "4".repeat(64);
-    sqlx::query(
-        "INSERT INTO bid_documents
-         (id,project_id,file_name,media_type,byte_length,original_object_ref,original_sha256,
-          conversion_generation,parse_status)
-         VALUES($1,$2,'lease-recheck.docx','application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-           1,$3,$4,1,'processing')",
-    )
-    .bind(document_id)
-    .bind(seed.project_id)
-    .bind(format!("objects/{digest}"))
-    .bind(&digest)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO bid_document_conversion_attempts
-         (document_id,conversion_generation,attempt,claim_token,claimed_by,claim_lease_ms,
-          claimed_at,heartbeat_at,status)
-         VALUES($1,1,1,$2,'conversion-reaper-recheck',300000,
-           clock_timestamp()-interval '10 minutes',clock_timestamp()-interval '10 minutes','running')",
-    )
-    .bind(document_id)
-    .bind(claim_token)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let mut blocker = pool.begin().await.unwrap();
-    sqlx::query("SELECT 1 FROM bid_documents WHERE id=$1 FOR UPDATE")
-        .bind(document_id)
-        .execute(&mut *blocker)
-        .await
-        .unwrap();
-    sqlx::query(
-        "UPDATE bid_document_conversion_attempts
-            SET heartbeat_at=clock_timestamp()
-          WHERE document_id=$1 AND conversion_generation=1 AND attempt=1",
-    )
-    .bind(document_id)
-    .execute(&mut *blocker)
-    .await
-    .unwrap();
-
-    let application_name = format!("conversion-recheck-{}", Uuid::new_v4());
-    let mut reaper_connection = pool.acquire().await.unwrap();
-    sqlx::query("SELECT set_config('application_name',$1,false)")
-        .bind(&application_name)
-        .execute(&mut *reaper_connection)
-        .await
-        .unwrap();
-    let reaper = tokio::spawn(async move {
-        sqlx::query_scalar::<_, Vec<Uuid>>("SELECT kb_bid_reclaim_stale_conversions()")
-            .fetch_one(&mut *reaper_connection)
-            .await
-    });
-
-    let mut waiting = false;
-    for _ in 0..100 {
-        waiting = sqlx::query_scalar(
-            "SELECT EXISTS(
-               SELECT 1 FROM pg_stat_activity
-                WHERE application_name=$1 AND wait_event_type='Lock')",
-        )
-        .bind(&application_name)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        if waiting {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    assert!(waiting, "reaper must wait on the exact conversion rows");
-    blocker.commit().await.unwrap();
-
-    assert!(
-        reaper.await.unwrap().unwrap().is_empty(),
-        "a reaper that waited for a lock must recheck the current attempt lease"
-    );
-    let state: (String, String) = sqlx::query_as(
-        "SELECT document.parse_status,attempt.status
-           FROM bid_documents document
-           JOIN bid_document_conversion_attempts attempt
-             ON attempt.document_id=document.id AND attempt.conversion_generation=document.conversion_generation
-          WHERE document.id=$1 AND attempt.claim_token=$2",
-    )
-    .bind(document_id)
-    .bind(claim_token)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(state, ("processing".into(), "running".into()));
-    reaper_guard.rollback().await.unwrap();
 }
 
 #[tokio::test]
@@ -1280,16 +1023,18 @@ async fn converted_images_transfer_staging_to_source_artifact_owners() {
     .await
     .unwrap();
 
-    let claim_token = Uuid::new_v4();
-    storage::bidding::claim_document_conversion(
-        &pool,
-        document_id,
-        claim_token,
-        "converted-image-contract-test",
-    )
-    .await
-    .unwrap()
-    .expect("pending document must be claimable");
+    let conversion = storage::bidding::load_document_conversion(&pool, document_id, 1)
+        .await
+        .unwrap()
+        .expect("the current conversion revision must be loadable");
+    assert_eq!(conversion.conversion_generation, 1);
+    assert!(
+        storage::bidding::load_document_conversion(&pool, document_id, 2)
+            .await
+            .unwrap()
+            .is_none(),
+        "a stale conversion revision must be ignored"
+    );
 
     let image = b"\x89PNG\r\n\x1a\nconverted-image";
     let image_digest = domain::sha256_hex(image);
@@ -1316,7 +1061,7 @@ async fn converted_images_transfer_staging_to_source_artifact_owners() {
         &pool,
         CompleteDocumentConversion {
             document_id,
-            claim_token,
+            conversion_generation: 1,
             source_artifact_id,
             markdown: format!("![topology]({image_ref})").as_bytes(),
             converter_contract_version: "converted-image-contract-v1",
@@ -1355,6 +1100,12 @@ async fn converted_images_transfer_staging_to_source_artifact_owners() {
     .await
     .expect("conversion completion must durably create its extraction target");
     assert_eq!(target, (source_artifact_id, 1, "pending".into()));
+    let successor = storage::bidding::document_conversion_successor(&pool, document_id, 1)
+        .await
+        .unwrap()
+        .expect("completed conversion must expose its durable extraction successor");
+    assert_eq!(successor.target_id, extraction_target_id);
+    assert_eq!(successor.extraction_generation, 1);
 
     let owner_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM object_owner_references

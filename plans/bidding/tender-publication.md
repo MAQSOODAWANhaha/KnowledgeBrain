@@ -1,6 +1,8 @@
-# 招标发布与条款生命周期
+# 招标发布与条款生命周期（Legacy V1实现快照）
 
-本文定义 `TenderPublication` 与 `ClauseLifecycle` 的最终 V1。所有表名均表示最终 baseline，不表示增量 migration 阶段。
+> Target V2输入、SourceUnit、RequirementSet和Workspace合同见[`../../docs/platform/tender-to-submission-authoring.md`](../../docs/platform/tender-to-submission-authoring.md)，实施见[`tender-to-submission-v2.md`](tender-to-submission-v2.md)。本文只用于定位待替换V1代码和可复用SourceSpan/转换seam，不再定义目标产品。
+
+本文记录`TenderPublication`与`ClauseLifecycle`的V1实现。所有固定clause/family语义均为current-state/deletion history。
 
 > 实施状态（2026-08-26）：Rust bounded tender parser、SourceSpanV2、KindRouter 和 publication/lifecycle 产品路径已落位；conversion/extraction durable dispatch 替换尚未实施，完整门禁与 fresh runtime 需重跑，未部署。
 
@@ -10,8 +12,8 @@
 
 - `BidProject` 与 `BidDocument` 的招标侧生命周期；
 - converted source/section 不可变 artifact；
-- extraction target、generation、claim/attempt；
-- document conversion/extraction target 的 dispatch stage 与 target-local repair adapter；
+- extraction target 与业务 generation/revision；
+- document conversion/extraction 的冻结输入和幂等原子发布；
 - span disposition、clause candidate、fact suggestion candidate；
 - section publication、current projection 与 receipt；
 - fact suggestion decision ledger 和项目事实 mutation。
@@ -37,29 +39,28 @@ BidDocument
   file_name, media_type, byte_length
   original_object_ref, original_sha256
   conversion_generation
-  current_conversion_target_id
+  parse_status, error_code
   current_converted_source_artifact_id
   created_at
 ```
 
 - 招标文件不写入知识库 `documents`，不进入产品索引。
 - 可复用同一个 convert adapter，但状态、重试、publication 和对象 owner 均归招投标。
-- current conversion target 的 `completed` 表示原件已转换且所需多模态写回完成，可以冻结 source artifact；不是条款抽取成功。
-- 重试产生更高 `conversion_generation`、新的 stable conversion target 和新 source artifact，不覆盖历史。
+- `parse_status=completed` 表示原件已转换且所需多模态写回完成，可以冻结 source artifact；不是条款抽取成功。
+- 人工重试推进 `conversion_generation` 并生成新的 source artifact，不覆盖历史；队列重试不推进该业务 generation。
 
 ### 2.2 DocumentConversionTarget
 
-每个 generation 使用新的 stable async target：
+`BidDocument` 自身就是 `document_conversion` 业务 target，不再建立 base/typed sidecar target：
 
 ```text
-id, project_id, document_id, conversion_generation
+id, project_id, conversion_generation
 conversion_snapshot_id, feature_snapshot_id
-status = pending|running|completed|failed|superseded|cancelled
-active_attempt, max_attempts
-created_at, completed_at, terminal_code
+parse_status = pending|completed|failed
+current_converted_source_artifact_id, error_code, created_at, parsed_at
 ```
 
-`id` 同时是 `bid_async_targets` 的 PK/FK identity；`BidDocument.current_conversion_target_id` 只能指向同 document/current generation 的非 superseded target。claim/attempt/heartbeat 使用 target ID，不再用可复用的 document ID 表示多个 generation。
+`pending` 覆盖 Oxana 的 queued/running/retrying，不在业务表镜像 transport phase。publish 校验 document ID、conversion generation、current project state 与 artifact unique identity；重复执行通过相同 generation 的 CAS/unique key 收敛。
 
 ### 2.3 ConvertedSourceArtifactV1
 
@@ -83,9 +84,9 @@ OutlineParser 必须识别 ATX、章/节、数字层级和中文编号。普通�
 
 ### 2.5 Conversion 与 extraction dispatch
 
-文档上传或 conversion retry 必须在创建/推进 `conversion_generation` 的同一事务创建 base async target、`DocumentConversionTarget` 和 `document_conversion` dispatch intent；API 不在 commit 后 enqueue。conversion worker 成功时，在 fenced settlement 事务中同时冻结 converted source、创建 extraction base/typed target、stage extraction dispatch intent，并终结 conversion target。
+文档上传或人工 conversion retry 必须在创建/推进 `conversion_generation` 的同一幂等事务把 `bid_documents` 置为 `pending`；commit 后单次 enqueue，accepted 才返回 `202`，unavailable 返回可重试 `503`。conversion worker 成功时，在 current-generation fenced transaction 中同时冻结 converted source、创建唯一的 `extraction_target`，并终结 conversion target。
 
-禁止先把 document 标记为 completed，再通过第二次 DB 调用或 Redis enqueue 创建 extraction target。Redis unavailable、duplicate、worker crash、alive-but-stuck lease 和旧 generation delivery 的行为只由 [`durable-dispatch.md`](durable-dispatch.md) 定义；本模块只实现 target-local begin/heartbeat/publish/repair。
+禁止先把 document 标记为 completed，再通过第二次 DB 调用补建 extraction target。transaction commit 后 enqueue extraction；失败时父 conversion job 返回 `Err`，Oxana retry只重放同一 extraction target enqueue。Redis unavailable、duplicate、worker crash、dead/revive 和旧 business generation 的行为只由 [`durable-dispatch.md`](durable-dispatch.md) 定义；本模块只实现 current-generation fenced publish。
 
 ## 3. SourceSpanV2 与抽取契约
 
@@ -198,11 +199,10 @@ candidate 图包含 section、span、disposition、clause 和 fact suggestion。
 
 1. project open；
 2. target/project/document/source identity；
-3. claim token、attempt、heartbeat/lease；
-4. expected conversion/extraction generation；
-5. section candidate terminal 且每个 segment 恰一 disposition；
-6. clause/fact candidate bounds、cardinality、schema；
-7. current section publication CAS 仍属于本 target。
+3. expected conversion/extraction generation；
+4. section candidate terminal 且每个 segment 恰一 disposition；
+5. clause/fact candidate bounds、cardinality、schema；
+6. current section publication CAS 仍属于本 target。
 
 验证后原子提交：
 

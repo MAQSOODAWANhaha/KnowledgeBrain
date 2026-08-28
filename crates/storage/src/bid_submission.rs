@@ -33,29 +33,25 @@ pub struct StoredManifestRenderAsset {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SubmissionRenderClaim {
+pub struct SubmissionRenderTarget {
     pub render_job_id: Uuid,
     pub project_id: Uuid,
     pub manifest_id: Uuid,
     pub expected_manifest_sha256: String,
     pub requested_by: String,
     pub idempotency_key: String,
-    pub attempt_count: i32,
-    pub max_attempts: i32,
-    pub claim_lease_ms: i32,
+    pub target_revision: i64,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct AttachmentPreparationClaim {
+pub struct AttachmentPreparationTarget {
     pub preparation_job_id: Uuid,
     pub project_id: Uuid,
     pub attachment_id: Uuid,
     pub object_ref: String,
     pub content_sha256: String,
     pub byte_length: i64,
-    pub attempt_count: i32,
-    pub max_attempts: i32,
-    pub claim_lease_ms: i32,
+    pub attachment_revision: i32,
 }
 
 fn protocol(message: impl Into<String>) -> sqlx::Error {
@@ -331,15 +327,15 @@ pub async fn upload_attachment(
     .await
 }
 
-pub async fn claim_attachment_preparation(
+pub async fn load_attachment_preparation(
     pool: &PgPool,
     preparation_job_id: Uuid,
-    claim_token: Uuid,
-) -> Result<Option<AttachmentPreparationClaim>, sqlx::Error> {
+    attachment_revision: i32,
+) -> Result<Option<AttachmentPreparationTarget>, sqlx::Error> {
     let value: Option<Value> =
-        sqlx::query_scalar("SELECT kb_bid_claim_attachment_preparation($1,$2)")
+        sqlx::query_scalar("SELECT kb_bid_load_attachment_preparation($1,$2)")
             .bind(preparation_job_id)
-            .bind(claim_token)
+            .bind(attachment_revision)
             .fetch_one(pool)
             .await?;
     value
@@ -347,28 +343,16 @@ pub async fn claim_attachment_preparation(
         .transpose()
 }
 
-pub async fn heartbeat_attachment_preparation(
-    pool: &PgPool,
-    preparation_job_id: Uuid,
-    claim_token: Uuid,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT kb_bid_heartbeat_attachment_preparation($1,$2)")
-        .bind(preparation_job_id)
-        .bind(claim_token)
-        .fetch_one(pool)
-        .await
-}
-
 pub async fn publish_attachment_preparation(
     pool: &PgPool,
     preparation_job_id: Uuid,
-    claim_token: Uuid,
+    attachment_revision: i32,
     render_pages: &Value,
     actor: &str,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar("SELECT kb_bid_publish_attachment_preparation($1,$2,$3,$4)")
         .bind(preparation_job_id)
-        .bind(claim_token)
+        .bind(attachment_revision)
         .bind(render_pages)
         .bind(actor)
         .fetch_one(pool)
@@ -378,29 +362,17 @@ pub async fn publish_attachment_preparation(
 pub async fn fail_attachment_preparation(
     pool: &PgPool,
     preparation_job_id: Uuid,
-    claim_token: Uuid,
+    attachment_revision: i32,
     error_code: &str,
     error_detail: &str,
     retryable: bool,
 ) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar("SELECT kb_bid_fail_attachment_preparation($1,$2,$3,$4,$5)")
         .bind(preparation_job_id)
-        .bind(claim_token)
+        .bind(attachment_revision)
         .bind(error_code)
         .bind(error_detail)
         .bind(retryable)
-        .fetch_one(pool)
-        .await
-}
-
-pub async fn reap_attachment_preparations(pool: &PgPool) -> Result<i32, sqlx::Error> {
-    sqlx::query_scalar("SELECT kb_bid_reap_attachment_preparations()")
-        .fetch_one(pool)
-        .await
-}
-
-pub async fn pending_attachment_preparations(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("SELECT COALESCE(kb_bid_pending_attachment_preparations(),'{}'::uuid[])")
         .fetch_one(pool)
         .await
 }
@@ -706,14 +678,14 @@ pub async fn get_submission_render_job(
         .await
 }
 
-pub async fn claim_submission_render(
+pub async fn load_submission_render(
     pool: &PgPool,
     render_job_id: Uuid,
-    claim_token: Uuid,
-) -> Result<Option<SubmissionRenderClaim>, sqlx::Error> {
-    let value: Option<Value> = sqlx::query_scalar("SELECT kb_bid_claim_submission_render($1,$2)")
+    target_revision: i64,
+) -> Result<Option<SubmissionRenderTarget>, sqlx::Error> {
+    let value: Option<Value> = sqlx::query_scalar("SELECT kb_bid_load_submission_render($1,$2)")
         .bind(render_job_id)
-        .bind(claim_token)
+        .bind(target_revision)
         .fetch_one(pool)
         .await?;
     value
@@ -721,44 +693,20 @@ pub async fn claim_submission_render(
         .transpose()
 }
 
-pub async fn heartbeat_submission_render(
-    pool: &PgPool,
-    render_job_id: Uuid,
-    claim_token: Uuid,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT kb_bid_heartbeat_submission_render($1,$2)")
-        .bind(render_job_id)
-        .bind(claim_token)
-        .fetch_one(pool)
-        .await
-}
-
 pub async fn fail_submission_render(
     pool: &PgPool,
     render_job_id: Uuid,
-    claim_token: Uuid,
+    target_revision: i64,
     error_code: &str,
     error_detail: &str,
     retryable: bool,
 ) -> Result<Option<String>, sqlx::Error> {
     sqlx::query_scalar("SELECT kb_bid_fail_submission_render($1,$2,$3,$4,$5)")
         .bind(render_job_id)
-        .bind(claim_token)
+        .bind(target_revision)
         .bind(error_code)
         .bind(error_detail)
         .bind(retryable)
-        .fetch_one(pool)
-        .await
-}
-
-pub async fn reap_submission_renders(pool: &PgPool) -> Result<i32, sqlx::Error> {
-    sqlx::query_scalar("SELECT kb_bid_reap_submission_renders()")
-        .fetch_one(pool)
-        .await
-}
-
-pub async fn pending_submission_renders(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("SELECT COALESCE(kb_bid_pending_submission_renders(), '{}')")
         .fetch_one(pool)
         .await
 }
@@ -767,7 +715,7 @@ pub struct PublishSubmissionOutput<'a> {
     pub staging_id: Uuid,
     pub id: Uuid,
     pub render_job_id: Uuid,
-    pub claim_token: Uuid,
+    pub target_revision: i64,
     pub object_ref: &'a str,
     pub digest: &'a str,
     pub byte_length: i64,
@@ -781,7 +729,7 @@ pub async fn publish_submission_output(
         .bind(input.staging_id)
         .bind(input.id)
         .bind(input.render_job_id)
-        .bind(input.claim_token)
+        .bind(input.target_revision)
         .bind(input.object_ref)
         .bind(input.digest)
         .bind(input.byte_length)
@@ -813,38 +761,6 @@ pub async fn required_part_keys(
 
 pub async fn housekeep_end_expired(pool: &PgPool) -> Result<i32, sqlx::Error> {
     sqlx::query_scalar("SELECT kb_bid_housekeep_end_expired()")
-        .fetch_one(pool)
-        .await
-}
-
-pub async fn reclaim_stale_conversions(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("SELECT COALESCE(kb_bid_reclaim_stale_conversions(), '{}')")
-        .fetch_one(pool)
-        .await
-}
-
-pub async fn pending_conversions(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("SELECT COALESCE(kb_bid_pending_conversions(), '{}')")
-        .fetch_one(pool)
-        .await
-}
-
-pub async fn reclaim_stale_extractions(
-    pool: &PgPool,
-) -> Result<Vec<(Uuid, Uuid, Uuid)>, sqlx::Error> {
-    sqlx::query_as("SELECT * FROM kb_bid_reclaim_stale_extractions()")
-        .fetch_all(pool)
-        .await
-}
-
-pub async fn pending_extractions(pool: &PgPool) -> Result<Vec<(Uuid, Uuid, Uuid)>, sqlx::Error> {
-    sqlx::query_as("SELECT * FROM kb_bid_pending_extractions()")
-        .fetch_all(pool)
-        .await
-}
-
-pub async fn dirty_match_projects(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("SELECT COALESCE(kb_bid_dirty_match_projects(), '{}')")
         .fetch_one(pool)
         .await
 }

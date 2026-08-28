@@ -29,11 +29,6 @@ async fn consume_loop(pool: sqlx::PgPool) {
             Ok(_) => {
                 backoff = std::time::Duration::from_secs(1);
                 tracing::info!("worker ready");
-                match runtime::replay_orphaned_local_jobs().await {
-                    Ok(n) if n > 0 => tracing::info!(replayed = n, "replayed orphaned oxana jobs"),
-                    Err(error) => tracing::warn!(%error, "orphan job replay skipped"),
-                    _ => {}
-                }
                 match run_core(AppCtx {
                     pool: Some(pool.clone()),
                 })

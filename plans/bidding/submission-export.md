@@ -1,6 +1,8 @@
-# ①～⑥组卷、程序材料与正式导出
+# ①～⑥组卷、程序材料与正式导出（Legacy V1实现快照）
 
-本文定义 `Submission` 深模块。它只消费其它模块已经发布的 identity/artifact，不读取临时 candidate、live quote draft 或知识库 live rows。
+> Target V2动态大纲、ContentBlock、advisory Assessment和无业务阻断DOCX/PDF合同见[`../../docs/platform/tender-to-submission-authoring.md`](../../docs/platform/tender-to-submission-authoring.md)，实施见[`tender-to-submission-v2.md`](tender-to-submission-v2.md)。本文的固定PartSet、SubmissionGateV1及专用profile/procedural流程仅供删除定位，不再定义目标产品。
+
+本文记录`Submission`深模块的V1实现快照。
 
 > 实施状态（2026-08-26）：RequiredPartSet、manifest、冻结程序附件、manifest-only DOCX/PDF renderer 和 `6:quote` table/grid seam 等产品逻辑已在当前工作树落位；attachment preparation 与 submission render 尚待切换到 [`durable-dispatch.md`](durable-dispatch.md) 的最终 owner。既有定向测试不构成新 dispatch 合同的完整验收；当前变更未提交、未 push、未部署，且未完成 fresh runtime acceptance。
 
@@ -99,7 +101,7 @@ mutation 使用 durable actor、expected revision、idempotency；更新 profile
 
 - 未编辑 extracted clause 复用合法 current SourceSpanV2 routed segment key；
 - manual/manual_after_edit 按 `。；！？\n` 和有界编号列表边界切分；
-- 阿拉伯数字句点编号仅在句点后存在空白时形成边界；`10.00`、`100.00`、`1.50` 等金额/小数不得切分，`1. `、`1)`、`1、`、`（一）` 仍是合法编号；
+- 阿拉伯数字句点编号仅在句点后存在空白时形成边界；`10.00`、`100.00`、`1.50` 等金额/小数不得切分，`1.`、`1)`、`1、`、`（一）` 仍是合法编号；
 - offsets 是相对 current clause text 的 UTF-8 byte 半开区间；
 - trim 只移除两端 Unicode whitespace 并同步收缩 offsets；
 - 空 segment 丢弃，最多 1024 段；
@@ -209,16 +211,16 @@ actor/timestamps
 
 upload/replace/delete/validate/confirm/reject 是独立 typed operation，使用 expected revision + idempotency。validated object artifact 与 attachment 通过 project composite FK 和 ObjectRegistry reference 互证。
 
-图片上传完成后 `preparation_status=not_required`，不创建 preparation job。PDF 上传路径只校验并提交原对象，在同一业务事务创建 base async target、typed durable preparation job 和对应 dispatch intent，返回 `preparation_status=pending` 和稳定 `preparation_job_id`；API 不在 commit 后直接 enqueue。dispatcher 按 [`durable-dispatch.md`](durable-dispatch.md) 单跳 offer 最终 delivery，Redis 不可用时 intent 保持 ready。
+图片上传完成后 `preparation_status=not_required`，不创建 preparation job。PDF 上传路径只校验并提交原对象，在同一幂等业务事务创建唯一的 `attachment_preparation` target；commit 后单次 enqueue，accepted 返回 `preparation_status=pending`、稳定 `preparation_job_id` 和 `202`，unavailable 返回可重试 `503`。同一幂等 key 重放只重试相同 unique job，完整合同见 [`durable-dispatch.md`](durable-dispatch.md)。
 
-PDF preparation 使用 `attachment_preparation` durable target，复用物理队列 `bid-convert-v1`；Redis 只承载 `bid-delivery/v1` minimal delivery，业务执行由 target adapter 完成，durable actor 为 `system:bid-attachment-preparation`：
+PDF preparation 使用 `attachment_preparation` durable target；Redis 只承载统一 `bid-delivery/v1` minimal delivery，业务执行由 target adapter 完成，durable actor 为 `system:bid-attachment-preparation`：
 
-- worker 以 claim token、lease 和后台 heartbeat 读取原对象并调用 DocReader；
+- worker 从 target 读取冻结 revision、原对象并调用 DocReader；
 - 每个有序页面先取得 ObjectRegistry upload staging reference；
-- publish 在单一事务中验证 claim/lease、连续 ordinal、MIME/bytes/pixels/总配额，把全部 staging 转成 page owner reference，并原子写 completed status；
-- claim 丢失、render/staging/publish 失败或 future 被取消时 abandon 尚未发布的 staging；
-- retryable failure 在同一事务精确终结旧 attempt、回到 pending 并推进下一 offer；确定性失败/耗尽尝试进入 failed，过期 claim 由 attachment target-local repair 回收；
-- reject/delete 会将 pending/running job 置为 cancelled、清除 claim，从而 fence 旧 worker。
+- publish 在单一事务中验证 target revision/current attachment、连续 ordinal、MIME/bytes/pixels/总配额，把全部 staging 转成 page owner reference，并原子写 completed status；
+- stale revision、render/staging/publish 失败或 future 被取消时 abandon 尚未发布的 staging；
+- retryable failure只记录bounded error并向Oxana返回`Err`；确定性失败进入failed；不维护claim/lease/reaper；
+- reject/delete 会将 pending target 置为 cancelled；旧 worker最终publish因current revision检查稳定noop。
 
 PDF preparation 未完成时 validate 必须返回 `ATTACHMENT_PREPARATION_INCOMPLETE`；PDF 必须 `preparation_status=completed`，图片必须 `preparation_status=not_required`，并同时满足 `validation_status=valid AND status=confirmed`，才能通过对应 Gate。附件集合按 kind 维护 revision/digest，任何变化在同一事务 stale 对应 part。
 
@@ -390,7 +392,7 @@ manifest 创建时验证 available、ownership、MIME/魔数、bytes、pixels �
 
 renderer 只能调用 `read_manifest_render_asset`，禁止查询 live shot/part/object table 或直接读任意 object key。
 
-HTTP render endpoint 只校验 manifest identity/renderer contract，在同一事务幂等创建 base async target、typed durable render job 与 dispatch intent，返回 `202 queued` 和稳定 `render_job_id`；API 不直接访问 Redis。Redis 短暂不可用或 volume 丢失时 intent 保持可 offer，客户端通过 project-scoped job API 观察 `pending|running|completed|failed`，不得用“outputs 尚未出现”推断 worker 状态。worker 使用 claim token/lease fencing；可重试失败精确终结旧 attempt、回到 `pending` 并推进下一 offer，确定性失败或耗尽尝试进入 `failed`，过期 claim 由 render target-local repair 回收。DOCX/PDF 构造、manifest asset bytes 读取、输出 staging write 与最终 publish 全部由 worker 完成。输出 bytes 先取得平台 upload staging reference，`publish_submission_output` 在同一事务中把它转移为 `bid_submission_output` owner、把 render job 与 dispatch intent 置为 terminal；publish/CAS 或 claim fencing 失败必须 abandon，不能留下无 owner 的物理对象。Redis payload 只携带 `dispatch_id + offer + lane_key + payload_version`；manifest identity、actor、generation、snapshot 与幂等键必须从 durable intent/target claim 取得，不能信任可漂移的消息副本。
+HTTP render endpoint 只校验 manifest identity/renderer contract，在同一幂等事务创建唯一的 `submission_render` target；commit 后单次enqueue，accepted返回`202 queued`和稳定`render_job_id`，unavailable返回可重试`503`。客户端通过project-scoped job API只观察业务`pending|completed|failed|cancelled`；queued/running/retrying/dead由oxana-web观测，不在业务表镜像。可重试失败向Oxana返回`Err`，确定性失败进入`failed`。DOCX/PDF构造、manifest asset bytes读取、输出staging write与最终publish全部由worker完成。输出bytes先取得平台upload staging reference，`publish_submission_output`在同一事务中验证manifest/target revision，把它转移为`bid_submission_output` owner并终结render target；stale/CAS失败必须abandon，不能留下无owner物理对象。Redis payload只携带`target_kind + target_id + target_revision`；manifest identity、actor和snapshot必须从业务target读取，不能信任消息副本。
 
 ### 11.3 renderer 输出合同
 
@@ -441,7 +443,7 @@ promote_procedural_router/template_contract (maintenance only)
 - manual/manual_after_edit 中文 segment offsets、编号/小数边界和 golden classifier；
 - classification/decision successor XOR terminal、KindRouter promotion terminal/rebuild；
 - attachment kind/validation/current identity，图片不创建 preparation job；
-- PDF preparation incomplete gate、claim/heartbeat/reaper fencing、cancel fencing、连续页面集合和 publish 失败零 page owner/page row；
+- PDF preparation incomplete gate、target-revision/cancel fencing、连续页面集合和 publish 失败零 page owner/page row；
 - GateIssue exact locator 与 DOCX/PDF 矩阵；
 - quote NULL placeholder 与 active eligible snapshot 同一性；
 - part edit/regenerate CAS 和 complete stale graph；

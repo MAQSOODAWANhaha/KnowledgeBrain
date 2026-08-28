@@ -2,9 +2,16 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | 最终 V1 领域目标已定义；产品主链部分已落位，durable dispatch 替换和完整验收未完成 |
+| 状态 | Target V2目标契约已确认，正在分阶段实现；旧V1文档只作删除定位 |
 | 角色 | 网络安全产品与服务应标方（乙方） |
-| 部署策略 | clean-slate fresh redeploy，不保留旧数据与旧协议 |
+| 部署策略 | Target V2 clean-slate fresh redeploy，不保留旧数据与旧协议 |
+
+Target V2权威入口：
+
+- 产品/领域契约：[`../platform/tender-to-submission-authoring.md`](../platform/tender-to-submission-authoring.md)
+- 分阶段实施：[`../../plans/bidding/tender-to-submission-v2.md`](../../plans/bidding/tender-to-submission-v2.md)
+
+固定PartSet、SubmissionGateV1、旧profile/procedural专用流程和旧API只属于当前V1实现快照，不是Target V2要求。
 
 ## 当前证据边界（2026-08-26）
 
@@ -19,10 +26,12 @@
 
 旧运行记录不能替代当前 checkout 的 acceptance。最终状态以 [`../../plans/bidding/implementation-acceptance.md`](../../plans/bidding/implementation-acceptance.md) 的分层证据为准。
 
-## 权威文档
+## 文档导航
 
-- 领域目标与术语：[`domain.md`](domain.md)
-- 完整实施方案入口：[`../../plans/bidding/README.md`](../../plans/bidding/README.md)
+- Target V2领域目标与术语：[`../platform/tender-to-submission-authoring.md`](../platform/tender-to-submission-authoring.md)
+- Target V2实施方案：[`../../plans/bidding/tender-to-submission-v2.md`](../../plans/bidding/tender-to-submission-v2.md)
+- V1实现/删除定位：[`domain.md`](domain.md)
+- V1专题导航：[`../../plans/bidding/README.md`](../../plans/bidding/README.md)
 - 招标发布与条款生命周期：[`../../plans/bidding/tender-publication.md`](../../plans/bidding/tender-publication.md)
 - 两路匹配：[`../../plans/bidding/matching.md`](../../plans/bidding/matching.md)
 - 人工报价：[`../../plans/bidding/quote.md`](../../plans/bidding/quote.md)

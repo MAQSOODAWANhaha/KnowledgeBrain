@@ -20,6 +20,32 @@ jobs:
       - name: test
         run: cargo test --workspace
 
+  bid-authoring-v2-phase0:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+          components: rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: install Phase 0 schema validator
+        run: python -m pip install --disable-pip-version-check 'jsonschema==4.25.1'
+      - name: mandatory Phase 0 static schema and fixture acceptance
+        run: scripts/fresh_schema_v2_acceptance.sh
+      - name: mandatory Phase 0 focused Rust contracts
+        run: |
+          cargo test -p bid --test authoring_schema_contracts --test bidding_v2_baseline_contract
+          cargo test -p runtime --lib
+          cargo test -p domain queue_registry
+          cargo test -p storage fixed_manifest_is_exact_and_checksummed
+      - name: mandatory Phase 0 live fresh V2 schema acceptance
+        env:
+          RUN_LIVE_V2_SCHEMA: "1"
+        run: scripts/fresh_schema_v2_acceptance.sh
+
   bid-durable-dispatch:
     runs-on: ubuntu-latest
     services:
@@ -55,18 +81,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.97.0
-      - name: shellcheck durable-dispatch acceptance scripts
-        run: shellcheck scripts/bid_durable_dispatch_acceptance.sh scripts/bid_durable_dispatch_cleanup.sh scripts/verify_oxana_registry_source.sh
-      - name: mandatory PR8A transport and cleanup acceptance
+      - name: install durable-delivery database schema
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGPASSWORD: knowledgebrain
+          POSTGRES_USER: knowledgebrain
+          POSTGRES_DB: knowledgebrain
+          KNOWLEDGEBRAIN_MIGRATOR_PASSWORD: migrator-ci
+          KNOWLEDGEBRAIN_FIRST_LAUNCH_VERIFIER_PASSWORD: verifier-ci
+          KNOWLEDGEBRAIN_API_DB_PASSWORD: api-ci
+          KNOWLEDGEBRAIN_WORKER_DB_PASSWORD: worker-ci
+          KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD: retention-ci
+        run: |
+          sh deploy/postgres-init/010-runtime-identities.sh
+          DATABASE_URL=postgres://kb_migrator:migrator-ci@127.0.0.1:5432/knowledgebrain \
+            KNOWLEDGEBRAIN_BOOTSTRAP_ADMIN_DATABASE_URL=postgres://knowledgebrain:knowledgebrain@127.0.0.1:5432/knowledgebrain \
+            cargo run --locked -p migrator
+      - name: shellcheck durable-delivery acceptance scripts
+        run: shellcheck scripts/bid_durable_dispatch_acceptance.sh scripts/verify_oxana_registry_source.sh
+      - name: mandatory durable-delivery acceptance
         run: scripts/bid_durable_dispatch_acceptance.sh
-      - name: independent durable-dispatch cleanup and residue assertion
-        if: always()
-        run: scripts/bid_durable_dispatch_cleanup.sh ci-cleanup
-      - name: upload durable-dispatch PR8A evidence
+      - name: upload durable-delivery evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bid-durable-dispatch-pr8a
+          name: bid-durable-delivery
           path: .artifacts/bid-durable-dispatch
           if-no-files-found: error
 
@@ -135,6 +175,7 @@ jobs:
         env:
           KNOWLEDGEBRAIN_REQUIRE_DOCKER_ACCEPTANCE: "1"
           KNOWLEDGEBRAIN_REQUIRE_BROWSER_ACCEPTANCE: "1"
+          KNOWLEDGEBRAIN_REQUIRE_CLEAN_ACCEPTANCE: "1"
         run: scripts/compose_first_launch_acceptance.sh
       - name: upload Compose runtime/PDF evidence
         if: always()
@@ -187,7 +228,7 @@ jobs:
               'kb_bid_build_quote_snapshot_v1(uuid,uuid,bigint,text,text,text,jsonb,numeric,numeric,numeric,jsonb,jsonb,bigint,bigint,kb_sha256)'
             ) IS NOT NULL
             AND to_regprocedure(
-              'kb_bid_publish_submission_output(uuid,uuid,uuid,uuid,kb_object_ref,kb_sha256,bigint)'
+              'kb_bid_publish_submission_output(uuid,uuid,uuid,bigint,kb_object_ref,kb_sha256,bigint)'
             ) IS NOT NULL;
           ")"
           test "$schema_ready" = "t" || {
@@ -198,6 +239,11 @@ jobs:
           cargo test -p api --test submission_contract -- --nocapture --test-threads=1
           cargo test -p bid --test tender_publication -- --nocapture --test-threads=1
           cargo test -p bid --test knowledge_retrieval_selection -- --nocapture --test-threads=1
+          cargo test -p bid --features knowledge-v2-exact-contract-tests --test knowledge_retrieval_exact_v2 -- --nocapture --test-threads=1
+          cargo test -p bid --test knowledge_retrieval_attestation_v2 -- --nocapture --test-threads=1
+          cargo test -p bid --test knowledge_keyword_index_v2 -- --nocapture --test-threads=1
+          cargo test -p bid --test knowledge_vector_index_v2 -- --nocapture --test-threads=1
+          cargo test -p worker --lib consume::tests::semantic_index_v2_business_lifecycle_is_fenced -- --exact --nocapture --test-threads=1
           cargo test -p bid --test matching_publication -- --nocapture --test-threads=1
 
           audit_before="$(psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -Atc \
@@ -225,6 +271,20 @@ jobs:
           fi
       - name: mandatory isolated fresh baseline, catalog, ACL, and ObjectRegistry acceptance
         run: scripts/fresh_schema_acceptance.sh
+      - name: assert fresh-schema test containers are absent
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          residue_output="$(docker ps -a \
+            --filter "name=kb-fresh-schema-${GITHUB_RUN_ID}-" \
+            --format '{{.Names}}')"
+          if [[ -n "$residue_output" ]]; then
+            mapfile -t residue <<< "$residue_output"
+            docker rm -f -v "${residue[@]}"
+            printf 'fresh-schema container residue: %s\n' "${residue[@]}" >&2
+            exit 1
+          fi
       - name: storage foundation unit tests
         run: cargo test -p storage --lib -- --nocapture
       - name: mandatory upload staging cleanup tests
@@ -232,7 +292,6 @@ jobs:
           KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD: retention-ci
         run: |
           cargo test -p worker --lib consume::tests::submission_staging_is_abandoned_when_the_render_future_is_cancelled -- --exact --nocapture
-          cargo test -p worker --lib consume::tests::live_recovery_ends_expired_bid_projects -- --exact --nocapture
           cargo test -p retention tests::expired_upload_staging_is_removed_by_running_retention_expiry_loop -- --exact --nocapture
           cargo test -p retention tests::retention_role_can_inspect_readiness_gate -- --exact --nocapture
       - name: mandatory Bid matching tests
@@ -300,6 +359,6 @@ jobs:
       - name: runtime image build
         run: docker build -f deploy/Dockerfile.rust --build-arg BIN=api -t knowledgebrain-api-ci .
       - name: shell
-        run: bash -n services/docreader/scripts/generate_proto.sh scripts/bid_durable_dispatch_acceptance.sh scripts/bid_durable_dispatch_cleanup.sh scripts/bid_e2e_smoke.sh scripts/bid_runtime_acceptance.sh scripts/bid_runtime_compose_hook.sh scripts/bidding_v1_deletion_scan.sh deploy/compose-first-launch.sh deploy/compose-runtime-restart.sh scripts/compose_first_launch_acceptance.sh scripts/fresh_schema_acceptance.sh scripts/verify_oxana_registry_source.sh deploy/postgres-init/010-runtime-identities.sh
+        run: bash -n services/docreader/scripts/generate_proto.sh scripts/bid_durable_dispatch_acceptance.sh scripts/bid_e2e_smoke.sh scripts/bid_runtime_acceptance.sh scripts/bid_runtime_compose_hook.sh scripts/bidding_v1_deletion_scan.sh deploy/compose-first-launch.sh deploy/compose-runtime-restart.sh scripts/compose_first_launch_acceptance.sh scripts/fresh_schema_acceptance.sh scripts/verify_oxana_registry_source.sh deploy/postgres-init/010-runtime-identities.sh
       - name: bidding V1 deletion scan
         run: sh scripts/bidding_v1_deletion_scan.sh

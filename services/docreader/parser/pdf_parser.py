@@ -23,9 +23,16 @@ import os
 import re
 import statistics
 import threading
+from typing import Optional
 
 from docreader.config import CONFIG
-from docreader.models.document import Document
+from docreader.models.document import (
+    Document,
+    ImageLocator,
+    PageLocator,
+    StructuredSourceUnit,
+    StructuredSourceUnitKind,
+)
 from docreader.parser.base_parser import BaseParser
 from docreader.parser.concurrency import parser_worker_limit
 
@@ -537,7 +544,7 @@ def _extract_vector_figure_clips(
 ) -> list:
     """Render vector figure regions anchored at each ``Figure N.`` caption on the page.
 
-    Returns ``[(ref_path, b64, y_sort, caption_line), ...]`` for markdown injection.
+    Returns ``[(ref_path, b64, y_sort, caption_line, bounds), ...]``.
     """
     if not RENDER_VECTOR_FIGURES or not re.search(r"\bFigure\s+\d+", plain_text, re.I):
         return []
@@ -587,6 +594,7 @@ def _extract_vector_figure_clips(
                     base64.b64encode(jpeg).decode("utf-8"),
                     bbox[3],
                     cap_line,
+                    bbox,
                 )
             )
         return results
@@ -1191,7 +1199,7 @@ def _select_embedded_images(
 def _extract_embedded_images(pdf, classes, raw, base_name: str, quality: int) -> dict:
     """Extract filtered embedded figures from native text pages.
 
-    Returns ``{page_index: [(ref_path, base64_jpeg, y_top), ...]}`` ordered so
+    Returns ``{page_index: [(ref_path, base64_jpeg, y_top, bounds), ...]}`` ordered so
     callers can place figures after the page text in top-to-bottom order.
     """
     import hashlib
@@ -1223,8 +1231,8 @@ def _extract_embedded_images(pdf, classes, raw, base_name: str, quality: int) ->
                     pil = obj.get_bitmap().to_pil()
                 except Exception:
                     continue
-                content_hash = hashlib.md5(pil.tobytes()).hexdigest()
-                candidates.append((i, top, pil))
+                content_hash = hashlib.sha256(pil.tobytes()).hexdigest()
+                candidates.append((i, top, pil, (left, bottom, right, top)))
                 meta.append(
                     {
                         "page": i,
@@ -1247,7 +1255,7 @@ def _extract_embedded_images(pdf, classes, raw, base_name: str, quality: int) ->
     per_page_count: dict = defaultdict(int)
     max_edge = CONFIG.pdf_render_max_edge
     for idx in kept_idx:
-        page_i, y_top, pil = candidates[idx]
+        page_i, y_top, pil, bounds = candidates[idx]
         if pil.mode not in ("RGB", "L"):
             pil = pil.convert("RGB")
         if max_edge > 0 and max(pil.size) > max_edge:
@@ -1261,7 +1269,7 @@ def _extract_embedded_images(pdf, classes, raw, base_name: str, quality: int) ->
         fname = f"{base_name}_p{page_i+1}_img{per_page_count[page_i]}.jpg"
         ref_path = f"images/{fname}"
         result[page_i].append(
-            (ref_path, base64.b64encode(buf.getvalue()).decode("utf-8"), y_top)
+            (ref_path, base64.b64encode(buf.getvalue()).decode("utf-8"), y_top, bounds)
         )
 
     # Top-to-bottom within each page (PDF y grows upward, so larger y first).
@@ -1306,6 +1314,39 @@ def _strip_repeating_lines(texts: list, classes: list) -> list:
         kept = [ln for ln in text.splitlines() if ln.strip() not in repeating]
         cleaned.append("\n".join(kept))
     return cleaned
+
+
+def _pdf_image_unit(
+    key: str,
+    ordinal: int,
+    page_ordinal: int,
+    ref_path: str,
+    encoded: str,
+    bounds: Optional[tuple[float, float, float, float]] = None,
+) -> StructuredSourceUnit:
+    from PIL import Image
+
+    raw = base64.b64decode(encoded)
+    with Image.open(io.BytesIO(raw)) as image:
+        width, height = image.size
+        media_type = Image.MIME.get(image.format or "", "application/octet-stream")
+    return StructuredSourceUnit(
+        key=key,
+        ordinal=ordinal,
+        kind=StructuredSourceUnitKind.IMAGE_REGION,
+        text="",
+        locator=ImageLocator(
+            original_ref=ref_path,
+            width=width,
+            height=height,
+            media_type=media_type,
+            page_ordinal=page_ordinal,
+            left=bounds[0] if bounds else None,
+            top=bounds[1] if bounds else None,
+            right=bounds[2] if bounds else None,
+            bottom=bounds[3] if bounds else None,
+        ),
+    )
 
 
 class PDFScannedParser(BaseParser):
@@ -1357,9 +1398,20 @@ class PDFScannedParser(BaseParser):
                 images[ref_path] = base64.b64encode(rendered[i]).decode("utf-8")
 
             text = "\n\n".join(markdown_lines)
+            structured_units = [
+                _pdf_image_unit(
+                    f"page:{i}:image:0",
+                    i,
+                    i,
+                    f"images/{base_name}_page_{i+1}.jpg",
+                    images[f"images/{base_name}_page_{i+1}.jpg"],
+                )
+                for i in range(page_count)
+            ]
             return Document(
                 content=text,
                 images=images,
+                structured_source_units=structured_units,
                 metadata={
                     "image_source_type": "scanned_pdf",
                     "page_count": page_count,
@@ -1488,7 +1540,7 @@ class PDFParser(BaseParser):
                         )
                         if clips:
                             vector_clips[i] = clips
-                            for ref_path, b64, _y, _cap in clips:
+                            for ref_path, b64, _y, _cap, _bounds in clips:
                                 images[ref_path] = b64
                     text = _postprocess_pdf_text(text)
                     if cls == "text" and vector_clips.get(i):
@@ -1526,7 +1578,7 @@ class PDFParser(BaseParser):
                     pdf, classes, pdfium_r, base_name, quality
                 )
                 for refs in embedded.values():
-                    for ref_path, b64, _y in refs:
+                    for ref_path, b64, _y, _bounds in refs:
                         images[ref_path] = b64
         finally:
             _close_pdfium_resource(pdf)
@@ -1546,7 +1598,7 @@ class PDFParser(BaseParser):
                 vector_figure_count += len(vector_clips.get(i, []))
                 page_images = list(embedded.get(i, []))
                 page_images.sort(key=lambda item: item[2], reverse=True)
-                for ref_path, _b64, _y in page_images:
+                for ref_path, _b64, _y, _bounds in page_images:
                     fname = os.path.basename(ref_path)
                     blocks.append(f"![{fname}]({ref_path})")
                     embedded_count += 1
@@ -1572,4 +1624,49 @@ class PDFParser(BaseParser):
             embedded_count,
             len(content_text),
         )
-        return Document(content=content_text, images=images, metadata=metadata)
+        structured_units: list[StructuredSourceUnit] = []
+        for i in range(page_count):
+            if classes[i] == "scanned":
+                ref_path = f"images/{base_name}_page_{i+1}.jpg"
+                structured_units.append(
+                    _pdf_image_unit(
+                        f"page:{i}:image:0",
+                        len(structured_units),
+                        i,
+                        ref_path,
+                        images[ref_path],
+                    )
+                )
+            else:
+                structured_units.append(
+                    StructuredSourceUnit(
+                        key=f"page:{i}:section:0",
+                        ordinal=len(structured_units),
+                        kind=StructuredSourceUnitKind.SECTION,
+                        text=texts[i].strip(),
+                        locator=PageLocator(page_ordinal=i),
+                    )
+                )
+            page_images = [
+                (item[0], item[1], item[3]) for item in embedded.get(i, [])
+            ]
+            page_images.extend(
+                (item[0], item[1], item[4]) for item in vector_clips.get(i, [])
+            )
+            for image_ordinal, (ref_path, encoded, bounds) in enumerate(page_images):
+                structured_units.append(
+                    _pdf_image_unit(
+                        f"page:{i}:image:{image_ordinal + 1}",
+                        len(structured_units),
+                        i,
+                        ref_path,
+                        encoded,
+                        bounds,
+                    )
+                )
+        return Document(
+            content=content_text,
+            images=images,
+            structured_source_units=structured_units,
+            metadata=metadata,
+        )

@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:knowledgebrain:bid:content-block:v1",
+  "title": "ContentBlockV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "block_revision_id", "lineage_id", "revision", "kind", "content", "origin", "content_sha256"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "block_revision_id": { "$ref": "#/$defs/uuid" },
+    "lineage_id": { "$ref": "#/$defs/uuid" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "kind": { "enum": ["rich_text", "table", "image", "attachment_ref", "structured_form", "page_break", "signature_placeholder"] },
+    "content": { "oneOf": [
+      { "$ref": "#/$defs/richTextContent" },
+      { "$ref": "#/$defs/tableContent" },
+      { "$ref": "#/$defs/imageContent" },
+      { "$ref": "#/$defs/attachmentContent" },
+      { "$ref": "#/$defs/structuredFormContent" },
+      { "$ref": "#/$defs/pageBreakContent" },
+      { "$ref": "#/$defs/signatureContent" }
+    ] },
+    "origin": { "enum": ["human", "agent_candidate", "deterministic"] },
+    "dependency_sha256": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+    "stale": { "type": "boolean", "default": false },
+    "content_sha256": { "$ref": "#/$defs/sha256" }
+  },
+  "allOf": [
+    { "if": { "properties": { "kind": { "const": "rich_text" } } }, "then": { "properties": { "content": { "$ref": "#/$defs/richTextContent" } } } },
+    { "if": { "properties": { "kind": { "const": "table" } } }, "then": { "properties": { "content": { "$ref": "#/$defs/tableContent" } } } },
+    { "if": { "properties": { "kind": { "const": "image" } } }, "then": { "properties": { "content": { "$ref": "#/$defs/imageContent" } } } },
+    { "if": { "properties": { "kind": { "const": "attachment_ref" } } }, "then": { "properties": { "content": { "$ref": "#/$defs/attachmentContent" } } } },
+    { "if": { "properties": { "kind": { "const": "structured_form" } } }, "then": { "properties": { "content": { "$ref": "#/$defs/structuredFormContent" } } } },
+    { "if": { "properties": { "kind": { "const": "page_break" } } }, "then": { "properties": { "content": { "$ref": "#/$defs/pageBreakContent" } } } },
+    { "if": { "properties": { "kind": { "const": "signature_placeholder" } } }, "then": { "properties": { "content": { "$ref": "#/$defs/signatureContent" } } } }
+  ],
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nonEmptyText": { "type": "string", "minLength": 1, "maxLength": 65536 },
+    "mark": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "enum": ["bold", "italic", "underline", "strike", "code"] } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "href"], "properties": { "kind": { "const": "link" }, "href": { "type": "string", "format": "uri", "maxLength": 2048 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "evidence_bundle_id", "evidence_item_id", "quote_start_offset", "quote_end_offset"], "properties": { "kind": { "const": "evidence_ref" }, "evidence_bundle_id": { "$ref": "#/$defs/uuid" }, "evidence_item_id": { "$ref": "#/$defs/uuid" }, "quote_start_offset": { "type": "integer", "minimum": 0 }, "quote_end_offset": { "type": "integer", "minimum": 1 } } }
+      ]
+    },
+    "inline": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "text"], "properties": { "kind": { "const": "text" }, "text": { "type": "string", "maxLength": 65536 }, "marks": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/mark" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "const": "hard_break" } } }
+      ]
+    },
+    "paragraph": { "type": "object", "additionalProperties": false, "required": ["kind", "content"], "properties": { "kind": { "const": "paragraph" }, "content": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/inline" } } } },
+    "listItem": { "type": "object", "additionalProperties": false, "required": ["kind", "content"], "properties": { "kind": { "const": "list_item" }, "content": { "type": "array", "minItems": 1, "maxItems": 1000, "items": { "$ref": "#/$defs/paragraph" } } } },
+    "richNode": { "oneOf": [
+      { "$ref": "#/$defs/paragraph" },
+      { "type": "object", "additionalProperties": false, "required": ["kind", "content"], "properties": { "kind": { "enum": ["bullet_list", "ordered_list"] }, "content": { "type": "array", "minItems": 1, "maxItems": 1000, "items": { "$ref": "#/$defs/listItem" } } } }
+    ] },
+    "richTextContent": { "type": "object", "additionalProperties": false, "required": ["type", "nodes"], "properties": { "type": { "const": "rich_text" }, "nodes": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/richNode" } } } },
+    "tableCell": { "type": "object", "additionalProperties": false, "required": ["row", "column", "rowspan", "colspan", "content"], "properties": { "row": { "type": "integer", "minimum": 0 }, "column": { "type": "integer", "minimum": 0 }, "rowspan": { "type": "integer", "minimum": 1 }, "colspan": { "type": "integer", "minimum": 1 }, "content": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/richNode" } } } },
+    "tableContent": { "type": "object", "additionalProperties": false, "required": ["type", "row_count", "column_count", "cells", "widths_mm", "repeat_header_rows"], "properties": { "type": { "const": "table" }, "row_count": { "type": "integer", "minimum": 1, "maximum": 10000 }, "column_count": { "type": "integer", "minimum": 1, "maximum": 256 }, "cells": { "type": "array", "minItems": 1, "maxItems": 100000, "items": { "$ref": "#/$defs/tableCell" } }, "widths_mm": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000 } }, "repeat_header_rows": { "type": "integer", "minimum": 0, "maximum": 1000 } } },
+    "imageContent": { "type": "object", "additionalProperties": false, "required": ["type", "asset_revision_id", "width_mm", "alignment", "crop", "alt"], "properties": { "type": { "const": "image" }, "asset_revision_id": { "$ref": "#/$defs/uuid" }, "width_mm": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000 }, "alignment": { "enum": ["left", "center", "right"] }, "crop": { "type": "object", "additionalProperties": false, "required": ["left", "top", "right", "bottom"], "properties": { "left": { "type": "number", "minimum": 0, "exclusiveMaximum": 1 }, "top": { "type": "number", "minimum": 0, "exclusiveMaximum": 1 }, "right": { "type": "number", "minimum": 0, "exclusiveMaximum": 1 }, "bottom": { "type": "number", "minimum": 0, "exclusiveMaximum": 1 } } }, "caption": { "type": "string", "maxLength": 4096 }, "alt": { "type": "string", "maxLength": 4096 } } },
+    "attachmentContent": { "type": "object", "additionalProperties": false, "required": ["type", "asset_revision_id", "render_mode", "start_new_page"], "properties": { "type": { "const": "attachment_ref" }, "asset_revision_id": { "$ref": "#/$defs/uuid" }, "preparation_revision_id": { "anyOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] }, "render_mode": { "enum": ["embedded_pages", "file_reference"] }, "start_new_page": { "type": "boolean" } } },
+    "structuredFormContent": { "type": "object", "additionalProperties": false, "required": ["type", "form_definition_revision_id", "field_values"], "properties": { "type": { "const": "structured_form" }, "form_definition_revision_id": { "$ref": "#/$defs/uuid" }, "field_values": { "type": "array", "maxItems": 10000, "items": { "type": "object", "additionalProperties": false, "required": ["field_id", "value"], "properties": { "field_id": { "type": "string", "minLength": 1, "maxLength": 256 }, "value": { "type": "string", "maxLength": 65536 } } } } } },
+    "pageBreakContent": { "type": "object", "additionalProperties": false, "required": ["type"], "properties": { "type": { "const": "page_break" } } },
+    "signatureContent": { "type": "object", "additionalProperties": false, "required": ["type", "signature_kind", "width_mm", "height_mm", "label"], "properties": { "type": { "const": "signature_placeholder" }, "signature_kind": { "enum": ["signature", "seal", "date"] }, "width_mm": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000 }, "height_mm": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000 }, "label": { "$ref": "#/$defs/nonEmptyText" } } }
+  }
+}

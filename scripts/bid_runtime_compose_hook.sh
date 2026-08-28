@@ -246,9 +246,9 @@ curl -fsS "$ACCEPTANCE_BASE_URL/api/v1/bids/$ACCEPTANCE_PROJECT_ID/submission/ar
 historical_pdf_sha="$(sha256sum "$TMP/historical-after-attachment-delete.pdf" | awk '{print $1}')"
 [ "$historical_pdf_sha" = "$ACCEPTANCE_PDF_SHA256" ] || fail "historical PDF changed after attachment release"
 
-# Stop both asynchronous consumers before creating the recovery fixtures. The
-# original Redis render message remains durable while the role-scoped reapers
-# move the exact records back into states the restarted consumers can finish.
+# Stop both asynchronous consumers before creating the restart fixtures. The
+# API must commit the business target and enqueue the Oxana job before it
+# returns 202; PostgreSQL must not run a due-target reconciler in the meantime.
 docker compose stop worker retention >/dev/null
 json_request POST "/api/v1/bids/$ACCEPTANCE_PROJECT_ID/submission/manifests" \
   '{"format":"docx"}' "$TMP/recovery-manifest.json"
@@ -259,18 +259,11 @@ json_request_with_key POST "/api/v1/bids/$ACCEPTANCE_PROJECT_ID/submission/manif
   "$(jq -cn --arg digest "$recovery_manifest_sha" '{expected_manifest_sha256:$digest}')" \
   "$recovery_render_key" "$TMP/recovery-render.json"
 recovery_render_job_id="$(jq -er .render_job_id "$TMP/recovery-render.json")"
-recovery_claim_token="$(new_id)"
-claimed="$(role_psql kb_runtime_worker acceptance-worker -Atc \
-  "SELECT kb_bid_claim_submission_render('$recovery_render_job_id'::uuid,'$recovery_claim_token'::uuid);")"
-printf '%s' "$claimed" | jq -e --arg id "$recovery_render_job_id" '.render_job_id==$id' >/dev/null ||
-  fail "worker role could not create the active render recovery fixture"
-recovery_claim_lease_ms="$(printf '%s' "$claimed" | jq -er .claim_lease_ms)"
-recovery_attempt_count_before="$(printf '%s' "$claimed" | jq -er .attempt_count)"
-[ "$recovery_claim_lease_ms" -ge 1000 ] || fail "recovery render claim lease is invalid"
-[ "$recovery_attempt_count_before" = "1" ] || fail "recovery render did not start at attempt 1"
-concurrent_claim_fenced="$(role_psql kb_runtime_worker acceptance-worker -Atc \
-  "SELECT kb_bid_claim_submission_render('$recovery_render_job_id'::uuid,'$(new_id)'::uuid) IS NULL;")"
-[ "$concurrent_claim_fenced" = "t" ] || fail "fresh active render claim was not fenced"
+recovery_status_before_restart="$(printf '%s\n' \
+  "SELECT status FROM bid_submission_render_jobs" \
+  " WHERE id='$recovery_render_job_id'::uuid;" | admin_psql -At)"
+[ "$recovery_status_before_restart" = "pending" ] ||
+  fail "render target was not pending while the worker was stopped"
 
 staging_id="$(new_id)"
 staging_digest="$(printf '%s' "$staging_id" | sha256sum | awk '{print $1}')"
@@ -281,34 +274,6 @@ project_actor="$(printf '%s\n' \
 role_psql kb_runtime_worker acceptance-worker -Atc \
   "SELECT kb_object_upload_stage('$staging_id'::uuid,'$staging_ref'::kb_object_ref,'$staging_digest'::kb_sha256,'application/octet-stream',0,'$project_actor'::kb_actor_identity);" \
   >/dev/null
-sleep 1
-aged_claim="$(printf '%s\n' \
-  "WITH updated AS (" \
-  "  UPDATE bid_submission_render_jobs" \
-  "     SET heartbeat_at=clock_timestamp()-make_interval(secs=>claim_lease_ms::double precision/1000.0)-interval '1 second'" \
-  "   WHERE id='$recovery_render_job_id'::uuid AND status='running'" \
-  "     AND claim_token='$recovery_claim_token'::uuid" \
-  "   RETURNING 1" \
-  ") SELECT count(*) FROM updated;" | admin_psql -At)"
-[ "$aged_claim" = "1" ] || fail "could not expire the isolated active render fixture"
-reaped="$(role_psql kb_runtime_worker acceptance-worker -Atc 'SELECT kb_bid_reap_submission_renders();')"
-[ "$reaped" -ge 1 ] || fail "expired active render claim was not reaped"
-reaped_target="$(printf '%s\n' \
-  "SELECT status||E'\\t'||attempt_count||E'\\t'||(claim_token IS NULL)||E'\\t'||" \
-  "       (heartbeat_at IS NULL)||E'\\t'||COALESCE(error_code,'')" \
-  "  FROM bid_submission_render_jobs WHERE id='$recovery_render_job_id'::uuid;" |
-  admin_psql -At)"
-IFS=$'\t' read -r reaped_status reaped_attempt reaped_claim_cleared reaped_heartbeat_cleared reaped_error \
-  <<<"$reaped_target"
-[ "$reaped_status" = "pending" ] || fail "reaped render did not return to pending"
-[ "$reaped_attempt" = "1" ] || fail "reaping changed the render attempt count"
-[ "$reaped_claim_cleared" = "true" ] || fail "reaping retained the old render claim token"
-[ "$reaped_heartbeat_cleared" = "true" ] || fail "reaping retained the old render heartbeat"
-[ "$reaped_error" = "CLAIM_LEASE_EXPIRED" ] || fail "reaped render lacks the lease-expired reason"
-old_token_heartbeat="$(role_psql kb_runtime_worker acceptance-worker -Atc \
-  "SELECT kb_bid_heartbeat_submission_render('$recovery_render_job_id'::uuid,'$recovery_claim_token'::uuid);")"
-[ "$old_token_heartbeat" = "f" ] || fail "expired render claim token was not fenced"
-
 expired_staging_row="$(printf '%s\n' \
   "WITH updated AS (" \
   "  UPDATE object_upload_staging SET expires_at=created_at+interval '1 millisecond'" \
@@ -350,8 +315,6 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 [ "$(jq -r .status "$TMP/recovery-status.json")" = "completed" ] || fail "recovered render did not complete"
-recovery_attempt_count_after="$(jq -er .attempt_count "$TMP/recovery-status.json")"
-[ "$recovery_attempt_count_after" = "2" ] || fail "recovered render did not complete on attempt 2"
 for _ in $(seq 1 60); do
   staging_state="$(printf '%s\n' \
     "SELECT COALESCE((SELECT state FROM object_registry WHERE object_ref='$staging_ref'::kb_object_ref),'missing');" |
@@ -373,10 +336,7 @@ jq -n \
   --argjson manifest_asset_count "$manifest_asset_count" \
   --arg historical_pdf_sha256 "$historical_pdf_sha" \
   --arg recovery_render_job_id "$recovery_render_job_id" \
-  --argjson recovery_claim_lease_ms "$recovery_claim_lease_ms" \
-  --argjson recovery_attempt_count_before "$recovery_attempt_count_before" \
-  --argjson recovery_attempt_count_after "$recovery_attempt_count_after" \
-  --arg reaped_status "$reaped_status" \
+  --arg recovery_status_before_restart "$recovery_status_before_restart" \
   --arg recovery_staging_object_ref "$staging_ref" \
   --arg staging_state_after_expire "$staging_reaped_state" \
   --arg staging_outbox_state_after_expire "$staging_outbox_state" \
@@ -393,11 +353,9 @@ jq -n \
       staging_state_after_expire:$staging_state_after_expire,
       staging_outbox_state_after_expire:$staging_outbox_state_after_expire,
       staging_row_removed_by_retention_service:true,released_staging_deleted:true},
-    restart_recovery:{render_job_id:$recovery_render_job_id,claim_lease_ms:$recovery_claim_lease_ms,
-      attempt_count_before_recovery:$recovery_attempt_count_before,
-      fresh_claim_fenced:true,target_state_after_reap:$reaped_status,old_token_fenced:true,
-      active_claim_reaped:true,attempt_count_after_recovery:$recovery_attempt_count_after,
-      completed_after_restart:true}}' \
+    restart_recovery:{render_job_id:$recovery_render_job_id,
+      target_state_while_worker_stopped:$recovery_status_before_restart,
+      api_committed_and_enqueued_before_202:true,completed_after_worker_restart:true}}' \
   >"$HOOK_EVIDENCE_FILE"
 if [ "$HOOK_EVIDENCE_FILE" != "$EVIDENCE_DIR/compose-hook.json" ]; then
   cp "$HOOK_EVIDENCE_FILE" "$EVIDENCE_DIR/compose-hook.json"

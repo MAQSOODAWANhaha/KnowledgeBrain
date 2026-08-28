@@ -4,7 +4,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, sync::LazyLock, time::Duration};
+use std::{collections::HashMap, sync::LazyLock};
 use storage::bidding::{
     CompleteDocumentConversion, ConvertedSourceImageUpload, MutationContext, PublishSection,
 };
@@ -821,7 +821,7 @@ impl FrozenSection {
 #[derive(Serialize)]
 struct PublicationRequest<'a> {
     target_id: Uuid,
-    attempt: i32,
+    target_revision: i32,
     section_key: &'a str,
     parent_start_offset: usize,
     parent_end_offset: usize,
@@ -832,163 +832,182 @@ struct PublicationRequest<'a> {
 pub async fn convert_and_schedule_document(
     pool: &sqlx::PgPool,
     document_id: Uuid,
-) -> Result<Option<Uuid>, String> {
-    let claim_token = Uuid::new_v4();
-    let Some(claim) = storage::bidding::claim_document_conversion(
-        pool,
-        document_id,
-        claim_token,
-        "bid-convert-v1",
-    )
-    .await
-    .map_err(|error| error.to_string())?
+    target_revision: i64,
+) -> Result<Option<(Uuid, i64)>, String> {
+    let conversion_generation = i32::try_from(target_revision)
+        .map_err(|_| "document conversion target revision is invalid".to_string())?;
+    let Some(target) =
+        storage::bidding::load_document_conversion(pool, document_id, conversion_generation)
+            .await
+            .map_err(|error| error.to_string())?
     else {
-        return Ok(None);
+        return storage::bidding::document_conversion_successor(
+            pool,
+            document_id,
+            conversion_generation,
+        )
+        .await
+        .map_err(|error| error.to_string())
+        .map(|successor| {
+            successor.map(|successor| {
+                (
+                    successor.target_id,
+                    i64::from(successor.extraction_generation),
+                )
+            })
+        });
     };
     const CONVERSION_OBJECT_ACTOR: &str = "system:bid-convert-worker";
     let mut image_uploads: Vec<ConvertedSourceImageUpload> = Vec::new();
     let target_id = Uuid::new_v4();
-    let conversion = runtime::run_with_heartbeat(
-        Duration::from_millis(claim.claim_lease_ms as u64),
-        async {
-            let original_digest = claim.object_ref.trim_start_matches("objects/");
-            let bytes = storage::read_blob(original_digest).map_err(|error| error.to_string())?;
-            let converted = docparser::convert_to_markdown(&claim.file_name, bytes)
-                .await
-                .map_err(|error| error.0)?;
-            if !converted.error.is_empty() {
-                return Err(converted.error);
+    let conversion = async {
+        let original_digest = target.object_ref.trim_start_matches("objects/");
+        let bytes = storage::read_blob(original_digest).map_err(|error| error.to_string())?;
+        let converted = docparser::convert_tender_source(&target.file_name, bytes)
+            .await
+            .map_err(|error| error.0)?;
+        if !converted.error.is_empty() {
+            return Err(converted.error);
+        }
+        let mut markdown = converted.markdown;
+        let image_source_type = converted
+            .metadata
+            .get("image_source_type")
+            .cloned()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| {
+                enrichment::image_source_type(&target.file_name, &markdown).to_string()
+            });
+        let language =
+            enrichment::infer_output_language(&format!("{}\n{markdown}", target.file_name));
+        let mut image_digests = Vec::new();
+        for image in converted.images {
+            if image.data.is_empty() {
+                continue;
             }
-            let mut markdown = converted.markdown;
-            let image_source_type = converted
-                .metadata
-                .get("image_source_type")
-                .cloned()
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| {
-                    enrichment::image_source_type(&claim.file_name, &markdown).to_string()
-                });
-            let language =
-                enrichment::infer_output_language(&format!("{}\n{markdown}", claim.file_name));
-            let mut image_digests = Vec::new();
-            for image in converted.images {
-                if image.data.is_empty() {
-                    continue;
-                }
-                let image_digest = hex::encode(Sha256::digest(&image.data));
-                let image_ref = storage::object_ref(&image_digest);
-                let media_type = image.mime_type.trim();
-                if !media_type.starts_with("image/") {
-                    return Err("converted image media type is missing or invalid".into());
-                }
-                let staging_id = Uuid::new_v4();
-                storage::stage_object_upload(
-                    pool,
-                    staging_id,
-                    &image_ref,
-                    &image_digest,
-                    media_type,
-                    image.data.len() as i64,
-                    CONVERSION_OBJECT_ACTOR,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-                image_uploads.push(ConvertedSourceImageUpload {
-                    staging_id,
-                    object_ref: image_ref.clone(),
-                    digest: image_digest.clone(),
-                    media_type: media_type.to_string(),
-                    byte_length: image.data.len() as i64,
-                    occurrence: format!("image:{}", image_uploads.len()),
-                });
-                storage::write_blob_off_runtime(&image_digest, &image.data)
-                    .map_err(|error| error.to_string())?;
-                image_digests.push(image_digest);
-                if domain::vlm_configured() {
-                    let (ocr, caption) =
-                        enrichment::describe_image(&image_ref, &image_source_type, &language)
-                            .map_err(|error| format!("tender multimodal stage failed: {error}"))?;
-                    markdown = markdown.replacen(
-                        &format!("]({})", image.original_ref),
-                        &format!("]({image_ref})\n\n{ocr}\n\n{caption}\n"),
-                        1,
-                    );
-                } else if markdown.contains(&image.original_ref) {
-                    markdown = markdown.replace(&image.original_ref, &image_ref);
-                }
+            let image_digest = hex::encode(Sha256::digest(&image.data));
+            let image_ref = storage::object_ref(&image_digest);
+            let media_type = image.mime_type.trim();
+            if !media_type.starts_with("image/") {
+                return Err("converted image media type is missing or invalid".into());
             }
-            image_digests.sort();
-            let mut image_set_hasher = Sha256::new();
-            image_set_hasher.update(b"ConvertedSourceArtifactV1:image-set:");
-            for digest in image_digests {
-                image_set_hasher.update(digest.as_bytes());
-            }
-            let image_asset_set_sha256 = hex::encode(image_set_hasher.finalize());
-            let sections = outline_and_route(&markdown)?;
-            let source_artifact_id = Uuid::new_v4();
-            let completed = storage::bidding::complete_document_conversion(
+            let staging_id = Uuid::new_v4();
+            storage::stage_object_upload(
                 pool,
-                CompleteDocumentConversion {
-                    document_id,
-                    claim_token,
-                    source_artifact_id,
-                    markdown: markdown.as_bytes(),
-                    converter_contract_version: "docparser-converted-source-v1",
-                    image_asset_set_sha256: &image_asset_set_sha256,
-                    image_assets: &image_uploads,
-                    extraction_target_id: target_id,
-                    expected_section_count: sections.len() as i32,
-                    policy_version: POLICY_VERSION,
-                    prompt_version: PROMPT_VERSION,
-                    actor: CONVERSION_OBJECT_ACTOR,
-                },
+                staging_id,
+                &image_ref,
+                &image_digest,
+                media_type,
+                image.data.len() as i64,
+                CONVERSION_OBJECT_ACTOR,
             )
             .await
             .map_err(|error| error.to_string())?;
-            if completed["source_artifact_id"] != source_artifact_id.to_string()
-                || completed["extraction_target_id"] != target_id.to_string()
-            {
-                return Err("conversion publication identity mismatch".into());
+            image_uploads.push(ConvertedSourceImageUpload {
+                staging_id,
+                object_ref: image_ref.clone(),
+                digest: image_digest.clone(),
+                media_type: media_type.to_string(),
+                byte_length: image.data.len() as i64,
+                occurrence: format!("image:{}", image_uploads.len()),
+            });
+            storage::write_blob_off_runtime(&image_digest, &image.data)
+                .map_err(|error| error.to_string())?;
+            image_digests.push(image_digest);
+            if domain::vlm_configured() {
+                let (ocr, caption) =
+                    enrichment::describe_image(&image_ref, &image_source_type, &language)
+                        .map_err(|error| format!("tender multimodal stage failed: {error}"))?;
+                markdown = markdown.replacen(
+                    &format!("]({})", image.original_ref),
+                    &format!("]({image_ref})\n\n{ocr}\n\n{caption}\n"),
+                    1,
+                );
+            } else if markdown.contains(&image.original_ref) {
+                markdown = markdown.replace(&image.original_ref, &image_ref);
             }
-            Ok(target_id)
-        },
-        || async {
-            storage::bidding::heartbeat_document_conversion(pool, document_id, claim_token)
-                .await
-                .map_err(|error| error.to_string())
-        },
-    )
+        }
+        image_digests.sort();
+        let mut image_set_hasher = Sha256::new();
+        image_set_hasher.update(b"ConvertedSourceArtifactV1:image-set:");
+        for digest in image_digests {
+            image_set_hasher.update(digest.as_bytes());
+        }
+        let image_asset_set_sha256 = hex::encode(image_set_hasher.finalize());
+        let sections = outline_and_route(&markdown)?;
+        let source_artifact_id = Uuid::new_v4();
+        let completed = storage::bidding::complete_document_conversion(
+            pool,
+            CompleteDocumentConversion {
+                document_id,
+                conversion_generation,
+                source_artifact_id,
+                markdown: markdown.as_bytes(),
+                converter_contract_version: "docparser-converted-source-v1",
+                image_asset_set_sha256: &image_asset_set_sha256,
+                image_assets: &image_uploads,
+                extraction_target_id: target_id,
+                expected_section_count: sections.len() as i32,
+                policy_version: POLICY_VERSION,
+                prompt_version: PROMPT_VERSION,
+                actor: CONVERSION_OBJECT_ACTOR,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        if completed["source_artifact_id"] != source_artifact_id.to_string()
+            || completed["extraction_target_id"] != target_id.to_string()
+        {
+            return Err("conversion publication identity mismatch".into());
+        }
+        let extraction_generation = completed
+            .get("extraction_generation")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| "conversion publication is missing extraction generation".to_string())?;
+        Ok((target_id, extraction_generation))
+    }
     .await;
     match conversion {
-        runtime::LeaseRun::Completed(Ok(target_id)) => Ok(Some(target_id)),
-        runtime::LeaseRun::Lost => {
-            for image in &image_uploads {
-                let _ =
-                    storage::abandon_object_upload(pool, image.staging_id, CONVERSION_OBJECT_ACTOR)
-                        .await;
-            }
-            Err("document conversion lease lost".into())
-        }
-        runtime::LeaseRun::Completed(Err(error)) | runtime::LeaseRun::HeartbeatFailed(error) => {
+        Ok(successor) => Ok(Some(successor)),
+        Err(error) => {
             for image in &image_uploads {
                 let _ =
                     storage::abandon_object_upload(pool, image.staging_id, CONVERSION_OBJECT_ACTOR)
                         .await;
             }
             let retry = super::conversion_error_is_retryable(&error);
-            let _ = storage::bidding::fail_document_conversion(
+            let settled = storage::bidding::fail_document_conversion(
                 pool,
                 document_id,
-                claim_token,
+                conversion_generation,
                 if retry {
                     "CONVERSION_TRANSIENT"
                 } else {
                     "CONVERSION_TERMINAL"
                 },
+                &error,
                 retry,
             )
-            .await;
-            Err(error)
+            .await
+            .map_err(|settle_error| settle_error.to_string())?;
+            if !settled {
+                return storage::bidding::document_conversion_successor(
+                    pool,
+                    document_id,
+                    conversion_generation,
+                )
+                .await
+                .map_err(|successor_error| successor_error.to_string())
+                .map(|successor| {
+                    successor.map(|successor| {
+                        (
+                            successor.target_id,
+                            i64::from(successor.extraction_generation),
+                        )
+                    })
+                });
+            }
+            if retry { Err(error) } else { Ok(None) }
         }
     }
 }
@@ -996,119 +1015,97 @@ pub async fn convert_and_schedule_document(
 pub async fn run_extraction_target(
     pool: &sqlx::PgPool,
     target_id: Uuid,
-    expected_project_id: Uuid,
-    expected_document_id: Option<Uuid>,
+    target_revision: i64,
 ) -> Result<(), String> {
-    let claim_token = Uuid::new_v4();
-    let Some(claim) =
-        storage::bidding::claim_extraction(pool, target_id, claim_token, "bid-extract-v1")
-            .await
-            .map_err(|error| error.to_string())?
+    let extraction_generation = i32::try_from(target_revision)
+        .map_err(|_| "extraction target revision is invalid".to_string())?;
+    let Some(target) = storage::bidding::load_extraction(pool, target_id, extraction_generation)
+        .await
+        .map_err(|error| error.to_string())?
     else {
         return Ok(());
     };
-    if claim.project_id != expected_project_id
-        || expected_document_id.is_some_and(|document_id| document_id != claim.document_id)
-    {
-        let _ = storage::bidding::fail_extraction(
-            pool,
-            target_id,
-            claim.attempt,
-            claim_token,
-            "EXTRACTION_SCOPE_MISMATCH",
-            false,
-        )
-        .await;
-        return Err("extraction target scope mismatch".into());
-    }
-    let extraction = runtime::run_with_heartbeat(
-        Duration::from_millis(claim.claim_lease_ms as u64),
-        async {
-            let source = storage::bidding::extraction_source(pool, claim.document_id)
-                .await
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "frozen extraction source missing".to_string())?;
-            if source.source_artifact_id != claim.source_artifact_id
-                || source.conversion_generation != claim.conversion_generation
-                || hex::encode(Sha256::digest(&source.markdown)) != source.markdown_sha256
-            {
-                return Err("frozen extraction source identity mismatch".into());
-            }
-            let markdown = String::from_utf8(source.markdown)
-                .map_err(|_| "converted source is not UTF-8".to_string())?;
-            let sections = outline_and_route(&markdown)?;
-            for section in &sections {
-                let graph = section.candidate_graph();
-                let expected_current_publication_id =
-                    storage::bidding::current_section_publication(
-                        pool,
-                        claim.project_id,
-                        claim.document_id,
-                        &section.key,
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let request = PublicationRequest {
+    let extraction = async {
+        let source = storage::bidding::extraction_source(pool, target.document_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "frozen extraction source missing".to_string())?;
+        if source.source_artifact_id != target.source_artifact_id
+            || source.conversion_generation != target.conversion_generation
+            || hex::encode(Sha256::digest(&source.markdown)) != source.markdown_sha256
+        {
+            return Err("frozen extraction source identity mismatch".to_string());
+        }
+        let markdown = String::from_utf8(source.markdown)
+            .map_err(|_| "converted source is not UTF-8".to_string())?;
+        let sections = outline_and_route(&markdown)?;
+        for section in &sections {
+            let graph = section.candidate_graph();
+            let expected_current_publication_id = storage::bidding::current_section_publication(
+                pool,
+                target.project_id,
+                target.document_id,
+                &section.key,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let request = PublicationRequest {
+                target_id,
+                target_revision: extraction_generation,
+                section_key: &section.key,
+                parent_start_offset: section.parent_start_offset,
+                parent_end_offset: section.parent_end_offset,
+                expected_current_publication_id,
+                candidate_graph: &graph,
+            };
+            let context = MutationContext::new(
+                "system:bid-extraction-worker",
+                format!("{target_id}:{}", section.key),
+                &request,
+            )
+            .map_err(|error| error.to_string())?;
+            storage::bidding::publish_extraction_section(
+                pool,
+                PublishSection {
                     target_id,
-                    attempt: claim.attempt,
+                    extraction_generation,
                     section_key: &section.key,
-                    parent_start_offset: section.parent_start_offset,
-                    parent_end_offset: section.parent_end_offset,
+                    heading_path: &json!(section.heading_path),
+                    parent_start_offset: section.parent_start_offset as i64,
+                    parent_end_offset: section.parent_end_offset as i64,
                     expected_current_publication_id,
                     candidate_graph: &graph,
-                };
-                let context = MutationContext::new(
-                    "system:bid-extraction-worker",
-                    format!("{target_id}:{}", section.key),
-                    &request,
-                )
-                .map_err(|error| error.to_string())?;
-                storage::bidding::publish_extraction_section(
-                    pool,
-                    PublishSection {
-                        target_id,
-                        attempt: claim.attempt,
-                        claim_token,
-                        section_key: &section.key,
-                        heading_path: &json!(section.heading_path),
-                        parent_start_offset: section.parent_start_offset as i64,
-                        parent_end_offset: section.parent_end_offset as i64,
-                        expected_current_publication_id,
-                        candidate_graph: &graph,
-                    },
-                    &context,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
-            }
-            Ok(())
-        },
-        || async {
-            storage::bidding::heartbeat_extraction(pool, target_id, claim_token, claim.attempt)
-                .await
-                .map_err(|error| error.to_string())
-        },
-    )
+                },
+                &context,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        }
+        Ok::<(), String>(())
+    }
     .await;
     match extraction {
-        runtime::LeaseRun::Completed(Ok(())) => Ok(()),
-        runtime::LeaseRun::Lost => Err("extraction lease lost".into()),
-        runtime::LeaseRun::Completed(Err(error)) | runtime::LeaseRun::HeartbeatFailed(error) => {
+        Ok(()) => Ok(()),
+        Err(error) => {
             let retry = super::conversion_error_is_retryable(&error);
-            let _ = storage::bidding::fail_extraction(
+            let settled = storage::bidding::fail_extraction(
                 pool,
                 target_id,
-                claim.attempt,
-                claim_token,
+                extraction_generation,
                 if retry {
                     "EXTRACTION_TRANSIENT"
                 } else {
                     "EXTRACTION_TERMINAL"
                 },
+                &error,
                 retry,
             )
-            .await;
-            Err(error)
+            .await
+            .map_err(|settle_error| settle_error.to_string())?;
+            if !settled {
+                return Ok(());
+            }
+            if retry { Err(error) } else { Ok(()) }
         }
     }
 }

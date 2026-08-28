@@ -20,7 +20,9 @@ assert bootstrap["sha256"] == hashlib.sha256(pathlib.Path(bootstrap["filename"])
 for entry in manifest["migrations"]:
     path = pathlib.Path("migrations") / entry["filename"]
     assert entry["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest(), path
-assert sorted(path.name for path in pathlib.Path("migrations").glob("*.sql")) == sorted(x[2] for x in expected)
+inactive_phase0 = {"bidding_v2_baseline.sql"}
+assert sorted(path.name for path in pathlib.Path("migrations").glob("*.sql")) == sorted({x[2] for x in expected} | inactive_phase0)
+assert all(entry["filename"] not in inactive_phase0 for entry in manifest["migrations"])
 
 # Deferred constraint triggers execute when the checked SECURITY DEFINER
 # mutation has returned to its runtime invoker. Their trigger functions must
@@ -46,12 +48,42 @@ cargo build -q -p migrator -p first-launch-verifier -p api -p worker -p retentio
 container="kb-fresh-schema-${GITHUB_RUN_ID:-local}-$$"
 port="${KNOWLEDGEBRAIN_SCHEMA_TEST_PORT:-55439}"
 cleanup() {
- docker rm -f -v "$container" >/dev/null 2>&1 || true
+ cleanup_status=0
+ if ! matching_containers=$(docker ps -a --filter "name=$container" --format '{{.Names}}'); then
+  echo "failed to inspect fresh-schema test container: $container" >&2
+  return 1
+ fi
+ if [ "$matching_containers" = "$container" ]; then
+  if ! docker rm -f -v "$container" >/dev/null; then
+   echo "failed to remove fresh-schema test container: $container" >&2
+   cleanup_status=1
+  fi
+ fi
+ if ! remaining_containers=$(docker ps -a --filter "name=$container" --format '{{.Names}}'); then
+  echo "failed to verify fresh-schema test container cleanup: $container" >&2
+  return 1
+ fi
+ if [ -n "$remaining_containers" ]; then
+  echo "fresh-schema test container residue: $remaining_containers" >&2
+  cleanup_status=1
+ fi
+ return "$cleanup_status"
 }
-trap cleanup EXIT HUP INT TERM
+cleanup_on_exit() {
+ status=$?
+ trap - EXIT
+ if ! cleanup; then status=1; fi
+ exit "$status"
+}
+trap cleanup_on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 cleanup
 
-docker run -d --name "$container" -p "$port:5432" \
+docker run -d --rm --name "$container" \
+ --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,size=1g \
+ -p "$port:5432" \
  -e POSTGRES_USER=knowledgebrain \
  -e POSTGRES_PASSWORD=knowledgebrain \
  -e POSTGRES_DB=knowledgebrain \
@@ -63,22 +95,26 @@ docker run -d --name "$container" -p "$port:5432" \
  -v "$PWD/deploy/postgres-init:/docker-entrypoint-initdb.d:ro" \
  pgvector/pgvector:0.8.6-pg16 >/dev/null
 
-for _ in $(seq 1 60); do
- if docker exec "$container" pg_isready -U knowledgebrain -d knowledgebrain >/dev/null 2>&1; then
+# The init script creates roles while the temporary bootstrap postmaster is
+# still running. Wait for the entrypoint completion marker, final postmaster,
+# and every bootstrap role so the active-V1 gate cannot race that restart.
+ready=0
+for _ in $(seq 1 180); do
+ if docker logs "$container" 2>&1 | grep -q 'PostgreSQL init process complete; ready for start up' \
+  && docker exec "$container" pg_isready -U knowledgebrain -d knowledgebrain >/dev/null 2>&1 \
+  && [ "$(docker exec -e PGPASSWORD=knowledgebrain "$container" \
+    psql -X -U knowledgebrain -d knowledgebrain -Atc \
+    "SELECT count(*)=5 FROM pg_roles WHERE rolname IN ('kb_migrator','kb_first_launch_verifier','kb_runtime_api','kb_runtime_worker','kb_runtime_retention')" 2>/dev/null)" = "t" ]; then
+  ready=1
   break
  fi
  sleep 1
 done
-docker exec "$container" pg_isready -U knowledgebrain -d knowledgebrain >/dev/null
-for _ in $(seq 1 60); do
- if docker exec -e PGPASSWORD=migrator-test "$container" \
-  psql -X -U kb_migrator -d knowledgebrain -Atc 'SELECT 1' >/dev/null 2>&1; then
-  break
- fi
- sleep 1
-done
-docker exec -e PGPASSWORD=migrator-test "$container" \
- psql -X -U kb_migrator -d knowledgebrain -Atc 'SELECT 1' >/dev/null
+[ "$ready" = "1" ] || {
+ docker logs "$container" >&2
+ echo "final PostgreSQL bootstrap readiness timed out" >&2
+ exit 1
+}
 
 # Runtime binaries are verification-only and must fail against an empty catalog
 # without creating even the migration ledger.
@@ -191,7 +227,7 @@ role_psql kb_runtime_api api-test -Atc "SELECT has_function_privilege('kb_runtim
 role_psql kb_runtime_worker worker-test -Atc "SELECT count(*) FROM bidding_current_matching_reports" | grep -qx '0'
 role_psql kb_runtime_worker worker-test -Atc "SELECT count(*) FROM bid_matching_jobs job LEFT JOIN bidding_matching_report_history report ON report.id=job.completed_report_id" | grep -qx '0'
 role_psql kb_runtime_worker worker-test -Atc "SELECT has_function_privilege('kb_runtime_worker','kb_bid_manifest_render_input(uuid,uuid)','EXECUTE')" | grep -qx 't'
-role_psql kb_runtime_worker worker-test -Atc "SELECT has_function_privilege('kb_runtime_worker','kb_bid_complete_document_conversion(uuid,uuid,uuid,bytea,text,kb_sha256,jsonb,uuid,integer,text,text,kb_actor_identity)','EXECUTE')" | grep -qx 't'
+role_psql kb_runtime_worker worker-test -Atc "SELECT has_function_privilege('kb_runtime_worker','kb_bid_complete_document_conversion(uuid,integer,uuid,bytea,text,kb_sha256,jsonb,uuid,integer,text,text,kb_actor_identity)','EXECUTE')" | grep -qx 't'
 role_psql kb_runtime_worker worker-test -Atc "SELECT has_function_privilege('kb_runtime_worker','kb_bid_sync_project_procedural(uuid,kb_actor_identity)','EXECUTE')" | grep -qx 'f'
 role_psql kb_runtime_worker worker-test -Atc "SELECT has_function_privilege('kb_runtime_worker','kb_object_upload_expire()','EXECUTE')" | grep -qx 'f'
 role_psql kb_runtime_retention retention-test -Atc "SELECT has_function_privilege('kb_runtime_retention','kb_object_upload_expire()','EXECUTE')" | grep -qx 't'

@@ -1,14 +1,15 @@
-# 招投标领域目标
+# 招投标领域（现有V1实现快照与Target V2导航）
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | **已确认目标契约，尚不代表代码已实现** |
-| 版本 | 最终 V1 |
-| 日期 | 2026-08-23 |
-| 部署 | clean-slate fresh redeploy |
-| 业务时区 | `Asia/Shanghai` |
+| 状态 | **Target V2已替代本文的目标契约；下文仅用于识别待删除V1实现** |
+| 目标契约 | [`../platform/tender-to-submission-authoring.md`](../platform/tender-to-submission-authoring.md) |
+| 实施方案 | [`../../plans/bidding/tender-to-submission-v2.md`](../../plans/bidding/tender-to-submission-v2.md) |
+| 部署 | Target V2 clean-slate fresh redeploy |
 
-本文是招投标领域的唯一目标定义。数据结构、算法、PR 顺序和测试细节在 [`../../plans/bidding/README.md`](../../plans/bidding/README.md) 及其专题中定义。
+Target V2的动态大纲、统一Workspace、ContentBlock、Candidate、Assessment和DOCX/PDF规则只由上述两份文档定义。下文保留固定PartSet、SubmissionGateV1等名称，只是当前V1代码/删除矩阵的实现快照，不再构成产品要求，也不得被新代码引用为Target V2合同。
+
+## Legacy V1实现快照（仅供删除与回归定位）
 
 ## 1. 产品目标
 

@@ -111,6 +111,7 @@ impl Role {
 pub const TYPE_DOCUMENT_PROCESS: &str = "document:process";
 pub const TYPE_MANUAL_PROCESS: &str = "manual:process";
 pub const TYPE_POST_PROCESS: &str = "knowledge:post_process";
+pub const TYPE_SEMANTIC_INDEX_V2: &str = "knowledge:semantic_index:v2";
 pub const TYPE_SUMMARY: &str = "summary:generation";
 pub const TYPE_QUESTION: &str = "question:generation";
 pub const TYPE_IMAGE_MULTIMODAL: &str = "image:multimodal";
@@ -123,12 +124,7 @@ pub const TYPE_LIST_DELETE: &str = "knowledge:list_delete";
 pub const TYPE_LIST_REPARSE: &str = "knowledge:list_reparse";
 pub const TYPE_INDEX_DELETE: &str = "index:delete";
 pub const TYPE_DATATABLE: &str = "datatable:summary";
-pub const TYPE_BID_CONVERT: &str = "bid:convert";
-pub const TYPE_BID_PREPARE_ATTACHMENT_V1: &str = "bid:prepare-attachment:v1";
-pub const TYPE_BID_EXTRACT: &str = "bid:extract";
-pub const TYPE_BID_MATCH_ROUTE_V1: &str = "bid:match-route:v1";
-pub const TYPE_BID_RENDER_SUBMISSION_V1: &str = "bid:render-submission:v1";
-pub const TYPE_SYSTEM_LIVE_RECOVERY_V1: &str = "system:live-recovery:v1";
+pub const TYPE_BID_DELIVERY_V1: &str = "bid:delivery:v1";
 
 pub const QUEUE_DEFAULT: &str = "default";
 pub const QUEUE_POSTPROCESS: &str = "postprocess";
@@ -138,10 +134,7 @@ pub const QUEUE_GRAPH: &str = "graph";
 pub const QUEUE_QUESTION: &str = "question";
 pub const QUEUE_WIKI: &str = "wiki";
 pub const QUEUE_LOW: &str = "low";
-pub const QUEUE_BID_CONVERT_V1: &str = "bid-convert-v1";
-pub const QUEUE_BID_EXTRACT_V1: &str = "bid-extract-v1";
-pub const QUEUE_BID_MATCHING_V1: &str = "bid-matching-v1";
-pub const QUEUE_BID_RENDER_V1: &str = "bid-render-v1";
+pub const QUEUE_BID_DELIVERY_V1: &str = "bid-delivery-v1";
 
 #[cfg(test)]
 mod tests {
@@ -151,17 +144,12 @@ mod tests {
     fn task_type_strings_match_brain() {
         assert_eq!(TYPE_DOCUMENT_PROCESS, "document:process");
         assert_eq!(TYPE_POST_PROCESS, "knowledge:post_process");
+        assert_eq!(TYPE_SEMANTIC_INDEX_V2, "knowledge:semantic_index:v2");
         assert_eq!(TYPE_KB_DELETE, "kb:delete");
         assert_eq!(TYPE_LIST_DELETE, "knowledge:list_delete");
         assert_eq!(TYPE_INDEX_DELETE, "index:delete");
-        assert_eq!(TYPE_BID_CONVERT, "bid:convert");
-        assert_eq!(TYPE_BID_PREPARE_ATTACHMENT_V1, "bid:prepare-attachment:v1");
-        assert_eq!(TYPE_BID_EXTRACT, "bid:extract");
-        assert_eq!(TYPE_BID_RENDER_SUBMISSION_V1, "bid:render-submission:v1");
+        assert_eq!(TYPE_BID_DELIVERY_V1, "bid:delivery:v1");
         assert_eq!(QUEUE_LOW, "low");
-        assert_eq!(QUEUE_BID_CONVERT_V1, "bid-convert-v1");
-        assert_eq!(QUEUE_BID_EXTRACT_V1, "bid-extract-v1");
-        assert_eq!(QUEUE_BID_MATCHING_V1, "bid-matching-v1");
-        assert_eq!(QUEUE_BID_RENDER_V1, "bid-render-v1");
+        assert_eq!(QUEUE_BID_DELIVERY_V1, "bid-delivery-v1");
     }
 }

@@ -1,184 +1,177 @@
-# 招投标异步任务与恢复方案
+# 招投标异步任务投递方案
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | 简化方案已批准并固化，待实施与验收 |
+| 状态 | 已批准；按 Oxana 原生能力简化方案实施 |
 | 所有者 | Bidding |
 | 队列依赖 | [`../platform/queue-runtime.md`](../platform/queue-runtime.md) |
 
-本文定义招投标异步业务的最小 PostgreSQL 正确性。Oxana 负责 enqueue、retry、retry delay、并发消费和 worker crash resurrection；本文不复制这些能力。
+本文只定义招投标业务 target 如何调用 Oxana。Oxana 负责 enqueue、retry、retry delay、并发消费、worker crash resurrection 和 dead queue；招投标不复制这些能力。
 
-## 1. 目标
+## 1. 目标与取舍
 
-- 业务 target 与产生它的 mutation 在同一 PostgreSQL 事务提交；
-- API 成功不依赖 Redis 当时在线；
-- duplicate、旧 generation、worker crash 和 lease lost 不会重复发布业务结果；
-- Redis volume 完全丢失后，未完成 target 可从 PostgreSQL 重新投递；
-- conversion、extraction、matching schedule/job、attachment preparation 和 submission render 使用同一套小流程；
-- 删除旧 `system:live-recovery:v1`、best-effort commit 后 enqueue 和泛化 orphan 扫描。
+- 六类现有业务 target 继续表达“要完成什么”和“最终结果是什么”；
+- 所有 transport 生命周期完全交给 Oxana 2.1.3；
+- duplicate、旧业务 revision 和重复执行不能重复发布结果；
+- conversion -> extraction、matching schedule -> 0..N jobs 等 successor 仍由一个业务事务原子创建；
+- 删除旧 `system:live-recovery:v1`、best-effort enqueue 和复杂 dispatch/recovery 草稿。
 
-非目标：通用工作流引擎、第二套队列、任意 DAG、队列 membership 镜像、exactly-once transport。
+V1 明确不做：Redis 不可用时仍返回成功、Redis volume 删除后的自动 DB 重建、后台扫描 pending target、通用工作流引擎或 transport exactly-once。enqueue 失败返回可重试错误；Redis 恢复后重试原幂等 operation。
 
-## 2. 最小模型
+## 2. 最小业务模型
 
-不新增 `dispatch head`、`dispatch intent`、`delivery attempt`、`settlement`、`successor` 或 `repair obligation` 表。六类现有业务 target 继续是唯一业务真源，只补齐一致的投递字段：
+不新增 `dispatch head`、`dispatch intent`、`delivery generation`、`delivery attempt`、`settlement`、`successor` 或 `repair obligation` 表。现有六类 target 只保留业务字段：
 
 ```text
-status                 pending | running | completed | failed | cancelled | superseded
-delivery_generation    bigint >= 0
-next_enqueue_at        timestamptz
-attempt_count          integer
-max_attempts           integer
-claim_token            uuid nullable
-claim_lease_ms          integer
-heartbeat_at           timestamptz nullable
+id
+status                 pending | completed | failed | cancelled | superseded
+business generation / watermark / revision
+frozen input identity
 result/artifact pointer nullable
-error_code              nullable bounded text
-error_detail            nullable bounded text
+last_error_code/detail nullable bounded text
+created_at, completed_at nullable
 ```
-
-现有独立 attempt 表可以在业务审计确实需要时保留，但只记录业务执行 attempt；不得保存 Oxana queued/retrying/dead phase，也不得控制队列 retry。
 
 约束：
 
-- target 创建时 `status=pending, delivery_generation=0, next_enqueue_at=now()`；
-- terminal target 没有 claim，且不再进入 due scan；
-- `running` 必须有 `claim_token + heartbeat_at`；非 running 不得保留有效 claim；
-- `attempt_count <= max_attempts`；当前 attempt 失败且已达到上限时，必须立即结算为 `failed`；
-- current pointer、source generation/watermark 和 artifact publish 继续使用各业务模块已有 FK/CAS；
-- target、audit、幂等 receipt 与初始 due intent 在同一业务事务完成，不在 commit 后补写。
+- `pending` 表示业务意图尚未终结，不区分 queued、running 或 retrying；
+- Oxana job phase、retry counter、dead state 不写入 PostgreSQL；
+- target 不保存 `delivery_generation`、`next_enqueue_at`、`claim_token`、`claim_lease_ms` 或 `heartbeat_at`；
+- final publish 必须校验 target 的 business generation/watermark/revision 和所属项目 current 状态；
+- immutable artifact unique key、current pointer CAS 和 ObjectRegistry owner reference 保证重复执行安全；
+- target、audit、幂等 receipt 和 successor targets 在所属业务事务内原子提交。
 
 ## 3. 唯一流程
 
 ```text
-业务事务创建 pending target
+幂等业务事务创建或取得 pending target
         |
+        | commit 后 enqueue 一次
         v
-worker 内轻量 reconciler 扫描 due target
+Oxana 2.1.3 bid:delivery:v1
         |
-        | reserve 新 delivery_generation
+        | retry / delay / resurrection / dead queue
         v
-Oxana 2.1.3 enqueue(target_id, generation)
+handler 读取冻结业务 target
         |
-        | 原生 retry / delay / resurrect / concurrency
+        | 外部工作
         v
-handler 从 PostgreSQL claim
+current/revision fenced transaction 原子 publish
         |
-        | heartbeat + 外部工作
+        | 若有 successor，commit 后逐个幂等 enqueue
         v
-fenced transaction 原子 publish 或 fail
+完成；enqueue 失败则由当前 Oxana job 重试重放
 ```
 
-### 3.1 Due reconciler
+### 3.1 API 创建 target
 
-reconciler 是 Redis 完全丢失时的最后兜底，不是第二套队列：
+API 使用调用方 idempotency key：
 
-1. 每 30 秒从六类 target 中各取固定上限的 due row，使用 `FOR UPDATE SKIP LOCKED`；
-2. 对 `pending AND next_enqueue_at <= now()` 的 row 原子增加 `delivery_generation`，并把 `next_enqueue_at` 推迟 5 分钟；
-3. transaction commit 后调用一次平台 `enqueue(target_id,generation)`；
-4. enqueue 返回错误或结果未知时不查询 Redis，也不建立 delivery attempt；target 到期后会产生下一 generation；
-5. 对 lease 已过期的 `running` row，先精确终结旧业务 attempt、清 claim并回到 `pending`；达到 `max_attempts` 则直接 `failed`；
-6. `completed|failed|cancelled|superseded` 永不重新投递。
+1. 同一 transaction 创建 target、业务 mutation、audit 和业务 receipt；receipt只返回稳定target identity，不声明queue accepted；
+2. commit 后调用一次 `enqueue(target_kind,target_id,target_revision)`；
+3. accepted 返回 endpoint 的既有成功状态与稳定 target ID；纯任务为 `202`，同步创建资源并附带异步 target 的 endpoint 可保持 `201`；
+4. unavailable返回`503 QUEUE_UNAVAILABLE`、稳定target ID和`retry_same_idempotency_key=true`；客户端必须用同一key重试，命中receipt后仍执行第2步，不重复业务写。
 
-reconciler 与 Oxana consumer 运行在现有 worker 进程中，复用 worker 的数据库连接和受检函数。V1 不新增 `bid-dispatcher` service、login role、DSN、activation hold 或独立控制面。
+不新增 outbox、due 字段或 reconciler 来掩盖 Redis 不可用。
 
-### 3.2 Handler claim
+### 3.2 Handler
 
-job payload 只有 `target_id + delivery_generation`。handler 在任何对象存储、DocReader、provider 或 renderer I/O 前执行一次 claim transaction：
+payload 只有 `target_kind + target_id + target_revision`。handler 在任何外部 I/O 前读取 target：
 
-- target 不存在、已 terminal 或 job generation 小于当前 generation：`Ok` noop；
-- job generation 大于当前 generation：记录 bounded invariant error并 `Ok`，不无限 retry；
-- 同 generation 已由未过期 owner 运行：duplicate `Ok` noop；
-- 同 generation 的旧 owner lease 已过期：在同一 transaction 精确终结旧 attempt；未耗尽时由新 token接管，已耗尽时置 `failed`；
-- target 为 current pending 且未耗尽 attempt：增加 `attempt_count`，写入新 `claim_token`、`heartbeat_at` 并进入 `running`；
-- project ended、source/current fence 已失效：原子 `cancelled|superseded` 后 `Ok`。
+| target kind | `target_revision` |
+| --- | --- |
+| `document_conversion` | `conversion_generation` |
+| `extraction_target` | `extraction_generation` |
+| `matching_schedule` | `mutation_watermark` |
+| `matching_job` | 冻结 manifest generation |
+| `attachment_preparation` | attachment revision |
+| `submission_render` | immutable render target 的固定 revision `1` |
 
-同一 generation 的 duplicate delivery 不创建第二个业务 owner。
+- target 不存在、已取消/取代或 revision 已旧：`Ok` noop；
+- target 已完成且没有 successor 待投递：`Ok` noop；
+- target 已完成且有确定性 successor：只重放 successor enqueue；
+- target pending 且 current：执行冻结输入对应的业务工作；
+- 确定性输入/业务错误：原子置 `failed` 后 `Ok`；
+- 可重试外部错误或领域固定 timeout：记录 bounded error 后 `Err`，由 Oxana 决定 retry/dead。
 
-### 3.3 Heartbeat 与长任务
+handler 不 claim、不续 lease，也不在 PostgreSQL 计算 retry。Oxana unique job 和 process resurrection负责正常单 job 执行；极端重复 owner只能竞争最终 CAS，loser 不得覆盖结果。
 
-- heartbeat 间隔不大于 `claim_lease_ms / 3`；
-- heartbeat 只在 `status=running AND generation/token` 均匹配且 lease 未过期时续租；
-- 外部转换、检索和完整 render 期间由独立 background heartbeat 持续续租；
-- handler 的所有外部子进程和 heartbeat 归属同一 task scope；
-- 正常、错误、timeout、panic 或 shutdown 都必须停止 heartbeat并回收子进程；
-- heartbeat 失败或 lease 过期后，本 owner 永远不能发布。
+### 3.3 Successor
 
-### 3.4 结算
+conversion 完成并创建 extraction target、matching schedule 创建 manifest 与 0..N matching job、attachment pages 完成以及 render output 发布，都必须在各自成功 transaction 中原子完成。不能先终结父 target，再用第二次数据库调用补建 child target。
 
-所有 post-claim 路径都必须进入统一结算：
+success transaction 返回确定性 child target 列表。commit 后逐个 enqueue：
 
-| 结果 | 数据库动作 | 返回 Oxana |
-| --- | --- | --- |
-| 成功 | 同一 transaction 验证 generation/token/lease/current fence，发布 artifact/current pointer并置 `completed` | `Ok` |
-| 可重试错误 | 终结本次业务 attempt，清 claim，置 `pending`；达到业务上限则 `failed` | 未耗尽时 `Err`，耗尽时 `Ok` |
-| 确定性错误 | 终结 attempt并置 `failed` | `Ok` |
-| cancelled/superseded | 清 claim并写 terminal 状态 | `Ok` |
-| lease lost | 不发布、不覆盖新 owner | `Ok` |
+- 全部 accepted/Skip：父 handler 返回 `Ok`；
+- 任一 unavailable：父 handler 返回 `Err`；
+- 父 job 重试时检测父结果已经提交，只重放完全相同的 child enqueue；
+- child unique ID 固定，因此 response lost 和部分成功不会产生重复 child job。
 
-conversion 完成并产生 extraction target、matching schedule 产生 0..N matching job、attachment pages 完成以及 render output 发布，都必须在各自成功 transaction 中原子完成。不能先把父 target 标为 completed，再在第二次数据库调用中创建后继 target。
+零 route 是成功的空 successor 集合，不创建占位 job。
 
-## 4. Oxana 与 PostgreSQL 如何配合
+## 4. Oxana 与业务事务如何配合
 
 | 场景 | 收敛方式 |
 | --- | --- |
-| handler 返回可重试错误 | Oxana 对同 generation 原生 retry |
-| worker 进程崩溃 | Oxana重新投递；旧DB lease过期后同generation接管，或由reconciler创建新generation |
-| duplicate membership | DB generation/claim/terminal 检查后 noop |
-| enqueue response lost | 可能 duplicate；DB fencing 保证有效发布一次 |
-| Oxana retry 耗尽 | target 仍非 terminal，5 分钟到期后新 generation |
-| Redis flush/volume 丢失 | due target 新 generation 重新 enqueue |
-| 旧 job 延迟到达 | generation 小于 current，noop |
-| worker 在 lease 后恢复 | publish CAS 失败，noop |
+| handler 返回可重试错误 | Oxana 原生 retry/delay |
+| worker 进程崩溃 | Oxana process heartbeat 与 resurrection |
+| duplicate enqueue/response lost | unique ID + `Skip`；final publish CAS |
+| retry 耗尽 | Oxana dead queue；target保持`pending`和last error，修复外部原因后用oxana-web `revive_all_dead` |
+| API enqueue 失败 | 返回 `503`；同一 idempotency key 重试相同 target |
+| successor enqueue 部分失败 | 父 job retry 只重放相同 child enqueue |
+| 旧业务 revision job 到达 | target/current revision 校验后 noop |
+| Redis volume 被删除 | 从基础设施备份恢复，或人工重试原业务 operation；V1 不自动 DB 扫描重建 |
 
-这套设计只保证“业务最终可恢复且有效发布至多一次”，不声称 transport exactly once。
+这套设计保证业务发布幂等，不声称 PostgreSQL 与 Redis 跨库原子或 transport exactly-once。
 
-## 5. 并发与幂等
+## 5. Matching 大结果
 
-- due reservation、claim、heartbeat、fail 和 publish 都使用 generation/token CAS；
-- Redis I/O 不放在 PostgreSQL transaction 内；
-- enqueue job ID 由 `target_id:generation` 确定，重复调用使用 Oxana `Skip`；
-- 业务发布使用已有 unique key/current pointer CAS/ObjectRegistry owner reference，重复 bytes 不等于重复业务发布；
-- matching 0..N fanout 在一个 transaction 内创建全部 matching target；零 route 是成功空 fanout；
-- 同 target 不允许同时由旧 recovery 和新 handler 驱动，切换时删除旧 owner，不双写。
+Matching 的 Open/Stage/Commit 只解决单次大 artifact 不能放入一个 JSON/transaction 的业务问题，不承担队列恢复：
+
+- staging set 绑定 immutable matching target ID、route ID、Oxana job ID 和本次 report nonce；
+- Oxana retry/resurrection 复用同一 unique job ID，但每次执行先原子abandon该job未消费staging，再用新report nonce从冻结输入重算；不恢复部分provider输出；
+- batch ordinal、canonical hash、配额和 final report CAS 保持幂等；
+- staging TTL 只回收未提交临时数据，不触发 enqueue、不改变 retry 次数；
+- 不需要 claim token、lease heartbeat 或 reaper 接管 job。
 
 ## 6. 需要删除
 
 | 旧内容 | 处理 |
 | --- | --- |
 | `system:live-recovery:v1` envelope、claim ledger、handler | 删除 |
-| commit 后 `enqueue_bid_*` best-effort 调用 | 删除 |
-| dirty-manifest/orphan-target/orphan-match 泛化 recovery UNION | 删除 |
+| commit 后忽略错误的 `enqueue_bid_*` | 改为显式 accepted/`503`/`Err` 合同 |
+| dirty-manifest/orphan-target/orphan-match recovery UNION | 删除 |
+| delivery generation、next enqueue、due reserve/reconciler | 删除 |
+| delivery claim、lease、heartbeat、attempt counter/reaper | 删除 |
 | Bid 对 `oxanus:*`、hostname/PID replay 的 correctness 依赖 | 删除 |
-| 新草稿中的 async base/typed extension/head/intent/state | 不实施；已产生的未用代码删除 |
-| delivery attempt/observation/settlement/inbound/repair obligation/rejected delivery | 不实施；已产生的未用代码删除 |
-| successor/gate/governor/activation hold/独立 dispatcher service | 不实施；已产生的未用代码删除 |
+| async base/extensions/head/intent/state 等复杂 dispatch 草稿 | 删除 |
+| successor/gate/governor/activation hold/独立 dispatcher service | 删除 |
 
-只删除被本方案替代的招投标路径；知识库仍在使用的队列代码不因本切换顺手重构。
+只删除被本方案替代的招投标路径；知识库现有 consumer 不在本轮顺手重构，但后续新增 consumer 必须遵守平台队列方案。
 
 ## 7. 实施顺序
 
 1. 固化 [`../platform/queue-runtime.md`](../platform/queue-runtime.md) 的 Oxana 2.1.3 合同；
-2. 为六类现有 target 补齐统一 delivery 字段和受检 due/claim/heartbeat/settle 函数；
-3. 在现有 worker 中加入 bounded reconciler 和一个 `BidDeliveryV1Job` handler；
-4. 逐类切换 conversion/extraction、matching、attachment/render，并在同一改动删除旧 enqueue/recovery owner；
-5. 删除所有剩余 Bid live-recovery、private Redis correctness 和未采用的复杂 dispatch 草稿；
-6. 从空库和空 Redis/object volume 执行最终验收。
+2. 将统一 job payload 收敛为 target kind/ID/business revision，删除 delivery/recovery 字段与接口；
+3. API target 创建改为“幂等 transaction -> 单次 enqueue -> accepted/503”；
+4. 逐类切换 conversion/extraction、matching、attachment/render；successor 使用“原子创建 -> 父 job retry 重放 enqueue”；
+5. Matching staging 改为 target/job identity 幂等，不再依赖 claim/lease heartbeat；
+6. 删除全部 Bid live-recovery、reconciler、private Redis correctness 和复杂 dispatch 草稿；
+7. 从空库执行最终验收并清理所有测试容器资源。
 
 ## 8. 验收矩阵
 
-必须覆盖以下关键行为，不建立庞大的内部状态证据协议：
+1. Oxana retry、10 秒 delay、resurrection、Skip、dead queue 和 `revive_all_dead` 使用发布版原生实现；
+2. API enqueue 失败返回 `503`，同一 idempotency key 重试不重复 target 或业务 mutation；
+3. duplicate job 和旧 revision job不能重复/覆盖业务结果；
+4. 任意 final publish 都有 current/revision CAS；
+5. conversion -> extraction 与 matching -> 0..N jobs 在数据库中原子创建；
+6. child enqueue response lost/部分失败后，父 job retry 只重放相同 child unique job；
+7. matching retry复用同一target/job identity、先清旧staging再重算，TTL cleanup不enqueue；
+8. 外部调用 timeout 进入同一 Oxana retry，handler退出时无遗留子进程；
+9. `rg`、registry 和 catalog denylist 证明 live-recovery、delivery generation、due reconciler、claim/lease heartbeat、private Redis correctness 和复杂 dispatch 草稿已删除；
+10. 所有活库/Compose 测试完成后，本轮 container、volume、network 和临时 image 为零。
 
-1. target 与业务 mutation 同事务：commit 全可见，rollback 全不可见；
-2. retryable handler error 实际由 Oxana 重试，数据库不调度同 generation 的 retry；
-3. worker crash 后 Oxana resurrection 能继续处理；
-4. duplicate delivery 只有一个 claim owner和一个有效业务发布；
-5. stale generation noop；
-6. lease lost owner不能 publish，新 owner可以完成；
-7. 任意 post-claim 错误都结算，不遗留永久 running；
-8. conversion→extraction 与 matching 0..N fanout 原子；
-9. 清空整个 Redis volume 后，非 terminal target 由 reconciler 新 generation 恢复；
-10. `rg`、registry 和 catalog denylist 证明旧 live-recovery、private key依赖和复杂 dispatch 草稿已删除；
-11. 所有活库/Compose 测试完成后，本轮 container、volume、network 和临时 image 为零。
+额外静态门禁：后续任何异步 consumer 若新增 delivery attempt/generation、pending target 自动重投、queue membership、retry schedule、dead queue、resurrection、claim lease heartbeat，或读取 Oxana 私有 Redis key，直接判定为方案违规。若确有新的业务一致性需求，必须先证明它不是 Oxana transport 能力，再单独修改方案评审。
 
 验收分别报告本地测试、已提交、已推送、已部署和 runtime accepted；不得用其中一个状态代替另一个。

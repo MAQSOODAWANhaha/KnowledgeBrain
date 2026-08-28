@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import re
@@ -19,9 +20,22 @@ from docx.image.exceptions import (
     UnexpectedEndOfFileError,
     UnrecognizedImageError,
 )
+from docx.oxml.ns import qn
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
 from docreader.config import CONFIG
-from docreader.models.document import Document as DocumentModel
+from docreader.models.document import (
+    AttachmentLocator,
+    Document as DocumentModel,
+    DocumentLocator,
+    FormImageParent,
+    ImageLocator as SourceImageLocator,
+    ParagraphImageParent,
+    StructuredSourceUnit,
+    TableCellImageParent,
+    StructuredSourceUnitKind,
+)
 from docreader.parser.base_parser import BaseParser
 from docreader.utils import endecode
 
@@ -49,6 +63,261 @@ class LineData:
     content_sequence: List[Tuple[str, Any]] = field(
         default_factory=list
     )  # Sequence of content items (text/images)
+
+
+def _docx_package_image_payloads(content: bytes) -> Dict[str, str]:
+    """Return image bytes under the exact refs used by drawing locators."""
+    import base64
+
+    doc = Document(BytesIO(content))
+    payloads: Dict[str, str] = {}
+    package: Any = doc.part.package
+    if package is None:
+        return payloads
+    for part in package.parts:
+        raw = getattr(part, "blob", None)
+        content_type = str(getattr(part, "content_type", ""))
+        if not content_type.startswith("image/") or not isinstance(raw, bytes) or not raw:
+            continue
+        extension = os.path.splitext(str(getattr(part, "partname", "")))[1].lower()
+        if not extension:
+            extension = ".bin"
+        ref = f"images/{hashlib.sha256(raw).hexdigest()}{extension}"
+        payloads[ref] = base64.b64encode(raw).decode("ascii")
+    return payloads
+
+
+def _heading_level(paragraph: Paragraph) -> Optional[int]:
+    style_name = str((paragraph.style.name if paragraph.style is not None else "") or "")
+    match = re.match(r"^heading\s+(\d+)$", style_name.strip(), re.IGNORECASE)
+    return max(1, int(match.group(1))) if match else None
+
+
+def _drawing_units(
+    element,
+    doc,
+    units: List[StructuredSourceUnit],
+    image_ordinal: int,
+    compound_parent,
+) -> int:
+    """Append relationship-backed drawings with one closed compound parent."""
+    for blip in element.xpath(".//*[local-name()='blip']"):
+        relation_id = blip.get(qn("r:embed"))
+        part = doc.part.related_parts.get(relation_id) if relation_id else None
+        raw = getattr(part, "blob", None)
+        if not isinstance(raw, bytes) or not raw:
+            continue
+        try:
+            with Image.open(BytesIO(raw)) as image:
+                width, height = image.size
+                media_type = Image.MIME.get(
+                    image.format or "", getattr(part, "content_type", "")
+                )
+        except Exception:
+            continue
+        extension = os.path.splitext(str(getattr(part, "partname", "")))[1].lower()
+        if not extension:
+            extension = ".bin"
+        original_ref = f"images/{hashlib.sha256(raw).hexdigest()}{extension}"
+        units.append(
+            StructuredSourceUnit(
+                key=f"image:{image_ordinal}",
+                ordinal=len(units),
+                kind=StructuredSourceUnitKind.IMAGE_REGION,
+                text="",
+                locator=SourceImageLocator(
+                    original_ref=original_ref,
+                    width=width,
+                    height=height,
+                    media_type=media_type,
+                    compound_parent=compound_parent,
+                ),
+            )
+        )
+        image_ordinal += 1
+    return image_ordinal
+
+
+def _docx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
+    """Extract deterministic typed occurrences in one pass over the DOCX body."""
+    doc = Document(BytesIO(content))
+    units: List[StructuredSourceUnit] = []
+    heading_stack: List[str] = []
+    pending_paragraphs: List[str] = []
+    current_section: Optional[int] = None
+    next_section = 0
+    table_ordinal = 0
+    form_ordinal = 0
+    image_ordinal = 0
+    paragraph_ordinal = 0
+
+    def heading_path() -> str:
+        return " > ".join(part for part in heading_stack if part)
+
+    def flush_section(force: bool = False) -> int:
+        nonlocal current_section, next_section
+        if not pending_paragraphs and not force:
+            if current_section is None:
+                raise ValueError("DOCX structure has no owning section")
+            return current_section
+        section = next_section
+        next_section += 1
+        units.append(
+            StructuredSourceUnit(
+                key=f"section:{section}",
+                ordinal=len(units),
+                kind=StructuredSourceUnitKind.SECTION,
+                text="\n".join(pending_paragraphs),
+                locator=DocumentLocator(
+                    section_ordinal=section,
+                    heading_path=heading_path(),
+                ),
+            )
+        )
+        pending_paragraphs.clear()
+        current_section = section
+        return section
+
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            paragraph = Paragraph(child, doc)
+            text = paragraph.text.strip()
+            level = _heading_level(paragraph)
+            if level is not None and text:
+                if pending_paragraphs:
+                    flush_section()
+                heading_stack = heading_stack[: level - 1]
+                while len(heading_stack) < level - 1:
+                    heading_stack.append("")
+                heading_stack.append(text)
+                pending_paragraphs.append(text)
+                current_section = None
+            elif text:
+                pending_paragraphs.append(text)
+
+            drawings = child.xpath(".//*[local-name()='blip']")
+            if drawings:
+                section = flush_section(force=current_section is None)
+                image_ordinal = _drawing_units(
+                    element=child,
+                    doc=doc,
+                    units=units,
+                    image_ordinal=image_ordinal,
+                    compound_parent=ParagraphImageParent(
+                        section_ordinal=section,
+                        paragraph_ordinal=paragraph_ordinal,
+                    ),
+                )
+            paragraph_ordinal += 1
+            continue
+
+        if child.tag == qn("w:tbl"):
+            section = flush_section(force=current_section is None)
+            table = Table(child, doc)
+            units.append(
+                StructuredSourceUnit(
+                    key=f"table:{table_ordinal}",
+                    ordinal=len(units),
+                    kind=StructuredSourceUnitKind.TABLE_REGION,
+                    text="\n".join(
+                        " | ".join(cell.text.strip() for cell in row.cells)
+                        for row in table.rows
+                    ),
+                    locator=DocumentLocator(
+                        section_ordinal=section,
+                        table_ordinal=table_ordinal,
+                        heading_path=heading_path(),
+                    ),
+                )
+            )
+            seen_table_cells: set[int] = set()
+            for row_ordinal, row in enumerate(table.rows):
+                units.append(
+                    StructuredSourceUnit(
+                        key=f"table:{table_ordinal}:row:{row_ordinal}",
+                        ordinal=len(units),
+                        kind=StructuredSourceUnitKind.TABLE_ROW,
+                        text=" | ".join(cell.text.strip() for cell in row.cells),
+                        locator=DocumentLocator(
+                            section_ordinal=section,
+                            table_ordinal=table_ordinal,
+                            row_ordinal=row_ordinal,
+                            heading_path=heading_path(),
+                        ),
+                    )
+                )
+                for cell_ordinal, cell in enumerate(row.cells):
+                    cell_identity = id(cell._tc)
+                    if cell_identity in seen_table_cells:
+                        continue
+                    seen_table_cells.add(cell_identity)
+                    image_ordinal = _drawing_units(
+                        element=cell._tc,
+                        doc=doc,
+                        units=units,
+                        image_ordinal=image_ordinal,
+                        compound_parent=TableCellImageParent(
+                            section_ordinal=section,
+                            table_ordinal=table_ordinal,
+                            row_ordinal=row_ordinal,
+                            cell_ordinal=cell_ordinal,
+                        ),
+                    )
+            table_ordinal += 1
+            continue
+
+        if child.tag == qn("w:sdt"):
+            section = flush_section(force=current_section is None)
+            text = "".join(node.text or "" for node in child.iter(qn("w:t"))).strip()
+            units.append(
+                StructuredSourceUnit(
+                    key=f"form:{form_ordinal}",
+                    ordinal=len(units),
+                    kind=StructuredSourceUnitKind.FORM_REGION,
+                    text=text,
+                    locator=DocumentLocator(
+                        section_ordinal=section,
+                        form_ordinal=form_ordinal,
+                        heading_path=heading_path(),
+                    ),
+                )
+            )
+            image_ordinal = _drawing_units(
+                element=child,
+                doc=doc,
+                units=units,
+                image_ordinal=image_ordinal,
+                compound_parent=FormImageParent(
+                    section_ordinal=section,
+                    form_ordinal=form_ordinal,
+                ),
+            )
+            form_ordinal += 1
+
+    if pending_paragraphs:
+        flush_section()
+
+    package: Any = doc.part.package
+    if package is not None:
+        attachment_ordinal = 0
+        for part in sorted(package.parts, key=lambda item: str(item.partname)):
+            part_name = str(part.partname)
+            if "/embeddings/" not in part_name:
+                continue
+            units.append(
+                StructuredSourceUnit(
+                    key=f"attachment:{attachment_ordinal}",
+                    ordinal=len(units),
+                    kind=StructuredSourceUnitKind.ATTACHMENT_REGION,
+                    text="",
+                    locator=AttachmentLocator(
+                        part_name=part_name,
+                        relationship_type=getattr(part, "content_type", ""),
+                    ),
+                )
+            )
+            attachment_ordinal += 1
+    return units
 
 
 class DocxParser(BaseParser):
@@ -103,13 +372,13 @@ class DocxParser(BaseParser):
                 actual storage upload from Document.images.
                 """
                 import base64
-                import uuid as _uuid
+                import hashlib
 
                 try:
                     with open(local_path, "rb") as f:
                         raw = f.read()
                     ext = os.path.splitext(local_path)[1].lower() or ".png"
-                    ref = f"images/{_uuid.uuid4().hex}{ext}"
+                    ref = f"images/{hashlib.sha256(raw).hexdigest()}{ext}"
                     inline_images[ref] = base64.b64encode(raw).decode()
                     return ref
                 except Exception as exc:
@@ -181,7 +450,12 @@ class DocxParser(BaseParser):
             )
 
             image_parts.update(inline_images)
-            return DocumentModel(content=text, images=image_parts)
+            image_parts.update(_docx_package_image_payloads(content))
+            return DocumentModel(
+                content=text,
+                images=image_parts,
+                structured_source_units=_docx_structured_units(content),
+            )
         except Exception as e:
             logger.error(f"Error parsing DOCX document: {str(e)}")
             logger.error(f"Detailed stack trace: {traceback.format_exc()}")
@@ -260,7 +534,11 @@ class DocxParser(BaseParser):
                 logger.warning("No text extracted using simplified method")
                 return DocumentModel()
 
-            return DocumentModel(content=result_text)
+            return DocumentModel(
+                content=result_text,
+                images=_docx_package_image_payloads(content),
+                structured_source_units=_docx_structured_units(content),
+            )
         except Exception as backup_error:
             processing_time = time.time() - start_time
             logger.error(

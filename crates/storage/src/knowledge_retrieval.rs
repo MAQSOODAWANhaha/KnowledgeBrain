@@ -6,19 +6,23 @@
 
 use async_trait::async_trait;
 use domain::knowledge_retrieval::{
-    CompanyEvidenceRequestV1, EligibleEvidenceVersionV1, KNOWLEDGE_EVIDENCE_CONTRACT_V1,
-    KNOWLEDGE_EVIDENCE_CONTRACT_V2, KNOWLEDGE_EVIDENCE_SCHEMA_V1, KNOWLEDGE_EVIDENCE_SCHEMA_V2,
-    KnowledgeEvidenceBatchV1, KnowledgeEvidenceBatchV2, KnowledgeEvidenceHitV1,
-    KnowledgeEvidenceHitV2, KnowledgeEvidenceScopeV2, KnowledgeRetrievalError,
-    KnowledgeRetrievalPort, KnowledgeRetrievalPortV2, KnowledgeSourceTypeV2,
-    ProductEvidenceRequestV1, RetrievalPolicyIdentityV1, UTF8_BYTE_OFFSET_UNIT,
-    validate_evidence_batch, validate_evidence_batch_v2,
+    CompanyEvidenceRequestV1, EligibleEvidenceVersionV1, EmbeddingRevisionV2,
+    KNOWLEDGE_EVIDENCE_CONTRACT_V1, KNOWLEDGE_EVIDENCE_CONTRACT_V2, KNOWLEDGE_EVIDENCE_SCHEMA_V1,
+    KNOWLEDGE_EVIDENCE_SCHEMA_V2, KnowledgeEvidenceBatchV1, KnowledgeEvidenceBatchV2,
+    KnowledgeEvidenceHitV1, KnowledgeEvidenceHitV2, KnowledgeEvidenceScopeV2,
+    KnowledgeRetrievalError, KnowledgeRetrievalPort, KnowledgeRetrievalPortV2,
+    KnowledgeSourceTypeV2, ProductEvidenceRequestV1, RerankRevisionV2, RetrievalPolicyIdentityV1,
+    RetrievalPolicyV2, UTF8_BYTE_OFFSET_UNIT, validate_evidence_batch, validate_evidence_batch_v2,
 };
 use rust_decimal::{Decimal, RoundingStrategy};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
-use std::{collections::BTreeMap, collections::HashSet};
+use sqlx::{PgPool, Postgres, Row, Transaction};
+use std::{collections::BTreeMap, collections::HashSet, sync::Arc};
 use uuid::Uuid;
+
+pub(crate) mod http_v2;
+pub(crate) mod rerank_v2;
+mod semantic_v2;
 
 const ABSOLUTE_MAX_HITS: u32 = 256;
 const ABSOLUTE_MAX_CHUNK_BYTES: u32 = 1_048_576;
@@ -30,6 +34,14 @@ const V2_MAX_TOTAL_BYTES: u64 = 1_099_511_627_776;
 #[derive(Clone)]
 pub struct PostgresKnowledgeRetrievalAdapter {
     pool: PgPool,
+    semantic_runtime_v2: Option<SemanticRuntimeV2>,
+    allow_exact_only_v2_contract_tests: bool,
+}
+
+#[derive(Clone)]
+struct SemanticRuntimeV2 {
+    embedding: semantic_v2::StrictEmbeddingClientV2,
+    rerank: rerank_v2::StrictRerankClientV2,
 }
 
 struct RetrievalQuery<'a> {
@@ -59,7 +71,41 @@ fn dispatch_contract(contract_version: &str) -> Result<RetrievalContract, Knowle
 
 impl PostgresKnowledgeRetrievalAdapter {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            semantic_runtime_v2: None,
+            allow_exact_only_v2_contract_tests: false,
+        }
+    }
+
+    /// Exact-only seam for the exhaustive A/B PostgreSQL contract suite. It is
+    /// absent from normal production builds so V2 can never silently emit an
+    /// unrereanked semantic tail.
+    #[cfg(feature = "knowledge-v2-exact-contract-tests")]
+    #[doc(hidden)]
+    pub fn new_exact_only_v2_contract_tests(pool: PgPool) -> Self {
+        Self {
+            pool,
+            semantic_runtime_v2: None,
+            allow_exact_only_v2_contract_tests: true,
+        }
+    }
+
+    /// Constructs the fail-closed complete V2 adapter. Production routing is
+    /// intentionally deferred to the controlled cutover slice.
+    #[allow(dead_code)]
+    pub(crate) fn new_complete_v2(
+        pool: PgPool,
+        credentials: Arc<dyn semantic_v2::EmbeddingCredentialResolverV2>,
+    ) -> Result<Self, KnowledgeRetrievalError> {
+        Ok(Self {
+            pool,
+            semantic_runtime_v2: Some(SemanticRuntimeV2 {
+                embedding: semantic_v2::StrictEmbeddingClientV2::new(credentials.clone())?,
+                rerank: rerank_v2::StrictRerankClientV2::new(credentials)?,
+            }),
+            allow_exact_only_v2_contract_tests: false,
+        })
     }
 
     async fn retrieve(
@@ -238,6 +284,13 @@ impl ExactCandidateV2 {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ValidatedSemanticPolicyV2 {
+    pub(crate) policy: RetrievalPolicyV2,
+    pub(crate) revision: EmbeddingRevisionV2,
+    pub(crate) credential_ref: String,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ExactSelectionV2 {
     hits: Vec<ExactCandidateV2>,
@@ -400,7 +453,17 @@ impl PostgresKnowledgeRetrievalAdapter {
             selected_versions,
             policy,
         )?;
-        self.validate_supported_policy_v2(policy).await?;
+        let validated_policy = self.validate_supported_policy_v2(policy).await?;
+        let mut tx = self.pool.begin().await.map_err(database_unavailable)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await
+            .map_err(database_unavailable)?;
+        semantic_v2::lock_supported_policy_in_snapshot(&mut tx, policy, &validated_policy).await?;
+        // Lock and validate the canonical rerank identity even when C is empty.
+        // Empty C still performs no credential lookup and no provider request.
+        let (rerank_revision, rerank_credential_ref) =
+            lock_rerank_revision_v2(&mut tx, &validated_policy.policy).await?;
 
         let selected_version_ids = selected_versions.iter().copied().collect::<HashSet<_>>();
         let trusted_types = ["text", "parent_text", "image_ocr"];
@@ -423,9 +486,9 @@ impl PostgresKnowledgeRetrievalAdapter {
         .bind(workspace_kind)
         .bind(selected_versions)
         .bind(trusted_types)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
-        .map_err(|error| KnowledgeRetrievalError::Unavailable(error.to_string()))?;
+        .map_err(database_unavailable)?;
 
         let normalized_requirement = normalize_exact_v2(requirement_text);
         let mut eligible_versions = BTreeMap::new();
@@ -490,53 +553,102 @@ impl PostgresKnowledgeRetrievalAdapter {
         }
 
         let selection = select_exact_prefix_v2(candidates, policy)?;
-        let hits = selection
+        let exact_versions_truncated = selection.exact_versions_truncated;
+        let exact_hits_truncated = selection.exact_hits_truncated;
+        let mut hits: Vec<KnowledgeEvidenceHitV2> = selection
             .hits
             .into_iter()
             .enumerate()
-            .map(|(index, candidate)| {
-                let chunk_byte_length = candidate.byte_length();
-                KnowledgeEvidenceHitV2 {
-                    schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V2,
-                    document_id: candidate.document_id,
-                    source_chunk_id: candidate.source_chunk_id,
-                    product_id: candidate.product_id,
-                    product_version_id: candidate.product_version_id,
-                    workspace_kind: workspace_kind.to_string(),
-                    frozen_document_display_name: candidate.frozen_document_display_name,
-                    chunk_sha256: hex::encode(Sha256::digest(candidate.chunk_utf8.as_bytes())),
-                    chunk_utf8: candidate.chunk_utf8,
-                    chunk_byte_length,
-                    quote_start_offset: 0,
-                    quote_end_offset: chunk_byte_length,
-                    offset_unit: UTF8_BYTE_OFFSET_UNIT.to_string(),
-                    retrieval_rank: index as u32 + 1,
-                    retrieval_raw_score: "1.000000".into(),
-                    retrieval_contract_version: KNOWLEDGE_EVIDENCE_CONTRACT_V2.into(),
-                    source_type: candidate.source_type,
-                }
-            })
+            .map(|(index, candidate)| exact_candidate_hit_v2(candidate, workspace_kind, index))
             .collect();
+        let exact_prefix_hit_count = u32::try_from(hits.len()).map_err(|_| {
+            KnowledgeRetrievalError::InvalidHit(
+                "v2 exact prefix length cannot be represented".into(),
+            )
+        })?;
+        let mut semantic_hits_truncated = 0u64;
+
+        if hits.len() < policy.max_hits as usize
+            && self.semantic_runtime_v2.is_none()
+            && !self.allow_exact_only_v2_contract_tests
+        {
+            return Err(KnowledgeRetrievalError::InvalidRequest(
+                "complete knowledge-evidence-v2 semantic runtime is not configured".into(),
+            ));
+        }
+        if hits.len() < policy.max_hits as usize
+            && let Some(runtime) = &self.semantic_runtime_v2
+        {
+            let query_embedding = runtime
+                .embedding
+                .embed(requirement_text, &validated_policy)
+                .await?;
+            semantic_v2::validate_query_embedding(&query_embedding, &validated_policy.policy)?;
+            let candidates = semantic_v2::recall_in_snapshot(
+                &mut tx,
+                workspace_kind,
+                selected_versions,
+                requirement_text,
+                &validated_policy.policy,
+                &query_embedding,
+            )
+            .await?;
+            if !candidates.is_empty() {
+                let reranked = runtime
+                    .rerank
+                    .rerank(
+                        requirement_text,
+                        candidates,
+                        &validated_policy.policy,
+                        &rerank_revision,
+                        &rerank_credential_ref,
+                    )
+                    .await?;
+                semantic_hits_truncated = semantic_hits_truncated.saturating_add(
+                    append_semantic_tail_v2(&mut hits, reranked, workspace_kind, policy),
+                );
+            }
+        }
+
         let batch = KnowledgeEvidenceBatchV2 {
             schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V2,
             eligible_versions: eligible_versions.into_values().collect(),
             hits,
-            exact_versions_truncated: selection.exact_versions_truncated,
-            exact_hits_truncated: selection.exact_hits_truncated,
-            semantic_hits_truncated: 0,
+            exact_prefix_hit_count,
+            exact_versions_truncated,
+            exact_hits_truncated,
+            semantic_hits_truncated,
         };
         validate_evidence_batch_v2(workspace_kind, &batch, policy)?;
+        tx.commit().await.map_err(database_unavailable)?;
         Ok(batch)
     }
 
     async fn validate_supported_policy_v2(
         &self,
         policy: &RetrievalPolicyIdentityV1,
-    ) -> Result<(), KnowledgeRetrievalError> {
+    ) -> Result<ValidatedSemanticPolicyV2, KnowledgeRetrievalError> {
         let row = sqlx::query(
-            "SELECT contract_version,max_hits,max_chunk_bytes,max_total_bytes,support_state
-               FROM knowledge_retrieval_policies_v2
-              WHERE policy_sha256=$1",
+            "SELECT policy.canonical_policy_payload,policy.embedding_revision_sha256,
+                    policy.rerank_revision_sha256,
+                    policy.contract_version,policy.max_hits,policy.max_chunk_bytes,
+                    policy.max_total_bytes,policy.support_state,
+                    revision.revision_sha256 AS registered_revision_sha256,
+                    revision.canonical_revision_payload,revision.schema_version,
+                    revision.provider_protocol_version,revision.provider_model_identifier,
+                    revision.provider_model_revision_sha256,revision.endpoint_config_sha256,
+                    revision.endpoint_identity,revision.dimension,revision.request_config_sha256,
+                    revision.output_normalization_version,revision.credential_ref,
+                    reranker.canonical_revision_payload AS rerank_payload,
+                    reranker.credential_ref AS rerank_credential_ref
+               FROM knowledge_retrieval_policies_v2 policy
+               JOIN embedding_revisions_v2 revision
+                 ON revision.revision_sha256=policy.embedding_revision_sha256
+                AND revision.support_state='supported'
+               JOIN rerank_revisions_v2 reranker
+                 ON reranker.revision_sha256=policy.rerank_revision_sha256
+                AND reranker.support_state='supported'
+              WHERE policy.policy_sha256=$1",
         )
         .bind(&policy.policy_sha256)
         .fetch_optional(&self.pool)
@@ -547,6 +659,8 @@ impl PostgresKnowledgeRetrievalAdapter {
                 "unknown knowledge-evidence-v2 policy".into(),
             ));
         };
+        let canonical_policy_payload = row.get::<Vec<u8>, _>("canonical_policy_payload");
+        let embedding_revision_sha256 = row.get::<String, _>("embedding_revision_sha256");
         let contract_version = row.get::<String, _>("contract_version");
         let max_hits = row.get::<i64, _>("max_hits");
         let max_chunk_bytes = row.get::<i64, _>("max_chunk_bytes");
@@ -562,7 +676,110 @@ impl PostgresKnowledgeRetrievalAdapter {
                 "revoked or mismatched knowledge-evidence-v2 policy".into(),
             ));
         }
-        Ok(())
+
+        let canonical_revision_payload = row.get::<Vec<u8>, _>("canonical_revision_payload");
+        let registered_revision_sha256 = row.get::<String, _>("registered_revision_sha256");
+        let revision = serde_json::from_slice::<EmbeddingRevisionV2>(&canonical_revision_payload)
+            .map_err(|error| {
+            KnowledgeRetrievalError::InvalidRequest(format!(
+                "invalid embedding revision v2 artifact: {error}"
+            ))
+        })?;
+        revision.validate().map_err(|error| {
+            KnowledgeRetrievalError::InvalidRequest(format!(
+                "invalid embedding revision v2 artifact: {error}"
+            ))
+        })?;
+        let canonical_revision_bytes = revision.canonical_bytes().map_err(|error| {
+            KnowledgeRetrievalError::InvalidRequest(format!(
+                "invalid embedding revision v2 artifact: {error}"
+            ))
+        })?;
+        let revision_digest = revision.sha256().map_err(|error| {
+            KnowledgeRetrievalError::InvalidRequest(format!(
+                "invalid embedding revision v2 identity: {error}"
+            ))
+        })?;
+        if canonical_revision_bytes != canonical_revision_payload
+            || revision_digest != registered_revision_sha256
+            || revision_digest != embedding_revision_sha256
+            || i16::try_from(revision.schema_version).ok()
+                != Some(row.get::<i16, _>("schema_version"))
+            || revision.provider_protocol_version
+                != row.get::<String, _>("provider_protocol_version")
+            || revision.provider_model_identifier
+                != row.get::<String, _>("provider_model_identifier")
+            || revision.provider_model_revision_sha256
+                != row.get::<String, _>("provider_model_revision_sha256")
+            || revision.endpoint_config_sha256 != row.get::<String, _>("endpoint_config_sha256")
+            || revision.endpoint_identity != row.get::<String, _>("endpoint_identity")
+            || i32::try_from(revision.dimension).ok() != Some(row.get::<i32, _>("dimension"))
+            || revision.request_config_sha256 != row.get::<String, _>("request_config_sha256")
+            || revision.output_normalization_version
+                != row.get::<String, _>("output_normalization_version")
+        {
+            return Err(KnowledgeRetrievalError::InvalidRequest(
+                "non-canonical or mismatched embedding revision v2 artifact".into(),
+            ));
+        }
+
+        let artifact = serde_json::from_slice::<RetrievalPolicyV2>(&canonical_policy_payload)
+            .map_err(|error| {
+                KnowledgeRetrievalError::InvalidRequest(format!(
+                    "invalid knowledge-evidence-v2 policy artifact: {error}"
+                ))
+            })?;
+        artifact.validate().map_err(|error| {
+            KnowledgeRetrievalError::InvalidRequest(format!(
+                "invalid knowledge-evidence-v2 policy artifact: {error}"
+            ))
+        })?;
+        let canonical_bytes = artifact.canonical_bytes().map_err(|error| {
+            KnowledgeRetrievalError::InvalidRequest(format!(
+                "invalid knowledge-evidence-v2 policy artifact: {error}"
+            ))
+        })?;
+        let rerank_revision_sha256 = row.get::<String, _>("rerank_revision_sha256");
+        let rerank_payload = row.get::<Vec<u8>, _>("rerank_payload");
+        let rerank_revision =
+            serde_json::from_slice::<RerankRevisionV2>(&rerank_payload).map_err(|error| {
+                KnowledgeRetrievalError::InvalidRequest(format!(
+                    "invalid rerank revision v2 artifact: {error}"
+                ))
+            })?;
+        rerank_revision.validate().map_err(|error| {
+            KnowledgeRetrievalError::InvalidRequest(format!(
+                "invalid rerank revision v2 artifact: {error}"
+            ))
+        })?;
+        if canonical_bytes != canonical_policy_payload
+            || embedding_revision_sha256 != artifact.embedding.model_revision_sha256
+            || rerank_revision_sha256 != artifact.rerank.revision_sha256
+            || rerank_revision.sha256().ok().as_deref() != Some(rerank_revision_sha256.as_str())
+            || rerank_revision.canonical_bytes().ok().as_deref() != Some(rerank_payload.as_slice())
+            || rerank_revision.provider_model_revision_sha256
+                != artifact.rerank.model_revision_sha256
+            || rerank_revision.config_revision_sha256 != artifact.rerank.config_revision_sha256
+        {
+            return Err(KnowledgeRetrievalError::InvalidRequest(
+                "non-canonical or mismatched knowledge-evidence-v2 policy artifact".into(),
+            ));
+        }
+        let artifact_identity = artifact.request_identity().map_err(|error| {
+            KnowledgeRetrievalError::InvalidRequest(format!(
+                "invalid knowledge-evidence-v2 policy identity: {error}"
+            ))
+        })?;
+        if artifact_identity != *policy {
+            return Err(KnowledgeRetrievalError::InvalidRequest(
+                "mismatched knowledge-evidence-v2 policy artifact identity".into(),
+            ));
+        }
+        Ok(ValidatedSemanticPolicyV2 {
+            policy: artifact,
+            revision,
+            credential_ref: row.get("credential_ref"),
+        })
     }
 }
 
@@ -597,6 +814,138 @@ impl KnowledgeRetrievalPortV2 for PostgresKnowledgeRetrievalAdapter {
             }
         }
     }
+}
+
+fn exact_candidate_hit_v2(
+    candidate: ExactCandidateV2,
+    workspace_kind: &str,
+    index: usize,
+) -> KnowledgeEvidenceHitV2 {
+    let chunk_byte_length = candidate.byte_length();
+    KnowledgeEvidenceHitV2 {
+        schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V2,
+        document_id: candidate.document_id,
+        source_chunk_id: candidate.source_chunk_id,
+        product_id: candidate.product_id,
+        product_version_id: candidate.product_version_id,
+        workspace_kind: workspace_kind.to_string(),
+        frozen_document_display_name: candidate.frozen_document_display_name,
+        chunk_sha256: hex::encode(Sha256::digest(candidate.chunk_utf8.as_bytes())),
+        chunk_utf8: candidate.chunk_utf8,
+        chunk_byte_length,
+        quote_start_offset: 0,
+        quote_end_offset: chunk_byte_length,
+        offset_unit: UTF8_BYTE_OFFSET_UNIT.to_string(),
+        retrieval_rank: index as u32 + 1,
+        retrieval_raw_score: "1.000000".into(),
+        pre_rerank_rrf_rank: None,
+        retrieval_contract_version: KNOWLEDGE_EVIDENCE_CONTRACT_V2.into(),
+        source_type: candidate.source_type,
+    }
+}
+
+fn append_semantic_tail_v2(
+    hits: &mut Vec<KnowledgeEvidenceHitV2>,
+    reranked: Vec<rerank_v2::RerankedSemanticCandidateV2>,
+    workspace_kind: &str,
+    policy: &RetrievalPolicyIdentityV1,
+) -> u64 {
+    let mut truncated = 0u64;
+    let mut total_bytes = hits.iter().map(|hit| hit.chunk_byte_length).sum::<u64>();
+    for reranked_candidate in reranked {
+        let candidate = &reranked_candidate.candidate;
+        let eligible = hits.len() < policy.max_hits as usize
+            && candidate.chunk_byte_length <= u64::from(policy.max_chunk_bytes)
+            && total_bytes
+                .checked_add(candidate.chunk_byte_length)
+                .is_some_and(|required| required <= policy.max_total_bytes);
+        if !eligible {
+            truncated = truncated.saturating_add(1);
+            continue;
+        }
+        total_bytes += candidate.chunk_byte_length;
+        hits.push(semantic_candidate_hit_v2(
+            reranked_candidate,
+            workspace_kind,
+            hits.len(),
+        ));
+    }
+    truncated
+}
+
+fn semantic_candidate_hit_v2(
+    reranked: rerank_v2::RerankedSemanticCandidateV2,
+    workspace_kind: &str,
+    index: usize,
+) -> KnowledgeEvidenceHitV2 {
+    let score = reranked.fixed_score();
+    let candidate = reranked.candidate;
+    KnowledgeEvidenceHitV2 {
+        schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V2,
+        document_id: candidate.document_id,
+        source_chunk_id: candidate.source_chunk_id,
+        product_id: candidate.product_id,
+        product_version_id: candidate.product_version_id,
+        workspace_kind: workspace_kind.to_string(),
+        frozen_document_display_name: candidate.frozen_document_display_name,
+        chunk_sha256: candidate.chunk_sha256,
+        chunk_utf8: candidate.chunk_utf8,
+        chunk_byte_length: candidate.chunk_byte_length,
+        quote_start_offset: 0,
+        quote_end_offset: candidate.chunk_byte_length,
+        offset_unit: UTF8_BYTE_OFFSET_UNIT.to_string(),
+        retrieval_rank: index as u32 + 1,
+        retrieval_raw_score: score,
+        pre_rerank_rrf_rank: Some(candidate.pre_rerank_rrf_rank),
+        retrieval_contract_version: KNOWLEDGE_EVIDENCE_CONTRACT_V2.into(),
+        source_type: candidate.source_type,
+    }
+}
+
+async fn lock_rerank_revision_v2(
+    tx: &mut Transaction<'_, Postgres>,
+    policy: &RetrievalPolicyV2,
+) -> Result<(RerankRevisionV2, String), KnowledgeRetrievalError> {
+    let row = sqlx::query(
+        "SELECT canonical_revision_payload,credential_ref
+           FROM public.kb_knowledge_lock_rerank_revision_v2($1)",
+    )
+    .bind(&policy.rerank.revision_sha256)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(database_unavailable)?
+    .ok_or_else(|| {
+        KnowledgeRetrievalError::InvalidRequest("unknown or revoked rerank revision v2".into())
+    })?;
+    let payload = row.get::<Vec<u8>, _>("canonical_revision_payload");
+    let revision = serde_json::from_slice::<RerankRevisionV2>(&payload).map_err(|error| {
+        KnowledgeRetrievalError::InvalidRequest(format!(
+            "invalid rerank revision v2 artifact: {error}"
+        ))
+    })?;
+    revision.validate().map_err(|error| {
+        KnowledgeRetrievalError::InvalidRequest(format!(
+            "invalid rerank revision v2 artifact: {error}"
+        ))
+    })?;
+    if revision.canonical_bytes().map_err(|error| {
+        KnowledgeRetrievalError::InvalidRequest(format!(
+            "invalid rerank revision v2 artifact: {error}"
+        ))
+    })? != payload
+        || revision.sha256().ok().as_deref() != Some(policy.rerank.revision_sha256.as_str())
+        || revision.provider_model_revision_sha256 != policy.rerank.model_revision_sha256
+        || revision.config_revision_sha256 != policy.rerank.config_revision_sha256
+    {
+        return Err(KnowledgeRetrievalError::InvalidRequest(
+            "non-canonical or mismatched rerank revision v2 artifact".into(),
+        ));
+    }
+    Ok((revision, row.get("credential_ref")))
+}
+
+fn database_unavailable(error: sqlx::Error) -> KnowledgeRetrievalError {
+    KnowledgeRetrievalError::Unavailable(error.to_string())
 }
 
 fn validate_request_v2(
@@ -889,6 +1238,76 @@ mod tests {
         assert!(empty.hits.is_empty());
         assert_eq!(empty.exact_versions_truncated, 0);
         assert_eq!(empty.exact_hits_truncated, 0);
+    }
+
+    fn reranked_candidate(
+        id: u128,
+        content: &str,
+        rank: u32,
+    ) -> rerank_v2::RerankedSemanticCandidateV2 {
+        rerank_v2::RerankedSemanticCandidateV2 {
+            candidate: semantic_v2::SemanticCandidateV2 {
+                document_id: Uuid::from_u128(id + 100),
+                source_chunk_id: Uuid::from_u128(id),
+                product_id: Uuid::from_u128(id + 200),
+                product_version_id: Uuid::from_u128(id + 300),
+                frozen_document_display_name: "manual.pdf".into(),
+                chunk_utf8: content.into(),
+                chunk_sha256: hex::encode(Sha256::digest(content.as_bytes())),
+                chunk_byte_length: content.len() as u64,
+                source_type: KnowledgeSourceTypeV2::Text,
+                vector_rank: Some(rank),
+                keyword_rank: None,
+                exact_rrf_score: semantic_v2::ExactRationalV2 {
+                    numerator: 1,
+                    denominator: u128::from(rank + 60),
+                },
+                pre_rerank_rrf_rank: rank,
+            },
+            score_millionths: 500_000,
+        }
+    }
+
+    #[test]
+    fn semantic_tail_skips_and_counts_count_chunk_and_total_quota_excess() {
+        let mut hits = Vec::new();
+        let chunk_policy = exact_policy(3, 3, 100);
+        let truncated = append_semantic_tail_v2(
+            &mut hits,
+            vec![
+                reranked_candidate(1, "wide", 1),
+                reranked_candidate(2, "ok", 2),
+            ],
+            "product_line",
+            &chunk_policy,
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(truncated, 1);
+
+        let mut hits = Vec::new();
+        let total_policy = exact_policy(3, 10, 3);
+        let truncated = append_semantic_tail_v2(
+            &mut hits,
+            vec![
+                reranked_candidate(3, "aa", 1),
+                reranked_candidate(4, "bb", 2),
+            ],
+            "product_line",
+            &total_policy,
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(truncated, 1);
+
+        let mut hits = Vec::new();
+        let count_policy = exact_policy(1, 10, 100);
+        let truncated = append_semantic_tail_v2(
+            &mut hits,
+            vec![reranked_candidate(5, "a", 1), reranked_candidate(6, "b", 2)],
+            "product_line",
+            &count_policy,
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(truncated, 1);
     }
 
     #[test]

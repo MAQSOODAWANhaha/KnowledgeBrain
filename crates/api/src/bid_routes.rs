@@ -260,44 +260,103 @@ fn map_sql(error: sqlx::Error) -> ApiErr {
     fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", message)
 }
 
-const PDF_MEDIA_TYPE: &str = "application/pdf";
-const DOCX_MEDIA_TYPE: &str =
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-
-fn docx_structure_is_valid(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"PK\x03\x04")
-        && bytes.windows(4).any(|window| window == b"PK\x01\x02")
-        && bytes.windows(4).any(|window| window == b"PK\x05\x06")
-        && bytes
-            .windows(b"[Content_Types].xml".len())
-            .any(|window| window == b"[Content_Types].xml")
-        && bytes
-            .windows(b"word/document.xml".len())
-            .any(|window| window == b"word/document.xml")
+enum BidApiErr {
+    Shared(ApiErr),
+    QueueUnavailable {
+        target_kind: runtime::BidDeliveryTargetKind,
+        target_id: Uuid,
+        target_revision: i64,
+        error: String,
+    },
 }
 
-fn tender_document_media_type(bytes: &[u8]) -> Result<&'static str, &'static str> {
-    if bytes.starts_with(b"%PDF-") {
-        let Some(eof_offset) = bytes
-            .windows(b"%%EOF".len())
-            .rposition(|window| window == b"%%EOF")
-        else {
-            return Err("TENDER_PDF_STRUCTURE_INVALID");
-        };
-        if bytes[eof_offset + b"%%EOF".len()..]
-            .iter()
-            .any(|byte| !byte.is_ascii_whitespace())
-        {
-            return Err("TENDER_PDF_STRUCTURE_INVALID");
+impl From<ApiErr> for BidApiErr {
+    fn from(error: ApiErr) -> Self {
+        Self::Shared(error)
+    }
+}
+
+impl IntoResponse for BidApiErr {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Shared(error) => error.into_response(),
+            Self::QueueUnavailable {
+                target_kind,
+                target_id,
+                target_revision,
+                error,
+            } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": {
+                        "code": "QUEUE_UNAVAILABLE",
+                        "message": error,
+                        "target_kind": target_kind.as_str(),
+                        "target_id": target_id,
+                        "target_revision": target_revision,
+                        "retry_same_idempotency_key": true
+                    }
+                })),
+            )
+                .into_response(),
         }
-        return Ok(PDF_MEDIA_TYPE);
     }
-    if bytes.starts_with(b"PK\x03\x04") {
-        return docx_structure_is_valid(bytes)
-            .then_some(DOCX_MEDIA_TYPE)
-            .ok_or("TENDER_DOCX_STRUCTURE_INVALID");
+}
+
+async fn enqueue_bid_target(
+    target_kind: runtime::BidDeliveryTargetKind,
+    target_id: Uuid,
+    target_revision: i64,
+) -> Result<String, BidApiErr> {
+    let storage = runtime::connect().map_err(|error| BidApiErr::QueueUnavailable {
+        target_kind,
+        target_id,
+        target_revision,
+        error: error.to_string(),
+    })?;
+    match runtime::BidDeliveryEnqueuer::new(storage)
+        .enqueue(target_kind, target_id, target_revision)
+        .await
+    {
+        runtime::BidDeliveryEnqueueOutcome::Accepted { job_id } => Ok(job_id),
+        runtime::BidDeliveryEnqueueOutcome::Indeterminate { error } => {
+            Err(BidApiErr::QueueUnavailable {
+                target_kind,
+                target_id,
+                target_revision,
+                error,
+            })
+        }
     }
-    Err("TENDER_DOCUMENT_TYPE_INVALID")
+}
+
+fn target_identity(
+    receipt: &Value,
+    id_field: &str,
+    revision_field: &str,
+) -> Result<(Uuid, i64), BidApiErr> {
+    let target_id = receipt
+        .get(id_field)
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "BID_TARGET_IDENTITY_INVALID",
+                format!("receipt is missing {id_field}"),
+            )
+        })?;
+    let target_revision = receipt
+        .get(revision_field)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| {
+            fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "BID_TARGET_IDENTITY_INVALID",
+                format!("receipt is missing {revision_field}"),
+            )
+        })?;
+    Ok((target_id, target_revision))
 }
 
 async fn validate_uploaded_bytes(
@@ -350,62 +409,6 @@ async fn abandon_staged_upload(pool: &sqlx::PgPool, staging_id: Uuid, actor: &st
     if let Err(error) = storage::abandon_object_upload(pool, staging_id, actor).await {
         tracing::error!(%error, %staging_id, "failed to abandon object upload staging");
     }
-}
-
-async fn enqueue_bid_conversion(
-    pool: &sqlx::PgPool,
-    document_id: Uuid,
-) -> Result<Option<String>, String> {
-    let snapshots = storage::bid_recovery::conversion_snapshots(pool, document_id)
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("document {document_id} snapshot intent is missing"))?;
-    runtime::enqueue_bid_convert_with_snapshots(
-        document_id,
-        runtime::BidConversionV1Snapshots {
-            conversion_snapshot_id: snapshots.conversion_snapshot_id,
-            feature_snapshot_id: snapshots.feature_snapshot_id,
-        },
-    )
-    .await
-}
-
-async fn enqueue_attachment_preparation(
-    pool: &sqlx::PgPool,
-    preparation_job_id: Uuid,
-) -> Result<Option<String>, String> {
-    let snapshots =
-        storage::bid_recovery::attachment_preparation_snapshots(pool, preparation_job_id)
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| {
-                format!("attachment preparation {preparation_job_id} snapshot intent is missing")
-            })?;
-    runtime::enqueue_bid_prepare_attachment_v1_with_snapshots(
-        preparation_job_id,
-        runtime::BidConversionV1Snapshots {
-            conversion_snapshot_id: snapshots.conversion_snapshot_id,
-            feature_snapshot_id: snapshots.feature_snapshot_id,
-        },
-    )
-    .await
-}
-
-async fn enqueue_submission_render(
-    pool: &sqlx::PgPool,
-    render_job_id: Uuid,
-) -> Result<Option<String>, String> {
-    let snapshots = storage::bid_recovery::submission_render_snapshots(pool, render_job_id)
-        .await
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("submission render {render_job_id} snapshot intent is missing"))?;
-    runtime::enqueue_bid_render_submission_v1_with_snapshots(
-        render_job_id,
-        runtime::BidRenderSubmissionV1Snapshots {
-            submission_render_job_snapshot_id: snapshots.submission_render_job_snapshot_id,
-        },
-    )
-    .await
 }
 
 async fn require_open(pool: &sqlx::PgPool, id: Uuid) -> Result<storage::bidding::Project, ApiErr> {
@@ -647,17 +650,19 @@ async fn upload_document(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<Value>), ApiErr> {
+) -> Result<(StatusCode, Json<Value>), BidApiErr> {
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
     let mut file_name = String::from("tender.pdf");
+    let mut declared_media_type = None;
     let mut bytes = Vec::new();
     while let Ok(Some(field)) = multipart.next_field().await {
         if field.name() == Some("file") {
             if let Some(name) = field.file_name() {
                 file_name = name.to_string();
             }
+            declared_media_type = field.content_type().map(ToString::to_string);
             bytes = field
                 .bytes()
                 .await
@@ -666,9 +671,15 @@ async fn upload_document(
         }
     }
     if bytes.is_empty() {
-        return Err(validation("file required"));
+        return Err(validation("file required").into());
     }
-    let media_type = tender_document_media_type(&bytes).map_err(validation)?;
+    let validated = bid::tender_upload::validate_tender_upload(
+        &file_name,
+        declared_media_type.as_deref(),
+        &bytes,
+    )
+    .map_err(|error| validation(&error.to_string()))?;
+    let media_type = validated.media_type;
     let actor = durable_human_actor(&actor)?;
     let digest = domain::sha256_hex(&bytes);
     let object_ref = storage::object_ref(&digest);
@@ -716,9 +727,13 @@ async fn upload_document(
         abandon_staged_upload(&pool, staging_id, &actor).await;
     }
     let created = created.map_err(map_sql)?;
-    if let Err(error) = enqueue_bid_conversion(&pool, document_id).await {
-        tracing::warn!(%document_id, %error, "bid conversion enqueue failed; durable intent remains pending");
-    }
+    let (target_id, target_revision) = target_identity(&created, "id", "conversion_generation")?;
+    enqueue_bid_target(
+        runtime::BidDeliveryTargetKind::DocumentConversion,
+        target_id,
+        target_revision,
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -732,7 +747,7 @@ async fn retry_document(
     headers: HeaderMap,
     Path((id, did)): Path<(Uuid, Uuid)>,
     Json(body): Json<RetryDoc>,
-) -> Result<Json<Value>, ApiErr> {
+) -> Result<(StatusCode, Json<Value>), BidApiErr> {
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
@@ -751,10 +766,15 @@ async fn retry_document(
     )
     .await
     .map_err(map_sql)?;
-    if let Err(error) = enqueue_bid_conversion(&pool, did).await {
-        tracing::warn!(document_id = %did, %error, "bid conversion retry enqueue failed; durable intent remains pending");
-    }
-    Ok(Json(result))
+    let (target_id, target_revision) =
+        target_identity(&result, "document_id", "conversion_generation")?;
+    enqueue_bid_target(
+        runtime::BidDeliveryTargetKind::DocumentConversion,
+        target_id,
+        target_revision,
+    )
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(result)))
 }
 
 async fn list_clauses(
@@ -946,21 +966,36 @@ async fn schedule_match(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<Value>, ApiErr> {
+) -> Result<(StatusCode, Json<Value>), BidApiErr> {
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
-    let job = bid::schedule_dirty_and_enqueue(
-        &pool,
-        id,
-        storage::bid_matching::ScheduleMutationContext::human(
-            durable_human_actor(&actor)?,
-            required_idempotency_key(&headers)?,
-        ),
+    let payload = json!({ "schema_version": 1, "project_id": id });
+    let context = storage::bidding::MutationContext::new(
+        durable_human_actor(&actor)?,
+        required_idempotency_key(&headers)?,
+        &payload,
     )
-    .await
-    .map_err(|error| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", error))?;
-    Ok(Json(json!({ "job_id": job })))
+    .map_err(|error| validation(&error.to_string()))?;
+    let target = storage::bid_matching::bind_schedule_target(&pool, id, &context)
+        .await
+        .map_err(map_sql)?;
+    let Some(target) = target else {
+        return Ok((StatusCode::OK, Json(json!({ "job_id": null }))));
+    };
+    enqueue_bid_target(
+        runtime::BidDeliveryTargetKind::MatchingSchedule,
+        target.id,
+        target.mutation_watermark,
+    )
+    .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "job_id": target.id,
+            "target_revision": target.mutation_watermark
+        })),
+    ))
 }
 
 async fn get_matching(
@@ -1611,7 +1646,7 @@ async fn upload_attachment(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<Value>), ApiErr> {
+) -> Result<(StatusCode, Json<Value>), BidApiErr> {
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
@@ -1631,7 +1666,7 @@ async fn upload_attachment(
         }
     }
     if bytes.is_empty() || kind.is_empty() {
-        return Err(validation("kind and file required"));
+        return Err(validation("kind and file required").into());
     }
     let (bytes, metadata) = validate_uploaded_bytes(bytes, true).await?;
     let actor = durable_human_actor(&actor)?;
@@ -1679,20 +1714,26 @@ async fn upload_attachment(
         abandon_staged_upload(&pool, staging_id, &actor).await;
     }
     let uploaded = uploaded.map_err(map_sql)?;
-    if let Some(preparation_job_id) = uploaded
+    let status = if uploaded
         .get("preparation_job_id")
-        .and_then(Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok())
+        .is_some_and(|value| !value.is_null())
     {
-        match enqueue_attachment_preparation(&pool, preparation_job_id).await {
-            Ok(Some(_)) => {}
-            Ok(None) => tracing::warn!(%preparation_job_id,
-                "attachment preparation queue unavailable; durable job remains pending"),
-            Err(error) => tracing::warn!(%preparation_job_id,%error,
-                "attachment preparation enqueue failed; durable job remains pending"),
-        }
-    }
-    Ok((StatusCode::CREATED, Json(uploaded)))
+        let (target_id, target_revision) = target_identity(
+            &uploaded,
+            "preparation_job_id",
+            "preparation_target_revision",
+        )?;
+        enqueue_bid_target(
+            runtime::BidDeliveryTargetKind::AttachmentPreparation,
+            target_id,
+            target_revision,
+        )
+        .await?;
+        StatusCode::CREATED
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(uploaded)))
 }
 
 #[derive(Deserialize, Serialize)]
@@ -2066,7 +2107,7 @@ async fn render_manifest(
     headers: HeaderMap,
     Path((id, mid)): Path<(Uuid, Uuid)>,
     Json(body): Json<RenderBody>,
-) -> Result<(StatusCode, Json<Value>), ApiErr> {
+) -> Result<(StatusCode, Json<Value>), BidApiErr> {
     let actor = actor_from(&headers, &state).await?;
     let pool = require_bid_pool().await?;
     require_open(&pool, id).await?;
@@ -2082,19 +2123,21 @@ async fn render_manifest(
             StatusCode::CONFLICT,
             "MANIFEST_SHA256_MISMATCH",
             "manifest identity changed",
-        ));
+        )
+        .into());
     }
     let format = match input.get("format").and_then(Value::as_str) {
         Some("pdf") => bid::submission::GateFormat::Pdf,
         Some("docx") => bid::submission::GateFormat::Docx,
-        _ => return Err(validation("invalid manifest format")),
+        _ => return Err(validation("invalid manifest format").into()),
     };
     if input.get("renderer_contract") != Some(&bid::renderer_contract_identity(format)) {
         return Err(fail(
             StatusCode::CONFLICT,
             "RENDERER_CONTRACT_MISMATCH",
             "manifest renderer contract differs from the running binary",
-        ));
+        )
+        .into());
     }
     let context = storage::bidding::MutationContext::new(actor, idempotency_key, &body)
         .map_err(|error| validation(&error.to_string()))?;
@@ -2119,15 +2162,13 @@ async fn render_manifest(
                 "durable render job did not return an id",
             )
         })?;
-    match enqueue_submission_render(&pool, render_job_id).await {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            tracing::warn!(%render_job_id, "render queue unavailable; durable job remains pending")
-        }
-        Err(error) => {
-            tracing::warn!(%render_job_id, %error, "render enqueue failed; durable job remains pending")
-        }
-    }
+    let (_, target_revision) = target_identity(&scheduled, "render_job_id", "target_revision")?;
+    enqueue_bid_target(
+        runtime::BidDeliveryTargetKind::SubmissionRender,
+        render_job_id,
+        target_revision,
+    )
+    .await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({
@@ -2417,78 +2458,6 @@ async fn promote_template_contract(
 mod tests {
     use super::*;
 
-    fn stored_zip(names: &[&str]) -> Vec<u8> {
-        let mut output = Vec::new();
-        let mut central_entries = Vec::new();
-        for name in names {
-            let name = name.as_bytes();
-            let local_offset = output.len() as u32;
-            output.extend_from_slice(b"PK\x03\x04");
-            output.extend_from_slice(&20u16.to_le_bytes());
-            output.extend_from_slice(&[0; 20]);
-            output.extend_from_slice(&(name.len() as u16).to_le_bytes());
-            output.extend_from_slice(&0u16.to_le_bytes());
-            output.extend_from_slice(name);
-
-            let mut central = Vec::new();
-            central.extend_from_slice(b"PK\x01\x02");
-            central.extend_from_slice(&20u16.to_le_bytes());
-            central.extend_from_slice(&20u16.to_le_bytes());
-            central.extend_from_slice(&[0; 20]);
-            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
-            central.extend_from_slice(&[0; 12]);
-            central.extend_from_slice(&local_offset.to_le_bytes());
-            central.extend_from_slice(name);
-            central_entries.push(central);
-        }
-        let central_offset = output.len() as u32;
-        for entry in central_entries {
-            output.extend_from_slice(&entry);
-        }
-        let central_size = output.len() as u32 - central_offset;
-        output.extend_from_slice(b"PK\x05\x06");
-        output.extend_from_slice(&0u16.to_le_bytes());
-        output.extend_from_slice(&0u16.to_le_bytes());
-        output.extend_from_slice(&(names.len() as u16).to_le_bytes());
-        output.extend_from_slice(&(names.len() as u16).to_le_bytes());
-        output.extend_from_slice(&central_size.to_le_bytes());
-        output.extend_from_slice(&central_offset.to_le_bytes());
-        output.extend_from_slice(&0u16.to_le_bytes());
-        output
-    }
-
-    #[test]
-    fn tender_document_media_type_rejects_unrecognized_bytes() {
-        assert_eq!(
-            tender_document_media_type(b"not a PDF or DOCX"),
-            Err("TENDER_DOCUMENT_TYPE_INVALID")
-        );
-    }
-
-    #[test]
-    fn tender_document_media_type_accepts_pdf_and_docx() {
-        assert_eq!(
-            tender_document_media_type(b"%PDF-1.7\n%%EOF\n"),
-            Ok(PDF_MEDIA_TYPE)
-        );
-        assert_eq!(
-            tender_document_media_type(&stored_zip(&["[Content_Types].xml", "word/document.xml"])),
-            Ok(DOCX_MEDIA_TYPE)
-        );
-    }
-
-    #[test]
-    fn tender_document_media_type_rejects_invalid_pdf_and_non_docx_zip() {
-        assert_eq!(
-            tender_document_media_type(b"%PDF-1.7\n%%EOF\ntrailing"),
-            Err("TENDER_PDF_STRUCTURE_INVALID")
-        );
-        assert_eq!(
-            tender_document_media_type(&stored_zip(&["[Content_Types].xml", "xl/workbook.xml"])),
-            Err("TENDER_DOCX_STRUCTURE_INVALID")
-        );
-    }
-
     #[test]
     fn bid_project_path_identity_is_fail_closed() {
         let project_id = Uuid::new_v4();
@@ -2562,6 +2531,27 @@ mod tests {
             let response = map_sql(sqlx::Error::Protocol(code.into())).into_response();
             assert_eq!(response.status(), expected_status, "{code}");
         }
+    }
+
+    #[tokio::test]
+    async fn queue_unavailable_response_preserves_retry_identity() {
+        let target_id = Uuid::new_v4();
+        let response = BidApiErr::QueueUnavailable {
+            target_kind: runtime::BidDeliveryTargetKind::SubmissionRender,
+            target_id,
+            target_revision: 1,
+            error: "redis unavailable".into(),
+        }
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("queue unavailable response body");
+        let body: Value = serde_json::from_slice(&bytes).expect("queue unavailable JSON");
+        assert_eq!(body["error"]["code"], "QUEUE_UNAVAILABLE");
+        assert_eq!(body["error"]["target_id"], target_id.to_string());
+        assert_eq!(body["error"]["target_revision"], 1);
+        assert_eq!(body["error"]["retry_same_idempotency_key"], true);
     }
 
     #[test]

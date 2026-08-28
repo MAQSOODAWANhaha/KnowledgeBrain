@@ -1,13 +1,15 @@
-# 招投标实施与验收
+# 招投标实施与验收（Legacy V1验收快照）
 
-本文记录最终 V1 的实施顺序、删除范围和验收标准。目标环境是 fresh redeploy，不保留历史兼容逻辑。
+> Target V2分阶段实施和最终验收只以[`tender-to-submission-v2.md`](tender-to-submission-v2.md)为准，目标契约见[`../../docs/platform/tender-to-submission-authoring.md`](../../docs/platform/tender-to-submission-authoring.md)。本文保留V1命令、表名和门禁仅供删除扫描与历史证据定位，不得用于判定Target V2完成。
+
+本文记录V1的实施顺序、删除范围和验收快照。
 
 ## 0. 当前边界
 
 | 层次 | 当前状态 |
 | --- | --- |
-| 方案 | 已批准并固化；队列/恢复使用 Oxana 2.1.3 加最小 PostgreSQL fencing |
-| implemented | 部分；产品主链和旧 transport seam已有实现，简化后的 durable dispatch 尚未按本方案完成 |
+| 方案 | 产品基线与 Oxana 原生能力简化方案均已批准；当前代码尚未按简化方案完成收敛 |
+| implemented | 部分；产品主链和旧 transport seam已有实现，Oxana原生能力简化方案尚未完成 |
 | locally verified | 部分；历史局部测试不能代替本轮简化方案和最终全量门禁 |
 | committed/pushed | 当前分支和 dirty 状态以 Git 实际输出为准；本轮方案未提交、未 push |
 | deployed | 否 |
@@ -22,7 +24,7 @@
 1. 空 PostgreSQL、Redis 和 object volume 可一次建立完整系统；
 2. 最终 schema 没有旧投标表、兼容 view、alias、runtime repair 或历史回填；
 3. API、Web 和 worker 只使用最终接口；
-4. 六类异步 target 由 Oxana 负责 retry/resurrection，由 PostgreSQL 负责业务 fencing；
+4. 六类异步 target 由 Oxana 负责 retry/resurrection/dead queue，由 PostgreSQL 只负责业务revision与幂等publish；
 5. 所有旧 best-effort enqueue、`system:live-recovery:v1` 和 Bid private Redis correctness 路径已删除；
 6. 单元、活库、HTTP、Web、Compose 和 runtime 验收均通过且无静默 skip；
 7. 正式 DOCX/PDF 可由 manifest、artifact hash、ObjectRegistry owner 和 audit 证明来源；
@@ -53,7 +55,7 @@ bidding_v1_baseline.sql
 ### 3.1 TenderPublication / ClauseLifecycle
 
 - document、converted source、section 和 SourceSpanV2；
-- conversion/extraction target、claim、heartbeat、attempt 和原子 publication；
+- conversion/extraction target、business generation/revision 和原子 publication；
 - fact suggestion/decision/current fact；
 - clause kind/family/status、origin/current span；
 - KindRouter artifact/current/promotion marker；
@@ -65,11 +67,11 @@ bidding_v1_baseline.sql
 
 - frozen manifest/routes/eligible scope/requirements；
 - knowledge scope attestation、EvidenceV1、decision/report canonical artifact；
-- matching job claim/heartbeat/lease、staging 和原子 publish；
+- matching job target/job identity、staging 和原子 publish；
 - current technical/commercial projections；
 - RoutePickSet/ProjectPickSet revision与 current pointer。
 
-关键验收：eligible scope 与 hit quota 解耦、普通和 unsectioned 混合、lease/staging failure、两个不同 pick 持久化、连续 pick 使用最新 revision或串行 mutation，不因共享旧 revision丢第二次选择。
+关键验收：eligible scope 与 hit quota 解耦、普通和 unsectioned 混合、staging failure/TTL cleanup/Oxana retry、两个不同 pick 持久化、连续 pick 使用最新 revision或串行 mutation，不因共享旧 revision丢第二次选择。
 
 ### 3.3 Quote
 
@@ -104,7 +106,7 @@ attachment_preparation
 submission_render
 ```
 
-统一遵循 [`durable-dispatch.md`](durable-dispatch.md)：现有 target 增加最小 delivery 字段；Oxana 原生 retry/resurrection；worker 内 bounded reconciler；generation/token/lease fenced publish；不建立第二套队列状态机。
+统一遵循 [`durable-dispatch.md`](durable-dispatch.md)：job只携带target kind/ID/business revision；Oxana原生处理retry/resurrection/dead queue；PostgreSQL只做current/revision fenced publish；不建立reconciler、claim/lease或第二套队列状态机。
 
 ## 4. 删除矩阵
 
@@ -113,12 +115,13 @@ submission_render
 | 旧内容 | 最终处理 |
 | --- | --- |
 | 旧 bid 增量 migration、backfill、runtime repair DDL | 删除，使用 fresh baseline |
-| commit 后 `enqueue_bid_*` best-effort 调用 | 删除，target 本身是 durable intent |
+| commit 后忽略错误的 `enqueue_bid_*` | 改为accepted后返回`202`、unavailable返回可重试`503`/`Err` |
 | `system:live-recovery:v1` envelope/claim/handler | 删除 |
-| dirty-manifest/orphan-target/orphan-match 泛化 recovery | 删除，使用 bounded due reconciler |
+| dirty-manifest/orphan-target/orphan-match 泛化 recovery | 删除，不替换为另一套扫描恢复 |
 | Bid 对 `oxanus:*`、hostname/PID replay 的 correctness 依赖 | 删除 |
 | async base/extensions/head/dispatch intent/state 草稿 | 删除或不实施 |
 | delivery attempt/observation/settlement/successor/governor 草稿 | 删除或不实施 |
+| delivery generation/next enqueue/claim/lease/heartbeat/reaper | 删除或不实施 |
 | 独立 bid-dispatcher service/role/DSN/activation hold 草稿 | 删除或不实施 |
 | direct extraction persist façade | 删除，使用 TenderPublication publisher |
 | live knowledge/document fallback | 删除，使用 frozen evidence/source artifact |
@@ -153,12 +156,12 @@ PR0 只修改文档。用户确认前不开始后续代码。
 - 完成 facts、clauses、KindRouter和 promotion；
 - 修复标题、金额、程序编号 splitter等 parser边界。
 
-验证：`tender_publication` 进入 mandatory 活库测试，包含慢转换 heartbeat、所有 post-claim error结算和 conversion→extraction 原子性。
+验证：`tender_publication` 进入 mandatory 活库测试，包含慢转换时Oxana进程heartbeat/resurrection、retryable error交给Oxana以及conversion→extraction原子创建/幂等enqueue。
 
 ### PR3 — Matching
 
 - 完成 scope/attestation/evidence/report；
-- 完成 lease/staging/atomic publish和 picks；
+- 完成 target identity/staging/atomic publish和 picks；
 - 删除旧 fallback和 rebuild decision。
 
 验证：0 hit/大 scope、混合 route、失败恢复、两个不同 pick 持久化和并发 CAS。
@@ -192,19 +195,21 @@ PR0 只修改文档。用户确认前不开始后续代码。
 - 锁定 crates.io Oxana 2.1.3 和 `Cargo.lock`；
 - worker 固定 `max_retries=3,retry_delay=10s,resurrect=true`；
 - 注册一个 `bid:delivery:v1` typed job；
-- 不读取私有 Redis key，不包装第二套 retry。
+- 使用Oxana dead queue与oxana-web `revive_all_dead`；
+- 不读取私有 Redis key，不包装第二套 retry/recovery。
 
-验证：活 Redis retry、delay、Skip、resurrection和 shutdown cleanup。
+验证：活 Redis retry、delay、Skip、resurrection、dead/`revive_all_dead`和 shutdown cleanup。
 
-### PR8 — 最小 durable dispatch 与旧逻辑删除
+### PR8 — 最小业务投递与旧逻辑删除
 
-- 六类 target 补齐 delivery generation/next enqueue字段；
-- 实现 due reserve、claim、heartbeat、settle和 worker内 reconciler；
+- 六类 target只保留business generation/revision、result与bounded error；
+- 实现幂等target transaction、单次enqueue、accepted/结构化503（稳定target ID+同key重试）和current/revision fenced publish；
 - conversion/extraction、matching、attachment/render逐类切换；
+- successor transaction后enqueue失败由父Oxana job重试重放；
 - 每切一类就在同一改动删除该类旧 enqueue/recovery owner；
-- 最后删除全部 Bid live-recovery、private Redis correctness和未采用的复杂 dispatch草稿。
+- 最后删除全部 Bid live-recovery、due reconciler、claim/lease heartbeat、private Redis correctness和未采用的复杂 dispatch草稿。
 
-验证：[`durable-dispatch.md`](durable-dispatch.md) 第 8 节十一项行为全部通过。
+验证：[`durable-dispatch.md`](durable-dispatch.md) 第 8 节十项行为全部通过。
 
 ### PR9 — Fresh runtime 验收
 
@@ -247,8 +252,9 @@ scripts/bid_durable_dispatch_acceptance.sh
 scripts/verify_oxana_registry_source.sh
 cargo test --locked -p runtime jobs::tests -- --nocapture
 cargo test --locked -p runtime --test work_transport_live -- --nocapture --test-threads=1
-cargo test --locked -p bid --test durable_dispatch_sql -- --nocapture --test-threads=1
-cargo test --locked -p worker --test durable_dispatch_worker -- --nocapture --test-threads=1
+cargo test --locked -p bid --test durable_delivery_sql -- --nocapture --test-threads=1
+cargo test --locked -p api --test bid_queue_contract -- --nocapture --test-threads=1
+cargo test --locked -p worker bid_delivery -- --nocapture
 cargo test --locked -p bid --test tender_publication -- --nocapture --test-threads=1
 cargo test --locked -p bid --test matching_publication -- --nocapture --test-threads=1
 cargo test --locked -p bid --test submission_sql -- --nocapture --test-threads=1
@@ -257,6 +263,8 @@ scripts/bidding_v1_deletion_scan.sh
 ```
 
 任一数据库/Redis不可用、测试文件不存在、零用例、`SKIP/SKIPPED` 或缺少预期结果都使 job失败。
+`bid_queue_contract` 必须覆盖 API enqueue失败后的 `503 QUEUE_UNAVAILABLE`，并证明同一
+idempotency key在业务 watermark变化后仍返回首次冻结的 target identity；新 key才可绑定新 target。
 
 ### 6.3 `bid-v1-fresh-runtime`
 
@@ -292,12 +300,12 @@ scripts/compose_first_launch_acceptance.sh
 1. retryable handler error由 Oxana 重试；
 2. worker process crash后 resurrection；
 3. duplicate delivery幂等；
-4. stale generation noop；
-5. lease lost owner不能 publish；
-6. Redis response lost/flush/整个 volume丢失后 target最终恢复；
-7. post-claim conversion/render error被结算，不遗留 running或 orphan artifact。
+4. stale business revision noop；
+5. API enqueue失败返回503，同幂等key重试相同target；
+6. successor enqueue response lost/部分失败后只重放相同child job；
+7. retry耗尽进入Oxana dead queue并可由oxana-web `revive_all_dead`，且保留原retry count。
 
-每个场景只保存必要证据：输入 target ID/generation、注入点、最终 target状态、有效发布次数、关键 artifact hash和 cleanup结果。不为内部队列 phase建立复杂证据 schema。
+每个场景只保存必要证据：输入 target ID/revision、注入点、最终 target状态、有效发布次数、关键 artifact hash和 cleanup结果。不为内部队列 phase建立复杂证据 schema。
 
 ## 8. 证据与清理
 

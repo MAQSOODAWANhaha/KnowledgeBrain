@@ -17,16 +17,34 @@ type Props = {
   className?: string;
 };
 
-export function Shell({ root, email, crumbs, title, extra, lead, steps, find = true, tree, inspector, children, className }: Props) {
+export function Shell({
+  root,
+  email,
+  crumbs,
+  title,
+  extra,
+  lead,
+  steps,
+  find = true,
+  tree,
+  inspector,
+  children,
+  className,
+}: Props) {
   const [menu, setMenu] = useState(false);
-  const initial = !email || email.startsWith("dev@") ? "张" : email.slice(0, 1).toUpperCase();
+  const initial =
+    !email || email.startsWith("dev@") ? "张" : email.slice(0, 1).toUpperCase();
   const wide = tree == null;
   return (
     <div className={`app${wide ? " no-side" : ""}`}>
       <header className="pnav">
         <div className="pnav-left" style={{ position: "relative" }}>
           <div className="mark">KB</div>
-          <button className="acct" type="button" onClick={() => setMenu((v) => !v)}>
+          <button
+            className="acct"
+            type="button"
+            onClick={() => setMenu((v) => !v)}
+          >
             <em>{email || "dev@local"}</em>
             <svg viewBox="0 0 24 24">
               <path d="M6 9l6 6 6-6" />
@@ -57,7 +75,10 @@ export function Shell({ root, email, crumbs, title, extra, lead, steps, find = t
               </svg>
               投标项目
             </a>
-            <a className={root === "assets" ? "on" : undefined} href="#/library">
+            <a
+              className={root === "assets" ? "on" : undefined}
+              href="#/library"
+            >
               <svg viewBox="0 0 24 24">
                 <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
               </svg>
@@ -114,26 +135,4 @@ export function Shell({ root, email, crumbs, title, extra, lead, steps, find = t
       </div>
     </div>
   );
-}
-
-export function StageLine({
-  derived,
-}: {
-  derived: {
-    has_files: boolean;
-    files_ready: boolean;
-    extract_running: boolean;
-    unconfirmed_drafts: number;
-    match_running: boolean;
-    has_picks: boolean;
-  };
-}) {
-  let label = "待上传招标文件";
-  if (derived.extract_running) label = "正在抽条款";
-  else if (derived.match_running) label = "正在匹配产品";
-  else if (derived.unconfirmed_drafts > 0) label = `${derived.unconfirmed_drafts} 条待确认`;
-  else if (derived.has_files && !derived.files_ready) label = "文件解析中";
-  else if (derived.has_picks) label = "已勾选产品，可预览";
-  else if (derived.files_ready) label = "待审条款";
-  return <span className="note" style={{ margin: 0 }}>{label}</span>;
 }

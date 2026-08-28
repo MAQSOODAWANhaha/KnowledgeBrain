@@ -40,6 +40,18 @@ capabilities = ["postgresql", "embedding", "index"]
 launch_mode = "required_enabled"
 
 [[entries]]
+physical_queue = "postprocess"
+task_type = "knowledge:semantic_index:v2"
+payload_schema = "knowledge-semantic-index/v2"
+payload_version = 1
+identity_formula = "knowledge:semantic_index:v2:{target_id}:{target_revision}"
+protocol = 1
+handler = "KnowledgeSemanticIndexV2Handler"
+snapshots = ["semantic_source_generation", "embedding_binding"]
+capabilities = ["postgresql", "embedding", "index"]
+launch_mode = "required_enabled"
+
+[[entries]]
 physical_queue = "summary"
 task_type = "summary:generation"
 payload_schema = "summary/v1"
@@ -196,73 +208,13 @@ capabilities = ["postgresql", "redis"]
 launch_mode = "maintenance_only"
 
 [[entries]]
-physical_queue = "low"
-task_type = "system:live-recovery:v1"
-payload_schema = "live-recovery/v1"
+physical_queue = "bid-delivery-v1"
+task_type = "bid:delivery:v1"
+payload_schema = "bid-delivery/v1"
 payload_version = 1
-identity_formula = "system:live-recovery:v1:{recovery_kind}:{durable_id}:{generation}:{recovery_epoch}"
+identity_formula = "{target_kind}:{target_id}:{target_revision}"
 protocol = 1
-handler = "LiveRecoveryV1Handler"
-snapshots = ["recovery_policy", "feature"]
-capabilities = ["postgresql", "redis"]
-launch_mode = "required_enabled"
-
-[[entries]]
-physical_queue = "bid-convert-v1"
-task_type = "bid:convert"
-payload_schema = "bid-convert/v1"
-payload_version = 1
-identity_formula = "bid:convert:{document_id}"
-protocol = 1
-handler = "BidConvertV1Handler"
-snapshots = ["conversion", "feature"]
-capabilities = ["postgresql", "object_store", "docreader"]
-launch_mode = "required_enabled"
-
-[[entries]]
-physical_queue = "bid-convert-v1"
-task_type = "bid:prepare-attachment:v1"
-payload_schema = "bid-prepare-attachment/v1"
-payload_version = 1
-identity_formula = "bid:prepare-attachment:v1:{preparation_job_id}"
-protocol = 1
-handler = "BidPrepareAttachmentV1Handler"
-snapshots = ["conversion", "feature"]
-capabilities = ["postgresql", "object_store", "docreader"]
-launch_mode = "required_enabled"
-
-[[entries]]
-physical_queue = "bid-extract-v1"
-task_type = "bid:extract"
-payload_schema = "bid-extract/v1"
-payload_version = 1
-identity_formula = "bid:extract:{run_id}"
-protocol = 1
-handler = "BidExtractV1Handler"
-snapshots = ["target_config", "feature"]
-capabilities = ["chat", "extraction_policy", "postgresql"]
-launch_mode = "required_enabled"
-
-[[entries]]
-physical_queue = "bid-matching-v1"
-task_type = "bid:match-route:v1"
-payload_schema = "bid-match-route/v1"
-payload_version = 1
-identity_formula = "bid:match-route:v1:{job_id}"
-protocol = 1
-handler = "BidMatchRouteV1Handler"
-snapshots = ["matching_config", "feature", "score_policy", "verifier_policy"]
-capabilities = ["retrieval", "verifier", "chat", "postgresql"]
-launch_mode = "required_enabled"
-
-[[entries]]
-physical_queue = "bid-render-v1"
-task_type = "bid:render-submission:v1"
-payload_schema = "bid-render-submission/v1"
-payload_version = 1
-identity_formula = "bid:render-submission:v1:{render_job_id}"
-protocol = 1
-handler = "BidRenderSubmissionV1Handler"
-snapshots = ["submission_render_job"]
-capabilities = ["postgresql", "object_store", "document_renderer"]
+handler = "BidDeliveryV1Handler"
+snapshots = ["business_target"]
+capabilities = ["postgresql", "redis", "object_store", "docreader", "chat", "retrieval", "verifier", "document_renderer"]
 launch_mode = "required_enabled"

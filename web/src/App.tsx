@@ -1,10 +1,21 @@
 import { useEffect, useState } from "react";
-import { Button, Modal, PasswordInput, SegmentedControl, Skeleton, TextInput } from "@mantine/core";
-import { ApiError, type Project, api, setToken, token } from "./api";
+import {
+  Button,
+  Modal,
+  PasswordInput,
+  SegmentedControl,
+  Skeleton,
+  TextInput,
+} from "@mantine/core";
+import { ApiError, api, setToken, token } from "./api";
 import { Assets } from "./assets/Assets";
+import { createBidV2Client, type BidProjectView } from "./bid/api";
+import { authoringHref } from "./bid/authoring/routes";
 import { Workbench } from "./bid/Workbench";
 import { shanghaiEndOfDay } from "./bid/helpers";
-import { bidHref, go, parseAssetRoute, parseBidRoute, useHash } from "./hash";
+import { go, parseAssetRoute, parseBidRoute, useHash } from "./hash";
+
+const bidApi = createBidV2Client();
 import { Crumbs } from "./Crumbs";
 import { Shell } from "./Shell";
 
@@ -32,7 +43,9 @@ function Login() {
               setToken(r.token);
               go("/");
             } catch (ex) {
-              setErr(ex instanceof ApiError ? "登录失败，请再试一次" : "网络错误");
+              setErr(
+                ex instanceof ApiError ? "登录失败，请再试一次" : "网络错误",
+              );
             } finally {
               setBusy(false);
             }
@@ -62,7 +75,14 @@ function Login() {
               {err}
             </p>
           )}
-          <Button type="submit" fullWidth mt={28} h={44} disabled={busy} data-testid="login-submit">
+          <Button
+            type="submit"
+            fullWidth
+            mt={28}
+            h={44}
+            disabled={busy}
+            data-testid="login-submit"
+          >
             {busy ? "进入中…" : "进入"}
           </Button>
         </form>
@@ -72,7 +92,7 @@ function Login() {
 }
 
 function Bids({ email }: { email: string }) {
-  const [rows, setRows] = useState<Project[] | null>(null);
+  const [rows, setRows] = useState<BidProjectView[] | null>(null);
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [when, setWhen] = useState("");
@@ -80,13 +100,17 @@ function Bids({ email }: { email: string }) {
   const [filter, setFilter] = useState<"all" | "open" | "ended">("all");
   const [query, setQuery] = useState("");
   useEffect(() => {
-    api
-      .bids()
+    bidApi
+      .listProjects()
       .then(setRows)
       .catch(() => setRows([]));
   }, []);
   const shown = (rows ?? []).filter((p) => {
-    if (query.trim() && !p.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())) return false;
+    if (
+      query.trim() &&
+      !p.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
+    )
+      return false;
     if (filter === "open") return p.status !== "ended";
     if (filter === "ended") return p.status === "ended";
     return true;
@@ -120,7 +144,7 @@ function Bids({ email }: { email: string }) {
               <div className="side-sec">项目</div>
               <nav className="sidenav">
                 {rows.map((p) => (
-                  <a key={p.id} href={`#${bidHref(p.id, "files", { step: "files" })}`}>
+                  <a key={p.id} href={`#${authoringHref(p.id, "files")}`}>
                     <svg viewBox="0 0 24 24">
                       <rect x="3" y="4" width="18" height="16" rx="2" />
                       <path d="M8 4V3h8v1M8 10h8M8 14h5" />
@@ -181,11 +205,17 @@ function Bids({ email }: { email: string }) {
               </thead>
               <tbody>
                 {shown.map((p) => (
-                  <tr key={p.id} onClick={() => go(bidHref(p.id, "files", { step: "files" }))} style={{ cursor: "pointer" }}>
+                  <tr
+                    key={p.id}
+                    onClick={() => go(authoringHref(p.id, "files"))}
+                    style={{ cursor: "pointer" }}
+                  >
                     <td>
                       <div className="name">{p.title}</div>
                     </td>
-                    <td className="muted">{p.ends_at ? p.ends_at.slice(0, 10) : "—"}</td>
+                    <td className="muted">
+                      {p.ends_at ? p.ends_at.slice(0, 10) : "—"}
+                    </td>
                     <td>
                       {p.status === "ended" ? (
                         <span className="chip gray">已结束</span>
@@ -217,17 +247,23 @@ function Bids({ email }: { email: string }) {
               return;
             }
             try {
-              const p = await api.createBid({
+              const p = await bidApi.createProject({
                 title: title.trim(),
                 ends_at: shanghaiEndOfDay(when),
               });
-              go(bidHref(p.id, "files", { step: "files" }));
+              go(authoringHref(p.id, "files"));
             } catch (ex) {
               setErr(ex instanceof Error ? ex.message : "创建失败");
             }
           }}
         >
-          <TextInput data-testid="bid-title" label="项目名称" value={title} onChange={(e) => setTitle(e.currentTarget.value)} required />
+          <TextInput
+            data-testid="bid-title"
+            label="项目名称"
+            value={title}
+            onChange={(e) => setTitle(e.currentTarget.value)}
+            required
+          />
           <TextInput label="负责人" value={email} mt="md" readOnly />
           <TextInput
             data-testid="bid-ends"
@@ -243,8 +279,15 @@ function Bids({ email }: { email: string }) {
               {err}
             </p>
           )}
-          <div className="row" style={{ justifyContent: "flex-end", marginTop: 24 }}>
-            <Button variant="default" type="button" onClick={() => setOpen(false)}>
+          <div
+            className="row"
+            style={{ justifyContent: "flex-end", marginTop: 24 }}
+          >
+            <Button
+              variant="default"
+              type="button"
+              onClick={() => setOpen(false)}
+            >
               取消
             </Button>
             <Button type="submit" data-testid="bid-create">

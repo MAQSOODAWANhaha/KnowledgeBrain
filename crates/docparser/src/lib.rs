@@ -33,11 +33,118 @@ pub struct ImageRef {
     pub data: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuredSourceUnitKind {
+    Section,
+    TableRow,
+    TableRegion,
+    FormRegion,
+    AttachmentRegion,
+    ImageRegion,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SpreadsheetCell {
+    pub address: String,
+    pub row: u32,
+    pub column: u32,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SpreadsheetRange {
+    pub a1_range: String,
+    pub start_row: u32,
+    pub start_column: u32,
+    pub end_row: u32,
+    pub end_column: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SpreadsheetTableIdentity {
+    pub name: String,
+    pub display_name: String,
+    pub a1_range: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "parent_kind", rename_all = "snake_case")]
+pub enum CompoundImageParent {
+    Paragraph {
+        section_ordinal: u32,
+        paragraph_ordinal: u32,
+    },
+    TableCell {
+        section_ordinal: u32,
+        table_ordinal: u32,
+        row_ordinal: u32,
+        cell_ordinal: u32,
+    },
+    Form {
+        section_ordinal: u32,
+        form_ordinal: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "locator_kind", rename_all = "snake_case")]
+pub enum StructuredSourceLocator {
+    Document {
+        section_ordinal: u32,
+        table_ordinal: Option<u32>,
+        row_ordinal: Option<u32>,
+        form_ordinal: Option<u32>,
+        heading_path: String,
+    },
+    Page {
+        page_ordinal: u32,
+        left: Option<f64>,
+        top: Option<f64>,
+        right: Option<f64>,
+        bottom: Option<f64>,
+    },
+    Spreadsheet {
+        sheet_ordinal: u32,
+        sheet_name: String,
+        region: SpreadsheetRange,
+        cells: Vec<SpreadsheetCell>,
+        merged_ranges: Vec<SpreadsheetRange>,
+        defined_tables: Vec<SpreadsheetTableIdentity>,
+    },
+    Image {
+        original_ref: String,
+        width: u32,
+        height: u32,
+        media_type: String,
+        page_ordinal: Option<u32>,
+        compound_parent: Option<CompoundImageParent>,
+        left: Option<f64>,
+        top: Option<f64>,
+        right: Option<f64>,
+        bottom: Option<f64>,
+    },
+    Attachment {
+        part_name: String,
+        relationship_type: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StructuredSourceUnit {
+    pub key: String,
+    pub ordinal: u32,
+    pub kind: StructuredSourceUnitKind,
+    pub text: String,
+    pub locator: StructuredSourceLocator,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ReadResult {
     pub markdown: String,
     pub error: String,
     pub images: Vec<ImageRef>,
+    pub structured_source_units: Vec<StructuredSourceUnit>,
     pub is_audio: bool,
     pub audio_data: Vec<u8>,
     pub metadata: std::collections::HashMap<String, String>,
@@ -84,6 +191,7 @@ pub fn convert_simple(file_name: &str, bytes: &[u8]) -> ReadResult {
             markdown: format!("[Audio file: {name}]"),
             error: String::new(),
             images: Vec::new(),
+            structured_source_units: Vec::new(),
             is_audio: true,
             audio_data: bytes.to_vec(),
             metadata: std::collections::HashMap::new(),
@@ -151,6 +259,26 @@ pub struct ConvertInput<'a> {
 
 /// Convert bytes to markdown without a Document row. Shared by product ingest and bid:convert.
 /// Engine comes from the product default table (office→anydoc, pdf→builtin).
+pub async fn convert_tender_source(
+    file_name: &str,
+    bytes: Vec<u8>,
+) -> Result<ReadResult, ConvertError> {
+    let ext = file_name
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(
+        ext.as_str(),
+        "pdf" | "docx" | "xlsx" | "png" | "jpg" | "jpeg" | "webp"
+    ) {
+        return Err(ConvertError(format!(
+            "unsupported tender source extension .{ext}"
+        )));
+    }
+    convert("builtin", file_name, &ext, false, bytes, "", file_name).await
+}
+
 pub async fn convert_to_markdown(
     file_name: &str,
     bytes: Vec<u8>,

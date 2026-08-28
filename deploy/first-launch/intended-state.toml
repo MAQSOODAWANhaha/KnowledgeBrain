@@ -18,6 +18,10 @@ task_type = "knowledge:post_process"
 state = "enabled"
 
 [[lanes]]
+task_type = "knowledge:semantic_index:v2"
+state = "enabled"
+
+[[lanes]]
 task_type = "summary:generation"
 state = "enabled"
 
@@ -70,25 +74,5 @@ task_type = "system:maintenance-housekeep:v1"
 state = "maintenance_only"
 
 [[lanes]]
-task_type = "system:live-recovery:v1"
-state = "enabled"
-
-[[lanes]]
-task_type = "bid:convert"
-state = "enabled"
-
-[[lanes]]
-task_type = "bid:prepare-attachment:v1"
-state = "enabled"
-
-[[lanes]]
-task_type = "bid:extract"
-state = "enabled"
-
-[[lanes]]
-task_type = "bid:match-route:v1"
-state = "enabled"
-
-[[lanes]]
-task_type = "bid:render-submission:v1"
+task_type = "bid:delivery:v1"
 state = "enabled"
