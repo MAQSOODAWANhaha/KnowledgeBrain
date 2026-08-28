@@ -207,19 +207,6 @@ fn assemble_by_start_at(chunks: &[Chunk]) -> String {
     out
 }
 
-fn drop_prior_summary_chunks(store: &mut Store, document_id: Uuid) {
-    let drop: Vec<Uuid> = store
-        .chunks
-        .values()
-        .filter(|c| c.document_id == document_id && c.chunk_type == "summary")
-        .map(|c| c.id)
-        .collect();
-    for id in drop {
-        store.chunks.remove(&id);
-        store.embeddings.remove(&id);
-    }
-}
-
 pub fn generate_questions(store: &mut Store, chunk_ids: &[Uuid], document_id: Uuid) {
     let _ = generate_questions_with(store, chunk_ids, &[], &[], document_id, 0);
 }
@@ -383,6 +370,7 @@ fn drop_prior_question_chunks_job(job: &mut DocJob, parent_ids: &[Uuid]) {
     }
 }
 
+#[cfg(test)]
 fn neighbor_content(store: &Store, hinted: Option<Uuid>, ch: &Chunk, prev: bool) -> String {
     if let Some(id) = hinted
         && let Some(n) = store.chunks.get(&id)
@@ -405,23 +393,6 @@ fn neighbor_content(store: &Store, hinted: Option<Uuid>, ch: &Chunk, prev: bool)
             .min_by_key(|o| o.start_at)
             .map(|o| o.content.clone())
             .unwrap_or_default()
-    }
-}
-
-fn drop_prior_question_chunks(store: &mut Store, parent_ids: &[Uuid]) {
-    let drop: Vec<Uuid> = store
-        .chunks
-        .values()
-        .filter(|c| {
-            (c.chunk_type == "question"
-                || (c.chunk_type == "text" && c.generated_questions.is_empty()))
-                && c.parent_chunk_id.is_some_and(|p| parent_ids.contains(&p))
-        })
-        .map(|c| c.id)
-        .collect();
-    for id in drop {
-        store.chunks.remove(&id);
-        store.embeddings.remove(&id);
     }
 }
 
@@ -598,6 +569,7 @@ pub fn image_source_type(file_name: &str, markdown: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn parent_text_chunk(store: &Store, document_id: Uuid, image_key: &str) -> Option<uuid::Uuid> {
     let texts: Vec<_> = store
         .chunks
@@ -609,23 +581,6 @@ fn parent_text_chunk(store: &Store, document_id: Uuid, image_key: &str) -> Optio
         .find(|c| c.content.contains(image_key))
         .or(texts.first())
         .map(|c| c.id)
-}
-
-fn drop_prior_image_chunks(store: &mut Store, document_id: Uuid, image_key: &str) {
-    let drop: Vec<uuid::Uuid> = store
-        .chunks
-        .values()
-        .filter(|c| {
-            c.document_id == document_id
-                && matches!(c.chunk_type.as_str(), "image_ocr" | "image_caption")
-                && c.context_header == image_key
-        })
-        .map(|c| c.id)
-        .collect();
-    for id in drop {
-        store.chunks.remove(&id);
-        store.embeddings.remove(&id);
-    }
 }
 
 fn truncate_key(key: &str) -> &str {
