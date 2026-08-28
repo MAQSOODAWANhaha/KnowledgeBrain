@@ -1,13 +1,14 @@
 # 招投标方案导航（Target V2）
 
 > 唯一产品/领域/Web 交互契约：[`../../docs/bidding/authoring.md`](../../docs/bidding/authoring.md)（含 §2.4 编制面）。  
-> 唯一后端实施方案：[`tender-to-submission-v2.md`](tender-to-submission-v2.md)。  
-> 唯一 Web 编制面实施方案：[`frontend-authoring.md`](frontend-authoring.md)。  
+> 唯一执行顺序：[`authoring-clean-slate-execution.md`](authoring-clean-slate-execution.md)。  
+> 后端合同与详细设计：[`tender-to-submission-v2.md`](tender-to-submission-v2.md)。  
+> Web 编制面详细设计：[`frontend-authoring.md`](frontend-authoring.md)。  
 > 下文旧专题中的固定 PartSet、SubmissionGateV1、①～⑥ 和专用 profile/procedural 流程只描述待删除的 V1 实现，不得作为 Target V2 要求。
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | **Target V2 分阶段实现中；Legacy V1 只保留为删除与回归定位** |
+| 状态 | **Clean-slate 执行已批准；Legacy V1 直接删除，不兼容、不迁移、不双写** |
 | 日期 | 2026-08-27 |
 | 业务 | 网络安全产品与服务应标（乙方） |
 | 部署 | clean-slate fresh redeploy |
@@ -19,7 +20,8 @@
 
 | 专题 | 内容 |
 | --- | --- |
-| [`tender-to-submission-v2.md`](tender-to-submission-v2.md) | V2 schema、API、job、Workspace、OutlineCompiler、Assessment、render、删除矩阵 |
+| [`authoring-clean-slate-execution.md`](authoring-clean-slate-execution.md) | 已批准的唯一阶段顺序、删除原则、阶段验收与完成定义 |
+| [`tender-to-submission-v2.md`](tender-to-submission-v2.md) | V2 schema、API、job、Workspace、OutlineCompiler、Assessment 与 render 详细合同 |
 | [`frontend-authoring.md`](frontend-authoring.md) | 黄金三步、独立大纲树、Tiptap 连续画布、Candidate overlay、无业务锁 |
 
 ## Legacy V1 删除 / 复用地图
@@ -38,7 +40,7 @@
 
 ## 当前实施状态
 
-当前仓库仍有大量 V1 主链（固定 PartSet、Gate、Markdown 编辑）。Target V2 的 Workspace / 画布 / Assessment 正在按阶段替换。异步投递以 Oxana 为 transport，业务 target 只承担意图与幂等 publish，边界见平台 [`queue-runtime.md`](../platform/queue-runtime.md)。
+当前仓库仍有大量 V1 主链（固定 PartSet、Gate、Markdown 编辑）。按 [`authoring-clean-slate-execution.md`](authoring-clean-slate-execution.md) 先移动目标系统仍需的通用原语，再直接删除旧业务实现；不保留兼容运行态。异步投递以 Oxana 为 transport，业务 target 只承担意图与幂等 publish，边界见平台 [`queue-runtime.md`](../platform/queue-runtime.md)。
 
 | 层次 | 当前证据 |
 | --- | --- |
@@ -49,7 +51,7 @@
 | deployed | 否 |
 | runtime accepted | 否；`phase_1d_runtime_complete=false` |
 
-“已实现”不等于 locally verified、committed、pushed、deployed 或 runtime accepted。V2 完成证据以 [`tender-to-submission-v2.md`](tender-to-submission-v2.md) 与 [`frontend-authoring.md`](frontend-authoring.md) 为准。
+“已实现”不等于 locally verified、committed、pushed、deployed 或 runtime accepted。V2 完成证据以 [`authoring-clean-slate-execution.md`](authoring-clean-slate-execution.md) 的阶段验收和完成定义为准，详细合同以 [`tender-to-submission-v2.md`](tender-to-submission-v2.md) 与 [`frontend-authoring.md`](frontend-authoring.md) 为准。
 
 ## 1. 方案结论
 

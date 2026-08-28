@@ -1,6 +1,6 @@
-# 招标文件驱动的投标文件编制 V2 实施方案
+# 招标文件驱动的投标文件编制 V2 详细设计
 
-> 状态：核心产品流程、Web 编制面与实现优先级已确认；Phase 0 已关闭，后续按用户可运行的纵向主流程推进。本文只描述如何实现 [`../../docs/bidding/authoring.md`](../../docs/bidding/authoring.md)，不得改变其“用户主导、Assessment只提示、Word 式画布、clean-slate”的目标契约。Web 黄金路径落地见 [`frontend-authoring.md`](frontend-authoring.md)。
+> 状态：产品、领域、HTTP、Schema、Job 与 Web 详细合同已确认。唯一执行顺序见 [`authoring-clean-slate-execution.md`](authoring-clean-slate-execution.md)；其中“直接删除 Legacy V1、不兼容、不迁移、不双写、删除 first-launch”的原则和阶段验收覆盖本文旧有 Phase/cutover 描述。本文不得改变 [`../../docs/bidding/authoring.md`](../../docs/bidding/authoring.md) 的“用户主导、Assessment只提示、Word 式画布、clean-slate”目标契约。Web 详细设计见 [`frontend-authoring.md`](frontend-authoring.md)。
 
 ## Context
 
