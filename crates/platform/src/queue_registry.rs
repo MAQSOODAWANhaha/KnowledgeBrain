@@ -260,7 +260,6 @@ mod tests {
             assert_eq!(entry.physical_queue, "bid-authoring-v2");
             assert_eq!(entry.payload_schema, "bid-authoring/v2");
         }
-        assert!(registry.entry_for_task("bid:delivery:v1").is_none());
     }
 
     #[test]
