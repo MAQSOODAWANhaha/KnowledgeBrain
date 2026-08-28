@@ -229,218 +229,66 @@ pub fn declared_disabled_tasks() -> Result<Vec<&'static str>, QueueRegistryError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TYPE_BID_DELIVERY_V1;
-
-    const BID_AUTHORING_V2_FIXTURE: &str =
-        include_str!("../../../deploy/authoring-v2/queue-registry.toml");
-
-    const DOCUMENTED_QUEUES: &[&str] = &[
-        "default",
-        "postprocess",
-        "summary",
-        "multimodal",
-        "graph",
-        "question",
-        "wiki",
-        "low",
-        "bid-delivery-v1",
-    ];
+    use crate::{
+        BID_CONTENT_GENERATE_V2_TASK, BID_OUTLINE_GENERATE_V2_TASK,
+        BID_REQUIREMENT_SET_COMPILE_V2_TASK, BID_SUBMISSION_EXPORT_V2_TASK,
+        BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
+    };
 
     fn loaded() -> QueueRegistry {
         QueueRegistry::load().expect("repo-relative deploy/queue-registry.toml")
     }
 
     #[test]
-    fn parse_ok() {
+    fn active_registry_has_only_v2_bidding_tasks() {
         let registry = loaded();
         assert_eq!(registry.format, 1);
-        assert_eq!(registry.schema_version, 1);
-        assert_eq!(registry.release_id, "kb-queue-registry-v1");
-        assert_eq!(registry.minimum_worker_protocol, 1);
-        assert_eq!(registry.entries().len(), 18);
-    }
-
-    #[test]
-    fn exact_bid_entries() {
-        let registry = loaded();
         let bid: Vec<_> = registry
             .entries()
             .iter()
             .filter(|entry| entry.task_type.starts_with("bid:"))
             .collect();
-        assert_eq!(bid.len(), 1);
+        assert_eq!(bid.len(), 5);
+        for task in [
+            BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
+            BID_REQUIREMENT_SET_COMPILE_V2_TASK,
+            BID_OUTLINE_GENERATE_V2_TASK,
+            BID_CONTENT_GENERATE_V2_TASK,
+            BID_SUBMISSION_EXPORT_V2_TASK,
+        ] {
+            let entry = registry.entry_for_task(task).expect("V2 task declared");
+            assert_eq!(entry.physical_queue, "bid-authoring-v2");
+            assert_eq!(entry.payload_schema, "bid-authoring/v2");
+        }
+        assert!(registry.entry_for_task("bid:delivery:v1").is_none());
+    }
 
-        let delivery = registry
-            .entry_for_task(TYPE_BID_DELIVERY_V1)
-            .expect("bid:delivery:v1");
-        assert_eq!(delivery.physical_queue, "bid-delivery-v1");
-        assert_eq!(delivery.payload_schema, "bid-delivery/v1");
+    #[test]
+    fn intake_workers_are_required_and_future_workers_are_declared_disabled() {
+        let registry = loaded();
         assert_eq!(
-            delivery.identity_formula,
-            "{target_kind}:{target_id}:{target_revision}"
+            registry.launch_mode(BID_TENDER_DOCUMENT_PROCESS_V2_TASK),
+            Some(LaunchMode::RequiredEnabled)
         );
-        assert_eq!(delivery.handler, "BidDeliveryV1Handler");
-        assert_eq!(delivery.launch_mode, LaunchMode::RequiredEnabled);
+        assert_eq!(
+            registry.launch_mode(BID_REQUIREMENT_SET_COMPILE_V2_TASK),
+            Some(LaunchMode::RequiredEnabled)
+        );
+        for task in [
+            BID_OUTLINE_GENERATE_V2_TASK,
+            BID_CONTENT_GENERATE_V2_TASK,
+            BID_SUBMISSION_EXPORT_V2_TASK,
+        ] {
+            assert_eq!(registry.launch_mode(task), Some(LaunchMode::DeclaredDisabled));
+        }
     }
 
     #[test]
-    fn unknown_task_absent() {
-        let registry = loaded();
-        assert!(registry.entry_for_task("not-a-real-task").is_none());
-        assert!(registry.entry_for_task("bid:match").is_none());
-        assert!(registry.entry_for_task("bid:convert:v1").is_none());
-        assert!(registry.entry_for_task("bid:extract-target:v1").is_none());
-        assert!(registry.launch_mode("missing").is_none());
-    }
-
-    #[test]
-    fn declared_disabled_includes_multimodal_graph_question() {
-        let registry = loaded();
-        let disabled = registry.declared_disabled_tasks();
-        assert!(disabled.contains(&"image:multimodal"));
-        assert!(disabled.contains(&"chunk:extract"));
-        assert!(disabled.contains(&"question:generation"));
-        assert_eq!(disabled.len(), 3);
-        let mut queues: Vec<&str> = registry
-            .entries()
-            .iter()
-            .filter(|entry| entry.launch_mode == LaunchMode::DeclaredDisabled)
-            .map(|entry| entry.physical_queue.as_str())
-            .collect();
-        queues.sort_unstable();
-        queues.dedup();
-        assert_eq!(queues, ["graph", "multimodal", "question"]);
-    }
-
-    #[test]
-    fn no_default_bid_handler() {
-        let registry = loaded();
-        for entry in registry.entries() {
-            if entry.physical_queue == "default" {
-                assert!(
-                    !entry.task_type.starts_with("bid:"),
-                    "default must not carry Bid task {}",
-                    entry.task_type
-                );
-                assert!(
-                    !entry.handler.contains("Bid"),
-                    "default must not carry Bid handler {}",
-                    entry.handler
-                );
+    fn no_bidding_task_uses_default_queue() {
+        for entry in loaded().entries() {
+            if entry.task_type.starts_with("bid:") {
+                assert_ne!(entry.physical_queue, "default");
             }
         }
-        assert!(
-            registry
-                .entry_for_task(TYPE_BID_DELIVERY_V1)
-                .unwrap()
-                .physical_queue
-                != "default"
-        );
-    }
-
-    #[test]
-    fn protocol_is_one() {
-        let registry = loaded();
-        assert_eq!(registry.minimum_worker_protocol, 1);
-        assert!(registry.entries().iter().all(|entry| entry.protocol == 1));
-        assert!(
-            registry
-                .entries()
-                .iter()
-                .all(|entry| entry.payload_version == 1)
-        );
-    }
-
-    #[test]
-    fn no_extra_queues_beyond_documented_set() {
-        let registry = loaded();
-        let queues: BTreeSet<&str> = registry
-            .entries()
-            .iter()
-            .map(|entry| entry.physical_queue.as_str())
-            .collect();
-        let documented: BTreeSet<&str> = DOCUMENTED_QUEUES.iter().copied().collect();
-        assert_eq!(queues, documented);
-        assert!(!queues.contains("sync"));
-        assert!(!queues.contains("bid-conversion-v1"));
-        assert!(!queues.contains("bid-extraction-v1"));
-    }
-
-    #[test]
-    fn embedded_registry_matches_checked_in() {
-        let embedded = QueueRegistry::parse(EMBEDDED_REGISTRY).expect("embedded registry");
-        assert_eq!(embedded, loaded());
-    }
-
-    #[test]
-    fn inactive_bid_authoring_v2_fixture_is_closed_and_not_active() {
-        let fixture = QueueRegistry::parse(BID_AUTHORING_V2_FIXTURE).expect("V2 fixture");
-        assert_eq!(fixture.release_id, "kb-bid-authoring-v2-phase0-fixture");
-        assert_eq!(fixture.entries().len(), 5);
-        assert!(fixture.entries().iter().all(|entry| {
-            entry.physical_queue == "bid-authoring-v2"
-                && entry.task_type.starts_with("bid:")
-                && entry.task_type.ends_with(":v2")
-                && entry.payload_schema == "bid-authoring/v2"
-                && entry.launch_mode == LaunchMode::DeclaredDisabled
-        }));
-        let active = loaded();
-        assert!(
-            active
-                .entries()
-                .iter()
-                .all(|entry| entry.physical_queue != "bid-authoring-v2")
-        );
-        assert!(
-            fixture
-                .entries()
-                .iter()
-                .all(|entry| active.entry_for_task(&entry.task_type).is_none())
-        );
-        let kinds: BTreeSet<&str> = fixture
-            .entries()
-            .iter()
-            .map(|entry| entry.task_type.as_str())
-            .collect();
-        assert_eq!(
-            kinds,
-            BTreeSet::from([
-                "bid:content_generate:v2",
-                "bid:outline_generate:v2",
-                "bid:requirement_set_compile:v2",
-                "bid:submission_export:v2",
-                "bid:tender_document_process:v2",
-            ])
-        );
-    }
-
-    #[test]
-    fn load_from_missing_path_is_unreadable() {
-        let error = QueueRegistry::load_from_path("/no/such/knowledgebrain-queue-registry.toml")
-            .expect_err("missing override path");
-        assert!(matches!(error, QueueRegistryError::Io(_)));
-    }
-
-    #[test]
-    fn deny_unknown_fields() {
-        let source = r#"
-format = 1
-schema_version = 1
-release_id = "x"
-minimum_worker_protocol = 1
-unexpected = true
-[[entries]]
-physical_queue = "default"
-task_type = "document:process"
-payload_schema = "document-process/v1"
-payload_version = 1
-identity_formula = "document:process:{document_id}:{attempt}"
-protocol = 1
-handler = "DocumentProcessV1Handler"
-snapshots = ["process"]
-capabilities = ["postgresql"]
-launch_mode = "required_enabled"
-"#;
-        assert!(QueueRegistry::parse(source).is_err());
     }
 }

@@ -190,8 +190,20 @@ INSERT INTO queue_contract_artifacts(
     contract_key, version, schema_version, canonical_payload, content_sha256, created_at
 )
 VALUES
- ('bid.delivery.v1', 1, 1, '{"queue":"bid-delivery-v1","schema_version":1,"task_type":"bid:delivery:v1"}',
-  encode(digest(convert_to('{"queue":"bid-delivery-v1","schema_version":1,"task_type":"bid:delivery:v1"}', 'UTF8'), 'sha256'), 'hex'),
+ ('bid.tender_document_process.v2', 1, 1, '{"queue":"bid-authoring-v2","schema_version":1,"task_type":"bid:tender_document_process:v2"}',
+  encode(digest(convert_to('{"queue":"bid-authoring-v2","schema_version":1,"task_type":"bid:tender_document_process:v2"}', 'UTF8'), 'sha256'), 'hex'),
+  '1970-01-01 UTC'),
+ ('bid.requirement_set_compile.v2', 1, 1, '{"queue":"bid-authoring-v2","schema_version":1,"task_type":"bid:requirement_set_compile:v2"}',
+  encode(digest(convert_to('{"queue":"bid-authoring-v2","schema_version":1,"task_type":"bid:requirement_set_compile:v2"}', 'UTF8'), 'sha256'), 'hex'),
+  '1970-01-01 UTC'),
+ ('bid.outline_generate.v2', 1, 1, '{"queue":"bid-authoring-v2","schema_version":1,"task_type":"bid:outline_generate:v2"}',
+  encode(digest(convert_to('{"queue":"bid-authoring-v2","schema_version":1,"task_type":"bid:outline_generate:v2"}', 'UTF8'), 'sha256'), 'hex'),
+  '1970-01-01 UTC'),
+ ('bid.content_generate.v2', 1, 1, '{"queue":"bid-authoring-v2","schema_version":1,"task_type":"bid:content_generate:v2"}',
+  encode(digest(convert_to('{"queue":"bid-authoring-v2","schema_version":1,"task_type":"bid:content_generate:v2"}', 'UTF8'), 'sha256'), 'hex'),
+  '1970-01-01 UTC'),
+ ('bid.submission_export.v2', 1, 1, '{"queue":"bid-authoring-v2","schema_version":1,"task_type":"bid:submission_export:v2"}',
+  encode(digest(convert_to('{"queue":"bid-authoring-v2","schema_version":1,"task_type":"bid:submission_export:v2"}', 'UTF8'), 'sha256'), 'hex'),
   '1970-01-01 UTC'),
  ('document.process', 1, 1, '{"claim_lease_ms":300000,"queue":"default","schema_version":1}',
   encode(digest(convert_to('{"claim_lease_ms":300000,"queue":"default","schema_version":1}', 'UTF8'), 'sha256'), 'hex'),
@@ -200,7 +212,11 @@ VALUES
   encode(digest(convert_to('{"claim_lease_ms":60000,"queue":"retention","schema_version":1}', 'UTF8'), 'sha256'), 'hex'),
   '1970-01-01 UTC');
 INSERT INTO queue_contract_current(contract_key, version, generation)
-VALUES ('bid.delivery.v1', 1, 0),
+VALUES ('bid.tender_document_process.v2', 1, 0),
+       ('bid.requirement_set_compile.v2', 1, 0),
+       ('bid.outline_generate.v2', 1, 0),
+       ('bid.content_generate.v2', 1, 0),
+       ('bid.submission_export.v2', 1, 0),
        ('document.process', 1, 0),
        ('object.retention', 1, 0);
 CREATE TRIGGER queue_contract_artifacts_immutable
