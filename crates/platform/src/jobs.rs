@@ -231,11 +231,8 @@ pub async fn queue_depths() -> std::collections::HashMap<String, i64> {
             storage.enqueued_count(GraphQueue).await.unwrap_or(0),
         ),
         (
-            "bid-delivery-v1",
-            storage
-                .enqueued_count(crate::BidDeliveryV1Queue)
-                .await
-                .unwrap_or(0),
+            "bid-authoring-v2",
+            storage.enqueued_count(crate::BidAuthoringV2Queue).await.unwrap_or(0),
         ),
     ] {
         out.insert(name.into(), n as i64);
@@ -302,7 +299,7 @@ pub fn dashboard_catalog() -> Option<(oxana::Storage, oxana::Catalog)> {
         .queue::<GraphQueue>()
         .queue::<MultimodalQueue>()
         .queue::<WikiQueue>()
-        .queue::<crate::BidDeliveryV1Queue>();
+        .queue::<crate::BidAuthoringV2Queue>();
     let catalog = builder.catalog();
     Some((storage, catalog))
 }
@@ -344,11 +341,8 @@ pub async fn queue_job_previews() -> std::collections::HashMap<String, Vec<Strin
         ),
         ("wiki", storage.list_queue_jobs(WikiQueue, &opts).await.ok()),
         (
-            "bid-delivery-v1",
-            storage
-                .list_queue_jobs(crate::BidDeliveryV1Queue, &opts)
-                .await
-                .ok(),
+            "bid-authoring-v2",
+            storage.list_queue_jobs(crate::BidAuthoringV2Queue, &opts).await.ok(),
         ),
     ] {
         if let Some(jobs) = jobs {
@@ -1190,8 +1184,5 @@ mod tests {
             "declared_disabled enqueues must not spill onto default"
         );
 
-        let mapped = crate::queue_for(crate::TYPE_BID_DELIVERY_V1);
-        assert_eq!(mapped, crate::QUEUE_BID_DELIVERY_V1);
-        assert_ne!(mapped, crate::QUEUE_DEFAULT);
     }
 }
