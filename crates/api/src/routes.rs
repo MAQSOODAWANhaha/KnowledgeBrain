@@ -58,6 +58,7 @@ use uuid::Uuid;
 
 pub fn build(state: AppState) -> Router {
     let app = Router::<AppState>::new()
+        .merge(crate::bid_v2_routes::router())
         .route("/health", get_s(health))
         .route("/live", get_s(live))
         .route("/ready", get_s(ready))
