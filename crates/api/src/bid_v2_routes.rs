@@ -53,6 +53,14 @@ pub fn router() -> Router<AppState> {
             get(list_requirements),
         )
         .route(
+            "/api/v2/bid-projects/{id}/requirements/{requirement_id}",
+            patch(patch_requirement),
+        )
+        .route(
+            "/api/v2/bid-projects/{id}/requirement-supersessions",
+            post(publish_requirement_supersession),
+        )
+        .route(
             "/api/v2/submission-workspaces/{workspace_id}",
             get(get_workspace),
         )
@@ -488,6 +496,33 @@ struct PublishDispositionSetBody {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PatchRequirementBody {
+    expected_requirement_set_id: Uuid,
+    expected_requirement_set_sha256: String,
+    requirement_kind: String,
+    requiredness: String,
+    compliance_policy: String,
+    lifecycle: String,
+    text: String,
+    fulfillment_expr: Value,
+    applicability: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublishRequirementSupersessionBody {
+    lineage_id: Uuid,
+    old_requirement_revision_id: Uuid,
+    new_requirement_revision_id: Uuid,
+    applicability: Value,
+    #[serde(default)]
+    expected_artifact_id: Option<Uuid>,
+    #[serde(default)]
+    expected_sha256: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OutlineGenerateBody {
     expected_workspace_revision_id: Uuid,
     document_set_revision_id: Uuid,
@@ -608,6 +643,67 @@ async fn list_requirements(
         .await
         .map(Json)
         .map_err(map_sql)
+}
+
+async fn patch_requirement(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, requirement_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<PatchRequirementBody>,
+) -> Result<Json<Value>, ApiErr> {
+    let (_, actor) = human_actor(&headers, &state).await?;
+    let context = bidding::MutationContext::new(
+        actor,
+        required_idempotency_key(&headers)?,
+        &body,
+    ).map_err(|error| validation(&error.to_string()))?;
+    let pool = require_bid_pool().await?;
+    bidding::bid_authoring_v2::patch_requirement_v2(
+        &pool,
+        bidding::bid_authoring_v2::PatchRequirementV2 {
+            project_id: id,
+            requirement_revision_id: requirement_id,
+            expected_set_id: body.expected_requirement_set_id,
+            expected_set_sha256: &body.expected_requirement_set_sha256,
+            requirement_kind: &body.requirement_kind,
+            requiredness: &body.requiredness,
+            compliance_policy: &body.compliance_policy,
+            lifecycle: &body.lifecycle,
+            text: &body.text,
+            fulfillment_expr: &body.fulfillment_expr,
+            applicability: &body.applicability,
+        },
+        &context,
+    ).await.map(Json).map_err(map_sql)
+}
+
+async fn publish_requirement_supersession(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PublishRequirementSupersessionBody>,
+) -> Result<(StatusCode, Json<Value>), ApiErr> {
+    let (_, actor) = human_actor(&headers, &state).await?;
+    let context = bidding::MutationContext::new(
+        actor,
+        required_idempotency_key(&headers)?,
+        &body,
+    ).map_err(|error| validation(&error.to_string()))?;
+    let pool = require_bid_pool().await?;
+    let value = bidding::bid_authoring_v2::publish_requirement_supersession_v2(
+        &pool,
+        bidding::bid_authoring_v2::PublishRequirementSupersessionV2 {
+            project_id: id,
+            lineage_id: body.lineage_id,
+            old_requirement_revision_id: body.old_requirement_revision_id,
+            new_requirement_revision_id: body.new_requirement_revision_id,
+            applicability: &body.applicability,
+            expected_artifact_id: body.expected_artifact_id,
+            expected_sha256: body.expected_sha256.as_deref(),
+        },
+        &context,
+    ).await.map_err(map_sql)?;
+    Ok((StatusCode::CREATED, Json(value)))
 }
 
 async fn get_project_workspace(

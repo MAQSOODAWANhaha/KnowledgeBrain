@@ -396,6 +396,85 @@ pub async fn list_requirements_v2(
         .await
 }
 
+#[derive(Debug)]
+pub struct PatchRequirementV2<'a> {
+    pub project_id: Uuid,
+    pub requirement_revision_id: Uuid,
+    pub expected_set_id: Uuid,
+    pub expected_set_sha256: &'a str,
+    pub requirement_kind: &'a str,
+    pub requiredness: &'a str,
+    pub compliance_policy: &'a str,
+    pub lifecycle: &'a str,
+    pub text: &'a str,
+    pub fulfillment_expr: &'a Value,
+    pub applicability: &'a Value,
+}
+
+pub async fn patch_requirement_v2(
+    pool: &PgPool,
+    input: PatchRequirementV2<'_>,
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_patch_requirement(
+          $1,$2,$3,$4::kb_sha256,$5,$6,$7,$8,$9,$10,$11,
+          $12::kb_actor_identity,$13,$14,$15::kb_sha256)",
+    )
+    .bind(input.project_id)
+    .bind(input.requirement_revision_id)
+    .bind(input.expected_set_id)
+    .bind(input.expected_set_sha256)
+    .bind(input.requirement_kind)
+    .bind(input.requiredness)
+    .bind(input.compliance_policy)
+    .bind(input.lifecycle)
+    .bind(input.text)
+    .bind(input.fulfillment_expr)
+    .bind(input.applicability)
+    .bind(&context.actor)
+    .bind(&context.idempotency_key)
+    .bind(&context.request.bytes)
+    .bind(&context.request.sha256)
+    .fetch_one(pool)
+    .await
+}
+
+#[derive(Debug)]
+pub struct PublishRequirementSupersessionV2<'a> {
+    pub project_id: Uuid,
+    pub lineage_id: Uuid,
+    pub old_requirement_revision_id: Uuid,
+    pub new_requirement_revision_id: Uuid,
+    pub applicability: &'a Value,
+    pub expected_artifact_id: Option<Uuid>,
+    pub expected_sha256: Option<&'a str>,
+}
+
+pub async fn publish_requirement_supersession_v2(
+    pool: &PgPool,
+    input: PublishRequirementSupersessionV2<'_>,
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_publish_requirement_supersession(
+          $1,$2,$3,$4,$5,$6,$7::kb_sha256,$8::kb_actor_identity,$9,$10,$11::kb_sha256)",
+    )
+    .bind(input.project_id)
+    .bind(input.lineage_id)
+    .bind(input.old_requirement_revision_id)
+    .bind(input.new_requirement_revision_id)
+    .bind(input.applicability)
+    .bind(input.expected_artifact_id)
+    .bind(input.expected_sha256)
+    .bind(&context.actor)
+    .bind(&context.idempotency_key)
+    .bind(&context.request.bytes)
+    .bind(&context.request.sha256)
+    .fetch_one(pool)
+    .await
+}
+
 pub async fn load_workspace_v2(
     pool: &PgPool,
     workspace_id: Uuid,
