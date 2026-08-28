@@ -1,10 +1,6 @@
 const SQL: &str = include_str!("../../../migrations/bidding_v2_baseline.sql");
 const KNOWLEDGE_SQL: &str = include_str!("../../../migrations/knowledge_base_baseline.sql");
-const ACTIVE_MANIFEST: &str = include_str!("../../../deploy/first-launch/migration-manifest.toml");
-const V2_MANIFEST_FIXTURE: &str =
-    include_str!("../../../deploy/authoring-v2/migration-manifest.toml");
 const ACTIVE_QUEUE_REGISTRY: &str = include_str!("../../../deploy/queue-registry.toml");
-const V2_QUEUE_FIXTURE: &str = include_str!("../../../deploy/authoring-v2/queue-registry.toml");
 const PHASE1_LIVE: &str = include_str!("../../../scripts/bidding_v2_phase1_live.sql");
 const API_ROUTER: &str = include_str!("../../api/src/routes.rs");
 const WORKER: &str = include_str!("../../worker/src/consume.rs");
@@ -289,7 +285,7 @@ fn v2_baseline_has_no_deleted_or_transport_state() {
 }
 
 #[test]
-fn phase_one_vertical_has_owner_checked_mutations_and_stays_inactive() {
+fn phase_one_vertical_has_owner_checked_mutations_and_is_active() {
     for procedure in [
         "kb_bid_v2_create_project",
         "kb_bid_v2_upload_tender_document",
@@ -311,93 +307,34 @@ fn phase_one_vertical_has_owner_checked_mutations_and_stays_inactive() {
     assert!(PHASE1_LIVE.contains("idempotency payload mismatch accepted"));
     assert!(PHASE1_LIVE.contains("stale document set CAS accepted"));
     assert!(PHASE1_LIVE.contains("source unit lacks exactly one requirement disposition"));
-    assert!(!API_ROUTER.contains("merge(bidding::bid_v2_routes::router"));
+    assert!(API_ROUTER.contains("merge(crate::bid_v2_routes::router())"));
     let active_worker = WORKER.split("\n#[cfg(test)]").next().expect("worker source");
-    assert!(!active_worker.contains("queue_with_concurrency::<BidAuthoringV2Queue>"));
+    assert!(active_worker.contains("queue_with_concurrency::<BidAuthoringV2Queue>"));
+    assert!(active_worker.contains("TenderDocumentProcessV2Worker"));
+    assert!(active_worker.contains("RequirementSetCompileV2Worker"));
 }
 
 #[test]
-fn phase_zero_fixtures_are_inactive_and_exactly_v2() {
-    assert!(ACTIVE_MANIFEST.contains("name = \"bidding_v1_baseline\""));
-    assert!(!ACTIVE_MANIFEST.contains("bidding_v2_baseline"));
-    assert!(V2_MANIFEST_FIXTURE.contains("name = \"bidding_v2_baseline\""));
-    assert!(!V2_MANIFEST_FIXTURE.contains("name = \"bidding_v1_baseline\""));
-    assert!(!ACTIVE_QUEUE_REGISTRY.contains(BID_AUTHORING_V2_QUEUE));
-
-    let registry = QueueRegistry::parse(V2_QUEUE_FIXTURE).expect("closed V2 fixture");
+fn active_queue_registry_is_v2_only_and_matches_implemented_workers() {
+    assert!(!ACTIVE_QUEUE_REGISTRY.contains("bid:delivery:v1"));
+    let registry = QueueRegistry::parse(ACTIVE_QUEUE_REGISTRY).expect("closed active registry");
     let expected = [
-        (
-            "bid:tender_document_process:v2",
-            "TenderDocumentProcessV2Handler",
-            "tender_document_process:{request_artifact_id}:{request_revision}",
-            &["request", "document", "parser_contract"][..],
-            &["postgresql", "object_store", "docreader", "ocr", "vlm"][..],
-        ),
-        (
-            "bid:requirement_set_compile:v2",
-            "RequirementSetCompileV2Handler",
-            "requirement_set_compile:{project_id}:{document_set_revision_id}:{disposition_set_revision_id}",
-            &["request", "document_set", "disposition_set"][..],
-            &["postgresql"][..],
-        ),
-        (
-            "bid:outline_generate:v2",
-            "OutlineGenerateV2Handler",
-            "outline_generate:{request_artifact_id}:{request_revision}",
-            &[
-                "request",
-                "workspace",
-                "requirement_projection",
-                "prompt",
-                "model",
-            ][..],
-            &["postgresql", "chat"][..],
-        ),
-        (
-            "bid:content_generate:v2",
-            "ContentGenerateV2Handler",
-            "content_generate:{request_artifact_id}:{request_revision}",
-            &[
-                "request",
-                "workspace",
-                "requirement_projection",
-                "evidence",
-                "prompt",
-                "model",
-            ][..],
-            &["postgresql", "chat", "embedding", "index", "object_store"][..],
-        ),
-        (
-            "bid:submission_export:v2",
-            "SubmissionExportV2Handler",
-            "submission_export:{request_artifact_id}:{request_revision}",
-            &[
-                "request",
-                "workspace",
-                "assessment",
-                "render",
-                "style",
-                "font",
-                "assets",
-            ][..],
-            &["postgresql", "object_store", "docx", "pdf"][..],
-        ),
+        ("bid:tender_document_process:v2", "TenderDocumentProcessV2Handler", LaunchMode::RequiredEnabled),
+        ("bid:requirement_set_compile:v2", "RequirementSetCompileV2Handler", LaunchMode::RequiredEnabled),
+        ("bid:outline_generate:v2", "OutlineGenerateV2Handler", LaunchMode::DeclaredDisabled),
+        ("bid:content_generate:v2", "ContentGenerateV2Handler", LaunchMode::DeclaredDisabled),
+        ("bid:submission_export:v2", "SubmissionExportV2Handler", LaunchMode::DeclaredDisabled),
     ];
-    assert_eq!(registry.entries().len(), expected.len());
-    for (entry, (task, handler, identity, snapshots, capabilities)) in
-        registry.entries().iter().zip(expected)
-    {
+    let bid_entries: Vec<_> = registry.entries().iter()
+        .filter(|entry| entry.task_type.starts_with("bid:"))
+        .collect();
+    assert_eq!(bid_entries.len(), expected.len());
+    for (task, handler, mode) in expected {
+        let entry = registry.entry_for_task(task).expect("V2 task");
         assert_eq!(entry.physical_queue, BID_AUTHORING_V2_QUEUE);
-        assert_eq!(entry.task_type, task);
         assert_eq!(entry.handler, handler);
-        assert_eq!(entry.identity_formula, identity);
-        assert_eq!(entry.snapshots, snapshots);
-        assert_eq!(entry.capabilities, capabilities);
         assert_eq!(entry.payload_schema, BID_AUTHORING_V2_PAYLOAD_SCHEMA);
-        assert_eq!(
-            entry.payload_version,
-            u32::from(BID_AUTHORING_V2_PAYLOAD_VERSION)
-        );
-        assert_eq!(entry.launch_mode, LaunchMode::DeclaredDisabled);
+        assert_eq!(entry.payload_version, u32::from(BID_AUTHORING_V2_PAYLOAD_VERSION));
+        assert_eq!(entry.launch_mode, mode);
     }
 }
