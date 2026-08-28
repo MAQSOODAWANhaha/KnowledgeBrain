@@ -6,13 +6,13 @@
 | 所有者 | Shared Platform |
 | 消费方 | 知识库、招投标 |
 
-本文是 fresh baseline、共享 actor/idempotency/audit、`ObjectRegistry` 和 retention 的唯一活动定义。队列能力由 [`queue-runtime.md`](queue-runtime.md) 定义；业务领域只定义自己的 target、业务引用和消费门禁。招投标**产品**目标是 Target V2（[`../../docs/bidding/authoring.md`](../../docs/bidding/authoring.md)），不是 ①～⑥ / Gate。当前 first-launch 仍加载 `bidding_v1_baseline`，Phase 7 才切到 `bidding_v2_baseline`。
+本文是 fresh baseline、共享 actor/idempotency/audit、`ObjectRegistry` 和 retention 的唯一活动定义。队列能力由 [`queue-runtime.md`](queue-runtime.md) 定义；业务领域只定义自己的 target、业务引用和消费门禁。招投标**产品**目标是 Target V2（[`../../docs/bidding/authoring.md`](../../docs/bidding/authoring.md)），不是 ①～⑥ / Gate。当前 active fresh bootstrap 直接加载 `bidding_v2_baseline`，不再存在 first-launch、manifest 或 V1 切片。
 
 ## 1. 所有权边界
 
 共享平台拥有：
 
-- baseline manifest、checksum ledger、extension、角色与启动期 schema identity 校验；
+- fresh baseline、extension、普通 bootstrap 角色与最小权限 runtime identity；
 - authenticated actor、共享幂等 intent/receipt 和 append-only audit envelope；
 - `ObjectRegistry`、owner reference、retention outbox/tombstone 与物理删除 consumer；
 - Oxana 版本、queue registry 和 worker runtime；
@@ -25,33 +25,23 @@
 
 平台和业务都不得复制 Oxana 的 retry、resurrection、queue membership、claim/heartbeat 或 dead-job 状态机。
 
-## 2. Fresh baseline manifest
+## 2. Fresh baseline
 
-最终系统只有一套能从空 PostgreSQL 建立完整 catalog 的 baseline manifest。逻辑上按所有权组织并由固定 checksum ledger 排序：
+最终系统从空 PostgreSQL 按固定顺序直接执行三份所有权切片：
 
 ```text
-knowledge_base_baseline.sql   # 现有知识库语义，重排不改业务
-shared_platform_baseline.sql  # 本文拥有的运行时基础
-bidding_v1_baseline.sql       # 当前仍在用的招投标切片；产品目标是 V2，Phase 7 替换为 bidding_v2_baseline
+knowledge_base_baseline.sql
+shared_platform_baseline.sql
+bidding_v2_baseline.sql
 ```
 
 必须满足：
 
-1. 不先创建旧投标表再通过 ALTER、backfill 或 runtime repair 到目标形态；
-2. migration runner 只执行固定 manifest，应用启动只验证 schema identity；
-3. extension、seed contract、current pointer、role/grant/revoke 进入 manifest 与 checksum；
-4. CI 和 Compose first launch 都从空库验证 catalog allowlist/denylist；
-5. API、worker、retention 和 migration 使用现有独立最小权限角色。
-
-fresh migration 在一个 main transaction 中使用 `SET LOCAL ROLE kb_launch_owner`。commit 后、handoff 前必须重新证明：
-
-```text
-session_user = kb_migrator
-current_user = kb_migrator
-current_setting('role') = none
-```
-
-active role、catalog checksum 不匹配或旧 schema 残留时 fail closed。V1 不为首次启动另建复杂 activation 状态机、候选 release 协议或专用 dispatcher role。
+1. 不创建旧投标表，不 ALTER/backfill/repair 到目标形态；
+2. `migrator` 是显式部署动作，应用启动只连接依赖；
+3. 已完整建立时 bootstrap 可安全重放，部分 schema 必须 reset；
+4. 不保存 manifest hash、catalog allowlist、intended-state、launch marker 或 verifier role；
+5. API、worker、retention 使用独立最小权限角色。
 
 ## 3. Actor、幂等与审计
 
@@ -123,7 +113,7 @@ retention outbox/tombstone
 
 ## 7. 实施与验收
 
-PR1 建立 baseline manifest、actor/idempotency/audit、`ObjectRegistry`、通用角色/ACL 和 seed；业务 PR 随后接入。招投标异步任务复用现有 worker role和服务，具体合同见 [`../bidding/durable-dispatch.md`](../bidding/durable-dispatch.md)。
+PR1 建立 baseline manifest、actor/idempotency/audit、`ObjectRegistry`、通用角色/ACL 和 seed；业务 PR 随后接入。招投标异步任务复用现有 worker role和服务，具体合同见 [`../bidding/authoring-clean-slate-execution.md`](../bidding/authoring-clean-slate-execution.md)。
 
 平台完成证据至少包括：
 

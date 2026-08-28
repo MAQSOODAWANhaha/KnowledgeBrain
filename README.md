@@ -6,16 +6,18 @@ HTTP (`/api/v1`) validates, persists, and enqueues only. Parse / chunk / vector 
 
 ## Deploy
 
-Deployment definitions live in [`deploy/`](deploy/README.md). Plain Compose is intentionally **infrastructure-only**: `docker compose up -d` never starts API, worker, migrations, or first-launch verification.
-
-A new production installation must eventually use only the checked-in destructive orchestrator:
+Deployment definitions live in [`deploy/`](deploy/README.md). A fresh installation uses the
+ordinary `migrate` bootstrap job followed by the runtime profile; there is no launch verifier,
+manifest checksum gate, compatibility migration, or bidding V1 schema.
 
 ```bash
 cp deploy/.env.example deploy/.env
-KNOWLEDGEBRAIN_FIRST_LAUNCH_FRESH=required deploy/compose-first-launch.sh
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env --profile runtime up -d --build
 ```
 
-The launchable fresh baseline is still exactly `knowledge_base_baseline`, `shared_platform_baseline`, and `bidding_v1_baseline` (current schema slice, not the product end state; Phase 7 replaces the bidding slice with `bidding_v2_baseline`). There is no incremental bidding chain. Production is still intentionally blocked: the orchestrator fails before Docker while reviewed runtime completion is `false`. API, worker, and the independent retention consumer only verify the exact manifest identity and never migrate. After verified runtime acceptance, use `deploy/compose-runtime-restart.sh` for restarts.
+The bootstrap applies `knowledge_base_baseline`, `shared_platform_baseline`, and
+`bidding_v2_baseline` to an empty database. API, worker, and retention only connect at startup.
+Use `deploy/compose-runtime-restart.sh` for an ordinary restart.
 
 ## Local rust (infra only)
 
@@ -43,5 +45,5 @@ npm ci --prefix web
 npm --prefix web run lint
 npm --prefix web run build
 npm --prefix web run test:e2e
-scripts/bidding_v1_deletion_scan.sh
+scripts/bidding_v2_deletion_scan.sh
 ```
