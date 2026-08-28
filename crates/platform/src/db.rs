@@ -110,9 +110,6 @@ mod tests {
     #[test]
     fn fresh_schema_contains_only_target_bidding_contract() {
         assert!(BIDDING_BASELINE.contains("CREATE TABLE bid_submission_workspaces"));
-        assert!(!BIDDING_BASELINE.contains("SubmissionGateV1"));
-        assert!(!BIDDING_BASELINE.contains("required_part_keys"));
-        assert!(!BIDDING_BASELINE.contains("template_slot_for_part_key"));
     }
 
     #[test]

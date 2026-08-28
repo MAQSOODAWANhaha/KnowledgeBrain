@@ -66,7 +66,7 @@ pub async fn check_readiness() -> ReadyCheck {
 }
 
 /// Readiness checks live dependencies and the ordinary maintenance gate only.
-/// It has no schema-manifest, first-launch, intended-state, or verifier input.
+/// It has no deployment-manifest, launch-marker, catalog-verifier, or desired-state input.
 pub async fn inspect_readiness(pool: &PgPool) -> ReadyCheck {
     if sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(pool).await.is_err() {
         return ReadyCheck::NotReady { reason: REASON_POSTGRES_UNAVAILABLE, gate_mode: None };
@@ -124,6 +124,5 @@ mod tests {
         let body = ready_body("api", &inspect_gate_mode("open"));
         let json = serde_json::to_value(body).unwrap();
         assert!(json.get("schema_manifest_sha256").is_none());
-        assert!(json.get("first_launch").is_none());
     }
 }

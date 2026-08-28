@@ -37,13 +37,13 @@ async fn open_test_maintenance_gate(pool: &PgPool, label: &str) {
         "WITH changed AS (
            UPDATE application_maintenance_gate
               SET mode='open',generation=generation+1,
-                  updated_by='system:first-launch',updated_at=clock_timestamp()
+                  updated_by='system:maintenance',updated_at=clock_timestamp()
             WHERE singleton_key AND mode='maintenance'
             RETURNING generation
          ), audited AS (
            INSERT INTO maintenance_gate_audit(
              id,from_mode,to_mode,generation,actor_identity,reason)
-           SELECT $1,'maintenance','open',generation,'system:first-launch',$2 FROM changed
+           SELECT $1,'maintenance','open',generation,'system:maintenance',$2 FROM changed
          )
          SELECT generation FROM changed",
     )
