@@ -8,10 +8,7 @@ async fn main() {
     platform::init_tracing();
     let pool = platform::connect()
         .await
-        .unwrap_or_else(|e| panic!("postgres initialization failed: {e}"));
-    platform::require_production_first_launch_verified(&pool)
-        .await
-        .unwrap_or_else(|error| panic!("production first-launch gate failed: {error}"));
+        .unwrap_or_else(|e| panic!("postgres connection failed: {e}"));
     let probe_addr = worker::probe::probe_addr();
     let probe_listener = worker::probe::bind()
         .await

@@ -7,12 +7,9 @@ use tokio::signal::unix::{SignalKind, signal};
 async fn main() {
     let _ = dotenvy::dotenv();
     platform::init_tracing();
-    let pool = platform::connect()
+    platform::connect()
         .await
-        .unwrap_or_else(|e| panic!("postgres schema verification failed: {e}"));
-    platform::require_production_first_launch_verified(&pool)
-        .await
-        .unwrap_or_else(|error| panic!("production first-launch gate failed: {error}"));
+        .unwrap_or_else(|e| panic!("postgres connection failed: {e}"));
     let addr = bind_addr();
     let listener = TcpListener::bind(&addr)
         .await

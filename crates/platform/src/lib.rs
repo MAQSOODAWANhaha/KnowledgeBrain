@@ -1,14 +1,11 @@
-//! Shared platform: auth, queue transport, Postgres pool, objects, first-launch.
+//! Shared platform: auth, queue transport, Postgres pool, objects, and observability.
 
 mod auth;
 mod bid_authoring_contract;
 mod blobs;
 mod db;
 mod env;
-mod first_launch;
-mod first_launch_evaluation;
 mod image_lock;
-mod intended_state;
 mod jobs;
 mod object_registry;
 mod probe;
@@ -22,10 +19,7 @@ pub use bid_authoring_contract::*;
 pub use blobs::*;
 pub use db::*;
 pub use env::*;
-pub use first_launch::*;
-pub use first_launch_evaluation::*;
 pub use image_lock::*;
-pub use intended_state::*;
 pub use jobs::*;
 pub use object_registry::*;
 pub use probe::*;

@@ -30,7 +30,3 @@ uuid.workspace = true
 [[bin]]
 name = "migrator"
 path = "src/bin/migrator.rs"
-
-[[bin]]
-name = "first-launch-verifier"
-path = "src/bin/first-launch-verifier.rs"

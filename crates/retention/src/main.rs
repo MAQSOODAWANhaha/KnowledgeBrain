@@ -34,10 +34,7 @@ async fn main() {
     platform::init_tracing();
     let pool = platform::connect()
         .await
-        .unwrap_or_else(|error| panic!("retention schema verification failed: {error}"));
-    platform::require_production_first_launch_verified(&pool)
-        .await
-        .unwrap_or_else(|error| panic!("retention first-launch gate failed: {error}"));
+        .unwrap_or_else(|error| panic!("retention postgres connection failed: {error}"));
 
     let _expiry_task = spawn_upload_staging_expiry(pool.clone(), UPLOAD_STAGING_EXPIRY_INTERVAL);
 
