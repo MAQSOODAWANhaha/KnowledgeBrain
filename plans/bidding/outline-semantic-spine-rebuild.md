@@ -312,3 +312,19 @@ Map 指令必须识别 `explicit_composition_clause`，例如将 3.1.1～3.1.4 �
 3. **不适用材料**：明确标记“本次不适用”的附件不生成正常章节，只保留审计 notice。
 4. **完整性门**：mandatory requirement 不能用 unmapped notice 关闭；自动 repair 后仍无法覆盖则本次生成失败，不展示缺项候选。
 5. **主动重新生成**：前一次生成结束后再次点击“生成大纲”必须创建新 request；新候选成功后旧 `proposed` candidate 自动 `obsolete`。新生成失败则保留旧候选。
+
+## V8 closure addendum (approved after real V7 repair-churn evidence)
+
+真实 V7 请求显示 append-only repair 会在 mandatory IDs 已齐全后继续累积 duplicate、wrong-section 和 source-disjoint bindings。V8 因此冻结以下附加约束：
+
+- `OutlineEvidenceBatchV4` 只负责结构、表单、context 与 applicability；删除 Rust 对“不适用/如有/偏差/响应表”等标题文本的语义 fallback。
+- Mandatory need 的语义分组不进入 Source Map 大输出，而由独立 `RequirementGroupingBatchV1` 处理；每批最多 64 个稳定 home need occurrences，适用 mandatory need 必须恰好分类一次。
+- `FulfillmentGroupV1` 是模型语义分组事实；Rust 只按完全相同的 group key、section、title、materialization 合并，禁止模糊归并。
+- `SectionObligationMatrixV2` 只引用 required/conditional/excluded group refs；`required_children` 不再复制所有 atomic mandatory requirements。
+- `OutlineReducePlanV3` 包含 `CompositionSpineV1`、groups 与 Matrix V2，不再包含要求模型机械复制的 requirement routes。
+- 模型节点使用 `coverage_group_refs` 显式声明语义覆盖；source overlap 只是合法性门，不能由 Rust 单独用来选择 target。
+- `OutlineDraftPatchV1` 使用 draft SHA CAS，原子 add/replace/delete；非法 patch 不写 checkpoint。
+- Rust 从唯一合法 group assignment 同源派生最终 `section_obligation_bindings` 与 requirement routes；最终公开输出继续使用 `OutlineGenerationOutputV2`。
+- `SynthesisPacketV3` / `CheckpointV3` 只保存 nodes、patch receipts、closure facts 与冻结事实，不保存 reasoning，也不保存独立 route/binding chunks。
+- Repair 只接受能严格缩小 unresolved identity 集的原子 patch；重复 fingerprint 或无改善立即失败。
+- V5/V6/V7 artifacts 保持不可变；V8 使用新 agent contract identity `00000000-0000-5000-8000-000000000108`。

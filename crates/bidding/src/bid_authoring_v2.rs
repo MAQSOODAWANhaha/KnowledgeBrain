@@ -1338,16 +1338,26 @@ pub async fn load_submission_export_input_v2(
         .await
 }
 
-#[allow(clippy::too_many_arguments)]
+pub struct SubmissionExportFontV2<'a> {
+    pub staging_id: Uuid,
+    pub object_ref: &'a str,
+    pub sha256: &'a str,
+    pub media_type: &'a str,
+}
+
+pub struct SubmissionExportOutputV2<'a> {
+    pub staging_id: Uuid,
+    pub artifact_id: Uuid,
+    pub object_ref: &'a str,
+    pub sha256: &'a str,
+    pub media_type: &'a str,
+    pub byte_length: i64,
+}
+
 pub async fn prepare_submission_export_v2(
     pool: &PgPool,
-    request_artifact_id: Uuid,
-    request_revision: i64,
-    frozen_input_sha256: &str,
-    font_staging_id: Uuid,
-    font_object_ref: &str,
-    font_sha256: &str,
-    font_media_type: &str,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    font: SubmissionExportFontV2<'_>,
     snapshot_id: Uuid,
     manifest_id: Uuid,
     actor: &str,
@@ -1355,13 +1365,13 @@ pub async fn prepare_submission_export_v2(
     sqlx::query_scalar(
         "SELECT kb_bid_v2_prepare_submission_export($1,$2,$3::kb_sha256,$4,$5::kb_object_ref,$6::kb_sha256,$7,$8,$9,$10::kb_actor_identity)",
     )
-    .bind(request_artifact_id)
-    .bind(request_revision)
-    .bind(frozen_input_sha256)
-    .bind(font_staging_id)
-    .bind(font_object_ref)
-    .bind(font_sha256)
-    .bind(font_media_type)
+    .bind(request.request_artifact_id)
+    .bind(request.request_revision)
+    .bind(&request.frozen_input_sha256)
+    .bind(font.staging_id)
+    .bind(font.object_ref)
+    .bind(font.sha256)
+    .bind(font.media_type)
     .bind(snapshot_id)
     .bind(manifest_id)
     .bind(actor)
@@ -1381,44 +1391,33 @@ pub async fn load_submission_manifest_render_input_v2(
         .await
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn publish_submission_export_v2(
     pool: &PgPool,
-    request_artifact_id: Uuid,
-    request_revision: i64,
-    frozen_input_sha256: &str,
-    font_staging_id: Uuid,
-    font_object_ref: &str,
-    font_sha256: &str,
-    font_media_type: &str,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    font: SubmissionExportFontV2<'_>,
     snapshot_id: Uuid,
     manifest_id: Uuid,
-    output_staging_id: Uuid,
-    output_id: Uuid,
-    output_object_ref: &str,
-    output_sha256: &str,
-    output_media_type: &str,
-    output_byte_length: i64,
+    output: SubmissionExportOutputV2<'_>,
     actor: &str,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kb_bid_v2_publish_submission_export($1,$2,$3::kb_sha256,$4,$5::kb_object_ref,$6::kb_sha256,$7,$8,$9,$10,$11,$12::kb_object_ref,$13::kb_sha256,$14,$15,$16::kb_actor_identity)",
     )
-    .bind(request_artifact_id)
-    .bind(request_revision)
-    .bind(frozen_input_sha256)
-    .bind(font_staging_id)
-    .bind(font_object_ref)
-    .bind(font_sha256)
-    .bind(font_media_type)
+    .bind(request.request_artifact_id)
+    .bind(request.request_revision)
+    .bind(&request.frozen_input_sha256)
+    .bind(font.staging_id)
+    .bind(font.object_ref)
+    .bind(font.sha256)
+    .bind(font.media_type)
     .bind(snapshot_id)
     .bind(manifest_id)
-    .bind(output_staging_id)
-    .bind(output_id)
-    .bind(output_object_ref)
-    .bind(output_sha256)
-    .bind(output_media_type)
-    .bind(output_byte_length)
+    .bind(output.staging_id)
+    .bind(output.artifact_id)
+    .bind(output.object_ref)
+    .bind(output.sha256)
+    .bind(output.media_type)
+    .bind(output.byte_length)
     .bind(actor)
     .fetch_one(pool)
     .await
@@ -1585,36 +1584,83 @@ pub async fn store_outline_map_batch_v2(
     .map(|_| ())
 }
 
-pub async fn load_outline_reduce_plan_v2(
+pub async fn load_outline_requirement_grouping_batch_v1(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    batch_ordinal: i32,
+    model_sha: &str,
+    agent_sha: &str,
+) -> Result<Option<Value>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_outline_grouping_get($1,$2::kb_sha256,$3,$4::kb_sha256,$5::kb_sha256)",
+    )
+    .bind(request.request_artifact_id)
+    .bind(&request.frozen_input_sha256)
+    .bind(batch_ordinal)
+    .bind(model_sha)
+    .bind(agent_sha)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn store_outline_requirement_grouping_batch_v1(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    batch_ordinal: i32,
+    model_sha: &str,
+    agent_sha: &str,
+    need_ids: &[Uuid],
+    payload: &Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT kb_bid_v2_outline_grouping_put($1,$2::kb_sha256,$3,$4::kb_sha256,$5::kb_sha256,$6,$7)",
+    )
+    .bind(request.request_artifact_id)
+    .bind(&request.frozen_input_sha256)
+    .bind(batch_ordinal)
+    .bind(model_sha)
+    .bind(agent_sha)
+    .bind(need_ids)
+    .bind(payload)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+pub async fn load_outline_reduce_plan_v3(
     pool: &PgPool,
     request: &platform::BidAuthoringRequestIdentityV2,
     map_evidence_set_sha: &str,
+    grouping_evidence_set_sha: &str,
     reduce_contract_sha: &str,
 ) -> Result<Option<Value>, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT kb_bid_v2_outline_reduce_get($1,$2::kb_sha256,$3::kb_sha256,$4::kb_sha256)",
+        "SELECT kb_bid_v2_outline_reduce_get($1,$2::kb_sha256,$3::kb_sha256,$4::kb_sha256,$5::kb_sha256)",
     )
     .bind(request.request_artifact_id)
     .bind(&request.frozen_input_sha256)
     .bind(map_evidence_set_sha)
+    .bind(grouping_evidence_set_sha)
     .bind(reduce_contract_sha)
     .fetch_one(pool)
     .await
 }
 
-pub async fn store_outline_reduce_plan_v2(
+pub async fn store_outline_reduce_plan_v3(
     pool: &PgPool,
     request: &platform::BidAuthoringRequestIdentityV2,
     map_evidence_set_sha: &str,
+    grouping_evidence_set_sha: &str,
     reduce_contract_sha: &str,
     payload: &Value,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "SELECT kb_bid_v2_outline_reduce_put($1,$2::kb_sha256,$3::kb_sha256,$4::kb_sha256,$5)",
+        "SELECT kb_bid_v2_outline_reduce_put($1,$2::kb_sha256,$3::kb_sha256,$4::kb_sha256,$5::kb_sha256,$6)",
     )
     .bind(request.request_artifact_id)
     .bind(&request.frozen_input_sha256)
     .bind(map_evidence_set_sha)
+    .bind(grouping_evidence_set_sha)
     .bind(reduce_contract_sha)
     .bind(payload)
     .execute(pool)
@@ -1622,46 +1668,52 @@ pub async fn store_outline_reduce_plan_v2(
     .map(|_| ())
 }
 
-pub async fn store_outline_synthesis_packet_v2(
+pub async fn store_outline_synthesis_packet_v3(
     pool: &PgPool,
     request: &platform::BidAuthoringRequestIdentityV2,
     reduce_plan_sha: &str,
     map_evidence_set_sha: &str,
+    grouping_evidence_set_sha: &str,
     payload: &Value,
 ) -> Result<String, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT kb_bid_v2_outline_synthesis_packet_append($1,$2::kb_sha256,$3::kb_sha256,$4::kb_sha256,$5)",
+        "SELECT kb_bid_v2_outline_synthesis_packet_append($1,$2::kb_sha256,$3::kb_sha256,$4::kb_sha256,$5::kb_sha256,$6)",
     )
     .bind(request.request_artifact_id)
     .bind(&request.frozen_input_sha256)
     .bind(reduce_plan_sha)
     .bind(map_evidence_set_sha)
+    .bind(grouping_evidence_set_sha)
     .bind(payload)
     .fetch_one(pool)
     .await
 }
 
+pub struct OutlineToolTraceV2<'a> {
+    pub attempt: i32,
+    pub ordinal: i32,
+    pub tool_name: &'a str,
+    pub args: &'a str,
+    pub result: &'a str,
+    pub duration_ms: i32,
+    pub ok: bool,
+}
+
 pub async fn append_outline_tool_trace_v2(
     pool: &PgPool,
     request: &platform::BidAuthoringRequestIdentityV2,
-    attempt: i32,
-    ordinal: i32,
-    tool_name: &str,
-    args: &str,
-    result: &str,
-    duration_ms: i32,
-    ok: bool,
+    trace: OutlineToolTraceV2<'_>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT kb_bid_v2_outline_trace_append($1,$2::kb_sha256,$3,$4,$5,$6,$7,$8,$9)")
         .bind(request.request_artifact_id)
         .bind(&request.frozen_input_sha256)
-        .bind(attempt)
-        .bind(ordinal)
-        .bind(tool_name)
-        .bind(args)
-        .bind(result)
-        .bind(duration_ms)
-        .bind(if ok { "ok" } else { "error" })
+        .bind(trace.attempt)
+        .bind(trace.ordinal)
+        .bind(trace.tool_name)
+        .bind(trace.args)
+        .bind(trace.result)
+        .bind(trace.duration_ms)
+        .bind(if trace.ok { "ok" } else { "error" })
         .execute(pool)
         .await
         .map(|_| ())

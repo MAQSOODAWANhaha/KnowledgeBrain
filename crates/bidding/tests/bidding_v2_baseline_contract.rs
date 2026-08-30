@@ -9,6 +9,7 @@ const WORKER: &str = include_str!("../../worker/src/consume.rs");
 const KNOWLEDGE_CLONE: &str = include_str!("../../knowledge/src/clone/mod.rs");
 const KNOWLEDGE_SEARCH: &str = include_str!("../../knowledge/src/search/mod.rs");
 const FRESH_SCHEMA_ACCEPTANCE: &str = include_str!("../../../scripts/fresh_schema_acceptance.sh");
+const BIDDING_TEST_SUPPORT: &str = include_str!("support/mod.rs");
 
 use knowledge::{LaunchMode, QueueRegistry};
 use platform::{
@@ -40,6 +41,9 @@ fn destructive_postgres_tests_require_an_isolated_non_live_database() {
             "{name} does not explicitly reject the live PostgreSQL port"
         );
     }
+    assert!(BIDDING_TEST_SUPPORT.contains("KNOWLEDGEBRAIN_TEST_DATABASE_URL"));
+    assert!(!BIDDING_TEST_SUPPORT.contains("platform::database_url()"));
+    assert!(BIDDING_TEST_SUPPORT.contains(":15432/"));
 }
 
 #[test]
@@ -380,6 +384,8 @@ fn phase_one_vertical_has_owner_checked_mutations_and_is_active() {
         );
     }
     assert!(SQL.contains("PERFORM kb_bid_v2_require_project_owner"));
+    assert!(SQL.contains("owner_user_id=split_part(p_actor,':',2)::uuid"));
+    assert!(SQL.contains("PROJECT_OWNER_REQUIRED"));
     assert!(SQL.contains("kb_bid_v2_idempotency_begin"));
     assert!(SQL.contains("DOCUMENT_SET_CAS_MISMATCH"));
     assert!(SQL.contains("disposition='requirement'"));
@@ -430,8 +436,11 @@ fn phase_three_has_async_workers_and_live_evidence_candidate_publication() {
         "kb_bid_v2_outline_semantics_valid",
         "section_obligation_bindings",
         "'system:requirement-set-compile-v3'",
-        "\"map_schema\":3",
-        "\"reduce_schema\":2",
+        "\"map_schema\":4",
+        "\"requirement_grouping_schema\":1",
+        "\"fulfillment_group_schema\":1",
+        "\"reduce_schema\":3",
+        "\"draft_patch_schema\":1",
         "\"output_schema\":2",
     ] {
         assert!(
@@ -443,24 +452,27 @@ fn phase_three_has_async_workers_and_live_evidence_candidate_publication() {
     assert!(!SQL.contains("request_value.status IN ('pending','succeeded')"));
     assert!(SQL.contains("AND state='proposed' AND id<>p_candidate_id"));
     assert!(SQL.contains(
-        "ARRAY['schema_version','coverage','composition_spine',\n      'section_obligation_matrix'"
+        "ARRAY['schema_version','coverage','composition_spine',\n      'section_obligation_matrix','fulfillment_groups'"
     ));
     assert!(SQL.contains(
-        "'reduce_plan_sha256','map_evidence_set_sha256','composition_spine','section_obligation_matrix'"
-    ));
-    assert!(SQL.contains(
-        "'selected_evidence','selected_facts','accepted_node_chunks','accepted_routes','accepted_obligation_bindings'"
+        "'reduce_plan_sha256','map_evidence_set_sha256','grouping_evidence_set_sha256','composition_spine'"
     ));
     assert!(
-        SQL.matches("p_payload->'schema_version' IS DISTINCT FROM '2'::jsonb")
+        SQL.contains(
+            "'selected_evidence','selected_facts','nodes','patch_receipts','closure_facts'"
+        )
+    );
+    assert!(
+        SQL.matches("p_payload->'schema_version' IS DISTINCT FROM '3'::jsonb")
             .count()
             >= 3
     );
     assert!(SQL.contains("00000000-0000-5000-8000-000000000105"));
     assert!(SQL.contains("00000000-0000-5000-8000-000000000106"));
     assert!(SQL.contains("00000000-0000-5000-8000-000000000107"));
-    assert!(SQL.contains("\"version\":7,\"map_schema\":3,\"reduce_schema\":2"));
-    assert!(SQL.contains("\"progress_control\":\"completion_and_stall\""));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000108"));
+    assert!(SQL.contains("\"version\":8,\"map_schema\":4,\"requirement_grouping_schema\":1"));
+    assert!(SQL.contains("\"progress_control\":\"semantic_closure_and_atomic_patch\""));
     assert!(SQL.contains("ORDER BY created_at DESC,checkpoint_ordinal DESC LIMIT 1"));
 }
 

@@ -1,4 +1,4 @@
--- Live semantic-spine contract upgrade. Safe for an existing V2 database.
+-- Live V8 semantic-spine contract upgrade. Safe for an existing V2 database.
 BEGIN;
 
 CREATE OR REPLACE FUNCTION kb_actor_identity_valid(value text)
@@ -29,6 +29,47 @@ AS $$
             'system:tender-document-process-v2'
         )
 $$;
+
+CREATE TABLE IF NOT EXISTS bid_outline_requirement_grouping_batch_artifacts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_artifact_id uuid NOT NULL,
+  frozen_input_sha256 kb_sha256 NOT NULL,
+  batch_ordinal integer NOT NULL CHECK (batch_ordinal>=0),
+  model_contract_sha256 kb_sha256 NOT NULL,
+  agent_contract_sha256 kb_sha256 NOT NULL,
+  need_occurrence_ids uuid[] NOT NULL CHECK (cardinality(need_occurrence_ids) BETWEEN 1 AND 48),
+  canonical_payload bytea NOT NULL,
+  content_sha256 kb_sha256 NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(request_artifact_id,frozen_input_sha256,batch_ordinal,model_contract_sha256,agent_contract_sha256),
+  FOREIGN KEY(request_artifact_id) REFERENCES bid_async_request_snapshot_artifacts(id),
+  CHECK (content_sha256=kb_bid_v2_sha256_bytes(canonical_payload))
+);
+ALTER TABLE bid_outline_reduce_plan_artifacts
+  ADD COLUMN IF NOT EXISTS grouping_evidence_set_sha256 kb_sha256;
+ALTER TABLE bid_outline_synthesis_packet_artifacts
+  ADD COLUMN IF NOT EXISTS grouping_evidence_set_sha256 kb_sha256;
+ALTER TABLE bid_outline_agent_run_artifacts
+  DROP CONSTRAINT IF EXISTS bid_outline_agent_run_artifacts_progress_phase_check;
+ALTER TABLE bid_outline_agent_run_artifacts
+  ADD CONSTRAINT bid_outline_agent_run_artifacts_progress_phase_check
+  CHECK (progress_phase IN ('analyzing','mapping','grouping','reducing','collecting','drafting','routing','verifying','repairing','publishing','retrying','succeeded','failed','cancelled'));
+
+CREATE OR REPLACE FUNCTION kb_bid_v2_require_project_owner(
+  p_project_id uuid,p_actor kb_actor_identity
+) RETURNS void LANGUAGE plpgsql STABLE SET search_path=pg_catalog,public AS $$
+BEGIN
+  IF p_actor NOT LIKE 'user:%' THEN
+    RAISE EXCEPTION 'USER_ACTOR_REQUIRED' USING ERRCODE='42501';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM bid_projects WHERE id=p_project_id) THEN
+    RAISE EXCEPTION 'PROJECT_NOT_FOUND' USING ERRCODE='P0002';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM bid_projects
+      WHERE id=p_project_id AND owner_user_id=split_part(p_actor,':',2)::uuid) THEN
+    RAISE EXCEPTION 'PROJECT_OWNER_REQUIRED' USING ERRCODE='42501';
+  END IF;
+END $$;
 
 CREATE OR REPLACE FUNCTION kb_bid_v2_load_requirement_set_compile_input_v3(
   p_request_artifact_id uuid,p_request_revision bigint,p_frozen_input_sha256 kb_sha256
@@ -294,7 +335,7 @@ BEGIN
   SELECT content_sha256 INTO STRICT prompt_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000101';
   SELECT content_sha256 INTO STRICT template_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000102';
   SELECT content_sha256 INTO STRICT model_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000103';
-  SELECT content_sha256 INTO STRICT agent_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000107';
+  SELECT content_sha256 INTO STRICT agent_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000108';
   SELECT coalesce(jsonb_agg(jsonb_build_object('form_definition_revision_id',form.id,
       'form_definition_sha256',form.content_sha256,'source_unit_revision_id',form.source_unit_revision_id)
       ORDER BY form.source_unit_revision_id,form.id),'[]'::jsonb) INTO form_identities
@@ -352,7 +393,7 @@ BEGIN
     '00000000-0000-5000-8000-000000000101',prompt_sha,
     '00000000-0000-5000-8000-000000000102',template_sha,
     '00000000-0000-5000-8000-000000000103',model_sha,
-    '00000000-0000-5000-8000-000000000107',agent_sha,form_identities);
+    '00000000-0000-5000-8000-000000000108',agent_sha,form_identities);
   response:=jsonb_build_object('request_artifact_id',request_id,'kind','OutlineGenerate','status','pending',
     'result_identity',NULL,'error_code',NULL,'request_revision',1,'request_sha256',p_request_sha256,
     'frozen_input_sha256',frozen_sha,'project_id',workspace.project_id,'workspace_id',p_workspace_id,
@@ -366,12 +407,14 @@ CREATE OR REPLACE FUNCTION kb_bid_v2_outline_semantics_valid(
   p_candidate jsonb,p_nodes jsonb,p_reduce jsonb,p_projection_id uuid
 ) RETURNS boolean LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
 BEGIN
-  IF jsonb_typeof(p_reduce)<>'object' OR p_reduce->'schema_version' IS DISTINCT FROM '2'::jsonb
+  IF jsonb_typeof(p_reduce)<>'object' OR p_reduce->'schema_version' IS DISTINCT FROM '3'::jsonb
     OR jsonb_typeof(p_reduce->'composition_spine')<>'object'
     OR jsonb_typeof(p_reduce#>'{composition_spine,sections}')<>'array'
     OR jsonb_array_length(p_reduce#>'{composition_spine,sections}')<2
     OR jsonb_typeof(p_reduce->'section_obligation_matrix')<>'object'
+    OR p_reduce#>'{section_obligation_matrix,schema_version}' IS DISTINCT FROM '2'::jsonb
     OR jsonb_typeof(p_reduce#>'{section_obligation_matrix,sections}')<>'array'
+    OR jsonb_typeof(p_reduce->'fulfillment_groups')<>'array'
     OR jsonb_typeof(p_candidate->'section_obligation_bindings')<>'array'
     OR jsonb_array_length(p_candidate->'section_obligation_bindings')>100000 THEN RETURN false; END IF;
   IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(p_nodes) node
@@ -424,33 +467,55 @@ BEGIN
         AND left(ltrim(node->>'title'),char_length(fragment->>'source_numbering'))=fragment->>'source_numbering'
         AND substring(ltrim(node->>'title') FROM char_length(fragment->>'source_numbering')+1 FOR 1)
           ~ '^[[:space:]、.．:：]$') THEN RETURN false; END IF;
+  IF EXISTS (WITH matrix AS (
+      SELECT section->>'section_ref' section_ref,section
+      FROM jsonb_array_elements(p_reduce#>'{section_obligation_matrix,sections}') section),
+    entries AS (
+      SELECT section_ref,group_ref,'required' bucket FROM matrix
+        CROSS JOIN LATERAL jsonb_array_elements_text(section->'required_group_refs') group_ref
+      UNION ALL SELECT section_ref,group_ref,'conditional' FROM matrix
+        CROSS JOIN LATERAL jsonb_array_elements_text(section->'conditional_group_refs') group_ref
+      UNION ALL SELECT section_ref,group_ref,'excluded' FROM matrix
+        CROSS JOIN LATERAL jsonb_array_elements_text(section->'excluded_group_refs') group_ref),
+    groups AS (SELECT value group_value FROM jsonb_array_elements(p_reduce->'fulfillment_groups'))
+    SELECT 1 FROM entries LEFT JOIN groups ON groups.group_value->>'group_ref'=entries.group_ref
+      WHERE groups.group_value IS NULL
+        OR groups.group_value->>'section_ref'<>entries.section_ref
+        OR (entries.bucket='required' AND groups.group_value->>'requiredness'<>'mandatory')
+        OR ((entries.bucket='excluded')<>(groups.group_value->>'applicability'='not_applicable'))
+    UNION ALL
+    SELECT 1 FROM entries GROUP BY group_ref HAVING count(*)<>1
+    UNION ALL
+    SELECT 1 FROM groups WHERE NOT EXISTS (SELECT 1 FROM entries
+      WHERE entries.group_ref=groups.group_value->>'group_ref')) THEN RETURN false; END IF;
   IF EXISTS (SELECT 1 FROM jsonb_array_elements(p_candidate->'section_obligation_bindings') binding
       WHERE jsonb_typeof(binding)<>'object'
         OR NOT kb_bid_v2_json_keys_exact(binding,ARRAY['obligation_id','target_client_node_ref'])
         OR coalesce(binding->>'obligation_id','')!~'^[a-f0-9]{64}$'
-        OR coalesce(binding->>'target_client_node_ref','')!~'^[A-Za-z0-9_-]{1,128}$'
+        OR coalesce(binding->>'target_client_node_ref','')!~'^[A-Za-z0-9_.:-]{1,128}$'
         OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements(p_nodes) node
           WHERE node->>'client_node_ref'=binding->>'target_client_node_ref')) THEN RETURN false; END IF;
   IF EXISTS (SELECT 1 FROM jsonb_array_elements(p_candidate->'section_obligation_bindings') binding
       GROUP BY binding->>'obligation_id' HAVING count(*)<>1) THEN RETURN false; END IF;
   IF EXISTS (WITH matrix AS (
-      SELECT section->>'section_ref' section_ref,section
-      FROM jsonb_array_elements(p_reduce#>'{section_obligation_matrix,sections}') section),
-    obligations AS (
-      SELECT section_ref,obligation,'required' bucket FROM matrix
-        CROSS JOIN LATERAL jsonb_array_elements(section->'required_children') obligation
-      UNION ALL SELECT section_ref,obligation,'conditional' FROM matrix
-        CROSS JOIN LATERAL jsonb_array_elements(section->'conditional_children') obligation
-      UNION ALL SELECT section_ref,obligation,'excluded' FROM matrix
-        CROSS JOIN LATERAL jsonb_array_elements(section->'excluded_children') obligation)
+      SELECT section FROM jsonb_array_elements(p_reduce#>'{section_obligation_matrix,sections}') section),
+    entries AS (
+      SELECT group_ref,'required' bucket FROM matrix
+        CROSS JOIN LATERAL jsonb_array_elements_text(section->'required_group_refs') group_ref
+      UNION ALL SELECT group_ref,'conditional' FROM matrix
+        CROSS JOIN LATERAL jsonb_array_elements_text(section->'conditional_group_refs') group_ref
+      UNION ALL SELECT group_ref,'excluded' FROM matrix
+        CROSS JOIN LATERAL jsonb_array_elements_text(section->'excluded_group_refs') group_ref)
     SELECT 1 FROM jsonb_array_elements(p_candidate->'section_obligation_bindings') binding
-      LEFT JOIN obligations ON obligations.obligation->>'obligation_id'=binding->>'obligation_id'
-      WHERE obligations.obligation IS NULL OR obligations.bucket='excluded') THEN RETURN false; END IF;
-  IF EXISTS (WITH matrix AS (SELECT section FROM jsonb_array_elements(p_reduce#>'{section_obligation_matrix,sections}') section),
-    required AS (SELECT obligation->>'obligation_id' obligation_id FROM matrix
-      CROSS JOIN LATERAL jsonb_array_elements(section->'required_children') obligation)
-    SELECT 1 FROM required WHERE (SELECT count(*) FROM jsonb_array_elements(p_candidate->'section_obligation_bindings') binding
-      WHERE binding->>'obligation_id'=required.obligation_id)<>1) THEN RETURN false; END IF;
+      LEFT JOIN entries ON entries.group_ref=binding->>'obligation_id'
+      WHERE entries.group_ref IS NULL OR entries.bucket='excluded') THEN RETURN false; END IF;
+  IF EXISTS (WITH matrix AS (
+      SELECT section FROM jsonb_array_elements(p_reduce#>'{section_obligation_matrix,sections}') section),
+    required AS (SELECT group_ref FROM matrix
+      CROSS JOIN LATERAL jsonb_array_elements_text(section->'required_group_refs') group_ref)
+    SELECT 1 FROM required WHERE (SELECT count(*)
+      FROM jsonb_array_elements(p_candidate->'section_obligation_bindings') binding
+      WHERE binding->>'obligation_id'=required.group_ref)<>1) THEN RETURN false; END IF;
   IF EXISTS (WITH RECURSIVE node_rows AS (
       SELECT node->>'client_node_ref' ref,node->>'parent_client_node_ref' parent,node
       FROM jsonb_array_elements(p_nodes) node),
@@ -460,30 +525,37 @@ BEGIN
         JOIN node_rows ON node_rows.ref=lineage.ancestor WHERE node_rows.parent IS NOT NULL),
     matrix AS (SELECT section->>'section_ref' section_ref,section
       FROM jsonb_array_elements(p_reduce#>'{section_obligation_matrix,sections}') section),
-    obligations AS (
-      SELECT section_ref,obligation FROM matrix
-        CROSS JOIN LATERAL jsonb_array_elements(section->'required_children') obligation
-      UNION ALL SELECT section_ref,obligation FROM matrix
-        CROSS JOIN LATERAL jsonb_array_elements(section->'conditional_children') obligation)
+    entries AS (
+      SELECT section_ref,group_ref FROM matrix
+        CROSS JOIN LATERAL jsonb_array_elements_text(section->'required_group_refs') group_ref
+      UNION ALL SELECT section_ref,group_ref FROM matrix
+        CROSS JOIN LATERAL jsonb_array_elements_text(section->'conditional_group_refs') group_ref),
+    groups AS (SELECT value group_value FROM jsonb_array_elements(p_reduce->'fulfillment_groups'))
     SELECT 1 FROM jsonb_array_elements(p_candidate->'section_obligation_bindings') binding
-      JOIN obligations ON obligations.obligation->>'obligation_id'=binding->>'obligation_id'
+      JOIN entries ON entries.group_ref=binding->>'obligation_id'
+      JOIN groups ON groups.group_value->>'group_ref'=entries.group_ref
       JOIN node_rows target ON target.ref=binding->>'target_client_node_ref'
-      WHERE target.ref='spine_'||left(obligations.section_ref,24)
+      WHERE target.ref='spine_'||left(entries.section_ref,24)
         OR NOT EXISTS (SELECT 1 FROM lineage WHERE lineage.ref=target.ref
-          AND lineage.ancestor='spine_'||left(obligations.section_ref,24))
+          AND lineage.ancestor='spine_'||left(entries.section_ref,24))
         OR NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(target.node->'origin_source_unit_revision_ids') node_source
-          JOIN jsonb_array_elements_text(obligations.obligation->'source_unit_revision_ids') obligation_source
-            ON obligation_source=node_source)) THEN RETURN false; END IF;
-  IF EXISTS (WITH matrix AS (SELECT section FROM jsonb_array_elements(p_reduce#>'{section_obligation_matrix,sections}') section),
-    excluded AS (SELECT obligation FROM matrix
-      CROSS JOIN LATERAL jsonb_array_elements(section->'excluded_children') obligation)
-    SELECT 1 FROM excluded,jsonb_array_elements(p_nodes) node
-      WHERE node->>'title'=excluded.obligation->>'title'
+          JOIN jsonb_array_elements_text(groups.group_value->'source_unit_revision_ids') group_source
+            ON group_source=node_source)) THEN RETURN false; END IF;
+  IF EXISTS (WITH matrix AS (
+      SELECT section FROM jsonb_array_elements(p_reduce#>'{section_obligation_matrix,sections}') section),
+    excluded AS (SELECT group_ref FROM matrix
+      CROSS JOIN LATERAL jsonb_array_elements_text(section->'excluded_group_refs') group_ref),
+    groups AS (SELECT value group_value FROM jsonb_array_elements(p_reduce->'fulfillment_groups'))
+    SELECT 1 FROM excluded JOIN groups ON groups.group_value->>'group_ref'=excluded.group_ref,
+      jsonb_array_elements(p_nodes) node
+      WHERE node->>'title'=groups.group_value->>'title'
         AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(node->'origin_source_unit_revision_ids') node_source
-          JOIN jsonb_array_elements_text(excluded.obligation->'source_unit_revision_ids') excluded_source
+          JOIN jsonb_array_elements_text(groups.group_value->'source_unit_revision_ids') excluded_source
             ON excluded_source=node_source)) THEN RETURN false; END IF;
-  IF (WITH matrix AS (SELECT section FROM jsonb_array_elements(p_reduce#>'{section_obligation_matrix,sections}') section),
-      excluded AS (SELECT obligation FROM matrix CROSS JOIN LATERAL jsonb_array_elements(section->'excluded_children') obligation)
+  IF (WITH matrix AS (
+      SELECT section FROM jsonb_array_elements(p_reduce#>'{section_obligation_matrix,sections}') section),
+      excluded AS (SELECT group_ref FROM matrix
+        CROSS JOIN LATERAL jsonb_array_elements_text(section->'excluded_group_refs') group_ref)
       SELECT count(*) FROM excluded) >
      (SELECT count(*) FROM jsonb_array_elements(p_candidate->'notices') notice
       WHERE notice->>'code'='EXCLUDED_NOT_APPLICABLE') THEN RETURN false; END IF;
@@ -494,18 +566,24 @@ BEGIN
       CROSS JOIN LATERAL jsonb_array_elements(kb_bid_v2_fulfillment_needs(requirement.fulfillment_expr)) need
       WHERE item.projection_id=p_projection_id AND requirement.requiredness='mandatory'),
     matrix AS (SELECT section FROM jsonb_array_elements(p_reduce#>'{section_obligation_matrix,sections}') section),
-    required AS (SELECT obligation FROM matrix CROSS JOIN LATERAL jsonb_array_elements(section->'required_children') obligation)
-    SELECT 1 FROM expected WHERE NOT EXISTS (
-      SELECT 1 FROM jsonb_array_elements(p_candidate->'bindings') route
-      JOIN required ON EXISTS (SELECT 1 FROM jsonb_array_elements_text(required.obligation->'need_occurrence_ids') need_id
-        WHERE need_id=expected.need_id::text)
-      JOIN jsonb_array_elements(p_candidate->'section_obligation_bindings') obligation_binding
-        ON obligation_binding->>'obligation_id'=required.obligation->>'obligation_id'
-        AND obligation_binding->>'target_client_node_ref'=route->>'target_client_node_ref'
-      WHERE route->>'need_occurrence_id'=expected.need_id::text
-        AND route->>'channel'=expected.channel
-        AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(required.obligation->'allowed_channels') allowed
-          WHERE allowed=expected.channel))) THEN RETURN false; END IF;
+    required_refs AS (SELECT group_ref FROM matrix
+      CROSS JOIN LATERAL jsonb_array_elements_text(section->'required_group_refs') group_ref),
+    groups AS (SELECT value group_value FROM jsonb_array_elements(p_reduce->'fulfillment_groups')),
+    required_groups AS (SELECT groups.group_value FROM required_refs
+      JOIN groups ON groups.group_value->>'group_ref'=required_refs.group_ref),
+    group_needs AS (SELECT required_groups.group_value->>'group_ref' group_ref,need
+      FROM required_groups CROSS JOIN LATERAL jsonb_array_elements(required_groups.group_value->'need_occurrences') need)
+    SELECT 1 FROM expected WHERE
+      (SELECT count(*) FROM group_needs WHERE group_needs.need->>'need_occurrence_id'=expected.need_id::text
+        AND group_needs.need->>'channel'=expected.channel)<>1
+      OR NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements(p_candidate->'bindings') route
+        JOIN group_needs ON group_needs.need->>'need_occurrence_id'=route->>'need_occurrence_id'
+        JOIN jsonb_array_elements(p_candidate->'section_obligation_bindings') group_binding
+          ON group_binding->>'obligation_id'=group_needs.group_ref
+          AND group_binding->>'target_client_node_ref'=route->>'target_client_node_ref'
+        WHERE route->>'need_occurrence_id'=expected.need_id::text
+          AND route->>'channel'=expected.channel)) THEN RETURN false; END IF;
   RETURN true;
 END $$;
 
@@ -563,69 +641,170 @@ BEGIN
   RETURN published_identity;
 END $$;
 
+CREATE OR REPLACE FUNCTION kb_bid_v2_outline_run_upsert(
+  p_request_artifact_id uuid,p_frozen_input_sha256 kb_sha256,p_attempt integer,p_max_attempts integer,
+  p_stage text,p_detail jsonb
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE current_run bid_outline_agent_run_artifacts%ROWTYPE; request_status text;
+  next_phase text:=coalesce(p_detail->>'phase',p_stage);
+  next_attempt_turn integer:=coalesce((p_detail->>'turn_in_attempt')::integer,(p_detail->>'turn')::integer,0);
+  next_attempt_tools integer:=coalesce((p_detail->>'tool_calls_in_attempt')::integer,(p_detail->>'tool_calls')::integer,0);
+  next_total_turn integer:=coalesce((p_detail->>'total_turns')::integer,next_attempt_turn);
+  next_total_tools integer:=coalesce((p_detail->>'total_tool_calls')::integer,next_attempt_tools);
+  next_text bigint:=coalesce((p_detail->>'text_bytes_read')::bigint,0);
+  next_images integer:=coalesce((p_detail->>'images_read')::integer,0);
+BEGIN
+  IF p_stage NOT IN ('analyzing','mapping','reviewing','generating') OR p_attempt<1 OR p_max_attempts<p_attempt
+    OR next_phase NOT IN ('analyzing','mapping','grouping','reducing','collecting','drafting','routing','verifying','repairing','publishing','retrying') THEN
+    RAISE EXCEPTION 'invalid outline progress transition' USING ERRCODE='22023';
+  END IF;
+  SELECT status INTO request_status FROM bid_async_request_snapshot_artifacts
+    WHERE id=p_request_artifact_id AND frozen_input_sha256=p_frozen_input_sha256 FOR UPDATE;
+  IF request_status IS NULL THEN RAISE EXCEPTION 'FROZEN_INPUT_MISSING' USING ERRCODE='P0002'; END IF;
+  IF request_status<>'pending' THEN RETURN; END IF;
+  SELECT * INTO current_run FROM bid_outline_agent_run_artifacts WHERE request_artifact_id=p_request_artifact_id FOR UPDATE;
+  IF NOT FOUND THEN
+    INSERT INTO bid_outline_agent_run_artifacts(
+      request_artifact_id,frozen_input_sha256,status,progress_stage,progress_phase,progress_detail,
+      progress_sequence,attempt,max_attempts,attempt_turn_count,attempt_tool_call_count,
+      turn_count,tool_call_count,text_bytes_read,images_read,updated_at)
+    VALUES(p_request_artifact_id,p_frozen_input_sha256,'running',p_stage,next_phase,coalesce(p_detail,'{}'::jsonb),
+      1,p_attempt,p_max_attempts,next_attempt_turn,next_attempt_tools,next_total_turn,next_total_tools,next_text,next_images,clock_timestamp());
+    RETURN;
+  END IF;
+  IF current_run.status<>'running' THEN RETURN; END IF;
+  IF p_attempt<current_run.attempt THEN RAISE EXCEPTION 'REQUEST_ATTEMPT_SUPERSEDED' USING ERRCODE='40001'; END IF;
+  UPDATE bid_outline_agent_run_artifacts SET
+    progress_stage=p_stage,progress_phase=next_phase,progress_detail=coalesce(p_detail,'{}'::jsonb),
+    progress_sequence=progress_sequence+1,attempt=p_attempt,max_attempts=p_max_attempts,
+    attempt_turn_count=CASE WHEN p_attempt>current_run.attempt THEN next_attempt_turn ELSE greatest(attempt_turn_count,next_attempt_turn) END,
+    attempt_tool_call_count=CASE WHEN p_attempt>current_run.attempt THEN next_attempt_tools ELSE greatest(attempt_tool_call_count,next_attempt_tools) END,
+    turn_count=greatest(turn_count,next_total_turn),tool_call_count=greatest(tool_call_count,next_total_tools),
+    text_bytes_read=greatest(text_bytes_read,next_text),images_read=greatest(images_read,next_images),
+    last_error_code=CASE WHEN next_phase='retrying' THEN p_detail->>'last_error_code' ELSE last_error_code END,
+    last_error_at=CASE WHEN next_phase='retrying' THEN clock_timestamp() ELSE last_error_at END,
+    updated_at=clock_timestamp()
+  WHERE request_artifact_id=p_request_artifact_id;
+END $$;
+
+CREATE OR REPLACE FUNCTION kb_bid_v2_outline_grouping_get(
+  p_request_artifact_id uuid,p_frozen_input_sha256 kb_sha256,p_batch_ordinal integer,
+  p_model_sha kb_sha256,p_agent_sha kb_sha256
+) RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+  SELECT convert_from(canonical_payload,'UTF8')::jsonb
+  FROM bid_outline_requirement_grouping_batch_artifacts
+  WHERE request_artifact_id=p_request_artifact_id AND frozen_input_sha256=p_frozen_input_sha256
+    AND batch_ordinal=p_batch_ordinal AND model_contract_sha256=p_model_sha
+    AND agent_contract_sha256=p_agent_sha
+$$;
+
+CREATE OR REPLACE FUNCTION kb_bid_v2_outline_grouping_put(
+  p_request_artifact_id uuid,p_frozen_input_sha256 kb_sha256,p_batch_ordinal integer,
+  p_model_sha kb_sha256,p_agent_sha kb_sha256,p_need_ids uuid[],p_payload jsonb
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE payload bytea:=convert_to(p_payload::text,'UTF8');
+BEGIN
+  IF jsonb_typeof(p_payload)<>'object'
+    OR NOT kb_bid_v2_json_keys_exact(p_payload,ARRAY['schema_version','batch_ordinal',
+      'home_need_occurrence_ids','assignments','notices'])
+    OR p_payload->'schema_version' IS DISTINCT FROM '1'::jsonb
+    OR (p_payload->>'batch_ordinal')::integer<>p_batch_ordinal
+    OR jsonb_array_length(p_payload->'home_need_occurrence_ids')<>cardinality(p_need_ids)
+    OR jsonb_array_length(p_payload->'assignments')<>cardinality(p_need_ids) THEN
+    RAISE EXCEPTION 'invalid requirement grouping batch' USING ERRCODE='23514';
+  END IF;
+  INSERT INTO bid_outline_requirement_grouping_batch_artifacts(
+    request_artifact_id,frozen_input_sha256,batch_ordinal,model_contract_sha256,agent_contract_sha256,
+    need_occurrence_ids,canonical_payload,content_sha256)
+  VALUES(p_request_artifact_id,p_frozen_input_sha256,p_batch_ordinal,p_model_sha,p_agent_sha,
+    p_need_ids,payload,kb_bid_v2_sha256_bytes(payload))
+  ON CONFLICT (request_artifact_id,frozen_input_sha256,batch_ordinal,model_contract_sha256,agent_contract_sha256)
+  DO NOTHING;
+  IF NOT EXISTS (SELECT 1 FROM bid_outline_requirement_grouping_batch_artifacts
+      WHERE request_artifact_id=p_request_artifact_id AND frozen_input_sha256=p_frozen_input_sha256
+        AND batch_ordinal=p_batch_ordinal AND model_contract_sha256=p_model_sha
+        AND agent_contract_sha256=p_agent_sha AND need_occurrence_ids=p_need_ids
+        AND content_sha256=kb_bid_v2_sha256_bytes(payload)) THEN
+    RAISE EXCEPTION 'divergent requirement grouping replay' USING ERRCODE='23514';
+  END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION kb_bid_v2_outline_reduce_get(
+  p_request_artifact_id uuid,p_frozen_input_sha256 kb_sha256,
+  p_map_evidence_set_sha256 kb_sha256,p_grouping_evidence_set_sha256 kb_sha256,
+  p_reduce_contract_sha256 kb_sha256
+) RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+  SELECT convert_from(canonical_payload,'UTF8')::jsonb
+  FROM bid_outline_reduce_plan_artifacts
+  WHERE request_artifact_id=p_request_artifact_id AND frozen_input_sha256=p_frozen_input_sha256
+    AND map_evidence_set_sha256=p_map_evidence_set_sha256
+    AND grouping_evidence_set_sha256=p_grouping_evidence_set_sha256
+    AND reduce_contract_sha256=p_reduce_contract_sha256
+$$;
+
 CREATE OR REPLACE FUNCTION kb_bid_v2_outline_reduce_put(
   p_request_artifact_id uuid,p_frozen_input_sha256 kb_sha256,
-  p_map_evidence_set_sha256 kb_sha256,p_reduce_contract_sha256 kb_sha256,p_payload jsonb
+  p_map_evidence_set_sha256 kb_sha256,p_grouping_evidence_set_sha256 kb_sha256,
+  p_reduce_contract_sha256 kb_sha256,p_payload jsonb
 ) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
 DECLARE payload bytea:=convert_to(p_payload::text,'UTF8');
 BEGIN
   IF jsonb_typeof(p_payload)<>'object'
     OR NOT kb_bid_v2_json_keys_exact(p_payload,ARRAY['schema_version','coverage','composition_spine',
-      'section_obligation_matrix','structure_fragments','priority_reads','requirement_routes',
+      'section_obligation_matrix','fulfillment_groups','structure_fragments','priority_reads',
       'unresolved_conflicts','vision_requests','notices'])
-    OR p_payload->'schema_version' IS DISTINCT FROM '2'::jsonb
+    OR p_payload->'schema_version' IS DISTINCT FROM '3'::jsonb
     OR jsonb_typeof(p_payload->'coverage')<>'object'
     OR jsonb_typeof(p_payload->'composition_spine')<>'object'
     OR jsonb_typeof(p_payload->'section_obligation_matrix')<>'object'
+    OR jsonb_typeof(p_payload->'fulfillment_groups')<>'array'
     OR jsonb_typeof(p_payload->'structure_fragments')<>'array'
     OR jsonb_typeof(p_payload->'priority_reads')<>'array'
-    OR jsonb_typeof(p_payload->'requirement_routes')<>'array'
     OR jsonb_typeof(p_payload->'unresolved_conflicts')<>'array'
     OR jsonb_typeof(p_payload->'vision_requests')<>'array'
     OR jsonb_typeof(p_payload->'notices')<>'array' THEN
-    RAISE EXCEPTION 'invalid outline Reduce plan' USING ERRCODE='23514';
+    RAISE EXCEPTION 'invalid outline Reduce plan V3' USING ERRCODE='23514';
   END IF;
   INSERT INTO bid_outline_reduce_plan_artifacts(
-    request_artifact_id,frozen_input_sha256,map_evidence_set_sha256,reduce_contract_sha256,
-    canonical_payload,content_sha256)
-  VALUES(p_request_artifact_id,p_frozen_input_sha256,p_map_evidence_set_sha256,p_reduce_contract_sha256,
-    payload,kb_bid_v2_sha256_bytes(payload))
-  ON CONFLICT (request_artifact_id,frozen_input_sha256,map_evidence_set_sha256,reduce_contract_sha256)
-  DO NOTHING;
+    request_artifact_id,frozen_input_sha256,map_evidence_set_sha256,grouping_evidence_set_sha256,
+    reduce_contract_sha256,canonical_payload,content_sha256)
+  VALUES(p_request_artifact_id,p_frozen_input_sha256,p_map_evidence_set_sha256,
+    p_grouping_evidence_set_sha256,p_reduce_contract_sha256,payload,kb_bid_v2_sha256_bytes(payload))
+  ON CONFLICT (request_artifact_id,frozen_input_sha256,map_evidence_set_sha256,
+    grouping_evidence_set_sha256,reduce_contract_sha256) DO NOTHING;
   IF NOT EXISTS (SELECT 1 FROM bid_outline_reduce_plan_artifacts
       WHERE request_artifact_id=p_request_artifact_id AND frozen_input_sha256=p_frozen_input_sha256
         AND map_evidence_set_sha256=p_map_evidence_set_sha256
+        AND grouping_evidence_set_sha256=p_grouping_evidence_set_sha256
         AND reduce_contract_sha256=p_reduce_contract_sha256
         AND content_sha256=kb_bid_v2_sha256_bytes(payload)) THEN
-    RAISE EXCEPTION 'divergent outline Reduce replay' USING ERRCODE='23514';
+    RAISE EXCEPTION 'divergent outline Reduce V3 replay' USING ERRCODE='23514';
   END IF;
 END $$;
 
 CREATE OR REPLACE FUNCTION kb_bid_v2_outline_synthesis_packet_append(
   p_request_artifact_id uuid,p_frozen_input_sha256 kb_sha256,
-  p_reduce_plan_sha256 kb_sha256,p_map_evidence_set_sha256 kb_sha256,p_payload jsonb
+  p_reduce_plan_sha256 kb_sha256,p_map_evidence_set_sha256 kb_sha256,
+  p_grouping_evidence_set_sha256 kb_sha256,p_payload jsonb
 ) RETURNS kb_sha256 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
 DECLARE payload bytea:=convert_to(p_payload::text,'UTF8'); sha kb_sha256:=kb_bid_v2_sha256_bytes(payload);
 BEGIN
   IF jsonb_typeof(p_payload)<>'object'
     OR NOT kb_bid_v2_json_keys_exact(p_payload,ARRAY['schema_version','request_artifact_id','frozen_input_sha256',
-      'reduce_plan_sha256','map_evidence_set_sha256','composition_spine','section_obligation_matrix',
-      'deterministic_spine_nodes','manifest','structure_fragments','priority_reads','requirement_routes',
-      'conflicts','notices','selected_evidence','selected_facts','draft'])
-    OR p_payload->'schema_version' IS DISTINCT FROM '2'::jsonb
+      'reduce_plan_sha256','map_evidence_set_sha256','grouping_evidence_set_sha256','composition_spine',
+      'section_obligation_matrix','fulfillment_groups','deterministic_spine_nodes','manifest',
+      'selected_evidence','selected_facts','draft'])
+    OR p_payload->'schema_version' IS DISTINCT FROM '3'::jsonb
     OR (p_payload->>'request_artifact_id')::uuid<>p_request_artifact_id
     OR p_payload->>'frozen_input_sha256'<>p_frozen_input_sha256::text
     OR p_payload->>'reduce_plan_sha256'<>p_reduce_plan_sha256::text
     OR p_payload->>'map_evidence_set_sha256'<>p_map_evidence_set_sha256::text
+    OR p_payload->>'grouping_evidence_set_sha256'<>p_grouping_evidence_set_sha256::text
     OR jsonb_typeof(p_payload->'composition_spine')<>'object'
     OR jsonb_typeof(p_payload->'section_obligation_matrix')<>'object'
+    OR jsonb_typeof(p_payload->'fulfillment_groups')<>'array'
     OR jsonb_typeof(p_payload->'deterministic_spine_nodes')<>'array'
     OR jsonb_typeof(p_payload->'manifest')<>'object'
-    OR jsonb_typeof(p_payload->'structure_fragments')<>'array'
-    OR jsonb_typeof(p_payload->'priority_reads')<>'array'
-    OR jsonb_typeof(p_payload->'requirement_routes')<>'array'
-    OR jsonb_typeof(p_payload->'conflicts')<>'array'
-    OR jsonb_typeof(p_payload->'notices')<>'array'
     OR jsonb_typeof(p_payload->'selected_evidence')<>'array'
     OR jsonb_typeof(p_payload->'selected_facts')<>'array'
     OR jsonb_typeof(p_payload->'draft')<>'object' THEN
@@ -633,8 +812,9 @@ BEGIN
   END IF;
   INSERT INTO bid_outline_synthesis_packet_artifacts(
     request_artifact_id,frozen_input_sha256,reduce_plan_sha256,map_evidence_set_sha256,
-    canonical_payload,content_sha256)
-  VALUES(p_request_artifact_id,p_frozen_input_sha256,p_reduce_plan_sha256,p_map_evidence_set_sha256,payload,sha)
+    grouping_evidence_set_sha256,canonical_payload,content_sha256)
+  VALUES(p_request_artifact_id,p_frozen_input_sha256,p_reduce_plan_sha256,p_map_evidence_set_sha256,
+    p_grouping_evidence_set_sha256,payload,sha)
   ON CONFLICT (request_artifact_id,content_sha256) DO NOTHING;
   RETURN sha;
 END $$;
@@ -653,17 +833,21 @@ BEGIN
   IF current_attempt<>p_attempt THEN RAISE EXCEPTION 'REQUEST_ATTEMPT_SUPERSEDED' USING ERRCODE='40001'; END IF;
   IF jsonb_typeof(p_payload)<>'object'
     OR NOT kb_bid_v2_json_keys_exact(p_payload,ARRAY['schema_version','attempt','phase','reduce_plan_sha256',
-      'selected_evidence','selected_facts','accepted_node_chunks','accepted_routes','accepted_obligation_bindings',
-      'unresolved_need_occurrence_ids','total_turns','total_tool_calls','text_bytes_read','images_read'])
-    OR p_payload->'schema_version' IS DISTINCT FROM '2'::jsonb
+      'selected_evidence','selected_facts','nodes','patch_receipts','closure_facts',
+      'total_turns','total_tool_calls','text_bytes_read','images_read'])
+    OR p_payload->'schema_version' IS DISTINCT FROM '3'::jsonb
     OR (p_payload->>'attempt')::integer<>p_attempt OR p_payload->>'phase'<>p_phase
     OR NOT kb_bid_v2_sha256_text(p_payload->>'reduce_plan_sha256')
     OR jsonb_typeof(p_payload->'selected_evidence')<>'array'
     OR jsonb_typeof(p_payload->'selected_facts')<>'array'
-    OR jsonb_typeof(p_payload->'accepted_node_chunks')<>'array'
-    OR jsonb_typeof(p_payload->'accepted_routes')<>'array'
-    OR jsonb_typeof(p_payload->'accepted_obligation_bindings')<>'array'
-    OR jsonb_typeof(p_payload->'unresolved_need_occurrence_ids')<>'array'
+    OR jsonb_typeof(p_payload->'nodes')<>'array'
+    OR jsonb_typeof(p_payload->'patch_receipts')<>'array'
+    OR jsonb_typeof(p_payload->'closure_facts')<>'object'
+    OR NOT kb_bid_v2_json_keys_exact(p_payload->'closure_facts',ARRAY['required_groups_total',
+      'required_groups_assigned','missing_group_refs','invalid_assignments','draft_sha256'])
+    OR jsonb_typeof(p_payload#>'{closure_facts,missing_group_refs}')<>'array'
+    OR jsonb_typeof(p_payload#>'{closure_facts,invalid_assignments}')<>'array'
+    OR NOT kb_bid_v2_sha256_text(p_payload#>>'{closure_facts,draft_sha256}')
     OR coalesce(p_payload->>'total_turns','')!~'^(0|[1-9][0-9]*)$'
     OR coalesce(p_payload->>'total_tool_calls','')!~'^(0|[1-9][0-9]*)$'
     OR coalesce(p_payload->>'text_bytes_read','')!~'^(0|[1-9][0-9]*)$'
@@ -695,21 +879,38 @@ $$;
 
 INSERT INTO bid_authoring_contract_artifacts(
   id,contract_kind,schema_version,canonical_payload,content_sha256)
-SELECT '00000000-0000-5000-8000-000000000107'::uuid,'agent',1,payload,
+SELECT '00000000-0000-5000-8000-000000000108'::uuid,'agent',1,payload,
   kb_bid_v2_sha256_bytes(payload)
 FROM (VALUES (convert_to(
-  '{"kind":"outline_agent","version":7,"map_schema":3,"reduce_schema":2,"output_schema":2,"progress_control":"completion_and_stall","max_stalled_turns":2}',
+  '{"kind":"outline_agent","version":8,"map_schema":4,"requirement_grouping_schema":1,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":3,"checkpoint_schema":3,"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","max_stalled_turns":2}',
   'UTF8'))) value(payload)
 ON CONFLICT (id) DO NOTHING;
 
 REVOKE ALL ON FUNCTION
+  kb_bid_v2_require_project_owner(uuid,kb_actor_identity),
   kb_bid_v2_load_requirement_set_compile_input_v3(uuid,bigint,kb_sha256),
   kb_bid_v2_publish_requirement_set_v3(uuid,bigint,kb_sha256,jsonb,kb_actor_identity),
-  kb_bid_v2_outline_semantics_valid(jsonb,jsonb,jsonb,uuid)
+  kb_bid_v2_outline_semantics_valid(jsonb,jsonb,jsonb,uuid),
+  kb_bid_v2_outline_run_upsert(uuid,kb_sha256,integer,integer,text,jsonb),
+  kb_bid_v2_outline_grouping_get(uuid,kb_sha256,integer,kb_sha256,kb_sha256),
+  kb_bid_v2_outline_grouping_put(uuid,kb_sha256,integer,kb_sha256,kb_sha256,uuid[],jsonb),
+  kb_bid_v2_outline_reduce_get(uuid,kb_sha256,kb_sha256,kb_sha256,kb_sha256),
+  kb_bid_v2_outline_reduce_put(uuid,kb_sha256,kb_sha256,kb_sha256,kb_sha256,jsonb),
+  kb_bid_v2_outline_synthesis_packet_append(uuid,kb_sha256,kb_sha256,kb_sha256,kb_sha256,jsonb),
+  kb_bid_v2_outline_checkpoint_append(uuid,kb_sha256,integer,integer,text,jsonb),
+  kb_bid_v2_outline_checkpoint_latest(uuid,kb_sha256)
 FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION
   kb_bid_v2_load_requirement_set_compile_input_v3(uuid,bigint,kb_sha256),
-  kb_bid_v2_publish_requirement_set_v3(uuid,bigint,kb_sha256,jsonb,kb_actor_identity)
+  kb_bid_v2_publish_requirement_set_v3(uuid,bigint,kb_sha256,jsonb,kb_actor_identity),
+  kb_bid_v2_outline_run_upsert(uuid,kb_sha256,integer,integer,text,jsonb),
+  kb_bid_v2_outline_grouping_get(uuid,kb_sha256,integer,kb_sha256,kb_sha256),
+  kb_bid_v2_outline_grouping_put(uuid,kb_sha256,integer,kb_sha256,kb_sha256,uuid[],jsonb),
+  kb_bid_v2_outline_reduce_get(uuid,kb_sha256,kb_sha256,kb_sha256,kb_sha256),
+  kb_bid_v2_outline_reduce_put(uuid,kb_sha256,kb_sha256,kb_sha256,kb_sha256,jsonb),
+  kb_bid_v2_outline_synthesis_packet_append(uuid,kb_sha256,kb_sha256,kb_sha256,kb_sha256,jsonb),
+  kb_bid_v2_outline_checkpoint_append(uuid,kb_sha256,integer,integer,text,jsonb),
+  kb_bid_v2_outline_checkpoint_latest(uuid,kb_sha256)
 TO kb_runtime_worker;
 
 COMMIT;

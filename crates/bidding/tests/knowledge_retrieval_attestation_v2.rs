@@ -25,6 +25,7 @@ mod support;
 
 const CONTRACT: &str = KNOWLEDGE_EVIDENCE_CONTRACT_V2;
 const DOCUMENT_NAME: &str = "v2-attestation.txt";
+static PG_TEST_SERIAL: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 #[derive(Clone)]
 struct ChunkFixture {
@@ -605,6 +606,10 @@ fn assert_check_constraint(error: sqlx::Error, expected: &str) {
 
 #[tokio::test]
 async fn attest_verify_positive_trusted_types_and_cross_version_replay() {
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) =
         support::connect_postgres_contract("KnowledgeRetrievalAttestationV2Replay").await
     else {
@@ -711,6 +716,10 @@ async fn attest_verify_positive_trusted_types_and_cross_version_replay() {
 
 #[tokio::test]
 async fn embedding_revision_revocation_invalidates_v2_attestation() {
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) =
         support::connect_postgres_contract("KnowledgeRetrievalAttestationV2EmbeddingRevocation")
             .await
@@ -788,6 +797,10 @@ async fn embedding_revision_revocation_invalidates_v2_attestation() {
 
 #[tokio::test]
 async fn embedding_revision_revoke_serializes_with_policy_insert() {
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) = support::connect_postgres_contract(
         "KnowledgeRetrievalAttestationV2EmbeddingInsertRevocationLock",
     )
@@ -889,6 +902,10 @@ async fn embedding_revision_revoke_serializes_with_policy_insert() {
 
 #[tokio::test]
 async fn policy_registry_rejects_unknown_revoked_quota_mismatch_and_mutation() {
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) =
         support::connect_postgres_contract("KnowledgeRetrievalAttestationV2Policy").await
     else {
@@ -1030,6 +1047,10 @@ async fn policy_registry_rejects_unknown_revoked_quota_mismatch_and_mutation() {
 
 #[tokio::test]
 async fn policy_revocation_waits_for_open_attestation_transaction() {
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) =
         support::connect_postgres_contract("KnowledgeRetrievalAttestationV2RevocationLock").await
     else {
@@ -1105,6 +1126,10 @@ async fn policy_revocation_waits_for_open_attestation_transaction() {
 
 #[tokio::test]
 async fn attestation_rejects_a_preestablished_repeatable_read_snapshot() {
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) =
         support::connect_postgres_contract("KnowledgeRetrievalAttestationV2Isolation").await
     else {
@@ -1138,6 +1163,10 @@ async fn attestation_rejects_a_preestablished_repeatable_read_snapshot() {
 
 #[tokio::test]
 async fn read_committed_attestation_waits_then_validates_the_committed_scope() {
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) =
         support::connect_postgres_contract("KnowledgeRetrievalAttestationV2PostLockState").await
     else {
@@ -1238,6 +1267,10 @@ async fn read_committed_attestation_waits_then_validates_the_committed_scope() {
 
 #[tokio::test]
 async fn attestation_locks_live_scope_and_rerank_revision_against_concurrent_mutation() {
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) =
         support::connect_postgres_contract("KnowledgeRetrievalAttestationV2AtomicScope").await
     else {
@@ -1420,6 +1453,10 @@ async fn attestation_locks_live_scope_and_rerank_revision_against_concurrent_mut
 
 #[tokio::test]
 async fn independently_rejects_hit_identity_digest_length_and_offset_mutations() {
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) =
         support::connect_postgres_contract("KnowledgeRetrievalAttestationV2TamperMatrix").await
     else {
@@ -1513,6 +1550,10 @@ async fn independently_rejects_hit_identity_digest_length_and_offset_mutations()
 
 #[tokio::test]
 async fn rejects_untrusted_source_and_live_name_content_type_or_eligibility_mismatch() {
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) =
         support::connect_postgres_contract("KnowledgeRetrievalAttestationV2Sources").await
     else {
@@ -1599,6 +1640,10 @@ async fn rejects_untrusted_source_and_live_name_content_type_or_eligibility_mism
 
 #[tokio::test]
 async fn explicit_exact_prefix_and_reranked_suffix_provenance_is_attested() {
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) =
         support::connect_postgres_contract("KnowledgeRetrievalAttestationV2Provenance").await
     else {
@@ -1668,6 +1713,10 @@ async fn explicit_exact_prefix_and_reranked_suffix_provenance_is_attested() {
 
 #[tokio::test]
 async fn rejects_missing_or_extra_product_scope() {
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) =
         support::connect_postgres_contract("KnowledgeRetrievalAttestationV2Scope").await
     else {
@@ -1703,6 +1752,10 @@ async fn rejects_missing_or_extra_product_scope() {
 
 #[tokio::test]
 async fn rejects_non_dense_ranks_and_duplicate_source_identity() {
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) =
         support::connect_postgres_contract("KnowledgeRetrievalAttestationV2Ranks").await
     else {
@@ -1740,6 +1793,10 @@ async fn rejects_non_dense_ranks_and_duplicate_source_identity() {
 
 #[tokio::test]
 async fn quota_boundaries_pass_and_each_excess_fails_closed() {
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) =
         support::connect_postgres_contract("KnowledgeRetrievalAttestationV2Quota").await
     else {

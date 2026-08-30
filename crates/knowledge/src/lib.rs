@@ -1,5 +1,10 @@
 //! Knowledge assets, ingest pipeline, and retrieval.
 
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(test)]
+pub(crate) static TEST_PG_SERIAL: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
 pub mod chunker;
 pub mod clone;
 pub mod enrichment;

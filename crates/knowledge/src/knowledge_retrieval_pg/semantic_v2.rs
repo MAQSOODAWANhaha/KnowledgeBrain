@@ -1496,13 +1496,17 @@ pub(super) mod tests {
     }
 
     async fn postgres_pool() -> Option<sqlx::PgPool> {
-        let database_url = match std::env::var("DATABASE_URL") {
+        let database_url = match std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL") {
             Ok(value) => value,
             Err(_) if std::env::var_os("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").is_some() => {
-                panic!("DATABASE_URL is required for semantic V2 PostgreSQL tests")
+                panic!("KNOWLEDGEBRAIN_TEST_DATABASE_URL is required for semantic V2 PostgreSQL tests")
             }
             Err(_) => return None,
         };
+        assert!(
+            !database_url.contains(":15432/"),
+            "semantic V2 PostgreSQL tests refuse the live :15432 database"
+        );
         Some(
             sqlx::postgres::PgPoolOptions::new()
                 .max_connections(5)
@@ -1574,6 +1578,10 @@ pub(super) mod tests {
 
     #[tokio::test]
     async fn runtime_lock_is_shadow_safe_acl_narrow_and_serializes_revocations() {
+        let _permit = crate::TEST_PG_SERIAL
+            .acquire()
+            .await
+            .expect("test semaphore closed");
         let Some(pool) = postgres_pool().await else {
             return;
         };
@@ -1796,6 +1804,10 @@ pub(super) mod tests {
 
     #[tokio::test]
     async fn postgres_folding_recall_repeatability_exclusion_and_integrity_are_fail_closed() {
+        let _permit = crate::TEST_PG_SERIAL
+            .acquire()
+            .await
+            .expect("test semaphore closed");
         let Some(pool) = postgres_pool().await else {
             return;
         };

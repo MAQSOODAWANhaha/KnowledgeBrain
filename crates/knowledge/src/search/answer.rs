@@ -256,6 +256,7 @@ mod tests {
 
     #[test]
     fn empty_hits_do_not_fabricate() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let mut s = Store::default();
         let (_, pid, _) = seed_product(&mut s);
         let out = answer(
@@ -277,6 +278,7 @@ mod tests {
 
     #[test]
     fn answers_from_hits_via_current_model() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let mut s = Store::default();
         let (_, pid, vid) = seed_product(&mut s);
         add_hit_doc(&mut s, vid, "spec", "device throughput is 40Gbps");
@@ -308,6 +310,7 @@ mod tests {
 
     #[test]
     fn omitted_version_id_searches_all_active() {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap();
         let mut s = Store::default();
         let (_, pid, vid) = seed_product(&mut s);
         add_hit_doc(&mut s, vid, "spec", "device throughput is 40Gbps");

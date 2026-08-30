@@ -1952,10 +1952,10 @@ mod tests {
 
     #[tokio::test]
     async fn matching_pg_returns_candidates_without_best_product() {
-        let _g = {
-            static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-            LOCK.lock().await
-        };
+        let _permit = crate::TEST_PG_SERIAL
+            .acquire()
+            .await
+            .expect("test semaphore closed");
         let Ok(pool) = connect_test_pool().await else {
             eprintln!("skip: isolated postgres test database not configured");
             return;

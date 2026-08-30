@@ -94,6 +94,46 @@ const SCHEMAS: &[(&str, &str, &str)] = &[
         "ad786d1a7425efc771bbc2cfc7bbcab1de68056bfee47ad5cd1ac86e2b3b128a",
     ),
     (
+        "outline-evidence-batch-v4.schema.json",
+        include_str!("../schemas/outline-evidence-batch-v4.schema.json"),
+        "7bbce8e569fd3ebdc5c359eed40ced5ff956ebde16afb619f933d64ede48d491",
+    ),
+    (
+        "requirement-grouping-batch-v1.schema.json",
+        include_str!("../schemas/requirement-grouping-batch-v1.schema.json"),
+        "8e14274f36be10b3bbfd5e5977e84f91fdacddaba62517f93668d5ed4148e4b3",
+    ),
+    (
+        "fulfillment-group-v1.schema.json",
+        include_str!("../schemas/fulfillment-group-v1.schema.json"),
+        "a193c82ee2679c7ffb3740bc2a09007b9e8faaceb5a7008f3aa572f5f1d55ade",
+    ),
+    (
+        "section-obligation-matrix-v2.schema.json",
+        include_str!("../schemas/section-obligation-matrix-v2.schema.json"),
+        "3fa4301e84041f0c81bddcdff2542f441754303abe0418f0daf964d3923d5367",
+    ),
+    (
+        "outline-reduce-plan-v3.schema.json",
+        include_str!("../schemas/outline-reduce-plan-v3.schema.json"),
+        "1a9a1d4a77135f1766620ed986a644ed1d0a100f758025d91dd48b1afbd8e96d",
+    ),
+    (
+        "outline-draft-patch-v1.schema.json",
+        include_str!("../schemas/outline-draft-patch-v1.schema.json"),
+        "f6e8dfd46010f7ac4b32b47521ece77a7a71f0bab8efd9a7072475b44a027835",
+    ),
+    (
+        "outline-synthesis-packet-v3.schema.json",
+        include_str!("../schemas/outline-synthesis-packet-v3.schema.json"),
+        "2744a867ae0296026eca18a161caef637f98f30d03382d82b9edf3313b2706bd",
+    ),
+    (
+        "outline-synthesis-checkpoint-v3.schema.json",
+        include_str!("../schemas/outline-synthesis-checkpoint-v3.schema.json"),
+        "04ab83f88bd55e78ccb642bcd43284ff10101e8119c590e7e6da4a687b9cd2ba",
+    ),
+    (
         "render-document-snapshot-v2.schema.json",
         include_str!("../schemas/render-document-snapshot-v2.schema.json"),
         "4047791bd136a261e24e7c05de160ab133ffe0bc521523fc012d0aa6050096e6",
@@ -155,7 +195,7 @@ fn enum_literals(value: &Value) -> BTreeSet<&str> {
 
 #[test]
 fn authoring_schema_bytes_and_hashes_are_golden() {
-    assert_eq!(SCHEMAS.len(), 23);
+    assert_eq!(SCHEMAS.len(), 31);
     for (name, source, expected_sha256) in SCHEMAS {
         let parsed: Value = serde_json::from_str(source).unwrap_or_else(|error| {
             panic!("{name} is not valid JSON: {error}");
@@ -325,6 +365,60 @@ fn approved_v2_contract_invariants_are_frozen() {
             .unwrap()
             .iter()
             .any(|value| value == "accepted_obligation_bindings")
+    );
+
+    let map_v4 = by_name("outline-evidence-batch-v4.schema.json");
+    assert_eq!(map_v4["properties"]["schema_version"]["const"], 4);
+    assert!(
+        map_v4["properties"]
+            .get("requirement_route_hints")
+            .is_none()
+    );
+    for property in [
+        "fulfillment_group_key",
+        "fulfillment_group_title",
+        "materialization",
+    ] {
+        assert!(
+            map_v4["$defs"]["structureFragment"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == property)
+        );
+    }
+    let grouping_v1 = by_name("requirement-grouping-batch-v1.schema.json");
+    assert_eq!(grouping_v1["properties"]["assignments"]["maxItems"], 64);
+    let group_v1 = by_name("fulfillment-group-v1.schema.json");
+    assert!(
+        group_v1["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "need_occurrences")
+    );
+    let matrix_v2 = by_name("section-obligation-matrix-v2.schema.json");
+    assert!(matrix_v2.to_string().contains("required_group_refs"));
+    let reduce_v3 = by_name("outline-reduce-plan-v3.schema.json");
+    assert!(reduce_v3["properties"].get("requirement_routes").is_none());
+    assert!(
+        reduce_v3["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "fulfillment_groups")
+    );
+    let patch_v1 = by_name("outline-draft-patch-v1.schema.json");
+    assert!(patch_v1.to_string().contains("coverage_group_refs"));
+    assert!(patch_v1.to_string().contains("base_draft_sha256"));
+    let packet_v3 = by_name("outline-synthesis-packet-v3.schema.json");
+    let checkpoint_v3 = by_name("outline-synthesis-checkpoint-v3.schema.json");
+    assert!(!packet_v3.to_string().contains("route_chunk_count"));
+    assert!(!checkpoint_v3.to_string().contains("accepted_routes"));
+    assert!(
+        !checkpoint_v3
+            .to_string()
+            .contains("accepted_obligation_bindings")
     );
 
     let outline_output_v2 = by_name("outline-generation-output-v2.schema.json");

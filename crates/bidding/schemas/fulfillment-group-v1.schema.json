@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://knowledgebrain.local/schemas/fulfillment-group-v1.schema.json",
+  "title": "FulfillmentGroupV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "group_ref",
+    "group_key",
+    "title",
+    "section_ref",
+    "semantic_role",
+    "materialization",
+    "requiredness",
+    "applicability",
+    "need_occurrences",
+    "source_unit_revision_ids",
+    "structured_form_revision_ids",
+    "fragment_refs"
+  ],
+  "properties": {
+    "group_ref": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "group_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "section_ref": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "semantic_role": {
+      "enum": [
+        "qualification",
+        "technical",
+        "commercial",
+        "quotation",
+        "deviation",
+        "implementation",
+        "evidence_index",
+        "attachment",
+        "other"
+      ]
+    },
+    "materialization": {
+      "enum": [
+        "explicit_child",
+        "bind_existing",
+        "audit_only"
+      ]
+    },
+    "requiredness": {
+      "enum": [
+        "mandatory",
+        "optional",
+        "informational"
+      ]
+    },
+    "applicability": {
+      "enum": [
+        "required",
+        "optional",
+        "conditional",
+        "not_applicable"
+      ]
+    },
+    "need_occurrences": {
+      "type": "array",
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "need_occurrence_id",
+          "channel"
+        ],
+        "properties": {
+          "need_occurrence_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "channel": {
+            "enum": [
+              "narrative_content",
+              "response_table",
+              "deviation_statement",
+              "structured_form",
+              "evidence_attachment",
+              "quotation"
+            ]
+          }
+        }
+      }
+    },
+    "source_unit_revision_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "format": "uuid"
+      }
+    },
+    "structured_form_revision_ids": {
+      "type": "array",
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "format": "uuid"
+      }
+    },
+    "fragment_refs": {
+      "type": "array",
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
+    }
+  }
+}

@@ -154,6 +154,7 @@ export function DocumentCanvas({
     );
     applying.current = false;
     // nodeKey + revision cover tree identity; drafts skip this path.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, revision, nodeKey]);
 
   useEffect(() => {

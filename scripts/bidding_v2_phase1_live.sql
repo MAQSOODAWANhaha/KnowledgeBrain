@@ -334,11 +334,15 @@ END $$;
 
 DO $$
 DECLARE actor kb_actor_identity:='user:10000000-0000-4000-8000-000000000001';
-  workspace_id uuid; workspace_value jsonb; docset bid_document_set_current%ROWTYPE;
+  workspace_id uuid; workspace_value jsonb;
   request_value jsonb; replay_value jsonb; candidate_value jsonb; snapshot jsonb; accepted jsonb;
-  nodes jsonb; outline_input jsonb; candidate_payload bytea; candidate_sha kb_sha256;
+  nodes jsonb; outline_input jsonb; reduce_value jsonb; technical_needs jsonb; technical_sources jsonb;
+  commercial_sources jsonb; root_sources jsonb; routes jsonb; candidate_json jsonb;
+  candidate_payload bytea; candidate_sha kb_sha256;
   request_bytes bytea:=convert_to('{"outline":"generate"}','UTF8'); request_sha kb_sha256;
   candidate_id uuid:='10000000-0000-4000-8000-000000000090';
+  commercial_section constant text:=repeat('a',64); technical_section constant text:=repeat('b',64);
+  commercial_group constant text:=repeat('c',64); technical_group constant text:=repeat('d',64);
 BEGIN
   SELECT id INTO STRICT workspace_id FROM bid_submission_workspaces
     WHERE project_id='10000000-0000-4000-8000-000000000010';
@@ -363,19 +367,82 @@ BEGIN
        WHERE NOT requirement ? 'requiredness' OR requirement ? 'mandatory') THEN
     RAISE EXCEPTION 'outline frozen input contract mismatch';
   END IF;
-  nodes:=jsonb_build_array(jsonb_build_object(
-    'client_node_ref','outline-technical','parent_client_node_ref',NULL,'ordinal',0,
-    'title','技术方案','semantic_role','technical','render_role','section',
-    'origin_source_unit_revision_ids','[]'::jsonb));
-  candidate_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,'nodes',nodes,
-    'bindings','[]'::jsonb,'notices','[]'::jsonb));
+  SELECT coalesce(jsonb_agg(jsonb_build_object(
+      'need_occurrence_id',need->>'need_occurrence_id','channel',need->>'channel')
+      ORDER BY need->>'need_occurrence_id'),'[]'::jsonb)
+    INTO technical_needs
+    FROM jsonb_array_elements(outline_input->'requirements') requirement
+    CROSS JOIN LATERAL jsonb_array_elements(requirement->'need_occurrences') need
+    WHERE requirement->>'requiredness'='mandatory';
+  SELECT coalesce(jsonb_agg(source_id ORDER BY source_id),'[]'::jsonb) INTO technical_sources
+    FROM (SELECT DISTINCT source_id FROM jsonb_array_elements(outline_input->'requirements') requirement
+      CROSS JOIN LATERAL jsonb_array_elements(requirement->'source_unit_revision_ids') source_id) sources;
+  commercial_sources:=jsonb_build_array(outline_input#>>'{source_units,0,source_unit_revision_id}');
+  root_sources:=commercial_sources||technical_sources;
+  nodes:=jsonb_build_array(
+    jsonb_build_object('client_node_ref','root','parent_client_node_ref',NULL,'ordinal',0,
+      'title','投标文件','semantic_role','cover','render_role','front_matter','origin_source_unit_revision_ids',root_sources),
+    jsonb_build_object('client_node_ref','toc','parent_client_node_ref','root','ordinal',0,
+      'title','目录','semantic_role','toc','render_role','toc','origin_source_unit_revision_ids',root_sources),
+    jsonb_build_object('client_node_ref','spine_'||left(commercial_section,24),'parent_client_node_ref','root','ordinal',1,
+      'title','商务文件','semantic_role','commercial','render_role','section','origin_source_unit_revision_ids',commercial_sources),
+    jsonb_build_object('client_node_ref','spine_'||left(technical_section,24),'parent_client_node_ref','root','ordinal',2,
+      'title','技术文件','semantic_role','technical','render_role','section','origin_source_unit_revision_ids',technical_sources),
+    jsonb_build_object('client_node_ref','commercial-letter','parent_client_node_ref','spine_'||left(commercial_section,24),'ordinal',0,
+      'title','投标函','semantic_role','commercial','render_role','section','origin_source_unit_revision_ids',commercial_sources),
+    jsonb_build_object('client_node_ref','technical-response','parent_client_node_ref','spine_'||left(technical_section,24),'ordinal',0,
+      'title','技术要求响应','semantic_role','technical','render_role','section','origin_source_unit_revision_ids',technical_sources));
+  SELECT coalesce(jsonb_agg(jsonb_build_object(
+      'need_occurrence_id',need->>'need_occurrence_id','channel',need->>'channel',
+      'target_client_node_ref','technical-response') ORDER BY need->>'need_occurrence_id'),'[]'::jsonb)
+    INTO routes FROM jsonb_array_elements(technical_needs) need;
+  reduce_value:=jsonb_build_object(
+    'schema_version',3,'coverage',jsonb_build_object('expected_batch_count',1,'covered_batch_ordinals',jsonb_build_array(0),
+      'expected_source_unit_revision_ids',root_sources,'covered_source_unit_revision_ids',root_sources),
+    'composition_spine',jsonb_build_object('schema_version',1,'root_title','投标文件',
+      'root_source_unit_revision_ids',root_sources,'sections',jsonb_build_array(
+        jsonb_build_object('section_ref',commercial_section,'title','商务文件','semantic_role','commercial','ordinal',0,
+          'source_numbering',NULL,'applicability','required','evidence_kind','explicit_composition_clause','confidence','high',
+          'source_unit_revision_ids',commercial_sources),
+        jsonb_build_object('section_ref',technical_section,'title','技术文件','semantic_role','technical','ordinal',1,
+          'source_numbering',NULL,'applicability','required','evidence_kind','explicit_composition_clause','confidence','high',
+          'source_unit_revision_ids',technical_sources))),
+    'section_obligation_matrix',jsonb_build_object('schema_version',2,'sections',jsonb_build_array(
+      jsonb_build_object('section_ref',commercial_section,'required_group_refs',jsonb_build_array(commercial_group),
+        'conditional_group_refs','[]'::jsonb,'excluded_group_refs','[]'::jsonb),
+      jsonb_build_object('section_ref',technical_section,'required_group_refs',jsonb_build_array(technical_group),
+        'conditional_group_refs','[]'::jsonb,'excluded_group_refs','[]'::jsonb))),
+    'fulfillment_groups',jsonb_build_array(
+      jsonb_build_object('group_ref',commercial_group,'group_key','bid-letter','title','投标函',
+        'section_ref',commercial_section,'semantic_role','commercial','materialization','explicit_child',
+        'requiredness','mandatory','applicability','required','need_occurrences','[]'::jsonb,
+        'source_unit_revision_ids',commercial_sources,'structured_form_revision_ids','[]'::jsonb,'fragment_refs','[]'::jsonb),
+      jsonb_build_object('group_ref',technical_group,'group_key','technical-response','title','技术要求响应',
+        'section_ref',technical_section,'semantic_role','technical','materialization','explicit_child',
+        'requiredness','mandatory','applicability','required','need_occurrences',technical_needs,
+        'source_unit_revision_ids',technical_sources,'structured_form_revision_ids','[]'::jsonb,'fragment_refs','[]'::jsonb)),
+    'structure_fragments',jsonb_build_array(
+      jsonb_build_object('title','商务文件','outline_usage','composition_spine','source_numbering',NULL,
+        'source_unit_revision_ids',commercial_sources),
+      jsonb_build_object('title','技术文件','outline_usage','composition_spine','source_numbering',NULL,
+        'source_unit_revision_ids',technical_sources)),
+    'priority_reads','[]'::jsonb,'unresolved_conflicts','[]'::jsonb,'vision_requests','[]'::jsonb,'notices','[]'::jsonb);
+  PERFORM kb_bid_v2_outline_reduce_put(
+    (request_value->>'request_artifact_id')::uuid,(request_value->>'frozen_input_sha256')::kb_sha256,
+    repeat('1',64)::kb_sha256,repeat('2',64)::kb_sha256,repeat('3',64)::kb_sha256,reduce_value);
+  candidate_json:=jsonb_build_object('schema_version',2,'nodes',nodes,'bindings',routes,
+    'section_obligation_bindings',jsonb_build_array(
+      jsonb_build_object('obligation_id',commercial_group,'target_client_node_ref','commercial-letter'),
+      jsonb_build_object('obligation_id',technical_group,'target_client_node_ref','technical-response')),
+    'notices','[]'::jsonb);
+  candidate_payload:=kb_bid_v2_json_payload(candidate_json);
   candidate_sha:=kb_bid_v2_sha256_bytes(candidate_payload);
   PERFORM kb_bid_v2_publish_outline_generation(
     (request_value->>'request_artifact_id')::uuid,(request_value->>'request_revision')::bigint,
     (request_value->>'frozen_input_sha256')::kb_sha256,candidate_id,candidate_payload,candidate_sha,nodes);
   candidate_value:=kb_bid_v2_get_candidate(workspace_id,candidate_id,actor);
-  IF candidate_value->>'status'<>'proposed' OR jsonb_array_length(candidate_value->'nodes')=0 THEN
-    RAISE EXCEPTION 'outline candidate missing';
+  IF candidate_value->>'status'<>'proposed' OR jsonb_array_length(candidate_value->'nodes')<>6 THEN
+    RAISE EXCEPTION 'V8 outline candidate missing';
   END IF;
   snapshot:=jsonb_build_object(
     'schema_version',1,'document_settings',workspace_value->'document_settings',

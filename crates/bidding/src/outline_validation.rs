@@ -264,12 +264,12 @@ fn validate_tree(
     let root_ref = roots[0].client_node_ref.clone();
     let mut children: HashMap<Option<String>, Vec<&OutlineNodeV1>> = HashMap::new();
     for node in nodes {
-        if let Some(parent) = &node.parent_client_node_ref {
-            if parent == &node.client_node_ref || !by_ref.contains_key(parent) {
-                return Err(OutlineValidationError::invalid(
-                    "outline parent is missing or self-referential",
-                ));
-            }
+        if let Some(parent) = &node.parent_client_node_ref
+            && (parent == &node.client_node_ref || !by_ref.contains_key(parent))
+        {
+            return Err(OutlineValidationError::invalid(
+                "outline parent is missing or self-referential",
+            ));
         }
         children
             .entry(node.parent_client_node_ref.clone())
@@ -480,7 +480,7 @@ fn validate_semantic_spine_and_obligations(
     let spine = reduce
         .get("composition_spine")
         .and_then(Value::as_object)
-        .ok_or_else(|| semantic_failure("Reduce V2 composition spine is missing"))?;
+        .ok_or_else(|| semantic_failure("Reduce V3 composition spine is missing"))?;
     let sections = spine
         .get("sections")
         .and_then(Value::as_array)
@@ -639,6 +639,20 @@ fn validate_semantic_spine_and_obligations(
         }
     }
 
+    let groups = reduce
+        .get("fulfillment_groups")
+        .and_then(Value::as_array)
+        .ok_or_else(|| semantic_failure("Reduce V3 fulfillment groups are missing"))?
+        .iter()
+        .map(|group| {
+            let group_ref = group
+                .get("group_ref")
+                .and_then(Value::as_str)
+                .filter(|value| sha256_text(value))
+                .ok_or_else(|| semantic_failure("fulfillment group ref invalid"))?;
+            Ok((group_ref.to_owned(), group))
+        })
+        .collect::<Result<HashMap<_, _>, OutlineValidationError>>()?;
     let mut obligations = HashMap::<String, (String, &Value, bool, bool)>::new();
     for section in reduce
         .pointer("/section_obligation_matrix/sections")
@@ -652,30 +666,50 @@ fn validate_semantic_spine_and_obligations(
             .ok_or_else(|| semantic_failure("obligation section ref invalid"))?
             .to_owned();
         for (key, required, excluded) in [
-            ("required_children", true, false),
-            ("conditional_children", false, false),
-            ("excluded_children", false, true),
+            ("required_group_refs", true, false),
+            ("conditional_group_refs", false, false),
+            ("excluded_group_refs", false, true),
         ] {
-            for obligation in section
+            for group_ref in section
                 .get(key)
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
+                .filter_map(Value::as_str)
             {
-                let id = obligation
-                    .get("obligation_id")
-                    .and_then(Value::as_str)
-                    .filter(|id| sha256_text(id))
-                    .ok_or_else(|| semantic_failure("obligation id invalid"))?
-                    .to_owned();
+                if !sha256_text(group_ref) {
+                    return Err(semantic_failure("matrix fulfillment group ref invalid"));
+                }
+                let group = groups.get(group_ref).ok_or_else(|| {
+                    semantic_failure("matrix references unknown fulfillment group")
+                })?;
+                if group.get("section_ref").and_then(Value::as_str) != Some(&section_ref)
+                    || excluded
+                        != (group.get("applicability").and_then(Value::as_str)
+                            == Some("not_applicable"))
+                    || (required
+                        && group.get("requiredness").and_then(Value::as_str) != Some("mandatory"))
+                {
+                    return Err(semantic_failure(
+                        "matrix fulfillment group classification conflicts with frozen group",
+                    ));
+                }
                 if obligations
-                    .insert(id, (section_ref.clone(), obligation, required, excluded))
+                    .insert(
+                        group_ref.to_owned(),
+                        (section_ref.clone(), *group, required, excluded),
+                    )
                     .is_some()
                 {
-                    return Err(semantic_failure("duplicate section obligation id"));
+                    return Err(semantic_failure("duplicate matrix fulfillment group ref"));
                 }
             }
         }
+    }
+    if obligations.len() != groups.len() {
+        return Err(semantic_failure(
+            "every fulfillment group must appear exactly once in Matrix V2",
+        ));
     }
     if output.section_obligation_bindings.len() > 100_000 {
         return Err(semantic_failure("too many section obligation bindings"));
@@ -687,19 +721,21 @@ fn validate_semantic_spine_and_obligations(
         {
             return Err(semantic_failure("section obligation binding invalid"));
         }
-        let (section_ref, obligation, _, excluded) = obligations
+        let (section_ref, group, _, excluded) = obligations
             .get(&binding.obligation_id)
-            .ok_or_else(|| semantic_failure("binding references unknown obligation"))?;
-        if *excluded {
-            return Err(semantic_failure("excluded obligation cannot be bound"));
+            .ok_or_else(|| semantic_failure("binding references unknown fulfillment group"))?;
+        if *excluded || group.get("materialization").and_then(Value::as_str) == Some("audit_only") {
+            return Err(semantic_failure(
+                "excluded fulfillment group cannot be bound",
+            ));
         }
         let target = by_ref
             .get(&binding.target_client_node_ref)
-            .ok_or_else(|| semantic_failure("obligation target node missing"))?;
+            .ok_or_else(|| semantic_failure("fulfillment group target node missing"))?;
         let section_node_ref = spine_node_ref(section_ref);
         if target.client_node_ref == section_node_ref {
             return Err(semantic_failure(
-                "required child obligation cannot bind to its top-level section",
+                "fulfillment group cannot bind directly to its top-level section",
             ));
         }
         let mut current = Some(target.client_node_ref.as_str());
@@ -719,7 +755,7 @@ fn validate_semantic_spine_and_obligations(
             }
         }
         if !descendant
-            || uuid_set(obligation.get("source_unit_revision_ids")).is_disjoint(
+            || uuid_set(group.get("source_unit_revision_ids")).is_disjoint(
                 &target
                     .origin_source_unit_revision_ids
                     .iter()
@@ -728,14 +764,16 @@ fn validate_semantic_spine_and_obligations(
             )
         {
             return Err(semantic_failure(
-                "obligation target lacks section ancestry or shared frozen evidence",
+                "fulfillment group target lacks section ancestry or shared frozen evidence",
             ));
         }
         if bound
             .insert(binding.obligation_id.clone(), binding)
             .is_some()
         {
-            return Err(semantic_failure("obligation was bound more than once"));
+            return Err(semantic_failure(
+                "fulfillment group was bound more than once",
+            ));
         }
     }
     if obligations
@@ -744,7 +782,7 @@ fn validate_semantic_spine_and_obligations(
     {
         return Err(OutlineValidationError {
             code: "AGENT_OBLIGATION_COVERAGE_FAILED",
-            message: "required SectionObligationMatrixV1 child is not bound".to_owned(),
+            message: "required SectionObligationMatrixV2 group is not bound".to_owned(),
         });
     }
     let routes = output
@@ -752,39 +790,64 @@ fn validate_semantic_spine_and_obligations(
         .iter()
         .map(|binding| (binding.need_occurrence_id, binding))
         .collect::<HashMap<_, _>>();
+    let mut grouped_needs = HashMap::<Uuid, (String, String)>::new();
+    for (group_ref, (_, group, required, excluded)) in &obligations {
+        for occurrence in group
+            .get("need_occurrences")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let need = occurrence
+                .get("need_occurrence_id")
+                .and_then(Value::as_str)
+                .and_then(|raw| Uuid::parse_str(raw).ok())
+                .ok_or_else(|| semantic_failure("grouped need identity invalid"))?;
+            let channel = occurrence
+                .get("channel")
+                .and_then(Value::as_str)
+                .ok_or_else(|| semantic_failure("grouped need channel invalid"))?;
+            if grouped_needs
+                .insert(need, (group_ref.clone(), channel.to_owned()))
+                .is_some()
+            {
+                return Err(semantic_failure(
+                    "need occurrence belongs to more than one fulfillment group",
+                ));
+            }
+            if *required && !*excluded {
+                let frozen = expected
+                    .get(&need)
+                    .ok_or_else(|| semantic_failure("group contains non-frozen need occurrence"))?;
+                if frozen.channel != channel {
+                    return Err(semantic_failure(
+                        "grouped need channel conflicts with frozen requirement",
+                    ));
+                }
+            }
+        }
+    }
     for (need, requirement) in expected.iter().filter(|(_, need)| need.mandatory) {
         let route = routes.get(need).ok_or_else(|| OutlineValidationError {
             code: "AGENT_REQUIREMENT_CLOSURE_FAILED",
             message: format!("mandatory need {need} is not routed"),
         })?;
-        let linked = obligations
-            .iter()
-            .any(|(id, (_, obligation, required, excluded))| {
-                *required
-                    && !*excluded
-                    && obligation
-                        .get("need_occurrence_ids")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .any(|id| id == need.to_string())
-                    && obligation
-                        .get("allowed_channels")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .any(|channel| channel == requirement.channel)
-                    && bound.get(id).is_some_and(|binding| {
-                        binding.target_client_node_ref == route.target_client_node_ref
-                    })
-            });
-        if !linked {
+        let (group_ref, channel) =
+            grouped_needs
+                .get(need)
+                .ok_or_else(|| OutlineValidationError {
+                    code: "AGENT_REQUIREMENT_CLOSURE_FAILED",
+                    message: format!("mandatory need {need} is not in a fulfillment group"),
+                })?;
+        if channel != &requirement.channel
+            || bound.get(group_ref).is_none_or(|binding| {
+                binding.target_client_node_ref != route.target_client_node_ref
+            })
+        {
             return Err(OutlineValidationError {
                 code: "AGENT_REQUIREMENT_CLOSURE_FAILED",
                 message: format!(
-                    "mandatory need {need} is not closed by a matching section obligation"
+                    "mandatory need {need} is not closed by its matching fulfillment group"
                 ),
             });
         }
@@ -861,7 +924,7 @@ mod tests {
 
     fn reduce() -> Value {
         json!({
-            "schema_version":2,
+            "schema_version":3,
             "composition_spine":{
                 "schema_version":1,"root_title":"投标文件",
                 "root_source_unit_revision_ids":[id(1),id(2)],
@@ -870,10 +933,14 @@ mod tests {
                     {"section_ref":TECHNICAL_REF,"title":"技术文件","semantic_role":"technical","ordinal":1,"source_numbering":"3.1.2","applicability":"required","evidence_kind":"explicit_composition_clause","confidence":"high","source_unit_revision_ids":[id(2)]}
                 ]
             },
+            "fulfillment_groups":[
+                {"group_ref":COMMERCIAL_OBLIGATION,"group_key":"bid-letter","title":"投标函","section_ref":COMMERCIAL_REF,"semantic_role":"commercial","materialization":"explicit_child","requiredness":"mandatory","applicability":"required","need_occurrences":[],"source_unit_revision_ids":[id(1)],"structured_form_revision_ids":[],"fragment_refs":[]},
+                {"group_ref":TECHNICAL_OBLIGATION,"group_key":"technical-response","title":"技术要求响应","section_ref":TECHNICAL_REF,"semantic_role":"technical","materialization":"explicit_child","requiredness":"mandatory","applicability":"required","need_occurrences":[{"need_occurrence_id":id(3),"channel":"narrative_content"}],"source_unit_revision_ids":[id(2)],"structured_form_revision_ids":[],"fragment_refs":[]}
+            ],
             "section_obligation_matrix":{
-                "schema_version":1,"sections":[
-                    {"section_ref":COMMERCIAL_REF,"required_children":[{"obligation_id":COMMERCIAL_OBLIGATION,"title":"投标函","semantic_role":"commercial","ordinal":0,"requiredness":"mandatory","evidence_kind":"format_template","source_unit_revision_ids":[id(1)],"structured_form_revision_ids":[],"need_occurrence_ids":[],"allowed_channels":["narrative_content"]}],"conditional_children":[],"excluded_children":[]},
-                    {"section_ref":TECHNICAL_REF,"required_children":[{"obligation_id":TECHNICAL_OBLIGATION,"title":"技术要求响应","semantic_role":"technical","ordinal":0,"requiredness":"mandatory","evidence_kind":"mandatory_requirement","source_unit_revision_ids":[id(2)],"structured_form_revision_ids":[],"need_occurrence_ids":[id(3)],"allowed_channels":["narrative_content"]}],"conditional_children":[],"excluded_children":[]}
+                "schema_version":2,"sections":[
+                    {"section_ref":COMMERCIAL_REF,"required_group_refs":[COMMERCIAL_OBLIGATION],"conditional_group_refs":[],"excluded_group_refs":[]},
+                    {"section_ref":TECHNICAL_REF,"required_group_refs":[TECHNICAL_OBLIGATION],"conditional_group_refs":[],"excluded_group_refs":[]}
                 ]
             },
             "structure_fragments":[

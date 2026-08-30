@@ -193,13 +193,15 @@ pub async fn run_clone(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{create_workspace_with_library, insert_document, insert_user};
+    use crate::{TEST_PG_SERIAL, create_workspace_with_library, insert_document, insert_user};
     use platform::apply_fresh_baseline;
-    use tokio::sync::{Mutex, OnceCell};
+    use tokio::sync::{OnceCell, SemaphorePermit};
 
-    async fn db_lock() -> tokio::sync::MutexGuard<'static, ()> {
-        static LOCK: Mutex<()> = Mutex::const_new(());
-        LOCK.lock().await
+    async fn db_lock() -> SemaphorePermit<'static> {
+        TEST_PG_SERIAL
+            .acquire()
+            .await
+            .expect("test semaphore closed")
     }
 
     async fn connect_test_pool() -> Result<sqlx::PgPool, sqlx::Error> {

@@ -366,13 +366,13 @@ async fn process_submission_export_v2(
     .await?;
     let prepared = match bidding::bid_authoring_v2::prepare_submission_export_v2(
         pool,
-        job.request.request_artifact_id,
-        job.request.request_revision,
-        &job.request.frozen_input_sha256,
-        font_staging_id,
-        &font_ref,
-        &font_digest,
-        "font/otf",
+        &job.request,
+        bidding::bid_authoring_v2::SubmissionExportFontV2 {
+            staging_id: font_staging_id,
+            object_ref: &font_ref,
+            sha256: &font_digest,
+            media_type: "font/otf",
+        },
         Uuid::new_v4(),
         Uuid::new_v4(),
         ACTOR,
@@ -475,21 +475,24 @@ async fn process_submission_export_v2(
     let output_id = Uuid::new_v4();
     let result = bidding::bid_authoring_v2::publish_submission_export_v2(
         pool,
-        job.request.request_artifact_id,
-        job.request.request_revision,
-        &job.request.frozen_input_sha256,
-        font_staging_id,
-        &font_ref,
-        &font_digest,
-        "font/otf",
+        &job.request,
+        bidding::bid_authoring_v2::SubmissionExportFontV2 {
+            staging_id: font_staging_id,
+            object_ref: &font_ref,
+            sha256: &font_digest,
+            media_type: "font/otf",
+        },
         snapshot_id,
         manifest_id,
-        output_staging_id,
-        output_id,
-        &output_ref,
-        &output_digest,
-        media_type,
-        i64::try_from(bytes.len()).map_err(|_| JobErr("rendered object too large".into()))?,
+        bidding::bid_authoring_v2::SubmissionExportOutputV2 {
+            staging_id: output_staging_id,
+            artifact_id: output_id,
+            object_ref: &output_ref,
+            sha256: &output_digest,
+            media_type,
+            byte_length: i64::try_from(bytes.len())
+                .map_err(|_| JobErr("rendered object too large".into()))?,
+        },
         ACTOR,
     )
     .await;

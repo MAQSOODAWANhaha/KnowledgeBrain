@@ -331,6 +331,18 @@ impl TenderProcessTransport for InactiveTenderProcessTransport {
     }
 }
 
+struct TenderPublicationInput<'a> {
+    document: &'a FrozenTenderDocument,
+    request: &'a BidAuthoringRequestIdentityV2,
+    converted_source_id: Uuid,
+    source_object: FrozenObjectIdentity,
+    source_payload: Vec<u8>,
+    parser_units: &'a [StructuredSourceUnit],
+    image_by_ref: &'a HashMap<&'a str, &'a docparser::ImageRef>,
+    image_source_type: &'a str,
+    language: &'a str,
+}
+
 pub struct TenderDocumentProcessService<R, C, V, T> {
     repository: R,
     converter: C,
@@ -477,15 +489,17 @@ where
 
         let build_result = self
             .build_publication(
-                &document,
-                payload_request,
-                converted_source_id,
-                source_object,
-                source_bytes,
-                &converted.structured_source_units,
-                &image_by_ref,
-                &image_source_type,
-                &language,
+                TenderPublicationInput {
+                    document: &document,
+                    request: payload_request,
+                    converted_source_id,
+                    source_object,
+                    source_payload: source_bytes,
+                    parser_units: &converted.structured_source_units,
+                    image_by_ref: &image_by_ref,
+                    image_source_type: &image_source_type,
+                    language: &language,
+                },
                 &mut staged,
             )
             .await;
@@ -510,20 +524,22 @@ where
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn build_publication(
         &self,
-        document: &FrozenTenderDocument,
-        request: &BidAuthoringRequestIdentityV2,
-        converted_source_id: Uuid,
-        source_object: FrozenObjectIdentity,
-        source_payload: Vec<u8>,
-        parser_units: &[StructuredSourceUnit],
-        image_by_ref: &HashMap<&str, &docparser::ImageRef>,
-        image_source_type: &str,
-        language: &str,
+        input: TenderPublicationInput<'_>,
         staged: &mut Vec<FrozenObjectIdentity>,
     ) -> Result<TenderDocumentPublication, TenderDocumentProcessError> {
+        let TenderPublicationInput {
+            document,
+            request,
+            converted_source_id,
+            source_object,
+            source_payload,
+            parser_units,
+            image_by_ref,
+            image_source_type,
+            language,
+        } = input;
         let mut image_artifacts = Vec::new();
         let mut source_units = Vec::with_capacity(parser_units.len());
         let mut image_set_digests = Vec::new();

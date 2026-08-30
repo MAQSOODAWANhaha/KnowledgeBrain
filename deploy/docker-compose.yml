@@ -235,7 +235,7 @@ services:
       network: host
       args:
         BIN: worker
-    image: knowledgebrain-worker:local
+    image: knowledgebrain-worker@sha256:5d2715634560254f7c975b5c2a35bc73b72a09ec7926696d91d0dbaa9be6d256
     environment:
       <<: *app-env
       BIN: retention

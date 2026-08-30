@@ -3,17 +3,17 @@ use uuid::Uuid;
 
 pub fn postgres_contract_tests_required() -> bool {
     std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").is_ok_and(|value| value == "1")
-        || std::env::var_os("DATABASE_URL").is_some()
+        || std::env::var_os("KNOWLEDGEBRAIN_TEST_DATABASE_URL").is_some()
 }
 
 pub async fn connect_postgres_contract(label: &str) -> Option<PgPool> {
-    let database_url = match platform::database_url() {
-        Ok(database_url) => database_url,
-        Err(error) if postgres_contract_tests_required() => {
-            panic!("read required {label} contract database URL: {error}")
+    let database_url = match std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL") {
+        Ok(database_url) if !database_url.trim().is_empty() => database_url,
+        Ok(_) | Err(_) if postgres_contract_tests_required() => {
+            panic!("required {label} contract needs explicit KNOWLEDGEBRAIN_TEST_DATABASE_URL")
         }
-        Err(error) => {
-            eprintln!("skipped {label} contract: database URL unavailable: {error}");
+        Ok(_) | Err(_) => {
+            eprintln!("skipped {label} contract: KNOWLEDGEBRAIN_TEST_DATABASE_URL is unavailable");
             return None;
         }
     };
