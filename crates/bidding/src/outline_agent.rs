@@ -4832,11 +4832,10 @@ mod tests {
             {"title":"商务文件","outline_usage":"composition_spine","source_numbering":null,"source_unit_revision_ids":[commercial_source]}
         ]);
         let mut draft = DraftAccumulator::default();
-        let patch = v8_test_patch(&draft.digest(),"patch-derived-routes");
-        draft.apply_patch(&reduce,&patch,false).unwrap();
-        let commercial_parent = spine_node_ref(
-            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        );
+        let patch = v8_test_patch(&draft.digest(), "patch-derived-routes");
+        draft.apply_patch(&reduce, &patch, false).unwrap();
+        let commercial_parent =
+            spine_node_ref("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
         let commercial_patch = json!({
             "schema_version":1,"patch_ref":"patch-commercial-child",
             "base_draft_sha256":draft.digest(),
@@ -4848,18 +4847,31 @@ mod tests {
             }],
             "replace_nodes":[],"delete_node_refs":[]
         });
-        draft.apply_patch(&reduce,&commercial_patch,false).unwrap();
-        let output = close_outline(&input,&reduce,&draft).unwrap();
-        assert_eq!(output["bindings"],json!([{
-            "need_occurrence_id":need,"channel":"narrative_content",
-            "target_client_node_ref":"technical-response"
-        }]));
-        assert_eq!(output["section_obligation_bindings"],json!([{
-            "obligation_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "target_client_node_ref":"technical-response"
-        }]));
-        assert!(output["nodes"].as_array().unwrap().iter()
-            .all(|node|node.get("coverage_group_refs").is_none()));
+        draft
+            .apply_patch(&reduce, &commercial_patch, false)
+            .unwrap();
+        let output = close_outline(&input, &reduce, &draft).unwrap();
+        assert_eq!(
+            output["bindings"],
+            json!([{
+                "need_occurrence_id":need,"channel":"narrative_content",
+                "target_client_node_ref":"technical-response"
+            }])
+        );
+        assert_eq!(
+            output["section_obligation_bindings"],
+            json!([{
+                "obligation_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "target_client_node_ref":"technical-response"
+            }])
+        );
+        assert!(
+            output["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|node| node.get("coverage_group_refs").is_none())
+        );
     }
 
     #[test]

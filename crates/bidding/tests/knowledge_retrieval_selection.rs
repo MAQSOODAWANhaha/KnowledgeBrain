@@ -383,7 +383,10 @@ fn assert_database_error(error: sqlx::Error, expected: &str) {
 
 #[tokio::test]
 async fn adapter_enforces_exact_unique_current_workspace_kind_selection() {
-    let _permit = PG_TEST_SERIAL.acquire().await.expect("test semaphore closed");
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) = support::connect_postgres_contract("KnowledgeSelectionAdapter").await else {
         return;
     };
@@ -437,7 +440,10 @@ async fn adapter_enforces_exact_unique_current_workspace_kind_selection() {
 
 #[tokio::test]
 async fn populated_v1_adapter_output_bytes_and_behavior_are_frozen() {
-    let _permit = PG_TEST_SERIAL.acquire().await.expect("test semaphore closed");
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) = support::connect_postgres_contract("KnowledgeSelectionV1ByteGolden").await
     else {
         return;
@@ -476,7 +482,10 @@ async fn populated_v1_adapter_output_bytes_and_behavior_are_frozen() {
 
 #[tokio::test]
 async fn attestation_freezes_empty_all_or_nonempty_exact_per_kind_selection() {
-    let _permit = PG_TEST_SERIAL.acquire().await.expect("test semaphore closed");
+    let _permit = PG_TEST_SERIAL
+        .acquire()
+        .await
+        .expect("test semaphore closed");
     let Some(pool) = support::connect_postgres_contract("KnowledgeSelectionAttestation").await
     else {
         return;

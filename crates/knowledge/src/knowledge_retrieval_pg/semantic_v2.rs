@@ -1499,7 +1499,9 @@ pub(super) mod tests {
         let database_url = match std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL") {
             Ok(value) => value,
             Err(_) if std::env::var_os("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").is_some() => {
-                panic!("KNOWLEDGEBRAIN_TEST_DATABASE_URL is required for semantic V2 PostgreSQL tests")
+                panic!(
+                    "KNOWLEDGEBRAIN_TEST_DATABASE_URL is required for semantic V2 PostgreSQL tests"
+                )
             }
             Err(_) => return None,
         };
