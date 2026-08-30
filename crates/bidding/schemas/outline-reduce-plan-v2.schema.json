@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:knowledgebrain:bid:outline-reduce-plan:v2",
+  "title": "OutlineReducePlanV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "coverage", "composition_spine", "section_obligation_matrix", "structure_fragments", "priority_reads", "requirement_routes", "unresolved_conflicts", "vision_requests", "notices"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "coverage": { "$ref": "#/$defs/coverage" },
+    "composition_spine": { "$ref": "urn:knowledgebrain:bid:composition-spine:v1" },
+    "section_obligation_matrix": { "$ref": "urn:knowledgebrain:bid:section-obligation-matrix:v1" },
+    "structure_fragments": { "type": "array", "maxItems": 100000, "items": { "$ref": "#/$defs/structureFragment" } },
+    "priority_reads": { "type": "array", "maxItems": 100000, "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } },
+    "requirement_routes": { "type": "array", "maxItems": 100000, "items": { "$ref": "#/$defs/routeHint" } },
+    "unresolved_conflicts": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/conflict" } },
+    "vision_requests": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/visionNeed" } },
+    "notices": { "type": "array", "maxItems": 10000, "items": { "$ref": "#/$defs/batchNotice" } }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "semanticRole": { "enum": ["cover", "toc", "qualification", "technical", "commercial", "quotation", "deviation", "implementation", "evidence_index", "attachment", "other"] },
+    "confidence": { "enum": ["high", "medium", "low"] },
+    "channel": { "enum": ["narrative_content", "response_table", "deviation_statement", "structured_form", "evidence_attachment", "quotation"] },
+    "outlineUsage": { "enum": ["composition_spine", "output_child", "form_template", "requirement_context", "reference_only"] },
+    "applicability": { "enum": ["required", "optional", "conditional", "not_applicable"] },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_units_total", "source_units_mapped", "requirements_total", "requirements_routed"],
+      "properties": {
+        "source_units_total": { "type": "integer", "minimum": 0 },
+        "source_units_mapped": { "type": "integer", "minimum": 0 },
+        "requirements_total": { "type": "integer", "minimum": 0 },
+        "requirements_routed": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "structureFragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signal_ref", "title", "semantic_role", "signal_kind", "outline_usage", "applicability", "composition_parent_role", "path_segments", "heading_level", "numbering", "source_numbering", "source_order", "source_unit_revision_ids", "confidence", "scope_repaired"],
+      "properties": {
+        "signal_ref": { "$ref": "#/$defs/sha256" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "semantic_role": { "$ref": "#/$defs/semanticRole" },
+        "signal_kind": { "enum": ["explicit_toc", "explicit_composition_clause", "explicit_format_clause", "explicit_package_clause", "explicit_upload_clause", "heading", "form", "evaluation_clause", "inferred"] },
+        "outline_usage": { "$ref": "#/$defs/outlineUsage" },
+        "applicability": { "$ref": "#/$defs/applicability" },
+        "composition_parent_role": { "anyOf": [{ "$ref": "#/$defs/semanticRole" }, { "type": "null" }] },
+        "path_segments": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 1024 } },
+        "heading_level": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "numbering": { "type": ["string", "null"], "maxLength": 128 },
+        "source_numbering": { "type": ["string", "null"], "maxLength": 128 },
+        "source_order": { "type": "integer", "minimum": 0 },
+        "source_unit_revision_ids": { "type": "array", "minItems": 1, "maxItems": 1000, "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "scope_repaired": { "type": "boolean" }
+      }
+    },
+    "routeHint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["need_occurrence_id", "suggested_semantic_role", "target_path_hint", "channel", "source_unit_revision_ids", "confidence"],
+      "properties": {
+        "need_occurrence_id": { "$ref": "#/$defs/uuid" },
+        "suggested_semantic_role": { "$ref": "#/$defs/semanticRole" },
+        "target_path_hint": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 1024 } },
+        "channel": { "$ref": "#/$defs/channel" },
+        "source_unit_revision_ids": { "type": "array", "maxItems": 1000, "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } },
+        "confidence": { "$ref": "#/$defs/confidence" }
+      }
+    },
+    "conflict": { "type": "object", "additionalProperties": false, "required": ["code", "message", "source_unit_revision_ids"], "properties": { "code": { "enum": ["CONFLICTING_STRUCTURE", "ALTERNATE_SOURCE", "UNCLEAR_HIERARCHY"] }, "message": { "type": "string", "minLength": 1, "maxLength": 4096 }, "source_unit_revision_ids": { "type": "array", "maxItems": 1000, "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } } } },
+    "visionNeed": { "type": "object", "additionalProperties": false, "required": ["source_unit_revision_id", "reason"], "properties": { "source_unit_revision_id": { "$ref": "#/$defs/uuid" }, "reason": { "enum": ["OCR_EMPTY", "OCR_LOW_CONFIDENCE", "STRUCTURE_UNREADABLE"] } } },
+    "batchNotice": { "type": "object", "additionalProperties": false, "required": ["code", "message", "source_identity"], "properties": { "code": { "enum": ["LOW_CONFIDENCE", "UNRESOLVED_SOURCE", "FORM_STRUCTURE_DEVIATION", "VISION_REVIEW", "SCOPE_REPAIRED"] }, "message": { "type": "string", "minLength": 1, "maxLength": 4096 }, "source_identity": { "type": "string", "minLength": 1, "maxLength": 256 } } }
+  }
+}

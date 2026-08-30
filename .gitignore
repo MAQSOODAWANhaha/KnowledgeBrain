@@ -23,3 +23,7 @@ web/e2e/artifacts/
 .impeccable/
 target-bookworm/
 .pi/
+artifacts/
+testdata/
+*.png
+.pi-lens.json

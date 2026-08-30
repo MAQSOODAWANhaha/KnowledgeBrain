@@ -79,6 +79,9 @@ pub enum RichNode {
     Paragraph { content: Vec<Inline> },
     BulletList { content: Vec<ListItem> },
     OrderedList { content: Vec<ListItem> },
+    Blockquote { content: Vec<Paragraph> },
+    CodeBlock { language: String, text: String },
+    HorizontalRule,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +199,21 @@ impl BlockContent {
         for node in nodes {
             match node {
                 RichNode::Paragraph { content } => Self::validate_inline(content)?,
+                RichNode::HorizontalRule => {}
+                RichNode::CodeBlock { language, text } => {
+                    if language.len() > 64 || text.len() > 65_536 {
+                        return Err("code block exceeds limit");
+                    }
+                }
+                RichNode::Blockquote { content } => {
+                    if content.len() > 1_000 {
+                        return Err("blockquote length is invalid");
+                    }
+                    for paragraph in content {
+                        let Paragraph::Paragraph { content } = paragraph;
+                        Self::validate_inline(content)?;
+                    }
+                }
                 RichNode::BulletList { content } | RichNode::OrderedList { content } => {
                     if content.is_empty() || content.len() > 1_000 {
                         return Err("list length is invalid");

@@ -45,6 +45,29 @@ pub fn chat_model() -> String {
     first_env(&["KNOWLEDGEBRAIN_CHAT_MODEL", "LLM_MODEL"])
 }
 
+/// OpenAI Chat Completions (`/v1/chat/completions`). stub-chat is not a model.
+pub fn openai_chat_ready(base_url: &str, api_key: &str, model: &str) -> bool {
+    let model = model.trim();
+    !base_url.trim().is_empty()
+        && !api_key.trim().is_empty()
+        && !model.is_empty()
+        && model != "stub-chat"
+}
+
+pub fn openai_chat_configured() -> bool {
+    openai_chat_ready(&chat_base_url(), &chat_api_key(), &chat_model())
+}
+
+/// API and worker refuse to start without a real OpenAI-compatible chat endpoint.
+pub fn require_openai_chat() {
+    if openai_chat_configured() {
+        return;
+    }
+    panic!(
+        "OpenAI-compatible chat is required at startup: set KNOWLEDGEBRAIN_CHAT_BASE_URL, KNOWLEDGEBRAIN_CHAT_API_KEY, and KNOWLEDGEBRAIN_CHAT_MODEL (aliases: LLM_BASE_URL / LLM_API_KEY / LLM_MODEL). stub-chat is not allowed."
+    );
+}
+
 pub fn embedding_base_url() -> String {
     first_env(&["KNOWLEDGEBRAIN_EMBEDDING_BASE_URL", "EMBEDDING_BASE_URL"])
 }
@@ -224,5 +247,19 @@ fn ip_blocked(ip: std::net::IpAddr) -> bool {
                 || v.is_unicast_link_local()
                 || v.to_ipv4_mapped().is_some_and(v4_blocked)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::openai_chat_ready;
+
+    #[test]
+    fn openai_chat_requires_url_key_and_real_model() {
+        assert!(!openai_chat_ready("", "k", "gpt-4"));
+        assert!(!openai_chat_ready("https://example/v1", "", "gpt-4"));
+        assert!(!openai_chat_ready("https://example/v1", "k", ""));
+        assert!(!openai_chat_ready("https://example/v1", "k", "stub-chat"));
+        assert!(openai_chat_ready("https://example/v1", "k", "gpt-4"));
     }
 }

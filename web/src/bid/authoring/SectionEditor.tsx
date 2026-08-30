@@ -5,7 +5,12 @@ import { TableCell } from "@tiptap/extension-table-cell";
 import { TableHeader } from "@tiptap/extension-table-header";
 import { TableRow } from "@tiptap/extension-table-row";
 import Underline from "@tiptap/extension-underline";
-import { EditorContent, useEditor, type Editor } from "@tiptap/react";
+import {
+  BubbleMenu,
+  EditorContent,
+  useEditor,
+  type Editor,
+} from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useMemo } from "react";
 import { contentBlockToEditorModel, type TiptapNode } from "./adapter";
@@ -89,7 +94,9 @@ function RichBlockEditor({
   if (!editor) return null;
   return (
     <div>
-      <FormatBar editor={editor} table={block.kind === "table"} />
+      <BubbleMenu editor={editor} className="fmt-bubble">
+        <FormatBar editor={editor} table={block.kind === "table"} />
+      </BubbleMenu>
       <EditorContent
         editor={editor}
         data-testid={`block-editor-${block.lineage_id}`}
@@ -173,11 +180,12 @@ export function SectionBlocks({
   live: boolean;
 }) {
   const blocks = blocksForNode(node, state.workspace?.blocks, state.drafts);
+  useEffect(() => {
+    if (!live || state.ended || blocks.length > 0) return;
+    void session.insertRichTextBlock(node.lineage_id, 0);
+  }, [live, state.ended, blocks.length, node.lineage_id, session]);
   return (
     <>
-      {blocks.length === 0 && live && (
-        <p className="note">这一章还是空的。插入段落，或点「生成本章」。</p>
-      )}
       {blocks.map((block) => (
         <div
           key={block.lineage_id}

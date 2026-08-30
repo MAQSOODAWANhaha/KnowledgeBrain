@@ -27,23 +27,25 @@ export function fileStage(
 ): {
   label: string;
   tone: "pine" | "amber" | "rose" | "gray";
-  desc: string;
+  progress: number;
+  busy: boolean;
   retryable: boolean;
 } {
-  const err = explainFileError(doc.error_code || "", doc.file_name);
   if (doc.parse_status === "failed") {
     return {
-      label: "解析失败",
+      label: "失败",
       tone: "rose",
-      desc: err || "解析失败，可重试或换格式。",
+      progress: 100,
+      busy: false,
       retryable: true,
     };
   }
   if (doc.parse_status === "pending") {
     return {
-      label: "排队解析",
+      label: "排队",
       tone: "gray",
-      desc: "已入库，等待转换。",
+      progress: 20,
+      busy: true,
       retryable: false,
     };
   }
@@ -51,14 +53,16 @@ export function fileStage(
     return {
       label: "解析中",
       tone: "amber",
-      desc: "正在抽取来源结构。",
+      progress: 65,
+      busy: true,
       retryable: false,
     };
   }
   return {
-    label: "已解析",
+    label: "完成",
     tone: "pine",
-    desc: "可冻结文件集并进入要求台账。",
+    progress: 100,
+    busy: false,
     retryable: false,
   };
 }

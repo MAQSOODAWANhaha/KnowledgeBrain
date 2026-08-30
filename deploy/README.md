@@ -16,6 +16,15 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env \
   --profile runtime up -d --build
 ```
 
+生产环境把 `docker-compose.pro.yml` 叠在现有 compose 上，直接拉 GitHub Container Registry 的 `latest` 镜像，不改、也不走本地构建文件。私有仓库先登录 GHCR：
+
+```bash
+cp deploy/.env.example deploy/.env
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u USER --password-stdin
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.pro.yml \
+  --env-file deploy/.env --profile runtime up -d --no-build
+```
+
 `api`、`worker`、`retention` 都等待 `migrate` 成功。应用进程启动时只连接依赖，不执行
 DDL。重启使用：
 

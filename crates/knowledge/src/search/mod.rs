@@ -1661,6 +1661,24 @@ fn product_versions(store: &Store, p: &crate::Product, scope: &str) -> Vec<Uuid>
 mod tests {
     use super::*;
 
+    async fn connect_test_pool() -> Result<sqlx::PgPool, sqlx::Error> {
+        let database_url = std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL").map_err(|_| {
+            sqlx::Error::Configuration(
+                "KNOWLEDGEBRAIN_TEST_DATABASE_URL is required for destructive PostgreSQL tests"
+                    .into(),
+            )
+        })?;
+        if database_url.contains(":15432/") {
+            return Err(sqlx::Error::Configuration(
+                "destructive PostgreSQL tests refuse the live :15432 database".into(),
+            ));
+        }
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(16)
+            .connect(&database_url)
+            .await
+    }
+
     async fn reset_fresh_schema(pool: &sqlx::PgPool) {
         for statement in [
             "DROP SCHEMA public CASCADE",
@@ -1938,8 +1956,8 @@ mod tests {
             static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
             LOCK.lock().await
         };
-        let Ok(pool) = platform::connect().await else {
-            eprintln!("skip: postgres down");
+        let Ok(pool) = connect_test_pool().await else {
+            eprintln!("skip: isolated postgres test database not configured");
             return;
         };
         reset_fresh_schema(&pool).await;

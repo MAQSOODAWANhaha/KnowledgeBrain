@@ -1,3 +1,5 @@
+import { randomUuid } from "./uuid";
+
 const TOKEN = "kb.token";
 
 export function token(): string | null {
@@ -24,7 +26,7 @@ export type MutationAttempt = Readonly<{
 }>;
 
 export function createMutationAttempt(): MutationAttempt {
-  return { idempotencyKey: crypto.randomUUID() };
+  return { idempotencyKey: randomUuid() };
 }
 
 async function req<T>(

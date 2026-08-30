@@ -1,6 +1,8 @@
+import "./adapter.test";
 import "./drafts.test";
 import { runAll, testSummary } from "./harness";
 import "./session.test";
+import "./sha256.test";
 import "./tree.test";
 
 await runAll();

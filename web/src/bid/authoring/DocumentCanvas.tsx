@@ -1,10 +1,100 @@
+import type { Content } from "@tiptap/core";
+import Link from "@tiptap/extension-link";
+import { Table } from "@tiptap/extension-table";
+import { TableCell } from "@tiptap/extension-table-cell";
+import { TableHeader } from "@tiptap/extension-table-header";
+import { TableRow } from "@tiptap/extension-table-row";
+import Underline from "@tiptap/extension-underline";
+import {
+  BubbleMenu,
+  EditorContent,
+  FloatingMenu,
+  useEditor,
+  type Editor,
+} from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useRef } from "react";
 import { go } from "../../hash";
+import { outlineToDoc, type TiptapNode } from "./adapter";
 import { blocksForNode } from "./blocks";
+import {
+  BidDocument,
+  BidImage,
+  Chapter,
+  ChapterTitle,
+  PageBreak,
+  SignatureBlock,
+} from "./chapter";
+import { EvidenceRef } from "./EvidenceRef";
 import { authoringHref } from "./routes";
-import { SectionBlocks } from "./SectionEditor";
 import type { BidV2Session, BidV2State } from "./session";
 import { flattenPreorder } from "./tree";
+
+const EXTENSIONS = [
+  StarterKit.configure({
+    document: false,
+    heading: false,
+  }),
+  BidDocument,
+  Chapter,
+  ChapterTitle,
+  PageBreak,
+  SignatureBlock,
+  BidImage,
+  Underline,
+  Link.configure({ openOnClick: false }),
+  Table.configure({ resizable: false }),
+  TableRow,
+  TableHeader,
+  TableCell,
+  EvidenceRef,
+];
+
+function FormatBar({ editor }: { editor: Editor }) {
+  return (
+    <div className="fmt-bar">
+      <button type="button" onClick={() => editor.chain().focus().toggleBold().run()}>
+        B
+      </button>
+      <button type="button" onClick={() => editor.chain().focus().toggleItalic().run()}>
+        I
+      </button>
+      <button
+        type="button"
+        onClick={() => editor.chain().focus().toggleUnderline().run()}
+      >
+        U
+      </button>
+      <button type="button" onClick={() => editor.chain().focus().toggleStrike().run()}>
+        S
+      </button>
+      <button
+        type="button"
+        onClick={() => editor.chain().focus().toggleBulletList().run()}
+      >
+        •
+      </button>
+      <button
+        type="button"
+        onClick={() => editor.chain().focus().toggleOrderedList().run()}
+      >
+        1.
+      </button>
+      <button
+        type="button"
+        onClick={() => editor.chain().focus().toggleBlockquote().run()}
+      >
+        “
+      </button>
+      <button
+        type="button"
+        onClick={() => editor.chain().focus().toggleCodeBlock().run()}
+      >
+        {"</>"}
+      </button>
+    </div>
+  );
+}
 
 export function DocumentCanvas({
   session,
@@ -15,21 +105,59 @@ export function DocumentCanvas({
 }) {
   const nodes = flattenPreorder(session.tree());
   const focused = state.selectedNodeLineageId;
-  const focusedNode = focused ? session.findNode(focused) : null;
-  const focusedBlocks = blocksForNode(
-    focusedNode,
-    state.workspace?.blocks,
-    state.drafts,
-  );
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const navigating = useRef(false);
   const selectedRef = useRef(state.selectedNodeLineageId);
   selectedRef.current = state.selectedNodeLineageId;
+  const applying = useRef(false);
   const projectId = state.route?.projectId ?? "";
-  const nodeIds = nodes.map((node) => node.lineage_id).join(",");
+  const nodeKey = nodes.map((node) => `${node.lineage_id}:${node.depth}`).join("|");
+  const revision = state.workspace?.revision_id ?? "";
+
+  const editor = useEditor({
+    extensions: EXTENSIONS,
+    content: outlineToDoc(nodes, (node) =>
+      blocksForNode(node, state.workspace?.blocks, state.drafts),
+    ) as Content,
+    immediatelyRender: false,
+    editable: !state.ended,
+    onUpdate: ({ editor: instance }) => {
+      if (applying.current || !state.workspace) return;
+      session.applyDocument(instance.getJSON() as TiptapNode);
+    },
+    onSelectionUpdate: ({ editor: instance }) => {
+      const pos = instance.state.selection.from;
+      const chapter = instance.state.doc.resolve(pos).node(1);
+      const id = chapter?.type.name === "chapter" ? chapter.attrs.lineageId : null;
+      if (typeof id === "string" && id && id !== selectedRef.current) {
+        session.selectNode(id);
+        if (projectId) go(authoringHref(projectId, "authoring", id));
+      }
+    },
+  });
 
   useEffect(() => {
-    if (!focused) return;
+    if (!editor) return;
+    applying.current = true;
+    editor.setEditable(!state.ended);
+    applying.current = false;
+  }, [editor, state.ended]);
+
+  useEffect(() => {
+    if (!editor) return;
+    if (Object.keys(state.drafts).length > 0) return;
+    applying.current = true;
+    editor.commands.setContent(
+      outlineToDoc(nodes, (node) =>
+        blocksForNode(node, state.workspace?.blocks, state.drafts),
+      ) as Content,
+    );
+    applying.current = false;
+    // nodeKey + revision cover tree identity; drafts skip this path.
+  }, [editor, revision, nodeKey]);
+
+  useEffect(() => {
+    if (!focused || !editor) return;
     navigating.current = true;
     const el = document.getElementById(`canvas-section-${focused}`);
     const rootEl = scrollRef.current;
@@ -41,134 +169,30 @@ export function DocumentCanvas({
     }
     const timer = window.setTimeout(() => {
       navigating.current = false;
-    }, 500);
+    }, 400);
     return () => window.clearTimeout(timer);
-  }, [focused]);
+  }, [focused, editor]);
 
-  useEffect(() => {
-    const root = scrollRef.current;
-    if (!root) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (navigating.current) return;
-        const visible = entries
-          .filter((entry) => entry.isIntersecting)
-          .sort(
-            (a, b) => a.boundingClientRect.top - b.boundingClientRect.top,
-          )[0];
-        const id = visible?.target.getAttribute("data-node-id");
-        if (!id || id === selectedRef.current) return;
-        session.selectNode(id);
-        if (projectId) go(authoringHref(projectId, "authoring", id));
-      },
-      { root, rootMargin: "-18% 0px -62% 0px", threshold: 0.05 },
+  if (nodes.length === 0) {
+    return (
+      <div className="ed-page" data-testid="document-canvas">
+        <div className="ed-stage canvas-stage">
+          <div className="ed-doc">
+            <p className="note">还没有章节。在左侧添加根章节，或点「生成大纲」。</p>
+          </div>
+        </div>
+      </div>
     );
-    for (const el of root.querySelectorAll("[data-node-id]"))
-      observer.observe(el);
-    return () => observer.disconnect();
-  }, [nodeIds, projectId, session]);
-
-  const pending = state.asyncRequests.find(
-    (request) => request.status === "pending",
-  );
-
-  function select(id: string) {
-    session.selectNode(id);
-    if (projectId) go(authoringHref(projectId, "authoring", id));
   }
 
   return (
     <div className="ed-page" data-testid="document-canvas">
       <div className="ed-toolbar">
-        <strong>{focusedNode?.title ?? "投标文件"}</strong>
+        <strong>投标文件</strong>
         <span className="chip gray" data-testid="draft-status">
           {state.draftStatus}
         </span>
-        <button
-          type="button"
-          className="btn ghost"
-          disabled={state.ended || !focusedNode}
-          onClick={() =>
-            focusedNode &&
-            session.insertRichTextBlock(
-              focusedNode.lineage_id,
-              focusedBlocks.length,
-            )
-          }
-        >
-          插入段落
-        </button>
-        <button
-          type="button"
-          className="btn ghost"
-          disabled={state.ended || !focusedNode}
-          onClick={() =>
-            focusedNode &&
-            session.insertTableBlock(
-              focusedNode.lineage_id,
-              focusedBlocks.length,
-            )
-          }
-        >
-          插入表格
-        </button>
-        <button
-          type="button"
-          className="btn ghost"
-          disabled={state.ended || !focusedNode}
-          onClick={() =>
-            focusedNode &&
-            session.insertPageBreak(
-              focusedNode.lineage_id,
-              focusedBlocks.length,
-            )
-          }
-        >
-          分页
-        </button>
-        <button
-          type="button"
-          className="btn ghost"
-          disabled={state.ended || !focusedNode}
-          onClick={() =>
-            focusedNode &&
-            session.insertSignature(
-              focusedNode.lineage_id,
-              focusedBlocks.length,
-            )
-          }
-        >
-          签章占位
-        </button>
-        <label className="chip gray" style={{ cursor: "pointer" }}>
-          插入图片
-          <input
-            type="file"
-            accept="image/*"
-            hidden
-            disabled={state.ended || !focusedNode}
-            onChange={(event) => {
-              const file = event.currentTarget.files?.[0];
-              if (file) void session.uploadAsset(file);
-              event.currentTarget.value = "";
-            }}
-          />
-        </label>
-        <button
-          type="button"
-          className="btn"
-          disabled={state.ended || state.draftStatus === "clean"}
-          onClick={() => void session.save()}
-        >
-          保存
-        </button>
       </div>
-      {pending && (
-        <div className="banner" data-testid="authoring-pending">
-          正在{pending.kind === "OutlineGenerate" ? "生成大纲" : "填充内容"}
-          …可继续改树和正文。
-        </div>
-      )}
       {state.conflict && (
         <div className="banner warn" data-testid="authoring-conflict">
           工作区已更新。
@@ -190,41 +214,59 @@ export function DocumentCanvas({
       )}
       <div className="ed-stage canvas-stage">
         <div className="ed-doc" ref={scrollRef} data-testid="section-editor">
-          <div className="ed-sheet">
-            {nodes.length === 0 && (
-              <p className="note">
-                还没有章节。在左侧添加根章节，或点「生成大纲」。
-              </p>
-            )}
-            {nodes.map((node) => {
-              const live = node.lineage_id === focused;
-              const heading =
-                node.depth === 0 ? "h1" : node.depth === 1 ? "h2" : "h3";
-              const Heading = heading;
-              return (
-                <section
-                  key={node.lineage_id}
-                  id={`canvas-section-${node.lineage_id}`}
-                  data-node-id={node.lineage_id}
-                  data-testid={`canvas-section-${node.lineage_id}`}
-                  className={`canvas-section${live ? " on" : ""}`}
-                  onClick={() => {
-                    if (!live) select(node.lineage_id);
-                  }}
+          {editor ? (
+            <>
+              <BubbleMenu editor={editor} className="fmt-bubble">
+                <FormatBar editor={editor} />
+              </BubbleMenu>
+              <FloatingMenu editor={editor} className="fmt-bubble">
+                <button
+                  type="button"
+                  onClick={() =>
+                    editor
+                      .chain()
+                      .focus()
+                      .insertTable({ rows: 2, cols: 3, withHeaderRow: true })
+                      .run()
+                  }
                 >
-                  <Heading className={`canvas-${heading}`}>
-                    {node.title}
-                  </Heading>
-                  <SectionBlocks
-                    session={session}
-                    state={state}
-                    node={node}
-                    live={live}
-                  />
-                </section>
-              );
-            })}
-          </div>
+                  表
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    editor.chain().focus().setHorizontalRule().run()
+                  }
+                >
+                  —
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    editor.chain().focus().insertContent({ type: "pageBreak" }).run()
+                  }
+                >
+                  分页
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    editor
+                      .chain()
+                      .focus()
+                      .insertContent({
+                        type: "signature",
+                        attrs: { label: "签字" },
+                      })
+                      .run()
+                  }
+                >
+                  签
+                </button>
+              </FloatingMenu>
+              <EditorContent editor={editor} className="ed-sheet" />
+            </>
+          ) : null}
         </div>
       </div>
     </div>

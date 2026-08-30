@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:knowledgebrain:bid:composition-spine:v1",
+  "title": "CompositionSpineV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "root_title", "root_source_unit_revision_ids", "sections"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "root_title": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "root_source_unit_revision_ids": { "type": "array", "minItems": 1, "maxItems": 1000, "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } },
+    "sections": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/section" } }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "semanticRole": { "enum": ["qualification", "technical", "commercial", "quotation", "attachment", "other"] },
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section_ref", "title", "semantic_role", "ordinal", "source_numbering", "applicability", "evidence_kind", "confidence", "source_unit_revision_ids"],
+      "properties": {
+        "section_ref": { "$ref": "#/$defs/sha256" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "semantic_role": { "$ref": "#/$defs/semanticRole" },
+        "ordinal": { "type": "integer", "minimum": 0, "maximum": 31 },
+        "source_numbering": { "type": ["string", "null"], "maxLength": 128 },
+        "applicability": { "enum": ["required", "optional", "conditional"] },
+        "evidence_kind": { "enum": ["explicit_composition_clause", "explicit_package_clause", "explicit_upload_clause", "evidence_derived"] },
+        "confidence": { "enum": ["high", "medium", "low"] },
+        "source_unit_revision_ids": { "type": "array", "minItems": 1, "maxItems": 1000, "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } }
+      }
+    }
+  }
+}

@@ -1,0 +1,4 @@
+[build]
+# Keep compiler artifacts outside the repository so security/deletion scans never
+# interpret dependency metadata as project source or credentials.
+target-dir = "../.knowledgebrain-target"

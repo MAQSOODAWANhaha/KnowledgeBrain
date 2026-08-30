@@ -237,7 +237,7 @@ CREATE TABLE knowledge_image_ocr_chunk_artifact_mappings (
 );
 
 CREATE FUNCTION kb_knowledge_validate_image_ocr_mapping()
-RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM chunks
@@ -253,7 +253,7 @@ CREATE TRIGGER knowledge_image_ocr_mapping_source_valid
 BEFORE INSERT ON knowledge_image_ocr_chunk_artifact_mappings
 FOR EACH ROW EXECUTE FUNCTION kb_knowledge_validate_image_ocr_mapping();
 CREATE FUNCTION kb_knowledge_reject_image_media_mutation()
-RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public AS $$
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
 BEGIN
     RAISE EXCEPTION 'KNOWLEDGE_IMAGE_MEDIA_IMMUTABLE' USING ERRCODE='42501';
     RETURN NULL;

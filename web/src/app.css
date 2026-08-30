@@ -421,9 +421,15 @@ a {
 .pagehead {
   background: #fff;
   border-bottom: 1px solid var(--line);
-  padding: 16px 24px;
+  padding: 12px 24px 16px;
   display: flex;
-  align-items: flex-end;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+.pagehead-row {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
 }
@@ -433,7 +439,7 @@ a {
   flex-wrap: wrap;
   align-items: center;
   gap: 0;
-  margin: 0 0 6px;
+  margin: 0;
   min-width: 0;
   font-size: 13px;
   font-weight: 500;
@@ -644,10 +650,44 @@ button.chip {
   overflow: visible;
 }
 
+.file-head,
 .file-row {
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
-  align-items: start;
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) 160px 88px 148px;
+  gap: 12px 16px;
+  align-items: center;
+  padding: 12px 20px;
+}
+.file-head {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+.file-head span:nth-child(2),
+.file-head span:nth-child(3),
+.file-head span:nth-child(4),
+.file-row .chip,
+.file-actions {
+  justify-self: start;
+}
+.file-head span:nth-child(4),
+.file-actions {
+  justify-self: end;
+}
+.file-row {
   scroll-margin-top: 16px;
+}
+.file-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  min-width: 148px;
+}
+.file-action-slot {
+  display: inline-block;
+  width: 64px;
+  height: 30px;
 }
 
 .file-row .name {
@@ -763,6 +803,11 @@ button.chip {
   margin-top: 2px;
 }
 
+.item.file-row {
+  grid-template-columns: minmax(0, 1.4fr) 160px 88px 148px;
+  align-items: center;
+  padding: 12px 20px;
+}
 .item.on,
 .item:hover {
   background: var(--iris-tint);
@@ -900,6 +945,32 @@ table.grid tr:hover td {
   display: none;
 }
 
+.bid-stepper-wrap {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+.bid-stepper {
+  width: min(720px, 100%);
+}
+.bid-stepper .mantine-Stepper-separator {
+  margin-inline: 16px;
+  min-width: 56px;
+}
+.bid-stepper .mantine-Stepper-stepIcon {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  font-size: 16px;
+}
+.bid-stepper .mantine-Stepper-stepLabel {
+  font-size: 17px;
+  font-weight: 600;
+}
+.bid-stepper .mantine-Stepper-stepDescription,
+.bid-stepper .mantine-Stepper-content {
+  display: none;
+}
 .wizard {
   display: flex;
   flex-wrap: wrap;
@@ -991,7 +1062,12 @@ table.grid tr:hover td {
 .bench-main {
   min-width: 0;
   overflow: auto;
-  padding: 20px 24px 40px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.bench-main > .wrap {
+  flex: 1;
 }
 
 .insp {
@@ -1078,9 +1154,13 @@ table.grid tr:hover td {
 
 .ed-page {
   flex: 1;
-  min-height: 0;
+  min-height: 70vh;
   display: flex;
   flex-direction: column;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
 }
 
 .ed-toolbar {
@@ -1096,23 +1176,77 @@ table.grid tr:hover td {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 1fr 280px;
-  background: var(--bg);
+  grid-template-columns: 1fr;
+  background: #fff;
 }
 
 .ed-doc {
   overflow: auto;
-  padding: 28px 40px 80px;
+  padding: 28px 16px 64px;
+  display: flex;
+  justify-content: center;
 }
 
 .ed-sheet {
-  max-width: 720px;
+  width: min(760px, 100%);
+  max-width: 760px;
   margin: 0 auto;
   background: #fff;
-  border-radius: 16px;
-  box-shadow: var(--shadow);
-  padding: 36px 44px 48px;
-  min-height: 480px;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 8px 0 80px;
+  min-height: 60vh;
+}
+.ed-sheet .ProseMirror {
+  outline: none;
+  min-height: 60vh;
+}
+.doc-chapter {
+  margin: 0 0 28px;
+}
+.doc-chapter-title {
+  margin: 0 0 12px;
+  letter-spacing: -0.03em;
+  font-weight: 650;
+  outline: none;
+  cursor: text;
+}
+h1.doc-chapter-title,
+.doc-chapter.depth-0 > .doc-chapter-title { font-size: 28px; line-height: 1.25; }
+h2.doc-chapter-title,
+.doc-chapter.depth-1 > .doc-chapter-title { font-size: 22px; line-height: 1.3; }
+h3.doc-chapter-title,
+.doc-chapter.depth-2 > .doc-chapter-title,
+.doc-chapter.depth-3 > .doc-chapter-title { font-size: 17px; line-height: 1.35; }
+.doc-chapter-body {
+  min-height: 24px;
+}
+.doc-chapter-body p {
+  margin: 0 0 10px;
+}
+.doc-chapter-body blockquote {
+  margin: 0 0 12px;
+  padding: 0 0 0 14px;
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+}
+.doc-chapter-body pre {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  background: var(--fill-2);
+  border-radius: 10px;
+  overflow: auto;
+  font-size: 13px;
+}
+.doc-page-break,
+.doc-signature,
+.doc-image {
+  margin: 16px 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .ed-sheet textarea {
@@ -1467,6 +1601,24 @@ table.grid tr:hover td {
   text-align: center;
   color: var(--muted);
 }
+.tender-preview-scroll {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+.tender-preview-scroll .file-preview {
+  min-height: 100%;
+}
+.tender-preview-scroll .preview-frame {
+  min-height: 100%;
+  height: 100%;
+}
+.tender-preview-scroll .preview-docx,
+.tender-preview-scroll .preview-excel,
+.tender-preview-scroll .preview-pptx {
+  overflow: visible;
+}
 .excel-sheet-name {
   font-weight: 650;
   margin: 12px 0 8px;
@@ -1585,8 +1737,14 @@ table.grid tr:hover td {
 .outline-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-height: 32px;
+  margin: 0 8px;
+  padding-right: 4px;
+  border-radius: 8px;
+}
+.outline-row.on {
+  background: var(--iris-soft);
 }
 .outline-row.on > a {
   color: var(--iris-ink);
@@ -1598,14 +1756,34 @@ table.grid tr:hover td {
   align-items: center;
   gap: 6px;
 }
+.outline-row a em {
+  font-style: normal;
+  font-weight: 510;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .outline-ops {
   display: flex;
-  gap: 2px;
+  flex-shrink: 0;
   opacity: 0;
 }
 .outline-row:hover .outline-ops,
 .outline-row.on .outline-ops {
   opacity: 1;
+}
+.fmt-bubble {
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+.fmt-bubble .fmt-bar {
+  margin: 0;
 }
 .outline-ops button {
   border: 0;
@@ -1677,9 +1855,7 @@ table.grid tr:hover td {
   padding-bottom: 28px;
 }
 .canvas-section.on {
-  outline: 1px solid var(--iris-soft);
-  outline-offset: 8px;
-  border-radius: 8px;
+  outline: none;
 }
 .canvas-h1,
 .canvas-h2,

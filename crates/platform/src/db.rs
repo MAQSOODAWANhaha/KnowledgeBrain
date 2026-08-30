@@ -190,6 +190,21 @@ mod tests {
     }
 
     #[test]
+    fn retention_live_upgrade_preserves_the_runtime_function_contract() {
+        let live = include_str!("../../../migrations/shared_platform_retention_live.sql");
+        for function in [
+            "kb_retention_claim",
+            "kb_retention_heartbeat",
+            "kb_retention_complete",
+            "kb_retention_fail",
+        ] {
+            assert!(SHARED_PLATFORM_BASELINE.contains(&format!("CREATE FUNCTION {function}")));
+            assert!(live.contains(&format!("CREATE OR REPLACE FUNCTION {function}")));
+        }
+        assert!(live.contains("TO kb_runtime_retention"));
+    }
+
+    #[test]
     fn runtime_connect_never_bootstraps_schema() {
         let source = include_str!("db.rs");
         let connect_body = source

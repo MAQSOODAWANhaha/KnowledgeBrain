@@ -6,7 +6,7 @@ type Props = {
   root: "bids" | "assets";
   email: string;
   crumbs: ReactNode;
-  title: string;
+  title?: string;
   extra?: ReactNode;
   lead?: ReactNode;
   steps?: ReactNode;
@@ -113,16 +113,18 @@ export function Shell({
         </aside>
       )}
       <div className={`maincol ${className ?? ""}`}>
-        {steps}
         <div className="pagehead">
-          <div>
-            <nav className="crumbs" aria-label="面包屑">
-              {crumbs}
-            </nav>
-            <h1 className="h1">{title}</h1>
-            {lead}
-          </div>
-          {extra && <div className="actions">{extra}</div>}
+          <nav className="crumbs" aria-label="面包屑">
+            {crumbs}
+          </nav>
+          {steps}
+          {title || extra ? (
+            <div className="pagehead-row">
+              {title ? <h1 className="h1">{title}</h1> : <span />}
+              {extra ? <div className="actions">{extra}</div> : null}
+            </div>
+          ) : null}
+          {lead}
         </div>
         {inspector ? (
           <div className="bench">

@@ -1,0 +1,40 @@
+# yaml-language-server: $schema=schemas/compose-spec.json
+# Overlay on docker-compose.yml: pull GHCR images, do not build.
+# Does not change the local-build compose file.
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.pro.yml \
+#     --env-file deploy/.env --profile runtime up -d --no-build
+name: knowledgebrain
+
+services:
+  docreader:
+    build: !reset {}
+    image: ${KNOWLEDGEBRAIN_IMAGE_PREFIX:-ghcr.io/maqsoodawanhaha/knowledgebrain}/docreader:${KNOWLEDGEBRAIN_IMAGE_TAG:-latest}
+    pull_policy: always
+
+  migrate:
+    build: !reset {}
+    image: ${KNOWLEDGEBRAIN_IMAGE_PREFIX:-ghcr.io/maqsoodawanhaha/knowledgebrain}/migrator:${KNOWLEDGEBRAIN_IMAGE_TAG:-latest}
+    pull_policy: always
+    environment:
+      BIN: migrator
+
+  api:
+    build: !reset {}
+    image: ${KNOWLEDGEBRAIN_IMAGE_PREFIX:-ghcr.io/maqsoodawanhaha/knowledgebrain}/api:${KNOWLEDGEBRAIN_IMAGE_TAG:-latest}
+    pull_policy: always
+    environment:
+      BIN: api
+
+  worker:
+    build: !reset {}
+    image: ${KNOWLEDGEBRAIN_IMAGE_PREFIX:-ghcr.io/maqsoodawanhaha/knowledgebrain}/worker:${KNOWLEDGEBRAIN_IMAGE_TAG:-latest}
+    pull_policy: always
+    environment:
+      BIN: worker
+
+  retention:
+    build: !reset {}
+    image: ${KNOWLEDGEBRAIN_IMAGE_PREFIX:-ghcr.io/maqsoodawanhaha/knowledgebrain}/worker:${KNOWLEDGEBRAIN_IMAGE_TAG:-latest}
+    pull_policy: always
+    environment:
+      BIN: retention

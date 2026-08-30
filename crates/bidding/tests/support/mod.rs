@@ -17,6 +17,7 @@ pub async fn connect_postgres_contract(label: &str) -> Option<PgPool> {
             return None;
         }
     };
+    assert_isolated_contract_database(&database_url, label);
     match PgPool::connect(&database_url).await {
         Ok(pool) => {
             open_test_maintenance_gate(&pool, label).await;
@@ -30,6 +31,14 @@ pub async fn connect_postgres_contract(label: &str) -> Option<PgPool> {
             None
         }
     }
+}
+
+fn assert_isolated_contract_database(database_url: &str, label: &str) {
+    let normalized = database_url.to_ascii_lowercase();
+    assert!(
+        !normalized.contains(":15432/") && !normalized.ends_with(":15432"),
+        "refusing to run destructive {label} contract tests against live PostgreSQL port 15432"
+    );
 }
 
 async fn open_test_maintenance_gate(pool: &PgPool, label: &str) {

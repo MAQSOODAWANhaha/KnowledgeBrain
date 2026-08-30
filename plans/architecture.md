@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 状态 | **已确认，实施中（D 未完成项见 [`d5-remaining.md`](d5-remaining.md)）** |
+| 状态 | **已确认，实施中（A–D 已落地；E 后置）** |
 | 产品契约 | [`../docs/bidding/authoring.md`](../docs/bidding/authoring.md) |
 | 编制 Web | [`bidding/frontend-authoring.md`](bidding/frontend-authoring.md) |
 | 后端到达 | [`bidding/tender-to-submission-v2.md`](bidding/tender-to-submission-v2.md) |
@@ -45,7 +45,7 @@
 
 现码还有 `knowledge_base_baseline` / `shared_platform_baseline` / `bidding_v1_baseline` 三刀 first-launch。**那是现状，不是前期落地方式。** 前期在同一个库上直接加表、改表、加 SQL，跟 crate 一起交，不必先改 4000 行 baseline、不必过 checksum manifest 才能编一章。生产级 fresh-launch 仪式往后放，不挡编制主路径。
 
-`knowledge::Store`（内存 HashMap）**不是**第二套生产库。生产已经 `platform::connect()` → Postgres。目标 D：知识管线正式 API 也只走这个 pool，不再 hydrate Store。
+`knowledge::Store`（内存 HashMap）**不是**第二套生产库。生产已经 `platform::connect()` → Postgres。知识管线正式 API 只走这个 pool，不再整仓 hydrate Store。
 
 ---
 
@@ -87,7 +87,7 @@ knowledge              bidding
 
 - pool / migrate / schema identity → `platform::db` / `migrate`
 - `users` / `api_keys` → `platform::auth`
-- workspace / document / chunk / wiki / graph / search SQL 和 `hydrate_workspace` → `knowledge`（生产路径随后删掉 Store hydration）
+- workspace / document / chunk / wiki / graph / search SQL → `knowledge`（生产知识 API 已不 hydrate Store）
 - 投标相关若还写在 persist 里 → `bidding`
 
 **`domain` 撤销落点：**
@@ -251,14 +251,14 @@ plans/bidding/
 
 ## 9. 落地顺序（确认后才执行）
 
-**A 文档** 契约搬家、计划索引、链接。  
-**B 编制主路径可跑** 三步顶栏 + 工作区表按需加在本库；缺什么表加什么，不走 manifest 仪式。  
-**C 并 crate** 同一 `DATABASE_URL`，`pub use` 过渡。验收：仍一个 postgres。  
-**D 知识管用 PgPool** 去掉生产路径上的 `Store`。  
+**A 文档** 契约搬家、计划索引、链接。**已完成。**  
+**B 编制主路径可跑** 三步顶栏 + 工作区表按需加在本库；缺什么表加什么，不走 manifest 仪式。**已完成。**  
+**C 并 crate** 同一 `DATABASE_URL`，`pub use` 过渡。验收：仍一个 postgres。**已完成。**  
+**D 知识管用 PgPool** 去掉生产路径上的 `Store`。**已完成。**  
 **E 后置** 需要干净安装时再收 baseline；删 Gate/PartSet 随编制主路径替换，不单独等「Phase 7 仪式」。
 
 ---
 
 ## 10. 现码对照（不是目标）
 
-crate 已并成 7 个。Web 已是三步导航。`knowledge::Store` hydrate、Matching attestation、Gate/PartSet 仍是现码/待删，不写回目标。
+crate 已并成 7 个。Web 已是三步导航。生产知识 API 已不整仓 `hydrate_workspace`。Matching attestation、Gate/PartSet 仍是现码/待删，不写回目标。

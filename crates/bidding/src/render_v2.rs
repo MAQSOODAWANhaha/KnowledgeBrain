@@ -236,6 +236,39 @@ fn layout_paragraphs(nodes: &[RichNode]) -> Vec<LayoutParagraphV2> {
                 list_marker: None,
                 runs: layout_runs(content),
             }),
+            RichNode::Blockquote { content } => {
+                for paragraph in content {
+                    let RichParagraph::Paragraph { content } = paragraph;
+                    result.push(LayoutParagraphV2 {
+                        list_marker: Some("│ ".into()),
+                        runs: layout_runs(content),
+                    });
+                }
+            }
+            RichNode::CodeBlock { text, .. } => result.push(LayoutParagraphV2 {
+                list_marker: None,
+                runs: vec![LayoutTextRunV2 {
+                    text: text.clone(),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    strike: false,
+                    code: true,
+                    link: None,
+                }],
+            }),
+            RichNode::HorizontalRule => result.push(LayoutParagraphV2 {
+                list_marker: None,
+                runs: vec![LayoutTextRunV2 {
+                    text: "────────".into(),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    strike: false,
+                    code: false,
+                    link: None,
+                }],
+            }),
             RichNode::BulletList { content } | RichNode::OrderedList { content } => {
                 let ordered = matches!(node, RichNode::OrderedList { .. });
                 for (item_index, item) in content.iter().enumerate() {
@@ -759,7 +792,13 @@ fn layout_from_workspace_with_resources_policy(
         .ok_or("workspace blocks missing")?;
     let mut sections = Vec::with_capacity(nodes.len());
     for node in nodes {
-        if node.get("render_role").and_then(Value::as_str) == Some("hidden") {
+        if matches!(
+            node.get("render_role").and_then(Value::as_str),
+            Some("hidden" | "front_matter" | "toc")
+        ) || matches!(
+            node.get("semantic_role").and_then(Value::as_str),
+            Some("cover" | "toc")
+        ) {
             continue;
         }
         let lineage_ids = node
@@ -898,38 +937,51 @@ fn chinese_ordinal(value: u32) -> String {
 }
 
 fn numbered_section_titles(document: &LayoutDocumentV2) -> Vec<String> {
-    let mut counters = [0u32; 6];
+    if document.settings.heading_numbering == "none" {
+        return document
+            .sections
+            .iter()
+            .map(|section| section.title.clone())
+            .collect();
+    }
+    let base_depth = document
+        .sections
+        .iter()
+        .map(|section| section.depth)
+        .min()
+        .unwrap_or(0);
+    let mut counters = [0u32; 8];
     document
         .sections
         .iter()
         .map(|section| {
-            if document.settings.heading_numbering == "none" {
-                return section.title.clone();
-            }
-            let depth = (section.depth as usize).min(counters.len() - 1);
+            let depth = section
+                .depth
+                .saturating_sub(base_depth)
+                .min((counters.len() - 1) as u32) as usize;
             counters[depth] += 1;
             counters
                 .iter_mut()
                 .skip(depth + 1)
                 .for_each(|value| *value = 0);
-            let number = counters[..=depth]
-                .iter()
-                .copied()
-                .filter(|value| *value > 0)
-                .map(|value| {
-                    if document.settings.heading_numbering == "chinese" {
-                        chinese_ordinal(value)
-                    } else {
-                        value.to_string()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(if document.settings.heading_numbering == "chinese" {
-                    "、"
-                } else {
-                    "."
-                });
-            format!("{number} {}", section.title)
+            let prefix = if depth == 0 {
+                format!("{}、", chinese_ordinal(counters[0]))
+            } else if depth == 1 {
+                format!("{}.", counters[1])
+            } else {
+                counters[1..=depth]
+                    .iter()
+                    .copied()
+                    .filter(|value| *value > 0)
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            };
+            if depth == 0 {
+                format!("{prefix}{}", section.title)
+            } else {
+                format!("{prefix} {}", section.title)
+            }
         })
         .collect()
 }
@@ -2099,6 +2151,78 @@ mod tests {
 
     fn workspace() -> Value {
         json!({"nodes":[{"title":"技术方案","depth":0,"render_role":"section","block_lineage_ids":["b1"]}],"blocks":[{"lineage_id":"b1","kind":"rich_text","content":{"type":"rich_text","nodes":[{"kind":"paragraph","content":[{"kind":"text","text":"中文投标正文"}]}]}}]})
+    }
+
+    #[test]
+    fn mixed_outline_numbering_resets_below_each_top_level() {
+        let document = LayoutDocumentV2 {
+            title: "投标文件".into(),
+            sections: vec![
+                LayoutSectionV2 {
+                    title: "商务文件".into(),
+                    depth: 1,
+                    blocks: vec![],
+                },
+                LayoutSectionV2 {
+                    title: "投标函".into(),
+                    depth: 2,
+                    blocks: vec![],
+                },
+                LayoutSectionV2 {
+                    title: "授权委托书".into(),
+                    depth: 3,
+                    blocks: vec![],
+                },
+                LayoutSectionV2 {
+                    title: "资格文件".into(),
+                    depth: 2,
+                    blocks: vec![],
+                },
+                LayoutSectionV2 {
+                    title: "技术文件".into(),
+                    depth: 1,
+                    blocks: vec![],
+                },
+                LayoutSectionV2 {
+                    title: "技术要求响应".into(),
+                    depth: 2,
+                    blocks: vec![],
+                },
+                LayoutSectionV2 {
+                    title: "参数响应表".into(),
+                    depth: 3,
+                    blocks: vec![],
+                },
+            ],
+            watermark: None,
+            settings: LayoutSettingsV2::default(),
+        };
+        assert_eq!(
+            numbered_section_titles(&document),
+            vec![
+                "一、商务文件",
+                "1. 投标函",
+                "1.1 授权委托书",
+                "2. 资格文件",
+                "二、技术文件",
+                "1. 技术要求响应",
+                "1.1 参数响应表",
+            ]
+        );
+    }
+
+    #[test]
+    fn cover_and_toc_nodes_do_not_enter_body_numbering() {
+        let value = json!({
+            "nodes":[
+                {"title":"投标文件","depth":0,"semantic_role":"cover","render_role":"front_matter","block_lineage_ids":[]},
+                {"title":"目录","depth":1,"semantic_role":"toc","render_role":"toc","block_lineage_ids":[]},
+                {"title":"商务文件","depth":1,"semantic_role":"commercial","render_role":"section","block_lineage_ids":["b1"]}
+            ],
+            "blocks":[{"lineage_id":"b1","kind":"rich_text","content":{"type":"rich_text","nodes":[{"kind":"paragraph","content":[{"kind":"text","text":"正文"}]}]}}]
+        });
+        let layout = layout_from_workspace("投标文件", &value, None).unwrap();
+        assert_eq!(numbered_section_titles(&layout), vec!["一、商务文件"]);
     }
 
     #[test]

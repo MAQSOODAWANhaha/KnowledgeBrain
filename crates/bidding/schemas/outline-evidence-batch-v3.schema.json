@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:knowledgebrain:bid:outline-evidence-batch:v3",
+  "title": "OutlineEvidenceBatchV3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "batch_ordinal", "source_unit_revision_ids", "shards", "structure_fragments", "requirement_route_hints", "conflicts", "needs_vision", "notices"],
+  "properties": {
+    "schema_version": { "const": 3 },
+    "batch_ordinal": { "type": "integer", "minimum": 0 },
+    "source_unit_revision_ids": { "type": "array", "minItems": 1, "maxItems": 10000, "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } },
+    "shards": { "type": "array", "minItems": 1, "maxItems": 10000, "items": { "$ref": "#/$defs/shard" } },
+    "structure_fragments": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/structureFragment" } },
+    "requirement_route_hints": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/routeHint" } },
+    "conflicts": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/conflict" } },
+    "needs_vision": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/visionNeed" } },
+    "notices": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/batchNotice" } }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "confidence": { "enum": ["high", "medium", "low"] },
+    "semanticRole": { "enum": ["cover", "toc", "qualification", "technical", "commercial", "quotation", "deviation", "implementation", "evidence_index", "attachment", "other"] },
+    "channel": { "enum": ["narrative_content", "response_table", "deviation_statement", "structured_form", "evidence_attachment", "quotation"] },
+    "outlineUsage": { "enum": ["composition_spine", "output_child", "form_template", "requirement_context", "reference_only"] },
+    "applicability": { "enum": ["required", "optional", "conditional", "not_applicable"] },
+    "shard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_unit_revision_id", "offset", "length", "shard_index", "shard_count"],
+      "properties": {
+        "source_unit_revision_id": { "$ref": "#/$defs/uuid" },
+        "offset": { "type": "integer", "minimum": 0 },
+        "length": { "type": "integer", "minimum": 0 },
+        "shard_index": { "type": "integer", "minimum": 0 },
+        "shard_count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "structureFragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signal_ref", "title", "semantic_role", "signal_kind", "outline_usage", "applicability", "composition_parent_role", "path_segments", "heading_level", "numbering", "source_numbering", "source_order", "source_unit_revision_ids", "confidence", "scope_repaired"],
+      "properties": {
+        "signal_ref": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "semantic_role": { "$ref": "#/$defs/semanticRole" },
+        "signal_kind": { "enum": ["explicit_toc", "explicit_composition_clause", "explicit_format_clause", "explicit_package_clause", "explicit_upload_clause", "heading", "form", "evaluation_clause", "inferred"] },
+        "outline_usage": { "$ref": "#/$defs/outlineUsage" },
+        "applicability": { "$ref": "#/$defs/applicability" },
+        "composition_parent_role": { "anyOf": [{ "$ref": "#/$defs/semanticRole" }, { "type": "null" }] },
+        "path_segments": { "type": "array", "minItems": 1, "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 256 } },
+        "heading_level": { "type": "integer", "minimum": 0, "maximum": 32 },
+        "numbering": { "type": ["string", "null"], "maxLength": 128 },
+        "source_numbering": { "type": ["string", "null"], "maxLength": 128 },
+        "source_order": { "type": "integer", "minimum": 0 },
+        "source_unit_revision_ids": { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "scope_repaired": { "type": "boolean" }
+      }
+    },
+    "routeHint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["need_occurrence_id", "suggested_semantic_role", "target_path_hint", "channel", "source_unit_revision_ids", "confidence"],
+      "properties": {
+        "need_occurrence_id": { "$ref": "#/$defs/uuid" },
+        "suggested_semantic_role": { "$ref": "#/$defs/semanticRole" },
+        "target_path_hint": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 256 } },
+        "channel": { "$ref": "#/$defs/channel" },
+        "source_unit_revision_ids": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } },
+        "confidence": { "$ref": "#/$defs/confidence" }
+      }
+    },
+    "conflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "source_unit_revision_ids"],
+      "properties": {
+        "code": { "enum": ["CONFLICTING_STRUCTURE", "ALTERNATE_SOURCE", "UNCLEAR_HIERARCHY"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "source_unit_revision_ids": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } }
+      }
+    },
+    "visionNeed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_unit_revision_id", "reason"],
+      "properties": {
+        "source_unit_revision_id": { "$ref": "#/$defs/uuid" },
+        "reason": { "enum": ["OCR_EMPTY", "OCR_LOW_CONFIDENCE", "STRUCTURE_UNREADABLE"] }
+      }
+    },
+    "batchNotice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "source_identity"],
+      "properties": {
+        "code": { "enum": ["LOW_CONFIDENCE", "UNRESOLVED_SOURCE", "FORM_STRUCTURE_DEVIATION", "VISION_REVIEW", "SCOPE_REPAIRED"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "source_identity": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    }
+  }
+}

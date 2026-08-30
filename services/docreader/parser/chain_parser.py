@@ -136,10 +136,15 @@ class PipelineParser(BaseParser):
         images: Dict[str, str] = {}
         metadata: Dict = {}
         document = Document()
+        carried_units = []
         for p in self._parsers:
             logger.info(f"PipelineParser: using parser {p.__class__.__name__}")
             # Parse content with current parser
             document = p.parse_into_text(content)
+            if document.structured_source_units:
+                carried_units = list(document.structured_source_units)
+            elif carried_units and not document.structured_source_units:
+                document.structured_source_units = list(carried_units)
             # Convert document content back to bytes for next parser
             content = endecode.encode_bytes(document.content)
             # Accumulate images and metadata from this parser
@@ -148,6 +153,8 @@ class PipelineParser(BaseParser):
         # Merge all accumulated images and metadata into final document
         document.images.update(images)
         document.metadata.update(metadata)
+        if carried_units and not document.structured_source_units:
+            document.structured_source_units = list(carried_units)
         return document
 
     @classmethod

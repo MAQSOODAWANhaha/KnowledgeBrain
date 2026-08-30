@@ -6,7 +6,7 @@ export type BlockDraft = {
   generation: number;
   nodeLineageId: string;
   blockLineageId: string;
-  op: "insert" | "update";
+  op: "insert" | "update" | "delete";
   ordinal: number;
   block: ContentBlockV1;
   baseWorkspaceRevisionId: string;
@@ -44,6 +44,10 @@ export async function draftsToOperations(
   );
   const operations: WorkspaceOperation[] = [];
   for (const draft of ordered) {
+    if (draft.op === "delete") {
+      operations.push(ops.deleteBlock(draft.blockLineageId));
+      continue;
+    }
     const block = await withContentSha256(draft.block);
     if (draft.op === "insert") {
       operations.push(

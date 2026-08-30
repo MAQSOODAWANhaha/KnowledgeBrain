@@ -9,8 +9,21 @@ COPY web ./
 RUN npm run build
 
 FROM ${RUST_IMAGE} AS builder
+ARG CARGO_MIRROR=rsproxy
 WORKDIR /src
-COPY rust-toolchain.toml rustfmt.toml Cargo.toml Cargo.lock ./
+# Use the image compiler. Copying rust-toolchain.toml makes rustup fetch
+# 1.97.0 from static.rust-lang.org, which is reset on blocked networks.
+ENV RUSTUP_AUTO_INSTALL=0
+RUN mkdir -p /usr/local/cargo; \
+    if [ "$CARGO_MIRROR" = "rsproxy" ]; then \
+      printf '%s\n' \
+        '[source.crates-io]' \
+        'replace-with = "rsproxy-sparse"' \
+        '[source.rsproxy-sparse]' \
+        'registry = "sparse+https://rsproxy.cn/index/"' \
+        > /usr/local/cargo/config.toml; \
+    fi
+COPY rustfmt.toml Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY migrations migrations
 COPY services/docreader/proto services/docreader/proto
@@ -20,7 +33,17 @@ COPY deploy/postgres-init/010-runtime-identities.sh deploy/postgres-init/010-run
 RUN cargo build --release -p api -p worker -p retention -p platform
 
 FROM debian:bookworm-slim
-RUN apt-get update \
+ARG APT_MIRROR=aliyun
+RUN set -eux; \
+    if [ "$APT_MIRROR" = "aliyun" ]; then \
+      if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources; \
+      fi; \
+      if [ -f /etc/apt/sources.list ]; then \
+        sed -i 's/deb.debian.org/mirrors.aliyun.com/g; s/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list; \
+      fi; \
+    fi; \
+    apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl fonts-wqy-zenhei poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 ARG BIN=api

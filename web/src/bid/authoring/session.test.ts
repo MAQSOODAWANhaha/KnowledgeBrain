@@ -88,6 +88,7 @@ function mockApi(impl: Partial<BidV2Api> = {}): BidV2Api {
 }
 
 const baseLists = {
+  listWorkspaceRequests: async () => [],
   getProject: async () => ({
     id: PROJECT,
     title: "t",
@@ -165,6 +166,9 @@ describe("session poll and generateOutline", () => {
         envelope({
           document_set_revision_id: frozeExpected ? FROZEN_SET : EMPTY_SET,
           document_set_sha256: SHA,
+          requirement_projection_revision_id: frozeExpected
+            ? "19191919-1919-1919-1919-191919191919"
+            : "15151515-1515-1515-1515-151515151515",
         }),
       freezeDocumentSet: async (_project, _ids, expected) => {
         frozeExpected = expected?.artifact_id ?? null;
@@ -178,7 +182,7 @@ describe("session poll and generateOutline", () => {
     });
     const session = createBidV2Session({
       api,
-      clock: { now: () => 0, schedule: () => () => undefined },
+      clock: { now: () => 0, schedule: (fn) => { fn(); return () => undefined; } },
     });
     await session.applyRoute({
       projectId: PROJECT,
@@ -191,10 +195,116 @@ describe("session poll and generateOutline", () => {
     session.dispose();
   });
 
-  it("hydrates an outline candidate from a succeeded generate request", async () => {
+  it("a deliberate terminal Generate click creates a new request for unchanged input", async () => {
+    let creates = 0;
     const api = mockApi({
       ...baseLists,
-      getProjectWorkspace: async () => envelope(),
+      getProjectWorkspace: async () =>
+        envelope({ document_set_revision_id: FROZEN_SET }),
+      freezeDocumentSet: async () => ({ artifact_id: FROZEN_SET, sha256: SHA }),
+      createOutlineCandidate: async () => {
+        creates += 1;
+        return {
+          request_artifact_id: `req-regenerate-${creates}`,
+          kind: "OutlineGenerate" as const,
+          status: "succeeded" as const,
+          result_identity: { artifact_id: `candidate-${creates}`, sha256: SHA },
+        };
+      },
+      getCandidate: async (_workspaceId, candidateId) => ({
+        candidate_id: candidateId,
+        kind: "outline" as const,
+        status: "proposed" as const,
+        base_workspace_revision_id: "14141414-1414-1414-1414-141414141414",
+        base_workspace_sha256: SHA,
+        nodes: [
+          {
+            client_node_ref: "root",
+            parent_client_node_ref: null,
+            ordinal: 0,
+            title: "投标文件",
+          },
+        ],
+        notices: [],
+      }),
+    });
+    const session = createBidV2Session({
+      api,
+      clock: {
+        now: () => 0,
+        schedule: (fn) => {
+          fn();
+          return () => undefined;
+        },
+      },
+    });
+    await session.applyRoute({
+      projectId: PROJECT,
+      step: "authoring",
+      nodeLineageId: ROOT,
+    });
+    await session.generateOutline();
+    await session.generateOutline();
+    expect(creates).toBe(2);
+    session.dispose();
+  });
+
+  it("ignores a stale outline progress sequence while polling", async () => {
+    const pending = {
+      request_artifact_id: "req-progress",
+      kind: "OutlineGenerate" as const,
+      status: "pending" as const,
+      progress: {
+        stage: "generating",
+        sequence: 5,
+        detail: { phase: "drafting" as const, attempt: 2, max_attempts: 4 },
+      },
+    };
+    const api = mockApi({
+      ...baseLists,
+      getProjectWorkspace: async () => envelope({ document_set_revision_id: FROZEN_SET }),
+      freezeDocumentSet: async () => ({ artifact_id: FROZEN_SET, sha256: SHA }),
+      createOutlineCandidate: async () => pending,
+      getRequest: async () => ({
+        ...pending,
+        progress: {
+          stage: "mapping",
+          sequence: 4,
+          detail: { phase: "mapping" as const, attempt: 1, max_attempts: 4 },
+        },
+      }),
+    });
+    const session = createBidV2Session({
+      api,
+      clock: {
+        now: () => 0,
+        schedule: (fn) => {
+          fn();
+          return () => undefined;
+        },
+      },
+    });
+    await session.applyRoute({ projectId: PROJECT, step: "authoring", nodeLineageId: ROOT });
+    await session.generateOutline();
+    await session.poll();
+    expect(session.getState().asyncRequests[0]?.progress?.sequence).toBe(5);
+    expect(session.getState().asyncRequests[0]?.progress?.detail?.phase).toBe("drafting");
+    session.dispose();
+  });
+
+  it("hydrates an outline candidate from a succeeded generate request", async () => {
+    let workspaceLoads = 0;
+    const api = mockApi({
+      ...baseLists,
+      getProjectWorkspace: async () => {
+        workspaceLoads += 1;
+        return envelope({
+          requirement_projection_revision_id:
+            workspaceLoads > 1
+              ? "19191919-1919-1919-1919-191919191919"
+              : "15151515-1515-1515-1515-151515151515",
+        });
+      },
       freezeDocumentSet: async () => ({ artifact_id: FROZEN_SET, sha256: SHA }),
       createOutlineCandidate: async () => ({
         request_artifact_id: "req-2",
@@ -221,7 +331,7 @@ describe("session poll and generateOutline", () => {
     });
     const session = createBidV2Session({
       api,
-      clock: { now: () => 0, schedule: () => () => undefined },
+      clock: { now: () => 0, schedule: (fn) => { fn(); return () => undefined; } },
     });
     await session.applyRoute({
       projectId: PROJECT,
@@ -231,6 +341,75 @@ describe("session poll and generateOutline", () => {
     await session.generateOutline();
     expect(session.getState().candidate?.kind).toBe("outline");
     expect(session.getState().selectedOutlineNodeRefs).toEqual(["n1"]);
+    session.dispose();
+  });
+
+  it("restores the latest succeeded candidate when authoring is refreshed", async () => {
+    let loadedCandidateId: string | null = null;
+    const api = mockApi({
+      ...baseLists,
+      getProjectWorkspace: async () => envelope(),
+      listWorkspaceRequests: async () => [
+        {
+          request_artifact_id: "req-newer-failed",
+          kind: "OutlineGenerate",
+          status: "failed",
+          result_identity: null,
+          error_code: "AGENT_OUTPUT_INVALID",
+        },
+        {
+          request_artifact_id: "req-latest-succeeded",
+          kind: "OutlineGenerate",
+          status: "succeeded",
+          result_identity: { artifact_id: "cand-latest", sha256: SHA },
+        },
+        {
+          request_artifact_id: "req-older-succeeded",
+          kind: "OutlineGenerate",
+          status: "succeeded",
+          result_identity: { artifact_id: "cand-older", sha256: SHA },
+        },
+      ],
+      getCandidate: async (_workspaceId, candidateId) => {
+        loadedCandidateId = candidateId;
+        return {
+          candidate_id: candidateId,
+          kind: "outline",
+          status: "proposed",
+          base_workspace_revision_id:
+            "14141414-1414-1414-1414-141414141414",
+          base_workspace_sha256: SHA,
+          nodes: [
+            {
+              client_node_ref: "restored-node",
+              parent_client_node_ref: null,
+              ordinal: 0,
+              title: "刷新后可见的大纲",
+            },
+          ],
+          notices: [],
+        };
+      },
+    });
+    const session = createBidV2Session({
+      api,
+      clock: {
+        now: () => 0,
+        schedule: () => () => undefined,
+      },
+    });
+
+    await session.applyRoute({
+      projectId: PROJECT,
+      step: "authoring",
+      nodeLineageId: ROOT,
+    });
+
+    expect(loadedCandidateId).toBe("cand-latest");
+    expect(session.getState().candidate?.candidate_id).toBe("cand-latest");
+    expect(session.getState().selectedOutlineNodeRefs).toEqual([
+      "restored-node",
+    ]);
     session.dispose();
   });
 });

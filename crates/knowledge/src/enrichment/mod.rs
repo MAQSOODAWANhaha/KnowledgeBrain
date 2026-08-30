@@ -9,8 +9,10 @@ mod summary;
 
 pub use chat::{
     ChatMessage, WIKI_LLM_MAX_ATTEMPTS, WIKI_LLM_MAX_TOKENS, attempt_superseded, chat_complete,
-    chat_complete_limited, chat_complete_wiki, chat_http_configured, chat_messages,
-    chat_messages_limited, sample_long_content,
+    chat_complete_limited, chat_complete_turn, chat_complete_turn_with_format,
+    chat_complete_turn_with_format_once, chat_complete_wiki, chat_http_configured, chat_messages,
+    chat_messages_limited, chat_tools_turn, chat_tools_turn_with_format,
+    chat_tools_turn_with_format_once, sample_long_content,
 };
 pub use language::{
     infer_output_language, language_for_document, language_for_document_parts,

@@ -6,7 +6,7 @@ const SCHEMAS: &[(&str, &str, &str)] = &[
     (
         "content-block-v1.schema.json",
         include_str!("../schemas/content-block-v1.schema.json"),
-        "4d0027af37854644f824b8df208cfffddb4ab9612abd367219fc725f8dead696",
+        "030cb07f3073bb8a7e87f6b045706bc0d4673b34153e827b05f31d7a3f7dc71d",
     ),
     (
         "content-generation-input-v1.schema.json",
@@ -19,6 +19,11 @@ const SCHEMAS: &[(&str, &str, &str)] = &[
         "f049c046fdca4e272d0a0d69c0076f77a252be59218d630acbb2983b8224b037",
     ),
     (
+        "composition-spine-v1.schema.json",
+        include_str!("../schemas/composition-spine-v1.schema.json"),
+        "1926e2efd296d5e56f8968979044980619a7f8393da0644ac9b2358cf42830c2",
+    ),
+    (
         "evidence-bundle-v1.schema.json",
         include_str!("../schemas/evidence-bundle-v1.schema.json"),
         "f1c708e73cd811602c3dad645bda35d5f50775654d8ab97e54a9bf77cb7a3dc2",
@@ -29,6 +34,21 @@ const SCHEMAS: &[(&str, &str, &str)] = &[
         "d696487fd36a5faf7a106746ecf77fefd1bbb770f1373b10a7e3273abcd03c0f",
     ),
     (
+        "outline-evidence-batch-v1.schema.json",
+        include_str!("../schemas/outline-evidence-batch-v1.schema.json"),
+        "e2ebe2aa46b756268c8d2daa1de3811e6f099bc85b8f3b853d3e63456407ff28",
+    ),
+    (
+        "outline-evidence-batch-v2.schema.json",
+        include_str!("../schemas/outline-evidence-batch-v2.schema.json"),
+        "c61b93b6ed07cfa70f4a54514ad68da5dc3d7bb5344eaec16e9229b16ebf95cc",
+    ),
+    (
+        "outline-evidence-batch-v3.schema.json",
+        include_str!("../schemas/outline-evidence-batch-v3.schema.json"),
+        "e91266fcc8efee425c54e04d89528a581f54ecc8a6f46287770a63c3c673efd8",
+    ),
+    (
         "outline-generation-input-v1.schema.json",
         include_str!("../schemas/outline-generation-input-v1.schema.json"),
         "f0ffbfdf049f2a1bb289e161eb6cb931e356e4bdedf29149c719bb074fd2b2e4",
@@ -36,12 +56,57 @@ const SCHEMAS: &[(&str, &str, &str)] = &[
     (
         "outline-generation-output-v1.schema.json",
         include_str!("../schemas/outline-generation-output-v1.schema.json"),
-        "9939cc729a40f3a0dc160b327012793defd22d81f0d510837f3f947f5374ddd3",
+        "f958ec49bc03f9ed6f79e0f4704e6aaed273af47b7ae4a996ee61bbec57587a5",
+    ),
+    (
+        "outline-generation-output-v2.schema.json",
+        include_str!("../schemas/outline-generation-output-v2.schema.json"),
+        "1b7d9d852e0956fa1717d633e087f4bfbd08ab2a8cf17693fd47d5808327a4bf",
+    ),
+    (
+        "outline-reduce-plan-v1.schema.json",
+        include_str!("../schemas/outline-reduce-plan-v1.schema.json"),
+        "fe61cd232a53c3959f46ea09cd0c5bcb2de21663baed4726baefdc9d76426854",
+    ),
+    (
+        "outline-reduce-plan-v2.schema.json",
+        include_str!("../schemas/outline-reduce-plan-v2.schema.json"),
+        "c52ab0a2ca5689f2e2e8f633e588cb3ed9f201f61400f030ed213825b5a6f15c",
+    ),
+    (
+        "outline-synthesis-checkpoint-v1.schema.json",
+        include_str!("../schemas/outline-synthesis-checkpoint-v1.schema.json"),
+        "7d0efce7fa4f352b2d787c97fc9b226558af1fe033984c43d1a23b2a223625fc",
+    ),
+    (
+        "outline-synthesis-checkpoint-v2.schema.json",
+        include_str!("../schemas/outline-synthesis-checkpoint-v2.schema.json"),
+        "2ce311b7b4a6cf9ad058f6e19663c9097dd091b4c9d689bc3c8c5342bdb75e25",
+    ),
+    (
+        "outline-synthesis-packet-v1.schema.json",
+        include_str!("../schemas/outline-synthesis-packet-v1.schema.json"),
+        "002360e4355595ab00986e639d5c0dd66b080c492282d94932a560d4d4c1f4d4",
+    ),
+    (
+        "outline-synthesis-packet-v2.schema.json",
+        include_str!("../schemas/outline-synthesis-packet-v2.schema.json"),
+        "ad786d1a7425efc771bbc2cfc7bbcab1de68056bfee47ad5cd1ac86e2b3b128a",
     ),
     (
         "render-document-snapshot-v2.schema.json",
         include_str!("../schemas/render-document-snapshot-v2.schema.json"),
         "4047791bd136a261e24e7c05de160ab133ffe0bc521523fc012d0aa6050096e6",
+    ),
+    (
+        "requirement-compilation-output-v3.schema.json",
+        include_str!("../schemas/requirement-compilation-output-v3.schema.json"),
+        "a4756dd2e0e01c17d9fe7493f3101347861c3359c17d7c9640284fd85e5a1e7c",
+    ),
+    (
+        "section-obligation-matrix-v1.schema.json",
+        include_str!("../schemas/section-obligation-matrix-v1.schema.json"),
+        "1ca5ee05ca9665f999875341889332f9360d6a7dd9359de90565209c4f742b4a",
     ),
     (
         "submission-assessment-snapshot-v1.schema.json",
@@ -90,7 +155,7 @@ fn enum_literals(value: &Value) -> BTreeSet<&str> {
 
 #[test]
 fn authoring_schema_bytes_and_hashes_are_golden() {
-    assert_eq!(SCHEMAS.len(), 10);
+    assert_eq!(SCHEMAS.len(), 23);
     for (name, source, expected_sha256) in SCHEMAS {
         let parsed: Value = serde_json::from_str(source).unwrap_or_else(|error| {
             panic!("{name} is not valid JSON: {error}");
@@ -199,6 +264,81 @@ fn approved_v2_contract_invariants_are_frozen() {
                 .any(|value| value == identity)
         );
     }
+
+    let requirement_compile = by_name("requirement-compilation-output-v3.schema.json");
+    assert_eq!(
+        requirement_compile["properties"]["schema_version"]["const"],
+        3
+    );
+    assert_eq!(
+        enum_literals(&requirement_compile["$defs"]["channel"]["enum"]),
+        BTreeSet::from([
+            "deviation_statement",
+            "evidence_attachment",
+            "narrative_content",
+            "quotation",
+            "response_table",
+            "structured_form",
+        ])
+    );
+
+    let map_v3 = by_name("outline-evidence-batch-v3.schema.json");
+    for property in [
+        "outline_usage",
+        "applicability",
+        "composition_parent_role",
+        "source_numbering",
+    ] {
+        assert!(
+            map_v3["$defs"]["structureFragment"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == property),
+            "Map V3 fragment missing {property}"
+        );
+    }
+
+    let reduce_v2 = by_name("outline-reduce-plan-v2.schema.json");
+    assert_eq!(
+        reduce_v2["properties"]["composition_spine"]["$ref"],
+        "urn:knowledgebrain:bid:composition-spine:v1"
+    );
+    assert_eq!(
+        reduce_v2["properties"]["section_obligation_matrix"]["$ref"],
+        "urn:knowledgebrain:bid:section-obligation-matrix:v1"
+    );
+
+    let packet_v2 = by_name("outline-synthesis-packet-v2.schema.json");
+    assert_eq!(packet_v2["properties"]["schema_version"]["const"], 2);
+    assert!(
+        packet_v2["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "section_obligation_matrix")
+    );
+    let checkpoint_v2 = by_name("outline-synthesis-checkpoint-v2.schema.json");
+    assert!(
+        checkpoint_v2["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "accepted_obligation_bindings")
+    );
+
+    let outline_output_v2 = by_name("outline-generation-output-v2.schema.json");
+    assert_eq!(
+        outline_output_v2["properties"]["schema_version"]["const"],
+        2
+    );
+    assert!(
+        outline_output_v2["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "section_obligation_bindings")
+    );
 
     let content_input = by_name("content-generation-input-v1.schema.json");
     assert_eq!(

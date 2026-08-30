@@ -117,6 +117,10 @@ export type BidV2Api = {
     requestArtifactId: string,
     signal?: AbortSignal,
   ): Promise<AsyncRequestView>;
+  listWorkspaceRequests(
+    workspaceId: string,
+    signal?: AbortSignal,
+  ): Promise<AsyncRequestView[]>;
   getCandidate(
     workspaceId: string,
     candidateId: string,
@@ -355,6 +359,13 @@ export function createBidV2Client(): BidV2Api {
         { signal },
       );
       return data;
+    },
+    async listWorkspaceRequests(workspaceId, signal) {
+      const { data } = await v2Request<AsyncRequestView[]>(
+        `/api/v2/submission-workspaces/${workspaceId}/requests`,
+        { signal },
+      );
+      return Array.isArray(data) ? data : [];
     },
     async getCandidate(workspaceId, candidateId, signal) {
       const { data } = await v2Request<CandidateView>(

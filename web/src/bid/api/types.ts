@@ -143,12 +143,54 @@ export type AsyncRequestKind =
   | "ContentGenerate"
   | "SubmissionExport";
 
+export type OutlineProgressDetail = {
+  phase?:
+    | "analyzing"
+    | "mapping"
+    | "reducing"
+    | "collecting"
+    | "drafting"
+    | "routing"
+    | "verifying"
+    | "repairing"
+    | "publishing"
+    | "retrying"
+    | "succeeded"
+    | "failed"
+    | "cancelled";
+  attempt?: number;
+  max_attempts?: number;
+  retry_count?: number;
+  mapped_batches?: number;
+  total_batches?: number;
+  structure_signals?: number;
+  requirements_done?: number;
+  requirements_total?: number;
+  turn_in_attempt?: number;
+  tool_calls_in_attempt?: number;
+  total_turns?: number;
+  total_tool_calls?: number;
+  text_bytes_read?: number;
+  images_read?: number;
+  last_error_code?: string | null;
+  [key: string]: unknown;
+};
+
+export type OutlineProgress = {
+  stage?: string;
+  label?: string;
+  status?: "running" | "succeeded" | "failed" | "cancelled";
+  sequence?: number;
+  detail?: OutlineProgressDetail;
+};
+
 export type AsyncRequestView = {
   request_artifact_id: string;
   kind: AsyncRequestKind;
   status: "pending" | "succeeded" | "failed" | "obsolete";
   result_identity?: FrozenIdentity | null;
   error_code?: string | null;
+  progress?: OutlineProgress | null;
 };
 
 export type ContentCandidateOperation = {
@@ -168,6 +210,7 @@ export type ContentCandidateView = {
 };
 
 export type OutlineCandidateView = {
+  schema_version?: 1 | 2;
   candidate_id: string;
   kind: "outline";
   status: "proposed" | "accepted" | "rejected" | "obsolete";
@@ -178,6 +221,29 @@ export type OutlineCandidateView = {
     parent_client_node_ref: string | null;
     ordinal: number;
     title: string;
+    semantic_role?:
+      | "cover"
+      | "toc"
+      | "qualification"
+      | "technical"
+      | "commercial"
+      | "quotation"
+      | "deviation"
+      | "implementation"
+      | "evidence_index"
+      | "attachment"
+      | "other";
+    render_role?: "section" | "front_matter" | "toc" | "appendix" | "hidden";
+    origin_source_unit_revision_ids?: string[];
+  }>;
+  bindings?: Array<{
+    need_occurrence_id: string;
+    channel: string;
+    target_client_node_ref: string;
+  }>;
+  section_obligation_bindings?: Array<{
+    obligation_id: string;
+    target_client_node_ref: string;
   }>;
   notices: Array<{ code: string; message: string; severity: string }>;
 };

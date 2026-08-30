@@ -696,6 +696,18 @@ pub async fn get_async_request_v2(
         .map(Option::flatten)
 }
 
+pub async fn list_workspace_async_requests_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_list_workspace_async_requests($1,$2::kb_actor_identity)")
+        .bind(workspace_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
 pub async fn get_candidate_v2(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -1458,13 +1470,24 @@ pub async fn compile_requirement_set_v2(
     request_revision: i64,
     frozen_input_sha256: &str,
 ) -> Result<Value, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT kb_bid_v2_compile_requirement_set($1,$2,$3::kb_sha256,$4::kb_actor_identity)",
+    let input: Value = sqlx::query_scalar(
+        "SELECT kb_bid_v2_load_requirement_set_compile_input_v3($1,$2,$3::kb_sha256)",
     )
     .bind(request_artifact_id)
     .bind(request_revision)
     .bind(frozen_input_sha256)
-    .bind("system:requirement-set-compile-v2")
+    .fetch_one(pool)
+    .await?;
+    let compiled = crate::requirement_compile::compile_requirement_input_v3(&input)
+        .map_err(sqlx::Error::Protocol)?;
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_publish_requirement_set_v3($1,$2,$3::kb_sha256,$4,$5::kb_actor_identity)",
+    )
+    .bind(request_artifact_id)
+    .bind(request_revision)
+    .bind(frozen_input_sha256)
+    .bind(compiled)
+    .bind("system:requirement-set-compile-v3")
     .fetch_one(pool)
     .await
 }
@@ -1497,4 +1520,266 @@ pub async fn mark_tender_document_failed_v2(
         .execute(pool)
         .await
         .map(|_| ())
+}
+
+pub async fn upsert_outline_agent_run_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    attempt: i32,
+    max_attempts: i32,
+    stage: &str,
+    detail: Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT kb_bid_v2_outline_run_upsert($1,$2::kb_sha256,$3,$4,$5,$6)")
+        .bind(request.request_artifact_id)
+        .bind(&request.frozen_input_sha256)
+        .bind(attempt)
+        .bind(max_attempts)
+        .bind(stage)
+        .bind(detail)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+pub async fn load_outline_map_batch_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    batch_ordinal: i32,
+    model_sha: &str,
+    agent_sha: &str,
+) -> Result<Option<Value>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_outline_map_get($1,$2::kb_sha256,$3,$4::kb_sha256,$5::kb_sha256)",
+    )
+    .bind(request.request_artifact_id)
+    .bind(&request.frozen_input_sha256)
+    .bind(batch_ordinal)
+    .bind(model_sha)
+    .bind(agent_sha)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn store_outline_map_batch_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    batch_ordinal: i32,
+    model_sha: &str,
+    agent_sha: &str,
+    unit_ids: &[Uuid],
+    payload: &Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT kb_bid_v2_outline_map_put($1,$2::kb_sha256,$3,$4::kb_sha256,$5::kb_sha256,$6,$7)",
+    )
+    .bind(request.request_artifact_id)
+    .bind(&request.frozen_input_sha256)
+    .bind(batch_ordinal)
+    .bind(model_sha)
+    .bind(agent_sha)
+    .bind(unit_ids)
+    .bind(payload)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+pub async fn load_outline_reduce_plan_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    map_evidence_set_sha: &str,
+    reduce_contract_sha: &str,
+) -> Result<Option<Value>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_outline_reduce_get($1,$2::kb_sha256,$3::kb_sha256,$4::kb_sha256)",
+    )
+    .bind(request.request_artifact_id)
+    .bind(&request.frozen_input_sha256)
+    .bind(map_evidence_set_sha)
+    .bind(reduce_contract_sha)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn store_outline_reduce_plan_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    map_evidence_set_sha: &str,
+    reduce_contract_sha: &str,
+    payload: &Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT kb_bid_v2_outline_reduce_put($1,$2::kb_sha256,$3::kb_sha256,$4::kb_sha256,$5)",
+    )
+    .bind(request.request_artifact_id)
+    .bind(&request.frozen_input_sha256)
+    .bind(map_evidence_set_sha)
+    .bind(reduce_contract_sha)
+    .bind(payload)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+pub async fn store_outline_synthesis_packet_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    reduce_plan_sha: &str,
+    map_evidence_set_sha: &str,
+    payload: &Value,
+) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_outline_synthesis_packet_append($1,$2::kb_sha256,$3::kb_sha256,$4::kb_sha256,$5)",
+    )
+    .bind(request.request_artifact_id)
+    .bind(&request.frozen_input_sha256)
+    .bind(reduce_plan_sha)
+    .bind(map_evidence_set_sha)
+    .bind(payload)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn append_outline_tool_trace_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    attempt: i32,
+    ordinal: i32,
+    tool_name: &str,
+    args: &str,
+    result: &str,
+    duration_ms: i32,
+    ok: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT kb_bid_v2_outline_trace_append($1,$2::kb_sha256,$3,$4,$5,$6,$7,$8,$9)")
+        .bind(request.request_artifact_id)
+        .bind(&request.frozen_input_sha256)
+        .bind(attempt)
+        .bind(ordinal)
+        .bind(tool_name)
+        .bind(args)
+        .bind(result)
+        .bind(duration_ms)
+        .bind(if ok { "ok" } else { "error" })
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+pub async fn store_outline_agent_checkpoint_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    attempt: i32,
+    checkpoint_ordinal: i32,
+    phase: &str,
+    payload: &Value,
+) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_outline_checkpoint_append($1,$2::kb_sha256,$3,$4,$5,$6)")
+        .bind(request.request_artifact_id)
+        .bind(&request.frozen_input_sha256)
+        .bind(attempt)
+        .bind(checkpoint_ordinal)
+        .bind(phase)
+        .bind(payload)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn load_latest_outline_agent_checkpoint_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+) -> Result<Option<Value>, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_outline_checkpoint_latest($1,$2::kb_sha256)")
+        .bind(request.request_artifact_id)
+        .bind(&request.frozen_input_sha256)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn fail_stale_outline_runs_v2(
+    pool: &PgPool,
+    stale_seconds: i32,
+) -> Result<u64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>("SELECT kb_bid_v2_fail_stale_outline_runs($1)")
+        .bind(stale_seconds)
+        .fetch_one(pool)
+        .await
+        .map(|count| count.max(0) as u64)
+}
+
+pub async fn outline_tool_search_units_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    query: &str,
+    limit: i32,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_outline_tool_search_units($1,$2,$3::kb_sha256,$4,$5)")
+        .bind(request.request_artifact_id)
+        .bind(request.request_revision)
+        .bind(&request.frozen_input_sha256)
+        .bind(query)
+        .bind(limit)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn outline_tool_read_units_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    ids: &[Uuid],
+    offset: i64,
+    limit: Option<i64>,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_outline_tool_read_units($1,$2,$3::kb_sha256,$4,$5,$6)")
+        .bind(request.request_artifact_id)
+        .bind(request.request_revision)
+        .bind(&request.frozen_input_sha256)
+        .bind(ids)
+        .bind(offset)
+        .bind(limit)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn outline_tool_read_requirements_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    ids: &[Uuid],
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_outline_tool_read_requirements($1,$2,$3::kb_sha256,$4)")
+        .bind(request.request_artifact_id)
+        .bind(request.request_revision)
+        .bind(&request.frozen_input_sha256)
+        .bind(ids)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn outline_tool_read_forms_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    ids: &[Uuid],
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_outline_tool_read_forms($1,$2,$3::kb_sha256,$4)")
+        .bind(request.request_artifact_id)
+        .bind(request.request_revision)
+        .bind(&request.frozen_input_sha256)
+        .bind(ids)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn outline_tool_read_images_v2(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    ids: &[Uuid],
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_outline_tool_read_images($1,$2,$3::kb_sha256,$4)")
+        .bind(request.request_artifact_id)
+        .bind(request.request_revision)
+        .bind(&request.frozen_input_sha256)
+        .bind(ids)
+        .fetch_one(pool)
+        .await
 }

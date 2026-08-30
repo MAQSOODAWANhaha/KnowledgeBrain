@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-: "${DATABASE_URL:?DATABASE_URL is required}"
+: "${KNOWLEDGEBRAIN_TEST_DATABASE_URL:?KNOWLEDGEBRAIN_TEST_DATABASE_URL is required}"
+DATABASE_URL="$KNOWLEDGEBRAIN_TEST_DATABASE_URL"
+if [[ "$DATABASE_URL" == *":15432/"* ]]; then
+  echo "refusing destructive acceptance against live PostgreSQL :15432" >&2
+  exit 2
+fi
 
 psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 <<'SQL'
 DROP SCHEMA public CASCADE;

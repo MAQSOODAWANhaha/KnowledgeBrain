@@ -1,4 +1,4 @@
-import type { ChangeEvent } from "react";
+import { Button, FileButton, Select, Tabs } from "@mantine/core";
 import type { BidV2Session, BidV2State, InspectorTab } from "./session";
 
 const TABS: { value: InspectorTab; label: string }[] = [
@@ -18,129 +18,102 @@ export function InspectorPanel({
   const nodeId = state.selectedNodeLineageId;
   const node = nodeId ? session.findNode(nodeId) : null;
 
-  function onTab(event: ChangeEvent<HTMLSelectElement>) {
-    session.setInspectorTab(event.currentTarget.value as InspectorTab);
-  }
-
   return (
-    <>
-      <select
-        className="in"
-        value={state.inspectorTab}
-        onChange={onTab}
-        data-testid="inspector-tab"
-      >
+    <Tabs
+      value={state.inspectorTab}
+      onChange={(value) =>
+        value && session.setInspectorTab(value as InspectorTab)
+      }
+      data-testid="inspector-tab"
+    >
+      <Tabs.List>
         {TABS.map((tab) => (
-          <option key={tab.value} value={tab.value}>
+          <Tabs.Tab key={tab.value} value={tab.value}>
             {tab.label}
-          </option>
+          </Tabs.Tab>
         ))}
-      </select>
-      {state.inspectorTab === "requirements" && (
-        <div className="stack" style={{ marginTop: 12 }}>
-          <p className="lbl">本章要求</p>
-          {(state.requirements ?? []).slice(0, 40).map((req) => (
-            <div key={req.requirement_revision_id} className="note">
-              {req.text}
-            </div>
-          ))}
-          {state.requirements.length === 0 && (
-            <p className="note">还没有要求投影。</p>
-          )}
-        </div>
-      )}
-      {state.inspectorTab === "evidence" && (
-        <div className="stack" style={{ marginTop: 12 }}>
-          <p className="lbl">知识证据</p>
-          <select
-            className="in"
-            value={state.evidenceMode}
-            onChange={(event) =>
-              session.setEvidenceMode(
-                event.currentTarget.value as BidV2State["evidenceMode"],
-              )
-            }
-          >
-            <option value="system_proposed">系统建议</option>
-            <option value="user_pick_set">人工先选</option>
-          </select>
-          <button
-            type="button"
-            className="btn ghost"
-            disabled={state.ended || !nodeId}
-            onClick={() => nodeId && void session.matchEvidence(nodeId)}
-          >
-            匹配资料
-          </button>
-          {(state.evidenceOverview?.bundles ?? []).map((bundle) => (
-            <div key={bundle.evidence_bundle_id} className="note">
-              {bundle.title}
-            </div>
-          ))}
-          <p className="note">
-            证据只在本面板和检查报告中展示，不写入投标正文。
-          </p>
-        </div>
-      )}
-      {state.inspectorTab === "assets" && (
-        <div className="stack" style={{ marginTop: 12 }}>
-          <p className="lbl">本次人工资产</p>
-          <label className="note">
-            上传
-            <input
-              type="file"
-              onChange={(event) => {
-                const file = event.currentTarget.files?.[0];
-                if (file) void session.uploadAsset(file);
-                event.currentTarget.value = "";
-              }}
-            />
-          </label>
-          {state.assets.map((asset) => (
-            <div key={asset.asset_revision_id} className="note">
-              {asset.file_name}{" "}
-              <button
-                type="button"
-                className="btn ghost"
-                disabled={state.ended || !nodeId}
-                onClick={() =>
-                  nodeId &&
-                  void session.insertAssetBlock(
-                    nodeId,
-                    asset.asset_revision_id,
-                    node?.block_lineage_ids.length ?? 0,
-                  )
-                }
-              >
-                插入本章
-              </button>
-            </div>
-          ))}
-          {state.assets.length === 0 && (
-            <p className="note">还没有插入证书、案例或图片。</p>
-          )}
-        </div>
-      )}
-      {state.inspectorTab === "assessment" && (
-        <div
-          className="stack"
-          style={{ marginTop: 12 }}
-          data-testid="assessment-panel"
+      </Tabs.List>
+      <Tabs.Panel value="requirements" pt="md">
+        {(state.requirements ?? []).slice(0, 40).map((req) => (
+          <div key={req.requirement_revision_id} className="note">
+            {req.text}
+          </div>
+        ))}
+        {state.requirements.length === 0 && <p className="note">暂无</p>}
+      </Tabs.Panel>
+      <Tabs.Panel value="evidence" pt="md">
+        <Select
+          data={[
+            { value: "system_proposed", label: "系统建议" },
+            { value: "user_pick_set", label: "人工先选" },
+          ]}
+          value={state.evidenceMode}
+          onChange={(value) =>
+            value &&
+            session.setEvidenceMode(value as BidV2State["evidenceMode"])
+          }
+        />
+        <Button
+          variant="default"
+          mt="sm"
+          disabled={state.ended || !nodeId}
+          onClick={() => nodeId && void session.matchEvidence(nodeId)}
         >
-          <p className="lbl">提示 · 不阻断</p>
-          <p className="note">
-            大纲 {state.assessments?.outline?.status ?? "—"} · 提交{" "}
-            {state.assessments?.submission?.status ?? "—"}
-          </p>
-          {(state.assessments?.outline?.issues ?? [])
-            .concat(state.assessments?.submission?.issues ?? [])
-            .map((issue) => (
-              <div key={issue.issue_id} className="note">
-                {issue.severity} · {issue.code} · {issue.message}
-              </div>
-            ))}
-        </div>
-      )}
-    </>
+          匹配资料
+        </Button>
+        {(state.evidenceOverview?.bundles ?? []).map((bundle) => (
+          <div key={bundle.evidence_bundle_id} className="note">
+            {bundle.title}
+          </div>
+        ))}
+      </Tabs.Panel>
+      <Tabs.Panel value="assets" pt="md">
+        <FileButton
+          onChange={(file) => {
+            if (file) void session.uploadAsset(file);
+          }}
+        >
+          {(props) => (
+            <Button {...props} variant="default">
+              上传
+            </Button>
+          )}
+        </FileButton>
+        {state.assets.map((asset) => (
+          <div key={asset.asset_revision_id} className="note">
+            {asset.file_name}{" "}
+            <Button
+              variant="subtle"
+              size="compact-sm"
+              disabled={state.ended || !nodeId}
+              onClick={() =>
+                nodeId &&
+                void session.insertAssetBlock(
+                  nodeId,
+                  asset.asset_revision_id,
+                  node?.block_lineage_ids.length ?? 0,
+                )
+              }
+            >
+              插入本章
+            </Button>
+          </div>
+        ))}
+        {state.assets.length === 0 && <p className="note">暂无</p>}
+      </Tabs.Panel>
+      <Tabs.Panel value="assessment" pt="md" data-testid="assessment-panel">
+        <p className="note">
+          大纲 {state.assessments?.outline?.status ?? "—"} · 提交{" "}
+          {state.assessments?.submission?.status ?? "—"}
+        </p>
+        {(state.assessments?.outline?.issues ?? [])
+          .concat(state.assessments?.submission?.issues ?? [])
+          .map((issue) => (
+            <div key={issue.issue_id} className="note">
+              {issue.severity} · {issue.code} · {issue.message}
+            </div>
+          ))}
+      </Tabs.Panel>
+    </Tabs>
   );
 }

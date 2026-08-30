@@ -383,12 +383,35 @@ where
         )
         .map_err(|error| TenderDocumentProcessError::FrozenInputMismatch(error.to_string()))?;
 
-        let converted = self
+        let mut converted = self
             .converter
             .convert(&document.file_name, document.bytes.clone())
             .await?;
         if !converted.error.is_empty() {
             return Err(TenderDocumentProcessError::Conversion(converted.error));
+        }
+        if converted.structured_source_units.is_empty() {
+            let markdown = converted.markdown.trim();
+            if markdown.is_empty() {
+                return Err(TenderDocumentProcessError::StructuredSource(
+                    "parser returned no structured units and no markdown".into(),
+                ));
+            }
+            converted
+                .structured_source_units
+                .push(StructuredSourceUnit {
+                    key: "body".into(),
+                    ordinal: 0,
+                    kind: StructuredSourceUnitKind::Section,
+                    text: converted.markdown.clone(),
+                    locator: StructuredSourceLocator::Document {
+                        section_ordinal: 0,
+                        table_ordinal: None,
+                        row_ordinal: None,
+                        form_ordinal: None,
+                        heading_path: document.file_name.clone(),
+                    },
+                });
         }
         validate_structured_units(&converted.structured_source_units)?;
 

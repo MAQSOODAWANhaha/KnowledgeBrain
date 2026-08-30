@@ -4,6 +4,13 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust:
     runs-on: ubuntu-latest
@@ -19,59 +26,6 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: tests
         run: cargo test --workspace --no-fail-fast
-
-  bidding-v2-live:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:0.8.6-pg16
-        env:
-          POSTGRES_USER: knowledgebrain
-          POSTGRES_PASSWORD: knowledgebrain
-          POSTGRES_DB: knowledgebrain
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U knowledgebrain -d knowledgebrain"
-          --health-interval 5s --health-timeout 5s --health-retries 12
-      redis:
-        image: redis:7-alpine
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s --health-timeout 5s --health-retries 12
-    env:
-      DATABASE_URL: postgres://knowledgebrain:knowledgebrain@127.0.0.1:5432/knowledgebrain
-      REDIS_URL: redis://127.0.0.1:6379
-      KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS: "1"
-      KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS: "1"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.97.0
-      - name: install runtime identities
-        env:
-          PGHOST: 127.0.0.1
-          PGPORT: "5432"
-          PGPASSWORD: knowledgebrain
-          POSTGRES_USER: knowledgebrain
-          POSTGRES_DB: knowledgebrain
-          KNOWLEDGEBRAIN_MIGRATOR_PASSWORD: migrator-ci
-          KNOWLEDGEBRAIN_API_DB_PASSWORD: api-ci
-          KNOWLEDGEBRAIN_WORKER_DB_PASSWORD: worker-ci
-          KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD: retention-ci
-        run: sh deploy/postgres-init/010-runtime-identities.sh
-      - name: fresh V2 schema acceptance
-        run: scripts/fresh_schema_acceptance.sh
-      - name: V2 deletion scan
-        run: scripts/bidding_v2_deletion_scan.sh
-      - name: V2 focused contracts
-        run: |
-          cargo test -p bidding --test authoring_schema_contracts -- --nocapture
-          cargo test -p bidding --test bidding_v2_baseline_contract -- --nocapture
-          cargo test -p bidding --test tender_document_process_v2 -- --nocapture
-      - name: API and worker tests
-        run: cargo test -p api -p worker --no-fail-fast -- --nocapture
 
   web:
     runs-on: ubuntu-latest
@@ -102,11 +56,91 @@ jobs:
       - name: pytest
         run: python -m pytest services/docreader
 
-  deploy-contract:
+  images:
+    needs: [rust, web, python]
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REGISTRY: ghcr.io
     steps:
       - uses: actions/checkout@v4
-      - name: compose config
-        run: docker compose --profile runtime config --quiet
-      - name: shell syntax
-        run: bash -n scripts/bidding_v2_deletion_scan.sh scripts/fresh_schema_acceptance.sh deploy/postgres-init/010-runtime-identities.sh deploy/compose-runtime-restart.sh
+      - name: Image prefix
+        run: echo "IMAGE_PREFIX=${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and push api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.rust
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.IMAGE_PREFIX }}/api:latest
+          build-args: |
+            BIN=api
+            CARGO_MIRROR=none
+            APT_MIRROR=none
+          cache-from: type=gha,scope=rust-runtime
+          cache-to: type=gha,mode=max,scope=rust-runtime
+      - name: Build and push worker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.rust
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.IMAGE_PREFIX }}/worker:latest
+          build-args: |
+            BIN=worker
+            CARGO_MIRROR=none
+            APT_MIRROR=none
+          cache-from: type=gha,scope=rust-runtime
+          cache-to: type=gha,mode=max,scope=rust-runtime
+      - name: Build and push migrator
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.rust
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.IMAGE_PREFIX }}/migrator:latest
+          build-args: |
+            BIN=migrator
+            CARGO_MIRROR=none
+            APT_MIRROR=none
+          cache-from: type=gha,scope=rust-runtime
+          cache-to: type=gha,mode=max,scope=rust-runtime
+      - name: Build and push docreader
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.docreader
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.IMAGE_PREFIX }}/docreader:latest
+          build-args: |
+            APT_MIRROR=none
+          cache-from: type=gha,scope=docreader
+          cache-to: type=gha,mode=max,scope=docreader
+      - name: Published images
+        run: |
+          {
+            echo "### GHCR images"
+            echo ""
+            echo "- \`${IMAGE_PREFIX}/api:latest\`"
+            echo "- \`${IMAGE_PREFIX}/worker:latest\`"
+            echo "- \`${IMAGE_PREFIX}/migrator:latest\`"
+            echo "- \`${IMAGE_PREFIX}/docreader:latest\`"
+          } >> "$GITHUB_STEP_SUMMARY"

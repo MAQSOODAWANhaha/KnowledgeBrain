@@ -2,6 +2,7 @@ import type { ChangeEvent } from "react";
 import type { ContentBlockV1, Inline, RichNode } from "./contentBlock";
 import type { BidV2Session, BidV2State } from "./session";
 import type { OutlineCandidateView } from "../api/types";
+import { outlineDisplayTitles } from "./numbering";
 
 function inlineText(inline: Inline): string {
   return inline.kind === "text" ? inline.text : " ";
@@ -12,9 +13,17 @@ function richSnippet(nodes: RichNode[]): string {
   for (const node of nodes) {
     if (node.kind === "paragraph") {
       parts.push(node.content.map(inlineText).join(""));
+    } else if (node.kind === "horizontal_rule") {
+      parts.push("---");
+    } else if (node.kind === "code_block") {
+      parts.push(node.text);
+    } else if (node.kind === "blockquote") {
+      parts.push(node.content.flatMap((p) => p.content.map(inlineText)).join(""));
     } else {
       for (const item of node.content) {
-        parts.push(item.content.flatMap((p) => p.content.map(inlineText)).join(""));
+        parts.push(
+          item.content.flatMap((p) => p.content.map(inlineText)).join(""),
+        );
       }
     }
   }
@@ -39,6 +48,64 @@ function blockSummary(block: ContentBlockV1): string {
   return `签章占位：${block.content.label}`;
 }
 
+export type OutlineCandidateQuality = {
+  blocked: boolean;
+  contractReady: boolean;
+  topLevelCount: number;
+  emptyTopLevelTitles: string[];
+  requirementBindingCount: number;
+  obligationBindingCount: number;
+  highNoticeCount: number;
+};
+
+export function outlineCandidateQuality(
+  candidate: OutlineCandidateView,
+): OutlineCandidateQuality {
+  const nodes = candidate.nodes ?? [];
+  const root = nodes.find(
+    (node) =>
+      node.parent_client_node_ref === null &&
+      (node.semantic_role === "cover" || node.render_role === "front_matter"),
+  );
+  const topLevel = nodes.filter(
+    (node) =>
+      node.parent_client_node_ref === root?.client_node_ref &&
+      node.semantic_role !== "toc" &&
+      node.render_role !== "toc" &&
+      node.render_role !== "hidden",
+  );
+  const emptyTopLevelTitles = topLevel
+    .filter(
+      (node) =>
+        !nodes.some(
+          (candidateNode) =>
+            candidateNode.parent_client_node_ref === node.client_node_ref &&
+            candidateNode.render_role !== "hidden",
+        ),
+    )
+    .map((node) => node.title);
+  const contractReady =
+    candidate.schema_version === 2 &&
+    Array.isArray(candidate.bindings) &&
+    Array.isArray(candidate.section_obligation_bindings);
+  const highNoticeCount = candidate.notices.filter(
+    (notice) => notice.severity === "high",
+  ).length;
+  return {
+    blocked:
+      !contractReady ||
+      topLevel.length < 2 ||
+      emptyTopLevelTitles.length > 0 ||
+      highNoticeCount > 0,
+    contractReady,
+    topLevelCount: topLevel.length,
+    emptyTopLevelTitles,
+    requirementBindingCount: candidate.bindings?.length ?? 0,
+    obligationBindingCount: candidate.section_obligation_bindings?.length ?? 0,
+    highNoticeCount,
+  };
+}
+
 function OutlineCandidateTree({
   nodes,
   selected,
@@ -50,6 +117,7 @@ function OutlineCandidateTree({
   obsolete: boolean;
   onToggle: (event: ChangeEvent<HTMLInputElement>, ref: string) => void;
 }) {
+  const displayTitles = outlineDisplayTitles(nodes);
   const byParent = new Map<string | null, OutlineCandidateView["nodes"]>();
   for (const node of [...nodes].sort((a, b) => a.ordinal - b.ordinal)) {
     const key = node.parent_client_node_ref;
@@ -80,7 +148,7 @@ function OutlineCandidateTree({
             disabled={obsolete}
             onChange={(event) => onToggle(event, node.client_node_ref)}
           />{" "}
-          {node.title}
+          {displayTitles.get(node.client_node_ref) ?? node.title}
         </label>
       ))}
     </>
@@ -99,6 +167,8 @@ export function CandidateReview({
   const stale =
     candidate.base_workspace_revision_id !== state.workspace?.revision_id;
   const obsolete = candidate.status === "obsolete" || stale;
+  const outlineQuality =
+    candidate.kind === "outline" ? outlineCandidateQuality(candidate) : null;
 
   function onOutline(event: ChangeEvent<HTMLInputElement>, ref: string) {
     session.toggleOutlineNode(ref, event.currentTarget.checked);
@@ -120,6 +190,32 @@ export function CandidateReview({
         <p className="note" data-testid="candidate-stale">
           候选已过期。人改的树和正文保留，可重新生成。
         </p>
+      )}
+      {candidate.kind === "outline" && outlineQuality && (
+        <div className="note" data-testid="outline-quality-summary">
+          <strong>结构质量</strong>
+          <div>
+            一级章节 {outlineQuality.topLevelCount} · 要求绑定{" "}
+            {outlineQuality.requirementBindingCount} · 子节义务绑定{" "}
+            {outlineQuality.obligationBindingCount} · 高风险提示{" "}
+            {outlineQuality.highNoticeCount}
+          </div>
+          {!outlineQuality.contractReady && (
+            <div data-testid="outline-quality-blocked">
+              此候选不是当前语义契约生成结果，必须重新生成后才能接受。
+            </div>
+          )}
+          {outlineQuality.emptyTopLevelTitles.length > 0 && (
+            <div data-testid="outline-quality-empty-branches">
+              空一级章节：{outlineQuality.emptyTopLevelTitles.join("、")}
+            </div>
+          )}
+          {outlineQuality.highNoticeCount > 0 && (
+            <div data-testid="outline-quality-high-notices">
+              存在高风险结构提示，必须修复后重新生成。
+            </div>
+          )}
+        </div>
       )}
       {candidate.kind === "outline" && (
         <OutlineCandidateTree
@@ -146,7 +242,7 @@ export function CandidateReview({
           type="button"
           className="btn"
           data-testid="candidate-accept"
-          disabled={state.ended || obsolete}
+          disabled={state.ended || obsolete || outlineQuality?.blocked === true}
           onClick={() => void session.acceptCandidate()}
         >
           接受所选

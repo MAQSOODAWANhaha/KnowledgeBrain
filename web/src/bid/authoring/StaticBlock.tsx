@@ -25,6 +25,17 @@ function richView(nodes: RichNode[]) {
     if (node.kind === "paragraph") {
       return <p key={index}>{node.content.map(inlineView)}</p>;
     }
+    if (node.kind === "horizontal_rule") return <hr key={index} />;
+    if (node.kind === "code_block") {
+      return (
+        <pre key={index}>
+          <code>{node.text}</code>
+        </pre>
+      );
+    }
+    if (node.kind === "blockquote") {
+      return <blockquote key={index}>{richView(node.content)}</blockquote>;
+    }
     const Tag = node.kind === "bullet_list" ? "ul" : "ol";
     return (
       <Tag key={index}>

@@ -39,12 +39,16 @@ function Login() {
             setErr("");
             setBusy(true);
             try {
-              const r = await api.login(email.trim(), password);
+              const r = await api.login(email.trim() || "dev@local", password);
               setToken(r.token);
               go("/");
             } catch (ex) {
               setErr(
-                ex instanceof ApiError ? "登录失败，请再试一次" : "网络错误",
+                ex instanceof ApiError
+                  ? "登录失败，请再试一次"
+                  : ex instanceof Error
+                    ? ex.message
+                    : "网络错误",
               );
             } finally {
               setBusy(false);

@@ -21,7 +21,13 @@ import type {
   WorkspaceEnvelope,
   WorkspaceView,
 } from "../api/types";
-import { applyEditorModel, type TiptapNode } from "./adapter";
+import {
+  applyEditorModel,
+  docToChapterPatches,
+  type ChapterPatchBlock,
+  type TiptapNode,
+} from "./adapter";
+import { blocksForNode } from "./blocks";
 import type { CurrentAssessments } from "./assessment";
 import { checkpointAllowed, exportAllowed } from "./assessment";
 import type { ContentBlockV1 } from "./contentBlock";
@@ -115,6 +121,8 @@ export type BidV2State = {
   assets: WorkspaceAssetView[];
   asyncRequests: AsyncRequestView[];
   pendingUploads: string[];
+  preparingOutline: boolean;
+  outlineSourceKey: string | null;
   error: { message: string; code: string; technical: boolean } | null;
   busy: boolean;
 };
@@ -180,6 +188,7 @@ export type BidV2Session = {
   deleteNode: (nodeLineageId: string) => Promise<void>;
   splitNode: (nodeLineageId: string, titles: string[]) => Promise<void>;
   mergeNodes: (nodeLineageIds: string[], title: string) => Promise<void>;
+  applyDocument: (doc: TiptapNode) => void;
   editRichText: (blockLineageId: string, doc: TiptapNode) => void;
   editTable: (blockLineageId: string, doc: TiptapNode) => void;
   insertRichTextBlock: (nodeLineageId: string, ordinal: number) => void;
@@ -239,6 +248,8 @@ function emptyState(): BidV2State {
     assets: [],
     asyncRequests: [],
     pendingUploads: [],
+    preparingOutline: false,
+    outlineSourceKey: null,
     error: null,
     busy: false,
   };
@@ -253,6 +264,17 @@ function mapError(error: unknown): AuthoringLogicError {
     if (error.status === 409) return new CasConflictError();
     if (error.status === 503)
       return new EnqueueUncertainError(requestArtifactId);
+    if (
+      error.code === "TENDER_DOCUMENT_DUPLICATE" ||
+      error.message.includes("TENDER_DOCUMENT_DUPLICATE")
+    ) {
+      return new AuthoringLogicError(
+        "TENDER_DOCUMENT_DUPLICATE",
+        "本项目已上传过这份文件",
+        true,
+        requestArtifactId,
+      );
+    }
     return new AuthoringLogicError(
       error.code || `HTTP_${error.status}`,
       error.message,
@@ -281,6 +303,7 @@ function requireBlock(
 }
 
 export function shouldPoll(state: BidV2State): boolean {
+  if (state.preparingOutline) return true;
   if (
     state.documents.some(
       (doc) =>
@@ -441,6 +464,22 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
     downloadedExports.add(exportId);
   }
 
+  function withMonotonicProgress(
+    previous: AsyncRequestView | undefined,
+    next: AsyncRequestView,
+  ): AsyncRequestView {
+    const previousSequence = previous?.progress?.sequence;
+    const nextSequence = next.progress?.sequence;
+    if (
+      typeof previousSequence === "number" &&
+      typeof nextSequence === "number" &&
+      nextSequence < previousSequence
+    ) {
+      return { ...next, progress: previous?.progress };
+    }
+    return next;
+  }
+
   async function rememberRequest(
     request: AsyncRequestView,
     mode: "candidate" | "evidence" | "export",
@@ -525,7 +564,7 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
               setState({ evidenceOverview });
             }
           }
-          nextRequests.push(latest);
+          nextRequests.push(withMonotonicProgress(request, latest));
         } catch {
           nextRequests.push(request);
         }
@@ -627,19 +666,59 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
         }
       }
       if (route.step === "authoring" && state.workspace) {
-        const [assessments, evidenceOverview, assets] = await Promise.all([
-          deps.api
-            .getAssessments(state.workspace.workspace_id, signal)
-            .catch(() => null),
-          deps.api
-            .getEvidenceOverview(state.workspace.workspace_id, signal)
-            .catch(() => null),
-          deps.api
-            .listAssets(state.workspace.workspace_id, signal)
-            .catch(() => [] as WorkspaceAssetView[]),
-        ]);
+        const workspaceId = state.workspace.workspace_id;
+        const [assessments, evidenceOverview, assets, requests] =
+          await Promise.all([
+            deps.api.getAssessments(workspaceId, signal).catch(() => null),
+            deps.api
+              .getEvidenceOverview(workspaceId, signal)
+              .catch(() => null),
+            deps.api
+              .listAssets(workspaceId, signal)
+              .catch(() => [] as WorkspaceAssetView[]),
+            deps.api
+              .listWorkspaceRequests(workspaceId, signal)
+              .catch(() => [] as AsyncRequestView[]),
+          ]);
         if (signal.aborted) return;
-        setState({ assessments, evidenceOverview, assets });
+        for (const request of requests) {
+          if (
+            request.kind === "OutlineGenerate" ||
+            request.kind === "ContentGenerate"
+          ) {
+            requestModes.set(request.request_artifact_id, "candidate");
+          } else if (request.kind === "SubmissionExport") {
+            requestModes.set(request.request_artifact_id, "export");
+          }
+        }
+        const monotonicRequests = requests.map((request) =>
+          withMonotonicProgress(
+            state.asyncRequests.find(
+              (current) =>
+                current.request_artifact_id === request.request_artifact_id,
+            ),
+            request,
+          ),
+        );
+        setState({
+          assessments,
+          evidenceOverview,
+          assets,
+          asyncRequests: monotonicRequests,
+        });
+        const latestCandidateRequest = monotonicRequests.find(
+          (request) =>
+            (request.kind === "OutlineGenerate" ||
+              request.kind === "ContentGenerate") &&
+            request.status === "succeeded" &&
+            request.result_identity,
+        );
+        if (latestCandidateRequest?.result_identity) {
+          await hydrateCandidate(
+            workspaceId,
+            latestCandidateRequest.result_identity.artifact_id,
+          ).catch(() => undefined);
+        }
       }
       if (route.step === "export" && state.workspace) {
         const [exports, assessments] = await Promise.all([
@@ -741,6 +820,52 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
       origin: "human",
       dependency_sha256: null,
       content_sha256: "0".repeat(64),
+    };
+  }
+
+  function materialize(
+    incoming: ChapterPatchBlock,
+    previous: ContentBlockV1 | null,
+  ): ContentBlockV1 {
+    const base =
+      previous && previous.kind === incoming.kind ? previous : { ...newBlockBase() };
+    if (incoming.kind === "rich_text") {
+      return {
+        ...base,
+        kind: "rich_text",
+        origin: "human",
+        content: { type: "rich_text", nodes: incoming.nodes },
+      };
+    }
+    if (incoming.kind === "table") {
+      return {
+        ...base,
+        kind: "table",
+        origin: "human",
+        content: incoming.content,
+      };
+    }
+    if (incoming.kind === "image") {
+      return {
+        ...base,
+        kind: "image",
+        origin: "human",
+        content: incoming.content,
+      };
+    }
+    if (incoming.kind === "page_break") {
+      return {
+        ...base,
+        kind: "page_break",
+        origin: "human",
+        content: { type: "page_break" },
+      };
+    }
+    return {
+      ...base,
+      kind: "signature_placeholder",
+      origin: "human",
+      content: incoming.content,
     };
   }
 
@@ -920,6 +1045,72 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
         assertCanMerge(tree(), nodeLineageIds);
         await commitOperations([ops.mergeNodes(nodeLineageIds, title)]);
       }).catch(fail),
+    applyDocument(doc) {
+      if (!state.workspace || !state.etag || state.ended) return;
+      const { workspace } = head();
+      const patches = docToChapterPatches(doc);
+      let drafts = { ...state.drafts };
+      let dirty = false;
+      const titles: Array<{ id: string; title: string }> = [];
+      for (const patch of patches) {
+        const node = findNode(tree(), patch.lineageId);
+        if (!node) continue;
+        if (patch.title.trim() && patch.title.trim() !== node.title) {
+          titles.push({ id: patch.lineageId, title: patch.title.trim() });
+        }
+        const existing = blocksForNode(node, workspace.blocks, drafts);
+        const next = patch.blocks.map((incoming, index) => {
+          const prev = existing[index];
+          return materialize(
+            incoming,
+            prev && prev.kind === incoming.kind ? prev : null,
+          );
+        });
+        const kept = new Set(next.map((block) => block.lineage_id));
+        for (const extra of existing) {
+          if (kept.has(extra.lineage_id)) continue;
+          drafts = upsertDraft(drafts, {
+            nodeLineageId: node.lineage_id,
+            blockLineageId: extra.lineage_id,
+            op: "delete",
+            ordinal: 0,
+            block: extra,
+            baseWorkspaceRevisionId: workspace.revision_id,
+          });
+          dirty = true;
+        }
+        next.forEach((block, ordinal) => {
+          const prev = existing.find(
+            (item) => item.lineage_id === block.lineage_id,
+          );
+          if (
+            prev &&
+            prev.kind === block.kind &&
+            JSON.stringify(prev.content) === JSON.stringify(block.content)
+          ) {
+            return;
+          }
+          drafts = upsertDraft(drafts, {
+            nodeLineageId: node.lineage_id,
+            blockLineageId: block.lineage_id,
+            op: prev ? "update" : "insert",
+            ordinal,
+            block,
+            baseWorkspaceRevisionId: workspace.revision_id,
+          });
+          dirty = true;
+        });
+      }
+      if (dirty) {
+        setState({
+          drafts,
+          draftStatus: state.conflict ? "conflict" : "dirty",
+          error: null,
+        });
+        if (!state.conflict) scheduleSave();
+      }
+      for (const item of titles) void session.renameNode(item.id, item.title);
+    },
     editRichText(blockLineageId, doc) {
       editModel(blockLineageId, { kind: "rich_text", doc });
     },
@@ -1054,6 +1245,7 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
     generateOutline: () =>
       enqueue(async () => {
         try {
+          setState({ preparingOutline: true, error: null });
           assertEditable();
           if (!state.route)
             throw new AuthoringLogicError("NO_ROUTE", "未选择项目");
@@ -1069,6 +1261,21 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
               "NO_READY_DOCUMENTS",
               "请等待招标文件解析完成后再生成大纲",
             );
+          }
+          const sourceKey = ready
+            .map(
+              (doc) =>
+                `${doc.id}:${doc.original_sha256}:${doc.conversion_generation}`,
+            )
+            .sort()
+            .join("|");
+          const pendingOutline = state.asyncRequests.find(
+            (request) =>
+              request.kind === "OutlineGenerate" &&
+              request.status === "pending",
+          );
+          if (pendingOutline) {
+            return;
           }
           if (
             !current.workspace.document_set_revision_id ||
@@ -1088,11 +1295,25 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
             },
             createMutationAttempt(),
           );
-          const envelope = await deps.api.getProjectWorkspace(
+          const delay = (ms: number) =>
+            new Promise<void>((resolve) => {
+              deps.clock.schedule(() => resolve(), ms);
+            });
+          let envelope = await deps.api.getProjectWorkspace(
             state.route.projectId,
           );
           applyWorkspace(envelope);
           current = head();
+          const freezeRevision = current.workspace.revision_id;
+          for (let attempt = 0; attempt < 25; attempt += 1) {
+            await delay(400);
+            envelope = await deps.api.getProjectWorkspace(
+              state.route.projectId,
+            );
+            applyWorkspace(envelope);
+            current = head();
+            if (current.workspace.revision_id !== freezeRevision) break;
+          }
           const setId =
             current.workspace.document_set_revision_id ?? pointer.artifact_id;
           const setSha =
@@ -1111,8 +1332,11 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
             },
           );
           await rememberRequest(request, "candidate");
+          setState({ outlineSourceKey: sourceKey });
         } catch (error) {
           fail(error);
+        } finally {
+          setState({ preparingOutline: false });
         }
       }),
     generateContent: (target, nodeLineageId, insertionAnchor) =>

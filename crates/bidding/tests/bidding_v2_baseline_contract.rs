@@ -6,6 +6,9 @@ const PHASE3_LIVE: &str = include_str!("../../../scripts/bidding_v2_phase3_live.
 const API_ROUTER: &str = include_str!("../../api/src/routes.rs");
 const BID_API_ROUTER: &str = include_str!("../../api/src/bid_v2_routes.rs");
 const WORKER: &str = include_str!("../../worker/src/consume.rs");
+const KNOWLEDGE_CLONE: &str = include_str!("../../knowledge/src/clone/mod.rs");
+const KNOWLEDGE_SEARCH: &str = include_str!("../../knowledge/src/search/mod.rs");
+const FRESH_SCHEMA_ACCEPTANCE: &str = include_str!("../../../scripts/fresh_schema_acceptance.sh");
 
 use knowledge::{LaunchMode, QueueRegistry};
 use platform::{
@@ -17,6 +20,26 @@ fn create_table_names() -> Vec<&'static str> {
         .filter_map(|line| line.trim().strip_prefix("CREATE TABLE "))
         .filter_map(|rest| rest.split_whitespace().next())
         .collect()
+}
+
+#[test]
+fn destructive_postgres_tests_require_an_isolated_non_live_database() {
+    for (name, source) in [
+        ("worker", WORKER),
+        ("knowledge clone", KNOWLEDGE_CLONE),
+        ("knowledge search", KNOWLEDGE_SEARCH),
+        ("fresh acceptance", FRESH_SCHEMA_ACCEPTANCE),
+    ] {
+        assert!(source.contains("DROP SCHEMA public CASCADE"), "{name}");
+        assert!(
+            source.contains("KNOWLEDGEBRAIN_TEST_DATABASE_URL"),
+            "{name} can inherit the live database"
+        );
+        assert!(
+            source.contains(":15432/"),
+            "{name} does not explicitly reject the live PostgreSQL port"
+        );
+    }
 }
 
 #[test]
@@ -398,9 +421,47 @@ fn phase_three_has_async_workers_and_live_evidence_candidate_publication() {
         .split("\n#[cfg(test)]")
         .next()
         .expect("worker source");
-    assert!(active_worker.contains("run_outline_agent"));
+    assert!(active_worker.contains("run_outline_generation"));
     assert!(active_worker.contains("run_content_agent"));
     assert!(active_worker.contains("exactly once"));
+    for semantic_contract in [
+        "kb_bid_v2_load_requirement_set_compile_input_v3",
+        "kb_bid_v2_publish_requirement_set_v3",
+        "kb_bid_v2_outline_semantics_valid",
+        "section_obligation_bindings",
+        "'system:requirement-set-compile-v3'",
+        "\"map_schema\":3",
+        "\"reduce_schema\":2",
+        "\"output_schema\":2",
+    ] {
+        assert!(
+            SQL.contains(semantic_contract),
+            "missing {semantic_contract}"
+        );
+    }
+    assert!(SQL.contains("AND request_value.status='pending'"));
+    assert!(!SQL.contains("request_value.status IN ('pending','succeeded')"));
+    assert!(SQL.contains("AND state='proposed' AND id<>p_candidate_id"));
+    assert!(SQL.contains(
+        "ARRAY['schema_version','coverage','composition_spine',\n      'section_obligation_matrix'"
+    ));
+    assert!(SQL.contains(
+        "'reduce_plan_sha256','map_evidence_set_sha256','composition_spine','section_obligation_matrix'"
+    ));
+    assert!(SQL.contains(
+        "'selected_evidence','selected_facts','accepted_node_chunks','accepted_routes','accepted_obligation_bindings'"
+    ));
+    assert!(
+        SQL.matches("p_payload->'schema_version' IS DISTINCT FROM '2'::jsonb")
+            .count()
+            >= 3
+    );
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000105"));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000106"));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000107"));
+    assert!(SQL.contains("\"version\":7,\"map_schema\":3,\"reduce_schema\":2"));
+    assert!(SQL.contains("\"progress_control\":\"completion_and_stall\""));
+    assert!(SQL.contains("ORDER BY created_at DESC,checkpoint_ordinal DESC LIMIT 1"));
 }
 
 #[test]

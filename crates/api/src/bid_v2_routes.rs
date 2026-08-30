@@ -178,6 +178,10 @@ pub fn router() -> Router<AppState> {
             get(get_submission_assessment_report),
         )
         .route(
+            "/api/v2/submission-workspaces/{workspace_id}/requests",
+            get(list_async_requests),
+        )
+        .route(
             "/api/v2/submission-workspaces/{workspace_id}/requests/{request_id}",
             get(get_async_request),
         )
@@ -212,6 +216,11 @@ fn map_sql(error: sqlx::Error) -> ApiErr {
             StatusCode::CONFLICT,
             "IDEMPOTENCY_PAYLOAD_MISMATCH",
             message,
+        ),
+        Some("23514") if message.contains("TENDER_DOCUMENT_DUPLICATE") => fail(
+            StatusCode::CONFLICT,
+            "TENDER_DOCUMENT_DUPLICATE",
+            "本项目已上传过这份文件",
         ),
         Some("23505") | Some("23514") | Some("22023") => validation(&message),
         Some("55000") => fail(StatusCode::CONFLICT, "PROJECT_ENDED", message),
@@ -1941,6 +1950,19 @@ async fn download_submission_export(
                 error.to_string(),
             )
         })
+}
+
+async fn list_async_requests(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Json<Value>, ApiErr> {
+    let (_, actor) = human_actor(&headers, &state).await?;
+    let pool = require_bid_pool().await?;
+    bidding::bid_authoring_v2::list_workspace_async_requests_v2(&pool, workspace_id, &actor)
+        .await
+        .map(Json)
+        .map_err(map_sql)
 }
 
 async fn get_async_request(

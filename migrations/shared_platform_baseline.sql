@@ -26,6 +26,7 @@ AS $$
             'system:matching-invalidation',
             'system:matching-publication',
             'system:requirement-set-compile-v2',
+            'system:requirement-set-compile-v3',
             'system:retention-consumer',
             'system:submission-export-v2',
             'system:tender-document-process-v2'
@@ -39,6 +40,7 @@ CREATE DOMAIN kb_object_ref AS text CHECK (VALUE ~ '^objects/[0-9a-f]{64}$');
 CREATE FUNCTION kb_reject_append_only()
 RETURNS trigger
 LANGUAGE plpgsql
+SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
 BEGIN
@@ -98,6 +100,7 @@ CREATE TABLE idempotency_requests (
 CREATE FUNCTION kb_guard_idempotency_request()
 RETURNS trigger
 LANGUAGE plpgsql
+SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
 BEGIN
@@ -343,7 +346,7 @@ CREATE TABLE object_retention_tombstones (
     CHECK (object_ref = 'objects/' || digest)
 );
 CREATE TRIGGER object_retention_tombstones_immutable
-BEFORE UPDATE OR DELETE ON object_retention_tombstones
+BEFORE UPDATE ON object_retention_tombstones
 FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
 CREATE TRIGGER object_retention_tombstones_no_truncate
 BEFORE TRUNCATE ON object_retention_tombstones
@@ -390,14 +393,22 @@ BEGIN
     SELECT * INTO registry FROM object_registry WHERE object_ref = p_object_ref FOR UPDATE;
     IF FOUND THEN
         IF registry.digest <> p_digest OR registry.media_type <> p_media_type
-           OR registry.byte_length <> p_byte_length OR registry.state <> 'available' THEN
+           OR registry.byte_length <> p_byte_length THEN
+            RAISE EXCEPTION 'object registry identity mismatch or object unavailable'
+                USING ERRCODE = '23514';
+        END IF;
+        IF registry.state IN ('deleting', 'deleted') THEN
+            DELETE FROM object_retention_outbox WHERE object_ref = p_object_ref;
+            DELETE FROM object_retention_tombstones WHERE object_ref = p_object_ref;
+            UPDATE object_registry
+               SET state = 'available', deleting_at = NULL, deleted_at = NULL
+             WHERE object_ref = p_object_ref;
+        ELSIF registry.state <> 'available' THEN
             RAISE EXCEPTION 'object registry identity mismatch or object unavailable'
                 USING ERRCODE = '23514';
         END IF;
     ELSE
-        IF EXISTS (SELECT 1 FROM object_retention_tombstones WHERE object_ref = p_object_ref) THEN
-            RAISE EXCEPTION 'deleted object digest cannot be revived' USING ERRCODE = '23514';
-        END IF;
+        DELETE FROM object_retention_tombstones WHERE object_ref = p_object_ref;
         INSERT INTO object_registry(object_ref, digest, media_type, byte_length, state)
         VALUES (p_object_ref, p_digest, p_media_type, p_byte_length, 'available');
     END IF;
@@ -524,7 +535,17 @@ BEGIN
     SELECT * INTO STRICT registry FROM object_registry
      WHERE object_ref = staging.object_ref FOR UPDATE;
     IF registry.digest <> p_digest OR registry.media_type <> p_media_type
-       OR registry.byte_length <> p_byte_length OR registry.state <> 'available' THEN
+       OR registry.byte_length <> p_byte_length THEN
+        RAISE EXCEPTION 'object upload staging content identity mismatch'
+            USING ERRCODE = '23514';
+    END IF;
+    IF registry.state IN ('deleting', 'deleted') THEN
+        DELETE FROM object_retention_outbox WHERE object_ref = p_object_ref;
+        DELETE FROM object_retention_tombstones WHERE object_ref = p_object_ref;
+        UPDATE object_registry
+           SET state = 'available', deleting_at = NULL, deleted_at = NULL
+         WHERE object_ref = p_object_ref;
+    ELSIF registry.state <> 'available' THEN
         RAISE EXCEPTION 'object upload staging content identity mismatch'
             USING ERRCODE = '23514';
     END IF;
@@ -774,7 +795,13 @@ RETURNS TABLE(object_ref kb_object_ref, digest kb_sha256, byte_length bigint, at
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public
+SET plan_cache_mode = force_custom_plan
 AS $$
+DECLARE
+    claimed_ref kb_object_ref;
+    claimed_digest kb_sha256;
+    claimed_bytes bigint;
+    claimed_attempt integer;
 BEGIN
     IF p_worker_name !~ '^[a-z0-9][a-z0-9._-]{0,63}$' OR p_lease_ms NOT BETWEEN 1000 AND 300000 THEN
         RAISE EXCEPTION 'invalid retention claim parameters' USING ERRCODE = '22023';
@@ -783,7 +810,6 @@ BEGIN
     -- A worker generates the claim token before the request. If the response is
     -- lost, the same token resumes and renews the exact claim without consuming
     -- another attempt.
-    RETURN QUERY
     WITH resumed AS (
         UPDATE object_retention_outbox outbox
            SET heartbeat_at = clock_timestamp(),
@@ -794,6 +820,7 @@ BEGIN
          RETURNING outbox.object_ref, outbox.attempt
     )
     SELECT registry.object_ref, registry.digest, registry.byte_length, resumed.attempt
+      INTO claimed_ref, claimed_digest, claimed_bytes, claimed_attempt
       FROM resumed JOIN object_registry registry USING (object_ref)
      WHERE registry.state = 'deleting'
        AND NOT EXISTS (
@@ -801,6 +828,11 @@ BEGIN
             WHERE refs.object_ref = resumed.object_ref
        );
     IF FOUND THEN
+        object_ref := claimed_ref;
+        digest := claimed_digest;
+        byte_length := claimed_bytes;
+        attempt := claimed_attempt;
+        RETURN NEXT;
         RETURN;
     END IF;
     IF EXISTS (
@@ -813,7 +845,6 @@ BEGIN
         RAISE EXCEPTION 'retention claim token cannot be reused' USING ERRCODE = '22023';
     END IF;
 
-    RETURN QUERY
     WITH candidate AS (
         SELECT outbox.object_ref, outbox.state AS prior_state,
                outbox.claim_token AS prior_claim_token, outbox.attempt AS prior_attempt
@@ -852,7 +883,16 @@ BEGIN
          RETURNING outbox.object_ref, outbox.attempt
     )
     SELECT registry.object_ref, registry.digest, registry.byte_length, claimed.attempt
+      INTO claimed_ref, claimed_digest, claimed_bytes, claimed_attempt
       FROM claimed JOIN object_registry registry USING (object_ref);
+    IF FOUND THEN
+        object_ref := claimed_ref;
+        digest := claimed_digest;
+        byte_length := claimed_bytes;
+        attempt := claimed_attempt;
+        RETURN NEXT;
+    END IF;
+    RETURN;
 END
 $$;
 

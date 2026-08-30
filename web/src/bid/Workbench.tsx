@@ -1,7 +1,8 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
+import { Button, Select, Stepper } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { Crumbs } from "../Crumbs";
-import { parseBidRoute, useHash } from "../hash";
+import { go, parseBidRoute, useHash } from "../hash";
 import { Shell } from "../Shell";
 import { FilesPane } from "./FilesPane";
 import { AuthoringShell } from "./authoring/AuthoringShell";
@@ -16,7 +17,29 @@ import {
 import { useBidV2Session } from "./authoring/useBidV2Session";
 
 function toast(msg: string, color: "blue" | "red" = "blue") {
-  notifications.show({ message: msg, color });
+  notifications.show({
+    title: color === "red" ? "失败" : "提示",
+    message: msg,
+    color,
+    autoClose: 5000,
+    withCloseButton: true,
+  });
+}
+
+function outlineErrorMessage(code?: string | null): string {
+  switch (code) {
+    case "AGENT_MAP_FAILED":
+      return "招标结构分析失败，请再试一次";
+    case "AGENT_DEADLINE_EXCEEDED":
+      return "生成超时，请再试一次";
+    case "AGENT_TURN_TIMEOUT":
+    case "AGENT_PROVIDER_ERROR":
+      return "模型服务异常或超时，请再试一次";
+    case "AGENT_OUTPUT_INVALID":
+      return "大纲结构校验失败，请再试一次";
+    default:
+      return "大纲生成失败";
+  }
 }
 
 function Wizard({
@@ -26,23 +49,35 @@ function Wizard({
   projectId: string;
   step: AuthoringStep;
 }) {
-  const cur = AUTHORING_STEPS.findIndex((item) => item.key === step);
+  const cur = Math.max(
+    0,
+    AUTHORING_STEPS.findIndex((item) => item.key === step),
+  );
   return (
-    <nav className="wizard">
-      {AUTHORING_STEPS.map((item, index) => (
-        <a
-          key={item.key}
-          data-testid={`wizard-${item.key}`}
-          className={
-            item.key === step ? "on" : index < cur ? "done" : undefined
-          }
-          href={`#${authoringHref(projectId, item.key)}`}
-        >
-          <i>{item.n}</i>
-          <span>{item.label}</span>
-        </a>
-      ))}
-    </nav>
+    <div className="bid-stepper-wrap">
+      <Stepper
+        active={cur}
+        size="lg"
+        allowNextStepsSelect
+        className="bid-stepper"
+        styles={{
+          content: { display: "none" },
+          stepDescription: { display: "none" },
+        }}
+        onStepClick={(index) => {
+          const next = AUTHORING_STEPS[index];
+          if (next) go(authoringHref(projectId, next.key));
+        }}
+      >
+        {AUTHORING_STEPS.map((item) => (
+          <Stepper.Step
+            key={item.key}
+            label={item.label}
+            data-testid={`wizard-${item.key}`}
+          />
+        ))}
+      </Stepper>
+    </div>
   );
 }
 
@@ -53,10 +88,41 @@ export function Workbench({ email }: { email: string }) {
   const projectId = route?.projectId ?? "";
   const step: AuthoringStep = route?.step ?? "files";
   const ended = state.ended;
+  const outlineToastKey = useRef("");
 
   useEffect(() => {
     if (state.error) toast(state.error.message, "red");
   }, [state.error]);
+
+  useEffect(() => {
+    const outline = state.asyncRequests.find(
+      (request) => request.kind === "OutlineGenerate",
+    );
+    if (!outline || state.preparingOutline) return;
+    if (outline.status === "pending") return;
+    if (outline.status !== "failed" && outline.status !== "obsolete") return;
+    const key = `${outline.request_artifact_id}:${outline.status}:${outline.error_code ?? ""}`;
+    if (outlineToastKey.current === key) return;
+    outlineToastKey.current = key;
+    toast(
+      outline.status === "obsolete"
+        ? "生成未完成，请再点一次生成大纲"
+        : outlineErrorMessage(outline.error_code),
+      "red",
+    );
+  }, [state.asyncRequests, state.preparingOutline]);
+
+  useEffect(() => {
+    if (
+      state.candidate?.kind !== "outline" ||
+      state.candidate.status !== "proposed"
+    )
+      return;
+    const key = `ok:${state.candidate.candidate_id}`;
+    if (outlineToastKey.current === key) return;
+    outlineToastKey.current = key;
+    toast("大纲候选已生成，请核对后接受");
+  }, [state.candidate]);
 
   const title =
     step === "files"
@@ -81,38 +147,47 @@ export function Workbench({ email }: { email: string }) {
           ]}
         />
       }
-      title={title}
       steps={
         projectId ? <Wizard projectId={projectId} step={step} /> : undefined
       }
       extra={
         step === "authoring" ? (
           <div className="row">
-            <select
-              className="in"
+            <Select
+              w={140}
+              allowDeselect={false}
               value={state.fillPolicy}
-              onChange={(event) =>
-                session.setFillPolicy(
-                  event.currentTarget.value as typeof state.fillPolicy,
-                )
+              onChange={(value) =>
+                value &&
+                session.setFillPolicy(value as typeof state.fillPolicy)
               }
-            >
-              <option value="empty_only">只填空章</option>
-              <option value="append_candidate">追加候选</option>
-              <option value="missing_requirements_only">只补缺项</option>
-            </select>
-            <button
-              type="button"
-              className="btn ghost"
+              data={[
+                { value: "empty_only", label: "只填空章" },
+                { value: "append_candidate", label: "追加候选" },
+                {
+                  value: "missing_requirements_only",
+                  label: "只补缺项",
+                },
+              ]}
+            />
+            <Button
+              variant="default"
               data-testid="generate-outline"
               disabled={ended}
-              onClick={() => void session.generateOutline()}
+              onClick={() => {
+                const pending = state.asyncRequests.some(
+                  (request) =>
+                    request.kind === "OutlineGenerate" &&
+                    request.status === "pending",
+                );
+                if (!pending) toast("正在生成大纲…");
+                void session.generateOutline();
+              }}
             >
               生成大纲
-            </button>
-            <button
-              type="button"
-              className="btn ghost"
+            </Button>
+            <Button
+              variant="default"
               data-testid="generate-node"
               disabled={ended || !state.selectedNodeLineageId}
               onClick={() =>
@@ -123,10 +198,9 @@ export function Workbench({ email }: { email: string }) {
               }
             >
               生成本章
-            </button>
-            <button
-              type="button"
-              className="btn ghost"
+            </Button>
+            <Button
+              variant="default"
               disabled={ended || !state.selectedNodeLineageId}
               onClick={() =>
                 void session.generateContent(
@@ -136,24 +210,18 @@ export function Workbench({ email }: { email: string }) {
               }
             >
               生成子树
-            </button>
-            <button
-              type="button"
-              className="btn ghost"
+            </Button>
+            <Button
+              variant="default"
               data-testid="generate-workspace"
               disabled={ended}
               onClick={() => void session.generateContent("workspace")}
             >
               填充全部空章
-            </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={ended}
-              onClick={() => void session.save()}
-            >
+            </Button>
+            <Button disabled={ended} onClick={() => void session.save()}>
               保存
-            </button>
+            </Button>
           </div>
         ) : undefined
       }
@@ -206,7 +274,9 @@ export function Workbench({ email }: { email: string }) {
         </div>
       )}
       {step === "authoring" && (
-        <AuthoringShell session={session} state={state} />
+        <div className="wrap">
+          <AuthoringShell session={session} state={state} />
+        </div>
       )}
       {step === "export" && (
         <div className="wrap">

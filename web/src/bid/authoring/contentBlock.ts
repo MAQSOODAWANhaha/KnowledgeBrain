@@ -38,7 +38,10 @@ export type Paragraph = { kind: "paragraph"; content: Inline[] };
 export type ListItem = { kind: "list_item"; content: Paragraph[] };
 export type RichNode =
   | Paragraph
-  | { kind: "bullet_list" | "ordered_list"; content: ListItem[] };
+  | { kind: "bullet_list" | "ordered_list"; content: ListItem[] }
+  | { kind: "blockquote"; content: Paragraph[] }
+  | { kind: "code_block"; language: string; text: string }
+  | { kind: "horizontal_rule" };
 
 export type RichTextContent = { type: "rich_text"; nodes: RichNode[] };
 

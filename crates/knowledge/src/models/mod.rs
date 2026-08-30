@@ -3,8 +3,14 @@
 mod http;
 mod sse;
 
-pub use http::{CHAT_TIMEOUT, EMBED_TIMEOUT, HTTP_ATTEMPTS, chat_sse, json_sse, post_llm};
-pub use sse::{collect_chat_content, last_json_value, looks_like_sse};
+pub use http::{
+    AGENT_HTTP_ATTEMPTS, AGENT_TURN_TIMEOUT, CHAT_TIMEOUT, EMBED_TIMEOUT, HTTP_ATTEMPTS, chat_sse,
+    chat_sse_turn, chat_sse_turn_once, is_retryable, json_sse, post_llm,
+};
+pub use sse::{
+    ChatToolCall, ChatTurn, collect_chat_content, collect_chat_turn, last_json_value,
+    looks_like_sse,
+};
 
 use serde::{Deserialize, Serialize};
 

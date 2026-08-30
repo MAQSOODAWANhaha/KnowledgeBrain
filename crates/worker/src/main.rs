@@ -6,6 +6,7 @@ use worker::consume::{AppCtx, run_core};
 async fn main() {
     let _ = dotenvy::dotenv();
     platform::init_tracing();
+    platform::require_openai_chat();
     let pool = platform::connect()
         .await
         .unwrap_or_else(|e| panic!("postgres connection failed: {e}"));

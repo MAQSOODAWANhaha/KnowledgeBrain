@@ -25,6 +25,7 @@ x-app-env: &app-env
   KNOWLEDGEBRAIN_CHAT_BASE_URL: ${KNOWLEDGEBRAIN_CHAT_BASE_URL:-}
   KNOWLEDGEBRAIN_CHAT_API_KEY: ${KNOWLEDGEBRAIN_CHAT_API_KEY:-${LLM_API_KEY:-}}
   KNOWLEDGEBRAIN_CHAT_MODEL: ${KNOWLEDGEBRAIN_CHAT_MODEL:-${LLM_MODEL:-}}
+  KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT: ${KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT:-low}
   BID_EXTRACT_MODE: ${BID_EXTRACT_MODE:-hybrid}
   BID_EXTRACT_MODEL_ID: ${BID_EXTRACT_MODEL_ID:-${KNOWLEDGEBRAIN_CHAT_MODEL:-${LLM_MODEL:-}}}
   LLM_BASE_URL: ${LLM_BASE_URL:-}
@@ -46,6 +47,7 @@ x-app-env: &app-env
 
 services:
   postgres:
+    container_name: knowledgebrain-postgres
     image: pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-knowledgebrain}
@@ -68,6 +70,7 @@ services:
       start_period: 10s
 
   redis:
+    container_name: knowledgebrain-redis
     image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     ports:
       - "${REDIS_HOST_PORT:-16379}:6379"
@@ -81,6 +84,7 @@ services:
       start_period: 5s
 
   neo4j:
+    container_name: knowledgebrain-neo4j
     image: neo4j:5.26@sha256:89d577f2e49606de76441eca8cf7a0fe88e594cbaac4d2a3d86c6e59676e2b1e
     environment:
       NEO4J_AUTH: ${NEO4J_AUTH:-neo4j/knowledgebrain}
@@ -97,6 +101,7 @@ services:
       start_period: 20s
 
   minio:
+    container_name: knowledgebrain-minio
     image: minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     command: server /data --console-address ":9001"
     environment:
@@ -115,11 +120,13 @@ services:
       start_period: 15s
 
   docreader:
+    container_name: knowledgebrain-docreader
     profiles: ["runtime"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.docreader
-    image: knowledgebrain-docreader:local@sha256:72a50677badec74ed84c173c6098e139c0ab9b58281f20212e60610bbe0dbb97
+      network: host
+    image: knowledgebrain-docreader:local
     environment:
       DOCREADER_GRPC_PORT: ${DOCREADER_GRPC_PORT:-50051}
       MAX_FILE_SIZE_MB: 50
@@ -137,10 +144,12 @@ services:
       start_period: 30s
 
   migrate:
+    container_name: knowledgebrain-migrate
     profiles: ["runtime", "bootstrap"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.rust
+      network: host
       args:
         BIN: migrator
     image: knowledgebrain-migrator:local
@@ -152,13 +161,15 @@ services:
     restart: "no"
 
   api:
+    container_name: knowledgebrain-api
     profiles: ["runtime"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.rust
+      network: host
       args:
         BIN: api
-    image: knowledgebrain-api:local@sha256:30a9535e1fa6a139ebe67d7612d144eff75eea3558d621ae003385c73879dd9b
+    image: knowledgebrain-api:local
     environment:
       <<: *app-env
       DATABASE_URL: postgres://kb_runtime_api:${KNOWLEDGEBRAIN_API_DB_PASSWORD:-api-change-me}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
@@ -184,13 +195,15 @@ services:
       start_period: 15s
 
   worker:
+    container_name: knowledgebrain-worker
     profiles: ["runtime"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.rust
+      network: host
       args:
         BIN: worker
-    image: knowledgebrain-worker:local@sha256:5d2715634560254f7c975b5c2a35bc73b72a09ec7926696d91d0dbaa9be6d256
+    image: knowledgebrain-worker:local
     environment:
       <<: *app-env
       DATABASE_URL: postgres://kb_runtime_worker:${KNOWLEDGEBRAIN_WORKER_DB_PASSWORD:-worker-change-me}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
@@ -214,13 +227,15 @@ services:
       start_period: 15s
 
   retention:
+    container_name: knowledgebrain-retention
     profiles: ["runtime"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.rust
+      network: host
       args:
         BIN: worker
-    image: knowledgebrain-worker:local@sha256:5d2715634560254f7c975b5c2a35bc73b72a09ec7926696d91d0dbaa9be6d256
+    image: knowledgebrain-worker:local
     environment:
       <<: *app-env
       BIN: retention
@@ -242,6 +257,12 @@ services:
       timeout: 5s
       retries: 10
       start_period: 15s
+
+networks:
+  default:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: "1280"
 
 volumes:
   postgres-data:

@@ -98,7 +98,9 @@ async fn claim_retention(
     worker_name: &str,
 ) -> Result<Option<RetentionClaim>, sqlx::Error> {
     let claim_token = Uuid::new_v4();
-    let row = sqlx::query("SELECT * FROM kb_retention_claim($1,$2,$3)")
+    let row = sqlx::query(
+        "SELECT object_ref::text AS object_ref, digest::text AS digest, byte_length, attempt FROM kb_retention_claim($1,$2,$3)",
+    )
         .bind(claim_token)
         .bind(worker_name)
         .bind(RETENTION_LEASE_MS)

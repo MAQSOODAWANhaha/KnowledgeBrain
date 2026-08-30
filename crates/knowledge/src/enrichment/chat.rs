@@ -1,6 +1,6 @@
 //! OpenAI-compatible chat; `stub-chat` / missing URL stays local.
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 pub fn chat_http_configured() -> bool {
     !crate::chat_base_url().is_empty()
@@ -104,6 +104,239 @@ fn chat_complete_inner(
     )
 }
 
+pub fn chat_complete_turn(
+    system: &str,
+    user: &str,
+    model_id: &str,
+    max_tokens: u32,
+    timeout: std::time::Duration,
+) -> Result<crate::models::ChatTurn, String> {
+    chat_complete_turn_with_format(system, user, model_id, max_tokens, timeout, None)
+}
+
+pub fn chat_complete_turn_with_format(
+    system: &str,
+    user: &str,
+    model_id: &str,
+    max_tokens: u32,
+    timeout: std::time::Duration,
+    response_format: Option<&serde_json::Value>,
+) -> Result<crate::models::ChatTurn, String> {
+    chat_tools_turn_with_format(
+        &[
+            serde_json::json!({"role": "system", "content": system}),
+            serde_json::json!({"role": "user", "content": user}),
+        ],
+        &serde_json::json!([]),
+        model_id,
+        max_tokens,
+        timeout,
+        response_format,
+    )
+}
+
+/// One transport attempt. Domain orchestrators use this to own a single,
+/// non-multiplicative retry budget across transport and structured-output errors.
+pub fn chat_complete_turn_with_format_once(
+    system: &str,
+    user: &str,
+    model_id: &str,
+    max_tokens: u32,
+    timeout: std::time::Duration,
+    response_format: Option<&serde_json::Value>,
+) -> Result<crate::models::ChatTurn, String> {
+    chat_tools_turn_with_format_once(
+        &[
+            serde_json::json!({"role": "system", "content": system}),
+            serde_json::json!({"role": "user", "content": user}),
+        ],
+        &serde_json::json!([]),
+        model_id,
+        max_tokens,
+        timeout,
+        response_format,
+    )
+}
+
+pub fn chat_tools_turn(
+    messages: &[serde_json::Value],
+    tools: &serde_json::Value,
+    model_id: &str,
+    max_tokens: u32,
+    timeout: std::time::Duration,
+) -> Result<crate::models::ChatTurn, String> {
+    chat_tools_turn_with_format(messages, tools, model_id, max_tokens, timeout, None)
+}
+
+pub fn chat_tools_turn_with_format(
+    messages: &[serde_json::Value],
+    tools: &serde_json::Value,
+    model_id: &str,
+    max_tokens: u32,
+    timeout: std::time::Duration,
+    response_format: Option<&serde_json::Value>,
+) -> Result<crate::models::ChatTurn, String> {
+    chat_tools_turn_with_format_mode(
+        messages,
+        tools,
+        model_id,
+        max_tokens,
+        timeout,
+        response_format,
+        true,
+    )
+}
+
+pub fn chat_tools_turn_with_format_once(
+    messages: &[serde_json::Value],
+    tools: &serde_json::Value,
+    model_id: &str,
+    max_tokens: u32,
+    timeout: std::time::Duration,
+    response_format: Option<&serde_json::Value>,
+) -> Result<crate::models::ChatTurn, String> {
+    chat_tools_turn_with_format_mode(
+        messages,
+        tools,
+        model_id,
+        max_tokens,
+        timeout,
+        response_format,
+        false,
+    )
+}
+
+fn chat_tools_turn_with_format_mode(
+    messages: &[serde_json::Value],
+    tools: &serde_json::Value,
+    model_id: &str,
+    max_tokens: u32,
+    timeout: std::time::Duration,
+    response_format: Option<&serde_json::Value>,
+    retry_transport: bool,
+) -> Result<crate::models::ChatTurn, String> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| {
+                chat_tools_turn_inner(
+                    messages,
+                    tools,
+                    model_id,
+                    max_tokens,
+                    timeout,
+                    response_format,
+                    retry_transport,
+                )
+            })
+        }
+        _ => chat_tools_turn_inner(
+            messages,
+            tools,
+            model_id,
+            max_tokens,
+            timeout,
+            response_format,
+            retry_transport,
+        ),
+    }
+}
+
+fn chat_tools_turn_inner(
+    messages: &[serde_json::Value],
+    tools: &serde_json::Value,
+    model_id: &str,
+    max_tokens: u32,
+    timeout: std::time::Duration,
+    response_format: Option<&serde_json::Value>,
+    retry_transport: bool,
+) -> Result<crate::models::ChatTurn, String> {
+    let base = crate::chat_base_url();
+    let model = resolve_chat_model(model_id);
+    if base.is_empty() || model == "stub-chat" {
+        let last = messages
+            .iter()
+            .rev()
+            .find(|m| m.get("role").and_then(|v| v.as_str()) == Some("user"))
+            .and_then(|m| m.get("content").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        return Ok(crate::models::ChatTurn {
+            content: stub_complete(last),
+            tool_calls: Vec::new(),
+            finish_reason: "stop".into(),
+        });
+    }
+    let key = crate::chat_api_key();
+    let url = completions_url(&base);
+    let mut body = json!({
+        "model": model,
+        "temperature": 0.3,
+        "max_tokens": max_tokens,
+        "messages": messages
+    });
+    if let Some(obj) = body.as_object_mut() {
+        if let Ok(effort) = std::env::var("KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT") {
+            let effort = effort.trim().to_ascii_lowercase();
+            if matches!(effort.as_str(), "low" | "medium" | "high") {
+                obj.insert("reasoning_effort".into(), json!(effort));
+            }
+        }
+        if tools
+            .as_array()
+            .map(|items| !items.is_empty())
+            .unwrap_or(false)
+        {
+            obj.insert("tools".into(), tools.clone());
+        }
+        if let Some(format) = response_format {
+            obj.insert("response_format".into(), format.clone());
+        }
+    }
+    let call = |payload| {
+        if retry_transport {
+            crate::models::chat_sse_turn(&url, &key, payload, timeout)
+        } else {
+            crate::models::chat_sse_turn_once(&url, &key, payload, timeout)
+        }
+    };
+    let result = call(body.clone());
+    if let Err(error) = &result
+        && let Some(fallback) = response_format_fallback(&body, response_format, error)
+    {
+        return call(fallback);
+    }
+    result
+}
+
+fn response_format_fallback(
+    body: &serde_json::Value,
+    response_format: Option<&serde_json::Value>,
+    error: &str,
+) -> Option<serde_json::Value> {
+    if response_format
+        .and_then(|format| format.get("type"))
+        .and_then(Value::as_str)
+        != Some("json_schema")
+        || !format_unsupported(error)
+    {
+        return None;
+    }
+    let mut fallback = body.clone();
+    fallback
+        .as_object_mut()?
+        .insert("response_format".into(), json!({"type": "json_object"}));
+    Some(fallback)
+}
+
+fn format_unsupported(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    e.contains("llm http 400")
+        && (e.contains("response_format")
+            || e.contains("json_schema")
+            || e.contains("json_object")
+            || e.contains("unknown")
+            || e.contains("unsupported"))
+}
+
 pub fn chat_messages_limited(
     messages: &[ChatMessage],
     model_id: &str,
@@ -205,6 +438,20 @@ pub fn attempt_superseded(current: i32, job_attempt: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_schema_unsupported_falls_back_to_json_object() {
+        let body = json!({"model":"m","response_format":{"type":"json_schema"}});
+        let strict = json!({"type":"json_schema"});
+        let fallback = response_format_fallback(
+            &body,
+            Some(&strict),
+            "LLM HTTP 400: response_format json_schema unsupported",
+        )
+        .expect("fallback payload");
+        assert_eq!(fallback["response_format"], json!({"type":"json_object"}));
+        assert!(response_format_fallback(&body, Some(&strict), "LLM HTTP 500").is_none());
+    }
 
     #[test]
     fn sample_keeps_short() {

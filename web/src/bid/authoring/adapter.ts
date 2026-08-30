@@ -5,9 +5,11 @@ import type {
   Paragraph,
   RichNode,
   RichTextContent,
+  SignatureContent,
   TableContent,
   TextMark,
 } from "./contentBlock";
+import type { FlattenedNode } from "./tree";
 import { emptyRichText, validateTableGrid } from "./contentBlock";
 import { EditorAdapterError } from "./errors";
 
@@ -43,7 +45,14 @@ export type EditorModel =
       >["content"];
     };
 
-const RICH_DOC_TYPES = new Set(["paragraph", "bulletList", "orderedList"]);
+const RICH_DOC_TYPES = new Set([
+  "paragraph",
+  "bulletList",
+  "orderedList",
+  "blockquote",
+  "codeBlock",
+  "horizontalRule",
+]);
 
 function fail(message: string): never {
   throw new EditorAdapterError(message);
@@ -164,6 +173,20 @@ function paragraphFromTiptap(node: TiptapNode): Paragraph {
 
 function richNodeToTiptap(node: RichNode): TiptapNode {
   if (node.kind === "paragraph") return paragraphToTiptap(node);
+  if (node.kind === "horizontal_rule") return { type: "horizontalRule" };
+  if (node.kind === "code_block") {
+    return {
+      type: "codeBlock",
+      attrs: { language: node.language },
+      content: node.text ? [{ type: "text", text: node.text }] : [],
+    };
+  }
+  if (node.kind === "blockquote") {
+    return {
+      type: "blockquote",
+      content: node.content.map(paragraphToTiptap),
+    };
+  }
   return {
     type: node.kind === "bullet_list" ? "bulletList" : "orderedList",
     content: node.content.map((item) => ({
@@ -175,6 +198,27 @@ function richNodeToTiptap(node: RichNode): TiptapNode {
 
 function richNodeFromTiptap(node: TiptapNode): RichNode {
   if (node.type === "paragraph") return paragraphFromTiptap(node);
+  if (node.type === "horizontalRule") return { kind: "horizontal_rule" };
+  if (node.type === "codeBlock") {
+    const text = (node.content ?? [])
+      .map((child) => child.text ?? "")
+      .join("\n");
+    const language =
+      typeof node.attrs?.language === "string" ? node.attrs.language : "";
+    if (language.length > 64 || text.length > 65536) fail("代码块过长");
+    return { kind: "code_block", language, text };
+  }
+  if (node.type === "blockquote") {
+    const children = node.content ?? [];
+    if (children.length < 1) fail("引用不能为空");
+    return {
+      kind: "blockquote",
+      content: children.map((child) => {
+        if (child.type !== "paragraph") fail("引用只能包含段落");
+        return paragraphFromTiptap(child);
+      }),
+    };
+  }
   if (node.type === "bulletList" || node.type === "orderedList") {
     const items = node.content ?? [];
     if (items.length < 1) fail("列表不能为空");
@@ -359,4 +403,164 @@ export function applyEditorModel(
     return { ...block, content: model.content, origin: "human" };
   }
   return block;
+}
+
+function blocksToChapterContent(blocks: ContentBlockV1[]): TiptapNode[] {
+  const content: TiptapNode[] = [];
+  for (const block of blocks) {
+    if (block.kind === "rich_text") {
+      content.push(...block.content.nodes.map(richNodeToTiptap));
+    } else if (block.kind === "table") {
+      content.push(tableToTiptap(block.content));
+    } else if (block.kind === "image") {
+      content.push({
+        type: "bidImage",
+        attrs: {
+          assetRevisionId: block.content.asset_revision_id,
+          widthMm: block.content.width_mm,
+          alignment: block.content.alignment,
+          alt: block.content.alt,
+          caption: block.content.caption ?? "",
+          cropLeft: block.content.crop.left,
+          cropTop: block.content.crop.top,
+          cropRight: block.content.crop.right,
+          cropBottom: block.content.crop.bottom,
+        },
+      });
+    } else if (block.kind === "page_break") {
+      content.push({ type: "pageBreak" });
+    } else if (block.kind === "signature_placeholder") {
+      content.push({
+        type: "signature",
+        attrs: {
+          signatureKind: block.content.signature_kind,
+          widthMm: block.content.width_mm,
+          heightMm: block.content.height_mm,
+          label: block.content.label,
+        },
+      });
+    } else {
+      content.push({
+        type: "paragraph",
+        content: [{ type: "text", text: `[${block.kind}]` }],
+      });
+    }
+  }
+  if (content.length === 0) content.push({ type: "paragraph" });
+  return content;
+}
+
+export function outlineToDoc(
+  nodes: FlattenedNode[],
+  blocksOf: (node: FlattenedNode) => ContentBlockV1[],
+): TiptapNode {
+  return {
+    type: "doc",
+    content: nodes.map((node) => ({
+      type: "chapter",
+      attrs: {
+        lineageId: node.lineage_id,
+        depth: node.depth,
+      },
+      content: [
+        {
+          type: "chapterTitle",
+          attrs: { depth: node.depth },
+          content: node.title ? [{ type: "text", text: node.title }] : [],
+        },
+        ...blocksToChapterContent(blocksOf(node)),
+      ],
+    })),
+  };
+}
+
+export type ChapterPatchBlock =
+  | { kind: "rich_text"; nodes: RichNode[] }
+  | { kind: "table"; content: TableContent }
+  | { kind: "image"; content: ImageContent }
+  | { kind: "page_break" }
+  | { kind: "signature_placeholder"; content: SignatureContent };
+
+export type ChapterPatch = {
+  lineageId: string;
+  title: string;
+  blocks: ChapterPatchBlock[];
+};
+
+export function docToChapterPatches(doc: TiptapNode): ChapterPatch[] {
+  if (doc.type !== "doc") fail("根节点必须是 doc");
+  const patches: ChapterPatch[] = [];
+  for (const chapter of doc.content ?? []) {
+    if (chapter.type !== "chapter") continue;
+    const lineageId = asString(chapter.attrs?.lineageId, "lineageId");
+    const children = [...(chapter.content ?? [])];
+    let title = "";
+    if (children[0]?.type === "chapterTitle") {
+      const heading = children.shift();
+      title = (heading?.content ?? [])
+        .map((part) => part.text ?? "")
+        .join("")
+        .trim();
+    }
+    const blocks: ChapterPatchBlock[] = [];
+    let rich: RichNode[] = [];
+    const flush = () => {
+      if (!rich.length) return;
+      blocks.push({ kind: "rich_text", nodes: rich });
+      rich = [];
+    };
+    for (const child of children) {
+      if (RICH_DOC_TYPES.has(child.type)) {
+        rich.push(richNodeFromTiptap(child));
+        continue;
+      }
+      flush();
+      if (child.type === "table") {
+        blocks.push({ kind: "table", content: tiptapToTable(child) });
+      } else if (child.type === "pageBreak") {
+        blocks.push({ kind: "page_break" });
+      } else if (child.type === "signature") {
+        const kind = child.attrs?.signatureKind;
+        blocks.push({
+          kind: "signature_placeholder",
+          content: {
+            type: "signature_placeholder",
+            signature_kind:
+              kind === "seal" || kind === "date" ? kind : "signature",
+            width_mm: Number(child.attrs?.widthMm ?? 40),
+            height_mm: Number(child.attrs?.heightMm ?? 20),
+            label: String(child.attrs?.label ?? "签字"),
+          },
+        });
+      } else if (child.type === "bidImage") {
+        blocks.push({
+          kind: "image",
+          content: {
+            type: "image",
+            asset_revision_id: asString(
+              child.attrs?.assetRevisionId,
+              "assetRevisionId",
+            ),
+            width_mm: Number(child.attrs?.widthMm ?? 80),
+            alignment:
+              child.attrs?.alignment === "left" ||
+              child.attrs?.alignment === "right"
+                ? child.attrs.alignment
+                : "center",
+            crop: {
+              left: Number(child.attrs?.cropLeft ?? 0),
+              top: Number(child.attrs?.cropTop ?? 0),
+              right: Number(child.attrs?.cropRight ?? 0),
+              bottom: Number(child.attrs?.cropBottom ?? 0),
+            },
+            caption: String(child.attrs?.caption ?? "") || undefined,
+            alt: String(child.attrs?.alt ?? ""),
+          },
+        });
+      }
+    }
+    flush();
+    patches.push({ lineageId, title, blocks });
+  }
+  return patches;
 }

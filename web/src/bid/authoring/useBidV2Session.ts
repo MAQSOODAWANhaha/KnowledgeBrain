@@ -61,9 +61,18 @@ export function useBidV2Session(route: AuthoringRoute | null): {
 
   useEffect(() => {
     if (!poll) return;
-    const timer = window.setInterval(() => void session.poll(), 5000);
+    const outlinePending =
+      state.preparingOutline ||
+      state.asyncRequests.some(
+        (request) =>
+          request.kind === "OutlineGenerate" && request.status === "pending",
+      );
+    const timer = window.setInterval(
+      () => void session.poll(),
+      outlinePending ? 1000 : 5000,
+    );
     return () => window.clearInterval(timer);
-  }, [session, poll]);
+  }, [session, poll, state.preparingOutline, state.asyncRequests]);
 
   useEffect(
     () => () => {

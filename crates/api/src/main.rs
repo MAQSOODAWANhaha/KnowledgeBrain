@@ -7,6 +7,7 @@ use tokio::signal::unix::{SignalKind, signal};
 async fn main() {
     let _ = dotenvy::dotenv();
     platform::init_tracing();
+    platform::require_openai_chat();
     platform::connect()
         .await
         .unwrap_or_else(|e| panic!("postgres connection failed: {e}"));

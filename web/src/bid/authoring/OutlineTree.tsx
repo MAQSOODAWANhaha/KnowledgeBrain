@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { ActionIcon, Menu } from "@mantine/core";
+import { IconDots } from "@tabler/icons-react";
 import { go } from "../../hash";
 import { authoringHref } from "./routes";
 import type { BidV2Session, BidV2State } from "./session";
@@ -113,6 +115,11 @@ function NodeRow({
           <a
             className={selected ? "flt" : undefined}
             href={href()}
+            title={node.title}
+            onDoubleClick={(event) => {
+              event.preventDefault();
+              if (!ended) setEditing(true);
+            }}
             onClick={(event) => {
               event.preventDefault();
               session.selectNode(node.lineage_id);
@@ -123,129 +130,124 @@ function NodeRow({
             }}
           >
             <em>{node.title}</em>
-            {node.stale && <span className="chip amber">stale</span>}
           </a>
         )}
         {!ended && (
           <span className="outline-ops">
-            <button
-              type="button"
-              title="上移"
-              disabled={index <= 0}
-              onClick={() =>
-                void session.moveNode(
-                  node.lineage_id,
-                  node.parent_lineage_id,
-                  index - 1,
-                )
-              }
-            >
-              ↑
-            </button>
-            <button
-              type="button"
-              title="下移"
-              disabled={index < 0 || index >= siblings.length - 1}
-              onClick={() =>
-                void session.moveNode(
-                  node.lineage_id,
-                  node.parent_lineage_id,
-                  index + 1,
-                )
-              }
-            >
-              ↓
-            </button>
-            <button
-              type="button"
-              title="降级为上一节的子节点"
-              disabled={index <= 0}
-              onClick={() => {
-                const prev = siblings[index - 1];
-                if (!prev) return;
-                void session.moveNode(
-                  node.lineage_id,
-                  prev.lineage_id,
-                  session.childrenOf(prev.lineage_id).length,
-                );
-              }}
-            >
-              →
-            </button>
-            <button
-              type="button"
-              title="升级到与父节点同级"
-              disabled={!node.parent_lineage_id}
-              onClick={() => {
-                const parent = session.findNode(node.parent_lineage_id ?? "");
-                if (!parent) return;
-                const parentSiblings = session.childrenOf(
-                  parent.parent_lineage_id,
-                );
-                const parentIndex = parentSiblings.findIndex(
-                  (item) => item.lineage_id === parent.lineage_id,
-                );
-                void session.moveNode(
-                  node.lineage_id,
-                  parent.parent_lineage_id,
-                  parentIndex + 1,
-                );
-              }}
-            >
-              ←
-            </button>
-            <button
-              type="button"
-              data-testid="outline-rename"
-              title="改名"
-              onClick={() => setEditing(true)}
-            >
-              改
-            </button>
-            <button
-              type="button"
-              data-testid="outline-add-child"
-              title="子节点"
-              onClick={() =>
-                void session.insertNode({
-                  parentLineageId: node.lineage_id,
-                  ordinal: children.length,
-                  title: "新章节",
-                })
-              }
-            >
-              +
-            </button>
-            <button
-              type="button"
-              title="拆成两节"
-              onClick={() => onSplit(node)}
-            >
-              拆
-            </button>
-            <button
-              type="button"
-              title="与上一节合并"
-              disabled={index <= 0}
-              onClick={() => {
-                const prev = siblings[index - 1];
-                if (!prev) return;
-                void session.mergeNodes(
-                  [prev.lineage_id, node.lineage_id],
-                  prev.title,
-                );
-              }}
-            >
-              合
-            </button>
-            <button
-              type="button"
-              data-testid="outline-delete"
-              title="删除"
-              onClick={() => void session.deleteNode(node.lineage_id)}
-            >
-              ×
-            </button>
+            <Menu shadow="md" width={160} position="bottom-end" withinPortal>
+              <Menu.Target>
+                <ActionIcon
+                  variant="subtle"
+                  size="sm"
+                  aria-label="章节操作"
+                  onClick={(event) => event.stopPropagation()}
+                  onDoubleClick={(event) => event.stopPropagation()}
+                >
+                  <IconDots size={16} />
+                </ActionIcon>
+              </Menu.Target>
+              <Menu.Dropdown>
+                <Menu.Item
+                  data-testid="outline-rename"
+                  onClick={() => setEditing(true)}
+                >
+                  改名
+                </Menu.Item>
+                <Menu.Item
+                  data-testid="outline-add-child"
+                  onClick={() =>
+                    void session.insertNode({
+                      parentLineageId: node.lineage_id,
+                      ordinal: children.length,
+                      title: "新章节",
+                    })
+                  }
+                >
+                  添加子章节
+                </Menu.Item>
+                <Menu.Item
+                  disabled={index <= 0}
+                  onClick={() =>
+                    void session.moveNode(
+                      node.lineage_id,
+                      node.parent_lineage_id,
+                      index - 1,
+                    )
+                  }
+                >
+                  上移
+                </Menu.Item>
+                <Menu.Item
+                  disabled={index < 0 || index >= siblings.length - 1}
+                  onClick={() =>
+                    void session.moveNode(
+                      node.lineage_id,
+                      node.parent_lineage_id,
+                      index + 1,
+                    )
+                  }
+                >
+                  下移
+                </Menu.Item>
+                <Menu.Item
+                  disabled={index <= 0}
+                  onClick={() => {
+                    const prev = siblings[index - 1];
+                    if (!prev) return;
+                    void session.moveNode(
+                      node.lineage_id,
+                      prev.lineage_id,
+                      session.childrenOf(prev.lineage_id).length,
+                    );
+                  }}
+                >
+                  降为子章节
+                </Menu.Item>
+                <Menu.Item
+                  disabled={!node.parent_lineage_id}
+                  onClick={() => {
+                    const parent = session.findNode(
+                      node.parent_lineage_id ?? "",
+                    );
+                    if (!parent) return;
+                    const parentSiblings = session.childrenOf(
+                      parent.parent_lineage_id,
+                    );
+                    const parentIndex = parentSiblings.findIndex(
+                      (item) => item.lineage_id === parent.lineage_id,
+                    );
+                    void session.moveNode(
+                      node.lineage_id,
+                      parent.parent_lineage_id,
+                      parentIndex + 1,
+                    );
+                  }}
+                >
+                  升为同级
+                </Menu.Item>
+                <Menu.Item onClick={() => onSplit(node)}>拆分</Menu.Item>
+                <Menu.Item
+                  disabled={index <= 0}
+                  onClick={() => {
+                    const prev = siblings[index - 1];
+                    if (!prev) return;
+                    void session.mergeNodes(
+                      [prev.lineage_id, node.lineage_id],
+                      prev.title,
+                    );
+                  }}
+                >
+                  与上一节合并
+                </Menu.Item>
+                <Menu.Item
+                  color="red"
+                  data-testid="outline-delete"
+                  onClick={() => void session.deleteNode(node.lineage_id)}
+                >
+                  删除
+                </Menu.Item>
+              </Menu.Dropdown>
+            </Menu>
           </span>
         )}
       </div>
@@ -299,25 +301,6 @@ export function OutlineTree({
           />
         ))}
       </nav>
-      {!state.ended && (
-        <div className="wrap" style={{ paddingTop: 8 }}>
-          <button
-            type="button"
-            className="btn ghost"
-            data-testid="outline-add-root"
-            disabled={roots.length > 0}
-            onClick={() =>
-              void session.insertNode({
-                parentLineageId: null,
-                ordinal: 0,
-                title: "投标文件",
-              })
-            }
-          >
-            添加根章节
-          </button>
-        </div>
-      )}
       {splitFor && (
         <div className="card" data-testid="outline-split-dialog">
           <p className="lbl">拆成两节</p>

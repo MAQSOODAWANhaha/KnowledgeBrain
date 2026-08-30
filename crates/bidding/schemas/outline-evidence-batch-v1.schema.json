@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:knowledgebrain:bid:outline-evidence-batch:v1",
+  "title": "OutlineEvidenceBatchV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "batch_ordinal",
+    "source_unit_revision_ids",
+    "shards",
+    "chapter_signals",
+    "conflicts",
+    "needs_vision",
+    "notices"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "batch_ordinal": { "type": "integer", "minimum": 0 },
+    "source_unit_revision_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/uuid" }
+    },
+    "shards": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/shard" }
+    },
+    "chapter_signals": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "$ref": "#/$defs/chapterSignal" }
+    },
+    "conflicts": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "$ref": "#/$defs/conflict" }
+    },
+    "needs_vision": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/visionNeed" }
+    },
+    "notices": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "$ref": "#/$defs/batchNotice" }
+    }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "confidence": { "enum": ["high", "medium", "low"] },
+    "semanticRole": {
+      "enum": [
+        "cover",
+        "toc",
+        "qualification",
+        "technical",
+        "commercial",
+        "quotation",
+        "deviation",
+        "implementation",
+        "evidence_index",
+        "attachment",
+        "other"
+      ]
+    },
+    "shard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_unit_revision_id",
+        "offset",
+        "length",
+        "shard_index",
+        "shard_count"
+      ],
+      "properties": {
+        "source_unit_revision_id": { "$ref": "#/$defs/uuid" },
+        "offset": { "type": "integer", "minimum": 0 },
+        "length": { "type": "integer", "minimum": 0 },
+        "shard_index": { "type": "integer", "minimum": 0 },
+        "shard_count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "chapterSignal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "semantic_role", "source_unit_revision_ids", "confidence"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "semantic_role": { "$ref": "#/$defs/semanticRole" },
+        "source_unit_revision_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/uuid" }
+        },
+        "confidence": { "$ref": "#/$defs/confidence" }
+      }
+    },
+    "conflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "source_unit_revision_ids"],
+      "properties": {
+        "code": { "enum": ["CONFLICTING_STRUCTURE", "ALTERNATE_SOURCE", "UNCLEAR_HIERARCHY"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "source_unit_revision_ids": {
+          "type": "array",
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/uuid" }
+        }
+      }
+    },
+    "visionNeed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_unit_revision_id", "reason"],
+      "properties": {
+        "source_unit_revision_id": { "$ref": "#/$defs/uuid" },
+        "reason": { "enum": ["OCR_EMPTY", "OCR_LOW_CONFIDENCE", "STRUCTURE_UNREADABLE"] }
+      }
+    },
+    "batchNotice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "source_identity"],
+      "properties": {
+        "code": {
+          "enum": [
+            "LOW_CONFIDENCE",
+            "UNRESOLVED_SOURCE",
+            "FORM_STRUCTURE_DEVIATION",
+            "VISION_REVIEW"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "source_identity": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    }
+  }
+}

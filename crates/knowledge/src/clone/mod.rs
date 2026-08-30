@@ -203,7 +203,17 @@ mod tests {
     }
 
     async fn connect_test_pool() -> Result<sqlx::PgPool, sqlx::Error> {
-        let database_url = std::env::var("DATABASE_URL").unwrap_or_default();
+        let database_url = std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL").map_err(|_| {
+            sqlx::Error::Configuration(
+                "KNOWLEDGEBRAIN_TEST_DATABASE_URL is required for destructive PostgreSQL tests"
+                    .into(),
+            )
+        })?;
+        if database_url.contains(":15432/") {
+            return Err(sqlx::Error::Configuration(
+                "destructive PostgreSQL tests refuse the live :15432 database".into(),
+            ));
+        }
         sqlx::postgres::PgPoolOptions::new()
             .max_connections(32)
             .connect(&database_url)
@@ -445,7 +455,7 @@ mod tests {
         insert_user(&pool, owner, &format!("{owner}@ex.com"), None)
             .await
             .unwrap();
-        let seeded = create_workspace_with_library(&pool, owner, "Mis", "mis")
+        let seeded = create_workspace_with_library(&pool, owner, "Mismatch", "mismatch")
             .await
             .unwrap();
         sqlx::query("UPDATE product_versions SET embedding_model_id = 'emb-a' WHERE id = $1")
