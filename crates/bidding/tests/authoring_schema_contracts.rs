@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
@@ -104,6 +104,26 @@ const SCHEMAS: &[(&str, &str, &str)] = &[
         "8e14274f36be10b3bbfd5e5977e84f91fdacddaba62517f93668d5ed4148e4b3",
     ),
     (
+        "requirement-grouping-batch-v2.schema.json",
+        include_str!("../schemas/requirement-grouping-batch-v2.schema.json"),
+        "c910ab4ad445561246e77b7f41dcf7c43d60d3584b6a08618b628db53ee19485",
+    ),
+    (
+        "requirement-grouping-batch-v3.schema.json",
+        include_str!("../schemas/requirement-grouping-batch-v3.schema.json"),
+        "404797ad65f3f28943d3bd8d64c54eec4f4cafee46004e3f070304a6e3bec62a",
+    ),
+    (
+        "requirement-grouping-batch-v4.schema.json",
+        include_str!("../schemas/requirement-grouping-batch-v4.schema.json"),
+        "34b23ad45ea7b246f486f7608699b740eb5259df2fdb6852eaaa98ff63c9c818",
+    ),
+    (
+        "requirement-grouping-batch-v5.schema.json",
+        include_str!("../schemas/requirement-grouping-batch-v5.schema.json"),
+        "0ffa1eeef1d559d519faa67026c62384eb27915c91c4f5cf68e7ecb5b30daa24",
+    ),
+    (
         "fulfillment-group-v1.schema.json",
         include_str!("../schemas/fulfillment-group-v1.schema.json"),
         "a193c82ee2679c7ffb3740bc2a09007b9e8faaceb5a7008f3aa572f5f1d55ade",
@@ -129,9 +149,24 @@ const SCHEMAS: &[(&str, &str, &str)] = &[
         "2744a867ae0296026eca18a161caef637f98f30d03382d82b9edf3313b2706bd",
     ),
     (
+        "outline-synthesis-packet-v4.schema.json",
+        include_str!("../schemas/outline-synthesis-packet-v4.schema.json"),
+        "360820632b42ee9b9d14ef589ffbd36aab965244db1935be8b9537ff2793cec8",
+    ),
+    (
+        "outline-synthesis-packet-v5.schema.json",
+        include_str!("../schemas/outline-synthesis-packet-v5.schema.json"),
+        "f7bb17fd01090667afc2d84b50cc357b276019d06cb0215c76a18419b3ad73a0",
+    ),
+    (
         "outline-synthesis-checkpoint-v3.schema.json",
         include_str!("../schemas/outline-synthesis-checkpoint-v3.schema.json"),
         "04ab83f88bd55e78ccb642bcd43284ff10101e8119c590e7e6da4a687b9cd2ba",
+    ),
+    (
+        "outline-synthesis-checkpoint-v4.schema.json",
+        include_str!("../schemas/outline-synthesis-checkpoint-v4.schema.json"),
+        "9dd1014eb5c6a7dd18de46310738fc2d9cf38141632653639d4a3c1757fbf10f",
     ),
     (
         "render-document-snapshot-v2.schema.json",
@@ -195,7 +230,7 @@ fn enum_literals(value: &Value) -> BTreeSet<&str> {
 
 #[test]
 fn authoring_schema_bytes_and_hashes_are_golden() {
-    assert_eq!(SCHEMAS.len(), 31);
+    assert_eq!(SCHEMAS.len(), 38);
     for (name, source, expected_sha256) in SCHEMAS {
         let parsed: Value = serde_json::from_str(source).unwrap_or_else(|error| {
             panic!("{name} is not valid JSON: {error}");
@@ -389,6 +424,54 @@ fn approved_v2_contract_invariants_are_frozen() {
     }
     let grouping_v1 = by_name("requirement-grouping-batch-v1.schema.json");
     assert_eq!(grouping_v1["properties"]["assignments"]["maxItems"], 64);
+    let grouping_v2 = by_name("requirement-grouping-batch-v2.schema.json");
+    assert_eq!(grouping_v2["properties"]["assignments"]["maxItems"], 48);
+    assert!(
+        grouping_v2["$defs"]["assignment"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "section_ref")
+    );
+    let grouping_v3 = by_name("requirement-grouping-batch-v3.schema.json");
+    let v3_required = grouping_v3["$defs"]["assignment"]["required"]
+        .as_array()
+        .unwrap();
+    assert!(v3_required.iter().any(|value| value == "section_ref"));
+    for frozen_echo in [
+        "channel",
+        "applicability",
+        "requiredness",
+        "source_unit_revision_ids",
+    ] {
+        assert!(!v3_required.iter().any(|value| value == frozen_echo));
+    }
+    let grouping_v4 = by_name("requirement-grouping-batch-v4.schema.json");
+    assert_eq!(
+        grouping_v4["properties"]["structure_placements"]["maxItems"],
+        48
+    );
+    assert!(
+        grouping_v4["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "home_structure_fragment_refs")
+    );
+    let grouping_v5 = by_name("requirement-grouping-batch-v5.schema.json");
+    for semantic_field in [
+        "fulfillment_group_key",
+        "fulfillment_group_title",
+        "materialization",
+    ] {
+        assert!(
+            grouping_v5["$defs"]["structurePlacement"]["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == semantic_field)
+        );
+    }
     let group_v1 = by_name("fulfillment-group-v1.schema.json");
     assert!(
         group_v1["required"]
@@ -413,6 +496,34 @@ fn approved_v2_contract_invariants_are_frozen() {
     assert!(patch_v1.to_string().contains("base_draft_sha256"));
     let packet_v3 = by_name("outline-synthesis-packet-v3.schema.json");
     let checkpoint_v3 = by_name("outline-synthesis-checkpoint-v3.schema.json");
+    let packet_v4 = by_name("outline-synthesis-packet-v4.schema.json");
+    let packet_v5 = by_name("outline-synthesis-packet-v5.schema.json");
+    let checkpoint_v4 = by_name("outline-synthesis-checkpoint-v4.schema.json");
+    assert!(
+        packet_v5["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "non_output_fragments")
+    );
+    assert_eq!(
+        packet_v5["properties"]["non_output_fragments"]["items"]["properties"]["outline_usage"]["enum"],
+        json!(["requirement_context", "reference_only"])
+    );
+    assert!(
+        packet_v4["$defs"]["closureFacts"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "empty_section_refs")
+    );
+    assert!(
+        checkpoint_v4["$defs"]["closureFacts"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "empty_section_refs")
+    );
     assert!(!packet_v3.to_string().contains("route_chunk_count"));
     assert!(!checkpoint_v3.to_string().contains("accepted_routes"));
     assert!(

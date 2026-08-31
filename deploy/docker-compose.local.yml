@@ -1,0 +1,5 @@
+# Local/LAN override: build and run retention from the same freshly built worker image.
+# The production compose file remains pinned to the signed digest in images.lock.json.
+services:
+  retention:
+    image: knowledgebrain-worker:local

@@ -255,20 +255,20 @@ Map 指令必须识别 `explicit_composition_clause`，例如将 3.1.1～3.1.4 �
 
 ## Steps
 
-- [ ] 定义并冻结 RequirementCompileV3、`CompositionSpineV1`、`SectionObligationMatrixV1` 与 fragment 分类契约。
-- [ ] 将 RequirementSet 编译从 SQL 正则升级为原子义务、正确 channel、applicability 和 form 归并。
-- [ ] 更新 Map schema/prompt/normalization，正确标记组成条款、模板和 requirement context。
-- [ ] 在 Reduce 中实现证据优先级、角色合并、applicability、composition spine 与 obligation matrix 产出。
-- [ ] 用 Rust 确定性创建 root/TOC/一级骨架，替换机械多根闭合。
-- [ ] 约束 synthesis 只能在骨架下生成子节点、requirement routes 与 section obligation bindings。
-- [ ] 收紧 route/obligation 匹配，要求 mandatory needs 与 required children 100% 覆盖。
-- [ ] 扩展 Rust 与 SQL semantic validation。
-- [ ] 更新 schema hashes、agent contract、缓存失效和同 frozen input 主动重生成语义。
-- [ ] 实现中文层级编号的 UI/Word 同源渲染，排除 cover/TOC 计数。
-- [ ] 更新候选审阅 UI 的质量摘要和接受阻断。
-- [ ] 增加单元、schema、SQL baseline、API 与浏览器回归。
-- [ ] 使用 `/opt/github/KnowledgeBrain/testdata/bid` 两份真实文件重新生成新候选。
-- [ ] 在 `http://192.168.92.42:28080/` 验证一级顺序、全部子树、bindings/notices、刷新恢复和截图。
+- [x] 定义并冻结 RequirementCompileV3、`CompositionSpineV1`、`SectionObligationMatrixV1` 与 fragment 分类契约。
+- [x] 将 RequirementSet 编译从 SQL 正则升级为原子义务、正确 channel、applicability 和 form 归并。
+- [x] 更新 Map schema/prompt/normalization，正确标记组成条款、模板和 requirement context。
+- [x] 在 Reduce 中实现证据优先级、角色合并、applicability、composition spine 与 obligation matrix 产出。
+- [x] 用 Rust 确定性创建 root/TOC/一级骨架，替换机械多根闭合。
+- [x] 约束 synthesis 只能在骨架下生成子节点、requirement routes 与 section obligation bindings。
+- [x] 收紧 route/obligation 匹配，要求 mandatory needs 与 required children 100% 覆盖。
+- [x] 扩展 Rust 与 SQL semantic validation。
+- [x] 更新 schema hashes、agent contract、缓存失效和同 frozen input 主动重生成语义。
+- [x] 实现中文层级编号的 UI/Word 同源渲染，排除 cover/TOC 计数。
+- [x] 更新候选审阅 UI 的质量摘要和接受阻断。
+- [x] 增加单元、schema、SQL baseline、API 与浏览器回归。
+- [x] 使用 `/opt/github/KnowledgeBrain/testdata/bid` 两份真实文件重新生成新候选。V20 request `cbb8a9c6-31f2-4fd2-aedb-eef038f09a3c` 成功发布 candidate `07516d90-2c2e-4d18-aa18-72fb1248556d`；1130 needs 达成 175 bindings XOR 955 `UNMAPPED_REQUIREMENT` notices，交集为 0；Checkpoint V4 closure 为 121/121 groups、0 missing、0 empty sections、0 invalid assignments；生成期四服务监控无 suspicious lines。
+- [x] 在 `http://192.168.92.42:28080/` 验证一级顺序、全部子树、bindings/notices、刷新恢复、接受、动态编号、DOCX/PDF 和截图；Playwright 1/1 通过，accepted workspace 为单根 140 nodes，17 个一级标题与 candidate ordinal 完全一致，DOCX 全部 17 个动态编号标题按序存在，最终四服务审计无异常。
 
 ## Verification
 
@@ -327,4 +327,19 @@ Map 指令必须识别 `explicit_composition_clause`，例如将 3.1.1～3.1.4 �
 - Rust 从唯一合法 group assignment 同源派生最终 `section_obligation_bindings` 与 requirement routes；最终公开输出继续使用 `OutlineGenerationOutputV2`。
 - `SynthesisPacketV3` / `CheckpointV3` 只保存 nodes、patch receipts、closure facts 与冻结事实，不保存 reasoning，也不保存独立 route/binding chunks。
 - Repair 只接受能严格缩小 unresolved identity 集的原子 patch；重复 fingerprint 或无改善立即失败。
-- V5/V6/V7 artifacts 保持不可变；V8 使用新 agent contract identity `00000000-0000-5000-8000-000000000108`。
+- V5/V6/V7 artifacts 保持不可变；V8 使用 agent contract identity `00000000-0000-5000-8000-000000000108`。
+- Live V8 验证发现同一 semantic role 可对应多个冻结一级章节；不得由 Rust 按 role、标题或来源重叠猜测目标。V9 保持 V8 artifacts/schema 不变，新增 `RequirementGroupingBatchV2.section_ref`，并使用 agent contract identity `00000000-0000-5000-8000-000000000109`，要求模型从冻结 `CompositionSpineV1` 精确选择 section identity。
+- Live V9 验证发现 48 项 grouping batch 若要求模型回显 frozen channel/applicability/requiredness/source identities 会导致结构化输出截断。V10 保持 V8/V9 contracts 与 artifacts 不变，新增 `RequirementGroupingBatchV3`，模型只返回 semantic delta，Rust 从冻结输入回填事实；agent contract identity 为 `00000000-0000-5000-8000-000000000110`。
+- Live V10 验证发现 Map `output_child` / `form_template` 的 `composition_parent_role` 可能在全局 Reduce 后不存在或不唯一；不得由 Rust 机械回退。V11 新增 `SemanticGroupingBatchV4.structure_placements`，将每个 Map 输出 fragment 精确放置到冻结 `section_ref`，并与 requirement grouping 一起进入 replay hash；agent contract identity 为 `00000000-0000-5000-8000-000000000111`。
+- Live V11 验证发现并行独立 requirement batches 可复用同一 model group key 但给出冲突 title/materialization。V12 保留 fail-closed exact merge，按 ordinal 顺序执行 semantic grouping，并向后续 batch 提供已接受的 reserved group registry；冲突在当前 batch 内反馈重试，不留到 Reduce；agent contract identity 为 `00000000-0000-5000-8000-000000000112`。
+- 为保持任意数量 requirement batches 的输入边界，V13 不把持续增长的完整 registry 发送给模型；新 key 必须使用 `batch-{ordinal}-` namespace，Rust 顺序校验完整 registry，仅把当前 batch 的有界冲突反馈给重试。精确复用仍可通过，冲突仍 fail-closed；agent contract identity 为 `00000000-0000-5000-8000-000000000113`。
+- Live V13 验证发现不同 Map batches 的 `output_child` / `form_template` 也会产生相同 key 但冲突 title/materialization。V14 的 `SemanticGroupingBatchV5` 要求全局 semantic stage 同时判定每个 structure fragment 的 section、group key/title 与 materialization，并纳入同一 bounded registry；Rust 只回填 frozen source/applicability facts；agent contract identity 为 `00000000-0000-5000-8000-000000000114`。
+- Live V14 首次到达 Draft/Verify，确认 159 mandatory 全部闭包，但 955 informational 与 16 optional needs 尚未进入 binding XOR notice closure。V15 将 mandatory+optional 纳入 bounded semantic grouping 与 Draft closure；RequirementCompileV3 已明确分类为 informational 的 need 由 Rust 组装可审计 `UNMAPPED_REQUIREMENT` notice，不重新做语义判断；agent contract identity 为 `00000000-0000-5000-8000-000000000115`。
+- Live V15 完成全部 binding XOR notice closure 后，发现两个冻结 composition sections 没有 evidence-backed child。V16 将空 section refs 纳入 Packet/Checkpoint V4 closure facts 与 atomic Repair 身份集合，要求模型补充 evidence-backed child；Rust 不生成通用占位章节，Repair 必须严格减少 group 或 section unresolved identities；agent contract identity 为 `00000000-0000-5000-8000-000000000116`。
+- Live V16 的 requirement groups 均完成后，structure-only batch 在三次 bounded retry 中重复给同一个 batch-scoped key 返回冲突 title/materialization。V17 明确 batch 内重复 key 也必须精确匹配 section/title/materialization，并在反馈中同时返回 reserved 与 received semantics；registry 冲突验证改为无副作用，失败不会污染后续状态；agent contract identity 为 `00000000-0000-5000-8000-000000000117`。
+- Live V17 完成 grouping、Draft 与 topology closure 后，一个绑定节点直接复制了 `requirement_context` 标题 `投标人须知前附表`；旧 closure facts 未暴露该 validator identity，Repair 因 group/section 集合不变而无法取得单调进展。V18 将 context/reference promotion 按 node identity 纳入既有 `invalid_assignments`，Draft patch 即时 fail-closed，Repair 可通过改写语义标题严格减少 invalid identity，并让 DraftAccumulator 同时恢复历史 Checkpoint V3 与当前 V4；agent contract identity 为 `00000000-0000-5000-8000-000000000118`。
+- Live V18 的两次 atomic Draft patch 均识别出不同的 non-output title，但 Packet 未预先提供完整禁用列表且每次只反馈首个 identity，连续两轮无 accepted closure change 触发 stall fuse。V19 Packet V5 在 Draft 前提供 bounded `non_output_fragments`（title/usage/source），并让 rejected patch 一次返回最多 32 个 invalid identities，使模型能在下一次 atomic patch 中统一修正而不放宽单调闭包；agent contract identity 为 `00000000-0000-5000-8000-000000000119`。
+- Live V19 成功生成并完成 1130-need XOR closure，但浏览器审查发现两个 `CONFLICTING_STRUCTURE` high notices 均只源自 `reference_only` / `requirement_context` TOC 变体，导致可审计但与输出无关的冲突错误阻塞接受。V20 仅在冲突来源命中至少一个 output-relevant frozen fragment 时保留 high；全部来源均为 non-output 时降为 low 审计 notice，缺失或混合来源仍 fail-closed 为 high；agent contract identity 为 `00000000-0000-5000-8000-000000000120`。
+- Live V20 候选生成与首次浏览器流程通过后，下载的真实 DOCX 揭示 accepted workspace 的 sibling order 与 candidate ordinal 不同；API `candidate_operations` 对 selected refs 使用 HashSet 迭代，导致 insertion order 非确定。接受转换现按 parent rank、sibling ordinal、candidate index 稳定排序，新增乱序输入回归；浏览器验收加强为刷新后逐项验证 `中文序号、title`，最终导出还必须按 ordinal-sorted candidate 对照 DOCX。
+- 顺序修复后的 V20 接受与 refresh 成功，但加强后的浏览器断言揭示 accepted `OutlineTree` 仍显示纯标题、未使用动态编号 helper。Workspace nodes 现通过 `workspaceOutlineDisplayTitles` 适配至同一纯函数，保留持久化纯标题并在 accepted UI 动态显示中/阿混合层级编号；新增 workspace view 编号回归。
+- Final V20 browser acceptance 通过：candidate `07516d90-2c2e-4d18-aa18-72fb1248556d` 为 accepted；refresh 后 UI 逐项显示 17 个按 candidate ordinal 排列的中文一级编号；DOCX `ee76642b247388111364301c6d708dac8fd606b1a71fea37d76b5f71b8ad955c`（109681 bytes）与 PDF `85d2987b7e551f829decadc2d7b8d690a0ae2cbd61ae657196c8573d518b843d`（109497 bytes）均 ready，DOCX 17/17 动态编号标题完整且顺序递增；candidate review、accepted refresh、export 三张截图已保存；最终 Worker/API/PostgreSQL/Retention 审计无异常。

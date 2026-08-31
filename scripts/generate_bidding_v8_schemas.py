@@ -95,6 +95,98 @@ grouping = {
 }
 write("requirement-grouping-batch-v1.schema.json", grouping)
 
+# V9 keeps the V8 grouping contract immutable and adds an explicit frozen
+# CompositionSpine section identity so duplicate semantic roles are unambiguous.
+assignment_v2 = deepcopy(assignment)
+assignment_v2["required"].insert(3, "section_ref")
+assignment_v2["properties"]["section_ref"] = SHA
+grouping_v2 = deepcopy(grouping)
+grouping_v2["$id"] = "https://knowledgebrain.local/schemas/requirement-grouping-batch-v2.schema.json"
+grouping_v2["title"] = "RequirementGroupingBatchV2"
+grouping_v2["properties"]["schema_version"] = {"const": 2}
+grouping_v2["properties"]["home_need_occurrence_ids"]["maxItems"] = 48
+grouping_v2["properties"]["assignments"]["maxItems"] = 48
+grouping_v2["properties"]["assignments"]["items"] = assignment_v2
+grouping_v2["$defs"]["assignment"] = assignment_v2
+write("requirement-grouping-batch-v2.schema.json", grouping_v2)
+
+# V10 removes frozen factual echoes from model output. Rust stamps channel,
+# applicability, requiredness and source identities from the bounded input.
+assignment_v3 = {
+    "type": "object", "additionalProperties": False,
+    "required": ["need_occurrence_id", "section_ref", "section_role", "fulfillment_group_key", "fulfillment_group_title", "materialization", "confidence"],
+    "properties": {
+        "need_occurrence_id": UUID,
+        "section_ref": SHA,
+        "section_role": SECTION_ROLE,
+        "fulfillment_group_key": {"type": "string", "minLength": 1, "maxLength": 128},
+        "fulfillment_group_title": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "materialization": MATERIALIZATION,
+        "confidence": {"enum": ["high", "medium", "low"]},
+    },
+}
+grouping_v3 = deepcopy(grouping_v2)
+grouping_v3["$id"] = "https://knowledgebrain.local/schemas/requirement-grouping-batch-v3.schema.json"
+grouping_v3["title"] = "RequirementGroupingBatchV3"
+grouping_v3["properties"]["schema_version"] = {"const": 3}
+grouping_v3["properties"]["assignments"]["items"] = assignment_v3
+grouping_v3["$defs"]["assignment"] = assignment_v3
+write("requirement-grouping-batch-v3.schema.json", grouping_v3)
+
+# V11 places Map output/form fragments against the already frozen composition
+# spine in the same bounded semantic-grouping stage. This avoids any Rust
+# fallback based on role, title, or source overlap.
+placement_v1 = {
+    "type": "object", "additionalProperties": False,
+    "required": ["signal_ref", "section_ref", "section_role", "confidence"],
+    "properties": {
+        "signal_ref": SHA,
+        "section_ref": SHA,
+        "section_role": SECTION_ROLE,
+        "confidence": {"enum": ["high", "medium", "low"]},
+    },
+}
+grouping_v4 = deepcopy(grouping_v3)
+grouping_v4["$id"] = "https://knowledgebrain.local/schemas/requirement-grouping-batch-v4.schema.json"
+grouping_v4["title"] = "SemanticGroupingBatchV4"
+grouping_v4["required"].insert(3, "home_structure_fragment_refs")
+grouping_v4["required"].insert(5, "structure_placements")
+grouping_v4["properties"]["schema_version"] = {"const": 4}
+grouping_v4["properties"]["home_need_occurrence_ids"]["minItems"] = 0
+grouping_v4["properties"]["assignments"]["minItems"] = 0
+grouping_v4["properties"]["home_structure_fragment_refs"] = {
+    "type": "array", "minItems": 0, "maxItems": 48, "uniqueItems": True, "items": SHA,
+}
+grouping_v4["properties"]["structure_placements"] = {
+    "type": "array", "minItems": 0, "maxItems": 48, "items": placement_v1,
+}
+grouping_v4["anyOf"] = [
+    {"properties": {"home_need_occurrence_ids": {"minItems": 1}}},
+    {"properties": {"home_structure_fragment_refs": {"minItems": 1}}},
+]
+grouping_v4["$defs"]["structurePlacement"] = placement_v1
+write("requirement-grouping-batch-v4.schema.json", grouping_v4)
+
+# V14 makes output-fragment grouping semantics global-stage model output rather
+# than trusting potentially conflicting per-Map-batch keys and titles.
+placement_v2 = deepcopy(placement_v1)
+placement_v2["required"] = [
+    "signal_ref", "section_ref", "section_role", "fulfillment_group_key",
+    "fulfillment_group_title", "materialization", "confidence",
+]
+placement_v2["properties"].update({
+    "fulfillment_group_key": {"type": "string", "minLength": 1, "maxLength": 128},
+    "fulfillment_group_title": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "materialization": MATERIALIZATION,
+})
+grouping_v5 = deepcopy(grouping_v4)
+grouping_v5["$id"] = "https://knowledgebrain.local/schemas/requirement-grouping-batch-v5.schema.json"
+grouping_v5["title"] = "SemanticGroupingBatchV5"
+grouping_v5["properties"]["schema_version"] = {"const": 5}
+grouping_v5["properties"]["structure_placements"]["items"] = placement_v2
+grouping_v5["$defs"]["structurePlacement"] = placement_v2
+write("requirement-grouping-batch-v5.schema.json", grouping_v5)
+
 group = {
     "$schema": DRAFT, "$id": "https://knowledgebrain.local/schemas/fulfillment-group-v1.schema.json", "title": "FulfillmentGroupV1",
     "type": "object", "additionalProperties": False,
@@ -166,6 +258,11 @@ closure = {
         "draft_sha256": SHA,
     },
 }
+closure_v4 = deepcopy(closure)
+closure_v4["required"].insert(3, "empty_section_refs")
+closure_v4["properties"]["empty_section_refs"] = {
+    "type": "array", "maxItems": 10000, "uniqueItems": True, "items": SHA,
+}
 packet_v2 = load("outline-synthesis-packet-v2.schema.json")
 packet_defs = deepcopy(packet_v2["$defs"])
 for obsolete in ["route", "nodeIndex", "draft"]:
@@ -190,6 +287,35 @@ packet_v3 = {
     "$defs": packet_defs,
 }
 write("outline-synthesis-packet-v3.schema.json", packet_v3)
+packet_v4 = deepcopy(packet_v3)
+packet_v4["$id"] = "https://knowledgebrain.local/schemas/outline-synthesis-packet-v4.schema.json"
+packet_v4["title"] = "OutlineSynthesisPacketV4"
+packet_v4["properties"]["schema_version"] = {"const": 4}
+packet_v4["$defs"]["closureFacts"] = closure_v4
+write("outline-synthesis-packet-v4.schema.json", packet_v4)
+packet_v5 = deepcopy(packet_v4)
+packet_v5["$id"] = "https://knowledgebrain.local/schemas/outline-synthesis-packet-v5.schema.json"
+packet_v5["title"] = "OutlineSynthesisPacketV5"
+packet_v5["properties"]["schema_version"] = {"const": 5}
+packet_v5["required"].insert(
+    packet_v5["required"].index("deterministic_spine_nodes"), "non_output_fragments"
+)
+packet_v5["properties"]["non_output_fragments"] = {
+    "type": "array", "maxItems": 10000,
+    "items": {
+        "type": "object", "additionalProperties": False,
+        "required": ["title", "outline_usage", "source_unit_revision_ids"],
+        "properties": {
+            "title": {"type": "string", "minLength": 1, "maxLength": 1000},
+            "outline_usage": {"enum": ["requirement_context", "reference_only"]},
+            "source_unit_revision_ids": {
+                "type": "array", "minItems": 1, "maxItems": 1000,
+                "uniqueItems": True, "items": UUID,
+            },
+        },
+    },
+}
+write("outline-synthesis-packet-v5.schema.json", packet_v5)
 
 checkpoint_v2 = load("outline-synthesis-checkpoint-v2.schema.json")
 checkpoint_defs = deepcopy(checkpoint_v2["$defs"])
@@ -210,3 +336,9 @@ checkpoint_v3 = {
     "$defs": checkpoint_defs,
 }
 write("outline-synthesis-checkpoint-v3.schema.json", checkpoint_v3)
+checkpoint_v4 = deepcopy(checkpoint_v3)
+checkpoint_v4["$id"] = "https://knowledgebrain.local/schemas/outline-synthesis-checkpoint-v4.schema.json"
+checkpoint_v4["title"] = "OutlineSynthesisCheckpointV4"
+checkpoint_v4["properties"]["schema_version"] = {"const": 4}
+checkpoint_v4["$defs"]["closureFacts"] = closure_v4
+write("outline-synthesis-checkpoint-v4.schema.json", checkpoint_v4)

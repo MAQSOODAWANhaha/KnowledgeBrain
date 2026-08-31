@@ -3,6 +3,8 @@ const KNOWLEDGE_SQL: &str = include_str!("../../../migrations/knowledge_base_bas
 const ACTIVE_QUEUE_REGISTRY: &str = include_str!("../../../deploy/queue-registry.toml");
 const PHASE1_LIVE: &str = include_str!("../../../scripts/bidding_v2_phase1_live.sql");
 const PHASE3_LIVE: &str = include_str!("../../../scripts/bidding_v2_phase3_live.sql");
+const SEMANTIC_SPINE_LIVE: &str =
+    include_str!("../../../migrations/bidding_v2_semantic_spine_live.sql");
 const API_ROUTER: &str = include_str!("../../api/src/routes.rs");
 const BID_API_ROUTER: &str = include_str!("../../api/src/bid_v2_routes.rs");
 const WORKER: &str = include_str!("../../worker/src/consume.rs");
@@ -422,6 +424,16 @@ fn phase_three_has_async_workers_and_live_evidence_candidate_publication() {
     }
     assert!(PHASE1_LIVE.contains("kb_bid_v2_publish_outline_generation"));
     assert!(PHASE3_LIVE.contains("explicit no-evidence bundle publication failed"));
+    assert!(SEMANTIC_SPINE_LIVE.contains(
+        "DROP CONSTRAINT IF EXISTS bid_outline_requirement_grouping_batc_need_occurrence_ids_check"
+    ));
+    assert!(SEMANTIC_SPINE_LIVE.contains("kb_bid_v2_outline_semantic_grouping_put"));
+    assert!(SEMANTIC_SPINE_LIVE.contains(
+        "DROP CONSTRAINT IF EXISTS bid_outline_reduce_plan_artif_request_artifact_id_frozen_in_key"
+    ));
+    assert!(
+        SEMANTIC_SPINE_LIVE.contains("ADD CONSTRAINT bid_outline_reduce_plan_replay_key UNIQUE")
+    );
     assert!(PHASE3_LIVE.contains("match_only did not complete without a candidate"));
     let active_worker = WORKER
         .split("\n#[cfg(test)]")
@@ -434,13 +446,23 @@ fn phase_three_has_async_workers_and_live_evidence_candidate_publication() {
         "kb_bid_v2_load_requirement_set_compile_input_v3",
         "kb_bid_v2_publish_requirement_set_v3",
         "kb_bid_v2_outline_semantics_valid",
+        "kb_bid_v2_outline_semantic_grouping_put",
         "section_obligation_bindings",
         "'system:requirement-set-compile-v3'",
         "\"map_schema\":4",
         "\"requirement_grouping_schema\":1",
+        "\"requirement_grouping_schema\":2",
+        "\"requirement_grouping_schema\":3",
+        "\"requirement_grouping_schema\":4",
+        "\"requirement_grouping_schema\":5",
+        "\"structure_placement_schema\":1",
+        "\"structure_placement_schema\":2",
         "\"fulfillment_group_schema\":1",
         "\"reduce_schema\":3",
         "\"draft_patch_schema\":1",
+        "\"packet_schema\":4",
+        "\"packet_schema\":5",
+        "\"checkpoint_schema\":4",
         "\"output_schema\":2",
     ] {
         assert!(
@@ -458,20 +480,75 @@ fn phase_three_has_async_workers_and_live_evidence_candidate_publication() {
         "'reduce_plan_sha256','map_evidence_set_sha256','grouping_evidence_set_sha256','composition_spine'"
     ));
     assert!(
+        SQL.contains("'fulfillment_groups','non_output_fragments','deterministic_spine_nodes'")
+    );
+    assert!(
         SQL.contains(
             "'selected_evidence','selected_facts','nodes','patch_receipts','closure_facts'"
         )
     );
-    assert!(
-        SQL.matches("p_payload->'schema_version' IS DISTINCT FROM '3'::jsonb")
-            .count()
-            >= 3
+    assert!(SQL.contains("'missing_group_refs','empty_section_refs','invalid_assignments'"));
+    assert!(SQL.contains("p_payload->'schema_version' IS DISTINCT FROM '3'::jsonb"));
+    assert_eq!(
+        SQL.matches("p_payload->'schema_version' NOT IN ('3'::jsonb,'4'::jsonb)")
+            .count(),
+        1
     );
+    assert!(SQL.contains("p_payload->'schema_version' NOT IN ('3'::jsonb,'4'::jsonb,'5'::jsonb)"));
     assert!(SQL.contains("00000000-0000-5000-8000-000000000105"));
     assert!(SQL.contains("00000000-0000-5000-8000-000000000106"));
     assert!(SQL.contains("00000000-0000-5000-8000-000000000107"));
     assert!(SQL.contains("00000000-0000-5000-8000-000000000108"));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000109"));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000110"));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000111"));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000112"));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000113"));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000114"));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000115"));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000116"));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000117"));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000118"));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000119"));
+    assert!(SQL.contains("00000000-0000-5000-8000-000000000120"));
     assert!(SQL.contains("\"version\":8,\"map_schema\":4,\"requirement_grouping_schema\":1"));
+    assert!(SQL.contains("\"version\":9,\"map_schema\":4,\"requirement_grouping_schema\":2"));
+    assert!(SQL.contains("\"version\":10,\"map_schema\":4,\"requirement_grouping_schema\":3"));
+    assert!(SQL.contains("\"version\":11,\"map_schema\":4,\"requirement_grouping_schema\":4"));
+    assert!(SQL.contains("\"version\":12,\"map_schema\":4,\"requirement_grouping_schema\":4"));
+    assert!(SQL.contains("\"version\":13,\"map_schema\":4,\"requirement_grouping_schema\":4"));
+    assert!(SQL.contains("\"version\":14,\"map_schema\":4,\"requirement_grouping_schema\":5"));
+    assert!(SQL.contains("\"version\":15,\"map_schema\":4,\"requirement_grouping_schema\":5"));
+    assert!(SQL.contains("\"version\":16,\"map_schema\":4,\"requirement_grouping_schema\":5"));
+    assert!(SQL.contains("\"version\":17,\"map_schema\":4,\"requirement_grouping_schema\":5"));
+    assert!(SQL.contains("\"version\":18,\"map_schema\":4,\"requirement_grouping_schema\":5"));
+    assert!(SQL.contains("\"version\":19,\"map_schema\":4,\"requirement_grouping_schema\":5"));
+    assert!(SQL.contains("\"version\":20,\"map_schema\":4,\"requirement_grouping_schema\":5"));
+    assert!(SQL.contains("\"section_target\":\"explicit_frozen_section_ref\""));
+    assert!(SQL.contains("\"grouping_output\":\"semantic_delta_only\""));
+    assert!(SQL.contains("\"structure_placement\":\"model_selected_frozen_section_ref\""));
+    assert!(SQL.contains("\"structure_placement\":\"model_selected_section_and_group\""));
+    assert!(SQL.contains("\"cross_batch_group_registry\":\"sequential_reserved_exact\""));
+    assert!(SQL.contains("\"cross_batch_group_registry\":\"sequential_bounded_feedback\""));
+    assert!(SQL.contains("\"intra_batch_group_registry\":\"exact_section_title_materialization\""));
+    assert!(SQL.contains("\"new_group_key_scope\":\"batch_ordinal\""));
+    assert!(SQL.contains("\"response_requiredness\":[\"mandatory\",\"optional\"]"));
+    assert!(SQL.contains("\"informational_closure\":\"compiled_semantic_unmapped_notice\""));
+    assert!(SQL.contains("\"draft_closure\":\"mandatory_and_optional_groups\""));
+    assert!(SQL.contains(
+        "\"topology_closure\":\"every_frozen_section_has_model_authored_evidence_child\""
+    ));
+    assert!(SQL.contains("\"repair_identity\":\"groups_and_sections\""));
+    assert!(SQL.contains("\"checkpoint_resume\":[3,4]"));
+    assert!(SQL.contains("\"context_fragment_promotion\":\"forbidden_by_title_and_source\""));
+    assert!(SQL.contains("\"repair_identity\":\"groups_sections_and_invalid_assignments\""));
+    assert!(SQL.contains("\"non_output_fragment_packet\":\"bounded_title_usage_source\""));
+    assert!(SQL.contains("\"patch_error_feedback\":\"all_invalid_identities_bounded_32\""));
+    assert!(
+        SQL.contains(
+            "\"conflict_notice_severity\":\"high_only_if_output_relevant_frozen_fragment\""
+        )
+    );
     assert!(SQL.contains("\"progress_control\":\"semantic_closure_and_atomic_patch\""));
     assert!(SQL.contains("ORDER BY created_at DESC,checkpoint_ordinal DESC LIMIT 1"));
 }

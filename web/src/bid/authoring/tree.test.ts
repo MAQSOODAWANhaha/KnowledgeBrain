@@ -1,6 +1,9 @@
 import { describe, expect, it } from "./harness";
 import { outlineCandidateQuality } from "./CandidateReview";
-import { outlineDisplayTitles } from "./numbering";
+import {
+  outlineDisplayTitles,
+  workspaceOutlineDisplayTitles,
+} from "./numbering";
 import {
   dropMove,
   dropPlacementFromRatio,
@@ -107,6 +110,23 @@ describe("outlineDisplayTitles", () => {
     expect(labels.get("qualification")).toBe("2. 资格文件");
     expect(labels.get("technical")).toBe("二、技术文件");
     expect(labels.get("response")).toBe("1. 技术要求响应");
+
+    const workspaceLabels = workspaceOutlineDisplayTitles(
+      candidateNodes.map((node) => ({
+        lineage_id: node.client_node_ref,
+        revision_id: `revision-${node.client_node_ref}`,
+        parent_lineage_id: node.parent_client_node_ref,
+        ordinal: node.ordinal,
+        title: node.title,
+        semantic_role: node.semantic_role,
+        render_role: node.render_role,
+        stale: false,
+        block_lineage_ids: [],
+      })),
+    );
+    expect(workspaceLabels.get("commercial")).toBe("一、商务文件");
+    expect(workspaceLabels.get("authorization")).toBe("1.1 授权委托书");
+    expect(workspaceLabels.get("technical")).toBe("二、技术文件");
 
     const quality = outlineCandidateQuality({
       schema_version: 2,

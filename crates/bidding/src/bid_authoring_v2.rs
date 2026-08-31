@@ -1627,6 +1627,36 @@ pub async fn store_outline_requirement_grouping_batch_v1(
     .map(|_| ())
 }
 
+pub struct OutlineSemanticGroupingBatchV4<'a> {
+    pub batch_ordinal: i32,
+    pub model_sha: &'a str,
+    pub agent_sha: &'a str,
+    pub need_ids: &'a [Uuid],
+    pub structure_fragment_refs: &'a [String],
+    pub payload: &'a Value,
+}
+
+pub async fn store_outline_semantic_grouping_batch_v4(
+    pool: &PgPool,
+    request: &platform::BidAuthoringRequestIdentityV2,
+    batch: &OutlineSemanticGroupingBatchV4<'_>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT kb_bid_v2_outline_semantic_grouping_put($1,$2::kb_sha256,$3,$4::kb_sha256,$5::kb_sha256,$6,$7::kb_sha256[],$8)",
+    )
+    .bind(request.request_artifact_id)
+    .bind(&request.frozen_input_sha256)
+    .bind(batch.batch_ordinal)
+    .bind(batch.model_sha)
+    .bind(batch.agent_sha)
+    .bind(batch.need_ids)
+    .bind(batch.structure_fragment_refs)
+    .bind(batch.payload)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
 pub async fn load_outline_reduce_plan_v3(
     pool: &PgPool,
     request: &platform::BidAuthoringRequestIdentityV2,

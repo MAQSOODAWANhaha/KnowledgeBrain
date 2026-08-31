@@ -20,7 +20,6 @@ pub const MAP_CONCURRENCY: usize = 4;
 pub const REQUIREMENT_GROUP_BATCH_MAX_NEEDS: usize = 48;
 pub const REQUIREMENT_GROUP_BATCH_MAX_RUNES: usize = 48_000;
 pub const REQUIREMENT_GROUP_MAX_ATTEMPTS: u32 = MAP_MAX_ATTEMPTS;
-pub const REQUIREMENT_GROUP_CONCURRENCY: usize = MAP_CONCURRENCY;
 pub const COLLECT_MAX_TURNS: u32 = 8;
 pub const COLLECT_MAX_TOOL_CALLS: u32 = 20;
 pub const COLLECT_MAX_TEXT_BYTES: u64 = 192 * 1024;
@@ -30,7 +29,7 @@ pub const PHASE_MAX_STALLED_TURNS: u32 = 2;
 pub const SYNTH_MAX_TOOL_CALLS: u32 = 64;
 pub const AGENT_MAX_IMAGES: u32 = 4;
 pub const JOB_WATCHDOG: Duration = Duration::from_secs(60 * 60);
-pub const AGENT_CONTRACT_VERSION: &str = "outline-agent-v8";
+pub const AGENT_CONTRACT_VERSION: &str = "outline-agent-v20";
 
 pub const STAGE_ANALYZING: &str = "analyzing";
 pub const STAGE_MAPPING: &str = "mapping";
@@ -104,6 +103,7 @@ impl MapBatch {
 pub struct RequirementGroupBatch {
     pub ordinal: i32,
     pub needs: Vec<Value>,
+    pub structure_fragments: Vec<Value>,
 }
 
 impl RequirementGroupBatch {
@@ -115,6 +115,14 @@ impl RequirementGroupBatch {
                     .and_then(Value::as_str)
                     .and_then(|raw| Uuid::parse_str(raw).ok())
             })
+            .collect()
+    }
+
+    pub fn structure_fragment_refs(&self) -> Vec<String> {
+        self.structure_fragments
+            .iter()
+            .filter_map(|fragment| fragment.get("signal_ref").and_then(Value::as_str))
+            .map(ToOwned::to_owned)
             .collect()
     }
 }
@@ -202,6 +210,11 @@ fn frozen_applicability(requirement: &Value) -> Option<&str> {
         .or_else(|| requirement.get("applicability").and_then(Value::as_str))
         .or_else(|| {
             requirement
+                .pointer("/effective_applicability/status")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            requirement
                 .pointer("/applicability/status")
                 .and_then(Value::as_str)
         })
@@ -219,8 +232,15 @@ pub fn partition_requirement_groups(
     let mut seen = HashSet::new();
     let mut needs = Vec::new();
     for requirement in requirements.iter().filter(|requirement| {
-        requirement.get("requiredness").and_then(Value::as_str) == Some("mandatory")
+        matches!(
+            requirement.get("requiredness").and_then(Value::as_str),
+            Some("mandatory" | "optional")
+        )
     }) {
+        let requiredness = requirement
+            .get("requiredness")
+            .and_then(Value::as_str)
+            .expect("response-obligation filter checked requiredness");
         let text = requirement
             .get("requirement_text")
             .and_then(Value::as_str)
@@ -228,13 +248,13 @@ pub fn partition_requirement_groups(
             .ok_or_else(|| {
                 OutlineAgentError::new(
                     "INPUT_SCHEMA_INVALID",
-                    "mandatory requirement text is missing",
+                    "response-obligation requirement text is missing",
                 )
             })?;
         let applicability = frozen_applicability(requirement).ok_or_else(|| {
             OutlineAgentError::new(
                 "INPUT_SCHEMA_INVALID",
-                "mandatory requirement applicability is missing",
+                "response-obligation applicability is missing",
             )
         })?;
         if !matches!(
@@ -243,7 +263,7 @@ pub fn partition_requirement_groups(
         ) {
             return Err(OutlineAgentError::new(
                 "INPUT_SCHEMA_INVALID",
-                "mandatory requirement applicability is invalid",
+                "response-obligation applicability is invalid",
             ));
         }
         let source_ids = requirement
@@ -253,7 +273,7 @@ pub fn partition_requirement_groups(
             .ok_or_else(|| {
                 OutlineAgentError::new(
                     "INPUT_SCHEMA_INVALID",
-                    "mandatory requirement frozen sources are missing",
+                    "response-obligation frozen sources are missing",
                 )
             })?;
         let sources = source_ids
@@ -266,7 +286,7 @@ pub fn partition_requirement_groups(
                     .ok_or_else(|| {
                         OutlineAgentError::new(
                             "INPUT_SCHEMA_INVALID",
-                            "mandatory requirement source identity is invalid",
+                            "response-obligation source identity is invalid",
                         )
                     })
             })
@@ -278,7 +298,7 @@ pub fn partition_requirement_groups(
             .ok_or_else(|| {
                 OutlineAgentError::new(
                     "INPUT_SCHEMA_INVALID",
-                    "mandatory requirement need occurrences are missing",
+                    "response-obligation need occurrences are missing",
                 )
             })?;
         for occurrence in occurrences {
@@ -289,13 +309,13 @@ pub fn partition_requirement_groups(
                 .ok_or_else(|| {
                     OutlineAgentError::new(
                         "INPUT_SCHEMA_INVALID",
-                        "mandatory need occurrence identity is invalid",
+                        "response-obligation need occurrence identity is invalid",
                     )
                 })?;
             if !seen.insert(need) {
                 return Err(OutlineAgentError::new(
                     "INPUT_SCHEMA_INVALID",
-                    format!("duplicate mandatory need occurrence {need}"),
+                    format!("duplicate response-obligation need occurrence {need}"),
                 ));
             }
             let channel = occurrence
@@ -315,7 +335,7 @@ pub fn partition_requirement_groups(
                 .ok_or_else(|| {
                     OutlineAgentError::new(
                         "INPUT_SCHEMA_INVALID",
-                        "mandatory need channel is missing or invalid",
+                        "response-obligation need channel is missing or invalid",
                     )
                 })?;
             let row = json!({
@@ -324,7 +344,7 @@ pub fn partition_requirement_groups(
                 "requirement_revision_id": requirement.get("requirement_revision_id"),
                 "requirement_kind": requirement.get("requirement_kind"),
                 "requirement_text": text,
-                "requiredness": "mandatory",
+                "requiredness": requiredness,
                 "applicability": applicability,
                 "source_unit_revision_ids": sources.iter().collect::<Vec<_>>()
             });
@@ -332,17 +352,11 @@ pub fn partition_requirement_groups(
             if runes > REQUIREMENT_GROUP_BATCH_MAX_RUNES {
                 return Err(OutlineAgentError::new(
                     "INPUT_SCHEMA_INVALID",
-                    format!("mandatory need {need} exceeds requirement grouping input rune limit"),
+                    format!("response-obligation need {need} exceeds grouping input rune limit"),
                 ));
             }
             needs.push((need, runes, row));
         }
-    }
-    if needs.is_empty() {
-        return Err(OutlineAgentError::new(
-            "INPUT_SCHEMA_INVALID",
-            "no mandatory need occurrences available for grouping",
-        ));
     }
     needs.sort_by_key(|(need, _, _)| *need);
     let mut batches = Vec::new();
@@ -356,6 +370,7 @@ pub fn partition_requirement_groups(
             batches.push(RequirementGroupBatch {
                 ordinal: batches.len() as i32,
                 needs: std::mem::take(&mut current),
+                structure_fragments: Vec::new(),
             });
             current_runes = 0;
         }
@@ -366,6 +381,111 @@ pub fn partition_requirement_groups(
         batches.push(RequirementGroupBatch {
             ordinal: batches.len() as i32,
             needs: current,
+            structure_fragments: Vec::new(),
+        });
+    }
+    Ok(batches)
+}
+
+fn frozen_need_ids_by_requiredness(input: &Value, requiredness: &str) -> BTreeSet<Uuid> {
+    input
+        .get("requirements")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|requirement| {
+            requirement.get("requiredness").and_then(Value::as_str) == Some(requiredness)
+        })
+        .flat_map(|requirement| {
+            requirement
+                .get("need_occurrences")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|need| {
+            need.get("need_occurrence_id")
+                .and_then(Value::as_str)
+                .and_then(|raw| Uuid::parse_str(raw).ok())
+        })
+        .collect()
+}
+
+fn informational_unmapped_notices(input: &Value) -> Vec<Value> {
+    frozen_need_ids_by_requiredness(input, "informational")
+        .into_iter()
+        .map(|need_id| json!({
+            "code":"UNMAPPED_REQUIREMENT",
+            "severity":"info",
+            "message":"RequirementCompileV3 classified this frozen need as informational; it is retained for audit and is not routed as a bid response obligation.",
+            "source_identity":need_id
+        }))
+        .collect()
+}
+
+fn attach_structure_placement_batches(
+    mut batches: Vec<RequirementGroupBatch>,
+    fragments: &[Value],
+) -> Result<Vec<RequirementGroupBatch>, OutlineAgentError> {
+    let mut output_fragments = fragments
+        .iter()
+        .filter(|fragment| {
+            matches!(
+                fragment.get("outline_usage").and_then(Value::as_str),
+                Some("output_child" | "form_template")
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    output_fragments.sort_by_key(|fragment| {
+        fragment
+            .get("signal_ref")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    });
+    if output_fragments.iter().any(|fragment| {
+        fragment
+            .get("signal_ref")
+            .and_then(Value::as_str)
+            .is_none_or(|value| {
+                value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+    }) {
+        return Err(OutlineAgentError::new(
+            "AGENT_MAP_FAILED",
+            "output structure fragment signal identity is invalid",
+        ));
+    }
+    let mut current = Vec::new();
+    let mut current_runes = 0usize;
+    for fragment in output_fragments {
+        let runes = fragment.to_string().chars().count();
+        if runes > REQUIREMENT_GROUP_BATCH_MAX_RUNES {
+            return Err(OutlineAgentError::new(
+                "AGENT_MAP_FAILED",
+                "one output structure fragment exceeds the semantic grouping rune limit",
+            ));
+        }
+        if !current.is_empty()
+            && (current.len() >= REQUIREMENT_GROUP_BATCH_MAX_NEEDS
+                || current_runes + runes > REQUIREMENT_GROUP_BATCH_MAX_RUNES)
+        {
+            batches.push(RequirementGroupBatch {
+                ordinal: batches.len() as i32,
+                needs: Vec::new(),
+                structure_fragments: std::mem::take(&mut current),
+            });
+            current_runes = 0;
+        }
+        current_runes += runes;
+        current.push(fragment);
+    }
+    if !current.is_empty() {
+        batches.push(RequirementGroupBatch {
+            ordinal: batches.len() as i32,
+            needs: Vec::new(),
+            structure_fragments: current,
         });
     }
     Ok(batches)
@@ -645,10 +765,15 @@ fn normalize_structure_fragments(
             Some(Value::String(value))
                 if matches!(
                     value.as_str(),
-                    "qualification"
+                    "cover"
+                        | "toc"
+                        | "qualification"
                         | "technical"
                         | "commercial"
                         | "quotation"
+                        | "deviation"
+                        | "implementation"
+                        | "evidence_index"
                         | "attachment"
                         | "other"
                 ) =>
@@ -1000,26 +1125,99 @@ struct FulfillmentGroupBuilder {
     fragment_refs: BTreeSet<String>,
 }
 
-fn section_ref_for_explicit_role(spine: &Value, role: &str) -> Result<String, OutlineAgentError> {
-    let matches = spine
-        .get("sections")
-        .and_then(Value::as_array)
+type FulfillmentGroupRegistry = BTreeMap<(String, String), (String, String)>;
+
+fn semantic_grouping_registry_items(grouping: &Value) -> impl Iterator<Item = &Value> {
+    ["assignments", "structure_placements"]
         .into_iter()
-        .flatten()
-        .filter(|section| section.get("semantic_role").and_then(Value::as_str) == Some(role))
-        .filter_map(|section| section.get("section_ref").and_then(Value::as_str))
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [section_ref] => Ok((*section_ref).to_owned()),
-        [] => Err(OutlineAgentError::new(
-            "AGENT_GROUPING_FAILED",
-            format!("group section_role {role} does not exist in frozen composition spine"),
-        )),
-        _ => Err(OutlineAgentError::new(
-            "AGENT_GROUPING_FAILED",
-            format!("group section_role {role} is ambiguous in frozen composition spine"),
-        )),
+        .flat_map(|key| {
+            grouping
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+}
+
+fn extend_fulfillment_group_registry(
+    registry: &mut FulfillmentGroupRegistry,
+    grouping: &Value,
+) -> Result<(), OutlineAgentError> {
+    for assignment in semantic_grouping_registry_items(grouping) {
+        let section_ref = assignment
+            .get("section_ref")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                OutlineAgentError::new("AGENT_GROUPING_FAILED", "group registry section is missing")
+            })?;
+        let group_key = assignment
+            .get("fulfillment_group_key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                OutlineAgentError::new("AGENT_GROUPING_FAILED", "group registry key is missing")
+            })?;
+        let title = assignment
+            .get("fulfillment_group_title")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                OutlineAgentError::new("AGENT_GROUPING_FAILED", "group registry title is missing")
+            })?;
+        let materialization = assignment
+            .get("materialization")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                OutlineAgentError::new(
+                    "AGENT_GROUPING_FAILED",
+                    "group registry materialization is missing",
+                )
+            })?;
+        let identity = (section_ref.to_owned(), group_key.to_owned());
+        let semantics = (title.to_owned(), materialization.to_owned());
+        if let Some(existing) = registry.get(&identity) {
+            if existing != &semantics {
+                return Err(OutlineAgentError::new(
+                    "AGENT_GROUPING_FAILED",
+                    format!(
+                        "group key {group_key} is reserved in section {section_ref} for title {} and materialization {}; received title {} and materialization {}. Use a different batch-scoped key unless section, title, and materialization are all exact",
+                        existing.0, existing.1, semantics.0, semantics.1
+                    ),
+                ));
+            }
+        } else {
+            registry.insert(identity, semantics);
+        }
     }
+    Ok(())
+}
+
+fn validate_grouping_against_registry(
+    registry: &FulfillmentGroupRegistry,
+    grouping: &Value,
+    batch_ordinal: i32,
+) -> Result<(), OutlineAgentError> {
+    let prefix = format!("batch-{batch_ordinal}-");
+    for assignment in semantic_grouping_registry_items(grouping) {
+        let section_ref = assignment
+            .get("section_ref")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let group_key = assignment
+            .get("fulfillment_group_key")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !registry.contains_key(&(section_ref.to_owned(), group_key.to_owned()))
+            && !group_key.starts_with(&prefix)
+        {
+            return Err(OutlineAgentError::new(
+                "AGENT_GROUPING_FAILED",
+                format!(
+                    "new fulfillment_group_key {group_key} must start with {prefix}; reserved cross-batch keys may only be reused exactly"
+                ),
+            ));
+        }
+    }
+    let mut candidate = registry.clone();
+    extend_fulfillment_group_registry(&mut candidate, grouping)
 }
 
 fn group_requiredness_rank(value: &str) -> u8 {
@@ -1128,23 +1326,128 @@ fn build_fulfillment_groups_and_matrix(
                 values
             },
         );
-    let mut groups = BTreeMap::<(String, String), FulfillmentGroupBuilder>::new();
-    for fragment in fragments.iter().filter(|fragment| {
-        matches!(
-            fragment.get("outline_usage").and_then(Value::as_str),
-            Some("output_child" | "form_template")
-        )
+    let mut placements = BTreeMap::<String, (&str, &str, &str, &str, &str)>::new();
+    for placement in grouping_batches.iter().flat_map(|batch| {
+        batch
+            .get("structure_placements")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
     }) {
-        let parent_role = fragment
-            .get("composition_parent_role")
+        let signal_ref = placement
+            .get("signal_ref")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                OutlineAgentError::new("AGENT_GROUPING_FAILED", "placement signal_ref is invalid")
+            })?;
+        let section_ref = placement
+            .get("section_ref")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                OutlineAgentError::new("AGENT_GROUPING_FAILED", "placement section_ref is invalid")
+            })?;
+        let section_role = placement
+            .get("section_role")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                OutlineAgentError::new("AGENT_GROUPING_FAILED", "placement section_role is invalid")
+            })?;
+        let group_key = placement
+            .get("fulfillment_group_key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                OutlineAgentError::new("AGENT_GROUPING_FAILED", "placement group key is invalid")
+            })?;
+        let group_title = placement
+            .get("fulfillment_group_title")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                OutlineAgentError::new("AGENT_GROUPING_FAILED", "placement group title is invalid")
+            })?;
+        let materialization = placement
+            .get("materialization")
             .and_then(Value::as_str)
             .ok_or_else(|| {
                 OutlineAgentError::new(
-                    "AGENT_MAP_FAILED",
-                    "output fragment composition parent is missing",
+                    "AGENT_GROUPING_FAILED",
+                    "placement materialization is invalid",
                 )
             })?;
-        let section_ref = section_ref_for_explicit_role(spine, parent_role)?;
+        if placements
+            .insert(
+                signal_ref.to_owned(),
+                (
+                    section_ref,
+                    section_role,
+                    group_key,
+                    group_title,
+                    materialization,
+                ),
+            )
+            .is_some()
+        {
+            return Err(OutlineAgentError::new(
+                "AGENT_GROUPING_FAILED",
+                format!("duplicate structure placement {signal_ref}"),
+            ));
+        }
+    }
+    let output_fragments = fragments
+        .iter()
+        .filter(|fragment| {
+            matches!(
+                fragment.get("outline_usage").and_then(Value::as_str),
+                Some("output_child" | "form_template")
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected_placements = output_fragments
+        .iter()
+        .filter_map(|fragment| fragment.get("signal_ref").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    if placements
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        != expected_placements
+    {
+        return Err(OutlineAgentError::new(
+            "AGENT_GROUPING_FAILED",
+            "structure placement coverage is not exact",
+        ));
+    }
+    let mut groups = BTreeMap::<(String, String), FulfillmentGroupBuilder>::new();
+    for fragment in output_fragments {
+        let signal_ref = fragment
+            .get("signal_ref")
+            .and_then(Value::as_str)
+            .expect("Map V4 normalization stamps signal ref");
+        let (section_ref, section_role, group_key, group_title, materialization) =
+            placements.get(signal_ref).copied().ok_or_else(|| {
+                OutlineAgentError::new(
+                    "AGENT_GROUPING_FAILED",
+                    format!("output fragment {signal_ref} has no semantic placement"),
+                )
+            })?;
+        let section = spine
+            .get("sections")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|section| section.get("section_ref").and_then(Value::as_str) == Some(section_ref))
+            .ok_or_else(|| {
+                OutlineAgentError::new(
+                    "AGENT_GROUPING_FAILED",
+                    format!("placed section {section_ref} does not exist"),
+                )
+            })?;
+        if section.get("semantic_role").and_then(Value::as_str) != Some(section_role) {
+            return Err(OutlineAgentError::new(
+                "AGENT_GROUPING_FAILED",
+                format!("placed section {section_ref} role mismatch"),
+            ));
+        }
+        let section_ref = section_ref.to_owned();
         let source_ids = value_string_set(fragment.get("source_unit_revision_ids"));
         let form_ids = source_ids
             .iter()
@@ -1155,11 +1458,7 @@ fn build_fulfillment_groups_and_matrix(
             .and_then(Value::as_str)
             .expect("Map V4 normalization stamps applicability")
             .to_owned();
-        let materialization = fragment
-            .get("materialization")
-            .and_then(Value::as_str)
-            .expect("Map V4 normalization stamps materialization")
-            .to_owned();
+        let materialization = materialization.to_owned();
         if applicability == "not_applicable" && materialization != "audit_only" {
             return Err(OutlineAgentError::new(
                 "AGENT_MAP_FAILED",
@@ -1169,23 +1468,8 @@ fn build_fulfillment_groups_and_matrix(
         merge_fulfillment_group(
             &mut groups,
             FulfillmentGroupBuilder {
-                group_key: fragment
-                    .get("fulfillment_group_key")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        OutlineAgentError::new("AGENT_MAP_FAILED", "fragment group key is missing")
-                    })?
-                    .to_owned(),
-                title: fragment
-                    .get("fulfillment_group_title")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        OutlineAgentError::new(
-                            "AGENT_MAP_FAILED",
-                            "fragment group title is missing",
-                        )
-                    })?
-                    .to_owned(),
+                group_key: group_key.to_owned(),
+                title: group_title.to_owned(),
                 section_ref,
                 semantic_role: fragment
                     .get("semantic_role")
@@ -1234,15 +1518,43 @@ fn build_fulfillment_groups_and_matrix(
                     format!("grouped need {need_id} is unexpected or duplicated"),
                 ));
             }
+            let section_ref = assignment
+                .get("section_ref")
+                .and_then(Value::as_str)
+                .expect("grouping normalization stamps section ref");
+            let section = spine
+                .get("sections")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|section| {
+                    section.get("section_ref").and_then(Value::as_str) == Some(section_ref)
+                })
+                .ok_or_else(|| {
+                    OutlineAgentError::new(
+                        "AGENT_GROUPING_FAILED",
+                        format!("group section_ref {section_ref} does not exist"),
+                    )
+                })?;
             let section_role = assignment
                 .get("section_role")
                 .and_then(Value::as_str)
                 .expect("grouping normalization stamps section role");
-            let section_ref = section_ref_for_explicit_role(spine, section_role)?;
+            if section.get("semantic_role").and_then(Value::as_str) != Some(section_role) {
+                return Err(OutlineAgentError::new(
+                    "AGENT_GROUPING_FAILED",
+                    format!("group section_ref {section_ref} role mismatch"),
+                ));
+            }
             let applicability = assignment
                 .get("applicability")
                 .and_then(Value::as_str)
                 .expect("grouping normalization stamps applicability")
+                .to_owned();
+            let requiredness = assignment
+                .get("requiredness")
+                .and_then(Value::as_str)
+                .expect("grouping normalization stamps requiredness")
                 .to_owned();
             let materialization = assignment
                 .get("materialization")
@@ -1262,10 +1574,10 @@ fn build_fulfillment_groups_and_matrix(
                         .and_then(Value::as_str)
                         .expect("grouping normalization stamps title")
                         .to_owned(),
-                    section_ref,
+                    section_ref: section_ref.to_owned(),
                     semantic_role: section_role.to_owned(),
                     materialization,
-                    requiredness: "mandatory".to_owned(),
+                    requiredness,
                     applicability,
                     need_occurrences: BTreeMap::from([(
                         need_id.to_string(),
@@ -1288,7 +1600,7 @@ fn build_fulfillment_groups_and_matrix(
         let missing = expected.difference(&assigned).collect::<Vec<_>>();
         return Err(OutlineAgentError::new(
             "AGENT_GROUPING_FAILED",
-            format!("mandatory grouping coverage is incomplete: {missing:?}"),
+            format!("response-obligation grouping coverage is incomplete: {missing:?}"),
         ));
     }
     let mut matrix_rows = spine
@@ -1467,6 +1779,7 @@ fn reduce_outline_evidence(
                 .unwrap_or_default(),
         );
     }
+    notices.extend(informational_unmapped_notices(input));
     if mapped_units.len() != unit_order.len()
         || unit_order.keys().any(|id| !mapped_units.contains(id))
     {
@@ -1581,7 +1894,7 @@ fn reduce_outline_evidence(
     if grouped_needs != expected_needs {
         return Err(OutlineAgentError::new(
             "AGENT_GROUPING_FAILED",
-            "Reduce V3 grouping coverage does not match mandatory frozen needs",
+            "Reduce V3 grouping coverage does not match frozen response-obligation needs",
         ));
     }
     Ok(json!({
@@ -1680,7 +1993,7 @@ pub async fn run_outline_generation(
         ));
     }
     let batches = partition_source_units(&units)?;
-    let requirement_group_batches = partition_requirement_groups(&input)?;
+    let mut requirement_group_batches = partition_requirement_groups(&input)?;
     let model_sha = digest_key(
         input
             .get("model_contract_sha256")
@@ -1694,14 +2007,14 @@ pub async fn run_outline_generation(
     let agent_schema_sha = platform::sha256_hex(
         [
             include_bytes!("../schemas/outline-evidence-batch-v4.schema.json").as_slice(),
-            include_bytes!("../schemas/requirement-grouping-batch-v1.schema.json").as_slice(),
+            include_bytes!("../schemas/requirement-grouping-batch-v4.schema.json").as_slice(),
             include_bytes!("../schemas/fulfillment-group-v1.schema.json").as_slice(),
             include_bytes!("../schemas/composition-spine-v1.schema.json").as_slice(),
             include_bytes!("../schemas/section-obligation-matrix-v2.schema.json").as_slice(),
             include_bytes!("../schemas/outline-reduce-plan-v3.schema.json").as_slice(),
             include_bytes!("../schemas/outline-draft-patch-v1.schema.json").as_slice(),
-            include_bytes!("../schemas/outline-synthesis-packet-v3.schema.json").as_slice(),
-            include_bytes!("../schemas/outline-synthesis-checkpoint-v3.schema.json").as_slice(),
+            include_bytes!("../schemas/outline-synthesis-packet-v5.schema.json").as_slice(),
+            include_bytes!("../schemas/outline-synthesis-checkpoint-v4.schema.json").as_slice(),
             include_bytes!("../schemas/outline-generation-output-v2.schema.json").as_slice(),
         ]
         .concat()
@@ -1818,40 +2131,23 @@ pub async fn run_outline_generation(
         total_batches=batches.len(), reused_batches=batches.len().saturating_sub(missing.len()),
         "outline Map phase completed"
     );
-    let grouping_spine = build_composition_spine(
-        &evidence
-            .iter()
-            .flat_map(|batch| {
-                batch
-                    .get("structure_fragments")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default()
-            })
-            .collect::<Vec<_>>(),
-    )?;
+    let mapped_fragments = evidence
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .get("structure_fragments")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    let grouping_spine = build_composition_spine(&mapped_fragments)?;
+    requirement_group_batches =
+        attach_structure_placement_batches(requirement_group_batches, &mapped_fragments)?;
     let mut grouped: Vec<Option<Value>> = vec![None; requirement_group_batches.len()];
-    let mut missing_grouping = Vec::new();
+    let mut group_registry = FulfillmentGroupRegistry::new();
     let mut grouped_count = 0usize;
     for batch in &requirement_group_batches {
-        ensure_pending(pool, request).await?;
-        if let Some(cached) = bid_authoring_v2::load_outline_requirement_grouping_batch_v1(
-            pool,
-            request,
-            batch.ordinal,
-            &model_sha,
-            &agent_sha,
-        )
-        .await
-        .map_err(|error| OutlineAgentError::new("INTERNAL", error.to_string()))?
-        {
-            grouped[batch.ordinal as usize] = Some(cached);
-            grouped_count += 1;
-        } else {
-            missing_grouping.push(batch.clone());
-        }
-    }
-    for pair in missing_grouping.chunks(REQUIREMENT_GROUP_CONCURRENCY) {
         ensure_pending(pool, request).await?;
         if job_started.elapsed() > JOB_WATCHDOG {
             return Err(OutlineAgentError::new(
@@ -1859,49 +2155,74 @@ pub async fn run_outline_generation(
                 "outline job exceeded the process safety watchdog",
             ));
         }
-        let mut tasks = Vec::new();
-        for batch in pair {
+        let cached = bid_authoring_v2::load_outline_requirement_grouping_batch_v1(
+            pool,
+            request,
+            batch.ordinal,
+            &model_sha,
+            &agent_sha,
+        )
+        .await
+        .map_err(|error| OutlineAgentError::new("INTERNAL", error.to_string()))?;
+        let grouping = if let Some(cached) = cached {
+            cached
+        } else {
             let frozen_input = input.clone();
             let frozen_spine = grouping_spine.clone();
             let frozen_batch = batch.clone();
-            tasks.push((
-                batch.ordinal,
-                batch.need_ids(),
-                tokio::task::spawn_blocking(move || {
-                    group_requirement_batch(&frozen_input, &frozen_spine, &frozen_batch)
-                }),
-            ));
-        }
-        for (ordinal, need_ids, task) in tasks {
+            let frozen_registry = group_registry.clone();
+            let task = tokio::task::spawn_blocking(move || {
+                group_requirement_batch(
+                    &frozen_input,
+                    &frozen_spine,
+                    &frozen_batch,
+                    &frozen_registry,
+                )
+            });
             let grouping = task.await.map_err(|error| {
                 OutlineAgentError::new(
                     "INTERNAL",
-                    format!("requirement grouping task join failed: {error}"),
+                    format!("semantic grouping task join failed: {error}"),
                 )
             })??;
             ensure_pending(pool, request).await?;
-            bid_authoring_v2::store_outline_requirement_grouping_batch_v1(
-                pool, request, ordinal, &model_sha, &agent_sha, &need_ids, &grouping,
-            )
-            .await
-            .map_err(|error| OutlineAgentError::new("INTERNAL", error.to_string()))?;
-            grouped[ordinal as usize] = Some(grouping);
-            grouped_count += 1;
-            bid_authoring_v2::upsert_outline_agent_run_v2(
+            let need_ids = batch.need_ids();
+            let structure_fragment_refs = batch.structure_fragment_refs();
+            bid_authoring_v2::store_outline_semantic_grouping_batch_v4(
                 pool,
                 request,
-                attempt,
-                max_attempts,
-                STAGE_MAPPING,
-                json!({
-                    "label":progress_label(STAGE_MAPPING),"phase":"grouping",
-                    "mapped_batches":batches.len(),"grouped_batches":grouped_count,
-                    "total_grouping_batches":requirement_group_batches.len()
-                }),
+                &bid_authoring_v2::OutlineSemanticGroupingBatchV4 {
+                    batch_ordinal: batch.ordinal,
+                    model_sha: &model_sha,
+                    agent_sha: &agent_sha,
+                    need_ids: &need_ids,
+                    structure_fragment_refs: &structure_fragment_refs,
+                    payload: &grouping,
+                },
             )
             .await
             .map_err(|error| OutlineAgentError::new("INTERNAL", error.to_string()))?;
-        }
+            grouping
+        };
+        validate_grouping_against_registry(&group_registry, &grouping, batch.ordinal)?;
+        extend_fulfillment_group_registry(&mut group_registry, &grouping)?;
+        grouped[batch.ordinal as usize] = Some(grouping);
+        grouped_count += 1;
+        bid_authoring_v2::upsert_outline_agent_run_v2(
+            pool,
+            request,
+            attempt,
+            max_attempts,
+            STAGE_MAPPING,
+            json!({
+                "label":progress_label(STAGE_MAPPING),"phase":"grouping",
+                "mapped_batches":batches.len(),"grouped_batches":grouped_count,
+                "total_grouping_batches":requirement_group_batches.len(),
+                "reserved_fulfillment_groups":group_registry.len()
+            }),
+        )
+        .await
+        .map_err(|error| OutlineAgentError::new("INTERNAL", error.to_string()))?;
     }
     let grouping_evidence = grouped
         .into_iter()
@@ -2064,14 +2385,14 @@ async fn ensure_pending(
 
 fn requirement_grouping_json_schema() -> Value {
     let contract: Value = serde_json::from_str(include_str!(
-        "../schemas/requirement-grouping-batch-v1.schema.json"
+        "../schemas/requirement-grouping-batch-v5.schema.json"
     ))
-    .expect("checked-in RequirementGroupingBatchV1 schema");
+    .expect("checked-in SemanticGroupingBatchV5 schema");
     let properties = contract
         .get("properties")
         .and_then(Value::as_object)
-        .expect("RequirementGroupingBatchV1 properties");
-    let selected = ["assignments", "notices"]
+        .expect("SemanticGroupingBatchV5 properties");
+    let selected = ["assignments", "structure_placements", "notices"]
         .into_iter()
         .map(|key| {
             (
@@ -2086,11 +2407,11 @@ fn requirement_grouping_json_schema() -> Value {
     json!({
         "type":"json_schema",
         "json_schema":{
-            "name":"requirement_grouping_batch_v1",
+            "name":"semantic_grouping_batch_v5",
             "strict":true,
             "schema":{
                 "type":"object","additionalProperties":false,
-                "required":["assignments","notices"],
+                "required":["assignments","structure_placements","notices"],
                 "properties":selected,
                 "$defs":contract.get("$defs").cloned().unwrap_or_else(||json!({}))
             }
@@ -2100,6 +2421,7 @@ fn requirement_grouping_json_schema() -> Value {
 
 fn stamp_requirement_grouping_batch(
     batch: &RequirementGroupBatch,
+    composition_spine: &Value,
     model_payload: Value,
 ) -> Result<Value, OutlineAgentError> {
     let object = model_payload.as_object().ok_or_else(|| {
@@ -2147,6 +2469,25 @@ fn stamp_requirement_grouping_batch(
                 format!("grouping duplicated need {need_id}"),
             ));
         }
+        let section_ref = item
+            .get("section_ref")
+            .and_then(Value::as_str)
+            .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or_else(|| {
+                OutlineAgentError::new("AGENT_GROUPING_FAILED", "grouping section_ref is invalid")
+            })?;
+        let frozen_section = composition_spine
+            .get("sections")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|section| section.get("section_ref").and_then(Value::as_str) == Some(section_ref))
+            .ok_or_else(|| {
+                OutlineAgentError::new(
+                    "AGENT_GROUPING_FAILED",
+                    format!("grouping section_ref {section_ref} is outside the frozen spine"),
+                )
+            })?;
         let section_role = item
             .get("section_role")
             .and_then(Value::as_str)
@@ -2164,6 +2505,14 @@ fn stamp_requirement_grouping_batch(
             .ok_or_else(|| {
                 OutlineAgentError::new("AGENT_GROUPING_FAILED", "grouping section_role is invalid")
             })?;
+        if frozen_section.get("semantic_role").and_then(Value::as_str) != Some(section_role) {
+            return Err(OutlineAgentError::new(
+                "AGENT_GROUPING_FAILED",
+                format!(
+                    "grouping section_ref {section_ref} and section_role {section_role} disagree"
+                ),
+            ));
+        }
         let group_key = item
             .get("fulfillment_group_key")
             .and_then(Value::as_str)
@@ -2194,6 +2543,10 @@ fn stamp_requirement_grouping_batch(
             .get("applicability")
             .and_then(Value::as_str)
             .expect("partition stamps applicability");
+        let requiredness = frozen
+            .get("requiredness")
+            .and_then(Value::as_str)
+            .expect("partition stamps requiredness");
         if applicability == "not_applicable" && materialization != "audit_only" {
             return Err(OutlineAgentError::new(
                 "AGENT_GROUPING_FAILED",
@@ -2203,7 +2556,7 @@ fn stamp_requirement_grouping_batch(
         if applicability != "not_applicable" && materialization == "audit_only" {
             return Err(OutlineAgentError::new(
                 "AGENT_GROUPING_FAILED",
-                format!("applicable mandatory need {need_id} cannot be audit_only"),
+                format!("applicable {requiredness} need {need_id} cannot be audit_only"),
             ));
         }
         let confidence = item
@@ -2216,12 +2569,13 @@ fn stamp_requirement_grouping_batch(
         assignments.push(json!({
             "need_occurrence_id":need_id,
             "channel":frozen.get("channel"),
+            "section_ref":section_ref,
             "section_role":section_role,
             "fulfillment_group_key":group_key,
             "fulfillment_group_title":group_title,
             "materialization":materialization,
             "applicability":applicability,
-            "requiredness":"mandatory",
+            "requiredness":requiredness,
             "source_unit_revision_ids":frozen.get("source_unit_revision_ids"),
             "confidence":confidence
         }));
@@ -2235,7 +2589,175 @@ fn stamp_requirement_grouping_batch(
         return Err(OutlineAgentError::new(
             "AGENT_GROUPING_FAILED",
             format!(
-                "grouping batch {} omitted mandatory needs: {missing:?}",
+                "grouping batch {} omitted response-obligation needs: {missing:?}",
+                batch.ordinal
+            ),
+        ));
+    }
+    let raw_placements = object
+        .get("structure_placements")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            OutlineAgentError::new("AGENT_GROUPING_FAILED", "structure placements are missing")
+        })?;
+    let expected_placements = batch
+        .structure_fragments
+        .iter()
+        .filter_map(|fragment| {
+            fragment
+                .get("signal_ref")
+                .and_then(Value::as_str)
+                .map(|signal_ref| (signal_ref.to_owned(), fragment))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut placed = HashSet::new();
+    let mut structure_placements = Vec::with_capacity(raw_placements.len());
+    for raw in raw_placements {
+        let item = raw.as_object().ok_or_else(|| {
+            OutlineAgentError::new(
+                "AGENT_GROUPING_FAILED",
+                "structure placement is not an object",
+            )
+        })?;
+        let signal_ref = item
+            .get("signal_ref")
+            .and_then(Value::as_str)
+            .filter(|value| expected_placements.contains_key(*value))
+            .ok_or_else(|| {
+                OutlineAgentError::new(
+                    "AGENT_GROUPING_FAILED",
+                    "structure placement signal_ref is outside its home batch",
+                )
+            })?;
+        if !placed.insert(signal_ref.to_owned()) {
+            return Err(OutlineAgentError::new(
+                "AGENT_GROUPING_FAILED",
+                format!("structure placement duplicated {signal_ref}"),
+            ));
+        }
+        let section_ref = item
+            .get("section_ref")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                OutlineAgentError::new(
+                    "AGENT_GROUPING_FAILED",
+                    "structure placement section_ref is missing",
+                )
+            })?;
+        let frozen_section = composition_spine
+            .get("sections")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|section| section.get("section_ref").and_then(Value::as_str) == Some(section_ref))
+            .ok_or_else(|| {
+                OutlineAgentError::new(
+                    "AGENT_GROUPING_FAILED",
+                    format!(
+                        "structure placement section_ref {section_ref} is outside the frozen spine"
+                    ),
+                )
+            })?;
+        let section_role = item
+            .get("section_role")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                OutlineAgentError::new(
+                    "AGENT_GROUPING_FAILED",
+                    "structure placement section_role is missing",
+                )
+            })?;
+        if frozen_section.get("semantic_role").and_then(Value::as_str) != Some(section_role) {
+            return Err(OutlineAgentError::new(
+                "AGENT_GROUPING_FAILED",
+                format!("structure placement {signal_ref} section identity and role disagree"),
+            ));
+        }
+        let group_key = item
+            .get("fulfillment_group_key")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                OutlineAgentError::new(
+                    "AGENT_GROUPING_FAILED",
+                    "structure placement group key is missing",
+                )
+            })?;
+        let group_title = item
+            .get("fulfillment_group_title")
+            .and_then(Value::as_str)
+            .map(|value| source_numbering_and_title(value).1)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                OutlineAgentError::new(
+                    "AGENT_GROUPING_FAILED",
+                    "structure placement group title is missing",
+                )
+            })?;
+        let materialization = item
+            .get("materialization")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "explicit_child" | "bind_existing" | "audit_only"))
+            .ok_or_else(|| {
+                OutlineAgentError::new(
+                    "AGENT_GROUPING_FAILED",
+                    "structure placement materialization is invalid",
+                )
+            })?;
+        let frozen_fragment = expected_placements
+            .get(signal_ref)
+            .expect("placement signal was checked against frozen home fragments");
+        let applicability = frozen_fragment
+            .get("applicability")
+            .and_then(Value::as_str)
+            .expect("Map V4 stamps fragment applicability");
+        if applicability == "not_applicable" && materialization != "audit_only" {
+            return Err(OutlineAgentError::new(
+                "AGENT_GROUPING_FAILED",
+                format!("excluded structure fragment {signal_ref} must be audit_only"),
+            ));
+        }
+        if applicability != "not_applicable" && materialization == "audit_only" {
+            return Err(OutlineAgentError::new(
+                "AGENT_GROUPING_FAILED",
+                format!("applicable structure fragment {signal_ref} cannot be audit_only"),
+            ));
+        }
+        let confidence = item
+            .get("confidence")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "high" | "medium" | "low"))
+            .ok_or_else(|| {
+                OutlineAgentError::new(
+                    "AGENT_GROUPING_FAILED",
+                    "structure placement confidence is invalid",
+                )
+            })?;
+        structure_placements.push(json!({
+            "signal_ref":signal_ref,
+            "section_ref":section_ref,
+            "section_role":section_role,
+            "fulfillment_group_key":group_key,
+            "fulfillment_group_title":group_title,
+            "materialization":materialization,
+            "confidence":confidence
+        }));
+    }
+    if placed.len() != expected_placements.len()
+        || expected_placements
+            .keys()
+            .any(|signal_ref| !placed.contains(signal_ref))
+    {
+        let missing = expected_placements
+            .keys()
+            .filter(|signal_ref| !placed.contains(*signal_ref))
+            .cloned()
+            .collect::<Vec<_>>();
+        return Err(OutlineAgentError::new(
+            "AGENT_GROUPING_FAILED",
+            format!(
+                "semantic grouping batch {} omitted structure fragments: {missing:?}",
                 batch.ordinal
             ),
         ));
@@ -2246,16 +2768,19 @@ fn stamp_requirement_grouping_batch(
         .cloned()
         .unwrap_or_default();
     Ok(json!({
-        "schema_version":1,
+        "schema_version":5,
         "batch_ordinal":batch.ordinal,
         "home_need_occurrence_ids":batch.need_ids(),
+        "home_structure_fragment_refs":batch.structure_fragment_refs(),
         "assignments":assignments,
+        "structure_placements":structure_placements,
         "notices":notices
     }))
 }
 
 fn parse_requirement_grouping_turn(
     batch: &RequirementGroupBatch,
+    composition_spine: &Value,
     turn: &knowledge::models::ChatTurn,
 ) -> Result<Value, String> {
     if turn.finish_reason == "length" {
@@ -2265,7 +2790,8 @@ fn parse_requirement_grouping_turn(
         ));
     }
     extract_json_object(&turn.content).and_then(|parsed| {
-        stamp_requirement_grouping_batch(batch, parsed).map_err(|error| error.message)
+        stamp_requirement_grouping_batch(batch, composition_spine, parsed)
+            .map_err(|error| error.message)
     })
 }
 
@@ -2273,6 +2799,7 @@ fn group_requirement_batch(
     input: &Value,
     composition_spine: &Value,
     batch: &RequirementGroupBatch,
+    existing_groups: &FulfillmentGroupRegistry,
 ) -> Result<Value, OutlineAgentError> {
     if !platform::openai_chat_configured() {
         return Err(OutlineAgentError::new(
@@ -2280,21 +2807,26 @@ fn group_requirement_batch(
             "Chat provider is required for mandatory requirement grouping",
         ));
     }
-    let system = "You are the bid RequirementGroupingBatchV1 agent. Classify every HOME_NEED exactly once. Rust owns factual need IDs, channels, applicability and frozen source IDs; you own section_role, semantic fulfillment_group_key/title, and materialization. Use one identical key only when needs can be fulfilled coherently by the same semantic outline node. Reusing a key with a different title, section, or materialization is a contract error. Prefer bind_existing when a need belongs in a broader evidence-backed response chapter; use explicit_child when the tender requires a distinct response section or form. Applicable mandatory needs may never be audit_only. Explicitly not-applicable needs must be audit_only. Do not create fixed-template categories unsupported by the frozen requirement text. Return every input need once, no extras, no markdown fences.";
+    let system = "You are the bid SemanticGroupingBatchV5 agent. Classify every HOME_NEED and place every HOME_STRUCTURE_FRAGMENT exactly once. Do not echo frozen channel, applicability, requiredness, source identities, or fragment source facts; Rust stamps those facts from the frozen inputs. For needs and structure fragments, you own the exact frozen composition section_ref/section_role, semantic fulfillment_group_key/title, materialization, and confidence. Select section_ref only from COMPOSITION_SPINE and copy its section_role exactly; never route by role alone because multiple frozen sections may share a role. Every new fulfillment_group_key must begin with batch-{BATCH_ORDINAL}- and be specific; a cross-batch key mentioned by PREVIOUS_VALIDATION_ERROR may only be reused with exactly its already reserved section, title, and materialization. Within a batch, every repeated fulfillment_group_key must also copy exactly the same section_ref, fulfillment_group_title, and materialization. If either title or materialization differs, create a distinct batch-scoped key. Use one identical key only when needs can be fulfilled coherently by the same semantic outline node. Prefer bind_existing when a need belongs in a broader evidence-backed response chapter; use explicit_child when the tender requires a distinct response section or form. Applicable HOME_NEEDS may never be audit_only. Explicitly not-applicable HOME_NEEDS must be audit_only. Do not create fixed-template categories unsupported by frozen evidence. Return every home identity once, no extras, no markdown fences.";
     let user = json!({
-        "schema_version":1,
+        "schema_version":5,
         "project_id":input.pointer("/document_set/project_id"),
         "batch_ordinal":batch.ordinal,
         "composition_spine":composition_spine,
-        "home_needs":batch.needs
+        "home_needs":batch.needs,
+        "home_structure_fragments":batch.structure_fragments
     });
     let schema = requirement_grouping_json_schema();
     let model = platform::chat_model();
     let mut last = String::from("requirement grouping failed");
     for attempt in 1..=REQUIREMENT_GROUP_MAX_ATTEMPTS {
+        let mut turn_user = user.clone();
+        if attempt > 1 {
+            turn_user["previous_validation_error"] = json!(last);
+        }
         let raw = match knowledge::enrichment::chat_complete_turn_with_format_once(
             system,
-            &user.to_string(),
+            &turn_user.to_string(),
             &model,
             8192,
             knowledge::models::AGENT_TURN_TIMEOUT,
@@ -2319,8 +2851,13 @@ fn group_requirement_batch(
                 ));
             }
         };
-        match parse_requirement_grouping_turn(batch, &raw) {
-            Ok(grouped) => return Ok(grouped),
+        match parse_requirement_grouping_turn(batch, composition_spine, &raw) {
+            Ok(grouped) => {
+                match validate_grouping_against_registry(existing_groups, &grouped, batch.ordinal) {
+                    Ok(()) => return Ok(grouped),
+                    Err(error) => last = error.message,
+                }
+            }
             Err(error) => last = error,
         }
     }
@@ -2590,13 +3127,17 @@ fn closure_facts(reduce: &Value, draft_nodes: &[Value]) -> Value {
         .into_iter()
         .flatten()
         .flat_map(|section| {
-            section
-                .get("required_group_refs")
-                .and_then(Value::as_array)
+            ["required_group_refs", "conditional_group_refs"]
                 .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(ToOwned::to_owned)
+                .flat_map(|key| {
+                    section
+                        .get(key)
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
         })
         .collect::<BTreeSet<_>>();
     let excluded = reduce
@@ -2689,6 +3230,44 @@ fn closure_facts(reduce: &Value, draft_nodes: &[Value]) -> Value {
             }
         }
     }
+    let mut promoted_nodes = HashSet::new();
+    for fragment in reduce
+        .get("structure_fragments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|fragment| {
+            matches!(
+                fragment.get("outline_usage").and_then(Value::as_str),
+                Some("requirement_context" | "reference_only")
+            )
+        })
+    {
+        let Some(title) = fragment.get("title").and_then(Value::as_str) else {
+            continue;
+        };
+        let usage = fragment
+            .get("outline_usage")
+            .and_then(Value::as_str)
+            .unwrap_or("requirement_context");
+        let fragment_sources = value_string_set(fragment.get("source_unit_revision_ids"));
+        for node in draft_nodes.iter().filter(|node| {
+            node.get("title").and_then(Value::as_str) == Some(title)
+                && !value_string_set(node.get("origin_source_unit_revision_ids"))
+                    .is_disjoint(&fragment_sources)
+        }) {
+            let node_ref = node
+                .get("client_node_ref")
+                .and_then(Value::as_str)
+                .unwrap_or("<invalid-node>");
+            if promoted_nodes.insert(node_ref.to_owned()) {
+                invalid.push(json!({
+                    "code":"CONTEXT_FRAGMENT_PROMOTED","identity":node_ref,
+                    "message":format!("draft node repeats frozen {usage} fragment title {title:?}; author a semantic response title instead")
+                }));
+            }
+        }
+    }
     let assigned_required = required
         .iter()
         .filter(|group_ref| assignments.contains_key(*group_ref))
@@ -2698,13 +3277,56 @@ fn closure_facts(reduce: &Value, draft_nodes: &[Value]) -> Value {
         .difference(&assigned_required)
         .cloned()
         .collect::<Vec<_>>();
+    let empty_section_refs = reduce
+        .pointer("/composition_spine/sections")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|section| section.get("section_ref").and_then(Value::as_str))
+        .filter(|section_ref| {
+            let section_node_ref = spine_node_ref(section_ref);
+            !draft_nodes
+                .iter()
+                .filter_map(|node| node.get("client_node_ref").and_then(Value::as_str))
+                .any(|node_ref| is_descendant(node_ref, &section_node_ref))
+        })
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
     json!({
         "required_groups_total":required.len(),
         "required_groups_assigned":assigned_required.len(),
         "missing_group_refs":missing,
+        "empty_section_refs":empty_section_refs,
         "invalid_assignments":invalid,
         "draft_sha256":draft_sha
     })
+}
+
+fn unresolved_semantic_identities(facts: &Value) -> BTreeSet<String> {
+    let mut identities = value_string_set(facts.get("missing_group_refs"))
+        .into_iter()
+        .map(|identity| format!("group:{identity}"))
+        .collect::<BTreeSet<_>>();
+    identities.extend(
+        value_string_set(facts.get("empty_section_refs"))
+            .into_iter()
+            .map(|identity| format!("section:{identity}")),
+    );
+    identities.extend(
+        facts
+            .get("invalid_assignments")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|invalid| {
+                Some(format!(
+                    "invalid:{}:{}",
+                    invalid.get("code")?.as_str()?,
+                    invalid.get("identity")?.as_str()?
+                ))
+            }),
+    );
+    identities
 }
 
 #[derive(Debug, Default, Clone)]
@@ -2840,31 +3462,48 @@ impl DraftAccumulator {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        if let Some(first) = invalid.first() {
+        if !invalid.is_empty() {
+            let details = invalid
+                .iter()
+                .take(32)
+                .map(|item| {
+                    format!(
+                        "{}:{}: {}",
+                        item.get("code")
+                            .and_then(Value::as_str)
+                            .unwrap_or("INVALID_ASSIGNMENT"),
+                        item.get("identity")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown"),
+                        item.get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("invalid assignment")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
             return Err(OutlineAgentError::new(
                 "AGENT_OUTPUT_INVALID",
                 format!(
-                    "outline patch rejected: {} ({})",
-                    first
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("invalid assignment"),
-                    first
-                        .get("identity")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
+                    "outline patch rejected with {} invalid semantic identities{}: {details}",
+                    invalid.len(),
+                    if invalid.len() > 32 {
+                        " (first 32 shown)"
+                    } else {
+                        ""
+                    }
                 ),
             ));
         }
         if require_improvement {
-            let before_missing = value_string_set(before.get("missing_group_refs"));
-            let after_missing = value_string_set(after.get("missing_group_refs"));
-            if after_missing.len() >= before_missing.len()
-                || !after_missing.is_subset(&before_missing)
+            let before_unresolved = unresolved_semantic_identities(&before);
+            let after_unresolved = unresolved_semantic_identities(&after);
+            if after_unresolved.len() >= before_unresolved.len()
+                || !after_unresolved.is_subset(&before_unresolved)
             {
                 return Err(OutlineAgentError::new(
                     "AGENT_OUTPUT_INVALID",
-                    "repair patch must strictly shrink unresolved group identities",
+                    "repair patch must strictly shrink unresolved group or section identities",
                 ));
             }
         }
@@ -2880,7 +3519,10 @@ impl DraftAccumulator {
     }
 
     fn from_checkpoint(checkpoint: &Value) -> Self {
-        if checkpoint.get("schema_version").and_then(Value::as_u64) != Some(3) {
+        if !matches!(
+            checkpoint.get("schema_version").and_then(Value::as_u64),
+            Some(3 | 4)
+        ) {
             return Self::default();
         }
         let nodes = checkpoint
@@ -2917,7 +3559,7 @@ impl DraftAccumulator {
 
     fn checkpoint_value(&self, snapshot: &CheckpointSnapshot<'_>) -> Value {
         json!({
-            "schema_version":3,"attempt":snapshot.attempt,"phase":snapshot.phase.as_str(),
+            "schema_version":4,"attempt":snapshot.attempt,"phase":snapshot.phase.as_str(),
             "reduce_plan_sha256":snapshot.reduce_sha,
             "selected_evidence":snapshot.selected_evidence,
             "selected_facts":snapshot.selected_facts,
@@ -2991,6 +3633,7 @@ fn draft_progress(_input: &Value, reduce: &Value, draft: &DraftAccumulator) -> V
         "required_groups_assigned":facts.get("required_groups_assigned"),
         "required_groups_total":facts.get("required_groups_total"),
         "missing_group_refs":facts.get("missing_group_refs"),
+        "empty_section_refs":facts.get("empty_section_refs"),
         "invalid_assignments":facts.get("invalid_assignments"),
         "draft_sha256":facts.get("draft_sha256")
     })
@@ -3004,6 +3647,10 @@ fn draft_counts_complete(_input: &Value, reduce: &Value, draft: &DraftAccumulato
             .and_then(Value::as_array)
             .is_some_and(Vec::is_empty)
         && facts
+            .get("empty_section_refs")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        && facts
             .get("invalid_assignments")
             .and_then(Value::as_array)
             .is_some_and(Vec::is_empty)
@@ -3014,6 +3661,7 @@ fn semantic_progress_fingerprint(reduce: &Value, draft: &DraftAccumulator) -> St
     platform::sha256_hex(
         json!({
             "missing_group_refs":facts.get("missing_group_refs"),
+            "empty_section_refs":facts.get("empty_section_refs"),
             "invalid_assignments":facts.get("invalid_assignments")
         })
         .to_string()
@@ -3230,6 +3878,36 @@ fn close_tree_shape(nodes: &mut [Value]) -> Result<(), OutlineAgentError> {
     Ok(())
 }
 
+fn conflict_notice_severity(reduce: &Value, conflict: &Value) -> &'static str {
+    let conflict_sources = value_string_set(conflict.get("source_unit_revision_ids"));
+    if conflict_sources.is_empty() {
+        return "high";
+    }
+    let matching_fragments = reduce
+        .get("structure_fragments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|fragment| {
+            !value_string_set(fragment.get("source_unit_revision_ids"))
+                .is_disjoint(&conflict_sources)
+        })
+        .collect::<Vec<_>>();
+    if matching_fragments.is_empty() {
+        return "high";
+    }
+    if matching_fragments.iter().all(|fragment| {
+        matches!(
+            fragment.get("outline_usage").and_then(Value::as_str),
+            Some("requirement_context" | "reference_only")
+        )
+    }) {
+        "low"
+    } else {
+        "high"
+    }
+}
+
 fn close_outline(
     input: &Value,
     reduce: &Value,
@@ -3265,6 +3943,19 @@ fn close_outline(
         return Err(OutlineAgentError::new(
             "AGENT_OBLIGATION_COVERAGE_FAILED",
             format!("required fulfillment groups remain unassigned: {missing:?}"),
+        ));
+    }
+    let empty_sections = facts
+        .get("empty_section_refs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !empty_sections.is_empty() {
+        return Err(OutlineAgentError::new(
+            "AGENT_SEMANTIC_VALIDATION_FAILED",
+            format!(
+                "composition sections remain without evidence-backed children: {empty_sections:?}"
+            ),
         ));
     }
     let mut draft_nodes = draft.nodes();
@@ -3348,10 +4039,7 @@ fn close_outline(
             }
         }
     }
-    let mandatory = partition_requirement_groups(input)?
-        .into_iter()
-        .flat_map(|batch| batch.need_ids())
-        .collect::<BTreeSet<_>>();
+    let mandatory = frozen_need_ids_by_requiredness(input, "mandatory");
     let routed = routes.keys().copied().collect::<BTreeSet<_>>();
     if !mandatory.is_subset(&routed) {
         let missing = mandatory.difference(&routed).collect::<Vec<_>>();
@@ -3376,7 +4064,7 @@ fn close_outline(
         .flatten()
     {
         notices.push(json!({
-            "code":"CONFLICTING_STRUCTURE","severity":"high",
+            "code":"CONFLICTING_STRUCTURE","severity":conflict_notice_severity(reduce, conflict),
             "message":conflict.get("message").and_then(Value::as_str).unwrap_or("招标结构存在冲突，请复核"),
             "source_identity":conflict.get("source_unit_revision_ids").and_then(Value::as_array).and_then(|ids|ids.first()).and_then(Value::as_str).unwrap_or("outline-reduce")
         }));
@@ -3387,8 +4075,28 @@ fn close_outline(
         .into_iter()
         .flatten()
     {
+        let code = notice
+            .get("code")
+            .and_then(Value::as_str)
+            .filter(|value| {
+                matches!(
+                    *value,
+                    "UNMAPPED_REQUIREMENT"
+                        | "CONFLICTING_STRUCTURE"
+                        | "LOW_CONFIDENCE"
+                        | "UNRESOLVED_SOURCE"
+                        | "FORM_STRUCTURE_DEVIATION"
+                        | "EXCLUDED_NOT_APPLICABLE"
+                )
+            })
+            .unwrap_or("LOW_CONFIDENCE");
+        let severity = notice
+            .get("severity")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "info" | "warning" | "high"))
+            .unwrap_or("warning");
         notices.push(json!({
-            "code":"LOW_CONFIDENCE","severity":"warning",
+            "code":code,"severity":severity,
             "message":notice.get("message").and_then(Value::as_str).unwrap_or("结构证据置信度较低，请复核"),
             "source_identity":notice.get("source_identity").and_then(Value::as_str).unwrap_or("outline-reduce")
         }));
@@ -4015,6 +4723,25 @@ fn synthesis_packet(
         batches,
         ..
     } = job;
+    let non_output_fragments = reduce
+        .get("structure_fragments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|fragment| {
+            matches!(
+                fragment.get("outline_usage").and_then(Value::as_str),
+                Some("requirement_context" | "reference_only")
+            )
+        })
+        .map(|fragment| {
+            json!({
+                "title":fragment.get("title"),
+                "outline_usage":fragment.get("outline_usage"),
+                "source_unit_revision_ids":fragment.get("source_unit_revision_ids")
+            })
+        })
+        .collect::<Vec<_>>();
     let requirements = input
         .get("requirements")
         .and_then(Value::as_array)
@@ -4041,7 +4768,7 @@ fn synthesis_packet(
         })
         .collect::<Vec<_>>();
     json!({
-        "schema_version":3,
+        "schema_version":5,
         "request_artifact_id":request.request_artifact_id,
         "frozen_input_sha256":request.frozen_input_sha256,
         "reduce_plan_sha256":platform::sha256_hex(reduce.to_string().as_bytes()),
@@ -4050,6 +4777,7 @@ fn synthesis_packet(
         "composition_spine":reduce.get("composition_spine").cloned().unwrap_or(Value::Null),
         "section_obligation_matrix":reduce.get("section_obligation_matrix").cloned().unwrap_or(Value::Null),
         "fulfillment_groups":reduce.get("fulfillment_groups").cloned().unwrap_or_else(||json!([])),
+        "non_output_fragments":non_output_fragments,
         "deterministic_spine_nodes":assemble_spine_nodes(reduce).unwrap_or_default(),
         "manifest":{
             "source_unit_revision_ids":input.get("source_units").and_then(Value::as_array).into_iter().flatten()
@@ -4075,10 +4803,10 @@ fn synthesis_messages(packet: &Value, phase: SynthesisPhase) -> Vec<Value> {
             "Inspect only priority/conflict/form/vision evidence when needed, then call finish_collecting with bounded source-grounded selected_facts."
         }
         SynthesisPhase::Drafting => {
-            "The deterministic root, TOC, and top-level composition spine already exist. Never replace, rename, or reorder them. Use apply_outline_patch with the current draft SHA. Add only semantic descendants. Every applicable required fulfillment_group_ref must be explicitly declared exactly once in one node coverage_group_refs. The target must remain inside the group's section and share frozen source evidence. Do not emit routes or obligation bindings; Rust derives both from accepted group assignments."
+            "The deterministic root, TOC, and top-level composition spine already exist. Never replace, rename, or reorder them. Use apply_outline_patch with the current draft SHA. Add only semantic descendants. Every required or conditional fulfillment_group_ref must be explicitly declared exactly once in one node coverage_group_refs. Every frozen top-level composition section must have at least one model-authored descendant with shared frozen source evidence, including sections with no fulfillment groups; such descendants use an empty coverage_group_refs array. The target must remain inside the group's or section's frozen spine node and share frozen source evidence. Never copy the title of a frozen requirement_context or reference_only fragment into an output node; author a semantic response title instead. Do not emit routes or obligation bindings; Rust derives both from accepted group assignments."
         }
         SynthesisPhase::Repairing => {
-            "Use one atomic apply_outline_patch against the current draft SHA. The patch must strictly shrink the missing fulfillment-group identity set and may not introduce invalid, duplicate, wrong-section, excluded, or source-disjoint assignments. Rust rejects the entire patch otherwise."
+            "Use one atomic apply_outline_patch against the current draft SHA. The patch must strictly shrink the unresolved group, section, or invalid-assignment identity set and may not introduce invalid, duplicate, wrong-section, excluded, source-disjoint, requirement-context, or reference-only promotion. Rust rejects the entire patch otherwise."
         }
         SynthesisPhase::Finalizing => {
             "Do not emit the outline. Call finalize_outline with the persisted draft digest."
@@ -4470,6 +5198,104 @@ mod tests {
     }
 
     #[test]
+    fn draft_closure_includes_conditional_group_refs() {
+        let mut reduce = v8_test_reduce();
+        let conditional_ref = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        reduce["section_obligation_matrix"]["sections"][0]["conditional_group_refs"] =
+            json!([conditional_ref]);
+        let mut conditional_group = reduce["fulfillment_groups"][0].clone();
+        conditional_group["group_ref"] = json!(conditional_ref);
+        conditional_group["group_key"] = json!("optional-technical-response");
+        conditional_group["title"] = json!("可选技术响应");
+        conditional_group["requiredness"] = json!("optional");
+        conditional_group["applicability"] = json!("conditional");
+        reduce["fulfillment_groups"]
+            .as_array_mut()
+            .unwrap()
+            .push(conditional_group);
+        let mut node = v8_test_patch("base", "patch")["add_nodes"][0].clone();
+        let incomplete = closure_facts(&reduce, &[node.clone()]);
+        assert_eq!(incomplete["required_groups_total"], 2);
+        assert_eq!(incomplete["missing_group_refs"], json!([conditional_ref]));
+        node["coverage_group_refs"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(conditional_ref));
+        assert_eq!(
+            closure_facts(&reduce, &[node])["missing_group_refs"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn promoted_context_fragment_is_a_repairable_semantic_identity() {
+        let mut reduce = v8_test_reduce();
+        reduce["structure_fragments"] = json!([{
+            "title":"技术响应","outline_usage":"requirement_context",
+            "source_unit_revision_ids":["22222222-2222-2222-2222-222222222222"]
+        }]);
+        let technical = v8_test_patch("base", "patch")["add_nodes"][0].clone();
+        let commercial = json!({
+            "client_node_ref":"commercial-evidence",
+            "parent_client_node_ref":spine_node_ref("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+            "ordinal":0,"title":"商务说明","semantic_role":"commercial","render_role":"section",
+            "origin_source_unit_revision_ids":["33333333-3333-3333-3333-333333333333"],
+            "coverage_group_refs":[]
+        });
+        let mut draft = DraftAccumulator::from_checkpoint(&json!({
+            "schema_version":4,"nodes":[technical.clone(),commercial],"patch_receipts":[]
+        }));
+        let before = closure_facts(&reduce, &draft.nodes());
+        assert_eq!(
+            before["invalid_assignments"][0]["code"], "CONTEXT_FRAGMENT_PROMOTED",
+            "closure facts: {before}"
+        );
+        assert!(
+            unresolved_semantic_identities(&before)
+                .contains("invalid:CONTEXT_FRAGMENT_PROMOTED:technical-response")
+        );
+        let mut replacement = technical;
+        replacement["title"] = json!("技术要求响应");
+        let repair = json!({
+            "schema_version":1,"patch_ref":"repair-context-title",
+            "base_draft_sha256":draft.digest(),"add_nodes":[],
+            "replace_nodes":[{"client_node_ref":"technical-response","replacement":replacement}],
+            "delete_node_refs":[]
+        });
+        draft.apply_patch(&reduce, &repair, true).unwrap();
+        assert_eq!(
+            closure_facts(&reduce, &draft.nodes())["invalid_assignments"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn reference_only_conflicts_are_audit_low_but_output_conflicts_remain_high() {
+        let source = "22222222-2222-2222-2222-222222222222";
+        let conflict = json!({"source_unit_revision_ids":[source]});
+        let mut reduce = json!({"structure_fragments":[{
+            "outline_usage":"reference_only","source_unit_revision_ids":[source]
+        },{
+            "outline_usage":"requirement_context","source_unit_revision_ids":[source]
+        }]});
+        assert_eq!(conflict_notice_severity(&reduce, &conflict), "low");
+        reduce["structure_fragments"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "outline_usage":"output_child","source_unit_revision_ids":[source]
+            }));
+        assert_eq!(conflict_notice_severity(&reduce, &conflict), "high");
+        assert_eq!(
+            conflict_notice_severity(
+                &reduce,
+                &json!({"source_unit_revision_ids":["33333333-3333-3333-3333-333333333333"]})
+            ),
+            "high"
+        );
+    }
+
+    #[test]
     fn partition_covers_every_unit_once() {
         let a = "a".repeat(100);
         let b = "b".repeat(MAP_BATCH_RUNES + 50);
@@ -4491,6 +5317,56 @@ mod tests {
             }
         }
         assert_eq!(reconstructed, b);
+    }
+
+    #[test]
+    fn frozen_applicability_accepts_replayable_compiled_objects() {
+        assert_eq!(
+            frozen_applicability(&json!({
+                "effective_applicability":{"status":"required"},
+                "applicability":{"fragments":["source_unit:x"]}
+            })),
+            Some("required")
+        );
+        assert_eq!(
+            frozen_applicability(&json!({
+                "effective_applicability":{"fragments":["source_unit:x"]},
+                "applicability":{"status":"not_applicable"}
+            })),
+            Some("not_applicable")
+        );
+    }
+
+    #[test]
+    fn map_parent_roles_match_the_frozen_semantic_role_schema() {
+        let source = "11111111-1111-1111-1111-111111111111".to_owned();
+        for role in [
+            "cover",
+            "toc",
+            "qualification",
+            "technical",
+            "commercial",
+            "quotation",
+            "deviation",
+            "implementation",
+            "evidence_index",
+            "attachment",
+            "other",
+        ] {
+            normalize_structure_fragments(
+                json!([{
+                    "title":"证据","semantic_role":"other","signal_kind":"inferred",
+                    "outline_usage":"reference_only","applicability":"required",
+                    "composition_parent_role":role,"fulfillment_group_key":null,
+                    "fulfillment_group_title":null,"materialization":"audit_only",
+                    "path_segments":["证据"],"heading_level":0,"numbering":null,
+                    "source_numbering":null,"source_order":0,
+                    "source_unit_revision_ids":[source.clone()],"confidence":"high"
+                }]),
+                std::slice::from_ref(&source),
+            )
+            .unwrap_or_else(|error| panic!("schema role {role} rejected: {error}"));
+        }
     }
 
     #[test]
@@ -4631,24 +5507,59 @@ mod tests {
                 {"title":"3.1.2 技术文件","semantic_role":"technical","signal_kind":"explicit_composition_clause","outline_usage":"composition_spine","applicability":"required","composition_parent_role":null,"fulfillment_group_key":null,"fulfillment_group_title":null,"materialization":"audit_only","path_segments":["投标文件组成","3.1.2 技术文件"],"heading_level":2,"numbering":"3.1.2","source_numbering":"3.1.2","source_order":1,"source_unit_revision_ids":[source_ids[1]],"confidence":"high"},
                 {"title":"3.1.3 报价文件","semantic_role":"quotation","signal_kind":"explicit_composition_clause","outline_usage":"composition_spine","applicability":"required","composition_parent_role":null,"fulfillment_group_key":null,"fulfillment_group_title":null,"materialization":"audit_only","path_segments":["投标文件组成","3.1.3 报价文件"],"heading_level":2,"numbering":"3.1.3","source_numbering":"3.1.3","source_order":2,"source_unit_revision_ids":[source_ids[2]],"confidence":"high"},
                 {"title":"3.1.4 其他附录","semantic_role":"attachment","signal_kind":"explicit_composition_clause","outline_usage":"composition_spine","applicability":"required","composition_parent_role":null,"fulfillment_group_key":null,"fulfillment_group_title":null,"materialization":"audit_only","path_segments":["投标文件组成","3.1.4 其他附录"],"heading_level":2,"numbering":"3.1.4","source_numbering":"3.1.4","source_order":3,"source_unit_revision_ids":[source_ids[3]],"confidence":"high"},
-                {"title":"投标函","semantic_role":"commercial","signal_kind":"form","outline_usage":"form_template","applicability":"required","composition_parent_role":"commercial","fulfillment_group_key":"bid-letter","fulfillment_group_title":"投标函","materialization":"explicit_child","path_segments":["商务文件","投标函"],"heading_level":3,"numbering":null,"source_numbering":null,"source_order":4,"source_unit_revision_ids":[source_ids[0]],"confidence":"high"},
+                {"title":"投标函","semantic_role":"commercial","signal_kind":"form","outline_usage":"form_template","applicability":"required","composition_parent_role":"qualification","fulfillment_group_key":"bid-letter","fulfillment_group_title":"投标函","materialization":"explicit_child","path_segments":["商务文件","投标函"],"heading_level":3,"numbering":null,"source_numbering":null,"source_order":4,"source_unit_revision_ids":[source_ids[0]],"confidence":"high"},
                 {"title":"第六章 投标文件格式","semantic_role":"other","signal_kind":"heading","outline_usage":"requirement_context","applicability":"required","composition_parent_role":null,"fulfillment_group_key":null,"fulfillment_group_title":null,"materialization":"audit_only","path_segments":["第六章 投标文件格式"],"heading_level":1,"numbering":"第六章","source_numbering":"第六章","source_order":5,"source_unit_revision_ids":[source_ids[0]],"confidence":"high"},
-                {"title":"附件5 本次不适用材料","semantic_role":"attachment","signal_kind":"form","outline_usage":"form_template","applicability":"not_applicable","composition_parent_role":"attachment","fulfillment_group_key":"excluded-attachment-5","fulfillment_group_title":"本次不适用材料","materialization":"audit_only","path_segments":["其他附录","附件5 本次不适用材料"],"heading_level":3,"numbering":"附件5","source_numbering":"附件5","source_order":6,"source_unit_revision_ids":[source_ids[3]],"confidence":"high"}
+                {"title":"附件5 本次不适用材料","semantic_role":"attachment","signal_kind":"form","outline_usage":"form_template","applicability":"not_applicable","composition_parent_role":"attachment","fulfillment_group_key":"bid-letter","fulfillment_group_title":"本次不适用材料","materialization":"audit_only","path_segments":["其他附录","附件5 本次不适用材料"],"heading_level":3,"numbering":"附件5","source_numbering":"附件5","source_order":6,"source_unit_revision_ids":[source_ids[3]],"confidence":"high"}
             ],
             "conflicts":[],"needs_vision":[],"notices":[]
         })).unwrap();
-        let group_batches = partition_requirement_groups(&input).unwrap();
-        let grouping = stamp_requirement_grouping_batch(&group_batches[0],json!({
+        let spine =
+            build_composition_spine(evidence["structure_fragments"].as_array().unwrap()).unwrap();
+        let commercial_ref = spine["sections"][0]["section_ref"].as_str().unwrap();
+        let group_batches = attach_structure_placement_batches(
+            partition_requirement_groups(&input).unwrap(),
+            evidence["structure_fragments"].as_array().unwrap(),
+        )
+        .unwrap();
+        let need_grouping = stamp_requirement_grouping_batch(&group_batches[0],&spine,json!({
             "assignments":[{
                 "need_occurrence_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                "channel":"evidence_attachment","section_role":"commercial",
+                "section_ref":commercial_ref,"section_role":"commercial",
                 "fulfillment_group_key":"authorization","fulfillment_group_title":"法定代表人授权委托书",
-                "materialization":"explicit_child","applicability":"required","requiredness":"mandatory",
-                "source_unit_revision_ids":[source_ids[0]],"confidence":"high"
+                "materialization":"explicit_child","confidence":"high"
             }],
-            "notices":[]
+            "structure_placements":[],"notices":[]
         })).unwrap();
-        let reduced = reduce_outline_evidence(&input, &[evidence], &[grouping]).unwrap();
+        let placements = group_batches[1]
+            .structure_fragments
+            .iter()
+            .map(|fragment| {
+                json!({
+                    "signal_ref":fragment["signal_ref"],
+                    "section_ref":commercial_ref,
+                    "section_role":"commercial",
+                    "fulfillment_group_key":format!(
+                        "batch-{}-{}",
+                        group_batches[1].ordinal,
+                        &fragment["signal_ref"].as_str().unwrap()[..8]
+                    ),
+                    "fulfillment_group_title":fragment["fulfillment_group_title"],
+                    "materialization":fragment["materialization"],
+                    "confidence":"high"
+                })
+            })
+            .collect::<Vec<_>>();
+        let structure_grouping = stamp_requirement_grouping_batch(
+            &group_batches[1],
+            &spine,
+            json!({
+                "assignments":[],"structure_placements":placements,"notices":[]
+            }),
+        )
+        .unwrap();
+        let reduced =
+            reduce_outline_evidence(&input, &[evidence], &[need_grouping, structure_grouping])
+                .unwrap();
         let titles = reduced["composition_spine"]["sections"]
             .as_array()
             .unwrap()
@@ -4885,9 +5796,30 @@ mod tests {
         assert!(!draft_counts_complete(&input, &reduce, &draft));
         let patch = v8_test_patch(&draft.digest(), "patch-progress");
         draft.apply_patch(&reduce, &patch, false).unwrap();
+        assert_eq!(
+            draft_progress(&input, &reduce, &draft)["empty_section_refs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let commercial_patch = json!({
+            "schema_version":1,"patch_ref":"patch-progress-commercial",
+            "base_draft_sha256":draft.digest(),
+            "add_nodes":[{
+                "client_node_ref":"commercial-evidence",
+                "parent_client_node_ref":spine_node_ref("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+                "ordinal":0,"title":"商务说明","semantic_role":"commercial","render_role":"section",
+                "origin_source_unit_revision_ids":["33333333-3333-3333-3333-333333333333"],
+                "coverage_group_refs":[]
+            }],
+            "replace_nodes":[],"delete_node_refs":[]
+        });
+        draft.apply_patch(&reduce, &commercial_patch, true).unwrap();
         let complete = draft_progress(&input, &reduce, &draft);
         assert_eq!(complete["required_groups_assigned"], 1);
         assert_eq!(complete["missing_group_refs"], json!([]));
+        assert_eq!(complete["empty_section_refs"], json!([]));
         assert!(draft_counts_complete(&input, &reduce, &draft));
         let delete = json!({
             "schema_version":1,"patch_ref":"repair-regression","base_draft_sha256":draft.digest(),
@@ -4961,12 +5893,29 @@ mod tests {
         json!({"requirements":requirements})
     }
 
+    fn grouping_test_spine() -> Value {
+        json!({"sections":[{
+            "section_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "semantic_role":"technical"
+        }]})
+    }
+
     fn grouping_model_output(batch: &RequirementGroupBatch) -> Value {
         json!({
             "assignments":batch.needs.iter().map(|need|json!({
                 "need_occurrence_id":need["need_occurrence_id"],
+                "section_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "section_role":"technical","fulfillment_group_key":"technical-response",
                 "fulfillment_group_title":"技术响应","materialization":"explicit_child",
+                "confidence":"high"
+            })).collect::<Vec<_>>(),
+            "structure_placements":batch.structure_fragments.iter().map(|fragment|json!({
+                "signal_ref":fragment["signal_ref"],
+                "section_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "section_role":"technical",
+                "fulfillment_group_key":format!("batch-{}-structure-output",batch.ordinal),
+                "fulfillment_group_title":fragment.get("fulfillment_group_title").and_then(Value::as_str).unwrap_or("结构输出"),
+                "materialization":if fragment.get("applicability").and_then(Value::as_str)==Some("not_applicable") {"audit_only"} else {"explicit_child"},
                 "confidence":"high"
             })).collect::<Vec<_>>(),
             "notices":[]
@@ -4989,9 +5938,12 @@ mod tests {
             .flat_map(RequirementGroupBatch::need_ids)
             .collect::<BTreeSet<_>>();
         assert_eq!(all.len(), 49);
-        let stamped =
-            stamp_requirement_grouping_batch(&batches[0], grouping_model_output(&batches[0]))
-                .unwrap();
+        let stamped = stamp_requirement_grouping_batch(
+            &batches[0],
+            &grouping_test_spine(),
+            grouping_model_output(&batches[0]),
+        )
+        .unwrap();
         assert_eq!(
             stamped["home_need_occurrence_ids"]
                 .as_array()
@@ -5003,7 +5955,7 @@ mod tests {
         let mut missing = grouping_model_output(&batches[0]);
         missing["assignments"].as_array_mut().unwrap().pop();
         assert_eq!(
-            stamp_requirement_grouping_batch(&batches[0], missing)
+            stamp_requirement_grouping_batch(&batches[0], &grouping_test_spine(), missing)
                 .unwrap_err()
                 .code,
             "AGENT_GROUPING_FAILED"
@@ -5036,16 +5988,141 @@ mod tests {
     }
 
     #[test]
+    fn response_grouping_includes_optional_and_audits_informational_needs() {
+        let mut input = grouping_input(1, "必须响应");
+        let mut optional = input["requirements"][0].clone();
+        optional["requirement_revision_id"] = json!("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        optional["requiredness"] = json!("optional");
+        optional["need_occurrences"][0]["need_occurrence_id"] =
+            json!("cccccccc-cccc-cccc-cccc-cccccccccccc");
+        let mut informational = optional.clone();
+        informational["requirement_revision_id"] = json!("dddddddd-dddd-dddd-dddd-dddddddddddd");
+        informational["requiredness"] = json!("informational");
+        informational["need_occurrences"][0]["need_occurrence_id"] =
+            json!("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
+        input["requirements"]
+            .as_array_mut()
+            .unwrap()
+            .extend([optional, informational]);
+        let grouped = partition_requirement_groups(&input)
+            .unwrap()
+            .into_iter()
+            .flat_map(|batch| batch.need_ids())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(grouped.len(), 2);
+        assert!(
+            grouped.contains(&Uuid::parse_str("cccccccc-cccc-cccc-cccc-cccccccccccc").unwrap())
+        );
+        let notices = informational_unmapped_notices(&input);
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0]["code"], "UNMAPPED_REQUIREMENT");
+        assert_eq!(
+            notices[0]["source_identity"],
+            "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+        );
+    }
+
+    #[test]
+    fn structure_placement_batches_are_bounded_and_exact() {
+        let requirement_batches =
+            partition_requirement_groups(&grouping_input(1, "必须响应")).unwrap();
+        let fragments = (1..=49)
+            .map(|ordinal| {
+                json!({
+                    "signal_ref":format!("{ordinal:064x}"),
+                    "outline_usage":"output_child",
+                    "title":format!("输出项 {ordinal}")
+                })
+            })
+            .collect::<Vec<_>>();
+        let batches = attach_structure_placement_batches(requirement_batches, &fragments).unwrap();
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[1].structure_fragments.len(), 48);
+        assert_eq!(batches[2].structure_fragments.len(), 1);
+        assert_eq!(
+            batches
+                .iter()
+                .flat_map(RequirementGroupBatch::structure_fragment_refs)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            49
+        );
+    }
+
+    #[test]
+    fn duplicate_semantic_roles_require_exact_frozen_section_refs() {
+        let input = grouping_input(2, "必须逐条响应");
+        let batches = partition_requirement_groups(&input).unwrap();
+        let mut model = grouping_model_output(&batches[0]);
+        model["assignments"][1]["section_ref"] =
+            json!("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+        let spine = json!({"sections":[
+            {"section_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","semantic_role":"technical"},
+            {"section_ref":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","semantic_role":"technical"}
+        ]});
+        let grouping = stamp_requirement_grouping_batch(&batches[0], &spine, model).unwrap();
+        let (groups, _) =
+            build_fulfillment_groups_and_matrix(&input, &[], &[grouping], &spine).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups
+                .iter()
+                .filter_map(|group| group["section_ref"].as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            ])
+        );
+    }
+
+    #[test]
+    fn cross_batch_group_registry_allows_only_exact_reuse() {
+        let first = json!({"assignments":[{
+            "section_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "fulfillment_group_key":"batch-0-bid-file-forms",
+            "fulfillment_group_title":"投标文件格式",
+            "materialization":"explicit_child"
+        }]});
+        let exact = first.clone();
+        let conflicting = json!({"assignments":[{
+            "section_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "fulfillment_group_key":"batch-0-bid-file-forms",
+            "fulfillment_group_title":"资格证明文件",
+            "materialization":"bind_existing"
+        }]});
+        let mut registry = FulfillmentGroupRegistry::new();
+        validate_grouping_against_registry(&registry, &first, 0).unwrap();
+        extend_fulfillment_group_registry(&mut registry, &first).unwrap();
+        validate_grouping_against_registry(&registry, &exact, 1).unwrap();
+        assert!(validate_grouping_against_registry(&registry, &conflicting, 1).is_err());
+        let before_conflict = registry.clone();
+        assert!(extend_fulfillment_group_registry(&mut registry, &conflicting).is_err());
+        assert_eq!(registry, before_conflict);
+        assert!(validate_grouping_against_registry(
+            &registry,
+            &json!({"assignments":[{
+                "section_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "fulfillment_group_key":"unscoped-new-key",
+                "fulfillment_group_title":"新分组",
+                "materialization":"explicit_child"
+            }]}),
+            1,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn conflicting_model_group_key_is_rejected_fail_closed() {
         let input = grouping_input(2, "必须逐条响应");
         let batches = partition_requirement_groups(&input).unwrap();
         let mut model = grouping_model_output(&batches[0]);
         model["assignments"][1]["fulfillment_group_title"] = json!("另一组标题");
-        let grouping = stamp_requirement_grouping_batch(&batches[0], model).unwrap();
         let spine = json!({"sections":[
             {"section_ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","semantic_role":"technical"},
             {"section_ref":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","semantic_role":"commercial"}
         ]});
+        let grouping = stamp_requirement_grouping_batch(&batches[0], &spine, model).unwrap();
         let error =
             build_fulfillment_groups_and_matrix(&input, &[], &[grouping], &spine).unwrap_err();
         assert_eq!(error.code, "AGENT_GROUPING_FAILED");

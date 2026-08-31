@@ -1,0 +1,331 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://knowledgebrain.local/schemas/requirement-grouping-batch-v5.schema.json",
+  "title": "SemanticGroupingBatchV5",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "batch_ordinal",
+    "home_need_occurrence_ids",
+    "home_structure_fragment_refs",
+    "assignments",
+    "structure_placements",
+    "notices"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 5
+    },
+    "batch_ordinal": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "home_need_occurrence_ids": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 48,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "format": "uuid"
+      }
+    },
+    "assignments": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 48,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "need_occurrence_id",
+          "section_ref",
+          "section_role",
+          "fulfillment_group_key",
+          "fulfillment_group_title",
+          "materialization",
+          "confidence"
+        ],
+        "properties": {
+          "need_occurrence_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "section_ref": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "section_role": {
+            "enum": [
+              "qualification",
+              "technical",
+              "commercial",
+              "quotation",
+              "attachment",
+              "other"
+            ]
+          },
+          "fulfillment_group_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "fulfillment_group_title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "materialization": {
+            "enum": [
+              "explicit_child",
+              "bind_existing",
+              "audit_only"
+            ]
+          },
+          "confidence": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          }
+        }
+      }
+    },
+    "notices": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message",
+          "source_identity"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "source_identity": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      }
+    },
+    "home_structure_fragment_refs": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 48,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
+    },
+    "structure_placements": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 48,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "signal_ref",
+          "section_ref",
+          "section_role",
+          "fulfillment_group_key",
+          "fulfillment_group_title",
+          "materialization",
+          "confidence"
+        ],
+        "properties": {
+          "signal_ref": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "section_ref": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "section_role": {
+            "enum": [
+              "qualification",
+              "technical",
+              "commercial",
+              "quotation",
+              "attachment",
+              "other"
+            ]
+          },
+          "confidence": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "fulfillment_group_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "fulfillment_group_title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "materialization": {
+            "enum": [
+              "explicit_child",
+              "bind_existing",
+              "audit_only"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "assignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "need_occurrence_id",
+        "section_ref",
+        "section_role",
+        "fulfillment_group_key",
+        "fulfillment_group_title",
+        "materialization",
+        "confidence"
+      ],
+      "properties": {
+        "need_occurrence_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "section_ref": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "section_role": {
+          "enum": [
+            "qualification",
+            "technical",
+            "commercial",
+            "quotation",
+            "attachment",
+            "other"
+          ]
+        },
+        "fulfillment_group_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "fulfillment_group_title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "materialization": {
+          "enum": [
+            "explicit_child",
+            "bind_existing",
+            "audit_only"
+          ]
+        },
+        "confidence": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        }
+      }
+    },
+    "structurePlacement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signal_ref",
+        "section_ref",
+        "section_role",
+        "fulfillment_group_key",
+        "fulfillment_group_title",
+        "materialization",
+        "confidence"
+      ],
+      "properties": {
+        "signal_ref": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "section_ref": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "section_role": {
+          "enum": [
+            "qualification",
+            "technical",
+            "commercial",
+            "quotation",
+            "attachment",
+            "other"
+          ]
+        },
+        "confidence": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "fulfillment_group_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "fulfillment_group_title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "materialization": {
+          "enum": [
+            "explicit_child",
+            "bind_existing",
+            "audit_only"
+          ]
+        }
+      }
+    }
+  },
+  "anyOf": [
+    {
+      "properties": {
+        "home_need_occurrence_ids": {
+          "minItems": 1
+        }
+      }
+    },
+    {
+      "properties": {
+        "home_structure_fragment_refs": {
+          "minItems": 1
+        }
+      }
+    }
+  ]
+}

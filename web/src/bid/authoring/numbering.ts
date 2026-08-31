@@ -1,4 +1,5 @@
 import type { OutlineCandidateView } from "../api/types";
+import type { OutlineNodeView } from "./tree";
 
 type CandidateNode = OutlineCandidateView["nodes"][number];
 
@@ -75,4 +76,19 @@ export function outlineDisplayTitles(
     walkLower(node.client_node_ref, []);
   });
   return labels;
+}
+
+export function workspaceOutlineDisplayTitles(
+  nodes: OutlineNodeView[],
+): Map<string, string> {
+  const candidateNodes: OutlineCandidateView["nodes"] = nodes.map((node) => ({
+    client_node_ref: node.lineage_id,
+    parent_client_node_ref: node.parent_lineage_id,
+    ordinal: node.ordinal,
+    title: node.title,
+    semantic_role: node.semantic_role,
+    render_role: node.render_role,
+    origin_source_unit_revision_ids: [],
+  }));
+  return outlineDisplayTitles(candidateNodes);
 }

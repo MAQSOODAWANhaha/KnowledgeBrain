@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ActionIcon, Menu } from "@mantine/core";
 import { IconDots } from "@tabler/icons-react";
 import { go } from "../../hash";
+import { workspaceOutlineDisplayTitles } from "./numbering";
 import { authoringHref } from "./routes";
 import type { BidV2Session, BidV2State } from "./session";
 import {
@@ -19,6 +20,7 @@ function NodeRow({
   node,
   depth,
   siblings,
+  displayTitles,
   dropHint,
   setDropHint,
   onSplit,
@@ -28,6 +30,7 @@ function NodeRow({
   node: OutlineNodeView;
   depth: number;
   siblings: OutlineNodeView[];
+  displayTitles: Map<string, string>;
   dropHint: DropHint | null;
   setDropHint: (hint: DropHint | null) => void;
   onSplit: (node: OutlineNodeView) => void;
@@ -129,7 +132,7 @@ function NodeRow({
                 ?.scrollIntoView({ behavior: "smooth", block: "start" });
             }}
           >
-            <em>{node.title}</em>
+            <em>{displayTitles.get(node.lineage_id) ?? node.title}</em>
           </a>
         )}
         {!ended && (
@@ -259,6 +262,7 @@ function NodeRow({
           node={child}
           depth={depth + 1}
           siblings={children}
+          displayTitles={displayTitles}
           dropHint={dropHint}
           setDropHint={setDropHint}
           onSplit={onSplit}
@@ -275,7 +279,9 @@ export function OutlineTree({
   session: BidV2Session;
   state: BidV2State;
 }) {
-  const roots = session.tree().roots;
+  const tree = session.tree();
+  const roots = tree.roots;
+  const displayTitles = workspaceOutlineDisplayTitles(tree.nodes);
   const [dropHint, setDropHint] = useState<DropHint | null>(null);
   const [splitFor, setSplitFor] = useState<OutlineNodeView | null>(null);
   const [splitTitle, setSplitTitle] = useState("");
@@ -292,6 +298,7 @@ export function OutlineTree({
             node={node}
             depth={0}
             siblings={roots}
+            displayTitles={displayTitles}
             dropHint={dropHint}
             setDropHint={setDropHint}
             onSplit={(current) => {

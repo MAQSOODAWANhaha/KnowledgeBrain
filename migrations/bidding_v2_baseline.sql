@@ -5563,7 +5563,19 @@ SELECT id,kind,1,payload,kb_bid_v2_sha256_bytes(payload) FROM (VALUES
   ('00000000-0000-5000-8000-000000000105'::uuid,'agent',convert_to('{"kind":"outline_agent","version":5,"map_schema":3,"reduce_schema":2,"output_schema":2}','UTF8')),
   ('00000000-0000-5000-8000-000000000106'::uuid,'agent',convert_to('{"kind":"outline_agent","version":6,"map_schema":3,"reduce_schema":2,"output_schema":2,"draft_max_turns":10,"repair_max_turns":4}','UTF8')),
   ('00000000-0000-5000-8000-000000000107'::uuid,'agent',convert_to('{"kind":"outline_agent","version":7,"map_schema":3,"reduce_schema":2,"output_schema":2,"progress_control":"completion_and_stall","max_stalled_turns":2}','UTF8')),
-  ('00000000-0000-5000-8000-000000000108'::uuid,'agent',convert_to('{"kind":"outline_agent","version":8,"map_schema":4,"requirement_grouping_schema":1,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":3,"checkpoint_schema":3,"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","max_stalled_turns":2}','UTF8'))
+  ('00000000-0000-5000-8000-000000000108'::uuid,'agent',convert_to('{"kind":"outline_agent","version":8,"map_schema":4,"requirement_grouping_schema":1,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":3,"checkpoint_schema":3,"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","max_stalled_turns":2}','UTF8')),
+  ('00000000-0000-5000-8000-000000000109'::uuid,'agent',convert_to('{"kind":"outline_agent","version":9,"map_schema":4,"requirement_grouping_schema":2,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":3,"checkpoint_schema":3,"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","section_target":"explicit_frozen_section_ref","max_stalled_turns":2}','UTF8')),
+  ('00000000-0000-5000-8000-000000000110'::uuid,'agent',convert_to('{"kind":"outline_agent","version":10,"map_schema":4,"requirement_grouping_schema":3,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":3,"checkpoint_schema":3,"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","section_target":"explicit_frozen_section_ref","grouping_output":"semantic_delta_only","max_stalled_turns":2}','UTF8')),
+  ('00000000-0000-5000-8000-000000000111'::uuid,'agent',convert_to('{"kind":"outline_agent","version":11,"map_schema":4,"requirement_grouping_schema":4,"structure_placement_schema":1,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":3,"checkpoint_schema":3,"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","section_target":"explicit_frozen_section_ref","grouping_output":"semantic_delta_only","structure_placement":"model_selected_frozen_section_ref","max_stalled_turns":2}','UTF8')),
+  ('00000000-0000-5000-8000-000000000112'::uuid,'agent',convert_to('{"kind":"outline_agent","version":12,"map_schema":4,"requirement_grouping_schema":4,"structure_placement_schema":1,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":3,"checkpoint_schema":3,"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","section_target":"explicit_frozen_section_ref","grouping_output":"semantic_delta_only","structure_placement":"model_selected_frozen_section_ref","cross_batch_group_registry":"sequential_reserved_exact","max_stalled_turns":2}','UTF8')),
+  ('00000000-0000-5000-8000-000000000113'::uuid,'agent',convert_to('{"kind":"outline_agent","version":13,"map_schema":4,"requirement_grouping_schema":4,"structure_placement_schema":1,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":3,"checkpoint_schema":3,"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","section_target":"explicit_frozen_section_ref","grouping_output":"semantic_delta_only","structure_placement":"model_selected_frozen_section_ref","cross_batch_group_registry":"sequential_bounded_feedback","new_group_key_scope":"batch_ordinal","max_stalled_turns":2}','UTF8')),
+  ('00000000-0000-5000-8000-000000000114'::uuid,'agent',convert_to('{"kind":"outline_agent","version":14,"map_schema":4,"requirement_grouping_schema":5,"structure_placement_schema":2,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":3,"checkpoint_schema":3,"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","section_target":"explicit_frozen_section_ref","grouping_output":"semantic_delta_only","structure_placement":"model_selected_section_and_group","cross_batch_group_registry":"sequential_bounded_feedback","new_group_key_scope":"batch_ordinal","max_stalled_turns":2}','UTF8')),
+  ('00000000-0000-5000-8000-000000000115'::uuid,'agent',convert_to('{"kind":"outline_agent","version":15,"map_schema":4,"requirement_grouping_schema":5,"structure_placement_schema":2,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":3,"checkpoint_schema":3,"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","section_target":"explicit_frozen_section_ref","grouping_output":"semantic_delta_only","structure_placement":"model_selected_section_and_group","cross_batch_group_registry":"sequential_bounded_feedback","new_group_key_scope":"batch_ordinal","response_requiredness":["mandatory","optional"],"informational_closure":"compiled_semantic_unmapped_notice","draft_closure":"mandatory_and_optional_groups","max_stalled_turns":2}','UTF8')),
+  ('00000000-0000-5000-8000-000000000116'::uuid,'agent',convert_to('{"kind":"outline_agent","version":16,"map_schema":4,"requirement_grouping_schema":5,"structure_placement_schema":2,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":4,"checkpoint_schema":4,"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","section_target":"explicit_frozen_section_ref","grouping_output":"semantic_delta_only","structure_placement":"model_selected_section_and_group","cross_batch_group_registry":"sequential_bounded_feedback","new_group_key_scope":"batch_ordinal","response_requiredness":["mandatory","optional"],"informational_closure":"compiled_semantic_unmapped_notice","draft_closure":"mandatory_and_optional_groups","topology_closure":"every_frozen_section_has_model_authored_evidence_child","repair_identity":"groups_and_sections","max_stalled_turns":2}','UTF8')),
+  ('00000000-0000-5000-8000-000000000117'::uuid,'agent',convert_to('{"kind":"outline_agent","version":17,"map_schema":4,"requirement_grouping_schema":5,"structure_placement_schema":2,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":4,"checkpoint_schema":4,"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","section_target":"explicit_frozen_section_ref","grouping_output":"semantic_delta_only","structure_placement":"model_selected_section_and_group","cross_batch_group_registry":"sequential_bounded_feedback","intra_batch_group_registry":"exact_section_title_materialization","new_group_key_scope":"batch_ordinal","response_requiredness":["mandatory","optional"],"informational_closure":"compiled_semantic_unmapped_notice","draft_closure":"mandatory_and_optional_groups","topology_closure":"every_frozen_section_has_model_authored_evidence_child","repair_identity":"groups_and_sections","max_stalled_turns":2}','UTF8')),
+  ('00000000-0000-5000-8000-000000000118'::uuid,'agent',convert_to('{"kind":"outline_agent","version":18,"map_schema":4,"requirement_grouping_schema":5,"structure_placement_schema":2,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":4,"checkpoint_schema":4,"checkpoint_resume":[3,4],"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","section_target":"explicit_frozen_section_ref","grouping_output":"semantic_delta_only","structure_placement":"model_selected_section_and_group","cross_batch_group_registry":"sequential_bounded_feedback","intra_batch_group_registry":"exact_section_title_materialization","new_group_key_scope":"batch_ordinal","response_requiredness":["mandatory","optional"],"informational_closure":"compiled_semantic_unmapped_notice","draft_closure":"mandatory_and_optional_groups","topology_closure":"every_frozen_section_has_model_authored_evidence_child","context_fragment_promotion":"forbidden_by_title_and_source","repair_identity":"groups_sections_and_invalid_assignments","max_stalled_turns":2}','UTF8')),
+  ('00000000-0000-5000-8000-000000000119'::uuid,'agent',convert_to('{"kind":"outline_agent","version":19,"map_schema":4,"requirement_grouping_schema":5,"structure_placement_schema":2,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":5,"checkpoint_schema":4,"checkpoint_resume":[3,4],"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","section_target":"explicit_frozen_section_ref","grouping_output":"semantic_delta_only","structure_placement":"model_selected_section_and_group","cross_batch_group_registry":"sequential_bounded_feedback","intra_batch_group_registry":"exact_section_title_materialization","new_group_key_scope":"batch_ordinal","response_requiredness":["mandatory","optional"],"informational_closure":"compiled_semantic_unmapped_notice","draft_closure":"mandatory_and_optional_groups","topology_closure":"every_frozen_section_has_model_authored_evidence_child","context_fragment_promotion":"forbidden_by_title_and_source","non_output_fragment_packet":"bounded_title_usage_source","patch_error_feedback":"all_invalid_identities_bounded_32","repair_identity":"groups_sections_and_invalid_assignments","max_stalled_turns":2}','UTF8')),
+  ('00000000-0000-5000-8000-000000000120'::uuid,'agent',convert_to('{"kind":"outline_agent","version":20,"map_schema":4,"requirement_grouping_schema":5,"structure_placement_schema":2,"fulfillment_group_schema":1,"reduce_schema":3,"draft_patch_schema":1,"packet_schema":5,"checkpoint_schema":4,"checkpoint_resume":[3,4],"output_schema":2,"progress_control":"semantic_closure_and_atomic_patch","section_target":"explicit_frozen_section_ref","grouping_output":"semantic_delta_only","structure_placement":"model_selected_section_and_group","cross_batch_group_registry":"sequential_bounded_feedback","intra_batch_group_registry":"exact_section_title_materialization","new_group_key_scope":"batch_ordinal","response_requiredness":["mandatory","optional"],"informational_closure":"compiled_semantic_unmapped_notice","draft_closure":"mandatory_and_optional_groups","topology_closure":"every_frozen_section_has_model_authored_evidence_child","context_fragment_promotion":"forbidden_by_title_and_source","non_output_fragment_packet":"bounded_title_usage_source","patch_error_feedback":"all_invalid_identities_bounded_32","conflict_notice_severity":"high_only_if_output_relevant_frozen_fragment","repair_identity":"groups_sections_and_invalid_assignments","max_stalled_turns":2}','UTF8'))
 ) seeded(id,kind,payload) ON CONFLICT (id) DO NOTHING;
 
 CREATE FUNCTION kb_bid_v2_create_outline_candidate(
@@ -5602,7 +5614,7 @@ BEGIN
   SELECT content_sha256 INTO STRICT prompt_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000101';
   SELECT content_sha256 INTO STRICT template_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000102';
   SELECT content_sha256 INTO STRICT model_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000103';
-  SELECT content_sha256 INTO STRICT agent_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000108';
+  SELECT content_sha256 INTO STRICT agent_sha FROM bid_authoring_contract_artifacts WHERE id='00000000-0000-5000-8000-000000000120';
   SELECT coalesce(jsonb_agg(jsonb_build_object('form_definition_revision_id',form.id,
       'form_definition_sha256',form.content_sha256,'source_unit_revision_id',form.source_unit_revision_id)
       ORDER BY form.source_unit_revision_id,form.id),'[]'::jsonb) INTO form_identities
@@ -5660,7 +5672,7 @@ BEGIN
     '00000000-0000-5000-8000-000000000101',prompt_sha,
     '00000000-0000-5000-8000-000000000102',template_sha,
     '00000000-0000-5000-8000-000000000103',model_sha,
-    '00000000-0000-5000-8000-000000000108',agent_sha,form_identities);
+    '00000000-0000-5000-8000-000000000120',agent_sha,form_identities);
   response:=jsonb_build_object('request_artifact_id',request_id,'kind','OutlineGenerate','status','pending',
     'result_identity',NULL,'error_code',NULL,'request_revision',1,'request_sha256',p_request_sha256,
     'frozen_input_sha256',frozen_sha,'project_id',workspace.project_id,'workspace_id',p_workspace_id,
@@ -5732,7 +5744,10 @@ BEGIN
       'requirement_revision_id',requirement.id,
       'requirement_text',convert_from(requirement.text_utf8,'UTF8'),'requirement_kind',requirement.requirement_kind,
       'requiredness',requirement.requiredness,'compliance_policy',requirement.compliance_policy,
-      'applicability',requirement.applicability,'effective_applicability',item.effective_applicability,
+      'applicability',CASE WHEN requirement.actor='system:requirement-set-compile-v3'
+        THEN coalesce(convert_from(requirement.canonical_payload,'UTF8')::jsonb->'compiled_applicability',requirement.applicability)
+        ELSE requirement.applicability END,
+      'effective_applicability',item.effective_applicability,
       'source_unit_revision_ids',coalesce((SELECT jsonb_agg(source.source_unit_revision_id ORDER BY source.source_unit_revision_id)
         FROM bid_requirement_source_revision_artifacts source WHERE source.requirement_revision_id=requirement.id),'[]'::jsonb))
       ORDER BY item.ordinal,requirement.id)
@@ -8548,7 +8563,8 @@ CREATE TABLE bid_outline_requirement_grouping_batch_artifacts (
   batch_ordinal integer NOT NULL CHECK (batch_ordinal>=0),
   model_contract_sha256 kb_sha256 NOT NULL,
   agent_contract_sha256 kb_sha256 NOT NULL,
-  need_occurrence_ids uuid[] NOT NULL CHECK (cardinality(need_occurrence_ids) BETWEEN 1 AND 48),
+  need_occurrence_ids uuid[] NOT NULL CHECK (cardinality(need_occurrence_ids) BETWEEN 0 AND 48),
+  structure_fragment_refs kb_sha256[] NOT NULL DEFAULT ARRAY[]::kb_sha256[] CHECK (cardinality(structure_fragment_refs) BETWEEN 0 AND 48),
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -8730,7 +8746,7 @@ BEGIN
   IF jsonb_typeof(p_payload)<>'object'
     OR NOT kb_bid_v2_json_keys_exact(p_payload,ARRAY['schema_version','batch_ordinal',
       'home_need_occurrence_ids','assignments','notices'])
-    OR p_payload->'schema_version' IS DISTINCT FROM '1'::jsonb
+    OR p_payload->'schema_version' NOT IN ('1'::jsonb,'2'::jsonb,'3'::jsonb)
     OR (p_payload->>'batch_ordinal')::integer<>p_batch_ordinal
     OR jsonb_array_length(p_payload->'home_need_occurrence_ids')<>cardinality(p_need_ids)
     OR jsonb_array_length(p_payload->'assignments')<>cardinality(p_need_ids) THEN
@@ -8749,6 +8765,42 @@ BEGIN
         AND agent_contract_sha256=p_agent_sha AND need_occurrence_ids=p_need_ids
         AND content_sha256=kb_bid_v2_sha256_bytes(payload)) THEN
     RAISE EXCEPTION 'divergent requirement grouping replay' USING ERRCODE='23514';
+  END IF;
+END $$;
+CREATE FUNCTION kb_bid_v2_outline_semantic_grouping_put(
+  p_request_artifact_id uuid,p_frozen_input_sha256 kb_sha256,p_batch_ordinal integer,
+  p_model_sha kb_sha256,p_agent_sha kb_sha256,p_need_ids uuid[],
+  p_structure_fragment_refs kb_sha256[],p_payload jsonb
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE payload bytea:=convert_to(p_payload::text,'UTF8');
+BEGIN
+  IF cardinality(p_need_ids)+cardinality(p_structure_fragment_refs) NOT BETWEEN 1 AND 48
+    OR jsonb_typeof(p_payload)<>'object'
+    OR NOT kb_bid_v2_json_keys_exact(p_payload,ARRAY['schema_version','batch_ordinal',
+      'home_need_occurrence_ids','home_structure_fragment_refs','assignments',
+      'structure_placements','notices'])
+    OR p_payload->'schema_version' NOT IN ('4'::jsonb,'5'::jsonb)
+    OR (p_payload->>'batch_ordinal')::integer<>p_batch_ordinal
+    OR jsonb_array_length(p_payload->'home_need_occurrence_ids')<>cardinality(p_need_ids)
+    OR jsonb_array_length(p_payload->'assignments')<>cardinality(p_need_ids)
+    OR jsonb_array_length(p_payload->'home_structure_fragment_refs')<>cardinality(p_structure_fragment_refs)
+    OR jsonb_array_length(p_payload->'structure_placements')<>cardinality(p_structure_fragment_refs) THEN
+    RAISE EXCEPTION 'invalid semantic grouping batch V4' USING ERRCODE='23514';
+  END IF;
+  INSERT INTO bid_outline_requirement_grouping_batch_artifacts(
+    request_artifact_id,frozen_input_sha256,batch_ordinal,model_contract_sha256,agent_contract_sha256,
+    need_occurrence_ids,structure_fragment_refs,canonical_payload,content_sha256)
+  VALUES(p_request_artifact_id,p_frozen_input_sha256,p_batch_ordinal,p_model_sha,p_agent_sha,
+    p_need_ids,p_structure_fragment_refs,payload,kb_bid_v2_sha256_bytes(payload))
+  ON CONFLICT (request_artifact_id,frozen_input_sha256,batch_ordinal,model_contract_sha256,agent_contract_sha256)
+  DO NOTHING;
+  IF NOT EXISTS (SELECT 1 FROM bid_outline_requirement_grouping_batch_artifacts
+      WHERE request_artifact_id=p_request_artifact_id AND frozen_input_sha256=p_frozen_input_sha256
+        AND batch_ordinal=p_batch_ordinal AND model_contract_sha256=p_model_sha
+        AND agent_contract_sha256=p_agent_sha AND need_occurrence_ids=p_need_ids
+        AND structure_fragment_refs=p_structure_fragment_refs
+        AND content_sha256=kb_bid_v2_sha256_bytes(payload)) THEN
+    RAISE EXCEPTION 'divergent semantic grouping V4 replay' USING ERRCODE='23514';
   END IF;
 END $$;
 CREATE FUNCTION kb_bid_v2_outline_reduce_get(
@@ -8810,11 +8862,22 @@ CREATE FUNCTION kb_bid_v2_outline_synthesis_packet_append(
 DECLARE payload bytea:=convert_to(p_payload::text,'UTF8'); sha kb_sha256:=kb_bid_v2_sha256_bytes(payload);
 BEGIN
   IF jsonb_typeof(p_payload)<>'object'
-    OR NOT kb_bid_v2_json_keys_exact(p_payload,ARRAY['schema_version','request_artifact_id','frozen_input_sha256',
-      'reduce_plan_sha256','map_evidence_set_sha256','grouping_evidence_set_sha256','composition_spine',
-      'section_obligation_matrix','fulfillment_groups','deterministic_spine_nodes','manifest',
-      'selected_evidence','selected_facts','draft'])
-    OR p_payload->'schema_version' IS DISTINCT FROM '3'::jsonb
+    OR p_payload->'schema_version' NOT IN ('3'::jsonb,'4'::jsonb,'5'::jsonb)
+    OR NOT (
+      (p_payload->'schema_version' IN ('3'::jsonb,'4'::jsonb)
+        AND kb_bid_v2_json_keys_exact(p_payload,ARRAY['schema_version','request_artifact_id','frozen_input_sha256',
+          'reduce_plan_sha256','map_evidence_set_sha256','grouping_evidence_set_sha256','composition_spine',
+          'section_obligation_matrix','fulfillment_groups','deterministic_spine_nodes','manifest',
+          'selected_evidence','selected_facts','draft']))
+      OR
+      (p_payload->'schema_version'='5'::jsonb
+        AND kb_bid_v2_json_keys_exact(p_payload,ARRAY['schema_version','request_artifact_id','frozen_input_sha256',
+          'reduce_plan_sha256','map_evidence_set_sha256','grouping_evidence_set_sha256','composition_spine',
+          'section_obligation_matrix','fulfillment_groups','non_output_fragments','deterministic_spine_nodes',
+          'manifest','selected_evidence','selected_facts','draft']))
+    )
+    OR (p_payload->'schema_version'='5'::jsonb
+      AND jsonb_typeof(p_payload->'non_output_fragments')<>'array')
     OR (p_payload->>'request_artifact_id')::uuid<>p_request_artifact_id
     OR p_payload->>'frozen_input_sha256'<>p_frozen_input_sha256::text
     OR p_payload->>'reduce_plan_sha256'<>p_reduce_plan_sha256::text
@@ -8880,7 +8943,7 @@ BEGIN
     OR NOT kb_bid_v2_json_keys_exact(p_payload,ARRAY['schema_version','attempt','phase','reduce_plan_sha256',
       'selected_evidence','selected_facts','nodes','patch_receipts','closure_facts',
       'total_turns','total_tool_calls','text_bytes_read','images_read'])
-    OR p_payload->'schema_version' IS DISTINCT FROM '3'::jsonb
+    OR p_payload->'schema_version' NOT IN ('3'::jsonb,'4'::jsonb)
     OR (p_payload->>'attempt')::integer<>p_attempt OR p_payload->>'phase'<>p_phase
     OR NOT kb_bid_v2_sha256_text(p_payload->>'reduce_plan_sha256')
     OR jsonb_typeof(p_payload->'selected_evidence')<>'array'
@@ -8888,8 +8951,17 @@ BEGIN
     OR jsonb_typeof(p_payload->'nodes')<>'array'
     OR jsonb_typeof(p_payload->'patch_receipts')<>'array'
     OR jsonb_typeof(p_payload->'closure_facts')<>'object'
-    OR NOT kb_bid_v2_json_keys_exact(p_payload->'closure_facts',ARRAY['required_groups_total',
-      'required_groups_assigned','missing_group_refs','invalid_assignments','draft_sha256'])
+    OR NOT (
+      (p_payload->'schema_version'='3'::jsonb AND kb_bid_v2_json_keys_exact(
+        p_payload->'closure_facts',ARRAY['required_groups_total','required_groups_assigned',
+          'missing_group_refs','invalid_assignments','draft_sha256']))
+      OR
+      (p_payload->'schema_version'='4'::jsonb AND kb_bid_v2_json_keys_exact(
+        p_payload->'closure_facts',ARRAY['required_groups_total','required_groups_assigned',
+          'missing_group_refs','empty_section_refs','invalid_assignments','draft_sha256']))
+    )
+    OR (p_payload->'schema_version'='4'::jsonb
+      AND jsonb_typeof(p_payload#>'{closure_facts,empty_section_refs}')<>'array')
     OR jsonb_typeof(p_payload#>'{closure_facts,missing_group_refs}')<>'array'
     OR jsonb_typeof(p_payload#>'{closure_facts,invalid_assignments}')<>'array'
     OR NOT kb_bid_v2_sha256_text(p_payload#>>'{closure_facts,draft_sha256}')
@@ -9085,6 +9157,7 @@ GRANT EXECUTE ON FUNCTION kb_bid_v2_publish_requirement_set(uuid,kb_sha256),
   kb_bid_v2_outline_map_put(uuid,kb_sha256,integer,kb_sha256,kb_sha256,uuid[],jsonb),
   kb_bid_v2_outline_grouping_get(uuid,kb_sha256,integer,kb_sha256,kb_sha256),
   kb_bid_v2_outline_grouping_put(uuid,kb_sha256,integer,kb_sha256,kb_sha256,uuid[],jsonb),
+  kb_bid_v2_outline_semantic_grouping_put(uuid,kb_sha256,integer,kb_sha256,kb_sha256,uuid[],kb_sha256[],jsonb),
   kb_bid_v2_outline_reduce_get(uuid,kb_sha256,kb_sha256,kb_sha256,kb_sha256),
   kb_bid_v2_outline_reduce_put(uuid,kb_sha256,kb_sha256,kb_sha256,kb_sha256,jsonb),
   kb_bid_v2_outline_synthesis_packet_append(uuid,kb_sha256,kb_sha256,kb_sha256,kb_sha256,jsonb),

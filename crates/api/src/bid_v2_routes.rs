@@ -2035,7 +2035,22 @@ fn candidate_operations(
             let mut ordinals = Vec::new();
             while !pending.is_empty() {
                 let before = pending.len();
-                let references = pending.iter().copied().collect::<Vec<_>>();
+                let mut references = pending.iter().copied().collect::<Vec<_>>();
+                references.sort_by_key(|reference| {
+                    let (index, node) = by_ref[reference];
+                    let parent_rank = node
+                        .get("parent_client_node_ref")
+                        .and_then(Value::as_str)
+                        .and_then(|parent| {
+                            by_ref.get(parent).map(|(parent_index, _)| parent_index + 1)
+                        })
+                        .unwrap_or(0);
+                    let ordinal = node
+                        .get("ordinal")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(index as u64);
+                    (parent_rank, ordinal, index)
+                });
                 for reference in references {
                     let (index, node) = by_ref[reference];
                     let selected_parent = node
@@ -2656,4 +2671,42 @@ async fn patch_document_settings(
     .await
     .map_err(map_sql)?;
     workspace_response(workspace)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outline_candidate_operations_follow_parent_and_sibling_ordinals() {
+        let candidate = json!({
+            "kind":"outline",
+            "nodes":[
+                {"client_node_ref":"root","parent_client_node_ref":null,"ordinal":0,"title":"封面","semantic_role":"cover","render_role":"front_matter"},
+                {"client_node_ref":"second","parent_client_node_ref":"root","ordinal":2,"title":"第二章","semantic_role":"technical","render_role":"section"},
+                {"client_node_ref":"first","parent_client_node_ref":"root","ordinal":1,"title":"第一章","semantic_role":"commercial","render_role":"section"}
+            ],
+            "bindings":[]
+        });
+        let current = json!({
+            "requirement_projection_revision_id":"11111111-1111-4111-8111-111111111111"
+        });
+        let body = AcceptCandidateBody {
+            expected_workspace_revision_id: Uuid::nil(),
+            expected_workspace_sha256: "a".repeat(64),
+            operation_indexes: Vec::new(),
+            client_node_refs: vec!["second".into(), "root".into(), "first".into()],
+        };
+        let Ok((operations, ordinals)) = candidate_operations(&candidate, &current, &body) else {
+            panic!("outline candidate operations should be valid");
+        };
+        assert_eq!(
+            operations
+                .iter()
+                .filter_map(|operation| operation.get("title").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec!["封面", "第一章", "第二章"]
+        );
+        assert_eq!(ordinals, vec![0, 2, 1]);
+    }
 }

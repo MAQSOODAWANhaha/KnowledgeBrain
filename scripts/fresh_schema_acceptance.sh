@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 : "${KNOWLEDGEBRAIN_TEST_DATABASE_URL:?KNOWLEDGEBRAIN_TEST_DATABASE_URL is required}"
-DATABASE_URL="$KNOWLEDGEBRAIN_TEST_DATABASE_URL"
+export DATABASE_URL="$KNOWLEDGEBRAIN_TEST_DATABASE_URL"
 if [[ "$DATABASE_URL" == *":15432/"* ]]; then
   echo "refusing destructive acceptance against live PostgreSQL :15432" >&2
   exit 2
