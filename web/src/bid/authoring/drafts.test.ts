@@ -20,7 +20,6 @@ function draft(id: string, generation?: number) {
       lineage_id: id,
       revision: 1,
       origin: "human" as const,
-      dependency_sha256: null,
       content_sha256: "0".repeat(64),
       kind: "rich_text" as const,
       content: emptyRichText(),

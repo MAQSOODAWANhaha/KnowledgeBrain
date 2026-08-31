@@ -12,7 +12,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry, Resource  # type: ignore[import-not-found]
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA_DIR = ROOT / "crates/bid/schemas"
+SCHEMA_DIR = ROOT / "crates/bidding/schemas"
 UUID = "00000000-0000-4000-8000-000000000001"
 SHA = "a" * 64
 
@@ -42,6 +42,16 @@ def deref(ref: str, root: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any
     return target, target
 
 
+def merge_schema(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_schema(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
 def sample(schema: dict[str, Any], root: dict[str, Any]) -> Any:
     if "$ref" in schema:
         target, target_root = deref(schema["$ref"], root)
@@ -50,15 +60,29 @@ def sample(schema: dict[str, Any], root: dict[str, Any]) -> Any:
         return schema["const"]
     if "enum" in schema:
         return schema["enum"][0]
+    if "allOf" in schema:
+        merged = {key: value for key, value in schema.items() if key != "allOf"}
+        for item in schema["allOf"]:
+            merged = merge_schema(merged, item)
+        return sample(merged, root)
     if "oneOf" in schema:
+        if "type" in schema:
+            merged = {key: value for key, value in schema.items() if key != "oneOf"}
+            return sample(merge_schema(merged, schema["oneOf"][0]), root)
         return sample(schema["oneOf"][0], root)
     if "anyOf" in schema:
         non_null = next(
             (item for item in schema["anyOf"] if item.get("type") != "null"),
             schema["anyOf"][0],
         )
+        if "type" in schema:
+            merged = {key: value for key, value in schema.items() if key != "anyOf"}
+            return sample(merge_schema(merged, non_null), root)
         return sample(non_null, root)
     kind = schema.get("type")
+    if isinstance(kind, list):
+        non_null_kind = next((item for item in kind if item != "null"), kind[0])
+        return sample({**schema, "type": non_null_kind}, root)
     if kind == "object":
         properties = schema.get("properties", {})
         return {name: sample(properties[name], root) for name in schema.get("required", [])}
@@ -69,7 +93,7 @@ def sample(schema: dict[str, Any], root: dict[str, Any]) -> Any:
             return UUID
         if schema.get("format") == "date-time":
             return "2026-01-01T00:00:00Z"
-        if schema.get("pattern") == "^[0-9a-f]{64}$":
+        if schema.get("pattern") in {"^[0-9a-f]{64}$", "^[a-f0-9]{64}$"}:
             return SHA
         if schema.get("pattern", "").startswith("^objects/"):
             return "objects/" + SHA
@@ -120,7 +144,7 @@ def variant(schema: dict[str, Any], kind: str) -> dict[str, Any]:
 
 
 def main() -> None:
-    assert len(SCHEMAS) == 10
+    assert len(SCHEMAS) == 38
     cases: dict[str, tuple[Draft202012Validator, dict[str, Any], dict[str, Any]]] = {}
     for name in SCHEMAS:
         v, schema, instance = validator(name)
@@ -199,7 +223,8 @@ def main() -> None:
     v, schema, base = cases["content-generation-output-v1.schema.json"]
     block_schema = SCHEMAS["content-block-v1.schema.json"]
     block = sample(block_schema, block_schema)
-    insert = sample(variant(schema["$defs"]["operation"], "insert_block"), schema)
+    insert = sample(schema["$defs"]["operation"], schema)
+    assert insert["kind"] == "insert_block"
     insert["block"] = block
     good = copy.deepcopy(base)
     good["operations"] = [insert]
@@ -337,18 +362,14 @@ def main() -> None:
     v.validate(good)
     good = copy.deepcopy(base)
     good.update(output_mode="submission", format="pdf")
-    good["mode_options"] = {
-        "watermark": None,
-        "include_assessment_notices": False,
-        "include_knowledge_sources": False,
-    }
+    good["mode_options"] = {"watermark": None}
     v.validate(good)
     bad = copy.deepcopy(good)
     bad["mode_options"]["watermark"] = "DRAFT"
     rejected(v, bad, "clean submission")
 
     assert set(cases) == set(SCHEMAS), "every frozen schema must have engine cases"
-    print("Draft 2020-12 validation: 10 schemas, positive and negative cases: PASS")
+    print(f"Draft 2020-12 validation: {len(SCHEMAS)} schemas, positive and negative cases: PASS")
 
 
 if __name__ == "__main__":

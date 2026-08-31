@@ -1513,7 +1513,10 @@ BEGIN
        AND document.enable_status='enabled'
        AND document.index_ready
        AND chunk.chunk_type=ANY(ARRAY[
-         'text','parent_text','image_ocr','question','summary','image_caption','graph_node','wiki_page']);
+         'text','parent_text','image_ocr','question','summary','image_caption','graph_node','wiki_page'])
+       AND (chunk.chunk_type<>'image_ocr' OR EXISTS (
+         SELECT 1 FROM public.knowledge_image_ocr_chunk_artifact_mappings mapping
+          WHERE mapping.chunk_id=chunk.id));
 
     IF actual_snapshot_sha256 IS DISTINCT FROM p_source_snapshot_sha256
        OR actual_count<>jsonb_array_length(p_vectors) THEN
@@ -1558,6 +1561,9 @@ BEGIN
            AND document.index_ready
            AND chunk.chunk_type=ANY(ARRAY[
              'text','parent_text','image_ocr','question','summary','image_caption','graph_node','wiki_page'])
+           AND (chunk.chunk_type<>'image_ocr' OR EXISTS (
+             SELECT 1 FROM public.knowledge_image_ocr_chunk_artifact_mappings mapping
+              WHERE mapping.chunk_id=chunk.id))
     )
     SELECT count(*) INTO payload_count
       FROM payload FULL JOIN expected USING(chunk_id,indexed_content_sha256,ordinal)
@@ -2771,7 +2777,11 @@ GRANT SELECT ON chunk_keyword_indexes_v2, chunk_vector_indexes_v2,
     product_version_vector_index_generations_v2,
     product_version_keyword_index_generations_v2,
     knowledge_semantic_index_intents_v2 TO kb_runtime_worker;
+GRANT EXECUTE ON FUNCTION vector_in(cstring,oid,integer),
+    cosine_distance(vector,vector)
+TO kb_runtime_api, kb_runtime_worker;
 GRANT EXECUTE ON FUNCTION kb_knowledge_rebuild_keyword_indexes_v2(uuid),
+    kb_knowledge_has_pending_derived_v2(uuid),
     kb_knowledge_reconcile_vector_indexes_v2(uuid,text,text,jsonb),
     kb_knowledge_prepare_semantic_index_intent_v2(uuid),
     kb_knowledge_preflight_semantic_index_intent_v2(uuid,bigint),

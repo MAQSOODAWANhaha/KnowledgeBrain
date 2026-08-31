@@ -29,8 +29,17 @@ fn launch_test_may_skip() -> bool {
         && std::env::var_os("REDIS_URL").is_none()
 }
 
+fn worker_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_worker"));
+    command
+        .env("KNOWLEDGEBRAIN_CHAT_BASE_URL", "http://127.0.0.1:9/v1")
+        .env("KNOWLEDGEBRAIN_CHAT_API_KEY", "worker-launch-test-key")
+        .env("KNOWLEDGEBRAIN_CHAT_MODEL", "worker-launch-test-model");
+    command
+}
+
 fn spawn_ready() -> Child {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_worker"))
+    let mut child = worker_command()
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -95,7 +104,7 @@ fn worker_starts_and_exits_twice() {
 
 #[test]
 fn worker_fails_before_consuming_when_postgres_initialization_fails() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_worker"))
+    let mut child = worker_command()
         .env("DATABASE_URL", "invalid-database-url")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

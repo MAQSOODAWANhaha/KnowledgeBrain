@@ -9,7 +9,9 @@ logger = logging.getLogger(__name__)
 
 
 class Docx2Parser(FirstParser):
-    _parser_cls = (MarkitdownParser, DocxParser)
+    # Tender parsing requires typed source units; MarkItDown only provides
+    # markdown, so the structure-preserving parser must be the primary path.
+    _parser_cls = (DocxParser, MarkitdownParser)
 
     def parse_into_text(self, content: bytes) -> Document:
         document = super().parse_into_text(content)

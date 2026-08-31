@@ -324,7 +324,6 @@ pub enum BidAuthoringErrorCodeV2 {
     InputSchemaInvalid,
     FrozenInputMissing,
     FrozenInputDigestMismatch,
-    RequestObsolete,
     WorkspaceCasConflict,
     AgentOutputInvalid,
     EvidenceUnavailable,
@@ -337,11 +336,10 @@ pub enum BidAuthoringErrorCodeV2 {
 }
 
 impl BidAuthoringErrorCodeV2 {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 12] = [
         Self::InputSchemaInvalid,
         Self::FrozenInputMissing,
         Self::FrozenInputDigestMismatch,
-        Self::RequestObsolete,
         Self::WorkspaceCasConflict,
         Self::AgentOutputInvalid,
         Self::EvidenceUnavailable,
@@ -492,7 +490,6 @@ mod tests {
             "INPUT_SCHEMA_INVALID",
             "FROZEN_INPUT_MISSING",
             "FROZEN_INPUT_DIGEST_MISMATCH",
-            "REQUEST_OBSOLETE",
             "WORKSPACE_CAS_CONFLICT",
             "AGENT_OUTPUT_INVALID",
             "EVIDENCE_UNAVAILABLE",

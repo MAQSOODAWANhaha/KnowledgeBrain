@@ -141,7 +141,7 @@ END $$;
 DO $$ DECLARE h_old kb_sha256:=encode(digest(convert_to('rset-old','UTF8'),'sha256'),'hex'); DECLARE h_high kb_sha256:=encode(digest(convert_to('rset-high','UTF8'),'sha256'),'hex'); DECLARE h_new kb_sha256:=encode(digest(convert_to('rset-new','UTF8'),'sha256'),'hex'); BEGIN
   IF kb_bid_v2_publish_requirement_set('00000000-0000-4000-8000-000000000082',h_high)<>'published' THEN RAISE EXCEPTION 'requirement high initial publish failed'; END IF;
   IF kb_bid_v2_publish_requirement_set('00000000-0000-4000-8000-000000000082',h_high)<>'replayed' THEN RAISE EXCEPTION 'requirement identical replay failed'; END IF;
-  IF kb_bid_v2_publish_requirement_set('00000000-0000-4000-8000-000000000081',h_old)<>'obsolete' THEN RAISE EXCEPTION 'late older requirement was not obsolete'; END IF;
+  IF kb_bid_v2_publish_requirement_set('00000000-0000-4000-8000-000000000081',h_old)<>'superseded' THEN RAISE EXCEPTION 'late older requirement was not superseded'; END IF;
   IF kb_bid_v2_publish_requirement_set('00000000-0000-4000-8000-000000000083',h_new)<>'published' THEN RAISE EXCEPTION 'nonconsecutive newer requirement publish failed'; END IF;
   IF NOT EXISTS (SELECT 1 FROM bid_requirement_set_current WHERE scope_id='00000000-0000-4000-8000-000000000010' AND artifact_id='00000000-0000-4000-8000-000000000083' AND generation=2 AND document_set_sequence=2 AND disposition_set_sequence=3) THEN RAISE EXCEPTION 'requirement current pointer mismatch'; END IF;
   BEGIN UPDATE bid_requirement_set_current SET artifact_id='00000000-0000-4000-8000-000000000082',artifact_sha256=h_high,generation=3 WHERE scope_id='00000000-0000-4000-8000-000000000010'; RAISE EXCEPTION 'requirement incoherent tuple accepted'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
@@ -189,8 +189,8 @@ DO $$ DECLARE h1 kb_sha256:=encode(digest(convert_to('proj1','UTF8'),'sha256'),'
   IF kb_bid_v2_advance_requirement_projection('00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000099',repeat('9',64),'00000000-0000-4000-8000-0000000000b2',h2) THEN RAISE EXCEPTION 'projection stale CAS accepted'; END IF;
   IF NOT kb_bid_v2_advance_requirement_projection('00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-0000000000b1',h1,'00000000-0000-4000-8000-0000000000b2',h2) THEN RAISE EXCEPTION 'projection advance failed'; END IF;
   IF kb_bid_v2_publish_requirement_set('00000000-0000-4000-8000-000000000081',
-       encode(digest(convert_to('rset-old','UTF8'),'sha256'),'hex'))<>'obsolete' THEN
-    RAISE EXCEPTION 'stale RequirementSet redelivery was not obsolete';
+       encode(digest(convert_to('rset-old','UTF8'),'sha256'),'hex'))<>'superseded' THEN
+    RAISE EXCEPTION 'late RequirementSet redelivery was not superseded';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM bid_requirement_set_current
        WHERE scope_id='00000000-0000-4000-8000-000000000010'
@@ -207,6 +207,7 @@ END $$;
 -- Typed fulfillment binding targets: four valid and four explicit negatives.
 INSERT INTO bid_outline_node_lineages(id,project_id,workspace_id) VALUES
  ('00000000-0000-4000-8000-0000000000c1','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0'),
+ ('00000000-0000-4000-8000-0000000001d2','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0'),
  ('00000000-0000-4000-8000-0000000000c9','00000000-0000-4000-8000-000000000019','00000000-0000-4000-8000-0000000000a9');
 INSERT INTO bid_content_block_lineages(id,project_id,workspace_id) VALUES
  ('00000000-0000-4000-8000-0000000000d1','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0'),
@@ -287,11 +288,11 @@ DO $$ BEGIN
 END $$;
 INSERT INTO bid_quote_snapshot_object_identities(quote_snapshot_id,project_id,object_ref,content_sha256) VALUES
  ('00000000-0000-4000-8000-0000000000f1','00000000-0000-4000-8000-000000000010','objects/'||encode(digest(convert_to('{}','UTF8'),'sha256'),'hex'),encode(digest(convert_to('{}','UTF8'),'sha256'),'hex'));
-INSERT INTO bid_workspace_asset_artifacts(id,project_id,workspace_id,object_ref,content_sha256,media_type,file_name,byte_length,source,created_by) VALUES
-('00000000-0000-4000-8000-000000000150','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','objects/'||repeat('8',64),repeat('8',64),'image/jpeg','fixture-one.jpg',4,'human_upload','user:00000000-0000-4000-8000-000000000001'),
-('00000000-0000-4000-8000-000000000152','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','objects/'||repeat('8',64),repeat('8',64),'image/jpeg','fixture-two.jpg',4,'human_upload','user:00000000-0000-4000-8000-000000000001');
+INSERT INTO bid_workspace_asset_artifacts(id,project_id,workspace_id,object_ref,content_sha256,media_type,file_name,byte_length,width_px,height_px,source,created_by) VALUES
+('00000000-0000-4000-8000-000000000150','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','objects/'||repeat('8',64),repeat('8',64),'image/jpeg','fixture-one.jpg',4,1,1,'human_upload','user:00000000-0000-4000-8000-000000000001'),
+('00000000-0000-4000-8000-000000000152','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','objects/'||repeat('8',64),repeat('8',64),'image/jpeg','fixture-two.jpg',4,1,1,'human_upload','user:00000000-0000-4000-8000-000000000001');
 INSERT INTO bid_render_font_artifacts(id,object_ref,content_sha256,media_type,family,script) VALUES
- ('00000000-0000-4000-8000-000000000147','objects/'||repeat('7',64),repeat('7',64),'font/ttf','Noto Sans CJK','cjk');
+ ('00000000-0000-4000-8000-000000000147','objects/'||repeat('7',64),repeat('7',64),'font/ttf','Noto Sans JP','cjk');
 DO $$ BEGIN
  BEGIN INSERT INTO bid_render_font_artifacts(id,object_ref,content_sha256,media_type,family,script) VALUES(gen_random_uuid(),'objects/'||repeat('7',64),repeat('7',64),'font/otf','Wrong MIME','cjk'); RAISE EXCEPTION 'font ObjectRegistry MIME mismatch accepted'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
 END $$;
@@ -307,9 +308,11 @@ INSERT INTO bid_workspace_revision_artifacts(id,project_id,workspace_id,revision
 INSERT INTO bid_workspace_heads(scope_id,project_id,artifact_id,artifact_sha256,generation,created_at) VALUES
  ('00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000135',encode(digest(convert_to('{"fixture":2}','UTF8'),'sha256'),'hex'),2,now());
 INSERT INTO bid_outline_node_revision_artifacts(id,project_id,workspace_id,lineage_id,revision,title,semantic_role,render_role,origin,canonical_payload,content_sha256) VALUES
- ('00000000-0000-4000-8000-00000000013b','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-0000000000c1',1,'Response','technical','section','human',convert_to('node1','UTF8'),encode(digest(convert_to('node1','UTF8'),'sha256'),'hex'));
+ ('00000000-0000-4000-8000-00000000013b','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-0000000000c1',1,'Response','technical','section','human',convert_to('node1','UTF8'),encode(digest(convert_to('node1','UTF8'),'sha256'),'hex')),
+ ('00000000-0000-4000-8000-0000000001d0','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-0000000001d2',1,'Child response','technical','section','human',convert_to('node-child','UTF8'),encode(digest(convert_to('node-child','UTF8'),'sha256'),'hex'));
 INSERT INTO bid_workspace_node_occurrences(id,project_id,workspace_revision_id,node_revision_id,parent_occurrence_id,ordinal,depth) VALUES
- ('00000000-0000-4000-8000-00000000013c','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000135','00000000-0000-4000-8000-00000000013b',NULL,0,0);
+ ('00000000-0000-4000-8000-00000000013c','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000135','00000000-0000-4000-8000-00000000013b',NULL,0,0),
+ ('00000000-0000-4000-8000-0000000001d1','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000135','00000000-0000-4000-8000-0000000001d0','00000000-0000-4000-8000-00000000013c',0,1);
 INSERT INTO bid_workspace_block_occurrences(id,project_id,workspace_revision_id,node_occurrence_id,block_revision_id,ordinal) VALUES
  ('00000000-0000-4000-8000-00000000013d','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000135','00000000-0000-4000-8000-00000000013c','00000000-0000-4000-8000-0000000000e2',0);
 -- The coherent checkpoint freezes the exact projection owned by WorkspaceRevision 2.
@@ -616,8 +619,8 @@ COMMIT;
 BEGIN;
 INSERT INTO bid_async_request_snapshot_artifacts(id,project_id,workspace_id,request_kind,revision,frozen_input_sha256,request_payload,request_sha256,status) VALUES
  ('00000000-0000-4000-8000-000000000182','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','content_generate',1,repeat('a',64),convert_to('content-request-1','UTF8'),encode(digest(convert_to('content-request-1','UTF8'),'sha256'),'hex'),'pending');
-INSERT INTO bid_content_generation_request_identities(request_artifact_id,project_id,workspace_id,request_revision,request_sha256,frozen_input_sha256,request_operation,base_workspace_revision_id,base_workspace_sha256,requirement_projection_id,requirement_projection_sha256,outline_checkpoint_id,outline_checkpoint_sha256,scope_revision_id,scope_revision_sha256,document_settings_revision_id,document_settings_sha256,render_style_contract_id,render_style_contract_sha256,evidence_selection_mode,evidence_selection_sha256,pick_set_kind,pick_set_artifact_id,pick_set_sha256,pick_set_matching_report_id,quote_snapshot_id,quote_snapshot_sha256,prompt_contract_id,prompt_contract_sha256,template_contract_id,template_contract_sha256,model_contract_id,model_contract_sha256,agent_contract_id,agent_contract_sha256,target_kind,target_node_lineage_id,target_node_revision_id,fill_policy,insertion_node_revision_id,insertion_block_revision_id,insertion_utf8_offset)
-VALUES('00000000-0000-4000-8000-000000000182','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0',1,encode(digest(convert_to('content-request-1','UTF8'),'sha256'),'hex'),repeat('a',64),'generate','00000000-0000-4000-8000-000000000135',encode(digest(convert_to('{"fixture":2}','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-0000000000b2',encode(digest(convert_to('proj2','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-00000000013e',encode(digest(convert_to('checkpoint1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000121',encode(digest(convert_to('scope1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000122',encode(digest(convert_to('settings1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000125',encode(digest(convert_to('style1','UTF8'),'sha256'),'hex'),'user_pick_set',repeat('e',64),'user_pick_set','00000000-0000-4000-8000-000000000181',encode(digest(convert_to('pick-set-1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000141','00000000-0000-4000-8000-0000000000f1',encode(digest(convert_to('{}','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000191',encode(digest(convert_to('prompt1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000192',encode(digest(convert_to('template1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000193',encode(digest(convert_to('model1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000194',encode(digest(convert_to('agent1','UTF8'),'sha256'),'hex'),'node','00000000-0000-4000-8000-0000000000c1','00000000-0000-4000-8000-00000000013b','append_candidate','00000000-0000-4000-8000-00000000013b','00000000-0000-4000-8000-0000000000e2',0);
+INSERT INTO bid_content_generation_request_identities(request_artifact_id,project_id,workspace_id,request_revision,request_sha256,frozen_input_sha256,request_operation,base_workspace_revision_id,base_workspace_sha256,requirement_projection_id,requirement_projection_sha256,outline_checkpoint_id,outline_checkpoint_sha256,scope_revision_id,scope_revision_sha256,document_settings_revision_id,document_settings_sha256,render_style_contract_id,render_style_contract_sha256,evidence_selection_mode,evidence_selection_sha256,pick_set_kind,pick_set_artifact_id,pick_set_sha256,pick_set_matching_report_id,quote_snapshot_id,quote_snapshot_sha256,prompt_contract_id,prompt_contract_sha256,template_contract_id,template_contract_sha256,model_contract_id,model_contract_sha256,agent_contract_id,agent_contract_sha256,target_kind,target_node_lineage_id,target_node_revision_id,fill_policy,insertion_node_revision_id,insertion_block_revision_id)
+VALUES('00000000-0000-4000-8000-000000000182','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0',1,encode(digest(convert_to('content-request-1','UTF8'),'sha256'),'hex'),repeat('a',64),'generate','00000000-0000-4000-8000-000000000135',encode(digest(convert_to('{"fixture":2}','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-0000000000b2',encode(digest(convert_to('proj2','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-00000000013e',encode(digest(convert_to('checkpoint1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000121',encode(digest(convert_to('scope1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000122',encode(digest(convert_to('settings1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000125',encode(digest(convert_to('style1','UTF8'),'sha256'),'hex'),'user_pick_set',repeat('e',64),'user_pick_set','00000000-0000-4000-8000-000000000181',encode(digest(convert_to('pick-set-1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000141','00000000-0000-4000-8000-0000000000f1',encode(digest(convert_to('{}','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000191',encode(digest(convert_to('prompt1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000192',encode(digest(convert_to('template1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000193',encode(digest(convert_to('model1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000194',encode(digest(convert_to('agent1','UTF8'),'sha256'),'hex'),'node','00000000-0000-4000-8000-0000000000c1','00000000-0000-4000-8000-00000000013b','append_candidate','00000000-0000-4000-8000-00000000013b','00000000-0000-4000-8000-0000000000e2');
 INSERT INTO bid_content_generation_request_evidence_bundles(request_artifact_id,project_id,workspace_id,ordinal,evidence_bundle_id,evidence_bundle_sha256)
  SELECT '00000000-0000-4000-8000-000000000182',project_id,workspace_id,0,id,content_sha256 FROM bid_evidence_bundle_artifacts WHERE id='00000000-0000-4000-8000-000000000143';
 INSERT INTO bid_candidate_artifacts(id,project_id,workspace_id,candidate_kind,base_workspace_revision_id,base_workspace_sha256,request_artifact_id,request_kind,request_revision,request_sha256,request_operation,state,canonical_payload,content_sha256)
@@ -655,15 +658,15 @@ DO $$ DECLARE id uuid; BEGIN
  id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_content_request(id,'manual-report-splice',jsonb_build_object('pick_set_matching_report_id',gen_random_uuid())); RAISE EXCEPTION 'manual PickSet accepted another MatchingReport'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
  id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_content_request(id,'bad-fill-policy',jsonb_build_object('fill_policy','overwrite')); RAISE EXCEPTION 'unknown fill policy accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
  id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_content_request(id,'fill-anchor-mismatch',jsonb_build_object('fill_policy','empty_only')); RAISE EXCEPTION 'non-append fill accepted insertion anchor'; EXCEPTION WHEN check_violation THEN NULL; END;
- id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_content_request(id,'workspace-target-null',jsonb_build_object('target_kind','workspace','target_node_lineage_id',NULL,'target_node_revision_id',NULL,'target_workspace_revision_id',NULL,'insertion_node_revision_id',NULL,'insertion_block_revision_id',NULL,'insertion_utf8_offset',NULL)); RAISE EXCEPTION 'workspace target without frozen revision accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
- id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_content_request(id,'anchor-offset-without-block',jsonb_build_object('insertion_block_revision_id',NULL,'insertion_utf8_offset',1)); RAISE EXCEPTION 'anchor offset without block accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+ id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_content_request(id,'anchor-outside-target',jsonb_build_object('target_kind','subtree','target_node_lineage_id','00000000-0000-4000-8000-0000000001d2','target_node_revision_id','00000000-0000-4000-8000-0000000001d0','insertion_node_revision_id','00000000-0000-4000-8000-00000000013b','insertion_block_revision_id',NULL)); RAISE EXCEPTION 'anchor outside frozen target subtree accepted'; EXCEPTION WHEN check_violation THEN IF SQLERRM NOT LIKE 'CONTENT_GENERATION_INPUT_INVALID:%' THEN RAISE; END IF; END;
+ id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_content_request(id,'workspace-target-null',jsonb_build_object('target_kind','workspace','target_node_lineage_id',NULL,'target_node_revision_id',NULL,'target_workspace_revision_id',NULL,'insertion_node_revision_id',NULL,'insertion_block_revision_id',NULL)); RAISE EXCEPTION 'workspace target without frozen revision accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 
 BEGIN;
 INSERT INTO bid_async_request_snapshot_artifacts(id,project_id,workspace_id,request_kind,revision,frozen_input_sha256,request_payload,request_sha256,status) VALUES
  ('00000000-0000-4000-8000-0000000001a6','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','submission_export',1,repeat('6',64),convert_to('export-request-1','UTF8'),encode(digest(convert_to('export-request-1','UTF8'),'sha256'),'hex'),'pending');
 INSERT INTO bid_submission_export_request_identities(request_artifact_id,project_id,workspace_id,request_revision,request_sha256,frozen_input_sha256,workspace_revision_id,workspace_sha256,outline_checkpoint_id,outline_checkpoint_sha256,requirement_projection_id,requirement_projection_sha256,scope_revision_id,scope_revision_sha256,document_settings_revision_id,document_settings_sha256,render_style_contract_id,render_style_contract_sha256,output_mode,format,mode_options)
-VALUES('00000000-0000-4000-8000-0000000001a6','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0',1,encode(digest(convert_to('export-request-1','UTF8'),'sha256'),'hex'),repeat('6',64),'00000000-0000-4000-8000-000000000135',encode(digest(convert_to('{"fixture":2}','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-00000000013e',encode(digest(convert_to('checkpoint1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-0000000000b2',encode(digest(convert_to('proj2','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000121',encode(digest(convert_to('scope1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000122',encode(digest(convert_to('settings1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000125',encode(digest(convert_to('style1','UTF8'),'sha256'),'hex'),'submission','pdf','{"watermark":null,"include_assessment_notices":false,"include_knowledge_sources":false}');
+VALUES('00000000-0000-4000-8000-0000000001a6','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0',1,encode(digest(convert_to('export-request-1','UTF8'),'sha256'),'hex'),repeat('6',64),'00000000-0000-4000-8000-000000000135',encode(digest(convert_to('{"fixture":2}','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-00000000013e',encode(digest(convert_to('checkpoint1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-0000000000b2',encode(digest(convert_to('proj2','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000121',encode(digest(convert_to('scope1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000122',encode(digest(convert_to('settings1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000125',encode(digest(convert_to('style1','UTF8'),'sha256'),'hex'),'submission','pdf','{"watermark":null}');
 COMMIT;
 
 -- The second valid SubmissionExport branch freezes review-draft options.
@@ -671,7 +674,7 @@ BEGIN;
 INSERT INTO bid_async_request_snapshot_artifacts(id,project_id,workspace_id,request_kind,revision,frozen_input_sha256,request_payload,request_sha256,status) VALUES
  ('00000000-0000-4000-8000-0000000001a7','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','submission_export',1,repeat('7',64),convert_to('export-review-draft-1','UTF8'),encode(digest(convert_to('export-review-draft-1','UTF8'),'sha256'),'hex'),'pending');
 INSERT INTO bid_submission_export_request_identities(request_artifact_id,project_id,workspace_id,request_revision,request_sha256,frozen_input_sha256,workspace_revision_id,workspace_sha256,outline_checkpoint_id,outline_checkpoint_sha256,requirement_projection_id,requirement_projection_sha256,scope_revision_id,scope_revision_sha256,document_settings_revision_id,document_settings_sha256,render_style_contract_id,render_style_contract_sha256,output_mode,format,mode_options)
-VALUES('00000000-0000-4000-8000-0000000001a7','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0',1,encode(digest(convert_to('export-review-draft-1','UTF8'),'sha256'),'hex'),repeat('7',64),'00000000-0000-4000-8000-000000000135',encode(digest(convert_to('{"fixture":2}','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-00000000013e',encode(digest(convert_to('checkpoint1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-0000000000b2',encode(digest(convert_to('proj2','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000121',encode(digest(convert_to('scope1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000122',encode(digest(convert_to('settings1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000125',encode(digest(convert_to('style1','UTF8'),'sha256'),'hex'),'review_draft','docx','{"watermark":"REVIEW DRAFT","include_assessment_notices":true,"include_knowledge_sources":true}');
+VALUES('00000000-0000-4000-8000-0000000001a7','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0',1,encode(digest(convert_to('export-review-draft-1','UTF8'),'sha256'),'hex'),repeat('7',64),'00000000-0000-4000-8000-000000000135',encode(digest(convert_to('{"fixture":2}','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-00000000013e',encode(digest(convert_to('checkpoint1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-0000000000b2',encode(digest(convert_to('proj2','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000121',encode(digest(convert_to('scope1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000122',encode(digest(convert_to('settings1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000125',encode(digest(convert_to('style1','UTF8'),'sha256'),'hex'),'review_draft','docx','{"watermark":"REVIEW DRAFT"}');
 COMMIT;
 
 CREATE FUNCTION pg_temp.clone_export_request(p_id uuid,p_payload text,p_mode text,p_format text,p_options jsonb)
@@ -686,21 +689,18 @@ BEGIN
  FROM bid_submission_export_request_identities source WHERE request_artifact_id='00000000-0000-4000-8000-0000000001a6';
 END $$;
 
--- SubmissionExport mode options are a closed, typed contract.
+-- SubmissionExport mode options are a closed, watermark-only contract.
 DO $$ DECLARE id uuid; BEGIN
- id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_export_request(id,'export-extra-options','submission','pdf','{"watermark":null,"include_assessment_notices":false,"include_knowledge_sources":false,"extra":true}'); RAISE EXCEPTION 'extra export option accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
- id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_export_request(id,'export-missing-options','submission','pdf','{"watermark":null,"include_assessment_notices":false}'); RAISE EXCEPTION 'missing export option accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
- id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_export_request(id,'export-watermark-type','review_draft','docx','{"watermark":1,"include_assessment_notices":true,"include_knowledge_sources":true}'); RAISE EXCEPTION 'numeric export watermark accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
- id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_export_request(id,'export-notices-type','review_draft','docx','{"watermark":"DRAFT","include_assessment_notices":"true","include_knowledge_sources":true}'); RAISE EXCEPTION 'string assessment flag accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
- id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_export_request(id,'export-sources-type','review_draft','docx','{"watermark":"DRAFT","include_assessment_notices":true,"include_knowledge_sources":"true"}'); RAISE EXCEPTION 'string knowledge flag accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
- id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_export_request(id,'export-empty-watermark','review_draft','docx','{"watermark":"","include_assessment_notices":true,"include_knowledge_sources":true}'); RAISE EXCEPTION 'empty draft watermark accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
- id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_export_request(id,'export-submission-notices','submission','pdf','{"watermark":null,"include_assessment_notices":true,"include_knowledge_sources":false}'); RAISE EXCEPTION 'submission assessment notices accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
- id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_export_request(id,'export-submission-sources','submission','pdf','{"watermark":null,"include_assessment_notices":false,"include_knowledge_sources":true}'); RAISE EXCEPTION 'submission knowledge sources accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+ id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_export_request(id,'export-extra-options','submission','pdf','{"watermark":null,"extra":true}'); RAISE EXCEPTION 'extra export option accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+ id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_export_request(id,'export-missing-options','submission','pdf','{}'); RAISE EXCEPTION 'missing export option accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+ id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_export_request(id,'export-watermark-type','review_draft','docx','{"watermark":1}'); RAISE EXCEPTION 'numeric export watermark accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+ id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_export_request(id,'export-empty-watermark','review_draft','docx','{"watermark":""}'); RAISE EXCEPTION 'empty draft watermark accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+ id:=gen_random_uuid(); BEGIN PERFORM pg_temp.clone_export_request(id,'export-submission-watermark','submission','pdf','{"watermark":"DRAFT"}'); RAISE EXCEPTION 'submission watermark accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
 END $$;
 
 -- Initial rows cannot bypass one-way transitions by starting terminal.
 DO $$ DECLARE terminal_status text; failure_message text; BEGIN
- FOR terminal_status IN SELECT unnest(ARRAY['succeeded','failed','obsolete']) LOOP
+ FOR terminal_status IN SELECT unnest(ARRAY['succeeded','failed']) LOOP
   BEGIN
    INSERT INTO bid_async_request_snapshot_artifacts(id,project_id,workspace_id,request_kind,revision,frozen_input_sha256,request_payload,request_sha256,status,result_identity,error_code,finished_at)
    VALUES(gen_random_uuid(),'00000000-0000-4000-8000-000000000010',NULL,'tender_document_process',1,repeat('8',64),convert_to('terminal-request-'||terminal_status,'UTF8'),encode(digest(convert_to('terminal-request-'||terminal_status,'UTF8'),'sha256'),'hex'),terminal_status,CASE WHEN terminal_status='succeeded' THEN '{}'::jsonb ELSE NULL END,CASE WHEN terminal_status='failed' THEN 'INPUT_SCHEMA_INVALID' ELSE NULL END,now());
@@ -710,7 +710,7 @@ DO $$ DECLARE terminal_status text; failure_message text; BEGIN
    IF failure_message<>'async request initial status must be pending' THEN RAISE; END IF;
   END;
  END LOOP;
- FOR terminal_status IN SELECT unnest(ARRAY['accepted','rejected','obsolete']) LOOP
+ FOR terminal_status IN SELECT unnest(ARRAY['accepted','rejected']) LOOP
   BEGIN
    INSERT INTO bid_candidate_artifacts(id,project_id,workspace_id,candidate_kind,base_workspace_revision_id,base_workspace_sha256,request_artifact_id,request_kind,request_revision,request_sha256,request_operation,state,canonical_payload,content_sha256,decided_at)
    VALUES(gen_random_uuid(),'00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','outline','00000000-0000-4000-8000-000000000135',encode(digest(convert_to('{"fixture":2}','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-0000000001a3','outline_generate',1,encode(digest(convert_to('outline-request-1','UTF8'),'sha256'),'hex'),'outline_generate',terminal_status,convert_to('terminal-candidate-'||terminal_status,'UTF8'),encode(digest(convert_to('terminal-candidate-'||terminal_status,'UTF8'),'sha256'),'hex'),now());
@@ -756,7 +756,6 @@ DO $$ BEGIN
  BEGIN EXECUTE 'TRUNCATE bid_requirement_set_compile_request_identities'; RAISE EXCEPTION 'typed projection truncate accepted'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
  UPDATE bid_async_request_snapshot_artifacts SET status='succeeded',result_identity='{}',finished_at=now() WHERE id='00000000-0000-4000-8000-0000000001a1';
  BEGIN UPDATE bid_async_request_snapshot_artifacts SET status='pending',result_identity=NULL,finished_at=NULL WHERE id='00000000-0000-4000-8000-0000000001a1'; RAISE EXCEPTION 'terminal request reopened'; EXCEPTION WHEN check_violation THEN NULL; END;
- BEGIN UPDATE bid_async_request_snapshot_artifacts SET status='obsolete',result_identity=NULL,finished_at=now() WHERE id='00000000-0000-4000-8000-0000000001a1'; RAISE EXCEPTION 'terminal request switched'; EXCEPTION WHEN check_violation THEN NULL; END;
  BEGIN DELETE FROM bid_async_request_snapshot_artifacts WHERE id='00000000-0000-4000-8000-0000000001a2'; RAISE EXCEPTION 'request delete accepted'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
  BEGIN EXECUTE 'TRUNCATE bid_async_request_snapshot_artifacts CASCADE'; RAISE EXCEPTION 'request truncate accepted'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
 END $$;
@@ -834,23 +833,23 @@ DO $$ DECLARE id uuid; source uuid; page1 jsonb; page2 jsonb; payload jsonb; BEG
 END $$;
 
 CREATE FUNCTION pg_temp.render_payload_base(p_id uuid) RETURNS jsonb LANGUAGE sql AS $$ SELECT jsonb_build_object(
- 'schema_version',2,'render_snapshot_id',p_id,'project_id','00000000-0000-4000-8000-000000000010','project_title','Project','workspace_id','00000000-0000-4000-8000-0000000000a0','workspace_scope','project_wide','workspace_scope_revision_id','00000000-0000-4000-8000-000000000121','workspace_revision_id','00000000-0000-4000-8000-000000000135','workspace_sha256',encode(digest(convert_to('{"fixture":2}','UTF8'),'sha256'),'hex'),'outline_checkpoint_id','00000000-0000-4000-8000-00000000013e','outline_checkpoint_sha256',encode(digest(convert_to('checkpoint1','UTF8'),'sha256'),'hex'),'requirement_projection_revision_id','00000000-0000-4000-8000-0000000000b2','requirement_projection_sha256',encode(digest(convert_to('proj2','UTF8'),'sha256'),'hex'),'document_settings_revision_id','00000000-0000-4000-8000-000000000122','document_settings_sha256',encode(digest(convert_to('settings1','UTF8'),'sha256'),'hex'),'submission_assessment_snapshot_id','00000000-0000-4000-8000-000000000124','submission_assessment_snapshot_sha256',encode(digest(convert_to('assessment1','UTF8'),'sha256'),'hex'),'output_mode','review_draft','format','pdf','mode_options',jsonb_build_object('watermark','DRAFT','include_assessment_notices',true,'include_knowledge_sources',true),
+ 'schema_version',2,'render_snapshot_id',p_id,'project_id','00000000-0000-4000-8000-000000000010','project_title','Project','workspace_id','00000000-0000-4000-8000-0000000000a0','workspace_scope','project_wide','workspace_scope_revision_id','00000000-0000-4000-8000-000000000121','workspace_revision_id','00000000-0000-4000-8000-000000000135','workspace_sha256',encode(digest(convert_to('{"fixture":2}','UTF8'),'sha256'),'hex'),'outline_checkpoint_id','00000000-0000-4000-8000-00000000013e','outline_checkpoint_sha256',encode(digest(convert_to('checkpoint1','UTF8'),'sha256'),'hex'),'requirement_projection_revision_id','00000000-0000-4000-8000-0000000000b2','requirement_projection_sha256',encode(digest(convert_to('proj2','UTF8'),'sha256'),'hex'),'document_settings_revision_id','00000000-0000-4000-8000-000000000122','document_settings_sha256',encode(digest(convert_to('settings1','UTF8'),'sha256'),'hex'),'submission_assessment_snapshot_id','00000000-0000-4000-8000-000000000124','submission_assessment_snapshot_sha256',encode(digest(convert_to('assessment1','UTF8'),'sha256'),'hex'),'output_mode','review_draft','format','pdf','mode_options',jsonb_build_object('watermark','DRAFT'),
  'ordered_nodes',jsonb_build_array(jsonb_build_object('node_occurrence_id','00000000-0000-4000-8000-00000000013c','node_revision_id','00000000-0000-4000-8000-00000000013b','parent_occurrence_id',NULL,'ordinal',0,'depth',0,'title','Response','render_role','section','block_occurrences',jsonb_build_array(jsonb_build_object('block_occurrence_id','00000000-0000-4000-8000-00000000013d','block_revision_id','00000000-0000-4000-8000-0000000000e2','ordinal',0,'block_sha256',encode(digest(convert_to('text1','UTF8'),'sha256'),'hex'))))),
  'assets',jsonb_build_array(
   jsonb_build_object('asset_revision_id','00000000-0000-4000-8000-000000000146','object_ref','objects/'||repeat('6',64),'sha256',repeat('6',64),'media_type','image/png','provenance','knowledge_evidence'),
   jsonb_build_object('asset_revision_id','00000000-0000-4000-8000-000000000150','object_ref','objects/'||repeat('8',64),'sha256',repeat('8',64),'media_type','image/jpeg','provenance','manual_workspace'),
   jsonb_build_object('asset_revision_id','00000000-0000-4000-8000-000000000151','object_ref','objects/'||repeat('9',64),'sha256',repeat('9',64),'media_type','image/png','provenance','prepared_attachment'),
   jsonb_build_object('asset_revision_id','00000000-0000-4000-8000-0000000000f1','object_ref','objects/'||encode(digest(convert_to('{}','UTF8'),'sha256'),'hex'),'sha256',encode(digest(convert_to('{}','UTF8'),'sha256'),'hex'),'media_type','application/json','provenance','quote_snapshot')),
- 'form_definition_occurrences',jsonb_build_array(jsonb_build_object('form_definition_revision_id','00000000-0000-4000-8000-000000000053','canonical_sha256',encode(digest(convert_to('form1','UTF8'),'sha256'),'hex'))),'attachment_preparation_occurrences',jsonb_build_array(jsonb_build_object('attachment_preparation_revision_id','00000000-0000-4000-8000-00000000012a','status','ready','canonical_sha256',(SELECT preparation_sha256 FROM bid_attachment_preparation_revision_artifacts WHERE id='00000000-0000-4000-8000-00000000012a'))),'content_block_schema_version',1,'content_block_schema_sha256',repeat('d',64),'render_operation_contract_version',1,'render_operation_contract_sha256',repeat('e',64),'docx_renderer_contract_id','00000000-0000-4000-8000-000000000128','docx_renderer_contract_sha256',encode(digest(convert_to('renderer-docx','UTF8'),'sha256'),'hex'),'pdf_renderer_contract_id','00000000-0000-4000-8000-000000000129','pdf_renderer_contract_sha256',encode(digest(convert_to('renderer-pdf','UTF8'),'sha256'),'hex'),'style_contract_id','00000000-0000-4000-8000-000000000125','style_contract_sha256',encode(digest(convert_to('style1','UTF8'),'sha256'),'hex'),'page_geometry',jsonb_build_object('page_size','A4','width_mm',210,'height_mm',297,'margins_mm',jsonb_build_object('top',20,'right',20,'bottom',20,'left',20)),'font_artifact_identities',jsonb_build_array(jsonb_build_object('font_artifact_id','00000000-0000-4000-8000-000000000147','object_ref','objects/'||repeat('7',64),'sha256',repeat('7',64),'media_type','font/ttf','family','Noto Sans CJK','script','cjk')),'numbering_policy','decimal','toc_policy','included') $$;
+ 'form_definition_occurrences',jsonb_build_array(jsonb_build_object('form_definition_revision_id','00000000-0000-4000-8000-000000000053','canonical_sha256',encode(digest(convert_to('form1','UTF8'),'sha256'),'hex'))),'attachment_preparation_occurrences',jsonb_build_array(jsonb_build_object('attachment_preparation_revision_id','00000000-0000-4000-8000-00000000012a','status','ready','canonical_sha256',(SELECT preparation_sha256 FROM bid_attachment_preparation_revision_artifacts WHERE id='00000000-0000-4000-8000-00000000012a'))),'content_block_schema_version',1,'content_block_schema_sha256',repeat('d',64),'render_operation_contract_version',1,'render_operation_contract_sha256',repeat('e',64),'docx_renderer_contract_id','00000000-0000-4000-8000-000000000128','docx_renderer_contract_sha256',encode(digest(convert_to('renderer-docx','UTF8'),'sha256'),'hex'),'pdf_renderer_contract_id','00000000-0000-4000-8000-000000000129','pdf_renderer_contract_sha256',encode(digest(convert_to('renderer-pdf','UTF8'),'sha256'),'hex'),'style_contract_id','00000000-0000-4000-8000-000000000125','style_contract_sha256',encode(digest(convert_to('style1','UTF8'),'sha256'),'hex'),'page_geometry',jsonb_build_object('page_size','A4','width_mm',210,'height_mm',297,'margins_mm',jsonb_build_object('top',20,'right',20,'bottom',20,'left',20)),'font_artifact_identities',jsonb_build_array(jsonb_build_object('font_artifact_id','00000000-0000-4000-8000-000000000147','object_ref','objects/'||repeat('7',64),'sha256',repeat('7',64),'media_type','font/ttf','family','Noto Sans JP','script','cjk')),'numbering_policy','decimal','toc_policy','included') $$;
 CREATE FUNCTION pg_temp.render_payload(p_id uuid) RETURNS jsonb LANGUAGE sql AS $$ WITH base AS (SELECT pg_temp.render_payload_base(p_id) p) SELECT p||jsonb_build_object('snapshot_sha256',encode(digest(convert_to(p::text,'UTF8'),'sha256'),'hex')) FROM base $$;
 
 DO $$ DECLARE p jsonb:=pg_temp.render_payload('00000000-0000-4000-8000-000000000127'); sha text:=p->>'snapshot_sha256'; BEGIN
  INSERT INTO bid_render_document_snapshot_artifacts(id,project_id,workspace_id,schema_version,workspace_revision_id,workspace_sha256,scope_revision_id,outline_checkpoint_id,outline_checkpoint_sha256,requirement_projection_id,requirement_projection_sha256,document_settings_revision_id,document_settings_sha256,submission_assessment_snapshot_id,submission_assessment_snapshot_sha256,output_mode,format,mode_options,content_block_schema_version,content_block_schema_sha256,render_operation_contract_version,render_operation_contract_sha256,docx_renderer_contract_id,docx_renderer_contract_sha256,pdf_renderer_contract_id,pdf_renderer_contract_sha256,style_contract_id,style_contract_sha256,page_size,page_width_mm,page_height_mm,margins_mm,numbering_policy,toc_policy,canonical_payload,content_sha256)
- VALUES('00000000-0000-4000-8000-000000000127','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0',2,'00000000-0000-4000-8000-000000000135',encode(digest(convert_to('{"fixture":2}','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000121','00000000-0000-4000-8000-00000000013e',encode(digest(convert_to('checkpoint1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-0000000000b2',encode(digest(convert_to('proj2','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000122',encode(digest(convert_to('settings1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000124',encode(digest(convert_to('assessment1','UTF8'),'sha256'),'hex'),'review_draft','pdf','{"watermark":"DRAFT","include_assessment_notices":true,"include_knowledge_sources":true}',1,repeat('d',64),1,repeat('e',64),'00000000-0000-4000-8000-000000000128',encode(digest(convert_to('renderer-docx','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000129',encode(digest(convert_to('renderer-pdf','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000125',encode(digest(convert_to('style1','UTF8'),'sha256'),'hex'),'A4',210,297,'{"top":20,"right":20,"bottom":20,"left":20}','decimal','included',p,sha);
+ VALUES('00000000-0000-4000-8000-000000000127','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0',2,'00000000-0000-4000-8000-000000000135',encode(digest(convert_to('{"fixture":2}','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000121','00000000-0000-4000-8000-00000000013e',encode(digest(convert_to('checkpoint1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-0000000000b2',encode(digest(convert_to('proj2','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000122',encode(digest(convert_to('settings1','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000124',encode(digest(convert_to('assessment1','UTF8'),'sha256'),'hex'),'review_draft','pdf','{"watermark":"DRAFT"}',1,repeat('d',64),1,repeat('e',64),'00000000-0000-4000-8000-000000000128',encode(digest(convert_to('renderer-docx','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000129',encode(digest(convert_to('renderer-pdf','UTF8'),'sha256'),'hex'),'00000000-0000-4000-8000-000000000125',encode(digest(convert_to('style1','UTF8'),'sha256'),'hex'),'A4',210,297,'{"top":20,"right":20,"bottom":20,"left":20}','decimal','included',p,sha);
  INSERT INTO bid_render_snapshot_node_occurrences VALUES('00000000-0000-4000-8000-000000000127','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000135','00000000-0000-4000-8000-00000000013c','00000000-0000-4000-8000-00000000013b',0);
  INSERT INTO bid_render_snapshot_block_occurrences VALUES('00000000-0000-4000-8000-000000000127','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000135','00000000-0000-4000-8000-00000000013c','00000000-0000-4000-8000-00000000013d','00000000-0000-4000-8000-0000000000e2',encode(digest(convert_to('text1','UTF8'),'sha256'),'hex'),0);
  INSERT INTO bid_render_snapshot_asset_items(render_snapshot_id,ordinal,asset_revision_id,object_ref,content_sha256,media_type,provenance) SELECT '00000000-0000-4000-8000-000000000127',ordinal-1,(a->>'asset_revision_id')::uuid,a->>'object_ref',a->>'sha256',a->>'media_type',a->>'provenance' FROM jsonb_array_elements(p->'assets') WITH ORDINALITY x(a,ordinal);
- INSERT INTO bid_render_snapshot_font_items(render_snapshot_id,ordinal,font_artifact_id,object_ref,content_sha256,media_type,family,script) VALUES('00000000-0000-4000-8000-000000000127',0,'00000000-0000-4000-8000-000000000147','objects/'||repeat('7',64),repeat('7',64),'font/ttf','Noto Sans CJK','cjk');
+ INSERT INTO bid_render_snapshot_font_items(render_snapshot_id,ordinal,font_artifact_id,object_ref,content_sha256,media_type,family,script) VALUES('00000000-0000-4000-8000-000000000127',0,'00000000-0000-4000-8000-000000000147','objects/'||repeat('7',64),repeat('7',64),'font/ttf','Noto Sans JP','cjk');
  INSERT INTO bid_render_snapshot_form_definition_items VALUES('00000000-0000-4000-8000-000000000127','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0',0,'00000000-0000-4000-8000-000000000053',encode(digest(convert_to('form1','UTF8'),'sha256'),'hex'));
  INSERT INTO bid_render_snapshot_attachment_preparation_items(render_snapshot_id,project_id,workspace_id,ordinal,attachment_preparation_revision_id,canonical_sha256) VALUES('00000000-0000-4000-8000-000000000127','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0',0,'00000000-0000-4000-8000-00000000012a',(SELECT preparation_sha256 FROM bid_attachment_preparation_revision_artifacts WHERE id='00000000-0000-4000-8000-00000000012a'));
  SET CONSTRAINTS ALL IMMEDIATE;
@@ -933,7 +932,7 @@ INSERT INTO phase0_expected_manifest_dependencies VALUES
  (17,'style','00000000-0000-4000-8000-000000000125',encode(digest(convert_to('style1','UTF8'),'sha256'),'hex')),
  (18,'workspace','00000000-0000-4000-8000-000000000135',encode(digest(convert_to('{"fixture":2}','UTF8'),'sha256'),'hex'));
 DO $$ BEGIN
- INSERT INTO bid_submission_manifest_artifacts(id,project_id,workspace_id,render_snapshot_id,output_mode,format,mode_options,canonical_payload,content_sha256) VALUES('00000000-0000-4000-8000-000000000130','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000127','review_draft','pdf','{"watermark":"DRAFT","include_assessment_notices":true,"include_knowledge_sources":true}',convert_to('manifest-draft','UTF8'),encode(digest(convert_to('manifest-draft','UTF8'),'sha256'),'hex'));
+ INSERT INTO bid_submission_manifest_artifacts(id,project_id,workspace_id,render_snapshot_id,output_mode,format,mode_options,canonical_payload,content_sha256) VALUES('00000000-0000-4000-8000-000000000130','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000127','review_draft','pdf','{"watermark":"DRAFT"}',convert_to('manifest-draft','UTF8'),encode(digest(convert_to('manifest-draft','UTF8'),'sha256'),'hex'));
  INSERT INTO bid_submission_manifest_dependencies(manifest_id,dependency_kind,dependency_id,dependency_sha256,ordinal)
  SELECT '00000000-0000-4000-8000-000000000130',dependency_kind,dependency_id,dependency_sha256,ordinal FROM phase0_expected_manifest_dependencies ORDER BY ordinal;
  IF (SELECT count(*) FROM bid_submission_manifest_dependencies WHERE manifest_id='00000000-0000-4000-8000-000000000130')<>19
@@ -945,11 +944,11 @@ DO $$ BEGIN
  SET CONSTRAINTS ALL IMMEDIATE;
 END $$;
 DO $$ BEGIN
- BEGIN INSERT INTO bid_submission_manifest_artifacts(id,project_id,workspace_id,render_snapshot_id,output_mode,format,mode_options,canonical_payload,content_sha256) VALUES('00000000-0000-4000-8000-000000000131','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000127','review_draft','pdf','{"watermark":"DRAFT","include_assessment_notices":true,"include_knowledge_sources":true}',convert_to('missing-deps','UTF8'),encode(digest(convert_to('missing-deps','UTF8'),'sha256'),'hex')); SET CONSTRAINTS ALL IMMEDIATE; RAISE EXCEPTION 'manifest with zero dependencies accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
+ BEGIN INSERT INTO bid_submission_manifest_artifacts(id,project_id,workspace_id,render_snapshot_id,output_mode,format,mode_options,canonical_payload,content_sha256) VALUES('00000000-0000-4000-8000-000000000131','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000127','review_draft','pdf','{"watermark":"DRAFT"}',convert_to('missing-deps','UTF8'),encode(digest(convert_to('missing-deps','UTF8'),'sha256'),'hex')); SET CONSTRAINTS ALL IMMEDIATE; RAISE EXCEPTION 'manifest with zero dependencies accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
  SET CONSTRAINTS ALL DEFERRED;
  BEGIN INSERT INTO bid_submission_manifest_dependencies VALUES('00000000-0000-4000-8000-000000000130','asset',gen_random_uuid(),repeat('f',64),999); RAISE EXCEPTION 'unknown manifest dependency accepted'; EXCEPTION WHEN check_violation THEN NULL; END;
  BEGIN
-  INSERT INTO bid_submission_manifest_artifacts(id,project_id,workspace_id,render_snapshot_id,output_mode,format,mode_options,canonical_payload,content_sha256) VALUES('00000000-0000-4000-8000-000000000133','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000127','review_draft','pdf','{"watermark":"DRAFT","include_assessment_notices":true,"include_knowledge_sources":true}',convert_to('wrong-digest','UTF8'),encode(digest(convert_to('wrong-digest','UTF8'),'sha256'),'hex'));
+  INSERT INTO bid_submission_manifest_artifacts(id,project_id,workspace_id,render_snapshot_id,output_mode,format,mode_options,canonical_payload,content_sha256) VALUES('00000000-0000-4000-8000-000000000133','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000127','review_draft','pdf','{"watermark":"DRAFT"}',convert_to('wrong-digest','UTF8'),encode(digest(convert_to('wrong-digest','UTF8'),'sha256'),'hex'));
   INSERT INTO bid_submission_manifest_dependencies(manifest_id,dependency_kind,dependency_id,dependency_sha256,ordinal) VALUES('00000000-0000-4000-8000-000000000133','render_snapshot','00000000-0000-4000-8000-000000000127',repeat('f',64),0);
   RAISE EXCEPTION 'wrong manifest dependency digest accepted';
  EXCEPTION WHEN check_violation THEN NULL; END;
@@ -974,8 +973,8 @@ DO $$ BEGIN
  BEGIN INSERT INTO bid_submission_output_artifacts(id,project_id,workspace_id,manifest_id,format,object_ref,content_sha256,media_type,byte_length,owner_id,owner_occurrence) VALUES('00000000-0000-4000-8000-000000000185','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000130','pdf','objects/'||repeat('f',64),repeat('f',64),'application/pdf',1,'00000000-0000-4000-8000-000000000185','output:00000000-0000-4000-8000-000000000010:00000000-0000-4000-8000-0000000000a0:00000000-0000-4000-8000-000000000130'); RAISE EXCEPTION 'missing output owner accepted'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
 END $$;
 
--- Real asynchronous RequirementSet delivery regression: D2 is compiled before D1.
--- D1 must terminate obsolete without moving the RequirementSet, projection, or Workspace heads.
+-- Real asynchronous RequirementSet delivery regression: D2 is compiled before late D1.
+-- D1 must terminate succeeded/unpublished without moving the RequirementSet, projection, or Workspace heads.
 INSERT INTO bid_source_unit_disposition_set_artifacts(
   id,project_id,document_set_id,document_set_sequence,revision,canonical_payload,content_sha256,actor)
 VALUES
@@ -1015,48 +1014,122 @@ VALUES
   '00000000-0000-4000-8000-000000000065',encode(digest(convert_to('compile-d2-disposition','UTF8'),'sha256'),'hex'));
 COMMIT;
 DO $$
-DECLARE d2 jsonb; d1 jsonb; set_head uuid; projection_head uuid; workspace_head uuid;
+DECLARE d2 jsonb; d2_replay jsonb; d1 jsonb; compiled_d2 jsonb; compiled_d1 jsonb;
+  set_head uuid; projection_head uuid; projection_sha kb_sha256;
+  workspace_before bid_workspace_heads%ROWTYPE; workspace_after bid_workspace_heads%ROWTYPE;
+  status_view jsonb; apply_bytes bytea:=convert_to('apply-v3-projection','UTF8');
 BEGIN
-  d2:=kb_bid_v2_compile_requirement_set('00000000-0000-4000-8000-0000000001c2',1,
-    encode(digest(convert_to('compile-d2-frozen','UTF8'),'sha256'),'hex'),'system:requirement-set-compile-v2');
+  compiled_d2:=jsonb_build_object('schema_version',3,
+    'source_unit_revision_ids',jsonb_build_array('00000000-0000-4000-8000-000000000052'),
+    'requirements',jsonb_build_array(jsonb_build_object(
+      'requirement_ref',repeat('d',64),'requirement_kind','technical','requiredness','mandatory',
+      'compliance_policy','must_comply','requirement_text','D2 current requirement','channel','narrative_content',
+      'applicability',jsonb_build_object('status','required','reason','D2','source_unit_revision_ids',
+        jsonb_build_array('00000000-0000-4000-8000-000000000052')),
+      'source_unit_revision_ids',jsonb_build_array('00000000-0000-4000-8000-000000000052'),
+      'structured_form_revision_ids','[]'::jsonb)),'notices','[]'::jsonb);
+  compiled_d1:=jsonb_build_object('schema_version',3,
+    'source_unit_revision_ids',jsonb_build_array('00000000-0000-4000-8000-000000000052'),
+    'requirements',jsonb_build_array(jsonb_build_object(
+      'requirement_ref',repeat('c',64),'requirement_kind','technical','requiredness','mandatory',
+      'compliance_policy','must_comply','requirement_text','D1 superseded requirement','channel','narrative_content',
+      'applicability',jsonb_build_object('status','required','reason','D1','source_unit_revision_ids',
+        jsonb_build_array('00000000-0000-4000-8000-000000000052')),
+      'source_unit_revision_ids',jsonb_build_array('00000000-0000-4000-8000-000000000052'),
+      'structured_form_revision_ids','[]'::jsonb)),'notices','[]'::jsonb);
+  SELECT * INTO STRICT workspace_before FROM bid_workspace_heads
+    WHERE scope_id='00000000-0000-4000-8000-0000000000a0';
+  d2:=kb_bid_v2_publish_requirement_set_v3('00000000-0000-4000-8000-0000000001c2',1,
+    encode(digest(convert_to('compile-d2-frozen','UTF8'),'sha256'),'hex'),compiled_d2,
+    'system:requirement-set-compile-v3');
   SELECT artifact_id INTO STRICT set_head FROM bid_requirement_set_current
     WHERE scope_id='00000000-0000-4000-8000-000000000010';
-  SELECT artifact_id INTO STRICT projection_head FROM bid_workspace_requirement_projection_current
-    WHERE scope_id='00000000-0000-4000-8000-0000000000a0';
-  SELECT artifact_id INTO STRICT workspace_head FROM bid_workspace_heads
+  SELECT artifact_id,artifact_sha256 INTO STRICT projection_head,projection_sha
+    FROM bid_workspace_requirement_projection_current
     WHERE scope_id='00000000-0000-4000-8000-0000000000a0';
   IF set_head<>(d2->>'requirement_set_id')::uuid
-     OR projection_head<>(d2->>'requirement_projection_id')::uuid THEN
-    RAISE EXCEPTION 'D2 compile did not advance all requirement heads';
+     OR projection_head<>(d2->>'requirement_projection_id')::uuid
+     OR d2->>'status'<>'succeeded' OR d2->>'published_current'<>'true'
+     OR d2->>'workspace_apply_required'<>'true' THEN
+    RAISE EXCEPTION 'D2 V3 compile did not publish the current requirement projection';
   END IF;
-  d1:=kb_bid_v2_compile_requirement_set('00000000-0000-4000-8000-0000000001c1',1,
-    encode(digest(convert_to('compile-d1-frozen','UTF8'),'sha256'),'hex'),'system:requirement-set-compile-v2');
-  IF d1->>'status'<>'obsolete' OR NOT EXISTS (
+  IF NOT EXISTS (SELECT 1 FROM bid_workspace_heads WHERE scope_id=workspace_before.scope_id
+      AND artifact_id=workspace_before.artifact_id AND artifact_sha256=workspace_before.artifact_sha256) THEN
+    RAISE EXCEPTION 'V3 worker publication changed WorkspaceHead';
+  END IF;
+  d2_replay:=kb_bid_v2_publish_requirement_set_v3('00000000-0000-4000-8000-0000000001c2',1,
+    encode(digest(convert_to('compile-d2-frozen','UTF8'),'sha256'),'hex'),compiled_d2,
+    'system:requirement-set-compile-v3');
+  IF d2_replay->>'replayed'<>'true' OR d2_replay->>'requirement_projection_id'<>projection_head::text THEN
+    RAISE EXCEPTION 'V3 replay did not return the frozen publication receipt';
+  END IF;
+  status_view:=kb_bid_v2_get_requirement_set_compile_request(
+    '00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000001c2',
+    'user:00000000-0000-4000-8000-000000000001');
+  IF status_view->>'status'<>'succeeded'
+     OR status_view#>>'{result_identity,requirement_projection_id}'<>projection_head::text
+     OR status_view->>'document_set_revision_id'<>'00000000-0000-4000-8000-000000000042' THEN
+    RAISE EXCEPTION 'typed RequirementSetCompile status view lost frozen identities';
+  END IF;
+  IF kb_bid_v2_get_requirement_set_compile_request(
+      '00000000-0000-4000-8000-000000000019','00000000-0000-4000-8000-0000000001c2',
+      'user:00000000-0000-4000-8000-000000000001') IS NOT NULL
+     OR kb_bid_v2_get_requirement_set_compile_request(
+      '00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000001a1',
+      'user:00000000-0000-4000-8000-000000000001') IS NOT NULL THEN
+    RAISE EXCEPTION 'typed RequirementSetCompile status view crossed project or request-kind binding';
+  END IF;
+  BEGIN
+    PERFORM kb_bid_v2_get_requirement_set_compile_request(
+      '00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000001c2',
+      'user:00000000-0000-4000-8000-000000000002');
+    RAISE EXCEPTION 'non-owner read RequirementSetCompile status';
+  EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+  PERFORM kb_bid_v2_refresh_requirement_projection(workspace_before.scope_id,projection_head,projection_sha,
+    workspace_before.artifact_id,workspace_before.artifact_sha256,
+    'user:00000000-0000-4000-8000-000000000001','phase0-v3-explicit-apply',apply_bytes,
+    encode(digest(apply_bytes,'sha256'),'hex'));
+  SELECT * INTO STRICT workspace_after FROM bid_workspace_heads WHERE scope_id=workspace_before.scope_id;
+  IF workspace_after.artifact_id=workspace_before.artifact_id THEN
+    RAISE EXCEPTION 'explicit owner projection apply did not advance WorkspaceHead';
+  END IF;
+  d1:=kb_bid_v2_publish_requirement_set_v3('00000000-0000-4000-8000-0000000001c1',1,
+    encode(digest(convert_to('compile-d1-frozen','UTF8'),'sha256'),'hex'),compiled_d1,
+    'system:requirement-set-compile-v3');
+  IF d1->>'status'<>'succeeded' OR d1->>'published_current'<>'false'
+     OR d1->>'workspace_apply_required'<>'false' OR NOT EXISTS (
       SELECT 1 FROM bid_async_request_snapshot_artifacts
-      WHERE id='00000000-0000-4000-8000-0000000001c1' AND status='obsolete') THEN
-    RAISE EXCEPTION 'late D1 compile did not terminate obsolete';
+      WHERE id='00000000-0000-4000-8000-0000000001c1' AND status='succeeded') THEN
+    RAISE EXCEPTION 'late D1 V3 compile did not succeed as an unpublished result';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM bid_requirement_set_current
       WHERE scope_id='00000000-0000-4000-8000-000000000010' AND artifact_id=set_head)
      OR NOT EXISTS (SELECT 1 FROM bid_workspace_requirement_projection_current
       WHERE scope_id='00000000-0000-4000-8000-0000000000a0' AND artifact_id=projection_head)
      OR NOT EXISTS (SELECT 1 FROM bid_workspace_heads
-      WHERE scope_id='00000000-0000-4000-8000-0000000000a0' AND artifact_id=workspace_head) THEN
-    RAISE EXCEPTION 'late D1 compile rolled back a current pointer';
+      WHERE scope_id=workspace_after.scope_id AND artifact_id=workspace_after.artifact_id
+        AND artifact_sha256=workspace_after.artifact_sha256) THEN
+    RAISE EXCEPTION 'late D1 V3 compile rolled back a current pointer';
   END IF;
 END $$;
 
--- Historical WorkspaceRevision keeps its quote identity when a later quote advances the head.
+-- Explicit quote apply advances the head while historical WorkspaceRevision keeps its quote identity.
 BEGIN;
 INSERT INTO bid_quote_snapshot_artifacts(id,project_id,revision,currency,canonical_payload,content_sha256,actor)
 VALUES('00000000-0000-4000-8000-0000000000f2','00000000-0000-4000-8000-000000000010',2,'CNY',
   convert_to('{"revision":2}','UTF8'),encode(digest(convert_to('{"revision":2}','UTF8'),'sha256'),'hex'),
   'user:00000000-0000-4000-8000-000000000001');
+INSERT INTO bid_quote_snapshot_current(scope_id,artifact_id,artifact_sha256,generation,created_at)
+VALUES('00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000f2',
+  encode(digest(convert_to('{"revision":2}','UTF8'),'sha256'),'hex'),2,clock_timestamp());
 SELECT kb_bid_v2_advance_workspace_quote('00000000-0000-4000-8000-000000000010',
   '00000000-0000-4000-8000-0000000000f2',encode(digest(convert_to('{"revision":2}','UTF8'),'sha256'),'hex'),
+  (SELECT artifact_id FROM bid_workspace_heads WHERE scope_id='00000000-0000-4000-8000-0000000000a0'),
+  (SELECT artifact_sha256 FROM bid_workspace_heads WHERE scope_id='00000000-0000-4000-8000-0000000000a0'),
   'user:00000000-0000-4000-8000-000000000001');
 DO $$
 DECLARE old_value jsonb; new_value jsonb; head bid_workspace_heads%ROWTYPE;
+  revision_count bigint; evidence_count bigint;
 BEGIN
   old_value:=kb_bid_v2_load_workspace_revision('00000000-0000-4000-8000-0000000000a0',
     '00000000-0000-4000-8000-000000000135',encode(digest(convert_to('{"fixture":2}','UTF8'),'sha256'),'hex'));
@@ -1067,6 +1140,20 @@ BEGIN
   new_value:=kb_bid_v2_load_workspace_revision(head.scope_id,head.artifact_id,head.artifact_sha256);
   IF new_value#>>'{quote_snapshot,artifact_id}' IS DISTINCT FROM '00000000-0000-4000-8000-0000000000f2' THEN
     RAISE EXCEPTION 'new workspace revision did not freeze the new quote';
+  END IF;
+  SELECT count(*) INTO revision_count FROM bid_workspace_revision_artifacts WHERE workspace_id=head.scope_id;
+  SELECT count(*) INTO evidence_count FROM bid_submission_fulfillment_evidence_revision_artifacts WHERE workspace_id=head.scope_id;
+  BEGIN
+    PERFORM kb_bid_v2_advance_workspace_quote('00000000-0000-4000-8000-000000000010',
+      '00000000-0000-4000-8000-0000000000f1',encode(digest(convert_to('{}','UTF8'),'sha256'),'hex'),
+      head.artifact_id,head.artifact_sha256,'user:00000000-0000-4000-8000-000000000001');
+    RAISE EXCEPTION 'non-current Q1 applied after Q2 publication';
+  EXCEPTION WHEN serialization_failure THEN NULL; END;
+  IF NOT EXISTS (SELECT 1 FROM bid_workspace_heads WHERE scope_id=head.scope_id
+      AND artifact_id=head.artifact_id AND artifact_sha256=head.artifact_sha256)
+     OR (SELECT count(*) FROM bid_workspace_revision_artifacts WHERE workspace_id=head.scope_id)<>revision_count
+     OR (SELECT count(*) FROM bid_submission_fulfillment_evidence_revision_artifacts WHERE workspace_id=head.scope_id)<>evidence_count THEN
+    RAISE EXCEPTION 'rejected stale quote apply left partial Workspace artifacts';
   END IF;
 END $$;
 ROLLBACK;
@@ -1081,6 +1168,20 @@ DO $$ BEGIN
         AND finished_at IS NOT NULL AND error_code='REQUIREMENT_COMPILE_FAILED') THEN
     RAISE EXCEPTION 'final compile failure did not become terminal';
   END IF;
+END $$;
+ROLLBACK;
+
+-- Repeated terminal delivery is an ACK/no-op and cannot corrupt a ready document.
+BEGIN;
+SELECT kb_bid_v2_mark_tender_document_failed('00000000-0000-4000-8000-0000000001a1','AGENT_OUTPUT_INVALID');
+SELECT kb_bid_v2_mark_tender_document_failed('00000000-0000-4000-8000-0000000001a1','AGENT_OUTPUT_INVALID');
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM bid_async_request_snapshot_artifacts
+     WHERE id='00000000-0000-4000-8000-0000000001a1' AND status='succeeded')
+    OR NOT EXISTS (SELECT 1 FROM bid_documents
+     WHERE id='00000000-0000-4000-8000-000000000011' AND parse_status='ready') THEN
+   RAISE EXCEPTION 'terminal tender failure redelivery corrupted succeeded request/document';
+ END IF;
 END $$;
 ROLLBACK;
 

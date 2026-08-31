@@ -55,6 +55,7 @@ async fn schema_slice_state(
            ('idempotency_requests'),('audit_events'),('queue_contract_current')),
          bidding(name) AS (VALUES
            ('bid_projects'),('bid_submission_workspaces'),('bid_workspace_revision_artifacts'),
+           ('bid_async_request_snapshot_artifacts'),('bid_candidate_artifacts'),
            ('bid_workspace_asset_artifacts'),('bid_workspace_asset_retirement_artifacts'),('bid_outline_checkpoint_artifacts'),
            ('bid_content_generation_request_identities'),('bid_evidence_bundle_artifacts'),
            ('bid_evidence_asset_artifacts'),('bid_evidence_selection_artifacts'),
@@ -87,9 +88,11 @@ async fn schema_slice_state(
            ('kb_bid_v2_prepare_workspace_attachment(uuid,uuid,uuid,uuid[],uuid[],integer[],integer[],kb_actor_identity,text,bytea,kb_sha256)'),
            ('kb_bid_v2_create_outline_checkpoint(uuid,uuid,kb_sha256,uuid,kb_actor_identity,text,bytea,kb_sha256)'),
            ('kb_bid_v2_accept_candidate(uuid,uuid,uuid,kb_sha256,jsonb,integer[],kb_actor_identity,text,bytea,kb_sha256)'),
-           ('kb_bid_v2_advance_workspace_projection(uuid,uuid,kb_sha256,uuid,kb_sha256)'),
+           ('kb_bid_v2_advance_workspace_projection(uuid,uuid,kb_sha256,uuid,kb_sha256,kb_actor_identity)'),
            ('kb_bid_v2_get_requirement_projection(uuid,kb_actor_identity)'),
-           ('kb_bid_v2_refresh_requirement_projection(uuid,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256)'),
+           ('kb_bid_v2_get_requirement_set_compile_request(uuid,uuid,kb_actor_identity)'),
+           ('kb_bid_v2_refresh_requirement_projection(uuid,uuid,kb_sha256,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256)'),
+           ('kb_bid_v2_apply_quote_snapshot(uuid,uuid,kb_sha256,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256)'),
            ('kb_bid_v2_retire_workspace_asset(uuid,uuid,text,kb_actor_identity,text,bytea,kb_sha256)'),
            ('kb_bid_v2_load_user_pick_evidence(uuid,bigint,kb_sha256)'),
            ('kb_bid_v2_load_submission_export_input(uuid,bigint,kb_sha256)'),
@@ -105,8 +108,8 @@ async fn schema_slice_state(
          SELECT
            (SELECT count(*)=7 FROM knowledge WHERE to_regclass('public.'||name) IS NOT NULL),
            (SELECT count(*)=6 FROM shared WHERE to_regclass('public.'||name) IS NOT NULL),
-           ((SELECT count(*)=25 FROM bidding WHERE to_regclass('public.'||name) IS NOT NULL)
-             AND (SELECT count(*)=35 FROM bidding_functions
+           ((SELECT count(*)=27 FROM bidding WHERE to_regclass('public.'||name) IS NOT NULL)
+             AND (SELECT count(*)=37 FROM bidding_functions
                WHERE to_regprocedure('public.'||signature) IS NOT NULL)
              AND EXISTS (SELECT 1 FROM pg_attribute attribute
                WHERE attribute.attrelid=to_regclass('public.bid_workspace_asset_artifacts')
@@ -119,7 +122,19 @@ async fn schema_slice_state(
                  AND attribute.attname='quote_snapshot_id' AND NOT attribute.attisdropped)
              AND EXISTS (SELECT 1 FROM pg_attribute attribute
                WHERE attribute.attrelid=to_regclass('public.bid_render_document_snapshot_artifacts')
-                 AND attribute.attname='submission_assessment_snapshot_id' AND NOT attribute.attisdropped)),
+                 AND attribute.attname='submission_assessment_snapshot_id' AND NOT attribute.attisdropped)
+             AND EXISTS (SELECT 1 FROM pg_constraint constraint_value
+               WHERE constraint_value.conrelid=to_regclass('public.bid_async_request_snapshot_artifacts')
+                 AND constraint_value.contype='c'
+                 AND constraint_value.convalidated
+                 AND regexp_replace(pg_get_constraintdef(constraint_value.oid),'[[:space:]]','','g')
+                   = 'CHECK((status=ANY(ARRAY[''pending''::text,''succeeded''::text,''failed''::text])))')
+             AND EXISTS (SELECT 1 FROM pg_constraint constraint_value
+               WHERE constraint_value.conrelid=to_regclass('public.bid_candidate_artifacts')
+                 AND constraint_value.contype='c'
+                 AND constraint_value.convalidated
+                 AND regexp_replace(pg_get_constraintdef(constraint_value.oid),'[[:space:]]','','g')
+                   = 'CHECK((state=ANY(ARRAY[''proposed''::text,''accepted''::text,''rejected''::text])))')),
            EXISTS (SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
              WHERE namespace.nspname='public' AND relation.relkind IN ('r','p','v','m'))",
     )
@@ -202,6 +217,15 @@ mod tests {
             assert!(live.contains(&format!("CREATE OR REPLACE FUNCTION {function}")));
         }
         assert!(live.contains("TO kb_runtime_retention"));
+    }
+
+    #[test]
+    fn bidding_schema_fingerprint_requires_typed_requirement_compile_status() {
+        let source = include_str!("db.rs");
+        assert!(source.contains(
+            "('kb_bid_v2_get_requirement_set_compile_request(uuid,uuid,kb_actor_identity)')"
+        ));
+        assert!(source.contains("count(*)=37 FROM bidding_functions"));
     }
 
     #[test]

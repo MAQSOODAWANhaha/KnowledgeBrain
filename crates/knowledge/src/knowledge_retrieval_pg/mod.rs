@@ -1119,9 +1119,9 @@ async fn hydrate_evidence_media_v3(
         AND media.product_version_id=mapping.product_version_id AND media.document_id=mapping.document_id
         AND media.object_ref=mapping.object_ref AND media.content_sha256=mapping.content_sha256
         AND media.media_type=mapping.media_type AND media.object_state=mapping.object_state
-      JOIN object_registry registry ON registry.object_ref=media.object_ref AND registry.digest=media.content_sha256
-        AND registry.media_type=media.media_type AND registry.state=media.object_state
-      WHERE mapping.chunk_id=ANY($1::uuid[])")
+    JOIN available_object_registry registry ON registry.object_ref=media.object_ref AND registry.digest=media.content_sha256
+    AND registry.media_type=media.media_type
+    WHERE mapping.chunk_id=ANY($1::uuid[]) AND media.object_state='available'")
         .bind(&ids).fetch_all(&mut **tx).await.map_err(database_unavailable)?;
     let media = rows
         .into_iter()

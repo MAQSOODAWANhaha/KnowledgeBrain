@@ -29,6 +29,7 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='kb_runtime_wo
 SELECT format('CREATE ROLE kb_runtime_retention LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'retention_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='kb_runtime_retention') \gexec
 SELECT format('GRANT CONNECT ON DATABASE %I TO kb_migrator,kb_runtime_api,kb_runtime_worker,kb_runtime_retention', current_database()) \gexec
+SELECT format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', current_database()) \gexec
 GRANT USAGE ON SCHEMA public TO kb_migrator,kb_runtime_api,kb_runtime_worker,kb_runtime_retention;
 GRANT CREATE ON SCHEMA public TO kb_migrator;
 GRANT EXECUTE ON FUNCTION public.digest(bytea,text), public.digest(text,text) TO kb_migrator,kb_app_owner;

@@ -30,6 +30,8 @@ pub const SYNTH_MAX_TOOL_CALLS: u32 = 64;
 pub const AGENT_MAX_IMAGES: u32 = 4;
 pub const JOB_WATCHDOG: Duration = Duration::from_secs(60 * 60);
 pub const AGENT_CONTRACT_VERSION: &str = "outline-agent-v20";
+const REQUIREMENT_GROUPING_BATCH_SCHEMA: &str =
+    include_str!("../schemas/requirement-grouping-batch-v5.schema.json");
 
 pub const STAGE_ANALYZING: &str = "analyzing";
 pub const STAGE_MAPPING: &str = "mapping";
@@ -2007,7 +2009,7 @@ pub async fn run_outline_generation(
     let agent_schema_sha = platform::sha256_hex(
         [
             include_bytes!("../schemas/outline-evidence-batch-v4.schema.json").as_slice(),
-            include_bytes!("../schemas/requirement-grouping-batch-v4.schema.json").as_slice(),
+            REQUIREMENT_GROUPING_BATCH_SCHEMA.as_bytes(),
             include_bytes!("../schemas/fulfillment-group-v1.schema.json").as_slice(),
             include_bytes!("../schemas/composition-spine-v1.schema.json").as_slice(),
             include_bytes!("../schemas/section-obligation-matrix-v2.schema.json").as_slice(),
@@ -2384,10 +2386,8 @@ async fn ensure_pending(
 }
 
 fn requirement_grouping_json_schema() -> Value {
-    let contract: Value = serde_json::from_str(include_str!(
-        "../schemas/requirement-grouping-batch-v5.schema.json"
-    ))
-    .expect("checked-in SemanticGroupingBatchV5 schema");
+    let contract: Value = serde_json::from_str(REQUIREMENT_GROUPING_BATCH_SCHEMA)
+        .expect("checked-in SemanticGroupingBatchV5 schema");
     let properties = contract
         .get("properties")
         .and_then(Value::as_object)

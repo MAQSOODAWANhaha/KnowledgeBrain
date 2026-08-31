@@ -1,5 +1,6 @@
 import {
   ApiError,
+  NetworkTransportError,
   createMutationAttempt,
   type MutationAttempt,
 } from "../../api";
@@ -13,6 +14,8 @@ import type {
   EvidenceOverview,
   ExpectedPointer,
   ExportView,
+  FreezeDocumentSetResult,
+  RequirementSetCompileRequestView,
   RequirementView,
   SourceUnitView,
   TenderDocumentView,
@@ -55,6 +58,7 @@ import {
   type ExportMode,
   type FillPolicy,
   type GenerateTarget,
+  type OutlineCandidateRequest,
 } from "./generation";
 import { clientRef, fileSha256Hex, newUuid } from "./ids";
 import {
@@ -83,10 +87,7 @@ import {
 } from "./tree";
 
 export type InspectorTab =
-  | "requirements"
-  | "evidence"
-  | "assets"
-  | "assessment";
+  "requirements" | "evidence" | "assets" | "assessment";
 export type DraftStatus = "clean" | "dirty" | "saving" | "conflict";
 
 export type ConflictState = {
@@ -257,12 +258,23 @@ function emptyState(): BidV2State {
 
 function mapError(error: unknown): AuthoringLogicError {
   if (error instanceof AuthoringLogicError) return error;
+  if (error instanceof NetworkTransportError)
+    return new EnqueueUncertainError();
   if (error instanceof ApiError) {
     const requestArtifactId = (
       error as ApiError & { requestArtifactId?: string }
     ).requestArtifactId;
+    if (error.code === "CANDIDATE_OBSOLETE")
+      return new AuthoringLogicError(
+        "CANDIDATE_OBSOLETE",
+        "候选基于旧工作区版本，请刷新候选并重新生成。",
+        true,
+      );
     if (error.status === 409) return new CasConflictError();
-    if (error.status === 503)
+    if (
+      error.code === "QUEUE_UNAVAILABLE" &&
+      queueRequestIdentity(error)?.retry_same_idempotency_key === true
+    )
       return new EnqueueUncertainError(requestArtifactId);
     if (
       error.code === "TENDER_DOCUMENT_DUPLICATE" ||
@@ -314,6 +326,227 @@ export function shouldPoll(state: BidV2State): boolean {
   return state.asyncRequests.some((request) => request.status === "pending");
 }
 
+type ImmutableQueuedRequestDescriptor = {
+  version: 1;
+  method: "POST";
+  path: string;
+  body: unknown;
+  ifMatch: string | null;
+  upload?: {
+    fileName: string;
+    mediaType: string;
+    byteLength: number;
+    sha256: string;
+  };
+};
+
+type StoredQueuedAttempt = {
+  idempotencyKey: string;
+  fingerprint: string;
+  descriptor: ImmutableQueuedRequestDescriptor;
+  payload: unknown;
+  status?: "uncertain" | "completed";
+  requestIdentity?: {
+    request_artifact_id: string;
+    request_revision?: number;
+    frozen_input_sha256?: string;
+    retry_same_idempotency_key?: boolean;
+  };
+};
+
+const QUEUED_ATTEMPT_PREFIX = "kb.bid.v2.queued-attempt:";
+const queuedAttemptFallback = new Map<string, StoredQueuedAttempt>();
+
+function queuedAttemptStorage(): Storage | null {
+  try {
+    return typeof sessionStorage === "undefined" ? null : sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function parseQueuedAttempt(raw: string | null): StoredQueuedAttempt | null {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as Partial<StoredQueuedAttempt>;
+    if (
+      typeof value.idempotencyKey !== "string" ||
+      typeof value.fingerprint !== "string" ||
+      !value.descriptor ||
+      !("payload" in value)
+    )
+      return null;
+    return value as StoredQueuedAttempt;
+  } catch {
+    return null;
+  }
+}
+
+function readQueuedAttempt(slot: string): StoredQueuedAttempt | null {
+  const fallback = queuedAttemptFallback.get(slot);
+  if (fallback?.status === "completed") {
+    queuedAttemptFallback.delete(slot);
+    try {
+      queuedAttemptStorage()?.removeItem(`${QUEUED_ATTEMPT_PREFIX}${slot}`);
+    } catch {
+      // The completed in-memory tombstone still prevents stale replay this session.
+    }
+    return null;
+  }
+  if (fallback) return fallback;
+  try {
+    const value = parseQueuedAttempt(
+      queuedAttemptStorage()?.getItem(`${QUEUED_ATTEMPT_PREFIX}${slot}`) ??
+        null,
+    );
+    if (value?.status === "completed") {
+      try {
+        queuedAttemptStorage()?.removeItem(`${QUEUED_ATTEMPT_PREFIX}${slot}`);
+      } catch {
+        queuedAttemptFallback.set(slot, value);
+      }
+      return null;
+    }
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function writeQueuedAttempt(slot: string, value: StoredQueuedAttempt): void {
+  queuedAttemptFallback.set(slot, value);
+  try {
+    queuedAttemptStorage()?.setItem(
+      `${QUEUED_ATTEMPT_PREFIX}${slot}`,
+      JSON.stringify(value),
+    );
+  } catch {
+    // The in-memory record preserves the key without reclassifying storage denial as a network error.
+  }
+}
+
+function clearQueuedAttempt(slot: string, value: StoredQueuedAttempt): void {
+  const completed = { ...value, status: "completed" as const };
+  queuedAttemptFallback.set(slot, completed);
+  try {
+    const storage = queuedAttemptStorage();
+    storage?.setItem(
+      `${QUEUED_ATTEMPT_PREFIX}${slot}`,
+      JSON.stringify(completed),
+    );
+    storage?.removeItem(`${QUEUED_ATTEMPT_PREFIX}${slot}`);
+    queuedAttemptFallback.delete(slot);
+  } catch {
+    // The completed tombstone wins over an older uncertain storage record.
+  }
+}
+
+function listQueuedAttempts(): Array<[string, StoredQueuedAttempt]> {
+  const values = new Map<string, StoredQueuedAttempt>();
+  for (const [slot, value] of queuedAttemptFallback) {
+    if (value.status !== "completed") values.set(slot, value);
+  }
+  try {
+    const storage = queuedAttemptStorage();
+    if (storage) {
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        if (!key?.startsWith(QUEUED_ATTEMPT_PREFIX)) continue;
+        const slot = key.slice(QUEUED_ATTEMPT_PREFIX.length);
+        if (values.has(slot)) continue;
+        const value = parseQueuedAttempt(storage.getItem(key));
+        if (value && value.status !== "completed") values.set(slot, value);
+      }
+    }
+  } catch {
+    // In-memory records remain available when storage enumeration is denied.
+  }
+  return [...values.entries()];
+}
+
+function queueRequestIdentity(
+  error: unknown,
+): StoredQueuedAttempt["requestIdentity"] {
+  if (!(error instanceof ApiError)) return undefined;
+  return (
+    error as ApiError & {
+      queueRequestIdentity?: StoredQueuedAttempt["requestIdentity"];
+    }
+  ).queueRequestIdentity;
+}
+
+function isUncertainQueuedDispatch(error: unknown): boolean {
+  if (error instanceof NetworkTransportError) return true;
+  if (!(error instanceof ApiError)) return false;
+  const identity = queueRequestIdentity(error);
+  return (
+    error.code === "QUEUE_UNAVAILABLE" &&
+    identity?.retry_same_idempotency_key === true
+  );
+}
+
+export function workspaceRequestMode(
+  path: string,
+  workspaceId: string,
+): "candidate" | "evidence" | "export" | null {
+  const prefix = `/api/v2/submission-workspaces/${workspaceId}/`;
+  if (!path.startsWith(prefix)) return null;
+  if (path.endsWith("/exports")) return "export";
+  if (path.includes("evidence-matches")) return "evidence";
+  if (path.includes("candidates")) return "candidate";
+  return null;
+}
+
+export function asyncRequestMode(
+  request: AsyncRequestView,
+): "candidate" | "evidence" | "export" {
+  if (request.kind === "SubmissionExport") return "export";
+  if (
+    request.kind === "ContentGenerate" &&
+    request.operation === "match_only"
+  ) {
+    return "evidence";
+  }
+  return "candidate";
+}
+
+function asyncRequestResult(value: unknown): AsyncRequestView | null {
+  if (!value || typeof value !== "object") return null;
+  const request = value as Partial<AsyncRequestView>;
+  return typeof request.request_artifact_id === "string" &&
+    (request.status === "pending" ||
+      request.status === "succeeded" ||
+      request.status === "failed")
+    ? (request as AsyncRequestView)
+    : null;
+}
+
+type CanonicalFingerprintValue =
+  | null
+  | boolean
+  | number
+  | string
+  | CanonicalFingerprintValue[]
+  | { [key: string]: CanonicalFingerprintValue };
+
+function canonicalFingerprint(value: unknown): string {
+  const normalize = (item: unknown): CanonicalFingerprintValue => {
+    if (item === null) return null;
+    if (typeof item === "boolean" || typeof item === "string") return item;
+    if (typeof item === "number" && Number.isFinite(item)) return item;
+    if (Array.isArray(item)) return item.map(normalize);
+    if (typeof item === "object") {
+      return Object.fromEntries(
+        Object.entries(item as Record<string, unknown>)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, child]) => [key, normalize(child)]),
+      );
+    }
+    throw new TypeError("queued request descriptor must be finite JSON");
+  };
+  return JSON.stringify(normalize(value));
+}
+
 export function createBidV2Session(deps: BidV2Deps): BidV2Session {
   const autosaveDelayMs = deps.autosaveDelayMs ?? 800;
   let state = emptyState();
@@ -323,7 +556,244 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
   let cancelAutosave: (() => void) | null = null;
   let mutationTail = Promise.resolve();
   let workspaceAttempt: MutationAttempt | null = null;
-  const uploadAttempts = new Map<string, MutationAttempt[]>();
+
+  async function dispatchQueued<T, P>(
+    slot: string,
+    descriptor: ImmutableQueuedRequestDescriptor,
+    proposedPayload: P,
+    dispatch: (
+      payload: P,
+      attempt: MutationAttempt,
+      descriptor: ImmutableQueuedRequestDescriptor,
+    ) => Promise<T>,
+  ): Promise<T> {
+    const proposedFingerprint = canonicalFingerprint(descriptor);
+    let stored = readQueuedAttempt(slot);
+    if (stored && stored.fingerprint !== proposedFingerprint) {
+      const workspaceMode = state.workspace
+        ? workspaceRequestMode(
+            stored.descriptor.path,
+            state.workspace.workspace_id,
+          )
+        : null;
+      if (stored.requestIdentity && state.workspace && workspaceMode) {
+        const latest = await deps.api.getRequest(
+          state.workspace.workspace_id,
+          stored.requestIdentity.request_artifact_id,
+        );
+        await rememberRequest(latest, workspaceMode);
+        if (latest.status === "pending") {
+          throw new AuthoringLogicError(
+            "PENDING_REPLAY",
+            "原请求仍在处理中；完成后将使用新幂等键提交当前更改。",
+            true,
+            latest.request_artifact_id,
+          );
+        }
+        clearQueuedAttempt(slot, stored);
+        stored = null;
+      } else if (stored.descriptor.upload) {
+        throw new AuthoringLogicError(
+          "PENDING_UPLOAD_RESELECT",
+          "上次上传结果尚未确认。请刷新文件状态；如仍未出现，请重新选择原文件后再提交新文件。",
+          false,
+          stored.requestIdentity?.request_artifact_id,
+        );
+      } else {
+        const oldRecord = stored;
+        try {
+          const replayed = await dispatch(
+            oldRecord.payload as P,
+            { idempotencyKey: oldRecord.idempotencyKey },
+            oldRecord.descriptor,
+          );
+          const request = asyncRequestResult(replayed);
+          if (request) {
+            const replayRecord = {
+              ...oldRecord,
+              status: "uncertain" as const,
+              requestIdentity: {
+                request_artifact_id: request.request_artifact_id,
+              },
+            };
+            writeQueuedAttempt(slot, replayRecord);
+            const mode = state.workspace
+              ? workspaceRequestMode(
+                  oldRecord.descriptor.path,
+                  state.workspace.workspace_id,
+                )
+              : null;
+            if (mode) await rememberRequest(request, mode);
+            if (request.status === "pending") {
+              throw new AuthoringLogicError(
+                "PENDING_REPLAY",
+                "原请求仍在处理中；完成后将使用新幂等键提交当前更改。",
+                true,
+                request.request_artifact_id,
+              );
+            }
+          }
+          clearQueuedAttempt(slot, oldRecord);
+          stored = null;
+        } catch (error) {
+          if (
+            error instanceof AuthoringLogicError &&
+            error.code === "PENDING_REPLAY"
+          ) {
+            throw error;
+          }
+          if (isUncertainQueuedDispatch(error)) {
+            writeQueuedAttempt(slot, {
+              ...oldRecord,
+              status: "uncertain",
+              requestIdentity:
+                queueRequestIdentity(error) ?? oldRecord.requestIdentity,
+            });
+            throw error;
+          }
+          clearQueuedAttempt(slot, oldRecord);
+          stored = null;
+        }
+      }
+    }
+    const record: StoredQueuedAttempt = stored ?? {
+      idempotencyKey: createMutationAttempt().idempotencyKey,
+      fingerprint: proposedFingerprint,
+      descriptor,
+      payload: proposedPayload,
+      status: "uncertain",
+    };
+    writeQueuedAttempt(slot, record);
+    try {
+      const result = await dispatch(
+        record.payload as P,
+        { idempotencyKey: record.idempotencyKey },
+        record.descriptor,
+      );
+      clearQueuedAttempt(slot, record);
+      return result;
+    } catch (error) {
+      if (isUncertainQueuedDispatch(error)) {
+        const identity = queueRequestIdentity(error);
+        writeQueuedAttempt(slot, {
+          ...record,
+          status: "uncertain",
+          requestIdentity: identity ?? record.requestIdentity,
+        });
+      } else {
+        clearQueuedAttempt(slot, record);
+      }
+      throw error;
+    }
+  }
+
+  async function resolveStoredOutlineGenerate(workspaceId: string): Promise<void> {
+    const slot = `outline-generate:${workspaceId}`;
+    const stored = readQueuedAttempt(slot);
+    if (!stored) return;
+    const expectedPath = `/api/v2/submission-workspaces/${workspaceId}/outline-candidates`;
+    if (
+      stored.descriptor.method !== "POST" ||
+      stored.descriptor.path !== expectedPath ||
+      workspaceRequestMode(stored.descriptor.path, workspaceId) !== "candidate"
+    ) {
+      throw new AuthoringLogicError(
+        "QUEUED_OUTLINE_IDENTITY_INVALID",
+        "待恢复的大纲请求身份无效",
+        true,
+      );
+    }
+
+    const rememberResolved = async (
+      request: AsyncRequestView,
+      record: StoredQueuedAttempt,
+    ): Promise<void> => {
+      const resolvedRecord = {
+        ...record,
+        status: "uncertain" as const,
+        requestIdentity: {
+          ...record.requestIdentity,
+          request_artifact_id: request.request_artifact_id,
+        },
+      };
+      writeQueuedAttempt(slot, resolvedRecord);
+      await rememberRequest(request, "candidate");
+      if (request.status === "pending") {
+        throw new AuthoringLogicError(
+          "PENDING_REPLAY",
+          "原请求仍在处理中；完成后将使用新幂等键提交当前更改。",
+          true,
+          request.request_artifact_id,
+        );
+      }
+      clearQueuedAttempt(slot, resolvedRecord);
+    };
+
+    const replayStoredPost = async (): Promise<void> => {
+      try {
+        const request = await deps.api.createOutlineCandidate(
+          workspaceId,
+          stored.payload as OutlineCandidateRequest,
+          {
+            attempt: { idempotencyKey: stored.idempotencyKey },
+            ifMatch: stored.descriptor.ifMatch,
+          },
+        );
+        await rememberResolved(request, {
+          ...stored,
+          requestIdentity: stored.requestIdentity
+            ? {
+                ...stored.requestIdentity,
+                retry_same_idempotency_key: false,
+              }
+            : undefined,
+        });
+      } catch (error) {
+        if (
+          error instanceof AuthoringLogicError &&
+          error.code === "PENDING_REPLAY"
+        ) {
+          throw error;
+        }
+        if (isUncertainQueuedDispatch(error)) {
+          writeQueuedAttempt(slot, {
+            ...stored,
+            status: "uncertain",
+            requestIdentity:
+              queueRequestIdentity(error) ?? stored.requestIdentity,
+          });
+        } else {
+          clearQueuedAttempt(slot, stored);
+        }
+        throw error;
+      }
+    };
+
+    if (stored.requestIdentity?.retry_same_idempotency_key === true) {
+      await replayStoredPost();
+      return;
+    }
+    if (!stored.requestIdentity) {
+      await replayStoredPost();
+      return;
+    }
+
+    let request: AsyncRequestView;
+    try {
+      request = await deps.api.getRequest(
+        workspaceId,
+        stored.requestIdentity.request_artifact_id,
+      );
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        clearQueuedAttempt(slot, stored);
+        return;
+      }
+      writeQueuedAttempt(slot, stored);
+      throw error;
+    }
+    await rememberResolved(request, stored);
+  }
 
   function emit(): void {
     if (disposed) return;
@@ -429,13 +899,46 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
   }
 
   const downloadedExports = new Set<string>();
-  const requestModes = new Map<
-    string,
-    "candidate" | "evidence" | "export"
-  >();
+  const requestModes = new Map<string, "candidate" | "evidence" | "export">();
 
-  function isReadyDocument(status: TenderDocumentView["parse_status"]): boolean {
+  function isReadyDocument(
+    status: TenderDocumentView["parse_status"],
+  ): boolean {
     return status === "ready" || status === "completed";
+  }
+
+  async function waitForRequirementCompilation(
+    projectId: string,
+    frozen: FreezeDocumentSetResult,
+  ): Promise<RequirementSetCompileRequestView> {
+    for (let attempt = 0; attempt < 750; attempt += 1) {
+      const request = await deps.api.getRequirementSetCompilation(
+        projectId,
+        frozen.request_artifact_id,
+      );
+      if (
+        request.request_artifact_id !== frozen.request_artifact_id ||
+        request.document_set_revision_id !== frozen.artifact_id ||
+        request.document_set_sha256 !== frozen.sha256 ||
+        request.frozen_input_sha256 !== frozen.frozen_input_sha256
+      ) {
+        throw new AuthoringLogicError(
+          "REQUIREMENT_COMPILE_IDENTITY_MISMATCH",
+          "条款编译结果与冻结输入不匹配",
+          true,
+        );
+      }
+      if (request.status !== "pending") return request;
+      await new Promise<void>((resolve) => {
+        deps.clock.schedule(() => resolve(), 400);
+      });
+    }
+    throw new AuthoringLogicError(
+      "REQUIREMENT_COMPILE_PENDING",
+      "条款仍在编译中，请稍后重试生成大纲",
+      false,
+      frozen.request_artifact_id,
+    );
   }
 
   function triggerDownload(blob: Blob, filename: string): void {
@@ -513,6 +1016,27 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
     await fulfillExport(request);
   }
 
+  async function hydrateStoredWorkspaceRequests(
+    workspaceId: string,
+  ): Promise<void> {
+    const prefix = `/api/v2/submission-workspaces/${workspaceId}/`;
+    for (const [slot, record] of listQueuedAttempts()) {
+      const requestId = record.requestIdentity?.request_artifact_id;
+      if (!requestId || !record.descriptor.path.startsWith(prefix)) continue;
+      const mode = workspaceRequestMode(record.descriptor.path, workspaceId);
+      if (!mode) continue;
+      try {
+        const request = await deps.api.getRequest(workspaceId, requestId);
+        await rememberRequest(request, mode);
+        if (request.status !== "pending") clearQueuedAttempt(slot, record);
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) {
+          clearQueuedAttempt(slot, record);
+        }
+      }
+    }
+  }
+
   async function pollJobs(): Promise<void> {
     if (disposed || !state.route) return;
     const projectId = state.route.projectId;
@@ -544,12 +1068,7 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
           if (latest.status === "succeeded" && latest.result_identity) {
             const mode =
               requestModes.get(latest.request_artifact_id) ??
-              (latest.kind === "SubmissionExport"
-                ? "export"
-                : latest.kind === "OutlineGenerate" ||
-                    latest.kind === "ContentGenerate"
-                  ? "candidate"
-                  : "evidence");
+              asyncRequestMode(latest);
             if (mode === "candidate") {
               await hydrateCandidate(
                 workspaceId,
@@ -651,17 +1170,24 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
         setState({ documents, relations });
       }
       if (route.step === "authoring" || route.step === "export") {
-        const envelope = await deps.api.getProjectWorkspace(
-          route.projectId,
-          signal,
-        );
+        const [envelope, sourceUnits, requirements] = await Promise.all([
+          deps.api.getProjectWorkspace(route.projectId, signal),
+          deps.api
+            .listSourceUnits(route.projectId, signal)
+            .catch(() => state.sourceUnits),
+          deps.api
+            .listRequirements(route.projectId, signal)
+            .catch(() => state.requirements),
+        ]);
         if (signal.aborted) return;
         if (hasDrafts(state.drafts)) {
-          setState({ route });
+          setState({ route, sourceUnits, requirements });
         } else {
           applyWorkspace(envelope, {
             selectedNodeLineageId: route.nodeLineageId,
             route,
+            sourceUnits,
+            requirements,
           });
         }
       }
@@ -670,9 +1196,7 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
         const [assessments, evidenceOverview, assets, requests] =
           await Promise.all([
             deps.api.getAssessments(workspaceId, signal).catch(() => null),
-            deps.api
-              .getEvidenceOverview(workspaceId, signal)
-              .catch(() => null),
+            deps.api.getEvidenceOverview(workspaceId, signal).catch(() => null),
             deps.api
               .listAssets(workspaceId, signal)
               .catch(() => [] as WorkspaceAssetView[]),
@@ -682,14 +1206,10 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
           ]);
         if (signal.aborted) return;
         for (const request of requests) {
-          if (
-            request.kind === "OutlineGenerate" ||
-            request.kind === "ContentGenerate"
-          ) {
-            requestModes.set(request.request_artifact_id, "candidate");
-          } else if (request.kind === "SubmissionExport") {
-            requestModes.set(request.request_artifact_id, "export");
-          }
+          requestModes.set(
+            request.request_artifact_id,
+            asyncRequestMode(request),
+          );
         }
         const monotonicRequests = requests.map((request) =>
           withMonotonicProgress(
@@ -706,10 +1226,13 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
           assets,
           asyncRequests: monotonicRequests,
         });
+        await hydrateStoredWorkspaceRequests(workspaceId);
+        if (signal.aborted) return;
         const latestCandidateRequest = monotonicRequests.find(
           (request) =>
             (request.kind === "OutlineGenerate" ||
-              request.kind === "ContentGenerate") &&
+              (request.kind === "ContentGenerate" &&
+                request.operation !== "match_only")) &&
             request.status === "succeeded" &&
             request.result_identity,
         );
@@ -729,6 +1252,8 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
         ]);
         if (signal.aborted) return;
         setState({ exports, assessments });
+        await hydrateStoredWorkspaceRequests(state.workspace.workspace_id);
+        if (signal.aborted) return;
       }
       setState({ busy: false });
     } catch (error) {
@@ -809,7 +1334,6 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
     | "lineage_id"
     | "revision"
     | "origin"
-    | "dependency_sha256"
     | "content_sha256"
   > {
     return {
@@ -818,7 +1342,6 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
       lineage_id: newUuid(),
       revision: 1,
       origin: "human",
-      dependency_sha256: null,
       content_sha256: "0".repeat(64),
     };
   }
@@ -828,7 +1351,9 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
     previous: ContentBlockV1 | null,
   ): ContentBlockV1 {
     const base =
-      previous && previous.kind === incoming.kind ? previous : { ...newBlockBase() };
+      previous && previous.kind === incoming.kind
+        ? previous
+        : { ...newBlockBase() };
     if (incoming.kind === "rich_text") {
       return {
         ...base,
@@ -894,19 +1419,32 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
         for (const file of files) {
           const digest = await fileSha256Hex(file);
           const key = `${projectId}:${file.name}:${file.size}:${digest}`;
-          const queued = uploadAttempts.get(key) ?? [];
-          const attempt = queued.shift() ?? createMutationAttempt();
-          if (queued.length === 0) uploadAttempts.delete(key);
-          try {
-            await deps.api.uploadTenderDocument(projectId, file, attempt);
-          } catch (error) {
-            if (!(error instanceof ApiError)) {
-              const pending = uploadAttempts.get(key) ?? [];
-              pending.push(attempt);
-              uploadAttempts.set(key, pending);
-            }
-            throw error;
-          }
+          const payload = {
+            projectId,
+            fileName: file.name,
+            mediaType: file.type,
+            size: file.size,
+            sha256: digest,
+          };
+          await dispatchQueued(
+            `upload:${key}`,
+            {
+              version: 1,
+              method: "POST",
+              path: `/api/v2/bid-projects/${projectId}/tender-documents`,
+              body: null,
+              ifMatch: null,
+              upload: {
+                fileName: file.name,
+                mediaType: file.type,
+                byteLength: file.size,
+                sha256: digest,
+              },
+            },
+            payload,
+            (_payload, attempt) =>
+              deps.api.uploadTenderDocument(projectId, file, attempt),
+          );
         }
         const documents = await deps.api.listTenderDocuments(projectId);
         setState({ documents, pendingUploads: [], busy: false, error: null });
@@ -919,11 +1457,23 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
       assertEditable();
       if (!state.route) throw new AuthoringLogicError("NO_ROUTE", "未选择项目");
       try {
-        await deps.api.retryTenderDocument(
-          state.route.projectId,
-          documentId,
-          expectedGeneration,
-          createMutationAttempt(),
+        await dispatchQueued(
+          `tender-retry:${state.route.projectId}:${documentId}`,
+          {
+            version: 1,
+            method: "POST",
+            path: `/api/v2/bid-projects/${state.route.projectId}/tender-documents/${documentId}/retry`,
+            body: { expected_generation: expectedGeneration },
+            ifMatch: null,
+          },
+          { expectedGeneration },
+          (payload, attempt) =>
+            deps.api.retryTenderDocument(
+              state.route!.projectId,
+              documentId,
+              payload.expectedGeneration,
+              attempt,
+            ),
         );
         const documents = await deps.api.listTenderDocuments(
           state.route.projectId,
@@ -976,11 +1526,27 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
       assertEditable();
       if (!state.route) throw new AuthoringLogicError("NO_ROUTE", "未选择项目");
       try {
-        await deps.api.freezeDocumentSet(
-          state.route.projectId,
-          documentIds,
-          expected,
-          createMutationAttempt(),
+        await dispatchQueued(
+          `requirement-compile:${state.route.projectId}`,
+          {
+            version: 1,
+            method: "POST",
+            path: `/api/v2/bid-projects/${state.route.projectId}/document-set-revisions`,
+            body: {
+              document_ids: documentIds,
+              expected_artifact_id: expected?.artifact_id ?? null,
+              expected_sha256: expected?.sha256 ?? null,
+            },
+            ifMatch: null,
+          },
+          { documentIds, expected },
+          (payload, attempt) =>
+            deps.api.freezeDocumentSet(
+              state.route!.projectId,
+              payload.documentIds,
+              payload.expected,
+              attempt,
+            ),
         );
         setState({ error: null });
         await session.refresh();
@@ -1250,6 +1816,7 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
           if (!state.route)
             throw new AuthoringLogicError("NO_ROUTE", "未选择项目");
           let current = head();
+          await resolveStoredOutlineGenerate(current.workspace.workspace_id);
           let docs = state.documents;
           if (docs.length === 0) {
             docs = await deps.api.listTenderDocuments(state.route.projectId);
@@ -1277,59 +1844,143 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
           if (pendingOutline) {
             return;
           }
-          if (
-            !current.workspace.document_set_revision_id ||
-            !current.workspace.document_set_sha256
-          ) {
+          const documentSets = await deps.api.listDocumentSets(
+            state.route.projectId,
+          );
+          const documentSetHead = documentSets[0];
+          if (!documentSetHead) {
             throw new AuthoringLogicError(
               "NO_DOCUMENT_SET",
-              "工作区缺少 DocumentSet 指针，无法冻结",
+              "项目缺少当前 DocumentSet，无法冻结",
             );
           }
-          const pointer = await deps.api.freezeDocumentSet(
-            state.route.projectId,
-            ready.map((doc) => doc.id),
-            {
-              artifact_id: current.workspace.document_set_revision_id,
-              sha256: current.workspace.document_set_sha256,
+          const compilePayload = {
+            documentIds: ready.map((doc) => doc.id),
+            expected: {
+              artifact_id: documentSetHead.artifact_id,
+              sha256: documentSetHead.sha256,
             },
-            createMutationAttempt(),
+          };
+          const frozen = await dispatchQueued(
+            `requirement-compile:${state.route.projectId}`,
+            {
+              version: 1,
+              method: "POST",
+              path: `/api/v2/bid-projects/${state.route.projectId}/document-set-revisions`,
+              body: {
+                document_ids: compilePayload.documentIds,
+                expected_artifact_id: compilePayload.expected.artifact_id,
+                expected_sha256: compilePayload.expected.sha256,
+              },
+              ifMatch: null,
+            },
+            compilePayload,
+            (payload, attempt) =>
+              deps.api.freezeDocumentSet(
+                state.route!.projectId,
+                payload.documentIds,
+                payload.expected,
+                attempt,
+              ),
           );
-          const delay = (ms: number) =>
-            new Promise<void>((resolve) => {
-              deps.clock.schedule(() => resolve(), ms);
-            });
-          let envelope = await deps.api.getProjectWorkspace(
+          const compilation = await waitForRequirementCompilation(
+            state.route.projectId,
+            frozen,
+          );
+          if (compilation.status === "failed") {
+            throw new AuthoringLogicError(
+              compilation.error_code ?? "REQUIREMENT_COMPILE_FAILED",
+              "条款编译失败，无法生成大纲",
+              true,
+              compilation.request_artifact_id,
+            );
+          }
+          const result = compilation.result_identity;
+          if (!result || !result.published_current) {
+            throw new AuthoringLogicError(
+              "REQUIREMENT_COMPILE_SUPERSEDED",
+              "条款编译结果已被更新输入取代，请重新生成",
+              false,
+              compilation.request_artifact_id,
+            );
+          }
+          if (
+            !result.workspace_apply_required ||
+            result.document_set_revision_id !== frozen.artifact_id ||
+            result.document_set_sha256 !== frozen.sha256 ||
+            !result.requirement_projection_id ||
+            !result.requirement_projection_sha256
+          ) {
+            throw new AuthoringLogicError(
+              "REQUIREMENT_COMPILE_RESULT_INVALID",
+              "条款编译结果缺少可信投影身份",
+              true,
+              compilation.request_artifact_id,
+            );
+          }
+          const latest = await deps.api.getProjectWorkspace(
             state.route.projectId,
           );
-          applyWorkspace(envelope);
+          applyWorkspace(latest);
           current = head();
-          const freezeRevision = current.workspace.revision_id;
-          for (let attempt = 0; attempt < 25; attempt += 1) {
-            await delay(400);
-            envelope = await deps.api.getProjectWorkspace(
-              state.route.projectId,
+          const applied = await deps.api.applyRequirementProjection(
+            current.workspace.workspace_id,
+            {
+              artifact_id: result.requirement_projection_id,
+              sha256: result.requirement_projection_sha256,
+            },
+            {
+              artifact_id: current.workspace.revision_id,
+              sha256: current.workspace.sha256,
+            },
+            { attempt: createMutationAttempt(), ifMatch: current.etag },
+          );
+          applyWorkspace(applied);
+          current = head();
+          if (
+            current.workspace.requirement_projection_revision_id !==
+              result.requirement_projection_id ||
+            current.workspace.requirement_projection_sha256 !==
+              result.requirement_projection_sha256 ||
+            current.workspace.document_set_revision_id !== frozen.artifact_id ||
+            current.workspace.document_set_sha256 !== frozen.sha256
+          ) {
+            throw new AuthoringLogicError(
+              "REQUIREMENT_PROJECTION_APPLY_INVALID",
+              "应用后的工作区与冻结条款投影不匹配",
+              true,
             );
-            applyWorkspace(envelope);
-            current = head();
-            if (current.workspace.revision_id !== freezeRevision) break;
           }
-          const setId =
-            current.workspace.document_set_revision_id ?? pointer.artifact_id;
-          const setSha =
-            current.workspace.document_set_sha256 ?? pointer.sha256;
+          const [sourceUnits, requirements] = await Promise.all([
+            deps.api
+              .listSourceUnits(state.route.projectId)
+              .catch(() => state.sourceUnits),
+            deps.api
+              .listRequirements(state.route.projectId)
+              .catch(() => state.requirements),
+          ]);
+          setState({ sourceUnits, requirements });
           const body = buildOutlineCandidateRequest({
             expected_workspace_revision_id: current.workspace.revision_id,
-            document_set_revision_id: setId,
-            document_set_sha256: setSha,
+            document_set_revision_id: frozen.artifact_id,
+            document_set_sha256: frozen.sha256,
           });
-          const request = await deps.api.createOutlineCandidate(
-            current.workspace.workspace_id,
-            body,
+          const request = await dispatchQueued(
+            `outline-generate:${current.workspace.workspace_id}`,
             {
-              attempt: createMutationAttempt(),
+              version: 1,
+              method: "POST",
+              path: `/api/v2/submission-workspaces/${current.workspace.workspace_id}/outline-candidates`,
+              body,
               ifMatch: current.etag,
             },
+            body,
+            (payload, attempt, descriptor) =>
+              deps.api.createOutlineCandidate(
+                current.workspace.workspace_id,
+                payload,
+                { attempt, ifMatch: descriptor.ifMatch },
+              ),
           );
           await rememberRequest(request, "candidate");
           setState({ outlineSourceKey: sourceKey });
@@ -1367,13 +2018,22 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
           expected_workspace_revision_id: current.workspace.revision_id,
         });
         try {
-          const request = await deps.api.createContentCandidate(
-            current.workspace.workspace_id,
-            body,
+          const request = await dispatchQueued(
+            `content-generate:${current.workspace.workspace_id}:${nodeLineageId ?? "workspace"}`,
             {
-              attempt: createMutationAttempt(),
+              version: 1,
+              method: "POST",
+              path: `/api/v2/submission-workspaces/${current.workspace.workspace_id}/content-candidates`,
+              body,
               ifMatch: current.etag,
             },
+            body,
+            (payload, attempt, descriptor) =>
+              deps.api.createContentCandidate(
+                current.workspace.workspace_id,
+                payload,
+                { attempt, ifMatch: descriptor.ifMatch },
+              ),
           );
           await rememberRequest(request, "candidate");
         } catch (error) {
@@ -1385,14 +2045,26 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
         assertEditable();
         const { workspace, etag } = head();
         try {
-          const request = await deps.api.matchEvidence(
-            workspace.workspace_id,
-            nodeLineageId,
-            workspace.revision_id,
+          const evidencePayload = {
+            workspaceRevisionId: workspace.revision_id,
+          };
+          const request = await dispatchQueued(
+            `evidence-match:${workspace.workspace_id}:${nodeLineageId}`,
             {
-              attempt: createMutationAttempt(),
+              version: 1,
+              method: "POST",
+              path: `/api/v2/submission-workspaces/${workspace.workspace_id}/nodes/${nodeLineageId}/evidence-matches`,
+              body: { expected_workspace_revision_id: workspace.revision_id },
               ifMatch: etag,
             },
+            evidencePayload,
+            (payload, attempt, descriptor) =>
+              deps.api.matchEvidence(
+                workspace.workspace_id,
+                nodeLineageId,
+                payload.workspaceRevisionId,
+                { attempt, ifMatch: descriptor.ifMatch },
+              ),
           );
           await rememberRequest(request, "evidence");
         } catch (error) {
@@ -1462,6 +2134,26 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
             error: null,
           });
         } catch (error) {
+          if (
+            error instanceof ApiError &&
+            error.code === "CANDIDATE_OBSOLETE"
+          ) {
+            setState({
+              candidate: null,
+              selectedOperationIndexes: [],
+              selectedOutlineNodeRefs: [],
+            });
+            const latestWorkspace = await deps.api
+              .getWorkspace(workspace.workspace_id)
+              .catch(() => null);
+            if (latestWorkspace) {
+              applyWorkspace(latestWorkspace, {
+                candidate: null,
+                selectedOperationIndexes: [],
+                selectedOutlineNodeRefs: [],
+              });
+            }
+          }
           fail(error);
         }
       }),
@@ -1537,13 +2229,21 @@ export function createBidV2Session(deps: BidV2Deps): BidV2Session {
           expected_workspace_revision_id: workspace.revision_id,
         });
         try {
-          const request = await deps.api.createExport(
-            workspace.workspace_id,
-            body,
+          const request = await dispatchQueued(
+            `submission-export:${workspace.workspace_id}:${mode}:${format}`,
             {
-              attempt: createMutationAttempt(),
+              version: 1,
+              method: "POST",
+              path: `/api/v2/submission-workspaces/${workspace.workspace_id}/exports`,
+              body,
               ifMatch: etag,
             },
+            body,
+            (payload, attempt, descriptor) =>
+              deps.api.createExport(workspace.workspace_id, payload, {
+                attempt,
+                ifMatch: descriptor.ifMatch,
+              }),
           );
           await rememberRequest(request, "export");
         } catch (error) {

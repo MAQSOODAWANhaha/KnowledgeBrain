@@ -281,15 +281,20 @@ BEGIN
   SELECT set_id,typed.project_id,(value->>'requirement_revision_id')::uuid,value->'effective_applicability',
     (value->>'ordinal')::integer FROM jsonb_array_elements(requirement_items);
   publication_status:=kb_bid_v2_publish_requirement_set(set_id,set_sha);
-  IF publication_status='obsolete' THEN
-    result_value:=jsonb_build_object('requirement_set_id',set_id,'requirement_set_sha256',set_sha,
-      'requirement_count',ordinal_value,'status','obsolete','compiler_version',3,'replayed',false);
+  IF publication_status='superseded' THEN
+    result_value:=jsonb_build_object('status','succeeded','published_current',false,
+      'workspace_apply_required',false,'requirement_set_id',set_id,'requirement_set_sha256',set_sha,
+      'document_set_revision_id',typed.document_set_revision_id,
+      'document_set_sha256',typed.document_set_sha256,'requirement_count',ordinal_value,
+      'compiler_version',3,'replayed',false);
     result_sha:=kb_bid_v2_sha256_bytes(convert_to(result_value::text,'UTF8'));
     INSERT INTO bid_async_stage_receipts(request_artifact_id,stage_kind,frozen_input_sha256,result_identity,result_sha256)
     VALUES(p_request_artifact_id,'requirement_compile',p_frozen_input_sha256,result_value,result_sha);
-    UPDATE bid_async_request_snapshot_artifacts SET status='obsolete',result_identity=result_value,
+    UPDATE bid_async_request_snapshot_artifacts SET status='succeeded',result_identity=result_value,
       finished_at=clock_timestamp() WHERE id=p_request_artifact_id;
     RETURN result_value;
+  ELSIF publication_status<>'published' THEN
+    RAISE EXCEPTION 'REQUIREMENT_SET_PUBLICATION_STATUS_INVALID' USING ERRCODE='23514';
   END IF;
   SELECT * INTO STRICT workspace_value FROM bid_submission_workspaces WHERE project_id=typed.project_id;
   SELECT * INTO STRICT projection_head FROM bid_workspace_requirement_projection_current
@@ -309,16 +314,42 @@ BEGIN
       projection_head.artifact_id,projection_head.artifact_sha256,projection_id,projection_sha) THEN
     RAISE EXCEPTION 'REQUIREMENT_PROJECTION_CAS_MISMATCH' USING ERRCODE='40001';
   END IF;
-  PERFORM kb_bid_v2_advance_workspace_projection(workspace_value.id,
-    projection_head.artifact_id,projection_head.artifact_sha256,projection_id,projection_sha);
-  result_value:=jsonb_build_object('requirement_set_id',set_id,'requirement_set_sha256',set_sha,
-    'requirement_count',ordinal_value,'requirement_projection_id',projection_id,
-    'requirement_projection_sha256',projection_sha,'compiler_version',3,'replayed',false);
+  result_value:=jsonb_build_object('status','succeeded','published_current',true,
+    'workspace_apply_required',true,'requirement_set_id',set_id,'requirement_set_sha256',set_sha,
+    'document_set_revision_id',typed.document_set_revision_id,
+    'document_set_sha256',typed.document_set_sha256,'requirement_count',ordinal_value,
+    'requirement_projection_id',projection_id,'requirement_projection_sha256',projection_sha,
+    'compiler_version',3,'replayed',false);
   result_sha:=kb_bid_v2_sha256_bytes(convert_to(result_value::text,'UTF8'));
   INSERT INTO bid_async_stage_receipts(request_artifact_id,stage_kind,frozen_input_sha256,result_identity,result_sha256)
   VALUES(p_request_artifact_id,'requirement_compile',p_frozen_input_sha256,result_value,result_sha);
   UPDATE bid_async_request_snapshot_artifacts SET status='succeeded',result_identity=result_value,
     finished_at=clock_timestamp() WHERE id=p_request_artifact_id;
+  RETURN result_value;
+END $$;
+
+CREATE OR REPLACE FUNCTION kb_bid_v2_get_requirement_set_compile_request(
+  p_project_id uuid,p_request_artifact_id uuid,p_actor kb_actor_identity
+) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE result_value jsonb;
+BEGIN
+  PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
+  SELECT jsonb_build_object(
+    'request_artifact_id',request_value.id,'kind','RequirementSetCompile','status',request_value.status,
+    'request_revision',identity_value.request_revision,'request_sha256',identity_value.request_sha256,
+    'frozen_input_sha256',identity_value.frozen_input_sha256,
+    'document_set_revision_id',identity_value.document_set_revision_id,
+    'document_set_sha256',identity_value.document_set_sha256,
+    'disposition_set_revision_id',identity_value.disposition_set_revision_id,
+    'disposition_set_sha256',identity_value.disposition_set_sha256,
+    'result_identity',request_value.result_identity,'error_code',request_value.error_code)
+  INTO result_value
+  FROM bid_async_request_snapshot_artifacts request_value
+  JOIN bid_requirement_set_compile_request_identities identity_value
+    ON identity_value.request_artifact_id=request_value.id
+  WHERE request_value.id=p_request_artifact_id AND request_value.project_id=p_project_id
+    AND request_value.request_kind='requirement_set_compile'
+    AND identity_value.project_id=p_project_id;
   RETURN result_value;
 END $$;
 
@@ -736,9 +767,6 @@ BEGIN
     VALUES(p_candidate_id,ordinal_value,node_value,kb_bid_v2_sha256_bytes(convert_to(node_value::text,'UTF8')));
     ordinal_value:=ordinal_value+1;
   END LOOP;
-  UPDATE bid_candidate_artifacts SET state='obsolete',decided_at=clock_timestamp()
-    WHERE workspace_id=typed.workspace_id AND candidate_kind='outline'
-      AND state='proposed' AND id<>p_candidate_id;
   published_identity:=jsonb_build_object('artifact_id',p_candidate_id,'sha256',p_candidate_sha256);
   INSERT INTO bid_async_stage_receipts(request_artifact_id,stage_kind,frozen_input_sha256,result_identity,result_sha256)
   VALUES(p_request_artifact_id,'agent_generate',p_frozen_input_sha256,published_identity,p_candidate_sha256);
@@ -1053,6 +1081,7 @@ REVOKE ALL ON FUNCTION
   kb_bid_v2_require_project_owner(uuid,kb_actor_identity),
   kb_bid_v2_load_requirement_set_compile_input_v3(uuid,bigint,kb_sha256),
   kb_bid_v2_publish_requirement_set_v3(uuid,bigint,kb_sha256,jsonb,kb_actor_identity),
+  kb_bid_v2_get_requirement_set_compile_request(uuid,uuid,kb_actor_identity),
   kb_bid_v2_load_outline_generation_input(uuid,bigint,kb_sha256),
   kb_bid_v2_outline_semantics_valid(jsonb,jsonb,jsonb,uuid),
   kb_bid_v2_outline_run_upsert(uuid,kb_sha256,integer,integer,text,jsonb),
@@ -1079,5 +1108,8 @@ GRANT EXECUTE ON FUNCTION
   kb_bid_v2_outline_checkpoint_append(uuid,kb_sha256,integer,integer,text,jsonb),
   kb_bid_v2_outline_checkpoint_latest(uuid,kb_sha256)
 TO kb_runtime_worker;
+GRANT EXECUTE ON FUNCTION
+  kb_bid_v2_get_requirement_set_compile_request(uuid,uuid,kb_actor_identity)
+TO kb_runtime_api;
 
 COMMIT;

@@ -6,17 +6,17 @@ const SCHEMAS: &[(&str, &str, &str)] = &[
     (
         "content-block-v1.schema.json",
         include_str!("../schemas/content-block-v1.schema.json"),
-        "030cb07f3073bb8a7e87f6b045706bc0d4673b34153e827b05f31d7a3f7dc71d",
+        "cec5813fe6cbeb4f407df62bc63198d29a33a3d354917dc50843147fba89313d",
     ),
     (
         "content-generation-input-v1.schema.json",
         include_str!("../schemas/content-generation-input-v1.schema.json"),
-        "bdeed344ec9db8a6a4436aa73da1b63cb84e8eac6c58b0580eaff3eef5913acd",
+        "a7d7a0eef5295da68243d07cf2a001588ea8b28e8d3bee2247cb08cdcc2da290",
     ),
     (
         "content-generation-output-v1.schema.json",
         include_str!("../schemas/content-generation-output-v1.schema.json"),
-        "f049c046fdca4e272d0a0d69c0076f77a252be59218d630acbb2983b8224b037",
+        "14187ee75ad1c275e45f830a106273fdad92b9423f3062912ba45c7f94b0fccd",
     ),
     (
         "composition-spine-v1.schema.json",
@@ -171,7 +171,7 @@ const SCHEMAS: &[(&str, &str, &str)] = &[
     (
         "render-document-snapshot-v2.schema.json",
         include_str!("../schemas/render-document-snapshot-v2.schema.json"),
-        "4047791bd136a261e24e7c05de160ab133ffe0bc521523fc012d0aa6050096e6",
+        "d1b7a9c891e6c206dc0962ce76a6b3d3199817775af06a470f116f95252edc9b",
     ),
     (
         "requirement-compilation-output-v3.schema.json",
@@ -191,7 +191,7 @@ const SCHEMAS: &[(&str, &str, &str)] = &[
     (
         "workspace-mutation-v1.schema.json",
         include_str!("../schemas/workspace-mutation-v1.schema.json"),
-        "e68e9abcd5b122aed0e25bdd63bbc611aef05bc662c74313b698c4915fff545f",
+        "bafc92c867a251c44e6144401eb43855be6fcb7459e4809edef40038d89f3f56",
     ),
 ];
 
@@ -596,7 +596,12 @@ fn approved_v2_contract_invariants_are_frozen() {
         enum_literals(&render["properties"]["output_mode"]["enum"]),
         BTreeSet::from(["preview", "review_draft", "submission"])
     );
-    assert!(render.to_string().contains("include_knowledge_sources"));
+    assert!(!render.to_string().contains("include_knowledge_sources"));
+    assert!(!render.to_string().contains("include_assessment_notices"));
+    let workspace_mutation = by_name("workspace-mutation-v1.schema.json").to_string();
+    assert!(!workspace_mutation.contains("acknowledge_stale"));
+    assert!(!workspace_mutation.contains("insertion_anchor"));
+    assert!(!content_input.to_string().contains("utf8_offset"));
     for identity in [
         "workspace_scope_revision_id",
         "form_definition_occurrences",
@@ -661,6 +666,20 @@ fn approved_v2_contract_invariants_are_frozen() {
             BTreeSet::from(["has_critical_warnings", "has_warnings", "ready"])
         );
     }
+
+    let content_output = by_name("content-generation-output-v1.schema.json");
+    assert_eq!(
+        content_output["$defs"]["operation"]["properties"]["kind"]["const"],
+        "insert_block"
+    );
+    assert!(!content_output.to_string().contains("append_to_block"));
+    assert!(!content_output.to_string().contains("insert_at_anchor"));
+
+    let content_block = by_name("content-block-v1.schema.json");
+    let link_pattern = content_block["$defs"]["mark"]["oneOf"][1]["properties"]["href"]["pattern"]
+        .as_str()
+        .expect("link pattern");
+    assert!(link_pattern.contains("[^/\\s:@?#]+"));
 
     let mutation = by_name("workspace-mutation-v1.schema.json");
     for operation in [

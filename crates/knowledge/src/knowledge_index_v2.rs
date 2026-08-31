@@ -567,7 +567,7 @@ async fn freeze_vector_index_snapshot_v2(
              ON revision.revision_sha256=binding.embedding_revision_sha256
             AND revision.support_state='supported'
           WHERE version.id=$1 AND version.deleted_at IS NULL
-          FOR SHARE OF version,binding,revision",
+          FOR SHARE OF version",
     )
     .bind(product_version_id)
     .fetch_optional(&mut **tx)

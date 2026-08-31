@@ -14,6 +14,22 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
+const MAX_EXPORT_INPUT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_FROZEN_ASSET_COUNT: usize = 2_048;
+const MAX_FROZEN_ASSET_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_FROZEN_ASSET_TOTAL_PIXELS: u64 = 300_000_000;
+const MAX_PDF_ATTACHMENT_BYTES: usize = 128 * 1024 * 1024;
+const MAX_PDF_ATTACHMENT_PAGES: usize = 1_000;
+const MAX_RASTER_TOTAL_BYTES: usize = 256 * 1024 * 1024;
+const MAX_RENDER_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
+const MAX_EXPORT_BLOCK_OCCURRENCES: usize = 100_000;
+const MAX_EXPORT_TABLE_ROWS: u64 = 100_000;
+const MAX_EXPORT_TABLE_CELLS: u64 = 100_000;
+const MAX_EXPORT_FORM_DEFINITIONS: usize = 10_000;
+const MAX_EXPORT_ATTACHMENT_PREPARATIONS: usize = 2_048;
+const MAX_EXPORT_REFERENCE_WORK_BYTES: u64 = 512 * 1024 * 1024;
+const RENDER_TIMEOUT_SECONDS: u64 = 120;
+
 #[derive(Clone)]
 pub struct AppCtx {
     pub pool: Option<PgPool>,
@@ -39,6 +55,11 @@ async fn stage_export_object(
     bytes: &[u8],
     actor: &str,
 ) -> Result<String, JobErr> {
+    if bytes.is_empty() || bytes.len() > MAX_RENDER_OUTPUT_BYTES {
+        return Err(JobErr(
+            "staged export object exceeds the byte budget".into(),
+        ));
+    }
     let object_ref = platform::object_ref(digest);
     let byte_length =
         i64::try_from(bytes.len()).map_err(|_| JobErr("rendered object too large".into()))?;
@@ -60,6 +81,254 @@ async fn stage_export_object(
     Ok(object_ref)
 }
 
+fn validate_frozen_asset_metadata(values: &[serde_json::Value]) -> Result<(), JobErr> {
+    if values.len() > MAX_FROZEN_ASSET_COUNT {
+        return Err(JobErr("frozen render asset count exceeds budget".into()));
+    }
+    let mut identities = std::collections::HashSet::with_capacity(values.len());
+    let mut total_bytes = 0u64;
+    let mut total_pixels = 0u64;
+    let mut total_pdf_pages = 0u64;
+    for value in values {
+        let identity = value
+            .get("asset_revision_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| JobErr("frozen asset identity metadata missing".into()))?;
+        if !identities.insert(identity) {
+            return Err(JobErr("duplicate frozen asset identity".into()));
+        }
+        let media_type = value
+            .get("media_type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| JobErr("frozen asset media type metadata missing".into()))?;
+        let byte_length = value
+            .get("byte_length")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|length| *length > 0)
+            .ok_or_else(|| JobErr("frozen asset byte length metadata missing".into()))?;
+        total_bytes = total_bytes
+            .checked_add(byte_length)
+            .ok_or_else(|| JobErr("frozen asset byte budget overflow".into()))?;
+        if total_bytes > MAX_FROZEN_ASSET_TOTAL_BYTES {
+            return Err(JobErr(
+                "frozen render assets exceed aggregate byte budget".into(),
+            ));
+        }
+        let width = value.get("width_px").and_then(serde_json::Value::as_u64);
+        let height = value.get("height_px").and_then(serde_json::Value::as_u64);
+        let page_count = value.get("page_count").and_then(serde_json::Value::as_u64);
+        if media_type.starts_with("image/") {
+            let (Some(width), Some(height), None) = (width, height, page_count) else {
+                return Err(JobErr("frozen image dimension metadata incomplete".into()));
+            };
+            let pixels = width
+                .checked_mul(height)
+                .ok_or_else(|| JobErr("frozen asset pixel metadata overflow".into()))?;
+            total_pixels = total_pixels
+                .checked_add(pixels)
+                .ok_or_else(|| JobErr("frozen asset pixel budget overflow".into()))?;
+        } else if media_type == "application/pdf" {
+            let (None, None, Some(pages)) = (width, height, page_count) else {
+                return Err(JobErr("frozen PDF page metadata incomplete".into()));
+            };
+            if pages == 0 || pages > MAX_PDF_ATTACHMENT_PAGES as u64 {
+                return Err(JobErr("frozen PDF page count exceeds budget".into()));
+            }
+            total_pdf_pages = total_pdf_pages
+                .checked_add(pages)
+                .ok_or_else(|| JobErr("frozen PDF page count overflow".into()))?;
+        } else if width.is_some() || height.is_some() || page_count.is_some() {
+            return Err(JobErr("non-visual frozen asset has visual metadata".into()));
+        }
+        if total_pixels > MAX_FROZEN_ASSET_TOTAL_PIXELS
+            || total_pdf_pages > MAX_PDF_ATTACHMENT_PAGES as u64
+        {
+            return Err(JobErr(
+                "frozen render assets exceed aggregate page or pixel budget".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_submission_export_metadata(input: &serde_json::Value) -> Result<(), JobErr> {
+    let assets = input
+        .get("assets")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| JobErr("frozen export assets missing".into()))?;
+    validate_frozen_asset_metadata(assets)?;
+    let mut asset_metadata = std::collections::HashMap::with_capacity(assets.len());
+    for asset in assets {
+        let id = asset
+            .get("asset_revision_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| JobErr("frozen asset identity metadata missing".into()))?;
+        let bytes = asset
+            .get("byte_length")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| JobErr("frozen asset byte length metadata missing".into()))?;
+        let pixels = match (
+            asset.get("width_px").and_then(serde_json::Value::as_u64),
+            asset.get("height_px").and_then(serde_json::Value::as_u64),
+        ) {
+            (Some(width), Some(height)) => width
+                .checked_mul(height)
+                .ok_or_else(|| JobErr("frozen asset occurrence pixels overflow".into()))?,
+            _ => 0,
+        };
+        asset_metadata.insert(id, (bytes, pixels));
+    }
+
+    let blocks = input
+        .get("workspace")
+        .and_then(|workspace| workspace.get("blocks"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| JobErr("frozen export blocks missing".into()))?;
+    if blocks.len() > MAX_EXPORT_BLOCK_OCCURRENCES {
+        return Err(JobErr("frozen export block count exceeds budget".into()));
+    }
+    let mut repeated_bytes = 0u64;
+    let mut occurrence_pixels = 0u64;
+    let mut table_rows = 0u64;
+    let mut table_cells = 0u64;
+    for block in blocks {
+        let content = block.get("content").unwrap_or(&serde_json::Value::Null);
+        if let Some(asset_id) = content
+            .get("asset_revision_id")
+            .and_then(serde_json::Value::as_str)
+        {
+            let (bytes, pixels) = asset_metadata
+                .get(asset_id)
+                .ok_or_else(|| JobErr("frozen block references missing asset metadata".into()))?;
+            repeated_bytes = repeated_bytes
+                .checked_add(*bytes)
+                .ok_or_else(|| JobErr("frozen asset reference byte estimate overflow".into()))?;
+            occurrence_pixels = occurrence_pixels
+                .checked_add(*pixels)
+                .ok_or_else(|| JobErr("frozen asset occurrence pixel estimate overflow".into()))?;
+        }
+        if content.get("type").and_then(serde_json::Value::as_str) == Some("table") {
+            let rows = content
+                .get("row_count")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| JobErr("frozen table row metadata missing".into()))?;
+            let columns = content
+                .get("column_count")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| JobErr("frozen table column metadata missing".into()))?;
+            let declared_cells = rows
+                .checked_mul(columns)
+                .ok_or_else(|| JobErr("frozen table cell count overflow".into()))?;
+            let cells = content
+                .get("cells")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| JobErr("frozen table cells missing".into()))?;
+            if u64::try_from(cells.len()).map_err(|_| JobErr("table cell count overflow".into()))?
+                > declared_cells
+            {
+                return Err(JobErr("frozen table cells exceed declared grid".into()));
+            }
+            for cell in cells {
+                let row = cell
+                    .get("row")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| JobErr("table row missing".into()))?;
+                let column = cell
+                    .get("column")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| JobErr("table column missing".into()))?;
+                let rowspan = cell
+                    .get("rowspan")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| JobErr("table rowspan missing".into()))?;
+                let colspan = cell
+                    .get("colspan")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| JobErr("table colspan missing".into()))?;
+                if rowspan == 0
+                    || colspan == 0
+                    || row.checked_add(rowspan).is_none_or(|end| end > rows)
+                    || column.checked_add(colspan).is_none_or(|end| end > columns)
+                    || rowspan.checked_mul(colspan).is_none()
+                {
+                    return Err(JobErr("frozen table span metadata invalid".into()));
+                }
+            }
+            table_rows = table_rows
+                .checked_add(rows)
+                .ok_or_else(|| JobErr("aggregate table row count overflow".into()))?;
+            table_cells = table_cells
+                .checked_add(declared_cells)
+                .ok_or_else(|| JobErr("aggregate table cell count overflow".into()))?;
+        }
+    }
+    let forms = input
+        .get("form_definitions")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| JobErr("frozen form definitions missing".into()))?;
+    let preparations = input
+        .get("attachment_preparations")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| JobErr("frozen attachment preparations missing".into()))?;
+    if forms.len() > MAX_EXPORT_FORM_DEFINITIONS
+        || preparations.len() > MAX_EXPORT_ATTACHMENT_PREPARATIONS
+        || table_rows > MAX_EXPORT_TABLE_ROWS
+        || table_cells > MAX_EXPORT_TABLE_CELLS
+        || occurrence_pixels > MAX_FROZEN_ASSET_TOTAL_PIXELS
+    {
+        return Err(JobErr("frozen export aggregate work exceeds budget".into()));
+    }
+    let mut prepared_pages = 0u64;
+    let mut prepared_pixels = 0u64;
+    for preparation in preparations {
+        let pages = preparation
+            .get("page_assets")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| JobErr("attachment preparation page metadata missing".into()))?;
+        prepared_pages = prepared_pages
+            .checked_add(
+                u64::try_from(pages.len())
+                    .map_err(|_| JobErr("prepared page count overflow".into()))?,
+            )
+            .ok_or_else(|| JobErr("prepared page count overflow".into()))?;
+        for page in pages {
+            let geometry = page
+                .get("geometry")
+                .ok_or_else(|| JobErr("prepared page geometry missing".into()))?;
+            let width = geometry
+                .get("width_px")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| JobErr("prepared page width missing".into()))?;
+            let height = geometry
+                .get("height_px")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| JobErr("prepared page height missing".into()))?;
+            prepared_pixels = prepared_pixels
+                .checked_add(
+                    width
+                        .checked_mul(height)
+                        .ok_or_else(|| JobErr("prepared page pixels overflow".into()))?,
+                )
+                .ok_or_else(|| JobErr("prepared page pixels overflow".into()))?;
+        }
+    }
+    let estimated_work = repeated_bytes
+        .checked_add(
+            prepared_pages
+                .checked_mul(256 * 1024)
+                .ok_or_else(|| JobErr("prepared page output estimate overflow".into()))?,
+        )
+        .and_then(|value| value.checked_add(table_cells.checked_mul(256)?))
+        .ok_or_else(|| JobErr("final export work estimate overflow".into()))?;
+    if prepared_pages > MAX_PDF_ATTACHMENT_PAGES as u64
+        || prepared_pixels > MAX_FROZEN_ASSET_TOTAL_PIXELS
+        || estimated_work > MAX_EXPORT_REFERENCE_WORK_BYTES
+    {
+        return Err(JobErr("frozen export aggregate work exceeds budget".into()));
+    }
+    Ok(())
+}
+
 async fn load_frozen_layout_assets(
     input: &serde_json::Value,
 ) -> Result<Vec<bidding::render_v2::FrozenLayoutAssetV2>, JobErr> {
@@ -68,7 +337,9 @@ async fn load_frozen_layout_assets(
         .get("assets")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| JobErr("frozen export assets missing".into()))?;
+    validate_frozen_asset_metadata(values)?;
     let mut assets = Vec::with_capacity(values.len());
+    let mut decoded_pixels = 0u64;
     for value in values {
         let asset_revision_id = value
             .get("asset_revision_id")
@@ -101,23 +372,46 @@ async fn load_frozen_layout_assets(
         } else {
             Vec::new()
         };
-        if !bytes.is_empty() && hex::encode(Sha256::digest(&bytes)) != sha256 {
-            return Err(JobErr(format!(
-                "frozen asset digest mismatch: {asset_revision_id}"
-            )));
+        if media_type.starts_with("image/") {
+            if bytes.is_empty()
+                || bytes.len() > bidding::render_v2::MAX_FROZEN_IMAGE_BYTES
+                || hex::encode(Sha256::digest(&bytes)) != sha256
+            {
+                return Err(JobErr(format!(
+                    "frozen image asset missing, oversized, or digest-mismatched: {asset_revision_id}"
+                )));
+            }
+            let (width, height) =
+                bidding::render_v2::frozen_image_dimensions(&bytes).map_err(JobErr)?;
+            decoded_pixels = decoded_pixels
+                .checked_add(u64::from(width) * u64::from(height))
+                .ok_or_else(|| JobErr("decoded image pixel budget overflow".into()))?;
+            if decoded_pixels > MAX_FROZEN_ASSET_TOTAL_PIXELS {
+                return Err(JobErr(
+                    "decoded images exceed aggregate pixel budget".into(),
+                ));
+            }
         }
         assets.push(bidding::render_v2::FrozenLayoutAssetV2 {
             asset_revision_id,
             sha256,
             media_type,
             file_name,
-            bytes,
+            bytes: Arc::new(bytes),
         });
     }
     Ok(assets)
 }
 
-async fn rasterize_pdf_pages(bytes: &[u8]) -> Result<Vec<Vec<u8>>, JobErr> {
+async fn rasterize_pdf_pages(
+    bytes: &[u8],
+    expected_geometry: &[(u32, u32)],
+) -> Result<Vec<Vec<u8>>, JobErr> {
+    if bytes.is_empty() || bytes.len() > MAX_PDF_ATTACHMENT_BYTES {
+        return Err(JobErr(
+            "frozen PDF attachment exceeds the source byte budget".into(),
+        ));
+    }
     struct TempDir(std::path::PathBuf);
     impl Drop for TempDir {
         fn drop(&mut self) {
@@ -136,20 +430,56 @@ async fn rasterize_pdf_pages(bytes: &[u8]) -> Result<Vec<Vec<u8>>, JobErr> {
     let mut command = tokio::process::Command::new("pdftoppm");
     command
         .arg("-png")
+        .arg("-cropbox")
         .arg("-r")
         .arg("144")
+        .arg("-f")
+        .arg("1")
+        .arg("-l")
+        .arg((MAX_PDF_ATTACHMENT_PAGES + 1).to_string())
         .arg(&input_path)
         .arg(&output_prefix)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    let output = tokio::time::timeout(std::time::Duration::from_secs(120), command.output())
-        .await
-        .map_err(|_| JobErr("PDF attachment rasterization timed out".into()))?
+    let mut child = command
+        .spawn()
         .map_err(|error| JobErr(format!("start trusted PDF rasterizer: {error}")))?;
-    if !output.status.success() {
-        return Err(JobErr(format!(
-            "trusted PDF rasterizer failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(RENDER_TIMEOUT_SECONDS);
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| JobErr(format!("poll trusted PDF rasterizer: {error}")))?
+        {
+            break status;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let _ = child.kill().await;
+            return Err(JobErr("PDF attachment rasterization timed out".into()));
+        }
+        let raster_bytes = std::fs::read_dir(&directory.0)
+            .map_err(|error| JobErr(format!("inspect PDF raster work directory: {error}")))?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("png")
+            })
+            .try_fold(0u64, |total, entry| {
+                entry
+                    .metadata()
+                    .map(|metadata| total.saturating_add(metadata.len()))
+            })
+            .map_err(|error| JobErr(format!("inspect PDF raster output: {error}")))?;
+        if raster_bytes > MAX_RASTER_TOTAL_BYTES as u64 {
+            let _ = child.kill().await;
+            return Err(JobErr(
+                "rasterized PDF pages exceed the temp byte budget".into(),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    if !status.success() {
+        return Err(JobErr("trusted PDF rasterizer failed".into()));
     }
     let mut paths = std::fs::read_dir(&directory.0)
         .map_err(|error| JobErr(format!("read PDF raster output: {error}")))?
@@ -164,38 +494,41 @@ async fn rasterize_pdf_pages(bytes: &[u8]) -> Result<Vec<Vec<u8>>, JobErr> {
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(u32::MAX)
     });
-    if paths.is_empty() || paths.len() > 10_000 {
+    if paths.is_empty()
+        || paths.len() > MAX_PDF_ATTACHMENT_PAGES
+        || paths.len() != expected_geometry.len()
+    {
         return Err(JobErr(
             "trusted PDF rasterizer returned an invalid page count".into(),
         ));
     }
     let mut pages = Vec::with_capacity(paths.len());
     let mut total_bytes = 0usize;
-    for path in paths {
+    for (index, path) in paths.into_iter().enumerate() {
         let page = std::fs::read(path)
             .map_err(|error| JobErr(format!("read rasterized PDF page: {error}")))?;
         total_bytes = total_bytes
             .checked_add(page.len())
             .ok_or_else(|| JobErr("rasterized PDF pages exceed byte budget".into()))?;
-        if total_bytes > 512 * 1024 * 1024 {
+        if total_bytes > MAX_RASTER_TOTAL_BYTES {
             return Err(JobErr("rasterized PDF pages exceed byte budget".into()));
+        }
+        let actual = bidding::render_v2::frozen_image_dimensions(&page).map_err(JobErr)?;
+        if actual != expected_geometry[index] {
+            return Err(JobErr("trusted PDF rasterizer geometry mismatch".into()));
         }
         pages.push(page);
     }
     Ok(pages)
 }
 
-async fn prepare_pdf_attachments(pool: &PgPool, job: &SubmissionExportJobV2) -> Result<(), JobErr> {
+async fn prepare_pdf_attachments(
+    pool: &PgPool,
+    job: &SubmissionExportJobV2,
+    input: &serde_json::Value,
+) -> Result<(), JobErr> {
     use sha2::{Digest, Sha256};
     const ACTOR: &str = "system:submission-export-v2";
-    let input = bidding::bid_authoring_v2::load_submission_export_input_v2(
-        pool,
-        job.request.request_artifact_id,
-        job.request.request_revision,
-        &job.request.frozen_input_sha256,
-    )
-    .await
-    .map_err(|error| JobErr(error.to_string()))?;
     let blocks = input
         .get("workspace")
         .and_then(|value| value.get("blocks"))
@@ -209,7 +542,50 @@ async fn prepare_pdf_attachments(pool: &PgPool, job: &SubmissionExportJobV2) -> 
         .get("attachment_preparations")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| JobErr("frozen attachment preparations missing".into()))?;
+    validate_frozen_asset_metadata(assets)?;
     let mut handled = std::collections::HashSet::new();
+    let mut raster_total_pages = 0u64;
+    let mut raster_total_pixels = 0u64;
+    let mut raster_total_bytes = 0usize;
+    for preparation in preparations {
+        let page_assets = preparation
+            .get("page_assets")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| JobErr("attachment preparation page metadata missing".into()))?;
+        raster_total_pages = raster_total_pages
+            .checked_add(
+                u64::try_from(page_assets.len())
+                    .map_err(|_| JobErr("prepared page count overflow".into()))?,
+            )
+            .ok_or_else(|| JobErr("prepared page count overflow".into()))?;
+        for page in page_assets {
+            let geometry = page
+                .get("geometry")
+                .ok_or_else(|| JobErr("prepared page geometry missing".into()))?;
+            let width = geometry
+                .get("width_px")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| JobErr("prepared page width missing".into()))?;
+            let height = geometry
+                .get("height_px")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| JobErr("prepared page height missing".into()))?;
+            raster_total_pixels = raster_total_pixels
+                .checked_add(
+                    width
+                        .checked_mul(height)
+                        .ok_or_else(|| JobErr("prepared page pixel overflow".into()))?,
+                )
+                .ok_or_else(|| JobErr("prepared page pixel overflow".into()))?;
+        }
+    }
+    if raster_total_pages > MAX_PDF_ATTACHMENT_PAGES as u64
+        || raster_total_pixels > MAX_FROZEN_ASSET_TOTAL_PIXELS
+    {
+        return Err(JobErr(
+            "prepared PDF geometry exceeds aggregate budget".into(),
+        ));
+    }
     for block in blocks {
         let content = block.get("content").unwrap_or(&serde_json::Value::Null);
         if block.get("kind").and_then(serde_json::Value::as_str) != Some("attachment_ref")
@@ -253,16 +629,85 @@ async fn prepare_pdf_attachments(pool: &PgPool, job: &SubmissionExportJobV2) -> 
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| JobErr("frozen PDF attachment digest missing".into()))?
             .to_owned();
+        let source_length = asset
+            .get("byte_length")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| JobErr("frozen PDF byte length metadata missing".into()))?;
+        if source_length > MAX_PDF_ATTACHMENT_BYTES as u64 {
+            return Err(JobErr(
+                "frozen PDF attachment exceeds the source byte budget".into(),
+            ));
+        }
         let read_sha = source_sha.clone();
         let source_bytes = tokio::task::spawn_blocking(move || platform::read_blob(&read_sha))
             .await
             .map_err(|error| JobErr(format!("join frozen PDF attachment read: {error}")))?
             .map_err(|error| JobErr(format!("read frozen PDF attachment: {error}")))?;
-        if hex::encode(Sha256::digest(&source_bytes)) != source_sha {
-            return Err(JobErr("frozen PDF attachment digest mismatch".into()));
+        if u64::try_from(source_bytes.len()).ok() != Some(source_length)
+            || hex::encode(Sha256::digest(&source_bytes)) != source_sha
+        {
+            return Err(JobErr(
+                "frozen PDF attachment length or digest mismatch".into(),
+            ));
         }
-        let pages = rasterize_pdf_pages(&source_bytes).await?;
+        let geometry =
+            bidding::render_v2::frozen_pdf_raster_geometry(&source_bytes).map_err(JobErr)?;
+        let declared_pages = asset
+            .get("page_count")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| JobErr("frozen PDF page count metadata missing".into()))?;
+        if u64::try_from(geometry.len()).ok() != Some(declared_pages) {
+            return Err(JobErr("frozen PDF page count metadata mismatch".into()));
+        }
+        raster_total_pages = raster_total_pages
+            .checked_add(declared_pages)
+            .ok_or_else(|| JobErr("rasterized PDF page count overflow".into()))?;
+        for (width, height) in &geometry {
+            raster_total_pixels = raster_total_pixels
+                .checked_add(u64::from(*width) * u64::from(*height))
+                .ok_or_else(|| JobErr("rasterized PDF pixel budget overflow".into()))?;
+        }
+        if raster_total_pages > MAX_PDF_ATTACHMENT_PAGES as u64
+            || raster_total_pixels > MAX_FROZEN_ASSET_TOTAL_PIXELS
+        {
+            return Err(JobErr(
+                "rasterized PDF geometry exceeds aggregate budget".into(),
+            ));
+        }
+        let pages = rasterize_pdf_pages(&source_bytes, &geometry).await?;
+        let mut total_pixels = 0u64;
+        for page in &pages {
+            raster_total_bytes = raster_total_bytes
+                .checked_add(page.len())
+                .ok_or_else(|| JobErr("rasterized PDF aggregate bytes overflow".into()))?;
+            if raster_total_bytes > MAX_RASTER_TOTAL_BYTES {
+                return Err(JobErr(
+                    "rasterized PDF pages exceed aggregate byte budget".into(),
+                ));
+            }
+            let (width, height) =
+                bidding::render_v2::frozen_image_dimensions(page).map_err(JobErr)?;
+            total_pixels = total_pixels
+                .checked_add(
+                    u64::from(width)
+                        .checked_mul(u64::from(height))
+                        .ok_or_else(|| JobErr("rasterized PDF pixel budget overflow".into()))?,
+                )
+                .ok_or_else(|| JobErr("rasterized PDF pixel budget overflow".into()))?;
+            if total_pixels > MAX_FROZEN_ASSET_TOTAL_PIXELS {
+                return Err(JobErr(
+                    "rasterized PDF pages exceed aggregate pixel budget".into(),
+                ));
+            }
+            i64::try_from(page.len())
+                .map_err(|_| JobErr("rasterized PDF page exceeds size limit".into()))?;
+            i32::try_from(width)
+                .map_err(|_| JobErr("rasterized PDF page width exceeds limit".into()))?;
+            i32::try_from(height)
+                .map_err(|_| JobErr("rasterized PDF page height exceeds limit".into()))?;
+        }
         let preparation_id = Uuid::new_v4();
+        let mut cleanup = platform::StagedObjectCleanupGuard::new(pool, ACTOR);
         let mut page_item_ids = Vec::with_capacity(pages.len());
         let mut staging_ids = Vec::with_capacity(pages.len());
         let mut object_refs = Vec::with_capacity(pages.len());
@@ -272,10 +717,11 @@ async fn prepare_pdf_attachments(pool: &PgPool, job: &SubmissionExportJobV2) -> 
         let mut widths = Vec::with_capacity(pages.len());
         let mut heights = Vec::with_capacity(pages.len());
         for page in pages {
-            let (width, height) =
-                bidding::render_v2::frozen_image_dimensions(&page).map_err(JobErr)?;
+            let (width, height) = bidding::render_v2::frozen_image_dimensions(&page)
+                .expect("raster page metadata was preflighted");
             let digest = hex::encode(Sha256::digest(&page));
             let staging_id = Uuid::new_v4();
+            cleanup.register(staging_id);
             match stage_export_object(pool, staging_id, &digest, "image/png", &page, ACTOR).await {
                 Ok(object_ref) => {
                     page_item_ids.push(Uuid::new_v4());
@@ -283,20 +729,11 @@ async fn prepare_pdf_attachments(pool: &PgPool, job: &SubmissionExportJobV2) -> 
                     object_refs.push(object_ref);
                     digests.push(digest);
                     media_types.push("image/png".to_owned());
-                    byte_lengths
-                        .push(i64::try_from(page.len()).map_err(|_| {
-                            JobErr("rasterized PDF page exceeds size limit".into())
-                        })?);
-                    widths.push(
-                        i32::try_from(width).map_err(|_| {
-                            JobErr("rasterized PDF page width exceeds limit".into())
-                        })?,
+                    byte_lengths.push(
+                        i64::try_from(page.len()).expect("raster page length was preflighted"),
                     );
-                    heights.push(
-                        i32::try_from(height).map_err(|_| {
-                            JobErr("rasterized PDF page height exceeds limit".into())
-                        })?,
-                    );
+                    widths.push(i32::try_from(width).expect("raster width was preflighted"));
+                    heights.push(i32::try_from(height).expect("raster height was preflighted"));
                 }
                 Err(error) => {
                     for staged in &staging_ids {
@@ -329,8 +766,15 @@ async fn prepare_pdf_attachments(pool: &PgPool, job: &SubmissionExportJobV2) -> 
             Ok(value) => {
                 if value.get("replayed").and_then(serde_json::Value::as_bool) == Some(true) {
                     for staged in &staging_ids {
-                        let _ = platform::abandon_object_upload(pool, *staged, ACTOR).await;
+                        if platform::abandon_object_upload(pool, *staged, ACTOR)
+                            .await
+                            .is_ok()
+                        {
+                            cleanup.disarm(*staged);
+                        }
                     }
+                } else {
+                    cleanup.disarm_all();
                 }
             }
             Err(error) => {
@@ -350,11 +794,29 @@ async fn process_submission_export_v2(
 ) -> Result<(), JobErr> {
     use sha2::{Digest, Sha256};
     const ACTOR: &str = "system:submission-export-v2";
-    prepare_pdf_attachments(pool, job)
+    let preflight_input = bidding::bid_authoring_v2::load_submission_export_input_v2(
+        pool,
+        job.request.request_artifact_id,
+        job.request.request_revision,
+        &job.request.frozen_input_sha256,
+    )
+    .await
+    .map_err(|error| JobErr(error.to_string()))?;
+    if serde_json::to_vec(&preflight_input)
+        .map_err(|error| JobErr(format!("serialize frozen export input: {error}")))?
+        .len()
+        > MAX_EXPORT_INPUT_BYTES
+    {
+        return Err(JobErr("frozen export input exceeds the byte budget".into()));
+    }
+    validate_submission_export_metadata(&preflight_input)?;
+    prepare_pdf_attachments(pool, job, &preflight_input)
         .await
         .map_err(|error| JobErr(format!("ATTACHMENT_PREPARATION_FAILED: {}", error.0)))?;
     let font_digest = hex::encode(Sha256::digest(bidding::render_v2::PDF_FONT_BYTES));
     let font_staging_id = Uuid::new_v4();
+    let mut font_cleanup = platform::StagedObjectCleanupGuard::new(pool, ACTOR);
+    font_cleanup.register(font_staging_id);
     let font_ref = stage_export_object(
         pool,
         font_staging_id,
@@ -381,7 +843,12 @@ async fn process_submission_export_v2(
     {
         Ok(value) => value,
         Err(error) => {
-            let _ = platform::abandon_object_upload(pool, font_staging_id, ACTOR).await;
+            if platform::abandon_object_upload(pool, font_staging_id, ACTOR)
+                .await
+                .is_ok()
+            {
+                font_cleanup.disarm(font_staging_id);
+            }
             return Err(JobErr(error.to_string()));
         }
     };
@@ -391,7 +858,14 @@ async fn process_submission_export_v2(
         == Some(true)
         || prepared.get("render_snapshot_sha256").is_none()
     {
-        let _ = platform::abandon_object_upload(pool, font_staging_id, ACTOR).await;
+        if platform::abandon_object_upload(pool, font_staging_id, ACTOR)
+            .await
+            .is_ok()
+        {
+            font_cleanup.disarm(font_staging_id);
+        }
+    } else {
+        font_cleanup.disarm(font_staging_id);
     }
     if prepared.get("render_snapshot_sha256").is_none() {
         return Ok(());
@@ -417,6 +891,14 @@ async fn process_submission_export_v2(
     )
     .await
     .map_err(|error| JobErr(error.to_string()))?;
+    if serde_json::to_vec(&input)
+        .map_err(|error| JobErr(format!("serialize frozen export input: {error}")))?
+        .len()
+        > MAX_EXPORT_INPUT_BYTES
+    {
+        return Err(JobErr("frozen export input exceeds the byte budget".into()));
+    }
+    validate_submission_export_metadata(&input)?;
     let request = input
         .get("request")
         .ok_or_else(|| JobErr("export request identity missing".into()))?;
@@ -450,19 +932,38 @@ async fn process_submission_export_v2(
         watermark,
     )
     .map_err(JobErr)?;
-    let (bytes, media_type) = match request.get("format").and_then(serde_json::Value::as_str) {
-        Some("docx") => (
-            bidding::render_v2::render_docx(&layout).map_err(JobErr)?,
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        ),
-        Some("pdf") => (
-            bidding::render_v2::render_pdf(&layout).map_err(JobErr)?,
-            "application/pdf",
-        ),
-        _ => return Err(JobErr("frozen export format invalid".into())),
-    };
+    let format = request
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| JobErr("frozen export format invalid".into()))?
+        .to_owned();
+    let rendered = tokio::time::timeout(
+        std::time::Duration::from_secs(RENDER_TIMEOUT_SECONDS),
+        tokio::task::spawn_blocking(move || match format.as_str() {
+            "docx" => bidding::render_v2::render_docx(&layout).map(|bytes| {
+                (
+                    bytes,
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            }),
+            "pdf" => {
+                bidding::render_v2::render_pdf(&layout).map(|bytes| (bytes, "application/pdf"))
+            }
+            _ => Err("frozen export format invalid".into()),
+        }),
+    )
+    .await
+    .map_err(|_| JobErr("rendering timed out".into()))?
+    .map_err(|error| JobErr(format!("join renderer: {error}")))?
+    .map_err(JobErr)?;
+    let (bytes, media_type) = rendered;
+    if bytes.is_empty() || bytes.len() > MAX_RENDER_OUTPUT_BYTES {
+        return Err(JobErr("rendered output exceeds the byte budget".into()));
+    }
     let output_digest = hex::encode(Sha256::digest(&bytes));
     let output_staging_id = Uuid::new_v4();
+    let mut output_cleanup = platform::StagedObjectCleanupGuard::new(pool, ACTOR);
+    output_cleanup.register(output_staging_id);
     let output_ref = stage_export_object(
         pool,
         output_staging_id,
@@ -498,7 +999,12 @@ async fn process_submission_export_v2(
     .await;
     match result {
         Err(error) => {
-            let _ = platform::abandon_object_upload(pool, output_staging_id, ACTOR).await;
+            if platform::abandon_object_upload(pool, output_staging_id, ACTOR)
+                .await
+                .is_ok()
+            {
+                output_cleanup.disarm(output_staging_id);
+            }
             Err(JobErr(error.to_string()))
         }
         Ok(identity) => {
@@ -506,8 +1012,12 @@ async fn process_submission_export_v2(
                 .get("artifact_id")
                 .and_then(serde_json::Value::as_str)
                 .and_then(|raw| Uuid::parse_str(raw).ok());
-            if persisted_output_id != Some(output_id) {
-                let _ = platform::abandon_object_upload(pool, output_staging_id, ACTOR).await;
+            if persisted_output_id == Some(output_id)
+                || platform::abandon_object_upload(pool, output_staging_id, ACTOR)
+                    .await
+                    .is_ok()
+            {
+                output_cleanup.disarm(output_staging_id);
             }
             Ok(())
         }
@@ -531,23 +1041,42 @@ impl oxana::Worker<SubmissionExportJobV2> for SubmissionExportV2Worker {
         let Some(pool) = &self.pool else {
             return Err(JobErr("postgres not configured".into()));
         };
+        if bid_request_is_terminal(pool, job.request.request_artifact_id).await? {
+            return Ok(());
+        }
         let result = process_submission_export_v2(pool, &job).await;
+        if result.is_err() && bid_request_is_terminal(pool, job.request.request_artifact_id).await?
+        {
+            return Ok(());
+        }
         if let Err(error) = &result
-            && ctx.meta.retries >= platform::BID_AUTHORING_V2_MAX_RETRIES
+            && bid_failure_is_final(ctx.meta.retries)
         {
             let error_code = if error.0.starts_with("ATTACHMENT_PREPARATION_FAILED:") {
                 "ATTACHMENT_PREPARATION_FAILED"
             } else {
                 "RENDERER_FAILED"
             };
-            let _ = bidding::bid_authoring_v2::mark_submission_export_failed_v2(
+            bidding::bid_authoring_v2::mark_submission_export_failed_v2(
                 pool,
                 job.request.request_artifact_id,
                 job.request.request_revision,
                 &job.request.frozen_input_sha256,
                 error_code,
             )
-            .await;
+            .await
+            .map_err(|failure| {
+                JobErr(format!(
+                    "submission export failed ({error}); terminal transition failed ({failure})"
+                ))
+            })?;
+            require_bid_request_terminal(
+                pool,
+                job.request.request_artifact_id,
+                "submission export",
+            )
+            .await?;
+            return Ok(());
         }
         result
     }
@@ -575,6 +1104,31 @@ impl std::fmt::Display for JobErr {
 }
 
 impl std::error::Error for JobErr {}
+
+async fn bid_request_is_terminal(pool: &PgPool, request_artifact_id: Uuid) -> Result<bool, JobErr> {
+    let status = bidding::bid_authoring_v2::async_request_status_v2(pool, request_artifact_id)
+        .await
+        .map_err(|error| JobErr(format!("load bidding request status: {error}")))?;
+    Ok(matches!(status.as_deref(), Some("succeeded" | "failed")))
+}
+
+fn bid_failure_is_final(retries: u32) -> bool {
+    retries >= platform::BID_AUTHORING_V2_MAX_RETRIES
+}
+
+async fn require_bid_request_terminal(
+    pool: &PgPool,
+    request_artifact_id: Uuid,
+    operation: &str,
+) -> Result<(), JobErr> {
+    if bid_request_is_terminal(pool, request_artifact_id).await? {
+        Ok(())
+    } else {
+        Err(JobErr(format!(
+            "{operation} terminal transition returned without settling the request"
+        )))
+    }
+}
 
 pub struct TenderDocumentProcessV2Worker {
     pool: Option<PgPool>,
@@ -609,6 +1163,9 @@ impl oxana::Worker<TenderDocumentProcessJobV2> for TenderDocumentProcessV2Worker
             return Err(JobErr("postgres not configured".into()));
         };
         let request_artifact_id = job.request.request_artifact_id;
+        if bid_request_is_terminal(pool, request_artifact_id).await? {
+            return Ok(());
+        }
         let payload = BidAuthoringJobPayloadV2::TenderDocumentProcess {
             request: job.request,
             project_id: job.project_id,
@@ -616,21 +1173,42 @@ impl oxana::Worker<TenderDocumentProcessJobV2> for TenderDocumentProcessV2Worker
         };
         let service = bidding::tender_process::TenderDocumentProcessService::new(
             bidding::tender_process::PgTenderDocumentProcessRepository::new(pool.clone()),
-            bidding::tender_process::DocParserTenderSourceConverter,
+            bidding::tender_process::DocReaderGrpcTenderSourceConverter,
             bidding::tender_process::ExistingTenderVisionEnricher,
             bidding::tender_process::InactiveTenderProcessTransport,
         );
-        match service.process(&payload).await {
+        // Keep stage/build/publish/abandon in an owned task: cancellation of the
+        // queue lease cannot strand a half-finished tender publication.
+        let outcome = tokio::spawn(async move { service.process(&payload).await })
+            .await
+            .map_err(|error| JobErr(format!("tender process task join failed: {error}")))?;
+        match outcome {
             Ok(_) => Ok(()),
             Err(error) => {
-                tracing::error!(%error, request_artifact_id = %request_artifact_id, "tender document process failed");
-                if ctx.meta.retries >= platform::BID_AUTHORING_V2_MAX_RETRIES {
-                    let _ = bidding::bid_authoring_v2::mark_tender_document_failed_v2(
+                if bid_request_is_terminal(pool, request_artifact_id).await? {
+                    return Ok(());
+                }
+                tracing::warn!(
+                    request_artifact_id = %request_artifact_id,
+                    retry = ctx.meta.retries,
+                    %error,
+                    "tender document processing attempt failed"
+                );
+                if bid_failure_is_final(ctx.meta.retries) {
+                    bidding::bid_authoring_v2::mark_tender_document_failed_v2(
                         pool,
                         request_artifact_id,
                         "AGENT_OUTPUT_INVALID",
                     )
-                    .await;
+                    .await
+                    .map_err(|failure| {
+                        JobErr(format!(
+                            "tender parse failed ({error}); terminal transition failed ({failure})"
+                        ))
+                    })?;
+                    require_bid_request_terminal(pool, request_artifact_id, "tender process")
+                        .await?;
+                    return Ok(());
                 }
                 Err(JobErr(error.to_string()))
             }
@@ -670,6 +1248,9 @@ impl oxana::Worker<RequirementSetCompileJobV2> for RequirementSetCompileV2Worker
         let Some(pool) = &self.pool else {
             return Err(JobErr("postgres not configured".into()));
         };
+        if bid_request_is_terminal(pool, job.request.request_artifact_id).await? {
+            return Ok(());
+        }
         let result = bidding::bid_authoring_v2::compile_requirement_set_v2(
             pool,
             job.request.request_artifact_id,
@@ -680,7 +1261,10 @@ impl oxana::Worker<RequirementSetCompileJobV2> for RequirementSetCompileV2Worker
         match result {
             Ok(_) => Ok(()),
             Err(error) => {
-                if ctx.meta.retries >= platform::BID_AUTHORING_V2_MAX_RETRIES {
+                if bid_request_is_terminal(pool, job.request.request_artifact_id).await? {
+                    return Ok(());
+                }
+                if bid_failure_is_final(ctx.meta.retries) {
                     bidding::bid_authoring_v2::mark_requirement_set_compile_failed_v2(
                         pool,
                         job.request.request_artifact_id,
@@ -694,6 +1278,13 @@ impl oxana::Worker<RequirementSetCompileJobV2> for RequirementSetCompileV2Worker
                             "requirement compile failed ({error}); terminal transition failed ({failure})"
                         ))
                     })?;
+                    require_bid_request_terminal(
+                        pool,
+                        job.request.request_artifact_id,
+                        "requirement compile",
+                    )
+                    .await?;
+                    return Ok(());
                 }
                 Err(JobErr(error.to_string()))
             }
@@ -730,6 +1321,9 @@ impl oxana::Worker<OutlineGenerateJobV2> for OutlineGenerateV2Worker {
         let Some(pool) = &self.pool else {
             return Err(JobErr("postgres not configured".into()));
         };
+        if bid_request_is_terminal(pool, job.request.request_artifact_id).await? {
+            return Ok(());
+        }
         let attempt = ctx.meta.retries as i32 + 1;
         let max_attempts = platform::BID_AUTHORING_V2_MAX_RETRIES as i32 + 1;
         match bidding::outline_agent::run_outline_generation(
@@ -744,15 +1338,23 @@ impl oxana::Worker<OutlineGenerateJobV2> for OutlineGenerateV2Worker {
             Err(error)
                 if error.disposition == bidding::outline_agent::RetryDisposition::Obsolete =>
             {
-                tracing::info!(request_artifact_id=%job.request.request_artifact_id, code=%error.code, error=%error.message,
-                    "skip outline generation; request or attempt is obsolete");
+                tracing::info!(
+                    request_artifact_id = %job.request.request_artifact_id,
+                    code = %error.code,
+                    error = %error.message,
+                    "skip outline generation; request or attempt is obsolete"
+                );
                 Ok(())
             }
             Err(error)
                 if error.disposition == bidding::outline_agent::RetryDisposition::Deterministic =>
             {
-                tracing::error!(request_artifact_id=%job.request.request_artifact_id, code=%error.code, error=%error.message,
-                    "outline generation failed with deterministic error");
+                tracing::error!(
+                    request_artifact_id = %job.request.request_artifact_id,
+                    code = %error.code,
+                    error = %error.message,
+                    "outline generation failed with deterministic error"
+                );
                 bidding::bid_authoring_v2::mark_outline_generation_failed_v2(
                     pool,
                     job.request.request_artifact_id,
@@ -764,19 +1366,40 @@ impl oxana::Worker<OutlineGenerateJobV2> for OutlineGenerateV2Worker {
                 .map_err(|persist| {
                     JobErr(format!("terminal outline failure persistence: {persist}"))
                 })?;
+                require_bid_request_terminal(
+                    pool,
+                    job.request.request_artifact_id,
+                    "outline generation",
+                )
+                .await?;
                 Ok(())
             }
             Err(error) => {
-                tracing::error!(request_artifact_id=%job.request.request_artifact_id, attempt, max_attempts,
-                    code=%error.code, error=%error.message, "outline generation transient failure");
+                tracing::error!(
+                    request_artifact_id = %job.request.request_artifact_id,
+                    attempt,
+                    max_attempts,
+                    code = %error.code,
+                    error = %error.message,
+                    "outline generation transient failure"
+                );
                 if attempt < max_attempts {
                     let _ = bidding::bid_authoring_v2::upsert_outline_agent_run_v2(
-                        pool, &job.request, attempt, max_attempts, "generating",
+                        pool,
+                        &job.request,
+                        attempt,
+                        max_attempts,
+                        "generating",
                         serde_json::json!({
-                            "label":"生成候选","phase":"retrying","attempt":attempt,"max_attempts":max_attempts,
-                            "retry_count":attempt,"last_error_code":error.code
+                            "label": "生成候选",
+                            "phase": "retrying",
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "retry_count": attempt,
+                            "last_error_code": error.code
                         }),
-                    ).await;
+                    )
+                    .await;
                     Err(JobErr(error.to_string()))
                 } else {
                     bidding::bid_authoring_v2::mark_outline_generation_failed_v2(
@@ -790,7 +1413,13 @@ impl oxana::Worker<OutlineGenerateJobV2> for OutlineGenerateV2Worker {
                     .map_err(|persist| {
                         JobErr(format!("terminal outline failure persistence: {persist}"))
                     })?;
-                    Err(JobErr(error.to_string()))
+                    require_bid_request_terminal(
+                        pool,
+                        job.request.request_artifact_id,
+                        "outline generation",
+                    )
+                    .await?;
+                    Ok(())
                 }
             }
         }
@@ -977,15 +1606,6 @@ fn content_candidate_output(
             let (lineage, node) = node_revisions
                 .get(node_revision)
                 .ok_or_else(|| "insertion anchor node is outside target".to_string())?;
-            if anchor
-                .get("utf8_offset")
-                .is_some_and(|value| !value.is_null())
-            {
-                return Err(
-                    "whole-block generation does not support an interior UTF-8 insertion anchor"
-                        .into(),
-                );
-            }
             let ordinal = if let Some(block_revision) = anchor
                 .get("block_revision_id")
                 .and_then(serde_json::Value::as_str)
@@ -1121,8 +1741,6 @@ fn content_candidate_output(
         block.lineage_id = stable_candidate_uuid(&[&dependency, &client_ref, "lineage"]);
         block.revision = 1;
         block.origin = bidding::content_block::BlockOrigin::AgentCandidate;
-        block.dependency_sha256 = Some(dependency.clone());
-        block.stale = false;
         block.content_sha256 = block.content.sha256().map_err(|error| error.to_string())?;
         block.validate().map_err(str::to_owned)?;
         if let bidding::content_block::BlockContent::Image {
@@ -1283,6 +1901,59 @@ fn content_candidate_output(
         .ok_or_else(|| "notices must be an array".to_string())?;
     if notices.len() > 10_000 {
         return Err("candidate notice bound exceeded".into());
+    }
+    let allowed_requirements = input
+        .get("requirements")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|requirement| {
+            requirement
+                .get("requirement_revision_id")
+                .and_then(serde_json::Value::as_str)
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let notice_codes = [
+        "NO_EVIDENCE",
+        "WEAK_EVIDENCE",
+        "UNSUPPORTED_FACT",
+        "FORM_CONSTRAINT",
+        "TARGET_ALREADY_HAS_CONTENT",
+    ];
+    for notice in notices {
+        let Some(object) = notice.as_object() else {
+            return Err("candidate notice must be an object".into());
+        };
+        let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
+        let requirement = notice
+            .get("requirement_revision_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let message = notice
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if keys != ["code", "message", "requirement_revision_id", "severity"]
+            || !notice_codes.contains(
+                &notice
+                    .get("code")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+            )
+            || !["info", "warning"].contains(
+                &notice
+                    .get("severity")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+            )
+            || message.is_empty()
+            || message.len() > 4_096
+            || Uuid::parse_str(requirement).is_err()
+            || !allowed_requirements.contains(requirement)
+        {
+            return Err("candidate notice is outside the frozen closed contract".into());
+        }
     }
     Ok(output)
 }
@@ -1589,23 +2260,42 @@ impl oxana::Worker<ContentGenerateJobV2> for ContentGenerateV2Worker {
         let Some(pool) = &self.pool else {
             return Err(JobErr("postgres not configured".into()));
         };
+        if bid_request_is_terminal(pool, job.request.request_artifact_id).await? {
+            return Ok(());
+        }
         let result = process_content_generation_v2(pool, &job).await;
+        if result.is_err() && bid_request_is_terminal(pool, job.request.request_artifact_id).await?
+        {
+            return Ok(());
+        }
         if let Err(error) = &result
-            && ctx.meta.retries >= platform::BID_AUTHORING_V2_MAX_RETRIES
+            && bid_failure_is_final(ctx.meta.retries)
         {
             let error_code = if error.0.starts_with("EVIDENCE_UNAVAILABLE:") {
                 "EVIDENCE_UNAVAILABLE"
             } else {
                 "AGENT_OUTPUT_INVALID"
             };
-            let _ = bidding::bid_authoring_v2::mark_content_generation_failed_v2(
+            bidding::bid_authoring_v2::mark_content_generation_failed_v2(
                 pool,
                 job.request.request_artifact_id,
                 job.request.request_revision,
                 &job.request.frozen_input_sha256,
                 error_code,
             )
-            .await;
+            .await
+            .map_err(|failure| {
+                JobErr(format!(
+                    "content generation failed ({error}); terminal transition failed ({failure})"
+                ))
+            })?;
+            require_bid_request_terminal(
+                pool,
+                job.request.request_artifact_id,
+                "content generation",
+            )
+            .await?;
+            return Ok(());
         }
         result
     }
@@ -3832,6 +4522,53 @@ mod tests {
     };
 
     #[test]
+    fn bidding_retry_policy_uses_initial_attempt_plus_three_retries() {
+        assert_eq!(platform::BID_AUTHORING_V2_MAX_RETRIES, 3);
+        assert!(!bid_failure_is_final(0));
+        assert!(!bid_failure_is_final(1));
+        assert!(!bid_failure_is_final(2));
+        assert!(bid_failure_is_final(3));
+    }
+
+    #[test]
+    fn frozen_asset_metadata_budget_rejects_before_reads_or_allocations() {
+        let oversized = vec![serde_json::json!({
+            "asset_revision_id":Uuid::new_v4(),
+            "media_type":"image/png",
+            "byte_length":MAX_FROZEN_ASSET_TOTAL_BYTES + 1,
+            "width_px":1,
+            "height_px":1
+        })];
+        assert!(validate_frozen_asset_metadata(&oversized).is_err());
+        let pixel_overflow = vec![serde_json::json!({
+            "asset_revision_id":Uuid::new_v4(),
+            "media_type":"image/png",
+            "byte_length":1,
+            "width_px":MAX_FROZEN_ASSET_TOTAL_PIXELS,
+            "height_px":2
+        })];
+        assert!(validate_frozen_asset_metadata(&pixel_overflow).is_err());
+        let missing_length = vec![serde_json::json!({
+            "asset_revision_id":Uuid::new_v4(),
+            "media_type":"application/pdf",
+            "page_count":1
+        })];
+        assert!(validate_frozen_asset_metadata(&missing_length).is_err());
+    }
+
+    #[test]
+    fn export_metadata_preflight_rejects_aggregate_table_work() {
+        let input = serde_json::json!({
+            "assets":[],
+            "workspace":{"blocks":[{"content":{"type":"table","row_count":1_000_001u64,
+                "column_count":1,"cells":[]}}]},
+            "form_definitions":[],
+            "attachment_preparations":[]
+        });
+        assert!(validate_submission_export_metadata(&input).is_err());
+    }
+
+    #[test]
     fn content_candidate_verifier_rejects_unfrozen_targets_and_unknown_fields() {
         use bidding::content_block::{
             BlockContent, BlockKind, BlockOrigin, ContentBlockV1, Inline, RichNode,
@@ -3854,16 +4591,25 @@ mod tests {
             content_sha256: content.sha256().unwrap(),
             content,
             origin: BlockOrigin::AgentCandidate,
-            dependency_sha256: None,
-            stale: false,
         };
+        let requirement = Uuid::new_v4();
         let input = serde_json::json!({"target_nodes":[{"node_lineage_id":lineage,
             "node_revision_id":Uuid::new_v4(),"block_count":0,"blocks":[]}],
+            "requirements":[{"requirement_revision_id":requirement}],
             "fill_policy":"append_candidate","generation_dependency_sha256":"a".repeat(64)});
         let output = serde_json::json!({"schema_version":1,"operations":[{
             "kind":"insert_block","client_operation_ref":"op-0","target_node_lineage_id":lineage,
             "ordinal":0,"block":block}],"factual_claims":[],"notices":[]});
         assert!(content_candidate_output(&serde_json::to_string(&output).unwrap(), &input).is_ok());
+        let mut invalid_notice = output.clone();
+        invalid_notice["notices"] = serde_json::json!([{
+            "code":"NO_EVIDENCE","severity":"warning","message":"需要证据",
+            "requirement_revision_id":Uuid::new_v4()
+        }]);
+        assert!(
+            content_candidate_output(&serde_json::to_string(&invalid_notice).unwrap(), &input)
+                .is_err()
+        );
         let mut invalid = output;
         invalid["operations"][0]["target_node_lineage_id"] = serde_json::json!(Uuid::new_v4());
         assert!(
@@ -3900,8 +4646,6 @@ mod tests {
             content_sha256: content.sha256().unwrap(),
             content,
             origin: BlockOrigin::AgentCandidate,
-            dependency_sha256: Some("a".repeat(64)),
-            stale: false,
         };
         let input = serde_json::json!({
             "target_nodes":[{"node_lineage_id":node,"node_revision_id":Uuid::new_v4(),

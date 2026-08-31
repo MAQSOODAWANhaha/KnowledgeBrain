@@ -1,9 +1,15 @@
 //! Deterministic V2 layout rendering. Both DOCX and PDF consume the same frozen
 //! layout model; this module never reads mutable database state.
 
-use std::{cell::Cell, io::Cursor};
+use std::{
+    cell::Cell,
+    io::{Cursor, Read, Write},
+    sync::Arc,
+};
 
-use crate::content_block::{Inline, ListItem, Paragraph as RichParagraph, RichNode, TextMark};
+use crate::content_block::{
+    Inline, ListItem, Paragraph as RichParagraph, RichNode, TextMark, validate_http_link,
+};
 use base64::Engine as _;
 use docx_rs::{
     AlignmentType, BreakType, Docx, Footer, Header, Hyperlink, HyperlinkType, LineSpacing,
@@ -28,15 +34,151 @@ pub const PDF_FONT_SHA256: &str =
     "5d0df56f107605387e0de494b22dfc7fb05d8d79ffd981474e7be11dbe571882";
 const PDF_PAGE_WIDTH: f32 = 210.0;
 const PDF_PAGE_HEIGHT: f32 = 297.0;
+pub const MAX_FROZEN_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_FROZEN_IMAGE_DIMENSION: u32 = 20_000;
+pub const MAX_FROZEN_IMAGE_PIXELS: u64 = 100_000_000;
+const MAX_RENDER_PLAN_BYTES: usize = 256 * 1024 * 1024;
+const MAX_RENDER_PLAN_PIXELS: u64 = 300_000_000;
+const MAX_RENDER_TABLE_CELLS: u64 = 100_000;
+const MAX_RENDER_BLOCK_OCCURRENCES: usize = 100_000;
 
 pub fn frozen_image_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
-    let image = image::load_from_memory(bytes)
+    if bytes.is_empty() || bytes.len() > MAX_FROZEN_IMAGE_BYTES {
+        return Err("attachment image exceeds the frozen byte budget".into());
+    }
+    let dimensions = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|error| format!("unsupported attachment image: {error}"))?
+        .into_dimensions()
         .map_err(|error| format!("unsupported attachment image: {error}"))?;
-    let dimensions = image.dimensions();
-    if dimensions.0 == 0 || dimensions.1 == 0 {
-        return Err("attachment image has zero dimensions".into());
+    if dimensions.0 == 0
+        || dimensions.1 == 0
+        || dimensions.0 > MAX_FROZEN_IMAGE_DIMENSION
+        || dimensions.1 > MAX_FROZEN_IMAGE_DIMENSION
+        || u64::from(dimensions.0) * u64::from(dimensions.1) > MAX_FROZEN_IMAGE_PIXELS
+    {
+        return Err("attachment image exceeds the frozen dimension budget".into());
     }
     Ok(dimensions)
+}
+
+pub fn frozen_pdf_page_count(bytes: &[u8]) -> Result<u32, String> {
+    if bytes.is_empty() || bytes.len() > 128 * 1024 * 1024 {
+        return Err("PDF attachment exceeds the frozen byte budget".into());
+    }
+    let document = lopdf::Document::load_mem(bytes)
+        .map_err(|error| format!("inspect frozen PDF page metadata: {error}"))?;
+    let pages = u32::try_from(document.get_pages().len())
+        .map_err(|_| "frozen PDF page count exceeds platform limits")?;
+    if pages == 0 || pages > 1_000 {
+        return Err("frozen PDF page count exceeds the export budget".into());
+    }
+    Ok(pages)
+}
+
+/// Returns the exact job-local 144-DPI raster geometry after applying inherited
+/// CropBox/MediaBox and page rotation. Callers must run this before `pdftoppm`.
+pub fn frozen_pdf_raster_geometry(bytes: &[u8]) -> Result<Vec<(u32, u32)>, String> {
+    use lopdf::Object;
+
+    fn number(value: &Object) -> Option<f64> {
+        match value {
+            Object::Integer(value) => Some(*value as f64),
+            Object::Real(value) => Some(f64::from(*value)),
+            _ => None,
+        }
+    }
+    fn inherited_array(
+        document: &lopdf::Document,
+        page_id: lopdf::ObjectId,
+        key: &[u8],
+    ) -> Option<Vec<f64>> {
+        let mut id = page_id;
+        for _ in 0..32 {
+            let dictionary = document.get_dictionary(id).ok()?;
+            if let Ok(value) = dictionary.get(key) {
+                let values = match value {
+                    Object::Array(values) => Some(values),
+                    Object::Reference(reference) => document
+                        .get_object(*reference)
+                        .ok()
+                        .and_then(|value| value.as_array().ok()),
+                    _ => None,
+                }?;
+                let values = values.iter().map(number).collect::<Option<Vec<_>>>()?;
+                if values.len() >= 4 {
+                    return Some(values);
+                }
+            }
+            id = match dictionary.get(b"Parent") {
+                Ok(Object::Reference(parent)) => *parent,
+                _ => return None,
+            };
+        }
+        None
+    }
+    fn inherited_rotation(document: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
+        let mut id = page_id;
+        for _ in 0..32 {
+            let Ok(dictionary) = document.get_dictionary(id) else {
+                return 0;
+            };
+            if let Ok(Object::Integer(rotation)) = dictionary.get(b"Rotate") {
+                return rotation.rem_euclid(360);
+            }
+            id = match dictionary.get(b"Parent") {
+                Ok(Object::Reference(parent)) => *parent,
+                _ => return 0,
+            };
+        }
+        0
+    }
+
+    if bytes.is_empty() || bytes.len() > 128 * 1024 * 1024 {
+        return Err("PDF attachment exceeds the frozen byte budget".into());
+    }
+    let document = lopdf::Document::load_mem(bytes)
+        .map_err(|error| format!("inspect frozen PDF page geometry: {error}"))?;
+    let pages = document.get_pages();
+    if pages.is_empty() || pages.len() > 1_000 {
+        return Err("frozen PDF page count exceeds the export budget".into());
+    }
+    let mut result = Vec::with_capacity(pages.len());
+    for page_id in pages.values().copied() {
+        let values = inherited_array(&document, page_id, b"CropBox")
+            .or_else(|| inherited_array(&document, page_id, b"MediaBox"))
+            .ok_or_else(|| "frozen PDF page box missing".to_owned())?;
+        let width_points = (values[2] - values[0]).abs();
+        let height_points = (values[3] - values[1]).abs();
+        if !width_points.is_finite()
+            || !height_points.is_finite()
+            || width_points <= 0.0
+            || height_points <= 0.0
+        {
+            return Err("frozen PDF page box invalid".into());
+        }
+        let (width_points, height_points) = match inherited_rotation(&document, page_id) {
+            90 | 270 => (height_points, width_points),
+            0 | 180 => (width_points, height_points),
+            _ => return Err("frozen PDF page rotation invalid".into()),
+        };
+        let width = (width_points * 2.0).ceil();
+        let height = (height_points * 2.0).ceil();
+        if width > f64::from(u32::MAX) || height > f64::from(u32::MAX) {
+            return Err("frozen PDF raster dimension overflow".into());
+        }
+        let dimensions = (width as u32, height as u32);
+        if dimensions.0 == 0
+            || dimensions.1 == 0
+            || dimensions.0 > MAX_FROZEN_IMAGE_DIMENSION
+            || dimensions.1 > MAX_FROZEN_IMAGE_DIMENSION
+            || u64::from(dimensions.0) * u64::from(dimensions.1) > MAX_FROZEN_IMAGE_PIXELS
+        {
+            return Err("frozen PDF page exceeds the raster geometry budget".into());
+        }
+        result.push(dimensions);
+    }
+    Ok(result)
 }
 
 thread_local! { static DOCX_PARAGRAPH_ID:Cell<u32>=const { Cell::new(1) }; }
@@ -60,8 +202,6 @@ pub struct LayoutMarginsV2 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LayoutSettingsV2 {
     pub margins_mm: LayoutMarginsV2,
-    pub cjk_font: String,
-    pub latin_font: String,
     pub body_font_pt: f32,
     pub line_spacing: f32,
     pub heading_numbering: String,
@@ -80,8 +220,6 @@ impl Default for LayoutSettingsV2 {
                 bottom: 25.4,
                 left: 25.4,
             },
-            cjk_font: "Noto Sans CJK SC".into(),
-            latin_font: "Times New Roman".into(),
             body_font_pt: 12.0,
             line_spacing: 1.5,
             heading_numbering: "decimal".into(),
@@ -131,7 +269,7 @@ pub struct FrozenLayoutAssetV2 {
     pub sha256: String,
     pub media_type: String,
     pub file_name: String,
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -315,15 +453,6 @@ fn find_asset(
     assets: &[FrozenLayoutAssetV2],
     asset_id: &str,
 ) -> Result<FrozenLayoutAssetV2, String> {
-    if assets.is_empty() {
-        return Ok(FrozenLayoutAssetV2 {
-            asset_revision_id: asset_id.to_owned(),
-            sha256: String::new(),
-            media_type: String::new(),
-            file_name: String::new(),
-            bytes: Vec::new(),
-        });
-    }
     assets
         .iter()
         .find(|asset| asset.asset_revision_id == asset_id)
@@ -376,14 +505,24 @@ fn block_from_json(
             Ok(LayoutBlockV2::RichText(layout_paragraphs(&nodes)))
         }
         "table" => {
-            let row_count = content
+            let row_count: usize = content
                 .get("row_count")
                 .and_then(Value::as_u64)
-                .ok_or("table row_count missing")? as usize;
-            let column_count = content
+                .ok_or("table row_count missing")?
+                .try_into()
+                .map_err(|_| "table row_count exceeds platform limits")?;
+            let column_count: usize = content
                 .get("column_count")
                 .and_then(Value::as_u64)
-                .ok_or("table column_count missing")? as usize;
+                .ok_or("table column_count missing")?
+                .try_into()
+                .map_err(|_| "table column_count exceeds platform limits")?;
+            let grid_cells = row_count
+                .checked_mul(column_count)
+                .ok_or("table grid size overflow")?;
+            if grid_cells == 0 || grid_cells as u64 > MAX_RENDER_TABLE_CELLS {
+                return Err("table grid exceeds cell budget".into());
+            }
             let widths_mm = content
                 .get("widths_mm")
                 .and_then(Value::as_array)
@@ -399,15 +538,20 @@ fn block_from_json(
             if widths_mm.len() != column_count {
                 return Err("table width count mismatch".into());
             }
-            let repeat_header_rows = content
+            let repeat_header_rows: usize = content
                 .get("repeat_header_rows")
                 .and_then(Value::as_u64)
                 .ok_or("table repeat_header_rows missing")?
-                as usize;
-            let cells = content
+                .try_into()
+                .map_err(|_| "table header count exceeds platform limits")?;
+            let cell_values = content
                 .get("cells")
                 .and_then(Value::as_array)
-                .ok_or("table cells missing")?
+                .ok_or("table cells missing")?;
+            if cell_values.len() > grid_cells {
+                return Err("table cell count exceeds declared grid".into());
+            }
+            let cells = cell_values
                 .iter()
                 .map(|cell| {
                     let nodes = serde_json::from_value::<Vec<RichNode>>(
@@ -422,29 +566,69 @@ fn block_from_json(
                         row: cell
                             .get("row")
                             .and_then(Value::as_u64)
-                            .ok_or("table cell row missing")? as usize,
+                            .ok_or("table cell row missing")?
+                            .try_into()
+                            .map_err(|_| "table cell row exceeds platform limits")?,
                         column: cell
                             .get("column")
                             .and_then(Value::as_u64)
                             .ok_or("table cell column missing")?
-                            as usize,
+                            .try_into()
+                            .map_err(|_| "table cell column exceeds platform limits")?,
                         rowspan: cell
                             .get("rowspan")
                             .and_then(Value::as_u64)
                             .ok_or("table cell rowspan missing")?
-                            as usize,
+                            .try_into()
+                            .map_err(|_| "table cell rowspan exceeds platform limits")?,
                         colspan: cell
                             .get("colspan")
                             .and_then(Value::as_u64)
                             .ok_or("table cell colspan missing")?
-                            as usize,
+                            .try_into()
+                            .map_err(|_| "table cell colspan exceeds platform limits")?,
                         text,
                         paragraphs,
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            if cells.is_empty() {
-                return Err("table cells missing".into());
+            if cells.is_empty()
+                || row_count == 0
+                || column_count == 0
+                || repeat_header_rows > row_count
+            {
+                return Err("table dimensions or header count invalid".into());
+            }
+            let slots = row_count
+                .checked_mul(column_count)
+                .ok_or("table dimensions overflow")?;
+            let mut covered = vec![false; slots];
+            for cell in &cells {
+                let row_end = cell.row.checked_add(cell.rowspan);
+                let column_end = cell.column.checked_add(cell.colspan);
+                if cell.rowspan == 0
+                    || cell.colspan == 0
+                    || row_end.is_none_or(|end| end > row_count)
+                    || column_end.is_none_or(|end| end > column_count)
+                    || (cell.row < repeat_header_rows
+                        && row_end.is_none_or(|end| end > repeat_header_rows))
+                {
+                    return Err("table merge crosses bounds or the header boundary".into());
+                }
+                let row_end = row_end.expect("checked above");
+                let column_end = column_end.expect("checked above");
+                for row in cell.row..row_end {
+                    for column in cell.column..column_end {
+                        let slot = row * column_count + column;
+                        if covered[slot] {
+                            return Err("table cells overlap".into());
+                        }
+                        covered[slot] = true;
+                    }
+                }
+            }
+            if covered.iter().any(|covered| !covered) {
+                return Err("table cells do not cover the declared grid".into());
             }
             Ok(LayoutBlockV2::Table(LayoutTableV2 {
                 row_count,
@@ -621,16 +805,6 @@ fn settings_from_workspace(workspace: &Value) -> LayoutSettingsV2 {
             left: margins.get("left").and_then(Value::as_f64).unwrap_or(25.4) as f32,
         };
     }
-    result.cjk_font = settings
-        .get("cjk_font")
-        .and_then(Value::as_str)
-        .unwrap_or("Noto Sans CJK SC")
-        .to_owned();
-    result.latin_font = settings
-        .get("latin_font")
-        .and_then(Value::as_str)
-        .unwrap_or("Times New Roman")
-        .to_owned();
     result.body_font_pt = settings
         .get("body_font_pt")
         .and_then(Value::as_f64)
@@ -685,12 +859,46 @@ fn fitted_page_width(
     Ok(printable_width.min(printable_height * width_px as f32 / height_px as f32))
 }
 
+fn validate_paragraph_links(paragraphs: &[LayoutParagraphV2]) -> Result<(), String> {
+    for link in paragraphs
+        .iter()
+        .flat_map(|paragraph| &paragraph.runs)
+        .filter_map(|run| run.link.as_deref())
+    {
+        validate_http_link(link)
+            .map_err(|_| "rich text link must use a safe HTTP(S) URI".to_owned())?;
+    }
+    Ok(())
+}
+
 fn validate_layout_dimensions(document: &LayoutDocumentV2) -> Result<(), String> {
     let (printable_width, printable_height) = printable_dimensions(&document.settings)?;
     for section in &document.sections {
         for block in &section.blocks {
             match block {
+                LayoutBlockV2::RichText(paragraphs) => validate_paragraph_links(paragraphs)?,
                 LayoutBlockV2::Table(table) => {
+                    if table.repeat_header_rows > table.row_count {
+                        return Err("table header count exceeds row count".into());
+                    }
+                    for cell in &table.cells {
+                        validate_paragraph_links(&cell.paragraphs)?;
+                        let row_end = cell
+                            .row
+                            .checked_add(cell.rowspan)
+                            .ok_or("table row span overflow")?;
+                        let column_end = cell
+                            .column
+                            .checked_add(cell.colspan)
+                            .ok_or("table column span overflow")?;
+                        if row_end > table.row_count || column_end > table.column_count {
+                            return Err("table merge crosses bounds".into());
+                        }
+                        if cell.row < table.repeat_header_rows && row_end > table.repeat_header_rows
+                        {
+                            return Err("table merge crosses the header boundary".into());
+                        }
+                    }
                     let declared = table.widths_mm.iter().sum::<f32>();
                     if !declared.is_finite() || declared > printable_width + f32::EPSILON {
                         return Err("table exceeds printable width".into());
@@ -773,6 +981,136 @@ pub fn layout_preview_from_workspace_with_resources(
     )
 }
 
+fn checked_render_plan_budget(
+    nodes: &[Value],
+    blocks: &[Value],
+    assets: &[FrozenLayoutAssetV2],
+    preparations: &[Value],
+) -> Result<(), String> {
+    let mut bytes = 0usize;
+    let mut pixels = 0u64;
+    let mut cells = 0u64;
+    let mut occurrences = 0usize;
+    let mut charge_asset = |asset_id: &str| -> Result<(), String> {
+        let asset = assets
+            .iter()
+            .find(|asset| asset.asset_revision_id == asset_id)
+            .ok_or_else(|| format!("frozen render asset {asset_id} missing"))?;
+        bytes = bytes
+            .checked_add(asset.bytes.len())
+            .ok_or("render plan byte budget overflow")?;
+        if bytes > MAX_RENDER_PLAN_BYTES {
+            return Err("render plan exceeds aggregate byte budget".into());
+        }
+        if asset.media_type.starts_with("image/") {
+            let (width, height) = frozen_image_dimensions(&asset.bytes)?;
+            pixels = pixels
+                .checked_add(u64::from(width) * u64::from(height))
+                .ok_or("render plan pixel budget overflow")?;
+            if pixels > MAX_RENDER_PLAN_PIXELS {
+                return Err("render plan exceeds aggregate pixel budget".into());
+            }
+        }
+        Ok(())
+    };
+    for node in nodes {
+        let lineage_ids = node
+            .get("block_lineage_ids")
+            .and_then(Value::as_array)
+            .ok_or("node block identities missing")?;
+        occurrences = occurrences
+            .checked_add(lineage_ids.len())
+            .ok_or("render block occurrence budget overflow")?;
+        if occurrences > MAX_RENDER_BLOCK_OCCURRENCES {
+            return Err("render plan has too many block occurrences".into());
+        }
+        for lineage_id in lineage_ids {
+            let lineage_id = lineage_id
+                .as_str()
+                .ok_or("invalid block lineage identity")?;
+            let block = blocks
+                .iter()
+                .find(|block| block.get("lineage_id").and_then(Value::as_str) == Some(lineage_id))
+                .ok_or_else(|| format!("frozen block {lineage_id} missing"))?;
+            let content = block.get("content").ok_or("block content missing")?;
+            match block.get("kind").and_then(Value::as_str) {
+                Some("image") => charge_asset(
+                    content
+                        .get("asset_revision_id")
+                        .and_then(Value::as_str)
+                        .ok_or("image asset identity missing")?,
+                )?,
+                Some("attachment_ref") => {
+                    let source_id = content
+                        .get("asset_revision_id")
+                        .and_then(Value::as_str)
+                        .ok_or("attachment asset identity missing")?;
+                    charge_asset(source_id)?;
+                    if content.get("render_mode").and_then(Value::as_str) == Some("embedded_pages")
+                    {
+                        let preparation_id = content
+                            .get("preparation_revision_id")
+                            .and_then(Value::as_str);
+                        let matching = preparations
+                            .iter()
+                            .filter(|value| {
+                                preparation_id.map_or_else(
+                                    || {
+                                        value
+                                            .get("source_asset_revision_id")
+                                            .and_then(Value::as_str)
+                                            == Some(source_id)
+                                    },
+                                    |expected| {
+                                        value
+                                            .get("attachment_preparation_revision_id")
+                                            .and_then(Value::as_str)
+                                            == Some(expected)
+                                    },
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        if matching.len() == 1 {
+                            for page in matching[0]
+                                .get("page_assets")
+                                .and_then(Value::as_array)
+                                .ok_or("attachment preparation pages missing")?
+                            {
+                                charge_asset(
+                                    page.get("page_asset_id")
+                                        .and_then(Value::as_str)
+                                        .ok_or("prepared page identity missing")?,
+                                )?;
+                            }
+                        }
+                    }
+                }
+                Some("table") => {
+                    let rows = content
+                        .get("row_count")
+                        .and_then(Value::as_u64)
+                        .ok_or("table row_count missing")?;
+                    let columns = content
+                        .get("column_count")
+                        .and_then(Value::as_u64)
+                        .ok_or("table column_count missing")?;
+                    cells = cells
+                        .checked_add(
+                            rows.checked_mul(columns)
+                                .ok_or("table cell budget overflow")?,
+                        )
+                        .ok_or("table cell budget overflow")?;
+                    if cells > MAX_RENDER_TABLE_CELLS {
+                        return Err("render plan exceeds table cell budget".into());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 fn layout_from_workspace_with_resources_policy(
     title: &str,
     workspace: &Value,
@@ -790,6 +1128,7 @@ fn layout_from_workspace_with_resources_policy(
         .get("blocks")
         .and_then(Value::as_array)
         .ok_or("workspace blocks missing")?;
+    checked_render_plan_budget(nodes, blocks, assets, preparations)?;
     let mut sections = Vec::with_capacity(nodes.len());
     for node in nodes {
         if matches!(
@@ -842,12 +1181,12 @@ fn layout_from_workspace_with_resources_policy(
     Ok(document)
 }
 
-fn run_fonts(settings: &LayoutSettingsV2) -> RunFonts {
+fn run_fonts(_settings: &LayoutSettingsV2) -> RunFonts {
     RunFonts::new()
-        .ascii(&settings.latin_font)
-        .hi_ansi(&settings.latin_font)
-        .east_asia(&settings.cjk_font)
-        .cs(&settings.cjk_font)
+        .ascii("Noto Sans JP")
+        .hi_ansi("Noto Sans JP")
+        .east_asia("Noto Sans JP")
+        .cs("Noto Sans JP")
 }
 
 fn paragraph(text: &str, size: usize, settings: &LayoutSettingsV2) -> Paragraph {
@@ -890,14 +1229,7 @@ fn rich_docx_paragraph(value: &LayoutParagraphV2, settings: &LayoutSettingsV2) -
         let mut run = Run::new()
             .add_text(&value.text)
             .size((settings.body_font_pt * 2.0).round() as usize)
-            .fonts(if value.code {
-                RunFonts::new()
-                    .ascii("Courier New")
-                    .hi_ansi("Courier New")
-                    .east_asia(&settings.cjk_font)
-            } else {
-                run_fonts(settings)
-            });
+            .fonts(run_fonts(settings));
         if value.bold {
             run = run.bold();
         }
@@ -986,17 +1318,61 @@ fn numbered_section_titles(document: &LayoutDocumentV2) -> Vec<String> {
         .collect()
 }
 
+fn table_slot_owners(table: &LayoutTableV2) -> Vec<usize> {
+    let mut owners = vec![usize::MAX; table.row_count * table.column_count];
+    for (index, cell) in table.cells.iter().enumerate() {
+        for row in cell.row..cell.row + cell.rowspan {
+            for column in cell.column..cell.column + cell.colspan {
+                owners[row * table.column_count + column] = index;
+            }
+        }
+    }
+    owners
+}
+
+fn table_cells_by_row(table: &LayoutTableV2) -> Vec<Vec<usize>> {
+    let mut rows = vec![Vec::new(); table.row_count];
+    for (index, cell) in table.cells.iter().enumerate() {
+        rows[cell.row].push(index);
+    }
+    for cells in &mut rows {
+        cells.sort_by_key(|index| table.cells[*index].column);
+    }
+    rows
+}
+
+fn table_protected_row_ends(table: &LayoutTableV2, row_cells: &[Vec<usize>]) -> Vec<usize> {
+    let mut ends = (0..table.row_count)
+        .map(|row| {
+            row_cells[row]
+                .iter()
+                .map(|index| table.cells[*index].row + table.cells[*index].rowspan)
+                .max()
+                .unwrap_or(row + 1)
+        })
+        .collect::<Vec<_>>();
+    for row in (0..table.row_count).rev() {
+        let mut cursor = row + 1;
+        let mut end = ends[row];
+        while cursor < end {
+            end = end.max(ends[cursor]);
+            cursor += 1;
+        }
+        ends[row] = end;
+    }
+    ends
+}
+
 fn docx_table(table: &LayoutTableV2, settings: &LayoutSettingsV2) -> Table {
+    let owners = table_slot_owners(table);
     let rows = (0..table.row_count)
         .map(|row| {
             let mut cells = Vec::new();
             let mut column = 0;
             while column < table.column_count {
-                if let Some(source) = table
-                    .cells
-                    .iter()
-                    .find(|cell| cell.row == row && cell.column == column)
-                {
+                let owner = owners[row * table.column_count + column];
+                let source = &table.cells[owner];
+                if source.row == row && source.column == column {
                     let width = table.widths_mm[column..column + source.colspan]
                         .iter()
                         .sum::<f32>();
@@ -1017,9 +1393,7 @@ fn docx_table(table: &LayoutTableV2, settings: &LayoutSettingsV2) -> Table {
                     }
                     cells.push(cell);
                     column += source.colspan;
-                } else if let Some(source) = table.cells.iter().find(|cell| {
-                    cell.row < row && row < cell.row + cell.rowspan && cell.column == column
-                }) {
+                } else if source.row < row && source.column == column {
                     let width = table.widths_mm[column..column + source.colspan]
                         .iter()
                         .sum::<f32>();
@@ -1033,7 +1407,6 @@ fn docx_table(table: &LayoutTableV2, settings: &LayoutSettingsV2) -> Table {
                     cells.push(cell);
                     column += source.colspan;
                 } else {
-                    cells.push(TableCell::new().add_paragraph(body_paragraph("", settings)));
                     column += 1;
                 }
             }
@@ -1070,6 +1443,14 @@ fn cropped_image(
     asset: &FrozenLayoutAssetV2,
     crop: &LayoutCropV2,
 ) -> Result<image::DynamicImage, String> {
+    let digest = hex::encode(Sha256::digest(asset.bytes.as_slice()));
+    if asset.sha256.len() != 64 || digest != asset.sha256 {
+        return Err(format!(
+            "frozen image digest mismatch: {}",
+            asset.asset_revision_id
+        ));
+    }
+    let _ = frozen_image_dimensions(&asset.bytes)?;
     let image = image::load_from_memory(&asset.bytes)
         .map_err(|error| format!("decode frozen image {}: {error}", asset.asset_revision_id))?;
     let (width, height) = image.dimensions();
@@ -1112,6 +1493,108 @@ fn docx_image(
     Ok(docx_paragraph()
         .align(alignment)
         .add_run(Run::new().add_image(pic)))
+}
+
+fn repeated_docx_table_headers(document: &LayoutDocumentV2) -> Vec<usize> {
+    document
+        .sections
+        .iter()
+        .flat_map(|section| &section.blocks)
+        .filter_map(|block| match block {
+            LayoutBlockV2::Table(table) => Some(table.repeat_header_rows),
+            LayoutBlockV2::StructuredForm(_) => Some(0),
+            _ => None,
+        })
+        .collect()
+}
+
+fn mark_docx_table_headers(xml: &str, repeats: &[usize]) -> Result<String, String> {
+    let mut output = String::with_capacity(xml.len() + repeats.iter().sum::<usize>() * 32);
+    let mut cursor = 0;
+    for repeat in repeats {
+        let relative_start = xml[cursor..]
+            .find("<w:tbl>")
+            .ok_or("DOCX table sequence is incomplete")?;
+        let table_start = cursor + relative_start;
+        let relative_end = xml[table_start..]
+            .find("</w:tbl>")
+            .ok_or("DOCX table XML is unbalanced")?;
+        let table_end = table_start + relative_end + "</w:tbl>".len();
+        output.push_str(&xml[cursor..table_start]);
+        let mut table = xml[table_start..table_end].to_owned();
+        let mut row_cursor = 0;
+        for _ in 0..*repeat {
+            let row_start = row_cursor
+                + table[row_cursor..]
+                    .find("<w:tr>")
+                    .ok_or("DOCX repeat-header row is missing")?;
+            let child_start = row_start + "<w:tr>".len();
+            if table[child_start..].starts_with("<w:trPr />") {
+                table.replace_range(
+                    child_start..child_start + "<w:trPr />".len(),
+                    "<w:trPr><w:tblHeader /></w:trPr>",
+                );
+            } else if table[child_start..].starts_with("<w:trPr>") {
+                let insertion = child_start + "<w:trPr>".len();
+                table.insert_str(insertion, "<w:tblHeader />");
+            } else {
+                table.insert_str(child_start, "<w:trPr><w:tblHeader /></w:trPr>");
+            }
+            row_cursor = child_start + "<w:trPr><w:tblHeader /></w:trPr>".len();
+        }
+        output.push_str(&table);
+        cursor = table_end;
+    }
+    output.push_str(&xml[cursor..]);
+    Ok(output)
+}
+
+fn patch_docx_table_headers(
+    bytes: Vec<u8>,
+    document: &LayoutDocumentV2,
+) -> Result<Vec<u8>, String> {
+    let repeats = repeated_docx_table_headers(document);
+    if repeats.iter().all(|repeat| *repeat == 0) {
+        return Ok(bytes);
+    }
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|error| error.to_string())?;
+    let mut entries = Vec::with_capacity(archive.len());
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
+        let name = entry.name().to_owned();
+        let is_dir = entry.is_dir();
+        let compression = entry.compression();
+        let mut value = Vec::new();
+        entry
+            .read_to_end(&mut value)
+            .map_err(|error| error.to_string())?;
+        if name == "word/document.xml" {
+            let xml = String::from_utf8(value).map_err(|error| error.to_string())?;
+            value = mark_docx_table_headers(&xml, &repeats)?.into_bytes();
+        }
+        entries.push((name, is_dir, compression, value));
+    }
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, is_dir, compression, value) in entries {
+        let options = zip::write::SimpleFileOptions::default().compression_method(compression);
+        if is_dir {
+            writer
+                .add_directory(name, options)
+                .map_err(|error| error.to_string())?;
+        } else {
+            writer
+                .start_file(name, options)
+                .map_err(|error| error.to_string())?;
+            writer
+                .write_all(&value)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    writer
+        .finish()
+        .map(|cursor| cursor.into_inner())
+        .map_err(|error| error.to_string())
 }
 
 pub fn render_docx(document: &LayoutDocumentV2) -> Result<Vec<u8>, String> {
@@ -1268,7 +1751,7 @@ pub fn render_docx(document: &LayoutDocumentV2) -> Result<Vec<u8>, String> {
     }
     let mut buffer = Cursor::new(Vec::new());
     docx.pack(&mut buffer).map_err(|error| error.to_string())?;
-    Ok(buffer.into_inner())
+    patch_docx_table_headers(buffer.into_inner(), document)
 }
 
 fn html_escape(value: &str) -> String {
@@ -1314,11 +1797,15 @@ fn render_html_rich(paragraphs: &[LayoutParagraphV2]) -> String {
 }
 
 fn render_html_table(table: &LayoutTableV2) -> String {
+    let owners = table_slot_owners(table);
     let mut html = String::from("<table><colgroup>");
     for width in &table.widths_mm {
         html.push_str(&format!("<col style=\"width:{}mm\">", width));
     }
     html.push_str("</colgroup>");
+    if table.repeat_header_rows == 0 {
+        html.push_str("<tbody>");
+    }
     for row in 0..table.row_count {
         if row == 0 && table.repeat_header_rows > 0 {
             html.push_str("<thead>");
@@ -1329,11 +1816,9 @@ fn render_html_table(table: &LayoutTableV2) -> String {
         html.push_str("<tr>");
         let mut column = 0;
         while column < table.column_count {
-            if let Some(cell) = table
-                .cells
-                .iter()
-                .find(|cell| cell.row == row && cell.column == column)
-            {
+            let owner = owners[row * table.column_count + column];
+            let cell = &table.cells[owner];
+            if cell.row == row && cell.column == column {
                 let tag = if row < table.repeat_header_rows {
                     "th"
                 } else {
@@ -1350,9 +1835,7 @@ fn render_html_table(table: &LayoutTableV2) -> String {
                     }
                 ));
                 column += cell.colspan;
-            } else if let Some(cell) = table.cells.iter().find(|cell| {
-                cell.row < row && row < cell.row + cell.rowspan && cell.column == column
-            }) {
+            } else if cell.row < row && cell.column == column {
                 column += cell.colspan;
             } else {
                 column += 1;
@@ -1360,24 +1843,25 @@ fn render_html_table(table: &LayoutTableV2) -> String {
         }
         html.push_str("</tr>");
     }
-    if table.repeat_header_rows > 0 {
-        html.push_str("</tbody>");
+    if table.repeat_header_rows == table.row_count && table.repeat_header_rows > 0 {
+        html.push_str("</thead><tbody>");
     }
-    html.push_str("</table>");
+    html.push_str("</tbody></table>");
     html
 }
 
-pub fn render_html(document: &LayoutDocumentV2) -> String {
+pub fn render_html(document: &LayoutDocumentV2) -> Result<String, String> {
+    validate_layout_dimensions(document)?;
     let margins = &document.settings.margins_mm;
     let mut html = format!(
-        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>{}</title><style>@page{{size:A4;margin:{}mm {}mm {}mm {}mm}}body{{font-family:'{}','{}';font-size:{}pt;line-height:{}}}.page-break{{break-after:page}}table{{border-collapse:collapse;width:100%}}td{{border:1px solid #333;padding:4px}}figure img{{max-width:100%;height:auto}}</style></head><body>",
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>{}</title><style>@page{{size:A4;margin:{}mm {}mm {}mm {}mm}}body{{font-family:'{}','{}';font-size:{}pt;line-height:{}}}.page-break{{break-after:page}}table{{border-collapse:collapse;width:100%}}td{{border:1px solid #333;padding:4px}}figure img{{max-width:100%;height:auto}}code{{font-family:inherit}}</style></head><body>",
         html_escape(&document.title),
         margins.top,
         margins.right,
         margins.bottom,
         margins.left,
-        html_escape(&document.settings.cjk_font),
-        html_escape(&document.settings.latin_font),
+        "Noto Sans JP",
+        "Noto Sans JP",
         document.settings.body_font_pt,
         document.settings.line_spacing
     );
@@ -1411,29 +1895,67 @@ pub fn render_html(document: &LayoutDocumentV2) -> String {
         ));
         for block in &section.blocks {
             match block {
-                LayoutBlockV2::RichText(paragraphs)=>html.push_str(&render_html_rich(paragraphs)),
-                LayoutBlockV2::Table(table)=>html.push_str(&render_html_table(table)),
-                LayoutBlockV2::StructuredForm(fields)=>{html.push_str("<table class=\"structured-form\">");for (label,value) in fields{html.push_str(&format!("<tr><td>{}</td><td>{}</td></tr>",html_escape(label),html_escape(value)));}html.push_str("</table>");},
-                LayoutBlockV2::Image{caption,width_mm,alignment,crop,asset}=>html.push_str(&format!(
-                    "<figure data-asset-revision-id=\"{}\" style=\"text-align:{}\"><img alt=\"{}\" src=\"data:{};base64,{}\" style=\"width:{}mm;clip-path:inset({}% {}% {}% {}%)\"><figcaption>{}</figcaption></figure>",
-                    html_escape(&asset.asset_revision_id),html_escape(alignment),html_escape(caption),
-                    html_escape(&asset.media_type),base64::engine::general_purpose::STANDARD.encode(&asset.bytes),width_mm,
-                    crop.top*100.0,crop.right*100.0,crop.bottom*100.0,crop.left*100.0,html_escape(caption))),
-                LayoutBlockV2::Attachment{label}=>html.push_str(&format!("<p>[附件] {}</p>",html_escape(label))),
-                LayoutBlockV2::PreparedAttachment{label,pages,start_new_page}=>{
-                    if *start_new_page { html.push_str("<hr class=\"page-break\">"); }
-                    html.push_str(&format!("<p>附件：{}</p>",html_escape(label)));
+                LayoutBlockV2::RichText(paragraphs) => html.push_str(&render_html_rich(paragraphs)),
+                LayoutBlockV2::Table(table) => html.push_str(&render_html_table(table)),
+                LayoutBlockV2::StructuredForm(fields) => {
+                    html.push_str("<table class=\"structured-form\">");
+                    for (label, value) in fields {
+                        html.push_str(&format!(
+                            "<tr><td>{}</td><td>{}</td></tr>",
+                            html_escape(label),
+                            html_escape(value)
+                        ));
+                    }
+                    html.push_str("</table>");
+                }
+                LayoutBlockV2::Image {
+                    caption,
+                    width_mm,
+                    alignment,
+                    crop,
+                    asset,
+                } => {
+                    let cropped = cropped_image(asset, crop)?;
+                    let mut png = Cursor::new(Vec::new());
+                    cropped
+                        .write_to(&mut png, image::ImageFormat::Png)
+                        .map_err(|error| format!("encode cropped HTML image: {error}"))?;
+                    html.push_str(&format!(
+                        "<figure data-asset-revision-id=\"{}\" style=\"text-align:{}\"><img alt=\"{}\" src=\"data:image/png;base64,{}\" style=\"width:{}mm;max-width:100%;height:auto\"><figcaption>{}</figcaption></figure>",
+                        html_escape(&asset.asset_revision_id),html_escape(alignment),html_escape(caption),
+                        base64::engine::general_purpose::STANDARD.encode(png.into_inner()),width_mm,
+                        html_escape(caption)));
+                }
+                LayoutBlockV2::Attachment { label } => {
+                    html.push_str(&format!("<p>[附件] {}</p>", html_escape(label)))
+                }
+                LayoutBlockV2::PreparedAttachment {
+                    label,
+                    pages,
+                    start_new_page,
+                } => {
+                    if *start_new_page {
+                        html.push_str("<hr class=\"page-break\">");
+                    }
+                    html.push_str(&format!("<p>附件：{}</p>", html_escape(label)));
                     for page in pages {
                         let style = fitted_page_width(page, &document.settings)
-                            .map(|width_mm| format!("display:block;width:{width_mm}mm;max-width:100%;height:auto"))
+                            .map(|width_mm| {
+                                format!(
+                                    "display:block;width:{width_mm}mm;max-width:100%;height:auto"
+                                )
+                            })
                             .unwrap_or_else(|_| "display:block;max-width:100%;height:auto".into());
                         html.push_str(&format!("<img class=\"prepared-attachment-page page-break\" alt=\"{}\" src=\"data:{};base64,{}\" style=\"{}\">",
                             html_escape(&page.file_name),html_escape(&page.media_type),
-                            base64::engine::general_purpose::STANDARD.encode(&page.bytes),style));
+                            base64::engine::general_purpose::STANDARD.encode(page.bytes.as_slice()),style));
                     }
-                },
-                LayoutBlockV2::PageBreak=>html.push_str("<hr class=\"page-break\">"),
-                LayoutBlockV2::Signature{label}=>html.push_str(&format!("<p class=\"signature\">{}：________________</p>",html_escape(label))),
+                }
+                LayoutBlockV2::PageBreak => html.push_str("<hr class=\"page-break\">"),
+                LayoutBlockV2::Signature { label } => html.push_str(&format!(
+                    "<p class=\"signature\">{}：________________</p>",
+                    html_escape(label)
+                )),
             }
         }
         html.push_str("</section>");
@@ -1442,7 +1964,7 @@ pub fn render_html(document: &LayoutDocumentV2) -> String {
         "<footer>{}</footer></body></html>",
         html_escape(&document.settings.footer)
     ));
-    html
+    Ok(html)
 }
 
 fn block_lines(block: &LayoutBlockV2) -> Vec<String> {
@@ -1461,21 +1983,18 @@ fn block_lines(block: &LayoutBlockV2) -> Vec<String> {
                 )
             })
             .collect(),
-        LayoutBlockV2::Table(table) => (0..table.row_count)
-            .map(|row| {
-                let mut cells = table
-                    .cells
-                    .iter()
-                    .filter(|cell| cell.row == row)
-                    .collect::<Vec<_>>();
-                cells.sort_by_key(|cell| cell.column);
-                cells
-                    .into_iter()
-                    .map(|cell| cell.text.clone())
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            })
-            .collect(),
+        LayoutBlockV2::Table(table) => {
+            let rows = table_cells_by_row(table);
+            rows.into_iter()
+                .map(|cells| {
+                    cells
+                        .into_iter()
+                        .map(|index| table.cells[index].text.clone())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                })
+                .collect()
+        }
         LayoutBlockV2::StructuredForm(fields) => fields
             .iter()
             .map(|(key, value)| format!("{key}：{value}"))
@@ -1504,6 +2023,11 @@ fn wrap(text: &str, size: f32, font: &ParsedFont, width_mm: f32) -> Vec<String> 
     let mut line = String::new();
     let mut current = 0.0;
     for character in text.chars() {
+        if character == '\n' {
+            result.push(std::mem::take(&mut line));
+            current = 0.0;
+            continue;
+        }
         let next = glyph_width(character, size, font);
         if !line.is_empty() && current + next > width_mm {
             result.push(std::mem::take(&mut line));
@@ -1780,16 +2304,30 @@ fn write_pdf_rich_paragraph(
     }
 }
 
-fn draw_pdf_table_row(
-    flow: &mut PdfFlow<'_>,
-    table: &LayoutTableV2,
+struct PdfTableRow<'a> {
+    table: &'a LayoutTableV2,
     row: usize,
     y_top: f32,
-    widths: &[f32],
-    row_heights: &[f32],
+    widths: &'a [f32],
+    row_heights: &'a [f32],
+    row_cells: &'a [Vec<usize>],
     font_size: f32,
-) {
-    for cell in table.cells.iter().filter(|cell| cell.row == row) {
+    leading: f32,
+}
+
+fn draw_pdf_table_row(flow: &mut PdfFlow<'_>, row_input: PdfTableRow<'_>) -> Result<(), String> {
+    let PdfTableRow {
+        table,
+        row,
+        y_top,
+        widths,
+        row_heights,
+        row_cells,
+        font_size,
+        leading,
+    } = row_input;
+    for index in &row_cells[row] {
+        let cell = &table.cells[*index];
         let x = flow.margins.left + widths[..cell.column].iter().sum::<f32>();
         let width = widths[cell.column..cell.column + cell.colspan]
             .iter()
@@ -1822,23 +2360,22 @@ fn draw_pdf_table_row(
                 },
             },
         ]);
-        let leading = font_size * 25.4 / 72.0 * 1.2;
         let mut text_y = y_top - leading;
         if cell.paragraphs.is_empty() {
             for line in wrap(&cell.text, font_size, flow.parsed, (width - 2.0).max(1.0)) {
                 if text_y < bottom + 1.0 {
-                    break;
+                    return Err("table row measurement did not fit drawn text".into());
                 }
                 fixed_pdf_text(&mut flow.ops, flow.font, line, font_size, x + 1.0, text_y);
                 text_y -= leading;
             }
         } else {
-            'paragraphs: for paragraph in &cell.paragraphs {
+            for paragraph in &cell.paragraphs {
                 for line in
                     pdf_rich_lines(paragraph, font_size, flow.parsed, (width - 2.0).max(1.0))
                 {
                     if text_y < bottom + 1.0 {
-                        break 'paragraphs;
+                        return Err("table row measurement did not fit drawn rich text".into());
                     }
                     draw_pdf_rich_segments(flow, line, font_size, leading, x + 1.0, text_y);
                     text_y -= leading;
@@ -1846,6 +2383,7 @@ fn draw_pdf_table_row(
             }
         }
     }
+    Ok(())
 }
 
 fn write_pdf_table(
@@ -1853,17 +2391,26 @@ fn write_pdf_table(
     table: &LayoutTableV2,
     font_size: f32,
     line_spacing: f32,
-) {
+) -> Result<(), String> {
     let widths = table.widths_mm.clone();
+    let row_cells = table_cells_by_row(table);
     let leading = font_size * 25.4 / 72.0 * line_spacing;
     let mut row_heights = vec![(leading + 4.0).max(7.0); table.row_count];
     for cell in &table.cells {
         let width = widths[cell.column..cell.column + cell.colspan]
             .iter()
             .sum::<f32>();
-        let required =
-            wrap(&cell.text, font_size, flow.parsed, (width - 2.0).max(1.0)).len() as f32 * leading
-                + 3.0;
+        let line_count = if cell.paragraphs.is_empty() {
+            wrap(&cell.text, font_size, flow.parsed, (width - 2.0).max(1.0)).len()
+        } else {
+            cell.paragraphs
+                .iter()
+                .map(|paragraph| {
+                    pdf_rich_lines(paragraph, font_size, flow.parsed, (width - 2.0).max(1.0)).len()
+                })
+                .sum()
+        };
+        let required = line_count as f32 * leading + 3.0;
         let current = row_heights[cell.row..cell.row + cell.rowspan]
             .iter()
             .sum::<f32>();
@@ -1873,16 +2420,27 @@ fn write_pdf_table(
     }
     let header_rows = table.repeat_header_rows.min(table.row_count);
     let header_height = row_heights[..header_rows].iter().sum::<f32>();
+    let printable_height = PDF_PAGE_HEIGHT - flow.margins.top - flow.margins.bottom;
+    if header_height > printable_height {
+        return Err("table header is taller than the printable page".into());
+    }
+    let span_end_by_start = table_protected_row_ends(table, &row_cells);
     let mut row = 0;
     while row < table.row_count {
-        let protected_end = table
-            .cells
-            .iter()
-            .filter(|cell| cell.row == row)
-            .map(|cell| cell.row + cell.rowspan)
-            .max()
-            .unwrap_or(row + 1);
+        let protected_end = span_end_by_start[row];
         let protected_height = row_heights[row..protected_end].iter().sum::<f32>();
+        let printable_height = PDF_PAGE_HEIGHT - flow.margins.top - flow.margins.bottom;
+        if protected_height > printable_height {
+            return Err("table row is taller than the printable page".into());
+        }
+        if row >= header_rows
+            && header_rows > 0
+            && header_height + protected_height > printable_height
+        {
+            return Err(
+                "repeated table header and protected row group exceed the printable page".into(),
+            );
+        }
         if flow.y - protected_height < flow.margins.bottom {
             flow.page_break();
             if row >= header_rows
@@ -1892,22 +2450,39 @@ fn write_pdf_table(
                 for header in 0..header_rows {
                     draw_pdf_table_row(
                         flow,
-                        table,
-                        header,
-                        flow.y,
-                        &widths,
-                        &row_heights,
-                        font_size,
-                    );
+                        PdfTableRow {
+                            table,
+                            row: header,
+                            y_top: flow.y,
+                            widths: &widths,
+                            row_heights: &row_heights,
+                            row_cells: &row_cells,
+                            font_size,
+                            leading,
+                        },
+                    )?;
                     flow.y -= row_heights[header];
                 }
             }
         }
-        draw_pdf_table_row(flow, table, row, flow.y, &widths, &row_heights, font_size);
+        draw_pdf_table_row(
+            flow,
+            PdfTableRow {
+                table,
+                row,
+                y_top: flow.y,
+                widths: &widths,
+                row_heights: &row_heights,
+                row_cells: &row_cells,
+                font_size,
+                leading,
+            },
+        )?;
         flow.y -= row_heights[row];
         row += 1;
     }
     flow.y -= 2.0;
+    Ok(())
 }
 
 fn write_pdf_image(
@@ -2048,7 +2623,7 @@ pub fn render_pdf(document: &LayoutDocumentV2) -> Result<Vec<u8>, String> {
                     table,
                     document.settings.body_font_pt,
                     document.settings.line_spacing,
-                ),
+                )?,
                 LayoutBlockV2::PreparedAttachment {
                     label,
                     pages: attachment_pages,
@@ -2290,7 +2865,7 @@ mod tests {
             (2, 2, 1)
         );
         assert_eq!(table.cells[0].colspan, 2);
-        let html = render_html(&layout);
+        let html = render_html(&layout).unwrap();
         assert!(html.contains("<thead>"));
         assert!(html.contains("colspan=\"2\""));
         assert!(html.contains("width:60mm"));
@@ -2304,7 +2879,8 @@ mod tests {
             .read_to_string(&mut xml)
             .unwrap();
         assert!(xml.contains("w:gridSpan"));
-        assert!(xml.contains("Noto Sans CJK SC"));
+        assert!(xml.contains("<w:tblHeader />"));
+        assert!(xml.contains("Noto Sans JP"));
         assert!(xml.contains("w:line=\"360\""));
         assert!(xml.contains("<w:b"));
         assert!(xml.contains("<w:i"));
@@ -2340,10 +2916,10 @@ mod tests {
             sha256: digest,
             media_type: "image/png".into(),
             file_name: "方案图.png".into(),
-            bytes,
+            bytes: Arc::new(bytes),
         };
         let workspace = json!({"nodes":[{"title":"技术方案","depth":0,"render_role":"section","block_lineage_ids":["b1","b2"]}],"blocks":[
-            {"lineage_id":"b1","kind":"image","content":{"type":"image","asset_revision_id":asset.asset_revision_id,"width_mm":120,"alignment":"center","crop":{"left":0,"top":0,"right":0,"bottom":0},"alt":"架构图"}},
+            {"lineage_id":"b1","kind":"image","content":{"type":"image","asset_revision_id":asset.asset_revision_id,"width_mm":120,"alignment":"center","crop":{"left":0.25,"top":0,"right":0.25,"bottom":0},"alt":"架构图"}},
             {"lineage_id":"b2","kind":"structured_form","content":{"type":"structured_form","form_definition_revision_id":"00000000-0000-4000-8000-000000000902","field_values":[{"field_id":"company","value":"知识脑"}]}}
         ]});
         let forms = vec![
@@ -2379,8 +2955,23 @@ mod tests {
                 _ => false,
             }
         }));
-        let html = render_html(&layout);
+        let html = render_html(&layout).unwrap();
         assert!(html.contains("data:image/png;base64,"));
+        assert!(!html.contains("clip-path"));
+        let encoded = html
+            .split("data:image/png;base64,")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let html_image = image::load_from_memory(
+            &base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(html_image.dimensions(), (20, 20));
         assert!(!html.contains("class=\"frozen-image\""));
         assert_eq!(docx, render_docx(&layout).unwrap());
         assert_eq!(pdf, render_pdf(&layout).unwrap());
@@ -2414,7 +3005,7 @@ mod tests {
             Some("https://example.com")
         );
         assert_eq!(paragraphs[1].list_marker.as_deref(), Some("• "));
-        let html = render_html(&layout);
+        let html = render_html(&layout).unwrap();
         assert!(html.contains("<strong>加粗</strong>"));
         assert!(html.contains("href=\"https://example.com\""));
         assert!(html.contains("<s><u><code>修订</code></u></s>"));
@@ -2432,7 +3023,7 @@ mod tests {
         assert!(document_xml.contains("<w:i"));
         assert!(document_xml.contains("<w:u"));
         assert!(document_xml.contains("<w:strike"));
-        assert!(document_xml.contains("Courier New"));
+        assert!(!document_xml.contains("Courier New"));
         assert!(document_xml.contains("<w:hyperlink"));
 
         let pdf = render_pdf(&layout).unwrap();
@@ -2462,13 +3053,39 @@ mod tests {
     }
 
     #[test]
+    fn unsafe_layout_links_and_missing_assets_fail_closed() {
+        let workspace = json!({
+            "nodes":[{"title":"技术方案","depth":0,"render_role":"section","block_lineage_ids":["rich"]}],
+            "blocks":[{"lineage_id":"rich","kind":"rich_text","content":{"type":"rich_text","nodes":[
+                {"kind":"paragraph","content":[{"kind":"text","text":"链接","marks":[{"kind":"link","href":"https://example.com"}]}]}
+            ]}}]
+        });
+        let mut layout = layout_from_workspace("投标文件", &workspace, None).unwrap();
+        let LayoutBlockV2::RichText(paragraphs) = &mut layout.sections[0].blocks[0] else {
+            panic!("rich text layout missing")
+        };
+        paragraphs[0].runs[0].link = Some("javascript:alert(1)".into());
+        assert!(render_html(&layout).is_err());
+        assert!(render_docx(&layout).is_err());
+        assert!(render_pdf(&layout).is_err());
+
+        let missing = json!({
+            "nodes":[{"title":"图片","depth":0,"render_role":"section","block_lineage_ids":["image"]}],
+            "blocks":[{"lineage_id":"image","kind":"image","content":{"type":"image",
+                "asset_revision_id":"00000000-0000-4000-8000-000000000999","width_mm":100,
+                "alignment":"center","crop":{"left":0,"top":0,"right":0,"bottom":0},"alt":"缺失"}}]
+        });
+        assert!(layout_from_workspace("投标文件", &missing, None).is_err());
+    }
+
+    #[test]
     fn preview_uses_a_safe_placeholder_until_pdf_pages_are_prepared() {
         let asset = FrozenLayoutAssetV2 {
             asset_revision_id: "00000000-0000-4000-8000-000000000903".into(),
             sha256: "a".repeat(64),
             media_type: "application/pdf".into(),
             file_name: "资质附件.pdf".into(),
-            bytes: b"%PDF-1.4 fixture".to_vec(),
+            bytes: Arc::new(b"%PDF-1.4 fixture".to_vec()),
         };
         let workspace = json!({
             "nodes":[{"title":"附件","depth":0,"render_role":"section","block_lineage_ids":["attachment"]}],
@@ -2514,12 +3131,237 @@ mod tests {
                 sha256: platform::sha256_hex(&page_bytes),
                 media_type: "image/png".into(),
                 file_name: "page-1.png".into(),
-                bytes: page_bytes,
+                bytes: Arc::new(page_bytes),
             }],
             start_new_page: true,
         };
-        let html = render_html(&prepared);
+        let html = render_html(&prepared).unwrap();
         assert!(html.contains("class=\"prepared-attachment-page page-break\""));
         assert!(html.contains("style=\"display:block;width:123.1mm;max-width:100%;height:auto\""));
+    }
+
+    #[test]
+    fn repeated_pdf_header_plus_body_group_must_fit_the_printable_page() {
+        let paragraph = |text: String| LayoutParagraphV2 {
+            list_marker: None,
+            runs: vec![LayoutTextRunV2 {
+                text,
+                bold: false,
+                italic: false,
+                underline: false,
+                strike: false,
+                code: false,
+                link: None,
+            }],
+        };
+        let document = |rowspan: usize| LayoutDocumentV2 {
+            title: "table".into(),
+            sections: vec![LayoutSectionV2 {
+                title: "section".into(),
+                depth: 0,
+                blocks: vec![LayoutBlockV2::Table(LayoutTableV2 {
+                    row_count: 1 + rowspan,
+                    column_count: 1,
+                    cells: vec![
+                        LayoutTableCellV2 {
+                            row: 0,
+                            column: 0,
+                            rowspan: 1,
+                            colspan: 1,
+                            text: String::new(),
+                            paragraphs: vec![paragraph("header\n".repeat(20))],
+                        },
+                        LayoutTableCellV2 {
+                            row: 1,
+                            column: 0,
+                            rowspan,
+                            colspan: 1,
+                            text: String::new(),
+                            paragraphs: vec![paragraph("body\n".repeat(20))],
+                        },
+                    ],
+                    widths_mm: vec![150.0],
+                    repeat_header_rows: 1,
+                })],
+            }],
+            watermark: None,
+            settings: LayoutSettingsV2 {
+                include_toc: false,
+                ..Default::default()
+            },
+        };
+        for rowspan in [1, 2] {
+            assert_eq!(
+                render_pdf(&document(rowspan)).unwrap_err(),
+                "repeated table header and protected row group exceed the printable page"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_table_span_overflow_is_rejected_without_panicking() {
+        let document = LayoutDocumentV2 {
+            title: "table".into(),
+            sections: vec![LayoutSectionV2 {
+                title: "section".into(),
+                depth: 0,
+                blocks: vec![LayoutBlockV2::Table(LayoutTableV2 {
+                    row_count: 1,
+                    column_count: 1,
+                    cells: vec![LayoutTableCellV2 {
+                        row: usize::MAX,
+                        column: usize::MAX,
+                        rowspan: 2,
+                        colspan: 2,
+                        text: String::new(),
+                        paragraphs: vec![],
+                    }],
+                    widths_mm: vec![150.0],
+                    repeat_header_rows: 0,
+                })],
+            }],
+            watermark: None,
+            settings: LayoutSettingsV2::default(),
+        };
+        assert!(validate_layout_dimensions(&document).is_err());
+    }
+
+    #[test]
+    fn pdf_rich_table_counts_multiline_paragraphs_and_rejects_oversized_rows() {
+        let run = |text: &str| LayoutTextRunV2 {
+            text: text.into(),
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            code: false,
+            link: None,
+        };
+        let table = |paragraphs: Vec<LayoutParagraphV2>| LayoutTableV2 {
+            row_count: 1,
+            column_count: 1,
+            cells: vec![LayoutTableCellV2 {
+                row: 0,
+                column: 0,
+                rowspan: 1,
+                colspan: 1,
+                text: String::new(),
+                paragraphs,
+            }],
+            widths_mm: vec![150.0],
+            repeat_header_rows: 0,
+        };
+        let document = |table| LayoutDocumentV2 {
+            title: "table".into(),
+            sections: vec![LayoutSectionV2 {
+                title: "section".into(),
+                depth: 0,
+                blocks: vec![LayoutBlockV2::Table(table)],
+            }],
+            watermark: None,
+            settings: LayoutSettingsV2 {
+                include_toc: false,
+                ..Default::default()
+            },
+        };
+        let multiline = table(vec![
+            LayoutParagraphV2 {
+                list_marker: None,
+                runs: vec![run("line one\nline two")],
+            },
+            LayoutParagraphV2 {
+                list_marker: None,
+                runs: vec![run("paragraph two")],
+            },
+        ]);
+        assert!(
+            render_pdf(&document(multiline))
+                .unwrap()
+                .starts_with(b"%PDF-")
+        );
+
+        let oversized = table(vec![LayoutParagraphV2 {
+            list_marker: None,
+            runs: vec![run(&"line\n".repeat(500))],
+        }]);
+        assert_eq!(
+            render_pdf(&document(oversized)).unwrap_err(),
+            "table row is taller than the printable page"
+        );
+    }
+
+    fn pdf_with_page_box(width: u32, height: u32, rotation: Option<i32>) -> Vec<u8> {
+        let rotate = rotation.map_or(String::new(), |value| format!(" /Rotate {value}"));
+        let objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}]{rotate} /Resources << >> >>"
+            )
+            .into_bytes(),
+        ];
+        let mut result = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![0];
+        for (index, value) in objects.iter().enumerate() {
+            offsets.push(result.len());
+            result.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            result.extend_from_slice(value);
+            result.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = result.len();
+        result.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets.into_iter().skip(1) {
+            result.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        result.extend_from_slice(
+            format!(
+                "trailer << /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        result
+    }
+
+    #[test]
+    fn frozen_pdf_geometry_is_exact_and_rejects_oversized_media_box_before_raster() {
+        assert_eq!(
+            frozen_pdf_raster_geometry(&pdf_with_page_box(400, 200, None)).unwrap(),
+            vec![(800, 400)]
+        );
+        assert_eq!(
+            frozen_pdf_raster_geometry(&pdf_with_page_box(400, 200, Some(90))).unwrap(),
+            vec![(400, 800)]
+        );
+        assert!(frozen_pdf_raster_geometry(&pdf_with_page_box(20_000, 20_000, None)).is_err());
+    }
+
+    #[test]
+    fn staggered_rowspans_form_one_transitive_page_break_group() {
+        let cell = |row, column, rowspan, colspan| LayoutTableCellV2 {
+            row,
+            column,
+            rowspan,
+            colspan,
+            text: String::new(),
+            paragraphs: vec![],
+        };
+        let table = LayoutTableV2 {
+            row_count: 4,
+            column_count: 2,
+            cells: vec![
+                cell(0, 0, 1, 2),
+                cell(1, 0, 2, 1),
+                cell(1, 1, 1, 1),
+                cell(2, 1, 2, 1),
+                cell(3, 0, 1, 1),
+            ],
+            widths_mm: vec![70.0, 70.0],
+            repeat_header_rows: 1,
+        };
+        let rows = table_cells_by_row(&table);
+        assert_eq!(table_protected_row_ends(&table, &rows), vec![1, 4, 4, 4]);
     }
 }

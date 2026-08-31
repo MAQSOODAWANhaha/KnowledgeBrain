@@ -1,10 +1,11 @@
 use crate::AppState;
-use crate::err::{fail, forbidden, not_found, validation};
+use crate::err::{fail, fail_with_details, forbidden, not_found, validation};
 use crate::routes::{
     ApiErr, actor_from, durable_human_actor, require_bid_pool, required_idempotency_key,
 };
 use axum::body::Body;
-use axum::extract::{Multipart, Path, State};
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{FromRequest, Multipart, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::routing::{delete, get, patch, post, put};
@@ -13,9 +14,43 @@ use platform::{
     BidAuthoringJobPayloadV2, BidAuthoringRequestIdentityV2, ContentGenerateOperationV2,
     SubmissionOutputModeV2,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+#[derive(Debug)]
+struct BidJson<T>(T);
+
+impl<S, T> FromRequest<S> for BidJson<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = ApiErr;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Json(value) = Json::<T>::from_request(request, state)
+            .await
+            .map_err(map_bid_json_rejection)?;
+        Ok(Self(value))
+    }
+}
+
+fn bid_json_error(status: StatusCode, message: String) -> ApiErr {
+    if status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+        fail(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "UNSUPPORTED_MEDIA_TYPE",
+            message,
+        )
+    } else {
+        validation(&message)
+    }
+}
+
+fn map_bid_json_rejection(error: JsonRejection) -> ApiErr {
+    bid_json_error(error.status(), error.to_string())
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -66,6 +101,10 @@ pub fn router() -> Router<AppState> {
             get(get_document_set),
         )
         .route(
+            "/api/v2/bid-projects/{id}/requirement-set-compilations/{request_id}",
+            get(get_requirement_set_compile_request),
+        )
+        .route(
             "/api/v2/bid-projects/{id}/source-units",
             get(list_source_units),
         )
@@ -96,6 +135,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v2/submission-workspaces/{workspace_id}/mutations",
             post(mutate_workspace),
+        )
+        .route(
+            "/api/v2/submission-workspaces/{workspace_id}/quote-snapshots/{snapshot_id}/apply",
+            post(apply_quote_snapshot),
         )
         .route(
             "/api/v2/submission-workspaces/{workspace_id}/outline-candidates",
@@ -235,6 +278,18 @@ fn map_sql(error: sqlx::Error) -> ApiErr {
     }
 }
 
+fn map_upload_validation(error: bidding::tender_upload::TenderUploadError) -> ApiErr {
+    use bidding::tender_upload::TenderUploadError::{DeclaredTypeInvalid, FilenameTypeInvalid};
+    match error {
+        FilenameTypeInvalid | DeclaredTypeInvalid => fail(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "UNSUPPORTED_MEDIA_TYPE",
+            error.to_string(),
+        ),
+        _ => validation(&error.to_string()),
+    }
+}
+
 async fn human_actor(headers: &HeaderMap, state: &AppState) -> Result<(Uuid, String), ApiErr> {
     let actor = actor_from(headers, state).await?;
     let durable = durable_human_actor(&actor)?;
@@ -245,33 +300,56 @@ async fn human_actor(headers: &HeaderMap, state: &AppState) -> Result<(Uuid, Str
     Ok((user_id, durable))
 }
 
-async fn enqueue(payload: BidAuthoringJobPayloadV2) -> Result<(), ApiErr> {
+async fn enqueue(
+    request: &BidAuthoringRequestIdentityV2,
+    request_sha256: Option<&str>,
+    payload: BidAuthoringJobPayloadV2,
+) -> Result<(), ApiErr> {
+    let details = || {
+        json!({
+            "request_artifact_id": request.request_artifact_id,
+            "request_revision": request.request_revision,
+            "request_sha256": request_sha256,
+            "frozen_input_sha256": request.frozen_input_sha256,
+            "retry_same_idempotency_key": true
+        })
+    };
     match platform::enqueue_bid_authoring_v2(payload).await {
         Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(fail(
+        Ok(None) => Err(fail_with_details(
             StatusCode::SERVICE_UNAVAILABLE,
             "QUEUE_UNAVAILABLE",
-            "authoring queue unavailable; retry with the same Idempotency-Key",
+            "request committed; retry with the same Idempotency-Key",
+            details(),
         )),
-        Err(error) => Err(fail(
+        Err(error) => Err(fail_with_details(
             StatusCode::SERVICE_UNAVAILABLE,
             "QUEUE_UNAVAILABLE",
-            format!("authoring queue unavailable: {error}"),
+            format!("request committed but queue is unavailable: {error}"),
+            details(),
         )),
     }
 }
 
 async fn enqueue_if_pending(
     pool: &sqlx::PgPool,
-    request: &BidAuthoringRequestIdentityV2,
+    committed_request: &Value,
     payload: BidAuthoringJobPayloadV2,
 ) -> Result<(), ApiErr> {
+    let request = request_identity(committed_request)?;
     let status =
         bidding::bid_authoring_v2::async_request_status_v2(pool, request.request_artifact_id)
             .await
             .map_err(map_sql)?;
     if status.as_deref() == Some("pending") {
-        enqueue(payload).await
+        enqueue(
+            &request,
+            committed_request
+                .get("request_sha256")
+                .and_then(Value::as_str),
+            payload,
+        )
+        .await
     } else {
         Ok(())
     }
@@ -321,7 +399,7 @@ struct CreateProjectBody {
 async fn create_project(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<CreateProjectBody>,
+    BidJson(body): BidJson<CreateProjectBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let (user_id, actor) = human_actor(&headers, &state).await?;
     let title = body.title.trim();
@@ -361,7 +439,7 @@ async fn end_project(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-    Json(body): Json<Value>,
+    BidJson(body): BidJson<Value>,
 ) -> Result<Json<Value>, ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let context = bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
@@ -403,12 +481,15 @@ async fn publish_quote_snapshot(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-    Json(body): Json<bidding::quote_snapshot::FinalizeQuoteSnapshotV1>,
+    BidJson(body): BidJson<bidding::quote_snapshot::FinalizeQuoteSnapshotV1>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let (user_id, actor) = human_actor(&headers, &state).await?;
-    let context =
-        bidding::MutationContext::new(actor.clone(), required_idempotency_key(&headers)?, &body)
-            .map_err(|error| validation(&error.to_string()))?;
+    let context = bidding::MutationContext::new(
+        actor.clone(),
+        required_idempotency_key(&headers)?,
+        &json!({"project_id":id,"request":body}),
+    )
+    .map_err(|error| validation(&error.to_string()))?;
     let pool = require_bid_pool().await?;
     let next = bidding::bid_authoring_v2::next_quote_snapshot_revision_v2(&pool, id, &actor)
         .await
@@ -554,7 +635,7 @@ async fn upload_tender_document(
         declared_media_type.as_deref(),
         &bytes,
     )
-    .map_err(|error| validation(&error.to_string()))?;
+    .map_err(map_upload_validation)?;
     let digest = platform::sha256_hex(&bytes);
     let object_ref = platform::object_ref(&digest);
     let context_payload = json!({
@@ -615,7 +696,7 @@ async fn upload_tender_document(
     }
     enqueue_if_pending(
         &pool,
-        &request,
+        &value,
         BidAuthoringJobPayloadV2::TenderDocumentProcess {
             request: request.clone(),
             project_id: id,
@@ -635,7 +716,7 @@ async fn retry_tender_document(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((id, document_id)): Path<(Uuid, Uuid)>,
-    Json(body): Json<RetryTenderDocumentBody>,
+    BidJson(body): BidJson<RetryTenderDocumentBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     if body.expected_generation <= 0 {
@@ -657,7 +738,7 @@ async fn retry_tender_document(
     let request = request_identity(&value)?;
     enqueue_if_pending(
         &pool,
-        &request,
+        &value,
         BidAuthoringJobPayloadV2::TenderDocumentProcess {
             request: request.clone(),
             project_id: id,
@@ -679,7 +760,7 @@ async fn patch_document_role(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((id, document_id)): Path<(Uuid, Uuid)>,
-    Json(body): Json<PatchRoleBody>,
+    BidJson(body): BidJson<PatchRoleBody>,
 ) -> Result<Json<Value>, ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let context = bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
@@ -732,7 +813,7 @@ async fn upsert_document_relation(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-    Json(body): Json<UpsertRelationBody>,
+    BidJson(body): BidJson<UpsertRelationBody>,
 ) -> Result<Json<Value>, ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let context = bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
@@ -761,7 +842,7 @@ async fn patch_document_relation(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((id, relation_id)): Path<(Uuid, Uuid)>,
-    Json(body): Json<UpsertRelationBody>,
+    BidJson(body): BidJson<UpsertRelationBody>,
 ) -> Result<Json<Value>, ApiErr> {
     if body.lineage_id.is_some_and(|value| value != relation_id) {
         return Err(validation("relation identity mismatch"));
@@ -814,6 +895,20 @@ async fn get_document_set(
         .map_err(map_sql)?
         .map(Json)
         .ok_or_else(|| not_found("document set revision"))
+}
+
+async fn get_requirement_set_compile_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, request_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>, ApiErr> {
+    let (_, actor) = human_actor(&headers, &state).await?;
+    let pool = require_bid_pool().await?;
+    bidding::bid_authoring_v2::get_requirement_set_compile_request_v2(&pool, id, request_id, &actor)
+        .await
+        .map_err(map_sql)?
+        .map(Json)
+        .ok_or_else(|| not_found("requirement set compilation"))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -874,13 +969,21 @@ struct OutlineGenerateBody {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WholeBlockInsertionAnchor {
+    node_revision_id: Uuid,
+    #[serde(default)]
+    block_revision_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ContentGenerateBody {
     target: String,
     #[serde(default)]
     node_lineage_id: Option<Uuid>,
     fill_policy: String,
     #[serde(default)]
-    insertion_anchor: Option<Value>,
+    insertion_anchor: Option<WholeBlockInsertionAnchor>,
     selection_mode: String,
     #[serde(default)]
     pick_set_artifact_id: Option<Uuid>,
@@ -929,6 +1032,16 @@ struct FulfillmentBindingBody {
 struct RefreshRequirementProjectionBody {
     expected_artifact_id: Uuid,
     expected_sha256: String,
+    expected_workspace_revision_id: Uuid,
+    expected_workspace_sha256: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplyQuoteSnapshotBody {
+    quote_snapshot_sha256: String,
+    expected_workspace_revision_id: Uuid,
+    expected_workspace_sha256: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -964,23 +1077,25 @@ struct PrepareAttachmentBody {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ReviewWatermarkBody {
+    text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SubmissionExportBody {
     mode: String,
     format: String,
     expected_workspace_revision_id: Uuid,
     #[serde(default)]
-    watermark: Option<Value>,
-    #[serde(default)]
-    include_risk_notices: Option<bool>,
-    #[serde(default)]
-    include_knowledge_provenance: Option<bool>,
+    watermark: Option<ReviewWatermarkBody>,
 }
 
 async fn freeze_document_set(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-    Json(body): Json<FreezeDocumentSetBody>,
+    BidJson(body): BidJson<FreezeDocumentSetBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let context = bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
@@ -1010,7 +1125,7 @@ async fn freeze_document_set(
         .ok_or_else(|| validation("disposition set artifact id missing"))?;
     enqueue_if_pending(
         &pool,
-        &request,
+        &value,
         BidAuthoringJobPayloadV2::RequirementSetCompile {
             request: request.clone(),
             project_id: id,
@@ -1026,7 +1141,7 @@ async fn publish_disposition_set(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-    Json(body): Json<PublishDispositionSetBody>,
+    BidJson(body): BidJson<PublishDispositionSetBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let context = bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
@@ -1051,7 +1166,7 @@ async fn publish_disposition_set(
         .ok_or_else(|| validation("disposition set artifact id missing"))?;
     enqueue_if_pending(
         &pool,
-        &request,
+        &value,
         BidAuthoringJobPayloadV2::RequirementSetCompile {
             request: request.clone(),
             project_id: id,
@@ -1106,7 +1221,7 @@ async fn patch_requirement(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((id, requirement_id)): Path<(Uuid, Uuid)>,
-    Json(body): Json<PatchRequirementBody>,
+    BidJson(body): BidJson<PatchRequirementBody>,
 ) -> Result<Json<Value>, ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let context = bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
@@ -1138,7 +1253,7 @@ async fn publish_requirement_supersession(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-    Json(body): Json<PublishRequirementSupersessionBody>,
+    BidJson(body): BidJson<PublishRequirementSupersessionBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let context = bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
@@ -1186,6 +1301,43 @@ async fn get_project_workspace(
         .ok_or_else(|| not_found("submission workspace"))
 }
 
+fn quote_apply_mutation_body(
+    workspace_id: Uuid,
+    snapshot_id: Uuid,
+    body: &ApplyQuoteSnapshotBody,
+) -> Value {
+    json!({"workspace_id":workspace_id,"snapshot_id":snapshot_id,"request":body})
+}
+
+async fn apply_quote_snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((workspace_id, snapshot_id)): Path<(Uuid, Uuid)>,
+    BidJson(body): BidJson<ApplyQuoteSnapshotBody>,
+) -> Result<(HeaderMap, Json<Value>), ApiErr> {
+    let (_, actor) = human_actor(&headers, &state).await?;
+    required_if_match(&headers, &body.expected_workspace_sha256)?;
+    let context = bidding::MutationContext::new(
+        actor,
+        required_idempotency_key(&headers)?,
+        &quote_apply_mutation_body(workspace_id, snapshot_id, &body),
+    )
+    .map_err(|error| validation(&error.to_string()))?;
+    let pool = require_bid_pool().await?;
+    let workspace = bidding::bid_authoring_v2::apply_quote_snapshot_v2(
+        &pool,
+        workspace_id,
+        snapshot_id,
+        &body.quote_snapshot_sha256,
+        body.expected_workspace_revision_id,
+        &body.expected_workspace_sha256,
+        &context,
+    )
+    .await
+    .map_err(map_sql)?;
+    workspace_response(workspace)
+}
+
 async fn get_workspace(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1216,7 +1368,7 @@ async fn mutate_workspace(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
-    Json(body): Json<bidding::workspace::WorkspaceMutationRequestV1>,
+    BidJson(body): BidJson<bidding::workspace::WorkspaceMutationRequestV1>,
 ) -> Result<(HeaderMap, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     if body.workspace_id != workspace_id {
@@ -1294,7 +1446,7 @@ async fn create_outline_candidate(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
-    Json(body): Json<OutlineGenerateBody>,
+    BidJson(body): BidJson<OutlineGenerateBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let expected_sha256 = headers
@@ -1325,7 +1477,7 @@ async fn create_outline_candidate(
     let identity = request_identity(&request)?;
     enqueue_if_pending(
         &pool,
-        &identity,
+        &request,
         BidAuthoringJobPayloadV2::OutlineGenerate {
             request: identity.clone(),
             project_id: value_uuid(&request, "project_id")?,
@@ -1353,7 +1505,7 @@ async fn enqueue_content_request(
     let identity = request_identity(request)?;
     enqueue_if_pending(
         pool,
-        &identity,
+        request,
         BidAuthoringJobPayloadV2::ContentGenerate {
             request: identity.clone(),
             project_id: value_uuid(request, "project_id")?,
@@ -1369,7 +1521,7 @@ async fn create_content_candidate(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
-    Json(body): Json<ContentGenerateBody>,
+    BidJson(body): BidJson<ContentGenerateBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let expected_sha256 = headers
@@ -1385,6 +1537,12 @@ async fn create_content_candidate(
         })?;
     let context = bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
         .map_err(|error| validation(&error.to_string()))?;
+    let insertion_anchor = body
+        .insertion_anchor
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| validation(&error.to_string()))?;
     let pool = require_bid_pool().await?;
     let request = bidding::bid_authoring_v2::create_content_request_v2(
         &pool,
@@ -1396,7 +1554,7 @@ async fn create_content_candidate(
             target_kind: &body.target,
             target_node_lineage_id: body.node_lineage_id,
             fill_policy: &body.fill_policy,
-            insertion_anchor: body.insertion_anchor.as_ref(),
+            insertion_anchor: insertion_anchor.as_ref(),
             evidence_selection_mode: &body.selection_mode,
             pick_set_artifact_id: body.pick_set_artifact_id,
         },
@@ -1496,7 +1654,7 @@ async fn create_fulfillment_binding(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
-    Json(body): Json<FulfillmentBindingBody>,
+    BidJson(body): BidJson<FulfillmentBindingBody>,
 ) -> Result<(HeaderMap, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let pool = require_bid_pool().await?;
@@ -1512,6 +1670,7 @@ async fn create_fulfillment_binding(
     let target = binding_target_value(&body.target)?;
     bindings.push(json!({"binding_lineage_id":Uuid::new_v4(),"binding_revision_id":Uuid::new_v4(),"revision":1,
         "need_occurrence_id":body.need_occurrence_id,"requirement_projection_revision_id":body.requirement_projection_revision_id,
+        "requirement_projection_sha256":current["requirement_projection_sha256"],
         "channel":body.channel,"target":target,"state":"bound","reason":body.reason}));
     let request = json!({"action":"create_fulfillment_binding","body":body});
     commit_resource_workspace(
@@ -1530,7 +1689,7 @@ async fn patch_fulfillment_binding(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((workspace_id, binding_lineage_id)): Path<(Uuid, Uuid)>,
-    Json(body): Json<FulfillmentBindingBody>,
+    BidJson(body): BidJson<FulfillmentBindingBody>,
 ) -> Result<(HeaderMap, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let pool = require_bid_pool().await?;
@@ -1558,6 +1717,7 @@ async fn patch_fulfillment_binding(
     let target = binding_target_value(&body.target)?;
     bindings[index] = json!({"binding_lineage_id":binding_lineage_id,"binding_revision_id":Uuid::new_v4(),"revision":revision,
         "need_occurrence_id":body.need_occurrence_id,"requirement_projection_revision_id":body.requirement_projection_revision_id,
+        "requirement_projection_sha256":current["requirement_projection_sha256"],
         "channel":body.channel,"target":target,"state":"bound","reason":body.reason});
     let request = json!({"action":"patch_fulfillment_binding","binding_lineage_id":binding_lineage_id,"body":body});
     commit_resource_workspace(
@@ -1625,7 +1785,7 @@ async fn match_evidence(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((workspace_id, node_lineage_id)): Path<(Uuid, Uuid)>,
-    Json(body): Json<EvidenceMatchBody>,
+    BidJson(body): BidJson<EvidenceMatchBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let expected_sha256 = headers
@@ -1668,7 +1828,7 @@ async fn put_node_evidence_pick_set(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((workspace_id, node_lineage_id)): Path<(Uuid, Uuid)>,
-    Json(body): Json<CreateEvidencePickSetBody>,
+    BidJson(body): BidJson<CreateEvidencePickSetBody>,
 ) -> Result<Json<Value>, ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let pool = require_bid_pool().await?;
@@ -1757,11 +1917,32 @@ async fn get_preview_html(
         })
 }
 
+fn validate_review_watermark(
+    output_mode: &str,
+    watermark: Option<&ReviewWatermarkBody>,
+) -> Result<Option<String>, ApiErr> {
+    let Some(watermark) = watermark else {
+        return Ok(None);
+    };
+    if output_mode != "review_draft" {
+        return Err(validation("submission export does not allow a watermark"));
+    }
+    let text = watermark.text.as_str();
+    if text.trim() != text
+        || text.is_empty()
+        || text.chars().count() > 128
+        || text.chars().any(char::is_control)
+    {
+        return Err(validation("review watermark text is invalid"));
+    }
+    Ok(Some(text.to_owned()))
+}
+
 async fn create_submission_export(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
-    Json(body): Json<SubmissionExportBody>,
+    BidJson(body): BidJson<SubmissionExportBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let expected_sha256 = headers
@@ -1787,15 +1968,8 @@ async fn create_submission_export(
     if !matches!(body.format.as_str(), "docx" | "pdf") {
         return Err(validation("export format must be docx or pdf"));
     }
-    let watermark = body
-        .watermark
-        .as_ref()
-        .and_then(|value| value.get("text").and_then(Value::as_str).map(str::to_owned));
-    let mode_options = json!({
-        "watermark":watermark,
-        "include_assessment_notices":body.include_risk_notices.unwrap_or(output_mode=="review_draft"),
-        "include_knowledge_sources":body.include_knowledge_provenance.unwrap_or(false),
-    });
+    let watermark = validate_review_watermark(output_mode, body.watermark.as_ref())?;
+    let mode_options = json!({"watermark":watermark});
     let context = bidding::MutationContext::new(
         actor,
         required_idempotency_key(&headers)?,
@@ -1822,7 +1996,7 @@ async fn create_submission_export(
         .ok_or_else(|| validation("export project identity missing"))?;
     enqueue_if_pending(
         &pool,
-        &request,
+        &value,
         BidAuthoringJobPayloadV2::SubmissionExport {
             request: request.clone(),
             project_id,
@@ -2085,6 +2259,10 @@ fn candidate_operations(
                 .get("requirement_projection_revision_id")
                 .and_then(Value::as_str)
                 .ok_or_else(|| validation("requirement projection missing"))?;
+            let projection_sha = current
+                .get("requirement_projection_sha256")
+                .and_then(Value::as_str)
+                .ok_or_else(|| validation("requirement projection digest missing"))?;
             for binding in candidate
                 .get("bindings")
                 .and_then(Value::as_array)
@@ -2103,9 +2281,9 @@ fn candidate_operations(
                     "kind":"bind_fulfillment",
                     "need_occurrence_id":binding.get("need_occurrence_id"),
                     "requirement_projection_revision_id":projection_id,
+                    "requirement_projection_sha256":projection_sha,
                     "channel":binding.get("channel"),
                     "target":{"kind":"outline_node","node_lineage_id":identities[target_ref]},
-                    "state":"bound",
                     "reason":"accepted_outline_candidate"
                 }));
             }
@@ -2151,11 +2329,23 @@ fn candidate_operations(
     }
 }
 
+fn candidate_obsolete_error(receipt: &Value) -> ApiErr {
+    fail_with_details(
+        StatusCode::CONFLICT,
+        "CANDIDATE_OBSOLETE",
+        "candidate base workspace is obsolete; review a new candidate",
+        json!({
+            "current_workspace_revision_id": receipt.get("current_workspace_revision_id"),
+            "current_workspace_sha256": receipt.get("current_workspace_sha256"),
+        }),
+    )
+}
+
 async fn accept_candidate(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((workspace_id, candidate_id)): Path<(Uuid, Uuid)>,
-    Json(body): Json<AcceptCandidateBody>,
+    BidJson(body): BidJson<AcceptCandidateBody>,
 ) -> Result<(HeaderMap, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     required_if_match(&headers, &body.expected_workspace_sha256)?;
@@ -2169,8 +2359,12 @@ async fn accept_candidate(
         .await
         .map_err(map_sql)?
         .ok_or_else(|| not_found("submission workspace"))?;
-    let context = bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
-        .map_err(|error| validation(&error.to_string()))?;
+    let context = bidding::MutationContext::new(
+        actor,
+        required_idempotency_key(&headers)?,
+        &json!({"workspace_id":workspace_id,"candidate_id":candidate_id,"request":body}),
+    )
+    .map_err(|error| validation(&error.to_string()))?;
     if candidate.get("status").and_then(Value::as_str) == Some("accepted") {
         let receipt = bidding::bid_authoring_v2::accept_candidate_v2(
             &pool,
@@ -2209,22 +2403,17 @@ async fn accept_candidate(
             obsolete.get("error_code").and_then(Value::as_str),
             Some("CANDIDATE_OBSOLETE")
         );
-        return Err(fail(
-            StatusCode::CONFLICT,
-            "CANDIDATE_OBSOLETE",
-            "candidate base workspace is obsolete; review a new candidate",
-        ));
+        return Err(candidate_obsolete_error(&obsolete));
     }
     let (operations, ordinals) = candidate_operations(&candidate, &current, &body)?;
-    let mutation = bidding::workspace::WorkspaceMutationRequestV1 {
-        schema_version: 1,
+    let snapshot = bidding::workspace::apply_trusted_candidate_operations(
+        &current,
         workspace_id,
-        expected_workspace_revision_id: body.expected_workspace_revision_id,
-        expected_workspace_sha256: body.expected_workspace_sha256.clone(),
-        operations,
-    };
-    let snapshot = bidding::workspace::apply_workspace_operations(&current, &mutation)
-        .map_err(|error| validation(&error.to_string()))?;
+        body.expected_workspace_revision_id,
+        &body.expected_workspace_sha256,
+        &operations,
+    )
+    .map_err(|error| validation(&error.to_string()))?;
     let workspace = bidding::bid_authoring_v2::accept_candidate_v2(
         &pool,
         workspace_id,
@@ -2240,11 +2429,7 @@ async fn accept_candidate(
     .await
     .map_err(map_sql)?;
     if workspace.get("error_code").and_then(Value::as_str) == Some("CANDIDATE_OBSOLETE") {
-        return Err(fail(
-            StatusCode::CONFLICT,
-            "CANDIDATE_OBSOLETE",
-            "candidate base workspace is obsolete; review a new candidate",
-        ));
+        return Err(candidate_obsolete_error(&workspace));
     }
     workspace_response(workspace)
 }
@@ -2270,7 +2455,7 @@ async fn create_outline_checkpoint(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
-    Json(body): Json<CreateOutlineCheckpointBody>,
+    BidJson(body): BidJson<CreateOutlineCheckpointBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let context = bidding::MutationContext::new(
@@ -2338,9 +2523,10 @@ async fn refresh_requirement_projection(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
-    Json(body): Json<RefreshRequirementProjectionBody>,
+    BidJson(body): BidJson<RefreshRequirementProjectionBody>,
 ) -> Result<(HeaderMap, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
+    required_if_match(&headers, &body.expected_workspace_sha256)?;
     let pool = require_bid_pool().await?;
     let context = bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
         .map_err(|error| validation(&error.to_string()))?;
@@ -2349,6 +2535,8 @@ async fn refresh_requirement_projection(
         workspace_id,
         body.expected_artifact_id,
         &body.expected_sha256,
+        body.expected_workspace_revision_id,
+        &body.expected_workspace_sha256,
         &context,
     )
     .await
@@ -2402,7 +2590,36 @@ async fn upload_workspace_asset(
         declared_media_type.as_deref(),
         &bytes,
     )
-    .map_err(|error| validation(&error.to_string()))?;
+    .map_err(map_upload_validation)?;
+    let (width_px, height_px, page_count) = match validated.media_type {
+        "image/png" | "image/jpeg" | "image/webp" => {
+            let (width, height) = bidding::render_v2::frozen_image_dimensions(&bytes)
+                .map_err(|error| validation(&error))?;
+            (
+                Some(
+                    i32::try_from(width)
+                        .map_err(|_| validation("image width exceeds platform limits"))?,
+                ),
+                Some(
+                    i32::try_from(height)
+                        .map_err(|_| validation("image height exceeds platform limits"))?,
+                ),
+                None,
+            )
+        }
+        "application/pdf" => (
+            None,
+            None,
+            Some(
+                i32::try_from(
+                    bidding::render_v2::frozen_pdf_page_count(&bytes)
+                        .map_err(|error| validation(&error))?,
+                )
+                .map_err(|_| validation("PDF page count exceeds platform limits"))?,
+            ),
+        ),
+        _ => (None, None, None),
+    };
     let digest = platform::sha256_hex(&bytes);
     let object_ref = platform::object_ref(&digest);
     let context = bidding::MutationContext::new(
@@ -2410,7 +2627,8 @@ async fn upload_workspace_asset(
         required_idempotency_key(&headers)?,
         &json!({
             "workspace_id":workspace_id,"file_name":file_name,"media_type":validated.media_type,
-            "byte_length":bytes.len(),"content_sha256":digest
+            "byte_length":bytes.len(),"width_px":width_px,"height_px":height_px,"page_count":page_count,
+            "content_sha256":digest
         }),
     )
     .map_err(|error| validation(&error.to_string()))?;
@@ -2436,6 +2654,9 @@ async fn upload_workspace_asset(
             file_name: &file_name,
             media_type: validated.media_type,
             byte_length: bytes.len() as i64,
+            width_px,
+            height_px,
+            page_count,
             object_ref: &object_ref,
             content_sha256: &digest,
         },
@@ -2463,7 +2684,7 @@ async fn prepare_workspace_attachment(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((workspace_id, asset_revision_id)): Path<(Uuid, Uuid)>,
-    Json(body): Json<PrepareAttachmentBody>,
+    BidJson(body): BidJson<PrepareAttachmentBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let pool = require_bid_pool().await?;
@@ -2606,7 +2827,7 @@ async fn patch_document_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
-    Json(body): Json<PatchDocumentSettingsBody>,
+    BidJson(body): BidJson<PatchDocumentSettingsBody>,
 ) -> Result<(HeaderMap, Json<Value>), ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let if_match = headers
@@ -2641,12 +2862,16 @@ async fn patch_document_settings(
     } else {
         Uuid::nil()
     };
+    let settings = serde_json::from_value(body.settings.clone())
+        .map_err(|error| validation(&format!("document settings schema invalid: {error}")))?;
     let request = bidding::workspace::WorkspaceMutationRequestV1 {
         schema_version: 1,
         workspace_id,
         expected_workspace_revision_id: expected_revision,
         expected_workspace_sha256: if_match.clone(),
-        operations: vec![json!({"kind":"update_document_settings","settings":body.settings})],
+        operations: vec![
+            bidding::workspace::WorkspaceOperationV1::UpdateDocumentSettings { settings },
+        ],
     };
     let snapshot = if current_sha == if_match {
         bidding::workspace::apply_workspace_operations(&current, &request)
@@ -2678,6 +2903,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn candidate_obsolete_error_preserves_current_workspace_identity() {
+        let revision = "11111111-1111-4111-8111-111111111111";
+        let sha256 = "a".repeat(64);
+        let (status, Json(body)) = candidate_obsolete_error(&json!({
+            "error_code":"CANDIDATE_OBSOLETE",
+            "current_workspace_revision_id":revision,
+            "current_workspace_sha256":sha256,
+        }));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body.error.code, "CANDIDATE_OBSOLETE");
+        let details = body.error.details.expect("current workspace details");
+        assert_eq!(details["current_workspace_revision_id"], revision);
+        assert_eq!(details["current_workspace_sha256"], sha256);
+    }
+
+    #[test]
     fn outline_candidate_operations_follow_parent_and_sibling_ordinals() {
         let candidate = json!({
             "kind":"outline",
@@ -2689,7 +2930,8 @@ mod tests {
             "bindings":[]
         });
         let current = json!({
-            "requirement_projection_revision_id":"11111111-1111-4111-8111-111111111111"
+            "requirement_projection_revision_id":"11111111-1111-4111-8111-111111111111",
+            "requirement_projection_sha256":"c".repeat(64)
         });
         let body = AcceptCandidateBody {
             expected_workspace_revision_id: Uuid::nil(),
@@ -2708,5 +2950,155 @@ mod tests {
             vec!["封面", "第一章", "第二章"]
         );
         assert_eq!(ordinals, vec![0, 2, 1]);
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn bid_json_maps_media_type_separately_from_malformed_json() {
+        assert_eq!(
+            bid_json_error(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "missing JSON content type".into()
+            )
+            .0,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        assert_eq!(
+            bid_json_error(StatusCode::BAD_REQUEST, "malformed JSON".into()).0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn insertion_anchor_is_closed_and_whole_block_only() {
+        let id = "00000000-0000-4000-8000-000000000001";
+        let valid = serde_json::json!({
+            "target":"node",
+            "fill_policy":"empty_only",
+            "selection_mode":"system_proposed",
+            "expected_workspace_revision_id":id,
+            "insertion_anchor":{"node_revision_id":id,"block_revision_id":id}
+        });
+        assert!(serde_json::from_value::<ContentGenerateBody>(valid).is_ok());
+        let interior = serde_json::json!({
+            "target":"node",
+            "fill_policy":"empty_only",
+            "selection_mode":"system_proposed",
+            "expected_workspace_revision_id":id,
+            "insertion_anchor":{"node_revision_id":id,"utf8_offset":3}
+        });
+        assert!(serde_json::from_value::<ContentGenerateBody>(interior).is_err());
+        let unknown = serde_json::json!({
+            "target":"node","fill_policy":"empty_only","selection_mode":"system_proposed",
+            "expected_workspace_revision_id":id,
+            "insertion_anchor":{"node_revision_id":id,"surprise":true}
+        });
+        assert!(serde_json::from_value::<ContentGenerateBody>(unknown).is_err());
+    }
+
+    #[test]
+    fn quote_apply_idempotency_identity_includes_both_path_ids() {
+        let body = ApplyQuoteSnapshotBody {
+            quote_snapshot_sha256: "a".repeat(64),
+            expected_workspace_revision_id: Uuid::new_v4(),
+            expected_workspace_sha256: "b".repeat(64),
+        };
+        let workspace = Uuid::new_v4();
+        let snapshot = Uuid::new_v4();
+        let first = bidding::MutationContext::new(
+            "user:00000000-0000-4000-8000-000000000001",
+            "same-key",
+            &quote_apply_mutation_body(workspace, snapshot, &body),
+        )
+        .unwrap();
+        let wrong_workspace = bidding::MutationContext::new(
+            "user:00000000-0000-4000-8000-000000000001",
+            "same-key",
+            &quote_apply_mutation_body(Uuid::new_v4(), snapshot, &body),
+        )
+        .unwrap();
+        let wrong_snapshot = bidding::MutationContext::new(
+            "user:00000000-0000-4000-8000-000000000001",
+            "same-key",
+            &quote_apply_mutation_body(workspace, Uuid::new_v4(), &body),
+        )
+        .unwrap();
+        assert_ne!(first.request.sha256, wrong_workspace.request.sha256);
+        assert_ne!(first.request.sha256, wrong_snapshot.request.sha256);
+    }
+
+    #[test]
+    fn review_watermark_is_typed_bounded_and_forbidden_for_submission() {
+        let valid = ReviewWatermarkBody {
+            text: "评审稿".into(),
+        };
+        assert_eq!(
+            validate_review_watermark("review_draft", Some(&valid))
+                .ok()
+                .flatten(),
+            Some("评审稿".into())
+        );
+        assert!(validate_review_watermark("submission", Some(&valid)).is_err());
+        for text in ["", " leading", "line\nbreak"] {
+            assert!(
+                validate_review_watermark(
+                    "review_draft",
+                    Some(&ReviewWatermarkBody { text: text.into() })
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            validate_review_watermark(
+                "review_draft",
+                Some(&ReviewWatermarkBody {
+                    text: "水".repeat(128)
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_review_watermark(
+                "review_draft",
+                Some(&ReviewWatermarkBody {
+                    text: "水".repeat(129)
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SubmissionExportBody>(serde_json::json!({
+                "mode":"review","format":"pdf","expected_workspace_revision_id":
+                    "00000000-0000-4000-8000-000000000001",
+                "watermark":{"text":"评审稿","color":"red"}
+            }))
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn bid_json_extractor_returns_real_415_and_400_rejections() {
+        let missing = Request::builder()
+            .method("POST")
+            .body(Body::from("{}"))
+            .unwrap();
+        let rejection = BidJson::<ApplyQuoteSnapshotBody>::from_request(missing, &())
+            .await
+            .unwrap_err();
+        assert_eq!(rejection.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let malformed = Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .body(Body::from("{not-json"))
+            .unwrap();
+        let rejection = BidJson::<ApplyQuoteSnapshotBody>::from_request(malformed, &())
+            .await
+            .unwrap_err();
+        assert_eq!(rejection.0, StatusCode::BAD_REQUEST);
     }
 }

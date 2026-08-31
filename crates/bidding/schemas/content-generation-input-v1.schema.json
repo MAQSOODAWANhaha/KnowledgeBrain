@@ -263,17 +263,6 @@
               "type": "null"
             }
           ]
-        },
-        "utf8_offset": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
         }
       }
     },

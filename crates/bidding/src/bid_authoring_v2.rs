@@ -343,6 +343,23 @@ pub async fn publish_quote_snapshot_v2(
         .bind(&context.request.bytes).bind(&context.request.sha256).fetch_one(pool).await
 }
 
+pub async fn apply_quote_snapshot_v2(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    snapshot_id: Uuid,
+    snapshot_sha256: &str,
+    expected_workspace_revision_id: Uuid,
+    expected_workspace_sha256: &str,
+    context: &crate::mutation::MutationContext,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_apply_quote_snapshot($1,$2,$3::kb_sha256,$4,$5::kb_sha256,$6::kb_actor_identity,$7,$8,$9::kb_sha256)")
+        .bind(workspace_id).bind(snapshot_id).bind(snapshot_sha256)
+        .bind(expected_workspace_revision_id).bind(expected_workspace_sha256)
+        .bind(&context.actor).bind(&context.idempotency_key)
+        .bind(&context.request.bytes).bind(&context.request.sha256)
+        .fetch_one(pool).await
+}
+
 pub async fn list_quote_snapshots_v2(
     pool: &PgPool,
     project_id: Uuid,
@@ -483,6 +500,22 @@ pub async fn list_requirements_v2(
         .bind(actor)
         .fetch_one(pool)
         .await
+}
+
+pub async fn get_requirement_set_compile_request_v2(
+    pool: &PgPool,
+    project_id: Uuid,
+    request_artifact_id: Uuid,
+    actor: &str,
+) -> Result<Option<Value>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT kb_bid_v2_get_requirement_set_compile_request($1,$2,$3::kb_actor_identity)",
+    )
+    .bind(project_id)
+    .bind(request_artifact_id)
+    .bind(actor)
+    .fetch_one(pool)
+    .await
 }
 
 #[derive(Debug)]
@@ -787,11 +820,15 @@ pub async fn refresh_requirement_projection_v2(
     workspace_id: Uuid,
     expected_artifact_id: Uuid,
     expected_sha256: &str,
+    expected_workspace_revision_id: Uuid,
+    expected_workspace_sha256: &str,
     context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
-    sqlx::query_scalar("SELECT kb_bid_v2_refresh_requirement_projection($1,$2,$3::kb_sha256,$4::kb_actor_identity,$5,$6,$7::kb_sha256)")
-        .bind(workspace_id).bind(expected_artifact_id).bind(expected_sha256).bind(&context.actor)
-        .bind(&context.idempotency_key).bind(&context.request.bytes).bind(&context.request.sha256)
+    sqlx::query_scalar("SELECT kb_bid_v2_refresh_requirement_projection($1,$2,$3::kb_sha256,$4,$5::kb_sha256,$6::kb_actor_identity,$7,$8,$9::kb_sha256)")
+        .bind(workspace_id).bind(expected_artifact_id).bind(expected_sha256)
+        .bind(expected_workspace_revision_id).bind(expected_workspace_sha256)
+        .bind(&context.actor).bind(&context.idempotency_key)
+        .bind(&context.request.bytes).bind(&context.request.sha256)
         .fetch_one(pool).await
 }
 
@@ -815,6 +852,9 @@ pub struct UploadWorkspaceAssetV2<'a> {
     pub file_name: &'a str,
     pub media_type: &'a str,
     pub byte_length: i64,
+    pub width_px: Option<i32>,
+    pub height_px: Option<i32>,
+    pub page_count: Option<i32>,
     pub object_ref: &'a str,
     pub content_sha256: &'a str,
 }
@@ -826,8 +866,8 @@ pub async fn upload_workspace_asset_v2(
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kb_bid_v2_upload_workspace_asset(
-          $1,$2,$3,$4,$5,$6,$7::kb_object_ref,$8::kb_sha256,
-          $9::kb_actor_identity,$10,$11,$12::kb_sha256)",
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10::kb_object_ref,$11::kb_sha256,
+          $12::kb_actor_identity,$13,$14,$15::kb_sha256)",
     )
     .bind(input.workspace_id)
     .bind(input.asset_id)
@@ -835,6 +875,9 @@ pub async fn upload_workspace_asset_v2(
     .bind(input.file_name)
     .bind(input.media_type)
     .bind(input.byte_length)
+    .bind(input.width_px)
+    .bind(input.height_px)
+    .bind(input.page_count)
     .bind(input.object_ref)
     .bind(input.content_sha256)
     .bind(&context.actor)
@@ -1216,7 +1259,7 @@ pub async fn get_preview_html_v2(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
-            bytes,
+            bytes: std::sync::Arc::new(bytes),
         });
     }
     let forms = input
@@ -1238,7 +1281,10 @@ pub async fn get_preview_html_v2(
         None,
     )
     .map_err(sqlx::Error::Protocol)?;
-    Ok((crate::render_v2::render_html(&layout), etag))
+    Ok((
+        crate::render_v2::render_html(&layout).map_err(sqlx::Error::Protocol)?,
+        etag,
+    ))
 }
 
 pub async fn create_submission_export_request_v2(

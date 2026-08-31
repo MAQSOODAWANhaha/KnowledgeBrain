@@ -15,7 +15,6 @@ function block(partial: Partial<ContentBlockV1> & Pick<ContentBlockV1, "kind" | 
     lineage_id: "00000000-0000-4000-8000-000000000002",
     revision: 1,
     origin: "human",
-    dependency_sha256: null,
     content_sha256: "0".repeat(64),
     ...partial,
   };

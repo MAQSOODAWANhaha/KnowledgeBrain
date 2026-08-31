@@ -456,11 +456,7 @@ async fn all_six_formats_use_one_document_path_and_freeze_typed_provenance() {
                     .iter()
                     .any(|value| value.media_type == expected_image_media)
             );
-            assert!(
-                objects
-                    .iter()
-                    .any(|value| value.media_type == "text/plain;charset=utf-8")
-            );
+            assert!(objects.iter().any(|value| value.media_type == "text/plain"));
             let image = publication.image_artifacts.first().unwrap();
             let canonical: serde_json::Value =
                 serde_json::from_slice(&image.canonical_payload).unwrap();

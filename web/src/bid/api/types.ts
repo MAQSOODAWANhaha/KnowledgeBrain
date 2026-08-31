@@ -50,15 +50,61 @@ export type TenderDocumentView = {
   role_revision_id: string;
   role_revision_sha256: string;
   role_provenance: "system_suggested" | "human_confirmed" | "human_modified";
-  parse_status:
-    | "pending"
-    | "processing"
-    | "ready"
-    | "completed"
-    | "failed";
+  parse_status: "pending" | "processing" | "ready" | "completed" | "failed";
   conversion_generation: number;
   error_code: string | null;
   original_sha256: string;
+};
+
+export type DocumentSetView = FrozenIdentity & {
+  revision: number;
+  items: Array<{
+    document_id: string;
+    ordinal: number;
+    role_revision_id: string;
+    source_revision_id: string | null;
+    disposition: "ready" | "pending" | "failed" | "unresolved";
+  }>;
+};
+
+export type FreezeDocumentSetResult = FrozenIdentity & {
+  revision: number;
+  disposition_set_artifact_id: string;
+  disposition_set_sha256: string;
+  request_artifact_id: string;
+  request_revision: number;
+  request_sha256: string;
+  frozen_input_sha256: string;
+};
+
+export type RequirementCompileResultIdentity = {
+  status: "succeeded";
+  published_current: boolean;
+  workspace_apply_required: boolean;
+  requirement_set_id: string;
+  requirement_set_sha256: string;
+  document_set_revision_id: string;
+  document_set_sha256: string;
+  requirement_count: number;
+  requirement_projection_id?: string;
+  requirement_projection_sha256?: string;
+  compiler_version: 3;
+  replayed: boolean;
+};
+
+export type RequirementSetCompileRequestView = {
+  request_artifact_id: string;
+  kind: "RequirementSetCompile";
+  status: "pending" | "succeeded" | "failed";
+  request_revision: number;
+  request_sha256: string;
+  frozen_input_sha256: string;
+  document_set_revision_id: string;
+  document_set_sha256: string;
+  disposition_set_revision_id: string;
+  disposition_set_sha256: string;
+  result_identity: RequirementCompileResultIdentity | null;
+  error_code: string | null;
 };
 
 export type TenderRelationView = {
@@ -72,9 +118,7 @@ export type TenderRelationView = {
 };
 
 export type SourceUnitDisposition =
-  | "requirement"
-  | "non_requirement"
-  | "unresolved";
+  "requirement" | "non_requirement" | "unresolved";
 
 export type SourceUnitView = {
   source_unit_revision_id: string;
@@ -95,10 +139,7 @@ export type RequirementView = {
   text: string;
   requiredness: "mandatory" | "optional" | "informational";
   compliance_policy:
-    | "must_comply"
-    | "explicit_response"
-    | "deviation_allowed"
-    | "scored";
+    "must_comply" | "explicit_response" | "deviation_allowed" | "scored";
   lifecycle: "current" | "superseded" | "withdrawn";
   source_unit_revision_ids: string[];
 };
@@ -187,16 +228,22 @@ export type OutlineProgress = {
 export type AsyncRequestView = {
   request_artifact_id: string;
   kind: AsyncRequestKind;
-  status: "pending" | "succeeded" | "failed" | "obsolete";
+  status: "pending" | "succeeded" | "failed";
+  operation?: "match_only" | "generate" | null;
   result_identity?: FrozenIdentity | null;
   error_code?: string | null;
   progress?: OutlineProgress | null;
 };
 
-export type ContentCandidateOperation = {
-  kind: "insert_block" | "append_to_block" | "insert_at_anchor";
+type ContentCandidateOperationBase = {
   client_operation_ref: string;
   block: ContentBlockV1;
+};
+
+export type ContentCandidateOperation = ContentCandidateOperationBase & {
+  kind: "insert_block";
+  target_node_lineage_id: string;
+  ordinal: number;
 };
 
 export type ContentCandidateView = {
@@ -206,7 +253,12 @@ export type ContentCandidateView = {
   base_workspace_revision_id: string;
   base_workspace_sha256: string;
   operations: ContentCandidateOperation[];
-  notices: Array<{ code: string; message: string }>;
+  notices: Array<{
+    code: string;
+    severity: "info" | "warning";
+    message: string;
+    requirement_revision_id: string;
+  }>;
 };
 
 export type OutlineCandidateView = {
@@ -245,7 +297,12 @@ export type OutlineCandidateView = {
     obligation_id: string;
     target_client_node_ref: string;
   }>;
-  notices: Array<{ code: string; message: string; severity: string }>;
+  notices: Array<{
+    code: string;
+    severity: "info" | "warning" | "high";
+    message: string;
+    source_unit_revision_id: string;
+  }>;
 };
 
 export type CandidateView = ContentCandidateView | OutlineCandidateView;
@@ -254,7 +311,7 @@ export type ExportView = {
   export_id: string;
   mode: "review_draft" | "submission";
   format: "docx" | "pdf";
-  status: "pending" | "succeeded" | "failed" | "obsolete";
+  status: "pending" | "succeeded" | "failed" | "ready";
 };
 
 export type WorkspaceAssetView = {
@@ -262,6 +319,9 @@ export type WorkspaceAssetView = {
   media_type: string;
   file_name: string;
   byte_length: number;
+  width_px?: number | null;
+  height_px?: number | null;
+  page_count?: number | null;
 };
 
 export type EvidenceOverview = {

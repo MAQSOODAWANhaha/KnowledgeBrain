@@ -38,14 +38,11 @@ export type FulfillmentChannel = (typeof FULFILLMENT_CHANNELS)[number];
 export type InsertionAnchor = {
   node_revision_id: string;
   block_revision_id?: string | null;
-  utf8_offset?: number | null;
 };
 
 export type DocumentSettings = {
   page_size: "A4";
   margins_mm: { top: number; right: number; bottom: number; left: number };
-  cjk_font: string;
-  latin_font: string;
   body_font_pt: number;
   line_spacing: number;
   heading_numbering: "decimal" | "chinese" | "none";
@@ -57,8 +54,6 @@ export type DocumentSettings = {
 export const DEFAULT_DOCUMENT_SETTINGS: DocumentSettings = {
   page_size: "A4",
   margins_mm: { top: 25.4, right: 25.4, bottom: 25.4, left: 25.4 },
-  cjk_font: "Noto Sans CJK SC",
-  latin_font: "Times New Roman",
   body_font_pt: 12,
   line_spacing: 1.5,
   heading_numbering: "decimal",
@@ -110,7 +105,6 @@ export type InsertBlockOp = {
   node_lineage_id: string;
   ordinal: number;
   block: ContentBlockV1;
-  insertion_anchor?: InsertionAnchor;
 };
 export type UpdateBlockOp = {
   kind: "update_block";
@@ -157,10 +151,6 @@ export type UnbindFulfillmentOp = {
   kind: "unbind_fulfillment";
   binding_lineage_id: string;
 };
-export type AcknowledgeStaleOp = {
-  kind: "acknowledge_stale";
-  dependency_identity_sha256: string;
-};
 
 export type WorkspaceOperation =
   | InsertNodeOp
@@ -178,7 +168,7 @@ export type WorkspaceOperation =
   | BindFulfillmentOp
   | RemapFulfillmentOp
   | UnbindFulfillmentOp
-  | AcknowledgeStaleOp;
+;
 
 export type WorkspaceMutationRequestV1 = {
   schema_version: 1;
@@ -292,12 +282,6 @@ export const ops = {
   },
   unbindFulfillment(bindingLineageId: string): UnbindFulfillmentOp {
     return { kind: "unbind_fulfillment", binding_lineage_id: bindingLineageId };
-  },
-  acknowledgeStale(dependencyIdentitySha256: string): AcknowledgeStaleOp {
-    return {
-      kind: "acknowledge_stale",
-      dependency_identity_sha256: dependencyIdentitySha256,
-    };
   },
 };
 

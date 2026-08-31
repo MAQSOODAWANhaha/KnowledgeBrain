@@ -269,18 +269,10 @@
             "properties": {
               "watermark": {
                 "const": null
-              },
-              "include_assessment_notices": {
-                "const": false
-              },
-              "include_knowledge_sources": {
-                "const": false
               }
             },
             "required": [
-              "watermark",
-              "include_assessment_notices",
-              "include_knowledge_sources"
+              "watermark"
             ]
           }
         }
@@ -300,9 +292,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "watermark",
-        "include_assessment_notices",
-        "include_knowledge_sources"
+        "watermark"
       ],
       "properties": {
         "watermark": {
@@ -316,12 +306,6 @@
               "type": "null"
             }
           ]
-        },
-        "include_assessment_notices": {
-          "type": "boolean"
-        },
-        "include_knowledge_sources": {
-          "type": "boolean"
         }
       }
     },

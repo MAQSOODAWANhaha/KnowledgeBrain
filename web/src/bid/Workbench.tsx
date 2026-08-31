@@ -34,7 +34,15 @@ function outlineErrorMessage(code?: string | null): string {
       return "生成超时，请再试一次";
     case "AGENT_TURN_TIMEOUT":
     case "AGENT_PROVIDER_ERROR":
+    case "AGENT_PROVIDER_UNAVAILABLE":
       return "模型服务异常或超时，请再试一次";
+    case "STRUCTURE_EVIDENCE_INSUFFICIENT":
+      return "招标文件缺少可验证的目录或章节结构证据";
+    case "AGENT_GROUPING_FAILED":
+      return "招标要求分组失败，请再试一次";
+    case "AGENT_SEMANTIC_VALIDATION_FAILED":
+    case "AGENT_REQUIREMENT_CLOSURE_FAILED":
+    case "AGENT_OBLIGATION_COVERAGE_FAILED":
     case "AGENT_OUTPUT_INVALID":
       return "大纲结构校验失败，请再试一次";
     default:
@@ -99,17 +107,11 @@ export function Workbench({ email }: { email: string }) {
       (request) => request.kind === "OutlineGenerate",
     );
     if (!outline || state.preparingOutline) return;
-    if (outline.status === "pending") return;
-    if (outline.status !== "failed" && outline.status !== "obsolete") return;
+    if (outline.status !== "failed") return;
     const key = `${outline.request_artifact_id}:${outline.status}:${outline.error_code ?? ""}`;
     if (outlineToastKey.current === key) return;
     outlineToastKey.current = key;
-    toast(
-      outline.status === "obsolete"
-        ? "生成未完成，请再点一次生成大纲"
-        : outlineErrorMessage(outline.error_code),
-      "red",
-    );
+    toast(outlineErrorMessage(outline.error_code), "red");
   }, [state.asyncRequests, state.preparingOutline]);
 
   useEffect(() => {

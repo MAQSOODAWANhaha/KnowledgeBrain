@@ -1,4 +1,5 @@
 import { Button, FileButton, Select, Tabs } from "@mantine/core";
+import { OWNER_MVP_EVIDENCE_MODE_OPTIONS } from "./generation";
 import type { BidV2Session, BidV2State, InspectorTab } from "./session";
 
 const TABS: { value: InspectorTab; label: string }[] = [
@@ -43,10 +44,7 @@ export function InspectorPanel({
       </Tabs.Panel>
       <Tabs.Panel value="evidence" pt="md">
         <Select
-          data={[
-            { value: "system_proposed", label: "系统建议" },
-            { value: "user_pick_set", label: "人工先选" },
-          ]}
+          data={[...OWNER_MVP_EVIDENCE_MODE_OPTIONS]}
           value={state.evidenceMode}
           onChange={(value) =>
             value &&

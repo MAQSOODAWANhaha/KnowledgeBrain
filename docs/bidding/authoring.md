@@ -25,7 +25,7 @@
 
 输入和输出严格分域：Tender Source只用于提取要求、生成大纲、构造响应表中的“招标要求”内容和结构；投标方正文、事实与图片只能来自知识库冻结证据、用户在当前Workspace人工输入/插入的资产、冻结`QuoteSnapshot`，以及基于这些来源生成的结构化内容。招标方文件中的图片或附件不得被Agent自动当作投标方证据插入输出。
 
-系统不读取用户DOCX模板，也不把XLSX当作输出模板或浏览器编辑对象。Renderer使用系统拥有的版本化`RenderStyleContract`，并允许用户通过受控`DocumentSettingsRevision`设置A4页边距、中西文字体、正文字号、行距、标题编号、页眉页脚和页码；根据大纲树、ContentBlock和这些全局设置生成DOCX/PDF。
+系统不读取用户DOCX模板，也不把XLSX当作输出模板或浏览器编辑对象。Renderer使用系统拥有的版本化`RenderStyleContract`和固定可信Noto字体；用户只能通过受控`DocumentSettingsRevision`设置A4页边距、正文字号、行距、标题编号、页眉页脚和页码。系统根据大纲树、ContentBlock和这些全局设置生成DOCX/PDF，不提供字体registry、上传或任意字体配置。
 
 系统是辅助编制和风险提示工具，不是招标合规审批人，也不声称生成结果必然满足法律、评审或中标条件。
 
@@ -133,7 +133,7 @@ Workspace拥有：
 - Assessment；
 - render snapshot与输出。
 
-`WorkspaceRevision`直接冻结 `(quote_snapshot_id, quote_snapshot_sha256)`；不得在历史Workspace、Assessment、generation input或render loader中动态解析 `QuoteSnapshotCurrent`。发布新报价时在同一事务中复制当前WorkspaceRevision、绑定新报价、推进WorkspaceHead并使基于旧head的候选/待处理生成请求过期；旧WorkspaceRevision继续解析到旧报价。
+`WorkspaceRevision`直接冻结 `(quote_snapshot_id, quote_snapshot_sha256)`；不得在历史Workspace、Assessment、generation input或render loader中动态解析 `QuoteSnapshotCurrent`。发布新报价只推进独立的`QuoteSnapshotCurrent`，不修改Workspace。用户必须携带Workspace `If-Match`显式apply该冻结报价；apply以单一WorkspaceHead revision ID+digest CAS创建新WorkspaceRevision。旧WorkspaceRevision继续解析到旧报价。
 
 每个`BidProject`恰好拥有一个`SubmissionWorkspace`并生成一份投标文件；Workspace scope固定为`project_wide`。
 
@@ -345,11 +345,11 @@ binding_revision_id
 workspace revision
 target node/block/table-row or structured block/value revision
 asset revision | QuoteSnapshot revision | assessment decision revision
-state = current|stale|withdrawn
+dependency_sha256
 evidence_sha256
 ```
 
-`OutlineFulfillmentBindingRevision`是WorkspaceRevision的一部分，没有独立current pointer。用户`bind`、`remap`或`unbind`时，必须在同一Workspace事务中校验`expected_workspace_head`、写binding revision和binding occurrence、创建新WorkspaceRevision并原子移动WorkspaceHead；每次操作保留历史。目标revision、RequirementProjection或依赖变化时SubmissionFulfillmentEvidence进入stale；逻辑binding可保留。Assessment只针对即将导出的WorkspaceRevision所引用的binding/evidence revisions重新求值。
+`OutlineFulfillmentBindingRevision`是WorkspaceRevision的一部分，没有独立current pointer。用户`bind`、`remap`或`unbind`时，必须在同一Workspace事务中校验`expected_workspace_head`、写binding revision和binding occurrence、创建新WorkspaceRevision并原子移动WorkspaceHead；每次操作保留历史。SubmissionFulfillmentEvidence是不可变的精确identity记录；系统不按编辑复制或rebase evidence，也不存储`stale`状态。Assessment按所请求WorkspaceRevision中的精确binding、target、RequirementProjection和dependency digest派生`current|stale|withdrawn`有效状态。
 
 ## 9. Workspace scope 与要求 projection
 
@@ -364,7 +364,7 @@ explicit requirement assignments
 actor, created_at, scope_sha256
 ```
 
-`WorkspaceRequirementProjectionRevision` 从 ProjectRequirementSet 选择当前 Workspace 的有效要求。未分配、多义或冲突要求进入 Assessment；用户可以继续并人工修改 assignment。
+`WorkspaceRequirementProjectionRevision` 从 ProjectRequirementSet 选择当前 Workspace 的有效要求。未分配、多义或冲突要求进入 Assessment；用户可以继续并人工修改 assignment。Requirement patch、supersession 与 Worker publication 都只发布projection并推进独立current pointer，响应返回`workspace_apply_required=true`；它们不得直接修改WorkspaceHead。用户必须携带Workspace `If-Match`显式apply，才会创建新WorkspaceRevision并推进WorkspaceHead。
 
 所有quote、coverage、Assessment、snapshot和manifest都携带唯一workspace composite identity，禁止脱离该项目Workspace读取或发布。
 
@@ -494,7 +494,7 @@ link
 evidence_ref(evidence_bundle_id,evidence_item_id,quote_range)
 ```
 
-`evidence_ref`是不可见的事实来源标记，不改变DOCX/PDF视觉样式。Agent生成的事实性span必须携带该标记；用户编辑被标记文本时保留人工内容但将对应引用置为stale，由Assessment提示重新核对。
+`evidence_ref`是不可见的事实来源标记，不改变DOCX/PDF视觉样式。Agent生成的事实性span必须携带该标记；用户编辑后保留人工内容，Assessment通过精确block revision和dependency identity派生旧引用是否stale，不修改ContentBlock中的标记。
 
 正式章节标题只来自 OutlineNode；正文 heading 不进入 ContentBlockV1。
 
@@ -548,7 +548,6 @@ signature_placeholder(kind,width_mm,height_mm,label)
 DocumentSettingsRevision
   page_size = A4
   margins_mm(top,right,bottom,left)
-  cjk_font, latin_font
   body_font_pt, line_spacing
   heading_numbering = decimal|chinese|none
   header, footer
@@ -569,18 +568,19 @@ ContentCandidate
   target node/block revisions
   requirement/dependency identities
   proposed operations
-  state = proposed|accepted|rejected|obsolete
+  stored state = proposed|accepted|rejected
+  effective status = stored state，或在proposed且base Workspace不再是Head时派生obsolete
 ```
 
 状态机只允许：
 
 ```text
-proposed -> accepted|rejected|obsolete
+proposed -> accepted|rejected
 ```
 
-终态不可改写。接受操作整体CAS WorkspaceHead；head不匹配时只能在 `state=proposed` 条件下转 obsolete。已accepted的重复请求返回首次receipt，不得改写为obsolete。
+终态不可改写。接受操作整体CAS WorkspaceHead；head不匹配时返回409和派生`obsolete`，不得改写Candidate行。已accepted的重复请求返回首次receipt。reject只对Candidate执行状态CAS，不修改Workspace且不要求`If-Match`。异步Request只存`pending|succeeded|failed`。
 
-支持逐块接受、部分接受、填充空章节和仅补充缺失要求。光标插入必须冻结`InsertionAnchor(node_revision_id, block_revision_id?, utf8_offset?)`；仅补充缺失要求使用`fill_policy=missing_requirements_only`。不存在“AI直接替换当前整章”的写入接口。
+支持逐块接受、部分接受、填充空章节和仅补充缺失要求。插入只支持whole-block边界，冻结`InsertionAnchor(node_revision_id, block_revision_id?)`；不接受字节或字符内部offset。仅补充缺失要求使用`fill_policy=missing_requirements_only`。不存在“AI直接替换当前整章”的写入接口。
 
 ### 13.1 证据选择、事实引用与图片候选
 
@@ -604,17 +604,11 @@ Agent生成的业务事实必须使用`evidence_ref`回指本次EvidenceBundle�
 
 ```text
 content revision +1
-保留原 dependency identity
-保留 stale 状态
+生成新的block revision identity
+不在ContentBlock存储dependency或stale状态
 ```
 
-只有以下操作才能绑定当前 requirement/dependency identity：
-
-- 接受基于当前输入生成的候选；
-- 用户显式执行“已根据当前要求核对”；
-- 受检的确定性表单或响应表重生成。
-
-用户可以忽略 stale 提示并继续导出，但系统不得静默把旧内容标记为已核对。
+接受基于当前冻结输入生成的Candidate或发布受检的确定性表单/响应表时，可以创建新的精确Evidence identity。系统不提供`acknowledge_stale`，也不按普通编辑复制或rebase evidence。用户可以忽略Assessment中的派生stale提示并继续导出，但系统不得静默把旧内容标记为已核对。
 
 ## 15. 输出Asset、PDF附件与招标表单结构
 
@@ -824,14 +818,14 @@ Target V2不兼容旧固定PartSet。最终实现必须删除：
 6. 任意节点插入图片、复杂表格和PDF附件，DOCX/PDF位置与Workspace一致；
 7. 招标表格/表单被生成成可编辑结构，人工改变结构时显示提示但不阻止导出；
 8. AI候选不会覆盖并发或后续人工编辑；
-9. 普通文字修改不会错误清除stale；
+9. 普通文字修改后evidence状态由新block revision identity精确派生，不复制或清除历史evidence；
 10. 新增招标附件后只使相关binding/evidence提示过期；
 11. 有业务提示时仍可生成干净submission文件和独立检查报告；
 12. 资产丢失、Schema非法或renderer失败时稳定技术失败；
 13. 同一RenderDocumentSnapshot可按冻结contract重放；
 14. 最终导出中不会重新出现被用户删除的固定旧part；
 15. Manifest可回溯完整身份链和当时的Assessment；
-16. 调整全局页边距、字体、行距、标题编号、页眉页脚或页码后，Preview与DOCX/PDF使用同一冻结设置；
+16. 调整全局页边距、行距、标题编号、页眉页脚或页码后，Preview与DOCX/PDF使用同一冻结设置；字体固定为可信Noto，不接受用户配置；
 17. 业务事实的知识来源可在Web和检查报告追踪，但不会出现在最终投标正文或脚注；
 18. “生成本章”“生成当前子树”“生成全部空章节”都只能由用户触发，后台不会自动生成；
 19. 光标插入使用冻结InsertionAnchor，`missing_requirements_only`只为尚未覆盖的Need建议内容；

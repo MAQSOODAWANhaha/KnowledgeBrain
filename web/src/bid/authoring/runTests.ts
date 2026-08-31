@@ -1,5 +1,7 @@
+import "../api/http.test";
 import "./adapter.test";
 import "./drafts.test";
+import "./generation.test";
 import { runAll, testSummary } from "./harness";
 import "./session.test";
 import "./sha256.test";

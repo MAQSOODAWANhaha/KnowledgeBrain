@@ -11,6 +11,15 @@ export function setToken(t: string | null): void {
   else localStorage.removeItem(TOKEN);
 }
 
+export class NetworkTransportError extends Error {
+  readonly causeValue: unknown;
+  constructor(causeValue: unknown) {
+    super(causeValue instanceof Error ? causeValue.message : "网络请求失败");
+    this.name = "NetworkTransportError";
+    this.causeValue = causeValue;
+  }
+}
+
 export class ApiError extends Error {
   status: number;
   code?: string;
@@ -54,7 +63,12 @@ async function req<T>(
   ) {
     headers.set("Content-Type", "application/json");
   }
-  const res = await fetch(path, { ...init, headers });
+  let res: Response;
+  try {
+    res = await fetch(path, { ...init, headers });
+  } catch (error) {
+    throw new NetworkTransportError(error);
+  }
   if (res.status === 204) return undefined as T;
   const text = await res.text();
   let data: unknown = null;

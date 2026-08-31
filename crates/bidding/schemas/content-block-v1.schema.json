@@ -21,8 +21,6 @@
       { "$ref": "#/$defs/signatureContent" }
     ] },
     "origin": { "enum": ["human", "agent_candidate", "deterministic"] },
-    "dependency_sha256": { "anyOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
-    "stale": { "type": "boolean", "default": false },
     "content_sha256": { "$ref": "#/$defs/sha256" }
   },
   "allOf": [
@@ -41,7 +39,7 @@
     "mark": {
       "oneOf": [
         { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "enum": ["bold", "italic", "underline", "strike", "code"] } } },
-        { "type": "object", "additionalProperties": false, "required": ["kind", "href"], "properties": { "kind": { "const": "link" }, "href": { "type": "string", "format": "uri", "maxLength": 2048 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "href"], "properties": { "kind": { "const": "link" }, "href": { "type": "string", "format": "uri", "pattern": "^https?://(?:\\[[0-9A-Fa-f:.]+\\]|[^/\\s:@?#]+)(?::[0-9]{1,5})?(?:[/?#][^\\s]*)?$", "maxLength": 2048 } } },
         { "type": "object", "additionalProperties": false, "required": ["kind", "evidence_bundle_id", "evidence_item_id", "quote_start_offset", "quote_end_offset"], "properties": { "kind": { "const": "evidence_ref" }, "evidence_bundle_id": { "$ref": "#/$defs/uuid" }, "evidence_item_id": { "$ref": "#/$defs/uuid" }, "quote_start_offset": { "type": "integer", "minimum": 0 }, "quote_end_offset": { "type": "integer", "minimum": 1 } } }
       ]
     },

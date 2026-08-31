@@ -42,13 +42,21 @@ BEGIN
     ('objects/'||quote_sha)::kb_object_ref,quote_sha,octet_length(quote_bytes),quote_bytes,actor,
     'phase6-quote-snapshot',request_bytes,request_sha);
   IF (result_value->>'quote_snapshot_id')::uuid<>quote_snapshot_id OR result_value->>'sha256'<>quote_sha
-     OR result_value#>>'{workspace_revision,revision_id}' IS NULL THEN
+     OR result_value->>'workspace_apply_required'<>'true' THEN
     RAISE EXCEPTION 'phase6 quote snapshot publication invalid: %',result_value;
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM bid_workspace_heads WHERE scope_id=workspace_id
+      AND artifact_id=head.artifact_id AND artifact_sha256=head.artifact_sha256) THEN
+    RAISE EXCEPTION 'quote publication unexpectedly advanced WorkspaceHead';
+  END IF;
+  request_bytes:=convert_to('{"apply_quote":"phase6"}','UTF8');
+  request_sha:=kb_bid_v2_sha256_bytes(request_bytes);
+  result_value:=kb_bid_v2_apply_quote_snapshot(workspace_id,quote_snapshot_id,quote_sha,
+    head.artifact_id,head.artifact_sha256,actor,'phase6-quote-apply',request_bytes,request_sha);
   SELECT * INTO STRICT head FROM bid_workspace_heads WHERE scope_id=workspace_id;
-  IF head.artifact_id::text<>result_value#>>'{workspace_revision,revision_id}'
-     OR head.artifact_sha256<>result_value#>>'{workspace_revision,sha256}' THEN
-    RAISE EXCEPTION 'phase6 quote publication did not atomically advance WorkspaceHead';
+  IF head.artifact_id::text<>result_value->>'revision_id'
+     OR head.artifact_sha256<>result_value->>'sha256' THEN
+    RAISE EXCEPTION 'explicit quote apply did not atomically advance WorkspaceHead';
   END IF;
 
   -- ContentGenerate freezes the immutable QuoteSnapshot identity at request
@@ -85,7 +93,7 @@ BEGIN
     'expected_workspace_revision_id',head.artifact_id)::text,'UTF8');
   request_sha:=kb_bid_v2_sha256_bytes(request_bytes);
   request_value:=kb_bid_v2_create_submission_export_request(workspace_id,head.artifact_id,head.artifact_sha256,
-    'review_draft','pdf','{"watermark":"评审稿","include_assessment_notices":true,"include_knowledge_sources":false}'::jsonb,
+    'review_draft','pdf','{"watermark":"评审稿"}'::jsonb,
     actor,'phase6-export',request_bytes,request_sha);
   request_id:=(request_value->>'request_artifact_id')::uuid;
   frozen_sha:=(request_value->>'frozen_input_sha256')::kb_sha256;
@@ -153,7 +161,7 @@ BEGIN
   request_bytes:=convert_to('{"mode":"review_draft","format":"pdf","failure_injection":true}','UTF8');
   request_sha:=kb_bid_v2_sha256_bytes(request_bytes);
   request_value:=kb_bid_v2_create_submission_export_request(target_workspace_id,head.artifact_id,head.artifact_sha256,
-    'review_draft','pdf','{"watermark":"失败注入","include_assessment_notices":true,"include_knowledge_sources":false}'::jsonb,
+    'review_draft','pdf','{"watermark":"失败注入"}'::jsonb,
     actor,'phase6-export-failure-injection',request_bytes,request_sha);
   request_id:=(request_value->>'request_artifact_id')::uuid;frozen_sha:=(request_value->>'frozen_input_sha256')::kb_sha256;
   PERFORM kb_object_upload_stage(font_staging,('objects/'||font_sha)::kb_object_ref,font_sha,'font/otf',4472168,worker_actor);

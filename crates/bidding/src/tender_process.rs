@@ -1,9 +1,9 @@
-//! Inactive V2 `TenderDocumentProcess` application service.
+//! Active V2 `TenderDocumentProcess` application service.
 //!
-//! This module is deliberately not registered with the active V1 API or worker.
-//! It processes one immutable tender document, freezes parser/OCR identities and
-//! publishes SourceUnit revisions. Project-wide DocumentSet, disposition and
-//! requirement work belongs to the later `RequirementSetCompile` boundary.
+//! The V2 worker invokes this job-local DocReader pipeline for one immutable
+//! tender document, freezes parser/OCR identities, and publishes SourceUnit
+//! revisions. Project-wide DocumentSet, disposition, and requirement work remains
+//! in the separate `RequirementSetCompile` boundary.
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::tender_upload::validate_tender_upload;
 
 pub const TENDER_SOURCE_PURPOSE: &str = "tender_requirements_and_structure_only";
-pub const TENDER_CONVERTER_OPERATION: &str = "docparser-structured-source-v2";
+pub const TENDER_CONVERTER_OPERATION: &str = "docreader-grpc-structured-source-v2";
 pub const TENDER_VISION_OPERATION: &str = "tender-image-ocr-v1";
 pub const TENDER_PROCESS_ACTOR: &str = "system:tender-document-process-v2";
 pub const MAX_TENDER_IMAGE_BYTES: usize = 20 * 1024 * 1024;
@@ -221,10 +221,10 @@ pub trait TenderSourceConverter: Send + Sync {
     ) -> Result<ReadResult, TenderDocumentProcessError>;
 }
 
-pub struct DocParserTenderSourceConverter;
+pub struct DocReaderGrpcTenderSourceConverter;
 
 #[async_trait]
-impl TenderSourceConverter for DocParserTenderSourceConverter {
+impl TenderSourceConverter for DocReaderGrpcTenderSourceConverter {
     async fn convert(
         &self,
         file_name: &str,
@@ -594,12 +594,7 @@ where
                     }
                     let ocr_object = self
                         .repository
-                        .stage_object(
-                            image_id,
-                            "ocr-text",
-                            "text/plain;charset=utf-8",
-                            ocr_text.as_bytes(),
-                        )
+                        .stage_object(image_id, "ocr-text", "text/plain", ocr_text.as_bytes())
                         .await?;
                     staged.push(ocr_object.clone());
                     let image_payload = canonical_json(&json!({
@@ -841,6 +836,8 @@ impl TenderDocumentProcessRepository for PgTenderDocumentProcessRepository {
         let sha256 = sha256_hex(bytes);
         let object_ref = platform::object_ref(&sha256);
         let staging_id = Uuid::new_v4();
+        let mut cleanup = platform::StagedObjectCleanupGuard::new(&self.pool, TENDER_PROCESS_ACTOR);
+        cleanup.register(staging_id);
         platform::stage_object_upload(
             &self.pool,
             staging_id,
@@ -855,8 +852,10 @@ impl TenderDocumentProcessRepository for PgTenderDocumentProcessRepository {
         if let Err(error) = platform::write_blob_off_runtime(&sha256, bytes) {
             let _ =
                 platform::abandon_object_upload(&self.pool, staging_id, TENDER_PROCESS_ACTOR).await;
+            cleanup.disarm(staging_id);
             return Err(TenderDocumentProcessError::ObjectFreeze(error.to_string()));
         }
+        cleanup.disarm(staging_id);
         Ok(FrozenObjectIdentity {
             staging_id,
             object_ref,

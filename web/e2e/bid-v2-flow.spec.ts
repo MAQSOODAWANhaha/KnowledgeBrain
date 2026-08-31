@@ -46,8 +46,6 @@ function workspace(over: Record<string, unknown> = {}) {
     document_settings: {
       page_size: "A4",
       margins_mm: { top: 25, right: 25, bottom: 25, left: 25 },
-      cjk_font: "Noto Sans CJK SC",
-      latin_font: "Times New Roman",
       body_font_pt: 12,
       line_spacing: 1.5,
       heading_numbering: "decimal",

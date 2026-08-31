@@ -115,13 +115,82 @@ _, _, quote = request(
     "POST", f"/api/v2/bid-projects/{workspace['project_id']}/quote-snapshots", quote_body,
     {"idempotency-key": f"{KEY_PREFIX}-quote-v1"},
 )
-_, _, workspace = request("GET", f"/api/v2/submission-workspaces/{WORKSPACE_ID}")
+_, _, workspace_after_publish = request(
+    "GET", f"/api/v2/submission-workspaces/{WORKSPACE_ID}"
+)
+if workspace_after_publish["revision_id"] != old_workspace_revision_id:
+    raise RuntimeError("quote publication moved WorkspaceHead without explicit apply")
+_, _, workspace = request(
+    "POST",
+    f"/api/v2/submission-workspaces/{WORKSPACE_ID}/quote-snapshots/{quote['quote_snapshot_id']}/apply",
+    {
+        "quote_snapshot_sha256": quote["sha256"],
+        "expected_workspace_revision_id": workspace_after_publish["revision_id"],
+        "expected_workspace_sha256": workspace_after_publish["sha256"],
+    },
+    {
+        "if-match": f'"{workspace_after_publish["sha256"]}"',
+        "idempotency-key": f"{KEY_PREFIX}-quote-apply-v1",
+    },
+)
 if workspace["revision_id"] == old_workspace_revision_id:
-    raise RuntimeError("quote publication did not advance WorkspaceRevision")
+    raise RuntimeError("explicit quote apply did not advance WorkspaceRevision")
 if workspace["quote_snapshot"]["artifact_id"] != quote["quote_snapshot_id"]:
-    raise RuntimeError("current WorkspaceRevision did not freeze the published quote")
-if workspace["revision_id"] != quote["workspace_revision"]["revision_id"]:
-    raise RuntimeError("quote receipt and WorkspaceHead identity diverged")
+    raise RuntimeError("explicitly applied WorkspaceRevision did not freeze the quote")
+
+quote_v2_body = {**quote_body, "notes": "new current quote must fence old apply"}
+_, _, quote_v2 = request(
+    "POST", f"/api/v2/bid-projects/{workspace['project_id']}/quote-snapshots", quote_v2_body,
+    {"idempotency-key": f"{KEY_PREFIX}-quote-v2"},
+)
+expect_http_error(
+    "POST",
+    "/api/v2/bid-projects/00000000-0000-4000-8000-000000000019/quote-snapshots",
+    quote_v2_body,
+    {"idempotency-key": f"{KEY_PREFIX}-quote-v2"},
+    409,
+)
+head_before_stale = workspace
+expect_http_error(
+    "POST",
+    f"/api/v2/submission-workspaces/{WORKSPACE_ID}/quote-snapshots/{quote['quote_snapshot_id']}/apply",
+    {
+        "quote_snapshot_sha256": quote["sha256"],
+        "expected_workspace_revision_id": head_before_stale["revision_id"],
+        "expected_workspace_sha256": head_before_stale["sha256"],
+    },
+    {
+        "if-match": f'"{head_before_stale["sha256"]}"',
+        "idempotency-key": f"{KEY_PREFIX}-stale-quote-apply",
+    },
+    409,
+)
+_, _, unchanged = request("GET", f"/api/v2/submission-workspaces/{WORKSPACE_ID}")
+if unchanged["revision_id"] != head_before_stale["revision_id"] or unchanged["sha256"] != head_before_stale["sha256"]:
+    raise RuntimeError("stale Q1 apply changed WorkspaceHead")
+apply_v2_body = {
+    "quote_snapshot_sha256": quote_v2["sha256"],
+    "expected_workspace_revision_id": unchanged["revision_id"],
+    "expected_workspace_sha256": unchanged["sha256"],
+}
+apply_v2_headers = {
+    "if-match": f'"{unchanged["sha256"]}"',
+    "idempotency-key": f"{KEY_PREFIX}-quote-apply-v2",
+}
+_, _, workspace = request(
+    "POST",
+    f"/api/v2/submission-workspaces/{WORKSPACE_ID}/quote-snapshots/{quote_v2['quote_snapshot_id']}/apply",
+    apply_v2_body,
+    apply_v2_headers,
+)
+_, _, apply_v2_replay = request(
+    "POST",
+    f"/api/v2/submission-workspaces/{WORKSPACE_ID}/quote-snapshots/{quote_v2['quote_snapshot_id']}/apply",
+    apply_v2_body,
+    apply_v2_headers,
+)
+if apply_v2_replay != workspace:
+    raise RuntimeError("quote apply replay changed the committed response")
 _, _, initial_preview = request(
     "GET", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/preview", expect_json=False,
 )
@@ -137,8 +206,6 @@ for format_name in ("docx", "pdf"):
         "format": format_name,
         "expected_workspace_revision_id": workspace["revision_id"],
         "watermark": {"text": "两阶段真实导出验收"},
-        "include_risk_notices": True,
-        "include_knowledge_provenance": False,
     }
     headers = {"if-match": f'"{workspace["sha256"]}"',
                "idempotency-key": f"{KEY_PREFIX}-real-export-{format_name}-v1"}
@@ -207,8 +274,6 @@ attachment = {
     "kind": "attachment_ref",
     "content": content,
     "origin": "human",
-    "dependency_sha256": None,
-    "stale": False,
     "content_sha256": content_sha(content),
 }
 mutation = {
@@ -220,7 +285,6 @@ mutation = {
         "kind": "insert_block",
         "node_lineage_id": node["lineage_id"],
         "ordinal": len(node["block_lineage_ids"]),
-        "insertion_anchor": None,
         "block": attachment,
     }],
 }
@@ -239,8 +303,6 @@ worker_prepared_body = {
     "format": "docx",
     "expected_workspace_revision_id": mutation_receipt["revision_id"],
     "watermark": {"text": "可信PDF附件准备验收"},
-    "include_risk_notices": True,
-    "include_knowledge_provenance": False,
 }
 _, _, worker_request = request(
     "POST", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/exports", worker_prepared_body,

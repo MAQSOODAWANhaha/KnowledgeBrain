@@ -65,7 +65,13 @@ INSERT INTO platform_role_contracts(role_name, login, purpose) VALUES
 -- through attacker-controlled temporary relations.
 DO $$
 BEGIN
-    EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', current_database());
+EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', current_database());
+IF has_database_privilege('kb_runtime_api',current_database(),'TEMPORARY')
+   OR has_database_privilege('kb_runtime_worker',current_database(),'TEMPORARY')
+   OR has_database_privilege('kb_runtime_retention',current_database(),'TEMPORARY') THEN
+  RAISE EXCEPTION 'runtime database roles must not have TEMPORARY privilege'
+    USING ERRCODE='42501';
+END IF;
 END
 $$;
 GRANT USAGE ON SCHEMA public TO
@@ -346,7 +352,7 @@ CREATE TABLE object_retention_tombstones (
     CHECK (object_ref = 'objects/' || digest)
 );
 CREATE TRIGGER object_retention_tombstones_immutable
-BEFORE UPDATE ON object_retention_tombstones
+BEFORE UPDATE OR DELETE ON object_retention_tombstones
 FOR EACH ROW EXECUTE FUNCTION kb_reject_append_only();
 CREATE TRIGGER object_retention_tombstones_no_truncate
 BEFORE TRUNCATE ON object_retention_tombstones
@@ -397,18 +403,31 @@ BEGIN
             RAISE EXCEPTION 'object registry identity mismatch or object unavailable'
                 USING ERRCODE = '23514';
         END IF;
-        IF registry.state IN ('deleting', 'deleted') THEN
-            DELETE FROM object_retention_outbox WHERE object_ref = p_object_ref;
-            DELETE FROM object_retention_tombstones WHERE object_ref = p_object_ref;
-            UPDATE object_registry
-               SET state = 'available', deleting_at = NULL, deleted_at = NULL
-             WHERE object_ref = p_object_ref;
+        IF registry.state = 'deleting' THEN
+            -- A failed attempt may release its last staging reference before an
+            -- Oxana retry. Reclaim only an unclaimed retention item, while the
+            -- registry row is locked; a claimed or tombstoned deletion remains
+            -- fail-closed because physical deletion may already be in flight.
+            DELETE FROM object_retention_outbox
+             WHERE object_ref = p_object_ref AND state IN ('queued', 'retry');
+            IF FOUND AND NOT EXISTS (
+                SELECT 1 FROM object_retention_tombstones WHERE object_ref = p_object_ref
+            ) THEN
+                UPDATE object_registry
+                   SET state = 'available', deleting_at = NULL
+                 WHERE object_ref = p_object_ref;
+            ELSE
+                RAISE EXCEPTION 'object registry identity mismatch or object unavailable'
+                    USING ERRCODE = '23514';
+            END IF;
         ELSIF registry.state <> 'available' THEN
             RAISE EXCEPTION 'object registry identity mismatch or object unavailable'
                 USING ERRCODE = '23514';
         END IF;
     ELSE
-        DELETE FROM object_retention_tombstones WHERE object_ref = p_object_ref;
+        IF EXISTS (SELECT 1 FROM object_retention_tombstones WHERE object_ref = p_object_ref) THEN
+            RAISE EXCEPTION 'deleted object digest cannot be revived' USING ERRCODE = '23514';
+        END IF;
         INSERT INTO object_registry(object_ref, digest, media_type, byte_length, state)
         VALUES (p_object_ref, p_digest, p_media_type, p_byte_length, 'available');
     END IF;
@@ -539,13 +558,7 @@ BEGIN
         RAISE EXCEPTION 'object upload staging content identity mismatch'
             USING ERRCODE = '23514';
     END IF;
-    IF registry.state IN ('deleting', 'deleted') THEN
-        DELETE FROM object_retention_outbox WHERE object_ref = p_object_ref;
-        DELETE FROM object_retention_tombstones WHERE object_ref = p_object_ref;
-        UPDATE object_registry
-           SET state = 'available', deleting_at = NULL, deleted_at = NULL
-         WHERE object_ref = p_object_ref;
-    ELSIF registry.state <> 'available' THEN
+    IF registry.state <> 'available' THEN
         RAISE EXCEPTION 'object upload staging content identity mismatch'
             USING ERRCODE = '23514';
     END IF;

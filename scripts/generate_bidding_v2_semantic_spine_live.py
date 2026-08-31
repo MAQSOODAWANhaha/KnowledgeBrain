@@ -74,6 +74,7 @@ for function_name in [
     "kb_bid_v2_require_project_owner",
     "kb_bid_v2_load_requirement_set_compile_input_v3",
     "kb_bid_v2_publish_requirement_set_v3",
+    "kb_bid_v2_get_requirement_set_compile_request",
     "kb_bid_v2_load_outline_generation_input",
     "kb_bid_v2_create_outline_candidate",
     "kb_bid_v2_outline_semantics_valid",
@@ -105,6 +106,7 @@ REVOKE ALL ON FUNCTION
   kb_bid_v2_require_project_owner(uuid,kb_actor_identity),
   kb_bid_v2_load_requirement_set_compile_input_v3(uuid,bigint,kb_sha256),
   kb_bid_v2_publish_requirement_set_v3(uuid,bigint,kb_sha256,jsonb,kb_actor_identity),
+  kb_bid_v2_get_requirement_set_compile_request(uuid,uuid,kb_actor_identity),
   kb_bid_v2_load_outline_generation_input(uuid,bigint,kb_sha256),
   kb_bid_v2_outline_semantics_valid(jsonb,jsonb,jsonb,uuid),
   kb_bid_v2_outline_run_upsert(uuid,kb_sha256,integer,integer,text,jsonb),
@@ -131,6 +133,9 @@ GRANT EXECUTE ON FUNCTION
   kb_bid_v2_outline_checkpoint_append(uuid,kb_sha256,integer,integer,text,jsonb),
   kb_bid_v2_outline_checkpoint_latest(uuid,kb_sha256)
 TO kb_runtime_worker;
+GRANT EXECUTE ON FUNCTION
+  kb_bid_v2_get_requirement_set_compile_request(uuid,uuid,kb_actor_identity)
+TO kb_runtime_api;
 
 COMMIT;
 """.strip()

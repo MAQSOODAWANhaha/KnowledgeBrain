@@ -17,9 +17,12 @@ import type {
   CurrentAssessmentsView,
   DocumentRelationKind,
   DocumentRole,
+  DocumentSetView,
   EvidenceOverview,
   ExpectedPointer,
   ExportView,
+  FreezeDocumentSetResult,
+  RequirementSetCompileRequestView,
   RequirementView,
   SourceUnitView,
   TenderDocumentView,
@@ -71,12 +74,21 @@ export type BidV2Api = {
     expected: ExpectedPointer,
     attempt: MutationAttempt,
   ): Promise<TenderDocumentView>;
+  listDocumentSets(
+    projectId: string,
+    signal?: AbortSignal,
+  ): Promise<DocumentSetView[]>;
   freezeDocumentSet(
     projectId: string,
     documentIds: string[],
     expected: ExpectedPointer | null,
     attempt: MutationAttempt,
-  ): Promise<ExpectedPointer>;
+  ): Promise<FreezeDocumentSetResult>;
+  getRequirementSetCompilation(
+    projectId: string,
+    requestArtifactId: string,
+    signal?: AbortSignal,
+  ): Promise<RequirementSetCompileRequestView>;
   listSourceUnits(
     projectId: string,
     signal?: AbortSignal,
@@ -176,6 +188,19 @@ export type BidV2Api = {
   patchDocumentSettings(
     workspaceId: string,
     settings: DocumentSettings,
+    opts: V2RequestOptions,
+  ): Promise<WorkspaceEnvelope>;
+  applyRequirementProjection(
+    workspaceId: string,
+    projection: ExpectedPointer,
+    workspace: ExpectedPointer,
+    opts: V2RequestOptions,
+  ): Promise<WorkspaceEnvelope>;
+  applyQuoteSnapshot(
+    workspaceId: string,
+    snapshotId: string,
+    snapshotSha256: string,
+    workspace: ExpectedPointer,
     opts: V2RequestOptions,
   ): Promise<WorkspaceEnvelope>;
 };
@@ -294,8 +319,14 @@ export function createBidV2Client(): BidV2Api {
       );
       return data;
     },
+    async listDocumentSets(projectId, signal) {
+      const { data } = await v2Request<
+        DocumentSetView[] | { document_sets: DocumentSetView[] }
+      >(`/api/v2/bid-projects/${projectId}/document-set-revisions`, { signal });
+      return Array.isArray(data) ? data : data.document_sets;
+    },
     async freezeDocumentSet(projectId, documentIds, expected, attempt) {
-      const { data } = await v2Request<ExpectedPointer>(
+      const { data } = await v2Request<FreezeDocumentSetResult>(
         `/api/v2/bid-projects/${projectId}/document-set-revisions`,
         {
           method: "POST",
@@ -306,6 +337,13 @@ export function createBidV2Client(): BidV2Api {
           }),
         },
         { attempt },
+      );
+      return data;
+    },
+    async getRequirementSetCompilation(projectId, requestArtifactId, signal) {
+      const { data } = await v2Request<RequirementSetCompileRequestView>(
+        `/api/v2/bid-projects/${projectId}/requirement-set-compilations/${requestArtifactId}`,
+        { signal },
       );
       return data;
     },
@@ -485,6 +523,53 @@ export function createBidV2Client(): BidV2Api {
         `/api/v2/submission-workspaces/${workspaceId}/document-settings`,
         { method: "PATCH", body: JSON.stringify({ settings }) },
         opts,
+      );
+      if (data && typeof data === "object" && "workspace" in data) {
+        return envelope(data.workspace, data.etag || etag);
+      }
+      return envelope(data as WorkspaceEnvelope["workspace"], etag);
+    },
+    async applyRequirementProjection(workspaceId, projection, workspace, opts) {
+      const { data, etag } = await v2Request<
+        WorkspaceEnvelope["workspace"] | WorkspaceEnvelope
+      >(
+        `/api/v2/submission-workspaces/${workspaceId}/requirement-projection`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            expected_artifact_id: projection.artifact_id,
+            expected_sha256: projection.sha256,
+            expected_workspace_revision_id: workspace.artifact_id,
+            expected_workspace_sha256: workspace.sha256,
+          }),
+        },
+        { ...opts, ifMatch: workspace.sha256 },
+      );
+      if (data && typeof data === "object" && "workspace" in data) {
+        return envelope(data.workspace, data.etag || etag);
+      }
+      return envelope(data as WorkspaceEnvelope["workspace"], etag);
+    },
+    async applyQuoteSnapshot(
+      workspaceId,
+      snapshotId,
+      snapshotSha256,
+      workspace,
+      opts,
+    ) {
+      const { data, etag } = await v2Request<
+        WorkspaceEnvelope["workspace"] | WorkspaceEnvelope
+      >(
+        `/api/v2/submission-workspaces/${workspaceId}/quote-snapshots/${snapshotId}/apply`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            quote_snapshot_sha256: snapshotSha256,
+            expected_workspace_revision_id: workspace.artifact_id,
+            expected_workspace_sha256: workspace.sha256,
+          }),
+        },
+        { ...opts, ifMatch: workspace.sha256 },
       );
       if (data && typeof data === "object" && "workspace" in data) {
         return envelope(data.workspace, data.etag || etag);

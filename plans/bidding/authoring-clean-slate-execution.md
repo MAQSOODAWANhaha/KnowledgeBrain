@@ -82,7 +82,7 @@
 
 ### Phase 1 验收
 
-多文件上传 → 当前成功输入冻结 → SourceUnit/Disposition → RequirementSet/Projection 可查询；澄清只局部替代指定要求；owner、CAS、幂等、replay、stale delivery 和六格式 fixture 通过。
+多文件上传 → 当前成功输入冻结 → SourceUnit/Disposition → RequirementSet/Projection 可查询；澄清只局部替代指定要求；owner、CAS、幂等、replay、superseded delivery的succeeded/unpublished结果和六格式fixture 通过。
 
 ## 4. Phase 2 — Workspace 纯人工编制
 
@@ -104,7 +104,7 @@
 - 实现 OutlineGenerate Worker，冻结 DocumentSet、Projection、Scope、prompt/template/model/agent contract。
 - 实现 agent schema、bounded verifier 和最多一次 repair；未知 role、伪造 identity、超深树和注入输入拒绝。
 - 按招标明确组成、表格/表单、资格/技术/商务/评分要求生成动态树，无固定标题或 part key。
-- 实现 OutlineCandidate overlay：默认全选、取消节点、部分接受、Workspace CAS、obsolete 拒绝。
+- 实现 OutlineCandidate overlay：默认全选、取消节点、部分接受、Workspace CAS和派生obsolete拒绝（不改写Candidate行）。
 - OutlineCheckpoint 是意图快照，不是审批锁；生成中和确认后都允许人工编辑。
 
 ### Phase 3 验收
@@ -132,7 +132,7 @@
 - 实现 narrative、response table、structured form、evidence index、quote 和 deterministic generators。
 - 校验业务事实 evidence_ref、bundle membership、图片 identity、表格网格、prompt injection 和封闭 Schema。
 - Candidate API 返回文字/表格/图片操作并允许按 operation ordinal 部分接受；接受与人工 mutation 共用 Workspace CAS。
-- 普通人工保存保留 dependency identity 和 stale；只有接受当前候选、显式核对或确定性重生成可绑定当前输入。
+- 普通人工保存不复制dependency/evidence或存储stale；Assessment按精确Workspace/block/binding/dependency identity派生状态，新的当前输入只能来自接受当前候选或确定性重生成。
 
 ### Phase 5 验收
 

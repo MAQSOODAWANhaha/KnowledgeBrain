@@ -10,6 +10,7 @@ const BID_API_ROUTER: &str = include_str!("../../api/src/bid_v2_routes.rs");
 const WORKER: &str = include_str!("../../worker/src/consume.rs");
 const KNOWLEDGE_CLONE: &str = include_str!("../../knowledge/src/clone/mod.rs");
 const KNOWLEDGE_SEARCH: &str = include_str!("../../knowledge/src/search/mod.rs");
+const KNOWLEDGE_INDEX_V2: &str = include_str!("../../knowledge/src/knowledge_index_v2.rs");
 const FRESH_SCHEMA_ACCEPTANCE: &str = include_str!("../../../scripts/fresh_schema_acceptance.sh");
 const BIDDING_TEST_SUPPORT: &str = include_str!("support/mod.rs");
 
@@ -134,6 +135,7 @@ fn v2_baseline_has_the_complete_authoring_foundation() {
     assert!(SQL.contains("mode_options jsonb NOT NULL"));
     for function in [
         "kb_bid_v2_get_requirement_projection",
+        "kb_bid_v2_get_requirement_set_compile_request",
         "kb_bid_v2_refresh_requirement_projection",
         "kb_bid_v2_retire_workspace_asset",
         "kb_bid_v2_create_node_evidence_pick_set",
@@ -155,6 +157,7 @@ fn v2_baseline_has_the_complete_authoring_foundation() {
         "/nodes/{node_lineage_id}/evidence-pick-set",
         "/assets/{asset_revision_id}",
         "/document-settings",
+        "/requirement-set-compilations/{request_id}",
         "/requirement-projection",
         "/exports/{export_id}/assessment-report",
         "/quote-snapshots",
@@ -164,6 +167,87 @@ fn v2_baseline_has_the_complete_authoring_foundation() {
             "missing V2 API route {route}"
         );
     }
+}
+
+#[test]
+fn owner_projection_publication_and_worker_terminal_contracts_are_frozen() {
+    let patch = &SQL[SQL
+        .find("CREATE FUNCTION kb_bid_v2_patch_requirement")
+        .unwrap()
+        ..SQL
+            .find("CREATE FUNCTION kb_bid_v2_publish_requirement_supersession")
+            .unwrap()];
+    let supersession = &SQL[SQL
+        .find("CREATE FUNCTION kb_bid_v2_publish_requirement_supersession")
+        .unwrap()
+        ..SQL
+            .find("CREATE FUNCTION kb_bid_v2_list_requirements")
+            .unwrap()];
+    assert!(!patch.contains("PERFORM kb_bid_v2_advance_workspace_projection"));
+    assert!(!supersession.contains("PERFORM kb_bid_v2_advance_workspace_projection"));
+    assert!(patch.contains("'workspace_apply_required',true"));
+    assert!(supersession.contains("'workspace_apply_required',true"));
+
+    let tender_failure = &SQL[SQL
+        .find("CREATE FUNCTION kb_bid_v2_mark_tender_document_failed")
+        .unwrap()..SQL.find("REVOKE ALL ON ALL TABLES").unwrap()];
+    let request_lock = tender_failure.find("FOR UPDATE").unwrap();
+    let terminal_guard = tender_failure
+        .find("status<>'pending' THEN RETURN")
+        .unwrap();
+    let document_update = tender_failure.find("UPDATE bid_documents").unwrap();
+    assert!(request_lock < terminal_guard && terminal_guard < document_update);
+    assert!(WORKER.contains("fn bid_failure_is_final(retries: u32)"));
+    assert!(!WORKER.contains("BID_AUTHORING_V2_MAX_RETRIES.saturating_sub(1)"));
+    assert!(SQL.contains("page_count integer CHECK (page_count > 0 AND page_count <= 1000)"));
+}
+
+#[test]
+fn v3_requirement_publication_never_advances_workspace_and_live_sql_is_fresh() {
+    let v3 = SQL
+        .split_once("CREATE FUNCTION kb_bid_v2_publish_requirement_set_v3(")
+        .expect("V3 publisher")
+        .1
+        .split_once("CREATE FUNCTION kb_bid_v2_mark_requirement_set_compile_failed(")
+        .expect("V3 publisher fence")
+        .0;
+    assert!(v3.contains("publication_status='superseded'"));
+    assert!(!v3.contains("publication_status='obsolete'"));
+    assert!(!v3.contains("kb_bid_v2_advance_workspace_projection"));
+    assert!(v3.contains("'published_current',false"));
+    assert!(v3.contains("'workspace_apply_required',false"));
+    assert!(v3.contains("'published_current',true"));
+    assert!(v3.contains("'workspace_apply_required',true"));
+    assert!(v3.contains("publication_status<>'published'"));
+    assert!(SEMANTIC_SPINE_LIVE.contains(v3));
+    assert!(!SEMANTIC_SPINE_LIVE.contains("publication_status='obsolete'"));
+}
+
+#[test]
+fn typed_compile_status_and_candidate_obsolete_api_contracts_are_frozen() {
+    assert!(SQL.contains("request_value.request_kind='requirement_set_compile'"));
+    assert!(SQL.contains("identity_value.project_id=p_project_id"));
+    assert!(
+        SQL.contains("kb_bid_v2_get_requirement_set_compile_request(uuid,uuid,kb_actor_identity)")
+    );
+    assert!(BID_API_ROUTER.contains("get_requirement_set_compile_request_v2"));
+    let candidate_accept = BID_API_ROUTER
+        .split_once("async fn accept_candidate(")
+        .expect("candidate accept handler")
+        .1
+        .split_once("async fn reject_candidate(")
+        .expect("candidate accept fence")
+        .0;
+    assert_eq!(candidate_accept.matches("CANDIDATE_OBSOLETE").count(), 2);
+    assert_eq!(
+        candidate_accept
+            .matches("candidate_obsolete_error(")
+            .count(),
+        2
+    );
+    assert!(BID_API_ROUTER.contains("fn candidate_obsolete_error(receipt: &Value)"));
+    assert!(BID_API_ROUTER.contains("current_workspace_revision_id"));
+    assert!(BID_API_ROUTER.contains("current_workspace_sha256"));
 }
 
 #[test]
@@ -177,7 +261,7 @@ fn reviewed_publication_target_and_render_constraints_are_frozen() {
     assert!(requirement_publish.contains("p_artifact_id uuid,p_artifact_sha256 kb_sha256"));
     assert!(!requirement_publish.contains("p_expected_artifact_id"));
     assert!(!requirement_publish.contains("candidate.revision<>current_value.generation+1"));
-    assert!(requirement_publish.contains("RETURN 'obsolete'"));
+    assert!(requirement_publish.contains("RETURN 'superseded'"));
     assert!(requirement_publish.contains("RETURN 'replayed'"));
     assert!(requirement_publish.contains("generation=current_value.generation+1"));
 
@@ -193,12 +277,28 @@ fn reviewed_publication_target_and_render_constraints_are_frozen() {
             "missing typed binding target {target_table}"
         );
     }
-    assert!(SQL.contains("mode_options ?& ARRAY['watermark','include_assessment_notices','include_knowledge_sources']"));
-    assert!(SQL.contains("mode_options - ARRAY['watermark','include_assessment_notices','include_knowledge_sources']::text[] = '{}'::jsonb"));
-    assert!(SQL.contains(
-        "jsonb_typeof(mode_options->'include_assessment_notices') IS NOT DISTINCT FROM 'boolean'"
-    ));
-    assert!(SQL.contains("mode_options @> '{\"watermark\":null,\"include_assessment_notices\":false,\"include_knowledge_sources\":false}'::jsonb"));
+    assert!(SQL.contains("mode_options ?& ARRAY['watermark']"));
+    assert!(SQL.contains("mode_options - ARRAY['watermark']::text[] = '{}'::jsonb"));
+    assert!(!SQL.contains("include_assessment_notices"));
+    assert!(!SQL.contains("include_knowledge_sources"));
+    assert!(SQL.contains("mode_options @> '{\"watermark\":null}'::jsonb"));
+    assert!(
+        SQL.contains("status text NOT NULL CHECK (status IN ('pending','succeeded','failed'))")
+    );
+    assert!(
+        SQL.contains("state text NOT NULL CHECK (state IN ('proposed','accepted','rejected'))")
+    );
+    assert!(SQL.contains("kb_bid_v2_apply_quote_snapshot"));
+    assert!(SQL.contains("kb_bid_v2_fulfillment_evidence_is_current"));
+    assert!(SQL.contains("kb_bid_v2_record_accepted_candidate_evidence"));
+    let generic_mutation = SQL
+        .split_once("CREATE FUNCTION kb_bid_v2_commit_workspace_mutation(")
+        .unwrap()
+        .1
+        .split_once("CREATE FUNCTION kb_bid_v2_record_accepted_candidate_evidence(")
+        .unwrap()
+        .0;
+    assert!(!generic_mutation.contains("bid_submission_fulfillment_evidence_revision_artifacts"));
     assert!(SQL.contains("docx_renderer_contract_sha256 kb_sha256 NOT NULL"));
     assert!(SQL.contains("pdf_renderer_contract_sha256 kb_sha256 NOT NULL"));
     assert!(SQL.contains("canonical_payload-'preparation_sha256'"));
@@ -256,6 +356,11 @@ fn reviewed_publication_target_and_render_constraints_are_frozen() {
         "REFERENCES bid_evidence_bundle_artifacts(project_id,workspace_id,id,content_sha256)"
     ));
     assert!(SQL.contains("CREATE FUNCTION kb_bid_v2_validate_content_generation_anchor"));
+    assert!(SQL.contains("insertion anchor is outside the frozen target subtree"));
+    assert!(SQL.contains("insertion block is outside the frozen anchor node"));
+    assert!(SQL.contains(
+        "SELECT identity.request_operation FROM bid_content_generation_request_identities identity"
+    ));
     assert!(SQL.contains("kb_bid_v2_verify_request_typed_projection"));
     assert!(SQL.contains("async request must have exactly one matching typed projection"));
     assert!(SQL.contains("kb_bid_v2_guard_async_request_initial_state"));
@@ -295,7 +400,6 @@ fn reviewed_publication_target_and_render_constraints_are_frozen() {
         "STRUCTURED_FORM_INCOMPLETE",
         "ATTACHMENT_PREPARATION_MISSING",
         "FULFILLMENT_EVIDENCE_STALE_OR_MISSING",
-        "STALE_CONTENT",
         "NO_ELIGIBLE_EVIDENCE",
         "QUOTE_SNAPSHOT_MISSING",
     ] {
@@ -428,6 +532,9 @@ fn phase_three_has_async_workers_and_live_evidence_candidate_publication() {
         "DROP CONSTRAINT IF EXISTS bid_outline_requirement_grouping_batc_need_occurrence_ids_check"
     ));
     assert!(SEMANTIC_SPINE_LIVE.contains("kb_bid_v2_outline_semantic_grouping_put"));
+    assert!(!SEMANTIC_SPINE_LIVE.contains("SET status='obsolete'"));
+    assert!(!SEMANTIC_SPINE_LIVE.contains("SET state='obsolete'"));
+    assert!(SEMANTIC_SPINE_LIVE.contains("'status','succeeded','published_current',false"));
     assert!(SEMANTIC_SPINE_LIVE.contains(
         "DROP CONSTRAINT IF EXISTS bid_outline_reduce_plan_artif_request_artifact_id_frozen_in_key"
     ));
@@ -472,7 +579,8 @@ fn phase_three_has_async_workers_and_live_evidence_candidate_publication() {
     }
     assert!(SQL.contains("AND request_value.status='pending'"));
     assert!(!SQL.contains("request_value.status IN ('pending','succeeded')"));
-    assert!(SQL.contains("AND state='proposed' AND id<>p_candidate_id"));
+    assert!(!SQL.contains("UPDATE bid_candidate_artifacts SET state='obsolete'"));
+    assert!(SQL.contains("THEN 'obsolete' ELSE candidate.state END"));
     assert!(SQL.contains(
         "ARRAY['schema_version','coverage','composition_spine',\n      'section_obligation_matrix','fulfillment_groups'"
     ));
@@ -601,4 +709,35 @@ fn active_queue_registry_is_v2_only_and_matches_implemented_workers() {
         );
         assert_eq!(entry.launch_mode, mode);
     }
+}
+
+#[test]
+fn remediation_fences_are_present() {
+    assert!(SQL.contains("QUOTE_SNAPSHOT_NOT_CURRENT"));
+    assert!(SQL.contains("current_quote bid_quote_snapshot_current%ROWTYPE"));
+    assert!(SQL.contains("p_new_projection_sha256 kb_sha256,p_actor kb_actor_identity"));
+    assert!(SQL.contains("payload,digest,p_actor"));
+    assert!(SQL.contains("asset.source='ai_evidence' THEN 'knowledge_evidence'"));
+    assert!(SQL.contains("WHERE id=p_request_artifact_id FOR UPDATE"));
+    assert!(SQL.contains("IF request_value.status<>'pending' THEN RETURN"));
+    assert!(SQL.contains("SELECT status INTO STRICT project_status FROM bid_projects WHERE id=p_project_id FOR UPDATE"));
+}
+
+#[test]
+fn runtime_vector_retrieval_and_image_snapshot_contracts_are_frozen() {
+    assert!(KNOWLEDGE_SQL.contains(
+        "GRANT EXECUTE ON FUNCTION vector_in(cstring,oid,integer),\n    cosine_distance(vector,vector)\nTO kb_runtime_api, kb_runtime_worker"
+    ));
+    assert!(KNOWLEDGE_SQL.contains(
+        "GRANT EXECUTE ON FUNCTION kb_knowledge_rebuild_keyword_indexes_v2(uuid),\n    kb_knowledge_has_pending_derived_v2(uuid)"
+    ));
+    assert_eq!(
+        KNOWLEDGE_SQL
+            .matches("chunk.chunk_type<>'image_ocr' OR EXISTS")
+            .count(),
+        3,
+        "source freeze and both reconciliation passes must exclude unattested OCR"
+    );
+    assert!(KNOWLEDGE_INDEX_V2.contains("FOR SHARE OF version\""));
+    assert!(!KNOWLEDGE_INDEX_V2.contains("FOR SHARE OF version,binding,revision"));
 }

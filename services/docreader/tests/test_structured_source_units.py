@@ -18,6 +18,7 @@ from docreader.models.document import (
     StructuredSourceUnitKind,
     TableCellImageParent,
 )
+from docreader.parser import Parser
 from docreader.parser.docx_parser import (
     _docx_package_image_payloads,
     _docx_structured_units,
@@ -199,6 +200,8 @@ def test_docx_preserves_body_order_heading_owner_and_drawing_identity() -> None:
     document.save(output)
 
     units = _docx_structured_units(output.getvalue())
+    routed = Parser().parse_file("tender.docx", "docx", output.getvalue())
+    assert [unit.key for unit in routed.structured_source_units] == [unit.key for unit in units]
     keys = [unit.key for unit in units]
     assert keys.index("section:0") < keys.index("table:0") < keys.index("section:1")
     table_unit = next(unit for unit in units if unit.key == "table:0")

@@ -45,7 +45,7 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env \
 4. `bid:content_generate:v2`
 5. `bid:submission_export:v2`
 
-API 事务提交后 enqueue。Worker 只读取冻结 request identity，发布 immutable artifact/stage receipt；
+API 事务提交后 enqueue。若enqueue结果不确定，API返回503并在`error.details`中携带已提交的request artifact ID、revision、request digest和frozen input digest；客户端必须用同一`Idempotency-Key`重试。Worker只读取冻结request identity，发布immutable artifact/stage receipt，不自动推进WorkspaceHead；
 相同 frozen input redelivery 必须 replay。同一功能不得拆出 EvidenceMatch continuation 或旧 Part/Gate Job。
 
 ## 4. 常见恢复流程
@@ -53,8 +53,8 @@ API 事务提交后 enqueue。Worker 只读取冻结 request identity，发布 i
 ### 4.1 TenderDocument 失败
 
 1. 读取 V2 document status 和技术错误。
-2. 修复 DocReader、OCR/VLM、文件 magic/container、ObjectRegistry 或对象可用性问题。
-3. 由 owner 调用 `POST /api/v2/projects/{project_id}/tender-documents/{document_id}/retry`，携带新的
+2. 修复 DocReader gRPC、OCR/VLM、文件 magic/container、ObjectRegistry 或对象可用性问题。DocReader只在Tender job执行时连接；不可用不得阻止export/content/maintenance lane启动或运行。
+3. 由 owner 调用 `POST /api/v2/bid-projects/{project_id}/tender-documents/{document_id}/retry`，携带新的
    `Idempotency-Key`。
 4. 观察 TenderDocumentProcess 和后续 RequirementSetCompile receipt。
 
@@ -64,12 +64,12 @@ pending/failed/unresolved 是可冻结的业务状态；它们不得让其他已
 
 - Workspace mutation/candidate acceptance 的 `If-Match` 冲突返回 409 和当前 head。重新 GET，向用户展示
   冲突后再显式重放操作。
-- stale RequirementSet delivery 记录为 `obsolete`，不得推进 RequirementSet、RequirementProjection 或
-  WorkspaceHead。
+- superseded RequirementSet delivery仍将Request记录为`succeeded`，result identity标注`published_current=false`；不得写Request `obsolete`，也不得推进RequirementSet current、RequirementProjection或WorkspaceHead。
 - Requirement supersession 按 `effective_applicability.fragments` 做局部 DAG 重放；边冻结 old/new
   SourceUnit revision 和 amendment DocumentRelation identity。范围重叠、未知来源或不兼容 DocumentSet 必须失败。
-- stale Candidate 记录为 `obsolete`，不得覆盖后来人工编辑；已接受 Candidate 的重复请求返回原 decision
-  receipt。
+- stale Candidate保持存储状态`proposed`，由base Workspace与当前Head派生有效`obsolete`；不得覆盖后来人工编辑。已接受Candidate的重复请求返回原decision receipt，reject不要求Workspace `If-Match`。
+- RequirementProjection和QuoteSnapshot发布只移动各自current pointer。用户必须携带Workspace revision ID+digest和`If-Match`调用显式apply；CAS失败返回409并回滚全部Workspace artifacts。
+- `POST /api/v2/bid-projects/{project_id}/document-set-revisions`返回冻结DocumentSet和专属RequirementSetCompile request identity。Web只可通过`GET /api/v2/bid-projects/{project_id}/requirement-set-compilations/{request_id}`轮询该绑定请求；`pending`、`failed`或`published_current=false`均不得apply或生成大纲。仅用户当前发起的生成动作可在校验冻结DocumentSet和Projection identity后显式apply，后台刷新不得自动apply。
 
 ### 4.3 Evidence 与生成
 
@@ -88,7 +88,8 @@ manifest-only DOCX/PDF render → output publication。Worker 运行镜像必须
   不得从 request 或 live Workspace 重建同一 manifest。
 - staging output 未转为 owner 时由 Retention 回收。
 - 已发布 output、字体、图片、附件页由 ObjectRegistry owner reference 保留；禁止直接删物理对象。
-- submission 模式不得出现水印、Assessment 提示或 Knowledge source；这些只进入独立报告。
+- export请求只接受受控`watermark`选项；submission必须为null。Assessment提示只进入独立报告，不提供Knowledge provenance或review notice appendix开关。
+- 正式render对缺失/空图片、digest不匹配、缺失embedded-pages preparation失败关闭。固定上限为：冻结export input 64 MiB、单图64 MiB/20,000px/100MP、PDF source 128 MiB、1,000页、raster总量256 MiB、render输出256 MiB、raster/render各120秒；临时目录在所有退出路径清理。
 
 ## 5. 当前 checkout 的强验证
 

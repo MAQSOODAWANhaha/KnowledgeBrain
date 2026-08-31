@@ -320,7 +320,7 @@ BEGIN
     'objects/'||repeat('e',64),repeat('e',64),'image/png',1,actor);
   upload_value:=kb_bid_v2_upload_workspace_asset(workspace_id,
     '10000000-0000-4000-8000-0000000000b1','10000000-0000-4000-8000-0000000000b0',
-    'unused.png','image/png',1,'objects/'||repeat('e',64),repeat('e',64),actor,
+    'unused.png','image/png',1,1,1,NULL,'objects/'||repeat('e',64),repeat('e',64),actor,
     'phase2-asset-upload',convert_to('{"asset":"upload"}','UTF8'),
     kb_bid_v2_sha256_bytes(convert_to('{"asset":"upload"}','UTF8')));
   retired:=kb_bid_v2_retire_workspace_asset(workspace_id,(upload_value->>'asset_revision_id')::uuid,
@@ -346,6 +346,15 @@ DECLARE actor kb_actor_identity:='user:10000000-0000-4000-8000-000000000001';
 BEGIN
   SELECT id INTO STRICT workspace_id FROM bid_submission_workspaces
     WHERE project_id='10000000-0000-4000-8000-000000000010';
+  -- Projection publication is independent; owner explicitly applies it with Workspace CAS.
+  PERFORM kb_bid_v2_refresh_requirement_projection(
+    workspace_id,
+    (SELECT artifact_id FROM bid_workspace_requirement_projection_current WHERE scope_id=workspace_id),
+    (SELECT artifact_sha256 FROM bid_workspace_requirement_projection_current WHERE scope_id=workspace_id),
+    (SELECT artifact_id FROM bid_workspace_heads WHERE scope_id=workspace_id),
+    (SELECT artifact_sha256 FROM bid_workspace_heads WHERE scope_id=workspace_id),
+    actor,'phase2-projection-apply',convert_to('{"apply_projection":true}','UTF8'),
+    kb_bid_v2_sha256_bytes(convert_to('{"apply_projection":true}','UTF8')));
   workspace_value:=kb_bid_v2_load_workspace_for_actor(workspace_id,actor);
   request_sha:=kb_bid_v2_sha256_bytes(request_bytes);
   request_value:=kb_bid_v2_create_outline_candidate(

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,31 +12,116 @@ pub struct WorkspaceMutationRequestV1 {
     pub workspace_id: Uuid,
     pub expected_workspace_revision_id: Uuid,
     pub expected_workspace_sha256: String,
-    pub operations: Vec<Value>,
+    pub operations: Vec<WorkspaceOperationV1>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DocumentMargins {
-    top: f64,
-    right: f64,
-    bottom: f64,
-    left: f64,
+pub struct DocumentMargins {
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+    pub left: f64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DocumentSettings {
-    page_size: String,
-    margins_mm: DocumentMargins,
-    cjk_font: String,
-    latin_font: String,
-    body_font_pt: f64,
-    line_spacing: f64,
-    heading_numbering: String,
-    header: String,
-    footer: String,
-    page_number: String,
+pub struct DocumentSettings {
+    pub page_size: String,
+    pub margins_mm: DocumentMargins,
+    pub body_font_pt: f64,
+    pub line_spacing: f64,
+    pub heading_numbering: String,
+    pub header: String,
+    pub footer: String,
+    pub page_number: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BindingTargetV1 {
+    OutlineNode { node_lineage_id: Uuid },
+    ResponseTable { block_lineage_id: Uuid },
+    StructuredForm { form_definition_revision_id: Uuid },
+    Quote { quote_snapshot_id: Uuid },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkspaceOperationV1 {
+    InsertNode {
+        client_node_ref: String,
+        parent_lineage_id: Option<Uuid>,
+        ordinal: u64,
+        title: String,
+        semantic_role: String,
+        render_role: String,
+    },
+    RenameNode {
+        node_lineage_id: Uuid,
+        title: String,
+    },
+    MoveNode {
+        node_lineage_id: Uuid,
+        parent_lineage_id: Option<Uuid>,
+        ordinal: u64,
+    },
+    SplitNode {
+        node_lineage_id: Uuid,
+        titles: Vec<String>,
+    },
+    MergeNodes {
+        node_lineage_ids: Vec<Uuid>,
+        title: String,
+    },
+    DeleteNode {
+        node_lineage_id: Uuid,
+    },
+    InsertBlock {
+        node_lineage_id: Uuid,
+        ordinal: u64,
+        block: Value,
+    },
+    UpdateBlock {
+        block_lineage_id: Uuid,
+        block: Value,
+    },
+    MoveBlock {
+        block_lineage_id: Uuid,
+        target_node_lineage_id: Uuid,
+        ordinal: u64,
+    },
+    DeleteBlock {
+        block_lineage_id: Uuid,
+    },
+    InsertAssetBlock {
+        node_lineage_id: Uuid,
+        asset_revision_id: Uuid,
+        ordinal: u64,
+    },
+    UpdateDocumentSettings {
+        settings: DocumentSettings,
+    },
+    BindFulfillment {
+        need_occurrence_id: Uuid,
+        channel: String,
+        requirement_projection_revision_id: Uuid,
+        requirement_projection_sha256: String,
+        target: BindingTargetV1,
+        reason: String,
+    },
+    RemapFulfillment {
+        binding_lineage_id: Uuid,
+        need_occurrence_id: Uuid,
+        channel: String,
+        requirement_projection_revision_id: Uuid,
+        requirement_projection_sha256: String,
+        target: BindingTargetV1,
+        reason: String,
+    },
+    UnbindFulfillment {
+        binding_lineage_id: Uuid,
+    },
 }
 
 pub fn validate_document_settings(value: &Value) -> Result<()> {
@@ -51,10 +137,6 @@ pub fn validate_document_settings(value: &Value) -> Result<()> {
         || margins
             .iter()
             .any(|margin| !margin.is_finite() || !(5.0..=80.0).contains(margin))
-        || settings.cjk_font.is_empty()
-        || settings.cjk_font.chars().count() > 128
-        || settings.latin_font.is_empty()
-        || settings.latin_font.chars().count() > 128
         || !settings.body_font_pt.is_finite()
         || !(6.0..=48.0).contains(&settings.body_font_pt)
         || !settings.line_spacing.is_finite()
@@ -99,9 +181,121 @@ pub fn apply_workspace_operations(
     current: &Value,
     request: &WorkspaceMutationRequestV1,
 ) -> Result<Value> {
-    if request.schema_version != 1
+    if request.operations.is_empty() || request.operations.len() > 1_000 {
+        return Err(invalid(
+            "operations count is outside the closed V1 contract",
+        ));
+    }
+    let mut client_refs = HashSet::new();
+    let operations = request
+        .operations
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| invalid(format!("workspace operation serialization failed: {error}")))?
+        .into_iter()
+        .map(|mut operation| {
+            if operation.get("kind").and_then(Value::as_str) == Some("insert_node") {
+                let client_ref = string(&operation, "client_node_ref")?;
+                if client_ref != client_ref.trim() || client_ref.chars().count() > 128 {
+                    return Err(invalid("client_node_ref invalid"));
+                }
+                if !client_refs.insert(client_ref.to_owned()) {
+                    return Err(invalid(
+                        "client_node_ref must be unique within one mutation",
+                    ));
+                }
+                let lineage = deterministic_node_identity(
+                    request.workspace_id,
+                    request.expected_workspace_revision_id,
+                    client_ref,
+                    b"lineage",
+                );
+                let revision = deterministic_node_identity(
+                    request.workspace_id,
+                    request.expected_workspace_revision_id,
+                    client_ref,
+                    b"revision",
+                );
+                let object = operation
+                    .as_object_mut()
+                    .ok_or_else(|| invalid("operation must be an object"))?;
+                object.remove("client_node_ref");
+                object.insert("lineage_id".into(), Value::String(lineage.to_string()));
+                object.insert("revision_id".into(), Value::String(revision.to_string()));
+            }
+            Ok(operation)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    apply_workspace_operation_values(
+        current,
+        request.schema_version,
+        request.workspace_id,
+        request.expected_workspace_revision_id,
+        &request.expected_workspace_sha256,
+        &operations,
+        true,
+    )
+}
+
+fn deterministic_node_identity(
+    workspace_id: Uuid,
+    expected_revision_id: Uuid,
+    client_ref: &str,
+    purpose: &[u8],
+) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(b"knowledgebrain.bid.workspace-node.v1\0");
+    hasher.update(workspace_id.as_bytes());
+    hasher.update(expected_revision_id.as_bytes());
+    hasher.update(purpose);
+    hasher.update([0]);
+    hasher.update(client_ref.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+/// Applies identity-bearing operations produced only by a validated immutable Candidate.
+/// This is deliberately separate from the public mutation DTO, which never accepts IDs.
+pub fn apply_trusted_candidate_operations(
+    current: &Value,
+    workspace_id: Uuid,
+    expected_workspace_revision_id: Uuid,
+    expected_workspace_sha256: &str,
+    operations: &[Value],
+) -> Result<Value> {
+    apply_workspace_operation_values(
+        current,
+        1,
+        workspace_id,
+        expected_workspace_revision_id,
+        expected_workspace_sha256,
+        operations,
+        true,
+    )
+}
+
+fn apply_workspace_operation_values(
+    current: &Value,
+    schema_version: u8,
+    workspace_id: Uuid,
+    expected_workspace_revision_id: Uuid,
+    expected_workspace_sha256: &str,
+    operations: &[Value],
+    trusted_candidate: bool,
+) -> Result<Value> {
+    if operations.is_empty() || operations.len() > 1_000 {
+        return Err(invalid(
+            "operations count is outside the closed V1 contract",
+        ));
+    }
+    if schema_version != 1
         || current.get("workspace_id").and_then(Value::as_str)
-            != Some(request.workspace_id.to_string().as_str())
+            != Some(workspace_id.to_string().as_str())
     {
         return Err(WorkspaceMutationError::WorkspaceIdentityMismatch);
     }
@@ -109,9 +303,8 @@ pub fn apply_workspace_operations(
         .get("revision_id")
         .and_then(Value::as_str)
         .and_then(|value| Uuid::parse_str(value).ok())
-        != Some(request.expected_workspace_revision_id)
-        || current.get("sha256").and_then(Value::as_str)
-            != Some(request.expected_workspace_sha256.as_str())
+        != Some(expected_workspace_revision_id)
+        || current.get("sha256").and_then(Value::as_str) != Some(expected_workspace_sha256)
     {
         return Err(WorkspaceMutationError::WorkspaceCasMismatch);
     }
@@ -125,14 +318,22 @@ pub fn apply_workspace_operations(
         .ok_or_else(|| invalid("document_settings missing"))?;
     let mut lineage_edges = Vec::new();
 
-    for operation in &request.operations {
+    for operation in operations {
         let kind = string(operation, "kind")?;
         let allowed: &[&str] = match kind {
+            "insert_node" if trusted_candidate => &[
+                "kind",
+                "lineage_id",
+                "revision_id",
+                "parent_lineage_id",
+                "ordinal",
+                "title",
+                "semantic_role",
+                "render_role",
+            ],
             "insert_node" => &[
                 "kind",
                 "client_node_ref",
-                "lineage_id",
-                "revision_id",
                 "parent_lineage_id",
                 "ordinal",
                 "title",
@@ -144,13 +345,7 @@ pub fn apply_workspace_operations(
             "split_node" => &["kind", "node_lineage_id", "titles"],
             "merge_nodes" => &["kind", "node_lineage_ids", "title"],
             "delete_node" => &["kind", "node_lineage_id"],
-            "insert_block" => &[
-                "kind",
-                "node_lineage_id",
-                "ordinal",
-                "insertion_anchor",
-                "block",
-            ],
+            "insert_block" => &["kind", "node_lineage_id", "ordinal", "block"],
             "update_block" => &["kind", "block_lineage_id", "block"],
             "move_block" => &[
                 "kind",
@@ -169,7 +364,6 @@ pub fn apply_workspace_operations(
                 "requirement_projection_sha256",
                 "target",
                 "reason",
-                "state",
             ],
             "remap_fulfillment" => &[
                 "kind",
@@ -180,10 +374,8 @@ pub fn apply_workspace_operations(
                 "requirement_projection_sha256",
                 "target",
                 "reason",
-                "state",
             ],
             "unbind_fulfillment" => &["kind", "binding_lineage_id"],
-            "acknowledge_stale" => &["kind", "dependency_identity_sha256"],
             other => return Err(invalid(format!("unknown operation kind {other}"))),
         };
         exact_keys(operation, allowed)?;
@@ -206,10 +398,15 @@ pub fn apply_workspace_operations(
                     .ok_or_else(|| invalid("settings missing"))?;
                 validate_document_settings(&settings)?;
             }
-            "bind_fulfillment" => bind_fulfillment(&mut bindings, operation)?,
-            "remap_fulfillment" => remap_fulfillment(&mut bindings, operation)?,
+            "bind_fulfillment" => {
+                validate_projection_identity(current, operation)?;
+                bind_fulfillment(&mut bindings, operation)?;
+            }
+            "remap_fulfillment" => {
+                validate_projection_identity(current, operation)?;
+                remap_fulfillment(&mut bindings, operation)?;
+            }
             "unbind_fulfillment" => unbind_fulfillment(&mut bindings, operation)?,
-            "acknowledge_stale" => acknowledge_stale(&mut blocks, operation)?,
             other => return Err(invalid(format!("unknown operation kind {other}"))),
         }
         normalize_tree(&mut nodes)?;
@@ -231,6 +428,28 @@ fn exact_keys(value: &Value, allowed: &[&str]) -> Result<()> {
         .ok_or_else(|| invalid("operation must be an object"))?;
     if object.keys().any(|key| !allowed.contains(&key.as_str())) {
         return Err(invalid("operation contains unknown fields"));
+    }
+    Ok(())
+}
+
+fn validate_projection_identity(current: &Value, operation: &Value) -> Result<()> {
+    let projection_id = uuid(operation, "requirement_projection_revision_id")?;
+    let projection_sha = string(operation, "requirement_projection_sha256")?;
+    if projection_sha.len() != 64
+        || !projection_sha
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || current
+            .get("requirement_projection_revision_id")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            != Some(projection_id)
+        || current
+            .get("requirement_projection_sha256")
+            .and_then(Value::as_str)
+            != Some(projection_sha)
+    {
+        return Err(invalid("requirement projection identity is not current"));
     }
     Ok(())
 }
@@ -267,6 +486,14 @@ fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| invalid(format!("{field} missing")))
+}
+
+fn bounded_title<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
+    let title = string(value, field)?.trim();
+    if title.is_empty() || title.chars().count() > 1_024 {
+        return Err(invalid(format!("{field} is empty or too long")));
+    }
+    Ok(title)
 }
 
 fn uuid(value: &Value, field: &str) -> Result<Uuid> {
@@ -323,13 +550,38 @@ fn set_node_blocks(node: &mut Value, blocks: Vec<Value>) -> Result<()> {
 }
 
 fn insert_node(nodes: &mut Vec<Value>, operation: &Value) -> Result<()> {
+    if let Some(client_ref) = operation.get("client_node_ref") {
+        let client_ref = client_ref
+            .as_str()
+            .filter(|value| !value.trim().is_empty() && value.chars().count() <= 128)
+            .ok_or_else(|| invalid("client_node_ref invalid"))?;
+        if client_ref != client_ref.trim() {
+            return Err(invalid("client_node_ref invalid"));
+        }
+    }
     let parent = optional_uuid(operation, "parent_lineage_id")?;
     if let Some(parent) = parent {
         node_index(nodes, parent)?;
     }
-    let title = string(operation, "title")?.trim();
-    if title.is_empty() || title.len() > 1024 {
-        return Err(invalid("title is empty or too long"));
+    let title = bounded_title(operation, "title")?;
+    if !matches!(
+        string(operation, "semantic_role")?,
+        "cover"
+            | "toc"
+            | "qualification"
+            | "technical"
+            | "commercial"
+            | "quotation"
+            | "deviation"
+            | "implementation"
+            | "evidence_index"
+            | "attachment"
+            | "other"
+    ) || !matches!(
+        string(operation, "render_role")?,
+        "section" | "front_matter" | "toc" | "appendix" | "hidden"
+    ) {
+        return Err(invalid("node role is outside the closed V1 contract"));
     }
     let lineage_id = optional_uuid(operation, "lineage_id")?.unwrap_or_else(Uuid::new_v4);
     let revision_id = optional_uuid(operation, "revision_id")?.unwrap_or_else(Uuid::new_v4);
@@ -356,7 +608,7 @@ fn insert_node(nodes: &mut Vec<Value>, operation: &Value) -> Result<()> {
 
 fn rename_node(nodes: &mut [Value], operation: &Value) -> Result<()> {
     let index = node_index(nodes, uuid(operation, "node_lineage_id")?)?;
-    let title = string(operation, "title")?.trim();
+    let title = bounded_title(operation, "title")?;
     let object = nodes[index]
         .as_object_mut()
         .ok_or_else(|| invalid("node must be an object"))?;
@@ -403,7 +655,7 @@ fn split_node(nodes: &mut Vec<Value>, edges: &mut Vec<Value>, operation: &Value)
     let titles = operation
         .get("titles")
         .and_then(Value::as_array)
-        .filter(|values| values.len() >= 2)
+        .filter(|values| (2..=100).contains(&values.len()))
         .ok_or_else(|| invalid("split titles invalid"))?;
     let parent = old.get("parent_lineage_id").cloned().unwrap_or(Value::Null);
     let base_ordinal = old.get("ordinal").and_then(Value::as_u64).unwrap_or(0);
@@ -420,7 +672,8 @@ fn split_node(nodes: &mut Vec<Value>, edges: &mut Vec<Value>, operation: &Value)
     for (offset, title) in titles.iter().enumerate() {
         let title = title
             .as_str()
-            .filter(|value| !value.trim().is_empty())
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && value.chars().count() <= 1_024)
             .ok_or_else(|| invalid("split title invalid"))?;
         let lineage = Uuid::new_v4();
         nodes.push(json!({
@@ -454,7 +707,7 @@ fn merge_nodes(nodes: &mut Vec<Value>, edges: &mut Vec<Value>, operation: &Value
     let ids = operation
         .get("node_lineage_ids")
         .and_then(Value::as_array)
-        .filter(|values| values.len() >= 2)
+        .filter(|values| (2..=100).contains(&values.len()))
         .ok_or_else(|| invalid("merge node_lineage_ids invalid"))?
         .iter()
         .map(|value| {
@@ -464,6 +717,9 @@ fn merge_nodes(nodes: &mut Vec<Value>, edges: &mut Vec<Value>, operation: &Value
                 .ok_or_else(|| invalid("merge lineage invalid"))
         })
         .collect::<Result<Vec<_>>>()?;
+    if ids.iter().copied().collect::<HashSet<_>>().len() != ids.len() {
+        return Err(invalid("merge node_lineage_ids must be unique"));
+    }
     let first = nodes[node_index(nodes, ids[0])?].clone();
     let parent = first
         .get("parent_lineage_id")
@@ -505,7 +761,7 @@ fn merge_nodes(nodes: &mut Vec<Value>, edges: &mut Vec<Value>, operation: &Value
         "revision_id": Uuid::new_v4(),
         "parent_lineage_id": parent,
         "ordinal": min_ordinal,
-        "title": string(operation, "title")?,
+        "title": bounded_title(operation, "title")?,
         "semantic_role": first.get("semantic_role").cloned().unwrap_or_else(|| json!("other")),
         "render_role": first.get("render_role").cloned().unwrap_or_else(|| json!("section")),
         "stale": false,
@@ -607,14 +863,6 @@ fn update_block(blocks: &mut [Value], operation: &Value) -> Result<()> {
         .get("revision")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    let old_dependency = blocks[index]
-        .get("dependency_sha256")
-        .cloned()
-        .unwrap_or(Value::Null);
-    let old_stale = blocks[index]
-        .get("stale")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let mut next = operation
         .get("block")
         .cloned()
@@ -631,11 +879,6 @@ fn update_block(blocks: &mut [Value], operation: &Value) -> Result<()> {
         Value::String(Uuid::new_v4().to_string()),
     );
     object.insert("revision".into(), Value::from(old_revision + 1));
-    object.insert("dependency_sha256".into(), old_dependency.clone());
-    object.insert(
-        "stale".into(),
-        Value::Bool(old_stale || !old_dependency.is_null()),
-    );
     blocks[index] = next;
     Ok(())
 }
@@ -709,8 +952,6 @@ fn insert_asset_block(
             "revision": 1,
             "kind": "image",
             "origin": "human",
-            "dependency_sha256": null,
-            "stale": false,
             "content_sha256": content_sha256,
             "content": content
         }
@@ -718,8 +959,28 @@ fn insert_asset_block(
     insert_block(nodes, blocks, &synthetic)
 }
 
+fn validate_binding_fields(operation: &Value) -> Result<()> {
+    if !matches!(
+        string(operation, "channel")?,
+        "narrative_content"
+            | "response_table"
+            | "deviation_statement"
+            | "structured_form"
+            | "evidence_attachment"
+            | "quotation"
+    ) {
+        return Err(invalid("fulfillment channel invalid"));
+    }
+    let reason = string(operation, "reason")?;
+    if reason.chars().count() > 4_096 {
+        return Err(invalid("fulfillment reason invalid"));
+    }
+    Ok(())
+}
+
 fn bind_fulfillment(bindings: &mut Vec<Value>, operation: &Value) -> Result<()> {
     uuid(operation, "need_occurrence_id")?;
+    validate_binding_fields(operation)?;
     validate_binding_target(
         operation
             .get("target")
@@ -747,6 +1008,8 @@ fn bind_fulfillment(bindings: &mut Vec<Value>, operation: &Value) -> Result<()> 
 
 fn remap_fulfillment(bindings: &mut [Value], operation: &Value) -> Result<()> {
     let lineage = uuid(operation, "binding_lineage_id")?;
+    uuid(operation, "need_occurrence_id")?;
+    validate_binding_fields(operation)?;
     validate_binding_target(
         operation
             .get("target")
@@ -805,19 +1068,6 @@ fn unbind_fulfillment(bindings: &mut [Value], operation: &Value) -> Result<()> {
     object.insert("state".into(), Value::String("unbound".into()));
     object.insert("reason".into(), Value::String("user_unbound".into()));
     object.insert("stale".into(), Value::Bool(false));
-    Ok(())
-}
-
-fn acknowledge_stale(blocks: &mut [Value], operation: &Value) -> Result<()> {
-    let dependency = string(operation, "dependency_identity_sha256")?;
-    for block in blocks {
-        if block.get("dependency_sha256").and_then(Value::as_str) == Some(dependency) {
-            block
-                .as_object_mut()
-                .ok_or_else(|| invalid("block must be object"))?
-                .insert("stale".into(), Value::Bool(false));
-        }
-    }
     Ok(())
 }
 
@@ -915,8 +1165,21 @@ mod tests {
             expected_workspace_revision_id: Uuid::parse_str("00000000-0000-4000-8000-000000000002")
                 .unwrap(),
             expected_workspace_sha256: "a".repeat(64),
-            operations,
+            operations: operations
+                .into_iter()
+                .map(|operation| serde_json::from_value(operation).unwrap())
+                .collect(),
         }
+    }
+
+    fn apply_trusted(operations: Vec<Value>) -> Result<Value> {
+        apply_trusted_candidate_operations(
+            &workspace(),
+            Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap(),
+            Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap(),
+            &"a".repeat(64),
+            &operations,
+        )
     }
 
     #[test]
@@ -963,7 +1226,7 @@ mod tests {
             json!({
                 "schema_version":1,"block_revision_id":Uuid::new_v4(),"lineage_id":lineage,
                 "revision":1,"kind":kind,"content":typed,"origin":"human",
-                "dependency_sha256":null,"stale":false,"content_sha256":typed.sha256().unwrap()
+                "content_sha256":typed.sha256().unwrap()
             })
         }
 
@@ -995,18 +1258,16 @@ mod tests {
                 "widths_mm":[100.0],"repeat_header_rows":0
             }),
         );
-        let result = apply_workspace_operations(&workspace(), &request(vec![
-            json!({"kind":"insert_node","client_node_ref":"root","lineage_id":root,
+        let result = apply_trusted(vec![
+            json!({"kind":"insert_node","lineage_id":root,
                 "revision_id":Uuid::new_v4(),"parent_lineage_id":null,"ordinal":0,
                 "title":"技术方案","semantic_role":"technical","render_role":"section"}),
-            json!({"kind":"insert_node","client_node_ref":"child","lineage_id":child,
+            json!({"kind":"insert_node","lineage_id":child,
                 "revision_id":Uuid::new_v4(),"parent_lineage_id":root,"ordinal":0,
                 "title":"实施细节","semantic_role":"technical","render_role":"section"}),
-            json!({"kind":"insert_block","node_lineage_id":root,"ordinal":0,
-                "insertion_anchor":null,"block":rich}),
+            json!({"kind":"insert_block","node_lineage_id":root,"ordinal":0,"block":rich}),
             json!({"kind":"update_block","block_lineage_id":rich_lineage,"block":updated_rich}),
-            json!({"kind":"insert_block","node_lineage_id":root,"ordinal":1,
-                "insertion_anchor":null,"block":table}),
+            json!({"kind":"insert_block","node_lineage_id":root,"ordinal":1,"block":table}),
             json!({"kind":"move_block","block_lineage_id":rich_lineage,
                 "target_node_lineage_id":child,"ordinal":0}),
             json!({"kind":"move_node","node_lineage_id":child,"parent_lineage_id":null,"ordinal":1}),
@@ -1014,7 +1275,7 @@ mod tests {
             json!({"kind":"delete_node","node_lineage_id":child}),
             json!({"kind":"insert_asset_block","node_lineage_id":root,
                 "asset_revision_id":asset,"ordinal":0})
-        ])).unwrap();
+        ]).unwrap();
 
         assert_eq!(result["nodes"].as_array().unwrap().len(), 1);
         assert_eq!(result["nodes"][0]["lineage_id"], root.to_string());
@@ -1027,50 +1288,119 @@ mod tests {
     }
 
     #[test]
-    fn manual_update_cannot_clear_candidate_dependency_or_stale_state() {
+    fn manual_update_creates_a_new_block_revision_without_stored_stale_state() {
+        let make_block = |lineage: Uuid, text: &str| {
+            let content: crate::content_block::BlockContent = serde_json::from_value(json!({
+                "type":"rich_text","nodes":[{"kind":"paragraph","content":[{
+                    "kind":"text","text":text,"marks":[]}]}]
+            }))
+            .unwrap();
+            json!({"schema_version":1,"block_revision_id":Uuid::new_v4(),"lineage_id":lineage,
+                "revision":1,"kind":"rich_text","content":content,"origin":"human",
+                "content_sha256":content.sha256().unwrap()})
+        };
         let node = Uuid::new_v4();
         let lineage = Uuid::new_v4();
-        let content: crate::content_block::BlockContent = serde_json::from_value(json!({
-            "type":"rich_text","nodes":[{"kind":"paragraph","content":[{
-                "kind":"text","text":"候选内容","marks":[]}]}]
-        }))
-        .unwrap();
-        let original = json!({
-            "schema_version":1,"block_revision_id":Uuid::new_v4(),"lineage_id":lineage,
-            "revision":1,"kind":"rich_text","content":content,"origin":"agent_candidate",
-            "dependency_sha256":"a".repeat(64),"stale":false,
-            "content_sha256":content.sha256().unwrap()
-        });
-        let edited_content: crate::content_block::BlockContent = serde_json::from_value(json!({
-            "type":"rich_text","nodes":[{"kind":"paragraph","content":[{
-                "kind":"text","text":"人工修改候选内容","marks":[]}]}]
-        }))
-        .unwrap();
-        let caller_attempt = json!({
-            "schema_version":1,"block_revision_id":Uuid::new_v4(),"lineage_id":lineage,
-            "revision":1,"kind":"rich_text","content":edited_content,"origin":"human",
-            "dependency_sha256":null,"stale":false,
-            "content_sha256":edited_content.sha256().unwrap()
-        });
-        let result = apply_workspace_operations(
-            &workspace(),
-            &request(vec![
-                json!({"kind":"insert_node","client_node_ref":"root","lineage_id":node,
+        let original = make_block(lineage, "候选内容");
+        let edited = make_block(lineage, "人工修改候选内容");
+        let result = apply_trusted(vec![
+            json!({"kind":"insert_node","lineage_id":node,
                     "revision_id":Uuid::new_v4(),"parent_lineage_id":null,"ordinal":0,
                     "title":"技术方案","semantic_role":"technical","render_role":"section"}),
-                json!({"kind":"insert_block","node_lineage_id":node,"ordinal":0,
-                    "insertion_anchor":null,"block":original}),
-                json!({"kind":"update_block","block_lineage_id":lineage,"block":caller_attempt}),
-            ]),
+            json!({"kind":"insert_block","node_lineage_id":node,"ordinal":0,"block":original}),
+            json!({"kind":"update_block","block_lineage_id":lineage,"block":edited}),
+        ])
+        .unwrap();
+        assert_eq!(result["blocks"][0]["revision"], 2);
+        assert!(result["blocks"][0].get("dependency_sha256").is_none());
+        assert!(result["blocks"][0].get("stale").is_none());
+    }
+
+    #[test]
+    fn public_workspace_operation_contract_rejects_integrity_and_anchor_fields() {
+        let base = json!({
+            "kind":"insert_node","client_node_ref":"root","parent_lineage_id":null,
+            "ordinal":0,"title":"技术方案","semantic_role":"technical","render_role":"section"
+        });
+        assert!(serde_json::from_value::<WorkspaceOperationV1>(base.clone()).is_ok());
+        for invalid in [
+            json!({"kind":"insert_node","parent_lineage_id":null,"ordinal":0,
+                "title":"技术方案","semantic_role":"technical","render_role":"section"}),
+            json!({"kind":"insert_node","client_node_ref":"root","lineage_id":Uuid::new_v4(),
+                "parent_lineage_id":null,"ordinal":0,"title":"技术方案",
+                "semantic_role":"technical","render_role":"section"}),
+            json!({"kind":"insert_node","client_node_ref":"root","revision_id":Uuid::new_v4(),
+                "parent_lineage_id":null,"ordinal":0,"title":"技术方案",
+                "semantic_role":"technical","render_role":"section"}),
+            json!({"kind":"insert_block","node_lineage_id":Uuid::new_v4(),"ordinal":0,
+                "block":{},"insertion_anchor":{"node_revision_id":Uuid::new_v4()}}),
+            json!({"kind":"bind_fulfillment","need_occurrence_id":Uuid::new_v4(),
+                "channel":"narrative_content","requirement_projection_revision_id":Uuid::new_v4(),
+                "requirement_projection_sha256":"a".repeat(64),
+                "target":{"kind":"outline_node","node_lineage_id":Uuid::new_v4()},
+                "reason":"manual","state":"bound"}),
+        ] {
+            assert!(
+                serde_json::from_value::<WorkspaceOperationV1>(invalid.clone()).is_err(),
+                "accepted forged public operation {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn public_insert_generates_server_identities_and_binding_requires_projection_digest() {
+        let inserted = apply_workspace_operations(
+            &workspace(),
+            &request(vec![json!({
+                "kind":"insert_node","client_node_ref":"root","parent_lineage_id":null,
+                "ordinal":0,"title":"技术方案","semantic_role":"technical","render_role":"section"
+            })]),
         )
         .unwrap();
-        assert_eq!(result["blocks"][0]["dependency_sha256"], "a".repeat(64));
-        assert_eq!(result["blocks"][0]["stale"], true);
+        assert!(Uuid::parse_str(inserted["nodes"][0]["lineage_id"].as_str().unwrap()).is_ok());
+        assert!(Uuid::parse_str(inserted["nodes"][0]["revision_id"].as_str().unwrap()).is_ok());
+        let replayed = apply_workspace_operations(
+            &workspace(),
+            &request(vec![json!({
+                "kind":"insert_node","client_node_ref":"root","parent_lineage_id":null,
+                "ordinal":0,"title":"技术方案","semantic_role":"technical","render_role":"section"
+            })]),
+        )
+        .unwrap();
+        assert_eq!(
+            inserted["nodes"][0]["lineage_id"],
+            replayed["nodes"][0]["lineage_id"]
+        );
+        assert_eq!(
+            inserted["nodes"][0]["revision_id"],
+            replayed["nodes"][0]["revision_id"]
+        );
+
+        let mut current = workspace();
+        current["requirement_projection_revision_id"] = json!(Uuid::new_v4());
+        current["requirement_projection_sha256"] = json!("b".repeat(64));
+        let operation = json!({
+            "kind":"bind_fulfillment","need_occurrence_id":Uuid::new_v4(),
+            "channel":"narrative_content",
+            "requirement_projection_revision_id":current["requirement_projection_revision_id"],
+            "requirement_projection_sha256":"a".repeat(64),
+            "target":{"kind":"outline_node","node_lineage_id":Uuid::new_v4()},
+            "reason":"manual"
+        });
+        let error = apply_workspace_operations(&current, &request(vec![operation])).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("projection identity is not current")
+        );
     }
 
     #[test]
     fn stale_cas_is_rejected_before_any_operation() {
-        let mut request = request(Vec::new());
+        let mut request = request(vec![json!({
+            "kind":"insert_node","client_node_ref":"stale","parent_lineage_id":null,
+            "ordinal":0,"title":"stale","semantic_role":"other","render_role":"section"
+        })]);
         request.expected_workspace_sha256 = "b".repeat(64);
         assert_eq!(
             apply_workspace_operations(&workspace(), &request).unwrap_err(),

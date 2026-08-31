@@ -47,47 +47,12 @@
       "minLength": 1,
       "maxLength": 1024
     },
-    "insertionAnchor": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "node_revision_id"
-      ],
-      "properties": {
-        "node_revision_id": {
-          "$ref": "#/$defs/uuid"
-        },
-        "block_revision_id": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/uuid"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "utf8_offset": {
-          "anyOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      }
-    },
     "documentSettings": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "page_size",
         "margins_mm",
-        "cjk_font",
-        "latin_font",
         "body_font_pt",
         "line_spacing",
         "heading_numbering",
@@ -130,16 +95,6 @@
               "maximum": 80
             }
           }
-        },
-        "cjk_font": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        "latin_font": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
         },
         "body_font_pt": {
           "type": "number",
@@ -382,9 +337,6 @@
             },
             "block": {
               "$ref": "urn:knowledgebrain:bid:content-block:v1"
-            },
-            "insertion_anchor": {
-              "$ref": "#/$defs/insertionAnchor"
             }
           }
         },
@@ -597,22 +549,6 @@
             },
             "binding_lineage_id": {
               "$ref": "#/$defs/uuid"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "dependency_identity_sha256"
-          ],
-          "properties": {
-            "kind": {
-              "const": "acknowledge_stale"
-            },
-            "dependency_identity_sha256": {
-              "$ref": "#/$defs/sha256"
             }
           }
         }

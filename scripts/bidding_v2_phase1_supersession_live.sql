@@ -1,6 +1,7 @@
 \set ON_ERROR_STOP on
 BEGIN;
 DO $$
+<<fixture>>
 DECLARE
   project_id uuid:='10000000-0000-4000-8000-000000000010';
   actor kb_actor_identity:='user:10000000-0000-4000-8000-000000000001';
@@ -9,7 +10,12 @@ DECLARE
   value jsonb; req2_target uuid; req2_later uuid; req1_old uuid; edge_id uuid;
   edge_lineage uuid:=gen_random_uuid(); edge_sha kb_sha256;
   body bytea; body_sha kb_sha256;
+  workspace_id uuid; head_before uuid; head_sha_before kb_sha256; revision_count_before bigint;
 BEGIN
+  SELECT workspace.id,head.artifact_id,head.artifact_sha256 INTO STRICT workspace_id,head_before,head_sha_before
+    FROM bid_submission_workspaces workspace JOIN bid_workspace_heads head ON head.scope_id=workspace.id
+    WHERE workspace.project_id=fixture.project_id;
+  SELECT count(*) INTO revision_count_before FROM bid_workspace_revision_artifacts revision WHERE revision.workspace_id=fixture.workspace_id;
   SELECT * INTO STRICT current_set FROM bid_requirement_set_current WHERE scope_id=project_id;
   SELECT requirement.* INTO STRICT req1 FROM bid_requirement_set_items item
     JOIN bid_requirement_revision_artifacts requirement ON requirement.id=item.requirement_revision_id
@@ -81,8 +87,14 @@ BEGIN
       AND requirement_revision_id=req1_old AND effective_applicability='{"fragments":["b"]}'::jsonb)
      OR NOT EXISTS (SELECT 1 FROM bid_requirement_set_items WHERE requirement_set_id=current_set.artifact_id
       AND requirement_revision_id=req2_target AND effective_applicability='{"fragments":["a"]}'::jsonb)
-     OR (value->>'tombstone')::boolean IS DISTINCT FROM false THEN
+     OR (value->>'tombstone')::boolean IS DISTINCT FROM false
+     OR (value->>'workspace_apply_required')::boolean IS DISTINCT FROM true THEN
     RAISE EXCEPTION 'supersession re-establishment did not reapply the effective set';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM bid_workspace_heads WHERE scope_id=fixture.workspace_id
+      AND artifact_id=head_before AND artifact_sha256=head_sha_before)
+     OR (SELECT count(*) FROM bid_workspace_revision_artifacts revision WHERE revision.workspace_id=fixture.workspace_id)<>revision_count_before THEN
+    RAISE EXCEPTION 'requirement patch/supersession mutated WorkspaceHead before explicit projection apply';
   END IF;
 END $$;
 ROLLBACK;

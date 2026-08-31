@@ -71,8 +71,6 @@ def block(lineage_id: uuid.UUID, content: dict[str, Any], revision: int = 1) -> 
         "kind": content["type"],
         "content": content,
         "origin": "human",
-        "dependency_sha256": None,
-        "stale": False,
         "content_sha256": content_sha(content),
     }
 
@@ -84,9 +82,10 @@ def png_chunk(kind: bytes, payload: bytes) -> bytes:
     )
 
 
+pixel = hashlib.sha256(KEY_PREFIX.encode()).digest()[:3] + b"\xff"
 png = b"\x89PNG\r\n\x1a\n" + png_chunk(
     b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
-) + png_chunk(b"IDAT", zlib.compress(b"\x00\x00\x80\xff\xff")) + png_chunk(b"IEND", b"")
+) + png_chunk(b"IDAT", zlib.compress(b"\x00" + pixel)) + png_chunk(b"IEND", b"")
 boundary = "----knowledgebrain-phase2-" + uuid.uuid4().hex
 multipart = (
     f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"phase2.png\"\r\n"
@@ -108,12 +107,33 @@ _, _, preparation = call(
 preparation_id = preparation["attachment_preparation_revision_id"]
 
 _, _, current = call("GET", f"/api/v2/submission-workspaces/{WORKSPACE_ID}")
-node_lineage = uuid.uuid4()
-secondary_lineage = uuid.uuid4()
 rich_lineage = uuid.uuid4()
 table_lineage = uuid.uuid4()
 attachment_lineage = uuid.uuid4()
 root_ordinal = sum(1 for node in current["nodes"] if node.get("parent_lineage_id") is None)
+node_request = {
+    "schema_version": 1,
+    "workspace_id": WORKSPACE_ID,
+    "expected_workspace_revision_id": current["revision_id"],
+    "expected_workspace_sha256": current["sha256"],
+    "operations": [
+        {"kind": "insert_node", "client_node_ref": "phase2-manual",
+         "parent_lineage_id": None, "ordinal": root_ordinal,
+         "title": "人工编制验收", "semantic_role": "technical", "render_role": "section"},
+        {"kind": "insert_node", "client_node_ref": "phase2-secondary",
+         "parent_lineage_id": None, "ordinal": root_ordinal + 1,
+         "title": "待拆分章节", "semantic_role": "technical", "render_role": "section"},
+    ],
+}
+_, _, inserted_nodes = call(
+    "POST", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/mutations", node_request,
+    {"if-match": f'"{current["sha256"]}"', "idempotency-key": f"{KEY_PREFIX}-nodes-v1"},
+)
+_, _, after_nodes = call("GET", f"/api/v2/submission-workspaces/{WORKSPACE_ID}")
+node_lineage = uuid.UUID(next(node["lineage_id"] for node in after_nodes["nodes"]
+                              if node["title"] == "人工编制验收"))
+secondary_lineage = uuid.UUID(next(node["lineage_id"] for node in after_nodes["nodes"]
+                                   if node["title"] == "待拆分章节"))
 rich = block(
     rich_lineage,
     {"type": "rich_text", "nodes": [{"kind": "paragraph", "content": [{"kind": "text", "text": "人工编制初稿", "marks": []}]}]},
@@ -130,31 +150,25 @@ attachment = block(
      "preparation_revision_id": preparation_id, "render_mode": "embedded_pages",
      "start_new_page": True},
 )
-first_request = {
+block_request = {
     "schema_version": 1,
     "workspace_id": WORKSPACE_ID,
-    "expected_workspace_revision_id": current["revision_id"],
-    "expected_workspace_sha256": current["sha256"],
+    "expected_workspace_revision_id": inserted_nodes["revision_id"],
+    "expected_workspace_sha256": inserted_nodes["sha256"],
     "operations": [
-        {"kind": "insert_node", "client_node_ref": "phase2-manual", "lineage_id": str(node_lineage),
-         "revision_id": str(uuid.uuid4()), "parent_lineage_id": None, "ordinal": root_ordinal,
-         "title": "人工编制验收", "semantic_role": "technical", "render_role": "section"},
-        {"kind": "insert_node", "client_node_ref": "phase2-secondary", "lineage_id": str(secondary_lineage),
-         "revision_id": str(uuid.uuid4()), "parent_lineage_id": None, "ordinal": root_ordinal + 1,
-         "title": "待拆分章节", "semantic_role": "technical", "render_role": "section"},
         {"kind": "insert_block", "node_lineage_id": str(node_lineage), "ordinal": 0,
-         "insertion_anchor": None, "block": rich},
+         "block": rich},
         {"kind": "insert_block", "node_lineage_id": str(node_lineage), "ordinal": 1,
-         "insertion_anchor": None, "block": table},
+         "block": table},
         {"kind": "insert_asset_block", "node_lineage_id": str(node_lineage),
          "asset_revision_id": asset_id, "ordinal": 2},
         {"kind": "insert_block", "node_lineage_id": str(node_lineage), "ordinal": 3,
-         "insertion_anchor": None, "block": attachment},
+         "block": attachment},
     ],
 }
 _, _, first = call(
-    "POST", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/mutations", first_request,
-    {"if-match": f'"{current["sha256"]}"', "idempotency-key": f"{KEY_PREFIX}-first-v1"},
+    "POST", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/mutations", block_request,
+    {"if-match": f'"{inserted_nodes["sha256"]}"', "idempotency-key": f"{KEY_PREFIX}-blocks-v1"},
 )
 oversized_table = block(
     table_lineage,

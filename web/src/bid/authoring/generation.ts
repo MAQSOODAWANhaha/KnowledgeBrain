@@ -3,10 +3,11 @@ import type { InsertionAnchor } from "./mutations";
 
 export type GenerateTarget = "node" | "subtree" | "workspace";
 export type FillPolicy =
-  | "empty_only"
-  | "append_candidate"
-  | "missing_requirements_only";
+  "empty_only" | "append_candidate" | "missing_requirements_only";
 export type EvidenceMode = "system_proposed" | "user_pick_set";
+export const OWNER_MVP_EVIDENCE_MODE_OPTIONS = [
+  { value: "system_proposed", label: "系统建议" },
+] as const;
 export type ExportMode = "review_draft" | "submission";
 export type ExportFormat = "docx" | "pdf";
 
@@ -38,8 +39,6 @@ export type ExportRequest = {
   format: ExportFormat;
   expected_workspace_revision_id: string;
   watermark?: { text: string } | null;
-  include_risk_notices?: boolean;
-  include_knowledge_provenance?: boolean;
 };
 
 export function buildOutlineCandidateRequest(
@@ -89,19 +88,11 @@ export function buildExportRequest(input: ExportRequest): ExportRequest {
   if (input.mode === "submission") {
     if (input.watermark)
       throw new AuthoringLogicError("EXPORT_WATERMARK", "正式提交不得带水印");
-    if (input.include_risk_notices || input.include_knowledge_provenance) {
-      throw new AuthoringLogicError(
-        "EXPORT_OPTIONS",
-        "正式提交不得包含风险提示或知识来源",
-      );
-    }
     return {
       mode: "submission",
       format: input.format,
       expected_workspace_revision_id: input.expected_workspace_revision_id,
       watermark: null,
-      include_risk_notices: false,
-      include_knowledge_provenance: false,
     };
   }
   return input;

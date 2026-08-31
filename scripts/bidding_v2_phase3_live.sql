@@ -52,7 +52,7 @@ DO $$
 DECLARE actor kb_actor_identity:='user:10000000-0000-4000-8000-000000000001';
   workspace_id uuid; workspace_value jsonb; checkpoint jsonb; request_value jsonb;
   frozen_input jsonb; candidate_payload bytea; candidate_sha kb_sha256;
-  candidate_id uuid:='10000000-0000-4000-8000-0000000000a1'; result_value jsonb;
+  v_candidate_id uuid:='10000000-0000-4000-8000-0000000000a1'; result_value jsonb;
   operation jsonb; block_content jsonb; block_value jsonb;
   policy jsonb; scope jsonb; attestation jsonb; matches jsonb;
   request_bytes bytea:=convert_to('{"target":"node","operation":"generate"}','UTF8');
@@ -101,21 +101,23 @@ BEGIN
     'kind','paragraph','content',jsonb_build_array(jsonb_build_object('kind','text','text','【待人工补充】候选响应内容','marks','[]'::jsonb)))));
   block_value:=jsonb_build_object('schema_version',1,'block_revision_id','10000000-0000-4000-8000-0000000000a2',
     'lineage_id','10000000-0000-4000-8000-0000000000a3','revision',1,'kind','rich_text',
-    'content',block_content,'origin','agent_candidate','dependency_sha256',request_value->>'frozen_input_sha256',
-    'stale',false,'content_sha256',kb_bid_v2_sha256_bytes(convert_to(block_content::text,'UTF8')));
+    'content',block_content,'origin','agent_candidate',
+    'content_sha256',kb_bid_v2_sha256_bytes(convert_to(block_content::text,'UTF8')));
   operation:=jsonb_build_object('kind','insert_block','client_operation_ref','phase3-op-0',
     'target_node_lineage_id','10000000-0000-4000-8000-000000000081','ordinal',0,'block',block_value);
   candidate_payload:=kb_bid_v2_json_payload(jsonb_build_object('schema_version',1,
     'operations',jsonb_build_array(operation),'factual_claims','[]'::jsonb,
-    'notices',jsonb_build_array(jsonb_build_object('code','NO_EVIDENCE','message','未检索到可用企业证据','requirement_revision_id',NULL))));
+    'notices',jsonb_build_array(jsonb_build_object('code','NO_EVIDENCE','severity','warning',
+      'message','未检索到可用企业证据','requirement_revision_id',
+      (frozen_input#>>'{requirements,0,requirement_revision_id}')::uuid))));
   candidate_sha:=kb_bid_v2_sha256_bytes(candidate_payload);
   result_value:=kb_bid_v2_publish_content_generation(
     (request_value->>'request_artifact_id')::uuid,(request_value->>'request_revision')::bigint,
     (request_value->>'frozen_input_sha256')::kb_sha256,(attestation->>'id')::uuid,
-    (attestation->>'content_sha256')::kb_sha256,matches,candidate_id,candidate_payload,candidate_sha,
+    (attestation->>'content_sha256')::kb_sha256,matches,v_candidate_id,candidate_payload,candidate_sha,
     jsonb_build_array(operation));
-  IF (result_value->>'artifact_id')::uuid<>candidate_id
-     OR (kb_bid_v2_get_candidate(workspace_id,candidate_id,actor)->>'status')<>'proposed' THEN
+  IF (result_value->>'artifact_id')::uuid<>v_candidate_id
+     OR (kb_bid_v2_get_candidate(workspace_id,v_candidate_id,actor)->>'status')<>'proposed' THEN
     RAISE EXCEPTION 'content candidate publication failed';
   END IF;
   IF (SELECT count(*) FROM bid_content_generation_request_evidence_bundles
@@ -126,6 +128,7 @@ BEGIN
          AND item.item_kind<>'no_evidence') THEN
     RAISE EXCEPTION 'explicit no-evidence bundle publication failed';
   END IF;
+
 END $$;
 
 DO $$
@@ -217,5 +220,45 @@ BEGIN
   IF first_value IS DISTINCT FROM replay_value OR jsonb_array_length(node_evidence->'bundles')<2
      OR jsonb_array_length(node_evidence->'pick_sets')<>1 THEN
     RAISE EXCEPTION 'node evidence projection or PickSet replay failed';
+  END IF;
+END $$;
+
+-- A generic owner edit advances the Workspace but must not copy/rebase evidence.
+-- Candidate obsolete is derived and stale accept leaves the stored row proposed.
+DO $$
+DECLARE actor kb_actor_identity:='user:10000000-0000-4000-8000-000000000001';
+  v_workspace_id uuid; workspace_value jsonb; advanced_workspace jsonb; candidate_value jsonb; stale_accept jsonb;
+  v_candidate_id uuid:='10000000-0000-4000-8000-0000000000a1'; evidence_count bigint;
+  request_bytes bytea:=convert_to('{"candidate":"stale"}','UTF8');
+BEGIN
+  SELECT id INTO STRICT v_workspace_id FROM bid_submission_workspaces
+    WHERE project_id='10000000-0000-4000-8000-000000000010';
+  workspace_value:=kb_bid_v2_load_workspace_for_actor(v_workspace_id,actor);
+  SELECT count(*) INTO evidence_count FROM bid_submission_fulfillment_evidence_revision_artifacts value
+    WHERE value.workspace_id=v_workspace_id;
+  advanced_workspace:=kb_bid_v2_commit_workspace_mutation(v_workspace_id,
+    (workspace_value->>'revision_id')::uuid,(workspace_value->>'sha256')::kb_sha256,
+    jsonb_build_object('document_settings',workspace_value->'document_settings',
+      'nodes',workspace_value->'nodes','blocks',workspace_value->'blocks',
+      'bindings',workspace_value->'bindings','lineage_edges','[]'::jsonb),actor);
+  IF (SELECT count(*) FROM bid_submission_fulfillment_evidence_revision_artifacts value
+      WHERE value.workspace_id=v_workspace_id)<>evidence_count THEN
+    RAISE EXCEPTION 'generic Workspace mutation copied or rebased fulfillment evidence';
+  END IF;
+  candidate_value:=kb_bid_v2_get_candidate(v_workspace_id,v_candidate_id,actor);
+  IF candidate_value->>'status'<>'obsolete' OR candidate_value->>'stored_status'<>'proposed'
+     OR NOT EXISTS (SELECT 1 FROM bid_candidate_artifacts WHERE id=v_candidate_id AND state='proposed') THEN
+    RAISE EXCEPTION 'candidate obsolete was not derived from the current WorkspaceHead';
+  END IF;
+  stale_accept:=kb_bid_v2_accept_candidate(v_workspace_id,v_candidate_id,
+    (advanced_workspace->>'revision_id')::uuid,(advanced_workspace->>'sha256')::kb_sha256,
+    jsonb_build_object('document_settings',advanced_workspace->'document_settings',
+      'nodes',advanced_workspace->'nodes','blocks',advanced_workspace->'blocks',
+      'bindings',advanced_workspace->'bindings','lineage_edges','[]'::jsonb),ARRAY[0],actor,
+    'phase3-stale-candidate-accept',request_bytes,kb_bid_v2_sha256_bytes(request_bytes));
+  IF stale_accept->>'status'<>'obsolete' OR stale_accept->>'stored_status'<>'proposed'
+     OR NOT EXISTS (SELECT 1 FROM bid_candidate_artifacts WHERE id=v_candidate_id AND state='proposed')
+     OR EXISTS (SELECT 1 FROM bid_candidate_decision_receipts receipt WHERE receipt.candidate_id=v_candidate_id) THEN
+    RAISE EXCEPTION 'stale candidate accept mutated stored candidate state or decision receipts';
   END IF;
 END $$;

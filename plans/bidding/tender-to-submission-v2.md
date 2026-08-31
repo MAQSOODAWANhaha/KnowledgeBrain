@@ -116,7 +116,7 @@ TenderDocumentSetRevision
 - `/projects/:id/requirements`：SourceUnit、disposition、要求、替代关系；
 - `/projects/:id/workspace`：取得项目唯一输出工作区；项目创建时同事务建立默认 project-wide WorkspaceScope；
 - `/workspaces/:id/outline`：大纲 proposal、mutation、checkpoint；
-- `/workspaces/:id/content`：block mutation、资产 placement、stale 核对；
+- `/workspaces/:id/content`：block mutation和资产placement；stale由Assessment按精确identity派生，不提供核对写接口；
 - `/workspaces/:id/candidates`：生成、查看、接受、拒绝；
 - `/workspaces/:id/assessment`：大纲与提交提示；
 - `/workspaces/:id/exports`：snapshot、manifest、render job、下载。
@@ -131,7 +131,7 @@ TenderDocumentSetRevision
 - `requirement_ledger`：SourceUnit disposition、AtomicRequirement、FulfillmentExpr、supersession；
 - `workspace_scope`：固定project-wide范围与projection；
 - `outline`：OutlineCompiler、树 mutation、lineage、checkpoint；
-- `authoring`：WorkspaceRevision、ContentBlock、Asset placement、stale；
+- `authoring`：WorkspaceRevision、ContentBlock、Asset placement和派生evidence状态；
 - `candidate`：OutlineCandidate/ContentCandidate 终态机；
 - `assessment`：advisory-only Outline/Submission Assessment；
 - `render_v2`：RenderDocumentSnapshotV2、manifest 和 DOCX/PDF adapter。
@@ -190,7 +190,7 @@ Agent只输出bounded proposal：`source_unit_revision_id`、候选义务文本�
 - quote adapter：只消费已选报价快照；
 - deterministic generator：目录和附件索引。
 
-每次生成冻结workspace、checkpoint、requirement projection、目标node/block、`EvidenceSelectionInput`、prompt/generator contract和系统RenderStyleContract版本。用户可以选择“生成本章”“生成当前子树”“生成全部空章节”，三种操作都必须显式触发；后台不自动生成。`fill_policy`支持`empty_only|append_candidate|missing_requirements_only`，光标插入冻结`InsertionAnchor(node_revision_id, block_revision_id?, utf8_offset?)`。结果只进入`ContentCandidate`，人工逐块接受。匹配到的知识库图片允许Agent直接生成带provenance的ImageBlock候选；用户在Candidate diff中接受、删除或调整位置。系统不读取用户DOCX模板。
+每次生成冻结workspace、checkpoint、requirement projection、目标node/block、`EvidenceSelectionInput`、prompt/generator contract和系统RenderStyleContract版本。用户可以选择“生成本章”“生成当前子树”“生成全部空章节”，三种操作都必须显式触发；后台不自动生成。`fill_policy`支持`empty_only|append_candidate|missing_requirements_only`，光标插入冻结`InsertionAnchor(node_revision_id, block_revision_id?)`（仅whole-block边界）。结果只进入`ContentCandidate`，输出operation闭集仅为whole-block `insert_block`，不发布`append_to_block`或`insert_at_anchor`；人工逐块接受。匹配到的知识库图片允许Agent直接生成带provenance的ImageBlock候选；用户在Candidate diff中接受、删除或调整位置。系统不读取用户DOCX模板。
 
 ### 7. 知识库内容匹配
 
@@ -294,7 +294,7 @@ crates/storage/src/
 - `bid_requirement_supersession_revision_artifacts/edges`：只记录显式局部替代，不实现全局latest-wins；
 - `bid_workspace_requirement_projection_artifacts/items/current`：V1唯一workspace的要求投影。
 
-role/relation修改、DocumentSet冻结、DispositionSet、RequirementSet、supersession和projection publication各自校验自己的`expected_artifact_id/sha256`，不占用WorkspaceHead CAS。创建project/document/workspace只使用幂等identity。任何新publication写不可变artifact并原子移动本聚合current pointer；旧artifact不可更新。
+role/relation修改、DocumentSet冻结、DispositionSet、RequirementSet和supersession各自校验自己的`expected_artifact_id/sha256`，不占用WorkspaceHead CAS。Requirement patch、supersession、RequirementProjection publication与QuoteSnapshot publication只写不可变artifact并移动各自current pointer，返回`workspace_apply_required=true`；用户携带Workspace `If-Match`显式apply后才以单一WorkspaceHead ID+digest CAS创建新WorkspaceRevision。创建project/document/workspace只使用幂等identity；旧artifact不可更新。
 
 #### 10.2 Workspace树与内容
 
@@ -317,18 +317,18 @@ role/relation修改、DocumentSet冻结、DispositionSet、RequirementSet、supe
 2. `SELECT ... FOR UPDATE`并比较expected revision+sha256；
 3. 写新的node/block/binding revision和occurrence集合；
 4. 写新WorkspaceRevision并原子移动head；
-5. 把受影响citation/dependency标记stale；
+5. 不复制或改写evidence；后续Assessment按新WorkspaceRevision精确派生状态；
 6. 写audit与首次receipt。
 
-允许的operation闭集：`insert_node`、`rename_node`、`move_node`、`split_node`、`merge_nodes`、`delete_node`、`insert_block`、`update_block`、`move_block`、`delete_block`、`insert_asset_block`、`update_document_settings`、`bind_fulfillment`、`remap_fulfillment`、`unbind_fulfillment`、`acknowledge_stale`。不提供按标题、part key或整份Markdown更新的入口。
+允许的operation闭集：`insert_node`、`rename_node`、`move_node`、`split_node`、`merge_nodes`、`delete_node`、`insert_block`、`update_block`、`move_block`、`delete_block`、`insert_asset_block`、`update_document_settings`、`bind_fulfillment`、`remap_fulfillment`、`unbind_fulfillment`。不提供按标题、part key或整份Markdown更新的入口。
 
-新增`bid_outline_fulfillment_binding_lineages`、`bid_outline_fulfillment_binding_revision_artifacts`和`bid_submission_fulfillment_evidence_revision_artifacts`。binding没有独立current pointer，由`bid_workspace_binding_occurrences`纳入WorkspaceRevision；`bind_fulfillment|remap_fulfillment|unbind_fulfillment`与树/block/settings mutation共用WorkspaceHead CAS。binding绑定Need与逻辑node/table/structured-form/quote目标；evidence绑定实际WorkspaceRevision、block/table-row/structured-value、asset或QuoteSnapshot revision。目标、projection或依赖变化只使evidence stale，不删除逻辑binding或人工内容。
+新增`bid_outline_fulfillment_binding_lineages`、`bid_outline_fulfillment_binding_revision_artifacts`和`bid_submission_fulfillment_evidence_revision_artifacts`。binding没有独立current pointer，由`bid_workspace_binding_occurrences`纳入WorkspaceRevision；`bind_fulfillment|remap_fulfillment|unbind_fulfillment`与树/block/settings mutation共用WorkspaceHead CAS。binding绑定Need与逻辑node/table/structured-form/quote目标；evidence只记录精确binding、target和dependency identities。普通编辑不复制/rebase evidence，也不存储stale；Assessment针对指定WorkspaceRevision派生`current|stale|withdrawn`有效状态，不删除逻辑binding或人工内容。
 
 #### 10.3 Candidate、证据和评估
 
 新增：
 
-- `bid_async_request_snapshot_artifacts/results`：只保存五类粗粒度业务request的冻结输入、用户可见`pending|succeeded|failed|obsolete`和结果identity；不保存delivery attempt、lease、retry/backoff或fan-out状态；
+- `bid_async_request_snapshot_artifacts/results`：只保存五类粗粒度业务request的冻结输入、用户可见`pending|succeeded|failed`和结果identity；superseded publication以`succeeded + published_current=false`表示，不保存`obsolete`；也不保存delivery attempt、lease、retry/backoff或fan-out状态；
 - `bid_outline_candidate_artifacts`、`bid_content_candidate_artifacts`、`bid_candidate_operations`；
 - `bid_candidate_decision_receipts`：终态与幂等结果；
 - `bid_evidence_match_reports/current`：从旧route/part语义改为requirement/node目标；
@@ -341,7 +341,7 @@ role/relation修改、DocumentSet冻结、DispositionSet、RequirementSet、supe
 
 Assessment使用`assessment_input_sha256`去重，hash包含WorkspaceRevision、RequirementProjection、WorkspaceScope、该WorkspaceRevision引用的DocumentSettingsRevision、冻结asset和QuoteSnapshot identities；不能只按workspace revision coalesce。
 
-`kb_bid_accept_candidate_v2`必须在一个事务中验证candidate仍为`proposed`、base head一致、选择的operation index合法、EvidenceBundle完整，然后应用选中操作、创建新WorkspaceRevision、冻结正式evidence selection并把candidate置为`accepted`。head冲突时原子转`obsolete`并返回409；重复接受返回首次receipt。
+`kb_bid_accept_candidate_v2`必须在一个事务中验证candidate仍为`proposed`、base head一致、选择的operation index合法、EvidenceBundle完整，然后应用选中操作、创建新WorkspaceRevision、冻结正式evidence selection并把candidate置为`accepted`。head冲突时保持stored `proposed`、返回派生`obsolete`与409；重复接受返回首次receipt。reject只做Candidate状态CAS，不修改Workspace且不要求`If-Match`。
 
 #### 10.4 Render与输出
 
@@ -441,7 +441,7 @@ GET       /api/v2/submission-workspaces/:workspace_id/assessments/current
 target = node|subtree|workspace
 node_lineage_id?               # node/subtree必需
 fill_policy = empty_only|append_candidate|missing_requirements_only
-insertion_anchor?              # node/block revision + optional utf8 offset
+insertion_anchor?              # whole-block node revision + optional block revision
 selection_mode = system_proposed|user_pick_set
 pick_set_artifact_id?          # user_pick_set必需
 expected_workspace_revision_id
@@ -462,9 +462,9 @@ GET  /api/v2/submission-workspaces/:workspace_id/exports/:export_id/download
 GET  /api/v2/submission-workspaces/:workspace_id/exports/:export_id/assessment-report
 ```
 
-Export request冻结`mode=review_draft|submission`、所选WorkspaceRevision、format及mode options；只有review_draft允许watermark配置，submission带watermark或风险/知识来源渲染选项时返回422。preview不发布Manifest或正式output。
+Export request冻结`mode=review_draft|submission`、所选WorkspaceRevision、format及mode options；唯一可见选项是受控watermark，submission必须为null。未实现的风险提示/知识来源appendix选项不在合同中；非法选项按validation返回400。preview不发布Manifest或正式output。
 
-GET workspace/preview返回`ETag=workspace_sha256`。Workspace树/block/settings/binding和candidate decision要求Workspace `If-Match`；DocumentSet、DispositionSet、RequirementSet、supersession和projection请求携带各自`expected_artifact_id/sha256`；创建请求要求`Idempotency-Key`。enqueue不确定的503响应携带首次request identity；重放原POST及相同key时复用request/receipt，并在状态仍为`pending`时重试Oxana enqueue。统一错误：400 malformed request，401/403身份，404资源隔离，409对应聚合CAS/candidate obsolete，415输入格式，422 schema/asset引用非法，503 request artifact已提交但Oxana enqueue不确定。Assessment warning始终随200/202返回，不映射为4xx。
+GET workspace/preview返回`ETag=workspace_sha256`。Workspace树/block/settings/binding和candidate decision要求Workspace `If-Match`；DocumentSet、DispositionSet、RequirementSet、supersession和projection请求携带各自`expected_artifact_id/sha256`；创建请求要求`Idempotency-Key`。enqueue不确定的503响应携带首次request identity；重放原POST及相同key时复用request/receipt，并在状态仍为`pending`时重试Oxana enqueue。统一错误：400 malformed/validation/schema request，401/403身份，404资源隔离，409对应Workspace CAS或派生candidate obsolete，415 unsupported media，503表示request artifact已提交但Oxana enqueue不确定，并携带该request identity。Assessment warning始终随200/202返回，不映射为4xx。
 
 ### 13. Agent输入输出合同
 
@@ -486,9 +486,9 @@ GET workspace/preview返回`ETag=workspace_sha256`。Workspace树/block/settings
 - `NO_EVIDENCE`要求只能生成占位/提示，不能编造事实；
 - tender/knowledge文本按untrusted data封装，防止其内容被当作system instruction；
 - table/form执行网格、rowspan/colspan、宽度和字段约束验证；
-- candidate发布前重新比较冻结input hash，输入变化则标记obsolete。
+- Worker只根据冻结input发布Candidate，不推进WorkspaceHead，也不写Candidate obsolete；查询/accept时以base Workspace与当前Head派生有效obsolete。
 
-`evidence_ref`作为自定义不可见RichText mark。Agent事实性span必须携带；人类编辑可以移除或使引用stale，但Assessment只提示、不阻断。
+`evidence_ref`作为自定义不可见RichText mark。Agent事实性span必须携带；人类编辑可以移除引用，Assessment按精确block revision与dependency identity派生stale，只提示、不阻断。
 
 ### 14. Web状态、编辑器与交互
 
@@ -674,10 +674,10 @@ Phase 0第十二轮P1修复后实现证据（等待独立review verdict）：详
 
 - ContentCandidate的`request_operation`必须非NULL且恒为`generate`，workspace target identity必须非NULL；ContentGeneration request须补齐outer selection digest、system matching policy、quote snapshot、prompt/model identity，并使manual PickSet复合绑定同workspace MatchingReport；补齐manual/system两条正路径和NULL/selection/policy/fill/anchor负例；
 - 五类generic request每条都必须恰好拥有一个matching kind-specific typed identity projection，所有ID+SHA输入使用复合FK；OutlineCandidate必须复合引用同一OutlineGenerate request/base tuple；
-- request frozen字段和typed projection不可update/delete/truncate，status只允许`pending→terminal`一次；candidate frozen字段不可变，decision只允许`proposed→accepted|rejected|obsolete`一次，禁止reopen或terminal切换；
+- request frozen字段和typed projection不可update/delete/truncate，status只允许`pending→succeeded|failed`一次；candidate frozen字段不可变，decision只允许stored `proposed→accepted|rejected`一次，禁止reopen或terminal切换；
 - 为五类request和两类candidate增加coherent、kind mismatch、cross-input、missing projection、payload mutation、delete/truncate和terminal-reopen live负例。上述第十一轮缺陷已通过typed projection、复合FK、deferred exactly-one verifier、append-only/transition trigger及clean live负例修复；Phase 0重新勾选，Phase 1仍须等待独立review PASS。
 
-第十一轮修复冻结以下实现规则：generic request只允许`pending→succeeded|failed|obsolete`一次；Candidate只允许`proposed→accepted|rejected|obsolete`一次，部分接受继续使用独立decision receipt/operation occurrence。Agent schema中原有SHA-only的prompt/model字段补为ID+SHA，并显式新增template/agent ID+SHA；system selection新增matching policy ID+SHA。所有合同指向单一`bid_authoring_contract_artifacts` closed kind，未引入handler或Phase 1行为。
+Owner-only MVP remediation取代第十一轮的旧终态规则：generic request只允许`pending→succeeded|failed`一次；Candidate只允许stored `proposed→accepted|rejected`一次，`obsolete`仅由base Workspace与当前Head派生；部分接受继续使用独立decision receipt/operation occurrence。Agent schema中原有SHA-only的prompt/model字段补为ID+SHA，并显式新增template/agent ID+SHA；system selection新增matching policy ID+SHA。所有合同指向单一`bid_authoring_contract_artifacts` closed kind，未引入handler或Phase 1行为。
 
 第十二轮独立review中typed request专项PASS，但仍有两条P1：
 
@@ -716,7 +716,7 @@ Task 1B实现前发现两项合同缺口：V1 `SourceSpanV2`只有Markdown secti
 - Web `AuthoringShell`/`OutlineTree`/`DocumentCanvas` 按 [`frontend-authoring.md`](frontend-authoring.md) 独立交付，本轮后端不修改。
 - [x] 实现409 conflict返回current head；相同Idempotency-Key重放首次request/receipt，若业务状态仍pending则再次尝试Oxana enqueue。
 
-验收：两个并发Workspace编辑者不能互相覆盖；DocumentSet/DispositionSet/RequirementSet并发只冲突各自聚合；rename/move/split/merge/delete保持lineage；bind/remap/unbind保留历史并正确使evidence stale；页面刷新后树、blocks和人工资产一致。
+验收：两个并发Workspace编辑者不能互相覆盖；DocumentSet/DispositionSet/RequirementSet并发只冲突各自聚合；rename/move/split/merge/delete保持lineage；bind/remap/unbind保留历史且Assessment按精确identity正确派生evidence stale；页面刷新后树、blocks和人工资产一致。
 
 ### Phase 3：动态OutlineCompiler
 
@@ -725,7 +725,7 @@ Task 1B实现前发现两项合同缺口：V1 `SourceSpanV2`只有Markdown secti
 - [x] 实现 OutlineCandidate、按ordinal部分接受与CAS；checkpoint 在准确WorkspaceRevision需要时确定性创建，不形成审批锁。
 - [x] 删除任何固定标题、part key或默认六部分假设。
 
-验收：至少四类golden tender产生不同树形；用户可删除强制节点并仍确认；新文件发布后旧candidate变obsolete、已接受人工树只变stale。
+验收：至少四类golden tender产生不同树形；用户可删除强制节点并仍确认；新WorkspaceHead产生后旧proposed candidate派生obsolete，已接受人工树保持不变，Assessment派生受影响evidence stale。
 
 ### Phase 4：知识检索V3、证据选择与图片冻结
 
@@ -767,14 +767,18 @@ Task 1B实现前发现两项合同缺口：V1 `SourceSpanV2`只有Markdown secti
 
 验收：fresh E2E是唯一上线通路；仓库扫描只允许旧名称出现在删除矩阵/历史说明中，生产源码、SQL、API和Web bundle零命中。
 
+## Owner-only MVP一致性收窄
+
+当前合同以单一project-wide WorkspaceHead CAS为唯一Workspace写序列：Worker和独立Projection/Quote publication不得推进Head；Projection/Quote必须由owner显式apply。Request只存`pending|succeeded|failed`，Candidate只存`proposed|accepted|rejected`，obsolete和evidence stale均由冻结base/current identities派生。ContentBlock不存dependency/stale，不提供`acknowledge_stale`或interior offset。Renderer固定Noto字体、共享确定性crop、HTTP(S)-only link、合法table header，并对缺失asset、digest、资源上限与临时目录失败关闭。
+
 ## Verification
 
 ### 自动化测试矩阵
 
 - Rust unit：media sniffing、`section|table_row|form_region|attachment_region|image_ocr_region` canonicalization与一Disposition约束、SourceSpanV2、supersession、FulfillmentExpr、树/binding验证、ContentBlock、evidence_ref、candidate状态机、LayoutDocument；
-- SQL/live：唯一project-wide workspace、artifact不可变、各聚合CAS、binding随WorkspaceRevision且无独立current、binding/evidence revision与stale、幂等receipt、确定性stage identity、candidate terminal state、ObjectRegistry引用、assessment composite identity、historical settings resolution、manifest no-live-read；
+- SQL/live：唯一project-wide workspace、artifact不可变、各聚合CAS、binding随WorkspaceRevision且无独立current、binding/evidence immutable identity与派生stale、幂等receipt、确定性stage identity、candidate terminal state、ObjectRegistry引用、assessment composite identity、historical settings resolution、manifest no-live-read；
 - API：owner隔离、四类upload、role/relation/DocumentSet freeze、调用方伪造identity拒绝、binding使用Workspace CAS、聚合级409、415/422/503合同；同key POST在pending enqueue不确定时重新enqueue且不新建request；业务warning不阻断、下载范围隔离；
-- Worker：五类粗粒度job映射、RequirementSetCompile的project+DocumentSet+DispositionSet唯一键、DocumentSet/Disposition publication enqueue owner及单调输入publication fence、Oxana unique/retry/backoff复用、确定性stage identity/首次receipt重放、重复或stale delivery no-op，且无自建scheduler/lease/fan-out/continuation状态；
+- Worker：五类粗粒度job映射、RequirementSetCompile的project+DocumentSet+DispositionSet唯一键、DocumentSet/Disposition publication enqueue owner及单调输入publication fence、Oxana unique/retry/backoff复用、确定性stage identity/首次receipt重放、重复delivery replay；superseded publication仍将request终结为succeeded但不移动current，且无自建scheduler/lease/fan-out/continuation状态；
 - Agent fixture：中文多级编号、表格/扫描表单、局部澄清、prompt injection、超深树、未知字段、伪造asset、无证据hallucination；
 - Renderer golden：动态标题、富文本、复杂表格、知识图片、人工图片、PDF附件、目录、CJK字体；比较HTML/DOCX/PDF的同一settings identity与语义；验证review draft水印及干净submission；
 - 独立前端交付的 Browser E2E：多文件上传→确认role/relation→冻结DocumentSet→要求台账→分别触发本章/子树/全部生成→missing requirements/光标插入→系统建议证据→含文字/图片Candidate→人工表格/图片→并发冲突→有提示导出；不计入本轮后端验收。
@@ -807,5 +811,5 @@ scripts/bidding_v2_export_api_worker_e2e.py
 - 证据选择：支持人工先选与系统建议两种模式，默认系统提出、用户确认；
 - 证据展示：知识来源仅在Web、审计链和独立Assessment报告中展示，不写入最终投标正文；
 - 匹配入口：集成于章节右侧Evidence面板，并提供整份文档概览，不作为强制独立步骤；
-- 文档设置：提供A4、页边距、中西文字体、字号、行距、标题编号、页眉页脚和页码的受控全局设置；
+- 文档设置：提供A4、页边距、字号、行距、标题编号、页眉页脚和页码的受控全局设置；Renderer固定使用可信Noto字体，不提供任意字体配置；
 - 部分输入：允许基于成功解析的当前DocumentSet生成；pending/failed/unresolved文件只提示，后续恢复会使旧candidate/checkpoint stale。

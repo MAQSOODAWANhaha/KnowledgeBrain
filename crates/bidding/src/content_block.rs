@@ -11,6 +11,37 @@ fn is_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+/// Validates the closed link contract shared by persisted content and renderers.
+pub fn validate_http_link(value: &str) -> Result<(), &'static str> {
+    if value.is_empty()
+        || value.chars().count() > 2_048
+        || !(value.starts_with("http://") || value.starts_with("https://"))
+        || matches!(value, "http://" | "https://")
+        || value
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err("link is invalid");
+    }
+    let authority = value
+        .strip_prefix("http://")
+        .or_else(|| value.strip_prefix("https://"))
+        .and_then(|suffix| suffix.split(['/', '?', '#']).next())
+        .ok_or("link is invalid")?;
+    if authority.is_empty() {
+        return Err("link is invalid");
+    }
+    let parsed = url::Url::parse(value).map_err(|_| "link is invalid")?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err("link is invalid");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockKind {
@@ -245,11 +276,7 @@ impl BlockContent {
                 }
                 for mark in marks {
                     match mark {
-                        TextMark::Link { href }
-                            if href.len() > 2_048
-                                || !(href.starts_with("http://")
-                                    || href.starts_with("https://")) =>
-                        {
+                        TextMark::Link { href } if validate_http_link(href).is_err() => {
                             return Err("link is invalid");
                         }
                         TextMark::EvidenceRef {
@@ -290,18 +317,27 @@ impl BlockContent {
                 {
                     return Err("table dimensions are invalid");
                 }
-                let mut cover = vec![false; row_count * column_count];
+                let slots = row_count
+                    .checked_mul(*column_count)
+                    .ok_or("table dimensions overflow")?;
+                let mut cover = vec![false; slots];
                 for cell in cells {
+                    let row_end = cell.row.checked_add(cell.rowspan);
+                    let column_end = cell.column.checked_add(cell.colspan);
                     if cell.rowspan == 0
                         || cell.colspan == 0
-                        || cell.row + cell.rowspan > *row_count
-                        || cell.column + cell.colspan > *column_count
+                        || row_end.is_none_or(|end| end > *row_count)
+                        || column_end.is_none_or(|end| end > *column_count)
+                        || (cell.row < *repeat_header_rows
+                            && row_end.is_none_or(|end| end > *repeat_header_rows))
                     {
-                        return Err("table cell is out of bounds");
+                        return Err("table cell is out of bounds or crosses the header boundary");
                     }
+                    let row_end = row_end.expect("checked above");
+                    let column_end = column_end.expect("checked above");
                     Self::validate_rich(&cell.content)?;
-                    for row in cell.row..cell.row + cell.rowspan {
-                        for column in cell.column..cell.column + cell.colspan {
+                    for row in cell.row..row_end {
+                        for column in cell.column..column_end {
                             let slot = row * column_count + column;
                             if cover[slot] {
                                 return Err("table cells overlap");
@@ -383,10 +419,6 @@ pub struct ContentBlockV1 {
     pub kind: BlockKind,
     pub content: BlockContent,
     pub origin: BlockOrigin,
-    #[serde(default)]
-    pub dependency_sha256: Option<String>,
-    #[serde(default)]
-    pub stale: bool,
     pub content_sha256: String,
 }
 
@@ -398,12 +430,7 @@ impl ContentBlockV1 {
         if self.kind != self.content.kind() {
             return Err("content block kind does not match content type");
         }
-        if self
-            .dependency_sha256
-            .as_deref()
-            .is_some_and(|value| !is_sha256(value))
-            || !is_sha256(&self.content_sha256)
-        {
+        if !is_sha256(&self.content_sha256) {
             return Err("content block digest is invalid");
         }
         self.content.validate()?;
@@ -433,8 +460,8 @@ mod tests {
         let typed: BlockContent = serde_json::from_value(content).unwrap();
         json!({
             "schema_version":1,"block_revision_id":Uuid::new_v4(),"lineage_id":Uuid::new_v4(),
-            "revision":1,"kind":kind,"content":typed,"origin":"human","dependency_sha256":null,
-            "stale":false,"content_sha256":typed.sha256().unwrap()
+            "revision":1,"kind":kind,"content":typed,"origin":"human",
+            "content_sha256":typed.sha256().unwrap()
         })
     }
 
@@ -445,6 +472,43 @@ mod tests {
             "rich_text",
         ))
         .unwrap();
+    }
+
+    #[test]
+    fn links_match_the_closed_http_uri_contract() {
+        for invalid in [
+            "https://example.com bad",
+            "https://example.com/line\nbreak",
+            "ftp://example.com/file",
+            "https:///missing-host",
+            "https://user:secret@example.com/path",
+        ] {
+            assert!(validate_http_link(invalid).is_err(), "accepted {invalid:?}");
+        }
+        for valid in [
+            "https://example.com/a%20b?x=1&y=%E4%B8%AD",
+            "http://example.com:8080/path#fragment",
+        ] {
+            validate_http_link(valid).unwrap();
+        }
+    }
+
+    #[test]
+    fn table_span_arithmetic_overflow_is_rejected_without_panicking() {
+        let table = BlockContent::Table {
+            row_count: 1,
+            column_count: 1,
+            cells: vec![TableCell {
+                row: usize::MAX,
+                column: usize::MAX,
+                rowspan: 2,
+                colspan: 2,
+                content: vec![],
+            }],
+            widths_mm: vec![100.0],
+            repeat_header_rows: 0,
+        };
+        assert!(table.validate().is_err());
     }
 
     #[test]

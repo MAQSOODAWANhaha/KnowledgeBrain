@@ -102,8 +102,6 @@ type BlockBase = {
   lineage_id: string;
   revision: number;
   origin: BlockOrigin;
-  dependency_sha256: string | null;
-  stale?: boolean;
   content_sha256: string;
 };
 

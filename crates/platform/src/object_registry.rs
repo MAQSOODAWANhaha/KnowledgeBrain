@@ -51,6 +51,63 @@ pub async fn abandon_object_upload(
         .await
 }
 
+/// Cancellation-safe best-effort cleanup for the small set of object uploads
+/// staged by one publication attempt. Database expiry remains the final fallback.
+pub struct StagedObjectCleanupGuard {
+    pool: PgPool,
+    actor: String,
+    staging_ids: Vec<Uuid>,
+}
+
+impl StagedObjectCleanupGuard {
+    pub fn new(pool: &PgPool, actor: &str) -> Self {
+        Self {
+            pool: pool.clone(),
+            actor: actor.to_owned(),
+            staging_ids: Vec::new(),
+        }
+    }
+
+    /// Register before awaiting the stage/write future so cancellation cannot
+    /// lose an upload that committed immediately before the future was dropped.
+    pub fn register(&mut self, staging_id: Uuid) {
+        if !self.staging_ids.contains(&staging_id) {
+            self.staging_ids.push(staging_id);
+        }
+    }
+
+    pub fn disarm(&mut self, staging_id: Uuid) {
+        self.staging_ids.retain(|value| *value != staging_id);
+    }
+
+    pub fn disarm_all(&mut self) {
+        self.staging_ids.clear();
+    }
+
+    #[cfg(test)]
+    fn pending(&self) -> &[Uuid] {
+        &self.staging_ids
+    }
+}
+
+impl Drop for StagedObjectCleanupGuard {
+    fn drop(&mut self) {
+        if self.staging_ids.is_empty() {
+            return;
+        }
+        let ids = std::mem::take(&mut self.staging_ids);
+        let pool = self.pool.clone();
+        let actor = self.actor.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                for staging_id in ids {
+                    let _ = abandon_object_upload(&pool, staging_id, &actor).await;
+                }
+            });
+        }
+    }
+}
+
 pub async fn expire_object_uploads(pool: &PgPool) -> Result<i32, sqlx::Error> {
     sqlx::query_scalar("SELECT kb_object_upload_expire()")
         .fetch_one(pool)
@@ -221,4 +278,27 @@ pub async fn process_one_retention_item(
     tokio::spawn(async move { process_claimed_retention_item(&claimed_pool, &claim).await })
         .await
         .map_err(|error| sqlx::Error::Protocol(format!("retention task join failed: {error}")))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn staging_guard_registration_and_disarm_are_closed() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let mut guard = StagedObjectCleanupGuard::new(&pool, "system:test");
+        guard.register(first);
+        guard.register(first);
+        guard.register(second);
+        assert_eq!(guard.pending(), &[first, second]);
+        guard.disarm(first);
+        assert_eq!(guard.pending(), &[second]);
+        guard.disarm_all();
+        assert!(guard.pending().is_empty());
+    }
 }
