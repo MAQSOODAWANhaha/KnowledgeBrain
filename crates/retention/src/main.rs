@@ -97,21 +97,80 @@ mod tests {
         LOCK.lock().await
     }
 
-    async fn admin_test_pool() -> Result<PgPool, sqlx::Error> {
-        let database_url = platform::database_url()
-            .map_err(|error| sqlx::Error::Configuration(Box::new(error)))?;
-        PgPoolOptions::new()
+    fn postgres_contract_tests_required() -> bool {
+        std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").as_deref() == Ok("1")
+            || std::env::var_os("KNOWLEDGEBRAIN_TEST_DATABASE_URL").is_some()
+    }
+
+    fn isolated_test_database_url(label: &str) -> Option<String> {
+        let database_url = match std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL") {
+            Ok(database_url) if !database_url.trim().is_empty() => database_url,
+            Ok(_) | Err(_) if postgres_contract_tests_required() => {
+                panic!("required {label} needs explicit KNOWLEDGEBRAIN_TEST_DATABASE_URL")
+            }
+            Ok(_) | Err(_) => {
+                eprintln!("skip: {label} needs explicit KNOWLEDGEBRAIN_TEST_DATABASE_URL");
+                return None;
+            }
+        };
+        let normalized = database_url.to_ascii_lowercase();
+        assert!(
+            !normalized.contains(":15432/") && !normalized.ends_with(":15432"),
+            "refusing retention tests against live PostgreSQL port 15432"
+        );
+        Some(database_url)
+    }
+
+    async fn admin_test_pool() -> Option<PgPool> {
+        let database_url = isolated_test_database_url("retention PostgreSQL contract")?;
+        match PgPoolOptions::new()
             .max_connections(4)
             .connect(&database_url)
             .await
+        {
+            Ok(pool) => Some(pool),
+            Err(error) if postgres_contract_tests_required() => {
+                panic!("required PostgreSQL retention test unavailable: {error}")
+            }
+            Err(error) => {
+                eprintln!("skip: retention PostgreSQL unavailable: {error}");
+                None
+            }
+        }
+    }
+
+    async fn retention_test_schema_is_ready(pool: &PgPool) -> bool {
+        let ready = sqlx::query_scalar(
+            "SELECT to_regclass('public.object_upload_staging') IS NOT NULL
+                 AND to_regprocedure('public.kb_object_upload_stage(uuid,kb_object_ref,kb_sha256,text,bigint,kb_actor_identity)') IS NOT NULL
+                 AND to_regprocedure('public.kb_object_upload_expire()') IS NOT NULL",
+        )
+        .fetch_one(pool)
+        .await;
+        match ready {
+            Ok(true) => true,
+            Ok(false) if postgres_contract_tests_required() => {
+                panic!("required migrated retention test schema is unavailable")
+            }
+            Err(error) if postgres_contract_tests_required() => {
+                panic!("inspect required retention test schema: {error}")
+            }
+            Ok(false) => {
+                eprintln!("skip: migrated retention test schema is unavailable");
+                false
+            }
+            Err(error) => {
+                eprintln!("skip: inspect retention test schema: {error}");
+                false
+            }
+        }
     }
 
     async fn retention_role_pool() -> Option<PgPool> {
+        let database_url = isolated_test_database_url("retention role contract")?;
         let password = match std::env::var("KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD") {
             Ok(password) => password,
-            Err(error)
-                if std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").as_deref() == Ok("1") =>
-            {
+            Err(error) if postgres_contract_tests_required() => {
                 panic!("required retention role password unavailable: {error}")
             }
             Err(error) => {
@@ -119,9 +178,8 @@ mod tests {
                 return None;
             }
         };
-        let database_url = platform::database_url().expect("retention readiness database URL");
         let options = PgConnectOptions::from_str(&database_url)
-            .expect("parse retention readiness database URL")
+            .expect("parse retention test database URL")
             .username("kb_runtime_retention")
             .password(&password);
         match PgPoolOptions::new()
@@ -130,9 +188,7 @@ mod tests {
             .await
         {
             Ok(pool) => Some(pool),
-            Err(error)
-                if std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").as_deref() == Ok("1") =>
-            {
+            Err(error) if postgres_contract_tests_required() => {
                 panic!("required retention role connection unavailable: {error}")
             }
             Err(error) => {
@@ -144,6 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn retention_role_can_inspect_readiness_gate() {
+        let _guard = db_lock().await;
         let Some(pool) = retention_role_pool().await else {
             return;
         };
@@ -160,19 +217,12 @@ mod tests {
     #[tokio::test]
     async fn expired_upload_staging_is_removed_by_running_retention_expiry_loop() {
         let _guard = db_lock().await;
-        let pool = match admin_test_pool().await {
-            Ok(pool) => pool,
-            Err(error)
-                if std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").as_deref() == Ok("1") =>
-            {
-                panic!("required PostgreSQL retention test unavailable: {error}")
-            }
-            Err(error) => {
-                eprintln!("skip: postgres down: {error}");
-                return;
-            }
+        let Some(pool) = admin_test_pool().await else {
+            return;
         };
-        platform::apply_fresh_baseline(&pool).await.unwrap();
+        if !retention_test_schema_is_ready(&pool).await {
+            return;
+        }
         let staging_id = Uuid::new_v4();
         let actor = format!("user:{}", Uuid::new_v4());
         let bytes = b"expired retention staging";
@@ -225,19 +275,12 @@ mod tests {
         const EXPECTED_BATCH_LIMIT: usize = 100;
 
         let _guard = db_lock().await;
-        let pool = match admin_test_pool().await {
-            Ok(pool) => pool,
-            Err(error)
-                if std::env::var("KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS").as_deref() == Ok("1") =>
-            {
-                panic!("required PostgreSQL retention test unavailable: {error}")
-            }
-            Err(error) => {
-                eprintln!("skip: postgres down: {error}");
-                return;
-            }
+        let Some(pool) = admin_test_pool().await else {
+            return;
         };
-        platform::apply_fresh_baseline(&pool).await.unwrap();
+        if !retention_test_schema_is_ready(&pool).await {
+            return;
+        }
         let actor = format!("user:{}", Uuid::new_v4());
         let bytes = b"bounded retention staging";
         let digest = platform::sha256_hex(bytes);

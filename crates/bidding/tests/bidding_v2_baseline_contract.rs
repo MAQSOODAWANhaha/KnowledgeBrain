@@ -8,6 +8,7 @@ const SEMANTIC_SPINE_LIVE: &str =
 const API_ROUTER: &str = include_str!("../../api/src/routes.rs");
 const BID_API_ROUTER: &str = include_str!("../../api/src/bid_v2_routes.rs");
 const WORKER: &str = include_str!("../../worker/src/consume.rs");
+const RETENTION: &str = include_str!("../../retention/src/main.rs");
 const KNOWLEDGE_CLONE: &str = include_str!("../../knowledge/src/clone/mod.rs");
 const KNOWLEDGE_SEARCH: &str = include_str!("../../knowledge/src/search/mod.rs");
 const KNOWLEDGE_INDEX_V2: &str = include_str!("../../knowledge/src/knowledge_index_v2.rs");
@@ -47,6 +48,15 @@ fn destructive_postgres_tests_require_an_isolated_non_live_database() {
     assert!(BIDDING_TEST_SUPPORT.contains("KNOWLEDGEBRAIN_TEST_DATABASE_URL"));
     assert!(!BIDDING_TEST_SUPPORT.contains("platform::database_url()"));
     assert!(BIDDING_TEST_SUPPORT.contains(":15432/"));
+}
+
+#[test]
+fn retention_tests_require_the_isolated_migrated_shared_schema_only() {
+    assert!(RETENTION.contains("KNOWLEDGEBRAIN_TEST_DATABASE_URL"));
+    assert!(RETENTION.contains(":15432/"));
+    assert!(!RETENTION.contains("platform::database_url()"));
+    assert!(!RETENTION.contains("platform::apply_fresh_baseline"));
+    assert!(RETENTION.contains("kb_object_upload_expire()"));
 }
 
 #[test]
