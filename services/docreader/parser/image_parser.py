@@ -1,8 +1,5 @@
 import base64
 import logging
-from io import BytesIO
-
-from PIL import Image
 
 from docreader.models.document import (
     Document,
@@ -11,6 +8,7 @@ from docreader.models.document import (
     StructuredSourceUnitKind,
 )
 from docreader.parser.base_parser import BaseParser
+from docreader.parser.image_identity import image_pixel_identity
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +28,7 @@ class ImageParser(BaseParser):
 
         text = f"![{self.file_name}]({ref_path})"
         images = {ref_path: base64.b64encode(content).decode()}
-        with Image.open(BytesIO(content)) as image:
-            width, height = image.size
-            media_type = Image.MIME.get(image.format or "", "application/octet-stream")
+        width, height, media_type = image_pixel_identity(content)
 
         unit = StructuredSourceUnit(
             key="image:0",

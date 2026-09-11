@@ -8,9 +8,9 @@ async fn main() {
     let _ = dotenvy::dotenv();
     platform::init_tracing();
     platform::require_openai_chat();
-    platform::connect()
+    platform::connect_runtime_verified(platform::SchemaComponentKind::Api)
         .await
-        .unwrap_or_else(|e| panic!("postgres connection failed: {e}"));
+        .unwrap_or_else(|e| panic!("postgres schema readiness failed: {e}"));
     let addr = bind_addr();
     let listener = TcpListener::bind(&addr)
         .await

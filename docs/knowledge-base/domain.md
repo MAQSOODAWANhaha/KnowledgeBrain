@@ -105,7 +105,7 @@ attest 成功后产生 immutable attestation ID、canonical payload 与 SHA-256�
 
 图片ingestion在同一事务发布chunk、embedding、`knowledge_image_artifact_revisions`、`knowledge_image_ocr_chunk_artifact_mappings`和`knowledge_image_artifact`对象owner reference；输入中的OCR图片身份固定为`objects/{sha256}`，digest、实际图片格式、尺寸、ObjectRegistry byte length及幂等冲突全部fail closed。live资料退休时图片artifact owner继续保留不可变对象。
 
-唯一`KnowledgeRetrievalPortV3`返回上述媒体快照，knowledge-owned verifier证明来源链；招投标只冻结验证后的`EvidenceAssetArtifact`及Workspace `ai_evidence` asset，不通过live join回查知识库。没有第二个检索/media端口，也没有V2/V3 runtime双模式；`knowledge-evidence-v2`只表示继续使用冻结的排序/policy合同。具体实现和验证见[`../../plans/knowledge-base/bidding-evidence-media-v3.md`](../../plans/knowledge-base/bidding-evidence-media-v3.md)。
+唯一`KnowledgeRetrievalPortV3`返回上述媒体快照，knowledge-owned verifier证明来源链；招投标只冻结验证后的`EvidenceAssetArtifact`及Workspace `ai_evidence` asset，不通过live join回查知识库。该快照用于初稿/候选证据，用户确认后定点写入 DOCX 并保存；media/asset 存在不代表实际正文已包含图片。对象最终存储身份遵循平台 ObjectRegistry/namespace 合同，本节摄取 key 不另建存储真源。没有第二个检索/media端口，也没有V2/V3 runtime双模式；`knowledge-evidence-v2`只表示继续使用冻结的排序/policy合同。具体实现和验证见[`../../plans/knowledge-base/bidding-evidence-media-v3.md`](../../plans/knowledge-base/bidding-evidence-media-v3.md)。
 
 ## 3. 招投标边界
 

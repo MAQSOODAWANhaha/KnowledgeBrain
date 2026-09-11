@@ -192,9 +192,10 @@ async fn image_ocr_publication_is_atomic_idempotent_and_retained() {
         FROM documents document JOIN object_registry registry ON registry.object_ref=document.object_ref WHERE document.id=$1")
         .bind(document_id).fetch_one(&pool).await.expect("original source identity");
     let mut retirement = pool.begin().await.expect("retirement transaction");
-    sqlx::query("SELECT kb_object_reference_remove($1,'knowledge_document',$2,'original')")
+    sqlx::query("SELECT kb_object_reference_remove($1,'knowledge_document',$2,'original',$3)")
         .bind(&original.0)
         .bind(document_id)
+        .bind(Uuid::new_v4())
         .execute(&mut *retirement)
         .await
         .expect("release live owner");

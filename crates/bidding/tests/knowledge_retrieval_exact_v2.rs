@@ -4,9 +4,10 @@ use knowledge::PostgresKnowledgeRetrievalAdapter;
 use knowledge::knowledge_retrieval::{
     EMBEDDING_DIMENSION_V2, EMBEDDING_OUTPUT_NORMALIZATION_VERSION_V2,
     EMBEDDING_PROVIDER_PROTOCOL_VERSION_V2, EMBEDDING_REVISION_SCHEMA_V2, EmbeddingRevisionV2,
-    KNOWLEDGE_EVIDENCE_CONTRACT_V2, KNOWLEDGE_EVIDENCE_SCHEMA_V1, KnowledgeEvidenceScopeV2,
-    KnowledgeRetrievalError, KnowledgeRetrievalPortV3, ProductEvidenceRequestV1,
-    RERANK_REQUEST_CONFIG_SHA256_V2, RERANK_REVISION_SCHEMA_V2, RETRIEVAL_A_PRIMARY_COMPARATOR_V2,
+    KNOWLEDGE_EVIDENCE_CONTRACT_V2, KNOWLEDGE_EVIDENCE_SCHEMA_V1, KNOWLEDGE_EVIDENCE_SCHEMA_V3,
+    KnowledgeEvidenceBatchV3, KnowledgeEvidenceScopeV2, KnowledgeRetrievalError,
+    KnowledgeRetrievalPortV3, ProductEvidenceRequestV1, RERANK_REQUEST_CONFIG_SHA256_V2,
+    RERANK_REVISION_SCHEMA_V2, RETRIEVAL_A_PRIMARY_COMPARATOR_V2,
     RETRIEVAL_A_VERSION_COMPARATOR_V2, RETRIEVAL_B_EXACT_COMPARATOR_V2,
     RETRIEVAL_C_SEMANTIC_COMPARATOR_V2, RETRIEVAL_CHANNEL_RANK_COMPARATOR_V2,
     RETRIEVAL_CHANNEL_SCORE_QUANTIZATION_VERSION_V2, RETRIEVAL_EMBEDDING_POLICY_V2,
@@ -20,6 +21,11 @@ use knowledge::knowledge_retrieval::{
     RetrievalEmbeddingPolicyV2, RetrievalKeywordPolicyV2, RetrievalPolicyIdentityV1,
     RetrievalPolicyV2, RetrievalRankingPolicyV2, RetrievalRequestQuotasV2, RetrievalRerankPolicyV2,
     RetrievalRrfPolicyV2,
+};
+use knowledge::knowledge_retrieval_pg::{
+    RequirementEvidenceBatchesV2, attest_compiled_requirement_evidence_v2,
+    compile_requirement_evidence_scope_v2, freeze_retrieval_policy_identity_v1,
+    latest_supported_retrieval_policy_v2,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -512,6 +518,137 @@ fn scope(
     })
 }
 
+struct PublishedExactOcrFixture {
+    chunk_id: Uuid,
+    image_artifact_revision_id: Uuid,
+    object_ref: String,
+    sha256: String,
+}
+
+async fn publish_exact_ocr_fixture(
+    pool: &PgPool,
+    version: &VersionFixture,
+) -> PublishedExactOcrFixture {
+    let object_dir =
+        std::env::var_os("OBJECT_DIR").expect("explicit local media fixture directory");
+    assert!(std::path::Path::new(&object_dir).is_dir());
+    assert!(
+        std::env::var("KNOWLEDGEBRAIN_S3_ENDPOINT")
+            .unwrap_or_default()
+            .is_empty()
+    );
+    let chunk_id = Uuid::new_v4();
+    let mut pixels = image::RgbaImage::new(4, 4);
+    for (pixel, byte) in pixels.pixels_mut().zip(chunk_id.as_bytes()) {
+        *pixel = image::Rgba([*byte, *byte ^ 0x5a, *byte ^ 0xa5, 255]);
+    }
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(pixels)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let png = png.into_inner();
+    let sha256 = platform::sha256_hex(&png);
+    let object_ref = platform::object_ref(&sha256);
+    platform::write_blob(&sha256, &png).unwrap();
+    let content = "图片 ALPHA\n条款";
+    let chunk = knowledge::Chunk {
+        id: chunk_id,
+        product_version_id: version.version_id,
+        document_id: version.document_id,
+        chunk_type: "image_ocr".into(),
+        content: content.into(),
+        context_header: object_ref.clone(),
+        start_at: 0,
+        end_at: i32::try_from(content.len()).unwrap(),
+        parent_chunk_id: None,
+        generated_questions: Vec::new(),
+    };
+    knowledge::append_document_chunks(pool, &[chunk], &[])
+        .await
+        .unwrap();
+    let image_artifact_revision_id: Uuid = sqlx::query_scalar(
+        "SELECT artifact.id FROM knowledge_image_ocr_chunk_artifact_mappings mapping
+         JOIN knowledge_image_artifact_revisions artifact
+           ON artifact.id=mapping.image_artifact_revision_id
+         JOIN object_registry registry ON registry.object_ref=artifact.object_ref
+         WHERE mapping.chunk_id=$1 AND mapping.product_version_id=$2 AND mapping.document_id=$3
+           AND artifact.product_version_id=$2 AND artifact.document_id=$3
+           AND mapping.object_ref=$4 AND artifact.object_ref=$4
+           AND mapping.content_sha256=$5 AND artifact.content_sha256=$5 AND registry.digest=$5
+           AND mapping.media_type='image/png' AND artifact.media_type='image/png'
+           AND registry.media_type='image/png' AND registry.state='available'
+           AND registry.byte_length=$6 AND artifact.width=4 AND artifact.height=4
+           AND EXISTS(SELECT 1 FROM object_owner_references owner
+             WHERE owner.object_ref=$4 AND owner.owner_kind='knowledge_image_artifact'
+               AND owner.owner_id=artifact.id)",
+    )
+    .bind(chunk_id)
+    .bind(version.version_id)
+    .bind(version.document_id)
+    .bind(&object_ref)
+    .bind(&sha256)
+    .bind(i64::try_from(png.len()).unwrap())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(platform::read_blob(&sha256).unwrap(), png);
+    PublishedExactOcrFixture {
+        chunk_id,
+        image_artifact_revision_id,
+        object_ref,
+        sha256,
+    }
+}
+
+async fn retained_exact_media_state(pool: &PgPool, versions: &[Uuid]) -> serde_json::Value {
+    sqlx::query_scalar(
+        "WITH objects AS (
+           SELECT object_ref FROM documents WHERE product_version_id=ANY($1)
+           UNION SELECT object_ref FROM knowledge_image_artifact_revisions
+             WHERE product_version_id=ANY($1)
+         ) SELECT jsonb_build_object(
+           'versions',(SELECT jsonb_agg(to_jsonb(v) ORDER BY v.id) FROM product_versions v WHERE v.id=ANY($1)),
+           'documents',(SELECT jsonb_agg(to_jsonb(d) ORDER BY d.id) FROM documents d WHERE d.product_version_id=ANY($1)),
+           'chunks',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.id) FROM chunks c WHERE c.product_version_id=ANY($1)),
+           'artifacts',(SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id) FROM knowledge_image_artifact_revisions a WHERE a.product_version_id=ANY($1)),
+           'mappings',(SELECT jsonb_agg(to_jsonb(m) ORDER BY m.chunk_id) FROM knowledge_image_ocr_chunk_artifact_mappings m WHERE m.product_version_id=ANY($1)),
+           'objects',(SELECT jsonb_agg(to_jsonb(r) ORDER BY r.object_ref) FROM object_registry r JOIN objects o USING(object_ref)),
+           'references',(SELECT jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text) FROM object_owner_references r JOIN objects o USING(object_ref)))",
+    )
+    .bind(versions)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+// Immutable media remains referenced until the runner drops this owned database.
+// Retire only this fixture's current pointers; do not bypass media deletion guards.
+async fn retire_exact_media_fixture(pool: &PgPool, fixture: &Fixture) {
+    let versions: Vec<_> = fixture.versions.iter().map(|v| v.version_id).collect();
+    let before = retained_exact_media_state(pool, &versions).await;
+    for version in &fixture.versions {
+        let changed = sqlx::query(
+            "UPDATE products SET current_version_id=NULL WHERE id=$1 AND current_version_id=$2",
+        )
+        .bind(version.product_id)
+        .bind(version.version_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        assert_eq!(changed.rows_affected(), 1);
+    }
+    assert_eq!(retained_exact_media_state(pool, &versions).await, before);
+    let frozen = freeze_retrieval_policy_identity_v1(pool)
+        .await
+        .unwrap()
+        .expect("supported fixture policy remains available");
+    assert!(
+        versions
+            .iter()
+            .all(|id| !frozen.product_version_ids.contains(id))
+    );
+}
+
 #[tokio::test]
 async fn exact_v2_returns_only_complete_trusted_snapshots_deterministically() {
     let Some(pool) = support::connect_postgres_contract("KnowledgeRetrievalExactV2").await else {
@@ -533,14 +670,48 @@ async fn exact_v2_returns_only_complete_trusted_snapshots_deterministically() {
         ],
     )
     .await;
+    let unmapped_ocr: Uuid = sqlx::query_scalar(
+        "SELECT id FROM chunks WHERE product_version_id=$1 AND chunk_type='image_ocr'",
+    )
+    .bind(exact)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let media = publish_exact_ocr_fixture(&pool, &fixture.versions[0]).await;
+    let unmapped_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge_image_ocr_chunk_artifact_mappings WHERE chunk_id=$1",
+    )
+    .bind(unmapped_ocr)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(unmapped_count, 0);
     let no_hit = add_version(&pool, &mut fixture, &[("text", "unrelated")]).await;
     let policy = register_policy(&pool, 8, 1024, 4096).await;
     let adapter = PostgresKnowledgeRetrievalAdapter::new_exact_only_v2_contract_tests(pool.clone());
     let request = scope("Al PhA 条款", vec![exact, no_hit], policy);
     let first = adapter.retrieve_evidence_v3(request.clone()).await.unwrap();
     let second = adapter.retrieve_evidence_v3(request).await.unwrap();
-    remove_fixture(&pool, &fixture).await;
+    retire_exact_media_fixture(&pool, &fixture).await;
 
+    assert_eq!(first.schema_version, KNOWLEDGE_EVIDENCE_SCHEMA_V3);
+    assert!(
+        first
+            .hits
+            .iter()
+            .all(|hit| hit.source_chunk_id != unmapped_ocr)
+    );
+    assert!(
+        first
+            .hits
+            .iter()
+            .any(|hit| hit.source_chunk_id == media.chunk_id)
+    );
+    assert!(
+        platform::blob_path(&media.sha256)
+            .expect("valid configured test object path")
+            .is_file()
+    );
     assert_eq!(
         serde_json::to_vec(&first).unwrap(),
         serde_json::to_vec(&second).unwrap()
@@ -563,6 +734,28 @@ async fn exact_v2_returns_only_complete_trusted_snapshots_deterministically() {
             .collect()
     );
     for (index, hit) in first.hits.iter().enumerate() {
+        assert_eq!(hit.schema_version, KNOWLEDGE_EVIDENCE_SCHEMA_V3);
+        if hit.source_chunk_id == media.chunk_id {
+            assert_eq!(hit.document_id, fixture.versions[0].document_id);
+            assert_eq!(hit.product_version_id, exact);
+            let actual = hit.media.as_ref().expect("published OCR media snapshot");
+            assert_eq!(
+                actual.image_artifact_revision_id,
+                media.image_artifact_revision_id
+            );
+            assert_eq!(actual.object_ref, media.object_ref);
+            assert_eq!(actual.sha256, media.sha256);
+            assert_eq!(actual.media_type, "image/png");
+            assert_eq!((actual.width, actual.height), (4, 4));
+            assert_eq!(actual.page_ordinal, None);
+            assert_eq!(actual.bounding_region, None);
+            assert_eq!(
+                actual.frozen_document_display_name,
+                hit.frozen_document_display_name
+            );
+        } else {
+            assert!(hit.media.is_none(), "text/parent_text must not carry media");
+        }
         assert_eq!(hit.retrieval_rank, index as u32 + 1);
         assert_eq!(hit.retrieval_raw_score, "1.000000");
         assert_eq!(hit.quote_start_offset, 0);
@@ -1140,10 +1333,10 @@ async fn embedding_revision_registry_binding_sidecars_and_revocation_are_enforce
     let revoked = adapter
         .retrieve_evidence_v3(scope("needle", vec![version], identity))
         .await;
-    assert!(matches!(
-        revoked,
-        Err(KnowledgeRetrievalError::InvalidRequest(_))
-    ));
+    assert!(
+        matches!(revoked, Err(KnowledgeRetrievalError::PolicyRevoked(_))),
+        "revoked embedding revision: {revoked:?}"
+    );
     let mismatched_version =
         add_version(&pool, &mut fixture, &[("text", "binding mismatch")]).await;
     assert!(
@@ -1260,20 +1453,20 @@ async fn exact_v2_rejects_selected_unknown_mismatched_and_revoked_policy() {
     let unknown = adapter
         .retrieve_evidence_v3(scope("needle", vec![version], unknown))
         .await;
-    assert!(matches!(
-        unknown,
-        Err(KnowledgeRetrievalError::InvalidRequest(_))
-    ));
+    assert!(
+        matches!(unknown, Err(KnowledgeRetrievalError::PolicyRevoked(_))),
+        "unknown policy identity: {unknown:?}"
+    );
 
     let mut mismatch = policy.clone();
     mismatch.max_hits += 1;
     let mismatch = adapter
         .retrieve_evidence_v3(scope("needle", vec![version], mismatch))
         .await;
-    assert!(matches!(
-        mismatch,
-        Err(KnowledgeRetrievalError::InvalidRequest(_))
-    ));
+    assert!(
+        matches!(mismatch, Err(KnowledgeRetrievalError::DigestMismatch(_))),
+        "policy sidecar mismatch: {mismatch:?}"
+    );
 
     sqlx::query(
         "UPDATE knowledge_retrieval_policies_v2 SET support_state='revoked' WHERE policy_sha256=$1",
@@ -1285,9 +1478,168 @@ async fn exact_v2_rejects_selected_unknown_mismatched_and_revoked_policy() {
     let revoked = adapter
         .retrieve_evidence_v3(scope("needle", vec![version], policy))
         .await;
-    assert!(matches!(
-        revoked,
-        Err(KnowledgeRetrievalError::InvalidRequest(_))
-    ));
+    assert!(
+        matches!(revoked, Err(KnowledgeRetrievalError::PolicyRevoked(_))),
+        "revoked policy identity: {revoked:?}"
+    );
+    remove_fixture(&pool, &fixture).await;
+}
+
+#[tokio::test]
+async fn frozen_exact_replay_and_attestation_survive_current_version_and_latest_policy_changes() {
+    let Some(pool) = support::connect_postgres_contract("FrozenRetrievalExactVersionReplay").await
+    else {
+        return;
+    };
+    if !final_schema(&pool).await {
+        return;
+    }
+
+    let mut fixture = new_fixture(&pool).await;
+    let version_a = add_version(&pool, &mut fixture, &[("text", "frozen needle evidence")]).await;
+    let product_id = fixture.versions[0].product_id;
+    let uniqueness = u64::from(Uuid::new_v4().as_bytes()[0]);
+    let policy_a = register_policy(&pool, 3, 1024, 20_000 + uniqueness).await;
+    let frozen_a = freeze_retrieval_policy_identity_v1(&pool)
+        .await
+        .unwrap()
+        .expect("supported retrieval policy must freeze");
+    let (frozen_a_bytes, frozen_a_sha256) = frozen_a.canonical_bytes_and_sha256().unwrap();
+    assert_eq!(frozen_a.policy_sha256, policy_a.policy_sha256);
+    assert_eq!(frozen_a.product_version_ids, vec![version_a]);
+
+    let version_b = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO product_versions(id,product_id,label,status) VALUES($1,$2,'v2','active')",
+    )
+    .bind(version_b)
+    .bind(product_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE products SET current_version_id=$2 WHERE id=$1")
+        .bind(product_id)
+        .bind(version_b)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let policy_b = register_policy(&pool, 4, 1024, 20_001 + uniqueness).await;
+    assert_eq!(
+        latest_supported_retrieval_policy_v2(&pool)
+            .await
+            .unwrap()
+            .unwrap(),
+        policy_b
+    );
+    let frozen_b = freeze_retrieval_policy_identity_v1(&pool)
+        .await
+        .unwrap()
+        .expect("advanced retrieval identity must freeze");
+    assert_eq!(frozen_b.policy_sha256, policy_b.policy_sha256);
+    assert_eq!(frozen_b.product_version_ids, vec![version_b]);
+    assert_ne!(
+        frozen_b.canonical_bytes_and_sha256().unwrap().1,
+        frozen_a_sha256
+    );
+
+    let replayed_a =
+        knowledge::knowledge_retrieval::FrozenRetrievalPolicyIdentityV1::from_canonical_bytes(
+            &frozen_a_bytes,
+        )
+        .unwrap();
+    assert_eq!(replayed_a, frozen_a);
+    let replay_policy = replayed_a.validate().unwrap();
+    let adapter = PostgresKnowledgeRetrievalAdapter::new_exact_only_v2_contract_tests(pool.clone());
+    let product_line = adapter
+        .retrieve_frozen_evidence_v3(
+            &replayed_a,
+            scope("frozen needle", vec![version_a], replay_policy.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(product_line.eligible_versions.len(), 1);
+    assert_eq!(
+        product_line.eligible_versions[0].product_version_id,
+        version_a
+    );
+    assert_eq!(product_line.hits.len(), 1);
+    assert_eq!(product_line.hits[0].product_version_id, version_a);
+    assert_eq!(product_line.hits[0].chunk_utf8, "frozen needle evidence");
+
+    let empty_company = KnowledgeEvidenceBatchV3 {
+        schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V3,
+        eligible_versions: Vec::new(),
+        hits: Vec::new(),
+        exact_prefix_hit_count: 0,
+        exact_versions_truncated: 0,
+        exact_hits_truncated: 0,
+        semantic_hits_truncated: 0,
+    };
+    let requirement_artifact_id = Uuid::new_v4();
+    let compiled = compile_requirement_evidence_scope_v2(
+        &replay_policy,
+        &[RequirementEvidenceBatchesV2 {
+            route_id: Uuid::new_v4(),
+            requirement_artifact_id,
+            requirement_identity_sha256: knowledge::sha256_hex(b"frozen needle"),
+            requirement_text: "frozen needle".into(),
+            product_line,
+            company: empty_company,
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        compiled["version_selections"]["product_line"],
+        serde_json::json!([version_a])
+    );
+    assert_eq!(
+        compiled["frozen_hits"][0]["product_version_artifact_id"],
+        version_a.to_string()
+    );
+
+    let mut transaction = pool.begin().await.unwrap();
+    let attested = attest_compiled_requirement_evidence_v2(&mut transaction, &compiled)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(attested.canonical_scope, compiled);
+    let persisted: (Vec<u8>, String) = sqlx::query_as(
+        "SELECT canonical_payload,content_sha256
+           FROM knowledge_matching_scope_attestations_v2 WHERE id=$1",
+    )
+    .bind(attested.attestation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let expected_canonical_payload: Vec<u8> =
+        sqlx::query_scalar("SELECT convert_to($1::jsonb::text,'UTF8')")
+            .bind(&compiled)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(persisted.0, expected_canonical_payload);
+    assert_eq!(persisted.1, attested.attestation_sha256);
+    assert_eq!(
+        knowledge::sha256_hex(&persisted.0),
+        attested.attestation_sha256
+    );
+
+    sqlx::query("DELETE FROM knowledge_matching_scope_attestations_v2 WHERE id=$1")
+        .bind(attested.attestation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE products SET current_version_id=$2 WHERE id=$1")
+        .bind(product_id)
+        .bind(version_a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM product_versions WHERE id=$1")
+        .bind(version_b)
+        .execute(&pool)
+        .await
+        .unwrap();
     remove_fixture(&pool, &fixture).await;
 }

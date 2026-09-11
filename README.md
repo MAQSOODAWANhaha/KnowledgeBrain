@@ -1,23 +1,24 @@
 # KnowledgeBrain
 
-Product-document knowledge service. Product: [`PRODUCT.md`](PRODUCT.md). Design: [`DESIGN.md`](DESIGN.md). Documentation: [`docs/README.md`](docs/README.md). Knowledge-base domain: [`docs/knowledge-base/domain.md`](docs/knowledge-base/domain.md). Bidding target: [`docs/bidding/authoring.md`](docs/bidding/authoring.md) (current-code contrast, not wholesale deletion: [`docs/bidding/current-code.md`](docs/bidding/current-code.md)).
+Rig 0.42.0 now serializes and parses production Chat requests for extraction and composition, preserving reserved bytes and final-body budgets. [Latest verification](docs/bidding/agent-runtime-recovery-results.md#agentrun-多轮步进与有界检查点) covers transport and recovery; bounded AgentRun stepping and checkpoint recovery are locally verified; full real semantic/DOCX acceptance remains pending.
+
+Product-document knowledge service. Product: [`PRODUCT.md`](PRODUCT.md). Design: [`DESIGN.md`](DESIGN.md). Documentation: [`docs/README.md`](docs/README.md). Knowledge-base domain: [`docs/knowledge-base/domain.md`](docs/knowledge-base/domain.md). Bidding: [business PRD](docs/bidding/prd.md), [domain boundaries](docs/bidding/authoring.md), [ONLYOFFICE/DOCX integration](plans/bidding/onlyoffice-integration.md), and [Rig Agent implementation plan](plans/bidding/agent-runtime-rig.md). The DOCX chain is partially implemented and locally verified; bounded extraction/review is partially implemented, durable Journal recovery is verified, and the Rig Chat seam has passed local tests; the production Rig Chat and AgentRun driver is integrated and locally verified. A complete real-tender Agent DOCX and matching PDF have not passed acceptance. See the [task ledger](plans/implementation-tasks.md) for evidence and remaining work.
 
 HTTP (`/api/v1`) validates, persists, and enqueues only. Parse / chunk / vector / wiki / graph run in `worker`. Task progress: `GET /api/v1/documents/{id}/timeline`.
 
 ## Deploy
 
 Deployment definitions live in [`deploy/`](deploy/README.md). A fresh installation uses the
-ordinary `migrate` bootstrap job followed by the runtime profile; there is no launch verifier,
-manifest checksum gate, compatibility migration, or bidding V1 schema.
+`migrate` bootstrap job followed by the runtime profile. The old launch verifier/intended-state system、compatibility migration and bidding V1 schema are absent; the migrator writes one minimal schema release receipt and every runtime performs read-only compiled-digest/catalog-manifest verification before readiness.
 
 ```bash
 cp deploy/.env.example deploy/.env
 docker compose -f deploy/docker-compose.yml --env-file deploy/.env --profile runtime up -d --build
 ```
 
-The bootstrap applies `knowledge_base_baseline`, `shared_platform_baseline`, and
-`bidding_v2_baseline` to an empty database. API, worker, and retention only connect at startup.
-Use `deploy/compose-runtime-restart.sh` for an ordinary restart.
+The bootstrap applies `shared_platform_baseline`, `knowledge_base_baseline`, and
+`bidding_v2_baseline` to an empty database in one transaction. API, worker, and retention only connect and verify at startup; they never execute DDL.
+Use `./deploy/deploy.sh up` for an ordinary restart.
 
 ## Local rust (infra only)
 
@@ -30,9 +31,11 @@ cargo run -p retention
 
 Host ports: API 18080, DocReader 15051, Postgres 15432, Redis 16379, MinIO 19000 / console 19001.
 
-## Test / CI
+## Development checks / target release gates
 
-Gates: `.scratch/knowledgebrain/review.md`.
+The commands below are development checks. They become release gates only when the named required CI jobs in [`deploy/README.md`](deploy/README.md) run them fail-closed with real PostgreSQL/pgvector、Redis、MinIO and zero skipped suites. Current workflow status must not be described as release accepted merely because these commands are documented.
+
+Review evidence: `.scratch/knowledgebrain/review.md`.
 
 ```bash
 cargo fmt --all -- --check

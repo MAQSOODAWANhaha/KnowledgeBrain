@@ -34,10 +34,16 @@ pub async fn connect_postgres_contract(label: &str) -> Option<PgPool> {
 }
 
 fn assert_isolated_contract_database(database_url: &str, label: &str) {
-    let normalized = database_url.to_ascii_lowercase();
+    let options = database_url
+        .parse::<sqlx::postgres::PgConnectOptions>()
+        .unwrap_or_else(|error| panic!("invalid {label} contract database URL: {error}"));
+    let isolated_host = matches!(options.get_host(), "127.0.0.1" | "localhost" | "::1");
+    let isolated_database = options
+        .get_database()
+        .is_some_and(|database| database.starts_with("knowledgebrain_test_"));
     assert!(
-        !normalized.contains(":15432/") && !normalized.ends_with(":15432"),
-        "refusing to run destructive {label} contract tests against live PostgreSQL port 15432"
+        isolated_host && options.get_port() == 25433 && isolated_database,
+        "refusing destructive {label} contract tests outside 127.0.0.1:25433/knowledgebrain_test_*"
     );
 }
 

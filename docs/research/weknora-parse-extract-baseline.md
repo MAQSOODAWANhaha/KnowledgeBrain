@@ -11,7 +11,7 @@
 | **v0.7.2 commit** | `3d5d8bfcdfeeea266b292b71cea616847af28d0f`（lightweight tag，2026-08-07T03:37:05Z） |
 | 上一标签 | `v0.7.1`（2026-07-24）、`v0.7.0`（2026-07-17） |
 | 本仓规格 | `docs/knowledge-base/domain.md`；实现对照见 `docs/research/repository-implementation-snapshot.md` |
-| 本仓投标 | [`../bidding/authoring.md`](../bidding/authoring.md) |
+| 本仓投标 | [来源/领域边界](../bidding/authoring.md)、[ONLYOFFICE/DOCX 目标](../bidding/onlyoffice.md)（本文调研时未接入；当前实现与验收以领域入口为准） |
 
 本文只记录 **WeKnora 公开实现在快照日的机制**，以及当时对本仓「抽不全 / 内容不对」的对照结论。  
 **不是** KnowledgeBrain 的运行规格；领域规格以 `docs/knowledge-base/domain.md` 为准。
@@ -93,7 +93,7 @@ UI 时间线五阶段 DAG：`docreader → chunking → (embedding ∥ multimoda
 
 Python 只出 Markdown + 图；OCR / VLM / 切块 / 抽取全在 Go。混在一起时，扫描页空白会被当成「提取失败」。
 
-本仓：知识库 `document:process` 已拆；投标 `bid:convert` 仍把 VLM 内联进转换。
+快照时本仓知识与招标源转换的 OCR/VLM 拆分不同；该观察仅用于解析诊断，不恢复旧投标任务。当前接缝见 `crates/bidding/src/tender_process.rs`。
 
 ### 4.2 PDF 逐页数字页 vs 扫描页 + XY-cut
 
@@ -133,7 +133,7 @@ MinerU 自托管超时约 1000s，`return_md=true, return_images=true`。PaddleO
 
 `knowledge:post_process` 把 `parse_status` 打成 `finalizing` 并写 `pending_subtasks_count`，再扇出图/摘要/问题/图谱/Wiki。图谱每文本 chunk 入队 `chunk:extract`（MaxRetry 3，超时 30 分钟）。Wiki Map-Reduce 的 Finalize **无 LLM**。
 
-本仓投标：已改为 **按标题段** 扇出并增量 persist（不是 WeKnora 的 graph `chunk:extract`）。项目级「同时只能一条 running」的 unique index 曾与并行抽取冲突，属实现债。
+快照时本仓投标曾按标题段处理，项目级唯一 running 约束与并行抽取发生冲突。这是历史诊断发现，不要求恢复扇出任务或旧状态机；当前 transport/AgentRun 边界见 [队列合同](../../plans/platform/queue-runtime.md)。
 
 ### 4.8 表格 / 合并单元格
 

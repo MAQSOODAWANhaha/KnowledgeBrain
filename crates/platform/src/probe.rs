@@ -4,6 +4,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 
 pub const REASON_POSTGRES_UNAVAILABLE: &str = "postgres_unavailable";
+pub const REASON_SCHEMA_REVISION_MISMATCH: &str = "schema_revision_mismatch";
 pub const REASON_MAINTENANCE_GATE_UNREADABLE: &str = "maintenance_gate_unreadable";
 pub const REASON_MAINTENANCE: &str = "maintenance";
 pub const REASON_DRAINING: &str = "draining";
@@ -75,9 +76,9 @@ pub fn ready_body(service: &'static str, check: &ReadyCheck) -> ReadyBody {
     }
 }
 
-pub async fn check_readiness() -> ReadyCheck {
+pub async fn check_readiness(expected_component: crate::SchemaComponentKind) -> ReadyCheck {
     match crate::connect().await {
-        Ok(pool) => inspect_readiness(&pool).await,
+        Ok(pool) => inspect_readiness(&pool, expected_component).await,
         Err(_) => ReadyCheck::NotReady {
             reason: REASON_POSTGRES_UNAVAILABLE,
             gate_mode: None,
@@ -85,9 +86,12 @@ pub async fn check_readiness() -> ReadyCheck {
     }
 }
 
-/// Readiness checks live dependencies and the ordinary maintenance gate only.
-/// It has no deployment-manifest, launch-marker, catalog-verifier, or desired-state input.
-pub async fn inspect_readiness(pool: &PgPool) -> ReadyCheck {
+/// Readiness revalidates the mounted release identity, exact receipt, and fresh
+/// catalog manifest read-only before checking the ordinary maintenance gate.
+pub async fn inspect_readiness(
+    pool: &PgPool,
+    expected_component: crate::SchemaComponentKind,
+) -> ReadyCheck {
     if sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(pool)
         .await
@@ -95,6 +99,27 @@ pub async fn inspect_readiness(pool: &PgPool) -> ReadyCheck {
     {
         return ReadyCheck::NotReady {
             reason: REASON_POSTGRES_UNAVAILABLE,
+            gate_mode: None,
+        };
+    }
+    let identity = match crate::SchemaRuntimeIdentity::load_from_env() {
+        Ok(identity) => identity,
+        Err(_) => {
+            return ReadyCheck::NotReady {
+                reason: REASON_SCHEMA_REVISION_MISMATCH,
+                gate_mode: None,
+            };
+        }
+    };
+    if identity.component_kind != expected_component {
+        return ReadyCheck::NotReady {
+            reason: REASON_SCHEMA_REVISION_MISMATCH,
+            gate_mode: None,
+        };
+    }
+    if let Err(error) = crate::verify_runtime_schema(pool, &identity).await {
+        return ReadyCheck::NotReady {
+            reason: readiness_reason_after_ping(&error),
             gate_mode: None,
         };
     }
@@ -123,6 +148,15 @@ pub async fn inspect_readiness(pool: &PgPool) -> ReadyCheck {
         };
     }
     check
+}
+
+fn readiness_reason_after_ping(error: &crate::SchemaError) -> &'static str {
+    match error {
+        crate::SchemaError::Sql(_) => REASON_POSTGRES_UNAVAILABLE,
+        crate::SchemaError::ReleaseIdentity(_) | crate::SchemaError::RevisionMismatch { .. } => {
+            REASON_SCHEMA_REVISION_MISMATCH
+        }
+    }
 }
 
 pub fn inspect_gate_mode(mode: impl Into<String>) -> ReadyCheck {
@@ -164,9 +198,30 @@ mod tests {
     }
 
     #[test]
-    fn readiness_contract_has_no_launch_manifest_identity() {
-        let body = ready_body("api", &inspect_gate_mode("open"));
+    fn post_ping_schema_failure_mapping_distinguishes_transport_from_identity() {
+        let transport = crate::SchemaError::Sql(sqlx::Error::PoolTimedOut);
+        assert_eq!(
+            readiness_reason_after_ping(&transport),
+            REASON_POSTGRES_UNAVAILABLE
+        );
+        let semantic = crate::SchemaError::RevisionMismatch { reason: "fixture" };
+        assert_eq!(
+            readiness_reason_after_ping(&semantic),
+            REASON_SCHEMA_REVISION_MISMATCH
+        );
+    }
+
+    #[test]
+    fn readiness_failure_exposes_only_stable_schema_reason() {
+        let body = ready_body(
+            "api",
+            &ReadyCheck::NotReady {
+                reason: REASON_SCHEMA_REVISION_MISMATCH,
+                gate_mode: None,
+            },
+        );
         let json = serde_json::to_value(body).unwrap();
-        assert!(json.get("schema_manifest_sha256").is_none());
+        assert_eq!(json["reason"], REASON_SCHEMA_REVISION_MISMATCH);
+        assert!(json.get("release_descriptor_sha256").is_none());
     }
 }

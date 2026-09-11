@@ -91,7 +91,7 @@ pub fn enqueue_ingest_on_job(store: &mut WikiJob, version_id: Uuid, document_id:
     );
 }
 
-/// Seed fail_count copied from a PG `task_pending_ops` row before `process_ingest`.
+/// Seed a retry counter in the ephemeral Wiki job working set.
 pub fn set_ingest_fail_count_on_job(
     store: &mut WikiJob,
     version_id: Uuid,
@@ -219,7 +219,9 @@ pub fn process_ingest_on_job(store: &mut WikiJob, version_id: Uuid) -> Result<()
     for op in &claimed {
         match op.op.as_str() {
             OP_RETRACT => {
-                retract_one(store, version_id, op);
+                for update in retract_document_updates(store, version_id, op)? {
+                    grouped.entry(update.slug.clone()).or_default().push(update);
+                }
                 done_ids.push(op.id);
             }
             _ => {
@@ -711,9 +713,18 @@ fn reduce_grouped(
     {
         let slug = patch.slug.clone();
         let title = patch.title.clone();
-        apply_patch(store, version_id, patch);
+        if patch.source_refs.is_empty() {
+            store.wiki.remove(&(version_id, slug.clone()));
+            store.chunks.retain(|_, chunk| {
+                !(chunk.product_version_id == version_id
+                    && chunk.chunk_type == "wiki_page"
+                    && chunk.context_header == slug)
+            });
+        } else {
+            apply_patch(store, version_id, patch);
+        }
+        written.push((slug.clone(), title));
         release_slug_lock(store, version_id, &slug);
-        written.push((slug, title));
     }
     for job in &jobs {
         if written.iter().all(|(s, _)| s != &job.slug) {
@@ -790,6 +801,11 @@ fn run_reduce_job(model: &str, job: &ReduceJob) -> Option<ReducePatch> {
         .as_ref()
         .map(|p| p.chunk_refs.clone())
         .unwrap_or_default();
+    if !retracts.is_empty() {
+        // Surviving-source additions below rebuild this set without retaining any
+        // chunk owned only by the retracted document.
+        chunk_refs.clear();
+    }
     let retract_ids: std::collections::HashSet<Uuid> =
         retracts.iter().map(|u| u.document_id).collect();
     source_refs.retain(|id| !retract_ids.contains(id));
@@ -1319,15 +1335,73 @@ fn upsert_system_page(
     index_wiki_page(store, version_id, Uuid::nil(), slug, title, content);
 }
 
-fn retract_one(store: &mut WikiJob, version_id: Uuid, op: &WikiPendingOp) {
-    if !op.slug.is_empty() {
-        store.wiki.remove(&(version_id, op.slug.clone()));
+fn retract_document_updates(
+    store: &mut WikiJob,
+    version_id: Uuid,
+    op: &WikiPendingOp,
+) -> Result<Vec<SlugUpdate>, String> {
+    let Some(document_id) = op.document_id else {
+        return Ok(Vec::new());
+    };
+    let affected_pages: Vec<WikiPage> = store
+        .wiki
+        .values()
+        .filter(|page| {
+            page.product_version_id == version_id && page.source_refs.contains(&document_id)
+        })
+        .cloned()
+        .collect();
+    let affected_slugs: std::collections::HashSet<String> = affected_pages
+        .iter()
+        .map(|page| page.slug.clone())
+        .collect();
+    let mut survivor_documents = std::collections::HashSet::new();
+    for page in &affected_pages {
+        survivor_documents.extend(
+            page.source_refs
+                .iter()
+                .copied()
+                .filter(|source| *source != document_id),
+        );
     }
-    if let Some(did) = op.document_id {
-        store
-            .chunks
-            .retain(|_, c| !(c.document_id == did && c.chunk_type == "wiki_page"));
+    let deleted_title = store
+        .documents
+        .get(&document_id)
+        .map(|document| document.title.clone())
+        .unwrap_or_else(|| op.title.clone());
+    let deleted_content = affected_pages
+        .iter()
+        .filter(|page| page.page_type == PAGE_SUMMARY)
+        .map(|page| page.content.clone())
+        .next()
+        .unwrap_or_default();
+    let mut updates = affected_pages
+        .iter()
+        .map(|page| SlugUpdate {
+            slug: page.slug.clone(),
+            update_type: "retractStale".into(),
+            document_id,
+            doc_title: deleted_title.clone(),
+            language: String::new(),
+            title: page.title.clone(),
+            about: String::new(),
+            details: String::new(),
+            aliases: Vec::new(),
+            chunk_ids: Vec::new(),
+            summary_line: String::new(),
+            summary_body: String::new(),
+            retract_content: deleted_content.clone(),
+            doc_summary: String::new(),
+        })
+        .collect::<Vec<_>>();
+    for survivor in survivor_documents {
+        updates.extend(
+            map_document(store, version_id, survivor)?
+                .into_iter()
+                .filter(|update| affected_slugs.contains(&update.slug)),
+        );
     }
+    Ok(updates)
 }
 
 fn reduce_slug(store: &mut WikiJob, version_id: Uuid, op: &WikiPendingOp) -> Result<(), String> {
@@ -1913,6 +1987,26 @@ mod tests {
             .unwrap();
         assert!(entity.source_refs.len() >= first_refs.len());
         assert!(entity.source_refs.contains(&did2) || entity.source_refs.len() > 1);
+
+        enqueue_retract_on_job(&mut s, vid, did, "Alpha");
+        process_ingest_on_job(&mut s, vid).unwrap();
+        process_finalize_on_job(&mut s, vid).unwrap();
+        let surviving = s
+            .wiki
+            .values()
+            .find(|page| page.page_type == PAGE_ENTITY && page.title == "Alpha")
+            .expect("shared slug must survive while the second source remains");
+        assert!(!surviving.source_refs.contains(&did));
+        assert!(surviving.source_refs.contains(&did2));
+        assert!(!surviving.content.is_empty());
+        enqueue_retract_on_job(&mut s, vid, did2, "Alpha");
+        process_ingest_on_job(&mut s, vid).unwrap();
+        process_finalize_on_job(&mut s, vid).unwrap();
+        assert!(
+            !s.wiki
+                .values()
+                .any(|page| page.page_type == PAGE_ENTITY && page.title == "Alpha")
+        );
     }
 
     #[test]

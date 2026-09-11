@@ -1,0 +1,1481 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://knowledgebrain.local/contracts/catalog-manifest-v1.schema.json",
+  "title": "CatalogManifestV1",
+  "type": "array",
+  "items": {
+    "$ref": "#/$defs/record"
+  },
+  "$defs": {
+    "manifestValue": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/manifestValue"
+          }
+        },
+        {
+          "type": "object",
+          "patternProperties": {
+            "^": {
+              "$ref": "#/$defs/manifestValue"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "aclEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "grantee",
+        "grantor",
+        "privilege",
+        "is_grantable"
+      ],
+      "properties": {
+        "grantee": {
+          "type": "string"
+        },
+        "grantor": {
+          "type": "string"
+        },
+        "privilege": {
+          "type": "string"
+        },
+        "is_grantable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "dependencyRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "database",
+            "schema",
+            "relation",
+            "view",
+            "sequence",
+            "type",
+            "column",
+            "default",
+            "constraint",
+            "index",
+            "trigger",
+            "policy",
+            "function",
+            "role",
+            "membership",
+            "default_acl",
+            "seed_row"
+          ]
+        },
+        "schema": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        }
+      }
+    },
+    "recordBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ]
+    },
+    "databaseDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "encoding",
+        "collate",
+        "ctype",
+        "locale_provider",
+        "is_template",
+        "allow_connections",
+        "connection_limit"
+      ],
+      "properties": {
+        "encoding": {
+          "type": "string"
+        },
+        "collate": {
+          "type": "string"
+        },
+        "ctype": {
+          "type": "string"
+        },
+        "locale_provider": {
+          "type": "string"
+        },
+        "is_template": {
+          "type": "boolean"
+        },
+        "allow_connections": {
+          "type": "boolean"
+        },
+        "connection_limit": {
+          "type": "integer"
+        }
+      }
+    },
+    "schemaDefinition": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "relationDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relkind",
+        "persistence",
+        "row_security",
+        "force_row_security",
+        "replica_identity",
+        "partition_key"
+      ],
+      "properties": {
+        "relkind": {
+          "type": "string"
+        },
+        "persistence": {
+          "type": "string"
+        },
+        "row_security": {
+          "type": "boolean"
+        },
+        "force_row_security": {
+          "type": "boolean"
+        },
+        "replica_identity": {
+          "type": "string"
+        },
+        "partition_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "viewDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "materialized",
+        "check_option",
+        "security_barrier",
+        "definition"
+      ],
+      "properties": {
+        "materialized": {
+          "type": "boolean"
+        },
+        "check_option": {
+          "type": "string"
+        },
+        "security_barrier": {
+          "type": "boolean"
+        },
+        "definition": {
+          "type": "string"
+        }
+      }
+    },
+    "sequenceDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "data_type",
+        "start",
+        "min",
+        "max",
+        "increment",
+        "cycle",
+        "cache"
+      ],
+      "properties": {
+        "data_type": {
+          "type": "string"
+        },
+        "start": {
+          "type": "string"
+        },
+        "min": {
+          "type": "string"
+        },
+        "max": {
+          "type": "string"
+        },
+        "increment": {
+          "type": "string"
+        },
+        "cycle": {
+          "type": "boolean"
+        },
+        "cache": {
+          "type": "string"
+        }
+      }
+    },
+    "typeDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type_kind",
+        "category",
+        "preferred",
+        "delimiter",
+        "element_type",
+        "base_type",
+        "not_null",
+        "default",
+        "enum_labels"
+      ],
+      "properties": {
+        "type_kind": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "preferred": {
+          "type": "boolean"
+        },
+        "delimiter": {
+          "type": "string"
+        },
+        "element_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "not_null": {
+          "type": "boolean"
+        },
+        "default": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enum_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "columnDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordinal",
+        "type",
+        "not_null",
+        "collation",
+        "identity_kind",
+        "generated_kind"
+      ],
+      "properties": {
+        "ordinal": {
+          "type": "integer"
+        },
+        "type": {
+          "type": "string"
+        },
+        "not_null": {
+          "type": "boolean"
+        },
+        "collation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "identity_kind": {
+          "type": "string"
+        },
+        "generated_kind": {
+          "type": "string"
+        }
+      }
+    },
+    "expressionDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expression"
+      ],
+      "properties": {
+        "expression": {
+          "type": "string"
+        }
+      }
+    },
+    "namedDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "definition"
+      ],
+      "properties": {
+        "definition": {
+          "type": "string"
+        }
+      }
+    },
+    "policyDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "permissive",
+        "roles",
+        "using_expr",
+        "check_expr"
+      ],
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "permissive": {
+          "type": "boolean"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "using_expr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "check_expr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "functionDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "return_type",
+        "language",
+        "volatility",
+        "security_definer",
+        "strict",
+        "parallel",
+        "definition"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "return_type": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "volatility": {
+          "type": "string"
+        },
+        "security_definer": {
+          "type": "boolean"
+        },
+        "strict": {
+          "type": "boolean"
+        },
+        "parallel": {
+          "type": "string"
+        },
+        "definition": {
+          "type": "string"
+        }
+      }
+    },
+    "roleDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "superuser",
+        "inherit",
+        "create_role",
+        "create_db",
+        "can_login",
+        "replication",
+        "bypass_rls",
+        "connection_limit",
+        "valid_until"
+      ],
+      "properties": {
+        "superuser": {
+          "type": "boolean"
+        },
+        "inherit": {
+          "type": "boolean"
+        },
+        "create_role": {
+          "type": "boolean"
+        },
+        "create_db": {
+          "type": "boolean"
+        },
+        "can_login": {
+          "type": "boolean"
+        },
+        "replication": {
+          "type": "boolean"
+        },
+        "bypass_rls": {
+          "type": "boolean"
+        },
+        "connection_limit": {
+          "type": "integer"
+        },
+        "valid_until": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "membershipDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "member",
+        "grantor",
+        "admin_option"
+      ],
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "member": {
+          "type": "string"
+        },
+        "grantor": {
+          "type": "string"
+        },
+        "admin_option": {
+          "type": "boolean"
+        }
+      }
+    },
+    "defaultAclDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entries"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        }
+      }
+    },
+    "seedRowDefinition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary_key",
+        "values"
+      ],
+      "properties": {
+        "primary_key": {
+          "type": "object",
+          "patternProperties": {
+            "^": {
+              "$ref": "#/$defs/manifestValue"
+            }
+          },
+          "additionalProperties": false
+        },
+        "values": {
+          "type": "object",
+          "patternProperties": {
+            "^": {
+              "$ref": "#/$defs/manifestValue"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "record": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/databaseRecord"
+        },
+        {
+          "$ref": "#/$defs/schemaRecord"
+        },
+        {
+          "$ref": "#/$defs/relationRecord"
+        },
+        {
+          "$ref": "#/$defs/viewRecord"
+        },
+        {
+          "$ref": "#/$defs/sequenceRecord"
+        },
+        {
+          "$ref": "#/$defs/typeRecord"
+        },
+        {
+          "$ref": "#/$defs/columnRecord"
+        },
+        {
+          "$ref": "#/$defs/defaultRecord"
+        },
+        {
+          "$ref": "#/$defs/constraintRecord"
+        },
+        {
+          "$ref": "#/$defs/indexRecord"
+        },
+        {
+          "$ref": "#/$defs/triggerRecord"
+        },
+        {
+          "$ref": "#/$defs/policyRecord"
+        },
+        {
+          "$ref": "#/$defs/functionRecord"
+        },
+        {
+          "$ref": "#/$defs/roleRecord"
+        },
+        {
+          "$ref": "#/$defs/membershipRecord"
+        },
+        {
+          "$ref": "#/$defs/defaultAclRecord"
+        },
+        {
+          "$ref": "#/$defs/seedRowRecord"
+        }
+      ]
+    },
+    "databaseRecord": {
+      "$ref": "#/$defs/databaseRecordShape"
+    },
+    "databaseRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "database"
+        },
+        "schema": {
+          "type": "null"
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "definition": {
+          "$ref": "#/$defs/databaseDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "schemaRecord": {
+      "$ref": "#/$defs/schemaRecordShape"
+    },
+    "schemaRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "schema"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "const": "kb_app_owner"
+        },
+        "definition": {
+          "$ref": "#/$defs/schemaDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "relationRecord": {
+      "$ref": "#/$defs/relationRecordShape"
+    },
+    "relationRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "relation"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "const": "kb_app_owner"
+        },
+        "definition": {
+          "$ref": "#/$defs/relationDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "viewRecord": {
+      "$ref": "#/$defs/viewRecordShape"
+    },
+    "viewRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "view"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "const": "kb_app_owner"
+        },
+        "definition": {
+          "$ref": "#/$defs/viewDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "sequenceRecord": {
+      "$ref": "#/$defs/sequenceRecordShape"
+    },
+    "sequenceRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "sequence"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "const": "kb_app_owner"
+        },
+        "definition": {
+          "$ref": "#/$defs/sequenceDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "typeRecord": {
+      "$ref": "#/$defs/typeRecordShape"
+    },
+    "typeRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "type"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "const": "kb_app_owner"
+        },
+        "definition": {
+          "$ref": "#/$defs/typeDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "columnRecord": {
+      "$ref": "#/$defs/columnRecordShape"
+    },
+    "columnRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "column"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "const": "kb_app_owner"
+        },
+        "definition": {
+          "$ref": "#/$defs/columnDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "defaultRecord": {
+      "$ref": "#/$defs/defaultRecordShape"
+    },
+    "defaultRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "default"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "const": "kb_app_owner"
+        },
+        "definition": {
+          "$ref": "#/$defs/expressionDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "constraintRecord": {
+      "$ref": "#/$defs/constraintRecordShape"
+    },
+    "constraintRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "constraint"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "const": "kb_app_owner"
+        },
+        "definition": {
+          "$ref": "#/$defs/namedDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "indexRecord": {
+      "$ref": "#/$defs/indexRecordShape"
+    },
+    "indexRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "index"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "const": "kb_app_owner"
+        },
+        "definition": {
+          "$ref": "#/$defs/namedDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "triggerRecord": {
+      "$ref": "#/$defs/triggerRecordShape"
+    },
+    "triggerRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "trigger"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "const": "kb_app_owner"
+        },
+        "definition": {
+          "$ref": "#/$defs/namedDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "policyRecord": {
+      "$ref": "#/$defs/policyRecordShape"
+    },
+    "policyRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "policy"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "const": "kb_app_owner"
+        },
+        "definition": {
+          "$ref": "#/$defs/policyDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "functionRecord": {
+      "$ref": "#/$defs/functionRecordShape"
+    },
+    "functionRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "function"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "const": "kb_app_owner"
+        },
+        "definition": {
+          "$ref": "#/$defs/functionDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "roleRecord": {
+      "$ref": "#/$defs/roleRecordShape"
+    },
+    "roleRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "role"
+        },
+        "schema": {
+          "type": "null"
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "null"
+        },
+        "definition": {
+          "$ref": "#/$defs/roleDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "membershipRecord": {
+      "$ref": "#/$defs/membershipRecordShape"
+    },
+    "membershipRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "membership"
+        },
+        "schema": {
+          "type": "null"
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "null"
+        },
+        "definition": {
+          "$ref": "#/$defs/membershipDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "defaultAclRecord": {
+      "$ref": "#/$defs/defaultAclRecordShape"
+    },
+    "defaultAclRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "default_acl"
+        },
+        "schema": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string",
+          "enum": [
+            "kb_app_owner",
+            "kb_migrator",
+            "kb_runtime_api",
+            "kb_runtime_retention",
+            "kb_runtime_worker"
+          ]
+        },
+        "definition": {
+          "$ref": "#/$defs/defaultAclDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    },
+    "seedRowRecord": {
+      "$ref": "#/$defs/seedRowRecordShape"
+    },
+    "seedRowRecordShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schema",
+        "name",
+        "identity",
+        "owner",
+        "definition",
+        "acl",
+        "dependencies"
+      ],
+      "properties": {
+        "kind": {
+          "const": "seed_row"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "owner": {
+          "const": "kb_app_owner"
+        },
+        "definition": {
+          "$ref": "#/$defs/seedRowDefinition"
+        },
+        "acl": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/aclEntry"
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependencyRef"
+          }
+        }
+      }
+    }
+  }
+}

@@ -351,18 +351,6 @@ pub async fn run_post_process(
             .queue
             .iter()
             .any(|j| j.task_type == platform::TYPE_WIKI_INGEST);
-    if wiki_trigger {
-        crate::enqueue_pending_op(
-            pool,
-            platform::TYPE_WIKI_INGEST,
-            product_version_id,
-            crate::wiki::OP_INGEST,
-            Some(&document_id.to_string()),
-            serde_json::json!({"document_id": document_id}),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    }
     if !crate::set_finalizing(pool, document_id, doc.pending_subtasks_count)
         .await
         .map_err(|e| e.to_string())?
@@ -502,15 +490,9 @@ pub async fn run_post_process(
         }
     }
     if wiki_trigger {
-        match platform::enqueue_wiki_ingest(product_version_id).await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                let _ = run_wiki_ingest(pool, product_version_id).await;
-            }
-            Err(_) => {
-                let _ = crate::finalize_subtask(pool, document_id).await;
-            }
-        }
+        platform::enqueue_wiki_ingest(product_version_id, document_id, crate::wiki::OP_INGEST)
+            .await?
+            .ok_or_else(|| "Oxana Redis is not configured for Wiki ingest".to_string())?;
     }
     finish_postprocess_spans(pool, document_id, attempt).await;
     tracing::info!(
@@ -684,251 +666,197 @@ pub async fn finalize_multimodal(pool: &PgPool, document_id: Uuid, attempt: i32)
     maybe_start_postprocess(pool, document_id, vid, attempt).await;
 }
 
-/// Brain ProcessWikiIngest on PG `task_pending_ops` ingest lane only.
-pub async fn run_wiki_ingest(pool: &PgPool, version_id: Uuid) -> Result<(), String> {
+/// Execute one closed Wiki ingest/retract job. Oxana owns retries and dead jobs;
+/// PostgreSQL stores only the resulting Wiki business artifacts.
+pub async fn run_wiki_ingest(
+    pool: &PgPool,
+    version_id: Uuid,
+    document_id: Uuid,
+    operation: &str,
+) -> Result<(), String> {
+    let mut lock = pool.acquire().await.map_err(|error| error.to_string())?;
+    sqlx::query("SELECT pg_catalog.pg_advisory_lock(pg_catalog.hashtextextended($1,0))")
+        .bind(format!("knowledge-wiki:{version_id}"))
+        .execute(&mut *lock)
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = run_wiki_ingest_locked(pool, version_id, document_id, operation).await;
+    let unlock =
+        sqlx::query("SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended($1,0))")
+            .bind(format!("knowledge-wiki:{version_id}"))
+            .execute(&mut *lock)
+            .await
+            .map_err(|error| error.to_string());
+    match (result, unlock) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(_)) => Ok(()),
+    }
+}
+
+async fn run_wiki_ingest_locked(
+    pool: &PgPool,
+    version_id: Uuid,
+    document_id: Uuid,
+    operation: &str,
+) -> Result<(), String> {
     if !crate::version_wiki_enabled(pool, version_id)
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|error| error.to_string())?
     {
-        tracing::info!(%version_id, "wiki ingest skipped: not enabled");
-        let _ = crate::drop_pending_ops(pool, platform::TYPE_WIKI_INGEST, version_id).await;
+        tracing::info!(%version_id, %document_id, "wiki ingest skipped: not enabled");
+        if operation == crate::wiki::OP_INGEST {
+            crate::finalize_subtask(pool, document_id)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         return schedule_semantic_index_v2_if_ready(pool, version_id).await;
     }
-    let claimed = crate::claim_pending_batch(
-        pool,
-        platform::TYPE_WIKI_INGEST,
-        version_id,
-        crate::wiki::BATCH_DOCS as i64,
-        crate::wiki::STALE_CLAIM_MIN as i64,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    if claimed.is_empty() {
-        return schedule_semantic_index_v2_if_ready(pool, version_id).await;
+    if !matches!(operation, crate::wiki::OP_INGEST | crate::wiki::OP_RETRACT) {
+        return Err("invalid closed Wiki ingest operation".into());
     }
     let mut store = crate::Store::default();
-    let _ = crate::hydrate_version(pool, &mut store, version_id).await;
+    crate::hydrate_version(pool, &mut store, version_id)
+        .await
+        .map_err(|error| error.to_string())?;
     store.versions.entry(version_id).or_insert_with(|| {
-        let mut v = crate::ProductVersion::new(Uuid::nil(), "v".into());
-        v.id = version_id;
-        v.wiki_enabled = true;
-        v
+        let mut version = crate::ProductVersion::new(Uuid::nil(), "v".into());
+        version.id = version_id;
+        version.wiki_enabled = true;
+        version
     });
+    store.documents.entry(document_id).or_insert_with(|| {
+        let mut document = crate::Document::new(
+            version_id,
+            document_id.to_string(),
+            "doc.txt".into(),
+            0,
+            String::new(),
+            String::new(),
+        );
+        document.id = document_id;
+        document
+    });
+    let before_pages = store.wiki.clone();
+    let before_folders = store.wiki_folders.clone();
     let mut job = crate::WikiJob::from_store(&store, version_id);
-    let mut done = Vec::new();
-    let mut slugs = Vec::new();
-    let mut ingest_ops = Vec::new();
-    for op in &claimed {
-        if op.op == crate::wiki::OP_RETRACT {
-            if let Some(did) = op
-                .dedup_key
-                .as_deref()
-                .and_then(|s| Uuid::parse_str(s).ok())
-            {
-                crate::wiki::enqueue_retract_on_job(&mut job, version_id, did, "");
-                let _ = crate::delete_wiki_for_document(pool, version_id, did).await;
-            }
-            done.push(op.id);
-            continue;
-        }
-        let Some(did) = op
-            .dedup_key
-            .as_deref()
-            .and_then(|s| Uuid::parse_str(s).ok())
-        else {
-            done.push(op.id);
-            continue;
-        };
-        job.documents.entry(did).or_insert_with(|| {
-            let mut doc = crate::Document::new(
-                version_id,
-                did.to_string(),
-                "doc.txt".into(),
-                0,
-                String::new(),
-                String::new(),
-            );
-            doc.id = did;
-            doc
-        });
-        crate::wiki::enqueue_ingest_on_job(&mut job, version_id, did);
-        crate::wiki::set_ingest_fail_count_on_job(&mut job, version_id, did, op.fail_count);
-        ingest_ops.push((op.id, did));
+    if operation == crate::wiki::OP_RETRACT {
+        crate::wiki::enqueue_retract_on_job(&mut job, version_id, document_id, "");
+    } else {
+        crate::wiki::enqueue_ingest_on_job(&mut job, version_id, document_id);
     }
-    if !ingest_ops.is_empty() {
-        if let Err(e) = crate::wiki::process_ingest_on_job(&mut job, version_id) {
-            for (_, did) in &ingest_ops {
-                let _ = crate::upsert_span(
-                    pool,
-                    *did,
-                    1,
-                    "wiki.ingest",
-                    "failed",
-                    Some(serde_json::json!({"error": e})),
-                )
-                .await;
-            }
-            for (op_id, did) in &ingest_ops {
-                if let Some(n) =
-                    crate::wiki::retryable_ingest_fail_count_on_job(&job, version_id, *did)
-                {
-                    crate::retry_pending_op(pool, *op_id, n)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                } else {
-                    crate::finalize_subtask(pool, *did)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    done.push(*op_id);
-                }
-            }
-        } else {
-            for (op_id, did) in &ingest_ops {
-                if let Some(n) =
-                    crate::wiki::retryable_ingest_fail_count_on_job(&job, version_id, *did)
-                {
-                    crate::retry_pending_op(pool, *op_id, n)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    continue;
-                }
-                crate::finalize_subtask(pool, *did)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let _ = crate::upsert_span(
-                    pool,
-                    *did,
-                    1,
-                    "wiki.ingest",
-                    "done",
-                    Some(serde_json::json!({"version_id": version_id})),
-                )
-                .await;
-                slugs.push(*did);
-                done.push(*op_id);
-            }
-        }
-        job.write_back(&mut store);
-        persist_wiki_store(pool, &store, version_id, None).await?;
+    crate::wiki::process_ingest_on_job(&mut job, version_id)?;
+    if operation == crate::wiki::OP_RETRACT {
+        // Retraction owns the complete reducer under the same version lock so
+        // surviving pages, folders and searchable chunks publish atomically.
+        crate::wiki::process_finalize_on_job(&mut job, version_id)?;
     }
-    crate::delete_pending_ids(pool, &done)
-        .await
-        .map_err(|e| e.to_string())?;
-    for did in slugs {
-        crate::enqueue_pending_op(
+    job.write_back(&mut store);
+    persist_wiki_store(
+        pool,
+        &store,
+        version_id,
+        document_id,
+        &before_pages,
+        &before_folders,
+    )
+    .await?;
+    if operation == crate::wiki::OP_INGEST {
+        crate::finalize_subtask(pool, document_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        crate::upsert_span(
             pool,
-            platform::TYPE_WIKI_FINALIZE,
-            version_id,
-            crate::wiki::OP_SLUG,
-            Some(&did.to_string()),
-            serde_json::json!({"document_id": did}),
+            document_id,
+            1,
+            "wiki.ingest",
+            "done",
+            Some(serde_json::json!({"version_id": version_id})),
         )
         .await
-        .map_err(|e| e.to_string())?;
-        let _ = crate::enqueue_pending_op(
-            pool,
-            platform::TYPE_WIKI_FINALIZE,
-            version_id,
-            crate::wiki::OP_CHANGE,
-            None,
-            serde_json::json!({"document_id": did}),
-        )
-        .await;
-        let _ = crate::enqueue_pending_op(
-            pool,
-            platform::TYPE_WIKI_FINALIZE,
-            version_id,
-            crate::wiki::OP_FOLDER_PRUNE,
-            None,
-            serde_json::json!({}),
-        )
-        .await;
-    }
-    if crate::count_pending(pool, platform::TYPE_WIKI_FINALIZE, version_id)
-        .await
-        .map_err(|e| e.to_string())?
-        > 0
-    {
-        let _ = platform::enqueue_wiki_finalize(version_id).await;
-    }
-    if crate::count_pending(pool, platform::TYPE_WIKI_INGEST, version_id)
-        .await
-        .map_err(|e| e.to_string())?
-        > 0
-    {
-        let delay = if done.len() < claimed.len() {
-            crate::wiki::LOCK_RETRY_SECS
-        } else {
-            crate::wiki::FOLLOW_UP_DEBOUNCE_SECS
-        };
-        let _ = platform::enqueue_wiki_ingest_in(version_id, delay).await;
+        .map_err(|error| error.to_string())?;
+        platform::enqueue_wiki_finalize(version_id, document_id)
+            .await?
+            .ok_or_else(|| "Oxana Redis is not configured for Wiki finalize".to_string())?;
     }
     schedule_semantic_index_v2_if_ready(pool, version_id).await
 }
 
-/// Brain ProcessWikiFinalize — finalize lane only, never ingest.
-pub async fn run_wiki_finalize(pool: &PgPool, version_id: Uuid) -> Result<(), String> {
-    let claimed = crate::claim_pending_batch(
-        pool,
-        platform::TYPE_WIKI_FINALIZE,
-        version_id,
-        5000,
-        crate::wiki::STALE_CLAIM_MIN as i64,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    if claimed.is_empty() {
-        return schedule_semantic_index_v2_if_ready(pool, version_id).await;
+/// Execute one idempotent Wiki finalize job derived from its immutable document identity.
+pub async fn run_wiki_finalize(
+    pool: &PgPool,
+    version_id: Uuid,
+    document_id: Uuid,
+) -> Result<(), String> {
+    let mut lock = pool.acquire().await.map_err(|error| error.to_string())?;
+    sqlx::query("SELECT pg_catalog.pg_advisory_lock(pg_catalog.hashtextextended($1,0))")
+        .bind(format!("knowledge-wiki:{version_id}"))
+        .execute(&mut *lock)
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = run_wiki_finalize_locked(pool, version_id, document_id).await;
+    let unlock =
+        sqlx::query("SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended($1,0))")
+            .bind(format!("knowledge-wiki:{version_id}"))
+            .execute(&mut *lock)
+            .await
+            .map_err(|error| error.to_string());
+    match (result, unlock) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(_)) => Ok(()),
     }
+}
+
+async fn run_wiki_finalize_locked(
+    pool: &PgPool,
+    version_id: Uuid,
+    document_id: Uuid,
+) -> Result<(), String> {
     let mut store = crate::Store::default();
-    let _ = crate::hydrate_version(pool, &mut store, version_id).await;
+    crate::hydrate_version(pool, &mut store, version_id)
+        .await
+        .map_err(|error| error.to_string())?;
     store.versions.entry(version_id).or_insert_with(|| {
-        let mut v = crate::ProductVersion::new(Uuid::nil(), "v".into());
-        v.id = version_id;
-        v.wiki_enabled = true;
-        v
+        let mut version = crate::ProductVersion::new(Uuid::nil(), "v".into());
+        version.id = version_id;
+        version.wiki_enabled = true;
+        version
     });
+    let before_pages = store.wiki.clone();
+    let before_folders = store.wiki_folders.clone();
     let mut job = crate::WikiJob::from_store(&store, version_id);
-    for op in &claimed {
-        let slug = op.dedup_key.clone().unwrap_or_default();
-        let title = op
-            .payload
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        crate::wiki::enqueue_finalize_op_on_job(&mut job, version_id, &op.op, &slug, &title);
-    }
+    crate::wiki::enqueue_finalize_op_on_job(
+        &mut job,
+        version_id,
+        crate::wiki::OP_SLUG,
+        &document_id.to_string(),
+        "",
+    );
+    crate::wiki::enqueue_finalize_op_on_job(&mut job, version_id, crate::wiki::OP_CHANGE, "", "");
+    crate::wiki::enqueue_finalize_op_on_job(
+        &mut job,
+        version_id,
+        crate::wiki::OP_FOLDER_PRUNE,
+        "",
+        "",
+    );
     crate::wiki::process_finalize_on_job(&mut job, version_id)?;
-    job.write_back(&mut store);
-    persist_wiki_store(pool, &store, version_id, None).await?;
-    let deferred: Vec<Uuid> = claimed
-        .iter()
-        .filter(|op| {
-            store.wiki_ops.iter().any(|o| {
-                o.lane == platform::TYPE_WIKI_FINALIZE
-                    && o.version_id == version_id
-                    && o.op == op.op
-                    && (op.dedup_key.as_deref().unwrap_or("").is_empty()
-                        || o.slug == op.dedup_key.as_deref().unwrap_or_default())
-            })
-        })
-        .map(|op| op.id)
-        .collect();
-    let done: Vec<Uuid> = claimed
-        .iter()
-        .map(|op| op.id)
-        .filter(|id| !deferred.contains(id))
-        .collect();
-    crate::delete_pending_ids(pool, &done)
-        .await
-        .map_err(|e| e.to_string())?;
-    crate::unclaim_pending_ids(pool, &deferred)
-        .await
-        .map_err(|e| e.to_string())?;
-    if !deferred.is_empty() {
-        let _ = platform::enqueue_wiki_finalize_in(version_id, crate::wiki::LOCK_RETRY_SECS).await;
+    if job.wiki_ops.iter().any(|operation| {
+        operation.lane == platform::TYPE_WIKI_FINALIZE && operation.version_id == version_id
+    }) {
+        return Err("Wiki finalize business lock is busy".into());
     }
+    job.write_back(&mut store);
+    persist_wiki_store(
+        pool,
+        &store,
+        version_id,
+        document_id,
+        &before_pages,
+        &before_folders,
+    )
+    .await?;
     schedule_semantic_index_v2_if_ready(pool, version_id).await
 }
 
@@ -936,70 +864,95 @@ async fn persist_wiki_store(
     pool: &PgPool,
     store: &crate::Store,
     version_id: Uuid,
-    document_id: Option<Uuid>,
+    document_id: Uuid,
+    before_pages: &std::collections::HashMap<(Uuid, String), crate::WikiPage>,
+    before_folders: &std::collections::HashMap<Uuid, crate::WikiFolder>,
 ) -> Result<(), String> {
-    for page in store
+    let changed_pages = store
         .wiki
-        .values()
-        .filter(|p| p.product_version_id == version_id)
-    {
-        let _ = crate::upsert_wiki_page(pool, page, document_id).await;
-    }
-    for folder in store
+        .iter()
+        .filter(|(key, page)| {
+            key.0 == version_id
+                && before_pages.get(*key).is_none_or(|before| {
+                    serde_json::to_value(before).ok() != serde_json::to_value(page).ok()
+                })
+        })
+        .map(|(_, page)| page.clone())
+        .collect::<Vec<_>>();
+    let removed_page_ids = before_pages
+        .iter()
+        .filter(|((candidate_version, slug), _)| {
+            *candidate_version == version_id
+                && !store.wiki.contains_key(&(*candidate_version, slug.clone()))
+        })
+        .map(|(_, page)| page.id)
+        .collect::<Vec<_>>();
+    let changed_folders = store
         .wiki_folders
-        .values()
-        .filter(|f| f.product_version_id == version_id)
-    {
-        let _ = crate::upsert_wiki_folder(pool, folder).await;
-    }
-    let owner = match document_id {
-        Some(id) => Some(id),
-        None => store
-            .documents
+        .iter()
+        .filter(|(id, folder)| {
+            folder.product_version_id == version_id
+                && before_folders.get(id).is_none_or(|before| {
+                    serde_json::to_value(before).ok() != serde_json::to_value(folder).ok()
+                })
+        })
+        .map(|(_, folder)| folder.clone())
+        .collect::<Vec<_>>();
+    let removed_folder_ids = before_folders
+        .iter()
+        .filter(|(id, folder)| {
+            folder.product_version_id == version_id && !store.wiki_folders.contains_key(id)
+        })
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
+    let mut changed_slugs = changed_pages
+        .iter()
+        .map(|page| page.slug.clone())
+        .collect::<std::collections::HashSet<_>>();
+    changed_slugs.extend(
+        before_pages
             .values()
-            .find(|d| d.product_version_id == version_id)
-            .map(|d| d.id),
-    };
-    let mut wiki_chunks: Vec<_> = store
+            .filter(|page| removed_page_ids.contains(&page.id))
+            .map(|page| page.slug.clone()),
+    );
+    let mut wiki_chunks = store
         .chunks
         .values()
-        .filter(|c| {
-            c.product_version_id == version_id
-                && c.chunk_type == "wiki_page"
-                && document_id.is_none_or(|did| c.document_id == did || c.document_id.is_nil())
+        .filter(|chunk| {
+            chunk.product_version_id == version_id
+                && chunk.chunk_type == "wiki_page"
+                && changed_slugs.contains(&chunk.context_header)
         })
         .cloned()
-        .collect();
-    if let Some(oid) = owner {
-        for c in &mut wiki_chunks {
-            if c.document_id.is_nil() {
-                c.document_id = oid;
-            }
+        .collect::<Vec<_>>();
+    for chunk in &mut wiki_chunks {
+        if chunk.document_id.is_nil() {
+            chunk.document_id = document_id;
         }
     }
-    wiki_chunks.retain(|c| !c.document_id.is_nil());
-    if wiki_chunks.is_empty() {
-        return Ok(());
-    }
-    let slugs: Vec<String> = wiki_chunks
+    let wiki_embeddings = wiki_chunks
         .iter()
-        .map(|c| c.context_header.clone())
-        .collect();
-    let owner_ids: std::collections::HashSet<_> =
-        wiki_chunks.iter().map(|c| c.document_id).collect();
-    let wiki_emb: Vec<_> = wiki_chunks
-        .iter()
-        .filter_map(|c| {
-            let mut e = store.embeddings.get(&c.id).cloned()?;
-            if e.document_id.is_nil() && owner_ids.contains(&c.document_id) {
-                e.document_id = c.document_id;
+        .filter_map(|chunk| {
+            let mut embedding = store.embeddings.get(&chunk.id).cloned()?;
+            if embedding.document_id.is_nil() {
+                embedding.document_id = chunk.document_id;
             }
-            Some(e)
+            Some(embedding)
         })
-        .collect();
-    crate::replace_wiki_page_chunks(pool, version_id, &slugs, &wiki_chunks, &wiki_emb)
-        .await
-        .map_err(|e| e.to_string())
+        .collect::<Vec<_>>();
+    crate::persist_wiki_changes_atomic(
+        pool,
+        version_id,
+        &changed_pages,
+        &removed_page_ids,
+        &changed_folders,
+        &removed_folder_ids,
+        &changed_slugs.into_iter().collect::<Vec<_>>(),
+        &wiki_chunks,
+        &wiki_embeddings,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 async fn schedule_semantic_index_for_document_v2(
@@ -1166,12 +1119,16 @@ pub async fn run_list_delete(pool: &PgPool, document_id: Uuid) -> Result<(), Str
             .await
             .map_err(|e| e.to_string())?;
     if let Some(vid) = vid {
-        let _ = crate::delete_wiki_for_document(pool, vid, document_id).await;
-        let _ = crate::graph::delete_document(vid, document_id);
+        run_wiki_ingest(pool, vid, document_id, crate::wiki::OP_RETRACT).await?;
+        crate::graph::delete_document(vid, document_id)?;
     }
-    let _ = crate::purge_document_index(pool, document_id).await;
-    let _ = platform::enqueue_index_delete(document_id).await;
-    platform::release_knowledge_document_object(
+    crate::purge_document_index(pool, document_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    platform::enqueue_index_delete(document_id)
+        .await?
+        .ok_or_else(|| "Oxana Redis is not configured for index deletion".to_string())?;
+    let deletion = platform::release_knowledge_document_object(
         pool,
         document_id,
         "system:knowledge-document-delete",
@@ -1179,6 +1136,9 @@ pub async fn run_list_delete(pool: &PgPool, document_id: Uuid) -> Result<(), Str
     )
     .await
     .map_err(|e| e.to_string())?;
+    if let Some(deletion) = deletion {
+        platform::dispatch_object_deletion(pool, deletion).await?;
+    }
     let _ = ws;
     Ok(())
 }

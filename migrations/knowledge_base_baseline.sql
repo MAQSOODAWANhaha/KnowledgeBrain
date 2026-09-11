@@ -130,30 +130,6 @@ CREATE TABLE document_processing_spans (
     PRIMARY KEY (document_id, attempt, name)
 );
 
-CREATE TABLE task_pending_ops (
-    id uuid PRIMARY KEY,
-    task_type text NOT NULL,
-    scope text NOT NULL,
-    scope_id uuid NOT NULL,
-    op text NOT NULL,
-    dedup_key text,
-    payload jsonb,
-    fail_count integer NOT NULL DEFAULT 0,
-    enqueued_at timestamptz NOT NULL DEFAULT now(),
-    claimed_at timestamptz
-);
-CREATE TABLE task_dead_letters (
-    id uuid PRIMARY KEY,
-    task_type text NOT NULL,
-    scope text NOT NULL,
-    scope_id uuid,
-    related_id uuid,
-    payload jsonb,
-    last_error text,
-    fail_count integer NOT NULL DEFAULT 0,
-    failed_at timestamptz NOT NULL DEFAULT now()
-);
-
 CREATE TABLE models (
     id text PRIMARY KEY,
     kind text NOT NULL CHECK (kind IN ('embedding', 'chat', 'vlm', 'asr')),
@@ -212,7 +188,10 @@ CREATE TABLE knowledge_image_artifact_revisions (
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE(id,product_version_id,document_id),
     UNIQUE(id,object_ref,content_sha256,media_type,object_state),
+    UNIQUE NULLS NOT DISTINCT(id,object_ref,content_sha256,media_type,object_state,width,height,page_ordinal,bounding_region),
     FOREIGN KEY(document_id,product_version_id) REFERENCES documents(id,product_version_id),
+    FOREIGN KEY(object_ref,content_sha256,media_type,object_state)
+      REFERENCES object_registry(object_ref,digest,media_type,state),
     CHECK (object_ref='objects/'||content_sha256),
     CHECK (artifact_sha256=encode(public.digest(canonical_payload,'sha256'),'hex')),
     CHECK (bounding_region IS NULL OR jsonb_typeof(bounding_region)='object')
@@ -504,6 +483,7 @@ CREATE TABLE knowledge_matching_scope_attestations_v2 (
     content_sha256 text NOT NULL CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE(id,content_sha256),
     CHECK (content_sha256=encode(public.digest(canonical_payload,'sha256'),'hex'))
 );
 REVOKE ALL ON TABLE knowledge_matching_scope_attestations_v2 FROM PUBLIC;
@@ -1185,6 +1165,60 @@ SELECT policy.canonical_policy_payload,
 $$;
 REVOKE ALL ON FUNCTION kb_knowledge_lock_semantic_policy_v2(text) FROM PUBLIC;
 
+-- Resolve the mutable supported/current selectors exactly once while creating a
+-- retrieval-bearing business Request. The caller persists these bytes and IDs;
+-- execution must never call this function again.
+CREATE FUNCTION kb_knowledge_freeze_retrieval_identity_v1()
+RETURNS jsonb
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+WITH selected AS (
+  SELECT policy.*,embedding.canonical_revision_payload AS embedding_payload,
+         embedding.credential_ref AS embedding_credential_ref,
+         reranker.canonical_revision_payload AS rerank_payload,
+         reranker.credential_ref AS rerank_credential_ref
+  FROM public.knowledge_retrieval_policies_v2 policy
+  JOIN public.embedding_revisions_v2 embedding
+    ON embedding.revision_sha256=policy.embedding_revision_sha256
+  JOIN public.rerank_revisions_v2 reranker
+    ON reranker.revision_sha256=policy.rerank_revision_sha256
+  WHERE policy.support_state='supported' AND embedding.support_state='supported'
+    AND reranker.support_state='supported'
+  ORDER BY policy.created_at DESC,policy.policy_sha256
+  LIMIT 1
+), scope AS (
+  SELECT coalesce(jsonb_agg(pv.id ORDER BY pv.id) FILTER (WHERE product.kind='product'),'[]'::jsonb)
+           AS product_version_ids,
+         coalesce(jsonb_agg(pv.id ORDER BY pv.id) FILTER (WHERE product.kind='library'),'[]'::jsonb)
+           AS library_version_ids
+  FROM public.workspaces workspace
+  JOIN public.products product ON product.workspace_id=workspace.id
+  JOIN public.product_versions pv ON pv.product_id=product.id
+    AND product.current_version_id=pv.id
+  WHERE pv.status='active' AND pv.deleted_at IS NULL
+    AND ((workspace.kind='product_line' AND product.kind='product')
+      OR (workspace.kind='company' AND product.kind='library'))
+)
+SELECT jsonb_build_object(
+  'schema_version',1,'policy_sha256',selected.policy_sha256,
+  'canonical_policy_utf8',convert_from(selected.canonical_policy_payload,'UTF8'),
+  'contract_version',selected.contract_version,'mode','exact',
+  'max_hits',selected.max_hits,'max_chunk_bytes',selected.max_chunk_bytes,
+  'max_total_bytes',selected.max_total_bytes,
+  'embedding_revision_sha256',selected.embedding_revision_sha256,
+  'canonical_embedding_revision_utf8',convert_from(selected.embedding_payload,'UTF8'),
+  'embedding_credential_ref',selected.embedding_credential_ref,
+  'rerank_revision_sha256',selected.rerank_revision_sha256,
+  'canonical_rerank_revision_utf8',convert_from(selected.rerank_payload,'UTF8'),
+  'rerank_credential_ref',selected.rerank_credential_ref,
+  'product_version_ids',scope.product_version_ids,
+  'library_version_ids',scope.library_version_ids)
+FROM selected CROSS JOIN scope
+$$;
+REVOKE ALL ON FUNCTION kb_knowledge_freeze_retrieval_identity_v1() FROM PUBLIC;
+
 CREATE TABLE product_version_embedding_bindings_v2 (
     product_version_id uuid PRIMARY KEY REFERENCES product_versions(id) ON DELETE CASCADE,
     embedding_revision_sha256 text NOT NULL REFERENCES embedding_revisions_v2(revision_sha256),
@@ -1644,10 +1678,6 @@ AS $$
               AND (document.parse_status IN ('pending','processing','finalizing')
                    OR document.pending_subtasks_count<>0
                    OR document.summary_status IN ('pending','processing')))
-      OR EXISTS(
-           SELECT 1 FROM public.task_pending_ops pending
-            WHERE pending.scope='product_version'
-              AND pending.scope_id=p_product_version_id)
 $$;
 REVOKE ALL ON FUNCTION kb_knowledge_has_pending_derived_v2(uuid) FROM PUBLIC;
 
@@ -1689,9 +1719,6 @@ BEGIN
     PERFORM chunk.id FROM public.chunks chunk
      WHERE chunk.product_version_id=p_product_version_id
      ORDER BY chunk.id FOR UPDATE;
-    PERFORM pending.id FROM public.task_pending_ops pending
-     WHERE pending.scope='product_version' AND pending.scope_id=p_product_version_id
-     ORDER BY pending.id FOR UPDATE;
 
     IF public.kb_knowledge_has_pending_derived_v2(p_product_version_id) THEN
         RETURN QUERY SELECT 'pending_derived'::text,NULL::uuid,NULL::bigint;
@@ -1830,10 +1857,6 @@ BEGIN
     PERFORM chunk.id FROM public.chunks chunk
      WHERE chunk.product_version_id=intent_value.product_version_id
      ORDER BY chunk.id FOR UPDATE;
-    PERFORM pending.id FROM public.task_pending_ops pending
-     WHERE pending.scope='product_version'
-       AND pending.scope_id=intent_value.product_version_id
-     ORDER BY pending.id FOR UPDATE;
     IF public.kb_knowledge_has_pending_derived_v2(intent_value.product_version_id) THEN
         RETURN 'pending_derived';
     END IF;
@@ -1888,9 +1911,6 @@ BEGIN
     PERFORM chunk.id FROM public.chunks chunk
      WHERE chunk.product_version_id=p_product_version_id
      ORDER BY chunk.id FOR UPDATE;
-    PERFORM pending.id FROM public.task_pending_ops pending
-     WHERE pending.scope='product_version' AND pending.scope_id=p_product_version_id
-     ORDER BY pending.id FOR UPDATE;
     IF public.kb_knowledge_has_pending_derived_v2(p_product_version_id) THEN
         RAISE EXCEPTION 'KNOWLEDGE_SEMANTIC_INDEX_V2_PENDING_DERIVED' USING ERRCODE='40001';
     END IF;
@@ -1995,10 +2015,6 @@ BEGIN
     PERFORM chunk.id FROM public.chunks chunk
      WHERE chunk.product_version_id=intent_value.product_version_id
      ORDER BY chunk.id FOR UPDATE;
-    PERFORM pending.id FROM public.task_pending_ops pending
-     WHERE pending.scope='product_version'
-       AND pending.scope_id=intent_value.product_version_id
-     ORDER BY pending.id FOR UPDATE;
     IF public.kb_knowledge_has_pending_derived_v2(intent_value.product_version_id) THEN
         RETURN 'pending_derived';
     END IF;
@@ -2299,9 +2315,7 @@ BEGIN
             OR workspace_value.kind IS DISTINCT FROM selection.kind
             OR (selection.kind='product_line' AND product.kind IS DISTINCT FROM 'product')
             OR (selection.kind='company' AND product.kind IS DISTINCT FROM 'library')
-            OR version_value.status IS DISTINCT FROM 'active'
-            OR version_value.deleted_at IS NOT NULL
-            OR product.current_version_id IS DISTINCT FROM version_value.id) THEN
+            OR version_value.deleted_at IS NOT NULL) THEN
         RAISE EXCEPTION 'KNOWLEDGE_MATCHING_SCOPE_V2_MISMATCH' USING ERRCODE='23514';
     END IF;
 
@@ -2322,9 +2336,7 @@ BEGIN
                 AND NOT (version_value.id=ANY(p_product_line_versions)))
             OR (workspace_value.kind='company' AND cardinality(p_company_versions)>0
                 AND NOT (version_value.id=ANY(p_company_versions)))
-            OR version_value.status IS DISTINCT FROM 'active'
             OR version_value.deleted_at IS NOT NULL
-            OR product.current_version_id IS DISTINCT FROM version_value.id
             OR artifact->>'frozen_display_name' IS DISTINCT FROM version_value.id::text
             OR artifact->>'identity_sha256' IS DISTINCT FROM encode(public.digest(convert_to(
                 'ProductVersionEvidenceV1:'||product.id::text||':'||version_value.id::text||':'
@@ -2336,28 +2348,15 @@ BEGIN
           SELECT 1 FROM jsonb_array_elements(p_products) artifact
            GROUP BY artifact->>'product_version_id' HAVING count(*)<>1)
        OR EXISTS (
-        SELECT 1
-          FROM workspaces workspace_value
-          JOIN products product ON product.workspace_id=workspace_value.id
-          JOIN product_versions version_value
-            ON version_value.product_id=product.id
-           AND product.current_version_id=version_value.id
-         WHERE workspace_value.kind=ANY(p_workspace_kinds)
-           AND version_value.status='active'
-           AND version_value.deleted_at IS NULL
-           AND ((workspace_value.kind='product_line' AND product.kind='product')
-             OR (workspace_value.kind='company' AND product.kind='library'))
-           AND ((workspace_value.kind='product_line'
-                 AND (cardinality(p_product_line_versions)=0
-                      OR version_value.id=ANY(p_product_line_versions)))
-             OR (workspace_value.kind='company'
-                 AND (cardinality(p_company_versions)=0
-                      OR version_value.id=ANY(p_company_versions))))
-           AND NOT EXISTS (
-               SELECT 1 FROM jsonb_array_elements(p_products) artifact
-                WHERE (artifact->>'product_id')::uuid=product.id
-                  AND (artifact->>'product_version_id')::uuid=version_value.id
-                  AND artifact->>'workspace_kind'=workspace_value.kind)) THEN
+        SELECT 1 FROM (
+          SELECT 'product_line'::text AS kind,version_id FROM unnest(p_product_line_versions) version_id
+          UNION ALL
+          SELECT 'company'::text AS kind,version_id FROM unnest(p_company_versions) version_id
+        ) selection
+        WHERE NOT EXISTS (
+          SELECT 1 FROM jsonb_array_elements(p_products) artifact
+          WHERE (artifact->>'product_version_id')::uuid=selection.version_id
+            AND artifact->>'workspace_kind'=selection.kind)) THEN
         RAISE EXCEPTION 'KNOWLEDGE_MATCHING_SCOPE_V2_MISMATCH' USING ERRCODE='23514';
     END IF;
 
@@ -2752,13 +2751,203 @@ CREATE TABLE wiki_log_entries (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
--- Knowledge-base runtime DML is intentionally unchanged. Platform-owned object,
--- idempotency, audit, and retention tables are introduced by the next slice and
--- are never granted here.
+-- Knowledge-owned ObjectRegistry integration. Child ownership follows the
+-- documents and knowledge_image_artifact_revisions relations in this slice.
+CREATE FUNCTION kb_register_knowledge_image_object(
+    p_image_artifact_revision_id uuid,p_object_ref kb_object_ref,p_digest kb_sha256,
+    p_media_type text,p_byte_length bigint,p_actor kb_actor_identity
+) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+    IF p_media_type NOT IN ('image/png','image/jpeg','image/webp') OR p_byte_length<=0 THEN
+      RAISE EXCEPTION 'knowledge image object metadata invalid' USING ERRCODE='23514';
+    END IF;
+    PERFORM kb_object_reference_add(p_object_ref,p_digest,p_media_type,p_byte_length,
+      'knowledge_image_artifact',p_image_artifact_revision_id,'source-media',p_actor);
+END $$;
+
+CREATE FUNCTION kb_register_knowledge_document_object(
+    p_document_id uuid,
+    p_media_type text,
+    p_actor kb_actor_identity,
+    p_idempotency_key text,
+    p_audit_id uuid
+)
+RETURNS kb_object_ref
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    doc documents%ROWTYPE;
+    request_bytes bytea;
+    replay record;
+    response_bytes bytea;
+BEGIN
+    SELECT * INTO STRICT doc FROM documents WHERE id = p_document_id FOR SHARE;
+    request_bytes := convert_to(jsonb_build_object(
+        'schema_version', 1, 'document_id', p_document_id, 'object_ref', doc.object_ref,
+        'digest', doc.file_hash, 'media_type', p_media_type, 'byte_length', doc.file_size
+    )::text, 'UTF8');
+    SELECT * INTO replay FROM kb_begin_intent(
+        p_actor, 'knowledge.document.object.register', p_idempotency_key, request_bytes
+    );
+    IF replay.replayed THEN
+        RETURN convert_from(replay.response_bytes, 'UTF8')::kb_object_ref;
+    END IF;
+
+    PERFORM kb_object_reference_add(
+        doc.object_ref, doc.file_hash, p_media_type, doc.file_size,
+        'knowledge_document', p_document_id, 'original', p_actor
+    );
+
+    response_bytes := convert_to(doc.object_ref::text, 'UTF8');
+    INSERT INTO audit_events(
+        id, schema_version, operation, actor_identity, idempotency_key,
+        request_sha256, response_sha256, entity_kind, entity_locator,
+        after_revision, after_sha256
+    ) VALUES (
+        p_audit_id, 1, 'knowledge.document.object.register', p_actor, p_idempotency_key,
+        encode(digest(request_bytes, 'sha256'), 'hex'),
+        encode(digest(response_bytes, 'sha256'), 'hex'),
+        'knowledge_document', jsonb_build_object('document_id', p_document_id),
+        1, doc.file_hash
+    );
+    PERFORM kb_complete_intent(
+        p_actor, 'knowledge.document.object.register', p_idempotency_key, 200, response_bytes
+    );
+    RETURN doc.object_ref;
+END
+$$;
+
+CREATE FUNCTION kb_release_knowledge_document_object(
+    p_document_id uuid,
+    p_actor kb_actor_identity,
+    p_idempotency_key text,
+    p_audit_id uuid
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    doc documents%ROWTYPE;
+    request_bytes bytea;
+    replay record;
+    response_bytes bytea;
+    deletion jsonb;
+BEGIN
+    SELECT * INTO STRICT doc FROM documents WHERE id = p_document_id FOR SHARE;
+    request_bytes := convert_to(jsonb_build_object(
+        'schema_version', 1, 'document_id', p_document_id, 'object_ref', doc.object_ref
+    )::text, 'UTF8');
+    SELECT * INTO replay FROM kb_begin_intent(
+        p_actor, 'knowledge.document.object.release', p_idempotency_key, request_bytes
+    );
+    IF replay.replayed THEN
+        RETURN convert_from(replay.response_bytes, 'UTF8')::jsonb;
+    END IF;
+
+    deletion := kb_object_reference_remove(
+        doc.object_ref, 'knowledge_document', p_document_id, 'original', p_audit_id
+    );
+    UPDATE documents
+       SET deleted_at = COALESCE(deleted_at, clock_timestamp()), updated_at = clock_timestamp()
+     WHERE id = p_document_id;
+
+    response_bytes := convert_to(coalesce(deletion, 'null'::jsonb)::text, 'UTF8');
+    INSERT INTO audit_events(
+        id, schema_version, operation, actor_identity, idempotency_key,
+        request_sha256, response_sha256, entity_kind, entity_locator,
+        before_revision, before_sha256
+    ) VALUES (
+        p_audit_id, 1, 'knowledge.document.object.release', p_actor, p_idempotency_key,
+        encode(digest(request_bytes, 'sha256'), 'hex'),
+        encode(digest(response_bytes, 'sha256'), 'hex'),
+        'knowledge_document', jsonb_build_object('document_id', p_document_id),
+        1, doc.file_hash
+    );
+    PERFORM kb_complete_intent(
+        p_actor, 'knowledge.document.object.release', p_idempotency_key, 200, response_bytes
+    );
+    RETURN deletion;
+END
+$$;
+
+CREATE FUNCTION kb_validate_knowledge_document_object_reference()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+    IF NEW.deleted_at IS NULL AND NOT EXISTS (
+        SELECT 1
+          FROM object_registry registry
+          JOIN object_owner_references reference_value
+            ON reference_value.object_ref = registry.object_ref
+         WHERE registry.object_ref = NEW.object_ref
+           AND registry.digest = NEW.file_hash
+           AND registry.byte_length = NEW.file_size
+           AND registry.state = 'available'
+           AND reference_value.owner_kind = 'knowledge_document'
+           AND reference_value.owner_id = NEW.id
+           AND reference_value.occurrence = 'original'
+    ) THEN
+        RAISE EXCEPTION 'knowledge document object reference is absent or unavailable'
+            USING ERRCODE = '23514';
+    ELSIF NEW.deleted_at IS NOT NULL AND EXISTS (
+        SELECT 1 FROM object_owner_references reference_value
+         WHERE reference_value.object_ref = NEW.object_ref
+           AND reference_value.owner_kind = 'knowledge_document'
+           AND reference_value.owner_id = NEW.id
+    ) THEN
+        RAISE EXCEPTION 'deleted knowledge document still owns an object reference'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE CONSTRAINT TRIGGER documents_object_reference_contract
+AFTER INSERT OR UPDATE OF object_ref, file_hash, file_size, deleted_at ON documents
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION kb_validate_knowledge_document_object_reference();
+
+CREATE FUNCTION kb_guard_knowledge_document_delete()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM object_owner_references reference_value
+         WHERE reference_value.owner_kind = 'knowledge_document'
+           AND reference_value.owner_id = OLD.id
+    ) THEN
+        RAISE EXCEPTION 'knowledge document cannot be deleted while it owns an object reference'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN OLD;
+END
+$$;
+CREATE TRIGGER documents_object_reference_delete_guard
+BEFORE DELETE ON documents
+FOR EACH ROW EXECUTE FUNCTION kb_guard_knowledge_document_delete();
+
+GRANT EXECUTE ON FUNCTION kb_register_knowledge_document_object(uuid, text, kb_actor_identity, text, uuid),
+    kb_release_knowledge_document_object(uuid, kb_actor_identity, text, uuid)
+TO kb_runtime_api, kb_runtime_worker;
+GRANT EXECUTE ON FUNCTION kb_register_knowledge_image_object(uuid,kb_object_ref,kb_sha256,text,bigint,kb_actor_identity)
+TO kb_runtime_worker;
+
+-- Knowledge-base runtime DML remains domain-owned. Platform-owned object,
+-- idempotency, audit, and retention tables were created by the preceding Shared
+-- slice and are exposed here only through the checked integration functions.
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
     workspaces, users, workspace_members, products, product_versions, documents,
-    tags, document_tags, document_processing_spans, task_pending_ops, task_dead_letters,
+    tags, document_tags, document_processing_spans,
     models, api_keys, chunks, chunk_embeddings, graph_nodes, graph_relations,
     wiki_pages, wiki_folders, wiki_log_entries
 TO kb_runtime_api, kb_runtime_worker;
@@ -2791,7 +2980,8 @@ GRANT EXECUTE ON FUNCTION kb_knowledge_rebuild_keyword_indexes_v2(uuid),
 TO kb_runtime_worker;
 GRANT EXECUTE ON FUNCTION kb_knowledge_keyword_token_stream_v2(text),
     kb_knowledge_lock_semantic_policy_v2(text),
-    kb_knowledge_lock_rerank_revision_v2(text)
+    kb_knowledge_lock_rerank_revision_v2(text),
+    kb_knowledge_freeze_retrieval_identity_v1()
 TO kb_runtime_api, kb_runtime_worker;
 GRANT EXECUTE ON FUNCTION kb_knowledge_attest_matching_scope_v2(jsonb),
     kb_knowledge_verify_matching_scope_v2(uuid,text,jsonb),

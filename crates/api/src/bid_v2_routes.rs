@@ -7,16 +7,15 @@ use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, Multipart, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
-use platform::{
-    BidAuthoringJobPayloadV2, BidAuthoringRequestIdentityV2, ContentGenerateOperationV2,
-    SubmissionOutputModeV2,
-};
+use platform::{BidAuthoringJobPayloadV2, BidAuthoringRequestIdentityV2};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+mod docx;
 
 #[derive(Debug)]
 struct BidJson<T>(T);
@@ -54,6 +53,7 @@ fn map_bid_json_rejection(error: JsonRejection) -> ApiErr {
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .merge(docx::router())
         .route(
             "/api/v2/bid-projects",
             get(list_projects).post(create_project),
@@ -141,10 +141,6 @@ pub fn router() -> Router<AppState> {
             post(apply_quote_snapshot),
         )
         .route(
-            "/api/v2/submission-workspaces/{workspace_id}/outline-candidates",
-            post(create_outline_candidate),
-        )
-        .route(
             "/api/v2/submission-workspaces/{workspace_id}/content-candidates",
             post(create_content_candidate),
         )
@@ -179,10 +175,6 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v2/submission-workspaces/{workspace_id}/preview",
             get(get_preview_html),
-        )
-        .route(
-            "/api/v2/submission-workspaces/{workspace_id}/outline-checkpoints",
-            post(create_outline_checkpoint),
         )
         .route(
             "/api/v2/submission-workspaces/{workspace_id}/assets",
@@ -300,11 +292,16 @@ async fn human_actor(headers: &HeaderMap, state: &AppState) -> Result<(Uuid, Str
     Ok((user_id, durable))
 }
 
-async fn enqueue(
+async fn enqueue_with<F, Fut>(
     request: &BidAuthoringRequestIdentityV2,
     request_sha256: Option<&str>,
     payload: BidAuthoringJobPayloadV2,
-) -> Result<(), ApiErr> {
+    transport: F,
+) -> Result<(), ApiErr>
+where
+    F: FnOnce(BidAuthoringJobPayloadV2) -> Fut,
+    Fut: std::future::Future<Output = Result<bool, String>>,
+{
     let details = || {
         json!({
             "request_artifact_id": request.request_artifact_id,
@@ -314,9 +311,9 @@ async fn enqueue(
             "retry_same_idempotency_key": true
         })
     };
-    match platform::enqueue_bid_authoring_v2(payload).await {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(fail_with_details(
+    match transport(payload).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(fail_with_details(
             StatusCode::SERVICE_UNAVAILABLE,
             "QUEUE_UNAVAILABLE",
             "request committed; retry with the same Idempotency-Key",
@@ -331,28 +328,57 @@ async fn enqueue(
     }
 }
 
-async fn enqueue_if_pending(
-    pool: &sqlx::PgPool,
-    committed_request: &Value,
+async fn enqueue(
+    request: &BidAuthoringRequestIdentityV2,
+    request_sha256: Option<&str>,
     payload: BidAuthoringJobPayloadV2,
 ) -> Result<(), ApiErr> {
-    let request = request_identity(committed_request)?;
-    let status =
-        bidding::bid_authoring_v2::async_request_status_v2(pool, request.request_artifact_id)
+    enqueue_with(request, request_sha256, payload, |payload| async move {
+        platform::enqueue_bid_authoring_v2(payload)
             .await
-            .map_err(map_sql)?;
-    if status.as_deref() == Some("pending") {
-        enqueue(
-            &request,
-            committed_request
-                .get("request_sha256")
-                .and_then(Value::as_str),
-            payload,
-        )
-        .await
-    } else {
-        Ok(())
+            .map(|job| job.is_some())
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+fn frozen_request_payload(
+    frozen: &Value,
+    expected_request: &BidAuthoringRequestIdentityV2,
+) -> Result<BidAuthoringJobPayloadV2, ApiErr> {
+    let payload: BidAuthoringJobPayloadV2 = serde_json::from_value(
+        frozen
+            .get("job_payload")
+            .cloned()
+            .ok_or_else(|| validation("frozen Request job_payload missing"))?,
+    )
+    .map_err(|_| validation("frozen Request job_payload is invalid"))?;
+    payload
+        .validate()
+        .map_err(|_| validation("frozen Request job_payload identity is invalid"))?;
+    if payload.request() != expected_request
+        || frozen.get("request_kind").and_then(Value::as_str) != Some(payload.kind().as_str())
+    {
+        return Err(validation("frozen Request job_payload identity mismatch"));
     }
+    Ok(payload)
+}
+
+async fn enqueue_if_pending(pool: &sqlx::PgPool, committed_request: &Value) -> Result<(), ApiErr> {
+    let request = request_identity(committed_request)?;
+    let frozen = bidding::bid_authoring_v2::load_authoring_job_payload_v2(pool, &request)
+        .await
+        .map_err(map_sql)?;
+    if frozen.get("status").and_then(Value::as_str) != Some("pending") {
+        return Ok(());
+    }
+    let payload = frozen_request_payload(&frozen, &request)?;
+    enqueue(
+        &request,
+        frozen.get("request_sha256").and_then(Value::as_str),
+        payload,
+    )
+    .await
 }
 
 fn request_identity(value: &Value) -> Result<BidAuthoringRequestIdentityV2, ApiErr> {
@@ -542,7 +568,7 @@ async fn publish_quote_snapshot(
     let value = match result {
         Ok(value) => value,
         Err(error) => {
-            let _ = platform::abandon_object_upload(&pool, staging_id, &actor).await;
+            schedule_staging_cleanup_required(staging_id).await?;
             return Err(map_sql(error));
         }
     };
@@ -551,9 +577,23 @@ async fn publish_quote_snapshot(
         .and_then(Value::as_str)
         .and_then(|raw| Uuid::parse_str(raw).ok());
     if persisted_snapshot_id != Some(snapshot_id) {
-        let _ = platform::abandon_object_upload(&pool, staging_id, &actor).await;
+        schedule_staging_cleanup_required(staging_id).await?;
     }
     Ok((StatusCode::CREATED, Json(value)))
+}
+
+async fn schedule_staging_cleanup_required(staging_id: Uuid) -> Result<(), ApiErr> {
+    platform::schedule_object_upload_cleanup(staging_id)
+        .await
+        .map_err(|error| {
+            fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "QUEUE_UNAVAILABLE",
+                format!(
+                    "staged object cleanup could not be queued; retry the same request: {error}"
+                ),
+            )
+        })
 }
 
 async fn stage_upload(
@@ -578,7 +618,7 @@ async fn stage_upload(
     .await
     .map_err(map_sql)?;
     if let Err(error) = platform::write_blob_async(digest, bytes).await {
-        let _ = platform::abandon_object_upload(pool, staging_id, actor).await;
+        schedule_staging_cleanup_required(staging_id).await?;
         tracing::error!(%error, %object_ref, "bidding V2 object write failed");
         return Err(fail(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -682,28 +722,18 @@ async fn upload_tender_document(
     )
     .await;
     if result.is_err() {
-        let _ = platform::abandon_object_upload(&pool, staging_id, &actor).await;
+        schedule_staging_cleanup_required(staging_id).await?;
     }
     let value = result.map_err(map_sql)?;
-    let request = request_identity(&value)?;
     let persisted_document_id = value
         .get("id")
         .and_then(Value::as_str)
         .and_then(|value| Uuid::parse_str(value).ok())
         .ok_or_else(|| validation("document id missing"))?;
     if persisted_document_id != document_id {
-        let _ = platform::abandon_object_upload(&pool, staging_id, &actor).await;
+        schedule_staging_cleanup_required(staging_id).await?;
     }
-    enqueue_if_pending(
-        &pool,
-        &value,
-        BidAuthoringJobPayloadV2::TenderDocumentProcess {
-            request: request.clone(),
-            project_id: id,
-            document_revision_id: persisted_document_id,
-        },
-    )
-    .await?;
+    enqueue_if_pending(&pool, &value).await?;
     Ok((StatusCode::CREATED, Json(value)))
 }
 
@@ -735,17 +765,7 @@ async fn retry_tender_document(
     )
     .await
     .map_err(map_sql)?;
-    let request = request_identity(&value)?;
-    enqueue_if_pending(
-        &pool,
-        &value,
-        BidAuthoringJobPayloadV2::TenderDocumentProcess {
-            request: request.clone(),
-            project_id: id,
-            document_revision_id: document_id,
-        },
-    )
-    .await?;
+    enqueue_if_pending(&pool, &value).await?;
     Ok((StatusCode::ACCEPTED, Json(value)))
 }
 
@@ -961,14 +981,6 @@ struct PublishRequirementSupersessionBody {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OutlineGenerateBody {
-    expected_workspace_revision_id: Uuid,
-    document_set_revision_id: Uuid,
-    document_set_sha256: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct WholeBlockInsertionAnchor {
     node_revision_id: Uuid,
     #[serde(default)]
@@ -1051,15 +1063,6 @@ struct AcceptCandidateBody {
     expected_workspace_sha256: String,
     #[serde(default)]
     operation_indexes: Vec<usize>,
-    #[serde(default)]
-    client_node_refs: Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateOutlineCheckpointBody {
-    expected_workspace_revision_id: Uuid,
-    expected_workspace_sha256: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1112,28 +1115,7 @@ async fn freeze_document_set(
     )
     .await
     .map_err(map_sql)?;
-    let request = request_identity(&value)?;
-    let document_set_revision_id = value
-        .get("artifact_id")
-        .and_then(Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .ok_or_else(|| validation("document set artifact id missing"))?;
-    let disposition_set_revision_id = value
-        .get("disposition_set_artifact_id")
-        .and_then(Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .ok_or_else(|| validation("disposition set artifact id missing"))?;
-    enqueue_if_pending(
-        &pool,
-        &value,
-        BidAuthoringJobPayloadV2::RequirementSetCompile {
-            request: request.clone(),
-            project_id: id,
-            document_set_revision_id,
-            disposition_set_revision_id,
-        },
-    )
-    .await?;
+    enqueue_if_pending(&pool, &value).await?;
     Ok((StatusCode::CREATED, Json(value)))
 }
 
@@ -1158,23 +1140,7 @@ async fn publish_disposition_set(
     )
     .await
     .map_err(map_sql)?;
-    let request = request_identity(&value)?;
-    let disposition_set_revision_id = value
-        .get("artifact_id")
-        .and_then(Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .ok_or_else(|| validation("disposition set artifact id missing"))?;
-    enqueue_if_pending(
-        &pool,
-        &value,
-        BidAuthoringJobPayloadV2::RequirementSetCompile {
-            request: request.clone(),
-            project_id: id,
-            document_set_revision_id: body.document_set_revision_id,
-            disposition_set_revision_id,
-        },
-    )
-    .await?;
+    enqueue_if_pending(&pool, &value).await?;
     Ok((StatusCode::CREATED, Json(value)))
 }
 
@@ -1442,79 +1408,30 @@ fn required_if_match<'a>(headers: &'a HeaderMap, expected: &str) -> Result<&'a s
     Ok(value)
 }
 
-async fn create_outline_candidate(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(workspace_id): Path<Uuid>,
-    BidJson(body): BidJson<OutlineGenerateBody>,
-) -> Result<(StatusCode, Json<Value>), ApiErr> {
-    let (_, actor) = human_actor(&headers, &state).await?;
-    let expected_sha256 = headers
-        .get("if-match")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.trim_matches('"'))
-        .ok_or_else(|| {
-            fail(
-                StatusCode::PRECONDITION_REQUIRED,
-                "IF_MATCH_REQUIRED",
-                "If-Match required",
-            )
-        })?;
-    let context = bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
-        .map_err(|error| validation(&error.to_string()))?;
-    let pool = require_bid_pool().await?;
-    let request = bidding::bid_authoring_v2::create_outline_candidate_v2(
-        &pool,
-        workspace_id,
-        body.expected_workspace_revision_id,
-        expected_sha256,
-        body.document_set_revision_id,
-        &body.document_set_sha256,
-        &context,
-    )
-    .await
-    .map_err(map_sql)?;
-    let identity = request_identity(&request)?;
-    enqueue_if_pending(
-        &pool,
-        &request,
-        BidAuthoringJobPayloadV2::OutlineGenerate {
-            request: identity.clone(),
-            project_id: value_uuid(&request, "project_id")?,
-            workspace_id: value_uuid(&request, "workspace_id")?,
-            base_workspace_revision_id: value_uuid(&request, "base_workspace_revision_id")?,
-        },
-    )
-    .await?;
-    Ok((StatusCode::ACCEPTED, Json(request)))
+async fn enqueue_content_request(pool: &sqlx::PgPool, request: &Value) -> Result<(), ApiErr> {
+    enqueue_if_pending(pool, request).await
 }
 
-fn value_uuid(value: &Value, key: &str) -> Result<Uuid, ApiErr> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-        .ok_or_else(|| validation("required request identity missing"))
+fn content_generate_mutation_envelope(
+    workspace_id: Uuid,
+    expected_revision_id: Uuid,
+    expected_sha256: &str,
+    body: &ContentGenerateBody,
+) -> Value {
+    json!({"operation":"content_generate","workspace_id":workspace_id,
+        "if_match":{"revision_id":expected_revision_id,"sha256":expected_sha256},"request":body})
 }
 
-async fn enqueue_content_request(
-    pool: &sqlx::PgPool,
-    request: &Value,
-    operation: ContentGenerateOperationV2,
-) -> Result<(), ApiErr> {
-    let identity = request_identity(request)?;
-    enqueue_if_pending(
-        pool,
-        request,
-        BidAuthoringJobPayloadV2::ContentGenerate {
-            request: identity.clone(),
-            project_id: value_uuid(request, "project_id")?,
-            workspace_id: value_uuid(request, "workspace_id")?,
-            base_workspace_revision_id: value_uuid(request, "base_workspace_revision_id")?,
-            operation,
-        },
-    )
-    .await
+fn evidence_match_mutation_envelope(
+    workspace_id: Uuid,
+    node_lineage_id: Uuid,
+    expected_revision_id: Uuid,
+    expected_sha256: &str,
+    body: &EvidenceMatchBody,
+) -> Value {
+    json!({"operation":"evidence_match","workspace_id":workspace_id,
+        "node_lineage_id":node_lineage_id,
+        "if_match":{"revision_id":expected_revision_id,"sha256":expected_sha256},"request":body})
 }
 
 async fn create_content_candidate(
@@ -1535,8 +1452,18 @@ async fn create_content_candidate(
                 "If-Match required",
             )
         })?;
-    let context = bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
-        .map_err(|error| validation(&error.to_string()))?;
+    let mutation_envelope = content_generate_mutation_envelope(
+        workspace_id,
+        body.expected_workspace_revision_id,
+        expected_sha256,
+        &body,
+    );
+    let context = bidding::MutationContext::new(
+        actor,
+        required_idempotency_key(&headers)?,
+        &mutation_envelope,
+    )
+    .map_err(|error| validation(&error.to_string()))?;
     let insertion_anchor = body
         .insertion_anchor
         .as_ref()
@@ -1544,6 +1471,45 @@ async fn create_content_candidate(
         .transpose()
         .map_err(|error| validation(&error.to_string()))?;
     let pool = require_bid_pool().await?;
+    if let Some(request) =
+        bidding::bid_authoring_v2::replay_content_request_v2(&pool, "generate", &context)
+            .await
+            .map_err(map_sql)?
+    {
+        enqueue_content_request(&pool, &request).await?;
+        return Ok((StatusCode::ACCEPTED, Json(request)));
+    }
+    let retrieval_identity = if body.selection_mode == "system_proposed" {
+        Some(
+            knowledge::knowledge_retrieval_pg::freeze_retrieval_policy_identity_v1(&pool)
+                .await
+                .map_err(|error| {
+                    fail(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTENT_RETRIEVAL_UNAVAILABLE",
+                        error.to_string(),
+                    )
+                })?
+                .ok_or_else(|| {
+                    fail(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "CONTENT_RETRIEVAL_UNAVAILABLE",
+                        "no supported retrieval policy",
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    let runtime_contract =
+        bidding::content_runtime::ContentAgentRuntimeContractV1::resolve_from_environment()
+            .map_err(|message| {
+                fail(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "AGENT_PROVIDER_UNAVAILABLE",
+                    message,
+                )
+            })?;
     let request = bidding::bid_authoring_v2::create_content_request_v2(
         &pool,
         bidding::bid_authoring_v2::CreateContentRequestV2 {
@@ -1557,12 +1523,14 @@ async fn create_content_candidate(
             insertion_anchor: insertion_anchor.as_ref(),
             evidence_selection_mode: &body.selection_mode,
             pick_set_artifact_id: body.pick_set_artifact_id,
+            retrieval_identity: retrieval_identity.as_ref(),
+            runtime_contract: Some(&runtime_contract),
         },
         &context,
     )
     .await
     .map_err(map_sql)?;
-    enqueue_content_request(&pool, &request, ContentGenerateOperationV2::Generate).await?;
+    enqueue_content_request(&pool, &request).await?;
     Ok((StatusCode::ACCEPTED, Json(request)))
 }
 
@@ -1799,9 +1767,45 @@ async fn match_evidence(
                 "If-Match required",
             )
         })?;
-    let context = bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &body)
-        .map_err(|error| validation(&error.to_string()))?;
+    let mutation_envelope = evidence_match_mutation_envelope(
+        workspace_id,
+        node_lineage_id,
+        body.expected_workspace_revision_id,
+        expected_sha256,
+        &body,
+    );
+    let context = bidding::MutationContext::new(
+        actor,
+        required_idempotency_key(&headers)?,
+        &mutation_envelope,
+    )
+    .map_err(|error| validation(&error.to_string()))?;
     let pool = require_bid_pool().await?;
+    if let Some(request) =
+        bidding::bid_authoring_v2::replay_content_request_v2(&pool, "match_only", &context)
+            .await
+            .map_err(map_sql)?
+    {
+        enqueue_content_request(&pool, &request).await?;
+        return Ok((StatusCode::ACCEPTED, Json(request)));
+    }
+    let retrieval_identity =
+        knowledge::knowledge_retrieval_pg::freeze_retrieval_policy_identity_v1(&pool)
+            .await
+            .map_err(|error| {
+                fail(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTENT_RETRIEVAL_UNAVAILABLE",
+                    error.to_string(),
+                )
+            })?
+            .ok_or_else(|| {
+                fail(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "CONTENT_RETRIEVAL_UNAVAILABLE",
+                    "no supported retrieval policy",
+                )
+            })?;
     let request = bidding::bid_authoring_v2::create_content_request_v2(
         &pool,
         bidding::bid_authoring_v2::CreateContentRequestV2 {
@@ -1815,12 +1819,14 @@ async fn match_evidence(
             insertion_anchor: None,
             evidence_selection_mode: "system_proposed",
             pick_set_artifact_id: None,
+            retrieval_identity: Some(&retrieval_identity),
+            runtime_contract: None,
         },
         &context,
     )
     .await
     .map_err(map_sql)?;
-    enqueue_content_request(&pool, &request, ContentGenerateOperationV2::MatchOnly).await?;
+    enqueue_content_request(&pool, &request).await?;
     Ok((StatusCode::ACCEPTED, Json(request)))
 }
 
@@ -1961,10 +1967,6 @@ async fn create_submission_export(
         "submission" => "submission",
         _ => return Err(validation("export mode must be review or submission")),
     };
-    let queue_mode = match output_mode {
-        "review_draft" => SubmissionOutputModeV2::ReviewDraft,
-        _ => SubmissionOutputModeV2::Submission,
-    };
     if !matches!(body.format.as_str(), "docx" | "pdf") {
         return Err(validation("export format must be docx or pdf"));
     }
@@ -1988,24 +1990,7 @@ async fn create_submission_export(
     )
     .await
     .map_err(map_sql)?;
-    let request = request_identity(&value)?;
-    let project_id = value
-        .get("project_id")
-        .and_then(Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .ok_or_else(|| validation("export project identity missing"))?;
-    enqueue_if_pending(
-        &pool,
-        &value,
-        BidAuthoringJobPayloadV2::SubmissionExport {
-            request: request.clone(),
-            project_id,
-            workspace_id,
-            workspace_revision_id: body.expected_workspace_revision_id,
-            output_mode: queue_mode,
-        },
-    )
-    .await?;
+    enqueue_if_pending(&pool, &value).await?;
     Ok((StatusCode::ACCEPTED, Json(value)))
 }
 
@@ -2169,126 +2154,9 @@ async fn get_candidate(
 
 fn candidate_operations(
     candidate: &Value,
-    current: &Value,
     body: &AcceptCandidateBody,
 ) -> Result<(Vec<Value>, Vec<i32>), ApiErr> {
     match candidate.get("kind").and_then(Value::as_str) {
-        Some("outline") => {
-            let selected: std::collections::HashSet<&str> =
-                body.client_node_refs.iter().map(String::as_str).collect();
-            if selected.is_empty() {
-                return Err(validation("at least one outline node must be selected"));
-            }
-            let nodes = candidate
-                .get("nodes")
-                .and_then(Value::as_array)
-                .ok_or_else(|| validation("outline candidate nodes missing"))?;
-            let mut by_ref = std::collections::HashMap::new();
-            for (index, node) in nodes.iter().enumerate() {
-                let reference = node
-                    .get("client_node_ref")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| validation("candidate client_node_ref missing"))?;
-                if by_ref.insert(reference, (index, node)).is_some() {
-                    return Err(validation("candidate client_node_ref duplicated"));
-                }
-            }
-            if selected
-                .iter()
-                .any(|reference| !by_ref.contains_key(reference))
-            {
-                return Err(validation("selected outline node does not exist"));
-            }
-            let identities = selected
-                .iter()
-                .map(|reference| (*reference, Uuid::new_v4()))
-                .collect::<std::collections::HashMap<_, _>>();
-            let mut pending = selected.clone();
-            let mut inserted = std::collections::HashSet::new();
-            let mut operations = Vec::new();
-            let mut ordinals = Vec::new();
-            while !pending.is_empty() {
-                let before = pending.len();
-                let mut references = pending.iter().copied().collect::<Vec<_>>();
-                references.sort_by_key(|reference| {
-                    let (index, node) = by_ref[reference];
-                    let parent_rank = node
-                        .get("parent_client_node_ref")
-                        .and_then(Value::as_str)
-                        .and_then(|parent| {
-                            by_ref.get(parent).map(|(parent_index, _)| parent_index + 1)
-                        })
-                        .unwrap_or(0);
-                    let ordinal = node
-                        .get("ordinal")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(index as u64);
-                    (parent_rank, ordinal, index)
-                });
-                for reference in references {
-                    let (index, node) = by_ref[reference];
-                    let selected_parent = node
-                        .get("parent_client_node_ref")
-                        .and_then(Value::as_str)
-                        .filter(|parent| selected.contains(parent));
-                    if selected_parent.is_some_and(|parent| !inserted.contains(parent)) {
-                        continue;
-                    }
-                    operations.push(json!({
-                        "kind":"insert_node",
-                        "lineage_id":identities[reference],
-                        "revision_id":Uuid::new_v4(),
-                        "parent_lineage_id":selected_parent.map(|parent| identities[parent]),
-                        "ordinal":node.get("ordinal").and_then(Value::as_u64).unwrap_or(index as u64),
-                        "title":node.get("title").and_then(Value::as_str).unwrap_or("未命名章节"),
-                        "semantic_role":node.get("semantic_role").and_then(Value::as_str).unwrap_or("other"),
-                        "render_role":node.get("render_role").and_then(Value::as_str).unwrap_or("section")
-                    }));
-                    ordinals.push(
-                        i32::try_from(index)
-                            .map_err(|_| validation("candidate ordinal overflow"))?,
-                    );
-                    inserted.insert(reference);
-                    pending.remove(reference);
-                }
-                if pending.len() == before {
-                    return Err(validation("selected outline graph is cyclic"));
-                }
-            }
-            let projection_id = current
-                .get("requirement_projection_revision_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| validation("requirement projection missing"))?;
-            let projection_sha = current
-                .get("requirement_projection_sha256")
-                .and_then(Value::as_str)
-                .ok_or_else(|| validation("requirement projection digest missing"))?;
-            for binding in candidate
-                .get("bindings")
-                .and_then(Value::as_array)
-                .unwrap_or(&Vec::new())
-            {
-                let Some(target_ref) = binding
-                    .get("target_client_node_ref")
-                    .and_then(Value::as_str)
-                else {
-                    continue;
-                };
-                if !selected.contains(target_ref) {
-                    continue;
-                }
-                operations.push(json!({
-                    "kind":"bind_fulfillment",
-                    "need_occurrence_id":binding.get("need_occurrence_id"),
-                    "requirement_projection_revision_id":projection_id,
-                    "requirement_projection_sha256":projection_sha,
-                    "channel":binding.get("channel"),
-                    "target":{"kind":"outline_node","node_lineage_id":identities[target_ref]},
-                    "reason":"accepted_outline_candidate"
-                }));
-            }
-            Ok((operations, ordinals))
-        }
         Some("content") => {
             let requested: std::collections::HashSet<usize> =
                 body.operation_indexes.iter().copied().collect();
@@ -2355,6 +2223,9 @@ async fn accept_candidate(
             .await
             .map_err(map_sql)?
             .ok_or_else(|| not_found("authoring candidate"))?;
+    if candidate.get("kind").and_then(Value::as_str) != Some("content") {
+        return Err(validation("unsupported candidate kind"));
+    }
     let current = bidding::bid_authoring_v2::load_workspace_v2(&pool, workspace_id, &actor)
         .await
         .map_err(map_sql)?
@@ -2382,6 +2253,20 @@ async fn accept_candidate(
         .map_err(map_sql)?;
         return workspace_response(receipt);
     }
+    if current
+        .get("revision_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        != Some(body.expected_workspace_revision_id)
+        || current.get("sha256").and_then(Value::as_str)
+            != Some(body.expected_workspace_sha256.as_str())
+    {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "WORKSPACE_CAS_CONFLICT",
+            "submitted workspace identity is stale",
+        ));
+    }
     if candidate.get("base_workspace_revision_id") != current.get("revision_id")
         || candidate.get("base_workspace_sha256") != current.get("sha256")
     {
@@ -2405,7 +2290,7 @@ async fn accept_candidate(
         );
         return Err(candidate_obsolete_error(&obsolete));
     }
-    let (operations, ordinals) = candidate_operations(&candidate, &current, &body)?;
+    let (operations, ordinals) = candidate_operations(&candidate, &body)?;
     let snapshot = bidding::workspace::apply_trusted_candidate_operations(
         &current,
         workspace_id,
@@ -2441,41 +2326,22 @@ async fn reject_candidate(
 ) -> Result<Json<Value>, ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let receipt_body = json!({"workspace_id":workspace_id,"candidate_id":candidate_id});
+    let pool = require_bid_pool().await?;
+    let candidate =
+        bidding::bid_authoring_v2::get_candidate_v2(&pool, workspace_id, candidate_id, &actor)
+            .await
+            .map_err(map_sql)?
+            .ok_or_else(|| not_found("authoring candidate"))?;
+    if candidate.get("kind").and_then(Value::as_str) != Some("content") {
+        return Err(validation("unsupported candidate kind"));
+    }
     let context =
         bidding::MutationContext::new(actor, required_idempotency_key(&headers)?, &receipt_body)
             .map_err(|error| validation(&error.to_string()))?;
-    let pool = require_bid_pool().await?;
     bidding::bid_authoring_v2::reject_candidate_v2(&pool, workspace_id, candidate_id, &context)
         .await
         .map(Json)
         .map_err(map_sql)
-}
-
-async fn create_outline_checkpoint(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(workspace_id): Path<Uuid>,
-    BidJson(body): BidJson<CreateOutlineCheckpointBody>,
-) -> Result<(StatusCode, Json<Value>), ApiErr> {
-    let (_, actor) = human_actor(&headers, &state).await?;
-    let context = bidding::MutationContext::new(
-        actor,
-        required_idempotency_key(&headers)?,
-        &json!({"workspace_id":workspace_id,"request":body}),
-    )
-    .map_err(|error| validation(&error.to_string()))?;
-    let pool = require_bid_pool().await?;
-    let value = bidding::bid_authoring_v2::create_outline_checkpoint_v2(
-        &pool,
-        workspace_id,
-        body.expected_workspace_revision_id,
-        &body.expected_workspace_sha256,
-        Uuid::new_v4(),
-        &context,
-    )
-    .await
-    .map_err(map_sql)?;
-    Ok((StatusCode::CREATED, Json(value)))
 }
 
 async fn get_document_settings(
@@ -2666,7 +2532,7 @@ async fn upload_workspace_asset(
     let value = match result {
         Ok(value) => value,
         Err(error) => {
-            let _ = platform::abandon_object_upload(&pool, staging_id, &actor).await;
+            schedule_staging_cleanup_required(staging_id).await?;
             return Err(map_sql(error));
         }
     };
@@ -2675,7 +2541,7 @@ async fn upload_workspace_asset(
         .and_then(Value::as_str)
         .and_then(|raw| Uuid::parse_str(raw).ok());
     if persisted_asset_id != Some(asset_id) {
-        let _ = platform::abandon_object_upload(&pool, staging_id, &actor).await;
+        schedule_staging_cleanup_required(staging_id).await?;
     }
     Ok((StatusCode::CREATED, Json(value)))
 }
@@ -2902,6 +2768,74 @@ async fn patch_document_settings(
 mod tests {
     use super::*;
 
+    fn enqueue_payload_fixture() -> BidAuthoringJobPayloadV2 {
+        BidAuthoringJobPayloadV2::RequirementSetCompile {
+            request: BidAuthoringRequestIdentityV2 {
+                request_artifact_id: Uuid::nil(),
+                request_revision: 1,
+                frozen_input_sha256: "a".repeat(64),
+            },
+            project_id: Uuid::nil(),
+            document_set_revision_id: Uuid::nil(),
+            disposition_set_revision_id: Uuid::nil(),
+        }
+    }
+
+    #[test]
+    fn sql_loaded_job_payload_is_closed_and_identity_checked() {
+        let payload = enqueue_payload_fixture();
+        let request = payload.request().clone();
+        let reservation = json!({
+            "status":"pending",
+            "request_artifact_id":request.request_artifact_id,
+            "request_revision":request.request_revision,
+            "frozen_input_sha256":request.frozen_input_sha256,
+            "request_sha256":"b".repeat(64),
+            "request_kind":"requirement_set_compile",
+            "job_payload":payload,
+        });
+        let parsed = match frozen_request_payload(&reservation, &request) {
+            Ok(parsed) => parsed,
+            Err(_) => panic!("SQL-shaped reservation must parse"),
+        };
+        assert_eq!(parsed, payload);
+        let mut mismatched = reservation;
+        mismatched["request_kind"] = json!("content_generate");
+        assert!(frozen_request_payload(&mismatched, &request).is_err());
+    }
+
+    #[tokio::test]
+    async fn direct_queue_failure_makes_exactly_one_physical_call() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let request = BidAuthoringRequestIdentityV2 {
+            request_artifact_id: Uuid::nil(),
+            request_revision: 1,
+            frozen_input_sha256: "a".repeat(64),
+        };
+        let result = enqueue_with(
+            &request,
+            Some(&"b".repeat(64)),
+            enqueue_payload_fixture(),
+            move |_| {
+                let observed = observed.clone();
+                async move {
+                    observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err("fixture queue unavailable".into())
+                }
+            },
+        )
+        .await;
+        let (status, Json(body)) = result.unwrap_err();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.error.code, "QUEUE_UNAVAILABLE");
+        assert_eq!(
+            body.error.details.unwrap()["request_artifact_id"],
+            request.request_artifact_id.to_string()
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn candidate_obsolete_error_preserves_current_workspace_identity() {
         let revision = "11111111-1111-4111-8111-111111111111";
@@ -2919,45 +2853,6 @@ mod tests {
     }
 
     #[test]
-    fn outline_candidate_operations_follow_parent_and_sibling_ordinals() {
-        let candidate = json!({
-            "kind":"outline",
-            "nodes":[
-                {"client_node_ref":"root","parent_client_node_ref":null,"ordinal":0,"title":"封面","semantic_role":"cover","render_role":"front_matter"},
-                {"client_node_ref":"second","parent_client_node_ref":"root","ordinal":2,"title":"第二章","semantic_role":"technical","render_role":"section"},
-                {"client_node_ref":"first","parent_client_node_ref":"root","ordinal":1,"title":"第一章","semantic_role":"commercial","render_role":"section"}
-            ],
-            "bindings":[]
-        });
-        let current = json!({
-            "requirement_projection_revision_id":"11111111-1111-4111-8111-111111111111",
-            "requirement_projection_sha256":"c".repeat(64)
-        });
-        let body = AcceptCandidateBody {
-            expected_workspace_revision_id: Uuid::nil(),
-            expected_workspace_sha256: "a".repeat(64),
-            operation_indexes: Vec::new(),
-            client_node_refs: vec!["second".into(), "root".into(), "first".into()],
-        };
-        let Ok((operations, ordinals)) = candidate_operations(&candidate, &current, &body) else {
-            panic!("outline candidate operations should be valid");
-        };
-        assert_eq!(
-            operations
-                .iter()
-                .filter_map(|operation| operation.get("title").and_then(Value::as_str))
-                .collect::<Vec<_>>(),
-            vec!["封面", "第一章", "第二章"]
-        );
-        assert_eq!(ordinals, vec![0, 2, 1]);
-    }
-}
-
-#[cfg(test)]
-mod contract_tests {
-    use super::*;
-
-    #[test]
     fn bid_json_maps_media_type_separately_from_malformed_json() {
         assert_eq!(
             bid_json_error(
@@ -2971,6 +2866,65 @@ mod contract_tests {
             bid_json_error(StatusCode::BAD_REQUEST, "malformed JSON".into()).0,
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[test]
+    fn content_idempotency_envelopes_bind_path_and_if_match_identity() {
+        let workspace = Uuid::from_u128(1);
+        let other_workspace = Uuid::from_u128(2);
+        let node = Uuid::from_u128(3);
+        let revision = Uuid::from_u128(4);
+        let body = ContentGenerateBody {
+            target: "node".into(),
+            node_lineage_id: Some(node),
+            fill_policy: "empty_only".into(),
+            insertion_anchor: None,
+            selection_mode: "system_proposed".into(),
+            pick_set_artifact_id: None,
+            expected_workspace_revision_id: revision,
+        };
+        let first = content_generate_mutation_envelope(workspace, revision, &"a".repeat(64), &body);
+        assert_ne!(
+            first,
+            content_generate_mutation_envelope(other_workspace, revision, &"a".repeat(64), &body)
+        );
+        assert_ne!(
+            first,
+            content_generate_mutation_envelope(workspace, revision, &"b".repeat(64), &body)
+        );
+        let match_body = EvidenceMatchBody {
+            expected_workspace_revision_id: revision,
+        };
+        let matched = evidence_match_mutation_envelope(
+            workspace,
+            node,
+            revision,
+            &"a".repeat(64),
+            &match_body,
+        );
+        assert_ne!(
+            matched,
+            evidence_match_mutation_envelope(
+                workspace,
+                Uuid::from_u128(5),
+                revision,
+                &"a".repeat(64),
+                &match_body
+            )
+        );
+        let first_context = bidding::MutationContext::new(
+            "user:00000000-0000-4000-8000-000000000001",
+            "same-key",
+            &first,
+        )
+        .unwrap();
+        let changed_context = bidding::MutationContext::new(
+            "user:00000000-0000-4000-8000-000000000001",
+            "same-key",
+            &matched,
+        )
+        .unwrap();
+        assert_ne!(first_context.request.sha256, changed_context.request.sha256);
     }
 
     #[test]

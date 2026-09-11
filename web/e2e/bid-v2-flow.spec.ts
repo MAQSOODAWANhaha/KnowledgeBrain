@@ -180,82 +180,19 @@ async function mockApi(page: Page) {
     }
     if (p.includes("/candidates/") && method === "GET") {
       return json({
-        schema_version: 2,
         candidate_id: "cand-outline",
+        candidate_sha256: SHA,
         kind: "outline",
         status: "proposed",
         base_workspace_revision_id: "25252525-2525-2525-2525-252525252525",
         base_workspace_sha256: SHA,
-        nodes: [
-          {
-            client_node_ref: "root",
-            parent_client_node_ref: null,
-            ordinal: 0,
-            title: "投标文件",
-            semantic_role: "cover",
-            render_role: "front_matter",
-            origin_source_unit_revision_ids: [],
-          },
-          {
-            client_node_ref: "toc",
-            parent_client_node_ref: "root",
-            ordinal: 0,
-            title: "目录",
-            semantic_role: "toc",
-            render_role: "toc",
-            origin_source_unit_revision_ids: [],
-          },
-          {
-            client_node_ref: "commercial",
-            parent_client_node_ref: "root",
-            ordinal: 1,
-            title: "商务文件",
-            semantic_role: "commercial",
-            render_role: "section",
-            origin_source_unit_revision_ids: ["source-commercial"],
-          },
-          {
-            client_node_ref: "commercial-child",
-            parent_client_node_ref: "commercial",
-            ordinal: 0,
-            title: "资格响应",
-            semantic_role: "qualification",
-            render_role: "section",
-            origin_source_unit_revision_ids: ["source-commercial"],
-          },
-          {
-            client_node_ref: "technical",
-            parent_client_node_ref: "root",
-            ordinal: 2,
-            title: "技术文件",
-            semantic_role: "technical",
-            render_role: "section",
-            origin_source_unit_revision_ids: ["source-technical"],
-          },
-          {
-            client_node_ref: "technical-child",
-            parent_client_node_ref: "technical",
-            ordinal: 0,
-            title: "技术要求响应",
-            semantic_role: "technical",
-            render_role: "section",
-            origin_source_unit_revision_ids: ["source-technical"],
-          },
-        ],
-        bindings: [
-          {
-            need_occurrence_id: "need-1",
-            channel: "narrative_content",
-            target_client_node_ref: "technical-child",
-          },
-        ],
-        section_obligation_bindings: [
-          {
-            obligation_id: "b".repeat(64),
-            target_client_node_ref: "technical-child",
-          },
-        ],
-        notices: [],
+        content: {
+          schema_version: 1,
+          candidate_tree: { schema_version: 1, nodes: [] },
+          need_dispositions: {},
+          template_operations: {},
+          candidate_provenance: {},
+        },
       });
     }
     if (p.includes("/candidates/") && method === "POST") {
@@ -332,10 +269,8 @@ test("V2 golden path: files, authoring canvas, outline candidate, export without
   await expect(page.getByTestId("generate-outline")).toBeEnabled();
   await activateWithKeyboard(page.getByTestId("generate-outline"));
   await expect(page.getByTestId("candidate-review")).toBeVisible();
-  await expect(page.getByTestId("outline-quality-summary")).toContainText(
-    "一级章节 2",
-  );
-  await expect(page.getByTestId("candidate-accept")).toBeEnabled();
+  await expect(page.getByTestId("outline-v1-read-only")).toContainText("仅可只读查看");
+  await expect(page.getByTestId("candidate-accept")).toBeDisabled();
   await expect(page.getByTestId("generate-outline")).toBeEnabled();
 
   await activateWithKeyboard(page.getByTestId("wizard-export"));

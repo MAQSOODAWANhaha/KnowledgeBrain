@@ -20,7 +20,7 @@ BEGIN
     CREATE ROLE kb_app_owner NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD NULL;
   END IF;
 END $roles$;
-SELECT format('CREATE ROLE kb_migrator LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'migrator_password')
+SELECT format('CREATE ROLE kb_migrator LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'migrator_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='kb_migrator') \gexec
 SELECT format('CREATE ROLE kb_runtime_api LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'api_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='kb_runtime_api') \gexec
@@ -28,12 +28,18 @@ SELECT format('CREATE ROLE kb_runtime_worker LOGIN INHERIT NOSUPERUSER NOCREATED
 WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='kb_runtime_worker') \gexec
 SELECT format('CREATE ROLE kb_runtime_retention LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'retention_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='kb_runtime_retention') \gexec
+GRANT kb_app_owner TO kb_migrator;
 SELECT format('GRANT CONNECT ON DATABASE %I TO kb_migrator,kb_runtime_api,kb_runtime_worker,kb_runtime_retention', current_database()) \gexec
-SELECT format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', current_database()) \gexec
+SELECT format('REVOKE CREATE, TEMPORARY ON DATABASE %I FROM PUBLIC', current_database()) \gexec
+SELECT format('REVOKE CREATE, TEMPORARY ON DATABASE %I FROM kb_migrator,kb_runtime_api,kb_runtime_worker,kb_runtime_retention', current_database()) \gexec
+ALTER SCHEMA public OWNER TO kb_app_owner;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC, kb_migrator, kb_runtime_api, kb_runtime_worker, kb_runtime_retention;
 GRANT USAGE ON SCHEMA public TO kb_migrator,kb_runtime_api,kb_runtime_worker,kb_runtime_retention;
-GRANT CREATE ON SCHEMA public TO kb_migrator;
-GRANT EXECUTE ON FUNCTION public.digest(bytea,text), public.digest(text,text) TO kb_migrator,kb_app_owner;
+GRANT CREATE, USAGE ON SCHEMA public TO kb_app_owner;
+GRANT EXECUTE ON FUNCTION public.digest(bytea,text), public.digest(text,text) TO kb_app_owner;
 GRANT EXECUTE ON FUNCTION public.vector_in(cstring,oid,integer), public.vector_out(public.vector), public.vector(public.vector,integer,boolean), public.cosine_distance(public.vector,public.vector) TO kb_runtime_api,kb_runtime_worker;
-ALTER DEFAULT PRIVILEGES FOR ROLE kb_migrator IN SCHEMA public REVOKE ALL ON TABLES FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES FOR ROLE kb_migrator IN SCHEMA public REVOKE ALL ON FUNCTIONS FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE kb_app_owner IN SCHEMA public REVOKE ALL ON TABLES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE kb_app_owner IN SCHEMA public REVOKE ALL ON SEQUENCES FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE kb_app_owner IN SCHEMA public REVOKE ALL ON FUNCTIONS FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE kb_app_owner IN SCHEMA public REVOKE ALL ON TYPES FROM PUBLIC;
 SQL

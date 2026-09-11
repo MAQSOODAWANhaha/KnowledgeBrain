@@ -19,8 +19,15 @@ pub struct DocumentProcessJob {
     pub task_type: String,
     #[serde(default)]
     pub passages: Vec<String>,
-    #[serde(default)]
-    pub manual: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
+#[oxana(unique_id = "manual:process:{document_id}:{attempt}", on_conflict = Skip)]
+pub struct ManualProcessJob {
+    pub document_id: Uuid,
+    pub product_version_id: Uuid,
+    pub attempt: i32,
+    pub task_type: String,
 }
 
 #[derive(oxana::Queue)]
@@ -130,9 +137,10 @@ pub struct KbDeleteJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
-#[oxana(unique_id = "knowledge:list_reparse:{document_id}", on_conflict = Skip)]
+#[oxana(unique_id = "knowledge:list_reparse:{document_id}:{attempt}", on_conflict = Skip)]
 pub struct ListReparseJob {
     pub document_id: Uuid,
+    pub attempt: i32,
     pub task_type: String,
 }
 
@@ -163,22 +171,46 @@ pub struct ImageMultimodalJob {
 pub struct MultimodalQueue;
 
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
-#[oxana(unique_id = "wiki-ingest:{product_version_id}", on_conflict = Skip)]
+#[oxana(unique_id = "wiki-ingest:{product_version_id}:{document_id}:{operation}", on_conflict = Skip)]
 pub struct WikiIngestJob {
     pub product_version_id: Uuid,
+    pub document_id: Uuid,
+    pub operation: String,
     pub task_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
-#[oxana(unique_id = "wiki-finalize:{product_version_id}", on_conflict = Skip)]
+#[oxana(unique_id = "wiki-finalize:{product_version_id}:{document_id}", on_conflict = Skip)]
 pub struct WikiFinalizeJob {
     pub product_version_id: Uuid,
+    pub document_id: Uuid,
     pub task_type: String,
 }
 
 #[derive(oxana::Queue)]
 #[oxana(key = "wiki", concurrency = Dynamic(8))]
 pub struct WikiQueue;
+
+#[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
+// Non-unique envelopes: Oxana 2.1.3 returns Ok(existing_id) on Skip, not a delivery receipt.
+#[oxana(resurrect = true)]
+pub struct ObjectRetentionJob {
+    pub deletion_id: Uuid,
+    pub object_ref: String,
+    pub digest: String,
+    pub byte_length: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, oxana::Job)]
+// Business identity is stable; every handoff needs its own native enqueue acknowledgement.
+#[oxana(resurrect = true)]
+pub struct ObjectUploadExpireJob {
+    pub staging_id: Uuid,
+}
+
+#[derive(oxana::Queue)]
+#[oxana(key = "retention", concurrency = Dynamic(4))]
+pub struct RetentionQueue;
 
 /// Periodic sweep; oxana cron on `low` every 5 minutes (`HOUSEKEEP_CRON`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, oxana::Job)]
@@ -194,8 +226,13 @@ pub fn runtime_concurrency(runtime: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-pub fn redis_url() -> String {
-    std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:16379".into())
+fn required_redis_url(raw: Option<String>) -> Result<String, oxana::OxanaError> {
+    raw.filter(|url| !url.is_empty())
+        .ok_or_else(|| oxana::OxanaError::ConfigError("REDIS_URL is required".into()))
+}
+
+pub fn redis_url() -> Result<String, oxana::OxanaError> {
+    required_redis_url(std::env::var("REDIS_URL").ok())
 }
 
 pub async fn queue_depths() -> std::collections::HashMap<String, i64> {
@@ -218,6 +255,10 @@ pub async fn queue_depths() -> std::collections::HashMap<String, i64> {
             storage.enqueued_count(MultimodalQueue).await.unwrap_or(0),
         ),
         ("wiki", storage.enqueued_count(WikiQueue).await.unwrap_or(0)),
+        (
+            "retention",
+            storage.enqueued_count(RetentionQueue).await.unwrap_or(0),
+        ),
         (
             "summary",
             storage.enqueued_count(SummaryQueue).await.unwrap_or(0),
@@ -243,8 +284,36 @@ pub async fn queue_depths() -> std::collections::HashMap<String, i64> {
     out
 }
 
+pub const OXANA_DEPLOYMENT_NAMESPACE_ID_ENV: &str = "KB_DEPLOYMENT_NAMESPACE_ID";
+
+fn validated_oxana_namespace(
+    raw: Option<String>,
+) -> Result<crate::DeploymentNamespaceV1, oxana::OxanaError> {
+    let raw = raw.ok_or_else(|| {
+        oxana::OxanaError::GenericError(format!("{OXANA_DEPLOYMENT_NAMESPACE_ID_ENV} is required"))
+    })?;
+    raw.parse::<crate::DeploymentNamespaceV1>().map_err(|_| {
+        oxana::OxanaError::GenericError(format!(
+            "{OXANA_DEPLOYMENT_NAMESPACE_ID_ENV} must be canonical lowercase UUID"
+        ))
+    })
+}
+
+/// Configure the pinned official client with the deployment's derived prefix.
+pub fn oxana_storage_in_namespace(
+    redis_url: &str,
+    namespace: crate::DeploymentNamespaceV1,
+) -> Result<oxana::Storage, oxana::OxanaError> {
+    oxana::StorageBuilder::new()
+        .namespace(namespace.redis_namespace())
+        .build_from_redis_url(redis_url)
+}
+
 pub fn oxana_connect() -> Result<oxana::Storage, oxana::OxanaError> {
-    oxana::Storage::from_url(redis_url())
+    oxana_storage_in_namespace(
+        &redis_url()?,
+        validated_oxana_namespace(std::env::var(OXANA_DEPLOYMENT_NAMESPACE_ID_ENV).ok())?,
+    )
 }
 
 pub async fn connect_verified() -> Result<oxana::Storage, String> {
@@ -302,6 +371,7 @@ pub fn dashboard_catalog() -> Option<(oxana::Storage, oxana::Catalog)> {
         .queue::<GraphQueue>()
         .queue::<MultimodalQueue>()
         .queue::<WikiQueue>()
+        .queue::<crate::RetentionQueue>()
         .queue::<crate::BidAuthoringV2Queue>();
     let catalog = builder.catalog();
     Some((storage, catalog))
@@ -344,6 +414,13 @@ pub async fn queue_job_previews() -> std::collections::HashMap<String, Vec<Strin
         ),
         ("wiki", storage.list_queue_jobs(WikiQueue, &opts).await.ok()),
         (
+            "retention",
+            storage
+                .list_queue_jobs(crate::RetentionQueue, &opts)
+                .await
+                .ok(),
+        ),
+        (
             "bid-authoring-v2",
             storage
                 .list_queue_jobs(crate::BidAuthoringV2Queue, &opts)
@@ -358,7 +435,7 @@ pub async fn queue_job_previews() -> std::collections::HashMap<String, Vec<Strin
     out
 }
 
-/// `Ok(None)` = Redis unreachable (memory queue still used). `Err` = connected but enqueue failed.
+/// `Ok(None)` means Oxana Redis is not configured; no fallback transport exists.
 pub async fn enqueue_document_process(
     document_id: Uuid,
     product_version_id: Uuid,
@@ -387,7 +464,6 @@ pub async fn enqueue_document_process_with(
                     attempt,
                     task_type: crate::TYPE_DOCUMENT_PROCESS.to_string(),
                     passages,
-                    manual: false,
                 },
             )
             .await,
@@ -406,13 +482,11 @@ pub async fn enqueue_manual_process(
         storage
             .enqueue(
                 DefaultQueue,
-                DocumentProcessJob {
+                ManualProcessJob {
                     document_id,
                     product_version_id,
                     attempt,
                     task_type: crate::TYPE_MANUAL_PROCESS.to_string(),
-                    passages: Vec::new(),
-                    manual: true,
                 },
             )
             .await,
@@ -490,20 +564,18 @@ pub async fn enqueue_bid_authoring_v2(
                 )
                 .await,
         ),
-        crate::BidAuthoringJobPayloadV2::OutlineGenerate {
+        crate::BidAuthoringJobPayloadV2::DocxCompose {
             request,
             project_id,
             workspace_id,
-            base_workspace_revision_id,
         } => oxana_id(
             storage
                 .enqueue(
                     crate::BidAuthoringV2Queue,
-                    crate::OutlineGenerateJobV2 {
+                    crate::DocxComposeJobV2 {
                         request,
                         project_id,
                         workspace_id,
-                        base_workspace_revision_id,
                     },
                 )
                 .await,
@@ -611,12 +683,24 @@ pub const WIKI_FOLLOW_UP_DEBOUNCE_SECS: u64 = 5;
 /// Brain `wikiIngestRetryDelay` / spec lock-conflict retry.
 pub const WIKI_LOCK_RETRY_SECS: u64 = 15;
 
-pub async fn enqueue_wiki_ingest(product_version_id: Uuid) -> Result<Option<String>, String> {
-    enqueue_wiki_ingest_in(product_version_id, WIKI_INGEST_DEBOUNCE_SECS).await
+pub async fn enqueue_wiki_ingest(
+    product_version_id: Uuid,
+    document_id: Uuid,
+    operation: &str,
+) -> Result<Option<String>, String> {
+    enqueue_wiki_ingest_in(
+        product_version_id,
+        document_id,
+        operation,
+        WIKI_INGEST_DEBOUNCE_SECS,
+    )
+    .await
 }
 
 pub async fn enqueue_wiki_ingest_in(
     product_version_id: Uuid,
+    document_id: Uuid,
+    operation: &str,
     delay_secs: u64,
 ) -> Result<Option<String>, String> {
     let Ok(storage) = oxana_connect() else {
@@ -628,6 +712,8 @@ pub async fn enqueue_wiki_ingest_in(
                 WikiQueue,
                 WikiIngestJob {
                     product_version_id,
+                    document_id,
+                    operation: operation.to_owned(),
                     task_type: crate::TYPE_WIKI_INGEST.to_string(),
                 },
                 delay_secs,
@@ -829,7 +915,10 @@ pub async fn enqueue_index_delete(document_id: Uuid) -> Result<Option<String>, S
     )
 }
 
-pub async fn enqueue_list_reparse(document_id: Uuid) -> Result<Option<String>, String> {
+pub async fn enqueue_list_reparse(
+    document_id: Uuid,
+    attempt: i32,
+) -> Result<Option<String>, String> {
     let Ok(storage) = oxana_connect() else {
         return Ok(None);
     };
@@ -839,6 +928,7 @@ pub async fn enqueue_list_reparse(document_id: Uuid) -> Result<Option<String>, S
                 LowQueue,
                 ListReparseJob {
                     document_id,
+                    attempt,
                     task_type: crate::TYPE_LIST_REPARSE.to_string(),
                 },
             )
@@ -846,12 +936,16 @@ pub async fn enqueue_list_reparse(document_id: Uuid) -> Result<Option<String>, S
     )
 }
 
-pub async fn enqueue_wiki_finalize(product_version_id: Uuid) -> Result<Option<String>, String> {
-    enqueue_wiki_finalize_in(product_version_id, WIKI_FINALIZE_DEBOUNCE_SECS).await
+pub async fn enqueue_wiki_finalize(
+    product_version_id: Uuid,
+    document_id: Uuid,
+) -> Result<Option<String>, String> {
+    enqueue_wiki_finalize_in(product_version_id, document_id, WIKI_FINALIZE_DEBOUNCE_SECS).await
 }
 
 pub async fn enqueue_wiki_finalize_in(
     product_version_id: Uuid,
+    document_id: Uuid,
     delay_secs: u64,
 ) -> Result<Option<String>, String> {
     let Ok(storage) = oxana_connect() else {
@@ -863,12 +957,31 @@ pub async fn enqueue_wiki_finalize_in(
                 WikiQueue,
                 WikiFinalizeJob {
                     product_version_id,
+                    document_id,
                     task_type: crate::TYPE_WIKI_FINALIZE.to_string(),
                 },
                 delay_secs,
             )
             .await,
     )
+}
+
+pub async fn enqueue_object_retention(job: ObjectRetentionJob) -> Result<Option<String>, String> {
+    let storage = oxana_connect().map_err(|error| error.to_string())?;
+    storage
+        .enqueue(RetentionQueue, job)
+        .await
+        .map(|id| Some(id.to_string()))
+        .map_err(|error| error.to_string())
+}
+
+pub async fn enqueue_object_upload_expire(staging_id: Uuid) -> Result<Option<String>, String> {
+    let storage = oxana_connect().map_err(|error| error.to_string())?;
+    storage
+        .enqueue(RetentionQueue, ObjectUploadExpireJob { staging_id })
+        .await
+        .map(|id| Some(id.to_string()))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -896,32 +1009,8 @@ mod tests {
         }))
     }
 
-    fn redis_default_endpoint_open() -> bool {
-        std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], 16379)),
-            std::time::Duration::from_millis(150),
-        )
-        .is_ok()
-    }
-
     async fn redis_live_if_up(test_name: &str) -> Option<oxana::Storage> {
-        let url_set = std::env::var_os("REDIS_URL").is_some();
-        if !url_set && !redis_tests_required() && !redis_default_endpoint_open() {
-            eprintln!(
-                "skip runtime test {test_name}: REDIS_URL unset and redis://127.0.0.1:16379 is down"
-            );
-            return None;
-        }
-        let storage = match oxana_connect() {
-            Ok(storage) => storage,
-            Err(error) => {
-                if redis_tests_required() {
-                    panic!("required runtime test {test_name} could not configure redis: {error}");
-                }
-                eprintln!("skip runtime test {test_name}: redis not configured ({error})");
-                return None;
-            }
-        };
+        let storage = redis_test_storage(test_name)?;
         match storage.enqueued_count(DefaultQueue).await {
             Ok(_) => Some(storage),
             Err(error) => {
@@ -940,6 +1029,72 @@ mod tests {
     }
 
     #[test]
+    fn oxana_namespace_is_required_exact_and_partitions_every_storage() {
+        assert!(required_redis_url(None).is_err());
+        assert!(required_redis_url(Some(String::new())).is_err());
+        assert!(validated_oxana_namespace(None).is_err());
+        for invalid in [
+            " 00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000001 ",
+            "00000000-0000-4000-8000-00000000000A",
+            "not-a-uuid",
+        ] {
+            assert!(validated_oxana_namespace(Some(invalid.into())).is_err());
+        }
+        let first = "00000000-0000-4000-8000-000000000001";
+        let second = "00000000-0000-4000-8000-000000000002";
+        let first_storage =
+            oxana_storage_in_namespace("redis://127.0.0.1:1", first.parse().unwrap()).unwrap();
+        let second_storage =
+            oxana_storage_in_namespace("redis://127.0.0.1:1", second.parse().unwrap()).unwrap();
+        assert_eq!(
+            first_storage.namespace(),
+            "kb:00000000000040008000000000000001"
+        );
+        assert_eq!(
+            second_storage.namespace(),
+            "kb:00000000000040008000000000000002"
+        );
+        assert_ne!(first_storage.namespace(), second_storage.namespace());
+    }
+
+    #[tokio::test]
+    async fn two_deployment_namespaces_do_not_share_jobs_or_uniqueness() {
+        let Some(_) = redis_live_if_up("two deployment namespaces").await else {
+            return;
+        };
+        let _guard = redis_test_lock().await;
+        let url = redis_url().unwrap();
+        let first = Uuid::new_v4().to_string();
+        let second = Uuid::new_v4().to_string();
+        let first_storage = oxana_storage_in_namespace(&url, first.parse().unwrap()).unwrap();
+        let second_storage = oxana_storage_in_namespace(&url, second.parse().unwrap()).unwrap();
+        let document_id = Uuid::new_v4();
+        let job = DocumentProcessJob {
+            document_id,
+            product_version_id: Uuid::new_v4(),
+            attempt: 1,
+            task_type: crate::TYPE_DOCUMENT_PROCESS.to_string(),
+            passages: Vec::new(),
+        };
+        first_storage
+            .enqueue(DefaultQueue, job.clone())
+            .await
+            .unwrap();
+        assert_eq!(first_storage.enqueued_count(DefaultQueue).await.unwrap(), 1);
+        assert_eq!(
+            second_storage.enqueued_count(DefaultQueue).await.unwrap(),
+            0
+        );
+        second_storage.enqueue(DefaultQueue, job).await.unwrap();
+        assert_eq!(first_storage.enqueued_count(DefaultQueue).await.unwrap(), 1);
+        assert_eq!(
+            second_storage.enqueued_count(DefaultQueue).await.unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn wiki_debounce_matches_spec() {
         assert_eq!(WIKI_INGEST_DEBOUNCE_SECS, 30);
         assert_eq!(WIKI_FINALIZE_DEBOUNCE_SECS, 20);
@@ -955,6 +1110,55 @@ mod tests {
             oxana::QueueKind::Static { key } => assert_eq!(key, "wiki"),
             other => panic!("wiki queue must be static, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn manual_and_document_process_identities_are_distinct_and_match_registry() {
+        let document_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let document = DocumentProcessJob {
+            document_id,
+            product_version_id: version_id,
+            attempt: 3,
+            task_type: crate::TYPE_DOCUMENT_PROCESS.to_string(),
+            passages: Vec::new(),
+        };
+        let manual = ManualProcessJob {
+            document_id,
+            product_version_id: version_id,
+            attempt: 3,
+            task_type: crate::TYPE_MANUAL_PROCESS.to_string(),
+        };
+        assert_eq!(
+            oxana::Job::unique_id(&document),
+            Some(format!("document:process:{document_id}:3"))
+        );
+        assert_eq!(
+            oxana::Job::unique_id(&manual),
+            Some(format!("manual:process:{document_id}:3"))
+        );
+        assert_ne!(
+            oxana::Job::unique_id(&document),
+            oxana::Job::unique_id(&manual)
+        );
+        let registry = include_str!("../../../deploy/queue-registry.toml");
+        assert!(
+            registry.contains("identity_formula = \"document:process:{document_id}:{attempt}\"")
+        );
+        assert!(registry.contains("identity_formula = \"manual:process:{document_id}:{attempt}\""));
+        let reparse = ListReparseJob {
+            document_id,
+            attempt: 3,
+            task_type: crate::TYPE_LIST_REPARSE.to_string(),
+        };
+        assert_eq!(
+            oxana::Job::unique_id(&reparse),
+            Some(format!("knowledge:list_reparse:{document_id}:3"))
+        );
+        assert!(
+            registry
+                .contains("identity_formula = \"knowledge:list_reparse:{document_id}:{attempt}\"")
+        );
     }
 
     #[test]
@@ -1107,13 +1311,16 @@ mod tests {
             .await
             .expect("wipe wiki queue");
         let vid = Uuid::new_v4();
+        let did = Uuid::new_v4();
         let opts = oxana::QueueListOpts {
             count: 500,
             offset: 0,
         };
         let mut found = false;
         for _ in 0..5 {
-            let pushed = enqueue_wiki_ingest(vid).await.expect("enqueue");
+            let pushed = enqueue_wiki_ingest(vid, did, "ingest")
+                .await
+                .expect("enqueue");
             assert!(pushed.is_some());
             let scheduled = storage.list_scheduled(&opts).await.unwrap();
             if scheduled
@@ -1125,7 +1332,9 @@ mod tests {
             }
         }
         assert!(found, "wiki ingest job missing from scheduled set");
-        let _ = enqueue_wiki_ingest(vid).await.expect("coalesce");
+        let _ = enqueue_wiki_ingest(vid, did, "ingest")
+            .await
+            .expect("coalesce");
         let scheduled2 = storage.list_scheduled(&opts).await.unwrap();
         let hits = scheduled2
             .iter()
@@ -1148,17 +1357,10 @@ mod tests {
             return;
         };
         let _guard = redis_test_lock().await;
-        let before_multimodal = storage.enqueued_count(MultimodalQueue).await.unwrap();
         let before_graph = storage.enqueued_count(GraphQueue).await.unwrap();
         let before_question = storage.enqueued_count(QuestionQueue).await.unwrap();
         let before_default = storage.enqueued_count(DefaultQueue).await.unwrap();
 
-        assert_eq!(
-            enqueue_image_multimodal(Uuid::new_v4(), "k", "page_image", true, true, 1)
-                .await
-                .expect("multimodal enqueue result"),
-            None
-        );
         assert_eq!(
             enqueue_extract(Uuid::new_v4(), Uuid::new_v4(), 1)
                 .await
@@ -1172,10 +1374,6 @@ mod tests {
             None
         );
 
-        assert_eq!(
-            storage.enqueued_count(MultimodalQueue).await.unwrap(),
-            before_multimodal
-        );
         assert_eq!(
             storage.enqueued_count(GraphQueue).await.unwrap(),
             before_graph

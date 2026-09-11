@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://knowledgebrain.local/schemas/pdf-semantic-manifest-v1.schema.json",
+  "title": "PDF Semantic Manifest V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "renderer_contract_id",
+    "renderer_contract_sha256",
+    "extractor_contract_sha256",
+    "pages"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "renderer_contract_id": { "type": "string", "minLength": 1 },
+    "renderer_contract_sha256": { "$ref": "#/$defs/sha256" },
+    "extractor_contract_sha256": { "$ref": "#/$defs/sha256" },
+    "pages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/page" }
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "boxMpt": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "integer" },
+        { "type": "integer" },
+        { "type": "integer" },
+        { "type": "integer" }
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "glyph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "glyph_ordinal",
+        "unicode_scalar_utf8_sha256",
+        "x_mpt",
+        "y_mpt",
+        "w_mpt",
+        "h_mpt"
+      ],
+      "properties": {
+        "glyph_ordinal": { "type": "integer", "minimum": 0 },
+        "unicode_scalar_utf8_sha256": { "$ref": "#/$defs/sha256" },
+        "x_mpt": { "type": "integer" },
+        "y_mpt": { "type": "integer" },
+        "w_mpt": { "type": "integer" },
+        "h_mpt": { "type": "integer" }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["occurrence_ordinal", "asset_sha256", "attachment_page_id"],
+      "properties": {
+        "occurrence_ordinal": { "type": "integer", "minimum": 0 },
+        "asset_sha256": { "$ref": "#/$defs/sha256" },
+        "attachment_page_id": {
+          "oneOf": [
+            { "$ref": "#/$defs/uuid" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "page_ordinal",
+        "media_box_mpt",
+        "crop_box_mpt",
+        "rotation",
+        "glyphs",
+        "assets"
+      ],
+      "properties": {
+        "page_ordinal": { "type": "integer", "minimum": 0 },
+        "media_box_mpt": { "$ref": "#/$defs/boxMpt" },
+        "crop_box_mpt": { "$ref": "#/$defs/boxMpt" },
+        "rotation": { "enum": [0, 90, 180, 270] },
+        "glyphs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/glyph" }
+        },
+        "assets": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/asset" }
+        }
+      }
+    }
+  }
+}

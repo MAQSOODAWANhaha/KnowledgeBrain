@@ -26,6 +26,10 @@ pub const DOCX_MEDIA_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 pub const XLSX_MEDIA_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+pub const XLSM_MEDIA_TYPE: &str = "application/vnd.ms-excel.sheet.macroEnabled.12";
+pub const DOC_MEDIA_TYPE: &str = "application/msword";
+pub const XLS_MEDIA_TYPE: &str = "application/vnd.ms-excel";
+const OLE_MAGIC: &[u8] = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1";
 pub const PNG_MEDIA_TYPE: &str = "image/png";
 pub const JPEG_MEDIA_TYPE: &str = "image/jpeg";
 pub const WEBP_MEDIA_TYPE: &str = "image/webp";
@@ -65,21 +69,44 @@ pub fn validate_tender_upload(
     declared_media_type: Option<&str>,
     bytes: &[u8],
 ) -> Result<ValidatedTenderUpload, TenderUploadError> {
+    validate_upload_size(bytes)?;
+    let extension = Path::new(file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or(TenderUploadError::FilenameTypeInvalid)?;
+    validate_typed_upload(&extension, declared_media_type, bytes)
+}
+
+/// Validate generated/template DOCX bytes without inventing a filename or
+/// relying on a caller-supplied extension. Reuses the upload container budgets.
+pub fn validate_docx_document(bytes: &[u8]) -> Result<(), TenderUploadError> {
+    validate_upload_size(bytes)?;
+    validate_office(bytes, OfficeKind::Docx).map(|_| ())
+}
+
+fn validate_upload_size(bytes: &[u8]) -> Result<(), TenderUploadError> {
     if bytes.is_empty() {
         return Err(TenderUploadError::Empty);
     }
     if bytes.len() > MAX_UPLOAD_BYTES {
         return Err(TenderUploadError::TooLarge);
     }
-    let extension = Path::new(file_name)
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase)
-        .ok_or(TenderUploadError::FilenameTypeInvalid)?;
-    let (media_type, canonical_extension) = match extension.as_str() {
+    Ok(())
+}
+
+fn validate_typed_upload(
+    extension: &str,
+    declared_media_type: Option<&str>,
+    bytes: &[u8],
+) -> Result<ValidatedTenderUpload, TenderUploadError> {
+    let (media_type, canonical_extension) = match extension {
         "pdf" => (validate_pdf(bytes)?, "pdf"),
         "docx" => (validate_office(bytes, OfficeKind::Docx)?, "docx"),
         "xlsx" => (validate_office(bytes, OfficeKind::Xlsx)?, "xlsx"),
+        "xlsm" => (validate_office(bytes, OfficeKind::Xlsm)?, "xlsm"),
+        "doc" => (validate_ole(bytes, OleKind::Doc)?, "doc"),
+        "xls" => (validate_ole(bytes, OleKind::Xls)?, "xls"),
         "png" => (
             validate_image(bytes, ImageFormat::Png, PNG_MEDIA_TYPE)?,
             "png",
@@ -105,7 +132,7 @@ pub fn validate_tender_upload(
         })
         .filter(|value| !value.is_empty())
         .ok_or(TenderUploadError::DeclaredTypeInvalid)?;
-    if declared != media_type {
+    if !declared.eq_ignore_ascii_case(media_type) {
         return Err(TenderUploadError::DeclaredTypeInvalid);
     }
     Ok(ValidatedTenderUpload {
@@ -154,9 +181,54 @@ fn validate_image(
 }
 
 #[derive(Clone, Copy)]
+enum OleKind {
+    Doc,
+    Xls,
+}
+
+fn ole_utf16le_name(name: &str) -> Vec<u8> {
+    name.encode_utf16().flat_map(u16::to_le_bytes).collect()
+}
+
+fn ole_contains_name(bytes: &[u8], name: &str) -> bool {
+    let needle = ole_utf16le_name(name);
+    bytes.windows(needle.len()).any(|window| window == needle)
+}
+
+fn validate_ole(bytes: &[u8], expected: OleKind) -> Result<&'static str, TenderUploadError> {
+    if bytes.len() < 512 || !bytes.starts_with(OLE_MAGIC) {
+        return Err(TenderUploadError::MagicInvalid);
+    }
+    if ole_contains_name(bytes, "EncryptedPackage") || ole_contains_name(bytes, "EncryptionInfo") {
+        return Err(TenderUploadError::OfficeContainerUnsafe);
+    }
+    match expected {
+        OleKind::Doc => {
+            if !ole_contains_name(bytes, "WordDocument") {
+                return Err(TenderUploadError::OfficeKindMismatch);
+            }
+            Ok(DOC_MEDIA_TYPE)
+        }
+        OleKind::Xls => {
+            if !(ole_contains_name(bytes, "Workbook") || ole_contains_name(bytes, "Book")) {
+                return Err(TenderUploadError::OfficeKindMismatch);
+            }
+            Ok(XLS_MEDIA_TYPE)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 enum OfficeKind {
     Docx,
     Xlsx,
+    Xlsm,
+}
+
+impl OfficeKind {
+    const fn is_spreadsheet(self) -> bool {
+        matches!(self, Self::Xlsx | Self::Xlsm)
+    }
 }
 
 fn validate_office(bytes: &[u8], expected: OfficeKind) -> Result<&'static str, TenderUploadError> {
@@ -205,7 +277,7 @@ fn validate_office(bytes: &[u8], expected: OfficeKind) -> Result<&'static str, T
                 | "word/_rels/document.xml.rels"
                 | "xl/workbook.xml"
                 | "xl/_rels/workbook.xml.rels"
-        ) || (matches!(expected, OfficeKind::Xlsx)
+        ) || (expected.is_spreadsheet()
             && ((name.starts_with("xl/worksheets/") && name.ends_with(".xml"))
                 || (name.starts_with("xl/tables/") && name.ends_with(".xml"))));
         if capture {
@@ -224,7 +296,7 @@ fn validate_office(bytes: &[u8], expected: OfficeKind) -> Result<&'static str, T
         }
     }
     let media_type = validate_ooxml_parts(expected, &xml_parts)?;
-    if matches!(expected, OfficeKind::Xlsx) {
+    if expected.is_spreadsheet() {
         validate_xlsx_structure(&xml_parts)?;
     }
     Ok(media_type)
@@ -254,6 +326,14 @@ fn validate_ooxml_parts(
             "workbook",
             "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
             XLSX_MEDIA_TYPE,
+        ),
+        OfficeKind::Xlsm => (
+            "xl/workbook.xml",
+            "xl/_rels/workbook.xml.rels",
+            "application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+            "workbook",
+            "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+            XLSM_MEDIA_TYPE,
         ),
     };
     let content_types = roxmltree::Document::parse(
@@ -310,7 +390,7 @@ fn validate_ooxml_parts(
     }
     if let Some(relationships) = parts.get(main_rels) {
         parse_relationships(relationships, RELS_NS)?;
-    } else if matches!(expected, OfficeKind::Xlsx) {
+    } else if expected.is_spreadsheet() {
         return Err(TenderUploadError::OfficeContainerInvalid);
     }
     Ok(media_type)
@@ -515,13 +595,20 @@ mod tests {
                 ("word/document.xml", "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Tender</w:t></w:r></w:p><w:sectPr/></w:body></w:document>".into()),
                 ("word/_rels/document.xml.rels", format!("<Relationships xmlns=\"{RELS_NS}\"/>")),
             ],
-            OfficeKind::Xlsx => vec![
-                ("[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>".into()),
-                ("_rels/.rels", format!("<Relationships xmlns=\"{RELS_NS}\"><Relationship Id=\"rId1\" Type=\"{OFFICE_REL}\" Target=\"xl/workbook.xml\"/></Relationships>")),
-                ("xl/workbook.xml", "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>".into()),
-                ("xl/_rels/workbook.xml.rels", format!("<Relationships xmlns=\"{RELS_NS}\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>")),
-                ("xl/worksheets/sheet1.xml", "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData/></worksheet>".into()),
-            ],
+            OfficeKind::Xlsx | OfficeKind::Xlsm => {
+                let main_type = if matches!(kind, OfficeKind::Xlsm) {
+                    "application/vnd.ms-excel.sheet.macroEnabled.main+xml"
+                } else {
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
+                };
+                vec![
+                    ("[Content_Types].xml", format!("<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"{main_type}\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>")),
+                    ("_rels/.rels", format!("<Relationships xmlns=\"{RELS_NS}\"><Relationship Id=\"rId1\" Type=\"{OFFICE_REL}\" Target=\"xl/workbook.xml\"/></Relationships>")),
+                    ("xl/workbook.xml", "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>".into()),
+                    ("xl/_rels/workbook.xml.rels", format!("<Relationships xmlns=\"{RELS_NS}\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>")),
+                    ("xl/worksheets/sheet1.xml", "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData/></worksheet>".into()),
+                ]
+            }
         };
         for (name, value) in entries {
             if extra.iter().any(|(extra_name, _)| *extra_name == name) {
@@ -535,6 +622,45 @@ mod tests {
             writer.write_all(value).unwrap();
         }
         writer.finish().unwrap().into_inner()
+    }
+
+    fn ole_container(stream: &str) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 512 * 3];
+        bytes[..OLE_MAGIC.len()].copy_from_slice(OLE_MAGIC);
+        bytes[28..30].copy_from_slice(&0xFFFE_u16.to_le_bytes());
+        bytes[30..32].copy_from_slice(&9_u16.to_le_bytes());
+        bytes[32..34].copy_from_slice(&6_u16.to_le_bytes());
+        bytes[44..48].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[48..52].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[60..64].copy_from_slice(&0xFFFF_FFFE_u32.to_le_bytes());
+        bytes[68..72].copy_from_slice(&0xFFFF_FFFE_u32.to_le_bytes());
+        bytes[76..80].copy_from_slice(&0_u32.to_le_bytes());
+        for index in 1..109 {
+            let offset = 76 + index * 4;
+            bytes[offset..offset + 4].copy_from_slice(&0xFFFF_FFFF_u32.to_le_bytes());
+        }
+        let fat = 512;
+        bytes[fat..fat + 4].copy_from_slice(&0xFFFF_FFFD_u32.to_le_bytes());
+        bytes[fat + 4..fat + 8].copy_from_slice(&0xFFFF_FFFE_u32.to_le_bytes());
+        write_ole_directory_entry(&mut bytes, 1024, "Root Entry", 5, 1);
+        write_ole_directory_entry(&mut bytes, 1152, stream, 2, u32::MAX);
+        bytes
+    }
+
+    fn write_ole_directory_entry(
+        bytes: &mut [u8],
+        offset: usize,
+        name: &str,
+        kind: u8,
+        child: u32,
+    ) {
+        let encoded: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        bytes[offset..offset + encoded.len()].copy_from_slice(&encoded);
+        let name_len = u16::try_from(encoded.len() + 2).unwrap();
+        bytes[offset + 64..offset + 66].copy_from_slice(&name_len.to_le_bytes());
+        bytes[offset + 66] = kind;
+        bytes[offset + 76..offset + 80].copy_from_slice(&child.to_le_bytes());
+        bytes[offset + 116..offset + 120].copy_from_slice(&0xFFFF_FFFE_u32.to_le_bytes());
     }
 
     fn minimal_pdf() -> Vec<u8> {
@@ -569,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn exactly_six_formats_are_accepted_with_matching_filename_and_declared_type() {
+    fn accepted_tender_formats_match_filename_and_declared_type() {
         let pdf = minimal_pdf();
         assert_eq!(
             validate_tender_upload("a.pdf", Some(PDF_MEDIA_TYPE), &pdf)
@@ -597,6 +723,32 @@ mod tests {
             .media_type,
             XLSX_MEDIA_TYPE
         );
+        assert_eq!(
+            validate_tender_upload(
+                "a.xlsm",
+                Some(XLSM_MEDIA_TYPE),
+                &office(OfficeKind::Xlsm, &[])
+            )
+            .unwrap()
+            .media_type,
+            XLSM_MEDIA_TYPE
+        );
+        assert_eq!(
+            validate_tender_upload(
+                "a.doc",
+                Some(DOC_MEDIA_TYPE),
+                &ole_container("WordDocument")
+            )
+            .unwrap()
+            .media_type,
+            DOC_MEDIA_TYPE
+        );
+        assert_eq!(
+            validate_tender_upload("a.xls", Some(XLS_MEDIA_TYPE), &ole_container("Workbook"))
+                .unwrap()
+                .media_type,
+            XLS_MEDIA_TYPE
+        );
         for (name, mime, format) in [
             ("a.png", PNG_MEDIA_TYPE, ImageFormat::Png),
             ("a.jpg", JPEG_MEDIA_TYPE, ImageFormat::Jpeg),
@@ -617,6 +769,46 @@ mod tests {
         assert_eq!(
             validate_tender_upload("a.xlsx", Some(XLSX_MEDIA_TYPE), &docx),
             Err(TenderUploadError::OfficeKindMismatch)
+        );
+        assert_eq!(
+            validate_tender_upload(
+                "a.xlsm",
+                Some(XLSM_MEDIA_TYPE),
+                &office(OfficeKind::Xlsx, &[])
+            ),
+            Err(TenderUploadError::OfficeKindMismatch)
+        );
+        assert_eq!(
+            validate_tender_upload(
+                "a.xlsx",
+                Some(XLSX_MEDIA_TYPE),
+                &office(OfficeKind::Xlsm, &[])
+            ),
+            Err(TenderUploadError::OfficeKindMismatch)
+        );
+        assert_eq!(
+            validate_tender_upload("a.doc", Some(DOC_MEDIA_TYPE), &docx),
+            Err(TenderUploadError::MagicInvalid)
+        );
+        assert_eq!(
+            validate_tender_upload("a.doc", Some(DOC_MEDIA_TYPE), &ole_container("Workbook")),
+            Err(TenderUploadError::OfficeKindMismatch)
+        );
+        assert_eq!(
+            validate_tender_upload(
+                "a.xls",
+                Some(XLS_MEDIA_TYPE),
+                &ole_container("WordDocument")
+            ),
+            Err(TenderUploadError::OfficeKindMismatch)
+        );
+        assert_eq!(
+            validate_tender_upload(
+                "a.doc",
+                Some(DOC_MEDIA_TYPE),
+                &ole_container("EncryptedPackage")
+            ),
+            Err(TenderUploadError::OfficeContainerUnsafe)
         );
         assert_eq!(
             validate_tender_upload("a.docx", Some(PDF_MEDIA_TYPE), &docx),
@@ -693,6 +885,19 @@ mod tests {
         wrong_relationship[at..at + needle.len()].copy_from_slice(b"word/other.xmlxxx");
         assert!(
             validate_tender_upload("a.docx", Some(DOCX_MEDIA_TYPE), &wrong_relationship).is_err()
+        );
+    }
+
+    #[test]
+    fn testdata_bid_xlsm_is_accepted() {
+        let bytes = include_bytes!(
+            "../../../testdata/bid/产品参数-云安全管理平台V2.0.6SP2-招标参数完整版V1.0_20260105__.xlsm"
+        );
+        assert_eq!(
+            validate_tender_upload("params.xlsm", Some(XLSM_MEDIA_TYPE), bytes)
+                .unwrap()
+                .media_type,
+            XLSM_MEDIA_TYPE
         );
     }
 

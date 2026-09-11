@@ -230,10 +230,10 @@ pub fn declared_disabled_tasks() -> Result<Vec<&'static str>, QueueRegistryError
 mod tests {
     use super::*;
     use crate::{
-        BID_CONTENT_GENERATE_V2_TASK, BID_OUTLINE_GENERATE_V2_TASK,
+        BID_CONTENT_GENERATE_V2_TASK, BID_DOCX_COMPOSE_V2_TASK,
         BID_REQUIREMENT_SET_COMPILE_V2_TASK, BID_SUBMISSION_EXPORT_V2_TASK,
         BID_TENDER_DOCUMENT_PROCESS_V2_TASK, BidAuthoringRequestIdentityV2, ContentGenerateJobV2,
-        ContentGenerateOperationV2, OutlineGenerateJobV2, RequirementSetCompileJobV2,
+        ContentGenerateOperationV2, DocxComposeJobV2, RequirementSetCompileJobV2,
         SubmissionExportJobV2, SubmissionOutputModeV2, TenderDocumentProcessJobV2,
     };
     use oxana::Job;
@@ -256,7 +256,7 @@ mod tests {
         for task in [
             BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
             BID_REQUIREMENT_SET_COMPILE_V2_TASK,
-            BID_OUTLINE_GENERATE_V2_TASK,
+            BID_DOCX_COMPOSE_V2_TASK,
             BID_CONTENT_GENERATE_V2_TASK,
             BID_SUBMISSION_EXPORT_V2_TASK,
         ] {
@@ -277,7 +277,6 @@ mod tests {
         let project_id = Uuid::from_u128(2);
         let document_id = Uuid::from_u128(3);
         let workspace_id = Uuid::from_u128(4);
-        let disposition_id = Uuid::from_u128(5);
         let request_formula =
             |kind: &str| format!("{kind}:{{request_artifact_id}}:{{request_revision}}");
         let request_unique = |kind: &str| format!("{kind}:{}:7", request.request_artifact_id);
@@ -285,12 +284,6 @@ mod tests {
             request: request.clone(),
             project_id,
             document_revision_id: document_id,
-        };
-        let outline = OutlineGenerateJobV2 {
-            request: request.clone(),
-            project_id,
-            workspace_id,
-            base_workspace_revision_id: document_id,
         };
         let content = ContentGenerateJobV2 {
             request: request.clone(),
@@ -313,11 +306,6 @@ mod tests {
                 tender.unique_id(),
             ),
             (
-                BID_OUTLINE_GENERATE_V2_TASK,
-                "outline_generate",
-                outline.unique_id(),
-            ),
-            (
                 BID_CONTENT_GENERATE_V2_TASK,
                 "content_generate",
                 content.unique_id(),
@@ -334,25 +322,35 @@ mod tests {
             );
             assert_eq!(actual.as_deref(), Some(request_unique(kind).as_str()));
         }
+        let compose = DocxComposeJobV2 {
+            request: request.clone(),
+            project_id,
+            workspace_id,
+        };
+        assert_eq!(
+            registry
+                .entry_for_task(BID_DOCX_COMPOSE_V2_TASK)
+                .unwrap()
+                .identity_formula,
+            request_formula("docx_compose")
+        );
+        assert_eq!(compose.unique_id(), Some(request_unique("docx_compose")));
         let compile = RequirementSetCompileJobV2 {
-            request,
+            request: request.clone(),
             project_id,
             document_set_revision_id: document_id,
-            disposition_set_revision_id: disposition_id,
+            disposition_set_revision_id: Uuid::from_u128(5),
         };
-        let formula = "requirement_set_compile:{project_id}:{document_set_revision_id}:{disposition_set_revision_id}";
         assert_eq!(
             registry
                 .entry_for_task(BID_REQUIREMENT_SET_COMPILE_V2_TASK)
                 .unwrap()
                 .identity_formula,
-            formula
+            request_formula("requirement_set_compile")
         );
         assert_eq!(
             compile.unique_id(),
-            Some(format!(
-                "requirement_set_compile:{project_id}:{document_id}:{disposition_id}"
-            ))
+            Some(request_unique("requirement_set_compile"))
         );
     }
 
@@ -362,7 +360,7 @@ mod tests {
         for task in [
             BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
             BID_REQUIREMENT_SET_COMPILE_V2_TASK,
-            BID_OUTLINE_GENERATE_V2_TASK,
+            BID_DOCX_COMPOSE_V2_TASK,
             BID_CONTENT_GENERATE_V2_TASK,
             BID_SUBMISSION_EXPORT_V2_TASK,
         ] {

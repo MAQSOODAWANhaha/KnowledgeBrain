@@ -21,15 +21,10 @@
     "evidence_bundle_ids",
     "current_block_revision_ids",
     "document_settings_revision_id",
-    "prompt_contract_id",
-    "prompt_contract_sha256",
-    "template_contract_id",
-    "template_contract_sha256",
-    "model_contract_id",
-    "model_contract_sha256",
-    "agent_contract_id",
-    "agent_contract_sha256",
-    "input_sha256",
+    "retrieval_identity",
+    "retrieval_identity_utf8",
+    "retrieval_identity_sha256",
+    "agent_contract",
     "workspace_scope_revision_id",
     "workspace_scope_sha256",
     "outline_checkpoint_id",
@@ -127,32 +122,23 @@
     "document_settings_revision_id": {
       "$ref": "#/$defs/uuid"
     },
-    "prompt_contract_id": {
-      "$ref": "#/$defs/uuid"
+    "retrieval_identity": {
+      "oneOf": [{ "$ref": "#/$defs/retrievalIdentity" }, { "type": "null" }]
     },
-    "prompt_contract_sha256": {
-      "$ref": "#/$defs/sha256"
+    "retrieval_identity_utf8": {
+      "oneOf": [
+        { "type": "string", "minLength": 2, "maxLength": 1048576 },
+        { "type": "null" }
+      ]
     },
-    "template_contract_id": {
-      "$ref": "#/$defs/uuid"
+    "retrieval_identity_sha256": {
+      "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }]
     },
-    "template_contract_sha256": {
-      "$ref": "#/$defs/sha256"
-    },
-    "model_contract_id": {
-      "$ref": "#/$defs/uuid"
-    },
-    "model_contract_sha256": {
-      "$ref": "#/$defs/sha256"
-    },
-    "agent_contract_id": {
-      "$ref": "#/$defs/uuid"
-    },
-    "agent_contract_sha256": {
-      "$ref": "#/$defs/sha256"
-    },
-    "input_sha256": {
-      "$ref": "#/$defs/sha256"
+    "agent_contract": {
+      "oneOf": [
+        { "$ref": "#/$defs/agentContract" },
+        { "type": "null" }
+      ]
     },
     "workspace_scope_revision_id": {
       "$ref": "#/$defs/uuid"
@@ -359,6 +345,72 @@
         }
       }
     },
+    "retrievalIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "policy_sha256", "canonical_policy_utf8", "contract_version", "mode", "max_hits", "max_chunk_bytes", "max_total_bytes", "embedding_revision_sha256", "canonical_embedding_revision_utf8", "embedding_credential_ref", "rerank_revision_sha256", "canonical_rerank_revision_utf8", "rerank_credential_ref", "product_version_ids", "library_version_ids", "eligible_scope_sha256"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "policy_sha256": { "$ref": "#/$defs/sha256" },
+        "canonical_policy_utf8": { "type": "string", "minLength": 2 },
+        "contract_version": { "const": "knowledge-evidence-v2" },
+        "mode": { "const": "exact" },
+        "max_hits": { "type": "integer", "minimum": 1 },
+        "max_chunk_bytes": { "type": "integer", "minimum": 1 },
+        "max_total_bytes": { "type": "integer", "minimum": 1 },
+        "embedding_revision_sha256": { "$ref": "#/$defs/sha256" },
+        "canonical_embedding_revision_utf8": { "type": "string", "minLength": 2 },
+        "embedding_credential_ref": { "type": "string", "minLength": 1 },
+        "rerank_revision_sha256": { "$ref": "#/$defs/sha256" },
+        "canonical_rerank_revision_utf8": { "type": "string", "minLength": 2 },
+        "rerank_credential_ref": { "type": "string", "minLength": 1 },
+        "product_version_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } },
+        "library_version_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/uuid" } },
+        "eligible_scope_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "agentContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime_contract", "runtime_contract_sha256", "prompt_contract_id", "prompt_contract_sha256", "prompt_utf8", "prompt_sha256", "output_schema_id", "output_schema_utf8", "output_schema_sha256", "template_contract_id", "template_contract_sha256", "model_contract_id", "model_contract_sha256", "agent_contract_id", "agent_contract_sha256"],
+      "properties": {
+        "runtime_contract": { "$ref": "#/$defs/runtimeContract" },
+        "runtime_contract_sha256": { "$ref": "#/$defs/sha256" },
+        "prompt_contract_id": { "$ref": "#/$defs/uuid" },
+        "prompt_contract_sha256": { "$ref": "#/$defs/sha256" },
+        "prompt_utf8": { "type": "string", "minLength": 1 },
+        "prompt_sha256": { "$ref": "#/$defs/sha256" },
+        "output_schema_id": { "const": "urn:knowledgebrain:bid:content-generation-output:v1" },
+        "output_schema_utf8": { "type": "string", "minLength": 2 },
+        "output_schema_sha256": { "$ref": "#/$defs/sha256" },
+        "template_contract_id": { "$ref": "#/$defs/uuid" },
+        "template_contract_sha256": { "$ref": "#/$defs/sha256" },
+        "model_contract_id": { "$ref": "#/$defs/uuid" },
+        "model_contract_sha256": { "$ref": "#/$defs/sha256" },
+        "agent_contract_id": { "$ref": "#/$defs/uuid" },
+        "agent_contract_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "runtimeContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "base_url", "endpoint", "protocol", "model_id", "credential_ref", "stream", "max_tokens", "timeout_ms", "response_mode", "transport_retries", "temperature", "reasoning_effort"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "base_url": { "type": "string", "minLength": 1 },
+        "endpoint": { "type": "string", "pattern": "^https://" },
+        "protocol": { "const": "openai_chat_completions_sse" },
+        "model_id": { "type": "string", "minLength": 1 },
+        "credential_ref": { "enum": ["env:KNOWLEDGEBRAIN_CHAT_API_KEY", "env:LLM_API_KEY"] },
+        "stream": { "const": true },
+        "max_tokens": { "const": 8192 },
+        "timeout_ms": { "const": 180000 },
+        "response_mode": { "const": "strict_json_schema" },
+        "transport_retries": { "const": 0 },
+        "temperature": { "type": "null" },
+        "reasoning_effort": { "type": "null" }
+      }
+    },
     "frozenIdentity": {
       "type": "object",
       "additionalProperties": false,
@@ -390,9 +442,10 @@
       },
       "then": {
         "properties": {
-          "evidence_selection_input": {
-            "$ref": "#/$defs/systemSelection"
-          }
+          "evidence_selection_input": { "$ref": "#/$defs/systemSelection" },
+          "retrieval_identity": { "$ref": "#/$defs/retrievalIdentity" },
+          "retrieval_identity_utf8": { "type": "string", "minLength": 2 },
+          "retrieval_identity_sha256": { "$ref": "#/$defs/sha256" }
         }
       }
     },
@@ -409,9 +462,10 @@
       },
       "then": {
         "properties": {
-          "evidence_selection_input": {
-            "$ref": "#/$defs/userSelection"
-          }
+          "evidence_selection_input": { "$ref": "#/$defs/userSelection" },
+          "retrieval_identity": { "type": "null" },
+          "retrieval_identity_utf8": { "type": "null" },
+          "retrieval_identity_sha256": { "type": "null" }
         }
       }
     }

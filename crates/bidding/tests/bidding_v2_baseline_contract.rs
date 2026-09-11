@@ -1,10 +1,9 @@
 const SQL: &str = include_str!("../../../migrations/bidding_v2_baseline.sql");
 const KNOWLEDGE_SQL: &str = include_str!("../../../migrations/knowledge_base_baseline.sql");
+const SHARED_SQL: &str = include_str!("../../../migrations/shared_platform_baseline.sql");
+const PLATFORM_DB: &str = include_str!("../../platform/src/db.rs");
 const ACTIVE_QUEUE_REGISTRY: &str = include_str!("../../../deploy/queue-registry.toml");
-const PHASE1_LIVE: &str = include_str!("../../../scripts/bidding_v2_phase1_live.sql");
-const PHASE3_LIVE: &str = include_str!("../../../scripts/bidding_v2_phase3_live.sql");
-const SEMANTIC_SPINE_LIVE: &str =
-    include_str!("../../../migrations/bidding_v2_semantic_spine_live.sql");
+const PHASE1_ACCEPTANCE: &str = include_str!("sql/phase1_acceptance.sql");
 const API_ROUTER: &str = include_str!("../../api/src/routes.rs");
 const BID_API_ROUTER: &str = include_str!("../../api/src/bid_v2_routes.rs");
 const WORKER: &str = include_str!("../../worker/src/consume.rs");
@@ -14,6 +13,9 @@ const KNOWLEDGE_SEARCH: &str = include_str!("../../knowledge/src/search/mod.rs")
 const KNOWLEDGE_INDEX_V2: &str = include_str!("../../knowledge/src/knowledge_index_v2.rs");
 const FRESH_SCHEMA_ACCEPTANCE: &str = include_str!("../../../scripts/fresh_schema_acceptance.sh");
 const BIDDING_TEST_SUPPORT: &str = include_str!("support/mod.rs");
+const CONTENT_ERROR_REGISTRY: &str = include_str!("../schemas/content-error-codes-v1.json");
+const REQUEST_HANDLER_ERROR_REGISTRY: &str =
+    include_str!("../schemas/request-handler-error-codes-v1.json");
 
 use knowledge::{LaunchMode, QueueRegistry};
 use platform::{
@@ -33,21 +35,72 @@ fn destructive_postgres_tests_require_an_isolated_non_live_database() {
         ("worker", WORKER),
         ("knowledge clone", KNOWLEDGE_CLONE),
         ("knowledge search", KNOWLEDGE_SEARCH),
-        ("fresh acceptance", FRESH_SCHEMA_ACCEPTANCE),
     ] {
         assert!(source.contains("DROP SCHEMA public CASCADE"), "{name}");
         assert!(
             source.contains("KNOWLEDGEBRAIN_TEST_DATABASE_URL"),
-            "{name} can inherit the live database"
+            "{name}"
         );
+        assert!(source.contains(":15432/"), "{name}");
+    }
+    assert!(FRESH_SCHEMA_ACCEPTANCE.contains("urlparse"));
+    assert!(FRESH_SCHEMA_ACCEPTANCE.contains("url.port != 25433"));
+    assert!(FRESH_SCHEMA_ACCEPTANCE.contains("knowledgebrain_test_"));
+    assert!(BIDDING_TEST_SUPPORT.contains("PgConnectOptions"));
+    assert!(BIDDING_TEST_SUPPORT.contains("get_port() == 25433"));
+    assert!(BIDDING_TEST_SUPPORT.contains("knowledgebrain_test_"));
+    assert!(!BIDDING_TEST_SUPPORT.contains("platform::database_url()"));
+}
+
+#[test]
+fn platform_order_and_knowledge_object_ownership_are_frozen() {
+    let owner = PLATFORM_DB.find("SET LOCAL ROLE kb_app_owner").unwrap();
+    let shared = PLATFORM_DB
+        .find("sqlx::raw_sql(SHARED_PLATFORM_BASELINE)")
+        .unwrap();
+    let knowledge = PLATFORM_DB
+        .find("sqlx::raw_sql(KNOWLEDGE_BASE_BASELINE)")
+        .unwrap();
+    let bidding = PLATFORM_DB.find("sqlx::raw_sql(BIDDING_BASELINE)").unwrap();
+    assert!(owner < shared && shared < knowledge && knowledge < bidding);
+    for symbol in [
+        "kb_register_knowledge_image_object",
+        "kb_register_knowledge_document_object",
+        "kb_release_knowledge_document_object",
+        "kb_validate_knowledge_document_object_reference",
+        "kb_guard_knowledge_document_delete",
+        "documents_object_reference_contract",
+        "documents_object_reference_delete_guard",
+    ] {
+        assert!(!SHARED_SQL.contains(symbol), "Shared still owns {symbol}");
         assert!(
-            source.contains(":15432/"),
-            "{name} does not explicitly reject the live PostgreSQL port"
+            KNOWLEDGE_SQL.contains(symbol),
+            "Knowledge is missing {symbol}"
         );
     }
-    assert!(BIDDING_TEST_SUPPORT.contains("KNOWLEDGEBRAIN_TEST_DATABASE_URL"));
-    assert!(!BIDDING_TEST_SUPPORT.contains("platform::database_url()"));
-    assert!(BIDDING_TEST_SUPPORT.contains(":15432/"));
+}
+
+#[test]
+fn bidding_never_alters_shared_or_knowledge_owned_inventory() {
+    for foreign_object in [
+        "object_registry",
+        "knowledge_image_artifact_revisions",
+        "knowledge_matching_scope_attestations_v2",
+    ] {
+        assert!(
+            !SQL.contains(&format!("ALTER TABLE {foreign_object}")),
+            "Bidding alters foreign-owned object {foreign_object}"
+        );
+    }
+    assert!(SHARED_SQL.contains("UNIQUE(object_ref,digest,state)"));
+    assert!(SHARED_SQL.contains("UNIQUE(object_ref,digest,media_type,state)"));
+    assert!(SHARED_SQL.contains("UNIQUE(object_ref,digest,media_type,byte_length,state)"));
+    assert!(
+        KNOWLEDGE_SQL.contains("FOREIGN KEY(object_ref,content_sha256,media_type,object_state)")
+    );
+    assert!(KNOWLEDGE_SQL.contains("UNIQUE NULLS NOT DISTINCT(id,object_ref,content_sha256,media_type,object_state,width,height,page_ordinal,bounding_region)"));
+    assert!(KNOWLEDGE_SQL.contains("UNIQUE(id,content_sha256)"));
+    assert!(SQL.contains("ALTER TABLE bid_tender_source_image_revision_artifacts"));
 }
 
 #[test]
@@ -56,7 +109,9 @@ fn retention_tests_require_the_isolated_migrated_shared_schema_only() {
     assert!(RETENTION.contains(":15432/"));
     assert!(!RETENTION.contains("platform::database_url()"));
     assert!(!RETENTION.contains("platform::apply_fresh_baseline"));
-    assert!(RETENTION.contains("kb_object_upload_expire()"));
+    assert!(RETENTION.contains("kb_object_upload_expiry_candidates()"));
+    assert!(RETENTION.contains("kb_object_upload_expire_one(uuid)"));
+    assert!(RETENTION.contains("kb_retention_preflight(uuid,kb_object_ref,kb_sha256,bigint)"));
 }
 
 #[test]
@@ -89,7 +144,6 @@ fn v2_baseline_has_the_complete_authoring_foundation() {
         "bid_authoring_contract_artifacts",
         "bid_tender_document_process_request_identities",
         "bid_requirement_set_compile_request_identities",
-        "bid_outline_generation_request_identities",
         "bid_content_generation_request_identities",
         "bid_submission_export_request_identities",
         "bid_content_generation_request_evidence_bundles",
@@ -136,9 +190,9 @@ fn v2_baseline_has_the_complete_authoring_foundation() {
     assert!(SQL.contains("disposition_set_sequence"));
     assert!(SQL.contains("disposition IN ('requirement','non_requirement','unresolved')"));
     assert!(!SQL.contains("mandatory boolean"));
-    assert!(SQL.contains("requiredness IN ('mandatory','optional','informational')"));
+    assert!(SQL.contains("requiredness IN ('mandatory','optional','informational','unknown')"));
     assert!(SQL.contains(
-        "compliance_policy IN ('must_comply','explicit_response','deviation_allowed','scored')"
+        "compliance_policy IN ('must_comply','explicit_response','deviation_allowed','scored','unknown')"
     ));
     assert!(SQL.contains("lifecycle IN ('current','superseded','withdrawn','unresolved')"));
     assert!(SQL.contains("status IN ('ready','has_warnings','has_critical_warnings')"));
@@ -202,35 +256,40 @@ fn owner_projection_publication_and_worker_terminal_contracts_are_frozen() {
         .find("CREATE FUNCTION kb_bid_v2_mark_tender_document_failed")
         .unwrap()..SQL.find("REVOKE ALL ON ALL TABLES").unwrap()];
     let request_lock = tender_failure.find("FOR UPDATE").unwrap();
+    let typed_fence = tender_failure
+        .find("FROM bid_tender_document_process_request_identities")
+        .unwrap();
     let terminal_guard = tender_failure
         .find("status<>'pending' THEN RETURN")
         .unwrap();
     let document_update = tender_failure.find("UPDATE bid_documents").unwrap();
-    assert!(request_lock < terminal_guard && terminal_guard < document_update);
-    assert!(WORKER.contains("fn bid_failure_is_final(retries: u32)"));
-    assert!(!WORKER.contains("BID_AUTHORING_V2_MAX_RETRIES.saturating_sub(1)"));
+    assert!(request_lock < typed_fence && typed_fence < terminal_guard);
+    assert!(terminal_guard < document_update);
+    assert!(!WORKER.contains(concat!("bid_failure_", "is_final")));
+    assert!(!WORKER.contains("ctx.meta.retries >= platform::BID_AUTHORING_V2_MAX_RETRIES"));
     assert!(SQL.contains("page_count integer CHECK (page_count > 0 AND page_count <= 1000)"));
 }
 
 #[test]
-fn v3_requirement_publication_never_advances_workspace_and_live_sql_is_fresh() {
-    let v3 = SQL
-        .split_once("CREATE FUNCTION kb_bid_v2_publish_requirement_set_v3(")
-        .expect("V3 publisher")
+fn v4_requirement_publication_never_advances_workspace() {
+    let v4 = SQL
+        .split_once("CREATE FUNCTION kb_bid_v2_publish_requirement_set_v4(")
+        .expect("V4 publisher")
         .1
-        .split_once("CREATE FUNCTION kb_bid_v2_mark_requirement_set_compile_failed(")
-        .expect("V3 publisher fence")
+        .split_once("END $$;")
+        .expect("V4 publisher fence")
         .0;
-    assert!(v3.contains("publication_status='superseded'"));
-    assert!(!v3.contains("publication_status='obsolete'"));
-    assert!(!v3.contains("kb_bid_v2_advance_workspace_projection"));
-    assert!(v3.contains("'published_current',false"));
-    assert!(v3.contains("'workspace_apply_required',false"));
-    assert!(v3.contains("'published_current',true"));
-    assert!(v3.contains("'workspace_apply_required',true"));
-    assert!(v3.contains("publication_status<>'published'"));
-    assert!(SEMANTIC_SPINE_LIVE.contains(v3));
-    assert!(!SEMANTIC_SPINE_LIVE.contains("publication_status='obsolete'"));
+    assert!(v4.contains("publication_status='superseded'"));
+    assert!(!v4.contains("publication_status='obsolete'"));
+    assert!(!v4.contains("kb_bid_v2_advance_workspace_projection"));
+    assert!(v4.contains("'published_current',false"));
+    assert!(v4.contains("'workspace_apply_required',false"));
+    assert!(v4.contains("'published_current',true"));
+    // Analysis publishes a source basis; DOCX rounds are created explicitly.
+    assert!(!v4.contains("'workspace_apply_required',true"));
+    assert!(!SQL.contains("CREATE FUNCTION kb_bid_v2_load_requirement_set_compile_input_v3("));
+    assert!(!SQL.contains("CREATE FUNCTION kb_bid_v2_publish_requirement_set_v3("));
+    assert!(v4.contains("publication_status<>'published'"));
 }
 
 #[test]
@@ -344,7 +403,9 @@ fn reviewed_publication_target_and_render_constraints_are_frozen() {
     assert!(SQL.contains("REFERENCES knowledge_image_artifact_revisions(id,object_ref,content_sha256,media_type,object_state)"));
     assert!(SQL.contains("item_payload->>'evidence_item_id')::uuid=id"));
     assert!(SQL.contains("item_payload->>'kind' IS NOT DISTINCT FROM item_kind"));
-    assert!(SQL.contains("ALTER TABLE knowledge_image_artifact_revisions"));
+    assert!(
+        KNOWLEDGE_SQL.contains("FOREIGN KEY(object_ref,content_sha256,media_type,object_state)")
+    );
     assert!(SQL.contains("REFERENCES object_registry(object_ref,digest,media_type,state)"));
     assert!(SQL.contains("REFERENCES knowledge_matching_scope_attestations_v2(id,content_sha256)"));
     assert!(SQL.contains("kb_bid_v2_validate_render_snapshot_payload"));
@@ -380,14 +441,20 @@ fn reviewed_publication_target_and_render_constraints_are_frozen() {
     assert!(SQL.contains("kb_bid_v2_guard_candidate_initial_state"));
     assert!(SQL.contains("candidate initial state must be proposed and undecided"));
     assert!(SQL.contains("kb_bid_v2_guard_candidate_transition"));
-    assert!(SQL.contains("request_operation text NOT NULL CHECK (request_operation IN ('outline_generate','generate'))"));
+    assert!(SQL.contains("ARRAY['state','decided_at','canonical_payload_sha256']"));
+    assert!(!SQL.contains("ARRAY['state','decided_at','canonical_payload']"));
+    assert!(
+        SQL.contains("request_operation text NOT NULL CHECK (request_operation IN ('generate'))")
+    );
     assert!(SQL.contains("evidence_selection_sha256 kb_sha256 NOT NULL"));
     assert!(SQL.contains("pick_set_matching_report_id uuid"));
     assert!(SQL.contains("matching_policy_id uuid"));
-    assert!(SQL.contains("prompt_contract_id uuid NOT NULL"));
-    assert!(SQL.contains("template_contract_id uuid NOT NULL"));
-    assert!(SQL.contains("model_contract_id uuid NOT NULL"));
-    assert!(SQL.contains("agent_contract_id uuid NOT NULL"));
+    assert!(SQL.contains("prompt_contract_id IS NOT NULL AND prompt_contract_sha256 IS NOT NULL"));
+    assert!(
+        SQL.contains("template_contract_id IS NOT NULL AND template_contract_sha256 IS NOT NULL")
+    );
+    assert!(SQL.contains("model_contract_id IS NOT NULL AND model_contract_sha256 IS NOT NULL"));
+    assert!(SQL.contains("agent_contract_id IS NOT NULL AND agent_contract_sha256 IS NOT NULL"));
     assert!(SQL.contains("CREATE TABLE bid_tender_document_process_request_identities"));
     assert!(SQL.contains("converter_contract_id uuid NOT NULL"));
     assert!(SQL.contains("ADD FOREIGN KEY(converter_contract_id,converter_contract_sha256)"));
@@ -397,7 +464,6 @@ fn reviewed_publication_target_and_render_constraints_are_frozen() {
     ));
     assert!(SQL.contains("'source_unit_set_sha256',computed_source_unit_set_sha"));
     assert!(SQL.contains("CREATE TABLE bid_requirement_set_compile_request_identities"));
-    assert!(SQL.contains("CREATE TABLE bid_outline_generation_request_identities"));
     assert!(SQL.contains("CREATE TABLE bid_submission_export_request_identities"));
     assert!(SQL.contains("EvidenceAsset knowledge media qualified identity mismatch"));
     assert!(SQL.contains("kb_bid_v2_verify_evidence_bundle_projection"));
@@ -465,19 +531,24 @@ fn v2_baseline_has_no_deleted_or_transport_state() {
         "procedural_classification",
         "procedural_decision",
         "delivery_attempt",
-        "lease_expires",
         "retry_count",
         "dispatch_head",
         "dispatch_intent",
         "fan_out",
         "fan_in",
+        "initial_enqueue_reserved_at",
+        "automatic_reconcile_reserved_at",
+        "operator_requeue_required",
+        "request_delivery_state",
+        "claim_stale_request_deliveries",
+        "reserve_request_delivery",
     ] {
         assert!(
             !normalized.contains(forbidden),
             "forbidden V2 SQL: {forbidden}"
         );
     }
-    assert!(SQL.contains("request_kind IN ('tender_document_process','requirement_set_compile','outline_generate','content_generate','submission_export')"));
+    assert!(SQL.contains("request_kind IN ('tender_document_process','requirement_set_compile','content_generate','submission_export','docx_compose')"));
     assert!(!SQL.contains("matching_schedule"));
     assert!(!SQL.contains("attachment_preparation_jobs"));
 }
@@ -506,10 +577,10 @@ fn phase_one_vertical_has_owner_checked_mutations_and_is_active() {
     assert!(SQL.contains("DOCUMENT_SET_CAS_MISMATCH"));
     assert!(SQL.contains("disposition='requirement'"));
     assert!(SQL.contains("'requirement_projection_id',projection_id"));
-    assert!(PHASE1_LIVE.contains("cross-owner tender read accepted"));
-    assert!(PHASE1_LIVE.contains("idempotency payload mismatch accepted"));
-    assert!(PHASE1_LIVE.contains("stale document set CAS accepted"));
-    assert!(PHASE1_LIVE.contains("source unit lacks exactly one requirement disposition"));
+    assert!(PHASE1_ACCEPTANCE.contains("cross-owner tender read accepted"));
+    assert!(PHASE1_ACCEPTANCE.contains("idempotency payload mismatch accepted"));
+    assert!(PHASE1_ACCEPTANCE.contains("stale document set CAS accepted"));
+    assert!(PHASE1_ACCEPTANCE.contains("source unit lacks exactly one requirement disposition"));
     assert!(API_ROUTER.contains("merge(crate::bid_v2_routes::router())"));
     let active_worker = WORKER
         .split("\n#[cfg(test)]")
@@ -518,157 +589,65 @@ fn phase_one_vertical_has_owner_checked_mutations_and_is_active() {
     assert!(active_worker.contains("queue_with_concurrency::<BidAuthoringV2Queue>"));
     assert!(active_worker.contains("TenderDocumentProcessV2Worker"));
     assert!(active_worker.contains("RequirementSetCompileV2Worker"));
-    assert!(active_worker.contains("OutlineGenerateV2Worker"));
     assert!(active_worker.contains("ContentGenerateV2Worker"));
 }
 
 #[test]
-fn phase_three_has_async_workers_and_live_evidence_candidate_publication() {
-    for procedure in [
-        "kb_bid_v2_load_outline_generation_input",
-        "kb_bid_v2_publish_outline_generation",
-        "kb_bid_v2_load_content_generation_input",
-        "kb_bid_v2_publish_content_generation",
-        "kb_bid_v2_get_evidence_overview",
-    ] {
-        assert!(
-            SQL.contains(&format!("CREATE FUNCTION {procedure}")),
-            "{procedure}"
-        );
-    }
-    assert!(PHASE1_LIVE.contains("kb_bid_v2_publish_outline_generation"));
-    assert!(PHASE3_LIVE.contains("explicit no-evidence bundle publication failed"));
-    assert!(SEMANTIC_SPINE_LIVE.contains(
-        "DROP CONSTRAINT IF EXISTS bid_outline_requirement_grouping_batc_need_occurrence_ids_check"
-    ));
-    assert!(SEMANTIC_SPINE_LIVE.contains("kb_bid_v2_outline_semantic_grouping_put"));
-    assert!(!SEMANTIC_SPINE_LIVE.contains("SET status='obsolete'"));
-    assert!(!SEMANTIC_SPINE_LIVE.contains("SET state='obsolete'"));
-    assert!(SEMANTIC_SPINE_LIVE.contains("'status','succeeded','published_current',false"));
-    assert!(SEMANTIC_SPINE_LIVE.contains(
-        "DROP CONSTRAINT IF EXISTS bid_outline_reduce_plan_artif_request_artifact_id_frozen_in_key"
-    ));
-    assert!(
-        SEMANTIC_SPINE_LIVE.contains("ADD CONSTRAINT bid_outline_reduce_plan_replay_key UNIQUE")
-    );
-    assert!(PHASE3_LIVE.contains("match_only did not complete without a candidate"));
-    let active_worker = WORKER
-        .split("\n#[cfg(test)]")
-        .next()
-        .expect("worker source");
-    assert!(active_worker.contains("run_outline_generation"));
-    assert!(active_worker.contains("run_content_agent"));
-    assert!(active_worker.contains("exactly once"));
-    for semantic_contract in [
-        "kb_bid_v2_load_requirement_set_compile_input_v3",
-        "kb_bid_v2_publish_requirement_set_v3",
-        "kb_bid_v2_outline_semantics_valid",
-        "kb_bid_v2_outline_semantic_grouping_put",
-        "section_obligation_bindings",
-        "'system:requirement-set-compile-v3'",
-        "\"map_schema\":4",
-        "\"requirement_grouping_schema\":1",
-        "\"requirement_grouping_schema\":2",
-        "\"requirement_grouping_schema\":3",
-        "\"requirement_grouping_schema\":4",
-        "\"requirement_grouping_schema\":5",
-        "\"structure_placement_schema\":1",
-        "\"structure_placement_schema\":2",
-        "\"fulfillment_group_schema\":1",
-        "\"reduce_schema\":3",
-        "\"draft_patch_schema\":1",
-        "\"packet_schema\":4",
-        "\"packet_schema\":5",
-        "\"checkpoint_schema\":4",
-        "\"output_schema\":2",
-    ] {
-        assert!(
-            SQL.contains(semantic_contract),
-            "missing {semantic_contract}"
-        );
-    }
-    assert!(SQL.contains("AND request_value.status='pending'"));
-    assert!(!SQL.contains("request_value.status IN ('pending','succeeded')"));
-    assert!(!SQL.contains("UPDATE bid_candidate_artifacts SET state='obsolete'"));
-    assert!(SQL.contains("THEN 'obsolete' ELSE candidate.state END"));
-    assert!(SQL.contains(
-        "ARRAY['schema_version','coverage','composition_spine',\n      'section_obligation_matrix','fulfillment_groups'"
-    ));
-    assert!(SQL.contains(
-        "'reduce_plan_sha256','map_evidence_set_sha256','grouping_evidence_set_sha256','composition_spine'"
-    ));
-    assert!(
-        SQL.contains("'fulfillment_groups','non_output_fragments','deterministic_spine_nodes'")
-    );
-    assert!(
-        SQL.contains(
-            "'selected_evidence','selected_facts','nodes','patch_receipts','closure_facts'"
-        )
-    );
-    assert!(SQL.contains("'missing_group_refs','empty_section_refs','invalid_assignments'"));
-    assert!(SQL.contains("p_payload->'schema_version' IS DISTINCT FROM '3'::jsonb"));
+fn content_terminal_error_allowlist_matches_the_separate_registry() {
+    let registry: serde_json::Value = serde_json::from_str(CONTENT_ERROR_REGISTRY).unwrap();
+    let expected = registry["codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["code"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    let failure = SQL
+        .split_once("CREATE FUNCTION kb_bid_v2_mark_content_generation_failed(")
+        .unwrap()
+        .1
+        .split_once("CREATE FUNCTION kb_bid_v2_create_evidence_pick_set(")
+        .unwrap()
+        .0;
+    let allowlist = failure
+        .split_once("IF p_error_code NOT IN (")
+        .unwrap()
+        .1
+        .split_once(") THEN")
+        .unwrap()
+        .0;
+    let actual = allowlist
+        .split('\'')
+        .enumerate()
+        .filter_map(|(index, value)| (index % 2 == 1).then_some(value))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, expected);
+    assert!(SQL.contains("CREATE TABLE bid_content_agent_run_artifacts"));
+    assert!(SQL.contains("CREATE TABLE bid_content_agent_boundary_attempts"));
+    assert!(SQL.contains("kb_bid_v2_content_lock_owner"));
+    assert!(failure.contains("kb_bid_v2_content_lock_owner"));
+}
+
+#[test]
+fn non_agent_timeout_allowlists_match_the_separate_handler_registry() {
+    let registry: serde_json::Value = serde_json::from_str(REQUEST_HANDLER_ERROR_REGISTRY).unwrap();
+    let codes = registry["codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["code"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
-        SQL.matches("p_payload->'schema_version' NOT IN ('3'::jsonb,'4'::jsonb)")
-            .count(),
-        1
+        codes,
+        std::collections::BTreeSet::from([
+            "REQUIREMENT_COMPILE_TIMEOUT",
+            "SUBMISSION_EXPORT_TIMEOUT",
+            "TENDER_DOCUMENT_PROCESS_TIMEOUT",
+        ])
     );
-    assert!(SQL.contains("p_payload->'schema_version' NOT IN ('3'::jsonb,'4'::jsonb,'5'::jsonb)"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000105"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000106"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000107"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000108"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000109"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000110"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000111"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000112"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000113"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000114"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000115"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000116"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000117"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000118"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000119"));
-    assert!(SQL.contains("00000000-0000-5000-8000-000000000120"));
-    assert!(SQL.contains("\"version\":8,\"map_schema\":4,\"requirement_grouping_schema\":1"));
-    assert!(SQL.contains("\"version\":9,\"map_schema\":4,\"requirement_grouping_schema\":2"));
-    assert!(SQL.contains("\"version\":10,\"map_schema\":4,\"requirement_grouping_schema\":3"));
-    assert!(SQL.contains("\"version\":11,\"map_schema\":4,\"requirement_grouping_schema\":4"));
-    assert!(SQL.contains("\"version\":12,\"map_schema\":4,\"requirement_grouping_schema\":4"));
-    assert!(SQL.contains("\"version\":13,\"map_schema\":4,\"requirement_grouping_schema\":4"));
-    assert!(SQL.contains("\"version\":14,\"map_schema\":4,\"requirement_grouping_schema\":5"));
-    assert!(SQL.contains("\"version\":15,\"map_schema\":4,\"requirement_grouping_schema\":5"));
-    assert!(SQL.contains("\"version\":16,\"map_schema\":4,\"requirement_grouping_schema\":5"));
-    assert!(SQL.contains("\"version\":17,\"map_schema\":4,\"requirement_grouping_schema\":5"));
-    assert!(SQL.contains("\"version\":18,\"map_schema\":4,\"requirement_grouping_schema\":5"));
-    assert!(SQL.contains("\"version\":19,\"map_schema\":4,\"requirement_grouping_schema\":5"));
-    assert!(SQL.contains("\"version\":20,\"map_schema\":4,\"requirement_grouping_schema\":5"));
-    assert!(SQL.contains("\"section_target\":\"explicit_frozen_section_ref\""));
-    assert!(SQL.contains("\"grouping_output\":\"semantic_delta_only\""));
-    assert!(SQL.contains("\"structure_placement\":\"model_selected_frozen_section_ref\""));
-    assert!(SQL.contains("\"structure_placement\":\"model_selected_section_and_group\""));
-    assert!(SQL.contains("\"cross_batch_group_registry\":\"sequential_reserved_exact\""));
-    assert!(SQL.contains("\"cross_batch_group_registry\":\"sequential_bounded_feedback\""));
-    assert!(SQL.contains("\"intra_batch_group_registry\":\"exact_section_title_materialization\""));
-    assert!(SQL.contains("\"new_group_key_scope\":\"batch_ordinal\""));
-    assert!(SQL.contains("\"response_requiredness\":[\"mandatory\",\"optional\"]"));
-    assert!(SQL.contains("\"informational_closure\":\"compiled_semantic_unmapped_notice\""));
-    assert!(SQL.contains("\"draft_closure\":\"mandatory_and_optional_groups\""));
-    assert!(SQL.contains(
-        "\"topology_closure\":\"every_frozen_section_has_model_authored_evidence_child\""
-    ));
-    assert!(SQL.contains("\"repair_identity\":\"groups_and_sections\""));
-    assert!(SQL.contains("\"checkpoint_resume\":[3,4]"));
-    assert!(SQL.contains("\"context_fragment_promotion\":\"forbidden_by_title_and_source\""));
-    assert!(SQL.contains("\"repair_identity\":\"groups_sections_and_invalid_assignments\""));
-    assert!(SQL.contains("\"non_output_fragment_packet\":\"bounded_title_usage_source\""));
-    assert!(SQL.contains("\"patch_error_feedback\":\"all_invalid_identities_bounded_32\""));
-    assert!(
-        SQL.contains(
-            "\"conflict_notice_severity\":\"high_only_if_output_relevant_frozen_fragment\""
-        )
-    );
-    assert!(SQL.contains("\"progress_control\":\"semantic_closure_and_atomic_patch\""));
-    assert!(SQL.contains("ORDER BY created_at DESC,checkpoint_ordinal DESC LIMIT 1"));
+    for code in codes {
+        assert!(SQL.contains(&format!("'{code}'")), "SQL omits {code}");
+    }
+    assert!(!CONTENT_ERROR_REGISTRY.contains("SUBMISSION_EXPORT_TIMEOUT"));
 }
 
 #[test]
@@ -687,8 +666,8 @@ fn active_queue_registry_is_v2_only_and_matches_implemented_workers() {
             LaunchMode::RequiredEnabled,
         ),
         (
-            "bid:outline_generate:v2",
-            "OutlineGenerateV2Handler",
+            "bid:docx_compose:v2",
+            "DocxComposeV2Handler",
             LaunchMode::RequiredEnabled,
         ),
         (
@@ -750,4 +729,28 @@ fn runtime_vector_retrieval_and_image_snapshot_contracts_are_frozen() {
     );
     assert!(KNOWLEDGE_INDEX_V2.contains("FOR SHARE OF version\""));
     assert!(!KNOWLEDGE_INDEX_V2.contains("FOR SHARE OF version,binding,revision"));
+}
+
+#[test]
+fn request_delivery_uses_oxana_without_a_postgres_reconciler() {
+    assert!(SQL.contains("kb_bid_v2_authoring_job_payload"));
+    assert!(SQL.contains("REQUEST_JOB_PAYLOAD_MISMATCH"));
+    assert!(SQL.contains("kb_bid_v2_load_authoring_job_payload"));
+    assert!(!SQL.contains("automatic_reconcile"));
+    assert!(!SQL.contains("kb_bid_v2_claim_stale_request_deliveries"));
+    assert!(BID_API_ROUTER.contains("load_authoring_job_payload_v2(pool, &request)"));
+    assert!(BID_API_ROUTER.contains("platform::enqueue_bid_authoring_v2(payload)"));
+    assert!(!BID_API_ROUTER.contains("reserve_request_delivery_v2(pool, &request, \"api\")"));
+    for forbidden in [
+        "run_bid_request_delivery_reconciler",
+        "claim_stale_request_deliveries_v2",
+        "DELIVERY_RECONCILE_MIN_SECONDS",
+        "automatic_reconcile",
+    ] {
+        assert!(
+            !WORKER.contains(forbidden),
+            "Worker contains PG queue recovery: {forbidden}"
+        );
+    }
+    assert!(!WORKER.contains("oxanus:"));
 }

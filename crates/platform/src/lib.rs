@@ -3,25 +3,34 @@
 mod auth;
 mod bid_authoring_contract;
 mod blobs;
+mod catalog;
 mod db;
 mod env;
 mod image_lock;
 mod jobs;
+mod namespace;
+mod namespace_reset;
 mod object_registry;
+mod object_store;
 mod probe;
 mod queue_registry;
+mod release;
 mod s3;
 
 pub use auth::*;
 pub use bid_authoring_contract::*;
 pub use blobs::*;
+pub use catalog::*;
 pub use db::*;
 pub use env::*;
 pub use image_lock::*;
 pub use jobs::*;
+pub use namespace::*;
+pub use namespace_reset::*;
 pub use object_registry::*;
 pub use probe::*;
 pub use queue_registry::*;
+pub use release::*;
 pub use s3::{configured as s3_configured, get_object, put_object};
 
 pub const TYPE_DOCUMENT_PROCESS: &str = "document:process";
@@ -90,7 +99,6 @@ pub fn queue_for(task_type: &str) -> &'static str {
         TYPE_DOCUMENT_PROCESS | TYPE_MANUAL_PROCESS => QUEUE_DEFAULT,
         BID_TENDER_DOCUMENT_PROCESS_V2_TASK
         | BID_REQUIREMENT_SET_COMPILE_V2_TASK
-        | BID_OUTLINE_GENERATE_V2_TASK
         | BID_CONTENT_GENERATE_V2_TASK
         | BID_SUBMISSION_EXPORT_V2_TASK => BID_AUTHORING_V2_QUEUE,
         TYPE_POST_PROCESS | TYPE_SEMANTIC_INDEX_V2 => QUEUE_POSTPROCESS,

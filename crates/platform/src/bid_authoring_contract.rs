@@ -1,10 +1,5 @@
-//! Inactive Target V2 bidding job contracts.
-//!
-//! Phase 0 freezes payload, identity, and Oxana-owned transport policy only.
-//! Oxana's `Job::name()` is an associated static function, so one tagged enum
-//! cannot expose five task names through one `Job` implementation. Phase 7
-//! therefore constructs five thin Job/Worker adapters after the active cutover.
-//! Nothing in this module is registered or dispatched by the V1 API/worker.
+//! Active bidding authoring transport contracts. Each typed adapter keeps its
+//! own task name and request-scoped Oxana identity.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -19,7 +14,7 @@ pub const BID_AUTHORING_V2_RETRY_BACKOFF_SECONDS: [u64; 3] = [10, 30, 90];
 pub const BID_AUTHORING_V2_UNIQUE_CONFLICT_POLICY: &str = "skip";
 pub const BID_AUTHORING_V2_RESURRECT_ON_REPLAY: bool = true;
 
-/// Inactive Phase 0 transport policy consumed by the five Phase 7 adapters.
+/// Shared retry policy for authoring adapters.
 pub struct BidAuthoringV2OxanaPolicy;
 
 impl BidAuthoringV2OxanaPolicy {
@@ -37,7 +32,7 @@ impl BidAuthoringV2OxanaPolicy {
 pub enum BidAuthoringJobKindV2 {
     TenderDocumentProcess,
     RequirementSetCompile,
-    OutlineGenerate,
+    DocxCompose,
     ContentGenerate,
     SubmissionExport,
 }
@@ -46,7 +41,7 @@ impl BidAuthoringJobKindV2 {
     pub const ALL: [Self; 5] = [
         Self::TenderDocumentProcess,
         Self::RequirementSetCompile,
-        Self::OutlineGenerate,
+        Self::DocxCompose,
         Self::ContentGenerate,
         Self::SubmissionExport,
     ];
@@ -55,7 +50,7 @@ impl BidAuthoringJobKindV2 {
         match self {
             Self::TenderDocumentProcess => "tender_document_process",
             Self::RequirementSetCompile => "requirement_set_compile",
-            Self::OutlineGenerate => "outline_generate",
+            Self::DocxCompose => "docx_compose",
             Self::ContentGenerate => "content_generate",
             Self::SubmissionExport => "submission_export",
         }
@@ -121,11 +116,10 @@ pub enum BidAuthoringJobPayloadV2 {
         document_set_revision_id: Uuid,
         disposition_set_revision_id: Uuid,
     },
-    OutlineGenerate {
+    DocxCompose {
         request: BidAuthoringRequestIdentityV2,
         project_id: Uuid,
         workspace_id: Uuid,
-        base_workspace_revision_id: Uuid,
     },
     ContentGenerate {
         request: BidAuthoringRequestIdentityV2,
@@ -145,7 +139,7 @@ pub enum BidAuthoringJobPayloadV2 {
 
 pub const BID_TENDER_DOCUMENT_PROCESS_V2_TASK: &str = "bid:tender_document_process:v2";
 pub const BID_REQUIREMENT_SET_COMPILE_V2_TASK: &str = "bid:requirement_set_compile:v2";
-pub const BID_OUTLINE_GENERATE_V2_TASK: &str = "bid:outline_generate:v2";
+pub const BID_DOCX_COMPOSE_V2_TASK: &str = "bid:docx_compose:v2";
 pub const BID_CONTENT_GENERATE_V2_TASK: &str = "bid:content_generate:v2";
 pub const BID_SUBMISSION_EXPORT_V2_TASK: &str = "bid:submission_export:v2";
 
@@ -165,11 +159,11 @@ pub struct RequirementSetCompileJobV2 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutlineGenerateJobV2 {
+#[serde(deny_unknown_fields)]
+pub struct DocxComposeJobV2 {
     pub request: BidAuthoringRequestIdentityV2,
     pub project_id: Uuid,
     pub workspace_id: Uuid,
-    pub base_workspace_revision_id: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,11 +217,6 @@ request_scoped_job!(
     "tender_document_process"
 );
 request_scoped_job!(
-    OutlineGenerateJobV2,
-    BID_OUTLINE_GENERATE_V2_TASK,
-    "outline_generate"
-);
-request_scoped_job!(
     ContentGenerateJobV2,
     BID_CONTENT_GENERATE_V2_TASK,
     "content_generate"
@@ -238,28 +227,13 @@ request_scoped_job!(
     "submission_export"
 );
 
-impl oxana::Job for RequirementSetCompileJobV2 {
-    fn name() -> &'static str {
-        BID_REQUIREMENT_SET_COMPILE_V2_TASK
-    }
+request_scoped_job!(
+    RequirementSetCompileJobV2,
+    BID_REQUIREMENT_SET_COMPILE_V2_TASK,
+    "requirement_set_compile"
+);
 
-    fn unique_id(&self) -> Option<String> {
-        Some(format!(
-            "requirement_set_compile:{}:{}:{}",
-            self.project_id.hyphenated(),
-            self.document_set_revision_id.hyphenated(),
-            self.disposition_set_revision_id.hyphenated()
-        ))
-    }
-
-    fn on_conflict(&self) -> oxana::JobConflictStrategy {
-        oxana::JobConflictStrategy::Skip
-    }
-
-    fn should_resurrect() -> bool {
-        BID_AUTHORING_V2_RESURRECT_ON_REPLAY
-    }
-}
+request_scoped_job!(DocxComposeJobV2, BID_DOCX_COMPOSE_V2_TASK, "docx_compose");
 
 #[derive(oxana::Queue)]
 #[oxana(key = "bid-authoring-v2", concurrency = Dynamic(4))]
@@ -270,7 +244,7 @@ impl BidAuthoringJobPayloadV2 {
         match self {
             Self::TenderDocumentProcess { .. } => BidAuthoringJobKindV2::TenderDocumentProcess,
             Self::RequirementSetCompile { .. } => BidAuthoringJobKindV2::RequirementSetCompile,
-            Self::OutlineGenerate { .. } => BidAuthoringJobKindV2::OutlineGenerate,
+            Self::DocxCompose { .. } => BidAuthoringJobKindV2::DocxCompose,
             Self::ContentGenerate { .. } => BidAuthoringJobKindV2::ContentGenerate,
             Self::SubmissionExport { .. } => BidAuthoringJobKindV2::SubmissionExport,
         }
@@ -280,37 +254,21 @@ impl BidAuthoringJobPayloadV2 {
         match self {
             Self::TenderDocumentProcess { request, .. }
             | Self::RequirementSetCompile { request, .. }
-            | Self::OutlineGenerate { request, .. }
+            | Self::DocxCompose { request, .. }
             | Self::ContentGenerate { request, .. }
             | Self::SubmissionExport { request, .. } => request,
         }
     }
 
-    /// Stable Oxana uniqueness material for the Phase 7 adapter. The inactive
-    /// Phase 0 contract deliberately does not implement `oxana::Job`.
+    /// Stable uniqueness shared with the typed Oxana adapters.
     pub fn unique_material(&self) -> String {
-        match self {
-            Self::RequirementSetCompile {
-                project_id,
-                document_set_revision_id,
-                disposition_set_revision_id,
-                ..
-            } => format!(
-                "requirement_set_compile:{}:{}:{}",
-                project_id.hyphenated(),
-                document_set_revision_id.hyphenated(),
-                disposition_set_revision_id.hyphenated()
-            ),
-            other => {
-                let request = other.request();
-                format!(
-                    "{}:{}:{}",
-                    other.kind().as_str(),
-                    request.request_artifact_id.hyphenated(),
-                    request.request_revision
-                )
-            }
-        }
+        let request = self.request();
+        format!(
+            "{}:{}:{}",
+            self.kind().as_str(),
+            request.request_artifact_id.hyphenated(),
+            request.request_revision
+        )
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -383,12 +341,13 @@ mod tests {
     }
 
     #[test]
-    fn exactly_five_closed_job_kinds_round_trip() {
+    fn active_closed_job_kinds_round_trip() {
         assert_eq!(BidAuthoringJobKindV2::ALL.len(), 5);
         for kind in BidAuthoringJobKindV2::ALL {
             assert_eq!(kind.as_str().parse::<BidAuthoringJobKindV2>(), Ok(kind));
         }
         assert!("evidence_match".parse::<BidAuthoringJobKindV2>().is_err());
+        assert!("outline_generate".parse::<BidAuthoringJobKindV2>().is_err());
     }
 
     #[test]
@@ -420,14 +379,13 @@ mod tests {
             },
             expected,
         );
-        let mut expected = ids("outline_generate");
-        expected.as_object_mut().unwrap().extend(serde_json::json!({"project_id":"00000000-0000-0000-0000-000000000002","workspace_id":"00000000-0000-0000-0000-000000000003","base_workspace_revision_id":"00000000-0000-0000-0000-000000000004"}).as_object().unwrap().clone());
+        let mut expected = ids("docx_compose");
+        expected.as_object_mut().unwrap().extend(serde_json::json!({"project_id":"00000000-0000-0000-0000-000000000002","workspace_id":"00000000-0000-0000-0000-000000000003"}).as_object().unwrap().clone());
         round_trip(
-            BidAuthoringJobPayloadV2::OutlineGenerate {
+            BidAuthoringJobPayloadV2::DocxCompose {
                 request: request(),
                 project_id: Uuid::from_u128(2),
                 workspace_id: Uuid::from_u128(3),
-                base_workspace_revision_id: Uuid::from_u128(4),
             },
             expected,
         );
@@ -484,7 +442,7 @@ mod tests {
         };
         assert_eq!(
             payload.unique_material(),
-            "requirement_set_compile:00000000-0000-0000-0000-000000000002:00000000-0000-0000-0000-000000000003:00000000-0000-0000-0000-000000000004"
+            "requirement_set_compile:00000000-0000-0000-0000-000000000001:7"
         );
         let expected = [
             "INPUT_SCHEMA_INVALID",

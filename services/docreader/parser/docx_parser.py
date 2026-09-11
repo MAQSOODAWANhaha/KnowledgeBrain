@@ -32,9 +32,11 @@ from docreader.models.document import (
     FormImageParent,
     ImageLocator as SourceImageLocator,
     ParagraphImageParent,
+    PdfTableCell,
     StructuredSourceUnit,
     TableCellImageParent,
     StructuredSourceUnitKind,
+    TableGrid,
 )
 from docreader.parser.base_parser import BaseParser
 from docreader.utils import endecode
@@ -90,7 +92,12 @@ def _docx_package_image_payloads(content: bytes) -> Dict[str, str]:
 def _heading_level(paragraph: Paragraph) -> Optional[int]:
     style_name = str((paragraph.style.name if paragraph.style is not None else "") or "")
     match = re.match(r"^heading\s+(\d+)$", style_name.strip(), re.IGNORECASE)
-    return max(1, int(match.group(1))) if match else None
+    if match is None:
+        return None
+    try:
+        return max(1, int(match.group(1)))
+    except ValueError:
+        return None
 
 
 def _drawing_units(
@@ -136,6 +143,100 @@ def _drawing_units(
         )
         image_ordinal += 1
     return image_ordinal
+
+
+def _tc_grid_span(tc) -> int:
+    tc_pr = getattr(tc, "tcPr", None)
+    if tc_pr is None or tc_pr.gridSpan is None or tc_pr.gridSpan.val is None:
+        return 1
+    try:
+        return max(1, int(tc_pr.gridSpan.val))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _tc_vmerge(tc) -> Optional[str]:
+    tc_pr = getattr(tc, "tcPr", None)
+    if tc_pr is None or tc_pr.vMerge is None:
+        return None
+    val = tc_pr.vMerge.val
+    if val in (None, "continue"):
+        return "continue"
+    return "restart"
+
+
+def _tc_text(tc) -> str:
+    return "".join(node.text or "" for node in tc.iter(qn("w:t"))).strip()
+
+
+def _tbl_grid_widths_mm(table: Table) -> Optional[List[float]]:
+    grid = table._tbl.tblGrid
+    if grid is None:
+        return None
+    widths: List[float] = []
+    for col in grid.gridCol_lst:
+        if col.w is None:
+            return None
+        try:
+            twips = int(col.w)
+        except (TypeError, ValueError):
+            return None
+        if twips <= 0:
+            return None
+        widths.append(twips * 25.4 / 1440)
+    return widths or None
+
+
+def _docx_table_anchors(table: Table) -> Tuple[TableGrid, List[Tuple[int, int, Any]]]:
+    tbl = table._tbl
+    grid = tbl.tblGrid
+    rows_tc = list(tbl.tr_lst)
+    row_count = len(rows_tc)
+    column_count = len(grid.gridCol_lst) if grid is not None else max(
+        (sum(_tc_grid_span(tc) for tc in tr.tc_lst) for tr in rows_tc), default=0
+    )
+    starts: Dict[Tuple[int, int], Tuple[int, Any]] = {}
+    continue_slots: set[Tuple[int, int]] = set()
+    for row, tr in enumerate(rows_tc):
+        column = 0
+        for tc in tr.tc_lst:
+            span = _tc_grid_span(tc)
+            if _tc_vmerge(tc) == "continue":
+                for covered in range(column, column + span):
+                    continue_slots.add((row, covered))
+                column += span
+                continue
+            starts[(row, column)] = (span, tc)
+            column += span
+    cells: List[PdfTableCell] = []
+    anchors: List[Tuple[int, int, Any]] = []
+    for (row, column), (col_span, tc) in sorted(starts.items()):
+        row_span = 1
+        next_row = row + 1
+        while next_row < row_count and all(
+            (next_row, covered) in continue_slots for covered in range(column, column + col_span)
+        ):
+            row_span += 1
+            next_row += 1
+        cells.append(
+            PdfTableCell(
+                row=row,
+                column=column,
+                row_span=row_span,
+                col_span=col_span,
+                text=_tc_text(tc),
+            )
+        )
+        anchors.append((row, column, tc))
+    return (
+        TableGrid(
+            row_count=max(1, row_count),
+            column_count=max(1, column_count),
+            cells=cells,
+            widths_mm=_tbl_grid_widths_mm(table),
+        ),
+        anchors,
+    )
 
 
 def _docx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
@@ -214,55 +315,34 @@ def _docx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
         if child.tag == qn("w:tbl"):
             section = flush_section(force=current_section is None)
             table = Table(child, doc)
+            grid, anchors = _docx_table_anchors(table)
             units.append(
                 StructuredSourceUnit(
                     key=f"table:{table_ordinal}",
                     ordinal=len(units),
                     kind=StructuredSourceUnitKind.TABLE_REGION,
-                    text="\n".join(
-                        " | ".join(cell.text.strip() for cell in row.cells)
-                        for row in table.rows
-                    ),
+                    text="",
                     locator=DocumentLocator(
                         section_ordinal=section,
                         table_ordinal=table_ordinal,
                         heading_path=heading_path(),
                     ),
+                    grid=grid,
                 )
             )
-            seen_table_cells: set[int] = set()
-            for row_ordinal, row in enumerate(table.rows):
-                units.append(
-                    StructuredSourceUnit(
-                        key=f"table:{table_ordinal}:row:{row_ordinal}",
-                        ordinal=len(units),
-                        kind=StructuredSourceUnitKind.TABLE_ROW,
-                        text=" | ".join(cell.text.strip() for cell in row.cells),
-                        locator=DocumentLocator(
-                            section_ordinal=section,
-                            table_ordinal=table_ordinal,
-                            row_ordinal=row_ordinal,
-                            heading_path=heading_path(),
-                        ),
-                    )
+            for row_ordinal, column, tc in anchors:
+                image_ordinal = _drawing_units(
+                    element=tc,
+                    doc=doc,
+                    units=units,
+                    image_ordinal=image_ordinal,
+                    compound_parent=TableCellImageParent(
+                        section_ordinal=section,
+                        table_ordinal=table_ordinal,
+                        row_ordinal=row_ordinal,
+                        cell_ordinal=column,
+                    ),
                 )
-                for cell_ordinal, cell in enumerate(row.cells):
-                    cell_identity = id(cell._tc)
-                    if cell_identity in seen_table_cells:
-                        continue
-                    seen_table_cells.add(cell_identity)
-                    image_ordinal = _drawing_units(
-                        element=cell._tc,
-                        doc=doc,
-                        units=units,
-                        image_ordinal=image_ordinal,
-                        compound_parent=TableCellImageParent(
-                            section_ordinal=section,
-                            table_ordinal=table_ordinal,
-                            row_ordinal=row_ordinal,
-                            cell_ordinal=cell_ordinal,
-                        ),
-                    )
             table_ordinal += 1
             continue
 
@@ -309,7 +389,7 @@ def _docx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
                     key=f"attachment:{attachment_ordinal}",
                     ordinal=len(units),
                     kind=StructuredSourceUnitKind.ATTACHMENT_REGION,
-                    text="",
+                    text=part_name,
                     locator=AttachmentLocator(
                         part_name=part_name,
                         relationship_type=getattr(part, "content_type", ""),
@@ -1116,7 +1196,10 @@ class Docx:
                 )
 
         # Process completion
-        processing_elapsed_ms = int((time.time() - batch_start_time) * 1000)
+        try:
+            processing_elapsed_ms = int((time.time() - batch_start_time) * 1000)
+        except (OverflowError, ValueError):
+            processing_elapsed_ms = 0
         logger.info(f"All processing completed in {processing_elapsed_ms}ms")
 
         # Process results

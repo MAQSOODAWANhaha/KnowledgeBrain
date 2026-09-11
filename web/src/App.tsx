@@ -1,23 +1,32 @@
 import { useEffect, useState } from "react";
-import {
-  Button,
-  Modal,
-  PasswordInput,
-  SegmentedControl,
-  Skeleton,
-  TextInput,
-} from "@mantine/core";
 import { ApiError, api, setToken, token } from "./api";
 import { Assets } from "./assets/Assets";
 import { createBidV2Client, type BidProjectView } from "./bid/api";
 import { authoringHref } from "./bid/authoring/routes";
+import { BidTree } from "./bid/BidTree";
 import { Workbench } from "./bid/Workbench";
 import { shanghaiEndOfDay } from "./bid/helpers";
+import { Alert } from "./components/ui/alert";
+import { Badge } from "./components/ui/badge";
+import { Button } from "./components/ui/button";
+import { Dialog, DialogContent } from "./components/ui/dialog";
+import { Input } from "./components/ui/input";
+import { Label } from "./components/ui/label";
+import { Skeleton } from "./components/ui/skeleton";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "./components/ui/table";
+import { Crumbs } from "./Crumbs";
 import { go, parseAssetRoute, parseBidRoute, useHash } from "./hash";
+import { cn } from "./lib/utils";
+import { Shell } from "./Shell";
 
 const bidApi = createBidV2Client();
-import { Crumbs } from "./Crumbs";
-import { Shell } from "./Shell";
 
 function Login() {
   const [email, setEmail] = useState("");
@@ -25,72 +34,62 @@ function Login() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   return (
-    <div className="login">
-      <header className="login-bar">
-        <div className="mark">KB</div>
-        <div className="brand">KnowledgeBrain</div>
-      </header>
-      <div className="login-body">
-        <form
-          className="login-card"
-          data-testid="login-form"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            setErr("");
-            setBusy(true);
-            try {
-              const r = await api.login(email.trim() || "dev@local", password);
-              setToken(r.token);
-              go("/");
-            } catch (ex) {
-              setErr(
-                ex instanceof ApiError
-                  ? "登录失败，请再试一次"
-                  : ex instanceof Error
-                    ? ex.message
-                    : "网络错误",
-              );
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          <h2>进入</h2>
-          <p className="note" style={{ margin: "0 0 28px" }}>
-            LDAP 账号。测试环境账号密码可空。
-          </p>
-          <TextInput
-            data-testid="login-email"
-            label="账号"
-            placeholder="账号"
-            value={email}
-            onChange={(e) => setEmail(e.currentTarget.value)}
-          />
-          <PasswordInput
+    <div className="grid min-h-dvh place-items-center bg-[radial-gradient(circle_at_50%_36%,rgba(37,99,235,.08),transparent_240px),#fafafb] px-6 py-12">
+      <form
+        className="w-full max-w-[400px] rounded-[14px] border border-line bg-white px-9 py-10 shadow-[0_1px_2px_rgba(17,17,26,.04),0_6px_18px_rgba(17,17,26,.05)]"
+        data-testid="login-form"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setErr("");
+          setBusy(true);
+          try {
+            const r = await api.login(email.trim() || "dev@local", password);
+            setToken(r.token);
+            go("/");
+          } catch (ex) {
+            setErr(
+              ex instanceof ApiError
+                ? "登录失败，请再试一次"
+                : ex instanceof Error
+                  ? ex.message
+                  : "网络错误",
+            );
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <div className="mb-7 flex items-center gap-2.5">
+          <span className="grid h-8 w-8 place-items-center rounded-[10px] bg-[linear-gradient(140deg,#60a5fa,#2563eb_55%,#1d4ed8)] text-[13px] font-extrabold text-white shadow-[0_2px_8px_rgba(37,99,235,.35)]">
+            KB
+          </span>
+          <strong className="text-base font-semibold">KnowledgeBrain</strong>
+        </div>
+        <h1 className="mb-6 text-[22px] font-semibold tracking-tight">登录</h1>
+        <Label htmlFor="login-email">账号</Label>
+        <Input
+          id="login-email"
+          data-testid="login-email"
+          placeholder="账号"
+          value={email}
+          onChange={(e) => setEmail(e.currentTarget.value)}
+        />
+        <div className="mt-4">
+          <Label htmlFor="login-password">密码</Label>
+          <Input
+            id="login-password"
             data-testid="login-password"
-            label="密码"
-            mt="md"
+            type="password"
             placeholder="密码"
             value={password}
             onChange={(e) => setPassword(e.currentTarget.value)}
           />
-          {err && (
-            <p className="note" style={{ color: "var(--rose)" }}>
-              {err}
-            </p>
-          )}
-          <Button
-            type="submit"
-            fullWidth
-            mt={28}
-            h={44}
-            disabled={busy}
-            data-testid="login-submit"
-          >
-            {busy ? "进入中…" : "进入"}
-          </Button>
-        </form>
-      </div>
+        </div>
+        {err ? <p className="mt-3 text-sm text-stop">{err}</p> : null}
+        <Button type="submit" className="mt-6 w-full" size="lg" disabled={busy} data-testid="login-submit">
+          {busy ? "进入中…" : "进入"}
+        </Button>
+      </form>
     </div>
   );
 }
@@ -124,182 +123,153 @@ function Bids({ email }: { email: string }) {
     <Shell
       root="bids"
       email={email}
-      crumbs={<Crumbs items={[{ label: "投标项目" }, { label: "在办的标" }]} />}
-      title="在办的标"
+      crumbs={<Crumbs items={[{ label: "投标项目" }, { label: "在办项目" }]} />}
+      title="在办项目"
       extra={
         <Button data-testid="new-bid" onClick={() => setOpen(true)}>
-          新建标
+          新建项目
         </Button>
       }
-      tree={
-        <>
-          <div className="side-sec">作业</div>
-          <nav className="sidenav">
-            <a className="on" href="#/">
-              <svg viewBox="0 0 24 24">
-                <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />
-              </svg>
-              <em>在办的标</em>
-              <span>{rows?.length ?? 0}</span>
-            </a>
-          </nav>
-          {rows && rows.length > 0 && (
-            <>
-              <div className="side-sec">项目</div>
-              <nav className="sidenav">
-                {rows.map((p) => (
-                  <a key={p.id} href={`#${authoringHref(p.id, "files")}`}>
-                    <svg viewBox="0 0 24 24">
-                      <rect x="3" y="4" width="18" height="16" rx="2" />
-                      <path d="M8 4V3h8v1M8 10h8M8 14h5" />
-                    </svg>
-                    <em>{p.title}</em>
-                    {p.status === "ended" && <span>已结束</span>}
-                  </a>
-                ))}
-              </nav>
-            </>
-          )}
-        </>
-      }
+      tree={<BidTree rows={rows} />}
     >
       <div className="wrap stack">
         {rows === null ? (
-          <div className="card stack">
-            <Skeleton height={48} radius="md" />
-            <Skeleton height={48} radius="md" />
-            <Skeleton height={48} radius="md" />
+          <div className="panel space-y-3 p-4">
+            <Skeleton className="h-12" />
+            <Skeleton className="h-12" />
+            <Skeleton className="h-12" />
           </div>
         ) : rows.length === 0 ? (
-          <div className="card">
+          <div className="panel">
             <div className="empty">
-              <h2>还没有标</h2>
-              <p className="note" style={{ margin: "0 0 20px" }}>
-                先建一项，再把招标文件拖进「文件」。
-              </p>
-              <Button onClick={() => setOpen(true)}>新建标</Button>
+              <h2>还没有项目</h2>
             </div>
           </div>
         ) : (
-          <div className="card pad-0">
+          <div className="panel">
             <div className="toolbar">
-              <TextInput
+              <Input
                 placeholder="按项目名过滤…"
                 value={query}
                 onChange={(event) => setQuery(event.currentTarget.value)}
-                style={{ flex: 1 }}
+                className="flex-1"
               />
-              <SegmentedControl
-                value={filter}
-                onChange={(value) => setFilter(value as typeof filter)}
-                data={[
-                  { value: "all", label: "全部" },
-                  { value: "open", label: "在办" },
-                  { value: "ended", label: "已结束" },
-                ]}
-              />
-            </div>
-            <table className="grid">
-              <thead>
-                <tr>
-                  <th>项目</th>
-                  <th>招标结束</th>
-                  <th>状态</th>
-                </tr>
-              </thead>
-              <tbody>
-                {shown.map((p) => (
-                  <tr
-                    key={p.id}
-                    onClick={() => go(authoringHref(p.id, "files"))}
-                    style={{ cursor: "pointer" }}
+              <div className="flex rounded-[6px] border border-line p-0.5">
+                {(
+                  [
+                    ["all", "全部"],
+                    ["open", "在办"],
+                    ["ended", "已结束"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className={cn(
+                      "h-7 rounded-[4px] px-2.5 text-[12px] font-medium",
+                      filter === value ? "bg-sky text-white" : "text-quiet hover:text-ink",
+                    )}
+                    onClick={() => setFilter(value)}
                   >
-                    <td>
-                      <div className="name">{p.title}</div>
-                    </td>
-                    <td className="muted">
-                      {p.ends_at ? p.ends_at.slice(0, 10) : "—"}
-                    </td>
-                    <td>
-                      {p.status === "ended" ? (
-                        <span className="chip gray">已结束</span>
-                      ) : (
-                        <span className="chip iris">
-                          <i className="dot" />
-                          在办
-                        </span>
-                      )}
-                    </td>
-                  </tr>
+                    {label}
+                  </button>
                 ))}
-              </tbody>
-            </table>
+              </div>
+            </div>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>项目</TableHead>
+                  <TableHead className="w-[140px]">招标结束</TableHead>
+                  <TableHead className="w-[88px]">状态</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {shown.map((p) => (
+                  <TableRow
+                    key={p.id}
+                    className="cursor-pointer"
+                    onClick={() => go(authoringHref(p.id, "files"))}
+                  >
+                    <TableCell className="font-semibold">{p.title}</TableCell>
+                    <TableCell className="text-quiet">
+                      {p.ends_at ? p.ends_at.slice(0, 10) : "—"}
+                    </TableCell>
+                    <TableCell>
+                      <Badge tone={p.status === "ended" ? "gray" : "sky"}>
+                        {p.status === "ended" ? "已结束" : "在办"}
+                      </Badge>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           </div>
         )}
       </div>
-      <Modal opened={open} onClose={() => setOpen(false)} title="新建标">
-        <form
-          data-testid="create-bid-form"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            if (!title.trim()) {
-              setErr("先写项目名称");
-              return;
-            }
-            if (!when) {
-              setErr("先选招标结束日");
-              return;
-            }
-            try {
-              const p = await bidApi.createProject({
-                title: title.trim(),
-                ends_at: shanghaiEndOfDay(when),
-              });
-              go(authoringHref(p.id, "files"));
-            } catch (ex) {
-              setErr(ex instanceof Error ? ex.message : "创建失败");
-            }
-          }}
-        >
-          <TextInput
-            data-testid="bid-title"
-            label="项目名称"
-            value={title}
-            onChange={(e) => setTitle(e.currentTarget.value)}
-            required
-          />
-          <TextInput label="负责人" value={email} mt="md" readOnly />
-          <TextInput
-            data-testid="bid-ends"
-            label="招标结束日"
-            type="date"
-            mt="md"
-            value={when}
-            onChange={(e) => setWhen(e.currentTarget.value)}
-            required
-          />
-          {err && (
-            <p className="note" style={{ color: "var(--rose)" }}>
-              {err}
-            </p>
-          )}
-          <div
-            className="row"
-            style={{ justifyContent: "flex-end", marginTop: 24 }}
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent title="新建项目">
+          <form
+            data-testid="create-bid-form"
+            className="space-y-4"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (!title.trim()) {
+                setErr("先写项目名称");
+                return;
+              }
+              if (!when) {
+                setErr("先选招标结束日");
+                return;
+              }
+              try {
+                const p = await bidApi.createProject({
+                  title: title.trim(),
+                  ends_at: shanghaiEndOfDay(when),
+                });
+                go(authoringHref(p.id, "files"));
+              } catch (ex) {
+                setErr(ex instanceof Error ? ex.message : "创建失败");
+              }
+            }}
           >
-            <Button
-              variant="default"
-              type="button"
-              onClick={() => setOpen(false)}
-            >
-              取消
-            </Button>
-            <Button type="submit" data-testid="bid-create">
-              创建
-            </Button>
-          </div>
-        </form>
-      </Modal>
+            <div>
+              <Label htmlFor="bid-title">项目名称</Label>
+              <Input
+                id="bid-title"
+                data-testid="bid-title"
+                value={title}
+                onChange={(e) => setTitle(e.currentTarget.value)}
+                required
+              />
+            </div>
+            <div>
+              <Label>负责人</Label>
+              <Input value={email} readOnly />
+            </div>
+            <div>
+              <Label htmlFor="bid-ends">招标结束日</Label>
+              <Input
+                id="bid-ends"
+                data-testid="bid-ends"
+                type="date"
+                value={when}
+                onChange={(e) => setWhen(e.currentTarget.value)}
+                required
+              />
+            </div>
+            {err ? <Alert>{err}</Alert> : null}
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="outline" type="button" onClick={() => setOpen(false)}>
+                取消
+              </Button>
+              <Button type="submit" data-testid="bid-create">
+                创建
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
     </Shell>
   );
 }
@@ -334,11 +304,10 @@ export function App() {
 
   if (!ready) {
     return (
-      <div className="login">
-        <header className="login-bar">
-          <div className="mark">KB</div>
-          <div className="brand">KnowledgeBrain</div>
-        </header>
+      <div className="grid min-h-dvh place-items-center bg-canvas">
+        <span className="grid h-8 w-8 place-items-center rounded-[10px] bg-[linear-gradient(140deg,#60a5fa,#2563eb_55%,#1d4ed8)] text-[13px] font-extrabold text-white shadow-[0_2px_8px_rgba(37,99,235,.35)]">
+          KB
+        </span>
       </div>
     );
   }

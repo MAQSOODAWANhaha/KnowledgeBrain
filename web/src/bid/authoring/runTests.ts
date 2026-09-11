@@ -1,11 +1,9 @@
 import "../api/http.test";
-import "./adapter.test";
-import "./drafts.test";
-import "./generation.test";
+import "./docxSession.test";
+import "./docxRound.test";
+import "./compositionSession.test";
 import { runAll, testSummary } from "./harness";
-import "./session.test";
 import "./sha256.test";
-import "./tree.test";
 
 await runAll();
 const { failed, passed } = testSummary();

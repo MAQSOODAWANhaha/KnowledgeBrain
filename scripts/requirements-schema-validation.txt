@@ -1,0 +1,7 @@
+# Host-native Draft 2020-12 acceptance tooling; keep transitive versions exact.
+jsonschema==4.23.0
+referencing==0.35.1
+jsonschema-specifications==2024.10.1
+attrs==24.2.0
+rpds-py==0.20.0
+typing_extensions==4.12.2

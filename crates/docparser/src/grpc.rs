@@ -150,6 +150,24 @@ pub async fn read(req: ConvertRequest) -> Result<ReadResult, ConvertError> {
     }
 }
 
+/// Render an immutable original through the same authenticated Python service.
+/// No local renderer or unary parsing fallback is used for this operation.
+pub async fn source_view(
+    request: crate::proto::SourceViewRequest,
+) -> Result<crate::proto::SourceViewResponse, ConvertError> {
+    let addr = reader_addr().ok_or_else(|| ConvertError(NOT_CONFIGURED.into()))?;
+    timeout(DOCREADER_TIMEOUT, async {
+        let mut client = connect(&addr).await?;
+        client
+            .source_view(request)
+            .await
+            .map(tonic::Response::into_inner)
+            .map_err(|e| ConvertError(format!("docreader SourceView: {e}")))
+    })
+    .await
+    .map_err(|_| ConvertError("docreader SourceView timeout".into()))?
+}
+
 async fn connect(addr: &str) -> Result<Client, ConvertError> {
     let url = endpoint_url(addr);
     let mut endpoint =
@@ -355,6 +373,7 @@ fn from_proto_unit(unit: ProtoStructuredSourceUnit) -> Result<StructuredSourceUn
                 bottom: value.bottom,
             }
         }
+        Locator::PageTable(value) => from_proto_page_table(value)?,
         Locator::Spreadsheet(value) => {
             if value.sheet_name.is_empty() {
                 return Err("DocReader returned spreadsheet locator without sheet name".into());
@@ -540,6 +559,9 @@ fn from_proto_unit(unit: ProtoStructuredSourceUnit) -> Result<StructuredSourceUn
             StructuredSourceLocator::Page { .. }
         ) | (
             StructuredSourceUnitKind::TableRegion,
+            StructuredSourceLocator::PageTable { .. }
+        ) | (
+            StructuredSourceUnitKind::TableRegion,
             StructuredSourceLocator::Spreadsheet { .. }
         ) | (
             StructuredSourceUnitKind::TableRow,
@@ -552,6 +574,9 @@ fn from_proto_unit(unit: ProtoStructuredSourceUnit) -> Result<StructuredSourceUn
         ) | (
             StructuredSourceUnitKind::TableRow,
             StructuredSourceLocator::Page { .. }
+        ) | (
+            StructuredSourceUnitKind::TableRow,
+            StructuredSourceLocator::PageTable { .. }
         ) | (
             StructuredSourceUnitKind::TableRow,
             StructuredSourceLocator::Spreadsheet { .. }
@@ -568,6 +593,9 @@ fn from_proto_unit(unit: ProtoStructuredSourceUnit) -> Result<StructuredSourceUn
             StructuredSourceLocator::Page { .. }
         ) | (
             StructuredSourceUnitKind::FormRegion,
+            StructuredSourceLocator::PageTable { .. }
+        ) | (
+            StructuredSourceUnitKind::FormRegion,
             StructuredSourceLocator::Spreadsheet { .. }
         ) | (
             StructuredSourceUnitKind::AttachmentRegion,
@@ -580,18 +608,34 @@ fn from_proto_unit(unit: ProtoStructuredSourceUnit) -> Result<StructuredSourceUn
     if !compatible {
         return Err("DocReader returned incompatible structured source kind and locator".into());
     }
+    if kind == StructuredSourceUnitKind::TableRow
+        && matches!(locator, StructuredSourceLocator::Document { .. })
+        && unit.text.trim().is_empty()
+    {
+        return Err("DocReader returned empty table_row".into());
+    }
+    let grid = match unit.grid {
+        Some(grid) => {
+            if kind != StructuredSourceUnitKind::TableRegion {
+                return Err("DocReader returned table grid on a non-table unit".into());
+            }
+            Some(crate::table_grid::from_proto_grid(grid)?)
+        }
+        None => None,
+    };
     Ok(StructuredSourceUnit {
         key: unit.key,
         ordinal: unit.ordinal,
         kind,
         text: unit.text,
         locator,
+        grid,
     })
 }
 
 fn validate_compound_image_parents(units: &[StructuredSourceUnit]) -> Result<(), String> {
     let mut sections = std::collections::HashSet::new();
-    let mut table_rows = std::collections::HashSet::new();
+    let mut table_grids = Vec::new();
     let mut forms = std::collections::HashSet::new();
     for unit in units {
         match (&unit.kind, &unit.locator) {
@@ -604,15 +648,17 @@ fn validate_compound_image_parents(units: &[StructuredSourceUnit]) -> Result<(),
                 sections.insert(*section_ordinal);
             }
             (
-                StructuredSourceUnitKind::TableRow,
+                StructuredSourceUnitKind::TableRegion,
                 StructuredSourceLocator::Document {
                     section_ordinal,
                     table_ordinal: Some(table_ordinal),
-                    row_ordinal: Some(row_ordinal),
+                    row_ordinal: None,
                     ..
                 },
             ) => {
-                table_rows.insert((*section_ordinal, *table_ordinal, *row_ordinal));
+                if let Some(grid) = &unit.grid {
+                    table_grids.push((*section_ordinal, *table_ordinal, grid));
+                }
             }
             (
                 StructuredSourceUnitKind::FormRegion,
@@ -643,8 +689,12 @@ fn validate_compound_image_parents(units: &[StructuredSourceUnit]) -> Result<(),
                 section_ordinal,
                 table_ordinal,
                 row_ordinal,
-                ..
-            } => table_rows.contains(&(*section_ordinal, *table_ordinal, *row_ordinal)),
+                cell_ordinal,
+            } => table_grids.iter().any(|(section, table, grid)| {
+                *section == *section_ordinal
+                    && *table == *table_ordinal
+                    && crate::table_grid::grid_cell_is_anchor(grid, *row_ordinal, *cell_ordinal)
+            }),
             CompoundImageParent::Form {
                 section_ordinal,
                 form_ordinal,
@@ -655,6 +705,37 @@ fn validate_compound_image_parents(units: &[StructuredSourceUnit]) -> Result<(),
         }
     }
     Ok(())
+}
+
+fn from_proto_page_table(
+    value: crate::proto::PageTableLocator,
+) -> Result<StructuredSourceLocator, String> {
+    if value.row_count != 0
+        || value.column_count != 0
+        || !value.cells.is_empty()
+        || !value.merged_ranges.is_empty()
+        || !value.column_edges.is_empty()
+        || !value.widths_mm.is_empty()
+    {
+        return Err("DocReader returned leftover page_table grid fields".into());
+    }
+    if !value.left.is_finite()
+        || !value.top.is_finite()
+        || !value.right.is_finite()
+        || !value.bottom.is_finite()
+        || value.left >= value.right
+        || value.bottom >= value.top
+    {
+        return Err("DocReader returned invalid page_table bounds".into());
+    }
+    Ok(StructuredSourceLocator::PageTable {
+        page_ordinal: value.page_ordinal,
+        table_ordinal: value.table_ordinal,
+        left: value.left,
+        top: value.top,
+        right: value.right,
+        bottom: value.bottom,
+    })
 }
 
 fn validate_bounds(
@@ -822,6 +903,7 @@ mod tests {
                     ..Default::default()
                 },
             )),
+            grid: None,
         };
         let mapped = from_proto_unit(unit).unwrap();
         assert_eq!(mapped.key, "image:0");
@@ -850,6 +932,7 @@ mod tests {
             kind: crate::proto::StructuredSourceUnitKind::Unspecified as i32,
             text: String::new(),
             locator: None,
+            grid: None,
         };
         assert!(from_proto_unit(missing).is_err());
         let missing_locator = ProtoStructuredSourceUnit {
@@ -858,6 +941,7 @@ mod tests {
             kind: crate::proto::StructuredSourceUnitKind::Section as i32,
             text: String::new(),
             locator: None,
+            grid: None,
         };
         assert!(from_proto_unit(missing_locator).is_err());
     }
@@ -876,6 +960,7 @@ mod tests {
                         ..Default::default()
                     },
                 )),
+                grid: None,
             }
         }
         assert!(from_proto_units(vec![section("same", 0), section("same", 1)]).is_err());
@@ -898,6 +983,7 @@ mod tests {
                     ..Default::default()
                 },
             )),
+            grid: None,
         };
         assert!(from_proto_unit(incompatible).is_err());
 
@@ -920,8 +1006,107 @@ mod tests {
                     ..Default::default()
                 },
             )),
+            grid: None,
         };
         assert!(from_proto_unit(invalid_range).is_err());
+    }
+
+    #[test]
+    fn page_table_decoder_is_identity_only() {
+        let identity = crate::proto::PageTableLocator {
+            page_ordinal: 0,
+            table_ordinal: 0,
+            left: 40.0,
+            top: 700.0,
+            right: 520.0,
+            bottom: 640.0,
+            ..Default::default()
+        };
+        let valid = ProtoStructuredSourceUnit {
+            key: "page:0:table:0".into(),
+            ordinal: 0,
+            kind: crate::proto::StructuredSourceUnitKind::TableRegion as i32,
+            text: String::new(),
+            locator: Some(crate::proto::structured_source_unit::Locator::PageTable(
+                identity.clone(),
+            )),
+            grid: Some(crate::proto::TableGrid {
+                row_count: 1,
+                column_count: 2,
+                cells: vec![
+                    crate::proto::PdfTableCell {
+                        row: 0,
+                        column: 0,
+                        row_span: 1,
+                        col_span: 1,
+                        text: "列甲".into(),
+                    },
+                    crate::proto::PdfTableCell {
+                        row: 0,
+                        column: 1,
+                        row_span: 1,
+                        col_span: 1,
+                        text: "列乙".into(),
+                    },
+                ],
+                widths_mm: vec![45.0, 135.0],
+            }),
+        };
+        let decoded = from_proto_unit(valid).expect("valid page_table");
+        assert!(matches!(
+            decoded.locator,
+            StructuredSourceLocator::PageTable {
+                page_ordinal: 0,
+                table_ordinal: 0,
+                ..
+            }
+        ));
+        let grid = decoded.grid.expect("grid");
+        assert_eq!((grid.row_count, grid.column_count), (1, 2));
+
+        let leftover = ProtoStructuredSourceUnit {
+            key: "page:0:table:1".into(),
+            ordinal: 0,
+            kind: crate::proto::StructuredSourceUnitKind::TableRegion as i32,
+            text: String::new(),
+            locator: Some(crate::proto::structured_source_unit::Locator::PageTable(
+                crate::proto::PageTableLocator {
+                    page_ordinal: 0,
+                    table_ordinal: 1,
+                    left: 0.0,
+                    top: 10.0,
+                    right: 20.0,
+                    bottom: 0.0,
+                    row_count: 1,
+                    ..Default::default()
+                },
+            )),
+            grid: None,
+        };
+        assert!(from_proto_unit(leftover).is_err());
+
+        let hole = ProtoStructuredSourceUnit {
+            key: "page:0:table:2".into(),
+            ordinal: 0,
+            kind: crate::proto::StructuredSourceUnitKind::TableRegion as i32,
+            text: String::new(),
+            locator: Some(crate::proto::structured_source_unit::Locator::PageTable(
+                identity,
+            )),
+            grid: Some(crate::proto::TableGrid {
+                row_count: 1,
+                column_count: 2,
+                cells: vec![crate::proto::PdfTableCell {
+                    row: 0,
+                    column: 0,
+                    row_span: 1,
+                    col_span: 1,
+                    text: "only".into(),
+                }],
+                widths_mm: vec![],
+            }),
+        };
+        assert!(from_proto_unit(hole).is_err());
     }
 
     #[test]
@@ -938,6 +1123,7 @@ mod tests {
                         ..Default::default()
                     },
                 )),
+                grid: None,
             }
         }
         fn paragraph_image(section_ordinal: u32) -> ProtoStructuredSourceUnit {
@@ -969,6 +1155,7 @@ mod tests {
                 locator: Some(crate::proto::structured_source_unit::Locator::Image(
                     locator,
                 )),
+                grid: None,
             }
         }
         let valid = from_proto_units(vec![section(), paragraph_image(0)]).unwrap();
@@ -1007,8 +1194,128 @@ mod tests {
             locator: Some(crate::proto::structured_source_unit::Locator::Image(
                 crate::proto::ImageLocator::decode(encoded.as_slice()).unwrap(),
             )),
+            grid: None,
         };
         assert!(from_proto_unit(missing_parent).is_err());
+
+        fn document_table_row(ordinal: u32, text: &str) -> ProtoStructuredSourceUnit {
+            ProtoStructuredSourceUnit {
+                key: format!("row:{ordinal}"),
+                ordinal,
+                kind: crate::proto::StructuredSourceUnitKind::TableRow as i32,
+                text: text.into(),
+                locator: Some(crate::proto::structured_source_unit::Locator::Document(
+                    crate::proto::DocumentLocator {
+                        section_ordinal: 0,
+                        table_ordinal: Some(0),
+                        row_ordinal: Some(0),
+                        ..Default::default()
+                    },
+                )),
+                grid: None,
+            }
+        }
+        fn table_region(ordinal: u32) -> ProtoStructuredSourceUnit {
+            ProtoStructuredSourceUnit {
+                key: format!("table:{ordinal}"),
+                ordinal,
+                kind: crate::proto::StructuredSourceUnitKind::TableRegion as i32,
+                text: String::new(),
+                locator: Some(crate::proto::structured_source_unit::Locator::Document(
+                    crate::proto::DocumentLocator {
+                        section_ordinal: 0,
+                        table_ordinal: Some(0),
+                        ..Default::default()
+                    },
+                )),
+                grid: Some(crate::proto::TableGrid {
+                    row_count: 1,
+                    column_count: 2,
+                    cells: vec![
+                        crate::proto::PdfTableCell {
+                            row: 0,
+                            column: 0,
+                            row_span: 1,
+                            col_span: 1,
+                            text: "a".into(),
+                        },
+                        crate::proto::PdfTableCell {
+                            row: 0,
+                            column: 1,
+                            row_span: 1,
+                            col_span: 1,
+                            text: "b".into(),
+                        },
+                    ],
+                    widths_mm: vec![],
+                }),
+            }
+        }
+        fn table_cell_image(
+            ordinal: u32,
+            row_ordinal: u32,
+            cell_ordinal: u32,
+        ) -> ProtoStructuredSourceUnit {
+            use prost::Message;
+
+            let locator = crate::proto::ImageLocator {
+                original_ref: "images/cell.png".into(),
+                width: 4,
+                height: 3,
+                media_type: "image/png".into(),
+                ..Default::default()
+            };
+            let parent = crate::proto::TableCellImageParent {
+                section_ordinal: Some(0),
+                table_ordinal: Some(0),
+                row_ordinal: Some(row_ordinal),
+                cell_ordinal: Some(cell_ordinal),
+            }
+            .encode_to_vec();
+            let mut encoded = locator.encode_to_vec();
+            encoded.push(0x6a); // field 13, length-delimited table_cell_parent
+            encoded.push(u8::try_from(parent.len()).expect("small parent fixture"));
+            encoded.extend(parent);
+            let locator = crate::proto::ImageLocator::decode(encoded.as_slice())
+                .expect("decode table cell parent fixture");
+            ProtoStructuredSourceUnit {
+                key: format!("image:{ordinal}"),
+                ordinal,
+                kind: crate::proto::StructuredSourceUnitKind::ImageRegion as i32,
+                text: String::new(),
+                locator: Some(crate::proto::structured_source_unit::Locator::Image(
+                    locator,
+                )),
+                grid: None,
+            }
+        }
+        assert!(from_proto_unit(document_table_row(0, "")).is_err());
+        assert!(from_proto_unit(document_table_row(0, "   ")).is_err());
+        assert!(from_proto_unit(document_table_row(0, "row text")).is_ok());
+        assert!(
+            from_proto_units(vec![
+                section(),
+                document_table_row(1, "row text"),
+                table_cell_image(2, 0, 0),
+            ])
+            .is_err()
+        );
+        let anchored =
+            from_proto_units(vec![section(), table_region(1), table_cell_image(2, 0, 0)]).unwrap();
+        assert!(matches!(
+            anchored[2].locator,
+            StructuredSourceLocator::Image {
+                compound_parent: Some(CompoundImageParent::TableCell {
+                    row_ordinal: 0,
+                    cell_ordinal: 0,
+                    ..
+                }),
+                ..
+            }
+        ));
+        assert!(
+            from_proto_units(vec![section(), table_region(1), table_cell_image(2, 0, 9),]).is_err()
+        );
     }
 
     #[test]
@@ -1036,6 +1343,7 @@ mod tests {
                     ..Default::default()
                 },
             )),
+            grid: None,
         };
         let row = ProtoStructuredSourceUnit {
             key: "sheet:0:row:4".into(),
@@ -1065,6 +1373,7 @@ mod tests {
                     ..Default::default()
                 },
             )),
+            grid: None,
         };
         assert!(from_proto_units(vec![sheet.clone(), row.clone()]).is_ok());
 

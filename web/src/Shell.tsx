@@ -1,6 +1,8 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode } from "react";
+import { IconBooks, IconClipboardList, IconLogout } from "@tabler/icons-react";
 import { setToken } from "./api";
 import { go } from "./hash";
+import { cn } from "./lib/utils";
 
 type Props = {
   root: "bids" | "assets";
@@ -10,11 +12,11 @@ type Props = {
   extra?: ReactNode;
   lead?: ReactNode;
   steps?: ReactNode;
-  find?: boolean;
   tree?: ReactNode;
   inspector?: ReactNode;
   children: ReactNode;
   className?: string;
+  onBeforeLeave?: () => boolean;
 };
 
 export function Shell({
@@ -25,111 +27,99 @@ export function Shell({
   extra,
   lead,
   steps,
-  find = true,
   tree,
   inspector,
   children,
   className,
+  onBeforeLeave,
 }: Props) {
-  const [menu, setMenu] = useState(false);
   const initial =
     !email || email.startsWith("dev@") ? "张" : email.slice(0, 1).toUpperCase();
-  const wide = tree == null;
+  function leave() {
+    if (onBeforeLeave && !onBeforeLeave()) return;
+    setToken(null);
+    go("/login");
+  }
   return (
-    <div className={`app${wide ? " no-side" : ""}`}>
-      <header className="pnav">
-        <div className="pnav-left" style={{ position: "relative" }}>
-          <div className="mark">KB</div>
-          <button
-            className="acct"
-            type="button"
-            onClick={() => setMenu((v) => !v)}
-          >
-            <em>{email || "dev@local"}</em>
-            <svg viewBox="0 0 24 24">
-              <path d="M6 9l6 6 6-6" />
-            </svg>
-          </button>
-          {menu && (
-            <div className="acct-menu">
-              <button
-                type="button"
-                onClick={() => {
-                  setToken(null);
-                  go("/login");
-                }}
-              >
-                退出
-              </button>
-            </div>
-          )}
-        </div>
-        <div className="pnav-main">
-          <nav className="ctx-nav">
-            <a className={root === "bids" ? "on" : undefined} href="#/">
-              <svg viewBox="0 0 24 24">
-                <rect x="3" y="3" width="7" height="7" rx="1" />
-                <rect x="14" y="3" width="7" height="7" rx="1" />
-                <rect x="3" y="14" width="7" height="7" rx="1" />
-                <rect x="14" y="14" width="7" height="7" rx="1" />
-              </svg>
-              投标项目
-            </a>
-            <a
-              className={root === "assets" ? "on" : undefined}
-              href="#/library"
-            >
-              <svg viewBox="0 0 24 24">
-                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-              </svg>
-              知识资产
-            </a>
-          </nav>
-          <div className="spacer" />
-          <span className="pnav-link">
-            <svg viewBox="0 0 24 24">
-              <circle cx="12" cy="12" r="9" />
-              <path d="M9.6 9.2a2.4 2.4 0 1 1 3.2 2.2c-.7.4-1 .9-1 1.7V14" />
-              <path d="M12 17.2h.01" />
-            </svg>
-            帮助
-          </span>
-          <div className="avatar">{initial}</div>
-        </div>
-      </header>
-      {tree != null && (
-        <aside className="side">
-          {find && (
-            <div className="side-find">
-              <svg viewBox="0 0 24 24">
-                <circle cx="11" cy="11" r="7" />
-                <path d="M20 20l-3-3" />
-              </svg>
-              <input placeholder="快速搜索…" />
-              <kbd>⌘K</kbd>
-            </div>
-          )}
-          {tree}
-        </aside>
+    <div
+      className={cn(
+        "grid h-dvh min-h-dvh grid-cols-[280px_minmax(0,1fr)] grid-rows-[62px_minmax(0,1fr)] bg-white",
+        className,
       )}
-      <div className={`maincol ${className ?? ""}`}>
-        <div className="pagehead">
+    >
+      <header className="col-span-2 z-20 grid h-[62px] grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-stretch border-b border-line bg-white/80 px-7 backdrop-blur-2xl">
+        <a className="flex min-w-0 items-center gap-2.5" href="#/">
+          <span className="grid h-8 w-8 place-items-center rounded-[10px] bg-[linear-gradient(140deg,#60a5fa,#2563eb_55%,#1d4ed8)] text-[13px] font-extrabold text-white shadow-[0_2px_8px_rgba(37,99,235,.35)]">
+            KB
+          </span>
+          <strong className="text-[16px] font-semibold tracking-tight text-ink">KnowledgeBrain</strong>
+        </a>
+        <nav className="flex items-stretch gap-6" aria-label="产品">
+          <a
+            className={cn(
+              "flex items-center gap-2 border-b-[2.5px] text-[16px] font-medium",
+              root === "bids"
+                ? "border-sky font-semibold text-ink"
+                : "border-transparent text-quiet hover:text-ink",
+            )}
+            href="#/"
+          >
+            <IconClipboardList size={18} stroke={1.7} aria-hidden />
+            投标项目
+          </a>
+          <a
+            className={cn(
+              "flex items-center gap-2 border-b-[2.5px] text-[16px] font-medium",
+              root === "assets"
+                ? "border-sky font-semibold text-ink"
+                : "border-transparent text-quiet hover:text-ink",
+            )}
+            href="#/library"
+          >
+            <IconBooks size={18} stroke={1.7} aria-hidden />
+            知识资产
+          </a>
+        </nav>
+        <div />
+      </header>
+      <aside className="side flex min-h-0 min-w-0 flex-col overflow-hidden border-r border-line bg-canvas">
+        <div className="min-h-0 flex-1 overflow-auto p-2">{tree}</div>
+        <div className="flex shrink-0 items-center gap-2 border-t border-line px-2 py-3">
+          <span className="grid h-8 w-8 place-items-center rounded-full bg-[linear-gradient(135deg,#f59e0b,#ef4444)] text-[12px] font-bold text-white">
+            {initial}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-[12.5px] text-quiet" title={email || "dev@local"}>
+            {email || "dev@local"}
+          </span>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded-[8px] px-2 py-1 text-[12.5px] font-medium text-quiet hover:bg-[#f6f6f8] hover:text-ink"
+            onClick={leave}
+            aria-label="退出"
+          >
+            <IconLogout size={16} stroke={1.7} />
+            退出
+          </button>
+        </div>
+      </aside>
+      <div className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-white">
+        <div className="flex shrink-0 flex-col gap-3 px-7 py-3">
           <nav className="crumbs" aria-label="面包屑">
             {crumbs}
           </nav>
           {steps}
           {title || extra ? (
-            <div className="pagehead-row">
-              {title ? <h1 className="h1">{title}</h1> : <span />}
-              {extra ? <div className="actions">{extra}</div> : null}
+            <div className="flex items-center justify-between gap-4">
+              {title ? <h1 className="m-0 text-[24px] font-semibold tracking-tight text-ink">{title}</h1> : <span />}
+              {extra ? <div className="flex items-center gap-2">{extra}</div> : null}
             </div>
           ) : null}
           {lead}
         </div>
         {inspector ? (
-          <div className="bench">
-            <div className="bench-main">{children}</div>
-            <aside className="insp">{inspector}</aside>
+          <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_320px]">
+            <div className="min-h-0 overflow-auto">{children}</div>
+            <aside className="overflow-auto border-l border-line bg-white">{inspector}</aside>
           </div>
         ) : (
           children

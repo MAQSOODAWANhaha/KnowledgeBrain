@@ -30,7 +30,11 @@ COPY services/docreader/proto services/docreader/proto
 RUN mkdir -p deploy/postgres-init
 COPY deploy/queue-registry.toml deploy/queue-registry.toml
 COPY deploy/postgres-init/010-runtime-identities.sh deploy/postgres-init/010-runtime-identities.sh
-RUN cargo build --release -p api -p worker -p retention -p platform
+# Compile-time platform contracts; keep deployment credentials outside the image.
+COPY deploy/catalog-manifest-v1.schema.json \
+     deploy/platform-frozen-seed-tables-v2.json \
+     deploy/release-descriptor-v1.schema.json deploy/
+RUN cargo build --locked --release -p api -p worker -p retention -p platform
 
 FROM debian:bookworm-slim
 ARG APT_MIRROR=aliyun

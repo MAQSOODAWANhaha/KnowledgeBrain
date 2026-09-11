@@ -9,23 +9,32 @@ use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use docparser::{
-    ReadResult, StructuredSourceLocator, StructuredSourceUnit, StructuredSourceUnitKind,
+    ReadResult, StructuredSourceLocator, StructuredSourceUnit, StructuredSourceUnitKind, TableGrid,
 };
 use platform::{BidAuthoringJobPayloadV2, BidAuthoringRequestIdentityV2};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::tender_upload::validate_tender_upload;
 
 pub const TENDER_SOURCE_PURPOSE: &str = "tender_requirements_and_structure_only";
-pub const TENDER_CONVERTER_OPERATION: &str = "docreader-grpc-structured-source-v2";
+pub const TENDER_CONVERTER_OPERATION: &str = "docreader-grpc-structured-source-v3";
 pub const TENDER_VISION_OPERATION: &str = "tender-image-ocr-v1";
+/// Non-empty OCR object payload when vision returned no text. Published unit
+/// text stays empty so Agent disposition must remain unresolved.
+pub const UNRESOLVED_EMPTY_OCR: &[u8] = b"unresolved-empty-ocr-v1\n";
 pub const TENDER_PROCESS_ACTOR: &str = "system:tender-document-process-v2";
 pub const MAX_TENDER_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 pub const MAX_TENDER_SOURCE_UNITS: usize = 100_000;
 pub const MAX_TENDER_SOURCE_TEXT_BYTES: usize = 16 * 1024 * 1024;
+
+/// SHA-256 of [`TENDER_CONVERTER_OPERATION`], matching the SQL converter contract payload.
+pub fn tender_converter_contract_sha256() -> String {
+    sha256_hex(TENDER_CONVERTER_OPERATION.as_bytes())
+}
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum TenderDocumentProcessError {
@@ -47,12 +56,36 @@ pub enum TenderDocumentProcessError {
     ImageIdentity(String),
     #[error("tender OCR/VLM failed: {0}")]
     Vision(String),
-    #[error("tender OCR produced no text: {0}")]
-    EmptyOcr(String),
     #[error("object freeze failed: {0}")]
     ObjectFreeze(String),
+    #[error("tender dependency unavailable: {0}")]
+    Unavailable(String),
     #[error("source publication failed: {0}")]
     Publication(String),
+}
+
+fn tender_sql_code_is_deterministic(code: &str) -> bool {
+    code.starts_with("22") || code.starts_with("23") || matches!(code, "P0001" | "P0002")
+}
+
+fn classify_tender_sql_error(error: sqlx::Error) -> TenderDocumentProcessError {
+    let deterministic = match &error {
+        sqlx::Error::RowNotFound
+        | sqlx::Error::ColumnIndexOutOfBounds { .. }
+        | sqlx::Error::ColumnNotFound(_)
+        | sqlx::Error::ColumnDecode { .. }
+        | sqlx::Error::Decode(_)
+        | sqlx::Error::TypeNotFound { .. } => true,
+        sqlx::Error::Database(database) => database
+            .code()
+            .is_some_and(|code| tender_sql_code_is_deterministic(code.as_ref())),
+        _ => false,
+    };
+    if deterministic {
+        TenderDocumentProcessError::Publication(error.to_string())
+    } else {
+        TenderDocumentProcessError::Unavailable(error.to_string())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +185,8 @@ pub struct SourceUnitRevision {
     pub text_sha256: String,
     pub canonical_payload: Vec<u8>,
     pub content_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<TableGrid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -194,7 +229,15 @@ pub trait TenderDocumentProcessRepository: Send + Sync {
     async fn load_frozen_document(
         &self,
         payload: &BidAuthoringJobPayloadV2,
+        cancel: &CancellationToken,
     ) -> Result<Option<FrozenTenderDocument>, TenderDocumentProcessError>;
+
+    /// Successful receipt for this frozen document/request/converter contract.
+    /// `process` must return it with `replayed=true` and must not convert, OCR, or stage.
+    async fn load_successful_receipt(
+        &self,
+        document: &FrozenTenderDocument,
+    ) -> Result<Option<TenderDocumentProcessReceipt>, TenderDocumentProcessError>;
 
     async fn stage_object(
         &self,
@@ -204,7 +247,10 @@ pub trait TenderDocumentProcessRepository: Send + Sync {
         bytes: &[u8],
     ) -> Result<FrozenObjectIdentity, TenderDocumentProcessError>;
 
-    async fn abandon_staged_object(&self, object: &FrozenObjectIdentity);
+    async fn abandon_staged_object(
+        &self,
+        object: &FrozenObjectIdentity,
+    ) -> Result<(), TenderDocumentProcessError>;
 
     async fn publish(
         &self,
@@ -218,6 +264,7 @@ pub trait TenderSourceConverter: Send + Sync {
         &self,
         file_name: &str,
         bytes: Vec<u8>,
+        cancel: &CancellationToken,
     ) -> Result<ReadResult, TenderDocumentProcessError>;
 }
 
@@ -229,12 +276,18 @@ impl TenderSourceConverter for DocReaderGrpcTenderSourceConverter {
         &self,
         file_name: &str,
         bytes: Vec<u8>,
+        cancel: &CancellationToken,
     ) -> Result<ReadResult, TenderDocumentProcessError> {
         // Intentionally never routes through `convert_simple`: standalone
         // images need the validated DocReader image-region response.
-        docparser::convert_tender_source(file_name, bytes)
-            .await
-            .map_err(|error| TenderDocumentProcessError::Conversion(error.0))
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(TenderDocumentProcessError::Conversion(
+                "tender conversion cancelled".into(),
+            )),
+            result = docparser::convert_tender_source(file_name, bytes) => result
+                .map_err(|error| TenderDocumentProcessError::Unavailable(error.0)),
+        }
     }
 }
 
@@ -250,9 +303,11 @@ pub struct VisionEnrichment {
 pub trait TenderVisionEnricher: Send + Sync {
     async fn enrich(
         &self,
-        image_object_ref: &str,
+        image_bytes: &[u8],
+        image_media_type: &str,
         image_source_type: &str,
         output_language: &str,
+        cancel: &CancellationToken,
     ) -> Result<VisionEnrichment, TenderDocumentProcessError>;
 }
 
@@ -262,29 +317,36 @@ pub struct ExistingTenderVisionEnricher;
 impl TenderVisionEnricher for ExistingTenderVisionEnricher {
     async fn enrich(
         &self,
-        image_object_ref: &str,
+        image_bytes: &[u8],
+        image_media_type: &str,
         image_source_type: &str,
         output_language: &str,
+        cancel: &CancellationToken,
     ) -> Result<VisionEnrichment, TenderDocumentProcessError> {
-        let image_object_ref = image_object_ref.to_string();
-        let image_source_type = image_source_type.to_string();
-        let output_language = output_language.to_string();
         let model = knowledge::vlm_model();
-        if model.trim().is_empty() || !knowledge::vlm_configured() {
-            return Err(TenderDocumentProcessError::Vision(
-                "configured vision model identity is missing".into(),
-            ));
-        }
-        let result = tokio::task::spawn_blocking(move || {
-            knowledge::enrichment::describe_image(
-                &image_object_ref,
-                &image_source_type,
-                &output_language,
-            )
-        })
-        .await
-        .map_err(|_| TenderDocumentProcessError::Vision("vision task join failed".into()))?
-        .map_err(TenderDocumentProcessError::Vision)?;
+        let result = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(TenderDocumentProcessError::Vision(
+                "tender vision request cancelled".into(),
+            )),
+            result = knowledge::enrichment::describe_image_bytes_once_async(
+                image_bytes,
+                image_media_type,
+                image_source_type,
+                output_language,
+            ) => result.map_err(|error| match error {
+                knowledge::models::ChatTransportError::Timeout(message)
+                | knowledge::models::ChatTransportError::Unavailable(message) => {
+                    TenderDocumentProcessError::Unavailable(message)
+                }
+                knowledge::models::ChatTransportError::HttpStatus(status) => {
+                    TenderDocumentProcessError::Unavailable(format!("configured provider returned HTTP {status}"))
+                }
+                knowledge::models::ChatTransportError::Response(message) => {
+                    TenderDocumentProcessError::Vision(message)
+                }
+            })?,
+        };
         let model_payload = format!("vision-model:{model}").into_bytes();
         let operation_payload = TENDER_VISION_OPERATION.as_bytes().to_vec();
         Ok(VisionEnrichment {
@@ -370,6 +432,7 @@ where
     pub async fn process(
         &self,
         payload: &BidAuthoringJobPayloadV2,
+        cancel: &CancellationToken,
     ) -> Result<TenderDocumentProcessReceipt, TenderDocumentProcessError> {
         let (payload_request, project_id, document_id) = match payload {
             BidAuthoringJobPayloadV2::TenderDocumentProcess {
@@ -384,7 +447,7 @@ where
             .map_err(|error| TenderDocumentProcessError::InvalidRequest(error.into()))?;
         let document = self
             .repository
-            .load_frozen_document(payload)
+            .load_frozen_document(payload, cancel)
             .await?
             .ok_or(TenderDocumentProcessError::MissingDocument)?;
         verify_frozen_document(&document, payload_request, project_id, document_id)?;
@@ -394,36 +457,22 @@ where
             &document.bytes,
         )
         .map_err(|error| TenderDocumentProcessError::FrozenInputMismatch(error.to_string()))?;
+        if let Some(mut receipt) = self.repository.load_successful_receipt(&document).await? {
+            receipt.replayed = true;
+            return Ok(receipt);
+        }
 
-        let mut converted = self
+        let converted = self
             .converter
-            .convert(&document.file_name, document.bytes.clone())
+            .convert(&document.file_name, document.bytes.clone(), cancel)
             .await?;
         if !converted.error.is_empty() {
             return Err(TenderDocumentProcessError::Conversion(converted.error));
         }
         if converted.structured_source_units.is_empty() {
-            let markdown = converted.markdown.trim();
-            if markdown.is_empty() {
-                return Err(TenderDocumentProcessError::StructuredSource(
-                    "parser returned no structured units and no markdown".into(),
-                ));
-            }
-            converted
-                .structured_source_units
-                .push(StructuredSourceUnit {
-                    key: "body".into(),
-                    ordinal: 0,
-                    kind: StructuredSourceUnitKind::Section,
-                    text: converted.markdown.clone(),
-                    locator: StructuredSourceLocator::Document {
-                        section_ordinal: 0,
-                        table_ordinal: None,
-                        row_ordinal: None,
-                        form_ordinal: None,
-                        heading_path: document.file_name.clone(),
-                    },
-                });
+            return Err(TenderDocumentProcessError::StructuredSource(
+                "parser returned no structured units".into(),
+            ));
         }
         validate_structured_units(&converted.structured_source_units)?;
 
@@ -501,24 +550,25 @@ where
                     language: &language,
                 },
                 &mut staged,
+                cancel,
             )
             .await;
         let publication = match build_result {
             Ok(publication) => publication,
             Err(error) => {
-                self.abandon_all(&staged).await;
+                self.abandon_all(&staged).await?;
                 return Err(error);
             }
         };
         match self.repository.publish(publication).await {
             Ok(receipt) => {
                 if receipt.replayed {
-                    self.abandon_all(&staged).await;
+                    self.abandon_all(&staged).await?;
                 }
                 Ok(receipt)
             }
             Err(error) => {
-                self.abandon_all(&staged).await;
+                self.abandon_all(&staged).await?;
                 Err(error)
             }
         }
@@ -528,6 +578,7 @@ where
         &self,
         input: TenderPublicationInput<'_>,
         staged: &mut Vec<FrozenObjectIdentity>,
+        cancel: &CancellationToken,
     ) -> Result<TenderDocumentPublication, TenderDocumentProcessError> {
         let TenderPublicationInput {
             document,
@@ -567,7 +618,7 @@ where
                             original_ref
                         )));
                     }
-                    if image.mime_type != *media_type {
+                    if !image_media_types_match(&image.mime_type, media_type) {
                         return Err(TenderDocumentProcessError::ImageIdentity(format!(
                             "{} media type differs between unit and image bytes",
                             original_ref
@@ -584,17 +635,17 @@ where
                     staged.push(original.clone());
                     let enrichment = self
                         .vision
-                        .enrich(&original.object_ref, image_source_type, language)
+                        .enrich(&image.data, media_type, image_source_type, language, cancel)
                         .await?;
                     let ocr_text = enrichment.ocr_text.trim().to_string();
-                    if ocr_text.is_empty() {
-                        return Err(TenderDocumentProcessError::EmptyOcr(
-                            parser_unit.key.clone(),
-                        ));
-                    }
+                    let ocr_bytes = if ocr_text.is_empty() {
+                        UNRESOLVED_EMPTY_OCR
+                    } else {
+                        ocr_text.as_bytes()
+                    };
                     let ocr_object = self
                         .repository
-                        .stage_object(image_id, "ocr-text", "text/plain", ocr_text.as_bytes())
+                        .stage_object(image_id, "ocr-text", "text/plain", ocr_bytes)
                         .await?;
                     staged.push(ocr_object.clone());
                     let image_payload = canonical_json(&json!({
@@ -648,7 +699,12 @@ where
                         None,
                     )
                 };
-            if text.is_empty() {
+            if text.is_empty()
+                && !matches!(
+                    &parser_unit.kind,
+                    StructuredSourceUnitKind::TableRegion | StructuredSourceUnitKind::ImageRegion
+                )
+            {
                 return Err(TenderDocumentProcessError::StructuredSource(format!(
                     "unit {} has empty text",
                     parser_unit.key
@@ -708,6 +764,7 @@ where
                 text_sha256: text_sha,
                 canonical_payload,
                 content_sha256: content_sha,
+                grid: parser_unit.grid.clone(),
             });
         }
 
@@ -740,21 +797,44 @@ where
         })
     }
 
-    async fn abandon_all(&self, objects: &[FrozenObjectIdentity]) {
+    async fn abandon_all(
+        &self,
+        objects: &[FrozenObjectIdentity],
+    ) -> Result<(), TenderDocumentProcessError> {
         for object in objects {
-            self.repository.abandon_staged_object(object).await;
+            self.repository.abandon_staged_object(object).await?;
         }
+        Ok(())
     }
+}
+
+#[async_trait]
+pub trait TenderObjectReader: Send + Sync {
+    async fn read(
+        &self,
+        sha256: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>, TenderDocumentProcessError>;
 }
 
 #[derive(Clone)]
 pub struct PgTenderDocumentProcessRepository {
     pool: sqlx::PgPool,
+    cleanup: platform::StagedObjectCleanupTracker,
+    object_reader: std::sync::Arc<dyn TenderObjectReader>,
 }
 
 impl PgTenderDocumentProcessRepository {
-    pub fn new(pool: sqlx::PgPool) -> Self {
-        Self { pool }
+    pub fn with_cleanup_tracker(
+        pool: sqlx::PgPool,
+        cleanup: platform::StagedObjectCleanupTracker,
+        object_reader: std::sync::Arc<dyn TenderObjectReader>,
+    ) -> Self {
+        Self {
+            pool,
+            cleanup,
+            object_reader,
+        }
     }
 }
 
@@ -763,6 +843,7 @@ impl TenderDocumentProcessRepository for PgTenderDocumentProcessRepository {
     async fn load_frozen_document(
         &self,
         payload: &BidAuthoringJobPayloadV2,
+        cancel: &CancellationToken,
     ) -> Result<Option<FrozenTenderDocument>, TenderDocumentProcessError> {
         let (request, project_id, document_id) = match payload {
             BidAuthoringJobPayloadV2::TenderDocumentProcess {
@@ -779,7 +860,7 @@ impl TenderDocumentProcessRepository for PgTenderDocumentProcessRepository {
             &request.frozen_input_sha256,
         )
         .await
-        .map_err(|error| TenderDocumentProcessError::Publication(error.to_string()))?;
+        .map_err(classify_tender_sql_error)?;
         let Some(row) = row else {
             return Ok(None);
         };
@@ -793,8 +874,10 @@ impl TenderDocumentProcessRepository for PgTenderDocumentProcessRepository {
                 "original ObjectRegistry reference differs".into(),
             ));
         }
-        let bytes = platform::read_blob(&row.document_sha256)
-            .map_err(|_| TenderDocumentProcessError::MissingDocument)?;
+        let bytes = self
+            .object_reader
+            .read(&row.document_sha256, cancel)
+            .await?;
         if i64::try_from(bytes.len()).ok() != Some(row.byte_length) {
             return Err(TenderDocumentProcessError::FrozenInputMismatch(
                 "original byte length differs from ObjectRegistry".into(),
@@ -819,6 +902,42 @@ impl TenderDocumentProcessRepository for PgTenderDocumentProcessRepository {
         }))
     }
 
+    async fn load_successful_receipt(
+        &self,
+        document: &FrozenTenderDocument,
+    ) -> Result<Option<TenderDocumentProcessReceipt>, TenderDocumentProcessError> {
+        let identity: Option<Value> = sqlx::query_scalar(
+            "SELECT result_identity
+               FROM bid_async_request_snapshot_artifacts
+              WHERE id=$1 AND revision=$2 AND frozen_input_sha256=$3::kb_sha256
+                AND request_kind='tender_document_process'
+                AND project_id=$4
+                AND status='succeeded'
+                AND result_identity IS NOT NULL",
+        )
+        .bind(document.request.request_artifact_id)
+        .bind(document.request.request_revision)
+        .bind(&document.request.frozen_input_sha256)
+        .bind(document.project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(classify_tender_sql_error)?;
+        let Some(mut identity) = identity else {
+            return Ok(None);
+        };
+        identity
+            .as_object_mut()
+            .ok_or_else(|| {
+                TenderDocumentProcessError::Publication(
+                    "successful tender receipt is not an object".into(),
+                )
+            })?
+            .insert("replayed".into(), json!(true));
+        serde_json::from_value(identity)
+            .map(Some)
+            .map_err(|error| TenderDocumentProcessError::Publication(error.to_string()))
+    }
+
     async fn stage_object(
         &self,
         _owner_id: Uuid,
@@ -836,8 +955,7 @@ impl TenderDocumentProcessRepository for PgTenderDocumentProcessRepository {
         let sha256 = sha256_hex(bytes);
         let object_ref = platform::object_ref(&sha256);
         let staging_id = Uuid::new_v4();
-        let mut cleanup = platform::StagedObjectCleanupGuard::new(&self.pool, TENDER_PROCESS_ACTOR);
-        cleanup.register(staging_id);
+        self.cleanup.register(staging_id);
         platform::stage_object_upload(
             &self.pool,
             staging_id,
@@ -848,14 +966,16 @@ impl TenderDocumentProcessRepository for PgTenderDocumentProcessRepository {
             TENDER_PROCESS_ACTOR,
         )
         .await
-        .map_err(|error| TenderDocumentProcessError::ObjectFreeze(error.to_string()))?;
+        .map_err(classify_tender_sql_error)?;
         if let Err(error) = platform::write_blob_off_runtime(&sha256, bytes) {
-            let _ =
-                platform::abandon_object_upload(&self.pool, staging_id, TENDER_PROCESS_ACTOR).await;
-            cleanup.disarm(staging_id);
-            return Err(TenderDocumentProcessError::ObjectFreeze(error.to_string()));
+            if platform::schedule_object_upload_cleanup(staging_id)
+                .await
+                .is_ok()
+            {
+                self.cleanup.disarm(staging_id);
+            }
+            return Err(TenderDocumentProcessError::Unavailable(error.to_string()));
         }
-        cleanup.disarm(staging_id);
         Ok(FrozenObjectIdentity {
             staging_id,
             object_ref,
@@ -865,10 +985,15 @@ impl TenderDocumentProcessRepository for PgTenderDocumentProcessRepository {
         })
     }
 
-    async fn abandon_staged_object(&self, object: &FrozenObjectIdentity) {
-        let _ =
-            platform::abandon_object_upload(&self.pool, object.staging_id, TENDER_PROCESS_ACTOR)
-                .await;
+    async fn abandon_staged_object(
+        &self,
+        object: &FrozenObjectIdentity,
+    ) -> Result<(), TenderDocumentProcessError> {
+        platform::schedule_object_upload_cleanup(object.staging_id)
+            .await
+            .map_err(TenderDocumentProcessError::Unavailable)?;
+        self.cleanup.disarm(object.staging_id);
+        Ok(())
     }
 
     async fn publish(
@@ -944,10 +1069,19 @@ impl TenderDocumentProcessRepository for PgTenderDocumentProcessRepository {
                         "text_sha256": unit.text_sha256,
                         "canonical_payload_hex": hex::encode(&unit.canonical_payload),
                         "content_sha256": unit.content_sha256,
+                        "grid": unit.grid,
                     })
                 })
                 .collect(),
         );
+        let staged_ids = std::iter::once(publication.converted_source.source_object.staging_id)
+            .chain(
+                publication
+                    .image_artifacts
+                    .iter()
+                    .flat_map(|image| [image.original.staging_id, image.ocr_text.staging_id]),
+            )
+            .collect::<Vec<_>>();
         let result = crate::bid_authoring_v2::publish_tender_document_process_v2(
             &self.pool,
             crate::bid_authoring_v2::PublishTenderDocumentProcessV2 {
@@ -964,10 +1098,28 @@ impl TenderDocumentProcessRepository for PgTenderDocumentProcessRepository {
             },
         )
         .await
-        .map_err(|error| TenderDocumentProcessError::Publication(error.to_string()))?;
-        serde_json::from_value(result)
-            .map_err(|error| TenderDocumentProcessError::Publication(error.to_string()))
+        .map_err(classify_tender_sql_error)?;
+        let receipt: TenderDocumentProcessReceipt = serde_json::from_value(result)
+            .map_err(|error| TenderDocumentProcessError::Publication(error.to_string()))?;
+        if !receipt.replayed {
+            for staging_id in staged_ids {
+                self.cleanup.disarm(staging_id);
+            }
+        }
+        Ok(receipt)
     }
+}
+
+fn image_media_types_match(left: &str, right: &str) -> bool {
+    fn canonical(value: &str) -> String {
+        let value = value.trim().to_ascii_lowercase();
+        if value == "image/jpg" {
+            "image/jpeg".into()
+        } else {
+            value
+        }
+    }
+    canonical(left) == canonical(right)
 }
 
 fn verify_frozen_document(
@@ -993,6 +1145,11 @@ fn verify_frozen_document(
         return Err(TenderDocumentProcessError::FrozenInputMismatch(
             "role or converter identity digest is malformed".into(),
         ));
+    }
+    if document.converter_contract_sha256 != tender_converter_contract_sha256() {
+        return Err(TenderDocumentProcessError::FrozenInputMismatch(format!(
+            "converter contract digest does not match {TENDER_CONVERTER_OPERATION}"
+        )));
     }
     Ok(())
 }
@@ -1065,4 +1222,49 @@ fn stable_uuid(namespace: &[u8], material: &[u8]) -> Uuid {
     bytes[6] = (bytes[6] & 0x0f) | 0x50;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Uuid::from_bytes(bytes)
+}
+
+#[cfg(test)]
+mod sql_classification_tests {
+    use super::*;
+
+    #[test]
+    fn lock_and_connectivity_are_transient_while_contract_violations_are_terminal() {
+        assert!(!tender_sql_code_is_deterministic("55P03"));
+        assert!(!tender_sql_code_is_deterministic("40001"));
+        assert!(!tender_sql_code_is_deterministic("08006"));
+        assert!(!tender_sql_code_is_deterministic("53100"));
+        assert!(!tender_sql_code_is_deterministic("57P01"));
+        assert!(!tender_sql_code_is_deterministic("57014"));
+        assert!(tender_sql_code_is_deterministic("P0002"));
+        assert!(tender_sql_code_is_deterministic("22023"));
+        assert!(tender_sql_code_is_deterministic("23514"));
+        assert!(matches!(
+            classify_tender_sql_error(sqlx::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "fixture",
+            ))),
+            TenderDocumentProcessError::Unavailable(_)
+        ));
+        assert!(matches!(
+            classify_tender_sql_error(sqlx::Error::RowNotFound),
+            TenderDocumentProcessError::Publication(_)
+        ));
+    }
+
+    #[test]
+    fn converter_contract_digest_is_sha256_of_v3_operation() {
+        assert_eq!(
+            TENDER_CONVERTER_OPERATION,
+            "docreader-grpc-structured-source-v3"
+        );
+        assert_eq!(
+            tender_converter_contract_sha256(),
+            sha256_hex(TENDER_CONVERTER_OPERATION.as_bytes())
+        );
+        assert_ne!(
+            tender_converter_contract_sha256(),
+            sha256_hex(b"docparser-structured-source-v2")
+        );
+    }
 }

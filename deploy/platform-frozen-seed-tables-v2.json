@@ -1,0 +1,79 @@
+{
+  "schema_version": 2,
+  "tables": [
+    {
+      "schema": "public",
+      "table": "application_maintenance_gate",
+      "primary_key": [
+        "singleton_key"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "bid_attachment_preparation_contract_artifacts",
+      "primary_key": [
+        "id"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "bid_authoring_contract_artifacts",
+      "primary_key": [
+        "id"
+      ],
+      "primary_key_values": [
+        [
+          "00000000-0000-5000-8000-000000000201"
+        ],
+        [
+          "00000000-0000-5000-8000-000000000202"
+        ],
+        [
+          "00000000-0000-5000-8000-000000000203"
+        ],
+        [
+          "00000000-0000-5000-8000-000000000204"
+        ],
+        [
+          "00000000-0000-5000-8000-000000000205"
+        ]
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "bid_render_style_contract_artifacts",
+      "primary_key": [
+        "id"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "bid_renderer_contract_artifacts",
+      "primary_key": [
+        "id"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "platform_role_contracts",
+      "primary_key": [
+        "role_name"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "queue_contract_artifacts",
+      "primary_key": [
+        "contract_key",
+        "version"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "queue_contract_current",
+      "primary_key": [
+        "contract_key"
+      ]
+    }
+  ]
+}

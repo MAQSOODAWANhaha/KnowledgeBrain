@@ -85,7 +85,7 @@ protocol = 1
 handler = "ImageMultimodalV1Handler"
 snapshots = ["multimodal", "feature"]
 capabilities = ["vlm", "ocr", "object_store"]
-launch_mode = "declared_disabled"
+launch_mode = "required_enabled"
 
 [[entries]]
 physical_queue = "graph"
@@ -116,7 +116,7 @@ physical_queue = "wiki"
 task_type = "wiki:ingest"
 payload_schema = "wiki-ingest/v1"
 payload_version = 1
-identity_formula = "wiki-ingest:{product_version_id}"
+identity_formula = "wiki-ingest:{product_version_id}:{document_id}:{operation}"
 protocol = 1
 handler = "WikiIngestV1Handler"
 snapshots = ["wiki", "feature"]
@@ -128,11 +128,35 @@ physical_queue = "wiki"
 task_type = "wiki:finalize"
 payload_schema = "wiki-finalize/v1"
 payload_version = 1
-identity_formula = "wiki-finalize:{product_version_id}"
+identity_formula = "wiki-finalize:{product_version_id}:{document_id}"
 protocol = 1
 handler = "WikiFinalizeV1Handler"
 snapshots = ["wiki", "feature"]
 capabilities = ["chat", "postgresql"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "retention"
+task_type = "object:retention"
+payload_schema = "object-retention/v1"
+payload_version = 1
+identity_formula = "object-retention:{deletion_id}"
+protocol = 1
+handler = "ObjectRetentionV1Handler"
+snapshots = ["object_deletion"]
+capabilities = ["postgresql", "object_store"]
+launch_mode = "required_enabled"
+
+[[entries]]
+physical_queue = "retention"
+task_type = "object:upload_expire"
+payload_schema = "object-upload-expire/v1"
+payload_version = 1
+identity_formula = "object-upload-expire:{staging_id}"
+protocol = 1
+handler = "ObjectUploadExpireV1Handler"
+snapshots = ["object_upload_staging"]
+capabilities = ["postgresql", "object_store"]
 launch_mode = "required_enabled"
 
 [[entries]]
@@ -188,7 +212,7 @@ physical_queue = "low"
 task_type = "knowledge:list_reparse"
 payload_schema = "list-reparse/v1"
 payload_version = 1
-identity_formula = "knowledge:list_reparse:{document_id}"
+identity_formula = "knowledge:list_reparse:{document_id}:{attempt}"
 protocol = 1
 handler = "ListReparseV1Handler"
 snapshots = ["process", "feature"]
@@ -224,7 +248,7 @@ physical_queue = "bid-authoring-v2"
 task_type = "bid:requirement_set_compile:v2"
 payload_schema = "bid-authoring/v2"
 payload_version = 1
-identity_formula = "requirement_set_compile:{project_id}:{document_set_revision_id}:{disposition_set_revision_id}"
+identity_formula = "requirement_set_compile:{request_artifact_id}:{request_revision}"
 protocol = 1
 handler = "RequirementSetCompileV2Handler"
 snapshots = ["request", "document_set", "disposition_set"]
@@ -233,14 +257,14 @@ launch_mode = "required_enabled"
 
 [[entries]]
 physical_queue = "bid-authoring-v2"
-task_type = "bid:outline_generate:v2"
+task_type = "bid:docx_compose:v2"
 payload_schema = "bid-authoring/v2"
 payload_version = 1
-identity_formula = "outline_generate:{request_artifact_id}:{request_revision}"
+identity_formula = "docx_compose:{request_artifact_id}:{request_revision}"
 protocol = 1
-handler = "OutlineGenerateV2Handler"
-snapshots = ["request", "workspace", "requirement_projection", "prompt", "model"]
-capabilities = ["postgresql", "chat"]
+handler = "DocxComposeV2Handler"
+snapshots = ["request", "document_set", "requirement_set", "expected_docx", "prompt", "model"]
+capabilities = ["postgresql", "chat", "object_store"]
 launch_mode = "required_enabled"
 
 [[entries]]

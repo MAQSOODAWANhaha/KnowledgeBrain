@@ -1,4 +1,5 @@
 import os
+import socket
 import unittest
 from unittest.mock import patch
 
@@ -36,10 +37,32 @@ class TestSSRFValidation(unittest.TestCase):
         self.assertFalse(safe)
         self.assertTrue(reason)
 
-    def test_allows_public_https(self):
+    @patch("docreader.utils.ssrf.socket.getaddrinfo")
+    def test_allows_public_https(self, resolve):
+        resolve.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 0))
+        ]
         safe, reason = is_ssrf_safe_url("https://example.com/article")
         self.assertTrue(safe, reason)
         self.assertEqual(reason, "")
+        resolve.assert_called_once_with("example.com", None, type=socket.SOCK_STREAM)
+
+    @patch("docreader.utils.ssrf.socket.getaddrinfo")
+    def test_rejects_dns_failure(self, resolve):
+        resolve.side_effect = socket.gaierror("test resolver unavailable")
+        safe, reason = is_ssrf_safe_url("https://example.com/article")
+        self.assertFalse(safe)
+        self.assertIn("DNS resolution failed", reason)
+
+    @patch("docreader.utils.ssrf.socket.getaddrinfo")
+    def test_rejects_public_hostname_with_any_private_answer(self, resolve):
+        resolve.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, 0))
+            for address in ["93.184.216.34", "127.0.0.1"]
+        ]
+        safe, reason = is_ssrf_safe_url("https://example.com/article")
+        self.assertFalse(safe)
+        self.assertTrue(reason)
 
 
 if __name__ == "__main__":

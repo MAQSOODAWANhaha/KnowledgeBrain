@@ -1,4 +1,5 @@
 [build]
-# Keep compiler artifacts outside the repository so security/deletion scans never
-# interpret dependency metadata as project source or credentials.
-target-dir = "../.knowledgebrain-target"
+# Local artifacts (gitignored /target). This repository is rustc 1.97 only.
+# Do not share ../.knowledgebrain-target with other rustc versions: a 1.88
+# writer there poisons rust-analyzer proc-macro expanders.
+target-dir = "target"

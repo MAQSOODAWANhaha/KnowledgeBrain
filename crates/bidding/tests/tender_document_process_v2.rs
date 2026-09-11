@@ -5,27 +5,38 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bidding::tender_process::*;
 use bidding::tender_upload::{
-    DOCX_MEDIA_TYPE, JPEG_MEDIA_TYPE, PDF_MEDIA_TYPE, PNG_MEDIA_TYPE, WEBP_MEDIA_TYPE,
-    XLSX_MEDIA_TYPE,
+    DOC_MEDIA_TYPE, DOCX_MEDIA_TYPE, JPEG_MEDIA_TYPE, PDF_MEDIA_TYPE, PNG_MEDIA_TYPE,
+    WEBP_MEDIA_TYPE, XLS_MEDIA_TYPE, XLSM_MEDIA_TYPE, XLSX_MEDIA_TYPE,
 };
 use docparser::{
-    CompoundImageParent, ImageRef, ReadResult, SpreadsheetCell, SpreadsheetRange,
+    CompoundImageParent, ImageRef, PdfTableCell, ReadResult, SpreadsheetCell, SpreadsheetRange,
     SpreadsheetTableIdentity, StructuredSourceLocator, StructuredSourceUnit,
-    StructuredSourceUnitKind,
+    StructuredSourceUnitKind, TableGrid,
 };
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
 use platform::{BidAuthoringJobPayloadV2, BidAuthoringRequestIdentityV2};
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zip::write::SimpleFileOptions;
 
-type FirstPublication = (String, Vec<String>, TenderDocumentProcessReceipt);
+struct StoredSuccessfulReceipt {
+    request: BidAuthoringRequestIdentityV2,
+    project_id: Uuid,
+    document_id: Uuid,
+    document_sha256: String,
+    converter_contract_id: Uuid,
+    converter_contract_sha256: String,
+    source_sha: String,
+    unit_shas: Vec<String>,
+    receipt: TenderDocumentProcessReceipt,
+}
 
 #[derive(Clone)]
 struct MockRepository {
     document: Arc<Mutex<FrozenTenderDocument>>,
     objects: Arc<Mutex<Vec<FrozenObjectIdentity>>>,
-    first: Arc<Mutex<Option<FirstPublication>>>,
+    first: Arc<Mutex<Option<StoredSuccessfulReceipt>>>,
     publications: Arc<Mutex<Vec<TenderDocumentPublication>>>,
     abandoned: Arc<AtomicUsize>,
 }
@@ -47,8 +58,29 @@ impl TenderDocumentProcessRepository for MockRepository {
     async fn load_frozen_document(
         &self,
         _payload: &BidAuthoringJobPayloadV2,
+        _cancel: &CancellationToken,
     ) -> Result<Option<FrozenTenderDocument>, TenderDocumentProcessError> {
         Ok(Some(self.document.lock().unwrap().clone()))
+    }
+
+    async fn load_successful_receipt(
+        &self,
+        document: &FrozenTenderDocument,
+    ) -> Result<Option<TenderDocumentProcessReceipt>, TenderDocumentProcessError> {
+        let first = self.first.lock().unwrap();
+        let Some(stored) = first.as_ref() else {
+            return Ok(None);
+        };
+        if stored.request != document.request
+            || stored.project_id != document.project_id
+            || stored.document_id != document.document_id
+            || stored.document_sha256 != document.document_sha256
+            || stored.converter_contract_id != document.converter_contract_id
+            || stored.converter_contract_sha256 != document.converter_contract_sha256
+        {
+            return Ok(None);
+        }
+        Ok(Some(stored.receipt.clone()))
     }
 
     async fn stage_object(
@@ -75,8 +107,12 @@ impl TenderDocumentProcessRepository for MockRepository {
         Ok(object)
     }
 
-    async fn abandon_staged_object(&self, _object: &FrozenObjectIdentity) {
+    async fn abandon_staged_object(
+        &self,
+        _object: &FrozenObjectIdentity,
+    ) -> Result<(), TenderDocumentProcessError> {
         self.abandoned.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn publish(
@@ -91,13 +127,13 @@ impl TenderDocumentProcessRepository for MockRepository {
             .map(|unit| unit.content_sha256.clone())
             .collect::<Vec<_>>();
         let mut first = self.first.lock().unwrap();
-        if let Some((expected_source, expected_units, receipt)) = first.as_ref() {
-            if expected_source != &source_sha || expected_units != &unit_shas {
+        if let Some(stored) = first.as_ref() {
+            if stored.source_sha != source_sha || stored.unit_shas != unit_shas {
                 return Err(TenderDocumentProcessError::Publication(
                     "same request has conflicting source unit SHA".into(),
                 ));
             }
-            let mut replay = receipt.clone();
+            let mut replay = stored.receipt.clone();
             replay.replayed = true;
             return Ok(replay);
         }
@@ -111,7 +147,20 @@ impl TenderDocumentProcessRepository for MockRepository {
             image_ocr_region_count: publication.image_artifacts.len() as u32,
             replayed: false,
         };
-        *first = Some((source_sha, unit_shas, receipt.clone()));
+        *first = Some(StoredSuccessfulReceipt {
+            request: publication.request.clone(),
+            project_id: publication.project_id,
+            document_id: publication.document_id,
+            document_sha256: publication.document_sha256.clone(),
+            converter_contract_id: publication.converted_source.converter_contract_id,
+            converter_contract_sha256: publication
+                .converted_source
+                .converter_contract_sha256
+                .clone(),
+            source_sha,
+            unit_shas,
+            receipt: receipt.clone(),
+        });
         Ok(receipt)
     }
 }
@@ -121,6 +170,7 @@ struct FixtureConverter {
     image_bytes: Vec<u8>,
     seen: Arc<Mutex<Vec<String>>>,
     omit_image_bytes: bool,
+    empty_units: bool,
 }
 
 #[async_trait]
@@ -129,6 +179,7 @@ impl TenderSourceConverter for FixtureConverter {
         &self,
         file_name: &str,
         bytes: Vec<u8>,
+        _cancel: &CancellationToken,
     ) -> Result<ReadResult, TenderDocumentProcessError> {
         self.seen.lock().unwrap().push(file_name.to_string());
         let ext = file_name.rsplit('.').next().unwrap();
@@ -136,6 +187,9 @@ impl TenderSourceConverter for FixtureConverter {
             markdown: format!("# {file_name}"),
             ..ReadResult::default()
         };
+        if self.empty_units {
+            return Ok(result);
+        }
         match ext {
             "pdf" => {
                 result.structured_source_units.push(unit(
@@ -151,9 +205,52 @@ impl TenderSourceConverter for FixtureConverter {
                         bottom: Some(1.0),
                     },
                 ));
-                add_image(&mut result, 1, "pdf-image", self, Some(0), None);
+                let mut table = unit(
+                    1,
+                    "pdf-table",
+                    StructuredSourceUnitKind::TableRegion,
+                    "",
+                    StructuredSourceLocator::PageTable {
+                        page_ordinal: 0,
+                        table_ordinal: 0,
+                        left: 40.0,
+                        top: 700.0,
+                        right: 520.0,
+                        bottom: 620.0,
+                    },
+                );
+                table.grid = Some(TableGrid {
+                    row_count: 1,
+                    column_count: 3,
+                    cells: vec![
+                        PdfTableCell {
+                            row: 0,
+                            column: 0,
+                            row_span: 1,
+                            col_span: 1,
+                            text: "列甲".into(),
+                        },
+                        PdfTableCell {
+                            row: 0,
+                            column: 1,
+                            row_span: 1,
+                            col_span: 1,
+                            text: "列乙".into(),
+                        },
+                        PdfTableCell {
+                            row: 0,
+                            column: 2,
+                            row_span: 1,
+                            col_span: 1,
+                            text: "列丙".into(),
+                        },
+                    ],
+                    widths_mm: Some(vec![45.0, 67.5, 67.5]),
+                });
+                result.structured_source_units.push(table);
+                add_image(&mut result, 2, "pdf-image", self, Some(0), None);
             }
-            "docx" => {
+            "docx" | "doc" => {
                 result.structured_source_units.push(unit(
                     0,
                     "doc-section",
@@ -199,7 +296,7 @@ impl TenderSourceConverter for FixtureConverter {
                     }),
                 );
             }
-            "xlsx" => result.structured_source_units.push(unit(
+            "xlsx" | "xlsm" | "xls" => result.structured_source_units.push(unit(
                 0,
                 "sheet-row",
                 StructuredSourceUnitKind::TableRow,
@@ -330,9 +427,11 @@ struct MockVision {
 impl TenderVisionEnricher for MockVision {
     async fn enrich(
         &self,
-        _image_object_ref: &str,
+        _image_bytes: &[u8],
+        _image_media_type: &str,
         _image_source_type: &str,
         _output_language: &str,
+        _cancel: &CancellationToken,
     ) -> Result<VisionEnrichment, TenderDocumentProcessError> {
         let text = self
             .text
@@ -374,12 +473,15 @@ impl TenderProcessTransport for MockTransport {
 }
 
 #[tokio::test]
-async fn all_six_formats_use_one_document_path_and_freeze_typed_provenance() {
+async fn accepted_formats_use_one_document_path_and_freeze_typed_provenance() {
     let png = image_bytes(ImageFormat::Png);
     let fixtures = vec![
         ("tender.pdf", PDF_MEDIA_TYPE, minimal_pdf()),
         ("tender.docx", DOCX_MEDIA_TYPE, office(true)),
         ("tender.xlsx", XLSX_MEDIA_TYPE, office(false)),
+        ("tender.xlsm", XLSM_MEDIA_TYPE, office_xlsm()),
+        ("tender.doc", DOC_MEDIA_TYPE, ole_container("WordDocument")),
+        ("tender.xls", XLS_MEDIA_TYPE, ole_container("Workbook")),
         ("tender.png", PNG_MEDIA_TYPE, png.clone()),
         (
             "tender.jpg",
@@ -399,6 +501,7 @@ async fn all_six_formats_use_one_document_path_and_freeze_typed_provenance() {
             image_bytes: png.clone(),
             seen: Arc::new(Mutex::new(Vec::new())),
             omit_image_bytes: false,
+            empty_units: false,
         };
         let seen = converter.seen.clone();
         let transport = MockTransport::default();
@@ -409,7 +512,10 @@ async fn all_six_formats_use_one_document_path_and_freeze_typed_provenance() {
             vision("verified OCR text"),
             transport,
         );
-        let receipt = service.process(&payload).await.unwrap();
+        let receipt = service
+            .process(&payload, &CancellationToken::new())
+            .await
+            .unwrap();
         assert_eq!(seen.lock().unwrap().as_slice(), &[name.to_string()]);
         assert!(!receipt.replayed);
         assert_eq!(transport_count.load(Ordering::SeqCst), 0);
@@ -427,7 +533,7 @@ async fn all_six_formats_use_one_document_path_and_freeze_typed_provenance() {
         );
         assert_eq!(
             publication.converted_source.converter_contract_sha256,
-            "b".repeat(64)
+            tender_converter_contract_sha256()
         );
         assert_eq!(
             publication.converted_source.source_unit_set_sha256,
@@ -439,8 +545,15 @@ async fn all_six_formats_use_one_document_path_and_freeze_typed_provenance() {
                 && unit.source_span_v2.document_id == publication.document_id
                 && unit.source_span_v2.converted_source_revision_id
                     == publication.converted_source.id
+                && {
+                    let persisted = serde_json::to_value(&unit.source_span_v2).unwrap();
+                    persisted["schema_version"] == 2
+                        && persisted["locator"].is_object()
+                        && persisted["locator"]["locator_kind"].is_string()
+                        && persisted.get("locator_kind").is_none()
+                }
         }));
-        if name.ends_with("xlsx") {
+        if name.ends_with("xlsx") || name.ends_with("xlsm") || name.ends_with("xls") {
             assert_eq!(receipt.image_ocr_region_count, 0);
         } else {
             assert_eq!(receipt.image_ocr_region_count, 1);
@@ -479,7 +592,9 @@ async fn replay_is_deterministic_conflicting_ocr_is_rejected_and_staging_is_aban
         image_bytes: image_bytes(ImageFormat::Png),
         seen: Arc::new(Mutex::new(Vec::new())),
         omit_image_bytes: false,
+        empty_units: false,
     };
+    let seen = converter.seen.clone();
     let mutable_text = Arc::new(Mutex::new(Ok("first OCR".into())));
     let service = TenderDocumentProcessService::new(
         repository.clone(),
@@ -489,19 +604,105 @@ async fn replay_is_deterministic_conflicting_ocr_is_rejected_and_staging_is_aban
         },
         MockTransport::default(),
     );
-    let first = service.process(&payload).await.unwrap();
-    let replay = service.process(&payload).await.unwrap();
+    let first = service
+        .process(&payload, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(seen.lock().unwrap().as_slice(), &["scan.png".to_string()]);
+    assert!(!first.replayed);
+    let objects_after_first = repository.objects.lock().unwrap().len();
+    let abandoned_after_first = repository.abandoned.load(Ordering::SeqCst);
+    let replay = service
+        .process(&payload, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(seen.lock().unwrap().as_slice(), &["scan.png".to_string()]);
     assert_eq!(
         first.converted_source_revision_id,
         replay.converted_source_revision_id
     );
     assert!(replay.replayed);
-    assert!(repository.abandoned.load(Ordering::SeqCst) >= 3);
+    assert_eq!(
+        repository.objects.lock().unwrap().len(),
+        objects_after_first
+    );
+    assert_eq!(
+        repository.abandoned.load(Ordering::SeqCst),
+        abandoned_after_first
+    );
     *mutable_text.lock().unwrap() = Ok("different OCR".into());
+    let skipped = service
+        .process(&payload, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert!(skipped.replayed);
+    assert_eq!(
+        skipped.converted_source_sha256,
+        first.converted_source_sha256
+    );
+}
+
+#[tokio::test]
+async fn first_failure_or_changed_identity_allows_convert_again() {
+    let bytes = image_bytes(ImageFormat::Png);
+    let (document, payload) = frozen_fixture("scan.png", PNG_MEDIA_TYPE, bytes.clone());
+    let repository = MockRepository::new(document);
+    let converter = FixtureConverter {
+        image_bytes: image_bytes(ImageFormat::Png),
+        seen: Arc::new(Mutex::new(Vec::new())),
+        omit_image_bytes: false,
+        empty_units: false,
+    };
+    let seen = converter.seen.clone();
+    let mutable_text = Arc::new(Mutex::new(Err("model unavailable".into())));
+    let service = TenderDocumentProcessService::new(
+        repository.clone(),
+        converter,
+        MockVision {
+            text: mutable_text.clone(),
+        },
+        MockTransport::default(),
+    );
     assert!(matches!(
-        service.process(&payload).await,
+        service.process(&payload, &CancellationToken::new()).await,
+        Err(TenderDocumentProcessError::Vision(_))
+    ));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+
+    *mutable_text.lock().unwrap() = Ok("first OCR".into());
+    let recovered = service
+        .process(&payload, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    assert!(!recovered.replayed);
+
+    {
+        let mut frozen = repository.document.lock().unwrap();
+        frozen.converter_contract_sha256 = "c".repeat(64);
+    }
+    assert!(matches!(
+        service.process(&payload, &CancellationToken::new()).await,
+        Err(TenderDocumentProcessError::FrozenInputMismatch(message))
+            if message.contains(TENDER_CONVERTER_OPERATION)
+    ));
+    assert_eq!(seen.lock().unwrap().len(), 2);
+
+    let jpeg = image_bytes(ImageFormat::Jpeg);
+    {
+        let mut frozen = repository.document.lock().unwrap();
+        frozen.converter_contract_sha256 = tender_converter_contract_sha256();
+        frozen.bytes = jpeg.clone();
+        frozen.document_sha256 = hex::encode(Sha256::digest(&jpeg));
+        frozen.file_name = "scan.jpg".into();
+        frozen.media_type = JPEG_MEDIA_TYPE.into();
+    }
+    assert!(matches!(
+        service.process(&payload, &CancellationToken::new()).await,
         Err(TenderDocumentProcessError::Publication(message)) if message.contains("conflicting")
     ));
+    assert_eq!(seen.lock().unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -511,14 +712,16 @@ async fn digest_missing_image_model_and_empty_ocr_fail_closed() {
     document.document_sha256 = "f".repeat(64);
     let bad_digest = service_for(document, false, vision("OCR"));
     assert!(matches!(
-        bad_digest.process(&payload).await,
+        bad_digest
+            .process(&payload, &CancellationToken::new())
+            .await,
         Err(TenderDocumentProcessError::FrozenInputMismatch(_))
     ));
 
     let (document, payload) = frozen_fixture("scan.png", PNG_MEDIA_TYPE, bytes.clone());
     let missing = service_for(document, true, vision("OCR"));
     assert!(matches!(
-        missing.process(&payload).await,
+        missing.process(&payload, &CancellationToken::new()).await,
         Err(TenderDocumentProcessError::MissingImage(_))
     ));
 
@@ -531,15 +734,62 @@ async fn digest_missing_image_model_and_empty_ocr_fail_closed() {
         },
     );
     assert!(matches!(
-        failed.process(&payload).await,
+        failed.process(&payload, &CancellationToken::new()).await,
         Err(TenderDocumentProcessError::Vision(_))
     ));
 
     let (document, payload) = frozen_fixture("scan.png", PNG_MEDIA_TYPE, bytes);
-    let empty = service_for(document, false, vision("  "));
+    let repository = MockRepository::new(document);
+    let service = TenderDocumentProcessService::new(
+        repository.clone(),
+        FixtureConverter {
+            image_bytes: image_bytes(ImageFormat::Png),
+            seen: Arc::new(Mutex::new(Vec::new())),
+            omit_image_bytes: false,
+            empty_units: false,
+        },
+        vision("  "),
+        MockTransport::default(),
+    );
+    let receipt = service
+        .process(&payload, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(receipt.image_ocr_region_count, 1);
+    let publication = repository.publications.lock().unwrap();
+    let unit = publication[0]
+        .source_units
+        .iter()
+        .find(|unit| unit.unit_kind == PublishedSourceUnitKind::ImageOcrRegion)
+        .unwrap();
+    assert!(unit.text_utf8.is_empty());
+    assert!(
+        publication[0]
+            .image_artifacts
+            .iter()
+            .any(|image| image.ocr_text.byte_length == UNRESOLVED_EMPTY_OCR.len() as i64)
+    );
+}
+
+#[tokio::test]
+async fn empty_structured_units_fail_closed_without_markdown_body() {
+    let bytes = image_bytes(ImageFormat::Png);
+    let (document, payload) = frozen_fixture("scan.png", PNG_MEDIA_TYPE, bytes);
+    let service = TenderDocumentProcessService::new(
+        MockRepository::new(document),
+        FixtureConverter {
+            image_bytes: image_bytes(ImageFormat::Png),
+            seen: Arc::new(Mutex::new(Vec::new())),
+            omit_image_bytes: false,
+            empty_units: true,
+        },
+        vision("OCR"),
+        MockTransport::default(),
+    );
     assert!(matches!(
-        empty.process(&payload).await,
-        Err(TenderDocumentProcessError::EmptyOcr(_))
+        service.process(&payload, &CancellationToken::new()).await,
+        Err(TenderDocumentProcessError::StructuredSource(message))
+            if message.contains("no structured units")
     ));
 }
 
@@ -556,7 +806,7 @@ async fn wrong_job_kind_and_tender_evidence_promotion_are_explicitly_rejected() 
         disposition_set_revision_id: Uuid::from_u128(3),
     };
     assert_eq!(
-        service.process(&wrong).await,
+        service.process(&wrong, &CancellationToken::new()).await,
         Err(TenderDocumentProcessError::WrongJobKind)
     );
 
@@ -583,6 +833,7 @@ async fn wrong_job_kind_and_tender_evidence_promotion_are_explicitly_rejected() 
         text_sha256: "b".repeat(64),
         canonical_payload: vec![1],
         content_sha256: "c".repeat(64),
+        grid: None,
     };
     assert!(!tender_source_unit_can_be_bidder_evidence(&unit));
 }
@@ -598,6 +849,7 @@ fn service_for(
             image_bytes: image_bytes(ImageFormat::Png),
             seen: Arc::new(Mutex::new(Vec::new())),
             omit_image_bytes,
+            empty_units: false,
         },
         vision,
         MockTransport::default(),
@@ -630,7 +882,7 @@ fn frozen_fixture(
         role_revision_id: deterministic_uuid(format!("role:{file_name}").as_bytes()),
         role_revision_sha256: "a".repeat(64),
         converter_contract_id: Uuid::from_u128(20),
-        converter_contract_sha256: "b".repeat(64),
+        converter_contract_sha256: tender_converter_contract_sha256(),
         file_name: file_name.into(),
         media_type: media_type.into(),
         bytes,
@@ -656,6 +908,7 @@ fn unit(
         kind,
         text: text.into(),
         locator,
+        grid: None,
     }
 }
 
@@ -679,6 +932,68 @@ fn image_bytes(format: ImageFormat) -> Vec<u8> {
     let mut bytes = Cursor::new(Vec::new());
     image.write_to(&mut bytes, format).unwrap();
     bytes.into_inner()
+}
+
+fn office_xlsm() -> Vec<u8> {
+    spreadsheet(true)
+}
+
+fn ole_container(stream: &str) -> Vec<u8> {
+    const MAGIC: &[u8] = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1";
+    let mut bytes = vec![0_u8; 512 * 3];
+    bytes[..MAGIC.len()].copy_from_slice(MAGIC);
+    bytes[28..30].copy_from_slice(&0xFFFE_u16.to_le_bytes());
+    bytes[30..32].copy_from_slice(&9_u16.to_le_bytes());
+    bytes[32..34].copy_from_slice(&6_u16.to_le_bytes());
+    bytes[44..48].copy_from_slice(&1_u32.to_le_bytes());
+    bytes[48..52].copy_from_slice(&1_u32.to_le_bytes());
+    bytes[60..64].copy_from_slice(&0xFFFF_FFFE_u32.to_le_bytes());
+    bytes[68..72].copy_from_slice(&0xFFFF_FFFE_u32.to_le_bytes());
+    bytes[76..80].copy_from_slice(&0_u32.to_le_bytes());
+    for index in 1..109 {
+        let offset = 76 + index * 4;
+        bytes[offset..offset + 4].copy_from_slice(&0xFFFF_FFFF_u32.to_le_bytes());
+    }
+    let fat = 512;
+    bytes[fat..fat + 4].copy_from_slice(&0xFFFF_FFFD_u32.to_le_bytes());
+    bytes[fat + 4..fat + 8].copy_from_slice(&0xFFFF_FFFE_u32.to_le_bytes());
+    fn entry(bytes: &mut [u8], offset: usize, name: &str, kind: u8, child: u32) {
+        let encoded: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        bytes[offset..offset + encoded.len()].copy_from_slice(&encoded);
+        let name_len = u16::try_from(encoded.len() + 2).unwrap();
+        bytes[offset + 64..offset + 66].copy_from_slice(&name_len.to_le_bytes());
+        bytes[offset + 66] = kind;
+        bytes[offset + 76..offset + 80].copy_from_slice(&child.to_le_bytes());
+        bytes[offset + 116..offset + 120].copy_from_slice(&0xFFFF_FFFE_u32.to_le_bytes());
+    }
+    entry(&mut bytes, 1024, "Root Entry", 5, 1);
+    entry(&mut bytes, 1152, stream, 2, u32::MAX);
+    bytes
+}
+
+fn spreadsheet(macro_enabled: bool) -> Vec<u8> {
+    const RELS_NS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+    const OFFICE_REL: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
+    let main_type = if macro_enabled {
+        "application/vnd.ms-excel.sheet.macroEnabled.main+xml"
+    } else {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
+    };
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let entries: Vec<(&str, String)> = vec![
+        ("[Content_Types].xml", format!("<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"{main_type}\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>")),
+        ("_rels/.rels", format!("<Relationships xmlns=\"{RELS_NS}\"><Relationship Id=\"rId1\" Type=\"{OFFICE_REL}\" Target=\"xl/workbook.xml\"/></Relationships>")),
+        ("xl/workbook.xml", "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>".into()),
+        ("xl/_rels/workbook.xml.rels", format!("<Relationships xmlns=\"{RELS_NS}\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>")),
+        ("xl/worksheets/sheet1.xml", "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>Requirement</t></is></c></row></sheetData></worksheet>".into()),
+    ];
+    for (name, content) in entries {
+        writer.start_file(name, options).unwrap();
+        writer.write_all(content.as_bytes()).unwrap();
+    }
+    writer.finish().unwrap().into_inner()
 }
 
 fn office(docx: bool) -> Vec<u8> {

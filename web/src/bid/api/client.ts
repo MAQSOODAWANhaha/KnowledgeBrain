@@ -1,34 +1,17 @@
 import { createMutationAttempt, type MutationAttempt } from "../../api";
+import { v2Request } from "./http";
 import type {
-  AcceptCandidateRequest,
-  ContentCandidateRequest,
-  ExportRequest,
-  OutlineCandidateRequest,
-} from "../authoring/generation";
-import type {
-  DocumentSettings,
-  WorkspaceMutationRequestV1,
-} from "../authoring/mutations";
-import { v2Blob, v2Request, type V2RequestOptions } from "./http";
-import type {
-  AsyncRequestView,
   BidProjectView,
-  CandidateView,
-  CurrentAssessmentsView,
   DocumentRelationKind,
   DocumentRole,
   DocumentSetView,
-  EvidenceOverview,
   ExpectedPointer,
-  ExportView,
   FreezeDocumentSetResult,
   RequirementSetCompileRequestView,
   RequirementView,
   SourceUnitView,
   TenderDocumentView,
   TenderRelationView,
-  WorkspaceAssetView,
-  WorkspaceEnvelope,
 } from "./types";
 
 export type BidV2Api = {
@@ -39,19 +22,6 @@ export type BidV2Api = {
   ): Promise<BidProjectView>;
   endProject(projectId: string, attempt?: MutationAttempt): Promise<void>;
   getProject(projectId: string, signal?: AbortSignal): Promise<BidProjectView>;
-  getProjectWorkspace(
-    projectId: string,
-    signal?: AbortSignal,
-  ): Promise<WorkspaceEnvelope>;
-  getWorkspace(
-    workspaceId: string,
-    signal?: AbortSignal,
-  ): Promise<WorkspaceEnvelope>;
-  mutateWorkspace(
-    workspaceId: string,
-    body: WorkspaceMutationRequestV1,
-    opts: V2RequestOptions,
-  ): Promise<WorkspaceEnvelope>;
   listTenderDocuments(
     projectId: string,
     signal?: AbortSignal,
@@ -114,103 +84,7 @@ export type BidV2Api = {
     },
     attempt: MutationAttempt,
   ): Promise<TenderRelationView>;
-  createOutlineCandidate(
-    workspaceId: string,
-    body: OutlineCandidateRequest,
-    opts: V2RequestOptions,
-  ): Promise<AsyncRequestView>;
-  createContentCandidate(
-    workspaceId: string,
-    body: ContentCandidateRequest,
-    opts: V2RequestOptions,
-  ): Promise<AsyncRequestView>;
-  getRequest(
-    workspaceId: string,
-    requestArtifactId: string,
-    signal?: AbortSignal,
-  ): Promise<AsyncRequestView>;
-  listWorkspaceRequests(
-    workspaceId: string,
-    signal?: AbortSignal,
-  ): Promise<AsyncRequestView[]>;
-  getCandidate(
-    workspaceId: string,
-    candidateId: string,
-    signal?: AbortSignal,
-  ): Promise<CandidateView>;
-  acceptCandidate(
-    workspaceId: string,
-    candidateId: string,
-    body: AcceptCandidateRequest,
-    opts: V2RequestOptions,
-  ): Promise<WorkspaceEnvelope>;
-  rejectCandidate(
-    workspaceId: string,
-    candidateId: string,
-    opts: V2RequestOptions,
-  ): Promise<CandidateView>;
-  createOutlineCheckpoint(
-    workspaceId: string,
-    expected: ExpectedPointer,
-    attempt: MutationAttempt,
-  ): Promise<ExpectedPointer>;
-  matchEvidence(
-    workspaceId: string,
-    nodeLineageId: string,
-    expectedRevisionId: string,
-    opts: V2RequestOptions,
-  ): Promise<AsyncRequestView>;
-  getEvidenceOverview(
-    workspaceId: string,
-    signal?: AbortSignal,
-  ): Promise<EvidenceOverview>;
-  getAssessments(
-    workspaceId: string,
-    signal?: AbortSignal,
-  ): Promise<CurrentAssessmentsView>;
-  getPreviewHtml(workspaceId: string, signal?: AbortSignal): Promise<string>;
-  createExport(
-    workspaceId: string,
-    body: ExportRequest,
-    opts: V2RequestOptions,
-  ): Promise<AsyncRequestView>;
-  listExports(workspaceId: string, signal?: AbortSignal): Promise<ExportView[]>;
-  downloadExport(workspaceId: string, exportId: string): Promise<Blob>;
-  listAssets(
-    workspaceId: string,
-    signal?: AbortSignal,
-  ): Promise<WorkspaceAssetView[]>;
-  uploadAsset(
-    workspaceId: string,
-    file: File,
-    attempt: MutationAttempt,
-  ): Promise<WorkspaceAssetView>;
-  patchDocumentSettings(
-    workspaceId: string,
-    settings: DocumentSettings,
-    opts: V2RequestOptions,
-  ): Promise<WorkspaceEnvelope>;
-  applyRequirementProjection(
-    workspaceId: string,
-    projection: ExpectedPointer,
-    workspace: ExpectedPointer,
-    opts: V2RequestOptions,
-  ): Promise<WorkspaceEnvelope>;
-  applyQuoteSnapshot(
-    workspaceId: string,
-    snapshotId: string,
-    snapshotSha256: string,
-    workspace: ExpectedPointer,
-    opts: V2RequestOptions,
-  ): Promise<WorkspaceEnvelope>;
 };
-
-function envelope(
-  workspace: WorkspaceEnvelope["workspace"],
-  etag: string | null,
-): WorkspaceEnvelope {
-  return { workspace, etag: etag || workspace.sha256 };
-}
 
 export function createBidV2Client(): BidV2Api {
   return {
@@ -241,37 +115,6 @@ export function createBidV2Client(): BidV2Api {
         { signal },
       );
       return data;
-    },
-    async getProjectWorkspace(projectId, signal) {
-      const { data, etag } = await v2Request<
-        WorkspaceEnvelope["workspace"] | WorkspaceEnvelope
-      >(`/api/v2/bid-projects/${projectId}/workspace`, { signal });
-      if (data && typeof data === "object" && "workspace" in data) {
-        return envelope(data.workspace, data.etag || etag);
-      }
-      return envelope(data as WorkspaceEnvelope["workspace"], etag);
-    },
-    async getWorkspace(workspaceId, signal) {
-      const { data, etag } = await v2Request<
-        WorkspaceEnvelope["workspace"] | WorkspaceEnvelope
-      >(`/api/v2/submission-workspaces/${workspaceId}`, { signal });
-      if (data && typeof data === "object" && "workspace" in data) {
-        return envelope(data.workspace, data.etag || etag);
-      }
-      return envelope(data as WorkspaceEnvelope["workspace"], etag);
-    },
-    async mutateWorkspace(workspaceId, body, opts) {
-      const { data, etag } = await v2Request<
-        WorkspaceEnvelope["workspace"] | WorkspaceEnvelope
-      >(
-        `/api/v2/submission-workspaces/${workspaceId}/mutations`,
-        { method: "POST", body: JSON.stringify(body) },
-        { ...opts, ifMatch: opts.ifMatch ?? body.expected_workspace_sha256 },
-      );
-      if (data && typeof data === "object" && "workspace" in data) {
-        return envelope(data.workspace, data.etag || etag);
-      }
-      return envelope(data as WorkspaceEnvelope["workspace"], etag);
     },
     async listTenderDocuments(projectId, signal) {
       const { data } = await v2Request<
@@ -374,207 +217,6 @@ export function createBidV2Client(): BidV2Api {
         { attempt },
       );
       return data;
-    },
-    async createOutlineCandidate(workspaceId, body, opts) {
-      const { data } = await v2Request<AsyncRequestView>(
-        `/api/v2/submission-workspaces/${workspaceId}/outline-candidates`,
-        { method: "POST", body: JSON.stringify(body) },
-        opts,
-      );
-      return data;
-    },
-    async createContentCandidate(workspaceId, body, opts) {
-      const { data } = await v2Request<AsyncRequestView>(
-        `/api/v2/submission-workspaces/${workspaceId}/content-candidates`,
-        { method: "POST", body: JSON.stringify(body) },
-        opts,
-      );
-      return data;
-    },
-    async getRequest(workspaceId, requestArtifactId, signal) {
-      const { data } = await v2Request<AsyncRequestView>(
-        `/api/v2/submission-workspaces/${workspaceId}/requests/${requestArtifactId}`,
-        { signal },
-      );
-      return data;
-    },
-    async listWorkspaceRequests(workspaceId, signal) {
-      const { data } = await v2Request<AsyncRequestView[]>(
-        `/api/v2/submission-workspaces/${workspaceId}/requests`,
-        { signal },
-      );
-      return Array.isArray(data) ? data : [];
-    },
-    async getCandidate(workspaceId, candidateId, signal) {
-      const { data } = await v2Request<CandidateView>(
-        `/api/v2/submission-workspaces/${workspaceId}/candidates/${candidateId}`,
-        { signal },
-      );
-      return data;
-    },
-    async acceptCandidate(workspaceId, candidateId, body, opts) {
-      const { data, etag } = await v2Request<
-        WorkspaceEnvelope["workspace"] | WorkspaceEnvelope
-      >(
-        `/api/v2/submission-workspaces/${workspaceId}/candidates/${candidateId}/accept`,
-        { method: "POST", body: JSON.stringify(body) },
-        { ...opts, ifMatch: opts.ifMatch ?? body.expected_workspace_sha256 },
-      );
-      if (data && typeof data === "object" && "workspace" in data) {
-        return envelope(data.workspace, data.etag || etag);
-      }
-      return envelope(data as WorkspaceEnvelope["workspace"], etag);
-    },
-    async rejectCandidate(workspaceId, candidateId, opts) {
-      const { data } = await v2Request<CandidateView>(
-        `/api/v2/submission-workspaces/${workspaceId}/candidates/${candidateId}/reject`,
-        { method: "POST", body: JSON.stringify({}) },
-        opts,
-      );
-      return data;
-    },
-    async createOutlineCheckpoint(workspaceId, expected, attempt) {
-      const { data } = await v2Request<ExpectedPointer>(
-        `/api/v2/submission-workspaces/${workspaceId}/outline-checkpoints`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            expected_workspace_revision_id: expected.artifact_id,
-            expected_workspace_sha256: expected.sha256,
-          }),
-        },
-        { attempt },
-      );
-      return data;
-    },
-    async matchEvidence(workspaceId, nodeLineageId, expectedRevisionId, opts) {
-      const { data } = await v2Request<AsyncRequestView>(
-        `/api/v2/submission-workspaces/${workspaceId}/nodes/${nodeLineageId}/evidence-matches`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            expected_workspace_revision_id: expectedRevisionId,
-          }),
-        },
-        opts,
-      );
-      return data;
-    },
-    async getEvidenceOverview(workspaceId, signal) {
-      const { data } = await v2Request<EvidenceOverview>(
-        `/api/v2/submission-workspaces/${workspaceId}/evidence-overview`,
-        { signal },
-      );
-      return data;
-    },
-    async getAssessments(workspaceId, signal) {
-      const { data } = await v2Request<CurrentAssessmentsView>(
-        `/api/v2/submission-workspaces/${workspaceId}/assessments/current`,
-        { signal },
-      );
-      return data;
-    },
-    async getPreviewHtml(workspaceId, signal) {
-      const { data } = await v2Request<{ html: string } | string>(
-        `/api/v2/submission-workspaces/${workspaceId}/preview?mode=preview`,
-        { signal },
-      );
-      return typeof data === "string" ? data : data.html;
-    },
-    async createExport(workspaceId, body, opts) {
-      const { data } = await v2Request<AsyncRequestView>(
-        `/api/v2/submission-workspaces/${workspaceId}/exports`,
-        { method: "POST", body: JSON.stringify(body) },
-        opts,
-      );
-      return data;
-    },
-    async listExports(workspaceId, signal) {
-      const { data } = await v2Request<
-        ExportView[] | { exports: ExportView[] }
-      >(`/api/v2/submission-workspaces/${workspaceId}/exports`, { signal });
-      return Array.isArray(data) ? data : data.exports;
-    },
-    async downloadExport(workspaceId, exportId) {
-      return v2Blob(
-        `/api/v2/submission-workspaces/${workspaceId}/exports/${exportId}/download`,
-      );
-    },
-    async listAssets(workspaceId, signal) {
-      const { data } = await v2Request<
-        WorkspaceAssetView[] | { assets: WorkspaceAssetView[] }
-      >(`/api/v2/submission-workspaces/${workspaceId}/assets`, { signal });
-      return Array.isArray(data) ? data : data.assets;
-    },
-    async uploadAsset(workspaceId, file, attempt) {
-      const fd = new FormData();
-      fd.set("file", file);
-      const { data } = await v2Request<WorkspaceAssetView>(
-        `/api/v2/submission-workspaces/${workspaceId}/assets`,
-        { method: "POST", body: fd },
-        { attempt },
-      );
-      return data;
-    },
-    async patchDocumentSettings(workspaceId, settings, opts) {
-      const { data, etag } = await v2Request<
-        WorkspaceEnvelope["workspace"] | WorkspaceEnvelope
-      >(
-        `/api/v2/submission-workspaces/${workspaceId}/document-settings`,
-        { method: "PATCH", body: JSON.stringify({ settings }) },
-        opts,
-      );
-      if (data && typeof data === "object" && "workspace" in data) {
-        return envelope(data.workspace, data.etag || etag);
-      }
-      return envelope(data as WorkspaceEnvelope["workspace"], etag);
-    },
-    async applyRequirementProjection(workspaceId, projection, workspace, opts) {
-      const { data, etag } = await v2Request<
-        WorkspaceEnvelope["workspace"] | WorkspaceEnvelope
-      >(
-        `/api/v2/submission-workspaces/${workspaceId}/requirement-projection`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            expected_artifact_id: projection.artifact_id,
-            expected_sha256: projection.sha256,
-            expected_workspace_revision_id: workspace.artifact_id,
-            expected_workspace_sha256: workspace.sha256,
-          }),
-        },
-        { ...opts, ifMatch: workspace.sha256 },
-      );
-      if (data && typeof data === "object" && "workspace" in data) {
-        return envelope(data.workspace, data.etag || etag);
-      }
-      return envelope(data as WorkspaceEnvelope["workspace"], etag);
-    },
-    async applyQuoteSnapshot(
-      workspaceId,
-      snapshotId,
-      snapshotSha256,
-      workspace,
-      opts,
-    ) {
-      const { data, etag } = await v2Request<
-        WorkspaceEnvelope["workspace"] | WorkspaceEnvelope
-      >(
-        `/api/v2/submission-workspaces/${workspaceId}/quote-snapshots/${snapshotId}/apply`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            quote_snapshot_sha256: snapshotSha256,
-            expected_workspace_revision_id: workspace.artifact_id,
-            expected_workspace_sha256: workspace.sha256,
-          }),
-        },
-        { ...opts, ifMatch: workspace.sha256 },
-      );
-      if (data && typeof data === "object" && "workspace" in data) {
-        return envelope(data.workspace, data.etag || etag);
-      }
-      return envelope(data as WorkspaceEnvelope["workspace"], etag);
     },
   };
 }

@@ -6,12 +6,22 @@ import {
   type AuthoringStep,
 } from "./bid/authoring/routes";
 
+const hashGuards = new Set<() => boolean>();
+export function guardHashNavigation(guard: () => boolean): () => void {
+  hashGuards.add(guard);
+  return () => { hashGuards.delete(guard); };
+}
+
 export function useHash(): string {
   const [path, setPath] = useState(
     () => location.hash.replace(/^#/, "") || "/",
   );
   useEffect(() => {
-    const on = () => setPath(location.hash.replace(/^#/, "") || "/");
+    const on = () => {
+      // Consult mounted editors before any router subscriber can unmount them.
+      for (const guard of hashGuards) if (!guard()) return;
+      setPath(location.hash.replace(/^#/, "") || "/");
+    };
     window.addEventListener("hashchange", on);
     return () => window.removeEventListener("hashchange", on);
   }, []);

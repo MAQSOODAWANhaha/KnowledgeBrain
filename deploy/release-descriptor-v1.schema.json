@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://knowledgebrain.local/contracts/release-descriptor-v1.schema.json",
+  "title": "ReleaseDescriptorV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "release_revision",
+    "git_sha",
+    "platform_schema_revision",
+    "images"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "release_revision": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "platform_schema_revision": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["migrator", "api", "worker", "retention", "docreader"],
+      "properties": {
+        "migrator": { "$ref": "#/$defs/digestOnlyImage" },
+        "api": { "$ref": "#/$defs/digestOnlyImage" },
+        "worker": { "$ref": "#/$defs/digestOnlyImage" },
+        "retention": { "$ref": "#/$defs/digestOnlyImage" },
+        "docreader": { "$ref": "#/$defs/digestOnlyImage" }
+      }
+    }
+  },
+  "$defs": {
+    "digestOnlyImage": {
+      "type": "string",
+      "pattern": "^[a-z0-9._-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+@sha256:[0-9a-f]{64}$"
+    }
+  }
+}

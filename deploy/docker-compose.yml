@@ -1,5 +1,10 @@
 name: knowledgebrain
 
+x-schema-env: &schema-env
+  KB_RELEASE_DESCRIPTOR_PATH: /run/knowledgebrain/release-descriptor.json
+  KB_RELEASE_DESCRIPTOR_SHA256: ${KB_RELEASE_DESCRIPTOR_SHA256:-770ce81ba32a38ff76cdee4e26abe276e3645a07dd6a6bf9d14ebf2bee76d84c}
+  KB_DEPLOYMENT_NAMESPACE_ID: ${KB_DEPLOYMENT_NAMESPACE_ID:-00000000-0000-4000-8000-000000000001}
+
 x-app-env: &app-env
   REDIS_URL: ${REDIS_URL:-redis://redis:6379}
   OBJECT_DIR: ${OBJECT_DIR:-/data/objects}
@@ -25,9 +30,11 @@ x-app-env: &app-env
   KNOWLEDGEBRAIN_CHAT_BASE_URL: ${KNOWLEDGEBRAIN_CHAT_BASE_URL:-}
   KNOWLEDGEBRAIN_CHAT_API_KEY: ${KNOWLEDGEBRAIN_CHAT_API_KEY:-${LLM_API_KEY:-}}
   KNOWLEDGEBRAIN_CHAT_MODEL: ${KNOWLEDGEBRAIN_CHAT_MODEL:-${LLM_MODEL:-}}
-  KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT: ${KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT:-low}
-  BID_EXTRACT_MODE: ${BID_EXTRACT_MODE:-hybrid}
-  BID_EXTRACT_MODEL_ID: ${BID_EXTRACT_MODEL_ID:-${KNOWLEDGEBRAIN_CHAT_MODEL:-${LLM_MODEL:-}}}
+  KB_TENDER_AGENT_LIMITS: ${KB_TENDER_AGENT_LIMITS:-}
+  KB_DOCX_COMPOSITION_LIMITS: ${KB_DOCX_COMPOSITION_LIMITS:-}
+  KB_AUTHORING_MAX_OUTPUT_TOKENS: ${KB_AUTHORING_MAX_OUTPUT_TOKENS:-8192}
+  KB_AUTHORING_TIMEOUT_MS: ${KB_AUTHORING_TIMEOUT_MS:-180000}
+  KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT: ${KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT:-}
   LLM_BASE_URL: ${LLM_BASE_URL:-}
   LLM_API_KEY: ${LLM_API_KEY:-}
   LLM_MODEL: ${LLM_MODEL:-}
@@ -44,6 +51,14 @@ x-app-env: &app-env
   KNOWLEDGEBRAIN_WIKI_CONCURRENCY: ${KNOWLEDGEBRAIN_WIKI_CONCURRENCY:-8}
   RUST_LOG: ${RUST_LOG:-info}
   NO_COLOR: ${NO_COLOR:-1}
+  # Defaults must match deploy/.env.example. Browser uses SERVER_ORIGIN; API uses COMMAND_ORIGIN.
+  KB_ONLYOFFICE_SERVER_ORIGIN: ${KB_ONLYOFFICE_SERVER_ORIGIN:-http://127.0.0.1:18081/}
+  KB_ONLYOFFICE_COMMAND_ORIGIN: ${KB_ONLYOFFICE_COMMAND_ORIGIN:-http://onlyoffice/}
+  KB_ONLYOFFICE_API_ORIGIN: ${KB_ONLYOFFICE_API_ORIGIN:-http://api:8080/}
+  KB_ONLYOFFICE_JWT_SECRET: ${KB_ONLYOFFICE_JWT_SECRET:-onlyoffice-jwt-change-me}
+  KB_ONLYOFFICE_CAPABILITY_SECRET: ${KB_ONLYOFFICE_CAPABILITY_SECRET:-onlyoffice-capability-change-me}
+  KB_ONLYOFFICE_TOKEN_TTL_SECONDS: ${KB_ONLYOFFICE_TOKEN_TTL_SECONDS:-1200}
+  KB_ONLYOFFICE_HTTP_TIMEOUT_SECONDS: ${KB_ONLYOFFICE_HTTP_TIMEOUT_SECONDS:-120}
 
 services:
   postgres:
@@ -154,7 +169,12 @@ services:
         BIN: migrator
     image: knowledgebrain-migrator:local
     environment:
+      <<: *schema-env
+      KB_COMPONENT_KIND: migrator
+      KB_COMPONENT_IMAGE_DIGEST: sha256:1111111111111111111111111111111111111111111111111111111111111111
       DATABASE_URL: postgres://kb_migrator:${KNOWLEDGEBRAIN_MIGRATOR_PASSWORD:-migrator-change-me}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
+    volumes:
+      - ${KB_RELEASE_DESCRIPTOR_FILE:-./release-descriptor-v1.development.json}:/run/knowledgebrain/release-descriptor.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -171,7 +191,9 @@ services:
         BIN: api
     image: knowledgebrain-api:local
     environment:
-      <<: *app-env
+      <<: [*app-env, *schema-env]
+      KB_COMPONENT_KIND: api
+      KB_COMPONENT_IMAGE_DIGEST: sha256:2222222222222222222222222222222222222222222222222222222222222222
       DATABASE_URL: postgres://kb_runtime_api:${KNOWLEDGEBRAIN_API_DB_PASSWORD:-api-change-me}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
       API_PORT: ${API_PORT:-8080}
       KNOWLEDGEBRAIN_WEB_ROOT: ${KNOWLEDGEBRAIN_WEB_ROOT:-/web}
@@ -180,6 +202,7 @@ services:
     restart: unless-stopped
     volumes:
       - objects:/data/objects
+      - ${KB_RELEASE_DESCRIPTOR_FILE:-./release-descriptor-v1.development.json}:/run/knowledgebrain/release-descriptor.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -205,11 +228,14 @@ services:
         BIN: worker
     image: knowledgebrain-worker:local
     environment:
-      <<: *app-env
+      <<: [*app-env, *schema-env]
+      KB_COMPONENT_KIND: worker
+      KB_COMPONENT_IMAGE_DIGEST: sha256:3333333333333333333333333333333333333333333333333333333333333333
       DATABASE_URL: postgres://kb_runtime_worker:${KNOWLEDGEBRAIN_WORKER_DB_PASSWORD:-worker-change-me}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
     restart: unless-stopped
     volumes:
       - objects:/data/objects
+      - ${KB_RELEASE_DESCRIPTOR_FILE:-./release-descriptor-v1.development.json}:/run/knowledgebrain/release-descriptor.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -237,13 +263,16 @@ services:
         BIN: worker
     image: knowledgebrain-worker@sha256:5d2715634560254f7c975b5c2a35bc73b72a09ec7926696d91d0dbaa9be6d256
     environment:
-      <<: *app-env
+      <<: [*app-env, *schema-env]
+      KB_COMPONENT_KIND: retention
+      KB_COMPONENT_IMAGE_DIGEST: sha256:4444444444444444444444444444444444444444444444444444444444444444
       BIN: retention
       DATABASE_URL: postgres://kb_runtime_retention:${KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD:-retention-change-me}@postgres:5432/${POSTGRES_DB:-knowledgebrain}
       RETENTION_PROBE_ADDR: 0.0.0.0:8082
     restart: unless-stopped
     volumes:
       - objects:/data/objects
+      - ${KB_RELEASE_DESCRIPTOR_FILE:-./release-descriptor-v1.development.json}:/run/knowledgebrain/release-descriptor.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -258,6 +287,28 @@ services:
       retries: 10
       start_period: 15s
 
+  onlyoffice:
+    container_name: knowledgebrain-onlyoffice
+    profiles: ["runtime"]
+    image: onlyoffice/documentserver:8.3.3
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: ${KB_ONLYOFFICE_JWT_SECRET:-onlyoffice-jwt-change-me}
+      JWT_IN_BODY: "true"
+      ALLOW_PRIVATE_IP_ADDRESS: "true"
+      ALLOW_META_IP_ADDRESS: "true"
+    ports:
+      - "${ONLYOFFICE_HOST_PORT:-18081}:80"
+    volumes:
+      - onlyoffice-data:/var/www/onlyoffice/Data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/healthcheck || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+
 networks:
   default:
     driver: bridge
@@ -270,3 +321,4 @@ volumes:
   neo4j-data:
   minio-data:
   objects:
+  onlyoffice-data:

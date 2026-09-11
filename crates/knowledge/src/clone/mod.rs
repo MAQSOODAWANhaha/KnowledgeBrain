@@ -223,16 +223,17 @@ mod tests {
     }
 
     async fn reset_fresh_schema(pool: &sqlx::PgPool) {
-        for statement in [
-            "DROP SCHEMA public CASCADE",
-            "CREATE SCHEMA public",
-            "GRANT ALL ON SCHEMA public TO CURRENT_USER",
-        ] {
-            sqlx::query(statement)
-                .execute(pool)
-                .await
-                .expect("reset fresh test schema");
-        }
+        sqlx::raw_sql(
+            "DROP SCHEMA public CASCADE;
+             CREATE SCHEMA public;
+             GRANT ALL ON SCHEMA public TO CURRENT_USER;
+             CREATE EXTENSION IF NOT EXISTS pgcrypto;
+             CREATE EXTENSION IF NOT EXISTS vector;
+             ALTER SCHEMA public OWNER TO kb_app_owner;",
+        )
+        .execute(pool)
+        .await
+        .expect("reset fresh test schema");
         apply_fresh_baseline(pool).await.expect("migrate");
     }
 

@@ -1,0 +1,203 @@
+{
+  "schema_version": 1,
+  "codes": [
+    {
+      "code": "INPUT_SCHEMA_INVALID",
+      "scope": "frozen input",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_and_run_terminal"
+      }
+    },
+    {
+      "code": "FROZEN_INPUT_MISSING",
+      "scope": "frozen input",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_and_run_terminal"
+      }
+    },
+    {
+      "code": "FROZEN_INPUT_DIGEST_MISMATCH",
+      "scope": "frozen input",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_and_run_terminal"
+      }
+    },
+    {
+      "code": "WORKSPACE_CAS_CONFLICT",
+      "scope": "workspace",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_and_run_terminal"
+      }
+    },
+    {
+      "code": "CONTENT_RETRIEVAL_INVALID_REQUEST",
+      "scope": "retrieval",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_and_run_terminal"
+      }
+    },
+    {
+      "code": "CONTENT_RETRIEVAL_UNAVAILABLE",
+      "scope": "retrieval",
+      "retry": {
+        "kind": "typed_transient_only",
+        "max_physical_calls": 3
+      },
+      "persistence": {
+        "kind": "request_and_run_on_exhaustion"
+      }
+    },
+    {
+      "code": "CONTENT_RETRIEVAL_QUOTA_EXCEEDED",
+      "scope": "retrieval",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_and_run_terminal"
+      }
+    },
+    {
+      "code": "CONTENT_RETRIEVAL_INVALID_HIT",
+      "scope": "retrieval",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_and_run_terminal"
+      }
+    },
+    {
+      "code": "CONTENT_RETRIEVAL_POLICY_REVOKED",
+      "scope": "retrieval",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_and_run_terminal"
+      }
+    },
+    {
+      "code": "CONTENT_RETRIEVAL_DIGEST_MISMATCH",
+      "scope": "retrieval",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_and_run_terminal"
+      }
+    },
+    {
+      "code": "CONTENT_DIVERGENT_AGENT_INPUT_REPLAY",
+      "scope": "agent input",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_and_run_terminal"
+      }
+    },
+    {
+      "code": "AGENT_PROVIDER_UNAVAILABLE",
+      "scope": "generation",
+      "retry": {
+        "kind": "boundary_budget",
+        "max_physical_calls": 3
+      },
+      "persistence": {
+        "kind": "request_and_run_on_exhaustion"
+      }
+    },
+    {
+      "code": "AGENT_TURN_TIMEOUT",
+      "scope": "generation",
+      "retry": {
+        "kind": "boundary_budget",
+        "max_physical_calls": 3
+      },
+      "persistence": {
+        "kind": "request_and_run_on_exhaustion"
+      }
+    },
+    {
+      "code": "AGENT_OUTPUT_INVALID",
+      "scope": "generation",
+      "retry": {
+        "kind": "boundary_budget",
+        "max_physical_calls": 3
+      },
+      "persistence": {
+        "kind": "request_and_run_on_exhaustion"
+      }
+    },
+    {
+      "code": "AGENT_TURN_BUDGET_EXCEEDED",
+      "scope": "generation",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_and_run_terminal"
+      }
+    },
+    {
+      "code": "AGENT_DEADLINE_EXCEEDED",
+      "scope": "generation",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_and_run_terminal"
+      }
+    },
+    {
+      "code": "REQUEST_ATTEMPT_BUDGET_EXCEEDED",
+      "scope": "generation",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_and_run_terminal"
+      }
+    },
+    {
+      "code": "CONTENT_MATCH_TIMEOUT",
+      "scope": "match_only",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_terminal"
+      }
+    }
+  ]
+}

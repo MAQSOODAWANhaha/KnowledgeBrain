@@ -30,11 +30,24 @@ from docreader.models.document import (
     Document,
     ImageLocator,
     PageLocator,
+    PageTableLocator,
+    PdfTableCell,
     StructuredSourceUnit,
     StructuredSourceUnitKind,
+    TableGrid,
+    sparsify_table_cells,
 )
 from docreader.parser.base_parser import BaseParser
 from docreader.parser.concurrency import parser_worker_limit
+from docreader.parser.image_identity import image_pixel_identity
+from docreader.parser.pdf_tables import (
+    PdfTableGrid,
+    chars_outside_tables,
+    extract_tables_from_page,
+    grid_markdown,
+    reading_order_text,
+    widths_mm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +204,10 @@ def _page_image_area_ratio(page, raw) -> float:
     against a threshold so that is harmless.
     """
     width, height = page.get_size()
-    page_area = float(width) * float(height)
+    try:
+        page_area = float(width) * float(height)
+    except (TypeError, ValueError):
+        return 0.0
     if page_area <= 0:
         return 0.0
 
@@ -356,7 +372,10 @@ def _chars_bbox(char_list: list) -> tuple:
 
 
 def _bbox_area_ratio(bbox, page_w: float, page_h: float) -> float:
-    page_area = float(page_w) * float(page_h)
+    try:
+        page_area = float(page_w) * float(page_h)
+    except (TypeError, ValueError):
+        return 0.0
     if page_area <= 0:
         return 0.0
     x0, y0, x1, y1 = bbox
@@ -406,10 +425,13 @@ def _render_page_clip_jpeg(page, bbox, scale: float, quality: int, max_edge: int
     finally:
         _close_pdfium_resource(bitmap)
     page_w, page_h = page.get_size()
-    x0 = int(left * scale_eff)
-    x1 = int(right * scale_eff)
-    y0 = int((page_h - top) * scale_eff)
-    y1 = int((page_h - bottom) * scale_eff)
+    try:
+        x0 = int(left * scale_eff)
+        x1 = int(right * scale_eff)
+        y0 = int((page_h - top) * scale_eff)
+        y1 = int((page_h - bottom) * scale_eff)
+    except (TypeError, ValueError) as error:
+        raise ValueError("invalid clip bbox") from error
     if x1 <= x0 or y1 <= y0:
         raise ValueError("degenerate clip bbox")
     return _pil_to_jpeg_bytes(pil.crop((x0, y0, x1, y1)), quality)
@@ -765,13 +787,14 @@ def _merge_orphan_punctuation_lines(lines: list) -> list:
     if not lines:
         return []
     merged: list = []
+    orphan_punct = set(".,;:!?…·，。、；：！？")
     for ln in lines:
         t = ln["text"].strip()
         if (
             merged
             and t
-            and len(t) <= 4
-            and all(c in ".,;:!?…·" or c.isspace() for c in t)
+            and len(t) <= 8
+            and all(c in orphan_punct or c.isspace() for c in t)
         ):
             suffix = "".join(t.split())
             prev = merged[-1]["text"]
@@ -871,7 +894,11 @@ def _segments_to_markdown(lines: list) -> str:
 
     levels = [level(ln) for ln in lines]
     # If too many lines qualify, the font sizes are too uniform/noisy to trust.
-    if sum(1 for x in levels if x) > max(1, int(0.4 * len(lines))):
+    try:
+        heading_cap = max(1, int(0.4 * len(lines)))
+    except (TypeError, ValueError):
+        heading_cap = 1
+    if sum(1 for x in levels if x) > heading_cap:
         levels = [0] * len(lines)
 
     out = []
@@ -888,6 +915,76 @@ def _chars_to_layout_markdown(chars: list, scale: float, width: float) -> str:
         if md:
             blocks.append(md)
     return "\n".join(blocks)
+
+
+def _extract_page_tables(page, raw) -> tuple[list[PdfTableGrid], str]:
+    import pypdfium2 as pdfium
+
+    textpage = None
+    chars: list = []
+    try:
+        try:
+            textpage = page.get_textpage()
+            chars, _width = _page_chars(textpage, page, raw)
+        except pdfium.PdfiumError:
+            # Glyph pass is unavailable; caller keeps the page text layer.
+            logger.debug("pdf table glyph pass failed", exc_info=True)
+            return [], ""
+    finally:
+        _close_pdfium_resource(textpage)
+    if not chars:
+        return [], ""
+    # TableExtractionLimitError is skipped per table inside extract_tables_from_page.
+    tables = extract_tables_from_page(page, raw, chars)
+    if not tables:
+        return [], ""
+    leftover = chars_outside_tables(chars, tables)
+    leftover_text = reading_order_text(leftover) if leftover else ""
+    return tables, leftover_text
+
+
+def _pdf_table_units(
+    page_ordinal: int,
+    table_ordinal: int,
+    start_ordinal: int,
+    grid: PdfTableGrid,
+) -> list[StructuredSourceUnit]:
+    dense = [
+        PdfTableCell(
+            row=cell.row,
+            column=cell.column,
+            row_span=cell.row_span,
+            col_span=cell.col_span,
+            text=cell.text,
+        )
+        for cell in grid.cells
+    ]
+    sparse = sparsify_table_cells(
+        grid.row_count, grid.column_count, dense, grid.merged_ranges
+    )
+    locator = PageTableLocator(
+        page_ordinal=page_ordinal,
+        table_ordinal=table_ordinal,
+        left=grid.left,
+        top=grid.top,
+        right=grid.right,
+        bottom=grid.bottom,
+    )
+    return [
+        StructuredSourceUnit(
+            key=f"page:{page_ordinal}:table:{table_ordinal}",
+            ordinal=start_ordinal,
+            kind=StructuredSourceUnitKind.TABLE_REGION,
+            text="",
+            locator=locator,
+            grid=TableGrid(
+                row_count=grid.row_count,
+                column_count=grid.column_count,
+                cells=sparse,
+                widths_mm=widths_mm(grid),
+            ),
+        )
+    ]
 
 
 def _layout_line_stats(text: str) -> tuple:
@@ -933,6 +1030,10 @@ def _plain_is_well_formed(plain: str) -> bool:
     if plain.count(" . . ") >= 2:
         return True
     words = re.findall(r"\S+", plain)
+    cjk_chars = len(re.findall(r"[\u4e00-\u9fff]", plain))
+    cjk_punct = sum(plain.count(mark) for mark in "，。；：")
+    if cjk_chars >= 40 and cjk_punct >= 6:
+        return True
     if len(words) < 30:
         return False
     avg_len = sum(len(w) for w in words) / len(words)
@@ -950,7 +1051,17 @@ def _should_prefer_plain(plain: str, layout: str) -> bool:
     n, single, punct_only = _layout_line_stats(layout)
     if n == 0:
         return True
-    if single / n >= 0.18 or punct_only / n >= 0.12:
+    lines = [ln.strip() for ln in layout.splitlines() if ln.strip()]
+    if any(re.fullmatch(r"[.\s]+", ln) and "." in ln for ln in lines):
+        return True
+    if "www." in plain and "www." not in layout:
+        return True
+    cjk_punct_only = sum(
+        1
+        for ln in lines
+        if len(ln) <= 4 and all(c in "，。、；：！？ \t" for c in ln)
+    )
+    if single / n >= 0.18 or (punct_only + cjk_punct_only) / n >= 0.12:
         return True
     garbled = _layout_garbled_line_fraction(layout)
     if garbled >= 0.20 and _layout_garbled_line_fraction(plain) < 0.08:
@@ -1005,8 +1116,11 @@ def _effective_scale(page, scale: float, max_edge: int) -> float:
     """
     if max_edge <= 0:
         return scale
-    width, height = page.get_size()
-    longest_pt = max(float(width), float(height))
+    try:
+        width, height = page.get_size()
+        longest_pt = max(float(width), float(height))
+    except (TypeError, ValueError):
+        return scale
     if longest_pt <= 0:
         return scale
     return min(scale, max_edge / longest_pt)
@@ -1041,8 +1155,11 @@ def _render_pool_init(pdf_path: str) -> None:
     global _WORKER_RENDER_DOC
     import pypdfium2 as pdfium
 
-    with open(pdf_path, "rb") as f:
-        _WORKER_RENDER_DOC = pdfium.PdfDocument(f.read())
+    try:
+        with open(pdf_path, "rb") as handle:
+            _WORKER_RENDER_DOC = pdfium.PdfDocument(handle.read())
+    except OSError as error:
+        raise RuntimeError(f"pdfium worker could not open {pdf_path}") from error
 
 
 def _render_pool_task(args):
@@ -1174,7 +1291,10 @@ def _select_embedded_images(
     for m in meta:
         hash_pages[m["hash"]].add(m["page"])
 
-    repeat_threshold = max(2, int(num_text_pages * repeat_frac)) if num_text_pages else 2
+    try:
+        repeat_threshold = max(2, int(num_text_pages * repeat_frac)) if num_text_pages else 2
+    except (TypeError, ValueError):
+        repeat_threshold = 2
     banned = {h for h, pages in hash_pages.items() if len(pages) >= repeat_threshold}
 
     kept: list = []
@@ -1260,9 +1380,11 @@ def _extract_embedded_images(pdf, classes, raw, base_name: str, quality: int) ->
             pil = pil.convert("RGB")
         if max_edge > 0 and max(pil.size) > max_edge:
             ratio = max_edge / max(pil.size)
-            pil = pil.resize(
-                (max(1, int(pil.width * ratio)), max(1, int(pil.height * ratio)))
-            )
+            try:
+                size = (max(1, int(pil.width * ratio)), max(1, int(pil.height * ratio)))
+            except (TypeError, ValueError):
+                size = (1, 1)
+            pil = pil.resize(size)
         buf = io.BytesIO()
         pil.save(buf, format="JPEG", quality=quality, optimize=True)
         per_page_count[page_i] += 1
@@ -1301,7 +1423,10 @@ def _strip_repeating_lines(texts: list, classes: list) -> list:
             if len(edge) <= 80:
                 counter[edge] += 1
 
-    threshold = max(2, int(len(text_indices) * 0.6))
+    try:
+        threshold = max(2, int(len(text_indices) * 0.6))
+    except (TypeError, ValueError):
+        threshold = 2
     repeating = {line for line, count in counter.items() if count >= threshold}
     if not repeating:
         return list(texts)
@@ -1324,12 +1449,8 @@ def _pdf_image_unit(
     encoded: str,
     bounds: Optional[tuple[float, float, float, float]] = None,
 ) -> StructuredSourceUnit:
-    from PIL import Image
-
     raw = base64.b64decode(encoded)
-    with Image.open(io.BytesIO(raw)) as image:
-        width, height = image.size
-        media_type = Image.MIME.get(image.format or "", "application/octet-stream")
+    width, height, media_type = image_pixel_identity(raw)
     return StructuredSourceUnit(
         key=key,
         ordinal=ordinal,
@@ -1508,6 +1629,7 @@ class PDFParser(BaseParser):
             texts: list = []
             classes: list = []
             vector_clips: dict = {}
+            page_tables: dict = {}
             for i in range(page_count):
                 page = pdf[i]
                 try:
@@ -1528,6 +1650,12 @@ class PDFParser(BaseParser):
                     else:
                         text = plain
                     if cls == "text":
+                        tables, leftover_text = _extract_page_tables(page, pdfium_r)
+                        if tables:
+                            page_tables[i] = tables
+                            # Cell glyphs belong to TABLE_REGION. SECTION is the
+                            # leftover outside table bboxes, never the full page.
+                            text = leftover_text
                         clips = _extract_vector_figure_clips(
                             page,
                             i,
@@ -1592,10 +1720,20 @@ class PDFParser(BaseParser):
                 page_filename = f"{base_name}_page_{i+1}.jpg"
                 blocks.append(f"![{page_filename}](images/{page_filename})")
             else:
-                stripped = texts[i].strip()
-                if stripped:
-                    blocks.append(stripped)
+                # SECTION stays leftover. Markdown serializes leftover + GFM cells
+                # so knowledge ingest does not drop tables.
+                parts = []
+                leftover = texts[i].strip()
+                if leftover:
+                    parts.append(leftover)
+                for grid in page_tables.get(i, []):
+                    table_md = grid_markdown(grid)
+                    if table_md:
+                        parts.append(table_md)
+                if parts:
+                    blocks.append("\n\n".join(parts))
                 vector_figure_count += len(vector_clips.get(i, []))
+
                 page_images = list(embedded.get(i, []))
                 page_images.sort(key=lambda item: item[2], reverse=True)
                 for ref_path, _b64, _y, _bounds in page_images:
@@ -1638,15 +1776,21 @@ class PDFParser(BaseParser):
                     )
                 )
             else:
-                structured_units.append(
-                    StructuredSourceUnit(
-                        key=f"page:{i}:section:0",
-                        ordinal=len(structured_units),
-                        kind=StructuredSourceUnitKind.SECTION,
-                        text=texts[i].strip(),
-                        locator=PageLocator(page_ordinal=i),
+                leftover = texts[i].strip()
+                if leftover:
+                    structured_units.append(
+                        StructuredSourceUnit(
+                            key=f"page:{i}:section:0",
+                            ordinal=len(structured_units),
+                            kind=StructuredSourceUnitKind.SECTION,
+                            text=leftover,
+                            locator=PageLocator(page_ordinal=i),
+                        )
                     )
-                )
+                for table_ordinal, grid in enumerate(page_tables.get(i, [])):
+                    structured_units.extend(
+                        _pdf_table_units(i, table_ordinal, len(structured_units), grid)
+                    )
             page_images = [
                 (item[0], item[1], item[3]) for item in embedded.get(i, [])
             ]

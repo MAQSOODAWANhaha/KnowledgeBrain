@@ -1,0 +1,2670 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "collection_index",
+      "description": "Read frozen document metadata, document relations or human decisions. Paginate all collections; metadata does not count as reading source text.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "documents",
+              "document_relations",
+              "decisions"
+            ]
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "kind",
+          "offset",
+          "limit"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "source_index",
+      "description": "List frozen sources and grid identities. This does not mark source text read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "offset",
+          "limit"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_source",
+      "description": "Read a UTF-8 byte range, including neighboring context by requesting another range. Only returned bytes count as read.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string"
+          },
+          "start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "max_bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "source_id",
+          "start",
+          "max_bytes"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_form",
+      "description": "Read frozen grid geometry and a slice of its cells. Preserve all cells and actual geometry; a grid is not automatically a submission template. Returns position-aligned citations: exact grid_cell evidence for anchor cells, null for covered merged positions. Cite these directly with zero text offsets and no view_id; reading a page does not establish cell reading.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "form_id": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "find_text": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional exact substring search in the returned cells. Adds position-aligned matches with original-cell UTF-8 start/end byte offsets and row/column; returns all occurrences including overlaps, [] for no match and null for covered merged cells. Inspect context before selecting a range; matching does not decide whether text is a bidder value."
+          }
+        },
+        "required": [
+          "form_id",
+          "offset",
+          "limit"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search_sources",
+      "description": "Literal search across frozen source text and sparse grid anchor text. Text hits carry source UTF-8 byte start/end; follow with read_source. Grid hits carry grid_cell (form_id,row,column), dense form_offset for read_form, and cell_match UTF-8 byte positions within that cell. Follow with read_form and use its returned citation; search matches are not evidence. Merged anchors appear once. Results contain whole hits within the byte budget; continue from next until total.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "query",
+          "offset",
+          "limit"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "inspect_analysis",
+      "description": "Navigate or read current versioned records, relations or source dispositions. view=index returns candidate IDs, refs, labels and detail_received: whether this role already received this exact candidate version in a completed model turn. The flag is a delivery receipt, not semantic approval; a changed candidate resets it. The index never establishes reading or review coverage. It is the default for queries without ids. Use this compact index to identify already saved outcomes, then view=detail with exact ids only when their full content is needed for comparison, correction or a relation. With ids, the default is detail. Do not repeatedly fetch all details merely to inventory saved records. During active work, a query without ids/source_id returns only outcomes related to current source_scope, not a global total. Explicit ids or source_id override that default for cross-references. Filters intersect; unknown or wrong-kind IDs are errors, never fuzzy matches. Source IDs identify dispositions in kind=all or kind=disposition. Mixed-category IDs are allowed with kind=all; colliding IDs require an explicit category. Pagination and total apply after filtering, in stable reference order. limit is a maximum; continue from next until total, never from the requested limit. Use all for records, relations and dispositions together; use record for all record kinds only. The reviewer must retrieve every complete record, relation and disposition using view=detail; only delivered detail objects are digest-tracked, independently of source reading. Template execution semantics: regions determine emitted document order; contiguous regions of one grid produce one table at that position. Region instructions do not rewrite, reorder or redact the cited source. A bidder_blank grid region with omitted or empty blank_ranges clears the ENTIRE original text of every selected cell, including any labels, units or instructions. Nonempty blank_ranges remove only those UTF-8 byte ranges from each selected cell; all other text survives. Other region roles preserve the original cell text. Region roles control initial text retention, not editing permissions: fixed_text cells remain ordinary editable DOCX cells. blank_ranges delete existing source bytes; they do not create input controls or new fillable space. A retained prompt with no value to erase needs no blank range. A bidder_blank text region replaces its entire cited span with a blank. Compare these actual effects with the original source; future filling alone does not justify removing fixed prompts. Cells containing only fixed prompts and empty input space can preserve their text without any blank_ranges.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "all",
+              "record",
+              "fact",
+              "rule",
+              "requirement",
+              "template",
+              "unresolved",
+              "relation",
+              "disposition"
+            ]
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "source_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "view": {
+            "type": "string",
+            "enum": [
+              "index",
+              "detail"
+            ],
+            "description": "Index is navigation only; detail returns complete versioned objects. Defaults to detail with ids, otherwise index."
+          }
+        },
+        "required": [
+          "kind",
+          "offset",
+          "limit"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "check_gaps",
+      "description": "List exact blockers. scope=work checks only the currently declared source scope: unread source/grid ranges, missing dispositions, outcome references to retain, and the reviewer's own undelivered evidence or inspections. Use it before setting that SAME scope to complete, then open the next scope. scope=analysis checks global publication/review gaps. Results are diagnostics, never reading or candidate-review evidence. Pages contain whole items within budget; continue from next until total. A zero work total only permits structural handoff, not semantic approval. scope=execution lists host execution blockers; scope=pending lists retained unresolved source outcomes, which are a different kind of issue.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "analysis",
+              "work",
+              "execution",
+              "pending"
+            ]
+          }
+        },
+        "required": [
+          "scope",
+          "offset",
+          "limit"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "put_record",
+      "description": "Create with id=null or replace an existing record by its returned id. Cite previously read source byte ranges. No invented bidder facts. Editing a record invalidates its existing relation bindings; inspect and re-establish relations_to_recheck before review. Validation failures identify the field as INVALID_FIELD <JSON Pointer>: <constraint>. Correct that field using source evidence; a failed call never partially saves the object.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source_id": {
+                  "type": "string"
+                },
+                "start": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "end": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "view_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                },
+                "grid_cell": {
+                  "type": "object",
+                  "properties": {
+                    "form_id": {
+                      "type": "string"
+                    },
+                    "row": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "column": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "form_id",
+                    "row",
+                    "column"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "source_id",
+                "start",
+                "end"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "data": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "fact"
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  },
+                  "scope": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "name",
+                  "value",
+                  "scope"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "rule"
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "scope": {
+                    "type": "string"
+                  },
+                  "applicability": {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string",
+                        "enum": [
+                          "applicable",
+                          "not_applicable",
+                          "conditional",
+                          "unknown"
+                        ]
+                      },
+                      "condition": {
+                        "type": "string"
+                      },
+                      "scope": {
+                        "type": "string"
+                      },
+                      "grounds": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "source_id": {
+                              "type": "string"
+                            },
+                            "start": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "end": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "view_id": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                            },
+                            "grid_cell": {
+                              "type": "object",
+                              "properties": {
+                                "form_id": {
+                                  "type": "string"
+                                },
+                                "row": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "column": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "form_id",
+                                "row",
+                                "column"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "required": [
+                            "source_id",
+                            "start",
+                            "end"
+                          ],
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "condition",
+                      "scope",
+                      "grounds"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "kind",
+                  "text",
+                  "scope",
+                  "applicability"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "requirement"
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "categories": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "qualification",
+                        "rejection",
+                        "evaluation",
+                        "commercial",
+                        "technical",
+                        "pricing",
+                        "personnel",
+                        "delivery",
+                        "format",
+                        "attachment",
+                        "other"
+                      ]
+                    }
+                  },
+                  "strength": {
+                    "type": "string",
+                    "enum": [
+                      "mandatory",
+                      "optional",
+                      "informational",
+                      "unknown"
+                    ]
+                  },
+                  "applicability": {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string",
+                        "enum": [
+                          "applicable",
+                          "not_applicable",
+                          "conditional",
+                          "unknown"
+                        ]
+                      },
+                      "condition": {
+                        "type": "string"
+                      },
+                      "scope": {
+                        "type": "string"
+                      },
+                      "grounds": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "source_id": {
+                              "type": "string"
+                            },
+                            "start": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "end": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "view_id": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                            },
+                            "grid_cell": {
+                              "type": "object",
+                              "properties": {
+                                "form_id": {
+                                  "type": "string"
+                                },
+                                "row": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "column": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "form_id",
+                                "row",
+                                "column"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "required": [
+                            "source_id",
+                            "start",
+                            "end"
+                          ],
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "condition",
+                      "scope",
+                      "grounds"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "response": {
+                    "type": "array",
+                    "description": "Only source-grounded submission or response obligations. Use [] when the clause imposes a constraint without a response artifact; an explicit_response compliance policy requires an actual response entry. Follow governing clauses before concluding no response is required.",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "channel": {
+                          "type": "string",
+                          "enum": [
+                            "narrative_content",
+                            "response_table",
+                            "deviation_statement",
+                            "structured_form",
+                            "evidence_attachment",
+                            "quotation"
+                          ]
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "condition": {
+                          "type": "string"
+                        },
+                        "grounds": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "source_id": {
+                                "type": "string"
+                              },
+                              "start": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "end": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "view_id": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                              },
+                              "grid_cell": {
+                                "type": "object",
+                                "properties": {
+                                  "form_id": {
+                                    "type": "string"
+                                  },
+                                  "row": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "column": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  }
+                                },
+                                "required": [
+                                  "form_id",
+                                  "row",
+                                  "column"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "source_id",
+                              "start",
+                              "end"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "channel",
+                        "description",
+                        "condition",
+                        "grounds"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "scoring_rule": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "proofs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "description": {
+                          "type": "string"
+                        },
+                        "subject": {
+                          "type": "string"
+                        },
+                        "validity": {
+                          "type": "string"
+                        },
+                        "name_required": {
+                          "type": "boolean"
+                        },
+                        "page_required": {
+                          "type": "boolean"
+                        },
+                        "issuer": {
+                          "type": "string"
+                        },
+                        "condition": {
+                          "type": "string"
+                        },
+                        "grounds": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "source_id": {
+                                "type": "string"
+                              },
+                              "start": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "end": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "view_id": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                              },
+                              "grid_cell": {
+                                "type": "object",
+                                "properties": {
+                                  "form_id": {
+                                    "type": "string"
+                                  },
+                                  "row": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "column": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  }
+                                },
+                                "required": [
+                                  "form_id",
+                                  "row",
+                                  "column"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "source_id",
+                              "start",
+                              "end"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "description",
+                        "subject",
+                        "validity",
+                        "name_required",
+                        "page_required",
+                        "issuer",
+                        "condition",
+                        "grounds"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "compliance": {
+                    "type": "array",
+                    "description": "Keep separate claims for distinct conditions or grounds, even when they use the same policy. Only identical policy/condition/grounds duplicates are invalid.",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "policy": {
+                          "type": "string",
+                          "enum": [
+                            "must_comply",
+                            "explicit_response",
+                            "deviation_allowed",
+                            "scored",
+                            "unknown"
+                          ]
+                        },
+                        "condition": {
+                          "type": "string"
+                        },
+                        "grounds": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "source_id": {
+                                "type": "string"
+                              },
+                              "start": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "end": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "view_id": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                              },
+                              "grid_cell": {
+                                "type": "object",
+                                "properties": {
+                                  "form_id": {
+                                    "type": "string"
+                                  },
+                                  "row": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "column": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  }
+                                },
+                                "required": [
+                                  "form_id",
+                                  "row",
+                                  "column"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "source_id",
+                              "start",
+                              "end"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "policy",
+                        "condition",
+                        "grounds"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "criteria": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "subject": {
+                          "type": "string"
+                        },
+                        "aspect": {
+                          "type": "string"
+                        },
+                        "operator": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        },
+                        "unit": {
+                          "type": "string"
+                        },
+                        "condition": {
+                          "type": "string"
+                        },
+                        "grounds": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "source_id": {
+                                "type": "string"
+                              },
+                              "start": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "end": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "view_id": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                              },
+                              "grid_cell": {
+                                "type": "object",
+                                "properties": {
+                                  "form_id": {
+                                    "type": "string"
+                                  },
+                                  "row": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "column": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  }
+                                },
+                                "required": [
+                                  "form_id",
+                                  "row",
+                                  "column"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "required": [
+                              "source_id",
+                              "start",
+                              "end"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "subject",
+                        "aspect",
+                        "operator",
+                        "value",
+                        "unit",
+                        "condition",
+                        "grounds"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "text",
+                  "categories",
+                  "strength",
+                  "applicability",
+                  "response",
+                  "scoring_rule",
+                  "proofs",
+                  "compliance",
+                  "criteria"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "template"
+                    ]
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "parent": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "order": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "purpose": {
+                    "type": "string"
+                  },
+                  "applicability": {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string",
+                        "enum": [
+                          "applicable",
+                          "not_applicable",
+                          "conditional",
+                          "unknown"
+                        ]
+                      },
+                      "condition": {
+                        "type": "string"
+                      },
+                      "scope": {
+                        "type": "string"
+                      },
+                      "grounds": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "source_id": {
+                              "type": "string"
+                            },
+                            "start": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "end": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "view_id": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                            },
+                            "grid_cell": {
+                              "type": "object",
+                              "properties": {
+                                "form_id": {
+                                  "type": "string"
+                                },
+                                "row": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "column": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "form_id",
+                                "row",
+                                "column"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "required": [
+                            "source_id",
+                            "start",
+                            "end"
+                          ],
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "condition",
+                      "scope",
+                      "grounds"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "regions": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "source": {
+                          "type": "object",
+                          "properties": {
+                            "source_id": {
+                              "type": "string"
+                            },
+                            "start": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "end": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "view_id": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                            },
+                            "grid_cell": {
+                              "type": "object",
+                              "properties": {
+                                "form_id": {
+                                  "type": "string"
+                                },
+                                "row": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "column": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "form_id",
+                                "row",
+                                "column"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "required": [
+                            "source_id",
+                            "start",
+                            "end"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "role": {
+                          "type": "string",
+                          "enum": [
+                            "fixed_text",
+                            "tender_value",
+                            "bidder_blank",
+                            "instruction",
+                            "signature"
+                          ]
+                        },
+                        "form_id": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "cells": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "row": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "column": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            },
+                            "required": [
+                              "row",
+                              "column"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "instruction": {
+                          "type": "string"
+                        },
+                        "blank_ranges": {
+                          "type": "array",
+                          "description": "Optional exact UTF-8 byte ranges to remove from the original cell text in a bidder_blank grid region. When nonempty, every selected cell must have ranges; preserve all text outside them. Omit or use [] for whole-cell blanks. No replacement strings.",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "row": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "column": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "start": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "end": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            },
+                            "required": [
+                              "row",
+                              "column",
+                              "start",
+                              "end"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "source",
+                        "role",
+                        "form_id",
+                        "cells",
+                        "instruction"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "label",
+                  "title",
+                  "parent",
+                  "order",
+                  "purpose",
+                  "applicability",
+                  "regions"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "unresolved"
+                    ]
+                  },
+                  "problem": {
+                    "type": "string"
+                  },
+                  "affected": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "candidates": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "problem",
+                  "affected",
+                  "candidates"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "sources",
+          "data"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "put_relation",
+      "description": "Create or update an evidence-backed many-to-many relationship. Endpoints are record IDs, not appendix display numbers. Select exact endpoints: record for whole-object references, template_region by region index, template_cell by frozen form ID and anchor coordinates, response/proof/criterion by requirement item index. same_value/aggregates need specific fields (or scalar facts); if unknown keep unresolved. Distinct fields within one record are allowed. The service binds endpoint record digests; editing either record requires inspecting and re-establishing affected relations. Aggregation conditions/formula must be preserved in explanation; an edge alone does not assert arithmetic evaluation. Validation failures identify the field as INVALID_FIELD <JSON Pointer>: <constraint>. Correct that field using source evidence; a failed call never partially saves the object.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "references",
+              "requires_template",
+              "contains",
+              "requires_proof",
+              "same_value",
+              "aggregates",
+              "responds_to",
+              "amends",
+              "replaces",
+              "withdraws"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "explicit",
+              "inferred",
+              "unresolved"
+            ]
+          },
+          "scope": {
+            "type": "string"
+          },
+          "explanation": {
+            "type": "string"
+          },
+          "grounds": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source_id": {
+                  "type": "string"
+                },
+                "start": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "end": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "view_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                },
+                "grid_cell": {
+                  "type": "object",
+                  "properties": {
+                    "form_id": {
+                      "type": "string"
+                    },
+                    "row": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "column": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "form_id",
+                    "row",
+                    "column"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "source_id",
+                "start",
+                "end"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "from_target": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "record"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "template_region"
+                    ]
+                  },
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "index"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "template_cell"
+                    ]
+                  },
+                  "form_id": {
+                    "type": "string"
+                  },
+                  "row": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "column": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "form_id",
+                  "row",
+                  "column"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "response"
+                    ]
+                  },
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "index"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "proof"
+                    ]
+                  },
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "index"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "criterion"
+                    ]
+                  },
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "index"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "to_target": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "record"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "template_region"
+                    ]
+                  },
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "index"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "template_cell"
+                    ]
+                  },
+                  "form_id": {
+                    "type": "string"
+                  },
+                  "row": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "column": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "form_id",
+                  "row",
+                  "column"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "response"
+                    ]
+                  },
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "index"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "proof"
+                    ]
+                  },
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "index"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "criterion"
+                    ]
+                  },
+                  "index": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "index"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "from",
+          "to",
+          "kind",
+          "state",
+          "scope",
+          "explanation",
+          "grounds",
+          "from_target",
+          "to_target"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "delete_record",
+      "description": "Remove a mistaken/duplicate record after removing dependent relations and child references. During primary repair, a pending unresolved record may be retired when a completed independent review finding explicitly identifies it as affected. Deletion preserves that finding and requires independent rereview; unreviewed pending uncertainty remains protected.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "delete_relation",
+      "description": "Remove a mistaken relationship.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "set_disposition",
+      "description": "After reading the whole source, record its disposition and explanation. Non-requirement may still support facts/templates. Unknowns stay explicit. Text-empty sources require fully read readable grids or delivered visual evidence before a resolved disposition.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "requirement",
+              "non_requirement",
+              "unresolved"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id",
+          "state",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "set_work_note",
+      "description": "Declare/update active source work before reading. source_scope uses frozen source IDs; expand it explicitly for cross-references. source_scope is permission to fetch evidence, and focus describes planned work. Any action may name valid unread text ranges in source_spans; declaring them grants no reading or comparison coverage. When exact text positions are not yet known, use locate with empty source_spans/references. Grid and view citations still require delivery. Actual record writes, findings, comparisons and completion require independently delivered evidence. Do not use start=end=0 as a text placeholder. For status=complete the focus arrays may be empty; source coverage and outcome checks still apply. Complete only after receiving all source/grid results and accounting for outcomes (reviewer must independently inspect them). The host automatically retains saved outcomes and unresolved references; do not supply output_refs or pending_refs. Unresolved work must stay pending across handoffs. Completing a scope releases old conversation while preserving business records; this does not certify semantic correctness. Before completion, query check_gaps with scope=work for the exact fields and references to repair. To split a scope that cannot fit, keep status=active, choose a smaller source_scope, retain every removed source in deferred_sources. Splitting releases old conversation but establishes no completion or evidence. Carry deferred_sources across handoffs; remove one only when resuming it into source_scope. Complete the current subset through the same local checks; clear all deferred work before requesting or submitting review. use scope=analysis only for global gaps.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source_scope": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "objective": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "complete"
+            ]
+          },
+          "note": {
+            "type": "string"
+          },
+          "deferred_sources": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true,
+            "description": "Frozen sources explicitly deferred when splitting a large active scope. Keep every prior deferred source until it is resumed into source_scope; disjoint from source_scope. Defaults to empty."
+          },
+          "focus": {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "locate",
+                  "extract",
+                  "link",
+                  "review",
+                  "handoff"
+                ]
+              },
+              "source_spans": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "source_id": {
+                      "type": "string"
+                    },
+                    "start": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "end": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "view_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                    },
+                    "grid_cell": {
+                      "type": "object",
+                      "properties": {
+                        "form_id": {
+                          "type": "string"
+                        },
+                        "row": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "column": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "form_id",
+                        "row",
+                        "column"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "source_id",
+                    "start",
+                    "end"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "references": {
+                "type": "array",
+                "description": "Use record:<id>, relation:<id>, or disposition:<source_id>, never bare UUIDs. A link focus needs record:<id> for each endpoint. Include the referenced sources in source_scope when comparing across sources.",
+                "items": {
+                  "type": "string"
+                },
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "action",
+              "source_spans",
+              "references"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "source_scope",
+          "objective",
+          "status",
+          "note",
+          "focus"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "request_review",
+      "description": "Submit the candidate to an independent reviewer after full reading and structural checks. Do not assert your own review approval.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "put_review_finding",
+      "description": "Reviewer only: persist one source-backed issue as soon as it is established. Describe the specific affected field and correction. Use id=null for a new service-allocated ID, or a returned ID to revise an existing finding. Findings survive scope handoff and history trimming; do not put finding IDs in business output_refs. affected contains exact id/path pairs, not bare IDs. Always provide a concrete correction tied to the cited evidence.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finding": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "affected": {
+                "type": "array",
+                "uniqueItems": true,
+                "description": "Exact independently inspected record/relation fields. For an omitted object cite sources and leave this empty.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "path": {
+                      "type": "string",
+                      "description": "JSON Pointer in that current object, for example /data/response/0/grounds. Empty only for a whole-object issue; reference the existing parent for a missing child."
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "path"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "sources": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "source_id": {
+                      "type": "string"
+                    },
+                    "start": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "end": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "view_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                    },
+                    "grid_cell": {
+                      "type": "object",
+                      "properties": {
+                        "form_id": {
+                          "type": "string"
+                        },
+                        "row": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "column": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "form_id",
+                        "row",
+                        "column"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "source_id",
+                    "start",
+                    "end"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "correction": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Concrete source-backed repair and what must be checked after it, without inventing bidder facts."
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "affected",
+              "sources",
+              "correction"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "finding"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "delete_review_finding",
+      "description": "Reviewer only: explicitly withdraw a saved finding after checking that it is mistaken or superseded. Only current draft finding IDs are accepted.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "complete_review_check",
+      "description": "Reviewer only: record a completed comparison with no issue for ONE exact current candidate in your active review focus. Explain the comparison and cite independently delivered original evidence. Use put_review_finding for a mismatch. Repeating a candidate version, changing the summary or varying citations cannot renew progress. Record comparisons track the candidate, its direct relations and endpoints, explicit template parents, global rules and related finding revisions. Relation comparisons track their endpoints; source dispositions and independent source judgments still track the whole source candidate collection, including additions and omissions. Sharing a source alone does not invalidate an unrelated record comparison. This local outcome neither approves the analysis nor replaces independent source judgments and host aggregation.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "reference": {
+            "type": "string",
+            "description": "Exact active-focus reference: record:<id>, relation:<id>, or disposition:<source_id>."
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source_id": {
+                  "type": "string"
+                },
+                "start": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "end": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "view_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                },
+                "grid_cell": {
+                  "type": "object",
+                  "properties": {
+                    "form_id": {
+                      "type": "string"
+                    },
+                    "row": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "column": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "form_id",
+                    "row",
+                    "column"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "source_id",
+                "start",
+                "end"
+              ],
+              "additionalProperties": false
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "reference",
+          "summary",
+          "sources"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "put_source_review",
+      "description": "Reviewer only: save the explicit source-to-result omission judgment for source_review.current.task and its expected_version. Compare the WHOLE fragment, current associated candidates, table notes and continuation boundaries. checked requires no issues; findings completes comparison with all saved finding_ids, not approval; needs_evidence keeps concrete pending questions. Reading and candidate checks alone cannot finish a source task. The host advances tasks and aggregates after the complete tool batch; no separate final submission. Submit template_mappings for every template in templates_requiring_mapping_judgment. Independently identify all existing requirement records whose response/proof the source assigns to that template, even for screenshot/evidence attachments or instruction-only layouts without fillable cells. List supporting requires_template relation_ids to this template or its parent. If an expected mapping is absent, save a finding and include its ID. Empty requirement_ids needs a source-grounded explanation that no separate requirement uses this template; an absent edge alone is not a reason. When source_review.current.layout_view is present, compare the template regions emission order against independently delivered original page pixels and include the returned visual citation in sources. Text and table source order cannot establish interleaving. A delivered view of another source on the same document page may be reused. Without original pixels keep needs_evidence; primary image receipts and cached-but-undelivered images do not qualify. Submit relationship_checks for the task rules, unresolved items and conditional/unknown/not-applicable requirements/templates. Locate actual reference targets and selected conditions, check whether applicability and continuation interpretation match them, and explain the evidence. resolved requires real non-unresolved incident relation_ids and their related_record_ids; edge existence alone is not semantic correctness. not_required needs evidence that no external relationship is required, not merely no saved edge. source_limited needs a saved unresolved_record_id affecting the subject or explicitly unknown applicability; inspect and cite frozen source IDs listed as unresolved candidates before claiming evidence unavailable. Report already-read continuations still marked missing, absent required edges and unincorporated source choices as findings; retain saved finding_ids in the outer judgment. Do not invent edges or turn a correct relation with unrelated content problems into a relationship finding. needs_evidence can keep the array incomplete while retrieving evidence.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_version": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "checked",
+              "findings",
+              "needs_evidence"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source_id": {
+                  "type": "string"
+                },
+                "start": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "end": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "view_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                },
+                "grid_cell": {
+                  "type": "object",
+                  "properties": {
+                    "form_id": {
+                      "type": "string"
+                    },
+                    "row": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "column": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "required": [
+                    "form_id",
+                    "row",
+                    "column"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "source_id",
+                "start",
+                "end"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "candidate_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "boundaries": {
+            "type": "object",
+            "properties": {
+              "before": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "complete",
+                      "continuation",
+                      "unresolved"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sources": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "source_id": {
+                          "type": "string"
+                        },
+                        "start": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "end": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "view_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                        },
+                        "grid_cell": {
+                          "type": "object",
+                          "properties": {
+                            "form_id": {
+                              "type": "string"
+                            },
+                            "row": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "column": {
+                              "type": "integer",
+                              "minimum": 0
+                            }
+                          },
+                          "required": [
+                            "form_id",
+                            "row",
+                            "column"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "source_id",
+                        "start",
+                        "end"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason",
+                  "sources"
+                ],
+                "additionalProperties": false
+              },
+              "after": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "complete",
+                      "continuation",
+                      "unresolved"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sources": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "source_id": {
+                          "type": "string"
+                        },
+                        "start": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "end": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "view_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                        },
+                        "grid_cell": {
+                          "type": "object",
+                          "properties": {
+                            "form_id": {
+                              "type": "string"
+                            },
+                            "row": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "column": {
+                              "type": "integer",
+                              "minimum": 0
+                            }
+                          },
+                          "required": [
+                            "form_id",
+                            "row",
+                            "column"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "source_id",
+                        "start",
+                        "end"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason",
+                  "sources"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "before",
+              "after"
+            ],
+            "additionalProperties": false
+          },
+          "finding_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "evidence_requests": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "question": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "source_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1
+                }
+              },
+              "required": [
+                "question",
+                "source_ids"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "template_mappings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "template_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "requirement_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "relation_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "finding_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sources": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "source_id": {
+                        "type": "string"
+                      },
+                      "start": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "end": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "view_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                      },
+                      "grid_cell": {
+                        "type": "object",
+                        "properties": {
+                          "form_id": {
+                            "type": "string"
+                          },
+                          "row": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "column": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "required": [
+                          "form_id",
+                          "row",
+                          "column"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "source_id",
+                      "start",
+                      "end"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 1
+                }
+              },
+              "required": [
+                "template_id",
+                "requirement_ids",
+                "relation_ids",
+                "finding_ids",
+                "reason",
+                "sources"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "relationship_checks": {
+            "type": "array",
+            "description": "Explicit relationship and applicability decisions for every records_requiring_relationship_judgment entry; optional additional task records may also be checked. IDs name independently retrieved current records/relations. Missing relationships or incorrect condition/continuation interpretations require saved findings, even if individual text comparisons are clean.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "record_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "resolved",
+                    "not_required",
+                    "source_limited",
+                    "findings"
+                  ]
+                },
+                "related_record_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "uniqueItems": true
+                },
+                "relation_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "uniqueItems": true
+                },
+                "unresolved_record_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "uniqueItems": true
+                },
+                "finding_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "uniqueItems": true
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sources": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "source_id": {
+                        "type": "string"
+                      },
+                      "start": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "end": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "view_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                      },
+                      "grid_cell": {
+                        "type": "object",
+                        "properties": {
+                          "form_id": {
+                            "type": "string"
+                          },
+                          "row": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "column": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "required": [
+                          "form_id",
+                          "row",
+                          "column"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "source_id",
+                      "start",
+                      "end"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 1
+                }
+              },
+              "required": [
+                "record_id",
+                "status",
+                "related_record_ids",
+                "relation_ids",
+                "unresolved_record_ids",
+                "finding_ids",
+                "reason",
+                "sources"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "task_id",
+          "expected_version",
+          "status",
+          "summary",
+          "sources",
+          "candidate_refs",
+          "boundaries",
+          "finding_ids",
+          "evidence_requests",
+          "template_mappings",
+          "relationship_checks"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "inspect_review",
+      "description": "Page through findings. Reviewer receives its persisted draft with IDs for revision or withdrawal; the main Agent receives finalized independent review findings to repair the candidate.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "offset",
+          "limit"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_source_view",
+      "description": "View the frozen original PDF physical page or uploaded image for this source through Python docreader. The actual image follows as an image message. Independently view primary Agent visual evidence when reviewing. Office page layout is not available.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+]

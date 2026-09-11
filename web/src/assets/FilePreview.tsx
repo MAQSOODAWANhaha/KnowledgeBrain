@@ -26,6 +26,38 @@ async function fetchBlob(objectKey: string): Promise<Blob> {
   return res.blob();
 }
 
+async function renderPdf(blob: Blob, el: HTMLElement, cancelled: () => boolean) {
+  const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist");
+  GlobalWorkerOptions.workerSrc = new URL(
+    "../../node_modules/pdfjs-dist/build/pdf.worker.min.mjs",
+    import.meta.url,
+  ).toString();
+  const data = new Uint8Array(await blob.arrayBuffer());
+  const pdf = await getDocument({ data }).promise;
+  try {
+    if (cancelled()) return;
+    el.innerHTML = "";
+    const width = Math.max(320, el.clientWidth || el.parentElement?.clientWidth || 800);
+    for (let n = 1; n <= pdf.numPages; n++) {
+      const page = await pdf.getPage(n);
+      if (cancelled()) return;
+      const base = page.getViewport({ scale: 1 });
+      const scale = Math.max(0.5, (width - 8) / base.width);
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement("canvas");
+      canvas.className = "pdf-page";
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("预览容器未就绪");
+      el.appendChild(canvas);
+      await page.render({ canvasContext: ctx, viewport }).promise;
+    }
+  } finally {
+    await pdf.destroy();
+  }
+}
+
 export function FilePreview({ fileName, objectKey }: { fileName: string; objectKey: string }) {
   const kind = kindOf(fileName);
   const host = useRef<HTMLDivElement>(null);
@@ -53,7 +85,11 @@ export function FilePreview({ fileName, objectKey }: { fileName: string; objectK
       try {
         const blob = await fetchBlob(objectKey);
         if (dead) return;
-        if (kind === "pdf" || kind === "image") {
+        if (kind === "pdf") {
+          const el = host.current;
+          if (!el) throw new Error("预览容器未就绪");
+          await renderPdf(blob, el, () => dead);
+        } else if (kind === "image") {
           blobUrl = URL.createObjectURL(blob);
           setUrl(blobUrl);
         } else if (kind === "docx") {
@@ -127,7 +163,6 @@ export function FilePreview({ fileName, objectKey }: { fileName: string; objectK
           </div>
         </div>
       ) : null}
-      {!busy && !err && kind === "pdf" && url ? <iframe className="preview-frame" title={fileName} src={url} /> : null}
       {!busy && !err && kind === "image" && url ? (
         <div className="preview-image">
           <img src={url} alt={fileName} />
@@ -137,7 +172,7 @@ export function FilePreview({ fileName, objectKey }: { fileName: string; objectK
         ref={host}
         className={kind === "pptx" ? "preview-pptx" : "preview-docx"}
         style={{
-          display: kind === "docx" || kind === "pptx" ? "block" : "none",
+          display: kind === "docx" || kind === "pptx" || kind === "pdf" ? "block" : "none",
           visibility: busy || err ? "hidden" : "visible",
         }}
       />

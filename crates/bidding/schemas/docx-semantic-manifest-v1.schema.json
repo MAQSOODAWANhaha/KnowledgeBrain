@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://knowledgebrain.local/schemas/docx-semantic-manifest-v1.schema.json",
+  "title": "DOCX Semantic Manifest V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "renderer_contract_id", "renderer_contract_sha256", "parts"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "renderer_contract_id": { "type": "string", "minLength": 1 },
+    "renderer_contract_sha256": { "$ref": "#/$defs/sha256" },
+    "parts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/part" }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "part": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "canonical_sha256", "uncompressed_byte_length"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["xml", "binary"] },
+        "canonical_sha256": { "$ref": "#/$defs/sha256" },
+        "uncompressed_byte_length": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

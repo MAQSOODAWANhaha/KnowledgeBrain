@@ -443,6 +443,7 @@ impl KnowledgeRetrievalPort for PostgresKnowledgeRetrievalAdapter {
 }
 
 impl PostgresKnowledgeRetrievalAdapter {
+    #[allow(clippy::too_many_arguments)]
     async fn retrieve_v2(
         &self,
         workspace_kind: &'static str,
@@ -451,6 +452,7 @@ impl PostgresKnowledgeRetrievalAdapter {
         requirement_text: &str,
         selected_versions: &[Uuid],
         policy: &RetrievalPolicyIdentityV1,
+        frozen: Option<&crate::knowledge_retrieval::FrozenRetrievalPolicyIdentityV1>,
     ) -> Result<KnowledgeEvidenceBatchV3, KnowledgeRetrievalError> {
         validate_request_v2(
             request_schema_version,
@@ -460,6 +462,17 @@ impl PostgresKnowledgeRetrievalAdapter {
             policy,
         )?;
         let validated_policy = self.validate_supported_policy_v2(policy).await?;
+        if let Some(frozen) = frozen
+            && (validated_policy.policy.canonical_bytes().ok().as_deref()
+                != Some(frozen.canonical_policy_utf8.as_bytes())
+                || validated_policy.revision.canonical_bytes().ok().as_deref()
+                    != Some(frozen.canonical_embedding_revision_utf8.as_bytes())
+                || validated_policy.credential_ref != frozen.embedding_credential_ref)
+        {
+            return Err(KnowledgeRetrievalError::DigestMismatch(
+                "frozen policy/embedding registry bytes or credential sidecar differ".into(),
+            ));
+        }
         let mut tx = self.pool.begin().await.map_err(database_unavailable)?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             .execute(&mut *tx)
@@ -470,6 +483,15 @@ impl PostgresKnowledgeRetrievalAdapter {
         // Empty C still performs no credential lookup and no provider request.
         let (rerank_revision, rerank_credential_ref) =
             lock_rerank_revision_v2(&mut tx, &validated_policy.policy).await?;
+        if let Some(frozen) = frozen
+            && (rerank_revision.canonical_bytes().ok().as_deref()
+                != Some(frozen.canonical_rerank_revision_utf8.as_bytes())
+                || rerank_credential_ref != frozen.rerank_credential_ref)
+        {
+            return Err(KnowledgeRetrievalError::DigestMismatch(
+                "frozen rerank registry bytes or credential sidecar differ".into(),
+            ));
+        }
 
         let selected_version_ids = selected_versions.iter().copied().collect::<HashSet<_>>();
         let trusted_types = ["text", "parent_text", "image_ocr"];
@@ -479,15 +501,15 @@ impl PostgresKnowledgeRetrievalAdapter {
                     p.id AS product_id,pv.id AS product_version_id,w.kind AS workspace_kind
                FROM workspaces w
                JOIN products p ON p.workspace_id=w.id
-               JOIN product_versions pv ON pv.product_id=p.id AND p.current_version_id=pv.id
+               JOIN product_versions pv ON pv.product_id=p.id
                LEFT JOIN documents d ON d.product_version_id=pv.id
                 AND d.deleted_at IS NULL AND d.enable_status='enabled' AND d.index_ready
                LEFT JOIN chunks c ON c.document_id=d.id AND c.product_version_id=pv.id
                 AND c.chunk_type=ANY($3::text[])
                 AND (c.chunk_type<>'image_ocr' OR EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings mapping WHERE mapping.chunk_id=c.id))
-              WHERE w.kind=$1 AND pv.status='active' AND pv.deleted_at IS NULL
+              WHERE w.kind=$1
                 AND (($1='product_line' AND p.kind='product') OR ($1='company' AND p.kind='library'))
-                AND (cardinality($2::uuid[])=0 OR pv.id=ANY($2::uuid[]))
+                AND pv.id=ANY($2::uuid[])
               ORDER BY p.id,pv.id,d.id,c.id",
         )
         .bind(workspace_kind)
@@ -649,15 +671,15 @@ impl PostgresKnowledgeRetrievalAdapter {
                     revision.provider_model_revision_sha256,revision.endpoint_config_sha256,
                     revision.endpoint_identity,revision.dimension,revision.request_config_sha256,
                     revision.output_normalization_version,revision.credential_ref,
+                    revision.support_state AS embedding_support_state,
                     reranker.canonical_revision_payload AS rerank_payload,
-                    reranker.credential_ref AS rerank_credential_ref
+                    reranker.credential_ref AS rerank_credential_ref,
+                    reranker.support_state AS rerank_support_state
                FROM knowledge_retrieval_policies_v2 policy
                JOIN embedding_revisions_v2 revision
                  ON revision.revision_sha256=policy.embedding_revision_sha256
-                AND revision.support_state='supported'
                JOIN rerank_revisions_v2 reranker
                  ON reranker.revision_sha256=policy.rerank_revision_sha256
-                AND reranker.support_state='supported'
               WHERE policy.policy_sha256=$1",
         )
         .bind(&policy.policy_sha256)
@@ -665,8 +687,8 @@ impl PostgresKnowledgeRetrievalAdapter {
         .await
         .map_err(|error| KnowledgeRetrievalError::Unavailable(error.to_string()))?;
         let Some(row) = row else {
-            return Err(KnowledgeRetrievalError::InvalidRequest(
-                "unknown knowledge-evidence-v2 policy".into(),
+            return Err(KnowledgeRetrievalError::PolicyRevoked(
+                "frozen knowledge-evidence-v2 policy is unavailable or revoked".into(),
             ));
         };
         let canonical_policy_payload = row.get::<Vec<u8>, _>("canonical_policy_payload");
@@ -677,13 +699,20 @@ impl PostgresKnowledgeRetrievalAdapter {
         let max_total_bytes = row.get::<i64, _>("max_total_bytes");
         let support_state = row.get::<String, _>("support_state");
         if support_state != "supported"
-            || contract_version != policy.contract_version
+            || row.get::<String, _>("embedding_support_state") != "supported"
+            || row.get::<String, _>("rerank_support_state") != "supported"
+        {
+            return Err(KnowledgeRetrievalError::PolicyRevoked(
+                "frozen knowledge-evidence-v2 policy or model revision is revoked".into(),
+            ));
+        }
+        if contract_version != policy.contract_version
             || max_hits != i64::from(policy.max_hits)
             || max_chunk_bytes != i64::from(policy.max_chunk_bytes)
             || u64::try_from(max_total_bytes).ok() != Some(policy.max_total_bytes)
         {
-            return Err(KnowledgeRetrievalError::InvalidRequest(
-                "revoked or mismatched knowledge-evidence-v2 policy".into(),
+            return Err(KnowledgeRetrievalError::DigestMismatch(
+                "frozen knowledge-evidence-v2 policy sidecars differ".into(),
             ));
         }
 
@@ -691,23 +720,23 @@ impl PostgresKnowledgeRetrievalAdapter {
         let registered_revision_sha256 = row.get::<String, _>("registered_revision_sha256");
         let revision = serde_json::from_slice::<EmbeddingRevisionV2>(&canonical_revision_payload)
             .map_err(|error| {
-            KnowledgeRetrievalError::InvalidRequest(format!(
-                "invalid embedding revision v2 artifact: {error}"
+            KnowledgeRetrievalError::DigestMismatch(format!(
+                "invalid frozen embedding revision artifact: {error}"
             ))
         })?;
         revision.validate().map_err(|error| {
-            KnowledgeRetrievalError::InvalidRequest(format!(
-                "invalid embedding revision v2 artifact: {error}"
+            KnowledgeRetrievalError::DigestMismatch(format!(
+                "invalid frozen embedding revision artifact: {error}"
             ))
         })?;
         let canonical_revision_bytes = revision.canonical_bytes().map_err(|error| {
-            KnowledgeRetrievalError::InvalidRequest(format!(
-                "invalid embedding revision v2 artifact: {error}"
+            KnowledgeRetrievalError::DigestMismatch(format!(
+                "invalid frozen embedding revision artifact: {error}"
             ))
         })?;
         let revision_digest = revision.sha256().map_err(|error| {
-            KnowledgeRetrievalError::InvalidRequest(format!(
-                "invalid embedding revision v2 identity: {error}"
+            KnowledgeRetrievalError::DigestMismatch(format!(
+                "invalid frozen embedding revision identity: {error}"
             ))
         })?;
         if canonical_revision_bytes != canonical_revision_payload
@@ -728,38 +757,38 @@ impl PostgresKnowledgeRetrievalAdapter {
             || revision.output_normalization_version
                 != row.get::<String, _>("output_normalization_version")
         {
-            return Err(KnowledgeRetrievalError::InvalidRequest(
-                "non-canonical or mismatched embedding revision v2 artifact".into(),
+            return Err(KnowledgeRetrievalError::DigestMismatch(
+                "frozen embedding revision bytes or sidecars differ".into(),
             ));
         }
 
         let artifact = serde_json::from_slice::<RetrievalPolicyV2>(&canonical_policy_payload)
             .map_err(|error| {
-                KnowledgeRetrievalError::InvalidRequest(format!(
-                    "invalid knowledge-evidence-v2 policy artifact: {error}"
+                KnowledgeRetrievalError::DigestMismatch(format!(
+                    "invalid frozen retrieval policy artifact: {error}"
                 ))
             })?;
         artifact.validate().map_err(|error| {
-            KnowledgeRetrievalError::InvalidRequest(format!(
-                "invalid knowledge-evidence-v2 policy artifact: {error}"
+            KnowledgeRetrievalError::DigestMismatch(format!(
+                "invalid frozen retrieval policy artifact: {error}"
             ))
         })?;
         let canonical_bytes = artifact.canonical_bytes().map_err(|error| {
-            KnowledgeRetrievalError::InvalidRequest(format!(
-                "invalid knowledge-evidence-v2 policy artifact: {error}"
+            KnowledgeRetrievalError::DigestMismatch(format!(
+                "invalid frozen retrieval policy artifact: {error}"
             ))
         })?;
         let rerank_revision_sha256 = row.get::<String, _>("rerank_revision_sha256");
         let rerank_payload = row.get::<Vec<u8>, _>("rerank_payload");
         let rerank_revision =
             serde_json::from_slice::<RerankRevisionV2>(&rerank_payload).map_err(|error| {
-                KnowledgeRetrievalError::InvalidRequest(format!(
-                    "invalid rerank revision v2 artifact: {error}"
+                KnowledgeRetrievalError::DigestMismatch(format!(
+                    "invalid frozen rerank revision artifact: {error}"
                 ))
             })?;
         rerank_revision.validate().map_err(|error| {
-            KnowledgeRetrievalError::InvalidRequest(format!(
-                "invalid rerank revision v2 artifact: {error}"
+            KnowledgeRetrievalError::DigestMismatch(format!(
+                "invalid frozen rerank revision artifact: {error}"
             ))
         })?;
         if canonical_bytes != canonical_policy_payload
@@ -771,18 +800,18 @@ impl PostgresKnowledgeRetrievalAdapter {
                 != artifact.rerank.model_revision_sha256
             || rerank_revision.config_revision_sha256 != artifact.rerank.config_revision_sha256
         {
-            return Err(KnowledgeRetrievalError::InvalidRequest(
-                "non-canonical or mismatched knowledge-evidence-v2 policy artifact".into(),
+            return Err(KnowledgeRetrievalError::DigestMismatch(
+                "frozen policy/rerank bytes or sidecars differ".into(),
             ));
         }
         let artifact_identity = artifact.request_identity().map_err(|error| {
-            KnowledgeRetrievalError::InvalidRequest(format!(
-                "invalid knowledge-evidence-v2 policy identity: {error}"
+            KnowledgeRetrievalError::DigestMismatch(format!(
+                "invalid frozen policy identity: {error}"
             ))
         })?;
         if artifact_identity != *policy {
-            return Err(KnowledgeRetrievalError::InvalidRequest(
-                "mismatched knowledge-evidence-v2 policy artifact identity".into(),
+            return Err(KnowledgeRetrievalError::DigestMismatch(
+                "frozen policy identity differs from registry artifact".into(),
             ));
         }
         Ok(ValidatedSemanticPolicyV2 {
@@ -808,6 +837,7 @@ impl KnowledgeRetrievalPortV3 for PostgresKnowledgeRetrievalAdapter {
                     &request.requirement_text,
                     &request.product_version_ids,
                     &request.retrieval_policy,
+                    None,
                 )
                 .await
             }
@@ -819,9 +849,72 @@ impl KnowledgeRetrievalPortV3 for PostgresKnowledgeRetrievalAdapter {
                     &request.requirement_text,
                     &request.library_version_ids,
                     &request.retrieval_policy,
+                    None,
                 )
                 .await
             }
+        }
+    }
+}
+
+impl PostgresKnowledgeRetrievalAdapter {
+    pub async fn retrieve_frozen_evidence_v3(
+        &self,
+        frozen: &crate::knowledge_retrieval::FrozenRetrievalPolicyIdentityV1,
+        scope: KnowledgeEvidenceScopeV2,
+    ) -> Result<KnowledgeEvidenceBatchV3, KnowledgeRetrievalError> {
+        let (canonical, _) = frozen
+            .canonical_bytes_and_sha256()
+            .map_err(KnowledgeRetrievalError::DigestMismatch)?;
+        let parsed: crate::knowledge_retrieval::FrozenRetrievalPolicyIdentityV1 =
+            serde_json::from_slice(&canonical)
+                .map_err(|error| KnowledgeRetrievalError::DigestMismatch(error.to_string()))?;
+        if parsed != *frozen {
+            return Err(KnowledgeRetrievalError::DigestMismatch(
+                "frozen retrieval identity is not canonical".into(),
+            ));
+        }
+        let policy = frozen.validate().map_err(|message| {
+            if message.starts_with("CONTENT_RETRIEVAL_DIGEST_MISMATCH:") {
+                KnowledgeRetrievalError::DigestMismatch(message)
+            } else {
+                KnowledgeRetrievalError::InvalidRequest(message)
+            }
+        })?;
+        match scope {
+            KnowledgeEvidenceScopeV2::ProductLine(request)
+                if request.product_version_ids == frozen.product_version_ids
+                    && request.retrieval_policy == policy =>
+            {
+                self.retrieve_v2(
+                    "product_line",
+                    request.schema_version,
+                    &request.requirement_identity_sha256,
+                    &request.requirement_text,
+                    &request.product_version_ids,
+                    &policy,
+                    Some(frozen),
+                )
+                .await
+            }
+            KnowledgeEvidenceScopeV2::Company(request)
+                if request.library_version_ids == frozen.library_version_ids
+                    && request.retrieval_policy == policy =>
+            {
+                self.retrieve_v2(
+                    "company",
+                    request.schema_version,
+                    &request.requirement_identity_sha256,
+                    &request.requirement_text,
+                    &request.library_version_ids,
+                    &policy,
+                    Some(frozen),
+                )
+                .await
+            }
+            _ => Err(KnowledgeRetrievalError::DigestMismatch(
+                "retrieval request differs from frozen scope or policy".into(),
+            )),
         }
     }
 }
@@ -841,6 +934,54 @@ pub struct AttestedEvidenceScopeV2 {
     pub attestation_id: Uuid,
     pub attestation_sha256: String,
     pub canonical_scope: serde_json::Value,
+}
+
+pub async fn freeze_retrieval_policy_identity_v1(
+    pool: &PgPool,
+) -> Result<
+    Option<crate::knowledge_retrieval::FrozenRetrievalPolicyIdentityV1>,
+    KnowledgeRetrievalError,
+> {
+    let value: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT kb_knowledge_freeze_retrieval_identity_v1()")
+            .fetch_one(pool)
+            .await
+            .map_err(database_unavailable)?;
+    let Some(mut value) = value else {
+        return Ok(None);
+    };
+    let product_version_ids: Vec<Uuid> =
+        serde_json::from_value(value.get("product_version_ids").cloned().ok_or_else(|| {
+            KnowledgeRetrievalError::InvalidRequest("frozen product scope missing".into())
+        })?)
+        .map_err(|error| KnowledgeRetrievalError::InvalidRequest(error.to_string()))?;
+    let library_version_ids: Vec<Uuid> =
+        serde_json::from_value(value.get("library_version_ids").cloned().ok_or_else(|| {
+            KnowledgeRetrievalError::InvalidRequest("frozen library scope missing".into())
+        })?)
+        .map_err(|error| KnowledgeRetrievalError::InvalidRequest(error.to_string()))?;
+    let eligible_scope_sha256 =
+        crate::knowledge_retrieval::FrozenRetrievalPolicyIdentityV1::eligible_scope_sha256_for(
+            &product_version_ids,
+            &library_version_ids,
+        )
+        .map_err(KnowledgeRetrievalError::InvalidRequest)?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| {
+            KnowledgeRetrievalError::InvalidRequest("frozen retrieval identity invalid".into())
+        })?
+        .insert(
+            "eligible_scope_sha256".into(),
+            serde_json::json!(eligible_scope_sha256),
+        );
+    let frozen: crate::knowledge_retrieval::FrozenRetrievalPolicyIdentityV1 =
+        serde_json::from_value(value)
+            .map_err(|error| KnowledgeRetrievalError::InvalidRequest(error.to_string()))?;
+    frozen
+        .validate()
+        .map_err(KnowledgeRetrievalError::InvalidRequest)?;
+    Ok(Some(frozen))
 }
 
 pub async fn latest_supported_retrieval_policy_v2(
@@ -882,11 +1023,10 @@ fn deterministic_uuid_v2(parts: &[&str]) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-pub async fn attest_requirement_evidence_v2(
-    pool: &PgPool,
+pub fn compile_requirement_evidence_scope_v2(
     policy: &RetrievalPolicyIdentityV1,
     requirements: &[RequirementEvidenceBatchesV2],
-) -> Result<AttestedEvidenceScopeV2, KnowledgeRetrievalError> {
+) -> Result<serde_json::Value, KnowledgeRetrievalError> {
     let mut products = BTreeMap::<Uuid, EligibleEvidenceVersionV1>::new();
     let mut requirement_values = Vec::with_capacity(requirements.len());
     let mut frozen_hits = Vec::new();
@@ -974,6 +1114,16 @@ pub async fn attest_requirement_evidence_v2(
         "identity_sha256":hex::encode(Sha256::digest(format!("ProductVersionEvidenceV1:{}:{}:{}",
             version.product_id,version.product_version_id,version.workspace_kind).as_bytes())),
     })).collect::<Vec<_>>();
+    let product_line_versions = products
+        .values()
+        .filter(|version| version.workspace_kind == "product_line")
+        .map(|version| version.product_version_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let company_versions = products
+        .values()
+        .filter(|version| version.workspace_kind == "company")
+        .map(|version| version.product_version_id)
+        .collect::<std::collections::BTreeSet<_>>();
     let mut workspace_kinds = products
         .values()
         .map(|version| version.workspace_kind.clone())
@@ -982,15 +1132,36 @@ pub async fn attest_requirement_evidence_v2(
     workspace_kinds.dedup();
     let scope = serde_json::json!({
         "schema_version":2,"workspace_kinds":workspace_kinds,
-        "version_selections":{"product_line":[],"company":[]},"products":product_values,
+        "version_selections":{"product_line":product_line_versions,"company":company_versions},"products":product_values,
         "retrieval_requirements":requirement_values,"frozen_hits":frozen_hits,"retrieval_policy":policy,
     });
+    Ok(scope)
+}
+
+fn attestation_database_error(error: sqlx::Error) -> KnowledgeRetrievalError {
+    let Some(database) = error.as_database_error() else {
+        return KnowledgeRetrievalError::Unavailable(error.to_string());
+    };
+    let message = database.message();
+    if message == "KNOWLEDGE_MATCHING_RETRIEVAL_POLICY_V2_INVALID" {
+        KnowledgeRetrievalError::PolicyRevoked(message.to_owned())
+    } else if message.starts_with("KNOWLEDGE_MATCHING_") {
+        KnowledgeRetrievalError::DigestMismatch(message.to_owned())
+    } else {
+        KnowledgeRetrievalError::Unavailable(error.to_string())
+    }
+}
+
+pub async fn attest_compiled_requirement_evidence_v2(
+    tx: &mut Transaction<'_, Postgres>,
+    scope: &serde_json::Value,
+) -> Result<AttestedEvidenceScopeV2, KnowledgeRetrievalError> {
     let attested: serde_json::Value =
         sqlx::query_scalar("SELECT kb_knowledge_attest_matching_scope_v2($1)")
-            .bind(&scope)
-            .fetch_one(pool)
+            .bind(scope)
+            .fetch_one(&mut **tx)
             .await
-            .map_err(database_unavailable)?;
+            .map_err(attestation_database_error)?;
     let attestation_id = attested
         .get("id")
         .and_then(serde_json::Value::as_str)
@@ -1008,8 +1179,20 @@ pub async fn attest_requirement_evidence_v2(
     Ok(AttestedEvidenceScopeV2 {
         attestation_id,
         attestation_sha256,
-        canonical_scope: scope,
+        canonical_scope: scope.clone(),
     })
+}
+
+pub async fn attest_requirement_evidence_v2(
+    pool: &PgPool,
+    policy: &RetrievalPolicyIdentityV1,
+    requirements: &[RequirementEvidenceBatchesV2],
+) -> Result<AttestedEvidenceScopeV2, KnowledgeRetrievalError> {
+    let scope = compile_requirement_evidence_scope_v2(policy, requirements)?;
+    let mut tx = pool.begin().await.map_err(database_unavailable)?;
+    let result = attest_compiled_requirement_evidence_v2(&mut tx, &scope).await?;
+    tx.commit().await.map_err(database_unavailable)?;
+    Ok(result)
 }
 
 fn exact_candidate_hit_v2(
@@ -1316,6 +1499,23 @@ fn lexical_terms(value: &str) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frozen_replay_uses_exact_versions_and_never_current_pointers() {
+        let source = include_str!("mod.rs");
+        let replay = source
+            .split_once("async fn retrieve_v2(")
+            .unwrap()
+            .1
+            .split_once("async fn validate_supported_policy_v2(")
+            .unwrap()
+            .0;
+        assert!(!replay.contains("current_version_id"));
+        assert!(!replay.contains("pv.status='active'"));
+        assert!(replay.contains("pv.id=ANY($2::uuid[])"));
+        assert!(source.contains("retrieve_frozen_evidence_v3"));
+        assert!(source.contains("KnowledgeRetrievalError::DigestMismatch"));
+    }
 
     #[test]
     fn contract_dispatch_accepts_only_v1_lexical_retrieval() {

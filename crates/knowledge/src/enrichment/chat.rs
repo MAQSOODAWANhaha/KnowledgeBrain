@@ -158,6 +158,57 @@ pub fn chat_complete_turn_with_format_once(
     )
 }
 
+/// One cancellation-safe async transport attempt with no hidden retry or
+/// response-format fallback. Agent orchestrators own the complete physical-call
+/// budget around this function.
+pub async fn chat_complete_turn_with_format_once_async(
+    system: &str,
+    user: &str,
+    model_id: &str,
+    max_tokens: u32,
+    timeout: std::time::Duration,
+    response_format: Option<&serde_json::Value>,
+) -> Result<crate::models::ChatTurn, String> {
+    let base = crate::chat_base_url();
+    let model = resolve_chat_model(model_id);
+    if base.is_empty() || model == "stub-chat" {
+        return Ok(crate::models::ChatTurn {
+            usage: None,
+            content: stub_complete(user),
+            tool_calls: Vec::new(),
+            finish_reason: "stop".into(),
+        });
+    }
+    let mut body = json!({
+        "model": model,
+        "temperature": 0.3,
+        "max_tokens": max_tokens,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user}
+        ]
+    });
+    if let Some(object) = body.as_object_mut() {
+        if let Ok(effort) = std::env::var("KNOWLEDGEBRAIN_CHAT_REASONING_EFFORT") {
+            let effort = effort.trim().to_ascii_lowercase();
+            if matches!(effort.as_str(), "low" | "medium" | "high") {
+                object.insert("reasoning_effort".into(), json!(effort));
+            }
+        }
+        if let Some(format) = response_format {
+            object.insert("response_format".into(), format.clone());
+        }
+    }
+    crate::models::chat_sse_turn_once_async(
+        &completions_url(&base),
+        &crate::chat_api_key(),
+        body,
+        timeout,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
 pub fn chat_tools_turn(
     messages: &[serde_json::Value],
     tools: &serde_json::Value,
@@ -260,6 +311,7 @@ fn chat_tools_turn_inner(
             .and_then(|m| m.get("content").and_then(|v| v.as_str()))
             .unwrap_or("");
         return Ok(crate::models::ChatTurn {
+            usage: None,
             content: stub_complete(last),
             tool_calls: Vec::new(),
             finish_reason: "stop".into(),
@@ -299,7 +351,8 @@ fn chat_tools_turn_inner(
         }
     };
     let result = call(body.clone());
-    if let Err(error) = &result
+    if retry_transport
+        && let Err(error) = &result
         && let Some(fallback) = response_format_fallback(&body, response_format, error)
     {
         return call(fallback);

@@ -8,31 +8,48 @@ license.workspace = true
 [features]
 default = []
 knowledge-v2-exact-contract-tests = ["knowledge/knowledge-v2-exact-contract-tests"]
+docreader-contract-tests = []
+
+[[test]]
+name = "tender_document_process_real_parse_counts"
+required-features = ["docreader-contract-tests"]
 
 [dependencies]
 async-trait = "0.1"
+bytes = "1"
 base64.workspace = true
 chrono.workspace = true
 docparser = { path = "../docparser" }
 docx-rs = "0.4"
 image = "0.25"
 hex.workspace = true
+futures = "0.3"
+eventsource-stream = "0.2.3"
+jsonschema = { version = "0.18.3", default-features = false, features = ["draft202012"] }
 knowledge = { path = "../knowledge" }
 lopdf = "0.44"
 oxana.workspace = true
 sha2.workspace = true
 regex = "1"
+reqwest.workspace = true
+rig = { version = "=0.42.0", default-features = false, features = ["agent", "reqwest", "rustls"] }
 roxmltree = "0.21"
 platform = { path = "../platform" }
 rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_json_canonicalizer = "0.3.2"
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
+unicode-normalization = "=0.1.25"
 uuid.workspace = true
 url = "2"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 printpdf = { version = "0.12", features = ["png", "jpeg"] }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+
+[dev-dependencies]
+retention = { path = "../retention" }

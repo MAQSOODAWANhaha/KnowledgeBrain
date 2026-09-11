@@ -47,7 +47,7 @@ def expect_http_error(method: str, path: str, body: Any,
 
 
 def wait_request(request_id: str) -> dict[str, Any]:
-    deadline = time.monotonic() + 180
+    deadline = time.monotonic() + int(os.environ.get("BID_V2_WAIT_SECONDS", "180"))
     while time.monotonic() < deadline:
         _, _, value = call("GET", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/requests/{request_id}")
         if value["status"] in ("succeeded", "failed"):
@@ -81,9 +81,14 @@ if not node:
     raise RuntimeError("workspace has no current requirement-bound fixture node")
 node_id = node["lineage_id"]
 _, _, requirements = call("GET", f"/api/v2/bid-projects/{workspace['project_id']}/requirements")
-requirement = next((value for value in requirements if value.get("lifecycle") == "current"), None)
+projected_requirement_ids = {
+    value["requirement_revision_id"] for value in projection.get("items", [])
+}
+requirement = next((value for value in requirements
+                    if value.get("lifecycle") == "current"
+                    and value.get("requirement_revision_id") in projected_requirement_ids), None)
 if not requirement:
-    raise RuntimeError("project has no current requirement for evidence matching")
+    raise RuntimeError(f"project has no projected current requirement: projection={projection}, requirements={requirements}")
 need_id = requirement["fulfillment_expr"]["need_occurrence_id"]
 if not any(value.get("need_occurrence_id") == need_id and
            value.get("target", {}).get("node_lineage_id") == node_id and
@@ -106,32 +111,31 @@ call(
     {"if-match": f'"{workspace["sha256"]}"',
      "idempotency-key": f"{KEY_PREFIX}-checkpoint-v1"},
 )
-match_body = {"expected_workspace_revision_id": workspace["revision_id"]}
-match_headers = {"if-match": f'"{workspace["sha256"]}"',
-                 "idempotency-key": f"{KEY_PREFIX}-match-v1"}
-status, _, match_request = call(
-    "POST", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/nodes/{node_id}/evidence-matches",
-    match_body, match_headers,
-)
-if status != 202:
-    raise RuntimeError("evidence match did not return 202")
-match_terminal = wait_request(match_request["request_artifact_id"])
-if match_terminal.get("operation") != "match_only":
-    raise RuntimeError("match-only request view omitted its operation")
-_, _, listed_requests = call(
-    "GET", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/requests"
-)
-listed_match = next(
-    (value for value in listed_requests
-     if value.get("request_artifact_id") == match_request["request_artifact_id"]),
-    None,
-)
-if not listed_match or listed_match.get("operation") != "match_only":
-    raise RuntimeError("workspace request list omitted the match-only operation")
+if os.environ.get("BID_V2_USE_FIXTURE_EVIDENCE") != "1":
+    match_body = {"expected_workspace_revision_id": workspace["revision_id"]}
+    match_headers = {"if-match": f'"{workspace["sha256"]}"',
+                     "idempotency-key": f"{KEY_PREFIX}-match-v1"}
+    status, _, match_request = call(
+        "POST", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/nodes/{node_id}/evidence-matches",
+        match_body, match_headers,
+    )
+    if status != 202:
+        raise RuntimeError("evidence match did not return 202")
+    match_terminal = wait_request(match_request["request_artifact_id"])
+    if match_terminal.get("operation") != "match_only":
+        raise RuntimeError("match-only request view omitted its operation")
+    _, _, listed_requests = call(
+        "GET", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/requests"
+    )
+    listed_match = next(
+        (value for value in listed_requests
+         if value.get("request_artifact_id") == match_request["request_artifact_id"]), None)
+    if not listed_match or listed_match.get("operation") != "match_only":
+        raise RuntimeError("workspace request list omitted the match-only operation")
 _, _, evidence = call("GET", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/nodes/{node_id}/evidence")
 bundles = evidence.get("bundles", [])
 if not bundles:
-    raise RuntimeError("match_only worker did not publish an EvidenceBundle")
+    raise RuntimeError("no EvidenceBundle available for Content generation")
 bundle = bundles[-1]
 items = [item for item in bundle.get("items", []) if item.get("kind") != "no_evidence"]
 if not items:
@@ -207,34 +211,46 @@ second_terminal = wait_request(second_generation["request_artifact_id"])
 second_candidate_id = (second_terminal.get("result_identity") or {}).get("artifact_id")
 if not second_candidate_id or second_candidate_id == candidate_id:
     raise RuntimeError("second Candidate identity was not independently published")
+_, _, before_reject = call("GET", f"/api/v2/submission-workspaces/{WORKSPACE_ID}")
+call(
+    "POST", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/candidates/{second_candidate_id}/reject",
+    None,
+    {"if-match": f'"{before_reject["sha256"]}"',
+     "idempotency-key": f"{KEY_PREFIX}-reject-v1"},
+)
+_, _, rejected = call("GET", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/candidates/{second_candidate_id}")
+if rejected.get("status") != "rejected":
+    raise RuntimeError("ContentCandidate rejection transition was not persisted")
 _, _, before_accept = call("GET", f"/api/v2/submission-workspaces/{WORKSPACE_ID}")
 accept_body = {"expected_workspace_revision_id": before_accept["revision_id"],
                "expected_workspace_sha256": before_accept["sha256"],
-               "operation_indexes": [0], "client_node_refs": []}
+               "operation_indexes": [0]}
 accept_headers = {"if-match": f'"{before_accept["sha256"]}"',
                   "idempotency-key": f"{KEY_PREFIX}-accept-v1"}
 _, _, accepted = call(
     "POST", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/candidates/{candidate_id}/accept",
     accept_body, accept_headers,
 )
-expect_http_error(
+stale_detail = expect_http_error(
     "POST",
     f"/api/v2/submission-workspaces/{WORKSPACE_ID}/candidates/{second_candidate_id}/accept",
     accept_body,
-    accept_headers,
+    {"if-match": f'"{before_accept["sha256"]}"',
+     "idempotency-key": f"{KEY_PREFIX}-accept-stale-v1"},
     409,
 )
+if "WORKSPACE_CAS_CONFLICT" not in stale_detail:
+    raise RuntimeError(f"stale Candidate returned the wrong conflict: {stale_detail}")
 _, _, accepted_replay = call(
     "POST", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/candidates/{candidate_id}/accept",
-    accept_body, {"if-match": f'"{before_accept["sha256"]}"',
-                  "idempotency-key": f"{KEY_PREFIX}-accept-replay-v1"},
+    accept_body, accept_headers,
 )
 if accepted_replay != accepted:
     raise RuntimeError("accepted Candidate did not replay its immutable first receipt")
 _, _, restored = call("GET", f"/api/v2/submission-workspaces/{WORKSPACE_ID}")
 if restored["revision_id"] != accepted["revision_id"]:
     raise RuntimeError("accepted ContentCandidate was not persisted as Workspace head")
-print(json.dumps({"status": "PASS", "match_request_id": match_request["request_artifact_id"],
+print(json.dumps({"status": "PASS", "match_request_id": locals().get("match_request", {}).get("request_artifact_id"),
                   "matching_report_id": report_id, "evidence_item_kind": item["kind"],
                   "pick_set_id": pick_id, "candidate_id": candidate_id,
                   "workspace_revision_id": restored["revision_id"]}, ensure_ascii=False))

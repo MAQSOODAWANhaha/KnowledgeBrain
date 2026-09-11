@@ -1,0 +1,6 @@
+.docx-pane { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.docx-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.docx-toolbar [role="status"] { color: var(--muted); }
+.docx-editor-frame { height: max(480px, calc(100dvh - 160px)); width: 100%; min-height: 0; }
+.docx-editor-frame > div { height: 100%; }
+.docx-editor-frame iframe { border: 0; }

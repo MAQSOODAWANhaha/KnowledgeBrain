@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "release_revision": "development-only",
+  "git_sha": "0000000000000000000000000000000000000000",
+  "platform_schema_revision": "development-platform-v1",
+  "images": {
+    "migrator": "development.local/knowledgebrain/migrator@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "api": "development.local/knowledgebrain/api@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "worker": "development.local/knowledgebrain/worker@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "retention": "development.local/knowledgebrain/retention@sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "docreader": "development.local/knowledgebrain/docreader@sha256:5555555555555555555555555555555555555555555555555555555555555555"
+  }
+}

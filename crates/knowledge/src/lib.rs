@@ -51,18 +51,12 @@ pub use platform::{
     vlm_endpoint_ready, vlm_model,
 };
 
-/// Disk write plus in-memory object map. Production bytes still go through platform blobs.
-pub fn put(store: &mut Store, bytes: &[u8]) -> (String, String) {
-    let (hash, reference) = put_bytes(bytes);
-    store.objects.insert(reference.clone(), bytes.to_vec());
-    (hash, reference)
-}
-
-pub fn put_bytes(bytes: &[u8]) -> (String, String) {
+/// Return an object identity only after the configured stores accept its bytes.
+pub async fn put_bytes(bytes: &[u8]) -> std::io::Result<(String, String)> {
     let hash = sha256_hex(bytes);
     let reference = platform::object_ref(&hash);
-    let _ = platform::write_blob_off_runtime(&hash, bytes);
-    (hash, reference)
+    platform::write_blob_async(&hash, bytes).await?;
+    Ok((hash, reference))
 }
 
 pub fn discard_unpersisted_object(store: &mut Store, hash: &str) {

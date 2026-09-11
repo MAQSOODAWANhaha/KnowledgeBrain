@@ -9,4 +9,4 @@
 - [`tracing-observability.md`](tracing-observability.md)：可观测性计划。
 - [`../../docs/research/repository-implementation-snapshot.md`](../../docs/research/repository-implementation-snapshot.md)：迁移前仓库实现快照，非规范。
 
-队列 transport、handler retry、worker crash resurrection和dead queue只由`queue-runtime.md`定义。领域只保存business target/revision与幂等publish，不保存claim/lease，不扫描pending target重建队列。
+队列 transport、handler retry、Worker process resurrection 与 dead queue 只由 `queue-runtime.md` 定义。显式 Agent-bound Request 可以保存 DB-generated AgentRun attempt/token/lease 与 attempt-independent physical-call ledger，仅用于 fence 外部业务副作用；PostgreSQL 不保存或恢复 queue transport work。

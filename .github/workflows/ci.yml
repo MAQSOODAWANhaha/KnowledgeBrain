@@ -14,6 +14,24 @@ concurrency:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: knowledgebrain_test_ci
+        ports:
+          - 25433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d knowledgebrain_test_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis@sha256:71da9275c5f3fcb97d0fa0c8c5b36cc995327265420f17a04bfd544f458059f7
+        ports:
+          - 26379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -23,9 +41,220 @@ jobs:
       - name: format
         run: cargo fmt --all -- --check
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: tests
-        run: cargo test --workspace --no-fail-fast
+        run: cargo test --locked --workspace --no-fail-fast
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Frozen authoring JSON Schema acceptance
+        run: |
+          python -m venv "$RUNNER_TEMP/kb-schema-validation"
+          "$RUNNER_TEMP/kb-schema-validation/bin/python" -m pip install -r scripts/requirements-schema-validation.txt
+          "$RUNNER_TEMP/kb-schema-validation/bin/python" -m pip check
+          "$RUNNER_TEMP/kb-schema-validation/bin/python" scripts/bid_authoring_schema_validation.py
+      - name: bootstrap isolated PostgreSQL acceptance schema
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -p 25433 -U postgres -d knowledgebrain_test_ci -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE EXTENSION IF NOT EXISTS pgcrypto;
+          CREATE EXTENSION IF NOT EXISTS vector;
+          CREATE ROLE kb_app_owner NOLOGIN NOINHERIT;
+          CREATE ROLE kb_migrator LOGIN NOINHERIT PASSWORD 'migrator';
+          CREATE ROLE kb_runtime_api LOGIN PASSWORD 'api';
+          CREATE ROLE kb_runtime_worker LOGIN PASSWORD 'worker';
+          CREATE ROLE kb_runtime_retention LOGIN PASSWORD 'retention';
+          GRANT kb_app_owner TO kb_migrator;
+          ALTER SCHEMA public OWNER TO kb_app_owner;
+          REVOKE TEMPORARY,CREATE ON DATABASE knowledgebrain_test_ci FROM PUBLIC;
+          REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+          SQL
+          { echo 'BEGIN; SET LOCAL ROLE kb_app_owner;'; cat migrations/shared_platform_baseline.sql migrations/knowledge_base_baseline.sql migrations/bidding_v2_baseline.sql; echo 'COMMIT;'; } \
+            | psql -h 127.0.0.1 -p 25433 -U postgres -d knowledgebrain_test_ci -v ON_ERROR_STOP=1
+      - name: Content AgentRun and typed cleanup delivery PostgreSQL acceptance
+        env:
+          KNOWLEDGEBRAIN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:25433/knowledgebrain_test_ci
+          KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS: "1"
+          KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS: "1"
+          KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD: retention
+          REDIS_URL: redis://127.0.0.1:26379/
+          KB_DEPLOYMENT_NAMESPACE_ID: 8fa19c5f-2afb-4cd8-b1c9-3378bcfd41a3
+        run: |
+          set -euo pipefail
+          export OBJECT_DIR
+          OBJECT_DIR=$(mktemp -d "$RUNNER_TEMP/request-delivery-objects.XXXXXX")
+          cleanup() {
+            result=$?
+            trap - EXIT
+            rm -rf -- "$OBJECT_DIR" || result=1
+            test ! -e "$OBJECT_DIR" || result=1
+            exit "$result"
+          }
+          trap cleanup EXIT
+          for suite in content_agent_run_postgres request_delivery_postgres; do
+            log="$RUNNER_TEMP/$suite.log"
+            cargo test --locked -p bidding --test "$suite" -- --test-threads=1 --nocapture 2>&1 | tee "$log"
+            grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' "$log"
+            if grep -Eq 'skipped .*contract:' "$log"; then
+              echo "required PostgreSQL suite $suite skipped a contract" >&2
+              exit 1
+            fi
+            if [ "$suite" = request_delivery_postgres ]; then
+              grep -Eq '^test cleanup_native_duplicates_protect_references_and_retry_failed_blob_deletion \.\.\.' "$log"
+              grep -Eq '^test cleanup_unconfirmed_handoff_keeps_staging_blob_and_tracker \.\.\.' "$log"
+              grep -q 'native retry observed job=' "$log"
+              grep -q 'unconfirmed mode=configuration-error' "$log"
+              grep -q 'unconfirmed mode=unresponsive-redis' "$log"
+            fi
+          done
+      - name: Tender analysis publication and fencing PostgreSQL acceptance
+        env:
+          KB_TENDER_AGENT_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:25433/knowledgebrain_test_ci
+        run: |
+          set -euo pipefail
+          cargo test --locked -p bidding --test tender_analysis_postgres analysis_ -- --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/tender-analysis.log"
+          grep -Eq '^test result: ok\. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/tender-analysis.log"
+      - name: Frozen exact-version retrieval PostgreSQL acceptance
+        env:
+          PGPASSWORD: postgres
+          KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS: "1"
+          KNOWLEDGEBRAIN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:25433/knowledgebrain_test_frozen_replay_ci
+        run: |
+          cleanup() { dropdb -h 127.0.0.1 -p 25433 -U postgres --if-exists --force knowledgebrain_test_frozen_replay_ci; }
+          trap cleanup EXIT
+          createdb -h 127.0.0.1 -p 25433 -U postgres -T template0 knowledgebrain_test_frozen_replay_ci
+          psql -h 127.0.0.1 -p 25433 -U postgres -d knowledgebrain_test_frozen_replay_ci -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE EXTENSION pgcrypto;
+          CREATE EXTENSION vector;
+          ALTER SCHEMA public OWNER TO kb_app_owner;
+          REVOKE TEMPORARY,CREATE ON DATABASE knowledgebrain_test_frozen_replay_ci FROM PUBLIC;
+          REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+          SQL
+          { echo 'BEGIN; SET LOCAL ROLE kb_app_owner;'; cat migrations/shared_platform_baseline.sql migrations/knowledge_base_baseline.sql; echo 'COMMIT;'; } \
+            | psql -h 127.0.0.1 -p 25433 -U postgres -d knowledgebrain_test_frozen_replay_ci -v ON_ERROR_STOP=1
+          cargo test --locked -p bidding --features knowledge-v2-exact-contract-tests \
+            --test knowledge_retrieval_exact_v2 \
+            frozen_exact_replay_and_attestation_survive_current_version_and_latest_policy_changes \
+            -- --exact --test-threads=1
+
+      - name: Fresh-baseline phase fixture acceptance
+        env:
+          PGPASSWORD: postgres
+          KNOWLEDGEBRAIN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:25433/knowledgebrain_test_ci
+        run: bash scripts/bidding_v2_phase_fixture_acceptance.sh
+
+  schema-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+        env:
+          POSTGRES_USER: knowledgebrain
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 25433:5432
+        options: >-
+          --health-cmd "pg_isready -U knowledgebrain -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+      - name: Fresh lifecycle and required catalog PostgreSQL acceptance
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: '25433'
+          PGUSER: knowledgebrain
+          PGPASSWORD: postgres
+          POSTGRES_USER: knowledgebrain
+          KNOWLEDGEBRAIN_MIGRATOR_PASSWORD: migrator
+          KNOWLEDGEBRAIN_API_DB_PASSWORD: api
+          KNOWLEDGEBRAIN_WORKER_DB_PASSWORD: worker
+          KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD: retention
+          KNOWLEDGEBRAIN_TEST_DATABASE_URL: postgres://knowledgebrain:postgres@127.0.0.1:25433/knowledgebrain_test_lifecycle_ci
+          KNOWLEDGEBRAIN_CATALOG_TEST_DATABASE_URL: postgres://kb_migrator:migrator@127.0.0.1:25433/knowledgebrain_test_catalog_ci
+          KNOWLEDGEBRAIN_CATALOG_TEST_ADMIN_PASSWORD: postgres
+          KNOWLEDGEBRAIN_REQUIRE_CATALOG_POSTGRES_TEST: '1'
+        run: |
+          set -euo pipefail
+          created_databases=()
+          cleanup() {
+            result=$?
+            trap - EXIT
+            for database in "${created_databases[@]}"; do
+              dropdb --force "$database" || result=1
+            done
+            exit "$result"
+          }
+          trap cleanup EXIT
+          for database in knowledgebrain_test_lifecycle_ci knowledgebrain_test_catalog_ci; do
+            createdb -T template0 "$database"
+            created_databases+=("$database")
+            POSTGRES_DB="$database" sh deploy/postgres-init/010-runtime-identities.sh
+          done
+          bash scripts/fresh_schema_acceptance.sh
+          log="$RUNNER_TEMP/catalog_manifest_postgres.log"
+          cargo test --locked -p platform --test catalog_manifest_postgres -- --test-threads=1 --nocapture 2>&1 | tee "$log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' "$log"
+          if grep -Eq 'skipped catalog manifest PostgreSQL fixture:' "$log"; then
+            echo "required catalog PostgreSQL fixture was skipped" >&2
+            exit 1
+          fi
+
+  queue-faults:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      redis:
+        image: redis@sha256:71da9275c5f3fcb97d0fa0c8c5b36cc995327265420f17a04bfd544f458059f7
+        ports:
+          - 6379/tcp
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+      - name: Required native Oxana faults against isolated Redis
+        env:
+          KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS: '1'
+          REDIS_URL: redis://127.0.0.1:${{ job.services.redis.ports[6379] }}/
+        run: |
+          set -euo pipefail
+          unset OXANA_NATIVE_FAULTS_CHILD OXANA_NATIVE_FAULTS_NAMESPACE
+          log="$RUNNER_TEMP/queue-faults.log"
+          cargo test --locked -p platform --test oxana_native_faults -- --test-threads=1 --nocapture 2>&1 | tee "$log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' "$log"
+          if grep -Eq 'skip oxana native faults:|skip runtime test' "$log"; then
+            echo "required native Oxana fault tests skipped execution" >&2
+            exit 1
+          fi
+      - name: Preserve native fault evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: queue-faults-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/queue-faults.log
+          if-no-files-found: error
+
+  content-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+      - name: Content E2E fail-closed cleanup contract
+        run: bash scripts/tests/bidding_v2_content_e2e_cleanup_test.sh
+      - name: Hermetic Content API Redis Worker E2E
+        run: bash scripts/bidding_v2_content_stack_e2e.sh
 
   web:
     runs-on: ubuntu-latest
@@ -58,9 +287,14 @@ jobs:
         run: uv sync --frozen
       - name: pytest
         run: uv run pytest tests/
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+      - name: Required Rust replay contract against real DocReader service
+        run: uv run python ../../scripts/docreader_replay_acceptance.py
 
   images:
-    needs: [rust, web, python]
+    needs: [rust, schema-contract, queue-faults, content-e2e, web, python]
     if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 120

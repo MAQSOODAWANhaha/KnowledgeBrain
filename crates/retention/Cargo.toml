@@ -6,9 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait = "0.1"
 axum.workspace = true
 dotenvy.workspace = true
 platform = { path = "../platform" }
+oxana.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true

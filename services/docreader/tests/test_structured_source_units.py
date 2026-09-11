@@ -136,30 +136,34 @@ def test_xlsx_preserves_sheets_cells_merges_tables_and_rows() -> None:
     ]
     table_unit = next(unit for unit in units if unit.key == "sheet:0:table:RequirementsTable")
     assert table_unit.kind is StructuredSourceUnitKind.TABLE_REGION
+    assert table_unit.text == ""
+    assert table_unit.grid is not None
+    assert (table_unit.grid.row_count, table_unit.grid.column_count) == (3, 2)
+    texts = {(cell.row, cell.column): cell.text for cell in table_unit.grid.cells}
+    assert texts[(0, 0)] == "Item" and texts[(1, 0)] == "Security"
     assert isinstance(table_unit.locator, SpreadsheetLocator)
     assert table_unit.locator.defined_tables[0].a1_range == "A1:B3"
+    assert table_unit.locator.cells == []
     sheet = next(unit for unit in units if unit.key == "sheet:0")
     assert isinstance(sheet.locator, SpreadsheetLocator)
-    assert [region.a1_range for region in sheet.locator.merged_ranges] == [
-        "A4:B4",
-        "C6:D6",
-    ]
-    assert [(cell.address, cell.text) for cell in sheet.locator.cells][:2] == [
-        ("A1", "Item"),
-        ("B1", "Response"),
-    ]
+    assert sheet.locator.cells == []
+    assert sheet.locator.merged_ranges == []
     assert any(unit.key == "sheet:1:row:1" and unit.text == "Total | 42" for unit in units)
+    pricing = next(unit for unit in units if unit.key == "sheet:1:used")
+    assert pricing.grid is not None
+    assert (pricing.grid.row_count, pricing.grid.column_count) == (1, 2)
+    assert {(cell.row, cell.column): cell.text for cell in pricing.grid.cells} == {
+        (0, 0): "Total",
+        (0, 1): "42",
+    }
+    assert not any(unit.key == "sheet:0:used" for unit in units)
     merge_sheet = next(unit for unit in units if unit.key == "sheet:2")
     assert isinstance(merge_sheet.locator, SpreadsheetLocator)
-    assert [item.a1_range for item in merge_sheet.locator.merged_ranges] == [
-        "A1:A2",
-        "D2:E2",
-        "E3:F3",
-        "D4:E4",
-    ]
+    assert merge_sheet.locator.merged_ranges == []
     merge_table = next(unit for unit in units if unit.key == "sheet:2:table:MergeTable")
-    assert isinstance(merge_table.locator, SpreadsheetLocator)
-    assert [item.a1_range for item in merge_table.locator.merged_ranges] == ["D2:E2"]
+    assert merge_table.grid is not None
+    assert merge_table.text == ""
+    assert any(cell.col_span == 2 for cell in merge_table.grid.cells if cell.row == 1 and cell.column == 0)
     row_four = next(unit for unit in units if unit.key == "sheet:2:row:4")
     assert isinstance(row_four.locator, SpreadsheetLocator)
     assert [item.a1_range for item in row_four.locator.merged_ranges] == ["D4:E4"]
@@ -209,7 +213,10 @@ def test_docx_preserves_body_order_heading_owner_and_drawing_identity() -> None:
     assert isinstance(table_unit.locator, DocumentLocator)
     assert table_unit.locator.section_ordinal == 0
     assert table_unit.locator.heading_path == "Heading A"
-    assert any(unit.key == "table:0:row:1" and "Encryption" in unit.text for unit in units)
+    assert table_unit.text == ""
+    assert table_unit.grid is not None
+    assert {(cell.row, cell.column): cell.text for cell in table_unit.grid.cells}[(1, 0)] == "Encryption"
+    assert not any(unit.key.startswith("table:0:row:") for unit in units)
     image_unit = next(unit for unit in units if unit.kind is StructuredSourceUnitKind.IMAGE_REGION)
     assert isinstance(image_unit.locator, ImageLocator)
     assert isinstance(image_unit.locator.compound_parent, ParagraphImageParent)
@@ -269,6 +276,29 @@ def test_docx_headingless_narrative_table_narrative_order_and_typed_image_parent
     assert form_image_proto.image.WhichOneof("compound_parent") == "form_parent"
     assert form_image_proto.image.form_parent.form_ordinal == 0
     assert [unit.ordinal for unit in units] == list(range(len(units)))
+
+
+def test_docx_table_grid_keeps_empty_anchors_and_drops_rows() -> None:
+    document = DocxDocument()
+    document.add_paragraph("Intro")
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).merge(table.cell(0, 1))
+    table.cell(0, 0).text = "标题"
+    table.cell(1, 0).text = ""
+    table.cell(1, 1).text = "值"
+    output = BytesIO()
+    document.save(output)
+    units = _docx_structured_units(output.getvalue())
+    table_unit = next(unit for unit in units if unit.key == "table:0")
+    assert table_unit.text == ""
+    assert table_unit.grid is not None
+    assert (table_unit.grid.row_count, table_unit.grid.column_count) == (2, 2)
+    cells = {(c.row, c.column): c for c in table_unit.grid.cells}
+    assert (0, 1) not in cells
+    assert cells[0, 0].col_span == 2 and cells[0, 0].text == "标题"
+    assert cells[1, 0].text == ""
+    assert cells[1, 1].text == "值"
+    assert not any(unit.kind is StructuredSourceUnitKind.TABLE_ROW for unit in units)
 
 
 def _minimal_pdf() -> bytes:

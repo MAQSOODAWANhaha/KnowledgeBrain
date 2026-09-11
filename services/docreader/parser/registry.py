@@ -95,9 +95,11 @@ class ParserEngineRegistry:
             if check is not None:
                 try:
                     available, unavailable_reason = check(overrides)
-                except Exception as e:
+                except Exception as error:
                     available = False
-                    unavailable_reason = str(e) or self._unavailable_hint.get(name, "")
+                    unavailable_reason = str(error)
+                    if not unavailable_reason:
+                        unavailable_reason = self._unavailable_hint.get(name, "")
             if not available and not unavailable_reason:
                 unavailable_reason = self._unavailable_hint.get(name, "不可用")
             result.append(
@@ -132,6 +134,7 @@ def _build_default_registry() -> ParserEngineRegistry:
             "md": MarkdownParser,
             "markdown": MarkdownParser,
             "xlsx": ExcelParser,
+            "xlsm": ExcelParser,
             "xls": ExcelParser,
             "epub": EPUBParser,
             "mhtml": MHTMLParser,

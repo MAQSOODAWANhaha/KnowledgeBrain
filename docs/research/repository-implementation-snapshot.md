@@ -8,7 +8,7 @@
 | 管线对照 | `/opt/workspace/code/brain`（WeKnora）。任务类型、队列名、`parse_status`、分块算法、Wiki/图谱作用域与 brain **同语义** |
 | 投标 | 同仓部署；当前目标见 [`../bidding/authoring.md`](../bidding/authoring.md) |
 
-本文描述迁移前知识库与共享运行时实现。招投标旧表、旧 `/match` 调用和旧导出仅作为现状，不构成目标规范；冲突时以编制契约和 [`../../plans/bidding/README.md`](../../plans/bidding/README.md) 为准。[`../bidding/current-code.md`](../bidding/current-code.md) 只是 V1 删除快照。
+本文保留迁移前知识库与共享运行时研究快照，不作为当前运行命令或第二领域规范。废弃招投标流程/接口与施工顺序不在本文继续维护；招投标目标由 [PRD](../bidding/prd.md)、[ONLYOFFICE](../bidding/onlyoffice.md) 与 [编辑与出件计划](../../plans/bidding/onlyoffice-integration.md)、[Agent 实施方案](../../plans/bidding/agent-runtime-rig.md)定义。知识库研究中的 Markdown、chunk、检索与 Wiki 不受 DOCX 正文选型影响。
 
 ---
 
@@ -19,10 +19,10 @@
 | 进程 | 路径 | 端口 | 职责 |
 | --- | --- | --- | --- |
 | `api` | `crates/api` | `:8080` | HTTP：LDAP/JWT/API key、领域 CRUD、入队、检索、文件代理、投标 CRUD、静态前端（`KNOWLEDGEBRAIN_WEB_ROOT`）、`/system/parser-engines`、`/ops/oxana` |
-| `worker` | `crates/worker` | 无 | 6 个 oxana Runtime + 投标队列（`bid:convert` / `bid:extract` / `bid:match`） |
+| `worker` | `crates/worker` | 无 | 知识处理 Runtime；招投标当前注册见部署/队列合同 |
 | `docreader` | `services/docreader` | gRPC `:50051` | 文件/URL → Markdown + 图片字节 |
 
-第一期**不**新开投标业务容器。投标与知识库共用 Postgres / Redis / 对象桶 `objects/{sha256}`。
+投标与知识库复用平台数据面；该历史快照不含当前 ONLYOFFICE 接入，不能将旧进程拓扑当作新部署已完成。对象身份由平台 ObjectRegistry/namespace 合同定义。
 
 数据面：Postgres（领域 + chunks + 向量 + wiki + 图 + spans + 死信）、Redis（oxana + 分布式锁）、对象存储（S3/MinIO/local，桶 `KNOWLEDGEBRAIN_S3_BUCKET`，键 `objects/{sha256}`）。可选 Neo4j（`KNOWLEDGEBRAIN_NEO4J_HTTP_URL`）：图谱双写投影，**不**门闩 extract。
 
@@ -152,9 +152,9 @@ Workspace kind=product_line       产品线（可多条）
 Workspace kind=company            恰好一条（slug=company）
   └── Product (kind=library)      分类夹：资质证照 / 体系认证 / 业绩案例 / 服务能力
         └── ProductVersion        资料批次
-              └── Document        必须进向量，商务 /match 才打得到
+              └── Document        知识证据检索使用可检索资料
 
-BidProject                        与 Workspace 平级；领域边界见 ../bidding/current-code.md
+BidProject                        不属于知识 Workspace；领域边界见 ../bidding/authoring.md
 ```
 
 文档只挂在某一个 `ProductVersion` 上，不跨版本共享同一 `document_id`。Workspace 不直接存知识。Wiki 一本、图谱一份，按 `product_version_id` 隔离。TAG 不改变归属、不改变 Wiki/图谱命名空间、不替代 Version。
@@ -179,7 +179,7 @@ BidProject                        与 Workspace 平级；领域边界见 ../bidd
 登录走 LDAP bind，首次成功则插入。`POST /auth/register` **关闭**。
 
 **workspace_members**：`(workspace_id, user_id)` PK，`role ∈ {owner, admin, contributor, viewer}`
-第一期**留表、不当门闩**。登录用户或已认证 API key 可读写全部 Workspace / 产品 / 文件 / 投标。
+第一期**留表、不当门闩**。知识库保留登录访问边界；投标另校验 project owner 与文件用途，不能推导任意投标访问权。
 
 **products**：`id, workspace_id FK, kind ∈ {product, library}, name, slug unique(workspace_id, slug), current_version_id`（无 FK）
 
@@ -218,9 +218,7 @@ BidProject                        与 Workspace 平级；领域边界见 ../bidd
 
 **document_processing_spans**：`(document_id, attempt, name)` upsert。列：`span_id, parent_span_id, kind, status, input/output/metadata jsonb, error_code, error_message, started_at, finished_at, duration_ms`
 
-**task_pending_ops**：`id, task_type, scope, scope_id, op, dedup_key, payload jsonb, fail_count, enqueued_at, claimed_at`。wiki 的 `scope=product_version`，`scope_id=product_version_id`。无 tenant 列。
-
-**task_dead_letters**：`id, task_type, scope, scope_id, related_id, payload jsonb, last_error (8KB cap), fail_count, failed_at`。无 TTL。
+Wiki ingest/finalize 与失败重试由 Oxana typed jobs 管理；PostgreSQL 只保存 Wiki 页面、目录、日志和文档终态，不保存 pending/dead transport rows。
 
 **retrieval_config**（挂 `workspaces.retrieval_config jsonb`，缺省如下）：
 
@@ -236,7 +234,7 @@ BidProject                        与 Workspace 平级；领域边界见 ../bidd
 
 **api_keys**：`scope_type ∈ {workspace, product}, scope_id, scopes[] ∈ {ingest, search, admin}`
 
-迁移分批：`0001` 领域（含 `workspaces.kind`、`documents.attempt` / `description` / `source_passages` / `index_ready`、tags）+成员+spans+pending+DL；`0002` models；`0003` api_keys；`0004` embeddings `vector(1024)`；`0005` graph；`0006` wiki（含 `chunk_refs`）；`0007` Bid*（含勾选段 / 人评 / 成稿分册）；`0008` 存量回填。API / worker 必须在 ready / 消费队列前完成连接、迁移和公司工作区初始化，任一步失败即启动失败。
+迁移分批：`0001` 领域（含 `workspaces.kind`、`documents.attempt` / `description` / `source_passages` / `index_ready`、tags）+成员+spans+pending+DL；`0002` models；`0003` api_keys；`0004` embeddings `vector(1024)`；`0005` graph；`0006` wiki（含 `chunk_refs`）；`0008` 存量回填。API / worker 必须在 ready / 消费队列前完成连接、迁移和公司工作区初始化，任一步失败即启动失败。
 
 ### 2.2 配置合并
 
@@ -253,7 +251,7 @@ BidProject                        与 Workspace 平级；领域边界见 ../bidd
 
 ### 2.4 招投标边界
 
-知识库 schema 不定义 BidProject、条款、匹配报告、报价或组卷状态。招投标**当前产品目标**见 [`../bidding/authoring.md`](../bidding/authoring.md)。[`../bidding/current-code.md`](../bidding/current-code.md) 与 [`../../plans/bidding/current-code/implementation-acceptance.md`](../../plans/bidding/current-code/implementation-acceptance.md) 只描述现码 / V1 runtime，不是目标。
+知识库不定义 BidProject、招标要求、报价或正文版本。当前 [领域契约](../bidding/authoring.md)定义来源/证据边界，[ONLYOFFICE 契约](../bidding/onlyoffice.md)定义真实 DOCX 编辑、保存和出件；结构化索引不得回写覆盖人工稿。
 
 ---
 
@@ -393,12 +391,11 @@ docreader → chunking → embedding
 | PUT | `/documents/{id}/tags` |
 | GET | `/products/{id}/versions/{vid}/wiki/pages`、`/wiki/pages/{slug}`、`/wiki/folders` |
 | GET | `/products/{id}/versions/{vid}/files?key=` |
-| GET | `/files?key=`（登录即可；招标原件 / 人补图 / 已引用对象） |
+| GET | `/files?key=`（知识文件代理；投标文件须按所属项目与用途授权） |
 | GET/POST/PATCH | `/models`（admin） |
 | POST | `/search`（`mode=assembly\|matching`） |
 | POST | `/match`（可选 `scope=product_lines\|company`） |
 | POST | `/answer` |
-| GET/POST | `/bids` …（项目、文件、条款、勾选段、成稿 ①–⑤；见领域草案） |
 | GET | `/ops/oxana/*`、`/ops/dead-letters`（admin） |
 
 级联：删 Workspace → 入队删其下全部 ProductVersion（`kb:delete`）；删 Product 同理。有 `parse_status ∈ {pending, processing, finalizing}` 时先 cancel 再删。产品线存量默认 library 不可删、不可再写入。`GET /documents/{id}` 回 `object_key` / `file_name`。
@@ -423,9 +420,9 @@ docreader → chunking → embedding
 
 内网一家公司。`POST /auth/login`：配了 `KNOWLEDGEBRAIN_LDAP_URL` 才 LDAP bind；空则测试模式，不验账号密码，缺省 `dev@local`，upsert `users` 后发 JWT。`/auth/register` 关闭。JWT：HS256，`JWT_SECRET`，TTL 24h。claims：`sub=user_id`, `exp`。
 
-**不**按 `workspace_members` 挡列仓、传手册/证、读原件、`/match`、投标。角色表仍在，第一期登录用户视为可写全库。`POST /auth/register` 关闭。
+**不**按 `workspace_members` 挡列仓、传手册/证、读知识原件或知识检索。投标权限不由 Workspace 成员规则推导。角色表仍在，第一期登录用户视为可写全库。`POST /auth/register` 关闭。
 
-API key：`scope_type=workspace|product` 仍可建；第一期**不按 key scope 挡**投标或带 `scope` 的 `/match`。只要能认证即可。bootstrap：`KNOWLEDGEBRAIN_BOOTSTRAP_KEY`。未认证全部 401。
+API key：`scope_type=workspace|product` 仍可建；知识库 key 规则是当时快照；投标不能凭 key 已认证就跨项目访问，无法证明本标 scope 时拒绝。bootstrap：`KNOWLEDGEBRAIN_BOOTSTRAP_KEY`。未认证全部 401。
 
 SSRF：拦 loopback / 链路本地 / 私网 / `169.254.169.254` / DNS rebinding。DocReader 侧 `utils/ssrf.py` 为第二层。
 
@@ -451,7 +448,7 @@ SSRF：拦 loopback / 链路本地 / 私网 / `169.254.169.254` / DNS rebinding�
 
 对照 `knowledge_process.go::convert` / `resolveDocReader`。
 
-抽出 **`convert_to_markdown(bytes, file_name) -> (markdown, images[])`**，不依赖 Document / ProductVersion。**解析只有这一条**：引擎由扩展名 + 产品默认 `parser_engine_rules` 决定，再 VLM 写回。`document:process` 与 `bid:convert` 都是调用方，不得各写一套。落盘才分叉：知识库进 Document/索引；招标只更新 `BidDocument`，不 `INSERT documents`。
+抽出 **`convert_to_markdown(bytes, file_name) -> (markdown, images[])`**，不依赖 Document / ProductVersion。**解析只有这一条**：引擎由扩展名 + 产品默认 `parser_engine_rules` 决定，再 VLM 写回。知识库与招标源均可复用转换能力，不重做解析系统。落盘才分叉：知识库进 Document/索引；招标只更新 `BidDocument`，不 `INSERT documents`。
 
 **与 WeKnora 的差别（有意）：** 上游空引擎 = DocReader/MarkItDown；本仓 anydoc 已进程内集成。anydoc 明显更好的类型（docx/doc/xlsx/xls/pptx/ppt 的表与结构）**默认 anydoc**，不跟上游用 MarkItDown 当默认。PDF / 扫描页仍 builtin（版面 + 栅格化 OCR），anydoc 无文本层时回退 builtin。版本 `parser_engine_rules` 可覆盖。
 
@@ -521,7 +518,7 @@ EmbeddingContent() = ContextHeader=="" ? trim(Content) : ContextHeader + "\n\n" 
 3. `enable_status=enabled`，写 `processed_at`。若还有多模态或 text chunk：`parse_status` 保持 `processing`。若既无 text 也无多模态：直接 `completed`，并置 `index_ready=true`。
 4. `EnableMultimodel && StoredImages>0`：设 Redis `multimodal:pending:{document_id}=N`，入队 N 条 `image:multimodal`。此时 **`index_ready` 仍为 false**。否则立刻置 `index_ready=true` 并 enqueue `knowledge:post_process`。
 
-检索过滤 `enable_status=enabled`。`parse_status=finalizing` 的文档已可搜。投标商务自动重搜与招标切条另看 `index_ready`。
+检索过滤 `enable_status=enabled`。`parse_status=finalizing` 的文档已可搜。招投标按 knowledge-owned 端口的 eligible scope 获取证据。
 
 ### 5.6 image:multimodal
 
@@ -646,7 +643,7 @@ POST /api/v1/search
 
 ### 7.1 assembly（默认）
 
-产品闭集。问答机器人指定型号、投标组稿锁版本，走这里。
+产品闭集，供指定型号的问答检索；投标使用专用知识端口而非本文 HTTP 路由。
 
 | 请求 | 目标 |
 | --- | --- |
@@ -661,7 +658,7 @@ POST /api/v1/search
 
 ### 7.2 招投标证据检索边界
 
-招投标不调用本章旧 `/match` HTTP 兼容协议，也不向知识库传 BidProject、clause、route 或 part 模型。唯一跨域契约是 [`../knowledge-base/domain.md`](../knowledge-base/domain.md) 定义的 `KnowledgeRetrievalPort`；招投标侧的冻结、验证、打分、decision 与 publication 见 [`../../plans/bidding/current-code/matching.md`](../../plans/bidding/current-code/matching.md)。
+招投标不调用本章旧 `/match` HTTP 兼容协议，也不向知识库传 BidProject、clause、route 或 part 模型。唯一跨域契约是 [`../knowledge-base/domain.md`](../knowledge-base/domain.md) 定义的 `KnowledgeRetrievalPort`；招投标侧冻结与采用见 [领域契约](../bidding/authoring.md)，执行围栏见 [队列合同](../../plans/platform/queue-runtime.md)。
 
 ### 7.3 共同规则
 
@@ -701,7 +698,7 @@ POST /api/v1/answer
 3. 引用必须来自本次 hits（`document_id` + `version_id` + 偏移）。禁止跨版本拼事实。
 4. 不写会话表、不做工具调用。会话历史由机器人服务持有；若要把上文送进来，用可选 `context[]` 字符串，本库不当成知识。
 
-投标组稿走 assembly `/search`（锁已勾选版本）。按招标条款荐产品走 `scope=product_lines`；公司资料按条款找文档走 `scope=company`。`/answer` 只给已指定产品的问答机器人。
+`/answer` 只给已指定产品的问答机器人。招投标只使用 knowledge-owned 证据端口，不恢复旧组稿 HTTP 调用。
 
 ---
 
@@ -760,7 +757,6 @@ Housekeeping：oxana cron 每 5min。`processing`/`finalizing` 超过 `DocumentP
 | 19 | key 管理、SSRF 全量测试 | |
 | 20 | Workspace.kind + company + index_ready + 真 VLM + `/match` scope | |
 | 21 | LDAP；关 register；files 登录可读 | |
-| 22 | `convert_to_markdown`；Bid*；抽取；BidMatchJob；预览 ①～⑤ | |
 
 ```
 00 → 01 → 01b → 02 → 04 ─┐

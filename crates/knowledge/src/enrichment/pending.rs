@@ -1,15 +1,23 @@
-//! Redis `multimodal:pending:{document_id}` with memory fallback.
+//! Deployment-scoped Redis multimodal counters with existing memory fallback.
 
 use crate::Store;
+use platform::DeploymentNamespaceV1;
 use uuid::Uuid;
 
-pub fn pending_key(document_id: Uuid) -> String {
-    format!("multimodal:pending:{document_id}")
+pub fn pending_key(namespace: DeploymentNamespaceV1, document_id: Uuid) -> String {
+    format!(
+        "{}multimodal:pending:{document_id}",
+        namespace.redis_prefix()
+    )
 }
 
-fn redis_conn() -> Option<redis::Connection> {
-    let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:16379".into());
-    redis::Client::open(url).ok()?.get_connection().ok()
+fn redis_conn() -> Option<(redis::Connection, DeploymentNamespaceV1)> {
+    // No unscoped connection or implicit server when configuration is absent.
+    // Runtime startup independently requires a valid deployment identity.
+    let namespace = DeploymentNamespaceV1::from_environment().ok()?;
+    let url = std::env::var("REDIS_URL").ok()?;
+    let connection = redis::Client::open(url).ok()?.get_connection().ok()?;
+    Some((connection, namespace))
 }
 
 /// Redis pending counter without a catalog Store. Memory fallback is per-call only.
@@ -26,8 +34,8 @@ pub fn decr_pending_count(document_id: Uuid) -> bool {
 /// SET pending=N (TTL 24h). Always writes the in-memory map; Redis when reachable.
 pub fn set_pending(store: &mut Store, document_id: Uuid, n: i32) {
     store.multimodal_pending.insert(document_id, n);
-    if let Some(mut c) = redis_conn() {
-        let key = pending_key(document_id);
+    if let Some((mut c, namespace)) = redis_conn() {
+        let key = pending_key(namespace, document_id);
         let _: Result<(), _> = redis::cmd("SET")
             .arg(&key)
             .arg(n)
@@ -39,8 +47,8 @@ pub fn set_pending(store: &mut Store, document_id: Uuid, n: i32) {
 
 /// DECR. Redis error → treat as done (fallback enqueue). Memory used if Redis down.
 pub fn decr_pending(store: &mut Store, document_id: Uuid) -> bool {
-    if let Some(mut c) = redis_conn() {
-        let key = pending_key(document_id);
+    if let Some((mut c, namespace)) = redis_conn() {
+        let key = pending_key(namespace, document_id);
         let n: Result<i64, _> = redis::cmd("DECR").arg(&key).query(&mut c);
         match n {
             Ok(v) => {
@@ -73,9 +81,9 @@ pub fn decr_pending(store: &mut Store, document_id: Uuid) -> bool {
 
 /// Redis GET of the pending counter (None if Redis down or key missing).
 pub fn pending_count(document_id: Uuid) -> Option<i32> {
-    let mut c = redis_conn()?;
+    let (mut c, namespace) = redis_conn()?;
     let n: i32 = redis::cmd("GET")
-        .arg(pending_key(document_id))
+        .arg(pending_key(namespace, document_id))
         .query(&mut c)
         .ok()?;
     Some(n)

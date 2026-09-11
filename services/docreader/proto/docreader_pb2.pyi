@@ -24,6 +24,42 @@ STRUCTURED_SOURCE_UNIT_KIND_FORM_REGION: StructuredSourceUnitKind
 STRUCTURED_SOURCE_UNIT_KIND_ATTACHMENT_REGION: StructuredSourceUnitKind
 STRUCTURED_SOURCE_UNIT_KIND_IMAGE_REGION: StructuredSourceUnitKind
 
+class SourceViewRequest(_message.Message):
+    __slots__ = ("file_content", "media_type", "source_sha256", "page_ordinal", "max_edge", "max_image_bytes")
+    FILE_CONTENT_FIELD_NUMBER: _ClassVar[int]
+    MEDIA_TYPE_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_SHA256_FIELD_NUMBER: _ClassVar[int]
+    PAGE_ORDINAL_FIELD_NUMBER: _ClassVar[int]
+    MAX_EDGE_FIELD_NUMBER: _ClassVar[int]
+    MAX_IMAGE_BYTES_FIELD_NUMBER: _ClassVar[int]
+    file_content: bytes
+    media_type: str
+    source_sha256: str
+    page_ordinal: int
+    max_edge: int
+    max_image_bytes: int
+    def __init__(self, file_content: _Optional[bytes] = ..., media_type: _Optional[str] = ..., source_sha256: _Optional[str] = ..., page_ordinal: _Optional[int] = ..., max_edge: _Optional[int] = ..., max_image_bytes: _Optional[int] = ...) -> None: ...
+
+class SourceViewResponse(_message.Message):
+    __slots__ = ("image_data", "media_type", "image_sha256", "source_sha256", "page_ordinal", "width", "height", "renderer")
+    IMAGE_DATA_FIELD_NUMBER: _ClassVar[int]
+    MEDIA_TYPE_FIELD_NUMBER: _ClassVar[int]
+    IMAGE_SHA256_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_SHA256_FIELD_NUMBER: _ClassVar[int]
+    PAGE_ORDINAL_FIELD_NUMBER: _ClassVar[int]
+    WIDTH_FIELD_NUMBER: _ClassVar[int]
+    HEIGHT_FIELD_NUMBER: _ClassVar[int]
+    RENDERER_FIELD_NUMBER: _ClassVar[int]
+    image_data: bytes
+    media_type: str
+    image_sha256: str
+    source_sha256: str
+    page_ordinal: int
+    width: int
+    height: int
+    renderer: str
+    def __init__(self, image_data: _Optional[bytes] = ..., media_type: _Optional[str] = ..., image_sha256: _Optional[str] = ..., source_sha256: _Optional[str] = ..., page_ordinal: _Optional[int] = ..., width: _Optional[int] = ..., height: _Optional[int] = ..., renderer: _Optional[str] = ...) -> None: ...
+
 class ReadConfig(_message.Message):
     __slots__ = ("parser_engine", "parser_engine_overrides")
     class ParserEngineOverridesEntry(_message.Message):
@@ -98,6 +134,72 @@ class PageLocator(_message.Message):
     right: float
     bottom: float
     def __init__(self, page_ordinal: _Optional[int] = ..., left: _Optional[float] = ..., top: _Optional[float] = ..., right: _Optional[float] = ..., bottom: _Optional[float] = ...) -> None: ...
+
+class PdfTableCell(_message.Message):
+    __slots__ = ("row", "column", "row_span", "col_span", "text")
+    ROW_FIELD_NUMBER: _ClassVar[int]
+    COLUMN_FIELD_NUMBER: _ClassVar[int]
+    ROW_SPAN_FIELD_NUMBER: _ClassVar[int]
+    COL_SPAN_FIELD_NUMBER: _ClassVar[int]
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    row: int
+    column: int
+    row_span: int
+    col_span: int
+    text: str
+    def __init__(self, row: _Optional[int] = ..., column: _Optional[int] = ..., row_span: _Optional[int] = ..., col_span: _Optional[int] = ..., text: _Optional[str] = ...) -> None: ...
+
+class PdfTableMergedRange(_message.Message):
+    __slots__ = ("start_row", "start_column", "end_row", "end_column")
+    START_ROW_FIELD_NUMBER: _ClassVar[int]
+    START_COLUMN_FIELD_NUMBER: _ClassVar[int]
+    END_ROW_FIELD_NUMBER: _ClassVar[int]
+    END_COLUMN_FIELD_NUMBER: _ClassVar[int]
+    start_row: int
+    start_column: int
+    end_row: int
+    end_column: int
+    def __init__(self, start_row: _Optional[int] = ..., start_column: _Optional[int] = ..., end_row: _Optional[int] = ..., end_column: _Optional[int] = ...) -> None: ...
+
+class PageTableLocator(_message.Message):
+    __slots__ = ("page_ordinal", "table_ordinal", "left", "top", "right", "bottom", "row_count", "column_count", "cells", "merged_ranges", "column_edges", "widths_mm")
+    PAGE_ORDINAL_FIELD_NUMBER: _ClassVar[int]
+    TABLE_ORDINAL_FIELD_NUMBER: _ClassVar[int]
+    LEFT_FIELD_NUMBER: _ClassVar[int]
+    TOP_FIELD_NUMBER: _ClassVar[int]
+    RIGHT_FIELD_NUMBER: _ClassVar[int]
+    BOTTOM_FIELD_NUMBER: _ClassVar[int]
+    ROW_COUNT_FIELD_NUMBER: _ClassVar[int]
+    COLUMN_COUNT_FIELD_NUMBER: _ClassVar[int]
+    CELLS_FIELD_NUMBER: _ClassVar[int]
+    MERGED_RANGES_FIELD_NUMBER: _ClassVar[int]
+    COLUMN_EDGES_FIELD_NUMBER: _ClassVar[int]
+    WIDTHS_MM_FIELD_NUMBER: _ClassVar[int]
+    page_ordinal: int
+    table_ordinal: int
+    left: float
+    top: float
+    right: float
+    bottom: float
+    row_count: int
+    column_count: int
+    cells: _containers.RepeatedCompositeFieldContainer[PdfTableCell]
+    merged_ranges: _containers.RepeatedCompositeFieldContainer[PdfTableMergedRange]
+    column_edges: _containers.RepeatedScalarFieldContainer[float]
+    widths_mm: _containers.RepeatedScalarFieldContainer[float]
+    def __init__(self, page_ordinal: _Optional[int] = ..., table_ordinal: _Optional[int] = ..., left: _Optional[float] = ..., top: _Optional[float] = ..., right: _Optional[float] = ..., bottom: _Optional[float] = ..., row_count: _Optional[int] = ..., column_count: _Optional[int] = ..., cells: _Optional[_Iterable[_Union[PdfTableCell, _Mapping]]] = ..., merged_ranges: _Optional[_Iterable[_Union[PdfTableMergedRange, _Mapping]]] = ..., column_edges: _Optional[_Iterable[float]] = ..., widths_mm: _Optional[_Iterable[float]] = ...) -> None: ...
+
+class TableGrid(_message.Message):
+    __slots__ = ("row_count", "column_count", "cells", "widths_mm")
+    ROW_COUNT_FIELD_NUMBER: _ClassVar[int]
+    COLUMN_COUNT_FIELD_NUMBER: _ClassVar[int]
+    CELLS_FIELD_NUMBER: _ClassVar[int]
+    WIDTHS_MM_FIELD_NUMBER: _ClassVar[int]
+    row_count: int
+    column_count: int
+    cells: _containers.RepeatedCompositeFieldContainer[PdfTableCell]
+    widths_mm: _containers.RepeatedScalarFieldContainer[float]
+    def __init__(self, row_count: _Optional[int] = ..., column_count: _Optional[int] = ..., cells: _Optional[_Iterable[_Union[PdfTableCell, _Mapping]]] = ..., widths_mm: _Optional[_Iterable[float]] = ...) -> None: ...
 
 class SpreadsheetCell(_message.Message):
     __slots__ = ("address", "row", "column", "text")
@@ -216,7 +318,7 @@ class AttachmentLocator(_message.Message):
     def __init__(self, part_name: _Optional[str] = ..., relationship_type: _Optional[str] = ...) -> None: ...
 
 class StructuredSourceUnit(_message.Message):
-    __slots__ = ("key", "ordinal", "kind", "text", "document", "page", "spreadsheet", "image", "attachment")
+    __slots__ = ("key", "ordinal", "kind", "text", "document", "page", "spreadsheet", "image", "attachment", "page_table", "grid")
     KEY_FIELD_NUMBER: _ClassVar[int]
     ORDINAL_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
@@ -226,6 +328,8 @@ class StructuredSourceUnit(_message.Message):
     SPREADSHEET_FIELD_NUMBER: _ClassVar[int]
     IMAGE_FIELD_NUMBER: _ClassVar[int]
     ATTACHMENT_FIELD_NUMBER: _ClassVar[int]
+    PAGE_TABLE_FIELD_NUMBER: _ClassVar[int]
+    GRID_FIELD_NUMBER: _ClassVar[int]
     key: str
     ordinal: int
     kind: StructuredSourceUnitKind
@@ -235,7 +339,9 @@ class StructuredSourceUnit(_message.Message):
     spreadsheet: SpreadsheetLocator
     image: ImageLocator
     attachment: AttachmentLocator
-    def __init__(self, key: _Optional[str] = ..., ordinal: _Optional[int] = ..., kind: _Optional[_Union[StructuredSourceUnitKind, str]] = ..., text: _Optional[str] = ..., document: _Optional[_Union[DocumentLocator, _Mapping]] = ..., page: _Optional[_Union[PageLocator, _Mapping]] = ..., spreadsheet: _Optional[_Union[SpreadsheetLocator, _Mapping]] = ..., image: _Optional[_Union[ImageLocator, _Mapping]] = ..., attachment: _Optional[_Union[AttachmentLocator, _Mapping]] = ...) -> None: ...
+    page_table: PageTableLocator
+    grid: TableGrid
+    def __init__(self, key: _Optional[str] = ..., ordinal: _Optional[int] = ..., kind: _Optional[_Union[StructuredSourceUnitKind, str]] = ..., text: _Optional[str] = ..., document: _Optional[_Union[DocumentLocator, _Mapping]] = ..., page: _Optional[_Union[PageLocator, _Mapping]] = ..., spreadsheet: _Optional[_Union[SpreadsheetLocator, _Mapping]] = ..., image: _Optional[_Union[ImageLocator, _Mapping]] = ..., attachment: _Optional[_Union[AttachmentLocator, _Mapping]] = ..., page_table: _Optional[_Union[PageTableLocator, _Mapping]] = ..., grid: _Optional[_Union[TableGrid, _Mapping]] = ...) -> None: ...
 
 class ReadResponse(_message.Message):
     __slots__ = ("markdown_content", "image_refs", "image_dir_path", "metadata", "error", "structured_source_units")

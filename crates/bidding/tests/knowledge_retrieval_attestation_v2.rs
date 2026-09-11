@@ -1189,11 +1189,16 @@ async fn read_committed_attestation_waits_then_validates_the_committed_scope() {
         .fetch_one(&mut *mutation)
         .await
         .unwrap();
-    sqlx::query("UPDATE products SET current_version_id=NULL WHERE id=$1")
-        .bind(fixture.product_id)
-        .execute(&mut *mutation)
-        .await
-        .unwrap();
+    let deleted = sqlx::query(
+        "UPDATE product_versions SET deleted_at=clock_timestamp()
+         WHERE id=$1 AND product_id=$2 AND deleted_at IS NULL",
+    )
+    .bind(fixture.version_id)
+    .bind(fixture.product_id)
+    .execute(&mut *mutation)
+    .await
+    .unwrap();
+    assert_eq!(deleted.rows_affected(), 1);
     sqlx::query("UPDATE documents SET file_name='post-lock-mutated.txt' WHERE id=$1")
         .bind(fixture.document_id)
         .execute(&mut *mutation)
@@ -1235,21 +1240,40 @@ async fn read_committed_attestation_waits_then_validates_the_committed_scope() {
         attestation_blocked,
         "READ COMMITTED attestation did not wait for the in-flight scope mutation"
     );
+    eprintln!(
+        "post-lock scope wait observed: version={} mutation_pid={mutation_pid} attestation_pid={attestation_pid}",
+        fixture.version_id
+    );
     mutation.commit().await.unwrap();
+    eprintln!(
+        "post-lock scope mutation committed: version={}",
+        fixture.version_id
+    );
 
     let error = timeout(Duration::from_secs(10), attestation_task)
         .await
         .expect("attestation remained blocked after mutation commit")
         .expect("attestation task panicked")
         .unwrap_err();
+    let database_error = error.as_database_error().expect("post-lock database error");
+    eprintln!(
+        "post-lock scope rejection: version={} code={:?} message={}",
+        fixture.version_id,
+        database_error.code(),
+        database_error.message()
+    );
     assert_contract_error(error, "KNOWLEDGE_MATCHING_SCOPE_V2_MISMATCH");
 
-    sqlx::query("UPDATE products SET current_version_id=$2 WHERE id=$1")
-        .bind(fixture.product_id)
-        .bind(fixture.version_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    let restored = sqlx::query(
+        "UPDATE product_versions SET deleted_at=NULL
+         WHERE id=$1 AND product_id=$2 AND deleted_at IS NOT NULL",
+    )
+    .bind(fixture.version_id)
+    .bind(fixture.product_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(restored.rows_affected(), 1);
     sqlx::query("UPDATE documents SET file_name=$2 WHERE id=$1")
         .bind(fixture.document_id)
         .bind(DOCUMENT_NAME)
@@ -1262,7 +1286,15 @@ async fn read_committed_attestation_waits_then_validates_the_committed_scope() {
         .execute(&pool)
         .await
         .unwrap();
+    eprintln!(
+        "post-lock scope fixture restored: version={}",
+        fixture.version_id
+    );
     remove_fixture(&pool, &fixture).await;
+    eprintln!(
+        "post-lock scope fixture removed: version={}",
+        fixture.version_id
+    );
 }
 
 #[tokio::test]

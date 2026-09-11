@@ -1,0 +1,16 @@
+{
+	auto_https off
+	admin off
+}
+
+# Browser entry. Listen on all interfaces so LAN IPs work, not only 127.0.0.1.
+:28080 {
+	tls /etc/caddy/certs/localhost.crt /etc/caddy/certs/localhost.key
+	reverse_proxy api:8080
+}
+
+# Document Server for the browser. Same cert; API still uses http://onlyoffice/.
+:18081 {
+	tls /etc/caddy/certs/localhost.crt /etc/caddy/certs/localhost.key
+	reverse_proxy onlyoffice:80
+}

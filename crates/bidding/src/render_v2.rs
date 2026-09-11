@@ -1144,6 +1144,11 @@ fn layout_from_workspace_with_resources_policy(
             .get("block_lineage_ids")
             .and_then(Value::as_array)
             .ok_or("node block identities missing")?;
+        let depth = node
+            .get("depth")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or("node depth missing or invalid")?;
         let mut section_blocks = Vec::new();
         for lineage_id in lineage_ids {
             let lineage_id = lineage_id
@@ -1167,7 +1172,7 @@ fn layout_from_workspace_with_resources_policy(
                 .and_then(Value::as_str)
                 .ok_or("node title missing")?
                 .to_owned(),
-            depth: node.get("depth").and_then(Value::as_u64).unwrap_or(0) as u32,
+            depth,
             blocks: section_blocks,
         });
     }
@@ -2725,46 +2730,46 @@ mod tests {
     use serde_json::json;
 
     fn workspace() -> Value {
-        json!({"nodes":[{"title":"技术方案","depth":0,"render_role":"section","block_lineage_ids":["b1"]}],"blocks":[{"lineage_id":"b1","kind":"rich_text","content":{"type":"rich_text","nodes":[{"kind":"paragraph","content":[{"kind":"text","text":"中文投标正文"}]}]}}]})
+        json!({"nodes":[{"title":"分域甲","depth":1,"render_role":"section","block_lineage_ids":["b1"]}],"blocks":[{"lineage_id":"b1","kind":"rich_text","content":{"type":"rich_text","nodes":[{"kind":"paragraph","content":[{"kind":"text","text":"正文甲"}]}]}}]})
     }
 
     #[test]
     fn mixed_outline_numbering_resets_below_each_top_level() {
         let document = LayoutDocumentV2 {
-            title: "投标文件".into(),
+            title: "文档".into(),
             sections: vec![
                 LayoutSectionV2 {
-                    title: "商务文件".into(),
+                    title: "分域甲".into(),
                     depth: 1,
                     blocks: vec![],
                 },
                 LayoutSectionV2 {
-                    title: "投标函".into(),
+                    title: "分组甲".into(),
                     depth: 2,
                     blocks: vec![],
                 },
                 LayoutSectionV2 {
-                    title: "授权委托书".into(),
+                    title: "条目甲".into(),
                     depth: 3,
                     blocks: vec![],
                 },
                 LayoutSectionV2 {
-                    title: "资格文件".into(),
+                    title: "分组乙".into(),
                     depth: 2,
                     blocks: vec![],
                 },
                 LayoutSectionV2 {
-                    title: "技术文件".into(),
+                    title: "分域乙".into(),
                     depth: 1,
                     blocks: vec![],
                 },
                 LayoutSectionV2 {
-                    title: "技术要求响应".into(),
+                    title: "分组丙".into(),
                     depth: 2,
                     blocks: vec![],
                 },
                 LayoutSectionV2 {
-                    title: "参数响应表".into(),
+                    title: "条目乙".into(),
                     depth: 3,
                     blocks: vec![],
                 },
@@ -2775,13 +2780,13 @@ mod tests {
         assert_eq!(
             numbered_section_titles(&document),
             vec![
-                "一、商务文件",
-                "1. 投标函",
-                "1.1 授权委托书",
-                "2. 资格文件",
-                "二、技术文件",
-                "1. 技术要求响应",
-                "1.1 参数响应表",
+                "一、分域甲",
+                "1. 分组甲",
+                "1.1 条目甲",
+                "2. 分组乙",
+                "二、分域乙",
+                "1. 分组丙",
+                "1.1 条目乙",
             ]
         );
     }
@@ -2790,14 +2795,15 @@ mod tests {
     fn cover_and_toc_nodes_do_not_enter_body_numbering() {
         let value = json!({
             "nodes":[
-                {"title":"投标文件","depth":0,"semantic_role":"cover","render_role":"front_matter","block_lineage_ids":[]},
+                {"title":"文档","depth":0,"semantic_role":"other","render_role":"hidden","block_lineage_ids":[]},
+                {"title":"封面","depth":1,"semantic_role":"cover","render_role":"front_matter","block_lineage_ids":[]},
                 {"title":"目录","depth":1,"semantic_role":"toc","render_role":"toc","block_lineage_ids":[]},
-                {"title":"商务文件","depth":1,"semantic_role":"commercial","render_role":"section","block_lineage_ids":["b1"]}
+                {"title":"分域甲","depth":1,"semantic_role":"commercial","render_role":"section","block_lineage_ids":["b1"]}
             ],
             "blocks":[{"lineage_id":"b1","kind":"rich_text","content":{"type":"rich_text","nodes":[{"kind":"paragraph","content":[{"kind":"text","text":"正文"}]}]}}]
         });
-        let layout = layout_from_workspace("投标文件", &value, None).unwrap();
-        assert_eq!(numbered_section_titles(&layout), vec!["一、商务文件"]);
+        let layout = layout_from_workspace("文档", &value, None).unwrap();
+        assert_eq!(numbered_section_titles(&layout), vec!["一、分域甲"]);
     }
 
     #[test]
@@ -2845,7 +2851,7 @@ mod tests {
         use std::io::Read;
         let rich =
             |text: &str| json!([{"kind":"paragraph","content":[{"kind":"text","text":text}]}]);
-        let workspace = json!({"nodes":[{"title":"报价表","depth":0,"render_role":"section","block_lineage_ids":["t1"]}],"blocks":[{
+        let workspace = json!({"nodes":[{"title":"表格甲","depth":1,"render_role":"section","block_lineage_ids":["t1"]}],"blocks":[{
             "lineage_id":"t1","kind":"table","content":{"type":"table","row_count":2,"column_count":2,
                 "cells":[{"row":0,"column":0,"rowspan":1,"colspan":2,"content":[{"kind":"paragraph","content":[{"kind":"text","text":"表头","marks":[{"kind":"bold"},{"kind":"italic"}]}]}]},
                     {"row":1,"column":0,"rowspan":1,"colspan":1,"content":rich("名称")},

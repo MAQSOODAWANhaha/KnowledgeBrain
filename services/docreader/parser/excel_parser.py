@@ -20,12 +20,14 @@ from openpyxl.utils.cell import range_boundaries
 from docreader.models.document import (
     Chunk,
     Document,
+    PdfTableCell,
     SpreadsheetCell,
     SpreadsheetLocator,
     SpreadsheetRange,
     SpreadsheetTableIdentity,
     StructuredSourceUnit,
     StructuredSourceUnitKind,
+    TableGrid,
 )
 from docreader.parser.base_parser import BaseParser
 from docreader.parser.excel_convert import (
@@ -147,7 +149,9 @@ class ExcelParser(BaseParser):
 
         # Tender XLSX follows the sparse structural path. Opening it through
         # pandas first can expand a single XFD1048576 cell into a huge rectangle.
-        if detect_excel_format(content) == "xlsx":
+        fmt = detect_excel_format(content)
+        structured_units: List[StructuredSourceUnit] = []
+        if fmt == "xlsx":
             structured_units = _extract_xlsx_structured_units(content)
             for unit in structured_units:
                 if unit.kind is not StructuredSourceUnitKind.TABLE_ROW or not unit.text:
@@ -164,6 +168,10 @@ class ExcelParser(BaseParser):
                 chunks=chunks,
                 structured_source_units=structured_units,
             )
+        if fmt == "xls":
+            converted = convert_excel_to_xlsx_bytes(content, suffix=".xls")
+            if converted and detect_excel_format(converted) == "xlsx":
+                structured_units = _extract_xlsx_structured_units(converted)
 
         excel_file = _open_excel_file(content, file_type=self.file_type)
         for excel_sheet_name in excel_file.sheet_names:
@@ -184,12 +192,23 @@ class ExcelParser(BaseParser):
                     Chunk(content=content_row, seq=len(chunks), start=start, end=end)
                 )
                 start = end
-        return Document(content="".join(text), chunks=chunks)
+        return Document(
+            content="".join(text),
+            chunks=chunks,
+            structured_source_units=structured_units,
+        )
 
 
 def _range_bounds(a1_range: str) -> tuple[int, int, int, int]:
     raw = range_boundaries(a1_range)
-    values = [int(value) for value in raw if value is not None]
+    values: list[int] = []
+    for value in raw:
+        if value is None:
+            continue
+        try:
+            values.append(int(value))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"XLSX range must be fully bounded: {a1_range}") from exc
     if len(values) != 4:
         raise ValueError(f"XLSX range must be fully bounded: {a1_range}")
     return values[0], values[1], values[2], values[3]
@@ -351,6 +370,88 @@ def _preflight_xlsx_structure(content: bytes) -> None:
             raise ValueError("XLSX_STRUCTURE_INVALID:no_worksheet")
 
 
+def _listobject_grid(
+    region: SpreadsheetRange,
+    cells: List[SpreadsheetCell],
+    merged: List[SpreadsheetRange],
+) -> TableGrid:
+    row_count = region.end_row - region.start_row + 1
+    column_count = region.end_column - region.start_column + 1
+    texts = {
+        (cell.row - region.start_row, cell.column - region.start_column): cell.text
+        for cell in cells
+        if region.start_row <= cell.row <= region.end_row
+        and region.start_column <= cell.column <= region.end_column
+    }
+    spans: dict[tuple[int, int], tuple[int, int]] = {}
+    covered: set[tuple[int, int]] = set()
+    for merge in merged:
+        if (
+            merge.start_row < region.start_row
+            or merge.end_row > region.end_row
+            or merge.start_column < region.start_column
+            or merge.end_column > region.end_column
+        ):
+            continue
+        start_row = merge.start_row - region.start_row
+        start_column = merge.start_column - region.start_column
+        row_span = merge.end_row - merge.start_row + 1
+        col_span = merge.end_column - merge.start_column + 1
+        spans[(start_row, start_column)] = (row_span, col_span)
+        for row in range(start_row, start_row + row_span):
+            for column in range(start_column, start_column + col_span):
+                if (row, column) != (start_row, start_column):
+                    covered.add((row, column))
+    sparse: List[PdfTableCell] = []
+    for row in range(row_count):
+        for column in range(column_count):
+            if (row, column) in covered:
+                continue
+            row_span, col_span = spans.get((row, column), (1, 1))
+            sparse.append(
+                PdfTableCell(
+                    row=row,
+                    column=column,
+                    row_span=row_span,
+                    col_span=col_span,
+                    text=texts.get((row, column), ""),
+                )
+            )
+    return TableGrid(
+        row_count=row_count,
+        column_count=column_count,
+        cells=sparse,
+        widths_mm=None,
+    )
+
+
+def _used_sheet_region(
+    cells: List[SpreadsheetCell],
+    merged: List[SpreadsheetRange],
+) -> SpreadsheetRange:
+    from openpyxl.utils import get_column_letter
+
+    start_row = min(cell.row for cell in cells)
+    end_row = max(cell.row for cell in cells)
+    start_column = min(cell.column for cell in cells)
+    end_column = max(cell.column for cell in cells)
+    for merge in merged:
+        start_row = min(start_row, merge.start_row)
+        end_row = max(end_row, merge.end_row)
+        start_column = min(start_column, merge.start_column)
+        end_column = max(end_column, merge.end_column)
+    return SpreadsheetRange(
+        a1_range=(
+            f"{get_column_letter(start_column)}{start_row}:"
+            f"{get_column_letter(end_column)}{end_row}"
+        ),
+        start_row=start_row,
+        start_column=start_column,
+        end_row=end_row,
+        end_column=end_column,
+    )
+
+
 def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
     """Return bounded deterministic units without rectangular expansion."""
     from openpyxl import load_workbook
@@ -390,6 +491,8 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                 len(cell.address.encode("utf-8")) + len(cell.text.encode("utf-8"))
                 for cell in locator.cells
             )
+        if unit.grid is not None:
+            total_cell_payload_bytes += sum(len(cell.text.encode("utf-8")) for cell in unit.grid.cells)
             _limit(
                 "cell_payload_bytes",
                 total_cell_payload_bytes,
@@ -488,8 +591,8 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                         sheet_ordinal=sheet_ordinal,
                         sheet_name=sheet.title,
                         region=sheet_region,
-                        cells=all_cells,
-                        merged_ranges=merged,
+                        cells=[],
+                        merged_ranges=[],
                         defined_tables=[identity for identity, _ in tables],
                     ),
                 )
@@ -537,24 +640,45 @@ def _extract_xlsx_structured_units(content: bytes) -> List[StructuredSourceUnit]
                     <= cell.column
                     <= table_region.end_column
                 ]
+                table_merges = [
+                    region for region in merged if contains(table_region, region)
+                ]
                 emit(
                     StructuredSourceUnit(
                         key=f"sheet:{sheet_ordinal}:table:{table.name}",
                         ordinal=len(units),
                         kind=StructuredSourceUnitKind.TABLE_REGION,
-                        text="\n".join(cell.text for cell in table_cells),
+                        text="",
                         locator=SpreadsheetLocator(
                             sheet_ordinal=sheet_ordinal,
                             sheet_name=sheet.title,
                             region=table_region,
-                            cells=table_cells,
-                            merged_ranges=[
-                                region
-                                for region in merged
-                                if contains(table_region, region)
-                            ],
+                            cells=[],
+                            merged_ranges=[],
                             defined_tables=[table],
                         ),
+                        grid=_listobject_grid(table_region, table_cells, table_merges),
+                    )
+                )
+            if not tables and all_cells:
+                used = _used_sheet_region(all_cells, merged)
+                range_area(used, "used")
+                used_merges = [region for region in merged if contains(used, region)]
+                emit(
+                    StructuredSourceUnit(
+                        key=f"sheet:{sheet_ordinal}:used",
+                        ordinal=len(units),
+                        kind=StructuredSourceUnitKind.TABLE_REGION,
+                        text="",
+                        locator=SpreadsheetLocator(
+                            sheet_ordinal=sheet_ordinal,
+                            sheet_name=sheet.title,
+                            region=used,
+                            cells=[],
+                            merged_ranges=[],
+                            defined_tables=[],
+                        ),
+                        grid=_listobject_grid(used, all_cells, used_merges),
                     )
                 )
     finally:
@@ -634,7 +758,9 @@ def _open_excel_file(content: bytes, file_type: str | None = None) -> pd.ExcelFi
                 f"Excel engine {engine!r} is not available for .{ext} files"
             ) from exc
         except KeyError as exc:
-            if "sharedStrings.xml" not in str(exc) or engine != "openpyxl":
+            if engine != "openpyxl":
+                raise
+            if "sharedStrings.xml" not in str(exc):
                 raise
             repaired = repair_xlsx_bytes(data)
             if repaired is None:
@@ -643,7 +769,9 @@ def _open_excel_file(content: bytes, file_type: str | None = None) -> pd.ExcelFi
             data = _prepare_xlsx_bytes(repaired)
             continue
         except ValueError as exc:
-            if converted_via_soffice or "cannot be determined" not in str(exc):
+            if converted_via_soffice:
+                raise
+            if "cannot be determined" not in str(exc):
                 raise
             try:
                 data = normalize_excel_bytes(content, file_type=file_type)
@@ -661,15 +789,13 @@ if __name__ == "__main__":
     your_file = "/path/to/your/file.xlsx"
     parser = ExcelParser()
 
-    # Read and parse the Excel file
-    with open(your_file, "rb") as f:
-        content = f.read()
-        document = parser.parse_into_text(content)
-
-        # Display the full document content
-        logger.error(document.content)
-
-        # Display the first chunk as an example
-        for chunk in document.chunks:
-            logger.error(chunk.content)
-            break  # Only show the first chunk
+    try:
+        with open(your_file, "rb") as handle:
+            content = handle.read()
+    except OSError as exc:
+        raise SystemExit(f"cannot read {your_file}: {exc}") from exc
+    document = parser.parse_into_text(content)
+    logger.error(document.content)
+    for chunk in document.chunks:
+        logger.error(chunk.content)
+        break

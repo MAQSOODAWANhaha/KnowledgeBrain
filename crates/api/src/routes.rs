@@ -179,7 +179,6 @@ pub fn build(state: AppState) -> Router {
             get_s(list_models).merge(post_s(create_model)),
         )
         .route("/api/v1/models/{id}", patch_s(patch_model))
-        .route("/api/v1/ops/dead-letters", get_s(dead_letters))
         .route("/api/v1/ops/queues", get_s(list_queues))
         .route("/api/v1/ops/oxana", get_s(ops_oxana))
         .route("/metrics", get_s(metrics))
@@ -239,7 +238,7 @@ async fn live() -> Json<knowledge::LiveBody> {
 }
 
 async fn ready() -> (StatusCode, Json<knowledge::ReadyBody>) {
-    let check = knowledge::check_readiness().await;
+    let check = knowledge::check_readiness(platform::SchemaComponentKind::Api).await;
     let status = if check.is_ready() {
         StatusCode::OK
     } else {
@@ -627,6 +626,22 @@ async fn patch_workspace(
     Ok(Json(WorkspaceView::from(&w)))
 }
 
+fn require_enqueued(result: Result<Option<String>, String>, task: &str) -> Result<(), ApiErr> {
+    match result {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "QUEUE_UNAVAILABLE",
+            format!("{task} remains pending; retry the same request after Redis recovers"),
+        )),
+        Err(error) => Err(fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "QUEUE_UNAVAILABLE",
+            format!("{task} remains pending; retry the same request: {error}"),
+        )),
+    }
+}
+
 async fn delete_workspace(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -638,9 +653,11 @@ async fn delete_workspace(
     let vids = knowledge::version_ids_for_workspace(&pool, id)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
-    let _ = knowledge::cancel_active_docs_for_versions(&pool, &vids).await;
+    knowledge::cancel_active_docs_for_versions(&pool, &vids)
+        .await
+        .map_err(pg_err)?;
     for vid in vids {
-        let _ = platform::enqueue_kb_delete(vid).await;
+        require_enqueued(platform::enqueue_kb_delete(vid).await, "workspace deletion")?;
     }
     knowledge::retire_workspace(&pool, id)
         .await
@@ -970,9 +987,11 @@ async fn delete_product(
     let vids = knowledge::version_ids_for_product(&pool, id)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
-    let _ = knowledge::cancel_active_docs_for_versions(&pool, &vids).await;
+    knowledge::cancel_active_docs_for_versions(&pool, &vids)
+        .await
+        .map_err(pg_err)?;
     for vid in vids {
-        let _ = platform::enqueue_kb_delete(vid).await;
+        require_enqueued(platform::enqueue_kb_delete(vid).await, "product deletion")?;
     }
     Ok(StatusCode::ACCEPTED)
 }
@@ -1131,7 +1150,10 @@ async fn create_version(
         current = Some(view_id);
     }
     if let Some(src) = clone_from {
-        let _ = platform::enqueue_version_clone(src, view_id, json!(diffs), make_current).await;
+        require_enqueued(
+            platform::enqueue_version_clone(src, view_id, json!(diffs), make_current).await,
+            "version clone",
+        )?;
     }
     if let Some(loaded) = knowledge::load_version(&pool, view_id).await.ok().flatten() {
         v = loaded;
@@ -1364,10 +1386,16 @@ async fn delete_version(
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?
         .ok_or_else(|| not_found("version"))?;
-    let _ = knowledge::cancel_active_docs_for_versions(&pool, &[vid]).await;
-    let _ = knowledge::set_version_status(&pool, vid, "archived").await;
-    let _ = knowledge::clear_product_current_if(&pool, id, vid).await;
-    let _ = platform::enqueue_kb_delete(vid).await;
+    knowledge::cancel_active_docs_for_versions(&pool, &[vid])
+        .await
+        .map_err(pg_err)?;
+    knowledge::set_version_status(&pool, vid, "archived")
+        .await
+        .map_err(pg_err)?;
+    knowledge::clear_product_current_if(&pool, id, vid)
+        .await
+        .map_err(pg_err)?;
+    require_enqueued(platform::enqueue_kb_delete(vid).await, "version deletion")?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -1510,6 +1538,111 @@ struct PreparedIngest<'a> {
     passages: Vec<String>,
 }
 
+#[cfg(test)]
+static INGEST_INSERT_BARRIER: std::sync::OnceLock<
+    std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Barrier>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+async fn wait_for_ingest_insert_barrier() {
+    let barrier = INGEST_INSERT_BARRIER
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("ingest insert barrier lock")
+        .clone();
+    if let Some(barrier) = barrier {
+        barrier.wait().await;
+    }
+}
+
+struct IngestReplayIdentity {
+    product_version_id: Uuid,
+    title: String,
+    file_name: String,
+    file_size: i64,
+    file_hash: String,
+    object_ref: String,
+    doc_type: String,
+    source_passages: Vec<String>,
+    process_overrides: Option<knowledge::ProcessOverrides>,
+    tag_ids: Vec<Uuid>,
+}
+
+fn normalized_tag_ids(tag_ids: &[Uuid]) -> Vec<Uuid> {
+    let mut normalized = tag_ids.to_vec();
+    normalized.sort_unstable();
+    normalized.dedup();
+    normalized
+}
+
+async fn load_exact_pending_duplicate(
+    pool: &sqlx::PgPool,
+    document_id: Uuid,
+    expected: &IngestReplayIdentity,
+) -> Result<Document, ApiErr> {
+    let document = knowledge::load_document(pool, document_id)
+        .await
+        .map_err(pg_err)?
+        .ok_or_else(|| fail(StatusCode::CONFLICT, "CONFLICT", "duplicate winner missing"))?;
+    let tag_ids = knowledge::document_tag_ids(pool, document.id)
+        .await
+        .map_err(pg_err)?;
+    if document.parse_status != ParseStatus::Pending
+        || document.product_version_id != expected.product_version_id
+        || document.title != expected.title
+        || document.file_name != expected.file_name
+        || document.file_size != expected.file_size
+        || document.file_hash != expected.file_hash
+        || document.object_ref != expected.object_ref
+        || document.doc_type != expected.doc_type
+        || document.source_passages != expected.source_passages
+        || document.process_overrides != expected.process_overrides
+        || tag_ids != expected.tag_ids
+    {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "CONFLICT",
+            format!("duplicate file {}", document.id),
+        ));
+    }
+    Ok(document)
+}
+
+async fn enqueue_ingest_document(doc: &Document) -> Result<(), ApiErr> {
+    if doc.doc_type == "manual" {
+        require_enqueued(
+            platform::enqueue_manual_process(doc.id, doc.product_version_id, doc.attempt).await,
+            "manual document processing",
+        )?;
+    } else if doc.doc_type == "passage" {
+        require_enqueued(
+            platform::enqueue_document_process_with(
+                doc.id,
+                doc.product_version_id,
+                doc.attempt,
+                doc.source_passages.clone(),
+            )
+            .await,
+            "passage processing",
+        )?;
+    } else {
+        if doc.file_name.ends_with(".csv")
+            || doc.file_name.ends_with(".xlsx")
+            || doc.file_name.ends_with(".xls")
+        {
+            require_enqueued(
+                platform::enqueue_datatable(doc.id).await,
+                "datatable processing",
+            )?;
+        }
+        require_enqueued(
+            platform::enqueue_document_process(doc.id, doc.product_version_id, doc.attempt).await,
+            "document processing",
+        )?;
+    }
+    Ok(())
+}
+
 async fn ingest_prepared(
     actor: &Actor,
     product_id: Uuid,
@@ -1564,16 +1697,30 @@ async fn ingest_prepared(
         return Err(validation("audio requires ASR configuration"));
     }
     let hash = platform::sha256_hex(bytes);
+    let expected = IngestReplayIdentity {
+        product_version_id: vid,
+        title: title.clone(),
+        file_name: file_name.clone(),
+        file_size: bytes.len() as i64,
+        file_hash: hash.clone(),
+        object_ref: platform::object_ref(&hash),
+        doc_type: if doc_type.is_empty() {
+            "file".into()
+        } else {
+            doc_type.into()
+        },
+        source_passages: passages.clone(),
+        process_overrides: overrides.clone().filter(|value| !value.is_empty()),
+        tag_ids: normalized_tag_ids(tag_ids),
+    };
     if let Some(existing) =
         knowledge::find_duplicate_document(&pool, vid, &file_name, bytes.len() as i64, &hash)
             .await
             .map_err(pg_err)?
     {
-        return Err(fail(
-            StatusCode::CONFLICT,
-            "CONFLICT",
-            format!("duplicate file {existing}"),
-        ));
+        let existing_document = load_exact_pending_duplicate(&pool, existing, &expected).await?;
+        enqueue_ingest_document(&existing_document).await?;
+        return Ok(existing_document);
     }
     if !knowledge::tags_belong_to_workspace(&pool, p.workspace_id, tag_ids)
         .await
@@ -1581,7 +1728,9 @@ async fn ingest_prepared(
     {
         return Err(validation("unknown tag"));
     }
-    let (hash, key) = knowledge::put_bytes(bytes);
+    let (hash, key) = knowledge::put_bytes(bytes)
+        .await
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", e.to_string()))?;
     let mut doc = Document::new(vid, title, file_name.clone(), bytes.len() as i64, hash, key);
     doc.process_overrides = overrides.filter(|o| !o.is_empty());
     if !doc_type.is_empty() {
@@ -1590,96 +1739,76 @@ async fn ingest_prepared(
     if !passages.is_empty() {
         doc.source_passages = passages.clone();
     }
-    persist_ingest_row(&doc, tag_ids).await?;
-    let enqueue_err = if doc_type == "manual" {
-        platform::enqueue_manual_process(doc.id, doc.product_version_id, doc.attempt)
-            .await
-            .err()
-    } else if doc_type == "passage" {
-        platform::enqueue_document_process_with(
-            doc.id,
-            doc.product_version_id,
-            doc.attempt,
-            passages,
-        )
-        .await
-        .err()
-    } else {
-        if file_name.ends_with(".csv")
-            || file_name.ends_with(".xlsx")
-            || file_name.ends_with(".xls")
-        {
-            let _ = platform::enqueue_datatable(doc.id).await;
-        }
-        platform::enqueue_document_process(doc.id, doc.product_version_id, doc.attempt)
-            .await
-            .err()
-    };
-    if let Some(e) = enqueue_err {
-        doc.parse_status = ParseStatus::Failed;
-        doc.error_message = e;
-        persist_failed_row(&doc).await;
-    }
-    Ok(doc)
+    let persisted = persist_ingest_row(&pool, &doc, tag_ids, &expected).await?;
+    enqueue_ingest_document(&persisted).await?;
+    Ok(persisted)
 }
 
-async fn persist_ingest_row(doc: &Document, tag_ids: &[Uuid]) -> Result<(), ApiErr> {
-    let Ok(pool) = platform::connect().await else {
-        return Ok(());
-    };
-    let version_in_pg = knowledge::version_exists(&pool, doc.product_version_id)
+async fn persist_ingest_row(
+    pool: &sqlx::PgPool,
+    doc: &Document,
+    tag_ids: &[Uuid],
+    expected: &IngestReplayIdentity,
+) -> Result<Document, ApiErr> {
+    let version_in_pg = knowledge::version_exists(pool, doc.product_version_id)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", e.to_string()))?;
     if !version_in_pg {
-        return Ok(());
+        return Err(not_found("version"));
     }
-    if let Ok(Some(existing)) = knowledge::find_duplicate_document(
-        &pool,
+    if let Some(existing) = knowledge::find_duplicate_document(
+        pool,
         doc.product_version_id,
         &doc.file_name,
         doc.file_size,
         &doc.file_hash,
     )
     .await
+    .map_err(pg_err)?
         && existing != doc.id
     {
-        return Err(fail(
-            StatusCode::CONFLICT,
-            "CONFLICT",
-            format!("duplicate file {existing}"),
-        ));
+        return load_exact_pending_duplicate(pool, existing, expected).await;
     }
-    if let Err(e) = knowledge::insert_document(
-        &pool,
-        knowledge::NewDocument {
-            id: doc.id,
-            product_version_id: doc.product_version_id,
-            title: &doc.title,
-            file_name: &doc.file_name,
-            file_size: doc.file_size,
-            file_hash: &doc.file_hash,
-            object_ref: &doc.object_ref,
+    #[cfg(test)]
+    wait_for_ingest_insert_barrier().await;
+    if let Err(e) = knowledge::insert_ingest_document(
+        pool,
+        knowledge::NewIngestDocument {
+            document: knowledge::NewDocument {
+                id: doc.id,
+                product_version_id: doc.product_version_id,
+                title: &doc.title,
+                file_name: &doc.file_name,
+                file_size: doc.file_size,
+                file_hash: &doc.file_hash,
+                object_ref: &doc.object_ref,
+            },
+            doc_type: &doc.doc_type,
+            source_passages: &doc.source_passages,
+            process_overrides: doc.process_overrides.as_ref(),
+            tag_ids,
         },
     )
     .await
     {
         if knowledge::is_unique_violation(&e) {
             let existing = knowledge::find_duplicate_document(
-                &pool,
+                pool,
                 doc.product_version_id,
                 &doc.file_name,
                 doc.file_size,
                 &doc.file_hash,
             )
             .await
-            .ok()
-            .flatten()
-            .unwrap_or(doc.id);
-            return Err(fail(
-                StatusCode::CONFLICT,
-                "CONFLICT",
-                format!("duplicate file {existing}"),
-            ));
+            .map_err(pg_err)?
+            .ok_or_else(|| {
+                fail(
+                    StatusCode::CONFLICT,
+                    "CONFLICT",
+                    "unique insert winner does not match the upload scope",
+                )
+            })?;
+            return load_exact_pending_duplicate(pool, existing, expected).await;
         }
         return Err(fail(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1687,33 +1816,10 @@ async fn persist_ingest_row(doc: &Document, tag_ids: &[Uuid]) -> Result<(), ApiE
             e.to_string(),
         ));
     }
-    let _ =
-        knowledge::set_document_source(&pool, doc.id, &doc.doc_type, &doc.source_passages).await;
-    let _ = knowledge::insert_document_tags(&pool, doc.id, tag_ids).await;
-    if let Some(o) = &doc.process_overrides {
-        let _ = knowledge::set_process_overrides(&pool, doc.id, o).await;
-    }
-    let _ = knowledge::open_attempt(&pool, doc.id, doc.attempt).await;
-    if doc.parse_status == ParseStatus::Failed {
-        let _ = knowledge::set_parse_status(&pool, doc.id, "failed", &doc.error_message).await;
-    }
-    Ok(())
-}
-
-async fn persist_failed_row(doc: &Document) {
-    if doc.parse_status != ParseStatus::Failed {
-        return;
-    }
-    let Ok(pool) = platform::connect().await else {
-        return;
-    };
-    if !knowledge::version_exists(&pool, doc.product_version_id)
+    knowledge::open_attempt(pool, doc.id, doc.attempt)
         .await
-        .unwrap_or(false)
-    {
-        return;
-    }
-    let _ = knowledge::set_parse_status(&pool, doc.id, "failed", &doc.error_message).await;
+        .map_err(pg_err)?;
+    Ok(doc.clone())
 }
 
 async fn ingest_file(
@@ -1992,9 +2098,7 @@ async fn delete_document(
     knowledge::set_parse_status(&pool, id, "deleting", "")
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
-    platform::enqueue_list_delete(id)
-        .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", e))?;
+    require_enqueued(platform::enqueue_list_delete(id).await, "document deletion")?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -2040,14 +2144,16 @@ async fn reparse_document(
                 .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
         }
     }
-    knowledge::mark_reparse_queued(&pool, id)
+    let attempt = knowledge::mark_reparse_queued(&pool, id)
         .await
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "UPSTREAM", e.to_string()))?;
+    doc.attempt = attempt;
     doc.parse_status = ParseStatus::Pending;
     doc.enable_status = "disabled".into();
-    platform::enqueue_list_reparse(id)
-        .await
-        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL", e))?;
+    require_enqueued(
+        platform::enqueue_list_reparse(id, attempt).await,
+        "document reparse",
+    )?;
     Ok(Json(DocView::from(&doc)))
 }
 
@@ -2621,22 +2727,9 @@ async fn do_answer(
     }))
 }
 
-async fn dead_letters(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<knowledge::DeadLetter>>, ApiErr> {
-    let actor = actor_from(&headers, &state).await?;
-    require_admin(&state, &actor).await?;
-    let pool = pg().await?;
-    let out = knowledge::list_dead_letters(&pool).await.map_err(pg_err)?;
-    Ok(Json(out))
-}
-
 #[derive(Serialize)]
 struct QueueView {
-    memory: HashMap<String, usize>,
-    pending_ops: HashMap<String, i64>,
-    dead_letters: usize,
+    native: HashMap<String, i64>,
 }
 
 async fn list_queues(
@@ -2645,13 +2738,8 @@ async fn list_queues(
 ) -> Result<Json<QueueView>, ApiErr> {
     let actor = actor_from(&headers, &state).await?;
     require_admin(&state, &actor).await?;
-    let pool = pg().await?;
-    let pending_ops = knowledge::pending_op_counts(&pool).await.map_err(pg_err)?;
-    let dead_letters = knowledge::count_dead_letters(&pool).await.map_err(pg_err)? as usize;
     Ok(Json(QueueView {
-        memory: HashMap::new(),
-        pending_ops,
-        dead_letters,
+        native: platform::queue_depths().await,
     }))
 }
 
@@ -2856,4 +2944,326 @@ pub(crate) async fn require_bid_pool() -> Result<sqlx::PgPool, ApiErr> {
             "bid database unavailable",
         )
     })
+}
+
+#[cfg(test)]
+mod required_enqueue_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone)]
+    struct QueueTestContext(Arc<AtomicUsize>);
+
+    struct QueueTestWorker(Arc<AtomicUsize>);
+
+    impl oxana::FromContext<QueueTestContext> for QueueTestWorker {
+        fn from_context(context: &QueueTestContext) -> Self {
+            Self(context.0.clone())
+        }
+    }
+
+    #[async_trait]
+    impl oxana::Worker<platform::DocumentProcessJob> for QueueTestWorker {
+        type Error = std::io::Error;
+
+        async fn process(
+            &self,
+            _job: platform::DocumentProcessJob,
+            _context: &oxana::JobContext,
+        ) -> Result<(), Self::Error> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn isolated_test_database_url() -> Option<String> {
+        let url = std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL").ok()?;
+        if !url.contains("127.0.0.1:25433/knowledgebrain_test_") {
+            panic!("API destructive test requires 127.0.0.1:25433/knowledgebrain_test_*");
+        }
+        Some(url)
+    }
+
+    async fn reset_test_schema(pool: &sqlx::PgPool) {
+        sqlx::raw_sql(
+            "DROP SCHEMA public CASCADE;
+             CREATE SCHEMA public;
+             GRANT ALL ON SCHEMA public TO CURRENT_USER;
+             CREATE EXTENSION IF NOT EXISTS pgcrypto;
+             CREATE EXTENSION IF NOT EXISTS vector;
+             ALTER SCHEMA public OWNER TO kb_app_owner;",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        platform::apply_fresh_baseline(pool).await.unwrap();
+    }
+
+    #[derive(Clone)]
+    struct MultipartUploadFixture {
+        uri: String,
+        content_type: String,
+        body: Vec<u8>,
+    }
+
+    impl MultipartUploadFixture {
+        fn request(&self) -> axum::http::Request<axum::body::Body> {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(&self.uri)
+                .header("x-api-key", "router-acceptance-key")
+                .header(axum::http::header::CONTENT_TYPE, &self.content_type)
+                .body(axum::body::Body::from(self.body.clone()))
+                .unwrap()
+        }
+    }
+
+    fn multipart_upload_fixture(
+        product_id: Uuid,
+        version_id: Uuid,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> MultipartUploadFixture {
+        let boundary = format!("kb-upload-{}", Uuid::new_v4());
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\n")
+                .as_bytes(),
+        );
+        body.extend_from_slice(b"Content-Type: text/plain\r\n\r\n");
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        MultipartUploadFixture {
+            uri: format!("/api/v1/products/{product_id}/versions/{version_id}/documents/file"),
+            content_type: format!("multipart/form-data; boundary={boundary}"),
+            body,
+        }
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn drain_one_document_job() {
+        let processed = Arc::new(AtomicUsize::new(0));
+        let storage = platform::oxana_connect().unwrap();
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        let runtime = storage
+            .runtime(QueueTestContext(processed.clone()))
+            .queue_with_concurrency::<platform::DefaultQueue>(1)
+            .worker::<QueueTestWorker, platform::DocumentProcessJob>()
+            .shutdown_on(async move {
+                while !*stop_rx.borrow() {
+                    if stop_rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+                Ok(())
+            })
+            .shutdown_timeout(std::time::Duration::from_secs(5))
+            .run();
+        let runtime = tokio::spawn(runtime);
+        for _ in 0..100 {
+            if processed.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        stop_tx.send(true).unwrap();
+        runtime.await.unwrap().unwrap();
+        assert_eq!(processed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn router_upload_race_and_real_redis_outage_replay_one_identity() {
+        use tower::ServiceExt;
+
+        let Some(database_url) = isolated_test_database_url() else {
+            eprintln!("skip: KNOWLEDGEBRAIN_TEST_DATABASE_URL is not configured");
+            return;
+        };
+        let Some(live_redis_url) = std::env::var("KNOWLEDGEBRAIN_TEST_REDIS_URL").ok() else {
+            eprintln!("skip: isolated Redis acceptance environment is not configured");
+            return;
+        };
+        if !live_redis_url.contains("127.0.0.1:26379") {
+            panic!("API queue acceptance requires isolated Redis on 127.0.0.1:26379");
+        }
+        if std::env::var_os("KB_DEPLOYMENT_NAMESPACE_ID").is_none() {
+            eprintln!("skip: KB_DEPLOYMENT_NAMESPACE_ID is not configured");
+            return;
+        }
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(8)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        reset_test_schema(&pool).await;
+        unsafe {
+            std::env::set_var("DATABASE_URL", &database_url);
+            std::env::set_var("REDIS_URL", &live_redis_url);
+        }
+        let owner = Uuid::new_v4();
+        knowledge::insert_user(&pool, owner, &format!("{owner}@example.test"), None)
+            .await
+            .unwrap();
+        let seeded = knowledge::create_workspace_with_library(&pool, owner, "API race", "api-race")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE workspaces SET kind='company' WHERE id=$1")
+            .bind(seeded.workspace_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let router = build(AppState {
+            jwt_secret: "router-acceptance-secret".into(),
+            bootstrap_key: "router-acceptance-key".into(),
+        });
+
+        *INGEST_INSERT_BARRIER
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap() = Some(Arc::new(tokio::sync::Barrier::new(2)));
+        let concurrent_upload = multipart_upload_fixture(
+            seeded.library_id,
+            seeded.library_version_id,
+            "same.txt",
+            b"same immutable upload",
+        );
+        let first_request = concurrent_upload.request();
+        let second_request = concurrent_upload.request();
+        let (first_response, second_response) = tokio::join!(
+            router.clone().oneshot(first_request),
+            router.clone().oneshot(second_request),
+        );
+        *INGEST_INSERT_BARRIER.get().unwrap().lock().unwrap() = None;
+        let first_response = first_response.unwrap();
+        let second_response = second_response.unwrap();
+        let first_status = first_response.status();
+        let second_status = second_response.status();
+        let first_json = response_json(first_response).await;
+        let second_json = response_json(second_response).await;
+        assert_eq!(first_status, StatusCode::CREATED, "{first_json}");
+        assert_eq!(second_status, StatusCode::CREATED, "{second_json}");
+        assert_eq!(first_json["id"], second_json["id"]);
+        let race_document_id = Uuid::parse_str(first_json["id"].as_str().unwrap()).unwrap();
+        let race_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM documents WHERE product_version_id=$1
+               AND file_name='same.txt' AND file_size=$2 AND file_hash=$3
+               AND deleted_at IS NULL",
+        )
+        .bind(seeded.library_version_id)
+        .bind(b"same immutable upload".len() as i64)
+        .bind(platform::sha256_hex(b"same immutable upload"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(race_rows, 1);
+        let race_span_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM document_processing_spans
+             WHERE document_id=$1 AND attempt=1",
+        )
+        .bind(race_document_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(race_span_count, 6);
+        drain_one_document_job().await;
+
+        unsafe {
+            std::env::set_var(
+                "REDIS_URL",
+                std::env::var("KNOWLEDGEBRAIN_TEST_UNAVAILABLE_REDIS_URL")
+                    .unwrap_or_else(|_| "redis://127.0.0.1:1".into()),
+            );
+        }
+        let outage_upload = multipart_upload_fixture(
+            seeded.library_id,
+            seeded.library_version_id,
+            "outage.txt",
+            b"persist before real redis outage",
+        );
+        let outage_response = router
+            .clone()
+            .oneshot(outage_upload.request())
+            .await
+            .unwrap();
+        assert_eq!(outage_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let outage_json = response_json(outage_response).await;
+        assert_eq!(outage_json["error"]["code"], "QUEUE_UNAVAILABLE");
+        let outage_document_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM documents WHERE product_version_id=$1
+               AND file_name='outage.txt' AND deleted_at IS NULL",
+        )
+        .bind(seeded.library_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        unsafe { std::env::set_var("REDIS_URL", &live_redis_url) };
+        let replay_response = router.oneshot(outage_upload.request()).await.unwrap();
+        assert_eq!(replay_response.status(), StatusCode::CREATED);
+        let replay_json = response_json(replay_response).await;
+        assert_eq!(replay_json["id"], outage_document_id.to_string());
+        let outage_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM documents WHERE product_version_id=$1
+               AND file_name='outage.txt' AND file_size=$2 AND file_hash=$3
+               AND deleted_at IS NULL",
+        )
+        .bind(seeded.library_version_id)
+        .bind(b"persist before real redis outage".len() as i64)
+        .bind(platform::sha256_hex(b"persist before real redis outage"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(outage_rows, 1);
+        drain_one_document_job().await;
+        for bytes in [
+            b"same immutable upload".as_slice(),
+            b"persist before real redis outage".as_slice(),
+        ] {
+            let _ = std::fs::remove_file(
+                platform::blob_path(&platform::sha256_hex(bytes))
+                    .expect("valid configured test object path"),
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_replay_normalizes_tag_set_and_requires_queue_recovery() {
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        assert_eq!(
+            normalized_tag_ids(&[second, first, second]),
+            normalized_tag_ids(&[first, second])
+        );
+        let unavailable = require_enqueued(Ok(None), "pending duplicate replay").unwrap_err();
+        assert_eq!(unavailable.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(unavailable.1.0.error.code, "QUEUE_UNAVAILABLE");
+        assert!(
+            require_enqueued(
+                Ok(Some("document:process:winner:4".into())),
+                "pending duplicate replay",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn enqueue_requires_a_queue_native_job_identity() {
+        assert!(require_enqueued(Ok(Some("job-id".into())), "test task").is_ok());
+        for unavailable in [Ok(None), Err("redis unavailable".into())] {
+            let error = require_enqueued(unavailable, "test task").unwrap_err();
+            assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(error.1.0.error.code, "QUEUE_UNAVAILABLE");
+            assert!(error.1.0.error.message.contains("remains pending"));
+            assert!(error.1.0.error.message.contains("retry"));
+        }
+    }
 }

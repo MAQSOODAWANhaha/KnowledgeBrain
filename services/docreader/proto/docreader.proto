@@ -12,6 +12,28 @@ service DocReader {
   // with bounded memory on both ends.
   rpc ReadStream(ReadRequest) returns (stream ReadStreamResponse) {}
   rpc ListEngines(ListEnginesRequest) returns (ListEnginesResponse) {}
+  // Read-only view of the supplied immutable original, not a second parser.
+  rpc SourceView(SourceViewRequest) returns (SourceViewResponse) {}
+}
+
+message SourceViewRequest {
+  bytes file_content = 1;
+  string media_type = 2;
+  string source_sha256 = 3;
+  uint32 page_ordinal = 4; // physical zero-based PDF page; zero for an image
+  uint32 max_edge = 5;
+  uint64 max_image_bytes = 6;
+}
+
+message SourceViewResponse {
+  bytes image_data = 1;
+  string media_type = 2;
+  string image_sha256 = 3;
+  string source_sha256 = 4;
+  uint32 page_ordinal = 5;
+  uint32 width = 6;
+  uint32 height = 7;
+  string renderer = 8;
 }
 
 message ReadConfig {
@@ -67,6 +89,46 @@ message PageLocator {
   optional double top = 3;
   optional double right = 4;
   optional double bottom = 5;
+}
+
+message PdfTableCell {
+  uint32 row = 1;      // zero based
+  uint32 column = 2;   // zero based
+  uint32 row_span = 3;
+  uint32 col_span = 4;
+  string text = 5;
+}
+
+message PdfTableMergedRange {
+  uint32 start_row = 1;
+  uint32 start_column = 2;
+  uint32 end_row = 3;
+  uint32 end_column = 4;
+}
+
+// Identity-only PDF table locator. Fields 7–12 are leftover from the dense
+// locator grid; identity decode accepts only proto defaults (0 / empty).
+message PageTableLocator {
+  uint32 page_ordinal = 1;
+  uint32 table_ordinal = 2;
+  double left = 3;
+  double top = 4;
+  double right = 5;
+  double bottom = 6;
+  uint32 row_count = 7;
+  uint32 column_count = 8;
+  repeated PdfTableCell cells = 9;
+  repeated PdfTableMergedRange merged_ranges = 10;
+  repeated double column_edges = 11;
+  repeated double widths_mm = 12;
+}
+
+// Sparse tiled grid. Covered merge slots are omitted from cells.
+message TableGrid {
+  uint32 row_count = 1;
+  uint32 column_count = 2;
+  repeated PdfTableCell cells = 3;
+  repeated double widths_mm = 4;
 }
 
 message SpreadsheetCell {
@@ -150,7 +212,9 @@ message StructuredSourceUnit {
     SpreadsheetLocator spreadsheet = 7;
     ImageLocator image = 8;
     AttachmentLocator attachment = 9;
+    PageTableLocator page_table = 10;
   }
+  TableGrid grid = 11; // TABLE_REGION only; missing grid still freezes
 }
 
 message ReadResponse {

@@ -1,7 +1,20 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
-import { Modal } from "@mantine/core";
-import { Dropzone } from "@mantine/dropzone";
-import { notifications } from "@mantine/notifications";
+import { IconCloudUpload } from "@tabler/icons-react";
+import { toast } from "sonner";
+import { Alert } from "../components/ui/alert";
+import { Badge } from "../components/ui/badge";
+import { Button } from "../components/ui/button";
+import { Dialog, DialogContent } from "../components/ui/dialog";
+import { Input } from "../components/ui/input";
+import { Label } from "../components/ui/label";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../components/ui/table";
 import {
   type Doc,
   type Product,
@@ -15,8 +28,9 @@ import { type AssetRoute, assetDocHref, assetVersionHref, go } from "../hash";
 import { Shell } from "../Shell";
 import { DocumentDetail } from "./DocumentDetail";
 
-function toast(msg: string, color: "iris" | "red" = "iris") {
-  notifications.show({ message: msg, color });
+function notify(msg: string, error = false) {
+  if (error) toast.error(msg);
+  else toast.success(msg);
 }
 
 function parseStatus(s: string | object): string {
@@ -187,7 +201,6 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
       if (create.kind === "folder") {
         if (!company) return;
         const p = await api.createProduct(company.id, { name: name.trim(), slug: slugify(name), kind: "library" });
-        await api.createVersion(p.id, "current");
         setCreate(null);
         setName("");
         await reloadTree();
@@ -206,11 +219,10 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
         const lineId = create.parentId;
         if (!lineId) return;
         const p = await api.createProduct(lineId, { name: name.trim(), slug: slugify(name), kind: "product" });
-        const v = await api.createVersion(p.id, "current");
         setCreate(null);
         setName("");
         await reloadTree();
-        go(`/products/${lineId}/${p.id}/${v.id}`);
+        go(`/products/${lineId}/${p.id}`);
         return;
       }
       const pid = create.parentId;
@@ -227,7 +239,7 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
       if (folders.some((f) => f.id === pid)) go(`/library/${pid}/${v.id}`);
       else if (lineId) go(`/products/${lineId}/${pid}/${v.id}`);
     } catch (e) {
-      toast(e instanceof Error ? e.message : "创建失败", "red");
+      notify(e instanceof Error ? e.message : "创建失败", true);
     }
   }
 
@@ -336,15 +348,14 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
 
   async function upload(files: File[]) {
     const pid = selectedProductId;
-    let vid = version?.id;
+    const vid = version?.id;
     if (!pid) return;
     if (!vid) {
-      const created = await api.createVersion(pid, "current");
-      vid = created.id;
-      setVersionsByProduct((cur) => ({ ...cur, [pid]: [created] }));
+      notify("请先新建版本，再上传文件", true);
+      return;
     }
     await Promise.all(files.map((f) => api.ingest(pid, vid, f)));
-    toast("已入库，解析完成后可检索");
+    notify("已入库");
     const list = await api.documents(pid, vid).catch(() => []);
     setDocs(list);
     await reloadTree();
@@ -360,13 +371,13 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
       title={title}
       extra={
         route.kind === "doc" ? undefined : route.kind === "version" || (route.kind === "folder" && version) ? (
-          <button className="btn pri" type="button" onClick={() => document.getElementById("asset-drop")?.click()}>
+          <Button type="button" onClick={() => document.getElementById("asset-file")?.click()}>
             上传
-          </button>
+          </Button>
         ) : (
-          <button className="btn pri" type="button" onClick={openCreateFromSelection}>
+          <Button type="button" onClick={openCreateFromSelection}>
             {createHint}
-          </button>
+          </Button>
         )
       }
       tree={
@@ -469,239 +480,219 @@ export function Assets({ email, route }: { email: string; route: AssetRoute }) {
     >
       <div className="wrap stack">
         {err && (
-          <div className="banner bad">
-            {err}{" "}
-            <button className="btn sm" type="button" onClick={() => void reloadTree()}>
+          <Alert>
+            {err}
+            <Button size="sm" className="mt-2" onClick={() => void reloadTree()}>
               重试
-            </button>
-          </div>
+            </Button>
+          </Alert>
         )}
         {route.kind === "company" && (
-          <Pane
-            title="公司资料"
-            note="证照、体系、业绩、服务能力。分类夹不是产品型号。可检索后才会被商务条款打到。"
-            empty={folders.length === 0}
-            emptyTitle="还没有分类"
-            action="新建分类"
-            onAction={() => setCreate({ kind: "folder" })}
-          >
-            {folders.map((p) => (
-              <a key={p.id} className="item" href={`#/library/${p.id}`} style={{ gridTemplateColumns: "1fr auto" }}>
-                <div>
-                  <div className="name">{p.name}</div>
-                  <div className="desc">点开后上传扫描件</div>
-                </div>
-                <span className="chip gray">分类</span>
-              </a>
-            ))}
+          <Pane empty={folders.length === 0} emptyTitle="还没有分类">
+            <NameTable
+              nameHeader="分类"
+              rows={folders.map((p) => ({
+                key: p.id,
+                href: `/library/${p.id}`,
+                name: p.name,
+                badge: "分类",
+              }))}
+            />
           </Pane>
         )}
         {route.kind === "lines" && (
-          <Pane
-            title="产品线"
-            note="产品线只是分类。型号、手册和版本挂在线下面，不要把招标文件丢进来。"
-            empty={lines.length === 0}
-            emptyTitle="还没有产品线"
-            action="新建产品线"
-            onAction={() => setCreate({ kind: "line" })}
-          >
-            {lines.map((l) => (
-              <a key={l.id} className="item" href={`#/products/${l.id}`} style={{ gridTemplateColumns: "1fr auto" }}>
-                <div>
-                  <div className="name">{l.name}</div>
-                  <div className="desc">{(productsByLine[l.id] ?? []).length} 个产品</div>
-                </div>
-                <span className="chip gray">产品线</span>
-              </a>
-            ))}
+          <Pane empty={lines.length === 0} emptyTitle="还没有产品线">
+            <NameTable
+              nameHeader="产品线"
+              rows={lines.map((l) => ({
+                key: l.id,
+                href: `/products/${l.id}`,
+                name: l.name,
+                badge: "产品线",
+              }))}
+            />
           </Pane>
         )}
         {route.kind === "line" && line && (
-          <Pane
-            title={line.name}
-            note="在这条线下建产品，再给产品建版本、传手册。"
-            empty={(productsByLine[line.id] ?? []).length === 0}
-            emptyTitle="还没有产品"
-            action="新建产品"
-            onAction={() => setCreate({ kind: "product", parentId: line.id })}
-          >
-            {(productsByLine[line.id] ?? []).map((p) => (
-              <a key={p.id} className="item" href={`#/products/${line.id}/${p.id}`} style={{ gridTemplateColumns: "1fr auto" }}>
-                <div>
-                  <div className="name">{p.name}</div>
-                  <div className="desc">点开看版本</div>
-                </div>
-                <span className="chip gray">产品</span>
-              </a>
-            ))}
+          <Pane empty={(productsByLine[line.id] ?? []).length === 0} emptyTitle="还没有产品">
+            <NameTable
+              nameHeader="产品"
+              rows={(productsByLine[line.id] ?? []).map((p) => ({
+                key: p.id,
+                href: `/products/${line.id}/${p.id}`,
+                name: p.name,
+                badge: "产品",
+              }))}
+            />
           </Pane>
         )}
         {(route.kind === "product" || (route.kind === "folder" && !route.versionId && versions.length !== 1)) && (
-          <Pane
-            title="版本"
-            note={route.kind === "folder" ? "换证可以开新版本。当前版本才进商务检索。" : "发版开新版本。匹配默认打当前版本。"}
-            empty={versions.length === 0}
-            emptyTitle="还没有版本"
-            action="新建版本"
-            onAction={() => setCreate({ kind: "version", parentId: selectedProductId ?? undefined })}
-          >
-            {versions.map((v) => (
-              <a
-                key={v.id}
-                className="item"
-                href={`#${route.kind === "folder" ? `/library/${route.folderId}/${v.id}` : `/products/${route.lineId}/${route.productId}/${v.id}`}`}
-                style={{ gridTemplateColumns: "1fr auto" }}
-              >
-                <div>
-                  <div className="name">{v.label}</div>
-                  <div className="desc">{v.status}</div>
-                </div>
-                {v.current ? (
-                  <span className="chip pine">
-                    <i className="dot" />
-                    当前
-                  </span>
-                ) : (
-                  <span className="chip gray">版本</span>
-                )}
-              </a>
-            ))}
+          <Pane empty={versions.length === 0} emptyTitle="还没有版本">
+            <NameTable
+              nameHeader="版本"
+              rows={versions.map((v) => ({
+                key: v.id,
+                href: route.kind === "folder" ? `/library/${route.folderId}/${v.id}` : `/products/${route.lineId}/${route.productId}/${v.id}`,
+                name: v.label,
+                badge: v.current ? "当前" : "版本",
+                badgeColor: v.current ? "go" : "gray",
+              }))}
+            />
           </Pane>
         )}
         {route.kind === "doc" && version?.id ? (
           <DocumentDetail docId={route.docId} backHref={assetVersionHref(route, version.id)} />
         ) : null}
-        {(route.kind === "version" || (route.kind === "folder" && (route.versionId || versions.length <= 1))) && (
+        {(route.kind === "version" || (route.kind === "folder" && Boolean(version))) && (
           <>
-            <Dropzone
+            <div
               id="asset-drop"
               className="drop"
-              multiple
-              onDrop={(files) => {
-                void upload(files).catch((e) => toast(e instanceof Error ? e.message : "上传失败", "red"));
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                void upload(Array.from(e.dataTransfer.files)).catch((err) =>
+                  notify(err instanceof Error ? err.message : "上传失败", true),
+                );
               }}
+              onClick={() => document.getElementById("asset-file")?.click()}
             >
-              <b>{route.kind === "folder" || folder ? "把证、案例、服务扫描件拖到这里" : "把手册或界面图拖到这里"}</b>
-              {route.kind === "folder" || folder
-                ? "只进公司资料。可检索之后才会被商务条款打到。"
-                : "手册进这个版本。招标文件不要放这里。"}
-            </Dropzone>
-            <div className="card pad-0">
+              <div className={docs.length === 0 ? "flex items-center justify-center gap-3 py-7" : "flex items-center justify-center gap-3 py-2"}>
+                <span className="grid h-10 w-10 place-items-center rounded-md bg-sky-wash text-sky">
+                  <IconCloudUpload size={22} />
+                </span>
+                <div className="font-semibold">把文件拖到这里</div>
+              </div>
+              <input
+                id="asset-file"
+                type="file"
+                multiple
+                hidden
+                onChange={(e) => {
+                  const list = e.target.files;
+                  if (list?.length) void upload(Array.from(list)).catch((err) => notify(err instanceof Error ? err.message : "上传失败", true));
+                  e.target.value = "";
+                }}
+              />
+            </div>
+            <div className="panel">
               {docs.length === 0 ? (
                 <div className="empty">
-                  <h2>这个版本还是空的</h2>
-                  <p className="note">拖入文件，等可检索后再回评估里确认或勾选。</p>
+                  <h2>还没有文件</h2>
                 </div>
               ) : (
-                docs.map((d) => (
-                  <a
-                    key={d.id || d.file_name}
-                    className="item"
-                    href={version?.id ? `#${assetDocHref(route, version.id, d.id)}` : undefined}
-                    style={{ gridTemplateColumns: "1fr auto" }}
-                  >
-                    <div>
-                      <div className="name">{d.file_name || d.title}</div>
-                      <div className="desc">{d.error_message || version?.label || "点开看原件和分片"}</div>
-                    </div>
-                    {d.error_message && /ocr_error|caption_error|vlm not configured/i.test(d.error_message) ? (
-                      <span className="chip rose">
-                        <i className="dot" />
-                        图像失败
-                      </span>
-                    ) : d.index_ready ? (
-                      <span className="chip pine">
-                        <i className="dot" />
-                        可检索
-                      </span>
-                    ) : (
-                      <span className="chip amber">
-                        <i className="dot" />
-                        {parseStatus(d.parse_status) || "解析中"}
-                      </span>
-                    )}
-                  </a>
-                ))
+                <NameTable
+                  nameHeader="文件"
+                  rows={docs.map((d) => {
+                    const failed = d.error_message && /ocr_error|caption_error|vlm not configured/i.test(d.error_message);
+                    return {
+                      key: d.id || d.file_name,
+                      href: version?.id ? assetDocHref(route, version.id, d.id) : undefined,
+                      name: d.file_name || d.title,
+                      desc: d.error_message || undefined,
+                      badge: failed ? "图像失败" : d.index_ready ? "可检索" : parseStatus(d.parse_status) || "解析中",
+                      badgeColor: failed ? "stop" : d.index_ready ? "go" : "wait",
+                    };
+                  })}
+                />
               )}
             </div>
           </>
         )}
       </div>
-      <Modal
-        opened={!!create}
-        onClose={() => setCreate(null)}
-        title={
-          create?.kind === "folder"
-            ? "新建分类"
-            : create?.kind === "line"
-              ? "新建产品线"
-              : create?.kind === "product"
-                ? "新建产品"
-                : "新建版本"
-        }
-        radius={16}
-      >
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            void submitCreate();
-          }}
+      <Dialog open={!!create} onOpenChange={(open) => { if (!open) setCreate(null); }}>
+        <DialogContent
+          title={
+            create?.kind === "folder"
+              ? "新建分类"
+              : create?.kind === "line"
+                ? "新建产品线"
+                : create?.kind === "product"
+                  ? "新建产品"
+                  : "新建版本"
+          }
         >
-          <label className="fld">名称</label>
-          <input className="inp" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
-          <div className="row" style={{ justifyContent: "flex-end", marginTop: 20 }}>
-            <button className="btn" type="button" onClick={() => setCreate(null)}>
-              取消
-            </button>
-            <button className="btn pri" type="submit">
-              建立
-            </button>
-          </div>
-        </form>
-      </Modal>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void submitCreate();
+            }}
+          >
+            <Label htmlFor="asset-name">名称</Label>
+            <Input
+              id="asset-name"
+              value={name}
+              onChange={(e) => setName(e.currentTarget.value)}
+              autoFocus
+            />
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="outline" type="button" onClick={() => setCreate(null)}>
+                取消
+              </Button>
+              <Button type="submit">建立</Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
     </Shell>
   );
 }
 
 function Pane({
-  title,
-  note,
   empty,
   emptyTitle,
-  action,
-  onAction,
   children,
 }: {
-  title: string;
-  note: string;
   empty: boolean;
   emptyTitle: string;
-  action: string;
-  onAction: () => void;
   children: ReactNode;
 }) {
   return (
-    <div className="card pad-0">
-      <div className="group-h">
-        <span>{title}</span>
-        <button className="btn sm" type="button" onClick={onAction}>
-          {action}
-        </button>
-      </div>
-      <p className="note" style={{ margin: "0 18px 12px" }}>
-        {note}
-      </p>
+    <div className="panel">
       {empty ? (
         <div className="empty">
           <h2>{emptyTitle}</h2>
-          <button className="btn pri" type="button" onClick={onAction}>
-            {action}
-          </button>
         </div>
       ) : (
         children
       )}
     </div>
+  );
+}
+
+function NameTable({
+  nameHeader,
+  rows,
+}: {
+  nameHeader: string;
+  rows: { key: string; href?: string; name: string; desc?: string; badge: string; badgeColor?: "sky" | "gray" | "go" | "wait" | "stop" }[];
+}) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>{nameHeader}</TableHead>
+          <TableHead className="w-[88px]">状态</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {rows.map((row) => (
+          <TableRow
+            key={row.key}
+            className={row.href ? "cursor-pointer" : undefined}
+            onClick={row.href ? () => go(row.href as string) : undefined}
+          >
+            <TableCell>
+              <div className="font-semibold">{row.name}</div>
+              {row.desc ? <div className="text-sm text-quiet">{row.desc}</div> : null}
+            </TableCell>
+            <TableCell>
+              <Badge tone={row.badgeColor ?? "gray"}>{row.badge}</Badge>
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
   );
 }
 

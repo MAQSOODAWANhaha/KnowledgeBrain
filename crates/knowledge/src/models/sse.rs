@@ -3,20 +3,46 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChatToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChatTurn {
     pub content: String,
     pub tool_calls: Vec<ChatToolCall>,
     pub finish_reason: String,
+    pub usage: Option<ChatUsage>,
+}
+
+/// Provider-reported counts. Missing values stay unknown; cache/reasoning counts
+/// are subsets of prompt/completion counts and must not be added to them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatUsage {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+}
+
+fn usage(value: &Value) -> Option<ChatUsage> {
+    value.is_object().then(|| ChatUsage {
+        prompt_tokens: value["prompt_tokens"].as_u64(),
+        completion_tokens: value["completion_tokens"].as_u64(),
+        total_tokens: value["total_tokens"].as_u64(),
+        cached_tokens: value["prompt_tokens_details"]["cached_tokens"].as_u64(),
+        reasoning_tokens: value["completion_tokens_details"]["reasoning_tokens"].as_u64(),
+    })
 }
 
 pub fn looks_like_sse(body: &str) -> bool {
@@ -132,6 +158,10 @@ fn apply_sse_data(
 ) -> Result<(), String> {
     let v: Value = serde_json::from_str(data)
         .map_err(|e| format!("sse chat json: {e}: {}", truncate(data, 180)))?;
+    if let Some(usage) = usage(&v["usage"]) {
+        // Streaming counts are cumulative snapshots, not increments per event.
+        turn.usage = Some(usage);
+    }
     if let Some(reason) = v["choices"][0]["finish_reason"].as_str() {
         turn.finish_reason = reason.to_owned();
     }
@@ -182,6 +212,7 @@ fn apply_sse_data(
 
 fn unary_turn(v: &Value) -> Result<ChatTurn, String> {
     let mut turn = ChatTurn {
+        usage: usage(&v["usage"]),
         content: v["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or("")
@@ -236,6 +267,46 @@ pub(crate) fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_usage_survives_empty_choices_without_double_counting() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"read_source\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5}}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_tokens_details\":{\"cached_tokens\":60},\"completion_tokens_details\":{\"reasoning_tokens\":4}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let turn = collect_chat_turn(body).unwrap();
+        assert_eq!(turn.finish_reason, "tool_calls");
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(
+            turn.usage,
+            Some(ChatUsage {
+                prompt_tokens: Some(100),
+                completion_tokens: Some(10),
+                total_tokens: Some(110),
+                cached_tokens: Some(60),
+                reasoning_tokens: Some(4),
+            })
+        );
+        assert_eq!(consume_sse_read(&mut body.as_bytes()).unwrap(), turn);
+    }
+
+    #[test]
+    fn missing_usage_remains_unknown_and_unary_counts_are_preserved() {
+        let body = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#;
+        assert_eq!(collect_chat_turn(body).unwrap().usage, None);
+        let mut value: Value = serde_json::from_str(body).unwrap();
+        value["usage"] = serde_json::json!({"prompt_tokens":0,"completion_tokens":2});
+        let counts = collect_chat_turn(&value.to_string())
+            .unwrap()
+            .usage
+            .unwrap();
+        assert_eq!(counts.prompt_tokens, Some(0));
+        assert_eq!(counts.completion_tokens, Some(2));
+        assert_eq!(counts.cached_tokens, None);
+        assert_eq!(counts.reasoning_tokens, None);
+        assert_eq!(counts.total_tokens, None);
+    }
 
     #[test]
     fn chat_sse_keeps_content_drops_reasoning() {

@@ -420,7 +420,7 @@ pub async fn list_documents_in_version(
                 WHERE dt.document_id = documents.id AND dt.tag_id = $4
              )
            )
-         ORDER BY created_at DESC",
+         ORDER BY updated_at DESC",
     )
     .bind(version_id)
     .bind(parse_status)
@@ -1284,6 +1284,14 @@ pub struct NewDocument<'a> {
     pub object_ref: &'a str,
 }
 
+pub struct NewIngestDocument<'a> {
+    pub document: NewDocument<'a>,
+    pub doc_type: &'a str,
+    pub source_passages: &'a [String],
+    pub process_overrides: Option<&'a crate::ProcessOverrides>,
+    pub tag_ids: &'a [Uuid],
+}
+
 pub async fn insert_tag(
     pool: &PgPool,
     id: Uuid,
@@ -1334,49 +1342,6 @@ pub async fn replace_document_tags(
     insert_document_tags(pool, document_id, tag_ids).await
 }
 
-pub async fn insert_dead_letter(
-    pool: &PgPool,
-    task_type: &str,
-    related_id: Uuid,
-    last_error: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO task_dead_letters (id, task_type, scope, related_id, last_error)
-         VALUES ($1,$2,'document',$3,$4)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(task_type)
-    .bind(related_id)
-    .bind(last_error)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-pub async fn list_dead_letters(pool: &PgPool) -> Result<Vec<crate::DeadLetter>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT task_type, COALESCE(related_id, '00000000-0000-0000-0000-000000000000'::uuid), last_error
-         FROM task_dead_letters ORDER BY failed_at DESC LIMIT 200",
-    )
-    .fetch_all(pool)
-    .await?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(crate::DeadLetter {
-            task_type: r.try_get(0)?,
-            related_id: r.try_get(1)?,
-            last_error: r.try_get(2).unwrap_or_default(),
-        });
-    }
-    Ok(out)
-}
-
-pub async fn count_dead_letters(pool: &PgPool) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("SELECT COUNT(*) FROM task_dead_letters")
-        .fetch_one(pool)
-        .await
-}
-
 pub async fn version_exists(pool: &PgPool, version_id: Uuid) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM product_versions WHERE id = $1 AND deleted_at IS NULL)",
@@ -1384,6 +1349,13 @@ pub async fn version_exists(pool: &PgPool, version_id: Uuid) -> Result<bool, sql
     .bind(version_id)
     .fetch_one(pool)
     .await
+}
+
+pub async fn document_tag_ids(pool: &PgPool, document_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar("SELECT tag_id FROM document_tags WHERE document_id=$1 ORDER BY tag_id")
+        .bind(document_id)
+        .fetch_all(pool)
+        .await
 }
 
 pub async fn find_duplicate_document(
@@ -1428,6 +1400,69 @@ pub async fn delete_image_chunks(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn insert_ingest_document(
+    pool: &PgPool,
+    input: NewIngestDocument<'_>,
+) -> Result<(), sqlx::Error> {
+    let NewIngestDocument {
+        document: doc,
+        doc_type,
+        source_passages,
+        process_overrides,
+        tag_ids,
+    } = input;
+    let source_passages = if source_passages.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!(source_passages)
+    };
+    let process_overrides = process_overrides
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO documents (
+            id, product_version_id, title, parse_status, enable_status,
+            file_name, file_size, file_hash, object_ref, type,
+            source_passages, process_overrides
+         ) VALUES ($1,$2,$3,'pending','disabled',$4,$5,$6,$7,$8,$9,$10)",
+    )
+    .bind(doc.id)
+    .bind(doc.product_version_id)
+    .bind(doc.title)
+    .bind(doc.file_name)
+    .bind(doc.file_size)
+    .bind(doc.file_hash)
+    .bind(doc.object_ref)
+    .bind(doc_type)
+    .bind(source_passages)
+    .bind(process_overrides)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query_scalar::<_, String>(
+        "SELECT kb_register_knowledge_document_object(
+            $1,'application/octet-stream',$2::kb_actor_identity,$3,$4)",
+    )
+    .bind(doc.id)
+    .bind("system:knowledge-document-ingest")
+    .bind(format!("knowledge-document:{}", doc.id))
+    .bind(Uuid::new_v4())
+    .fetch_one(&mut *tx)
+    .await?;
+    for tag_id in tag_ids {
+        sqlx::query(
+            "INSERT INTO document_tags (document_id,tag_id) VALUES ($1,$2)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(doc.id)
+        .bind(tag_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await
 }
 
 pub async fn insert_document(pool: &PgPool, doc: NewDocument<'_>) -> Result<(), sqlx::Error> {
@@ -2217,20 +2252,24 @@ pub async fn list_spans_attempt(
     Ok(out)
 }
 
-pub async fn mark_reparse_queued(pool: &PgPool, document_id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query(
+pub async fn mark_reparse_queued(pool: &PgPool, document_id: Uuid) -> Result<i32, sqlx::Error> {
+    sqlx::query_scalar(
         "UPDATE documents SET
+            attempt = CASE
+                WHEN parse_status='pending' AND enable_status='disabled' THEN attempt
+                ELSE attempt+1
+            END,
             parse_status = 'pending',
             enable_status = 'disabled',
             pending_subtasks_count = 0,
             error_message = '',
             updated_at = now()
-         WHERE id = $1",
+         WHERE id = $1
+         RETURNING attempt",
     )
     .bind(document_id)
-    .execute(pool)
-    .await?;
-    Ok(())
+    .fetch_one(pool)
+    .await
 }
 
 pub async fn delete_product(pool: &PgPool, product_id: Uuid) -> Result<(), PersistError> {
@@ -2573,143 +2612,6 @@ pub async fn housekeep_documents(pool: &PgPool, stale_secs: i64) -> Result<u64, 
     Ok(ids.len() as u64)
 }
 
-#[derive(Debug, Clone)]
-pub struct PendingOp {
-    pub id: Uuid,
-    pub task_type: String,
-    pub scope_id: Uuid,
-    pub op: String,
-    pub dedup_key: Option<String>,
-    pub payload: serde_json::Value,
-    pub fail_count: i32,
-}
-
-pub async fn enqueue_pending_op(
-    pool: &PgPool,
-    task_type: &str,
-    scope_id: Uuid,
-    op: &str,
-    dedup_key: Option<&str>,
-    payload: serde_json::Value,
-) -> Result<Uuid, sqlx::Error> {
-    if let Some(key) = dedup_key {
-        sqlx::query(
-            "DELETE FROM task_pending_ops
-             WHERE task_type = $1 AND scope_id = $2 AND op = $3 AND dedup_key = $4
-               AND claimed_at IS NULL",
-        )
-        .bind(task_type)
-        .bind(scope_id)
-        .bind(op)
-        .bind(key)
-        .execute(pool)
-        .await?;
-    }
-    let id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO task_pending_ops
-            (id, task_type, scope, scope_id, op, dedup_key, payload)
-         VALUES ($1, $2, 'product_version', $3, $4, $5, $6)",
-    )
-    .bind(id)
-    .bind(task_type)
-    .bind(scope_id)
-    .bind(op)
-    .bind(dedup_key)
-    .bind(payload)
-    .execute(pool)
-    .await?;
-    Ok(id)
-}
-
-pub async fn claim_pending_batch(
-    pool: &PgPool,
-    task_type: &str,
-    scope_id: Uuid,
-    limit: i64,
-    stale_minutes: i64,
-) -> Result<Vec<PendingOp>, sqlx::Error> {
-    let rows = sqlx::query(
-        "UPDATE task_pending_ops SET claimed_at = now()
-         WHERE id IN (
-            SELECT id FROM task_pending_ops
-            WHERE task_type = $1 AND scope_id = $2
-              AND (claimed_at IS NULL
-                   OR claimed_at < now() - make_interval(mins => $3::int))
-            ORDER BY enqueued_at
-            LIMIT $4
-            FOR UPDATE SKIP LOCKED
-         )
-         RETURNING id, task_type, scope_id, op, dedup_key, COALESCE(payload, '{}'::jsonb) AS payload, fail_count",
-    )
-    .bind(task_type)
-    .bind(scope_id)
-    .bind(stale_minutes as i32)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(PendingOp {
-            id: r.try_get("id")?,
-            task_type: r.try_get("task_type")?,
-            scope_id: r.try_get("scope_id")?,
-            op: r.try_get("op")?,
-            dedup_key: r.try_get("dedup_key")?,
-            payload: r.try_get("payload")?,
-            fail_count: r.try_get("fail_count")?,
-        });
-    }
-    Ok(out)
-}
-
-pub async fn drop_pending_ops(
-    pool: &PgPool,
-    task_type: &str,
-    scope_id: Uuid,
-) -> Result<u64, sqlx::Error> {
-    let n = sqlx::query("DELETE FROM task_pending_ops WHERE task_type = $1 AND scope_id = $2")
-        .bind(task_type)
-        .bind(scope_id)
-        .execute(pool)
-        .await?
-        .rows_affected();
-    Ok(n)
-}
-
-pub async fn delete_pending_ids(pool: &PgPool, ids: &[Uuid]) -> Result<u64, sqlx::Error> {
-    if ids.is_empty() {
-        return Ok(0);
-    }
-    let n = sqlx::query("DELETE FROM task_pending_ops WHERE id = ANY($1)")
-        .bind(ids)
-        .execute(pool)
-        .await?
-        .rows_affected();
-    Ok(n)
-}
-
-pub async fn unclaim_pending_ids(pool: &PgPool, ids: &[Uuid]) -> Result<u64, sqlx::Error> {
-    if ids.is_empty() {
-        return Ok(0);
-    }
-    let n = sqlx::query("UPDATE task_pending_ops SET claimed_at = NULL WHERE id = ANY($1)")
-        .bind(ids)
-        .execute(pool)
-        .await?
-        .rows_affected();
-    Ok(n)
-}
-
-pub async fn retry_pending_op(pool: &PgPool, id: Uuid, fail_count: i32) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE task_pending_ops SET claimed_at = NULL, fail_count = $2 WHERE id = $1")
-        .bind(id)
-        .bind(fail_count)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
 pub async fn replace_wiki_page_chunks(
     pool: &PgPool,
     version_id: Uuid,
@@ -2732,35 +2634,134 @@ pub async fn replace_wiki_page_chunks(
     append_document_chunks(pool, chunks, embeddings).await
 }
 
-pub async fn pending_op_counts(
+#[allow(clippy::too_many_arguments)]
+pub async fn persist_wiki_changes_atomic(
     pool: &PgPool,
-) -> Result<std::collections::HashMap<String, i64>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT task_type, COUNT(*)::bigint AS n FROM task_pending_ops GROUP BY task_type",
-    )
-    .fetch_all(pool)
-    .await?;
-    let mut out = std::collections::HashMap::new();
-    for r in rows {
-        let t: String = r.try_get("task_type")?;
-        let n: i64 = r.try_get("n")?;
-        out.insert(t, n);
+    version_id: Uuid,
+    pages: &[crate::WikiPage],
+    removed_page_ids: &[Uuid],
+    folders: &[crate::WikiFolder],
+    removed_folder_ids: &[Uuid],
+    changed_slugs: &[String],
+    chunks: &[crate::Chunk],
+    embeddings: &[crate::ChunkEmbedding],
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    if !removed_page_ids.is_empty() {
+        sqlx::query("DELETE FROM wiki_pages WHERE product_version_id=$1 AND id=ANY($2::uuid[])")
+            .bind(version_id)
+            .bind(removed_page_ids)
+            .execute(&mut *tx)
+            .await?;
     }
-    Ok(out)
-}
-
-pub async fn count_pending(
-    pool: &PgPool,
-    task_type: &str,
-    scope_id: Uuid,
-) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT COUNT(*) FROM task_pending_ops WHERE task_type = $1 AND scope_id = $2",
-    )
-    .bind(task_type)
-    .bind(scope_id)
-    .fetch_one(pool)
-    .await
+    for folder in folders {
+        sqlx::query(
+            "INSERT INTO wiki_folders
+                (id,product_version_id,parent_id,name,path,depth,sort_order)
+             VALUES($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT(id) DO UPDATE SET parent_id=EXCLUDED.parent_id,name=EXCLUDED.name,
+               path=EXCLUDED.path,depth=EXCLUDED.depth,sort_order=EXCLUDED.sort_order,
+               updated_at=clock_timestamp(),deleted_at=NULL",
+        )
+        .bind(folder.id)
+        .bind(folder.product_version_id)
+        .bind(folder.parent_id)
+        .bind(&folder.name)
+        .bind(&folder.path)
+        .bind(folder.depth)
+        .bind(folder.sort_order)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for page in pages {
+        let source_refs = page
+            .source_refs
+            .iter()
+            .map(Uuid::to_string)
+            .collect::<Vec<_>>();
+        sqlx::query(
+            "INSERT INTO wiki_pages
+              (id,product_version_id,slug,title,content,page_type,status,summary,aliases,
+               source_refs,chunk_refs,category_path,folder_id)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             ON CONFLICT(product_version_id,slug) DO UPDATE SET title=EXCLUDED.title,
+               content=EXCLUDED.content,page_type=EXCLUDED.page_type,status=EXCLUDED.status,
+               summary=EXCLUDED.summary,aliases=EXCLUDED.aliases,source_refs=EXCLUDED.source_refs,
+               chunk_refs=EXCLUDED.chunk_refs,category_path=EXCLUDED.category_path,
+               folder_id=EXCLUDED.folder_id,updated_at=clock_timestamp(),deleted_at=NULL",
+        )
+        .bind(page.id)
+        .bind(page.product_version_id)
+        .bind(&page.slug)
+        .bind(&page.title)
+        .bind(&page.content)
+        .bind(&page.page_type)
+        .bind(&page.status)
+        .bind(&page.summary)
+        .bind(serde_json::json!(page.aliases))
+        .bind(serde_json::json!(source_refs))
+        .bind(serde_json::json!(
+            page.chunk_refs
+                .iter()
+                .map(Uuid::to_string)
+                .collect::<Vec<_>>()
+        ))
+        .bind(serde_json::json!(page.category_path))
+        .bind(page.folder_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if !removed_folder_ids.is_empty() {
+        sqlx::query("DELETE FROM wiki_folders WHERE product_version_id=$1 AND id=ANY($2::uuid[])")
+            .bind(version_id)
+            .bind(removed_folder_ids)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if !changed_slugs.is_empty() {
+        sqlx::query(
+            "DELETE FROM chunks WHERE product_version_id=$1 AND chunk_type='wiki_page'
+               AND context_header=ANY($2::text[])",
+        )
+        .bind(version_id)
+        .bind(changed_slugs)
+        .execute(&mut *tx)
+        .await?;
+    }
+    for chunk in chunks {
+        sqlx::query(
+            "INSERT INTO chunks(id,product_version_id,document_id,chunk_type,content,
+               context_header,start_at,end_at,parent_chunk_id,generated_questions)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+        )
+        .bind(chunk.id)
+        .bind(chunk.product_version_id)
+        .bind(chunk.document_id)
+        .bind(&chunk.chunk_type)
+        .bind(&chunk.content)
+        .bind(&chunk.context_header)
+        .bind(chunk.start_at)
+        .bind(chunk.end_at)
+        .bind(chunk.parent_chunk_id)
+        .bind(serde_json::json!(chunk.generated_questions))
+        .execute(&mut *tx)
+        .await?;
+    }
+    for embedding in embeddings {
+        let vector = vector_literal(&embedding.vector);
+        sqlx::query(
+            "INSERT INTO chunk_embeddings(chunk_id,product_version_id,document_id,embedding,tsv,content)
+             VALUES($1,$2,$3,CAST($4 AS vector),to_tsvector('simple',$5),$5)",
+        )
+        .bind(embedding.chunk_id)
+        .bind(embedding.product_version_id)
+        .bind(embedding.document_id)
+        .bind(vector)
+        .bind(&embedding.content)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await
 }
 
 pub async fn version_multimodal_enabled(
@@ -2843,15 +2844,9 @@ pub async fn purge_document_index(pool: &PgPool, document_id: Uuid) -> Result<()
 pub async fn upsert_wiki_page(
     pool: &PgPool,
     page: &crate::WikiPage,
-    source_document_id: Option<Uuid>,
+    _source_document_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
-    let mut refs: Vec<String> = page.source_refs.iter().map(|id| id.to_string()).collect();
-    if let Some(id) = source_document_id {
-        let s = id.to_string();
-        if !refs.contains(&s) {
-            refs.push(s);
-        }
-    }
+    let refs: Vec<String> = page.source_refs.iter().map(|id| id.to_string()).collect();
     sqlx::query(
         "INSERT INTO wiki_pages
             (id, product_version_id, slug, title, content, page_type, status,
@@ -3108,25 +3103,6 @@ pub async fn append_document_chunks(
         .await?;
     }
     tx.commit().await
-}
-
-pub async fn delete_wiki_for_document(
-    pool: &PgPool,
-    version_id: Uuid,
-    document_id: Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM chunks WHERE document_id = $1 AND chunk_type = 'wiki_page'")
-        .bind(document_id)
-        .execute(pool)
-        .await?;
-    sqlx::query(
-        "DELETE FROM wiki_pages WHERE product_version_id = $1 AND source_refs @> jsonb_build_array($2::text)",
-    )
-    .bind(version_id)
-    .bind(document_id.to_string())
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
 pub async fn list_wiki_folders(

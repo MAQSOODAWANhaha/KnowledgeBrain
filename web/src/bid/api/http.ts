@@ -36,6 +36,7 @@ function readError(status: number, data: unknown, fallback: string): ApiError {
               request_artifact_id?: string;
               request_revision?: number;
               frozen_input_sha256?: string;
+              request_sha256?: string;
               retry_same_idempotency_key?: boolean;
             };
           };
@@ -54,6 +55,7 @@ function readError(status: number, data: unknown, fallback: string): ApiError {
       request_artifact_id: requestArtifactId,
       request_revision: obj?.error?.details?.request_revision,
       frozen_input_sha256: obj?.error?.details?.frozen_input_sha256,
+      request_sha256: obj?.error?.details?.request_sha256,
       retry_same_idempotency_key:
         obj?.error?.details?.retry_same_idempotency_key === true,
     };

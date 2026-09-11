@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "codes": [
+    {
+      "code": "TENDER_DOCUMENT_PROCESS_TIMEOUT",
+      "scope": "TenderDocumentProcess handler",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_terminal"
+      },
+      "api": {
+        "kind": "async_failed",
+        "post_http_status": null,
+        "get_http_status": 200,
+        "request_get_status": "failed"
+      }
+    },
+    {
+      "code": "REQUIREMENT_COMPILE_TIMEOUT",
+      "scope": "RequirementSetCompile handler",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_terminal"
+      },
+      "api": {
+        "kind": "async_failed",
+        "post_http_status": null,
+        "get_http_status": 200,
+        "request_get_status": "failed"
+      }
+    },
+    {
+      "code": "SUBMISSION_EXPORT_TIMEOUT",
+      "scope": "SubmissionExport handler",
+      "retry": {
+        "kind": "none",
+        "max_physical_calls": null
+      },
+      "persistence": {
+        "kind": "request_terminal"
+      },
+      "api": {
+        "kind": "async_failed",
+        "post_http_status": null,
+        "get_http_status": 200,
+        "request_get_status": "failed"
+      }
+    }
+  ]
+}

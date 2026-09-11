@@ -1,845 +1,100 @@
-# 招标文件驱动的投标文件编制工作区
+# 招投标编制：领域边界与可复用约束
 
-| 项 | 值 |
-| --- | --- |
-| 状态 | **已确认目标契约与 Web 编制交互，尚不代表代码已实现** |
-| 版本 | Target V2 |
-| 部署 | 同一个库；前期 schema 跟功能走 |
-| 核心原则 | 用户拥有最终编辑与导出决定权；系统只生成建议、提示风险 |
+> 方案已确认，普通实施与隔离开发验证已授权；任务状态及授权边界见[实施台账](../../plans/implementation-tasks.md)，不代表已经实现或运行验收。业务清单由 [PRD](prd.md) 定义；正文编辑、保存及出件协议由 [ONLYOFFICE 契约](onlyoffice.md) 定义；编辑/出件顺序见 [ONLYOFFICE 计划](../../plans/bidding/onlyoffice-integration.md)，Agent 改造见 [Rig 方案](../../plans/bidding/agent-runtime-rig.md)。本文只定义来源、候选、证据、业务与平台的接缝，不另建编辑器或导出标准。
 
-本文是招投标权威产品、领域与 Web 交互定义。仓库架构见 [`../../plans/architecture.md`](../../plans/architecture.md)。实现见 [`../../plans/bidding/tender-to-submission-v2.md`](../../plans/bidding/tender-to-submission-v2.md) 与 [`../../plans/bidding/frontend-authoring.md`](../../plans/bidding/frontend-authoring.md)。
+## 1. 用户流程与领域所有权
 
-## 1. 最终目标
+用户入口固定为 **文件 / 编制 / 导出**（左栏挂在当前标下，不是顶栏大 Stepper；冻结是文件页动作）。解析、要求、结构规划、材料、报价和检查均在三步内部，不是确认后才能继续的一级向导。一个 BidProject 对应唯一 project-wide SubmissionWorkspace，维护各轮稿与历史输出，不新增包件、Org、多租户、成本/评标引擎、电子签章或自动递交。
 
-系统接受同一个招标项目的一份或多份 PDF、DOCX、XLSX、PNG、JPEG 或 WebP 文件，包括主招标文件、技术或商务附件、报价清单、合同、投标文件格式、澄清、修改和补遗文件，并完成：
+| 所有者 | 拥有的能力 | 跨域边界 |
+| --- | --- | --- |
+| 招投标 | 项目、招标文件集合、要求/表格规范、编制轮次、DOCX 文件版本、候选、证据采用、报价、检查和输出记录 | 不把招标文件或本标人补材料写进知识库 |
+| 知识库 | Workspace、Product/ProductVersion、Document、解析、索引与检索 | 唯一 [KnowledgeRetrievalPortV3](../knowledge-base/domain.md)；招投标不直接 join 知识库表 |
+| 共享平台 | 认证、actor、CAS/幂等/audit基础、ObjectRegistry、队列、运行时与retention | [runtime-foundation](../../plans/platform/runtime-foundation.md) 与 [queue-runtime](../../plans/platform/queue-runtime.md) 各自拥有平台合同 |
+| ONLYOFFICE Docs | 真实 DOCX 在线编辑会话及转换 | 我方负责文件访问、持久化版本与权限；文档服务不是我方存储真源 |
 
-1. 独立解析每份文件，保留文件、页码、章节、表格行、单元格、图片OCR和表单区域来源；
-2. 建立带版本、适用范围和局部替代关系的要求台账；
-3. 根据招标文件明确组成、表格/表单结构、资格条件、技术商务要求和评分因素编译投标文件树形大纲；
-4. 允许用户在任何阶段新增、删除、改名、移动、拆分和合并大纲节点；
-5. 允许用户编辑文字、表格、结构化表单、图片、附件、分页和签章占位；
-6. AI 只生成大纲或内容候选，不直接覆盖人工内容；
-7. 系统持续提示遗漏、偏离、缺件、低置信度、评分损失和过期内容，但不替用户作最终决定；
-8. 用户可以在存在提示时继续确认、编辑和导出；
-9. 最终 DOCX/PDF 从不可变工作区快照渲染，并可回溯到招标文件、要求、大纲、内容和资产版本。
+现有 LDAP/本地口令认证保持，注册关闭；知识库 authenticated-global 不等于任何人可访问任意投标。项目沿用 owner 访问校验，负责人业务字段不能替代 ACL。API key 无法证明本标作用域时拒绝访问；每个文件读取、回调和下载还须校验项目、文件与用途，不另造权限产品。业务时间使用 `Asia/Shanghai`，存储转 UTC，接口时间带明确 offset。
 
-输入和输出严格分域：Tender Source只用于提取要求、生成大纲、构造响应表中的“招标要求”内容和结构；投标方正文、事实与图片只能来自知识库冻结证据、用户在当前Workspace人工输入/插入的资产、冻结`QuoteSnapshot`，以及基于这些来源生成的结构化内容。招标方文件中的图片或附件不得被Agent自动当作投标方证据插入输出。
+## 2. 来源、文件集合与要求
 
-系统不读取用户DOCX模板，也不把XLSX当作输出模板或浏览器编辑对象。Renderer使用系统拥有的版本化`RenderStyleContract`和固定可信Noto字体；用户只能通过受控`DocumentSettingsRevision`设置A4页边距、正文字号、行距、标题编号、页眉页脚和页码。系统根据大纲树、ContentBlock和这些全局设置生成DOCX/PDF，不提供字体registry、上传或任意字体配置。
+### 文件级复用与新轮整稿
 
-系统是辅助编制和风险提示工具，不是招标合规审批人，也不声称生成结果必然满足法律、评审或中标条件。
+- 同项目接收 PDF、DOCX、DOC、XLSX、XLS、XLSM、PNG、JPEG、WebP 招标源；按真实字节、容器结构或完整图片解码验证，不信扩展名/MIME。`.doc`/`.xls` 为 OLE 容器，不执行宏。XLSX/XLSM/XLS 用于抽取，不新增在线 Excel 编辑器。Word/Excel 冻结网格按[招标冻结网格方案](../../plans/knowledge-base/docreader-structured-parse.md)。无 Excel Table 的工作表按 used range 出 form。
+- 每份文件独立保存原件、摘要、转换/解析结果及处理身份；未变且有可用结果的文件复用，只处理新增、变更或无可用结果的文件。不拼接多份 Markdown 后丢失文件身份。
+- 当前集合汇总必须包含全部纳入文件及复用结果；pending、failed、unresolved 作为显式未参与/未解析项传递。部分失败不让已成功文件失效，不作业务编制或导出闸门。
+- 补遗、澄清、替代、撤回关系按原文与用户确认解释，保留适用范围、决定及历史；不以文件名、上传时间或“最后一个文件胜出”消除冲突。无法安全确定有效要求时保留待确认项。
+- 集合变化形成新轮汇总与整稿；旧稿、响应、检查和页码不自动沿用，不做旧稿局部影响分析、修补或自动合并。仅改投标正文不重跑源解析。
 
-## 2. 最高产品约束：用户主导
+### 来源身份与完整性
 
-### 2.1 永久允许的人工操作
+保留不可变 SourceUnit revision，覆盖章节、表格行、表单区域、附件区域和图片 OCR 区域。来源关联冻结项目、文档、转换结果及摘要；`SourceSpanV2`/`SourceUnitSpanV2` 的页/节/UTF-8 byte 区间、sheet/cell 或区域是定位器，不能单独冒充业务来源身份。人工改写保留历史 origin，但不能继续声称改后文字为原文逐字引用。
 
-任何业务阶段都允许用户：
+所选文件集合的每个 SourceUnit 在对应 disposition 集合恰好出现一次：requirement、non_requirement 或 unresolved；每条抽取要求至少绑定一个已知 SourceUnit revision。验证遗漏、重复、孤立来源和越界定位，未解决项不能因用户继续而消失。
 
-- 修改、删除或增加大纲节点；
-- 调整章节层级与顺序；
-- 拆分或合并章节；
-- 修改要求分类、适用范围和章节映射；
-- 修改 AI 生成的任何文字、表格或表单字段；
-- 插入、移动、替换或删除图片与附件；
-- 忽略系统提示并继续确认或导出。
+项目汇总产出公共数据、编制规则、要求台账、表格规范与待确认项。要求保留原文、来源、强制程度/评分属性、适用范围与响应需要；表格规范保留原行列、合并单元格、填写列和证明名称/页码要求。人员是独立数据与要求类型，不意味着固定目录之外必增专章。
 
-系统不得因为资格缺失、强制要求未覆盖、评分材料不足、内容过期或固定格式偏离而禁止用户继续业务操作。
+## 3. 初稿与 AI 候选
 
-### 2.2 Assessment，不使用业务阻断 Gate
+初稿结构遵循 PRD 的招标指定目录/组成/固定表优先规则；业务分类不是固定可见章节，不强制封面/目录/商务/技术/报价的通用骨架。标题与表格最终由 DOCX 承载，外部 Outline 只可规划或导航，不能覆盖用户改动。
 
-大纲与提交检查统一使用 Assessment：
+初稿/候选可复用结构化树、内容块及生成编译原语，但只单向生成新稿或提出定点候选。保留以下生成约束，不保留旧编辑模型的强制字段、整树 Accept 或独立正文重建协议：
 
-```text
-ready
-has_warnings
-has_critical_warnings
-```
+- 冻结当前完整来源集合、要求/规范、证据、报价（如使用）、生成基线、目标与 prompt/schema/model/compiler 身份；重试不得换成 live 输入。
+- 招标文本、知识内容及模板均按不可信数据封装，不能成为系统指令。模型只提出有界候选，不签发 UUID/权限/对象路径，不调用任意 URL、SQL 或私有编辑器协议。
+- 结构/表格校验保留来源范围、网格、合并与真实列宽；缺失或非法数据不得静默补成“已验证模板”。缺输入可提出空章和待确认项，不虚构投标事实。
+- 逐要求记录拟承载目标、未覆盖、忽略或待确认原因；用户可以修改或不采用，检查如实提示，不能把 mandatory 属性变成接受或导出业务锁。
+- AI 只由用户触发，支持按章、选定范围或空白/缺失内容生成候选；不在后台持续改稿。用户可部分接受或拒绝，人工内容始终保留。
+- 候选记录基线文件版本、新稿轮次、目标定位、支撑资料和决定；接受时再次校验当前编辑状态。并发/未保存编辑、版本或目标失效时保留人工稿并提示重新核对，不猜位置、不自动合并。
+- 接受命令与已持久化入稿是不同事实；定点写入后必须确认保存回调。重复决定重放首次结果，不反复插入；决定与落盘失败如实可查。
 
-不使用会阻止业务操作的 `PASS/BLOCK` 语义。
+生成请求、stage 与结果的不可变身份、事务发布、重复重放和副作用围栏继续复用。Oxana 管 transport，领域执行 token/lease 与调用账本约束外部业务副作用；拟接入的 Rig `AgentRun` 只管理模型多轮状态，物理调用预算不因执行 attempt 重置；具体时钟、lease、retry 与资源回收只见平台队列合同。旧 Map/Composition/Route 的具体 schema/固定骨架不是新 DOCX 目标的必需前置。
 
-- `OutlineAssessmentSnapshot` 描述大纲覆盖、来源、顺序、结构化表格/表单和未解决要求；
-- `SubmissionAssessmentSnapshot` 描述正文、表格、附件、报价、评分、偏离、stale 和格式问题；
-- 用户可以在任意 Assessment 状态下确认大纲或导出文件；
-- “用户选择继续”不得把未满足要求改写为 `covered` 或把 Assessment 改写为 `ready`。
+## 4. 证据、事实、拟议响应与报价
 
-### 2.3 技术失败仍然 fail-closed
+### 证据采用
 
-用户主导不等于允许系统生成损坏或不可重放的文件。以下属于技术失败，必须停止对应 mutation 或 render：
+知识库端口返回完整 eligible scope 与有界 hits，二者不能混淆；无命中明确 `NO_EVIDENCE`，不冒充没有可用版本。检索 policy/embedding/ranking、quota、limit 和 eligible scope 随生成输入冻结；重试保留原 identity。Unavailable 可按受控预算重试；quota、撤销/非法 policy、摘要不符、非法 request/hit 使用可区分错误，不静默换策略。当前 exact 检索不因文档清理启用 ANN 或外部向量库。
 
-- revision/CAS 冲突可能覆盖其他人工修改；
-- ContentBlock 不符合冻结 Schema；
-- 表格网格或合并单元格结构非法；
-- 图片、附件、字体或RenderStyle资产不存在或 digest 不匹配；
-- PDF 附件页面准备不完整；
-- renderer 失败或输出文件结构无效；
-- 数据库事务、对象提交或不可变快照发布失败。
+证据可由系统建议并随候选一起确认，也可由用户先选；匹配不是强制独立步骤。采用的文字 quote 保留连续 UTF-8 byte slice、digest、Document/ProductVersion 与冻结显示名；事实引用只能指向本次证据集合，禁止跨 bundle 伪造引用。
 
-业务风险只提示；无法正确执行的技术错误必须明确失败。
+`image_ocr` 文字本身不是可插入图片。图片必须经 knowledge-owned media mapping/attestation 返回稳定 artifact、ObjectRegistry 引用、摘要、媒体类型、尺寸和来源区域；招投标立即冻结自己的 EvidenceAsset 与对象引用，不通过 OCR 文本反查 live 图片。知识文档变化或删除不改写已冻结证据。媒体所有权细节见 [V3 专题](../../plans/knowledge-base/bidding-evidence-media-v3.md)。
 
-### 2.4 Web 编制面（已确认交互）
+招标图表可提供要求/空表结构，但招标图片附件不得自动作为我方证明。用户为本标插入的文字、证书和附件只属于本标，不自动写入长期知识库或建立检索索引。所需附件必须真实进入完整 DOCX，文件名、对象引用或准备状态不等于正文中已经提供。
 
-用户看见的**步导航**只有三步。能力上仍是上传 → 解析 → 生成大纲 → 知识库填充 → 导出，但解析、生成大纲、填充都落在「文件 / 编制」里。
+### 事实与拟议响应
+
+已有资质、业绩、人员经历和产品参数不得虚构。技术方案、实施安排、商务响应和报价可作为本标拟议草稿待确认，不要求每句方案都有现成证件或逐字知识引用；需要证明的事实另行匹配。缺材料、弱证据和待确认项进入检查，不删除用户人工内容，也不阻断编辑/导出。
+
+知识来源标识供 Web、审计和独立报告使用，不自动成为正式正文脚注。招标要求的证明材料、响应矩阵和评分索引仍按要求入稿，不能与内部知识来源混为一谈。
+
+### 报价与实际正文
+
+保留结构化 QuoteSnapshot 与人工正式价格确认。金额使用 CNY、Decimal/定点计算而非 JSON float，逐行舍入再求和；限价含税/未税口径明确，歧义必须人工核对，不能静默假定。报价新版本不覆盖历史快照。
+
+报价数据发布不等于 DOCX 改动；采用后按固定表把明细、税额、合计写入实际稿并保存。正文与结构化报价不一致时提示核对，不后台回写。缺报价/缺确认只提示，不让正式价格确认要求变成整本导出锁。报价与附件全部进入同一完整稿；系统不另出报价文件或附件包。
+
+## 5. 存储身份、保存与出件
+
+继续使用不可变对象、业务版本和 current pointer/CAS，不建设第二套通用版本平台。每份输出可追溯到：
 
 ```text
-上传招标文件 → 解析 → 生成大纲 → 从知识库填充内容 → 导出投标文件
-        文件               编制（同一张画布）              导出
+当前文件集合及解析身份 → 本轮要求/规范 → 编制轮次与生成/采用记录
+→ 已持久化 DOCX 对象、摘要与版本 → 冻结出件版本
+→ 同一文件的 DOCX/PDF 与独立检查报告
 ```
 
-1. **文件** — 上传，看解析状态；
-2. **编制** — 生成大纲、改树、填充、一直改；
-3. **导出** — 导出当前工作区稿；改完再导一份新文件。
+每次业务 mutation 校验 authenticated actor、幂等键和 payload hash；同键同输入重放首次 receipt，同键异输入冲突。相关业务写、版本/摘要、current pointer、audit 与 receipt 原子提交。CAS 冲突不能 last-write-wins；历史输出不得读 live 报价、知识、业务索引重建。
 
-**编制画布工具条**（编制步里面）才是：生成大纲 · 填充本章/全部空章 · 导出。不要和步导航都叫顶栏。
+ObjectRegistry 是对象身份/可用性/owner reference 的平台真源；业务引用不存临时 URL 充当身份。写入先 staging，再在业务事务提交最终引用；未提交资源按平台规则回收，业务代码不得直接删 blob。文件必须校验真实格式、大小、digest 与归属，技术损坏如实失败。
 
-不做匹配向导、报价向导。检查器「匹配资料」最多是编制内现查刷新。
+保存协议唯一见 [ONLYOFFICE §4](onlyoffice.md#4-最小接入职责)：session key、forcesave 请求、回调落盘和出件版本必须区分；重复、乱序、过期和旧轮不能回滚当前稿。PDF 只从同一已保存 DOCX 转换，不从结构化块另行重排。
 
-编制过程没有业务锁。填充时同一库现查资料；人接受后写入本章。导出读工作区快照，不回查 live 资料拼正文。
+检查针对实际输出与其冻结依赖，不因 Outline binding、QuoteSnapshot 或资产记录存在就算已覆盖。用户编辑造成关联失效时保留历史依据并提示重新核对，不能自动复制旧“已核验”结论。
 
-布局钉死为 Word 式三栏：左独立大纲、中连续画布（聚焦章 Tiptap，其余静态）、右当前章提示。章标题来自树，正文关闭 heading。`AuthoringStep` 只认 `files | authoring | export`。
+证明引用先锚定、真实排版后回填、保存再检查；无法稳定时清除或降级不确定数字并验证实际输出。完整工序及安全出口由 [PRD §3.3](prd.md#33-证明材料页码回填) 和 [ONLYOFFICE §7](onlyoffice.md#7-pdf页码与最终报告) 定义。业务风险不作闸门，保存/转换/结构损坏等技术失败不能伪成功。
 
-## 3. 范围与聚合
+## 6. 实现证据与未完成项
 
-### 3.1 同一项目的多份文件
+当前编制入口使用 DOCX，旧 Tiptap 编辑及大纲会话已删除。废弃设计和专用实现直接撤除；共享原语按实际消费者保留。旧大纲生成 SQL/注册与专用测试已撤除，执行保护的回归迁至招标提取 Agent；内容、证据及导出仍消费的块模型按实际接线跟踪，不能将旧 fixture 或阶段记录计为新链验收。定位见 [运行手册](backend-runbook.md)。
 
-所有输入文件都属于当前 `BidProject`，不做跨项目识别、匹配或合并：
-
-```text
-BidProject
-└── TenderDocumentSet
-    ├── primary_tender
-    ├── bid_format
-    ├── technical_specification
-    ├── commercial_requirement
-    ├── bill_of_quantities
-    ├── contract
-    ├── drawing
-    ├── clarification
-    ├── amendment
-    └── other_attachment
-```
-
-每份文件独立转换和解析。禁止把多份 Markdown 简单拼接后丢失来源身份。
-
-### 3.2 一个项目一个 Workspace、一份输出
-
-V1每个`BidProject`在创建时同时建立唯一的project-wide `SubmissionWorkspace`，只生成一份投标文件。数据库以唯一约束保证一个project不能出现第二个Workspace。
-
-Workspace拥有：
-
-- 项目级要求projection；
-- 冻结`QuoteSnapshot`引用；
-- 大纲与内容；
-- 知识库证据和用户人工资产placement；
-- Assessment；
-- render snapshot与输出。
-
-`WorkspaceRevision`直接冻结 `(quote_snapshot_id, quote_snapshot_sha256)`；不得在历史Workspace、Assessment、generation input或render loader中动态解析 `QuoteSnapshotCurrent`。发布新报价只推进独立的`QuoteSnapshotCurrent`，不修改Workspace。用户必须携带Workspace `If-Match`显式apply该冻结报价；apply以单一WorkspaceHead revision ID+digest CAS创建新WorkspaceRevision。旧WorkspaceRevision继续解析到旧报价。
-
-每个`BidProject`恰好拥有一个`SubmissionWorkspace`并生成一份投标文件；Workspace scope固定为`project_wide`。
-
-## 4. 不可变身份链
-
-一份输出必须能够回溯以下身份：
-
-```text
-TenderDocumentSetRevision
-→ SourceUnitDispositionSetRevision
-→ ProjectRequirementSetRevision
-→ WorkspaceScopeRevision
-→ WorkspaceRequirementProjectionRevision
-→ OutlineCheckpoint
-→ WorkspaceRevision（引用DocumentSettingsRevision）
-→ SubmissionAssessmentSnapshot
-→ RenderDocumentSnapshotV2
-→ SubmissionManifestV2
-→ DOCX/PDF
-```
-
-每一层使用版本化canonical schema和SHA-256；历史不可覆盖，current pointer只能原子切换。CAS按聚合边界执行：WorkspaceHead保护树、ContentBlock、DocumentSettings、OutlineFulfillmentBinding和Candidate decision；DocumentSet、SourceUnitDispositionSet、RequirementSet、Supersession与WorkspaceRequirementProjection各自校验自己的`expected_artifact_id/sha256`。创建project/document/workspace只要求幂等identity，不伪造`expected_workspace_head`。
-
-## 5. 招标文件集合
-
-### 5.1 TenderDocument
-
-```text
-TenderDocument
-  id, project_id
-  file_name, media_type, byte_length
-  document_role
-  original_object_ref, original_sha256
-  conversion_generation, parse_status
-  effective_at, uploaded_at
-```
-
-`document_role` 由系统建议、用户确认或修改。文件名不能成为优先级或覆盖关系的唯一依据。
-
-### 5.2 文件关系
-
-```text
-TenderDocumentRelation
-  source_document_id
-  target_document_id
-  relation = complements|clarifies|partially_amends|replaces|withdraws
-  applicability
-  confirmed_by, confirmed_at
-```
-
-文件关系用于解释上下文；要求级 supersession 才是局部覆盖的权威。
-
-### 5.3 TenderDocumentSetRevision
-
-用户可随时冻结当前文件集合，也可以在文件尚未完全解析时继续，系统只产生提示。快照至少冻结：
-
-```text
-project_id
-included document identities and roles
-document relations
-conversion/source artifact identities
-unparsed or failed document list
-created_by, created_at
-source_set_sha256
-```
-
-后续新增、替换或重试文件形成新 revision，不修改旧 revision。
-
-## 6. SourceUnit 与抽取完整性
-
-### 6.1 SourceUnit
-
-每份冻结招标源被分解为有界、可回放且有独立revision身份的SourceUnit：
-
-```text
-SourceUnitRevision
-  source_unit_lineage_id, source_unit_revision_id
-  unit_kind = section|table_row|form_region|attachment_region|image_ocr_region
-  frozen source artifact/document identities
-  source_span_v2                 # 仅定位器
-  structural locator and digest
-```
-
-Requirement和Disposition必须引用`source_unit_revision_id`；`SourceSpanV2`只负责section/page/offset、sheet/cell或区域定位，不是要求来源的业务身份。
-
-### 6.2 SourceUnitDispositionSetRevision
-
-每个选入DocumentSetRevision的`SourceUnitRevision`在同一个`SourceUnitDispositionSetRevision`中恰有一条disposition：
-
-```text
-requirement
-non_requirement
-unresolved
-```
-
-Verifier检查：
-
-- 文件集中的每个`SourceUnitRevision`恰好出现一次；
-- 每个requirement至少引用一个`SourceUnitRevision`；
-- 不存在孤立requirement、未知revision或仅以SourceSpan充当来源的记录；
-- unresolved 被保留并进入 Assessment，不因用户继续操作而消失。
-
-未解决 SourceUnit 不阻止用户冻结 RequirementSet、确认大纲或导出，但必须持续显示为风险提示。
-
-## 7. 原子要求与局部替代
-
-### 7.1 AtomicRequirement
-
-```text
-AtomicRequirement
-  logical_requirement_id
-  requirement_revision_id
-  project_requirement_set_revision_id
-  obligation_text
-  requiredness = mandatory|optional|informational
-  compliance_policy = must_comply|explicit_response|deviation_allowed|scored
-  applicability
-  lifecycle = current|superseded|withdrawn|unresolved
-  requirement_sha256
-```
-
-`requiredness` 和 `compliance_policy` 只影响提示等级和满足度计算，不赋予系统阻止用户操作的权力。
-
-### 7.2 RequirementSource
-
-一个要求可以引用多个`SourceUnitRevision`；同一`SourceUnitRevision`也可以支持多个经过人工确认的原子要求。`RequirementSourceRevision`必须冻结requirement revision、source unit revision、relation、actor和digest；不得直接把`SourceSpanV2`作为RequirementSource。
-
-### 7.3 RequirementSupersessionEdge
-
-```text
-RequirementSupersessionEdge
-  old_requirement_revision
-  new_requirement_revision
-  old_source_unit_refs[]
-  new_source_unit_refs[]
-  amendment_document_relation
-  applicability
-  actor, reason, created_at
-```
-
-不变量：
-
-- old/new 属于同一项目和兼容的文件集 lineage；
-- supersession 图无环；
-- ProjectRequirementSet 保存带适用范围的历史；
-- Workspace projection 按自己的 scope 重放 DAG；
-- 对某个 applicability fragment，old 与 successor 的 effective membership 不得同时含糊生效。
-
-V1 canonical applicability 使用封闭表示：`{}` 表示全域，局部范围使用
-`{"fragments":["..."]}`（非空、去重、稳定排序）。RequirementSet 和 WorkspaceProjection item
-冻结 `effective_applicability`；局部替代从 old item 扣除 edge fragments，并只把这些 fragments 加入
-successor。范围重叠、无法从全域安全扣除的部分替代、未知 SourceUnit 或不兼容 DocumentSet 必须拒绝。
-
-用户可以修改、撤销或重新建立 supersession 决定；新决定形成新 revision，不覆盖历史。
-
-## 8. 履约表达式与覆盖
-
-### 8.1 FulfillmentNeed
-
-支持渠道：
-
-```text
-narrative_content
-response_table
-deviation_statement
-structured_form
-evidence_attachment
-quotation
-```
-
-### 8.2 FulfillmentExprV1
-
-```text
-Need(need_occurrence_id, channel)
-AllOf(non_empty children)
-AnyOf(non_empty children)
-AtLeast(min_count, children)
-```
-
-不变量：
-
-- mandatory requirement 的表达式不得为空；
-- `AllOf/AnyOf.children` 非空；
-- `1 <= AtLeast.min_count <= children.length`；
-- 同一表达式中的 `need_occurrence_id` 唯一；
-- 同一 evidence occurrence 在一次求值中最多消费一次；
-- 未知节点、字段、枚举或额外键拒绝。
-
-表达式求值用于生成提示和覆盖状态，不用于阻止用户确认或导出。人工事实和流程响应使用普通`narrative_content`、`response_table`或`structured_form` block；只有`QuoteSnapshot`保留专用业务快照身份。
-
-### 8.3 两层覆盖身份
-
-`OutlineFulfillmentBindingRevision`把Need绑定到逻辑目标：
-
-```text
-binding_lineage_id, binding_revision_id
-need_occurrence_id
-workspace requirement projection revision
-outline node lineage | response table | structured form | quote
-state = bound|unbound|superseded
-actor, reason, binding_sha256
-```
-
-`SubmissionFulfillmentEvidenceRevision`绑定实际输出身份：
-
-```text
-evidence_lineage_id, evidence_revision_id
-binding_revision_id
-workspace revision
-target node/block/table-row or structured block/value revision
-asset revision | QuoteSnapshot revision | assessment decision revision
-dependency_sha256
-evidence_sha256
-```
-
-`OutlineFulfillmentBindingRevision`是WorkspaceRevision的一部分，没有独立current pointer。用户`bind`、`remap`或`unbind`时，必须在同一Workspace事务中校验`expected_workspace_head`、写binding revision和binding occurrence、创建新WorkspaceRevision并原子移动WorkspaceHead；每次操作保留历史。SubmissionFulfillmentEvidence是不可变的精确identity记录；系统不按编辑复制或rebase evidence，也不存储`stale`状态。Assessment按所请求WorkspaceRevision中的精确binding、target、RequirementProjection和dependency digest派生`current|stale|withdrawn`有效状态。
-
-## 9. Workspace scope 与要求 projection
-
-`WorkspaceScopeRevision`固定冻结项目级范围：
-
-```text
-workspace_id
-scope_kind = project_wide
-applicable source regions
-shared requirement rules
-explicit requirement assignments
-actor, created_at, scope_sha256
-```
-
-`WorkspaceRequirementProjectionRevision` 从 ProjectRequirementSet 选择当前 Workspace 的有效要求。未分配、多义或冲突要求进入 Assessment；用户可以继续并人工修改 assignment。Requirement patch、supersession 与 Worker publication 都只发布projection并推进独立current pointer，响应返回`workspace_apply_required=true`；它们不得直接修改WorkspaceHead。用户必须携带Workspace `If-Match`显式apply，才会创建新WorkspaceRevision并推进WorkspaceHead。
-
-所有quote、coverage、Assessment、snapshot和manifest都携带唯一workspace composite identity，禁止脱离该项目Workspace读取或发布。
-
-## 10. OutlineCompiler
-
-OutlineCompiler 只生成候选，不直接修改 WorkspaceHead：
-
-```text
-compile_outline(
-  document_set_revision,
-  workspace_requirement_projection,
-  workspace_scope
-) -> OutlineCandidate
-```
-
-编译顺序：
-
-1. 识别招标文件明确规定的投标文件组成、分册和顺序；
-2. 将招标输入中投标函、授权书、报价表、偏离表等格式要求解析为结构化表格/表单节点建议；不读取或填充用户DOCX/XLSX模板；
-3. 绑定资格、技术、商务、评分和证明材料要求；
-4. 为尚无承载位置的文档型履约 Need 建议节点；
-5. 生成 OutlineFulfillmentBinding 建议；
-6. 输出冲突、未映射、低置信度和来源提示。
-
-禁止根据固定通用大纲无条件生成与本次招标无关的章节。
-
-pending、failed或unresolved输入不阻止用户基于当前成功解析的DocumentSetRevision生成大纲；Candidate和Assessment必须明确冻结并展示未参与输入。文件后来恢复或新增时，旧Candidate/Checkpoint进入stale，但不删除已接受的人工树和正文。
-
-## 11. 树与正文的统一工作区
-
-### 11.1 WorkspaceRevision
-
-```text
-WorkspaceRevision
-  workspace_revision_id
-  parent_revision_id, parent_sha256
-  outline checkpoint/base identity
-  document_settings_revision identity
-  ordered NodeOccurrence[]
-  ordered OutlineFulfillmentBindingOccurrence[]
-  created_by, created_at
-  workspace_sha256
-```
-
-所有树、块、binding和全局文档设置mutation在同一事务中：
-
-1. 校验`expected_workspace_head`；
-2. 写不可变node/block/binding revisions；
-3. 写新WorkspaceRevision及其node/block/binding occurrences；
-4. 原子移动WorkspaceHead；
-5. 写audit和幂等receipt。
-
-CAS冲突不得自动覆盖或丢弃人工编辑。
-
-### 11.2 OutlineNode
-
-```text
-OutlineNode
-  lineage_id
-  node_revision_id
-  title
-  node_kind
-  semantic_role
-  render_role
-  origin
-  tombstone
-```
-
-标题可以任意修改，但结构化表单、报价、目录和渲染行为只能读取 `semantic_role/render_role`，不得解析标题或旧 part key。
-
-### 11.3 身份规则
-
-- rename/move/reorder：保留 lineage，创建新 node revision；
-- split：创建多个新 lineage 和一对多 lineage edge；
-- merge：创建新 lineage 和多对一 lineage edge；
-- delete：写 tombstone，不物理删除历史内容；
-- 未迁移的 requirement binding 进入 unresolved 提示。
-
-### 11.4 画布与编辑器真源
-
-Web 按第 2.4 节把工作区渲染成连续画布。树身份只来自 OutlineNode；正文只来自 ContentBlock；Tiptap JSON 只在内存。Preview/DOCX/PDF 读冻结工作区，不读编辑器内存。
-
-## 12. ContentBlockV1
-
-### 12.1 Node 与 Block placement
-
-WorkspaceRevision中的节点 occurrence 冻结：
-
-```text
-NodeOccurrence
-  node_revision_id
-  parent occurrence
-  ordinal, depth
-  BlockOccurrence[]
-```
-
-```text
-BlockOccurrence
-  block_revision_id
-  ordinal
-```
-
-每个 BlockOccurrence 在一个 WorkspaceRevision 中唯一属于一个节点。
-
-### 12.2 RichText
-
-允许 block/inline节点：
-
-```text
-paragraph
-bullet_list
-ordered_list
-list_item
-hard_break
-text
-```
-
-允许 mark：
-
-```text
-bold
-italic
-underline
-strike
-code
-link
-evidence_ref(evidence_bundle_id,evidence_item_id,quote_range)
-```
-
-`evidence_ref`是不可见的事实来源标记，不改变DOCX/PDF视觉样式。Agent生成的事实性span必须携带该标记；用户编辑后保留人工内容，Assessment通过精确block revision和dependency identity派生旧引用是否stale，不修改ContentBlock中的标记。
-
-正式章节标题只来自 OutlineNode；正文 heading 不进入 ContentBlockV1。
-
-### 12.3 Table
-
-```text
-rows
-cells(content,rowspan,colspan)
-widths_mm
-repeat_header_rows
-```
-
-不变量：
-
-- rowspan/colspan为正整数且不越界；
-- 逻辑网格每个坐标恰由一个cell覆盖；
-- 合并单元格不得重叠；
-- widths数量等于逻辑列数；
-- 总宽不超过 `210mm - left_margin - right_margin`；图片 `width_mm` 使用同一可打印宽度合同；
-- Workspace block或DocumentSettings每次mutation都在CAS事务内执行该校验，超宽直接失败，DOCX/PDF不得各自静默缩放；
-- repeat_header_rows为连续前缀；
-- cell内容只使用允许的RichText结构。
-
-### 12.4 Image
-
-```text
-asset_revision_id
-width_mm
-alignment = left|center|right
-crop = normalized left/top/right/bottom
-caption
-alt
-```
-
-不变量：宽度为正且不超过可打印宽度；crop坐标在0..1内，左右和、上下和均小于1；默认保持宽高比。
-
-### 12.5 其它块
-
-```text
-attachment_ref(asset/preparation revision, render_mode, start_new_page)
-structured_form(form_definition_revision, field_values)
-page_break
-signature_placeholder(kind,width_mm,height_mm,label)
-```
-
-每种 block 使用封闭、版本化 JSON Schema；未知kind、字段、enum、rich-text节点或mark全部拒绝。
-
-### 12.6 DocumentSettingsRevision
-
-```text
-DocumentSettingsRevision
-  page_size = A4
-  margins_mm(top,right,bottom,left)
-  body_font_pt, line_spacing
-  heading_numbering = decimal|chinese|none
-  header, footer
-  page_number = none|footer_center|footer_outside
-  settings_sha256
-```
-
-字段和值域由RenderStyleContract封闭约束。用户可以修改这些全局设置，但不能上传DOCX模板、注入任意样式代码或使用逐字符自由字号。设置修改创建新的DocumentSettingsRevision，并由同一事务产生的新WorkspaceRevision引用；历史preview/export只能沿所选WorkspaceRevision解析该settings revision，禁止读取live settings pointer。
-
-## 13. 用户编辑与 AI Candidate
-
-用户可以直接编辑任何非技术损坏状态的树或内容。AI只创建不可变 Candidate：
-
-```text
-OutlineCandidate
-ContentCandidate
-  base_workspace_revision/head_sha256
-  target node/block revisions
-  requirement/dependency identities
-  proposed operations
-  stored state = proposed|accepted|rejected
-  effective status = stored state，或在proposed且base Workspace不再是Head时派生obsolete
-```
-
-状态机只允许：
-
-```text
-proposed -> accepted|rejected
-```
-
-终态不可改写。接受操作整体CAS WorkspaceHead；head不匹配时返回409和派生`obsolete`，不得改写Candidate行。已accepted的重复请求返回首次receipt。reject只对Candidate执行状态CAS，不修改Workspace且不要求`If-Match`。异步Request只存`pending|succeeded|failed`。
-
-支持逐块接受、部分接受、填充空章节和仅补充缺失要求。插入只支持whole-block边界，冻结`InsertionAnchor(node_revision_id, block_revision_id?)`；不接受字节或字符内部offset。仅补充缺失要求使用`fill_policy=missing_requirements_only`。不存在“AI直接替换当前整章”的写入接口。
-
-### 13.1 证据选择、事实引用与图片候选
-
-内容生成的`EvidenceSelectionInput`支持两种形式：
-
-```text
-EvidenceSelectionInput
-  = EvidencePickSetArtifact       # 用户先选择
-  | ProposedEvidenceSetArtifact   # 系统根据MatchingReport提出
-```
-
-默认流程由系统提出证据集合并生成ContentCandidate，用户在同一review中确认；用户也可以先人工选择证据再触发生成。无论哪种方式，只有用户接受Candidate后，选择才成为正式采用的冻结evidence selection。
-
-Agent匹配到知识库图片时，可以直接把带知识来源和稳定资产身份的ImageBlock放入ContentCandidate。用户可以接受、删除、移动或调整图片。不得只依据`image_ocr`文本反查live知识库图片；知识检索端口必须返回可冻结的图片media identity，招投标立即冻结自己的EvidenceAssetArtifact和ObjectRegistry引用。
-
-Agent生成的业务事实必须使用`evidence_ref`回指本次EvidenceBundle；服务端拒绝引用bundle外identity。连接、章节过渡、组织语言和不引入新业务事实的总结可以无引用生成。用户人工输入的内容始终允许保留，缺少证据只产生Assessment提示，不阻止确认或导出。
-
-## 14. Stale 与人工核对
-
-普通人工保存：
-
-```text
-content revision +1
-生成新的block revision identity
-不在ContentBlock存储dependency或stale状态
-```
-
-接受基于当前冻结输入生成的Candidate或发布受检的确定性表单/响应表时，可以创建新的精确Evidence identity。系统不提供`acknowledge_stale`，也不按普通编辑复制或rebase evidence。用户可以忽略Assessment中的派生stale提示并继续导出，但系统不得静默把旧内容标记为已核对。
-
-## 15. 输出Asset、PDF附件与招标表单结构
-
-### 15.1 WorkspaceAsset
-
-```text
-WorkspaceAsset
-  asset_revision_id
-  workspace_id
-  object_ref, sha256
-  media_type, dimensions, page_count
-  source, validation_status
-```
-
-内容块引用稳定asset revision，不存临时URL或内联大对象。输出WorkspaceAsset的来源只能是知识库EvidenceAssetArtifact或用户人工上传；Tender Source图片/附件不得被Agent自动登记为输出资产。
-
-### 15.2 AttachmentPreparationRevision
-
-所有 `embedded_pages` PDF附件必须冻结：
-
-```text
-source_asset_revision
-ordered page asset revisions/digests
-page geometry
-status
-preparation_sha256
-```
-
-`SubmissionExport` Worker是PDF页面准备的唯一可信执行者：它从冻结source asset digest读取PDF，以固定144 DPI栅格化，逐页登记ObjectRegistry staging/commit，并原子发布包含source/request/renderer identity的preparation attestation。客户端不得提交PDF page-image asset IDs，普通准备API只允许单张图片引用自身。Renderer不得运行时重新转换PDF，只读取已冻结的准备结果；页面不完整、source digest不符、准备工具缺失或对象提交失败均为技术失败。准备完成前，Preview仅显示元数据占位且不读取source PDF bytes；准备完成后，Preview与DOCX/PDF按同一可打印区域等比拟合冻结页面图片。用户可以改用 `file_reference` 或替换附件。
-
-### 15.3 TenderStructuredFormDefinition
-
-招标输入中的DOCX/XLSX表格或扫描表单只被解析为结构定义：
-
-```text
-TenderStructuredFormDefinition
-  source document/unit identities
-  title and instruction text
-  ordered columns/rows/fields
-  merged-cell and required-field constraints
-  definition_sha256
-```
-
-内容生成器根据definition创建普通可编辑`table`或`structured_form` ContentBlock。用户可以修改其结构和值；系统只提示与招标输入结构的差异。不存在下载原模板填写、上传完成模板或运行时合并DOCX/XLSX模板的流程。
-
-## 16. 大纲确认与 Assessment
-
-系统生成大纲后，用户修改并点击确认，创建：
-
-```text
-OutlineCheckpoint
-OutlineAssessmentSnapshot
-  workspace_revision_id
-  workspace_requirement_projection_revision_id
-  workspace_scope_revision_id
-  document_settings_revision_id
-  frozen asset/QuoteSnapshot identities
-  assessment_input_sha256
-```
-
-同一个`assessment_input_sha256`可以复用同一结果；只按workspace revision去重不成立。
-
-Assessment至少包含：
-
-- 未映射或部分映射要求；
-- unresolved SourceUnit；
-- 招标要求的结构化表格/表单缺失或结构偏离；
-- 招标指定顺序差异；
-- 评分材料缺失；
-- 用户忽略的高风险项。
-
-存在任何提示都允许确认。确认是用户意图检查点，不是审批锁。
-
-确认后仍可继续编辑；树变化形成新WorkspaceRevision和新的待确认状态。用户可以继续人工编辑内容，并可选择用当前草稿重新确认后生成候选。
-
-## 17. 提交 Assessment 与导出
-
-### 17.1 SubmissionAssessmentSnapshot
-
-导出时针对明确选择的WorkspaceRevision及其冻结依赖重新计算：
-
-```text
-SubmissionAssessmentSnapshot
-  workspace revision
-  requirement projection and scope revisions
-  DocumentSettingsRevision
-  frozen asset and QuoteSnapshot identities
-  assessment_input_sha256
-  requirement fulfillment status
-  unresolved and ignored requirements
-  missing/invalid/stale content
-  structured table/form completeness and deviation
-  quote and scoring gaps
-  asset/preparation status
-  layout and rendering warnings
-```
-
-Assessment只提示，不阻止业务导出。
-
-### 17.2 输出模式
-
-```text
-preview
-review_draft
-submission
-```
-
-- preview：在线预览，不发布可下载正式文件；
-- review_draft：可下载，允许受控水印并配套独立问题报告；
-- submission：干净的正式输出，不写入警告、水印、风险声明或知识来源。
-
-模式和选项必须冻结在RenderDocumentSnapshot与Manifest中。三种模式都允许存在业务提示；只有技术上无法正确渲染时失败。
-
-### 17.3 独立检查报告
-
-系统可以生成：
-
-```text
-投标文件.docx / 投标文件.pdf
-投标文件检查报告.pdf / json
-```
-
-检查报告不自动嵌入submission正文，由用户决定是否下载、保存或分享。知识库文件名、quote和`evidence_ref`只在Web证据面板、审计链和检查报告中展示，不写入最终DOCX/PDF正文或脚注。
-
-导出技术顺序固定为：
-
-```text
-SubmissionAssessmentSnapshot
-→ AttachmentPreparationRevision（如有）
-→ 验证全部preparation ready且digest完整
-→ RenderDocumentSnapshotV2
-→ SubmissionManifestV2
-→ DOCX/PDF render
-```
-
-不得在附件准备成功前发布RenderDocumentSnapshot或Manifest。
-
-## 18. RenderDocumentSnapshotV2
-
-```text
-RenderDocumentSnapshotV2
-  mode = preview|review_draft|submission
-  mode options and watermark identity
-  workspace revision/checkpoint identities
-  document settings revision identity
-  ordered node and block occurrences
-  asset/form/preparation occurrences
-  content_block_schema_version
-  render_operation_contract_version
-  docx_renderer_contract_id
-  pdf_renderer_contract_id
-  style_contract_id
-  page_geometry
-  font artifact identities
-  numbering and TOC policy
-  snapshot_sha256
-```
-
-Renderer按树的前序遍历输出标题和内容块。每个block kind有明确DOCX/PDF operation；不得再以标题、`part_key`或附件kind推导位置。
-
-Schedule与publish都复核snapshot、renderer、style、font和asset identities。同一snapshot不因后续renderer或字体升级改变语义。
-
-## 19. SubmissionManifestV2
-
-```text
-SubmissionManifestV2
-  format = docx|pdf
-  mode = review_draft|submission
-  frozen mode options and watermark identity
-  project/workspace identities
-  document-set and requirement projection identities
-  outline checkpoint, workspace revision and document settings revision
-  submission assessment snapshot
-  render document snapshot
-  renderer/style/font identities
-  manifest_sha256
-```
-
-Manifest只读取冻结快照，不读取live树、正文、报价、要求、settings或资产。历史导出从选定WorkspaceRevision解析DocumentSettingsRevision。Assessment状态不限制manifest创建；附件preparation未ready、技术身份不完整或不一致必须失败。submission模式必须验证watermark为空且不会渲染风险/知识来源。
-
-## 20. Clean-slate替换
-
-Target V2不兼容旧固定PartSet。最终实现必须删除：
-
-- `1、2:*、3、4、5、6:*` RequiredPartSet；
-- `part_key -> template_slot`业务身份；
-- 按标题或固定part判断报价、授权书、附件和渲染逻辑；
-- 旧part update/regenerate API；
-- 旧SubmissionGateV1业务阻断语义；
-- 旧company-profile、submission-profile和procedural专用API/表，以及旧人工事实/流程专用fulfillment channel；公司证据改由知识检索或人工资产提供，人工事实和流程响应使用通用narrative/table/structured_form内容；
-- OutlineFulfillmentBinding独立current pointer或绕过WorkspaceHead的bind/remap/unbind路径；
-- legacy schema、alias、兼容façade、双写、旧格式读取和历史数据导入。
-
-只保留现有`QuoteSnapshot`作为Target V2的专用业务快照输入，不迁移其它旧profile/procedural聚合。
-
-不实现 `legacy|outline_v2` 双模式，不处理旧binary共存或在途legacy任务。部署使用fresh baseline。
-
-现有SourceSpan、不可变artifact、ObjectRegistry、报价快照、匹配报告、CAS、幂等和manifest-only render思想可以复用，但必须通过Target V2的新interface接入。
-
-## 21. 最低验收场景
-
-1. 同一项目上传主文件、技术附件、报价清单和格式附件，生成一棵可追踪大纲；
-2. 澄清文件只替代原要求中的局部内容；
-3. unresolved抽取持续提示，但用户仍可确认大纲和导出；
-4. 用户确认大纲后继续新增、删除、改名、移动、拆分和合并；
-5. 删除强制要求节点后显示高风险提示，用户仍可继续；
-6. 任意节点插入图片、复杂表格和PDF附件，DOCX/PDF位置与Workspace一致；
-7. 招标表格/表单被生成成可编辑结构，人工改变结构时显示提示但不阻止导出；
-8. AI候选不会覆盖并发或后续人工编辑；
-9. 普通文字修改后evidence状态由新block revision identity精确派生，不复制或清除历史evidence；
-10. 新增招标附件后只使相关binding/evidence提示过期；
-11. 有业务提示时仍可生成干净submission文件和独立检查报告；
-12. 资产丢失、Schema非法或renderer失败时稳定技术失败；
-13. 同一RenderDocumentSnapshot可按冻结contract重放；
-14. 最终导出中不会重新出现被用户删除的固定旧part；
-15. Manifest可回溯完整身份链和当时的Assessment；
-16. 调整全局页边距、行距、标题编号、页眉页脚或页码后，Preview与DOCX/PDF使用同一冻结设置；字体固定为可信Noto，不接受用户配置；
-17. 业务事实的知识来源可在Web和检查报告追踪，但不会出现在最终投标正文或脚注；
-18. “生成本章”“生成当前子树”“生成全部空章节”都只能由用户触发，后台不会自动生成；
-19. 光标插入使用冻结InsertionAnchor，`missing_requirements_only`只为尚未覆盖的Need建议内容；
-20. 同一WorkspaceRevision在HTML preview、DOCX和PDF中使用同一DocumentSettingsRevision；
-21. review_draft可带受控水印，submission永远不含水印、风险提示或知识来源；
-22. 独立或扫描图片OCR形成`image_ocr_region` SourceUnit，并与section/table_row/form_region/attachment_region一样在所选DispositionSet中恰好出现一次；
-23. 两个并发bind/remap/unbind使用同一WorkspaceHead CAS，失败方不得写入独立binding current或覆盖胜出方；
-24. 人工事实和流程响应使用普通narrative/table/structured_form，只有QuoteSnapshot使用专用业务快照身份。
-25. Web 步导航只有文件 / 编制 / 导出；
-26. 点左侧第三章，中间滚到该章且可编；拖拽后画布顺序一致；
-27. 正文不能插 heading；改名只发生在树；
-28. 填充现查资料，接受后进工作区；过期候选不覆盖人改；
-29. 导出当前稿后再改再导是新文件。
-
-## 22. 完成语义
-
-本文批准目标。完成还要：三步 Web、工作区编辑、填充、导出、以及按 [`../../plans/architecture.md`](../../plans/architecture.md) 收口的分层。
+ONLYOFFICE 接入、真实保存、授权、AI 定点入稿、同稿转换和页码回填均须按接入计划取得实证；新 API/schema 在切片实施中核实，不由本文伪称已存在。新链验收后撤旧入口，不维持两份正式正文；保留平台、知识库、来源和历史数据不等于保留旧编辑标准，也不授权清库或部署。

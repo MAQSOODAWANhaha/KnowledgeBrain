@@ -6,6 +6,7 @@ mod engines;
 mod grpc;
 mod http_engine;
 mod images;
+mod table_grid;
 
 pub use anydoc::{
     ENGINE as ANYDOC_ENGINE, supported_file_types as anydoc_file_types,
@@ -13,7 +14,7 @@ pub use anydoc::{
 };
 pub use asr::{ASR_NOT_CONFIGURED, AsrSettings, apply as apply_asr, apply_stub as apply_asr_stub};
 pub use engines::{EngineCatalog, EngineInfo, list_all_engines, local_engines, merge_engines};
-pub use grpc::{ConvertRequest, DOCREADER_TIMEOUT, reader_addr};
+pub use grpc::{ConvertRequest, DOCREADER_TIMEOUT, reader_addr, source_view};
 pub use images::{rewrite_images, rewrite_inline};
 
 use platform::{is_audio_type, is_image_type, is_simple_format};
@@ -42,6 +43,23 @@ pub enum StructuredSourceUnitKind {
     FormRegion,
     AttachmentRegion,
     ImageRegion,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PdfTableCell {
+    pub row: u32,
+    pub column: u32,
+    pub row_span: u32,
+    pub col_span: u32,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PdfTableMergedRange {
+    pub start_row: u32,
+    pub start_column: u32,
+    pub end_row: u32,
+    pub end_column: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -104,6 +122,14 @@ pub enum StructuredSourceLocator {
         right: Option<f64>,
         bottom: Option<f64>,
     },
+    PageTable {
+        page_ordinal: u32,
+        table_ordinal: u32,
+        left: f64,
+        top: f64,
+        right: f64,
+        bottom: f64,
+    },
     Spreadsheet {
         sheet_ordinal: u32,
         sheet_name: String,
@@ -131,12 +157,23 @@ pub enum StructuredSourceLocator {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TableGrid {
+    pub row_count: u32,
+    pub column_count: u32,
+    pub cells: Vec<PdfTableCell>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widths_mm: Option<Vec<f64>>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StructuredSourceUnit {
     pub key: String,
     pub ordinal: u32,
     pub kind: StructuredSourceUnitKind,
     pub text: String,
     pub locator: StructuredSourceLocator,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<TableGrid>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -270,7 +307,7 @@ pub async fn convert_tender_source(
         .to_ascii_lowercase();
     if !matches!(
         ext.as_str(),
-        "pdf" | "docx" | "xlsx" | "png" | "jpg" | "jpeg" | "webp"
+        "pdf" | "docx" | "doc" | "xlsx" | "xls" | "xlsm" | "png" | "jpg" | "jpeg" | "webp"
     ) {
         return Err(ConvertError(format!(
             "unsupported tender source extension .{ext}"
@@ -677,6 +714,15 @@ mod tests {
             Ok(Response::new(ReceiverStream::new(rx)))
         }
 
+        async fn source_view(
+            &self,
+            _: Request<crate::proto::SourceViewRequest>,
+        ) -> Result<Response<crate::proto::SourceViewResponse>, Status> {
+            Err(Status::unimplemented(
+                "source views unavailable in this legacy test service",
+            ))
+        }
+
         async fn list_engines(
             &self,
             _req: Request<ListEnginesRequest>,
@@ -707,6 +753,15 @@ mod tests {
             _req: Request<ReadRequest>,
         ) -> Result<Response<Self::ReadStreamStream>, Status> {
             Err(Status::unimplemented("old server"))
+        }
+
+        async fn source_view(
+            &self,
+            _: Request<crate::proto::SourceViewRequest>,
+        ) -> Result<Response<crate::proto::SourceViewResponse>, Status> {
+            Err(Status::unimplemented(
+                "source views unavailable in this legacy test service",
+            ))
         }
 
         async fn list_engines(
@@ -780,6 +835,15 @@ mod tests {
             Ok(Response::new(ReceiverStream::new(rx)))
         }
 
+        async fn source_view(
+            &self,
+            _: Request<crate::proto::SourceViewRequest>,
+        ) -> Result<Response<crate::proto::SourceViewResponse>, Status> {
+            Err(Status::unimplemented(
+                "source views unavailable in this legacy test service",
+            ))
+        }
+
         async fn list_engines(
             &self,
             _req: Request<ListEnginesRequest>,
@@ -848,6 +912,15 @@ mod tests {
             Ok(Response::new(ReceiverStream::new(rx)))
         }
 
+        async fn source_view(
+            &self,
+            _: Request<crate::proto::SourceViewRequest>,
+        ) -> Result<Response<crate::proto::SourceViewResponse>, Status> {
+            Err(Status::unimplemented(
+                "source views unavailable in this legacy test service",
+            ))
+        }
+
         async fn list_engines(
             &self,
             _req: Request<ListEnginesRequest>,
@@ -896,6 +969,15 @@ mod tests {
             .unwrap();
             drop(tx);
             Ok(Response::new(ReceiverStream::new(rx)))
+        }
+
+        async fn source_view(
+            &self,
+            _: Request<crate::proto::SourceViewRequest>,
+        ) -> Result<Response<crate::proto::SourceViewResponse>, Status> {
+            Err(Status::unimplemented(
+                "source views unavailable in this legacy test service",
+            ))
         }
 
         async fn list_engines(

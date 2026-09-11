@@ -22,8 +22,10 @@ from docreader.models.document import (
     FormImageParent,
     ImageLocator,
     PageLocator,
+    PageTableLocator,
     ParagraphImageParent,
     SpreadsheetLocator,
+    StructuredSourceUnit as ModelStructuredSourceUnit,
     TableCellImageParent,
     StructuredSourceUnitKind,
 )
@@ -139,7 +141,7 @@ def _mime_for_ref(ref_path: str) -> tuple[str, str]:
     return fname, mime_map.get(ext, "application/octet-stream")
 
 
-def _structured_unit_to_proto(unit):
+def _structured_unit_to_proto(unit: ModelStructuredSourceUnit) -> ProtoStructuredSourceUnit:
     kinds = {
         StructuredSourceUnitKind.SECTION: STRUCTURED_SOURCE_UNIT_KIND_SECTION,
         StructuredSourceUnitKind.TABLE_ROW: STRUCTURED_SOURCE_UNIT_KIND_TABLE_ROW,
@@ -167,6 +169,13 @@ def _structured_unit_to_proto(unit):
             value = getattr(locator, name)
             if value is not None:
                 setattr(proto.page, name, value)
+    elif isinstance(locator, PageTableLocator):
+        proto.page_table.page_ordinal = locator.page_ordinal
+        proto.page_table.table_ordinal = locator.table_ordinal
+        proto.page_table.left = locator.left
+        proto.page_table.top = locator.top
+        proto.page_table.right = locator.right
+        proto.page_table.bottom = locator.bottom
     elif isinstance(locator, SpreadsheetLocator):
         proto.spreadsheet.sheet_ordinal = locator.sheet_ordinal
         proto.spreadsheet.sheet_name = locator.sheet_name
@@ -214,6 +223,19 @@ def _structured_unit_to_proto(unit):
         proto.attachment.relationship_type = locator.relationship_type
     else:
         raise TypeError(f"unsupported structured locator {type(locator)!r}")
+    if unit.grid is not None:
+        proto.grid.row_count = unit.grid.row_count
+        proto.grid.column_count = unit.grid.column_count
+        for cell in unit.grid.cells:
+            proto.grid.cells.add(
+                row=cell.row,
+                column=cell.column,
+                row_span=cell.row_span,
+                col_span=cell.col_span,
+                text=cell.text,
+            )
+        if unit.grid.widths_mm is not None:
+            proto.grid.widths_mm.extend(unit.grid.widths_mm)
     return proto
 
 
@@ -225,7 +247,7 @@ def _range_to_proto(source, target) -> None:
     target.end_column = source.end_column
 
 
-def _structured_units_to_proto(units):
+def _structured_units_to_proto(units: list[ModelStructuredSourceUnit]) -> list[ProtoStructuredSourceUnit]:
     return [_structured_unit_to_proto(unit) for unit in units]
 
 
@@ -258,6 +280,19 @@ class DocReaderServicer(docreader_pb2_grpc.DocReaderServicer):
     def __init__(self):
         super().__init__()
         self.parser = Parser()
+
+    def SourceView(self, request, context):
+        from docreader.parser.source_view import UnsupportedSourceView, source_view
+
+        try:
+            return source_view(request)
+        except UnsupportedSourceView as error:
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, str(error))
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except Exception:
+            logger.exception("SourceView rendering failed")
+            context.abort(grpc.StatusCode.INTERNAL, "source view rendering failed")
 
     def _parse_request(self, request: ReadRequest):
         """Run the parser for a ReadRequest, returning (result, source_desc).

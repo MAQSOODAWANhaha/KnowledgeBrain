@@ -8,7 +8,7 @@ const liveUiUrl = process.env.KB_LIVE_UI_URL;
 
 export default defineConfig({
   testDir: "./e2e",
-  testMatch: "**/*-live*.spec.ts",
+  testMatch: "bid-v2-live.spec.ts",
   fullyParallel: false,
   forbidOnly: true,
   retries: 0,

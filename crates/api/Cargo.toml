@@ -5,10 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+docx-http-contract-tests = []
+docx-native-tests = []
+
 [dependencies]
 axum.workspace = true
 bidding = { path = "../bidding" }
 chrono.workspace = true
+jsonwebtoken.workspace = true
+reqwest.workspace = true
 dotenvy.workspace = true
 docparser = { path = "../docparser" }
 http-body-util.workspace = true
@@ -25,7 +31,9 @@ tower-http = { workspace = true, features = ["cors", "fs"] }
 uuid.workspace = true
 
 [dev-dependencies]
+async-trait = "0.1"
 http-body-util.workspace = true
+oxana.workspace = true
 sqlx.workspace = true
 tokio = { workspace = true, features = ["process", "io-util"] }
 tower.workspace = true

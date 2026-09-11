@@ -369,7 +369,7 @@ pub struct WikiFolder {
     pub sort_order: i32,
 }
 
-/// One row in brain `task_pending_ops`. Lane is `wiki:ingest` or `wiki:finalize`.
+/// Ephemeral Wiki operation used only inside one typed Oxana job execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WikiPendingOp {
     pub id: i64,

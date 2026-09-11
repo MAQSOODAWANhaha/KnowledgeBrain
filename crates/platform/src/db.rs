@@ -1,4 +1,13 @@
-use sqlx::{Connection, PgConnection, PgPool};
+use crate::{
+    CATALOG_MANIFEST_CONTRACT_VERSION, CatalogError, ReleaseIdentityError, SchemaRuntimeIdentity,
+    bidding_baseline_sha256, build_catalog_manifest, catalog_manifest_sha256,
+    knowledge_baseline_sha256, shared_baseline_sha256,
+};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::{Connection, PgConnection, PgPool, Row};
+use thiserror::Error;
+use uuid::Uuid;
 
 pub const KNOWLEDGE_BASE_BASELINE: &str =
     include_str!("../../../migrations/knowledge_base_baseline.sql");
@@ -6,22 +15,101 @@ pub const SHARED_PLATFORM_BASELINE: &str =
     include_str!("../../../migrations/shared_platform_baseline.sql");
 pub const BIDDING_BASELINE: &str = include_str!("../../../migrations/bidding_v2_baseline.sql");
 
-const DEFAULT_DATABASE_URL: &str =
-    "postgres://knowledgebrain:knowledgebrain@127.0.0.1:15432/knowledgebrain";
 const BOOTSTRAP_LOCK_ID: i64 = 0x4b_42_53_43_48_45_4d_41;
+pub const SCHEMA_REVISION_MISMATCH: &str = "SCHEMA_REVISION_MISMATCH";
 
-fn database_url_from_env_value(
-    value: Result<String, std::env::VarError>,
-) -> Result<String, std::env::VarError> {
-    match value {
-        Ok(value) => Ok(value),
-        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_DATABASE_URL.into()),
-        Err(error) => Err(error),
+#[derive(Debug, Error)]
+pub enum SchemaError {
+    #[error("{0}")]
+    ReleaseIdentity(#[from] ReleaseIdentityError),
+    #[error("postgres schema verification failed")]
+    Sql(#[from] sqlx::Error),
+    #[error("SCHEMA_REVISION_MISMATCH: reset required ({reason})")]
+    RevisionMismatch { reason: &'static str },
+}
+
+impl SchemaError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::RevisionMismatch { .. } => SCHEMA_REVISION_MISMATCH,
+            Self::ReleaseIdentity(_) => "RELEASE_IDENTITY_INVALID",
+            Self::Sql(_) => "POSTGRES_UNAVAILABLE",
+        }
+    }
+
+    fn mismatch(reason: &'static str) -> Self {
+        Self::RevisionMismatch { reason }
     }
 }
 
+fn sql_error_is_unavailable(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Io(_)
+        | sqlx::Error::Tls(_)
+        | sqlx::Error::Protocol(_)
+        | sqlx::Error::PoolTimedOut
+        | sqlx::Error::PoolClosed
+        | sqlx::Error::WorkerCrashed
+        | sqlx::Error::BeginFailed => true,
+        sqlx::Error::Database(database) => database.code().is_some_and(|code| {
+            code.starts_with("08") || matches!(code.as_ref(), "57P01" | "57P02" | "57P03")
+        }),
+        _ => false,
+    }
+}
+
+fn map_sql_verification_error(error: sqlx::Error, reason: &'static str) -> SchemaError {
+    if sql_error_is_unavailable(&error) {
+        SchemaError::Sql(error)
+    } else {
+        SchemaError::mismatch(reason)
+    }
+}
+
+fn map_catalog_verification_error(error: CatalogError) -> SchemaError {
+    match error {
+        CatalogError::Sql(error) => {
+            map_sql_verification_error(error, "catalog manifest is unavailable or unreadable")
+        }
+        CatalogError::Json(_)
+        | CatalogError::UnsupportedValue(_)
+        | CatalogError::InvalidSeedSpec(_)
+        | CatalogError::InvalidCatalog(_) => {
+            SchemaError::mismatch("catalog manifest extraction violated its contract")
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionIdentity {
+    pub name: String,
+    pub version: String,
+    pub schema: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SchemaReceiptV1 {
+    pub schema_revision: String,
+    pub shared_baseline_sha256: String,
+    pub knowledge_baseline_sha256: String,
+    pub bidding_baseline_sha256: String,
+    pub manifest_contract_version: i32,
+    pub catalog_manifest_sha256: String,
+    pub postgres_server_version_num: i32,
+    pub extensions: Vec<ExtensionIdentity>,
+    pub release_descriptor_sha256: String,
+    pub deployment_namespace_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
 pub fn database_url() -> Result<String, std::env::VarError> {
-    database_url_from_env_value(std::env::var("DATABASE_URL"))
+    let value = std::env::var("DATABASE_URL")?;
+    if value.is_empty() {
+        Err(std::env::VarError::NotPresent)
+    } else {
+        Ok(value)
+    }
 }
 
 static POOL: tokio::sync::OnceCell<PgPool> = tokio::sync::OnceCell::const_new();
@@ -36,116 +124,221 @@ async fn open_pool() -> Result<PgPool, sqlx::Error> {
         .await
 }
 
-/// Process-wide runtime pool. Runtime startup only connects; schema bootstrap is
-/// an explicit deployment/test action and is never a readiness or launch gate.
-pub async fn connect() -> Result<PgPool, sqlx::Error> {
+/// Explicit unverified connection for the migrator before a receipt can exist.
+pub async fn connect_unverified() -> Result<PgPool, sqlx::Error> {
     POOL.get_or_try_init(open_pool).await.cloned()
 }
 
-async fn schema_slice_state(
-    connection: &mut PgConnection,
-) -> Result<(bool, bool, bool, bool), sqlx::Error> {
-    sqlx::query_as(
-        "WITH
-         knowledge(name) AS (VALUES
-           ('users'),('workspaces'),('documents'),('chunks'),('knowledge_matching_scope_attestations_v2'),
-           ('knowledge_image_artifact_revisions'),('knowledge_image_ocr_chunk_artifact_mappings')),
-         shared(name) AS (VALUES
-           ('object_registry'),('object_upload_staging'),('object_owner_references'),
-           ('idempotency_requests'),('audit_events'),('queue_contract_current')),
-         bidding(name) AS (VALUES
-           ('bid_projects'),('bid_submission_workspaces'),('bid_workspace_revision_artifacts'),
-           ('bid_async_request_snapshot_artifacts'),('bid_candidate_artifacts'),
-           ('bid_workspace_asset_artifacts'),('bid_workspace_asset_retirement_artifacts'),('bid_outline_checkpoint_artifacts'),
-           ('bid_content_generation_request_identities'),('bid_evidence_bundle_artifacts'),
-           ('bid_evidence_asset_artifacts'),('bid_evidence_selection_artifacts'),
-           ('bid_outline_assessment_snapshot_artifacts'),('bid_submission_assessment_snapshot_artifacts'),
-           ('bid_submission_assessment_snapshot_evidence_items'),('bid_tender_structured_form_definition_artifacts'),
-           ('bid_attachment_preparation_revision_artifacts'),('bid_attachment_preparation_asset_items'),
-           ('bid_attachment_preparation_contract_artifacts'),('bid_pdf_attachment_preparation_attestations'),
-           ('bid_submission_export_request_identities'),('bid_render_document_snapshot_artifacts'),
-           ('bid_submission_manifest_artifacts'),('bid_submission_output_artifacts'),
-           ('bid_submission_assessment_report_artifacts'),('bid_quote_snapshot_artifacts'),
-           ('bid_quote_snapshot_object_identities')),
-         bidding_functions(signature) AS (VALUES
-           ('kb_bid_v2_create_project(uuid,text,uuid,kb_actor_identity,text,bytea,kb_sha256)'),
-           ('kb_bid_v2_load_tender_document_process_input(uuid,bigint,kb_sha256)'),
-           ('kb_bid_v2_retry_tender_document(uuid,uuid,uuid,bigint,kb_actor_identity,text,bytea,kb_sha256)'),
-           ('kb_bid_v2_commit_workspace_mutation_idempotent(uuid,uuid,kb_sha256,jsonb,kb_actor_identity,text,bytea,kb_sha256)'),
-           ('kb_bid_v2_publish_outline_generation(uuid,bigint,kb_sha256,uuid,bytea,kb_sha256,jsonb)'),
-           ('kb_bid_v2_publish_content_generation(uuid,bigint,kb_sha256,uuid,kb_sha256,jsonb,uuid,bytea,kb_sha256,jsonb)'),
-           ('kb_bid_v2_create_evidence_pick_set(uuid,uuid,uuid[],kb_actor_identity,text,bytea,kb_sha256)'),
-           ('kb_bid_v2_create_node_evidence_pick_set(uuid,uuid,uuid,uuid[],kb_actor_identity,text,bytea,kb_sha256)'),
-           ('kb_bid_v2_list_evidence_pick_sets(uuid,kb_actor_identity)'),
-           ('kb_bid_v2_get_node_evidence(uuid,uuid,kb_actor_identity)'),
-           ('kb_bid_v2_get_evidence_overview(uuid,kb_actor_identity)'),
-           ('kb_bid_v2_get_current_assessments(uuid,kb_actor_identity)'),
-           ('kb_bid_v2_get_preview_html(uuid,kb_actor_identity)'),
-           ('kb_bid_v2_next_quote_snapshot_revision(uuid,kb_actor_identity)'),
-           ('kb_bid_v2_publish_quote_snapshot(uuid,uuid,bigint,uuid,kb_object_ref,kb_sha256,bigint,bytea,kb_actor_identity,text,bytea,kb_sha256)'),
-           ('kb_bid_v2_list_quote_snapshots(uuid,kb_actor_identity)'),
-           ('kb_bid_v2_get_quote_snapshot(uuid,uuid,kb_actor_identity)'),
-           ('kb_bid_v2_prepare_workspace_attachment(uuid,uuid,uuid,uuid[],uuid[],integer[],integer[],kb_actor_identity,text,bytea,kb_sha256)'),
-           ('kb_bid_v2_create_outline_checkpoint(uuid,uuid,kb_sha256,uuid,kb_actor_identity,text,bytea,kb_sha256)'),
-           ('kb_bid_v2_accept_candidate(uuid,uuid,uuid,kb_sha256,jsonb,integer[],kb_actor_identity,text,bytea,kb_sha256)'),
-           ('kb_bid_v2_advance_workspace_projection(uuid,uuid,kb_sha256,uuid,kb_sha256,kb_actor_identity)'),
-           ('kb_bid_v2_get_requirement_projection(uuid,kb_actor_identity)'),
-           ('kb_bid_v2_get_requirement_set_compile_request(uuid,uuid,kb_actor_identity)'),
-           ('kb_bid_v2_refresh_requirement_projection(uuid,uuid,kb_sha256,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256)'),
-           ('kb_bid_v2_apply_quote_snapshot(uuid,uuid,kb_sha256,uuid,kb_sha256,kb_actor_identity,text,bytea,kb_sha256)'),
-           ('kb_bid_v2_retire_workspace_asset(uuid,uuid,text,kb_actor_identity,text,bytea,kb_sha256)'),
-           ('kb_bid_v2_load_user_pick_evidence(uuid,bigint,kb_sha256)'),
-           ('kb_bid_v2_load_submission_export_input(uuid,bigint,kb_sha256)'),
-           ('kb_bid_v2_mark_requirement_set_compile_failed(uuid,bigint,kb_sha256,text)'),
-           ('kb_bid_v2_publish_pdf_attachment_preparation(uuid,bigint,kb_sha256,uuid,uuid,uuid[],uuid[],kb_object_ref[],kb_sha256[],text[],bigint[],integer[],integer[],kb_actor_identity)'),
-           ('kb_bid_v2_prepare_submission_export(uuid,bigint,kb_sha256,uuid,kb_object_ref,kb_sha256,text,uuid,uuid,kb_actor_identity)'),
-           ('kb_bid_v2_load_submission_manifest_render_input(uuid,kb_sha256)'),
-           ('kb_bid_v2_publish_submission_export(uuid,bigint,kb_sha256,uuid,kb_object_ref,kb_sha256,text,uuid,uuid,uuid,uuid,kb_object_ref,kb_sha256,text,bigint,kb_actor_identity)'),
-           ('kb_bid_v2_list_submission_exports(uuid,kb_actor_identity)'),
-           ('kb_bid_v2_get_submission_export(uuid,uuid,kb_actor_identity)'),
-           ('kb_bid_v2_get_submission_assessment_report(uuid,uuid,kb_actor_identity)'),
-           ('kb_bid_v2_get_submission_export_object(uuid,uuid,kb_actor_identity)'))
-         SELECT
-           (SELECT count(*)=7 FROM knowledge WHERE to_regclass('public.'||name) IS NOT NULL),
-           (SELECT count(*)=6 FROM shared WHERE to_regclass('public.'||name) IS NOT NULL),
-           ((SELECT count(*)=27 FROM bidding WHERE to_regclass('public.'||name) IS NOT NULL)
-             AND (SELECT count(*)=37 FROM bidding_functions
-               WHERE to_regprocedure('public.'||signature) IS NOT NULL)
-             AND EXISTS (SELECT 1 FROM pg_attribute attribute
-               WHERE attribute.attrelid=to_regclass('public.bid_workspace_asset_artifacts')
-                 AND attribute.attname='file_name' AND NOT attribute.attisdropped)
-             AND EXISTS (SELECT 1 FROM pg_attribute attribute
-               WHERE attribute.attrelid=to_regclass('public.bid_workspace_revision_artifacts')
-                 AND attribute.attname='requirement_projection_sha256' AND NOT attribute.attisdropped)
-             AND EXISTS (SELECT 1 FROM pg_attribute attribute
-               WHERE attribute.attrelid=to_regclass('public.bid_workspace_revision_artifacts')
-                 AND attribute.attname='quote_snapshot_id' AND NOT attribute.attisdropped)
-             AND EXISTS (SELECT 1 FROM pg_attribute attribute
-               WHERE attribute.attrelid=to_regclass('public.bid_render_document_snapshot_artifacts')
-                 AND attribute.attname='submission_assessment_snapshot_id' AND NOT attribute.attisdropped)
-             AND EXISTS (SELECT 1 FROM pg_constraint constraint_value
-               WHERE constraint_value.conrelid=to_regclass('public.bid_async_request_snapshot_artifacts')
-                 AND constraint_value.contype='c'
-                 AND constraint_value.convalidated
-                 AND regexp_replace(pg_get_constraintdef(constraint_value.oid),'[[:space:]]','','g')
-                   = 'CHECK((status=ANY(ARRAY[''pending''::text,''succeeded''::text,''failed''::text])))')
-             AND EXISTS (SELECT 1 FROM pg_constraint constraint_value
-               WHERE constraint_value.conrelid=to_regclass('public.bid_candidate_artifacts')
-                 AND constraint_value.contype='c'
-                 AND constraint_value.convalidated
-                 AND regexp_replace(pg_get_constraintdef(constraint_value.oid),'[[:space:]]','','g')
-                   = 'CHECK((state=ANY(ARRAY[''proposed''::text,''accepted''::text,''rejected''::text])))')),
-           EXISTS (SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
-             WHERE namespace.nspname='public' AND relation.relkind IN ('r','p','v','m'))",
+/// Existing request-path pool accessor. Startup verification is performed once by
+/// `connect_runtime_verified`; request handlers never bootstrap or repair schema.
+pub async fn connect() -> Result<PgPool, sqlx::Error> {
+    connect_unverified().await
+}
+
+/// Runtime startup gate shared by API, Worker, and Retention.
+pub async fn connect_runtime_verified(
+    expected_component: crate::SchemaComponentKind,
+) -> Result<PgPool, SchemaError> {
+    let identity = SchemaRuntimeIdentity::load_from_env()?;
+    if identity.component_kind != expected_component {
+        return Err(SchemaError::mismatch(
+            "component kind differs from executable",
+        ));
+    }
+    let pool = connect_unverified().await?;
+    verify_runtime_schema(&pool, &identity).await?;
+    Ok(pool)
+}
+
+async fn application_object_count(connection: &mut PgConnection) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM (
+           SELECT class_value.oid FROM pg_catalog.pg_class class_value
+           JOIN pg_catalog.pg_namespace namespace_value ON namespace_value.oid=class_value.relnamespace
+           JOIN pg_catalog.pg_roles owner_role ON owner_role.oid=class_value.relowner
+           WHERE owner_role.rolname='kb_app_owner'
+             AND namespace_value.nspname NOT IN ('pg_catalog','information_schema')
+             AND namespace_value.nspname !~ '^pg_(temp|toast)'
+           UNION ALL
+           SELECT procedure_value.oid FROM pg_catalog.pg_proc procedure_value
+           JOIN pg_catalog.pg_namespace namespace_value ON namespace_value.oid=procedure_value.pronamespace
+           JOIN pg_catalog.pg_roles owner_role ON owner_role.oid=procedure_value.proowner
+           WHERE owner_role.rolname='kb_app_owner'
+             AND namespace_value.nspname NOT IN ('pg_catalog','information_schema')
+             AND namespace_value.nspname !~ '^pg_(temp|toast)'
+           UNION ALL
+           SELECT type_value.oid FROM pg_catalog.pg_type type_value
+           JOIN pg_catalog.pg_namespace namespace_value ON namespace_value.oid=type_value.typnamespace
+           JOIN pg_catalog.pg_roles owner_role ON owner_role.oid=type_value.typowner
+           WHERE owner_role.rolname='kb_app_owner'
+             AND namespace_value.nspname NOT IN ('pg_catalog','information_schema')
+             AND namespace_value.nspname !~ '^pg_(temp|toast)'
+           UNION ALL
+           SELECT namespace_value.oid FROM pg_catalog.pg_namespace namespace_value
+           JOIN pg_catalog.pg_roles owner_role ON owner_role.oid=namespace_value.nspowner
+           WHERE owner_role.rolname='kb_app_owner' AND namespace_value.nspname<>'public'
+             AND namespace_value.nspname NOT IN ('pg_catalog','information_schema')
+             AND namespace_value.nspname !~ '^pg_(temp|toast)'
+         ) application_objects",
     )
     .fetch_one(connection)
     .await
 }
 
-/// Apply the single fresh schema directly. This helper is checksum-, manifest-,
-/// marker-, and compatibility-free. An already-complete schema is accepted;
-/// a partial schema must be reset rather than silently repaired.
-pub async fn apply_fresh_baseline(pool: &PgPool) -> Result<(), sqlx::Error> {
+async fn installed_extensions(
+    connection: &mut PgConnection,
+) -> Result<Vec<ExtensionIdentity>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT extension_value.extname AS name,extension_value.extversion AS version,
+                namespace_value.nspname AS schema
+         FROM pg_catalog.pg_extension extension_value
+         JOIN pg_catalog.pg_namespace namespace_value ON namespace_value.oid=extension_value.extnamespace",
+    )
+    .fetch_all(connection)
+    .await?;
+    let mut extensions = rows
+        .into_iter()
+        .map(|row| {
+            Ok(ExtensionIdentity {
+                name: row.try_get("name")?,
+                version: row.try_get("version")?,
+                schema: row.try_get("schema")?,
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    extensions.sort_by(|left, right| {
+        (&left.name, &left.version, &left.schema).cmp(&(&right.name, &right.version, &right.schema))
+    });
+    Ok(extensions)
+}
+
+async fn server_version(connection: &mut PgConnection) -> Result<i32, sqlx::Error> {
+    sqlx::query_scalar("SELECT current_setting('server_version_num')::integer")
+        .fetch_one(connection)
+        .await
+}
+
+async fn read_receipt(connection: &mut PgConnection) -> Result<SchemaReceiptV1, SchemaError> {
+    let rows = sqlx::query(
+        "SELECT schema_revision,shared_baseline_sha256::text,knowledge_baseline_sha256::text,
+                bidding_baseline_sha256::text,manifest_contract_version,catalog_manifest_sha256::text,
+                postgres_server_version_num,extensions,release_descriptor_sha256::text,
+                deployment_namespace_id,created_at
+         FROM public.platform_schema_snapshot WHERE singleton",
+    )
+    .fetch_all(connection)
+    .await
+    .map_err(|error| {
+        map_sql_verification_error(error, "schema receipt is absent or unreadable")
+    })?;
+    if rows.len() != 1 {
+        return Err(SchemaError::mismatch(
+            "schema receipt must contain exactly one singleton row",
+        ));
+    }
+    let row = &rows[0];
+    let invalid_column = |_| SchemaError::mismatch("schema receipt columns are invalid");
+    let extensions: serde_json::Value = row.try_get("extensions").map_err(invalid_column)?;
+    let extensions = serde_json::from_value(extensions)
+        .map_err(|_| SchemaError::mismatch("schema receipt extensions are invalid"))?;
+    Ok(SchemaReceiptV1 {
+        schema_revision: row.try_get("schema_revision").map_err(invalid_column)?,
+        shared_baseline_sha256: row
+            .try_get("shared_baseline_sha256")
+            .map_err(invalid_column)?,
+        knowledge_baseline_sha256: row
+            .try_get("knowledge_baseline_sha256")
+            .map_err(invalid_column)?,
+        bidding_baseline_sha256: row
+            .try_get("bidding_baseline_sha256")
+            .map_err(invalid_column)?,
+        manifest_contract_version: row
+            .try_get("manifest_contract_version")
+            .map_err(invalid_column)?,
+        catalog_manifest_sha256: row
+            .try_get("catalog_manifest_sha256")
+            .map_err(invalid_column)?,
+        postgres_server_version_num: row
+            .try_get("postgres_server_version_num")
+            .map_err(invalid_column)?,
+        extensions,
+        release_descriptor_sha256: row
+            .try_get("release_descriptor_sha256")
+            .map_err(invalid_column)?,
+        deployment_namespace_id: row
+            .try_get("deployment_namespace_id")
+            .map_err(invalid_column)?,
+        created_at: row.try_get("created_at").map_err(invalid_column)?,
+    })
+}
+
+async fn verify_receipt_on_connection(
+    connection: &mut PgConnection,
+    identity: &SchemaRuntimeIdentity,
+) -> Result<SchemaReceiptV1, SchemaError> {
+    let receipt = read_receipt(connection).await?;
+    let manifest = build_catalog_manifest(connection)
+        .await
+        .map_err(map_catalog_verification_error)?;
+    let manifest_sha = catalog_manifest_sha256(&manifest)
+        .map_err(|_| SchemaError::mismatch("catalog manifest is invalid"))?;
+    let extensions = installed_extensions(connection).await.map_err(|error| {
+        map_sql_verification_error(error, "installed extension identity is unreadable")
+    })?;
+    let version = server_version(connection).await.map_err(|error| {
+        map_sql_verification_error(error, "PostgreSQL server identity is unreadable")
+    })?;
+    let exact = receipt.schema_revision == identity.schema_revision()
+        && receipt.shared_baseline_sha256 == shared_baseline_sha256()
+        && receipt.knowledge_baseline_sha256 == knowledge_baseline_sha256()
+        && receipt.bidding_baseline_sha256 == bidding_baseline_sha256()
+        && receipt.manifest_contract_version == CATALOG_MANIFEST_CONTRACT_VERSION
+        && receipt.catalog_manifest_sha256 == manifest_sha
+        && receipt.postgres_server_version_num == version
+        && receipt.extensions == extensions
+        && receipt.release_descriptor_sha256 == identity.release_descriptor_sha256
+        && receipt.deployment_namespace_id == identity.deployment_namespace_id;
+    if !exact {
+        return Err(SchemaError::mismatch("receipt or catalog identity differs"));
+    }
+    Ok(receipt)
+}
+
+#[doc(hidden)]
+pub async fn verify_runtime_schema_on_connection(
+    connection: &mut PgConnection,
+    identity: &SchemaRuntimeIdentity,
+) -> Result<SchemaReceiptV1, SchemaError> {
+    verify_receipt_on_connection(connection, identity).await
+}
+
+pub async fn verify_runtime_schema(
+    pool: &PgPool,
+    identity: &SchemaRuntimeIdentity,
+) -> Result<SchemaReceiptV1, SchemaError> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *transaction)
+        .await?;
+    let receipt = verify_receipt_on_connection(&mut transaction, identity).await?;
+    transaction.commit().await?;
+    Ok(receipt)
+}
+
+pub async fn apply_fresh_baseline(pool: &PgPool) -> Result<(), SchemaError> {
+    let identity = SchemaRuntimeIdentity::load_from_env()?;
+    apply_fresh_baseline_with_identity(pool, &identity).await
+}
+
+pub async fn apply_fresh_baseline_with_identity(
+    pool: &PgPool,
+    identity: &SchemaRuntimeIdentity,
+) -> Result<(), SchemaError> {
+    if identity.component_kind != crate::SchemaComponentKind::Migrator {
+        return Err(SchemaError::mismatch(
+            "fresh baseline requires migrator component identity",
+        ));
+    }
     let mut lock_connection = pool.acquire().await?;
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(BOOTSTRAP_LOCK_ID)
@@ -153,22 +346,70 @@ pub async fn apply_fresh_baseline(pool: &PgPool) -> Result<(), sqlx::Error> {
         .await?;
 
     let result = async {
-        match schema_slice_state(&mut lock_connection).await? {
-            (true, true, true, _) => return Ok(()),
-            (false, false, false, false) => {}
-            state => {
-                return Err(sqlx::Error::Protocol(format!(
-                    "fresh schema is partial or stale (knowledge={}, shared={}, bidding={}, objects_present={}); reset the database",
-                    state.0, state.1, state.2, state.3
-                )));
-            }
+        let snapshot_exists: bool =
+            sqlx::query_scalar("SELECT to_regclass('public.platform_schema_snapshot') IS NOT NULL")
+                .fetch_one(&mut *lock_connection)
+                .await?;
+        if snapshot_exists {
+            let mut transaction = lock_connection.begin().await?;
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                .execute(&mut *transaction)
+                .await?;
+            verify_receipt_on_connection(&mut transaction, identity).await?;
+            transaction.commit().await?;
+            return Ok(());
+        }
+        if application_object_count(&mut lock_connection).await? != 0 {
+            return Err(SchemaError::mismatch(
+                "snapshot missing from a partial application catalog",
+            ));
         }
 
-        let mut transaction = (*lock_connection).begin().await?;
-        sqlx::raw_sql(KNOWLEDGE_BASE_BASELINE).execute(&mut *transaction).await?;
-        sqlx::raw_sql(SHARED_PLATFORM_BASELINE).execute(&mut *transaction).await?;
-        sqlx::raw_sql(BIDDING_BASELINE).execute(&mut *transaction).await?;
-        transaction.commit().await
+        let mut transaction = lock_connection.begin().await?;
+        sqlx::query("SET LOCAL ROLE kb_app_owner")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::raw_sql(SHARED_PLATFORM_BASELINE)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::raw_sql(KNOWLEDGE_BASE_BASELINE)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::raw_sql(BIDDING_BASELINE)
+            .execute(&mut *transaction)
+            .await?;
+        crate::catalog::verify_fresh_seed_selection(&mut transaction)
+            .await
+            .map_err(map_catalog_verification_error)?;
+        let manifest = build_catalog_manifest(&mut transaction)
+            .await
+            .map_err(map_catalog_verification_error)?;
+        let manifest_sha = catalog_manifest_sha256(&manifest)
+            .map_err(|_| SchemaError::mismatch("catalog manifest is invalid"))?;
+        let extensions = installed_extensions(&mut transaction).await?;
+        let version = server_version(&mut transaction).await?;
+        sqlx::query(
+            "INSERT INTO public.platform_schema_snapshot(
+               singleton,schema_revision,shared_baseline_sha256,knowledge_baseline_sha256,
+               bidding_baseline_sha256,manifest_contract_version,catalog_manifest_sha256,
+               postgres_server_version_num,extensions,release_descriptor_sha256,
+               deployment_namespace_id,created_at)
+             VALUES(true,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,clock_timestamp())",
+        )
+        .bind(identity.schema_revision())
+        .bind(shared_baseline_sha256())
+        .bind(knowledge_baseline_sha256())
+        .bind(bidding_baseline_sha256())
+        .bind(CATALOG_MANIFEST_CONTRACT_VERSION)
+        .bind(manifest_sha)
+        .bind(version)
+        .bind(serde_json::to_value(extensions).expect("extensions serialize"))
+        .bind(&identity.release_descriptor_sha256)
+        .bind(identity.deployment_namespace_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
     }
     .await;
 
@@ -186,59 +427,120 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_database_url_only_when_absent() {
-        assert_eq!(
-            database_url_from_env_value(Err(std::env::VarError::NotPresent)).unwrap(),
-            DEFAULT_DATABASE_URL
-        );
-        assert!(
-            database_url_from_env_value(Err(std::env::VarError::NotUnicode(
-                std::ffi::OsString::from("bad")
-            )))
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn fresh_schema_contains_only_target_bidding_contract() {
-        assert!(BIDDING_BASELINE.contains("CREATE TABLE bid_submission_workspaces"));
-    }
-
-    #[test]
-    fn retention_live_upgrade_preserves_the_runtime_function_contract() {
-        let live = include_str!("../../../migrations/shared_platform_retention_live.sql");
-        for function in [
-            "kb_retention_claim",
-            "kb_retention_heartbeat",
-            "kb_retention_complete",
-            "kb_retention_fail",
-        ] {
-            assert!(SHARED_PLATFORM_BASELINE.contains(&format!("CREATE FUNCTION {function}")));
-            assert!(live.contains(&format!("CREATE OR REPLACE FUNCTION {function}")));
-        }
-        assert!(live.contains("TO kb_runtime_retention"));
-    }
-
-    #[test]
-    fn bidding_schema_fingerprint_requires_typed_requirement_compile_status() {
+    fn database_url_has_no_checked_in_fallback() {
         let source = include_str!("db.rs");
-        assert!(source.contains(
-            "('kb_bid_v2_get_requirement_set_compile_request(uuid,uuid,kb_actor_identity)')"
+        assert!(!source.contains(&["postgres", "://"].concat()));
+        assert!(!source.contains(&["154", "32"].concat()));
+        assert!(source.contains("std::env::var(\"DATABASE_URL\")?"));
+    }
+
+    #[test]
+    fn verification_error_mapping_preserves_transport_and_contract_classes() {
+        let transport = map_sql_verification_error(
+            sqlx::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "closed",
+            )),
+            "receipt",
+        );
+        assert!(matches!(transport, SchemaError::Sql(_)));
+        assert_eq!(transport.code(), "POSTGRES_UNAVAILABLE");
+
+        let pool_timeout =
+            map_catalog_verification_error(CatalogError::Sql(sqlx::Error::PoolTimedOut));
+        assert!(matches!(pool_timeout, SchemaError::Sql(_)));
+        let contract = map_sql_verification_error(sqlx::Error::RowNotFound, "receipt");
+        assert!(matches!(contract, SchemaError::RevisionMismatch { .. }));
+        assert_eq!(contract.code(), SCHEMA_REVISION_MISMATCH);
+        let catalog_contract =
+            map_catalog_verification_error(CatalogError::InvalidCatalog("fixture".into()));
+        assert!(matches!(
+            catalog_contract,
+            SchemaError::RevisionMismatch { .. }
         ));
-        assert!(source.contains("count(*)=37 FROM bidding_functions"));
     }
 
     #[test]
-    fn runtime_connect_never_bootstraps_schema() {
+    fn baseline_order_receipt_and_owner_boundary_are_explicit() {
         let source = include_str!("db.rs");
-        let connect_body = source
-            .split("pub async fn connect()")
-            .nth(1)
-            .expect("connect body")
-            .split("async fn schema_slice_state")
-            .next()
-            .expect("connect end");
-        assert!(!connect_body.contains("apply_fresh_baseline"));
-        assert!(!connect_body.contains("raw_sql"));
+        let owner = source.find("SET LOCAL ROLE kb_app_owner").unwrap();
+        let shared = source
+            .find("sqlx::raw_sql(SHARED_PLATFORM_BASELINE)")
+            .unwrap();
+        let knowledge = source
+            .find("sqlx::raw_sql(KNOWLEDGE_BASE_BASELINE)")
+            .unwrap();
+        let bidding = source.find("sqlx::raw_sql(BIDDING_BASELINE)").unwrap();
+        let manifest = source
+            .find("let manifest = build_catalog_manifest(&mut transaction)")
+            .unwrap();
+        let receipt = source
+            .find("INSERT INTO public.platform_schema_snapshot")
+            .unwrap();
+        assert!(
+            owner < shared
+                && shared < knowledge
+                && knowledge < bidding
+                && bidding < manifest
+                && manifest < receipt
+        );
+    }
+
+    #[test]
+    fn matching_replay_and_runtime_verification_are_read_only() {
+        let source = include_str!("db.rs");
+        let verifier = source
+            .split_once("async fn verify_receipt_on_connection")
+            .unwrap()
+            .1
+            .split_once("pub async fn verify_runtime_schema")
+            .unwrap()
+            .0;
+        assert!(!verifier.contains("raw_sql"));
+        assert!(!verifier.contains("INSERT"));
+        assert!(!verifier.contains("UPDATE"));
+        assert!(!verifier.contains("DELETE"));
+        assert!(!verifier.contains("SET ROLE"));
+        assert!(source.contains("REPEATABLE READ READ ONLY"));
+        assert!(!source.contains(&["schema_slice", "state"].join("_")));
+    }
+
+    #[test]
+    fn shared_slice_contains_exact_snapshot_structure_without_seed_row() {
+        let snapshot = SHARED_PLATFORM_BASELINE
+            .split_once("CREATE TABLE platform_schema_snapshot (")
+            .unwrap()
+            .1
+            .split_once(");")
+            .unwrap()
+            .0;
+        for column in [
+            "singleton boolean PRIMARY KEY CHECK (singleton)",
+            "schema_revision text NOT NULL",
+            "shared_baseline_sha256 char(64) NOT NULL",
+            "knowledge_baseline_sha256 char(64) NOT NULL",
+            "bidding_baseline_sha256 char(64) NOT NULL",
+            "manifest_contract_version integer NOT NULL",
+            "catalog_manifest_sha256 char(64) NOT NULL",
+            "postgres_server_version_num integer NOT NULL",
+            "extensions jsonb NOT NULL",
+            "release_descriptor_sha256 char(64) NOT NULL",
+            "deployment_namespace_id uuid NOT NULL",
+            "created_at timestamptz NOT NULL",
+        ] {
+            assert!(
+                snapshot.contains(column),
+                "missing snapshot column {column}"
+            );
+        }
+        assert!(!SHARED_PLATFORM_BASELINE.contains("INSERT INTO platform_schema_snapshot"));
+    }
+
+    #[test]
+    fn unverified_and_verified_connection_entrypoints_are_separate() {
+        let source = include_str!("db.rs");
+        assert!(source.contains("pub async fn connect_unverified()"));
+        assert!(source.contains("pub async fn connect_runtime_verified("));
+        assert!(source.contains("verify_runtime_schema(&pool, &identity).await?"));
     }
 }

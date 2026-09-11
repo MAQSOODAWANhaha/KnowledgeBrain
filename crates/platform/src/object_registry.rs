@@ -1,17 +1,13 @@
-use sqlx::{PgPool, Row};
-use std::time::Duration;
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-const RETENTION_LEASE_MS: i32 = 60_000;
-const RETENTION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RetentionClaim {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectDeletionIdentity {
+    pub deletion_id: Uuid,
     pub object_ref: String,
     pub digest: String,
     pub byte_length: i64,
-    pub attempt: i32,
-    pub claim_token: Uuid,
 }
 
 pub async fn stage_object_upload(
@@ -43,75 +39,225 @@ pub async fn abandon_object_upload(
     pool: &PgPool,
     staging_id: Uuid,
     actor_identity: &str,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT kb_object_upload_abandon($1,$2::kb_actor_identity)")
-        .bind(staging_id)
-        .bind(actor_identity)
-        .fetch_one(pool)
-        .await
+) -> Result<Option<ObjectDeletionIdentity>, sqlx::Error> {
+    let value: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT kb_object_upload_abandon($1,$2::kb_actor_identity)")
+            .bind(staging_id)
+            .bind(actor_identity)
+            .fetch_one(pool)
+            .await?;
+    value
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))
 }
 
-/// Cancellation-safe best-effort cleanup for the small set of object uploads
-/// staged by one publication attempt. Database expiry remains the final fallback.
+pub async fn schedule_object_upload_cleanup(staging_id: Uuid) -> Result<(), String> {
+    crate::enqueue_object_upload_expire(staging_id)
+        .await?
+        .map(|_| ())
+        .ok_or_else(|| "Oxana Redis is not configured for upload cleanup".to_string())
+}
+
+pub async fn dispatch_object_deletion(
+    _pool: &PgPool,
+    deletion: ObjectDeletionIdentity,
+) -> Result<(), String> {
+    let queued = crate::enqueue_object_retention(crate::ObjectRetentionJob {
+        deletion_id: deletion.deletion_id,
+        object_ref: deletion.object_ref.clone(),
+        digest: deletion.digest.clone(),
+        byte_length: deletion.byte_length,
+    })
+    .await?;
+    queued
+        .map(|_| ())
+        .ok_or_else(|| "Oxana Redis is not configured for object retention".to_string())
+}
+
+/// Shared ownership of staged uploads created by one handler. The handler's
+/// supervisor retains this tracker and explicitly awaits cleanup after joining
+/// cancelled work; expiry is only a fallback for process crashes.
+#[derive(Clone)]
+pub struct StagedObjectCleanupTracker {
+    staging_ids: std::sync::Arc<std::sync::Mutex<Vec<Uuid>>>,
+}
+
+impl StagedObjectCleanupTracker {
+    pub fn new(_pool: &PgPool, _actor: &str) -> Self {
+        Self {
+            staging_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn guard(&self) -> StagedObjectCleanupGuard {
+        StagedObjectCleanupGuard {
+            tracker: self.clone(),
+        }
+    }
+
+    pub fn register(&self, staging_id: Uuid) {
+        let mut ids = self
+            .staging_ids
+            .lock()
+            .expect("staged cleanup lock poisoned");
+        if !ids.contains(&staging_id) {
+            ids.push(staging_id);
+        }
+    }
+
+    pub fn disarm(&self, staging_id: Uuid) {
+        self.staging_ids
+            .lock()
+            .expect("staged cleanup lock poisoned")
+            .retain(|value| *value != staging_id);
+    }
+
+    pub async fn cleanup_pending(&self) -> Result<(), String> {
+        loop {
+            let staging_id = self
+                .staging_ids
+                .lock()
+                .map_err(|_| "staged cleanup lock poisoned".to_string())?
+                .first()
+                .copied();
+            let Some(staging_id) = staging_id else {
+                return Ok(());
+            };
+            schedule_object_upload_cleanup(staging_id)
+                .await
+                .map_err(|error| {
+                    format!("staged object cleanup scheduling failed for {staging_id}: {error}")
+                })?;
+            let mut ids = self
+                .staging_ids
+                .lock()
+                .map_err(|_| "staged cleanup lock poisoned".to_string())?;
+            if ids.first() == Some(&staging_id) {
+                ids.remove(0);
+            } else {
+                ids.retain(|value| *value != staging_id);
+            }
+        }
+    }
+
+    /// Recovery identities in the order in which handoff will be attempted.
+    pub fn pending_staging_ids(&self) -> Vec<Uuid> {
+        self.staging_ids
+            .lock()
+            .expect("staged cleanup lock poisoned")
+            .clone()
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.staging_ids
+            .lock()
+            .expect("staged cleanup lock poisoned")
+            .len()
+    }
+
+    pub fn has_pending(&self) -> bool {
+        self.pending_count() != 0
+    }
+}
+
+/// Synchronous registration facade used inside a handler pipeline. Dropping it
+/// never detaches work; the retained tracker is the only cleanup executor.
 pub struct StagedObjectCleanupGuard {
-    pool: PgPool,
-    actor: String,
-    staging_ids: Vec<Uuid>,
+    tracker: StagedObjectCleanupTracker,
 }
 
 impl StagedObjectCleanupGuard {
     pub fn new(pool: &PgPool, actor: &str) -> Self {
-        Self {
-            pool: pool.clone(),
-            actor: actor.to_owned(),
-            staging_ids: Vec::new(),
-        }
+        StagedObjectCleanupTracker::new(pool, actor).guard()
     }
 
-    /// Register before awaiting the stage/write future so cancellation cannot
-    /// lose an upload that committed immediately before the future was dropped.
+    pub fn tracker(&self) -> StagedObjectCleanupTracker {
+        self.tracker.clone()
+    }
+
     pub fn register(&mut self, staging_id: Uuid) {
-        if !self.staging_ids.contains(&staging_id) {
-            self.staging_ids.push(staging_id);
-        }
+        self.tracker.register(staging_id);
     }
 
     pub fn disarm(&mut self, staging_id: Uuid) {
-        self.staging_ids.retain(|value| *value != staging_id);
+        self.tracker.disarm(staging_id);
     }
 
     pub fn disarm_all(&mut self) {
-        self.staging_ids.clear();
+        let mut ids = self
+            .tracker
+            .staging_ids
+            .lock()
+            .expect("staged cleanup lock poisoned");
+        ids.clear();
     }
 
     #[cfg(test)]
-    fn pending(&self) -> &[Uuid] {
-        &self.staging_ids
+    fn pending(&self) -> Vec<Uuid> {
+        self.tracker
+            .staging_ids
+            .lock()
+            .expect("staged cleanup lock poisoned")
+            .clone()
     }
 }
 
-impl Drop for StagedObjectCleanupGuard {
-    fn drop(&mut self) {
-        if self.staging_ids.is_empty() {
-            return;
-        }
-        let ids = std::mem::take(&mut self.staging_ids);
-        let pool = self.pool.clone();
-        let actor = self.actor.clone();
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                for staging_id in ids {
-                    let _ = abandon_object_upload(&pool, staging_id, &actor).await;
-                }
-            });
-        }
-    }
+pub async fn enqueue_expired_object_uploads(pool: &PgPool) -> Result<i32, sqlx::Error> {
+    enqueue_expired_object_uploads_with(pool, |staging_id| async move {
+        crate::enqueue_object_upload_expire(staging_id).await
+    })
+    .await
 }
 
-pub async fn expire_object_uploads(pool: &PgPool) -> Result<i32, sqlx::Error> {
-    sqlx::query_scalar("SELECT kb_object_upload_expire()")
+pub async fn enqueue_expired_object_uploads_with<F, Fut>(
+    pool: &PgPool,
+    enqueue: F,
+) -> Result<i32, sqlx::Error>
+where
+    F: Fn(Uuid) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<String>, String>>,
+{
+    let staging_ids: Vec<Uuid> =
+        sqlx::query_scalar("SELECT * FROM kb_object_upload_expiry_candidates()")
+            .fetch_all(pool)
+            .await?;
+    for staging_id in &staging_ids {
+        enqueue(*staging_id)
+            .await
+            .map_err(sqlx::Error::Protocol)?
+            .ok_or_else(|| {
+                sqlx::Error::Protocol("Oxana Redis is not configured for upload expiry".into())
+            })?;
+    }
+    i32::try_from(staging_ids.len()).map_err(|error| sqlx::Error::Decode(Box::new(error)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObjectUploadExpiryResult {
+    state: String,
+    staging_id: Uuid,
+    deletion: Option<ObjectDeletionIdentity>,
+}
+
+pub async fn expire_one_object_upload(
+    pool: &PgPool,
+    staging_id: Uuid,
+) -> Result<Option<ObjectDeletionIdentity>, String> {
+    let value: serde_json::Value = sqlx::query_scalar("SELECT kb_object_upload_expire_one($1)")
+        .bind(staging_id)
         .fetch_one(pool)
         .await
+        .map_err(|error| error.to_string())?;
+    let result: ObjectUploadExpiryResult =
+        serde_json::from_value(value).map_err(|error| error.to_string())?;
+    if result.staging_id != staging_id
+        || !matches!(result.state.as_str(), "expired" | "not_current")
+    {
+        return Err("upload expiry returned an invalid closed result".into());
+    }
+    Ok(result.deletion)
 }
 
 pub async fn register_knowledge_document_object(
@@ -138,8 +284,8 @@ pub async fn release_knowledge_document_object(
     document_id: Uuid,
     actor_identity: &str,
     idempotency_key: &str,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+) -> Result<Option<ObjectDeletionIdentity>, sqlx::Error> {
+    let value: Option<serde_json::Value> = sqlx::query_scalar(
         "SELECT kb_release_knowledge_document_object($1,$2::kb_actor_identity,$3,$4)",
     )
     .bind(document_id)
@@ -147,137 +293,52 @@ pub async fn release_knowledge_document_object(
     .bind(idempotency_key)
     .bind(Uuid::new_v4())
     .fetch_one(pool)
-    .await
+    .await?;
+    value
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))
 }
 
-async fn claim_retention(
+pub async fn process_object_deletion(
     pool: &PgPool,
-    worker_name: &str,
-) -> Result<Option<RetentionClaim>, sqlx::Error> {
-    let claim_token = Uuid::new_v4();
-    let row = sqlx::query(
-        "SELECT object_ref::text AS object_ref, digest::text AS digest, byte_length, attempt FROM kb_retention_claim($1,$2,$3)",
-    )
-        .bind(claim_token)
-        .bind(worker_name)
-        .bind(RETENTION_LEASE_MS)
-        .fetch_optional(pool)
-        .await?;
-    row.map(|row| {
-        Ok(RetentionClaim {
-            object_ref: row.try_get("object_ref")?,
-            digest: row.try_get("digest")?,
-            byte_length: row.try_get("byte_length")?,
-            attempt: row.try_get("attempt")?,
-            claim_token,
-        })
-    })
-    .transpose()
-}
-
-async fn delete_claimed_blob_with_heartbeat(
-    pool: &PgPool,
-    claim: &RetentionClaim,
-) -> Result<Result<(), String>, sqlx::Error> {
-    let deletion = crate::delete_claimed_blob(&claim.digest);
-    tokio::pin!(deletion);
-    let mut heartbeat = tokio::time::interval(RETENTION_HEARTBEAT_INTERVAL);
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    heartbeat.tick().await;
-
-    loop {
-        tokio::select! {
-            result = &mut deletion => return Ok(result),
-            _ = heartbeat.tick() => {
-                let renewal: Result<bool, sqlx::Error> = sqlx::query_scalar(
-                    "SELECT kb_retention_heartbeat($1::kb_object_ref,$2,$3)",
-                )
-                .bind(&claim.object_ref)
-                .bind(claim.claim_token)
-                .bind(RETENTION_LEASE_MS)
-                .fetch_one(pool)
-                .await;
-                match renewal {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        let _ = deletion.await;
-                        return Err(sqlx::Error::Protocol(
-                            "retention heartbeat lost the current claim".into(),
-                        ));
-                    }
-                    Err(error) => {
-                        let _ = deletion.await;
-                        return Err(error);
-                    }
-                }
-            }
-        }
+    deletion: &ObjectDeletionIdentity,
+) -> Result<(), String> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Preflight {
+        state: String,
     }
-}
-
-fn bounded_error_code(error: &str) -> &'static str {
-    if error.contains("timeout") {
-        "OBJECT_DELETE_TIMEOUT"
-    } else if error.contains("s3") {
-        "OBJECT_STORE_DELETE_FAILED"
+    let value: serde_json::Value =
+        sqlx::query_scalar("SELECT kb_retention_preflight($1,$2::kb_object_ref,$3::kb_sha256,$4)")
+            .bind(deletion.deletion_id)
+            .bind(&deletion.object_ref)
+            .bind(&deletion.digest)
+            .bind(deletion.byte_length)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| error.to_string())?;
+    let preflight: Preflight = serde_json::from_value(value).map_err(|error| error.to_string())?;
+    match preflight.state.as_str() {
+        "completed" => return Ok(()),
+        "current" => {}
+        "mismatch" => return Err("object deletion business fence is not current".into()),
+        _ => return Err("retention preflight returned an invalid closed state".into()),
+    }
+    crate::delete_retained_blob(&deletion.digest).await?;
+    let completed: bool =
+        sqlx::query_scalar("SELECT kb_retention_complete($1,$2::kb_object_ref,$3::kb_sha256)")
+            .bind(deletion.deletion_id)
+            .bind(&deletion.object_ref)
+            .bind(&deletion.digest)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| error.to_string())?;
+    if completed {
+        Ok(())
     } else {
-        "OBJECT_DELETE_FAILED"
+        Err("object deletion completion was not acknowledged".into())
     }
-}
-
-/// Finish one current claim. Keeping this whole future in an owned Tokio task
-/// makes cancellation of the polling loop detach, rather than split, the
-/// heartbeat/delete/receipt lifecycle.
-async fn process_claimed_retention_item(
-    pool: &PgPool,
-    claim: &RetentionClaim,
-) -> Result<bool, sqlx::Error> {
-    match delete_claimed_blob_with_heartbeat(pool, claim).await? {
-        Ok(()) => {
-            let completed: bool =
-                sqlx::query_scalar("SELECT kb_retention_complete($1::kb_object_ref,$2)")
-                    .bind(&claim.object_ref)
-                    .bind(claim.claim_token)
-                    .fetch_one(pool)
-                    .await?;
-            if !completed {
-                return Err(sqlx::Error::Protocol(
-                    "retention completion did not acknowledge the claim".into(),
-                ));
-            }
-            Ok(true)
-        }
-        Err(error) => {
-            let failed: bool =
-                sqlx::query_scalar("SELECT kb_retention_fail($1::kb_object_ref,$2,$3)")
-                    .bind(&claim.object_ref)
-                    .bind(claim.claim_token)
-                    .bind(bounded_error_code(&error))
-                    .fetch_one(pool)
-                    .await?;
-            if !failed {
-                return Err(sqlx::Error::Protocol(
-                    "retention retry did not acknowledge the claim".into(),
-                ));
-            }
-            Ok(true)
-        }
-    }
-}
-
-/// Claim and process at most one retention item. Physical deletion is hidden
-/// inside this module and is impossible without a current database claim.
-pub async fn process_one_retention_item(
-    pool: &PgPool,
-    worker_name: &str,
-) -> Result<bool, sqlx::Error> {
-    let Some(claim) = claim_retention(pool, worker_name).await? else {
-        return Ok(false);
-    };
-    let claimed_pool = pool.clone();
-    tokio::spawn(async move { process_claimed_retention_item(&claimed_pool, &claim).await })
-        .await
-        .map_err(|error| sqlx::Error::Protocol(format!("retention task join failed: {error}")))?
 }
 
 #[cfg(test)]

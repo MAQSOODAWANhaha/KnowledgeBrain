@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { SegmentedControl, Skeleton } from "@mantine/core";
+import { Skeleton } from "../components/ui/skeleton";
+import { cn } from "../lib/utils";
 import { type DocChunk, type DocContent, api } from "../api";
 import { GfmPreview, formatPlainLayout } from "../bid/gfm";
 import { FilePreview } from "./FilePreview";
@@ -79,8 +80,8 @@ export function DocumentDetail({
   if (!data) {
     return (
       <div className="card stack">
-        <Skeleton height={44} radius="md" />
-        <Skeleton height={320} radius="md" />
+        <Skeleton className="h-11" />
+        <Skeleton className="h-80" />
       </div>
     );
   }
@@ -98,21 +99,40 @@ export function DocumentDetail({
   return (
     <div className="stack doc-detail">
       <div className="card pad-0">
-        <p className="note" style={{ margin: "12px 18px 8px" }}>
-          {data.index_ready ? "已可检索。" : data.error_message || "解析还在进行。"}
-          「解析」是完整 Markdown；「正文」只含切块后的检索正文，不含问句、Wiki、配图。
-        </p>
-        <div className="toolbar" style={{ borderBottom: 0 }}>
-          <SegmentedControl
-            value={tab}
-            onChange={(value) => setTab(value as Tab)}
-            data={tabs
-              .filter((item) => !item.hideIfEmpty || (item.n ?? 0) > 0)
-              .map((item) => ({
-                value: item.key,
-                label: item.n == null ? item.label : `${item.label} ${item.n}`,
-              }))}
-          />
+        {data.error_message ? (
+          <p className="note" style={{ margin: "12px 18px 8px", color: "var(--rose)" }}>
+            {data.error_message}
+          </p>
+        ) : null}
+        <div className="flex h-[52px] flex-wrap items-stretch gap-1 bg-[#f6f6f8] px-5" role="tablist">
+          {tabs
+            .filter((item) => !item.hideIfEmpty || (item.n ?? 0) > 0)
+            .map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                role="tab"
+                aria-selected={tab === item.key}
+                className={cn(
+                  "relative flex items-center gap-2 bg-transparent px-3 text-[16px] font-medium transition-colors",
+                  tab === item.key ? "font-semibold text-ink" : "text-[#9a9aa6] hover:text-ink",
+                )}
+                onClick={() => setTab(item.key)}
+              >
+                {item.label}
+                {item.n != null ? (
+                  <span className="rounded-full bg-white px-1.5 py-0.5 text-[12px] font-medium text-quiet">
+                    {item.n}
+                  </span>
+                ) : null}
+                <span
+                  className={cn(
+                    "absolute bottom-2 left-1/2 h-[3px] w-7 -translate-x-1/2 rounded-full bg-sky transition-opacity duration-150",
+                    tab === item.key ? "opacity-100" : "opacity-0",
+                  )}
+                />
+              </button>
+            ))}
         </div>
       </div>
       {tab === "file" ? (
@@ -128,7 +148,7 @@ export function DocumentDetail({
             </div>
           ) : (
             <p className="note" style={{ padding: 24 }}>
-              还没有解析正文。等 convert 完成后会出现在这里。
+              还没有解析正文
             </p>
           )}
         </div>
@@ -138,16 +158,15 @@ export function DocumentDetail({
       {tab === "questions" ? (
         <ListChunks
           emptyTitle="还没有检索问句"
-          emptyNote="问句是后处理生成的，用来辅助检索，不是原文。"
           chunks={groups.questions}
           label="问句"
         />
       ) : null}
       {tab === "summary" ? (
-        <ListChunks emptyTitle="还没有摘要" emptyNote="摘要来自后处理，不是切块正文。" chunks={groups.summary} label="摘要" />
+        <ListChunks emptyTitle="还没有摘要" chunks={groups.summary} label="摘要" />
       ) : null}
       {tab === "wiki" ? (
-        <ListChunks emptyTitle="还没有 Wiki" emptyNote="Wiki 是从正文蒸馏的词条，单独存放。" chunks={groups.wiki} label="Wiki" />
+        <ListChunks emptyTitle="还没有 Wiki" chunks={groups.wiki} label="Wiki" />
       ) : null}
     </div>
   );
@@ -159,7 +178,6 @@ function BodyChunks({ chunks }: { chunks: DocChunk[] }) {
       <div className="card pad-0">
         <div className="empty">
           <h2>还没有正文分片</h2>
-          <p className="note">切块完成后按文档顺序排列。完整连续文本看「解析」。问句和配图不在这里。</p>
         </div>
       </div>
     );
@@ -188,7 +206,6 @@ function ImageChunks({ groups }: { groups: { key: string; ocr?: DocChunk; captio
       <div className="card pad-0">
         <div className="empty">
           <h2>没有图像块</h2>
-          <p className="note">文中的图 OCR 和配图说明会按图归组。</p>
         </div>
       </div>
     );
@@ -223,19 +240,16 @@ function ListChunks({
   chunks,
   label,
   emptyTitle,
-  emptyNote,
 }: {
   chunks: DocChunk[];
   label: string;
   emptyTitle: string;
-  emptyNote: string;
 }) {
   if (chunks.length === 0) {
     return (
       <div className="card pad-0">
         <div className="empty">
           <h2>{emptyTitle}</h2>
-          <p className="note">{emptyNote}</p>
         </div>
       </div>
     );

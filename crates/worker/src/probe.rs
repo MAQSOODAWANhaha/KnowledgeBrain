@@ -26,7 +26,7 @@ async fn live() -> Json<knowledge::LiveBody> {
 }
 
 async fn ready() -> (StatusCode, Json<knowledge::ReadyBody>) {
-    let check = knowledge::check_readiness().await;
+    let check = knowledge::check_readiness(platform::SchemaComponentKind::Worker).await;
     let status = if check.is_ready() {
         StatusCode::OK
     } else {
@@ -39,8 +39,11 @@ pub async fn bind() -> std::io::Result<TcpListener> {
     TcpListener::bind(probe_addr()).await
 }
 
-pub async fn serve(listener: TcpListener) {
-    if let Err(error) = axum::serve(listener, router()).await {
-        tracing::error!(%error, "worker probe listener failed");
-    }
+pub async fn serve(
+    listener: TcpListener,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> std::io::Result<()> {
+    axum::serve(listener, router())
+        .with_graceful_shutdown(shutdown.cancelled_owned())
+        .await
 }

@@ -16,14 +16,14 @@
 
 ## 与招投标的边界
 
-招投标不得直接读取知识库表、复用知识库 `Document` 状态机或把招标文件写入产品索引。唯一跨域契约及 DTO 由 [`current-code.md`](current-code.md) 的 `KnowledgeRetrievalPort` 定义；招投标负责冻结采用证据。招投标如何用这些证据填进大纲/画布，见 [`../bidding/authoring.md`](../bidding/authoring.md)，不在知识库重写编制流程。
+招投标不得直接读取知识库表、复用知识库 `Document` 状态机或把招标文件写入产品索引。唯一跨域契约及 DTO 由 [`domain.md`](domain.md) 的 `KnowledgeRetrievalPortV3` 定义；招投标负责冻结采用证据。招投标如何冻结证据用于初稿/候选并经确认进入 DOCX，见 [`../bidding/authoring.md`](../bidding/authoring.md)，不在知识库重写编制流程。
 
 ## 当前文档
 
-- 知识库领域真源：[`current-code.md`](current-code.md)
+- 知识库领域真源：[`domain.md`](domain.md)
 - 仓库实现快照（非规范）：[`../research/repository-implementation-snapshot.md`](../research/repository-implementation-snapshot.md)
 - 文档详情计划：[`../../plans/knowledge-base/document-detail.md`](../../plans/knowledge-base/document-detail.md)
-- 检索融合与可选重排计划：[`../../plans/knowledge-base/retrieval-ranking.md`](../../plans/knowledge-base/retrieval-ranking.md)
+- [模型与索引一致性独立事项](../../plans/knowledge-base/README.md#模型与索引一致性独立事项)：与本次投标提取修复分开，不迁移知识库到 Rig。
 - 外部解析抽取调研基线：[`../research/weknora-parse-extract-baseline.md`](../research/weknora-parse-extract-baseline.md)
 
 本页没有改动现有 Workspace、Document、索引或检索业务规则；后续知识库重构应在 [`../../plans/knowledge-base/README.md`](../../plans/knowledge-base/README.md) 下独立评审。

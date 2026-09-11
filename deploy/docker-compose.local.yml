@@ -1,5 +1,36 @@
-# Local/LAN override: build and run retention from the same freshly built worker image.
-# The production compose file remains pinned to the signed digest in images.lock.json.
+# Local/LAN override: build retention from the worker image, and terminate
+# browser TLS on Caddy. Production compose stays pinned to images.lock.json.
+# Do not add Caddy to the release-descriptor five-image contract.
 services:
   retention:
     image: knowledgebrain-worker:local
+  api:
+    ports: !override []
+  onlyoffice:
+    ports: !override []
+  caddy:
+    image: caddy:2.8.4-alpine
+    container_name: knowledgebrain-caddy
+    profiles: ["runtime"]
+    restart: unless-stopped
+    ports:
+      - "${API_HOST_PORT:-28080}:28080"
+      - "${ONLYOFFICE_HOST_PORT:-18081}:18081"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      onlyoffice:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- --no-check-certificate https://127.0.0.1:28080/ready >/dev/null",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 10s

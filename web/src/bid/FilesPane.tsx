@@ -1,10 +1,29 @@
 import { useEffect, useRef, useState } from "react";
-import { Button, Drawer, Progress } from "@mantine/core";
-import { Dropzone } from "@mantine/dropzone";
+import { IconCloudUpload } from "@tabler/icons-react";
 import { FilePreview } from "../assets/FilePreview";
+import { Badge } from "../components/ui/badge";
+import { Button } from "../components/ui/button";
+import { Progress } from "../components/ui/progress";
+import { Sheet, SheetContent } from "../components/ui/sheet";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../components/ui/table";
+import { cn } from "../lib/utils";
 import type { TenderDocumentView } from "./api/types";
 import { TENDER_INPUT_ACCEPT } from "./authoring/media";
 import { fileStage } from "./helpers";
+
+const TONE = {
+  pine: "go",
+  amber: "wait",
+  rose: "stop",
+  gray: "gray",
+} as const;
 
 export function FilesPane({
   docs,
@@ -39,43 +58,31 @@ export function FilesPane({
     onUpload(files);
   }
 
-  async function filesFromEvent(event: unknown): Promise<File[]> {
-    const ev = event as {
-      dataTransfer?: DataTransfer;
-      target?: EventTarget | null;
-    };
-    const fromDt = ev.dataTransfer?.files;
-    if (fromDt && fromDt.length) return Array.from(fromDt);
-    const fromInput = (ev.target as HTMLInputElement | null)?.files;
-    if (fromInput && fromInput.length) return Array.from(fromInput);
-    return [];
-  }
-
   const empty = docs.length === 0 && pendingNames.length === 0;
+  const pending = pendingNames.filter((n) => !docs.some((d) => d.file_name === n));
   return (
     <div className="stack">
       {!ended && (
-        <Dropzone
-          multiple
-          disabled={uploading}
-          activateOnClick={false}
-          getFilesFromEvent={filesFromEvent}
-          onDrop={take}
-          onReject={() => undefined}
-          onDragEnter={() => setDragOn(true)}
-          onDragLeave={() => setDragOn(false)}
-          className={`drop ${dragOn ? "on" : ""}`}
+        <div
           data-testid="upload-drop"
-          style={{
-            cursor: uploading ? "wait" : "pointer",
-            padding: empty ? "40px 24px" : undefined,
+          className={cn("drop", dragOn && "on")}
+          onDragEnter={(e) => {
+            e.preventDefault();
+            setDragOn(true);
+          }}
+          onDragOver={(e) => e.preventDefault()}
+          onDragLeave={() => setDragOn(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragOn(false);
+            take(Array.from(e.dataTransfer.files));
           }}
         >
-          <b>{uploading ? "上传中" : "拖入文件"}</b>
-          <div
-            className="row"
-            style={{ justifyContent: "center", marginTop: 14 }}
-          >
+          <div className={cn("flex items-center justify-center gap-3", empty ? "py-7" : "py-2")}>
+            <span className="grid h-10 w-10 place-items-center rounded-md bg-sky-wash text-sky">
+              <IconCloudUpload size={22} />
+            </span>
+            <div className="font-semibold">{uploading ? "上传中" : "把文件拖到这里"}</div>
             <Button
               disabled={uploading}
               onClick={(e) => {
@@ -87,7 +94,7 @@ export function FilesPane({
               {uploading ? "上传中" : "选择文件"}
             </Button>
           </div>
-        </Dropzone>
+        </div>
       )}
       <input
         ref={inputRef}
@@ -102,103 +109,81 @@ export function FilesPane({
         }}
       />
       {!empty && (
-        <div className="card pad-0 file-list">
-          <div className="file-head">
-            <span>文件</span>
-            <span>进度</span>
-            <span>状态</span>
-            <span>操作</span>
-          </div>
-          {pendingNames
-            .filter((n) => !docs.some((d) => d.file_name === n))
-            .map((n) => (
-              <div key={`p-${n}`} className="file-row item">
-                <div className="name">{n}</div>
-                <Progress value={35} animated striped size="sm" />
-                <span className="chip amber">上传中</span>
-                <div className="file-actions">
-                  <span className="file-action-slot" />
-                  <span className="file-action-slot" />
-                </div>
-              </div>
-            ))}
-          {docs.map((d) => {
-            const stage = fileStage(d);
-            return (
-              <div
-                key={d.id}
-                id={`bid-doc-${d.id}`}
-                className={`file-row item${stage.tone === "rose" ? " fail" : ""}${focusId === d.id ? " on" : ""}`}
-              >
-                <div className="name">{d.file_name}</div>
-                <Progress
-                  value={stage.progress}
-                  animated={stage.busy}
-                  striped={stage.busy}
-                  color={
-                    stage.tone === "rose"
-                      ? "red"
-                      : stage.tone === "pine"
-                        ? "teal"
-                        : "blue"
-                  }
-                  size="sm"
-                />
-                <span className={`chip ${stage.tone}`}>{stage.label}</span>
-                <div className="file-actions">
-                  <Button
-                    variant="default"
-                    size="compact-sm"
-                    data-testid={`preview-${d.id}`}
-                    onClick={() => setPreview(d)}
+        <div className="panel">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>文件</TableHead>
+                <TableHead className="w-40">进度</TableHead>
+                <TableHead className="w-[88px]">状态</TableHead>
+                <TableHead className="w-[148px] text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {pending.map((n) => (
+                <TableRow key={`p-${n}`}>
+                  <TableCell>{n}</TableCell>
+                  <TableCell>
+                    <Progress value={35} animated />
+                  </TableCell>
+                  <TableCell>
+                    <Badge>上传中</Badge>
+                  </TableCell>
+                  <TableCell />
+                </TableRow>
+              ))}
+              {docs.map((d) => {
+                const stage = fileStage(d);
+                return (
+                  <TableRow
+                    key={d.id}
+                    id={`bid-doc-${d.id}`}
+                    className={focusId === d.id ? "bg-sky-wash" : undefined}
                   >
-                    预览
-                  </Button>
-                  {stage.retryable ? (
-                    <Button
-                      variant="default"
-                      size="compact-sm"
-                      disabled={ended}
-                      onClick={() => onRetry(d)}
-                    >
-                      重试
-                    </Button>
-                  ) : (
-                    <span className="file-action-slot" />
-                  )}
-                </div>
-              </div>
-            );
-          })}
+                    <TableCell>{d.file_name}</TableCell>
+                    <TableCell>
+                      <Progress
+                        value={stage.progress}
+                        animated={stage.busy}
+                        tone={stage.tone === "rose" ? "stop" : stage.tone === "pine" ? "go" : "sky"}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Badge tone={TONE[stage.tone]}>{stage.label}</Badge>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex justify-end gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          data-testid={`preview-${d.id}`}
+                          onClick={() => setPreview(d)}
+                        >
+                          预览
+                        </Button>
+                        {stage.retryable ? (
+                          <Button variant="outline" size="sm" disabled={ended} onClick={() => onRetry(d)}>
+                            重试
+                          </Button>
+                        ) : null}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
         </div>
       )}
-      <Drawer
-        opened={preview != null}
-        onClose={() => setPreview(null)}
-        position="right"
-        size="80%"
-        title={preview?.file_name ?? "预览"}
-        className="tender-preview-drawer"
-        styles={{
-          content: { display: "flex", flexDirection: "column", height: "100%" },
-          header: { flexShrink: 0 },
-          body: {
-            flex: 1,
-            minHeight: 0,
-            overflow: "hidden",
-            padding: 0,
-          },
-        }}
-      >
-        {preview ? (
-          <div className="tender-preview-scroll">
-            <FilePreview
-              fileName={preview.file_name}
-              objectKey={`objects/${preview.original_sha256}`}
-            />
-          </div>
-        ) : null}
-      </Drawer>
+      <Sheet open={preview != null} onOpenChange={(open) => { if (!open) setPreview(null); }}>
+        <SheetContent title={preview?.file_name ?? "预览"}>
+          {preview ? (
+            <div className="tender-preview-scroll">
+              <FilePreview fileName={preview.file_name} objectKey={`objects/${preview.original_sha256}`} />
+            </div>
+          ) : null}
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }

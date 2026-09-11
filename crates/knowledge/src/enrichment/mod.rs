@@ -10,9 +10,10 @@ mod summary;
 pub use chat::{
     ChatMessage, WIKI_LLM_MAX_ATTEMPTS, WIKI_LLM_MAX_TOKENS, attempt_superseded, chat_complete,
     chat_complete_limited, chat_complete_turn, chat_complete_turn_with_format,
-    chat_complete_turn_with_format_once, chat_complete_wiki, chat_http_configured, chat_messages,
-    chat_messages_limited, chat_tools_turn, chat_tools_turn_with_format,
-    chat_tools_turn_with_format_once, sample_long_content,
+    chat_complete_turn_with_format_once, chat_complete_turn_with_format_once_async,
+    chat_complete_wiki, chat_http_configured, chat_messages, chat_messages_limited,
+    chat_tools_turn, chat_tools_turn_with_format, chat_tools_turn_with_format_once,
+    sample_long_content,
 };
 pub use language::{
     infer_output_language, language_for_document, language_for_document_parts,
@@ -593,6 +594,81 @@ fn truncate_key(key: &str) -> &str {
     }
 }
 
+/// One cancellation-safe OCR + caption operation for a caller-owned image.
+/// Each prompt performs exactly one physical HTTP attempt with no hidden retry.
+pub async fn describe_image_bytes_once_async(
+    image_bytes: &[u8],
+    media_type: &str,
+    image_source_type: &str,
+    language: &str,
+) -> Result<(String, String), crate::models::ChatTransportError> {
+    use crate::models::ChatTransportError;
+    if image_bytes.is_empty() {
+        return Err(ChatTransportError::Response("image bytes are empty".into()));
+    }
+    if !matches!(
+        media_type,
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+    ) {
+        return Err(ChatTransportError::Response(
+            "image media type is outside the closed VLM allowlist".into(),
+        ));
+    }
+    let base = vlm_base_url();
+    let model = crate::vlm_model();
+    if base.is_empty() || model.is_empty() || model == "stub-vlm" {
+        return Err(ChatTransportError::Response(
+            "VLM endpoint/model is not configured".into(),
+        ));
+    }
+    let image_url = format!(
+        "data:{media_type};base64,{}",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, image_bytes)
+    );
+    async fn complete(
+        url: &str,
+        key: &str,
+        model: &str,
+        image_url: &str,
+        prompt: String,
+    ) -> Result<crate::models::ChatTurn, ChatTransportError> {
+        crate::models::chat_sse_turn_once_async(
+            url,
+            key,
+            serde_json::json!({
+                "model": model,
+                "max_tokens": 1024,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_url}}
+                    ]
+                }]
+            }),
+            std::time::Duration::from_secs(180),
+        )
+        .await
+    }
+    let url = chat::completions_url_for_vlm(&base);
+    let key = crate::vlm_api_key();
+    let ocr = complete(
+        &url,
+        &key,
+        &model,
+        &image_url,
+        ocr_prompt(image_source_type).to_string(),
+    )
+    .await?;
+    let caption = complete(&url, &key, &model, &image_url, caption_prompt(language)).await?;
+    if ocr.content.trim().is_empty() {
+        return Err(ChatTransportError::Response(
+            "VLM OCR output is empty".into(),
+        ));
+    }
+    Ok((ocr.content, caption.content))
+}
+
 /// OCR + caption. Unconfigured or stub VLM is an error, never fake text.
 pub fn describe_image(
     image_key: &str,
@@ -660,9 +736,7 @@ fn image_data_url(image_key: &str) -> Result<String, String> {
         return Ok(key.to_string());
     }
     let hash = key.trim_start_matches("objects/").trim_start_matches('/');
-    let dir = std::env::var("OBJECT_DIR").unwrap_or_else(|_| "var/objects".into());
-    let bytes = std::fs::read(std::path::Path::new(&dir).join(hash))
-        .map_err(|e| format!("read image {hash}: {e}"))?;
+    let bytes = platform::read_blob(hash).map_err(|e| format!("read image {hash}: {e}"))?;
     let mime = match bytes.first() {
         Some(0x89) => "image/png",
         Some(0x47) => "image/gif",

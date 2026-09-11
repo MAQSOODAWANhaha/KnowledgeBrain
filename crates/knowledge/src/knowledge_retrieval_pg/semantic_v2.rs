@@ -100,7 +100,9 @@ impl StrictEmbeddingClientV2 {
             .await
             .map_err(|error| match error {
                 KnowledgeRetrievalError::InvalidRequest(_)
-                | KnowledgeRetrievalError::Unavailable(_) => error,
+                | KnowledgeRetrievalError::Unavailable(_)
+                | KnowledgeRetrievalError::PolicyRevoked(_)
+                | KnowledgeRetrievalError::DigestMismatch(_) => error,
                 KnowledgeRetrievalError::QuotaExceeded(_)
                 | KnowledgeRetrievalError::InvalidHit(_) => {
                     invalid("embedding credential resolver returned an invalid error variant")
@@ -454,7 +456,9 @@ pub(crate) async fn lock_supported_policy_in_snapshot(
     .await
     .map_err(db)?;
     let Some(row) = row else {
-        return Err(invalid("unknown or revoked knowledge-evidence-v2 policy"));
+        return Err(KnowledgeRetrievalError::PolicyRevoked(
+            "unknown or revoked knowledge-evidence-v2 policy".into(),
+        ));
     };
     let canonical_policy = validated
         .policy
@@ -474,8 +478,8 @@ pub(crate) async fn lock_supported_policy_in_snapshot(
         || hex::encode(Sha256::digest(&revision_payload)) != revision_sha
         || credential_ref != validated.credential_ref
     {
-        return Err(invalid(
-            "policy or embedding revision changed during semantic recall",
+        return Err(KnowledgeRetrievalError::DigestMismatch(
+            "policy or embedding revision changed during semantic recall".into(),
         ));
     }
     Ok(())
@@ -498,10 +502,10 @@ pub(crate) async fn recall_in_snapshot(
     let eligible_rows = sqlx::query(
         "SELECT p.id AS product_id,pv.id AS version_id
            FROM workspaces w JOIN products p ON p.workspace_id=w.id
-           JOIN product_versions pv ON pv.product_id=p.id AND p.current_version_id=pv.id
-          WHERE w.kind=$1 AND pv.status='active' AND pv.deleted_at IS NULL
+           JOIN product_versions pv ON pv.product_id=p.id
+          WHERE w.kind=$1
             AND (($1='product_line' AND p.kind='product') OR ($1='company' AND p.kind='library'))
-            AND (cardinality($2::uuid[])=0 OR pv.id=ANY($2::uuid[]))
+            AND pv.id=ANY($2::uuid[])
           ORDER BY p.id,pv.id",
     )
     .bind(workspace_kind)
@@ -514,9 +518,9 @@ pub(crate) async fn recall_in_snapshot(
         .map(|row| row.get::<Uuid, _>("version_id"))
         .collect::<BTreeSet<_>>();
     let selected = selected_versions.iter().copied().collect::<BTreeSet<_>>();
-    if !selected.is_empty() && selected != eligible {
-        return Err(invalid(
-            "selected versions are not the exact current eligible workspace scope",
+    if selected != eligible {
+        return Err(KnowledgeRetrievalError::DigestMismatch(
+            "selected versions differ from the frozen eligible workspace scope".into(),
         ));
     }
     let eligible_vec = eligible.iter().copied().collect::<Vec<_>>();
@@ -566,10 +570,6 @@ pub(crate) async fn recall_in_snapshot(
                  AND (pending_document.parse_status IN ('pending','processing','finalizing')
                       OR pending_document.pending_subtasks_count<>0
                       OR pending_document.summary_status IN ('pending','processing')))
-            AND NOT EXISTS(
-              SELECT 1 FROM task_pending_ops pending
-               WHERE pending.scope='product_version'
-                 AND pending.scope_id=vector_generation.product_version_id)
           ORDER BY vector_generation.product_version_id",
     )
     .bind(&eligible_vec)

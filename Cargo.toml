@@ -16,7 +16,8 @@ rust-version = "1.97"
 license = "MIT"
 
 [workspace.dependencies]
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "test-util"] }
+tokio-util = { version = "=0.7.19", features = ["rt"] }
 axum = { version = "0.8", features = ["multipart", "macros"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
@@ -25,7 +26,7 @@ toml = "0.9"
 tower-http = { version = "0.6", features = ["cors", "trace", "limit", "fs"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 sha2 = "0.11"
@@ -48,3 +49,4 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 base64 = "0.22"
 redis = { version = "1", default-features = false, features = ["script"] }
 hmac = "0.13"
+libc = "=0.2.189"

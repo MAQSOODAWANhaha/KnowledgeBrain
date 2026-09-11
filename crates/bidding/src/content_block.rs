@@ -312,8 +312,8 @@ impl BlockContent {
                     || *repeat_header_rows > *row_count
                     || widths_mm
                         .iter()
-                        .any(|width| !width.is_finite() || *width <= 0.0 || *width > 200.0)
-                    || widths_mm.iter().sum::<f64>() > 200.0
+                        .any(|width| !width.is_finite() || *width <= 0.0)
+                    || !widths_mm.iter().sum::<f64>().is_finite()
                 {
                     return Err("table dimensions are invalid");
                 }

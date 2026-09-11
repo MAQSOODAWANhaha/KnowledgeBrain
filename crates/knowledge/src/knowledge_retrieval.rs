@@ -97,6 +97,136 @@ pub struct RetrievalPolicyIdentityV1 {
     pub max_total_bytes: u64,
 }
 
+/// Request-owned retrieval identity. Unlike `RetrievalPolicyIdentityV1`, this
+/// includes the exact registry bytes, credentials references and eligible
+/// version scope needed to replay a ContentGenerate request without consulting
+/// a mutable "latest" pointer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrozenRetrievalPolicyIdentityV1 {
+    pub schema_version: u16,
+    pub policy_sha256: String,
+    pub canonical_policy_utf8: String,
+    pub contract_version: String,
+    pub mode: String,
+    pub max_hits: u32,
+    pub max_chunk_bytes: u32,
+    pub max_total_bytes: u64,
+    pub embedding_revision_sha256: String,
+    pub canonical_embedding_revision_utf8: String,
+    pub embedding_credential_ref: String,
+    pub rerank_revision_sha256: String,
+    pub canonical_rerank_revision_utf8: String,
+    pub rerank_credential_ref: String,
+    pub product_version_ids: Vec<Uuid>,
+    pub library_version_ids: Vec<Uuid>,
+    pub eligible_scope_sha256: String,
+}
+
+impl FrozenRetrievalPolicyIdentityV1 {
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let value: Self = serde_json::from_slice(bytes)
+            .map_err(|error| format!("frozen retrieval identity JSON: {error}"))?;
+        let (canonical, _) = value.canonical_bytes_and_sha256()?;
+        if canonical != bytes {
+            return Err(
+                "CONTENT_RETRIEVAL_DIGEST_MISMATCH: frozen retrieval identity is not RFC8785 JCS"
+                    .into(),
+            );
+        }
+        Ok(value)
+    }
+
+    pub fn canonical_bytes_and_sha256(&self) -> Result<(Vec<u8>, String), String> {
+        let bytes = serde_json_canonicalizer::to_vec(self)
+            .map_err(|error| format!("frozen retrieval identity JCS: {error}"))?;
+        let sha256 = hex::encode(Sha256::digest(&bytes));
+        Ok((bytes, sha256))
+    }
+
+    pub fn eligible_scope_sha256_for(
+        product_version_ids: &[Uuid],
+        library_version_ids: &[Uuid],
+    ) -> Result<String, String> {
+        #[derive(Serialize)]
+        struct EligibleScope<'a> {
+            library_version_ids: &'a [Uuid],
+            product_version_ids: &'a [Uuid],
+        }
+        let bytes = serde_json_canonicalizer::to_vec(&EligibleScope {
+            library_version_ids,
+            product_version_ids,
+        })
+        .map_err(|error| format!("eligible scope JCS: {error}"))?;
+        Ok(hex::encode(Sha256::digest(bytes)))
+    }
+
+    pub fn validate(&self) -> Result<RetrievalPolicyIdentityV1, String> {
+        if self.schema_version != 1 || self.mode != "exact" {
+            return Err(
+                "CONTENT_RETRIEVAL_INVALID_POLICY: invalid frozen retrieval identity".into(),
+            );
+        }
+        let policy: RetrievalPolicyV2 = serde_json::from_str(&self.canonical_policy_utf8)
+            .map_err(|error| format!("CONTENT_RETRIEVAL_INVALID_POLICY: policy JSON: {error}"))?;
+        policy
+            .validate()
+            .map_err(|error| format!("CONTENT_RETRIEVAL_INVALID_POLICY: {error}"))?;
+        if policy.sha256().map_err(|error| error.to_string())? != self.policy_sha256
+            || policy.contract_version != self.contract_version
+            || policy.request_quotas.max_hits != self.max_hits
+            || policy.request_quotas.max_chunk_bytes != self.max_chunk_bytes
+            || policy.request_quotas.max_total_bytes != self.max_total_bytes
+        {
+            return Err(
+                "CONTENT_RETRIEVAL_DIGEST_MISMATCH: frozen policy identity mismatch".into(),
+            );
+        }
+        let embedding: EmbeddingRevisionV2 =
+            serde_json::from_str(&self.canonical_embedding_revision_utf8).map_err(|error| {
+                format!("CONTENT_RETRIEVAL_INVALID_POLICY: embedding JSON: {error}")
+            })?;
+        if embedding.sha256().map_err(|error| error.to_string())? != self.embedding_revision_sha256
+            || self.embedding_revision_sha256 != policy.embedding.model_revision_sha256
+            || self.embedding_credential_ref.is_empty()
+        {
+            return Err("CONTENT_RETRIEVAL_DIGEST_MISMATCH: embedding identity mismatch".into());
+        }
+        let rerank: RerankRevisionV2 = serde_json::from_str(&self.canonical_rerank_revision_utf8)
+            .map_err(|error| {
+            format!("CONTENT_RETRIEVAL_INVALID_POLICY: rerank JSON: {error}")
+        })?;
+        if rerank.sha256().map_err(|error| error.to_string())? != self.rerank_revision_sha256
+            || self.rerank_revision_sha256 != policy.rerank.revision_sha256
+            || self.rerank_credential_ref.is_empty()
+        {
+            return Err("CONTENT_RETRIEVAL_DIGEST_MISMATCH: rerank identity mismatch".into());
+        }
+        if self
+            .product_version_ids
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+            || self
+                .library_version_ids
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || Self::eligible_scope_sha256_for(
+                &self.product_version_ids,
+                &self.library_version_ids,
+            )? != self.eligible_scope_sha256
+        {
+            return Err("CONTENT_RETRIEVAL_DIGEST_MISMATCH: eligible scope mismatch".into());
+        }
+        Ok(RetrievalPolicyIdentityV1 {
+            contract_version: self.contract_version.clone(),
+            policy_sha256: self.policy_sha256.clone(),
+            max_hits: self.max_hits,
+            max_chunk_bytes: self.max_chunk_bytes,
+            max_total_bytes: self.max_total_bytes,
+        })
+    }
+}
+
 /// Canonical immutable identity for the embedding service behavior used by v2.
 ///
 /// Credentials are deliberately registry metadata rather than part of these
@@ -1207,6 +1337,10 @@ pub enum KnowledgeRetrievalError {
     InvalidRequest(String),
     #[error("knowledge retrieval unavailable: {0}")]
     Unavailable(String),
+    #[error("knowledge retrieval policy revoked: {0}")]
+    PolicyRevoked(String),
+    #[error("knowledge retrieval digest mismatch: {0}")]
+    DigestMismatch(String),
     #[error("knowledge retrieval quota exceeded: {0}")]
     QuotaExceeded(String),
     #[error("invalid evidence hit: {0}")]
@@ -1240,6 +1374,56 @@ pub trait KnowledgeRetrievalPortV3: Send + Sync {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn frozen_retrieval_identity_uses_literal_rfc8785_order_and_rejects_non_jcs() {
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let frozen = FrozenRetrievalPolicyIdentityV1 {
+            schema_version: 1,
+            policy_sha256: sha.into(),
+            canonical_policy_utf8: "{}".into(),
+            contract_version: "knowledge-evidence-v2".into(),
+            mode: "exact".into(),
+            max_hits: 1,
+            max_chunk_bytes: 2,
+            max_total_bytes: 3,
+            embedding_revision_sha256: sha.into(),
+            canonical_embedding_revision_utf8: "{}".into(),
+            embedding_credential_ref: "env:EMBED".into(),
+            rerank_revision_sha256: sha.into(),
+            canonical_rerank_revision_utf8: "{}".into(),
+            rerank_credential_ref: "env:RERANK".into(),
+            product_version_ids: vec![],
+            library_version_ids: vec![],
+            eligible_scope_sha256:
+                "715d78b3301b4e5901d8dc93c9d33776a0cef3378d65de32353ee8e998541901".into(),
+        };
+        let expected = concat!(
+            "{\"canonical_embedding_revision_utf8\":\"{}\",\"canonical_policy_utf8\":\"{}\",",
+            "\"canonical_rerank_revision_utf8\":\"{}\",\"contract_version\":\"knowledge-evidence-v2\",",
+            "\"eligible_scope_sha256\":\"715d78b3301b4e5901d8dc93c9d33776a0cef3378d65de32353ee8e998541901\",",
+            "\"embedding_credential_ref\":\"env:EMBED\",\"embedding_revision_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",",
+            "\"library_version_ids\":[],\"max_chunk_bytes\":2,\"max_hits\":1,\"max_total_bytes\":3,\"mode\":\"exact\",",
+            "\"policy_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"product_version_ids\":[],",
+            "\"rerank_credential_ref\":\"env:RERANK\",\"rerank_revision_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"schema_version\":1}"
+        );
+        let (bytes, _) = frozen.canonical_bytes_and_sha256().unwrap();
+        assert_eq!(bytes, expected.as_bytes());
+        assert_eq!(
+            FrozenRetrievalPolicyIdentityV1::from_canonical_bytes(&bytes).unwrap(),
+            frozen
+        );
+        let non_jcs = serde_json::to_vec_pretty(&frozen).unwrap();
+        assert!(
+            FrozenRetrievalPolicyIdentityV1::from_canonical_bytes(&non_jcs)
+                .unwrap_err()
+                .contains("CONTENT_RETRIEVAL_DIGEST_MISMATCH")
+        );
+        assert_eq!(
+            FrozenRetrievalPolicyIdentityV1::eligible_scope_sha256_for(&[], &[]).unwrap(),
+            "715d78b3301b4e5901d8dc93c9d33776a0cef3378d65de32353ee8e998541901"
+        );
+    }
 
     fn hit(chunk: &str) -> KnowledgeEvidenceHitV1 {
         KnowledgeEvidenceHitV1 {
