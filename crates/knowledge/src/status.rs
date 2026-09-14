@@ -121,12 +121,15 @@ impl Role {
 mod tests {
     #[test]
     fn task_type_strings_match_brain() {
-        assert_eq!(crate::TYPE_DOCUMENT_PROCESS, "document:process");
-        assert_eq!(crate::TYPE_POST_PROCESS, "knowledge:post_process");
-        assert_eq!(crate::TYPE_SEMANTIC_INDEX_V2, "knowledge:semantic_index:v2");
-        assert_eq!(crate::TYPE_KB_DELETE, "kb:delete");
-        assert_eq!(crate::TYPE_LIST_DELETE, "knowledge:list_delete");
-        assert_eq!(crate::TYPE_INDEX_DELETE, "index:delete");
-        assert_eq!(crate::QUEUE_LOW, "low");
+        assert_eq!(platform::TYPE_DOCUMENT_PROCESS, "document:process");
+        assert_eq!(platform::TYPE_POST_PROCESS, "knowledge:post_process");
+        assert_eq!(
+            platform::TYPE_SEMANTIC_INDEX_V2,
+            "knowledge:semantic_index:v2"
+        );
+        assert_eq!(platform::TYPE_KB_DELETE, "kb:delete");
+        assert_eq!(platform::TYPE_LIST_DELETE, "knowledge:list_delete");
+        assert_eq!(platform::TYPE_INDEX_DELETE, "index:delete");
+        assert_eq!(platform::QUEUE_LOW, "low");
     }
 }

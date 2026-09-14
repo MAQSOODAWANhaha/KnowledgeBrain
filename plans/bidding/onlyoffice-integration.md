@@ -25,7 +25,7 @@
 | `crates/api/src/bid_v2_routes.rs` | 授权编辑配置、受控文档读取、回调接收及保存/导出衔接 |
 | `crates/bidding/src/workspace.rs`、`crates/bidding/src/bid_authoring_v2.rs`及现有持久化边界 | 文档版本与 Workspace/新稿轮次关联，幂等、CAS、旧会话保护；复用对象注册和历史身份 |
 | `crates/bidding/src/content_runtime.rs`及候选校验 | 事实与拟议响应区分，生成目标绑定 DOCX；通过获准文档能力接受入稿 |
-| `crates/bidding/src/render_v2.rs`、`crates/worker/src/consume.rs` | 正式输出改读已保存 DOCX并调用 ONLYOFFICE；接保存、转换、页码和最终报告结果 |
+| `crates/bidding/src/render_v2.rs`、`crates/worker/src/bidding.rs`、`crates/worker/src/helpers.rs` | 正式输出改读已保存 DOCX并调用 ONLYOFFICE；接保存、转换、页码和最终报告结果 |
 | 现有部署与配置入口 | 经授权后增加文档服务、网络/密钥/字体/资源配置，不由本次文档写入代替部署 |
 
 保留上传、DocReader、文件级解析复用、完整文件集汇总、要求和表格规范、项目/Workspace、知识检索、证据和报价数据、用户确认、CAS、不可变对象、异步 Job及独立报告。

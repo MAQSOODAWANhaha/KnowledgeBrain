@@ -21,12 +21,12 @@ pub fn router() -> Router {
         .route("/ready", get(ready))
 }
 
-async fn live() -> Json<knowledge::LiveBody> {
+async fn live() -> Json<platform::LiveBody> {
     Json(platform::live_body("worker"))
 }
 
-async fn ready() -> (StatusCode, Json<knowledge::ReadyBody>) {
-    let check = knowledge::check_readiness(platform::SchemaComponentKind::Worker).await;
+async fn ready() -> (StatusCode, Json<platform::ReadyBody>) {
+    let check = platform::check_readiness(platform::SchemaComponentKind::Worker).await;
     let status = if check.is_ready() {
         StatusCode::OK
     } else {

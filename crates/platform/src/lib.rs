@@ -49,6 +49,7 @@ pub const TYPE_LIST_DELETE: &str = "knowledge:list_delete";
 pub const TYPE_LIST_REPARSE: &str = "knowledge:list_reparse";
 pub const TYPE_INDEX_DELETE: &str = "index:delete";
 pub const TYPE_DATATABLE: &str = "datatable:summary";
+pub const TYPE_MAINTENANCE_HOUSEKEEP: &str = "system:maintenance-housekeep:v1";
 
 pub const QUEUE_DEFAULT: &str = "default";
 pub const QUEUE_POSTPROCESS: &str = "postprocess";
@@ -99,6 +100,7 @@ pub fn queue_for(task_type: &str) -> &'static str {
         TYPE_DOCUMENT_PROCESS | TYPE_MANUAL_PROCESS => QUEUE_DEFAULT,
         BID_TENDER_DOCUMENT_PROCESS_V2_TASK
         | BID_REQUIREMENT_SET_COMPILE_V2_TASK
+        | BID_DOCX_COMPOSE_V2_TASK
         | BID_CONTENT_GENERATE_V2_TASK
         | BID_SUBMISSION_EXPORT_V2_TASK => BID_AUTHORING_V2_QUEUE,
         TYPE_POST_PROCESS | TYPE_SEMANTIC_INDEX_V2 => QUEUE_POSTPROCESS,
@@ -107,8 +109,12 @@ pub fn queue_for(task_type: &str) -> &'static str {
         TYPE_CHUNK_EXTRACT => QUEUE_GRAPH,
         TYPE_QUESTION => QUEUE_QUESTION,
         TYPE_WIKI_INGEST | TYPE_WIKI_FINALIZE => QUEUE_WIKI,
-        TYPE_VERSION_CLONE | TYPE_KB_DELETE | TYPE_LIST_DELETE | TYPE_LIST_REPARSE
-        | TYPE_INDEX_DELETE => QUEUE_LOW,
+        TYPE_VERSION_CLONE
+        | TYPE_KB_DELETE
+        | TYPE_LIST_DELETE
+        | TYPE_LIST_REPARSE
+        | TYPE_INDEX_DELETE
+        | TYPE_MAINTENANCE_HOUSEKEEP => QUEUE_LOW,
         _ => "rejected:unknown",
     }
 }

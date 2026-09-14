@@ -9539,7 +9539,8 @@ BEGIN
     RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: turn or role changed' USING ERRCODE='23514';
   END IF;
   IF runtime->'checkpoint_contract_version' IS DISTINCT FROM '3'::jsonb
-      OR runtime->>'runtime_adapter' IS DISTINCT FROM 'rig-chat-0.42.0/3' THEN RAISE EXCEPTION 'AGENT_PROVIDER_UNAVAILABLE: frozen runtime missing' USING ERRCODE='23514'; END IF;
+      OR runtime->>'runtime_adapter' IS DISTINCT FROM 'rig-chat-0.42.0/3'
+      OR runtime->>'repair_task_policy' IS DISTINCT FROM 'main-repair-tasks-v1' THEN RAISE EXCEPTION 'AGENT_PROVIDER_UNAVAILABLE: frozen runtime missing' USING ERRCODE='23514'; END IF;
   IF p_turn>=(runtime#>>'{limits,max_turns}')::integer
       OR coalesce((prior->>'tool_calls')::integer,0)>=(runtime#>>'{limits,max_tool_calls}')::integer
       OR coalesce((prior->>'read_bytes')::bigint,0)>=(runtime#>>'{limits,max_read_bytes}')::bigint THEN
@@ -9587,6 +9588,8 @@ CREATE FUNCTION kb_bid_v2_tender_agent_checkpoint_put(p_request_id uuid,p_sha kb
     p_state jsonb,p_progress jsonb)
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
 DECLARE stamp timestamptz; runtime jsonb; config_sha kb_sha256; prior jsonb; payload bytea; turn_value integer; sequence_value integer; pending_value jsonb; prior_pending jsonb; response_value jsonb; role_value text; prior_payload bytea;
+  tasks jsonb; prior_tasks jsonb; task_entry record; alias_entry record; old_entry jsonb; counter_key text;
+  feedback_findings jsonb; feedback_sha text; charged_task text;
 BEGIN
   stamp:=kb_bid_v2_tender_agent_lock_owner(p_request_id,p_sha,p_attempt,p_token);
   SELECT agent_runtime INTO STRICT runtime FROM bid_requirement_set_compile_request_identities WHERE request_artifact_id=p_request_id;
@@ -9603,7 +9606,14 @@ BEGIN
   prior:=kb_bid_v2_tender_agent_checkpoint_get(p_request_id,p_sha);
   pending_value:=p_state#>'{journal,pending}'; prior_pending:=coalesce(prior#>'{journal,pending}','null'::jsonb);
   role_value:=p_state->>'role';
-  IF NOT kb_bid_v2_json_keys_exact(p_state->'journal',ARRAY['sequence','pending','session'])
+  IF runtime->>'repair_task_policy' IS DISTINCT FROM 'main-repair-tasks-v1'
+    OR NOT kb_bid_v2_json_keys_exact(p_state->'journal',ARRAY['sequence','pending','session'])
+    OR NOT kb_bid_v2_json_keys_exact(p_state->'repair',ARRAY['feedback_sha256','baseline','results','tasks'])
+    OR jsonb_typeof(p_state#>'{repair,baseline}') IS DISTINCT FROM 'object'
+    OR jsonb_typeof(p_state#>'{repair,results}') IS DISTINCT FROM 'object'
+    OR (p_state#>'{repair,feedback_sha256}' IS DISTINCT FROM 'null'::jsonb AND (
+      jsonb_typeof(p_state#>'{repair,feedback_sha256}') IS DISTINCT FROM 'string'
+      OR p_state#>>'{repair,feedback_sha256}' !~ '^[0-9a-f]{64}$'))
     OR NOT (p_state ? 'source_review')
     OR (role_value='reviewer' AND jsonb_typeof(p_state->'source_review') IS DISTINCT FROM 'object')
     OR (p_state->'source_review' IS DISTINCT FROM 'null'::jsonb AND (
@@ -9642,6 +9652,138 @@ BEGIN
     OR (p_state->>'read_bytes')::bigint>((runtime->'limits')->>'max_read_bytes')::bigint THEN
     RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: checkpoint sequence, identity or budget' USING ERRCODE='23514';
   END IF;
+  -- Finding execution is domain checkpoint metadata, not a second Agent table.
+  -- Content versions may change; already spent attempts must not disappear.
+  tasks:=p_state#>'{repair,tasks}';
+  prior_tasks:=coalesce(prior#>'{repair,tasks}',
+    '{"active":null,"aliases":{},"entries":{},"feedback_sha256":null,"last_committed_turn":null}'::jsonb);
+  SELECT coalesce(jsonb_agg(value ORDER BY key),'[]'::jsonb) INTO feedback_findings
+    FROM jsonb_each(p_state->'review_draft');
+  IF p_state->'review' IS DISTINCT FROM 'null'::jsonb THEN
+    feedback_findings:=p_state#>'{review,findings}';
+  END IF;
+  feedback_sha:=kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(
+    jsonb_build_array(p_state->'review_rounds',feedback_findings)),'UTF8'))::text;
+  IF NOT kb_bid_v2_json_keys_exact(tasks,ARRAY['active','aliases','entries','feedback_sha256','last_committed_turn'])
+    OR jsonb_typeof(tasks->'aliases') IS DISTINCT FROM 'object'
+    OR jsonb_typeof(tasks->'entries') IS DISTINCT FROM 'object'
+    OR (tasks->'active' IS DISTINCT FROM 'null'::jsonb AND (
+      jsonb_typeof(tasks->'active') IS DISTINCT FROM 'string' OR btrim(tasks->>'active')=''))
+    OR (tasks->'feedback_sha256' IS DISTINCT FROM 'null'::jsonb AND (
+      jsonb_typeof(tasks->'feedback_sha256') IS DISTINCT FROM 'string'
+      OR NOT kb_bid_v2_sha256_text(tasks->>'feedback_sha256')))
+    OR (tasks->'last_committed_turn' IS DISTINCT FROM 'null'::jsonb AND (
+      jsonb_typeof(tasks->'last_committed_turn') IS DISTINCT FROM 'number'
+      OR tasks->>'last_committed_turn' !~ '^(0|[1-9][0-9]*)$')) THEN
+    RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: repair task shape' USING ERRCODE='23514';
+  END IF;
+  IF tasks->'feedback_sha256' IS DISTINCT FROM prior_tasks->'feedback_sha256'
+    AND tasks->>'feedback_sha256' IS DISTINCT FROM feedback_sha THEN
+    RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: repair task feedback identity' USING ERRCODE='23514';
+  END IF;
+  IF (tasks->>'last_committed_turn')::numeric>turn_value
+    OR (prior_tasks->'last_committed_turn'<>'null'::jsonb AND (
+      tasks->'last_committed_turn'='null'::jsonb
+      OR (tasks->>'last_committed_turn')::numeric<(prior_tasks->>'last_committed_turn')::numeric)) THEN
+    RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: repair task accounting' USING ERRCODE='23514';
+  END IF;
+  FOR task_entry IN SELECT key,value FROM jsonb_each(tasks->'entries') LOOP
+    IF btrim(task_entry.key)=''
+      OR NOT kb_bid_v2_json_keys_exact(task_entry.value,ARRAY[
+        'finding_sha256','watch','committed_turns','attempted_dependencies','inherited_blocked'])
+      OR jsonb_typeof(task_entry.value->'finding_sha256') IS DISTINCT FROM 'string'
+      OR NOT kb_bid_v2_sha256_text(task_entry.value->>'finding_sha256')
+      OR NOT kb_bid_v2_json_keys_exact(task_entry.value->'watch',ARRAY[
+        'no_progress_turns','focus_turns','replans','recovery'])
+      OR coalesce(task_entry.value#>>'{watch,recovery}','') NOT IN ('running','replan','blocked')
+      OR jsonb_typeof(task_entry.value->'committed_turns') IS DISTINCT FROM 'number'
+      OR task_entry.value->>'committed_turns' !~ '^(0|[1-9][0-9]*)$'
+      OR jsonb_typeof(task_entry.value->'attempted_dependencies') IS DISTINCT FROM 'array'
+      OR jsonb_typeof(task_entry.value->'inherited_blocked') IS DISTINCT FROM 'boolean' THEN
+      RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: repair task shape' USING ERRCODE='23514';
+    END IF;
+    FOREACH counter_key IN ARRAY ARRAY['no_progress_turns','focus_turns','replans'] LOOP
+      IF jsonb_typeof(task_entry.value#>ARRAY['watch',counter_key]) IS DISTINCT FROM 'number'
+        OR task_entry.value#>>ARRAY['watch',counter_key] !~ '^(0|[1-9][0-9]*)$' THEN
+        RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: repair task shape' USING ERRCODE='23514';
+      END IF;
+    END LOOP;
+    IF EXISTS(SELECT 1 FROM jsonb_array_elements(task_entry.value->'attempted_dependencies') dependency
+      WHERE jsonb_typeof(dependency) IS DISTINCT FROM 'string'
+        OR NOT kb_bid_v2_sha256_text(dependency#>>'{}'))
+      OR (SELECT count(*)<>count(DISTINCT dependency) FROM
+        jsonb_array_elements(task_entry.value->'attempted_dependencies') dependency) THEN
+      RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: repair task shape' USING ERRCODE='23514';
+    END IF;
+  END LOOP;
+  FOR alias_entry IN SELECT key,value FROM jsonb_each(tasks->'aliases') LOOP
+    IF btrim(alias_entry.key)='' OR jsonb_typeof(alias_entry.value) IS DISTINCT FROM 'string'
+      OR NOT (tasks->'entries' ? (alias_entry.value#>>'{}'))
+      OR tasks#>ARRAY['aliases',alias_entry.value#>>'{}'] IS DISTINCT FROM alias_entry.value THEN
+      RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: repair task alias' USING ERRCODE='23514';
+    END IF;
+    IF NOT (prior_tasks->'aliases' ? alias_entry.key) AND (
+      NOT (p_state->'review_draft' ? alias_entry.key)
+      OR tasks#>>ARRAY['entries',alias_entry.value#>>'{}','finding_sha256'] IS DISTINCT FROM
+        kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(p_state#>ARRAY['review_draft',alias_entry.key]),'UTF8'))::text) THEN
+      RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: repair task finding identity' USING ERRCODE='23514';
+    END IF;
+  END LOOP;
+  IF EXISTS(SELECT 1 FROM jsonb_object_keys(tasks->'entries') id WHERE NOT (tasks->'aliases' ? id))
+    OR (tasks->'active'<>'null'::jsonb AND (
+      NOT (tasks->'entries' ? (tasks->>'active'))
+      OR tasks#>ARRAY['aliases',tasks->>'active'] IS DISTINCT FROM tasks->'active'))
+    OR EXISTS(SELECT 1 FROM jsonb_object_keys(prior_tasks->'aliases') id WHERE NOT (tasks->'aliases' ? id)) THEN
+    RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: repair task alias' USING ERRCODE='23514';
+  END IF;
+  FOR task_entry IN SELECT key,value FROM jsonb_each(prior_tasks->'entries') LOOP
+    old_entry:=tasks#>ARRAY['entries',task_entry.key];
+    IF old_entry IS NULL
+      OR (old_entry->>'committed_turns')::numeric<(task_entry.value->>'committed_turns')::numeric
+      OR (old_entry#>>'{watch,replans}')::numeric<(task_entry.value#>>'{watch,replans}')::numeric
+      OR NOT ((task_entry.value->'attempted_dependencies') <@ (old_entry->'attempted_dependencies'))
+      OR (task_entry.value->'inherited_blocked'='true'::jsonb AND old_entry->'inherited_blocked'<>'true'::jsonb) THEN
+      RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: repair task accounting' USING ERRCODE='23514';
+    END IF;
+  END LOOP;
+  FOR task_entry IN SELECT key,value FROM jsonb_each(tasks->'entries') LOOP
+    IF task_entry.value->'finding_sha256' IS DISTINCT FROM prior_tasks#>ARRAY['entries',task_entry.key,'finding_sha256']
+      AND (tasks->>'feedback_sha256' IS DISTINCT FROM feedback_sha
+        OR NOT EXISTS(SELECT 1 FROM jsonb_each(tasks->'aliases') alias
+          JOIN jsonb_each(p_state->'review_draft') finding ON finding.key=alias.key
+          WHERE alias.value=to_jsonb(task_entry.key) AND task_entry.value->>'finding_sha256'=
+            kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(finding.value),'UTF8'))::text)) THEN
+      RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: repair task finding identity' USING ERRCODE='23514';
+    END IF;
+  END LOOP;
+  -- Exact aliases share one ledger. Merging identities must carry the sum of
+  -- their former canonical costs, while retaining retired entry history.
+  IF EXISTS(SELECT 1 FROM jsonb_each(tasks->'entries') entry
+      WHERE (entry.value->>'committed_turns')::numeric<(
+        SELECT coalesce(sum((prior_tasks#>>ARRAY['entries',previous.target,'committed_turns'])::numeric),0)
+        FROM (SELECT DISTINCT prior_tasks#>>ARRAY['aliases',alias.key] AS target
+          FROM jsonb_each(tasks->'aliases') alias
+          WHERE alias.value=to_jsonb(entry.key) AND prior_tasks->'aliases' ? alias.key) previous)) THEN
+    RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: repair task merge lost accounting' USING ERRCODE='23514';
+  END IF;
+  -- Main repair dispositions persist in the existing journal. They are never
+  -- independent review results or permission to publish an extraction.
+  IF (p_state#>'{repair,feedback_sha256}'='null'::jsonb AND (
+      p_state#>'{repair,baseline}'<>'{}'::jsonb OR p_state#>'{repair,results}'<>'{}'::jsonb))
+    OR EXISTS(SELECT 1 FROM jsonb_each(p_state#>'{repair,baseline}') AS entry WHERE
+      entry.key !~ '^(record|relation):.+' OR jsonb_typeof(entry.value)<>'string'
+      OR entry.value#>>'{}' !~ '^[0-9a-f]{64}$')
+    OR EXISTS(SELECT 1 FROM jsonb_each(p_state#>'{repair,results}') AS entry WHERE
+      entry.key !~ '^[0-9a-f]{64}$'
+      OR NOT kb_bid_v2_json_keys_exact(entry.value,ARRAY['conclusion','summary','sources','candidate_versions'])
+      OR coalesce(entry.value->>'conclusion','') NOT IN ('revised','disputed')
+      OR jsonb_typeof(entry.value->'summary') IS DISTINCT FROM 'string'
+      OR btrim(entry.value->>'summary')=''
+      OR jsonb_typeof(entry.value->'sources') IS DISTINCT FROM 'array'
+      OR entry.value->'sources'='[]'::jsonb
+      OR jsonb_typeof(entry.value->'candidate_versions') IS DISTINCT FROM 'object') THEN
+    RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: repair disposition shape' USING ERRCODE='23514';
+  END IF;
   IF pending_value IS DISTINCT FROM 'null'::jsonb AND (
     NOT kb_bid_v2_json_keys_exact(pending_value,ARRAY['turn','role','body','response'])
     OR pending_value->'turn' IS DISTINCT FROM p_state->'turn'
@@ -9660,9 +9802,28 @@ BEGIN
         AND provider_body=convert_to(pending_value->>'body','UTF8')) THEN
       RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: prepared checkpoint requires reserved exact request' USING ERRCODE='23514';
     END IF;
-    IF prior IS NOT NULL AND ((p_state-ARRAY['journal','transcript']) #- '{pending_coverage,views}' IS DISTINCT FROM (prior-ARRAY['journal','transcript']) #- '{pending_coverage,views}'
+    IF prior IS NOT NULL AND (((p_state-ARRAY['journal','transcript','main_work']) #- '{pending_coverage,views}' #- '{repair,tasks}' #- '{main_progress,watch}') IS DISTINCT FROM
+      ((prior-ARRAY['journal','transcript','main_work']) #- '{pending_coverage,views}' #- '{repair,tasks}' #- '{main_progress,watch}')
       OR NOT (coalesce(p_state#>'{pending_coverage,views}','{}'::jsonb) <@ coalesce(prior#>'{pending_coverage,views}','{}'::jsonb))) THEN
       RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: preparation changed business state' USING ERRCODE='23514';
+    END IF;
+    IF tasks->'last_committed_turn' IS DISTINCT FROM prior_tasks->'last_committed_turn'
+      OR EXISTS(SELECT 1 FROM jsonb_each(tasks->'entries') entry
+        WHERE (entry.value->>'committed_turns')::numeric<>greatest(
+          coalesce((prior_tasks#>>ARRAY['entries',entry.key,'committed_turns'])::numeric,0),
+          (SELECT coalesce(sum((prior_tasks#>>ARRAY['entries',previous.target,'committed_turns'])::numeric),0)
+            FROM (SELECT DISTINCT prior_tasks#>>ARRAY['aliases',alias.key] AS target
+              FROM jsonb_each(tasks->'aliases') alias
+              WHERE alias.value=to_jsonb(entry.key) AND prior_tasks->'aliases' ? alias.key) previous))) THEN
+      RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: preparation charged repair task' USING ERRCODE='23514';
+    END IF;
+    IF prior IS NOT NULL AND (
+      (tasks->'active'='null'::jsonb AND (
+        p_state->'main_work' IS DISTINCT FROM prior->'main_work'
+        OR p_state#>'{main_progress,watch}' IS DISTINCT FROM prior#>'{main_progress,watch}'))
+      OR (tasks->'active'<>'null'::jsonb AND (role_value<>'main'
+        OR p_state#>'{main_progress,watch}' IS DISTINCT FROM tasks#>ARRAY['entries',tasks->>'active','watch']))) THEN
+      RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: preparation detached task watch' USING ERRCODE='23514';
     END IF;
     IF prior IS NULL AND (p_state->'tool_calls' IS DISTINCT FROM '0'::jsonb
       OR p_state->'read_bytes' IS DISTINCT FROM '0'::jsonb
@@ -9671,6 +9832,8 @@ BEGIN
       OR p_state#>'{analysis,relations}' IS DISTINCT FROM '{}'::jsonb
       OR p_state#>'{analysis,dispositions}' IS DISTINCT FROM '{}'::jsonb
       OR p_state->'review' IS DISTINCT FROM 'null'::jsonb
+      OR ((p_state->'repair')-'tasks') IS DISTINCT FROM '{"feedback_sha256":null,"baseline":{},"results":{}}'::jsonb
+      OR (tasks-'feedback_sha256') IS DISTINCT FROM '{"active":null,"aliases":{},"entries":{},"last_committed_turn":null}'::jsonb
       OR p_state->'review_draft' IS DISTINCT FROM '{}'::jsonb
       OR p_state->'source_review' IS DISTINCT FROM 'null'::jsonb
       OR p_state->'review_rounds' IS DISTINCT FROM '0'::jsonb
@@ -9713,6 +9876,20 @@ BEGIN
       OR (p_state->>'tool_calls')::bigint<=(prior->>'tool_calls')::bigint
       OR (p_state->>'tool_calls')::bigint>(prior->>'tool_calls')::bigint+jsonb_array_length(prior_pending#>'{response,tool_calls}') THEN
       RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: tool commit must follow saved response' USING ERRCODE='23514';
+    END IF;
+    charged_task:=CASE WHEN prior->>'role'='main' THEN prior_tasks->>'active' END;
+    IF (charged_task IS NOT NULL AND tasks->>'last_committed_turn' IS DISTINCT FROM turn_value::text)
+      OR (charged_task IS NULL AND tasks->'last_committed_turn' IS DISTINCT FROM prior_tasks->'last_committed_turn')
+      OR EXISTS(SELECT 1 FROM jsonb_each(tasks->'entries') entry
+        WHERE (entry.value->>'committed_turns')::numeric<>greatest(
+          coalesce((prior_tasks#>>ARRAY['entries',entry.key,'committed_turns'])::numeric,0)
+            +CASE WHEN charged_task=entry.key THEN 1 ELSE 0 END,
+          (SELECT coalesce(sum((prior_tasks#>>ARRAY['entries',previous.target,'committed_turns'])::numeric
+              +CASE WHEN charged_task=previous.target THEN 1 ELSE 0 END),0)
+            FROM (SELECT DISTINCT prior_tasks#>>ARRAY['aliases',alias.key] AS target
+              FROM jsonb_each(tasks->'aliases') alias
+              WHERE alias.value=to_jsonb(entry.key) AND prior_tasks->'aliases' ? alias.key) previous))) THEN
+      RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: committed batch repair task charge' USING ERRCODE='23514';
     END IF;
   END IF;
   INSERT INTO bid_tender_agent_checkpoint_artifacts(request_artifact_id,frozen_input_sha256,stage_kind,batch_ordinal,

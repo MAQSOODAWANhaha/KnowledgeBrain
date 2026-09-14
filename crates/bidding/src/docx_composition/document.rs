@@ -176,6 +176,73 @@ fn read_range(root: roxmltree::Node<'_, '_>, name: &str) -> Result<RenderedBlock
 fn normalized(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
+
+fn read_text_regions(
+    root: roxmltree::Node<'_, '_>,
+    section: usize,
+    block: usize,
+    fragments: &[String],
+) -> Result<Vec<RenderedBlock>, String> {
+    let name = bookmark_name(section, Some(block));
+    let start = root
+        .descendants()
+        .find(|n| {
+            n.has_tag_name((W, "bookmarkStart")) && n.attribute((W, "name")) == Some(name.as_str())
+        })
+        .ok_or("text block missing")?;
+    let paragraph = start
+        .next_siblings()
+        .skip(1)
+        .find(|n| n.is_element())
+        .filter(|n| n.has_tag_name((W, "p")))
+        .ok_or("text block paragraph missing")?;
+    let nodes: Vec<_> = paragraph.children().filter(|n| n.is_element()).collect();
+    if nodes.len() != fragments.len() * 3 {
+        return Err("text region boundaries changed".into());
+    }
+    let mut out = vec![];
+    for (index, (expected, nodes)) in fragments.iter().zip(nodes.chunks_exact(3)).enumerate() {
+        let name = crate::docx_template::region_bookmark_name(section, block, index);
+        let [start, run, end] = nodes else {
+            unreachable!()
+        };
+        let id = start
+            .attribute((W, "id"))
+            .ok_or("text region identity missing")?;
+        if !start.has_tag_name((W, "bookmarkStart"))
+            || start.attribute((W, "name")) != Some(name.as_str())
+            || !run.has_tag_name((W, "r"))
+            || !end.has_tag_name((W, "bookmarkEnd"))
+            || end.attribute((W, "id")) != Some(id)
+            || text(*run) != *expected
+            || root
+                .descendants()
+                .filter(|n| {
+                    n.has_tag_name((W, "bookmarkStart"))
+                        && (n.attribute((W, "name")) == Some(name.as_str())
+                            || n.attribute((W, "id")) == Some(id))
+                })
+                .count()
+                != 1
+            || root
+                .descendants()
+                .filter(|n| {
+                    n.has_tag_name((W, "bookmarkEnd")) && n.attribute((W, "id")) == Some(id)
+                })
+                .count()
+                != 1
+        {
+            return Err("text region wording, order or independent location changed".into());
+        }
+        out.push(RenderedBlock {
+            bookmark: name,
+            paragraphs: vec![text(*run)],
+            paragraph_styles: vec![None],
+            table: None,
+        });
+    }
+    Ok(out)
+}
 fn twips(mm: f64) -> usize {
     (mm * 1440.0 / 25.4).round() as usize
 }
@@ -223,6 +290,7 @@ pub fn verify(
         .map_err(|e| e.to_string())?;
     let doc = roxmltree::Document::parse(&xml).map_err(|e| e.to_string())?;
     let mut out = vec![];
+    let mut inline = vec![];
     for (s, section) in plan.sections.iter().enumerate() {
         let heading = read_range(doc.root(), &bookmark_name(s, None))?;
         if heading.paragraphs != [normalized(&section.title)] || heading.table.is_some() {
@@ -240,6 +308,14 @@ pub fn verify(
         for (b, block) in section.blocks.iter().enumerate() {
             let rendered = read_range(doc.root(), &bookmark_name(s, Some(b)))?;
             match block.kind.as_str() {
+                "text_regions" => {
+                    let fragments = crate::docx_template::resolve_text_regions(input, block)
+                        .map_err(|e| e.to_string())?;
+                    if rendered.paragraphs != [fragments.concat()] || rendered.table.is_some() {
+                        return Err("text region paragraph or source line breaks changed".into());
+                    }
+                    inline.extend(read_text_regions(doc.root(), s, b, &fragments)?);
+                }
                 "source_excerpt" => {
                     let expected = normalized(
                         &crate::docx_template::resolve_source_parts(input, &block.source_parts)
@@ -478,5 +554,7 @@ pub fn verify(
             return Err("rendered margins changed".into());
         }
     }
+    // Nested region locations are queryable, but are not additional body blocks.
+    out.extend(inline);
     Ok(out)
 }

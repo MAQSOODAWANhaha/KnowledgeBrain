@@ -38,10 +38,21 @@ Agent 检查点当前合同版本3包含活动 SDK 会话，已区分准备、�
 | Workspace/权限 | `crates/bidding/src/workspace.rs`、`bid_authoring_v2.rs`、`crates/api/src/bid_v2_routes.rs` | project/workspace 与 CAS/幂等接缝；不证明 DOCX 保存协议 |
 | 报价 | `crates/bidding/src/quote_snapshot.rs` | Decimal、人工确认和不可变报价；不证明实际正文含报价表 |
 | 媒体证据 | `crates/knowledge/src/knowledge_retrieval.rs`、`knowledge_retrieval_pg/` | V3 media/scope 与冻结引用；不证明图片已插入 DOCX |
-| 对象/队列 | `crates/platform/src/object_registry.rs`、`jobs.rs`、`crates/worker/src/consume.rs` | 对象与执行边界；queue ACK 不等于业务成功 |
+| 对象/队列 | `crates/platform/src/object_registry.rs`、`jobs.rs`、`crates/worker/src/{runtime,helpers,knowledge,bidding}.rs` | worker 只含 adapter + helper；queue ACK 不等于业务成功；housekeep env 需重启；retention 不在本进程 |
 | 编辑与新轮 | `web/src/bid/authoring/DocxEditor.tsx`、`DocxRound.tsx`、`crates/bidding/src/docx_round.rs` | DOCX 编辑和显式发布；合成来源的 Agent 生成至 Office 保存已验证，真实整稿另行验收，旧块渲染不能作回退路径 |
 
 路径中简写文件与同格首个完整路径同目录。当前实现可只读定位，不意味着应继续扩建旧正文模型。已有 schema/compiler/fixture 按其真实行为诊断，不作为新产品标准。
+
+### 完整分析与生成版本报告查询
+
+以下两个 GET 已接入现有 owner 权限与持久化查询，不新增 migration。接口验证见 [API整合记录](../../artifacts/bid-full-sample/loop-repair/analysis-report-api/verification.json)：两个隔离 PostgreSQL/HTTP target 各1项、17项API单测及Clippy/fmt通过；前端报告入口的[34项单测、10项合成浏览器回归与构建检查](../../artifacts/bid-full-sample/loop-repair/analysis-report-api/frontend/verification.json)通过。合成fixtures及实际HTTP校验均不等于真实106页提取或完整DOCX/PDF验收。
+
+| GET | 用途与边界 |
+| --- | --- |
+| `/api/v2/bid-projects/{project_id}/requirement-sets/{requirement_set_id}/analysis?kind=all&offset=0&limit=100` | 按精确冻结要求集分页读取完整记录及原始多分类、政策、visual/grid引用；`kind=all`仅包含所有record类别。关系、来源处置、复核意见分别使用`kind=relation`、`disposition`、`finding`；也可按`fact`、`rule`、`requirement`、`template`、`unresolved`筛选。显式提供非负offset和1–100的limit，沿各集合total读完，不能把一页all当整张图。 |
+| `/api/v2/submission-workspaces/{workspace_id}/docx/versions/{version_id}/composition-report` | 按workspace及精确生成版本下载持久化manifest原始JSON，含来源质量及source_open_items；有无待确认项都可下载。校验存储摘要、长度及DOCX身份后返回`application/json`附件。后续手动上传版本无报告返回404 `DOCX_COMPOSITION_REPORT_NOT_FOUND`，不回退到历史生成报告。 |
+
+旧项目`/requirements`和workspace`/requirement-projection`仍是有损兼容投影，不应用来重建完整章节、政策及附表关系。分析页的quality不是单独的错误结论：复核finding和原文来源open-items须分别解释；编制报告只反映其绑定生成版本的来源状态。不存在的冻结要求集返回404；旧要求集没有完整分析时返回`available:false`。越权查询返回403，未认证返回401；报告对象不可读返回503，摘要/长度/绑定身份校验失败返回422，均不自动取另一版本。生成页报告下载失败不丢失原DOCX下载及重新生成功能。
 
 ## 2. 现有部署与平台恢复
 

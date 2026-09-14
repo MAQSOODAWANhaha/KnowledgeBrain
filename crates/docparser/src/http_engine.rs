@@ -1,6 +1,18 @@
 //! MinerU / PaddleOCR-VL HTTP convert (spec §5.2).
 
 use crate::{ConvertError, NOT_CONFIGURED, ReadResult};
+use tokio_util::sync::CancellationToken;
+
+async fn wait_cancel<T>(
+    cancel: &CancellationToken,
+    fut: impl std::future::Future<Output = Result<T, ConvertError>>,
+) -> Result<T, ConvertError> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(ConvertError("cancelled".into())),
+        result = fut => result,
+    }
+}
 
 pub fn mineru_endpoint() -> String {
     std::env::var("KNOWLEDGEBRAIN_MINERU_ENDPOINT")
@@ -18,10 +30,14 @@ pub async fn convert_http(
     engine: &str,
     file_name: &str,
     bytes: Vec<u8>,
+    cancel: &CancellationToken,
 ) -> Result<ReadResult, ConvertError> {
+    if cancel.is_cancelled() {
+        return Err(ConvertError("cancelled".into()));
+    }
     match engine {
-        "mineru" | "mineru_cloud" => mineru_parse(file_name, &bytes).await,
-        "paddleocr_vl" | "paddleocr_vl_cloud" => paddle_parse(file_name, &bytes).await,
+        "mineru" | "mineru_cloud" => mineru_parse(file_name, &bytes, cancel).await,
+        "paddleocr_vl" | "paddleocr_vl_cloud" => paddle_parse(file_name, &bytes, cancel).await,
         _ => Ok(ReadResult {
             error: NOT_CONFIGURED.into(),
             ..ReadResult::default()
@@ -29,7 +45,11 @@ pub async fn convert_http(
     }
 }
 
-async fn mineru_parse(file_name: &str, bytes: &[u8]) -> Result<ReadResult, ConvertError> {
+async fn mineru_parse(
+    file_name: &str,
+    bytes: &[u8],
+    cancel: &CancellationToken,
+) -> Result<ReadResult, ConvertError> {
     let base = mineru_endpoint();
     if base.is_empty() {
         return Ok(ReadResult {
@@ -43,26 +63,37 @@ async fn mineru_parse(file_name: &str, bytes: &[u8]) -> Result<ReadResult, Conve
         .mime_str("application/octet-stream")
         .map_err(|e| ConvertError(e.to_string()))?;
     let form = reqwest::multipart::Form::new().part("files", part);
-    let resp = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30 * 60))
         .build()
-        .map_err(|e| ConvertError(e.to_string()))?
-        .post(url)
-        .multipart(form)
-        .send()
-        .await
         .map_err(|e| ConvertError(e.to_string()))?;
+    let resp = wait_cancel(cancel, async {
+        client
+            .post(url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| ConvertError(e.to_string()))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(ConvertError(format!("mineru {}", resp.status())));
     }
-    let v: serde_json::Value = resp.json().await.map_err(|e| ConvertError(e.to_string()))?;
+    let v: serde_json::Value = wait_cancel(cancel, async {
+        resp.json().await.map_err(|e| ConvertError(e.to_string()))
+    })
+    .await?;
     Ok(ReadResult {
         markdown: extract_markdown(&v),
         ..ReadResult::default()
     })
 }
 
-async fn paddle_parse(file_name: &str, bytes: &[u8]) -> Result<ReadResult, ConvertError> {
+async fn paddle_parse(
+    file_name: &str,
+    bytes: &[u8],
+    cancel: &CancellationToken,
+) -> Result<ReadResult, ConvertError> {
     let base = paddle_endpoint();
     if base.is_empty() {
         return Ok(ReadResult {
@@ -75,19 +106,26 @@ async fn paddle_parse(file_name: &str, bytes: &[u8]) -> Result<ReadResult, Conve
         "file": data_encoding_base64(bytes),
         "fileName": file_name,
     });
-    let resp = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30 * 60))
         .build()
-        .map_err(|e| ConvertError(e.to_string()))?
-        .post(url)
-        .json(&body)
-        .send()
-        .await
         .map_err(|e| ConvertError(e.to_string()))?;
+    let resp = wait_cancel(cancel, async {
+        client
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ConvertError(e.to_string()))
+    })
+    .await?;
     if !resp.status().is_success() {
         return Err(ConvertError(format!("paddle {}", resp.status())));
     }
-    let v: serde_json::Value = resp.json().await.map_err(|e| ConvertError(e.to_string()))?;
+    let v: serde_json::Value = wait_cancel(cancel, async {
+        resp.json().await.map_err(|e| ConvertError(e.to_string()))
+    })
+    .await?;
     Ok(ReadResult {
         markdown: extract_markdown(&v),
         ..ReadResult::default()
@@ -158,11 +196,12 @@ mod tests {
             std::env::remove_var("KNOWLEDGEBRAIN_PADDLE_ENDPOINT");
             std::env::remove_var("PADDLEOCR_VL_ENDPOINT");
         }
-        let r = convert_http("mineru", "a.pdf", b"%PDF".to_vec())
+        let cancel = CancellationToken::new();
+        let r = convert_http("mineru", "a.pdf", b"%PDF".to_vec(), &cancel)
             .await
             .unwrap();
         assert_eq!(r.error, NOT_CONFIGURED);
-        let r = convert_http("paddleocr_vl", "a.pdf", b"%PDF".to_vec())
+        let r = convert_http("paddleocr_vl", "a.pdf", b"%PDF".to_vec(), &cancel)
             .await
             .unwrap();
         assert_eq!(r.error, NOT_CONFIGURED);

@@ -16,7 +16,7 @@ use rig::{
 };
 use std::{
     sync::{
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -110,6 +110,7 @@ impl HttpClientExt for OnceHttp {
         tracing::info!(
             event = "llm_response_headers",
             status = response.status().as_u16(),
+            content_type = response_type(response.headers()),
             elapsed_ms = started.elapsed().as_millis() as u64
         );
         if !response.status().is_success() {
@@ -133,7 +134,16 @@ impl HttpClientExt for OnceHttp {
                     elapsed_ms = started.elapsed().as_millis() as u64
                 );
             }
-            chunk.map_err(|_| http_unavailable())
+            chunk.map_err(|error| {
+                tracing::warn!(
+                    event = "llm_stream_failure",
+                    stage = "http_body",
+                    timeout = error.is_timeout(),
+                    decode = error.is_decode(),
+                    body = error.is_body()
+                );
+                http_unavailable()
+            })
         });
         // Rig 0.42 records [DONE] but waits for HTTP EOF before flushing its
         // final response. Bound the transport at the actual SSE sentinel.
@@ -147,37 +157,43 @@ impl HttpClientExt for OnceHttp {
                 }
                 let event = stream.next().await?;
                 let mut done = false;
-                let item = event.map_err(|_| http_unavailable()).map(|event| {
-                    done = event.data == "[DONE]";
-                    if done {
-                        tracing::info!(
-                            event = "llm_sse_done",
-                            elapsed_ms = started.elapsed().as_millis() as u64
-                        );
-                    } else if let Ok(frame) = serde_json::from_str::<serde_json::Value>(&event.data)
-                    {
-                        // Protocol labels only: never log provider text or
-                        // arbitrary finish-reason strings as diagnostics.
-                        for reason in frame["choices"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|choice| choice["finish_reason"].as_str())
-                        {
-                            let reason = match reason {
-                                "tool_calls" | "stop" | "length" | "content_filter" => reason,
-                                _ => "other",
-                            };
+                let item = event
+                    .map_err(|_| {
+                        tracing::warn!(event = "llm_stream_failure", stage = "sse_frame");
+                        http_unavailable()
+                    })
+                    .map(|event| {
+                        done = event.data == "[DONE]";
+                        if done {
                             tracing::info!(
-                                event = "llm_sse_finish_reason",
-                                finish_reason = reason,
+                                event = "llm_sse_done",
                                 elapsed_ms = started.elapsed().as_millis() as u64
                             );
+                        } else if let Ok(frame) =
+                            serde_json::from_str::<serde_json::Value>(&event.data)
+                        {
+                            // Protocol labels only: never log provider text or
+                            // arbitrary finish-reason strings as diagnostics.
+                            for reason in frame["choices"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|choice| choice["finish_reason"].as_str())
+                            {
+                                let reason = match reason {
+                                    "tool_calls" | "stop" | "length" | "content_filter" => reason,
+                                    _ => "other",
+                                };
+                                tracing::info!(
+                                    event = "llm_sse_finish_reason",
+                                    finish_reason = reason,
+                                    elapsed_ms = started.elapsed().as_millis() as u64
+                                );
+                            }
                         }
-                    }
-                    let data = event.data.replace('\n', "\ndata: ");
-                    Bytes::from(format!("data: {data}\n\n"))
-                });
+                        let data = event.data.replace('\n', "\ndata: ");
+                        Bytes::from(format!("data: {data}\n\n"))
+                    });
                 Some((item, (stream, done)))
             },
         );
@@ -191,6 +207,45 @@ impl HttpClientExt for OnceHttp {
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WAIT_LOG: Duration = Duration::from_secs(15);
+
+/// Heartbeat ticks must not cancel the SSE task, so it is spawned. Dropping
+/// this wrapper (cancel, timeout, or return) aborts that task; JoinHandle
+/// drop alone would leave the HTTP request running.
+struct AbortOnDrop<T> {
+    handle: tokio::task::JoinHandle<T>,
+}
+
+impl<T> AbortOnDrop<T> {
+    fn abort(&self) {
+        self.handle.abort();
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+fn response_type(headers: &reqwest::header::HeaderMap) -> &'static str {
+    let Some(value) = headers.get(reqwest::header::CONTENT_TYPE) else {
+        return "missing";
+    };
+    let Ok(value) = value.to_str() else {
+        return "other";
+    };
+    // Only bounded protocol classifications, never arbitrary header contents.
+    let mime = value.split(';').next().unwrap_or_default().trim();
+    if mime.eq_ignore_ascii_case("text/event-stream") {
+        "sse"
+    } else if mime.eq_ignore_ascii_case("application/json") {
+        "json"
+    } else if mime.eq_ignore_ascii_case("text/html") {
+        "html"
+    } else {
+        "other"
+    }
+}
 
 fn client() -> Result<reqwest::Client, AgentError> {
     static CLIENT: OnceLock<Result<reqwest::Client, ()>> = OnceLock::new();
@@ -208,7 +263,7 @@ fn client() -> Result<reqwest::Client, AgentError> {
         .map_err(|_| unavailable())
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct StreamStats {
     sdk_events: u64,
     text_events: u64,
@@ -258,6 +313,7 @@ pub(crate) async fn provider_turn(
         &key,
         body,
         Duration::from_millis(runtime.timeout_ms),
+        Arc::default(),
     )
     .await
 }
@@ -267,6 +323,7 @@ async fn send(
     key: &str,
     body: &[u8],
     timeout: Duration,
+    stats: Arc<Mutex<StreamStats>>,
 ) -> Result<ChatTurn, AgentError> {
     let mut request = Request::builder()
         .method("POST")
@@ -292,26 +349,32 @@ async fn send(
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await;
     let mut deadline = std::pin::pin!(tokio::time::sleep(timeout));
-    let mut handle = tokio::spawn(complete_provider_stream(http, request, started));
+    let mut handle = AbortOnDrop {
+        handle: tokio::spawn(complete_provider_stream(
+            http,
+            request,
+            started,
+            stats.clone(),
+        )),
+    };
     loop {
         tokio::select! {
             biased;
-            joined = &mut handle => {
+            joined = &mut handle.handle => {
                 let outcome = joined.unwrap_or_else(|_| Err(unavailable()));
-                let empty = StreamStats::default();
                 log_stream(
-                    outcome.as_ref().ok().map(|(_, stats)| stats).unwrap_or(&empty),
+                    &stats.lock().expect("stream statistics"),
                     &received_bytes,
                     &received_chunks,
                     false,
                     started,
                 );
-                return outcome.map(|(turn, _)| turn);
+                return outcome;
             }
             _ = &mut deadline => {
                 handle.abort();
                 log_stream(
-                    &StreamStats::default(),
+                    &stats.lock().expect("stream statistics"),
                     &received_bytes,
                     &received_chunks,
                     true,
@@ -336,24 +399,20 @@ async fn complete_provider_stream(
     http: OnceHttp,
     request: Request<Vec<u8>>,
     started: Instant,
-) -> Result<(ChatTurn, StreamStats), AgentError> {
-    let mut stats = StreamStats {
-        sdk_events: 0,
-        text_events: 0,
-        text_delta_bytes: 0,
-        reasoning_events: 0,
-        reasoning_delta_bytes: 0,
-        tool_delta_events: 0,
-        tool_argument_delta_bytes: 0,
-        completed_tool_events: 0,
-        final_events: 0,
-        last_sdk_event_ms: None,
-    };
+    stats: Arc<Mutex<StreamStats>>,
+) -> Result<ChatTurn, AgentError> {
     let mut stream = send_compatible_streaming_request(http, request, "openai-chat-compatible")
         .await
         .map_err(response_error)?;
     while let Some(event) = stream.next().await {
-        match event.map_err(response_error)? {
+        let event = event.map_err(|error| {
+            tracing::warn!(event = "llm_stream_failure", stage = "sdk_stream");
+            response_error(error)
+        })?;
+        // Retain observations even when a later frame fails or the task times out.
+        // This guard never spans an await.
+        let mut stats = stats.lock().expect("stream statistics");
+        match event {
             StreamedAssistantContent::Text(text) => {
                 stats.text_events += 1;
                 stats.text_delta_bytes = stats
@@ -436,7 +495,7 @@ async fn complete_provider_stream(
     if !super::valid_tool_turn(&result) {
         return Err(invalid());
     }
-    Ok((result, stats))
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -456,11 +515,26 @@ mod tests {
         )
     }
 
+    #[test]
+    fn response_type_never_exposes_arbitrary_header_values() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert_eq!(response_type(&headers), "missing");
+        for (value, expected) in [
+            ("Text/Event-Stream; charset=utf-8", "sse"),
+            ("application/json", "json"),
+            ("text/html; detail=private-provider-value", "html"),
+            ("private-provider-value", "other"),
+        ] {
+            headers.insert(reqwest::header::CONTENT_TYPE, value.parse().unwrap());
+            assert_eq!(response_type(&headers), expected);
+        }
+    }
+
     async fn exchange(
         status: u16,
         response: String,
         hold: bool,
-    ) -> (Result<ChatTurn, AgentError>, Vec<Vec<u8>>) {
+    ) -> (Result<ChatTurn, AgentError>, Vec<Vec<u8>>, StreamStats) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!(
             "http://{}/v1/chat/completions",
@@ -511,11 +585,13 @@ mod tests {
             vec![json!({"role":"system","content":"合成来源"}),json!({"role":"user","content":"读取已冻结来源"})],
             vec![json!({"type":"function","function":{"name":"inspect_analysis","description":"Read fixture evidence","parameters":{"type":"object"}}})],
         ).await.unwrap();
+        let stats = Arc::default();
         let result = send(
             &endpoint,
             "local-fixture",
             &request,
             Duration::from_millis(if hold { 200 } else { 2000 }),
+            Arc::clone(&stats),
         )
         .await;
         server.abort();
@@ -529,7 +605,8 @@ mod tests {
             vec![request],
             "one reserved body must produce exactly one unchanged physical request"
         );
-        (result, bodies)
+        let observed = stats.lock().expect("stream statistics").clone();
+        (result, bodies, observed)
     }
 
     #[tokio::test]
@@ -545,12 +622,12 @@ mod tests {
             json!({"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":8,"total_tokens":128,"prompt_tokens_details":{"cached_tokens":70},"completion_tokens_details":{"reasoning_tokens":3}}})
         );
         let complete = format!("{tool}{finish}{usage}data: [DONE]\n\n");
-        let (held, _) = exchange(200, complete.clone(), true).await;
+        let (held, _, _) = exchange(200, complete.clone(), true).await;
         assert!(
             held.is_ok(),
             "[DONE] must complete without waiting for HTTP EOF"
         );
-        let (result, _) = exchange(200, complete, false).await;
+        let (result, _, _) = exchange(200, complete, false).await;
         let result = result.unwrap();
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].id, "call-a");
@@ -569,13 +646,13 @@ mod tests {
                 reasoning_tokens: Some(3)
             })
         );
-        let (result, _) = exchange(200, format!("{tool}{finish}data: [DONE]\n\n"), false).await;
+        let (result, _, _) = exchange(200, format!("{tool}{finish}data: [DONE]\n\n"), false).await;
         assert_eq!(result.unwrap().usage, None);
         let partial_usage = format!(
             "data: {}\n\n",
             json!({"choices":[],"usage":{"prompt_tokens":120,"total_tokens":120,"prompt_tokens_details":{},"completion_tokens_details":{}}})
         );
-        let (result, _) = exchange(
+        let (result, _, _) = exchange(
             200,
             format!("{tool}{finish}{partial_usage}data: [DONE]\n\n"),
             false,
@@ -594,7 +671,7 @@ mod tests {
             json!({"tool_calls":[{"index":1,"function":{"arguments":"}"}},{"index":0,"function":{"arguments":"文\"}"}}]}),
             Value::Null,
         );
-        let (result, _) = exchange(
+        let (result, _, _) = exchange(
             200,
             format!("{first}{second}{finish}data: [DONE]\n\n"),
             false,
@@ -652,18 +729,43 @@ mod tests {
                 format!("{tool}data: {{corrupt\n\n{finish}data: [DONE]\n\n"),
             ),
         ] {
-            let (result, _) = exchange(200, body, false).await;
+            let (result, _, _) = exchange(200, body, false).await;
             assert!(result.is_err(), "{name} must not execute tools: {result:?}");
         }
         for status in [400, 413, 429, 503] {
-            let (result, _) = exchange(status, "truncated provider error body".into(), true).await;
+            let (result, _, _) =
+                exchange(status, "truncated provider error body".into(), true).await;
             let error = result.unwrap_err();
             assert_eq!(error.code, "AGENT_PROVIDER_UNAVAILABLE");
             assert!(error.message.contains(&format!("HTTP {status}")));
             assert!(!error.message.contains("truncated provider"));
         }
-        let (result, _) = exchange(200, tool, true).await;
+        let (result, _, _) = exchange(200, tool, true).await;
         assert_eq!(result.unwrap_err().code, "AGENT_TURN_TIMEOUT");
+    }
+
+    #[tokio::test]
+    #[ignore = "owned loopback HTTP server; no external provider or credentials"]
+    async fn partial_stream_statistics_survive_failure_and_timeout() {
+        let partial = event(json!({"content":"partial evidence"}), Value::Null);
+        for (body, hold) in [
+            (format!("{partial}data: {{corrupt\n\n"), false),
+            (partial.clone(), false),
+            (partial, true),
+        ] {
+            let (result, _, stats) = exchange(200, body, hold).await;
+            let error = result.unwrap_err();
+            if hold {
+                assert_eq!(error.code, "AGENT_TURN_TIMEOUT");
+            }
+            assert!(
+                stats.sdk_events > 0,
+                "partial output must not be reported as no SDK events"
+            );
+            assert!(stats.text_delta_bytes > 0);
+            assert!(stats.last_sdk_event_ms.is_some());
+            assert_eq!(stats.completed_tool_events, 0);
+        }
     }
 
     #[tokio::test]
@@ -685,6 +787,7 @@ mod tests {
             "local-fixture",
             b"{}",
             Duration::from_millis(200),
+            Arc::default(),
         )
         .await;
         server.abort();
@@ -693,5 +796,81 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "timeout must not wait for the hung connection drop"
         );
+    }
+
+    #[tokio::test]
+    async fn dropping_send_aborts_the_in_flight_provider_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!(
+            "http://{}/v1/chat/completions",
+            listener.local_addr().unwrap()
+        );
+        let (accepted, mut accepted_rx) = mpsc::unbounded_channel();
+        let (closed, mut closed_rx) = mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut block = [0; 4096];
+            let end = loop {
+                let n = socket.read(&mut block).await.unwrap();
+                if n == 0 {
+                    return;
+                }
+                bytes.extend_from_slice(&block[..n]);
+                if let Some(i) = bytes.windows(4).position(|b| b == b"\r\n\r\n") {
+                    break i + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+            let size = headers
+                .lines()
+                .find_map(|s| s.strip_prefix("content-length:"))
+                .unwrap()
+                .trim()
+                .parse::<usize>()
+                .unwrap();
+            while bytes.len() < end + size {
+                let n = socket.read(&mut block).await.unwrap();
+                if n == 0 {
+                    return;
+                }
+                bytes.extend_from_slice(&block[..n]);
+            }
+            accepted.send(()).unwrap();
+            loop {
+                match socket.read(&mut block).await {
+                    Ok(0) | Err(_) => {
+                        let _ = closed.send(());
+                        return;
+                    }
+                    Ok(_) => {}
+                }
+            }
+        });
+        let mut send = Some(Box::pin(send(
+            &endpoint,
+            "local-fixture",
+            b"{}",
+            Duration::from_secs(30),
+            Arc::default(),
+        )));
+        tokio::select! {
+            biased;
+            result = send.as_mut().unwrap().as_mut() => {
+                panic!("in-flight send completed before drop: {result:?}")
+            }
+            _ = accepted_rx.recv() => {}
+        }
+        let started = Instant::now();
+        send.take();
+        tokio::time::timeout(Duration::from_secs(2), closed_rx.recv())
+            .await
+            .expect("dropping send must abort the spawned HTTP stream")
+            .expect("server closed");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "abort must not wait for the unused send timeout"
+        );
+        server.abort();
     }
 }

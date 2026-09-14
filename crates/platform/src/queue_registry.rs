@@ -340,6 +340,8 @@ mod tests {
             project_id,
             document_set_revision_id: document_id,
             disposition_set_revision_id: Uuid::from_u128(5),
+            reclaim: false,
+            reclaim_attempt: 0,
         };
         assert_eq!(
             registry

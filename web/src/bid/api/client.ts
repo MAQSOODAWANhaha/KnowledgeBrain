@@ -54,6 +54,14 @@ export type BidV2Api = {
     expected: ExpectedPointer | null,
     attempt: MutationAttempt,
   ): Promise<FreezeDocumentSetResult>;
+  latestRequirementSetCompilation(
+    projectId: string,
+    signal?: AbortSignal,
+  ): Promise<RequirementSetCompileRequestView | null>;
+  continueRequirementSetCompilation(
+    projectId: string,
+    attempt: MutationAttempt,
+  ): Promise<RequirementSetCompileRequestView>;
   getRequirementSetCompilation(
     projectId: string,
     requestArtifactId: string,
@@ -179,6 +187,20 @@ export function createBidV2Client(): BidV2Api {
             expected_sha256: expected?.sha256 ?? null,
           }),
         },
+        { attempt },
+      );
+      return data;
+    },
+    async latestRequirementSetCompilation(projectId, signal) {
+      const { data } = await v2Request<RequirementSetCompileRequestView | null>(
+        `/api/v2/bid-projects/${projectId}/requirement-set-compilations/latest`, { signal },
+      );
+      return data;
+    },
+    async continueRequirementSetCompilation(projectId, attempt) {
+      const { data } = await v2Request<RequirementSetCompileRequestView>(
+        `/api/v2/bid-projects/${projectId}/requirement-set-compilations/latest/continue`,
+        { method: "POST" },
         { attempt },
       );
       return data;

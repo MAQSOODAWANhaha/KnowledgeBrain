@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+mod analysis;
 mod docx;
 
 #[derive(Debug)]
@@ -53,6 +54,7 @@ fn map_bid_json_rejection(error: JsonRejection) -> ApiErr {
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .merge(analysis::router())
         .merge(docx::router())
         .route(
             "/api/v2/bid-projects",
@@ -99,6 +101,14 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v2/bid-projects/{id}/document-set-revisions/{revision_id}",
             get(get_document_set),
+        )
+        .route(
+            "/api/v2/bid-projects/{id}/requirement-set-compilations/latest",
+            get(latest_requirement_set_compile_request),
+        )
+        .route(
+            "/api/v2/bid-projects/{id}/requirement-set-compilations/latest/continue",
+            post(continue_latest_requirement_set_compile_request),
         )
         .route(
             "/api/v2/bid-projects/{id}/requirement-set-compilations/{request_id}",
@@ -915,6 +925,101 @@ async fn get_document_set(
         .map_err(map_sql)?
         .map(Json)
         .ok_or_else(|| not_found("document set revision"))
+}
+
+async fn latest_requirement_set_compile_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Option<Value>>, ApiErr> {
+    let (_, actor) = human_actor(&headers, &state).await?;
+    let pool = require_bid_pool().await?;
+    // Authorize before discovering request identities; the detail read checks ownership again.
+    bidding::bid_authoring_v2::get_project_v2(&pool, id, &actor)
+        .await
+        .map_err(map_sql)?
+        .ok_or_else(|| not_found("bid project"))?;
+    let request_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM bid_async_request_snapshot_artifacts \
+         WHERE project_id=$1 AND request_kind='requirement_set_compile' \
+         ORDER BY revision DESC,created_at DESC,id DESC LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(map_sql)?;
+    match request_id {
+        Some(request_id) => bidding::bid_authoring_v2::get_requirement_set_compile_request_v2(
+            &pool, id, request_id, &actor,
+        )
+        .await
+        .map(Json)
+        .map_err(map_sql),
+        None => Ok(Json(None)),
+    }
+}
+
+async fn continue_latest_requirement_set_compile_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiErr> {
+    let (_, actor) = human_actor(&headers, &state).await?;
+    let pool = require_bid_pool().await?;
+    bidding::bid_authoring_v2::get_project_v2(&pool, id, &actor)
+        .await
+        .map_err(map_sql)?
+        .ok_or_else(|| not_found("bid project"))?;
+    let row: Option<(Uuid, i64, String, i32, String)> = sqlx::query_as(
+        "SELECT id, revision, frozen_input_sha256::text, current_attempt, status \
+         FROM bid_async_request_snapshot_artifacts \
+         WHERE project_id=$1 AND request_kind='requirement_set_compile' \
+         ORDER BY revision DESC, created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(map_sql)?;
+    let Some((request_id, revision, frozen, attempt, status)) = row else {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "COMPILE_NOT_PENDING",
+            "no compilation to continue",
+        ));
+    };
+    if status != "pending" {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "COMPILE_NOT_PENDING",
+            "compilation is not pending",
+        ));
+    }
+    let request = BidAuthoringRequestIdentityV2 {
+        request_artifact_id: request_id,
+        request_revision: revision,
+        frozen_input_sha256: frozen,
+    };
+    let frozen_job = bidding::bid_authoring_v2::load_authoring_job_payload_v2(&pool, &request)
+        .await
+        .map_err(map_sql)?;
+    let payload = frozen_request_payload(&frozen_job, &request)?;
+    enqueue_with(
+        &request,
+        frozen_job.get("request_sha256").and_then(Value::as_str),
+        payload,
+        |payload| async move {
+            platform::enqueue_requirement_set_compile_reclaim(payload, attempt)
+                .await
+                .map(|job| job.is_some())
+                .map_err(|error| error.to_string())
+        },
+    )
+    .await?;
+    bidding::bid_authoring_v2::get_requirement_set_compile_request_v2(&pool, id, request_id, &actor)
+        .await
+        .map_err(map_sql)?
+        .map(Json)
+        .ok_or_else(|| not_found("requirement set compilation"))
 }
 
 async fn get_requirement_set_compile_request(

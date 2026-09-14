@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tonic::Code;
 use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
@@ -133,20 +134,30 @@ async fn list_engines_inner(
         .collect())
 }
 
-pub async fn read(req: ConvertRequest) -> Result<ReadResult, ConvertError> {
+pub async fn read(
+    req: ConvertRequest,
+    cancel: &CancellationToken,
+) -> Result<ReadResult, ConvertError> {
+    if cancel.is_cancelled() {
+        return Err(ConvertError("cancelled".into()));
+    }
     let Some(addr) = reader_addr() else {
         return Ok(ReadResult {
             error: NOT_CONFIGURED.into(),
             ..ReadResult::default()
         });
     };
-    let fut = read_inner(&addr, req);
-    match timeout(DOCREADER_TIMEOUT, fut).await {
-        Ok(r) => r,
-        Err(_) => Err(ConvertError(format!(
-            "docreader call timeout after {:?}",
-            DOCREADER_TIMEOUT
-        ))),
+    let fut = read_inner(&addr, req, cancel);
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Err(ConvertError("cancelled".into())),
+        result = timeout(DOCREADER_TIMEOUT, fut) => match result {
+            Ok(r) => r,
+            Err(_) => Err(ConvertError(format!(
+                "docreader call timeout after {:?}",
+                DOCREADER_TIMEOUT
+            ))),
+        },
     }
 }
 
@@ -208,10 +219,14 @@ fn to_proto(req: ConvertRequest, request_id: String) -> ReadRequest {
     }
 }
 
-async fn read_inner(addr: &str, req: ConvertRequest) -> Result<ReadResult, ConvertError> {
+async fn read_inner(
+    addr: &str,
+    req: ConvertRequest,
+    cancel: &CancellationToken,
+) -> Result<ReadResult, ConvertError> {
     let mut client = connect(addr).await?;
     let proto_req = to_proto(req, uuid::Uuid::new_v4().to_string());
-    match read_stream(&mut client, proto_req.clone()).await {
+    match read_stream(&mut client, proto_req.clone(), cancel).await {
         Ok(r) => Ok(r),
         Err(e) if e.msg.contains("unimplemented") || e.code == Some(Code::Unimplemented) => {
             read_unary(&mut client, proto_req).await
@@ -225,7 +240,11 @@ struct StreamErr {
     msg: String,
 }
 
-async fn read_stream(client: &mut Client, req: ReadRequest) -> Result<ReadResult, StreamErr> {
+async fn read_stream(
+    client: &mut Client,
+    req: ReadRequest,
+    cancel: &CancellationToken,
+) -> Result<ReadResult, StreamErr> {
     let mut stream = client
         .read_stream(req)
         .await
@@ -235,16 +254,32 @@ async fn read_stream(client: &mut Client, req: ReadRequest) -> Result<ReadResult
     let mut got_meta = false;
     let mut expected_images: Option<usize> = None;
     loop {
+        if cancel.is_cancelled() {
+            return Err(StreamErr {
+                code: None,
+                msg: "cancelled".into(),
+            });
+        }
         if got_meta && expected_images.is_some_and(|n| result.images.len() >= n) {
             break;
         }
-        let next = if got_meta {
-            match timeout(FRAME_IDLE, stream.message()).await {
+        let message = if got_meta {
+            timeout(FRAME_IDLE, stream.message())
+        } else {
+            timeout(DOCREADER_TIMEOUT, stream.message())
+        };
+        let next = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                return Err(StreamErr {
+                    code: None,
+                    msg: "cancelled".into(),
+                });
+            }
+            result = message => match result {
                 Ok(r) => r,
                 Err(_) => break,
-            }
-        } else {
-            stream.message().await
+            },
         };
         let Some(frame) = next.map_err(map_status)? else {
             break;
@@ -1397,5 +1432,26 @@ mod tests {
         unsafe { std::env::set_var("GRPC_TLS_ENABLED", "true") };
         assert_eq!(endpoint_url("reader:50051"), "https://reader:50051");
         unsafe { std::env::remove_var("GRPC_TLS_ENABLED") };
+    }
+
+    #[tokio::test]
+    async fn cancelled_read_returns_before_connect() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let err = read(
+            ConvertRequest {
+                file_content: vec![],
+                file_name: "a.pdf".into(),
+                file_type: "pdf".into(),
+                url: String::new(),
+                title: String::new(),
+                parser_engine: "builtin".into(),
+                parser_engine_overrides: Default::default(),
+            },
+            &cancel,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, "cancelled");
     }
 }

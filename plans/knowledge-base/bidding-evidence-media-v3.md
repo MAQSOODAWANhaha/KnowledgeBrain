@@ -81,7 +81,7 @@ knowledge baseline负责：
 
 - `migrations/knowledge_base_baseline.sql`：knowledge-owned image artifact/mapping/attestation 与 grants。
 - `crates/knowledge/src/knowledge_retrieval.rs`、`knowledge_retrieval_pg/`：V3 DTO/port、exact/semantic 排序与 scope。
-- `crates/knowledge/src/persist.rs`、`pipeline.rs`：图片 ingestion 原子发布。
+- `crates/knowledge/src/ingest.rs`、`pipeline.rs`、`catalog/`：图片 ingestion 原子发布（无 `persist.rs`）。
 - `crates/platform/src/object_registry.rs`：对象摘要、引用与平台所有权；对象命名空间按平台合同，不由图片专题另定义路径。
 - `crates/bidding/src/content_runtime.rs`、`bid_authoring_v2.rs`：消费受检证据并冻结本标引用；不代表 DOCX 入稿已实现。
 - `crates/knowledge/tests/knowledge_image_ingestion_v3.rs`、`crates/bidding/tests/knowledge_retrieval_attestation_v2.rs`：现存测试位置，不是本轮执行结果。

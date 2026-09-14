@@ -92,7 +92,7 @@ async fn seed_v1_golden_fixture(pool: &PgPool) -> V1GoldenFixture {
         trusted_chunk_id: golden_uuid(5),
         derived_chunk_id: golden_uuid(6),
         filtered_chunk_id: golden_uuid(7),
-        object_ref: format!("objects/{}", knowledge::sha256_hex(document_id.as_bytes())),
+        object_ref: format!("objects/{}", platform::sha256_hex(document_id.as_bytes())),
     };
     remove_v1_golden_fixture(pool, &fixture).await;
 
@@ -129,7 +129,7 @@ async fn seed_v1_golden_fixture(pool: &PgPool) -> V1GoldenFixture {
         .await
         .unwrap();
 
-    let file_hash = knowledge::sha256_hex(fixture.document_id.as_bytes());
+    let file_hash = platform::sha256_hex(fixture.document_id.as_bytes());
     sqlx::query(
         "INSERT INTO object_registry(object_ref,digest,media_type,byte_length,state)
          VALUES($1,$2,'text/plain',1,'available')",
@@ -199,7 +199,7 @@ async fn seed_v1_golden_fixture(pool: &PgPool) -> V1GoldenFixture {
 fn retrieval_policy() -> RetrievalPolicyIdentityV1 {
     RetrievalPolicyIdentityV1 {
         contract_version: "knowledge-evidence-v1".into(),
-        policy_sha256: knowledge::sha256_hex(b"knowledge-evidence-v1:selection-contract-test"),
+        policy_sha256: platform::sha256_hex(b"knowledge-evidence-v1:selection-contract-test"),
         max_hits: 4,
         max_chunk_bytes: 262_144,
         max_total_bytes: 1_048_576,
@@ -333,7 +333,7 @@ async fn remove_selection_fixture(pool: &PgPool, fixture: &SelectionFixture) {
 fn product_request(version_ids: Vec<Uuid>) -> ProductEvidenceRequestV1 {
     ProductEvidenceRequestV1 {
         schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V1,
-        requirement_identity_sha256: knowledge::sha256_hex(b"selection contract requirement"),
+        requirement_identity_sha256: platform::sha256_hex(b"selection contract requirement"),
         requirement_text: "selection contract requirement".into(),
         product_version_ids: version_ids,
         retrieval_policy: retrieval_policy(),
@@ -343,7 +343,7 @@ fn product_request(version_ids: Vec<Uuid>) -> ProductEvidenceRequestV1 {
 fn company_request(version_ids: Vec<Uuid>) -> CompanyEvidenceRequestV1 {
     CompanyEvidenceRequestV1 {
         schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V1,
-        requirement_identity_sha256: knowledge::sha256_hex(b"selection contract requirement"),
+        requirement_identity_sha256: platform::sha256_hex(b"selection contract requirement"),
         requirement_text: "selection contract requirement".into(),
         library_version_ids: version_ids,
         retrieval_policy: retrieval_policy(),
@@ -357,7 +357,7 @@ fn frozen_product(product_id: Uuid, version_id: Uuid, kind: &str) -> Value {
         "product_version_id": version_id,
         "workspace_kind": kind,
         "frozen_display_name": version_id.to_string(),
-        "identity_sha256": knowledge::sha256_hex(
+        "identity_sha256": platform::sha256_hex(
             format!("ProductVersionEvidenceV1:{product_id}:{version_id}:{kind}").as_bytes()
         )
     })

@@ -6,7 +6,6 @@ const ACTIVE_QUEUE_REGISTRY: &str = include_str!("../../../deploy/queue-registry
 const PHASE1_ACCEPTANCE: &str = include_str!("sql/phase1_acceptance.sql");
 const API_ROUTER: &str = include_str!("../../api/src/routes.rs");
 const BID_API_ROUTER: &str = include_str!("../../api/src/bid_v2_routes.rs");
-const WORKER: &str = include_str!("../../worker/src/consume.rs");
 const RETENTION: &str = include_str!("../../retention/src/main.rs");
 const KNOWLEDGE_CLONE: &str = include_str!("../../knowledge/src/clone/mod.rs");
 const KNOWLEDGE_SEARCH: &str = include_str!("../../knowledge/src/search/mod.rs");
@@ -17,10 +16,10 @@ const CONTENT_ERROR_REGISTRY: &str = include_str!("../schemas/content-error-code
 const REQUEST_HANDLER_ERROR_REGISTRY: &str =
     include_str!("../schemas/request-handler-error-codes-v1.json");
 
-use knowledge::{LaunchMode, QueueRegistry};
 use platform::{
     BID_AUTHORING_V2_PAYLOAD_SCHEMA, BID_AUTHORING_V2_PAYLOAD_VERSION, BID_AUTHORING_V2_QUEUE,
 };
+use platform::{LaunchMode, QueueRegistry};
 
 fn create_table_names() -> Vec<&'static str> {
     SQL.lines()
@@ -32,7 +31,6 @@ fn create_table_names() -> Vec<&'static str> {
 #[test]
 fn destructive_postgres_tests_require_an_isolated_non_live_database() {
     for (name, source) in [
-        ("worker", WORKER),
         ("knowledge clone", KNOWLEDGE_CLONE),
         ("knowledge search", KNOWLEDGE_SEARCH),
     ] {
@@ -265,8 +263,6 @@ fn owner_projection_publication_and_worker_terminal_contracts_are_frozen() {
     let document_update = tender_failure.find("UPDATE bid_documents").unwrap();
     assert!(request_lock < typed_fence && typed_fence < terminal_guard);
     assert!(terminal_guard < document_update);
-    assert!(!WORKER.contains(concat!("bid_failure_", "is_final")));
-    assert!(!WORKER.contains("ctx.meta.retries >= platform::BID_AUTHORING_V2_MAX_RETRIES"));
     assert!(SQL.contains("page_count integer CHECK (page_count > 0 AND page_count <= 1000)"));
 }
 
@@ -582,14 +578,18 @@ fn phase_one_vertical_has_owner_checked_mutations_and_is_active() {
     assert!(PHASE1_ACCEPTANCE.contains("stale document set CAS accepted"));
     assert!(PHASE1_ACCEPTANCE.contains("source unit lacks exactly one requirement disposition"));
     assert!(API_ROUTER.contains("merge(crate::bid_v2_routes::router())"));
-    let active_worker = WORKER
-        .split("\n#[cfg(test)]")
-        .next()
-        .expect("worker source");
-    assert!(active_worker.contains("queue_with_concurrency::<BidAuthoringV2Queue>"));
-    assert!(active_worker.contains("TenderDocumentProcessV2Worker"));
-    assert!(active_worker.contains("RequirementSetCompileV2Worker"));
-    assert!(active_worker.contains("ContentGenerateV2Worker"));
+    let registry = QueueRegistry::load().expect("queue registry");
+    for task in [
+        platform::BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
+        platform::BID_REQUIREMENT_SET_COMPILE_V2_TASK,
+        platform::BID_DOCX_COMPOSE_V2_TASK,
+        platform::BID_CONTENT_GENERATE_V2_TASK,
+        platform::BID_SUBMISSION_EXPORT_V2_TASK,
+    ] {
+        let entry = registry.entry_for_task(task).expect(task);
+        assert_eq!(entry.physical_queue, "bid-authoring-v2");
+        assert_eq!(entry.launch_mode, LaunchMode::RequiredEnabled);
+    }
 }
 
 #[test]
@@ -741,16 +741,4 @@ fn request_delivery_uses_oxana_without_a_postgres_reconciler() {
     assert!(BID_API_ROUTER.contains("load_authoring_job_payload_v2(pool, &request)"));
     assert!(BID_API_ROUTER.contains("platform::enqueue_bid_authoring_v2(payload)"));
     assert!(!BID_API_ROUTER.contains("reserve_request_delivery_v2(pool, &request, \"api\")"));
-    for forbidden in [
-        "run_bid_request_delivery_reconciler",
-        "claim_stale_request_deliveries_v2",
-        "DELIVERY_RECONCILE_MIN_SECONDS",
-        "automatic_reconcile",
-    ] {
-        assert!(
-            !WORKER.contains(forbidden),
-            "Worker contains PG queue recovery: {forbidden}"
-        );
-    }
-    assert!(!WORKER.contains("oxanus:"));
 }

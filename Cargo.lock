@@ -3133,6 +3133,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -4785,6 +4786,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -10213,7 +10215,6 @@ dependencies = [
  "async-trait",
  "axum",
  "bidding",
- "docparser",
  "dotenvy",
  "hex",
  "knowledge",

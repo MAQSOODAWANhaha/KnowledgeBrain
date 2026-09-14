@@ -3,6 +3,8 @@
 //! FinalizeSubtask only on ingest terminal.
 
 mod linkify;
+#[path = "sql.rs"]
+pub(crate) mod sql;
 mod taxonomy;
 
 pub use linkify::{LinkRef, linkify_content};
@@ -12,8 +14,9 @@ pub use taxonomy::{
 };
 
 use crate::job::WikiJob;
-use crate::{Chunk, TYPE_WIKI_FINALIZE, TYPE_WIKI_INGEST, WikiFolder, WikiPage, WikiPendingOp};
+use crate::{Chunk, WikiFolder, WikiPage, WikiPendingOp};
 use chrono::{Duration, Utc};
+use platform::{TYPE_WIKI_FINALIZE, TYPE_WIKI_INGEST};
 use taxonomy::{
     Candidate, assemble_body, attach_citations, candidate_slug_prompt, category_for, cite_with_llm,
     collect_text_chunks, dedup_candidates, document_language, existing_folder_paths, fallback_path,
@@ -1039,19 +1042,7 @@ fn index_wiki_page(
         parent_chunk_id: None,
         generated_questions: Vec::new(),
     };
-    let model = store
-        .versions
-        .get(&version_id)
-        .map(|v| v.embedding_model_id.clone())
-        .unwrap_or_default();
-    let _ = crate::index::index_one_in(
-        &mut store.embeddings,
-        &ch,
-        title,
-        &model,
-        vector_on,
-        keyword_on,
-    );
+    let _ = crate::index::index_one_in(&mut store.embeddings, &ch, title, vector_on, keyword_on);
     store.chunks.insert(ch.id, ch);
 }
 
@@ -1431,16 +1422,10 @@ fn reduce_slug(store: &mut WikiJob, version_id: Uuid, op: &WikiPendingOp) -> Res
     if let Some(mut existing) = existing {
         existing.content = page.content.clone();
         existing.end_at = page.content.chars().count() as i32;
-        let model = store
-            .versions
-            .get(&version_id)
-            .map(|v| v.embedding_model_id.clone())
-            .unwrap_or_default();
         crate::index::index_one_in(
             &mut store.embeddings,
             &existing,
             &page.title,
-            &model,
             vector_on,
             keyword_on,
         )?;
@@ -1459,16 +1444,10 @@ fn reduce_slug(store: &mut WikiJob, version_id: Uuid, op: &WikiPendingOp) -> Res
         parent_chunk_id: None,
         generated_questions: Vec::new(),
     };
-    let model = store
-        .versions
-        .get(&version_id)
-        .map(|v| v.embedding_model_id.clone())
-        .unwrap_or_default();
     crate::index::index_one_in(
         &mut store.embeddings,
         &ch,
         &page.title,
-        &model,
         vector_on,
         keyword_on,
     )?;
@@ -1567,7 +1546,7 @@ fn schedule_trigger(
     }
     store.enqueue(
         task_type,
-        crate::QUEUE_WIKI,
+        platform::QUEUE_WIKI,
         serde_json::json!({
             "product_version_id": version_id,
             "delay_secs": delay_secs,

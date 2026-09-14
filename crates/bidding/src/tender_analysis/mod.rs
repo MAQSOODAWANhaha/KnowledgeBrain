@@ -1,8 +1,10 @@
 //! Tender-side semantic analysis. Source geometry is immutable; interpretations
 //! are versioned records, reviewed independently before publication.
 pub mod agent;
+pub mod evidence_refs;
 pub mod postgres;
 pub mod relations;
+pub mod source_review;
 pub mod tools;
 pub mod views;
 
@@ -304,7 +306,7 @@ pub enum RelationTarget {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Relation {
     pub id: String,

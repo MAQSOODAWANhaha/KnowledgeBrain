@@ -74,8 +74,9 @@ impl Workspace {
         if self.done {
             return Err("composition is already independently reviewed".into());
         }
+        let args = crate::tender_analysis::evidence_refs::expand(input, args)?;
         let mut next = self.clone();
-        let out = next.execute(input, result, name, args, limits)?;
+        let out = next.execute(input, result, name, &args, limits)?;
         if serde_json::to_vec(&out).map_err(|e| e.to_string())?.len() > limits.max_result_bytes {
             return Err("composition tool result exceeds budget; request a smaller page".into());
         }

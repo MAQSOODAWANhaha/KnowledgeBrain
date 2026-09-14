@@ -4,9 +4,11 @@
 mod neo4j;
 mod parse;
 mod prompt;
+#[path = "sql.rs"]
+pub(crate) mod sql;
 
 pub use neo4j::{
-    NeoNode, configured as neo4j_configured, delete_document, search_names, sync_document,
+    NeoNode, configured as neo4j_configured, delete_document, search_names, sync_document_job,
 };
 
 pub use parse::{parse_graph, stub_extract_json};
@@ -15,31 +17,12 @@ pub use prompt::{
     render_extract_messages, render_system_prompt,
 };
 
-use crate::Store;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtractOutcome {
     Done,
     Superseded,
-}
-
-pub fn extract_chunk(store: &mut Store, chunk_id: Uuid, document_id: Uuid) -> Result<(), String> {
-    extract_chunk_for_attempt(store, chunk_id, document_id, 0).map(|_| ())
-}
-
-pub fn extract_chunk_for_attempt(
-    store: &mut Store,
-    chunk_id: Uuid,
-    document_id: Uuid,
-    job_attempt: i32,
-) -> Result<ExtractOutcome, String> {
-    let Some(mut job) = crate::DocJob::from_store(store, document_id) else {
-        return Ok(ExtractOutcome::Done);
-    };
-    let outcome = extract_chunk_on_job(&mut job, chunk_id, job_attempt)?;
-    job.write_back(store);
-    Ok(outcome)
 }
 
 pub fn extract_chunk_on_job(
@@ -112,13 +95,13 @@ pub fn extract_chunk_on_job(
 }
 
 fn is_stub_chat(model_id: &str) -> bool {
-    crate::chat_base_url().is_empty() && (model_id == "stub-chat" || model_id.trim().is_empty())
+    platform::chat_base_url().is_empty() && (model_id == "stub-chat" || model_id.trim().is_empty())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Chunk, Document, ProductVersion};
+    use crate::{Chunk, DocJob, Document, ProductVersion};
 
     fn text_chunk(did: Uuid, vid: Uuid, content: &str) -> Chunk {
         Chunk {
@@ -137,77 +120,69 @@ mod tests {
 
     #[test]
     fn upsert_unions_chunk_ids() {
-        let mut s = Store::default();
         let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         let vid = v.id;
-        s.versions.insert(vid, v);
         let doc = Document::new(vid, "t".into(), "a.txt".into(), 1, "h".into(), "h".into());
         let did = doc.id;
-        s.documents.insert(did, doc);
+        let mut job = DocJob::for_test(doc, v);
         let c1 = text_chunk(did, vid, "Alpha device throughput");
         let c2 = text_chunk(did, vid, "Alpha switch fabric");
-        s.chunks.insert(c1.id, c1.clone());
-        s.chunks.insert(c2.id, c2.clone());
-        extract_chunk(&mut s, c1.id, did).unwrap();
-        extract_chunk(&mut s, c2.id, did).unwrap();
-        let node = s
+        job.chunks.insert(c1.id, c1.clone());
+        job.chunks.insert(c2.id, c2.clone());
+        extract_chunk_on_job(&mut job, c1.id, 0).unwrap();
+        extract_chunk_on_job(&mut job, c2.id, 0).unwrap();
+        let node = job
             .graph
             .values()
             .find(|n| n.name == "Alpha")
             .expect("Alpha node");
         assert!(node.chunk_ids.len() >= 2);
         assert!(
-            s.relations.values().any(|r| r.rel_type == "RELATES_TO"),
+            job.relations.values().any(|r| r.rel_type == "RELATES_TO"),
             "stub path should emit a relation"
         );
     }
 
     #[test]
     fn superseded_extract_does_not_finalize() {
-        let mut s = Store::default();
         let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         let vid = v.id;
-        s.versions.insert(vid, v);
         let mut doc = Document::new(vid, "t".into(), "a.txt".into(), 1, "h".into(), "h".into());
         doc.attempt = 2;
         doc.parse_status = crate::ParseStatus::Finalizing;
         doc.pending_subtasks_count = 1;
         let did = doc.id;
-        s.documents.insert(did, doc);
+        let mut job = DocJob::for_test(doc, v);
         let c = text_chunk(did, vid, "Alpha device throughput");
-        s.chunks.insert(c.id, c.clone());
-        let out = extract_chunk_for_attempt(&mut s, c.id, did, 1).unwrap();
+        job.chunks.insert(c.id, c.clone());
+        let out = extract_chunk_on_job(&mut job, c.id, 1).unwrap();
         assert_eq!(out, ExtractOutcome::Superseded);
-        assert_eq!(s.documents[&did].pending_subtasks_count, 1);
-        assert!(s.graph.is_empty());
+        assert_eq!(job.document.pending_subtasks_count, 1);
+        assert!(job.graph.is_empty());
     }
 
     #[test]
     fn extract_disabled_finalizes_without_nodes() {
-        let mut s = Store::default();
         let mut v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         v.extract_enabled = false;
         let vid = v.id;
-        s.versions.insert(vid, v);
         let mut doc = Document::new(vid, "t".into(), "a.txt".into(), 1, "h".into(), "h".into());
         doc.parse_status = crate::ParseStatus::Finalizing;
         doc.pending_subtasks_count = 1;
         let did = doc.id;
-        s.documents.insert(did, doc);
+        let mut job = DocJob::for_test(doc, v);
         let c = text_chunk(did, vid, "Alpha device throughput");
-        s.chunks.insert(c.id, c.clone());
-        extract_chunk(&mut s, c.id, did).unwrap();
-        assert_eq!(s.documents[&did].pending_subtasks_count, 0);
-        assert!(s.graph.is_empty());
+        job.chunks.insert(c.id, c.clone());
+        extract_chunk_on_job(&mut job, c.id, 0).unwrap();
+        assert_eq!(job.document.pending_subtasks_count, 0);
+        assert!(job.graph.is_empty());
     }
 
     #[test]
     fn extract_uses_effective_version_overrides() {
-        let mut s = Store::default();
         let mut v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         v.extract_enabled = true;
         let vid = v.id;
-        s.versions.insert(vid, v);
         let mut doc = Document::new(vid, "t".into(), "a.txt".into(), 1, "h".into(), "h".into());
         doc.parse_status = crate::ParseStatus::Finalizing;
         doc.pending_subtasks_count = 1;
@@ -219,12 +194,12 @@ mod tests {
             ..Default::default()
         });
         let did = doc.id;
-        s.documents.insert(did, doc);
+        let mut job = DocJob::for_test(doc, v);
         let c = text_chunk(did, vid, "Alpha device throughput");
-        s.chunks.insert(c.id, c.clone());
-        extract_chunk(&mut s, c.id, did).unwrap();
-        assert_eq!(s.documents[&did].pending_subtasks_count, 0);
-        assert!(s.graph.is_empty());
+        job.chunks.insert(c.id, c.clone());
+        extract_chunk_on_job(&mut job, c.id, 0).unwrap();
+        assert_eq!(job.document.pending_subtasks_count, 0);
+        assert!(job.graph.is_empty());
     }
 
     #[test]

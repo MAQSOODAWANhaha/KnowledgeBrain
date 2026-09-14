@@ -1486,8 +1486,8 @@ pub(super) mod tests {
             schema_version: EMBEDDING_REVISION_SCHEMA_V2,
             provider_protocol_version: EMBEDDING_PROVIDER_PROTOCOL_VERSION_V2.into(),
             provider_model_identifier: "semantic-v2-test@2025-01-15".into(),
-            provider_model_revision_sha256: crate::sha256_hex(Uuid::new_v4().as_bytes()),
-            endpoint_config_sha256: crate::sha256_hex(Uuid::new_v4().as_bytes()),
+            provider_model_revision_sha256: platform::sha256_hex(Uuid::new_v4().as_bytes()),
+            endpoint_config_sha256: platform::sha256_hex(Uuid::new_v4().as_bytes()),
             endpoint_identity: "https://embeddings.example.test/v1/embeddings".into(),
             dimension: EMBEDDING_DIMENSION_V2,
             request_config_sha256: EmbeddingRevisionV2::canonical_request_config_sha256(),
@@ -1543,8 +1543,8 @@ pub(super) mod tests {
             schema_version: EMBEDDING_REVISION_SCHEMA_V2,
             provider_protocol_version: EMBEDDING_PROVIDER_PROTOCOL_VERSION_V2.into(),
             provider_model_identifier: "semantic-v2-lock-test@2025-01-15".into(),
-            provider_model_revision_sha256: crate::sha256_hex(b"semantic-v2-lock-model"),
-            endpoint_config_sha256: crate::sha256_hex(b"semantic-v2-lock-endpoint"),
+            provider_model_revision_sha256: platform::sha256_hex(b"semantic-v2-lock-model"),
+            endpoint_config_sha256: platform::sha256_hex(b"semantic-v2-lock-endpoint"),
             endpoint_identity: "https://embeddings.example.test/v1/embeddings".into(),
             dimension: EMBEDDING_DIMENSION_V2,
             request_config_sha256: EmbeddingRevisionV2::canonical_request_config_sha256(),
@@ -1556,7 +1556,7 @@ pub(super) mod tests {
             .bind(&revision_sha).bind(&revision_bytes).bind(i16::try_from(revision.schema_version).unwrap()).bind(&revision.provider_protocol_version).bind(&revision.provider_model_identifier).bind(&revision.provider_model_revision_sha256).bind(&revision.endpoint_config_sha256).bind(&revision.endpoint_identity).bind(i32::try_from(revision.dimension).unwrap()).bind(&revision.request_config_sha256).bind(&revision.output_normalization_version).execute(pool).await.unwrap();
         let mut artifact = policy();
         artifact.embedding.model_revision_sha256 = revision_sha.clone();
-        artifact.rerank.model_revision_sha256 = crate::sha256_hex(b"semantic-v2-lock-reranker");
+        artifact.rerank.model_revision_sha256 = platform::sha256_hex(b"semantic-v2-lock-reranker");
         let reranker = RerankRevisionV2 {
             schema_version: RERANK_REVISION_SCHEMA_V2,
             provider_protocol_version: artifact.rerank.provider_protocol_version.clone(),
@@ -1859,7 +1859,7 @@ pub(super) mod tests {
             .await
             .unwrap();
         for id in [document_id, other_document_id] {
-            let digest = crate::sha256_hex(id.as_bytes());
+            let digest = platform::sha256_hex(id.as_bytes());
             let object_ref = format!("objects/{digest}");
             sqlx::query("INSERT INTO object_registry(object_ref,digest,media_type,byte_length,state) VALUES($1,$2,'text/plain',1,'available')")
                 .bind(&object_ref).bind(&digest).execute(&mut *tx).await.unwrap();

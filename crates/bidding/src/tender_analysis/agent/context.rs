@@ -13,1964 +13,7 @@ pub(super) fn estimate_input_tokens(body: &Value, limits: &Limits) -> Result<usi
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    #[ignore = "requires KB_TENDER_CONTEXT_REPLAY_DIR and KB_TENDER_CONTEXT_REPORT; saved response and cached images only"]
-    async fn saved_mixed_batch_defers_overflowing_writes_without_losing_fitted_comparisons() {
-        struct NoIo;
-        #[async_trait]
-        impl Journal for NoIo {
-            async fn load(&self) -> Result<Option<Checkpoint>, AgentError> {
-                panic!("offline only")
-            }
-            async fn reserve(&self, _: &Checkpoint, _: &[u8]) -> Result<Option<usize>, AgentError> {
-                panic!("offline only")
-            }
-            async fn save(&self, _: &Checkpoint, _: &Value) -> Result<(), AgentError> {
-                panic!("offline only")
-            }
-        }
-        let root = std::path::PathBuf::from(std::env::var("KB_TENDER_CONTEXT_REPLAY_DIR").unwrap());
-        let original = std::fs::read(root.join("extraction/checkpoint.json")).unwrap();
-        let saved: Checkpoint = serde_json::from_slice(&original).unwrap();
-        let input: FrozenInput =
-            serde_json::from_slice(&std::fs::read(root.join("input/frozen-input.json")).unwrap())
-                .unwrap();
-        let runtime: Value =
-            serde_json::from_slice(&std::fs::read(root.join("extraction/runtime.json")).unwrap())
-                .unwrap();
-        let config = Config::with_provider(
-            serde_json::from_value(runtime["provider"].clone()).unwrap(),
-            serde_json::from_value(runtime["limits"].clone()).unwrap(),
-        )
-        .unwrap();
-        let response = saved.journal.response().unwrap().clone();
-        let mut state = saved.clone();
-        let result = super::execute_turn(
-            &input,
-            &config,
-            &mut state,
-            &NoIo,
-            response.clone(),
-            BTreeMap::new(),
-            &CancellationToken::new(),
-        )
-        .await;
-        let mut checks = vec![];
-        let mut bytes = None;
-        if let Ok(outputs) = &result {
-            for (call, output) in response.tool_calls.iter().zip(outputs) {
-                if call.name != "complete_review_check" {
-                    continue;
-                }
-                let args: Value = serde_json::from_str(&call.arguments).unwrap();
-                let key = args["reference"].as_str().unwrap();
-                let out: Value = serde_json::from_str(output["content"].as_str().unwrap()).unwrap();
-                let compared = has_review_outcome(&state, key).unwrap();
-                checks.push(json!({"reference":key,"ok":out["ok"],"error":out["error"],"compared_after":compared,"compared_before":has_review_outcome(&saved,key).unwrap()}));
-            }
-            bytes = Some(
-                super::request(&input, &config, &mut state)
-                    .await
-                    .unwrap()
-                    .len(),
-            );
-        }
-        std::fs::write(std::env::var("KB_TENDER_CONTEXT_REPORT").unwrap(), serde_json::to_vec_pretty(&json!({"mode":"offline saved response replay; no model or persistence calls","saved_turn":saved.turn,"error":result.as_ref().err().map(|e|&e.message),"request_bytes":bytes,"checks":checks})).unwrap()).unwrap();
-        assert_eq!(
-            std::fs::read(root.join("extraction/checkpoint.json")).unwrap(),
-            original
-        );
-        let outputs = result.unwrap();
-        assert_eq!(outputs.len(), response.tool_calls.len());
-        assert_eq!(state.turn, saved.turn + 1);
-        assert_eq!(
-            state.tool_calls,
-            saved.tool_calls + response.tool_calls.len()
-        );
-        assert_eq!(json!(state.analysis), json!(saved.analysis));
-        assert_eq!(state.journal.body().unwrap(), saved.journal.body().unwrap());
-        assert!(
-            checks
-                .iter()
-                .any(|c| c["ok"] == true && c["compared_after"] == true)
-        );
-        assert!(checks.iter().any(|c| c["ok"] == false));
-        for check in checks.iter().filter(|c| c["ok"] == false) {
-            assert_eq!(
-                check["compared_after"], check["compared_before"],
-                "rejected writes must not establish comparisons"
-            );
-        }
-    }
-
-    #[tokio::test]
-    #[ignore = "requires KB_TENDER_CONTEXT_REPLAY_DIR and KB_TENDER_CONTEXT_REPORT; cached images only, no I/O"]
-    async fn checkpoint_original_image_rereads_fit_without_new_coverage() {
-        struct NoIo;
-        #[async_trait]
-        impl Journal for NoIo {
-            async fn load(&self) -> Result<Option<Checkpoint>, AgentError> {
-                panic!("offline only")
-            }
-            async fn reserve(&self, _: &Checkpoint, _: &[u8]) -> Result<Option<usize>, AgentError> {
-                panic!("offline only")
-            }
-            async fn save(&self, _: &Checkpoint, _: &Value) -> Result<(), AgentError> {
-                panic!("offline only")
-            }
-        }
-        let root = std::path::PathBuf::from(std::env::var("KB_TENDER_CONTEXT_REPLAY_DIR").unwrap());
-        let original = std::fs::read(root.join("extraction/checkpoint.json")).unwrap();
-        let saved: Checkpoint = serde_json::from_slice(&original).unwrap();
-        let input: FrozenInput =
-            serde_json::from_slice(&std::fs::read(root.join("input/frozen-input.json")).unwrap())
-                .unwrap();
-        let runtime: Value =
-            serde_json::from_slice(&std::fs::read(root.join("extraction/runtime.json")).unwrap())
-                .unwrap();
-        let config = Config::with_provider(
-            serde_json::from_value(runtime["provider"].clone()).unwrap(),
-            serde_json::from_value(runtime["limits"].clone()).unwrap(),
-        )
-        .unwrap();
-        let mut reports = vec![];
-        for (id, identity) in &saved.coverage().views {
-            let mut state = saved.clone();
-            state.journal = Default::default();
-            if let Some(delivered) = state.pending_coverage.take() {
-                state.replace_coverage(delivered);
-            }
-            let before = json!([
-                state.analysis,
-                state.coverage(),
-                state.turn,
-                state.tool_calls
-            ]);
-            let args = json!({"source_id":identity.source_id});
-            check_read_scope(&input, &state, "read_source_view", &args).unwrap();
-            state.transcript.push(json!({"role":"assistant","tool_calls":[{"id":"reread","type":"function","function":{"name":"read_source_view","arguments":args.to_string()}}]}));
-            let result = super::read_source_view(
-                &input,
-                &config,
-                &mut state,
-                &NoIo,
-                &args,
-                &CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-            assert_eq!(result["view_id"], *id);
-            state.pending_coverage = Some(state.coverage().clone());
-            state.transcript.push(json!({"role":"tool","tool_call_id":"reread","content":json!({"ok":true,"result":result}).to_string()}));
-            let fitted =
-                super::fit_batch(&input, &config, &mut state, &[], std::slice::from_ref(id)).await;
-            let mut bytes = None;
-            if fitted.is_ok() {
-                state
-                    .transcript
-                    .push(json!({"role":"user","source_view_refs":[id]}));
-                let wire = super::prepare_request(&input, &config, &mut state, false)
-                    .await
-                    .unwrap();
-                let body: Value = serde_json::from_slice(&wire).unwrap();
-                let expected = state.source_views[id].message();
-                assert!(body["messages"].as_array().unwrap().contains(&expected));
-                bytes = Some(wire.len());
-            }
-            assert_eq!(
-                json!([
-                    state.analysis,
-                    state.coverage(),
-                    state.turn,
-                    state.tool_calls
-                ]),
-                before
-            );
-            reports.push(json!({"source_id":identity.source_id,"view_id":id,"bytes":bytes,"error":fitted.err().map(|e|e.message)}));
-        }
-        assert!(!reports.is_empty());
-        assert_eq!(
-            std::fs::read(root.join("extraction/checkpoint.json")).unwrap(),
-            original
-        );
-        std::fs::write(
-            std::env::var("KB_TENDER_CONTEXT_REPORT").unwrap(),
-            serde_json::to_vec_pretty(&json!({"mode":"offline cached image rereads, original checkpoint and receipts unchanged","turn":saved.turn,"reports":reports})).unwrap(),
-        ).unwrap();
-        assert!(reports.iter().all(|r| r["error"].is_null()), "{reports:?}");
-    }
-
-    #[test]
-    #[ignore = "requires KB_TENDER_WORK_GAP_REPLAY_DIR and KB_TENDER_WORK_GAP_REPORT; diagnostics only"]
-    fn recorded_work_gap_diagnostics_do_not_resume_or_rewrite_the_run() {
-        use std::path::PathBuf;
-        let root = PathBuf::from(std::env::var("KB_TENDER_WORK_GAP_REPLAY_DIR").unwrap());
-        let checkpoint_path = root.join("extraction/checkpoint.json");
-        let original = std::fs::read(&checkpoint_path).unwrap();
-        let input: FrozenInput =
-            serde_json::from_slice(&std::fs::read(root.join("input/frozen-input.json")).unwrap())
-                .unwrap();
-        let mut projection: Value = serde_json::from_slice(&original).unwrap();
-        // An in-memory diagnostic projection of the old payload only. Its
-        // input/config identity is never changed or passed to agent::run.
-        if projection.get("review_draft").is_none() {
-            projection["review_draft"] = json!({});
-        }
-        if projection.get("journal").is_none() {
-            projection["journal"] = json!({"sequence":0,"pending":null});
-        }
-        let state: Checkpoint = serde_json::from_value(projection).unwrap();
-        let before = digest(&state).unwrap();
-        let work = state.work().unwrap();
-        let rows = completion_gaps(&input, &state, work).unwrap();
-        let global = tools::gaps(&input, &state.analysis);
-        let global_scope_items = global
-            .iter()
-            .take(50)
-            .filter(|g| {
-                g["source_id"]
-                    .as_str()
-                    .is_some_and(|id| work.source_scope.iter().any(|s| s == id))
-            })
-            .count();
-        assert_eq!(
-            global_scope_items, 0,
-            "fixture must reproduce a global page hiding local blockers"
-        );
-        let missing = work
-            .source_scope
-            .iter()
-            .filter(|id| !state.analysis.dispositions.contains_key(*id))
-            .count();
-        assert!(missing > 0);
-        assert_eq!(
-            rows.iter()
-                .filter(|g| g["kind"] == "missing_disposition")
-                .count(),
-            missing
-        );
-        // Exercise the tool's actual byte-bounded continuation, without an LLM.
-        let mut found = Vec::new();
-        let mut offset = 0;
-        let mut pages = 0;
-        while offset < rows.len() {
-            let page = work_gaps(
-                &input,
-                &state,
-                &json!({"scope":"work","offset":offset,"limit":rows.len()}),
-                2048,
-            )
-            .unwrap();
-            assert!(serde_json::to_vec(&page).unwrap().len() <= 2048);
-            let next = page["next"].as_u64().unwrap() as usize;
-            assert!(next > offset);
-            found.extend(page["items"].as_array().unwrap().iter().cloned());
-            offset = next;
-            pages += 1;
-        }
-        assert_eq!(found, rows);
-        assert!(pages > 1);
-        assert_eq!(digest(&state).unwrap(), before);
-        assert_eq!(std::fs::read(&checkpoint_path).unwrap(), original);
-        let request_packet = request_work_state(&input, &state, 2048).unwrap();
-        assert!(serde_json::to_vec(&request_packet).unwrap().len() <= 2048);
-        assert_eq!(request_packet["gap_counts"]["missing_disposition"], missing);
-        assert!(request_packet["blockers"]["next"].as_u64().unwrap() > 0);
-        assert_eq!(std::fs::read(&checkpoint_path).unwrap(), original);
-        let report = json!({"mode":"offline diagnostics only; no model call or run recovery", "request_packet":request_packet,
-            "recorded_turn":state.turn,"active_sources":work.source_scope.len(),
-            "global_gap_count":global.len(),"global_first_50_scope_items":global_scope_items,
-            "local_gap_count":rows.len(),"missing_scope_dispositions":missing,
-            "pages_at_2048_bytes":pages,"items":rows});
-        std::fs::write(
-            std::env::var("KB_TENDER_WORK_GAP_REPORT").unwrap(),
-            serde_json::to_vec_pretty(&report).unwrap(),
-        )
-        .unwrap();
-    }
-
-    #[tokio::test]
-    #[ignore = "requires checkpoint replay directory, inspection argument array and report via KB_TENDER_CONTEXT_*; offline only"]
-    async fn checkpoint_exact_inspection_preserves_working_evidence() {
-        checkpoint_inspection_replay(true).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires a cache-pressure checkpoint, queries and report via KB_TENDER_CONTEXT_*; offline only"]
-    async fn checkpoint_exact_inspection_preserves_required_evidence_with_partial_optional_cache() {
-        checkpoint_inspection_replay(false).await;
-    }
-
-    async fn checkpoint_inspection_replay(require_full_cache: bool) {
-        let root = std::path::PathBuf::from(std::env::var("KB_TENDER_CONTEXT_REPLAY_DIR").unwrap());
-        let original = std::fs::read(root.join("extraction/checkpoint.json")).unwrap();
-        let saved: Checkpoint = serde_json::from_slice(&original).unwrap();
-        let input: FrozenInput =
-            serde_json::from_slice(&std::fs::read(root.join("input/frozen-input.json")).unwrap())
-                .unwrap();
-        let runtime: Value =
-            serde_json::from_slice(&std::fs::read(root.join("extraction/runtime.json")).unwrap())
-                .unwrap();
-        let config = Config::with_provider(
-            serde_json::from_value(runtime["provider"].clone()).unwrap(),
-            serde_json::from_value(runtime["limits"].clone()).unwrap(),
-        )
-        .unwrap();
-        let queries: Vec<Value> = serde_json::from_slice(
-            &std::fs::read(std::env::var("KB_TENDER_CONTEXT_REQUEST").unwrap()).unwrap(),
-        )
-        .unwrap();
-        let mut reports = vec![];
-        for args in queries {
-            let mut state = saved.clone();
-            state.journal = Default::default();
-            if let Some(delivered) = state.pending_coverage.take() {
-                state.replace_coverage(delivered);
-            }
-            let call = knowledge::models::ChatToolCall {
-                id: "offline-inspection".into(),
-                name: "inspect_analysis".into(),
-                arguments: args.to_string(),
-            };
-            state.transcript.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments}}]}));
-            let committed = state.coverage().clone();
-            let expected = focused_work_evidence(&state, &state.transcript);
-            let result = super::inspect_in_context(
-                &input,
-                &config,
-                &mut state,
-                &args,
-                std::slice::from_ref(&call),
-                &[],
-                &committed,
-            )
-            .await;
-            let mut wire_report = Value::Null;
-            if let Ok(page) = &result {
-                state
-                    .transcript
-                    .push(json!({"role":"tool","tool_call_id":call.id,
-                    "content":json!({"ok":true,"result":page}).to_string()}));
-                let bytes = super::request(&input, &config, &mut state).await.unwrap();
-                let body: Value = serde_json::from_slice(&bytes).unwrap();
-                let messages = body["messages"].as_array().unwrap();
-                let actual = focused_work_evidence(&state, messages);
-                let all_visible = visible_work_evidence(&state, messages);
-                let available = candidate_recall_message(
-                    &state,
-                    config.limits.max_tool_result_bytes,
-                    &BTreeMap::new(),
-                )
-                .unwrap();
-                let available: Value = available["content"]
-                    .as_str()
-                    .map(|content| serde_json::from_str(content).unwrap())
-                    .unwrap_or(Value::Null);
-                let recall_candidates: Vec<_> = available["retained_candidate_details"]["items"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .collect();
-                let missing_recall: Vec<_> = recall_candidates
-                    .iter()
-                    .filter(|item| {
-                        !all_visible.contains_key(&format!(
-                            "candidate:{}:{}",
-                            item["reference"].as_str().unwrap(),
-                            digest(&item["value"]).unwrap()
-                        ))
-                    })
-                    .map(|item| &item["reference"])
-                    .collect();
-                let missing: Vec<_> = expected
-                    .iter()
-                    .filter(|(key, ranges)| {
-                        !ranges
-                            .iter()
-                            .all(|&(a, b)| tools::contains(actual.get(*key), a, b))
-                            && !key.strip_prefix("view:").is_some_and(|id| {
-                                state
-                                    .source_views
-                                    .get(id)
-                                    .is_some_and(|v| messages.contains(&v.message()))
-                            })
-                    })
-                    .map(|(key, _)| key)
-                    .collect();
-                let focus_candidates = recall_candidates
-                    .iter()
-                    .filter(|item| {
-                        state.work().is_some_and(|work| {
-                            work.focus
-                                .references
-                                .iter()
-                                .any(|key| item["reference"] == *key)
-                        })
-                    })
-                    .count();
-                wire_report = json!({"bytes":bytes.len(),"missing_evidence":missing,"focus_candidates":focus_candidates,
-                    "recall_candidates":recall_candidates.len(),"missing_recall_candidates":missing_recall});
-            }
-            reports.push(json!({"query":args,"expected_evidence":expected,
-                "returned_items":result.as_ref().ok().map(|v|&v["items"]),"wire":wire_report,"error":result.err()}));
-        }
-        std::fs::write(std::env::var("KB_TENDER_CONTEXT_REPORT").unwrap(), serde_json::to_vec_pretty(&json!({
-            "mode":"offline projection of exact lookups after delivery of the saved request; no model, reservation, checkpoint or business writes",
-            "turn":saved.turn,"require_full_cache":require_full_cache,"reports":reports
-        })).unwrap()).unwrap();
-        assert_eq!(
-            std::fs::read(root.join("extraction/checkpoint.json")).unwrap(),
-            original
-        );
-        assert!(
-            reports.iter().all(|r| r["error"].is_null()),
-            "exact candidate lookup rejected; inspect offline report"
-        );
-        assert!(reports.iter().all(|r| {
-            r["wire"]["bytes"].as_u64().unwrap() <= config.limits.max_context_bytes as u64
-                && r["wire"]["missing_evidence"].as_array().unwrap().is_empty()
-        }));
-        if require_full_cache {
-            assert!(
-                reports
-                    .iter()
-                    .all(|r| r["wire"]["missing_recall_candidates"]
-                        .as_array()
-                        .unwrap()
-                        .is_empty()),
-                "all candidate versions reserved by the recall budget must coexist; inspect offline report"
-            );
-        } else {
-            for report in &reports {
-                let wire = &report["wire"];
-                let omitted = wire["missing_recall_candidates"].as_array().unwrap().len() as u64;
-                assert!(omitted > 0, "fixture must exercise partial-cache pressure");
-                assert!(
-                    wire["recall_candidates"].as_u64().unwrap() - omitted
-                        > wire["focus_candidates"].as_u64().unwrap(),
-                    "retain optional evidence that still fits, rather than discarding the entire cache"
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    #[ignore = "requires KB_TENDER_CONTEXT_REPLAY_DIR, KB_TENDER_CONTEXT_REQUEST and KB_TENDER_CONTEXT_REPORT; offline only"]
-    async fn scoped_candidate_retrieval_keeps_work_evidence_in_the_recorded_window() {
-        use std::path::PathBuf;
-        let root = PathBuf::from(std::env::var("KB_TENDER_CONTEXT_REPLAY_DIR").unwrap());
-        let checkpoint_path = root.join("extraction/checkpoint.json");
-        let original = std::fs::read(&checkpoint_path).unwrap();
-        let saved: Checkpoint = serde_json::from_slice(&original).unwrap();
-        let input: FrozenInput =
-            serde_json::from_slice(&std::fs::read(root.join("input/frozen-input.json")).unwrap())
-                .unwrap();
-        let old: Value =
-            serde_json::from_slice(&std::fs::read(root.join("extraction/runtime.json")).unwrap())
-                .unwrap();
-        // Offline projection uses only the recorded tuning, not its retired
-        // runtime implementation identity. It never resumes that checkpoint.
-        let config = Config::with_provider(
-            serde_json::from_value(old["provider"].clone()).unwrap(),
-            serde_json::from_value(old["limits"].clone()).unwrap(),
-        )
-        .unwrap();
-        let request: Value = serde_json::from_slice(
-            &std::fs::read(std::env::var("KB_TENDER_CONTEXT_REQUEST").unwrap()).unwrap(),
-        )
-        .unwrap();
-        let messages = request["messages"].as_array().unwrap();
-        let dynamic: Value =
-            serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
-        let work: WorkState = serde_json::from_value(dynamic["work"].clone()).unwrap();
-        let evidence = |transcript: &[Value]| {
-            let mut ranges = BTreeMap::<String, Vec<(usize, usize)>>::new();
-            let mut cells = BTreeSet::new();
-            for message in transcript.iter().filter(|m| m["role"] == "tool") {
-                let output: Value =
-                    serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
-                if output["ok"] != true {
-                    continue;
-                }
-                let result = &output["result"];
-                if result["text"].is_string()
-                    && result["source_id"]
-                        .as_str()
-                        .is_some_and(|id| work.source_scope.iter().any(|s| s == id))
-                {
-                    tools::cover(
-                        ranges
-                            .entry(result["source_id"].as_str().unwrap().to_owned())
-                            .or_default(),
-                        result["start"].as_u64().unwrap() as usize,
-                        result["end"].as_u64().unwrap() as usize,
-                    );
-                }
-                if result["form_id"].is_string()
-                    && input.structured_forms.iter().any(|f| {
-                        f["form_definition_revision_id"] == result["form_id"]
-                            && work
-                                .source_scope
-                                .iter()
-                                .any(|s| f["source_unit_revision_id"] == *s)
-                    })
-                {
-                    for cell in result["cells"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .filter(|c| !c.is_null())
-                    {
-                        cells.insert((
-                            result["form_id"].as_str().unwrap().to_owned(),
-                            cell["row"].as_u64().unwrap(),
-                            cell["column"].as_u64().unwrap(),
-                        ));
-                    }
-                }
-            }
-            (ranges, cells)
-        };
-        let mut base = saved;
-        base.role = Role::Main;
-        base.turn = dynamic["progress"]["turn"].as_u64().unwrap() as usize;
-        base.tool_calls = dynamic["progress"]["tool_calls"].as_u64().unwrap() as usize;
-        base.read_bytes = dynamic["progress"]["read_bytes"].as_u64().unwrap() as usize;
-        base.main_work = Some(work.clone());
-        base.transcript = messages[2..messages.len() - 1].to_vec();
-        base.pending_coverage = None;
-        base.journal = Default::default();
-        let expected = evidence(&base.transcript);
-        assert!(!expected.1.is_empty());
-        let args = json!({"view":"detail","kind":"all","offset":0,"limit":50});
-        let mut reports = vec![];
-        for scoped in [false, true] {
-            let mut state = base.clone();
-            let call = knowledge::models::ChatToolCall {
-                id: "diagnostic-inspection".into(),
-                name: "inspect_analysis".into(),
-                arguments: args.to_string(),
-            };
-            state.transcript.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments}}]}));
-            let page = if scoped {
-                let committed = state.coverage().clone();
-                super::inspect_in_context(
-                    &input,
-                    &config,
-                    &mut state,
-                    &args,
-                    std::slice::from_ref(&call),
-                    &[],
-                    &committed,
-                )
-                .await
-                .unwrap()
-            } else {
-                tools::inspect_analysis(
-                    &input,
-                    &state.analysis,
-                    &mut Coverage::default(),
-                    &Coverage::default(),
-                    &args,
-                    config.limits.max_tool_result_bytes,
-                    None,
-                )
-                .unwrap()
-            };
-            state.transcript.push(json!({"role":"tool","tool_call_id":call.id,"content":json!({"ok":true,"result":page}).to_string()}));
-            let body = super::request(&input, &config, &mut state).await.unwrap();
-            let actual = evidence(&state.transcript);
-            reports.push(json!({"scoped":scoped,"candidate_count":page["total"],"returned_candidates":page["items"].as_array().unwrap().len(),"next":page["next"],"request_bytes":body.len(),
-                "tool_result_bytes":serde_json::to_vec(&page).unwrap().len(),"retained_anchors":actual.1.len(),"expected_anchors":expected.1.len(),
-                "all_prior_work_evidence_retained":actual == expected}));
-            if scoped {
-                let total = page["total"].as_u64().unwrap();
-                let mut next = page["next"].as_u64().unwrap();
-                let mut ids: BTreeSet<_> = page["items"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v["id"].as_str().unwrap().to_owned())
-                    .collect();
-                let mut pages = 1;
-                while next < total {
-                    let args = json!({"view":"detail","kind":"all","offset":next,"limit":50});
-                    let call = knowledge::models::ChatToolCall {
-                        id: format!("diagnostic-page-{next}"),
-                        name: "inspect_analysis".into(),
-                        arguments: args.to_string(),
-                    };
-                    state.transcript.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments}}]}));
-                    let committed = state.coverage().clone();
-                    let page = super::inspect_in_context(
-                        &input,
-                        &config,
-                        &mut state,
-                        &args,
-                        std::slice::from_ref(&call),
-                        &[],
-                        &committed,
-                    )
-                    .await
-                    .unwrap();
-                    state
-                        .transcript
-                        .push(json!({"role":"tool","tool_call_id":call.id,
-                        "content":json!({"ok":true,"result":page}).to_string()}));
-                    super::request(&input, &config, &mut state).await.unwrap();
-                    assert_eq!(
-                        evidence(&state.transcript),
-                        expected,
-                        "pagination evicted required source evidence"
-                    );
-                    for row in page["items"].as_array().unwrap() {
-                        assert!(ids.insert(row["id"].as_str().unwrap().to_owned()));
-                    }
-                    let cursor = page["next"].as_u64().unwrap();
-                    assert!(cursor > next);
-                    next = cursor;
-                    pages += 1;
-                }
-                assert_eq!(ids.len() as u64, total);
-                reports.last_mut().unwrap()["pages_to_retrieve_all_candidates"] = json!(pages);
-                reports.last_mut().unwrap()["all_candidates_retrieved_without_evidence_eviction"] =
-                    json!(true);
-            }
-        }
-        std::fs::write(
-            std::env::var("KB_TENDER_CONTEXT_REPORT").unwrap(),
-            serde_json::to_vec_pretty(&reports).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(std::fs::read(checkpoint_path).unwrap(), original);
-        assert_eq!(
-            reports[0]["all_prior_work_evidence_retained"], false,
-            "fixture must reproduce evidence eviction"
-        );
-        assert_eq!(reports[1]["all_prior_work_evidence_retained"], true);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires KB_TENDER_CONTEXT_REPLAY_DIR, KB_TENDER_CONTEXT_REQUEST and KB_TENDER_CONTEXT_REPORT; offline only"]
-    async fn recorded_overlapping_inspections_fit_without_losing_source_evidence() {
-        use std::path::PathBuf;
-        let root = PathBuf::from(std::env::var("KB_TENDER_CONTEXT_REPLAY_DIR").unwrap());
-        let original = std::fs::read(root.join("extraction/checkpoint.json")).unwrap();
-        let mut state: Checkpoint = serde_json::from_slice(&original).unwrap();
-        let input: FrozenInput =
-            serde_json::from_slice(&std::fs::read(root.join("input/frozen-input.json")).unwrap())
-                .unwrap();
-        let runtime: Value =
-            serde_json::from_slice(&std::fs::read(root.join("extraction/runtime.json")).unwrap())
-                .unwrap();
-        let config = Config::with_provider(
-            serde_json::from_value(runtime["provider"].clone()).unwrap(),
-            serde_json::from_value(runtime["limits"].clone()).unwrap(),
-        )
-        .unwrap();
-        let recorded: Value = serde_json::from_slice(
-            &std::fs::read(std::env::var("KB_TENDER_CONTEXT_REQUEST").unwrap()).unwrap(),
-        )
-        .unwrap();
-        let messages = recorded["messages"].as_array().unwrap();
-        let dynamic: Value =
-            serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
-        let last = messages
-            .iter()
-            .rposition(|m| m["role"] == "assistant")
-            .unwrap();
-        let calls: Vec<knowledge::models::ChatToolCall> = messages[last]["tool_calls"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|c| knowledge::models::ChatToolCall {
-                id: c["id"].as_str().unwrap().into(),
-                name: c["function"]["name"].as_str().unwrap().into(),
-                arguments: c["function"]["arguments"].as_str().unwrap().into(),
-            })
-            .collect();
-        assert!(calls.len() > 1 && calls.iter().all(|c| c.name == "inspect_analysis"));
-        state.role = Role::Main;
-        state.main_work = Some(serde_json::from_value(dynamic["work"].clone()).unwrap());
-        state.turn = dynamic["progress"]["turn"].as_u64().unwrap() as usize - 1;
-        state.tool_calls =
-            dynamic["progress"]["tool_calls"].as_u64().unwrap() as usize - calls.len();
-        state.read_bytes = dynamic["progress"]["read_bytes"].as_u64().unwrap() as usize;
-        state.transcript = messages[2..=last].to_vec();
-        state.pending_coverage = None;
-        state.journal = Default::default();
-        let expected = visible_work_evidence(&state, &state.transcript);
-        assert!(!expected.is_empty());
-        let mut source_window = state.clone();
-        source_window.transcript.pop(); // Replace only the recorded last query batch.
-        let mut report = vec![];
-        for (index, call) in calls.iter().enumerate() {
-            let args: Value = serde_json::from_str(&call.arguments).unwrap();
-            let committed = state.coverage().clone();
-            let result = super::inspect_in_context(
-                &input,
-                &config,
-                &mut state,
-                &args,
-                &calls[index..],
-                &[],
-                &committed,
-            )
-            .await;
-            let output = match result {
-                Ok(page) => json!({"ok":true,"result":page}),
-                Err(error) => json!({"ok":false,"error":error}),
-            };
-            report.push(json!({"args":args,"output":output}));
-            state
-                .transcript
-                .push(json!({"role":"tool","tool_call_id":call.id,"content":output.to_string()}));
-            super::fit_batch(&input, &config, &mut state, &calls[index + 1..], &[])
-                .await
-                .unwrap();
-        }
-        let body = super::request(&input, &config, &mut state).await.unwrap();
-        let retained = visible_work_evidence(&state, &state.transcript) == expected;
-        let ids: BTreeSet<_> = report
-            .iter()
-            .flat_map(|r| {
-                r["output"]["result"]["items"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-            })
-            .filter_map(|row| row["id"].as_str())
-            .collect();
-        let mut detail_count = 0;
-        for id in ids {
-            let mut state = source_window.clone();
-            let args = json!({"view":"detail","kind":"all","ids":[id],"offset":0,"limit":1});
-            let call = knowledge::models::ChatToolCall {
-                id: "offline-single-detail".into(),
-                name: "inspect_analysis".into(),
-                arguments: args.to_string(),
-            };
-            state.transcript.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.arguments}}]}));
-            let committed = state.coverage().clone();
-            let page = super::inspect_in_context(
-                &input,
-                &config,
-                &mut state,
-                &args,
-                std::slice::from_ref(&call),
-                &[],
-                &committed,
-            )
-            .await
-            .unwrap();
-            assert_eq!(page["items"][0], json!(state.analysis.records[id]));
-            state.transcript.push(json!({"role":"tool","tool_call_id":call.id,"content":json!({"ok":true,"result":page}).to_string()}));
-            super::request(&input, &config, &mut state).await.unwrap();
-            assert_eq!(visible_work_evidence(&state, &state.transcript), expected);
-            detail_count += 1;
-        }
-        std::fs::write(
-            std::env::var("KB_TENDER_CONTEXT_REPORT").unwrap(),
-            serde_json::to_vec_pretty(&json!({
-                "mode":"offline projection only; no model call or checkpoint recovery",
-                "request_bytes":body.len(),"all_source_evidence_retained":retained,"single_complete_details_retrieved":detail_count,"calls":report,
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            std::fs::read(root.join("extraction/checkpoint.json")).unwrap(),
-            original
-        );
-        assert!(retained);
-        assert!(
-            report.iter().all(|r| r["output"]["ok"] == true),
-            "overlapping inventory queries must fit alongside original evidence"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires KB_TENDER_CONTEXT_REPLAY_DIR and KB_TENDER_CONTEXT_REPORT; offline only"]
-    async fn recorded_reviewer_batch_retains_sources_and_focused_candidates() {
-        let root = std::path::PathBuf::from(std::env::var("KB_TENDER_CONTEXT_REPLAY_DIR").unwrap());
-        let original = std::fs::read(root.join("extraction/checkpoint.json")).unwrap();
-        let mut state: Checkpoint = serde_json::from_slice(&original).unwrap();
-        assert_eq!(state.role, Role::Reviewer);
-        let input: FrozenInput =
-            serde_json::from_slice(&std::fs::read(root.join("input/frozen-input.json")).unwrap())
-                .unwrap();
-        let runtime: Value =
-            serde_json::from_slice(&std::fs::read(root.join("extraction/runtime.json")).unwrap())
-                .unwrap();
-        let config = Config::with_provider(
-            serde_json::from_value(runtime["provider"].clone()).unwrap(),
-            serde_json::from_value(runtime["limits"].clone()).unwrap(),
-        )
-        .unwrap();
-        let request: Value =
-            serde_json::from_slice(&std::fs::read(root.join("request.json")).unwrap()).unwrap();
-        let messages = request["messages"].as_array().unwrap();
-        let dynamic: Value =
-            serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
-        let mut work = dynamic["work"].clone();
-        work.as_object_mut().unwrap().remove("saved_outcome_count");
-        work.as_object_mut()
-            .unwrap()
-            .remove("pending_outcome_count");
-        state.reviewer_work = Some(serde_json::from_value(work).unwrap());
-        let last = messages
-            .iter()
-            .rposition(|m| m["role"] == "assistant")
-            .unwrap();
-        let calls: Vec<knowledge::models::ChatToolCall> = messages[last]["tool_calls"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|c| knowledge::models::ChatToolCall {
-                id: c["id"].as_str().unwrap().into(),
-                name: c["function"]["name"].as_str().unwrap().into(),
-                arguments: c["function"]["arguments"].as_str().unwrap().into(),
-            })
-            .collect();
-        assert!(calls.len() > 1 && calls.iter().all(|c| c.name == "inspect_analysis"));
-        state.transcript = messages[2..=last].to_vec();
-        for message in &mut state.transcript {
-            if let Some(parts) = message["content"].as_array() {
-                let ids: Vec<_> = parts
-                    .iter()
-                    .filter_map(|p| p["image_url"]["url"].as_str())
-                    .map(|url| {
-                        state
-                            .source_views
-                            .iter()
-                            .find_map(|(id, v)| {
-                                (url.strip_prefix("data:image/jpeg;base64,")
-                                    == Some(v.jpeg_base64.as_str()))
-                                .then_some(id.clone())
-                            })
-                            .expect("original image must match cache")
-                    })
-                    .collect();
-                if !ids.is_empty() {
-                    *message = json!({"role":"user","source_view_refs":ids});
-                }
-            }
-        }
-        state.turn = dynamic["progress"]["turn"].as_u64().unwrap() as usize - 1;
-        state.tool_calls =
-            dynamic["progress"]["tool_calls"].as_u64().unwrap() as usize - calls.len();
-        state.read_bytes = dynamic["progress"]["read_bytes"].as_u64().unwrap() as usize;
-        state.pending_coverage = None;
-        state.journal = Default::default();
-        let expected = focused_work_evidence(&state, &state.transcript);
-        assert!(expected.keys().any(|k| k.starts_with("candidate:")));
-        assert!(
-            expected
-                .keys()
-                .any(|k| k.starts_with("form:") || k.starts_with("text:"))
-        );
-        let mut report = vec![];
-        for (index, call) in calls.iter().enumerate() {
-            let args: Value = serde_json::from_str(&call.arguments).unwrap();
-            let committed = state.coverage().clone();
-            let result = super::inspect_in_context(
-                &input,
-                &config,
-                &mut state,
-                &args,
-                &calls[index..],
-                &[],
-                &committed,
-            )
-            .await;
-            let output = match result {
-                Ok(page) => json!({"ok":true,"result":page}),
-                Err(error) => json!({"ok":false,"error":error}),
-            };
-            report.push(json!({"args":args,"output":output}));
-            state
-                .transcript
-                .push(json!({"role":"tool","tool_call_id":call.id,"content":output.to_string()}));
-            super::fit_batch(&input, &config, &mut state, &calls[index + 1..], &[])
-                .await
-                .unwrap();
-        }
-        let body = super::request(&input, &config, &mut state).await.unwrap();
-        let wire: Value = serde_json::from_slice(&body).unwrap();
-        let actual = focused_work_evidence(&state, wire["messages"].as_array().unwrap());
-        let missing: Vec<_> = expected
-            .iter()
-            .filter(|(key, ranges)| {
-                !ranges
-                    .iter()
-                    .all(|&(a, b)| tools::contains(actual.get(*key), a, b))
-                    && !key.strip_prefix("view:").is_some_and(|id| {
-                        state.source_views.get(id).is_some_and(|view| {
-                            wire["messages"]
-                                .as_array()
-                                .unwrap()
-                                .contains(&view.message())
-                        })
-                    })
-            })
-            .map(|(k, v)| json!({"key":k,"ranges":v}))
-            .collect();
-        std::fs::write(std::env::var("KB_TENDER_CONTEXT_REPORT").unwrap(),serde_json::to_vec_pretty(&json!({"mode":"offline current-checkpoint/request-window projection; no model or journal I/O","request_bytes":body.len(),"calls":report,"missing_focused_evidence":missing,"expected":expected,"actual":actual})).unwrap()).unwrap();
-        assert_eq!(
-            std::fs::read(root.join("extraction/checkpoint.json")).unwrap(),
-            original
-        );
-        assert!(
-            missing.is_empty(),
-            "focused candidates and source evidence must coexist"
-        );
-        assert!(
-            report.iter().all(|r| r["output"]["ok"] == true),
-            "recorded exact candidate lookups must not be rejected"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires KB_TENDER_CONTEXT_REPLAY_DIR and KB_TENDER_CONTEXT_REPORT; offline only"]
-    async fn recorded_scope_split_keeps_a_complete_grid_and_original_view_together() {
-        use std::path::PathBuf;
-        struct NoIo;
-        #[async_trait]
-        impl Journal for NoIo {
-            async fn load(&self) -> Result<Option<Checkpoint>, AgentError> {
-                panic!("offline only")
-            }
-            async fn reserve(&self, _: &Checkpoint, _: &[u8]) -> Result<Option<usize>, AgentError> {
-                panic!("offline only")
-            }
-            async fn save(&self, _: &Checkpoint, _: &Value) -> Result<(), AgentError> {
-                panic!("offline only")
-            }
-        }
-        let root = PathBuf::from(std::env::var("KB_TENDER_CONTEXT_REPLAY_DIR").unwrap());
-        let original = std::fs::read(root.join("extraction/checkpoint.json")).unwrap();
-        let mut state: Checkpoint = serde_json::from_slice(&original).unwrap();
-        let input: FrozenInput =
-            serde_json::from_slice(&std::fs::read(root.join("input/frozen-input.json")).unwrap())
-                .unwrap();
-        let old: Value =
-            serde_json::from_slice(&std::fs::read(root.join("extraction/runtime.json")).unwrap())
-                .unwrap();
-        let config = Config::with_provider(
-            serde_json::from_value(old["provider"].clone()).unwrap(),
-            serde_json::from_value(old["limits"].clone()).unwrap(),
-        )
-        .unwrap();
-        state.journal = Default::default();
-        state.pending_coverage = None;
-        let before = digest(&state.analysis).unwrap();
-        let mut work = state.work().unwrap().clone();
-        let prior_scope = work.source_scope.clone();
-        let form = input
-            .structured_forms
-            .iter()
-            .find(|f| {
-                let id = f["source_unit_revision_id"].as_str().unwrap();
-                prior_scope.iter().any(|s| s == id)
-                    && state
-                        .source_views
-                        .values()
-                        .any(|v| v.identity.source_id == id)
-            })
-            .unwrap();
-        let source_id = form["source_unit_revision_id"].as_str().unwrap();
-        work.source_scope = vec![source_id.into()];
-        work.deferred_sources = prior_scope
-            .iter()
-            .filter(|id| *id != source_id)
-            .cloned()
-            .collect();
-        assert!(!work.deferred_sources.is_empty());
-        for key in scope_references(&state.analysis, &work.deferred_sources) {
-            let refs = if unresolved(&state.analysis, &key) {
-                &mut work.pending_refs
-            } else {
-                &mut work.output_refs
-            };
-            if !refs.contains(&key) {
-                refs.push(key);
-            }
-        }
-        let assistant = |calls: Vec<(&str, &str, Value)>| json!({"role":"assistant","content":null,"tool_calls":calls.into_iter().map(|(id,name,args)| json!({"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}})).collect::<Vec<_>>()});
-        let response = |id: &str, page: &Value| json!({"role":"tool","tool_call_id":id,"content":json!({"ok":true,"result":page}).to_string()});
-        state
-            .transcript
-            .push(assistant(vec![("split", "set_work_note", json!(work))]));
-        let mut work_input = json!(work);
-        work_input.as_object_mut().unwrap().remove("output_refs");
-        work_input.as_object_mut().unwrap().remove("pending_refs");
-        let split =
-            super::apply(&input, &config, &mut state, "set_work_note", &work_input).unwrap();
-        assert_eq!(split["handoff"], true);
-        state.transcript.push(response("split", &split));
-        assert_eq!(
-            state.transcript.len(),
-            2,
-            "split must release the old delivered window"
-        );
-        let grid_args = json!({"form_id":form["form_definition_revision_id"],"offset":0,"limit":config.limits.max_tool_result_bytes});
-        let view_args = json!({"source_id":source_id});
-        state.transcript.push(assistant(vec![
-            ("grid", "read_form", grid_args.clone()),
-            ("view", "read_source_view", view_args.clone()),
-        ]));
-        let grid = tools::invoke(
-            &input,
-            &mut state.analysis.clone(),
-            &mut state.coverage().clone(),
-            false,
-            "read_form",
-            &grid_args,
-            config.limits.max_tool_result_bytes,
-        )
-        .unwrap();
-        assert_eq!(grid["next"], grid["total_cells"]);
-        let view = super::read_source_view(
-            &input,
-            &config,
-            &mut state,
-            &NoIo,
-            &view_args,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        state.transcript.push(response("grid", &grid));
-        state.transcript.push(response("view", &view));
-        state
-            .transcript
-            .push(json!({"role":"user","source_view_refs":[view["view_id"]]}));
-        let expected = visible_work_evidence(&state, &state.transcript);
-        let body = super::request(&input, &config, &mut state).await.unwrap();
-        assert_eq!(visible_work_evidence(&state, &state.transcript), expected);
-        assert_eq!(
-            expected.len(),
-            2,
-            "complete grid plus its actual original image"
-        );
-        assert_eq!(digest(&state.analysis).unwrap(), before);
-        let restored: Checkpoint = serde_json::from_value(json!(state)).unwrap();
-        assert_eq!(
-            restored.work().unwrap().deferred_sources,
-            work.deferred_sources
-        );
-        assert_eq!(
-            std::fs::read(root.join("extraction/checkpoint.json")).unwrap(),
-            original
-        );
-        std::fs::write(std::env::var("KB_TENDER_CONTEXT_REPORT").unwrap(), serde_json::to_vec_pretty(&json!({
-            "mode":"offline projection only; no model or journal I/O", "prior_scope_sources":prior_scope.len(),
-            "active_sources":work.source_scope,"deferred_sources":work.deferred_sources,"request_bytes":body.len(),
-            "complete_grid_cells":grid["total_cells"],"original_view_retained":true,"business_analysis_unchanged":true
-        })).unwrap()).unwrap();
-    }
-
-    #[tokio::test]
-    #[ignore = "requires KB_TENDER_CONTEXT_REPLAY_DIR and KB_TENDER_CONTEXT_REPORT; offline only"]
-    async fn recorded_history_eviction_preserves_current_parsed_evidence() {
-        replay_history_eviction(true).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires KB_TENDER_CONTEXT_REPLAY_DIR and KB_TENDER_CONTEXT_REPORT; offline only"]
-    async fn recorded_active_original_and_focused_candidates_coexist() {
-        replay_history_eviction(false).await;
-    }
-
-    async fn replay_history_eviction(require_all_candidates: bool) {
-        use std::path::PathBuf;
-        let root = PathBuf::from(std::env::var("KB_TENDER_CONTEXT_REPLAY_DIR").unwrap());
-        let original = std::fs::read(root.join("extraction/checkpoint.json")).unwrap();
-        let mut state: Checkpoint = serde_json::from_slice(&original).unwrap();
-        let input: FrozenInput =
-            serde_json::from_slice(&std::fs::read(root.join("input/frozen-input.json")).unwrap())
-                .unwrap();
-        let runtime: Value =
-            serde_json::from_slice(&std::fs::read(root.join("extraction/runtime.json")).unwrap())
-                .unwrap();
-        let config = Config::with_provider(
-            serde_json::from_value(runtime["provider"].clone()).unwrap(),
-            serde_json::from_value(runtime["limits"].clone()).unwrap(),
-        )
-        .unwrap();
-        let request: Value =
-            serde_json::from_slice(&std::fs::read(root.join("request.json")).unwrap()).unwrap();
-        let messages = request["messages"].as_array().unwrap();
-        let dynamic: Value =
-            serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
-        state.transcript = messages[2..messages.len() - 1].to_vec();
-        // Archived wire requests contain pixels; checkpoints reference cached
-        // views. Restore those references only in this offline projection.
-        for message in &mut state.transcript {
-            let Some(parts) = message["content"].as_array() else {
-                continue;
-            };
-            let ids: Vec<_> = parts
-                .iter()
-                .filter_map(|part| part["image_url"]["url"].as_str())
-                .map(|url| {
-                    state
-                        .source_views
-                        .iter()
-                        .find_map(|(id, view)| {
-                            (url.strip_prefix("data:image/jpeg;base64,") == Some(&view.jpeg_base64))
-                                .then_some(id.clone())
-                        })
-                        .expect("recorded image must match a cached original")
-                })
-                .collect();
-            if !ids.is_empty() {
-                *message = json!({"role":"user","source_view_refs":ids});
-            }
-        }
-        let mut declared = dynamic["work"].clone();
-        declared
-            .as_object_mut()
-            .unwrap()
-            .remove("saved_outcome_count");
-        declared
-            .as_object_mut()
-            .unwrap()
-            .remove("pending_outcome_count");
-        let mut work: WorkState = serde_json::from_value(declared).unwrap();
-        retain_outcomes(&state.analysis, &mut work, None);
-        let work = Some(work);
-        match state.role {
-            Role::Main => state.main_work = work,
-            Role::Reviewer => state.reviewer_work = work,
-        }
-        state.turn = dynamic["progress"]["turn"].as_u64().unwrap() as usize;
-        state.tool_calls = dynamic["progress"]["tool_calls"].as_u64().unwrap() as usize;
-        state.read_bytes = dynamic["progress"]["read_bytes"].as_u64().unwrap() as usize;
-        state.journal = Default::default();
-        state.pending_coverage = None;
-        let response: Value =
-            serde_json::from_slice(&std::fs::read(root.join("response-request.json")).unwrap())
-                .unwrap();
-        let response_messages = response["messages"].as_array().unwrap();
-        let last = response_messages
-            .iter()
-            .rposition(|m| m["role"] == "assistant")
-            .unwrap();
-        let current_group = response_messages[last..response_messages.len() - 1].to_vec();
-        assert!(
-            !current_group[0]["tool_calls"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-        state.transcript.extend(current_group.clone());
-        let completed: Value = serde_json::from_str(
-            response_messages.last().unwrap()["content"]
-                .as_str()
-                .unwrap(),
-        )
-        .unwrap();
-        state.turn = completed["progress"]["turn"].as_u64().unwrap() as usize;
-        state.tool_calls = completed["progress"]["tool_calls"].as_u64().unwrap() as usize;
-        state.read_bytes = completed["progress"]["read_bytes"].as_u64().unwrap() as usize;
-        let expected = visible_work_evidence(&state, &state.transcript);
-        let focused = focused_work_evidence(&state, &state.transcript);
-        if !require_all_candidates {
-            assert!(focused.keys().any(|key| key.starts_with("candidate:")));
-        }
-        let body = super::request(&input, &config, &mut state).await.unwrap();
-        let actual = visible_work_evidence(&state, &state.transcript);
-        let wire: Value = serde_json::from_slice(&body).unwrap();
-        let image_urls: Vec<_> = wire["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|m| m["content"].as_array().into_iter().flatten())
-            .filter_map(|item| item["image_url"]["url"].as_str())
-            .collect();
-        let current_source = dynamic["source_review"]["current"]["task"]["source_id"].as_str();
-        let active_images: Vec<_> = state
-            .reviewer_coverage
-            .views
-            .iter()
-            .filter(|(_, view)| Some(view.source_id.as_str()) == current_source)
-            .map(|(id, _)| &state.source_views[id])
-            .collect();
-        if !require_all_candidates {
-            assert!(
-                !active_images.is_empty(),
-                "this replay must exercise a previously read active original"
-            );
-        }
-        let active_images_retained = active_images.iter().all(|view| {
-            image_urls
-                .iter()
-                .any(|url| url.strip_prefix("data:image/jpeg;base64,") == Some(&view.jpeg_base64))
-        });
-        let retained = expected
-            .iter()
-            .filter(|(key, _)| !key.starts_with("view:"))
-            .all(|(key, ranges)| {
-                ranges
-                    .iter()
-                    .all(|&(a, b)| tools::contains(actual.get(key), a, b))
-            });
-        let source_ranges_retained = expected
-            .iter()
-            .filter(|(key, _)| !key.starts_with("candidate:") && !key.starts_with("view:"))
-            .all(|(key, ranges)| {
-                ranges
-                    .iter()
-                    .all(|&(a, b)| tools::contains(actual.get(key), a, b))
-            });
-        let focus_retained = focused
-            .iter()
-            .filter(|(key, _)| !key.starts_with("view:"))
-            .all(|(key, ranges)| {
-                ranges
-                    .iter()
-                    .all(|&(a, b)| tools::contains(actual.get(key), a, b))
-            });
-        std::fs::write(std::env::var("KB_TENDER_CONTEXT_REPORT").unwrap(), serde_json::to_vec_pretty(&json!({
-            "mode":"offline projection; no model or journal I/O", "request_bytes":body.len(),
-            "expected_evidence":expected,"retained_evidence":actual,"all_parsed_evidence_retained":retained,
-            "request_image_count":image_urls.len(),"active_source_images_expected":active_images.len(),
-            "active_source_images_retained":active_images_retained,
-            "require_all_candidates":require_all_candidates,
-            "all_source_ranges_retained":source_ranges_retained,"all_focus_evidence_retained":focus_retained,
-            "expected_focus_evidence":focused,
-            "latest_tool_calls":current_group[0]["tool_calls"],
-            "messages":state.transcript
-        })).unwrap()).unwrap();
-        assert_eq!(
-            std::fs::read(root.join("extraction/checkpoint.json")).unwrap(),
-            original
-        );
-        assert!(
-            state.transcript.ends_with(&current_group),
-            "new tool outputs must remain verbatim"
-        );
-        assert!(
-            if require_all_candidates {
-                retained
-            } else {
-                source_ranges_retained && focus_retained
-            },
-            "oversized delivered groups must yield before smaller current parsed evidence"
-        );
-        assert!(
-            active_images_retained,
-            "the current reviewer original must remain visible in the wire request"
-        );
-    }
-
-    #[test]
-    fn delivered_line_annotations_preserve_receipts_errors_and_pending_results() {
-        let mut state: Checkpoint = serde_json::from_value(json!({
-            "journal":{"sequence":0,"pending":null,"session":null},
-            "input_sha256":"","config_sha256":"","turn":0,"tool_calls":0,"read_bytes":0,
-            "review_rounds":0,"role":"main","analysis":Analysis::default(),"review":null,
-            "review_draft":{},"reviewer_coverage":Coverage::default(),"pending_coverage":null,
-            "transcript":[],"main_work":null,"reviewer_work":null,"done":false,"source_views":{}
-        }))
-        .unwrap();
-        let group = |id: &str, result: Value| {
-            vec![
-                json!({"role":"assistant","tool_calls":[{"id":id,"function":{"name":"read_source","arguments":"{}"}}]}),
-                json!({"role":"tool","tool_call_id":id,"content":result.to_string()}),
-            ]
-        };
-        let source =
-            json!({"ok":true,"result":{"source_id":"source","start":6,"end":13,"text":"甲\n乙"}});
-        let latest = group("pending", source.clone());
-        state.transcript = [
-            group("old", source.clone()),
-            group("failed", json!({"ok":false,"error":"unread"})),
-            latest.clone(),
-        ]
-        .concat();
-        let before = state.clone();
-        annotate_delivered_source_lines(&mut state, 1024).unwrap();
-        let mut delivered: Value =
-            serde_json::from_str(state.transcript[1]["content"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            delivered["result"]["line_spans"],
-            json!([
-                {"start":6,"end":10,"text":"甲\n"},{"start":10,"end":13,"text":"乙"}
-            ])
-        );
-        delivered["result"]
-            .as_object_mut()
-            .unwrap()
-            .remove("line_spans");
-        assert_eq!(delivered, source, "original evidence remains verbatim");
-        assert_eq!(
-            state.transcript[2..],
-            before.transcript[2..],
-            "errors and pending tool group are unchanged"
-        );
-        assert!(state.transcript.ends_with(&latest));
-        let once = state.transcript.clone();
-        annotate_delivered_source_lines(&mut state, 1024).unwrap();
-        assert_eq!(state.transcript, once);
-        state.transcript = before.transcript.clone();
-        annotate_delivered_source_lines(&mut state, 1).unwrap();
-        assert_eq!(
-            json!(state),
-            json!(before),
-            "annotation cannot change receipts, journals or exceed its result budget"
-        );
-    }
-
-    #[test]
-    fn oversized_delivered_images_release_pixels_without_losing_their_batch_candidates() {
-        let mut state = Checkpoint {
-            journal: Default::default(),
-            input_sha256: String::new(),
-            config_sha256: String::new(),
-            turn: 3,
-            tool_calls: 3,
-            read_bytes: 2048,
-            review_rounds: 0,
-            role: Role::Main,
-            analysis: Analysis::default(),
-            review: None,
-            review_draft: BTreeMap::new(),
-            source_review: None,
-            reviewer_coverage: Coverage::default(),
-            pending_coverage: Some(Coverage::default()),
-            transcript: vec![],
-            main_progress: Default::default(),
-            reviewer_progress: Default::default(),
-            main_work: Some(WorkState {
-                source_scope: vec!["source".into()],
-                deferred_sources: vec![],
-                objective: "Compare the grid with its original page".into(),
-                focus: Focus::default(),
-                output_refs: vec![],
-                pending_refs: vec![],
-                status: WorkStatus::Active,
-                note: String::new(),
-            }),
-            reviewer_work: None,
-            done: false,
-            source_views: BTreeMap::new(),
-        };
-        for id in ["first", "second"] {
-            let view = views::SourceView {
-                identity: views::ViewIdentity {
-                    source_id: "source".into(),
-                    original_sha256: "0".repeat(64),
-                    image_sha256: id.into(),
-                    page_ordinal: 0,
-                    width: 1,
-                    height: 1,
-                    renderer: "test-only-sizing".into(),
-                },
-                // Sizing test only; no decoding or provider I/O.
-                jpeg_base64: "A".repeat(1024),
-            };
-            state
-                .analysis
-                .coverage
-                .views
-                .insert(id.into(), view.identity.clone());
-            state.source_views.insert(id.into(), view);
-            state
-                .main_work
-                .as_mut()
-                .unwrap()
-                .focus
-                .source_spans
-                .push(Span {
-                    source_id: "source".into(),
-                    start: 0,
-                    end: 0,
-                    view_id: Some(id.into()),
-                    grid_cell: None,
-                });
-        }
-        let assistant = |id: &str, name: &str| {
-            json!({"role":"assistant","tool_calls":[
-                {"id":id,"type":"function","function":{"name":name,"arguments":"{}"}}
-            ]})
-        };
-        let result = |id: &str, value: Value| {
-            json!({"role":"tool","tool_call_id":id,
-            "content":json!({"ok":true,"result":value}).to_string()})
-        };
-        let grid = vec![
-            assistant("grid", "read_form"),
-            result(
-                "grid",
-                json!({
-                    "source_id":"source","form_id":"grid","offset":0,"next":2,"cells":["条款","完整条件"]
-                }),
-            ),
-        ];
-        let candidate = Record {
-            id: "candidate".into(),
-            sources: vec![Span {
-                source_id: "source".into(),
-                start: 0,
-                end: 3,
-                view_id: None,
-                grid_cell: None,
-            }],
-            data: RecordData::Fact {
-                name: "项目".into(),
-                value: "原文事实".into(),
-                scope: "本项目".into(),
-            },
-        };
-        state
-            .analysis
-            .records
-            .insert(candidate.id.clone(), candidate.clone());
-        let mut image_calls = assistant("image", "read_source_view");
-        image_calls["tool_calls"]
-            .as_array_mut()
-            .unwrap()
-            .push(assistant("candidate", "inspect_analysis")["tool_calls"][0].clone());
-        let images = vec![
-            image_calls,
-            result("image", json!({"view_id":"first"})),
-            result("candidate", json!({"view":"detail","items":[candidate]})),
-            json!({"role":"user","source_view_refs":["first","second"]}),
-        ];
-        let latest = vec![
-            assistant("write", "put_record"),
-            result("write", json!({"id":"saved"})),
-        ];
-        state.transcript = [grid.clone(), images.clone(), latest.clone()].concat();
-        let before = state.clone();
-        // Each image fits alone; together their payloads cannot fit history.
-        assert!(evict_delivered_group(&mut state, 1500, false));
-        assert!(state.transcript.starts_with(&grid));
-        assert!(state.transcript.ends_with(&latest));
-        assert_eq!(
-            state
-                .transcript
-                .iter()
-                .find(|m| m["tool_call_id"] == "candidate"),
-            Some(&images[2])
-        );
-        assert_eq!(
-            &state.transcript[grid.len()..grid.len() + 3],
-            &images[..3],
-            "delivered pixels must not evict the current candidate and its complete tool protocol"
-        );
-        assert!(
-            !state
-                .transcript
-                .iter()
-                .any(|m| m.get("source_view_refs").is_some())
-        );
-        assert_eq!(json!(state.analysis), json!(before.analysis));
-        assert_eq!(
-            json!(state.reviewer_coverage),
-            json!(before.reviewer_coverage)
-        );
-        assert_eq!(
-            json!(state.pending_coverage),
-            json!(before.pending_coverage)
-        );
-        assert_eq!(json!(state.source_views), json!(before.source_views));
-        assert_eq!(state.read_bytes, before.read_bytes);
-
-        // Even a smaller old image must yield before unique parsed evidence
-        // when the caller has exhausted lossless history compaction.
-        state = before.clone();
-        assert!(!evict_delivered_group(&mut state, 4096, false));
-        assert_eq!(json!(state), json!(before));
-        assert!(evict_delivered_group(&mut state, 4096, true));
-        assert!(state.transcript.starts_with(&grid));
-        assert_eq!(&state.transcript[grid.len()..grid.len() + 3], &images[..3]);
-        assert!(
-            !state
-                .transcript
-                .iter()
-                .any(|m| m.get("source_view_refs").is_some())
-        );
-        assert_eq!(json!(state.source_views), json!(before.source_views));
-        assert_eq!(
-            json!(state.analysis.coverage),
-            json!(before.analysis.coverage)
-        );
-        state = before.clone();
-        state.main_work.as_mut().unwrap().focus.source_spans.clear();
-        assert!(evict_delivered_group(&mut state, 4096, true));
-        assert!(
-            state.transcript.starts_with(&grid),
-            "incidental old images must yield before focused parsed evidence"
-        );
-
-        // An oversized latest image batch is pending delivery, never an old
-        // group to evict. The caller handles its separate backpressure.
-        state.transcript = [grid, images.clone()].concat();
-        assert!(evict_delivered_group(&mut state, 1500, true));
-        assert_eq!(state.transcript, images);
-        assert!(!evict_delivered_group(&mut state, 1500, true));
-    }
-
-    #[test]
-    fn navigation_compaction_preserves_sources_details_metadata_and_pending_delivery() {
-        let output = |result: Value| json!({"ok":true,"result":result}).to_string();
-        let large = "navigation metadata ".repeat(100);
-        let calls = [
-            ("source", "read_form"),
-            ("index", "source_index"),
-            ("metadata", "collection_index"),
-            ("detail", "inspect_analysis"),
-            ("candidates", "inspect_analysis"),
-            ("failed", "search_sources"),
-        ];
-        let mut transcript = vec![
-            json!({"role":"assistant","tool_calls":calls.iter().map(|(id,name)|json!({"id":id,"function":{"name":name,"arguments":"{}"}})).collect::<Vec<_>>()}),
-        ];
-        for (id, result) in [
-            ("source", output(json!({"cells":[large]}))),
-            ("index", output(json!({"items":[large]}))),
-            ("metadata", output(json!({"items":[large]}))),
-            ("detail", output(json!({"view":"detail","items":[large]}))),
-            (
-                "candidates",
-                output(json!({"view":"index","items":[large]})),
-            ),
-            ("failed", json!({"ok":false,"error":large}).to_string()),
-        ] {
-            transcript.push(json!({"role":"tool","tool_call_id":id,"content":result}));
-        }
-        transcript.push(json!({"role":"assistant","tool_calls":[{"id":"pending","function":{"name":"source_index","arguments":"{}"}}]}));
-        transcript.push(json!({"role":"tool","tool_call_id":"pending","content":output(json!({"items":[large]}))}));
-        let before = transcript.clone();
-        assert!(compact_delivered_navigation(&mut transcript));
-        assert!(compact_delivered_navigation(&mut transcript));
-        assert!(!compact_delivered_navigation(&mut transcript));
-        for (old, new) in before.iter().zip(&transcript) {
-            if matches!(new["tool_call_id"].as_str(), Some("index" | "candidates")) {
-                let value: Value = serde_json::from_str(new["content"].as_str().unwrap()).unwrap();
-                assert_eq!(value["result"]["history_omitted"], true);
-                assert_eq!(old["tool_call_id"], new["tool_call_id"]);
-            } else {
-                assert_eq!(
-                    old, new,
-                    "evidence, errors and the latest batch must stay verbatim"
-                );
-            }
-        }
-    }
-
-    #[test]
-    #[ignore = "requires KB_AGENT_LOOP_FIXTURE_DIR and KB_AGENT_LOOP_REPORT; offline archived regression"]
-    fn archived_stall_and_four_ready_relationships_regress_without_resuming_old_run() {
-        use std::{fs, path::PathBuf};
-        let root = PathBuf::from(std::env::var("KB_AGENT_LOOP_FIXTURE_DIR").unwrap());
-        let run = root.join("real-run-v13-resume2");
-        let original = fs::read(run.join("extraction/checkpoint.json")).unwrap();
-        let input: FrozenInput =
-            serde_json::from_slice(&fs::read(run.join("source/frozen-input.json")).unwrap())
-                .unwrap();
-        let runtime: Value =
-            serde_json::from_slice(&fs::read(run.join("extraction/runtime.json")).unwrap())
-                .unwrap();
-        let config = Config::with_provider(
-            serde_json::from_value(runtime["provider"].clone()).unwrap(),
-            serde_json::from_value(runtime["limits"].clone()).unwrap(),
-        )
-        .unwrap();
-        let mut state: Checkpoint = serde_json::from_slice(&original).unwrap();
-        let analysis_before = digest(&state.analysis).unwrap();
-        synchronize_outcomes(&mut state);
-        let rows = completion_gaps(&input, &state, state.work().unwrap()).unwrap();
-        assert!(!rows.iter().any(|g| matches!(
-            g["kind"].as_str(),
-            Some("unretained_outcome" | "unresolved_outcome")
-        )));
-        for _ in 0..28 {
-            observe_progress(&mut state, &Role::Main, None, &config.limits).unwrap();
-        }
-        assert_eq!(state.main_progress.watch.recovery, Recovery::Blocked);
-        assert_eq!(
-            digest(&state.analysis).unwrap(),
-            analysis_before,
-            "stagnation is not source uncertainty"
-        );
-        let pairs: Vec<Value> = serde_json::from_slice(
-            &fs::read(root.join("inspection-loop-diagnosis/pairs.json")).unwrap(),
-        )
-        .unwrap();
-        let mut state: Checkpoint = serde_json::from_slice(&original).unwrap();
-        let mut checks = vec![];
-        for pair in pairs {
-            let mut work = state.work().unwrap().clone();
-            work.focus = Focus {
-                action: FocusAction::Link,
-                source_spans: vec![],
-                references: vec![
-                    format!("record:{}", pair["from"].as_str().unwrap()),
-                    format!("record:{}", pair["to"].as_str().unwrap()),
-                ],
-            };
-            super::apply(
-                &input,
-                &config,
-                &mut state,
-                "set_work_note",
-                &work_input(&work).unwrap(),
-            )
-            .unwrap();
-            let args = json!({"id":null,"from":pair["from"],"to":pair["to"],"from_target":{"kind":"record"},"to_target":{"kind":"record"},"kind":"references","state":"explicit","scope":"offline archived regression","explanation":"正文明确指向前附表，对照已保存的正文记录和前附表事实。","grounds":pair["grounds"]});
-            let out = super::apply(&input, &config, &mut state, "put_relation", &args).unwrap();
-            let completion = focused_completion(&state, "put_relation", &out).unwrap();
-            assert!(completion.is_some());
-            observe_progress(&mut state, &Role::Main, completion, &config.limits).unwrap();
-            assert_eq!(state.main_progress.watch.focus_turns, 0);
-            assert!(
-                state
-                    .work()
-                    .unwrap()
-                    .output_refs
-                    .contains(&format!("relation:{}", out["id"].as_str().unwrap()))
-            );
-            checks.push(json!({"label":pair["label"],"validated_write":true,"automatic_reference":true,"focused_action_completed":true}));
-        }
-        assert_eq!(checks.len(), 4);
-        assert_eq!(
-            fs::read(run.join("extraction/checkpoint.json")).unwrap(),
-            original
-        );
-        fs::write(std::env::var("KB_AGENT_LOOP_REPORT").unwrap(),serde_json::to_vec_pretty(&json!({"checks":checks,"twenty_eight_turn_stall":"execution_blocked","old_checkpoint_unchanged":true,"model_calls":0,"semantic_acceptance":"not assessed; fixture-selected diagnostic relationships are not an Agent result"})).unwrap()).unwrap();
-    }
-
-    #[test]
-    fn unique_candidate_versions_are_not_navigation_and_focused_pairs_survive() {
-        let analysis = Analysis::default();
-        let mut state: Checkpoint = serde_json::from_value(json!({
-            "journal":{"sequence":0,"pending":null,"session":null},"input_sha256":"","config_sha256":"",
-            "turn":0,"tool_calls":0,"read_bytes":0,"review_rounds":0,"role":"main","analysis":analysis,
-            "review":null,"review_draft":{},"reviewer_coverage":Coverage::default(),"pending_coverage":null,
-            "transcript":[],"main_work":{"source_scope":["source"],"objective":"compare endpoints",
-                "focus":{"action":"link","source_spans":[],"references":["record:left","record:right"]},"status":"active","note":""},
-            "reviewer_work":null,"done":false,"source_views":{}
-        })).unwrap();
-        for id in ["left", "right"] {
-            state.analysis.records.insert(
-                id.into(),
-                Record {
-                    id: id.into(),
-                    sources: vec![Span {
-                        source_id: "source".into(),
-                        start: 0,
-                        end: 3,
-                        view_id: None,
-                        grid_cell: None,
-                    }],
-                    data: RecordData::Unresolved {
-                        problem: id.into(),
-                        affected: vec![],
-                        candidates: vec![],
-                    },
-                },
-            );
-        }
-        let group = |id: &str, result: Value| {
-            vec![
-                json!({"role":"assistant","tool_calls":[{"id":id,"type":"function","function":{"name":"inspect_analysis","arguments":"{}"}}]}),
-                json!({"role":"tool","tool_call_id":id,"content":json!({"ok":true,"result":result}).to_string()}),
-            ]
-        };
-        let mut recall = state.clone();
-        assert!(
-            retained_candidate_message(&recall, 4096).unwrap().is_null(),
-            "stored candidate data is not a role-local reading receipt"
-        );
-        let left = reference(&recall.analysis, "record:left").unwrap();
-        recall
-            .analysis
-            .coverage
-            .candidate
-            .insert("record:left".into(), digest(&left).unwrap());
-        let before = digest(&recall).unwrap();
-        let message = retained_candidate_message(&recall, 4096).unwrap();
-        let payload: Value = serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            payload["retained_candidate_details"]["items"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            payload["retained_candidate_details"]["items"][0]["value"],
-            left
-        );
-        assert_eq!(
-            digest(&recall).unwrap(),
-            before,
-            "recall creates no state, receipt or comparison"
-        );
-        assert!(message["content"].as_str().unwrap().len() <= 4096);
-        let mut legacy = payload.clone();
-        legacy["retained_candidate_details"]["items"][0]["sha256"] = json!(digest(&left).unwrap());
-        let legacy_message = |value: &Value| json!({"role":"user","content":value.to_string()});
-        assert_eq!(
-            visible_work_evidence(&recall, &[legacy_message(&legacy)]).len(),
-            1
-        );
-        legacy["retained_candidate_details"]["items"][0]["sha256"] = json!("wrong");
-        assert!(visible_work_evidence(&recall, &[legacy_message(&legacy)]).is_empty());
-        let mut altered = payload.clone();
-        altered["retained_candidate_details"]["items"][0]["value"]["data"]["problem"] =
-            json!("altered");
-        assert!(
-            visible_work_evidence(&recall, &[legacy_message(&altered)]).is_empty(),
-            "omitting a redundant sent digest must not accept changed candidate data"
-        );
-        assert!(retained_candidate_message(&recall, 1).unwrap().is_null());
-        recall.main_work.as_mut().unwrap().status = WorkStatus::Complete;
-        assert!(
-            retained_candidate_message(&recall, 4096).unwrap().is_null(),
-            "completed work must release recalled details"
-        );
-        recall.main_work.as_mut().unwrap().status = WorkStatus::Active;
-        recall.pending_coverage = Some(recall.analysis.coverage.clone());
-        let received = recall.analysis.coverage.clone();
-        recall.analysis.coverage.candidate.clear();
-        assert!(
-            retained_candidate_message(&recall, 4096).unwrap().is_null(),
-            "pending delivery alone cannot authorize recall"
-        );
-        recall.analysis.coverage = received;
-        recall.pending_coverage = None;
-        recall.reviewer_work = recall.main_work.clone();
-        recall.role = Role::Reviewer;
-        assert!(
-            retained_candidate_message(&recall, 4096).unwrap().is_null(),
-            "a reviewer cannot recall the main role's evidence"
-        );
-        let mut assigned = recall.clone();
-        assigned.reviewer_work.as_mut().unwrap().focus.references = vec!["record:left".into()];
-        assigned.reviewer_coverage = assigned.analysis.coverage.clone();
-        assigned.analysis.records.get_mut("right").unwrap().sources[0].source_id = "other".into();
-        let right = reference(&assigned.analysis, "record:right").unwrap();
-        assigned
-            .reviewer_coverage
-            .candidate
-            .insert("record:right".into(), digest(&right).unwrap());
-        assigned.source_review = Some(serde_json::from_value(json!({
-            "schema_version":1,"manifest_sha256":"fixture","results":{},"active_task":"task",
-            "dependencies":{"source_ids":["source"],"references":["record:right"],"global":false},
-            "finding_revisions":{},"candidate_revisions":{},"completed_analysis_sha256":null
-        })).unwrap());
-        let before = digest(&assigned).unwrap();
-        let recalled = retained_candidate_message(&assigned, 4096).unwrap();
-        let payload: Value = serde_json::from_str(recalled["content"].as_str().unwrap()).unwrap();
-        assert!(
-            payload["retained_candidate_details"]["items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|item| item["reference"] == "record:right"),
-            "already-delivered assigned endpoints must survive manual focus changes"
-        );
-        assert_eq!(
-            digest(&assigned).unwrap(),
-            before,
-            "recall grants no source access or evidence receipt"
-        );
-        assigned.source_review.as_mut().unwrap().active_task = None;
-        let recalled = retained_candidate_message(&assigned, 4096).unwrap();
-        let payload: Value = serde_json::from_str(recalled["content"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            payload["retained_candidate_details"]["total"], 1,
-            "inactive assignments release their candidate details"
-        );
-        assigned.source_review.as_mut().unwrap().active_task = Some("task".into());
-        assigned.transcript = group(
-            "old-candidates",
-            json!({"view":"detail","items":[left, right]}),
-        );
-        assigned.transcript[0]["tool_calls"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({
-                "id":"original","type":"function","function":{"name":"read_source","arguments":"{}"}
-            }));
-        let original = json!({"role":"tool","tool_call_id":"original","content":json!({
-            "ok":true,"result":{"source_id":"source","start":0,"end":3,"text":"原"}
-        }).to_string()});
-        assigned.transcript.push(original.clone());
-        let latest = group("latest", json!({"view":"index","items":[]}));
-        assigned.transcript.extend(latest.clone());
-        let coverage = digest(&assigned.reviewer_coverage).unwrap();
-        let before = assigned.transcript.clone();
-        assert!(!compact_recallable_candidate_details(&mut assigned, 1));
-        assert_eq!(
-            assigned.transcript, before,
-            "no recall capacity must preserve focused evidence"
-        );
-        assert!(compact_recallable_candidate_details(&mut assigned, 4096));
-        assert!(
-            assigned.transcript.contains(&original),
-            "candidate recall must preserve the original sharing its batch"
-        );
-        assert!(
-            assigned.transcript.ends_with(&latest),
-            "pending tool results stay verbatim"
-        );
-        let recalled = retained_candidate_message(&assigned, 4096).unwrap();
-        let payload: Value = serde_json::from_str(recalled["content"].as_str().unwrap()).unwrap();
-        assert_eq!(payload["retained_candidate_details"]["total"], 2);
-        assert_eq!(digest(&assigned.reviewer_coverage).unwrap(), coverage);
-        recall.role = Role::Main;
-        recall.transcript = group("visible", json!({"view":"detail","items":[left]}));
-        assert!(
-            retained_candidate_message(&recall, 4096).unwrap().is_null(),
-            "visible detail should not be duplicated"
-        );
-        recall.transcript.clear();
-        recall.analysis.records.get_mut("left").unwrap().data = RecordData::Unresolved {
-            problem: "revised".into(),
-            affected: vec![],
-            candidates: vec![],
-        };
-        assert!(
-            retained_candidate_message(&recall, 4096).unwrap().is_null(),
-            "a stale receipt cannot recall an unread new version"
-        );
-        recall.analysis.records.remove("left");
-        assert!(
-            retained_candidate_message(&recall, 4096).unwrap().is_null(),
-            "deleted candidates cannot be resurrected from old receipts"
-        );
-        let mut mixed = state.clone();
-        let mut dormant = mixed.analysis.records["left"].clone();
-        dormant.id = "dormant".into();
-        dormant.data = RecordData::Unresolved {
-            problem: "earlier independent candidate ".repeat(100),
-            affected: vec![],
-            candidates: vec![],
-        };
-        mixed
-            .analysis
-            .records
-            .insert(dormant.id.clone(), dormant.clone());
-        mixed.transcript.extend(group(
-            "mixed",
-            json!({"view":"detail","total":3,"next":2,
-            "items":[mixed.analysis.records["left"],dormant]}),
-        ));
-        let source = json!({"role":"tool","tool_call_id":"source","content":json!({"ok":true,"result":{"source_id":"source","start":0,"end":3,"text":"原"}}).to_string()});
-        mixed.transcript[0]["tool_calls"].as_array_mut().unwrap().push(json!({"id":"source","type":"function","function":{"name":"read_source","arguments":"{}"}}));
-        mixed.transcript.push(source.clone());
-        mixed.transcript.extend(group(
-            "latest",
-            json!({"view":"detail","items":[mixed.analysis.records["right"],dormant]}),
-        ));
-        let before_mixed = mixed.clone();
-        let expected = focused_work_evidence(&mixed, &mixed.transcript);
-        assert!(evict_delivered_group(&mut mixed, 65536, true));
-        assert_eq!(focused_work_evidence(&mixed, &mixed.transcript), expected);
-        assert_eq!(mixed.transcript.len(), before_mixed.transcript.len());
-        assert_eq!(mixed.transcript[0], before_mixed.transcript[0]);
-        assert_eq!(mixed.transcript[2], source);
-        assert_eq!(
-            &mixed.transcript[3..],
-            &before_mixed.transcript[3..],
-            "latest pending details must remain exact"
-        );
-        let compact: Value =
-            serde_json::from_str(mixed.transcript[1]["content"].as_str().unwrap()).unwrap();
-        assert_eq!(
-            compact["result"]["items"],
-            json!([mixed.analysis.records["left"]])
-        );
-        assert_eq!(compact["result"]["history_omitted_items"], 1);
-        assert_eq!(compact["result"]["total"], 3);
-        assert_eq!(compact["result"]["next"], 2);
-        assert_eq!(json!(mixed.analysis), json!(before_mixed.analysis));
-        assert_eq!(
-            json!(mixed.reviewer_coverage),
-            json!(before_mixed.reviewer_coverage)
-        );
-        state.transcript.extend(group(
-            "left",
-            json!({"view":"detail","items":[state.analysis.records["left"]]}),
-        ));
-        state
-            .transcript
-            .extend(group("navigation", json!({"view":"index","items":[]})));
-        state.transcript.extend(group(
-            "right",
-            json!({"view":"detail","items":[state.analysis.records["right"]]}),
-        ));
-        state
-            .transcript
-            .extend(group("pending", json!({"view":"index","items":[]})));
-        let pending = state.transcript[state.transcript.len() - 2..].to_vec();
-        let evidence = focused_work_evidence(&state, &state.transcript);
-        assert_eq!(evidence.len(), 2);
-        assert!(evict_delivered_group(&mut state, 65536, true));
-        assert_eq!(focused_work_evidence(&state, &state.transcript), evidence);
-        assert!(
-            !state
-                .transcript
-                .iter()
-                .any(|m| m["tool_call_id"] == "navigation")
-        );
-        assert_eq!(
-            &state.transcript[state.transcript.len() - 2..],
-            pending.as_slice()
-        );
-        state.analysis.records.get_mut("left").unwrap().data = RecordData::Unresolved {
-            problem: "changed version".into(),
-            affected: vec![],
-            candidates: vec![],
-        };
-        assert_eq!(
-            visible_work_evidence(&state, &state.transcript).len(),
-            1,
-            "old candidate bodies cannot stand in for current versions"
-        );
-        assert!(evict_delivered_group(&mut state, 65536, true));
-        assert!(!state.transcript.iter().any(|m| m["tool_call_id"] == "left"));
-    }
-
-    #[test]
-    fn token_estimate_counts_images_separately_and_preserves_utf8_and_tools() {
-        let limits = crate::tender_analysis::tests::config().limits;
-        let mut body = json!({"messages":[{"role":"user","content":[
-            {"type":"text","text":"中文😀"},
-            {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,AAAA","detail":"high"}}
-        ]}],"tools":[{"type":"function","function":{"name":"read_source"}}]});
-        let before = body.clone();
-        let estimate = estimate_input_tokens(&body, &limits).unwrap();
-        assert_eq!(body, before, "sizing must not replace transmitted pixels");
-        body["messages"][0]["content"][1]["image_url"]["url"] = json!("A".repeat(200000));
-        assert_eq!(estimate_input_tokens(&body, &limits).unwrap(), estimate);
-        body["messages"][0]["content"][0]["text"] = json!("中文😀中文😀");
-        assert_eq!(
-            estimate_input_tokens(&body, &limits).unwrap(),
-            estimate + "中文😀".len()
-        );
-        body["tools"][0]["function"]["description"] = json!("真实工具定义");
-        assert!(estimate_input_tokens(&body, &limits).unwrap() > estimate + "中文😀".len());
-        let image = body["messages"][0]["content"][1].clone();
-        let single = estimate_input_tokens(&body, &limits).unwrap();
-        body["messages"][0]["content"]
-            .as_array_mut()
-            .unwrap()
-            .push(image);
-        assert!(
-            estimate_input_tokens(&body, &limits).unwrap() >= single + limits.image_token_reserve
-        );
-    }
-}
+mod tests;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -2018,7 +61,10 @@ pub struct WorkState {
     pub note: String,
 }
 
-pub(super) fn reference(analysis: &Analysis, key: &str) -> Result<Value, String> {
+pub(in crate::tender_analysis) fn reference(
+    analysis: &Analysis,
+    key: &str,
+) -> Result<Value, String> {
     let (kind, id) = key
         .split_once(':')
         .ok_or("use record:<id>, relation:<id>, or disposition:<source_id> for a work reference, not a bare ID")?;
@@ -2055,7 +101,10 @@ fn unresolved(analysis: &Analysis, key: &str) -> bool {
     }
 }
 
-pub(super) fn scope_references(analysis: &Analysis, scope: &[String]) -> Vec<String> {
+pub(in crate::tender_analysis) fn scope_references(
+    analysis: &Analysis,
+    scope: &[String],
+) -> Vec<String> {
     let record_in_scope = |r: &Record| r.sources.iter().any(|s| scope.contains(&s.source_id));
     let mut refs: Vec<_> = analysis
         .records
@@ -2084,8 +133,8 @@ pub(super) fn scope_references(analysis: &Analysis, scope: &[String]) -> Vec<Str
     refs
 }
 
-/// Source judgments also depend on cross-source endpoints and actual queries.
-/// Navigation must not declare comparisons finished while those remain pending.
+/// Candidates available for explicit focus or recall, including queried support.
+/// This is not the compulsory work roster for the current source task.
 fn work_references(state: &Checkpoint, work: &WorkState) -> Vec<String> {
     let mut refs = scope_references(&state.analysis, &work.source_scope);
     if state.role == Role::Reviewer
@@ -2103,9 +152,23 @@ fn work_references(state: &Checkpoint, work: &WorkState) -> Vec<String> {
     refs
 }
 
+fn required_work_references(
+    input: &FrozenInput,
+    state: &Checkpoint,
+    work: &WorkState,
+    max_bytes: usize,
+) -> Result<Vec<String>, String> {
+    Ok(
+        match source_review::active_obligations(input, state, max_bytes)? {
+            Some(owned) => owned.comparisons.into_iter().collect(),
+            None => scope_references(&state.analysis, &work.source_scope),
+        },
+    )
+}
+
 /// Outcomes are host-maintained, including deferred work and unresolved cross-scope
 /// dependencies. They are references only, never reading receipts or approval.
-pub(super) fn retain_outcomes(
+pub(in crate::tender_analysis) fn retain_outcomes(
     analysis: &Analysis,
     work: &mut WorkState,
     prior: Option<&WorkState>,
@@ -2185,12 +248,21 @@ pub(super) fn execution_gaps(
     let rows: Vec<_> = if args["scope"] == "pending" {
         state.work().into_iter().flat_map(|w|&w.pending_refs).map(|key|json!({"reference":key,"kind":"source_uncertainty","instruction":"inspect this saved outcome when its content is needed; it is not an execution failure"})).collect()
     } else {
-        state.execution().blockers.iter().map(|b|json!({"source_scope":b.scope,"dependencies_sha256":b.dependencies_sha256,"kind":"execution_blocker"})).collect()
+        state.execution().blockers.iter().map(|b| {
+            let mut row = json!({"source_scope":b.scope,"dependencies_sha256":b.dependencies_sha256,"kind":"execution_blocker"});
+            if super::repair_recovery::available(state, &b.scope)? {
+                row["history_recovery"] = json!({"tool":"set_work_note","source_scope":b.scope,
+                    "instruction":"Newly delivered original finding and prior repair history allow one bounded retry of this scope. Choose an exact correction objective and retain other deferred sources. Spent replans remain spent; this is neither evidence delivery nor approval. Re-reading this history does not renew the attempt."});
+            } else if let Some(query) = super::repair_recovery::history_query(state, &b.scope)? {
+                row["history_to_read"] = query;
+            }
+            Ok(row)
+        }).collect::<Result<_, String>>()?
     };
     tools::bounded_page(&rows, number("offset")?, number("limit")?, max_bytes)
 }
 
-pub(super) fn validate(
+pub(in crate::tender_analysis) fn validate(
     input: &FrozenInput,
     state: &Checkpoint,
     next: &WorkState,
@@ -2306,7 +378,7 @@ pub(super) fn validate(
     if next.status != WorkStatus::Complete {
         return Ok(());
     }
-    if let Some(gap) = completion_gaps(input, state, next)?.first() {
+    if let Some(gap) = completion_gaps(input, state, next, max_bytes)?.first() {
         return Err(format!(
             "{}; use check_gaps with scope=work for exact fields and references",
             gap["message"].as_str().unwrap_or("work gap")
@@ -2321,11 +393,12 @@ fn completion_gaps(
     input: &FrozenInput,
     state: &Checkpoint,
     work: &WorkState,
+    max_bytes: usize,
 ) -> Result<Vec<Value>, String> {
     // Completion depends on confirmed evidence, not whether a redundant read
     // happened in this batch. Unseen sources and candidate versions still have
     // their own concrete gaps below.
-    scoped_gaps(input, state, work, state.coverage())
+    scoped_gaps(input, state, work, state.coverage(), max_bytes)
 }
 
 fn scoped_gaps(
@@ -2333,6 +406,7 @@ fn scoped_gaps(
     state: &Checkpoint,
     work: &WorkState,
     coverage: &Coverage,
+    max_bytes: usize,
 ) -> Result<Vec<Value>, String> {
     let mut gaps = Vec::new();
     for mut gap in tools::reading_gaps(input, coverage) {
@@ -2370,7 +444,7 @@ fn scoped_gaps(
     // Retention is global; completion is local. Unrelated pending outcomes stay
     // in WorkState and the final review gate, but must not pull deferred work
     // into every local comparison. Related cross-scope relations remain here.
-    for key in work_references(state, work) {
+    for key in required_work_references(input, state, work, max_bytes)? {
         if state.role == Role::Reviewer
             && coverage.candidate.get(&key) != Some(&digest(&reference(&state.analysis, &key)?)?)
         {
@@ -2380,6 +454,10 @@ fn scoped_gaps(
             );
         }
     }
+    gaps.extend(super::repair::recovery_completion_gaps(
+        state,
+        &work.source_scope,
+    )?);
     Ok(gaps)
 }
 
@@ -2408,7 +486,7 @@ pub(super) fn work_gaps(
         input,
         state,
         state.coverage(),
-        completion_gaps(input, state, work)?,
+        completion_gaps(input, state, work, max_bytes)?,
         max_bytes,
     )?;
     tools::bounded_page(&rows, number("offset")?, number("limit")?, max_bytes)
@@ -2445,17 +523,14 @@ pub(super) fn check_delete(state: &Checkpoint, name: &str, args: &Value) -> Resu
         "{kind}:{}",
         args["id"].as_str().ok_or("delete needs an ID")?
     );
-    // A completed independent review can identify the pending item itself as
-    // wrong. Let the primary role retire it; the saved finding still requires
-    // explicit independent rereview and is not cleared by record deletion.
+    // A prior reviewer finding can identify the pending item itself as wrong.
+    // Retirement still requires independent rereview; neither the finding nor
+    // the source obligation is cleared by deleting its candidate record.
     let reviewed_issue = state.role == Role::Main
-        && state.review_rounds > 0
-        && state.review.as_ref().is_some_and(|review| {
-            review
-                .findings
-                .iter()
-                .any(|finding| finding.affected.iter().any(|field| args["id"] == field.id))
-        });
+        && state
+            .findings_for_repair()
+            .iter()
+            .any(|finding| finding.affected.iter().any(|field| args["id"] == field.id));
     if unresolved(&state.analysis, &key)
         && !reviewed_issue
         && [&state.main_work, &state.reviewer_work]
@@ -2468,7 +543,7 @@ pub(super) fn check_delete(state: &Checkpoint, name: &str, args: &Value) -> Resu
     Ok(())
 }
 
-pub(super) fn check_read_scope(
+pub(in crate::tender_analysis) fn check_read_scope(
     input: &FrozenInput,
     state: &Checkpoint,
     name: &str,
@@ -2497,7 +572,7 @@ pub(super) fn check_read_scope(
 /// evidence receipt. Pending reads are projected here only because that exact
 /// last protocol group is being delivered in this request; the durable ledger
 /// is still promoted only after a complete model response.
-pub(super) fn request_work_state(
+pub(in crate::tender_analysis) fn request_work_state(
     input: &FrozenInput,
     state: &Checkpoint,
     max_bytes: usize,
@@ -2506,11 +581,19 @@ pub(super) fn request_work_state(
         return Ok(Value::Null);
     };
     if state.role == Role::Main && work.status == WorkStatus::Complete {
-        if work.deferred_sources.is_empty()
-            && state.main_progress.blockers.is_empty()
-            && state.reviewer_progress.blockers.is_empty()
-            && tools::gaps(input, &state.analysis).is_empty()
-        {
+        let gaps = tools::gaps(input, &state.analysis);
+        let blocked = !state.main_progress.blockers.is_empty()
+            || !state.reviewer_progress.blockers.is_empty();
+        if work.deferred_sources.is_empty() && !blocked && gaps.is_empty() {
+            let findings = state.findings_for_repair();
+            if !findings.is_empty() {
+                // A changed analysis digest proves only that something was
+                // edited. It cannot establish that the other findings were
+                // handled, especially omissions and missing relationships.
+                return Ok(json!({"next_action":"verify_review_findings",
+                    "finding_count":findings.len(),
+                    "instruction":"Reconcile all previous model findings against original evidence before requesting another review. A retained draft is repair feedback, not proof of a completed independent review. Use already delivered findings; inspect_review only for missing pages. Correct all grounded issues, including missing objects and relationships, in coherent source scopes. A single edit or completed scope does not resolve the other findings. Use review_findings.repair.next_finding and put_repair_result to record each actual correction or source-backed dispute before requesting independent verification. Unchanged subjects may have been repaired through related records or edges; do not invent edits to clear this navigation. The main Agent cannot withdraw reviewer findings, and this navigation does not attest repairs; the per-finding disposition gate still applies."}));
+            }
             let changed = state
                 .review
                 .as_ref()
@@ -2525,11 +608,57 @@ pub(super) fn request_work_state(
                     "instruction":"The analysis is unchanged since the previous review. Recheck the findings against original sources before deciding a correction or requesting another review; unchanged data is not a completed repair."})
             });
         }
-        return Ok(Value::Null);
+        let deferred = work.deferred_sources.first();
+        let rows = if blocked || deferred.is_some() {
+            &[][..]
+        } else {
+            gaps.as_slice()
+        };
+        let source_id = deferred.map(String::as_str).or_else(|| {
+            let gap = rows.first()?;
+            gap["source_id"].as_str().or_else(|| {
+                input
+                    .structured_forms
+                    .iter()
+                    .find(|f| f["form_definition_revision_id"] == gap["form_id"])
+                    .and_then(|f| f["source_unit_revision_id"].as_str())
+            })
+        });
+        let source = input
+            .source_units
+            .iter()
+            .find(|s| Some(s.source_unit_revision_id.as_str()) == source_id);
+        let mut packet = json!({
+            "next_action":if blocked {"resolve_execution_blockers"} else if deferred.is_some() {"resume_deferred_scope"} else {"select_next_scope"},
+            "next_source":source.map(|s| json!({"source_id":s.source_unit_revision_id,
+                "document_id":s.document_id,"ordinal":s.ordinal,"page_ordinal":s.locator["page_ordinal"],"bytes":s.text.len()})),
+            "instruction":if blocked {
+                "Resolve the existing execution blockers shown in execution before requesting review; a completed local scope does not clear them."
+            } else if deferred.is_some() {
+                "Resume a deferred source with set_work_note, keeping all other deferred work. Opening it will show its current local gaps. Navigation is not evidence or semantic completion."
+            } else {
+                "One pending global gap is shown. Choose a coherent next scope with set_work_note, or follow another needed cross-reference; this is not a prescribed reading order. Read an indicated metadata collection directly with collection_index. More global gaps are available with check_gaps scope=analysis at blockers.next. These hints grant no reading receipt or semantic approval."
+            },
+            "blockers":null
+        });
+        let overhead = serde_json::to_vec(&packet)
+            .map_err(|e| e.to_string())?
+            .len()
+            - serde_json::to_vec(&Value::Null)
+                .map_err(|e| e.to_string())?
+                .len();
+        let page_budget = max_bytes
+            .checked_sub(overhead)
+            .ok_or("next work hint exceeds input budget")?;
+        packet["blockers"] = tools::bounded_page(rows, 0, 1, page_budget)?;
+        return Ok(packet);
     }
     if work.status != WorkStatus::Active {
         return Ok(Value::Null);
     }
+    // Independent scopes remain executable; global blockers are still checked
+    // when requesting or accepting the whole-analysis review.
+    let blocked = scope_is_blocked(state, &work.source_scope)?;
     let coverage = state
         .pending_coverage
         .as_ref()
@@ -2538,7 +667,7 @@ pub(super) fn request_work_state(
         input,
         state,
         coverage,
-        scoped_gaps(input, state, work, coverage)?,
+        scoped_gaps(input, state, work, coverage, max_bytes)?,
         max_bytes,
     )?;
     let mut counts = BTreeMap::<String, usize>::new();
@@ -2554,7 +683,7 @@ pub(super) fn request_work_state(
     }
     let mut packet = json!({
         "gap_counts":counts,
-        "next_action":if !state.main_progress.blockers.is_empty() || !state.reviewer_progress.blockers.is_empty() {
+        "next_action":if blocked {
             "resolve_execution_blockers"
         } else if !rows.is_empty() {
             "resolve_work_gaps"
@@ -2572,7 +701,7 @@ pub(super) fn request_work_state(
         "blockers":null
     });
     if state.role == Role::Reviewer {
-        let refs = work_references(state, work);
+        let refs = required_work_references(input, state, work, max_bytes)?;
         let mut remaining = Vec::new();
         for key in &refs {
             if !has_review_outcome(state, key)? {
@@ -2592,10 +721,7 @@ pub(super) fn request_work_state(
             "focus_total":work.focus.references.len(),"focus_remaining":focus_remaining,
             "next_reference":next_focused.or_else(|| remaining.first().copied()),
             "instruction":"Save a finding or complete_review_check after comparing a candidate. This is local progress, not automatic approval; source-to-result omissions still need independent checking."});
-        if review_focus_complete(state)?
-            && state.main_progress.blockers.is_empty()
-            && state.reviewer_progress.blockers.is_empty()
-        {
+        if review_focus_complete(state)? && !blocked {
             if !remaining.is_empty() {
                 packet["next_action"] = json!("select_next_review_focus");
                 packet["instruction"] = json!(
@@ -2624,7 +750,7 @@ pub(super) fn request_work_state(
 
 /// Inventory of source payloads actually retained in a request transcript.
 /// It is used only for context selection, never to acknowledge reading.
-pub(super) fn visible_work_evidence(
+pub(in crate::tender_analysis) fn visible_work_evidence(
     state: &Checkpoint,
     messages: &[Value],
 ) -> BTreeMap<String, Vec<(usize, usize)>> {
@@ -2652,6 +778,47 @@ pub(super) fn visible_work_evidence(
         else {
             continue;
         };
+        if message["role"] == "tool"
+            && output["ok"] == true
+            && let Some(assigned) = output["result"].get("assigned_evidence")
+        {
+            // Inspect actual packet values just like tool results. This
+            // inventory controls context admission, never reading credit.
+            let mut items = Vec::new();
+            for item in assigned["candidates"].as_array().into_iter().flatten() {
+                let Some(key) = item["reference"].as_str() else {
+                    continue;
+                };
+                if let Ok(current) = reference(&state.analysis, key)
+                    && current == item["value"]
+                    && digest(&current).ok().as_deref() == item["sha256"].as_str()
+                {
+                    items.push(current);
+                }
+            }
+            let mut projected = vec![
+                json!({"role":"tool","content":json!({"ok":true,"result":assigned["source"]}).to_string()}),
+                json!({"role":"tool","content":json!({"ok":true,"result":{"view":"detail","items":items}}).to_string()}),
+            ];
+            for boundary in assigned["boundary_evidence"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .chain(
+                    assigned["subject_evidence"]["items"]
+                        .as_array()
+                        .into_iter()
+                        .flatten(),
+                )
+            {
+                projected.push(json!({"role":"tool","content":json!({"ok":true,"result":boundary["source"]}).to_string()}));
+            }
+            for (key, spans) in visible_work_evidence(state, &projected) {
+                for (start, end) in spans {
+                    tools::cover(ranges.entry(key.clone()).or_default(), start, end);
+                }
+            }
+        }
         if message["role"] == "user" {
             for item in output["retained_candidate_details"]["items"]
                 .as_array()
@@ -3183,7 +1350,10 @@ fn compact_delivered_candidate_details(
     false
 }
 
-fn scope_dependencies(state: &Checkpoint, scope: &[String]) -> Result<String, String> {
+pub(super) fn raw_scope_dependencies(
+    state: &Checkpoint,
+    scope: &[String],
+) -> Result<String, String> {
     let values: Vec<_> = scope_references(&state.analysis, scope)
         .iter()
         .map(|key| reference(&state.analysis, key))
@@ -3191,18 +1361,33 @@ fn scope_dependencies(state: &Checkpoint, scope: &[String]) -> Result<String, St
     digest(&values)
 }
 
-pub(super) fn check_blocked_scope(state: &Checkpoint, scope: &[String]) -> Result<(), String> {
+fn scope_dependencies(state: &Checkpoint, scope: &[String]) -> Result<String, String> {
+    super::repair_recovery::dependencies(state, scope, raw_scope_dependencies(state, scope)?)
+}
+
+pub(in crate::tender_analysis) fn check_blocked_scope(
+    state: &Checkpoint,
+    scope: &[String],
+) -> Result<(), String> {
+    if scope_is_blocked(state, scope)? {
+        return Err(
+            "blocked source dependencies are unchanged; continue an independent scope instead"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn scope_is_blocked(state: &Checkpoint, scope: &[String]) -> Result<bool, String> {
     for blocker in &state.execution().blockers {
         if blocker.scope.iter().any(|id| scope.contains(id))
             && scope_dependencies(state, &blocker.scope)? == blocker.dependencies_sha256
+            && !super::repair_recovery::available(state, &blocker.scope)?
         {
-            return Err(
-                "blocked source dependencies are unchanged; continue an independent scope instead"
-                    .into(),
-            );
+            return Ok(true);
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Only used before preparing a fresh boundary. Saved responses still execute,
@@ -3218,6 +1403,7 @@ pub(super) fn check_independent_work(
     for blocker in &state.execution().blockers {
         if scope_dependencies(state, &blocker.scope).map_err(invalid)?
             == blocker.dependencies_sha256
+            && !super::repair_recovery::available(state, &blocker.scope).map_err(invalid)?
         {
             blocked.extend(&blocker.scope);
         }
@@ -3235,7 +1421,7 @@ pub(super) fn check_independent_work(
     Ok(())
 }
 
-pub(super) fn observe_progress(
+pub(in crate::tender_analysis) fn observe_progress(
     state: &mut Checkpoint,
     role: &Role,
     local_completion: Option<String>,
@@ -3282,6 +1468,24 @@ pub(super) fn observe_progress(
     for finding in state.review_draft.values() {
         versions.push(digest(finding)?);
     }
+    if *role == Role::Main {
+        for (id, receipt) in &state.repair.results {
+            // Rephrasing the explanation is not another unit of progress.
+            versions.push(digest(&json!([
+                "repair_disposition",
+                id,
+                receipt.candidate_versions
+            ]))?);
+        }
+    }
+    if *role == Role::Main && repair::tasks::active(state).is_some() {
+        // Task completion is judged after the entire batch. Local writes, scope
+        // notes and role handoffs cannot refund this task or edit legacy blockers.
+        state
+            .main_progress
+            .observe(versions, None, &limits.progress());
+        return Ok(());
+    }
     let completed = work
         .as_ref()
         .is_some_and(|w| w.status == WorkStatus::Complete)
@@ -3290,6 +1494,25 @@ pub(super) fn observe_progress(
     let completion = completed
         .then(|| digest(&json!([scope, dependencies, state.role, state.done])))
         .transpose()?;
+    let active_progress = if *role == Role::Main {
+        &state.main_progress
+    } else {
+        &state.reviewer_progress
+    };
+    let active_dependencies: Vec<_> = active_progress
+        .blockers
+        .iter()
+        .filter(|blocker| {
+            blocker.watch.recovery != Recovery::Blocked
+                && blocker.scope.iter().any(|id| scope.contains(id))
+        })
+        .map(|blocker| {
+            Ok((
+                blocker.scope.clone(),
+                scope_dependencies(state, &blocker.scope)?,
+            ))
+        })
+        .collect::<Result<_, String>>()?;
     let progress = if *role == Role::Main {
         &mut state.main_progress
     } else {
@@ -3305,6 +1528,19 @@ pub(super) fn observe_progress(
             .blockers
             .retain(|b| !b.scope.iter().all(|id| scope.contains(id)));
     }
+    for (active_scope, active_hash) in active_dependencies {
+        if let Some(blocker) = progress
+            .blockers
+            .iter_mut()
+            .find(|b| b.scope == active_scope)
+        {
+            blocker.watch = progress.watch.clone();
+            if progress.watch.recovery == Recovery::Blocked {
+                // Expanded or narrowed work must also close the original retry.
+                blocker.dependencies_sha256 = active_hash;
+            }
+        }
+    }
     progress.block(scope, dependencies);
     if progress.watch.recovery == Recovery::Blocked {
         let work = if *role == Role::Main {
@@ -3319,13 +1555,26 @@ pub(super) fn observe_progress(
     Ok(())
 }
 
-pub(super) fn execution_packet(state: &Checkpoint, max_bytes: usize) -> Result<Value, String> {
+pub(in crate::tender_analysis) fn execution_packet(
+    state: &Checkpoint,
+    max_bytes: usize,
+) -> Result<Value, String> {
     let progress = state.execution();
     let completed_focus = review_focus_complete(state)?
-        && state.main_progress.blockers.is_empty()
-        && state.reviewer_progress.blockers.is_empty();
+        && !scope_is_blocked(
+            state,
+            &state
+                .work()
+                .expect("completed review focus has work")
+                .source_scope,
+        )?;
+    let history_available = progress.blockers.iter().try_fold(false, |found, blocker| {
+        super::repair_recovery::available(state, &blocker.scope).map(|available| found || available)
+    })?;
     let mut packet = json!({"watch":progress.watch,"blocker_count":progress.blockers.len(),
-    "next_action":if completed_focus {
+    "next_action":if history_available {
+        "A blocker below has newly delivered prior repair history. Its history_recovery navigation permits one explicit set_work_note retry while retaining spent replans and deferred work. This does not approve or complete the scope."
+    } else if completed_focus {
         "The current review focus already has recorded outcomes. Follow work_state.next_action and comparison_progress.next_reference to select unfinished comparisons. Do not repeat the completed focus. If none remain, complete the assigned source-to-result judgment with put_source_review; the host advances and aggregates. This guidance neither grants approval nor resets recovery budgets."
     } else if state.role == Role::Reviewer && progress.watch.needs_replan_context() {
         "Replan the stalled comparison now. Select a single unfinished candidate or one exact source uncertainty and narrow focus with set_work_note; retain the assigned source task and permitted cross-reference scope. Compare that candidate with its original evidence and save put_review_finding or complete_review_check before loading another inventory page. If a particular field is missing, retrieve only that evidence. Do not wait to read every candidate before saving the first comparison. After the local comparisons, judge source omissions and boundaries with put_source_review; the host advances tasks and aggregates complete judgments. Execution blockers prevent submission. This neither approves the analysis nor renews recovery allowances."
@@ -3335,6 +1584,14 @@ pub(super) fn execution_packet(state: &Checkpoint, max_bytes: usize) -> Result<V
         (_, Recovery::Replan) => "Repeated reads/notes are not progress. Narrow focus to an exact clause or endpoint pair and write its result; inspect only a specific missing field.",
         (_, Recovery::Blocked) => "Select an independent source scope. This execution failure prevents final acceptance and cannot be converted to source uncertainty."
     }}});
+    if state.role == Role::Main
+        && let Some((id, entry)) = repair::tasks::active(state)
+    {
+        packet["repair_task"] = json!({"id":id,"finding_sha256":entry.finding_sha256,"committed_turns":entry.committed_turns});
+        packet["next_action"] = json!(
+            "Work on the host-assigned repair task. Changing source scope or focus does not change the task or renew its allowance. Save a grounded revised or disputed result; the host checks the full batch before selecting another task. Existing source blockers remain binding."
+        );
+    }
     packet["blockers"] = execution_gaps(
         state,
         &json!({"scope":"execution","offset":0,"limit":progress.blockers.len().max(1)}),
@@ -3354,31 +1611,43 @@ fn review_check_key(reference: &str, version: &str) -> Result<String, String> {
     digest(&json!(["review_check", reference, version]))
 }
 
-fn has_review_finding(state: &Checkpoint, reference: &str) -> bool {
-    reference.split_once(':').is_some_and(|(kind, id)| {
-        state.review_draft.values().any(|f| {
-            let affects = if kind == "disposition" {
-                f.sources.iter().any(|s| s.source_id == id)
+pub(in crate::tender_analysis) fn candidate_findings(
+    state: &Checkpoint,
+    reference: &str,
+) -> Vec<String> {
+    let Some((kind, id)) = reference.split_once(':') else {
+        return vec![];
+    };
+    let current = self::reference(&state.analysis, reference)
+        .ok()
+        .and_then(|value| digest(&value).ok());
+    if current.is_none() || current.as_ref() != state.reviewer_coverage.candidate.get(reference) {
+        return vec![];
+    }
+    state
+        .review_draft
+        .iter()
+        .filter(|(_, finding)| {
+            if kind == "disposition" {
+                finding.sources.iter().any(|source| source.source_id == id)
             } else {
-                f.affected.iter().any(|a| a.id == id)
-            };
-            affects
-                && self::reference(&state.analysis, reference)
-                    .ok()
-                    .and_then(|v| digest(&v).ok())
-                    .as_ref()
-                    == state.reviewer_coverage.candidate.get(reference)
+                finding.affected.iter().any(|affected| affected.id == id)
+            }
         })
-    })
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
-pub(super) fn has_review_outcome(state: &Checkpoint, key: &str) -> Result<bool, String> {
+pub(in crate::tender_analysis) fn has_review_outcome(
+    state: &Checkpoint,
+    key: &str,
+) -> Result<bool, String> {
     let version = source_review::candidate_version(state, key)?;
     Ok(state
         .reviewer_progress
         .seen
         .contains(&review_check_key(key, &version)?)
-        || has_review_finding(state, key))
+        || !candidate_findings(state, key).is_empty())
 }
 
 fn review_focus_complete(state: &Checkpoint) -> Result<bool, String> {
@@ -3398,7 +1667,7 @@ fn review_focus_complete(state: &Checkpoint) -> Result<bool, String> {
     Ok(true)
 }
 
-pub(super) fn complete_review_check(
+pub(in crate::tender_analysis) fn complete_review_check(
     input: &FrozenInput,
     state: &mut Checkpoint,
     args: &Value,
@@ -3439,13 +1708,20 @@ pub(super) fn complete_review_check(
                 .into(),
         );
     }
-    if has_review_finding(state, &check.reference) {
-        return Err("candidate has a saved review finding; inspect_review before asserting a clean comparison".into());
+    let findings = candidate_findings(state, &check.reference);
+    if !findings.is_empty() {
+        return Err(tools::field_error(
+            "/reference",
+            json!({"reference":check.reference,"recorded_outcome":"findings",
+                "finding_ids":tools::bounded_page(&findings,0,usize::MAX,max_bytes/4)?,
+                "instruction":"This candidate already has a recorded finding outcome. Do not submit a clean comparison for it or repeat an inventory just to record completion. Retain these findings and compare the remaining pending_candidate_refs, then judge source omissions, relationships and boundaries with put_source_review using status=findings. Use inspect_review only when finding details are needed for a correction or an evidence-backed withdrawal. This rejection grants no clean comparison or source approval."}),
+        ));
     }
     for source in &check.sources {
-        if !work.source_scope.contains(&source.source_id) {
-            return Err("comparison evidence lies outside the active source scope".into());
-        }
+        // The exact candidate was authorized by its task/focus above. Original
+        // evidence can already have been delivered by a boundary bundle or a
+        // previous cross-reference read. Citing it does not expand the current
+        // read scope or authorize comparisons of other candidates.
         tools::validate_span(input, &state.reviewer_coverage, source)?;
     }
     let cited: Vec<_> = check.sources.iter().map(|s| s.source_id.clone()).collect();

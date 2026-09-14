@@ -2,9 +2,10 @@
 
 use crate::{
     Chunk, ChunkEmbedding, DeadLetter, Document, GraphNode, GraphRelation, Job, ParseStatus,
-    ProductVersion, Store, WikiFolder, WikiPage, WikiPendingOp,
+    ProductVersion, WikiFolder, WikiPage, WikiPendingOp,
 };
 use chrono::{DateTime, Utc};
+use sqlx::{PgPool, Row};
 use std::collections::{HashMap, VecDeque};
 use uuid::Uuid;
 
@@ -19,65 +20,44 @@ pub struct DocJob {
 }
 
 impl DocJob {
-    pub fn from_store(store: &Store, document_id: Uuid) -> Option<Self> {
-        let document = store.documents.get(&document_id)?.clone();
-        let mut version = store.versions.get(&document.product_version_id)?.clone();
+    pub async fn from_pool(pool: &PgPool, document_id: Uuid) -> Result<Option<Self>, sqlx::Error> {
+        let Some(document) = crate::load_document(pool, document_id).await? else {
+            return Ok(None);
+        };
+        let Some(mut version) = crate::load_version(pool, document.product_version_id).await?
+        else {
+            return Ok(None);
+        };
         crate::resolve_process_config(&version, document.process_overrides.as_ref())
             .apply_to(&mut version);
-        let chunks = store
-            .chunks
-            .iter()
-            .filter(|(_, chunk)| chunk.document_id == document_id)
-            .map(|(id, chunk)| (*id, chunk.clone()))
+        let chunk_list = crate::load_document_chunks(pool, document_id).await?;
+        let chunks = chunk_list
+            .into_iter()
+            .map(|chunk| (chunk.id, chunk))
             .collect();
-        let embeddings = store
-            .embeddings
-            .iter()
-            .filter(|(_, embedding)| embedding.document_id == document_id)
-            .map(|(id, embedding)| (*id, embedding.clone()))
-            .collect();
-        let graph = store
-            .graph
-            .iter()
-            .filter(|(_, node)| node.document_id == document_id)
-            .map(|(key, node)| (key.clone(), node.clone()))
-            .collect();
-        let relations = store
-            .relations
-            .iter()
-            .filter(|(_, rel)| rel.document_id == document_id)
-            .map(|(key, rel)| (key.clone(), rel.clone()))
-            .collect();
-        Some(Self {
+        let (graph, relations) =
+            crate::graph::sql::load_graph_for_document(pool, document_id).await?;
+        Ok(Some(Self {
             document,
             version,
             chunks,
-            embeddings,
+            embeddings: HashMap::new(),
             graph,
             relations,
-        })
+        }))
     }
 
-    pub fn write_back(self, store: &mut Store) {
-        let document_id = self.document.id;
-        store.versions.insert(self.version.id, self.version);
-        store.documents.insert(document_id, self.document);
-        store
-            .chunks
-            .retain(|_, chunk| chunk.document_id != document_id);
-        store.chunks.extend(self.chunks);
-        store
-            .embeddings
-            .retain(|_, embedding| embedding.document_id != document_id);
-        store.embeddings.extend(self.embeddings);
-        store
-            .graph
-            .retain(|_, node| node.document_id != document_id);
-        store.graph.extend(self.graph);
-        store
-            .relations
-            .retain(|_, rel| rel.document_id != document_id);
-        store.relations.extend(self.relations);
+    pub fn for_test(document: Document, mut version: ProductVersion) -> Self {
+        crate::resolve_process_config(&version, document.process_overrides.as_ref())
+            .apply_to(&mut version);
+        Self {
+            document,
+            version,
+            chunks: HashMap::new(),
+            embeddings: HashMap::new(),
+            graph: HashMap::new(),
+            relations: HashMap::new(),
+        }
     }
 
     pub fn upsert_node(&mut self, version_id: Uuid, document_id: Uuid, name: &str, chunk_id: Uuid) {
@@ -150,115 +130,66 @@ pub struct WikiJob {
 }
 
 impl WikiJob {
-    pub fn from_store(store: &Store, version_id: Uuid) -> Self {
-        let documents: HashMap<_, _> = store
-            .documents
-            .iter()
-            .filter(|(_, d)| d.product_version_id == version_id)
-            .map(|(k, v)| (*k, v.clone()))
-            .collect();
-        let doc_ids: std::collections::HashSet<_> = documents.keys().copied().collect();
-        let chunks = store
-            .chunks
-            .iter()
-            .filter(|(_, c)| c.product_version_id == version_id || doc_ids.contains(&c.document_id))
-            .map(|(k, v)| (*k, v.clone()))
-            .collect();
-        let embeddings = store
-            .embeddings
-            .iter()
-            .filter(|(_, e)| e.product_version_id == version_id || doc_ids.contains(&e.document_id))
-            .map(|(k, v)| (*k, v.clone()))
-            .collect();
-        Self {
+    pub async fn from_pool(pool: &PgPool, version_id: Uuid) -> Result<Self, sqlx::Error> {
+        let mut versions = HashMap::new();
+        if let Some(version) = crate::load_version(pool, version_id).await? {
+            versions.insert(version_id, version);
+        }
+        let documents_list =
+            crate::list_documents_in_version(pool, version_id, None, None, None).await?;
+        let mut documents = HashMap::new();
+        let mut chunks = HashMap::new();
+        for document in documents_list {
+            for chunk in crate::load_document_chunks(pool, document.id).await? {
+                chunks.insert(chunk.id, chunk);
+            }
+            documents.insert(document.id, document);
+        }
+        let mut wiki = HashMap::new();
+        for page in crate::list_wiki_pages(pool, version_id).await? {
+            wiki.insert((page.product_version_id, page.slug.clone()), page);
+        }
+        let folder_rows = sqlx::query(
+            "SELECT id, product_version_id, parent_id, name, path, depth, sort_order
+             FROM wiki_folders
+             WHERE product_version_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(version_id)
+        .fetch_all(pool)
+        .await?;
+        let mut wiki_folders = HashMap::new();
+        for row in folder_rows {
+            let id: Uuid = row.try_get("id")?;
+            wiki_folders.insert(
+                id,
+                crate::WikiFolder {
+                    id,
+                    product_version_id: row.try_get("product_version_id")?,
+                    parent_id: row.try_get("parent_id")?,
+                    name: row.try_get("name")?,
+                    path: row.try_get("path")?,
+                    depth: row.try_get("depth")?,
+                    sort_order: row.try_get("sort_order").unwrap_or(0),
+                },
+            );
+        }
+        Ok(Self {
             version_id,
-            versions: store
-                .versions
-                .iter()
-                .filter(|(id, _)| **id == version_id)
-                .map(|(k, v)| (*k, v.clone()))
-                .collect(),
+            versions,
             documents,
             chunks,
-            embeddings,
-            graph: store
-                .graph
-                .iter()
-                .filter(|(_, n)| n.version_id == version_id)
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            wiki: store
-                .wiki
-                .iter()
-                .filter(|((vid, _), _)| *vid == version_id)
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            wiki_folders: store
-                .wiki_folders
-                .iter()
-                .filter(|(_, f)| f.product_version_id == version_id)
-                .map(|(k, v)| (*k, v.clone()))
-                .collect(),
-            wiki_ops: store
-                .wiki_ops
-                .iter()
-                .filter(|o| o.version_id == version_id)
-                .cloned()
-                .collect(),
-            wiki_tombstones: store
-                .wiki_tombstones
-                .iter()
-                .filter(|((vid, _), _)| *vid == version_id)
-                .map(|(k, v)| (*k, *v))
-                .collect(),
-            wiki_slug_locks: store.wiki_slug_locks.clone(),
-            wiki_inflight: store
-                .wiki_inflight
-                .iter()
-                .filter(|(id, _)| **id == version_id)
-                .map(|(k, v)| (*k, *v))
-                .collect(),
-            wiki_op_seq: store.wiki_op_seq,
+            embeddings: HashMap::new(),
+            graph: HashMap::new(),
+            wiki,
+            wiki_folders,
+            wiki_ops: Vec::new(),
+            wiki_tombstones: HashMap::new(),
+            wiki_slug_locks: HashMap::new(),
+            wiki_inflight: HashMap::new(),
+            wiki_op_seq: 0,
             queue: VecDeque::new(),
             dead_letters: Vec::new(),
-        }
-    }
-
-    pub fn write_back(self, store: &mut Store) {
-        let version_id = self.version_id;
-        store.versions.extend(self.versions);
-        store
-            .documents
-            .retain(|_, d| d.product_version_id != version_id);
-        store.documents.extend(self.documents);
-        store
-            .chunks
-            .retain(|_, c| c.product_version_id != version_id);
-        store.chunks.extend(self.chunks);
-        store
-            .embeddings
-            .retain(|_, e| e.product_version_id != version_id);
-        store.embeddings.extend(self.embeddings);
-        store.graph.retain(|_, n| n.version_id != version_id);
-        store.graph.extend(self.graph);
-        store.wiki.retain(|(vid, _), _| *vid != version_id);
-        store.wiki.extend(self.wiki);
-        store
-            .wiki_folders
-            .retain(|_, f| f.product_version_id != version_id);
-        store.wiki_folders.extend(self.wiki_folders);
-        store.wiki_ops.retain(|o| o.version_id != version_id);
-        store.wiki_ops.extend(self.wiki_ops);
-        store
-            .wiki_tombstones
-            .retain(|(vid, _), _| *vid != version_id);
-        store.wiki_tombstones.extend(self.wiki_tombstones);
-        store.wiki_slug_locks = self.wiki_slug_locks;
-        store.wiki_inflight.retain(|id, _| *id != version_id);
-        store.wiki_inflight.extend(self.wiki_inflight);
-        store.wiki_op_seq = self.wiki_op_seq.max(store.wiki_op_seq);
-        store.queue.extend(self.queue);
-        store.dead_letters.extend(self.dead_letters);
+        })
     }
 
     pub fn finalize_subtask(&mut self, doc_id: Uuid) {

@@ -8,6 +8,10 @@ use std::{
     io::{Cursor, Write},
 };
 
+mod text_regions;
+pub use text_regions::TextRegion;
+pub(crate) use text_regions::{region_bookmark_name, resolve_text_regions};
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TemplateStyle {
@@ -69,6 +73,9 @@ fn toc(plan: &TemplatePlan) -> Result<String, TemplateError> {
 #[serde(deny_unknown_fields)]
 pub struct TemplateBlock {
     pub kind: String,
+    /// Compiler-owned, contiguous original text with independently located blanks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub text_regions: Vec<TextRegion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_parts: Vec<SourcePart>,
     pub source_id: Option<String>,
@@ -341,6 +348,7 @@ pub fn compile_template(input: &Value, plan: &TemplatePlan) -> Result<Vec<u8>, T
         body += &bookmark(ordinal, None, false, range_id);
         range_id += 1;
         for (block_index, block) in section.blocks.iter().enumerate() {
+            let block_range_id = range_id;
             check(
                 block.kind == "condition" || block.condition.is_none(),
                 "applicability annotation cannot be hidden in another block kind",
@@ -360,7 +368,39 @@ pub fn compile_template(input: &Value, plan: &TemplatePlan) -> Result<Vec<u8>, T
                 block.kind == "table" || block.blank_ranges.is_empty(),
                 "partial cell blanks require a frozen table",
             )?;
+            check(
+                block.kind == "text_regions" || block.text_regions.is_empty(),
+                "text regions require their own primitive",
+            )?;
             match block.kind.as_str() {
+                "text_regions" => {
+                    check(
+                        block.quote.is_none()
+                            && block.form_id.is_none()
+                            && block.header_rows == 0
+                            && block.blank_cells.is_empty()
+                            && block.columns.is_empty()
+                            && block.blank_rows == 0,
+                        "unexpected text region fields",
+                    )?;
+                    let fragments = resolve_text_regions(input, block)?;
+                    body += "<w:p>";
+                    for (index, fragment) in fragments.iter().enumerate() {
+                        range_id = range_id
+                            .checked_add(1)
+                            .ok_or_else(|| invalid("too many document ranges"))?;
+                        let name = region_bookmark_name(ordinal, block_index, index);
+                        body +=
+                            &format!("<w:bookmarkStart w:id=\"{range_id}\" w:name=\"{name}\"/>");
+                        let run = paragraph(fragment, None)?;
+                        body += run
+                            .strip_prefix("<w:p>")
+                            .and_then(|s| s.strip_suffix("</w:p>"))
+                            .ok_or_else(|| invalid("paragraph carrier missing"))?;
+                        body += &format!("<w:bookmarkEnd w:id=\"{range_id}\"/>");
+                    }
+                    body += "</w:p>";
+                }
                 "source_excerpt" => {
                     check(
                         block.source_id.is_none()
@@ -602,7 +642,7 @@ pub fn compile_template(input: &Value, plan: &TemplatePlan) -> Result<Vec<u8>, T
                 }
                 _ => return Err(invalid("unsupported template block")),
             }
-            body += &bookmark(ordinal, Some(block_index), false, range_id);
+            body += &bookmark(ordinal, Some(block_index), false, block_range_id);
             range_id = range_id
                 .checked_add(1)
                 .filter(|v| *v <= i32::MAX as u32)

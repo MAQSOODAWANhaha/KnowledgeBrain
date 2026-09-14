@@ -82,8 +82,8 @@ fn revision() -> EmbeddingRevisionV2 {
         schema_version: EMBEDDING_REVISION_SCHEMA_V2,
         provider_protocol_version: EMBEDDING_PROVIDER_PROTOCOL_VERSION_V2.into(),
         provider_model_identifier: format!("vector-index-v2-{}@2025-01-15", Uuid::new_v4()),
-        provider_model_revision_sha256: knowledge::sha256_hex(b"vector-index-v2 model revision"),
-        endpoint_config_sha256: knowledge::sha256_hex(b"vector-index-v2 endpoint config"),
+        provider_model_revision_sha256: platform::sha256_hex(b"vector-index-v2 model revision"),
+        endpoint_config_sha256: platform::sha256_hex(b"vector-index-v2 endpoint config"),
         endpoint_identity: "https://embeddings.example.test/v1/embeddings".into(),
         dimension: EMBEDDING_DIMENSION_V2,
         request_config_sha256: EmbeddingRevisionV2::canonical_request_config_sha256(),
@@ -97,7 +97,7 @@ async fn seed(pool: &PgPool) -> Fixture {
     let version_id = Uuid::new_v4();
     let document_id = Uuid::new_v4();
     let chunk_ids = [Uuid::new_v4(), Uuid::new_v4()];
-    let file_hash = knowledge::sha256_hex(document_id.as_bytes());
+    let file_hash = platform::sha256_hex(document_id.as_bytes());
     let object_ref = format!("objects/{file_hash}");
     let revision = revision();
     let revision_sha256 = revision.sha256().unwrap();

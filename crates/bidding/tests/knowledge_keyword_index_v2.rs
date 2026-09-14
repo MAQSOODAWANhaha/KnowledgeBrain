@@ -32,7 +32,7 @@ async fn final_schema(pool: &PgPool) -> bool {
 
 async fn seed_fixture(pool: &PgPool) -> Fixture {
     let document_id = Uuid::new_v4();
-    let file_hash = knowledge::sha256_hex(document_id.as_bytes());
+    let file_hash = platform::sha256_hex(document_id.as_bytes());
     let fixture = Fixture {
         workspace_id: Uuid::new_v4(),
         product_id: Uuid::new_v4(),

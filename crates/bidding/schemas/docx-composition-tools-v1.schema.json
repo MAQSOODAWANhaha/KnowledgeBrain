@@ -63,55 +63,73 @@
           "grounds": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "source_id": {
-                  "type": "string"
-                },
-                "start": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "end": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "view_id": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
-                },
-                "grid_cell": {
+              "anyOf": [
+                {
                   "type": "object",
                   "properties": {
-                    "form_id": {
-                      "type": "string"
-                    },
-                    "row": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "column": {
-                      "type": "integer",
-                      "minimum": 0
+                    "ref": {
+                      "type": "string",
+                      "pattern": "^[tg]:[0-9]+:[0-9]+:[0-9]+$",
+                      "description": "Copy a citation_ref or citation_refs object returned by read_source/read_form. Address is scoped to this frozen collection; it grants no reading or semantic approval."
                     }
                   },
                   "required": [
-                    "form_id",
-                    "row",
-                    "column"
+                    "ref"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_id": {
+                      "type": "string"
+                    },
+                    "start": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "end": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "view_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                    },
+                    "grid_cell": {
+                      "type": "object",
+                      "properties": {
+                        "form_id": {
+                          "type": "string"
+                        },
+                        "row": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "column": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "form_id",
+                        "row",
+                        "column"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "source_id",
+                    "start",
+                    "end"
                   ],
                   "additionalProperties": false
                 }
-              },
-              "required": [
-                "source_id",
-                "start",
-                "end"
-              ],
-              "additionalProperties": false
+              ]
             }
           },
           "explanation": {
@@ -171,55 +189,73 @@
           "grounds": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "source_id": {
-                  "type": "string"
-                },
-                "start": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "end": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "view_id": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
-                },
-                "grid_cell": {
+              "anyOf": [
+                {
                   "type": "object",
                   "properties": {
-                    "form_id": {
-                      "type": "string"
-                    },
-                    "row": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "column": {
-                      "type": "integer",
-                      "minimum": 0
+                    "ref": {
+                      "type": "string",
+                      "pattern": "^[tg]:[0-9]+:[0-9]+:[0-9]+$",
+                      "description": "Copy a citation_ref or citation_refs object returned by read_source/read_form. Address is scoped to this frozen collection; it grants no reading or semantic approval."
                     }
                   },
                   "required": [
-                    "form_id",
-                    "row",
-                    "column"
+                    "ref"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_id": {
+                      "type": "string"
+                    },
+                    "start": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "end": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "view_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                    },
+                    "grid_cell": {
+                      "type": "object",
+                      "properties": {
+                        "form_id": {
+                          "type": "string"
+                        },
+                        "row": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "column": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "form_id",
+                        "row",
+                        "column"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "source_id",
+                    "start",
+                    "end"
                   ],
                   "additionalProperties": false
                 }
-              },
-              "required": [
-                "source_id",
-                "start",
-                "end"
-              ],
-              "additionalProperties": false
+              ]
             }
           },
           "content": {
@@ -1216,55 +1252,73 @@
           "grounds": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "source_id": {
-                  "type": "string"
-                },
-                "start": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "end": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "view_id": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
-                },
-                "grid_cell": {
+              "anyOf": [
+                {
                   "type": "object",
                   "properties": {
-                    "form_id": {
-                      "type": "string"
-                    },
-                    "row": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "column": {
-                      "type": "integer",
-                      "minimum": 0
+                    "ref": {
+                      "type": "string",
+                      "pattern": "^[tg]:[0-9]+:[0-9]+:[0-9]+$",
+                      "description": "Copy a citation_ref or citation_refs object returned by read_source/read_form. Address is scoped to this frozen collection; it grants no reading or semantic approval."
                     }
                   },
                   "required": [
-                    "form_id",
-                    "row",
-                    "column"
+                    "ref"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_id": {
+                      "type": "string"
+                    },
+                    "start": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "end": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "view_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                    },
+                    "grid_cell": {
+                      "type": "object",
+                      "properties": {
+                        "form_id": {
+                          "type": "string"
+                        },
+                        "row": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "column": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "form_id",
+                        "row",
+                        "column"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "source_id",
+                    "start",
+                    "end"
                   ],
                   "additionalProperties": false
                 }
-              },
-              "required": [
-                "source_id",
-                "start",
-                "end"
-              ],
-              "additionalProperties": false
+              ]
             }
           }
         },
@@ -1298,55 +1352,73 @@
           "grounds": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "source_id": {
-                  "type": "string"
-                },
-                "start": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "end": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "view_id": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
-                },
-                "grid_cell": {
+              "anyOf": [
+                {
                   "type": "object",
                   "properties": {
-                    "form_id": {
-                      "type": "string"
-                    },
-                    "row": {
-                      "type": "integer",
-                      "minimum": 0
-                    },
-                    "column": {
-                      "type": "integer",
-                      "minimum": 0
+                    "ref": {
+                      "type": "string",
+                      "pattern": "^[tg]:[0-9]+:[0-9]+:[0-9]+$",
+                      "description": "Copy a citation_ref or citation_refs object returned by read_source/read_form. Address is scoped to this frozen collection; it grants no reading or semantic approval."
                     }
                   },
                   "required": [
-                    "form_id",
-                    "row",
-                    "column"
+                    "ref"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_id": {
+                      "type": "string"
+                    },
+                    "start": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "end": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "view_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                    },
+                    "grid_cell": {
+                      "type": "object",
+                      "properties": {
+                        "form_id": {
+                          "type": "string"
+                        },
+                        "row": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "column": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "form_id",
+                        "row",
+                        "column"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "source_id",
+                    "start",
+                    "end"
                   ],
                   "additionalProperties": false
                 }
-              },
-              "required": [
-                "source_id",
-                "start",
-                "end"
-              ],
-              "additionalProperties": false
+              ]
             }
           }
         },
@@ -1617,55 +1689,73 @@
                 "sources": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "properties": {
-                      "source_id": {
-                        "type": "string"
-                      },
-                      "start": {
-                        "type": "integer",
-                        "minimum": 0
-                      },
-                      "end": {
-                        "type": "integer",
-                        "minimum": 0
-                      },
-                      "view_id": {
-                        "type": [
-                          "string",
-                          "null"
-                        ],
-                        "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
-                      },
-                      "grid_cell": {
+                    "anyOf": [
+                      {
                         "type": "object",
                         "properties": {
-                          "form_id": {
-                            "type": "string"
-                          },
-                          "row": {
-                            "type": "integer",
-                            "minimum": 0
-                          },
-                          "column": {
-                            "type": "integer",
-                            "minimum": 0
+                          "ref": {
+                            "type": "string",
+                            "pattern": "^[tg]:[0-9]+:[0-9]+:[0-9]+$",
+                            "description": "Copy a citation_ref or citation_refs object returned by read_source/read_form. Address is scoped to this frozen collection; it grants no reading or semantic approval."
                           }
                         },
                         "required": [
-                          "form_id",
-                          "row",
-                          "column"
+                          "ref"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "source_id": {
+                            "type": "string"
+                          },
+                          "start": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "end": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "view_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                          },
+                          "grid_cell": {
+                            "type": "object",
+                            "properties": {
+                              "form_id": {
+                                "type": "string"
+                              },
+                              "row": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "column": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            },
+                            "required": [
+                              "form_id",
+                              "row",
+                              "column"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "source_id",
+                          "start",
+                          "end"
                         ],
                         "additionalProperties": false
                       }
-                    },
-                    "required": [
-                      "source_id",
-                      "start",
-                      "end"
-                    ],
-                    "additionalProperties": false
+                    ]
                   }
                 }
               },

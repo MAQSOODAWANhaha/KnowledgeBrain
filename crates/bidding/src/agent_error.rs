@@ -35,6 +35,31 @@ impl AgentError {
             disposition,
         }
     }
+
+    /// What the Oxana job should do after this attempt. Decided by error code,
+    /// not by collapsing different causes into one boolean.
+    pub fn request_queue_effect(&self) -> RequestQueueEffect {
+        match self.code.as_str() {
+            "REQUEST_OBSOLETE" => RequestQueueEffect::AckObsolete,
+            "REQUEST_ATTEMPT_SUPERSEDED" => RequestQueueEffect::RetryUnchanged,
+            "AGENT_DEADLINE_EXCEEDED" => RequestQueueEffect::ReleaseThenRetry,
+            _ if self.disposition == RetryDisposition::Transient => {
+                RequestQueueEffect::YieldThenRetry
+            }
+            _ => RequestQueueEffect::FailRequest,
+        }
+    }
+}
+
+/// Queue outcome for one AgentRun attempt. Keep causes separate: superseded is
+/// already unlocked; deadline still holds the lease and must yield first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestQueueEffect {
+    AckObsolete,
+    RetryUnchanged,
+    ReleaseThenRetry,
+    YieldThenRetry,
+    FailRequest,
 }
 
 impl std::fmt::Display for AgentError {
@@ -69,6 +94,31 @@ mod tests {
         assert_eq!(
             AgentError::new("INTERNAL", "database unavailable").disposition,
             RetryDisposition::Transient
+        );
+    }
+
+    #[test]
+    fn request_queue_effect_keeps_causes_separate() {
+        use RequestQueueEffect::*;
+        assert_eq!(
+            AgentError::new("REQUEST_OBSOLETE", "done").request_queue_effect(),
+            AckObsolete
+        );
+        assert_eq!(
+            AgentError::new("REQUEST_ATTEMPT_SUPERSEDED", "lease").request_queue_effect(),
+            RetryUnchanged
+        );
+        assert_eq!(
+            AgentError::new("AGENT_DEADLINE_EXCEEDED", "wall").request_queue_effect(),
+            ReleaseThenRetry
+        );
+        assert_eq!(
+            AgentError::new("INTERNAL", "db").request_queue_effect(),
+            YieldThenRetry
+        );
+        assert_eq!(
+            AgentError::new("AGENT_OUTPUT_INVALID", "schema").request_queue_effect(),
+            FailRequest
         );
     }
 }

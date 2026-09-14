@@ -38,7 +38,8 @@ def test_shared_service_preserves_cybersecurity_tender_anchors():
         if grid is not None:
             for cell in grid.cells:
                 by_page[ordinal + 1].append(cell.text or "")
-    compact = lambda text: re.sub(r"\s+", "", text)
+    def compact(text: str) -> str:
+        return re.sub(r"\s+", "", text)
     for case in fixture["cases"]:
         for anchor in case["evidence"]:
             page = compact("\n".join(by_page.get(anchor["page"], [])))

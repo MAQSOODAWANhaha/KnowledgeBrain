@@ -1,183 +1,8 @@
-//! Production knowledge jobs: hydrate is internal; callers pass PgPool only.
+//! Production knowledge jobs. Callers pass PgPool; jobs load SQL into DocJob/WikiJob.
 
-use crate::{
-    ParseStatus, Store, TYPE_CHUNK_EXTRACT, TYPE_QUESTION, TYPE_SUMMARY, expected_subtasks,
-};
+use crate::expected_subtasks;
 use sqlx::PgPool;
 use uuid::Uuid;
-
-fn req_uuid(v: &serde_json::Value, key: &str) -> Result<Uuid, String> {
-    let aliases: &[&str] = match key {
-        "document_id" => &["document_id", "knowledge_id"],
-        "product_version_id" => &["product_version_id", "knowledge_base_id"],
-        other => return read_uuid(v, other),
-    };
-    for k in aliases {
-        if let Ok(id) = read_uuid(v, k) {
-            return Ok(id);
-        }
-    }
-    let _ = v.get("tenant_id");
-    Err(format!("missing {key}"))
-}
-
-fn read_uuid(v: &serde_json::Value, key: &str) -> Result<Uuid, String> {
-    v.get(key)
-        .and_then(|x| x.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| format!("missing {key}"))
-}
-
-pub fn post_process(store: &mut Store, payload: &serde_json::Value) -> Result<(), String> {
-    let doc_id = req_uuid(payload, "document_id")?;
-    let clone_keep = payload
-        .get("clone_keep")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let Some(doc) = store.documents.get(&doc_id).cloned() else {
-        return Ok(());
-    };
-    if doc.parse_status.is_aborted() {
-        return Ok(());
-    }
-    let rows = crate::obs::timeline(store, doc_id);
-    if !crate::obs::can_start_stage_or_legacy(crate::obs::SPAN_POSTPROCESS, &rows) {
-        return Err("postprocess waiting for embedding and multimodal".into());
-    }
-    if doc.parse_status != ParseStatus::Processing {
-        return Ok(());
-    }
-    let Some(version) = store.effective_version(doc_id) else {
-        return Ok(());
-    };
-    let text_count = store
-        .chunks
-        .values()
-        .filter(|c| c.document_id == doc_id && c.chunk_type == "text")
-        .count();
-    let ocr_count = store
-        .chunks
-        .values()
-        .filter(|c| {
-            c.document_id == doc_id
-                && matches!(c.chunk_type.as_str(), "image_ocr" | "image_caption")
-        })
-        .count();
-    let n = expected_subtasks(
-        text_count,
-        ocr_count,
-        version.question_enabled,
-        version.needs_embedding(),
-        version.wiki_enabled,
-        version.graph_enabled,
-        clone_keep,
-    );
-    if n == 0 {
-        if let Some(d) = store.documents.get_mut(&doc_id) {
-            d.parse_status = ParseStatus::Completed;
-            d.summary_status = crate::SummaryStatus::None;
-        }
-        crate::obs::finish(
-            store,
-            doc_id,
-            crate::obs::SPAN_POSTPROCESS,
-            crate::obs::STATUS_DONE,
-        );
-        crate::obs::finish(
-            store,
-            doc_id,
-            crate::obs::ROOT_NAME,
-            crate::obs::STATUS_DONE,
-        );
-        return Ok(());
-    }
-    if !store.set_finalizing(doc_id, n as i32) {
-        return Ok(());
-    }
-    if text_count + ocr_count > 0 && !clone_keep {
-        if let Some(d) = store.documents.get_mut(&doc_id) {
-            d.summary_status = crate::SummaryStatus::Pending;
-        }
-        store.enqueue(
-            TYPE_SUMMARY,
-            platform::QUEUE_SUMMARY,
-            serde_json::json!({ "document_id": doc_id, "attempt": doc.attempt }),
-        );
-    }
-    if !clone_keep && version.question_enabled && version.needs_embedding() && text_count > 0 {
-        let mut ids: Vec<_> = store
-            .chunks
-            .values()
-            .filter(|c| c.document_id == doc_id && c.chunk_type == "text")
-            .cloned()
-            .collect();
-        ids.sort_by_key(|c| c.start_at);
-        for (batch_i, batch) in ids.chunks(20).enumerate() {
-            let base = batch_i * 20;
-            let chunk_ids: Vec<String> = batch.iter().map(|c| c.id.to_string()).collect();
-            let prev_ids: Vec<Option<String>> = (0..batch.len())
-                .map(|i| {
-                    if base + i == 0 {
-                        None
-                    } else {
-                        Some(ids[base + i - 1].id.to_string())
-                    }
-                })
-                .collect();
-            let next_ids: Vec<Option<String>> = (0..batch.len())
-                .map(|i| ids.get(base + i + 1).map(|c| c.id.to_string()))
-                .collect();
-            store.enqueue(
-                TYPE_QUESTION,
-                platform::QUEUE_QUESTION,
-                serde_json::json!({
-                    "document_id": doc_id,
-                    "chunk_ids": chunk_ids,
-                    "prev_ids": prev_ids,
-                    "next_ids": next_ids,
-                    "attempt": doc.attempt
-                }),
-            );
-        }
-    }
-    if version.wiki_enabled && text_count + ocr_count > 0 {
-        let mut job = crate::WikiJob::from_store(store, doc.product_version_id);
-        crate::wiki::enqueue_ingest_on_job(&mut job, doc.product_version_id, doc_id);
-        job.write_back(store);
-    }
-    if version.graph_enabled {
-        let graph_ids: Vec<Uuid> = store
-            .chunks
-            .values()
-            .filter(|c| {
-                c.document_id == doc_id
-                    && matches!(
-                        c.chunk_type.as_str(),
-                        "text" | "image_ocr" | "image_caption"
-                    )
-            })
-            .map(|c| c.id)
-            .collect();
-        for cid in graph_ids {
-            store.enqueue(
-                TYPE_CHUNK_EXTRACT,
-                platform::QUEUE_GRAPH,
-                serde_json::json!({
-                    "chunk_id": cid,
-                    "document_id": doc_id,
-                    "attempt": doc.attempt
-                }),
-            );
-        }
-    }
-    crate::obs::finish(
-        store,
-        doc_id,
-        crate::obs::SPAN_POSTPROCESS,
-        crate::obs::STATUS_DONE,
-    );
-    Ok(())
-}
 
 fn truncate_key(key: &str) -> &str {
     let t = key.trim_start_matches("objects/").trim_start_matches('/');
@@ -187,7 +12,12 @@ fn truncate_key(key: &str) -> &str {
     }
 }
 
-async fn maybe_start_postprocess(pool: &PgPool, document_id: Uuid, version_id: Uuid, attempt: i32) {
+pub async fn maybe_start_postprocess(
+    pool: &PgPool,
+    document_id: Uuid,
+    version_id: Uuid,
+    attempt: i32,
+) {
     let rows = crate::list_spans_attempt(pool, document_id, attempt)
         .await
         .unwrap_or_default();
@@ -217,7 +47,7 @@ pub async fn schedule_semantic_index_v2_if_ready(
     .await
 }
 
-async fn schedule_semantic_index_v2_if_ready_with<F, Fut>(
+pub async fn schedule_semantic_index_v2_if_ready_with<F, Fut>(
     pool: &PgPool,
     product_version_id: Uuid,
     enqueue: F,
@@ -250,8 +80,8 @@ where
 /// Running generators here would re-enable those lanes in-process.
 fn allow_inline_fallback(task_type: &str) -> bool {
     !matches!(
-        crate::launch_mode(task_type),
-        Ok(Some(crate::LaunchMode::DeclaredDisabled))
+        platform::launch_mode(task_type),
+        Ok(Some(platform::LaunchMode::DeclaredDisabled))
     )
 }
 
@@ -301,23 +131,14 @@ pub async fn run_post_process(
         None,
     )
     .await;
-    let mut store = crate::Store::default();
-    if !crate::hydrate_document(pool, &mut store, document_id)
+    let Some(job) = crate::DocJob::from_pool(pool, document_id)
         .await
         .map_err(|e| e.to_string())?
-    {
-        return Ok(());
-    }
-    post_process(
-        &mut store,
-        &serde_json::json!({
-            "document_id": document_id,
-            "clone_keep": clone_keep
-        }),
-    )?;
-    let Some(doc) = store.documents.get(&document_id).cloned() else {
+    else {
         return Ok(());
     };
+    let doc = job.document.clone();
+    let version = job.version.clone();
     if doc.parse_status.is_aborted() {
         let _ = crate::skip_span(
             pool,
@@ -329,7 +150,41 @@ pub async fn run_post_process(
         .await;
         return Ok(());
     }
-    if doc.parse_status == crate::ParseStatus::Completed {
+    if doc.parse_status != crate::ParseStatus::Processing {
+        if doc.parse_status == crate::ParseStatus::Completed {
+            crate::set_document_progress(pool, document_id, "completed", 0)
+                .await
+                .map_err(|e| e.to_string())?;
+            let _ = crate::set_summary_status(pool, document_id, "none").await;
+            finish_postprocess_spans(pool, document_id, attempt).await;
+            return schedule_semantic_index_v2_if_ready(pool, product_version_id).await;
+        }
+        finish_postprocess_spans(pool, document_id, attempt).await;
+        return Ok(());
+    }
+    let text_count = job
+        .chunks
+        .values()
+        .filter(|c| c.document_id == document_id && c.chunk_type == "text")
+        .count();
+    let ocr_count = job
+        .chunks
+        .values()
+        .filter(|c| {
+            c.document_id == document_id
+                && matches!(c.chunk_type.as_str(), "image_ocr" | "image_caption")
+        })
+        .count();
+    let n = expected_subtasks(
+        text_count,
+        ocr_count,
+        version.question_enabled,
+        version.needs_embedding(),
+        version.wiki_enabled,
+        version.graph_enabled,
+        clone_keep,
+    );
+    if n == 0 {
         crate::set_document_progress(pool, document_id, "completed", 0)
             .await
             .map_err(|e| e.to_string())?;
@@ -337,52 +192,42 @@ pub async fn run_post_process(
         finish_postprocess_spans(pool, document_id, attempt).await;
         return schedule_semantic_index_v2_if_ready(pool, product_version_id).await;
     }
-    if doc.parse_status != crate::ParseStatus::Finalizing {
-        finish_postprocess_spans(pool, document_id, attempt).await;
-        return Ok(());
-    }
-    let wiki_on = store
-        .versions
-        .get(&product_version_id)
-        .map(|v| v.wiki_enabled)
-        .unwrap_or(false);
-    let wiki_trigger = wiki_on
-        && store
-            .queue
-            .iter()
-            .any(|j| j.task_type == platform::TYPE_WIKI_INGEST);
-    if !crate::set_finalizing(pool, document_id, doc.pending_subtasks_count)
+    if !crate::set_finalizing(pool, document_id, n as i32)
         .await
         .map_err(|e| e.to_string())?
     {
         finish_postprocess_spans(pool, document_id, attempt).await;
         return Ok(());
     }
-    if matches!(doc.summary_status, crate::SummaryStatus::Pending) {
+    let enqueue_summary = text_count + ocr_count > 0 && !clone_keep;
+    if enqueue_summary {
         let _ = crate::set_summary_status(pool, document_id, "pending").await;
-    }
-    if store
-        .queue
-        .iter()
-        .any(|j| j.task_type == platform::TYPE_SUMMARY)
-    {
         match platform::enqueue_summary(document_id, attempt).await {
             Ok(Some(_)) => {}
             Ok(None) => {
-                crate::enrichment::generate_summary(&mut store, document_id);
-                let _ = crate::persist_summary_chunks(pool, &store, document_id).await;
-                if let Some(d) = store.documents.get(&document_id) {
-                    let st = match d.summary_status {
-                        crate::SummaryStatus::Completed => "completed",
-                        crate::SummaryStatus::Failed => "failed",
-                        crate::SummaryStatus::Pending => "pending",
-                        crate::SummaryStatus::Processing => "processing",
-                        crate::SummaryStatus::None => "none",
-                    };
-                    let _ =
-                        crate::set_document_description(pool, document_id, &d.description).await;
-                    let _ = crate::set_summary_status(pool, document_id, st).await;
-                }
+                let mut inline = job.clone();
+                let _ = crate::enrichment::generate_summary_on_job(&mut inline, attempt, false);
+                let _ = crate::persist_summary_maps(
+                    pool,
+                    &inline.chunks,
+                    &inline.embeddings,
+                    document_id,
+                )
+                .await;
+                let _ = crate::set_document_description(
+                    pool,
+                    document_id,
+                    &inline.document.description,
+                )
+                .await;
+                let st = match inline.document.summary_status {
+                    crate::SummaryStatus::Completed => "completed",
+                    crate::SummaryStatus::Failed => "failed",
+                    crate::SummaryStatus::Pending => "pending",
+                    crate::SummaryStatus::Processing => "processing",
+                    crate::SummaryStatus::None => "none",
+                };
+                let _ = crate::set_summary_status(pool, document_id, st).await;
                 let _ = crate::finalize_subtask(pool, document_id).await;
             }
             Err(_) => {
@@ -390,106 +235,113 @@ pub async fn run_post_process(
             }
         }
     }
-    let question_jobs: Vec<crate::Job> = store
-        .queue
-        .iter()
-        .filter(|j| j.task_type == platform::TYPE_QUESTION)
-        .cloned()
-        .collect();
-    for (batch, j) in question_jobs.into_iter().enumerate() {
-        let ids: Vec<Uuid> = j
-            .payload
-            .get("chunk_ids")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().and_then(|s| Uuid::parse_str(s).ok()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let parse_opt = |key: &str| {
-            j.payload
-                .get(key)
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .map(|x| x.as_str().and_then(|s| Uuid::parse_str(s).ok()))
-                        .collect::<Vec<Option<Uuid>>>()
+    if !clone_keep && version.question_enabled && version.needs_embedding() && text_count > 0 {
+        let mut ids: Vec<_> = job
+            .chunks
+            .values()
+            .filter(|c| c.document_id == document_id && c.chunk_type == "text")
+            .cloned()
+            .collect();
+        ids.sort_by_key(|c| c.start_at);
+        for (batch_i, batch) in ids.chunks(20).enumerate() {
+            let base = batch_i * 20;
+            let chunk_ids: Vec<Uuid> = batch.iter().map(|c| c.id).collect();
+            let prev_ids: Vec<Option<Uuid>> = (0..batch.len())
+                .map(|i| {
+                    if base + i == 0 {
+                        None
+                    } else {
+                        Some(ids[base + i - 1].id)
+                    }
                 })
-                .unwrap_or_default()
-        };
-        let prev_ids = parse_opt("prev_ids");
-        let next_ids = parse_opt("next_ids");
-        match platform::enqueue_question_neighbors(
-            document_id,
-            ids.clone(),
-            prev_ids.clone(),
-            next_ids.clone(),
-            attempt,
-            batch as u32,
-        )
-        .await
-        {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                if run_inline_if_allowed(platform::TYPE_QUESTION, || {
-                    crate::enrichment::generate_questions_with(
-                        &mut store,
-                        &ids,
-                        &prev_ids,
-                        &next_ids,
-                        document_id,
-                        attempt,
+                .collect();
+            let next_ids: Vec<Option<Uuid>> = (0..batch.len())
+                .map(|i| ids.get(base + i + 1).map(|c| c.id))
+                .collect();
+            match platform::enqueue_question_neighbors(
+                document_id,
+                chunk_ids.clone(),
+                prev_ids.clone(),
+                next_ids.clone(),
+                attempt,
+                batch_i as u32,
+            )
+            .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    let mut inline = job.clone();
+                    if run_inline_if_allowed(platform::TYPE_QUESTION, || {
+                        crate::enrichment::generate_questions_on_job(
+                            &mut inline,
+                            &chunk_ids,
+                            &prev_ids,
+                            &next_ids,
+                            attempt,
+                        )
+                        .map(|_| ())
+                    })
+                    .is_some()
+                    {
+                        let _ = crate::persist_question_maps(
+                            pool,
+                            &inline.chunks,
+                            &inline.embeddings,
+                            document_id,
+                            &chunk_ids,
+                        )
+                        .await;
+                    }
+                    let _ = crate::finalize_subtask(pool, document_id).await;
+                }
+                Err(_) => {
+                    let _ = crate::finalize_subtask(pool, document_id).await;
+                }
+            }
+        }
+    }
+    if version.graph_enabled {
+        let graph_ids: Vec<Uuid> = job
+            .chunks
+            .values()
+            .filter(|c| {
+                c.document_id == document_id
+                    && matches!(
+                        c.chunk_type.as_str(),
+                        "text" | "image_ocr" | "image_caption"
                     )
-                })
-                .is_some()
-                {
-                    let _ = crate::persist_question_updates(pool, &store, document_id, &ids).await;
+            })
+            .map(|c| c.id)
+            .collect();
+        for cid in graph_ids {
+            match platform::enqueue_extract(cid, document_id, attempt).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    let mut inline = job.clone();
+                    if let Some(outcome) =
+                        run_inline_if_allowed(platform::TYPE_CHUNK_EXTRACT, || {
+                            crate::graph::extract_chunk_on_job(&mut inline, cid, attempt)
+                        })
+                    {
+                        outcome.map(|_| ())?;
+                        let _ = crate::persist_graph_maps(
+                            pool,
+                            &inline.graph,
+                            &inline.relations,
+                            document_id,
+                        )
+                        .await;
+                        let _ = crate::graph::sync_document_job(&inline);
+                    }
+                    let _ = crate::finalize_subtask(pool, document_id).await;
                 }
-                let _ = crate::finalize_subtask(pool, document_id).await;
-            }
-            Err(_) => {
-                let _ = crate::finalize_subtask(pool, document_id).await;
+                Err(_) => {
+                    let _ = crate::finalize_subtask(pool, document_id).await;
+                }
             }
         }
     }
-    let extracts: Vec<(Uuid, Uuid)> = store
-        .queue
-        .iter()
-        .filter(|j| j.task_type == platform::TYPE_CHUNK_EXTRACT)
-        .filter_map(|j| {
-            let cid = j
-                .payload
-                .get("chunk_id")
-                .and_then(|v| v.as_str())
-                .and_then(|s| Uuid::parse_str(s).ok())?;
-            let did = j
-                .payload
-                .get("document_id")
-                .and_then(|v| v.as_str())
-                .and_then(|s| Uuid::parse_str(s).ok())?;
-            Some((cid, did))
-        })
-        .collect();
-    for (cid, did) in &extracts {
-        match platform::enqueue_extract(*cid, *did, attempt).await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                if let Some(outcome) = run_inline_if_allowed(platform::TYPE_CHUNK_EXTRACT, || {
-                    crate::graph::extract_chunk(&mut store, *cid, *did)
-                }) {
-                    outcome?;
-                    let _ = crate::persist_graph_for_document(pool, &store, document_id).await;
-                    let _ = crate::graph::sync_document(&store, document_id);
-                }
-                let _ = crate::finalize_subtask(pool, document_id).await;
-            }
-            Err(_) => {
-                let _ = crate::finalize_subtask(pool, document_id).await;
-            }
-        }
-    }
-    if wiki_trigger {
+    if version.wiki_enabled && text_count + ocr_count > 0 {
         platform::enqueue_wiki_ingest(product_version_id, document_id, crate::wiki::OP_INGEST)
             .await?
             .ok_or_else(|| "Oxana Redis is not configured for Wiki ingest".to_string())?;
@@ -547,21 +399,17 @@ pub async fn run_image(
     let Some(_ws) = ws else {
         return Ok(());
     };
-    let mut store = crate::Store::default();
-    if !crate::hydrate_document(pool, &mut store, document_id)
+    let Some(mut job) = crate::DocJob::from_pool(pool, document_id)
         .await
         .map_err(|e| e.to_string())?
-    {
-        return Ok(());
-    }
-    if let Some(d) = store.documents.get_mut(&document_id)
-        && d.parse_status == crate::ParseStatus::Pending
-    {
-        d.parse_status = crate::ParseStatus::Processing;
-    }
-    let Some(mut job) = crate::DocJob::from_store(&store, document_id) else {
+    else {
         return Ok(());
     };
+    job.version.embedding_model_id =
+        crate::freeze_version_embedding_model(pool, job.version.id).await?;
+    if job.document.parse_status == crate::ParseStatus::Pending {
+        job.document.parse_status = crate::ParseStatus::Processing;
+    }
     if let Err(error) = crate::enrichment::process_image_on_job(
         &mut job,
         image_key,
@@ -577,7 +425,6 @@ pub async fn run_image(
         );
         return Err(error);
     }
-    job.write_back(&mut store);
     tracing::info!(
         document_id = %document_id,
         image_key = truncate_key(image_key),
@@ -585,7 +432,7 @@ pub async fn run_image(
         caption = enable_caption,
         "parse image done"
     );
-    let image_chunks: Vec<_> = store
+    let image_chunks: Vec<_> = job
         .chunks
         .values()
         .filter(|c| {
@@ -596,7 +443,7 @@ pub async fn run_image(
         .cloned()
         .collect();
     let ids: std::collections::HashSet<_> = image_chunks.iter().map(|c| c.id).collect();
-    let embeddings: Vec<_> = store
+    let embeddings: Vec<_> = job
         .embeddings
         .values()
         .filter(|e| ids.contains(&e.chunk_id))
@@ -608,13 +455,9 @@ pub async fn run_image(
     crate::insert_document_chunks(pool, &image_chunks, &embeddings)
         .await
         .map_err(|e| e.to_string())?;
-    if crate::enrichment::decr_pending(&mut store, document_id) {
+    if crate::enrichment::decr_pending_count(document_id)? {
         let _ = crate::set_index_ready(pool, document_id, true).await;
-        let vid = store
-            .documents
-            .get(&document_id)
-            .map(|d| d.product_version_id)
-            .unwrap_or_default();
+        let vid = job.document.product_version_id;
         let tracked = crate::list_spans_attempt(pool, document_id, attempt)
             .await
             .unwrap_or_default()
@@ -649,8 +492,7 @@ pub async fn finalize_multimodal(pool: &PgPool, document_id: Uuid, attempt: i32)
     if current.is_some_and(|n| n != attempt) {
         return;
     }
-    let mut tmp = crate::Store::default();
-    if !crate::enrichment::decr_pending(&mut tmp, document_id) {
+    if !crate::enrichment::decr_pending_count(document_id).unwrap_or(false) {
         return;
     }
     let vid: Option<Uuid> =
@@ -715,17 +557,20 @@ async fn run_wiki_ingest_locked(
     if !matches!(operation, crate::wiki::OP_INGEST | crate::wiki::OP_RETRACT) {
         return Err("invalid closed Wiki ingest operation".into());
     }
-    let mut store = crate::Store::default();
-    crate::hydrate_version(pool, &mut store, version_id)
+    let frozen = crate::freeze_version_embedding_model(pool, version_id).await?;
+    let mut job = crate::WikiJob::from_pool(pool, version_id)
         .await
         .map_err(|error| error.to_string())?;
-    store.versions.entry(version_id).or_insert_with(|| {
+    job.versions.entry(version_id).or_insert_with(|| {
         let mut version = crate::ProductVersion::new(Uuid::nil(), "v".into());
         version.id = version_id;
         version.wiki_enabled = true;
         version
     });
-    store.documents.entry(document_id).or_insert_with(|| {
+    if let Some(version) = job.versions.get_mut(&version_id) {
+        version.embedding_model_id = frozen;
+    }
+    job.documents.entry(document_id).or_insert_with(|| {
         let mut document = crate::Document::new(
             version_id,
             document_id.to_string(),
@@ -737,9 +582,8 @@ async fn run_wiki_ingest_locked(
         document.id = document_id;
         document
     });
-    let before_pages = store.wiki.clone();
-    let before_folders = store.wiki_folders.clone();
-    let mut job = crate::WikiJob::from_store(&store, version_id);
+    let before_pages = job.wiki.clone();
+    let before_folders = job.wiki_folders.clone();
     if operation == crate::wiki::OP_RETRACT {
         crate::wiki::enqueue_retract_on_job(&mut job, version_id, document_id, "");
     } else {
@@ -751,10 +595,9 @@ async fn run_wiki_ingest_locked(
         // surviving pages, folders and searchable chunks publish atomically.
         crate::wiki::process_finalize_on_job(&mut job, version_id)?;
     }
-    job.write_back(&mut store);
-    persist_wiki_store(
+    persist_wiki_job(
         pool,
-        &store,
+        &job,
         version_id,
         document_id,
         &before_pages,
@@ -813,19 +656,21 @@ async fn run_wiki_finalize_locked(
     version_id: Uuid,
     document_id: Uuid,
 ) -> Result<(), String> {
-    let mut store = crate::Store::default();
-    crate::hydrate_version(pool, &mut store, version_id)
+    let frozen = crate::freeze_version_embedding_model(pool, version_id).await?;
+    let mut job = crate::WikiJob::from_pool(pool, version_id)
         .await
         .map_err(|error| error.to_string())?;
-    store.versions.entry(version_id).or_insert_with(|| {
+    job.versions.entry(version_id).or_insert_with(|| {
         let mut version = crate::ProductVersion::new(Uuid::nil(), "v".into());
         version.id = version_id;
         version.wiki_enabled = true;
         version
     });
-    let before_pages = store.wiki.clone();
-    let before_folders = store.wiki_folders.clone();
-    let mut job = crate::WikiJob::from_store(&store, version_id);
+    if let Some(version) = job.versions.get_mut(&version_id) {
+        version.embedding_model_id = frozen;
+    }
+    let before_pages = job.wiki.clone();
+    let before_folders = job.wiki_folders.clone();
     crate::wiki::enqueue_finalize_op_on_job(
         &mut job,
         version_id,
@@ -847,10 +692,9 @@ async fn run_wiki_finalize_locked(
     }) {
         return Err("Wiki finalize business lock is busy".into());
     }
-    job.write_back(&mut store);
-    persist_wiki_store(
+    persist_wiki_job(
         pool,
-        &store,
+        &job,
         version_id,
         document_id,
         &before_pages,
@@ -860,15 +704,15 @@ async fn run_wiki_finalize_locked(
     schedule_semantic_index_v2_if_ready(pool, version_id).await
 }
 
-async fn persist_wiki_store(
+async fn persist_wiki_job(
     pool: &PgPool,
-    store: &crate::Store,
+    job: &crate::WikiJob,
     version_id: Uuid,
     document_id: Uuid,
     before_pages: &std::collections::HashMap<(Uuid, String), crate::WikiPage>,
     before_folders: &std::collections::HashMap<Uuid, crate::WikiFolder>,
 ) -> Result<(), String> {
-    let changed_pages = store
+    let changed_pages = job
         .wiki
         .iter()
         .filter(|(key, page)| {
@@ -883,11 +727,11 @@ async fn persist_wiki_store(
         .iter()
         .filter(|((candidate_version, slug), _)| {
             *candidate_version == version_id
-                && !store.wiki.contains_key(&(*candidate_version, slug.clone()))
+                && !job.wiki.contains_key(&(*candidate_version, slug.clone()))
         })
         .map(|(_, page)| page.id)
         .collect::<Vec<_>>();
-    let changed_folders = store
+    let changed_folders = job
         .wiki_folders
         .iter()
         .filter(|(id, folder)| {
@@ -901,7 +745,7 @@ async fn persist_wiki_store(
     let removed_folder_ids = before_folders
         .iter()
         .filter(|(id, folder)| {
-            folder.product_version_id == version_id && !store.wiki_folders.contains_key(id)
+            folder.product_version_id == version_id && !job.wiki_folders.contains_key(id)
         })
         .map(|(id, _)| *id)
         .collect::<Vec<_>>();
@@ -915,7 +759,7 @@ async fn persist_wiki_store(
             .filter(|page| removed_page_ids.contains(&page.id))
             .map(|page| page.slug.clone()),
     );
-    let mut wiki_chunks = store
+    let mut wiki_chunks = job
         .chunks
         .values()
         .filter(|chunk| {
@@ -933,7 +777,7 @@ async fn persist_wiki_store(
     let wiki_embeddings = wiki_chunks
         .iter()
         .filter_map(|chunk| {
-            let mut embedding = store.embeddings.get(&chunk.id).cloned()?;
+            let mut embedding = job.embeddings.get(&chunk.id).cloned()?;
             if embedding.document_id.is_nil() {
                 embedding.document_id = chunk.document_id;
             }
@@ -986,35 +830,30 @@ pub async fn run_summary(
     {
         return schedule_semantic_index_for_document_v2(pool, document_id).await;
     }
-    let mut store = crate::Store::default();
-    if !crate::hydrate_document(pool, &mut store, document_id)
+    let Some(mut job) = crate::DocJob::from_pool(pool, document_id)
         .await
         .map_err(|e| e.to_string())?
-    {
-        return Ok(());
-    }
-    let Some(mut job) = crate::DocJob::from_store(&store, document_id) else {
+    else {
         return Ok(());
     };
+    job.version.embedding_model_id =
+        crate::freeze_version_embedding_model(pool, job.version.id).await?;
     let outcome = crate::enrichment::generate_summary_on_job(&mut job, attempt, fallback)?;
-    job.write_back(&mut store);
     if matches!(outcome, crate::enrichment::SummaryOutcome::Superseded) {
         return Ok(());
     }
-    crate::persist_summary_chunks(pool, &store, document_id)
+    crate::persist_summary_maps(pool, &job.chunks, &job.embeddings, document_id)
         .await
         .map_err(|e| e.to_string())?;
-    if let Some(d) = store.documents.get(&document_id) {
-        let _ = crate::set_document_description(pool, document_id, &d.description).await;
-        let st = match d.summary_status {
-            crate::SummaryStatus::Completed => "completed",
-            crate::SummaryStatus::Failed => "failed",
-            crate::SummaryStatus::Pending => "pending",
-            crate::SummaryStatus::Processing => "processing",
-            crate::SummaryStatus::None => "none",
-        };
-        let _ = crate::set_summary_status(pool, document_id, st).await;
-    }
+    let _ = crate::set_document_description(pool, document_id, &job.document.description).await;
+    let st = match job.document.summary_status {
+        crate::SummaryStatus::Completed => "completed",
+        crate::SummaryStatus::Failed => "failed",
+        crate::SummaryStatus::Pending => "pending",
+        crate::SummaryStatus::Processing => "processing",
+        crate::SummaryStatus::None => "none",
+    };
+    let _ = crate::set_summary_status(pool, document_id, st).await;
     crate::finalize_subtask(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -1037,24 +876,21 @@ pub async fn run_questions(
     {
         return schedule_semantic_index_for_document_v2(pool, document_id).await;
     }
-    let mut store = crate::Store::default();
-    if !crate::hydrate_document(pool, &mut store, document_id)
+    let Some(mut job) = crate::DocJob::from_pool(pool, document_id)
         .await
         .map_err(|e| e.to_string())?
-    {
-        return Ok(());
-    }
-    let Some(mut job) = crate::DocJob::from_store(&store, document_id) else {
+    else {
         return Ok(());
     };
+    job.version.embedding_model_id =
+        crate::freeze_version_embedding_model(pool, job.version.id).await?;
     let outcome = crate::enrichment::generate_questions_on_job(
         &mut job, chunk_ids, prev_ids, next_ids, attempt,
     )?;
-    job.write_back(&mut store);
     if matches!(outcome, crate::enrichment::QuestionOutcome::Superseded) {
         return Ok(());
     }
-    crate::persist_question_updates(pool, &store, document_id, chunk_ids)
+    crate::persist_question_maps(pool, &job.chunks, &job.embeddings, document_id, chunk_ids)
         .await
         .map_err(|e| e.to_string())?;
     crate::finalize_subtask(pool, document_id)
@@ -1077,25 +913,20 @@ pub async fn run_extract(
     {
         return schedule_semantic_index_for_document_v2(pool, document_id).await;
     }
-    let mut store = crate::Store::default();
-    if !crate::hydrate_document(pool, &mut store, document_id)
+    let Some(mut job) = crate::DocJob::from_pool(pool, document_id)
         .await
         .map_err(|e| e.to_string())?
-    {
-        return Ok(());
-    }
-    let Some(mut job) = crate::DocJob::from_store(&store, document_id) else {
+    else {
         return Ok(());
     };
     let outcome = crate::graph::extract_chunk_on_job(&mut job, chunk_id, attempt)?;
-    job.write_back(&mut store);
     if matches!(outcome, crate::graph::ExtractOutcome::Superseded) {
         return Ok(());
     }
-    crate::persist_graph_for_document(pool, &store, document_id)
+    crate::persist_graph_maps(pool, &job.graph, &job.relations, document_id)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = crate::graph::sync_document(&store, document_id);
+    let _ = crate::graph::sync_document_job(&job);
     crate::finalize_subtask(pool, document_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -1144,27 +975,21 @@ pub async fn run_list_delete(pool: &PgPool, document_id: Uuid) -> Result<(), Str
 }
 
 pub async fn run_datatable(pool: &PgPool, document_id: Uuid) -> Result<(), String> {
-    let mut store = Store::default();
-    if !crate::hydrate_document(pool, &mut store, document_id)
+    let Some(doc) = crate::load_document(pool, document_id)
         .await
         .map_err(|e| e.to_string())?
-    {
+    else {
         return Ok(());
-    }
-    datatable_summary(&mut store, document_id)?;
-    let table: Vec<_> = store
-        .chunks
-        .values()
-        .filter(|c| {
-            c.document_id == document_id
-                && matches!(c.chunk_type.as_str(), "table_summary" | "table_column")
-        })
-        .cloned()
-        .collect();
-    let embeds: Vec<_> = table
-        .iter()
-        .filter_map(|c| store.embeddings.get(&c.id).cloned())
-        .collect();
+    };
+    let Some(mut version) = crate::load_version(pool, doc.product_version_id)
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(());
+    };
+    crate::resolve_process_config(&version, doc.process_overrides.as_ref()).apply_to(&mut version);
+    version.embedding_model_id = crate::freeze_version_embedding_model(pool, version.id).await?;
+    let (table, embeds) = datatable_chunks(&doc, &version)?;
     crate::delete_chunks_by_types(pool, document_id, &["table_summary", "table_column"])
         .await
         .map_err(|e| e.to_string())?;
@@ -1185,15 +1010,12 @@ fn is_table_file(name: &str) -> bool {
     )
 }
 
-pub fn datatable_summary(store: &mut Store, document_id: Uuid) -> Result<(), String> {
-    let Some(doc) = store.documents.get(&document_id).cloned() else {
-        return Ok(());
-    };
-    let Some(version) = store.effective_version(document_id) else {
-        return Ok(());
-    };
+fn datatable_chunks(
+    doc: &crate::Document,
+    version: &crate::ProductVersion,
+) -> Result<(Vec<crate::Chunk>, Vec<crate::ChunkEmbedding>), String> {
     if !is_table_file(&doc.file_name) {
-        return Ok(());
+        return Ok((Vec::new(), Vec::new()));
     }
     let ext = doc
         .file_name
@@ -1201,12 +1023,8 @@ pub fn datatable_summary(store: &mut Store, document_id: Uuid) -> Result<(), Str
         .next()
         .unwrap_or("")
         .to_ascii_lowercase();
-    let bytes = store
-        .objects
-        .get(&doc.object_ref)
-        .cloned()
-        .unwrap_or_default();
-    let markdown = converted_markdown(&doc);
+    let bytes = platform::read_blob(&doc.file_hash).unwrap_or_default();
+    let markdown = converted_markdown(doc);
     let (headers, rows) = if ext == "csv" {
         parse_csv_sample(&bytes)
     } else {
@@ -1216,9 +1034,8 @@ pub fn datatable_summary(store: &mut Store, document_id: Uuid) -> Result<(), Str
         if matches!(ext.as_str(), "xlsx" | "xls") && markdown.trim().is_empty() {
             return Err("datatable waiting for docreader convert markdown".into());
         }
-        return Ok(());
+        return Ok((Vec::new(), Vec::new()));
     }
-    drop_prior_table_chunks(store, document_id);
     let schema = headers
         .iter()
         .enumerate()
@@ -1265,7 +1082,7 @@ pub fn datatable_summary(store: &mut Store, document_id: Uuid) -> Result<(), Str
         format!("# Table Column Information\n\nTable name: {table_name}\n\n{col_raw}");
     let summary = crate::Chunk {
         id: Uuid::new_v4(),
-        document_id,
+        document_id: doc.id,
         product_version_id: doc.product_version_id,
         chunk_type: "table_summary".into(),
         content: table_content.clone(),
@@ -1277,7 +1094,7 @@ pub fn datatable_summary(store: &mut Store, document_id: Uuid) -> Result<(), Str
     };
     let column = crate::Chunk {
         id: Uuid::new_v4(),
-        document_id,
+        document_id: doc.id,
         product_version_id: doc.product_version_id,
         chunk_type: "table_column".into(),
         content: col_content.clone(),
@@ -1287,18 +1104,18 @@ pub fn datatable_summary(store: &mut Store, document_id: Uuid) -> Result<(), Str
         parent_chunk_id: Some(summary.id),
         generated_questions: Vec::new(),
     };
+    let mut embeddings = std::collections::HashMap::new();
     for ch in [&summary, &column] {
-        crate::index::index_one(
-            store,
+        crate::index::index_one_in(
+            &mut embeddings,
             ch,
             &doc.title,
             version.vector_enabled,
             version.keyword_enabled,
         )?;
     }
-    store.chunks.insert(summary.id, summary);
-    store.chunks.insert(column.id, column);
-    Ok(())
+    let embeds = embeddings.into_values().collect();
+    Ok((vec![summary, column], embeds))
 }
 
 fn chat_table(
@@ -1334,22 +1151,6 @@ fn sample_rows_json(headers: &[String], rows: &[Vec<String>]) -> String {
         }
     }
     out
-}
-
-fn drop_prior_table_chunks(store: &mut Store, document_id: Uuid) {
-    let drop: Vec<Uuid> = store
-        .chunks
-        .values()
-        .filter(|c| {
-            c.document_id == document_id
-                && matches!(c.chunk_type.as_str(), "table_summary" | "table_column")
-        })
-        .map(|c| c.id)
-        .collect();
-    for id in drop {
-        store.chunks.remove(&id);
-        store.embeddings.remove(&id);
-    }
 }
 
 fn converted_markdown(doc: &crate::Document) -> String {

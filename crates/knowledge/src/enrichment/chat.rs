@@ -3,12 +3,12 @@
 use serde_json::{Value, json};
 
 pub fn chat_http_configured() -> bool {
-    !crate::chat_base_url().is_empty()
+    !platform::chat_base_url().is_empty()
 }
 
 fn resolve_chat_model(model_id: &str) -> String {
     if model_id.trim().is_empty() || model_id == "stub-chat" {
-        let env = crate::chat_model();
+        let env = platform::chat_model();
         if env.is_empty() {
             "stub-chat".into()
         } else {
@@ -169,7 +169,7 @@ pub async fn chat_complete_turn_with_format_once_async(
     timeout: std::time::Duration,
     response_format: Option<&serde_json::Value>,
 ) -> Result<crate::models::ChatTurn, String> {
-    let base = crate::chat_base_url();
+    let base = platform::chat_base_url();
     let model = resolve_chat_model(model_id);
     if base.is_empty() || model == "stub-chat" {
         return Ok(crate::models::ChatTurn {
@@ -201,7 +201,7 @@ pub async fn chat_complete_turn_with_format_once_async(
     }
     crate::models::chat_sse_turn_once_async(
         &completions_url(&base),
-        &crate::chat_api_key(),
+        &platform::chat_api_key(),
         body,
         timeout,
     )
@@ -301,7 +301,7 @@ fn chat_tools_turn_inner(
     response_format: Option<&serde_json::Value>,
     retry_transport: bool,
 ) -> Result<crate::models::ChatTurn, String> {
-    let base = crate::chat_base_url();
+    let base = platform::chat_base_url();
     let model = resolve_chat_model(model_id);
     if base.is_empty() || model == "stub-chat" {
         let last = messages
@@ -317,7 +317,7 @@ fn chat_tools_turn_inner(
             finish_reason: "stop".into(),
         });
     }
-    let key = crate::chat_api_key();
+    let key = platform::chat_api_key();
     let url = completions_url(&base);
     let mut body = json!({
         "model": model,
@@ -408,7 +408,7 @@ fn chat_messages_inner(
     model_id: &str,
     max_tokens: u32,
 ) -> Result<String, String> {
-    let base = crate::chat_base_url();
+    let base = platform::chat_base_url();
     let model = resolve_chat_model(model_id);
     if base.is_empty() || model == "stub-chat" {
         let last = messages
@@ -419,7 +419,7 @@ fn chat_messages_inner(
             .unwrap_or("");
         return Ok(stub_complete(last));
     }
-    let key = crate::chat_api_key();
+    let key = platform::chat_api_key();
     let url = completions_url(&base);
     let body = json!({
         "model": model,

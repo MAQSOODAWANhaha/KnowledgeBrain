@@ -1,5 +1,5 @@
 import { ApiError, NetworkTransportError } from "../../api";
-import { compositionApi, type CompositionStatus } from "../api/composition";
+import { compositionApi, downloadCompositionReport, type CompositionStatus } from "../api/composition";
 import { createCompositionSession, type CompositionAttempt } from "./compositionSession";
 import { describe, expect, it } from "./harness";
 function fixture() {
@@ -16,6 +16,18 @@ function fixture() {
   return { api, store, job, basis, calls, session: createCompositionSession(api, "workspace", store) };
 }
 describe("complete template composition", () => {
+  it("report downloads use the exact encoded workspace and version without submitting work", async () => {
+    const previous = globalThis.fetch; let sentPath: unknown; let sent: RequestInit | undefined;
+    const report = JSON.stringify({ source_open_items: [] });
+    globalThis.fetch = async (path, init) => { sentPath = path; sent = init; return new Response(report, { headers: { "Content-Type": "application/json" } }); };
+    try {
+      const blob = await downloadCompositionReport("workspace /?", "version/#?");
+      expect(sentPath).toBe("/api/v2/submission-workspaces/workspace%20%2F%3F/docx/versions/version%2F%23%3F/composition-report");
+      expect(sent?.method ?? "GET").toBe("GET");
+      expect(new Headers(sent?.headers).get("Idempotency-Key")).toBe(null);
+      expect(await blob.text()).toBe(report);
+    } finally { globalThis.fetch = previous; }
+  });
   it("start freezes actual source basis and enters existing request polling", async () => {
     const f = fixture(); await f.session.load(); await f.session.start();
     expect(f.calls[0].input).toEqual({ basis: f.basis, expected: null });

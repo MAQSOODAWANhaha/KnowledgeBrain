@@ -1,10 +1,11 @@
 //! Worker process supervisor.
 
 use tokio_util::sync::CancellationToken;
-use worker::consume::{
-    AppCtx, run_core, run_object_read_helper, run_object_write_helper, run_pdf_raster_helper,
-    run_submission_render_helper, shutdown_signal,
+use worker::helpers::{
+    run_object_read_helper, run_object_write_helper, run_pdf_raster_helper,
+    run_submission_render_helper,
 };
+use worker::runtime::{AppCtx, run_core, shutdown_signal};
 
 #[tokio::main]
 async fn main() {

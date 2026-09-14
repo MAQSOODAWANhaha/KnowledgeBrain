@@ -1,6 +1,6 @@
 //! Optional Neo4j projection. Extract always writes Postgres; this is extra.
 
-use crate::Store;
+use crate::{DocJob, GraphNode, GraphRelation};
 use platform::DeploymentNamespaceV1;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -9,32 +9,32 @@ pub fn configured() -> bool {
     !http_url().is_empty()
 }
 
-pub fn sync_document(store: &Store, document_id: Uuid) -> Result<(), String> {
+pub fn sync_document_job(job: &DocJob) -> Result<(), String> {
     if !configured() {
         return Ok(());
     }
-    sync_document_in_namespace(
-        store,
-        document_id,
-        DeploymentNamespaceV1::from_environment().map_err(|error| error.to_string())?,
+    let namespace = DeploymentNamespaceV1::from_environment().map_err(|error| error.to_string())?;
+    sync_parts(
+        &job.document,
+        job.graph
+            .values()
+            .filter(|n| n.document_id == job.document.id),
+        job.relations
+            .values()
+            .filter(|r| r.document_id == job.document.id),
+        namespace,
     )
 }
 
-fn sync_document_in_namespace(
-    store: &Store,
-    document_id: Uuid,
+fn sync_parts<'a>(
+    doc: &crate::Document,
+    nodes: impl Iterator<Item = &'a GraphNode>,
+    relations: impl Iterator<Item = &'a GraphRelation>,
     namespace: DeploymentNamespaceV1,
 ) -> Result<(), String> {
-    let Some(doc) = store.documents.get(&document_id) else {
-        return Ok(());
-    };
-    delete_document_in_namespace(doc.product_version_id, document_id, namespace)?;
+    delete_document_in_namespace(doc.product_version_id, doc.id, namespace)?;
     let mut statements = Vec::new();
-    for n in store
-        .graph
-        .values()
-        .filter(|n| n.document_id == document_id)
-    {
+    for n in nodes {
         let ids: Vec<String> = n.chunk_ids.iter().map(|id| id.to_string()).collect();
         statements.push(json!({
             "statement":
@@ -51,11 +51,7 @@ fn sync_document_in_namespace(
             }
         }));
     }
-    for r in store
-        .relations
-        .values()
-        .filter(|r| r.document_id == document_id)
-    {
+    for r in relations {
         statements.push(json!({
             "statement":
                 "MATCH (a:KbEntity {deployment_namespace_id: $namespace, key: $a}), \
@@ -77,6 +73,20 @@ fn sync_document_in_namespace(
     }
     cypher(&statements)?;
     Ok(())
+}
+
+#[cfg(test)]
+fn sync_job_in_namespace(job: &DocJob, namespace: DeploymentNamespaceV1) -> Result<(), String> {
+    sync_parts(
+        &job.document,
+        job.graph
+            .values()
+            .filter(|n| n.document_id == job.document.id),
+        job.relations
+            .values()
+            .filter(|r| r.document_id == job.document.id),
+        namespace,
+    )
 }
 
 pub fn delete_document(version_id: Uuid, document_id: Uuid) -> Result<(), String> {
@@ -245,15 +255,28 @@ fn cypher(statements: &[Value]) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DocJob, Document, ProductVersion};
+
+    fn job_with_graph() -> (DocJob, Uuid, Uuid) {
+        let version = ProductVersion::new(Uuid::new_v4(), "v1".into());
+        let vid = version.id;
+        let doc = Document::new(vid, "t".into(), "t.txt".into(), 1, "h".into(), "k".into());
+        let did = doc.id;
+        let mut job = DocJob::for_test(doc, version);
+        job.upsert_node(vid, did, "Widget", Uuid::new_v4());
+        job.upsert_rel(vid, did, "Widget", "Spec", "mentions");
+        (job, vid, did)
+    }
 
     #[test]
     fn unconfigured_is_noop() {
         if configured() {
             return;
         }
-        assert!(sync_document(&Store::default(), Uuid::new_v4()).is_ok());
-        assert!(delete_document(Uuid::new_v4(), Uuid::new_v4()).is_ok());
-        assert!(search_names(Uuid::new_v4(), "Widget").unwrap().is_empty());
+        let (job, vid, did) = job_with_graph();
+        assert!(sync_document_job(&job).is_ok());
+        assert!(delete_document(vid, did).is_ok());
+        assert!(search_names(vid, "Widget").unwrap().is_empty());
     }
 
     #[test]
@@ -265,17 +288,8 @@ mod tests {
             eprintln!("skip: neo4j not configured");
             return;
         }
-        let mut store = Store::default();
-        let vid = Uuid::new_v4();
-        let did = Uuid::new_v4();
-        let cid = Uuid::new_v4();
-        store.documents.insert(
-            did,
-            crate::Document::new(vid, "t".into(), "t.txt".into(), 1, "h".into(), "k".into()),
-        );
-        store.upsert_node(vid, did, "Widget", cid);
-        store.upsert_rel(vid, did, "Widget", "Spec", "mentions");
-        sync_document(&store, did).expect("neo4j sync");
+        let (job, vid, did) = job_with_graph();
+        sync_document_job(&job).expect("neo4j sync");
         let found = search_names(vid, "widget").expect("neo4j search");
         assert!(
             found
@@ -301,50 +315,48 @@ mod tests {
         );
         let first: DeploymentNamespaceV1 = Uuid::new_v4().to_string().parse().unwrap();
         let second: DeploymentNamespaceV1 = Uuid::new_v4().to_string().parse().unwrap();
-        let version = Uuid::new_v4();
-        let document = Uuid::new_v4();
-        let mut store = Store::default();
-        store.documents.insert(
-            document,
-            crate::Document::new(
-                version,
-                "fixture".into(),
-                "fixture.txt".into(),
-                1,
-                "h".into(),
-                "k".into(),
-            ),
+        let version = ProductVersion::new(Uuid::new_v4(), "v1".into());
+        let vid = version.id;
+        let document = Document::new(
+            vid,
+            "fixture".into(),
+            "fixture.txt".into(),
+            1,
+            "h".into(),
+            "k".into(),
         );
-        store.upsert_node(version, document, "Common", Uuid::new_v4());
-        store.upsert_node(version, document, "First", Uuid::new_v4());
-        store.upsert_rel(version, document, "Common", "First", "links");
-        sync_document_in_namespace(&store, document, first).unwrap();
+        let did = document.id;
+        let mut job = DocJob::for_test(document, version);
+        job.upsert_node(vid, did, "Common", Uuid::new_v4());
+        job.upsert_node(vid, did, "First", Uuid::new_v4());
+        job.upsert_rel(vid, did, "Common", "First", "links");
+        sync_job_in_namespace(&job, first).unwrap();
         assert!(
-            search_names_in_namespace(version, "Common", second)
+            search_names_in_namespace(vid, "Common", second)
                 .unwrap()
                 .is_empty()
         );
-        let first_chunk = search_names_in_namespace(version, "Common", first).unwrap()[0]
+        let first_chunk = search_names_in_namespace(vid, "Common", first).unwrap()[0]
             .chunk_ids
             .clone();
-        store.graph.clear();
-        store.relations.clear();
-        store.upsert_node(version, document, "Common", Uuid::new_v4());
-        store.upsert_node(version, document, "Second", Uuid::new_v4());
-        store.upsert_rel(version, document, "Common", "Second", "links");
-        sync_document_in_namespace(&store, document, second).unwrap();
+        job.graph.clear();
+        job.relations.clear();
+        job.upsert_node(vid, did, "Common", Uuid::new_v4());
+        job.upsert_node(vid, did, "Second", Uuid::new_v4());
+        job.upsert_rel(vid, did, "Common", "Second", "links");
+        sync_job_in_namespace(&job, second).unwrap();
         assert_eq!(
-            search_names_in_namespace(version, "Common", first).unwrap()[0].chunk_ids,
+            search_names_in_namespace(vid, "Common", first).unwrap()[0].chunk_ids,
             first_chunk
         );
         assert!(
-            search_names_in_namespace(version, "Second", first)
+            search_names_in_namespace(vid, "Second", first)
                 .unwrap()
                 .is_empty()
         );
         let graph = cypher(&[json!({
             "statement":"MATCH (a:KbEntity)-[r:KB_REL]->(b:KbEntity) WHERE a.document_id=$did RETURN a.deployment_namespace_id, r.deployment_namespace_id, b.deployment_namespace_id",
-            "parameters":{"did":document.to_string()}
+            "parameters":{"did":did.to_string()}
         })]).unwrap();
         let rows = graph["results"][0]["data"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
@@ -359,29 +371,27 @@ mod tests {
             namespaces,
             std::collections::BTreeSet::from([first.to_string(), second.to_string()])
         );
-        // An old unnamespaced projection is never adopted or removed implicitly.
         cypher(&[json!({"statement":"CREATE (:KbEntity {name:'Legacy',version_id:$vid,document_id:$did,key:$key})",
-            "parameters":{"vid":version.to_string(),"did":document.to_string(),"key":Uuid::new_v4().to_string()}})]).unwrap();
-        delete_document_in_namespace(version, document, first).unwrap();
+            "parameters":{"vid":vid.to_string(),"did":did.to_string(),"key":Uuid::new_v4().to_string()}})]).unwrap();
+        delete_document_in_namespace(vid, did, first).unwrap();
         assert!(
-            search_names_in_namespace(version, "Common", first)
+            search_names_in_namespace(vid, "Common", first)
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
-            search_names_in_namespace(version, "Common", second)
+            search_names_in_namespace(vid, "Common", second)
                 .unwrap()
                 .len(),
             1
         );
-        delete_document_in_namespace(version, document, second).unwrap();
+        delete_document_in_namespace(vid, did, second).unwrap();
         let remaining=cypher(&[json!({"statement":"MATCH (e:KbEntity {document_id:$did}) RETURN e.name,e.deployment_namespace_id",
-            "parameters":{"did":document.to_string()}})]).unwrap();
+            "parameters":{"did":did.to_string()}})]).unwrap();
         let remaining = remaining["results"][0]["data"].as_array().unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0]["row"], json!(["Legacy", null]));
-        // Remove only this test's explicitly created legacy fixture.
         cypher(&[json!({"statement":"MATCH (e:KbEntity {document_id:$did,version_id:$vid,name:'Legacy'}) WHERE e.deployment_namespace_id IS NULL DELETE e",
-            "parameters":{"did":document.to_string(),"vid":version.to_string()}})]).unwrap();
+            "parameters":{"did":did.to_string(),"vid":vid.to_string()}})]).unwrap();
     }
 }

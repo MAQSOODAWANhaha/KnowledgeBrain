@@ -1,6 +1,6 @@
 //! Processing spans. Brain-aligned five-stage DAG. No Langfuse / Prometheus.
 
-use crate::{Span, Store};
+use crate::Span;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
@@ -99,102 +99,11 @@ pub fn dependents_of(stage: &str) -> &'static [&'static str] {
     }
 }
 
-pub fn start(store: &mut Store, document_id: Uuid, attempt: i32, name: &str, parent: Option<&str>) {
-    if let Some(existing) = store
-        .spans
-        .iter_mut()
-        .rev()
-        .find(|s| s.document_id == document_id && s.attempt == attempt && s.name == name)
-    {
-        existing.status = STATUS_RUNNING.into();
-        existing.started_at = Utc::now();
-        existing.finished_at = None;
-        existing.duration_ms = None;
-        existing.error_message.clear();
-        existing.output = None;
-        return;
-    }
-    let parent_span_id = parent.and_then(|p| {
-        store
-            .spans
-            .iter()
-            .rev()
-            .find(|s| s.document_id == document_id && s.attempt == attempt && s.name == p)
-            .map(|s| s.span_id)
-    });
-    store.spans.push(Span {
-        span_id: Uuid::new_v4(),
-        document_id,
-        attempt,
-        name: name.to_string(),
-        parent_span_id,
-        kind: kind_of(name).to_string(),
-        status: STATUS_RUNNING.into(),
-        output: None,
-        error_message: String::new(),
-        started_at: Utc::now(),
-        finished_at: None,
-        duration_ms: None,
-    });
-}
-
-pub fn finish(store: &mut Store, document_id: Uuid, name: &str, status: &str) {
-    let status = normalize_status(status);
-    if let Some(s) = store
-        .spans
-        .iter_mut()
-        .rev()
-        .find(|s| s.document_id == document_id && s.name == name && s.finished_at.is_none())
-    {
-        s.status = status.to_string();
-        s.finished_at = Some(Utc::now());
-        s.duration_ms = Some((s.finished_at.unwrap() - s.started_at).num_milliseconds());
-    }
-}
-
-pub fn skip(store: &mut Store, document_id: Uuid, attempt: i32, name: &str, reason: &str) {
-    start(store, document_id, attempt, name, Some(ROOT_NAME));
-    if let Some(s) = store
-        .spans
-        .iter_mut()
-        .rev()
-        .find(|s| s.document_id == document_id && s.name == name)
-    {
-        s.status = STATUS_SKIPPED.into();
-        s.error_message = reason.to_string();
-        s.finished_at = Some(Utc::now());
-        s.duration_ms = Some(0);
-    }
-}
-
-pub fn cascade_cancel(store: &mut Store, document_id: Uuid, attempt: i32, failed_stage: &str) {
-    let deps = dependents_of(failed_stage);
-    for s in store.spans.iter_mut().filter(|s| {
-        s.document_id == document_id
-            && s.attempt == attempt
-            && deps.contains(&s.name.as_str())
-            && (s.status == STATUS_PENDING || s.status == STATUS_RUNNING)
-    }) {
-        s.status = STATUS_CANCELLED.into();
-        s.error_message = format!("upstream {failed_stage} failed");
-        s.finished_at = Some(Utc::now());
-    }
-}
-
 pub fn current_step(spans: &[Span]) -> Option<&Span> {
     spans
         .iter()
         .find(|s| s.kind == KIND_STAGE && s.status == STATUS_RUNNING)
         .or_else(|| spans.iter().rev().find(|s| s.kind == KIND_STAGE))
-}
-
-pub fn timeline(store: &Store, document_id: Uuid) -> Vec<Span> {
-    store
-        .spans
-        .iter()
-        .filter(|s| s.document_id == document_id)
-        .cloned()
-        .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -331,15 +240,40 @@ fn attach_child(node: &mut TraceNode, parent_id: Uuid, child: TraceNode) -> bool
 mod tests {
     use super::*;
 
+    fn span(did: Uuid, name: &str, status: &str) -> Span {
+        let kind = if name == ROOT_NAME {
+            KIND_ROOT
+        } else {
+            KIND_STAGE
+        };
+        Span {
+            span_id: Uuid::new_v4(),
+            document_id: did,
+            attempt: 1,
+            name: name.to_string(),
+            parent_span_id: None,
+            kind: kind.to_string(),
+            status: status.to_string(),
+            output: None,
+            error_message: String::new(),
+            started_at: Utc::now(),
+            finished_at: if status == STATUS_RUNNING {
+                None
+            } else {
+                Some(Utc::now())
+            },
+            duration_ms: None,
+        }
+    }
+
     #[test]
     fn current_step_prefers_running() {
         let did = Uuid::new_v4();
-        let mut store = Store::default();
-        start(&mut store, did, 1, ROOT_NAME, None);
-        start(&mut store, did, 1, SPAN_DOCREADER, Some(ROOT_NAME));
-        finish(&mut store, did, SPAN_DOCREADER, "ok");
-        start(&mut store, did, 1, SPAN_CHUNKING, Some(ROOT_NAME));
-        let steps = timeline(&store, did);
+        let steps = vec![
+            span(did, ROOT_NAME, STATUS_RUNNING),
+            span(did, SPAN_DOCREADER, STATUS_DONE),
+            span(did, SPAN_CHUNKING, STATUS_RUNNING),
+        ];
         let cur = current_step(&steps).unwrap();
         assert_eq!(cur.name, SPAN_CHUNKING);
         assert_eq!(cur.status, STATUS_RUNNING);
@@ -373,35 +307,28 @@ mod tests {
     #[test]
     fn postprocess_waits_for_both_siblings() {
         let did = Uuid::new_v4();
-        let mut store = Store::default();
-        start(&mut store, did, 1, ROOT_NAME, None);
-        start(&mut store, did, 1, SPAN_DOCREADER, Some(ROOT_NAME));
-        finish(&mut store, did, SPAN_DOCREADER, STATUS_DONE);
-        start(&mut store, did, 1, SPAN_CHUNKING, Some(ROOT_NAME));
-        finish(&mut store, did, SPAN_CHUNKING, STATUS_DONE);
-        start(&mut store, did, 1, SPAN_EMBEDDING, Some(ROOT_NAME));
-        finish(&mut store, did, SPAN_EMBEDDING, STATUS_DONE);
-        start(&mut store, did, 1, SPAN_MULTIMODAL, Some(ROOT_NAME));
-        let rows = timeline(&store, did);
+        let mut rows = vec![
+            span(did, ROOT_NAME, STATUS_RUNNING),
+            span(did, SPAN_DOCREADER, STATUS_DONE),
+            span(did, SPAN_CHUNKING, STATUS_DONE),
+            span(did, SPAN_EMBEDDING, STATUS_DONE),
+            span(did, SPAN_MULTIMODAL, STATUS_RUNNING),
+        ];
         assert!(!can_start_stage(SPAN_POSTPROCESS, &rows));
-        finish(&mut store, did, SPAN_MULTIMODAL, STATUS_DONE);
-        let rows = timeline(&store, did);
+        rows[4].status = STATUS_DONE.to_string();
         assert!(can_start_stage(SPAN_POSTPROCESS, &rows));
     }
 
     #[test]
     fn skipped_multimodal_unblocks_postprocess() {
         let did = Uuid::new_v4();
-        let mut store = Store::default();
-        start(&mut store, did, 1, ROOT_NAME, None);
-        start(&mut store, did, 1, SPAN_DOCREADER, Some(ROOT_NAME));
-        finish(&mut store, did, SPAN_DOCREADER, STATUS_DONE);
-        start(&mut store, did, 1, SPAN_CHUNKING, Some(ROOT_NAME));
-        finish(&mut store, did, SPAN_CHUNKING, STATUS_DONE);
-        start(&mut store, did, 1, SPAN_EMBEDDING, Some(ROOT_NAME));
-        finish(&mut store, did, SPAN_EMBEDDING, STATUS_DONE);
-        skip(&mut store, did, 1, SPAN_MULTIMODAL, "no images");
-        let rows = timeline(&store, did);
+        let rows = vec![
+            span(did, ROOT_NAME, STATUS_RUNNING),
+            span(did, SPAN_DOCREADER, STATUS_DONE),
+            span(did, SPAN_CHUNKING, STATUS_DONE),
+            span(did, SPAN_EMBEDDING, STATUS_DONE),
+            span(did, SPAN_MULTIMODAL, STATUS_SKIPPED),
+        ];
         assert!(can_start_stage(SPAN_POSTPROCESS, &rows));
     }
 }

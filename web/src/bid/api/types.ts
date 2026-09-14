@@ -90,6 +90,15 @@ export type RequirementCompileResultIdentity = {
 export type RequirementSetCompileRequestView = {
   request_artifact_id: string;
   kind: "RequirementSetCompile";
+  progress?: {
+    phase?: string;
+    turn?: number;
+    records?: number;
+    tool_calls?: number;
+    review_rounds?: number;
+    checkpoint_sequence?: number;
+    boundary?: string;
+  } | null;
   status: "pending" | "succeeded" | "failed";
   request_revision: number;
   request_sha256: string;

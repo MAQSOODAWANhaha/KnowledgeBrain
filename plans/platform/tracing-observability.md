@@ -45,9 +45,9 @@ Noise control:
 | `crates/platform/src/lib.rs` | Keep single `init_tracing()`; disable ansi in Docker if `NO_COLOR`/`TERM=dumb` (compose can set `NO_COLOR=1`) |
 | `crates/api/src/main.rs` | Verify the existing tracing initialization and shutdown event; do not recreate removed stdout helpers |
 | `crates/worker/src/main.rs` | Verify existing initialization/shutdown and remaining helper diagnostics without changing helper output protocols |
-| `crates/worker/src/consume.rs` | Knowledge convert/chunk/embed/fanout/image/postprocess + bid workers |
+| `crates/worker/src/runtime.rs` / `knowledge.rs` / `bidding.rs` | Knowledge convert/chunk/embed/fanout/image/postprocess + bid adapters |
 | `crates/docparser/src/images.rs` | Remote rewrite cap/fail → `warn!` |
-| `crates/docparser/src/lib.rs` | Convert start/fallback (`anydoc_fallback`) at `info`/`warn` |
+| `crates/docparser/src/convert.rs` | Convert start/fallback (`anydoc_fallback`) at `info`/`warn` |
 | `crates/knowledge/src/enrichment/mod.rs` | `describe_image` fail/not-configured → `warn!`/`error!` (no image payload) |
 | `crates/platform/src/jobs.rs` | Knowledge enqueue at `debug`；Bid transport 只记录 target kind/id/revision与Oxana job ID |
 | `crates/knowledge/src/graph/neo4j.rs`、`crates/platform/src/s3.rs` | Inspect production paths only; the existing `skip: neo4j` / `skip: s3` test diagnostics stay unchanged |
@@ -63,12 +63,12 @@ Do **not** touch test behavior under `crates/*/tests` or inline test modules, ex
 - Compose `RUST_LOG` — `deploy/docker-compose.yml` `x-app-env`
 - Oxana dashboard — `crates/api/src/routes.rs` nest `/api/v1/ops/oxana/web`, JSON `/api/v1/ops/oxana`
 - Document timeline — `GET /api/v1/documents/{id}/timeline` + `knowledge::obs` spans (`SPAN_DOCREADER` … `SPAN_POSTPROCESS`)
-- Engine choice: `knowledge::parser_engine_for` / `docparser::convert_to_markdown`
+- Engine choice: `knowledge::parser_engine_for` / `docparser::convert_with_cancel`
 - VLM configuration: `platform::vlm_configured` / `platform::vlm_endpoint_ready`
 
 ## Event catalog
 
-### Knowledge parse (`worker::consume::convert_document`)
+### Knowledge parse (`knowledge::ingest::run_convert` via worker adapter)
 
 | Event | Level | Fields |
 | --- | --- | --- |
@@ -104,7 +104,7 @@ ONLYOFFICE 保存/转换日志随接入切片实现：区分会话、新稿轮�
 
 ## eprintln inventory
 
-**Inspect remaining production diagnostics:** `crates/worker/src/main.rs`, `crates/worker/src/consume.rs`, `crates/api/src/routes.rs`, `crates/api/src/bid_v2_routes.rs`, `crates/docparser/src/images.rs`, `crates/knowledge/src/graph/neo4j.rs`, `crates/platform/src/s3.rs`. Existing tracing events need no conversion; first distinguish production diagnostics from inline tests and helper protocol output.
+**Inspect remaining production diagnostics:** `crates/worker/src/main.rs`, `crates/worker/src/runtime.rs`, `crates/api/src/routes.rs`, `crates/api/src/bid_v2_routes.rs`, `crates/docparser/src/images.rs`, `crates/knowledge/src/graph/neo4j.rs`, `crates/platform/src/s3.rs`. Existing tracing events need no conversion; first distinguish production diagnostics from inline tests and helper protocol output.
 
 **Keep:** skip diagnostics under `#[cfg(test)]` or `mod tests`, existing helper/CLI output protocols, and Cargo `println!` in `crates/docparser/build.rs`.
 

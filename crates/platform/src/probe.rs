@@ -11,6 +11,20 @@ pub const REASON_DRAINING: &str = "draining";
 pub const REASON_ROLLBACK: &str = "rollback";
 pub const REASON_GATE_MODE_NOT_LIVE_READY: &str = "gate_mode_not_live_ready";
 pub const REASON_QUEUE_REGISTRY_UNREADABLE: &str = "queue_registry_unreadable";
+pub const REASON_EMBEDDING_UNCONFIGURED: &str = "embedding_unconfigured";
+
+/// API/worker must have both embedding URL and model before taking traffic.
+pub fn embedding_config_not_ready_reason() -> Option<&'static str> {
+    embedding_config_not_ready_reason_for(&crate::embedding_base_url(), &crate::embedding_model())
+}
+
+pub fn embedding_config_not_ready_reason_for(url: &str, model: &str) -> Option<&'static str> {
+    if url.trim().is_empty() || model.trim().is_empty() {
+        Some(REASON_EMBEDDING_UNCONFIGURED)
+    } else {
+        None
+    }
+}
 
 const LIVE_READY_GATE_MODE: &str = "open";
 
@@ -147,6 +161,12 @@ pub async fn inspect_readiness(
             gate_mode: Some(LIVE_READY_GATE_MODE.to_string()),
         };
     }
+    if let Some(reason) = embedding_config_not_ready_reason() {
+        return ReadyCheck::NotReady {
+            reason,
+            gate_mode: Some(LIVE_READY_GATE_MODE.to_string()),
+        };
+    }
     check
 }
 
@@ -183,6 +203,22 @@ pub fn gate_mode_not_ready_reason(mode: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedding_config_requires_url_and_model() {
+        assert_eq!(
+            embedding_config_not_ready_reason_for("", "live-emb"),
+            Some(REASON_EMBEDDING_UNCONFIGURED)
+        );
+        assert_eq!(
+            embedding_config_not_ready_reason_for("http://127.0.0.1:9", ""),
+            Some(REASON_EMBEDDING_UNCONFIGURED)
+        );
+        assert_eq!(
+            embedding_config_not_ready_reason_for("http://127.0.0.1:9", "live-emb"),
+            None
+        );
+    }
 
     #[test]
     fn maintenance_modes_fail_closed() {

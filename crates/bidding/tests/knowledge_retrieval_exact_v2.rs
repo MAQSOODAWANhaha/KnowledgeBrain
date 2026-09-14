@@ -49,10 +49,10 @@ fn embedding_revision_for(provider_model_identifier: impl Into<String>) -> Embed
         schema_version: EMBEDDING_REVISION_SCHEMA_V2,
         provider_protocol_version: EMBEDDING_PROVIDER_PROTOCOL_VERSION_V2.into(),
         provider_model_identifier: provider_model_identifier.into(),
-        provider_model_revision_sha256: knowledge::sha256_hex(
+        provider_model_revision_sha256: platform::sha256_hex(
             b"exact-v2 fixture immutable provider revision metadata",
         ),
-        endpoint_config_sha256: knowledge::sha256_hex(
+        endpoint_config_sha256: platform::sha256_hex(
             b"exact-v2 fixture immutable endpoint preprocessing config",
         ),
         endpoint_identity: "https://embeddings.example.test/v1/embeddings".into(),
@@ -71,8 +71,8 @@ fn rerank_revision() -> RerankRevisionV2 {
         schema_version: RERANK_REVISION_SCHEMA_V2,
         provider_protocol_version: RETRIEVAL_RERANK_PROTOCOL_VERSION_V2.into(),
         provider_model_identifier: "exact-v2-reranker@2025-01-15".into(),
-        provider_model_revision_sha256: knowledge::sha256_hex(b"exact-v2 reranker model"),
-        config_revision_sha256: knowledge::sha256_hex(b"exact-v2 reranker config"),
+        provider_model_revision_sha256: platform::sha256_hex(b"exact-v2 reranker model"),
+        config_revision_sha256: platform::sha256_hex(b"exact-v2 reranker config"),
         endpoint_identity: "https://rerank.example.test/v1/rerank".into(),
         request_config_sha256: RERANK_REQUEST_CONFIG_SHA256_V2.into(),
         score_normalization_version: RETRIEVAL_RERANK_SCORE_NORMALIZATION_VERSION_V2.into(),
@@ -276,7 +276,7 @@ async fn insert_policy_raw(
              max_hits,max_chunk_bytes,max_total_bytes)
          VALUES($1,$2,$3,$4,$5,$6,$7)",
     )
-    .bind(knowledge::sha256_hex(&payload))
+    .bind(platform::sha256_hex(&payload))
     .bind(payload)
     .bind(embedding_revision().sha256().unwrap())
     .bind(KNOWLEDGE_EVIDENCE_CONTRACT_V2)
@@ -303,7 +303,7 @@ async fn insert_embedding_revision_raw(
     canonical_revision_payload: Vec<u8>,
     credential_ref: &str,
 ) -> Result<(), sqlx::Error> {
-    let revision_sha256 = knowledge::sha256_hex(&canonical_revision_payload);
+    let revision_sha256 = platform::sha256_hex(&canonical_revision_payload);
     sqlx::query(
         "INSERT INTO embedding_revisions_v2(
              revision_sha256,canonical_revision_payload,schema_version,
@@ -383,7 +383,7 @@ async fn add_version(pool: &PgPool, fixture: &mut Fixture, chunks: &[(&str, &str
         .await
         .unwrap();
 
-    let file_hash = knowledge::sha256_hex(document_id.as_bytes());
+    let file_hash = platform::sha256_hex(document_id.as_bytes());
     let object_ref = format!("objects/{file_hash}");
     sqlx::query(
         "INSERT INTO object_registry(object_ref,digest,media_type,byte_length,state)
@@ -511,7 +511,7 @@ fn scope(
 ) -> KnowledgeEvidenceScopeV2 {
     KnowledgeEvidenceScopeV2::ProductLine(ProductEvidenceRequestV1 {
         schema_version: KNOWLEDGE_EVIDENCE_SCHEMA_V1,
-        requirement_identity_sha256: knowledge::sha256_hex(requirement.as_bytes()),
+        requirement_identity_sha256: platform::sha256_hex(requirement.as_bytes()),
         requirement_text: requirement.into(),
         product_version_ids: versions,
         retrieval_policy: policy,
@@ -1243,7 +1243,7 @@ async fn embedding_revision_registry_binding_sidecars_and_revocation_are_enforce
                  max_hits,max_chunk_bytes,max_total_bytes)
              VALUES($1,$2,$3,$4,2,1024,2048)",
         )
-        .bind(knowledge::sha256_hex(&payload))
+        .bind(platform::sha256_hex(&payload))
         .bind(payload)
         .bind(&revision_sha256)
         .bind(KNOWLEDGE_EVIDENCE_CONTRACT_V2)
@@ -1353,7 +1353,7 @@ async fn embedding_revision_registry_binding_sidecars_and_revocation_are_enforce
         .contains("EMBEDDING_REVISION_V2_NOT_SUPPORTED")
     );
 
-    let unknown_sha = knowledge::sha256_hex(Uuid::new_v4().as_bytes());
+    let unknown_sha = platform::sha256_hex(Uuid::new_v4().as_bytes());
     let mut unknown_artifact = policy_artifact(1, 1024, 1024);
     unknown_artifact.embedding.model_revision_sha256 = unknown_sha.clone();
     let unknown_identity = unknown_artifact.request_identity().unwrap();
@@ -1449,7 +1449,7 @@ async fn exact_v2_rejects_selected_unknown_mismatched_and_revoked_policy() {
     ));
 
     let mut unknown = policy.clone();
-    unknown.policy_sha256 = knowledge::sha256_hex(Uuid::new_v4().as_bytes());
+    unknown.policy_sha256 = platform::sha256_hex(Uuid::new_v4().as_bytes());
     let unknown = adapter
         .retrieve_evidence_v3(scope("needle", vec![version], unknown))
         .await;
@@ -1582,7 +1582,7 @@ async fn frozen_exact_replay_and_attestation_survive_current_version_and_latest_
         &[RequirementEvidenceBatchesV2 {
             route_id: Uuid::new_v4(),
             requirement_artifact_id,
-            requirement_identity_sha256: knowledge::sha256_hex(b"frozen needle"),
+            requirement_identity_sha256: platform::sha256_hex(b"frozen needle"),
             requirement_text: "frozen needle".into(),
             product_line,
             company: empty_company,
@@ -1621,7 +1621,7 @@ async fn frozen_exact_replay_and_attestation_survive_current_version_and_latest_
     assert_eq!(persisted.0, expected_canonical_payload);
     assert_eq!(persisted.1, attested.attestation_sha256);
     assert_eq!(
-        knowledge::sha256_hex(&persisted.0),
+        platform::sha256_hex(&persisted.0),
         attested.attestation_sha256
     );
 

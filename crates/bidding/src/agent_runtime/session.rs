@@ -279,11 +279,34 @@ impl Session {
         self.run.tool_results(content).map_err(|_| failure())
     }
 
+    /// Serialized SDK AgentRun size, not the Chat Completions wire body.
+    /// `drive` drops the activity window when this exceeds `max_context_bytes`.
+    /// Domain adapters separately budget the reserved request from `chat::prepare`.
     pub(super) fn bytes(&self) -> Result<usize, AgentError> {
         serde_json::to_vec(self)
             .map(|bytes| bytes.len())
             .map_err(|_| failure())
     }
+
+    #[cfg(test)]
+    pub(crate) fn projected_history(&self) -> Result<Vec<Value>, AgentError> {
+        projected(self.run.full_history())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_system_evidence(text: &str) -> Vec<Value> {
+    projected(vec![Message::system(text)]).unwrap()
+}
+
+#[cfg(test)]
+pub(crate) fn test_window_body(evidence: Vec<Value>, progress: &str) -> Vec<u8> {
+    let mut messages = evidence;
+    messages.insert(1, json!({"role":"user","content":"project metadata"}));
+    messages.push(json!({"role":"user","content":progress}));
+    serde_json_canonicalizer::to_vec(&json!({"messages":messages,
+        "tools":[{"type":"function","function":{"name":"read_source"}}]}))
+    .unwrap()
 }
 
 #[cfg(test)]
@@ -324,7 +347,15 @@ mod tests {
     fn canonical_checkpoint_roundtrip_preserves_argument_meaning_and_rejects_actual_edits() {
         let body = request(vec![Message::system("reviewer")], "progress");
         let mut active = None;
-        Session::prepare(&mut active, &body, 2, 1, 3, 16384).unwrap();
+        Session::prepare(
+            &mut active,
+            &body,
+            crate::agent_runtime::SESSION_PREFIX,
+            crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
+            3,
+            16384,
+        )
+        .unwrap();
         let session = active.as_mut().unwrap();
         let mut turn = response(&["read_source"]);
         turn.tool_calls[0].arguments = r#"{"z":0,"a":{"second":2,"first":1}}"#.into();
@@ -342,7 +373,15 @@ mod tests {
             .unwrap()["tool_calls"][0]["function"]["arguments"] =
             json!(turn.tool_calls[0].arguments);
         let body = serde_json_canonicalizer::to_vec(&raw).unwrap();
-        Session::prepare(&mut active, &body, 2, 1, 2, 16384).unwrap();
+        Session::prepare(
+            &mut active,
+            &body,
+            crate::agent_runtime::SESSION_PREFIX,
+            crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
+            2,
+            16384,
+        )
+        .unwrap();
         let original = body.clone();
         let mut restored: Session = serde_json::from_slice(
             &serde_json_canonicalizer::to_vec(active.as_ref().unwrap()).unwrap(),
@@ -375,7 +414,15 @@ mod tests {
     fn multiple_turns_reuse_sdk_state_and_restore_awaiting_model_without_another_step() {
         let mut active = None;
         let body = request(vec![Message::system("main")], "first progress");
-        Session::prepare(&mut active, &body, 2, 1, 3, 16384).unwrap();
+        Session::prepare(
+            &mut active,
+            &body,
+            crate::agent_runtime::SESSION_PREFIX,
+            crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
+            3,
+            16384,
+        )
+        .unwrap();
         // A response saved by the host can be replayed into this persisted
         // AwaitingModel state without asking SDK for another model step.
         let mut saved: Session =
@@ -392,7 +439,15 @@ mod tests {
             .unwrap();
         let body = request(saved.run.full_history(), "updated progress");
         active = Some(saved);
-        Session::prepare(&mut active, &body, 2, 1, 2, 16384).unwrap();
+        Session::prepare(
+            &mut active,
+            &body,
+            crate::agent_runtime::SESSION_PREFIX,
+            crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
+            2,
+            16384,
+        )
+        .unwrap();
         let session = active.as_mut().unwrap();
         assert_eq!(
             session.run.turn(),
@@ -416,7 +471,15 @@ mod tests {
             .finish(vec![result("provider-0", "second result")])
             .unwrap();
         let body = request(session.run.full_history(), "third progress");
-        Session::prepare(&mut active, &body, 2, 1, 1, 16384).unwrap();
+        Session::prepare(
+            &mut active,
+            &body,
+            crate::agent_runtime::SESSION_PREFIX,
+            crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
+            1,
+            16384,
+        )
+        .unwrap();
         assert_eq!(active.unwrap().run.turn(), 3);
     }
 
@@ -424,7 +487,15 @@ mod tests {
     fn suppressed_role_tools_keep_provider_ids_and_exact_sdk_feedback() {
         let body = request(vec![Message::system("reviewer")], "progress");
         let mut active = None;
-        Session::prepare(&mut active, &body, 2, 1, 3, 16384).unwrap();
+        Session::prepare(
+            &mut active,
+            &body,
+            crate::agent_runtime::SESSION_PREFIX,
+            crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
+            3,
+            16384,
+        )
+        .unwrap();
         let session = active.as_mut().unwrap();
         let suppressed = session
             .tools(&body, &response(&["read_source", "put_record", "unknown"]))
@@ -449,7 +520,15 @@ mod tests {
     fn window_and_role_handoffs_preserve_selected_evidence_and_remaining_budget() {
         let initial = request(vec![Message::system("main")], "progress");
         let mut active = None;
-        Session::prepare(&mut active, &initial, 2, 1, 4, 16384).unwrap();
+        Session::prepare(
+            &mut active,
+            &initial,
+            crate::agent_runtime::SESSION_PREFIX,
+            crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
+            4,
+            16384,
+        )
+        .unwrap();
         let session = active.as_mut().unwrap();
         session
             .tools(&initial, &response(&["read_source"]))
@@ -462,7 +541,15 @@ mod tests {
             Message::user("selected source and form anchors"),
         ];
         let body = request(selected.clone(), "new scope");
-        Session::prepare(&mut active, &body, 2, 1, 1, 16384).unwrap();
+        Session::prepare(
+            &mut active,
+            &body,
+            crate::agent_runtime::SESSION_PREFIX,
+            crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
+            1,
+            16384,
+        )
+        .unwrap();
         let session = active.as_mut().unwrap();
         assert_eq!(session.run.turn(), 1);
         assert_eq!(

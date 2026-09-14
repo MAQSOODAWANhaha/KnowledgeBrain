@@ -53,7 +53,7 @@ fn fixture() -> (FrozenInput, AnalysisResult) {
             json!({"row":2,"column":1,"row_span":1,"col_span":1,"text":"证明材料"}),
             json!({"row":2,"column":2,"row_span":1,"col_span":1,"text":""}),
         ];
-        input.structured_forms.push(json!({"form_definition_revision_id":format!("f{i}"),"source_unit_revision_id":format!("s{i}"),"definition":{"kind":"grid","row_count":3,"column_count":3,"widths_mm":[100,70,50],"cells":cells}}));
+        input.structured_forms.push(json!({"form_definition_revision_id":format!("f{i}"),"source_unit_revision_id":format!("s{i}"),"definition":{"schema_version":3,"kind":"grid","row_count":3,"column_count":3,"widths_mm":[100,70,50],"cells":cells}}));
     }
     let mut a = Analysis::default();
     for source in &input.source_units {
@@ -925,7 +925,7 @@ fn excerpt_fixture() -> (FrozenInput, AnalysisResult, Value) {
         );
         input.structured_forms.push(
             json!({"form_definition_revision_id":format!("ef{i}"),"source_unit_revision_id":id,
-            "definition":{"kind":"grid","row_count":1,"column_count":2,"widths_mm":[40,40],
+            "definition":{"schema_version":3,"kind":"grid","row_count":1,"column_count":2,"widths_mm":[40,40],
                 "cells":[{"row":0,"column":0,"row_span":1,"col_span":2,"text":text}]}}),
         );
         result
@@ -1914,6 +1914,138 @@ async fn composition_budget_and_cancellation_keep_unfinished_state() {
             .is_err()
     );
     assert_eq!(*fresh.calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn composition_cancels_between_tools_without_advancing_the_turn() {
+    let (input, result) = fixture();
+    let config = config();
+    let mut state = agent::Checkpoint {
+        journal: Default::default(),
+        contract_sha256: config.contract_sha256().unwrap(),
+        workspace: Workspace::new(&input, &result).unwrap(),
+        turn: 0,
+        tool_calls: 0,
+        read_bytes: 0,
+        transcript: vec![],
+        main_work: None,
+        review_work: None,
+        main_progress: Default::default(),
+        review_progress: Default::default(),
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let response = knowledge::models::ChatTurn {
+        content: String::new(),
+        finish_reason: "tool_calls".into(),
+        usage: None,
+        tool_calls: vec![
+            knowledge::models::ChatToolCall {
+                id: "one".into(),
+                name: "inspect_composition".into(),
+                arguments: json!({"offset":0,"limit":100}).to_string(),
+            },
+            knowledge::models::ChatToolCall {
+                id: "two".into(),
+                name: "inspect_composition".into(),
+                arguments: json!({"offset":0,"limit":100}).to_string(),
+            },
+        ],
+    };
+    let error = agent::execute_turn(
+        &input,
+        &result,
+        &config,
+        &mut state,
+        response,
+        std::collections::BTreeMap::new(),
+        &cancel,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "INTERNAL");
+    assert_eq!(error.message, "Agent run cancelled");
+    assert_eq!(state.turn, 0);
+    assert_eq!(state.tool_calls, 1);
+    assert_eq!(
+        state
+            .transcript
+            .iter()
+            .filter(|m| m["tool_call_id"] == "one")
+            .count(),
+        1
+    );
+    assert!(state.transcript.iter().all(|m| m["tool_call_id"] != "two"));
+}
+
+#[tokio::test]
+async fn composition_cancels_after_first_tool_yield_without_running_the_second() {
+    let (input, result) = fixture();
+    let config = config();
+    let mut state = agent::Checkpoint {
+        journal: Default::default(),
+        contract_sha256: config.contract_sha256().unwrap(),
+        workspace: Workspace::new(&input, &result).unwrap(),
+        turn: 0,
+        tool_calls: 0,
+        read_bytes: 0,
+        transcript: vec![],
+        main_work: None,
+        review_work: None,
+        main_progress: Default::default(),
+        review_progress: Default::default(),
+    };
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let response = knowledge::models::ChatTurn {
+        content: String::new(),
+        finish_reason: "tool_calls".into(),
+        usage: None,
+        tool_calls: vec![
+            knowledge::models::ChatToolCall {
+                id: "one".into(),
+                name: "inspect_composition".into(),
+                arguments: json!({"offset":0,"limit":100}).to_string(),
+            },
+            knowledge::models::ChatToolCall {
+                id: "two".into(),
+                name: "inspect_composition".into(),
+                arguments: json!({"offset":0,"limit":100}).to_string(),
+            },
+        ],
+    };
+    let error = {
+        let mut exec = std::pin::pin!(agent::execute_turn(
+            &input,
+            &result,
+            &config,
+            &mut state,
+            response,
+            std::collections::BTreeMap::new(),
+            &cancel,
+        ));
+        tokio::select! {
+            biased;
+            result = &mut exec => panic!(
+                "both tools completed before the first yield: {result:?}"
+            ),
+            _ = std::future::ready(()) => {}
+        }
+        cancel.cancel();
+        exec.await.unwrap_err()
+    };
+    assert_eq!(error.code, "INTERNAL");
+    assert_eq!(error.message, "Agent run cancelled");
+    assert_eq!(state.turn, 0);
+    assert_eq!(state.tool_calls, 1);
+    assert_eq!(
+        state
+            .transcript
+            .iter()
+            .filter(|m| m["tool_call_id"] == "one")
+            .count(),
+        1
+    );
+    assert!(state.transcript.iter().all(|m| m["tool_call_id"] != "two"));
 }
 
 #[test]

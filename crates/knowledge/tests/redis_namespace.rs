@@ -19,22 +19,22 @@ fn multimodal_counters_isolate_the_same_document_and_preserve_legacy_keys() {
         match case.as_str() {
             "first" => {
                 assert_eq!(pending_count(id), None);
-                set_pending_count(id, 2);
+                set_pending_count(id, 2).unwrap();
                 assert_eq!(pending_count(id), Some(2));
             }
             "second" => {
                 assert_eq!(pending_count(id), None);
-                set_pending_count(id, 7);
+                set_pending_count(id, 7).unwrap();
                 assert_eq!(pending_count(id), Some(7));
             }
             "finish_first" => {
-                assert!(!decr_pending_count(id));
+                assert!(!decr_pending_count(id).unwrap());
                 assert_eq!(pending_count(id), Some(1));
-                assert!(decr_pending_count(id));
+                assert!(decr_pending_count(id).unwrap());
                 assert_eq!(pending_count(id), None);
             }
             "no_namespace" => {
-                set_pending_count(id, 5);
+                assert!(set_pending_count(id, 5).is_err());
                 assert_eq!(pending_count(id), None);
             }
             _ => panic!("unknown fixture operation"),

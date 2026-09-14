@@ -2,7 +2,7 @@
 //! terminal ledger. Object I/O is supplied by the worker's owned child helpers.
 use super::{agent, postgres};
 use crate::{
-    agent_error::{AgentError, RetryDisposition},
+    agent_error::{AgentError, RequestQueueEffect},
     bid_authoring_v2::AgentRunLease,
 };
 use async_trait::async_trait;
@@ -284,30 +284,57 @@ pub async fn execute_with_model<M: agent::Model>(
         return Ok(receipt);
     }
     let error = heartbeat_error.unwrap_or_else(|| result.unwrap_err());
-    if error.disposition == RetryDisposition::Obsolete {
-        return Ok(json!({"disposition":"obsolete"}));
-    }
-    let sql = if error.disposition == RetryDisposition::Transient {
-        "SELECT kb_bid_v2_tender_agent_yield_for_retry($1,$2::kb_sha256,$3,$4,$5,$6)"
-    } else {
-        "SELECT kb_bid_v2_tender_agent_fail($1,$2::kb_sha256,$3,$4,$5,$6)"
-    };
-    let recorded = sqlx::query(sql)
-        .bind(job.request.request_artifact_id)
-        .bind(&job.request.frozen_input_sha256)
-        .bind(owner.attempt)
-        .bind(owner.execution_owner_token)
-        .bind(&error.code)
-        .bind(&error.message)
-        .execute(pool)
-        .await
-        .map_err(db_error);
-    match recorded {
-        Err(e) if e.disposition == RetryDisposition::Obsolete => {
-            Ok(json!({"disposition":"obsolete"}))
+    match error.request_queue_effect() {
+        RequestQueueEffect::AckObsolete => Ok(json!({"disposition":"obsolete"})),
+        RequestQueueEffect::RetryUnchanged => Err(error),
+        RequestQueueEffect::ReleaseThenRetry => {
+            let _ = sqlx::query(
+                "SELECT kb_bid_v2_tender_agent_yield_for_retry($1,$2::kb_sha256,$3,$4,$5,$6)",
+            )
+            .bind(job.request.request_artifact_id)
+            .bind(&job.request.frozen_input_sha256)
+            .bind(owner.attempt)
+            .bind(owner.execution_owner_token)
+            .bind("INTERNAL")
+            .bind(&error.message)
+            .execute(pool)
+            .await;
+            Err(error)
         }
-        Err(e) => Err(e),
-        Ok(_) if error.disposition == RetryDisposition::Transient => Err(error),
-        Ok(_) => Ok(json!({"status":"failed","error_code":error.code})),
+        RequestQueueEffect::YieldThenRetry => {
+            sqlx::query(
+                "SELECT kb_bid_v2_tender_agent_yield_for_retry($1,$2::kb_sha256,$3,$4,$5,$6)",
+            )
+            .bind(job.request.request_artifact_id)
+            .bind(&job.request.frozen_input_sha256)
+            .bind(owner.attempt)
+            .bind(owner.execution_owner_token)
+            .bind(&error.code)
+            .bind(&error.message)
+            .execute(pool)
+            .await
+            .map_err(db_error)?;
+            Err(error)
+        }
+        RequestQueueEffect::FailRequest => {
+            let recorded =
+                sqlx::query("SELECT kb_bid_v2_tender_agent_fail($1,$2::kb_sha256,$3,$4,$5,$6)")
+                    .bind(job.request.request_artifact_id)
+                    .bind(&job.request.frozen_input_sha256)
+                    .bind(owner.attempt)
+                    .bind(owner.execution_owner_token)
+                    .bind(&error.code)
+                    .bind(&error.message)
+                    .execute(pool)
+                    .await
+                    .map_err(db_error);
+            match recorded {
+                Ok(_) => Ok(json!({"status":"failed","error_code":error.code})),
+                Err(e) if e.request_queue_effect() == RequestQueueEffect::AckObsolete => {
+                    Ok(json!({"disposition":"obsolete"}))
+                }
+                Err(e) => Err(e),
+            }
+        }
     }
 }

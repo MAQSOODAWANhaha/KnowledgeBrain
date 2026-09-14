@@ -96,7 +96,7 @@ async fn seed_fixture(pool: &PgPool) -> Fixture {
         .execute(pool)
         .await
         .unwrap();
-    let file_hash = knowledge::sha256_hex(document_id.as_bytes());
+    let file_hash = platform::sha256_hex(document_id.as_bytes());
     let object_ref = format!("objects/{file_hash}");
     sqlx::query(
         "INSERT INTO object_registry(object_ref,digest,media_type,byte_length,state)
@@ -239,10 +239,10 @@ fn embedding_revision_for(provider_model_identifier: impl Into<String>) -> Embed
         schema_version: EMBEDDING_REVISION_SCHEMA_V2,
         provider_protocol_version: EMBEDDING_PROVIDER_PROTOCOL_VERSION_V2.into(),
         provider_model_identifier: provider_model_identifier.into(),
-        provider_model_revision_sha256: knowledge::sha256_hex(
+        provider_model_revision_sha256: platform::sha256_hex(
             b"attestation-v2 fixture immutable provider revision metadata",
         ),
-        endpoint_config_sha256: knowledge::sha256_hex(
+        endpoint_config_sha256: platform::sha256_hex(
             b"attestation-v2 fixture immutable endpoint preprocessing config",
         ),
         endpoint_identity: "https://embeddings.example.test/v1/embeddings".into(),
@@ -261,8 +261,8 @@ fn rerank_revision() -> RerankRevisionV2 {
         schema_version: RERANK_REVISION_SCHEMA_V2,
         provider_protocol_version: RETRIEVAL_RERANK_PROTOCOL_VERSION_V2.into(),
         provider_model_identifier: "attestation-v2-reranker@2025-01-15".into(),
-        provider_model_revision_sha256: knowledge::sha256_hex(b"attestation-v2 reranker model"),
-        config_revision_sha256: knowledge::sha256_hex(b"attestation-v2 reranker config"),
+        provider_model_revision_sha256: platform::sha256_hex(b"attestation-v2 reranker model"),
+        config_revision_sha256: platform::sha256_hex(b"attestation-v2 reranker config"),
         endpoint_identity: "https://rerank.example.test/v1/rerank".into(),
         request_config_sha256: RERANK_REQUEST_CONFIG_SHA256_V2.into(),
         score_normalization_version: RETRIEVAL_RERANK_SCORE_NORMALIZATION_VERSION_V2.into(),
@@ -438,11 +438,11 @@ async fn register_policy(
     let unique = Uuid::new_v4();
     reranker.provider_model_identifier = format!(
         "attestation-v2-reranker@sha256:{}",
-        knowledge::sha256_hex(unique.as_bytes())
+        platform::sha256_hex(unique.as_bytes())
     );
     reranker.provider_model_revision_sha256 =
-        knowledge::sha256_hex(format!("model-{unique}").as_bytes());
-    reranker.config_revision_sha256 = knowledge::sha256_hex(format!("config-{unique}").as_bytes());
+        platform::sha256_hex(format!("model-{unique}").as_bytes());
+    reranker.config_revision_sha256 = platform::sha256_hex(format!("config-{unique}").as_bytes());
     artifact.rerank.revision_sha256 = reranker.sha256().unwrap();
     artifact.rerank.model_revision_sha256 = reranker.provider_model_revision_sha256.clone();
     artifact.rerank.config_revision_sha256 = reranker.config_revision_sha256.clone();
@@ -502,7 +502,7 @@ fn product_artifact(fixture: &Fixture) -> Value {
         "product_version_id": fixture.version_id,
         "workspace_kind": "product_line",
         "frozen_display_name": fixture.version_id.to_string(),
-        "identity_sha256": knowledge::sha256_hex(
+        "identity_sha256": platform::sha256_hex(
             format!(
                 "ProductVersionEvidenceV1:{}:{}:product_line",
                 fixture.product_id, fixture.version_id
@@ -528,7 +528,7 @@ fn frozen_hit(
         "source_chunk_id": chunk.id,
         "frozen_document_display_name": DOCUMENT_NAME,
         "chunk_utf8": chunk.content,
-        "chunk_sha256": knowledge::sha256_hex(chunk.content.as_bytes()),
+        "chunk_sha256": platform::sha256_hex(chunk.content.as_bytes()),
         "chunk_byte_length": byte_length,
         "source_type": chunk.source_type,
         "media": null,
@@ -559,7 +559,7 @@ fn scope(fixture: &Fixture, retrieval_policy: Value, hits: Vec<Value>) -> Value 
                 json!({
                     "route_id": route_id,
                     "requirement_artifact_id": requirement_artifact_id,
-                    "requirement_identity_sha256": knowledge::sha256_hex(b"trusted"),
+                    "requirement_identity_sha256": platform::sha256_hex(b"trusted"),
                     "requirement_text": "trusted",
                     "exact_prefix_hit_count": exact_prefix_hit_count
                 })
@@ -945,7 +945,7 @@ async fn policy_registry_rejects_unknown_revoked_quota_mismatch_and_mutation() {
     let mut invalid_artifact = policy_artifact(2, 1024, 2048);
     invalid_artifact.normalization_version = "unsupported-normalization-v999".into();
     let invalid_payload = serde_json::to_vec(&invalid_artifact).unwrap();
-    let invalid_digest = knowledge::sha256_hex(&invalid_payload);
+    let invalid_digest = platform::sha256_hex(&invalid_payload);
     assert_check_constraint(
         sqlx::query(
             "INSERT INTO knowledge_retrieval_policies_v2(
@@ -1621,7 +1621,7 @@ async fn rejects_untrusted_source_and_live_name_content_type_or_eligibility_mism
     );
     let mut wrong_content = valid.clone();
     wrong_content["frozen_hits"][0]["chunk_utf8"] = json!("forged");
-    wrong_content["frozen_hits"][0]["chunk_sha256"] = json!(knowledge::sha256_hex(b"forged"));
+    wrong_content["frozen_hits"][0]["chunk_sha256"] = json!(platform::sha256_hex(b"forged"));
     wrong_content["frozen_hits"][0]["chunk_byte_length"] = json!(6);
     wrong_content["frozen_hits"][0]["quote_end_offset"] = json!(6);
     assert_contract_error(
@@ -1697,7 +1697,7 @@ async fn explicit_exact_prefix_and_reranked_suffix_provenance_is_attested() {
     );
     valid["retrieval_requirements"][0]["requirement_text"] = json!("alpha");
     valid["retrieval_requirements"][0]["requirement_identity_sha256"] =
-        json!(knowledge::sha256_hex(b"alpha"));
+        json!(platform::sha256_hex(b"alpha"));
     valid["retrieval_requirements"][0]["exact_prefix_hit_count"] = json!(1);
     valid["frozen_hits"][1]["pre_rerank_rrf_rank"] = json!(2);
     // A C score of exactly one remains explicit C and must not bypass rerank provenance.
@@ -1730,7 +1730,7 @@ async fn explicit_exact_prefix_and_reranked_suffix_provenance_is_attested() {
     );
     inversion["retrieval_requirements"][0]["requirement_text"] = json!("alpha");
     inversion["retrieval_requirements"][0]["requirement_identity_sha256"] =
-        json!(knowledge::sha256_hex(b"alpha"));
+        json!(platform::sha256_hex(b"alpha"));
     inversion["retrieval_requirements"][0]["exact_prefix_hit_count"] = json!(1);
     inversion["frozen_hits"][1]["retrieval_raw_score"] = json!("0.400000");
     inversion["frozen_hits"][1]["pre_rerank_rrf_rank"] = json!(1);

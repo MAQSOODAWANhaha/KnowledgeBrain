@@ -1,6 +1,6 @@
 import { NetworkTransportError, type MutationAttempt } from "../../api";
 import type { DocxRoundInput, DocxRoundReceipt } from "./docx";
-import { v2Request } from "./http";
+import { v2Blob, v2Request } from "./http";
 
 export type CompositionIdentity = { request_artifact_id: string; request_revision: number; frozen_input_sha256: string };
 export type CompositionStatus = CompositionIdentity & {
@@ -17,6 +17,9 @@ export type CompositionApi = {
   status(workspace: string, request: string): Promise<CompositionStatus>;
 };
 const path = (workspace: string) => `/api/v2/submission-workspaces/${encodeURIComponent(workspace)}/docx-compositions`;
+export function downloadCompositionReport(workspace: string, version: string): Promise<Blob> {
+  return v2Blob(`/api/v2/submission-workspaces/${encodeURIComponent(workspace)}/docx/versions/${encodeURIComponent(version)}/composition-report`);
+}
 function identity(value: CompositionIdentity): boolean {
   return !!value && typeof value.request_artifact_id === "string" && !!value.request_artifact_id
     && Number.isSafeInteger(value.request_revision) && value.request_revision > 0

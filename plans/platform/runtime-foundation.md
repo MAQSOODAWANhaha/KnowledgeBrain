@@ -260,7 +260,7 @@ Oxana 2.1.3 的 unique `Skip` 返回既有 JobId，不能区分新入队与跳�
 | 2 | 已接入独立 `schema-contract` 与现有 AgentRun 必跑检查；正确性验收仍须补齐 §6 的清理交接/消费/最终回收证据，见下节 | fresh、只读重放、漂移拒绝、角色边界及字节回归已有局部证据；清理链须有真实 consumer、有引用保护及失败恢复证据，不把局部验证称为 hosted CI 已绿 |
 | 3 | 待补齐首次发布的可执行检查 | 按 [部署说明](../../deploy/README.md) 落位 release/reset 工具，验证 descriptor、实际 RepoDigest、migrator 先于 runtime 与 readiness；不另建发布框架 |
 
-[pgvector 基准](../knowledge-base/README.md#向量检索优化边界)按性能证据独立推进，不增加外部向量库，也不是修 baseline 或 ONLYOFFICE O0 的前置。完整 release 自动化同样不是这些开发切片的前置，但首次正式发布仍须满足下列全部安全验收。招投标复用现有 worker 与[领域接缝](../../docs/bidding/authoring.md)，保持 [ONLYOFFICE O0 → O4](../bidding/onlyoffice-integration.md)，不先重做平台。
+pgvector 性能基准不列入当前计划（禁止项见 [`docs/knowledge-base/crate.md`](../../docs/knowledge-base/crate.md)），不增加外部向量库，也不是修 baseline 或 ONLYOFFICE O0 的前置。完整 release 自动化同样不是这些开发切片的前置，但首次正式发布仍须满足下列全部安全验收。招投标复用现有 worker 与[领域接缝](../../docs/bidding/authoring.md)，保持 [ONLYOFFICE O0 → O4](../bidding/onlyoffice-integration.md)，不先重做平台。
 
 ### 7.1 聚焦数据库 gate
 

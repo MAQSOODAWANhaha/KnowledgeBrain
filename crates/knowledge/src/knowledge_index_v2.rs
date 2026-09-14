@@ -972,6 +972,190 @@ pub async fn rebuild_keyword_indexes_v2(
         .await
 }
 
+fn bounded_semantic_index_error_detail(error: &str) -> String {
+    let mut end = error.len().min(512);
+    while !error.is_char_boundary(end) {
+        end -= 1;
+    }
+    let detail = error[..end].trim();
+    if detail.is_empty() {
+        "semantic index v2 failure".into()
+    } else {
+        detail.into()
+    }
+}
+
+pub async fn run_semantic_index_job(
+    pool: &PgPool,
+    target_id: Uuid,
+    target_revision: i64,
+    provider: Option<&dyn VectorEmbeddingProviderV2>,
+    provider_configuration_error: Option<&str>,
+) -> Result<Option<SemanticIndexIntentV2>, String> {
+    let Some(intent) = semantic_index_intent_v2(pool, target_id, target_revision)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    match preflight_semantic_index_intent_v2(pool, target_id, target_revision)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        SemanticIndexPreflightV2::Current => {}
+        SemanticIndexPreflightV2::PendingDerived => {
+            let detail = "semantic source has pending derived work";
+            let _ = record_semantic_index_intent_v2(
+                pool,
+                &intent,
+                "retryable",
+                "PENDING_DERIVED",
+                detail,
+            )
+            .await;
+            return Err(detail.into());
+        }
+        SemanticIndexPreflightV2::Superseded => {
+            return prepare_semantic_index_v2_successor(pool, intent.product_version_id).await;
+        }
+        SemanticIndexPreflightV2::Completed
+        | SemanticIndexPreflightV2::Terminal
+        | SemanticIndexPreflightV2::Duplicate => return Ok(None),
+    }
+
+    let Some(provider) = provider else {
+        let detail = bounded_semantic_index_error_detail(
+            provider_configuration_error
+                .unwrap_or("strict V2 vector provider could not be configured"),
+        );
+        record_semantic_index_intent_v2(
+            pool,
+            &intent,
+            "terminal",
+            "CLIENT_CONFIGURATION_INVALID",
+            &detail,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        return Ok(None);
+    };
+
+    let result = async {
+        rebuild_semantic_keyword_indexes_v2(pool, &intent).await?;
+        let has_vector = semantic_vector_generation_matches_intent_v2(pool, &intent)
+            .await
+            .map_err(VectorIndexErrorV2::Database)?;
+        if !has_vector {
+            rebuild_vector_indexes_for_intent_v2(pool, &intent, provider).await?;
+        }
+        complete_semantic_index_intent_v2(pool, &intent)
+            .await
+            .map_err(VectorIndexErrorV2::Database)
+    }
+    .await;
+
+    match result {
+        Ok(SemanticIndexCompletionV2::Completed | SemanticIndexCompletionV2::Duplicate) => {
+            tracing::info!(
+                target_id = %intent.id,
+                target_revision = intent.target_revision,
+                product_version_id = %intent.product_version_id,
+                source_snapshot_sha256 = %intent.source_snapshot_sha256,
+                embedding_revision_sha256 = %intent.embedding_revision_sha256,
+                "knowledge semantic index v2 ready"
+            );
+            Ok(None)
+        }
+        Ok(SemanticIndexCompletionV2::Superseded) => {
+            prepare_semantic_index_v2_successor(pool, intent.product_version_id).await
+        }
+        Ok(SemanticIndexCompletionV2::Terminal) => Ok(None),
+        Ok(SemanticIndexCompletionV2::PendingDerived | SemanticIndexCompletionV2::NotReady) => {
+            let detail = "semantic readiness is not yet publishable";
+            let _ = record_semantic_index_intent_v2(
+                pool,
+                &intent,
+                "retryable",
+                "SEMANTIC_SOURCE_NOT_SETTLED",
+                detail,
+            )
+            .await;
+            Err(detail.into())
+        }
+        Err(VectorIndexErrorV2::SnapshotChanged(error)) => {
+            let detail = bounded_semantic_index_error_detail(&error);
+            record_semantic_index_intent_v2(
+                pool,
+                &intent,
+                "superseded",
+                "SOURCE_GENERATION_CHANGED",
+                &detail,
+            )
+            .await
+            .map_err(|record_error| record_error.to_string())?;
+            prepare_semantic_index_v2_successor(pool, intent.product_version_id).await
+        }
+        Err(VectorIndexErrorV2::PendingDerived(error)) => {
+            let detail = bounded_semantic_index_error_detail(&error);
+            let _ = record_semantic_index_intent_v2(
+                pool,
+                &intent,
+                "retryable",
+                "PENDING_DERIVED",
+                &detail,
+            )
+            .await;
+            Err(detail)
+        }
+        Err(VectorIndexErrorV2::InvalidConfiguration(error)) => {
+            let detail = bounded_semantic_index_error_detail(&error);
+            record_semantic_index_intent_v2(
+                pool,
+                &intent,
+                "terminal",
+                "INVALID_IMMUTABLE_CONFIGURATION",
+                &detail,
+            )
+            .await
+            .map_err(|record_error| record_error.to_string())?;
+            Ok(None)
+        }
+        Err(error @ (VectorIndexErrorV2::Unavailable(_) | VectorIndexErrorV2::Database(_))) => {
+            let detail = bounded_semantic_index_error_detail(&error.to_string());
+            let error_code = match error {
+                VectorIndexErrorV2::Unavailable(_) => "PROVIDER_UNAVAILABLE",
+                VectorIndexErrorV2::Database(_) => "DATABASE_UNAVAILABLE",
+                VectorIndexErrorV2::InvalidConfiguration(_)
+                | VectorIndexErrorV2::PendingDerived(_)
+                | VectorIndexErrorV2::SnapshotChanged(_) => unreachable!(),
+            };
+            let _ =
+                record_semantic_index_intent_v2(pool, &intent, "retryable", error_code, &detail)
+                    .await;
+            Err(detail)
+        }
+    }
+}
+
+async fn prepare_semantic_index_v2_successor(
+    pool: &PgPool,
+    product_version_id: Uuid,
+) -> Result<Option<SemanticIndexIntentV2>, String> {
+    match prepare_semantic_index_intent_v2(pool, product_version_id)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        SemanticIndexPreparationV2::Enqueue(successor) => Ok(Some(successor)),
+        SemanticIndexPreparationV2::PendingDerived => {
+            Err("semantic successor source has pending derived work".into())
+        }
+        SemanticIndexPreparationV2::Unbound
+        | SemanticIndexPreparationV2::Ready(_)
+        | SemanticIndexPreparationV2::Terminal(_)
+        | SemanticIndexPreparationV2::Superseded(_) => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

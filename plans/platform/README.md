@@ -6,6 +6,7 @@
 
 - [`runtime-foundation.md`](runtime-foundation.md)：fresh baseline、actor/idempotency/audit、`ObjectRegistry` 与 retention 的平台唯一活动实施定义。
 - [`queue-runtime.md`](queue-runtime.md)：Oxana/Redis transport interface、进程 identity、retry/resurrection 所有权与平台验收。
+- [`worker-runtime.md`](worker-runtime.md)：**已落地**。worker 只保留 Oxana adapter 与 helper；知识 ingest / 投标 content·export 在所属 crate。
 - [`tracing-observability.md`](tracing-observability.md)：可观测性计划。
 - [`../../docs/research/repository-implementation-snapshot.md`](../../docs/research/repository-implementation-snapshot.md)：迁移前仓库实现快照，非规范。
 

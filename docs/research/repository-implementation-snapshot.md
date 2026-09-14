@@ -448,7 +448,7 @@ SSRF：拦 loopback / 链路本地 / 私网 / `169.254.169.254` / DNS rebinding�
 
 对照 `knowledge_process.go::convert` / `resolveDocReader`。
 
-抽出 **`convert_to_markdown(bytes, file_name) -> (markdown, images[])`**，不依赖 Document / ProductVersion。**解析只有这一条**：引擎由扩展名 + 产品默认 `parser_engine_rules` 决定，再 VLM 写回。知识库与招标源均可复用转换能力，不重做解析系统。落盘才分叉：知识库进 Document/索引；招标只更新 `BidDocument`，不 `INSERT documents`。
+抽出 **`convert_to_markdown(bytes, file_name) -> (markdown, images[])`**，不依赖 Document / ProductVersion。现状（非规范）：知识库 ingest 走 `parser_engine_for` + `convert_with_cancel`；招标走 `convert_tender_source`（写死 builtin）。`convert_to_markdown` 只是无 token 包装。两边共用转换门面，不重做解析系统。落盘才分叉：知识库进 Document/索引；招标只更新 `BidDocument`，不 `INSERT documents`。
 
 **与 WeKnora 的差别（有意）：** 上游空引擎 = DocReader/MarkItDown；本仓 anydoc 已进程内集成。anydoc 明显更好的类型（docx/doc/xlsx/xls/pptx/ppt 的表与结构）**默认 anydoc**，不跟上游用 MarkItDown 当默认。PDF / 扫描页仍 builtin（版面 + 栅格化 OCR），anydoc 无文本层时回退 builtin。版本 `parser_engine_rules` 可覆盖。
 

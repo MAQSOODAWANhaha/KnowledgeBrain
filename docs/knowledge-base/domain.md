@@ -5,7 +5,7 @@
 | 状态 | 当前业务语义保持 |
 | 服务对象 | 知识资产管理、问答、招投标证据检索 |
 
-本文是知识库领域与跨域检索端口的唯一权威定义。实现现状快照见 [`../research/repository-implementation-snapshot.md`](../research/repository-implementation-snapshot.md)，不从快照反推新业务规则。
+本文是知识库领域与跨域检索端口的唯一权威定义。crate 怎么切、job 怎么读写见 [`crate.md`](crate.md)。实现现状快照见 [`../research/repository-implementation-snapshot.md`](../research/repository-implementation-snapshot.md)，不从快照反推新业务规则。
 
 ## 1. 领域模型
 
@@ -15,6 +15,8 @@ Workspace
        -> ProductVersion
             -> Document
                  -> parsed Markdown / Chunk / Image derivations / indexes
+            -> Wiki pages / folders（版本范围）
+            -> graph nodes / relations（版本范围）
 ```
 
 ### 1.1 Workspace
@@ -36,7 +38,20 @@ Workspace
 - 知识资产文件归某一 ProductVersion；
 - 解析、Markdown、chunk、图片派生内容、embedding、关键词与索引归知识库；
 - `index_ready` 等状态只描述知识资产是否可检索；
+- 解析与后处理由 Oxana 队列驱动：`ingest.rs` 负责 convert/fanout/delete/reparse，`pipeline.rs` 负责 summary/questions/image/post_process/extract/wiki/datatable；工作行集是 `DocJob` / `WikiJob`，不是进程内存库；
 - 招标文件、某次投标的人补截图和 submission artifact 不创建知识库 Document。
+
+### 1.4 产品问答与招标证据检索
+
+产品问答（`search/` assembly / matching）与招标 `retrieve_evidence_v3` 是两套检索，不共用命中合同。
+
+部署只有一个 embedding 模型（`KNOWLEDGEBRAIN_EMBEDDING_MODEL`）。API/worker 未同时配置 embedding URL 和 model 不得 ready。
+
+- 问答向量在 `chunk_embeddings`。版本身份是 `product_versions.embedding_model_id`，写入前冻成环境模型；空值和历史 `stub-emb` 不是模型名。
+- 招标 V3 向量在 `chunk_vector_indexes_v2`。身份是不可变 `embedding_revisions_v2`。同一 version 上若已有 V3 binding，其 `provider_model_identifier` 必须等于环境模型。
+- 不自动重建历史索引。未绑定却已有问答向量时，拒绝再写、拒绝用环境模型去查询。
+
+细则见 [`crate.md`](crate.md)。
 
 ## 2. KnowledgeRetrievalPort
 
@@ -105,7 +120,7 @@ attest 成功后产生 immutable attestation ID、canonical payload 与 SHA-256�
 
 图片ingestion在同一事务发布chunk、embedding、`knowledge_image_artifact_revisions`、`knowledge_image_ocr_chunk_artifact_mappings`和`knowledge_image_artifact`对象owner reference；输入中的OCR图片身份固定为`objects/{sha256}`，digest、实际图片格式、尺寸、ObjectRegistry byte length及幂等冲突全部fail closed。live资料退休时图片artifact owner继续保留不可变对象。
 
-唯一`KnowledgeRetrievalPortV3`返回上述媒体快照，knowledge-owned verifier证明来源链；招投标只冻结验证后的`EvidenceAssetArtifact`及Workspace `ai_evidence` asset，不通过live join回查知识库。该快照用于初稿/候选证据，用户确认后定点写入 DOCX 并保存；media/asset 存在不代表实际正文已包含图片。对象最终存储身份遵循平台 ObjectRegistry/namespace 合同，本节摄取 key 不另建存储真源。没有第二个检索/media端口，也没有V2/V3 runtime双模式；`knowledge-evidence-v2`只表示继续使用冻结的排序/policy合同。具体实现和验证见[`../../plans/knowledge-base/bidding-evidence-media-v3.md`](../../plans/knowledge-base/bidding-evidence-media-v3.md)。
+唯一`KnowledgeRetrievalPortV3`返回上述媒体快照，knowledge-owned verifier证明来源链；招投标只冻结验证后的`EvidenceAssetArtifact`及Workspace `ai_evidence` asset，不通过live join回查知识库。该快照用于初稿/候选证据，用户确认后定点写入 DOCX 并保存；media/asset 存在不代表实际正文已包含图片。对象最终存储身份遵循平台 ObjectRegistry/namespace 合同，本节摄取 key 不另建存储真源。没有第二个检索/media端口，也没有V2/V3 runtime双模式；`knowledge-evidence-v2`只表示继续使用冻结的排序/policy合同。接缝与验证清单见[`../../plans/knowledge-base/bidding-evidence-media-v3.md`](../../plans/knowledge-base/bidding-evidence-media-v3.md)。
 
 ## 3. 招投标边界
 
@@ -127,6 +142,8 @@ attest 成功后产生 immutable attestation ID、canonical payload 与 SHA-256�
 
 鉴权、队列运行时、ObjectRegistry、通用幂等/audit 和可观测性归 [`../platform/README.md`](../platform/README.md)。知识库使用这些能力，但不在本领域重新定义平台状态。
 
-## 5. 本轮不变项
+真源是 PostgreSQL；协调是 Oxana 队列。没有独立内存库。`DocJob` 只是单次 job 的工作行集。crate 目录与禁止项见 [`crate.md`](crate.md)。
 
-本次文档整理不改变 Workspace、Product、ProductVersion、Document、解析、索引、问答或检索算法的现有业务语义。任何后续知识库语义调整都必须先在 [`../../plans/knowledge-base/README.md`](../../plans/knowledge-base/README.md) 下独立评审。
+## 5. 语义变更纪律
+
+本文不改变 Workspace、Product、ProductVersion、Document、解析、索引、问答或检索算法的业务语义。后续语义调整必须先在 [`../../plans/knowledge-base/README.md`](../../plans/knowledge-base/README.md) 下独立评审。

@@ -2,9 +2,6 @@
 //! Never default to English or Chinese in call sites: env override, then
 //! version `chunk_languages`, then detect from the document text.
 
-use crate::Store;
-use uuid::Uuid;
-
 pub fn env_content_language() -> Option<String> {
     let raw = std::env::var("KNOWLEDGEBRAIN_CONTENT_LANGUAGE").ok()?;
     let t = raw.trim();
@@ -86,50 +83,9 @@ pub fn language_for_document_parts(
     infer_output_language(&sample)
 }
 
-pub fn language_for_document(store: &Store, document_id: Uuid) -> String {
-    if let Some(forced) = env_content_language() {
-        return forced;
-    }
-    if let Some(version) = store.effective_version(document_id)
-        && let Some(tag) = version
-            .chunk_languages
-            .iter()
-            .map(|s| s.trim())
-            .find(|s| !s.is_empty())
-    {
-        return normalize_language_tag(tag);
-    }
-    let mut sample = String::new();
-    if let Some(doc) = store.documents.get(&document_id) {
-        sample.push_str(&doc.title);
-        sample.push('\n');
-        sample.push_str(&doc.file_name);
-        sample.push('\n');
-        sample.push_str(&doc.markdown);
-    }
-    if sample
-        .chars()
-        .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
-        .count()
-        < 12
-    {
-        for chunk in store.chunks.values().filter(|c| {
-            c.document_id == document_id && matches!(c.chunk_type.as_str(), "text" | "image_ocr")
-        }) {
-            sample.push_str(&chunk.content);
-            sample.push('\n');
-            if sample.len() > 6000 {
-                break;
-            }
-        }
-    }
-    infer_output_language(&sample)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Document, ProductVersion, Store};
 
     #[test]
     fn detects_chinese_from_han() {
@@ -165,22 +121,11 @@ mod tests {
 
     #[test]
     fn version_chunk_languages_win() {
-        let mut store = Store::default();
-        let mut version = ProductVersion::new(Uuid::new_v4(), "v1".into());
-        version.chunk_languages = vec!["en".into()];
-        let vid = version.id;
-        let doc = Document::new(
-            vid,
-            "白皮书".into(),
-            "白皮书.docx".into(),
-            1,
-            "h".into(),
-            "k".into(),
+        let chunks = std::collections::HashMap::new();
+        assert_eq!(
+            language_for_document_parts("白皮书", &["en".into()], &chunks),
+            "English"
         );
-        let did = doc.id;
-        store.versions.insert(vid, version);
-        store.documents.insert(did, doc);
-        assert_eq!(language_for_document(&store, did), "English");
     }
 
     #[test]

@@ -1,17 +1,84 @@
 //! processChunks: write chunk rows, then vector/tsv for text (not parent_text).
 
 use crate::models::EMBEDDING_DIM;
-use crate::{Chunk, ChunkEmbedding, ParseStatus, Store, SummaryStatus};
-use chrono::Utc;
-use uuid::Uuid;
+use crate::{Chunk, ChunkEmbedding};
 
 pub fn embedding_http_configured() -> bool {
-    !crate::embedding_base_url().is_empty()
+    !platform::embedding_base_url().trim().is_empty()
+}
+
+/// Empty or leftover `stub-emb` rows are not a model identity.
+pub fn unbound_embedding_model(id: &str) -> bool {
+    let t = id.trim();
+    t.is_empty() || t == "stub-emb"
+}
+
+/// The single configured embedding model. Missing config is not a model name.
+pub fn live_embedding_model_id() -> Result<String, String> {
+    let model = platform::embedding_model();
+    if model.trim().is_empty() {
+        return Err("embedding model identity is empty".into());
+    }
+    Ok(model.trim().to_string())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmbeddingIdentity {
+    Use(String),
+    Bind(String),
+}
+
+/// Decide how to treat a version's stored embedding model id.
+pub fn embedding_identity_plan(
+    stored: &str,
+    has_embeddings: bool,
+    v3_model: Option<&str>,
+) -> Result<EmbeddingIdentity, String> {
+    let live = live_embedding_model_id()?;
+    if let Some(v3) = v3_model.map(str::trim).filter(|s| !s.is_empty())
+        && v3 != live
+    {
+        return Err(format!(
+            "embedding model conflict: v3 binding is {v3}, environment is {live}"
+        ));
+    }
+    let stored = stored.trim();
+    if unbound_embedding_model(stored) {
+        if has_embeddings {
+            return Err(format!(
+                "version already has embeddings under unknown identity; refusing to mix with {live}"
+            ));
+        }
+        return Ok(EmbeddingIdentity::Bind(live));
+    }
+    if stored != live {
+        return Err(format!(
+            "embedding model conflict: version frozen as {stored}, environment is {live}"
+        ));
+    }
+    Ok(EmbeddingIdentity::Use(stored.to_string()))
+}
+
+/// Query path: never substitute live for an unbound version.
+pub fn query_embedding_model_id(stored: &str) -> Result<String, String> {
+    if !embedding_http_configured() {
+        return Ok(stored.trim().to_string());
+    }
+    if unbound_embedding_model(stored) {
+        return Err(
+            "version embedding identity is unbound; freeze it before querying HTTP embeddings"
+                .into(),
+        );
+    }
+    match embedding_identity_plan(stored, false, None)? {
+        EmbeddingIdentity::Use(id) | EmbeddingIdentity::Bind(id) => Ok(id),
+    }
 }
 
 /// Search / taxonomy: HTTP when configured, else hashed stub. HTTP errors fall back.
 pub fn embed(text: &str) -> Vec<f32> {
-    if let Ok(v) = embed_http(text, "")
+    if embedding_http_configured()
+        && let Ok(v) = embed_http(text)
         && v.len() == EMBEDDING_DIM
     {
         return v;
@@ -19,10 +86,10 @@ pub fn embed(text: &str) -> Vec<f32> {
     stub_embed(text)
 }
 
-/// processChunks: configured HTTP must succeed; missing URL stays stub.
-pub fn embed_index(text: &str, model_id: &str) -> Result<Vec<f32>, String> {
+/// processChunks: configured HTTP must succeed with the live model; missing URL stays stub.
+pub fn embed_index(text: &str) -> Result<Vec<f32>, String> {
     if embedding_http_configured() {
-        embed_http(text, model_id)
+        embed_http(text)
     } else {
         Ok(stub_embed(text))
     }
@@ -173,108 +240,11 @@ pub fn keyword_score(query: &str, content: &str) -> f64 {
 }
 
 /// Brain processChunks + finalizeIndexedKnowledgeState.
-pub fn process_chunks(
-    store: &mut Store,
-    document_id: Uuid,
-    chunks: Vec<Chunk>,
-    has_multimodal: bool,
-) -> Result<(), String> {
-    let Some(doc) = store.documents.get(&document_id).cloned() else {
-        return Err("document missing".into());
-    };
-    if doc.parse_status.is_aborted() {
-        return Ok(());
-    }
-    let Some(version) = store.versions.get(&doc.product_version_id).cloned() else {
-        return Err("version missing".into());
-    };
-    store.clear_document_index(document_id);
-    if store
-        .documents
-        .get(&document_id)
-        .is_some_and(|d| d.parse_status.is_aborted())
-    {
-        return Ok(());
-    }
-    let title = doc.title.clone();
-    let model_id = version.embedding_model_id.clone();
-    let needs = version.needs_embedding();
-    let chunks = keep_nonempty_chunks(chunks);
-    let text_count = chunks.iter().filter(|c| c.chunk_type == "text").count();
-    for ch in chunks {
-        store.chunks.insert(ch.id, ch);
-    }
-    if store
-        .documents
-        .get(&document_id)
-        .is_some_and(|d| d.parse_status.is_aborted())
-    {
-        return Ok(());
-    }
-    if needs {
-        let pending: Vec<Chunk> = store
-            .chunks
-            .values()
-            .filter(|ch| {
-                ch.document_id == document_id
-                    && ch.chunk_type != "parent_text"
-                    && matches!(
-                        ch.chunk_type.as_str(),
-                        "text"
-                            | "image_ocr"
-                            | "image_caption"
-                            | "summary"
-                            | "wiki_page"
-                            | "question"
-                    )
-            })
-            .cloned()
-            .collect();
-        for ch in pending {
-            let content = ch.index_content(&title);
-            let vector = if version.vector_enabled {
-                embed_index(&content, &model_id)?
-            } else {
-                Vec::new()
-            };
-            let tsv = if version.keyword_enabled {
-                tokenize(&content).join(" ")
-            } else {
-                String::new()
-            };
-            store.embeddings.insert(
-                ch.id,
-                ChunkEmbedding {
-                    chunk_id: ch.id,
-                    product_version_id: doc.product_version_id,
-                    document_id,
-                    content,
-                    vector,
-                    tsv,
-                },
-            );
-        }
-    }
-    if let Some(d) = store.documents.get_mut(&document_id) {
-        d.enable_status = "enabled".into();
-        d.processed_at = Some(Utc::now());
-        d.summary_status = SummaryStatus::None;
-        if text_count == 0 && !has_multimodal {
-            d.parse_status = ParseStatus::Completed;
-            d.index_ready = true;
-        } else if !has_multimodal {
-            d.index_ready = true;
-        }
-    }
-    Ok(())
-}
-
 pub fn index_chunks(
     chunks: &[Chunk],
     title: &str,
     vector_on: bool,
     keyword_on: bool,
-    model_id: &str,
 ) -> Result<Vec<ChunkEmbedding>, String> {
     if !vector_on && !keyword_on {
         return Ok(Vec::new());
@@ -300,7 +270,7 @@ pub fn index_chunks(
             document_id: ch.document_id,
             content: content.clone(),
             vector: if vector_on {
-                embed_index(&content, model_id)?
+                embed_index(&content)?
             } else {
                 Vec::new()
             },
@@ -314,33 +284,10 @@ pub fn index_chunks(
     Ok(out)
 }
 
-pub fn index_one(
-    store: &mut Store,
-    chunk: &Chunk,
-    title: &str,
-    vector_on: bool,
-    keyword_on: bool,
-) -> Result<(), String> {
-    let model = store
-        .versions
-        .get(&chunk.product_version_id)
-        .map(|v| v.embedding_model_id.clone())
-        .unwrap_or_default();
-    index_one_in(
-        &mut store.embeddings,
-        chunk,
-        title,
-        &model,
-        vector_on,
-        keyword_on,
-    )
-}
-
 pub fn index_one_in(
     embeddings: &mut std::collections::HashMap<uuid::Uuid, crate::ChunkEmbedding>,
     chunk: &Chunk,
     title: &str,
-    model: &str,
     vector_on: bool,
     keyword_on: bool,
 ) -> Result<(), String> {
@@ -349,7 +296,7 @@ pub fn index_one_in(
     }
     let content = chunk.index_content(title);
     let vector = if vector_on {
-        embed_index(&content, model)?
+        embed_index(&content)?
     } else {
         Vec::new()
     };
@@ -371,30 +318,21 @@ pub fn index_one_in(
     Ok(())
 }
 
-fn embed_http(text: &str, model_id: &str) -> Result<Vec<f32>, String> {
+fn embed_http(text: &str) -> Result<Vec<f32>, String> {
     if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::task::block_in_place(|| embed_http_inner(text, model_id))
+        tokio::task::block_in_place(|| embed_http_inner(text))
     } else {
-        embed_http_inner(text, model_id)
+        embed_http_inner(text)
     }
 }
 
-fn embed_http_inner(text: &str, model_id: &str) -> Result<Vec<f32>, String> {
-    let base = crate::embedding_base_url();
+fn embed_http_inner(text: &str) -> Result<Vec<f32>, String> {
+    let base = platform::embedding_base_url();
     if base.is_empty() {
         return Err("embedding not configured".into());
     }
-    let key = crate::embedding_api_key();
-    let model = if model_id.trim().is_empty() || model_id == "stub-emb" {
-        let env = crate::embedding_model();
-        if env.is_empty() {
-            "stub-emb".into()
-        } else {
-            env
-        }
-    } else {
-        model_id.trim().to_string()
-    };
+    let key = platform::embedding_api_key();
+    let model = live_embedding_model_id()?;
     let url = embeddings_url(&base);
     let body = serde_json::json!({
         "model": model,
@@ -429,7 +367,8 @@ fn embeddings_url(base: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Document, ProductVersion, TEST_ENV_LOCK};
+    use crate::{Chunk, TEST_ENV_LOCK};
+    use uuid::Uuid;
 
     #[test]
     fn keyword_tokenizer_v2_goldens() {
@@ -458,157 +397,19 @@ mod tests {
     }
 
     #[test]
-    fn parent_text_not_vectorized() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
-        let mut s = Store::default();
-        let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
-        let vid = v.id;
-        s.versions.insert(vid, v);
-        let mut doc = Document::new(
-            vid,
-            "Title".into(),
-            "a.txt".into(),
-            1,
-            "h".into(),
-            "h".into(),
-        );
-        doc.parse_status = ParseStatus::Processing;
-        let did = doc.id;
-        s.documents.insert(did, doc);
-        let parent = Chunk {
-            id: Uuid::new_v4(),
-            document_id: did,
-            product_version_id: vid,
-            chunk_type: "parent_text".into(),
-            content: "parent body".into(),
-            context_header: String::new(),
-            start_at: 0,
-            end_at: 11,
-            parent_chunk_id: None,
-            generated_questions: Vec::new(),
-        };
-        let child = Chunk {
-            id: Uuid::new_v4(),
-            document_id: did,
-            product_version_id: vid,
-            chunk_type: "text".into(),
-            content: "child body".into(),
-            context_header: "H".into(),
-            start_at: 0,
-            end_at: 10,
-            parent_chunk_id: Some(parent.id),
-            generated_questions: Vec::new(),
-        };
-        process_chunks(&mut s, did, vec![parent.clone(), child.clone()], false).unwrap();
-        assert!(!s.embeddings.contains_key(&parent.id));
-        let emb = &s.embeddings[&child.id];
-        assert!(emb.content.starts_with("Title\n"));
-        assert!(emb.content.contains("H\n\nchild body"));
-        assert_eq!(s.documents[&did].enable_status, "enabled");
-        assert_eq!(s.documents[&did].summary_status, SummaryStatus::None);
-    }
-
-    #[test]
-    fn skips_blank_chunks_and_completes_without_text() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
-        let mut s = Store::default();
-        let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
-        let vid = v.id;
-        s.versions.insert(vid, v);
-        let mut doc = Document::new(vid, "T".into(), "a.txt".into(), 1, "h".into(), "h".into());
-        doc.parse_status = ParseStatus::Processing;
-        doc.summary_status = SummaryStatus::Pending;
-        let did = doc.id;
-        s.documents.insert(did, doc);
-        let blank = Chunk {
-            id: Uuid::new_v4(),
-            document_id: did,
-            product_version_id: vid,
-            chunk_type: "text".into(),
-            content: "   \n".into(),
-            context_header: String::new(),
-            start_at: 0,
-            end_at: 0,
-            parent_chunk_id: None,
-            generated_questions: Vec::new(),
-        };
-        process_chunks(&mut s, did, vec![blank], false).unwrap();
-        assert!(s.chunks.is_empty());
-        assert!(s.embeddings.is_empty());
-        assert_eq!(s.documents[&did].parse_status, ParseStatus::Completed);
-        assert_eq!(s.documents[&did].summary_status, SummaryStatus::None);
-    }
-
-    #[test]
-    fn process_chunks_keeps_rows_when_embed_fails() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap();
-        let prev_base = std::env::var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL").ok();
-        let prev_alias = std::env::var("EMBEDDING_BASE_URL").ok();
-        unsafe {
-            std::env::set_var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL", "http://127.0.0.1:1");
-            std::env::set_var("EMBEDDING_BASE_URL", "http://127.0.0.1:1");
-        }
-        let mut s = Store::default();
-        let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
-        let vid = v.id;
-        s.versions.insert(vid, v);
-        let mut doc = Document::new(vid, "T".into(), "a.txt".into(), 1, "h".into(), "h".into());
-        doc.parse_status = ParseStatus::Processing;
-        let did = doc.id;
-        s.documents.insert(did, doc);
-        let ch = Chunk {
-            id: Uuid::new_v4(),
-            document_id: did,
-            product_version_id: vid,
-            chunk_type: "text".into(),
-            content: "keep this chunk".into(),
-            context_header: String::new(),
-            start_at: 0,
-            end_at: 15,
-            parent_chunk_id: None,
-            generated_questions: Vec::new(),
-        };
-        let err = process_chunks(&mut s, did, vec![ch.clone()], false).unwrap_err();
-        unsafe {
-            match prev_base {
-                Some(v) => std::env::set_var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL", v),
-                None => std::env::remove_var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL"),
-            }
-            match prev_alias {
-                Some(v) => std::env::set_var("EMBEDDING_BASE_URL", v),
-                None => std::env::remove_var("EMBEDDING_BASE_URL"),
-            }
-        }
-        assert!(
-            err.contains("error") || err.contains("connect") || err.contains("llm"),
-            "{err}"
-        );
-        assert!(
-            s.chunks.contains_key(&ch.id),
-            "chunk must survive embed fail"
-        );
-        assert!(!s.embeddings.contains_key(&ch.id));
-    }
-
-    #[test]
     fn embed_index_without_url_is_stub() {
         let _guard = TEST_ENV_LOCK.lock().unwrap();
-        let v = embed_index("throughput 40gbps", "stub-emb").unwrap();
+        let v = embed_index("throughput 40gbps").unwrap();
         assert_eq!(v, stub_embed("throughput 40gbps"));
     }
 
     #[test]
     fn index_one_writes_vector_from_embed_index() {
         let _guard = TEST_ENV_LOCK.lock().unwrap();
-        let mut s = Store::default();
-        let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
-        let vid = v.id;
-        s.versions.insert(vid, v);
-        let did = Uuid::new_v4();
         let ch = Chunk {
             id: Uuid::new_v4(),
-            document_id: did,
-            product_version_id: vid,
+            document_id: Uuid::new_v4(),
+            product_version_id: Uuid::new_v4(),
             chunk_type: "text".into(),
             content: "throughput 40gbps".into(),
             context_header: String::new(),
@@ -617,8 +418,9 @@ mod tests {
             parent_chunk_id: None,
             generated_questions: Vec::new(),
         };
-        index_one(&mut s, &ch, "T", true, true).unwrap();
-        let emb = &s.embeddings[&ch.id];
+        let mut embeddings = std::collections::HashMap::new();
+        index_one_in(&mut embeddings, &ch, "T", true, true).unwrap();
+        let emb = &embeddings[&ch.id];
         assert_eq!(emb.vector, stub_embed(&ch.index_content("T")));
         assert!(!emb.tsv.is_empty());
     }
@@ -630,5 +432,61 @@ mod tests {
         assert!((cosine(&v, &v) - 1.0).abs() < 1e-5);
         let via = embed("throughput 40gbps");
         assert_eq!(via, v);
+    }
+
+    fn with_live_embedding_env<T>(url: &str, model: &str, f: impl FnOnce() -> T) -> T {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL", url);
+            std::env::set_var("KNOWLEDGEBRAIN_EMBEDDING_MODEL", model);
+            std::env::remove_var("EMBEDDING_BASE_URL");
+            std::env::remove_var("EMBEDDING_MODEL");
+        }
+        let out = f();
+        unsafe {
+            std::env::remove_var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL");
+            std::env::remove_var("KNOWLEDGEBRAIN_EMBEDDING_MODEL");
+        }
+        out
+    }
+
+    #[test]
+    fn identity_plan_binds_unbound_without_vectors() {
+        with_live_embedding_env("http://127.0.0.1:9", "live-emb", || {
+            assert_eq!(
+                embedding_identity_plan("", false, None).unwrap(),
+                EmbeddingIdentity::Bind("live-emb".into())
+            );
+            assert_eq!(
+                embedding_identity_plan("stub-emb", false, None).unwrap(),
+                EmbeddingIdentity::Bind("live-emb".into())
+            );
+        });
+    }
+
+    #[test]
+    fn identity_plan_rejects_unbound_with_vectors() {
+        with_live_embedding_env("http://127.0.0.1:9", "live-emb", || {
+            let err = embedding_identity_plan("stub-emb", true, None).unwrap_err();
+            assert!(err.contains("unknown identity"), "{err}");
+        });
+    }
+
+    #[test]
+    fn identity_plan_rejects_frozen_other_model() {
+        with_live_embedding_env("http://127.0.0.1:9", "live-emb", || {
+            let err = embedding_identity_plan("other-emb", false, None).unwrap_err();
+            assert!(err.contains("frozen as other-emb"), "{err}");
+            let err = embedding_identity_plan("live-emb", false, Some("v3-other")).unwrap_err();
+            assert!(err.contains("v3 binding"), "{err}");
+        });
+    }
+
+    #[test]
+    fn query_rejects_unbound_when_http_configured() {
+        with_live_embedding_env("http://127.0.0.1:9", "live-emb", || {
+            assert!(query_embedding_model_id("stub-emb").is_err());
+            assert_eq!(query_embedding_model_id("live-emb").unwrap(), "live-emb");
+        });
     }
 }

@@ -2,15 +2,16 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Alert } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Crumbs } from "../Crumbs";
-import { go, parseBidRoute, useHash } from "../hash";
+import { parseBidRoute, useHash } from "../hash";
 import { Shell } from "../Shell";
 import { createMutationAttempt } from "../api";
 import { BidTree } from "./BidTree";
 import { FilesPane } from "./FilesPane";
-import { authoringHref, type AuthoringStep } from "./authoring/routes";
+import { type AuthoringStep } from "./authoring/routes";
 import { createBidV2Client } from "./api/client";
 import { docxApi, type DocxCurrent } from "./api/docx";
 import type { BidProjectView, TenderDocumentView } from "./api/types";
+import { AnalysisProgress } from "./authoring/AnalysisProgress";
 import { DocxEditor } from "./authoring/DocxEditor";
 import { DocxStart } from "./authoring/DocxStart";
 
@@ -58,12 +59,14 @@ function DocxGate({ email, projectId, step, tree }: { email: string; projectId: 
         <Button size="sm" className="mt-2" onClick={() => setRetry((value) => value + 1)}>重试</Button>
       </Alert>
         : !result ? <p role="status">正在读取当前稿件…</p>
-        : (creating || (!result.current && step === "authoring" && result.project.status !== "ended")) ? <DocxStart key={result.project.workspace_id} workspaceId={result.project.workspace_id} onUnsafeChange={setUnsafe}
-          onCancel={() => { setCreating(false); setUnsafe(false); if (!result.current) go(authoringHref(projectId, "files")); }}
-          onPublished={() => { setCreating(false); setUnsafe(false); setResult(null); setRetry(value => value + 1); }} />
         : step === "authoring" && result.project.status !== "ended"
-          ? <DocxEditor key={result.project.workspace_id} workspaceId={result.project.workspace_id}
-            onUnsafeChange={setUnsafe} onCreateRound={() => setCreating(true)} />
+          ? <AnalysisProgress projectId={projectId}>
+              {(creating || !result.current)
+                ? <DocxStart key={result.project.workspace_id} workspaceId={result.project.workspace_id} onUnsafeChange={setUnsafe}
+                    onPublished={() => { setCreating(false); setUnsafe(false); setResult(null); setRetry(value => value + 1); }} />
+                : <DocxEditor key={result.project.workspace_id} workspaceId={result.project.workspace_id}
+                    onUnsafeChange={setUnsafe} onCreateRound={() => setCreating(true)} />}
+            </AnalysisProgress>
           : result.current ? <SavedDocx workspaceId={result.project.workspace_id} current={result.current} /> : <p>尚未创建 DOCX 投标稿。</p>}
     </div>
   </Shell>;
@@ -92,7 +95,6 @@ function ProjectFiles({ email, projectId, tree }: { email: string; projectId: st
   const [pending, setPending] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => {
     const abort = new AbortController();
     const read = async () => {
@@ -112,31 +114,16 @@ function ProjectFiles({ email, projectId, tree }: { email: string; projectId: st
     catch { setError("上传结果未全部确认，请核对文件列表后重试。"); }
     finally { setBusy(false); setPending([]); }
   }
-  async function freeze() {
-    if (busy) return;
-    setBusy(true); setError(null);
-    try {
-      const sets = await client.listDocumentSets(projectId);
-      const expected = sets[0] ?? null;
-      await client.freezeDocumentSet(projectId, docs.map(doc => doc.id), expected, createMutationAttempt());
-      setNotice("文件集已冻结，要求整理完成后可在编制页生成模板。");
-    } catch { setError("文件冻结未成功，请核对文件处理状态后重试。"); }
-    finally { setBusy(false); }
-  }
   return <Shell root="bids" email={email}
     crumbs={<Crumbs items={[{ label: "投标项目", href: "/" }, { label: project?.title ?? "招标文件" }, { label: "文件" }]} />}
     tree={tree}>
     <div className="wrap stack">
       {error && <Alert className="mb-2">{error}</Alert>}
-      {notice && <Alert tone="go" className="mb-2">{notice}</Alert>}
+      <AnalysisProgress projectId={projectId} allowStart={false} />
       <FilesPane docs={docs} ended={project?.status === "ended"} uploading={busy && pending.length > 0}
         pendingNames={pending} onUpload={files => void upload(files)}
         onRetry={doc => void client.retryTenderDocument(projectId, doc.id, doc.conversion_generation, createMutationAttempt())
           .catch(() => setError("重试处理失败，请刷新后重试。"))} />
-      <div className="panel-foot">
-        <Button disabled={busy || !project || project.status === "ended" || !docs.length}
-          onClick={() => void freeze()}>冻结文件并整理要求</Button>
-      </div>
     </div>
   </Shell>;
 }

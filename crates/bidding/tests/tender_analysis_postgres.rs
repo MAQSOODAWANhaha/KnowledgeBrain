@@ -3244,3 +3244,436 @@ async fn source_review_final_batch_recovers_without_extra_model_calls_or_double_
     }
     pool.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires KB_TENDER_AGENT_TEST_DATABASE_URL pointing to a fresh owned test database"]
+async fn repair_checkpoint_rejects_malformed_dispositions_without_changing_saved_state() {
+    use bidding::tender_analysis::agent::{self, Journal};
+    let url =
+        std::env::var("KB_TENDER_AGENT_TEST_DATABASE_URL").expect("dedicated test URL required");
+    let pool = PgPool::connect(&url).await.unwrap();
+    let db: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        db.starts_with("knowledgebrain_test_"),
+        "refuse non-test database"
+    );
+    let (request, input) = seed(&pool).await;
+    let owner = composition_claim(&pool, &request).await;
+    let journal = LostReviewAck {
+        journal: postgres::PgJournal {
+            pool: &pool,
+            request: &request,
+            owner: &owner,
+            source_reader: None,
+        },
+        fail_turn: usize::MAX,
+        fail_sequence: Some(1),
+        reject_prepared: false,
+    };
+    let model = script(&input);
+    assert_eq!(
+        agent::run(
+            &input,
+            &config(),
+            &journal,
+            &model,
+            &CancellationToken::new()
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "INTERNAL"
+    );
+    let saved = journal.load().await.unwrap().unwrap();
+    let empty_tasks = json!(saved.repair.tasks);
+    assert_eq!(empty_tasks["entries"], json!({}));
+    assert_eq!(empty_tasks["aliases"], json!({}));
+    assert_eq!(
+        json!(saved.repair),
+        json!({"feedback_sha256":null,"baseline":{},"results":{},"tasks":empty_tasks})
+    );
+    for (index,repair) in [
+        json!(null),
+        json!({"feedback_sha256":null,"baseline":{},"results":{},"approve":true}),
+        json!({"feedback_sha256":"bad","baseline":{},"results":{}}),
+        json!({"feedback_sha256":null,"baseline":{"record:invented":"a".repeat(64)},"results":{}}),
+        json!({"feedback_sha256":"a".repeat(64),"baseline":{},"results":{ "bad":{"conclusion":"verified"}}}),
+        json!({"feedback_sha256":"a".repeat(64),"baseline":{},"results":{
+            "b".repeat(64):{"conclusion":"disputed","summary":"","sources":[],"candidate_versions":{}}}}),
+    ].into_iter().enumerate() {
+        let mut invalid = json!(saved);
+        invalid["journal"]["sequence"] = json!(saved.journal.sequence + 1);
+        let mut repair = repair;
+        if let Some(object) = repair.as_object_mut() {
+            object.insert("tasks".into(), empty_tasks.clone());
+        }
+        invalid["repair"] = repair;
+        let error = sqlx::query(
+            "SELECT kb_bid_v2_tender_agent_checkpoint_put($1,$2::kb_sha256,$3,$4,$5,$6)",
+        )
+        .bind(request.request_artifact_id)
+        .bind(&request.frozen_input_sha256)
+        .bind(owner.attempt)
+        .bind(owner.execution_owner_token)
+        .bind(invalid)
+        .bind(json!({}))
+        .execute(&pool)
+        .await
+        .unwrap_err();
+        assert_eq!(error.as_database_error().unwrap().message(), if index < 3 {
+            "FROZEN_INPUT_DIGEST_MISMATCH: checkpoint sequence, identity or budget"
+        } else { "FROZEN_INPUT_DIGEST_MISMATCH: repair disposition shape" }, "{error}");
+        assert_eq!(json!(journal.load().await.unwrap().unwrap()), json!(saved));
+    }
+    // The rejected writes do not strand the original durable reservation.
+    let result = agent::run(
+        &input,
+        &config(),
+        &journal.journal,
+        &model,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.quality, "verified");
+    pool.close().await;
+}
+
+// Synthetic ledger transitions isolate SQL persistence guarantees. They do not
+// claim that the scripted model has extracted or independently approved a tender.
+#[tokio::test]
+#[ignore = "requires KB_TENDER_AGENT_TEST_DATABASE_URL pointing to a fresh owned test database"]
+async fn repair_task_checkpoint_preserves_accounting_and_boundary_atomicity() {
+    use bidding::tender_analysis::agent::{self, Journal};
+
+    async fn put(journal: &postgres::PgJournal<'_>, value: &Value) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT kb_bid_v2_tender_agent_checkpoint_put($1,$2::kb_sha256,$3,$4,$5,$6)")
+            .bind(journal.request.request_artifact_id)
+            .bind(&journal.request.frozen_input_sha256)
+            .bind(journal.owner.attempt)
+            .bind(journal.owner.execution_owner_token)
+            .bind(value)
+            .bind(json!({}))
+            .execute(journal.pool)
+            .await
+            .map(|_| ())
+    }
+    fn digest(value: &Value) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(
+            serde_json_canonicalizer::to_vec(value).unwrap(),
+        ))
+    }
+    let url =
+        std::env::var("KB_TENDER_AGENT_TEST_DATABASE_URL").expect("dedicated test URL required");
+    let pool = PgPool::connect(&url).await.unwrap();
+    let db: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        db.starts_with("knowledgebrain_test_"),
+        "refuse non-test database"
+    );
+    let (request, input) = seed(&pool).await;
+    let owner = composition_claim(&pool, &request).await;
+    let journal = LostReviewAck {
+        journal: postgres::PgJournal {
+            pool: &pool,
+            request: &request,
+            owner: &owner,
+            source_reader: None,
+        },
+        fail_turn: usize::MAX,
+        fail_sequence: Some(20),
+        reject_prepared: false,
+    };
+    let error = agent::run(
+        &input,
+        &config(),
+        &journal,
+        &script(&input),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "INTERNAL", "{error:?}");
+    let mut committed = journal.load().await.unwrap().unwrap();
+    let body = committed.journal.body().unwrap().to_vec();
+    let response = committed.journal.response().unwrap().clone();
+    committed.journal.committed().unwrap();
+    committed.turn += 1;
+    committed.tool_calls += 1;
+    let mut committed = json!(committed);
+    let source = &input.source_units[0];
+    let finding = json!({"code":"FIELD_RECHECK","message":"Check source correspondence",
+        "correction":"Compare the cited source", "affected":[],
+        "sources":[{"source_id":source.source_unit_revision_id,"start":0,"end":source.text.len()}]});
+    let finding_sha = digest(&finding);
+    committed["review_draft"] = json!({"a":finding,"b":finding});
+    let feedback_sha = digest(&json!([committed["review_rounds"], [finding, finding]]));
+    let entry = |spent| {
+        json!({"finding_sha256":finding_sha,"committed_turns":spent,
+        "watch":{"no_progress_turns":0,"focus_turns":0,"replans":1,"recovery":"running"},
+        "attempted_dependencies":["d".repeat(64)],"inherited_blocked":false})
+    };
+    committed["repair"]["tasks"] = json!({"active":null,"aliases":{"a":"a","b":"b"},
+        "entries":{"a":entry(0),"b":entry(0)},"feedback_sha256":feedback_sha,
+        "last_committed_turn":null});
+    put(&journal.journal, &committed).await.unwrap();
+    // Establish historical spend through actual three-boundary writes.
+    for id in ["a", "b", "b"] {
+        let mut next: agent::Checkpoint = serde_json::from_value(committed.clone()).unwrap();
+        next.journal.prepare(next.turn, "main", &body).unwrap();
+        let mut next = json!(next);
+        next["repair"]["tasks"]["active"] = json!(id);
+        next["main_progress"]["watch"] = next["repair"]["tasks"]["entries"][id]["watch"].clone();
+        let next: agent::Checkpoint = serde_json::from_value(next).unwrap();
+        journal.journal.reserve(&next, &body).await.unwrap();
+        let mut next = next;
+        next.journal.responded(response.clone()).unwrap();
+        journal.journal.save(&next, &json!({})).await.unwrap();
+        next.journal.committed().unwrap();
+        next.turn += 1;
+        next.tool_calls += 1;
+        let mut next = json!(next);
+        next["repair"]["tasks"]["entries"][id]["committed_turns"] = json!(
+            next["repair"]["tasks"]["entries"][id]["committed_turns"]
+                .as_u64()
+                .unwrap()
+                + 1
+        );
+        next["repair"]["tasks"]["last_committed_turn"] = next["turn"].clone();
+        put(&journal.journal, &next).await.unwrap();
+        committed = next;
+    }
+    // Repeating the exact committed payload is idempotent, including spent turns.
+    put(&journal.journal, &committed).await.unwrap();
+    assert_eq!(json!(journal.load().await.unwrap().unwrap()), committed);
+
+    let mut prepared: agent::Checkpoint = serde_json::from_value(committed.clone()).unwrap();
+    prepared
+        .journal
+        .prepare(prepared.turn, "main", &body)
+        .unwrap();
+    let prepared = json!(prepared);
+    sqlx::query("SELECT kb_bid_v2_tender_agent_reserve($1,$2::kb_sha256,$3,$4,$5,$6,$7)")
+        .bind(request.request_artifact_id)
+        .bind(&request.frozen_input_sha256)
+        .bind(owner.attempt)
+        .bind(owner.execution_owner_token)
+        .bind(committed["turn"].as_i64().unwrap() as i32)
+        .bind("main")
+        .bind(&body)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let tasks_path = "/repair/tasks";
+    for (path, replacement, message) in [
+        (
+            "/repair/tasks/active",
+            json!("missing"),
+            "repair task alias",
+        ),
+        (
+            "/repair/tasks/aliases/b",
+            json!("missing"),
+            "repair task alias",
+        ),
+        (
+            "/repair/tasks/entries/a/committed_turns",
+            json!(-1),
+            "repair task shape",
+        ),
+        (
+            "/repair/tasks/entries/a/committed_turns",
+            json!(0),
+            "repair task accounting",
+        ),
+        (
+            "/repair/tasks/entries/a/watch/replans",
+            json!(0),
+            "repair task accounting",
+        ),
+        (
+            "/repair/tasks/entries/a/attempted_dependencies",
+            json!([]),
+            "repair task accounting",
+        ),
+        (
+            "/repair/tasks/last_committed_turn",
+            json!(0),
+            "repair task accounting",
+        ),
+        (
+            "/repair/tasks/entries/a/finding_sha256",
+            json!("f".repeat(64)),
+            "repair task finding identity",
+        ),
+        (
+            "/repair/tasks/feedback_sha256",
+            json!("f".repeat(64)),
+            "repair task feedback identity",
+        ),
+        (
+            "/repair/tasks/entries/a/attempted_dependencies",
+            json!(["bad"]),
+            "repair task shape",
+        ),
+        (
+            "/repair/tasks/entries/a/attempted_dependencies",
+            json!(["d".repeat(64), "d".repeat(64)]),
+            "repair task shape",
+        ),
+        (
+            "/repair/tasks/entries/a/committed_turns",
+            json!(2),
+            "preparation charged repair task",
+        ),
+        (
+            "/main_progress/watch/focus_turns",
+            json!(99),
+            "preparation detached task watch",
+        ),
+        (
+            "/analysis/dispositions",
+            json!({"invented":{}}),
+            "preparation changed business state",
+        ),
+        (
+            "/main_progress/seen",
+            json!(["invented"]),
+            "preparation changed business state",
+        ),
+        (
+            "/repair/baseline",
+            json!({"record:invented":"a".repeat(64)}),
+            "repair disposition shape",
+        ),
+    ] {
+        let mut invalid = prepared.clone();
+        *invalid.pointer_mut(path).unwrap() = replacement;
+        let error = put(&journal.journal, &invalid).await.unwrap_err();
+        assert!(
+            error
+                .as_database_error()
+                .unwrap()
+                .message()
+                .ends_with(message),
+            "{path}: {error}"
+        );
+        assert_eq!(json!(journal.load().await.unwrap().unwrap()), committed);
+    }
+    let mut detached = prepared.clone();
+    detached["repair"]["tasks"]["active"] = json!(null);
+    detached["main_progress"]["watch"]["focus_turns"] = json!(99);
+    let error = put(&journal.journal, &detached).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("preparation detached task watch")
+    );
+    assert_eq!(json!(journal.load().await.unwrap().unwrap()), committed);
+    for key in ["entries", "aliases"] {
+        let mut invalid = prepared.clone();
+        invalid.pointer_mut(tasks_path).unwrap()[key]
+            .as_object_mut()
+            .unwrap()
+            .remove("b");
+        assert!(put(&journal.journal, &invalid).await.is_err());
+        assert_eq!(json!(journal.load().await.unwrap().unwrap()), committed);
+    }
+    let mut merged = prepared;
+    merged["repair"]["tasks"]["aliases"]["b"] = json!("a");
+    merged["repair"]["tasks"]["active"] = json!("a");
+    let undercounted = put(&journal.journal, &merged).await.unwrap_err();
+    assert!(undercounted.to_string().contains("merge lost accounting"));
+    merged["repair"]["tasks"]["entries"]["a"]["committed_turns"] = json!(3);
+    // A retired entry remains byte-for-byte; only its alias is redirected.
+    assert_eq!(
+        merged["repair"]["tasks"]["entries"]["b"],
+        committed["repair"]["tasks"]["entries"]["b"]
+    );
+    put(&journal.journal, &merged).await.unwrap();
+    let mut received: agent::Checkpoint = serde_json::from_value(merged.clone()).unwrap();
+    received.journal.responded(response.clone()).unwrap();
+    let received = json!(received);
+    let mut forged = received.clone();
+    forged["repair"]["tasks"]["active"] = json!(null);
+    let error = put(&journal.journal, &forged).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("response boundary changed prepared state")
+    );
+    assert_eq!(json!(journal.load().await.unwrap().unwrap()), merged);
+    put(&journal.journal, &received).await.unwrap();
+    let mut final_state: agent::Checkpoint = serde_json::from_value(received).unwrap();
+    final_state.journal.committed().unwrap();
+    final_state.turn += 1;
+    final_state.tool_calls += 1;
+    let mut final_state = json!(final_state);
+    final_state["repair"]["tasks"]["last_committed_turn"] = final_state["turn"].clone();
+    final_state["repair"]["tasks"]["entries"]["a"]["committed_turns"] = json!(4);
+    for (a_spent, b_spent, last_turn) in [
+        (3, 2, final_state["turn"].clone()),
+        (3, 3, final_state["turn"].clone()),
+        (4, 2, merged["turn"].clone()),
+    ] {
+        let mut invalid = final_state.clone();
+        invalid["repair"]["tasks"]["entries"]["a"]["committed_turns"] = json!(a_spent);
+        invalid["repair"]["tasks"]["entries"]["b"]["committed_turns"] = json!(b_spent);
+        invalid["repair"]["tasks"]["last_committed_turn"] = last_turn;
+        let error = put(&journal.journal, &invalid).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("committed batch repair task charge"),
+            "{error}"
+        );
+    }
+    put(&journal.journal, &final_state).await.unwrap();
+    put(&journal.journal, &final_state).await.unwrap();
+    assert_eq!(json!(journal.load().await.unwrap().unwrap()), final_state);
+    assert_eq!(
+        final_state["repair"]["tasks"]["entries"]["a"]["committed_turns"],
+        json!(4)
+    );
+    // If the charged canonical task retires in this same commit, both its
+    // history and the winning ledger retain the charged turn.
+    let mut retiring: agent::Checkpoint = serde_json::from_value(final_state).unwrap();
+    retiring
+        .journal
+        .prepare(retiring.turn, "main", &body)
+        .unwrap();
+    journal.journal.reserve(&retiring, &body).await.unwrap();
+    retiring.journal.responded(response).unwrap();
+    journal.journal.save(&retiring, &json!({})).await.unwrap();
+    retiring.journal.committed().unwrap();
+    retiring.turn += 1;
+    retiring.tool_calls += 1;
+    let mut retiring = json!(retiring);
+    retiring["repair"]["tasks"]["last_committed_turn"] = retiring["turn"].clone();
+    retiring["repair"]["tasks"]["active"] = json!("b");
+    retiring["repair"]["tasks"]["aliases"] = json!({"a":"b","b":"b"});
+    retiring["repair"]["tasks"]["entries"]["a"]["committed_turns"] = json!(5);
+    retiring["repair"]["tasks"]["entries"]["b"]["committed_turns"] = json!(5);
+    for missed in ["a", "b"] {
+        let mut invalid = retiring.clone();
+        invalid["repair"]["tasks"]["entries"][missed]["committed_turns"] = json!(4);
+        let error = put(&journal.journal, &invalid).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("committed batch repair task charge"),
+            "{error}"
+        );
+    }
+    put(&journal.journal, &retiring).await.unwrap();
+    put(&journal.journal, &retiring).await.unwrap();
+    assert_eq!(json!(journal.load().await.unwrap().unwrap()), retiring);
+    pool.close().await;
+}

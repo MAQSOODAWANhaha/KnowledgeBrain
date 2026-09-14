@@ -560,6 +560,8 @@ pub async fn enqueue_bid_authoring_v2(
                         project_id,
                         document_set_revision_id,
                         disposition_set_revision_id,
+                        reclaim: false,
+                        reclaim_attempt: 0,
                     },
                 )
                 .await,
@@ -621,6 +623,40 @@ pub async fn enqueue_bid_authoring_v2(
                 .await,
         ),
     }
+}
+
+pub async fn enqueue_requirement_set_compile_reclaim(
+    payload: crate::BidAuthoringJobPayloadV2,
+    reclaim_attempt: i32,
+) -> Result<Option<String>, String> {
+    payload.validate().map_err(str::to_owned)?;
+    let crate::BidAuthoringJobPayloadV2::RequirementSetCompile {
+        request,
+        project_id,
+        document_set_revision_id,
+        disposition_set_revision_id,
+    } = payload
+    else {
+        return Err("reclaim is only valid for requirement set compilation".into());
+    };
+    let Ok(storage) = oxana_connect() else {
+        return Ok(None);
+    };
+    oxana_id(
+        storage
+            .enqueue(
+                crate::BidAuthoringV2Queue,
+                crate::RequirementSetCompileJobV2 {
+                    request,
+                    project_id,
+                    document_set_revision_id,
+                    disposition_set_revision_id,
+                    reclaim: true,
+                    reclaim_attempt,
+                },
+            )
+            .await,
+    )
 }
 
 pub async fn enqueue_semantic_index_v2(

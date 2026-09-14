@@ -5,7 +5,7 @@ use super::{
     *,
 };
 use crate::{
-    agent_error::{AgentError, RetryDisposition},
+    agent_error::{AgentError, RequestQueueEffect},
     bid_authoring_v2::AgentRunLease,
 };
 use async_trait::async_trait;
@@ -210,11 +210,26 @@ impl Journal for PgJournal<'_> {
         .await
         .map_err(db_error)?;
         if value.is_some() {
-            sqlx::query("SELECT kb_bid_v2_tender_agent_checkpoint_put($1,$2::kb_sha256,$3,$4,$5,$6)")
-                .bind(self.request.request_artifact_id).bind(&self.request.frozen_input_sha256)
-                .bind(self.owner.attempt).bind(self.owner.execution_owner_token)
-                .bind(serde_json::to_value(state).map_err(invalid)?).bind(serde_json::json!({"checkpoint_sequence":state.journal.sequence,"boundary":"prepared"}))
-                .execute(&mut *tx).await.map_err(db_error)?;
+            sqlx::query(
+                "SELECT kb_bid_v2_tender_agent_checkpoint_put($1,$2::kb_sha256,$3,$4,$5,$6)",
+            )
+            .bind(self.request.request_artifact_id)
+            .bind(&self.request.frozen_input_sha256)
+            .bind(self.owner.attempt)
+            .bind(self.owner.execution_owner_token)
+            .bind(serde_json::to_value(state).map_err(invalid)?)
+            .bind(json!({
+                "phase": if state.role == Role::Main { "main" } else { "reviewer" },
+                "turn": state.turn,
+                "tool_calls": state.tool_calls,
+                "review_rounds": state.review_rounds,
+                "records": state.analysis.records.len(),
+                "checkpoint_sequence": state.journal.sequence,
+                "boundary": "prepared",
+            }))
+            .execute(&mut *tx)
+            .await
+            .map_err(db_error)?;
         }
         tx.commit().await.map_err(db_error)?;
         value
@@ -443,36 +458,75 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
         (Err(_), Some(error)) => Err(error),
         (Err(error), None) => Err(error),
     };
-    // The scoped provider/work future has been dropped before owner release.
-    match result {
-        Ok(v) => Ok(v),
-        Err(e) if e.disposition == RetryDisposition::Obsolete => {
-            Ok(json!({"disposition":"obsolete"}))
+    persist_attempt_outcome(pool, request, &owner, result).await
+}
+
+async fn persist_attempt_outcome(
+    pool: &PgPool,
+    request: &BidAuthoringRequestIdentityV2,
+    owner: &AgentRunLease,
+    result: Result<Value, AgentError>,
+) -> Result<Value, AgentError> {
+    let error = match result {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    match error.request_queue_effect() {
+        RequestQueueEffect::AckObsolete => Ok(json!({"disposition":"obsolete"})),
+        RequestQueueEffect::RetryUnchanged => Err(error),
+        RequestQueueEffect::ReleaseThenRetry => {
+            let _ = sqlx::query(
+                "SELECT kb_bid_v2_tender_agent_yield_for_retry($1,$2::kb_sha256,$3,$4,$5,$6)",
+            )
+            .bind(request.request_artifact_id)
+            .bind(&request.frozen_input_sha256)
+            .bind(owner.attempt)
+            .bind(owner.execution_owner_token)
+            .bind("INTERNAL")
+            .bind(&error.message)
+            .execute(pool)
+            .await;
+            Err(error)
         }
-        Err(e) => {
-            let sql = if e.disposition == RetryDisposition::Transient {
-                "SELECT kb_bid_v2_tender_agent_yield_for_retry($1,$2::kb_sha256,$3,$4,$5,$6)"
-            } else {
-                "SELECT kb_bid_v2_tender_agent_fail($1,$2::kb_sha256,$3,$4,$5,$6)"
-            };
-            let recorded = sqlx::query(sql)
-                .bind(request.request_artifact_id)
-                .bind(&request.frozen_input_sha256)
-                .bind(owner.attempt)
-                .bind(owner.execution_owner_token)
-                .bind(&e.code)
-                .bind(&e.message)
-                .execute(pool)
-                .await
-                .map_err(db_error);
-            match recorded {
-                Err(recorded) if recorded.disposition == RetryDisposition::Obsolete => {
+        RequestQueueEffect::YieldThenRetry => {
+            record_attempt_sql(pool, request, owner, true, &error).await?;
+            Err(error)
+        }
+        RequestQueueEffect::FailRequest => {
+            match record_attempt_sql(pool, request, owner, false, &error).await {
+                Ok(()) => Ok(json!({"status":"failed","error_code":error.code})),
+                Err(recorded)
+                    if recorded.request_queue_effect() == RequestQueueEffect::AckObsolete =>
+                {
                     Ok(json!({"disposition":"obsolete"}))
                 }
                 Err(recorded) => Err(recorded),
-                Ok(_) if e.disposition == RetryDisposition::Transient => Err(e),
-                Ok(_) => Ok(json!({"status":"failed","error_code":e.code})),
             }
         }
     }
+}
+
+async fn record_attempt_sql(
+    pool: &PgPool,
+    request: &BidAuthoringRequestIdentityV2,
+    owner: &AgentRunLease,
+    yield_for_retry: bool,
+    error: &AgentError,
+) -> Result<(), AgentError> {
+    let sql = if yield_for_retry {
+        "SELECT kb_bid_v2_tender_agent_yield_for_retry($1,$2::kb_sha256,$3,$4,$5,$6)"
+    } else {
+        "SELECT kb_bid_v2_tender_agent_fail($1,$2::kb_sha256,$3,$4,$5,$6)"
+    };
+    sqlx::query(sql)
+        .bind(request.request_artifact_id)
+        .bind(&request.frozen_input_sha256)
+        .bind(owner.attempt)
+        .bind(owner.execution_owner_token)
+        .bind(&error.code)
+        .bind(&error.message)
+        .execute(pool)
+        .await
+        .map(|_| ())
+        .map_err(db_error)
 }

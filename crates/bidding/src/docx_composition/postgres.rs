@@ -465,7 +465,7 @@ pub async fn get_manifest_identity(
     workspace: Uuid,
     version: Uuid,
     actor: &str,
-) -> Result<Option<serde_json::Value>, AgentError> {
+) -> Result<Option<serde_json::Value>, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kb_bid_v2_get_docx_composition_manifest($1,$2,$3::kb_actor_identity)",
     )
@@ -474,5 +474,4 @@ pub async fn get_manifest_identity(
     .bind(actor)
     .fetch_one(pool)
     .await
-    .map_err(db_error)
 }

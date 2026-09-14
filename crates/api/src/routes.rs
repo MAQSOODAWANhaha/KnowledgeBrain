@@ -49,8 +49,9 @@ where
 }
 use knowledge::{
     ApiKey, Document, ParseStatus, Product, ProductKind, ProductVersion, Role, Tag, VersionStatus,
-    Workspace, is_audio_type, is_image_type, is_valid_file_type, is_video,
+    Workspace,
 };
+use platform::{is_audio_type, is_image_type, is_valid_file_type, is_video};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -233,12 +234,12 @@ async fn health(State(_state): State<AppState>) -> Json<HealthBody> {
     })
 }
 
-async fn live() -> Json<knowledge::LiveBody> {
+async fn live() -> Json<platform::LiveBody> {
     Json(platform::live_body("api"))
 }
 
-async fn ready() -> (StatusCode, Json<knowledge::ReadyBody>) {
-    let check = knowledge::check_readiness(platform::SchemaComponentKind::Api).await;
+async fn ready() -> (StatusCode, Json<platform::ReadyBody>) {
+    let check = platform::check_readiness(platform::SchemaComponentKind::Api).await;
     let status = if check.is_ready() {
         StatusCode::OK
     } else {
@@ -905,7 +906,7 @@ async fn create_product(
             name: body.name,
             slug: body.slug,
             current_version_id: None,
-            embedding_model_id: "stub-emb".into(),
+            embedding_model_id: platform::embedding_model(),
         };
         let view = ProductView::from(&p);
         let pid = p.id;
@@ -1363,7 +1364,35 @@ async fn patch_version(
         .await
         .map_err(pg_err)?
         .ok_or_else(|| not_found("version"))?;
+    let old_embedding = v.embedding_model_id.clone();
     apply_patch_version(&mut v, &body);
+    if v.embedding_model_id != old_embedding {
+        let live = platform::embedding_model();
+        if live.trim().is_empty() {
+            return Err(fail(
+                StatusCode::BAD_REQUEST,
+                "EMBEDDING_UNCONFIGURED",
+                "embedding model is not configured",
+            ));
+        }
+        if v.embedding_model_id.trim() != live.trim() {
+            return Err(fail(
+                StatusCode::BAD_REQUEST,
+                "EMBEDDING_MISMATCH",
+                "embedding_model_id must be the configured embedding model",
+            ));
+        }
+        let has = knowledge::version_has_chunk_embeddings(&pool, vid)
+            .await
+            .map_err(pg_err)?;
+        if has && old_embedding != v.embedding_model_id {
+            return Err(fail(
+                StatusCode::BAD_REQUEST,
+                "EMBEDDING_MISMATCH",
+                "cannot change embedding_model_id after vectors exist",
+            ));
+        }
+    }
     knowledge::update_version_config(&pool, vid, version_config_of(&v))
         .await
         .map_err(pg_err)?;

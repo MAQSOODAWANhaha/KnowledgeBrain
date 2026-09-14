@@ -29,7 +29,7 @@ export function createCompositionSession(api: CompositionApi & Pick<DocxApi, "cu
       const [basis, current] = await Promise.all([api.basis(workspace), api.current(workspace)]);
       if (turn !== epoch) return;
       if (!basis || current?.editor.pending_save_id) {
-        set({ phase: "blocked", error: !basis ? "请先完成招标文件分析，再生成投标模板。" : "当前稿件仍在保存，请等待保存完成。" });
+        set({ phase: "blocked", error: !basis ? "编制数据尚未就绪，请稍后重试。" : "当前稿件仍在保存，请等待保存完成。" });
       } else {
         set({ phase: "ready", job: null, request: null, input: { basis, expected: current ? { version_id: current.version_id, docx_sha256: current.docx_sha256 } : null } });
       }

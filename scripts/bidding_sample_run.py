@@ -39,7 +39,7 @@ def main():
     parser.add_argument('--source-directory', required=True, type=Path)
     parser.add_argument('--limits', required=True, type=Path)
     parser.add_argument('--run-directory', required=True, type=Path)
-    parser.add_argument('--mode', required=True, choices=['extract', 'review', 'compose'])
+    parser.add_argument('--mode', required=True, choices=['extract', 'review', 'repair', 'compose'])
     args = parser.parse_args()
     try:
         env = provider_environment(args.env_file, os.environ)

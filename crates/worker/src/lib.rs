@@ -1,5 +1,11 @@
 #![recursion_limit = "512"]
-//! Worker: Oxana consume + probe. In-memory drain is gone; jobs run via `knowledge::pipeline`.
+//! Worker: Oxana adapters + Unix helper isolation.
 
-pub mod consume;
+pub mod bidding;
+pub mod helpers;
+pub mod knowledge;
 pub mod probe;
+pub mod runtime;
+
+#[cfg(test)]
+mod adapter_tests;

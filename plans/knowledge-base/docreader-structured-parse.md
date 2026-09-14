@@ -9,7 +9,7 @@ v3 **不考虑旧冻结迁移**。S0 改生产者、发布缝、**以及 `table_
 | 调用 | 默认引擎 | 权威产出 | 本期是否改变 |
 | --- | --- | --- | --- |
 | 招标 `convert_tender_source` | **写死 builtin** | units → `structured_forms` / Agent | **是**：Word/Excel 可 `read_form` |
-| 知识库 `convert_to_markdown` | Office → **anydoc**（成功不调 DocReader）；PDF → builtin | markdown + 图；**忽略 units** | **否** |
+| 知识库 `parser_engine_for` + `convert_with_cancel` | Office → **anydoc**（成功不调 DocReader）；PDF → builtin | markdown + 图；**忽略 units** | **否** |
 
 知识库 PDF 已有 leftover+GFM。Office 默认仍走 anydoc。不把「Word 知识库解析变好」列为完成条件。
 

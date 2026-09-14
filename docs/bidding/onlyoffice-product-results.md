@@ -132,3 +132,7 @@ DOCX 的目录标题、计算页码和书签仍按既有方法核对，并检查
 首次实测已完成保存及 PDF，但测试误等“无修改关闭后清除 key”，因此超时；失败日志与零错误清理证据保留。产品已有 `status=4` 只确认通知、保留可重开 key 的语义，见[保存说明](docx-editor.md#保存与失败行为)。修正的是验收脚本：无修改重开关闭后验证同一保存 identity 和原字节，不伪造新版本，也未修改产品会话逻辑。
 
 证据见 [`artifacts/bid-full-sample/clean-finalization/`](../../artifacts/bid-full-sample/clean-finalization/)。真实提取通过独立复核并完成整稿编制后，应对其产物运行该模式，继续逐项审查实际完整 DOCX/PDF；32 项招标语义发现及 O1/O2 完整验收仍未关闭。
+
+## 2026-09-11 真实整稿出件依赖预检
+
+固定Community 9.4.0-129镜像缓存曾缺失，现恢复原摘要`e3da62a847b9a5d51a11f73cfea1d9c13c3be3809614490d4edddcf01dcf919b`，镜像ID与历史通过记录一致；未替换成另一份缓存的8.3.3。现有统一DocReader成功回读既有两页合成PDF，当前Chromium 151.0.7922.34可启动空白页。未启动Office服务、未访问业务数据库，也未生成真实招标文件的DOCX/PDF。[出件交接](../../artifacts/bid-full-sample/output-readiness-v15/finalization-handoff.json)保留真实提取/复核、32项和编制验收前置，复用上述整理流程。

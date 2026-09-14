@@ -133,14 +133,24 @@ impl Progress {
     }
 
     pub fn block(&mut self, scope: Vec<String>, dependencies_sha256: String) {
-        if self.watch.recovery == Recovery::Blocked
-            && !self.blockers.iter().any(|b| b.scope == scope)
-        {
-            self.blockers.push(ExecutionBlocker {
-                scope,
-                dependencies_sha256,
-                watch: self.watch.clone(),
-            });
+        if self.watch.recovery != Recovery::Blocked {
+            return;
+        }
+        let latest = ExecutionBlocker {
+            scope,
+            dependencies_sha256,
+            watch: self.watch.clone(),
+        };
+        if let Some(existing) = self.blockers.iter_mut().find(|b| b.scope == latest.scope) {
+            // A failed retry must block the dependencies it just tried. Keeping
+            // the old digest would allow the same retry indefinitely.
+            // Later handoff navigation on unchanged dependencies does not
+            // replace the original exhausted scope's watch with handoff ticks.
+            if existing.dependencies_sha256 != latest.dependencies_sha256 {
+                *existing = latest;
+            }
+        } else {
+            self.blockers.push(latest);
         }
     }
 
@@ -228,5 +238,40 @@ mod tests {
         assert_eq!(state.watch.recovery, Recovery::Blocked);
         assert_eq!(state.watch.replans, 2);
         assert!(state.handoff_exhausted(&ProgressLimits::default()));
+    }
+
+    #[test]
+    fn a_failed_retry_blocks_the_latest_dependencies_without_refunding_replans() {
+        let scope = vec!["source".into()];
+        let mut state = Progress {
+            watch: ProgressWatch {
+                replans: 2,
+                recovery: Recovery::Blocked,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        state.block(scope.clone(), "original dependencies".into());
+        let original = state.blockers[0].watch.clone();
+        state.resume(Some(&original));
+        assert_eq!(state.watch.replans, 2);
+        for _ in 0..ProgressLimits::default().max_no_progress_turns {
+            state.observe([], None, &ProgressLimits::default());
+        }
+        assert_eq!(state.watch.recovery, Recovery::Blocked);
+        state.block(scope.clone(), "changed dependencies".into());
+        let blocked_ticks = state.blockers[0].watch.no_progress_turns;
+        state.observe([], None, &ProgressLimits::default());
+        assert!(state.watch.no_progress_turns > blocked_ticks);
+        state.block(scope, "changed dependencies".into());
+        assert_eq!(state.blockers[0].watch.no_progress_turns, blocked_ticks);
+        let restored: Progress = serde_json::from_value(serde_json::json!(state)).unwrap();
+        assert_eq!(restored.blockers.len(), 1);
+        assert_eq!(
+            restored.blockers[0].dependencies_sha256,
+            "changed dependencies"
+        );
+        assert_eq!(restored.blockers[0].watch.replans, original.replans);
+        assert_eq!(restored.blockers[0].watch.recovery, Recovery::Blocked);
     }
 }

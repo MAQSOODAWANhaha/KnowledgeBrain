@@ -1,8 +1,14 @@
 use super::*;
 use bidding::docx_composition::{agent::Config, postgres};
 
+mod report;
+
 pub(super) fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/v2/submission-workspaces/{workspace_id}/docx/versions/{version_id}/composition-report",
+            get(report::download),
+        )
         .route(
             "/api/v2/submission-workspaces/{workspace_id}/docx-compositions/basis",
             get(basis),

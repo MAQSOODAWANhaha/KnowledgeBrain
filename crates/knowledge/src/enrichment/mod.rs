@@ -15,10 +15,7 @@ pub use chat::{
     chat_tools_turn, chat_tools_turn_with_format, chat_tools_turn_with_format_once,
     sample_long_content,
 };
-pub use language::{
-    infer_output_language, language_for_document, language_for_document_parts,
-    normalize_language_tag,
-};
+pub use language::{infer_output_language, language_for_document_parts, normalize_language_tag};
 pub use ocr::sanitize_ocr_text;
 pub use pending::{
     decr_pending, decr_pending_count, pending_count, pending_key, set_pending, set_pending_count,
@@ -43,36 +40,10 @@ pub enum SummaryOutcome {
 }
 
 use crate::job::DocJob;
-use crate::{Chunk, Store, SummaryStatus};
+use crate::{Chunk, SummaryStatus};
 use uuid::Uuid;
 
 pub const SUMMARY_MAX_INPUT: usize = 24 * 1024;
-
-pub fn generate_summary(store: &mut Store, document_id: Uuid) {
-    let _ = generate_summary_with(store, document_id, 0, false);
-}
-
-pub fn generate_summary_for_attempt(
-    store: &mut Store,
-    document_id: Uuid,
-    job_attempt: i32,
-) -> Result<SummaryOutcome, String> {
-    generate_summary_with(store, document_id, job_attempt, false)
-}
-
-pub fn generate_summary_with(
-    store: &mut Store,
-    document_id: Uuid,
-    job_attempt: i32,
-    fallback: bool,
-) -> Result<SummaryOutcome, String> {
-    let Some(mut job) = DocJob::from_store(store, document_id) else {
-        return Ok(SummaryOutcome::Done);
-    };
-    let outcome = generate_summary_on_job(&mut job, job_attempt, fallback)?;
-    job.write_back(store);
-    Ok(outcome)
-}
 
 pub fn generate_summary_on_job(
     job: &mut DocJob,
@@ -170,7 +141,6 @@ pub fn generate_summary_on_job(
         &mut job.embeddings,
         &chunk,
         &doc.title,
-        &version.embedding_model_id,
         version.vector_enabled,
         version.keyword_enabled,
     )?;
@@ -208,35 +178,6 @@ fn assemble_by_start_at(chunks: &[Chunk]) -> String {
         out = format!("{}{}", prefix, c.content);
     }
     out
-}
-
-pub fn generate_questions(store: &mut Store, chunk_ids: &[Uuid], document_id: Uuid) {
-    let _ = generate_questions_with(store, chunk_ids, &[], &[], document_id, 0);
-}
-
-pub fn generate_questions_for_attempt(
-    store: &mut Store,
-    chunk_ids: &[Uuid],
-    document_id: Uuid,
-    job_attempt: i32,
-) -> Result<QuestionOutcome, String> {
-    generate_questions_with(store, chunk_ids, &[], &[], document_id, job_attempt)
-}
-
-pub fn generate_questions_with(
-    store: &mut Store,
-    chunk_ids: &[Uuid],
-    prev_ids: &[Option<Uuid>],
-    next_ids: &[Option<Uuid>],
-    document_id: Uuid,
-    job_attempt: i32,
-) -> Result<QuestionOutcome, String> {
-    let Some(mut job) = DocJob::from_store(store, document_id) else {
-        return Ok(QuestionOutcome::Done);
-    };
-    let outcome = generate_questions_on_job(&mut job, chunk_ids, prev_ids, next_ids, job_attempt)?;
-    job.write_back(store);
-    Ok(outcome)
 }
 
 pub fn generate_questions_on_job(
@@ -314,7 +255,6 @@ pub fn generate_questions_on_job(
                 &mut job.embeddings,
                 &qc,
                 &doc.title,
-                &version.embedding_model_id,
                 version.vector_enabled,
                 version.keyword_enabled,
             )?;
@@ -373,32 +313,6 @@ fn drop_prior_question_chunks_job(job: &mut DocJob, parent_ids: &[Uuid]) {
     }
 }
 
-#[cfg(test)]
-fn neighbor_content(store: &Store, hinted: Option<Uuid>, ch: &Chunk, prev: bool) -> String {
-    if let Some(id) = hinted
-        && let Some(n) = store.chunks.get(&id)
-    {
-        return n.content.clone();
-    }
-    let cand = store.chunks.values().filter(|o| {
-        o.document_id == ch.document_id
-            && o.chunk_type == "text"
-            && o.parent_chunk_id.is_none()
-            && o.id != ch.id
-    });
-    if prev {
-        cand.filter(|o| o.end_at <= ch.start_at)
-            .max_by_key(|o| o.end_at)
-            .map(|o| o.content.clone())
-            .unwrap_or_default()
-    } else {
-        cand.filter(|o| o.start_at >= ch.end_at)
-            .min_by_key(|o| o.start_at)
-            .map(|o| o.content.clone())
-            .unwrap_or_default()
-    }
-}
-
 fn fallback_questions(stem: &str, want: usize) -> Vec<String> {
     const TEMPLATES: [&str; 3] = ["How to {s}?", "What is {s}?", "Why does {s}?"];
     (0..want)
@@ -406,78 +320,7 @@ fn fallback_questions(stem: &str, want: usize) -> Vec<String> {
         .collect()
 }
 
-pub fn process_image(store: &mut Store, document_id: Uuid, image_key: &str) {
-    let _ = process_image_with(store, document_id, image_key, "", true, true);
-}
-
 /// OCR/caption + index. DECR `multimodal:pending` after the caller persists.
-pub fn process_image_without_decr(
-    store: &mut Store,
-    document_id: Uuid,
-    image_key: &str,
-    image_source_type: &str,
-    enable_ocr: bool,
-    enable_caption: bool,
-) -> Result<(), String> {
-    process_image_core(
-        store,
-        document_id,
-        image_key,
-        image_source_type,
-        enable_ocr,
-        enable_caption,
-        false,
-    )
-}
-
-pub fn process_image_with(
-    store: &mut Store,
-    document_id: Uuid,
-    image_key: &str,
-    image_source_type: &str,
-    enable_ocr: bool,
-    enable_caption: bool,
-) -> Result<(), String> {
-    process_image_core(
-        store,
-        document_id,
-        image_key,
-        image_source_type,
-        enable_ocr,
-        enable_caption,
-        true,
-    )
-}
-
-fn process_image_core(
-    store: &mut Store,
-    document_id: Uuid,
-    image_key: &str,
-    image_source_type: &str,
-    enable_ocr: bool,
-    enable_caption: bool,
-    decr: bool,
-) -> Result<(), String> {
-    let Some(mut job) = DocJob::from_store(store, document_id) else {
-        if decr && decr_pending(store, document_id) {
-            enqueue_post_process(store, document_id);
-        }
-        return Ok(());
-    };
-    process_image_on_job(
-        &mut job,
-        image_key,
-        image_source_type,
-        enable_ocr,
-        enable_caption,
-    )?;
-    job.write_back(store);
-    if decr && decr_pending(store, document_id) {
-        enqueue_post_process(store, document_id);
-    }
-    Ok(())
-}
-
 pub fn process_image_on_job(
     job: &mut DocJob,
     image_key: &str,
@@ -522,7 +365,6 @@ pub fn process_image_on_job(
             &mut job.embeddings,
             &ch,
             &doc.title,
-            &version.embedding_model_id,
             version.vector_enabled,
             version.keyword_enabled,
         )?;
@@ -572,20 +414,6 @@ pub fn image_source_type(file_name: &str, markdown: &str) -> &'static str {
     }
 }
 
-#[cfg(test)]
-fn parent_text_chunk(store: &Store, document_id: Uuid, image_key: &str) -> Option<uuid::Uuid> {
-    let texts: Vec<_> = store
-        .chunks
-        .values()
-        .filter(|c| c.document_id == document_id && c.chunk_type == "text")
-        .collect();
-    texts
-        .iter()
-        .find(|c| c.content.contains(image_key))
-        .or(texts.first())
-        .map(|c| c.id)
-}
-
 fn truncate_key(key: &str) -> &str {
     let t = key.trim_start_matches("objects/").trim_start_matches('/');
     match t.char_indices().nth(16) {
@@ -615,7 +443,7 @@ pub async fn describe_image_bytes_once_async(
         ));
     }
     let base = vlm_base_url();
-    let model = crate::vlm_model();
+    let model = platform::vlm_model();
     if base.is_empty() || model.is_empty() || model == "stub-vlm" {
         return Err(ChatTransportError::Response(
             "VLM endpoint/model is not configured".into(),
@@ -651,7 +479,7 @@ pub async fn describe_image_bytes_once_async(
         .await
     }
     let url = chat::completions_url_for_vlm(&base);
-    let key = crate::vlm_api_key();
+    let key = platform::vlm_api_key();
     let ocr = complete(
         &url,
         &key,
@@ -685,11 +513,11 @@ pub fn describe_image(
 }
 
 pub fn vlm_configured() -> bool {
-    crate::vlm_configured()
+    platform::vlm_configured()
 }
 
 fn vlm_base_url() -> String {
-    crate::vlm_base_url()
+    platform::vlm_base_url()
 }
 
 fn vlm_describe(
@@ -752,9 +580,9 @@ fn vlm_complete(base: &str, prompt: &str, image_key: &str) -> Result<String, Str
 }
 
 fn vlm_complete_inner(base: &str, prompt: &str, image_key: &str) -> Result<String, String> {
-    let key = crate::vlm_api_key();
+    let key = platform::vlm_api_key();
     let model = {
-        let m = crate::vlm_model();
+        let m = platform::vlm_model();
         if m.is_empty() || m == "stub-vlm" {
             return Err("vlm model not configured".into());
         }
@@ -774,14 +602,6 @@ fn vlm_complete_inner(base: &str, prompt: &str, image_key: &str) -> Result<Strin
         }]
     });
     crate::models::chat_sse(&url, &key, body)
-}
-
-fn enqueue_post_process(store: &mut Store, document_id: Uuid) {
-    store.enqueue(
-        crate::TYPE_POST_PROCESS,
-        crate::QUEUE_POSTPROCESS,
-        serde_json::json!({ "document_id": document_id, "clone_keep": false }),
-    );
 }
 
 pub fn markdown_image_keys(md: &str) -> Vec<String> {
@@ -805,7 +625,8 @@ pub fn markdown_image_keys(md: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Chunk, Document, ProductVersion, Store, SummaryStatus};
+    use crate::{Chunk, DocJob, Document, ProductVersion, SummaryStatus};
+    use uuid::Uuid;
 
     #[test]
     fn image_source_type_only_for_image_dominated_pdf() {
@@ -827,13 +648,10 @@ mod tests {
     #[test]
     fn describe_image_without_vlm_is_error() {
         assert!(describe_image("images/x.png", "", "Chinese").is_err());
-        let mut s = Store::default();
         let mut v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         v.enable_multimodel = true;
-        let vid = v.id;
-        s.versions.insert(vid, v);
         let mut doc = Document::new(
-            vid,
+            v.id,
             "T".into(),
             "scan.pdf".into(),
             1,
@@ -841,28 +659,24 @@ mod tests {
             "k".into(),
         );
         doc.parse_status = crate::ParseStatus::Processing;
-        let did = doc.id;
-        s.documents.insert(did, doc);
-        set_pending(&mut s, did, 1);
+        let mut job = DocJob::for_test(doc, v);
         assert!(
-            process_image_with(&mut s, did, "images/p1.jpg", "scanned_pdf", true, true).is_err()
+            process_image_on_job(&mut job, "images/p1.jpg", "scanned_pdf", true, true).is_err()
         );
-        assert!(!s.chunks.values().any(|c| c.chunk_type == "image_ocr"));
+        assert!(!job.chunks.values().any(|c| c.chunk_type == "image_ocr"));
     }
 
     #[test]
     fn image_parent_is_text_chunk_that_contains_the_key() {
-        let mut s = Store::default();
         let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         let vid = v.id;
-        s.versions.insert(vid, v);
         let mut doc = Document::new(vid, "T".into(), "g.md".into(), 1, "h".into(), "k".into());
         doc.parse_status = crate::ParseStatus::Processing;
         let did = doc.id;
-        s.documents.insert(did, doc);
+        let mut job = DocJob::for_test(doc, v);
         let first = Uuid::new_v4();
         let second = Uuid::new_v4();
-        s.chunks.insert(
+        job.chunks.insert(
             first,
             Chunk {
                 id: first,
@@ -877,7 +691,7 @@ mod tests {
                 generated_questions: Vec::new(),
             },
         );
-        s.chunks.insert(
+        job.chunks.insert(
             second,
             Chunk {
                 id: second,
@@ -892,39 +706,32 @@ mod tests {
                 generated_questions: Vec::new(),
             },
         );
-        set_pending(&mut s, did, 1);
-        assert_eq!(parent_text_chunk(&s, did, "images/p1.jpg"), Some(second));
+        assert_eq!(parent_text_chunk_job(&job, "images/p1.jpg"), Some(second));
     }
 
     #[test]
     fn superseded_summary_does_not_finalize() {
-        let mut s = Store::default();
         let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
-        let vid = v.id;
-        s.versions.insert(vid, v);
-        let mut doc = Document::new(vid, "T".into(), "a.txt".into(), 1, "h".into(), "k".into());
+        let mut doc = Document::new(v.id, "T".into(), "a.txt".into(), 1, "h".into(), "k".into());
         doc.attempt = 2;
         doc.parse_status = crate::ParseStatus::Finalizing;
         doc.pending_subtasks_count = 1;
-        let did = doc.id;
-        s.documents.insert(did, doc);
-        generate_summary_for_attempt(&mut s, did, 1).unwrap();
-        assert_eq!(s.documents[&did].pending_subtasks_count, 1);
-        assert!(s.documents[&did].description.is_empty());
+        let mut job = DocJob::for_test(doc, v);
+        generate_summary_on_job(&mut job, 1, false).unwrap();
+        assert_eq!(job.document.pending_subtasks_count, 1);
+        assert!(job.document.description.is_empty());
     }
 
     #[test]
     fn insufficient_image_only_body_fails_without_llm() {
-        let mut s = Store::default();
         let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         let vid = v.id;
-        s.versions.insert(vid, v);
         let mut doc = Document::new(vid, "T".into(), "a.txt".into(), 1, "h".into(), "k".into());
         doc.parse_status = crate::ParseStatus::Finalizing;
         doc.pending_subtasks_count = 1;
         let did = doc.id;
-        s.documents.insert(did, doc);
-        s.chunks.insert(
+        let mut job = DocJob::for_test(doc, v);
+        job.chunks.insert(
             did,
             Chunk {
                 id: did,
@@ -939,10 +746,10 @@ mod tests {
                 generated_questions: Vec::new(),
             },
         );
-        generate_summary_for_attempt(&mut s, did, 0).unwrap();
-        assert_eq!(s.documents[&did].summary_status, SummaryStatus::Failed);
-        assert!(s.documents[&did].description.is_empty());
-        assert_eq!(s.documents[&did].pending_subtasks_count, 0);
+        generate_summary_on_job(&mut job, 0, false).unwrap();
+        assert_eq!(job.document.summary_status, SummaryStatus::Failed);
+        assert!(job.document.description.is_empty());
+        assert_eq!(job.document.pending_subtasks_count, 0);
     }
 
     #[test]
@@ -954,18 +761,16 @@ mod tests {
 
     #[test]
     fn generate_questions_uses_version_count() {
-        let mut s = Store::default();
         let mut v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         v.question_count = 5;
         let vid = v.id;
-        s.versions.insert(vid, v);
         let mut doc = Document::new(vid, "T".into(), "a.txt".into(), 1, "h".into(), "k".into());
         doc.parse_status = crate::ParseStatus::Finalizing;
         doc.pending_subtasks_count = 1;
         let did = doc.id;
-        s.documents.insert(did, doc);
+        let mut job = DocJob::for_test(doc, v);
         let cid = Uuid::new_v4();
-        s.chunks.insert(
+        job.chunks.insert(
             cid,
             Chunk {
                 id: cid,
@@ -980,26 +785,24 @@ mod tests {
                 generated_questions: Vec::new(),
             },
         );
-        generate_questions(&mut s, &[cid], did);
-        let qs = &s.chunks[&cid].generated_questions;
+        generate_questions_on_job(&mut job, &[cid], &[], &[], 0).unwrap();
+        let qs = &job.chunks[&cid].generated_questions;
         assert_eq!(qs.len(), 5, "{qs:?}");
-        assert_eq!(s.documents[&did].pending_subtasks_count, 0);
+        assert_eq!(job.document.pending_subtasks_count, 0);
     }
 
     #[test]
     fn superseded_question_does_not_finalize() {
-        let mut s = Store::default();
         let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         let vid = v.id;
-        s.versions.insert(vid, v);
         let mut doc = Document::new(vid, "T".into(), "a.txt".into(), 1, "h".into(), "k".into());
         doc.attempt = 2;
         doc.parse_status = crate::ParseStatus::Finalizing;
         doc.pending_subtasks_count = 1;
         let did = doc.id;
-        s.documents.insert(did, doc);
+        let mut job = DocJob::for_test(doc, v);
         let cid = Uuid::new_v4();
-        s.chunks.insert(
+        job.chunks.insert(
             cid,
             Chunk {
                 id: cid,
@@ -1014,27 +817,25 @@ mod tests {
                 generated_questions: Vec::new(),
             },
         );
-        let out = generate_questions_for_attempt(&mut s, &[cid], did, 1).unwrap();
+        let out = generate_questions_on_job(&mut job, &[cid], &[], &[], 1).unwrap();
         assert_eq!(out, QuestionOutcome::Superseded);
-        assert_eq!(s.documents[&did].pending_subtasks_count, 1);
-        assert!(s.chunks[&cid].generated_questions.is_empty());
+        assert_eq!(job.document.pending_subtasks_count, 1);
+        assert!(job.chunks[&cid].generated_questions.is_empty());
     }
 
     #[test]
     fn question_skips_empty_and_non_text() {
-        let mut s = Store::default();
         let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         let vid = v.id;
-        s.versions.insert(vid, v);
         let mut doc = Document::new(vid, "T".into(), "a.txt".into(), 1, "h".into(), "k".into());
         doc.parse_status = crate::ParseStatus::Finalizing;
         doc.pending_subtasks_count = 1;
         let did = doc.id;
-        s.documents.insert(did, doc);
+        let mut job = DocJob::for_test(doc, v);
         let empty = Uuid::new_v4();
         let ocr = Uuid::new_v4();
         let text = Uuid::new_v4();
-        s.chunks.insert(
+        job.chunks.insert(
             empty,
             Chunk {
                 id: empty,
@@ -1049,7 +850,7 @@ mod tests {
                 generated_questions: Vec::new(),
             },
         );
-        s.chunks.insert(
+        job.chunks.insert(
             ocr,
             Chunk {
                 id: ocr,
@@ -1064,7 +865,7 @@ mod tests {
                 generated_questions: Vec::new(),
             },
         );
-        s.chunks.insert(
+        job.chunks.insert(
             text,
             Chunk {
                 id: text,
@@ -1079,24 +880,22 @@ mod tests {
                 generated_questions: Vec::new(),
             },
         );
-        generate_questions(&mut s, &[empty, ocr, text], did);
-        assert!(s.chunks[&empty].generated_questions.is_empty());
-        assert!(s.chunks[&ocr].generated_questions.is_empty());
-        assert!(!s.chunks[&text].generated_questions.is_empty());
-        assert_eq!(s.documents[&did].pending_subtasks_count, 0);
+        generate_questions_on_job(&mut job, &[empty, ocr, text], &[], &[], 0).unwrap();
+        assert!(job.chunks[&empty].generated_questions.is_empty());
+        assert!(job.chunks[&ocr].generated_questions.is_empty());
+        assert!(!job.chunks[&text].generated_questions.is_empty());
+        assert_eq!(job.document.pending_subtasks_count, 0);
     }
 
     #[test]
     fn question_uses_payload_neighbors() {
-        let mut s = Store::default();
         let v = ProductVersion::new(Uuid::new_v4(), "v1".into());
         let vid = v.id;
-        s.versions.insert(vid, v);
         let mut doc = Document::new(vid, "T".into(), "a.txt".into(), 1, "h".into(), "k".into());
         doc.parse_status = crate::ParseStatus::Finalizing;
         doc.pending_subtasks_count = 1;
         let did = doc.id;
-        s.documents.insert(did, doc);
+        let mut job = DocJob::for_test(doc, v);
         let prev = Uuid::new_v4();
         let mid = Uuid::new_v4();
         let next = Uuid::new_v4();
@@ -1105,7 +904,7 @@ mod tests {
             (mid, "main content about installing the line card", 40),
             (next, "following chapter about power verification", 90),
         ] {
-            s.chunks.insert(
+            job.chunks.insert(
                 id,
                 Chunk {
                     id,
@@ -1121,19 +920,19 @@ mod tests {
                 },
             );
         }
-        let hinted_prev = neighbor_content(&s, Some(prev), &s.chunks[&mid], true);
-        let hinted_next = neighbor_content(&s, Some(next), &s.chunks[&mid], false);
+        let hinted_prev = neighbor_content_in(&job.chunks, Some(prev), &job.chunks[&mid], true);
+        let hinted_next = neighbor_content_in(&job.chunks, Some(next), &job.chunks[&mid], false);
         assert!(hinted_prev.contains("fabric topology"));
         assert!(hinted_next.contains("power verification"));
-        generate_questions_with(&mut s, &[mid], &[Some(prev)], &[Some(next)], did, 0).unwrap();
-        assert!(!s.chunks[&mid].generated_questions.is_empty());
-        let kids: Vec<_> = s
+        generate_questions_on_job(&mut job, &[mid], &[Some(prev)], &[Some(next)], 0).unwrap();
+        assert!(!job.chunks[&mid].generated_questions.is_empty());
+        let kids: Vec<_> = job
             .chunks
             .values()
             .filter(|c| c.parent_chunk_id == Some(mid))
             .collect();
-        assert_eq!(kids.len(), s.chunks[&mid].generated_questions.len());
+        assert_eq!(kids.len(), job.chunks[&mid].generated_questions.len());
         assert!(kids.iter().all(|c| c.chunk_type == "question"));
-        assert_eq!(s.documents[&did].pending_subtasks_count, 0);
+        assert_eq!(job.document.pending_subtasks_count, 0);
     }
 }

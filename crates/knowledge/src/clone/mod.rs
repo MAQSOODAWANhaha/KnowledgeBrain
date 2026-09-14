@@ -154,16 +154,16 @@ pub async fn run_clone(
                     .await
                     .map_err(|e| e.to_string())?;
                     follow.push(FollowUp {
-                        task_type: crate::TYPE_POST_PROCESS,
-                        queue: crate::QUEUE_POSTPROCESS,
+                        task_type: platform::TYPE_POST_PROCESS,
+                        queue: platform::QUEUE_POSTPROCESS,
                         document_id: nid,
                         product_version_id: target_version_id,
                         clone_keep: true,
                     });
                 } else {
                     follow.push(FollowUp {
-                        task_type: crate::TYPE_DOCUMENT_PROCESS,
-                        queue: crate::QUEUE_DEFAULT,
+                        task_type: platform::TYPE_DOCUMENT_PROCESS,
+                        queue: platform::QUEUE_DEFAULT,
                         document_id: nid,
                         product_version_id: target_version_id,
                         clone_keep: false,
@@ -279,7 +279,7 @@ mod tests {
             .unwrap();
         let follow = run_clone(&pool, src_ver, dst, &[], false).await.unwrap();
         assert_eq!(follow.len(), 1);
-        assert_eq!(follow[0].task_type, crate::TYPE_POST_PROCESS);
+        assert_eq!(follow[0].task_type, platform::TYPE_POST_PROCESS);
         assert!(follow[0].clone_keep);
         assert_eq!(follow[0].product_version_id, dst);
         let src_count: i64 =
@@ -401,7 +401,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(follow.len(), 1);
-        assert_eq!(follow[0].task_type, crate::TYPE_POST_PROCESS);
+        assert_eq!(follow[0].task_type, platform::TYPE_POST_PROCESS);
         assert!(follow[0].clone_keep);
         let dst_id = follow[0].document_id;
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
@@ -527,7 +527,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(follow.len(), 1);
-        assert_eq!(follow[0].task_type, crate::TYPE_DOCUMENT_PROCESS);
+        assert_eq!(follow[0].task_type, platform::TYPE_DOCUMENT_PROCESS);
         assert!(!follow[0].clone_keep);
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE document_id = $1")
             .bind(follow[0].document_id)

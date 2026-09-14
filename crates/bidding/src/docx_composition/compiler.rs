@@ -3,6 +3,10 @@ use crate::docx_template::{self as render, *};
 use serde_json::json;
 use std::collections::BTreeSet;
 
+#[cfg(test)]
+#[path = "compiler_text_regions_tests.rs"]
+mod text_region_tests;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Location {
@@ -65,6 +69,7 @@ pub struct Compiled {
 fn block(kind: &str) -> TemplateBlock {
     TemplateBlock {
         kind: kind.into(),
+        text_regions: vec![],
         source_parts: vec![],
         source_id: None,
         quote: None,
@@ -414,6 +419,44 @@ fn template(
             }
             blocks.push(out);
         } else {
+            let mut end = index + 1;
+            while end < regions.len()
+                && regions[end].form_id.is_none()
+                && regions[end].source.source_id == region.source.source_id
+                && regions[end - 1].source.end == regions[end].source.start
+            {
+                end += 1;
+            }
+            if end > index + 1 {
+                let mut out = block("text_regions");
+                out.source_id = Some(region.source.source_id.clone());
+                for (offset, region) in regions[index..end].iter().enumerate() {
+                    if region.source.view_id.is_some() || region.source.grid_cell.is_some() {
+                        return Err("visual-only wording needs a reviewed editable source; screenshots are not editable templates".into());
+                    }
+                    out.text_regions.push(TextRegion {
+                        start: region.source.start,
+                        end: region.source.end,
+                        blank: region.role == RegionRole::BidderBlank,
+                    });
+                    let inline = Location {
+                        bookmark: render::region_bookmark_name(ordinal, blocks.len(), offset),
+                        ..location.clone()
+                    };
+                    place(placements, record_id, RelationTarget::Record, &inline);
+                    place(
+                        placements,
+                        record_id,
+                        RelationTarget::TemplateRegion {
+                            index: index + offset,
+                        },
+                        &inline,
+                    );
+                }
+                blocks.push(out);
+                index = end;
+                continue;
+            }
             if region.source.view_id.is_some() || region.source.grid_cell.is_some() {
                 return Err("visual-only wording needs a reviewed editable source; screenshots are not editable templates".into());
             }

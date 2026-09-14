@@ -285,8 +285,13 @@ impl TenderSourceConverter for DocReaderGrpcTenderSourceConverter {
             () = cancel.cancelled() => Err(TenderDocumentProcessError::Conversion(
                 "tender conversion cancelled".into(),
             )),
-            result = docparser::convert_tender_source(file_name, bytes) => result
-                .map_err(|error| TenderDocumentProcessError::Unavailable(error.0)),
+            result = docparser::convert_tender_source(file_name, bytes, cancel) => match result {
+                Ok(converted) => Ok(converted),
+                Err(error) if error.0 == "cancelled" => Err(TenderDocumentProcessError::Conversion(
+                    "tender conversion cancelled".into(),
+                )),
+                Err(error) => Err(TenderDocumentProcessError::Unavailable(error.0)),
+            },
         }
     }
 }
@@ -323,7 +328,7 @@ impl TenderVisionEnricher for ExistingTenderVisionEnricher {
         output_language: &str,
         cancel: &CancellationToken,
     ) -> Result<VisionEnrichment, TenderDocumentProcessError> {
-        let model = knowledge::vlm_model();
+        let model = platform::vlm_model();
         let result = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(TenderDocumentProcessError::Vision(

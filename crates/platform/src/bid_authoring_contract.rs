@@ -156,6 +156,11 @@ pub struct RequirementSetCompileJobV2 {
     pub project_id: Uuid,
     pub document_set_revision_id: Uuid,
     pub disposition_set_revision_id: Uuid,
+    /// Not part of the frozen SQL payload. Continue/reclaim uses a distinct Oxana unique id.
+    #[serde(default)]
+    pub reclaim: bool,
+    #[serde(default)]
+    pub reclaim_attempt: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,13 +232,33 @@ request_scoped_job!(
     "submission_export"
 );
 
-request_scoped_job!(
-    RequirementSetCompileJobV2,
-    BID_REQUIREMENT_SET_COMPILE_V2_TASK,
-    "requirement_set_compile"
-);
-
 request_scoped_job!(DocxComposeJobV2, BID_DOCX_COMPOSE_V2_TASK, "docx_compose");
+
+impl oxana::Job for RequirementSetCompileJobV2 {
+    fn name() -> &'static str {
+        BID_REQUIREMENT_SET_COMPILE_V2_TASK
+    }
+    fn unique_id(&self) -> Option<String> {
+        let id = self.request.request_artifact_id.hyphenated();
+        Some(if self.reclaim {
+            format!(
+                "requirement_set_compile:reclaim:{id}:{}:{}",
+                self.request.request_revision, self.reclaim_attempt
+            )
+        } else {
+            format!(
+                "requirement_set_compile:{id}:{}",
+                self.request.request_revision
+            )
+        })
+    }
+    fn on_conflict(&self) -> oxana::JobConflictStrategy {
+        oxana::JobConflictStrategy::Skip
+    }
+    fn should_resurrect() -> bool {
+        BID_AUTHORING_V2_RESURRECT_ON_REPLAY
+    }
+}
 
 #[derive(oxana::Queue)]
 #[oxana(key = "bid-authoring-v2", concurrency = Dynamic(4))]
@@ -443,6 +468,27 @@ mod tests {
         assert_eq!(
             payload.unique_material(),
             "requirement_set_compile:00000000-0000-0000-0000-000000000001:7"
+        );
+        let compile = RequirementSetCompileJobV2 {
+            request: request(),
+            project_id: Uuid::from_u128(2),
+            document_set_revision_id: Uuid::from_u128(3),
+            disposition_set_revision_id: Uuid::from_u128(4),
+            reclaim: false,
+            reclaim_attempt: 0,
+        };
+        assert_eq!(
+            oxana::Job::unique_id(&compile).as_deref(),
+            Some("requirement_set_compile:00000000-0000-0000-0000-000000000001:7")
+        );
+        let reclaim = RequirementSetCompileJobV2 {
+            reclaim: true,
+            reclaim_attempt: 1,
+            ..compile
+        };
+        assert_eq!(
+            oxana::Job::unique_id(&reclaim).as_deref(),
+            Some("requirement_set_compile:reclaim:00000000-0000-0000-0000-000000000001:7:1")
         );
         let expected = [
             "INPUT_SCHEMA_INVALID",

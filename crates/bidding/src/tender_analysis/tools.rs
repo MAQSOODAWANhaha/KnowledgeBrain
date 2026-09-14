@@ -65,9 +65,13 @@ pub fn validate_input(input: &FrozenInput) -> Result<(), String> {
                 .as_str()
                 .ok_or("form source missing")?,
         )?;
-        if !f["definition"]["cells"].is_array() {
-            return Err("form grid unavailable".into());
+        let definition = &f["definition"];
+        if definition["schema_version"] != 3 || definition["kind"] != "grid" {
+            return Err(format!("form {id}: schema 3 grid definition required"));
         }
+        let grid: docparser::TableGrid = serde_json::from_value(definition.clone())
+            .map_err(|error| format!("form {id}: {error}"))?;
+        docparser::validate_table_grid(&grid).map_err(|error| format!("form {id}: {error}"))?;
     }
     Ok(())
 }
@@ -640,6 +644,28 @@ pub fn reading_gaps(input: &FrozenInput, coverage: &Coverage) -> Vec<Value> {
             gaps.push(json!({"kind":"unread_grid","form_id":id,"cell_count":n,"read_ranges":coverage.form_cells.get(id)}));
         }
     }
+    // Keep metadata first, then interleave text and grids in frozen source order.
+    // Grouping by representation postpones every table until all text is read.
+    gaps.sort_by_cached_key(|gap| {
+        if gap["kind"] == "unread_metadata" {
+            return (0, 0);
+        }
+        let source_id = gap["source_id"].as_str().or_else(|| {
+            input
+                .structured_forms
+                .iter()
+                .find(|form| form["form_definition_revision_id"] == gap["form_id"])
+                .and_then(|form| form["source_unit_revision_id"].as_str())
+        });
+        (
+            1,
+            input
+                .source_units
+                .iter()
+                .position(|source| Some(source.source_unit_revision_id.as_str()) == source_id)
+                .unwrap_or(usize::MAX),
+        )
+    });
     gaps
 }
 
@@ -675,13 +701,42 @@ pub fn gaps(input: &FrozenInput, analysis: &Analysis) -> Vec<Value> {
 }
 
 fn candidate_rows(analysis: &Analysis, kind: &str) -> Result<Vec<(String, Value)>, String> {
-    filtered_candidate_rows(analysis, kind, None, None)
+    filtered_candidate_rows(analysis, kind, None, None).map_err(String::from)
+}
+
+/// Preserve identity failures for host navigation without interpreting prose.
+#[derive(Debug)]
+pub(super) enum InspectionError {
+    CandidateIdentity(String),
+    Other(String),
+}
+
+impl From<String> for InspectionError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+impl From<&str> for InspectionError {
+    fn from(message: &str) -> Self {
+        Self::Other(message.into())
+    }
+}
+
+impl From<InspectionError> for String {
+    fn from(error: InspectionError) -> Self {
+        match error {
+            InspectionError::CandidateIdentity(message) | InspectionError::Other(message) => {
+                message
+            }
+        }
+    }
 }
 
 fn selected_entries<'a, T>(
     entries: &'a BTreeMap<String, T>,
     ids: Option<&BTreeSet<String>>,
-) -> Result<Vec<(&'a String, &'a T)>, String> {
+) -> Result<Vec<(&'a String, &'a T)>, InspectionError> {
     match ids {
         None => Ok(entries.iter().collect()),
         Some(ids) => ids
@@ -689,9 +744,9 @@ fn selected_entries<'a, T>(
             .map(|id| {
                 entries
                     .get_key_value(id)
-                    .ok_or_else(|| field_error("/ids", format!(
+                    .ok_or_else(|| InspectionError::CandidateIdentity(field_error("/ids", format!(
                         "unknown candidate id in requested category: {id}. Use kind=all for mixed categories, kind=record for all record kinds, kind=relation for relations, or kind=disposition for source dispositions. Pass IDs without the reference prefix; use the current index if the ID is stale."
-                    )))
+                    ))))
             })
             .collect(),
     }
@@ -702,7 +757,7 @@ fn filtered_candidate_rows(
     kind: &str,
     ids: Option<&BTreeSet<String>>,
     source_ids: Option<&BTreeSet<&str>>,
-) -> Result<Vec<(String, Value)>, String> {
+) -> Result<Vec<(String, Value)>, InspectionError> {
     if kind == "all" {
         let groups = ["record", "relation", "disposition"];
         let contains = |category: &str, id: &str| match category {
@@ -719,12 +774,12 @@ fn filtered_candidate_rows(
                 {
                     1 => {}
                     0 => {
-                        return Err(field_error(
+                        return Err(InspectionError::CandidateIdentity(field_error(
                             "/ids",
                             format!(
                                 "unknown candidate ID: {id}; use the current index and pass IDs without the reference prefix"
                             ),
-                        ));
+                        )));
                     }
                     _ => {
                         return Err(field_error(
@@ -732,7 +787,7 @@ fn filtered_candidate_rows(
                             format!(
                                 "ambiguous candidate ID: {id}; select kind=record, kind=relation or kind=disposition"
                             ),
-                        ));
+                        ).into());
                     }
                 }
             }
@@ -795,7 +850,9 @@ fn filtered_candidate_rows(
                 && kind != "record"
                 && entries.iter().any(|(_, record)| record.data.kind() != kind)
             {
-                return Err("candidate id does not belong to requested record kind".into());
+                return Err(InspectionError::CandidateIdentity(
+                    "candidate id does not belong to requested record kind".into(),
+                ));
             }
             entries
                 .into_iter()
@@ -907,7 +964,7 @@ pub(super) fn inspect_analysis(
     args: &Value,
     max_bytes: usize,
     default_scope: Option<&[String]>,
-) -> Result<Value, String> {
+) -> Result<Value, InspectionError> {
     object(
         args,
         &["kind", "offset", "limit", "ids", "source_id", "view"],
@@ -1039,6 +1096,8 @@ pub fn invoke(
 ) -> Result<Value, String> {
     // Tool execution is transactional in memory. An oversized/invalid result
     // must neither mark unseen text read nor partially update the candidate.
+    let expanded = evidence_refs::expand(input, args)?;
+    let args = &expanded;
     let mut next_coverage = coverage.clone();
     // Reading a long tender must not copy the growing semantic graph on every
     // source page. These branches mutate only the temporary coverage ledger.
@@ -1176,8 +1235,9 @@ fn execute(
                     );
                 }
                 let text = &s.text[start..end];
-                let out = json!({"source_id":id,"start":start,"end":end,"total_bytes":s.text.len(),
+                let mut out = json!({"source_id":id,"start":start,"end":end,"total_bytes":s.text.len(),
                     "text":text,"line_spans":source_line_spans(text,start)});
+                evidence_refs::decorate(input, name, &mut out)?;
                 if serde_json::to_vec(&out).map_err(|e| e.to_string())?.len() <= max_bytes {
                     cover(coverage.text.entry(id.into()).or_default(), start, end);
                     return Ok(out);
@@ -1242,6 +1302,7 @@ fn execute(
             }
             let mut out = json!({"form_id":id,"source_id":f["source_unit_revision_id"],"definition":definition,
                 "offset":start,"next":end,"total_cells":total,"cells":window,"citations":citations});
+            evidence_refs::decorate(input, name, &mut out)?;
             if let Some(query) = find_text {
                 let mut remaining = max_bytes;
                 let mut matched = vec![];
@@ -1325,7 +1386,8 @@ fn execute(
             args,
             max_bytes,
             None,
-        ),
+        )
+        .map_err(String::from),
         "check_gaps" => {
             object(args, &["offset", "limit", "scope"])?;
             if string(args, "scope")? != "analysis" {
@@ -1400,6 +1462,22 @@ fn execute(
             let relation: Relation = serde_json::from_value(raw).map_err(|e| field_error("", e))?;
             analysis.coverage = coverage.clone();
             validate_relation(input, analysis, &relation)?;
+            // Repeating the exact claim must not mint a new identity or renew
+            // progress. Differing prose, scope, evidence or endpoint versions
+            // remain distinct claims for the Agent to inspect and reconcile.
+            if args["id"].is_null() {
+                for existing in analysis
+                    .relations
+                    .values()
+                    .filter(|existing| existing.from == relation.from && existing.to == relation.to)
+                {
+                    let mut repeated = relation.clone();
+                    repeated.id.clone_from(&existing.id);
+                    if repeated == *existing {
+                        return Ok(json!({"id":existing.id,"unchanged":true}));
+                    }
+                }
+            }
             analysis.relations.insert(id.clone(), relation);
             Ok(json!({"id":id}))
         }
@@ -1525,6 +1603,7 @@ pub fn schemas(reviewer: bool) -> Vec<Value> {
                             | "delete_relation"
                             | "set_disposition"
                             | "request_review"
+                            | "put_repair_result"
                     )
                 )
         })
@@ -1533,7 +1612,8 @@ pub fn schemas(reviewer: bool) -> Vec<Value> {
                 || !matches!(
                     tool["function"]["name"].as_str(),
                     Some(
-                        "put_source_review"
+                        "read_review_task"
+                            | "put_source_review"
                             | "put_review_finding"
                             | "delete_review_finding"
                             | "complete_review_check"
