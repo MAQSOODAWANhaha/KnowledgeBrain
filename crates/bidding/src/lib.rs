@@ -10,6 +10,7 @@ pub mod content_block;
 pub mod content_generate;
 pub mod content_runtime;
 pub mod docx_composition;
+pub mod docx_layout;
 pub mod docx_round;
 pub mod export_review;
 pub mod docx_template;

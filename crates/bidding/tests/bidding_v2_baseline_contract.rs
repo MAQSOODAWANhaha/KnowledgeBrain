@@ -542,7 +542,10 @@ fn v2_baseline_has_no_deleted_or_transport_state() {
             "forbidden V2 SQL: {forbidden}"
         );
     }
-    assert!(SQL.contains("request_kind IN ('tender_document_process','requirement_set_compile','content_generate','submission_export','docx_compose')"));
+    assert!(SQL.contains("request_kind IN ('tender_document_process','requirement_set_compile','content_generate','submission_export','docx_compose','docx_layout')"));
+    assert!(SQL.contains("stage_kind IN ('analysis_checkpoint','composition_checkpoint','export_review_checkpoint','layout_checkpoint')"));
+    assert!(SQL.contains("CREATE FUNCTION kb_bid_v2_layout_checkpoint_put"));
+    assert!(SQL.contains("WHERE id=p_request_artifact_id AND request_kind='submission_export'"));
     assert!(!SQL.contains("matching_schedule"));
     assert!(!SQL.contains("attachment_preparation_jobs"));
 }

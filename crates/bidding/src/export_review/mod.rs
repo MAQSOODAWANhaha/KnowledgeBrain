@@ -46,6 +46,8 @@ pub struct OutputUnit {
     pub kind: String,
     pub content_sha256: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bookmark: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -89,9 +91,10 @@ pub fn inventory_from_docx(bytes: &[u8], pdf_sha256: Option<String>) -> Result<I
                 continue;
             }
             let text = node_text(node);
+            let bookmark = bookmark_name(node);
             let ordinal = units.len();
             let content_sha256 = digest(&json!({
-                "part":name,"kind":kind,"ordinal":ordinal,"text":text
+                "part":name,"kind":kind,"ordinal":ordinal,"text":text,"bookmark":bookmark
             }))?;
             units.push(OutputUnit {
                 id: format!("docx:{docx_sha256}:{ordinal}"),
@@ -101,6 +104,7 @@ pub fn inventory_from_docx(bytes: &[u8], pdf_sha256: Option<String>) -> Result<I
                 kind: kind.into(),
                 content_sha256,
                 text,
+                bookmark,
             });
         }
     }
@@ -141,9 +145,27 @@ pub fn attach_pdf_pages(inventory: &mut Inventory, pdf: &[u8]) -> Result<(), Str
             kind: "pdf_page".into(),
             content_sha256,
             text,
+            bookmark: None,
         });
     }
     Ok(())
+}
+
+pub fn extra_units_not_covered_by_bookmarks<'a>(
+    inventory: &'a Inventory,
+    bookmarks: &[String],
+) -> Vec<&'a OutputUnit> {
+    inventory
+        .units
+        .iter()
+        .filter(|unit| {
+            matches!(unit.kind.as_str(), "paragraphs" | "table")
+                && !unit
+                    .bookmark
+                    .as_ref()
+                    .is_some_and(|bookmark| bookmarks.iter().any(|known| known == bookmark))
+        })
+        .collect()
 }
 
 pub fn inventory_from_files(docx: &[u8], pdf: Option<&[u8]>) -> Result<Inventory, String> {
@@ -195,6 +217,13 @@ pub fn read_output_evidence(
             .insert(unit.id.clone(), unit.content_sha256.clone());
     }
     Ok(page)
+}
+
+fn bookmark_name(node: roxmltree::Node<'_, '_>) -> Option<String> {
+    node.descendants()
+        .find(|child| child.has_tag_name((W, "bookmarkStart")))
+        .and_then(|child| child.attribute((W, "name")).map(str::to_owned))
+        .filter(|name| !name.is_empty() && !name.starts_with('_'))
 }
 
 fn is_content_part(name: &str) -> bool {
@@ -283,6 +312,11 @@ mod tests {
                 .units
                 .iter()
                 .any(|u| u.part == "word/header1.xml" && u.kind == "paragraphs")
+        );
+        let extra = extra_units_not_covered_by_bookmarks(&inventory, &[]);
+        assert!(
+            extra.iter().any(|unit| unit.text == "无书签正文" && unit.bookmark.is_none()),
+            "unbookmarked body text must remain in the file inventory"
         );
     }
 

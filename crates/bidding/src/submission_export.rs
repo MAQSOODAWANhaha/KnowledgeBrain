@@ -466,6 +466,7 @@ mod tests {
                 kind: "paragraphs".into(),
                 content_sha256: "f".repeat(64),
                 text: "投标函".into(),
+                bookmark: None,
             }],
         };
         let r = report(&s, d, p, &"e".repeat(64), 42, &inventory, None).unwrap();

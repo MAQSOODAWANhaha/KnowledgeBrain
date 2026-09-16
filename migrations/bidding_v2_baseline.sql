@@ -898,7 +898,7 @@ CREATE TABLE bid_async_request_snapshot_artifacts (
   id uuid PRIMARY KEY,
   project_id uuid NOT NULL REFERENCES bid_projects(id),
   workspace_id uuid,
-  request_kind text NOT NULL CHECK (request_kind IN ('tender_document_process','requirement_set_compile','content_generate','submission_export','docx_compose')),
+  request_kind text NOT NULL CHECK (request_kind IN ('tender_document_process','requirement_set_compile','content_generate','submission_export','docx_compose','docx_layout')),
   revision bigint NOT NULL CHECK (revision > 0),
   frozen_input_sha256 kb_sha256 NOT NULL,
   request_payload bytea NOT NULL,
@@ -2687,7 +2687,7 @@ ALTER TABLE bid_async_request_snapshot_artifacts
   ADD UNIQUE(id,project_id,request_kind,revision,request_sha256,frozen_input_sha256),
   ADD CHECK (CASE
     WHEN request_kind IN ('tender_document_process','requirement_set_compile') THEN workspace_id IS NULL
-    WHEN request_kind IN ('content_generate','submission_export','docx_compose') THEN workspace_id IS NOT NULL
+    WHEN request_kind IN ('content_generate','submission_export','docx_compose','docx_layout') THEN workspace_id IS NOT NULL
     ELSE false END);
 ALTER TABLE bid_content_generation_request_identities
   ADD FOREIGN KEY(matching_policy_id,matching_policy_sha256)
@@ -2885,7 +2885,7 @@ CREATE TABLE bid_submission_export_request_identities (
   request_artifact_id uuid PRIMARY KEY,
   project_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
-  request_kind text NOT NULL DEFAULT 'submission_export' CHECK (request_kind='submission_export'),
+  request_kind text NOT NULL DEFAULT 'submission_export' CHECK (request_kind IN ('submission_export','docx_layout')),
   request_revision bigint NOT NULL CHECK (request_revision>0),
   request_sha256 kb_sha256 NOT NULL,
   frozen_input_sha256 kb_sha256 NOT NULL,
@@ -2944,7 +2944,7 @@ BEGIN
      OR (NEW.request_kind='requirement_set_compile' AND NOT EXISTS (SELECT 1 FROM bid_requirement_set_compile_request_identities WHERE request_artifact_id=NEW.id))
      OR (NEW.request_kind='docx_compose' AND NOT EXISTS (SELECT 1 FROM bid_docx_composition_request_identities WHERE request_artifact_id=NEW.id))
      OR (NEW.request_kind='content_generate' AND NOT EXISTS (SELECT 1 FROM bid_content_generation_request_identities WHERE request_artifact_id=NEW.id))
-     OR (NEW.request_kind='submission_export' AND NOT EXISTS (SELECT 1 FROM bid_submission_export_request_identities WHERE request_artifact_id=NEW.id)) THEN
+     OR (NEW.request_kind IN ('submission_export','docx_layout') AND NOT EXISTS (SELECT 1 FROM bid_submission_export_request_identities WHERE request_artifact_id=NEW.id)) THEN
     RAISE EXCEPTION 'async request must have exactly one matching typed projection' USING ERRCODE='23514';
   END IF;
   RETURN NULL;
@@ -7428,7 +7428,7 @@ CREATE TABLE bid_tender_agent_checkpoint_artifacts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   request_artifact_id uuid NOT NULL,
   frozen_input_sha256 kb_sha256 NOT NULL,
-  stage_kind text NOT NULL CHECK (stage_kind IN ('analysis_checkpoint','composition_checkpoint','export_review_checkpoint')),
+  stage_kind text NOT NULL CHECK (stage_kind IN ('analysis_checkpoint','composition_checkpoint','export_review_checkpoint','layout_checkpoint')),
   batch_ordinal integer NOT NULL CHECK (batch_ordinal>=0),
   contract_sha256 kb_sha256 NOT NULL,
   canonical_input bytea NOT NULL,
@@ -9817,6 +9817,45 @@ END $$;
 
 
 
+
+CREATE FUNCTION kb_bid_v2_layout_checkpoint_get(p_id uuid,p_sha kb_sha256)
+RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+  SELECT payload FROM bid_tender_agent_checkpoint_artifacts
+    WHERE request_artifact_id=p_id AND frozen_input_sha256=p_sha AND stage_kind='layout_checkpoint';
+$$;
+
+CREATE FUNCTION kb_bid_v2_layout_checkpoint_put(p_id uuid,p_sha kb_sha256,p_attempt integer,p_token uuid,p_state jsonb)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE typed bid_submission_export_request_identities%ROWTYPE; prior jsonb; payload bytea; prior_payload bytea;
+  stamp timestamptz; revision_value bigint;
+BEGIN
+  stamp:=kb_bid_v2_tender_agent_lock_owner(p_id,p_sha,p_attempt,p_token);
+  SELECT * INTO STRICT typed FROM bid_submission_export_request_identities WHERE request_artifact_id=p_id AND frozen_input_sha256=p_sha;
+  IF typed.request_kind<>'docx_layout'
+    OR jsonb_typeof(p_state) IS DISTINCT FROM 'object'
+    OR NOT kb_bid_v2_json_keys_exact(p_state,ARRAY['revision','state','baseline_sha256','iteration','max_iterations','operation_id','expected_old','export_request_id','diagnosis'])
+    OR p_state->>'state' NOT IN ('measure','await_editor','await_save','ready','failed')
+    OR p_state->>'baseline_sha256' IS DISTINCT FROM typed.docx_sha256::text
+    OR (p_state->>'state'<>'ready' AND p_state->>'export_request_id' IS NOT NULL) THEN
+    RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: layout checkpoint identity' USING ERRCODE='23514';
+  END IF;
+  revision_value:=(p_state->>'revision')::bigint;
+  payload:=convert_to(kb_bid_v2_jcs(p_state),'UTF8');
+  SELECT payload INTO prior FROM bid_tender_agent_checkpoint_artifacts
+    WHERE request_artifact_id=p_id AND frozen_input_sha256=p_sha AND stage_kind='layout_checkpoint';
+  IF prior IS NOT NULL AND (
+      revision_value<=coalesce((prior->>'revision')::bigint,0)
+      OR (prior->>'state' IN ('ready','failed') AND p_state IS DISTINCT FROM prior)
+    ) THEN
+    RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: layout checkpoint cannot rewind' USING ERRCODE='23514';
+  END IF;
+  INSERT INTO bid_tender_agent_checkpoint_artifacts(
+    request_artifact_id,frozen_input_sha256,stage_kind,payload,payload_sha256,sequence,turn,updated_at)
+  VALUES(p_id,p_sha,'layout_checkpoint',convert_from(payload,'UTF8')::jsonb,kb_bid_v2_sha256_bytes(payload),revision_value,0,stamp)
+  ON CONFLICT (request_artifact_id,frozen_input_sha256,stage_kind) DO UPDATE
+    SET payload=EXCLUDED.payload,payload_sha256=EXCLUDED.payload_sha256,sequence=EXCLUDED.sequence,updated_at=EXCLUDED.updated_at;
+END $$;
+
 CREATE FUNCTION kb_bid_v2_export_review_reserve(p_id uuid,p_sha kb_sha256,p_attempt integer,p_token uuid,
   p_turn integer,p_contract kb_sha256,p_body bytea)
 RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
@@ -10413,7 +10452,9 @@ GRANT EXECUTE ON FUNCTION kb_bid_v2_load_docx_composition_request(uuid,bigint,kb
   kb_bid_v2_export_review_checkpoint_get(uuid,kb_sha256),
   kb_bid_v2_export_review_checkpoint_put(uuid,kb_sha256,integer,uuid,jsonb),
   kb_bid_v2_load_export_review_basis(uuid,kb_sha256),
-  kb_bid_v2_export_review_reserve(uuid,kb_sha256,integer,uuid,integer,kb_sha256,bytea)
+  kb_bid_v2_export_review_reserve(uuid,kb_sha256,integer,uuid,integer,kb_sha256,bytea),
+  kb_bid_v2_layout_checkpoint_get(uuid,kb_sha256),
+  kb_bid_v2_layout_checkpoint_put(uuid,kb_sha256,integer,uuid,jsonb)
   TO kb_runtime_worker;
 GRANT EXECUTE ON FUNCTION kb_bid_v2_load_docx_composition_source(uuid,jsonb,kb_actor_identity),
   kb_bid_v2_prepare_docx_composition_source(uuid,jsonb,jsonb,kb_actor_identity)
