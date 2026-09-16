@@ -426,6 +426,7 @@ async fn inspect_review_pages_complete_findings_by_bytes_for_both_roles() {
                 analysis_sha256: digest(&state.analysis).unwrap(),
                 coverage: Coverage::default(),
                 findings: state.review_draft.values().cloned().collect(),
+            ..Default::default()
             });
         }
         let all = agent::inspect_review(&state, &json!({"offset":0,"limit":100}), 16000).unwrap();
@@ -565,10 +566,58 @@ async fn review_findings_require_current_field_paths_and_concrete_corrections() 
 #[tokio::test]
 async fn review_draft_rejects_unseen_evidence_and_main_agent_mutations() {
     let journal = fresh_review_journal().await;
-    let state = journal.load().await.unwrap().unwrap();
-    let record_id = state.analysis.records.keys().next().unwrap().clone();
+    let mut state = journal.load().await.unwrap().unwrap();
+    let mut source = input();
+    let padding = "Independent neighboring text. ".repeat(1024);
+    let tail = Span {
+        source_id: "unseen".into(),
+        start: padding.len(),
+        end: padding.len() + "Final evidence.".len(),
+        grid_cell: None,
+        view_id: None,
+    };
+    source.source_units.push(Source {
+        source_unit_revision_id: "unseen".into(),
+        ordinal: 1,
+        text: format!("{padding}Final evidence."),
+        ..source.source_units[0].clone()
+    });
+    state.input_sha256 = digest(&source).unwrap();
+    tools::cover(
+        state
+            .analysis
+            .coverage
+            .text
+            .entry("unseen".into())
+            .or_default(),
+        0,
+        tail.end,
+    );
+    state.analysis.dispositions.insert(
+        "unseen".into(),
+        Disposition {
+            state: DispositionState::NonRequirement,
+            reason: "Independent synthetic fact source".into(),
+        },
+    );
+    let record: Record = serde_json::from_value(json!({"id":"unseen-fact","sources":[tail],"data":{"kind":"fact","name":"independent fact","value":"Final evidence.","scope":"unseen"}})).unwrap();
+    let record_id = record.id.clone();
+    state.analysis.records.insert(record_id.clone(), record);
+    state.source_review = Some(source_review::initialize(&source, &config()).unwrap());
+    source_review::select_next(&source, &config(), &mut state).unwrap();
+    let projected = source_review::evidence(&source, &config(), &state)
+        .unwrap()
+        .unwrap();
+    assert!(tools::validate_span(&source, &projected.coverage, &tail).is_err());
+    assert!(
+        !projected
+            .coverage
+            .candidate
+            .contains_key(&format!("record:{record_id}"))
+    );
+    *journal.state.lock().unwrap() = Some(state.clone());
     let finding = json!({"code":"FIELD_MISMATCH","message":"specific field issue",
-        "correction":"按所引原文补全并重新核对该字段", "affected":[],"sources":[span()]});
+        "correction":"按所引原文补全并重新核对该字段", "affected":[],"sources":[tail]});
     let unseen_candidate = json!({"code":"FIELD_MISMATCH","message":"specific field issue",
         "correction":"核对原文后修正该字段", "affected":[{"id":record_id,"path":"/data"}],"sources":[]});
     *journal.interrupt_after.lock().unwrap() = Some(state.turn + 3);
@@ -581,7 +630,7 @@ async fn review_draft_rejects_unseen_evidence_and_main_agent_mutations() {
         ("delete_review_finding", json!({"id":"foreign"})),
     ]);
     agent::run(
-        &input(),
+        &source,
         &config(),
         &journal,
         &model,
@@ -590,6 +639,25 @@ async fn review_draft_rejects_unseen_evidence_and_main_agent_mutations() {
     .await
     .unwrap_err();
     let mut saved = journal.load().await.unwrap().unwrap();
+    let packet: Value = {
+        let wire = model.bodies.lock().unwrap();
+        serde_json::from_str(
+            wire[0]["messages"].as_array().unwrap().last().unwrap()["content"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    assert!(
+        !packet["preloaded_evidence"]
+            .to_string()
+            .contains("Final evidence.")
+    );
+    assert!(
+        !packet["preloaded_evidence"]
+            .to_string()
+            .contains(&record_id)
+    );
     assert!(saved.review_draft.is_empty());
     assert!(
         model.bodies.lock().unwrap()[2]
@@ -611,7 +679,7 @@ async fn review_draft_rejects_unseen_evidence_and_main_agent_mutations() {
         ("delete_review_finding", json!({"id":"existing"})),
     ]);
     agent::run(
-        &input(),
+        &source,
         &config(),
         &journal,
         &model,
@@ -627,7 +695,7 @@ async fn review_draft_rejects_unseen_evidence_and_main_agent_mutations() {
     *journal.state.lock().unwrap() = Some(saved);
     *journal.interrupt_after.lock().unwrap() = Some(next);
     agent::run(
-        &input(),
+        &source,
         &config(),
         &journal,
         &work_script(vec![("delete_review_finding", json!({"id":"existing"}))]),
@@ -823,11 +891,25 @@ async fn source_judgment_can_pipeline_next_read_without_granting_same_batch_evid
 }
 
 #[tokio::test]
-async fn review_task_read_delivers_source_and_candidates_at_the_existing_response_boundary() {
+async fn preloaded_review_evidence_allows_comparison_without_an_extra_read_round() {
     struct ReadAndCompare(String);
     #[async_trait]
     impl Model for ReadAndCompare {
-        async fn turn(&self, _: &Config, _: &[u8]) -> Result<ChatTurn, AgentError> {
+        async fn turn(&self, _: &Config, body: &[u8]) -> Result<ChatTurn, AgentError> {
+            let body: Value = serde_json::from_slice(body).unwrap();
+            let packet: Value = serde_json::from_str(
+                body["messages"].as_array().unwrap().last().unwrap()["content"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let evidence = &packet["preloaded_evidence"]["assigned_evidence"];
+            assert_eq!(evidence["source"]["text"], input().source_units[0].text);
+            assert!(
+                evidence
+                    .to_string()
+                    .contains(self.0.strip_prefix("record:").unwrap())
+            );
             Ok(ChatTurn {
                 finish_reason: "tool_calls".into(),
                 tool_calls: vec![
@@ -841,6 +923,11 @@ async fn review_task_read_delivers_source_and_candidates_at_the_existing_respons
     }
     let journal = fresh_review_journal().await;
     let initial = journal.load().await.unwrap().unwrap();
+    assert!(initial.reviewer_coverage.text.is_empty());
+    let delivered = source_review::evidence(&input(), &config(), &initial)
+        .unwrap()
+        .unwrap()
+        .coverage;
     let key = format!("record:{}", initial.analysis.records.keys().next().unwrap());
     *journal.interrupt_after.lock().unwrap() = Some(initial.turn + 1);
     agent::run(
@@ -853,10 +940,7 @@ async fn review_task_read_delivers_source_and_candidates_at_the_existing_respons
     .await
     .unwrap_err();
     let saved = journal.load().await.unwrap().unwrap();
-    assert_eq!(
-        json!(saved.reviewer_coverage),
-        json!(initial.reviewer_coverage)
-    );
+    assert_eq!(json!(saved.reviewer_coverage), json!(delivered));
     let receipt = digest(&json!([
         "review_check",
         key,
@@ -869,7 +953,7 @@ async fn review_task_read_delivers_source_and_candidates_at_the_existing_respons
         pending.candidate[&key],
         digest(&initial.analysis.records.values().next().unwrap()).unwrap()
     );
-    assert!(!saved.reviewer_progress.seen.contains(&receipt));
+    assert!(saved.reviewer_progress.seen.contains(&receipt));
     let results: Vec<Value> = saved
         .transcript
         .iter()
@@ -886,8 +970,8 @@ async fn review_task_read_delivers_source_and_candidates_at_the_existing_respons
             <= config().limits.max_tool_result_bytes
     );
     assert_eq!(
-        results[1]["ok"], false,
-        "a same-batch read cannot authorize comparison"
+        results[1]["ok"], true,
+        "the reserved request already delivered the independent evidence before any tool executed"
     );
     let before = digest(&saved.analysis).unwrap();
     let mut projected = saved.clone();
@@ -902,10 +986,7 @@ async fn review_task_read_delivers_source_and_candidates_at_the_existing_respons
             .as_str()
             .is_some_and(|raw| raw.contains("assigned_evidence") && raw.contains("citation_ref"))
     }));
-    assert_eq!(
-        json!(projected.reviewer_coverage),
-        json!(initial.reviewer_coverage)
-    );
+    assert_eq!(json!(projected.reviewer_coverage), json!(delivered));
     assert_eq!(
         projected.read_bytes, saved.read_bytes,
         "request projection is not a second tool read"
@@ -928,6 +1009,10 @@ async fn review_task_read_delivers_source_and_candidates_at_the_existing_respons
     .unwrap_err();
     let after = journal.load().await.unwrap().unwrap();
     assert!(after.reviewer_progress.seen.contains(&receipt));
+    assert_eq!(
+        after.reviewer_progress.completions, saved.reviewer_progress.completions,
+        "a repeated comparison after the redundant read cannot earn completion twice"
+    );
     assert_eq!(digest(&after.analysis).unwrap(), before);
     assert!(
         !after.done,
@@ -957,12 +1042,19 @@ async fn independent_review_must_read_and_drives_repair() {
     let state = state.as_ref().unwrap();
     assert_eq!(state.review_rounds, 2);
     assert_eq!(state.turn, expected_calls);
-    // The review's premature submit was rejected, despite complete main coverage.
+    // The reviewer now receives its own evidence packet before judging.
+    // Its grounded omission still forces a Main repair and a second review;
+    // preloading does not itself accept the initial non-requirement decision.
     let bodies = model.bodies.lock().unwrap();
     assert!(
-        bodies[6]["messages"]
+        bodies[4]["messages"]
             .to_string()
-            .contains("independently inspect")
+            .contains("assigned_evidence")
+    );
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body["messages"].to_string().contains("OMITTED_REQUIREMENT"))
     );
     for body in bodies.iter().filter(|b| {
         b["messages"][0]["content"][0]["text"]
@@ -1041,7 +1133,7 @@ async fn clean_review_checks_require_independent_evidence_and_only_complete_a_ve
     let check = json!({"reference":reference,"summary":"The recorded submission requirement matches the cited original clause.","sources":[span()]});
     let calls = vec![
         ("set_work_note", focus),
-        ("complete_review_check", check.clone()), // no independent receipts yet
+        ("check_gaps", json!({"scope":"work","offset":0,"limit":10})), // preparation grants no semantic comparison
         (
             "read_source",
             json!({"source_id":"source","start":0,"max_bytes":1024}),
@@ -1106,11 +1198,11 @@ async fn clean_review_checks_require_independent_evidence_and_only_complete_a_ve
     );
     assert_eq!(digest(&projected.reviewer_progress).unwrap(), before);
     assert!(!projected.done);
-    assert!(saved.transcript.iter().any(|m| {
-        m["content"]
-            .as_str()
-            .is_some_and(|s| s.contains("independently inspect the current candidate"))
-    }));
+    assert_eq!(
+        saved.reviewer_coverage.candidate.get(&reference),
+        Some(&digest(record).unwrap()),
+        "a successful clean comparison still requires this reviewer's exact current candidate receipt"
+    );
 
     // A new summary (or a restart) cannot turn the same comparison into progress.
     let mut repeated = check.clone();
@@ -1132,8 +1224,8 @@ async fn clean_review_checks_require_independent_evidence_and_only_complete_a_ve
     );
     assert_eq!(repeated.reviewer_progress.watch.no_progress_turns, 1);
 
-    // A repaired candidate must be independently retrieved again before its
-    // new version can get a clean comparison receipt.
+    // A repaired candidate must be independently delivered again. The next
+    // request can preload its current value rather than spend a reading turn.
     let mut changed = repeated;
     let record = changed.analysis.records.values_mut().next().unwrap();
     let RecordData::Requirement { text, .. } = &mut record.data else {
@@ -1148,17 +1240,30 @@ async fn clean_review_checks_require_independent_evidence_and_only_complete_a_ve
     .unwrap();
     *journal.interrupt_after.lock().unwrap() = Some(changed.turn + 1);
     *journal.state.lock().unwrap() = Some(changed);
+    let model = work_script(vec![("complete_review_check", check)]);
     agent::run(
         &input(),
         &config(),
         &journal,
-        &work_script(vec![("complete_review_check", check)]),
+        &model,
         &CancellationToken::new(),
     )
     .await
     .unwrap_err();
     let changed = journal.load().await.unwrap().unwrap();
-    assert!(!changed.reviewer_progress.seen.contains(&changed_receipt));
+    let wire = model.bodies.lock().unwrap();
+    let packet: Value = serde_json::from_str(
+        wire[0]["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        packet["preloaded_evidence"]
+            .to_string()
+            .contains("提交规定格式。")
+    );
+    assert!(changed.reviewer_progress.seen.contains(&changed_receipt));
     assert!(!changed.done);
     assert!(
         !tools::schemas(false)
@@ -1221,7 +1326,13 @@ async fn source_review_advances_without_pulling_in_deferred_unknowns() {
         vec!["later"]
     );
     assert_eq!(saved.reviewer_work.as_ref().unwrap().pending_refs.len(), 1);
-    assert!(!saved.reviewer_coverage.text.contains_key("later"));
+    assert!(
+        source_review::pending(&source, &config(), &saved)
+            .unwrap()
+            .iter()
+            .any(|task| task.source_id == "later"),
+        "neighbor evidence may be delivered, but the deferred source still requires its own semantic judgment"
+    );
     assert!(
         saved.review.is_none(),
         "local completion cannot approve the deferred source"

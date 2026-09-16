@@ -2,10 +2,10 @@
 use super::*;
 use axum::extract::{OriginalUri, Query};
 use axum::http::header::HOST;
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use bidding::onlyoffice_conversion::{Config, Error as TransportError, ErrorKind, bounded_body};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use reqwest::Url;
 use serde::Serialize;
-use std::time::Duration;
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -31,14 +31,14 @@ pub(super) fn router() -> Router<AppState> {
         )
 }
 
-struct Config {
-    server: Url,
-    command: Url,
-    api: Url,
-    server_secret: String,
-    capability_secret: String,
-    ttl: u64,
-    timeout: Duration,
+fn map_transport(error: TransportError) -> ApiErr {
+    let status = match error.kind {
+        ErrorKind::Invalid => StatusCode::BAD_REQUEST,
+        ErrorKind::Unauthorized => StatusCode::UNAUTHORIZED,
+        ErrorKind::Forbidden => StatusCode::FORBIDDEN,
+        ErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    fail(status, error.code, error.message)
 }
 
 fn transport_error(code: &str, message: &str) -> ApiErr {
@@ -71,131 +71,6 @@ fn browser_document_server(server: &Url, headers: &HeaderMap) -> Result<Url, Api
     url.set_host(Some(hostname))
         .map_err(|_| validation("invalid ONLYOFFICE origin"))?;
     Ok(url)
-}
-
-impl Config {
-    fn load() -> Result<Self, ApiErr> {
-        let required = |name: &str| {
-            std::env::var(name)
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .ok_or_else(|| {
-                    transport_error(
-                        "ONLYOFFICE_NOT_CONFIGURED",
-                        "ONLYOFFICE configuration is incomplete",
-                    )
-                })
-        };
-        let origin = |value: String| -> Result<Url, ApiErr> {
-            let url = Url::parse(&value).map_err(|_| validation("invalid ONLYOFFICE origin"))?;
-            if !matches!(url.scheme(), "http" | "https")
-                || url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.query().is_some()
-                || url.fragment().is_some()
-                || url.path() != "/"
-            {
-                return Err(validation(
-                    "ONLYOFFICE origins must be absolute HTTP(S) origins",
-                ));
-            }
-            Ok(url)
-        };
-        let positive = |value: String| {
-            value
-                .parse::<u64>()
-                .ok()
-                .filter(|v| *v > 0)
-                .ok_or_else(|| validation("ONLYOFFICE time budgets must be positive seconds"))
-        };
-        let server_secret = required("KB_ONLYOFFICE_JWT_SECRET")?;
-        let capability_secret = required("KB_ONLYOFFICE_CAPABILITY_SECRET")?;
-        if server_secret == capability_secret {
-            return Err(validation(
-                "ONLYOFFICE service and capability secrets must be independent",
-            ));
-        }
-        let server = origin(required("KB_ONLYOFFICE_SERVER_ORIGIN")?)?;
-        let command = match std::env::var("KB_ONLYOFFICE_COMMAND_ORIGIN") {
-            Ok(value) if !value.trim().is_empty() => origin(value)?,
-            Ok(_) | Err(_) => server.clone(),
-        };
-        Ok(Self {
-            server,
-            command,
-            api: origin(required("KB_ONLYOFFICE_API_ORIGIN")?)?,
-            server_secret,
-            capability_secret,
-            ttl: positive(required("KB_ONLYOFFICE_TOKEN_TTL_SECONDS")?)?,
-            timeout: Duration::from_secs(positive(required(
-                "KB_ONLYOFFICE_HTTP_TIMEOUT_SECONDS",
-            )?)?),
-        })
-    }
-
-    fn client(&self) -> Result<reqwest::Client, ApiErr> {
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .timeout(self.timeout)
-            .build()
-            .map_err(|_| {
-                transport_error(
-                    "ONLYOFFICE_TRANSPORT_FAILED",
-                    "document service client unavailable",
-                )
-            })
-    }
-
-    fn sign<T: Serialize>(&self, value: &T, capability: bool) -> Result<String, ApiErr> {
-        let secret = if capability {
-            &self.capability_secret
-        } else {
-            &self.server_secret
-        };
-        encode(
-            &Header::new(Algorithm::HS256),
-            value,
-            &EncodingKey::from_secret(secret.as_bytes()),
-        )
-        .map_err(|_| transport_error("ONLYOFFICE_SIGN_FAILED", "document service signing failed"))
-    }
-
-    fn expiration(&self) -> Result<u64, ApiErr> {
-        let now = u64::try_from(chrono::Utc::now().timestamp())
-            .map_err(|_| validation("invalid server clock"))?;
-        now.checked_add(self.ttl)
-            .filter(|v| *v <= i64::MAX as u64)
-            .ok_or_else(|| validation("ONLYOFFICE token lifetime overflow"))
-    }
-
-    fn download_url(&self, value: &str) -> Result<Url, ApiErr> {
-        let mut url =
-            Url::parse(value).map_err(|_| validation("invalid document service download URL"))?;
-        let origin = url.origin();
-        if (origin != self.server.origin() && origin != self.command.origin())
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.fragment().is_some()
-            || !url.path().starts_with("/cache/files/")
-        {
-            return Err(fail(
-                StatusCode::FORBIDDEN,
-                "ONLYOFFICE_DOWNLOAD_SCOPE",
-                "document download is outside the configured service cache",
-            ));
-        }
-        if origin == self.server.origin() && self.command.origin() != self.server.origin() {
-            let _ = url.set_scheme(self.command.scheme());
-            url.set_host(self.command.host_str())
-                .map_err(|_| validation("invalid document service download URL"))?;
-            if url.set_port(self.command.port()).is_err() {
-                return Err(validation("invalid document service download URL"));
-            }
-        }
-        Ok(url)
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -231,7 +106,7 @@ fn read_capability(
     validation.validate_exp = false;
     let claims = decode::<Capability>(
         token,
-        &DecodingKey::from_secret(config.capability_secret.as_bytes()),
+        &DecodingKey::from_secret(config.capability_secret().as_bytes()),
         &validation,
     )
     .map_err(|_| {
@@ -294,7 +169,7 @@ async fn open(
     if let Some(language) = &expected.language {
         validate_language(language)?;
     }
-    let config = Config::load()?;
+    let config = Config::load().map_err(map_transport)?;
     let pool = require_bid_pool().await?;
     let version =
         bidding::docx_round::get_docx_version(&pool, workspace, expected.version_id, &actor)
@@ -327,25 +202,27 @@ async fn open(
         .api
         .join(&format!("{prefix}/source"))
         .map_err(|_| validation("invalid API origin"))?;
-    source_url
-        .query_pairs_mut()
-        .append_pair("token", &config.sign(&capability, true)?);
+    source_url.query_pairs_mut().append_pair(
+        "token",
+        &config.sign(&capability, true).map_err(map_transport)?,
+    );
     capability.aud = "docx-callback".into();
     let mut callback_url = config
         .api
         .join(&format!("{prefix}/callback"))
         .map_err(|_| validation("invalid API origin"))?;
-    callback_url
-        .query_pairs_mut()
-        .append_pair("token", &config.sign(&capability, true)?);
+    callback_url.query_pairs_mut().append_pair(
+        "token",
+        &config.sign(&capability, true).map_err(map_transport)?,
+    );
     let mut editor = json!({"documentType":"word", "document": {"fileType":"docx", "key":key.to_string(),
         "title":format!("{workspace}.docx"),"url":source_url.as_str(),"permissions":{"edit":true}},
         "editorConfig":{"mode":"edit","callbackUrl":callback_url.as_str(),"user":{"id":actor,"name":email},
-            "customization":{"forcesave":false}},"exp":config.expiration()?});
+            "customization":{"forcesave":false}},"exp":config.expiration().map_err(map_transport)?});
     if let Some(language) = expected.language {
         editor["editorConfig"]["lang"] = json!(language);
     }
-    editor["token"] = json!(config.sign(&editor, false)?);
+    editor["token"] = json!(config.sign(&editor, false).map_err(map_transport)?);
     let browser_server = browser_document_server(&config.server, &headers)?;
     Ok(Json(json!({"config":editor,"session":session,
         "api_script_url":browser_server.join("web-apps/apps/api/documents/api.js").map_err(|_| validation("invalid server origin"))?.as_str()})))
@@ -357,7 +234,7 @@ async fn source(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, ApiErr> {
-    let config = Config::load()?;
+    let config = Config::load().map_err(map_transport)?;
     let capability = read_capability(&config, &ticket.token, "docx-source", workspace, key)?;
     let payload = read_service_payload(&config, &headers)?;
     let requested = config
@@ -421,7 +298,7 @@ async fn force_save(
 ) -> Result<Json<Value>, ApiErr> {
     let (_, actor) = human_actor(&headers, &state).await?;
     let request_key = required_idempotency_key(&headers)?;
-    let config = Config::load()?;
+    let config = Config::load().map_err(map_transport)?;
     let pool = require_bid_pool().await?;
     let pending=bidding::docx_round::editor_command(&pool,workspace,"request_save",&json!({"editor_key":input.editor_key,
         "expected_version_id":input.expected.version_id,"expected_docx_sha256":input.expected.docx_sha256}),&actor,&request_key).await.map_err(map_docx_sql)?;
@@ -431,9 +308,10 @@ async fn force_save(
     let save_id = identity(&pending, "save_id")?;
     let mut command =
         json!({"c":"forcesave","key":input.editor_key.to_string(),"userdata":save_id.to_string()});
-    command["token"] = json!(config.sign(&command, false)?);
+    command["token"] = json!(config.sign(&command, false).map_err(map_transport)?);
     let response = config
-        .client()?
+        .client()
+        .map_err(map_transport)?
         .post(
             config
                 .command
@@ -455,7 +333,9 @@ async fn force_save(
             "save command outcome is unknown; pending correlation retained",
         ));
     }
-    let bytes = bounded_body(response).await?;
+    let bytes = bounded_body(response, platform::max_file_bytes())
+        .await
+        .map_err(map_transport)?;
     let result: Value = serde_json::from_slice(&bytes).map_err(|_| {
         transport_error(
             "ONLYOFFICE_COMMAND_UNCERTAIN",
@@ -488,26 +368,6 @@ async fn force_save(
     Ok(Json(pending))
 }
 
-async fn bounded_body(mut response: reqwest::Response) -> Result<Vec<u8>, ApiErr> {
-    let limit = platform::max_file_bytes();
-    if response
-        .content_length()
-        .is_some_and(|size| size > limit as u64)
-    {
-        return Err(validation("document service response too large"));
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|_| {
-        transport_error("ONLYOFFICE_READ_FAILED", "document service response failed")
-    })? {
-        if chunk.len() > limit.saturating_sub(bytes.len()) {
-            return Err(validation("document service response too large"));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
-}
-
 fn read_service_payload(config: &Config, headers: &HeaderMap) -> Result<Value, ApiErr> {
     let token = headers
         .get("authorization")
@@ -524,7 +384,7 @@ fn read_service_payload(config: &Config, headers: &HeaderMap) -> Result<Value, A
     validation.leeway = 0;
     let signed = decode::<Value>(
         token,
-        &DecodingKey::from_secret(config.server_secret.as_bytes()),
+        &DecodingKey::from_secret(config.service_secret().as_bytes()),
         &validation,
     )
     .map_err(|_| {
@@ -568,7 +428,7 @@ async fn callback_inner(
     headers: HeaderMap,
     BidJson(body): BidJson<Value>,
 ) -> Result<Json<Value>, ApiErr> {
-    let config = Config::load()?;
+    let config = Config::load().map_err(map_transport)?;
     let capability = read_capability(&config, &ticket.token, "docx-callback", workspace, key)?;
     let signed = read_service_payload(&config, &headers)?;
     let mut content = body.clone();
@@ -616,11 +476,13 @@ async fn callback_inner(
     if !matches!(status, 2 | 6) {
         return Err(validation_error("unsupported callback status"));
     }
-    let url = config.download_url(
-        content["url"]
-            .as_str()
-            .ok_or_else(|| validation_error("save callback URL missing"))?,
-    )?;
+    let url = config
+        .download_url(
+            content["url"]
+                .as_str()
+                .ok_or_else(|| validation_error("save callback URL missing"))?,
+        )
+        .map_err(map_transport)?;
     // Hash only the verified semantic payload and capability scope. JWT/token
     // expiry/signature can change on redelivery without changing the save.
     // JCS also makes JSON property order irrelevant; no cache URL is persisted.
@@ -661,16 +523,24 @@ async fn callback_inner(
             "save request is no longer pending",
         ));
     }
-    let response = config.client()?.get(url).send().await.map_err(|_| {
-        transport_error("ONLYOFFICE_READ_FAILED", "document service download failed")
-    })?;
+    let response = config
+        .client()
+        .map_err(map_transport)?
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| {
+            transport_error("ONLYOFFICE_READ_FAILED", "document service download failed")
+        })?;
     if !response.status().is_success() {
         return Err(transport_error(
             "ONLYOFFICE_READ_FAILED",
             "document service download did not succeed",
         ));
     }
-    let bytes = bounded_body(response).await?;
+    let bytes = bounded_body(response, platform::max_file_bytes())
+        .await
+        .map_err(map_transport)?;
     let document = tokio::task::spawn_blocking(move || InitialDocx::new(bytes))
         .await
         .map_err(|_| transport_error("DOCX_VALIDATION_FAILED", "DOCX validation failed"))?

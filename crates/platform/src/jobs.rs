@@ -606,8 +606,6 @@ pub async fn enqueue_bid_authoring_v2(
             request,
             project_id,
             workspace_id,
-            workspace_revision_id,
-            output_mode,
         } => oxana_id(
             storage
                 .enqueue(
@@ -616,8 +614,6 @@ pub async fn enqueue_bid_authoring_v2(
                         request,
                         project_id,
                         workspace_id,
-                        workspace_revision_id,
-                        output_mode,
                     },
                 )
                 .await,

@@ -1,4 +1,4 @@
-//! Unix helper subprocesses for object I/O, PDF raster and submission render.
+//! Unix helper subprocesses for immutable object I/O.
 
 use crate::runtime::{JobErr, TASK_ABORT_DRAIN_RESERVE, non_agent_sql_error};
 use async_trait::async_trait;
@@ -7,15 +7,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub(crate) const MAX_EXPORT_INPUT_BYTES: usize = 64 * 1024 * 1024;
-pub(crate) const MAX_PDF_ATTACHMENT_BYTES: usize = 128 * 1024 * 1024;
 pub(crate) const MAX_TENDER_DOCUMENT_BYTES: usize = 50 * 1024 * 1024;
-pub(crate) const MAX_RASTER_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const MAX_RENDER_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
-pub(crate) const MAX_PDF_ATTACHMENT_PAGES: usize =
-    bidding::submission_export::MAX_PDF_ATTACHMENT_PAGES;
-pub(crate) const RENDER_TIMEOUT_SECONDS: u64 = 120;
-pub(crate) const SUBMISSION_RENDER_HELPER_ARG: &str = "--kb-submission-render-helper-v1";
-pub(crate) const PDF_RASTER_HELPER_ARG: &str = "--kb-pdf-raster-helper-v1";
 
 pub(crate) async fn stage_export_object(
     pool: &PgPool,
@@ -51,18 +44,6 @@ pub(crate) async fn stage_export_object(
         )));
     }
     Ok(object_ref)
-}
-
-#[cfg(test)]
-pub(crate) fn validate_frozen_asset_metadata(values: &[serde_json::Value]) -> Result<(), JobErr> {
-    bidding::submission_export::validate_frozen_asset_metadata(values)
-        .map_err(|error| JobErr(error.0))
-}
-
-#[cfg(test)]
-pub(crate) fn validate_submission_export_metadata(input: &serde_json::Value) -> Result<(), JobErr> {
-    bidding::submission_export::validate_submission_export_metadata(input)
-        .map_err(|error| JobErr(error.0))
 }
 
 pub(crate) async fn abort_task_until<T>(
@@ -124,237 +105,6 @@ pub(crate) async fn kill_helper_group_and_reap_child(
         .map_err(|_| JobErr(format!("reap {label} exceeded cleanup deadline")))?
         .map_err(|error| JobErr(format!("reap {label}: {error}")))?;
     Ok(())
-}
-
-pub(crate) async fn rasterize_pdf_pages(
-    bytes: &[u8],
-    expected_geometry: &[(u32, u32)],
-    cancel: &CancellationToken,
-) -> Result<Vec<Vec<u8>>, JobErr> {
-    if bytes.is_empty() || bytes.len() > MAX_PDF_ATTACHMENT_BYTES {
-        return Err(JobErr(
-            "frozen PDF attachment exceeds the source byte budget".into(),
-        ));
-    }
-    if expected_geometry.is_empty() || expected_geometry.len() > MAX_PDF_ATTACHMENT_PAGES {
-        return Err(JobErr(
-            "trusted PDF rasterizer expected page count is invalid".into(),
-        ));
-    }
-    let geometry = serde_json::to_string(expected_geometry)
-        .map_err(|error| JobErr(format!("serialize PDF geometry: {error}")))?;
-    let framed = run_helper_capture(
-        &[PDF_RASTER_HELPER_ARG.into(), geometry],
-        bytes.to_vec(),
-        MAX_RASTER_TOTAL_BYTES + 8 + expected_geometry.len() * 8,
-        std::time::Duration::from_secs(RENDER_TIMEOUT_SECONDS),
-        cancel,
-        "PDF raster helper",
-    )
-    .await?;
-    if framed.len() < 4 {
-        return Err(JobErr("PDF raster helper framing is truncated".into()));
-    }
-    let page_count = u32::from_be_bytes(framed[0..4].try_into().unwrap()) as usize;
-    if page_count != expected_geometry.len() {
-        return Err(JobErr(
-            "trusted PDF rasterizer returned an invalid page count".into(),
-        ));
-    }
-    let mut offset = 4usize;
-    let mut pages = Vec::with_capacity(page_count);
-    let mut total_bytes = 0usize;
-    for (index, expected) in expected_geometry.iter().enumerate() {
-        let length_bytes = framed
-            .get(offset..offset + 8)
-            .ok_or_else(|| JobErr("PDF raster helper framing is truncated".into()))?;
-        let length = usize::try_from(u64::from_be_bytes(length_bytes.try_into().unwrap()))
-            .map_err(|_| JobErr("PDF raster page length overflows usize".into()))?;
-        offset += 8;
-        let page = framed
-            .get(offset..offset + length)
-            .ok_or_else(|| JobErr("PDF raster helper page is truncated".into()))?
-            .to_vec();
-        offset += length;
-        total_bytes = total_bytes
-            .checked_add(length)
-            .ok_or_else(|| JobErr("rasterized PDF pages exceed byte budget".into()))?;
-        if total_bytes > MAX_RASTER_TOTAL_BYTES {
-            return Err(JobErr("rasterized PDF pages exceed byte budget".into()));
-        }
-        let actual = bidding::render_v2::frozen_image_dimensions(&page).map_err(JobErr)?;
-        if actual != *expected {
-            return Err(JobErr(format!(
-                "trusted PDF rasterizer geometry mismatch at page {index}"
-            )));
-        }
-        pages.push(page);
-    }
-    if offset != framed.len() {
-        return Err(JobErr(
-            "PDF raster helper framing has trailing bytes".into(),
-        ));
-    }
-    Ok(pages)
-}
-
-pub fn run_submission_render_helper(arguments: &[String]) -> Result<(), String> {
-    use std::io::{Read, Write};
-    if arguments.first().map(String::as_str) != Some(SUBMISSION_RENDER_HELPER_ARG) {
-        return Err("invalid submission render helper arguments".into());
-    }
-    #[cfg(debug_assertions)]
-    if let Some(delay) = std::env::var("KNOWLEDGEBRAIN_TEST_RENDER_HELPER_DELAY_MS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-    {
-        std::thread::sleep(std::time::Duration::from_millis(delay));
-    }
-    // The four-argument form is retained only as a direct lifecycle test seam;
-    // production uses bounded stdin/stdout so the parent performs no filesystem I/O.
-    if arguments.len() == 4 {
-        let input_path = std::path::Path::new(&arguments[1]);
-        let output_path = std::path::Path::new(&arguments[2]);
-        let format = arguments[3].as_str();
-        let input = std::fs::read(input_path).map_err(|error| error.to_string())?;
-        let rendered = render_submission_helper_bytes(&input, format)?;
-        std::fs::write(output_path, rendered).map_err(|error| error.to_string())?;
-        return Ok(());
-    }
-    if arguments.len() != 2 {
-        return Err("invalid submission render helper arguments".into());
-    }
-    let mut input = Vec::new();
-    std::io::stdin()
-        .take((MAX_EXPORT_INPUT_BYTES + 1) as u64)
-        .read_to_end(&mut input)
-        .map_err(|error| error.to_string())?;
-    if input.len() > MAX_EXPORT_INPUT_BYTES {
-        return Err("submission render helper input exceeds budget".into());
-    }
-    let rendered = render_submission_helper_bytes(&input, &arguments[1])?;
-    let mut stdout = std::io::stdout().lock();
-    stdout
-        .write_all(&rendered)
-        .map_err(|error| error.to_string())?;
-    stdout.flush().map_err(|error| error.to_string())
-}
-
-pub(crate) fn render_submission_helper_bytes(
-    input: &[u8],
-    format: &str,
-) -> Result<Vec<u8>, String> {
-    if input.is_empty() || input.len() > MAX_EXPORT_INPUT_BYTES {
-        return Err("submission render helper input exceeds budget".into());
-    }
-    if !matches!(format, "docx" | "pdf") {
-        return Err("invalid submission render helper format".into());
-    }
-    let layout: bidding::render_v2::LayoutDocumentV2 =
-        serde_json::from_slice(input).map_err(|error| error.to_string())?;
-    let rendered = match format {
-        "docx" => bidding::render_v2::render_docx(&layout),
-        "pdf" => bidding::render_v2::render_pdf(&layout),
-        _ => unreachable!(),
-    }?;
-    if rendered.is_empty() || rendered.len() > MAX_RENDER_OUTPUT_BYTES {
-        return Err("submission render helper output exceeds budget".into());
-    }
-    Ok(rendered)
-}
-
-pub fn run_pdf_raster_helper(arguments: &[String]) -> Result<(), String> {
-    use std::io::{Read, Write};
-    if arguments.len() != 2 || arguments[0] != PDF_RASTER_HELPER_ARG {
-        return Err("invalid PDF raster helper arguments".into());
-    }
-    let geometry: Vec<(u32, u32)> =
-        serde_json::from_str(&arguments[1]).map_err(|error| error.to_string())?;
-    if geometry.is_empty() || geometry.len() > MAX_PDF_ATTACHMENT_PAGES {
-        return Err("invalid PDF raster helper geometry".into());
-    }
-    let mut pdf = Vec::new();
-    std::io::stdin()
-        .take((MAX_PDF_ATTACHMENT_BYTES + 1) as u64)
-        .read_to_end(&mut pdf)
-        .map_err(|error| error.to_string())?;
-    if pdf.is_empty() || pdf.len() > MAX_PDF_ATTACHMENT_BYTES {
-        return Err("PDF raster helper input exceeds budget".into());
-    }
-    struct WorkDirectory(std::path::PathBuf);
-    impl Drop for WorkDirectory {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    let path = std::env::temp_dir().join(format!("kb-pdf-raster-helper-{}", Uuid::new_v4()));
-    std::fs::create_dir(&path).map_err(|error| error.to_string())?;
-    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o700))
-        .map_err(|error| error.to_string())?;
-    let directory = WorkDirectory(path);
-    let input_path = directory.0.join("source.pdf");
-    let output_prefix = directory.0.join("page");
-    std::fs::write(&input_path, pdf).map_err(|error| error.to_string())?;
-    let status = std::process::Command::new("pdftoppm")
-        .arg("-png")
-        .arg("-cropbox")
-        .arg("-r")
-        .arg("144")
-        .arg("-f")
-        .arg("1")
-        .arg("-l")
-        .arg((MAX_PDF_ATTACHMENT_PAGES + 1).to_string())
-        .arg(&input_path)
-        .arg(&output_prefix)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|error| error.to_string())?;
-    if !status.success() {
-        return Err("trusted PDF rasterizer failed".into());
-    }
-    let mut paths = std::fs::read_dir(&directory.0)
-        .map_err(|error| error.to_string())?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("png"))
-        .collect::<Vec<_>>();
-    paths.sort_by_key(|path| {
-        path.file_stem()
-            .and_then(|value| value.to_str())
-            .and_then(|value| value.rsplit('-').next())
-            .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(u32::MAX)
-    });
-    if paths.len() != geometry.len() {
-        return Err("trusted PDF rasterizer returned an invalid page count".into());
-    }
-    let mut pages = Vec::with_capacity(paths.len());
-    let mut total = 0usize;
-    for (path, expected) in paths.into_iter().zip(geometry) {
-        let page = std::fs::read(path).map_err(|error| error.to_string())?;
-        total = total
-            .checked_add(page.len())
-            .ok_or_else(|| "PDF raster output byte count overflow".to_string())?;
-        if total > MAX_RASTER_TOTAL_BYTES {
-            return Err("PDF raster output exceeds budget".into());
-        }
-        if bidding::render_v2::frozen_image_dimensions(&page)? != expected {
-            return Err("trusted PDF rasterizer geometry mismatch".into());
-        }
-        pages.push(page);
-    }
-    let mut stdout = std::io::stdout().lock();
-    stdout
-        .write_all(&(pages.len() as u32).to_be_bytes())
-        .map_err(|error| error.to_string())?;
-    for page in pages {
-        stdout
-            .write_all(&(page.len() as u64).to_be_bytes())
-            .and_then(|_| stdout.write_all(&page))
-            .map_err(|error| error.to_string())?;
-    }
-    stdout.flush().map_err(|error| error.to_string())
 }
 
 pub(crate) const OBJECT_READ_HELPER_ARG: &str = "--kb-object-read-helper-v1";
@@ -485,31 +235,6 @@ impl bidding::submission_export::ExportIo for HelperExportIo {
         actor: &str,
     ) -> Result<String, bidding::submission_export::ExportError> {
         stage_export_object(pool, staging_id, digest, media_type, bytes, actor)
-            .await
-            .map_err(|error| bidding::submission_export::ExportError(error.0))
-    }
-}
-
-#[async_trait]
-impl bidding::submission_export::RenderIo for HelperExportIo {
-    async fn render(
-        &self,
-        layout: bidding::render_v2::LayoutDocumentV2,
-        format: &str,
-        cancel: &CancellationToken,
-    ) -> Result<(Vec<u8>, &'static str), bidding::submission_export::ExportError> {
-        render_submission_in_helper(layout, format, cancel)
-            .await
-            .map_err(|error| bidding::submission_export::ExportError(error.0))
-    }
-
-    async fn raster_pdf(
-        &self,
-        bytes: &[u8],
-        geometry: &[(u32, u32)],
-        cancel: &CancellationToken,
-    ) -> Result<Vec<Vec<u8>>, bidding::submission_export::ExportError> {
-        rasterize_pdf_pages(bytes, geometry, cancel)
             .await
             .map_err(|error| bidding::submission_export::ExportError(error.0))
     }
@@ -683,31 +408,4 @@ pub(crate) async fn read_blob_in_helper(
             JobErr(format!("TRANSIENT_HANDLER:{}", error.0))
         }
     })
-}
-
-pub(crate) async fn render_submission_in_helper(
-    layout: bidding::render_v2::LayoutDocumentV2,
-    format: &str,
-    cancel: &CancellationToken,
-) -> Result<(Vec<u8>, &'static str), JobErr> {
-    let input = serde_json::to_vec(&layout)
-        .map_err(|error| JobErr(format!("serialize render helper input: {error}")))?;
-    if input.is_empty() || input.len() > MAX_EXPORT_INPUT_BYTES {
-        return Err(JobErr("render helper input exceeds budget".into()));
-    }
-    let bytes = run_helper_capture(
-        &[SUBMISSION_RENDER_HELPER_ARG.into(), format.into()],
-        input,
-        MAX_RENDER_OUTPUT_BYTES,
-        std::time::Duration::from_secs(RENDER_TIMEOUT_SECONDS),
-        cancel,
-        "render helper",
-    )
-    .await?;
-    let media_type = if format == "docx" {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    } else {
-        "application/pdf"
-    };
-    Ok((bytes, media_type))
 }

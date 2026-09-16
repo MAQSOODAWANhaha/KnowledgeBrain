@@ -14,6 +14,19 @@ fn original(input: &FrozenInput) -> Value {
     json!({"source_id":"source","start":0,"end":input.source_units[0].text.len()})
 }
 
+struct InitialExtraction(Value);
+#[async_trait]
+impl Model for InitialExtraction {
+    async fn turn(&self, _: &Config, _: &[u8]) -> Result<ChatTurn, AgentError> {
+        Ok(ChatTurn { content:String::new(), finish_reason:"tool_calls".into(), usage:None,
+            tool_calls: vec![
+                ChatToolCall {id:"initial-record".into(), name:"put_record".into(), arguments:self.0.to_string()},
+                ChatToolCall {id:"initial-disposition".into(), name:"set_disposition".into(),
+                    arguments:json!({"source_id":"source","state":"requirement","reason":"Direct interface requirement."}).to_string()},
+            ] })
+    }
+}
+
 async fn steps(
     input: &FrozenInput,
     config: &Config,
@@ -47,13 +60,30 @@ async fn absent_parameter_relation_dispute_reaches_independent_withdrawal_and_so
     let read = json!({"source_id":"source","start":0,"max_bytes":1024});
     let records = json!({"kind":"all","view":"detail","offset":0,"limit":10});
     let dispositions = json!({"kind":"disposition","view":"detail","offset":0,"limit":10});
-    let (initial, _) = steps(&input, &config, &journal, vec![
-        ("set_work_note", active_work("source")),
-        ("read_source", read.clone()),
-        ("put_record", requirement),
-        ("set_disposition", json!({"source_id":"source","state":"requirement","reason":"Direct interface requirement."})),
-        ("request_review", json!({})),
-    ]).await;
+    let (before, _) = steps(
+        &input,
+        &config,
+        &journal,
+        vec![
+            ("set_work_note", active_work("source")),
+            ("read_source", read.clone()),
+        ],
+    )
+    .await;
+    // Creation and disposition share one response: the host-allocated record
+    // detail has not been delivered back to Main when independent review starts.
+    *journal.interrupt_after.lock().unwrap() = Some(before.turn + 1);
+    let error = agent::run(
+        &input,
+        &config,
+        &journal,
+        &InitialExtraction(requirement),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "INTERNAL");
+    let initial = journal.load().await.unwrap().unwrap();
     let record_id = initial.analysis.records.keys().next().unwrap().clone();
     let record_ref = format!("record:{record_id}");
     let finding = json!({"code":"MISSING_PARAMETER_RELATION",

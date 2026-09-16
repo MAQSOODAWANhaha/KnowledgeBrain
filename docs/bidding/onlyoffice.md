@@ -1,8 +1,14 @@
 # ONLYOFFICE Docs：在线 DOCX 编制目标契约
 
-> 状态：**方案已确认；普通实施与隔离开发验证已授权，任务见[实施台账](../../plans/implementation-tasks.md)**。ONLYOFFICE/DOCX 主链已有部分实现及隔离验证，真实 Agent 整稿与同版本 PDF 尚未完整验收；本文定义技术目标，具体完成状态以台账证据为准。
-> 业务流程以 [`prd.md`](prd.md) 为准；本文定义编辑、保存、AI 入稿及 PDF 输出目标。
-> ONLYOFFICE 编辑与出件的接入顺序见 [`../../plans/bidding/onlyoffice-integration.md`](../../plans/bidding/onlyoffice-integration.md)。
+## 当前方案与验收入口
+
+唯一有效实施方案为 [Agent 运行时与完整样稿方案](../../plans/bidding/agent-runtime-rig.md)；已合并方案评审修订，按 S0–S6 分阶段推进。保留完整最终目标，按分项能力逐步实施和验收；设计要求、已有实现与真实验收分别记录，新设计不等于已经实现或通过。
+
+api-v4 已完成两轮完整独立复核，但尚未通过。最新进度、缺口与证据只维护在[主方案 §19](../../plans/bidding/agent-runtime-rig.md#19-当前能力真实验收与下一步)，本页不重复运行轮次或临时检查数字。
+
+下列历史证据只说明对应版本与当时状态，不构成另一份现行方案。历史 Agent P0–P4 编号不再用作当前实施阶段；平台 P0/P1/P2 和 ONLYOFFICE O 阶段的既有任务编号不受影响。
+
+> 业务目标以 [PRD](prd.md) 为准；本文保留 ONLYOFFICE 编辑、保存及出件领域契约。实现顺序与完成状态以统一主方案为准，[ONLYOFFICE 接入记录](../../plans/bidding/onlyoffice-integration.md)保留领域任务与历史验证依据。
 
 ## 1. 决定与边界
 
@@ -126,6 +132,8 @@ AI 定点入稿可优先验证**编辑器内官方插件**：通过插件自定�
 报价应根据固定表格规范把明细、税额、合计写入实际 DOCX，保留其结构化数据来源。需提供的证明附件必须以真实内容进入整本；文件名或对象引用本身不等于附件已提供。缺料可提示后继续，已选嵌入文件损坏则明确技术失败。
 
 ## 7. PDF、页码与最终报告
+
+2026-09-16 实施接点：正式`POST /api/v2/submission-workspaces/{workspace_id}/exports`以`{version_id}`、`If-Match: docx_sha256`和幂等键提交，一次冻结保存版本并输出DOCX、PDF和报告；不再接受旧Workspace revision、单格式选择或导出时水印重排。源文件由仅绑定该请求/版本的短期能力地址提供，后续编辑不改变已冻结出件。当前技术报告标注`needs_review`，语义与版面尚未检查时明确`not_checked`；完整最终报告与真实三件套验收仍按下述要求完成。
 
 正式出件读取已保存且冻结的同一 DOCX，调用 ONLYOFFICE Conversion API 转 PDF，下载 DOCX 和转换后的 PDF，并独立提供检查报告。转换失败不能回退到旧自研 PDF 重排后仍宣称同一出件链成功。
 

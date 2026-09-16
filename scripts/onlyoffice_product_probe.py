@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Opt-in real ONLYOFFICE/product-router integration in owned disposable services.
+"""Opt-in real ONLYOFFICE integration through the formal product export queue.
 
-Requires cached images, Rust dependencies, Playwright and a local browser. No
-production API executable, test HTTP endpoints or existing database is used.
+Owned probes use disposable services and synthetic source identities. Explicit
+--existing-ticket finalization retains an already published real composition.
+Requires Playwright/browser; owned mode also needs cached images and Rust tools.
 """
 import argparse
 import hashlib
@@ -22,7 +23,7 @@ from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 import uuid
 
-from onlyoffice_lifecycle_probe import NoRedirect, docx_text, sign
+from onlyoffice_lifecycle_probe import NoRedirect, docx_text
 from onlyoffice_web_probe import product_web
 
 
@@ -136,14 +137,84 @@ def body_text_without_toc(data):
     return "".join("".join(parts).split())
 
 
+def verify_attached_identity(ticket, current, docx, download):
+    expected = ticket["expected"]
+    for key in ("round_id", "version_id", "docx_sha256"):
+        assert current[key] == expected[key], "attached saved DOCX identity changed"
+    assert current["workspace_id"] == ticket["workspace"]
+    assert current["project_id"] == ticket["project_id"]
+    assert current["editor"]["pending_save_id"] is None and current["editor"]["save_error"] is None
+    for key in ("document_set_id", "document_set_sha256", "requirement_set_id", "requirement_set_sha256"):
+        assert current["round_basis"][key] == expected[key], "attached analysis basis changed"
+    assert hashlib.sha256(docx).hexdigest() == expected["docx_sha256"]
+    base = f"/api/v2/submission-workspaces/{ticket['workspace']}/docx/versions/{expected['version_id']}"
+    assert download(base + "/download") == docx, "local sample differs from the actual saved version"
+    manifest_bytes = download(base + "/composition-report")
+    assert hashlib.sha256(manifest_bytes).hexdigest() == expected["composition_manifest_sha256"]
+    manifest = json.loads(manifest_bytes)
+    assert manifest["docx_sha256"] == expected["docx_sha256"]
+    assert manifest["analysis_sha256"] == expected["analysis_sha256"]
+    assert manifest["status"] in ("reviewed_template", "reviewed_template_with_open_items")
+    return current
+
+
+def verify_export_package(package, report, outputs, version, docx):
+    source = package["source"]
+    assert source["version_id"] == version["version_id"] and source["round_id"] == version["round_id"]
+    assert source["docx_sha256"] == version["docx_sha256"]
+    assert outputs["docx"] == docx, "formal DOCX differs from its frozen saved source"
+    for filetype in ("docx", "pdf"):
+        identity = package["outputs"][filetype]
+        assert len(outputs[filetype]) == identity["byte_length"]
+        assert hashlib.sha256(outputs[filetype]).hexdigest() == identity["sha256"]
+    assert outputs["pdf"].startswith(b"%PDF-")
+    assert report["schema_version"] == 2 and report["source"] == source
+    assert report["outputs"] == package["outputs"]
+    assert report["content_sha256"] == package["assessment_report_sha256"]
+    assert report["checks"], "empty final checks are not a report"
+
+
+def run_attached(args):
+    """Finalize an already published real composition; never manufacture its basis."""
+    ticket = json.loads(args.existing_ticket.read_text())
+    endpoint = urlsplit(ticket["origin"])
+    if endpoint.scheme not in ("http", "https") or not endpoint.netloc or endpoint.username \
+            or endpoint.password or endpoint.path not in ("", "/") or endpoint.query or endpoint.fragment:
+        raise ValueError("ticket origin must be an explicit HTTP(S) origin")
+    evidence = Path(args.evidence_dir).resolve()
+    if not evidence.is_relative_to(Path(tempfile.gettempdir()).resolve()):
+        raise ValueError("--evidence-dir must be inside the temporary directory")
+    root = evidence / ("attached-" + uuid.uuid4().hex)
+    root.mkdir(parents=True, mode=0o700)
+    (root / "initial.docx").write_bytes(Path(args.sample).read_bytes())
+    (root / "driver.json").write_text(json.dumps({"attached": True, "browser": str(Path(args.browser).resolve()),
+        "timeout": args.timeout, "verify_config_expiry": False, "web": True, "pdf": True,
+        "update_toc": True, "finalize_only": True}))
+    private = root / "browser-ticket.json"
+    private.touch(mode=0o600)
+    private.write_text(json.dumps(ticket))
+    print(root, flush=True)
+    try:
+        drive(root)
+        (root / "run.exit").write_text("0\n")
+        return 0
+    except Exception:
+        (root / "run.exit").write_text("1\n")
+        raise
+    finally:
+        private.unlink(missing_ok=True)
+
+
 def drive(root):
     from playwright.sync_api import sync_playwright
 
     settings = json.loads((root / "driver.json").read_text())
     ticket = json.loads((root / "browser-ticket.json").read_text())
     origin = ticket["origin"]
-    object_directory = Path(ticket["object_directory"])
-    assert object_directory.resolve().is_relative_to((root / "objects").resolve())
+    attached = settings.get("attached", False)
+    object_directory = None if attached else Path(ticket["object_directory"])
+    if object_directory is not None:
+        assert object_directory.resolve().is_relative_to((root / "objects").resolve())
     base = f"/api/v2/submission-workspaces/{ticket['workspace']}/docx"
     timeout = settings["timeout"]
     headers = {"Authorization": "Bearer " + ticket["token"]}
@@ -159,19 +230,25 @@ def drive(root):
         return {key: version[key] for key in ("version_id", "docx_sha256")}
 
     old = api(base + "/current")
-    metadata = {"basis": old["round_basis"], "expected": identity(old)}
-    # Match the public upload DTO exactly; round_basis can include receipt data.
-    metadata["basis"] = {key: old["round_basis"][key] for key in (
-        "document_set_id", "document_set_sha256", "requirement_set_id", "requirement_set_sha256")}
     original = (root / "initial.docx").read_bytes()
-    boundary = uuid.uuid4().hex
-    body = (f'--{boundary}\r\nContent-Disposition: form-data; name="metadata"\r\n\r\n'
-        + json.dumps(metadata) + f'\r\n--{boundary}\r\nContent-Disposition: form-data; name="file"\r\n'
-        'Content-Type: application/octet-stream\r\n\r\n').encode()
-    body += original + f"\r\n--{boundary}--\r\n".encode()
-    initial = api(base + "-rounds", raw=body,
-        extra={"Content-Type": "multipart/form-data; boundary=" + boundary})
-    assert initial["docx_sha256"] == hashlib.sha256(original).hexdigest()
+    if attached:
+        initial = verify_attached_identity(ticket, old, original,
+            lambda path: request(origin + path, headers=headers))
+        (root / "attached-identity.json").write_text(json.dumps({
+            "project_id": old["project_id"], "workspace_id": ticket["workspace"],
+            "expected": ticket["expected"], "initial": initial}, ensure_ascii=False, indent=2))
+    else:
+        metadata = {"basis": old["round_basis"], "expected": identity(old)}
+        metadata["basis"] = {key: old["round_basis"][key] for key in (
+            "document_set_id", "document_set_sha256", "requirement_set_id", "requirement_set_sha256")}
+        boundary = uuid.uuid4().hex
+        body = (f'--{boundary}\r\nContent-Disposition: form-data; name="metadata"\r\n\r\n'
+            + json.dumps(metadata) + f'\r\n--{boundary}\r\nContent-Disposition: form-data; name="file"\r\n'
+            'Content-Type: application/octet-stream\r\n\r\n').encode()
+        body += original + f"\r\n--{boundary}--\r\n".encode()
+        initial = api(base + "-rounds", raw=body,
+            extra={"Content-Type": "multipart/form-data; boundary=" + boundary})
+        assert initial["docx_sha256"] == hashlib.sha256(original).hexdigest()
     session = api(base + "/editor", identity(initial))
     key = session["session"]["editor_key"]
     source = session["config"]["document"]["url"]
@@ -212,7 +289,8 @@ def drive(root):
         data = request(origin + base + f"/versions/{version['version_id']}/download", headers=headers)
         (root / name).write_bytes(data)
         assert hashlib.sha256(data).hexdigest() == version["docx_sha256"]
-        assert (object_directory / version["docx_sha256"]).read_bytes() == data
+        if object_directory is not None:
+            assert (object_directory / version["docx_sha256"]).read_bytes() == data
         assert all(docx_text(data).count(marker) == 1 for marker in markers)
         if rich:
             rich.verify(data)
@@ -221,22 +299,32 @@ def drive(root):
     def convert_pdf(opened, version, data, prefix=""):
         if not settings.get("pdf"):
             return None
-        # Convert the exact immutable opening baseline with a fresh
-        # conversion key. No editor cache or ContentBlock rendering.
         before_conversion = api(base + "/current")
-        server = urlsplit(opened["api_script_url"])
-        server_origin = f"{server.scheme}://{server.netloc}"
-        conversion = {"async": False, "filetype": "docx", "outputtype": "pdf",
-            "key": uuid.uuid4().hex, "url": opened["config"]["document"]["url"]}
-        conversion["token"] = sign(conversion, os.environ["KB_ONLYOFFICE_JWT_SECRET"])
-        result = json.loads(request(server_origin + "/converter", conversion, timeout=timeout))
-        assert result.get("error") is None, "Document Server conversion rejected"
-        assert result.get("endConvert") is True, "conversion did not complete"
-        output = urlsplit(result["fileUrl"])
-        assert (output.scheme, output.netloc) == (server.scheme, server.netloc)
-        assert output.path.startswith("/cache/files/") and not output.fragment
-        pdf = request(result["fileUrl"], timeout=timeout)
-        assert pdf.startswith(b"%PDF-"), "conversion did not return a PDF"
+        export_base = base.removesuffix("/docx")
+        accepted = api(export_base + "/exports", {"version_id": version["version_id"]},
+            extra={"If-Match": version["docx_sha256"]})
+        (root / (prefix + "export-request.json")).write_text(json.dumps(accepted, indent=2))
+
+        def completed():
+            receipt = api(export_base + "/requests/" + accepted["request_artifact_id"])
+            if receipt["status"] == "failed":
+                raise RuntimeError("formal export failed: " + str(receipt.get("error_code")))
+            return receipt["result_identity"] if receipt["status"] == "succeeded" else None
+
+        package = wait_until("formal export worker publication", completed, timeout)
+        report = api(export_base + "/exports/" + package["manifest_id"] + "/assessment-report")
+        outputs = {}
+        for filetype in ("docx", "pdf"):
+            output = package["outputs"][filetype]
+            outputs[filetype] = request(origin + export_base + "/exports/" + output["artifact_id"]
+                + "/download", headers=headers, timeout=timeout)
+        verify_export_package(package, report, outputs, version, data)
+        if attached:
+            for field in ("round_id", "document_set_id", "document_set_sha256", "requirement_set_id", "requirement_set_sha256"):
+                assert package["source"][field] == ticket["expected"][field], "export changed real analysis/round identity"
+        pdf = outputs["pdf"]
+        (root / (prefix + "export-package.json")).write_text(json.dumps(package, ensure_ascii=False, indent=2))
+        (root / (prefix + "final-report.json")).write_text(json.dumps(report, ensure_ascii=False, indent=2))
         (root / (prefix + "pdf-source.docx")).write_bytes(data)
         (root / (prefix + "same-version.pdf")).write_bytes(pdf)
         # Reuse the application's Python parser for semantic readback.
@@ -262,7 +350,8 @@ def drive(root):
                     if getattr(unit.locator, "page_ordinal", None) == entry["page"] - 1)
                 assert "".join(entry["title"].split()) in "".join(target_text.split()), \
                     "TOC target heading is absent from its actual PDF page"
-        assert verified_source(opened["config"]["document"]["url"]) == data
+        if not attached:
+            assert verified_source(opened["config"]["document"]["url"]) == data
         assert api(base + "/current") == before_conversion
         assert verify_file(version, (prefix + "pdf-source-after.docx")) == data
         pdf_report = {"version_id": version["version_id"], "docx_sha256": version["docx_sha256"],
@@ -272,7 +361,9 @@ def drive(root):
             "computed_toc": computed_toc,
             "toc_page_check": "heading text present on referenced PDF page; independent layout review still required",
             "source_and_version_unchanged": True, "conversion_api_tested": True,
-            "product_export_flow_tested": False, "whole_document_layout_accepted": False}
+            "product_export_flow_tested": True, "whole_document_layout_accepted": False,
+            "manifest_id": package["manifest_id"], "final_report_status": report.get("status"),
+            "analysis_identity_preserved": attached}
         (root / (prefix + "pdf-result.json")).write_text(json.dumps(pdf_report, indent=2))
         print("same saved DOCX converted to PDF; version and source bytes unchanged", flush=True)
         return pdf_report
@@ -368,7 +459,8 @@ def drive(root):
                     raise
 
             page = open_page(session)
-            assert verified_source(source) == original
+            if not attached:
+                assert verified_source(source) == original
             if settings["verify_config_expiry"]:
                 wait_until("editor configuration expiry", lambda: time.time() > session["config"]["exp"] + 1, timeout)
                 assert verified_source(source) == original
@@ -408,7 +500,8 @@ def drive(root):
                 reopened = api(base + "/editor", identity(final))
                 assert reopened["session"]["editor_key"] != key
                 page = open_page(reopened)
-                assert verified_source(reopened["config"]["document"]["url"]) == final_data
+                if not attached:
+                    assert verified_source(reopened["config"]["document"]["url"]) == final_data
                 pdf_report = convert_pdf(reopened, final, final_data, "finalized-")
                 page.screenshot(path=str(root / "finalized-reopened.png"))
                 page.close()
@@ -427,7 +520,8 @@ def drive(root):
                     "same_version_pdf": pdf_report, "product_router_tcp": True,
                     "product_frontend_tested": True, "native_document_server": True,
                     "edit_and_callback_fault_suite_tested": False,
-                    "real_tender_semantic_acceptance": False}
+                    "real_tender_semantic_acceptance": False,
+                    "analysis_identity_preserved": attached}
                 (root / "result.json").write_text(json.dumps(report, indent=2))
                 print("clean DOCX and same-version PDF finalized without probe edits", flush=True)
                 return
@@ -641,9 +735,6 @@ CREATE EXTENSION vector;
 ALTER SCHEMA public OWNER TO kb_app_owner;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 ''' + f'REVOKE TEMPORARY,CREATE ON DATABASE "{database}" FROM PUBLIC;')
-        sql("BEGIN; SET LOCAL ROLE kb_app_owner;\n" + "\n".join((root / name).read_text() for name in (
-            "shared_platform_baseline.sql", "knowledge_base_baseline.sql", "bidding_v2_baseline.sql")) + "\nCOMMIT;")
-        sql(fixture.replace("\nROLLBACK;", "\nCOMMIT;"))
 
         def health():
             try:
@@ -673,6 +764,15 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
         (root / "driver.json").write_text(json.dumps({"browser": str(Path(args.browser).resolve()), "timeout": args.timeout,
             "verify_config_expiry": args.config_ttl is not None, "web": args.web, "rich_edit": args.rich_edit,
             "pdf": args.pdf, "update_toc": args.update_toc, "finalize_only": args.finalize_only}))
+        if args.pdf:
+            with (root / "worker-build.log").open("w") as log:
+                subprocess.run([str(cargo), "build", "--locked", "--offline", "-p", "worker", "--bin", "worker"],
+                    cwd=repo, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
+            target = Path(env.get("CARGO_TARGET_DIR", repo / "target"))
+            if not target.is_absolute():
+                target = repo / target
+            env["KB_DOCX_NATIVE_WORKER_BIN"] = str((target / "debug/worker").resolve())
+            env["KB_DOCX_NATIVE_WORKER_URL"] = f"postgresql://kb_runtime_worker@127.0.0.1:{pg_port}/{database}"
         with (root / "native-test.log").open("w") as log:
             # New process group lets timeout cleanup also stop the browser driver.
             process = subprocess.Popen([str(cargo), "test", "--locked", "--offline", "-p", "api",
@@ -731,13 +831,16 @@ if __name__ == "__main__":
         drive(Path(sys.argv[2]))
     else:
         parser = argparse.ArgumentParser(description=__doc__)
-        for option in ("image", "postgres-image", "redis-image", "sample", "browser", "cargo", "evidence-dir"):
+        for option in ("sample", "browser", "evidence-dir"):
             parser.add_argument("--" + option, required=True)
+        for option in ("image", "postgres-image", "redis-image", "cargo"):
+            parser.add_argument("--" + option)
+        parser.add_argument("--existing-ticket", type=Path, help="private authenticated real-product identity ticket; requires --finalize-only and never imports a fixture")
         parser.add_argument("--timeout", type=int, default=180, help="per-operation test timeout seconds")
         parser.add_argument("--config-ttl", type=int, help="test opening-config TTL; when set, wait for expiry before editing")
         parser.add_argument("--web", action="store_true", help="exercise the actual React Workbench through an owned Vite server")
         parser.add_argument("--rich-edit", action="store_true", help="edit a real table and image through the product UI (requires --web)")
-        parser.add_argument("--pdf", action="store_true", help="convert an exact saved DOCX via ONLYOFFICE and read it back through DocReader")
+        parser.add_argument("--pdf", action="store_true", help="run formal queued DOCX/PDF/report export and read PDF back through DocReader")
         parser.add_argument("--update-toc", action="store_true", help="update a generated template's native TOC in the editor and check its PDF target pages (requires --web --pdf)")
         parser.add_argument("--finalize-only", action="store_true", help="save a clean TOC-updated DOCX and same-version PDF without probe edits; does not run the edit/fault suite")
         arguments = parser.parse_args()
@@ -753,4 +856,10 @@ if __name__ == "__main__":
             parser.error("--finalize-only cannot be combined with rich edits or configuration-expiry testing")
         if arguments.config_ttl is not None and not 0 < arguments.config_ttl < arguments.timeout:
             parser.error("--config-ttl must be positive and below --timeout")
+        if arguments.existing_ticket:
+            if not arguments.finalize_only:
+                parser.error("--existing-ticket requires --finalize-only")
+            sys.exit(run_attached(arguments))
+        if not all((arguments.image, arguments.postgres_image, arguments.redis_image, arguments.cargo)):
+            parser.error("owned Office probes require --image --postgres-image --redis-image --cargo")
         sys.exit(run_probe(arguments))

@@ -379,7 +379,19 @@ async fn active_source_review_keeps_its_own_pixels_after_history_eviction_within
         "leaving the scope releases its pixels without erasing prior receipts"
     );
     assert_eq!(json!(cross.reviewer_coverage), coverage_before);
-    config.limits.max_context_bytes = without_image.len() + view.jpeg_base64.len() / 2;
+    // Optional preloaded text can be omitted before mandatory original pixels.
+    // Measure the irreducible request, not that optional packet's extra bytes.
+    let mut mandatory_body: Value = serde_json::from_slice(&without_image).unwrap();
+    let last = mandatory_body["messages"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap();
+    let mut packet: Value = serde_json::from_str(last["content"].as_str().unwrap()).unwrap();
+    packet["preloaded_evidence"] = Value::Null;
+    last["content"] = json!(packet.to_string());
+    config.limits.max_context_bytes =
+        serde_json::to_vec(&mandatory_body).unwrap().len() + view.jpeg_base64.len() / 2;
     assert!(
         agent::request(&input(), &config, &mut state).await.is_err(),
         "working images still obey the total ceiling; do not silently omit the active original"

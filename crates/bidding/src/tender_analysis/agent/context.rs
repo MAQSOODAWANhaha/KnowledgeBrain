@@ -778,10 +778,14 @@ pub(in crate::tender_analysis) fn visible_work_evidence(
         else {
             continue;
         };
-        if message["role"] == "tool"
-            && output["ok"] == true
-            && let Some(assigned) = output["result"].get("assigned_evidence")
-        {
+        let assigned = if message["role"] == "tool" && output["ok"] == true {
+            output["result"].get("assigned_evidence")
+        } else if message["role"] == "user" {
+            output["preloaded_evidence"].get("assigned_evidence")
+        } else {
+            None
+        };
+        if let Some(assigned) = assigned {
             // Inspect actual packet values just like tool results. This
             // inventory controls context admission, never reading credit.
             let mut items = Vec::new();
@@ -1166,7 +1170,15 @@ pub(super) fn evict_delivered_group(
         .iter()
         .enumerate()
         .filter(|(_, message)| message["role"] == "assistant")
-        .map(|(index, _)| index)
+        .map(|(index, _)| {
+            if index > 0
+                && super::evidence_delivery::is_retained_message(&state.transcript[index - 1])
+            {
+                index - 1
+            } else {
+                index
+            }
+        })
         .collect();
     if starts.len() < 2 {
         return false;

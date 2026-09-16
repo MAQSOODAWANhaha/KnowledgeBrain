@@ -347,7 +347,8 @@
                   "additionalProperties": false
                 }
               ]
-            }
+            },
+            "minItems": 1
           },
           "data": {
             "anyOf": [
@@ -361,13 +362,16 @@
                     ]
                   },
                   "name": {
-                    "type": "string"
+                    "type": "string",
+                    "minLength": 1
                   },
                   "value": {
-                    "type": "string"
+                    "type": "string",
+                    "minLength": 1
                   },
                   "scope": {
-                    "type": "string"
+                    "type": "string",
+                    "minLength": 1
                   }
                 },
                 "required": [
@@ -388,10 +392,12 @@
                     ]
                   },
                   "text": {
-                    "type": "string"
+                    "type": "string",
+                    "minLength": 1
                   },
                   "scope": {
-                    "type": "string"
+                    "type": "string",
+                    "minLength": 1
                   },
                   "applicability": {
                     "type": "object",
@@ -406,10 +412,14 @@
                         ]
                       },
                       "condition": {
-                        "type": "string"
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Nonblank source-grounded applicability conditions or explanation of the selected state. Preserve controlling clauses, exceptions and alternatives. For unknown, explain what the cited source leaves unresolved; do not default unknown to applicable or invent a condition."
                       },
                       "scope": {
-                        "type": "string"
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Nonblank source-grounded scope of this applicability assessment. Preserve the actual document, clause, subject or phase boundary; do not invent a broader scope."
                       },
                       "grounds": {
                         "type": "array",
@@ -481,7 +491,8 @@
                               "additionalProperties": false
                             }
                           ]
-                        }
+                        },
+                        "minItems": 1
                       }
                     },
                     "required": [
@@ -491,6 +502,61 @@
                       "grounds"
                     ],
                     "additionalProperties": false
+                  },
+                  "items": {
+                    "type": "array",
+                    "description": "Bounded composition/order/format/signature/submission atoms. Host assigns stable ids.",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "composition",
+                            "order",
+                            "format",
+                            "signature",
+                            "submission_hint"
+                          ]
+                        },
+                        "text": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "condition": {
+                          "type": "string"
+                        },
+                        "grounds": {
+                          "type": "array"
+                        },
+                        "targets": {
+                          "type": "array"
+                        },
+                        "sequence": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "format_key": {
+                          "type": "string"
+                        },
+                        "format_value": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "text",
+                        "condition",
+                        "grounds",
+                        "targets"
+                      ],
+                      "additionalProperties": false
+                    }
                   }
                 },
                 "required": [
@@ -511,7 +577,8 @@
                     ]
                   },
                   "text": {
-                    "type": "string"
+                    "type": "string",
+                    "minLength": 1
                   },
                   "categories": {
                     "type": "array",
@@ -530,7 +597,8 @@
                         "attachment",
                         "other"
                       ]
-                    }
+                    },
+                    "minItems": 1
                   },
                   "strength": {
                     "type": "string",
@@ -554,10 +622,14 @@
                         ]
                       },
                       "condition": {
-                        "type": "string"
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Nonblank source-grounded applicability conditions or explanation of the selected state. Preserve controlling clauses, exceptions and alternatives. For unknown, explain what the cited source leaves unresolved; do not default unknown to applicable or invent a condition."
                       },
                       "scope": {
-                        "type": "string"
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Nonblank source-grounded scope of this applicability assessment. Preserve the actual document, clause, subject or phase boundary; do not invent a broader scope."
                       },
                       "grounds": {
                         "type": "array",
@@ -629,7 +701,8 @@
                               "additionalProperties": false
                             }
                           ]
-                        }
+                        },
+                        "minItems": 1
                       }
                     },
                     "required": [
@@ -658,10 +731,21 @@
                           ]
                         },
                         "description": {
-                          "type": "string"
+                          "type": "string",
+                          "minLength": 1
                         },
                         "condition": {
-                          "type": "string"
+                          "type": "string",
+                          "description": "Additional source-grounded trigger for this response. Use an empty string when no extra trigger applies beyond the parent requirement's applicability and governing compliance conditions; this does not make the response unconditional. Preserve explicit additional triggers. Do not invent filler conditions. The key is still required.",
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "maxLength": 0
+                            },
+                            {
+                              "type": "string"
+                            }
+                          ]
                         },
                         "grounds": {
                           "type": "array",
@@ -733,7 +817,8 @@
                                 "additionalProperties": false
                               }
                             ]
-                          }
+                          },
+                          "minItems": 1
                         }
                       },
                       "required": [
@@ -761,13 +846,16 @@
                       "type": "object",
                       "properties": {
                         "description": {
-                          "type": "string"
+                          "type": "string",
+                          "minLength": 1
                         },
                         "subject": {
-                          "type": "string"
+                          "type": "string",
+                          "minLength": 1
                         },
                         "validity": {
-                          "type": "string"
+                          "type": "string",
+                          "description": "Validity period or time window stated by the source. Use an empty string when none is specified; never infer a period, default date or current validity."
                         },
                         "name_required": {
                           "type": "boolean"
@@ -776,10 +864,13 @@
                           "type": "boolean"
                         },
                         "issuer": {
-                          "type": "string"
+                          "type": "string",
+                          "description": "Required issuer stated by the source. Use an empty string when the source does not specify an issuer; never infer an organization or certification authority."
                         },
                         "condition": {
-                          "type": "string"
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Nonblank source-grounded conditions for this proof obligation, including applicable parent conditions and the required submission or delivery phase. Preserve alternative proofs and their triggers. Do not invent conditions or filler; keep unresolved interpretation explicit."
                         },
                         "grounds": {
                           "type": "array",
@@ -851,7 +942,8 @@
                                 "additionalProperties": false
                               }
                             ]
-                          }
+                          },
+                          "minItems": 1
                         }
                       },
                       "required": [
@@ -885,7 +977,9 @@
                           ]
                         },
                         "condition": {
-                          "type": "string"
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Nonblank source-grounded conditions or justification for this compliance policy, including relevant governing clauses. Preserve each distinct condition separately. For unknown, explain what remains undetermined; do not invent a trigger or default to all bidders."
                         },
                         "grounds": {
                           "type": "array",
@@ -957,7 +1051,8 @@
                                 "additionalProperties": false
                               }
                             ]
-                          }
+                          },
+                          "minItems": 1
                         }
                       },
                       "required": [
@@ -974,22 +1069,29 @@
                       "type": "object",
                       "properties": {
                         "subject": {
-                          "type": "string"
+                          "type": "string",
+                          "minLength": 1
                         },
                         "aspect": {
-                          "type": "string"
+                          "type": "string",
+                          "minLength": 1
                         },
                         "operator": {
-                          "type": "string"
+                          "type": "string",
+                          "minLength": 1
                         },
                         "value": {
-                          "type": "string"
+                          "type": "string",
+                          "minLength": 1
                         },
                         "unit": {
-                          "type": "string"
+                          "type": "string",
+                          "description": "Original unit for the stated value. Use an empty string when the source gives no unit or the criterion is unitless; never guess or normalize to an unstated unit."
                         },
                         "condition": {
-                          "type": "string"
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Nonblank source-grounded application or test conditions for this criterion, including applicable parent conditions. Preserve alternatives, test setup and timing where stated. Do not invent additional qualifiers or filler; keep unresolved interpretation explicit."
                         },
                         "grounds": {
                           "type": "array",
@@ -1061,7 +1163,8 @@
                                 "additionalProperties": false
                               }
                             ]
-                          }
+                          },
+                          "minItems": 1
                         }
                       },
                       "required": [
@@ -1104,7 +1207,8 @@
                     "type": "string"
                   },
                   "title": {
-                    "type": "string"
+                    "type": "string",
+                    "minLength": 1
                   },
                   "parent": {
                     "anyOf": [
@@ -1128,7 +1232,8 @@
                     ]
                   },
                   "purpose": {
-                    "type": "string"
+                    "type": "string",
+                    "minLength": 1
                   },
                   "applicability": {
                     "type": "object",
@@ -1143,10 +1248,14 @@
                         ]
                       },
                       "condition": {
-                        "type": "string"
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Nonblank source-grounded applicability conditions or explanation of the selected state. Preserve controlling clauses, exceptions and alternatives. For unknown, explain what the cited source leaves unresolved; do not default unknown to applicable or invent a condition."
                       },
                       "scope": {
-                        "type": "string"
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Nonblank source-grounded scope of this applicability assessment. Preserve the actual document, clause, subject or phase boundary; do not invent a broader scope."
                       },
                       "grounds": {
                         "type": "array",
@@ -1218,7 +1327,8 @@
                               "additionalProperties": false
                             }
                           ]
-                        }
+                        },
+                        "minItems": 1
                       }
                     },
                     "required": [
@@ -1388,7 +1498,8 @@
                         "instruction"
                       ],
                       "additionalProperties": false
-                    }
+                    },
+                    "minItems": 1
                   }
                 },
                 "required": [
@@ -1413,7 +1524,8 @@
                     ]
                   },
                   "problem": {
-                    "type": "string"
+                    "type": "string",
+                    "minLength": 1
                   },
                   "affected": {
                     "type": "array",
@@ -1436,7 +1548,8 @@
                 ],
                 "additionalProperties": false
               }
-            ]
+            ],
+            "description": "Send a structured record object, not JSON text. Required semantic text must contain non-whitespace source-grounded content; only explicitly optional values may be empty."
           }
         },
         "required": [
@@ -2463,7 +2576,7 @@
     "type": "function",
     "function": {
       "name": "put_source_review",
-      "description": "Reviewer only: save the explicit source-to-result omission judgment for source_review.current.task and its expected_version. Compare the WHOLE fragment, current associated candidates, table notes and continuation boundaries. Original source citations in sources, boundaries, template_mappings and relationship_checks prove independently read evidence, not comparison of every candidate on each cited page. Compare the assigned task roster and explicitly selected related candidates. Candidate queries, candidate_refs and mapping/relationship IDs retain their actual semantic dependencies; do not inventory unrelated neighboring candidates merely because you cite their original page. checked requires no candidate errors. A genuinely unresolved boundary may be checked only with a current independently compared Unresolved record, matching original evidence and a source_limited relationship check naming it in unresolved_record_ids; it remains a source-report open item. Do not retain an extraction finding merely because accurately reported evidence is absent. findings completes comparison with all saved finding_ids, not approval; needs_evidence keeps concrete pending questions. Reading and candidate checks alone cannot finish a source task. When source_review.remaining is greater than one, place read_review_task immediately after this tool to read the next task after a successfully admitted, complete judgment. The host aggregates after the complete tool batch; no separate final submission. Submit template_mappings for every template in templates_requiring_mapping_judgment. Independently identify all existing requirement records whose response/proof the source assigns to that template, even for screenshot/evidence attachments or instruction-only layouts without fillable cells. List supporting requires_template relation_ids to this template or its parent. If an expected mapping is absent, save a finding and include its ID. Empty requirement_ids needs a source-grounded explanation that no separate requirement uses this template; an absent edge alone is not a reason. When source_review.current.layout_view is present, compare the template regions emission order against independently delivered original page pixels and include the returned visual citation in sources. Text and table source order cannot establish interleaving. A delivered view of another source on the same document page may be reused. Without original pixels keep needs_evidence; primary image receipts and cached-but-undelivered images do not qualify. Submit relationship_checks for the task rules, unresolved items and conditional/unknown/not-applicable requirements/templates. Locate actual reference targets and selected conditions, check whether applicability and continuation interpretation match them, and explain the evidence. resolved requires real non-unresolved incident relation_ids and their related_record_ids; edge existence alone is not semantic correctness. not_required needs evidence that no external relationship is required, not merely no saved edge. source_limited needs a saved unresolved_record_id affecting the subject or explicitly unknown applicability; inspect and cite frozen source IDs listed as unresolved candidates before claiming evidence unavailable. Report already-read continuations still marked missing, absent required edges and unincorporated source choices as findings; retain saved finding_ids in the outer judgment. Do not invent edges or turn a correct relation with unrelated content problems into a relationship finding. needs_evidence can keep the array incomplete while retrieving evidence.",
+      "description": "Reviewer only: save the explicit source-to-result omission judgment for source_review.current.task and its expected_version. Compare the WHOLE fragment, current associated candidates, table notes and continuation boundaries. Original source citations in sources, boundaries, template_mappings and relationship_checks prove independently read evidence, not comparison of every candidate on each cited page. Compare the assigned task roster and explicitly selected related candidates. Candidate queries, candidate_refs and mapping/relationship IDs retain their actual semantic dependencies; do not inventory unrelated neighboring candidates merely because you cite their original page. checked requires no candidate errors. A genuinely unresolved boundary may be checked only with a current independently compared Unresolved record, matching original evidence and a source_limited relationship check naming it in unresolved_record_ids; it remains a source-report open item. Do not retain an extraction finding merely because accurately reported evidence is absent. findings completes comparison with all saved finding_ids, not approval; needs_evidence keeps concrete pending questions. Reading and candidate checks alone cannot finish a source task. When source_review.remaining is greater than one, place read_review_task immediately after this tool to read the next task after a successfully admitted, complete judgment. The host aggregates after the complete tool batch; no separate final submission. Submit template_mappings for every template in templates_requiring_mapping_judgment. Independently identify all existing requirement records whose response/proof the source assigns to that template, even for screenshot/evidence attachments or instruction-only layouts without fillable cells. List supporting requires_template relation_ids to this template or its parent. If an expected mapping is absent, save a finding and include its ID. Empty requirement_ids needs a source-grounded explanation that no separate requirement uses this template; an absent edge alone is not a reason. When source_review.current.layout_view is present, compare the template regions emission order against independently delivered original page pixels and include the returned visual citation in sources. Text and table source order cannot establish interleaving. A delivered view of another source on the same document page may be reused. Without original pixels keep needs_evidence; primary image receipts and cached-but-undelivered images do not qualify. Submit relationship_checks for the task rules, unresolved items, templates with a parent, and conditional/unknown/not-applicable requirements/templates. Locate actual reference targets and selected conditions, check whether applicability and continuation interpretation match them, and explain the evidence. resolved requires real non-unresolved incident relation_ids and their related_record_ids; a template's actual parent in related_record_ids is an existing structural link and needs no duplicate contains edge. Independently compare and cite the original parent and child hierarchy; report wrong ownership at /data/parent. Other targets still require real edges. Edge existence alone is not semantic correctness. not_required needs evidence that no external relationship is required, not merely no saved edge; a saved Template.parent cannot use not_required. source_limited needs a saved unresolved_record_id affecting the subject or explicitly unknown applicability; inspect and cite frozen source IDs listed as unresolved candidates before claiming evidence unavailable. Report already-read continuations still marked missing, absent required edges and unincorporated source choices as findings; retain saved finding_ids in the outer judgment. Do not invent edges or turn a correct relation with unrelated content problems into a relationship finding. needs_evidence can keep the array incomplete while retrieving evidence.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -3125,6 +3238,57 @@
         },
         "required": [
           "source_id"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "put_analysis_check",
+      "description": "Submit one host-enumerated global analysis check. Main and Reviewer store independent conclusions.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "enum": [
+              "source_coverage",
+              "collection_consistency",
+              "composition_order_format",
+              "cross_references",
+              "rule_items"
+            ]
+          },
+          "conclusion": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "findings",
+              "source_limited"
+            ]
+          },
+          "grounds": {
+            "type": "array"
+          },
+          "record_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "finding_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "key",
+          "conclusion",
+          "grounds"
         ],
         "additionalProperties": false
       }

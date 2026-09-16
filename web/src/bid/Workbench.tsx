@@ -14,6 +14,7 @@ import type { BidProjectView, TenderDocumentView } from "./api/types";
 import { AnalysisProgress } from "./authoring/AnalysisProgress";
 import { DocxEditor } from "./authoring/DocxEditor";
 import { DocxStart } from "./authoring/DocxStart";
+import { ExportPane } from "./authoring/ExportPane";
 
 export function Workbench({ email }: { email: string }) {
   const route = parseBidRoute(useHash());
@@ -67,25 +68,10 @@ function DocxGate({ email, projectId, step, tree }: { email: string; projectId: 
                 : <DocxEditor key={result.project.workspace_id} workspaceId={result.project.workspace_id}
                     onUnsafeChange={setUnsafe} onCreateRound={() => setCreating(true)} />}
             </AnalysisProgress>
-          : result.current ? <SavedDocx workspaceId={result.project.workspace_id} current={result.current} /> : <p>尚未创建 DOCX 投标稿。</p>}
+          : <ExportPane key={result.project.workspace_id} workspaceId={result.project.workspace_id}
+              ended={result.project.status === "ended"} onUnsafeChange={setUnsafe} />}
     </div>
   </Shell>;
-}
-
-function SavedDocx({ workspaceId, current }: { workspaceId: string; current: DocxCurrent }) {
-  const [error, setError] = useState(false);
-  async function download() {
-    try {
-      const url = URL.createObjectURL(await docxApi.download(workspaceId, current.version_id));
-      const link = document.createElement("a"); link.href = url; link.download = `投标稿-${current.revision}.docx`;
-      link.click(); URL.revokeObjectURL(url);
-    } catch { setError(true); }
-  }
-  return <section><h2>已保存的投标稿</h2><p>保存版本 {current.revision}</p>
-    {current.editor.pending_save_id && <p role="status">还有保存请求待确认，下载文件为当前已保存版本。</p>}
-    <Button onClick={() => void download()}>下载 DOCX</Button>
-    {error && <Alert className="mt-2">下载失败，请重试。</Alert>}
-  </section>;
 }
 
 function ProjectFiles({ email, projectId, tree }: { email: string; projectId: string; tree: ReactNode }) {

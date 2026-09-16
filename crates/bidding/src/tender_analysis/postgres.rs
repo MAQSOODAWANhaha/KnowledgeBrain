@@ -252,6 +252,15 @@ impl Journal for PgJournal<'_> {
 }
 
 pub fn publication(input: &FrozenInput, result: &AnalysisResult) -> Result<Value, AgentError> {
+    if result.schema_version == 2 {
+        crate::tender_analysis::rule_contract::validate_inventory(
+            input,
+            &result.analysis,
+            &result.review.global_checks,
+            &result.review.findings,
+        )
+        .map_err(invalid)?;
+    }
     let mut requirements = Vec::new();
     for record in result.analysis.records.values() {
         if let RecordData::Requirement {

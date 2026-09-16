@@ -32,6 +32,25 @@ pub struct CompositionFinding {
     pub sources: Vec<Span>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReviewConclusion {
+    Pass,
+    Findings,
+    SourceLimited,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanReview {
+    pub item_id: String,
+    pub conclusion: PlanReviewConclusion,
+    #[serde(default)]
+    pub finding_ids: Vec<String>,
+    pub grounds: Vec<Span>,
+    pub artifact_sha256: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Workspace {
@@ -44,6 +63,8 @@ pub struct Workspace {
     pub source_coverage: Coverage,
     pub review_coverage: Coverage,
     pub inspected: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plan_reviews: BTreeMap<String, PlanReview>,
 }
 
 impl Workspace {
@@ -58,6 +79,7 @@ impl Workspace {
             source_coverage: Coverage::default(),
             review_coverage: Coverage::default(),
             inspected: BTreeMap::new(),
+            plan_reviews: BTreeMap::new(),
         })
     }
     /// Apply on a clone and commit only after the bounded response fits. No
@@ -140,6 +162,7 @@ impl Workspace {
                 Ok(json!({"source_view_id":id,"identity":view.identity}))
             }
             "set_presentation"
+            | "put_composition_plan_item"
             | "put_section"
             | "delete_section"
             | "put_omission"
@@ -164,6 +187,29 @@ impl Workspace {
                     .remove("expected_draft_sha256");
                 let mut id = None;
                 match name {
+                    "put_composition_plan_item" => {
+                        let mut item: PlanItem =
+                            serde_json::from_value(payload).map_err(|e| e.to_string())?;
+                        if item.id.trim().is_empty() {
+                            item.id = uuid::Uuid::new_v4().to_string();
+                        }
+                        validate_grounds(input, &result.analysis, &item.grounds)?;
+                        if item.title.trim().is_empty() {
+                            return Err("plan item title required".into());
+                        }
+                        if item
+                            .parent
+                            .as_ref()
+                            .is_some_and(|parent| {
+                                parent == &item.id || !self.draft.plan.contains_key(parent)
+                            })
+                        {
+                            return Err("invalid plan parent".into());
+                        }
+                        let key = item.id.clone();
+                        self.draft.plan.insert(key.clone(), item);
+                        id = Some(key);
+                    }
                     "set_presentation" => {
                         let p: Presentation =
                             serde_json::from_value(payload).map_err(|e| e.to_string())?;
@@ -176,13 +222,31 @@ impl Workspace {
                     "put_section" => {
                         let key = match payload["id"].as_str() {
                             Some(key) if self.draft.sections.contains_key(key) => key.to_owned(),
+                            Some(key)
+                                if self.draft.plan.get(key).is_some_and(|item| {
+                                    item.kind == PlanItemKind::Section
+                                }) =>
+                            {
+                                key.to_owned()
+                            }
                             Some(_) => {
                                 return Err("unknown section; use null id for creation".into());
                             }
-                            None if payload["id"].is_null() => uuid::Uuid::new_v4().to_string(),
+                            None if payload["id"].is_null() && self.draft.plan.is_empty() => {
+                                uuid::Uuid::new_v4().to_string()
+                            }
                             _ => return Err("invalid section id".into()),
                         };
                         payload["id"] = json!(key);
+                        if !self.draft.plan.is_empty()
+                            && self.draft.plan.get(&key).is_none_or(|item| {
+                                item.kind != PlanItemKind::Section
+                            })
+                        {
+                            return Err(
+                                "section id must be an existing chapter plan item".into(),
+                            );
+                        }
                         let section: Section =
                             serde_json::from_value(payload).map_err(|e| e.to_string())?;
                         validate_grounds(input, &result.analysis, &section.grounds)?;
@@ -407,6 +471,54 @@ impl Workspace {
                     json!({"total":a.manifest.placements.len(),"next":offset+items.len(),"items":items}),
                 )
             }
+            "put_composition_review" => {
+                if !self.reviewing {
+                    return Err("independent review is not active".into());
+                }
+                let item_id = args["item_id"].as_str().ok_or("plan item id required")?.to_owned();
+                if self.draft.plan.is_empty() {
+                    if !self.draft.sections.contains_key(&item_id) {
+                        return Err("unknown chapter for composition review".into());
+                    }
+                } else if !self.draft.plan.contains_key(&item_id) {
+                    return Err("unknown plan item for composition review".into());
+                }
+                let conclusion: PlanReviewConclusion =
+                    serde_json::from_value(args["conclusion"].clone()).map_err(|e| e.to_string())?;
+                let grounds: Vec<Span> =
+                    serde_json::from_value(args["grounds"].clone()).map_err(|e| e.to_string())?;
+                let finding_ids: Vec<String> = args
+                    .get("finding_ids")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|e| e.to_string())?
+                    .unwrap_or_default();
+                if matches!(conclusion, PlanReviewConclusion::Findings) && finding_ids.is_empty() {
+                    return Err("findings conclusion needs finding ids".into());
+                }
+                if matches!(conclusion, PlanReviewConclusion::SourceLimited) && grounds.is_empty() {
+                    return Err("source_limited conclusion needs grounds".into());
+                }
+                let artifact_sha256 = self
+                    .artifact
+                    .as_ref()
+                    .ok_or("compile the draft before independent review")?
+                    .manifest
+                    .docx_sha256
+                    .clone();
+                self.plan_reviews.insert(
+                    item_id.clone(),
+                    PlanReview {
+                        item_id: item_id.clone(),
+                        conclusion,
+                        finding_ids,
+                        grounds,
+                        artifact_sha256,
+                    },
+                );
+                Ok(json!({"saved":true,"item_id":item_id}))
+            }
             "request_composition_review" => {
                 empty(args)?;
                 if self.reviewing || self.review_rounds >= max_review_rounds {
@@ -440,6 +552,21 @@ impl Workspace {
                         "{} source/analysis/document inspection gaps remain",
                         gaps.len()
                     ));
+                }
+                if !self.draft.plan.is_empty() {
+                    let missing: Vec<_> = self
+                        .draft
+                        .plan
+                        .keys()
+                        .filter(|id| !self.plan_reviews.contains_key(*id))
+                        .cloned()
+                        .collect();
+                    if !missing.is_empty() {
+                        return Err(format!(
+                            "{} plan items lack composition review", 
+                            missing.len()
+                        ));
+                    }
                 }
                 let findings: Vec<CompositionFinding> =
                     serde_json::from_value(args["findings"].clone()).map_err(|e| e.to_string())?;

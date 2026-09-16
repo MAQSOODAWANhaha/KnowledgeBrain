@@ -95,6 +95,9 @@ pub fn validate_target(
         (RecordData::Requirement { criteria, .. }, RelationTarget::Criterion { index }) => {
             criteria.get(*index).is_some()
         }
+        (RecordData::Rule { items, .. }, RelationTarget::RuleItem { item_id }) => {
+            items.iter().any(|item| item.id == *item_id)
+        }
         _ => false,
     };
     if valid {

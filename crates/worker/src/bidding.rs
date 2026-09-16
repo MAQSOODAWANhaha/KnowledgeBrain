@@ -1,9 +1,8 @@
 //! Bid-authoring-v2 Oxana adapters.
 
 use crate::helpers::{
-    HelperCompositionObjects, HelperExportIo, MAX_EXPORT_INPUT_BYTES, MAX_PDF_ATTACHMENT_BYTES,
-    MAX_RASTER_TOTAL_BYTES, MAX_RENDER_OUTPUT_BYTES, MAX_TENDER_DOCUMENT_BYTES,
-    read_blob_in_helper,
+    HelperCompositionObjects, HelperExportIo, MAX_EXPORT_INPUT_BYTES, MAX_RENDER_OUTPUT_BYTES,
+    MAX_TENDER_DOCUMENT_BYTES, read_blob_in_helper,
 };
 use crate::runtime::{
     AppCtx, CONTENT_GENERATE_HANDLER_HARD_TIMEOUT, CONTENT_MATCH_HANDLER_HARD_TIMEOUT,
@@ -49,12 +48,9 @@ pub(crate) async fn process_submission_export_v2(
         cancel,
         cleanup_tracker,
         &io,
-        &io,
         bidding::submission_export::ExportLimits {
             max_input_bytes: MAX_EXPORT_INPUT_BYTES,
             max_render_output_bytes: MAX_RENDER_OUTPUT_BYTES,
-            max_pdf_attachment_bytes: MAX_PDF_ATTACHMENT_BYTES,
-            max_raster_total_bytes: MAX_RASTER_TOTAL_BYTES,
         },
     )
     .await

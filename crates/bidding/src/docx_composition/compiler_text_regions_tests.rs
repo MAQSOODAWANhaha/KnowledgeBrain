@@ -75,6 +75,7 @@ fn fixture(parts: &[(&str, bool)]) -> (FrozenInput, AnalysisResult) {
             analysis_sha256: String::new(),
             coverage: Coverage::default(),
             findings: vec![],
+        ..Default::default()
         },
         quality: "diagnostic_unaccepted".into(),
         source_views: BTreeMap::new(),
@@ -386,6 +387,7 @@ fn compiled_response_binding_uses_its_independent_inline_region() {
         analysis_sha256: digest(&result.analysis).unwrap(),
         coverage,
         findings: vec![],
+    ..Default::default()
     };
     result.frozen_input_sha256 = digest(&input).unwrap();
     result.quality = result.expected_quality(&input).into();

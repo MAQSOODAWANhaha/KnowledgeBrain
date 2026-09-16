@@ -195,6 +195,96 @@ fn validate_applicability(
     validate_grounds(input, coverage, &a.grounds, "/data/applicability/grounds")
 }
 
+fn validate_rule_items(
+    input: &FrozenInput,
+    analysis: &Analysis,
+    record_id: &str,
+    items: &[RuleItem],
+) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for (index, item) in items.iter().enumerate() {
+        let path = format!("/data/items/{index}");
+        nonempty(&item.id, &format!("{path}/id"))?;
+        if !seen.insert(&item.id) {
+            return Err(field_error(
+                &format!("{path}/id"),
+                "duplicate rule item id",
+            ));
+        }
+        nonempty(&item.text, &format!("{path}/text"))?;
+        validate_grounds(
+            input,
+            &analysis.coverage,
+            &item.grounds,
+            &format!("{path}/grounds"),
+        )?;
+        match item.kind {
+            RuleItemKind::Order => {
+                if item.sequence.is_empty() {
+                    return Err(field_error(
+                        &format!("{path}/sequence"),
+                        "order items need a sequence of item ids",
+                    ));
+                }
+            }
+            RuleItemKind::Format => {
+                nonempty(
+                    item.format_key.as_deref().unwrap_or(""),
+                    &format!("{path}/format_key"),
+                )?;
+                nonempty(
+                    item.format_value.as_deref().unwrap_or(""),
+                    &format!("{path}/format_value"),
+                )?;
+            }
+            _ => {
+                if !item.sequence.is_empty()
+                    || item.format_key.is_some()
+                    || item.format_value.is_some()
+                {
+                    return Err(field_error(
+                        &path,
+                        "sequence and format fields are only valid on order or format items",
+                    ));
+                }
+            }
+        }
+        for (t_index, target) in item.targets.iter().enumerate() {
+            let tpath = format!("{path}/targets/{t_index}");
+            match target {
+                RuleItemTarget::Record { id } => {
+                    if id != record_id && !analysis.records.contains_key(id) {
+                        return Err(field_error(&tpath, "unknown record target"));
+                    }
+                }
+                RuleItemTarget::RuleItem {
+                    record_id: rid,
+                    item_id,
+                } => {
+                    let known = if rid == record_id {
+                        items.iter().any(|other| other.id == *item_id)
+                    } else {
+                        analysis.records.get(rid).is_some_and(|record| {
+                            matches!(
+                                &record.data,
+                                RecordData::Rule { items: other, .. }
+                                    if other.iter().any(|other| other.id == *item_id)
+                            )
+                        })
+                    };
+                    if !known {
+                        return Err(field_error(&tpath, "unknown rule item target"));
+                    }
+                }
+                RuleItemTarget::Unresolved { reason } => {
+                    nonempty(reason, &format!("{tpath}/reason"))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_record(
     input: &FrozenInput,
     analysis: &Analysis,
@@ -211,10 +301,12 @@ pub fn validate_record(
             text,
             scope,
             applicability,
+            items,
         } => {
             nonempty(text, "/data/text")?;
             nonempty(scope, "/data/scope")?;
             validate_applicability(input, &analysis.coverage, applicability)?;
+            validate_rule_items(input, analysis, &record.id, items)?;
         }
         RecordData::Requirement {
             text,
@@ -246,7 +338,11 @@ pub fn validate_record(
             for (index, need) in response.iter().enumerate() {
                 let path = format!("/data/response/{index}");
                 nonempty(&need.description, &format!("{path}/description"))?;
-                nonempty(&need.condition, &format!("{path}/condition"))?;
+                // The response may inherit its parent's conditions without
+                // repeating them or inventing an additional trigger.
+                if !need.condition.is_empty() {
+                    nonempty(&need.condition, &format!("{path}/condition"))?;
+                }
                 validate_grounds(
                     input,
                     &analysis.coverage,
@@ -1408,14 +1504,23 @@ fn execute(
 
         "put_record" if !reviewer => {
             object(args, &["id", "sources", "data"])?;
+            if !args["data"].is_object() {
+                return Err(field_error(
+                    "/data",
+                    "expected a record object with a kind field; send the object directly, not a JSON-encoded string",
+                ));
+            }
             let id = record_id(args, &analysis.records)?;
-            let record = Record {
+            let mut record = Record {
                 id: id.clone(),
                 sources: serde_json::from_value(args["sources"].clone())
                     .map_err(|e| field_error("/sources", e))?,
                 data: serde_json::from_value(args["data"].clone())
                     .map_err(|e| field_error("/data", e))?,
             };
+            if let RecordData::Rule { items, .. } = &mut record.data {
+                crate::tender_analysis::rule_contract::assign_item_ids(items);
+            }
             analysis.coverage = coverage.clone();
             validate_record(input, analysis, &record)?;
             analysis.records.insert(id.clone(), record);

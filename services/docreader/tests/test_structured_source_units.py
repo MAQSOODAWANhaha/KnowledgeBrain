@@ -4,6 +4,7 @@ from io import BytesIO
 
 import pytest
 from docx import Document as DocxDocument
+from docx.oxml.ns import qn
 from openpyxl import Workbook
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from PIL import Image
@@ -187,6 +188,24 @@ def test_xlsx_sparse_last_cell_is_rejected_without_rectangular_iteration() -> No
         ExcelParser(file_name="sparse.xlsx", file_type="xlsx").parse_into_text(
             output.getvalue()
         )
+
+
+@pytest.mark.parametrize("widths_twips", [(720, 2160), (4819, 4819), (1000, 2000, 3000)])
+def test_docx_grid_widths_preserve_original_twips_in_millimetres(widths_twips) -> None:
+    document = DocxDocument()
+    table = document.add_table(rows=2, cols=len(widths_twips))
+    for index, (column, width) in enumerate(zip(table._tbl.tblGrid.gridCol_lst, widths_twips)):
+        column.set(qn("w:w"), str(width))
+        table.cell(0, index).text = f"Column {index}"
+    output = BytesIO()
+    document.save(output)
+
+    parsed = Parser().parse_file("widths.docx", "docx", output.getvalue())
+    unit = next(unit for unit in parsed.structured_source_units if unit.key == "table:0")
+    assert unit.grid is not None
+    expected = [width * 25.4 / 1440 for width in widths_twips]
+    assert unit.grid.widths_mm == pytest.approx(expected)
+    assert list(_structured_unit_to_proto(unit).grid.widths_mm) == pytest.approx(expected)
 
 
 def test_docx_preserves_body_order_heading_owner_and_drawing_identity() -> None:

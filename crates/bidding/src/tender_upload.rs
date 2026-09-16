@@ -141,7 +141,7 @@ fn validate_typed_upload(
     })
 }
 
-fn validate_pdf(bytes: &[u8]) -> Result<&'static str, TenderUploadError> {
+pub(crate) fn validate_pdf(bytes: &[u8]) -> Result<&'static str, TenderUploadError> {
     if !bytes.starts_with(b"%PDF-") {
         return Err(TenderUploadError::MagicInvalid);
     }

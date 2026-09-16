@@ -1,0 +1,40 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "read_output_evidence",
+      "description": "Read frozen final-file evidence units from the actual DOCX/PDF inventory. IDs belong to the output namespace and never grant tender-source coverage. Continue from next until total. not_checked units require page inspection and cannot be treated as approved content.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "offset": { "type": "integer", "minimum": 0 },
+          "limit": { "type": "integer", "minimum": 1 },
+          "id": { "type": "string", "minLength": 1 }
+        },
+        "required": ["offset", "limit"],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "put_composition_review",
+      "description": "Submit one export-review item conclusion against the frozen output inventory. Host aggregates. This does not reuse composition workspace approval.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "item_id": { "type": "string", "minLength": 1 },
+          "conclusion": {
+            "type": "string",
+            "enum": ["pass", "findings", "source_limited"]
+          },
+          "grounds": { "type": "array" },
+          "finding_ids": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["item_id", "conclusion", "grounds"],
+        "additionalProperties": false
+      }
+    }
+  }
+]

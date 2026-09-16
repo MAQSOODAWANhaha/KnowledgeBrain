@@ -3147,6 +3147,339 @@ async fn analysis_three_boundaries_are_atomic_and_resume_received_responses() {
     pool.close().await;
 }
 
+struct PreloadedPgModel {
+    first_record: Mutex<Option<Value>>,
+    rest: Script,
+    bodies: Mutex<Vec<Vec<u8>>>,
+}
+
+impl PreloadedPgModel {
+    fn new(input: &FrozenInput) -> Self {
+        let rest = script(input);
+        let first_record = {
+            let mut turns = rest.turns.lock().unwrap();
+            let first: Vec<_> = turns.drain(..4).collect();
+            assert_eq!(first[3].0, "put_record");
+            // Metadata can need its own page; source delivery itself comes
+            // from the first reserved request, with no preliminary read turn.
+            turns.push_front(first[1].clone());
+            first[3].1.clone()
+        };
+        Self {
+            first_record: Mutex::new(Some(first_record)),
+            rest,
+            bodies: Mutex::new(vec![]),
+        }
+    }
+}
+
+#[async_trait]
+impl Model for PreloadedPgModel {
+    async fn turn(&self, config: &Config, bytes: &[u8]) -> Result<ChatTurn, AgentError> {
+        self.bodies.lock().unwrap().push(bytes.to_vec());
+        let record = self.first_record.lock().unwrap().take();
+        if let Some(record) = record {
+            let body: Value = serde_json::from_slice(bytes).unwrap();
+            let packet: Value = serde_json::from_str(
+                body["messages"].as_array().unwrap().last().unwrap()["content"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let source_id = &record["sources"][0]["source_id"];
+            assert_eq!(
+                packet["preloaded_evidence"]["main_work"]["source_scope"],
+                json!([source_id])
+            );
+            assert!(
+                packet["preloaded_evidence"]["assigned_evidence"]["boundary_evidence"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["tool"] == "read_source"
+                        && entry["source"]["source_id"] == *source_id
+                        && entry["source"]["start"] == 0
+                        && entry["source"]["end"] == record["sources"][0]["end"])
+            );
+            return Ok(ChatTurn {
+                content: String::new(),
+                finish_reason: "tool_calls".into(),
+                usage: None,
+                tool_calls: vec![ChatToolCall {
+                    id: Uuid::new_v4().to_string(),
+                    name: "put_record".into(),
+                    arguments: record.to_string(),
+                }],
+            });
+        }
+        self.rest.turn(config, bytes).await
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires KB_TENDER_AGENT_TEST_DATABASE_URL pointing to a fresh owned test database"]
+async fn main_and_reviewer_preloads_recover_all_postgres_boundaries_without_early_or_double_receipts()
+ {
+    use bidding::tender_analysis::{
+        agent::{self, Journal, Role},
+        digest,
+    };
+    let pool = PgPool::connect(
+        &std::env::var("KB_TENDER_AGENT_TEST_DATABASE_URL").expect("dedicated test URL required"),
+    )
+    .await
+    .unwrap();
+    let database: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        database.starts_with("knowledgebrain_test_"),
+        "refuse non-test database"
+    );
+    for reviewer in [false, true] {
+        for boundary in [1, 2, 3] {
+            let (request, input) = seed(&pool).await;
+            let owner = composition_claim(&pool, &request).await;
+            let model = PreloadedPgModel::new(&input);
+            let mut expected_calls = 1 + model.rest.turns.lock().unwrap().len();
+            let mut prior = None;
+            if reviewer {
+                let handoff_turn = 2 + model
+                    .rest
+                    .turns
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .position(|(name, _)| *name == "set_disposition")
+                    .unwrap();
+                let setup = LostReviewAck {
+                    journal: postgres::PgJournal {
+                        pool: &pool,
+                        request: &request,
+                        owner: &owner,
+                        source_reader: None,
+                    },
+                    fail_turn: handoff_turn,
+                    fail_sequence: None,
+                    reject_prepared: false,
+                };
+                let error =
+                    agent::run(&input, &config(), &setup, &model, &CancellationToken::new())
+                        .await
+                        .unwrap_err();
+                assert_eq!(error.code, "INTERNAL", "review setup: {error:?}");
+                let state = setup.load().await.unwrap().unwrap();
+                assert_eq!(state.role, Role::Reviewer);
+                assert!(state.reviewer_coverage.text.is_empty());
+                assert!(state.reviewer_coverage.candidate.is_empty());
+                assert_eq!(
+                    model.rest.turns.lock().unwrap().pop_front().unwrap().0,
+                    "request_review"
+                );
+                expected_calls -= 1; // automatic Main handoff already happened
+                prior = Some(state);
+            }
+            let turn = prior.as_ref().map_or(0, |state| state.turn);
+            let sequence = prior.as_ref().map_or(0, |state| state.journal.sequence);
+            let calls_before = model.bodies.lock().unwrap().len();
+            let interrupted = LostReviewAck {
+                journal: postgres::PgJournal {
+                    pool: &pool,
+                    request: &request,
+                    owner: &owner,
+                    source_reader: None,
+                },
+                fail_turn: usize::MAX,
+                fail_sequence: Some(sequence + boundary),
+                reject_prepared: false,
+            };
+            let error = agent::run(
+                &input,
+                &config(),
+                &interrupted,
+                &model,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.code, "INTERNAL",
+                "reviewer={reviewer}, boundary={boundary}: {error:?}"
+            );
+            let saved = interrupted.load().await.unwrap().unwrap();
+            assert_eq!(saved.journal.sequence, sequence + boundary);
+            let prepared_bytes:Vec<u8> = sqlx::query_scalar("SELECT canonical_payload FROM bid_tender_agent_checkpoint_artifacts WHERE request_artifact_id=$1 AND stage_kind='analysis_checkpoint' AND batch_ordinal=$2")
+                .bind(request.request_artifact_id).bind((sequence + 1) as i32).fetch_one(&pool).await.unwrap();
+            let prepared: agent::Checkpoint = serde_json::from_slice(&prepared_bytes).unwrap();
+            let reserved = prepared.journal.body().unwrap().to_vec();
+            let body: Value = serde_json::from_slice(&reserved).unwrap();
+            let packet: Value = serde_json::from_str(
+                body["messages"].as_array().unwrap().last().unwrap()["content"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let sent = &packet["preloaded_evidence"];
+            assert!(
+                sent["assigned_evidence"].is_object(),
+                "both roles must actually reserve original evidence"
+            );
+            assert_eq!(prepared.turn, turn);
+            assert_eq!(
+                prepared.read_bytes,
+                prior.as_ref().map_or(0, |state| state.read_bytes)
+            );
+            if reviewer {
+                assert_eq!(
+                    json!(prepared.analysis.coverage),
+                    json!(prior.as_ref().unwrap().analysis.coverage)
+                );
+                assert!(prepared.reviewer_coverage.text.is_empty());
+                assert!(prepared.reviewer_coverage.candidate.is_empty());
+                assert!(
+                    !sent["assigned_evidence"]["candidates"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
+            } else {
+                assert!(prepared.main_work.is_none());
+                assert!(prepared.analysis.coverage.text.is_empty());
+                assert!(prepared.analysis.records.is_empty());
+            }
+            if boundary < 3 {
+                assert_eq!(saved.turn, turn);
+                assert_eq!(saved.read_bytes, prepared.read_bytes);
+                assert_eq!(saved.tool_calls, prepared.tool_calls);
+                assert_eq!(json!(saved.analysis), json!(prepared.analysis));
+                assert_eq!(
+                    json!(saved.reviewer_coverage),
+                    json!(prepared.reviewer_coverage)
+                );
+                assert_eq!(json!(saved.main_work), json!(prepared.main_work));
+                assert_eq!(saved.journal.response().is_some(), boundary == 2);
+                assert_eq!(saved.journal.body().unwrap(), reserved);
+                let stop_after_commit = LostReviewAck {
+                    journal: postgres::PgJournal {
+                        pool: &pool,
+                        request: &request,
+                        owner: &owner,
+                        source_reader: None,
+                    },
+                    fail_turn: turn + 1,
+                    fail_sequence: None,
+                    reject_prepared: false,
+                };
+                let error = agent::run(
+                    &input,
+                    &config(),
+                    &stop_after_commit,
+                    &model,
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(error.code, "INTERNAL");
+            }
+            let committed = interrupted.load().await.unwrap().unwrap();
+            assert_eq!(committed.turn, turn + 1);
+            assert_eq!(committed.tool_calls, prepared.tool_calls + 1);
+            assert_eq!(committed.journal.sequence, sequence + 3);
+            assert!(committed.journal.pending.is_none());
+            assert_eq!(
+                model.bodies.lock().unwrap().len(),
+                calls_before + 1,
+                "received/committed restoration must not recall the tested model turn"
+            );
+            assert_eq!(model.bodies.lock().unwrap()[calls_before], reserved);
+            let last_assistant = committed
+                .transcript
+                .iter()
+                .rposition(|message| message["role"] == "assistant")
+                .unwrap();
+            let tool_bytes: usize = committed.transcript[last_assistant..]
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .map(|message| message["content"].as_str().unwrap().len())
+                .sum();
+            assert_eq!(
+                committed.read_bytes,
+                prepared.read_bytes + serde_json::to_vec(sent).unwrap().len() + tool_bytes,
+                "one exact evidence delivery and one executed tool output must be charged"
+            );
+            let source = &input.source_units[0];
+            let citation = serde_json::from_value(json!({"source_id":source.source_unit_revision_id,"start":0,"end":source.text.len()})).unwrap();
+            if reviewer {
+                bidding::tender_analysis::tools::validate_span(
+                    &input,
+                    &committed.reviewer_coverage,
+                    &citation,
+                )
+                .unwrap();
+                for candidate in sent["assigned_evidence"]["candidates"].as_array().unwrap() {
+                    assert_eq!(
+                        committed
+                            .reviewer_coverage
+                            .candidate
+                            .get(candidate["reference"].as_str().unwrap())
+                            .map(String::as_str),
+                        candidate["sha256"].as_str()
+                    );
+                }
+                assert_eq!(json!(committed.analysis), json!(prepared.analysis));
+                assert!(
+                    committed.source_review.as_ref().unwrap().results.is_empty(),
+                    "delivery is not semantic review approval"
+                );
+            } else {
+                bidding::tender_analysis::tools::validate_span(
+                    &input,
+                    &committed.analysis.coverage,
+                    &citation,
+                )
+                .unwrap();
+                assert_eq!(
+                    committed.analysis.records.len(),
+                    1,
+                    "received replay cannot duplicate the first record"
+                );
+                assert!(committed.reviewer_coverage.text.is_empty());
+            }
+            let attempts:Vec<Vec<u8>> = sqlx::query_scalar("SELECT provider_body FROM bid_tender_agent_call_attempts WHERE request_artifact_id=$1 AND batch_ordinal=$2 ORDER BY call_ordinal")
+                .bind(request.request_artifact_id).bind(turn as i32).fetch_all(&pool).await.unwrap();
+            assert_eq!(attempts.len(), if boundary == 1 { 2 } else { 1 });
+            assert!(attempts.iter().all(|body| body == &reserved));
+            let committed_digest = digest(&committed).unwrap();
+            interrupted
+                .journal
+                .save(&committed, &json!({}))
+                .await
+                .unwrap();
+            assert_eq!(
+                digest(&interrupted.load().await.unwrap().unwrap()).unwrap(),
+                committed_digest,
+                "committed replay is idempotent in PostgreSQL"
+            );
+            let result = agent::run(
+                &input,
+                &config(),
+                &interrupted.journal,
+                &model,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.quality, "verified");
+            assert_eq!(model.bodies.lock().unwrap().len(), expected_calls);
+            let completed = interrupted.load().await.unwrap().unwrap();
+            assert_eq!(completed.review_rounds, 1);
+            assert!(completed.done);
+        }
+    }
+    pool.close().await;
+}
+
 #[tokio::test]
 #[ignore = "requires KB_TENDER_AGENT_TEST_DATABASE_URL pointing to a fresh owned test database"]
 async fn source_review_final_batch_recovers_without_extra_model_calls_or_double_finalization() {

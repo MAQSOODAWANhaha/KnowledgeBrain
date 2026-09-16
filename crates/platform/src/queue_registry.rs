@@ -234,7 +234,7 @@ mod tests {
         BID_REQUIREMENT_SET_COMPILE_V2_TASK, BID_SUBMISSION_EXPORT_V2_TASK,
         BID_TENDER_DOCUMENT_PROCESS_V2_TASK, BidAuthoringRequestIdentityV2, ContentGenerateJobV2,
         ContentGenerateOperationV2, DocxComposeJobV2, RequirementSetCompileJobV2,
-        SubmissionExportJobV2, SubmissionOutputModeV2, TenderDocumentProcessJobV2,
+        SubmissionExportJobV2, TenderDocumentProcessJobV2,
     };
     use oxana::Job;
     use uuid::Uuid;
@@ -296,8 +296,6 @@ mod tests {
             request: request.clone(),
             project_id,
             workspace_id,
-            workspace_revision_id: document_id,
-            output_mode: SubmissionOutputModeV2::Submission,
         };
         for (task, kind, actual) in [
             (

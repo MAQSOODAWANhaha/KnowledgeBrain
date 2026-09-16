@@ -1,12 +1,101 @@
 use super::*;
 
+pub(super) fn with_unseen_target(mut input: FrozenInput) -> FrozenInput {
+    input.source_units[0].ordinal = 1;
+    input.source_units.insert(
+        0,
+        Source {
+            source_unit_revision_id: "initial-source".into(),
+            document_id: "independent-initial-document".into(),
+            ordinal: 0,
+            text: "Independent introductory background.".into(),
+            locator: json!({}),
+        },
+    );
+    input
+}
+
+pub(super) async fn pending_unseen_source() -> (FrozenInput, MemoryJournal, Checkpoint) {
+    struct ReadUnseen;
+    #[async_trait]
+    impl Model for ReadUnseen {
+        async fn turn(&self, _: &Config, bytes: &[u8]) -> Result<ChatTurn, AgentError> {
+            let body: Value = serde_json::from_slice(bytes).unwrap();
+            let packet: Value = serde_json::from_str(
+                body["messages"].as_array().unwrap().last().unwrap()["content"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                packet["preloaded_evidence"]["main_work"]["source_scope"],
+                json!(["initial-source"])
+            );
+            let mut work = active_work("initial-source");
+            work["source_scope"] = json!(["initial-source", "source"]);
+            Ok(ChatTurn {
+                content: String::new(),
+                finish_reason: "tool_calls".into(),
+                usage: None,
+                tool_calls: vec![
+                    ChatToolCall {
+                        id: "expand".into(),
+                        name: "set_work_note".into(),
+                        arguments: work.to_string(),
+                    },
+                    ChatToolCall {
+                        id: "read-unseen".into(),
+                        name: "read_source".into(),
+                        arguments: json!({"source_id":"source","start":0,"max_bytes":1024})
+                            .to_string(),
+                    },
+                ],
+            })
+        }
+    }
+    let input = with_unseen_target(input());
+    let journal = MemoryJournal::default();
+    *journal.interrupt_after.lock().unwrap() = Some(1);
+    let error = agent::run(
+        &input,
+        &config(),
+        &journal,
+        &ReadUnseen,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "INTERNAL");
+    let saved = journal.load().await.unwrap().unwrap();
+    assert!(!saved.analysis.coverage.text.contains_key("source"));
+    assert!(saved.analysis.coverage.text.contains_key("initial-source"));
+    assert!(
+        saved
+            .pending_coverage
+            .as_ref()
+            .unwrap()
+            .text
+            .contains_key("source")
+    );
+    (input, journal, saved)
+}
+
 #[tokio::test]
 async fn pending_reads_are_not_evidence_until_a_successful_model_turn_after_resume() {
-    let journal = MemoryJournal::default();
-    *journal.interrupt_after.lock().unwrap() = Some(2);
-    let model = script();
-    let err = agent::run(
-        &input(),
+    let (input, journal, saved) = pending_unseen_source().await;
+    assert!(saved.reviewer_coverage.text.is_empty());
+    assert_eq!(
+        json!(saved.pending_coverage)["text"]["source"],
+        json!([[0, span().end]])
+    );
+    assert!(tools::validate_span(&input, &saved.analysis.coverage, &span()).is_err());
+    *journal.interrupt_after.lock().unwrap() = Some(saved.turn + 1);
+    let model = work_script(vec![(
+        "check_gaps",
+        json!({"scope":"work","offset":0,"limit":10}),
+    )]);
+    let error = agent::run(
+        &input,
         &config(),
         &journal,
         &model,
@@ -14,31 +103,14 @@ async fn pending_reads_are_not_evidence_until_a_successful_model_turn_after_resu
     )
     .await
     .unwrap_err();
-    assert_eq!(err.code, "INTERNAL");
-    let saved = journal.load().await.unwrap().unwrap();
+    assert_eq!(error.code, "INTERNAL");
+    let received = journal.load().await.unwrap().unwrap();
+    assert!(tools::validate_span(&input, &received.analysis.coverage, &span()).is_ok());
     assert!(
-        saved.analysis.coverage.text.is_empty(),
-        "a tool receipt is not model delivery"
+        tools::validate_span(&input, &received.reviewer_coverage, &span()).is_err(),
+        "Main receipt does not authorize Reviewer"
     );
-    assert!(saved.reviewer_coverage.text.is_empty());
-    let json = serde_json::to_value(&saved).unwrap();
-    assert_eq!(
-        json["pending_coverage"]["text"]["source"],
-        json!([[0, span().end]])
-    );
-    assert!(tools::validate_span(&input(), &saved.analysis.coverage, &span()).is_err());
-    let result = agent::run(
-        &input(),
-        &config(),
-        &journal,
-        &model,
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(result.quality, "verified");
-    assert!(tools::validate_span(&input(), &result.analysis.coverage, &span()).is_ok());
-    assert!(tools::validate_span(&input(), &result.review.coverage, &span()).is_ok());
+    assert!(received.pending_coverage.is_none());
 }
 
 #[tokio::test]
@@ -53,20 +125,9 @@ async fn failed_delivery_retains_pending_reads_without_committing_coverage() {
             ))
         }
     }
-    let journal = MemoryJournal::default();
-    *journal.interrupt_after.lock().unwrap() = Some(2);
-    agent::run(
-        &input(),
-        &config(),
-        &journal,
-        &script(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap_err();
-    let before = journal.load().await.unwrap().unwrap();
+    let (input, journal, before) = pending_unseen_source().await;
     let err = agent::run(
-        &input(),
+        &input,
         &config(),
         &journal,
         &Unavailable,
@@ -76,7 +137,7 @@ async fn failed_delivery_retains_pending_reads_without_committing_coverage() {
     .unwrap_err();
     assert_eq!(err.code, "AGENT_PROVIDER_UNAVAILABLE");
     let after = journal.load().await.unwrap().unwrap();
-    assert!(after.analysis.coverage.text.is_empty());
+    assert!(!after.analysis.coverage.text.contains_key("source"));
     assert_eq!(after.turn, before.turn);
     assert_eq!(after.tool_calls, before.tool_calls);
     assert_eq!(after.read_bytes, before.read_bytes);
@@ -91,8 +152,8 @@ async fn failed_delivery_retains_pending_reads_without_committing_coverage() {
     assert_eq!(after.journal.sequence, before.journal.sequence + 1);
     assert!(after.journal.response().is_none());
     let reservations = journal.reservations.lock().unwrap();
-    assert_eq!(after.journal.body().unwrap(), reservations[&2].0);
-    assert_eq!(reservations[&2].1, 3);
+    assert_eq!(after.journal.body().unwrap(), reservations[&before.turn].0);
+    assert_eq!(reservations[&before.turn].1, 3);
 }
 
 #[tokio::test]

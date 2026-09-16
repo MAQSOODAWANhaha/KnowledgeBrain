@@ -205,8 +205,8 @@ fn v2_baseline_has_the_complete_authoring_foundation() {
         "kb_bid_v2_prepare_workspace_attachment",
         "kb_bid_v2_load_user_pick_evidence",
         "kb_bid_v2_publish_quote_snapshot",
-        "kb_bid_v2_prepare_submission_export",
-        "kb_bid_v2_load_submission_manifest_render_input",
+        "kb_bid_v2_publish_submission_export",
+        "kb_bid_v2_load_submission_export_source",
     ] {
         assert!(
             SQL.contains(function),
@@ -342,11 +342,9 @@ fn reviewed_publication_target_and_render_constraints_are_frozen() {
             "missing typed binding target {target_table}"
         );
     }
-    assert!(SQL.contains("mode_options ?& ARRAY['watermark']"));
-    assert!(SQL.contains("mode_options - ARRAY['watermark']::text[] = '{}'::jsonb"));
+    assert!(SQL.contains("p_docx->>'sha256' IS DISTINCT FROM typed.docx_sha256::text"));
     assert!(!SQL.contains("include_assessment_notices"));
     assert!(!SQL.contains("include_knowledge_sources"));
-    assert!(SQL.contains("mode_options @> '{\"watermark\":null}'::jsonb"));
     assert!(
         SQL.contains("status text NOT NULL CHECK (status IN ('pending','succeeded','failed'))")
     );
@@ -383,10 +381,10 @@ fn reviewed_publication_target_and_render_constraints_are_frozen() {
         "preparation_status text NOT NULL DEFAULT 'ready' CHECK (preparation_status='ready')"
     ));
     assert!(SQL.contains("FOREIGN KEY(project_id,workspace_id,attachment_preparation_revision_id,preparation_status,canonical_sha256)"));
-    assert!(SQL.contains(
-        "FOREIGN KEY(project_id,workspace_id,render_snapshot_id,output_mode,format,mode_options)"
-    ));
-    assert!(SQL.contains("FOREIGN KEY(project_id,workspace_id,manifest_id,format)"));
+    assert!(SQL.contains("FOREIGN KEY(project_id,workspace_id,round_id,version_id,docx_sha256)"));
+    assert!(
+        SQL.contains("FOREIGN KEY(project_id,workspace_id,manifest_id,docx_output_id,docx_format)")
+    );
     assert!(SQL.contains("FOREIGN KEY(project_id,parent_revision_id,parent_sha256)"));
     assert!(SQL.contains("FOREIGN KEY(project_id,artifact_id,artifact_sha256) REFERENCES bid_workspace_revision_artifacts"));
     assert!(SQL.contains(
@@ -492,7 +490,7 @@ fn reviewed_publication_target_and_render_constraints_are_frozen() {
             "REFERENCES object_owner_references(object_ref,owner_kind,owner_id,occurrence)"
         )
     );
-    assert!(SQL.contains("UNION ALL SELECT 'outline_checkpoint',outline_checkpoint_id,outline_checkpoint_sha256 FROM manifest"));
+    assert!(SQL.contains("('docx_version','version_id','docx_sha256')"));
     assert!(SQL.contains("canonical_payload jsonb NOT NULL"));
     assert!(SQL.contains("outline_checkpoint_sha256 kb_sha256 NOT NULL"));
     assert!(SQL.contains("workspace_sha256 kb_sha256 NOT NULL"));
@@ -706,7 +704,7 @@ fn remediation_fences_are_present() {
     assert!(SQL.contains("current_quote bid_quote_snapshot_current%ROWTYPE"));
     assert!(SQL.contains("p_new_projection_sha256 kb_sha256,p_actor kb_actor_identity"));
     assert!(SQL.contains("payload,digest,p_actor"));
-    assert!(SQL.contains("asset.source='ai_evidence' THEN 'knowledge_evidence'"));
+    assert!(SQL.contains("owned.owner_kind='bid_docx_version'"));
     assert!(SQL.contains("WHERE id=p_request_artifact_id FOR UPDATE"));
     assert!(SQL.contains("IF request_value.status<>'pending' THEN RETURN"));
     assert!(SQL.contains("SELECT status INTO STRICT project_status FROM bid_projects WHERE id=p_project_id FOR UPDATE"));
@@ -741,4 +739,31 @@ fn request_delivery_uses_oxana_without_a_postgres_reconciler() {
     assert!(BID_API_ROUTER.contains("load_authoring_job_payload_v2(pool, &request)"));
     assert!(BID_API_ROUTER.contains("platform::enqueue_bid_authoring_v2(payload)"));
     assert!(!BID_API_ROUTER.contains("reserve_request_delivery_v2(pool, &request, \"api\")"));
+}
+
+#[test]
+fn formal_export_freezes_saved_docx_and_atomically_binds_both_outputs() {
+    let export = SQL
+        .split_once("CREATE FUNCTION kb_bid_v2_create_submission_export_request(")
+        .unwrap()
+        .1
+        .split_once("REVOKE ALL ON ALL TABLES")
+        .unwrap()
+        .0;
+    assert!(export.contains("analysis_identity"));
+    assert!(export.contains("frozen_context"));
+    assert!(export.contains("DOCX_VERSION_CAS_MISMATCH"));
+    assert!(export.contains("DOCX_SAVE_PENDING"));
+    assert!(export.contains("DOCX_SAVE_ERROR"));
+    assert!(
+        export.contains(
+            "IF request_value.status='succeeded' THEN RETURN request_value.result_identity"
+        )
+    );
+    assert!(export.contains("p_report->'source' IS DISTINCT FROM typed.source"));
+    assert!(export.contains("p_report->'outputs' IS DISTINCT FROM jsonb_build_object('docx',docx_identity,'pdf',pdf_identity)"));
+    assert!(!export.contains("bid_workspace_heads"));
+    assert!(!export.contains("bid_render_document_snapshot_artifacts"));
+    assert!(!SQL.contains("CREATE FUNCTION kb_bid_v2_prepare_submission_export("));
+    assert!(!SQL.contains("CREATE FUNCTION kb_bid_v2_load_submission_manifest_render_input("));
 }

@@ -4,6 +4,8 @@ pub mod agent;
 pub mod evidence_refs;
 pub mod postgres;
 pub mod relations;
+pub mod rule_contract;
+pub mod semantic_compare;
 pub mod source_review;
 pub mod tools;
 pub mod views;
@@ -11,6 +13,11 @@ pub mod views;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+
+pub use rule_contract::{
+    ANALYSIS_GLOBAL_CHECK_KEYS, GlobalCheck, GlobalCheckConclusion, RuleItem, RuleItemKind,
+    RuleItemTarget,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -134,6 +141,8 @@ pub enum ResponseChannel {
 pub struct ResponseNeed {
     pub channel: ResponseChannel,
     pub description: String,
+    /// Additional response trigger. Empty means no extra condition beyond the
+    /// parent requirement's applicability and governing compliance conditions.
     pub condition: String,
     pub grounds: Vec<Span>,
 }
@@ -167,7 +176,7 @@ pub struct ProofNeed {
     pub page_required: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RegionRole {
     FixedText,
@@ -209,6 +218,8 @@ pub enum RecordData {
         text: String,
         scope: String,
         applicability: Applicability,
+        #[serde(default)]
+        items: Vec<RuleItem>,
     },
     Requirement {
         text: String,
@@ -304,6 +315,9 @@ pub enum RelationTarget {
     Criterion {
         index: usize,
     },
+    RuleItem {
+        item_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -377,14 +391,22 @@ pub struct Analysis {
     pub relations: BTreeMap<String, Relation>,
     pub dispositions: BTreeMap<String, Disposition>,
     pub coverage: Coverage,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub main_global_checks: BTreeMap<String, GlobalCheck>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub review_global_checks: BTreeMap<String, GlobalCheck>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Review {
     pub analysis_sha256: String,
     pub coverage: Coverage,
     pub findings: Vec<Finding>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub contract_sha256: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub global_checks: Vec<GlobalCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

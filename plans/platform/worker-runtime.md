@@ -191,9 +191,9 @@ crates/bidding/src/
 - clone：`knowledge::clone::run_clone` 已返回 follow；worker 只 enqueue。
 - catalog：`housekeep_documents`、`purge_document_index`、`set_parse_status`、`try_set_processing` 已在 `knowledge::catalog`。
 - content HTTP：`bidding::content_runtime::{turn_once_with, ContentAgentRuntimeContractV1}`。
-- export 发布：`bid_authoring_v2::{load_submission_export_input_v2, prepare_submission_export_v2, publish_submission_export_v2, mark_submission_export_failed_v2}`。
+- export 发布：`bid_authoring_v2::{load_submission_export_input_v2, publish_submission_export_v2, mark_submission_export_failed_v2}`。正式出件冻结已保存DOCX版本，ONLYOFFICE转换同版PDF，并原子发布DOCX/PDF/报告；已移除旧块重排与字体/渲染快照准备步骤。技术报告不代替独立内容及版面验收。
 - 政策常数：`DOCUMENT_PROCESS_*`、`SEMANTIC_INDEX_V2_*`、`BID_AUTHORING_V2_*`、`HOUSEKEEP_*`、`runtime_concurrency`。
-- 测试：`tests/launch.rs`、`object_write_helper.rs`、`render_helper_shutdown.rs`；consume 内 late-write / wiki 幂等 / content verifier 按归属搬家，断言不放宽。
+- 测试：`tests/launch.rs`、`object_write_helper.rs`；正式出件移除旧render helper后，转换中取消由`bidding::onlyoffice_conversion`回归覆盖；consume 内 late-write / wiki 幂等 / content verifier 按归属搬家，断言不放宽。
 
 ## Steps
 

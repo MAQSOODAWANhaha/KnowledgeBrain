@@ -7,6 +7,8 @@ use crate::agent_runtime::progress::Recovery;
 use serde_json::json;
 use std::collections::BTreeSet;
 
+pub(super) mod evidence_candidates;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Region {
@@ -1306,10 +1308,14 @@ fn relationship_records(analysis: &Analysis, refs: &BTreeSet<String>) -> BTreeSe
         .filter(
             |id| match analysis.records.get(*id).map(|record| &record.data) {
                 Some(RecordData::Rule { .. } | RecordData::Unresolved { .. }) => true,
-                Some(
-                    RecordData::Requirement { applicability, .. }
-                    | RecordData::Template { applicability, .. },
-                ) => applicability.state != ApplicabilityState::Applicable,
+                Some(RecordData::Template {
+                    parent,
+                    applicability,
+                    ..
+                }) => parent.is_some() || applicability.state != ApplicabilityState::Applicable,
+                Some(RecordData::Requirement { applicability, .. }) => {
+                    applicability.state != ApplicabilityState::Applicable
+                }
                 _ => false,
             },
         )
@@ -1349,6 +1355,10 @@ fn validate_relationship_subjects(
             ));
         }
         let subject = &state.analysis.records[&check.record_id];
+        let parent = match &subject.data {
+            RecordData::Template { parent, .. } => parent.as_ref(),
+            _ => None,
+        };
         if check.reason.trim().is_empty() || check.sources.is_empty() {
             return Err(fail(
                 "explain the actual reference targets, selected conditions and continuation interpretation using independently read sources",
@@ -1503,26 +1513,41 @@ fn validate_relationship_subjects(
         match check.status {
             RelationshipStatus::Resolved => {
                 if matches!(subject.data, RecordData::Unresolved { .. })
-                    || check.relation_ids.is_empty()
+                    || (check.relation_ids.is_empty() && parent.is_none())
+                    || parent.is_some_and(|id| !check.related_record_ids.contains(id))
                     || !check.unresolved_record_ids.is_empty()
                     || check
                         .relation_ids
                         .iter()
                         .any(|id| state.analysis.relations[id].state == RelationState::Unresolved)
                     || check.related_record_ids.iter().any(|id| {
-                        !check.relation_ids.iter().any(|edge| {
-                            let edge = &state.analysis.relations[edge];
-                            edge.from == *id || edge.to == *id
-                        })
+                        parent != Some(id)
+                            && !check.relation_ids.iter().any(|edge| {
+                                let edge = &state.analysis.relations[edge];
+                                edge.from == *id || edge.to == *id
+                            })
                     })
                 {
                     return Err(fail(
-                        "resolved requires actual resolved edges to every listed target and consistent applicability/continuation interpretation; report a stale unresolved record as a finding",
+                        "resolved requires actual resolved edges to every listed target, or the template's actual parent listed in related_record_ids, and consistent applicability/continuation interpretation; Template.parent is already a structural relationship and needs no duplicate contains edge; report a stale unresolved record as a finding",
+                    ));
+                }
+                if let Some(parent) = parent
+                    && !state.analysis.records[parent].sources.iter().any(|source| {
+                        check
+                            .sources
+                            .iter()
+                            .any(|span| shared_mapping_evidence(source, span))
+                    })
+                {
+                    return Err(fail(
+                        "cite independently read original evidence for the selected template parent as well as the child; record existence does not establish semantic ownership",
                     ));
                 }
             }
             RelationshipStatus::NotRequired => {
                 if matches!(subject.data, RecordData::Unresolved { .. })
+                    || parent.is_some()
                     || !check.related_record_ids.is_empty()
                     || !check.relation_ids.is_empty()
                     || !check.unresolved_record_ids.is_empty()
@@ -1533,7 +1558,7 @@ fn validate_relationship_subjects(
                         .any(|edge| edge.from == check.record_id || edge.to == check.record_id)
                 {
                     return Err(fail(
-                        "not_required needs a source-grounded absence of external relationships; existing edges or unresolved records must be examined, not dismissed",
+                        "not_required needs a source-grounded absence of external relationships; an existing template parent, edges or unresolved records must be examined, not dismissed",
                     ));
                 }
             }
@@ -1753,6 +1778,24 @@ pub(super) struct Evidence {
     pub coverage: Coverage,
 }
 
+pub(super) fn assigned_source(
+    input: &FrozenInput,
+    state: &Checkpoint,
+    budget: usize,
+) -> Result<Option<String>, String> {
+    let Some(id) = state
+        .source_review
+        .as_ref()
+        .and_then(|review| review.active_task.as_ref())
+    else {
+        return Ok(None);
+    };
+    Ok(task_inventory(input, state, budget)?
+        .into_iter()
+        .find(|task| &task.id == id)
+        .map(|task| task.source_id))
+}
+
 /// Recover original grounds for cross-source relationship subjects that this
 /// reviewer has already read. A retained candidate alone cannot replace them.
 fn recalled_relationship_sources(
@@ -1895,8 +1938,12 @@ pub(super) fn evidence(
     )?;
     let mut content = json!({"assigned_evidence":{
         "task_id":task.id,"source":source,"candidates":[],"boundary_evidence":[],
-        "instruction":"Original frozen source and complete current candidate values returned together for this assigned task. Compare them directly; no read/index call is needed for these exact values. boundary_evidence contains bounded adjacent original text/grid ranges, not whole neighboring tasks or a semantic continuation judgment. Check exact returned ranges; read missing continuation content explicitly. This is not a comparison or approval. Unlisted candidates, cross-reference targets, metadata and original pixels still require their reading tools. Save field-level findings or clean comparisons, then judge source omissions and boundaries."
+        "instruction":"Original frozen source and complete candidate values for the explicitly reported delivery are returned together. Check candidate_delivery: a partial packet is not the complete task inventory. Compare the included values directly; no read/index call is needed for these exact values. boundary_evidence contains bounded adjacent original text/grid ranges, not whole neighboring tasks or a semantic continuation judgment. Check exact returned ranges; read missing continuation content explicitly. This is not a comparison or approval. Unlisted candidates, cross-reference targets, metadata and original pixels still require their reading tools. Save field-level findings or clean comparisons, then judge source omissions and boundaries."
     }});
+    // Admit complete candidate groups before optional neighboring context. The
+    // immutable source obligation remains intact when its evidence needs more
+    // than one delivery; partial delivery is explicit and grants no approval.
+    evidence_candidates::append(input, state, task, &mut content, &mut coverage, budget)?;
     // Each boundary read uses an eighth of the existing packet budget,
     // leaving the original half for the assigned source and room for
     // candidates. Include the wrapper in admission before staging receipts.
@@ -1993,44 +2040,6 @@ pub(super) fn evidence(
         } else {
             coverage = staged;
         }
-    }
-    let assigned_refs = obligations(input, state, task).comparisons;
-    let mut keys: Vec<_> = state
-        .work()
-        .into_iter()
-        .flat_map(|work| &work.focus.references)
-        .filter(|key| assigned_refs.contains(*key))
-        .cloned()
-        .collect();
-    for key in assigned_refs {
-        if !keys.contains(&key) {
-            keys.push(key);
-        }
-    }
-    for key in keys {
-        if context::has_review_outcome(state, &key)? {
-            continue;
-        }
-        let value = context::reference(&state.analysis, &key)?;
-        let sha256 = digest(&value)?;
-        let items = content["assigned_evidence"]["candidates"]
-            .as_array_mut()
-            .unwrap();
-        items.push(json!({"reference":key,"sha256":sha256,"value":value}));
-        if serde_json::to_vec(&content)
-            .map_err(|e| e.to_string())?
-            .len()
-            > budget
-        {
-            content["assigned_evidence"]["candidates"]
-                .as_array_mut()
-                .unwrap()
-                .pop();
-            // A large record does not prevent a later complete small result
-            // fitting; omitted records remain in pending_candidate_refs.
-            continue;
-        }
-        coverage.candidate.insert(key, sha256);
     }
     // Existing assigned originals and pending candidates keep priority. Recall
     // only complete previously delivered grounds that fit the same tool budget;

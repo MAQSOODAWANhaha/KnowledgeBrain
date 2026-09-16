@@ -883,44 +883,6 @@ fn bidding_transport_retry_count_never_classifies_business_outcomes() {
     assert!(!include_str!("runtime.rs").contains(concat!("bid_failure_", "is_final")));
 }
 
-#[test]
-fn frozen_asset_metadata_budget_rejects_before_reads_or_allocations() {
-    let oversized = vec![serde_json::json!({
-        "asset_revision_id":Uuid::new_v4(),
-        "media_type":"image/png",
-        "byte_length":bidding::submission_export::MAX_FROZEN_ASSET_TOTAL_BYTES + 1,
-        "width_px":1,
-        "height_px":1
-    })];
-    assert!(validate_frozen_asset_metadata(&oversized).is_err());
-    let pixel_overflow = vec![serde_json::json!({
-        "asset_revision_id":Uuid::new_v4(),
-        "media_type":"image/png",
-        "byte_length":1,
-        "width_px":bidding::submission_export::MAX_FROZEN_ASSET_TOTAL_PIXELS,
-        "height_px":2
-    })];
-    assert!(validate_frozen_asset_metadata(&pixel_overflow).is_err());
-    let missing_length = vec![serde_json::json!({
-        "asset_revision_id":Uuid::new_v4(),
-        "media_type":"application/pdf",
-        "page_count":1
-    })];
-    assert!(validate_frozen_asset_metadata(&missing_length).is_err());
-}
-
-#[test]
-fn export_metadata_preflight_rejects_aggregate_table_work() {
-    let input = serde_json::json!({
-        "assets":[],
-        "workspace":{"blocks":[{"content":{"type":"table","row_count":1_000_001u64,
-            "column_count":1,"cells":[]}}]},
-        "form_definitions":[],
-        "attachment_preparations":[]
-    });
-    assert!(validate_submission_export_metadata(&input).is_err());
-}
-
 #[tokio::test]
 async fn content_pipeline_abort_is_authoritatively_joined() {
     struct Dropped(Arc<AtomicBool>);

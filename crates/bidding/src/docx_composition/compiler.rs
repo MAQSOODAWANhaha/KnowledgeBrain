@@ -46,6 +46,8 @@ pub struct Manifest {
     pub relation_omissions: Vec<RelationOmission>,
     pub source_quality: String,
     pub source_open_items: Vec<SourceOpenItem>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub plan_sha256: String,
     /// Rendering is a structural check, never semantic or bidder approval.
     pub status: String,
 }
@@ -737,6 +739,11 @@ pub fn compile(
         relation_omissions: draft.relation_omissions.values().cloned().collect(),
         source_quality: result.quality.clone(),
         source_open_items: result.open_items(input),
+        plan_sha256: if draft.plan.is_empty() {
+            String::new()
+        } else {
+            digest(&draft.plan)?
+        },
         status: "needs_review".into(),
     };
     Ok(Compiled {
@@ -842,6 +849,12 @@ pub fn required_references(result: &AnalysisResult) -> Vec<Reference> {
                 } => (0..response.len())
                     .map(|index| RelationTarget::Response { index })
                     .chain((0..proofs.len()).map(|index| RelationTarget::Proof { index }))
+                    .collect(),
+                RecordData::Rule { items, .. } => items
+                    .iter()
+                    .map(|item| RelationTarget::RuleItem {
+                        item_id: item.id.clone(),
+                    })
                     .collect(),
                 _ => vec![],
             };

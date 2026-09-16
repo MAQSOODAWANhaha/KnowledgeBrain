@@ -75,13 +75,6 @@ pub enum ContentGenerateOperationV2 {
     Generate,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SubmissionOutputModeV2 {
-    ReviewDraft,
-    Submission,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BidAuthoringRequestIdentityV2 {
@@ -132,8 +125,6 @@ pub enum BidAuthoringJobPayloadV2 {
         request: BidAuthoringRequestIdentityV2,
         project_id: Uuid,
         workspace_id: Uuid,
-        workspace_revision_id: Uuid,
-        output_mode: SubmissionOutputModeV2,
     },
 }
 
@@ -185,8 +176,6 @@ pub struct SubmissionExportJobV2 {
     pub request: BidAuthoringRequestIdentityV2,
     pub project_id: Uuid,
     pub workspace_id: Uuid,
-    pub workspace_revision_id: Uuid,
-    pub output_mode: SubmissionOutputModeV2,
 }
 
 macro_rules! request_scoped_job {
@@ -431,30 +420,24 @@ mod tests {
                 expected,
             );
         }
-        for output_mode in [
-            SubmissionOutputModeV2::ReviewDraft,
-            SubmissionOutputModeV2::Submission,
-        ] {
-            let mode = match output_mode {
-                SubmissionOutputModeV2::ReviewDraft => "review_draft",
-                SubmissionOutputModeV2::Submission => "submission",
-            };
-            let mut expected = ids("submission_export");
-            expected.as_object_mut().unwrap().extend(serde_json::json!({"project_id":"00000000-0000-0000-0000-000000000002","workspace_id":"00000000-0000-0000-0000-000000000003","workspace_revision_id":"00000000-0000-0000-0000-000000000004","output_mode":mode}).as_object().unwrap().clone());
-            round_trip(
-                BidAuthoringJobPayloadV2::SubmissionExport {
-                    request: request(),
-                    project_id: Uuid::from_u128(2),
-                    workspace_id: Uuid::from_u128(3),
-                    workspace_revision_id: Uuid::from_u128(4),
-                    output_mode,
-                },
-                expected,
-            );
-        }
-        let mut preview_export = ids("submission_export");
-        preview_export.as_object_mut().unwrap().extend(serde_json::json!({"project_id":"00000000-0000-0000-0000-000000000002","workspace_id":"00000000-0000-0000-0000-000000000003","workspace_revision_id":"00000000-0000-0000-0000-000000000004","output_mode":"preview"}).as_object().unwrap().clone());
-        assert!(serde_json::from_value::<BidAuthoringJobPayloadV2>(preview_export).is_err());
+        let mut expected = ids("submission_export");
+        expected.as_object_mut().unwrap().extend(
+            serde_json::json!({
+                "project_id":"00000000-0000-0000-0000-000000000002",
+                "workspace_id":"00000000-0000-0000-0000-000000000003"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        round_trip(
+            BidAuthoringJobPayloadV2::SubmissionExport {
+                request: request(),
+                project_id: Uuid::from_u128(2),
+                workspace_id: Uuid::from_u128(3),
+            },
+            expected,
+        );
     }
 
     #[test]

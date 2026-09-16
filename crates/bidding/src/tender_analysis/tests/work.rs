@@ -1,8 +1,49 @@
 use super::*;
 
+fn add_unseen_review_source(input: &mut FrozenInput, state: &mut Checkpoint) {
+    let source = Source {
+        source_unit_revision_id: "unseen-source".into(),
+        document_id: "unseen-document".into(),
+        ordinal: input.source_units.len(),
+        text: "独立来源的项目背景。".into(),
+        locator: json!({}),
+    };
+    state.analysis.records.insert(
+        "unseen-record".into(),
+        Record {
+            id: "unseen-record".into(),
+            sources: vec![Span {
+                source_id: source.source_unit_revision_id.clone(),
+                start: 0,
+                end: source.text.len(),
+                grid_cell: None,
+                view_id: None,
+            }],
+            data: RecordData::Fact {
+                name: "背景".into(),
+                value: "独立来源".into(),
+                scope: "project".into(),
+            },
+        },
+    );
+    input.source_units.push(source);
+    state.input_sha256 = digest(input).unwrap();
+    state.source_review = Some(source_review::initialize(input, &config()).unwrap());
+    source_review::select_next(input, &config(), state).unwrap();
+}
+
+fn broad_review_work() -> Value {
+    let mut work = active_work("source");
+    work["source_scope"] = json!(["source", "unseen-source"]);
+    work
+}
+
 #[tokio::test]
 async fn active_scope_queries_exclude_unrelated_outcomes_but_allow_exact_cross_references() {
-    let (input, analysis, ids) = analysis_query_fixture();
+    let (input, mut analysis, ids) = analysis_query_fixture();
+    let mut unrelated = analysis.records[&ids[1]].clone();
+    unrelated.id = "unrelated-record".into();
+    analysis.records.insert(unrelated.id.clone(), unrelated);
     for role in [Role::Main, Role::Reviewer] {
         let journal = MemoryJournal::default();
         *journal.interrupt_after.lock().unwrap() = Some(1);
@@ -40,7 +81,7 @@ async fn active_scope_queries_exclude_unrelated_outcomes_but_allow_exact_cross_r
             ),
             (
                 "inspect_analysis",
-                json!({"view":"detail","kind":"all","offset":0,"limit":50,"ids":[ids[1]]}),
+                json!({"view":"detail","kind":"all","offset":0,"limit":50,"ids":["unrelated-record"]}),
             ),
         ]);
         agent::run(
@@ -77,13 +118,13 @@ async fn active_scope_queries_exclude_unrelated_outcomes_but_allow_exact_cross_r
         assert_eq!(pages[2]["total"], 1);
         assert_eq!(pages[2]["items"][0]["source_id"], "source");
         assert_eq!(pages[3]["total"], 1);
-        assert_eq!(pages[3]["items"][0]["id"], ids[1]);
+        assert_eq!(pages[3]["items"][0]["id"], "unrelated-record");
         if role == Role::Reviewer {
             assert!(
                 !state
                     .reviewer_coverage
                     .candidate
-                    .contains_key(&format!("record:{}", ids[1]))
+                    .contains_key("record:unrelated-record")
             );
             assert!(
                 state
@@ -91,7 +132,7 @@ async fn active_scope_queries_exclude_unrelated_outcomes_but_allow_exact_cross_r
                     .as_ref()
                     .unwrap()
                     .candidate
-                    .contains_key(&format!("record:{}", ids[1]))
+                    .contains_key("record:unrelated-record")
             );
         }
     }
@@ -109,13 +150,36 @@ async fn work_actions_can_plan_unread_text_without_authorizing_a_citation() {
         } else {
             MemoryJournal::default()
         };
+        let mut frozen = input();
+        let planned = if role == Role::Reviewer {
+            let mut state = journal.load().await.unwrap().unwrap();
+            add_unseen_review_source(&mut frozen, &mut state);
+            *journal.state.lock().unwrap() = Some(state);
+            Span {
+                source_id: "unseen-source".into(),
+                start: 0,
+                end: frozen.source_units[1].text.len(),
+                grid_cell: None,
+                view_id: None,
+            }
+        } else {
+            frozen = super::resume::with_unseen_target(frozen);
+            span()
+        };
         let start = journal.load().await.unwrap().map_or(0, |s| s.turn);
         *journal.interrupt_after.lock().unwrap() = Some(start + 1);
-        let mut work = active_work("source");
+        let mut work = if role == Role::Reviewer {
+            broad_review_work()
+        } else {
+            active_work("source")
+        };
+        if role == Role::Main {
+            work["source_scope"] = json!(["initial-source", "source"]);
+        }
         work["focus"]["action"] = json!(action);
-        work["focus"]["source_spans"] = json!([span()]);
+        work["focus"]["source_spans"] = json!([planned]);
         agent::run(
-            &input(),
+            &frozen,
             &config(),
             &journal,
             &work_script(vec![("set_work_note", work)]),
@@ -139,7 +203,7 @@ async fn work_actions_can_plan_unread_text_without_authorizing_a_citation() {
             &saved.reviewer_coverage
         };
         assert!(
-            tools::validate_span(&input(), coverage, &span()).is_err(),
+            tools::validate_span(&frozen, coverage, &planned).is_err(),
             "planning is not delivery, even if the other role has read the source"
         );
     }
@@ -200,7 +264,12 @@ async fn work_split_retains_deferred_sources_outcomes_and_review_barriers() {
             source_review::select_next(&input, &config(), &mut state).unwrap();
             state.reviewer_work = Some(serde_json::from_value(broad).unwrap());
         }
-        let analysis_before = digest(&state.analysis).unwrap();
+        let analysis_before = json!([
+            state.analysis.records,
+            state.analysis.relations,
+            state.analysis.dispositions
+        ]);
+        let source_coverage_before = state.analysis.coverage.text.clone();
         *journal.state.lock().unwrap() = Some(state);
         let mut split = active_work("source");
         split["deferred_sources"] = json!(["other-source"]);
@@ -244,7 +313,15 @@ async fn work_split_retains_deferred_sources_outcomes_and_review_barriers() {
         assert!(work.output_refs.contains(&format!("relation:{}", ids[3])));
         assert_eq!(state.role, role);
         assert!(!state.done);
-        assert_eq!(digest(&state.analysis).unwrap(), analysis_before);
+        assert_eq!(
+            json!([
+                state.analysis.records,
+                state.analysis.relations,
+                state.analysis.dispositions
+            ]),
+            analysis_before
+        );
+        assert_eq!(state.analysis.coverage.text, source_coverage_before);
         let outputs: Vec<Value> = model
             .bodies
             .lock()
@@ -283,7 +360,8 @@ async fn work_split_retains_deferred_sources_outcomes_and_review_barriers() {
             if role == Role::Main {
                 error.contains("resume deferred_sources")
             } else {
-                error.contains("independently") || error.contains("read the cited source")
+                error.contains("record the current candidate comparison")
+                    || error.contains("read the cited source")
             },
             "{error}"
         );
@@ -298,14 +376,15 @@ async fn work_split_retains_deferred_sources_outcomes_and_review_barriers() {
         expanded["source_scope"] = json!(["other-source", "source"]);
         expanded["deferred_sources"] = json!([]);
         *journal.interrupt_after.lock().unwrap() = Some(9);
+        let resume_model = work_script(vec![
+            ("set_work_note", resume),
+            ("set_work_note", expanded.clone()),
+        ]);
         agent::run(
             &input,
             &config(),
             &journal,
-            &work_script(vec![
-                ("set_work_note", resume),
-                ("set_work_note", expanded.clone()),
-            ]),
+            &resume_model,
             &CancellationToken::new(),
         )
         .await
@@ -317,9 +396,36 @@ async fn work_split_retains_deferred_sources_outcomes_and_review_barriers() {
             resumed.reviewer_work.as_ref()
         }
         .unwrap();
-        assert_eq!(json!(work.source_scope), expanded["source_scope"]);
+        assert_eq!(
+            json!(work.source_scope),
+            expanded["source_scope"],
+            "role={role:?}; transcript={:?}",
+            resumed.transcript
+        );
         assert!(work.deferred_sources.is_empty());
-        assert_eq!(digest(&resumed.analysis).unwrap(), analysis_before);
+        if role == Role::Reviewer {
+            let bodies = resume_model.bodies.lock().unwrap();
+            assert_eq!(bodies.len(), 2);
+            let packet: Value = serde_json::from_str(
+                bodies[1]["messages"].as_array().unwrap().last().unwrap()["content"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(
+                packet["preloaded_evidence"].is_null(),
+                "temporary cross-source scope must not preload the still assigned original task"
+            );
+        }
+        assert_eq!(
+            json!([
+                resumed.analysis.records,
+                resumed.analysis.relations,
+                resumed.analysis.dispositions
+            ]),
+            analysis_before
+        );
+        assert_eq!(resumed.analysis.coverage.text, source_coverage_before);
     }
 }
 
@@ -413,7 +519,12 @@ async fn work_gaps_find_local_blockers_hidden_behind_global_unread_pages() {
     .unwrap_err();
     let mut saved = journal.load().await.unwrap().unwrap();
     saved.analysis = analysis;
-    let before = digest(&saved.analysis).unwrap();
+    let before = json!([
+        saved.analysis.records,
+        saved.analysis.relations,
+        saved.analysis.dispositions
+    ]);
+    let source_coverage_before = saved.analysis.coverage.text.clone();
     *journal.state.lock().unwrap() = Some(saved);
     *journal.interrupt_after.lock().unwrap() = Some(3);
     agent::run(
@@ -433,9 +544,17 @@ async fn work_gaps_find_local_blockers_hidden_behind_global_unread_pages() {
     .unwrap_err();
     let saved = journal.load().await.unwrap().unwrap();
     assert_eq!(
-        digest(&saved.analysis).unwrap(),
+        json!([
+            saved.analysis.records,
+            saved.analysis.relations,
+            saved.analysis.dispositions
+        ]),
         before,
-        "diagnostics cannot establish evidence"
+        "diagnostics cannot change semantic outcomes"
+    );
+    assert_eq!(
+        saved.analysis.coverage.text, source_coverage_before,
+        "diagnostics cannot read unrelated text"
     );
     assert!(saved.pending_coverage.is_none());
     let pages: Vec<Value> = saved
@@ -464,43 +583,61 @@ async fn work_gaps_find_local_blockers_hidden_behind_global_unread_pages() {
     );
     assert_eq!(local[0]["kind"], "missing_disposition");
     assert_eq!(local[0]["source_id"], "source");
-    let mut complete = active_work("source");
-    complete["status"] = json!("complete");
-    *journal.interrupt_after.lock().unwrap() = Some(8);
-    let model = work_script(vec![
-        (
-            "set_disposition",
-            json!({"source_id":"source","state":"non_requirement","reason":"已读事实来源"}),
-        ),
-        ("set_work_note", complete),
-        ("check_gaps", json!({"scope":"work","offset":0,"limit":10})),
-        ("request_review", json!({})),
-        ("set_work_note", active_work("other-source")),
-    ]);
+    *journal.interrupt_after.lock().unwrap() = Some(4);
     agent::run(
         &input,
         &config(),
         &journal,
-        &model,
+        &work_script(vec![(
+            "set_disposition",
+            json!({"source_id":"source","state":"non_requirement","reason":"已读事实来源"}),
+        )]),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    let completed = journal.load().await.unwrap().unwrap();
+    assert_eq!(
+        completed.main_work.as_ref().unwrap().status,
+        agent::context::WorkStatus::Complete
+    );
+    assert_eq!(
+        completed.main_work.as_ref().unwrap().source_scope,
+        vec!["source"]
+    );
+    assert_eq!(completed.role, Role::Main);
+    let checklist = agent::context::request_work_state(
+        &input,
+        &completed,
+        config().limits.max_tool_result_bytes,
+    )
+    .unwrap();
+    assert_eq!(checklist["next_action"], "select_next_scope");
+    assert_ne!(checklist["next_source"]["source_id"], "source");
+    *journal.interrupt_after.lock().unwrap() = Some(5);
+    agent::run(
+        &input,
+        &config(),
+        &journal,
+        &work_script(vec![("request_review", json!({}))]),
         &CancellationToken::new(),
     )
     .await
     .unwrap_err();
     let saved = journal.load().await.unwrap().unwrap();
-    assert_eq!(saved.main_work.unwrap().source_scope, vec!["other-source"]);
-    let bodies = model.bodies.lock().unwrap();
-    let tool = bodies[3]["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .rev()
-        .find(|m| m["role"] == "tool")
-        .unwrap();
-    let result: Value = serde_json::from_str(tool["content"].as_str().unwrap()).unwrap();
-    assert_eq!(result["result"]["total"], 0);
+    assert_eq!(saved.role, Role::Main);
+    assert!(!saved.done);
+    let result: Value = serde_json::from_str(
+        saved.transcript.last().unwrap()["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(result["ok"], false);
     assert!(
-        bodies[4]
-            .to_string()
+        result["error"]
+            .as_str()
+            .unwrap()
             .contains("structural/reading gaps remain"),
         "zero local blockers cannot authorize global review"
     );
@@ -630,15 +767,35 @@ async fn work_gap_diagnostics_cannot_count_same_batch_reads_as_reviewer_evidence
     struct ReadAndDiagnose;
     #[async_trait]
     impl Model for ReadAndDiagnose {
-        async fn turn(&self, _: &Config, _: &[u8]) -> Result<ChatTurn, AgentError> {
+        async fn turn(&self, _: &Config, body: &[u8]) -> Result<ChatTurn, AgentError> {
+            let body: Value = serde_json::from_slice(body).unwrap();
+            let packet: Value = serde_json::from_str(
+                body["messages"].as_array().unwrap().last().unwrap()["content"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let assigned = &packet["preloaded_evidence"]["assigned_evidence"];
+            assert_eq!(assigned["source"]["source_id"], "source");
+            assert!(
+                !assigned["candidates"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|candidate| candidate["reference"] == "record:unseen-record")
+            );
             let calls = [
                 (
                     "read_source",
-                    json!({"source_id":"source","start":0,"max_bytes":1024}),
+                    json!({"source_id":"unseen-source","start":0,"max_bytes":1024}),
                 ),
                 (
                     "inspect_analysis",
-                    json!({"view":"detail","kind":"all","offset":0,"limit":100}),
+                    json!({"view":"detail","kind":"all","offset":0,"limit":100,"ids":["unseen-record"]}),
+                ),
+                (
+                    "check_gaps",
+                    json!({"scope":"analysis","offset":0,"limit":100}),
                 ),
                 ("check_gaps", json!({"scope":"work","offset":0,"limit":100})),
             ];
@@ -660,13 +817,14 @@ async fn work_gap_diagnostics_cannot_count_same_batch_reads_as_reviewer_evidence
     }
     let journal = fresh_review_journal().await;
     let mut saved = journal.load().await.unwrap().unwrap();
-    saved.reviewer_work = Some(serde_json::from_value(active_work("source")).unwrap());
-    let before = digest(&saved.reviewer_coverage).unwrap();
+    let mut frozen = input();
+    add_unseen_review_source(&mut frozen, &mut saved);
+    saved.reviewer_work = Some(serde_json::from_value(broad_review_work()).unwrap());
     let turn = saved.turn;
     *journal.state.lock().unwrap() = Some(saved);
     *journal.interrupt_after.lock().unwrap() = Some(turn + 1);
     agent::run(
-        &input(),
+        &frozen,
         &config(),
         &journal,
         &ReadAndDiagnose,
@@ -675,14 +833,20 @@ async fn work_gap_diagnostics_cannot_count_same_batch_reads_as_reviewer_evidence
     .await
     .unwrap_err();
     let saved = journal.load().await.unwrap().unwrap();
-    assert_eq!(digest(&saved.reviewer_coverage).unwrap(), before);
+    assert!(!saved.reviewer_coverage.text.contains_key("unseen-source"));
+    assert!(
+        !saved
+            .reviewer_coverage
+            .candidate
+            .contains_key("record:unseen-record")
+    );
     assert!(
         saved
             .pending_coverage
             .as_ref()
             .unwrap()
             .text
-            .contains_key("source")
+            .contains_key("unseen-source")
     );
     let result: Value = serde_json::from_str(
         saved.transcript.last().unwrap()["content"]
@@ -691,13 +855,36 @@ async fn work_gap_diagnostics_cannot_count_same_batch_reads_as_reviewer_evidence
     )
     .unwrap();
     assert_eq!(result["ok"], true);
-    let gaps = result["result"]["items"].as_array().unwrap();
-    for kind in ["unread_source", "unreviewed_scope_outcome"] {
-        assert!(
-            gaps.iter().any(|g| g["kind"] == kind),
-            "missing blocker {kind}"
-        );
-    }
+    // The current source task does not acquire the unrelated source's full
+    // semantic obligations merely because its evidence was queried.
+    assert_eq!(
+        saved
+            .pending_coverage
+            .as_ref()
+            .unwrap()
+            .candidate
+            .get("record:unseen-record"),
+        Some(
+            &digest(&serde_json::to_value(&saved.analysis.records["unseen-record"]).unwrap())
+                .unwrap()
+        )
+    );
+    let outputs: Vec<Value> = saved
+        .transcript
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| serde_json::from_str(m["content"].as_str().unwrap()).unwrap())
+        .collect();
+    let reading = &outputs[outputs.len() - 2];
+    assert_eq!(reading["ok"], true);
+    assert!(
+        reading["result"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap["kind"] == "unread_source" && gap["source_id"] == "unseen-source"),
+        "{reading}"
+    );
 }
 
 #[tokio::test]
@@ -705,11 +892,10 @@ async fn work_handoff_cannot_drop_an_unresolved_outcome() {
     let mut input = input();
     input.source_units.push(Source {
         source_unit_revision_id: "other".into(),
+        document_id: "independent-document".into(),
         ordinal: 1,
         ..input.source_units[0].clone()
     });
-    let mut complete = active_work("source");
-    complete["status"] = json!("complete");
     let model = work_script(vec![
         ("set_work_note", active_work("source")),
         (
@@ -720,7 +906,6 @@ async fn work_handoff_cannot_drop_an_unresolved_outcome() {
             "set_disposition",
             json!({"source_id":"source","state":"unresolved","reason":"引用目标尚未解析"}),
         ),
-        ("set_work_note", complete),
         ("set_work_note", active_work("other")),
         (
             "check_gaps",
@@ -728,7 +913,7 @@ async fn work_handoff_cannot_drop_an_unresolved_outcome() {
         ),
     ]);
     let journal = MemoryJournal::default();
-    *journal.interrupt_after.lock().unwrap() = Some(6);
+    *journal.interrupt_after.lock().unwrap() = Some(5);
     agent::run(
         &input,
         &config(),
@@ -761,24 +946,16 @@ async fn work_handoff_cannot_drop_an_unresolved_outcome() {
 
 #[tokio::test]
 async fn reviewer_scope_completion_requires_its_own_source_and_candidate_delivery() {
-    let journal = MemoryJournal::default();
-    agent::run(
-        &input(),
-        &config(),
-        &journal,
-        &script(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
+    let journal = fresh_review_journal().await;
     let mut state = journal.load().await.unwrap().unwrap();
-    // Start a fresh review fixture over actual stored outcomes, with no inherited evidence.
-    state.role = Role::Reviewer;
-    state.done = false;
-    state.transcript.clear();
-    state.reviewer_work = None;
-    state.reviewer_coverage = Coverage::default();
-    state.pending_coverage = None;
+    // The current candidate is valid but cannot fit into the automatic packet.
+    // Its omission must be explicit, and source delivery cannot stand in for it.
+    let id = state.analysis.records.keys().next().unwrap().clone();
+    let record = state.analysis.records.get_mut(&id).unwrap();
+    let RecordData::Requirement { text, .. } = &mut record.data else {
+        panic!("requirement fixture")
+    };
+    *text = "x".repeat(config().limits.max_tool_result_bytes);
     let turn = state.turn;
     *journal.state.lock().unwrap() = Some(state);
     *journal.interrupt_after.lock().unwrap() = Some(turn + 4);
@@ -814,44 +991,71 @@ async fn reviewer_scope_completion_requires_its_own_source_and_candidate_deliver
         last["error"]
             .as_str()
             .unwrap()
-            .contains("independently inspect current scope outcome")
+            .contains("independently inspect current scope outcome"),
+        "{last}"
     );
+    let bodies = model.bodies.lock().unwrap();
+    let body = &bodies[0];
+    let packet: Value = serde_json::from_str(
+        body["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        packet["preloaded_evidence"]["assigned_evidence"]["candidate_delivery"]["capacity_blocked_group"],
+        format!("record:{id}")
+    );
+    assert!(state.reviewer_coverage.text.contains_key("source"));
     assert!(
-        model.bodies.lock().unwrap()[2]
-            .to_string()
-            .contains("undelivered source ranges")
+        !state
+            .reviewer_coverage
+            .candidate
+            .contains_key(&format!("record:{id}"))
     );
-    assert!(state.reviewer_coverage.candidate.is_empty());
 }
 
 #[tokio::test]
 async fn source_reads_require_a_known_active_scope_and_explicit_cross_reference_expansion() {
+    struct ExpandAndRead;
+    #[async_trait]
+    impl Model for ExpandAndRead {
+        async fn turn(&self, _: &Config, _: &[u8]) -> Result<ChatTurn, AgentError> {
+            let mut work = active_work("source");
+            work["source_scope"] = json!(["source", "other"]);
+            Ok(ChatTurn {
+                content: String::new(),
+                finish_reason: "tool_calls".into(),
+                usage: None,
+                tool_calls: vec![
+                    ChatToolCall {
+                        id: "expand".into(),
+                        name: "set_work_note".into(),
+                        arguments: work.to_string(),
+                    },
+                    ChatToolCall {
+                        id: "read-other".into(),
+                        name: "read_source".into(),
+                        arguments: json!({"source_id":"other","start":0,"max_bytes":1024})
+                            .to_string(),
+                    },
+                ],
+            })
+        }
+    }
     let mut input = input();
     input.source_units.push(Source {
         source_unit_revision_id: "other".into(),
+        document_id: "independent-document".into(),
         ordinal: 1,
         ..input.source_units[0].clone()
     });
-    let mut expanded = active_work("source");
-    expanded["source_scope"] = json!(["source", "other"]);
-    let model = work_script(vec![
-        (
-            "read_source",
-            json!({"source_id":"source","start":0,"max_bytes":1024}),
-        ),
-        ("set_work_note", active_work("source")),
-        (
-            "read_source",
-            json!({"source_id":"other","start":0,"max_bytes":1024}),
-        ),
-        ("set_work_note", expanded),
-        (
-            "read_source",
-            json!({"source_id":"other","start":0,"max_bytes":1024}),
-        ),
-    ]);
     let journal = MemoryJournal::default();
-    *journal.interrupt_after.lock().unwrap() = Some(5);
+    *journal.interrupt_after.lock().unwrap() = Some(1);
+    let model = work_script(vec![(
+        "read_source",
+        json!({"source_id":"other","start":0,"max_bytes":1024}),
+    )]);
     agent::run(
         &input,
         &config(),
@@ -861,9 +1065,41 @@ async fn source_reads_require_a_known_active_scope_and_explicit_cross_reference_
     )
     .await
     .unwrap_err();
+    let before = journal.load().await.unwrap().unwrap();
+    assert_eq!(
+        before.main_work.as_ref().unwrap().source_scope,
+        vec!["source"]
+    );
+    assert!(before.analysis.coverage.text.contains_key("source"));
+    assert!(!before.analysis.coverage.text.contains_key("other"));
+    let rejected: Value = serde_json::from_str(
+        before.transcript.last().unwrap()["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rejected["ok"], false);
+    assert!(
+        rejected["error"]
+            .as_str()
+            .unwrap()
+            .contains("outside active")
+    );
+    *journal.interrupt_after.lock().unwrap() = Some(2);
+    agent::run(
+        &input,
+        &config(),
+        &journal,
+        &ExpandAndRead,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
     let state = journal.load().await.unwrap().unwrap();
-    assert!(state.analysis.coverage.text.is_empty());
-    assert_eq!(state.pending_coverage.as_ref().unwrap().text.len(), 1);
+    assert!(
+        !state.analysis.coverage.text.contains_key("other"),
+        "new cross-reference reads still await model delivery"
+    );
     assert!(
         state
             .pending_coverage
@@ -872,10 +1108,13 @@ async fn source_reads_require_a_known_active_scope_and_explicit_cross_reference_
             .text
             .contains_key("other")
     );
-    let bodies = model.bodies.lock().unwrap();
-    for (index, reason) in [(1, "declare an active"), (3, "outside active")] {
-        assert!(bodies[index]["messages"].to_string().contains(reason));
-    }
+    let accepted: Value = serde_json::from_str(
+        state.transcript.last().unwrap()["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(accepted["ok"], true);
 }
 
 #[tokio::test]
@@ -884,12 +1123,11 @@ async fn completed_work_releases_old_source_below_the_context_ceiling_and_keeps_
     input.source_units[0].text = "EARLIER_SOURCE_TEXT_甲乙".repeat(100);
     input.source_units.push(Source {
         source_unit_revision_id: "other".into(),
+        document_id: "independent-document".into(),
         ordinal: 1,
         text: "NEXT_SOURCE_TEXT_丙丁".into(),
         ..input.source_units[0].clone()
     });
-    let mut complete = active_work("source");
-    complete["status"] = json!("complete");
     let model = work_script(vec![
         ("set_work_note", active_work("source")),
         (
@@ -900,7 +1138,6 @@ async fn completed_work_releases_old_source_below_the_context_ceiling_and_keeps_
             "set_disposition",
             json!({"source_id":"source","state":"non_requirement","reason":"来源说明"}),
         ),
-        ("set_work_note", complete),
         ("set_work_note", active_work("other")),
         (
             "read_source",
@@ -912,7 +1149,7 @@ async fn completed_work_releases_old_source_below_the_context_ceiling_and_keeps_
         ),
     ]);
     let journal = MemoryJournal::default();
-    *journal.interrupt_after.lock().unwrap() = Some(7);
+    *journal.interrupt_after.lock().unwrap() = Some(6);
     agent::run(
         &input,
         &config(),
@@ -924,12 +1161,12 @@ async fn completed_work_releases_old_source_below_the_context_ceiling_and_keeps_
     .unwrap_err();
     {
         let bodies = model.bodies.lock().unwrap();
-        assert!(bodies[3].to_string().contains("EARLIER_SOURCE_TEXT_甲乙"));
+        assert!(bodies[2].to_string().contains("EARLIER_SOURCE_TEXT_甲乙"));
         assert!(
-            !bodies[4].to_string().contains("EARLIER_SOURCE_TEXT_甲乙"),
+            !bodies[3].to_string().contains("EARLIER_SOURCE_TEXT_甲乙"),
             "handoff must release text before the emergency ceiling"
         );
-        assert!(bodies[6].to_string().contains("NEXT_SOURCE_TEXT_丙丁"));
+        assert!(bodies[5].to_string().contains("NEXT_SOURCE_TEXT_丙丁"));
     }
     let state = journal.load().await.unwrap().unwrap();
     assert!(state.analysis.dispositions.contains_key("source"));
@@ -939,19 +1176,8 @@ async fn completed_work_releases_old_source_below_the_context_ceiling_and_keeps_
 
 #[tokio::test]
 async fn request_work_checklist_projects_current_receipts_without_committing_them() {
-    let journal = MemoryJournal::default();
-    *journal.interrupt_after.lock().unwrap() = Some(2);
-    agent::run(
-        &input(),
-        &config(),
-        &journal,
-        &script(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap_err();
-    let mut state = journal.load().await.unwrap().unwrap();
-    assert!(state.analysis.coverage.text.is_empty());
+    let (frozen, _, mut state) = super::resume::pending_unseen_source().await;
+    assert!(!state.analysis.coverage.text.contains_key("source"));
     assert!(
         state
             .pending_coverage
@@ -963,7 +1189,7 @@ async fn request_work_checklist_projects_current_receipts_without_committing_the
     let before = digest(&state.analysis).unwrap();
     let receipts_before = digest(&state.pending_coverage).unwrap();
     let body: Value = serde_json::from_slice(
-        &agent::request(&input(), &config(), &mut state)
+        &agent::request(&frozen, &config(), &mut state)
             .await
             .unwrap(),
     )
@@ -975,7 +1201,7 @@ async fn request_work_checklist_projects_current_receipts_without_committing_the
     )
     .unwrap();
     let checklist = &tail["work_state"];
-    assert_eq!(checklist["gap_counts"]["missing_disposition"], 1);
+    assert_eq!(checklist["gap_counts"]["missing_disposition"], 2);
     assert_eq!(checklist["next_action"], "resolve_work_gaps");
     assert!(
         checklist["gap_counts"].get("unread_source").is_none(),
@@ -986,18 +1212,18 @@ async fn request_work_checklist_projects_current_receipts_without_committing_the
     assert_eq!(digest(&state.analysis).unwrap(), before);
     assert_eq!(digest(&state.pending_coverage).unwrap(), receipts_before);
     assert!(
-        tools::validate_span(&input(), &state.analysis.coverage, &span()).is_err(),
+        tools::validate_span(&frozen, &state.analysis.coverage, &span()).is_err(),
         "request metadata is not evidence authorization"
     );
     // The other role still needs its own reading, even when main's pending
     // receipts have subsequently been confirmed.
     state.analysis.coverage = state.pending_coverage.take().unwrap();
     state.role = Role::Reviewer;
-    state.source_review = Some(source_review::initialize(&input(), &config()).unwrap());
+    state.source_review = Some(source_review::initialize(&frozen, &config()).unwrap());
     state.reviewer_work = state.main_work.clone();
     state.transcript.clear();
     let body: Value = serde_json::from_slice(
-        &agent::request(&input(), &config(), &mut state)
+        &agent::request(&frozen, &config(), &mut state)
             .await
             .unwrap(),
     )
@@ -1008,7 +1234,7 @@ async fn request_work_checklist_projects_current_receipts_without_committing_the
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(tail["work_state"]["gap_counts"]["unread_source"], 1);
+    assert_eq!(tail["work_state"]["gap_counts"]["unread_source"], 2);
     assert_eq!(tail["work_state"]["next_action"], "resolve_work_gaps");
     assert!(state.reviewer_coverage.text.is_empty());
 }
@@ -1019,6 +1245,7 @@ async fn stalled_work_is_persisted_and_independent_sources_continue_after_restar
     let mut source = input();
     source.source_units.push(Source {
         source_unit_revision_id: "independent".into(),
+        document_id: "independent-document".into(),
         ordinal: 1,
         ..source.source_units[0].clone()
     });
@@ -1026,7 +1253,7 @@ async fn stalled_work_is_persisted_and_independent_sources_continue_after_restar
     config.limits.max_no_progress_turns = 2;
     config.limits.max_focus_replans = 1;
     let journal = MemoryJournal::default();
-    *journal.interrupt_after.lock().unwrap() = Some(4);
+    *journal.interrupt_after.lock().unwrap() = Some(5);
     let mut rename = active_work("source");
     rename["note"] = json!("same work, new note and objective");
     rename["objective"] = json!("renamed work");
@@ -1041,6 +1268,7 @@ async fn stalled_work_is_persisted_and_independent_sources_continue_after_restar
             "search_sources",
             json!({"query":"absent","offset":0,"limit":10}),
         ),
+        ("check_gaps", json!({"scope":"work","offset":0,"limit":10})),
     ];
     agent::run(
         &source,
@@ -1061,7 +1289,7 @@ async fn stalled_work_is_persisted_and_independent_sources_continue_after_restar
     );
     let restored = serde_json::from_value(json!(state)).unwrap();
     *journal.state.lock().unwrap() = Some(restored);
-    *journal.interrupt_after.lock().unwrap() = Some(9);
+    *journal.interrupt_after.lock().unwrap() = Some(10);
     let model = work_script(vec![
         ("set_work_note", active_work("source")),
         ("set_work_note", active_work("independent")),
@@ -1136,7 +1364,11 @@ async fn all_blocked_sources_stop_before_reserving_a_pointless_handoff() {
     );
     let state = journal.load().await.unwrap().unwrap();
     assert!(state.turn < config.limits.max_turns);
-    assert_eq!(state.turn, 18);
+    assert_eq!(
+        state.turn,
+        1 + config.limits.max_no_progress_turns * (config.limits.max_focus_replans + 1),
+        "the first actual Main evidence delivery is progress; navigation afterward is not"
+    );
     assert_eq!(model.bodies.lock().unwrap().len(), state.turn);
     assert_eq!(journal.reservations.lock().unwrap().len(), state.turn);
     assert_eq!(state.main_progress.blockers.len(), 1);

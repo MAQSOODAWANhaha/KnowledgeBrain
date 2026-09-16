@@ -205,6 +205,7 @@ fn fixture() -> (FrozenInput, AnalysisResult) {
             analysis_sha256: digest(&a).unwrap(),
             coverage,
             findings: vec![],
+        ..Default::default()
         },
         analysis: a,
         quality: "verified".into(),
@@ -870,6 +871,7 @@ fn refresh_excerpt_basis(input: &FrozenInput, result: &mut AnalysisResult) {
         analysis_sha256: digest(&result.analysis).unwrap(),
         coverage,
         findings: vec![],
+    ..Default::default()
     };
     assert!(
         analysis::tools::gaps(input, &result.analysis).is_empty(),
@@ -2139,6 +2141,7 @@ fn text_marked_as_bidder_input_is_not_copied_as_a_filled_response() {
         analysis_sha256: digest(&result.analysis).unwrap(),
         coverage,
         findings: vec![],
+    ..Default::default()
     };
     let w = ready(&input, &result);
     let compiled = compiler::compile(&input, &result, &w.draft, 1_000_000).unwrap();
@@ -2181,6 +2184,7 @@ fn an_old_empty_review_cannot_authorize_overlapping_template_text() {
         analysis_sha256: digest(&result.analysis).unwrap(),
         coverage,
         findings: vec![],
+    ..Default::default()
     };
     assert!(
         analysis::tools::review_gaps(&input, &result.analysis, &result.review.coverage).is_empty()
@@ -2247,6 +2251,7 @@ fn conditional_template_renders_its_reviewed_condition_and_preserves_field_bindi
             analysis_sha256: digest(&result.analysis).unwrap(),
             coverage,
             findings: vec![],
+        ..Default::default()
         };
         result.quality = result.expected_quality(&input).into();
         let w = ready(&input, &result);
@@ -2354,6 +2359,7 @@ async fn acknowledged_missing_sources_produce_a_reviewed_draft_with_a_separate_o
         analysis_sha256: digest(&result.analysis).unwrap(),
         coverage,
         findings: vec![],
+    ..Default::default()
     };
     result.quality = result.expected_quality(&input).into();
     assert_eq!(result.quality, "needs_review");
@@ -2481,6 +2487,7 @@ fn conditional_template_alternatives_require_explicit_reviewable_disposition() {
         analysis_sha256: digest(&result.analysis).unwrap(),
         coverage,
         findings: vec![],
+    ..Default::default()
     };
     let mut w = ready(&input, &result);
     assert!(compiler::compile(&input, &result, &w.draft, 1_000_000).is_err());
@@ -2747,5 +2754,240 @@ async fn composition_token_limit_protects_both_roles_below_the_byte_limit() {
                 .code,
             "AGENT_TURN_BUDGET_EXCEEDED"
         );
+    }
+}
+
+#[test]
+fn put_composition_review_requires_active_review_and_known_chapter() {
+    let (input, result) = fixture();
+    let mut w = ready(&input, &result);
+    let err = w
+        .invoke(
+            &input,
+            &result,
+            "put_composition_review",
+            &json!({"item_id":"missing","conclusion":"pass","grounds":[]}),
+            tool_limits(100_000, 1_000_000),
+        )
+        .unwrap_err();
+    assert!(err.contains("independent review is not active"), "{err}");
+    w.invoke(
+        &input,
+        &result,
+        "compile_docx",
+        &json!({}),
+        tool_limits(100_000, 1_000_000),
+    )
+    .unwrap();
+    w.invoke(
+        &input,
+        &result,
+        "request_composition_review",
+        &json!({}),
+        tool_limits(100_000, 1_000_000),
+    )
+    .unwrap();
+    let err = w
+        .invoke(
+            &input,
+            &result,
+            "put_composition_review",
+            &json!({"item_id":"missing","conclusion":"pass","grounds":[]}),
+            tool_limits(100_000, 1_000_000),
+        )
+        .unwrap_err();
+    assert!(err.contains("unknown chapter"), "{err}");
+    let id = w.draft.sections.keys().next().unwrap().clone();
+    w.invoke(
+        &input,
+        &result,
+        "put_composition_review",
+        &json!({"item_id":id,"conclusion":"pass","grounds":[{"source_id":"s0","start":0,"end":input.source_units[0].text.len()}]}),
+        tool_limits(100_000, 1_000_000),
+    )
+    .unwrap();
+    assert_eq!(w.plan_reviews[&id].conclusion, tools::PlanReviewConclusion::Pass);
+}
+
+#[test]
+fn plan_complete_requires_every_obligation_or_exception() {
+    let (input, result) = fixture();
+    let mut w = ready(&input, &result);
+    assert!(!plan_complete(&result, &w.draft).unwrap());
+    for r in obligation_inventory(&result) {
+        let key = reference_key(&r).unwrap();
+        w.draft.plan.insert(
+            key.clone(),
+            PlanItem {
+                id: key.clone(),
+                kind: PlanItemKind::Section,
+                parent: None,
+                order: w.draft.plan.len(),
+                title: "义务".into(),
+                placement: Default::default(),
+                prescribed: true,
+                grounds: vec![Span {
+                    source_id: input.source_units[0].source_unit_revision_id.clone(),
+                    start: 0,
+                    end: input.source_units[0].text.len(),
+                    view_id: None,
+                    grid_cell: None,
+                }],
+                obligation_refs: vec![key.clone()],
+                exception: None,
+            },
+        );
+    }
+    assert!(plan_complete(&result, &w.draft).unwrap());
+    assert!(!implementation_complete(&w.draft, None));
+}
+
+#[test]
+fn required_references_include_each_rule_item() {
+    let (_, mut result) = fixture();
+    result.analysis.records.insert(
+        "rule".into(),
+        Record {
+            id: "rule".into(),
+            sources: vec![],
+            data: RecordData::Rule {
+                text: "投标函在前".into(),
+                scope: "本次".into(),
+                applicability: Applicability {
+                    state: ApplicabilityState::Applicable,
+                    condition: "按须知".into(),
+                    scope: "本次".into(),
+                    grounds: vec![],
+                },
+                items: vec![RuleItem {
+                    id: "i1".into(),
+                    kind: RuleItemKind::Composition,
+                    text: "投标函".into(),
+                    grounds: vec![],
+                    condition: String::new(),
+                    targets: vec![],
+                    sequence: vec![],
+                    format_key: None,
+                    format_value: None,
+                }],
+            },
+        },
+    );
+    assert!(compiler::required_references(&result).iter().any(|r| {
+        r.record_id == "rule" && r.target == RelationTarget::RuleItem { item_id: "i1".into() }
+    }));
+}
+
+#[test]
+fn set_composition_work_cannot_pick_the_next_plan_chapter() {
+    let (input, result) = fixture();
+    let mut w = Workspace::new(&input, &result).unwrap();
+    w.draft.plan.insert(
+        "ch1".into(),
+        PlanItem {
+            id: "ch1".into(),
+            kind: PlanItemKind::Section,
+            parent: None,
+            order: 0,
+            title: "第一章".into(),
+            placement: Default::default(),
+            prescribed: true,
+            grounds: vec![Span {
+                source_id: input.source_units[0].source_unit_revision_id.clone(),
+                start: 0,
+                end: input.source_units[0].text.len(),
+                view_id: None,
+                grid_cell: None,
+            }],
+            obligation_refs: vec![],
+            exception: None,
+        },
+    );
+    w.draft.plan.insert(
+        "ch2".into(),
+        PlanItem {
+            id: "ch2".into(),
+            kind: PlanItemKind::Section,
+            parent: None,
+            order: 1,
+            title: "第二章".into(),
+            placement: Default::default(),
+            prescribed: true,
+            grounds: vec![Span {
+                source_id: input.source_units[0].source_unit_revision_id.clone(),
+                start: 0,
+                end: input.source_units[0].text.len(),
+                view_id: None,
+                grid_cell: None,
+            }],
+            obligation_refs: vec![],
+            exception: None,
+        },
+    );
+    let mut state = agent::Checkpoint {
+        journal: Default::default(),
+        contract_sha256: config().contract_sha256().unwrap(),
+        workspace: w,
+        turn: 0,
+        tool_calls: 0,
+        read_bytes: 0,
+        transcript: vec![],
+        main_work: None,
+        review_work: None,
+        main_progress: Default::default(),
+        review_progress: Default::default(),
+    };
+    let err = super::agent_work::set_work(
+        &input,
+        &result,
+        &mut state,
+        &json!({
+            "source_scope":[input.source_units[0].source_unit_revision_id],
+            "section_scope":["ch2"],
+            "action":"compose",
+            "objective":"写第二章",
+            "note":"",
+            "status":"active"
+        }),
+        4096,
+    )
+    .unwrap_err();
+    assert!(err.contains("cannot pick the next item"), "{err}");
+}
+
+#[test]
+fn compiled_docx_file_inventory_is_not_the_bookmark_manifest() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let (input, result) = fixture();
+    let mut w = ready(&input, &result);
+    w.invoke(
+        &input,
+        &result,
+        "compile_docx",
+        &json!({}),
+        tool_limits(100_000, 1_000_000),
+    )
+    .unwrap();
+    let artifact = w.artifact.as_ref().unwrap();
+    let bytes = STANDARD.decode(&artifact.docx_base64).unwrap();
+    let inventory = crate::export_review::inventory_from_docx(&bytes, None).unwrap();
+    assert_eq!(inventory.docx_sha256, artifact.manifest.docx_sha256);
+    assert!(!inventory.units.is_empty());
+    assert!(
+        inventory.units.len() >= artifact.rendered.len(),
+        "file inventory {} vs bookmark renders {}",
+        inventory.units.len(),
+        artifact.rendered.len()
+    );
+    for block in &artifact.rendered {
+        for paragraph in &block.paragraphs {
+            if paragraph.trim().is_empty() {
+                continue;
+            }
+            assert!(
+                inventory.units.iter().any(|unit| unit.text.contains(paragraph)),
+                "rendered {paragraph:?} missing from file inventory"
+            );
+        }
     }
 }

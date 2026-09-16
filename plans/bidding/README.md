@@ -1,8 +1,24 @@
 # 招投标实施导航
 
+## 当前方案与验收入口
+
+唯一有效实施方案为 [Agent 运行时与完整样稿方案](agent-runtime-rig.md)；已合并方案评审修订，按 S0–S6 分阶段推进。保留完整最终目标，按分项能力逐步实施和验收；设计要求、已有实现与真实验收分别记录，新设计不等于已经实现或通过。
+
+api-v4 已完成两轮完整独立复核，但尚未通过。最新进度、缺口与证据只维护在[主方案 §19](agent-runtime-rig.md#19-当前能力真实验收与下一步)，本页不重复运行轮次或临时检查数字。
+
+下列历史证据只说明对应版本与当时状态，不构成另一份现行方案。历史 Agent P0–P4 编号不再用作当前实施阶段；平台 P0/P1/P2 和 ONLYOFFICE O 阶段的既有任务编号不受影响。
+
+## 历史运行与验证记录
+
+2026-09-16 早期历史快照：有界证据预装、Main自动推进和真实PG三边界恢复已验证；同版DOCX/PDF/报告正式导出接线通过隔离HTTP→worker测试（转换器模拟，非真实Office验收）。统一DocReader的DOCX列宽单位错误已修复，20项解析回归及3项真实DOCX冻结回归通过；新source-v4仅6表widths_mm变化，28个来源的文本、单元格、合并和ID保持一致。旧v3因错误冻结输入停止，47次调用及终态保留。api-v4在14:06 UTC观察到turn124/Main、49条候选、396次工具调用，首轮独立复核已完成28个来源判断并提出14项finding，现交回Main修复；这不是语义通过。同一request已自动由attempt1续至2，未手工continue，checkpoint与累计计数保留。379项库回归、API20项、worker38项及严格Clippy通过；解析合计23项（20项解析＋3项真实DOCX）、验收脚本18项及4个子测试通过，见[验证汇总](../../artifacts/minimal-bid-fixture/implementation/current-verification.json)。完整分析准入、编制及同版三件套仍未验收；最新明细以[统一方案](agent-runtime-rig.md)及其验收证据为准。
+
+106页历史终态摘要：106页真实文档的历史终态仍为 turn1604，424条候选、177条关系、104项有效修复说明、2项待处理、3处执行阻塞、0轮完整独立复核，累计3826/4000次调用。尚无验收通过的完整DOCX、同版PDF和报告。
+
+[调用审查](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/call-cost-audit-20260916.md)确认v19有1604个完整Main回合、Reviewer为0，六段运行约3.96小时；1104回合无业务写尝试，674/3475次工具失败。必要读取不能一概算浪费，但主要改进对象是串行导航、范围/参数错误和反复登记。旧终态、消费和配置保持不变；新试验单独冻结合同，不自动重启旧耗尽运行。
+
 2026-09-12 UTC 最新终态：`real-run-v19-repair-scope-resume5` 已于 12:43:50 UTC 结束，运行退出码 1，本段耗时 4427.34 秒；[固定终态](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/resume5-terminal-verification.json)为 turn1604（SHA `5e69cacf…`），424 条候选、177 条关系、104 条保存修复说明，有效处置 104/106、待处理 2，保留 3 处执行阻塞，完整独立复核 0 轮。错误 `AGENT_TURN_BUDGET_EXCEEDED` 指局部执行及独立工作交接额度耗尽；全文累计调用 3826/4000、尚余 174 次，并非总调用帽耗尽或供应商超时。未重启。有效处置不等于独立语义批准；完整 106 页、32 项语义及同版 DOCX/PDF/报告验收仍未完成。正确性与稳定性优先，速度优化后置。
 
-主修复异议闭环：[宿主核查与默认 CI 回归](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/repair-dispute-closed-loop.md)确认生产已有 disputed→独立保留或撤回→完整来源复核及编制准入的闭环；本次仅补测试，覆盖受影响候选详情门槛、主角色不能自批和独立裁定分支。[验证记录](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/repair-dispute-closed-loop-verification.json)为最终断言加强前 217 项 tender_analysis 测试通过、36 项既有忽略，随后加强断言的新专项 1 项通过，严格 Clippy、全仓 fmt 与 diff 整合检查通过。这是合成脚本的宿主协议验证，不是 grok 的真实语义成功。[主方案](agent-runtime-rig.md)已记录“Main 修复任务隔离：turn1604 后续实施边界”，T1–T3 任务账本、Main 派发和既有 Journal 合同已进入代码整合与离线回归，尚未完成整合验收或部署，未授予新尝试；旧 turn1604 终态、检查点、阻塞及累计调用账本保持不变。
+2026-09-12 主修复异议闭环记录：[宿主核查与默认 CI 回归](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/repair-dispute-closed-loop.md)确认生产已有 disputed→独立保留或撤回→完整来源复核及编制准入的闭环；当时仅补测试，覆盖受影响候选详情门槛、主角色不能自批和独立裁定分支。[验证记录](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/repair-dispute-closed-loop-verification.json)为最终断言加强前 217 项 tender_analysis 测试通过、36 项既有忽略，随后加强断言的新专项 1 项通过，严格 Clippy、全仓 fmt 与 diff 整合检查通过。这是合成脚本的宿主协议验证，不是 grok 的真实语义成功。[主方案](agent-runtime-rig.md)已记录“Main 修复任务隔离：turn1604 后续实施边界”，T1–T3 任务账本、Main 派发和既有 Journal 合同已进入代码整合与离线回归，尚未完成整合验收或部署，未授予新尝试；旧 turn1604 终态、检查点、阻塞及累计调用账本保持不变。
 
 编制版式：[行内布局修复](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/inline-template-layout-implementation.md)已完成局部验证：同一冻结来源中连续文本区域保留原始换行和独立字段书签，示例填写值在原位置清除；跨来源、间隔和网格保持边界。固定 turn1571 的[真实候选前后 DOCX 对照](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/inline-layout-before-after.json)确认四个身份字段恢复同行、20 个区域定位均可回读。[整合验证](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/inline-layout-integration-verification.json)为 40 项编制测试通过、1 项既有忽略，严格 Clippy、全仓 fmt 与 diff 检查通过；无新增 migration，未改提取 schema 或配置。该局部诊断不是整单样稿，也不代表原页像素、完整 DOCX/PDF 或 R03/R06 验收通过。
 
@@ -54,7 +70,7 @@
 
 2026-09-12 UTC 前次实测记录：查询依赖与来源任务职责分离已实现，[工程验证](../../artifacts/bid-full-sample/loop-repair/source-task-ownership/verification.json)通过252项库测试（30项忽略）、20项合同、严格Clippy、全局fmt及编译。[局部复核终态](../../artifacts/bid-full-sample/loop-repair/source-task-ownership/fee-corrected-review-resume1/final-observation.json)为第68轮、累计69/80次调用、5轮复核、23记录/10关系，quality=needs_review；7项来源判断已完成，但末段组成要求缺少续页的1项发现仍未解决，生产编制校验正确拒绝。续跑619.19秒，加修复前243.58秒累计862.77秒（不含暂停），性能仍不合格。已观察到无业务写入的主Agent查询后再次复核往返，需验证完整分析摘要包含阅读回执是否干扰重复终止判断。当前无模型进程；旧费用80/80及全文第236轮998/1200保持终态。106页、32项语义与完整同版DOCX/PDF/报告仍待验。下方为历史记录。
 
-2026-09-11 UTC 最新状态：局部导航、历史来源判断取回及固定任务清单复用已通过248项库、严格Clippy及全局fmt。同一检查点离线请求构造中位耗时约556→295毫秒、请求摘要不变；尚无新的模型完成率或全文性能验收。全文兼容接续后已在第236轮因HTTP500/503/503终止，当前没有真实模型进程运行；累计998次调用，原总额度剩202次，但该边界三次尝试已耗尽，未重置。保留33项来源判断及27项发现，另有2处执行阻塞。32项与完整DOCX/PDF/报告仍未完成；费用正文两组亦未完成复核，不能宣称性能可用。以[方案§5.4](agent-runtime-rig.md#54-性能指标和结论)及所链接证据为准，下方为历史运行记录。
+2026-09-11 UTC 最新状态：局部导航、历史来源判断取回及固定任务清单复用已通过248项库、严格Clippy及全局fmt。同一检查点离线请求构造中位耗时约556→295毫秒、请求摘要不变；尚无新的模型完成率或全文性能验收。全文兼容接续后已在第236轮因HTTP500/503/503终止，当前没有真实模型进程运行；累计998次调用，原总额度剩202次，但该边界三次尝试已耗尽，未重置。保留33项来源判断及27项发现，另有2处执行阻塞。32项与完整DOCX/PDF/报告仍未完成；费用正文两组亦未完成复核，不能宣称性能可用。以[方案§14](agent-runtime-rig.md#14-成本可观测性与全文容量)及所链接证据为准，下方为历史运行记录。
 
 2026-09-11 UTC 性能修复真实对照通过：同一七页目录、原7项候选和同.env配置，baseline为33次/239.30秒/10次工具错误，完整原文出处规则的provenance为8次/63.55秒/0次工具错误，两组均verified且生产结构审计通过、候选值不变。该局部对照墙钟减少73.44%，不代表完整106页性能。已合并有界边界证据，并将冻结原文读取/引文与实际候选依赖分开；实际候选查询、记录/映射/关系ID及同页原图排版依赖保留。241项库、严格Clippy和编译通过；同次导航复用清单，离线输出摘要一致。旧全文v3在146轮无在途边界暂停，累计759次；v4已使用原1200额度剩余441次启动，首请求合同与成功对照一致，保留416条记录/8条关系，未导入旧独立回执。32项和同版DOCX/PDF仍未完成。证据：artifacts/bid-full-sample/loop-repair/review-boundary-evidence/provenance-final.json、real-run-v15-review-v4/startup-verification.json。
 
@@ -64,7 +80,7 @@
 
 2026-09-11 UTC 性能对照终态补充：同一第11页原格式27次调用/503.66秒，简短引用21次/410.91秒，墙钟缩短18.42%；新版主提取6次/模型162.54秒，独立复核15次/模型242.04秒。两组均完成一轮复核且生产结构审计通过，但新版quality=needs_review，原格式为verified，候选分类不同，不能宣称等质量提速或性能可用。新版仍有8次工具错误及重复读取/复核提交往返；下一步应缩减有界提取与复核的串行调用，保留独立证据和语义门槛。证据：artifacts/bid-full-sample/loop-repair/compact-evidence-references/final-comparison.json。全文旧合同运行继续，完整32项及DOCX/PDF验收仍未完成；本条取代下文“对照进行中/待终态”的状态。
 
-2026-09-11 UTC 历史进展（以上方状态为准）：简短证据引用已实现并共用于提取/独立复核和编制/稿件复核，领域Span、持久化成果和阅读校验保持原合同语义；232项库、20项合同和严格Clippy通过，离线5轮参数缩减约25%–55%且展开结果逐值等于原参数。相同第11页来源、同.env、同预算的原格式/简短格式顺序对照已启动，真实提速及语义质量尚未证明；当前workspace格式检查仍有其他并行修改的排版差异。全文real-run-v15-resume2仍使用其归档程序及旧合同继续，第196轮接入正文/表格导航修复时保留241条记录、2条关系和196次累计调用；新工具/提示词合同不套回旧检查点。全文独立复核、32项语义、完整同版DOCX/PDF/报告尚未完成，部分模板整段待填可能删除固定文字仍须复核修正。沿用deploy/.env的grok-4.6＋Chat＋low，无模型配置调整或新migration，人工答案不发送。 详见[统一方案](agent-runtime-rig.md#55-本次修复的实施门槛)。
+2026-09-11 UTC 历史进展（以上方状态为准）：简短证据引用已实现并共用于提取/独立复核和编制/稿件复核，领域Span、持久化成果和阅读校验保持原合同语义；232项库、20项合同和严格Clippy通过，离线5轮参数缩减约25%–55%且展开结果逐值等于原参数。相同第11页来源、同.env、同预算的原格式/简短格式顺序对照已启动，真实提速及语义质量尚未证明；当前workspace格式检查仍有其他并行修改的排版差异。全文real-run-v15-resume2仍使用其归档程序及旧合同继续，第196轮接入正文/表格导航修复时保留241条记录、2条关系和196次累计调用；新工具/提示词合同不套回旧检查点。全文独立复核、32项语义、完整同版DOCX/PDF/报告尚未完成，部分模板整段待填可能删除固定文字仍须复核修正。沿用deploy/.env的grok-4.6＋Chat＋low，无模型配置调整或新migration，人工答案不发送。 详见[统一方案](agent-runtime-rig.md#15-实施分步改动落点与依赖)。
 
 招投标有两个职责明确的实施入口，统一进展见[执行台账](../implementation-tasks.md)。编辑、保存与出件按 [ONLYOFFICE 接入计划](onlyoffice-integration.md)：
 
@@ -74,11 +90,11 @@
 4. O3：初稿/AI 定点入稿、报价附件、证据定位与页码；
 5. O4：真实回归后切换、撤旧入口。
 
-提取与 Agent 改造按 [Rig 完整实施方案](agent-runtime-rig.md)的 **Rig P0–P4**：现有驱动的精确查询/有界主复核窗口 → 附表关系与复核修复 → 真实提取验收 → 独立 Journal 升级 → Rig 单协议接入与撤旧。协议只使用 Chat Completions，模型仍由 `deploy/.env` 决定。该编号不替代平台 P0/P1/P2；通过的分析交给既有 O1-S 编制链，O2 负责同稿出件，Embedding 一致性留在知识库独立事项。
+提取、编制和出件按[唯一有效实施方案](agent-runtime-rig.md)的 **S0–S6** 推进；阶段依赖见 §15，实际完成状态见 §19。原 Agent P0–P4 仅保留为历史切片编号。
 
 招标冻结网格按 [DocReader 结构增强](../knowledge-base/docreader-structured-parse.md)（builtin `convert_tender_source`）。知识库 Office 默认仍是 anydoc。Word/Excel（含 `.doc`/`.xls` OLE 与 XLSM）已可冻结为 `read_form` 网格（无 Excel Table 的工作表走 used range；无 `widths_mm` 时编制 fail-closed）。
 
-**普通实施已授权。** ONLYOFFICE/DOCX 主链已有部分实现及隔离验证；提取 P0 与复核 P1 已部分实现，Journal 三边界恢复和 Rig Chat 接缝已验证，共享宿主驱动已接提取/编制，Rig 已接生产 Chat 请求序列化、流解析和 AgentRun 多轮状态，有界会话恢复已通过隔离验收。前序 clean-review 独立复核曾完成72个局部比较，但第64轮因执行/交接额度耗尽停止，32 项语义发现仍开放，完整真实 Agent DOCX/PDF 未验收。旧大纲专用链已按授权删除；生产部署、采购及现有数据操作仍需对应授权。局部或合成验证不能代替完整真实验收。
+**普通实施已授权。** 当前能力和待验项以[主方案 §19](agent-runtime-rig.md#19-当前能力真实验收与下一步)为准；未完成的页码能力、终检或新合同不能借已有隔离验证标成实现完毕。
 
 ## 契约与复用
 

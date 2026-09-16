@@ -109,6 +109,42 @@ async fn real_document_server_publishes_and_reopens_product_versions() {
         );
     }
     let admin = PgPool::connect(&admin_url).await.unwrap();
+    // The real worker requires the actual release/catalog receipt. Never seed a
+    // fake readiness row or let the Office probe bypass runtime admission.
+    let descriptor: platform::ReleaseDescriptorV1 = serde_json::from_str(include_str!(
+        "../../../deploy/release-descriptor-v1.development.json"
+    ))
+    .unwrap();
+    let descriptor_path = root.join("release-descriptor.json");
+    std::fs::write(&descriptor_path, serde_json::to_vec(&descriptor).unwrap()).unwrap();
+    let descriptor_sha = descriptor.sha256().unwrap();
+    let admission = platform::SchemaRuntimeIdentity::from_descriptor(
+        descriptor_path.clone(),
+        descriptor.clone(),
+        &descriptor_sha,
+        "migrator",
+        descriptor
+            .component_digest(platform::SchemaComponentKind::Migrator)
+            .unwrap(),
+        &required("KB_DEPLOYMENT_NAMESPACE_ID"),
+    )
+    .unwrap();
+    platform::apply_fresh_baseline_with_identity(&admin, &admission)
+        .await
+        .unwrap();
+    let fixture = std::fs::read_to_string(root.join("document_collection_acceptance.sql")).unwrap();
+    let fixture = fixture
+        .lines()
+        .filter(|line| !line.starts_with("\\set "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(fixture.matches("\nROLLBACK;").count(), 1);
+    sqlx::raw_sql(sqlx::AssertSqlSafe(
+        fixture.replace("\nROLLBACK;", "\nCOMMIT;"),
+    ))
+    .execute(&admin)
+    .await
+    .unwrap();
     let runtime = platform::connect().await.unwrap();
     let role: String = sqlx::query_scalar("SELECT current_user")
         .fetch_one(&runtime)
@@ -150,12 +186,73 @@ async fn real_document_server_publishes_and_reopens_product_versions() {
     )
     .unwrap();
     drop(file);
+    let mut worker = if let Ok(binary) = std::env::var("KB_DOCX_NATIVE_WORKER_BIN") {
+        let options: sqlx::postgres::PgConnectOptions =
+            required("KB_DOCX_NATIVE_WORKER_URL").parse().unwrap();
+        assert_eq!(options.get_host(), "127.0.0.1");
+        assert_eq!(options.get_username(), "kb_runtime_worker");
+        assert_eq!(
+            options.get_database(),
+            admin_url
+                .parse::<sqlx::postgres::PgConnectOptions>()
+                .unwrap()
+                .get_database()
+        );
+        let log = std::fs::File::create(root.join("worker.log")).unwrap();
+        let environment = [
+            "REDIS_URL",
+            "KB_DEPLOYMENT_NAMESPACE_ID",
+            "KB_ONLYOFFICE_SERVER_ORIGIN",
+            "KB_ONLYOFFICE_COMMAND_ORIGIN",
+            "KB_ONLYOFFICE_API_ORIGIN",
+            "KB_ONLYOFFICE_JWT_SECRET",
+            "KB_ONLYOFFICE_CAPABILITY_SECRET",
+            "KB_ONLYOFFICE_TOKEN_TTL_SECONDS",
+            "KB_ONLYOFFICE_HTTP_TIMEOUT_SECONDS",
+        ]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok().map(|value| (key, value)));
+        Some(
+            tokio::process::Command::new(binary)
+                .env_clear()
+                .envs(environment)
+                .current_dir(&root)
+                .kill_on_drop(true)
+                .env("DATABASE_URL", required("KB_DOCX_NATIVE_WORKER_URL"))
+                .env("OBJECT_DIR", &objects)
+                .env("KB_RELEASE_DESCRIPTOR_PATH", &descriptor_path)
+                .env("KB_RELEASE_DESCRIPTOR_SHA256", &descriptor_sha)
+                .env("KB_COMPONENT_KIND", "worker")
+                .env(
+                    "KB_COMPONENT_IMAGE_DIGEST",
+                    descriptor
+                        .component_digest(platform::SchemaComponentKind::Worker)
+                        .unwrap(),
+                )
+                .env("KNOWLEDGEBRAIN_WORKER_PROBE_ADDR", "127.0.0.1:0")
+                // This isolated Office probe never uses a model. A mistaken model
+                // operation must fail locally, never inherit provider credentials.
+                .env("KNOWLEDGEBRAIN_CHAT_BASE_URL", "http://127.0.0.1:1/v1")
+                .env("KNOWLEDGEBRAIN_CHAT_API_KEY", "isolated-office-no-model")
+                .env("KNOWLEDGEBRAIN_CHAT_MODEL", "isolated-office-no-model")
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .unwrap(),
+        )
+    } else {
+        None
+    };
     let status = tokio::process::Command::new(required("KB_DOCX_NATIVE_PYTHON"))
         .arg(required("KB_DOCX_NATIVE_DRIVER"))
         .arg("drive")
         .arg(&root)
         .status()
         .await;
+    if let Some(child) = &mut worker {
+        child.start_kill().unwrap();
+        child.wait().await.unwrap();
+    }
     server.abort();
     let _ = server.await;
     std::fs::remove_file(ticket).unwrap();

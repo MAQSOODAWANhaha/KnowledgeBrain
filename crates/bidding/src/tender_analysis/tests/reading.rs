@@ -1150,7 +1150,19 @@ async fn candidate_receipt_is_not_reported_received_before_model_delivery() {
     struct DetailThenIndex(String);
     #[async_trait]
     impl Model for DetailThenIndex {
-        async fn turn(&self, _: &Config, _: &[u8]) -> Result<ChatTurn, AgentError> {
+        async fn turn(&self, _: &Config, body: &[u8]) -> Result<ChatTurn, AgentError> {
+            let body: Value = serde_json::from_slice(body).unwrap();
+            for message in body["messages"].as_array().unwrap() {
+                if let Some(raw) = message["content"].as_str()
+                    && let Ok(packet) = serde_json::from_str::<Value>(raw)
+                    && let Some(preloaded) = packet.get("preloaded_evidence")
+                {
+                    assert!(
+                        !preloaded.to_string().contains(&self.0),
+                        "the actual request must not preload this negative-case candidate"
+                    );
+                }
+            }
             Ok(ChatTurn {
                 usage: None,
                 content: String::new(),
@@ -1168,7 +1180,13 @@ async fn candidate_receipt_is_not_reported_received_before_model_delivery() {
             })
         }
     }
-    let (input, analysis, ids) = analysis_query_fixture();
+    let (input, mut analysis, ids) = analysis_query_fixture();
+    // Read an actual independent source's candidate that is not an endpoint
+    // of the assigned source. The preloaded package may confirm other IDs.
+    analysis.relations.clear();
+    let target = &ids[1];
+    let reference = format!("record:{target}");
+    let version = digest(&analysis.records[target]).unwrap();
     for role in [Role::Main, Role::Reviewer] {
         let journal = MemoryJournal::default();
         *journal.interrupt_after.lock().unwrap() = Some(1);
@@ -1188,6 +1206,13 @@ async fn candidate_receipt_is_not_reported_received_before_model_delivery() {
             state.source_review = Some(source_review::initialize(&input, &config()).unwrap());
             source_review::select_next(&input, &config(), &mut state).unwrap();
             state.reviewer_work = Some(serde_json::from_value(active_work("source")).unwrap());
+            let projected = source_review::evidence(&input, &config(), &state)
+                .unwrap()
+                .unwrap();
+            assert!(
+                !projected.coverage.candidate.contains_key(&reference),
+                "the negative case must target evidence absent from the actual assigned package"
+            );
         }
         *journal.state.lock().unwrap() = Some(state);
         *journal.interrupt_after.lock().unwrap() = Some(2);
@@ -1195,22 +1220,30 @@ async fn candidate_receipt_is_not_reported_received_before_model_delivery() {
             &input,
             &config(),
             &journal,
-            &DetailThenIndex(ids[0].clone()),
+            &DetailThenIndex(target.clone()),
             &CancellationToken::new(),
         )
         .await
         .unwrap_err();
         let saved = journal.load().await.unwrap().unwrap();
         assert!(
-            if role == Role::Main {
+            !if role == Role::Main {
                 &saved.analysis.coverage
             } else {
                 &saved.reviewer_coverage
             }
             .candidate
-            .is_empty()
+            .contains_key(&reference)
         );
-        assert_eq!(saved.pending_coverage.as_ref().unwrap().candidate.len(), 1);
+        assert_eq!(
+            saved
+                .pending_coverage
+                .as_ref()
+                .unwrap()
+                .candidate
+                .get(&reference),
+            Some(&version)
+        );
         let index: Value = serde_json::from_str(
             saved.transcript.last().unwrap()["content"]
                 .as_str()
@@ -1227,7 +1260,7 @@ async fn candidate_receipt_is_not_reported_received_before_model_delivery() {
             &journal,
             &work_script(vec![(
                 "inspect_analysis",
-                json!({"kind":"all","ids":[ids[0]],"view":"index","offset":0,"limit":1}),
+                json!({"kind":"all","ids":[target],"view":"index","offset":0,"limit":1}),
             )]),
             &CancellationToken::new(),
         )
@@ -1241,8 +1274,8 @@ async fn candidate_receipt_is_not_reported_received_before_model_delivery() {
                 &received.reviewer_coverage
             }
             .candidate
-            .len(),
-            1
+            .get(&reference),
+            Some(&version)
         );
         let index: Value = serde_json::from_str(
             received.transcript.last().unwrap()["content"]
@@ -1478,7 +1511,11 @@ async fn a_same_turn_read_cannot_authorize_a_write_before_the_model_sees_it() {
                     ChatToolCall {
                         id: "work".into(),
                         name: "set_work_note".into(),
-                        arguments: active_work("source").to_string(),
+                        arguments: {
+                            let mut work = active_work("initial-source");
+                            work["source_scope"] = json!(["initial-source", "source"]);
+                            work.to_string()
+                        },
                     },
                     ChatToolCall {
                         id: "read".into(),
@@ -1498,7 +1535,7 @@ async fn a_same_turn_read_cannot_authorize_a_write_before_the_model_sees_it() {
     let journal = MemoryJournal::default();
     *journal.interrupt_after.lock().unwrap() = Some(1);
     agent::run(
-        &input(),
+        &super::resume::with_unseen_target(input()),
         &config(),
         &journal,
         &ReadThenWrite,
@@ -1511,7 +1548,8 @@ async fn a_same_turn_read_cannot_authorize_a_write_before_the_model_sees_it() {
         saved.analysis.records.is_empty(),
         "unseen read results cannot ground a record"
     );
-    assert!(saved.analysis.coverage.text.is_empty());
+    assert!(!saved.analysis.coverage.text.contains_key("source"));
+    assert!(saved.analysis.coverage.text.contains_key("initial-source"));
     let result: Value = serde_json::from_str(
         saved.transcript.last().unwrap()["content"]
             .as_str()
@@ -1649,37 +1687,48 @@ async fn known_evidence_writes_can_complete_in_one_batch_but_failed_or_unseen_wr
         let mut source = input();
         source.source_units[0].text = "项目名称为测试项目。".into();
         let journal = MemoryJournal::default();
-        let mut setup = vec![("set_work_note", active_work("source"))];
+        let mut setup = vec![];
         if delivered {
+            setup.push(("set_work_note", active_work("source")));
             setup.push((
                 "read_source",
                 json!({"source_id":"source","start":0,"max_bytes":1024}),
             ));
         }
+        if !delivered {
+            source = super::resume::with_unseen_target(source);
+        }
         let setup_turns = setup.len();
         *journal.interrupt_after.lock().unwrap() = Some(setup_turns);
-        agent::run(
-            &source,
-            &config(),
-            &journal,
-            &work_script(setup),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
+        if delivered {
+            agent::run(
+                &source,
+                &config(),
+                &journal,
+                &work_script(setup),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        }
         let mut complete = active_work("source");
         complete["status"] = json!("complete");
         let mut calls = vec![];
         if !delivered {
+            let mut expanded = active_work("initial-source");
+            expanded["source_scope"] = json!(["initial-source", "source"]);
+            complete["source_scope"] = expanded["source_scope"].clone();
+            calls.push(("set_work_note", expanded));
             calls.push((
                 "read_source",
                 json!({"source_id":"source","start":0,"max_bytes":1024}),
             ));
         }
         let start = if valid_write { 0 } else { 1 };
-        let end = source.source_units[0].text.len();
+        let index = usize::from(!delivered);
+        let end = source.source_units[index].text.len();
         let citation = if compact {
-            json!({"ref":format!("t:0:{start}:{end}")})
+            json!({"ref":format!("t:{index}:{start}:{end}")})
         } else {
             json!({"source_id":"source","start":start,"end":end})
         };
@@ -1713,7 +1762,7 @@ async fn known_evidence_writes_can_complete_in_one_batch_but_failed_or_unseen_wr
             "local completion never authorizes the whole analysis"
         );
         if !delivered {
-            assert!(saved.analysis.coverage.text.is_empty());
+            assert!(!saved.analysis.coverage.text.contains_key("source"));
             assert!(
                 saved
                     .pending_coverage
@@ -1735,7 +1784,11 @@ async fn tool_batch_overflow_returns_feedback_and_only_retains_fitting_read_rece
             let mut calls = vec![ChatToolCall {
                 id: "work".into(),
                 name: "set_work_note".into(),
-                arguments: active_work("source").to_string(),
+                arguments: {
+                    let mut work = active_work("initial-source");
+                    work["source_scope"] = json!(["initial-source", "source"]);
+                    work.to_string()
+                },
             }];
             for i in 0..6 {
                 calls.push(ChatToolCall {
@@ -1756,10 +1809,59 @@ async fn tool_batch_overflow_returns_feedback_and_only_retains_fitting_read_rece
     for token_limited in [false, true] {
         let mut input = input();
         input.source_units[0].text = "x".repeat(72000);
+        input = super::resume::with_unseen_target(input);
         let mut config = config();
-        config.limits.max_context_bytes = if token_limited { 200000 } else { 80000 };
+        // Measure the current prompt/schema/navigation envelope without a
+        // model call. Schema descriptions must not consume a fixed test-only
+        // 80 KB ceiling and turn every otherwise valid read into a rejection.
+        config.limits.max_context_bytes = config.limits.max_context_tokens;
+        let probe = MemoryJournal::default();
+        *probe.fail_boundary_ack.lock().unwrap() = Some(1);
+        let unused_model = work_script(vec![]);
+        let error = agent::run(
+            &input,
+            &config,
+            &probe,
+            &unused_model,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "INTERNAL");
+        assert!(unused_model.bodies.lock().unwrap().is_empty());
+        let envelope = probe.reservations.lock().unwrap()[&0].0.clone();
+        let sample = tools::invoke(
+            &input,
+            &mut Analysis::default(),
+            &mut Coverage::default(),
+            true,
+            "read_source",
+            &json!({"source_id":"source","start":0,"max_bytes":12000}),
+            config.limits.max_tool_result_bytes,
+        )
+        .unwrap();
+        let read_bytes = serde_json::to_vec(&json!({"role":"tool","tool_call_id":"read-0",
+            "content":json!({"ok":true,"result":sample}).to_string()}))
+        .unwrap()
+        .len();
+        // Allow roughly half of the six real read results, leaving room for
+        // batch bookkeeping but forcing the remaining reads to report limits.
+        let read_allowance = 3 * read_bytes;
+        config.limits.max_context_bytes = envelope.len()
+            + if token_limited {
+                6 * read_bytes
+            } else {
+                read_allowance
+            };
         if token_limited {
-            config.limits.max_context_tokens = 100000;
+            config.limits.max_context_tokens = crate::agent_runtime::chat::estimate_input_tokens(
+                &serde_json::from_slice(&envelope).unwrap(),
+                config.limits.image_token_reserve,
+                config.limits.token_safety_margin,
+            )
+            .unwrap()
+                + config.provider.max_tokens as usize
+                + read_allowance;
         }
         let journal = MemoryJournal::default();
         *journal.interrupt_after.lock().unwrap() = Some(1);
@@ -1777,7 +1879,7 @@ async fn tool_batch_overflow_returns_feedback_and_only_retains_fitting_read_rece
             "a read overflow should save feedback, not strand the whole batch"
         );
         let saved = journal.load().await.unwrap().unwrap();
-        assert!(saved.analysis.coverage.text.is_empty());
+        assert!(!saved.analysis.coverage.text.contains_key("source"));
         let mut successes = 0;
         let mut rejected = 0;
         let mut delivered_ranges = Vec::new();
@@ -1797,7 +1899,7 @@ async fn tool_batch_overflow_returns_feedback_and_only_retains_fitting_read_rece
                 let end = output["result"]["end"].as_u64().unwrap() as usize;
                 assert_eq!(
                     output["result"]["text"],
-                    input.source_units[0].text[start..end]
+                    input.source_units[1].text[start..end]
                 );
                 delivered_ranges.push((start, end));
             } else {
@@ -1822,6 +1924,16 @@ async fn tool_batch_overflow_returns_feedback_and_only_retains_fitting_read_rece
         let mut state = saved.clone();
         let body = agent::request(&input, &config, &mut state).await.unwrap();
         assert!(body.len() <= config.limits.max_context_bytes);
+        assert!(
+            crate::agent_runtime::chat::estimate_input_tokens(
+                &serde_json::from_slice(&body).unwrap(),
+                config.limits.image_token_reserve,
+                config.limits.token_safety_margin
+            )
+            .unwrap()
+                + config.provider.max_tokens as usize
+                <= config.limits.max_context_tokens
+        );
         assert_eq!(
             digest(&saved.pending_coverage).unwrap(),
             digest(&state.pending_coverage).unwrap()

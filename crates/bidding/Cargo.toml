@@ -26,6 +26,7 @@ hex.workspace = true
 futures = "0.3"
 eventsource-stream = "0.2.3"
 jsonschema = { version = "0.18.3", default-features = false, features = ["draft202012"] }
+jsonwebtoken.workspace = true
 knowledge = { path = "../knowledge" }
 lopdf = "0.44"
 oxana.workspace = true

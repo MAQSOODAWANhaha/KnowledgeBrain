@@ -1,6 +1,9 @@
 use super::*;
 use crate::agent_runtime::{Driver, Status, drive};
 pub(super) mod context;
+pub(super) mod evidence_delivery;
+mod main_handoff;
+pub(super) mod main_work;
 pub mod repair;
 pub(super) mod repair_recovery;
 pub(super) mod repair_task_host;
@@ -476,6 +479,9 @@ pub async fn run<J: Journal, M: Model>(
         source_views: state.source_views,
     };
     result.quality = result.expected_quality(input).into();
+    if crate::tender_analysis::rule_contract::complete(input, &result.analysis, &result.review) {
+        result.schema_version = 2;
+    }
     Ok(result)
 }
 
@@ -501,6 +507,7 @@ pub(super) async fn execute_turn<J: Journal>(
         ));
     }
     let actual_input_tokens = response.usage.as_ref().and_then(|u| u.prompt_tokens);
+    evidence_delivery::confirm(input, config, state, &body)?;
     tracing::info!(event="analysis_token_usage",turn=state.turn,role=?state.role,
         estimated_input_tokens, actual_input_tokens,
         actual_output_tokens=response.usage.as_ref().and_then(|u|u.completion_tokens),
@@ -532,6 +539,8 @@ pub(super) async fn execute_turn<J: Journal>(
     let mut tool_results = Vec::new();
     let mut local_completion = None;
     let mut batch_failed = false;
+    let mut main_completion = None;
+    let mut disposition_submitted = false;
     fit_batch(input, config, state, &response.tool_calls, &pending_views).await?;
     for (call_index, call) in response.tool_calls.iter().enumerate() {
         let tool_started = Instant::now();
@@ -704,6 +713,12 @@ pub(super) async fn execute_turn<J: Journal>(
             }
         }
         batch_failed |= !succeeded;
+        if succeeded && call.name == "set_disposition" && role == Role::Main {
+            disposition_submitted = true;
+        }
+        if succeeded && call.name == "set_work_note" && role == Role::Main {
+            main_completion = main_handoff::completion(input, state).map_err(invalid)?;
+        }
         if succeeded
             && let Some(completion) =
                 context::focused_completion(state, &call.name, &out["result"]).map_err(invalid)?
@@ -749,6 +764,17 @@ pub(super) async fn execute_turn<J: Journal>(
             state.turn + 1,
             state.main_progress.watch.clone(),
             &config.limits,
+        )
+        .map_err(invalid)?;
+    }
+    if role == Role::Main {
+        main_handoff::finish(
+            input,
+            config,
+            state,
+            main_completion.as_deref(),
+            batch_failed,
+            disposition_submitted,
         )
         .map_err(invalid)?;
     }
@@ -809,10 +835,19 @@ fn record_completed_review(
         .ok_or("source review state missing")?;
     source_review.completed_analysis_sha256 = Some(sha.clone());
     source_review.active_task = None;
+    let global_checks: Vec<_> = state
+        .analysis
+        .review_global_checks
+        .values()
+        .cloned()
+        .collect();
+    let contract_sha256 = crate::tender_analysis::rule_contract::contract_sha256().unwrap_or_default();
     state.review = Some(Review {
         analysis_sha256: sha,
         coverage: state.reviewer_coverage.clone(),
         findings,
+        contract_sha256,
+        global_checks,
     });
     // Retain findings and source receipts through repairs. The reviewer must
     // explicitly revise/withdraw them against the repaired candidate versions.
@@ -1056,6 +1091,7 @@ pub(super) async fn prepare_request(
         }
     }
     let mut excluded_recall = std::collections::BTreeSet::new();
+    let mut omit_preloaded_evidence = false;
     loop {
         let reviewer = state.role == Role::Reviewer;
         let review_packet = if reviewer {
@@ -1074,6 +1110,14 @@ pub(super) async fn prepare_request(
             .transcript
             .iter()
             .rposition(|m| m["role"] == "assistant")
+            .map(|index| {
+                if index > 0 && evidence_delivery::is_retained_message(&state.transcript[index - 1])
+                {
+                    index - 1
+                } else {
+                    index
+                }
+            })
             .unwrap_or(0);
         let mut history_end = messages.len();
         let mut visible_views = std::collections::BTreeSet::new();
@@ -1157,11 +1201,18 @@ pub(super) async fn prepare_request(
         if !recalled.is_null() {
             messages.push(recalled.clone());
         }
+        let preloaded_evidence = if omit_preloaded_evidence {
+            None
+        } else {
+            evidence_delivery::select(input, config, state)?.map(|evidence| evidence.content)
+        };
+        let has_preloaded_evidence = preloaded_evidence.is_some();
         messages.push(json!({"role":"user","content":json!({
             "progress":state.progress(input),"work":context::request_work(state).map_err(invalid)?,
             "execution":context::execution_packet(state,config.limits.max_tool_result_bytes).map_err(invalid)?,
             "work_state":context::request_work_state(input,state,config.limits.max_tool_result_bytes).map_err(invalid)?,
             "source_review":review_packet,
+            "preloaded_evidence":preloaded_evidence,
             "review_findings":if reviewer {Value::Null}else{repair_feedback_packet(state, &messages, &config.limits).map_err(invalid)?}
         }).to_string()}));
         let bytes = crate::agent_runtime::chat::prepare(
@@ -1216,6 +1267,10 @@ pub(super) async fn prepare_request(
             // Optional recall uses remaining space. Preserve focused candidates
             // and fresh results; try the full cache again on the next request.
             continue;
+        } else if has_preloaded_evidence {
+            // Keep the current protocol group intact. An optional evidence
+            // preload that cannot fit grants no receipt; explicit tools remain.
+            omit_preloaded_evidence = true;
         } else if context::evict_delivered_group(state, config.limits.max_history_bytes, true) {
             continue;
         } else if defer_images
@@ -1492,6 +1547,62 @@ pub(super) fn apply_in_batch(
     Ok(result)
 }
 
+fn put_analysis_check(
+    input: &FrozenInput,
+    state: &mut Checkpoint,
+    args: &Value,
+) -> Result<Value, String> {
+    let key = args["key"].as_str().ok_or("global check key required")?.to_owned();
+    if !ANALYSIS_GLOBAL_CHECK_KEYS.contains(&key.as_str()) {
+        return Err(format!("unknown global check {key}"));
+    }
+    let conclusion: GlobalCheckConclusion =
+        serde_json::from_value(args["conclusion"].clone()).map_err(|e| e.to_string())?;
+    let grounds: Vec<Span> = serde_json::from_value(args["grounds"].clone())
+        .map_err(|e| e.to_string())?;
+    let record_ids: Vec<String> = args
+        .get("record_ids")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    let finding_ids: Vec<String> = args
+        .get("finding_ids")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    let check = GlobalCheck {
+        key: key.clone(),
+        scope_sha256: crate::tender_analysis::rule_contract::scope_sha256(input, &state.analysis)?,
+        conclusion,
+        grounds,
+        record_ids,
+        finding_ids,
+    };
+    crate::tender_analysis::rule_contract::validate_inventory(
+        input,
+        &state.analysis,
+        std::slice::from_ref(&check),
+        &state.review_draft.values().cloned().collect::<Vec<_>>(),
+    )
+    .or_else(|error| {
+        if error == "global checks incomplete" {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    })?;
+    if state.role == Role::Reviewer {
+        state.analysis.review_global_checks.insert(key.clone(), check);
+    } else {
+        state.analysis.main_global_checks.insert(key.clone(), check);
+    }
+    Ok(json!({"saved":true,"key":key}))
+}
+
 fn apply_inner(
     input: &FrozenInput,
     config: &Config,
@@ -1653,48 +1764,12 @@ fn apply_inner(
             repair::put(input, config, state, args)
         }
         "request_review" if !reviewer => {
-            if !state.main_progress.blockers.is_empty()
-                || !state.reviewer_progress.blockers.is_empty()
-            {
-                return Err(
-                    "execution blockers remain; they cannot be published as source uncertainty"
-                        .into(),
-                );
-            }
             if args.as_object().is_none_or(|o| !o.is_empty()) {
                 return Err("review request takes no arguments".into());
             }
-            if state
-                .work()
-                .is_some_and(|work| !work.deferred_sources.is_empty())
-            {
-                return Err("resume deferred_sources before requesting independent review".into());
-            }
-            let gaps = tools::gaps(input, &state.analysis);
-            if !gaps.is_empty() {
-                return Err(format!(
-                    "{} structural/reading gaps remain; use check_gaps",
-                    gaps.len()
-                ));
-            }
-            let feedback = repair_feedback_packet(state, &[], &config.limits)?;
-            if feedback["unread"] != 0 {
-                return Err(format!("repair feedback has unread findings: {feedback}"));
-            }
-            let repairs = repair::packet(state, &config.limits)?;
-            if repairs["pending"] != 0 {
-                return Err(format!("repair dispositions remain: {repairs}"));
-            }
-            state.role = Role::Reviewer;
-            // Frozen sources are unchanged. Keep this reviewer's own receipts;
-            // candidate digest checks invalidate precisely the edited versions.
-            state.reviewer_work = None;
-            if state.source_review.is_none() {
-                state.source_review = Some(source_review::initialize(input, config)?);
-            }
-            source_review::select_next(input, config, state)?;
-            Ok(json!({"reviewing":digest(&state.analysis)?}))
+            main_handoff::enter(input, config, state)
         }
+        "put_analysis_check" => put_analysis_check(input, state, args),
         _ => {
             let mut coverage = if reviewer {
                 state.reviewer_coverage.clone()

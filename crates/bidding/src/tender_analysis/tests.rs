@@ -11,8 +11,11 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 mod context;
+mod evidence_delivery_resume;
 mod id_navigation;
 mod input;
+mod main_handoff;
+mod main_work;
 mod original_views;
 mod reading;
 mod records;
@@ -506,7 +509,13 @@ fn script() -> Script {
         ),
         ("request_review", json!({})),
         ("set_work_note", active_work("source")),
-        ("put_source_review", json!({})),
+        // Preloaded original evidence may legitimately support an immediate
+        // judgment. This scripted reviewer first investigates the known
+        // omission instead of submitting a deliberately false clean result.
+        (
+            "check_gaps",
+            json!({"scope":"analysis","offset":0,"limit":10}),
+        ),
         read.clone(),
         (
             "inspect_analysis",
@@ -536,7 +545,13 @@ fn script() -> Script {
         ("request_review", json!({})),
         ("set_work_note", active_work("source")),
         read,
-        ("put_source_review", json!({})),
+        // Preloaded original evidence may legitimately support an immediate
+        // judgment. This scripted reviewer first investigates the known
+        // omission instead of submitting a deliberately false clean result.
+        (
+            "check_gaps",
+            json!({"scope":"analysis","offset":0,"limit":10}),
+        ),
         (
             "inspect_analysis",
             json!({"view":"detail","kind":"disposition","offset":0,"limit":10}),

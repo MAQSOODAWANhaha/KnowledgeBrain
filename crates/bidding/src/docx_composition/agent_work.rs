@@ -31,6 +31,31 @@ pub struct Work {
     pub status: Status,
 }
 
+fn host_assigned_section(state: &Checkpoint) -> Option<&str> {
+    let mut items: Vec<_> = state
+        .workspace
+        .draft
+        .plan
+        .values()
+        .filter(|item| item.kind == PlanItemKind::Section)
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    items.sort_by_key(|item| item.order);
+    if state.workspace.reviewing {
+        items
+            .into_iter()
+            .find(|item| !state.workspace.plan_reviews.contains_key(&item.id))
+            .map(|item| item.id.as_str())
+    } else {
+        items
+            .into_iter()
+            .find(|item| !state.workspace.draft.sections.contains_key(&item.id))
+            .map(|item| item.id.as_str())
+    }
+}
+
 pub(super) fn scope_sections<'a>(state: &'a Checkpoint, scope: &[String]) -> Vec<&'a Section> {
     state
         .workspace
@@ -70,7 +95,21 @@ pub(super) fn set_work(
             return Err("unknown composition source scope".into());
         }
     }
+    if let Some(assigned) = host_assigned_section(state)
+        && work.section_scope.iter().any(|id| id != assigned)
+    {
+        return Err(
+            "host assigns the current chapter; set_composition_work cannot pick the next item"
+                .into(),
+        );
+    }
     for id in &work.section_scope {
+        if !state.workspace.draft.plan.is_empty()
+            && state.workspace.draft.plan.contains_key(id)
+            && !state.workspace.draft.sections.contains_key(id)
+        {
+            continue;
+        }
         let section = state
             .workspace
             .draft

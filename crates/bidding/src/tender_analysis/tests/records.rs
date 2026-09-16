@@ -1,6 +1,50 @@
 use super::*;
 
 #[test]
+fn string_encoded_record_is_rejected_without_echoing_or_decoding_its_contents() {
+    let input = input();
+    let mut analysis = Analysis::default();
+    let mut coverage = Coverage::default();
+    coverage.text.insert("source".into(), vec![(0, span().end)]);
+    let original = requirement();
+    let mut args = original.clone();
+    args["data"] = json!(original["data"].to_string().repeat(256));
+    let before = digest(&analysis).unwrap();
+    let coverage_before = digest(&coverage).unwrap();
+    let error = tools::invoke(
+        &input,
+        &mut analysis,
+        &mut coverage,
+        false,
+        "put_record",
+        &args,
+        8192,
+    )
+    .unwrap_err();
+    assert!(error.starts_with("INVALID_FIELD /data:"), "{error}");
+    assert!(error.contains("object directly"), "{error}");
+    assert!(
+        error.len() < 200,
+        "bad payload must not be echoed into context"
+    );
+    assert_eq!(digest(&analysis).unwrap(), before);
+    assert_eq!(digest(&coverage).unwrap(), coverage_before);
+    // Correcting the shape still runs all original semantic/evidence guards.
+    assert!(
+        tools::invoke(
+            &input,
+            &mut analysis,
+            &mut coverage,
+            false,
+            "put_record",
+            &original,
+            8192,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn grid_grounded_obligations_publish_without_fabricating_text_quotes() {
     let input = grid_citation_input();
     let mut analysis = Analysis::default();
@@ -53,6 +97,7 @@ fn grid_grounded_obligations_publish_without_fabricating_text_quotes() {
             analysis_sha256: digest(&analysis).unwrap(),
             coverage: Coverage::default(),
             findings: vec![],
+        ..Default::default()
         },
         analysis,
         quality: "needs_review".into(),
@@ -413,6 +458,7 @@ fn same_compliance_policy_preserves_distinct_conditions_and_ground_ranges() {
             analysis_sha256: digest(&analysis).unwrap(),
             coverage: Coverage::default(),
             findings: vec![],
+        ..Default::default()
         },
         analysis,
         quality: "needs_review".into(),
@@ -437,7 +483,9 @@ fn record_validation_identifies_the_rejected_field_without_partial_writes() {
         ("/data/text", json!(" ")),
         ("/data/categories", json!([])),
         ("/data/response", json!([])),
-        ("/data/response/0/condition", json!("")),
+        ("/data/response/0/condition", json!(" ")),
+        ("/data/response/0/description", json!("")),
+        ("/data/response/0/grounds", json!([])),
         (
             "/data/response/0/grounds/0",
             json!({"source_id":"source","start":1,"end":2}),
@@ -509,6 +557,142 @@ fn record_validation_identifies_the_rejected_field_without_partial_writes() {
         1,
         "an unspecified numeric unit stays empty"
     );
+}
+
+#[test]
+fn response_without_an_extra_trigger_preserves_parent_conditions_and_required_evidence() {
+    let mut input = input();
+    input.source_units[0].text =
+        "提供A类设备时提交证明文件；若采用替代产品，还须附型号对照表。".into();
+    let citation = Span {
+        end: input.source_units[0].text.len(),
+        ..span()
+    };
+    let mut analysis = read_analysis(&input);
+    let mut coverage = analysis.coverage.clone();
+    let args = json!({"id":null,"sources":[citation],"data":{
+        "kind":"requirement","text":input.source_units[0].text,
+        "categories":["technical"],"strength":"mandatory",
+        "applicability":{"state":"conditional","condition":"提供A类设备时","scope":"A类设备","grounds":[citation]},
+        "compliance":[{"policy":"explicit_response","condition":"提供A类设备时","grounds":[citation]}],
+        "response":[
+            {"channel":"evidence_attachment","description":"提交证明文件","condition":"","grounds":[citation]},
+            {"channel":"structured_form","description":"附型号对照表","condition":"若采用替代产品","grounds":[citation]}
+        ],
+        "proofs":[],"criteria":[],"scoring_rule":null
+    }});
+    let schemas = tools::schemas(false);
+    let writer = schemas
+        .iter()
+        .find(|tool| tool["function"]["name"] == "put_record")
+        .unwrap();
+    let schema = jsonschema::JSONSchema::compile(&writer["function"]["parameters"]).unwrap();
+    assert!(
+        schema.is_valid(&args),
+        "empty additional condition with a grounded parent must satisfy the real tool schema"
+    );
+    // Some compatible Chat gateways corrupt nested object output when given
+    // nonblank regex constraints. Advertise minLength plus a description;
+    // whitespace semantics remain a strict host check, never a fallback value.
+    let mut whitespace = args.clone();
+    whitespace["data"]["applicability"]["condition"] = json!(" \t\n");
+    assert!(schema.is_valid(&whitespace));
+    let before = (digest(&analysis).unwrap(), digest(&coverage).unwrap());
+    let error = tools::invoke(
+        &input,
+        &mut analysis,
+        &mut coverage,
+        false,
+        "put_record",
+        &whitespace,
+        16000,
+    )
+    .unwrap_err();
+    assert!(
+        error.starts_with("INVALID_FIELD /data/applicability/condition:"),
+        "{error}"
+    );
+    assert_eq!(
+        before,
+        (digest(&analysis).unwrap(), digest(&coverage).unwrap())
+    );
+    for (path, replacement) in [
+        ("/data/response/0/condition", json!(" ")),
+        ("/data/response/0/condition", json!("\t\n")),
+        ("/data/response/0/description", json!("")),
+        ("/data/response/0/grounds", json!([])),
+        ("/data/applicability/condition", json!("")),
+        ("/data/compliance/0/condition", json!("")),
+    ] {
+        let mut invalid = args.clone();
+        *invalid.pointer_mut(path).unwrap() = replacement;
+        if path == "/data/response/0/condition" {
+            assert!(
+                schema.is_valid(&invalid),
+                "whitespace is rejected by the host"
+            );
+        } else {
+            assert!(!schema.is_valid(&invalid), "tool schema must reject {path}");
+        }
+        let before = (digest(&analysis).unwrap(), digest(&coverage).unwrap());
+        let error = tools::invoke(
+            &input,
+            &mut analysis,
+            &mut coverage,
+            false,
+            "put_record",
+            &invalid,
+            16000,
+        )
+        .unwrap_err();
+        assert!(
+            error.starts_with(&format!("INVALID_FIELD {path}:")),
+            "{error}"
+        );
+        assert_eq!(
+            before,
+            (digest(&analysis).unwrap(), digest(&coverage).unwrap())
+        );
+    }
+    let mut missing_key = args.clone();
+    missing_key["data"]["response"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("condition");
+    assert!(
+        !schema.is_valid(&missing_key),
+        "optional value does not make the condition key optional"
+    );
+    assert!(serde_json::from_value::<RecordData>(missing_key["data"].clone()).is_err());
+    let result = tools::invoke(
+        &input,
+        &mut analysis,
+        &mut coverage,
+        false,
+        "put_record",
+        &args,
+        16000,
+    )
+    .unwrap();
+    let record = &analysis.records[result["id"].as_str().unwrap()];
+    let RecordData::Requirement {
+        applicability,
+        compliance,
+        response,
+        ..
+    } = &record.data
+    else {
+        panic!("requirement expected")
+    };
+    assert_eq!(applicability.state, ApplicabilityState::Conditional);
+    assert_eq!(applicability.condition, "提供A类设备时");
+    assert_eq!(compliance[0].condition, "提供A类设备时");
+    assert_eq!(
+        response[0].condition, "",
+        "no fabricated fallback or copied parent condition"
+    );
+    assert_eq!(response[1].condition, "若采用替代产品");
+    assert_eq!(json!(response[0].grounds), json!([citation]));
 }
 
 #[test]
@@ -721,4 +905,49 @@ fn a_conditional_claim_still_requires_read_source_grounds_and_a_condition() {
             "{missing}"
         );
     }
+}
+
+#[test]
+fn put_record_assigns_stable_rule_item_ids() {
+    let input = input();
+    let mut analysis = read_analysis(&input);
+    let mut coverage = analysis.coverage.clone();
+    let args = json!({
+        "id":null,
+        "sources":[span()],
+        "data":{
+            "kind":"rule",
+            "text":"投标函、授权书依次排列并分别签章",
+            "scope":"本次投标",
+            "applicability":{
+                "state":"applicable",
+                "condition":"按须知提交",
+                "scope":"本次投标",
+                "grounds":[span()]
+            },
+            "items":[
+                {"id":"","kind":"composition","text":"投标函","condition":"","grounds":[span()],"targets":[]},
+                {"id":"","kind":"composition","text":"授权书","condition":"","grounds":[span()],"targets":[]},
+                {"id":"","kind":"order","text":"依次排列","condition":"","grounds":[span()],"targets":[],"sequence":["i1","i2"]}
+            ]
+        }
+    });
+    let schema = tools::schemas(false)
+        .into_iter()
+        .find(|t| t["function"]["name"] == "put_record")
+        .unwrap();
+    assert!(jsonschema::JSONSchema::compile(&schema["function"]["parameters"]).unwrap().is_valid(&args));
+    let id = tools::invoke(&input, &mut analysis, &mut coverage, false, "put_record", &args, 16000)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let RecordData::Rule { items, .. } = &analysis.records[&id].data else {
+        panic!("rule expected");
+    };
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0].id, "i1");
+    assert_eq!(items[1].id, "i2");
+    assert_eq!(items[2].kind, RuleItemKind::Order);
+    assert_eq!(items[2].sequence, ["i1", "i2"]);
 }

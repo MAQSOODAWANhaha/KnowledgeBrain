@@ -1300,6 +1300,7 @@ dependencies = [
  "hex",
  "image",
  "jsonschema",
+ "jsonwebtoken",
  "knowledge",
  "lopdf 0.44.0",
  "oxana",

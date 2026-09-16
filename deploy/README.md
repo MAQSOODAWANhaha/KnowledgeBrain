@@ -12,7 +12,7 @@ Redis、MinIO；Neo4j 可选。
 
 ### Agent 与模型配置改造（待实施）
 
-投标 Agent 按 [Rig 方案 §2](../plans/bidding/agent-runtime-rig.md#2-模型配置通信和目录)仅使用 Chat Completions；不新增 Responses 或协议切换配置，模型与凭据统一来自 `deploy/.env`。当前先修既有提取/复核，Rig 替换尚未实施。Embedding 继续走知识库现有独立接口，索引身份一致性是[知识库独立事项](../plans/knowledge-base/README.md#模型与索引一致性独立事项)，不作为提取修复前置。
+投标 Agent 按 [统一 Agent 方案](../plans/bidding/agent-runtime-rig.md)仅使用 Chat Completions；不新增 Responses 或协议切换配置，模型与凭据统一来自 `deploy/.env`。Rig/Chat 已接入，新增语义修复、编制和终检按统一方案分阶段验证，真实全链尚未验收；能力与证据见[主方案 §19](../plans/bidding/agent-runtime-rig.md#19-当前能力真实验收与下一步)。Embedding 继续走知识库现有独立接口，索引身份一致性是[知识库独立事项](../plans/knowledge-base/README.md#模型与索引一致性独立事项)，不作为提取修复前置。
 
 ## Fresh 启动
 

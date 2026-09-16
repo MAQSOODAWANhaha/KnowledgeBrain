@@ -1,10 +1,7 @@
 //! Worker process supervisor.
 
 use tokio_util::sync::CancellationToken;
-use worker::helpers::{
-    run_object_read_helper, run_object_write_helper, run_pdf_raster_helper,
-    run_submission_render_helper,
-};
+use worker::helpers::{run_object_read_helper, run_object_write_helper};
 use worker::runtime::{AppCtx, run_core, shutdown_signal};
 
 #[tokio::main]
@@ -12,18 +9,13 @@ async fn main() {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     if let Some(helper) = arguments.first().map(String::as_str) {
         let result = match helper {
-            "--kb-submission-render-helper-v1" => run_submission_render_helper(&arguments),
             "--kb-object-write-helper-v1" => run_object_write_helper(&arguments),
             "--kb-object-read-helper-v1" => run_object_read_helper(&arguments),
-            "--kb-pdf-raster-helper-v1" => run_pdf_raster_helper(&arguments),
             _ => Ok(()),
         };
         if matches!(
             helper,
-            "--kb-submission-render-helper-v1"
-                | "--kb-object-write-helper-v1"
-                | "--kb-object-read-helper-v1"
-                | "--kb-pdf-raster-helper-v1"
+            "--kb-object-write-helper-v1" | "--kb-object-read-helper-v1"
         ) {
             if let Err(error) = result {
                 eprintln!("worker helper failed: {error}");

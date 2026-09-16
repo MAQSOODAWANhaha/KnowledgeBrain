@@ -99,6 +99,32 @@ pub struct Presentation {
     pub explanation: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanItemKind {
+    Section,
+    Presentation,
+    ReportNote,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanItem {
+    pub id: String,
+    pub kind: PlanItemKind,
+    pub parent: Option<String>,
+    pub order: usize,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "SectionPlacement::is_body")]
+    pub placement: SectionPlacement,
+    pub prescribed: bool,
+    pub grounds: Vec<Span>,
+    #[serde(default)]
+    pub obligation_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exception: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Draft {
@@ -108,6 +134,8 @@ pub struct Draft {
     pub sections: BTreeMap<String, Section>,
     pub omissions: BTreeMap<String, Omission>,
     pub relation_omissions: BTreeMap<String, RelationOmission>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plan: BTreeMap<String, PlanItem>,
 }
 
 impl Draft {
@@ -120,6 +148,7 @@ impl Draft {
             sections: BTreeMap::new(),
             omissions: BTreeMap::new(),
             relation_omissions: BTreeMap::new(),
+            plan: BTreeMap::new(),
         })
     }
 
@@ -138,7 +167,7 @@ impl Draft {
 
 pub fn validate_basis(input: &FrozenInput, result: &AnalysisResult) -> Result<(), String> {
     crate::tender_analysis::tools::validate_input(input)?;
-    if result.schema_version != 1
+    if !matches!(result.schema_version, 1 | 2)
         || result.quality != result.expected_quality(input)
         || result.frozen_input_sha256 != digest(input)?
         || result.review.analysis_sha256 != digest(&result.analysis)?
@@ -153,7 +182,66 @@ pub fn validate_basis(input: &FrozenInput, result: &AnalysisResult) -> Result<()
     {
         return Err("composition requires a frozen, independently reviewed analysis with no outstanding review findings and an accurate source quality".into());
     }
+    if result.schema_version == 2 {
+        crate::tender_analysis::rule_contract::validate_inventory(
+            input,
+            &result.analysis,
+            &result.review.global_checks,
+            &result.review.findings,
+        )?;
+    }
     Ok(())
+}
+
+pub fn obligation_inventory(result: &AnalysisResult) -> Vec<Reference> {
+    compiler::required_references(result)
+}
+
+pub fn plan_complete(result: &AnalysisResult, draft: &Draft) -> Result<bool, String> {
+    let mut accounted = std::collections::BTreeSet::new();
+    for item in draft.plan.values() {
+        if item
+            .parent
+            .as_ref()
+            .is_some_and(|parent| !draft.plan.contains_key(parent))
+        {
+            return Ok(false);
+        }
+        for r in &item.obligation_refs {
+            accounted.insert(r.clone());
+        }
+        if let Some(exception) = &item.exception
+            && exception.trim().is_empty()
+        {
+            return Ok(false);
+        }
+    }
+    for omission in draft.omissions.values() {
+        accounted.insert(reference_key(&omission.reference)?);
+    }
+    for r in obligation_inventory(result) {
+        if !accounted.contains(&reference_key(&r)?) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub fn implementation_complete(draft: &Draft, artifact: Option<&compiler::Compiled>) -> bool {
+    if draft.plan.is_empty() {
+        return false;
+    }
+    let Some(compiled) = artifact else {
+        return false;
+    };
+    if compiled.manifest.plan_sha256 != digest(&draft.plan).ok().unwrap_or_default() {
+        return false;
+    }
+    draft.plan.values().all(|item| match item.kind {
+        PlanItemKind::Section => draft.sections.contains_key(&item.id),
+        PlanItemKind::Presentation => draft.presentation.is_some(),
+        PlanItemKind::ReportNote => true,
+    })
 }
 
 pub fn reference_key(reference: &Reference) -> Result<String, String> {

@@ -10,6 +10,13 @@ use knowledge::models::ChatTurn;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+mod evidence_capacity;
+mod evidence_delivery;
+mod global_checks;
+mod new_contract_minimal;
+mod semantic_compare;
+mod template_parent;
+
 #[test]
 fn source_task_neighbors_include_completed_ranges_without_crossing_documents_or_granting_reads() {
     let (mut input, config, mut state) = fixture();
@@ -467,6 +474,14 @@ fn review_task_evidence_preserves_complete_grid_cells_and_only_fitted_candidates
     assert_eq!(bundle.coverage.form_cells["grid"], vec![(0, 4)]);
     assert!(bundle.coverage.views.is_empty());
     assert!(!bundle.coverage.candidate.contains_key("record:large"));
+    assert_eq!(
+        bundle.content["assigned_evidence"]["candidate_delivery"]["complete"],
+        false
+    );
+    assert_eq!(
+        bundle.content["assigned_evidence"]["candidate_delivery"]["capacity_blocked_group"],
+        "record:large"
+    );
     assert!(bundle.coverage.candidate.contains_key("disposition:source"));
     assert!(
         serde_json::to_vec(&bundle.content).unwrap().len() <= config.limits.max_tool_result_bytes
@@ -1054,6 +1069,7 @@ fn relationship_fixture() -> (FrozenInput, Config, Checkpoint) {
                     scope: "项目".into(),
                     grounds: vec![citation(&input)],
                 },
+                items: vec![],
             },
         },
     );
@@ -3670,6 +3686,7 @@ fn candidate_checks_track_explicit_template_parent_and_global_rules() {
                 text: "统一约定".into(),
                 scope: "项目".into(),
                 applicability,
+                items: vec![],
             },
         },
     );
@@ -4463,6 +4480,7 @@ fn completed_main_repair_navigates_to_independent_review_without_self_approval()
         analysis_sha256: digest(&state.analysis).unwrap(),
         coverage: state.reviewer_coverage.clone(),
         findings: vec![],
+    ..Default::default()
     });
     state
         .analysis
@@ -4759,6 +4777,7 @@ fn one_primary_edit_does_not_navigate_past_remaining_review_findings() {
             affected: vec![],
             sources: vec![citation(&input)],
         }],
+        ..Default::default()
     });
     state
         .analysis
@@ -5330,6 +5349,7 @@ fn independent_finding_allows_retiring_a_wrong_unresolved_item_without_clearing_
         analysis_sha256: digest(&state.analysis).unwrap(),
         coverage: state.reviewer_coverage.clone(),
         findings: vec![issue.clone()],
+    ..Default::default()
     });
     state.review.as_mut().unwrap().findings[0].affected.clear();
     assert!(

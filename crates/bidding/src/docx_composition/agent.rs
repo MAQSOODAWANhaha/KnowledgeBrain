@@ -403,6 +403,13 @@ pub fn reviewed_artifact(
         || !state.workspace.done
         || state.workspace.reviewing
         || !state.workspace.findings.is_empty()
+        || (!state.workspace.draft.plan.is_empty()
+            && state
+                .workspace
+                .draft
+                .plan
+                .keys()
+                .any(|id| !state.workspace.plan_reviews.contains_key(id)))
     {
         return Err(invalid("composition independent review is incomplete"));
     }
@@ -553,6 +560,7 @@ pub fn schemas(reviewing: bool) -> Vec<Value> {
             !matches!(
                 name,
                 "set_presentation"
+                    | "put_composition_plan_item"
                     | "put_section"
                     | "delete_section"
                     | "put_omission"
@@ -563,7 +571,7 @@ pub fn schemas(reviewing: bool) -> Vec<Value> {
                     | "request_composition_review"
             )
         } else {
-            name != "submit_composition_review"
+            !matches!(name, "submit_composition_review" | "put_composition_review")
         }
     }));
     tools

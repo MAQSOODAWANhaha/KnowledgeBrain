@@ -10,5 +10,5 @@ pub use platform::{
     BID_TENDER_DOCUMENT_PROCESS_V2_TASK, BidAuthoringJobKindV2, BidAuthoringJobPayloadV2,
     BidAuthoringRequestIdentityV2, BidAuthoringV2Queue, ContentGenerateJobV2,
     ContentGenerateOperationV2, RequirementSetCompileJobV2, SubmissionExportJobV2,
-    SubmissionOutputModeV2, TenderDocumentProcessJobV2,
+    TenderDocumentProcessJobV2,
 };

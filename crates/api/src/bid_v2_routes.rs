@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 mod analysis;
 mod docx;
+mod export_source;
 
 #[derive(Debug)]
 struct BidJson<T>(T);
@@ -209,6 +210,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v2/submission-workspaces/{workspace_id}/exports",
             get(list_submission_exports).post(create_submission_export),
+        )
+        .route(
+            "/api/v2/submission-workspaces/{workspace_id}/exports/requests/{request_id}/source",
+            get(export_source::source),
         )
         .route(
             "/api/v2/submission-workspaces/{workspace_id}/exports/{export_id}",
@@ -1185,18 +1190,8 @@ struct PrepareAttachmentBody {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReviewWatermarkBody {
-    text: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SubmissionExportBody {
-    mode: String,
-    format: String,
-    expected_workspace_revision_id: Uuid,
-    #[serde(default)]
-    watermark: Option<ReviewWatermarkBody>,
+    version_id: Uuid,
 }
 
 async fn freeze_document_set(
@@ -2028,27 +2023,6 @@ async fn get_preview_html(
         })
 }
 
-fn validate_review_watermark(
-    output_mode: &str,
-    watermark: Option<&ReviewWatermarkBody>,
-) -> Result<Option<String>, ApiErr> {
-    let Some(watermark) = watermark else {
-        return Ok(None);
-    };
-    if output_mode != "review_draft" {
-        return Err(validation("submission export does not allow a watermark"));
-    }
-    let text = watermark.text.as_str();
-    if text.trim() != text
-        || text.is_empty()
-        || text.chars().count() > 128
-        || text.chars().any(char::is_control)
-    {
-        return Err(validation("review watermark text is invalid"));
-    }
-    Ok(Some(text.to_owned()))
-}
-
 async fn create_submission_export(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2067,30 +2041,17 @@ async fn create_submission_export(
                 "If-Match required",
             )
         })?;
-    let output_mode = match body.mode.as_str() {
-        "review" | "review_draft" => "review_draft",
-        "submission" => "submission",
-        _ => return Err(validation("export mode must be review or submission")),
-    };
-    if !matches!(body.format.as_str(), "docx" | "pdf") {
-        return Err(validation("export format must be docx or pdf"));
-    }
-    let watermark = validate_review_watermark(output_mode, body.watermark.as_ref())?;
-    let mode_options = json!({"watermark":watermark});
     let context = bidding::MutationContext::new(
         actor,
         required_idempotency_key(&headers)?,
-        &json!({"workspace_id":workspace_id,"request":body,"mode_options":mode_options}),
+        &json!({"workspace_id":workspace_id,"request":body,"docx_sha256":expected_sha256}),
     )
     .map_err(|error| validation(&error.to_string()))?;
     let pool = require_bid_pool().await?;
     let value = bidding::bid_authoring_v2::create_submission_export_request_v2(
         &pool,
         workspace_id,
-        (body.expected_workspace_revision_id, expected_sha256),
-        output_mode,
-        &body.format,
-        &mode_options,
+        (body.version_id, expected_sha256),
         &context,
     )
     .await
@@ -3091,50 +3052,16 @@ mod tests {
     }
 
     #[test]
-    fn review_watermark_is_typed_bounded_and_forbidden_for_submission() {
-        let valid = ReviewWatermarkBody {
-            text: "评审稿".into(),
-        };
-        assert_eq!(
-            validate_review_watermark("review_draft", Some(&valid))
-                .ok()
-                .flatten(),
-            Some("评审稿".into())
-        );
-        assert!(validate_review_watermark("submission", Some(&valid)).is_err());
-        for text in ["", " leading", "line\nbreak"] {
-            assert!(
-                validate_review_watermark(
-                    "review_draft",
-                    Some(&ReviewWatermarkBody { text: text.into() })
-                )
-                .is_err()
-            );
-        }
+    fn export_request_requires_saved_docx_identity_and_rejects_legacy_block_options() {
         assert!(
-            validate_review_watermark(
-                "review_draft",
-                Some(&ReviewWatermarkBody {
-                    text: "水".repeat(128)
-                })
+            serde_json::from_value::<SubmissionExportBody>(json!({"version_id":Uuid::new_v4()}))
+                .is_ok()
+        );
+        assert!(serde_json::from_value::<SubmissionExportBody>(json!({"expected_workspace_revision_id":Uuid::new_v4(),"mode":"review","format":"pdf"})).is_err());
+        assert!(
+            serde_json::from_value::<SubmissionExportBody>(
+                json!({"version_id":Uuid::new_v4(),"watermark":{"text":"review"}})
             )
-            .is_ok()
-        );
-        assert!(
-            validate_review_watermark(
-                "review_draft",
-                Some(&ReviewWatermarkBody {
-                    text: "水".repeat(129)
-                })
-            )
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<SubmissionExportBody>(serde_json::json!({
-                "mode":"review","format":"pdf","expected_workspace_revision_id":
-                    "00000000-0000-4000-8000-000000000001",
-                "watermark":{"text":"评审稿","color":"red"}
-            }))
             .is_err()
         );
     }

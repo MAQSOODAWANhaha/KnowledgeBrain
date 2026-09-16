@@ -178,12 +178,13 @@ def _tbl_grid_widths_mm(table: Table) -> Optional[List[float]]:
         if col.w is None:
             return None
         try:
-            twips = int(col.w)
+            # python-docx exposes w:w as an EMU Length, although OOXML stores twips.
+            width_mm = col.w.mm
         except (TypeError, ValueError):
             return None
-        if twips <= 0:
+        if width_mm <= 0:
             return None
-        widths.append(twips * 25.4 / 1440)
+        widths.append(width_mm)
     return widths or None
 
 

@@ -3,7 +3,7 @@ mod support;
 
 use bidding::bid_authoring_v2::{self, CreateContentRequestV2};
 use bidding::content_runtime::ContentAgentRuntimeContractV1;
-use platform::{BidAuthoringJobPayloadV2, ContentGenerateOperationV2, SubmissionOutputModeV2};
+use platform::{BidAuthoringJobPayloadV2, ContentGenerateOperationV2};
 use retention::{ObjectRetentionWorker, ObjectUploadExpireWorker, RetentionCtx};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -55,8 +55,6 @@ enum ExpectedPayload {
     },
     Export {
         workspace_id: Uuid,
-        workspace_revision_id: Uuid,
-        output_mode: SubmissionOutputModeV2,
     },
 }
 
@@ -354,41 +352,68 @@ async fn create_content_request(
     }
 }
 
-async fn create_export_request(
-    pool: &PgPool,
-    output_mode: SubmissionOutputModeV2,
-) -> CreatedRequest {
-    let (workspace_id, revision_id, revision_sha) = workspace_head(pool).await;
-    let (mode, watermark) = match output_mode {
-        SubmissionOutputModeV2::ReviewDraft => ("review_draft", json!("request delivery matrix")),
-        SubmissionOutputModeV2::Submission => ("submission", Value::Null),
-    };
-    let request_bytes = format!(r#"{{"delivery_matrix":"export","mode":"{mode}"}}"#);
+async fn create_export_request(pool: &PgPool) -> CreatedRequest {
+    let (workspace_id, _, _) = workspace_head(pool).await;
     let mut connection = owner_connection(pool).await;
+    // This phase-one fixture has newer sources than its published requirements.
+    // Seed an already-saved DOCX on that historical basis; export creation must
+    // preserve it without pretending the older requirements are current. Actual
+    // new-round creation and its basis CAS are exercised in phase-six SQL.
+    let current: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT version_id,docx_sha256 FROM bid_docx_current WHERE scope_id=$1")
+            .bind(workspace_id)
+            .fetch_optional(&mut *connection)
+            .await
+            .unwrap();
+    let (version_id, docx_sha) = match current {
+        Some(current) => current,
+        None => {
+            let bytes = b"request-delivery saved DOCX identity";
+            let digest = platform::sha256_hex(bytes);
+            let staging = Uuid::new_v4();
+            sqlx::query("SELECT kb_object_upload_stage($1,('objects/'||$2)::kb_object_ref,$2::kb_sha256,'application/vnd.openxmlformats-officedocument.wordprocessingml.document',$3,$4::kb_actor_identity)")
+                .bind(staging).bind(&digest).bind(bytes.len() as i64).bind(ACTOR)
+                .execute(&mut *connection).await.unwrap();
+            let round_id = Uuid::new_v4();
+            let version_id = Uuid::new_v4();
+            connection.execute("BEGIN").await.unwrap();
+            sqlx::query("SELECT kb_object_upload_commit($1,('objects/'||$2)::kb_object_ref,$2::kb_sha256,'application/vnd.openxmlformats-officedocument.wordprocessingml.document',$3,'bid_docx_version',$4,'document',$5::kb_actor_identity)")
+                .bind(staging).bind(&digest).bind(bytes.len() as i64).bind(version_id).bind(ACTOR)
+                .execute(&mut *connection).await.unwrap();
+            sqlx::query("INSERT INTO bid_docx_round_artifacts(id,project_id,workspace_id,revision,document_set_id,requirement_set_id,canonical_payload,content_sha256,actor)
+                SELECT $1,$2,$3,1,r.document_set_id,r.id,kb_bid_v2_json_payload(jsonb_build_object('saved_before_source_update',true)),
+                  kb_bid_v2_sha256_bytes(kb_bid_v2_json_payload(jsonb_build_object('saved_before_source_update',true))),$4::kb_actor_identity
+                FROM bid_requirement_set_current c JOIN bid_requirement_set_artifacts r ON r.id=c.artifact_id WHERE c.scope_id=$2")
+                .bind(round_id).bind(PROJECT_ID).bind(workspace_id).bind(ACTOR)
+                .execute(&mut *connection).await.unwrap();
+            sqlx::query("INSERT INTO bid_docx_version_artifacts(id,project_id,workspace_id,round_id,revision,object_ref,docx_sha256,byte_length,actor)
+                VALUES($1,$2,$3,$4,1,('objects/'||$5)::kb_object_ref,$5::kb_sha256,$6,$7::kb_actor_identity)")
+                .bind(version_id).bind(PROJECT_ID).bind(workspace_id).bind(round_id).bind(&digest)
+                .bind(bytes.len() as i64).bind(ACTOR).execute(&mut *connection).await.unwrap();
+            sqlx::query("INSERT INTO bid_docx_current(scope_id,project_id,round_id,version_id,docx_sha256) VALUES($1,$2,$3,$4,$5::kb_sha256)")
+                .bind(workspace_id).bind(PROJECT_ID).bind(round_id).bind(version_id).bind(&digest)
+                .execute(&mut *connection).await.unwrap();
+            connection.execute("COMMIT").await.unwrap();
+            (version_id, digest)
+        }
+    };
+    let request_bytes = br#"{"delivery_matrix":"export"}"#;
     let response: Value = sqlx::query_scalar(
         "SELECT kb_bid_v2_create_submission_export_request(
-           $1,$2,$3::kb_sha256,$4,'pdf',jsonb_build_object('watermark',$5::jsonb),
-           $6::kb_actor_identity,$7,convert_to($8,'UTF8'),
-           kb_bid_v2_sha256_bytes(convert_to($8,'UTF8')))",
+          $1,$2,$3::kb_sha256,$4::kb_actor_identity,$5,$6,kb_bid_v2_sha256_bytes($6))",
     )
     .bind(workspace_id)
-    .bind(revision_id)
-    .bind(revision_sha)
-    .bind(mode)
-    .bind(watermark)
+    .bind(version_id)
+    .bind(docx_sha)
     .bind(ACTOR)
-    .bind(format!("delivery-export-{mode}-{}", Uuid::new_v4()))
-    .bind(request_bytes)
+    .bind(format!("delivery-export-{}", Uuid::new_v4()))
+    .bind(request_bytes.as_slice())
     .fetch_one(&mut *connection)
     .await
     .expect("create SubmissionExport Request");
     CreatedRequest {
         response,
-        expected: ExpectedPayload::Export {
-            workspace_id,
-            workspace_revision_id: revision_id,
-            output_mode,
-        },
+        expected: ExpectedPayload::Export { workspace_id },
     }
 }
 
@@ -398,8 +423,7 @@ async fn create_real_request_matrix(pool: &PgPool) -> Vec<CreatedRequest> {
         create_requirement_request(pool).await,
         create_content_request(pool, ContentGenerateOperationV2::MatchOnly).await,
         create_content_request(pool, ContentGenerateOperationV2::Generate).await,
-        create_export_request(pool, SubmissionOutputModeV2::ReviewDraft).await,
-        create_export_request(pool, SubmissionOutputModeV2::Submission).await,
+        create_export_request(pool).await,
     ]
 }
 
@@ -457,20 +481,14 @@ fn assert_expected_payload(payload: &BidAuthoringJobPayloadV2, expected: &Expect
             BidAuthoringJobPayloadV2::SubmissionExport {
                 project_id,
                 workspace_id,
-                workspace_revision_id,
-                output_mode,
                 ..
             },
             ExpectedPayload::Export {
                 workspace_id: expected_workspace,
-                workspace_revision_id: expected_revision,
-                output_mode: expected_mode,
             },
         ) => {
             assert_eq!(*project_id, PROJECT_ID);
             assert_eq!(workspace_id, expected_workspace);
-            assert_eq!(workspace_revision_id, expected_revision);
-            assert_eq!(output_mode, expected_mode);
         }
         other => panic!("wrong closed payload variant: {other:?}"),
     }
@@ -591,7 +609,7 @@ async fn all_real_request_creators_persist_exact_replayable_queue_payloads() {
     let mut test_lock = acquire_delivery_test_lock(&pool).await;
     ensure_phase1_fixture(&pool).await;
     let created = create_real_request_matrix(&pool).await;
-    assert_eq!(created.len(), 6);
+    assert_eq!(created.len(), 5);
     for request in &created {
         assert_frozen_payload_exact(&pool, request).await;
     }
@@ -611,7 +629,10 @@ async fn non_agent_handler_timeout_codes_terminalize_requests_atomically() {
     let requests = create_real_request_matrix(&pool).await;
     let tender = &requests[0];
     let requirement = &requests[1];
-    let export = &requests[5];
+    let export = requests
+        .iter()
+        .find(|request| matches!(request.expected, ExpectedPayload::Export { .. }))
+        .expect("export request");
 
     for (request_id, revision, digest) in [
         (tender.id(), tender.revision() + 1, tender.frozen_sha()),
