@@ -516,6 +516,18 @@ pub async fn list_requirements_v2(
         .await
 }
 
+pub async fn get_tender_outline_v2(
+    pool: &PgPool,
+    project_id: Uuid,
+    actor: &str,
+) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("SELECT kb_bid_v2_get_tender_outline($1,$2::kb_actor_identity)")
+        .bind(project_id)
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+}
+
 pub async fn get_requirement_set_compile_request_v2(
     pool: &PgPool,
     project_id: Uuid,
@@ -1270,8 +1282,26 @@ pub async fn create_submission_export_request_v2(
     expected: (Uuid, &str),
     context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
+    let execution = match crate::export_review::agent::Config::from_environment() {
+        Ok(config) => Some(
+            crate::export_review::FrozenExecution::freeze(&config)
+                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?,
+        ),
+        Err(error)
+            if error.code == "AGENT_PROVIDER_UNAVAILABLE"
+                && error.message.contains("not configured") =>
+        {
+            None
+        }
+        Err(error) => return Err(sqlx::Error::Protocol(error.to_string())),
+    };
+    let frozen_context = crate::export_review::FrozenContext {
+        analysis_identity: None,
+        execution_contract: execution,
+        layout_result: None,
+    };
     sqlx::query_scalar(
-        "SELECT kb_bid_v2_create_submission_export_request($1,$2,$3::kb_sha256,$4::kb_actor_identity,$5,$6,$7::kb_sha256)",
+        "SELECT kb_bid_v2_create_submission_export_request($1,$2,$3::kb_sha256,$4::kb_actor_identity,$5,$6,$7::kb_sha256,$8)",
     )
     .bind(workspace_id)
     .bind(expected.0)
@@ -1280,6 +1310,7 @@ pub async fn create_submission_export_request_v2(
     .bind(&context.idempotency_key)
     .bind(&context.request.bytes)
     .bind(&context.request.sha256)
+    .bind(sqlx::types::Json(frozen_context))
     .fetch_one(pool)
     .await
 }
@@ -1372,7 +1403,7 @@ pub async fn load_submission_export_source_v2(
 
 #[derive(serde::Serialize)]
 pub struct SubmissionExportOutputV2<'a> {
-    pub staging_id: Uuid,
+    pub staging_id: Option<Uuid>,
     pub artifact_id: Uuid,
     pub object_ref: &'a str,
     pub sha256: &'a str,
@@ -1384,22 +1415,24 @@ pub async fn publish_submission_export_v2(
     pool: &PgPool,
     request: &platform::BidAuthoringRequestIdentityV2,
     manifest_id: Uuid,
-    docx: SubmissionExportOutputV2<'_>,
-    pdf: SubmissionExportOutputV2<'_>,
+    outputs: (SubmissionExportOutputV2<'_>, SubmissionExportOutputV2<'_>),
     report: &Value,
     actor: &str,
+    owner: &AgentRunLease,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT kb_bid_v2_publish_submission_export($1,$2,$3::kb_sha256,$4,$5,$6,$7,$8::kb_actor_identity)",
+        "SELECT kb_bid_v2_publish_submission_export($1,$2,$3::kb_sha256,$4,$5,$6,$7,$8::kb_actor_identity,$9,$10)",
     )
     .bind(request.request_artifact_id)
     .bind(request.request_revision)
     .bind(&request.frozen_input_sha256)
     .bind(manifest_id)
-    .bind(sqlx::types::Json(docx))
-    .bind(sqlx::types::Json(pdf))
+    .bind(sqlx::types::Json(outputs.0))
+    .bind(sqlx::types::Json(outputs.1))
     .bind(report)
     .bind(actor)
+    .bind(owner.attempt)
+    .bind(owner.execution_owner_token)
     .fetch_one(pool)
     .await
 }

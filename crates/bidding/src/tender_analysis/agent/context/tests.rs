@@ -1351,7 +1351,7 @@ async fn replay_history_eviction(require_all_candidates: bool) {
 #[test]
 fn delivered_line_annotations_preserve_receipts_errors_and_pending_results() {
     let mut state: Checkpoint = serde_json::from_value(json!({
-        "journal":{"sequence":0,"pending":null,"session":null},
+        "dispatch":{"active":null,"entries":{},"last_committed_turn":null},"journal":{"sequence":0,"pending":null,"session":null},
         "input_sha256":"","config_sha256":"","turn":0,"tool_calls":0,"read_bytes":0,
         "review_rounds":0,"role":"main","analysis":Analysis::default(),"review":null,
         "review_draft":{},"reviewer_coverage":Coverage::default(),"pending_coverage":null,
@@ -1422,6 +1422,7 @@ fn oversized_delivered_images_release_pixels_without_losing_their_batch_candidat
         review_draft: BTreeMap::new(),
         source_review: None,
         repair: Default::default(),
+        dispatch: Default::default(),
         reviewer_coverage: Coverage::default(),
         pending_coverage: Some(Coverage::default()),
         transcript: vec![],
@@ -1440,6 +1441,12 @@ fn oversized_delivered_images_release_pixels_without_losing_their_batch_candidat
         reviewer_work: None,
         done: false,
         source_views: BTreeMap::new(),
+        draft_stage: Default::default(),
+        draft_active_id: None,
+        draft_compile_object_id: None,
+        draft_docx_base64: None,
+        outline_config_sha256: None,
+        fill_config_sha256: None,
     };
     for id in ["first", "second"] {
         let view = views::SourceView {
@@ -1738,7 +1745,7 @@ fn archived_stall_and_four_ready_relationships_regress_without_resuming_old_run(
 fn unique_candidate_versions_are_not_navigation_and_focused_pairs_survive() {
     let analysis = Analysis::default();
     let mut state: Checkpoint = serde_json::from_value(json!({
-        "journal":{"sequence":0,"pending":null,"session":null},"input_sha256":"","config_sha256":"",
+        "dispatch":{"active":null,"entries":{},"last_committed_turn":null},"journal":{"sequence":0,"pending":null,"session":null},"input_sha256":"","config_sha256":"",
         "turn":0,"tool_calls":0,"read_bytes":0,"review_rounds":0,"role":"main","analysis":analysis,
         "review":null,"review_draft":{},"reviewer_coverage":Coverage::default(),"pending_coverage":null,
         "transcript":[],"main_work":{"source_scope":["source"],"objective":"compare endpoints",

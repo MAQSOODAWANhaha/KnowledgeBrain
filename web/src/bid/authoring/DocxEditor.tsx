@@ -12,7 +12,9 @@ declare global {
 const scripts = new Map<string, Promise<void>>();
 let installedUrl: string | null = null;
 function loadScript(url: string): Promise<void> {
-  const address = new URL(url);
+  let address: URL;
+  try { address = new URL(url); }
+  catch { return Promise.reject(new Error("invalid script URL")); }
   if (!["http:", "https:"].includes(address.protocol)) return Promise.reject(new Error("invalid script URL"));
   if (installedUrl && installedUrl !== url) return Promise.reject(new Error("document service changed; reload required"));
   if (!scripts.has(url)) {
@@ -105,7 +107,7 @@ export function DocxEditor({ workspaceId, onUnsafeChange, onCreateRound }: {
       const blob = await docxApi.download(workspaceId, state.current.version_id);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
-      link.href = url; link.download = `投标稿-${state.current.revision}.docx`;
+      link.href = url; link.download = `投标草稿-${state.current.revision}.docx`;
       // This is explicitly the persisted version, even if editing has continued.
       link.click(); URL.revokeObjectURL(url);
     } catch { setNotice("已保存稿下载失败，请重试。"); }
@@ -117,7 +119,7 @@ export function DocxEditor({ workspaceId, onUnsafeChange, onCreateRound }: {
   }
   return <section className="docx-pane" data-testid="docx-editor">
     <div className="docx-toolbar">
-      <strong>投标稿</strong>
+      <strong>投标草稿</strong>
       {state.current && <span data-testid="docx-version">保存版本 {state.current.revision}</span>}
       <span role="status" data-testid="docx-status">{docxStatus(state)}</span>
       <div className="spacer" />

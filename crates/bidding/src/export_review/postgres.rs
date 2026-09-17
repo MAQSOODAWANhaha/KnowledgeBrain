@@ -3,6 +3,7 @@
 use super::agent::{Checkpoint, Journal};
 use crate::agent_error::AgentError;
 use crate::bid_authoring_v2::AgentRunLease;
+use crate::tender_analysis::postgres::db_error;
 use platform::BidAuthoringRequestIdentityV2;
 use sqlx::PgPool;
 
@@ -12,21 +13,16 @@ pub struct PgJournal<'a> {
     pub owner: &'a AgentRunLease,
 }
 
-fn db_error(error: sqlx::Error) -> AgentError {
-    AgentError::new("INTERNAL", error.to_string())
-}
-
 #[async_trait::async_trait]
 impl Journal for PgJournal<'_> {
     async fn load(&self) -> Result<Option<Checkpoint>, AgentError> {
-        let value: Option<sqlx::types::Json<Checkpoint>> = sqlx::query_scalar(
-            "SELECT kb_bid_v2_export_review_checkpoint_get($1,$2::kb_sha256)",
-        )
-        .bind(self.request.request_artifact_id)
-        .bind(&self.request.frozen_input_sha256)
-        .fetch_one(self.pool)
-        .await
-        .map_err(db_error)?;
+        let value: Option<sqlx::types::Json<Checkpoint>> =
+            sqlx::query_scalar("SELECT kb_bid_v2_export_review_checkpoint_get($1,$2::kb_sha256)")
+                .bind(self.request.request_artifact_id)
+                .bind(&self.request.frozen_input_sha256)
+                .fetch_one(self.pool)
+                .await
+                .map_err(db_error)?;
         Ok(value.map(|v| v.0))
     }
 
@@ -77,6 +73,8 @@ pub const CHECKPOINT_SQL_KEYS: &[&str] = &[
     "contract_sha256",
     "inventory",
     "analysis",
+    "obligations",
+    "pending_delivery",
     "tender_coverage",
     "output_coverage",
     "reviews",
@@ -104,6 +102,8 @@ mod tests {
             contract_sha256: "a".repeat(64),
             inventory: Inventory::default(),
             analysis: Analysis::default(),
+            obligations: BTreeMap::new(),
+            pending_delivery: None,
             tender_coverage: Coverage::default(),
             output_coverage: OutputCoverage::default(),
             reviews: BTreeMap::new(),

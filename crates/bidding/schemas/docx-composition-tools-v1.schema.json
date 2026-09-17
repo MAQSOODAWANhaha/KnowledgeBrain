@@ -3,7 +3,7 @@
     "type": "function",
     "function": {
       "name": "put_composition_plan_item",
-      "description": "Create or replace one composition plan item. Chapter section ids must reuse this host id. expected_draft_sha256 is required.",
+      "description": "Save a source-grounded plan item before implementing it. obligation_refs copy obligation_ref from composition_coverage. Section IDs, parent, order, title and placement must match the plan. report_note needs an actual omission and matching exception reason.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -66,6 +66,13 @@
               {
                 "type": "null"
               }
+            ]
+          },
+          "placement": {
+            "type": "string",
+            "enum": [
+              "body",
+              "front_matter"
             ]
           }
         },
@@ -1668,7 +1675,7 @@
     "type": "function",
     "function": {
       "name": "composition_coverage",
-      "description": "Paginate every template/response/proof obligation and its currently planned sections or explicit omission; planning coverage does not prove actual DOCX placement.",
+      "description": "Page the current obligation inventory. Copy obligation_ref into plan items; planned_items and implemented_sections are separate progress, never semantic acceptance. Omissions must cite original evidence.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1718,7 +1725,7 @@
     "type": "function",
     "function": {
       "name": "compile_docx",
-      "description": "Generate and verify a new actual DOCX from the complete current draft. Keeps bytes in checkpoint; returns identity/counts, not base64. All template/response/proof obligations must be placed or explicitly accounted for.",
+      "description": "Generate and verify a new actual DOCX from the complete current draft. Keeps bytes in checkpoint; returns identity/counts, not base64. All template/response/proof and Rule.items obligations must be implemented or explicitly accounted for. Order-rule sequence IDs follow composition-item references to actual content targets, rejecting cycles; other items use their section locations. Distinct content blocks can prove order within a section; a shared bookmark cannot. Only valid saved omissions exclude sequence items. The host also compiles automatically after a complete successful batch. A deterministic compile failure is retained against the current draft; change the draft to resolve it before retrying.",
       "parameters": {
         "type": "object",
         "properties": {},
@@ -1731,7 +1738,7 @@
     "type": "function",
     "function": {
       "name": "request_composition_review",
-      "description": "Request independent review of current compiled DOCX. Must be the only tool call in this turn.",
+      "description": "Request independent review of current compiled DOCX. Must be the only tool call in this turn. The host performs this transition automatically when the complete current draft compiles and no pending evidence or execution blocker remains; this manual entry remains available.",
       "parameters": {
         "type": "object",
         "properties": {},
@@ -1744,7 +1751,7 @@
     "type": "function",
     "function": {
       "name": "submit_composition_review",
-      "description": "Submit independent findings only after source, analysis, draft, rendered content and placements are inspected. Must be the only tool call in this turn. Empty findings approves a template, never bidder compliance.",
+      "description": "Aggregate all current plan-item judgments after complete original/draft/render inspection. findings may only repeat already saved findings; [] never clears item findings. Must be the only tool call.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1887,7 +1894,7 @@
     "type": "function",
     "function": {
       "name": "set_composition_work",
-      "description": "Save a bounded source and section task. Use actual frozen IDs. Host progress survives restart and scope renaming. Complete only after delivered source evidence and saved sections (reviewer must independently inspect them). Blocked tasks cannot be accepted as source gaps.",
+      "description": "Save a bounded source and section task. Use actual frozen IDs. Host progress survives restart and scope renaming. Complete only after delivered source evidence and saved implementation (reviewer also needs a current independent per-item judgment). Blocked tasks cannot be accepted as source gaps.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1898,6 +1905,13 @@
             },
             "minItems": 1,
             "uniqueItems": true
+          },
+          "plan_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Host-assigned plan item identity. Presentation and report notes use this field and an empty section_scope."
           },
           "section_scope": {
             "type": "array",
@@ -1972,7 +1986,7 @@
     "type": "function",
     "function": {
       "name": "put_composition_review",
-      "description": "Submit one plan-item or chapter review while independent composition review is active. Host aggregates; do not submit the whole finding list in one call.",
+      "description": "Judge one inspected plan item and current artifact using independently read original grounds. Supply actionable findings or saved content-digest finding_ids; a new grounded judgment replaces only this item prior findings. Reading or inspection requested in the same batch is not delivered evidence. Wait for a subsequent model response containing those results before judging.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -1995,6 +2009,108 @@
             "type": "array",
             "items": {
               "type": "string"
+            }
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "section_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "record_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "sources": {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "ref": {
+                            "type": "string",
+                            "pattern": "^[tg]:[0-9]+:[0-9]+:[0-9]+$",
+                            "description": "Copy a citation_ref or citation_refs object returned by read_source/read_form. Address is scoped to this frozen collection; it grants no reading or semantic approval."
+                          }
+                        },
+                        "required": [
+                          "ref"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "source_id": {
+                            "type": "string"
+                          },
+                          "start": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "end": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "view_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                          },
+                          "grid_cell": {
+                            "type": "object",
+                            "properties": {
+                              "form_id": {
+                                "type": "string"
+                              },
+                              "row": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "column": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            },
+                            "required": [
+                              "form_id",
+                              "row",
+                              "column"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "required": [
+                          "source_id",
+                          "start",
+                          "end"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "message",
+                "section_ids",
+                "record_ids",
+                "sources"
+              ],
+              "additionalProperties": false
             }
           }
         },

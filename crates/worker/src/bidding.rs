@@ -7,11 +7,12 @@ use crate::helpers::{
 use crate::runtime::{
     AppCtx, CONTENT_GENERATE_HANDLER_HARD_TIMEOUT, CONTENT_MATCH_HANDLER_HARD_TIMEOUT,
     DOCX_COMPOSE_HANDLER_HARD_TIMEOUT, HANDLER_CLEANUP_MARGIN, HandlerDeadline, JobErr,
-    NonAgentTerminalFailure, OwnedHandlerCompletion, REQUIREMENT_HANDLER_HARD_TIMEOUT,
-    SUBMISSION_EXPORT_HANDLER_HARD_TIMEOUT, TASK_ABORT_DRAIN_RESERVE, TENDER_HANDLER_HARD_TIMEOUT,
-    TERMINAL_PERSISTENCE_RESERVE, bid_request_is_terminal, cleanup_tracker_until,
-    require_bid_request_terminal, run_owned_handler, teardown_deadline_for_effect,
-    terminalize_non_agent_failure_until, terminalize_until,
+    OwnedHandlerCompletion, REQUIREMENT_DRAFT_HANDLER_HARD_TIMEOUT,
+    REQUIREMENT_HANDLER_HARD_TIMEOUT, SUBMISSION_EXPORT_HANDLER_HARD_TIMEOUT,
+    TASK_ABORT_DRAIN_RESERVE, TENDER_HANDLER_HARD_TIMEOUT, TERMINAL_PERSISTENCE_RESERVE,
+    bid_request_is_terminal, cleanup_tracker_until, require_bid_request_terminal,
+    run_owned_handler, teardown_deadline_for_effect, terminalize_tender_document_failure_until,
+    terminalize_until,
 };
 use async_trait::async_trait;
 use platform::{
@@ -54,7 +55,13 @@ pub(crate) async fn process_submission_export_v2(
         },
     )
     .await
-    .map_err(|error| JobErr(error.0))
+    .or_else(|error| {
+        use bidding::agent_error::RequestQueueEffect;
+        match error.request_queue_effect() {
+            RequestQueueEffect::AckObsolete => Ok(()),
+            _ => Err(JobErr(format!("TRANSIENT_HANDLER:{error}"))),
+        }
+    })
 }
 
 #[async_trait]
@@ -104,7 +111,6 @@ impl oxana::Worker<SubmissionExportJobV2> for SubmissionExportV2Worker {
             |error| !error.0.starts_with("TRANSIENT_HANDLER:"),
         )
         .await;
-        let cleanup_deadline = run.cleanup_deadline;
         let cleanup_error = run.cleanup_error;
         let result = match run.completion {
             OwnedHandlerCompletion::ShuttingDown => {
@@ -114,50 +120,13 @@ impl oxana::Worker<SubmissionExportJobV2> for SubmissionExportV2Worker {
                 )));
             }
             OwnedHandlerCompletion::TimedOut => {
-                terminalize_non_agent_failure_until(
-                    pool,
-                    &job.request,
-                    NonAgentTerminalFailure::SubmissionExport("SUBMISSION_EXPORT_TIMEOUT"),
-                    cleanup_deadline,
-                    "submission export timeout",
-                )
-                .await?;
-                if let Some(error) = cleanup_tracker_until(Some(&cleanup), cleanup_deadline).await {
-                    tracing::warn!(%error, "submission export timed out and terminalized; cleanup remains pending");
-                }
-                return Ok(());
+                return Err(JobErr(cleanup_error.map_or_else(
+                    || "submission export deadline reached; resume the same frozen request".into(),
+                    |error| format!("submission export deadline reached; cleanup failed: {error}"),
+                )));
             }
             OwnedHandlerCompletion::Completed(result) => result,
         };
-        if let Err(error) = &result {
-            if let Some(message) = error.0.strip_prefix("TRANSIENT_HANDLER:") {
-                return Err(JobErr(message.to_owned()));
-            }
-            let error_code = if error.0.starts_with("ATTACHMENT_PREPARATION_FAILED:") {
-                "ATTACHMENT_PREPARATION_FAILED"
-            } else {
-                "RENDERER_FAILED"
-            };
-            let already_terminal = terminalize_non_agent_failure_until(
-                pool,
-                &job.request,
-                NonAgentTerminalFailure::SubmissionExport(error_code),
-                cleanup_deadline,
-                "submission export failure",
-            )
-            .await
-            .map_err(|failure| JobErr(format!("submission export failed ({error}); {failure}")))?;
-            if already_terminal {
-                return cleanup_error.map_or(Ok(()), |cleanup| {
-                    Err(JobErr(format!("terminal export cleanup failed: {cleanup}")))
-                });
-            }
-            return cleanup_error.map_or(Ok(()), |cleanup| {
-                Err(JobErr(format!(
-                    "submission export terminalized after {error}; cleanup failed: {cleanup}"
-                )))
-            });
-        }
         match (result, cleanup_error) {
             (Ok(()), Some(error)) => Err(JobErr(format!(
                 "submission export completed but cleanup failed: {error}"
@@ -273,10 +242,10 @@ impl oxana::Worker<TenderDocumentProcessJobV2> for TenderDocumentProcessV2Worker
                 )));
             }
             OwnedHandlerCompletion::TimedOut => {
-                terminalize_non_agent_failure_until(
+                terminalize_tender_document_failure_until(
                     pool,
                     &job.request,
-                    NonAgentTerminalFailure::TenderDocument("TENDER_DOCUMENT_PROCESS_TIMEOUT"),
+                    "TENDER_DOCUMENT_PROCESS_TIMEOUT",
                     cleanup_deadline,
                     "tender process timeout",
                 )
@@ -298,10 +267,10 @@ impl oxana::Worker<TenderDocumentProcessJobV2> for TenderDocumentProcessV2Worker
                 }
                 tracing::warn!(request_artifact_id = %request_artifact_id, %error,
                     "tender document processing failed deterministically");
-                let already_terminal = terminalize_non_agent_failure_until(
+                let already_terminal = terminalize_tender_document_failure_until(
                     pool,
                     &job.request,
-                    NonAgentTerminalFailure::TenderDocument("AGENT_OUTPUT_INVALID"),
+                    "AGENT_OUTPUT_INVALID",
                     cleanup_deadline,
                     "tender process failure",
                 )
@@ -359,6 +328,9 @@ impl oxana::Worker<RequirementSetCompileJobV2> for RequirementSetCompileV2Worker
         let cancel = CancellationToken::new();
         let pipeline_cancel = cancel.clone();
         let pool = pool.clone();
+        // Worker 角色不能直读 identities 表。草稿 20min 由分析 heartbeat 执行；
+        // 这里只保留进程围栏，取官方 45min（覆盖草稿上限）。
+        let timeout = REQUIREMENT_HANDLER_HARD_TIMEOUT.max(REQUIREMENT_DRAFT_HANDLER_HARD_TIMEOUT);
         let run = run_owned_handler(
             async move {
                 bidding::tender_analysis::postgres::execute(
@@ -371,7 +343,7 @@ impl oxana::Worker<RequirementSetCompileJobV2> for RequirementSetCompileV2Worker
                 .map(|_| ())
                 .map_err(|e| JobErr(e.to_string()))
             },
-            HandlerDeadline::from_now(REQUIREMENT_HANDLER_HARD_TIMEOUT),
+            HandlerDeadline::from_now(timeout),
             self.shutdown.clone(),
             cancel,
             None,

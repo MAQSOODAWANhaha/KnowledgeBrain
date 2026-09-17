@@ -13,6 +13,55 @@ pub(crate) fn region_bookmark_name(section: usize, block: usize, region: usize) 
     format!("{}_r{region}", bookmark_name(section, Some(block)))
 }
 
+/// Initial text for the existing quote/blank and contiguous-region primitives.
+/// Removed ranges address the original UTF-8 bytes, before newline normalization.
+pub(crate) fn initial_text_fragment(
+    raw: &str,
+    blank: bool,
+    inline: bool,
+    prior_cr: &mut bool,
+) -> (String, Vec<std::ops::Range<usize>>) {
+    if blank && !inline {
+        return (
+            String::new(),
+            (!raw.is_empty())
+                .then_some(0..raw.len())
+                .into_iter()
+                .collect(),
+        );
+    }
+    let mut fragment = String::new();
+    for ch in raw.chars() {
+        if ch != '\n' || !*prior_cr {
+            fragment.push(if ch == '\r' { '\n' } else { ch });
+        }
+        *prior_cr = ch == '\r';
+    }
+    let mut removed = Vec::new();
+    if blank {
+        fragment = fragment
+            .split('\n')
+            .map(|line| {
+                if line.chars().all(char::is_whitespace) {
+                    line
+                } else {
+                    " "
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut start = 0;
+        for line in raw.split_inclusive(['\r', '\n']) {
+            let text = line.trim_end_matches(['\r', '\n']);
+            if !text.chars().all(char::is_whitespace) {
+                removed.push(start..start + text.len());
+            }
+            start += line.len();
+        }
+    }
+    (fragment, removed)
+}
+
 pub(crate) fn resolve_text_regions(
     input: &Value,
     block: &TemplateBlock,
@@ -43,26 +92,7 @@ pub(crate) fn resolve_text_regions(
             .ok_or_else(|| invalid("text region range invalid"))?;
         end = Some(region.end);
         // Normalize the shared stream, including a CRLF split across regions.
-        let mut fragment = String::new();
-        for ch in raw.chars() {
-            if ch != '\n' || !prior_cr {
-                fragment.push(if ch == '\r' { '\n' } else { ch });
-            }
-            prior_cr = ch == '\r';
-        }
-        if region.blank {
-            fragment = fragment
-                .split('\n')
-                .map(|line| {
-                    if line.chars().all(char::is_whitespace) {
-                        line
-                    } else {
-                        " "
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-        }
+        let (fragment, _) = initial_text_fragment(raw, region.blank, true, &mut prior_cr);
         out.push(fragment);
     }
     Ok(out)

@@ -16,9 +16,9 @@ use crate::proto::{
     StructuredSourceUnit as ProtoStructuredSourceUnit,
 };
 use crate::{
-    CompoundImageParent, ConvertError, ImageRef, NOT_CONFIGURED, ReadResult, SpreadsheetCell,
-    SpreadsheetRange, SpreadsheetTableIdentity, StructuredSourceLocator, StructuredSourceUnit,
-    StructuredSourceUnitKind,
+    CompoundImageParent, ConvertError, DocReaderReadError, ImageRef, NOT_CONFIGURED, ReadResult,
+    SpreadsheetCell, SpreadsheetRange, SpreadsheetTableIdentity, StructuredSourceLocator,
+    StructuredSourceUnit, StructuredSourceUnitKind,
 };
 
 pub const DOCREADER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -138,25 +138,33 @@ pub async fn read(
     req: ConvertRequest,
     cancel: &CancellationToken,
 ) -> Result<ReadResult, ConvertError> {
-    if cancel.is_cancelled() {
-        return Err(ConvertError("cancelled".into()));
-    }
-    let Some(addr) = reader_addr() else {
+    // Preserve the established ingest API's missing-configuration response.
+    if reader_addr().is_none() && !cancel.is_cancelled() {
         return Ok(ReadResult {
             error: NOT_CONFIGURED.into(),
             ..ReadResult::default()
         });
-    };
-    let fut = read_inner(&addr, req, cancel);
+    }
+    read_classified(req, cancel)
+        .await
+        .map_err(|error| ConvertError(error.to_string()))
+}
+
+pub(crate) async fn read_classified(
+    req: ConvertRequest,
+    cancel: &CancellationToken,
+) -> Result<ReadResult, DocReaderReadError> {
+    if cancel.is_cancelled() {
+        return Err(DocReaderReadError::Cancelled);
+    }
+    let addr =
+        reader_addr().ok_or_else(|| DocReaderReadError::Configuration(NOT_CONFIGURED.into()))?;
     tokio::select! {
         biased;
-        () = cancel.cancelled() => Err(ConvertError("cancelled".into())),
-        result = timeout(DOCREADER_TIMEOUT, fut) => match result {
-            Ok(r) => r,
-            Err(_) => Err(ConvertError(format!(
-                "docreader call timeout after {:?}",
-                DOCREADER_TIMEOUT
-            ))),
+        () = cancel.cancelled() => Err(DocReaderReadError::Cancelled),
+        result = timeout(DOCREADER_TIMEOUT, read_inner(&addr, req, cancel)) => match result {
+            Ok(result) => result,
+            Err(_) => Err(DocReaderReadError::Transient(format!("docreader call timeout after {:?}", DOCREADER_TIMEOUT))),
         },
     }
 }
@@ -180,19 +188,24 @@ pub async fn source_view(
 }
 
 async fn connect(addr: &str) -> Result<Client, ConvertError> {
+    connect_classified(addr)
+        .await
+        .map_err(|error| ConvertError(error.to_string()))
+}
+
+async fn connect_classified(addr: &str) -> Result<Client, DocReaderReadError> {
     let url = endpoint_url(addr);
-    let mut endpoint =
-        Channel::from_shared(url.clone()).map_err(|e| ConvertError(e.to_string()))?;
+    let mut endpoint = Channel::from_shared(url.clone())
+        .map_err(|e| DocReaderReadError::Configuration(e.to_string()))?;
     if url.starts_with("https://") || tls_enabled() {
         let tls = ClientTlsConfig::new().with_native_roots();
         endpoint = endpoint
             .tls_config(tls)
-            .map_err(|e| ConvertError(e.to_string()))?;
+            .map_err(|e| DocReaderReadError::Configuration(e.to_string()))?;
     }
-    let channel = endpoint
-        .connect()
-        .await
-        .map_err(|e| ConvertError(format!("failed to connect to docreader: {e}")))?;
+    let channel = endpoint.connect().await.map_err(|e| {
+        DocReaderReadError::Transient(format!("failed to connect to docreader: {e}"))
+    })?;
     let max = max_message_size();
     Ok(DocReaderClient::with_interceptor(
         channel,
@@ -223,21 +236,36 @@ async fn read_inner(
     addr: &str,
     req: ConvertRequest,
     cancel: &CancellationToken,
-) -> Result<ReadResult, ConvertError> {
-    let mut client = connect(addr).await?;
+) -> Result<ReadResult, DocReaderReadError> {
+    let mut client = connect_classified(addr).await?;
     let proto_req = to_proto(req, uuid::Uuid::new_v4().to_string());
     match read_stream(&mut client, proto_req.clone(), cancel).await {
         Ok(r) => Ok(r),
-        Err(e) if e.msg.contains("unimplemented") || e.code == Some(Code::Unimplemented) => {
-            read_unary(&mut client, proto_req).await
-        }
-        Err(e) => Err(ConvertError(e.msg)),
+        Err(e) if e.code == Some(Code::Unimplemented) => read_unary(&mut client, proto_req).await,
+        Err(e) => Err(e.classified()),
     }
 }
 
 struct StreamErr {
     code: Option<Code>,
     msg: String,
+}
+
+impl StreamErr {
+    fn classified(self) -> DocReaderReadError {
+        match self.code {
+            Some(Code::Cancelled) => DocReaderReadError::Cancelled,
+            Some(
+                Code::Unavailable
+                | Code::DeadlineExceeded
+                | Code::Aborted
+                | Code::ResourceExhausted
+                | Code::Internal
+                | Code::Unknown,
+            ) => DocReaderReadError::Transient(self.msg),
+            _ => DocReaderReadError::InvalidResponse(self.msg),
+        }
+    }
 }
 
 async fn read_stream(
@@ -256,7 +284,7 @@ async fn read_stream(
     loop {
         if cancel.is_cancelled() {
             return Err(StreamErr {
-                code: None,
+                code: Some(Code::Cancelled),
                 msg: "cancelled".into(),
             });
         }
@@ -272,13 +300,13 @@ async fn read_stream(
             biased;
             () = cancel.cancelled() => {
                 return Err(StreamErr {
-                    code: None,
+                    code: Some(Code::Cancelled),
                     msg: "cancelled".into(),
                 });
             }
             result = message => match result {
                 Ok(r) => r,
-                Err(_) => break,
+                Err(_) => return Err(StreamErr { code: Some(Code::DeadlineExceeded), msg: "DocReader stream frame timeout".into() }),
             },
         };
         let Some(frame) = next.map_err(map_status)? else {
@@ -288,7 +316,7 @@ async fn read_stream(
     }
     if !got_meta {
         return Err(StreamErr {
-            code: None,
+            code: Some(Code::Unavailable),
             msg: "gRPC ReadStream returned no metadata frame".into(),
         });
     }
@@ -296,7 +324,7 @@ async fn read_stream(
         && result.images.len() < n
     {
         return Err(StreamErr {
-            code: None,
+            code: Some(Code::Unavailable),
             msg: format!(
                 "gRPC ReadStream incomplete: got {} of {n} images",
                 result.images.len()
@@ -306,11 +334,14 @@ async fn read_stream(
     Ok(result)
 }
 
-async fn read_unary(client: &mut Client, req: ReadRequest) -> Result<ReadResult, ConvertError> {
+async fn read_unary(
+    client: &mut Client,
+    req: ReadRequest,
+) -> Result<ReadResult, DocReaderReadError> {
     let resp = client
         .read(req)
         .await
-        .map_err(|e| ConvertError(format!("gRPC Read failed: {e}")))?
+        .map_err(|error| map_status(error).classified())?
         .into_inner();
     Ok(ReadResult {
         markdown: resp.markdown_content,
@@ -318,7 +349,7 @@ async fn read_unary(client: &mut Client, req: ReadRequest) -> Result<ReadResult,
         images: resp.image_refs.into_iter().map(from_proto_image).collect(),
         metadata: resp.metadata,
         structured_source_units: from_proto_units(resp.structured_source_units)
-            .map_err(ConvertError)?,
+            .map_err(DocReaderReadError::InvalidResponse)?,
         ..ReadResult::default()
     })
 }
@@ -898,6 +929,36 @@ fn map_status(s: tonic::Status) -> StreamErr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_error_classification_uses_status_and_decode_boundary_not_message() {
+        for code in [
+            Code::Unavailable,
+            Code::DeadlineExceeded,
+            Code::ResourceExhausted,
+        ] {
+            assert!(matches!(
+                map_status(tonic::Status::new(code, "schema mismatch")).classified(),
+                DocReaderReadError::Transient(_)
+            ));
+        }
+        assert!(matches!(
+            map_status(tonic::Status::invalid_argument("connection refused")).classified(),
+            DocReaderReadError::InvalidResponse(_)
+        ));
+        assert!(matches!(
+            StreamErr {
+                code: None,
+                msg: "timeout".into()
+            }
+            .classified(),
+            DocReaderReadError::InvalidResponse(_)
+        ));
+        assert_eq!(
+            map_status(tonic::Status::cancelled("transport cancelled")).classified(),
+            DocReaderReadError::Cancelled
+        );
+    }
 
     #[test]
     fn proto_forwards_parser_engine_overrides() {

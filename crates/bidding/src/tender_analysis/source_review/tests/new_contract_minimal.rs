@@ -1,11 +1,11 @@
 //! New-contract comparison against testdata/bid/minimal.
 //! Host projections are evidence, never semantic acceptance.
 use super::*;
-use crate::export_review::{inventory_from_docx, schemas as export_schemas};
+use crate::export_review::schemas as export_schemas;
 use crate::tender_analysis::semantic_compare;
 use crate::tender_analysis::{ANALYSIS_GLOBAL_CHECK_KEYS, Source};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::{io::Read, path::Path};
 
 const MINIMAL_SOURCE_SHA256: &str =
     "d743182e1f67ad7f453127562fdda92dd0c2c1c898aefd4800e27c09a66c8a85";
@@ -16,25 +16,46 @@ fn minimal_docx() -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
+// Test-only inspection of the source fixture, not the product output inventory.
+// Product parsing and its coverage contract are exercised through DocReader.
+fn source_xml_text(bytes: &[u8]) -> String {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    archive
+        .by_name("word/document.xml")
+        .unwrap()
+        .read_to_string(&mut xml)
+        .unwrap();
+    let document = roxmltree::Document::parse(&xml).unwrap();
+    document
+        .descendants()
+        .filter(|node| {
+            node.has_tag_name((
+                "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                "t",
+            ))
+        })
+        .filter_map(|node| node.text())
+        .collect()
+}
+
 #[test]
 fn new_contract_minimal_is_host_evidence_not_semantic_acceptance() {
     let bytes = minimal_docx();
     assert_eq!(hex::encode(Sha256::digest(&bytes)), MINIMAL_SOURCE_SHA256);
 
-    let inventory = inventory_from_docx(&bytes, None).unwrap();
+    let joined = source_xml_text(&bytes);
     assert!(
-        !inventory.units.is_empty(),
-        "file-native inventory cannot be empty"
+        joined.contains("附表甲"),
+        "composition table must appear in original OOXML fixture"
     );
-    let joined: String = inventory.units.iter().map(|u| u.text.as_str()).collect();
-    assert!(joined.contains("附表甲"), "composition table must appear in file inventory");
     assert!(
         joined.contains("空白金额由投标人填写"),
-        "bidder-fill instruction must appear in file inventory"
+        "bidder-fill instruction must appear in original OOXML fixture"
     );
     assert!(
         joined.contains("总分100分"),
-        "scoring clause must appear in file inventory"
+        "scoring clause must appear in original OOXML fixture"
     );
 
     assert_eq!(
@@ -58,7 +79,7 @@ fn new_contract_minimal_is_host_evidence_not_semantic_acceptance() {
     let blank = "空白金额由投标人填写";
     let blank_start = joined.find(blank).expect("blank instruction");
 
-    let mut input = FrozenInput {
+    let input = FrozenInput {
         schema_version: 1,
         project_id: "project".into(),
         document_set_id: "set".into(),
@@ -74,7 +95,13 @@ fn new_contract_minimal_is_host_evidence_not_semantic_acceptance() {
             ordinal: 0,
         }],
     };
-    let _ = &mut input;
+    let mut coverage = Coverage::default();
+    tools::cover(
+        coverage.text.entry("source".into()).or_default(),
+        0,
+        joined.len(),
+    );
+    let scope = vec!["source".into()];
     let scoring_span = Span {
         source_id: "source".into(),
         start,
@@ -115,6 +142,8 @@ fn new_contract_minimal_is_host_evidence_not_semantic_acceptance() {
     let wrapper = semantic_compare::attach(
         &input,
         &analysis,
+        &coverage,
+        &scope,
         "record:score",
         json!({"reference":"record:score","value":requirement}),
     );
@@ -158,31 +187,26 @@ fn new_contract_minimal_is_host_evidence_not_semantic_acceptance() {
     let wrapper = semantic_compare::attach(
         &input,
         &analysis,
+        &coverage,
+        &scope,
         "record:price",
         json!({"reference":"record:price","value":template}),
     );
     let effects = wrapper["blank_effects"].as_array().unwrap();
     assert!(
         effects.iter().any(|row| {
-            row["removed"]
+            row["selected_source_text"]
                 .as_str()
                 .is_some_and(|text| text.contains("空白金额由投标人填写"))
         }),
         "whole-line bidder_blank must project removed source bytes: {effects:?}"
     );
-
-    const SEMANTIC_ACCEPTANCE: bool = false;
-    assert!(
-        !SEMANTIC_ACCEPTANCE,
-        "host contract comparison is not model semantic acceptance"
-    );
 }
 
 #[test]
-fn new_contract_minimal_source_inventory_contains_matrix_needles() {
+fn minimal_source_ooxml_contains_matrix_needles() {
     let bytes = minimal_docx();
-    let inventory = inventory_from_docx(&bytes, None).unwrap();
-    let joined: String = inventory.units.iter().map(|u| u.text.as_str()).collect();
+    let joined = source_xml_text(&bytes);
     for (id, needle) in [
         ("M01", "不采购新增硬件"),
         ("M01", "日志管理软件1套"),
@@ -202,11 +226,9 @@ fn new_contract_minimal_source_inventory_contains_matrix_needles() {
     ] {
         assert!(
             joined.contains(needle),
-            "{id} needle {needle:?} missing from file-native inventory"
+            "{id} needle {needle:?} missing from original OOXML fixture"
         );
     }
-    const SEMANTIC_ACCEPTANCE: bool = false;
-    assert!(!SEMANTIC_ACCEPTANCE);
 }
 
 #[test]
@@ -217,8 +239,14 @@ fn new_contract_minimal_rule_and_plan_tools_are_advertised() {
         .find(|tool| tool["function"]["name"] == "put_record")
         .unwrap();
     let dump = put_record.to_string();
-    assert!(dump.contains("composition"), "Rule.items kinds must be on put_record");
-    assert!(dump.contains("submission_hint"), "Rule.items kinds must be on put_record");
+    assert!(
+        dump.contains("composition"),
+        "Rule.items kinds must be on put_record"
+    );
+    assert!(
+        dump.contains("submission_hint"),
+        "Rule.items kinds must be on put_record"
+    );
     let composition = crate::docx_composition::agent::schemas(false);
     assert!(
         composition
@@ -230,6 +258,4 @@ fn new_contract_minimal_rule_and_plan_tools_are_advertised() {
             .iter()
             .any(|tool| tool["function"]["name"] == "put_composition_review")
     );
-    const SEMANTIC_ACCEPTANCE: bool = false;
-    assert!(!SEMANTIC_ACCEPTANCE);
 }

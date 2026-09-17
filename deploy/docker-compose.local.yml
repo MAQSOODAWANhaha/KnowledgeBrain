@@ -2,6 +2,9 @@
 # browser TLS on Caddy. Production compose stays pinned to images.lock.json.
 # Do not add Caddy to the release-descriptor five-image contract.
 services:
+  minio:
+    # 本机无 lock digest，registry 也拉不下来；本地 UI 闭环用已有 latest。
+    image: minio/minio:latest
   retention:
     image: knowledgebrain-worker:local
   api:

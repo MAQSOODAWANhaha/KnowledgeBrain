@@ -62,6 +62,7 @@ async fn fixture() -> (MemoryJournal, Config) {
         ("read_source", json!({"source_id":"source","start":0,"max_bytes":1024})),
         ("put_record", json!({"id":null,"sources":[span()],"data":{"kind":"fact","name":"fixture heading","value":"original","scope":"source"}})),
         ("set_disposition", json!({"source_id":"source","state":"non_requirement","reason":"synthetic fixture carrier"})),
+        ("fixture_global_checks", json!({})),
         ("request_review", json!({})),
         ("set_work_note", active_work("source")),
         ("read_source", json!({"source_id":"source","start":0,"max_bytes":1024})),
@@ -69,6 +70,7 @@ async fn fixture() -> (MemoryJournal, Config) {
         ("inspect_analysis", json!({"kind":"disposition","view":"detail","offset":0,"limit":10})),
         ("put_review_finding", finding("question-one")),
         ("put_review_finding", finding("question-two")),
+        ("fixture_global_checks", json!({})),
         ("put_source_review", json!({"fixture_status":"findings"})),
     ]).await;
     assert_eq!(state.role, Role::Main, "{:#?}", state.transcript);
@@ -301,7 +303,15 @@ async fn later_batch_write_invalidates_receipt_before_task_switch_and_handoff_do
         rejected.repair.tasks.entries[&second].committed_turns + 1
     );
     let completed_tasks = json!(completed.repair.tasks);
-    let reviewer = steps(&config, &journal, vec![("request_review", json!({}))]).await;
+    let reviewer = steps(
+        &config,
+        &journal,
+        vec![
+            ("fixture_global_checks", json!({})),
+            ("request_review", json!({})),
+        ],
+    )
+    .await;
     assert_eq!(reviewer.role, Role::Reviewer, "{:#?}", reviewer.transcript);
     assert!(reviewer.repair.tasks.active.is_none());
     assert_eq!(

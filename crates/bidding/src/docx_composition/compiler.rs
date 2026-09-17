@@ -31,6 +31,31 @@ pub struct SourceExcerpt {
     pub response_location: Location,
 }
 
+/// Actual implementation dependencies, not an automatic semantic verdict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuleImplementationTarget {
+    Section {
+        location: Location,
+        dependencies: Vec<Placement>,
+    },
+    Presentation {
+        property: String,
+        value: serde_json::Value,
+    },
+    ReportNote {
+        omission: Omission,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleImplementation {
+    pub plan_item_id: String,
+    pub reference: Reference,
+    pub implementation: RuleImplementationTarget,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -48,6 +73,8 @@ pub struct Manifest {
     pub source_open_items: Vec<SourceOpenItem>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub plan_sha256: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_implementations: Vec<RuleImplementation>,
     /// Rendering is a structural check, never semantic or bidder approval.
     pub status: String,
 }
@@ -406,7 +433,7 @@ fn template(
                         },
                         &field,
                     );
-                    if r.role == RegionRole::BidderBlank && r.blank_ranges.is_empty() {
+                    if !r.role.preserves_source_text() && r.blank_ranges.is_empty() {
                         out.blank_cells.push(CellRef {
                             row: cell.row,
                             column: cell.column,
@@ -439,7 +466,7 @@ fn template(
                     out.text_regions.push(TextRegion {
                         start: region.source.start,
                         end: region.source.end,
-                        blank: region.role == RegionRole::BidderBlank,
+                        blank: !region.role.preserves_source_text(),
                     });
                     let inline = Location {
                         bookmark: render::region_bookmark_name(ordinal, blocks.len(), offset),
@@ -472,12 +499,12 @@ fn template(
                 .get(region.source.start..region.source.end)
                 .filter(|s| !s.is_empty())
                 .ok_or("template region text missing")?;
-            let mut out = block(if region.role == RegionRole::BidderBlank {
+            let mut out = block(if !region.role.preserves_source_text() {
                 "blank"
             } else {
                 "quote"
             });
-            if region.role != RegionRole::BidderBlank {
+            if region.role.preserves_source_text() {
                 out.source_id = Some(region.source.source_id.clone());
                 out.quote = Some(quote.into());
             }
@@ -503,6 +530,10 @@ pub fn compile(
     max_docx_bytes: usize,
 ) -> Result<Compiled, String> {
     draft.validate_basis(input, result)?;
+    if !result.review.draft {
+        super::validate_plan(result, draft)?;
+    }
+    super::validate_plan_sections(draft)?;
     let p = draft
         .presentation
         .as_ref()
@@ -682,7 +713,11 @@ pub fn compile(
             cell: None,
         });
     }
-    account(input, result, draft, &placements)?;
+    let rule_implementations =
+        implement_rules(input, result, draft, &placements, &section_locations)?;
+    if !result.review.draft {
+        account(input, result, draft, &placements, &rule_implementations)?;
+    }
     let used_sources: BTreeSet<_> = plan
         .sections
         .iter()
@@ -744,6 +779,7 @@ pub fn compile(
         } else {
             digest(&draft.plan)?
         },
+        rule_implementations,
         status: "needs_review".into(),
     };
     Ok(Compiled {
@@ -753,16 +789,330 @@ pub fn compile(
     })
 }
 
+fn rule_target_placements(
+    target: &crate::tender_analysis::RuleItemTarget,
+    draft: &Draft,
+    placements: &[Placement],
+    sections: &[Location],
+) -> Result<Vec<Placement>, String> {
+    use crate::tender_analysis::RuleItemTarget;
+    match target {
+        RuleItemTarget::Record { id } => Ok(placements
+            .iter()
+            .filter(|p| &p.reference.record_id == id)
+            .cloned()
+            .collect()),
+        RuleItemTarget::RuleItem { record_id, item_id } => {
+            let target = Reference {
+                record_id: record_id.clone(),
+                target: RelationTarget::RuleItem {
+                    item_id: item_id.clone(),
+                },
+            };
+            let key = reference_key(&target)?;
+            Ok(draft
+                .plan
+                .values()
+                .filter(|item| {
+                    item.kind == PlanItemKind::Section && item.obligation_refs.contains(&key)
+                })
+                .filter_map(|item| sections.iter().find(|s| s.section_id == item.id))
+                .map(|location| Placement {
+                    reference: target.clone(),
+                    location: location.clone(),
+                })
+                .collect())
+        }
+        RuleItemTarget::Unresolved { .. } => {
+            Err("unresolved rule target cannot be claimed as an implemented section".into())
+        }
+    }
+}
+
+/// Follow composition aliases to their emitted content. Signature targets name
+/// the signed object, so they must not replace the signature's own position.
+fn rule_order_locations(
+    reference: &Reference,
+    analysis: &Analysis,
+    draft: &Draft,
+    placements: &[Placement],
+    sections: &[Location],
+    visiting: &mut BTreeSet<String>,
+) -> Result<Vec<Location>, String> {
+    use crate::tender_analysis::{RuleItemKind, RuleItemTarget};
+    let key = reference_key(reference)?;
+    if !visiting.insert(key.clone()) {
+        return Err("cyclic rule sequence target references".into());
+    }
+    let RelationTarget::RuleItem { item_id } = &reference.target else {
+        return Err("rule sequence must reference a rule item".into());
+    };
+    let Some(Record {
+        data: RecordData::Rule { items, .. },
+        ..
+    }) = analysis.records.get(&reference.record_id)
+    else {
+        return Err("rule sequence references an unknown rule".into());
+    };
+    let item = items
+        .iter()
+        .find(|item| &item.id == item_id)
+        .ok_or("rule sequence references an unknown item")?;
+    let mut locations = vec![];
+    if item.kind == RuleItemKind::Composition && !item.targets.is_empty() {
+        for target in &item.targets {
+            let found = if let RuleItemTarget::RuleItem { record_id, item_id } = target {
+                rule_order_locations(
+                    &Reference {
+                        record_id: record_id.clone(),
+                        target: RelationTarget::RuleItem {
+                            item_id: item_id.clone(),
+                        },
+                    },
+                    analysis,
+                    draft,
+                    placements,
+                    sections,
+                    visiting,
+                )?
+            } else {
+                rule_target_placements(target, draft, placements, sections)?
+                    .into_iter()
+                    .map(|p| p.location)
+                    .collect()
+            };
+            if found.is_empty() {
+                return Err("rule sequence target has no actual content location".into());
+            }
+            locations.extend(found);
+        }
+    } else {
+        locations.extend(
+            sections
+                .iter()
+                .filter(|location| {
+                    draft.plan[&location.section_id]
+                        .obligation_refs
+                        .contains(&key)
+                })
+                .cloned(),
+        );
+    }
+    visiting.remove(&key);
+    Ok(locations)
+}
+
+fn implement_rules(
+    input: &FrozenInput,
+    result: &AnalysisResult,
+    draft: &Draft,
+    placements: &[Placement],
+    sections: &[Location],
+) -> Result<Vec<RuleImplementation>, String> {
+    use crate::tender_analysis::rule_contract::RuleItemKind;
+    let inventory: std::collections::BTreeMap<_, _> = required_references(result)
+        .into_iter()
+        .map(|r| Ok((reference_key(&r)?, r)))
+        .collect::<Result<_, String>>()?;
+    let mut implementations = vec![];
+    for plan in draft.plan.values() {
+        validate_grounds(input, &result.analysis, &plan.grounds)?;
+        for key in &plan.obligation_refs {
+            let reference = inventory.get(key).ok_or("unknown planned obligation")?;
+            let RelationTarget::RuleItem { item_id } = &reference.target else {
+                if plan.kind == PlanItemKind::Presentation {
+                    return Err("presentation can implement format rules, not bidder response or proof obligations".into());
+                }
+                continue;
+            };
+            let RecordData::Rule { items, .. } =
+                &result.analysis.records[&reference.record_id].data
+            else {
+                return Err("rule implementation requires a rule record".into());
+            };
+            let rule = items
+                .iter()
+                .find(|item| &item.id == item_id)
+                .ok_or("unknown rule item")?;
+            let implementation = match plan.kind {
+                PlanItemKind::Section => {
+                    if matches!(
+                        rule.kind,
+                        RuleItemKind::Format | RuleItemKind::SubmissionHint
+                    ) {
+                        return Err("format and submission rules need an actual presentation or report implementation".into());
+                    }
+                    let location = sections
+                        .iter()
+                        .find(|s| s.section_id == plan.id)
+                        .ok_or("rule section implementation missing")?
+                        .clone();
+                    let mut dependencies = vec![];
+                    for target in &rule.targets {
+                        let found = rule_target_placements(target, draft, placements, sections)?;
+                        if found.is_empty() {
+                            return Err("rule target has no actual document implementation".into());
+                        }
+                        dependencies.extend(found);
+                    }
+                    if rule.kind == RuleItemKind::Order {
+                        if rule.sequence.is_empty() {
+                            return Err("rule sequence has no ordered items".into());
+                        }
+                        let mut previous = None;
+                        for item_id in &rule.sequence {
+                            let target = Reference {
+                                record_id: reference.record_id.clone(),
+                                target: RelationTarget::RuleItem {
+                                    item_id: item_id.clone(),
+                                },
+                            };
+                            let key = reference_key(&target)?;
+                            // account() validates this exception, its evidence and the
+                            // prohibition on simultaneously implementing and omitting it.
+                            if draft.omissions.contains_key(&key) {
+                                continue;
+                            }
+                            let locations = rule_order_locations(
+                                &target,
+                                &result.analysis,
+                                draft,
+                                placements,
+                                sections,
+                                &mut BTreeSet::new(),
+                            )?;
+                            // `sections` is the compiler's actual traversal, including
+                            // parents. Distinct emitted block bookmarks also establish
+                            // order within a section; a shared bookmark cannot prove it.
+                            let mut positions = locations
+                                .into_iter()
+                                .map(|location| {
+                                    let section = sections
+                                        .iter()
+                                        .position(|s| s.section_id == location.section_id)
+                                        .ok_or(
+                                            "rule sequence location is outside the actual document",
+                                        )?;
+                                    let block = placements
+                                        .iter()
+                                        .position(|p| p.location.bookmark == location.bookmark)
+                                        .map_or(0, |index| index + 1);
+                                    Ok(((section, block), location))
+                                })
+                                .collect::<Result<Vec<_>, String>>()?;
+                            positions.sort_by_key(|(position, _)| *position);
+                            positions.dedup_by_key(|(position, _)| *position);
+                            let Some((first, _)) = positions.first() else {
+                                return Err(
+                                    "rule sequence item has no actual section location".into()
+                                );
+                            };
+                            if previous.is_some_and(|last| last >= *first) {
+                                return Err("rule sequence differs from actual content order or shares an unproven location".into());
+                            }
+                            for (position, location) in positions {
+                                previous = Some(position);
+                                dependencies.push(Placement {
+                                    reference: target.clone(),
+                                    location: location.clone(),
+                                });
+                            }
+                        }
+                    }
+                    RuleImplementationTarget::Section {
+                        location,
+                        dependencies,
+                    }
+                }
+                PlanItemKind::Presentation => {
+                    if rule.kind != RuleItemKind::Format {
+                        return Err("presentation implementation requires a format rule".into());
+                    }
+                    let presentation = draft
+                        .presentation
+                        .as_ref()
+                        .ok_or("presentation implementation missing")?;
+                    let property = rule
+                        .format_key
+                        .as_ref()
+                        .ok_or("format rule property missing")?;
+                    let wanted = rule
+                        .format_value
+                        .as_ref()
+                        .ok_or("format rule value missing")?;
+                    // These are the serialized finite TemplateStyle fields, never text keyword inference.
+                    let style =
+                        serde_json::to_value(&presentation.style).map_err(|e| e.to_string())?;
+                    let value = style
+                        .get(property)
+                        .ok_or("format property is not supported by TemplateStyle")?;
+                    let matches = value.as_str().is_some_and(|actual| actual == wanted)
+                        || serde_json::from_str::<serde_json::Value>(wanted)
+                            .ok()
+                            .as_ref()
+                            .is_some_and(|expected| {
+                                expected == value
+                                    || expected
+                                        .as_f64()
+                                        .zip(value.as_f64())
+                                        .is_some_and(|(a, b)| a == b)
+                            });
+                    if !matches {
+                        return Err(
+                            "actual presentation value does not match the frozen format rule"
+                                .into(),
+                        );
+                    }
+                    RuleImplementationTarget::Presentation {
+                        property: property.clone(),
+                        value: value.clone(),
+                    }
+                }
+                PlanItemKind::ReportNote => {
+                    let omission = draft
+                        .omissions
+                        .get(key)
+                        .ok_or("report plan needs an actual omission entry")?;
+                    if plan.exception.as_ref() != Some(&omission.reason) {
+                        return Err(
+                            "report plan exception must match the actual omission explanation"
+                                .into(),
+                        );
+                    }
+                    RuleImplementationTarget::ReportNote {
+                        omission: omission.clone(),
+                    }
+                }
+            };
+            implementations.push(RuleImplementation {
+                plan_item_id: plan.id.clone(),
+                reference: reference.clone(),
+                implementation,
+            });
+        }
+    }
+    Ok(implementations)
+}
+
 fn account(
     input: &FrozenInput,
     result: &AnalysisResult,
     draft: &Draft,
     placements: &[Placement],
+    rule_implementations: &[RuleImplementation],
 ) -> Result<(), String> {
     let mut accounted: BTreeSet<String> = placements
         .iter()
         .map(|p| reference_key(&p.reference))
         .collect::<Result<_, _>>()?;
+    for implementation in rule_implementations {
+        if !matches!(
+            implementation.implementation,
+            RuleImplementationTarget::ReportNote { .. }
+        ) {
+            accounted.insert(reference_key(&implementation.reference)?);
+        }
+    }
     for (key, omission) in &draft.omissions {
         validate_reference(input, &result.analysis, &omission.reference)?;
         validate_grounds(input, &result.analysis, &omission.grounds)?;
@@ -837,8 +1187,11 @@ fn account(
 }
 
 pub fn required_references(result: &AnalysisResult) -> Vec<Reference> {
-    result
-        .analysis
+    required_references_for_analysis(&result.analysis)
+}
+
+pub(crate) fn required_references_for_analysis(analysis: &Analysis) -> Vec<Reference> {
+    analysis
         .records
         .values()
         .flat_map(|record| {

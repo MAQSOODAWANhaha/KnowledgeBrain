@@ -98,6 +98,7 @@ async fn partial_repair_feedback_read_cannot_start_another_review() {
             .unwrap(),
         );
     }
+    agent::main_dispatch::after_batch(&input(), &config(), &mut state, None, false, false).unwrap();
     let start = state.turn;
     *journal.state.lock().unwrap() = Some(state);
     *journal.interrupt_after.lock().unwrap() = Some(start + 2);
@@ -214,6 +215,7 @@ async fn complete_feedback_delivery_cannot_replace_per_finding_repair_dispositio
         "correction":"Reconcile this finding against its actual original evidence.",
         "affected":[], "sources":[span()]
     })).unwrap());
+    agent::main_dispatch::after_batch(&input(), &config(), &mut state, None, false, false).unwrap();
     let start = state.turn;
     *journal.state.lock().unwrap() = Some(state);
     *journal.interrupt_after.lock().unwrap() = Some(start + 2);
@@ -262,6 +264,7 @@ pub(super) async fn repair_fixture(affected: bool) -> (MemoryJournal, Config, St
     })).unwrap();
     let sha = digest(&finding).unwrap();
     state.review_draft.insert("fixture-issue".into(), finding);
+    agent::main_dispatch::after_batch(&input(), &config, &mut state, None, false, false).unwrap();
     *journal.state.lock().unwrap() = Some(state);
     (journal, config, id, sha)
 }

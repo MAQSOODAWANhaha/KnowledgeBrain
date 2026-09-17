@@ -13,7 +13,7 @@ pub(crate) use driver::{Driver, Status, check_cancel, drive};
 /// Versioned persistence contract, independent of provider and business rules.
 pub const CHECKPOINT_CONTRACT_VERSION: u32 = 3;
 /// Freeze the SDK/adapter separately from the Journal's persistence format.
-pub const RUNTIME_ADAPTER_VERSION: &str = "rig-chat-0.42.0/3";
+pub const RUNTIME_ADAPTER_VERSION: &str = "rig-chat-0.42.0/4";
 
 /// Host messages before the SDK evidence transcript: system instruction plus
 /// per-request metadata. Extraction and composition share this layout.

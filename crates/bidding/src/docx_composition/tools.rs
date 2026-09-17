@@ -49,6 +49,14 @@ pub struct PlanReview {
     pub finding_ids: Vec<String>,
     pub grounds: Vec<Span>,
     pub artifact_sha256: String,
+    pub draft_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompileFeedback {
+    pub draft_sha256: String,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +73,8 @@ pub struct Workspace {
     pub inspected: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plan_reviews: BTreeMap<String, PlanReview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compile_feedback: Option<CompileFeedback>,
 }
 
 impl Workspace {
@@ -80,6 +90,7 @@ impl Workspace {
             review_coverage: Coverage::default(),
             inspected: BTreeMap::new(),
             plan_reviews: BTreeMap::new(),
+            compile_feedback: None,
         })
     }
     /// Apply on a clone and commit only after the bounded response fits. No
@@ -188,26 +199,39 @@ impl Workspace {
                 let mut id = None;
                 match name {
                     "put_composition_plan_item" => {
-                        let mut item: PlanItem =
-                            serde_json::from_value(payload).map_err(|e| e.to_string())?;
-                        if item.id.trim().is_empty() {
-                            item.id = uuid::Uuid::new_v4().to_string();
+                        if payload["id"].is_null()
+                            || payload["id"]
+                                .as_str()
+                                .is_some_and(|id| id.trim().is_empty())
+                        {
+                            // The same received response must allocate the same
+                            // identity after a crash before committed is saved.
+                            payload["id"] = Value::Null;
+                            let key = digest(&json!({"draft_sha256":expected,"item":payload}))?;
+                            payload["id"] = json!(format!("plan_{key}"));
                         }
+                        let item: PlanItem =
+                            serde_json::from_value(payload).map_err(|e| e.to_string())?;
                         validate_grounds(input, &result.analysis, &item.grounds)?;
+                        for span in &item.grounds {
+                            crate::tender_analysis::tools::validate_span(
+                                input,
+                                &self.source_coverage,
+                                span,
+                            )?;
+                        }
                         if item.title.trim().is_empty() {
                             return Err("plan item title required".into());
                         }
-                        if item
-                            .parent
-                            .as_ref()
-                            .is_some_and(|parent| {
-                                parent == &item.id || !self.draft.plan.contains_key(parent)
-                            })
-                        {
+                        if item.parent.as_ref().is_some_and(|parent| {
+                            parent == &item.id || !self.draft.plan.contains_key(parent)
+                        }) {
                             return Err("invalid plan parent".into());
                         }
                         let key = item.id.clone();
                         self.draft.plan.insert(key.clone(), item);
+                        // Partial inventories are allowed while planning; invalid references are not.
+                        plan_complete(result, &self.draft)?;
                         id = Some(key);
                     }
                     "set_presentation" => {
@@ -220,32 +244,17 @@ impl Workspace {
                         self.draft.presentation = Some(p);
                     }
                     "put_section" => {
-                        let key = match payload["id"].as_str() {
-                            Some(key) if self.draft.sections.contains_key(key) => key.to_owned(),
-                            Some(key)
-                                if self.draft.plan.get(key).is_some_and(|item| {
-                                    item.kind == PlanItemKind::Section
-                                }) =>
-                            {
-                                key.to_owned()
-                            }
-                            Some(_) => {
-                                return Err("unknown section; use null id for creation".into());
-                            }
-                            None if payload["id"].is_null() && self.draft.plan.is_empty() => {
-                                uuid::Uuid::new_v4().to_string()
-                            }
-                            _ => return Err("invalid section id".into()),
-                        };
-                        payload["id"] = json!(key);
-                        if !self.draft.plan.is_empty()
-                            && self.draft.plan.get(&key).is_none_or(|item| {
-                                item.kind != PlanItemKind::Section
-                            })
-                        {
-                            return Err(
-                                "section id must be an existing chapter plan item".into(),
-                            );
+                        let key = payload["id"]
+                            .as_str()
+                            .ok_or("section requires an existing plan item id")?
+                            .to_owned();
+                        let planned = self
+                            .draft
+                            .plan
+                            .get(&key)
+                            .ok_or("section requires an existing plan item id")?;
+                        if planned.kind != PlanItemKind::Section {
+                            return Err("section requires a section plan item".into());
                         }
                         let section: Section =
                             serde_json::from_value(payload).map_err(|e| e.to_string())?;
@@ -257,6 +266,13 @@ impl Workspace {
                                 .is_some_and(|p| p == &key || !self.draft.sections.contains_key(p))
                         {
                             return Err("invalid chapter title or parent".into());
+                        }
+                        if section.parent != planned.parent
+                            || section.order != planned.order
+                            || section.title != planned.title
+                            || section.placement != planned.placement
+                        {
+                            return Err("section identity, parent, order, title and placement must match its plan".into());
                         }
                         validate_section_content(input, result, &section)?;
                         self.draft.sections.insert(key.clone(), section);
@@ -346,8 +362,12 @@ impl Workspace {
                     _ => self
                         .findings
                         .iter()
-                        .enumerate()
-                        .map(|(i, v)| (format!("finding:{i}"), json!(v)))
+                        .map(|v| {
+                            (
+                                format!("finding:{}", digest(v).expect("serializable finding")),
+                                json!(v),
+                            )
+                        })
                         .collect(),
                 };
                 if offset > rows.len() {
@@ -383,7 +403,9 @@ impl Workspace {
                         Content::Placeholder{needs}|Content::ResponseTable{needs,..} => needs.contains(r),
                         Content::SourceResponse{need,..} => need == r,
                     })).map(|s|&s.id).collect();
-                    json!({"reference":r,"planned_sections":sections,"omission":self.draft.omissions.get(&reference_key(r).expect("serializable reference"))})
+                    let key = reference_key(r).expect("serializable reference");
+                    let plan_items: Vec<_> = self.draft.plan.values().filter(|item| item.obligation_refs.contains(&key)).map(|item| &item.id).collect();
+                    json!({"reference":r,"obligation_ref":key,"planned_items":plan_items,"implemented_sections":sections,"omission":self.draft.omissions.get(&key)})
                 }).collect();
                 Ok(json!({"total":required.len(),"next":offset+items.len(),"items":items}))
             }
@@ -431,8 +453,18 @@ impl Workspace {
                     return Err("reviewer inspects the frozen render, not a replacement".into());
                 }
                 empty(args)?;
+                validate_plan(result, &self.draft)?;
+                if let Some(feedback) = &self.compile_feedback
+                    && feedback.draft_sha256 == digest(&self.draft)?
+                {
+                    return Err(feedback.error.clone());
+                }
                 let compiled = compile(input, result, &self.draft, max_docx_bytes)?;
+                if !implementation_complete(&self.draft, Some(&compiled)) {
+                    return Err("planned composition implementation is incomplete".into());
+                }
                 let out = json!({"draft_sha256":compiled.manifest.draft_sha256,"docx_sha256":compiled.manifest.docx_sha256,"bytes":compiled.docx.len(),"sections":compiled.manifest.sections.len(),"placements":compiled.manifest.placements.len(),"source_quality":compiled.manifest.source_quality,"source_open_items":compiled.manifest.source_open_items.len(),"status":"needs_review"});
+                self.compile_feedback = None;
                 self.artifact = Some(Artifact {
                     docx_base64: STANDARD.encode(compiled.docx),
                     manifest: compiled.manifest,
@@ -475,48 +507,65 @@ impl Workspace {
                 if !self.reviewing {
                     return Err("independent review is not active".into());
                 }
-                let item_id = args["item_id"].as_str().ok_or("plan item id required")?.to_owned();
-                if self.draft.plan.is_empty() {
-                    if !self.draft.sections.contains_key(&item_id) {
-                        return Err("unknown chapter for composition review".into());
-                    }
-                } else if !self.draft.plan.contains_key(&item_id) {
-                    return Err("unknown plan item for composition review".into());
-                }
+                let item_id = args["item_id"]
+                    .as_str()
+                    .ok_or("plan item id required")?
+                    .to_owned();
+                let item = self
+                    .draft
+                    .plan
+                    .get(&item_id)
+                    .ok_or("unknown plan item for composition review")?;
                 let conclusion: PlanReviewConclusion =
-                    serde_json::from_value(args["conclusion"].clone()).map_err(|e| e.to_string())?;
+                    serde_json::from_value(args["conclusion"].clone())
+                        .map_err(|e| e.to_string())?;
                 let grounds: Vec<Span> =
                     serde_json::from_value(args["grounds"].clone()).map_err(|e| e.to_string())?;
-                let finding_ids: Vec<String> = args
-                    .get("finding_ids")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|e| e.to_string())?
-                    .unwrap_or_default();
-                if matches!(conclusion, PlanReviewConclusion::Findings) && finding_ids.is_empty() {
-                    return Err("findings conclusion needs finding ids".into());
+                let mut finding_ids: Vec<String> =
+                    serde_json::from_value(args.get("finding_ids").cloned().unwrap_or(json!([])))
+                        .map_err(|e| e.to_string())?;
+                let findings: Vec<CompositionFinding> =
+                    serde_json::from_value(args.get("findings").cloned().unwrap_or(json!([])))
+                        .map_err(|e| e.to_string())?;
+                for finding in findings {
+                    self.validate_finding(input, result, &finding)?;
+                    let id = digest(&finding)?;
+                    if !finding_ids.contains(&id) {
+                        finding_ids.push(id.clone());
+                    }
+                    if !self
+                        .findings
+                        .iter()
+                        .any(|f| digest(f).ok().as_ref() == Some(&id))
+                    {
+                        self.findings.push(finding);
+                    }
                 }
-                if matches!(conclusion, PlanReviewConclusion::SourceLimited) && grounds.is_empty() {
-                    return Err("source_limited conclusion needs grounds".into());
-                }
-                let artifact_sha256 = self
+                let artifact = self
                     .artifact
                     .as_ref()
-                    .ok_or("compile the draft before independent review")?
-                    .manifest
-                    .docx_sha256
-                    .clone();
-                self.plan_reviews.insert(
-                    item_id.clone(),
-                    PlanReview {
-                        item_id: item_id.clone(),
-                        conclusion,
-                        finding_ids,
-                        grounds,
-                        artifact_sha256,
-                    },
-                );
+                    .ok_or("compile the draft before independent review")?;
+                let review = PlanReview {
+                    item_id: item_id.clone(),
+                    conclusion,
+                    finding_ids,
+                    grounds,
+                    artifact_sha256: artifact.manifest.docx_sha256.clone(),
+                    draft_sha256: digest(&self.draft)?,
+                };
+                self.validate_plan_review(input, result, item, &review)?;
+                // An explicit evidence-backed new item judgment may withdraw only its own prior findings.
+                let previous = self.plan_reviews.insert(item_id.clone(), review);
+                if let Some(previous) = previous {
+                    self.findings.retain(|finding| {
+                        let id = digest(finding).expect("serializable finding");
+                        !previous.finding_ids.contains(&id)
+                            || self
+                                .plan_reviews
+                                .values()
+                                .any(|r| r.finding_ids.contains(&id))
+                    });
+                }
                 Ok(json!({"saved":true,"item_id":item_id}))
             }
             "request_composition_review" => {
@@ -528,8 +577,9 @@ impl Workspace {
                     .artifact
                     .as_ref()
                     .ok_or("compile the draft before independent review")?;
-                if a.manifest.draft_sha256 != digest(&self.draft)? {
-                    return Err("render is stale".into());
+                validate_plan(result, &self.draft)?;
+                if !implementation_manifest_complete(&self.draft, &a.manifest) {
+                    return Err("render is stale or plan implementation incomplete".into());
                 }
                 self.reviewing = true;
                 self.review_rounds += 1;
@@ -553,49 +603,24 @@ impl Workspace {
                         gaps.len()
                     ));
                 }
-                if !self.draft.plan.is_empty() {
-                    let missing: Vec<_> = self
-                        .draft
-                        .plan
-                        .keys()
-                        .filter(|id| !self.plan_reviews.contains_key(*id))
-                        .cloned()
-                        .collect();
-                    if !missing.is_empty() {
-                        return Err(format!(
-                            "{} plan items lack composition review", 
-                            missing.len()
-                        ));
-                    }
-                }
-                let findings: Vec<CompositionFinding> =
+                let submitted: Vec<CompositionFinding> =
                     serde_json::from_value(args["findings"].clone()).map_err(|e| e.to_string())?;
-                for f in &findings {
-                    if f.message.trim().is_empty()
-                        || f.section_ids.is_empty()
-                            && f.record_ids.is_empty()
-                            && f.sources.is_empty()
-                        || f.section_ids
-                            .iter()
-                            .any(|id| !self.draft.sections.contains_key(id))
-                        || f.record_ids
-                            .iter()
-                            .any(|id| !result.analysis.records.contains_key(id))
+                for finding in &submitted {
+                    self.validate_finding(input, result, finding)?;
+                    if !self
+                        .findings
+                        .iter()
+                        .any(|saved| digest(saved).ok() == digest(finding).ok())
                     {
-                        return Err(
-                            "review finding needs valid affected objects and explanation".into(),
-                        );
-                    }
-                    for span in &f.sources {
-                        crate::tender_analysis::tools::validate_span(
-                            input,
-                            &self.review_coverage,
-                            span,
-                        )?;
+                        return Err("save findings through put_composition_review before submitting the aggregate".into());
                     }
                 }
-                self.done = findings.is_empty();
-                self.findings = findings;
+                self.validate_plan_reviews(input, result, false)?;
+                self.done = self.findings.is_empty()
+                    && self
+                        .plan_reviews
+                        .values()
+                        .all(|r| r.conclusion != PlanReviewConclusion::Findings);
                 self.reviewing = false;
                 if self.done {
                     let manifest = &mut self
@@ -621,6 +646,12 @@ impl Workspace {
         let mut rows = vec![("presentation".into(), json!(self.draft.presentation))];
         rows.extend(
             self.draft
+                .plan
+                .iter()
+                .map(|(id, item)| (format!("plan:{id}"), json!(item))),
+        );
+        rows.extend(
+            self.draft
                 .relation_omissions
                 .iter()
                 .map(|(id, v)| (format!("relation_omission:{id}"), json!(v))),
@@ -638,6 +669,16 @@ impl Workspace {
                 .map(|(id, s)| (format!("omission:{id}"), json!(s))),
         );
         if let Some(artifact) = &self.artifact {
+            rows.extend(
+                artifact
+                    .manifest
+                    .rule_implementations
+                    .iter()
+                    .enumerate()
+                    .map(|(i, implementation)| {
+                        (format!("rule_implementation:{i}"), json!(implementation))
+                    }),
+            );
             rows.extend(
                 artifact
                     .manifest
@@ -661,6 +702,151 @@ impl Workspace {
         }
         rows
     }
+    fn validate_finding(
+        &self,
+        input: &FrozenInput,
+        result: &AnalysisResult,
+        finding: &CompositionFinding,
+    ) -> Result<(), String> {
+        if finding.message.trim().is_empty()
+            || finding.sources.is_empty()
+            || finding
+                .section_ids
+                .iter()
+                .any(|id| !self.draft.sections.contains_key(id))
+            || finding
+                .record_ids
+                .iter()
+                .any(|id| !result.analysis.records.contains_key(id))
+        {
+            return Err("review finding needs valid affected objects and original grounds".into());
+        }
+        for span in &finding.sources {
+            crate::tender_analysis::tools::validate_span(input, &self.review_coverage, span)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_plan_review(
+        &self,
+        input: &FrozenInput,
+        result: &AnalysisResult,
+        item: &PlanItem,
+        review: &PlanReview,
+    ) -> Result<(), String> {
+        let artifact = self.artifact.as_ref().ok_or("reviewed artifact missing")?;
+        validate_grounds(input, &result.analysis, &item.grounds)?;
+        for span in &item.grounds {
+            crate::tender_analysis::tools::validate_span(input, &self.source_coverage, span)?;
+        }
+        if review.item_id != item.id
+            || review.artifact_sha256 != artifact.manifest.docx_sha256
+            || review.draft_sha256 != digest(&self.draft)?
+            || !implementation_manifest_complete(&self.draft, &artifact.manifest)
+        {
+            return Err("plan review belongs to a stale artifact or draft".into());
+        }
+        if self.inspected.get(&format!("plan:{}", item.id)) != Some(&digest(item)?) {
+            return Err("inspect the current plan item before judging it".into());
+        }
+        let key = match item.kind {
+            PlanItemKind::Section => format!("section:{}", item.id),
+            PlanItemKind::Presentation => "presentation".into(),
+            PlanItemKind::ReportNote => format!("plan:{}", item.id),
+        };
+        let value = self
+            .draft_rows()
+            .into_iter()
+            .find(|(k, _)| k == &key)
+            .ok_or("plan implementation not available")?
+            .1;
+        if self.inspected.get(&key) != Some(&digest(&value)?) {
+            return Err("inspect the current implementation before judging it".into());
+        }
+        if review.grounds.is_empty()
+            || !review
+                .grounds
+                .iter()
+                .any(|g| item.grounds.iter().any(|p| p.source_id == g.source_id))
+        {
+            return Err("plan review requires relevant original grounds".into());
+        }
+        for span in &review.grounds {
+            crate::tender_analysis::tools::validate_span(input, &self.review_coverage, span)?;
+        }
+        if (review.conclusion == PlanReviewConclusion::Findings) != !review.finding_ids.is_empty() {
+            return Err("findings conclusion must reference saved findings; clean conclusions cannot cite findings".into());
+        }
+        for id in &review.finding_ids {
+            let finding = self
+                .findings
+                .iter()
+                .find(|f| digest(f).ok().as_ref() == Some(id))
+                .ok_or("unknown saved composition finding")?;
+            self.validate_finding(input, result, finding)?;
+            if !finding.section_ids.contains(&item.id)
+                && !finding
+                    .sources
+                    .iter()
+                    .any(|s| item.grounds.iter().any(|g| s.source_id == g.source_id))
+            {
+                return Err("finding does not concern this plan item".into());
+            }
+        }
+        if review.conclusion == PlanReviewConclusion::SourceLimited
+            && !result.open_items(input).iter().any(|open| match open {
+                SourceOpenItem::Source { source_id, .. }
+                | SourceOpenItem::View { source_id, .. } => {
+                    review.grounds.iter().any(|g| &g.source_id == source_id)
+                }
+                SourceOpenItem::Record { record } => record
+                    .sources
+                    .iter()
+                    .any(|s| review.grounds.iter().any(|g| g.source_id == s.source_id)),
+                SourceOpenItem::Document { .. } => true,
+                SourceOpenItem::Relation { relation } => item.obligation_refs.iter().any(|key| {
+                    obligation_inventory(result).iter().any(|r| {
+                        reference_key(r).ok().as_ref() == Some(key)
+                            && (r.record_id == relation.from || r.record_id == relation.to)
+                    })
+                }),
+            })
+        {
+            return Err("source_limited requires a corresponding frozen source open item".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_plan_reviews(
+        &self,
+        input: &FrozenInput,
+        result: &AnalysisResult,
+        clean: bool,
+    ) -> Result<(), String> {
+        validate_plan(result, &self.draft)?;
+        if self
+            .plan_reviews
+            .keys()
+            .any(|id| !self.draft.plan.contains_key(id))
+        {
+            return Err("composition review references an unknown plan item".into());
+        }
+        for item in self.draft.plan.values() {
+            let review = self
+                .plan_reviews
+                .get(&item.id)
+                .ok_or("plan item lacks independent composition review")?;
+            self.validate_plan_review(input, result, item, review)?;
+            if clean && review.conclusion == PlanReviewConclusion::Findings {
+                return Err("composition plan findings remain".into());
+            }
+        }
+        if clean && !self.findings.is_empty() {
+            return Err("composition findings remain".into());
+        }
+        Ok(())
+    }
+
     pub fn review_gaps(
         &self,
         input: &FrozenInput,
@@ -700,6 +886,14 @@ impl Workspace {
             );
         } else {
             gaps.push(json!({"kind":"missing_render"}));
+        }
+        for item in self.draft.plan.values() {
+            if self.plan_reviews.get(&item.id).is_none_or(|review| {
+                self.validate_plan_review(input, result, item, review)
+                    .is_err()
+            }) {
+                gaps.push(json!({"kind":"unreviewed_plan_item","item_id":item.id}));
+            }
         }
         for (key, value) in rows {
             if self.inspected.get(&key) != Some(&digest(&value)?) {

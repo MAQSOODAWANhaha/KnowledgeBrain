@@ -206,10 +206,7 @@ fn validate_rule_items(
         let path = format!("/data/items/{index}");
         nonempty(&item.id, &format!("{path}/id"))?;
         if !seen.insert(&item.id) {
-            return Err(field_error(
-                &format!("{path}/id"),
-                "duplicate rule item id",
-            ));
+            return Err(field_error(&format!("{path}/id"), "duplicate rule item id"));
         }
         nonempty(&item.text, &format!("{path}/text"))?;
         validate_grounds(
@@ -218,13 +215,39 @@ fn validate_rule_items(
             &item.grounds,
             &format!("{path}/grounds"),
         )?;
+        if item.kind != RuleItemKind::Order && !item.sequence.is_empty() {
+            return Err(field_error(
+                &format!("{path}/sequence"),
+                "sequence is only valid on order items",
+            ));
+        }
+        if item.kind != RuleItemKind::Format
+            && (item.format_key.is_some() || item.format_value.is_some())
+        {
+            return Err(field_error(
+                &path,
+                "format fields are only valid on format items",
+            ));
+        }
         match item.kind {
             RuleItemKind::Order => {
                 if item.sequence.is_empty() {
                     return Err(field_error(
                         &format!("{path}/sequence"),
-                        "order items need a sequence of item ids",
+                        "order items need a sequence of item ids; first save the source-backed component items without this new order item, then add it using their returned IDs from the same rule. Document precedence is not output order; do not relabel a genuine output-order requirement to bypass this check",
                     ));
+                }
+                let mut sequence = BTreeSet::new();
+                for (position, id) in item.sequence.iter().enumerate() {
+                    if id == &item.id
+                        || !items.iter().any(|other| &other.id == id)
+                        || !sequence.insert(id)
+                    {
+                        return Err(field_error(
+                            &format!("{path}/sequence/{position}"),
+                            "sequence must reference distinct other items in this rule; retrieve this saved rule's returned component IDs, not placeholders, predicted IDs, self references or IDs from another rule. A rejected write does not allocate usable IDs",
+                        ));
+                    }
                 }
             }
             RuleItemKind::Format => {
@@ -237,17 +260,7 @@ fn validate_rule_items(
                     &format!("{path}/format_value"),
                 )?;
             }
-            _ => {
-                if !item.sequence.is_empty()
-                    || item.format_key.is_some()
-                    || item.format_value.is_some()
-                {
-                    return Err(field_error(
-                        &path,
-                        "sequence and format fields are only valid on order or format items",
-                    ));
-                }
-            }
+            _ => {}
         }
         for (t_index, target) in item.targets.iter().enumerate() {
             let tpath = format!("{path}/targets/{t_index}");
@@ -261,19 +274,14 @@ fn validate_rule_items(
                     record_id: rid,
                     item_id,
                 } => {
-                    let known = if rid == record_id {
-                        items.iter().any(|other| other.id == *item_id)
-                    } else {
-                        analysis.records.get(rid).is_some_and(|record| {
-                            matches!(
-                                &record.data,
-                                RecordData::Rule { items: other, .. }
-                                    if other.iter().any(|other| other.id == *item_id)
-                            )
-                        })
-                    };
+                    let known = rid == record_id
+                        && item_id != &item.id
+                        && items.iter().any(|other| other.id == *item_id);
                     if !known {
-                        return Err(field_error(&tpath, "unknown rule item target"));
+                        return Err(field_error(
+                            &tpath,
+                            "target must reference another current item in the same rule",
+                        ));
                     }
                 }
                 RuleItemTarget::Unresolved { reason } => {
@@ -1051,7 +1059,8 @@ pub(crate) fn bounded_page<T: Serialize>(
 }
 
 /// An active Agent scope supplies the default filter. Explicit IDs or a source
-/// select cross-reference targets; standalone callers inspect the whole analysis.
+/// select cross-reference targets; collection scope navigates the whole analysis
+/// without changing the active task or granting any reading receipt.
 pub(super) fn inspect_analysis(
     input: &FrozenInput,
     analysis: &Analysis,
@@ -1063,8 +1072,23 @@ pub(super) fn inspect_analysis(
 ) -> Result<Value, InspectionError> {
     object(
         args,
-        &["kind", "offset", "limit", "ids", "source_id", "view"],
+        &[
+            "kind",
+            "offset",
+            "limit",
+            "ids",
+            "source_id",
+            "view",
+            "scope",
+        ],
     )?;
+    let scope = match args.get("scope") {
+        None => "work",
+        Some(value) => value.as_str().ok_or("scope must be work or collection")?,
+    };
+    if !matches!(scope, "work" | "collection") {
+        return Err("scope must be work or collection".into());
+    }
     let view = match args.get("view") {
         Some(value) => value.as_str().ok_or("view must be index or detail")?,
         None if args.get("ids").is_some() => "detail",
@@ -1102,7 +1126,7 @@ pub(super) fn inspect_analysis(
     // looking up one record must not clone the entire semantic graph.
     let source_ids: Option<BTreeSet<&str>> = if let Some(source_id) = source_id {
         Some(BTreeSet::from([source_id]))
-    } else if ids.is_none() {
+    } else if ids.is_none() && scope == "work" {
         default_scope.map(|scope| scope.iter().map(String::as_str).collect())
     } else {
         None
@@ -1134,7 +1158,14 @@ pub(super) fn inspect_analysis(
         Some(index) => index.iter().collect(),
         None => rows.iter().map(|(_, value)| value).collect(),
     };
-    let overhead = serde_json::to_vec(&json!({"view":view}))
+    let query_scope = json!({
+        "mode": if source_id.is_some() || ids.is_some() { "explicit" }
+            else if source_ids.is_some() { "work" } else { "collection" },
+        "source_id":source_id,
+        "source_scope_count":source_ids.as_ref().map(BTreeSet::len),
+        "candidate_id_count":ids.as_ref().map(BTreeSet::len),
+    });
+    let overhead = serde_json::to_vec(&json!({"view":view,"query_scope":query_scope}))
         .map_err(|e| e.to_string())?
         .len()
         - 1;
@@ -1147,6 +1178,7 @@ pub(super) fn inspect_analysis(
             .ok_or("inspection envelope exceeds budget")?,
     )?;
     page["view"] = json!(view);
+    page["query_scope"] = query_scope;
     let end = page["next"].as_u64().ok_or("invalid page continuation")? as usize;
     if view == "detail" {
         for (key, value) in &rows[start..end] {
@@ -1501,7 +1533,6 @@ fn execute(
                 max_bytes,
             )
         }
-
         "put_record" if !reviewer => {
             object(args, &["id", "sources", "data"])?;
             if !args["data"].is_object() {
@@ -1518,11 +1549,37 @@ fn execute(
                 data: serde_json::from_value(args["data"].clone())
                     .map_err(|e| field_error("/data", e))?,
             };
-            if let RecordData::Rule { items, .. } = &mut record.data {
-                crate::tender_analysis::rule_contract::assign_item_ids(items);
-            }
+            let item_sequence = if let RecordData::Rule { items, .. } = &mut record.data {
+                let previous = analysis
+                    .records
+                    .get(&id)
+                    .and_then(|r| match &r.data {
+                        RecordData::Rule { items, .. } => Some(items.as_slice()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                Some(crate::tender_analysis::rule_contract::assign_item_ids(
+                    items,
+                    previous,
+                    analysis
+                        .rule_item_sequences
+                        .get(&id)
+                        .copied()
+                        .unwrap_or_default(),
+                )?)
+            } else {
+                None
+            };
             analysis.coverage = coverage.clone();
             validate_record(input, analysis, &record)?;
+            if let Some(sequence) = item_sequence {
+                analysis.rule_item_sequences.insert(id.clone(), sequence);
+            }
+            let item_ids = if let RecordData::Rule { items, .. } = &record.data {
+                Some(items.iter().map(|item| item.id.clone()).collect::<Vec<_>>())
+            } else {
+                None
+            };
             analysis.records.insert(id.clone(), record);
             let record_sha = digest(&analysis.records[&id])?;
             let recheck: Vec<_> = analysis
@@ -1534,7 +1591,11 @@ fn execute(
                 })
                 .map(|r| &r.id)
                 .collect();
-            Ok(json!({"id":id,"relations_to_recheck":recheck}))
+            let mut output = json!({"id":id,"relations_to_recheck":recheck});
+            if let Some(item_ids) = item_ids {
+                output["item_ids"] = json!(item_ids);
+            }
+            Ok(output)
         }
         "put_relation" if !reviewer => {
             object(
@@ -1686,6 +1747,10 @@ fn record_id<T>(args: &Value, records: &BTreeMap<String, T>) -> Result<String, S
         return Err("unknown record id; use null to allocate a new identity".into());
     }
     Ok(id.into())
+}
+
+pub fn schemas_for(reviewer: bool, _limits: &super::agent::Limits) -> Vec<Value> {
+    schemas(reviewer)
 }
 
 pub fn schemas(reviewer: bool) -> Vec<Value> {

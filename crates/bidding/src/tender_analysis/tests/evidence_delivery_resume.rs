@@ -33,7 +33,15 @@ impl Model for ReviewFromReservedEvidence {
             content: String::new(),
             finish_reason: "tool_calls".into(),
             usage: None,
-            tool_calls: fixture_review_calls(&body, "put_source_review", &json!({})).unwrap(),
+            tool_calls: fixture_review_calls(
+                &body,
+                "fixture_global_checks",
+                &json!({"grounds":[{"source_id":"source","start":0,"end":self.original.len()}]}),
+            )
+            .unwrap()
+            .into_iter()
+            .chain(fixture_review_calls(&body, "put_source_review", &json!({})).unwrap())
+            .collect(),
         })
     }
 }
@@ -42,7 +50,7 @@ async fn ready() -> (FrozenInput, MemoryJournal, Checkpoint) {
     let mut input = input();
     input.source_units[0].text = "这是项目背景介绍，没有投标响应要求。".into();
     let journal = MemoryJournal::default();
-    *journal.interrupt_after.lock().unwrap() = Some(3);
+    *journal.interrupt_after.lock().unwrap() = Some(4);
     let main = work_script(vec![
         ("set_work_note", active_work("source")),
         (
@@ -52,6 +60,10 @@ async fn ready() -> (FrozenInput, MemoryJournal, Checkpoint) {
         (
             "set_disposition",
             json!({"source_id":"source","state":"non_requirement","reason":"Synthetic background paragraph."}),
+        ),
+        (
+            "fixture_global_checks",
+            json!({"grounds":[{"source_id":"source","start":0,"end":input.source_units[0].text.len()}]}),
         ),
     ]);
     let error = agent::run(

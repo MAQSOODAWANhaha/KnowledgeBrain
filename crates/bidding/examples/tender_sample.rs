@@ -326,7 +326,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .open(&lock_path)?;
     let _lock = Lock(lock_path);
     let input: ta::FrozenInput = read(input_dir.join("frozen-input.json"))?;
-    let limits: Value = read(&args[3])?;
+    let mut limits: Value = read(&args[3])?;
+    let operator_turns = limits["extraction"]["max_turns"].as_u64().unwrap_or(0) as usize;
+    let operator_physical = limits["max_physical_calls"]
+        .as_u64()
+        .ok_or("explicit physical call limit required")? as usize;
+    let pack_max_units = limits["extraction"]["pack_max_units"].as_u64().unwrap_or(1) as usize;
+    let pack_max_chars = limits["extraction"]["pack_max_chars"].as_u64().unwrap_or(0) as usize;
+    if limits["extraction"]["draft_path"]
+        .as_bool()
+        .unwrap_or(false)
+    {
+        let turns = if operator_turns == 0 {
+            ta::draft::DRAFT_MAX_TURNS
+        } else {
+            operator_turns.min(ta::draft::DRAFT_MAX_TURNS)
+        };
+        limits["extraction"]["max_turns"] = json!(turns);
+        limits["extraction"]["reviewer_reserve"] = json!(0);
+        limits["budget_estimate"] = json!({
+            "kind":"draft_path",
+            "applied_turns":turns,
+            "applied_physical":operator_physical,
+            "reviewer_reserve":0,
+            "extract6_turns_reference":416
+        });
+    } else {
+        match ta::budget::apply_with_pack(
+            &input,
+            operator_turns,
+            operator_physical,
+            pack_max_units,
+            pack_max_chars,
+        ) {
+            Ok(budget) => {
+                limits["extraction"]["max_turns"] = json!(budget.applied_turns);
+                limits["extraction"]["reviewer_reserve"] = json!(budget.reviewer_reserve);
+                limits["max_physical_calls"] = json!(budget.applied_physical);
+                limits["budget_estimate"] = json!(budget);
+            }
+            Err(refused) => {
+                return Err(format!(
+                    "extraction turn estimate {} exceeds ceiling {}; refuse to start without an explicit operator override",
+                    refused.estimated_turns, refused.ceiling
+                )
+                .into());
+            }
+        }
+    }
     let provider = AuthoringRuntimeContractV1::resolve_tools_from_environment()?;
     let repair_seed: Option<extraction::Checkpoint> = if mode == "repair" {
         let seed = read(input_dir.join("repair-seed.json"))?;
@@ -379,9 +426,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     match mode.as_str() {
         "extract" | "review" | "repair" => {
-            let config = extraction::Config::with_provider(
+            let config = extraction::Config::with_provider_for(
                 provider,
                 serde_json::from_value(limits["extraction"].clone())?,
+                Some(&input),
             )?;
             save(root.join("runtime.json"), &config)?;
             if let Some(seed) = review_seed
@@ -410,6 +458,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or_default(),
                     source_review: Some(ta::source_review::initialize(&input, &config)?),
                     repair: Default::default(),
+                    dispatch: Default::default(),
                     reviewer_coverage: Default::default(),
                     pending_coverage: None,
                     transcript: vec![],
@@ -419,6 +468,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     reviewer_work: None,
                     done: false,
                     source_views: BTreeMap::new(),
+                    draft_stage: Default::default(),
+                    draft_active_id: None,
+                    draft_compile_object_id: None,
+                    draft_docx_base64: None,
+                    outline_config_sha256: None,
+                    fill_config_sha256: None,
                 };
                 if state.role == extraction::Role::Reviewer {
                     ta::source_review::select_next(&input, &config, &mut state)?;

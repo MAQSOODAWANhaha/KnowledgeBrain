@@ -1,0 +1,70 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "put_chapter_template",
+      "description": "Write template regions for the assigned chapter. chapter_id must be the assigned draft_active_id (for example outline-1), never the title. Preloaded evidence is already read.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["chapter_id", "id", "title", "purpose", "regions"],
+        "properties": {
+          "chapter_id": {
+            "type": "string",
+            "description": "Must equal progress.draft_active_id / work.chapter_id. Do not send the chapter title."
+          },
+          "id": { "type": ["string", "null"] },
+          "title": { "type": "string" },
+          "purpose": { "type": "string" },
+          "regions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "object",
+                  "description": "Copy a citation_ref {\"ref\":\"t:source_index:start:end\"} from preloaded evidence, or {source_id,start,end}."
+                },
+                "role": { "type": "string", "enum": ["fixed_text", "bidder_blank", "instruction", "signature"] },
+                "form_id": { "type": ["string", "null"] },
+                "cells": { "type": "array" },
+                "blank_ranges": { "type": "array" },
+                "instruction": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "put_chapter_omission",
+      "description": "Omit the assigned chapter with a reason and grounds. chapter_id must be the assigned draft_active_id, never the title.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["chapter_id", "reason", "summary", "grounds"],
+        "properties": {
+          "chapter_id": {
+            "type": "string",
+            "description": "Must equal progress.draft_active_id / work.chapter_id. Do not send the chapter title."
+          },
+          "reason": {
+            "type": "string",
+            "enum": ["bind_failed", "deadline", "not_applicable", "parse_failed", "blank_rule", "window_exceeded"]
+          },
+          "summary": { "type": "string", "minLength": 1 },
+          "grounds": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "description": "Copy a citation_ref {\"ref\":\"...\"} or {source_id,start,end}."
+            }
+          }
+        }
+      }
+    }
+  }
+]

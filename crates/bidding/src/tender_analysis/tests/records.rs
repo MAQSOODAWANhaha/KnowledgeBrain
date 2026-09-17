@@ -97,7 +97,7 @@ fn grid_grounded_obligations_publish_without_fabricating_text_quotes() {
             analysis_sha256: digest(&analysis).unwrap(),
             coverage: Coverage::default(),
             findings: vec![],
-        ..Default::default()
+            ..Default::default()
         },
         analysis,
         quality: "needs_review".into(),
@@ -458,7 +458,7 @@ fn same_compliance_policy_preserves_distinct_conditions_and_ground_ranges() {
             analysis_sha256: digest(&analysis).unwrap(),
             coverage: Coverage::default(),
             findings: vec![],
-        ..Default::default()
+            ..Default::default()
         },
         analysis,
         quality: "needs_review".into(),
@@ -936,9 +936,21 @@ fn put_record_assigns_stable_rule_item_ids() {
         .into_iter()
         .find(|t| t["function"]["name"] == "put_record")
         .unwrap();
-    assert!(jsonschema::JSONSchema::compile(&schema["function"]["parameters"]).unwrap().is_valid(&args));
-    let id = tools::invoke(&input, &mut analysis, &mut coverage, false, "put_record", &args, 16000)
-        .unwrap()["id"]
+    assert!(
+        jsonschema::JSONSchema::compile(&schema["function"]["parameters"])
+            .unwrap()
+            .is_valid(&args)
+    );
+    let id = tools::invoke(
+        &input,
+        &mut analysis,
+        &mut coverage,
+        false,
+        "put_record",
+        &args,
+        16000,
+    )
+    .unwrap()["id"]
         .as_str()
         .unwrap()
         .to_owned();

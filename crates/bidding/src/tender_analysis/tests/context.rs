@@ -267,6 +267,7 @@ async fn replay_recorded_requests_with_bounded_history() {
                 review_draft: BTreeMap::new(),
                 source_review: None,
                 repair: Default::default(),
+                dispatch: Default::default(),
                 reviewer_coverage: Coverage::default(),
                 pending_coverage: None,
                 transcript: transcript.clone(),
@@ -276,6 +277,12 @@ async fn replay_recorded_requests_with_bounded_history() {
                 reviewer_work: None,
                 done: false,
                 source_views: BTreeMap::new(),
+                draft_stage: Default::default(),
+                draft_active_id: None,
+                draft_compile_object_id: None,
+                draft_docx_base64: None,
+                outline_config_sha256: None,
+                fill_config_sha256: None,
             };
             let before = state.clone();
             let bytes = agent::request(&input, &config, &mut state).await.unwrap();

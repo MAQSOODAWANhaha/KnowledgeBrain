@@ -81,7 +81,7 @@ fn background() -> FrozenInput {
 }
 
 #[tokio::test]
-async fn initial_package_is_pure_and_its_first_response_can_write_and_handoff() {
+async fn initial_package_is_pure_and_writes_still_require_global_checks_before_handoff() {
     let input = background();
     let config = config();
     let (journal, before, body) = prepared(&input, &config).await;
@@ -99,7 +99,8 @@ async fn initial_package_is_pure_and_its_first_response_can_write_and_handoff() 
         .unwrap_err();
     assert_eq!(error.code, "INTERNAL");
     let state = journal.load().await.unwrap().unwrap();
-    assert_eq!(state.role, Role::Reviewer);
+    assert_eq!(state.role, Role::Main);
+    assert!(state.analysis.main_global_checks.is_empty());
     assert_eq!(state.turn, 1);
     assert_eq!(state.tool_calls, 2);
     assert_eq!(state.analysis.records.len(), 1);
@@ -149,13 +150,14 @@ async fn received_main_package_recovers_without_recall_or_double_delivery() {
     let saved = journal.load().await.unwrap().unwrap();
     assert_eq!(saved.turn, 1);
     assert_eq!(saved.tool_calls, 2);
-    assert_eq!(saved.role, Role::Reviewer);
+    assert_eq!(saved.role, Role::Main);
+    assert!(saved.analysis.main_global_checks.is_empty());
     assert_eq!(saved.analysis.records.len(), 1);
     assert_eq!(model.bodies.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn completed_packages_collectively_handoff_without_global_scope_declaration() {
+async fn completed_packages_require_global_checks_without_redeclaring_all_sources() {
     let mut input = background();
     input.source_units.push(Source {
         source_unit_revision_id: "other".into(),
@@ -176,18 +178,34 @@ async fn completed_packages_collectively_handoff_without_global_scope_declaratio
         assert_eq!(error.code, "INTERNAL");
         let state = journal.load().await.unwrap().unwrap();
         assert_eq!(state.turn, turn);
-        assert_eq!(state.main_work.as_ref().unwrap().source_scope.len(), 1);
+        assert_eq!(
+            state.main_work.as_ref().unwrap().source_scope.len(),
+            if turn == 1 { 1 } else { 2 }
+        );
         assert_eq!(state.analysis.dispositions.len(), turn);
         assert_eq!(
             state.role,
-            if turn == 1 {
-                Role::Main
-            } else {
-                Role::Reviewer
-            }
+            Role::Main,
+            "source packages cannot replace global checks"
         );
     }
     assert_eq!(model.bodies.lock().unwrap().len(), 2);
+    let before = journal.load().await.unwrap().unwrap();
+    *journal.interrupt_after.lock().unwrap() = Some(before.turn + 1);
+    let globals = work_script(vec![(
+        "fixture_global_checks",
+        json!({"grounds":[{"source_id":"source","start":0,"end":input.source_units[0].text.len()}]}),
+    )]);
+    agent::run(
+        &input,
+        &config,
+        &journal,
+        &globals,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(journal.load().await.unwrap().unwrap().role, Role::Reviewer);
 }
 
 #[tokio::test]
@@ -358,6 +376,7 @@ async fn remaining_metadata_continues_after_all_sources_are_disposed() {
     let config = config();
     let (_, mut state, body) = prepared(&input, &config).await;
     agent::evidence_delivery::confirm(&input, &config, &mut state, &body).unwrap();
+    agent::main_dispatch::confirm(&input, &config, &mut state, &body).unwrap();
     let mut coverage = state.analysis.coverage.clone();
     tools::invoke(
         &input,
@@ -369,7 +388,9 @@ async fn remaining_metadata_continues_after_all_sources_are_disposed() {
         config.limits.max_tool_result_bytes,
     )
     .unwrap();
-    state.main_work.as_mut().unwrap().status = agent::context::WorkStatus::Complete;
+    let owner = state.dispatch.active.clone();
+    agent::main_dispatch::after_batch(&input, &config, &mut state, owner.as_ref(), false, false)
+        .unwrap();
     let work = json!(state.main_work);
     assert!(!tools::contains(
         state.analysis.coverage.metadata.get("documents"),
@@ -386,7 +407,10 @@ async fn remaining_metadata_continues_after_all_sources_are_disposed() {
                 .unwrap();
         let sent = packet(&body)["preloaded_evidence"].clone();
         assert!(sent.is_object());
-        assert!(sent.get("main_work").is_none());
+        assert!(
+            sent.get("main_work").is_some(),
+            "metadata belongs to the explicit global closing root"
+        );
         assert_eq!(json!(state.main_work), work);
         assert_eq!(
             json!(state.analysis.coverage),

@@ -1,8 +1,16 @@
+mod batch_handoff;
+mod local_handoff;
+mod local_handoff_boundaries;
+mod planning_dispatch;
+mod write_scope;
 use super::tools::Workspace;
 use super::*;
 use crate::tender_analysis as analysis;
 use serde_json::{Value, json};
 use std::{collections::VecDeque, sync::Mutex};
+
+#[path = "compiler_rule_order_tests.rs"]
+mod rule_order;
 
 #[test]
 fn no_response_constraint_keeps_proof_obligations_without_an_extra_response_slot() {
@@ -198,20 +206,78 @@ fn fixture() -> (FrozenInput, AnalysisResult) {
         )
         .unwrap();
     }
-    let result = AnalysisResult {
-        schema_version: 1,
+    let mut result = AnalysisResult {
+        schema_version: 2,
         frozen_input_sha256: digest(&input).unwrap(),
         review: Review {
             analysis_sha256: digest(&a).unwrap(),
             coverage,
             findings: vec![],
-        ..Default::default()
+            ..Default::default()
         },
         analysis: a,
         quality: "verified".into(),
         source_views: BTreeMap::new(),
     };
+    seal_review(&input, &mut result);
     (input, result)
+}
+fn seal_review(input: &FrozenInput, result: &mut AnalysisResult) {
+    use crate::tender_analysis::rule_contract::*;
+    result.schema_version = 2;
+    let checks: Vec<_> = ANALYSIS_GLOBAL_CHECK_KEYS
+        .iter()
+        .map(|key| GlobalCheck {
+            key: (*key).into(),
+            scope_sha256: scope_sha256(input, &result.analysis).unwrap(),
+            conclusion: GlobalCheckConclusion::Pass,
+            grounds: input
+                .source_units
+                .first()
+                .map(|s| {
+                    vec![Span {
+                        source_id: s.source_unit_revision_id.clone(),
+                        start: 0,
+                        end: s.text.len(),
+                        view_id: None,
+                        grid_cell: None,
+                    }]
+                })
+                .unwrap_or_default(),
+            record_ids: vec![],
+            finding_ids: vec![],
+        })
+        .collect();
+    result.analysis.review_global_checks =
+        checks.iter().map(|c| (c.key.clone(), c.clone())).collect();
+    result.analysis.main_global_checks = result.analysis.review_global_checks.clone();
+    result.review.contract_sha256 = contract_sha256().unwrap();
+    result.review.global_checks = checks;
+    result.review.analysis_sha256 = digest(&result.analysis).unwrap();
+}
+fn plan_for_section(result: &AnalysisResult, section: &Value) -> Value {
+    let parsed: Section = serde_json::from_value(section.clone()).unwrap();
+    let refs: Vec<_> = obligation_inventory(result)
+        .iter()
+        .filter(|r| {
+            parsed.content.iter().any(|c| match c {
+                Content::Template {
+                    record_id,
+                    bindings,
+                    ..
+                } => {
+                    r.record_id == *record_id && r.target == RelationTarget::Record
+                        || bindings.iter().any(|b| &b.need == *r)
+                }
+                Content::Placeholder { needs } | Content::ResponseTable { needs, .. } => {
+                    needs.contains(r)
+                }
+                Content::SourceResponse { need, .. } => need == *r,
+            })
+        })
+        .map(|r| reference_key(r).unwrap())
+        .collect();
+    json!({"id":parsed.id,"kind":"section","parent":parsed.parent,"order":parsed.order,"title":parsed.title,"placement":parsed.placement,"prescribed":true,"grounds":parsed.grounds,"obligation_refs":refs})
 }
 fn presentation(input: &FrozenInput) -> Value {
     json!({"title":"投标模板","toc_title":"目录","style":{"width_mm":297,"height_mm":210,"top_mm":20,"right_mm":20,"bottom_mm":20,"left_mm":20,"font_family":"Noto Sans CJK SC","body_font_pt":10.5,"line_spacing":1.5},"grounds":[{"source_id":"s0","start":0,"end":input.source_units[0].text.len()}],"explanation":"测试显式横向页面与字体，表宽来自冻结网格"})
@@ -223,7 +289,7 @@ fn section(input: &FrozenInput, i: usize) -> Value {
     if i == 0 {
         bindings.push(json!({"need":{"record_id":"r","target":{"kind":"proof","index":0}},"field":{"kind":"template_cell","form_id":"f0","row":2,"column":2}}));
     }
-    json!({"id":null,"parent":null,"order":i,"title":if i==0{"技术响应"}else{"报价附件"},"grounds":[{"source_id":format!("s{i}"),"start":0,"end":input.source_units[i].text.len()}],"content":[{"kind":"template","record_id":format!("t{i}"),"headers":[{"form_id":format!("f{i}"),"header_rows":1}],"bindings":bindings}]})
+    json!({"id":format!("fixture-section-{i}"),"parent":null,"order":i,"title":if i==0{"技术响应"}else{"报价附件"},"grounds":[{"source_id":format!("s{i}"),"start":0,"end":input.source_units[i].text.len()}],"content":[{"kind":"template","record_id":format!("t{i}"),"headers":[{"form_id":format!("f{i}"),"header_rows":1}],"bindings":bindings}]})
 }
 fn omission(input: &FrozenInput) -> Value {
     json!({"reference":{"record_id":"not-applicable","target":{"kind":"record"}},"reason":"原文明确不适用","grounds":[{"source_id":"s1","start":input.source_units[1].text.find("附件乙").unwrap(),"end":input.source_units[1].text.len()}]})
@@ -235,12 +301,30 @@ fn edit(
     name: &str,
     mut args: Value,
 ) -> Value {
+    if name == "put_section" {
+        if args["id"].is_null() {
+            args["id"] = json!(uuid::Uuid::new_v4().to_string());
+        }
+        {
+            let mut plan = plan_for_section(result, &args);
+            plan["expected_draft_sha256"] = json!(digest(&w.draft).unwrap());
+            w.invoke(
+                input,
+                result,
+                "put_composition_plan_item",
+                &plan,
+                tool_limits(100_000, 1_000_000),
+            )
+            .unwrap();
+        }
+    }
     args["expected_draft_sha256"] = json!(digest(&w.draft).unwrap());
     w.invoke(input, result, name, &args, tool_limits(100_000, 1_000_000))
         .unwrap()
 }
 fn ready(input: &FrozenInput, result: &AnalysisResult) -> Workspace {
     let mut w = Workspace::new(input, result).unwrap();
+    w.source_coverage = result.analysis.coverage.clone();
     edit(
         &mut w,
         input,
@@ -258,14 +342,7 @@ fn ready(input: &FrozenInput, result: &AnalysisResult) -> Workspace {
 #[test]
 fn put_section_rejects_template_record_as_bidder_need() {
     let (input, result) = fixture();
-    let mut w = Workspace::new(&input, &result).unwrap();
-    edit(
-        &mut w,
-        &input,
-        &result,
-        "set_presentation",
-        presentation(&input),
-    );
+    let mut w = ready(&input, &result);
     let mut args = section(&input, 0);
     args["content"][0]["bindings"] = json!([{
         "need":{"record_id":"t0","target":{"kind":"record"}},
@@ -286,7 +363,7 @@ fn put_section_rejects_template_record_as_bidder_need() {
         "{error}"
     );
     assert!(
-        w.draft.sections.is_empty(),
+        w.draft.sections.len() == 2,
         "invalid binding must not become a checkpoint"
     );
 }
@@ -871,8 +948,9 @@ fn refresh_excerpt_basis(input: &FrozenInput, result: &mut AnalysisResult) {
         analysis_sha256: digest(&result.analysis).unwrap(),
         coverage,
         findings: vec![],
-    ..Default::default()
+        ..Default::default()
     };
+    seal_review(input, result);
     assert!(
         analysis::tools::gaps(input, &result.analysis).is_empty(),
         "{:?}",
@@ -1092,12 +1170,14 @@ fn source_response_rejects_foreign_invalid_sample_and_non_response_evidence() {
         s["content"][0]["paragraphs"] = json!([[part]]);
         let mut w = ready(&input, &result);
         edit(&mut w, &input, &result, "put_section", s);
-        assert!(
-            compiler::compile(&input, &result, &w.draft, 1_000_000)
-                .err()
-                .unwrap()
-                .contains("template region")
-        );
+        w.draft.plan.values_mut().next().unwrap().obligation_refs = obligation_inventory(&result)
+            .iter()
+            .map(|r| reference_key(r).unwrap())
+            .collect();
+        let error = compiler::compile(&input, &result, &w.draft, 1_000_000)
+            .err()
+            .unwrap();
+        assert!(error.contains("template region"), "{error}");
     }
 }
 
@@ -1585,7 +1665,10 @@ impl agent::Model for Model {
         let body: Value = serde_json::from_slice(body).unwrap();
         let context: Value =
             serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
-        if matches!(name, "put_section" | "set_presentation" | "put_omission") {
+        if matches!(
+            name,
+            "put_section" | "put_composition_plan_item" | "set_presentation" | "put_omission"
+        ) {
             args["expected_draft_sha256"] = context["draft_sha256"].clone();
         }
         let mut calls = vec![knowledge::models::ChatToolCall {
@@ -1632,7 +1715,7 @@ fn config() -> agent::Config {
 }
 
 #[tokio::test]
-async fn composition_defers_oversized_images_without_review_credit_or_budget_reset() {
+async fn composition_defers_delivered_images_without_revoking_receipts_or_budget_reset() {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use sha2::{Digest, Sha256};
     let (input, mut result) = fixture();
@@ -1691,15 +1774,20 @@ async fn composition_defers_oversized_images_without_review_credit_or_budget_res
         review_work: None,
         main_progress: Default::default(),
         review_progress: Default::default(),
+        pending_delivery: None,
     };
-    let complete = agent::request(&mut state, &result, &config).await.unwrap();
+    let complete = agent::request(&input, &state, &result, &config)
+        .await
+        .unwrap();
     config.limits.max_tool_result_bytes = 1024;
     config.limits.max_context_bytes = complete.len() - 1;
     state.contract_sha256 = config.contract_sha256().unwrap();
     let before = state.clone();
-    let body = agent::request(&mut state, &result, &config).await.unwrap();
+    let body = agent::request(&input, &state, &result, &config)
+        .await
+        .unwrap();
     assert!(body.len() <= config.limits.max_context_bytes);
-    assert_eq!(state.workspace.review_coverage.views.len(), 1);
+    assert_eq!(state.workspace.review_coverage.views.len(), 2);
     assert!(state.workspace.source_coverage.views.is_empty());
     assert_eq!(state.read_bytes, before.read_bytes);
     assert_eq!(state.tool_calls, before.tool_calls);
@@ -1718,22 +1806,39 @@ async fn composition_defers_oversized_images_without_review_credit_or_budget_res
             .count(),
         1
     );
-    let mut replay: agent::Checkpoint =
+    let replay: agent::Checkpoint =
         serde_json::from_value(serde_json::to_value(&before).unwrap()).unwrap();
     assert_eq!(
         body,
-        agent::request(&mut replay, &result, &config).await.unwrap()
+        agent::request(&input, &replay, &result, &config)
+            .await
+            .unwrap()
     );
 }
 
 fn model(input: &FrozenInput) -> Model {
+    let (_, result) = fixture();
     let mut turns = vec![
+        (
+            "read_source",
+            json!({"source_id":"s0","start":0,"max_bytes":10000}),
+        ),
+        (
+            "read_source",
+            json!({"source_id":"s1","start":0,"max_bytes":10000}),
+        ),
+        (
+            "put_composition_plan_item",
+            plan_for_section(&result, &section(input, 0)),
+        ),
+        (
+            "put_composition_plan_item",
+            plan_for_section(&result, &section(input, 1)),
+        ),
         ("set_presentation", presentation(input)),
         ("put_section", section(input, 0)),
         ("put_section", section(input, 1)),
         ("put_omission", omission(input)),
-        ("compile_docx", json!({})),
-        ("request_composition_review", json!({})),
         ("submit_composition_review", json!({"findings":[]})),
     ];
     for i in 0..2 {
@@ -1766,6 +1871,9 @@ fn model(input: &FrozenInput) -> Model {
                 json!({"bookmark":format!("kb_s{i}_b1"),"offset":offset,"limit":3}),
             ));
         }
+    }
+    for i in 0..2 {
+        turns.push(("put_composition_review", json!({"item_id":format!("fixture-section-{i}"),"conclusion":"pass","grounds":[{"source_id":format!("s{i}"),"start":0,"end":input.source_units[i].text.len()}]})));
     }
     turns.push(("submit_composition_review", json!({"findings":[]})));
     Model {
@@ -1934,6 +2042,7 @@ async fn composition_cancels_between_tools_without_advancing_the_turn() {
         review_work: None,
         main_progress: Default::default(),
         review_progress: Default::default(),
+        pending_delivery: None,
     };
     let cancel = tokio_util::sync::CancellationToken::new();
     cancel.cancel();
@@ -1996,6 +2105,7 @@ async fn composition_cancels_after_first_tool_yield_without_running_the_second()
         review_work: None,
         main_progress: Default::default(),
         review_progress: Default::default(),
+        pending_delivery: None,
     };
     let cancel = tokio_util::sync::CancellationToken::new();
     let response = knowledge::models::ChatTurn {
@@ -2141,8 +2251,9 @@ fn text_marked_as_bidder_input_is_not_copied_as_a_filled_response() {
         analysis_sha256: digest(&result.analysis).unwrap(),
         coverage,
         findings: vec![],
-    ..Default::default()
+        ..Default::default()
     };
+    seal_review(&input, &mut result);
     let w = ready(&input, &result);
     let compiled = compiler::compile(&input, &result, &w.draft, 1_000_000).unwrap();
     let slot = compiled
@@ -2184,8 +2295,9 @@ fn an_old_empty_review_cannot_authorize_overlapping_template_text() {
         analysis_sha256: digest(&result.analysis).unwrap(),
         coverage,
         findings: vec![],
-    ..Default::default()
+        ..Default::default()
     };
+    seal_review(&input, &mut result);
     assert!(
         analysis::tools::review_gaps(&input, &result.analysis, &result.review.coverage).is_empty()
     );
@@ -2251,9 +2363,10 @@ fn conditional_template_renders_its_reviewed_condition_and_preserves_field_bindi
             analysis_sha256: digest(&result.analysis).unwrap(),
             coverage,
             findings: vec![],
-        ..Default::default()
+            ..Default::default()
         };
         result.quality = result.expected_quality(&input).into();
+        seal_review(&input, &mut result);
         let w = ready(&input, &result);
         let compiled = compiler::compile(&input, &result, &w.draft, 1_000_000);
         if state != ApplicabilityState::Conditional {
@@ -2337,6 +2450,7 @@ async fn acknowledged_missing_sources_produce_a_reviewed_draft_with_a_separate_o
             candidates: vec![],
         },
     };
+    seal_review(&input, &mut result);
     result
         .analysis
         .records
@@ -2359,8 +2473,9 @@ async fn acknowledged_missing_sources_produce_a_reviewed_draft_with_a_separate_o
         analysis_sha256: digest(&result.analysis).unwrap(),
         coverage,
         findings: vec![],
-    ..Default::default()
+        ..Default::default()
     };
+    seal_review(&input, &mut result);
     result.quality = result.expected_quality(&input).into();
     assert_eq!(result.quality, "needs_review");
     assert!(validate_basis(&input, &result).is_ok());
@@ -2487,8 +2602,9 @@ fn conditional_template_alternatives_require_explicit_reviewable_disposition() {
         analysis_sha256: digest(&result.analysis).unwrap(),
         coverage,
         findings: vec![],
-    ..Default::default()
+        ..Default::default()
     };
+    seal_review(&input, &mut result);
     let mut w = ready(&input, &result);
     assert!(compiler::compile(&input, &result, &w.draft, 1_000_000).is_err());
     edit(
@@ -2593,6 +2709,7 @@ fn composition_progress_is_role_local_durable_and_blocks_publication() {
         review_work: None,
         main_progress: Default::default(),
         review_progress: Default::default(),
+        pending_delivery: None,
     };
     let source = input.source_units[0].source_unit_revision_id.clone();
     let work = json!({"source_scope":[source],"section_scope":[],"action":"compose","objective":"one source-backed section","note":"","status":"active"});
@@ -2650,7 +2767,7 @@ async fn composition_replan_removes_only_redundant_history_before_budget_pressur
         "inspect_composition",
         json!({"items":[{"key":"source_report:quality","value":"acknowledged_gaps"}]}),
     );
-    let mut state = agent::Checkpoint {
+    let state = agent::Checkpoint {
         journal: Default::default(),
         contract_sha256: config.contract_sha256().unwrap(),
         workspace: ready(&input, &result),
@@ -2668,8 +2785,11 @@ async fn composition_replan_removes_only_redundant_history_before_budget_pressur
         review_work: None,
         main_progress: Default::default(),
         review_progress: Default::default(),
+        pending_delivery: None,
     };
-    agent::request(&mut state, &result, &config).await.unwrap();
+    agent::request(&input, &state, &result, &config)
+        .await
+        .unwrap();
     assert!(
         state
             .transcript
@@ -2688,7 +2808,19 @@ async fn composition_replan_removes_only_redundant_history_before_budget_pressur
         progress.watch.recovery = Recovery::Running;
         progress.watch.replans = 1;
         let before = json!(state);
-        agent::request(&mut state, &result, &config).await.unwrap();
+        let body = agent::request(&input, &state, &result, &config)
+            .await
+            .unwrap();
+        assert_eq!(json!(state), before, "request sizing must be read-only");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let delivered: Vec<_> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["tool_call_id"].as_str())
+            .collect();
+        assert_eq!(delivered, ["original", "report", "latest"]);
+        super::agent_work::normalize_history(&mut state, &config.limits).unwrap();
         assert_eq!(
             state.transcript,
             [original.clone(), report.clone(), latest.clone()].concat()
@@ -2735,10 +2867,13 @@ async fn composition_token_limit_protects_both_roles_below_the_byte_limit() {
         review_work: None,
         main_progress: Default::default(),
         review_progress: Default::default(),
+        pending_delivery: None,
     };
     for reviewing in [false, true] {
         state.workspace.reviewing = reviewing;
-        let full = agent::request(&mut state, &result, &config).await.unwrap();
+        let full = agent::request(&input, &state, &result, &config)
+            .await
+            .unwrap();
         assert!(full.len() < config.limits.max_context_bytes);
         let mut raw = json!(config);
         raw["limits"]["max_context_tokens"] =
@@ -2748,7 +2883,7 @@ async fn composition_token_limit_protects_both_roles_below_the_byte_limit() {
         let limited: agent::Config = serde_json::from_value(raw).unwrap();
         limited.contract_sha256().unwrap();
         assert_eq!(
-            agent::request(&mut state, &result, &limited)
+            agent::request(&input, &state, &result, &limited)
                 .await
                 .unwrap_err()
                 .code,
@@ -2796,8 +2931,24 @@ fn put_composition_review_requires_active_review_and_known_chapter() {
             tool_limits(100_000, 1_000_000),
         )
         .unwrap_err();
-    assert!(err.contains("unknown chapter"), "{err}");
+    assert!(err.contains("unknown plan item"), "{err}");
     let id = w.draft.sections.keys().next().unwrap().clone();
+    w.invoke(
+        &input,
+        &result,
+        "inspect_composition",
+        &json!({"offset":0,"limit":100}),
+        tool_limits(100_000, 1_000_000),
+    )
+    .unwrap();
+    w.invoke(
+        &input,
+        &result,
+        "read_source",
+        &json!({"source_id":"s0","start":0,"max_bytes":10000}),
+        tool_limits(100_000, 1_000_000),
+    )
+    .unwrap();
     w.invoke(
         &input,
         &result,
@@ -2806,13 +2957,17 @@ fn put_composition_review_requires_active_review_and_known_chapter() {
         tool_limits(100_000, 1_000_000),
     )
     .unwrap();
-    assert_eq!(w.plan_reviews[&id].conclusion, tools::PlanReviewConclusion::Pass);
+    assert_eq!(
+        w.plan_reviews[&id].conclusion,
+        tools::PlanReviewConclusion::Pass
+    );
 }
 
 #[test]
 fn plan_complete_requires_every_obligation_or_exception() {
     let (input, result) = fixture();
     let mut w = ready(&input, &result);
+    w.draft.plan.clear();
     assert!(!plan_complete(&result, &w.draft).unwrap());
     for r in obligation_inventory(&result) {
         let key = reference_key(&r).unwrap();
@@ -2874,7 +3029,11 @@ fn required_references_include_each_rule_item() {
         },
     );
     assert!(compiler::required_references(&result).iter().any(|r| {
-        r.record_id == "rule" && r.target == RelationTarget::RuleItem { item_id: "i1".into() }
+        r.record_id == "rule"
+            && r.target
+                == RelationTarget::RuleItem {
+                    item_id: "i1".into(),
+                }
     }));
 }
 
@@ -2899,7 +3058,10 @@ fn set_composition_work_cannot_pick_the_next_plan_chapter() {
                 view_id: None,
                 grid_cell: None,
             }],
-            obligation_refs: vec![],
+            obligation_refs: obligation_inventory(&result)
+                .iter()
+                .map(|reference| reference_key(reference).unwrap())
+                .collect(),
             exception: None,
         },
     );
@@ -2936,6 +3098,7 @@ fn set_composition_work_cannot_pick_the_next_plan_chapter() {
         review_work: None,
         main_progress: Default::default(),
         review_progress: Default::default(),
+        pending_delivery: None,
     };
     let err = super::agent_work::set_work(
         &input,
@@ -2956,7 +3119,7 @@ fn set_composition_work_cannot_pick_the_next_plan_chapter() {
 }
 
 #[test]
-fn compiled_docx_file_inventory_is_not_the_bookmark_manifest() {
+fn compiled_docx_contains_the_rendered_paragraphs() {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let (input, result) = fixture();
     let mut w = ready(&input, &result);
@@ -2970,24 +3133,669 @@ fn compiled_docx_file_inventory_is_not_the_bookmark_manifest() {
     .unwrap();
     let artifact = w.artifact.as_ref().unwrap();
     let bytes = STANDARD.decode(&artifact.docx_base64).unwrap();
-    let inventory = crate::export_review::inventory_from_docx(&bytes, None).unwrap();
-    assert_eq!(inventory.docx_sha256, artifact.manifest.docx_sha256);
-    assert!(!inventory.units.is_empty());
-    assert!(
-        inventory.units.len() >= artifact.rendered.len(),
-        "file inventory {} vs bookmark renders {}",
-        inventory.units.len(),
-        artifact.rendered.len()
-    );
+    // File assertion only. Full output inventories are produced by DocReader.
+    use std::io::Read;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    archive
+        .by_name("word/document.xml")
+        .unwrap()
+        .read_to_string(&mut xml)
+        .unwrap();
+    let document = roxmltree::Document::parse(&xml).unwrap();
+    let actual: String = document
+        .descendants()
+        .filter(|node| {
+            node.has_tag_name((
+                "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                "t",
+            ))
+        })
+        .filter_map(|node| node.text())
+        .collect();
     for block in &artifact.rendered {
         for paragraph in &block.paragraphs {
             if paragraph.trim().is_empty() {
                 continue;
             }
             assert!(
-                inventory.units.iter().any(|unit| unit.text.contains(paragraph)),
-                "rendered {paragraph:?} missing from file inventory"
+                actual.contains(paragraph),
+                "rendered {paragraph:?} missing from actual DOCX"
             );
         }
     }
+}
+
+#[test]
+fn planning_gate_rejects_unplanned_compile() {
+    let (input, result) = fixture();
+    let mut w = ready(&input, &result);
+    w.draft.plan.clear();
+    assert!(
+        w.invoke(
+            &input,
+            &result,
+            "compile_docx",
+            &json!({}),
+            tool_limits(100_000, 1_000_000)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn planning_gate_rejects_unknown_obligation() {
+    let (input, result) = fixture();
+    let mut w = ready(&input, &result);
+    let args = json!({"id":"plan-invalid","kind":"section","parent":null,"order":99,"title":"bad","prescribed":true,"grounds":[{"source_id":"s0","start":0,"end":3}],"obligation_refs":["invented"],"expected_draft_sha256":digest(&w.draft).unwrap()});
+    assert!(
+        w.invoke(
+            &input,
+            &result,
+            "put_composition_plan_item",
+            &args,
+            tool_limits(100_000, 1_000_000)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn planning_gate_rejects_section_order_divergence() {
+    let (input, result) = fixture();
+    let mut w = ready(&input, &result);
+    let id = w.draft.sections.keys().next().unwrap().clone();
+    let mut args = json!(w.draft.sections[&id]);
+    args["order"] = json!(99);
+    args["expected_draft_sha256"] = json!(digest(&w.draft).unwrap());
+    assert!(
+        w.invoke(
+            &input,
+            &result,
+            "put_section",
+            &args,
+            tool_limits(100_000, 1_000_000)
+        )
+        .is_err()
+    );
+}
+
+fn review_workspace(input: &FrozenInput, result: &AnalysisResult) -> Workspace {
+    let mut w = ready(input, result);
+    for name in ["compile_docx", "request_composition_review"] {
+        w.invoke(
+            input,
+            result,
+            name,
+            &json!({}),
+            tool_limits(100_000, 1_000_000),
+        )
+        .unwrap();
+    }
+    for i in 0..2 {
+        w.invoke(
+            input,
+            result,
+            "read_source",
+            &json!({"source_id":format!("s{i}"),"start":0,"max_bytes":10000}),
+            tool_limits(100_000, 1_000_000),
+        )
+        .unwrap();
+        w.invoke(
+            input,
+            result,
+            "read_form",
+            &json!({"form_id":format!("f{i}"),"offset":0,"limit":100}),
+            tool_limits(100_000, 1_000_000),
+        )
+        .unwrap();
+    }
+    for kind in ["all", "relation", "disposition"] {
+        w.invoke(
+            input,
+            result,
+            "inspect_analysis",
+            &json!({"view":"detail","kind":kind,"offset":0,"limit":100}),
+            tool_limits(100_000, 1_000_000),
+        )
+        .unwrap();
+    }
+    for name in [
+        "inspect_composition",
+        "inspect_rendered",
+        "inspect_placements",
+    ] {
+        w.invoke(
+            input,
+            result,
+            name,
+            &json!({"offset":0,"limit":100}),
+            tool_limits(100_000, 1_000_000),
+        )
+        .unwrap();
+    }
+    let bookmarks: Vec<_> = w
+        .artifact
+        .as_ref()
+        .unwrap()
+        .rendered
+        .iter()
+        .filter(|b| b.table.is_some())
+        .map(|b| b.bookmark.clone())
+        .collect();
+    for bookmark in bookmarks {
+        w.invoke(
+            input,
+            result,
+            "inspect_rendered_cells",
+            &json!({"bookmark":bookmark,"offset":0,"limit":100}),
+            tool_limits(100_000, 1_000_000),
+        )
+        .unwrap();
+    }
+    w
+}
+fn plan_judgment(input: &FrozenInput, i: usize) -> Value {
+    json!({"item_id":format!("fixture-section-{i}"),"conclusion":"pass","grounds":[{"source_id":format!("s{i}"),"start":0,"end":input.source_units[i].text.len()}]})
+}
+#[test]
+fn plan_review_rejects_unread_original_and_unknown_finding() {
+    let (input, result) = fixture();
+    let mut w = review_workspace(&input, &result);
+    w.review_coverage.text.clear();
+    let before = digest(&w).unwrap();
+    assert!(
+        w.invoke(
+            &input,
+            &result,
+            "put_composition_review",
+            &plan_judgment(&input, 0),
+            tool_limits(100_000, 1_000_000)
+        )
+        .is_err()
+    );
+    assert_eq!(digest(&w).unwrap(), before);
+    w.review_coverage = result.review.coverage.clone();
+    let mut args = plan_judgment(&input, 0);
+    args["conclusion"] = json!("findings");
+    args["finding_ids"] = json!(["unknown-finding"]);
+    assert!(
+        w.invoke(
+            &input,
+            &result,
+            "put_composition_review",
+            &args,
+            tool_limits(100_000, 1_000_000)
+        )
+        .unwrap_err()
+        .contains("unknown saved")
+    );
+}
+#[test]
+fn saved_plan_findings_survive_empty_aggregate_submission() {
+    let (input, result) = fixture();
+    let mut w = review_workspace(&input, &result);
+    let mut args = plan_judgment(&input, 0);
+    args["conclusion"] = json!("findings");
+    args["findings"] = json!([{"message":"原文与成稿字段不一致","section_ids":["fixture-section-0"],"record_ids":["t0"],"sources":args["grounds"]}]);
+    w.invoke(
+        &input,
+        &result,
+        "put_composition_review",
+        &args,
+        tool_limits(100_000, 1_000_000),
+    )
+    .unwrap();
+    w.invoke(
+        &input,
+        &result,
+        "put_composition_review",
+        &plan_judgment(&input, 1),
+        tool_limits(100_000, 1_000_000),
+    )
+    .unwrap();
+    assert!(w.review_gaps(&input, &result).unwrap().is_empty());
+    let out = w
+        .invoke(
+            &input,
+            &result,
+            "submit_composition_review",
+            &json!({"findings":[]}),
+            tool_limits(100_000, 1_000_000),
+        )
+        .unwrap();
+    assert_eq!(out["done"], false);
+    assert_eq!(w.findings.len(), 1);
+    assert!(!w.done);
+}
+#[test]
+fn current_plan_judgments_are_required_after_recompilation() {
+    let (input, result) = fixture();
+    let mut w = review_workspace(&input, &result);
+    for i in 0..2 {
+        w.invoke(
+            &input,
+            &result,
+            "put_composition_review",
+            &plan_judgment(&input, i),
+            tool_limits(100_000, 1_000_000),
+        )
+        .unwrap();
+    }
+    assert!(w.validate_plan_reviews(&input, &result, true).is_ok());
+    w.plan_reviews
+        .get_mut("fixture-section-0")
+        .unwrap()
+        .draft_sha256 = "old-draft".into();
+    assert!(
+        w.invoke(
+            &input,
+            &result,
+            "submit_composition_review",
+            &json!({"findings":[]}),
+            tool_limits(100_000, 1_000_000)
+        )
+        .is_err()
+    );
+    assert!(!w.done);
+}
+#[test]
+fn plan_item_requires_main_original_receipt_and_v2_basis() {
+    let (input, mut result) = fixture();
+    let mut w = Workspace::new(&input, &result).unwrap();
+    let mut args = plan_for_section(&result, &section(&input, 0));
+    args["expected_draft_sha256"] = json!(digest(&w.draft).unwrap());
+    assert!(
+        w.invoke(
+            &input,
+            &result,
+            "put_composition_plan_item",
+            &args,
+            tool_limits(100_000, 1_000_000)
+        )
+        .is_err()
+    );
+    result.schema_version = 1;
+    assert!(Workspace::new(&input, &result).is_err());
+}
+
+fn rule_fixture(
+    kind: &str,
+    property: Option<&str>,
+    value: Option<&str>,
+) -> (FrozenInput, AnalysisResult) {
+    let (input, mut result) = fixture();
+    let grounds = result.analysis.records["t0"].sources.clone();
+    let record: Record = serde_json::from_value(json!({"id":"rule","sources":grounds,"data":{
+        "kind":"rule","text":"本项目编制规则","scope":"本次投标","applicability":{"state":"applicable","scope":"本项目","condition":"按原文","grounds":grounds},
+        "items":[{"id":"rule-item","kind":kind,"text":"明确原文规则","grounds":grounds,"condition":"本次投标","targets":[{"kind":"record","id":"t0"}],"sequence":[],"format_key":property,"format_value":value}]
+    }})).unwrap();
+    result.analysis.records.insert(record.id.clone(), record);
+    refresh_excerpt_basis(&input, &mut result);
+    (input, result)
+}
+fn rule_reference() -> Reference {
+    Reference {
+        record_id: "rule".into(),
+        target: RelationTarget::RuleItem {
+            item_id: "rule-item".into(),
+        },
+    }
+}
+
+#[test]
+fn section_rule_implementation_records_actual_bookmark_and_target_dependencies() {
+    let (input, result) = rule_fixture("composition", None, None);
+    let mut w = ready(&input, &result);
+    let key = reference_key(&rule_reference()).unwrap();
+    w.draft
+        .plan
+        .get_mut("fixture-section-0")
+        .unwrap()
+        .obligation_refs
+        .push(key);
+    let compiled = compiler::compile(&input, &result, &w.draft, 1_000_000).unwrap();
+    let implementation = &compiled.manifest.rule_implementations[0];
+    assert_eq!(implementation.reference, rule_reference());
+    let compiler::RuleImplementationTarget::Section {
+        location,
+        dependencies,
+    } = &implementation.implementation
+    else {
+        panic!("real section location required")
+    };
+    assert_eq!(location.section_id, "fixture-section-0");
+    assert!(
+        compiled
+            .manifest
+            .sections
+            .iter()
+            .any(|s| s.bookmark == location.bookmark)
+    );
+    assert!(dependencies.iter().any(|d| d.reference.record_id == "t0"));
+}
+
+#[test]
+fn format_rule_requires_actual_style_property_not_a_chapter_bookmark() {
+    let (input, result) = rule_fixture("format", Some("font_family"), Some("Noto Sans CJK SC"));
+    let mut w = ready(&input, &result);
+    let key = reference_key(&rule_reference()).unwrap();
+    w.draft
+        .plan
+        .get_mut("fixture-section-0")
+        .unwrap()
+        .obligation_refs
+        .push(key.clone());
+    assert!(
+        compiler::compile(&input, &result, &w.draft, 1_000_000)
+            .err()
+            .unwrap()
+            .contains("actual presentation")
+    );
+    w.draft
+        .plan
+        .get_mut("fixture-section-0")
+        .unwrap()
+        .obligation_refs
+        .retain(|r| r != &key);
+    edit(
+        &mut w,
+        &input,
+        &result,
+        "put_composition_plan_item",
+        json!({"id":"presentation-plan","kind":"presentation","parent":null,"order":0,"title":"投标模板","prescribed":true,"grounds":result.analysis.records["rule"].sources,"obligation_refs":[key]}),
+    );
+    let compiled = compiler::compile(&input, &result, &w.draft, 1_000_000).unwrap();
+    assert!(implementation_complete(&w.draft, Some(&compiled)));
+    let compiler::RuleImplementationTarget::Presentation { property, value } =
+        &compiled.manifest.rule_implementations[0].implementation
+    else {
+        panic!("explicit style dependency required")
+    };
+    assert_eq!(property, "font_family");
+    assert_eq!(value, "Noto Sans CJK SC");
+    w.draft.presentation.as_mut().unwrap().style.font_family = "Different Font".into();
+    assert!(
+        compiler::compile(&input, &result, &w.draft, 1_000_000)
+            .err()
+            .unwrap()
+            .contains("does not match")
+    );
+}
+
+#[test]
+fn report_rule_requires_a_real_matching_omission() {
+    let (input, result) = rule_fixture("submission_hint", None, None);
+    let mut w = ready(&input, &result);
+    let key = reference_key(&rule_reference()).unwrap();
+    let grounds = result.analysis.records["rule"].sources.clone();
+    edit(
+        &mut w,
+        &input,
+        &result,
+        "put_composition_plan_item",
+        json!({"id":"submission-report","kind":"report_note","parent":null,"order":0,"title":"递交说明","prescribed":true,"grounds":grounds,"obligation_refs":[key],"exception":"保留在报告，递交操作不生成正文"}),
+    );
+    assert!(
+        compiler::compile(&input, &result, &w.draft, 1_000_000)
+            .err()
+            .unwrap()
+            .contains("actual omission")
+    );
+    edit(
+        &mut w,
+        &input,
+        &result,
+        "put_omission",
+        json!({"reference":rule_reference(),"reason":"保留在报告，递交操作不生成正文","grounds":grounds}),
+    );
+    let compiled = compiler::compile(&input, &result, &w.draft, 1_000_000).unwrap();
+    assert!(implementation_complete(&w.draft, Some(&compiled)));
+    assert!(matches!(
+        compiled.manifest.rule_implementations[0].implementation,
+        compiler::RuleImplementationTarget::ReportNote { .. }
+    ));
+    w.draft.plan.get_mut("submission-report").unwrap().exception = Some("不同的未实施理由".into());
+    assert!(compiler::compile(&input, &result, &w.draft, 1_000_000).is_err());
+}
+
+#[test]
+fn unsupported_format_property_is_an_implementation_error() {
+    let (input, result) = rule_fixture("format", Some("unknown_style_property"), Some("value"));
+    let mut w = ready(&input, &result);
+    edit(
+        &mut w,
+        &input,
+        &result,
+        "put_composition_plan_item",
+        json!({"id":"presentation-plan","kind":"presentation","parent":null,"order":0,"title":"投标模板","prescribed":true,"grounds":result.analysis.records["rule"].sources,"obligation_refs":[reference_key(&rule_reference()).unwrap()]}),
+    );
+    let error = compiler::compile(&input, &result, &w.draft, 1_000_000)
+        .err()
+        .unwrap();
+    assert!(error.contains("not supported by TemplateStyle"), "{error}");
+}
+
+#[test]
+fn implementation_requires_obligations_at_the_planned_section() {
+    let (input, result) = fixture();
+    let mut w = ready(&input, &result);
+    let first = w.draft.plan["fixture-section-0"].obligation_refs.clone();
+    let second = w.draft.plan["fixture-section-1"].obligation_refs.clone();
+    w.draft
+        .plan
+        .get_mut("fixture-section-0")
+        .unwrap()
+        .obligation_refs = second;
+    w.draft
+        .plan
+        .get_mut("fixture-section-1")
+        .unwrap()
+        .obligation_refs = first;
+    assert!(plan_complete(&result, &w.draft).unwrap());
+    let compiled = compiler::compile(&input, &result, &w.draft, 1_000_000).unwrap();
+    assert!(!implementation_complete(&w.draft, Some(&compiled)));
+    assert!(
+        w.invoke(
+            &input,
+            &result,
+            "compile_docx",
+            &json!({}),
+            tool_limits(100_000, 1_000_000)
+        )
+        .unwrap_err()
+        .contains("implementation is incomplete")
+    );
+}
+
+fn work_checkpoint(workspace: Workspace) -> agent::Checkpoint {
+    agent::Checkpoint {
+        journal: Default::default(),
+        contract_sha256: config().contract_sha256().unwrap(),
+        workspace,
+        turn: 0,
+        tool_calls: 0,
+        read_bytes: 0,
+        transcript: vec![],
+        main_work: None,
+        review_work: None,
+        main_progress: Default::default(),
+        review_progress: Default::default(),
+        pending_delivery: None,
+    }
+}
+
+#[test]
+fn composition_dispatches_non_section_work_without_fake_sections() {
+    for kind in [PlanItemKind::Presentation, PlanItemKind::ReportNote] {
+        let (input, result) = fixture();
+        let mut workspace = ready(&input, &result);
+        let presentation = workspace.draft.presentation.take().unwrap();
+        let omission = workspace.draft.omissions.values().next().unwrap().clone();
+        if kind == PlanItemKind::ReportNote {
+            workspace.draft.omissions.clear();
+        }
+        let item = PlanItem {
+            id: "non-section".into(),
+            kind: kind.clone(),
+            parent: None,
+            order: 0,
+            title: presentation.title.clone(),
+            placement: Default::default(),
+            prescribed: true,
+            grounds: presentation.grounds.clone(),
+            obligation_refs: if kind == PlanItemKind::ReportNote {
+                vec![reference_key(&omission.reference).unwrap()]
+            } else {
+                vec![]
+            },
+            exception: (kind == PlanItemKind::ReportNote).then(|| omission.reason.clone()),
+        };
+        workspace.draft.plan.insert(item.id.clone(), item);
+        let mut state = work_checkpoint(workspace);
+        let mut work = json!({"source_scope": input.source_units.iter().map(|s| &s.source_unit_revision_id).collect::<Vec<_>>(),
+            "section_scope":[], "plan_item_id":"non-section", "action":"compose", "objective":"实现来源计划项", "note":"", "status":"active"});
+        let packet = super::agent_work::packet(&input, &result, &state);
+        assert_eq!(packet["assigned_plan_item"]["id"], "non-section");
+        let mut fake = work.clone();
+        fake["section_scope"] = json!(["non-section"]);
+        assert!(super::agent_work::set_work(&input, &result, &mut state, &fake, 100000).is_err());
+        super::agent_work::set_work(&input, &result, &mut state, &work, 100000).unwrap();
+        work["status"] = json!("complete");
+        assert!(super::agent_work::set_work(&input, &result, &mut state, &work, 100000).is_err());
+        if kind == PlanItemKind::Presentation {
+            state.workspace.draft.presentation = Some(presentation);
+        } else {
+            state
+                .workspace
+                .draft
+                .omissions
+                .insert(reference_key(&omission.reference).unwrap(), omission);
+        }
+        let mut restored: agent::Checkpoint = serde_json::from_value(json!(state)).unwrap();
+        assert_eq!(
+            super::agent_work::packet(&input, &result, &restored)["assigned_plan_item"]["id"],
+            "non-section"
+        );
+        super::agent_work::set_work(&input, &result, &mut restored, &work, 100000).unwrap();
+        assert!(
+            super::agent_work::packet(&input, &result, &restored)["assigned_plan_item"].is_null()
+        );
+    }
+}
+
+#[test]
+fn composition_dispatch_restores_and_rechecks_current_plan_judgment() {
+    let (input, result) = fixture();
+    let mut workspace = review_workspace(&input, &result);
+    for i in 0..2 {
+        workspace
+            .invoke(
+                &input,
+                &result,
+                "put_composition_review",
+                &plan_judgment(&input, i),
+                tool_limits(100000, 1000000),
+            )
+            .unwrap();
+    }
+    workspace
+        .plan_reviews
+        .get_mut("fixture-section-0")
+        .unwrap()
+        .draft_sha256 = "stale".into();
+    let state = work_checkpoint(workspace);
+    let mut restored: agent::Checkpoint = serde_json::from_value(json!(state)).unwrap();
+    assert_eq!(
+        super::agent_work::packet(&input, &result, &restored)["assigned_plan_item"]["id"],
+        "fixture-section-0"
+    );
+    let mut work = json!({"source_scope": input.source_units.iter().map(|s| &s.source_unit_revision_id).collect::<Vec<_>>(),
+        "section_scope":["fixture-section-0"], "plan_item_id":"fixture-section-0", "action":"review", "objective":"复核当前稿", "note":"", "status":"active"});
+    super::agent_work::set_work(&input, &result, &mut restored, &work, 100000).unwrap();
+    work["status"] = json!("complete");
+    assert!(super::agent_work::set_work(&input, &result, &mut restored, &work, 100000).is_err());
+    restored
+        .workspace
+        .invoke(
+            &input,
+            &result,
+            "put_composition_review",
+            &plan_judgment(&input, 0),
+            tool_limits(100000, 1000000),
+        )
+        .unwrap();
+    let mut restored: agent::Checkpoint = serde_json::from_value(json!(restored)).unwrap();
+    assert_eq!(
+        super::agent_work::packet(&input, &result, &restored)["assigned_plan_item"]["id"],
+        "fixture-section-0"
+    );
+    super::agent_work::set_work(&input, &result, &mut restored, &work, 100000).unwrap();
+    assert!(super::agent_work::packet(&input, &result, &restored)["assigned_plan_item"].is_null());
+}
+
+#[test]
+fn composition_review_rejects_orphaned_plan_judgment() {
+    let (input, result) = fixture();
+    let mut workspace = review_workspace(&input, &result);
+    for i in 0..2 {
+        workspace
+            .invoke(
+                &input,
+                &result,
+                "put_composition_review",
+                &plan_judgment(&input, i),
+                tool_limits(100000, 1000000),
+            )
+            .unwrap();
+    }
+    let mut orphan = workspace.plan_reviews["fixture-section-0"].clone();
+    orphan.item_id = "deleted-plan".into();
+    workspace
+        .plan_reviews
+        .insert(orphan.item_id.clone(), orphan);
+    assert!(
+        workspace
+            .validate_plan_reviews(&input, &result, true)
+            .unwrap_err()
+            .contains("unknown plan item")
+    );
+}
+
+#[test]
+fn composition_dispatch_moves_from_saved_parent_container_to_planned_child() {
+    let (input, result) = fixture();
+    let mut workspace = ready(&input, &result);
+    let parent = "fixture-section-0";
+    let child = "fixture-section-1";
+    workspace
+        .draft
+        .sections
+        .get_mut(parent)
+        .unwrap()
+        .content
+        .clear();
+    workspace.draft.plan.get_mut(child).unwrap().parent = Some(parent.into());
+    workspace.draft.sections.remove(child);
+    workspace.draft.plan.get_mut(parent).unwrap().order = 1;
+    workspace.draft.plan.get_mut(child).unwrap().order = 0;
+    let mut parent_section = workspace.draft.sections.remove(parent).unwrap();
+    parent_section.order = 1;
+    let mut state = work_checkpoint(workspace);
+    assert_eq!(
+        super::agent_work::packet(&input, &result, &state)["assigned_plan_item"]["id"],
+        parent
+    );
+    state
+        .workspace
+        .draft
+        .sections
+        .insert(parent.into(), parent_section);
+    let work = json!({"source_scope":input.source_units.iter().map(|s| &s.source_unit_revision_id).collect::<Vec<_>>(),
+        "section_scope":[child], "plan_item_id":child, "action":"compose", "objective":"编制计划中的子章节", "note":"", "status":"active"});
+    assert_eq!(
+        super::agent_work::packet(&input, &result, &state)["assigned_plan_item"]["id"],
+        child
+    );
+    super::agent_work::set_work(&input, &result, &mut state, &work, 100000).unwrap();
 }

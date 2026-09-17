@@ -9,7 +9,7 @@ import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from io import BytesIO
-from multiprocessing import Manager
+from multiprocessing import get_context
 from typing import Any, Dict, List, Optional, Tuple
 
 from ._docx_opc_patch import ensure_patched
@@ -610,15 +610,18 @@ class DocxParser(BaseParser):
                 f"generated {len(result_text)} characters of text"
             )
 
-            # If the result is still empty, return an error message
-            if not result_text:
-                logger.warning("No text extracted using simplified method")
-                return DocumentModel()
+            # Empty prose is legitimate for image-only or other supported
+            # structured documents. Use the same full-file structure/image
+            # extraction as the normal path, never the surviving worker list.
+            structured_units = _docx_structured_units(content)
+            images = _docx_package_image_payloads(content)
+            if not result_text and not structured_units:
+                raise ValueError("DOCX serial fallback has no supported text or structure")
 
             return DocumentModel(
                 content=result_text,
-                images=_docx_package_image_payloads(content),
-                structured_source_units=_docx_structured_units(content),
+                images=images,
+                structured_source_units=structured_units,
             )
         except Exception as backup_error:
             processing_time = time.time() - start_time
@@ -626,7 +629,7 @@ class DocxParser(BaseParser):
                 f"Simplified parsing failed {processing_time:.2f}s: {backup_error}"
             )
             logger.error(f"Detailed traceback: {traceback.format_exc()}")
-            return DocumentModel()
+            raise
 
 
 class Docx:
@@ -1017,11 +1020,12 @@ class Docx:
             temp_file_path,
         )
 
-        # Execute multiprocess tasks
-        self._execute_multiprocess_tasks(args_list, max_workers)
-
-        # Clean up temporary file
-        self._cleanup_temp_file(temp_file_path)
+        # A worker failure propagates to the whole-document serial fallback.
+        # Always remove the temporary original, including that failure path.
+        try:
+            self._execute_multiprocess_tasks(args_list, max_workers)
+        finally:
+            self._cleanup_temp_file(temp_file_path)
 
     def _check_document_has_images(self):
         """Check if the document contains images
@@ -1119,33 +1123,25 @@ class Docx:
             args_list: List of arguments
             max_workers: Maximum number of workers
         """
-        # Use a shared manager to share data
-        with Manager() as manager:
-            # Create shared data structures
-            self.all_lines = manager.list()
-
+        # Workers return LineData; only the parent owns the result list. Spawn
+        # avoids inheriting native-library state from the threaded RPC server.
+        self.all_lines = []
+        logger.info(
+            f"Processing {len(args_list)} pages using {max_workers} processes"
+        )
+        batch_start_time = time.time()
+        with ProcessPoolExecutor(
+            max_workers=max_workers, mp_context=get_context("spawn")
+        ) as executor:
+            logger.info(f"Started ProcessPoolExecutor with {max_workers} workers")
+            future_to_idx = {
+                executor.submit(process_page_multiprocess, *args): i
+                for i, args in enumerate(args_list)
+            }
             logger.info(
-                f"Processing {len(args_list)} pages using {max_workers} processes"
+                f"Submitted {len(future_to_idx)} processing tasks to process pool"
             )
-
-            # Use ProcessPoolExecutor to truly implement multi-core parallelization
-            batch_start_time = time.time()
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                logger.info(f"Started ProcessPoolExecutor with {max_workers} workers")
-
-                # Submit all tasks
-                future_to_idx = {
-                    executor.submit(process_page_multiprocess, *args): i
-                    for i, args in enumerate(args_list)
-                }
-                logger.info(
-                    f"Submitted {len(future_to_idx)} processing tasks to process pool"
-                )
-
-                # Collect results
-                self._collect_process_results(
-                    future_to_idx, args_list, batch_start_time
-                )
+            self._collect_process_results(future_to_idx, args_list, batch_start_time)
 
     def _collect_process_results(self, future_to_idx, args_list, batch_start_time):
         """Collect multiprocess processing results
@@ -1162,12 +1158,17 @@ class Docx:
         completed_count = 0
         results = []
         temp_img_paths = set()  # Collect all temporary image paths
+        failed_pages = []
 
         for future in as_completed(future_to_idx):
             idx = future_to_idx[future]
             page_num = args_list[idx][0]
             try:
                 page_lines = future.result()
+                if not page_lines and args_list[idx][1]:
+                    raise ValueError("nonempty DOCX input group returned an empty result")
+                if any(line.page_num != page_num for line in page_lines):
+                    raise ValueError("DOCX result belongs to another input group")
 
                 # Collect temporary image paths for later cleanup
                 for line in page_lines:
@@ -1191,6 +1192,7 @@ class Docx:
                     )
 
             except Exception as e:
+                failed_pages.append((page_num, e))
                 logger.error(f"Error processing page {page_num}: {str(e)}")
                 logger.error(
                     f"Detailed traceback for page {page_num}: {traceback.format_exc()}"
@@ -1203,11 +1205,15 @@ class Docx:
             processing_elapsed_ms = 0
         logger.info(f"All processing completed in {processing_elapsed_ms}ms")
 
-        # Process results
-        self._process_multiprocess_results(results)
-
-        # Clean up temporary image files
-        self._cleanup_temp_image_files(temp_img_paths)
+        # Never publish surviving fragments as a complete document. A blank
+        # successful LineData is valid; a failed/non-returned group is not.
+        try:
+            if failed_pages:
+                pages = [page for page, _ in failed_pages]
+                raise RuntimeError(f"DOCX page processing incomplete: failed groups {pages}") from failed_pages[0][1]
+            self._process_multiprocess_results(results)
+        finally:
+            self._cleanup_temp_image_files(temp_img_paths)
 
     def _process_multiprocess_results(self, results: List[LineData]):
         """Process multiprocess results
@@ -1565,7 +1571,7 @@ def process_page_multiprocess(
         # Load document in the process
         doc = _load_document_in_process(process_logger, page_num, temp_file_path)
         if not doc:
-            return []
+            raise ValueError(f"could not load DOCX source document for group {page_num}")
 
         # If paragraph indices are empty, return empty result
         if not paragraphs:
@@ -1641,7 +1647,7 @@ def process_page_multiprocess(
             f"[PID:{os.getpid()}] Error processing page {page_num}: {str(e)}"
         )
         process_logger.error(f"[PID:{os.getpid()}] Traceback: {traceback.format_exc()}")
-        return []
+        raise
 
 
 def _load_document_in_process(logger, page_num, temp_file_path):

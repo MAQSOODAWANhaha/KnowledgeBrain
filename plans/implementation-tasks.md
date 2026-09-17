@@ -2,9 +2,7 @@
 
 ## 当前方案与验收入口
 
-唯一有效实施方案为 [Agent 运行时与完整样稿方案](bidding/agent-runtime-rig.md)；已合并方案评审修订，按 S0–S6 分阶段推进。保留完整最终目标，按分项能力逐步实施和验收；设计要求、已有实现与真实验收分别记录，新设计不等于已经实现或通过。
-
-api-v4 已完成两轮完整独立复核，但尚未通过。最新进度、缺口与证据只维护在[主方案 §19](bidding/agent-runtime-rig.md#19-当前能力真实验收与下一步)，本页不重复运行轮次或临时检查数字。
+产品主路径是 [大纲→按章模板草稿](bidding/outline-then-template.md)。未完成项拆分为 [剩余实施任务](bidding/remaining-implementation.md)（D0–D6 草稿，F1–F7 终稿）。终稿设计仍以 [Agent 运行时方案](bidding/agent-runtime-rig.md) 为准；已有能力与真实验收见 [§19](bidding/agent-runtime-rig.md#19-当前能力真实验收与下一步)。`draft_channel` 已删除，不得再用。
 
 下列历史证据只说明对应版本与当时状态，不构成另一份现行方案。历史 Agent P0–P4 编号不再用作当前实施阶段；平台 P0/P1/P2 和 ONLYOFFICE O 阶段的既有任务编号不受影响。
 

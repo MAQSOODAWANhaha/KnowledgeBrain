@@ -263,7 +263,7 @@
     "type": "function",
     "function": {
       "name": "put_record",
-      "description": "Create with id=null or replace an existing record by its returned id. Cite previously read source byte ranges. No invented bidder facts. Editing a record invalidates its existing relation bindings; inspect and re-establish relations_to_recheck before review. Validation failures identify the field as INVALID_FIELD <JSON Pointer>: <constraint>. Correct that field using source evidence; a failed call never partially saves the object.",
+      "description": "Create with id=null or replace an existing record by its returned id. Cite previously read source byte ranges. No invented bidder facts. Editing a record invalidates its existing relation bindings; inspect and re-establish relations_to_recheck before review. Validation failures identify the field as INVALID_FIELD <JSON Pointer>: <constraint>. Correct that field using source evidence; a failed call never partially saves the object. Rule.items: omit or leave id empty for a new item; updates must retain returned IDs for existing items, including after reordering. The response item_ids follows saved item order. Obtain these IDs before linking order/target references; never predict identities.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -505,12 +505,13 @@
                   },
                   "items": {
                     "type": "array",
-                    "description": "Bounded composition/order/format/signature/submission atoms. Host assigns stable ids.",
+                    "description": "Source-grounded composition/order/format/signature/submission atoms. IDs are assigned by the host and retained on revision; deletion never permits identity reuse.",
                     "items": {
                       "type": "object",
                       "properties": {
                         "id": {
-                          "type": "string"
+                          "type": "string",
+                          "description": "Omit or use an empty string for a new item. For an existing item copy its returned ID unchanged; never invent one."
                         },
                         "kind": {
                           "type": "string",
@@ -520,7 +521,8 @@
                             "format",
                             "signature",
                             "submission_hint"
-                          ]
+                          ],
+                          "description": "Choose by the source meaning, not its heading. composition identifies required output components; order specifies the order of actual output components represented by this rule's items and requires sequence. Document-precedence or interpretation rules are not automatically output-order items: retain their governing meaning in the Rule and collection checks. Do not relabel a genuine output-order obligation merely to avoid sequence validation."
                         },
                         "text": {
                           "type": "string",
@@ -530,16 +532,158 @@
                           "type": "string"
                         },
                         "grounds": {
-                          "type": "array"
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "ref": {
+                                    "type": "string",
+                                    "pattern": "^[tg]:[0-9]+:[0-9]+:[0-9]+$",
+                                    "description": "Copy a citation_ref or citation_refs object returned by read_source/read_form. Address is scoped to this frozen collection; it grants no reading or semantic approval."
+                                  }
+                                },
+                                "required": [
+                                  "ref"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "source_id": {
+                                    "type": "string"
+                                  },
+                                  "start": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "end": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "view_id": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ],
+                                    "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                                  },
+                                  "grid_cell": {
+                                    "type": "object",
+                                    "properties": {
+                                      "form_id": {
+                                        "type": "string"
+                                      },
+                                      "row": {
+                                        "type": "integer",
+                                        "minimum": 0
+                                      },
+                                      "column": {
+                                        "type": "integer",
+                                        "minimum": 0
+                                      }
+                                    },
+                                    "required": [
+                                      "form_id",
+                                      "row",
+                                      "column"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                },
+                                "required": [
+                                  "source_id",
+                                  "start",
+                                  "end"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          },
+                          "minItems": 1
                         },
                         "targets": {
-                          "type": "array"
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                      "record"
+                                    ]
+                                  },
+                                  "id": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "id"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                      "rule_item"
+                                    ]
+                                  },
+                                  "record_id": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "item_id": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "record_id",
+                                  "item_id"
+                                ],
+                                "additionalProperties": false
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                      "unresolved"
+                                    ]
+                                  },
+                                  "reason": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "reason"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          },
+                          "description": "Existing record IDs or another item within this same rule; unknown targets require an explicit unresolved reason. Future chapter IDs are not analysis targets."
                         },
                         "sequence": {
                           "type": "array",
                           "items": {
                             "type": "string"
-                          }
+                          },
+                          "description": "Required and nonempty for order items only: distinct other current item IDs in this rule, in source-prescribed order. First save the source-backed component items without the new order item; then add the order item using IDs returned by that successful put_record or retrieved for that same saved rule. A failed write allocated no usable IDs. Never use placeholders, predicted IDs, self references or foreign-rule IDs. Preserve the original ordering requirement while locating its component targets; changing its kind is not a substitute for resolving the sequence.",
+                          "uniqueItems": true
                         },
                         "format_key": {
                           "type": "string"
@@ -554,6 +698,53 @@
                         "condition",
                         "grounds",
                         "targets"
+                      ],
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "kind": {
+                              "enum": [
+                                "order"
+                              ]
+                            },
+                            "sequence": {
+                              "minItems": 1
+                            }
+                          },
+                          "required": [
+                            "sequence"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "kind": {
+                              "enum": [
+                                "format"
+                              ]
+                            },
+                            "format_key": {
+                              "minLength": 1
+                            },
+                            "format_value": {
+                              "minLength": 1
+                            }
+                          },
+                          "required": [
+                            "format_key",
+                            "format_value"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "kind": {
+                              "enum": [
+                                "composition",
+                                "signature",
+                                "submission_hint"
+                              ]
+                            }
+                          }
+                        }
                       ],
                       "additionalProperties": false
                     }
@@ -3247,7 +3438,7 @@
     "type": "function",
     "function": {
       "name": "put_analysis_check",
-      "description": "Submit one host-enumerated global analysis check. Main and Reviewer store independent conclusions.",
+      "description": "Submit one host-enumerated global analysis check against the supplied expected_scope_sha256 after comparing current candidates and independently delivered originals. Main and Reviewer store independent conclusions. A missing edge alone is not missing source. Saved finding IDs are frozen by content digest.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -3270,7 +3461,77 @@
             ]
           },
           "grounds": {
-            "type": "array"
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "ref": {
+                      "type": "string",
+                      "pattern": "^[tg]:[0-9]+:[0-9]+:[0-9]+$",
+                      "description": "Copy a citation_ref or citation_refs object returned by read_source/read_form. Address is scoped to this frozen collection; it grants no reading or semantic approval."
+                    }
+                  },
+                  "required": [
+                    "ref"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "source_id": {
+                      "type": "string"
+                    },
+                    "start": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "end": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "view_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Visual evidence ID returned by read_source_view; use start=end=0. Omit for text evidence."
+                    },
+                    "grid_cell": {
+                      "type": "object",
+                      "properties": {
+                        "form_id": {
+                          "type": "string"
+                        },
+                        "row": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "column": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "form_id",
+                        "row",
+                        "column"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": [
+                    "source_id",
+                    "start",
+                    "end"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "minItems": 1
           },
           "record_ids": {
             "type": "array",
@@ -3283,12 +3544,17 @@
             "items": {
               "type": "string"
             }
+          },
+          "expected_scope_sha256": {
+            "type": "string",
+            "description": "Exact current scope digest from global_analysis_checks; graph changes require a new comparison."
           }
         },
         "required": [
           "key",
           "conclusion",
-          "grounds"
+          "grounds",
+          "expected_scope_sha256"
         ],
         "additionalProperties": false
       }

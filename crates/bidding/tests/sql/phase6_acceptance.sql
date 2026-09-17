@@ -96,7 +96,7 @@ END $$;
 -- bytes are identity fixtures, not a real DOCX/PDF or semantic acceptance.
 DO $$
 DECLARE
- workspace_value uuid:='00000000-0000-4000-8000-0000000000a0';
+ workspace_value uuid; export_project uuid:=gen_random_uuid();
  actor kb_actor_identity:='user:00000000-0000-4000-8000-000000000001';
  worker_actor kb_actor_identity:='system:submission-export-v2';
  mime text:='application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -108,7 +108,13 @@ DECLARE
  source_value jsonb; loaded jsonb; docx jsonb; pdf jsonb; report jsonb; result_value jsonb; replay jsonb;
  package_id uuid:=gen_random_uuid(); docx_id uuid:=gen_random_uuid(); pdf_id uuid:=gen_random_uuid();
  docx_staging uuid:=gen_random_uuid(); pdf_staging uuid:=gen_random_uuid(); report_value jsonb;
+ claim jsonb; attempt integer; owner_token uuid; inventory jsonb; snapshot jsonb; render jsonb;
 BEGIN
+ -- The earlier phases deliberately use non-JSON legacy requirement payloads.
+ -- Formal export uses a production-created project with a valid frozen basis.
+ PERFORM kb_bid_v2_create_project(export_project,'phase6 saved DOCX export',
+   '00000000-0000-4000-8000-000000000001',actor,gen_random_uuid()::text,request_bytes,kb_bid_v2_sha256_bytes(request_bytes));
+ SELECT id INTO STRICT workspace_value FROM bid_submission_workspaces WHERE project_id=export_project;
  source_sha:=kb_bid_v2_sha256_bytes(source_bytes);pdf_sha:=kb_bid_v2_sha256_bytes(pdf_bytes);
  SELECT jsonb_build_object('document_set_id',d.artifact_id,'document_set_sha256',d.artifact_sha256,
    'requirement_set_id',r.artifact_id,'requirement_set_sha256',r.artifact_sha256,
@@ -143,6 +149,9 @@ BEGIN
  request_value:=kb_bid_v2_create_submission_export_request(workspace_value,(current_value->>'version_id')::uuid,source_sha,actor,'phase6-export',request_bytes,request_sha);
  request_id:=(request_value->>'request_artifact_id')::uuid;frozen_sha:=(request_value->>'frozen_input_sha256')::kb_sha256;
  loaded:=kb_bid_v2_load_submission_export_input(request_id,1,frozen_sha);source_value:=loaded->'source';
+ claim:=kb_bid_v2_tender_agent_claim(request_id,1,frozen_sha);
+ attempt:=(claim->>'attempt')::integer; owner_token:=(claim->>'execution_owner_token')::uuid;
+ IF claim->>'disposition'<>'claimed' THEN RAISE EXCEPTION 'export owner not claimed'; END IF;
  IF source_value->>'docx_sha256'<>source_sha OR loaded->'published'<>'null'::jsonb OR loaded ? 'workspace' THEN
    RAISE EXCEPTION 'export did not freeze the saved DOCX';
  END IF;
@@ -167,12 +176,27 @@ BEGIN
    'sha256',source_sha,'media_type',mime,'byte_length',octet_length(source_bytes));
  pdf:=jsonb_build_object('staging_id',pdf_staging,'artifact_id',pdf_id,'object_ref','objects/'||pdf_sha,
    'sha256',pdf_sha,'media_type','application/pdf','byte_length',octet_length(pdf_bytes));
+ render:=jsonb_build_object('schema_version',1,'source',source_value,'pdf',pdf-ARRAY['staging_id','artifact_id']);
+ PERFORM kb_bid_v2_submission_export_render_put(request_id,frozen_sha,attempt,owner_token,pdf_staging,render);
+ -- Synthetic parser manifest identities exercise persistence only, not semantic parsing.
+ inventory:=jsonb_build_object('docx_sha256',source_sha,'pdf_sha256',pdf_sha,'units','[]'::jsonb,'images','{}'::jsonb,
+   'parser_manifests',jsonb_build_array(
+     jsonb_build_object('schema_version',1,'profile','output_inventory_v1','file_sha256',source_sha,'parser','synthetic-storage-fixture','config','{}'::jsonb),
+     jsonb_build_object('schema_version',1,'profile','output_inventory_v1','file_sha256',pdf_sha,'parser','synthetic-storage-fixture','config','{}'::jsonb)));
+ snapshot:=jsonb_build_object('schema_version',2,'inventory',inventory,
+   'inventory_sha256',kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(inventory),'UTF8')));
+ PERFORM kb_bid_v2_submission_export_snapshot_put(request_id,frozen_sha,attempt,owner_token,snapshot);
+ -- The durable render adopted the first stage; publication adopts a new one.
+ pdf_staging:=gen_random_uuid();
+ PERFORM kb_object_upload_stage(pdf_staging,'objects/'||pdf_sha,pdf_sha,'application/pdf',octet_length(pdf_bytes),worker_actor);
+ pdf:=pdf||jsonb_build_object('staging_id',pdf_staging);
  report:=jsonb_build_object('schema_version',2,'source',source_value,'outputs',jsonb_build_object(
    'docx',docx-ARRAY['staging_id','object_ref','media_type'],'pdf',pdf-ARRAY['staging_id','object_ref','media_type']),
-   'checks',jsonb_build_array(jsonb_build_object('id','semantic-review','status','not_checked','detail','SQL identity fixture only')));
+   'output_images','{}'::jsonb,'output_inventory',jsonb_build_object('inventory_sha256',snapshot->'inventory_sha256'),
+   'checks',jsonb_build_array(jsonb_build_object('id','export_review','status','not_checked','detail','SQL identity fixture only')));
  BEGIN
    PERFORM kb_bid_v2_publish_submission_export(request_id,1,frozen_sha,package_id,docx,pdf,
-     report||jsonb_build_object('source',source_value||jsonb_build_object('version_id',next_value->'version_id')),worker_actor);
+     report||jsonb_build_object('source',source_value||jsonb_build_object('version_id',next_value->'version_id')),worker_actor,attempt,owner_token);
    RAISE EXCEPTION 'report accepted the wrong source';
  EXCEPTION WHEN check_violation THEN
    IF SQLERRM<>'SUBMISSION_REPORT_IDENTITY_INVALID' THEN RAISE; END IF;
@@ -181,7 +205,7 @@ BEGIN
  -- remove the manifest, DOCX output, owner ref and all publication receipts.
  BEGIN
    PERFORM kb_bid_v2_publish_submission_export(request_id,1,frozen_sha,package_id,docx,
-     pdf||jsonb_build_object('staging_id',gen_random_uuid()),report,worker_actor);
+     pdf||jsonb_build_object('staging_id',gen_random_uuid()),report,worker_actor,attempt,owner_token);
    RAISE EXCEPTION 'export accepted missing PDF staging';
  EXCEPTION WHEN no_data_found OR check_violation THEN NULL; END;
  IF EXISTS(SELECT 1 FROM bid_submission_manifest_artifacts WHERE id=package_id)
@@ -190,8 +214,8 @@ BEGIN
    OR EXISTS(SELECT 1 FROM bid_async_stage_receipts WHERE request_artifact_id=request_id AND stage_kind='package') THEN
    RAISE EXCEPTION 'failed pair publication leaked a partial artifact';
  END IF;
- result_value:=kb_bid_v2_publish_submission_export(request_id,1,frozen_sha,package_id,docx,pdf,report,worker_actor);
- replay:=kb_bid_v2_publish_submission_export(request_id,1,frozen_sha,gen_random_uuid(),NULL,NULL,NULL,worker_actor);
+ result_value:=kb_bid_v2_publish_submission_export(request_id,1,frozen_sha,package_id,docx,pdf,report,worker_actor,attempt,owner_token);
+ replay:=kb_bid_v2_publish_submission_export(request_id,1,frozen_sha,gen_random_uuid(),NULL,NULL,NULL,worker_actor,attempt,owner_token);
  IF replay IS DISTINCT FROM result_value OR result_value#>>'{outputs,docx,sha256}'<>source_sha
    OR result_value#>>'{outputs,pdf,sha256}'<>pdf_sha THEN RAISE EXCEPTION 'atomic package/replay identity invalid'; END IF;
  IF (SELECT count(*) FROM bid_submission_output_artifacts WHERE bid_submission_output_artifacts.manifest_id=package_id)<>2 THEN
@@ -218,7 +242,7 @@ BEGIN
    RAISE EXCEPTION 'failed request still allowed conversion-source access';
  EXCEPTION WHEN no_data_found THEN NULL; END;
  BEGIN
-   PERFORM kb_bid_v2_publish_submission_export(request_id,1,frozen_sha,gen_random_uuid(),docx,pdf,report,worker_actor);
+   PERFORM kb_bid_v2_publish_submission_export(request_id,1,frozen_sha,gen_random_uuid(),docx,pdf,report,worker_actor,attempt,owner_token);
    RAISE EXCEPTION 'failed request was resurrected by publication';
  EXCEPTION WHEN object_not_in_prerequisite_state THEN
    IF SQLERRM<>'SUBMISSION_EXPORT_NOT_PENDING' THEN RAISE; END IF;

@@ -5,10 +5,19 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocateError {
-    Unavailable { reason: String },
-    MissingAnchor { anchor_id: String },
-    Ambiguous { anchor_id: String, candidates: usize },
-    DuplicateAnchor { anchor_id: String },
+    Unavailable {
+        reason: String,
+    },
+    MissingAnchor {
+        anchor_id: String,
+    },
+    Ambiguous {
+        anchor_id: String,
+        candidates: usize,
+    },
+    DuplicateAnchor {
+        anchor_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +77,9 @@ impl PageLocatePort for UnavailableLocate {
         _anchors: &[Anchor],
     ) -> Result<Vec<LocateHit>, LocateError> {
         Err(LocateError::Unavailable {
-            reason: "page-locate port is not proven on this deployment; text search is not a substitute".into(),
+            reason:
+                "page-locate port is not proven on this deployment; text search is not a substitute"
+                    .into(),
         })
     }
 }
@@ -102,10 +113,6 @@ pub fn pdf_text_search_pages(pdf: &[u8], query: &str) -> Result<Vec<u32>, String
         }
     }
     Ok(hits)
-}
-
-pub fn s6_full_sample_ready(page_count: u32, item_count: u32) -> bool {
-    page_count >= 106 && item_count >= 32
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,10 +177,7 @@ impl LayoutCheckpoint {
             );
         }
         if self.iteration >= self.max_iterations {
-            return self.bump(
-                LayoutState::Failed,
-                Some("iteration limit".into()),
-            );
+            return self.bump(LayoutState::Failed, Some("iteration limit".into()));
         }
         if !pages_need_update {
             return self.bump(LayoutState::Ready, None);
@@ -201,14 +205,13 @@ pub async fn load_checkpoint(
     request_artifact_id: uuid::Uuid,
     frozen_input_sha256: &str,
 ) -> Result<Option<LayoutCheckpoint>, crate::agent_error::AgentError> {
-    let value: Option<sqlx::types::Json<LayoutCheckpoint>> = sqlx::query_scalar(
-        "SELECT kb_bid_v2_layout_checkpoint_get($1,$2::kb_sha256)",
-    )
-    .bind(request_artifact_id)
-    .bind(frozen_input_sha256)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| crate::agent_error::AgentError::new("INTERNAL", error.to_string()))?;
+    let value: Option<sqlx::types::Json<LayoutCheckpoint>> =
+        sqlx::query_scalar("SELECT kb_bid_v2_layout_checkpoint_get($1,$2::kb_sha256)")
+            .bind(request_artifact_id)
+            .bind(frozen_input_sha256)
+            .fetch_one(pool)
+            .await
+            .map_err(|error| crate::agent_error::AgentError::new("INTERNAL", error.to_string()))?;
     Ok(value.map(|row| row.0))
 }
 
@@ -287,11 +290,15 @@ mod tests {
     #[test]
     fn unavailable_locate_port_is_not_acceptance() {
         let err = UnavailableLocate
-            .locate(b"docx", b"pdf", &[Anchor { id: "proof-1".into() }])
+            .locate(
+                b"docx",
+                b"pdf",
+                &[Anchor {
+                    id: "proof-1".into(),
+                }],
+            )
             .unwrap_err();
         assert!(matches!(err, LocateError::Unavailable { .. }));
-        const S4B_ACCEPTANCE: bool = false;
-        assert!(!S4B_ACCEPTANCE);
     }
 
     #[test]
@@ -330,27 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn s6_minimal_fixture_is_not_full_sample_acceptance() {
-        let bytes = std::fs::read(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../testdata/bid/minimal/source/minimal-security-tender.docx"
-        ))
-        .unwrap();
-        let inventory = crate::export_review::inventory_from_docx(&bytes, None).unwrap();
-        let pages = inventory
-            .units
-            .iter()
-            .filter(|unit| unit.kind == "pdf_page")
-            .count() as u32;
-        assert!(
-            !s6_full_sample_ready(pages, 0),
-            "minimal source must not close S6"
-        );
-        const S6_ACCEPTANCE: bool = false;
-        assert!(!S6_ACCEPTANCE);
-    }
-
-    #[test]
     fn measure_without_page_updates_can_ready_without_editor() {
         let ck = LayoutCheckpoint::start("a".repeat(64), 3).measure(
             &UnavailableLocate,
@@ -369,14 +355,14 @@ mod tests {
             &UnavailableLocate,
             b"docx",
             b"pdf",
-            &[Anchor { id: "proof-1".into() }],
+            &[Anchor {
+                id: "proof-1".into(),
+            }],
             true,
         );
         assert_eq!(ck.state, LayoutState::Failed);
         assert!(ck.diagnosis.as_ref().unwrap().contains("not proven"));
         assert!(!ck.can_publish_triad());
-        const S4B_ACCEPTANCE: bool = false;
-        assert!(!S4B_ACCEPTANCE);
     }
 
     #[test]
@@ -384,7 +370,10 @@ mod tests {
         let value = serde_json::to_value(LayoutCheckpoint::start("a".repeat(64), 3)).unwrap();
         let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
         keys.sort();
-        let mut expected: Vec<_> = CHECKPOINT_SQL_KEYS.iter().map(|k| (*k).to_string()).collect();
+        let mut expected: Vec<_> = CHECKPOINT_SQL_KEYS
+            .iter()
+            .map(|k| (*k).to_string())
+            .collect();
         expected.sort();
         assert_eq!(keys, expected);
         assert_eq!(value["state"], "measure");

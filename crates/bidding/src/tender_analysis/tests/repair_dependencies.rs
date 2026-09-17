@@ -96,6 +96,7 @@ async fn unchanged_legacy_is_valid_but_invalid_legacy_stays_stale_until_normal_m
         state.repair.results[&sha].candidate_versions[&key],
         Some(legacy)
     );
+    agent::main_dispatch::after_batch(&input(), &config, &mut state, None, false, false).unwrap();
     *journal.state.lock().unwrap() = Some(state);
     let saved =
         super::repair::repair_steps(&journal, &config, vec![("put_repair_result", args)]).await;

@@ -34,6 +34,8 @@ pub(crate) const TENDER_HANDLER_HARD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
 pub(crate) const REQUIREMENT_HANDLER_HARD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(45 * 60);
+pub(crate) const REQUIREMENT_DRAFT_HANDLER_HARD_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(20 * 60);
 pub(crate) const DOCX_COMPOSE_HANDLER_HARD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(45 * 60);
 pub(crate) const SUBMISSION_EXPORT_HANDLER_HARD_TIMEOUT: std::time::Duration =
@@ -134,15 +136,10 @@ pub(crate) async fn require_bid_request_terminal(
     }
 }
 
-pub(crate) enum NonAgentTerminalFailure<'a> {
-    SubmissionExport(&'a str),
-    TenderDocument(&'a str),
-}
-
-pub(crate) async fn terminalize_non_agent_failure_until(
+pub(crate) async fn terminalize_tender_document_failure_until(
     pool: &PgPool,
     request: &platform::BidAuthoringRequestIdentityV2,
-    failure: NonAgentTerminalFailure<'_>,
+    code: &str,
     cleanup_deadline: tokio::time::Instant,
     label: &str,
 ) -> Result<bool, JobErr> {
@@ -150,28 +147,14 @@ pub(crate) async fn terminalize_non_agent_failure_until(
         if bid_request_is_terminal(pool, request.request_artifact_id).await? {
             return Ok(true);
         }
-        let result = match failure {
-            NonAgentTerminalFailure::SubmissionExport(code) => {
-                bidding::bid_authoring_v2::mark_submission_export_failed_v2(
-                    pool,
-                    request.request_artifact_id,
-                    request.request_revision,
-                    &request.frozen_input_sha256,
-                    code,
-                )
-                .await
-            }
-            NonAgentTerminalFailure::TenderDocument(code) => {
-                bidding::bid_authoring_v2::mark_tender_document_failed_v2(
-                    pool,
-                    request.request_artifact_id,
-                    request.request_revision,
-                    &request.frozen_input_sha256,
-                    code,
-                )
-                .await
-            }
-        };
+        let result = bidding::bid_authoring_v2::mark_tender_document_failed_v2(
+            pool,
+            request.request_artifact_id,
+            request.request_revision,
+            &request.frozen_input_sha256,
+            code,
+        )
+        .await;
         result.map_err(|error| JobErr(format!("{label}: terminal transition failed: {error}")))?;
         require_bid_request_terminal(pool, request.request_artifact_id, label).await?;
         Ok(false)

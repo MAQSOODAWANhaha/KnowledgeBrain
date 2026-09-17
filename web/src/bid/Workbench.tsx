@@ -13,7 +13,7 @@ import { docxApi, type DocxCurrent } from "./api/docx";
 import type { BidProjectView, TenderDocumentView } from "./api/types";
 import { AnalysisProgress } from "./authoring/AnalysisProgress";
 import { DocxEditor } from "./authoring/DocxEditor";
-import { DocxStart } from "./authoring/DocxStart";
+import { DraftReady } from "./authoring/DraftReady";
 import { ExportPane } from "./authoring/ExportPane";
 
 export function Workbench({ email }: { email: string }) {
@@ -39,7 +39,6 @@ function DocxGate({ email, projectId, step, tree }: { email: string; projectId: 
   const [error, setError] = useState(false);
   const [retry, setRetry] = useState(0);
   const [unsafe, setUnsafe] = useState(false);
-  const [creating, setCreating] = useState(false);
   useEffect(() => {
     let canceled = false;
     setError(false);
@@ -50,6 +49,16 @@ function DocxGate({ email, projectId, step, tree }: { email: string; projectId: 
     })().catch(() => { if (!canceled) setError(true); });
     return () => { canceled = true; };
   }, [projectId, retry]);
+  useEffect(() => {
+    if (!result || result.current || step !== "authoring") return;
+    let canceled = false;
+    const timer = window.setInterval(() => {
+      void docxApi.current(result.project.workspace_id).then((current) => {
+        if (!canceled && current) setResult((value) => value ? { ...value, current } : value);
+      }).catch(() => { /* keep waiting for the analysis job to write the draft */ });
+    }, 3000);
+    return () => { canceled = true; window.clearInterval(timer); };
+  }, [result, step]);
   const stepLabel = step === "export" ? "导出" : "编制";
   return <Shell root="bids" email={email} onBeforeLeave={() => !unsafe}
     crumbs={<Crumbs items={[{ label: "投标项目", href: "/" }, { label: result?.project.title ?? "投标稿" }, { label: stepLabel }]} />}
@@ -62,11 +71,10 @@ function DocxGate({ email, projectId, step, tree }: { email: string; projectId: 
         : !result ? <p role="status">正在读取当前稿件…</p>
         : step === "authoring" && result.project.status !== "ended"
           ? <AnalysisProgress projectId={projectId}>
-              {(creating || !result.current)
-                ? <DocxStart key={result.project.workspace_id} workspaceId={result.project.workspace_id} onUnsafeChange={setUnsafe}
-                    onPublished={() => { setCreating(false); setUnsafe(false); setResult(null); setRetry(value => value + 1); }} />
-                : <DocxEditor key={result.project.workspace_id} workspaceId={result.project.workspace_id}
-                    onUnsafeChange={setUnsafe} onCreateRound={() => setCreating(true)} />}
+              {result.current
+                ? <DocxEditor key={result.project.workspace_id} workspaceId={result.project.workspace_id}
+                    onUnsafeChange={setUnsafe} />
+                : <DraftReady />}
             </AnalysisProgress>
           : <ExportPane key={result.project.workspace_id} workspaceId={result.project.workspace_id}
               ended={result.project.status === "ended"} onUnsafeChange={setUnsafe} />}

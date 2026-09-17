@@ -215,6 +215,7 @@ async fn review_findings_survive_handoff_ack_loss_and_are_finalized_from_storage
         // The retired bulk payload must not clear a persisted finding.
         ("put_source_review", json!({"findings":[]})),
         ("put_review_finding", json!({"id":id,"finding":revised})),
+        ("fixture_global_checks", json!({})),
         ("put_source_review", json!({"fixture_status":"findings"})),
     ]);
     let result = agent::run(
@@ -426,7 +427,7 @@ async fn inspect_review_pages_complete_findings_by_bytes_for_both_roles() {
                 analysis_sha256: digest(&state.analysis).unwrap(),
                 coverage: Coverage::default(),
                 findings: state.review_draft.values().cloned().collect(),
-            ..Default::default()
+                ..Default::default()
             });
         }
         let all = agent::inspect_review(&state, &json!({"offset":0,"limit":100}), 16000).unwrap();
@@ -712,15 +713,64 @@ async fn review_draft_rejects_unseen_evidence_and_main_agent_mutations() {
             .review_draft
             .is_empty()
     );
+}
+
+#[test]
+fn advertised_tools_omit_discarded_navigation() {
     let main = tools::schemas(false);
     let reviewer = tools::schemas(true);
     for name in [
-        "read_review_task",
         "put_review_finding",
         "delete_review_finding",
+        "put_source_review",
     ] {
         assert!(!main.iter().any(|t| t["function"]["name"] == name));
         assert!(reviewer.iter().any(|t| t["function"]["name"] == name));
+    }
+    // 终稿广告保持 rig §8 / tender-analysis-tools-v1；14.3 只约束草稿。
+    for name in [
+        "inspect_analysis",
+        "check_gaps",
+        "set_work_note",
+        "source_index",
+        "collection_index",
+    ] {
+        assert!(
+            main.iter().any(|tool| tool["function"]["name"] == name),
+            "{name} must remain on official Main"
+        );
+        assert!(
+            reviewer.iter().any(|tool| tool["function"]["name"] == name),
+            "{name} must remain on official Reviewer"
+        );
+    }
+    assert!(
+        main.iter()
+            .any(|tool| tool["function"]["name"] == "request_review")
+    );
+    assert!(
+        !reviewer
+            .iter()
+            .any(|tool| tool["function"]["name"] == "request_review")
+    );
+    for name in ["read_review_task", "complete_review_check"] {
+        assert!(!main.iter().any(|tool| tool["function"]["name"] == name));
+        assert!(reviewer.iter().any(|tool| tool["function"]["name"] == name));
+    }
+    for name in [
+        "put_record",
+        "put_relation",
+        "set_disposition",
+        "read_source",
+        "read_form",
+        "search_sources",
+        "read_source_view",
+        "put_analysis_check",
+    ] {
+        assert!(
+            main.iter().any(|tool| tool["function"]["name"] == name),
+            "{name} must remain on Main"
+        );
     }
 }
 
@@ -1300,6 +1350,7 @@ async fn source_review_advances_without_pulling_in_deferred_unknowns() {
         ),
         ("set_disposition", disposition("source")),
         ("set_disposition", disposition("later")),
+        ("fixture_global_checks", json!({})),
         ("request_review", json!({})),
         ("set_work_note", local),
         ("read_source", read("source")),
@@ -1349,6 +1400,7 @@ async fn source_review_advances_without_pulling_in_deferred_unknowns() {
             ("read_source", read("later")),
             ("inspect_analysis", inspect("later", "all")),
             ("inspect_analysis", inspect("later", "disposition")),
+            ("fixture_global_checks", json!({})),
             ("put_source_review", json!({"fixture_status":"checked","fixture_relationship_status":"source_limited","fixture_unresolved":true})),
         ]),
         &CancellationToken::new(),

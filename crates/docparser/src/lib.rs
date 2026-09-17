@@ -7,6 +7,7 @@ mod engines;
 mod grpc;
 mod http_engine;
 mod images;
+mod output_inventory;
 mod simple;
 mod table_grid;
 mod types;
@@ -23,12 +24,17 @@ pub use convert::{
 pub use engines::{EngineCatalog, EngineInfo, list_all_engines, local_engines, merge_engines};
 pub use grpc::{ConvertRequest, DOCREADER_TIMEOUT, reader_addr, source_view};
 pub use images::{rewrite_images, rewrite_inline};
+pub use output_inventory::{
+    OutputInventoryEntry, OutputInventoryManifest, OutputInventoryRead, read_output_inventory,
+    validate_output_inventory,
+};
 pub use simple::convert_simple;
 pub use table_grid::validate_table_grid;
 pub use types::{
-    CompoundImageParent, ConvertError, ConvertInput, ImageRef, NOT_CONFIGURED, PdfTableCell,
-    PdfTableMergedRange, ReadResult, SpreadsheetCell, SpreadsheetRange, SpreadsheetTableIdentity,
-    StructuredSourceLocator, StructuredSourceUnit, StructuredSourceUnitKind, TableGrid,
+    CompoundImageParent, ConvertError, ConvertInput, DocReaderReadError, ImageRef, NOT_CONFIGURED,
+    PdfTableCell, PdfTableMergedRange, ReadResult, SpreadsheetCell, SpreadsheetRange,
+    SpreadsheetTableIdentity, StructuredSourceLocator, StructuredSourceUnit,
+    StructuredSourceUnitKind, TableGrid,
 };
 
 pub mod proto {

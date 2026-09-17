@@ -10,10 +10,13 @@ use knowledge::models::ChatTurn;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+mod assigned_progress;
 mod evidence_capacity;
 mod evidence_delivery;
+mod execution_blocked;
 mod global_checks;
 mod new_contract_minimal;
+mod rule_targets;
 mod semantic_compare;
 mod template_parent;
 
@@ -54,6 +57,35 @@ fn source_task_neighbors_include_completed_ranges_without_crossing_documents_or_
     assert_eq!(digest(&state).unwrap(), before);
     assert!(!state.reviewer_coverage.text.contains_key("next"));
     assert!(state.pending_coverage.is_none());
+}
+
+#[test]
+fn reviewer_assigns_the_whole_pack_and_stays_until_it_is_reviewed() {
+    let (mut input, mut config, mut state) = fixture();
+    config.limits.pack_max_units = 8;
+    config.limits.pack_max_chars = 1200;
+    input.source_units[0].locator = json!({"heading_path": "一", "table_ordinal": null});
+    input.source_units.push(Source {
+        source_unit_revision_id: "next".into(),
+        document_id: "document".into(),
+        text: "第二条义务。".into(),
+        locator: json!({"heading_path": "一", "table_ordinal": null}),
+        ordinal: 1,
+    });
+    state.source_review = Some(initialize(&input, &config).unwrap());
+    state.reviewer_work = None;
+    select_next(&input, &config, &mut state).unwrap();
+    let mut scope = state.reviewer_work.as_ref().unwrap().source_scope.clone();
+    scope.sort();
+    assert_eq!(scope, ["next", "source"]);
+    let args = judgment(&input, &config, &state);
+    put(&input, &config, &mut state, &args).unwrap();
+    select_next(&input, &config, &mut state).unwrap();
+    assert_eq!(
+        state.reviewer_work.as_ref().unwrap().source_scope,
+        vec!["next".to_string()],
+        "pack session continues with remaining sources, not a new root"
+    );
 }
 
 #[test]
@@ -140,6 +172,7 @@ async fn archived_source_review_costs_are_reported() {
 #[test]
 fn completed_source_navigation_reopens_a_missing_candidate_comparison_before_aggregation() {
     let (input, config, mut state) = fixture();
+    crate::tender_analysis::tests::fixture_global_checks(&input, &config, &mut state);
     let args = judgment(&input, &config, &state);
     put(&input, &config, &mut state, &args).unwrap();
     assert!(pending(&input, &config, &state).unwrap().is_empty());
@@ -266,7 +299,7 @@ fn assigned_candidate_comparison_can_use_delivered_boundary_evidence_without_exp
             "read_source",
             &json!({"source_id":"next","start":0,"max_bytes":100})
         )
-        .is_err()
+        .is_ok()
     );
 
     // Even a previously delivered neighbor candidate must be explicitly
@@ -383,8 +416,8 @@ fn review_task_delivers_bounded_neighbor_evidence_without_approving_it() {
         json!({"role":"tool","content":json!({"ok":true,"result":bundle.content}).to_string()});
     let visible = context::visible_work_evidence(&state, &[message]);
     assert!(
-        !visible.contains_key("text:next"),
-        "adjacent reading does not expand the active work inventory"
+        visible.contains_key("text:next"),
+        "supporting original stays visible without expanding work ownership"
     );
     assert_eq!(
         state.reviewer_work.as_ref().unwrap().source_scope,
@@ -392,7 +425,7 @@ fn review_task_delivers_bounded_neighbor_evidence_without_approving_it() {
     );
     assert!(
         context::check_read_scope(&input, &state, "read_source", &json!({"source_id":"next"}))
-            .is_err()
+            .is_ok()
     );
 
     // On a split source, preceding evidence must include the true end of
@@ -557,6 +590,7 @@ fn fixture() -> (FrozenInput, Config, Checkpoint) {
         review_draft: BTreeMap::new(),
         source_review: Some(initialize(&input, &config).unwrap()),
         repair: Default::default(),
+        dispatch: Default::default(),
         reviewer_coverage: coverage,
         pending_coverage: None,
         transcript: vec![],
@@ -566,6 +600,12 @@ fn fixture() -> (FrozenInput, Config, Checkpoint) {
         reviewer_work: None,
         done: false,
         source_views: BTreeMap::new(),
+        draft_stage: Default::default(),
+        draft_active_id: None,
+        draft_compile_object_id: None,
+        draft_docx_base64: None,
+        outline_config_sha256: None,
+        fill_config_sha256: None,
     };
     select_next(&input, &config, &mut state).unwrap();
     compare(&input, &config, &mut state);
@@ -2991,6 +3031,7 @@ fn cross_source_nested_findings_can_finish_the_assigned_judgment() {
 #[test]
 fn candidate_comparisons_do_not_replace_source_judgment_and_host_finishes_without_submission() {
     let (input, config, mut state) = fixture();
+    crate::tender_analysis::tests::fixture_global_checks(&input, &config, &mut state);
     let task = packet(&input, &config, &state).unwrap();
     assert_eq!(task["current"]["comparison_total"], 1);
     assert_eq!(task["current"]["pending_candidate_refs"]["total"], 0);
@@ -2999,6 +3040,7 @@ fn candidate_comparisons_do_not_replace_source_judgment_and_host_finishes_withou
         "do not present completed comparisons as a new work roster"
     );
     assert!(tools::review_gaps(&input, &state.analysis, &state.reviewer_coverage).is_empty());
+    crate::tender_analysis::tests::fixture_global_checks(&input, &config, &mut state);
     finish_review_batch(&input, &config, &mut state).unwrap();
     assert!(!state.done);
     let args = judgment(&input, &config, &state);
@@ -3007,9 +3049,11 @@ fn candidate_comparisons_do_not_replace_source_judgment_and_host_finishes_withou
         !state.done,
         "individual tools must not finalize before the batch ends"
     );
+    crate::tender_analysis::tests::fixture_global_checks(&input, &config, &mut state);
     finish_review_batch(&input, &config, &mut state).unwrap();
     assert!(state.done);
     assert_eq!(state.review_rounds, 1);
+    crate::tender_analysis::tests::fixture_global_checks(&input, &config, &mut state);
     finish_review_batch(&input, &config, &mut state).unwrap();
     assert_eq!(
         state.review_rounds, 1,
@@ -3020,6 +3064,7 @@ fn candidate_comparisons_do_not_replace_source_judgment_and_host_finishes_withou
 #[test]
 fn late_finding_and_withdrawal_invalidate_old_receipts_without_resurrecting_clean_checks() {
     let (input, config, mut state) = fixture();
+    crate::tender_analysis::tests::fixture_global_checks(&input, &config, &mut state);
     let args = judgment(&input, &config, &state);
     put(&input, &config, &mut state, &args).unwrap();
     let finding = Finding {
@@ -3031,6 +3076,7 @@ fn late_finding_and_withdrawal_invalidate_old_receipts_without_resurrecting_clea
     };
     finding_changed(&mut state, None, Some(&finding)).unwrap();
     state.review_draft.insert("finding".into(), finding.clone());
+    crate::tender_analysis::tests::fixture_global_checks(&input, &config, &mut state);
     finish_review_batch(&input, &config, &mut state).unwrap();
     assert!(
         !state.done,
@@ -3048,6 +3094,7 @@ fn late_finding_and_withdrawal_invalidate_old_receipts_without_resurrecting_clea
     compare(&input, &config, &mut state);
     let args = judgment(&input, &config, &state);
     put(&input, &config, &mut state, &args).unwrap();
+    crate::tender_analysis::tests::fixture_global_checks(&input, &config, &mut state);
     finish_review_batch(&input, &config, &mut state).unwrap();
     assert!(state.done);
 }
@@ -3911,8 +3958,8 @@ fn navigation_keeps_cross_source_endpoints_required_by_the_assigned_task_pending
     context::validate(&input, &state, &focus, config.limits.max_tool_result_bytes).unwrap();
     assert!(
         context::check_read_scope(&input, &state, "read_source", &json!({"source_id":"other"}))
-            .is_err(),
-        "a comparison focus does not grant cross-source reading permission"
+            .is_ok(),
+        "reviewer can fetch supporting originals without changing comparison ownership"
     );
     let mut unrelated = state.clone();
     let mut record = unrelated.analysis.records["endpoint"].clone();
@@ -4279,11 +4326,12 @@ fn reviewed_source_gap_can_remain_open_without_an_outstanding_extraction_error()
         "reason":"冻结集合中没有续文，当前未决记录准确表达原文范围。","sources":[citation(&input)]}]);
     let before = state.clone();
     put(&input, &config, &mut state, &args).unwrap();
+    crate::tender_analysis::tests::fixture_global_checks(&input, &config, &mut state);
     finish_review_batch(&input, &config, &mut state).unwrap();
     assert!(state.done);
     assert!(state.review.as_ref().unwrap().findings.is_empty());
     let result = AnalysisResult {
-        schema_version: 1,
+        schema_version: 2,
         frozen_input_sha256: digest(&input).unwrap(),
         analysis: state.analysis.clone(),
         review: state.review.clone().unwrap(),
@@ -4480,7 +4528,7 @@ fn completed_main_repair_navigates_to_independent_review_without_self_approval()
         analysis_sha256: digest(&state.analysis).unwrap(),
         coverage: state.reviewer_coverage.clone(),
         findings: vec![],
-    ..Default::default()
+        ..Default::default()
     });
     state
         .analysis
@@ -4989,14 +5037,15 @@ fn opening_after_completed_scope_preserves_fresh_navigation_without_granting_rea
             )
             .is_err()
         );
-        assert!(
+        assert_eq!(
             context::check_read_scope(
                 &input,
                 &state,
                 "read_source",
                 &json!({"source_id":"source","start":0,"max_bytes":100})
             )
-            .is_err()
+            .is_ok(),
+            role == Role::Reviewer
         );
         assert!(
             apply(
@@ -5129,13 +5178,18 @@ async fn main_source_backed_dispute_requires_independent_reconsideration() {
         let disposition = json!({"finding_sha256":digest(state.findings_for_repair()[0]).unwrap(),
             "conclusion":"disputed", "summary":"The synthetic source limitation is already recorded; request independent verification of the unchanged outcome.",
             "sources":[citation(input)],"candidate_refs":[]});
+        crate::tender_analysis::tests::fixture_global_checks(input, config, state);
         for (name, arguments) in [
             ("put_repair_result", disposition),
             ("request_review", json!({})),
         ] {
-            // Match the real pre-reservation dispatcher; request() alone is
-            // intentionally a read-only sizing/projection path.
-            agent::repair_task_host::schedule(state, &config.limits).unwrap();
+            if name == "request_review" && state.role == Role::Reviewer {
+                // The grounded repair already crossed the unique batch-end
+                // gate. Independent reconsideration below remains mandatory.
+                assert!(state.source_review.is_some());
+                break;
+            }
+            agent::main_dispatch::after_batch(input, config, state, None, false, false).unwrap();
             let body = request(input, config, state).await.unwrap();
             let response = ChatTurn {
                 finish_reason: "tool_calls".into(),
@@ -5169,6 +5223,7 @@ async fn main_source_backed_dispute_requires_independent_reconsideration() {
         }
     }
     let (input, config, mut state) = fixture();
+    crate::tender_analysis::tests::fixture_global_checks(&input, &config, &mut state);
     let finding = Finding {
         code: "missing_continuation".into(),
         message: "The frozen source lacks the continuation.".into(),
@@ -5182,6 +5237,7 @@ async fn main_source_backed_dispute_requires_independent_reconsideration() {
     args["status"] = json!("findings");
     args["finding_ids"] = json!(["missing"]);
     put(&input, &config, &mut state, &args).unwrap();
+    crate::tender_analysis::tests::fixture_global_checks(&input, &config, &mut state);
     finish_review_batch(&input, &config, &mut state).unwrap();
     assert_eq!(state.role, Role::Main);
     assert!(!state.done);
@@ -5349,7 +5405,7 @@ fn independent_finding_allows_retiring_a_wrong_unresolved_item_without_clearing_
         analysis_sha256: digest(&state.analysis).unwrap(),
         coverage: state.reviewer_coverage.clone(),
         findings: vec![issue.clone()],
-    ..Default::default()
+        ..Default::default()
     });
     state.review.as_mut().unwrap().findings[0].affected.clear();
     assert!(
@@ -5372,6 +5428,7 @@ fn independent_finding_allows_retiring_a_wrong_unresolved_item_without_clearing_
 #[test]
 fn deleting_an_affected_candidate_does_not_silently_drop_its_source_finding() {
     let (input, config, mut state) = fixture();
+    crate::tender_analysis::tests::fixture_global_checks(&input, &config, &mut state);
     let record = Record {
         id: "fact".into(),
         sources: vec![citation(&input)],
@@ -5409,6 +5466,7 @@ fn deleting_an_affected_candidate_does_not_silently_drop_its_source_finding() {
     args["status"] = json!("findings");
     args["finding_ids"] = json!(["finding"]);
     put(&input, &config, &mut state, &args).unwrap();
+    crate::tender_analysis::tests::fixture_global_checks(&input, &config, &mut state);
     finish_review_batch(&input, &config, &mut state).unwrap();
     assert_eq!(state.role, Role::Main);
     state.analysis.records.remove("fact");
@@ -5460,6 +5518,7 @@ fn deleting_an_affected_candidate_does_not_silently_drop_its_source_finding() {
     );
     let args = judgment(&input, &config, &state);
     put(&input, &config, &mut state, &args).unwrap();
+    crate::tender_analysis::tests::fixture_global_checks(&input, &config, &mut state);
     finish_review_batch(&input, &config, &mut state).unwrap();
     assert!(state.done);
 }

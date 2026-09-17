@@ -123,7 +123,7 @@ async fn navigation_skips_missing_history_and_preserves_the_original_offset() {
         analysis_sha256: digest(&state.analysis).unwrap(),
         coverage: Coverage::default(),
         findings: vec![unrelated.clone(), unrelated, original.clone()],
-    ..Default::default()
+        ..Default::default()
     });
     let query = row(&state)["history_to_read"]["inspect_review"].clone();
     assert_eq!(query, json!({"offset":2,"limit":1}));

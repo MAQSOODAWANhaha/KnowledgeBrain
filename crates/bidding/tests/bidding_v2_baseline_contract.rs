@@ -560,6 +560,7 @@ fn phase_one_vertical_has_owner_checked_mutations_and_is_active() {
         "kb_bid_v2_freeze_document_set",
         "kb_bid_v2_compile_requirement_set",
         "kb_bid_v2_list_source_units",
+        "kb_bid_v2_get_tender_outline",
         "kb_bid_v2_list_requirements",
     ] {
         assert!(
@@ -758,6 +759,10 @@ fn formal_export_freezes_saved_docx_and_atomically_binds_both_outputs() {
     assert!(export.contains("DOCX_VERSION_CAS_MISMATCH"));
     assert!(export.contains("DOCX_SAVE_PENDING"));
     assert!(export.contains("DOCX_SAVE_ERROR"));
+    assert!(
+        export
+            .contains("SUBMISSION_EXPORT_CONTEXT_INVALID: official export rejects draft analysis")
+    );
     assert!(
         export.contains(
             "IF request_value.status='succeeded' THEN RETURN request_value.result_identity"

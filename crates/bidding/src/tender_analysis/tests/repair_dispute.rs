@@ -95,11 +95,13 @@ async fn absent_parameter_relation_dispute_reaches_independent_withdrawal_and_so
         &config,
         &journal,
         vec![
+            ("fixture_global_checks", json!({"grounds":[citation]})),
             ("set_work_note", active_work("source")),
             ("read_source", read.clone()),
             ("inspect_analysis", records.clone()),
             ("inspect_analysis", dispositions.clone()),
             ("put_review_finding", json!({"id":null,"finding":finding})),
+            ("fixture_global_checks", json!({"grounds":[citation]})),
             ("put_source_review", json!({"fixture_status":"findings"})),
         ],
     )
@@ -107,6 +109,11 @@ async fn absent_parameter_relation_dispute_reaches_independent_withdrawal_and_so
     assert_eq!(saved.role, Role::Main);
     assert!(!saved.done);
     assert_eq!(saved.review.as_ref().unwrap().findings.len(), 1);
+    // The global closing package may already have delivered candidate detail.
+    // This branch explicitly exercises repair without that qualification.
+    let mut unread_main = saved.clone();
+    unread_main.analysis.coverage.candidate.clear();
+    *journal.state.lock().unwrap() = Some(unread_main);
     let id = saved.review_draft.keys().next().unwrap().clone();
     let finding_sha = digest(&saved.review_draft[&id]).unwrap();
     let graph = json!([

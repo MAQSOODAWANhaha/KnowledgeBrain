@@ -3,6 +3,7 @@ use super::*;
 
 pub(super) const POLICY: &str = "main-repair-tasks-v1";
 
+#[cfg(test)]
 pub(in crate::tender_analysis) fn schedule(
     state: &mut Checkpoint,
     limits: &Limits,
@@ -96,14 +97,4 @@ pub(super) fn exhausted(state: &Checkpoint, limits: &Limits) -> bool {
     // Once all receipts are current, normal bounded source/review handoff
     // resumes. Completed repair tasks must not disable its terminal gate.
     state.execution().handoff_exhausted(&limits.progress())
-}
-
-pub(super) fn check_ready(state: &Checkpoint, limits: &Limits) -> Result<(), AgentError> {
-    if exhausted(state, limits) {
-        return Err(error(
-            "AGENT_TURN_BUDGET_EXCEEDED",
-            "repair task or subsequent handoff allowance exhausted; task allowances and legacy blockers retained",
-        ));
-    }
-    Ok(())
 }

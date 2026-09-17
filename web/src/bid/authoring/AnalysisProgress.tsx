@@ -2,12 +2,18 @@ import { useEffect, useState, type ReactNode } from "react";
 import { createMutationAttempt } from "../../api";
 import { Button } from "../../components/ui/button";
 import { createBidV2Client } from "../api/client";
-import type { RequirementSetCompileRequestView, TenderDocumentView } from "../api/types";
+import type {
+  OutlineNode,
+  RequirementSetCompileRequestView,
+  TenderDocumentView,
+  TenderOutline,
+} from "../api/types";
 import { fileStage } from "../helpers";
 
 type Progress = NonNullable<RequirementSetCompileRequestView["progress"]> & {
   checkpoint_sequence?: number;
   boundary?: string;
+  draft_stage?: string;
 };
 
 function parsed(docs: TenderDocumentView[]) {
@@ -26,19 +32,29 @@ function fileSummary(docs: TenderDocumentView[]) {
 function analysisSummary(job: RequirementSetCompileRequestView | null) {
   if (!job) return "未开始";
   if (job.status === "failed") return job.error_code ?? "未完成";
-  if (job.status === "succeeded") return "已完成";
+  if (job.status === "succeeded") return "已完成草稿模板";
   const progress = (job.progress ?? {}) as Progress;
   const step = typeof progress.turn === "number" ? progress.turn : progress.checkpoint_sequence;
   const parts: string[] = [];
   if (progress.boundary === "prepared") parts.push("正在等待模型");
-  else if (progress.phase === "reviewer" || progress.phase === "verifying") parts.push("正在复核");
-  else parts.push("正在分析");
+  else if (progress.draft_stage === "fill") parts.push("正在按章填写模板");
+  else parts.push("正在生成大纲");
   if (typeof step === "number") parts.push(`第 ${step} 步`);
-  if (typeof progress.records === "number") parts.push(`已提取 ${progress.records} 条`);
-  if (typeof progress.review_rounds === "number" && progress.review_rounds > 0) {
-    parts.push(`已复核 ${progress.review_rounds} 轮`);
-  }
   return parts.join(" · ");
+}
+
+function OutlineTree({ nodes }: { nodes: OutlineNode[] }) {
+  if (!nodes.length) return null;
+  return (
+    <ol className="stack text-sm" style={{ paddingLeft: "1.25rem" }}>
+      {nodes.map((node, index) => (
+        <li key={node.record_id ?? `${node.title}:${index}`}>
+          {node.title}
+          <OutlineTree nodes={node.children ?? []} />
+        </li>
+      ))}
+    </ol>
+  );
 }
 
 export function AnalysisProgress({
@@ -57,6 +73,7 @@ export function AnalysisProgress({
   const [error, setError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const [outline, setOutline] = useState<TenderOutline | null>(null);
   useEffect(() => {
     const abort = new AbortController();
     const client = createBidV2Client();
@@ -64,13 +81,15 @@ export function AnalysisProgress({
     async function read() {
       let complete = false;
       try {
-        const [value, documents, project] = await Promise.all([
+        const [value, documents, project, nextOutline] = await Promise.all([
           client.latestRequirementSetCompilation(projectId, abort.signal),
           client.listTenderDocuments(projectId, abort.signal),
           client.getProject(projectId, abort.signal),
+          client.getTenderOutline(projectId, abort.signal),
         ]);
         if (abort.signal.aborted) return;
         setJob(value); setDocs(documents); setEnded(project.status === "ended");
+        setOutline(nextOutline);
         setLoaded(true); setError(false);
         complete = value?.status === "succeeded";
       } catch { if (!abort.signal.aborted) setError(true); }
@@ -117,6 +136,22 @@ export function AnalysisProgress({
       {showResume && <Button disabled={busy} onClick={() => void resume()}>继续分析</Button>}
       {showStart && <Button disabled={busy || !parsed(docs)} onClick={() => void start()}>开始分析</Button>}
     </section>
+    {loaded && <section className="card stack" data-testid="tender-outline">
+      <h2 className="h3">章节大纲</h2>
+      <p className="text-sm">目录预览不是编制依据。草稿由分析任务直接编译；终稿需另一次独立复核。</p>
+      {(outline?.extracted?.length ?? 0) > 0
+        ? <><h3 className="text-sm">抽取目录</h3><OutlineTree nodes={outline?.extracted ?? []} /></>
+        : <p className="text-sm">{job ? "分析尚未抽出目录。" : "开始分析后将显示抽取的投标文件目录。"}</p>}
+      {(outline?.documents ?? []).map((document) => {
+        const source = document.source ?? [];
+        return <div key={document.id} className="stack">
+          <h3 className="text-sm">{document.file_name}</h3>
+          {source.length
+            ? <OutlineTree nodes={source} />
+            : <p className="text-sm">已解析，但没有标题路径；目录以抽取结果为准。</p>}
+        </div>;
+      })}
+    </section>}
     {ready ? children : null}
   </>;
 }

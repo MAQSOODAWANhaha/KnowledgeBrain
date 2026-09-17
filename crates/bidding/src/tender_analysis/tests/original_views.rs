@@ -121,9 +121,11 @@ async fn requested_original_evidence_takes_priority_over_optional_assigned_candi
 #[tokio::test]
 async fn active_source_review_keeps_its_own_pixels_after_history_eviction_within_total_budget() {
     let mut config = config();
-    config.limits.max_history_bytes = 128;
     let journal = fresh_review_journal_config(&config).await;
     let mut state = journal.load().await.unwrap().unwrap();
+    // The narrow history budget belongs to these request-sizing probes, not
+    // the preceding synthetic extraction and repair script.
+    config.limits.max_history_bytes = 128;
     let view = test_view();
     let id = view.id().unwrap();
     state.source_views.insert(id.clone(), view.clone());

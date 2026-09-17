@@ -69,6 +69,12 @@ class Parser:
             engine or "builtin",
         )
 
+        if "output_inventory" in overrides:
+            if overrides != {"output_inventory": "v1"} or engine not in ("", "builtin"):
+                raise ValueError("unsupported output inventory profile or overrides")
+            from docreader.parser.output_inventory import parse_output_inventory
+            return parse_output_inventory(file_name, file_type, content)
+
         effective_file_type = detect_effective_file_type(file_type, content)
         cls = self.registry.get_parser_class(engine, effective_file_type)
         logger.info(

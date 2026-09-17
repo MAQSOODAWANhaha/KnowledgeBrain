@@ -182,7 +182,7 @@ async fn assert_pending_request(pool: &PgPool, request_id: Uuid) {
 }
 
 #[tokio::test]
-async fn blocked_export_tender_and_content_effects_are_bounded_without_late_writes() {
+async fn blocked_tender_and_content_effects_are_bounded_without_late_writes() {
     let _guard = db_lock().await;
     let Some(database_url) = std::env::var("KNOWLEDGEBRAIN_TEST_DATABASE_URL").ok() else {
         eprintln!("skip: isolated PostgreSQL test database is down");
@@ -197,7 +197,6 @@ async fn blocked_export_tender_and_content_effects_are_bounded_without_late_writ
     };
     reset_test_schema(&pool).await;
     install_phase_fixture(&pool).await;
-    let export = create_export_terminal_test_request(&pool).await;
     let tender = create_tender_terminal_test_request(&pool).await;
     let content = create_content_terminal_test_request(&pool).await;
     let content_owner = match bidding::bid_authoring_v2::claim_content_agent_run_v1(&pool, &content)
@@ -210,26 +209,10 @@ async fn blocked_export_tender_and_content_effects_are_bounded_without_late_writ
 
     let (blocked, held) = single_connection_pool(&database_url).await;
     let started = tokio::time::Instant::now();
-    let export_result = terminalize_non_agent_failure_until(
-        &blocked,
-        &export,
-        NonAgentTerminalFailure::SubmissionExport("RENDERER_FAILED"),
-        started + std::time::Duration::from_millis(100),
-        "blocked export failure",
-    )
-    .await;
-    assert!(export_result.unwrap_err().0.contains("persistence reserve"));
-    assert!(started.elapsed() < std::time::Duration::from_secs(1));
-    drop(held);
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert_pending_request(&pool, export.request_artifact_id).await;
-
-    let (blocked, held) = single_connection_pool(&database_url).await;
-    let started = tokio::time::Instant::now();
-    let tender_result = terminalize_non_agent_failure_until(
+    let tender_result = terminalize_tender_document_failure_until(
         &blocked,
         &tender,
-        NonAgentTerminalFailure::TenderDocument("AGENT_OUTPUT_INVALID"),
+        "AGENT_OUTPUT_INVALID",
         started + std::time::Duration::from_millis(100),
         "blocked tender failure",
     )
@@ -385,30 +368,6 @@ async fn create_tender_terminal_test_request(
     .bind(TEST_ACTOR)
     .bind(format!("reserve-tender-{}", Uuid::new_v4()))
     .bind(request_bytes.as_slice())
-    .fetch_one(&mut *connection)
-    .await
-    .unwrap();
-    request_identity(&value)
-}
-
-async fn create_export_terminal_test_request(
-    pool: &PgPool,
-) -> platform::BidAuthoringRequestIdentityV2 {
-    let (workspace_id, revision_id, revision_sha) = test_workspace_head(pool).await;
-    let request_bytes = r#"{"reserve_test":"export"}"#;
-    let mut connection = owner_connection(pool).await;
-    let value: serde_json::Value = sqlx::query_scalar(
-        "SELECT kb_bid_v2_create_submission_export_request(
-             $1,$2,$3::kb_sha256,'review_draft','pdf',
-             jsonb_build_object('watermark','reserve test'),$4::kb_actor_identity,$5,
-             convert_to($6,'UTF8'),kb_bid_v2_sha256_bytes(convert_to($6,'UTF8')))",
-    )
-    .bind(workspace_id)
-    .bind(revision_id)
-    .bind(revision_sha)
-    .bind(TEST_ACTOR)
-    .bind(format!("reserve-export-{}", Uuid::new_v4()))
-    .bind(request_bytes)
     .fetch_one(&mut *connection)
     .await
     .unwrap();
@@ -604,6 +563,10 @@ async fn all_active_v2_handler_deadlines_fire_at_the_exact_boundary() {
     let deadlines = [
         ("TenderDocumentProcess", TENDER_HANDLER_HARD_TIMEOUT),
         ("RequirementSetCompile", REQUIREMENT_HANDLER_HARD_TIMEOUT),
+        (
+            "RequirementSetCompile(draft)",
+            REQUIREMENT_DRAFT_HANDLER_HARD_TIMEOUT,
+        ),
         ("DocxCompose", DOCX_COMPOSE_HANDLER_HARD_TIMEOUT),
         (
             "ContentGenerate(generate)",

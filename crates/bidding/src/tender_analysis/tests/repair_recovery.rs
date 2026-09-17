@@ -97,8 +97,19 @@ async fn completed_history_delivery_allows_one_retry_with_spent_replans() {
         "delivered full prior history must open the bounded retry"
     );
     assert_eq!(state.main_progress.watch.replans, 2);
-    assert_eq!(state.main_progress.blockers[0].dependencies_sha256, prior);
+    // The current saved repair permits automatic source closure, but the
+    // ordinary owner retains the already spent retry allowance.
+    assert!(state.main_progress.blockers.is_empty());
+    assert!(
+        state
+            .dispatch
+            .entries
+            .values()
+            .any(|entry| entry.spent_replans == 2)
+    );
+    assert!(!agent::repair_recovery::available(&state, &["source".into()]).unwrap());
     assert!(state.main_progress.watch.focus_turns > 0);
+    assert!(!prior.is_empty());
 }
 
 #[tokio::test]

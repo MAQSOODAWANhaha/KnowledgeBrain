@@ -70,7 +70,7 @@ BEGIN
     (claim->>'execution_owner_token')::uuid,checkpoint,'{"phase":"sql_boundary_fixture"}'::jsonb);
   RETURN kb_bid_v2_publish_requirement_set_v4(p_id,p_revision,p_sha,
     p_compiled||jsonb_build_object('analysis_result',analysis_result),p_actor,
-    (claim->>'attempt')::integer,(claim->>'execution_owner_token')::uuid);
+    (claim->>'attempt')::integer,(claim->>'execution_owner_token')::uuid,NULL);
 END $$;
 
 DO $$

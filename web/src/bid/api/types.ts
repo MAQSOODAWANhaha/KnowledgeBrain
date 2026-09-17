@@ -124,6 +124,26 @@ export type TenderRelationView = {
 export type SourceUnitDisposition =
   "requirement" | "non_requirement" | "unresolved";
 
+export type OutlineNode = {
+  title: string;
+  kind: string;
+  children?: OutlineNode[];
+  record_id?: string;
+};
+
+export type TenderOutline = {
+  quality: "draft";
+  compile_status?: string | null;
+  extracted_from: "none" | "checkpoint" | "published";
+  extracted?: OutlineNode[];
+  documents?: Array<{
+    id: string;
+    file_name: string;
+    parse_status: string;
+    source?: OutlineNode[];
+  }>;
+};
+
 export type SourceUnitView = {
   source_unit_revision_id: string;
   document_id: string;

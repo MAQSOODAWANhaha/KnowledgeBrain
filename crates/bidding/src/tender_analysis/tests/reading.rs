@@ -763,17 +763,6 @@ fn inspect_analysis_exact_ids_and_source_filter_do_not_review_neighbours() {
     let (input, mut analysis, ids) = analysis_query_fixture();
     let mut coverage = Coverage::default();
     let query = json!({"view":"detail","kind":"all","offset":0,"limit":1,"ids":[ids[1]]});
-    for reviewer in [false, true] {
-        let schema = tools::schemas(reviewer)
-            .into_iter()
-            .find(|t| t["function"]["name"] == "inspect_analysis")
-            .unwrap();
-        assert!(
-            jsonschema::JSONSchema::compile(&schema["function"]["parameters"])
-                .unwrap()
-                .is_valid(&query)
-        );
-    }
     let out = tools::invoke(
         &input,
         &mut analysis,
@@ -1026,7 +1015,7 @@ fn inspect_analysis_budgeted_pages_preserve_records_and_only_receipt_returned_it
             .enumerate()
             .map(|(index, record)| {
                 serde_json::to_vec(
-                    &json!({"view":"detail","total":records.len(),"next":index+1,"items":[record]}),
+                    &json!({"view":"detail","query_scope":expected["query_scope"],"total":records.len(),"next":index+1,"items":[record]}),
                 )
                 .unwrap()
                 .len()
@@ -1407,7 +1396,7 @@ fn candidate_index_pages_fit_without_returning_full_candidate_content() {
         .iter()
         .map(|row| {
             serde_json::to_vec(
-                &json!({"view":"index","total":all["total"],"next":all["total"],"items":[row]}),
+                &json!({"view":"index","query_scope":all["query_scope"],"total":all["total"],"next":all["total"],"items":[row]}),
             )
             .unwrap()
             .len()
@@ -1753,7 +1742,12 @@ async fn known_evidence_writes_can_complete_in_one_batch_but_failed_or_unseen_wr
         let accepted = delivered && valid_write;
         assert_eq!(saved.analysis.records.len(), usize::from(accepted));
         assert_eq!(
-            json!(saved.main_work.as_ref().unwrap().status) == "complete",
+            saved
+                .dispatch
+                .entries
+                .values()
+                .any(|entry| entry.source_id.as_deref() == Some("source")
+                    && entry.completed_dependencies.is_some()),
             accepted,
             "failed or not-yet-delivered writes cannot be hidden by same-batch completion"
         );

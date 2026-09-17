@@ -77,17 +77,6 @@ pub(super) fn append(
                 Ok(json!({"reference":key.clone(),"sha256":digest(&value)?,"value":value}))
             })
             .collect::<Result<_, String>>()?;
-        let attached: Vec<_> = raw
-            .iter()
-            .map(|row| {
-                crate::tender_analysis::semantic_compare::attach(
-                    input,
-                    &state.analysis,
-                    row["reference"].as_str().unwrap(),
-                    row.clone(),
-                )
-            })
-            .collect();
         let admit = |packet: &mut Value, rows: &[Value]| {
             let items = packet["assigned_evidence"]["candidates"]
                 .as_array_mut()
@@ -105,16 +94,7 @@ pub(super) fn append(
                 json!(blocked.as_ref().unwrap_or(reference));
         };
         let mut proposed = content.clone();
-        admit(&mut proposed, &attached);
-        if !fits(&proposed, budget)? {
-            proposed = content.clone();
-            admit(&mut proposed, &raw);
-            proposed["assigned_evidence"]["comparison_projection"] = json!({
-                "complete":false,
-                "omitted_for":reference,
-                "instruction":"Host field/blank projections omitted so the complete candidate group still fits. Compare value against original evidence; do not treat omission as approval."
-            });
-        }
+        admit(&mut proposed, &raw);
         if fits(&proposed, budget)? {
             *content = proposed;
             completed += 1;
@@ -141,6 +121,46 @@ pub(super) fn append(
     delivery["complete"] = json!(completed == pending.len());
     delivery["next_group"] = json!(next);
     delivery["capacity_blocked_group"] = json!(blocked);
+    let mut scope: BTreeSet<_> = state
+        .work()
+        .map(|work| work.source_scope.clone())
+        .unwrap_or_else(|| vec![task.source_id.clone()])
+        .into_iter()
+        .collect();
+    if state.role == Role::Reviewer {
+        // This is only the projection's evidence scope, never task authority.
+        // Use this role's delivered/staged text and cell receipts. Each quoted
+        // ground still requires exact coverage in semantic_compare::excerpt;
+        // image receipts cannot authorize text or grid projections.
+        scope.extend(
+            input
+                .source_units
+                .iter()
+                .filter(|source| {
+                    coverage
+                        .text
+                        .get(&source.source_unit_revision_id)
+                        .is_some_and(|ranges| !ranges.is_empty())
+                })
+                .map(|source| source.source_unit_revision_id.clone()),
+        );
+        scope.extend(input.structured_forms.iter().filter_map(|form| {
+            let id = form["form_definition_revision_id"].as_str()?;
+            coverage
+                .form_cells
+                .get(id)
+                .filter(|ranges| !ranges.is_empty())?;
+            form["source_unit_revision_id"].as_str().map(str::to_owned)
+        }));
+    }
+    crate::tender_analysis::semantic_compare::annotate_candidates(
+        input,
+        &state.analysis,
+        coverage,
+        &scope.into_iter().collect::<Vec<_>>(),
+        content,
+        budget,
+    )?;
     if !fits(content, budget)? {
         return Err(
             "source and explicit candidate delivery status exceed the evidence budget".into(),

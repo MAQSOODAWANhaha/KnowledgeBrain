@@ -11,9 +11,11 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 mod context;
+mod draft;
 mod evidence_delivery_resume;
 mod id_navigation;
 mod input;
+mod main_dispatch;
 mod main_handoff;
 mod main_work;
 mod original_views;
@@ -31,6 +33,8 @@ mod repair_task_dispatch;
 mod repair_task_packet;
 mod resume;
 mod review;
+mod reviewer_support_reads;
+mod rule_items;
 mod work;
 
 fn input() -> FrozenInput {
@@ -297,13 +301,12 @@ impl Model for Script {
                 .rev()
                 .find_map(|message| {
                     let result: Value = serde_json::from_str(message["content"].as_str()?).ok()?;
-                    result["result"]["items"]
-                        .as_array()?
-                        .first()?
+                    result["result"]
                         .get("id")
                         .cloned()
+                        .filter(|id| id.is_string())
                 })
-                .expect("fixture explicitly retrieved its finding");
+                .expect("fixture saved a review finding");
         }
         if name == "put_repair_result" && args["finding_sha256"] == "$fixture_repair" {
             let packet: Value = serde_json::from_str(
@@ -323,13 +326,12 @@ impl Model for Script {
                     .find_map(|message| {
                         let result: Value =
                             serde_json::from_str(message["content"].as_str()?).ok()?;
-                        let item = result["result"]["items"]
-                            .as_array()?
-                            .iter()
-                            .find(|item| item.get("data").is_some())?;
-                        item.get("id").cloned()
+                        result["result"]
+                            .get("id")
+                            .cloned()
+                            .filter(|id| id.is_string())
                     })
-                    .expect("fixture explicitly inspected its repaired record");
+                    .expect("fixture saved a record before repair");
                 args["candidate_refs"] = json!([format!("record:{}", id.as_str().unwrap())]);
             }
         }
@@ -353,6 +355,15 @@ impl Model for Script {
 /// identity from the request. This does not run the completion reducer or
 /// manufacture durable receipts; every assertion still traverses the tools.
 fn fixture_review_calls(body: &Value, name: &str, args: &Value) -> Option<Vec<ChatToolCall>> {
+    if name == "fixture_global_checks" {
+        let packet: Value =
+            serde_json::from_str(body["messages"].as_array()?.last()?["content"].as_str()?).ok()?;
+        return Some(ANALYSIS_GLOBAL_CHECK_KEYS.iter().enumerate().map(|(index, key)| ChatToolCall {
+            id: format!("fixture-global-{index}"), name: "put_analysis_check".into(),
+            arguments: json!({"key":key,"expected_scope_sha256":packet["global_analysis_checks"]["expected_scope_sha256"],
+                "conclusion":"pass","grounds":args.get("grounds").cloned().unwrap_or_else(||json!([span()])),"record_ids":[],"finding_ids":[]}).to_string(),
+        }).collect());
+    }
     if name != "put_source_review" || !(args == &json!({}) || args.get("fixture_status").is_some())
     {
         return None;
@@ -436,8 +447,8 @@ pub(super) fn config() -> Config {
             max_no_progress_turns: 6,
             max_focus_turns: 24,
             max_focus_replans: 2,
-            max_turns: 32,
-            max_tool_calls: 40,
+            max_turns: 40,
+            max_tool_calls: 80,
             max_read_bytes: 1000000,
             max_context_bytes: 100000,
             max_history_bytes: 32000,
@@ -448,6 +459,12 @@ pub(super) fn config() -> Config {
             max_review_rounds: 3,
             max_source_view_edge: 1600,
             max_source_view_bytes: 16000,
+            reviewer_reserve: 0,
+            pack_max_units: 1,
+            pack_max_chars: 0,
+            pack_max_turns: 0,
+            draft_path: false,
+            draft_bind_terms: vec![],
         },
     )
     .unwrap()
@@ -485,6 +502,7 @@ async fn fresh_review_journal_config(config: &Config) -> MemoryJournal {
     state.done = false;
     state.review = None;
     state.reviewer_coverage = Coverage::default();
+    state.analysis.review_global_checks.clear();
     state.reviewer_progress = Default::default();
     state.pending_coverage = None;
     state.reviewer_work = None;
@@ -501,30 +519,18 @@ fn script() -> Script {
         json!({"source_id":"source","start":0,"max_bytes":1024}),
     );
     let calls = vec![
-        ("set_work_note", active_work("source")),
         read.clone(),
         (
             "set_disposition",
             json!({"source_id":"source","state":"non_requirement","reason":"incorrect initial interpretation"}),
         ),
-        ("request_review", json!({})),
-        ("set_work_note", active_work("source")),
-        // Preloaded original evidence may legitimately support an immediate
-        // judgment. This scripted reviewer first investigates the known
-        // omission instead of submitting a deliberately false clean result.
-        (
-            "check_gaps",
-            json!({"scope":"analysis","offset":0,"limit":10}),
-        ),
+        ("fixture_global_checks", json!({})),
         read.clone(),
-        (
-            "inspect_analysis",
-            json!({"view":"detail","kind":"disposition","offset":0,"limit":10}),
-        ),
         (
             "put_review_finding",
             json!({"id":null,"finding":{"code":"OMITTED_REQUIREMENT","message":"遗漏附表提交义务","correction":"按所引原文补全并重新核对该字段", "affected":[],"sources":[span()]}}),
         ),
+        ("fixture_global_checks", json!({})),
         ("put_source_review", json!({"fixture_status":"findings"})),
         ("inspect_review", json!({"offset":0,"limit":10})),
         ("put_record", requirement()),
@@ -533,35 +539,16 @@ fn script() -> Script {
             json!({"source_id":"source","state":"requirement","reason":"须知要求按附表提交"}),
         ),
         (
-            "inspect_analysis",
-            json!({"view":"detail","kind":"all","offset":0,"limit":10}),
-        ),
-        (
             "put_repair_result",
             json!({"finding_sha256":"$fixture_repair", "conclusion":"revised",
             "summary":"Added the previously omitted submission requirement from the cited fixture source.",
             "sources":[span()],"candidate_refs":["$fixture_record"]}),
         ),
-        ("request_review", json!({})),
-        ("set_work_note", active_work("source")),
+        ("fixture_global_checks", json!({})),
         read,
-        // Preloaded original evidence may legitimately support an immediate
-        // judgment. This scripted reviewer first investigates the known
-        // omission instead of submitting a deliberately false clean result.
-        (
-            "check_gaps",
-            json!({"scope":"analysis","offset":0,"limit":10}),
-        ),
-        (
-            "inspect_analysis",
-            json!({"view":"detail","kind":"disposition","offset":0,"limit":10}),
-        ),
-        (
-            "inspect_analysis",
-            json!({"view":"detail","kind":"all","offset":0,"limit":10}),
-        ),
         ("inspect_review", json!({"offset":0,"limit":10})),
         ("delete_review_finding", json!({"id":"$fixture_finding"})),
+        ("fixture_global_checks", json!({})),
         ("put_source_review", json!({})),
     ];
     Script {
@@ -604,4 +591,31 @@ fn field_relation_fixture() -> (FrozenInput, Analysis, Value) {
         "to_target":{"kind":"template_cell","form_id":"form-a","row":1,"column":1},
         "kind":"aggregates","state":"explicit","scope":"当前附件","explanation":"分项汇总到合计，保留原文条件，不执行计算","grounds":[span()]});
     (input, analysis, args)
+}
+
+/// Explicit synthetic global judgments for direct state-machine tests. Never
+/// grants reading coverage; malformed or unread grounds still fail production tools.
+pub(super) fn fixture_global_checks(input: &FrozenInput, config: &Config, state: &mut Checkpoint) {
+    let grounds: Vec<_> = input
+        .source_units
+        .iter()
+        .filter_map(|source| {
+            let span = Span {
+                source_id: source.source_unit_revision_id.clone(),
+                start: 0,
+                end: source.text.len(),
+                view_id: None,
+                grid_cell: None,
+            };
+            (!source.text.is_empty()
+                && tools::validate_span(input, state.coverage(), &span).is_ok())
+            .then_some(span)
+        })
+        .take(1)
+        .collect();
+    for key in ANALYSIS_GLOBAL_CHECK_KEYS {
+        let args = json!({"key":key,"expected_scope_sha256":rule_contract::scope_sha256(input,&state.analysis).unwrap(),
+            "conclusion":"pass","grounds":grounds,"record_ids":[],"finding_ids":[]});
+        agent::apply(input, config, state, "put_analysis_check", &args).unwrap();
+    }
 }

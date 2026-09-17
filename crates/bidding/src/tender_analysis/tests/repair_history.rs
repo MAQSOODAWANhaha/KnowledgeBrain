@@ -155,6 +155,7 @@ async fn stale_repair_can_be_registered_after_current_reads_without_another_muta
     let (journal, config, id, sha, args) = handled().await;
     let mut state = journal.load().await.unwrap().unwrap();
     incident_change(&mut state, &id);
+    agent::main_dispatch::after_batch(&input(), &config, &mut state, None, false, false).unwrap();
     state.analysis.coverage.candidate.clear();
     let analysis = digest(&state.analysis.records).unwrap();
     let relations = digest(&state.analysis.relations).unwrap();

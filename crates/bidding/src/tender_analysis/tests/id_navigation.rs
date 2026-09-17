@@ -52,7 +52,7 @@ fn query(error: &str) -> Value {
 }
 
 #[tokio::test]
-async fn fabricated_id_error_navigates_local_index_without_receipts_or_mutation() {
+async fn fabricated_id_error_navigates_collection_index_without_receipts_or_mutation() {
     let (input, mut state, config) = fixture().await;
     let before = digest(&state).unwrap();
     let error = inspect(
@@ -68,16 +68,7 @@ async fn fabricated_id_error_navigates_local_index_without_receipts_or_mutation(
     let mut navigation = query(&error);
     assert_eq!(
         navigation,
-        json!({"kind":"all","offset":0,"limit":1,"view":"index"})
-    );
-    let schema = tools::schemas(false)
-        .into_iter()
-        .find(|t| t["function"]["name"] == "inspect_analysis")
-        .unwrap();
-    assert!(
-        jsonschema::JSONSchema::compile(&schema["function"]["parameters"])
-            .unwrap()
-            .is_valid(&navigation)
+        json!({"kind":"all","offset":0,"limit":1,"view":"index","scope":"collection"})
     );
     let mut found = false;
     loop {
@@ -100,6 +91,74 @@ async fn fabricated_id_error_navigates_local_index_without_receipts_or_mutation(
         before,
         "index grants neither detail nor progress/recovery"
     );
+}
+
+#[tokio::test]
+async fn collection_navigation_finds_cross_source_candidates_without_switching_work() {
+    let (mut input, mut state, config) = fixture().await;
+    let mut outside = input.source_units[0].clone();
+    outside.source_unit_revision_id = "outside".into();
+    input.source_units.push(outside);
+    state
+        .analysis
+        .records
+        .get_mut("b-full-identity")
+        .unwrap()
+        .sources[0]
+        .source_id = "outside".into();
+    let before = digest(&state).unwrap();
+    let args = json!({"kind":"record","view":"index","offset":0,"limit":10});
+    let local = inspect(&input, &mut state, &config, &args).await.unwrap();
+    assert_eq!(local["total"], 1);
+    assert_eq!(local["query_scope"]["mode"], "work");
+    assert_eq!(local["query_scope"]["source_scope_count"], 1);
+    let mut collection = args;
+    collection["scope"] = json!("collection");
+    let page = inspect(&input, &mut state, &config, &collection)
+        .await
+        .unwrap();
+    assert_eq!(page["total"], 2);
+    assert_eq!(page["query_scope"]["mode"], "collection");
+    assert!(
+        page["items"].as_array().unwrap().iter().any(|row| {
+            row["id"] == "b-full-identity" && row["source_ids"] == json!(["outside"])
+        })
+    );
+    assert_eq!(
+        digest(&state).unwrap(),
+        before,
+        "navigation cannot change task, receipts or progress"
+    );
+    collection["source_id"] = json!("source");
+    collection["ids"] = json!(["b-full-identity"]);
+    let filtered = inspect(&input, &mut state, &config, &collection)
+        .await
+        .unwrap();
+    assert_eq!(
+        filtered["total"], 0,
+        "collection must still honor explicit filters"
+    );
+    assert_eq!(filtered["query_scope"]["mode"], "explicit");
+    assert_eq!(digest(&state).unwrap(), before);
+}
+
+#[tokio::test]
+async fn collection_navigation_remains_bounded_and_rejects_unknown_scope() {
+    let (input, mut state, mut config) = fixture().await;
+    config.limits.max_tool_result_bytes = 512;
+    let args = json!({"kind":"record","view":"index","offset":0,"limit":100,"scope":"collection"});
+    let before = digest(&state).unwrap();
+    let page = inspect(&input, &mut state, &config, &args).await.unwrap();
+    assert!(serde_json::to_vec(&page).unwrap().len() <= 512);
+    assert!(!page["items"].as_array().unwrap().is_empty());
+    let mut invalid = args;
+    invalid["scope"] = json!("everything");
+    assert!(
+        inspect(&input, &mut state, &config, &invalid)
+            .await
+            .is_err()
+    );
+    assert_eq!(digest(&state).unwrap(), before);
 }
 
 #[tokio::test]

@@ -7,11 +7,68 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "offset": { "type": "integer", "minimum": 0 },
-          "limit": { "type": "integer", "minimum": 1 },
-          "id": { "type": "string", "minLength": 1 }
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          }
         },
-        "required": ["offset", "limit"],
+        "required": [
+          "offset",
+          "limit"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_output_view",
+      "description": "Read exact frozen output pixels for one image_region unit. The next request carries the actual stored image, not just its ID or text. This never grants a visual receipt for unsupported fields or text boxes. Use read_output_evidence for units without a frozen image.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_review_obligations",
+      "description": "Page the complete frozen obligation inventory, including chapters or templates missing entirely from the final file. This index grants no source or candidate-detail reading receipt; use inspect_analysis and original read tools independently.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "offset",
+          "limit"
+        ],
         "additionalProperties": false
       }
     }
@@ -20,19 +77,50 @@
     "type": "function",
     "function": {
       "name": "put_composition_review",
-      "description": "Submit one export-review item conclusion against the frozen output inventory. Host aggregates. This does not reuse composition workspace approval.",
+      "description": "Review one actual output unit or one frozen tender obligation. For obligations cite the actual output_ids implementing it; an absent obligation needs a finding after inspecting the complete file inventory. The host assigns issue IDs from findings text. Unsupported parser content is not_checked, never source_limited. Source_limited requires an actual frozen source uncertainty.",
       "parameters": {
         "type": "object",
         "properties": {
-          "item_id": { "type": "string", "minLength": 1 },
+          "item_id": {
+            "type": "string",
+            "minLength": 1
+          },
           "conclusion": {
             "type": "string",
-            "enum": ["pass", "findings", "source_limited"]
+            "enum": [
+              "pass",
+              "findings",
+              "source_limited",
+              "not_checked",
+              "not_applicable"
+            ]
           },
-          "grounds": { "type": "array" },
-          "finding_ids": { "type": "array", "items": { "type": "string" } }
+          "grounds": {
+            "type": "array"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Actual issue, limitation or exclusion rationale. Required and nonempty for findings, source_limited, not_checked and not_applicable; empty for pass."
+          },
+          "output_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true,
+            "description": "Exact already-read output units implementing this obligation. Empty only for a grounded absence/limitation. Output-unit judgments default to their own ID."
+          }
         },
-        "required": ["item_id", "conclusion", "grounds"],
+        "required": [
+          "item_id",
+          "conclusion",
+          "grounds"
+        ],
         "additionalProperties": false
       }
     }

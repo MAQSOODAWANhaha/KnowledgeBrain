@@ -173,6 +173,29 @@ impl std::fmt::Display for ConvertError {
 
 impl std::error::Error for ConvertError {}
 
+/// Typed read boundary for callers that must distinguish retries from bad input.
+/// The existing ConvertError API remains available to general ingest callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocReaderReadError {
+    Cancelled,
+    Transient(String),
+    Configuration(String),
+    InvalidResponse(String),
+}
+
+impl std::fmt::Display for DocReaderReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("cancelled"),
+            Self::Transient(message)
+            | Self::Configuration(message)
+            | Self::InvalidResponse(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for DocReaderReadError {}
+
 pub const NOT_CONFIGURED: &str = "Document parsing service is not configured. Please use text/paragraph import or set DOCREADER_ADDR.";
 
 pub struct ConvertInput<'a> {

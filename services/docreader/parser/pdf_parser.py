@@ -1561,6 +1561,7 @@ class PDFParser(BaseParser):
 
     def __init__(self, file_name: str = "", file_type=None, **kwargs):
         # Capture per-upload override before BaseParser consumes kwargs.
+        self._output_inventory = kwargs.pop("output_inventory", False)
         raw = kwargs.pop("pdf_force_scanned", None)
         super().__init__(file_name=file_name, file_type=file_type, **kwargs)
         # Priority: per-upload override > global env > default (False).
@@ -1573,7 +1574,7 @@ class PDFParser(BaseParser):
 
     def parse_into_text(self, content: bytes) -> Document:
         # Force-scanned short-circuit: render every page as an image.
-        if self._force_scanned:
+        if self._force_scanned and not self._output_inventory:
             logger.info(
                 "PDFParser: force scanned mode enabled for %s",
                 self.file_name,
@@ -1595,6 +1596,8 @@ class PDFParser(BaseParser):
         try:
             return self._route(content)
         except Exception:
+            if self._output_inventory:
+                raise
             logger.exception(
                 "PDFParser: per-page routing failed for %s; "
                 "falling back to full image rendering",
@@ -1655,7 +1658,8 @@ class PDFParser(BaseParser):
                             page_tables[i] = tables
                             # Cell glyphs belong to TABLE_REGION. SECTION is the
                             # leftover outside table bboxes, never the full page.
-                            text = leftover_text
+                            if not self._output_inventory:
+                                text = leftover_text
                         clips = _extract_vector_figure_clips(
                             page,
                             i,
@@ -1670,8 +1674,11 @@ class PDFParser(BaseParser):
                             vector_clips[i] = clips
                             for ref_path, b64, _y, _cap, _bounds in clips:
                                 images[ref_path] = b64
-                    text = _postprocess_pdf_text(text)
-                    if cls == "text" and vector_clips.get(i):
+                    if self._output_inventory:
+                        text = plain
+                    else:
+                        text = _postprocess_pdf_text(text)
+                    if not self._output_inventory and cls == "text" and vector_clips.get(i):
                         text = _inject_figure_markdown_before_captions(
                             text, vector_clips[i]
                         )
@@ -1680,16 +1687,20 @@ class PDFParser(BaseParser):
                 texts.append(text)
                 classes.append(cls)
 
-            texts = _strip_repeating_lines(texts, classes)
+            if not self._output_inventory:
+                texts = _strip_repeating_lines(texts, classes)
             scanned_indices = [i for i, c in enumerate(classes) if c == "scanned"]
 
-            # Pass 2: render only the scanned pages (heavy work, rate-limited).
-            if scanned_indices:
+            # Final-file inventory keeps every page's pixels, including blank
+            # pages and small figures excluded by normal ingest heuristics.
+            render_indices = list(range(page_count)) if self._output_inventory else scanned_indices
+            # Pass 2: shared rate-limited renderer.
+            if render_indices:
                 with parser_worker_limit("pdf_render", CONFIG.pdf_render_max_workers):
                     rendered = _render_scanned_pages(
                         pdf,
                         content,
-                        scanned_indices,
+                        render_indices,
                         scale,
                         quality,
                         CONFIG.pdf_render_max_edge,
@@ -1764,6 +1775,14 @@ class PDFParser(BaseParser):
         )
         structured_units: list[StructuredSourceUnit] = []
         for i in range(page_count):
+            if self._output_inventory:
+                structured_units.append(
+                    StructuredSourceUnit(
+                        key=f"page:{i}:section:0", ordinal=len(structured_units),
+                        kind=StructuredSourceUnitKind.SECTION, text=texts[i],
+                        locator=PageLocator(page_ordinal=i),
+                    )
+                )
             if classes[i] == "scanned":
                 ref_path = f"images/{base_name}_page_{i+1}.jpg"
                 structured_units.append(
@@ -1777,7 +1796,7 @@ class PDFParser(BaseParser):
                 )
             else:
                 leftover = texts[i].strip()
-                if leftover:
+                if leftover and not self._output_inventory:
                     structured_units.append(
                         StructuredSourceUnit(
                             key=f"page:{i}:section:0",
@@ -1791,6 +1810,11 @@ class PDFParser(BaseParser):
                     structured_units.extend(
                         _pdf_table_units(i, table_ordinal, len(structured_units), grid)
                     )
+            if self._output_inventory and classes[i] != "scanned":
+                ref_path = f"images/{base_name}_page_{i+1}.jpg"
+                structured_units.append(_pdf_image_unit(
+                    f"page:{i}:image:0", len(structured_units), i, ref_path, images[ref_path]
+                ))
             page_images = [
                 (item[0], item[1], item[3]) for item in embedded.get(i, [])
             ]

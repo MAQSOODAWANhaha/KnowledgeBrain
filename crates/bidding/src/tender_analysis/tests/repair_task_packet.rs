@@ -105,6 +105,14 @@ async fn current_repair_receipts_do_not_bypass_exhausted_handoff_on_resume() {
         no_progress_turns: config.limits.max_no_progress_turns * 2,
         focus_turns: config.limits.max_focus_turns,
     };
+    let agent::main_dispatch::Active::Ordinary(root) = state.dispatch.active.clone().unwrap()
+    else {
+        panic!("global root after repair");
+    };
+    let entry = state.dispatch.entries.get_mut(&root).unwrap();
+    entry.watch = state.main_progress.watch.clone();
+    entry.spent_replans = config.limits.max_focus_replans;
+    entry.spent_batches = agent::repair::tasks::limit(&config.limits).unwrap();
     let before = digest(&state).unwrap();
     *journal.state.lock().unwrap() = Some(serde_json::from_value(json!(state)).unwrap());
     let reservations = journal.reservations.lock().unwrap().clone();

@@ -57,17 +57,25 @@ pub(crate) async fn drive<D: Driver>(
 ) -> Result<(), AgentError> {
     while !host.status().done {
         check_cancel(cancel)?;
-        if host.status().execution_blocked {
-            return Err(AgentError::new(
-                "AGENT_TURN_BUDGET_EXCEEDED",
-                "local execution and independent-work handoff allowances exhausted; blockers and checkpoint retained",
-            ));
-        }
-        if host.status().budget_exhausted {
-            return Err(AgentError::new(
-                "AGENT_TURN_BUDGET_EXCEEDED",
-                "global Agent budget exhausted; checkpoint retained",
-            ));
+        let recovered = host.status().journal.response().is_some();
+        if recovered {
+            // A received response already belongs to its saved reservation.
+            // Validate it before replay; these gates authorize only a NEW call.
+            let status = host.status();
+            status.journal.validate(status.turn, status.role)?;
+        } else {
+            if host.status().execution_blocked {
+                return Err(AgentError::new(
+                    "AGENT_TURN_BUDGET_EXCEEDED",
+                    "local execution and independent-work handoff allowances exhausted; blockers and checkpoint retained",
+                ));
+            }
+            if host.status().budget_exhausted {
+                return Err(AgentError::new(
+                    "AGENT_TURN_BUDGET_EXCEEDED",
+                    "global Agent budget exhausted; checkpoint retained",
+                ));
+            }
         }
         let started = Instant::now();
         if host.status().journal.pending.is_none() {
@@ -84,7 +92,6 @@ pub(crate) async fn drive<D: Driver>(
             request_bytes = body.len(),
             elapsed_ms = started.elapsed().as_millis() as u64
         );
-        let recovered = host.status().journal.response().is_some();
         let response = if let Some(response) = host.status().journal.response() {
             response.clone()
         } else {
@@ -314,6 +321,8 @@ mod tests {
         turn: usize,
         done: bool,
         complete_after: usize,
+        budget_exhausted: bool,
+        execution_blocked: bool,
         reserved: Mutex<usize>,
         calls: Mutex<usize>,
         executes: Mutex<usize>,
@@ -327,6 +336,8 @@ mod tests {
                 turn: 0,
                 done: false,
                 complete_after: 2,
+                budget_exhausted: false,
+                execution_blocked: false,
                 reserved: Mutex::new(0),
                 calls: Mutex::new(0),
                 executes: Mutex::new(0),
@@ -359,8 +370,8 @@ mod tests {
                 turn: self.turn,
                 role: "main",
                 done: self.done,
-                budget_exhausted: false,
-                execution_blocked: false,
+                budget_exhausted: self.budget_exhausted,
+                execution_blocked: self.execution_blocked,
                 max_context_bytes: 16384,
             }
         }
@@ -448,6 +459,105 @@ mod tests {
         assert_eq!(*host.reserved.lock().unwrap(), 0);
         assert_eq!(*host.executes.lock().unwrap(), 1);
         assert!(host.journal.pending.is_none());
+    }
+
+    async fn stopped_boundary(received: bool, budget: bool, blocked: bool) -> ScriptedHost {
+        let mut host = ScriptedHost {
+            budget_exhausted: budget,
+            execution_blocked: blocked,
+            ..Default::default()
+        };
+        let body = host.prepare_request().await.unwrap();
+        host.journal.prepare(0, "main", &body).unwrap();
+        if received {
+            host.journal
+                .responded(tool_response("saved-at-limit"))
+                .unwrap();
+        }
+        host
+    }
+
+    #[tokio::test]
+    async fn received_response_finishes_before_next_call_budget_or_execution_gate() {
+        for (budget, blocked) in [(true, false), (false, true), (true, true)] {
+            let mut host = stopped_boundary(true, budget, blocked).await;
+            host.complete_after = 1;
+            drive(&mut host, &CancellationToken::new()).await.unwrap();
+            assert!(host.done);
+            assert!(host.journal.pending.is_none());
+            assert_eq!(host.journal.sequence, 3);
+            assert_eq!(*host.executes.lock().unwrap(), 1);
+            assert_eq!(*host.reserved.lock().unwrap(), 0);
+            assert_eq!(*host.calls.lock().unwrap(), 0);
+            assert_eq!(host.sdk_turns.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn received_replay_cannot_authorize_another_preparation_or_reservation() {
+        for (budget, blocked) in [(true, false), (false, true)] {
+            let mut host = stopped_boundary(true, budget, blocked).await;
+            let error = drive(&mut host, &CancellationToken::new())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "AGENT_TURN_BUDGET_EXCEEDED");
+            assert!(!host.done);
+            assert!(host.journal.pending.is_none());
+            assert_eq!(host.journal.sequence, 3);
+            assert_eq!(host.turn, 1);
+            assert_eq!(*host.executes.lock().unwrap(), 1);
+            assert_eq!(*host.reserved.lock().unwrap(), 0);
+            assert_eq!(*host.calls.lock().unwrap(), 0);
+            assert_eq!(host.sdk_turns.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_boundary_still_obeys_next_call_budget_and_execution_gates() {
+        for (budget, blocked) in [(true, false), (false, true)] {
+            let mut host = stopped_boundary(false, budget, blocked).await;
+            let before = serde_json::to_value(&host.journal).unwrap();
+            let error = drive(&mut host, &CancellationToken::new())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "AGENT_TURN_BUDGET_EXCEEDED");
+            assert_eq!(serde_json::to_value(&host.journal).unwrap(), before);
+            assert_eq!(*host.executes.lock().unwrap(), 0);
+            assert_eq!(*host.reserved.lock().unwrap(), 0);
+            assert_eq!(*host.calls.lock().unwrap(), 0);
+            assert_eq!(host.sdk_turns.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn received_replay_at_limit_keeps_cancellation_and_frozen_boundary_validation() {
+        let mut host = stopped_boundary(true, true, true).await;
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let error = drive(&mut host, &cancel).await.unwrap_err();
+        assert_eq!(error.message, "Agent run cancelled");
+        assert_eq!(*host.executes.lock().unwrap(), 0);
+        assert!(host.journal.response().is_some());
+
+        for corruption in ["role", "turn", "body", "response", "session"] {
+            let mut host = stopped_boundary(true, true, true).await;
+            let pending = host.journal.pending.as_mut().unwrap();
+            match corruption {
+                "role" => pending.role = "reviewer".into(),
+                "turn" => pending.turn += 1,
+                "body" => pending.body = "{}".into(),
+                "response" => pending.response = Some(ChatTurn::default()),
+                "session" => host.journal.session = None,
+                _ => unreachable!(),
+            }
+            let error = drive(&mut host, &CancellationToken::new())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "FROZEN_INPUT_DIGEST_MISMATCH", "{corruption}");
+            assert_eq!(*host.executes.lock().unwrap(), 0);
+            assert_eq!(*host.reserved.lock().unwrap(), 0);
+            assert_eq!(*host.calls.lock().unwrap(), 0);
+        }
     }
 
     #[tokio::test]

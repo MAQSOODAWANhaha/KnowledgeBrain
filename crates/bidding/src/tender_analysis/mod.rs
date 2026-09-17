@@ -1,7 +1,11 @@
 //! Tender-side semantic analysis. Source geometry is immutable; interpretations
 //! are versioned records, reviewed independently before publication.
 pub mod agent;
+pub mod budget;
+pub mod draft;
 pub mod evidence_refs;
+pub mod outline;
+pub mod pack;
 pub mod postgres;
 pub mod relations;
 pub mod rule_contract;
@@ -186,7 +190,14 @@ pub enum RegionRole {
     Signature,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl RegionRole {
+    /// Shared by the compiler and its source-policy comparison projection.
+    pub(crate) fn preserves_source_text(self) -> bool {
+        self != Self::BidderBlank
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Cell {
     pub row: usize,
@@ -388,6 +399,11 @@ pub struct Coverage {
 #[serde(deny_unknown_fields)]
 pub struct Analysis {
     pub records: BTreeMap<String, Record>,
+    /// Host allocation history; retained after item/record deletion to prevent identity reuse.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rule_item_sequences: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draft_plan: Vec<draft::DraftPlanItem>,
     pub relations: BTreeMap<String, Relation>,
     pub dispositions: BTreeMap<String, Disposition>,
     pub coverage: Coverage,
@@ -407,6 +423,11 @@ pub struct Review {
     pub contract_sha256: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub global_checks: Vec<GlobalCheck>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub omitted_sources: BTreeMap<String, String>,
+    /// Draft path: not an independent review and not a verified composition basis.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draft: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

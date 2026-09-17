@@ -2,17 +2,6 @@
 //! and reading receipts; package preparation never advances extraction.
 use super::*;
 
-pub(super) fn normal(state: &Checkpoint) -> bool {
-    state.role == Role::Main
-        && state.source_review.is_none()
-        && state.review.is_none()
-        && state.review_draft.is_empty()
-        && repair::tasks::active(state).is_none()
-        && state.main_progress.blockers.is_empty()
-        && state.reviewer_progress.blockers.is_empty()
-        && state.execution().watch.recovery != Recovery::Blocked
-}
-
 fn unread(ranges: Option<&Vec<(usize, usize)>>, total: usize) -> Option<usize> {
     let mut offset = 0;
     for &(start, end) in ranges.into_iter().flatten() {
@@ -59,12 +48,7 @@ fn append_candidates(
             .filter(|key| !delivered.contains(*key))
             .map(|key| {
                 let value = context::reference(&state.analysis, key)?;
-                Ok(crate::tender_analysis::semantic_compare::attach(
-                    input,
-                    &state.analysis,
-                    key,
-                    json!({"reference":key,"sha256":digest(&value)?,"value":value}),
-                ))
+                Ok(json!({"reference":key,"sha256":digest(&value)?,"value":value}))
             })
             .collect::<Result<_, String>>()?;
         let ids: Vec<_> = group
@@ -104,6 +88,14 @@ fn append_candidates(
         "complete":complete == references.len(),"next_inspection":next,
         "instruction":"Missing groups are not received or judged. Continue with the exact next_inspection IDs; inspect returned pagination and narrow the comparison if the whole group and original evidence cannot fit."
     });
+    crate::tender_analysis::semantic_compare::annotate_candidates(
+        input,
+        &state.analysis,
+        coverage,
+        scope,
+        content,
+        budget / 2,
+    )?;
     Ok(())
 }
 
@@ -162,28 +154,43 @@ pub(super) fn evidence(
     config: &Config,
     state: &Checkpoint,
 ) -> Result<Option<source_review::Evidence>, String> {
-    if !normal(state) || state.pending_coverage.is_some() {
+    if state.role != Role::Main || state.pending_coverage.is_some() {
         return Ok(None);
     }
-    let prior = state.main_work.as_ref();
-    if prior
-        .is_some_and(|work| work.status == WorkStatus::Blocked || !work.deferred_sources.is_empty())
-    {
-        // Explicitly deferred cross-reference work keeps its existing scope
-        // protocol. A derived package must not discard that obligation.
-        return Ok(None);
-    }
-    let active = prior.filter(|work| work.status == WorkStatus::Active);
-    let mut work = active.cloned().unwrap_or(WorkState {
-        source_scope: vec![],
-        deferred_sources: vec![],
-        objective: "Extract source-grounded records, relationships and dispositions from the assigned frozen evidence.".into(),
-        focus: context::Focus::default(),
-        output_refs: vec![],
-        pending_refs: vec![],
-        status: WorkStatus::Active,
-        note: String::new(),
-    });
+    let (work, check_replace) = if config.limits.draft_path {
+        match state
+            .main_work
+            .clone()
+            .filter(|work| work.status == WorkStatus::Active)
+        {
+            Some(work) => {
+                if state.draft_stage == crate::tender_analysis::draft::DraftStage::Outline
+                    && !crate::tender_analysis::draft::small_file(input)
+                {
+                    return Ok(None);
+                }
+                (work, false)
+            }
+            None => return Ok(None),
+        }
+    } else {
+        if state.source_review.is_some() && state.dispatch.active.is_none() {
+            return Ok(None);
+        }
+        let Some(assigned) = main_dispatch::projection(input, config, state)? else {
+            return Ok(None);
+        };
+        if matches!(assigned.owner, main_dispatch::Active::Repair(_)) {
+            return Ok(None);
+        }
+        let work = main_dispatch::work(input, &config.limits, state, &assigned);
+        if !work.deferred_sources.is_empty()
+            || context::scope_is_blocked(state, &work.source_scope)?
+        {
+            return Ok(None);
+        }
+        (work, true)
+    };
     // Bound semantic work independently of the total context window. Treating
     // one serialized UTF-8 byte as one output token is only a conservative
     // workload heuristic; it cannot predict extraction expansion or guarantee
@@ -200,57 +207,49 @@ pub(super) fn evidence(
     }});
     for source in &input.source_units {
         let id = &source.source_unit_revision_id;
-        if active.is_some_and(|work| !work.source_scope.contains(id))
-            || (active.is_none() && state.analysis.dispositions.contains_key(id))
-        {
+        if !work.source_scope.contains(id) {
             continue;
-        }
-        // A new package follows frozen adjacency within one document. Actual
-        // cross-document or continuation relationships remain model judgments.
-        if active.is_none()
-            && work.source_scope.first().is_some_and(|first| {
-                input
-                    .source_units
-                    .iter()
-                    .find(|s| &s.source_unit_revision_id == first)
-                    .is_some_and(|first| first.document_id != source.document_id)
-            })
-        {
-            break;
         }
         let before = content.clone();
         let before_coverage = coverage.clone();
-        if active.is_none() {
-            work.source_scope.push(id.clone());
-            context::retain_outcomes(&state.analysis, &mut work, prior);
-            content["main_work"] = json!(work);
-        }
         content["assigned_evidence"]["navigation"].as_array_mut().unwrap().push(json!({
             "source_id":id,"document_id":source.document_id,"ordinal":source.ordinal,
             "locator":source.locator,"total_bytes":source.text.len(),
             "forms":input.structured_forms.iter().filter(|form| form["source_unit_revision_id"] == *id)
                 .map(|form| &form["form_definition_revision_id"]).collect::<Vec<_>>()
         }));
-        append_candidates(
-            input,
-            state,
-            &work.source_scope,
-            &mut content,
-            &mut coverage,
-            budget,
-        )?;
+        if !config.limits.draft_path {
+            append_candidates(
+                input,
+                state,
+                &work.source_scope,
+                &mut content,
+                &mut coverage,
+                budget,
+            )?;
+        }
         let mut delivered = content["assigned_evidence"]["candidates"]
             != before["assigned_evidence"]["candidates"]
             || content["assigned_evidence"]["candidate_delivery"]["next_inspection"].is_object();
-        if let Some(start) = unread(coverage.text.get(id), source.text.len())
-            .or_else(|| (active.is_none() && !source.text.is_empty()).then_some(0))
-        {
+        let start = if config.limits.draft_path {
+            (!source.text.is_empty()).then_some(0)
+        } else {
+            unread(coverage.text.get(id), source.text.len()).or_else(|| {
+                (state.dispatch.active.is_none() && !source.text.is_empty()).then_some(0)
+            })
+        };
+        if let Some(start) = start {
+            let max_bytes = if config.limits.draft_path {
+                (source.text.len() - start).min(crate::tender_analysis::draft::DRAFT_WINDOW_CHARS)
+            } else {
+                source.text.len() - start
+            };
             delivered |= append(
                 input,
                 &mut content,
                 &mut coverage,
                 "read_source",
-                json!({"source_id":id,"start":start,"max_bytes":source.text.len()-start}),
+                json!({"source_id":id,"start":start,"max_bytes":max_bytes}),
                 budget,
             )?;
         } else if source.text.is_empty() && !state.analysis.dispositions.contains_key(id) {
@@ -287,11 +286,6 @@ pub(super) fn evidence(
         if !delivered || size(&content)? > budget {
             content = before;
             coverage = before_coverage;
-            if active.is_none() {
-                work = serde_json::from_value(content["main_work"].clone())
-                    .map_err(|error| error.to_string())?;
-                break;
-            }
         }
     }
     if work.source_scope.is_empty() {
@@ -303,22 +297,24 @@ pub(super) fn evidence(
             "These are the remaining frozen collection metadata pages. Their exact kind and offset are in arguments. They do not replace the active/completed source scope or declare semantic approval. Inspect decisions and document relationships; save any grounded consequences before requesting independent review. Unsent metadata retains its reading gaps."
         );
     }
-    // Frozen metadata is evidence too. Admit bounded real collection pages;
-    // an omitted page retains its existing global reading gap.
-    for (kind, values) in [
-        ("documents", &input.documents),
-        ("document_relations", &input.document_relations),
-        ("decisions", &input.decisions),
-    ] {
-        if let Some(offset) = unread(coverage.metadata.get(kind), values.len()) {
-            append(
-                input,
-                &mut content,
-                &mut coverage,
-                "collection_index",
-                json!({"kind":kind,"offset":offset,"limit":values.len()-offset}),
-                budget,
-            )?;
+    if !config.limits.draft_path {
+        // Frozen metadata is evidence too. Admit bounded real collection pages;
+        // an omitted page retains its existing global reading gap.
+        for (kind, values) in [
+            ("documents", &input.documents),
+            ("document_relations", &input.document_relations),
+            ("decisions", &input.decisions),
+        ] {
+            if let Some(offset) = unread(coverage.metadata.get(kind), values.len()) {
+                append(
+                    input,
+                    &mut content,
+                    &mut coverage,
+                    "collection_index",
+                    json!({"kind":kind,"offset":offset,"limit":values.len()-offset}),
+                    budget,
+                )?;
+            }
         }
     }
     if content["assigned_evidence"]["boundary_evidence"]
@@ -336,7 +332,7 @@ pub(super) fn evidence(
     if size(&content)? > budget {
         return Ok(None);
     }
-    if !work.source_scope.is_empty() {
+    if check_replace && !work.source_scope.is_empty() {
         context::validate(input, state, &work, config.limits.max_tool_result_bytes)?;
     }
     Ok(Some(source_review::Evidence { content, coverage }))
@@ -348,14 +344,18 @@ pub(super) fn confirm_work(
     state: &mut Checkpoint,
     sent: &Value,
 ) -> Result<(), String> {
+    if config.limits.draft_path {
+        return Ok(());
+    }
     let Some(value) = sent.get("main_work") else {
         return Ok(());
     };
-    if !normal(state) {
-        return Err("Main package cannot replace review or repair work".into());
+    if state.role != Role::Main {
+        return Err("Main package cannot replace Reviewer work".into());
     }
     let work: WorkState =
         serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+    main_dispatch::check_scope(input, state, &config.limits, &work.source_scope)?;
     context::validate(input, state, &work, config.limits.max_tool_result_bytes)?;
     state.main_work = Some(work);
     Ok(())

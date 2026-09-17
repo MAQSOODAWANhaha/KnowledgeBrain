@@ -3,10 +3,15 @@ use super::*;
 use axum::extract::{Query, rejection::QueryRejection};
 
 pub(super) fn router() -> Router<AppState> {
-    Router::new().route(
-        "/api/v2/bid-projects/{project_id}/requirement-sets/{requirement_set_id}/analysis",
-        get(read),
-    )
+    Router::new()
+        .route(
+            "/api/v2/bid-projects/{project_id}/requirement-sets/{requirement_set_id}/analysis",
+            get(read),
+        )
+        .route(
+            "/api/v2/bid-projects/{project_id}/tender-outline",
+            get(outline),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +71,23 @@ async fn read(
         .ok_or_else(|| not_found("frozen tender analysis"))
 }
 
+async fn outline(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project): Path<Uuid>,
+) -> Result<Json<Value>, ApiErr> {
+    let (_, actor) = human_actor(&headers, &state).await?;
+    let pool = require_bid_pool().await?;
+    let bundle = bidding::bid_authoring_v2::get_tender_outline_v2(&pool, project, &actor)
+        .await
+        .map_err(map_sql)?;
+    let outline = bidding::tender_analysis::outline::from_bundle(bundle)
+        .map_err(|error| validation(&error))?;
+    serde_json::to_value(&outline)
+        .map(Json)
+        .map_err(|error| validation(&error.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +142,27 @@ mod tests {
             let error = parse(query).expect_err(query);
             assert_eq!(error.0, StatusCode::BAD_REQUEST, "{query}");
         }
+    }
+
+    #[tokio::test]
+    async fn outline_route_requires_authentication_before_database_access() {
+        let app = router().with_state(AppState {
+            jwt_secret: "outline-route-test".into(),
+            bootstrap_key: String::new(),
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v2/bid-projects/{}/tender-outline",
+                        Uuid::new_v4()
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

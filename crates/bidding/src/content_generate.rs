@@ -1212,36 +1212,38 @@ pub async fn execute(
                 .get("existing_attestation")
                 .filter(|value| !value.is_null())
                 .map(|value| {
-                    Ok(knowledge::knowledge_retrieval_pg::AttestedEvidenceScopeV2 {
-                        attestation_id: value
-                            .get("attestation_id")
-                            .and_then(serde_json::Value::as_str)
-                            .and_then(|value| Uuid::parse_str(value).ok())
-                            .ok_or_else(|| {
-                                crate::agent_error::AgentError::new(
-                                    "CONTENT_DIVERGENT_AGENT_INPUT_REPLAY",
-                                    "stored attestation id invalid",
-                                )
-                            })?,
-                        attestation_sha256: value
-                            .get("attestation_sha256")
-                            .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| {
-                                crate::agent_error::AgentError::new(
-                                    "CONTENT_DIVERGENT_AGENT_INPUT_REPLAY",
-                                    "stored attestation digest invalid",
-                                )
-                            })?
-                            .to_owned(),
-                        canonical_scope: value.get("canonical_scope").cloned().ok_or_else(
-                            || {
-                                crate::agent_error::AgentError::new(
-                                    "CONTENT_DIVERGENT_AGENT_INPUT_REPLAY",
-                                    "stored attestation scope missing",
-                                )
-                            },
-                        )?,
-                    })
+                    Ok::<_, crate::agent_error::AgentError>(
+                        knowledge::knowledge_retrieval_pg::AttestedEvidenceScopeV2 {
+                            attestation_id: value
+                                .get("attestation_id")
+                                .and_then(serde_json::Value::as_str)
+                                .and_then(|value| Uuid::parse_str(value).ok())
+                                .ok_or_else(|| {
+                                    crate::agent_error::AgentError::new(
+                                        "CONTENT_DIVERGENT_AGENT_INPUT_REPLAY",
+                                        "stored attestation id invalid",
+                                    )
+                                })?,
+                            attestation_sha256: value
+                                .get("attestation_sha256")
+                                .and_then(serde_json::Value::as_str)
+                                .ok_or_else(|| {
+                                    crate::agent_error::AgentError::new(
+                                        "CONTENT_DIVERGENT_AGENT_INPUT_REPLAY",
+                                        "stored attestation digest invalid",
+                                    )
+                                })?
+                                .to_owned(),
+                            canonical_scope: value.get("canonical_scope").cloned().ok_or_else(
+                                || {
+                                    crate::agent_error::AgentError::new(
+                                        "CONTENT_DIVERGENT_AGENT_INPUT_REPLAY",
+                                        "stored attestation scope missing",
+                                    )
+                                },
+                            )?,
+                        },
+                    )
                 })
                 .transpose()?;
             let staged_input_sha256 = staged

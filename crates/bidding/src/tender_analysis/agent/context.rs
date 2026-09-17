@@ -225,6 +225,9 @@ pub(super) fn request_work(state: &Checkpoint) -> Result<Value, String> {
     let mut value = work_input(work)?;
     value["saved_outcome_count"] = json!(work.output_refs.len());
     value["pending_outcome_count"] = json!(work.pending_refs.len());
+    if let Some(id) = &state.draft_active_id {
+        value["chapter_id"] = json!(id);
+    }
     Ok(value)
 }
 
@@ -559,10 +562,22 @@ pub(in crate::tender_analysis) fn check_read_scope(
         _ => return Ok(()),
     }
     .ok_or("reading requires a known source or form identity")?;
+    if !input
+        .source_units
+        .iter()
+        .any(|source| source.source_unit_revision_id == source_id)
+    {
+        return Err("reading requires a known source or form identity".into());
+    }
     let work = state
         .work()
-        .ok_or("declare an active source scope with set_work_note before reading")?;
-    if work.status != WorkStatus::Active || !work.source_scope.iter().any(|id| id == source_id) {
+        .ok_or("host must assign an active source pack before reading")?;
+    // Independent comparison can require another frozen original. Reading it
+    // changes neither the assigned task nor candidate/write authorization.
+    if work.status != WorkStatus::Active
+        || work.source_scope.is_empty()
+        || (state.role != Role::Reviewer && !work.source_scope.iter().any(|id| id == source_id))
+    {
         return Err("read lies outside active work; expand the scope for a cross-reference or complete its handoff first".into());
     }
     Ok(())
@@ -759,6 +774,10 @@ pub(in crate::tender_analysis) fn visible_work_evidence(
         .filter(|work| work.status == WorkStatus::Active)
         .map(|work| work.source_scope.as_slice())
         .unwrap_or_default();
+    let supporting_read = state.role == Role::Reviewer
+        && state
+            .work()
+            .is_some_and(|work| work.status == WorkStatus::Active);
     let mut ranges = BTreeMap::<String, Vec<(usize, usize)>>::new();
     for message in messages {
         if let Some(ids) = message["source_view_refs"].as_array() {
@@ -766,7 +785,7 @@ pub(in crate::tender_analysis) fn visible_work_evidence(
                 if state
                     .source_views
                     .get(id)
-                    .is_some_and(|view| scope.contains(&view.identity.source_id))
+                    .is_some_and(|view| supporting_read || scope.contains(&view.identity.source_id))
                 {
                     ranges.insert(format!("view:{id}"), vec![(0, 1)]);
                 }
@@ -882,7 +901,7 @@ pub(in crate::tender_analysis) fn visible_work_evidence(
         let Some(source_id) = result["source_id"].as_str() else {
             continue;
         };
-        if output["ok"] != true || !scope.iter().any(|id| id == source_id) {
+        if output["ok"] != true || (!supporting_read && !scope.iter().any(|id| id == source_id)) {
             continue;
         }
         let (key, start, end) = if let Some(form_id) = result["form_id"].as_str() {
@@ -916,7 +935,8 @@ pub(super) fn focused_work_evidence(
 ) -> BTreeMap<String, Vec<(usize, usize)>> {
     let mut evidence = visible_work_evidence(state, messages);
     let refs = state.work().map(|w| &w.focus.references);
-    let views = focused_view_ids(state);
+    let mut views = focused_view_ids(state);
+    views.extend(reviewer_support_view_ids(state));
     evidence.retain(|key, _| {
         if let Some(id) = key.strip_prefix("view:") {
             return views.contains(id);
@@ -937,6 +957,49 @@ pub(super) fn focused_view_ids(state: &Checkpoint) -> BTreeSet<String> {
         .into_iter()
         .flat_map(|work| &work.focus.source_spans)
         .filter_map(|span| span.view_id.clone())
+        .collect()
+}
+
+/// Only explicit reads still in bounded history can retain supporting pixels.
+/// A shared cache, another role's receipt, or an old evicted read is insufficient.
+pub(super) fn reviewer_support_view_ids(state: &Checkpoint) -> BTreeSet<String> {
+    if state.role != Role::Reviewer
+        || state
+            .work()
+            .is_none_or(|work| work.status != WorkStatus::Active)
+    {
+        return BTreeSet::new();
+    }
+    let calls: BTreeSet<_> = state
+        .transcript
+        .iter()
+        .filter(|message| message["role"] == "assistant")
+        .flat_map(|message| message["tool_calls"].as_array().into_iter().flatten())
+        .filter(|call| call["function"]["name"] == "read_source_view")
+        .filter_map(|call| call["id"].as_str())
+        .collect();
+    state
+        .transcript
+        .iter()
+        .filter_map(|message| {
+            if message["role"] != "tool"
+                || !message["tool_call_id"]
+                    .as_str()
+                    .is_some_and(|id| calls.contains(id))
+            {
+                return None;
+            }
+            let output: Value = serde_json::from_str(message["content"].as_str()?).ok()?;
+            if output["ok"] != true {
+                return None;
+            }
+            let id = output["result"]["view_id"].as_str()?;
+            let identity = state.coverage().views.get(id)?;
+            if output["result"]["identity"] != json!(identity) {
+                return None;
+            }
+            Some(id.to_owned())
+        })
         .collect()
 }
 
@@ -1390,7 +1453,10 @@ pub(in crate::tender_analysis) fn check_blocked_scope(
     Ok(())
 }
 
-fn scope_is_blocked(state: &Checkpoint, scope: &[String]) -> Result<bool, String> {
+pub(in crate::tender_analysis) fn scope_is_blocked(
+    state: &Checkpoint,
+    scope: &[String],
+) -> Result<bool, String> {
     for blocker in &state.execution().blockers {
         if blocker.scope.iter().any(|id| scope.contains(id))
             && scope_dependencies(state, &blocker.scope)? == blocker.dependencies_sha256
@@ -1402,35 +1468,54 @@ fn scope_is_blocked(state: &Checkpoint, scope: &[String]) -> Result<bool, String
     Ok(false)
 }
 
-/// Only used before preparing a fresh boundary. Saved responses still execute,
-/// and changed dependencies or an independent source retain the handoff path.
-pub(super) fn check_independent_work(
-    input: &FrozenInput,
+fn reviewer_assigned_progress_versions(
     state: &Checkpoint,
-) -> Result<(), AgentError> {
-    if state.execution().watch.recovery != Recovery::Blocked {
-        return Ok(());
-    }
-    let mut blocked = BTreeSet::new();
-    for blocker in &state.execution().blockers {
-        if scope_dependencies(state, &blocker.scope).map_err(invalid)?
-            == blocker.dependencies_sha256
-            && !super::repair_recovery::available(state, &blocker.scope).map_err(invalid)?
-        {
-            blocked.extend(&blocker.scope);
+    scope: &[String],
+) -> Result<Vec<String>, String> {
+    let assigned: BTreeSet<&str> = scope.iter().map(String::as_str).collect();
+    let assigned_refs: BTreeSet<String> = scope_references(&state.analysis, scope)
+        .into_iter()
+        .collect();
+    let mut versions = Vec::new();
+    let coverage = &state.reviewer_coverage;
+    for (id, ranges) in &coverage.metadata {
+        if assigned.contains(id.as_str()) {
+            versions.push(digest(&json!(["metadata", id, ranges]))?);
         }
     }
-    if input
-        .source_units
-        .iter()
-        .all(|source| blocked.contains(&source.source_unit_revision_id))
-    {
-        return Err(error(
-            "AGENT_TURN_BUDGET_EXCEEDED",
-            "no independent source scope remains; execution blockers and checkpoint retained",
-        ));
+    for (id, ranges) in &coverage.text {
+        if assigned.contains(id.as_str()) {
+            versions.push(digest(&json!(["text", id, ranges]))?);
+        }
     }
-    Ok(())
+    for (id, ranges) in &coverage.form_cells {
+        if assigned.contains(id.as_str()) {
+            versions.push(digest(&json!(["form_cells", id, ranges]))?);
+        }
+    }
+    for (id, value) in &coverage.candidate {
+        if assigned_refs.contains(id) {
+            versions.push(digest(&json!(["candidate", id, value]))?);
+        }
+    }
+    for (id, view) in &coverage.views {
+        if assigned.contains(view.source_id.as_str()) {
+            versions.push(digest(&json!(["views", id, view]))?);
+        }
+    }
+    for key in &assigned_refs {
+        versions.push(digest(&reference(&state.analysis, key)?)?);
+    }
+    for finding in state.review_draft.values() {
+        if finding
+            .sources
+            .iter()
+            .any(|span| assigned.contains(span.source_id.as_str()))
+        {
+            versions.push(digest(finding)?);
+        }
+    }
+    Ok(versions)
 }
 
 pub(in crate::tender_analysis) fn observe_progress(
@@ -1450,35 +1535,37 @@ pub(in crate::tender_analysis) fn observe_progress(
         .unwrap_or_default();
     scope.sort();
     let dependencies = scope_dependencies(state, &scope)?;
-    let coverage = if *role == Role::Main {
-        &state.analysis.coverage
-    } else {
-        &state.reviewer_coverage
-    };
     let mut versions = Vec::new();
-    // Receipts are already confirmed at this complete response boundary.
-    // Pending reads are excluded; evicting and re-reading cannot create novelty.
-    for (kind, value) in serde_json::to_value(coverage)
-        .map_err(|e| e.to_string())?
-        .as_object()
-        .ok_or("coverage object missing")?
-    {
-        if kind == "view_failures" {
-            continue;
-        }
-        if let Some(entries) = value.as_object() {
-            for (id, value) in entries {
-                versions.push(digest(&json!([kind, id, value]))?);
+    if *role == Role::Reviewer {
+        // Only the assigned packet can reset reviewer no-progress. Inspecting
+        // unrelated candidates is supporting evidence, not packet settlement.
+        versions.extend(reviewer_assigned_progress_versions(state, &scope)?);
+    } else {
+        let coverage = &state.analysis.coverage;
+        // Receipts are already confirmed at this complete response boundary.
+        // Pending reads are excluded; evicting and re-reading cannot create novelty.
+        for (kind, value) in serde_json::to_value(coverage)
+            .map_err(|e| e.to_string())?
+            .as_object()
+            .ok_or("coverage object missing")?
+        {
+            if kind == "view_failures" {
+                continue;
             }
-        } else {
-            versions.push(digest(&json!([kind, value]))?);
+            if let Some(entries) = value.as_object() {
+                for (id, value) in entries {
+                    versions.push(digest(&json!([kind, id, value]))?);
+                }
+            } else {
+                versions.push(digest(&json!([kind, value]))?);
+            }
         }
-    }
-    for key in scope_references(&state.analysis, &scope) {
-        versions.push(digest(&reference(&state.analysis, &key)?)?);
-    }
-    for finding in state.review_draft.values() {
-        versions.push(digest(finding)?);
+        for key in scope_references(&state.analysis, &scope) {
+            versions.push(digest(&reference(&state.analysis, &key)?)?);
+        }
+        for finding in state.review_draft.values() {
+            versions.push(digest(finding)?);
+        }
     }
     if *role == Role::Main {
         for (id, receipt) in &state.repair.results {
@@ -1532,9 +1619,18 @@ pub(in crate::tender_analysis) fn observe_progress(
     };
     progress.observe(
         versions,
-        completion.or(local_completion),
+        if *role == Role::Main && state.dispatch.active.is_some() {
+            None
+        } else {
+            completion.or(local_completion)
+        },
         &limits.progress(),
     );
+    if limits.draft_path {
+        progress.watch.recovery = Recovery::Running;
+        progress.watch.replans = 0;
+        return Ok(());
+    }
     if completed {
         progress
             .blockers

@@ -12,7 +12,9 @@ export function ExportPane({ workspaceId, ended, onUnsafeChange }: {
   const [session] = useState(() => createExportSession({ ...exportsApi, current: docxApi.current }, workspaceId, {
     read() {
       const raw = sessionStorage.getItem(`kb.docx-export:${workspaceId}`);
-      return raw ? JSON.parse(raw) as ExportAttempt : null;
+      if (!raw) return null;
+      try { return JSON.parse(raw) as ExportAttempt; }
+      catch { return null; }
     },
     write(value) {
       if (value) sessionStorage.setItem(`kb.docx-export:${workspaceId}`, JSON.stringify(value));
@@ -54,7 +56,7 @@ export function ExportPane({ workspaceId, ended, onUnsafeChange }: {
   }
   return <section className="stack" data-testid="docx-export">
     <h2>导出投标稿</h2>
-    <p>以已保存的同一版本生成 DOCX、PDF 和校核报告。后续编辑需重新导出。</p>
+    <p>以已保存的同一版本生成 DOCX、PDF 和校核报告。终稿需另一次独立复核请求；草稿分析不能直接导出三件套。后续编辑需重新导出。</p>
     {state.current && <p>当前已保存版本 {state.current.revision}</p>}
     {state.phase === "loading" && <p role="status">正在读取稿件和导出记录…</p>}
     {state.phase === "sending" && <p role="status">正在提交导出请求…</p>}

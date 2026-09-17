@@ -11,6 +11,7 @@ import type {
   RequirementView,
   SourceUnitView,
   TenderDocumentView,
+  TenderOutline,
   TenderRelationView,
 } from "./types";
 
@@ -67,6 +68,10 @@ export type BidV2Api = {
     requestArtifactId: string,
     signal?: AbortSignal,
   ): Promise<RequirementSetCompileRequestView>;
+  getTenderOutline(
+    projectId: string,
+    signal?: AbortSignal,
+  ): Promise<TenderOutline>;
   listSourceUnits(
     projectId: string,
     signal?: AbortSignal,
@@ -208,6 +213,13 @@ export function createBidV2Client(): BidV2Api {
     async getRequirementSetCompilation(projectId, requestArtifactId, signal) {
       const { data } = await v2Request<RequirementSetCompileRequestView>(
         `/api/v2/bid-projects/${projectId}/requirement-set-compilations/${requestArtifactId}`,
+        { signal },
+      );
+      return data;
+    },
+    async getTenderOutline(projectId, signal) {
+      const { data } = await v2Request<TenderOutline>(
+        `/api/v2/bid-projects/${projectId}/tender-outline`,
         { signal },
       );
       return data;

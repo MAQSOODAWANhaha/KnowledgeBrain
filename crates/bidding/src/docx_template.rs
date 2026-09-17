@@ -10,7 +10,7 @@ use std::{
 
 mod text_regions;
 pub use text_regions::TextRegion;
-pub(crate) use text_regions::{region_bookmark_name, resolve_text_regions};
+pub(crate) use text_regions::{initial_text_fragment, region_bookmark_name, resolve_text_regions};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -468,7 +468,8 @@ pub fn compile_template(input: &Value, plan: &TemplatePlan) -> Result<Vec<u8>, T
                             && block.header_rows == 0,
                         "unexpected quote fields",
                     )?;
-                    for line in quote.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
+                    let (initial, _) = initial_text_fragment(quote, false, false, &mut false);
+                    for line in initial.split('\n') {
                         body += &paragraph(line, None)?;
                     }
                 }
@@ -483,7 +484,8 @@ pub fn compile_template(input: &Value, plan: &TemplatePlan) -> Result<Vec<u8>, T
                             && block.blank_rows == 0,
                         "unexpected blank fields",
                     )?;
-                    body += &paragraph("", None)?;
+                    let (initial, _) = initial_text_fragment("", true, false, &mut false);
+                    body += &paragraph(&initial, None)?;
                 }
                 "table" => {
                     check(

@@ -2,7 +2,7 @@
 
 日期：2026-09-16。状态：方案已统一；已有能力、新增设计和真实验收分别登记于 §19，完整链路尚未验收。
 
-本文是招标提取、独立复核、编制与同版出件的唯一有效 Agent 实施方案。已合并此前方案与修订稿，并按用户要求删除重复方案，不保留并行有效版本。业务边界以 [PRD](../../docs/bidding/prd.md)、[领域契约](../../docs/bidding/authoring.md) 和 [ONLYOFFICE 契约](../../docs/bidding/onlyoffice.md) 为准。实现状态以 §19 的证据为准；下文目标字段、工具和判定函数不得仅因写入方案就登记为已有能力。
+本文是**终稿**（独立复核 + 正式编制 + 同版出件）的 Agent 实施方案。日常自动出稿以 [outline-then-template.md](outline-then-template.md) 为准（大纲→按章模板，20 分钟内发布草稿）。终稿另一次请求，库存为草稿的 `draft_plan`+Template，禁止重开 source_unit 抽取。两条路径不得混用同一套发布门。草稿 DOCX 不能销 32 项或同版三件套验收。装包 Rechecker（§4.5）只服务终稿，不能当小文件产品方案。业务边界以 [PRD](../../docs/bidding/prd.md)、[领域契约](../../docs/bidding/authoring.md) 和 [ONLYOFFICE 契约](../../docs/bidding/onlyoffice.md) 为准。实现状态以 §19 的证据为准；下文目标字段、工具和判定函数不得仅因写入方案就登记为已有能力。
 
 **执行顺序：已证实语义反例 → 分阶段最小真实验证 → 正确模板与已保存同版三件套 → 自动页码回填及产品终检专项 → 复杂场景 → 106 页与32项验收。** 每个必要切片先验证再扩大；不用先完成全部架构改造才开始最小样本。最终交付目标不降低，自动化能力与实际文件验收分别记账。
 
@@ -46,8 +46,11 @@
 
 | 保留设计 | 解决的问题 | 对应实现/验收 |
 | --- | --- | --- |
+| 统一DocReader、冻结来源身份与完整表格几何，工具按位置/ID取证 | 重复解析漂移、附表错配、只读摘要遗漏固定内容 | §2/§7/§9，完整来源与实际附表对照 |
+| 由招标文件决定目录、层级、顺序和条件模板，投标方未知事实留白 | 硬编码通用目录、虚构报价或材料、误删招标侧固定文字 | §0.1/§9/§10，实际模板逐项验收 |
 | 宿主派发、模型解释语义；局部执行与全局成功分离 | 机械导航、单项阻塞拖死无关任务、误交接 | §1/§4，RT01/RT06/RT09/RT10 |
 | 有界完整证据、角色隔离、实际交付后确认、三边界恢复 | 窗口过载、未读假通过、重复提交和费用丢失 | §3/§5–§7，RT02–RT05/RT11–RT16 |
+| `.env` 配置冻结、Chat 单协议、JCS 同字节预约与发送 | 临时覆盖配置、协议与 SQL 合同不一致、重试费用无法追溯 | §0/§5/§15，冻结请求与实际发送合同核对 |
 | Rule原子项、全局结论随产物交付、完整集合依赖 | 一条复合规则只落实一部分、对象新增后沿用旧通过 | §2/§9，B11/B13/B14 |
 | 同一义务库存，规划与实际实现分开，章节身份一致 | 有目录无内容、游离章节、计划和实际稿件脱节 | §10，B01/B02/B07/B12 |
 | 独立双向复核、有据异议、真实来源不确定性保留 | 漏提取、错误自批、为过门强造关系、删掉真实缺项 | §9/§11，B03–B09/B15–B19 |
@@ -55,6 +58,13 @@
 | 自动回填与产品终检明确实现归属，质量/成本分别验收 | 转换成功冒充正确页码、本地报告冒充自动产品能力 | §12–§16，S4-B/S4-C/S5-B/S6 |
 
 每次后续修订说明：保留什么、哪个真实反例要求改变什么、影响哪些合同、用什么验证。没有证据时保持已验证语义；复用现有模块，避免反复推倒重做。新增设计若必须调整，也须保持最终目标及相应验收覆盖；阶段性未完成只标未完成，不从最终目标中删除。S5-A是较早的完整文件质量证据，不替代S5-B产品自动能力及S6真实全文验收。
+
+修订时直接更新本文的对应设计、§16验收项和§19状态，不另建并行方案。每个修订按以下步骤收敛：
+
+1. **确认保留项**：已有实现符合目标且证据仍有效的，保留并复用；分别标明已验证机制和仍待验证的语义效果，不因一次模型失败否定全部设计。
+2. **定位必要改动**：记录真实反例、根因证据和受影响合同；证据不足时标为待验证假设。优先补齐现有工具、领域规则或交接缺口，再判断是否需要替换机制。
+3. **证明替换不退化**：替换实现方式时保留原验收断言及证据出处，补充等价性或更强保证；不能删除失败用例、缩小来源/输出检查全集或降低通过条件。设计合理不意味着实现不可调整，保留的是目标与保证。
+4. **逐级验收后登记**：各切片先通过受影响的合同回归，再用独立真实运行验证语义；§19分别登记实现、验证和未完成项。最终仍须完成全部适用能力、106页/32项以及同版三件套验收。
 
 ## 1. 职责与调用关系
 
@@ -139,6 +149,8 @@ flowchart TD
 只拆解与投标稿组织或提交有关的约束；其他规则保留原记录，Reviewer 确认没有应生成的内容后允许 items 为空，不能把所有履约规则强制变成新增章节。不得用空数组掩盖原文明确要求的组成或签署。
 
 目标引用使用已有记录/响应/证明/模板或同一规则的 item ID；尚未确定的目标显式 unresolved，不能伪造未来章节 ID。宿主从模板和已有 response/proof 直接枚举的义务继续复用原引用，不另复制一份。`rule_item:<record_id>:<item_id>` 仅是现有图内引用；`put_record` 返回宿主 ID，重放从同一基线得到相同 ID，删除或改动 item 使相关依赖失效。
+
+新项提交空 ID，工具返回分配结果；修订只接受该规则当前已保存的显式 ID，不按文字相似度猜身份。宿主在现有 Analysis/checkpoint 的 `rule_item_sequences` 保留每条规则已分配序号，删除到空后仍不复用旧 ID，失败写入不消费序号。该账本参与完整产物摘要，但不进入全局语义 scope，避免账本变化制造无关语义失效。顺序和项间引用使用工具已经返回的 ID，不预测尚未分配的身份；无需新增表。
 
 例如“投标函、授权书、报价表依次排列，三处分别签章”，应形成三个组成项、一个顺序项和三个签章项；不能用“这个 Rule 已关联一章”算七项均已落实。未指定模板的组成项以来源中的章节名称和自身 item ID 定位，编制计划再映射到生成节点。
 
@@ -240,12 +252,15 @@ Reviewer 从完整原文逐项核对拆解是否漏项、过拆或重复；可�
   编制 Main：计划依赖 → 可执行修复 → 已就绪章节/格式 → 最终编译
   编制 Reviewer：有效性已失效的必需复核项
 若所有工作已满足：检查唯一全局政策后转换
-若仍有工作但无可执行项：记录受阻终态及原因，停止，不标 done
+若无可执行项且已有 ≥1 个 complete 源：分析 Main 进入 Reviewer（遗漏源保持未完成，不编造 disposition）
+若无可执行项且 0 个 complete：记录受阻终态及原因，停止，不标 done
 ```
 
 依赖优先于上述排序；修复上限耗尽不能阻止无关提取来源继续。排序在冻结合同下确定，不能靠模型选择或临时调高额度打破。
 
 `execution_blocked` 只在**无可执行项且未成功完成**时为真。`done` 只表示本 Driver 的成功完成。取消、全局预算、传输/存储失败和无可执行项均可停止；不再声称 drive 只能因 done/取消/预算停止。沿现有终态错误封装附可区分原因，不用预算错误掩盖依赖循环或容量失败。
+
+Reviewer 待办是尚未独立复核的 **pack**、候选和全局检查，不是 Main 的 blocked 根清单。已完成来源仍要独立复核，不能当「已无 Reviewer 工作」。导航中的 `current` 只展示真正安装的活动任务；没有活动任务时返回空，不回退展示被阻塞的首项。这些 Reviewer 待办全部不可执行时，在新请求准备和恢复 prepared 后的调用预约前停止；已经保存的完整 received 响应仍先验证、重放及提交。pack 待办为空不等于全局复核完成，仍须执行剩余候选/全局检查。不授权 Reviewer 修改候选或清除 finding。
 
 ### 4.3 Blocked 恢复
 
@@ -257,13 +272,112 @@ A 阻塞后 B/C 可继续。B 的结果使 A 的引用目标可用时，重新�
 
 ### 4.4 唯一交接政策
 
-分析进入 Reviewer 仍集中在 `main_handoff::check/enter`：无执行 blocker、无未完成或延期工作、`tools::gaps` 空、无未读修复反馈、无待处理 repair、全局 Main 收尾完成。禁止调用 `validate_basis` 来判断能否进入 Reviewer。
+分析进入 Reviewer 的权威是 `continuation()` 三枝（Continue / EnterReview / Stop），`projection` / `after_batch` / `prepare` / `check_ready` 只问这一枝。禁止调用 `validate_basis` 来判断能否进入 Reviewer。`set_work_note complete` 与 `request_review` 不是交接条件。
 
-每个成功应用的完整批次都重算就绪条件；不再要求本批恰好调用 `set_disposition` 或 `set_work_note complete`。最后缺口由关系写入、元数据交付或 repair 消除时，也可以自动交接。
+```text
+Continue(root)   仍有可执行 Main 包或可执行 repair
+EnterReview      已有 ≥1 个 complete 源，且第一圈找不到可执行 Main 包：
+                   五项 main_global_checks 未齐且全局根未耗尽 → 先 Continue(全局)
+                   否则 EnterReview（含 blocked/exhausted 遗漏，不要求 host-closed 分类）
+Stop             0 个 complete，且没有可执行包
+```
 
-含工具错误的批次可以保留原有逐工具成功结果并切走阻塞项，但不据此宣布阶段成功；后续对当前最终状态重新校验。仍有未交付证据结果时不跨角色，见 §6.4。
+严格 `enter()`：全包 complete、无 deferred、gaps 空、repair 清、`validate_inventory` 过。
+省略 `enter_with_closed_omissions`：`continuation == EnterReview`。丢掉 Main `pending_coverage`（未交付读不能变 Reviewer 回执）。blocker 按包：complete 或已不可执行即可。遗漏源保持未读/无 disposition，Reviewer 当任务，不编造。
 
-`request_review` 可保留兼容入口，仍是独占批次，只请求批末走相同政策，不在工具循环中提前切换角色。正常提示不要求调用它。Reviewer 完成后有 finding 则派修复，无 finding 且所有独立结论当前有效才形成 `AnalysisResult`；Main 修复说明不等于 Reviewer 批准。
+`projection()`：进行中的 reserved 请求仍返回当前 active（即使该根已 exhausted），否则 `confirm` 对不上。`check_ready` 在 EnterReview 时放行，只在 Stop 时报 `no_executable_main_tasks`。
+
+每个成功应用的完整批次都重算就绪条件。含工具错误的批次可以保留原有逐工具成功结果并切走阻塞项，但不据此宣布阶段成功。
+
+`request_review` 可保留兼容入口，仍是独占批次，只请求批末走相同政策，不在工具循环中提前切换角色。正常提示不要求调用它。Reviewer 完成后有 finding 则派修复。`AnalysisResult` 的形成条件见 §4.5.3：允许带明确遗漏，禁止把未复核源写成 `checked`。Main 修复说明不等于 Reviewer 批准。
+
+### 4.5 分析工作包：禁止一源一会话
+
+实测：约 2800 字 / 28 个 `source_units`（中位约 40 字）的 Main 抽取用了 **147 回合 / 27 个 disposition**（约 5.4 回合/源），然后因 1 个 blocked 根走 Stop（extract-4）。根因不是读正文，而是 **调度键 = 每个 source_unit 一根 + 一轮一组工具**。同样粒度下 106 页会先撞 §14.4 天花板，加 `max_turns` 不能当修法。
+
+**派发键是 pack，不是单个 source_unit。** 宿主纯函数从 FrozenInput 装包，模型不选包、不拆包。
+
+```text
+表源（text 空白或 locator.table_ordinal 非空）：一源一包，进度看 form_cells + 该源 disposition
+短正文：同一 document_id，按 ordinal 扫描；heading_path 变化则切包；累加直到
+        源数达 pack_max_units 或 合计 text 达 pack_max_chars
+若切完 packs ≥ 源数×0.8（几乎未合并）：忽略 heading，改为同文档连续 ordinal 累加到字数/源数上限
+跨文档、正文与表、已保存 requires_template 依赖的两端：禁止装进同一包
+pack_id = digest(sorted source_unit_revision_ids)
+```
+
+`Limits.pack_max_units` 默认 **1**（测试 `config()` 保持一源一根，避免 `two_sources` 被合并）。最小样稿与产品 `limits.json` **必须** 设 `pack_max_units≥6` 且 `pack_max_chars≥1200`；缺省按一源一根开跑视为合同错误，不是合法降级。
+
+**一包的付费回合上限（硬）：**
+
+| 条件 | 允许的模型回合 |
+| --- | --- |
+| 指派证据已在本请求（预装成功） | **第 1 回合必须写下本包全部 source_id 的 disposition**（可并行多条 `put_record`/`set_disposition`） |
+| 第 1 回合缺 disposition / 工具错误 | 第 2 回合只补缺口 |
+| 仍缺 | 第 3 回合；再缺则 **block 本包**，Continue 下一可执行包 |
+| 证据未预装，必须先读 | 额外 +1 读回合，之后仍适用上表 |
+
+只 `inspect_analysis` / 读无关源 **不重置** 本包 no-progress。连续无包进度达到 `max_no_progress_turns` → replan → 仍无写入则 block 本包。禁止为同一包空转超过上表。
+
+包完成：包内每个 source_id 都有 disposition；表源另需 form_cells 覆盖。`set_work_note complete` 不是完成条件。
+
+Reviewer 使用 **同一 pack_id 集合** 做独立复核（独立 = 不沿用 Main 结论，不是每个 source_unit 再开会话）。候选/全局检查另计。回合硬顶见 §4.5.2，不得把 Main 的 `dispatch.entries.spent_batches` 拿来当 Rechecker 额度。
+
+最小样稿数字门（**仅约束 §4.5.2 落地后的新目录**，extract-6 只作对照）：Main **≤40** 回合交出 Rechecker 或源齐；Main+Reviewer 合计 **≤80** 回合应能形成 `analysis-result.json`（`review_rounds≥1`）。超过视为该新目录切片失败，不得靠加总顶宣称通过。106 页先跑真实装包计数，按包估回合；超 CEILING 则改装包或预检失败。
+
+#### 4.5.1 翻车项关闭
+
+| 风险 | 关闭方式 |
+| --- | --- |
+| 第 1 回合写不全 | 不换包。`pack_max_turns=3`：同一 pack owner 满 3 批仍缺 disposition 则 exhausted，Continue 下一可执行包。`inspect` 不算包进度。不新增选包；一批可多条 `put_record`/`set_disposition`。 |
+| heading 过碎装不成包 | packs≥源数×0.8 则忽略 heading，按连续 ordinal 硬装。表永远单包。 |
+| 一包装了不该在一起的条款 | 包完成=包内每个 source_id 都有 disposition，缺一条整包未完，不假完成。 |
+| Rechecker 再按源开会话 | 同一 pack_id；指派 `source_scope` 为包。独立=不沿用 Main 结论。回合硬顶见 §4.5.2。 |
+| Reviewer 把 Main blocked 当已无待办 | Reviewer 待办=尚未 `source_review` 的 **包** + 候选 + 全局检查。Main 钉死的包是「未复核/无 disposition」任务，不是跳过。Stop 仅当这些任务都不可执行。 |
+| Rechecker 无回合硬顶，inspect/`complete_review_check` 各烧一轮 | §4.5.2：预装后禁止只 inspect；check 与 `put_source_review` 同批；满 3 批仍无包结账则 block 本包。 |
+| 合集 `blocked_scope` 比单源更严 | 往包里加源时先试合集；合集会 blocked 则丢掉该成员，只派独立子集。禁止再抛 `work scope depends on a blocked root` 杀整次分析（extract-5）。 |
+| extract-4/5 续跑验证装包 | 禁止。必须新目录。extract-6 仅作对照，不改其冻结合同。 |
+
+#### 4.5.2 Rechecker 一包回合（extract-6 对照后收窄）
+
+extract-6 已进入 Reviewer：约 15 个 Rechecker 回合才 5 条 `source_review`，其中 `complete_review_check` 远多于 `put_source_review`，`inspect_*` 仍扣总顶。Main 已有 `pack_max_turns=3`，Reviewer **没有** 对应计数。
+
+**要做：**
+
+- Rechecker 对当前 `source_scope` 自备 **包批次数**（不得复用 Main `dispatch.entries`）。`pack_max_turns=3` 记的是 **批次数**，不是「有 `complete_review_check` 就续命」。满 3 批仍无本包 `put_source_review`（包内应复核的 source_id 未结）→ block 本包，选下一可执行包。不编造 `checked`。
+- 指派证据已在本请求：只 `inspect_analysis` / `inspect_review` / `read_review_task` **不算包进度**。
+- 指派范围内的 `complete_review_check` **算 no-progress 意义上的包进度**（逐条独立核对），且必须能与 `put_source_review` 出现在 **同一 tool 组**。禁止改成「无进度」或删工具。check 不能延长 `pack_max_turns`。
+- 换包时丢掉 Rechecker `pending_coverage`（未交付读不能变成下一包回执）。
+
+**不要做：**
+
+- 无条件「第 1 回合必须 `put_source_review`」。证据未预装（空表 form、pending 读）允许 **+1 读回合**，之后才适用 3 回合写顶。
+- 用加 `max_turns` 掩盖 Rechecker 空转。
+- 改 extract-6 冻结合同或续跑旧目录当新合同证据。验证 §4.5.2 必须 **extract-7 新目录**。
+
+空表：预装 form/grid；禁止靠空 `read_source` 混回合。满 3 仍无 `put_source_review` 则遗漏，质量门失败，不假通过。
+
+#### 4.5.3 带遗漏的 AnalysisResult（质量门与产物分开）
+
+Rechecker 按 §4.5.2 耗尽若干包后，禁止再走「没有 28/28 条 `source_review` 就不写 `analysis-result.json`」——那会重复 extract-3 的死法，只是死在复核侧。
+
+**可以形成 AnalysisResult v2 当且仅当：**
+
+1. `review_rounds≥1`（对当时可执行的复核包做过一轮派发：结账或按硬顶 block）；且
+2. **至少 1 个源**有独立 `source_review` 结果；且
+3. 每个 `source_id` 要么有独立复核结果，要么有宿主记录的遗漏（`not_checked` / pack exhausted / Main host-closed），**禁止**写成 `checked`。
+
+当 Rechecker 已无可以执行的包（剩余均 complete 或已按硬顶/blocked 不可执行），且全局检查已提交或全局根耗尽时，**宿主**将 `review_rounds` 加一并按上表尝试写 AnalysisResult；不得等模型再喊 complete。
+
+**零条独立复核**（只有遗漏）→ 不写 AnalysisResult，与 Main 零 complete 一样 Stop。
+
+有 finding 仍派 Main 修复；修复后再进 Rechecker 只针对 finding 范围，不把已 block 的空转包当新额度。
+
+| 门 | 遗漏时 |
+| --- | --- |
+| 质量 / S5-A | **失败** |
+| 成本 | 按是否超冻结 `max_turns` 单独记 |
+| 最小样稿 `compose` / `validate_basis` | **接受**带遗漏的 v2，以便跑通主链；正式语义验收仍看质量门 |
 
 ## 5. 单批调用与原子提交
 
@@ -368,7 +482,7 @@ coverage 记录历史交付，另由本次 body 派生 `visible_evidence`。当�
 
 同时限制确切请求字节、估算输入 token、输出预留、图像成本、工具批返回和 checkpoint/SDK 尺寸。包内原文、候选、边界内容和工具 schema 都计入，不用源文本长度冒充完整上下文估算。
 
-首次按解析结构、相邻来源、表题/表注进行确定性打包；模型发现语义跨引用后申请扩包。不能预设宿主已经知道全部复合义务。超预算拆分保持父子和延期关系；不可独立判断的最小证据组仍过大时，记录容量限制，不截断后给完整回执。
+首次按解析结构、相邻来源、表题/表注进行确定性打包；模型发现语义跨引用后按需精确补读，需要改变工作或比较范围时再申请扩包。Reviewer对显式已知冻结来源的只读取证不要求改source_scope，Main仍遵守当前写入/读取工作范围。不能预设宿主已经知道全部复合义务。超预算拆分保持父子和延期关系；不可独立判断的最小证据组仍过大时，记录容量限制，不截断后给完整回执。
 
 ### 7.4 模型输入与结构化工具检索的边界
 
@@ -377,13 +491,15 @@ coverage 记录历史交付，另由本次 body 派生 `visible_evidence`。当�
 | 内容 | 默认交付 | 缺失时使用现有工具 |
 | --- | --- | --- |
 | 当前目标、待完成义务、合法位置 | 有界导航；本身不是证据 | source_index/collection_index分页 |
-| 当前条款、控制条件、当前候选 | 判断所需完整值，字段grounds精确对应 | search_sources定位→read_source取全文范围；inspect_analysis按ID详情 |
+| 当前条款、控制条件、当前候选 | 判断所需完整值，字段grounds精确对应 | search_sources定位→read_source取全文范围；inspect_analysis默认查当前work，scope=collection跨集合定位后按ID取详情 |
 | 指定附表与网格 | 当前相关完整小表，或明确范围的大表分包 | read_form返回真实行列、合并锚点、单元格文字及精确引用 |
 | 表头/单位、标题、说明、签署、续页 | 与当前区域共同判断所需部分；归属由模型解释 | 按位置/邻接取原文与关联表，不把一张grid当整份附表 |
 | 原页版式 | 需要时取精确页面身份，缓存复用但交付分角色 | read_source_view；图片核查排布，不替代可编辑正文/网格 |
 | 历史成果与人工预期 | 不默认装入全部历史；人工预期永不交付 | 当前必要成果精确取回；审计在模型外进行 |
 
 搜索保持冻结字面可复现；命中只是位置导航，不能证明已读、已关联或未命中即不存在。大表按可独立解释的区域读取，保留适用表头/单位/合并关系和未读部分，不逐格调用制造往返，不只取命中单元格便宣布附表完整。完整附表的正文/网格交错以及跨来源关系按 §9.2 和真实DOCX/PDF验证。
+
+候选查询返回实际query_scope；局部total=0不能证明全文集合不存在目标。显式collection查询保留ID/来源过滤、分页和字节上限，不改变工作身份或授予已读；无显式过滤的集合查询（包括空结果）绑定全局候选依赖，避免新增对象后沿用旧否定结论。Reviewer可精确读取已知冻结text/grid/view作为当前任务的支持依据；实际内容必须进入下一请求，成功received后才确认本角色回执。它不扩张source_scope、不完成别的任务、不放开候选比较/写入权限。上下文压缩与图像恢复同时保留这些显式证据并计入预算，不能只取消读取守卫而裁掉实际内容。
 
 当前工具具备结构化读取，不等于自动补齐所有控制条款、重复表头、表外说明和续页归属已验收；每项装配增强先在最小完整案例证明需要。不要新增另一套查询语言、解析服务、LLM摘要或向量Top-K覆盖判据，不硬编码附件编号、网络安全指标或样稿答案。
 
@@ -461,12 +577,12 @@ api-v4 的真实 prepared body、模型判断及成功回执证明：turn258 已
 | 失败类型 | 必要修复与复核输入 | 可验证成功条件 |
 | --- | --- | --- |
 | 声明在全文正确，但自身 grounds 错误 | 将字段值与它实际引用的原文精确并列；分别判断声明和字段证据，不用其他字段的自由文本引用代替 grounds | 错引用产生字段 finding；修复后的同一声明引用正确控制条款；不按具体分值或条款号硬编码 |
-| 文字/整格/部分格 blank 吞掉固定标签 | 在现有有界证据工具/包中解释现有编译器的实际留白作用范围，展示被替换的原文字节；`instruction` 不覆盖 `role`/范围 | 固定名称、单位、签署及日期文字在实际 DOCX/PDF 保留，只有有据待填值被替换；不能只看区域合法或说明写了“保留” |
+| 文字/整格/部分格 blank 吞掉固定标签 | 在现有有界证据工具/包中并列原文字节、被替换范围及实际初始生成文本，复用编译器的真实分组/连续文本/CRLF语义；`instruction` 不覆盖 `role`/范围 | 固定名称、单位、签署及日期文字在实际 DOCX/PDF 保留，只有有据待填值被替换；不能只看区域合法或说明写了“保留” |
 | 父记录存在，但归属错误 | 有 parent 的模板进入既有 relationship_checks；比较当前父子及组成原文。Template.parent 本身是结构关系，不强迫重复 Contains | 错归属以 `/data/parent` 报告；真实来源歧义可有据 SourceLimited；当前父候选及原文未独立交付不得判 resolved |
 | 附表说明、签署已提取但未入模板 | 从完整附表原文与相邻/续页内容独立枚举应保留区域及次序，再比对模板和实际稿件；现有 regions 不能决定检查分母 | 表前/表后说明、共同签署及交错顺序在稿件中有实际位置；仅保存在 requirement 不等于模板内容落实 |
 | 已有端点仍称“待提取/待连边” | 将 unresolved 声明与当前目标、检索范围和关系一起比较，区分图工作未完成与原文真实缺项 | 过期未决产生 finding 并完成修复/复验；真实歧义继续保留，不用缺边直接证明来源缺失 |
 
-优先增强现有比较合同、证据投影及精确错误反馈，不新增逐字段持久状态机。原文字节投影必须遵守实际交付和 scope；超预算明确分页，不能为附加解释挤掉完整候选后仍称交付完整。只解释保留/替换范围时复用编译语义；若展示精确输出字符串，复用现有 renderer 的连续文本/CRLF 与 grid blank 逻辑，不另写模拟器。原文和计算投影不自动授予 clean 结论。
+优先增强现有比较合同、证据投影及精确错误反馈，不新增逐字段持久状态机。原文字节投影必须遵守本角色实际交付及逐区间覆盖；Main仍受工作scope约束，Reviewer可使用§7中已精确读取的跨来源支持证据，投影不得扩大任务或写入权限。待交付内容可以随本次请求装包，但不能提前确认为已读。超预算明确分页，不能为附加解释挤掉完整候选后仍称交付完整。只解释保留/替换范围时复用编译语义；若展示精确输出字符串，复用现有 renderer 的连续文本/CRLF 与 grid blank 逻辑，不另写模拟器。原文和计算投影不自动授予 clean 结论。
 
 上述五类应先用固定反例验证宿主合同，再用新合同真实模型对照其发现与修复能力。人工预期只在模型外评分，记录未发现、错误 finding 和修复后再次漏检；不能只展示一次成功。最终仍须实际文件审查，同供应商同模型不同角色不具备统计意义上的独立性。
 
@@ -514,6 +630,8 @@ api-v4 的真实 prepared body、模型判断及成功回执证明：turn258 已
 `required_references/account` 统一枚举现有 template/response/proof 引用和 §2.3 的 Rule.items。计划和实现都对同一库存逐项处理；一处内容可以满足多项有据义务，但不能以一个 Rule 命中代表其全部 items 完成。
 
 编译 manifest 增加 `plan_sha256`，现有 `section_id → bookmark/region` 映射承接实际位置，因此链路为 `义务引用 → 计划/Section 同一 ID → manifest 位置 → 实际 DOCX`。删除/变更计划项立即使相应 Section、manifest 或检查不再满足当前版本；只能重编译后恢复实现证据，不能伪造旧位置。
+
+顺序项不能只比较计划标签或父标题。组成项已有具体目标时，使用实际模板/内容落点；没有具体目标时使用已生成章节位置。同一章内不同内容块可以证明相对顺序，共用一个书签不能证明块内次序。签署项的被签对象不冒充签署位置；有据省略经既有 omission 合同校验后不再参与输出排序，普通缺失不能跳过。宿主验证这些确定性位置关系，Reviewer 仍检查拆项、目标选择和条件判断是否符合原文。
 
 计划分批写入；`plan_complete` 成立即派节。空正文允许完成规划，但此时 `implementation_complete=false`。正文反向检查继续发现无依据新增或错误重复；合法公共数据重复填写按其多个目标分别检查。
 
@@ -639,6 +757,8 @@ ready 的原子事务重新校验权限、项目状态、当前版本和待保�
 
 复用统一 DocReader 解析确切最终 DOCX 和 PDF，配合 OOXML 部件枚举检查解析覆盖；不把 `document::verify` 按生成书签读取的结果当作整本库存，不另写通用文档解析器。冻结 parser/render 版本及解析配置，并将以下库存保存为出件请求的不可变证据 manifest：
 
+终检使用同一服务的显式保真 profile。普通入库解析会清理重复页眉页脚等内容，不能直接作为最终文件的完整检查库存。服务须返回匹配的 profile、原文件摘要、解析配置、逐单元映射和图片摘要；不支持该 profile 的旧服务明确失败，不静默退回普通解析。正文、网格仍用既有结构化数据通道，manifest只保存身份与覆盖信息。
+
 | 范围 | 必须枚举 |
 | --- | --- |
 | DOCX | 全部正文段落/表格、各节及其使用的页眉页脚、脚注/尾注、图片/文本框等存在的内容载体、书签与目录/引用域 |
@@ -649,7 +769,11 @@ ready 的原子事务重新校验权限、项目状态、当前版本和待保�
 
 依义务、结构、单元/页面做有界工作包，不把每个单元强制变成单独模型轮。宿主检查字节身份、结构、确定性文字/表格约束；模型处理需要语义或视觉判断的项。整本“无额外内容”检查绑定完整库存摘要，并对每个未匹配内容单元给出有据处置，不能只查看已知计划节点。
 
-终检适配器使用既有 Reviewer 循环，固定增加只读 `read_output_evidence`，并复用 `put_composition_review` 的逐检查项结果结构。工具在新终检合同中冻结；输出证据写入独立 `output_coverage`，招标依据继续使用本角色的 tender coverage，两种命名空间不能互换。原文或最终稿内容都不提升为系统指令。可复用小型检查函数，不复用编制 workspace 中的“稿件已批准”标志。
+终检适配器使用既有 Reviewer 循环，通过只读 `read_output_evidence` 获取正文/网格，通过 `read_output_view` 获取确切输出单元绑定的图片，并复用 `put_composition_review` 的逐检查项结果结构。工具在新终检合同中冻结；输出证据写入独立 `output_coverage`，招标依据继续使用本角色的 tender coverage，两种命名空间不能互换。原文或最终稿内容都不提升为系统指令。可复用小型检查函数，不复用编制 workspace 中的“稿件已批准”标志。
+
+图片字节复用既有对象存储，manifest仅记录摘要、对象引用、媒体类型和尺寸；读取时重新校验真实字节。文本工具结果或图片元数据不能授予视觉已读，只有包含确切图片的冻结请求进入received后才确认独立视觉回执。原招标图片从已冻结分析的source_views读取，与输出图片分开计收据。图片编码大小计入读取与请求预算，裁剪不能丢弃尚未交付的工具/图片组；received恢复复用原请求，不再取图或调用模型。已交付图片只能解除其对应image_region的待视觉检查状态，不能使相邻文本框、域或其他未支持载体自动通过。
+
+检查分母同时包括实际文件单元和编制阶段共用的冻结义务库存。`read_review_obligations`只提供分页导航，不授予候选详情或来源已读资格。义务通过须指向已读的实际文件位置；判定整项遗漏前须完成整本库存检索。明确不适用只适用于有冻结依据的义务，不能用来跳过实际已有内容。问题、来源限制和无法检查的原因保留原文说明，由宿主分配内容绑定的ID；恢复时重算分母、身份和回执，不能只检查结论数量或缓存的`done`。这些门保留双向复核设计，不替代模型对语义正确性的判断。
 
 ### 13.3 终检执行与恢复
 
@@ -719,6 +843,23 @@ PDF、证据 manifest 及必要页面对象先沿 ObjectRegistry 提交为请求
 
 必须包含 schema、元数据、原图、当前协议组及输出预留。报告典型/最坏单包大小、不可拆包、预测工作量、估计假设及实测对照；不承诺仅靠源页数准确预测模型调用。若超冻结资源预算，先改装包或明确容量边界，不直接开全文加总帽。
 
+### 14.4 分析回合预算（开跑冻结）
+
+分析 `max_turns` / `max_physical_calls` 按 **§4.5 冻结后的 pack 数** 估算，不按文件字节、页数，也不按未装包的 `source_units` 个数。表包与正文包分开计；`structured_forms` 已对应表源则不再另加。`documents` 只加很小的跨文档开销。测试 `pack_max_units=1` 时 packs=源数，不缩放测试 `max_turns`。
+
+```text
+prose_packs, table_packs = pack(FrozenInput)   // §4.5
+turns = OVERHEAD(32) + prose_packs×3 + table_packs×4 + max(docs,1)×8
+turns = max(turns, operator_floor, 64)
+if estimated > 2048 且操作员未给出 ≥ estimated 的覆盖值 → 拒绝开跑（成本预检失败，不静默截断）
+physical = max(operator_physical, turns + turns/8, 64)
+reviewer_reserve = (prose_packs+table_packs)×3  // 计入 Limits；Main 花到阈值必须 EnterReview
+```
+
+`at_least_for` / `budget::apply` **必须按 pack() 后的包数估算**，不得再用未装包的 `source_units.len()`（当前实现仍按 22 正文+6 表估到 416，与已启用的装包不一致，属合同债，extract-7 前改掉）。测试 `pack_max_units=1` 时 packs=源数，不缩放测试 `max_turns`。
+
+最小样稿装包后应落在约 8～14 包、估约 70～90 回合（含复核预留）。§4.5 的 ≤40/≤80 **只约束 §4.5.2+§4.5.3 落地后的新目录**；extract-6 对照跑超时不视为方案数字门失败。操作员 JSON 是地板。写入 `run-contract` 后冻结。质量门见 §4.5.3。106 页用同一装包函数计数再估；超 CEILING 先改装包。
+
 ## 15. 实施分步、改动落点与依赖
 
 所有阶段都保持单一现有产品主链。测试断言先写，代码与提示/SQL 同步落地；不单独合入“禁止模型选包”而缺宿主派发。
@@ -786,12 +927,12 @@ S4-A 的独立实际文件报告、S4-B 的自动回填和 S4-C 的产品自动�
 | RT07 | 扩包、拆包、延期、返回父包、重启 | 待办不消失，稳定 key 与累计额度不重置 |
 | RT08 | A 依赖未变/真实变化/来回变换 | 未变拒绝重试；变化按有界历史恢复；不能 A/B/A 无限刷新 |
 | RT09 | repair 任务耗尽但仍有独立提取来源 | 修复失败保留，来源继续；不存在双活动项或错扣费用 |
-| RT10 | 全部剩余工作 blocked 或依赖成环 | 明确受阻停止，保留 checkpoint；不空转、不标 done |
+| RT10 | 全部剩余工作 blocked 或依赖成环；另有已完成来源 | 有 ≥1 complete：EnterReview（遗漏保持未完成）；0 complete：预约前停止、不标 done；仍有独立可执行包则 Continue；检查未齐可先全局收尾。extract-4 形状（27 disposition / 1 blocked / 五项检查）必须进 Reviewer，禁止 `no_executable_main_tasks` |
 | RT11 | 清空 session，裁掉已读原文，后续任务需要该原文 | 精确重装或合法补读；coverage 不当作可见原文；额度不重置 |
 | RT12 | 混合 assistant/tool 批含 index 与必要证据 | 裁剪不留孤立 tool，不丢待交付内容；超容量明确失败 |
 | RT13 | prepared/received 被注入状态、hash 或 body 变更 | SQL 拒绝；纯 projection 不改变业务字段；新 schema 全程冻结 |
 | RT14 | 首轮空 checkpoint 与已有 repair prepare 对齐 | 初始投影可恢复；不增加付费导航；不破坏原 repair 合同 |
-| RT15 | 全局预算恰好用完时已有 received 响应 | 原响应可安全重放完成，禁止新的未授权预约 |
+| RT15 | 全局预算用完或下一调用已execution_blocked时，已有完整received响应 | 先验证原响应并安全重放提交一次，再检查下一调用门；prepared无响应仍受预算/执行门限制，禁止新的未授权预约；取消与身份/正文损坏不得绕过校验 |
 | RT16 | 父项拆为多个子批，子批依次完成，父项重开/重命名 | 子批不重置共享 watch 或累计费用；原 owner 消耗继承，合计达到冻结上限后不能继续预约 |
 | RT17 | 本批写入导致确定性编译/覆盖失败，随后重放 received | 失败反馈与修复任务可提交，只结算一次；无相关输入变化不重复编译，不死循环重放同一错误 |
 
@@ -849,7 +990,7 @@ S4-A 的独立实际文件报告、S4-B 的自动回填和 S4-C 的产品自动�
 
 最小源若没有需要稳定回填的真实引用，O06 可以通过，但不能证明 O03/O05；另用独立真实文档用例验证目标定位与稳定数字回填。两次最小全链成功只证明接线和该样本，不证明 106 页语义完整。
 
-进入 106 页前完成复杂用例、容量预检及成本阈值冻结。全文按[32项语义验收索引](../../artifacts/bid-full-sample/acceptance-index.json)逐项评定，分别报告分析通过、编制通过、文档保真通过、同版出件通过和成本通过；任何一项未测必须写未测。
+进入 106 页前完成复杂用例、容量预检及成本阈值冻结。全文按32项语义验收索引逐项评定（历史位置 `artifacts/bid-full-sample/acceptance-index.json`，当前工作区缺失，全文启动前必须从原归档恢复并核验；可读的问题说明见[真实招标验收复核](../../docs/bidding/real-tender-acceptance-review.md)，不得用说明替代精确索引），分别报告分析通过、编制通过、文档保真通过、同版出件通过和成本通过；任何一项未测必须写未测。
 
 ## 17. 设计问题到修复的对应
 
@@ -863,7 +1004,9 @@ S4-A 的独立实际文件报告、S4-B 的自动回填和 S4-C 的产品自动�
 | 强制分析与编制同一 install_next 状态机 | §1.3 共用协议，各领域维护业务完成与派发 |
 | committed 后切包与 execute_turn 内切包矛盾 | §5 精确 12 步，领域结果和 Journal 同笔提交 |
 | 最后缺口非 disposition 时没有自动交接 | §4.4 每批最终状态统一判断，不依赖工具名称触发 |
-| 无可执行项仍空转，或修复耗尽提前杀整个 Main | §4.2 可执行项判定、明确受阻终态及修复/提取优先规则 |
+| 无可执行项仍空转，或修复耗尽提前杀整个 Main | §4.2/§4.4：0 complete 才 Stop；有产物则 EnterReview |
+| 2800 字 / 28 源烧 100+ Main 回合 | §4.5 按节装包 + 一包 1～3 回合；limits 必须启用装包 |
+| extract-4：27/28 完成仍 `no_executable_main_tasks` | §4.4 不要求 host-closed 分类；blocked ≠ 可执行 |
 | 清 session 当成清上下文，已读当作仍可见 | §7 三层状态、精确重装、纯投影与协议组裁剪 |
 | 无固定目录时缺语义规划 | §10 现有编制 Agent 的 plan 工作与双向完整性矩阵 |
 | 按来源完成不能保证全局关系及多文件一致 | §2/§9 全局收尾与独立全局检查、版本失效 |
@@ -885,6 +1028,8 @@ S4-A 的独立实际文件报告、S4-B 的自动回填和 S4-C 的产品自动�
 | 仅按生成书签检查会漏掉用户编辑后的实际内容 | §13.2：从最终 DOCX/PDF 枚举整本库存，独立 output coverage | O15 |
 | 子批完成会重置父级 ProgressWatch 额度 | §3.2–§3.3：根项唯一持有累计消耗和 watch，子批引用，完成不退款 | RT07、RT16 |
 | 只绑定已知对象会漏掉集合新增/删除/重排 | §9.1：有限命名集合摘要，包含空集合、适用性及顺序 | B14 |
+| 同批先写后删仍可能被当作局部完成，或父章节仅存在但已与计划不符 | §5、§10–§11：以批末实际状态判断当前项，先记旧项消耗再安装下一项；父项须与当前计划一致 | RT06、B12；局部换项回归见§19.1，不替代全局覆盖验收 |
+| 两个编辑会话读取相同旧值后，竞争写入均返回成功 | §12：保留不覆盖人工编辑的保证；单会话工具内检查不足以证明跨会话互斥，正式接线前验证写入隔离和版本保护 | O04、O13；实际反例见§19.1的编辑实测 |
 
 ## 18. 实施依据与当前能力边界
 
@@ -895,7 +1040,7 @@ S4-A 的独立实际文件报告、S4-B 的自动回填和 S4-C 的产品自动�
 - [来源独立复核](../../crates/bidding/src/tender_analysis/source_review/mod.rs)、[编制输入与 Draft](../../crates/bidding/src/docx_composition/mod.rs)、[编制工具](../../crates/bidding/src/docx_composition/tools.rs)、[编译覆盖](../../crates/bidding/src/docx_composition/compiler.rs)、[编制发布](../../crates/bidding/src/docx_composition/postgres.rs)。
 - [DOCX 版本](../../crates/bidding/src/docx_round.rs)、[ONLYOFFICE 转换](../../crates/bidding/src/onlyoffice_conversion.rs)、[同版出件](../../crates/bidding/src/submission_export.rs)、[SQL 合同](../../migrations/bidding_v2_baseline.sql)。
 
-历史 [调用成本审查](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/call-cost-audit-20260916.md) 用于说明失败模式，不用来承诺新方案节省比例；历史 [三件套接线核查](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/triad-output-readiness-20260916.md) 可能早于当前出件代码，现状以实际代码和新验收产物为准。
+历史调用成本审查与三件套接线核查原位于 `artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/` 下的 `call-cost-audit-20260916.md`、`triad-output-readiness-20260916.md`。当前工作区缺少这两份归档，本节保留历史出处，不将其冒充本轮可复验的证据或新方案节省比例；现状以实际代码和新验收产物为准。
 
 本文统一设计与可验证实施约束。§19登记现有状态；新增派发字段、增量回执、结构计划、全局复核交付、页码端口和产品最终语义报告，必须按阶段实现、测试和真实验收后，才能登记为产品能力。
 
@@ -910,30 +1055,60 @@ S4-A 的独立实际文件报告、S4-B 的自动回填和 S4-C 的产品自动�
 | --- | --- | --- |
 | Rig 0.42/Chat、JCS同字节预约、Journal三边界与既有任务账本 | 已在现有提取/编制接入；历史费用、错误与合同保留 | 换SDK已解决语义误判或全文性能 |
 | Main/Reviewer有界证据预装、received才确认、完整候选组、Main正常包推进 | 真实PG prepared/received/committed×两角色共6种恢复验证；[日志](../../artifacts/minimal-bid-fixture/implementation/main-preload-pg-run.log) | 新dispatch/增量pending/全部全局交接政策已实现 |
-| 统一DocReader解析 | DOCX列宽EMU单位错误已修；20项解析+3项真实DOCX冻结回归；[修复核验](../../artifacts/minimal-bid-fixture/implementation/docx-width-fix.json) | 真实模板语义和文档保真通过 |
-| 既有独立来源复核与Main修复异议 | api-v4已完成两轮独立来源复核，仍有问题；见§19.2 | 模型clean或finding清零等于正确 |
+| 统一DocReader解析 | 保留DOCX列宽修复；终检使用同一Python服务的保真profile，保留正文/网格/适用story和全部PDF页/图片身份，删除Rust重复正文解析；新增纯图片与混合绘图区分及真实像素校验。默认DOCX分片失败改为整文回退或明确失败，线程内进程池改spawn并删除无用Manager；[后续回归180通过/13跳过](../../artifacts/minimal-bid-fixture/implementation/docx-worker-recovery-20260916/docx-failover-verification.json) | 长期运行稳定性、全部域/版式或真实模板语义已通过 |
+| 既有独立来源复核与Main修复异议 | api-v4完成5轮复核并发布分析，外部语义审计仍失败；见§19.2 | 模型clean或finding清零等于正确 |
 | 显式父模板专项复核 | 当前源码新增9项回归；库388通过/39既有忽略，严格Clippy与fmt通过；[合同核验](../../artifacts/minimal-bid-fixture/implementation/parent-review-contract.json) | api-v4已使用该新合同，或新合同已真实语义验收 |
 | 正式保存版本→DOCX/PDF/技术报告 | 实际API→worker→发布/下载集成通过，转换器模拟；[证据](../../artifacts/bid-export-http-contract/20260916/README.md) | 最小真实标书三件套或产品语义终检已通过 |
 | 实际文件独立报告工具 | 本地collector绑定真实版本和观察；脚本18项+4子测试；[汇总](../../artifacts/minimal-bid-fixture/implementation/current-verification.json) | 自动产品Reviewer已检查编辑后的整本DOCX/PDF |
-| 新增Rule.items/分析全局结果v2、Draft.plan、dispatch、增量交付、docx_layout、export_review | 本文目标设计，按§15逐项实施 | 已完成或仅换文档即启用 |
+| Rule.items/分析全局结果v2 | 当前scope、角色独立已读证据、真实finding、固定检查库存以及交接/完成/发布校验已接入；补宿主ID高水位、合法引用及received重放7项回归；Rust/SQL全局结论正反例已通过独立PG验证 | 主模型与Reviewer已正确理解真实来源 |
+| Draft.plan、义务库存与逐项稿件复核 | 计划与实际落实、逐项当前稿件/已读证据、finding保留及派项已接入；支持格式/报告项、父子章节及过期复核重派。实际顺序与间接目标定位8项回归通过；PG编制恢复/原子发布含9类计划反例通过 | 全部§3–§6调度协议、新合同最小样稿或真实稿件已验收 |
+| 字段依据与留白作用投影 | 文本投影复用真实renderer的连续区域/CRLF逻辑，返回生成片段与删除区间；实际DOCX XML对照5项通过。跨来源依据仍逐字节/单元格验证本角色交付，12项semantic_compare回归通过；[对照记录](../../artifacts/minimal-bid-fixture/implementation/api-v5-20260916/text-blank-preview-verification.json) | 模型已发现全部语义错误，或局部文本一致等于整本DOCX语义/版式验收 |
+| 集合候选导航与Reviewer支持证据 | inspect_analysis显式区分work/collection/过滤查询，保留边界与全局依赖；Reviewer跨来源text/grid/view不扩大任务权限，精确图片随压缩/恢复保留。5项支持证据回归及本轮PG18项通过；[证据](../../artifacts/minimal-bid-fixture/implementation/reviewer-evidence-repair-20260916/support-reads.md) | 当前v5已使用新合同，或机械障碍修复已解决模型反复错误判断 |
+| docx_layout | 现有账本追加/重放/owner/预算/终态与跨阶段隔离已有PG证据；实际8.3.3-18部署两次合成文档只读书签定位与同源6页PDF一致，见[端口预检](../../artifacts/minimal-bid-fixture/diagnostics/layout-port-preflight-20260916/README.md)。后续[编辑实测](../../artifacts/minimal-bid-fixture/diagnostics/layout-port-preflight-20260916/EDIT-RESULT.md)证明单会话定点修改可保存，但双会话同旧值两次写均返回成功，实际保存只保留后者，公开callCommand旧值检查不能充当跨会话CAS。显示页码、安全隔离写入、API/worker/callback接线、稳定循环及ready原子创建export仍未闭合，见[专项差距审计](../../artifacts/minimal-bid-fixture/diagnostics/layout-plan-gap-20260916.md) | 物理页索引等于分节显示页码，或只读定位/单次编辑成功等于并发安全回填和无人值守恢复 |
+| export_review | 复用编制义务库存，检查实际输出和缺失义务两类分母；42项定向检查通过，含新增输出/原图独立received交付、真实像素身份、读取预算和恢复；[本轮记录](../../artifacts/minimal-bid-fixture/implementation/s4-export-visual-20260916/verification.json) | 真实模型视觉判断、自动页码/域检查或真实文件完整语义已验收 |
+| submission_export冻结与恢复 | 已接入请求冻结模型/预算、全链owner续租、固定PDF/render_snapshot复用、失败分类和完整报告投影校验；图片与snapshot同事务持有，发布后manifest和报告继续持有图片，PDF复用原render对象；[PG18项](../../artifacts/minimal-bid-fixture/implementation/s4-export-visual-20260916/postgres-verification.json) | 转换成功、checkpoint.done或明确not_checked报告等于完整验收 |
+| 新dispatch与增量pending_delivery | 编制批末自动编译/交接、编译失败反馈和pending交付已有回归；终检亦按received确认。后续[编制局部换项切片](../../artifacts/minimal-bid-fixture/implementation/composition-local-handoff-20260916/verification.json)已有92项编制测试通过（1项忽略），含12项定向回归，覆盖批末状态、父子依赖、旧项计费及恢复；该切片PG联合验证仍待完成。分析Main派发正在整合，编制普通任务根owner、写范围约束及跨blocked/repair派发仍有缺口，现有pending快照不能当作同轮增量合并；[调度差距审计](../../artifacts/minimal-bid-fixture/diagnostics/dispatch-plan-gap-20260916.md)保留修复前基线 | 当前各局部实现已等同完整§3–§6调度协议，或局部回归关闭RT01/RT09/RT16；v6已使用后续源码 |
 
-父级合同检查保证必需判断和证据存在，不保证模型判断正确。该源码变更不热注入旧api-v4服务。§9.2中的留白作用投影、字段依据对照和真实回归仍须实施/验收；当前更明确的提示不作为其已解决证据。
+[修复前代码对照](../../artifacts/minimal-bid-fixture/diagnostics/unified-plan-code-mapping.md)保留发现时状态；以上逐项状态记录本轮修复。新增源码门禁不替代宿主派发、输入/发布SQL、真实模型及实际文件的联合验收。
+
+上一切片[合同回归记录](../../artifacts/minimal-bid-fixture/implementation/unified-agent-contracts-20260916/final-verification.json)：bidding库466通过/39项既有忽略，严格全目标Clippy、fmt与diff检查通过；全新隔离库安装当前三份baseline，16项PG检查通过，3项外部服务测试明确未纳入。Rule身份7项、实际顺序8项定向回归及原失败反例均归档。本轮没有新增模型调用，`.env`与最小招标原件摘要未变；这些结果不关闭S5-A/S5-B/S6。
+
+上一S4切片[核验记录](../../artifacts/minimal-bid-fixture/implementation/s4-export-contracts-20260916/verification.json)：bidding库497通过/39项既有忽略，最终export_review定向32通过；worker库38通过，但其依环境提前返回的数据库用例不算真实集成验收。bidding/docparser/worker严格全目标Clippy、全局fmt和diff检查通过。全新隔离库安装该切片baseline，18项PG合同回归全部通过，3项真实外部集成明确未纳入；phase6正式出件SQL场景另行通过，不等于整个phase0/6 wrapper通过。该切片未新增真实模型调用；这些历史结果不替代后续改动的验证。
+
+当前图片证据切片[核验记录](../../artifacts/minimal-bid-fixture/implementation/s4-export-visual-20260916/verification.json)：bidding库507通过/39项既有忽略，export_review定向42通过，严格全目标Clippy和fmt通过；隔离新baseline的PG18项通过。当时Python171通过/13跳过，但日志暴露默认DOCX并行子进程段错误及可能接受部分结果的风险，不能把退出码0当成解析稳定性证明。新终检profile的10项独立检查通过。图片真实字节、原/输出图独立交付与持久化已验证，视觉语义尚未实测；`.env`及最小原件摘要未变，当前仍无验收通过的同版三件套。
+
+随后[DOCX进程恢复修复](../../artifacts/minimal-bid-fixture/implementation/docx-worker-recovery-20260916/docx-failover.md)保留统一解析和既有格式范围：任一分片失败不得接纳幸存片段，使用既有整文串行回退；回退失败显式报错，合法空文本和图片结构仍保留。删除仅由父进程使用的Manager，以标准spawn启动worker，避免继承多线程RPC的原生库状态。9项定向回归通过（含真实线程/RPC成功路径），全量180通过/13跳过，本次未再出现原生段错误或线程内fork警告；没有原生回溯证明旧崩溃仅由fork导致，不外推为长期无故障。私有api-v5服务未热改。
+
+本轮[Reviewer证据修复联合验证](../../artifacts/minimal-bid-fixture/implementation/reviewer-evidence-repair-20260916/verification.json)：bidding库520通过/39项既有忽略，bidding/docparser/worker严格全目标Clippy、全局fmt与diff检查通过。初跑7项因沙箱禁止本机监听失败，允许回环端口后完整复跑通过；不隐藏初跑日志。PG18项本轮重跑通过，其执行早于最后的跨来源投影整合，具体源码摘要独立保留，不冒充最终全链集成。此次保留任务权限、角色独立回执、received确认及原编译语义，只修复集合导航歧义、支持证据交付/投影不一致和文本留白效果不可见；未修改.env或原件，未热改v5，也未新增该合同的真实模型验收。
+
+随后[恢复与重复交付切片](../../artifacts/minimal-bid-fixture/implementation/runtime-replay-delivery-20260916/verification.json)关闭两个精确反例：共享driver先验证并重放已保存的完整received响应，再应用下一调用的预算/执行阻塞门；prepared、取消、损坏正文/角色/session仍拒绝。编制批末只在本角色coverage及inspected与当前已确认资格完全一致时取消空pending，保留读取成本与工具结果；新旧混合证据、新图片及另一角色资格仍需received确认。driver9项、编制批次10项及全库526项通过（39项既有忽略），严格Clippy/fmt通过；全新隔离baseline库4项分析/编制恢复与发布检查通过。为冻结新的恢复语义，runtime adapter升为`rig-chat-0.42.0/4`，baseline三处版本锁同步，Journal仍v3，无新表或migration文件；旧v5服务/数据库保持其原合同。上述合同验证不关闭完整dispatch、页码自动化或真实样稿验收。
+
+父级合同检查保证必需判断和证据存在，不保证模型判断正确。该源码变更不热注入旧api-v4服务。§9.2中的留白作用投影及字段依据对照已有宿主实现和定向回归；独立模型比较、修复效果及实际文件回归尚未验收，不能以更明确的提示或局部测试宣称语义问题已解决。
 
 ### 19.2 最小真实样本与完整样本
 
 最小源：`testdata/bid/minimal/source/minimal-security-tender.docx`，SHA256 `d743182e1f67ad7f453127562fdda92dd0c2c1c898aefd4800e27c09a66c8a85`。统一解析为28个来源、6张schema v3网格；[M01–M18人工矩阵](../../artifacts/minimal-bid-fixture/expected/acceptance-matrix.md)独立保存，绝不发送模型。v1因空条件合同错位停止、v2因供应商工具schema输出异常停止、v3因冻结列宽错误停止；原输入、费用及失败轨迹保留，不退款。
 
-api-v4使用真实API上传/解析/冻结和`deploy/.env`生产预算，不导入旧候选。首轮28来源复核提出14项finding；Main修复后第二轮再次完成全部来源判断，留下1项新父级finding。第二轮精确完成点为turn293、review_rounds=2，[回执](../../artifacts/minimal-bid-fixture/implementation/api-v4-second-review-completed.json)。后续Main已提交该项修复并进入第三轮复验；截至14:52 UTC仍未发布分析、未编制，不能称语义或三件套通过。
+api-v4使用真实API上传/解析/冻结和`deploy/.env`生产预算，不导入旧候选。分析在15:30:57 UTC发布：turn424、5轮独立复核、48条记录、18条关系、28项处置、0条finding，物理模型调用428次；[完成回执](../../artifacts/minimal-bid-fixture/implementation/api-v4-analysis-completed.json)。这是宿主完成，分析质量仍为`needs_review`。最终[独立语义审计](../../artifacts/minimal-bid-fixture/diagnostics/api-v4-final-semantic.md)确认丙的错误父级、旧未决记录、评分grounds与部分固定标签留白问题仍在；乙1签署与说明一/二等已有改善，保留这些有效修复。
 
-[独立候选审计](../../artifacts/minimal-bid-fixture/diagnostics/semantic-audit-api-v4-review2.md)和[真实请求核查](../../artifacts/minimal-bid-fixture/diagnostics/semantic-audit-api-v4-delivery.md)保留评分grounds、固定标签blank、父级及未决记录残留的具体反例。复核finding数与这些外部验收问题分别记录，最终图和实际产物仍须重查。
+随后编制在turn99失败：`AGENT_OUTPUT_INVALID`，109次物理调用中99次有合法工具输出、9次纯文本零工具、1次传输失败。最后一轮3次HTTP200/SSE正常结束却均无工具调用，耗尽该轮预约上限；不是180秒超时或全局预算用尽。[编制失败诊断](../../artifacts/minimal-bid-fixture/diagnostics/api-v4-composition-failure.md)保存请求及SQL恢复证据。局部工作完成后缺少明确全局下一步是已观察到的编排缺口，但不足以单独证明供应商零工具输出的原因；失败正文及usage未保存，相关结论保留证据边界。
 
-同一api-v4请求自动经历attempt1→2及2→3。前者保留已提交状态，后者在prepared边界重发同一正文；工具/读取没有重复提交，但产生额外物理模型尝试，不能说供应商零重复成本。[prepared交接证据](../../artifacts/minimal-bid-fixture/implementation/api-v4-attempt-handoff-2-3.json)。此前完整样本3826次、最小v1/v2/诊断/v3合计89次，即api-v4之前累计3915次；api-v4另按实际预约累计，不重置历史。
+此合同已终止，不能清预约/清预算继续冒充恢复。修复后采用新合同、空候选重新验收；当前尚无该样本验收通过的DOCX/PDF/报告三件套。
+同一api-v4请求自动经历attempt1→2及2→3。前者保留已提交状态，后者在prepared边界重发同一正文；工具/读取没有重复提交，但产生额外物理模型尝试，不能说供应商零重复成本。[prepared交接证据](../../artifacts/minimal-bid-fixture/implementation/api-v4-attempt-handoff-2-3.json)。此前完整样本3826次、最小v1/v2/诊断/v3合计89次，即api-v4之前累计3915次；本轮分析428次加编制109次，已知累计4452次物理调用，不重置历史。
+
+api-v5使用独立基础设施、空候选和私有源码快照重新上传同一最小原件，统一解析完成后进入首次独立Reviewer，现已失败终止；模型/Chat/预算来自未改动的`.env`且与数据库冻结值核对一致。[终态记录](../../artifacts/minimal-bid-fixture/implementation/api-v5-20260916/terminal-summary.json)确认2026-09-16 22:34:53 UTC在attempt2、turn249以`AGENT_TURN_BUDGET_EXCEEDED`结束，250次物理调用、787次工具调用、17条finding、0轮完整复核；连同此前4452次，已知历史累计4702次物理调用。Main修复和编制未开始，没有生成DOCX/PDF/报告。原检查点、费用、数据库与对象均保留，不能清预算续跑或热改旧合同。源文件是仓库脚本生成的纯合成夹具，人工M01–M18答案不外发；[既有出件交接](../../artifacts/minimal-bid-fixture/implementation/api-v5-20260916/export-handoff.md)仅说明后续接线方式，不证明本次已取得文件。
+
+终止前最后已核实的有效来源判断为26/28，已保存27项；终态JSON没有重新计算有效分母，不把已保存数量当作有效完成数量。[实际turn238诊断](../../artifacts/minimal-bid-fixture/implementation/api-v5-20260916/blocked-source-diagnosis.json)显示剩余两项均被未变化依赖阻塞，`active_task=null`，导航却回退展示首个blocked项；读取要求真实active，切换又拒绝相同依赖，独立工作检查还把已完成来源当作可执行来源，形成无效循环。§4.2据此补明真正待办集合、实际活动身份和预约前停止要求；停止更准确并不证明最初的语义阻塞已解决。当前源码已有对应修复，新增7项定向回归通过，覆盖导航、新请求/恢复prepared拒绝预约、完整received优先提交、独立任务继续、依赖变化不退款、来源完成后全局复核及错误清单拒绝；[联合验证](../../artifacts/minimal-bid-fixture/implementation/reviewer-blocked-20260916/verification.json)记录库533通过/39既有忽略、严格Clippy及fmt/diff通过。[实际turn238离线核验](../../artifacts/minimal-bid-fixture/implementation/reviewer-blocked-20260916/actual-turn238-offline.md)证明26/28有效、2项blocked时不再新预约，合成完整received仍只提交一次；仅在内存适配新合同，旧/3合同直接加载被拒，不冒充原运行恢复。新合同真实语义与文件验收尚待完成，不能计为完整dispatch已完成。
+
+attempt1→2保留同一checkpoint及待执行正文，观察到的是SQL fence后的自动接续，不能推定为软时限让出。Reviewer独立发现固定标签被留白删除，属于有效发现，但尚未修复；附表映射判断曾反复误挂内容finding，后将内容finding保留在外层并清空mapping finding列表，成功保存findings判断，见[提交证据](../../artifacts/minimal-bid-fixture/implementation/api-v5-20260916/mapping-judgment-saved-after-loop.json)。保留这些正确发现与协议进展，不能放宽映射证据或清除finding以促成发布。
+
+api-v6已完成独立源码冻结和隔离启动，2026-09-16 23:05:54 UTC发起首个真实调用；[冻结请求核对](../../artifacts/minimal-bid-fixture/implementation/api-v6-20260916/frozen-request-audit.json)确认`.env`未变、启动配置与数据库冻结值一致，使用空候选和原最小源，历史4702次调用单独保留。23:28:08 UTC观察仍在Main，turn55、56次物理调用，64条记录、8条关系和28项来源处置，尚无完整独立复核或三件套；后续观察见[运行状态](../../artifacts/minimal-bid-fixture/implementation/api-v6-20260916/progress.json)。本次快照包含Reviewer阻塞修复，但早于正在整合的Main派发、编制局部换项及Rule条件schema修订，不热更新，也不能将其结果归到后续合同。
 
 完整106页旧终态仍保留在 `artifacts/bid-full-sample/real-run-v19-repair-scope-resume5`：turn1604、424候选、177关系、104处置、2待处理、3执行阻塞、0轮完整独立复核、累计3826/4000物理调用。该终态不自动恢复，也不作为最小新合同种子。真实全文、32项及完整同版DOCX/PDF/报告均未验收。
 
 ### 19.3 根因基线与执行门
 
-历史v19的1604完整回合全部为Main，1104回合无业务写尝试，3475次工具中674次失败；六段累计约3.96小时、模型回合平均6.18秒、请求正文P95约107KB。证据：[调用成本审查](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/call-cost-audit-20260916.md)。不能将本次慢笼统归于全文上下文或Reviewer重读；当前最小样本另证明完整交付后仍有错误比较。性能尚未可用，正确性优先，但每个试验同时记录无效往返及成本，不以继续加预算替代根因修复。
+历史v19的1604完整回合全部为Main，1104回合无业务写尝试，3475次工具中674次失败；六段累计约3.96小时、模型回合平均6.18秒、请求正文P95约107KB。以上为历史记录的诊断数字；原始调用成本审查归档当前缺失，须恢复后复核（见§18）。不能将本次慢笼统归于全文上下文或Reviewer重读；当前最小样本另证明完整交付后仍有错误比较。性能尚未可用，正确性优先，但每个试验同时记录无效往返及成本，不以继续加预算替代根因修复。
 
 1. 先完成§9.2已证实反例的最小修复与独立真实对照，保留当前运行旧合同和终态证据。
 2. 按§15每个必要切片做最小真实验证，尽早取得S5-A正确模板及同版三件套，报告必须检查实际文件。

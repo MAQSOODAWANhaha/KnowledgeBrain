@@ -45,7 +45,7 @@ async fn ready() -> (MemoryJournal, Checkpoint) {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code, "INTERNAL");
+    assert_eq!(error.code, "INTERNAL", "{error:?}");
     let mut state = journal.load().await.unwrap().unwrap();
     let mut coverage = state.analysis.coverage.clone();
     tools::invoke(
@@ -58,9 +58,49 @@ async fn ready() -> (MemoryJournal, Checkpoint) {
         config().limits.max_tool_result_bytes,
     )
     .unwrap();
+    fixture_global_checks(&input(), &config(), &mut state);
     *journal.state.lock().unwrap() = Some(state.clone());
     assert!(tools::gaps(&input(), &state.analysis).is_empty());
     (journal, state)
+}
+
+// These tests extend a synthetic frozen input, not a production checkpoint.
+// Re-key its existing source/global roots and add the new untouched source.
+fn extend_fixture_roots(input: &FrozenInput, state: &mut Checkpoint) {
+    let old = std::mem::take(&mut state.dispatch.entries);
+    let active_source = state
+        .dispatch
+        .active
+        .as_ref()
+        .and_then(|active| match active {
+            agent::main_dispatch::Active::Ordinary(id) => old.get(id).map(|e| e.source_id.clone()),
+            _ => None,
+        });
+    for source_id in input
+        .source_units
+        .iter()
+        .map(|s| Some(s.source_unit_revision_id.clone()))
+        .chain(std::iter::once(None))
+    {
+        let entry = old
+            .values()
+            .find(|e| e.source_id == source_id)
+            .cloned()
+            .unwrap_or_else(|| agent::main_dispatch::Entry {
+                source_id: source_id.clone(),
+                ..Default::default()
+            });
+        let id = digest(&json!([
+            "main-dispatch-v1",
+            digest(input).unwrap(),
+            source_id
+        ]))
+        .unwrap();
+        if active_source.as_ref() == Some(&source_id) {
+            state.dispatch.active = Some(agent::main_dispatch::Active::Ordinary(id.clone()));
+        }
+        state.dispatch.entries.insert(id, entry);
+    }
 }
 
 fn complete() -> Value {
@@ -158,6 +198,7 @@ async fn local_completion_uses_global_saved_coverage_instead_of_redeclaring_all_
     // A previously extracted independent source makes the global structural
     // check empty, while this response explicitly completes only one scope.
     before.input_sha256 = digest(&larger).unwrap();
+    extend_fixture_roots(&larger, &mut before);
     tools::cover(
         before
             .analysis
@@ -171,6 +212,7 @@ async fn local_completion_uses_global_saved_coverage_instead_of_redeclaring_all_
     let mut coverage = before.analysis.coverage.clone();
     tools::invoke(&larger, &mut before.analysis, &mut coverage, false, "set_disposition", &json!({"source_id":"other","state":"non_requirement","reason":"independent fixture title"}), config().limits.max_tool_result_bytes).unwrap();
     assert!(tools::gaps(&larger, &before.analysis).is_empty());
+    fixture_global_checks(&larger, &config(), &mut before);
     *journal.state.lock().unwrap() = Some(before.clone());
     *journal.interrupt_after.lock().unwrap() = Some(before.turn + 1);
     let error = agent::run(
@@ -182,7 +224,7 @@ async fn local_completion_uses_global_saved_coverage_instead_of_redeclaring_all_
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code, "INTERNAL");
+    assert_eq!(error.code, "INTERNAL", "{error:?}");
     let saved = journal.load().await.unwrap().unwrap();
     assert_eq!(
         saved.main_work.as_ref().unwrap().status,
@@ -201,6 +243,7 @@ async fn local_completion_cannot_skip_an_unread_or_undisposed_source() {
         ..larger.source_units[0].clone()
     });
     before.input_sha256 = digest(&larger).unwrap();
+    extend_fixture_roots(&larger, &mut before);
     *journal.state.lock().unwrap() = Some(before.clone());
     *journal.interrupt_after.lock().unwrap() = Some(before.turn + 1);
     let error = agent::run(
@@ -212,7 +255,7 @@ async fn local_completion_cannot_skip_an_unread_or_undisposed_source() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code, "INTERNAL");
+    assert_eq!(error.code, "INTERNAL", "{error:?}");
     let saved = journal.load().await.unwrap().unwrap();
     assert_eq!(saved.role, Role::Main);
     assert!(saved.source_review.is_none());
@@ -232,7 +275,7 @@ async fn received_completion_recovers_without_model_recall_or_double_charge() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code, "INTERNAL");
+    assert_eq!(error.code, "INTERNAL", "{error:?}");
     let received = journal.load().await.unwrap().unwrap();
     assert!(received.journal.response().is_some());
     assert_eq!(received.role, Role::Main);
@@ -250,7 +293,7 @@ async fn received_completion_recovers_without_model_recall_or_double_charge() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code, "INTERNAL");
+    assert_eq!(error.code, "INTERNAL", "{error:?}");
     let saved = journal.load().await.unwrap().unwrap();
     assert_eq!(saved.role, Role::Reviewer);
     assert_eq!(saved.tool_calls, before.tool_calls + 1);
@@ -305,6 +348,15 @@ async fn source_uncertainty_survives_handoff_for_independent_judgment() {
         ("set_disposition", json!({"source_id":"source","state":"unresolved","reason":"The referenced target requires independent source interpretation."})),
         ("set_work_note", complete()),
     ]).await;
+    assert_eq!(
+        saved.role,
+        Role::Main,
+        "changed disposition invalidates earlier global checks"
+    );
+    let mut updated = saved;
+    fixture_global_checks(&input(), &config(), &mut updated);
+    *journal.state.lock().unwrap() = Some(updated.clone());
+    let saved = batch(&journal, &updated, vec![("request_review", json!({}))]).await;
     assert_eq!(saved.role, Role::Reviewer);
     assert_eq!(
         saved.main_work.as_ref().unwrap().pending_refs,

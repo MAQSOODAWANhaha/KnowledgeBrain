@@ -11,9 +11,13 @@ use crate::{
 use async_trait::async_trait;
 use platform::BidAuthoringRequestIdentityV2;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+const REQUIREMENT_COMPILE_ACTOR: &str = "system:requirement-set-compile-v4";
+const DOCX_MEDIA: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 pub struct PgJournal<'a> {
     pub pool: &'a PgPool,
@@ -220,6 +224,7 @@ impl Journal for PgJournal<'_> {
             .bind(serde_json::to_value(state).map_err(invalid)?)
             .bind(json!({
                 "phase": if state.role == Role::Main { "main" } else { "reviewer" },
+                "draft_stage": state.draft_stage,
                 "turn": state.turn,
                 "tool_calls": state.tool_calls,
                 "review_rounds": state.review_rounds,
@@ -252,12 +257,11 @@ impl Journal for PgJournal<'_> {
 }
 
 pub fn publication(input: &FrozenInput, result: &AnalysisResult) -> Result<Value, AgentError> {
-    if result.schema_version == 2 {
-        crate::tender_analysis::rule_contract::validate_inventory(
+    if result.schema_version == 2 && !result.review.draft {
+        crate::tender_analysis::rule_contract::validate_review(
             input,
             &result.analysis,
-            &result.review.global_checks,
-            &result.review.findings,
+            &result.review,
         )
         .map_err(invalid)?;
     }
@@ -346,6 +350,59 @@ pub fn publication(input: &FrozenInput, result: &AnalysisResult) -> Result<Value
     )
 }
 
+async fn stage_draft_docx(
+    pool: &PgPool,
+    journal: &PgJournal<'_>,
+    result: &AnalysisResult,
+) -> Result<Option<Uuid>, AgentError> {
+    if !result.review.draft {
+        return Ok(None);
+    }
+    let Some(state) = journal.load().await? else {
+        return Ok(None);
+    };
+    let Some(encoded) = state.draft_docx_base64.as_deref() else {
+        return Ok(None);
+    };
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+        .map_err(invalid)?;
+    let sha = hex::encode(Sha256::digest(&bytes));
+    let object_ref = format!("objects/{sha}");
+    if state.draft_compile_object_id.as_deref() != Some(object_ref.as_str()) {
+        return Err(invalid("draft object identity mismatch"));
+    }
+    let staging = Uuid::new_v4();
+    platform::stage_object_upload(
+        pool,
+        staging,
+        &object_ref,
+        &sha,
+        DOCX_MEDIA,
+        i64::try_from(bytes.len()).map_err(invalid)?,
+        REQUIREMENT_COMPILE_ACTOR,
+    )
+    .await
+    .map_err(db_error)?;
+    if let Err(error) = platform::write_blob_async(&sha, &bytes).await {
+        let _ = platform::abandon_object_upload(pool, staging, REQUIREMENT_COMPILE_ACTOR).await;
+        return Err(AgentError::new("INTERNAL", error.to_string()));
+    }
+    Ok(Some(staging))
+}
+
+fn draft_staging_committed(receipt: &Value) -> bool {
+    receipt["replayed"] != json!(true)
+        && receipt["published_current"] == json!(true)
+        && receipt["draft_docx"]["object_ref"].is_string()
+}
+
+async fn abandon_draft_staging(pool: &PgPool, staging: Option<Uuid>) {
+    let Some(staging) = staging else {
+        return;
+    };
+    let _ = platform::abandon_object_upload(pool, staging, REQUIREMENT_COMPILE_ACTOR).await;
+}
+
 pub async fn execute(
     pool: &PgPool,
     request: &BidAuthoringRequestIdentityV2,
@@ -400,6 +457,21 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
         )
         .map_err(invalid)?,
     };
+    let bundle: Value =
+        sqlx::query_scalar("SELECT kb_bid_v2_load_tender_analysis_input($1,$2,$3::kb_sha256)")
+            .bind(request.request_artifact_id)
+            .bind(request.request_revision)
+            .bind(&request.frozen_input_sha256)
+            .fetch_one(pool)
+            .await
+            .map_err(db_error)?;
+    let draft_path = bundle["runtime"]["limits"]["draft_path"]
+        .as_bool()
+        .unwrap_or(true);
+    if crate::tender_analysis::draft::draft_claim_exhausted(draft_path, owner.attempt) {
+        return Ok(json!({"disposition":"exhausted","reason":"draft_attempt_limit"}));
+    }
+    let deadline_secs = crate::tender_analysis::draft::analysis_deadline_secs(draft_path);
     let journal = PgJournal {
         pool,
         request,
@@ -410,15 +482,6 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
     let finished = CancellationToken::new();
     let work = async {
         let result = async {
-            let bundle: Value = sqlx::query_scalar(
-                "SELECT kb_bid_v2_load_tender_analysis_input($1,$2,$3::kb_sha256)",
-            )
-            .bind(request.request_artifact_id)
-            .bind(request.request_revision)
-            .bind(&request.frozen_input_sha256)
-            .fetch_one(pool)
-            .await
-            .map_err(db_error)?;
             if bundle["runtime"].is_null() {
                 return Err(AgentError::new(
                     "AGENT_PROVIDER_UNAVAILABLE",
@@ -427,14 +490,46 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
             }
             let input: FrozenInput =
                 serde_json::from_value(bundle["input"].clone()).map_err(invalid)?;
-            let config: Config =
+            let mut config: Config =
                 serde_json::from_value(bundle["runtime"].clone()).map_err(invalid)?;
+            config.limits = config
+                .limits
+                .at_least_for(&input)
+                .map_err(|refused| {
+                    AgentError::new(
+                        "AGENT_PROVIDER_UNAVAILABLE",
+                        format!(
+                            "extraction turn estimate {} exceeds ceiling {}",
+                            refused.estimated_turns, refused.ceiling
+                        ),
+                    )
+                })?;
             let result = agent::run(&input, &config, &journal, model, &local).await?;
             let compiled = publication(&input, &result)?;
-            let receipt:Value=sqlx::query_scalar("SELECT kb_bid_v2_publish_requirement_set_v4($1,$2,$3::kb_sha256,$4,$5::kb_actor_identity,$6,$7)")
-            .bind(request.request_artifact_id).bind(request.request_revision).bind(&request.frozen_input_sha256)
-            .bind(compiled).bind("system:requirement-set-compile-v4").bind(owner.attempt).bind(owner.execution_owner_token)
-            .fetch_one(pool).await.map_err(db_error)?;
+            let staging = stage_draft_docx(pool, &journal, &result).await?;
+            let receipt = match sqlx::query_scalar(
+                "SELECT kb_bid_v2_publish_requirement_set_v4($1,$2,$3::kb_sha256,$4,$5::kb_actor_identity,$6,$7,$8)",
+            )
+            .bind(request.request_artifact_id)
+            .bind(request.request_revision)
+            .bind(&request.frozen_input_sha256)
+            .bind(compiled)
+            .bind(REQUIREMENT_COMPILE_ACTOR)
+            .bind(owner.attempt)
+            .bind(owner.execution_owner_token)
+            .bind(staging)
+            .fetch_one(pool)
+            .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    abandon_draft_staging(pool, staging).await;
+                    return Err(db_error(error));
+                }
+            };
+            if !draft_staging_committed(&receipt) {
+                abandon_draft_staging(pool, staging).await;
+            }
             Ok(receipt)
         }
         .await;
@@ -445,7 +540,7 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
-        let deadline = tokio::time::sleep(std::time::Duration::from_secs(45 * 60));
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(deadline_secs));
         tokio::pin!(deadline);
         loop {
             let error = tokio::select! {

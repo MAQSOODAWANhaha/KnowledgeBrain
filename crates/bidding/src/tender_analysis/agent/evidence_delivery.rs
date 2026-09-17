@@ -21,7 +21,7 @@ pub(in crate::tender_analysis) fn select(
     state: &Checkpoint,
 ) -> Result<Option<source_review::Evidence>, AgentError> {
     if state.pending_coverage.is_some()
-        || state.execution().watch.recovery == Recovery::Blocked
+        || (state.execution().watch.recovery == Recovery::Blocked && !config.limits.draft_path)
         || (state.role == Role::Reviewer
             && state
                 .work()
@@ -59,7 +59,10 @@ pub(in crate::tender_analysis) fn select(
             .iter()
             .any(|&(start, end)| !tools::contains(state.coverage().metadata.get(kind), start, end))
     });
-    if !new_metadata
+    let draft_fill = config.limits.draft_path
+        && state.draft_stage == crate::tender_analysis::draft::DraftStage::Fill;
+    if !draft_fill
+        && !new_metadata
         && !expected.is_empty()
         && expected.iter().all(|(key, spans)| {
             spans.iter().all(|(start, end)| {

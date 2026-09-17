@@ -3,7 +3,7 @@
 use super::agent::context::WorkStatus;
 use super::agent::{Checkpoint, Config, Role, WorkState, context, repair, validate_finding};
 use super::*;
-use crate::agent_runtime::progress::Recovery;
+use crate::agent_runtime::progress::{ExecutionBlocker, ProgressWatch, Recovery};
 use serde_json::json;
 use std::collections::BTreeSet;
 
@@ -150,6 +150,9 @@ pub struct State {
     pub finding_revisions: BTreeMap<String, u64>,
     pub candidate_revisions: BTreeMap<String, u64>,
     pub completed_analysis_sha256: Option<String>,
+    /// Batches spent on a reviewer pack key (sorted source_scope).
+    #[serde(default)]
+    pub pack_batches: BTreeMap<String, usize>,
     // Derived solely from frozen input and the tool budget, never a semantic
     // receipt. Rebuild after restart; do not change the checkpoint contract.
     #[serde(skip)]
@@ -295,6 +298,7 @@ pub fn initialize(input: &FrozenInput, config: &Config) -> Result<State, String>
         finding_revisions: BTreeMap::new(),
         candidate_revisions: BTreeMap::new(),
         completed_analysis_sha256: None,
+        pack_batches: BTreeMap::new(),
         task_inventory: Default::default(),
     })
 }
@@ -451,6 +455,14 @@ fn dependency_references(analysis: &Analysis, dependencies: &Dependencies) -> BT
         .into_iter()
         .collect();
     refs.extend(dependencies.references.iter().cloned());
+    let embedded: Vec<_> = refs
+        .iter()
+        .filter_map(|key| key.strip_prefix("record:"))
+        .filter_map(|id| analysis.records.get(id))
+        .flat_map(embedded_relationship_targets)
+        .map(|id| format!("record:{id}"))
+        .collect();
+    refs.extend(embedded);
     // Explicitly inspected endpoints also depend on newly added/removed edges,
     // including edges whose grounds lie outside the original source fragment.
     let incident: Vec<_> = analysis
@@ -921,6 +933,98 @@ pub(super) fn pending(
     pending_from_inventory(input, state, &tasks)
 }
 
+pub(super) fn pending_open(
+    input: &FrozenInput,
+    config: &Config,
+    state: &Checkpoint,
+) -> Result<Vec<Task>, String> {
+    let pending = pending(input, config, state)?;
+    let mut open = Vec::new();
+    for task in pending {
+        if !context::scope_is_blocked(state, std::slice::from_ref(&task.source_id))? {
+            open.push(task);
+        }
+    }
+    Ok(open)
+}
+
+pub(super) fn omitted_sources(
+    input: &FrozenInput,
+    config: &Config,
+    state: &Checkpoint,
+) -> Result<BTreeMap<String, String>, String> {
+    let pending = pending(input, config, state)?;
+    let mut omitted = BTreeMap::new();
+    for task in pending {
+        if context::scope_is_blocked(state, std::slice::from_ref(&task.source_id))? {
+            omitted.insert(task.source_id, "pack exhausted or blocked".into());
+        }
+    }
+    Ok(omitted)
+}
+
+pub(super) fn charge_pack(
+    input: &FrozenInput,
+    config: &Config,
+    state: &mut Checkpoint,
+) -> Result<(), String> {
+    if state.role != Role::Reviewer || config.limits.pack_max_turns == 0 {
+        return Ok(());
+    }
+    let Some(scope) = state
+        .reviewer_work
+        .as_ref()
+        .map(|work| work.source_scope.clone())
+    else {
+        return Ok(());
+    };
+    if scope.is_empty() {
+        return Ok(());
+    }
+    let mut key = scope.clone();
+    key.sort();
+    let key = key.join("\n");
+    let spent = {
+        let review = state
+            .source_review
+            .as_mut()
+            .ok_or("source review state missing")?;
+        let spent = review.pack_batches.entry(key).or_insert(0);
+        *spent = spent.saturating_add(1);
+        *spent
+    };
+    if spent < config.limits.pack_max_turns {
+        return Ok(());
+    }
+    let leftover: Vec<String> = pending_open(input, config, state)?
+        .into_iter()
+        .filter(|task| scope.contains(&task.source_id))
+        .map(|task| task.source_id)
+        .collect();
+    if leftover.is_empty() {
+        return Ok(());
+    }
+    let values: Vec<_> = context::scope_references(&state.analysis, &leftover)
+        .iter()
+        .map(|item| context::reference(&state.analysis, item))
+        .collect::<Result<Vec<_>, _>>()?;
+    state.reviewer_progress.blockers.push(ExecutionBlocker {
+        scope: leftover,
+        dependencies_sha256: digest(&values)?,
+        watch: ProgressWatch {
+            recovery: Recovery::Blocked,
+            replans: config.limits.max_focus_replans,
+            ..Default::default()
+        },
+    });
+    state.reviewer_work = None;
+    state.pending_coverage = None;
+    if let Some(review) = state.source_review.as_mut() {
+        review.active_task = None;
+    }
+    Ok(())
+}
+
 fn pending_from_inventory(
     input: &FrozenInput,
     state: &Checkpoint,
@@ -1041,6 +1145,8 @@ pub(super) fn record_query(input: &FrozenInput, state: &mut Checkpoint, name: &s
                         .filter_map(Value::as_str)
                         .map(|id| format!("{kind}:{id}")),
                 );
+            } else if args["scope"] == "collection" {
+                dependencies.global = true;
             } else if let Some(scope) = scope {
                 dependencies.source_ids.extend(scope);
             } else {
@@ -1050,6 +1156,29 @@ pub(super) fn record_query(input: &FrozenInput, state: &mut Checkpoint, name: &s
         _ => {}
     }
     expand_view_dependencies(input, &state.reviewer_coverage, dependencies);
+}
+
+fn has_executable_task(state: &Checkpoint, pending: &[Task]) -> Result<bool, String> {
+    for task in pending {
+        if !context::scope_is_blocked(state, std::slice::from_ref(&task.source_id))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Completed input sources are not independent work. Evaluate the actual
+/// pending judgments, using the same dependency policy as task selection.
+pub(in crate::tender_analysis) fn execution_blocked(
+    input: &FrozenInput,
+    config: &Config,
+    state: &Checkpoint,
+) -> Result<bool, String> {
+    if state.role != Role::Reviewer || state.done || state.source_review.is_none() {
+        return Ok(false);
+    }
+    let pending = pending(input, config, state)?;
+    Ok(!pending.is_empty() && !has_executable_task(state, &pending)?)
 }
 
 pub fn select_next(
@@ -1064,18 +1193,70 @@ pub fn select_next(
         expand_view_dependencies(input, &state.reviewer_coverage, &mut review.dependencies);
     }
     let pending = pending(input, config, state)?;
-    let executable: Vec<_> = pending
-        .iter()
-        .filter(|task| {
-            context::check_blocked_scope(state, std::slice::from_ref(&task.source_id)).is_ok()
-        })
-        .collect();
+    let mut executable = Vec::new();
+    for task in &pending {
+        if !context::scope_is_blocked(state, std::slice::from_ref(&task.source_id))? {
+            executable.push(task);
+        }
+    }
     let review = state
         .source_review
         .as_ref()
         .ok_or("source review state missing")?;
-    if review
-        .active_task
+    let active_task = review.active_task.clone();
+    let seed_id = pending
+        .iter()
+        .find(|task| active_task.as_ref() == Some(&task.id))
+        .map(|task| task.source_id.clone())
+        .or_else(|| {
+            state
+                .reviewer_work
+                .as_ref()
+                .and_then(|work| work.source_scope.first().cloned())
+        });
+    if let Some(seed_id) = seed_id {
+        let pack = crate::tender_analysis::pack::pack_containing(
+            input,
+            config.limits.pack_max_units,
+            config.limits.pack_max_chars,
+            &seed_id,
+        );
+        let pack_executable: Vec<&Task> = executable
+            .iter()
+            .copied()
+            .filter(|task| pack.contains(&task.source_id))
+            .collect();
+        if !pack_executable.is_empty() {
+            let source_scope: Vec<String> = pack
+                .into_iter()
+                .filter(|id| executable.iter().any(|task| &task.source_id == id))
+                .collect();
+            if active_task
+                .as_ref()
+                .is_some_and(|id| pack_executable.iter().any(|task| &task.id == id))
+            {
+                if let Some(work) = state.reviewer_work.as_mut() {
+                    work.source_scope = source_scope;
+                }
+                return Ok(());
+            }
+            let task = pack_executable[0];
+            let mut dependencies = review
+                .results
+                .get(&task.id)
+                .map(|result| result.dependencies.clone())
+                .unwrap_or_else(|| task_dependencies(task));
+            expand_view_dependencies(input, &state.reviewer_coverage, &mut dependencies);
+            let review = state.source_review.as_mut().expect("checked review state");
+            review.active_task = Some(task.id.clone());
+            review.dependencies = dependencies;
+            if let Some(work) = state.reviewer_work.as_mut() {
+                work.source_scope = source_scope;
+            }
+            return Ok(());
+        }
+    }
+    if active_task
         .as_ref()
         .is_some_and(|id| executable.iter().any(|task| &task.id == id))
     {
@@ -1084,10 +1265,11 @@ pub fn select_next(
     let next = executable.first().copied();
     let mut dependencies = next
         .map(|task| {
-            review
-                .results
-                .get(&task.id)
-                .map(|r| r.dependencies.clone())
+            state
+                .source_review
+                .as_ref()
+                .and_then(|review| review.results.get(&task.id))
+                .map(|result| result.dependencies.clone())
                 .unwrap_or_else(|| task_dependencies(task))
         })
         .unwrap_or_default();
@@ -1105,7 +1287,26 @@ pub fn select_next(
                 .map(|b| b.watch.clone());
             state.reviewer_progress.resume(prior.as_ref());
         }
-        let source_scope = vec![task.source_id.clone()];
+        let pack = crate::tender_analysis::pack::pack_containing(
+            input,
+            config.limits.pack_max_units,
+            config.limits.pack_max_chars,
+            &task.source_id,
+        );
+        let mut source_scope: Vec<String> = pack
+            .into_iter()
+            .filter(|id| executable.iter().any(|pending| &pending.source_id == id))
+            .collect();
+        if source_scope.is_empty() {
+            source_scope = vec![task.source_id.clone()];
+        }
+        if state
+            .reviewer_work
+            .as_ref()
+            .is_none_or(|work| work.source_scope != source_scope)
+        {
+            state.pending_coverage = None;
+        }
         let mut work = WorkState { source_scope, deferred_sources: Vec::new(),
             objective: "Independently compare the original fragment and all associated candidates, including omissions and continuation boundaries.".into(),
             focus: context::Focus::default(), output_refs: Vec::new(), pending_refs: Vec::new(),
@@ -1323,6 +1524,25 @@ fn relationship_records(analysis: &Analysis, refs: &BTreeSet<String>) -> BTreeSe
         .collect()
 }
 
+/// Existing typed references are relationships, not a request to duplicate
+/// them in Analysis.relations. Local RuleItem targets stay in their own record.
+fn embedded_relationship_targets(record: &Record) -> BTreeSet<String> {
+    match &record.data {
+        RecordData::Template { parent, .. } => parent.iter().cloned().collect(),
+        RecordData::Rule { items, .. } => items
+            .iter()
+            .flat_map(|item| &item.targets)
+            .filter_map(|target| match target {
+                rule_contract::RuleItemTarget::Record { id } if id != &record.id => {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .collect(),
+        _ => BTreeSet::new(),
+    }
+}
+
 /// This validates explicit evidence, not the model's semantic conclusion. A
 /// source-grounded decision may legitimately need no edge or retain ambiguity.
 #[cfg(test)]
@@ -1359,6 +1579,7 @@ fn validate_relationship_subjects(
             RecordData::Template { parent, .. } => parent.as_ref(),
             _ => None,
         };
+        let embedded = embedded_relationship_targets(subject);
         if check.reason.trim().is_empty() || check.sources.is_empty() {
             return Err(fail(
                 "explain the actual reference targets, selected conditions and continuation interpretation using independently read sources",
@@ -1513,15 +1734,17 @@ fn validate_relationship_subjects(
         match check.status {
             RelationshipStatus::Resolved => {
                 if matches!(subject.data, RecordData::Unresolved { .. })
-                    || (check.relation_ids.is_empty() && parent.is_none())
-                    || parent.is_some_and(|id| !check.related_record_ids.contains(id))
+                    || (check.relation_ids.is_empty() && embedded.is_empty())
+                    || embedded
+                        .iter()
+                        .any(|id| !check.related_record_ids.contains(id))
                     || !check.unresolved_record_ids.is_empty()
                     || check
                         .relation_ids
                         .iter()
                         .any(|id| state.analysis.relations[id].state == RelationState::Unresolved)
                     || check.related_record_ids.iter().any(|id| {
-                        parent != Some(id)
+                        !embedded.contains(id)
                             && !check.relation_ids.iter().any(|edge| {
                                 let edge = &state.analysis.relations[edge];
                                 edge.from == *id || edge.to == *id
@@ -1529,8 +1752,20 @@ fn validate_relationship_subjects(
                     })
                 {
                     return Err(fail(
-                        "resolved requires actual resolved edges to every listed target, or the template's actual parent listed in related_record_ids, and consistent applicability/continuation interpretation; Template.parent is already a structural relationship and needs no duplicate contains edge; report a stale unresolved record as a finding",
+                        "resolved requires actual resolved edges or saved typed targets to every listed target; list every external Rule.items target and Template.parent in related_record_ids. These typed links need no duplicate references/contains edge. Independently verify their source meaning; report a stale unresolved record as a finding",
                     ));
+                }
+                for target in embedded.iter().filter(|id| parent != Some(*id)) {
+                    if !state.analysis.records[target].sources.iter().any(|source| {
+                        check
+                            .sources
+                            .iter()
+                            .any(|span| shared_mapping_evidence(source, span))
+                    }) {
+                        return Err(fail(
+                            "cite independently read original evidence for each typed Rule target as well as the subject; a saved target is not semantic approval",
+                        ));
+                    }
                 }
                 if let Some(parent) = parent
                     && !state.analysis.records[parent].sources.iter().any(|source| {
@@ -1548,6 +1783,7 @@ fn validate_relationship_subjects(
             RelationshipStatus::NotRequired => {
                 if matches!(subject.data, RecordData::Unresolved { .. })
                     || parent.is_some()
+                    || !embedded.is_empty()
                     || !check.related_record_ids.is_empty()
                     || !check.relation_ids.is_empty()
                     || !check.unresolved_record_ids.is_empty()
@@ -1558,7 +1794,7 @@ fn validate_relationship_subjects(
                         .any(|edge| edge.from == check.record_id || edge.to == check.record_id)
                 {
                     return Err(fail(
-                        "not_required needs a source-grounded absence of external relationships; an existing template parent, edges or unresolved records must be examined, not dismissed",
+                        "not_required needs a source-grounded absence of external relationships; existing Rule.items targets, template parents, edges or unresolved records must be examined, not dismissed",
                     ));
                 }
             }
@@ -2130,14 +2366,14 @@ pub(super) fn packet(
         .ok_or("source review state missing")?;
     let task = remaining
         .iter()
-        .find(|t| Some(&t.id) == review.active_task.as_ref())
-        .or(remaining.first());
+        .find(|t| Some(&t.id) == review.active_task.as_ref());
+    let execution_blocked = !remaining.is_empty() && !has_executable_task(state, &remaining)?;
     let current = task.map(|task| -> Result<Value, String> {
         let adjacent = neighbors(input, &inventory, task);
         let neighbors = json!({
             "previous":adjacent.iter().find(|(side, _)| *side == "before").map(|(_, task)| task),
             "next":adjacent.iter().find(|(side, _)| *side == "after").map(|(_, task)| task),
-            "instruction":"Navigation in the frozen document review order only, not evidence or a semantic continuation judgment. read_review_task includes bounded adjacent evidence when it fits; this does not expand the active work scope. Check returned ranges. Use explicit read_source/read_form or read_source_view for missing continuation content. Expand source_scope before reading outside it. A null neighbor does not resolve cross-document references. Navigation grants no reading receipt, comparison or approval."
+            "instruction":"Navigation in the frozen document review order only, not evidence or a semantic continuation judgment. read_review_task includes bounded adjacent evidence when it fits; this does not expand the active work scope. Check returned ranges. Use explicit read_source/read_form or read_source_view for missing continuation content, including known frozen supporting sources outside the task scope. Supporting reads grant no other task or write authority. A null neighbor does not resolve cross-document references. Navigation grants no reading receipt, comparison or approval."
         });
         let dependencies = if Some(&task.id) == review.active_task.as_ref() { review.dependencies.clone() } else { task_dependencies(task) };
         let owned = obligations(input, state, task);
@@ -2188,7 +2424,7 @@ pub(super) fn packet(
             "pending_candidate_refs":tools::bounded_page(&pending_refs,0,usize::MAX,config.limits.max_tool_result_bytes/2)?}))
     }).transpose()?;
     Ok(
-        json!({"remaining":remaining.len(),"current":current,"relation_kind":relation_kind,
+        json!({"remaining":remaining.len(),"current":current,"execution_blocked":execution_blocked,"relation_kind":relation_kind,
         "instruction":"Use pending_candidate_refs for remaining candidate comparisons; completed references are omitted from this work roster but remain available through inspect_analysis. candidates_with_findings already have recorded problem outcomes: retain their findings, do not call complete_review_check to mark them clean. An empty pending list calls for source-to-result omission checking and an explicit put_source_review judgment, not another inventory of completed comparisons. Compare the entire fragment, its headings/table notes and continuation boundaries against current candidates. Save omitted or incorrect content as findings. Reading and candidate checks do not establish source completeness. The host aggregates only after all required current judgments; no empty final submission is needed."}),
     )
 }

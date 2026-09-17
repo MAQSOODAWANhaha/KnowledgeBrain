@@ -396,9 +396,11 @@ async fn work_split_retains_deferred_sources_outcomes_and_review_barriers() {
             resumed.reviewer_work.as_ref()
         }
         .unwrap();
+        let actual: std::collections::BTreeSet<_> = work.source_scope.iter().cloned().collect();
+        let expected: std::collections::BTreeSet<String> =
+            serde_json::from_value(expanded["source_scope"].clone()).unwrap();
         assert_eq!(
-            json!(work.source_scope),
-            expanded["source_scope"],
+            actual, expected,
             "role={role:?}; transcript={:?}",
             resumed.transcript
         );
@@ -462,7 +464,11 @@ async fn work_references_cannot_be_fabricated_or_erased_by_deletion() {
     let mut fabricated = active_work("source");
     fabricated["output_refs"] = json!(["record:invented"]);
     let model = work_script(vec![
-        ("set_work_note", active_work("foreign")),
+        ("set_work_note", {
+            let mut work = active_work("source");
+            work["source_scope"] = json!(["source", "foreign"]);
+            work
+        }),
         ("set_work_note", fabricated),
         ("delete_record", json!({"id":"pending"})),
     ]);
@@ -597,13 +603,20 @@ async fn work_gaps_find_local_blockers_hidden_behind_global_unread_pages() {
     .await
     .unwrap_err();
     let completed = journal.load().await.unwrap().unwrap();
-    assert_eq!(
-        completed.main_work.as_ref().unwrap().status,
-        agent::context::WorkStatus::Complete
-    );
-    assert_eq!(
+    let root = completed
+        .dispatch
+        .entries
+        .values()
+        .find(|entry| entry.source_id.as_deref() == Some("source"))
+        .unwrap();
+    assert!(root.completed_dependencies.is_some());
+    assert_ne!(
         completed.main_work.as_ref().unwrap().source_scope,
         vec!["source"]
+    );
+    assert_eq!(
+        completed.main_work.as_ref().unwrap().status,
+        agent::context::WorkStatus::Active
     );
     assert_eq!(completed.role, Role::Main);
     let checklist = agent::context::request_work_state(
@@ -612,8 +625,10 @@ async fn work_gaps_find_local_blockers_hidden_behind_global_unread_pages() {
         config().limits.max_tool_result_bytes,
     )
     .unwrap();
-    assert_eq!(checklist["next_action"], "select_next_scope");
-    assert_ne!(checklist["next_source"]["source_id"], "source");
+    assert_ne!(
+        checklist["status"], "complete",
+        "the host has already installed the next source work"
+    );
     *journal.interrupt_after.lock().unwrap() = Some(5);
     agent::run(
         &input,
@@ -730,13 +745,26 @@ async fn rereading_completed_evidence_does_not_reopen_work_gaps_or_block_handoff
         .await
         .unwrap();
         let mut state = journal.load().await.unwrap().unwrap();
-        state.role = role;
+        state.role = role.clone();
         state.done = false;
         state.review = None;
         state.transcript.clear();
         state.pending_coverage = None;
         state.main_work = Some(serde_json::from_value(active_work("source")).unwrap());
         state.reviewer_work = state.main_work.clone();
+        if role == Role::Main {
+            // Reopen the completed fixture's global owner without refunding it.
+            let id = state
+                .dispatch
+                .entries
+                .iter()
+                .find(|(_, e)| e.source_id.is_none())
+                .unwrap()
+                .0
+                .clone();
+            state.main_progress.watch = state.dispatch.entries[&id].watch.clone();
+            state.dispatch.active = Some(agent::main_dispatch::Active::Ordinary(id));
+        }
         *journal.interrupt_after.lock().unwrap() = Some(state.turn + 1);
         *journal.state.lock().unwrap() = Some(state);
         agent::run(
@@ -749,15 +777,13 @@ async fn rereading_completed_evidence_does_not_reopen_work_gaps_or_block_handoff
         .await
         .unwrap_err();
         let saved = journal.load().await.unwrap().unwrap();
-        let work = if saved.role == Role::Main {
-            saved.main_work.as_ref()
-        } else {
-            saved.reviewer_work.as_ref()
-        };
-        assert_eq!(
-            json!(work.unwrap().status),
-            "complete",
-            "duplicate reads must not create a new completion obligation"
+        let work = saved.main_work.as_ref().or(saved.reviewer_work.as_ref());
+        let complete = work.is_some_and(|work| json!(work.status) == json!("complete"));
+        assert!(
+            complete || saved.role == Role::Reviewer,
+            "duplicate reads must not reopen extraction; status={:?} role={:?}",
+            work.map(|work| json!(work.status)),
+            saved.role
         );
     }
 }
@@ -1280,7 +1306,18 @@ async fn stalled_work_is_persisted_and_independent_sources_continue_after_restar
     .await
     .unwrap_err();
     let state = journal.load().await.unwrap().unwrap();
-    assert_eq!(state.main_progress.watch.recovery, Recovery::Blocked);
+    assert_eq!(state.main_progress.watch.recovery, Recovery::Running);
+    let root = state
+        .dispatch
+        .entries
+        .values()
+        .find(|e| e.source_id.as_deref() == Some("source"))
+        .unwrap();
+    assert_eq!(root.watch.recovery, Recovery::Blocked);
+    assert_eq!(
+        state.main_work.as_ref().unwrap().source_scope,
+        vec!["independent"]
+    );
     assert_eq!(state.main_progress.blockers.len(), 1);
     assert_eq!(state.main_progress.blockers[0].scope, vec!["source"]);
     assert!(
@@ -1316,9 +1353,17 @@ async fn stalled_work_is_persisted_and_independent_sources_continue_after_restar
     );
     assert!(state.analysis.coverage.text.contains_key("independent"));
     assert_eq!(state.main_progress.blockers[0].watch.replans, 1);
-    assert_eq!(state.main_progress.blockers.len(), 1);
+    assert_eq!(state.main_progress.blockers.len(), 2);
+    assert!(
+        state
+            .main_progress
+            .blockers
+            .iter()
+            .any(|b| b.scope == vec!["independent"])
+    );
     assert!(!state.done);
     assert_eq!(state.role, Role::Main);
+    assert_eq!(model.bodies.lock().unwrap().len(), 5);
     let last: Value = serde_json::from_str(
         state.transcript.last().unwrap()["content"]
             .as_str()
@@ -1331,14 +1376,14 @@ async fn stalled_work_is_persisted_and_independent_sources_continue_after_restar
             .unwrap()
             .contains("execution blockers")
     );
-    assert!(
-        model
-            .bodies
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|body| body.to_string().contains("dependencies are unchanged"))
-    );
+    let original = state
+        .dispatch
+        .entries
+        .values()
+        .find(|e| e.source_id.as_deref() == Some("source"))
+        .unwrap();
+    assert_eq!(original.watch.recovery, Recovery::Blocked);
+    assert_eq!(original.spent_batches, 5);
 }
 
 #[tokio::test]
@@ -1357,11 +1402,7 @@ async fn all_blocked_sources_stop_before_reserving_a_pointless_handoff() {
     )
     .await
     .unwrap_err();
-    assert!(
-        error
-            .message
-            .contains("no independent source scope remains")
-    );
+    assert!(error.message.contains("no_executable_main_tasks"));
     let state = journal.load().await.unwrap().unwrap();
     assert!(state.turn < config.limits.max_turns);
     assert_eq!(
@@ -1384,6 +1425,8 @@ async fn all_blocked_sources_stop_before_reserving_a_pointless_handoff() {
         serde_json::from_value(json!({"state":"requirement","reason":"newly saved outcome"}))
             .unwrap(),
     );
+    // Synthetic external candidate edit: reproduce the real batch-end selector.
+    agent::main_dispatch::after_batch(&input(), &config, &mut changed, None, false, false).unwrap();
     let changed_journal = MemoryJournal::default();
     *changed_journal.state.lock().unwrap() = Some(changed);
     *changed_journal.interrupt_after.lock().unwrap() = Some(state.turn + 1);
@@ -1416,13 +1459,25 @@ async fn all_blocked_sources_stop_before_reserving_a_pointless_handoff() {
     assert!(
         error
             .message
-            .contains("no independent source scope remains")
+            .contains("independent source review state missing"),
+        "{error:?}"
     );
     assert!(no_model.bodies.lock().unwrap().is_empty());
 
     // An older compatible checkpoint can already contain a received response.
     // Commit it normally, then stop before creating any additional reservation.
     let mut received = state.clone();
+    // An already received old-owner response retains its reserved identity;
+    // the stopped committed checkpoint above has no next assignment.
+    let root = received
+        .dispatch
+        .entries
+        .iter()
+        .find(|(_, e)| e.source_id.as_deref() == Some("source"))
+        .unwrap()
+        .0
+        .clone();
+    received.dispatch.active = Some(agent::main_dispatch::Active::Ordinary(root));
     let body = agent::request(&input(), &config, &mut received)
         .await
         .unwrap();
@@ -1465,9 +1520,8 @@ async fn all_blocked_sources_stop_before_reserving_a_pointless_handoff() {
     .await
     .unwrap_err();
     assert!(
-        error
-            .message
-            .contains("no independent source scope remains")
+        error.message.contains("no_executable_main_tasks"),
+        "{error:?}"
     );
     let committed = journal.load().await.unwrap().unwrap();
     assert_eq!(committed.turn, state.turn + 1);

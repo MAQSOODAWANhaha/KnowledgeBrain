@@ -75,7 +75,7 @@ fn fixture(parts: &[(&str, bool)]) -> (FrozenInput, AnalysisResult) {
             analysis_sha256: String::new(),
             coverage: Coverage::default(),
             findings: vec![],
-        ..Default::default()
+            ..Default::default()
         },
         quality: "diagnostic_unaccepted".into(),
         source_views: BTreeMap::new(),
@@ -223,6 +223,72 @@ fn inline_fields_keep_source_lines_and_independent_locations_without_example_val
             .paragraphs,
         [" \n "]
     );
+}
+
+#[test]
+fn review_text_effects_match_actual_compiled_docx_for_standalone_and_inline_groups() {
+    let cases: &[&[(&str, bool)]] = &[
+        &[("投标人名称：________________\r\n样例", true)],
+        &[("固定字\r\n签章日期", false)],
+        &[(" \t\r\n", true)],
+        &[
+            ("固定字\r", false),
+            ("\n样例甲\r\n \t\n样例乙", true),
+            ("\r", false),
+            ("\n签章日期", false),
+        ],
+    ];
+    for parts in cases {
+        let (input, result) = fixture(parts);
+        let (plan, _) = plan(&input, &result);
+        let docx = compile_template(&json!(input), &plan).unwrap();
+        let rendered = super::super::document::verify(&docx, &json!(input), &plan).unwrap();
+        let mut coverage = Coverage::default();
+        coverage
+            .text
+            .insert("source".into(), vec![(0, input.source_units[0].text.len())]);
+        let projected = crate::tender_analysis::semantic_compare::attach(
+            &input,
+            &result.analysis,
+            &coverage,
+            &["source".into()],
+            "record:template",
+            json!({}),
+        );
+        let effects = projected["blank_effects"].as_array().unwrap();
+        let generated: String = effects
+            .iter()
+            .map(|effect| effect["generated_text"].as_str().unwrap())
+            .collect();
+        let carrier = rendered
+            .iter()
+            .find(|block| block.bookmark == "kb_s0_b0")
+            .unwrap();
+        let paragraphs = if plan.sections[0].blocks[0].kind == "quote" {
+            generated.split('\n').map(str::to_owned).collect::<Vec<_>>()
+        } else {
+            vec![generated]
+        };
+        assert_eq!(
+            carrier.paragraphs, paragraphs,
+            "actual DOCX text must match the review projection"
+        );
+        for (index, effect) in effects.iter().enumerate() {
+            assert_eq!(effect["render_group"]["start_region"], 0);
+            assert_eq!(effect["render_group"]["end_region_exclusive"], parts.len());
+            if parts.len() > 1 {
+                let bookmark = format!("kb_s0_b0_r{index}");
+                let fragment = rendered
+                    .iter()
+                    .find(|block| block.bookmark == bookmark)
+                    .unwrap();
+                assert_eq!(
+                    fragment.paragraphs,
+                    [effect["generated_text"].as_str().unwrap()]
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -387,8 +453,28 @@ fn compiled_response_binding_uses_its_independent_inline_region() {
         analysis_sha256: digest(&result.analysis).unwrap(),
         coverage,
         findings: vec![],
-    ..Default::default()
+        ..Default::default()
     };
+    result.schema_version = 2;
+    result.review.contract_sha256 = rule_contract::contract_sha256().unwrap();
+    result.review.global_checks = ANALYSIS_GLOBAL_CHECK_KEYS
+        .iter()
+        .map(|key| GlobalCheck {
+            key: (*key).into(),
+            scope_sha256: rule_contract::scope_sha256(&input, &result.analysis).unwrap(),
+            conclusion: GlobalCheckConclusion::Pass,
+            grounds: grounds.clone(),
+            record_ids: vec![],
+            finding_ids: vec![],
+        })
+        .collect();
+    result.analysis.review_global_checks = result
+        .review
+        .global_checks
+        .iter()
+        .map(|check| (check.key.clone(), check.clone()))
+        .collect();
+    result.review.analysis_sha256 = digest(&result.analysis).unwrap();
     result.frozen_input_sha256 = digest(&input).unwrap();
     result.quality = result.expected_quality(&input).into();
     let mut draft = Draft::new(&input, &result).unwrap();
@@ -412,6 +498,25 @@ fn compiled_response_binding_uses_its_independent_inline_region() {
             field: RelationTarget::TemplateRegion { index: 1 },
         }],
     });
+    draft.plan.insert(
+        section.id.clone(),
+        PlanItem {
+            id: section.id.clone(),
+            kind: PlanItemKind::Section,
+            parent: section.parent.clone(),
+            order: section.order,
+            title: section.title.clone(),
+            placement: section.placement,
+            prescribed: true,
+            grounds: section.grounds.clone(),
+            obligation_refs: required_references(&result)
+                .iter()
+                .map(reference_key)
+                .collect::<Result<_, _>>()
+                .unwrap(),
+            exception: None,
+        },
+    );
     draft.sections.insert(section.id.clone(), section);
     let compiled = compile(&input, &result, &draft, 1_000_000).unwrap();
     let need = compiled

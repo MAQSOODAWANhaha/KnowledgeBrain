@@ -18,6 +18,25 @@ use std::{collections::VecDeque, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+#[path = "support/global_review_publication.rs"]
+mod global_review_publication;
+
+fn runtime_pool_options(
+    base: &sqlx::postgres::PgConnectOptions,
+    role: &str,
+) -> sqlx::postgres::PgConnectOptions {
+    let password_key = match role {
+        "kb_runtime_api" => "KNOWLEDGEBRAIN_API_DB_PASSWORD",
+        "kb_runtime_worker" => "KNOWLEDGEBRAIN_WORKER_DB_PASSWORD",
+        _ => panic!("unsupported runtime test role"),
+    };
+    let options = base.clone().username(role);
+    match std::env::var(password_key) {
+        Ok(password) => options.password(&password),
+        Err(_) => options,
+    }
+}
+
 fn config() -> Config {
     let provider: AuthoringRuntimeContractV1 = serde_json::from_value(json!({
         "schema_version":1,"base_url":"https://model.example.invalid/v1",
@@ -44,6 +63,12 @@ fn config() -> Config {
             max_review_rounds: 3,
             max_source_view_edge: 1600,
             max_source_view_bytes: 16000,
+            reviewer_reserve: 0,
+            pack_max_units: 1,
+            pack_max_chars: 0,
+            pack_max_turns: 0,
+            draft_path: false,
+            draft_bind_terms: vec![],
         },
     )
     .unwrap()
@@ -140,6 +165,37 @@ impl Model for Script {
                 .into();
         }
         let mut tool_calls = Vec::new();
+        if name == "put_analysis_check" {
+            let body: Value = serde_json::from_slice(body).unwrap();
+            let packet: Value = serde_json::from_str(
+                body["messages"].as_array().unwrap().last().unwrap()["content"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            let global = &packet["global_analysis_checks"];
+            for key in global["pending_keys"].as_array().unwrap() {
+                tool_calls.push(ChatToolCall {
+                    id: Uuid::new_v4().to_string(),
+                    name: name.into(),
+                    arguments: json!({"key":key,
+                        "expected_scope_sha256":global["expected_scope_sha256"],
+                        "conclusion":"pass","grounds":args["grounds"],
+                        "record_ids":[],"finding_ids":[]})
+                    .to_string(),
+                });
+            }
+            assert!(
+                !tool_calls.is_empty(),
+                "script expected pending global checks"
+            );
+            return Ok(ChatTurn {
+                usage: None,
+                content: String::new(),
+                finish_reason: "tool_calls".into(),
+                tool_calls,
+            });
+        }
         if name == "put_source_review" {
             let body: Value = serde_json::from_slice(body).unwrap();
             let packet: Value = serde_json::from_str(
@@ -219,6 +275,7 @@ fn script(input: &FrozenInput) -> Script {
             "set_disposition",
             json!({"source_id":source.source_unit_revision_id,"state":"requirement","reason":"提交义务"}),
         ),
+        ("put_analysis_check", json!({"grounds":[span]})),
         ("request_review", json!({})),
         work,
         metadata,
@@ -235,6 +292,7 @@ fn script(input: &FrozenInput) -> Script {
             "inspect_analysis",
             json!({"view":"detail","kind":"relation","offset":0,"limit":10}),
         ),
+        ("put_analysis_check", json!({"grounds":[span]})),
         ("put_source_review", json!({})),
     ];
     Script {
@@ -974,7 +1032,7 @@ async fn composition_source_freezes_published_analysis_and_restores_history() {
     let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
     let api_pool = PgPoolOptions::new()
         .max_connections(2)
-        .connect_with(options.username("kb_runtime_api"))
+        .connect_with(runtime_pool_options(&options, "kb_runtime_api"))
         .await
         .unwrap();
     let prepared = composition::prepare(
@@ -1193,9 +1251,20 @@ impl bidding::docx_composition::agent::Model for CompositionScript {
             .unwrap()
             .pop_front()
             .expect("unexpected composition call");
+        assert!(
+            request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == name),
+            "scripted composition tool must be advertised in the current role: {name}"
+        );
         let context: Value =
             serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
-        if matches!(name, "set_presentation" | "put_section") {
+        if matches!(
+            name,
+            "set_presentation" | "put_section" | "put_composition_plan_item"
+        ) {
             args["expected_draft_sha256"] = context["draft_sha256"].clone();
         }
         if name == "inspect_rendered_cells" {
@@ -1234,12 +1303,28 @@ fn composition_script(
 ) -> CompositionScript {
     let source = &input.source_units[0];
     let id = analysis.analysis.records.keys().next().unwrap();
+    let section_id = Uuid::new_v4().to_string();
+    let obligations: Vec<_> = bidding::docx_composition::obligation_inventory(analysis)
+        .iter()
+        .map(|reference| bidding::docx_composition::reference_key(reference).unwrap())
+        .collect();
     let span =
         json!({"source_id":source.source_unit_revision_id,"start":0,"end":source.text.len()});
     let mut turns = vec![
         (
             "read_source",
             json!({"source_id":source.source_unit_revision_id,"start":0,"max_bytes":1000}),
+        ),
+        (
+            "put_composition_plan_item",
+            json!({"id":section_id,"kind":"section","parent":null,"order":0,
+                "title":"响应及证明材料","prescribed":true,"grounds":[span],"obligation_refs":obligations}),
+        ),
+        (
+            "set_composition_work",
+            json!({"source_scope":[source.source_unit_revision_id],"section_scope":[section_id],
+                "plan_item_id":section_id,"action":"compose","objective":"落实当前计划章节",
+                "note":"已读取独立来源并保存章节计划","status":"active"}),
         ),
         (
             "set_presentation",
@@ -1249,12 +1334,10 @@ fn composition_script(
         ),
         (
             "put_section",
-            json!({"id":null,"parent":null,"order":0,"title":"响应及证明材料","grounds":[span],"content":[
+            json!({"id":section_id,"parent":null,"order":0,"title":"响应及证明材料","grounds":[span],"content":[
             {"kind":"response_table","needs":[{"record_id":id,"target":{"kind":"response","index":0}}],"columns":["项目","待填响应"],"blank_rows":1},
             {"kind":"placeholder","needs":[{"record_id":id,"target":{"kind":"response","index":1}}]}]}),
         ),
-        ("compile_docx", json!({})),
-        ("request_composition_review", json!({})),
         (
             "collection_index",
             json!({"kind":"documents","offset":0,"limit":100}),
@@ -1280,6 +1363,10 @@ fn composition_script(
     turns.push((
         "inspect_rendered_cells",
         json!({"bookmark":null,"offset":0,"limit":100}),
+    ));
+    turns.push((
+        "put_composition_review",
+        json!({"item_id":section_id,"conclusion":"pass","grounds":[span],"finding_ids":[]}),
     ));
     turns.push(("submit_composition_review", json!({"findings":[]})));
     CompositionScript {
@@ -1390,10 +1477,10 @@ async fn composition_durable_journal_resumes_review_and_enforces_owner_and_call_
     let (workspace,actor):(Uuid,String)=sqlx::query_as("SELECT w.id,'user:'||p.owner_user_id FROM bid_submission_workspaces w JOIN bid_projects p ON p.id=w.project_id WHERE p.id=$1")
         .bind(Uuid::parse_str(&input.project_id).unwrap()).fetch_one(&pool).await.unwrap();
     let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
-    let api_pool = PgPool::connect_with(options.clone().username("kb_runtime_api"))
+    let api_pool = PgPool::connect_with(runtime_pool_options(&options, "kb_runtime_api"))
         .await
         .unwrap();
-    let worker_pool = PgPool::connect_with(options.username("kb_runtime_worker"))
+    let worker_pool = PgPool::connect_with(runtime_pool_options(&options, "kb_runtime_worker"))
         .await
         .unwrap();
     let basis = bidding::docx_round::get_docx_round_basis(&api_pool, workspace, &actor)
@@ -1500,13 +1587,21 @@ async fn composition_durable_journal_resumes_review_and_enforces_owner_and_call_
         request: &identity,
         owner: &owner,
     };
+    let model = composition_script(&loaded.input, &loaded.analysis);
+    let fail_turn = model
+        .turns
+        .lock()
+        .unwrap()
+        .iter()
+        .position(|(name, _)| *name == "put_section")
+        .unwrap()
+        + 1;
     let failing = LostCompositionAck {
         journal,
-        fail_turn: 3,
+        fail_turn,
         fail_sequence: None,
         reject_prepared: false,
     };
-    let model = composition_script(&loaded.input, &loaded.analysis);
     let error = compose::run(
         &loaded.input,
         &loaded.analysis,
@@ -1520,8 +1615,16 @@ async fn composition_durable_journal_resumes_review_and_enforces_owner_and_call_
     .unwrap();
     assert_eq!(error.code, "INTERNAL", "{error:?}");
     let saved = failing.load().await.unwrap().unwrap();
-    assert_eq!(saved.turn, 3);
+    assert_eq!(saved.turn, fail_turn);
     assert_eq!(saved.workspace.draft.sections.len(), 1);
+    assert!(
+        saved.workspace.reviewing,
+        "a complete Main batch must durably enter independent review"
+    );
+    assert_eq!(
+        saved.main_work.as_ref().unwrap().plan_item_id.as_ref(),
+        saved.workspace.draft.plan.keys().next()
+    );
     failing.journal.save(&saved).await.unwrap();
     let mut divergent = saved.clone();
     divergent.main_progress.watch.focus_turns += 1;
@@ -1622,6 +1725,7 @@ async fn composition_durable_journal_resumes_review_and_enforces_owner_and_call_
         let mut journal = initial.journal.clone();
         journal.pending.as_mut().unwrap().role = if reviewing { "reviewer" } else { "main" }.into();
         compose::Checkpoint {
+            pending_delivery: None,
             journal,
             contract_sha256: config.contract_sha256().unwrap(),
             workspace,
@@ -1896,10 +2000,10 @@ async fn composition_publication_is_atomic_and_replay_verifies_both_files() {
     let (workspace,actor):(Uuid,String)=sqlx::query_as("SELECT w.id,'user:'||p.owner_user_id FROM bid_submission_workspaces w JOIN bid_projects p ON p.id=w.project_id WHERE p.id=$1")
         .bind(Uuid::parse_str(&input.project_id).unwrap()).fetch_one(&pool).await.unwrap();
     let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
-    let api_pool = PgPool::connect_with(options.clone().username("kb_runtime_api"))
+    let api_pool = PgPool::connect_with(runtime_pool_options(&options, "kb_runtime_api"))
         .await
         .unwrap();
-    let worker_pool = PgPool::connect_with(options.username("kb_runtime_worker"))
+    let worker_pool = PgPool::connect_with(runtime_pool_options(&options, "kb_runtime_worker"))
         .await
         .unwrap();
     let basis = bidding::docx_round::get_docx_round_basis(&api_pool, workspace, &actor)
@@ -1963,6 +2067,13 @@ async fn composition_publication_is_atomic_and_replay_verifies_both_files() {
     .await
     .unwrap();
     let checkpoint = journal.load().await.unwrap().unwrap();
+    global_review_publication::reject_invalid_composition_plan_publication(
+        &pool,
+        &identity,
+        &owner,
+        &checkpoint,
+    )
+    .await;
     for variant in 0..4 {
         let mut changed = checkpoint.clone();
         match variant {
@@ -2565,10 +2676,10 @@ async fn composition_runtime_dispatch_resume_cleanup_heartbeat_and_failure() {
     let (workspace,actor):(Uuid,String)=sqlx::query_as("SELECT w.id,'user:'||p.owner_user_id FROM bid_submission_workspaces w JOIN bid_projects p ON p.id=w.project_id WHERE p.id=$1")
         .bind(Uuid::parse_str(&input.project_id).unwrap()).fetch_one(&pool).await.unwrap();
     let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
-    let api_pool = PgPool::connect_with(options.clone().username("kb_runtime_api"))
+    let api_pool = PgPool::connect_with(runtime_pool_options(&options, "kb_runtime_api"))
         .await
         .unwrap();
-    let worker_pool = PgPool::connect_with(options.username("kb_runtime_worker"))
+    let worker_pool = PgPool::connect_with(runtime_pool_options(&options, "kb_runtime_worker"))
         .await
         .unwrap();
     let basis = bidding::docx_round::get_docx_round_basis(&api_pool, workspace, &actor)
@@ -2907,10 +3018,10 @@ async fn export_composition_http_fixture() {
     let (workspace,actor):(Uuid,String)=sqlx::query_as("SELECT w.id,'user:'||p.owner_user_id FROM bid_submission_workspaces w JOIN bid_projects p ON p.id=w.project_id WHERE p.id=$1")
         .bind(Uuid::parse_str(&input.project_id).unwrap()).fetch_one(&pool).await.unwrap();
     let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
-    let api_pool = PgPool::connect_with(options.clone().username("kb_runtime_api"))
+    let api_pool = PgPool::connect_with(runtime_pool_options(&options, "kb_runtime_api"))
         .await
         .unwrap();
-    let worker_pool = PgPool::connect_with(options.username("kb_runtime_worker"))
+    let worker_pool = PgPool::connect_with(runtime_pool_options(&options, "kb_runtime_worker"))
         .await
         .unwrap();
     let basis = bidding::docx_round::get_docx_round_basis(&api_pool, workspace, &actor)
@@ -3045,7 +3156,7 @@ async fn analysis_three_boundaries_are_atomic_and_resume_received_responses() {
         db.starts_with("knowledgebrain_test_"),
         "refuse non-test database"
     );
-    for boundary in [0, 1, 2] {
+    for boundary in [0, 1, 2, 3] {
         let (request, input) = seed(&pool).await;
         let owner = composition_claim(&pool, &request).await;
         let journal = LostReviewAck {
@@ -3087,11 +3198,37 @@ async fn analysis_three_boundaries_are_atomic_and_resume_received_responses() {
         assert_eq!(error.code, "INTERNAL", "{error:?}");
         assert_eq!(count, 1);
         let saved = journal.load().await.unwrap().unwrap();
-        assert_eq!(saved.turn, 0);
+        assert_eq!(saved.turn, usize::from(boundary == 3));
         assert_eq!(saved.journal.sequence, boundary);
         assert_eq!(saved.journal.response().is_some(), boundary == 2);
-        assert_eq!(saved.tool_calls, 0);
+        assert_eq!(saved.tool_calls, usize::from(boundary == 3));
         journal.journal.save(&saved, &json!({})).await.unwrap();
+        if boundary == 3 {
+            let value = json!(saved);
+            let owner = value["dispatch"]["active"]["id"].as_str().unwrap();
+            for (case, expected) in [
+                ("refund", "Main root cost decreased"),
+                ("owner", "Main dispatch detached owner"),
+                ("watch", "Main dispatch detached owner"),
+                ("identity", "Main root shape or identity"),
+            ] {
+                let mut forged = value.clone();
+                forged["journal"]["sequence"] = json!(boundary + 1);
+                match case {
+                    "refund" => forged["dispatch"]["entries"][owner]["spent_batches"] = json!(0),
+                    "owner" => forged["dispatch"]["active"]["id"] = json!("f".repeat(64)),
+                    "watch" => forged["main_progress"]["watch"]["replans"] = json!(1),
+                    "identity" => {
+                        forged["dispatch"]["entries"][owner]["source_id"] = json!("foreign-source")
+                    }
+                    _ => unreachable!(),
+                }
+                let forged: agent::Checkpoint = serde_json::from_value(forged).unwrap();
+                let error = journal.journal.save(&forged, &json!({})).await.unwrap_err();
+                assert!(error.message.contains(expected), "{case}: {error:?}");
+                assert_eq!(json!(journal.load().await.unwrap().unwrap()), value);
+            }
+        }
         let mut forged = saved.clone();
         forged.journal.sequence += 1;
         forged.turn += 1;
@@ -3251,7 +3388,7 @@ async fn main_and_reviewer_preloads_recover_all_postgres_boundaries_without_earl
                     .lock()
                     .unwrap()
                     .iter()
-                    .position(|(name, _)| *name == "set_disposition")
+                    .position(|(name, _)| *name == "put_analysis_check")
                     .unwrap();
                 let setup = LostReviewAck {
                     journal: postgres::PgJournal {
@@ -3273,11 +3410,13 @@ async fn main_and_reviewer_preloads_recover_all_postgres_boundaries_without_earl
                 assert_eq!(state.role, Role::Reviewer);
                 assert!(state.reviewer_coverage.text.is_empty());
                 assert!(state.reviewer_coverage.candidate.is_empty());
+                // The v2 automatic handoff follows the global-check inventory;
+                // a local source disposition alone cannot enter Reviewer.
                 assert_eq!(
                     model.rest.turns.lock().unwrap().pop_front().unwrap().0,
                     "request_review"
                 );
-                expected_calls -= 1; // automatic Main handoff already happened
+                expected_calls -= 1;
                 prior = Some(state);
             }
             let turn = prior.as_ref().map_or(0, |state| state.turn);
