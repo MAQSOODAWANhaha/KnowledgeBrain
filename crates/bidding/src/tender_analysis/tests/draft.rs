@@ -3572,7 +3572,10 @@ impl Model for OutlinePublishScript {
                 }),
             )],
             3 => vec![("finish_outline".into(), json!({}))],
-            step if step >= 4 && step % 2 == 0 => vec![("read_outline".into(), json!({"kind":"fragments","offset":0,"limit":1000}))],
+            step if step >= 4 && step % 2 == 0 => vec![(
+                "read_outline".into(),
+                json!({"kind":"fragments","offset":0,"limit":1000}),
+            )],
             step if step >= 4 => {
                 let packet = body["messages"]
                     .as_array()
@@ -3942,8 +3945,14 @@ fn chapters_can_be_organized_incrementally_and_reordered_during_repair() {
     agent::apply(&input,&config,&mut state,"put_outline_items",
         &json!({"items":[chapter(&first_id,1,"need-a"),chapter(&second_id,0,"need-b")],"remove_ids":[]})).unwrap();
     // Replacing a removed sibling at the same order is valid in the final tree.
-    let replacement = agent::apply(&input, &config, &mut state, "put_outline_items",
-        &json!({"items":[chapter("replacement",0,"need-b")],"remove_ids":[second_id]})).unwrap();
+    let replacement = agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "put_outline_items",
+        &json!({"items":[chapter("replacement",0,"need-b")],"remove_ids":[second_id]}),
+    )
+    .unwrap();
     assert!(replacement["id_map"]["replacement"].is_string());
     assert!(outline_flow::blockers(&input, &state).is_empty());
     assert_eq!(
@@ -4002,7 +4011,8 @@ async fn fill_preserves_outline_warnings_in_recompiled_document() {
     state.draft_stage = crate::tender_analysis::draft::DraftStage::Fill;
     state.analysis.draft_plan = vec![item.clone()];
     state.analysis.outline = outline.clone();
-    state.analysis.fill_seed_chapters = crate::tender_analysis::readback::seed_identities(&state.analysis.draft_plan).unwrap();
+    state.analysis.fill_seed_chapters =
+        crate::tender_analysis::readback::seed_identities(&state.analysis.draft_plan).unwrap();
     let journal = MemoryJournal::default();
     *journal.state.lock().unwrap() = Some(state);
     let model = outline_publish_script(&input);
@@ -4025,7 +4035,8 @@ async fn fill_preserves_outline_warnings_in_recompiled_document() {
     let mut compilation = draft_result(&input);
     compilation.analysis = saved.analysis;
     compilation.review.analysis_sha256 = digest(&compilation.analysis).unwrap();
-    let docx = crate::tender_analysis::draft::compile_draft(&input, &compilation, 1_000_000).unwrap();
+    let docx =
+        crate::tender_analysis::draft::compile_draft(&input, &compilation, 1_000_000).unwrap();
     let xml = docx_document_xml(&docx.compiled.docx);
     assert!(xml.contains("外部标准待确认"));
     assert!(xml.contains("用户报价100万元"));
@@ -4041,9 +4052,18 @@ fn short_discovery_sources_share_scope_without_claiming_coverage() {
     let mut state = journal_state(&input, &config);
     let before = serde_json::to_value(&state.analysis.coverage).unwrap();
     crate::tender_analysis::draft::preload_outline_window(&input, &mut state);
-    assert_eq!(crate::tender_analysis::draft::outline_reading_scope(&input, &state, 32_000).len(), input.source_units.len());
-    assert_eq!(serde_json::to_value(&state.analysis.coverage).unwrap(), before);
-    assert!(!crate::tender_analysis::outline_flow::scan_complete(&input, &state.analysis.outline));
+    assert_eq!(
+        crate::tender_analysis::draft::outline_reading_scope(&input, &state, 32_000).len(),
+        input.source_units.len()
+    );
+    assert_eq!(
+        serde_json::to_value(&state.analysis.coverage).unwrap(),
+        before
+    );
+    assert!(!crate::tender_analysis::outline_flow::scan_complete(
+        &input,
+        &state.analysis.outline
+    ));
 }
 
 #[tokio::test]
@@ -4062,30 +4082,56 @@ async fn discovery_package_crosses_accounting_chunks_and_replays_exact_receipts(
     let mut state = journal_state(&input, &config);
     crate::tender_analysis::draft::preload_outline_window(&input, &mut state);
     let saved = serde_json::to_vec(&state).unwrap();
-    let large = agent::evidence_delivery::select(&input, &config, &state).unwrap().unwrap();
+    let large = agent::evidence_delivery::select(&input, &config, &state)
+        .unwrap()
+        .unwrap();
     assert!(serde_json::to_vec(&large.content).unwrap().len() <= 64_000);
     for source in &input.source_units {
         assert!(crate::tender_analysis::tools::contains(
-            large.coverage.text.get(&source.source_unit_revision_id), 0, 9000));
+            large.coverage.text.get(&source.source_unit_revision_id),
+            0,
+            9000
+        ));
     }
-    assert!(state.analysis.coverage.text.is_empty(), "preparation grants no receipt");
+    assert!(
+        state.analysis.coverage.text.is_empty(),
+        "preparation grants no receipt"
+    );
     let mut small_config = config.clone();
     small_config.provider.max_tokens = 2048;
-    let small = agent::evidence_delivery::select(&input, &small_config, &state).unwrap().unwrap();
-    assert!(serde_json::to_vec(&small.content).unwrap().len() < serde_json::to_vec(&large.content).unwrap().len());
+    let small = agent::evidence_delivery::select(&input, &small_config, &state)
+        .unwrap()
+        .unwrap();
+    assert!(
+        serde_json::to_vec(&small.content).unwrap().len()
+            < serde_json::to_vec(&large.content).unwrap().len()
+    );
     let mut restored: Checkpoint = serde_json::from_slice(&saved).unwrap();
-    let replay = agent::evidence_delivery::select(&input, &config, &restored).unwrap().unwrap();
+    let replay = agent::evidence_delivery::select(&input, &config, &restored)
+        .unwrap()
+        .unwrap();
     assert_eq!(large.content, replay.content);
-    let request = agent::request(&input, &config, &mut restored).await.unwrap();
+    let request = agent::request(&input, &config, &mut restored)
+        .await
+        .unwrap();
     assert!(request.len() <= config.limits.max_context_bytes);
     let body: Value = serde_json::from_slice(&request).unwrap();
     agent::evidence_delivery::confirm(&input, &config, &mut restored, &body).unwrap();
     for source in &input.source_units {
         assert!(crate::tender_analysis::tools::contains(
-            restored.analysis.coverage.text.get(&source.source_unit_revision_id), 0, 9000));
+            restored
+                .analysis
+                .coverage
+                .text
+                .get(&source.source_unit_revision_id),
+            0,
+            9000
+        ));
     }
-    assert!(!crate::tender_analysis::outline_flow::scan_complete(&input, &restored.analysis.outline),
-        "receipt is not semantic scan completion");
+    assert!(
+        !crate::tender_analysis::outline_flow::scan_complete(&input, &restored.analysis.outline),
+        "receipt is not semantic scan completion"
+    );
 }
 
 #[tokio::test]
@@ -4118,41 +4164,89 @@ async fn check_late_discovery_budget(token_only: bool) {
     let mut state = journal_state(&input, &config);
     crate::tender_analysis::draft::preload_outline_window(&input, &mut state);
     let first = agent::request(&input, &config, &mut state).await.unwrap();
-    let full = agent::evidence_delivery::select(&input, &config, &state).unwrap().unwrap();
+    let full = agent::evidence_delivery::select(&input, &config, &state)
+        .unwrap()
+        .unwrap();
     // A latest response is mandatory context, even after older groups are evicted.
     let first_body: Value = serde_json::from_slice(&first).unwrap();
-    let first_tokens = crate::agent_runtime::chat::estimate_input_tokens(&first_body,
-        config.limits.image_token_reserve, config.limits.token_safety_margin).unwrap();
+    let first_tokens = crate::agent_runtime::chat::estimate_input_tokens(
+        &first_body,
+        config.limits.image_token_reserve,
+        config.limits.token_safety_margin,
+    )
+    .unwrap();
     let padding = if token_only {
-        (config.limits.max_context_tokens - first_tokens - config.provider.max_tokens as usize + 4_000) * 2
+        (config.limits.max_context_tokens - first_tokens - config.provider.max_tokens as usize
+            + 4_000)
+            * 2
     } else {
         config.limits.max_context_bytes - first.len() + 4_000
     };
     if token_only {
         assert!(first.len() + padding + 1000 < config.limits.max_context_bytes);
-        assert!(first_tokens + padding / 2 + config.provider.max_tokens as usize > config.limits.max_context_tokens);
+        assert!(
+            first_tokens + padding / 2 + config.provider.max_tokens as usize
+                > config.limits.max_context_tokens
+        );
     }
-    state.transcript.push(json!({"role":"assistant","content":"x".repeat(padding)}));
+    state
+        .transcript
+        .push(json!({"role":"assistant","content":"x".repeat(padding)}));
     let request = agent::request(&input, &config, &mut state).await.unwrap();
     assert!(request.len() <= config.limits.max_context_bytes);
     let body: Value = serde_json::from_slice(&request).unwrap();
-    assert!(crate::agent_runtime::chat::estimate_input_tokens(&body,
-        config.limits.image_token_reserve, config.limits.token_safety_margin).unwrap()
-        + config.provider.max_tokens as usize <= config.limits.max_context_tokens);
-    let host: Value = serde_json::from_str(body["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap()).unwrap();
+    assert!(
+        crate::agent_runtime::chat::estimate_input_tokens(
+            &body,
+            config.limits.image_token_reserve,
+            config.limits.token_safety_margin
+        )
+        .unwrap()
+            + config.provider.max_tokens as usize
+            <= config.limits.max_context_tokens
+    );
+    let host: Value = serde_json::from_str(
+        body["messages"].as_array().unwrap().last().unwrap()["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
     let sent = &host["preloaded_evidence"];
     assert!(sent.is_object(), "must shrink rather than drop evidence");
-    assert!(sent["assigned_evidence"]["workload_bytes_limit"].as_u64().unwrap()
-        < full.content["assigned_evidence"]["workload_bytes_limit"].as_u64().unwrap());
+    assert!(
+        sent["assigned_evidence"]["workload_bytes_limit"]
+            .as_u64()
+            .unwrap()
+            < full.content["assigned_evidence"]["workload_bytes_limit"]
+                .as_u64()
+                .unwrap()
+    );
     assert!(state.analysis.coverage.text.is_empty());
-    let mut recovered: Checkpoint = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+    let mut recovered: Checkpoint =
+        serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     agent::evidence_delivery::confirm(&input, &config, &mut recovered, &body).unwrap();
-    let delivered = recovered.analysis.coverage.text.values().flatten().map(|(a,b)| b-a).sum::<usize>();
-    let original = full.coverage.text.values().flatten().map(|(a,b)| b-a).sum::<usize>();
+    let delivered = recovered
+        .analysis
+        .coverage
+        .text
+        .values()
+        .flatten()
+        .map(|(a, b)| b - a)
+        .sum::<usize>();
+    let original = full
+        .coverage
+        .text
+        .values()
+        .flatten()
+        .map(|(a, b)| b - a)
+        .sum::<usize>();
     assert!(delivered > 0 && delivered < original);
-    state.transcript = vec![json!({"role":"assistant","content":"x".repeat(config.limits.max_context_bytes)})];
-    assert!(agent::request(&input, &config, &mut state).await.is_err(),
-        "no room for minimum evidence must fail explicitly");
+    state.transcript =
+        vec![json!({"role":"assistant","content":"x".repeat(config.limits.max_context_bytes)})];
+    assert!(
+        agent::request(&input, &config, &mut state).await.is_err(),
+        "no room for minimum evidence must fail explicitly"
+    );
     assert!(state.analysis.coverage.text.is_empty());
 }
 
@@ -4163,16 +4257,29 @@ fn completed_discovery_history_can_yield_without_losing_scan_state() {
     let mut state = journal_state(&input, &config);
     crate::tender_analysis::draft::preload_outline_window(&input, &mut state);
     let id = &input.source_units[0].source_unit_revision_id;
-    state.analysis.coverage.text.insert(id.clone(), vec![(0, 10)]);
+    state
+        .analysis
+        .coverage
+        .text
+        .insert(id.clone(), vec![(0, 10)]);
     state.transcript = vec![
         json!({"role":"assistant","content":"old result"}),
         json!({"role":"tool","content":json!({"ok":true,"result":{"source_id":id,"start":0,"end":10,"text":"old unique"}}).to_string()}),
         json!({"role":"assistant","content":"latest pending"}),
     ];
-    assert!(!agent::context::evict_completed_discovery_history(&mut state, 1000));
-    state.analysis.outline.scanned.text.insert(id.clone(), vec![(0,10)]);
+    assert!(!agent::context::evict_completed_discovery_history(
+        &mut state, 1000
+    ));
+    state
+        .analysis
+        .outline
+        .scanned
+        .text
+        .insert(id.clone(), vec![(0, 10)]);
     let before = serde_json::to_value(&state.analysis).unwrap();
-    assert!(agent::context::evict_completed_discovery_history(&mut state, 1000));
+    assert!(agent::context::evict_completed_discovery_history(
+        &mut state, 1000
+    ));
     assert_eq!(state.transcript.len(), 1);
     assert_eq!(serde_json::to_value(&state.analysis).unwrap(), before);
 }
@@ -4185,28 +4292,64 @@ fn mostly_read_large_source_does_not_exclude_following_small_source() {
     let config = config();
     let mut state = journal_state(&input, &config);
     let id = input.source_units[0].source_unit_revision_id.clone();
-    state.analysis.coverage.text.insert(id.clone(), vec![(0,59_990)]);
-    state.analysis.outline.scanned.text.insert(id, vec![(0,59_990)]);
-    assert_eq!(crate::tender_analysis::draft::outline_reading_scope(&input, &state, 4096).len(), 2);
+    state
+        .analysis
+        .coverage
+        .text
+        .insert(id.clone(), vec![(0, 59_990)]);
+    state
+        .analysis
+        .outline
+        .scanned
+        .text
+        .insert(id, vec![(0, 59_990)]);
+    assert_eq!(
+        crate::tender_analysis::draft::outline_reading_scope(&input, &state, 4096).len(),
+        2
+    );
 }
 
 #[tokio::test]
 #[ignore = "requires KB_DISCOVERY_LOOP_DIR archived input and checkpoint; no live model or DB"]
 async fn archived_discovery_loop_projects_pending_ranges_under_frozen_token_budget() {
     let root = std::path::PathBuf::from(std::env::var("KB_DISCOVERY_LOOP_DIR").unwrap());
-    let frozen: Value = serde_json::from_slice(&std::fs::read(root.join("frozen.json")).unwrap()).unwrap();
+    let frozen: Value =
+        serde_json::from_slice(&std::fs::read(root.join("frozen.json")).unwrap()).unwrap();
     let input: FrozenInput = serde_json::from_value(frozen["input"].clone()).unwrap();
     let config: Config = serde_json::from_value(frozen["runtime"].clone()).unwrap();
-    let mut state: Checkpoint = serde_json::from_slice(&std::fs::read(root.join("loop-checkpoint.json")).unwrap()).unwrap();
+    let mut state: Checkpoint =
+        serde_json::from_slice(&std::fs::read(root.join("loop-checkpoint.json")).unwrap()).unwrap();
     let request = agent::request(&input, &config, &mut state).await.unwrap();
     let body: Value = serde_json::from_slice(&request).unwrap();
-    let tokens = crate::agent_runtime::chat::estimate_input_tokens(&body, config.limits.image_token_reserve, config.limits.token_safety_margin).unwrap();
+    let tokens = crate::agent_runtime::chat::estimate_input_tokens(
+        &body,
+        config.limits.image_token_reserve,
+        config.limits.token_safety_margin,
+    )
+    .unwrap();
     assert!(tokens + config.provider.max_tokens as usize <= config.limits.max_context_tokens);
-    let pending = agent::apply(&input, &config, &mut state, "read_outline",
-        &json!({"kind":"pending_scan","offset":0,"limit":1000})).unwrap();
-    assert!(pending["items"].as_array().unwrap().iter().any(|r|
-        r["id"] == "2bf533bf-17f8-4724-aab7-006d67787506" && r["start"] == 0 && r["end"] == 36));
-    let source = input.source_units.iter().find(|s| s.source_unit_revision_id == "74715b3f-23a3-512a-823f-020b9337ded7").unwrap();
+    let pending = agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "read_outline",
+        &json!({"kind":"pending_scan","offset":0,"limit":1000}),
+    )
+    .unwrap();
+    assert!(
+        pending["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == "2bf533bf-17f8-4724-aab7-006d67787506"
+                && r["start"] == 0
+                && r["end"] == 36)
+    );
+    let source = input
+        .source_units
+        .iter()
+        .find(|s| s.source_unit_revision_id == "74715b3f-23a3-512a-823f-020b9337ded7")
+        .unwrap();
     let before = state.outline_run.chunk_cursor;
     agent::apply(&input, &config, &mut state, "submit_outline_scan", &json!({
         "text":{source.source_unit_revision_id.clone():[[0,source.text.len()]]},
@@ -4215,7 +4358,9 @@ async fn archived_discovery_loop_projects_pending_ranges_under_frozen_token_budg
     })).unwrap();
     crate::tender_analysis::draft::after_batch(&input, &mut state, false, false).unwrap();
     assert!(state.outline_run.chunk_cursor > before);
-    assert!(!crate::tender_analysis::outline_flow::checked(&input, &state));
+    assert!(!crate::tender_analysis::outline_flow::checked(
+        &input, &state
+    ));
 }
 
 #[test]
@@ -4228,14 +4373,32 @@ fn discovery_repeated_reads_exhaust_recovery_without_resetting_replans() {
     crate::tender_analysis::draft::preload_outline_window(&input, &mut state);
     let source = &input.source_units[0];
     for _ in 0..30 {
-        if state.main_progress.watch.recovery == crate::agent_runtime::progress::Recovery::Blocked { break; }
-        agent::apply(&input, &config, &mut state, "read_source", &json!({
-            "source_id":source.source_unit_revision_id,"start":0,"max_bytes":100})).unwrap();
+        if state.main_progress.watch.recovery == crate::agent_runtime::progress::Recovery::Blocked {
+            break;
+        }
+        agent::apply(
+            &input,
+            &config,
+            &mut state,
+            "read_source",
+            &json!({
+            "source_id":source.source_unit_revision_id,"start":0,"max_bytes":100}),
+        )
+        .unwrap();
         agent::context::observe_progress(&mut state, &Role::Main, None, &config.limits).unwrap();
     }
-    assert_eq!(state.main_progress.watch.recovery, crate::agent_runtime::progress::Recovery::Blocked);
-    assert_eq!(state.main_progress.watch.replans, config.limits.max_focus_replans);
-    assert!(!crate::tender_analysis::outline_flow::scan_complete(&input, &state.analysis.outline));
+    assert_eq!(
+        state.main_progress.watch.recovery,
+        crate::agent_runtime::progress::Recovery::Blocked
+    );
+    assert_eq!(
+        state.main_progress.watch.replans,
+        config.limits.max_focus_replans
+    );
+    assert!(!crate::tender_analysis::outline_flow::scan_complete(
+        &input,
+        &state.analysis.outline
+    ));
 }
 
 #[test]
@@ -4247,16 +4410,40 @@ fn discovery_reoffers_evicted_unsubmitted_prefix_and_keeps_hot_state_small() {
     crate::tender_analysis::draft::preload_outline_window(&input, &mut state);
     let id = &input.source_units[0].source_unit_revision_id;
     let len = input.source_units[0].text.len();
-    state.analysis.coverage.text.insert(id.clone(), vec![(0,len)]);
-    state.analysis.outline.scanned.text.insert(id.clone(), vec![(3,len)]);
-    let evidence = agent::evidence_delivery::select(&input, &config, &state).unwrap().unwrap();
-    let visible = agent::context::visible_work_evidence(&state, &[json!({"role":"user","content":json!({"preloaded_evidence":evidence.content}).to_string()})]);
-    assert!(crate::tender_analysis::tools::contains(visible.get(&format!("text:{id}")), 0, 3));
+    state
+        .analysis
+        .coverage
+        .text
+        .insert(id.clone(), vec![(0, len)]);
+    state
+        .analysis
+        .outline
+        .scanned
+        .text
+        .insert(id.clone(), vec![(3, len)]);
+    let evidence = agent::evidence_delivery::select(&input, &config, &state)
+        .unwrap()
+        .unwrap();
+    let visible = agent::context::visible_work_evidence(
+        &state,
+        &[
+            json!({"role":"user","content":json!({"preloaded_evidence":evidence.content}).to_string()}),
+        ],
+    );
+    assert!(crate::tender_analysis::tools::contains(
+        visible.get(&format!("text:{id}")),
+        0,
+        3
+    ));
     let packet = crate::tender_analysis::outline_flow::packet(&input, &state, 48000).unwrap();
     assert!(packet.get("requirements").is_none());
     assert!(packet.get("requirement_count").is_some());
     assert_eq!(packet["cursor_chunk"]["source_id"], *id);
-    assert!(!crate::tender_analysis::tools::contains(state.analysis.outline.scanned.text.get(id), 0, 3));
+    assert!(!crate::tender_analysis::tools::contains(
+        state.analysis.outline.scanned.text.get(id),
+        0,
+        3
+    ));
 }
 
 #[test]
@@ -4267,20 +4454,45 @@ fn discovery_duplicate_receipts_require_actual_visible_complete_ranges() {
     crate::tender_analysis::draft::preload_outline_window(&input, &mut state);
     let id = &input.source_units[0].source_unit_revision_id;
     for (name, result) in [
-        ("read_source", json!({"source_id":id,"start":0,"end":100,"text":"visible original"})),
-        ("read_form", json!({"source_id":id,"form_id":"f","offset":0,"next":36,"cells":["original"]})),
-        ("collection_index", json!({"kind":"documents","offset":0,"next":2,"items":["original","original"]})),
+        (
+            "read_source",
+            json!({"source_id":id,"start":0,"end":100,"text":"visible original"}),
+        ),
+        (
+            "read_form",
+            json!({"source_id":id,"form_id":"f","offset":0,"next":36,"cells":["original"]}),
+        ),
+        (
+            "collection_index",
+            json!({"kind":"documents","offset":0,"next":2,"items":["original","original"]}),
+        ),
     ] {
-        let messages = vec![json!({"role":"tool","content":json!({"ok":true,"result":result}).to_string()})];
+        let messages =
+            vec![json!({"role":"tool","content":json!({"ok":true,"result":result}).to_string()})];
         let visible = agent::context::visible_work_evidence(&state, &messages);
         assert!(!visible.is_empty());
         let receipt = agent::context::visible_read_receipt(&state, &visible, name, result.clone());
         assert_eq!(receipt["already_visible"], true);
-        assert!(agent::context::visible_work_evidence(&state, &[json!({"role":"tool","content":json!({"ok":true,"result":receipt}).to_string()})]).is_empty(), "short receipt must not masquerade as original evidence");
-        assert_eq!(agent::context::visible_read_receipt(&state, &Default::default(), name, result.clone()), result, "evicted and not-yet-delivered evidence must be readable");
+        assert!(
+            agent::context::visible_work_evidence(
+                &state,
+                &[json!({"role":"tool","content":json!({"ok":true,"result":receipt}).to_string()})]
+            )
+            .is_empty(),
+            "short receipt must not masquerade as original evidence"
+        );
+        assert_eq!(
+            agent::context::visible_read_receipt(&state, &Default::default(), name, result.clone()),
+            result,
+            "evicted and not-yet-delivered evidence must be readable"
+        );
         let mut partial = visible.clone();
         partial.values_mut().next().unwrap()[0].1 -= 1;
-        assert_eq!(agent::context::visible_read_receipt(&state, &partial, name, result.clone()), result, "partial overlap cannot suppress a missing range");
+        assert_eq!(
+            agent::context::visible_read_receipt(&state, &partial, name, result.clone()),
+            result,
+            "partial overlap cannot suppress a missing range"
+        );
     }
     assert!(state.analysis.outline.scanned.text.is_empty());
 }
@@ -4289,10 +4501,13 @@ fn discovery_duplicate_receipts_require_actual_visible_complete_ranges() {
 #[ignore = "requires KB_DISCOVERY_LOOP_DIR cursor-118 archive; no live model or DB"]
 async fn archived_cursor_118_reoffers_missing_grid_tail_without_advancing_scan() {
     let root = std::path::PathBuf::from(std::env::var("KB_DISCOVERY_LOOP_DIR").unwrap());
-    let frozen: Value = serde_json::from_slice(&std::fs::read(root.join("frozen.json")).unwrap()).unwrap();
+    let frozen: Value =
+        serde_json::from_slice(&std::fs::read(root.join("frozen.json")).unwrap()).unwrap();
     let input: FrozenInput = serde_json::from_value(frozen["input"].clone()).unwrap();
     let config: Config = serde_json::from_value(frozen["runtime"].clone()).unwrap();
-    let mut state: Checkpoint = serde_json::from_slice(&std::fs::read(root.join("latest-checkpoint.json")).unwrap()).unwrap();
+    let mut state: Checkpoint =
+        serde_json::from_slice(&std::fs::read(root.join("latest-checkpoint.json")).unwrap())
+            .unwrap();
     assert_eq!(state.outline_run.chunk_cursor, 118);
     // Archive is awaiting a response to its tool results. Simulate that delivery
     // boundary before preparing the next request; do not invent scan conclusions.
@@ -4305,21 +4520,41 @@ async fn archived_cursor_118_reoffers_missing_grid_tail_without_advancing_scan()
     let body: Value = serde_json::from_slice(&request).unwrap();
     let messages = body["messages"].as_array().unwrap();
     let visible = agent::context::visible_work_evidence(&state, messages);
-    assert!(crate::tender_analysis::tools::contains(visible.get("form:7c726851-7e75-4055-8a15-14b69401ad45"), 50, 63));
-    let host: Value = serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
+    assert!(crate::tender_analysis::tools::contains(
+        visible.get("form:7c726851-7e75-4055-8a15-14b69401ad45"),
+        50,
+        63
+    ));
+    let host: Value =
+        serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
     assert!(host.to_string().contains("cursor_chunk"));
-    let tokens = crate::agent_runtime::chat::estimate_input_tokens(&body, config.limits.image_token_reserve, config.limits.token_safety_margin).unwrap();
+    let tokens = crate::agent_runtime::chat::estimate_input_tokens(
+        &body,
+        config.limits.image_token_reserve,
+        config.limits.token_safety_margin,
+    )
+    .unwrap();
     assert!(tokens + config.provider.max_tokens as usize <= config.limits.max_context_tokens);
-    eprintln!("cursor118 request bytes={} estimated_tokens={} package_limit={}", request.len(), tokens, host["preloaded_evidence"]["assigned_evidence"]["workload_bytes_limit"]);
+    eprintln!(
+        "cursor118 request bytes={} estimated_tokens={} package_limit={}",
+        request.len(),
+        tokens,
+        host["preloaded_evidence"]["assigned_evidence"]["workload_bytes_limit"]
+    );
     agent::evidence_delivery::confirm(&input, &config, &mut state, &body).unwrap();
-    assert_eq!(serde_json::to_value(&state.analysis.outline.scanned).unwrap(), before);
+    assert_eq!(
+        serde_json::to_value(&state.analysis.outline.scanned).unwrap(),
+        before
+    );
     agent::apply(&input, &config, &mut state, "submit_outline_scan", &json!({
         "text":{},
         "forms":{"7c726851-7e75-4055-8a15-14b69401ad45":[[50,63]]},"metadata":{},"empty_sources":[],"requirements":[],"references":[],"issues":[],"review_fragments":[]
     })).unwrap();
     crate::tender_analysis::draft::after_batch(&input, &mut state, false, false).unwrap();
     assert!(state.outline_run.chunk_cursor > 118);
-    assert!(!crate::tender_analysis::outline_flow::checked(&input, &state));
+    assert!(!crate::tender_analysis::outline_flow::checked(
+        &input, &state
+    ));
 }
 
 #[test]

@@ -768,8 +768,11 @@ async fn run_seeded<J: Journal, M: Model>(
         Some((plan, outline)) => {
             let seed_identities = super::readback::seed_identities(&plan).map_err(invalid)?;
             if state.draft_stage != crate::tender_analysis::draft::DraftStage::None
-                && state.analysis.fill_seed_chapters != seed_identities {
-                return Err(invalid("fill checkpoint differs from the frozen saved-document seed"));
+                && state.analysis.fill_seed_chapters != seed_identities
+            {
+                return Err(invalid(
+                    "fill checkpoint differs from the frozen saved-document seed",
+                ));
             }
             state.analysis.fill_seed_chapters = seed_identities;
             if state.draft_stage == crate::tender_analysis::draft::DraftStage::None {
@@ -2248,7 +2251,7 @@ fn apply_inner(
                     | "submit_outline_scan"
                     | "read_outline"
                     | "assign_outline_fragments"
-                | "finish_outline"
+                    | "finish_outline"
                     | "submit_outline_check"
                     | "omit_outline_item"
                     | "put_chapter_template"

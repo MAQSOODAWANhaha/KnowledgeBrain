@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from docreader.parser import pdf_tables
 from docreader.parser.pdf_parser import PDFParser, _extract_page_tables
 from docreader.parser.pdf_tables import (
@@ -24,7 +26,7 @@ from docreader.models.document import (
     sparsify_table_cells,
 )
 
-BIDDING_PDF = Path("/opt/github/KnowledgeBrain/testdata/bid/BiddingFile.pdf")
+BIDDING_PDF = Path(__file__).resolve().parents[3] / "testdata/bid/BiddingFile.pdf"
 
 
 def _glyph(ch: str, x: float, y: float, w: float = 8.0, h: float = 10.0) -> dict:
@@ -119,6 +121,7 @@ def test_ruled_grid_wins_over_fragmented_alignment(monkeypatch) -> None:
     assert extract_tables_from_page(object(), object(), []) == [ruled]
 
 
+@pytest.mark.skipif(not BIDDING_PDF.is_file(), reason="testdata/bid/BiddingFile.pdf is not available")
 def test_bidding_file_emits_page_table_grids() -> None:
     parsed = PDFParser(file_name="BiddingFile.pdf", file_type="pdf").parse_into_text(
         BIDDING_PDF.read_bytes()
@@ -269,6 +272,7 @@ def test_grid_markdown_serializes_cells() -> None:
     assert lines[2] == "| 丙 | 丁 |"
 
 
+@pytest.mark.skipif(not BIDDING_PDF.is_file(), reason="testdata/bid/BiddingFile.pdf is not available")
 def test_price_title_stays_outside_grid_and_parameters_keep_their_cell() -> None:
     parsed = PDFParser(file_name="BiddingFile.pdf", file_type="pdf").parse_into_text(
         BIDDING_PDF.read_bytes()

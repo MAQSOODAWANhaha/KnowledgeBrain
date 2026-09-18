@@ -25,8 +25,8 @@ pub use engines::{EngineCatalog, EngineInfo, list_all_engines, local_engines, me
 pub use grpc::{ConvertRequest, DOCREADER_TIMEOUT, reader_addr, source_view};
 pub use images::{rewrite_images, rewrite_inline};
 pub use output_inventory::{
-    OUTPUT_INVENTORY_PROFILE, OutputInventoryEntry, OutputTableLayout, OutputInventoryManifest, OutputInventoryRead,
-    read_output_inventory, validate_output_inventory,
+    OUTPUT_INVENTORY_PROFILE, OutputInventoryEntry, OutputInventoryManifest, OutputInventoryRead,
+    OutputTableLayout, read_output_inventory, validate_output_inventory,
 };
 pub use simple::convert_simple;
 pub use table_grid::validate_table_grid;

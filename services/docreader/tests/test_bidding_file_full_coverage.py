@@ -8,6 +8,8 @@ from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 
+import pytest
+
 from docreader.models.document import (
     PageLocator,
     PageTableLocator,
@@ -17,7 +19,10 @@ from docreader.models.document import (
 from docreader.parser.pdf_parser import PDFParser, _close_pdfium_resource, _page_chars
 from docreader.parser.pdf_tables import extract_tables_from_page, table_region_reading_text
 
-BIDDING_PDF = Path("/opt/github/KnowledgeBrain/testdata/bid/BiddingFile.pdf")
+BIDDING_PDF = Path(__file__).resolve().parents[3] / "testdata/bid/BiddingFile.pdf"
+pytestmark = pytest.mark.skipif(
+    not BIDDING_PDF.is_file(), reason="testdata/bid/BiddingFile.pdf is not available"
+)
 PAGE_COUNT = 106
 KEY_PHRASES = ("招标文件", "投标价格表", "商务和技术偏差")
 PAGE_HEADER = "华盾公司 2024-2025 年广域网防火墙框架采购招标文件"

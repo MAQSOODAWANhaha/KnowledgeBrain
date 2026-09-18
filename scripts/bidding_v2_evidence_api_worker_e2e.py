@@ -90,9 +90,11 @@ requirement = next((value for value in requirements
 if not requirement:
     raise RuntimeError(f"project has no projected current requirement: projection={projection}, requirements={requirements}")
 need_id = requirement["fulfillment_expr"]["need_occurrence_id"]
+# Loaded bindings omit state. A row on the current revision is bound unless marked otherwise.
 if not any(value.get("need_occurrence_id") == need_id and
            value.get("target", {}).get("node_lineage_id") == node_id and
-           value.get("state") == "bound" for value in workspace["bindings"]):
+           value.get("state", "bound") == "bound" and not value.get("stale")
+           for value in workspace["bindings"]):
     _, _, workspace = call(
         "POST", f"/api/v2/submission-workspaces/{WORKSPACE_ID}/fulfillment-bindings",
         {"need_occurrence_id": need_id,
@@ -103,14 +105,6 @@ if not any(value.get("need_occurrence_id") == need_id and
         {"if-match": f'"{workspace["sha256"]}"',
          "idempotency-key": f"{KEY_PREFIX}-binding-v1"},
     )
-call(
-    "POST",
-    f"/api/v2/submission-workspaces/{WORKSPACE_ID}/outline-checkpoints",
-    {"expected_workspace_revision_id": workspace["revision_id"],
-     "expected_workspace_sha256": workspace["sha256"]},
-    {"if-match": f'"{workspace["sha256"]}"',
-     "idempotency-key": f"{KEY_PREFIX}-checkpoint-v1"},
-)
 if os.environ.get("BID_V2_USE_FIXTURE_EVIDENCE") != "1":
     match_body = {"expected_workspace_revision_id": workspace["revision_id"]}
     match_headers = {"if-match": f'"{workspace["sha256"]}"',

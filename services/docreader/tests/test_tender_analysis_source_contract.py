@@ -14,10 +14,16 @@ from docreader.proto.docreader_pb2 import ReadRequest
 
 REPO = Path(__file__).resolve().parents[3]
 EXPECTATIONS = REPO / "crates/bidding/tests/fixtures/tender-analysis-golden-v1.json"
-SOURCE = REPO / json.loads(EXPECTATIONS.read_text())["source"]
 
 
-@pytest.mark.skipif(not SOURCE.is_file(), reason="private real tender sample is not available")
+def _sample_ready() -> bool:
+    if not EXPECTATIONS.is_file():
+        return False
+    source = REPO / json.loads(EXPECTATIONS.read_text())["source"]
+    return source.is_file()
+
+
+@pytest.mark.skipif(not _sample_ready(), reason="private real tender sample is not available")
 def test_shared_service_preserves_cybersecurity_tender_anchors():
     fixture = json.loads(EXPECTATIONS.read_text())
     source = REPO / fixture["source"]

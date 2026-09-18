@@ -96,7 +96,10 @@ fn inventory(units: Vec<Unit>) -> (OutputInventoryManifest, Vec<StructuredSource
     for (ordinal, unit) in units.into_iter().enumerate() {
         let key = format!("story:{ordinal}");
         entries.push(OutputInventoryEntry {
-            table_layout: unit.grid.as_ref().map(|grid| docparser::OutputTableLayout { widths_twips: vec![2000; grid.column_count as usize], header_rows: 0 }),
+            table_layout: unit.grid.as_ref().map(|grid| docparser::OutputTableLayout {
+                widths_twips: vec![2000; grid.column_count as usize],
+                header_rows: 0,
+            }),
             unit_key: key.clone(),
             part: unit.part.into(),
             ordinal,

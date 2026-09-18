@@ -16,11 +16,14 @@ from docreader.parser.docx2_parser import Docx2Parser
 from docreader.parser.excel_parser import ExcelParser
 from docreader.parser.pdf_parser import PDFParser
 
-BID_DIR = Path("/opt/github/KnowledgeBrain/testdata/bid")
+REPO = Path(__file__).resolve().parents[3]
+BID_DIR = REPO / "testdata" / "bid"
 TENDER_EXTS = frozenset({"pdf", "docx", "xlsx"})
 
 
 def _files(*, large: bool) -> list[Path]:
+    if not BID_DIR.is_dir():
+        return []
     files = sorted(p for p in BID_DIR.iterdir() if p.is_file())
     if large:
         return [p for p in files if p.stat().st_size > 10_000_000]
@@ -87,11 +90,19 @@ def _assert_freeze_contract(path: Path) -> None:
         assert ext in TENDER_EXTS
 
 
-@pytest.mark.parametrize("path", _files(large=False), ids=lambda p: p.name)
+def _params(*, large: bool):
+    files = _files(large=large)
+    if files:
+        return files
+    reason = "testdata/bid is not available" if not BID_DIR.is_dir() else "no matching files in testdata/bid"
+    return [pytest.param(Path("missing"), marks=pytest.mark.skip(reason=reason))]
+
+
+@pytest.mark.parametrize("path", _params(large=False), ids=lambda p: p.name)
 def test_testdata_bid_freeze_contract(path: Path) -> None:
     _assert_freeze_contract(path)
 
 
-@pytest.mark.parametrize("path", _files(large=True), ids=lambda p: p.name)
+@pytest.mark.parametrize("path", _params(large=True), ids=lambda p: p.name)
 def test_testdata_bid_large_pdf_freeze_contract(path: Path) -> None:
     _assert_freeze_contract(path)

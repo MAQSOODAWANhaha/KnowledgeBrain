@@ -133,6 +133,15 @@ curl -fsS "http://127.0.0.1:$api_port/health" >/dev/null
 # Runtime schema identity is verified before test-only fixture DML changes frozen seed tables.
 { echo 'SET ROLE kb_app_owner;'; cat crates/bidding/tests/sql/phase0_acceptance.sql; } \
   | docker exec -i "$pg_name" psql -U postgres -d "$database" -v ON_ERROR_STOP=1 >/dev/null
+# phase0 stores the node binding but does not attach it to the current revision.
+# Attaching it here keeps the seeded outline checkpoint on that revision.
+# There is no HTTP route for creating another checkpoint.
+docker exec -i "$pg_name" psql -U postgres -d "$database" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+SET ROLE kb_app_owner;
+INSERT INTO bid_workspace_binding_occurrences(id,project_id,workspace_revision_id,binding_revision_id,ordinal)
+VALUES ('00000000-0000-4000-8000-00000000014a','00000000-0000-4000-8000-000000000010',
+        '00000000-0000-4000-8000-000000000135','00000000-0000-4000-8000-000000000111',0);
+SQL
 
 jwt=$(python3 - <<'PY'
 import base64,hashlib,hmac,json,time
