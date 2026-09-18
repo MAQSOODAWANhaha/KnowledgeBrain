@@ -6,13 +6,11 @@ use crate::helpers::{
 };
 use crate::runtime::{
     AppCtx, CONTENT_GENERATE_HANDLER_HARD_TIMEOUT, CONTENT_MATCH_HANDLER_HARD_TIMEOUT,
-    DOCX_COMPOSE_HANDLER_HARD_TIMEOUT, HANDLER_CLEANUP_MARGIN, HandlerDeadline, JobErr,
-    OwnedHandlerCompletion, REQUIREMENT_DRAFT_HANDLER_HARD_TIMEOUT,
-    REQUIREMENT_HANDLER_HARD_TIMEOUT, SUBMISSION_EXPORT_HANDLER_HARD_TIMEOUT,
-    TASK_ABORT_DRAIN_RESERVE, TENDER_HANDLER_HARD_TIMEOUT, TERMINAL_PERSISTENCE_RESERVE,
-    bid_request_is_terminal, cleanup_tracker_until, require_bid_request_terminal,
-    run_owned_handler, teardown_deadline_for_effect, terminalize_tender_document_failure_until,
-    terminalize_until,
+    HANDLER_CLEANUP_MARGIN, HandlerDeadline, JobErr, OwnedHandlerCompletion,
+    SUBMISSION_EXPORT_HANDLER_HARD_TIMEOUT, TASK_ABORT_DRAIN_RESERVE, TENDER_HANDLER_HARD_TIMEOUT,
+    TERMINAL_PERSISTENCE_RESERVE, bid_request_is_terminal, cleanup_tracker_until,
+    require_bid_request_terminal, run_owned_handler, teardown_deadline_for_effect,
+    terminalize_tender_document_failure_until, terminalize_until,
 };
 use async_trait::async_trait;
 use platform::{
@@ -291,6 +289,27 @@ impl oxana::Worker<TenderDocumentProcessJobV2> for TenderDocumentProcessV2Worker
     }
 }
 
+pub(crate) async fn tender_handler_deadline(
+    pool: &PgPool,
+    request_id: uuid::Uuid,
+) -> Result<HandlerDeadline, JobErr> {
+    let deadline_unix: Option<i64> = sqlx::query_scalar(
+        "SELECT floor(extract(epoch from coalesce(kb_bid_v2_tender_agent_frozen_deadline($1), clock_timestamp()+make_interval(secs => (kb_bid_v2_tender_agent_runtime($1)#>>'{budget,total_timeout_secs}')::double precision))))::bigint",
+    )
+    .bind(request_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| JobErr(error.to_string()))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| JobErr(error.to_string()))?
+        .as_secs() as i64;
+    let secs = bidding::tender_analysis::draft::handler_budget_secs(deadline_unix, now, 0);
+    Ok(HandlerDeadline::from_now(std::time::Duration::from_secs(
+        secs,
+    )))
+}
+
 pub struct RequirementSetCompileV2Worker {
     pool: Option<PgPool>,
     shutdown: CancellationToken,
@@ -328,9 +347,7 @@ impl oxana::Worker<RequirementSetCompileJobV2> for RequirementSetCompileV2Worker
         let cancel = CancellationToken::new();
         let pipeline_cancel = cancel.clone();
         let pool = pool.clone();
-        // Worker 角色不能直读 identities 表。草稿 20min 由分析 heartbeat 执行；
-        // 这里只保留进程围栏，取官方 45min（覆盖草稿上限）。
-        let timeout = REQUIREMENT_HANDLER_HARD_TIMEOUT.max(REQUIREMENT_DRAFT_HANDLER_HARD_TIMEOUT);
+        let deadline = tender_handler_deadline(&pool, job.request.request_artifact_id).await?;
         let run = run_owned_handler(
             async move {
                 bidding::tender_analysis::postgres::execute(
@@ -343,7 +360,7 @@ impl oxana::Worker<RequirementSetCompileJobV2> for RequirementSetCompileV2Worker
                 .map(|_| ())
                 .map_err(|e| JobErr(e.to_string()))
             },
-            HandlerDeadline::from_now(timeout),
+            deadline,
             self.shutdown.clone(),
             cancel,
             None,
@@ -399,6 +416,7 @@ impl oxana::Worker<DocxComposeJobV2> for DocxComposeV2Worker {
         let cancel = CancellationToken::new();
         let pipeline_cancel = cancel.clone();
         let pool = pool.clone();
+        let deadline = tender_handler_deadline(&pool, job.request.request_artifact_id).await?;
         let run = run_owned_handler(
             async move {
                 bidding::docx_composition::runtime::execute(
@@ -412,7 +430,7 @@ impl oxana::Worker<DocxComposeJobV2> for DocxComposeV2Worker {
                 .map(|_| ())
                 .map_err(|e| JobErr(e.to_string()))
             },
-            HandlerDeadline::from_now(DOCX_COMPOSE_HANDLER_HARD_TIMEOUT),
+            deadline,
             self.shutdown.clone(),
             cancel,
             Some(&cleanup),

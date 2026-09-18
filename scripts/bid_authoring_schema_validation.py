@@ -42,7 +42,7 @@ def load_schema(path: Path) -> dict[str, Any]:
 SCHEMAS = {
     path.name: load_schema(path)
     for path in sorted(SCHEMA_DIR.glob("*.schema.json"))
-    if path.name not in {"tender-analysis-tools-v1.schema.json", "docx-composition-tools-v1.schema.json"}
+    if path.name not in {"tender-analysis-tools-v1.schema.json"}
 }
 SCHEMAS_BY_ID = {schema["$id"]: schema for schema in SCHEMAS.values()}
 REGISTRY = Registry().with_resources(

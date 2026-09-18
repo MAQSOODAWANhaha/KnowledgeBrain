@@ -98,6 +98,11 @@ export type RequirementSetCompileRequestView = {
     review_rounds?: number;
     checkpoint_sequence?: number;
     boundary?: string;
+    draft_stage?: string;
+    outline_phase?: string;
+    outline_chapters?: number;
+    outline_requirements?: number;
+    outline_open_issues?: number;
   } | null;
   status: "pending" | "succeeded" | "failed";
   request_revision: number;
@@ -132,6 +137,7 @@ export type OutlineNode = {
 };
 
 export type TenderOutline = {
+  notices?: string[];
   quality: "draft";
   compile_status?: string | null;
   extracted_from: "none" | "checkpoint" | "published";
@@ -169,3 +175,94 @@ export type RequirementView = {
 };
 
 export type ExpectedPointer = FrozenIdentity;
+
+export type ChapterPurpose = "group" | "response";
+export type BodyStatus = "empty" | "user" | "generated";
+
+export type OutlineBlockerCode =
+  | "B_SCAN_INCOMPLETE"
+  | "B_REQUIREMENT_UNMAPPED"
+  | "B_TREE_INVALID"
+  | "B_CONFLICT_FALSELY_RESOLVED"
+  | "B_FORMAT_EVIDENCE_MISSING";
+
+export type OutlineRequirement = {
+  description: string;
+  kind: string;
+  applicability: "required" | "conditional" | "not_applicable";
+  condition: string;
+  grounds: Array<Record<string, unknown>>;
+  format_grounds: Array<Record<string, unknown>>;
+  order_constraints: string[];
+};
+
+export type OutlineIssue = {
+  code: string;
+  requirement_ids: string[];
+  chapter_ids: string[];
+  reference_ids: string[];
+  grounds: Array<Record<string, unknown>>;
+  status: "open" | "resolved";
+  resolution_grounds: Array<Record<string, unknown>>;
+};
+
+export type OutlineDraftPlanItem = {
+  id: string;
+  parent: string | null;
+  order: number;
+  title: string;
+  prescribed: boolean;
+  purpose: ChapterPurpose;
+  requirement_ids: string[];
+  format_refs: Array<Record<string, unknown>>;
+  body_status: BodyStatus;
+  grounds: Array<Record<string, unknown>>;
+  status: "pending" | "filled" | "omitted";
+};
+
+export const OUTLINE_BLOCKER_CODES: readonly OutlineBlockerCode[] = [
+  "B_SCAN_INCOMPLETE",
+  "B_REQUIREMENT_UNMAPPED",
+  "B_TREE_INVALID",
+  "B_CONFLICT_FALSELY_RESOLVED",
+  "B_FORMAT_EVIDENCE_MISSING",
+] as const;
+
+export function isChapterPurpose(value: unknown): value is ChapterPurpose {
+  return value === "group" || value === "response";
+}
+
+export function isBodyStatus(value: unknown): value is BodyStatus {
+  return value === "empty" || value === "user" || value === "generated";
+}
+
+export function isOutlineBlockerCode(value: unknown): value is OutlineBlockerCode {
+  return typeof value === "string"
+    && (OUTLINE_BLOCKER_CODES as readonly string[]).includes(value);
+}
+
+export function isOutlineRequirement(value: unknown): value is OutlineRequirement {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Record<string, unknown>;
+  return typeof row.description === "string"
+    && typeof row.kind === "string"
+    && (row.applicability === "required"
+      || row.applicability === "conditional"
+      || row.applicability === "not_applicable")
+    && typeof row.condition === "string"
+    && Array.isArray(row.grounds)
+    && Array.isArray(row.format_grounds)
+    && Array.isArray(row.order_constraints);
+}
+
+export function isOutlineIssue(value: unknown): value is OutlineIssue {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Record<string, unknown>;
+  return typeof row.code === "string"
+    && Array.isArray(row.requirement_ids)
+    && Array.isArray(row.chapter_ids)
+    && Array.isArray(row.reference_ids)
+    && Array.isArray(row.grounds)
+    && (row.status === "open" || row.status === "resolved")
+    && Array.isArray(row.resolution_grounds);
+}

@@ -412,6 +412,36 @@ pub async fn get_document_set_v2(
         .await
 }
 
+async fn outline_request_config(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    project_id: Uuid,
+    documents: Option<&[Uuid]>,
+    document_set: Option<Uuid>,
+    decisions: Option<&Value>,
+    actor: &str,
+) -> Result<crate::tender_analysis::agent::Config, sqlx::Error> {
+    let sqlx::types::Json(mut input): sqlx::types::Json<crate::tender_analysis::FrozenInput> =
+        sqlx::query_scalar("SELECT kb_bid_v2_tender_budget_input($1,$2,$3,$4::kb_actor_identity)")
+            .bind(project_id)
+            .bind(documents)
+            .bind(document_set)
+            .bind(actor)
+            .fetch_one(&mut **tx)
+            .await?;
+    if let Some(items) = decisions.and_then(Value::as_array) {
+        input.decisions = items
+            .iter()
+            .filter(|item| item["reason"] != "awaiting_agent_analysis")
+            .map(|item| {
+                serde_json::json!({"source_id":item["source_unit_revision_id"],
+                "disposition":item["disposition"],"reason":item["reason"]})
+            })
+            .collect();
+    }
+    crate::tender_analysis::agent::Config::from_environment_for(&input)
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))
+}
+
 pub async fn freeze_document_set_v2(
     pool: &PgPool,
     project_id: Uuid,
@@ -421,7 +451,20 @@ pub async fn freeze_document_set_v2(
     request_artifact_id: Uuid,
     context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
-    sqlx::query_scalar(
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await?;
+    let config = outline_request_config(
+        &mut tx,
+        project_id,
+        Some(document_ids),
+        None,
+        None,
+        &context.actor,
+    )
+    .await?;
+    let response = sqlx::query_scalar(
         "SELECT kb_bid_v2_freeze_document_set(
           $1,$2,$3,$4::kb_sha256,$5,$6::kb_actor_identity,$7,$8,$9::kb_sha256,$10)",
     )
@@ -434,15 +477,11 @@ pub async fn freeze_document_set_v2(
     .bind(&context.idempotency_key)
     .bind(&context.request.bytes)
     .bind(&context.request.sha256)
-    .bind(
-        serde_json::to_value(
-            crate::tender_analysis::agent::Config::from_environment()
-                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?,
-        )
-        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?,
-    )
-    .fetch_one(pool)
-    .await
+    .bind(serde_json::to_value(config).map_err(|e| sqlx::Error::Protocol(e.to_string()))?)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(response)
 }
 
 pub async fn publish_disposition_set_v2(
@@ -455,7 +494,20 @@ pub async fn publish_disposition_set_v2(
     context: &crate::mutation::MutationContext,
 ) -> Result<Value, sqlx::Error> {
     let (expected_artifact_id, expected_sha256) = expected;
-    sqlx::query_scalar(
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await?;
+    let config = outline_request_config(
+        &mut tx,
+        project_id,
+        None,
+        Some(document_set_id),
+        Some(items),
+        &context.actor,
+    )
+    .await?;
+    let response = sqlx::query_scalar(
         "SELECT kb_bid_v2_publish_disposition_set(
           $1,$2,$3,$4,$5::kb_sha256,$6,$7::kb_actor_identity,$8,$9,$10::kb_sha256,$11)",
     )
@@ -469,15 +521,11 @@ pub async fn publish_disposition_set_v2(
     .bind(&context.idempotency_key)
     .bind(&context.request.bytes)
     .bind(&context.request.sha256)
-    .bind(
-        serde_json::to_value(
-            crate::tender_analysis::agent::Config::from_environment()
-                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?,
-        )
-        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?,
-    )
-    .fetch_one(pool)
-    .await
+    .bind(serde_json::to_value(config).map_err(|e| sqlx::Error::Protocol(e.to_string()))?)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(response)
 }
 
 pub async fn list_source_units_v2(

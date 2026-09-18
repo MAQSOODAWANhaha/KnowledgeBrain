@@ -1,5 +1,4 @@
-//! Closed, bounded Agent tools. The serializable workspace is the checkpoint;
-//! model messages receive metadata/inspection pages, never a whole DOCX/base64.
+//! Test-only builders and assertions for deterministic compiler fixtures.
 use super::*;
 use super::{
     compiler::{self, Manifest, compile},

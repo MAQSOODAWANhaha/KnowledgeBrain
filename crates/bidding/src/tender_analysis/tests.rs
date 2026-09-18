@@ -1,13 +1,9 @@
-use super::agent::{Checkpoint, Config, Journal, Limits, Model, Role};
+use super::agent::{Checkpoint, Config, Journal, Limits};
 use super::*;
 use crate::{agent_error::AgentError, authoring_runtime::AuthoringRuntimeContractV1};
 use async_trait::async_trait;
-use knowledge::models::{ChatToolCall, ChatTurn};
 use serde_json::json;
-use std::{
-    collections::{BTreeMap, VecDeque},
-    sync::Mutex,
-};
+use std::{collections::BTreeMap, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
 mod draft;
@@ -29,15 +25,6 @@ fn input() -> FrozenInput {
             locator: json!({"heading_path":"须知"}),
             ordinal: 0,
         }],
-    }
-}
-fn span() -> Span {
-    Span {
-        view_id: None,
-        grid_cell: None,
-        source_id: "source".into(),
-        start: 0,
-        end: input().source_units[0].text.len(),
     }
 }
 
@@ -121,7 +108,7 @@ impl Journal for MemoryJournal {
         }
         Ok(Some(row.1))
     }
-    async fn save(&self, state: &Checkpoint, _: &Value) -> Result<(), AgentError> {
+    async fn save(&self, state: &Checkpoint, _: &serde_json::Value) -> Result<(), AgentError> {
         *self.state.lock().unwrap() = Some(state.clone());
         if let Some((sequence, token)) = &*self.cancel_boundary.lock().unwrap()
             && *sequence == state.journal.sequence
@@ -148,169 +135,16 @@ impl Journal for MemoryJournal {
     }
 }
 
-struct Script {
-    calls: Mutex<VecDeque<(String, Value)>>,
-    bodies: Mutex<Vec<Value>>,
-}
-#[async_trait]
-impl Model for Script {
-    async fn turn(&self, _: &Config, body: &[u8]) -> Result<ChatTurn, AgentError> {
-        let body: Value = serde_json::from_slice(body).unwrap();
-        self.bodies.lock().unwrap().push(body.clone());
-        let (name, mut args) = self
-            .calls
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("unexpected model call");
-        if name == "delete_review_finding" && args["id"] == "$fixture_finding" {
-            args["id"] = body["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .rev()
-                .find_map(|message| {
-                    let result: Value = serde_json::from_str(message["content"].as_str()?).ok()?;
-                    result["result"]
-                        .get("id")
-                        .cloned()
-                        .filter(|id| id.is_string())
-                })
-                .expect("fixture saved a review finding");
-        }
-        if name == "put_repair_result" && args["finding_sha256"] == "$fixture_repair" {
-            let packet: Value = serde_json::from_str(
-                body["messages"].as_array().unwrap().last().unwrap()["content"]
-                    .as_str()
-                    .unwrap(),
-            )
-            .unwrap();
-            args["finding_sha256"] =
-                packet["review_findings"]["repair"]["next_finding"]["finding_sha256"].clone();
-            if args["candidate_refs"] == json!(["$fixture_record"]) {
-                let id = body["messages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .rev()
-                    .find_map(|message| {
-                        let result: Value =
-                            serde_json::from_str(message["content"].as_str()?).ok()?;
-                        result["result"]
-                            .get("id")
-                            .cloned()
-                            .filter(|id| id.is_string())
-                    })
-                    .expect("fixture saved a record before repair");
-                args["candidate_refs"] = json!([format!("record:{}", id.as_str().unwrap())]);
-            }
-        }
-        let tools = fixture_review_calls(&body, &name, &args);
-        Ok(ChatTurn {
-            usage: None,
-            content: String::new(),
-            finish_reason: "tool_calls".into(),
-            tool_calls: tools.unwrap_or_else(|| {
-                vec![ChatToolCall {
-                    id: format!("call-{}", self.calls.lock().unwrap().len()),
-                    name,
-                    arguments: args.to_string(),
-                }]
-            }),
-        })
-    }
-}
-
-/// Scripted semantic assertions for synthetic fixtures, using the real task
-/// identity from the request. This does not run the completion reducer or
-/// manufacture durable receipts; every assertion still traverses the tools.
-fn fixture_review_calls(body: &Value, name: &str, args: &Value) -> Option<Vec<ChatToolCall>> {
-    if name == "fixture_global_checks" {
-        let packet: Value =
-            serde_json::from_str(body["messages"].as_array()?.last()?["content"].as_str()?).ok()?;
-        return Some(ANALYSIS_GLOBAL_CHECK_KEYS.iter().enumerate().map(|(index, key)| ChatToolCall {
-            id: format!("fixture-global-{index}"), name: "put_analysis_check".into(),
-            arguments: json!({"key":key,"expected_scope_sha256":packet["global_analysis_checks"]["expected_scope_sha256"],
-                "conclusion":"pass","grounds":args.get("grounds").cloned().unwrap_or_else(||json!([span()])),"record_ids":[],"finding_ids":[]}).to_string(),
-        }).collect());
-    }
-    if name != "put_source_review" || !(args == &json!({}) || args.get("fixture_status").is_some())
-    {
-        return None;
-    }
-    let packet: Value =
-        serde_json::from_str(body["messages"].as_array()?.last()?["content"].as_str()?).ok()?;
-    let current = &packet["source_review"]["current"];
-    let task = &current["task"];
-    let source = task["source_id"].as_str()?;
-    let region = &task["region"];
-    if region["kind"] != "text" {
-        return None;
-    }
-    let sources = json!([{"source_id":source,"start":region["start"],"end":region["end"]}]);
-    let mut calls = Vec::new();
-    let mut emit = |name: &str, args: Value| {
-        calls.push(ChatToolCall {
-            id: format!("fixture-{}", calls.len()),
-            name: name.into(),
-            arguments: args.to_string(),
-        })
-    };
-    for reference in current["pending_candidate_refs"]["items"].as_array()? {
-        emit(
-            "complete_review_check",
-            json!({"reference":reference,"summary":"Synthetic fixture comparison against the cited original.","sources":sources}),
-        );
-    }
-    let mut finding_ids = vec![];
-    if args["fixture_status"] == "findings" {
-        for message in body["messages"].as_array()? {
-            let Some(content) = message["content"].as_str() else {
-                continue;
-            };
-            let Ok(value) = serde_json::from_str::<Value>(content) else {
-                continue;
-            };
-            if value["result"]["saved"] == true
-                && let Some(id) = value["result"]["id"].as_str()
-            {
-                finding_ids.push(id.to_owned());
-            }
-        }
-    }
-    let boundary = json!({"state":"complete","reason":"The synthetic paragraph is complete at this boundary.","sources":sources});
-    let template_mappings = if args["fixture_template_mappings"] == true {
-        current["templates_requiring_mapping_judgment"]["items"].as_array()?.iter()
-            .map(|id| json!({"template_id":id,"requirement_ids":[],"relation_ids":[],
-                "finding_ids":[],"sources":sources,
-                "reason":"Synthetic applicability-only fixture contains one standalone template and no separate requirement record."}))
-            .collect::<Vec<_>>()
-    } else {
-        vec![]
-    };
-    let relationship_checks = current["records_requiring_relationship_judgment"]["items"]
-        .as_array()?.iter().map(|id| {
-            let unresolved = args["fixture_unresolved"] == true;
-            json!({"record_id":id,"status":args.get("fixture_relationship_status").unwrap_or(&json!("not_required")),
-                "related_record_ids":[],"relation_ids":[],"unresolved_record_ids":if unresolved {json!([id])} else {json!([])},
-                "finding_ids":[],"reason":"Synthetic fixture: standalone bidder condition or documented unavailable evidence, without an external selected condition or continuation target.","sources":sources})
-        }).collect::<Vec<_>>();
-    emit(
-        "put_source_review",
-        json!({"task_id":task["id"],"expected_version":current["expected_version"],
-        "status":if finding_ids.is_empty(){"checked"}else{"findings"},"summary":"Synthetic fixture source-to-result judgment, including omissions and boundaries.",
-        "sources":sources,"candidate_refs":current["pending_candidate_refs"]["items"],"template_mappings":template_mappings,"relationship_checks":relationship_checks,"boundaries":{"before":boundary,"after":boundary},
-        "finding_ids":finding_ids,"evidence_requests":[]}),
-    );
-    Some(calls)
-}
 pub(super) fn config() -> Config {
     // Test provider never makes network calls; production resolves this identity
     // from configuration and freezes it before execution.
-    let provider:AuthoringRuntimeContractV1=serde_json::from_value(json!({"schema_version":1,"base_url":"https://llm.example/v1",
+    let provider: AuthoringRuntimeContractV1 = serde_json::from_value(json!({
+        "schema_version":1,"base_url":"https://llm.example/v1",
         "endpoint":"https://llm.example/v1/chat/completions","protocol":"openai_chat_completions_sse","model_id":"test-frozen-model",
         "credential_ref":"env:LLM_API_KEY","stream":true,"max_tokens":8192,"timeout_ms":180000,"response_mode":"tool_calls",
-        "transport_retries":0,"temperature":null,"reasoning_effort":null})).unwrap();
+        "transport_retries":0,"temperature":null,"reasoning_effort":null
+    }))
+    .unwrap();
     Config::with_provider(
         provider,
         Limits {
@@ -339,11 +173,4 @@ pub(super) fn config() -> Config {
         },
     )
     .unwrap()
-}
-
-fn work_script(calls: Vec<(&str, Value)>) -> Script {
-    Script {
-        calls: Mutex::new(calls.into_iter().map(|(n, v)| (n.into(), v)).collect()),
-        bodies: Mutex::new(vec![]),
-    }
 }

@@ -1355,7 +1355,8 @@ fn delivered_line_annotations_preserve_receipts_errors_and_pending_results() {
         "input_sha256":"","config_sha256":"","turn":0,"tool_calls":0,"read_bytes":0,
         "review_rounds":0,"role":"main","analysis":Analysis::default(),"review":null,
         "review_draft":{},"reviewer_coverage":Coverage::default(),"pending_coverage":null,
-        "transcript":[],"main_work":null,"reviewer_work":null,"done":false,"source_views":{}
+        "transcript":[],"main_work":null,"reviewer_work":null,"done":false,"source_views":{},
+        "outline_run":{"phase":"discover","chunk_plan_sha256":"","chunk_cursor":0,"active_check_packet":null,"repair_signatures":{},"no_progress_rounds":0}
     }))
     .unwrap();
     let group = |id: &str, result: Value| {
@@ -1756,7 +1757,8 @@ fn unique_candidate_versions_are_not_navigation_and_focused_pairs_survive() {
         "review":null,"review_draft":{},"reviewer_coverage":Coverage::default(),"pending_coverage":null,
         "transcript":[],"main_work":{"source_scope":["source"],"objective":"compare endpoints",
             "focus":{"action":"link","source_spans":[],"references":["record:left","record:right"]},"status":"active","note":""},
-        "reviewer_work":null,"done":false,"source_views":{}
+        "reviewer_work":null,"done":false,"source_views":{},
+        "outline_run":{"phase":"discover","chunk_plan_sha256":"","chunk_cursor":0,"active_check_packet":null,"repair_signatures":{},"no_progress_rounds":0}
     })).unwrap();
     for id in ["left", "right"] {
         state.analysis.records.insert(
@@ -2057,12 +2059,9 @@ fn token_estimate_counts_images_separately_and_preserves_utf8_and_tools() {
     body["messages"][0]["content"][1]["image_url"]["url"] = json!("A".repeat(200000));
     assert_eq!(estimate_input_tokens(&body, &limits).unwrap(), estimate);
     body["messages"][0]["content"][0]["text"] = json!("中文😀中文😀");
-    assert_eq!(
-        estimate_input_tokens(&body, &limits).unwrap(),
-        estimate + "中文😀".len()
-    );
+    assert_eq!(estimate_input_tokens(&body, &limits).unwrap(), estimate + 8);
     body["tools"][0]["function"]["description"] = json!("真实工具定义");
-    assert!(estimate_input_tokens(&body, &limits).unwrap() > estimate + "中文😀".len());
+    assert!(estimate_input_tokens(&body, &limits).unwrap() > estimate + 8);
     let image = body["messages"][0]["content"][1].clone();
     let single = estimate_input_tokens(&body, &limits).unwrap();
     body["messages"][0]["content"]

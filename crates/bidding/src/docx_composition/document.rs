@@ -302,6 +302,14 @@ pub fn verify(
         .read_to_string(&mut xml)
         .map_err(|e| e.to_string())?;
     let doc = roxmltree::Document::parse(&xml).map_err(|e| e.to_string())?;
+    let mut notice_ranges = Vec::new();
+    for notice in &plan.notices {
+        let rendered = read_range(doc.root(), &crate::docx_template::notice_bookmark(notice))?;
+        if rendered.paragraphs != [normalized(notice)] || rendered.table.is_some() {
+            return Err("outline warning text changed during compilation".into());
+        }
+        notice_ranges.push(rendered);
+    }
     let mut out = vec![];
     let mut inline = vec![];
     for (s, section) in plan.sections.iter().enumerate() {
@@ -478,7 +486,14 @@ pub fn verify(
                     if Some(table.rows as u64) != unit["row_count"].as_u64()
                         || table.grid_twips.len() as u64
                             != unit["column_count"].as_u64().unwrap_or(0)
-                        || !table.headers.is_empty()
+                        || serde_json::to_value(&table.grid_twips).map_err(|e| e.to_string())?
+                            != unit["widths_twips"]
+                        || table.headers
+                            != (0..unit["header_rows"]
+                                .as_u64()
+                                .ok_or("preserved headers missing")?
+                                as usize)
+                                .collect::<Vec<_>>()
                     {
                         return Err("preserved table geometry changed".into());
                     }
@@ -506,7 +521,20 @@ pub fn verify(
         .descendants()
         .find(|n| n.has_tag_name((W, "body")))
         .ok_or("document body missing")?;
-    let children: Vec<_> = body.children().filter(|n| n.is_element()).collect();
+    for text in [&plan.title, &plan.toc_title] {
+        let heading = read_range(doc.root(), &crate::docx_template::notice_bookmark(text))?;
+        if heading.paragraphs != [normalized(text)] || heading.table.is_some() {
+            return Err("system title bookmark does not match its text".into());
+        }
+    }
+    let children: Vec<_> = body
+        .children()
+        .filter(|n| n.is_element())
+        .filter(|n| {
+            !((n.has_tag_name((W, "bookmarkStart")) || n.has_tag_name((W, "bookmarkEnd")))
+                && matches!(n.attribute((W, "id")), Some("0" | "1")))
+        })
+        .collect();
     let body_sections: Vec<_> = plan
         .sections
         .iter()
@@ -519,6 +547,7 @@ pub fn verify(
         .count();
     let prefix = body_sections.len() + 4 + usize::from(front_sections > 0);
     let expected_count = prefix
+        + notice_ranges.len() * 3
         + out
             .iter()
             .map(|b| 2 + b.paragraphs.len() + usize::from(b.table.is_some()))
@@ -577,6 +606,7 @@ pub fn verify(
     }
     cursor += toc_nodes.len();
     consume_ranges(&children, &mut cursor, &out[front_ranges..])?;
+    consume_ranges(&children, &mut cursor, &notice_ranges)?;
     if cursor + 1 != children.len() {
         return Err("unmapped content after body chapters".into());
     }

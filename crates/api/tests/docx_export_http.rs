@@ -51,7 +51,6 @@ async fn prepare_isolated_full_flow_startup() {
         "KB_AUTHORING_MAX_OUTPUT_TOKENS",
         "KB_AUTHORING_TIMEOUT_MS",
         "KB_TENDER_AGENT_LIMITS",
-        "KB_DOCX_COMPOSITION_LIMITS",
     ] {
         let configured = declared.get(name).filter(|value| !value.is_empty());
         let actual = std::env::var(name).ok().filter(|value| !value.is_empty());
@@ -61,7 +60,6 @@ async fn prepare_isolated_full_flow_startup() {
         );
     }
     let analysis = bidding::tender_analysis::agent::Config::from_environment().unwrap();
-    let composition = bidding::docx_composition::agent::Config::from_environment().unwrap();
     let runtime_url = local_database("DATABASE_URL", "kb_runtime_api");
     let admin_url = local_database("KB_EXPORT_HTTP_ADMIN_URL", "postgres");
     assert_eq!(
@@ -108,7 +106,7 @@ async fn prepare_isolated_full_flow_startup() {
         "{}",
         json!({"origin":origin,"token":token,"owner_user_id":owner,
         "startup":{"env_file_sha256":platform::sha256_hex(&std::fs::read(env_file).unwrap()),
-        "runtime":{"analysis":analysis,"composition":composition}}})
+        "runtime":{"analysis":analysis}}})
     )
     .unwrap();
     file.sync_all().unwrap();

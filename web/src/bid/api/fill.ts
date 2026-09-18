@@ -21,9 +21,10 @@ export type FillStatus = FillIdentity & {
   result_identity: (DocxIdentity & { round_id: string; round_revision: number }) | null;
   progress: FillProgress | null;
 };
+export type FillUnchanged = { status: "unchanged"; current: DocxIdentity };
 export type FillApi = {
   basis(workspace: string): Promise<DocxRoundBasis | null>;
-  start(workspace: string, input: FillInput, attempt: MutationAttempt): Promise<FillIdentity>;
+  start(workspace: string, input: FillInput, attempt: MutationAttempt): Promise<FillIdentity | FillUnchanged>;
   latest(workspace: string): Promise<FillStatus | null>;
   status(workspace: string, request: string): Promise<FillStatus>;
   /** 只记一次「停」的意向：任务在当前章收尾后自己停下并照常出稿。 */
@@ -44,21 +45,26 @@ function status(value: FillStatus, workspace: string): FillStatus {
 }
 export const fillApi: FillApi = {
   async basis(workspace) {
-    return (await v2Request<DocxRoundBasis | null>(`${workspacePath(workspace)}/docx-compositions/basis`)).data;
+    return (await v2Request<DocxRoundBasis | null>(`${workspacePath(workspace)}/docx-fills/basis`)).data;
   },
   async start(workspace, input, attempt) {
-    const value = (await v2Request<FillIdentity>(`${workspacePath(workspace)}/docx-fills`,
+    const value = (await v2Request<FillIdentity | FillUnchanged>(`${workspacePath(workspace)}/docx-fills`,
       { method: "POST", body: JSON.stringify(input) }, { attempt })).data;
-    if (!identity(value)) throw new NetworkTransportError(new Error("invalid fill receipt"));
-    return value;
+    if ("status" in value && value.status === "unchanged") {
+      if (value.current.version_id !== input.expected.version_id || value.current.docx_sha256 !== input.expected.docx_sha256)
+        throw new NetworkTransportError(new Error("unchanged fill version mismatch"));
+      return value;
+    }
+    if (!identity(value as FillIdentity)) throw new NetworkTransportError(new Error("invalid fill receipt"));
+    return value as FillIdentity;
   },
   async latest(workspace) {
-    const value = (await v2Request<FillStatus | null>(`${workspacePath(workspace)}/docx-compositions/latest`)).data;
+    const value = (await v2Request<FillStatus | null>(`${workspacePath(workspace)}/docx-fills/latest`)).data;
     return value === null ? null : status(value, workspace);
   },
   async status(workspace, request) {
     const value = status((await v2Request<FillStatus>(
-      `${workspacePath(workspace)}/docx-compositions/${encodeURIComponent(request)}`)).data, workspace);
+      `${workspacePath(workspace)}/docx-fills/${encodeURIComponent(request)}`)).data, workspace);
     if (value.request_artifact_id !== request) throw new NetworkTransportError(new Error("fill request changed"));
     return value;
   },

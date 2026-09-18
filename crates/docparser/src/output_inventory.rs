@@ -12,6 +12,13 @@ pub const OUTPUT_INVENTORY_PROFILE: &str = "output_inventory_v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct OutputTableLayout {
+    pub widths_twips: Vec<u32>,
+    pub header_rows: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct OutputInventoryEntry {
     pub unit_key: String,
     pub part: String,
@@ -23,11 +30,16 @@ pub struct OutputInventoryEntry {
     /// editors renumber `w:styleId` after a round trip.
     #[serde(default)]
     pub heading_level: Option<u32>,
+    /// Paragraph style `w:name` when present. Fill only accepts compiler-safe
+    /// styles; custom names become not_checked.
+    #[serde(default)]
+    pub style_name: Option<String>,
     /// Set when the carrier sits inside a field region. Table-of-contents
     /// entries repeat chapter titles verbatim, so a reader that cannot see the
     /// region counts every chapter twice.
     #[serde(default)]
     pub field_region: Option<String>,
+    pub table_layout: Option<OutputTableLayout>,
     pub status: String,
     pub reason: Option<String>,
 }

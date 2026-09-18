@@ -85,9 +85,8 @@ export function createExportSession(api: ExportApi & Pick<DocxApi, "current">, w
         try { store.write(null); flight = null; } catch { /* replaying the same rejected intent is safe */ }
         set({ phase: "blocked", error: error.status === 409 || error.status === 412
           ? "稿件版本或保存状态已变化，请刷新后重新确认导出。"
-          // 草稿（含 AI 填章的结果）不是终稿：终稿要另一次独立复核的编制。
           : error.code === "SUBMISSION_EXPORT_CONTEXT_INVALID"
-            ? "当前稿件仍是草稿，不能作为终稿导出。终稿需要另一次独立复核的编制。"
+            ? "导出上下文无效，请刷新稿件状态后重试。"
             : "导出请求被拒绝，请检查项目权限和稿件状态。" });
       } else set({ phase: "uncertain", result: null, error: "提交结果尚未确认，请确认同一次导出请求，避免重复生成文件。" });
     }

@@ -19,16 +19,14 @@ class ExportIdentityTests(unittest.TestCase):
         self.current = dict(project_id="project", workspace_id="workspace", round_id="round",
                             version_id="version", docx_sha256=self.sha, round_basis=self.basis,
                             editor=dict(pending_save_id=None, save_error=None))
-        manifest = dict(docx_sha256=self.sha, analysis_sha256="b" * 64, status="reviewed_template")
-        self.manifest = json.dumps(manifest).encode()
         self.ticket = dict(project_id="project", workspace="workspace", expected=dict(
-            round_id="round", version_id="version", docx_sha256=self.sha, **self.basis,
-            composition_manifest_sha256=hashlib.sha256(self.manifest).hexdigest(), analysis_sha256="b" * 64))
+            round_id="round", version_id="version", docx_sha256=self.sha, **self.basis))
 
     def download(self, path):
-        return self.manifest if path.endswith("composition-report") else self.docx
+        assert path.endswith("/download"), "outline probe must not require a retired composition report"
+        return self.docx
 
-    def test_attach_requires_actual_registered_manifest_and_basis(self):
+    def test_attach_requires_actual_saved_docx_and_basis(self):
         self.assertEqual(probe.verify_attached_identity(self.ticket, self.current, self.docx, self.download), self.current)
         for key in self.basis:
             changed = copy.deepcopy(self.current)
@@ -36,7 +34,7 @@ class ExportIdentityTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(AssertionError):
                 probe.verify_attached_identity(self.ticket, changed, self.docx, self.download)
         changed = copy.deepcopy(self.ticket)
-        changed["expected"]["analysis_sha256"] = "forged locally"
+        changed["expected"]["docx_sha256"] = "forged locally"
         with self.assertRaises(AssertionError):
             probe.verify_attached_identity(changed, self.current, self.docx, self.download)
         with self.assertRaises(AssertionError):

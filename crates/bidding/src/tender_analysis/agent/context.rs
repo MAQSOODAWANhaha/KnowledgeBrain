@@ -1,8 +1,8 @@
 use super::*;
 use std::collections::BTreeSet;
 
-/// Explicit conservative estimate, not a provider tokenizer. Count all JSON
-/// text bytes, replacing each image URL with the configured visual allowance.
+/// Shared application estimate, not a provider tokenizer. Includes the complete
+/// JSON envelope, replacing image URLs with the configured visual allowance.
 /// Base64 is transport encoding, not text sent through the model tokenizer.
 pub(super) fn estimate_input_tokens(body: &Value, limits: &Limits) -> Result<usize, AgentError> {
     crate::agent_runtime::chat::estimate_input_tokens(
@@ -554,7 +554,7 @@ pub(in crate::tender_analysis) fn check_read_scope(
 ) -> Result<(), String> {
     let source_id = match name {
         "read_source" | "read_source_view" => args["source_id"].as_str(),
-        "read_form" => input
+        "read_form" | "read_form_cell" => input
             .structured_forms
             .iter()
             .find(|f| f["form_definition_revision_id"] == args["form_id"])
@@ -780,10 +780,13 @@ pub(in crate::tender_analysis) fn visible_work_evidence(
         .filter(|work| work.status == WorkStatus::Active)
         .map(|work| work.source_scope.as_slice())
         .unwrap_or_default();
-    let supporting_read = state.role == Role::Reviewer
-        && state
-            .work()
-            .is_some_and(|work| work.status == WorkStatus::Active);
+    let supporting_read = state.analysis.outline.phase
+        == super::super::outline_flow::Phase::Discover
+        && matches!(state.draft_stage, super::super::draft::DraftStage::Outline)
+        || state.role == Role::Reviewer
+            && state
+                .work()
+                .is_some_and(|work| work.status == WorkStatus::Active);
     let mut ranges = BTreeMap::<String, Vec<(usize, usize)>>::new();
     for message in messages {
         if let Some(ids) = message["source_view_refs"].as_array() {
@@ -904,13 +907,33 @@ pub(in crate::tender_analysis) fn visible_work_evidence(
                 }
             }
         }
+        if output["ok"] == true
+            && result["items"].is_array()
+            && let Some(kind) = result["kind"].as_str()
+            && ["documents", "document_relations", "decisions"].contains(&kind)
+            && let (Some(start), Some(end)) = (result["offset"].as_u64(), result["next"].as_u64())
+        {
+            tools::cover(
+                ranges.entry(format!("metadata:{kind}")).or_default(),
+                start as usize,
+                end as usize,
+            );
+        }
         let Some(source_id) = result["source_id"].as_str() else {
             continue;
         };
         if output["ok"] != true || (!supporting_read && !scope.iter().any(|id| id == source_id)) {
             continue;
         }
-        let (key, start, end) = if let Some(form_id) = result["form_id"].as_str() {
+        let (key, start, end) = if let (Some(form_id), Some(offset)) =
+            (result["form_id"].as_str(), result["cell_offset"].as_u64())
+        {
+            (
+                format!("metadata:form-cell:{form_id}:{offset}"),
+                result["start"].as_u64(),
+                result["end"].as_u64(),
+            )
+        } else if let Some(form_id) = result["form_id"].as_str() {
             (
                 format!("form:{form_id}"),
                 result["offset"].as_u64(),
@@ -1229,6 +1252,63 @@ pub(super) fn compact_delivered_navigation(transcript: &mut [Value]) -> bool {
 
 /// Evict a complete delivered protocol group, preserving unique active source
 /// evidence when another group can be removed instead.
+/// Only discard unique discovery evidence after its delivered ranges have
+/// corresponding persisted scan conclusions. Unprocessed/latest groups stay.
+pub(in crate::tender_analysis) fn evict_completed_discovery_history(
+    state: &mut Checkpoint,
+    history_budget: usize,
+) -> bool {
+    let _ = history_budget;
+    let starts: Vec<_> = state
+        .transcript
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message["role"] == "assistant")
+        .map(|(index, _)| {
+            if index > 0
+                && super::evidence_delivery::is_retained_message(&state.transcript[index - 1])
+            {
+                index - 1
+            } else {
+                index
+            }
+        })
+        .collect();
+    for pair in starts.windows(2) {
+        let start = if pair[0] == starts[0] { 0 } else { pair[0] };
+        let end = pair[1];
+        let evidence = visible_work_evidence(state, &state.transcript[start..end]);
+        let complete = evidence.iter().all(|(key, ranges)| {
+            let Some((kind, id)) = key.split_once(':') else {
+                return false;
+            };
+            let scanned = &state.analysis.outline.scanned;
+            if kind == "metadata" {
+                if let Some((form, offset)) = id
+                    .strip_prefix("form-cell:")
+                    .and_then(|key| key.rsplit_once(':'))
+                {
+                    return offset.parse::<usize>().ok().is_some_and(|offset| {
+                        tools::contains(scanned.form_cells.get(form), offset, offset + 1)
+                    });
+                }
+            }
+            let done = match kind {
+                "text" => scanned.text.get(id),
+                "form" => scanned.form_cells.get(id),
+                "metadata" => scanned.metadata.get(id),
+                _ => return false,
+            };
+            ranges.iter().all(|&(a, b)| tools::contains(done, a, b))
+        });
+        if complete {
+            state.transcript.drain(start..end);
+            return true;
+        }
+    }
+    false
+}
+
 pub(super) fn evict_delivered_group(
     state: &mut Checkpoint,
     history_budget: usize,
@@ -1530,6 +1610,70 @@ pub(in crate::tender_analysis) fn observe_progress(
     local_completion: Option<String>,
     limits: &Limits,
 ) -> Result<(), String> {
+    if limits.draft_path
+        && *role == Role::Main
+        && state.draft_stage == super::super::draft::DraftStage::Outline
+        && state.analysis.outline.phase == super::super::outline_flow::Phase::Discover
+    {
+        let flow = &state.analysis.outline;
+        let evidence = digest(&state.analysis.coverage)?;
+        // Only new inspected ranges complete discovery work. Requirement edits
+        // cannot reset the scan watchdog while the cursor remains unaccounted.
+        let scanned = digest(&flow.scanned)?;
+        state.main_progress.observe(
+            [evidence, scanned.clone()],
+            Some(scanned),
+            &limits.progress(),
+        );
+        return Ok(());
+    }
+    if limits.draft_path
+        && *role == Role::Main
+        && state.draft_stage == super::super::draft::DraftStage::Outline
+    {
+        let flow = &state.analysis.outline;
+        let organized: BTreeSet<_> = state
+            .analysis
+            .draft_plan
+            .iter()
+            .map(|node| {
+                (
+                    node.id.clone(),
+                    node.requirement_ids.clone(),
+                    serde_json::to_string(&node.format_refs).unwrap(),
+                )
+            })
+            .collect();
+        let resolved: BTreeSet<_> = flow
+            .references
+            .iter()
+            .filter(|(_, reference)| {
+                reference.status == super::super::outline_flow::ReferenceStatus::Resolved
+            })
+            .map(|(id, reference)| {
+                (
+                    id.clone(),
+                    serde_json::to_string(&reference.resolution_grounds).unwrap(),
+                )
+            })
+            .collect();
+        let checks: BTreeSet<_> = flow
+            .checks
+            .iter()
+            .filter(|(_, packet)| packet.status == "pass")
+            .map(|(id, packet)| (id.clone(), packet.snapshot_sha256.clone()))
+            .collect();
+        let completed = digest(&json!([organized, resolved, checks]))?;
+        state.main_progress.observe(
+            [
+                digest(&state.analysis.coverage)?,
+                digest(&state.analysis.draft_plan)?,
+            ],
+            Some(completed),
+            &limits.progress(),
+        );
+        return Ok(());
+    }
     let work = if *role == Role::Main {
         &state.main_work
     } else {
@@ -1926,4 +2070,30 @@ pub(super) fn focused_completion(
         _ => {}
     }
     Ok(None)
+}
+
+/// Only suppress ranges present in the request the model actually answered.
+/// Historical coverage and outputs from this response are not visibility.
+pub(in crate::tender_analysis) fn visible_read_receipt(
+    state: &Checkpoint,
+    delivered: &BTreeMap<String, Vec<(usize, usize)>>,
+    name: &str,
+    result: Value,
+) -> Value {
+    if !matches!(name, "read_source" | "read_form" | "collection_index") {
+        return result;
+    }
+    let message = json!({"role":"tool","content":json!({"ok":true,"result":result}).to_string()});
+    let requested = visible_work_evidence(state, &[message]);
+    if requested.is_empty()
+        || !requested.iter().all(|(key, ranges)| {
+            ranges
+                .iter()
+                .all(|&(start, end)| end > start && tools::contains(delivered.get(key), start, end))
+        })
+    {
+        return result;
+    }
+    json!({"already_visible":true,"ranges":requested,
+        "instruction":"Original evidence is already in the delivered request. Submit inspected ranges with submit_outline_scan; reading receipts are not scan conclusions. If evidence is evicted later, reread the required range."})
 }

@@ -562,12 +562,6 @@ async fn content_heartbeat_failure_cannot_starve_the_effect_reserve() {
 async fn all_active_v2_handler_deadlines_fire_at_the_exact_boundary() {
     let deadlines = [
         ("TenderDocumentProcess", TENDER_HANDLER_HARD_TIMEOUT),
-        ("RequirementSetCompile", REQUIREMENT_HANDLER_HARD_TIMEOUT),
-        (
-            "RequirementSetCompile(draft)",
-            REQUIREMENT_DRAFT_HANDLER_HARD_TIMEOUT,
-        ),
-        ("DocxCompose", DOCX_COMPOSE_HANDLER_HARD_TIMEOUT),
         (
             "ContentGenerate(generate)",
             CONTENT_GENERATE_HANDLER_HARD_TIMEOUT,

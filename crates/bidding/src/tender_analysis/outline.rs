@@ -24,6 +24,7 @@ pub struct OutlineDocument {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TenderOutline {
+    pub notices: Vec<String>,
     pub quality: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compile_status: Option<String>,
@@ -36,6 +37,7 @@ pub struct TenderOutline {
 
 #[derive(Debug, Deserialize)]
 struct Bundle {
+    outline: Option<super::outline_flow::OutlineState>,
     compile_status: Option<String>,
     extracted_from: String,
     #[serde(default)]
@@ -64,6 +66,11 @@ pub fn from_bundle(value: Value) -> Result<TenderOutline, String> {
     let bundle: Bundle = serde_json::from_value(value).map_err(|e| e.to_string())?;
     let records = parse_records(&bundle.records);
     Ok(TenderOutline {
+        notices: bundle
+            .outline
+            .as_ref()
+            .map(super::outline_flow::notices)
+            .unwrap_or_default(),
         quality: "draft".into(),
         compile_status: bundle.compile_status.filter(|s| !s.is_empty()),
         extracted_from: bundle.extracted_from,
@@ -147,9 +154,25 @@ fn insert_path(nodes: &mut Vec<OutlineNode>, parts: &[String]) {
 }
 
 pub fn plan_tree(plan: &[crate::tender_analysis::draft::DraftPlanItem]) -> Vec<OutlineNode> {
+    use crate::tender_analysis::draft::DraftStatus;
+    let node_of = |id: &str| plan.iter().find(|node| node.id == id);
+    let carries_live_child = |item: &crate::tender_analysis::draft::DraftPlanItem| {
+        plan.iter().any(|node| {
+            let mut current = node.parent.clone();
+            while let Some(id) = current {
+                if id == item.id {
+                    return node.status != DraftStatus::Omitted;
+                }
+                current = node_of(&id).and_then(|node| node.parent.clone());
+            }
+            false
+        })
+    };
+    // Preview and Word share this rule: omitted leaves drop out; omitted parents
+    // that still carry live children keep their heading.
     let live: Vec<_> = plan
         .iter()
-        .filter(|item| item.status != crate::tender_analysis::draft::DraftStatus::Omitted)
+        .filter(|item| item.status != DraftStatus::Omitted || carries_live_child(item))
         .collect();
     if live.is_empty() {
         return Vec::new();
@@ -499,9 +522,9 @@ mod tests {
                 "headings":[{"ordinal":0,"kind":"section","heading_path":"须知 > 8. 包装","page_ordinal":null}]}],
             "records": {},
             "draft_plan": [
-                {"id":"vol","parent":null,"order":0,"title":"技术投标文件","prescribed":true,"source_ids":[],"windows":[],"window_index":0,"status":"pending"},
-                {"id":"ch8","parent":"vol","order":8,"title":"8. 包装及运输","prescribed":true,"source_ids":[],"windows":[],"window_index":0,"status":"pending"},
-                {"id":"ch81","parent":"ch8","order":1,"title":"8.1 大件运输","prescribed":true,"source_ids":[],"windows":[],"window_index":0,"status":"pending"}
+                {"id":"vol","parent":null,"order":0,"title":"技术投标文件","prescribed":true,"source_ids":[],"windows":[],"window_index":0,"status":"pending","purpose":"group","requirement_ids":[],"format_refs":[],"body_status":"empty","grounds":[]},
+                {"id":"ch8","parent":"vol","order":8,"title":"8. 包装及运输","prescribed":true,"source_ids":[],"windows":[],"window_index":0,"status":"pending","purpose":"response","requirement_ids":[],"format_refs":[],"body_status":"empty","grounds":[]},
+                {"id":"ch81","parent":"ch8","order":1,"title":"8.1 大件运输","prescribed":true,"source_ids":[],"windows":[],"window_index":0,"status":"pending","purpose":"response","requirement_ids":[],"format_refs":[],"body_status":"empty","grounds":[]}
             ]
         }))
         .unwrap();

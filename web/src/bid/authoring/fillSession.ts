@@ -5,7 +5,7 @@ import type { FillApi, FillIdentity, FillInput, FillStatus } from "../api/fill";
 export type FillAttempt = { input: FillInput; attempt: MutationAttempt };
 export type FillAttemptStore = { read(): FillAttempt | null; write(value: FillAttempt | null): void };
 type State = {
-  phase: "loading" | "ready" | "blocked" | "sending" | "uncertain" | "running" | "completed" | "failed";
+  phase: "loading" | "ready" | "blocked" | "sending" | "uncertain" | "running" | "completed" | "unchanged" | "failed";
   input: FillInput | null; request: FillIdentity | null; job: FillStatus | null; error: string | null;
   /** 已经请求停止：任务仍在写当前章，写完就停并出稿。 */
   stopping: boolean;
@@ -33,6 +33,7 @@ export function createFillSession(
   api: FillApi & Pick<DocxApi, "current">,
   workspace: string,
   store: FillAttemptStore,
+  onPublished?: () => void,
 ) {
   let state: State = { phase: "loading", input: null, request: null, job: null, error: null, stopping: false };
   let flight: FillAttempt | null = null;
@@ -41,15 +42,18 @@ export function createFillSession(
   const listeners = new Set<() => void>();
   const set = (patch: Partial<State>) => { state = { ...state, ...patch }; listeners.forEach(fn => fn()); };
   const unsafe = () => state.phase === "sending" || state.phase === "uncertain";
-  const received = (job: FillStatus) => set({
-    job, request: job,
-    phase: job.status === "pending" ? "running" : job.status === "succeeded" ? "completed" : "failed",
-    error: job.status === "failed"
-      ? (job.error_code === "WORKSPACE_CAS_CONFLICT"
-        ? "稿件在填充期间已被改动，本次填充没有替换当前稿件。"
-        : "本次填充未完成，可在稿件保存并关闭编辑器后重试。")
-      : null,
-  });
+  const received = (job: FillStatus) => {
+    const phase = job.status === "pending" ? "running" : job.status === "succeeded" ? "completed" : "failed";
+    set({
+      job, request: job, phase,
+      error: job.status === "failed"
+        ? (job.error_code === "WORKSPACE_CAS_CONFLICT"
+          ? "稿件在填充期间已被改动，本次填充没有替换当前稿件。"
+          : "本次填充未完成，可在稿件保存并关闭编辑器后重试。")
+        : null,
+    });
+    if (job.status === "succeeded") onPublished?.();
+  };
   async function load(fresh = false) {
     if (unsafe() || state.phase === "running") return;
     const turn = ++epoch;
@@ -104,7 +108,11 @@ export function createFillSession(
     try {
       const request = await api.start(workspace, flight.input, flight.attempt);
       store.write(null); flight = null;
-      set({ phase: "running", request, job: null, stopping: false });
+      if ("status" in request && request.status === "unchanged") {
+        set({ phase: "unchanged", request: null, job: null, stopping: false });
+        return;
+      }
+      set({ phase: "running", request: request as FillIdentity, job: null, stopping: false });
       await poll();
     } catch (error) {
       if (error instanceof ApiError && (error.code === "AGENT_PROVIDER_UNAVAILABLE"

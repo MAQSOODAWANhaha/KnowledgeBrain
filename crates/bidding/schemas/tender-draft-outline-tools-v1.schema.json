@@ -24,7 +24,9 @@
                 "title",
                 "prescribed",
                 "grounds",
-                "requirement_ids"
+                "requirement_ids",
+                "purpose",
+                "format_refs"
               ],
               "properties": {
                 "id": {
@@ -61,6 +63,19 @@
                   "type": "array",
                   "items": {
                     "type": "string"
+                  }
+                },
+                "purpose": {
+                  "type": "string",
+                  "enum": [
+                    "group",
+                    "response"
+                  ]
+                },
+                "format_refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
                   }
                 }
               }

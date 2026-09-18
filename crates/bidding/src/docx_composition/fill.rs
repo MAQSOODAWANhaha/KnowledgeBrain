@@ -4,7 +4,6 @@
 //! 分析 agent（`put_chapter_template`），依据是用户保存的那份 Word 回读出来的章
 //! 树。回读结果是**输入**——请求里冻着它的摘要，执行时用同一份字节重算，SQL 用摘
 //! 要核对第一个检查点，因此「种子」不可能被模型或宿主偷换。
-use super::CompositionMode;
 use crate::{
     agent_error::AgentError,
     docx_round::{DocxRoundBasis, DocxVersionIdentity},
@@ -27,7 +26,6 @@ pub struct FrozenFillRequest {
     pub basis: DocxRoundBasis,
     /// 填章必须绑定一个具体的当前版本：填的是**这一份**用户编辑过的 Word。
     pub expected: Option<DocxVersionIdentity>,
-    pub mode: CompositionMode,
     pub seed_plan_sha256: Option<String>,
     pub source_request: BidAuthoringRequestIdentityV2,
     pub source_input_sha256: String,
@@ -77,7 +75,13 @@ pub async fn read_seed(
         .await
         .map_err(invalid)?;
     if !document.not_checked.is_empty() {
-        return Err(AgentError::new("DOCX_FILL_UNSUPPORTED_CONTENT", format!("Saved document cannot be preserved: {}", document.not_checked.join("; "))));
+        return Err(AgentError::new(
+            "DOCX_FILL_UNSUPPORTED_CONTENT",
+            format!(
+                "Saved document cannot be preserved: {}",
+                document.not_checked.join("; ")
+            ),
+        ));
     }
     let seed = readback::seed_plan(&document, &analysis.analysis.draft_plan);
     if seed.is_empty() {
@@ -95,7 +99,6 @@ impl FrozenFillRequest {
         self.source_request.validate().map_err(invalid)?;
         if self.schema_version != 1
             || self.workspace_id.is_nil()
-            || self.mode != CompositionMode::DraftFill
             || self.expected.is_none()
             || self.source_request != source.source_request
             || self.source_input_sha256 != digest(&source.input).map_err(invalid)?
@@ -128,7 +131,6 @@ async fn load_source(
     .bind(workspace_id)
     .bind(sqlx::types::Json(basis))
     .bind(actor)
-    .bind("draft-fill")
     .fetch_one(pool)
     .await
     .map_err(db_error)?;
@@ -175,13 +177,12 @@ pub async fn prepare(
     } = intent;
     let actor = actor.as_str();
     let sqlx::types::Json(source): sqlx::types::Json<Source> = sqlx::query_scalar(
-        "SELECT kb_bid_v2_prepare_docx_composition_source($1,$2,$3,$4::kb_actor_identity,$5)",
+        "SELECT kb_bid_v2_prepare_docx_composition_source($1,$2,$3,$4::kb_actor_identity)",
     )
     .bind(workspace_id)
     .bind(sqlx::types::Json(&basis))
     .bind(sqlx::types::Json(&expected))
     .bind(actor)
-    .bind("draft-fill")
     .fetch_one(pool)
     .await
     .map_err(db_error)?;
@@ -193,7 +194,6 @@ pub async fn prepare(
         actor: actor.into(),
         basis,
         expected,
-        mode: CompositionMode::DraftFill,
         seed_plan_sha256: Some(digest(&seed).map_err(invalid)?),
         source_request: source.source_request.clone(),
         source_input_sha256: digest(&source.input).map_err(invalid)?,

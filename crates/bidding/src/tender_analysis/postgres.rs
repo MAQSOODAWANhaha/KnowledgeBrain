@@ -225,6 +225,10 @@ impl Journal for PgJournal<'_> {
             .bind(json!({
                 "phase": if state.role == Role::Main { "main" } else { "reviewer" },
                 "draft_stage": state.draft_stage,
+                "outline_phase": state.analysis.outline.phase,
+                "outline_chapters": state.analysis.draft_plan.len(),
+                "outline_requirements": state.analysis.outline.requirements.len(),
+                "outline_open_issues": state.analysis.outline.issues.values().filter(|issue| issue.status == crate::tender_analysis::outline_flow::IssueStatus::Open).count(),
                 "turn": state.turn,
                 "tool_calls": state.tool_calls,
                 "review_rounds": state.review_rounds,
@@ -485,6 +489,7 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
         )
         .map_err(invalid)?,
     };
+    let deadline_secs = claim_budget_secs(&claim["hard_deadline_at"])?;
     let bundle: Value =
         sqlx::query_scalar("SELECT kb_bid_v2_load_tender_analysis_input($1,$2,$3::kb_sha256)")
             .bind(request.request_artifact_id)
@@ -499,7 +504,6 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
     if crate::tender_analysis::draft::draft_claim_exhausted(draft_path, owner.attempt) {
         return Ok(json!({"disposition":"exhausted","reason":"draft_attempt_limit"}));
     }
-    let deadline_secs = crate::tender_analysis::draft::analysis_deadline_secs(draft_path);
     let journal = PgJournal {
         pool,
         request,
@@ -518,21 +522,14 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
             }
             let input: FrozenInput =
                 serde_json::from_value(bundle["input"].clone()).map_err(invalid)?;
-            let mut config: Config =
+            let config: Config =
                 serde_json::from_value(bundle["runtime"].clone()).map_err(invalid)?;
-            config.limits = config
-                .limits
-                .at_least_for(&input)
-                .map_err(|refused| {
-                    AgentError::new(
-                        "AGENT_PROVIDER_UNAVAILABLE",
-                        format!(
-                            "extraction turn estimate {} exceeds ceiling {}",
-                            refused.estimated_turns, refused.ceiling
-                        ),
-                    )
-                })?;
-            let result = agent::run(&input, &config, &journal, model, &local).await?;
+            let model_secs = claim_budget_secs(&claim["hard_deadline_at"])?
+                .saturating_sub(config.budget.publish_reserve_secs);
+            let result = agent::run_with_model_budget(
+                &input, &config, &journal, model, &local,
+                std::time::Duration::from_secs(model_secs),
+            ).await?;
             let compiled = publication(&input, &result)?;
             let staging = stage_draft_docx(
                 pool,
@@ -598,6 +595,18 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
         (Err(error), None) => Err(error),
     };
     persist_attempt_outcome(pool, request, &owner, result).await
+}
+
+pub(crate) fn claim_budget_secs(deadline: &Value) -> Result<u64, AgentError> {
+    let text = deadline
+        .as_str()
+        .ok_or_else(|| invalid("hard_deadline_at missing"))?;
+    let parsed = chrono::DateTime::parse_from_rfc3339(text).map_err(invalid)?;
+    Ok(crate::tender_analysis::draft::handler_budget_secs(
+        Some(parsed.timestamp()),
+        chrono::Utc::now().timestamp(),
+        0,
+    ))
 }
 
 async fn persist_attempt_outcome(

@@ -24,7 +24,7 @@ pub(crate) fn default_token_safety_margin() -> usize {
     4096
 }
 
-/// Conservative application estimate, not a provider tokenizer. Base64 is
+/// Application estimate, not a provider tokenizer or an upper bound. Base64 is
 /// transport encoding; each image instead consumes its configured allowance.
 pub(crate) fn estimate_input_tokens(
     body: &Value,
@@ -48,11 +48,24 @@ pub(crate) fn estimate_input_tokens(
             }
         }
     }
-    serde_json_canonicalizer::to_vec(&text)
-        .map_err(|e| AgentError::new("AGENT_OUTPUT_INVALID", e.to_string()))?
-        .len()
-        .checked_add(reserve)
-        .ok_or_else(overflow)
+    let serialized = serde_json_canonicalizer::to_vec(&text)
+        .map_err(|e| AgentError::new("AGENT_OUTPUT_INVALID", e.to_string()))?;
+    let serialized = std::str::from_utf8(&serialized)
+        .map_err(|e| AgentError::new("AGENT_OUTPUT_INVALID", e.to_string()))?;
+    // Deliberately more conservative than the observed ~3 UTF-8 bytes/token:
+    // ASCII: two chars/token; common CJK: two tokens/character; other scripts
+    // and symbols: byte fallback. Count the entire envelope, then add margin.
+    let halves = serialized.chars().try_fold(0usize, |sum, c| {
+        let cost = if c.is_ascii() {
+            1
+        } else if ('\u{3400}'..='\u{9fff}').contains(&c) {
+            4
+        } else {
+            c.len_utf8() * 2
+        };
+        sum.checked_add(cost).ok_or_else(overflow)
+    })?;
+    halves.div_ceil(2).checked_add(reserve).ok_or_else(overflow)
 }
 
 /// The frozen compatible Chat contract uses max_tokens for every configured

@@ -92,9 +92,15 @@ impl Limits {
         if self.draft_path {
             // 阶段一的绝对门。填章请求不走这里：它在冻结请求时按待填章数另记一套
             // 额度（`draft::fill_limits`），所以这个 20 只约束大纲与骨架。
-            self.max_turns = self.max_turns.max(crate::tender_analysis::draft::outline_turn_cap(input));
+            self.max_turns = self
+                .max_turns
+                .max(crate::tender_analysis::draft::outline_turn_cap(input));
             self.max_tool_calls = self.max_tool_calls.max(self.max_turns.saturating_mul(12));
-            self.max_read_bytes = self.max_read_bytes.max(self.max_turns.saturating_mul(self.max_tool_result_bytes).saturating_mul(4));
+            self.max_read_bytes = self.max_read_bytes.max(
+                self.max_turns
+                    .saturating_mul(self.max_tool_result_bytes)
+                    .saturating_mul(4),
+            );
             if self.max_turns == 0 {
                 self.max_turns = crate::tender_analysis::draft::OUTLINE_MAX_TURNS;
             }
@@ -116,6 +122,14 @@ impl Limits {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RunBudget {
+    pub chunk_count: usize,
+    pub total_timeout_secs: u64,
+    pub publish_reserve_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub checkpoint_contract_version: u32,
     pub runtime_adapter: String,
@@ -123,6 +137,7 @@ pub struct Config {
     pub main_dispatch_policy: String,
     pub provider: AuthoringRuntimeContractV1,
     pub limits: Limits,
+    pub budget: RunBudget,
     pub tools_sha256: String,
     pub review_tools_sha256: String,
     pub main_prompt_sha256: String,
@@ -192,9 +207,27 @@ impl Config {
     pub fn with_provider_for(
         provider: AuthoringRuntimeContractV1,
         mut limits: Limits,
-        _input: Option<&FrozenInput>,
+        input: Option<&FrozenInput>,
     ) -> Result<Self, AgentError> {
         limits.draft_path = true;
+        if let Some(input) = input {
+            limits = limits
+                .at_least_for(input)
+                .map_err(|e| invalid(format!("outline budget refused: {e:?}")))?;
+        }
+        let budget = RunBudget {
+            chunk_count: input.map_or(0, |input| draft::outline_chunks(input).len()),
+            total_timeout_secs: (limits.max_turns as u64)
+                .saturating_mul(
+                    provider
+                        .timeout_ms
+                        .div_ceil(1000)
+                        .saturating_mul(3)
+                        .saturating_add(30),
+                )
+                .saturating_add(draft::PUBLISH_RESERVE_SECS),
+            publish_reserve_secs: draft::PUBLISH_RESERVE_SECS,
+        };
         let fill_tools_sha256 =
             digest(&crate::tender_analysis::draft::fill_schemas()).map_err(invalid)?;
         let fill_prompt_sha256 =
@@ -219,6 +252,7 @@ impl Config {
             main_dispatch_policy: main_dispatch::POLICY.into(),
             provider,
             limits,
+            budget,
             tools_sha256,
             review_tools_sha256,
             main_prompt_sha256,
@@ -233,7 +267,9 @@ impl Config {
     pub fn validate(&self) -> Result<(), AgentError> {
         self.provider.validate().map_err(invalid)?;
         let l = &self.limits;
-        if !l.progress().validate()
+        if self.budget.publish_reserve_secs == 0
+            || self.budget.total_timeout_secs <= self.budget.publish_reserve_secs
+            || !l.progress().validate()
             || self.checkpoint_contract_version != crate::agent_runtime::CHECKPOINT_CONTRACT_VERSION
             || self.repair_task_policy != repair_task_host::POLICY
             || self.main_dispatch_policy != main_dispatch::POLICY
@@ -421,7 +457,11 @@ impl Checkpoint {
         } else {
             &self.reviewer_coverage
         };
-        json!({"phase":self.role,"draft_stage":self.draft_stage,"turn":self.turn,"tool_calls":self.tool_calls,
+        json!({"phase":self.role,"draft_stage":self.draft_stage,"outline_phase":self.analysis.outline.phase,
+            "outline_chapters":self.analysis.draft_plan.len(),
+            "outline_requirements":self.analysis.outline.requirements.len(),
+            "outline_open_issues":self.analysis.outline.issues.values().filter(|issue| issue.status == crate::tender_analysis::outline_flow::IssueStatus::Open).count(),
+            "turn":self.turn,"tool_calls":self.tool_calls,
             "read_bytes":self.read_bytes,"review_rounds":self.review_rounds,"records":self.analysis.records.len(),
             "relations":self.analysis.relations.len(),"unread_ranges":tools::reading_gaps(input,coverage).len(),
             "source_count":input.source_units.len(),"disposition_count":self.analysis.dispositions.len(),
@@ -508,8 +548,13 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
                 "reviewer"
             },
             done: self.state.done,
-            execution_blocked: self.state.role == Role::Reviewer
-                && repair_task_host::exhausted(self.state, limits),
+            execution_blocked: (self.state.role == Role::Reviewer
+                && repair_task_host::exhausted(self.state, limits))
+                || (limits.draft_path
+                    && self.state.role == Role::Main
+                    && self.state.draft_stage == draft::DraftStage::Outline
+                    && self.state.analysis.outline.phase == super::outline_flow::Phase::Discover
+                    && self.state.main_progress.watch.recovery == Recovery::Blocked),
             budget_exhausted: self.state.turn >= limits.max_turns
                 || self.state.tool_calls >= limits.max_tool_calls
                 || self.state.read_bytes >= limits.max_read_bytes,
@@ -584,7 +629,28 @@ pub async fn run<J: Journal, M: Model>(
     model: &M,
     cancel: &CancellationToken,
 ) -> Result<AnalysisResult, AgentError> {
-    run_seeded(input, config, journal, model, cancel, None).await
+    run_seeded(input, config, journal, model, cancel, None, None).await
+}
+
+/// Stop model work at the reserve boundary; checked outlines may still compile.
+pub(crate) async fn run_with_model_budget<J: Journal, M: Model>(
+    input: &FrozenInput,
+    config: &Config,
+    journal: &J,
+    model: &M,
+    cancel: &CancellationToken,
+    model_budget: std::time::Duration,
+) -> Result<AnalysisResult, AgentError> {
+    run_seeded(
+        input,
+        config,
+        journal,
+        model,
+        cancel,
+        None,
+        Some(model_budget),
+    )
+    .await
 }
 
 /// 用户触发的填章 run：从**回读出来的章树**起跑，而不是从零开始拉大纲。
@@ -599,6 +665,7 @@ pub async fn run_fill<J: Journal, M: Model>(
     model: &M,
     cancel: &CancellationToken,
     seed: Vec<crate::tender_analysis::draft::DraftPlanItem>,
+    outline: super::outline_flow::OutlineState,
 ) -> Result<AnalysisResult, AgentError> {
     if seed.is_empty() {
         return Err(invalid("fill run needs a read-back chapter tree"));
@@ -606,7 +673,16 @@ pub async fn run_fill<J: Journal, M: Model>(
     if !config.limits.draft_path {
         return Err(invalid("fill run requires the draft path"));
     }
-    run_seeded(input, config, journal, model, cancel, Some(seed)).await
+    run_seeded(
+        input,
+        config,
+        journal,
+        model,
+        cancel,
+        Some((seed, outline)),
+        None,
+    )
+    .await
 }
 
 async fn run_seeded<J: Journal, M: Model>(
@@ -615,8 +691,13 @@ async fn run_seeded<J: Journal, M: Model>(
     journal: &J,
     model: &M,
     cancel: &CancellationToken,
-    seed: Option<Vec<crate::tender_analysis::draft::DraftPlanItem>>,
+    seed: Option<(
+        Vec<crate::tender_analysis::draft::DraftPlanItem>,
+        super::outline_flow::OutlineState,
+    )>,
+    model_budget: Option<std::time::Duration>,
 ) -> Result<AnalysisResult, AgentError> {
+    let model_deadline = model_budget.map(|budget| tokio::time::Instant::now() + budget);
     tools::validate_input(input).map_err(invalid)?;
     config.validate()?;
     let started = Instant::now();
@@ -684,10 +765,19 @@ async fn run_seeded<J: Journal, M: Model>(
     state.fill_config_sha256 = Some(config.fill_tools_sha256.clone());
     let is_outline_run = seed.is_none();
     match seed {
-        Some(plan) => {
+        Some((plan, outline)) => {
+            let seed_identities = super::readback::seed_identities(&plan).map_err(invalid)?;
+            if state.draft_stage != crate::tender_analysis::draft::DraftStage::None
+                && state.analysis.fill_seed_chapters != seed_identities {
+                return Err(invalid("fill checkpoint differs from the frozen saved-document seed"));
+            }
+            state.analysis.fill_seed_chapters = seed_identities;
             if state.draft_stage == crate::tender_analysis::draft::DraftStage::None {
                 state.analysis.draft_plan = plan;
+                state.analysis.outline = outline;
                 state.draft_stage = crate::tender_analysis::draft::DraftStage::Fill;
+                crate::tender_analysis::draft::after_batch(input, &mut state, false, false)
+                    .map_err(invalid)?;
             } else if state.draft_stage == crate::tender_analysis::draft::DraftStage::Outline {
                 return Err(error(
                     "FROZEN_INPUT_DIGEST_MISMATCH",
@@ -701,22 +791,60 @@ async fn run_seeded<J: Journal, M: Model>(
         }
         None => {}
     }
-    let driven = drive(
-        &mut RunDriver {
+    let already_checked = is_outline_run && super::outline_flow::checked(input, &state);
+    let driven = if already_checked {
+        Ok(())
+    } else {
+        let mut driver = RunDriver {
             input,
             config,
             state: &mut state,
             journal,
             model,
-        },
-        cancel,
-    )
-    .await;
-    if let Err(error) = driven {
-        if is_outline_run || !crate::tender_analysis::draft::draft_should_publish_partial(&error.code, &error.message) { return Err(error); }
+        };
+        if let Some(deadline) = model_deadline {
+            if deadline <= tokio::time::Instant::now() {
+                return Err(error(
+                    "AGENT_DEADLINE_EXCEEDED",
+                    "publish reserve reached before checking completed",
+                ));
+            }
+            tokio::time::timeout_at(deadline, drive(&mut driver, cancel))
+                .await
+                .map_err(|_| {
+                    error(
+                        "AGENT_DEADLINE_EXCEEDED",
+                        "model deadline reached; no partial outline published",
+                    )
+                })?
+        } else {
+            drive(&mut driver, cancel).await
+        }
+    };
+    if let Err(error) = driven
+        && (is_outline_run
+            || !crate::tender_analysis::draft::draft_should_publish_partial(
+                &error.code,
+                &error.message,
+            ))
+    {
+        return Err(error);
     }
     if is_outline_run && !super::outline_flow::checked(input, &state) {
-        return Err(invalid("outline completeness check has not passed; checkpoint retained"));
+        return Err(invalid(
+            "outline completeness check has not passed; checkpoint retained",
+        ));
+    }
+    if !is_outline_run
+        && !state
+            .analysis
+            .draft_plan
+            .iter()
+            .any(|item| item.template_id.is_some())
+    {
+        return Err(invalid(
+            "fill produced no new content; current document remains unchanged",
+        ));
     }
     let stage = state.draft_stage;
     let turns = state.turn;
@@ -875,6 +1003,10 @@ pub(super) async fn execute_turn<J: Journal>(
     if let Some(delivered) = state.pending_coverage.take() {
         state.replace_coverage(delivered);
     }
+    let delivered_discovery = (config.limits.draft_path
+        && state.draft_stage == draft::DraftStage::Outline
+        && state.analysis.outline.phase == super::outline_flow::Phase::Discover)
+        .then(|| context::visible_work_evidence(state, body["messages"].as_array().unwrap()));
     let outline_phase_before = state.analysis.outline.phase;
     let role = state.role.clone();
     state.transcript.push(json!({"role":"assistant","content":if response.content.is_empty(){Value::Null}else{json!(response.content)},
@@ -901,6 +1033,9 @@ pub(super) async fn execute_turn<J: Journal>(
                 | "source_index"
                 | "read_source"
                 | "read_form"
+                | "read_form_cell"
+                | "read_outline"
+                | "read_outline_fragment"
                 | "read_review_task"
                 | "read_source_view"
                 | "search_sources"
@@ -920,6 +1055,9 @@ pub(super) async fn execute_turn<J: Journal>(
             "collection_index"
                 | "read_source"
                 | "read_form"
+                | "read_form_cell"
+                | "read_outline"
+                | "read_outline_fragment"
                 | "read_review_task"
                 | "read_source_view"
                 | "inspect_analysis"
@@ -999,7 +1137,14 @@ pub(super) async fn execute_turn<J: Journal>(
             state.pending_coverage = Some(state.replace_coverage(prior));
         }
         let out = match result {
-            Ok(value) => json!({"ok":true,"result":value}),
+            Ok(value) => {
+                let value = if let Some(delivered) = &delivered_discovery {
+                    context::visible_read_receipt(state, delivered, &call.name, value)
+                } else {
+                    value
+                };
+                json!({"ok":true,"result":value})
+            }
             Err(message) => json!({"ok":false,"error":message}),
         };
         let mut succeeded = out["ok"] == true;
@@ -1113,7 +1258,10 @@ pub(super) async fn execute_turn<J: Journal>(
     crate::tender_analysis::draft::after_batch(input, state, batch_failed, stop)
         .map_err(invalid)?;
     state.turn += 1;
-    if state.role != role || (outline_phase_before != state.analysis.outline.phase && state.analysis.outline.phase == super::outline_flow::Phase::Check) {
+    if state.role != role
+        || (outline_phase_before != state.analysis.outline.phase
+            && state.analysis.outline.phase == super::outline_flow::Phase::Check)
+    {
         state.transcript.clear();
     }
     Ok(tool_results)
@@ -1438,6 +1586,13 @@ pub(super) async fn prepare_request(
     }
     let mut excluded_recall = std::collections::BTreeSet::new();
     let mut omit_preloaded_evidence = false;
+    let mut package_budget = None;
+    let discovering = config.limits.draft_path
+        && matches!(
+            state.draft_stage,
+            draft::DraftStage::None | draft::DraftStage::Outline
+        )
+        && state.analysis.outline.phase == super::outline_flow::Phase::Discover;
     loop {
         let reviewer = state.role == Role::Reviewer;
         let review_packet = if reviewer {
@@ -1567,8 +1722,19 @@ pub(super) async fn prepare_request(
         let preloaded_evidence = if omit_preloaded_evidence {
             None
         } else {
-            evidence_delivery::select(input, config, state)?.map(|evidence| evidence.content)
+            evidence_delivery::select_with_budget(input, config, state, package_budget)?
+                .map(|evidence| evidence.content)
         };
+        if discovering && package_budget.is_some() && preloaded_evidence.is_none() {
+            if context::evict_completed_discovery_history(state, config.limits.max_history_bytes) {
+                package_budget = None;
+                continue;
+            }
+            return Err(error(
+                "AGENT_TURN_BUDGET_EXCEEDED",
+                "context budget cannot hold a minimal discovery evidence package",
+            ));
+        }
         let has_preloaded_evidence = preloaded_evidence.is_some();
         let host = if config.limits.draft_path {
             let mut packet = json!({
@@ -1581,7 +1747,9 @@ pub(super) async fn prepare_request(
             ) {
                 packet["source_index"] =
                     draft::outline_index(input, state, config.limits.max_tool_result_bytes);
-                packet["outline_state"] = super::outline_flow::packet(input, state, config.limits.max_tool_result_bytes).map_err(invalid)?;
+                packet["outline_state"] =
+                    super::outline_flow::packet(input, state, config.limits.max_tool_result_bytes)
+                        .map_err(invalid)?;
             }
             if let Some(evidence) = &preloaded_evidence {
                 packet["preloaded_evidence"] = evidence.clone();
@@ -1660,6 +1828,24 @@ pub(super) async fn prepare_request(
             // Optional recall uses remaining space. Preserve focused candidates
             // and fresh results; try the full cache again on the next request.
             continue;
+        } else if discovering && has_preloaded_evidence {
+            if context::evict_completed_discovery_history(state, config.limits.max_history_bytes) {
+                package_budget = None;
+                continue;
+            }
+            // Retry the entire request with a smaller package. The exact cap
+            // travels in the reserved payload so receipt replay is deterministic.
+            let current =
+                preloaded_evidence.as_ref().unwrap()["assigned_evidence"]["workload_bytes_limit"]
+                    .as_u64()
+                    .unwrap_or(0) as usize;
+            if current <= 1 {
+                return Err(error(
+                    "AGENT_TURN_BUDGET_EXCEEDED",
+                    "context budget cannot hold a minimal discovery evidence package",
+                ));
+            }
+            package_budget = Some(current / 2);
         } else if has_preloaded_evidence {
             // Keep the current protocol group intact. An optional evidence
             // preload that cannot fit grants no receipt; explicit tools remain.
@@ -2061,11 +2247,12 @@ fn apply_inner(
                     | "put_outline_items"
                     | "submit_outline_scan"
                     | "read_outline"
-                    | "finish_outline"
+                    | "assign_outline_fragments"
+                | "finish_outline"
                     | "submit_outline_check"
                     | "omit_outline_item"
                     | "put_chapter_template"
-                    | "put_chapter_omission"
+                    | "skip_chapter_content"
             ))
         && !matches!(
             name,
@@ -2075,23 +2262,42 @@ fn apply_inner(
         return Err("local execution is blocked; select an independent source scope, or retry after its saved dependencies change".into());
     }
     if config.limits.draft_path {
+        if state.analysis.outline.phase == crate::tender_analysis::outline_flow::Phase::Check
+            && !matches!(
+                name,
+                "read_outline" | "read_outline_fragment" | "submit_outline_check"
+            )
+        {
+            return Err(
+                "check phase allows only read_outline and submit_outline_check; rescanning and free source reads are closed"
+                    .into(),
+            );
+        }
         if matches!(
             name,
             "put_outline_item"
-                    | "put_outline_items"
-                    | "submit_outline_scan"
-                    | "read_outline"
-                    | "finish_outline"
-                    | "submit_outline_check"
+                | "put_outline_items"
+                | "submit_outline_scan"
+                | "read_outline"
+                | "read_outline_fragment"
+                | "assign_outline_fragments"
+                | "finish_outline"
+                | "submit_outline_check"
                 | "omit_outline_item"
                 | "put_chapter_template"
-                | "put_chapter_omission"
+                | "skip_chapter_content"
         ) {
             return crate::tender_analysis::draft::apply(input, config, state, name, args);
         }
         if !matches!(
             name,
-            "collection_index" | "source_index" | "read_source" | "read_form" | "search_sources" | "read_source_view"
+            "collection_index"
+                | "source_index"
+                | "search_sources"
+                | "read_source"
+                | "read_form"
+                | "read_form_cell"
+                | "read_source_view"
         ) {
             return Err("unknown or role-forbidden tool".into());
         }

@@ -74,9 +74,11 @@ function DocxGate({ email, projectId, step, tree }: { email: string; projectId: 
           ? <AnalysisProgress projectId={projectId}>
               {result.current
                 ? <>
-                    <DocxEditor key={result.project.workspace_id} workspaceId={result.project.workspace_id}
+                    <DocxEditor key={`${result.project.workspace_id}:${result.current.version_id}`}
+                      workspaceId={result.project.workspace_id}
                       onUnsafeChange={setUnsafe} />
-                    <FillPane key={`fill:${result.project.workspace_id}`} workspaceId={result.project.workspace_id} />
+                    <FillPane key={`fill:${result.project.workspace_id}`} workspaceId={result.project.workspace_id}
+                      onPublished={() => setRetry((value) => value + 1)} />
                   </>
                 : <DraftReady />}
             </AnalysisProgress>

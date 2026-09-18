@@ -110,3 +110,20 @@ describe("user triggered chapter filling", () => {
     expect(fillProgressText(stopped)).toBe("已按你的要求停止，已填的章都已保存");
   });
 });
+
+
+describe("fill without empty chapters", () => {
+  it("returns unchanged without polling or reporting a new version", async () => {
+    const f = fixture();
+    let polls = 0;
+    const session = createFillSession({ ...f.api,
+      start: async (_workspace, input) => ({ status: "unchanged" as const, current: input.expected }),
+      status: async () => { polls++; return f.job; },
+    }, "workspace", f.store);
+    await session.load();
+    await session.start();
+    expect(session.getState().phase).toBe("unchanged");
+    expect(polls).toBe(0);
+    expect(f.store.read()).toBe(null);
+  });
+});

@@ -3,7 +3,7 @@
     "type": "function",
     "function": {
       "name": "submit_outline_scan",
-      "description": "Commit only inspected, delivered text byte ranges and dense form cell ranges. Empty requirement id allocates an ID. Preserve unresolved references and input problems; issues is the complete remaining issue list.",
+      "description": "Commit inspected delivered text, grid and collection metadata ranges. Entries are upserts; omitted saved issues remain open. Use returned IDs for updates. In outline phase, update existing requirements/references with exact read grounds and empty scan-range maps. Use read_outline(kind=blockers) for actionable repair IDs.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -13,7 +13,9 @@
           "empty_sources",
           "requirements",
           "references",
-          "issues"
+          "issues",
+          "review_fragments",
+          "metadata"
         ],
         "properties": {
           "text": {
@@ -86,30 +88,583 @@
                 "grounds": {
                   "type": "array",
                   "items": {
-                    "type": "object"
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "source_id",
+                      "start",
+                      "end"
+                    ],
+                    "properties": {
+                      "source_id": {
+                        "type": "string"
+                      },
+                      "start": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "end": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "view_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "grid_cell": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "form_id",
+                              "row",
+                              "column"
+                            ],
+                            "properties": {
+                              "form_id": {
+                                "type": "string"
+                              },
+                              "row": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "column": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
                   }
                 },
                 "format_grounds": {
                   "type": "array",
                   "items": {
-                    "type": "object"
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "source_id",
+                      "start",
+                      "end"
+                    ],
+                    "properties": {
+                      "source_id": {
+                        "type": "string"
+                      },
+                      "start": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "end": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "view_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "grid_cell": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "form_id",
+                              "row",
+                              "column"
+                            ],
+                            "properties": {
+                              "form_id": {
+                                "type": "string"
+                              },
+                              "row": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "column": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
                   }
                 },
                 "order_constraints": {
                   "type": "array",
-                  "items": { "type": "string" }
+                  "items": {
+                    "type": "string"
+                  }
                 },
-                "kind": { "type": "string" }
+                "kind": {
+                  "type": "string"
+                }
               }
             }
           },
           "references": {
             "type": "array",
-            "items": { "type": "object", "additionalProperties": false }
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "grounds",
+                "target_description",
+                "target_ids",
+                "requirement_ids",
+                "impact",
+                "status",
+                "resolution_grounds"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "grounds": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "source_id",
+                      "start",
+                      "end"
+                    ],
+                    "properties": {
+                      "source_id": {
+                        "type": "string"
+                      },
+                      "start": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "end": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "view_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "grid_cell": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "form_id",
+                              "row",
+                              "column"
+                            ],
+                            "properties": {
+                              "form_id": {
+                                "type": "string"
+                              },
+                              "row": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "column": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                "target_description": {
+                  "type": "string"
+                },
+                "target_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "requirement_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "impact": {
+                  "type": "string",
+                  "enum": [
+                    "structure",
+                    "format",
+                    "content"
+                  ]
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "resolved",
+                    "unresolved"
+                  ]
+                },
+                "resolution_grounds": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "source_id",
+                      "start",
+                      "end"
+                    ],
+                    "properties": {
+                      "source_id": {
+                        "type": "string"
+                      },
+                      "start": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "end": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "view_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "grid_cell": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "form_id",
+                              "row",
+                              "column"
+                            ],
+                            "properties": {
+                              "form_id": {
+                                "type": "string"
+                              },
+                              "row": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "column": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
           },
           "issues": {
             "type": "array",
-            "items": { "type": "object", "additionalProperties": false }
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "code",
+                "description",
+                "requirement_ids",
+                "chapter_ids",
+                "reference_ids",
+                "grounds",
+                "status",
+                "resolution_grounds"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "requirement_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "chapter_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reference_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "grounds": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "source_id",
+                      "start",
+                      "end"
+                    ],
+                    "properties": {
+                      "source_id": {
+                        "type": "string"
+                      },
+                      "start": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "end": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "view_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "grid_cell": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "form_id",
+                              "row",
+                              "column"
+                            ],
+                            "properties": {
+                              "form_id": {
+                                "type": "string"
+                              },
+                              "row": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "column": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                "status": {
+                  "enum": [
+                    "open",
+                    "resolved"
+                  ],
+                  "type": "string"
+                },
+                "resolution_grounds": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "source_id",
+                      "start",
+                      "end"
+                    ],
+                    "properties": {
+                      "source_id": {
+                        "type": "string"
+                      },
+                      "start": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "end": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "view_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "grid_cell": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "form_id",
+                              "row",
+                              "column"
+                            ],
+                            "properties": {
+                              "form_id": {
+                                "type": "string"
+                              },
+                              "row": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "column": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "review_fragments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "kind",
+                "span",
+                "document_id",
+                "volume_ids"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "span": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "source_id",
+                    "start",
+                    "end"
+                  ],
+                  "properties": {
+                    "source_id": {
+                      "type": "string"
+                    },
+                    "start": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "end": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "view_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "grid_cell": {
+                      "anyOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "form_id",
+                            "row",
+                            "column"
+                          ],
+                          "properties": {
+                            "form_id": {
+                              "type": "string"
+                            },
+                            "row": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "column": {
+                              "type": "integer",
+                              "minimum": 0
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                "document_id": {
+                  "type": "string"
+                },
+                "volume_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
           }
         }
       }
@@ -132,10 +687,13 @@
           "kind": {
             "type": "string",
             "enum": [
+              "pending_scan",
               "chapters",
               "requirements",
               "references",
-              "issues"
+              "issues",
+              "fragments",
+              "blockers"
             ]
           },
           "offset": {
@@ -172,16 +730,266 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "snapshot_sha256",
+          "packet_id",
+          "packet_snapshot_sha256",
           "issues"
         ],
         "properties": {
-          "snapshot_sha256": {
+          "packet_id": {
             "type": "string"
+          },
+          "packet_snapshot_sha256": {
+            "type": "string"
+          },
+          "snapshot_sha256": {
+            "type": "string",
+            "description": "Deprecated alias for packet_snapshot_sha256"
           },
           "issues": {
             "type": "array",
-            "items": { "type": "object", "additionalProperties": false }
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "code",
+                "description",
+                "requirement_ids",
+                "chapter_ids",
+                "reference_ids",
+                "grounds",
+                "status",
+                "resolution_grounds"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "requirement_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "chapter_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reference_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "grounds": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "source_id",
+                      "start",
+                      "end"
+                    ],
+                    "properties": {
+                      "source_id": {
+                        "type": "string"
+                      },
+                      "start": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "end": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "view_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "grid_cell": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "form_id",
+                              "row",
+                              "column"
+                            ],
+                            "properties": {
+                              "form_id": {
+                                "type": "string"
+                              },
+                              "row": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "column": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                "status": {
+                  "enum": [
+                    "open",
+                    "resolved"
+                  ],
+                  "type": "string"
+                },
+                "resolution_grounds": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "source_id",
+                      "start",
+                      "end"
+                    ],
+                    "properties": {
+                      "source_id": {
+                        "type": "string"
+                      },
+                      "start": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "end": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "view_id": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "grid_cell": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "form_id",
+                              "row",
+                              "column"
+                            ],
+                            "properties": {
+                              "form_id": {
+                                "type": "string"
+                              },
+                              "row": {
+                                "type": "integer",
+                                "minimum": 0
+                              },
+                              "column": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_outline_fragment",
+      "description": "Read a saved fragment in bounded UTF-8 byte ranges. During check only the active packet is allowed. Confirm all ranges in a later model turn before submitting the check.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "fragment_id",
+          "start",
+          "max_bytes"
+        ],
+        "properties": {
+          "fragment_id": {
+            "type": "string"
+          },
+          "start": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "max_bytes": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "assign_outline_fragments",
+      "description": "After organization, assign unresolved discovery fragment scopes to existing root chapter IDs or explicitly mark global clauses. Do not put unrelated technical clauses into composition.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "assignments"
+        ],
+        "properties": {
+          "assignments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "fragment_id",
+                "volume_ids",
+                "global"
+              ],
+              "properties": {
+                "fragment_id": {
+                  "type": "string"
+                },
+                "volume_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "global": {
+                  "type": "boolean"
+                }
+              }
+            }
           }
         }
       }

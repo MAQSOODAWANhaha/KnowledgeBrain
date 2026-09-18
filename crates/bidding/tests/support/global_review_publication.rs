@@ -13,7 +13,7 @@ async fn analysis_v2_publication_and_export_basis_preserve_exact_frozen_input() 
         .unwrap();
     assert!(database.starts_with("knowledgebrain_test_"));
     let (request, input) = seed(&pool).await;
-    let owner = composition_claim(&pool, &request).await;
+    let owner = claim_agent_run(&pool, &request).await;
     let journal = postgres::PgJournal {
         pool: &pool,
         request: &request,
@@ -197,108 +197,4 @@ fn legacy_v1_publication_projection_retains_its_own_contract() {
         )
         .is_err()
     );
-}
-
-pub(super) async fn reject_invalid_composition_plan_publication(
-    pool: &PgPool,
-    identity: &BidAuthoringRequestIdentityV2,
-    owner: &bidding::bid_authoring_v2::AgentRunLease,
-    checkpoint: &bidding::docx_composition::agent::Checkpoint,
-) {
-    for case in [
-        "empty_plan",
-        "missing_review",
-        "extra_review",
-        "wrong_plan_digest",
-        "wrong_plan_id",
-        "wrong_review_id",
-        "old_artifact",
-        "old_draft",
-        "findings",
-    ] {
-        let mut state = json!(checkpoint);
-        let key = state["workspace"]["draft"]["plan"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .next()
-            .unwrap()
-            .clone();
-        match case {
-            "empty_plan" => state["workspace"]["draft"]["plan"] = json!({}),
-            "missing_review" => {
-                state["workspace"]["plan_reviews"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove(&key);
-            }
-            "extra_review" => {
-                state["workspace"]["plan_reviews"]["foreign"] =
-                    state["workspace"]["plan_reviews"][&key].clone()
-            }
-            "wrong_plan_digest" => {
-                state["workspace"]["artifact"]["manifest"]["plan_sha256"] = json!("a".repeat(64))
-            }
-            "wrong_plan_id" => state["workspace"]["draft"]["plan"][&key]["id"] = json!("foreign"),
-            "wrong_review_id" => {
-                state["workspace"]["plan_reviews"][&key]["item_id"] = json!("foreign")
-            }
-            "old_artifact" => {
-                state["workspace"]["plan_reviews"][&key]["artifact_sha256"] = json!("b".repeat(64))
-            }
-            "old_draft" => {
-                state["workspace"]["plan_reviews"][&key]["draft_sha256"] = json!("c".repeat(64))
-            }
-            "findings" => {
-                state["workspace"]["plan_reviews"][&key]["conclusion"] = json!("findings");
-                state["workspace"]["plan_reviews"][&key]["finding_ids"] = json!(["remaining"]);
-            }
-            _ => unreachable!(),
-        }
-        if matches!(case, "empty_plan" | "wrong_plan_id") {
-            let draft_sha = bidding::tender_analysis::digest(&state["workspace"]["draft"]).unwrap();
-            state["workspace"]["artifact"]["manifest"]["draft_sha256"] = json!(draft_sha);
-            state["workspace"]["artifact"]["manifest"]["plan_sha256"] = json!(
-                bidding::tender_analysis::digest(&state["workspace"]["draft"]["plan"]).unwrap()
-            );
-            for review in state["workspace"]["plan_reviews"]
-                .as_object_mut()
-                .unwrap()
-                .values_mut()
-            {
-                review["draft_sha256"] = json!(draft_sha);
-            }
-        }
-        let payload = serde_json_canonicalizer::to_vec(&state).unwrap();
-        let sha = platform::sha256_hex(&payload);
-        let mut tx = pool.begin().await.unwrap();
-        // Test-owned append and rollback simulate a bad stored host checkpoint;
-        // all byte/hash and immutable-row constraints still apply.
-        sqlx::query("INSERT INTO bid_tender_agent_checkpoint_artifacts(request_artifact_id,frozen_input_sha256,stage_kind,batch_ordinal,
-             contract_sha256,canonical_input,input_sha256,canonical_payload,content_sha256)
-             SELECT request_artifact_id,frozen_input_sha256,stage_kind,batch_ordinal+1,
-             contract_sha256,canonical_input,input_sha256,$3,$4::kb_sha256
-             FROM bid_tender_agent_checkpoint_artifacts WHERE request_artifact_id=$1 AND frozen_input_sha256=$2::kb_sha256
-             AND stage_kind='composition_checkpoint' ORDER BY batch_ordinal DESC LIMIT 1")
-            .bind(identity.request_artifact_id).bind(&identity.frozen_input_sha256).bind(payload).bind(&sha)
-            .execute(&mut *tx).await.unwrap();
-        let error = sqlx::query_scalar::<_, Value>(
-            "SELECT kb_bid_v2_publish_docx_composition($1,$2::kb_sha256,$3,$4,$5::kb_sha256,$6,$7)",
-        )
-        .bind(identity.request_artifact_id)
-        .bind(&identity.frozen_input_sha256)
-        .bind(owner.attempt)
-        .bind(owner.execution_owner_token)
-        .bind(&sha)
-        .bind(Uuid::new_v4())
-        .bind(Uuid::new_v4())
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("composition plan"),
-            "{case}: {error}"
-        );
-        tx.rollback().await.unwrap();
-    }
 }

@@ -204,8 +204,8 @@ fn report(
             {"id":"output_inventory","status":if inventory_ok {"pass"} else {"fail"},
                 "detail":"File-native DOCX inventory is bound to this frozen version; generation bookmarks are not the scan denominator."},
             export_review_check(inventory, &inventory_sha256, review),
-            {"id":"tender_semantics","status":"not_checked","detail":"Export does not inherit semantic approval from an earlier composition manifest. Complete final-document review against the frozen tender requirements remains necessary."},
-            {"id":"page_layout","status":"not_checked","detail":"Pagination, tables, signatures and source-specific layout still require inspection of these actual final files."}
+            {"id":"tender_semantics","status":"not_checked","detail":"Export does not claim semantic approval from outline, fill, or composition. Only checks that actually ran are recorded above."},
+            {"id":"page_layout","status":"not_checked","detail":"Pagination, tables, signatures and source-specific layout still require inspection of these actual files."}
         ]}),
     )
 }

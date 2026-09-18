@@ -1,5 +1,6 @@
 use super::*;
 use bidding::docx_composition::compiler::Manifest;
+use bidding::docx_composition::postgres;
 
 #[derive(Deserialize)]
 struct Identity {

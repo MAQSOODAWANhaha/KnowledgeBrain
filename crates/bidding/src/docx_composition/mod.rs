@@ -1,14 +1,12 @@
-//! Incremental composition of a new DOCX from one frozen, independently
-//! reviewed tender analysis. This workspace contains no bidder facts.
-pub mod agent;
-mod agent_scope;
-mod agent_work;
+//! Deterministic DOCX compilation and optional filling of saved chapters.
 pub mod compiler;
 pub mod document;
 pub mod fill;
 pub mod postgres;
 pub mod runtime;
-pub mod tools;
+#[cfg(test)]
+#[path = "tests/compiler_fixture.rs"]
+mod tools;
 
 use crate::{
     docx_template::{SectionPlacement, SourcePart, TemplateStyle},
@@ -16,16 +14,6 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-
-/// 同一条 `docx_compose` 请求轨道上的两种运行：终稿编制，或用户触发的草稿填章。
-/// 模式决定跑哪个合同、允许什么样的分析、以及出稿走哪条路。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum CompositionMode {
-    #[serde(rename = "official")]
-    Official,
-    #[serde(rename = "draft-fill")]
-    DraftFill,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -258,6 +246,8 @@ pub fn synthesize_draft_document(
     validate_draft_basis(input, result)?;
     let mut draft = Draft::new(input, result)?;
     let plan = &result.analysis.draft_plan;
+    crate::tender_analysis::readback::validate_seed(&result.analysis)?;
+    let retained = !result.analysis.fill_seed_chapters.is_empty();
     crate::tender_analysis::outline_flow::tree_valid(plan)?;
     // The compiler validates every ground against what the run actually read.
     // A large tender only reads its anchor windows, so a whole-source span would
@@ -283,8 +273,30 @@ pub fn synthesize_draft_document(
         .text
         .iter()
         .find(|(_, ranges)| !ranges.is_empty())
-        .map(|(id, _)| id.clone())
-        .ok_or("draft skeleton needs a read source range")?;
+        .map(|(id, _)| id.clone());
+    if unbound.is_none() && !retained {
+        return Err("draft skeleton needs a read source range".into());
+    }
+    let retained_grounds = |item: &DraftPlanItem| -> Result<Vec<Span>, String> {
+        if retained {
+            return Ok(item.grounds.clone());
+        }
+        let bound: Vec<_> = if !item.grounds.is_empty() {
+            item.grounds.clone()
+        } else {
+            item.source_ids.iter().filter_map(|id| read(id)).collect()
+        };
+        if !bound.is_empty() {
+            Ok(bound)
+        } else {
+            Ok(vec![
+                unbound
+                    .as_deref()
+                    .and_then(read)
+                    .ok_or("read source range vanished")?,
+            ])
+        }
+    };
     let node_of = |id: &str| plan.iter().find(|node| node.id == id);
     // An omitted volume still holds its live children, so it keeps a heading;
     // an omitted leaf is the only node allowed to leave the document.
@@ -302,7 +314,7 @@ pub fn synthesize_draft_document(
     };
     let mut sources = std::collections::BTreeSet::new();
     for item in plan {
-        if item.status == DraftStatus::Omitted && !carries_live_child(item) {
+        if item.status == DraftStatus::Omitted && !retained && !carries_live_child(item) {
             continue;
         }
         let mut parent = item.parent.clone();
@@ -313,11 +325,7 @@ pub fn synthesize_draft_document(
             // The user's own body outranks everything else: a chapter read back
             // with text keeps that text, whatever the plan says about filling it.
             _ if !item.preserved.is_empty() => {
-                let bound: Vec<_> = if !item.grounds.is_empty() { item.grounds.clone() } else { item.source_ids.iter().filter_map(|id| read(id)).collect() };
-                let grounds = match bound.is_empty() {
-                    false => bound,
-                    true => vec![read(&unbound).ok_or("read source range vanished")?],
-                };
+                let grounds = retained_grounds(item)?;
                 (
                     vec![Content::Preserved {
                         blocks: item.preserved.clone(),
@@ -360,11 +368,7 @@ pub fn synthesize_draft_document(
             // instead of a body; a leaf declares the body as bidder work. Either
             // way it cites a read range so the compiler can ground it.
             _ => {
-                let bound: Vec<_> = if !item.grounds.is_empty() { item.grounds.clone() } else { item.source_ids.iter().filter_map(|id| read(id)).collect() };
-                let grounds = match bound.is_empty() {
-                    false => bound,
-                    true => vec![read(&unbound).ok_or("read source range vanished")?],
-                };
+                let grounds = retained_grounds(item)?;
                 let content = match carries_live_child(item) {
                     true => vec![],
                     false => vec![Content::BidderBlank],
@@ -402,8 +406,13 @@ pub fn synthesize_draft_document(
         );
     }
     let mut grounds: Vec<Span> = sources.iter().filter_map(|id| read(id)).collect();
-    if grounds.is_empty() {
-        grounds.push(read(&unbound).ok_or("read source range vanished")?);
+    if grounds.is_empty() && !retained {
+        grounds.push(
+            unbound
+                .as_deref()
+                .and_then(read)
+                .ok_or("read source range vanished")?,
+        );
     }
     let title = input
         .documents

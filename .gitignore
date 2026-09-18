@@ -8,6 +8,8 @@
 .env
 var/
 fixtures/
+!crates/bidding/schemas/fixtures/
+!crates/bidding/schemas/fixtures/**
 .venv/
 __pycache__/
 web/node_modules/

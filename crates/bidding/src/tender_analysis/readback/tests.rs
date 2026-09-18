@@ -13,6 +13,9 @@ struct Unit {
     field: Option<&'static str>,
     grid: Option<TableGrid>,
     reason: Option<&'static str>,
+    part: &'static str,
+    style_name: Option<&'static str>,
+    fields: Vec<&'static str>,
 }
 
 fn paragraph(text: &'static str) -> Unit {
@@ -24,6 +27,9 @@ fn paragraph(text: &'static str) -> Unit {
         field: None,
         grid: None,
         reason: None,
+        part: "/word/document.xml",
+        style_name: Some("Normal"),
+        fields: vec![],
     }
 }
 
@@ -31,6 +37,11 @@ fn heading(level: u32, text: &'static str, bookmarks: Vec<&'static str>) -> Unit
     Unit {
         level: Some(level),
         bookmarks,
+        style_name: Some(match level {
+            1 => "Heading 1",
+            2 => "Heading 2",
+            _ => "Heading 3",
+        }),
         ..paragraph(text)
     }
 }
@@ -65,6 +76,9 @@ fn table(cells: &[(usize, usize, &str)]) -> Unit {
                 .collect(),
         }),
         reason: None,
+        part: "/word/document.xml",
+        style_name: None,
+        fields: vec![],
     }
 }
 
@@ -82,13 +96,15 @@ fn inventory(units: Vec<Unit>) -> (OutputInventoryManifest, Vec<StructuredSource
     for (ordinal, unit) in units.into_iter().enumerate() {
         let key = format!("story:{ordinal}");
         entries.push(OutputInventoryEntry {
+            table_layout: unit.grid.as_ref().map(|grid| docparser::OutputTableLayout { widths_twips: vec![2000; grid.column_count as usize], header_rows: 0 }),
             unit_key: key.clone(),
-            part: "/word/document.xml".into(),
+            part: unit.part.into(),
             ordinal,
             kind: unit.kind.into(),
             bookmarks: unit.bookmarks.iter().map(|s| (*s).to_string()).collect(),
-            fields: vec![],
+            fields: unit.fields.iter().map(|s| (*s).to_string()).collect(),
             heading_level: unit.level,
+            style_name: unit.style_name.map(str::to_string),
             field_region: unit.field.map(str::to_string),
             status: if unit.reason.is_some() {
                 "not_checked".into()
@@ -173,6 +189,32 @@ fn compiled_skeleton_claims_every_chapter_by_bookmark() {
     );
     assert_eq!(document.chapters[1].parent.as_deref(), Some("vol-biz"));
     assert_eq!(pending_chapters(&document).len(), 2, "空章全部待填");
+    assert!(
+        document
+            .not_checked
+            .iter()
+            .any(|reason| reason.contains("before the first chapter")),
+        "{:?}",
+        document.not_checked
+    );
+}
+
+#[test]
+fn pre_chapter_non_toc_content_is_reported_not_silently_dropped() {
+    let document = read(vec![
+        paragraph("封面单位名称"),
+        heading(1, "第一册 商务文件", vec!["kb_s0"]),
+        paragraph(""),
+    ]);
+    assert!(
+        document
+            .not_checked
+            .iter()
+            .any(|reason| reason.contains("before the first chapter")),
+        "{:?}",
+        document.not_checked
+    );
+    assert_eq!(document.chapters.len(), 1);
 }
 
 /// 目录条目与章标题逐字相同：认成章就会每章读两遍。
@@ -273,7 +315,10 @@ fn chapters_with_body_are_preserved_and_tables_keep_their_grid() {
 fn not_checked_carriers_are_reported_and_never_become_body() {
     let document = read(vec![heading(1, "第一册 商务文件", vec!["kb_s0"]), image()]);
     assert!(!document.chapters[0].has_body());
-    assert_eq!(document.not_checked, vec!["image requires visual review"]);
+    assert_eq!(
+        document.not_checked,
+        vec!["/word/document.xml / story:1 / ordinal 1: image requires visual review"]
+    );
 }
 
 #[test]
@@ -308,4 +353,119 @@ fn preserved_units_receipt_keys_match_the_block_references() {
     assert_eq!(units["story:1"]["paragraphs"][0], "我方郑重承诺如下。");
     assert_eq!(units["story:2"]["kind"], "table");
     assert_eq!(units["story:2"]["cells"][3]["text"], "壹万元");
+}
+
+#[test]
+fn header_footer_custom_style_and_date_fields_block_fill() {
+    let header = Unit {
+        part: "/word/header1.xml",
+        ..paragraph("页眉单位名称")
+    };
+    let custom = Unit {
+        style_name: Some("BidderBrand"),
+        ..paragraph("品牌段落")
+    };
+    let date_field = Unit {
+        field: Some("field"),
+        fields: vec![" DATE \\@ \"yyyy\""],
+        ..paragraph("2026")
+    };
+    let document = read(vec![
+        heading(1, "第一册 商务文件", vec!["kb_s0"]),
+        header,
+        custom,
+        date_field,
+        paragraph("可保留正文"),
+    ]);
+    assert!(
+        document
+            .not_checked
+            .iter()
+            .any(|reason| reason.contains("header/footer")),
+        "{:?}",
+        document.not_checked
+    );
+    assert!(
+        document
+            .not_checked
+            .iter()
+            .any(|reason| reason.contains("custom style")),
+        "{:?}",
+        document.not_checked
+    );
+    assert!(
+        document
+            .not_checked
+            .iter()
+            .any(|reason| reason.contains("ordinary fields") || reason.contains("DATE/REF")),
+        "{:?}",
+        document.not_checked
+    );
+    assert_eq!(document.chapters[0].body.len(), 1);
+}
+
+#[test]
+fn renamed_chapter_clears_prior_grounds_and_format_refs() {
+    use crate::tender_analysis::draft::{BodyStatus, ChapterPurpose, DraftPlanItem, DraftStatus};
+    let document = read(vec![
+        heading(1, "第一册 商务卷", vec!["kb_s0"]),
+        paragraph(""),
+    ]);
+    assert_eq!(document.chapters[0].claim, Claim::Bookmark);
+    assert_eq!(document.chapters[0].title, "第一册 商务卷");
+    let prior = vec![DraftPlanItem {
+        grounds: vec![crate::tender_analysis::Span {
+            source_id: "source".into(),
+            start: 0,
+            end: 4,
+            view_id: None,
+            grid_cell: None,
+        }],
+        requirement_ids: vec!["requirement-1".into()],
+        id: "vol-biz".into(),
+        parent: None,
+        order: 0,
+        title: "第一册 商务文件".into(),
+        prescribed: true,
+        source_ids: vec!["source".into()],
+        windows: vec![vec!["source".into()]],
+        window_index: 0,
+        template_id: None,
+        status: DraftStatus::Pending,
+        purpose: ChapterPurpose::Response,
+        format_refs: vec![crate::tender_analysis::Span {
+            source_id: "format".into(),
+            start: 0,
+            end: 2,
+            view_id: None,
+            grid_cell: None,
+        }],
+        body_status: BodyStatus::Empty,
+        omit_reason: None,
+        preserved: vec![],
+    }];
+    let seeded = seed_plan(&document, &prior);
+    assert_eq!(seeded[0].id, "vol-biz");
+    assert!(seeded[0].grounds.is_empty(), "{:?}", seeded[0].grounds);
+    assert!(seeded[0].requirement_ids.is_empty());
+    assert!(seeded[0].format_refs.is_empty());
+    assert!(seeded[0].source_ids.is_empty());
+    assert!(seeded[0].windows.is_empty());
+    assert_eq!(seeded[0].status, DraftStatus::Pending);
+}
+
+#[test]
+fn unchanged_system_note_is_not_body_but_edited_note_is_protected() {
+    let (mut manifest, mut units) = inventory(vec![
+        heading(1, "第一册 商务文件", vec!["kb_s0"]),
+        paragraph("待核实引用 [reference-1] 外部标准"),
+    ]);
+    manifest.units[1]
+        .bookmarks
+        .push(crate::docx_template::notice_bookmark(&units[1].text));
+    let read = read_chapters(&manifest, &units, &sections(), &prior_titles()).unwrap();
+    assert!(!read.chapters[0].has_body());
+    units[1].text.push_str("：已由用户补充说明");
+    let read = read_chapters(&manifest, &units, &sections(), &prior_titles()).unwrap();
+    assert!(read.chapters[0].has_body());
 }

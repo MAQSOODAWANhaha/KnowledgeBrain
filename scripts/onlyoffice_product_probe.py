@@ -149,12 +149,6 @@ def verify_attached_identity(ticket, current, docx, download):
     assert hashlib.sha256(docx).hexdigest() == expected["docx_sha256"]
     base = f"/api/v2/submission-workspaces/{ticket['workspace']}/docx/versions/{expected['version_id']}"
     assert download(base + "/download") == docx, "local sample differs from the actual saved version"
-    manifest_bytes = download(base + "/composition-report")
-    assert hashlib.sha256(manifest_bytes).hexdigest() == expected["composition_manifest_sha256"]
-    manifest = json.loads(manifest_bytes)
-    assert manifest["docx_sha256"] == expected["docx_sha256"]
-    assert manifest["analysis_sha256"] == expected["analysis_sha256"]
-    assert manifest["status"] in ("reviewed_template", "reviewed_template_with_open_items")
     return current
 
 

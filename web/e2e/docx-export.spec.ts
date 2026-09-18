@@ -39,7 +39,7 @@ test("lost export receipt survives reload and retains exact version, key and req
   const f = await fixture(page); f.network.loseReceipt = true;
   await page.goto(`/#/bids/${project}/export`);
   const panel = page.getByTestId("docx-export");
-  await expect(panel).toContainText("终稿需另一次独立复核请求");
+  await expect(panel).toContainText("PDF 由该版 DOCX 转换");
   await panel.getByRole("button", { name: "生成导出文件" }).click();
   await expect(panel.getByRole("button", { name: "确认本次导出请求" })).toBeVisible();
   f.current.version_id = "later-version"; page.on("dialog", dialog => void dialog.accept()); await page.reload();

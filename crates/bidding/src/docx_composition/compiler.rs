@@ -548,7 +548,19 @@ pub fn compile(
         .presentation
         .as_ref()
         .ok_or("document presentation is not configured")?;
-    validate_grounds(input, &result.analysis, &p.grounds)?;
+    crate::tender_analysis::readback::validate_seed(&result.analysis)?;
+    let retained = result.review.draft && !result.analysis.fill_seed_chapters.is_empty();
+    if retained {
+        let expected = super::synthesize_draft_document(input, result)?;
+        if serde_json::to_value(&p.style).map_err(|e| e.to_string())?
+            != serde_json::to_value(&expected.presentation.unwrap().style)
+                .map_err(|e| e.to_string())?
+        {
+            return Err("fill must retain the supported presentation".into());
+        }
+    } else {
+        validate_grounds(input, &result.analysis, &p.grounds)?;
+    }
     if p.explanation.trim().is_empty() {
         return Err("presentation decision needs explanation".into());
     }
@@ -559,13 +571,28 @@ pub fn compile(
         sections: vec![],
         excluded_sources: vec![],
         excluded_forms: vec![],
-        notices: vec![],
+        notices: crate::tender_analysis::outline_flow::notices(&result.analysis.outline),
     };
     let mut placements = vec![];
     let mut source_excerpts = vec![];
     let mut section_locations = vec![];
     for (ordinal, (section, depth)) in ordered_sections(draft)?.into_iter().enumerate() {
-        validate_grounds(input, &result.analysis, &section.grounds)?;
+        let saved_section = retained
+            && result.analysis.draft_plan.iter().any(|item| {
+                item.id == section.id
+                    && item.parent == section.parent
+                    && item.title == section.title
+                    && item.order == section.order
+                    && item.grounds == section.grounds
+                    && section.content.iter().all(|content| match content {
+                        Content::Preserved { blocks } => *blocks == item.preserved,
+                        Content::BidderBlank => item.preserved.is_empty(),
+                        _ => false,
+                    })
+            });
+        if !saved_section {
+            validate_grounds(input, &result.analysis, &section.grounds)?;
+        }
         let mut blocks = vec![];
         let before = placements.len();
         for content in &section.content {
@@ -808,6 +835,10 @@ pub fn compile(
                 .flat_map(|item| item.preserved.iter()),
         );
     }
+    if retained {
+        value["retained_sections"] =
+            serde_json::to_value(&plan.sections).map_err(|e| e.to_string())?;
+    }
     let docx = render::compile_template(&value, &plan).map_err(|e| e.to_string())?;
     if docx.len() > max_docx_bytes {
         return Err("compiled DOCX exceeds configured byte budget".into());
@@ -968,7 +999,19 @@ fn implement_rules(
         .collect::<Result<_, String>>()?;
     let mut implementations = vec![];
     for plan in draft.plan.values() {
-        validate_grounds(input, &result.analysis, &plan.grounds)?;
+        let retained = result.review.draft
+            && !result.analysis.fill_seed_chapters.is_empty()
+            && plan.obligation_refs.is_empty()
+            && result.analysis.draft_plan.iter().any(|item| {
+                item.id == plan.id
+                    && item.parent == plan.parent
+                    && item.order == plan.order
+                    && item.title == plan.title
+                    && item.grounds == plan.grounds
+            });
+        if !retained {
+            validate_grounds(input, &result.analysis, &plan.grounds)?;
+        }
         for key in &plan.obligation_refs {
             let reference = inventory.get(key).ok_or("unknown planned obligation")?;
             let RelationTarget::RuleItem { item_id } = &reference.target else {

@@ -45,8 +45,8 @@
   {
     "type": "function",
     "function": {
-      "name": "put_chapter_omission",
-      "description": "Omit the assigned chapter with a reason and grounds. chapter_id must be the assigned draft_active_id, never the title.",
+      "name": "skip_chapter_content",
+      "description": "Skip writing the assigned chapter for this run; its heading and existing structure are preserved. chapter_id must be the assigned draft_active_id, never the title.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,

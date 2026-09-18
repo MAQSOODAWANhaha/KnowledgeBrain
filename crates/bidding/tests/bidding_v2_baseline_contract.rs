@@ -543,7 +543,9 @@ fn v2_baseline_has_no_deleted_or_transport_state() {
         );
     }
     assert!(SQL.contains("request_kind IN ('tender_document_process','requirement_set_compile','content_generate','submission_export','docx_compose','docx_layout')"));
-    assert!(SQL.contains("stage_kind IN ('analysis_checkpoint','composition_checkpoint','export_review_checkpoint','layout_checkpoint')"));
+    assert!(SQL.contains(
+        "stage_kind IN ('analysis_checkpoint','export_review_checkpoint','layout_checkpoint')"
+    ));
     assert!(SQL.contains("CREATE FUNCTION kb_bid_v2_layout_checkpoint_put"));
     assert!(SQL.contains("WHERE id=p_request_artifact_id AND request_kind='submission_export'"));
     assert!(!SQL.contains("matching_schedule"));
@@ -747,11 +749,9 @@ fn request_delivery_uses_oxana_without_a_postgres_reconciler() {
 
 /// 填章跑在 `docx_compose` 请求轨道的 `draft-fill` 模式上。这条用例钉住那条轨道
 /// 上「谁能放行 draft、谁必须拒 draft」的两个方向，以及出稿的三道闸门：检查点攻
-/// 证、字节摘要、编辑器会话未关时不得入稿。
+/// 证、字节摘要、编辑器会话未关时不得入稿。正式编制入口已删除，只保留 draft-fill。
 #[test]
-fn draft_fill_mode_admits_drafts_while_official_composition_still_refuses_them() {
-    // 请求身份表：mode 与 seed_plan_sha256 是键集的一部分，且 seed 摘要只在
-    // draft-fill 上出现——official 请求带 seed 摘要一样过不了 CHECK。
+fn fill_has_no_mode_and_preserves_seed_and_publication_guards() {
     let identities = SQL
         .split_once("CREATE TABLE bid_docx_composition_request_identities (")
         .unwrap()
@@ -759,12 +759,10 @@ fn draft_fill_mode_admits_drafts_while_official_composition_still_refuses_them()
         .split_once("\n);")
         .unwrap()
         .0;
-    assert!(identities.contains("'mode','seed_plan_sha256'"));
-    assert!(identities.contains("frozen_input->>'mode' IN ('official','draft-fill')"));
-    assert!(identities.contains(
-        "(frozen_input->>'mode'='draft-fill')=kb_bid_v2_sha256_text(frozen_input->>'seed_plan_sha256')"
-    ));
-    // 取源两处都按 mode 分流：官方拒 draft，填章反过来必须是 draft。
+    assert!(identities.contains("'seed_plan_sha256'"));
+    assert!(!identities.contains("'mode'"));
+    assert!(identities.contains("kb_bid_v2_sha256_text(frozen_input->>'seed_plan_sha256')"));
+    assert!(!identities.contains("'official','draft-fill'"));
     for function in [
         "CREATE FUNCTION kb_bid_v2_load_docx_composition_source(",
         "CREATE FUNCTION kb_bid_v2_prepare_docx_composition_source(",
@@ -777,14 +775,8 @@ fn draft_fill_mode_admits_drafts_while_official_composition_still_refuses_them()
             .unwrap()
             .0;
         assert!(
-            body.contains("p_mode text DEFAULT 'official'"),
-            "{function} 必须带 mode 参数"
-        );
-        assert!(
-            body.contains(
-                "DOCX_COMPOSITION_INPUT_INVALID: official composition rejects draft analysis"
-            ),
-            "{function} 仍须拒绝把 draft 当终稿编制"
+            !body.contains("p_mode"),
+            "{function} must not retain mode routing"
         );
     }
     let load = SQL
@@ -798,7 +790,6 @@ fn draft_fill_mode_admits_drafts_while_official_composition_still_refuses_them()
         load.contains("DOCX_COMPOSITION_INPUT_INVALID: draft fill requires a draft analysis"),
         "填章不能跑在已复核终稿上"
     );
-    // 冻结请求时 draft-fill 走分析合同的键集与额度，official 走编制合同的。
     let create = SQL
         .split_once("CREATE FUNCTION kb_bid_v2_create_docx_composition_request(")
         .unwrap()
@@ -809,9 +800,8 @@ fn draft_fill_mode_admits_drafts_while_official_composition_still_refuses_them()
     assert!(create.contains("DOCX_COMPOSITION_INPUT_INVALID: draft fill contract"));
     assert!(create.contains("DOCX_COMPOSITION_INPUT_INVALID: draft fill budgets required"));
     assert!(create.contains("'max_draft_docx_bytes'"));
-    assert!(create.contains("coalesce((p_snapshot#>'{config,limits,draft_path}')::boolean,false) IS DISTINCT FROM true"));
-    // 分析侧的 reserve/checkpoint 攻证对两种请求身份复用同一个解析器，填章才能跑
-    // 分析合同而不必新建 request_kind。
+    assert!(!create.contains("p_snapshot->>'mode'"));
+    assert!(!create.contains("p_snapshot->>'mode'='official'"));
     for function in [
         "CREATE FUNCTION kb_bid_v2_tender_agent_runtime(",
         "CREATE FUNCTION kb_bid_v2_tender_agent_source_input(",
@@ -823,10 +813,13 @@ fn draft_fill_mode_admits_drafts_while_official_composition_still_refuses_them()
             .split_once("END $$;")
             .unwrap()
             .0;
-        assert!(body.contains("bid_requirement_set_compile_request_identities"), "{function}");
+        assert!(
+            body.contains("bid_requirement_set_compile_request_identities"),
+            "{function}"
+        );
         assert!(
             body.contains("bid_docx_composition_request_identities")
-                && body.contains("frozen_input->>'mode'='draft-fill'"),
+                && !body.contains("frozen_input->>'mode'"),
             "{function}"
         );
     }
@@ -842,7 +835,7 @@ fn draft_fill_mode_admits_drafts_while_official_composition_still_refuses_them()
     assert!(checkpoint.contains(
         "(seed_plan IS NOT NULL AND kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(\n        p_state#>'{analysis,draft_plan}'),'UTF8'))::text IS DISTINCT FROM seed_plan)"
     ));
-    // 没冻 seed 的 run（大纲、官方编制）第一个检查点的 draft_plan 必须是空的。
+    // 没冻 seed 的 run（大纲）第一个检查点的 draft_plan 必须是空的。
     assert!(checkpoint.contains("WHEN seed_plan IS NULL THEN '[]'::jsonb"));
     // 出稿：草稿填章不出 composition manifest，但编辑器会话未关时一律拒绝入稿。
     let publish = SQL
@@ -852,7 +845,7 @@ fn draft_fill_mode_admits_drafts_while_official_composition_still_refuses_them()
         .split_once("END $$;")
         .unwrap()
         .0;
-    assert!(publish.contains("AGENT_OUTPUT_INVALID: draft fill publication requires draft-fill mode"));
+    assert!(!publish.contains("frozen_input->>'mode'"));
     assert!(publish.contains("AGENT_OUTPUT_INVALID: finished draft fill checkpoint required"));
     assert!(publish.contains("checkpoint#>'{review,draft}' IS DISTINCT FROM 'true'::jsonb"));
     assert!(publish.contains("draft_compile_object_id"));
@@ -888,7 +881,9 @@ fn draft_fill_mode_admits_drafts_while_official_composition_still_refuses_them()
         .split_once("GRANT EXECUTE ON FUNCTION kb_bid_v2_load_docx_composition_request(")
         .unwrap()
         .1;
-    assert!(grants.contains("kb_bid_v2_publish_docx_fill(uuid,kb_sha256,integer,uuid,kb_sha256,uuid)"));
+    assert!(
+        grants.contains("kb_bid_v2_publish_docx_fill(uuid,kb_sha256,integer,uuid,kb_sha256,uuid)")
+    );
     assert!(grants.contains("kb_bid_v2_tender_agent_stop_requested(uuid,kb_sha256,integer,uuid)"));
     assert!(SQL.contains("kb_bid_v2_request_docx_fill_stop(uuid,uuid,kb_actor_identity),\n  kb_bid_v2_create_docx_composition_request"));
 }
@@ -907,10 +902,9 @@ fn formal_export_freezes_saved_docx_and_atomically_binds_both_outputs() {
     assert!(export.contains("DOCX_VERSION_CAS_MISMATCH"));
     assert!(export.contains("DOCX_SAVE_PENDING"));
     assert!(export.contains("DOCX_SAVE_ERROR"));
-    assert!(
-        export
-            .contains("SUBMISSION_EXPORT_CONTEXT_INVALID: official export rejects draft analysis")
-    );
+    assert!(!export.contains("official export rejects draft analysis"));
+    assert!(export.contains("review_checkpoint->'done' = 'true'::jsonb"));
+    assert!(export.contains("unfrozen semantic review cannot be published"));
     assert!(
         export.contains(
             "IF request_value.status='succeeded' THEN RETURN request_value.result_identity"
@@ -922,4 +916,87 @@ fn formal_export_freezes_saved_docx_and_atomically_binds_both_outputs() {
     assert!(!export.contains("bid_render_document_snapshot_artifacts"));
     assert!(!SQL.contains("CREATE FUNCTION kb_bid_v2_prepare_submission_export("));
     assert!(!SQL.contains("CREATE FUNCTION kb_bid_v2_load_submission_manifest_render_input("));
+}
+
+#[test]
+fn frozen_deadline_is_accessible_to_worker_and_uses_frozen_budget() {
+    let grants = SQL
+        .split_once("GRANT EXECUTE ON FUNCTION kb_bid_v2_tender_agent_claim")
+        .unwrap()
+        .1
+        .split_once("TO kb_runtime_worker")
+        .unwrap()
+        .0;
+    assert!(grants.contains("kb_bid_v2_tender_agent_frozen_deadline(uuid)"));
+    assert!(grants.contains("kb_bid_v2_tender_agent_runtime(uuid)"));
+    let guard = SQL
+        .split_once("CREATE FUNCTION kb_bid_v2_tender_agent_run_deadline_guard")
+        .unwrap()
+        .1
+        .split_once("END $$;")
+        .unwrap()
+        .0;
+    assert!(guard.contains("budget,total_timeout_secs"));
+    assert!(!guard.contains("46 minutes"));
+}
+
+#[test]
+fn standalone_composer_runtime_and_sql_entrypoints_are_removed() {
+    let module = include_str!("../src/docx_composition/mod.rs");
+    assert!(!module.contains("pub mod agent;"));
+    assert!(!module.contains("pub mod tools;"));
+    for function in [
+        "kb_bid_v2_docx_composition_checkpoint_get",
+        "kb_bid_v2_docx_composition_checkpoint_put",
+        "kb_bid_v2_docx_composition_reserve",
+        "kb_bid_v2_publish_docx_composition",
+        "kb_bid_v2_replay_docx_composition(",
+    ] {
+        assert!(!SQL.contains(function), "obsolete entrypoint {function}");
+    }
+    for stage in [
+        "'composition_checkpoint'",
+        "'composition_main'",
+        "'composition_review'",
+    ] {
+        assert!(!SQL.contains(stage), "obsolete stage {stage}");
+    }
+    assert!(SQL.contains("CREATE FUNCTION kb_bid_v2_publish_docx_fill("));
+    assert!(SQL.contains("CREATE FUNCTION kb_bid_v2_replay_docx_fill("));
+}
+
+#[test]
+fn outline_creation_calibrates_both_entrypoints_from_a_consistent_input() {
+    let source = include_str!("../src/bid_authoring_v2.rs");
+    let helper = source
+        .split("async fn outline_request_config(")
+        .nth(1)
+        .unwrap()
+        .split("pub async fn freeze_document_set_v2")
+        .next()
+        .unwrap();
+    assert!(helper.contains("kb_bid_v2_tender_budget_input"));
+    assert!(helper.contains("Config::from_environment_for(&input)"));
+    for name in ["freeze_document_set_v2", "publish_disposition_set_v2"] {
+        let body = source
+            .split(&format!("pub async fn {name}("))
+            .nth(1)
+            .unwrap()
+            .split("pub async fn ")
+            .next()
+            .unwrap();
+        assert!(body.contains("REPEATABLE READ"), "{name}");
+        assert!(body.contains("outline_request_config("), "{name}");
+        assert!(!body.contains("Config::from_environment()"), "{name}");
+    }
+    assert!(SQL.contains("CREATE FUNCTION kb_bid_v2_tender_budget_input("));
+}
+
+#[test]
+fn fill_seed_receipts_are_frozen_without_fake_read_coverage() {
+    let sql = include_str!("../../../migrations/bidding_v2_baseline.sql");
+    assert!(sql.contains("immutable fill seed receipt changed"));
+    assert!(sql.contains("prior#>'{analysis,fill_seed_chapters}'"));
+    assert!(sql.contains("node->'grounds',node->'format_refs',node->'preserved'"));
+    assert!(!sql.contains("checkpoint_contract_version' IS DISTINCT FROM '3'"));
 }

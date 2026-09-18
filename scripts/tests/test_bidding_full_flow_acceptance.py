@@ -70,7 +70,7 @@ def test_connection_requires_current_env_and_matching_startup_snapshot(tmp_path)
                           "protocol": "openai_chat_completions_sse", "max_tokens": 4096, "timeout_ms": 90000},
               "limits": {"max_turns": 10}}
     value = {"origin": "http://127.0.0.1:1234", "token": "private-auth", "startup": {
-        "env_file_sha256": flow.digest(env.read_bytes()), "runtime": {"analysis": config, "composition": config}}}
+        "env_file_sha256": flow.digest(env.read_bytes()), "runtime": {"analysis": config}}}
     ticket = tmp_path / "connection.json"
     flow.private_write(ticket, flow.json_bytes(value))
     assert flow.read_connection(ticket, env) == value
@@ -149,18 +149,71 @@ def test_handoff_matches_existing_office_probe_and_rejects_newer_saved_version()
                  requirement_set_id="requirements", requirement_set_sha256="b" * 64)
     current = dict(version_id="version", round_id="round", docx_sha256=sha, project_id="project", workspace_id="workspace",
                    round_basis=basis, editor=dict(pending_save_id=None, save_error=None))
-    manifest = flow.json_bytes(dict(docx_sha256=sha, analysis_sha256="c" * 64, status="reviewed_template_with_open_items"))
     project = dict(id="project", workspace_id="workspace")
     connection = dict(origin="http://127.0.0.1:1234", token="private")
-    ticket = flow.handoff(connection, project, current, basis, current, source, manifest)
-    assert verify_attached_identity(ticket, current, source, lambda path: manifest if path.endswith("composition-report") else source) == current
+    ticket = flow.handoff(connection, project, current, basis, current, source)
+    assert verify_attached_identity(ticket, current, source, lambda path: source) == current
     changed = copy.deepcopy(current)
     changed["version_id"] = "newer-version"
-    with pytest.raises(ValueError, match="changed after composition"):
-        flow.handoff(connection, project, changed, basis, current, source, manifest)
-    with pytest.raises(ValueError, match="manifest mismatch"):
-        flow.handoff(connection, project, current, basis, current, source + b"edit", manifest)
+    with pytest.raises(ValueError, match="changed after outline"):
+        flow.handoff(connection, project, changed, basis, current, source)
+    with pytest.raises(ValueError, match="digest mismatch"):
+        flow.handoff(connection, project, current, basis, current, source + b"edit")
     changed = copy.deepcopy(current)
     changed["round_basis"]["requirement_set_id"] = "fixture-instead-of-analysis"
     with pytest.raises(ValueError, match="another analysis basis"):
-        flow.handoff(connection, project, changed, basis, current, source, manifest)
+        flow.handoff(connection, project, changed, basis, current, source)
+
+
+def test_outline_publication_handoff_does_not_start_another_composer(tmp_path):
+    source = tmp_path / "tender.pdf"
+    source.write_bytes(b"original tender")
+    docx = b"generated outline"
+    basis = dict(document_set_id="set", document_set_sha256="a" * 64,
+                 requirement_set_id="requirements", requirement_set_sha256="b" * 64)
+    generated = dict(version_id="version", round_id="round", docx_sha256=flow.digest(docx))
+    current = dict(generated, project_id="project", workspace_id="workspace", round_basis=basis,
+                   editor=dict(pending_save_id=None, save_error=None))
+
+    class Api:
+        def get(self, path):
+            if path.endswith("/docx-fills/basis"):
+                return basis
+            if path.endswith("/docx/current"):
+                return current
+            raise AssertionError(path)
+
+        def request(self, method, path):
+            assert method == "GET" and path.endswith("/docx/versions/version/download")
+            return docx
+
+    class Driver:
+        api = Api()
+        root = tmp_path
+        state = {"identity": {"source_sha256": flow.digest(source.read_bytes())}}
+
+        def post(self, name, path, prepare, status):
+            if name == "project":
+                return dict(id="project", workspace_id="workspace")
+            assert name == "analysis", "outline generation is the only model job"
+            return dict(request_artifact_id="request")
+
+        def mutation(self, *args):
+            return dict(id="document", original_sha256=self.state["identity"]["source_sha256"])
+
+        def observe(self, *args):
+            pass
+
+        def job(self, name, *args):
+            assert name == "analysis"
+            return dict(document_set_revision_id="set", document_set_sha256="a" * 64,
+                        result_identity=dict(requirement_set_id="requirements",
+                                             requirement_set_sha256="b" * 64, draft_docx=generated))
+
+        def save(self):
+            pass
+
+    driver = Driver()
+    flow.run(driver, source, dict(origin="http://127.0.0.1:1234", token="private"), 1, 0.01)
+    assert driver.state["stage"] == "outline_published"
+    assert (tmp_path / "generated.docx").read_bytes() == docx

@@ -405,6 +405,8 @@ pub struct Coverage {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Analysis {
+    /// Frozen read-back chapter identities, never model reading receipts.
+    pub fill_seed_chapters: BTreeMap<String, String>,
     #[serde(default)]
     pub outline: outline_flow::OutlineState,
     pub records: BTreeMap<String, Record>,

@@ -7,8 +7,7 @@ model client is implemented here. Human expected answers are never accepted.
 
 Private connection ticket (mode 0600):
   {"origin":"http://127.0.0.1:PORT","token":"...", "startup":{
-    "env_file_sha256":"...", "runtime":{"analysis":{...production Config...},
-      "composition":{...production Config...}}}}
+    "env_file_sha256":"...", "runtime":{"analysis":{...production Config...}}}}
 Startup snapshots are not proof of the later requests' frozen runtimes. The
 caller must separately inspect those PostgreSQL records using the saved request
 identities. Provider configuration is re-read exclusively from deploy/.env.
@@ -70,7 +69,7 @@ def read_connection(path, env_file):
     model = alias("KNOWLEDGEBRAIN_CHAT_MODEL", "LLM_MODEL")
     base = alias("KNOWLEDGEBRAIN_CHAT_BASE_URL", "LLM_BASE_URL").rstrip("/")
     alias("KNOWLEDGEBRAIN_CHAT_API_KEY", "LLM_API_KEY")
-    for stage in ("analysis", "composition"):
+    for stage in ("analysis",):
         config = ticket["startup"]["runtime"][stage]
         provider = config["provider"]
         if not config.get("limits") or provider["model_id"] != model or provider["base_url"] != base \
@@ -147,10 +146,9 @@ class Driver:
         if not isinstance(receipt, dict):
             raise ValueError("invalid mutation receipt; original intent retained")
         keys = {"project": ("id", "workspace_id"), "upload": ("id", "original_sha256"),
-                "analysis": ("request_artifact_id", "frozen_input_sha256"),
-                "composition": ("request_artifact_id", "frozen_input_sha256")}[name]
+                "analysis": ("request_artifact_id", "frozen_input_sha256")}[name]
         if any(not isinstance(receipt.get(key), str) or not receipt[key] for key in keys) \
-                or (name in ("analysis", "composition") and (not isinstance(receipt.get("request_revision"), int) or receipt["request_revision"] < 1)):
+                or (name == "analysis" and (not isinstance(receipt.get("request_revision"), int) or receipt["request_revision"] < 1)):
             raise ValueError("invalid mutation identity; original intent retained")
         intent["receipt"] = receipt
         self.save()
@@ -189,22 +187,20 @@ def items(value, key):
     return value if isinstance(value, list) else value[key]
 
 
-def handoff(ticket, project, current, basis, generated, docx, manifest_bytes):
+def handoff(ticket, project, current, basis, generated, docx):
     for key in ("version_id", "round_id", "docx_sha256"):
         if current[key] != generated[key]:
-            raise ValueError("current DOCX changed after composition publication")
+            raise ValueError("current DOCX changed after outline publication")
     if current["project_id"] != project["id"] or current["workspace_id"] != project["workspace_id"]:
-        raise ValueError("composition belongs to another workspace")
+        raise ValueError("outline belongs to another workspace")
     if current["editor"]["pending_save_id"] or current["editor"]["save_error"]:
         raise ValueError("current DOCX has an unresolved save")
     if any(current["round_basis"][key] != value for key, value in basis.items()):
         raise ValueError("current DOCX has another analysis basis")
-    manifest = json.loads(manifest_bytes)
-    if digest(docx) != current["docx_sha256"] or manifest["docx_sha256"] != current["docx_sha256"] \
-            or manifest["status"] not in ("reviewed_template", "reviewed_template_with_open_items"):
-        raise ValueError("generated DOCX or reviewed composition manifest mismatch")
+    if digest(docx) != current["docx_sha256"]:
+        raise ValueError("generated DOCX digest mismatch")
     expected = {key: current[key] for key in ("version_id", "round_id", "docx_sha256")}
-    expected.update(basis, analysis_sha256=manifest["analysis_sha256"], composition_manifest_sha256=digest(manifest_bytes))
+    expected.update(basis)
     return {"origin": ticket["origin"], "token": ticket["token"], "project_id": project["id"],
             "workspace": project["workspace_id"], "expected": expected}
 
@@ -256,31 +252,22 @@ def run(driver, source, ticket, seconds, interval):
 
     accepted = driver.post("analysis", project_path + "/document-set-revisions", freeze, 201)
     analysis = driver.job("analysis", project_path + "/requirement-set-compilations/" + accepted["request_artifact_id"], accepted, seconds, interval)
-    basis = driver.api.get(base + "/docx-compositions/basis")
+    basis = driver.api.get(base + "/docx-fills/basis")
     published = analysis["result_identity"]
     if not basis or basis["requirement_set_id"] != published["requirement_set_id"] \
             or basis["requirement_set_sha256"] != published["requirement_set_sha256"] \
             or basis["document_set_id"] != analysis["document_set_revision_id"] \
             or basis["document_set_sha256"] != analysis["document_set_sha256"]:
-        raise ValueError("composition basis does not reference this completed analysis")
-
-    def composition():
-        current = driver.api.get(base + "/docx/current")
-        if current and (current["editor"]["pending_save_id"] or current["editor"]["save_error"]):
-            raise ValueError("cannot compose while saved version is unresolved")
-        return {"basis": basis, "expected": {key: current[key] for key in ("version_id", "docx_sha256")} if current else None}
-
-    accepted = driver.post("composition", base + "/docx-compositions", composition, 202)
-    compiled = driver.job("composition", base + "/docx-compositions/" + accepted["request_artifact_id"], accepted, seconds, interval)
-    generated = compiled["result_identity"]
+        raise ValueError("outline basis does not reference this completed analysis")
+    generated = published["draft_docx"]
+    if not generated:
+        raise ValueError("completed outline has no published DOCX")
     version = base + "/docx/versions/" + generated["version_id"]
     docx = driver.api.request("GET", version + "/download")
-    manifest_bytes = driver.api.request("GET", version + "/composition-report")
-    office_ticket = handoff(ticket, project, driver.api.get(base + "/docx/current"), basis, generated, docx, manifest_bytes)
+    office_ticket = handoff(ticket, project, driver.api.get(base + "/docx/current"), basis, generated, docx)
     private_write(driver.root / "generated.docx", docx)
-    private_write(driver.root / "composition-report.json", manifest_bytes)
     private_write(driver.root / "existing-ticket.json", json_bytes(office_ticket))
-    driver.state.update(stage="composition_published", actual_frozen_runtime_audit="requires_external_postgres_read_only_check",
+    driver.state.update(stage="outline_published", actual_frozen_runtime_audit="requires_external_postgres_read_only_check",
                         semantic_and_layout_acceptance="not_assessed", office_ticket="existing-ticket.json")
     driver.save()
 

@@ -60,8 +60,24 @@ impl SectionPlacement {
     }
 }
 
+pub(crate) fn notice_bookmark(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "kb_note_{}",
+        &hex::encode(Sha256::digest(text.as_bytes()))[..32]
+    )
+}
+
+fn system_paragraph(text: &str, style: Option<&str>, id: u32) -> Result<String, TemplateError> {
+    let name = notice_bookmark(text);
+    Ok(format!(
+        "<w:bookmarkStart w:id=\"{id}\" w:name=\"{name}\"/>{}<w:bookmarkEnd w:id=\"{id}\"/>",
+        paragraph(text, style)?
+    ))
+}
+
 fn toc(plan: &TemplatePlan) -> Result<String, TemplateError> {
-    let mut out = paragraph(&plan.toc_title, None)?;
+    let mut out = system_paragraph(&plan.toc_title, None, 1)?;
     out += "<w:p><w:r><w:fldChar w:fldCharType=\"begin\" w:dirty=\"true\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC \\o &quot;1-9&quot; \\h \\z \\u </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r></w:p>";
     for section in plan.sections.iter().filter(|s| s.placement.is_body()) {
         out += &paragraph(&section.title, None)?;
@@ -326,10 +342,10 @@ pub fn compile_template(input: &Value, plan: &TemplatePlan) -> Result<Vec<u8>, T
     let printable = s.width_mm - s.left_mm - s.right_mm;
     let mut used_sources = BTreeSet::new();
     let mut used_forms = BTreeSet::new();
-    let mut body = paragraph(&plan.title, Some("Title"))?;
+    let mut body = system_paragraph(&plan.title, Some("Title"), 0)?;
     let mut toc_written = false;
     let mut last_depth = 0;
-    let mut range_id = 0u32;
+    let mut range_id = 2u32;
     let mut cells_used = 0usize;
     for (ordinal, section) in plan.sections.iter().enumerate() {
         if section.placement.is_body() && !toc_written {
@@ -352,7 +368,11 @@ pub fn compile_template(input: &Value, plan: &TemplatePlan) -> Result<Vec<u8>, T
         )?;
         check(
             !section.title.trim().is_empty()
-                && !section.source_ids.is_empty()
+                && (!section.source_ids.is_empty()
+                    || input["retained_sections"].get(ordinal)
+                        == Some(
+                            &serde_json::to_value(section).map_err(|e| invalid(e.to_string()))?,
+                        ))
                 && !section.blocks.is_empty(),
             "empty chapter structure or provenance",
         )?;
@@ -749,14 +769,24 @@ pub fn compile_template(input: &Value, plan: &TemplatePlan) -> Result<Vec<u8>, T
                         .checked_add(rows * columns)
                         .ok_or_else(|| invalid("table capacity"))?;
                     check(cells_used <= 100000, "aggregate table capacity")?;
-                    body += &table_xml(
-                        rows,
-                        columns,
-                        &anchors,
-                        &vec![printable / columns as f64; columns],
-                        0,
-                        printable,
-                    )?;
+                    let widths = unit["widths_twips"]
+                        .as_array()
+                        .ok_or_else(|| invalid("preserved table widths missing"))?
+                        .iter()
+                        .map(|width| {
+                            width
+                                .as_u64()
+                                .filter(|v| *v > 0)
+                                .map(|v| v as f64 * 25.4 / 1440.0)
+                                .ok_or_else(|| invalid("invalid preserved table width"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let headers = unit["header_rows"]
+                        .as_u64()
+                        .filter(|v| *v <= rows as u64)
+                        .ok_or_else(|| invalid("invalid preserved header rows"))?
+                        as usize;
+                    body += &table_xml(rows, columns, &anchors, &widths, headers, printable)?;
                 }
                 _ => return Err(invalid("unsupported template block")),
             }
@@ -788,6 +818,13 @@ pub fn compile_template(input: &Value, plan: &TemplatePlan) -> Result<Vec<u8>, T
         used_sources.len() == sources.len() && used_forms.len() == forms.len(),
         "source/form coverage incomplete",
     )?;
+    for notice in &plan.notices {
+        let name = notice_bookmark(notice);
+        body += &format!("<w:bookmarkStart w:id=\"{range_id}\" w:name=\"{name}\"/>");
+        body += &paragraph(notice, None)?;
+        body += &format!("<w:bookmarkEnd w:id=\"{range_id}\"/>");
+        range_id += 1;
+    }
     body += &format!(
         "<w:sectPr><w:pgSz w:w=\"{}\" w:h=\"{}\" w:orient=\"{}\"/><w:pgMar w:top=\"{}\" w:right=\"{}\" w:bottom=\"{}\" w:left=\"{}\"/></w:sectPr>",
         twips(s.width_mm),

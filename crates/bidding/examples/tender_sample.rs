@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use bidding::{
     agent_error::AgentError,
     authoring_runtime::AuthoringRuntimeContractV1,
-    docx_composition::agent as composition,
     tender_analysis::{self as ta, agent as extraction},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -165,42 +164,6 @@ impl extraction::Journal for Local {
         Ok(view)
     }
 }
-#[async_trait]
-impl composition::Journal for Local {
-    async fn load(&self) -> Result<Option<composition::Checkpoint>, AgentError> {
-        let p = self.root.join("checkpoint.json");
-        if p.exists() {
-            Ok(Some(read(p)?))
-        } else {
-            Ok(None)
-        }
-    }
-    async fn reserve(
-        &self,
-        state: &composition::Checkpoint,
-        body: &[u8],
-    ) -> Result<usize, AgentError> {
-        let (total, _) = self.reserve(
-            state.turn,
-            if state.workspace.reviewing {
-                "reviewer"
-            } else {
-                "main"
-            },
-            body,
-        )?;
-        save(self.root.join("checkpoint.json"), state)?;
-        Ok(total)
-    }
-    async fn save(&self, s: &composition::Checkpoint) -> Result<(), AgentError> {
-        save(self.root.join("checkpoint.json"), s)?;
-        eprintln!(
-            "{}",
-            json!({"turn":s.turn,"sections":s.workspace.draft.sections.len(),"reviewing":s.workspace.reviewing,"done":s.workspace.done})
-        );
-        Ok(())
-    }
-}
 struct Lock(PathBuf);
 impl Drop for Lock {
     fn drop(&mut self) {
@@ -313,7 +276,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if args.len() != 5 {
-        return Err("usage: tender_sample <extract|review|repair|compose> <input-directory> <explicit-limits.json> <run-directory>".into());
+        return Err("usage: tender_sample <extract|review|repair> <input-directory> <explicit-limits.json> <run-directory>".into());
     }
     let mode = &args[1];
     let input_dir = PathBuf::from(&args[2]);
@@ -507,30 +470,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "analysis-result.json"
             };
             save(root.join(name), &result)?;
-        }
-        "compose" => {
-            let result: ta::AnalysisResult = read(input_dir.join("analysis-result.json"))?;
-            let config = composition::Config {
-                provider,
-                limits: serde_json::from_value(limits["composition"].clone())?,
-            };
-            save(root.join("runtime.json"), &config)?;
-            let artifact = composition::run(
-                &input,
-                &result,
-                &config,
-                &journal,
-                &composition::ConfiguredModel,
-                &cancel,
-            )
-            .await?;
-            use base64::Engine;
-            fs::write(
-                root.join("bid-template.docx"),
-                base64::engine::general_purpose::STANDARD.decode(&artifact.docx_base64)?,
-            )?;
-            save(root.join("manifest.json"), &artifact.manifest)?;
-            save(root.join("rendered.json"), &artifact.rendered)?;
         }
         _ => return Err("unknown mode".into()),
     }

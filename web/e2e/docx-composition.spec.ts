@@ -45,12 +45,12 @@ async function fixture(page: Page) {
     if (path.endsWith("/docx/current")) return json(docx.current);
     if (path.endsWith("/docx-compositions") && req.method() === "POST") {
       compositionPosts.push(req.postDataJSON());
-      return json({ error: { code: "OFFICIAL_COMPOSITION_REJECTS_DRAFT", message: "draft" } }, 409);
+      return json({ error: { code: "OFFICIAL_COMPOSITION_REMOVED", message: "use /docx-fills" } }, 410);
     }
-    if (path.endsWith("/docx-compositions/basis")) {
+    if (path.endsWith("/docx-fills/basis")) {
       return json({ document_set_id: "documents", document_set_sha256: "a".repeat(64), requirement_set_id: "analysis", requirement_set_sha256: "b".repeat(64) });
     }
-    if (path.endsWith("/docx-compositions/latest")) return json(fill.latest);
+    if (path.endsWith("/docx-fills/latest")) return json(fill.latest);
     if (path.endsWith("/docx-fills") && req.method() === "POST") {
       fill.posts.push(req.postDataJSON());
       return json({ request_artifact_id: requestId, request_revision: 1, frozen_input_sha256: "c".repeat(64) }, 202);
@@ -59,7 +59,7 @@ async function fixture(page: Page) {
       fill.stops.push(path);
       return json({ request_artifact_id: requestId, status: "pending", stop_requested_at: "2026-09-18T00:00:00Z" });
     }
-    if (path.endsWith(`/docx-compositions/${requestId}`)) {
+    if (path.endsWith(`/docx-fills/${requestId}`)) {
       return json({
         request_artifact_id: requestId, request_revision: 1, frozen_input_sha256: "c".repeat(64),
         workspace_id: workspace, status: "pending", error_code: null, result_identity: null,

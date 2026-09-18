@@ -77,6 +77,7 @@ fn service_read(
             .image_sha256
             .insert(original_ref.into(), hex::encode(Sha256::digest(&pixels)));
         manifest.units.push(docparser::OutputInventoryEntry {
+            table_layout: None,
             unit_key: "source:1".into(),
             part: "pdf:page:1".into(),
             ordinal: 1,
@@ -84,6 +85,7 @@ fn service_read(
             bookmarks: vec![],
             fields: vec![],
             heading_level: None,
+            style_name: None,
             field_region: None,
             status: "not_checked".into(),
             reason: Some("visual review required".into()),

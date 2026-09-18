@@ -6,7 +6,7 @@ from io import BytesIO
 
 import grpc
 import pytest
-from docx import Document
+from docx import Document as BaseDocument
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from pypdf import PdfWriter
@@ -16,6 +16,27 @@ from docreader.main import DocReaderServicer
 from docreader.parser.parser import Parser
 from docreader.proto.docreader_pb2 import ReadConfig, ReadRequest
 from docreader.proto.docreader_pb2_grpc import DocReaderStub, add_DocReaderServicer_to_server
+
+
+def Document():
+    # Match the product compiler's supported default presentation.
+    doc = BaseDocument()
+    defaults = doc.styles.element.find(qn("w:docDefaults"))
+    if defaults is not None:
+        doc.styles.element.remove(defaults)
+    from docx.oxml import parse_xml
+    doc.styles.element.insert(0, parse_xml(
+        '<w:docDefaults xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:rPrDefault><w:rPr><w:rFonts w:ascii="SimSun" w:hAnsi="SimSun" w:eastAsia="SimSun" w:cs="SimSun"/>'
+        '<w:sz w:val="24"/></w:rPr></w:rPrDefault>'
+        '<w:pPrDefault><w:pPr><w:spacing w:line="360" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults>'
+    ))
+    section = doc.sections[0]._sectPr
+    for child in list(section):
+        section.remove(child)
+    section.append(parse_xml('<w:pgSz xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:w="11906" w:h="16838" w:orient="portrait"/>'))
+    section.append(parse_xml('<w:pgMar xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:top="1417" w:right="1417" w:bottom="1417" w:left="1417"/>'))
+    return doc
 
 
 def parse(name, raw):
@@ -203,6 +224,22 @@ def test_docx_duplicate_bookmarks_are_explicit_not_checked():
     assert len([e for e in entries if "duplicate bookmarks" in (e["reason"] or "")]) == 2
 
 
+def test_header_footer_and_custom_style_are_not_checked():
+    doc = Document()
+    doc.add_heading("第一章", level=1)
+    branded = doc.add_paragraph("品牌段落")
+    branded.style = doc.styles.add_style("BidderBrand", 1)
+    doc.sections[0].header.paragraphs[0].text = "页眉内容"
+    doc.sections[0].footer.paragraphs[0].text = "页脚内容"
+    raw = BytesIO()
+    doc.save(raw)
+    entries = manifest(parse("styled.docx", raw.getvalue()))["units"]
+    assert any("header" in e["part"] for e in entries)
+    assert any("footer" in e["part"] for e in entries)
+    assert any("custom style" in (e["reason"] or "") for e in entries)
+    assert any(e.get("style_name") == "BidderBrand" for e in entries)
+
+
 @pytest.mark.parametrize("mixed", [False, True])
 def test_exact_picture_has_one_visual_carrier_but_mixed_shape_stays_unchecked(mixed):
     from PIL import Image
@@ -236,3 +273,172 @@ def test_exact_picture_has_one_visual_carrier_but_mixed_shape_stays_unchecked(mi
         assert drawings and textboxes
     else:
         assert not drawings and not textboxes
+
+
+def test_reconstructable_toc_has_no_ordinary_field_rejection():
+    doc = Document()
+    paragraph = doc.add_paragraph()
+    field = OxmlElement("w:fldSimple")
+    field.set(qn("w:instr"), 'TOC \\o "1-3"')
+    paragraph._p.append(field)
+    raw = BytesIO()
+    doc.save(raw)
+    entries = manifest(parse("toc.docx", raw.getvalue()))["units"]
+    assert any(e["field_region"] == "toc" for e in entries)
+    assert not any(e["status"] == "not_checked" for e in entries)
+
+
+def test_table_custom_paragraph_style_is_explicitly_rejected():
+    doc = Document()
+    doc.add_heading("报价", 1)
+    cell = doc.add_table(rows=1, cols=1).cell(0, 0)
+    cell.text = "报价100"
+    cell.paragraphs[0].style = "Intense Quote"
+    raw = BytesIO()
+    doc.save(raw)
+    entries = manifest(parse("table.docx", raw.getvalue()))["units"]
+    assert any(e["status"] == "not_checked" and "table paragraph custom style" in e["reason"] for e in entries)
+
+
+@pytest.mark.parametrize("style_kind", ["character", "table"])
+def test_table_nested_custom_styles_are_rejected(style_kind):
+    from docx.enum.style import WD_STYLE_TYPE
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    cell = table.cell(0, 0)
+    cell.text = "报价100"
+    if style_kind == "character":
+        style = doc.styles.add_style("BidderCharacter", WD_STYLE_TYPE.CHARACTER)
+        cell.paragraphs[0].runs[0].style = style
+    else:
+        style = doc.styles.add_style("BidderTable", WD_STYLE_TYPE.TABLE)
+        table.style = style
+    raw = BytesIO()
+    doc.save(raw)
+    entries = manifest(parse("table.docx", raw.getvalue()))["units"]
+    assert any(e["status"] == "not_checked" and "style" in (e["reason"] or "") for e in entries)
+
+
+def test_toc_does_not_whitelist_adjacent_date_field():
+    doc = Document()
+    paragraph = doc.add_paragraph()
+    for instruction in ['TOC \\o "1-3"', "DATE"]:
+        field = OxmlElement("w:fldSimple")
+        field.set(qn("w:instr"), instruction)
+        paragraph._p.append(field)
+    raw = BytesIO()
+    doc.save(raw)
+    entries = manifest(parse("mixed.docx", raw.getvalue()))["units"]
+    assert any(e["status"] == "not_checked" and "field" in (e["reason"] or "") for e in entries)
+
+
+def test_package_root_signature_is_explicitly_rejected():
+    doc = Document()
+    doc.add_paragraph("已签署报价")
+    doc.part.package.rels.get_or_add_ext_rel(
+        "http://schemas.openxmlformats.org/package/2006/relationships/digital-signature/origin",
+        "https://example.invalid/signature",
+    )
+    raw = BytesIO()
+    doc.save(raw)
+    entries = manifest(parse("signed.docx", raw.getvalue()))["units"]
+    assert any(e["part"] == "/" and e["status"] == "not_checked"
+               and "origin relationship" in (e["reason"] or "") for e in entries)
+
+
+@pytest.mark.parametrize("change", ["bold", "font_size", "normal", "heading", "numbering", "table_shading"])
+def test_reconstruction_rejects_unrepresented_formatting(change):
+    from docx.shared import Pt
+    doc = Document()
+    paragraph = doc.add_paragraph("报价100万元")
+    if change == "bold":
+        paragraph.runs[0].bold = True
+    elif change == "font_size":
+        paragraph.runs[0].font.size = Pt(22)
+    elif change == "normal":
+        doc.styles["Normal"].font.size = Pt(22)
+    elif change == "heading":
+        paragraph.style = "Heading 1"
+        doc.styles["Heading 1"].font.size = Pt(22)
+    elif change == "numbering":
+        paragraph._p.get_or_add_pPr().append(OxmlElement("w:numPr"))
+    else:
+        cell = doc.add_table(rows=1, cols=1).cell(0, 0)
+        cell.text = "报价"
+        cell._tc.get_or_add_tcPr().append(OxmlElement("w:shd"))
+    raw = BytesIO()
+    doc.save(raw)
+    entries = manifest(parse("format.docx", raw.getvalue()))["units"]
+    assert any(e["status"] == "not_checked" and any(term in (e["reason"] or "") for term in ("formatting", "style")) for e in entries)
+
+
+def test_toc_with_ordinary_body_is_not_silently_discarded():
+    doc = Document()
+    paragraph = doc.add_paragraph("报价100万元")
+    field = OxmlElement("w:fldSimple")
+    field.set(qn("w:instr"), 'TOC \\o "1-3"')
+    paragraph._p.append(field)
+    raw = BytesIO()
+    doc.save(raw)
+    entries = manifest(parse("mixed-toc.docx", raw.getvalue()))["units"]
+    assert any(e["status"] == "not_checked" and "mixed with TOC" in (e["reason"] or "") for e in entries)
+
+
+def test_standard_style_inheritance_cannot_hide_custom_formatting():
+    doc = Document()
+    custom = doc.styles.add_style("CustomBase", 1)
+    custom.font.bold = True
+    doc.styles["Normal"].base_style = custom
+    doc.add_paragraph("报价100万元")
+    raw = BytesIO()
+    doc.save(raw)
+    entries = manifest(parse("inherited.docx", raw.getvalue()))["units"]
+    assert any(e["status"] == "not_checked" and "inheritance" in (e["reason"] or "") for e in entries)
+
+
+def test_modified_document_defaults_are_rejected():
+    doc = Document()
+    doc.add_paragraph("报价100万元")
+    defaults = doc.styles.element.find(qn("w:docDefaults"))
+    defaults.find(qn("w:rPrDefault")).find(qn("w:rPr")).find(qn("w:sz")).set(qn("w:val"), "60")
+    raw = BytesIO()
+    doc.save(raw)
+    entries = manifest(parse("defaults.docx", raw.getvalue()))["units"]
+    assert any(e["status"] == "not_checked" and "default formatting" in (e["reason"] or "") for e in entries)
+
+@pytest.mark.parametrize("attribute,value", [("w:w", "16838"), ("w:orient", "landscape"), ("margin", "283")])
+def test_fill_rejects_changed_page_layout(attribute, value):
+    doc = Document()
+    doc.add_paragraph("保留正文")
+    section = doc.sections[0]._sectPr
+    if attribute == "margin":
+        section.find(qn("w:pgMar")).set(qn("w:left"), value)
+    else:
+        section.find(qn("w:pgSz")).set(qn(attribute), value)
+    stream = BytesIO()
+    doc.save(stream)
+    entries = manifest(parse("layout.docx", stream.getvalue()))["units"]
+    assert any("cannot be reconstructed" in (entry["reason"] or "") for entry in entries)
+
+
+def test_fill_inventory_carries_unequal_widths_and_repeated_header():
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    for column, width in zip(table._tbl.tblGrid, [2000, 4000]):
+        column.set(qn("w:w"), str(width))
+    for row in table.rows:
+        for cell, width in zip(row.cells, [2000, 4000]):
+            cell._tc.get_or_add_tcPr().find(qn("w:tcW")).set(qn("w:w"), str(width))
+    header = OxmlElement("w:tblHeader")
+    table.rows[0]._tr.get_or_add_trPr().append(header)
+    stream = BytesIO()
+    doc.save(stream)
+    entries = manifest(parse("table.docx", stream.getvalue()))["units"]
+    entry = next(entry for entry in entries if entry["kind"] == "table")
+    assert entry["table_layout"] == {"widths_twips": [2000, 4000], "header_rows": 1}
+    assert not any("table layout cannot" in (entry["reason"] or "") for entry in entries)
+    table.rows[0].cells[0]._tc.get_or_add_tcPr().find(qn("w:tcW")).set(qn("w:w"), "1000")
+    stream = BytesIO()
+    doc.save(stream)
+    assert any("table layout cannot" in (entry["reason"] or "")
+               for entry in manifest(parse("table.docx", stream.getvalue()))["units"])

@@ -30,6 +30,8 @@ pub enum Preserved {
         unit_key: String,
         row_count: usize,
         column_count: usize,
+        widths_twips: Vec<u32>,
+        header_rows: usize,
         cells: Vec<PreservedCell>,
     },
 }
@@ -93,6 +95,74 @@ fn section_bookmark(name: &str) -> Option<usize> {
 
 /// 以回读结构为准重建章节树。`sections` 是阶段一编译时的章序（序号 → 计划 id），
 /// 用来把 `kb_sN` 映射回原章；`prior_titles` 用于标题匹配兜底。
+fn is_header_footer_part(part: &str) -> bool {
+    let leaf = part.rsplit('/').next().unwrap_or(part);
+    let lower = leaf.to_ascii_lowercase();
+    lower.starts_with("header") || lower.starts_with("footer")
+}
+
+fn allowed_paragraph_style(style_name: Option<&str>) -> bool {
+    let name = style_name.unwrap_or("Normal").trim();
+    if name.is_empty() {
+        return true;
+    }
+    let folded = name.to_ascii_lowercase();
+    if matches!(folded.as_str(), "normal" | "title" | "toc heading") {
+        return true;
+    }
+    let bytes = folded.as_bytes();
+    bytes.len() == 9 && bytes.starts_with(b"heading ") && matches!(bytes[8], b'1'..=b'9')
+}
+
+fn reject_entry(entry: &docparser::OutputInventoryEntry) -> Option<String> {
+    if entry.status == "not_checked" {
+        return entry
+            .reason
+            .clone()
+            .or_else(|| Some(format!("{}: not checked", entry.unit_key)));
+    }
+    if is_header_footer_part(&entry.part) {
+        return Some(format!(
+            "{}: header/footer content cannot be reconstructed",
+            entry.unit_key
+        ));
+    }
+    if entry.part.trim_start_matches('/') != "word/document.xml" {
+        return Some("non-body story cannot be reconstructed at its original position".into());
+    }
+    if entry.kind == "paragraphs" && !allowed_paragraph_style(entry.style_name.as_deref()) {
+        return Some(format!(
+            "{}: custom style cannot be reconstructed: {}",
+            entry.unit_key,
+            entry.style_name.as_deref().unwrap_or("")
+        ));
+    }
+    if entry.field_region.as_deref() == Some("field") {
+        return Some(format!(
+            "{}: ordinary fields cannot be preserved by template recompilation",
+            entry.unit_key
+        ));
+    }
+    if !entry.fields.is_empty()
+        && entry.fields.iter().any(|field| {
+            let upper = field.to_ascii_uppercase();
+            upper.contains("DATE") || upper.contains(" REF ") || upper.starts_with("REF ")
+        })
+    {
+        return Some(format!(
+            "{}: DATE/REF fields cannot be preserved by template recompilation",
+            entry.unit_key
+        ));
+    }
+    if !matches!(entry.kind.as_str(), "paragraphs" | "table" | "section") {
+        return Some(format!(
+            "{}: unsupported {} carrier",
+            entry.unit_key, entry.kind
+        ));
+    }
+    None
+}
+
 pub fn read_chapters(
     manifest: &OutputInventoryManifest,
     units: &[StructuredSourceUnit],
@@ -115,21 +185,26 @@ pub fn read_chapters(
         if entry.unit_key != unit.key {
             return Err("readback receipt unit key does not match the parsed unit".into());
         }
-        if entry.status == "not_checked" {
-            if let Some(reason) = &entry.reason {
-                not_checked.push(reason.clone());
-            }
+        if let Some(reason) = reject_entry(entry) {
+            not_checked.push(format!(
+                "{} / {} / ordinal {}: {}",
+                entry.part, entry.unit_key, entry.ordinal, reason
+            ));
             continue;
         }
-        // 目录域条目与章标题逐字相同，认成章就会每章读两遍。
+        // TOC field entries repeat chapter titles; skip without treating as body.
         if entry.field_region.as_deref() == Some("toc") {
             continue;
         }
-        if entry.field_region.as_deref() == Some("field") {
-            not_checked.push(format!("{}: ordinary fields cannot be preserved by template recompilation", entry.unit_key));
-        }
-        if !matches!(entry.kind.as_str(), "paragraphs" | "table") {
-            not_checked.push(format!("{}: unsupported {} carrier", entry.unit_key, entry.kind));
+        // Only unchanged, marked system notes are excluded from bidder body.
+        // An edited note becomes protected user text even if its bookmark survives.
+        if entry.kind == "paragraphs"
+            && entry
+                .bookmarks
+                .iter()
+                .any(|name| name == &crate::docx_template::notice_bookmark(unit.text.trim()))
+        {
+            continue;
         }
         let heading = entry
             .heading_level
@@ -163,7 +238,14 @@ pub fn read_chapters(
             continue;
         }
         if chapters.is_empty() {
-            // 首个标题之前的内容是封面/目录标题，不属于任何章。
+            // Cover/front matter and non-TOC content before the first heading cannot
+            // be reconstructed. TOC field regions are skipped above.
+            if !unit.text.trim().is_empty() || unit.grid.is_some() {
+                not_checked.push(format!(
+                    "{}: content before the first chapter heading cannot be preserved",
+                    entry.unit_key
+                ));
+            }
             continue;
         }
         match (entry.kind.as_str(), &unit.grid) {
@@ -171,12 +253,31 @@ pub fn read_chapters(
                 pending_paragraphs.push((unit.key.clone(), unit.text.clone()));
             }
             ("table", Some(grid)) => {
+                let Some(layout) = entry.table_layout.as_ref().filter(|layout| {
+                    layout.widths_twips.len() == grid.column_count as usize
+                        && layout.widths_twips.iter().all(|width| *width > 0)
+                        && layout
+                            .widths_twips
+                            .iter()
+                            .map(|width| u64::from(*width))
+                            .sum::<u64>()
+                            <= 9072
+                        && layout.header_rows <= grid.row_count as usize
+                }) else {
+                    not_checked.push(format!(
+                        "{}: table layout missing or invalid",
+                        entry.unit_key
+                    ));
+                    continue;
+                };
                 flush_paragraphs(&mut chapters, &mut pending_paragraphs);
                 let chapter = chapters.last_mut().expect("open chapter");
                 chapter.body.push(Preserved::Table {
                     unit_key: unit.key.clone(),
                     row_count: grid.row_count as usize,
                     column_count: grid.column_count as usize,
+                    widths_twips: layout.widths_twips.clone(),
+                    header_rows: layout.header_rows,
                     cells: grid
                         .cells
                         .iter()
@@ -292,6 +393,8 @@ pub fn preserved_units<'a>(blocks: impl IntoIterator<Item = &'a Preserved>) -> s
 /// 已有正文的章标 `Filled` 并带上 `preserved`，编译时原样重排，模型看不到也改
 /// 不动；正文为空的章标 `Pending` 交给填充回路。绑源不在这里做：`assign_next_chapter`
 /// 每次派章前都会按标题重绑，新增章因此不需要种子带窗。
+///
+/// 改名／改变归属的章清空旧要求关联、格式来源和窗口，不能沿用旧依据填新标题。
 pub fn seed_plan(
     document: &ReadbackDocument,
     prior: &[crate::tender_analysis::draft::DraftPlanItem],
@@ -301,35 +404,115 @@ pub fn seed_plan(
         .chapters
         .iter()
         .map(|chapter| {
-            let previous = prior.iter().find(|item| item.id == chapter.id && item.title == chapter.title && item.parent == chapter.parent);
+            let previous = prior.iter().find(|item| {
+                item.id == chapter.id
+                    && item.title == chapter.title
+                    && item.parent == chapter.parent
+            });
+            let keep_binding =
+                previous.is_some() && matches!(chapter.claim, Claim::Bookmark | Claim::Title);
             DraftPlanItem {
-            grounds: previous.map(|item| item.grounds.clone()).unwrap_or_default(),
-            requirement_ids: previous.map(|item| item.requirement_ids.clone()).unwrap_or_default(),
+                grounds: if keep_binding {
+                    previous
+                        .map(|item| item.grounds.clone())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
+                requirement_ids: if keep_binding {
+                    previous
+                        .map(|item| item.requirement_ids.clone())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
                 id: chapter.id.clone(),
                 parent: chapter.parent.clone(),
                 order: chapter.order,
                 title: chapter.title.clone(),
-                prescribed: previous.is_some_and(|item| item.prescribed),
-                source_ids: previous
-                    .map(|item| item.source_ids.clone())
-                    .unwrap_or_default(),
-                windows: previous
-                    .map(|item| item.windows.clone())
-                    .unwrap_or_default(),
+                prescribed: keep_binding && previous.is_some_and(|item| item.prescribed),
+                source_ids: if keep_binding {
+                    previous
+                        .map(|item| item.source_ids.clone())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
+                windows: if keep_binding {
+                    previous
+                        .map(|item| item.windows.clone())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
                 window_index: 0,
                 template_id: None,
                 status: match chapter.has_body() {
                     true => DraftStatus::Filled,
                     false => DraftStatus::Pending,
                 },
-                purpose: ChapterPurpose::Response,
-                format_refs: previous.map(|item| item.format_refs.clone()).unwrap_or_default(),
-                body_status: if chapter.has_body() { BodyStatus::User } else { BodyStatus::Empty },
+                purpose: previous
+                    .map(|item| item.purpose)
+                    .unwrap_or(ChapterPurpose::Response),
+                format_refs: if keep_binding {
+                    previous
+                        .map(|item| item.format_refs.clone())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
+                body_status: if chapter.has_body() {
+                    BodyStatus::User
+                } else {
+                    BodyStatus::Empty
+                },
                 omit_reason: None,
                 preserved: chapter.body.clone(),
             }
         })
         .collect()
+}
+
+/// Retained structure/body are attested by the frozen current-DOCX seed, not by
+/// pretending the fill model reread old tender grounds. Mutable writing state
+/// (template/status/windows) is intentionally outside this identity.
+pub fn seed_identity(
+    item: &crate::tender_analysis::draft::DraftPlanItem,
+) -> Result<String, String> {
+    super::digest(&serde_json::json!([
+        item.id,
+        item.parent,
+        item.order,
+        item.title,
+        item.purpose,
+        item.requirement_ids,
+        item.grounds,
+        item.format_refs,
+        item.preserved
+    ]))
+}
+
+pub fn seed_identities(
+    plan: &[crate::tender_analysis::draft::DraftPlanItem],
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    plan.iter()
+        .map(|item| Ok((item.id.clone(), seed_identity(item)?)))
+        .collect()
+}
+
+pub fn validate_seed(analysis: &super::Analysis) -> Result<(), String> {
+    if analysis.fill_seed_chapters.is_empty() {
+        return Ok(());
+    }
+    if analysis.draft_plan.len() != analysis.fill_seed_chapters.len() {
+        return Err("fill cannot add or delete saved chapters".into());
+    }
+    for item in &analysis.draft_plan {
+        if analysis.fill_seed_chapters.get(&item.id) != Some(&seed_identity(item)?) {
+            return Err("saved chapter structure, grounds or user body changed during fill".into());
+        }
+    }
+    Ok(())
 }
 
 /// 阶段一编译时的章序（`kb_sN` 的 N → 计划 id）与标题表，喂给 `read_chapters`

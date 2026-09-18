@@ -1235,6 +1235,7 @@ pub fn invoke(
             | "source_index"
             | "read_source"
             | "read_form"
+            | "read_form_cell"
             | "search_sources"
             | "inspect_analysis"
             | "check_gaps"
@@ -1249,7 +1250,7 @@ pub fn invoke(
             max_bytes,
         )?;
         if serde_json::to_vec(&out).map_err(|e| e.to_string())?.len() > max_bytes {
-            return Err("tool result exceeds budget; request a smaller range".into());
+            return Err(if name == "read_form" { "form result exceeds budget; reduce limit or use read_form_cell(form_id, offset, start, max_bytes) for an oversized cell" } else { "tool result exceeds budget; request a smaller range" }.into());
         }
         if !reviewer {
             analysis.coverage = next_coverage.clone();
@@ -1268,7 +1269,7 @@ pub fn invoke(
         max_bytes,
     )?;
     if serde_json::to_vec(&out).map_err(|e| e.to_string())?.len() > max_bytes {
-        return Err("tool result exceeds budget; request a smaller range".into());
+        return Err(if name == "read_form" { "form result exceeds budget; reduce limit or use read_form_cell(form_id, offset, start, max_bytes) for an oversized cell" } else { "tool result exceeds budget; request a smaller range" }.into());
     }
     if !reviewer {
         next.coverage = next_coverage.clone();
@@ -1308,7 +1309,9 @@ fn execute(
                 start,
                 end,
             );
-            Ok(json!({"total":values.len(),"next":end,"items":&values[start..end]}))
+            Ok(
+                json!({"kind":kind,"offset":start,"total":values.len(),"next":end,"items":&values[start..end]}),
+            )
         }
         "source_index" => {
             object(args, &["offset", "limit"])?;
@@ -1375,6 +1378,61 @@ fn execute(
                 }
                 // Include annotation overhead in the returned range budget.
                 // The next read resumes at this exact returned end, without gaps.
+                end = start + (end - start) / 2;
+            }
+        }
+        "read_form_cell" => {
+            object(args, &["form_id", "offset", "start", "max_bytes"])?;
+            let id = string(args, "form_id")?;
+            let f = form(input, id)?;
+            let (rows, columns) = super::relations::form_dimensions(&f["definition"])
+                .ok_or("form grid unavailable")?;
+            let offset = number(args, "offset")?;
+            if offset >= rows * columns {
+                return Err("cell offset outside form".into());
+            }
+            let cell =
+                super::relations::sparse_cell(&f["definition"], offset / columns, offset % columns)
+                    .ok_or("cell must be a grid anchor")?;
+            let text = cell["text"].as_str().ok_or("grid cell text missing")?;
+            let start = number(args, "start")?;
+            let size = number(args, "max_bytes")?;
+            if size == 0 || start > text.len() || !text.is_char_boundary(start) {
+                return Err("invalid cell text range".into());
+            }
+            let mut end = start.saturating_add(size).min(text.len());
+            loop {
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let out = json!({"form_id":id,"source_id":f["source_unit_revision_id"],"cell_offset":offset,
+                    "row":cell["row"],"column":cell["column"],"row_span":cell["row_span"],"col_span":cell["col_span"],
+                    "start":start,"end":end,"next":end,"total_bytes":text.len(),"text":&text[start..end],
+                    "citation":{"source_id":f["source_unit_revision_id"],"start":0,"end":0,"view_id":null,
+                        "grid_cell":{"form_id":id,"row":offset/columns,"column":offset%columns}},
+                    "instruction":"Cell continuation only. Full-cell citations and scan conclusions require all byte ranges to be delivered and confirmed."});
+                if serde_json::to_vec(&out).map_err(|e| e.to_string())?.len() <= max_bytes {
+                    if start == end && start < text.len() {
+                        return Err("cell result budget too small".into());
+                    }
+                    let key = format!("form-cell:{id}:{offset}");
+                    cover(
+                        coverage.metadata.entry(key.clone()).or_default(),
+                        start,
+                        end,
+                    );
+                    if text.is_empty() || contains(coverage.metadata.get(&key), 0, text.len()) {
+                        cover(
+                            coverage.form_cells.entry(id.into()).or_default(),
+                            offset,
+                            offset + 1,
+                        );
+                    }
+                    return Ok(out);
+                }
+                if end == start {
+                    return Err("cell result budget too small".into());
+                }
                 end = start + (end - start) / 2;
             }
         }

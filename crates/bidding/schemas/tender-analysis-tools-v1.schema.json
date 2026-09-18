@@ -3571,5 +3571,39 @@
         "additionalProperties": false
       }
     }
+  },
+{
+  "type": "function",
+  "function": {
+    "name": "read_form_cell",
+    "description": "Continue one oversized grid anchor cell by UTF-8 byte range. Whole-cell evidence is granted only after all ranges are confirmed.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "form_id",
+        "offset",
+        "start",
+        "max_bytes"
+      ],
+      "properties": {
+        "form_id": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
   }
+}
 ]

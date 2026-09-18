@@ -155,7 +155,7 @@ cargo run -p retention
 
 - `bid:tender_document_process:v2`
 - `bid:requirement_set_compile:v2`
-- `bid:docx_compose:v2`（冻结分析到完整模板，需显式 KB_DOCX_COMPOSITION_LIMITS；整链验收状态见编制实施记录）
+- `bid:docx_compose:v2`（用户触发填充当前已保存 DOCX，复用冻结大纲运行合同；整链验收状态见统一方案）
 - `bid:content_generate:v2`
 - `bid:submission_export:v2`
 

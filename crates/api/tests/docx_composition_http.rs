@@ -39,7 +39,7 @@ async fn call(app: &axum::Router, request: Request<Body>, status: StatusCode) ->
     serde_json::from_slice(&bytes).unwrap()
 }
 #[tokio::test]
-async fn composition_http_replays_original_intent_and_exposes_scoped_progress() {
+async fn fill_http_replays_original_intent_and_exposes_scoped_progress() {
     let path = std::path::PathBuf::from(
         std::env::var("KB_COMPOSITION_HTTP_FIXTURE").expect("explicit fixture required"),
     );
@@ -74,7 +74,7 @@ async fn composition_http_replays_original_intent_and_exposes_scoped_progress() 
         jwt_secret: secret,
         bootstrap_key: String::new(),
     });
-    let base = format!("/api/v2/submission-workspaces/{workspace}/docx-compositions");
+    let base = format!("/api/v2/submission-workspaces/{workspace}/docx-fills");
     let body = json!({"basis":fixture["basis"],"expected":{"version_id":fixture["current"]["version_id"],"docx_sha256":fixture["current"]["docx_sha256"]}});
     assert_eq!(
         call(
@@ -123,7 +123,7 @@ async fn composition_http_replays_original_intent_and_exposes_scoped_progress() 
             .await
             .unwrap();
     unsafe {
-        std::env::remove_var("KB_DOCX_COMPOSITION_LIMITS");
+        std::env::remove_var("KB_TENDER_AGENT_LIMITS");
     }
     let unavailable = call(
         &app,
@@ -140,7 +140,7 @@ async fn composition_http_replays_original_intent_and_exposes_scoped_progress() 
     assert_eq!(count_before, count_after);
     unsafe {
         std::env::set_var(
-            "KB_DOCX_COMPOSITION_LIMITS",
+            "KB_TENDER_AGENT_LIMITS",
             fixture["config"]["limits"].to_string(),
         );
     }
@@ -165,7 +165,7 @@ async fn composition_http_replays_original_intent_and_exposes_scoped_progress() 
     unsafe {
         std::env::set_var("REDIS_URL", &redis);
         std::env::set_var("KNOWLEDGEBRAIN_CHAT_MODEL", "changed-test-configuration");
-        std::env::set_var("KB_DOCX_COMPOSITION_LIMITS", "");
+        std::env::set_var("KB_TENDER_AGENT_LIMITS", "");
     }
     let accepted = call(
         &app,
@@ -266,7 +266,7 @@ async fn composition_http_replays_original_intent_and_exposes_scoped_progress() 
         &app,
         request(
             "GET",
-            &format!("/api/v2/submission-workspaces/{other}/docx-compositions/{id}"),
+            &format!("/api/v2/submission-workspaces/{other}/docx-fills/{id}"),
             &token,
             None,
             &Value::Null,
@@ -279,7 +279,7 @@ async fn composition_http_replays_original_intent_and_exposes_scoped_progress() 
             &app,
             request(
                 "GET",
-                &format!("/api/v2/submission-workspaces/{other}/docx-compositions/basis"),
+                &format!("/api/v2/submission-workspaces/{other}/docx-fills/basis"),
                 &token,
                 None,
                 &Value::Null
@@ -319,7 +319,7 @@ async fn composition_http_replays_original_intent_and_exposes_scoped_progress() 
     unsafe {
         std::env::set_var("KNOWLEDGEBRAIN_CHAT_MODEL", &model);
         std::env::set_var(
-            "KB_DOCX_COMPOSITION_LIMITS",
+            "KB_TENDER_AGENT_LIMITS",
             fixture["config"]["limits"].to_string(),
         );
     }

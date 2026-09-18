@@ -1,0 +1,72 @@
+{
+  "outline": {
+    "phase": "outline",
+    "scanned": {
+      "text": {
+        "source": [[0, 12]]
+      },
+      "form_cells": {},
+      "candidate": {},
+      "views": {},
+      "metadata": {},
+      "view_failures": {}
+    },
+    "requirements": {
+      "requirement-1": {
+        "description": "投标函",
+        "kind": "submission",
+        "applicability": "required",
+        "condition": "",
+        "grounds": [
+          {
+            "source_id": "source",
+            "start": 0,
+            "end": 12,
+            "view_id": null,
+            "grid_cell": null
+          }
+        ],
+        "format_grounds": [],
+        "order_constraints": []
+      }
+    },
+    "references": {},
+    "review_fragments": {},
+    "issues": {},
+    "checks": {},
+    "id_sequences": {
+      "requirement": 1,
+      "reference": 0,
+      "issue": 0,
+      "chapter": 1,
+      "fragment": 0
+    },
+    "checked_sha256": null
+  },
+  "draft_plan": [
+    {
+      "grounds": [
+        {
+          "source_id": "source",
+          "start": 0,
+          "end": 12,
+          "view_id": null,
+          "grid_cell": null
+        }
+      ],
+      "requirement_ids": ["requirement-1"],
+      "id": "chapter-1",
+      "parent": null,
+      "order": 0,
+      "title": "投标函",
+      "prescribed": true,
+      "source_ids": ["source"],
+      "windows": [["source"]],
+      "window_index": 0,
+      "status": "pending",
+      "purpose": "response",
+      "format_refs": [],
+      "body_status": "empty"
+    }
+  ]
+}

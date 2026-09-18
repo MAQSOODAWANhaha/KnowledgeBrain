@@ -18,30 +18,25 @@ pub const FILL_TURNS_PER_CHAPTER: usize = 4;
 pub const FILL_MAX_TURNS: usize = 200;
 /// 一窗的**字节**上限（不是字数：中文约 3 字节/字）。
 pub const DRAFT_WINDOW_BYTES: usize = 8000;
-/// 大纲阶段的窗数上限。锚点窗之外的顺序全扫只是 fallback，超限带缺口发布。
+/// 历史 8 窗上限已删除；保留常数仅作回归对照，不再截断扫描。
 pub const OUTLINE_MAX_WINDOWS: usize = 8;
 /// 一个标题最多绑这么多来源，其余留给定向补读。
 pub const BIND_MAX_SOURCES: usize = 8;
-/// 连续这么多轮修补都没减少缺口就收尾，不空转。
+/// 连续这么多轮修补都没减少缺口就结束自动执行，不空转、不出部分骨架。
 pub const OUTLINE_MAX_STALLED_ROUNDS: usize = 2;
-/// 阶段一的墙钟兜底：到点把已有大纲编译成骨架出稿（不是失败，也不是「必须」20
-/// 分钟写完）。目标是远快于此，见 `OUTLINE_DEADLINE_TARGET_SECS`。
-pub const DRAFT_DEADLINE_SECS: u64 = 20 * 60;
+/// 阶段一墙钟保护额度（非完整性定义）；到点保持未完成，不编译部分骨架。
+pub const DRAFT_DEADLINE_SECS: u64 = 46 * 60;
 /// 阶段一的墙钟**目标**：正常文档应该几分钟出骨架。
 pub const OUTLINE_DEADLINE_TARGET_SECS: u64 = 5 * 60;
 pub const OFFICIAL_DEADLINE_SECS: u64 = 45 * 60;
-pub const DRAFT_MAX_ATTEMPTS: i32 = 2;
+pub const DRAFT_MAX_ATTEMPTS: i32 = 3;
 /// 整体填充的**写作窗**：到点停止派章，把已填的章编译出稿。
 pub const FILL_DEADLINE_SECS: u64 = 40 * 60;
 /// 整体填充的**信封窗**：写作窗之后还留 5 分钟给编译、登记与入稿，且必须短于
 /// SQL 的 46 分钟硬租约（SQL 只作兜底，不在那边再调一遍）。
 pub const FILL_ENVELOPE_DEADLINE_SECS: u64 = 45 * 60;
 
-// 三条口径写成编译期断言，改常数时当场失败，不用等哪个测试恰好覆盖到。
-const _: () = assert!(
-    OUTLINE_MAX_WINDOWS + 4 <= OUTLINE_TURN_TARGET,
-    "最坏窗数下的大纲帽也要落在目标回合内，否则目标是空话"
-);
+// 写作窗必须短于信封窗，信封窗必须短于 SQL 硬租约。
 const _: () = assert!(
     OUTLINE_MAX_TURNS > OUTLINE_TURN_TARGET,
     "兜底上限必须宽于目标：时间是要压的目标，不是砍掉大纲的理由"
@@ -63,58 +58,27 @@ pub fn default_draft_docx_bytes() -> usize {
     DRAFT_MAX_DOCX_BYTES
 }
 
-/// 编译产物 + 为了压进字节上限而被退回骨架的章。
+/// Compile result. `degraded` stays empty: over-budget compile fails instead of
+/// dropping filled bodies.
 pub struct DraftCompile {
     pub compiled: crate::docx_composition::compiler::Compiled,
     pub degraded: Vec<String>,
 }
 
-/// 按配置上限编译草稿，超限时降级出稿而不是让整轮白跑。
-///
-/// 一份填满的 106 页投标文件很容易超过骨架用的上限。用户宁愿拿到一份「前面
-/// 有正文、后面留空标题」的 Word，也不要一个编译错误和零产物；被退回的章会
-/// 报上来，由调用方告知用户。
+/// Compile the current draft plan. Over-budget compilation fails without dropping
+/// filled bodies or user-preserved content; callers must raise the budget or stop.
 pub fn compile_draft(
     input: &FrozenInput,
     result: &super::AnalysisResult,
     max_docx_bytes: usize,
 ) -> Result<DraftCompile, String> {
-    let filled: Vec<String> = result
-        .analysis
-        .draft_plan
-        .iter()
-        .filter(|item| item.status == DraftStatus::Filled)
-        .map(|item| item.id.clone())
-        .collect();
-    let mut keep = filled.len();
-    loop {
-        let mut attempt = result.clone();
-        let degraded: Vec<String> = filled.iter().skip(keep).cloned().collect();
-        for id in &degraded {
-            if let Some(item) = attempt
-                .analysis
-                .draft_plan
-                .iter_mut()
-                .find(|item| &item.id == id)
-            {
-                item.status = DraftStatus::Pending;
-            }
-        }
-        if !degraded.is_empty() {
-            // The compiler checks the analysis digest, so a degraded plan has to
-            // be a coherent analysis rather than an edited copy of another one.
-            attempt.review.analysis_sha256 = crate::tender_analysis::digest(&attempt.analysis)?;
-        }
-        let composed = crate::docx_composition::synthesize_draft_document(input, &attempt)?;
-        match crate::docx_composition::compiler::compile(input, &attempt, &composed, max_docx_bytes)
-        {
-            Ok(compiled) => return Ok(DraftCompile { compiled, degraded }),
-            Err(error) if keep > 0 && error.contains("exceeds configured byte budget") => {
-                keep /= 2;
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    let composed = crate::docx_composition::synthesize_draft_document(input, result)?;
+    let compiled =
+        crate::docx_composition::compiler::compile(input, result, &composed, max_docx_bytes)?;
+    Ok(DraftCompile {
+        compiled,
+        degraded: vec![],
+    })
 }
 
 pub fn draft_claim_exhausted(draft_path: bool, attempt: i32) -> bool {
@@ -151,6 +115,21 @@ pub fn analysis_deadline_secs(draft_path: bool) -> u64 {
         OFFICIAL_DEADLINE_SECS
     }
 }
+
+/// Seconds until a frozen absolute deadline. `None` is the first claim, which
+/// still uses the initial budget; a later claim must pass the same deadline.
+pub fn handler_budget_secs(
+    deadline_unix: Option<i64>,
+    now_unix: i64,
+    first_claim_secs: u64,
+) -> u64 {
+    match deadline_unix {
+        None => first_claim_secs,
+        Some(deadline) => (deadline - now_unix).max(0) as u64,
+    }
+}
+
+pub const PUBLISH_RESERVE_SECS: u64 = 300;
 
 pub fn draft_should_publish_partial(code: &str, _message: &str) -> bool {
     !matches!(
@@ -254,242 +233,15 @@ fn heading_parts(source: &Source) -> Vec<String> {
         .collect()
 }
 
-fn titles_match(left: &str, right: &str) -> bool {
-    let left_core = title_core(left);
-    let right_core = title_core(right);
-    folded_contains(left, right_core)
-        || folded_contains(right, left_core)
-        || folded_contains(left_core, right_core)
-        || folded_contains(right_core, left_core)
-}
-
-fn source_subheadings(input: &FrozenInput, title: &str) -> Vec<String> {
-    let mut kids = BTreeSet::new();
-    // 分母只取能当目录依据的来源：投标人须知、评标办法、技术规格的标题树是要求，
-    // 不是投标目录，拿它们当分母就会把招标目录抄进投标文件。
-    for source in input
-        .source_units
-        .iter()
-        .filter(|source| is_catalog_source(input, source))
-    {
-        let parts = heading_parts(source);
-        for (index, part) in parts.iter().enumerate() {
-            if titles_match(part, title) && index + 1 < parts.len() {
-                kids.insert(parts[index + 1].clone());
-            }
-        }
-    }
-    kids.into_iter().collect()
-}
-
-fn child_covers_subheading(child_title: &str, subheading: &str) -> bool {
-    folded_contains(child_title, subheading)
-        || folded_contains(subheading, title_core(child_title))
-        || folded_contains(child_title, title_core(subheading))
-}
-
-/// 宿主完整性清单里的一条缺口：`owner` 为空表示缺的是组成条款/点名表单里
-/// 列出的顶层项，否则是该节点在来源标题下还没写的子标题。
-pub struct OutlineGap {
-    pub owner: Option<String>,
-    pub owner_title: String,
-    pub missing: Vec<String>,
-}
-
-/// 组成条款定位标记。宿主只用它找到条款位置，条款里列了什么由原文决定，
-/// 不靠内置行业词表猜标题。
-const COMPOSITION_CLAUSE_MARKERS: [&str; 8] = [
-    "投标文件组成",
-    "投标文件的组成",
-    "投标文件应包括",
-    "投标文件由",
-    "装订顺序",
-    "须提交的格式",
-    "由下列",
-    "包括以下",
-];
-
-/// 「投标文件格式/附表」章的定位标记。与组成条款标记一起决定哪些来源能当目录依据。
-const FORMAT_CHAPTER_MARKERS: [&str; 4] = ["投标文件格式", "响应文件格式", "投标文件组成", "附表"];
-
-/// 能当目录依据的来源：组成/装订条款所在来源、「投标文件格式/附表」章、被点名的
-/// 表单所在来源。其余章节是投标要求，不是投标目录。
-pub fn is_catalog_source(input: &FrozenInput, source: &Source) -> bool {
-    if !composition_clause_items(&source.text).is_empty() {
-        return true;
-    }
-    if heading_parts(source).iter().any(|part| {
-        FORMAT_CHAPTER_MARKERS
-            .iter()
-            .any(|m| folded_contains(part, m))
-    }) {
-        return true;
-    }
-    input
-        .structured_forms
-        .iter()
-        .any(|form| form["source_unit_revision_id"] == source.source_unit_revision_id)
-}
-
-fn plausible_item_title(part: &str) -> bool {
-    let count = part.chars().count();
-    (2..=20).contains(&count)
-        && !part.contains('。')
-        && !COMPOSITION_CLAUSE_MARKERS
-            .iter()
-            .any(|marker| part.contains(marker))
-}
-
-fn strip_ordinal(part: &str) -> &str {
-    part.trim()
-        .trim_start_matches(|c: char| {
-            c.is_ascii_digit() || matches!(c, '.' | '．' | '、' | ' ' | '①'..='⑳')
-        })
-        .trim()
-}
-
-/// 条款正文按枚举标记切条。列表既可能是「、」串联，也可能是编号或换行分行。
-/// 没有冒号也没有分隔符的，说明标记后面只是普通句子，不是枚举，不取。
-fn clause_items(body: &str) -> Vec<String> {
-    if !body.contains(['、', '；', ';', '\n']) {
-        return Vec::new();
-    }
-    body.split(|c: char| {
-        matches!(
-            c,
-            '、' | '；' | ';' | '\n' | '，' | ',' | '(' | ')' | '（' | '）'
-        )
-    })
-    .map(strip_ordinal)
-    .filter(|part| plausible_item_title(part))
-    .map(str::to_string)
-    .collect()
-}
-
-fn composition_clause_items(text: &str) -> Vec<String> {
-    let mut items = Vec::new();
-    for marker in COMPOSITION_CLAUSE_MARKERS {
-        let mut from = 0;
-        while let Some(hit) = text[from..].find(marker) {
-            let start = from + hit + marker.len();
-            let end = text[start..]
-                .find('。')
-                .map(|index| start + index)
-                .unwrap_or(text.len());
-            let body = &text[start..end];
-            // 「……由下列文件组成：投标函、……」冒号之后才是枚举本身。
-            let body = match body.char_indices().rfind(|(_, c)| matches!(c, '：' | ':')) {
-                Some((index, colon)) => &body[index + colon.len_utf8()..],
-                None => body,
-            };
-            items.extend(clause_items(body));
-            from = end.max(start);
-        }
-    }
-    items
-}
-
-fn all_form_titles(input: &FrozenInput) -> Vec<String> {
-    input
-        .structured_forms
-        .iter()
-        .filter_map(|form| {
-            form["definition"]["title"]
-                .as_str()
-                .or_else(|| form["title"].as_str())
-                .map(str::to_string)
-        })
-        .filter(|title| plausible_item_title(title))
-        .collect()
-}
-
-/// 期望清单：组成条款枚举 + 被点名的指定格式/附表。
-fn expected_outline_items(input: &FrozenInput) -> Vec<String> {
-    let mut expected: Vec<String> = Vec::new();
-    let candidates = input
-        .source_units
-        .iter()
-        .flat_map(|source| composition_clause_items(&source.text))
-        .chain(all_form_titles(input));
-    for item in candidates {
-        if !expected.iter().any(|kept| titles_match(kept, &item)) {
-            expected.push(item);
-        }
-    }
-    expected
-}
-
-fn catalog_gaps(input: &FrozenInput, plan: &[DraftPlanItem]) -> Vec<OutlineGap> {
-    let live = |item: &DraftPlanItem| item.status != DraftStatus::Omitted;
-    let mut gaps = Vec::new();
-    // 根节点同样要查：「只有分册名」正好是漏掉根节点时看不见的那一类。
-    for item in plan.iter().filter(|item| live(item)) {
-        let required = source_subheadings(input, &item.title);
-        if required.is_empty() {
-            continue;
-        }
-        let children: Vec<_> = plan
-            .iter()
-            .filter(|child| live(child) && child.parent.as_deref() == Some(item.id.as_str()))
-            .collect();
-        let missing: Vec<_> = required
-            .into_iter()
-            .filter(|sub| {
-                !children
-                    .iter()
-                    .any(|child| child_covers_subheading(&child.title, sub))
-            })
-            .collect();
-        if !missing.is_empty() {
-            gaps.push(OutlineGap {
-                owner: Some(item.id.clone()),
-                owner_title: item.title.clone(),
-                missing,
-            });
-        }
-    }
-    gaps
-}
-
-/// 宿主完整性清单。大纲只有在清单闭合时才算写完；到期是「带缺口发布」。
-pub fn outline_gaps(input: &FrozenInput, plan: &[DraftPlanItem]) -> Vec<OutlineGap> {
-    let mut gaps = Vec::new();
-    // 有据 omitted 也算映射到了，所以这里连 omitted 节点一起认。
-    let missing: Vec<String> = expected_outline_items(input)
-        .into_iter()
-        .filter(|item| !plan.iter().any(|node| titles_match(&node.title, item)))
-        .collect();
-    if !missing.is_empty() {
-        gaps.push(OutlineGap {
-            owner: None,
-            owner_title: "投标文件组成条款".into(),
-            missing,
-        });
-    }
-    gaps.extend(catalog_gaps(input, plan));
-    gaps
-}
-
-pub fn outline_ready(input: &FrozenInput, plan: &[DraftPlanItem]) -> bool {
-    !plan.is_empty() && outline_gaps(input, plan).is_empty()
-}
-
-
-
 /// 大纲阶段的回合帽：索引 + 逐窗投递 + 修补轮，按窗数推导。
 pub fn outline_turn_cap(input: &FrozenInput) -> usize {
-    outline_windows(input).len().saturating_mul(4).saturating_add(12)
+    outline_chunks(input)
+        .len()
+        .saturating_mul(4)
+        .saturating_add(12)
 }
 
-/// 帽到期或修补轮不再减少缺口时，把每条缺口记成 `omitted(bind_failed)`，
-/// 让它出现在报告里而不是静默消失。
-
-
-/// 顺序正确性：同一父下的 `order` 以组成条款枚举顺序为准；条款没列的节点保持
-/// 相对次序排在其后。
-
-
-
+/// 帽到期或修补轮不再减少缺口时，保持未完成，不编译部分骨架。
 fn has_paren_group(text: &str) -> bool {
     (text.contains('(') && text.contains(')')) || (text.contains('（') && text.contains('）'))
 }
@@ -530,10 +282,6 @@ fn folded_contains(haystack: &str, needle: &str) -> bool {
     !needle.is_empty() && compact(haystack).contains(&needle)
 }
 
-
-
-
-
 fn title_core(title: &str) -> &str {
     let title = title.trim();
     match title.find(['(', '（']) {
@@ -568,18 +316,14 @@ fn source_matches_terms(input: &FrozenInput, source: &Source, terms: &[String]) 
             .any(|name| terms.iter().any(|term| folded_contains(name, term)))
 }
 
-
-
-/// 命中来源的优先级：表名精确 > 目录依据章 > `heading_path` 同名 > 只在正文出现。
+/// 命中来源的优先级：表名包含 > 解析器给出的 `heading_path` 同名 > 只在正文出现。
+/// 不使用组成／格式词表抬优先级。
 fn bind_rank(input: &FrozenInput, source: &Source, terms: &[String]) -> u8 {
     if form_titles(input, &source.source_unit_revision_id)
         .iter()
         .any(|name| terms.iter().any(|term| folded_contains(name, term)))
     {
         return 0;
-    }
-    if is_catalog_source(input, source) {
-        return 1;
     }
     if heading_parts(source)
         .iter()
@@ -623,16 +367,39 @@ pub fn bind_source_ids(
     Ok(hits.into_iter().map(|(_, _, id)| id).collect())
 }
 
-
-
 fn specialize_pending_windows(input: &FrozenInput, plan: &mut [DraftPlanItem]) {
-    for item in plan.iter_mut().filter(|item| item.status == DraftStatus::Pending) {
-        if !item.source_ids.is_empty() { continue; }
+    for item in plan
+        .iter_mut()
+        .filter(|item| item.status == DraftStatus::Pending)
+    {
+        if item.omit_reason.is_some() || !item.source_ids.is_empty() {
+            continue;
+        }
+        let mut from_grounds: Vec<String> = item
+            .grounds
+            .iter()
+            .map(|span| span.source_id.clone())
+            .collect();
+        from_grounds.sort();
+        from_grounds.dedup();
+        if !from_grounds.is_empty() {
+            item.source_ids = from_grounds;
+            item.windows = split_windows(input, &item.source_ids);
+            item.omit_reason = None;
+            continue;
+        }
         item.windows.clear();
         item.window_index = 0;
         match bind_source_ids(input, &item.title, &[]) {
-            Ok(hits) => { item.source_ids = hits; item.windows = split_windows(input, &item.source_ids); item.omit_reason = None; }
-            Err(reason) => { item.source_ids.clear(); item.omit_reason = Some(reason); }
+            Ok(hits) => {
+                item.source_ids = hits;
+                item.windows = split_windows(input, &item.source_ids);
+                item.omit_reason = None;
+            }
+            Err(reason) => {
+                item.source_ids.clear();
+                item.omit_reason = Some(reason);
+            }
         }
     }
 }
@@ -684,13 +451,193 @@ pub fn split_windows(input: &FrozenInput, source_ids: &[String]) -> Vec<Vec<Stri
     windows
 }
 
-/// 大纲阶段的窗序列：先投锚点窗（组成条款与投标文件格式章），其余来源按顺序作为
-/// fallback 排在后面，总窗数有上限。锚点由宿主用与完整性清单同一组条款标记确定，
-/// 不再多要一次模型选点。
+/// 大纲阶段的窗序列：全部有效来源按原文顺序分窗，不截断尾部。
 pub fn outline_windows(input: &FrozenInput) -> Vec<Vec<String>> {
-    let ids = input.source_units.iter().map(|source| source.source_unit_revision_id.clone()).collect::<Vec<_>>();
-    let windows = split_windows(input, &ids);
-    windows
+    let ids = input
+        .source_units
+        .iter()
+        .map(|source| source.source_unit_revision_id.clone())
+        .collect::<Vec<_>>();
+    split_windows(input, &ids)
+}
+
+/// 续读重叠只作上下文，不进入扫描记账区间。
+pub const OUTLINE_RANGE_OVERLAP: usize = 256;
+pub const OUTLINE_FORM_BODY_ROWS: usize = 8;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct OutlineChunk {
+    pub source_id: String,
+    pub kind: String,
+    pub form_id: String,
+    pub account_start: usize,
+    pub account_end: usize,
+    pub deliver_start: usize,
+    pub header_cells: usize,
+}
+
+/// 不相交的 UTF-8 记账区间。切点落在字符边界上。
+pub fn utf8_account_ranges(text: &str, window: usize) -> Vec<(usize, usize)> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let window = window.max(1);
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = (start + window).min(text.len());
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            end = text[start..]
+                .chars()
+                .next()
+                .map(|ch| start + ch.len_utf8())
+                .unwrap_or(text.len());
+        }
+        ranges.push((start, end));
+        if end >= text.len() {
+            break;
+        }
+        start = end;
+    }
+    ranges
+}
+
+fn delivery_start(text: &str, account_start: usize) -> usize {
+    if account_start == 0 {
+        return 0;
+    }
+    let mut start = account_start.saturating_sub(OUTLINE_RANGE_OVERLAP);
+    while start < account_start && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    start
+}
+
+/// 表头单元格不重复记账；续段的 `header_cells` 是投递时必须带上的前缀。
+pub fn form_account_slices(
+    definition: &serde_json::Value,
+    body_rows: usize,
+) -> Vec<(usize, usize, usize)> {
+    let Some((rows, columns)) = super::relations::form_dimensions(definition) else {
+        return Vec::new();
+    };
+    if columns == 0 || rows == 0 {
+        return Vec::new();
+    }
+    let total = rows * columns;
+    let header = if rows > 1 { columns } else { 0 };
+    if header >= total {
+        return vec![(0, total, 0)];
+    }
+    let step = columns.saturating_mul(body_rows.max(1)).max(columns);
+    let mut start = 0;
+    let mut slices = Vec::new();
+    while start < total {
+        let end = (start + step + if start == 0 { header } else { 0 }).min(total);
+        slices.push((start, end, header));
+        start = end;
+    }
+    slices
+}
+
+pub fn outline_chunks(input: &FrozenInput) -> Vec<OutlineChunk> {
+    let mut chunks = Vec::new();
+    for source in &input.source_units {
+        if source.text.is_empty() {
+            chunks.push(OutlineChunk {
+                source_id: source.source_unit_revision_id.clone(),
+                kind: "empty".into(),
+                form_id: String::new(),
+                account_start: 0,
+                account_end: 0,
+                deliver_start: 0,
+                header_cells: 0,
+            });
+        }
+        for (start, end) in utf8_account_ranges(&source.text, DRAFT_WINDOW_BYTES) {
+            chunks.push(OutlineChunk {
+                source_id: source.source_unit_revision_id.clone(),
+                kind: "text".into(),
+                form_id: String::new(),
+                account_start: start,
+                account_end: end,
+                deliver_start: delivery_start(&source.text, start),
+                header_cells: 0,
+            });
+        }
+        for form in input
+            .structured_forms
+            .iter()
+            .filter(|form| form["source_unit_revision_id"] == source.source_unit_revision_id)
+        {
+            let Some(form_id) = form["form_definition_revision_id"].as_str() else {
+                continue;
+            };
+            for (start, end, header) in
+                form_account_slices(&form["definition"], OUTLINE_FORM_BODY_ROWS)
+            {
+                chunks.push(OutlineChunk {
+                    source_id: source.source_unit_revision_id.clone(),
+                    kind: "form".into(),
+                    form_id: form_id.into(),
+                    account_start: start,
+                    account_end: end,
+                    deliver_start: if header > 0 { 0 } else { start },
+                    header_cells: header,
+                });
+            }
+        }
+    }
+    for (kind, values) in [
+        ("documents", &input.documents),
+        ("document_relations", &input.document_relations),
+        ("decisions", &input.decisions),
+    ] {
+        for index in 0..values.len() {
+            chunks.push(OutlineChunk {
+                source_id: kind.into(),
+                kind: "metadata".into(),
+                form_id: String::new(),
+                account_start: index,
+                account_end: index + 1,
+                deliver_start: index,
+                header_cells: 0,
+            });
+        }
+    }
+    chunks
+}
+
+fn chunk_scanned(
+    input: &FrozenInput,
+    outline: &super::outline_flow::OutlineState,
+    chunk: &OutlineChunk,
+) -> bool {
+    let _ = input;
+    if chunk.kind == "metadata" {
+        super::tools::contains(
+            outline.scanned.metadata.get(&chunk.source_id),
+            chunk.account_start,
+            chunk.account_end,
+        )
+    } else if chunk.kind == "empty" {
+        outline.scanned.metadata.contains_key(&chunk.source_id)
+    } else if chunk.kind == "form" {
+        super::tools::contains(
+            outline.scanned.form_cells.get(&chunk.form_id),
+            chunk.account_start,
+            chunk.account_end,
+        )
+    } else {
+        super::tools::contains(
+            outline.scanned.text.get(&chunk.source_id),
+            chunk.account_start,
+            chunk.account_end,
+        )
+    }
 }
 
 pub fn current_window(item: &DraftPlanItem) -> &[String] {
@@ -857,8 +804,7 @@ pub fn fill_schemas() -> Vec<Value> {
     tools
 }
 
-/// 常驻读工具。**没有 `search_sources`**：自由检索是回合失控的入口，读取只准
-/// 按索引里的 id 取。工具集固定、不随文件大小变，所以冻结合同只有两份 hash。
+/// Bounded navigation and search over the complete frozen collection.
 pub fn read_schemas() -> Vec<Value> {
     let tools: Vec<Value> = serde_json::from_str(include_str!(
         "../../schemas/tender-analysis-tools-v1.schema.json"
@@ -869,7 +815,15 @@ pub fn read_schemas() -> Vec<Value> {
         .filter(|tool| {
             matches!(
                 tool["function"]["name"].as_str(),
-                Some("collection_index" | "source_index" | "search_sources" | "read_source" | "read_form" | "read_source_view")
+                Some(
+                    "collection_index"
+                        | "search_sources"
+                        | "source_index"
+                        | "read_source"
+                        | "read_form"
+                        | "read_form_cell"
+                        | "read_source_view"
+                )
             )
         })
         .collect()
@@ -882,29 +836,150 @@ pub fn apply(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    if matches!(name, "submit_outline_scan" | "read_outline" | "submit_outline_check" | "finish_outline") {
-        return super::outline_flow::apply(input, state, name, args, config.limits.max_tool_result_bytes);
+    if matches!(
+        name,
+        "submit_outline_scan"
+            | "read_outline"
+            | "read_outline_fragment"
+            | "submit_outline_check"
+            | "assign_outline_fragments"
+            | "finish_outline"
+    ) {
+        return super::outline_flow::apply(
+            input,
+            state,
+            name,
+            args,
+            config.limits.max_tool_result_bytes,
+        );
     }
     if name == "put_outline_items" {
-        if state.analysis.outline.phase != super::outline_flow::Phase::Outline { return Err("chapter organization requires completed discovery".into()); }
+        if !organization_allowed(input, state) {
+            return Err("chapter organization requires completed discovery".into());
+        }
         let items = args["items"].as_array().ok_or("items required")?;
         let mut next = state.clone();
+        let mut items = items.clone();
+        let mut id_map = std::collections::BTreeMap::new();
+        let mut seen_ids = BTreeSet::new();
+        for item in &mut items {
+            let supplied = item["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned);
+            if let Some(id) = &supplied
+                && !seen_ids.insert(id.clone())
+            {
+                return Err("duplicate chapter ID in batch".into());
+            }
+            if supplied
+                .as_ref()
+                .is_none_or(|id| !state.analysis.draft_plan.iter().any(|node| &node.id == id))
+            {
+                let id = loop {
+                    next.analysis.outline.id_sequences.chapter += 1;
+                    let id = format!("chapter-{}", next.analysis.outline.id_sequences.chapter);
+                    if !state.analysis.draft_plan.iter().any(|node| node.id == id) {
+                        break id;
+                    }
+                };
+                if let Some(alias) = supplied {
+                    id_map.insert(alias, id.clone());
+                }
+                item["id"] = json!(id);
+            }
+        }
+        for item in &mut items {
+            if let Some(parent) = item["parent"].as_str().and_then(|id| id_map.get(id)) {
+                item["parent"] = json!(parent);
+            }
+        }
+        let removed: Vec<String> =
+            serde_json::from_value(args["remove_ids"].clone()).map_err(|e| e.to_string())?;
+        if items
+            .iter()
+            .any(|item| removed.iter().any(|id| item["id"] == *id))
+        {
+            return Err("cannot update and remove the same chapter".into());
+        }
+        // Remove replaced/deleted nodes before checking sibling order; validate the final tree below.
+        next.analysis.draft_plan.retain(|node| {
+            !removed.contains(&node.id) && !items.iter().any(|item| item["id"] == node.id)
+        });
         let mut saved = Vec::new();
-        for item in items { saved.push(put_outline_item(input, config, &mut next, item)?); }
-        let removed: Vec<String> = serde_json::from_value(args["remove_ids"].clone()).map_err(|e| e.to_string())?;
-        next.analysis.draft_plan.retain(|node| !removed.contains(&node.id));
+        let mut composition_changed = false;
+        let mut volume_touch = BTreeSet::new();
+        for item in &items {
+            let before_parent = item.get("id").and_then(Value::as_str).and_then(|id| {
+                state
+                    .analysis
+                    .draft_plan
+                    .iter()
+                    .find(|node| node.id == id)
+                    .and_then(|node| node.parent.clone())
+            });
+            let parent = item
+                .get("parent")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if parent.is_none() || before_parent.is_none() {
+                composition_changed = true;
+            }
+            if let Some(volume) = parent.clone().or(before_parent) {
+                volume_touch.insert(volume);
+            }
+            saved.push(put_outline_item(input, config, &mut next, item)?);
+        }
+        if !removed.is_empty() {
+            composition_changed = true;
+            for id in &removed {
+                if let Some(parent) = next
+                    .analysis
+                    .draft_plan
+                    .iter()
+                    .find(|node| node.id == *id)
+                    .and_then(|node| node.parent.clone())
+                {
+                    volume_touch.insert(parent);
+                }
+            }
+        }
+        next.analysis
+            .draft_plan
+            .retain(|node| !removed.contains(&node.id));
         super::outline_flow::tree_valid(&next.analysis.draft_plan)?;
-        next.analysis.outline.checked_sha256 = None;
+        let unmapped = next.analysis.outline.requirements.iter().any(|(id, need)| {
+            need.applicability != super::outline_flow::Applicability::NotApplicable
+                && state.analysis.draft_plan.iter().any(|node| {
+                    node.status != DraftStatus::Omitted && node.requirement_ids.contains(id)
+                })
+                && !next.analysis.draft_plan.iter().any(|node| {
+                    node.status != DraftStatus::Omitted && node.requirement_ids.contains(id)
+                })
+        });
+        if unmapped {
+            return Err("batch would leave a required or conditional requirement unmapped".into());
+        }
+        let volumes: Vec<String> = volume_touch.into_iter().collect();
+        super::outline_flow::invalidate_checks(&mut next, composition_changed, &volumes);
         *state = next;
-        return Ok(json!({"saved":saved}));
+        return Ok(json!({"saved": saved, "id_map": id_map}));
     }
     match name {
         "put_outline_item" => put_outline_item(input, config, state, args),
         "omit_outline_item" => omit_outline_item(input, config, state, args),
         "put_chapter_template" => put_chapter_template(input, config, state, args),
-        "put_chapter_omission" => put_chapter_omission(input, state, args),
+        "skip_chapter_content" => skip_chapter_content(input, state, args),
         _ => Err(format!("unknown draft tool {name}")),
     }
+}
+
+fn organization_allowed(input: &FrozenInput, state: &super::agent::Checkpoint) -> bool {
+    use super::outline_flow::{Phase, scan_complete};
+    state.analysis.outline.phase == Phase::Outline
+        || (state.analysis.outline.phase == Phase::Discover
+            && !state.analysis.outline.checks.is_empty()
+            && scan_complete(input, &state.analysis.outline))
 }
 
 fn put_outline_item(
@@ -913,6 +988,9 @@ fn put_outline_item(
     state: &mut super::agent::Checkpoint,
     args: &Value,
 ) -> Result<Value, String> {
+    if !organization_allowed(input, state) {
+        return Err("chapter organization requires completed discovery".into());
+    }
     let title = args["title"].as_str().ok_or("title required")?.trim();
     if title.is_empty() {
         return Err("title required".into());
@@ -933,21 +1011,54 @@ fn put_outline_item(
     for span in &grounds {
         crate::tender_analysis::tools::validate_span(input, state.coverage(), span)?;
     }
-    let id = args["id"]
-        .as_str()
-        .map(str::to_string)
+    let requirement_ids = required_json_array(args, "requirement_ids")?;
+    let requirement_ids: Vec<String> =
+        serde_json::from_value(requirement_ids).map_err(|e| e.to_string())?;
+    if requirement_ids
+        .iter()
+        .any(|id| !state.analysis.outline.requirements.contains_key(id))
+    {
+        return Err("unknown submission requirement".into());
+    }
+    let purpose = required_json_field(args, "purpose")?;
+    let purpose: ChapterPurpose = serde_json::from_value(purpose).map_err(|e| e.to_string())?;
+    let format_refs = required_json_array(args, "format_refs")?;
+    let format_refs: Vec<Span> = serde_json::from_value(format_refs).map_err(|e| e.to_string())?;
+    for span in &format_refs {
+        crate::tender_analysis::tools::validate_span(input, state.coverage(), span)?;
+    }
+    let id = match args
+        .get("id")
+        .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
-        .unwrap_or_else(|| format!("outline-{}", state.analysis.draft_plan.len() + 1));
+    {
+        Some(id) => id.to_string(),
+        None => {
+            state.analysis.outline.id_sequences.chapter += 1;
+            format!("chapter-{}", state.analysis.outline.id_sequences.chapter)
+        }
+    };
     if sibling_order_taken(&state.analysis.draft_plan, parent.as_deref(), order, &id) {
         return Err(
             "sibling order must be unique under the same parent; keep the tender composition order"
                 .into(),
         );
     }
-    let requirement_ids: Vec<String> = serde_json::from_value(args["requirement_ids"].clone()).map_err(|e| e.to_string())?;
-    if requirement_ids.iter().any(|id| !state.analysis.outline.requirements.contains_key(id)) { return Err("unknown submission requirement".into()); }
-    let mut source_ids: Vec<String> = requirement_ids.iter().flat_map(|id| state.analysis.outline.requirements[id].format_grounds.iter().map(|span| span.source_id.clone())).collect();
-    if source_ids.is_empty() { source_ids = grounds.iter().map(|span| span.source_id.clone()).collect(); }
+    let composition_changed = parent.is_none();
+    let volume_touch: Vec<String> = parent.iter().cloned().collect();
+    let mut source_ids: Vec<String> = requirement_ids
+        .iter()
+        .flat_map(|id| {
+            state.analysis.outline.requirements[id]
+                .format_grounds
+                .iter()
+                .map(|span| span.source_id.clone())
+        })
+        .collect();
+    source_ids.extend(format_refs.iter().map(|span| span.source_id.clone()));
+    if source_ids.is_empty() {
+        source_ids = grounds.iter().map(|span| span.source_id.clone()).collect();
+    }
     let mut seen = BTreeSet::new();
     source_ids.retain(|id| seen.insert(id.clone()));
     let windows = split_windows(input, &source_ids);
@@ -966,14 +1077,31 @@ fn put_outline_item(
             window_index: 0,
             template_id: None,
             status: DraftStatus::Pending,
-            purpose: ChapterPurpose::Response,
-            format_refs: vec![],
+            purpose,
+            format_refs,
             body_status: BodyStatus::Empty,
             omit_reason: None,
             preserved: vec![],
         },
     );
+    super::outline_flow::invalidate_checks(state, composition_changed, &volume_touch);
     Ok(json!({"id":id,"saved":true}))
+}
+
+fn required_json_field(args: &Value, key: &str) -> Result<Value, String> {
+    match args.get(key) {
+        None => Err(format!("{key} required")),
+        Some(Value::Null) => Err(format!("{key} must not be null")),
+        Some(value) => Ok(value.clone()),
+    }
+}
+
+fn required_json_array(args: &Value, key: &str) -> Result<Value, String> {
+    let value = required_json_field(args, key)?;
+    if !value.is_array() {
+        return Err(format!("{key} must be an array"));
+    }
+    Ok(value)
 }
 
 fn omit_outline_item(
@@ -1112,7 +1240,7 @@ fn put_chapter_template(
     Ok(json!({"id":id,"saved":true,"status":item.status}))
 }
 
-fn put_chapter_omission(
+fn skip_chapter_content(
     input: &FrozenInput,
     state: &mut super::agent::Checkpoint,
     args: &Value,
@@ -1153,9 +1281,9 @@ fn put_chapter_omission(
     } else {
         reason
     };
-    item.status = DraftStatus::Omitted;
+    item.status = DraftStatus::Pending;
     item.omit_reason = Some(reason);
-    Ok(json!({"saved":true,"status":"omitted"}))
+    Ok(json!({"saved":true,"status":"pending","content_skipped":true}))
 }
 
 fn upsert_plan(state: &mut super::agent::Checkpoint, item: DraftPlanItem) {
@@ -1169,10 +1297,6 @@ fn upsert_plan(state: &mut super::agent::Checkpoint, item: DraftPlanItem) {
     } else {
         state.analysis.draft_plan.push(item);
     }
-}
-
-fn has_plan_children(plan: &[DraftPlanItem], id: &str) -> bool {
-    plan.iter().any(|item| item.parent.as_deref() == Some(id))
 }
 
 fn sibling_order_taken(
@@ -1200,9 +1324,14 @@ pub fn assign_next_chapter(input: &FrozenInput, state: &mut super::agent::Checkp
         .analysis
         .draft_plan
         .iter()
-        .filter(|item| item.status == DraftStatus::Pending && !item.source_ids.is_empty())
-        .filter(|item| !has_plan_children(&state.analysis.draft_plan, &item.id))
-        // 叶子章就是可填章：声明了父节点的必须真有父节点，根一级的叶子章同样可填。
+        .filter(|item| {
+            item.status == DraftStatus::Pending
+                && item.omit_reason.is_none()
+                && !item.source_ids.is_empty()
+        })
+        // Group nodes are structural only. Response parents with children still
+        // carry their own body and must be filled; leaves always remain eligible.
+        .filter(|item| item.purpose != ChapterPurpose::Group)
         .filter(|item| {
             item.parent.as_ref().is_none_or(|parent| {
                 state
@@ -1252,12 +1381,19 @@ pub fn after_batch(
         DraftStage::None | DraftStage::Outline => {
             use super::outline_flow::{self, Phase};
             state.draft_stage = DraftStage::Outline;
-            if state.outline_run.no_progress_rounds > 2 { return Err("outline semantic repair exhausted; checkpoint retained".into()); }
+            if state.outline_run.no_progress_rounds > 2 {
+                return Err("outline semantic repair exhausted; checkpoint retained".into());
+            }
             if state.analysis.outline.phase == Phase::Discover {
-                if outline_flow::scan_complete(input, &state.analysis.outline) {
+                if outline_flow::scan_complete(input, &state.analysis.outline)
+                    && state.analysis.outline.checks.is_empty()
+                {
                     state.analysis.outline.phase = Phase::Outline;
+                    state.outline_run.phase = Phase::Outline;
+                    state.outline_run.chunk_cursor = outline_chunks(input).len();
+                    state.main_work = None;
                     state.transcript.clear();
-                } else {
+                } else if !outline_flow::scan_complete(input, &state.analysis.outline) {
                     preload_outline_window(input, state);
                 }
             }
@@ -1270,7 +1406,8 @@ pub fn after_batch(
             let active_done = state.draft_active_id.as_ref().is_none_or(|id| {
                 state.analysis.draft_plan.iter().any(|item| {
                     item.id == *id
-                        && matches!(item.status, DraftStatus::Filled | DraftStatus::Omitted)
+                        && (matches!(item.status, DraftStatus::Filled | DraftStatus::Omitted)
+                            || item.omit_reason.is_some())
                 })
             });
             // 用户要停：当前章收尾后就不再派下一章，走正常收尾编译出稿。剩下的
@@ -1286,39 +1423,134 @@ pub fn after_batch(
     Ok(())
 }
 
-/// 投递当前大纲窗。全书装得进一窗时只跑一轮，与今天的「小文件」行为一致，但走的是
-/// 同一条代码路径。
+/// Select unscanned sources independently of the 8KB accounting chunks.
+pub(super) fn outline_reading_scope(
+    input: &FrozenInput,
+    state: &super::agent::Checkpoint,
+    budget: usize,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut estimated = 0usize;
+    for chunk in outline_chunks(input) {
+        if chunk.kind == "metadata"
+            || chunk_scanned(input, &state.analysis.outline, &chunk)
+            || ids.contains(&chunk.source_id)
+        {
+            continue;
+        }
+        let bytes = input
+            .source_units
+            .iter()
+            .find(|source| source.source_unit_revision_id == chunk.source_id)
+            .map_or(0, |source| {
+                let read = state
+                    .analysis
+                    .coverage
+                    .text
+                    .get(&chunk.source_id)
+                    .into_iter()
+                    .flatten()
+                    .map(|(start, end)| end.saturating_sub(*start))
+                    .sum::<usize>();
+                source.text.len().saturating_sub(read).min(budget)
+            });
+        let form_bytes = input
+            .structured_forms
+            .iter()
+            .filter(|form| form["source_unit_revision_id"] == chunk.source_id)
+            .fold(0usize, |sum, form| {
+                let total = super::relations::form_total(&form["definition"]).unwrap_or(0);
+                let read = form["form_definition_revision_id"]
+                    .as_str()
+                    .and_then(|id| state.analysis.coverage.form_cells.get(id))
+                    .into_iter()
+                    .flatten()
+                    .map(|(start, end)| end.saturating_sub(*start))
+                    .sum::<usize>();
+                let remaining = total.saturating_sub(read);
+                let size =
+                    serde_json::to_vec(&form["definition"]).map_or(budget, |bytes| bytes.len());
+                sum.saturating_add(size.saturating_mul(remaining) / total.max(1))
+            });
+        // Reserve navigation/identity overhead; serialized evidence is checked again.
+        let cost = bytes
+            .saturating_add(form_bytes)
+            .min(budget)
+            .saturating_add(512);
+        if !ids.is_empty() && estimated.saturating_add(cost) > budget {
+            break;
+        }
+        estimated = estimated.saturating_add(cost);
+        ids.push(chunk.source_id);
+    }
+    ids
+}
+
+/// 保存大纲发现游标。阅读包大小由请求组包层决定。首次建立后冻结分块摘要，
+/// 游标指向下一个未记账的 UTF-8／表格区间，不因重试改计划。
 pub fn preload_outline_window(input: &FrozenInput, state: &mut super::agent::Checkpoint) {
+    let chunks = outline_chunks(input);
+    let plan_sha = super::digest(&chunks).expect("outline chunk plan digest");
+    if state.outline_run.chunk_plan_sha256.is_empty() {
+        state.outline_run.chunk_plan_sha256 = plan_sha;
+    }
+    let index = chunks
+        .iter()
+        .position(|chunk| !chunk_scanned(input, &state.analysis.outline, chunk))
+        .unwrap_or(chunks.len().saturating_sub(1));
+    state.outline_run.chunk_cursor = index;
     let windows = outline_windows(input);
-    let index = windows.iter().position(|window| window.iter().any(|id| !super::outline_flow::source_scanned(input, &state.analysis.outline, id))).unwrap_or(windows.len()-1);
-    state.draft_outline_window = index;
-    let window = windows[index].clone();
+    let active = chunks.get(index);
+    let source_index = active
+        .and_then(|chunk| {
+            windows
+                .iter()
+                .position(|window| window.iter().any(|id| id == &chunk.source_id))
+        })
+        .unwrap_or(windows.len().saturating_sub(1));
+    state.draft_outline_window = source_index;
+    // Only the recovery cursor lives here. The request builder sizes the
+    // reading package from the frozen model configuration.
+    let window = active
+        .filter(|chunk| chunk.kind != "metadata")
+        .map(|chunk| vec![chunk.source_id.clone()])
+        .unwrap_or_default();
+    let note = format!(
+        "Inspect all actually delivered ranges and submit them together with submit_outline_scan. Chunk cursor {}/{} is accounting progress, not a one-chunk-per-turn restriction. Do not confirm navigation-only, unsent or overlapping context ranges.",
+        index + 1,
+        chunks.len().max(1)
+    );
     state.main_work = Some(super::agent::WorkState {
         source_scope: window,
         deferred_sources: vec![],
         objective: format!(
-            "按已投递原文写出投标文件组成大纲（第 {}/{} 窗；缺依据的来源按索引 id 定向补读）",
+            "按已投递原文写出投标文件组成大纲（第 {}/{} 块；缺依据的来源按索引 id 定向补读）",
             index + 1,
-            windows.len()
+            chunks.len().max(1)
         ),
         focus: Default::default(),
         output_refs: vec![],
         pending_refs: vec![],
         status: super::agent::context::WorkStatus::Active,
-        note: "Inspect the actual delivered ranges, then submit_outline_scan. Read remaining ranges before claiming a whole source.".into(),
+        note,
     });
 }
 
 /// S1 结构索引：全书标题树与来源清单投影，不含正文。draft 路径原先根本不投递
 /// `documents` 元数据，把最便宜、最结构化的信息藏起来却给了自由检索。
-pub fn outline_index(input: &FrozenInput, state: &super::agent::Checkpoint, max_bytes: usize) -> Value {
+pub fn outline_index(
+    input: &FrozenInput,
+    state: &super::agent::Checkpoint,
+    max_bytes: usize,
+) -> Value {
     let rows: Vec<Value> = input.source_units.iter().map(|source| json!({
         "source_id":source.source_unit_revision_id,"document_id":source.document_id,
         "ordinal":source.ordinal,"bytes":source.text.len(),"locator":source.locator,
         "forms":input.structured_forms.iter().filter(|f| f["source_unit_revision_id"]==source.source_unit_revision_id)
             .map(|f| &f["form_definition_revision_id"]).collect::<Vec<_>>()
     })).collect();
-    json!({"current_window":state.draft_outline_window,"total_sources":rows.len(),
+    json!({"current_window":state.draft_outline_window,"chunk_cursor":state.outline_run.chunk_cursor,
+        "chunk_plan_sha256":state.outline_run.chunk_plan_sha256,"total_sources":rows.len(),
         "sources":super::tools::bounded_page(&rows,0,rows.len().max(1),max_bytes/2).unwrap_or_else(|e| json!({"error":e})),
         "documents":super::tools::bounded_page(&input.documents,0,input.documents.len().max(1),max_bytes/4).unwrap_or_else(|e|json!({"error":e})),
         "instruction":"Use source_index(offset=next,limit=...) to continue. Tables are not automatically prescribed bid forms. Use collection_index for document relations and decisions."})

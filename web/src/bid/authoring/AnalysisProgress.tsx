@@ -10,10 +10,7 @@ import type {
 } from "../api/types";
 import { fileStage } from "../helpers";
 
-type Progress = NonNullable<RequirementSetCompileRequestView["progress"]> & {
-  checkpoint_sequence?: number;
-  boundary?: string;
-};
+type Progress = NonNullable<RequirementSetCompileRequestView["progress"]>;
 
 function parsed(docs: TenderDocumentView[]) {
   return docs.length > 0 && docs.every((doc) => doc.parse_status === "ready" || doc.parse_status === "completed");
@@ -35,9 +32,19 @@ function analysisSummary(job: RequirementSetCompileRequestView | null) {
   const progress = (job.progress ?? {}) as Progress;
   const step = typeof progress.turn === "number" ? progress.turn : progress.checkpoint_sequence;
   const parts: string[] = [];
-  // 阶段一只做大纲与骨架；填章是阶段二用户触发的独立任务，不会出现在这条任务里。
-  if (progress.boundary === "prepared") parts.push("正在等待模型");
+  const phase = progress.outline_phase ?? progress.draft_stage;
+  if (phase === "discover") parts.push("正在发现提交要求");
+  else if (phase === "outline") parts.push("正在组织章节");
+  else if (phase === "check") parts.push("正在语义核对");
+  else if (progress.boundary === "prepared") parts.push("正在等待模型");
   else parts.push("正在生成章节大纲");
+  if (typeof progress.outline_chapters === "number") parts.push(`已有 ${progress.outline_chapters} 章`);
+  if (typeof progress.outline_requirements === "number" && progress.outline_requirements > 0) {
+    parts.push(`${progress.outline_requirements} 项要求`);
+  }
+  if (typeof progress.outline_open_issues === "number" && progress.outline_open_issues > 0) {
+    parts.push(`${progress.outline_open_issues} 个待处理问题`);
+  }
   if (typeof step === "number") parts.push(`第 ${step} 步`);
   return parts.join(" · ");
 }
@@ -137,7 +144,8 @@ export function AnalysisProgress({
     </section>
     {loaded && <section className="card stack" data-testid="tender-outline">
       <h2 className="h3">章节大纲</h2>
-      <p className="text-sm">根据招标要求生成章节层级和可编辑 Word 骨架。招标文件解析标题不是组成依据。终稿需另一次独立复核。</p>
+      <p className="text-sm">根据招标要求生成章节层级和可编辑 Word 骨架。招标文件解析标题不是组成依据。</p>
+      {(outline?.notices ?? []).map((notice, index) => <p role="note" key={`notice:${index}`}>{notice}</p>)}
       {(outline?.extracted?.length ?? 0) > 0
         ? <><h3 className="text-sm">投标文件组成</h3><OutlineTree nodes={outline?.extracted ?? []} /></>
         : <p className="text-sm">{job ? "分析尚未写出投标组成树。" : "开始分析后将显示投标文件组成大纲。"}</p>}

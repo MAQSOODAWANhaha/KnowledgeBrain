@@ -247,12 +247,6 @@ fn new_contract_minimal_rule_and_plan_tools_are_advertised() {
         dump.contains("submission_hint"),
         "Rule.items kinds must be on put_record"
     );
-    let composition = crate::docx_composition::agent::schemas(false);
-    assert!(
-        composition
-            .iter()
-            .any(|tool| tool["function"]["name"] == "put_composition_plan_item")
-    );
     assert!(
         crate::export_review::schemas()
             .iter()

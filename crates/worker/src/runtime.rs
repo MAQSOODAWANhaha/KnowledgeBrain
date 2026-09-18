@@ -32,12 +32,6 @@ pub(crate) const TASK_ABORT_DRAIN_RESERVE: std::time::Duration =
     std::time::Duration::from_millis(100);
 pub(crate) const TENDER_HANDLER_HARD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
-pub(crate) const REQUIREMENT_HANDLER_HARD_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(45 * 60);
-pub(crate) const REQUIREMENT_DRAFT_HANDLER_HARD_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(20 * 60);
-pub(crate) const DOCX_COMPOSE_HANDLER_HARD_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(45 * 60);
 pub(crate) const SUBMISSION_EXPORT_HANDLER_HARD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
 pub(crate) const CONTENT_GENERATE_HANDLER_HARD_TIMEOUT: std::time::Duration =

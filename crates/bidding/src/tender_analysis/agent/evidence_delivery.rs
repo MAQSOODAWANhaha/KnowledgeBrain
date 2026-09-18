@@ -15,10 +15,20 @@ pub(super) fn is_retained_message(message: &Value) -> bool {
             .is_some_and(|content| content["preloaded_evidence"]["assigned_evidence"].is_object())
 }
 
+#[cfg(test)]
 pub(in crate::tender_analysis) fn select(
     input: &FrozenInput,
     config: &Config,
     state: &Checkpoint,
+) -> Result<Option<source_review::Evidence>, AgentError> {
+    select_with_budget(input, config, state, None)
+}
+
+pub(super) fn select_with_budget(
+    input: &FrozenInput,
+    config: &Config,
+    state: &Checkpoint,
+    package_budget: Option<usize>,
 ) -> Result<Option<source_review::Evidence>, AgentError> {
     if state.pending_coverage.is_some()
         || (state.execution().watch.recovery == Recovery::Blocked && !config.limits.draft_path)
@@ -30,7 +40,7 @@ pub(in crate::tender_analysis) fn select(
         return Ok(None);
     }
     let evidence = if state.role == Role::Main {
-        main_work::evidence(input, config, state).map_err(invalid)?
+        main_work::evidence(input, config, state, package_budget).map_err(invalid)?
     } else {
         let assigned_source =
             source_review::assigned_source(input, state, config.limits.max_tool_result_bytes)
@@ -51,9 +61,7 @@ pub(in crate::tender_analysis) fn select(
     };
     let expected = context::visible_work_evidence(state, &[message(&evidence.content)]);
     let retained = context::visible_work_evidence(state, &state.transcript);
-    // Visible source/candidate projections deliberately do not interpret
-    // collection metadata. Retained candidates must not suppress a new page
-    // of documents, decisions or document relationships in the same packet.
+    // A new metadata page must not be suppressed by retained candidate bodies.
     let new_metadata = evidence.coverage.metadata.iter().any(|(kind, ranges)| {
         ranges
             .iter()
@@ -105,7 +113,10 @@ pub(in crate::tender_analysis) fn confirm(
     else {
         return Ok(());
     };
-    let evidence = select(input, config, state)?
+    let package_budget = sent["assigned_evidence"]["workload_bytes_limit"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok());
+    let evidence = select_with_budget(input, config, state, package_budget)?
         .filter(|evidence| &evidence.content == sent)
         .ok_or_else(|| invalid("reserved evidence differs from the assigned frozen evidence"))?;
     let bytes = serde_json::to_vec(sent).map_err(invalid)?.len();
