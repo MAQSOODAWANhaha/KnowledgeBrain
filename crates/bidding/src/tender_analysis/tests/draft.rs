@@ -169,7 +169,10 @@ fn save_required(
         id.into(),
         crate::tender_analysis::outline_flow::SubmissionNeed {
             description: description.into(),
-            kind: "composition".into(),
+            kind: crate::tender_analysis::outline_flow::NeedKind::Submission,
+            submission_name: Some(description.into()),
+            classification_reason: String::new(),
+            format_required: false,
             applicability: crate::tender_analysis::outline_flow::Applicability::Required,
             condition: String::new(),
             grounds: vec![Span {
@@ -594,7 +597,7 @@ fn bind_matches_title_across_line_wrap() {
 }
 
 #[test]
-fn outline_rejects_concatenated_list_title() {
+fn outline_accepts_punctuation_in_material_titles() {
     let input = draft_input();
     let mut limits = config().limits;
     limits.draft_path = true;
@@ -603,21 +606,6 @@ fn outline_rejects_concatenated_list_title() {
     enter_outline(&input, &mut state);
     mark_window_coverage(&input, &mut state.analysis.coverage, &["source".into()]);
     let end = input.source_units[0].text.len();
-    let err = agent::apply(
-        &input,
-        &config,
-        &mut state,
-        "put_outline_item",
-        &json!({
-            "id":null,"parent":null,"order":0,
-            "title":"投标函(附件 1A)、法定代表人身份证明(附件 1B)、授权委托书(附件 1C)",
-            "prescribed":true,
-            "requirement_ids":[],"purpose":"response","format_refs":[],
-            "grounds":[{"source_id":"source","start":0,"end":end,"view_id":null,"grid_cell":null}]
-        }),
-    )
-    .unwrap_err();
-    assert!(err.contains("multiple composition items"), "{err}");
     agent::apply(
         &input,
         &config,
@@ -625,6 +613,20 @@ fn outline_rejects_concatenated_list_title() {
         "put_outline_item",
         &json!({
             "id":null,"parent":null,"order":0,
+            "title":"设备安装、调试、培训方案",
+            "prescribed":true,
+            "requirement_ids":[],"purpose":"response","format_refs":[],
+            "grounds":[{"source_id":"source","start":0,"end":end,"view_id":null,"grid_cell":null}]
+        }),
+    )
+    .unwrap();
+    agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "put_outline_item",
+        &json!({
+            "id":null,"parent":null,"order":1,
             "title":"法定代表人（单位负责人）身份证明(附件 1B)",
             "prescribed":true,
             "requirement_ids":[],"purpose":"response","format_refs":[],
@@ -3554,7 +3556,7 @@ impl Model for OutlinePublishScript {
                     "text":{"source":[[0,end]]},
                     "forms":{},
                     "metadata":{"documents":[[0,1]]},"empty_sources":[],
-                    "requirements":[],
+                    "requirements":[{"id":"","description":"投标函","kind":"submission","submission_name":"投标函","classification_reason":"","format_required":false,"applicability":"required","condition":"","grounds":[{"source_id":"source","start":0,"end":end}],"format_grounds":[],"order_constraints":[]}],
                     "references":[],
                     "issues":[],
                     "review_fragments":[]
@@ -3564,9 +3566,8 @@ impl Model for OutlinePublishScript {
                 "put_outline_items".into(),
                 json!({
                     "items":[{
-                        "id":null,"parent":null,"order":0,"title":"投标函","prescribed":true,
-                        "requirement_ids":[],"purpose":"response","format_refs":[],
-                        "grounds":[{"source_id":"source","start":0,"end":end,"view_id":null,"grid_cell":null}]
+                        "id":"tmp-letter","parent":null,"order":0,"title":"投标函","prescribed":true,
+                        "requirement_ids":["requirement-1"],"purpose":"response"
                     }],
                     "remove_ids":[]
                 }),
@@ -3917,8 +3918,7 @@ fn chapters_can_be_organized_incrementally_and_reordered_during_repair() {
     let chapter = |id: &str, order: usize, need: &str| {
         json!({
             "id":id,"parent":null,"order":order,"title":need,"prescribed":false,
-            "grounds":[{"source_id":source.source_unit_revision_id,"start":0,"end":source.text.len()}],
-            "requirement_ids":[need],"purpose":"response","format_refs":[]
+            "requirement_ids":[need],"purpose":"response"
         })
     };
     let first = agent::apply(
@@ -3950,10 +3950,10 @@ fn chapters_can_be_organized_incrementally_and_reordered_during_repair() {
         &config,
         &mut state,
         "put_outline_items",
-        &json!({"items":[chapter("replacement",0,"need-b")],"remove_ids":[second_id]}),
+        &json!({"items":[chapter("tmp-replacement",0,"need-b")],"remove_ids":[second_id]}),
     )
     .unwrap();
-    assert!(replacement["id_map"]["replacement"].is_string());
+    assert!(replacement["id_map"]["tmp-replacement"].is_string());
     assert!(outline_flow::blockers(&input, &state).is_empty());
     assert_eq!(
         state
@@ -4567,7 +4567,7 @@ fn duplicate_extraction_does_not_reset_scan_stall() {
     mark_window_coverage(&input, &mut state.analysis.coverage, &["source".into()]);
     for _ in 0..30 {
         agent::apply(&input,&config,&mut state,"submit_outline_scan",&json!({"text":{},"forms":{},"metadata":{},"empty_sources":[],"references":[],"issues":[],"review_fragments":[],
-   "requirements":[{"id":"","description":"投标函","kind":"submission","applicability":"required","condition":"","grounds":[{"source_id":"source","start":0,"end":3,"view_id":null,"grid_cell":null}],"format_grounds":[],"order_constraints":[]}]})).unwrap();
+   "requirements":[{"id":"","description":"投标函","kind":"submission","submission_name":"投标函","classification_reason":"","format_required":false,"applicability":"required","condition":"","grounds":[{"source_id":"source","start":0,"end":3,"view_id":null,"grid_cell":null}],"format_grounds":[],"order_constraints":[]}]})).unwrap();
         let _ = agent::context::observe_progress(&mut state, &Role::Main, None, &config.limits);
     }
     assert_eq!(state.analysis.outline.requirements.len(), 1);
@@ -4851,4 +4851,465 @@ fn archived_cursor181_exposes_reference_and_format_repairs_without_rescanning() 
     assert!(!crate::tender_analysis::outline_flow::checked(
         &input, &state
     ));
+}
+
+#[tokio::test]
+async fn organization_support_reads_survive_cleared_work_without_widening_other_phases() {
+    use crate::tender_analysis::{agent::context, draft::DraftStage, outline_flow::Phase};
+    let mut input = draft_input();
+    input.structured_forms.push(json!({
+        "form_definition_revision_id":"form", "source_unit_revision_id":"source",
+        "definition":{"schema_version":3,"kind":"grid","row_count":1,"column_count":1,
+        "cells":[{"row":0,"column":0,"row_span":1,"col_span":1,"text":"报价"}]}
+    }));
+    let config = config();
+    let mut state = journal_state(&input, &config);
+    enter_outline(&input, &mut state);
+    state.analysis.outline.phase = Phase::Discover;
+    crate::tender_analysis::draft::after_batch(&input, &mut state, false, false).unwrap();
+    assert_eq!(state.analysis.outline.phase, Phase::Outline);
+    assert!(state.main_work.is_none());
+    let journal = MemoryJournal::default();
+    let body = agent::request(&input, &config, &mut state).await.unwrap();
+    state
+        .journal
+        .prepare_session(
+            &body,
+            crate::agent_runtime::SESSION_PREFIX,
+            crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
+            config.limits.max_turns,
+            config.limits.max_context_bytes,
+        )
+        .unwrap();
+    state.journal.prepare(state.turn, "main", &body).unwrap();
+    agent::execute_turn(
+        &input,
+        &config,
+        &mut state,
+        &journal,
+        ChatTurn {
+            tool_calls: vec![ChatToolCall {
+                id: "organization-read".into(),
+                name: "read_source".into(),
+                arguments: json!({"source_id":"source","start":0,"max_bytes":1024}).to_string(),
+            }],
+            finish_reason: "tool_calls".into(),
+            ..Default::default()
+        },
+        Default::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let output: Value = state
+        .transcript
+        .iter()
+        .find(|message| message["role"] == "tool" && message["tool_call_id"] == "organization-read")
+        .and_then(|message| message["content"].as_str())
+        .map(|content| serde_json::from_str(content).unwrap())
+        .unwrap();
+    assert_eq!(output["ok"], true, "{output}");
+    for (name, args) in [
+        ("read_source", json!({"source_id":"source"})),
+        ("read_source_view", json!({"source_id":"source"})),
+        ("read_form", json!({"form_id":"form"})),
+        ("read_form_cell", json!({"form_id":"form"})),
+    ] {
+        context::check_read_scope(&input, &state, name, &args).unwrap();
+        let mut checking = state.clone();
+        checking.analysis.outline.phase = Phase::Check;
+        assert!(context::check_read_scope(&input, &checking, name, &args).is_err());
+        let mut fill = state.clone();
+        fill.draft_stage = DraftStage::Fill;
+        assert!(context::check_read_scope(&input, &fill, name, &args).is_err());
+    }
+    assert!(
+        context::check_read_scope(
+            &input,
+            &state,
+            "read_source",
+            &json!({"source_id":"missing"})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn unknown_stable_chapter_id_rejects_entire_batch() {
+    let input = draft_input();
+    let config = config();
+    let mut state = journal_state(&input, &config);
+    enter_outline(&input, &mut state);
+    let before = json!(state);
+    let error = agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "put_outline_items",
+        &json!({
+            "items":[{"id":"tmp-valid","purpose":"group","requirement_ids":[]},{"id":"chapter-999","purpose":"group","requirement_ids":[]}],"remove_ids":[]
+        }),
+    )
+    .unwrap_err();
+    assert!(error.contains("items[1].id"), "{error}");
+    assert_eq!(json!(state), before);
+}
+
+#[test]
+fn frozen_wall_clock_budget_does_not_grow_with_turn_cap_or_provider_timeout() {
+    let mut limits = config().limits;
+    limits.max_turns = 828;
+    let mut provider = config().provider.clone();
+    provider.timeout_ms = 180_000;
+    let config = Config::with_provider(provider, limits).unwrap();
+    let frozen = serde_json::to_value(config).unwrap();
+    assert_eq!(frozen["budget"]["total_timeout_secs"], 3600);
+    assert_eq!(frozen["budget"]["publish_reserve_secs"], 300);
+}
+
+#[test]
+fn cosmetic_organization_edits_do_not_reset_completion_watch() {
+    let input = draft_input();
+    let config = config();
+    let mut state = journal_state(&input, &config);
+    enter_outline(&input, &mut state);
+    for id in ["need-a", "need-b"] {
+        save_required(
+            &mut state,
+            id,
+            id,
+            "source",
+            input.source_units[0].text.len(),
+        );
+    }
+    agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "put_outline_items",
+        &json!({
+            "items":[{"id":"tmp-first","parent":null,"order":0,"title":"投标函", "prescribed":false,
+            "requirement_ids":["need-a","need-b"],"purpose":"response"}],
+            "remove_ids":[]
+        }),
+    )
+    .unwrap();
+    agent::context::observe_progress(&mut state, &Role::Main, None, &config.limits).unwrap();
+    let completions = state.main_progress.completions.clone();
+    state.analysis.draft_plan[0].requirement_ids.reverse();
+    state.analysis.draft_plan[0].id = "chapter-100".into();
+    state.analysis.draft_plan[0].title = "投标响应函".into();
+    agent::context::observe_progress(&mut state, &Role::Main, None, &config.limits).unwrap();
+    assert_eq!(state.main_progress.completions, completions);
+    assert_eq!(state.main_progress.watch.focus_turns, 1);
+}
+
+#[tokio::test]
+async fn compilation_uses_a_distinct_checkpoint_and_resume_reuses_it() {
+    let input = draft_input();
+    let config = Config::with_provider(config().provider, config().limits).unwrap();
+    let journal = MemoryJournal {
+        strict_checkpoint_identity: true,
+        ..Default::default()
+    };
+    let model = outline_publish_script(&input);
+    let result = agent::run(&input, &config, &journal, &model, &CancellationToken::new())
+        .await
+        .unwrap();
+    let saved = journal.load().await.unwrap().unwrap();
+    assert_eq!(json!(saved.review), json!(result.review));
+    assert_draft_object_ref(&saved);
+    let calls = model.requests.lock().unwrap().len();
+    let resumed = agent::run(&input, &config, &journal, &model, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(json!(result), json!(resumed));
+    assert_eq!(calls, model.requests.lock().unwrap().len());
+    assert_eq!(json!(saved), json!(journal.load().await.unwrap().unwrap()));
+}
+
+#[tokio::test]
+async fn rejected_compilation_checkpoint_cannot_return_a_publishable_result() {
+    let input = draft_input();
+    let config = Config::with_provider(config().provider, config().limits).unwrap();
+    let journal = MemoryJournal {
+        reject_compilation_checkpoint: true,
+        ..Default::default()
+    };
+    let error = agent::run(
+        &input,
+        &config,
+        &journal,
+        &outline_publish_script(&input),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "FROZEN_INPUT_DIGEST_MISMATCH");
+    assert!(
+        journal
+            .load()
+            .await
+            .unwrap()
+            .unwrap()
+            .draft_docx_base64
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn lost_compilation_save_ack_resumes_without_a_second_compile() {
+    let input = draft_input();
+    let config = Config::with_provider(config().provider, config().limits).unwrap();
+    let failed = MemoryJournal {
+        reject_compilation_checkpoint: true,
+        ..Default::default()
+    };
+    let model = outline_publish_script(&input);
+    agent::run(&input, &config, &failed, &model, &CancellationToken::new())
+        .await
+        .unwrap_err();
+    let committed = failed.load().await.unwrap().unwrap();
+    let journal = MemoryJournal {
+        strict_checkpoint_identity: true,
+        fail_boundary_ack: Mutex::new(Some(committed.journal.sequence + 1)),
+        state: Mutex::new(Some(committed)),
+        ..Default::default()
+    };
+    let error = agent::run(&input, &config, &journal, &model, &CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(error.message, "lost boundary acknowledgement");
+    let saved = journal.load().await.unwrap().unwrap();
+    assert_draft_object_ref(&saved);
+    let calls = model.requests.lock().unwrap().len();
+    agent::run(&input, &config, &journal, &model, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(json!(saved), json!(journal.load().await.unwrap().unwrap()));
+    assert_eq!(calls, model.requests.lock().unwrap().len());
+}
+
+#[test]
+fn compact_material_batch_derives_and_refreshes_exact_basis() {
+    use crate::tender_analysis::outline_flow;
+    let input = draft_input();
+    let config = config();
+    let mut state = journal_state(&input, &config);
+    enter_outline(&input, &mut state);
+    save_required(&mut state, "need", "投标函", "source", 3);
+    let request = json!({"items":[
+        {"id":"tmp-volume","parent":null,"order":0,"title":"商务文件","purpose":"group","prescribed":false,"requirement_ids":[]},
+        {"id":"tmp-letter","parent":"tmp-volume","order":0,"title":"投标函","purpose":"response","prescribed":true,"requirement_ids":["need","need"]}
+    ],"remove_ids":[]});
+    agent::apply(&input, &config, &mut state, "put_outline_items", &request).unwrap();
+    assert_eq!(state.analysis.draft_plan[1].requirement_ids, vec!["need"]);
+    let old = state.analysis.outline.requirements["need"].grounds.clone();
+    for node in &state.analysis.draft_plan {
+        assert_eq!(node.grounds, old);
+    }
+    let mut revised = json!(state.analysis.outline.requirements["need"]);
+    revised["id"] = json!("need");
+    revised["grounds"][0]["end"] = json!(6);
+    revised["format_required"] = json!(true);
+    revised["format_grounds"] = revised["grounds"].clone();
+    agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "submit_outline_scan",
+        &json!({
+            "text":{},"forms":{},"metadata":{},"empty_sources":[],"requirements":[revised],
+            "references":[],"issues":[],"review_fragments":[]
+        }),
+    )
+    .unwrap();
+    for node in &state.analysis.draft_plan {
+        assert_eq!(node.grounds[0].end, 6);
+        assert_eq!(node.format_refs, node.grounds);
+        assert!(!node.grounds.contains(&old[0]));
+    }
+    assert!(!outline_flow::blockers(&input, &state).contains(&"B_FORMAT_EVIDENCE_MISSING"));
+}
+
+#[test]
+fn non_document_and_structure_conclusions_need_review_not_chapters() {
+    use crate::tender_analysis::outline_flow::{self, NeedKind};
+    let input = draft_input();
+    let config = config();
+    let mut state = journal_state(&input, &config);
+    enter_outline(&input, &mut state);
+    for (id, kind) in [
+        ("upload", NeedKind::NonDocument),
+        ("language", NeedKind::StructureConstraint),
+    ] {
+        save_required(&mut state, id, id, "source", 3);
+        let need = state.analysis.outline.requirements.get_mut(id).unwrap();
+        need.kind = kind;
+        need.submission_name = None;
+        need.classification_reason = "原文规定操作或全局编制规则".into();
+    }
+    assert!(!outline_flow::blockers(&input, &state).contains(&"B_REQUIREMENT_UNMAPPED"));
+    outline_flow::compose_check_packets(&input, &mut state);
+    assert!(
+        !state.analysis.outline.checks["composition"]
+            .fragment_ids
+            .is_empty()
+    );
+    let before = outline_flow::packet_snapshot(&input, &state, "composition").unwrap();
+    state
+        .analysis
+        .outline
+        .requirements
+        .get_mut("upload")
+        .unwrap()
+        .classification_reason = "排除理由改变".into();
+    assert_ne!(
+        before,
+        outline_flow::packet_snapshot(&input, &state, "composition").unwrap()
+    );
+    let error = agent::apply(&input,&config,&mut state,"put_outline_items",&json!({"items":[
+        {"id":"tmp-upload","parent":null,"order":0,"title":"电子上传","purpose":"response","prescribed":false,"requirement_ids":["upload"]}
+    ],"remove_ids":[]})).unwrap_err();
+    assert!(error.contains("does not belong"), "{error}");
+}
+
+#[test]
+fn prescribed_format_flag_and_response_location_are_real_blockers() {
+    use crate::tender_analysis::outline_flow;
+    let input = draft_input();
+    let config = config();
+    let mut state = journal_state(&input, &config);
+    enter_outline(&input, &mut state);
+    save_required(&mut state, "letter", "投标函", "source", 3);
+    state
+        .analysis
+        .outline
+        .requirements
+        .get_mut("letter")
+        .unwrap()
+        .format_required = true;
+    assert!(outline_flow::blockers(&input, &state).contains(&"B_FORMAT_EVIDENCE_MISSING"));
+    let before = json!(state);
+    assert!(agent::apply(&input,&config,&mut state,"put_outline_items",&json!({"items":[
+        {"id":"tmp-root","parent":null,"order":0,"title":"商务文件","purpose":"group","prescribed":false,"requirement_ids":["letter"]}
+    ],"remove_ids":[]})).is_err());
+    assert_eq!(json!(state), before);
+}
+
+#[test]
+fn splitting_mixed_requirements_uses_scanned_basis_and_strict_categories() {
+    let input = draft_input();
+    let config = config();
+    let mut state = journal_state(&input, &config);
+    enter_outline(&input, &mut state);
+    let mut batch = json!({"text":{},"forms":{},"metadata":{},"empty_sources":[],"references":[],"issues":[],"review_fragments":[],
+        "requirements":[{"id":"","description":"提交授权书","kind":"submission","submission_name":"授权书","classification_reason":"","format_required":false,
+        "applicability":"required","condition":"","grounds":[{"source_id":"source","start":0,"end":3}],"format_grounds":[],"order_constraints":[]}]});
+    let result = agent::apply(&input, &config, &mut state, "submit_outline_scan", &batch).unwrap();
+    assert_eq!(result["saved"][0], "requirement-1");
+    batch["requirements"][0]["id"] = json!("requirement-1");
+    batch["requirements"][0]["kind"] = json!("non_document");
+    batch["requirements"][0]["submission_name"] = Value::Null;
+    assert!(
+        agent::apply(&input, &config, &mut state, "submit_outline_scan", &batch)
+            .unwrap_err()
+            .contains("classification_reason")
+    );
+    batch["requirements"][0]["kind"] = json!("qualification");
+    assert!(
+        agent::apply(&input, &config, &mut state, "submit_outline_scan", &batch)
+            .unwrap_err()
+            .contains("unknown variant")
+    );
+}
+
+#[test]
+fn requirement_replacement_is_atomic_and_reopens_affected_conclusions() {
+    use crate::tender_analysis::outline_flow::{
+        IssueStatus, OutlineIssue, OutlineReference, ReferenceImpact, ReferenceStatus,
+    };
+    let input = draft_input();
+    let config = config();
+    let mut state = journal_state(&input, &config);
+    enter_outline(&input, &mut state);
+    save_required(&mut state, "mixed", "投标函与授权书", "source", 3);
+    agent::apply(&input,&config,&mut state,"put_outline_items",&json!({"items":[
+        {"id":"tmp-response","parent":null,"order":0,"title":"投标文件","purpose":"response","prescribed":false,"requirement_ids":["mixed"]}
+    ],"remove_ids":[]})).unwrap();
+    let grounds = state.analysis.outline.requirements["mixed"].grounds.clone();
+    state.analysis.outline.references.insert(
+        "ref".into(),
+        OutlineReference {
+            grounds: grounds.clone(),
+            target_description: "核对材料".into(),
+            target_ids: vec!["source".into()],
+            requirement_ids: vec!["mixed".into()],
+            impact: ReferenceImpact::Structure,
+            status: ReferenceStatus::Resolved,
+            resolution_grounds: grounds.clone(),
+        },
+    );
+    state.analysis.outline.issues.insert(
+        "issue".into(),
+        OutlineIssue {
+            code: "material".into(),
+            description: "材料拆分".into(),
+            requirement_ids: vec!["mixed".into()],
+            chapter_ids: vec![],
+            reference_ids: vec![],
+            grounds: grounds.clone(),
+            status: IssueStatus::Resolved,
+            resolution_grounds: grounds,
+        },
+    );
+    let mut new = json!(state.analysis.outline.requirements["mixed"]);
+    new["id"] = json!("tmp-letter");
+    new["description"] = json!("投标函");
+    new["submission_name"] = json!("投标函");
+    let mut second = new.clone();
+    second["id"] = json!("tmp-authority");
+    second["description"] = json!("授权书");
+    second["submission_name"] = json!("授权书");
+    let mut batch = json!({"text":{},"forms":{},"metadata":{},"empty_sources":[],"requirements":[new,second],
+        "references":[],"issues":[],"review_fragments":[],"requirement_replacements":{"mixed":["tmp-letter","unknown"]}});
+    let before = json!(state);
+    assert!(agent::apply(&input, &config, &mut state, "submit_outline_scan", &batch).is_err());
+    assert_eq!(json!(state), before);
+    batch["requirement_replacements"]["mixed"] = json!(["tmp-letter", "tmp-authority"]);
+    let result = agent::apply(&input, &config, &mut state, "submit_outline_scan", &batch).unwrap();
+    assert!(!state.analysis.outline.requirements.contains_key("mixed"));
+    let ids = vec![
+        result["id_map"]["tmp-letter"].as_str().unwrap().to_string(),
+        result["id_map"]["tmp-authority"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    ];
+    assert_eq!(state.analysis.draft_plan[0].requirement_ids, ids);
+    assert_eq!(
+        state.analysis.outline.references["ref"].status,
+        ReferenceStatus::Unresolved
+    );
+    assert_eq!(
+        state.analysis.outline.references["ref"].requirement_ids,
+        ids
+    );
+    assert_eq!(
+        state.analysis.outline.issues["issue"].status,
+        IssueStatus::Open
+    );
+    assert!(
+        state.analysis.outline.issues["issue"]
+            .resolution_grounds
+            .is_empty()
+    );
+    assert!(
+        state
+            .analysis
+            .outline
+            .review_fragments
+            .keys()
+            .any(|id| id.starts_with("replacement-"))
+    );
 }

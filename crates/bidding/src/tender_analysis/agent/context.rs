@@ -569,15 +569,16 @@ pub(in crate::tender_analysis) fn check_read_scope(
     {
         return Err("reading requires a known source or form identity".into());
     }
+    if state.draft_stage == super::super::draft::DraftStage::Outline {
+        return match state.analysis.outline.phase {
+            super::super::outline_flow::Phase::Discover
+            | super::super::outline_flow::Phase::Outline => Ok(()),
+            _ => Err("check phase reads must use the active outline packet".into()),
+        };
+    }
     let work = state
         .work()
         .ok_or("host must assign an active source pack before reading")?;
-    // 草稿通道的读取范围是「当前窗 ∪ S1 索引里列出的 source_id」：宿主逐窗投递，
-    // 缺依据的节点必须能按索引 id 定向补读，否则模型只能靠检索去撞。写入仍受
-    // grounds 覆盖与工作包约束。
-    if state.draft_stage != crate::tender_analysis::draft::DraftStage::None {
-        return Ok(());
-    }
     // Independent comparison can require another frozen original. Reading it
     // changes neither the assigned task nor candidate/write authorization.
     if work.status != WorkStatus::Active
@@ -780,13 +781,16 @@ pub(in crate::tender_analysis) fn visible_work_evidence(
         .filter(|work| work.status == WorkStatus::Active)
         .map(|work| work.source_scope.as_slice())
         .unwrap_or_default();
-    let supporting_read = state.analysis.outline.phase
-        == super::super::outline_flow::Phase::Discover
-        && matches!(state.draft_stage, super::super::draft::DraftStage::Outline)
-        || state.role == Role::Reviewer
-            && state
-                .work()
-                .is_some_and(|work| work.status == WorkStatus::Active);
+    let supporting_read = matches!(
+        state.analysis.outline.phase,
+        super::super::outline_flow::Phase::Discover | super::super::outline_flow::Phase::Outline
+    ) && matches!(
+        state.draft_stage,
+        super::super::draft::DraftStage::Outline
+    ) || state.role == Role::Reviewer
+        && state
+            .work()
+            .is_some_and(|work| work.status == WorkStatus::Active);
     let mut ranges = BTreeMap::<String, Vec<(usize, usize)>>::new();
     for message in messages {
         if let Some(ids) = message["source_view_refs"].as_array() {
@@ -1283,15 +1287,14 @@ pub(in crate::tender_analysis) fn evict_completed_discovery_history(
                 return false;
             };
             let scanned = &state.analysis.outline.scanned;
-            if kind == "metadata" {
-                if let Some((form, offset)) = id
+            if kind == "metadata"
+                && let Some((form, offset)) = id
                     .strip_prefix("form-cell:")
                     .and_then(|key| key.rsplit_once(':'))
-                {
-                    return offset.parse::<usize>().ok().is_some_and(|offset| {
-                        tools::contains(scanned.form_cells.get(form), offset, offset + 1)
-                    });
-                }
+            {
+                return offset.parse::<usize>().ok().is_some_and(|offset| {
+                    tools::contains(scanned.form_cells.get(form), offset, offset + 1)
+                });
             }
             let done = match kind {
                 "text" => scanned.text.get(id),
@@ -1632,16 +1635,26 @@ pub(in crate::tender_analysis) fn observe_progress(
         && state.draft_stage == super::super::draft::DraftStage::Outline
     {
         let flow = &state.analysis.outline;
+        // Completion measures covered obligations, not node identity or array
+        // order. Cosmetic edits still count as work, but cannot reset focus.
         let organized: BTreeSet<_> = state
             .analysis
             .draft_plan
             .iter()
-            .map(|node| {
-                (
-                    node.id.clone(),
-                    node.requirement_ids.clone(),
-                    serde_json::to_string(&node.format_refs).unwrap(),
-                )
+            .filter(|node| node.status != super::super::draft::DraftStatus::Omitted)
+            .flat_map(|node| node.requirement_ids.iter().cloned())
+            .collect();
+        let formats: BTreeSet<_> = state
+            .analysis
+            .draft_plan
+            .iter()
+            .filter(|node| node.status != super::super::draft::DraftStatus::Omitted)
+            .flat_map(|node| {
+                node.requirement_ids.iter().flat_map(|id| {
+                    node.format_refs
+                        .iter()
+                        .map(move |span| (id.clone(), serde_json::to_string(span).unwrap()))
+                })
             })
             .collect();
         let resolved: BTreeSet<_> = flow
@@ -1653,7 +1666,11 @@ pub(in crate::tender_analysis) fn observe_progress(
             .map(|(id, reference)| {
                 (
                     id.clone(),
-                    serde_json::to_string(&reference.resolution_grounds).unwrap(),
+                    reference
+                        .resolution_grounds
+                        .iter()
+                        .map(|span| serde_json::to_string(span).unwrap())
+                        .collect::<BTreeSet<_>>(),
                 )
             })
             .collect();
@@ -1663,7 +1680,7 @@ pub(in crate::tender_analysis) fn observe_progress(
             .filter(|(_, packet)| packet.status == "pass")
             .map(|(id, packet)| (id.clone(), packet.snapshot_sha256.clone()))
             .collect();
-        let completed = digest(&json!([organized, resolved, checks]))?;
+        let completed = digest(&json!([organized, formats, resolved, checks]))?;
         state.main_progress.observe(
             [
                 digest(&state.analysis.coverage)?,

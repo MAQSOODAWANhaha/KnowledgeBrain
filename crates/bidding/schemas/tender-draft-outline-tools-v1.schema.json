@@ -3,7 +3,7 @@
     "type": "function",
     "function": {
       "name": "put_outline_items",
-      "description": "Atomically organize chapters after discovery. Parent IDs may reference an earlier item in this batch. All nodes require exact grounds; response nodes reference saved requirement IDs.",
+      "description": "Atomically organize actual submission materials. Provide structure and requirement IDs only; the host derives exact evidence. Independent prescribed forms need separately locatable response nodes; constraints attach to their actual response material.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -23,17 +23,14 @@
                 "order",
                 "title",
                 "prescribed",
-                "grounds",
                 "requirement_ids",
-                "purpose",
-                "format_refs"
+                "purpose"
               ],
               "properties": {
                 "id": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Use a tmp- prefixed ID for new nodes; updates require an existing stable chapter ID returned by id_map."
                 },
                 "parent": {
                   "type": [
@@ -52,13 +49,6 @@
                 "prescribed": {
                   "type": "boolean"
                 },
-                "grounds": {
-                  "type": "array",
-                  "minItems": 1,
-                  "items": {
-                    "type": "object"
-                  }
-                },
                 "requirement_ids": {
                   "type": "array",
                   "items": {
@@ -71,12 +61,6 @@
                     "group",
                     "response"
                   ]
-                },
-                "format_refs": {
-                  "type": "array",
-                  "items": {
-                    "type": "object"
-                  }
                 }
               }
             }

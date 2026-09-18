@@ -3,7 +3,12 @@
     "phase": "outline",
     "scanned": {
       "text": {
-        "source": [[0, 12]]
+        "source": [
+          [
+            0,
+            12
+          ]
+        ]
       },
       "form_cells": {},
       "candidate": {},
@@ -27,7 +32,10 @@
           }
         ],
         "format_grounds": [],
-        "order_constraints": []
+        "order_constraints": [],
+        "submission_name": "投标函",
+        "classification_reason": "",
+        "format_required": false
       }
     },
     "references": {},
@@ -54,14 +62,22 @@
           "grid_cell": null
         }
       ],
-      "requirement_ids": ["requirement-1"],
+      "requirement_ids": [
+        "requirement-1"
+      ],
       "id": "chapter-1",
       "parent": null,
       "order": 0,
       "title": "投标函",
       "prescribed": true,
-      "source_ids": ["source"],
-      "windows": [["source"]],
+      "source_ids": [
+        "source"
+      ],
+      "windows": [
+        [
+          "source"
+        ]
+      ],
       "window_index": 0,
       "status": "pending",
       "purpose": "response",

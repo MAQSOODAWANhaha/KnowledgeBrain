@@ -44,6 +44,8 @@ fn grid_citation_input() -> FrozenInput {
 #[derive(Default)]
 struct MemoryJournal {
     sdk_turns: Mutex<Vec<usize>>,
+    strict_checkpoint_identity: bool,
+    reject_compilation_checkpoint: bool,
     fail_boundary_ack: Mutex<Option<usize>>,
     cancel_boundary: Mutex<Option<(usize, CancellationToken)>>,
     reject_reservation: Mutex<bool>,
@@ -109,6 +111,30 @@ impl Journal for MemoryJournal {
         Ok(Some(row.1))
     }
     async fn save(&self, state: &Checkpoint, _: &serde_json::Value) -> Result<(), AgentError> {
+        if self.reject_compilation_checkpoint && state.draft_docx_base64.is_some() {
+            return Err(AgentError::new(
+                "FROZEN_INPUT_DIGEST_MISMATCH",
+                "injected compilation checkpoint rejection",
+            ));
+        }
+        if self.strict_checkpoint_identity {
+            let saved = self.state.lock().unwrap();
+            if let Some(prior) = saved.as_ref() {
+                if prior.journal.sequence == state.journal.sequence && json!(prior) != json!(state)
+                {
+                    return Err(AgentError::new(
+                        "FROZEN_INPUT_DIGEST_MISMATCH",
+                        "divergent checkpoint",
+                    ));
+                }
+                if state.draft_docx_base64.is_some() && prior.draft_docx_base64.is_none() {
+                    assert_eq!(state.journal.sequence, prior.journal.sequence + 1);
+                    assert_eq!(state.turn, prior.turn);
+                    assert!(state.journal.pending.is_none());
+                    assert_eq!(json!(state.analysis), json!(prior.analysis));
+                }
+            }
+        }
         *self.state.lock().unwrap() = Some(state.clone());
         if let Some((sequence, token)) = &*self.cancel_boundary.lock().unwrap()
             && *sequence == state.journal.sequence

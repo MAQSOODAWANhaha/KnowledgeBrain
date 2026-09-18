@@ -2864,7 +2864,7 @@ CREATE TABLE bid_docx_composition_request_identities (
     ELSE jsonb_build_object('version_id',expected_version_id,'docx_sha256',expected_docx_sha256) END),
   CHECK (jsonb_typeof(contract_definition) IS NOT DISTINCT FROM 'object'
     AND kb_bid_v2_json_keys_exact(contract_definition,ARRAY['checkpoint_contract_version','runtime_adapter','config'])
-    AND contract_definition->'checkpoint_contract_version' IS NOT DISTINCT FROM '4'::jsonb
+    AND contract_definition->'checkpoint_contract_version' IS NOT DISTINCT FROM '6'::jsonb
     AND contract_definition->>'runtime_adapter' IS NOT DISTINCT FROM 'rig-chat-0.42.0/4'
     AND jsonb_typeof(contract_definition->'config') IS NOT DISTINCT FROM 'object'),
   FOREIGN KEY(request_artifact_id,project_id,workspace_id,request_kind,request_revision,request_sha256,frozen_input_sha256)
@@ -8823,7 +8823,7 @@ BEGIN
       OR coalesce(prior#>'{journal,pending,response}','null'::jsonb)<>'null'::jsonb THEN
     RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: turn or role changed' USING ERRCODE='23514';
   END IF;
-  IF runtime->'checkpoint_contract_version' IS DISTINCT FROM '4'::jsonb
+  IF runtime->'checkpoint_contract_version' IS DISTINCT FROM '6'::jsonb
       OR runtime->>'runtime_adapter' IS DISTINCT FROM 'rig-chat-0.42.0/4'
       OR runtime->>'repair_task_policy' IS DISTINCT FROM 'main-repair-tasks-v1'
       OR runtime->>'main_dispatch_policy' IS DISTINCT FROM 'main-dispatch-v1' THEN RAISE EXCEPTION 'AGENT_PROVIDER_UNAVAILABLE: frozen runtime missing' USING ERRCODE='23514'; END IF;
@@ -8913,7 +8913,7 @@ DECLARE stamp timestamptz; runtime jsonb; config_sha kb_sha256; prior jsonb; pay
   feedback_findings jsonb; feedback_sha text; charged_task text;
   dispatch jsonb; prior_dispatch jsonb; dispatch_owner jsonb; charged_owner jsonb;
   dispatch_entry record; prior_entry jsonb; dispatch_cap numeric; source_input jsonb;
-  saved_body jsonb; saved_packet jsonb; seed_plan text;
+  saved_body jsonb; saved_packet jsonb; seed_plan text; finalizing boolean;
 BEGIN
   stamp:=kb_bid_v2_tender_agent_lock_owner(p_request_id,p_sha,p_attempt,p_token);
   runtime:=kb_bid_v2_tender_agent_runtime(p_request_id);
@@ -8942,6 +8942,8 @@ BEGIN
   END IF;
   pending_value:=p_state#>'{journal,pending}'; prior_pending:=coalesce(prior#>'{journal,pending}','null'::jsonb);
   role_value:=p_state->>'role';
+  finalizing:=coalesce(prior IS NOT NULL AND prior_pending='null'::jsonb
+    AND pending_value='null'::jsonb AND p_state->>'draft_stage'='published',false);
   IF runtime->>'repair_task_policy' IS DISTINCT FROM 'main-repair-tasks-v1'
     OR runtime->>'main_dispatch_policy' IS DISTINCT FROM 'main-dispatch-v1'
     OR NOT kb_bid_v2_json_keys_exact(p_state->'journal',ARRAY['sequence','pending','session'])
@@ -8981,7 +8983,7 @@ BEGIN
     OR turn_value IS NULL OR turn_value<0 OR p_state->>'config_sha256' IS DISTINCT FROM config_sha::text
     OR (prior IS NOT NULL AND p_state->>'input_sha256' IS DISTINCT FROM prior->>'input_sha256')
     OR role_value IS NULL OR role_value NOT IN ('main','reviewer')
-    OR coalesce((prior#>>'{done}')::boolean,false)
+    OR (coalesce((prior#>>'{done}')::boolean,false) AND NOT finalizing)
     OR coalesce((p_state->>'tool_calls')::bigint,-1)<coalesce((prior->>'tool_calls')::bigint,0)
     OR coalesce((p_state->>'read_bytes')::bigint,-1)<coalesce((prior->>'read_bytes')::bigint,0)
     OR turn_value>((runtime->'limits')->>'max_turns')::integer
@@ -9223,7 +9225,29 @@ BEGIN
     OR jsonb_typeof(pending_value->'body') IS DISTINCT FROM 'string') THEN
     RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: pending request identity' USING ERRCODE='23514';
   END IF;
-  IF prior_pending='null'::jsonb THEN
+  IF finalizing THEN
+    -- Host compilation adds a new journal boundary, never rewrites a model turn.
+    IF role_value<>'main' OR p_state->'done' IS DISTINCT FROM 'true'::jsonb
+      OR (p_state-ARRAY['journal','review','done','draft_stage','draft_degraded','draft_compile_object_id','draft_docx_base64'])
+        IS DISTINCT FROM (prior-ARRAY['journal','review','done','draft_stage','draft_degraded','draft_compile_object_id','draft_docx_base64'])
+      OR ((p_state->'journal')-'sequence') IS DISTINCT FROM ((prior->'journal')-'sequence')
+      OR coalesce(prior->'draft_docx_base64','null'::jsonb) IS DISTINCT FROM 'null'::jsonb
+      OR coalesce(prior->'draft_compile_object_id','null'::jsonb) IS DISTINCT FROM 'null'::jsonb
+      OR p_state->'review' IS DISTINCT FROM jsonb_build_object(
+        'analysis_sha256',kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(p_state->'analysis'),'UTF8')),
+        'coverage',p_state#>'{analysis,coverage}','findings','[]'::jsonb,'draft',true)
+      OR jsonb_typeof(p_state->'draft_docx_base64') IS DISTINCT FROM 'string'
+      OR coalesce(p_state->>'draft_docx_base64','')=''
+      OR p_state->>'draft_compile_object_id' IS DISTINCT FROM
+        'objects/'||kb_bid_v2_sha256_bytes(decode(p_state->>'draft_docx_base64','base64'))::text
+      OR (seed_plan IS NULL AND (prior#>>'{analysis,outline,phase}' IS DISTINCT FROM 'complete'
+        OR jsonb_typeof(prior#>'{analysis,outline,checked_sha256}') IS DISTINCT FROM 'string'
+        OR NOT EXISTS(SELECT 1 FROM jsonb_each(prior#>'{analysis,outline,checks}'))
+        OR EXISTS(SELECT 1 FROM jsonb_each(prior#>'{analysis,outline,checks}') c WHERE c.value->>'status' IS DISTINCT FROM 'pass')))
+      OR (seed_plan IS NOT NULL AND prior->>'draft_stage' NOT IN ('fill','published')) THEN
+      RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: invalid compilation checkpoint' USING ERRCODE='23514';
+    END IF;
+  ELSIF prior_pending='null'::jsonb THEN
     -- Reservation and this prepared checkpoint commit in one transaction.
     IF turn_value<>coalesce((prior->>'turn')::integer,0)
       OR role_value IS DISTINCT FROM (coalesce(prior->>'role','main'))
@@ -10029,7 +10053,7 @@ BEGIN
     OR NOT kb_bid_v2_sha256_text(p_snapshot->>'seed_plan_sha256')
     OR p_snapshot->>'actor' IS DISTINCT FROM p_actor::text
     OR jsonb_typeof(p_contract) IS DISTINCT FROM 'object'
-    OR p_contract->'checkpoint_contract_version' IS DISTINCT FROM '4'::jsonb
+    OR p_contract->'checkpoint_contract_version' IS DISTINCT FROM '6'::jsonb
     OR p_contract->>'runtime_adapter' IS DISTINCT FROM 'rig-chat-0.42.0/4'
     OR p_snapshot->'config' IS DISTINCT FROM p_contract->'config'
     OR p_snapshot->>'contract_sha256' IS DISTINCT FROM kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(p_contract),'UTF8'))::text THEN

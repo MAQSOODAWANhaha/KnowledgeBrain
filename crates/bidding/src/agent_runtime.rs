@@ -11,7 +11,7 @@ mod session;
 pub(crate) use driver::{Driver, Status, check_cancel, drive};
 
 /// Versioned persistence contract, independent of provider and business rules.
-pub const CHECKPOINT_CONTRACT_VERSION: u32 = 4;
+pub const CHECKPOINT_CONTRACT_VERSION: u32 = 6;
 /// Freeze the SDK/adapter separately from the Journal's persistence format.
 pub const RUNTIME_ADAPTER_VERSION: &str = "rig-chat-0.42.0/4";
 
@@ -87,6 +87,14 @@ impl TurnJournal {
             response: None,
         });
         Ok(())
+    }
+
+    /// Persist a host-only terminal result after the last committed model turn.
+    pub(crate) fn finish(&mut self) -> Result<(), AgentError> {
+        if self.pending.is_some() || self.sequence == 0 {
+            return Err(invalid("finalization requires a committed checkpoint"));
+        }
+        self.advance()
     }
 
     pub fn validate(&self, turn: usize, role: &str) -> Result<(), AgentError> {

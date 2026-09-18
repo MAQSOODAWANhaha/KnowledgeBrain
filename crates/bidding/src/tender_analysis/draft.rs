@@ -241,23 +241,6 @@ pub fn outline_turn_cap(input: &FrozenInput) -> usize {
         .saturating_add(12)
 }
 
-/// 帽到期或修补轮不再减少缺口时，保持未完成，不编译部分骨架。
-fn has_paren_group(text: &str) -> bool {
-    (text.contains('(') && text.contains(')')) || (text.contains('（') && text.contains('）'))
-}
-
-fn concatenated_composition_title(title: &str) -> bool {
-    let pauses = title.matches('、').count() + title.matches(", ").count();
-    if pauses >= 2 {
-        return true;
-    }
-    ["、", ", ", "及"].iter().any(|sep| {
-        title.find(sep).is_some_and(|index| {
-            has_paren_group(&title[..index]) && has_paren_group(&title[index + sep.len()..])
-        })
-    })
-}
-
 /// 「已填」必须真有正文可编译：要么有模板 record，要么带回读来的用户正文。
 pub fn filled_templates_present(analysis: &Analysis) -> bool {
     analysis.draft_plan.iter().all(|item| match item.status {
@@ -860,9 +843,52 @@ pub fn apply(
         let items = args["items"].as_array().ok_or("items required")?;
         let mut next = state.clone();
         let mut items = items.clone();
+        for (index, item) in items.iter_mut().enumerate() {
+            if item.get("grounds").is_some() || item.get("format_refs").is_some() {
+                return Err(format!(
+                    "items[{index}]: grounds and format_refs are host-derived; supply requirement_ids only"
+                ));
+            }
+            let ids: Vec<String> = serde_json::from_value(item["requirement_ids"].clone())
+                .map_err(|error| format!("items[{index}].requirement_ids: {error}"))?;
+            let purpose: ChapterPurpose = serde_json::from_value(item["purpose"].clone())
+                .map_err(|error| format!("items[{index}].purpose: {error}"))?;
+            let mut grounds = Vec::new();
+            let mut formats = Vec::new();
+            for id in &ids {
+                let need = state
+                    .analysis
+                    .outline
+                    .requirements
+                    .get(id)
+                    .ok_or_else(|| format!("items[{index}].requirement_ids: unknown {id}"))?;
+                let valid = match purpose {
+                    ChapterPurpose::Response => need.needs_chapter(),
+                    ChapterPurpose::Group => {
+                        need.kind == super::outline_flow::NeedKind::StructureConstraint
+                            && need.applicability
+                                != super::outline_flow::Applicability::NotApplicable
+                    }
+                };
+                if !valid {
+                    return Err(format!(
+                        "items[{index}].requirement_ids: {id} does not belong on a {purpose:?} node"
+                    ));
+                }
+                grounds.extend(need.grounds.clone());
+                formats.extend(need.format_grounds.clone());
+            }
+            if purpose == ChapterPurpose::Response && ids.is_empty() {
+                return Err(format!(
+                    "items[{index}].requirement_ids: response material requires saved obligations"
+                ));
+            }
+            item["grounds"] = json!(grounds);
+            item["format_refs"] = json!(formats);
+        }
         let mut id_map = std::collections::BTreeMap::new();
         let mut seen_ids = BTreeSet::new();
-        for item in &mut items {
+        for (index, item) in items.iter_mut().enumerate() {
             let supplied = item["id"]
                 .as_str()
                 .filter(|id| !id.is_empty())
@@ -870,12 +896,21 @@ pub fn apply(
             if let Some(id) = &supplied
                 && !seen_ids.insert(id.clone())
             {
-                return Err("duplicate chapter ID in batch".into());
+                return Err(format!("items[{index}].id: duplicate chapter ID {id}"));
             }
             if supplied
                 .as_ref()
                 .is_none_or(|id| !state.analysis.draft_plan.iter().any(|node| &node.id == id))
             {
+                if !supplied
+                    .as_ref()
+                    .is_some_and(|id| id.starts_with("tmp-") && id.len() > 4)
+                {
+                    return Err(format!(
+                        "items[{index}].id: unknown chapter {:?}; new chapters require tmp- IDs",
+                        supplied
+                    ));
+                }
                 let id = loop {
                     next.analysis.outline.id_sequences.chapter += 1;
                     let id = format!("chapter-{}", next.analysis.outline.id_sequences.chapter);
@@ -909,7 +944,7 @@ pub fn apply(
         let mut saved = Vec::new();
         let mut composition_changed = false;
         let mut volume_touch = BTreeSet::new();
-        for item in &items {
+        for (index, item) in items.iter().enumerate() {
             let before_parent = item.get("id").and_then(Value::as_str).and_then(|id| {
                 state
                     .analysis
@@ -928,7 +963,10 @@ pub fn apply(
             if let Some(volume) = parent.clone().or(before_parent) {
                 volume_touch.insert(volume);
             }
-            saved.push(put_outline_item(input, config, &mut next, item)?);
+            saved.push(
+                put_outline_item(input, config, &mut next, item)
+                    .map_err(|error| format!("items[{index}] ({}): {error}", item["id"]))?,
+            );
         }
         if !removed.is_empty() {
             composition_changed = true;
@@ -948,8 +986,9 @@ pub fn apply(
             .draft_plan
             .retain(|node| !removed.contains(&node.id));
         super::outline_flow::tree_valid(&next.analysis.draft_plan)?;
+        refresh_outline_basis(input, &mut next)?;
         let unmapped = next.analysis.outline.requirements.iter().any(|(id, need)| {
-            need.applicability != super::outline_flow::Applicability::NotApplicable
+            need.needs_chapter()
                 && state.analysis.draft_plan.iter().any(|node| {
                     node.status != DraftStatus::Omitted && node.requirement_ids.contains(id)
                 })
@@ -974,6 +1013,96 @@ pub fn apply(
     }
 }
 
+/// Recompute provenance from saved obligations and the final tree, never titles.
+pub(super) fn refresh_outline_basis(
+    input: &FrozenInput,
+    state: &mut super::agent::Checkpoint,
+) -> Result<(), String> {
+    super::outline_flow::tree_valid(&state.analysis.draft_plan)?;
+    let positions: std::collections::BTreeMap<_, _> = state
+        .analysis
+        .draft_plan
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect();
+    let mut children = vec![Vec::new(); positions.len()];
+    let mut parents = vec![None; positions.len()];
+    for (index, node) in state.analysis.draft_plan.iter().enumerate() {
+        if let Some(parent) = &node.parent {
+            let parent = positions[parent];
+            children[parent].push(index);
+            parents[index] = Some(parent);
+        }
+    }
+    let mut pending: Vec<_> = children.iter().map(Vec::len).collect();
+    let mut ready: Vec<_> = pending
+        .iter()
+        .enumerate()
+        .filter_map(|(i, count)| (*count == 0).then_some(i))
+        .collect();
+    while let Some(index) = ready.pop() {
+        let node = &state.analysis.draft_plan[index];
+        let mut grounds = std::collections::BTreeMap::new();
+        let mut formats = std::collections::BTreeMap::new();
+        for id in &node.requirement_ids {
+            let need = state
+                .analysis
+                .outline
+                .requirements
+                .get(id)
+                .ok_or("unknown chapter requirement")?;
+            if need.applicability == super::outline_flow::Applicability::NotApplicable {
+                continue;
+            }
+            for span in &need.grounds {
+                grounds.insert(serde_json::to_string(span).unwrap(), span.clone());
+            }
+            for span in &need.format_grounds {
+                formats.insert(serde_json::to_string(span).unwrap(), span.clone());
+            }
+        }
+        if node.purpose == ChapterPurpose::Group {
+            for child in &children[index] {
+                let child = &state.analysis.draft_plan[*child];
+                if child.status != DraftStatus::Omitted {
+                    for span in &child.grounds {
+                        grounds.insert(serde_json::to_string(span).unwrap(), span.clone());
+                    }
+                    for span in &child.format_refs {
+                        formats.insert(serde_json::to_string(span).unwrap(), span.clone());
+                    }
+                }
+            }
+        }
+        let node = &mut state.analysis.draft_plan[index];
+        node.requirement_ids.sort();
+        node.requirement_ids.dedup();
+        node.grounds = grounds.into_values().collect();
+        node.format_refs = formats.into_values().collect();
+        let spans = if node.format_refs.is_empty() {
+            &node.grounds
+        } else {
+            &node.format_refs
+        };
+        node.source_ids = spans
+            .iter()
+            .map(|span| span.source_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        node.windows = split_windows(input, &node.source_ids);
+        node.window_index = 0;
+        if let Some(parent) = parents[index] {
+            pending[parent] -= 1;
+            if pending[parent] == 0 {
+                ready.push(parent);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn organization_allowed(input: &FrozenInput, state: &super::agent::Checkpoint) -> bool {
     use super::outline_flow::{Phase, scan_complete};
     state.analysis.outline.phase == Phase::Outline
@@ -995,17 +1124,11 @@ fn put_outline_item(
     if title.is_empty() {
         return Err("title required".into());
     }
-    if concatenated_composition_title(title) {
-        return Err(
-            "one outline item cannot list multiple composition items; put each listed item as its own chapter"
-                .into(),
-        );
-    }
     let order = args["order"].as_u64().ok_or("order required")? as usize;
     let prescribed = args["prescribed"].as_bool().ok_or("prescribed required")?;
     let parent = args["parent"].as_str().map(str::to_string);
     let grounds = parse_spans(&args["grounds"])?;
-    if grounds.is_empty() {
+    if grounds.is_empty() && args["purpose"] != "group" {
         return Err("grounds required".into());
     }
     for span in &grounds {

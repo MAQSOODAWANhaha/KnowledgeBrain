@@ -1000,3 +1000,25 @@ fn fill_seed_receipts_are_frozen_without_fake_read_coverage() {
     assert!(sql.contains("node->'grounds',node->'format_refs',node->'preserved'"));
     assert!(!sql.contains("checkpoint_contract_version' IS DISTINCT FROM '3'"));
 }
+
+#[test]
+fn compilation_checkpoint_is_an_immutable_host_boundary() {
+    let checkpoint = SQL
+        .split("CREATE FUNCTION kb_bid_v2_tender_agent_checkpoint_put")
+        .nth(1)
+        .unwrap()
+        .split("END $$;")
+        .next()
+        .unwrap();
+    assert!(checkpoint.contains("invalid compilation checkpoint"));
+    assert!(checkpoint.contains(
+        "coalesce(prior->'draft_docx_base64','null'::jsonb) IS DISTINCT FROM 'null'::jsonb"
+    ));
+    assert!(checkpoint.contains("(p_state->'journal')-'sequence'"));
+    assert!(checkpoint.contains("analysis,outline,checked_sha256"));
+    assert!(
+        checkpoint
+            .contains("sequence_value<>coalesce((prior#>>'{journal,sequence}')::integer,0)+1")
+    );
+    assert!(SQL.contains("checkpoint_contract_version' IS DISTINCT FROM '6'"));
+}

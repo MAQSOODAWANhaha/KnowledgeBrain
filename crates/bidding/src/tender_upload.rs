@@ -890,11 +890,15 @@ mod tests {
 
     #[test]
     fn testdata_bid_xlsm_is_accepted() {
-        let bytes = include_bytes!(
-            "../../../testdata/bid/产品参数-云安全管理平台V2.0.6SP2-招标参数完整版V1.0_20260105__.xlsm"
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../testdata/bid/产品参数-云安全管理平台V2.0.6SP2-招标参数完整版V1.0_20260105__.xlsm",
         );
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("skip {}: private sample is not available", path.display());
+            return;
+        };
         assert_eq!(
-            validate_tender_upload("params.xlsm", Some(XLSM_MEDIA_TYPE), bytes)
+            validate_tender_upload("params.xlsm", Some(XLSM_MEDIA_TYPE), &bytes)
                 .unwrap()
                 .media_type,
             XLSM_MEDIA_TYPE

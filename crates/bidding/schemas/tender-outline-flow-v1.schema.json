@@ -3,7 +3,7 @@
     "type": "function",
     "function": {
       "name": "submit_outline_scan",
-      "description": "Commit inspected delivered text, grid and collection metadata ranges. Entries are upserts; omitted saved issues remain open. Use returned IDs for updates. In outline phase, update existing requirements/references with exact read grounds and empty scan-range maps. Use read_outline(kind=blockers) for actionable repair IDs.",
+      "description": "Commit inspected delivered text, grid and collection metadata ranges. Entries are upserts; omitted saved issues remain open. Use returned IDs for updates. In outline phase, add or revise conclusions with previously inspected, confirmed evidence and empty scan-range maps. Classify independent materials separately; constraints do not become standalone chapters. Use read_outline(kind=blockers) for actionable repair IDs.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -65,11 +65,15 @@
                 "condition",
                 "grounds",
                 "format_grounds",
-                "order_constraints"
+                "order_constraints",
+                "submission_name",
+                "classification_reason",
+                "format_required"
               ],
               "properties": {
                 "id": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Existing stable ID to update; empty or tmp- alias to allocate. Use tmp- aliases to reference new requirements within this batch."
                 },
                 "description": {
                   "type": "string"
@@ -212,7 +216,25 @@
                   }
                 },
                 "kind": {
+                  "type": "string",
+                  "enum": [
+                    "submission",
+                    "content_constraint",
+                    "structure_constraint",
+                    "non_document"
+                  ]
+                },
+                "submission_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "classification_reason": {
                   "type": "string"
+                },
+                "format_required": {
+                  "type": "boolean"
                 }
               }
             }
@@ -663,6 +685,17 @@
                 },
                 "minItems": 2,
                 "maxItems": 2
+              }
+            }
+          },
+          "requirement_replacements": {
+            "type": "object",
+            "description": "Optional atomic replacement from old requirement IDs to nonempty final target IDs. Targets may use tmp- aliases created in this batch. No chains or cycles. Original evidence remains in review.",
+            "additionalProperties": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
               }
             }
           }

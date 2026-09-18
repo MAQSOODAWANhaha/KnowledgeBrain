@@ -50,11 +50,33 @@ pub enum IssueStatus {
     Resolved,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NeedKind {
+    Submission,
+    ContentConstraint,
+    StructureConstraint,
+    NonDocument,
+}
+
+impl SubmissionNeed {
+    pub fn needs_chapter(&self) -> bool {
+        self.applicability != Applicability::NotApplicable
+            && matches!(
+                self.kind,
+                NeedKind::Submission | NeedKind::ContentConstraint
+            )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmissionNeed {
     pub description: String,
-    pub kind: String,
+    pub kind: NeedKind,
+    pub submission_name: Option<String>,
+    pub classification_reason: String,
+    pub format_required: bool,
     pub applicability: Applicability,
     pub condition: String,
     pub grounds: Vec<Span>,
@@ -422,6 +444,21 @@ pub fn packet_snapshot(
             }
         }
     }
+    if packet_id == "composition" {
+        requirement_ids.extend(
+            state
+                .analysis
+                .outline
+                .requirements
+                .iter()
+                .filter(|(id, _)| {
+                    !state.analysis.draft_plan.iter().any(|node| {
+                        node.status != DraftStatus::Omitted && node.requirement_ids.contains(id)
+                    })
+                })
+                .map(|(id, _)| id.clone()),
+        );
+    }
     let requirements: BTreeMap<_, _> = requirement_ids
         .into_iter()
         .filter_map(|id| {
@@ -529,7 +566,7 @@ pub fn compose_check_packets(input: &FrozenInput, state: &mut Checkpoint) {
             bases.push((
                 span.clone(),
                 affected.clone(),
-                matches!(need.kind.as_str(), "composition" | "order"),
+                need.kind == NeedKind::StructureConstraint || affected.is_empty(),
             ));
         }
     }
@@ -543,8 +580,10 @@ pub fn compose_check_packets(input: &FrozenInput, state: &mut Checkpoint) {
             })
             .cloned()
             .collect();
-        for span in node.grounds.iter().chain(&node.format_refs) {
-            bases.push((span.clone(), affected.clone(), node.parent.is_none()));
+        if node.purpose != super::draft::ChapterPurpose::Group {
+            for span in node.grounds.iter().chain(&node.format_refs) {
+                bases.push((span.clone(), affected.clone(), node.parent.is_none()));
+            }
         }
     }
     for (span, volumes, composition) in bases {
@@ -681,6 +720,10 @@ fn issue_signature(
         .map(|need| {
             json!({
                 "description": need.description,
+                "kind": need.kind,
+                "submission_name": need.submission_name,
+                "classification_reason": need.classification_reason,
+                "format_required": need.format_required,
                 "applicability": need.applicability,
                 "condition": need.condition,
                 "grounds": need.grounds,
@@ -793,15 +836,31 @@ pub fn blockers(input: &FrozenInput, state: &Checkpoint) -> Vec<&'static str> {
         codes.push("B_TREE_INVALID");
     }
     let unmapped = flow.requirements.iter().any(|(id, need)| {
-        need.applicability != Applicability::NotApplicable
+        need.needs_chapter()
             && !state.analysis.draft_plan.iter().any(|node| {
-                node.status != DraftStatus::Omitted && node.requirement_ids.contains(id)
+                node.status != DraftStatus::Omitted
+                    && node.purpose == super::draft::ChapterPurpose::Response
+                    && node.requirement_ids.contains(id)
             })
     }) || flow.references.values().any(|reference| {
         reference.status == ReferenceStatus::Unresolved
             && reference.impact == ReferenceImpact::Structure
     });
-    if unmapped {
+    let invalid_mapping = state.analysis.draft_plan.iter().any(|node| {
+        node.status != DraftStatus::Omitted
+            && node.requirement_ids.iter().any(|id| {
+                flow.requirements
+                    .get(id)
+                    .is_none_or(|need| match node.purpose {
+                        super::draft::ChapterPurpose::Response => !need.needs_chapter(),
+                        super::draft::ChapterPurpose::Group => {
+                            need.kind != NeedKind::StructureConstraint
+                                || need.applicability == Applicability::NotApplicable
+                        }
+                    })
+            })
+    });
+    if unmapped || invalid_mapping {
         codes.push("B_REQUIREMENT_UNMAPPED");
     }
     if flow.references.values().any(|reference| {
@@ -811,7 +870,7 @@ pub fn blockers(input: &FrozenInput, state: &Checkpoint) -> Vec<&'static str> {
     }
     let missing_format = flow.requirements.iter().any(|(id, need)| {
         need.applicability != Applicability::NotApplicable
-            && ((need.kind == "format" && need.format_grounds.is_empty())
+            && ((need.format_required && need.format_grounds.is_empty())
                 || need.format_grounds.iter().any(|span| {
                     !state.analysis.draft_plan.iter().any(|node| {
                         node.status != DraftStatus::Omitted
@@ -857,20 +916,45 @@ pub fn blockers(input: &FrozenInput, state: &Checkpoint) -> Vec<&'static str> {
 fn blocker_details(input: &FrozenInput, state: &Checkpoint) -> Vec<Value> {
     let flow = &state.analysis.outline;
     let mut rows = Vec::new();
+    for node in &state.analysis.draft_plan {
+        if node.status == DraftStatus::Omitted {
+            continue;
+        }
+        for id in &node.requirement_ids {
+            let valid = flow
+                .requirements
+                .get(id)
+                .is_some_and(|need| match node.purpose {
+                    super::draft::ChapterPurpose::Response => need.needs_chapter(),
+                    super::draft::ChapterPurpose::Group => {
+                        need.kind == NeedKind::StructureConstraint
+                            && need.applicability != Applicability::NotApplicable
+                    }
+                });
+            if !valid {
+                rows.push(json!({"code":"B_REQUIREMENT_UNMAPPED","requirement_id":id,"chapter_id":node.id,
+                    "action":"remove the invalid association; material and content obligations belong on response nodes, structure rules on groups, exclusions in review"}));
+            }
+        }
+    }
     for (id, need) in &flow.requirements {
-        if need.applicability == Applicability::NotApplicable {
+        if !need.needs_chapter() {
             continue;
         }
         let chapters: Vec<_> = state
             .analysis
             .draft_plan
             .iter()
-            .filter(|node| node.status != DraftStatus::Omitted && node.requirement_ids.contains(id))
+            .filter(|node| {
+                node.status != DraftStatus::Omitted
+                    && node.purpose == super::draft::ChapterPurpose::Response
+                    && node.requirement_ids.contains(id)
+            })
             .collect();
         if chapters.is_empty() {
             rows.push(json!({"code":"B_REQUIREMENT_UNMAPPED","requirement_id":id,"action":"map this requirement with put_outline_items"}));
         }
-        if need.kind == "format" && need.format_grounds.is_empty() {
+        if need.format_required && need.format_grounds.is_empty() {
             rows.push(json!({"code":"B_FORMAT_EVIDENCE_MISSING","requirement_id":id,"action":"update this requirement's format_grounds with submit_outline_scan, using actual read evidence"}));
         }
         for span in &need.format_grounds {
@@ -1014,7 +1098,10 @@ pub fn packet(input: &FrozenInput, state: &Checkpoint, budget: usize) -> Result<
 struct ScanNeed {
     id: String,
     description: String,
-    kind: String,
+    kind: NeedKind,
+    submission_name: Option<String>,
+    classification_reason: String,
+    format_required: bool,
     applicability: Applicability,
     condition: String,
     grounds: Vec<Span>,
@@ -1037,8 +1124,8 @@ struct ScanIssue {
 }
 
 fn validate_issue_update(prior: Option<&OutlineIssue>, next: &ScanIssue) -> Result<(), String> {
-    if let Some(prior) = prior.filter(|issue| is_blocker_issue(issue)) {
-        if prior.code != next.code
+    if let Some(prior) = prior.filter(|issue| is_blocker_issue(issue))
+        && (prior.code != next.code
             || !prior
                 .requirement_ids
                 .iter()
@@ -1051,10 +1138,9 @@ fn validate_issue_update(prior: Option<&OutlineIssue>, next: &ScanIssue) -> Resu
                 .reference_ids
                 .iter()
                 .all(|id| next.reference_ids.contains(id))
-            || !prior.grounds.iter().all(|span| next.grounds.contains(span))
-        {
-            return Err("retain the blocker code, affected IDs and original grounds; resolve it with evidence instead of reclassifying it".into());
-        }
+            || !prior.grounds.iter().all(|span| next.grounds.contains(span)))
+    {
+        return Err("retain the blocker code, affected IDs and original grounds; resolve it with evidence instead of reclassifying it".into());
     }
     Ok(())
 }
@@ -1090,6 +1176,8 @@ struct Scan {
     empty_sources: Vec<String>,
     metadata: BTreeMap<String, Vec<(usize, usize)>>,
     requirements: Vec<ScanNeed>,
+    #[serde(default)]
+    requirement_replacements: BTreeMap<String, Vec<String>>,
     references: Vec<ScanReference>,
     issues: Vec<ScanIssue>,
     review_fragments: Vec<ScanFragment>,
@@ -1402,17 +1490,9 @@ pub fn apply(
             && (!batch.text.is_empty()
                 || !batch.forms.is_empty()
                 || !batch.metadata.is_empty()
-                || !batch.empty_sources.is_empty()
-                || batch
-                    .requirements
-                    .iter()
-                    .any(|entry| !state.analysis.outline.requirements.contains_key(&entry.id))
-                || batch
-                    .references
-                    .iter()
-                    .any(|entry| !state.analysis.outline.references.contains_key(&entry.id)))
+                || !batch.empty_sources.is_empty())
         {
-            return Err("organization may update saved requirements and references only; discovery ranges are already closed".into());
+            return Err("organization must use empty scan ranges; add or revise conclusions using inspected evidence".into());
         }
         let mut next = state.analysis.outline.clone();
         for (id, ranges) in batch.text {
@@ -1492,9 +1572,41 @@ pub fn apply(
             next.scanned.metadata.entry(id).or_default();
         }
         let mut saved = Vec::new();
+        let mut aliases = BTreeMap::new();
         for need in batch.requirements {
             if need.description.trim().is_empty() || need.grounds.is_empty() {
                 return Err("submission requirement needs description and exact grounds".into());
+            }
+            if (need.kind == NeedKind::Submission
+                && need
+                    .submission_name
+                    .as_deref()
+                    .is_none_or(|name| name.trim().is_empty()))
+                || (need.kind != NeedKind::Submission && need.submission_name.is_some())
+            {
+                return Err("submission_name must name one actual material for submission and be null otherwise".into());
+            }
+            if (need.kind == NeedKind::NonDocument
+                || next
+                    .requirements
+                    .get(&need.id)
+                    .is_some_and(|old| old.kind != need.kind))
+                && need.classification_reason.trim().is_empty()
+            {
+                return Err(
+                    "non-document or reclassified requirement needs classification_reason".into(),
+                );
+            }
+            if need.format_required
+                && matches!(
+                    need.kind,
+                    NeedKind::NonDocument | NeedKind::StructureConstraint
+                )
+            {
+                return Err(
+                    "prescribed material format must belong to a submission or content constraint"
+                        .into(),
+                );
             }
             if need.applicability != Applicability::Required && need.condition.trim().is_empty() {
                 return Err(
@@ -1503,34 +1615,69 @@ pub fn apply(
             }
             for span in need.grounds.iter().chain(&need.format_grounds) {
                 tools::validate_span(input, state.coverage(), span)?;
+                if state.analysis.outline.phase == Phase::Outline
+                    && span.view_id.is_some()
+                    && !state
+                        .analysis
+                        .outline
+                        .scanned
+                        .metadata
+                        .contains_key(&span.source_id)
+                {
+                    return Err("organization needs an inspected visual source".into());
+                }
+                if state.analysis.outline.phase == Phase::Outline && span.view_id.is_none() {
+                    tools::validate_span(input, &state.analysis.outline.scanned, span).map_err(
+                        |_| "organization needs previously scanned evidence".to_string(),
+                    )?;
+                }
             }
             let value = SubmissionNeed {
                 description: need.description,
                 kind: need.kind,
+                submission_name: need.submission_name,
+                classification_reason: need.classification_reason,
+                format_required: need.format_required,
                 applicability: need.applicability,
                 condition: need.condition,
                 grounds: need.grounds,
                 format_grounds: need.format_grounds,
                 order_constraints: need.order_constraints,
             };
-            if need.id.is_empty()
+            let temporary = need.id.starts_with("tmp-");
+            if temporary && (need.id.len() == 4 || aliases.contains_key(&need.id)) {
+                return Err("requirement temporary ID must be nonempty and unique".into());
+            }
+            if (need.id.is_empty() || temporary)
                 && let Some((id, _)) = next.requirements.iter().find(|(_, prior)| **prior == value)
             {
+                if temporary {
+                    aliases.insert(need.id.clone(), id.clone());
+                }
                 saved.push(id.clone());
                 continue;
             }
+            let alias = temporary.then(|| need.id.clone());
             let known = next.requirements.contains_key(&need.id);
             let id = allocate(
                 &mut next.id_sequences.requirement,
                 "requirement",
-                need.id,
+                if temporary { String::new() } else { need.id },
                 known,
             )?;
+            if let Some(alias) = alias {
+                aliases.insert(alias, id.clone());
+            }
             saved.push(id.clone());
             next.requirements.insert(id, value);
         }
 
-        for reference in batch.references {
+        for mut reference in batch.references {
+            for id in &mut reference.requirement_ids {
+                if let Some(stable) = aliases.get(id) {
+                    *id = stable.clone();
+                }
+            }
             if reference.grounds.is_empty() || reference.target_description.trim().is_empty() {
                 return Err("reference needs description and original grounds".into());
             }
@@ -1582,7 +1729,12 @@ pub fn apply(
                 },
             );
         }
-        for issue in batch.issues {
+        for mut issue in batch.issues {
+            for id in &mut issue.requirement_ids {
+                if let Some(stable) = aliases.get(id) {
+                    *id = stable.clone();
+                }
+            }
             validate_issue_update(next.issues.get(&issue.id), &issue)?;
             if issue.description.trim().is_empty() {
                 return Err("issue description required".into());
@@ -1630,10 +1782,93 @@ pub fn apply(
             );
         }
         next.checked_sha256 = None;
-        state.analysis.outline = next;
-        invalidate_checks(state, true, &[]);
+        let mut replacements = batch.requirement_replacements;
+        for (old, targets) in &mut replacements {
+            if !state.analysis.outline.requirements.contains_key(old) || targets.is_empty() {
+                return Err(
+                    "requirement replacement needs an existing original and nonempty targets"
+                        .into(),
+                );
+            }
+            for id in targets.iter_mut() {
+                if let Some(stable) = aliases.get(id) {
+                    *id = stable.clone();
+                }
+                if !next.requirements.contains_key(id) {
+                    return Err("unknown replacement requirement".into());
+                }
+            }
+            targets.sort();
+            targets.dedup();
+        }
+        if replacements
+            .values()
+            .flatten()
+            .any(|target| replacements.contains_key(target))
+        {
+            return Err(
+                "replacement chains and cycles are not allowed; supply final targets".into(),
+            );
+        }
+        let remap = |ids: &mut Vec<String>| {
+            let changed = ids.iter().any(|id| replacements.contains_key(id));
+            *ids = ids
+                .iter()
+                .flat_map(|id| {
+                    replacements
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| vec![id.clone()])
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            changed
+        };
+        for old in replacements.keys() {
+            // Preserve the replaced original for semantic review of the split.
+            for span in &state.analysis.outline.requirements[old].grounds {
+                let id = format!("replacement-{}", digest(span)?);
+                next.review_fragments.insert(
+                    id,
+                    ReviewFragment {
+                        kind: "composition".into(),
+                        span: span.clone(),
+                        volume_ids: vec![],
+                        document_id: input
+                            .source_units
+                            .iter()
+                            .find(|source| source.source_unit_revision_id == span.source_id)
+                            .ok_or("replacement source missing")?
+                            .document_id
+                            .clone(),
+                    },
+                );
+            }
+            next.requirements.remove(old);
+        }
+        for reference in next.references.values_mut() {
+            if remap(&mut reference.requirement_ids) {
+                reference.status = ReferenceStatus::Unresolved;
+                reference.resolution_grounds.clear();
+            }
+        }
+        for issue in next.issues.values_mut() {
+            if remap(&mut issue.requirement_ids) {
+                issue.status = IssueStatus::Open;
+                issue.resolution_grounds.clear();
+            }
+        }
+        let mut candidate = state.clone();
+        candidate.analysis.outline = next;
+        for node in &mut candidate.analysis.draft_plan {
+            remap(&mut node.requirement_ids);
+        }
+        super::draft::refresh_outline_basis(input, &mut candidate)?;
+        invalidate_checks(&mut candidate, true, &[]);
+        *state = candidate;
         return Ok(
-            json!({"saved":saved,"scan_complete":scan_complete(input, &state.analysis.outline)}),
+            json!({"saved":saved,"id_map":aliases,"scan_complete":scan_complete(input, &state.analysis.outline)}),
         );
     }
     if name == "submit_outline_check" {
@@ -1959,7 +2194,10 @@ mod tests {
             "requirement-1".into(),
             SubmissionNeed {
                 description: "投标函".into(),
-                kind: "composition".into(),
+                kind: NeedKind::Submission,
+                submission_name: Some("投标函".into()),
+                classification_reason: String::new(),
+                format_required: false,
                 applicability: Applicability::Required,
                 condition: String::new(),
                 grounds: vec![span(&source.source_unit_revision_id, source.text.len())],
@@ -1991,7 +2229,7 @@ mod tests {
             });
         state.analysis.outline.phase = Phase::Complete;
         state.analysis.outline.checked_sha256 = Some(snapshot(&state).unwrap());
-        compose_check_packets(&input, &mut state);
+        compose_check_packets(input, &mut state);
         for id in state
             .analysis
             .outline
@@ -2169,7 +2407,7 @@ mod tests {
             "forms":{},
             "metadata":{},"empty_sources":[],
             "requirements":[{
-                "id":"","description":"投标函","kind":"submission","applicability":"required","condition":"",
+                "id":"","description":"投标函","kind":"submission","submission_name":"投标函","classification_reason":"","format_required":false,"applicability":"required","condition":"",
                 "grounds":[{"source_id":"source","start":0,"end":input.source_units[0].text.len(),"view_id":null,"grid_cell":null}],
                 "format_grounds":[],"order_constraints":[]
             }],

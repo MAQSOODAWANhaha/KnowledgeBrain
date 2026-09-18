@@ -217,15 +217,9 @@ impl Config {
         }
         let budget = RunBudget {
             chunk_count: input.map_or(0, |input| draft::outline_chunks(input).len()),
-            total_timeout_secs: (limits.max_turns as u64)
-                .saturating_mul(
-                    provider
-                        .timeout_ms
-                        .div_ceil(1000)
-                        .saturating_mul(3)
-                        .saturating_add(30),
-                )
-                .saturating_add(draft::PUBLISH_RESERVE_SECS),
+            // A task deadline is independent of the worst-case cost of every
+            // permitted turn. Retries consume this same frozen wall-clock budget.
+            total_timeout_secs: 60 * 60,
             publish_reserve_secs: draft::PUBLISH_RESERVE_SECS,
         };
         let fill_tools_sha256 =
@@ -861,7 +855,7 @@ async fn run_seeded<J: Journal, M: Model>(
             crate::tender_analysis::draft::OUTLINE_DEADLINE_TARGET_SECS
         };
         tracing::info!(
-            event = "draft_run_published",
+            event = "draft_compile_ready",
             stage = ?stage,
             fill_run = seeded,
             turns,
@@ -906,6 +900,26 @@ async fn finish_draft_path<J: Journal>(
         return Err(invalid(
             "draft outline has no chapter; tender parsing produced no bid composition clause",
         ));
+    }
+    if state.journal.pending.is_some() {
+        return Err(invalid("cannot finalize an uncommitted model turn"));
+    }
+    if state.draft_docx_base64.is_some() && state.draft_compile_object_id.is_some() {
+        let review = state
+            .review
+            .clone()
+            .ok_or_else(|| invalid("compiled checkpoint lacks review"))?;
+        if !state.done || review.analysis_sha256 != digest(&state.analysis).map_err(invalid)? {
+            return Err(invalid("compiled checkpoint differs from analysis"));
+        }
+        return Ok(AnalysisResult {
+            schema_version: 2,
+            frozen_input_sha256: input_sha256,
+            analysis: state.analysis.clone(),
+            review,
+            quality: "needs_review".into(),
+            source_views: state.source_views.clone(),
+        });
     }
     state.draft_stage = crate::tender_analysis::draft::DraftStage::Published;
     state.done = true;
@@ -952,17 +966,8 @@ async fn finish_draft_path<J: Journal>(
         &base64::engine::general_purpose::STANDARD,
         &compiled.docx,
     ));
-    if let Err(error) = journal.save(state, &state.progress(input)).await {
-        if error.code == "FROZEN_INPUT_DIGEST_MISMATCH" {
-            tracing::warn!(
-                event = "draft_finish_checkpoint_skipped",
-                error = %error.message,
-                "compile overlay kept in memory for publish"
-            );
-        } else {
-            return Err(error);
-        }
-    }
+    state.journal.finish()?;
+    journal.save(state, &state.progress(input)).await?;
     result.analysis = state.analysis.clone();
     Ok(result)
 }

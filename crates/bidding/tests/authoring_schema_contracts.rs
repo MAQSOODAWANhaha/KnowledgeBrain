@@ -225,3 +225,30 @@ fn semantic_manifests_are_closed_at_every_object_level() {
     extra_glyph_field["pages"][0]["glyphs"][0]["text"] = json!("A");
     assert!(!pdf_schema.is_valid(&extra_glyph_field));
 }
+
+#[test]
+fn outline_material_tools_use_compact_nodes_and_strict_need_categories() {
+    let tools: Value = serde_json::from_str(include_str!(
+        "../schemas/tender-draft-outline-tools-v1.schema.json"
+    ))
+    .unwrap();
+    let schema = validator_from(tools[0]["function"]["parameters"].clone());
+    let mut batch = json!({"items":[{"id":"tmp-letter","parent":null,"order":0,"title":"投标函","prescribed":true,"requirement_ids":["requirement-1"],"purpose":"response"}],"remove_ids":[]});
+    assert!(schema.is_valid(&batch));
+    batch["items"][0]["grounds"] = json!([]);
+    assert!(!schema.is_valid(&batch));
+    let flow: Value = serde_json::from_str(include_str!(
+        "../schemas/tender-outline-flow-v1.schema.json"
+    ))
+    .unwrap();
+    let requirement = validator_from(
+        flow[0]["function"]["parameters"]["properties"]["requirements"]["items"].clone(),
+    );
+    let mut need = json!({"id":"","description":"投标函","kind":"submission","submission_name":"投标函","classification_reason":"","format_required":true,"applicability":"required","condition":"","grounds":[],"format_grounds":[],"order_constraints":[]});
+    assert!(requirement.is_valid(&need));
+    need["kind"] = json!("prescribed_format");
+    assert!(!requirement.is_valid(&need));
+    need["kind"] = json!("submission");
+    need.as_object_mut().unwrap().remove("format_required");
+    assert!(!requirement.is_valid(&need));
+}

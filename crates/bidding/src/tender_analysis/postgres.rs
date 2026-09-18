@@ -367,9 +367,7 @@ pub fn publication(input: &FrozenInput, result: &AnalysisResult) -> Result<Value
 async fn stage_draft_docx(
     pool: &PgPool,
     journal: &PgJournal<'_>,
-    input: &FrozenInput,
     result: &AnalysisResult,
-    max_docx_bytes: usize,
 ) -> Result<Option<Uuid>, AgentError> {
     if !result.review.draft {
         return Ok(None);
@@ -379,24 +377,20 @@ async fn stage_draft_docx(
     if result.analysis.draft_plan.is_empty() {
         return Ok(None);
     }
-    let loaded = journal.load().await?;
-    let (object_ref, bytes) = if let Some(state) = loaded.as_ref()
-        && let (Some(object_id), Some(encoded)) = (
-            state.draft_compile_object_id.as_deref(),
-            state.draft_docx_base64.as_deref(),
-        ) {
-        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
-            .map_err(invalid)?;
-        (object_id.to_string(), bytes)
-    } else {
-        // Same gate as the agent's finish_draft_path: the outline skeleton is
-        // staged too, otherwise the agent's bytes and this path disagree about
-        // what counts as publishable.
-        let outcome = crate::tender_analysis::draft::compile_draft(input, result, max_docx_bytes)
-            .map_err(invalid)?;
-        let sha = hex::encode(Sha256::digest(&outcome.compiled.docx));
-        (format!("objects/{sha}"), outcome.compiled.docx)
-    };
+    let state = journal
+        .load()
+        .await?
+        .ok_or_else(|| invalid("compiled checkpoint missing"))?;
+    let object_ref = state
+        .draft_compile_object_id
+        .as_deref()
+        .ok_or_else(|| invalid("compiled checkpoint lacks DOCX identity"))?;
+    let encoded = state
+        .draft_docx_base64
+        .as_deref()
+        .ok_or_else(|| invalid("compiled checkpoint lacks DOCX bytes"))?;
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+        .map_err(invalid)?;
     let sha = object_ref
         .strip_prefix("objects/")
         .ok_or_else(|| invalid("draft object identity mismatch"))?;
@@ -531,14 +525,7 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
                 std::time::Duration::from_secs(model_secs),
             ).await?;
             let compiled = publication(&input, &result)?;
-            let staging = stage_draft_docx(
-                pool,
-                &journal,
-                &input,
-                &result,
-                config.limits.max_draft_docx_bytes,
-            )
-            .await?;
+            let staging = stage_draft_docx(pool, &journal, &result).await?;
             let receipt = match sqlx::query_scalar(
                 "SELECT kb_bid_v2_publish_requirement_set_v4($1,$2,$3::kb_sha256,$4,$5::kb_actor_identity,$6,$7,$8)",
             )
@@ -561,6 +548,8 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
             };
             if !draft_staging_committed(&receipt) {
                 abandon_draft_staging(pool, staging).await;
+            } else {
+                tracing::info!(event="draft_publication_committed", request_id=%request.request_artifact_id);
             }
             Ok(receipt)
         }
