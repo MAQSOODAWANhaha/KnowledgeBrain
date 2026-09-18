@@ -2,6 +2,7 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 pub const DRAFT_MAX_TURNS: usize = 80;
 pub const DRAFT_OUTLINE_MAX_TURNS: usize = 5;
@@ -102,6 +103,105 @@ pub fn outline_tree_ready(plan: &[DraftPlanItem]) -> bool {
                 live(item) && item.parent.as_deref() == Some(root.id.as_str())
             })
         })
+}
+
+fn heading_parts(source: &Source) -> Vec<String> {
+    source.locator["heading_path"]
+        .as_str()
+        .unwrap_or("")
+        .split(" > ")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn titles_match(left: &str, right: &str) -> bool {
+    let left_core = title_core(left);
+    let right_core = title_core(right);
+    folded_contains(left, right_core)
+        || folded_contains(right, left_core)
+        || folded_contains(left_core, right_core)
+        || folded_contains(right_core, left_core)
+}
+
+fn source_subheadings(input: &FrozenInput, title: &str) -> Vec<String> {
+    let mut kids = BTreeSet::new();
+    for source in &input.source_units {
+        let parts = heading_parts(source);
+        for (index, part) in parts.iter().enumerate() {
+            if titles_match(part, title) && index + 1 < parts.len() {
+                kids.insert(parts[index + 1].clone());
+            }
+        }
+    }
+    kids.into_iter().collect()
+}
+
+fn child_covers_subheading(child_title: &str, subheading: &str) -> bool {
+    folded_contains(child_title, subheading)
+        || folded_contains(subheading, title_core(child_title))
+        || folded_contains(child_title, title_core(subheading))
+}
+
+fn catalog_gaps(input: &FrozenInput, plan: &[DraftPlanItem]) -> Vec<(String, Vec<String>)> {
+    let live = |item: &DraftPlanItem| item.status != DraftStatus::Omitted;
+    let mut gaps = Vec::new();
+    for item in plan.iter().filter(|item| live(item) && item.parent.is_some()) {
+        let required = source_subheadings(input, &item.title);
+        if required.is_empty() {
+            continue;
+        }
+        let children: Vec<_> = plan
+            .iter()
+            .filter(|child| live(child) && child.parent.as_deref() == Some(item.id.as_str()))
+            .collect();
+        let missing: Vec<_> = required
+            .into_iter()
+            .filter(|sub| {
+                !children
+                    .iter()
+                    .any(|child| child_covers_subheading(&child.title, sub))
+            })
+            .collect();
+        if !missing.is_empty() {
+            gaps.push((item.title.clone(), missing));
+        }
+    }
+    gaps
+}
+
+fn catalog_nodes_expanded(input: &FrozenInput, plan: &[DraftPlanItem]) -> bool {
+    catalog_gaps(input, plan).is_empty()
+}
+
+pub fn outline_expansion_ready(input: &FrozenInput, plan: &[DraftPlanItem]) -> bool {
+    outline_tree_ready(plan) && catalog_nodes_expanded(input, plan)
+}
+
+fn outline_gap_note(input: &FrozenInput, plan: &[DraftPlanItem]) -> String {
+    let gaps = catalog_gaps(input, plan);
+    if gaps.is_empty() {
+        if outline_tree_ready(plan) {
+            return String::new();
+        }
+        return "每个未省略的一级分册必须有二级孩子；不要抄招标文件目录".into();
+    }
+    let mut parts = vec!["下列已写入节点在来源标题下还有未写入的子标题，补全后再结束大纲：".to_string()];
+    for (title, missing) in gaps {
+        parts.push(format!("{title} → {}", missing.join("；")));
+    }
+    parts.join(" ")
+}
+
+fn refresh_outline_work_note(input: &FrozenInput, state: &mut super::agent::Checkpoint) {
+    let note = outline_gap_note(input, &state.analysis.draft_plan);
+    if note.is_empty() {
+        return;
+    }
+    if let Some(work) = &mut state.main_work {
+        work.note = note;
+    }
 }
 
 fn has_paren_group(text: &str) -> bool {
@@ -928,7 +1028,7 @@ pub fn after_batch(
                 .filter(|item| item.status != DraftStatus::Omitted)
                 .count();
             if plan_ready(&state.analysis.draft_plan)
-                && (small_file(input) || outline_tree_ready(&state.analysis.draft_plan))
+                && (small_file(input) || outline_expansion_ready(input, &state.analysis.draft_plan))
                 && (small_file(input)
                     || !analysis_mutated
                     || (state.turn + 1 >= DRAFT_OUTLINE_MAX_TURNS && live >= 2))
@@ -938,6 +1038,8 @@ pub fn after_batch(
                     state.draft_stage = DraftStage::Published;
                     state.done = true;
                 }
+            } else {
+                refresh_outline_work_note(input, state);
             }
         }
         DraftStage::Fill => {
@@ -970,7 +1072,7 @@ pub fn preload_outline_window(input: &FrozenInput, state: &mut super::agent::Che
         source_scope: ids,
         deferred_sources: vec![],
         objective: if small_file(input) {
-            "根据已预装原文写出投标文件大纲".into()
+            "根据已预装原文写出投标文件组成大纲".into()
         } else {
             "检索冻结原文，写出投标文件组成大纲".into()
         },
@@ -978,7 +1080,7 @@ pub fn preload_outline_window(input: &FrozenInput, state: &mut super::agent::Che
         output_refs: vec![],
         pending_refs: vec![],
         status: super::agent::context::WorkStatus::Active,
-        note: String::new(),
+        note: outline_gap_note(input, &state.analysis.draft_plan),
     });
 }
 

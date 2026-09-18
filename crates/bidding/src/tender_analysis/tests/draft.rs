@@ -1098,6 +1098,92 @@ fn numbered_heading_rejects_unrelated_child() {
     .unwrap();
 }
 
+fn large_catalog_input() -> FrozenInput {
+    let pad = "正文内容".repeat(700);
+    let mut input = draft_input();
+    input.source_units = vec![
+        Source {
+            source_unit_revision_id: "biz".into(),
+            document_id: "document".into(),
+            text: format!("商务文件由下列文件组成。{pad}"),
+            locator: json!({"heading_path":"商务文件"}),
+            ordinal: 0,
+        },
+        Source {
+            source_unit_revision_id: "qual".into(),
+            document_id: "document".into(),
+            text: format!("资格审查资料。8A 摘要表。{pad}"),
+            locator: json!({"heading_path":"资格审查资料 > 8A 摘要表"}),
+            ordinal: 1,
+        },
+    ];
+    input
+}
+
+#[test]
+fn large_outline_blocks_fill_until_heading_children_are_written() {
+    let input = large_catalog_input();
+    assert!(!crate::tender_analysis::draft::small_file(&input));
+    let mut limits = config().limits;
+    limits.draft_path = true;
+    let config =
+        Config::with_provider_for(config().provider.clone(), limits, Some(&input)).unwrap();
+    let mut state = journal_state(&input, &config);
+    crate::tender_analysis::draft::preload_outline_window(&input, &mut state);
+    let ids: Vec<String> = input
+        .source_units
+        .iter()
+        .map(|source| source.source_unit_revision_id.clone())
+        .collect();
+    mark_window_coverage(&input, &mut state.analysis.coverage, &ids);
+    let grounds_biz = json!([{"source_id":"biz","start":0,"end":input.source_units[0].text.len(),"view_id":null,"grid_cell":null}]);
+    let grounds_qual = json!([{"source_id":"qual","start":0,"end":input.source_units[1].text.len(),"view_id":null,"grid_cell":null}]);
+    agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "put_outline_item",
+        &json!({"id":"vol","parent":null,"order":0,"title":"商务文件","prescribed":true,"grounds":grounds_biz}),
+    )
+    .unwrap();
+    agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "put_outline_item",
+        &json!({"id":"qual","parent":"vol","order":1,"title":"资格审查资料","prescribed":true,"grounds":grounds_qual}),
+    )
+    .unwrap();
+    crate::tender_analysis::draft::after_batch(&input, &mut state, false, false).unwrap();
+    assert_eq!(
+        state.draft_stage,
+        crate::tender_analysis::draft::DraftStage::Outline
+    );
+    assert!(
+        state
+            .main_work
+            .as_ref()
+            .unwrap()
+            .note
+            .contains("8A 摘要表"),
+        "{}",
+        state.main_work.as_ref().unwrap().note
+    );
+    agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "put_outline_item",
+        &json!({"id":"a8","parent":"qual","order":1,"title":"8A 摘要表","prescribed":true,"grounds":grounds_qual}),
+    )
+    .unwrap();
+    crate::tender_analysis::draft::after_batch(&input, &mut state, false, false).unwrap();
+    assert_eq!(
+        state.draft_stage,
+        crate::tender_analysis::draft::DraftStage::Fill
+    );
+}
+
 #[test]
 fn advertised_draft_tools_omit_extract_contract() {
     let names = |tools: Vec<serde_json::Value>| {
