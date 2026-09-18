@@ -95,31 +95,3 @@ pub(super) fn enter(
     source_review::select_next(input, config, state)?;
     Ok(json!({"reviewing":digest(&state.analysis)?}))
 }
-
-/// Finished sources go to independent review even if host-closed roots still have gaps.
-/// Does not invent dispositions for those roots.
-pub(super) fn enter_with_closed_omissions(
-    input: &FrozenInput,
-    config: &Config,
-    state: &mut Checkpoint,
-) -> Result<Value, String> {
-    if !main_dispatch::any_source_complete(input, state)? {
-        return Err("no finished source to review".into());
-    }
-    if state
-        .work()
-        .is_some_and(|work| !work.deferred_sources.is_empty())
-    {
-        return Err("resume deferred_sources before requesting independent review".into());
-    }
-    state.pending_coverage = None;
-    state.dispatch.active = None;
-    state.repair.tasks.active = None;
-    state.role = Role::Reviewer;
-    state.reviewer_work = None;
-    if state.source_review.is_none() {
-        state.source_review = Some(source_review::initialize(input, config)?);
-    }
-    source_review::select_next(input, config, state)?;
-    Ok(json!({"reviewing":digest(&state.analysis)?}))
-}

@@ -140,6 +140,43 @@ fn folded_contains(haystack: &str, needle: &str) -> bool {
     !needle.is_empty() && compact(haystack).contains(&needle)
 }
 
+fn numbered_heading_prefix(title: &str) -> Option<String> {
+    let title = title.trim();
+    let mut chars = title.chars().peekable();
+    let mut prefix = String::new();
+    if !chars.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    while let Some(ch) = chars.peek().copied() {
+        if ch.is_ascii_digit() {
+            prefix.push(ch);
+            chars.next();
+            continue;
+        }
+        if matches!(ch, '.' | '．') && chars.clone().nth(1).is_some_and(|n| n.is_ascii_digit()) {
+            prefix.push('.');
+            chars.next();
+            continue;
+        }
+        break;
+    }
+    (!prefix.is_empty() && prefix.chars().any(|ch| ch.is_ascii_digit())).then_some(prefix)
+}
+
+fn outline_child_fits_parent(parent_title: &str, child_title: &str) -> bool {
+    let parent_num = numbered_heading_prefix(parent_title);
+    let child_num = numbered_heading_prefix(child_title);
+    if let (Some(parent_num), Some(child_num)) = (&parent_num, &child_num) {
+        return child_num == parent_num
+            || child_num.starts_with(&format!("{parent_num}."));
+    }
+    if parent_num.is_some() && child_num.is_none() {
+        let core = title_core(parent_title);
+        return folded_contains(child_title, core) || folded_contains(core, title_core(child_title));
+    }
+    true
+}
+
 fn title_core(title: &str) -> &str {
     let title = title.trim();
     match title.find(['(', '（']) {
@@ -562,6 +599,21 @@ fn put_outline_item(
             "sibling order must be unique under the same parent; keep the tender composition order"
                 .into(),
         );
+    }
+    if let Some(parent_id) = parent.as_deref() {
+        let parent_title = state
+            .analysis
+            .draft_plan
+            .iter()
+            .find(|item| item.id == parent_id)
+            .map(|item| item.title.as_str())
+            .ok_or("parent outline item missing")?;
+        if !outline_child_fits_parent(parent_title, title) {
+            return Err(
+                "child title must belong under that parent: numbered headings keep descendant numbers, and technical chapter children cannot be unrelated exhibits"
+                    .into(),
+            );
+        }
     }
     let source_ids = match bind_source_ids(input, title, &config.limits.draft_bind_terms) {
         Ok(ids) => ids,

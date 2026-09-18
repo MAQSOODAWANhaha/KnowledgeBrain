@@ -124,6 +124,12 @@ pub struct Config {
     pub review_prompt_sha256: String,
     pub fill_tools_sha256: String,
     pub fill_prompt_sha256: String,
+    /// Outline tools plus read tools (large-file request bodies).
+    #[serde(default)]
+    pub tools_read_sha256: String,
+    /// Fill tools plus read tools (large-file request bodies).
+    #[serde(default)]
+    pub fill_tools_read_sha256: String,
 }
 
 impl Config {
@@ -186,29 +192,22 @@ impl Config {
 
     pub fn with_provider_for(
         provider: AuthoringRuntimeContractV1,
-        limits: Limits,
-        input: Option<&FrozenInput>,
+        mut limits: Limits,
+        _input: Option<&FrozenInput>,
     ) -> Result<Self, AgentError> {
-        let fill_tools = if limits.draft_path {
-            input.map_or_else(
-                crate::tender_analysis::draft::fill_schemas,
-                crate::tender_analysis::draft::fill_schemas_for,
-            )
-        } else {
-            crate::tender_analysis::draft::fill_schemas()
-        };
+        limits.draft_path = true;
+        let outline_tools = crate::tender_analysis::draft::outline_schemas();
+        let mut outline_read = outline_tools.clone();
+        outline_read.extend(crate::tender_analysis::draft::read_schemas());
+        let fill_tools = crate::tender_analysis::draft::fill_schemas();
+        let mut fill_read = fill_tools.clone();
+        fill_read.extend(crate::tender_analysis::draft::read_schemas());
         let fill_tools_sha256 = digest(&fill_tools).map_err(invalid)?;
+        let fill_tools_read_sha256 = digest(&fill_read).map_err(invalid)?;
         let fill_prompt_sha256 =
             digest(&crate::agent_runtime::chat::system_content(DRAFT_FILL)).map_err(invalid)?;
-        let tools_sha256 = if limits.draft_path {
-            digest(&input.map_or_else(
-                crate::tender_analysis::draft::outline_schemas,
-                crate::tender_analysis::draft::outline_schemas_for,
-            ))
-            .map_err(invalid)?
-        } else {
-            digest(&tools::schemas_for(false, &limits)).map_err(invalid)?
-        };
+        let tools_sha256 = digest(&outline_tools).map_err(invalid)?;
+        let tools_read_sha256 = digest(&outline_read).map_err(invalid)?;
         let review_tools_sha256 = digest(&tools::schemas_for(true, &limits)).map_err(invalid)?;
         let main_prompt_sha256 = digest(&crate::agent_runtime::chat::system_content(
             if limits.draft_path {
@@ -233,6 +232,8 @@ impl Config {
             review_prompt_sha256,
             fill_tools_sha256,
             fill_prompt_sha256,
+            tools_read_sha256,
+            fill_tools_read_sha256,
         };
         config.validate()?;
         Ok(config)
@@ -280,6 +281,9 @@ impl Config {
                 let fill_read = digest(&fill_read).map_err(invalid)?;
                 !((self.tools_sha256 == outline || self.tools_sha256 == outline_read)
                     && (self.fill_tools_sha256 == fill || self.fill_tools_sha256 == fill_read)
+                    && (self.tools_read_sha256.is_empty() || self.tools_read_sha256 == outline_read)
+                    && (self.fill_tools_read_sha256.is_empty()
+                        || self.fill_tools_read_sha256 == fill_read)
                     && self.main_prompt_sha256
                         == digest(&crate::agent_runtime::chat::system_content(DRAFT_OUTLINE))
                             .map_err(invalid)?
@@ -465,19 +469,6 @@ struct RunDriver<'a, J, M> {
     model: &'a M,
 }
 
-fn check_review_execution(
-    input: &FrozenInput,
-    config: &Config,
-    state: &Checkpoint,
-) -> Result<(), AgentError> {
-    if source_review::execution_blocked(input, config, state).map_err(invalid)? {
-        return Err(invalid(
-            "no_executable_source_review_tasks: all remaining source judgments have unchanged blocked dependencies; checkpoint, findings and costs retained",
-        ));
-    }
-    Ok(())
-}
-
 #[async_trait]
 impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
     fn status(&self) -> Status<'_> {
@@ -503,10 +494,6 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
         &mut self.state.journal
     }
     async fn prepare_request(&mut self) -> Result<Vec<u8>, AgentError> {
-        if !self.config.limits.draft_path {
-            check_review_execution(self.input, self.config, self.state)?;
-            main_dispatch::check_ready(self.input, self.config, self.state)?;
-        }
         let started = Instant::now();
         let body = request(self.input, self.config, self.state).await?;
         let estimated_input_tokens = context::estimate_input_tokens(
@@ -528,10 +515,6 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
     async fn reserve(&self, body: &[u8], _local_attempt: usize) -> Result<usize, AgentError> {
         // A restored prepared request skips prepare_request. Received replay
         // skips reserve entirely and still commits its already saved response.
-        if !self.config.limits.draft_path {
-            check_review_execution(self.input, self.config, self.state)?;
-            main_dispatch::check_ready(self.input, self.config, self.state)?;
-        }
         self.journal
             .reserve(self.state, body)
             .await?
@@ -631,13 +614,11 @@ pub async fn run<J: Journal, M: Model>(
             "completed analysis has a pending turn",
         ));
     }
-    if config.limits.draft_path {
-        state.outline_config_sha256 = Some(config.tools_sha256.clone());
-        state.fill_config_sha256 = Some(config.fill_tools_sha256.clone());
-        if state.draft_stage == crate::tender_analysis::draft::DraftStage::None {
-            state.draft_stage = crate::tender_analysis::draft::DraftStage::Outline;
-            crate::tender_analysis::draft::preload_outline_window(input, &mut state);
-        }
+    state.outline_config_sha256 = Some(config.tools_sha256.clone());
+    state.fill_config_sha256 = Some(config.fill_tools_sha256.clone());
+    if state.draft_stage == crate::tender_analysis::draft::DraftStage::None {
+        state.draft_stage = crate::tender_analysis::draft::DraftStage::Outline;
+        crate::tender_analysis::draft::preload_outline_window(input, &mut state);
     }
     let driven = drive(
         &mut RunDriver {
@@ -650,57 +631,16 @@ pub async fn run<J: Journal, M: Model>(
         cancel,
     )
     .await;
-    if config.limits.draft_path {
-        if let Err(error) = driven {
-            if !crate::tender_analysis::draft::draft_should_publish_partial(
-                &error.code,
-                &error.message,
-            ) {
-                return Err(error);
-            }
-            crate::tender_analysis::draft::omit_pending_deadline(&mut state.analysis.draft_plan);
+    if let Err(error) = driven {
+        if !crate::tender_analysis::draft::draft_should_publish_partial(
+            &error.code,
+            &error.message,
+        ) {
+            return Err(error);
         }
-        return finish_draft_path(input, config, journal, &mut state, input_sha256).await;
+        crate::tender_analysis::draft::omit_pending_deadline(&mut state.analysis.draft_plan);
     }
-    driven?;
-    if !state.main_progress.blockers.is_empty() || !state.reviewer_progress.blockers.is_empty() {
-        return Err(invalid("execution blockers prevent analysis acceptance"));
-    }
-    if !review_complete(input, config, &state).map_err(invalid)?
-        || state
-            .source_review
-            .as_ref()
-            .and_then(|r| r.completed_analysis_sha256.as_ref())
-            != Some(&digest(&state.analysis).map_err(invalid)?)
-    {
-        return Err(invalid(
-            "current independent source and candidate judgments missing",
-        ));
-    }
-    let review = state
-        .review
-        .ok_or_else(|| invalid("independent review missing"))?;
-    if review.analysis_sha256 != digest(&state.analysis).map_err(invalid)?
-        || !tools::gaps(input, &state.analysis).is_empty()
-        || !tools::review_gaps(input, &state.analysis, &review.coverage).is_empty()
-    {
-        return Err(invalid("analysis or review coverage changed"));
-    }
-    // Quality describes extraction, not whether a particular bidder meets a
-    // condition. Source-backed conditions remain conditional after review;
-    // bidder identity and actual responses are deferred.
-    crate::tender_analysis::rule_contract::validate_review(input, &state.analysis, &review)
-        .map_err(invalid)?;
-    let mut result = AnalysisResult {
-        schema_version: 2,
-        frozen_input_sha256: input_sha256,
-        analysis: state.analysis,
-        review,
-        quality: String::new(),
-        source_views: state.source_views,
-    };
-    result.quality = result.expected_quality(input).into();
-    Ok(result)
+    finish_draft_path(input, config, journal, &mut state, input_sha256).await
 }
 
 async fn finish_draft_path<J: Journal>(
@@ -768,7 +708,17 @@ async fn finish_draft_path<J: Journal>(
             ),
         }
     }
-    journal.save(state, &state.progress(input)).await?;
+    if let Err(error) = journal.save(state, &state.progress(input)).await {
+        if error.code == "FROZEN_INPUT_DIGEST_MISMATCH" {
+            tracing::warn!(
+                event = "draft_finish_checkpoint_skipped",
+                error = %error.message,
+                "compile overlay kept in memory for publish"
+            );
+        } else {
+            return Err(error);
+        }
+    }
     result.analysis = state.analysis.clone();
     Ok(result)
 }
@@ -793,10 +743,6 @@ pub(super) async fn execute_turn<J: Journal>(
     }
     let actual_input_tokens = response.usage.as_ref().and_then(|u| u.prompt_tokens);
     evidence_delivery::confirm(input, config, state, &body)?;
-    if !config.limits.draft_path {
-        main_dispatch::confirm(input, config, state, &body).map_err(invalid)?;
-    }
-    let charged_owner = state.dispatch.active.clone();
     tracing::info!(event="analysis_token_usage",turn=state.turn,role=?state.role,
         estimated_input_tokens, actual_input_tokens,
         actual_output_tokens=response.usage.as_ref().and_then(|u|u.completion_tokens),
@@ -1061,20 +1007,8 @@ pub(super) async fn execute_turn<J: Journal>(
         // full analysis digest without repairing any of its findings.
         record_completed_review(input, config, state, true).map_err(invalid)?;
     }
-    if config.limits.draft_path {
-        crate::tender_analysis::draft::after_batch(input, state, analysis_mutated, batch_failed)
-            .map_err(invalid)?;
-    } else {
-        main_dispatch::after_batch(
-            input,
-            config,
-            state,
-            charged_owner.as_ref(),
-            batch_failed,
-            analysis_mutated,
-        )
+    crate::tender_analysis::draft::after_batch(input, state, analysis_mutated, batch_failed)
         .map_err(invalid)?;
-    }
     state.turn += 1;
     if state.role != role {
         state.transcript.clear();

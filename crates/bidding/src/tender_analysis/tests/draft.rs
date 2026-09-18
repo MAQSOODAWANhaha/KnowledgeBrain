@@ -939,6 +939,19 @@ fn draft_runtime_freezes_outline_and_fill_contracts() {
     );
     assert_ne!(frozen.tools_sha256, frozen.fill_tools_sha256);
     assert_ne!(frozen.main_prompt_sha256, frozen.fill_prompt_sha256);
+    let mut outline_read = crate::tender_analysis::draft::outline_schemas();
+    outline_read.extend(crate::tender_analysis::draft::read_schemas());
+    let mut fill_read = crate::tender_analysis::draft::fill_schemas();
+    fill_read.extend(crate::tender_analysis::draft::read_schemas());
+    assert_eq!(
+        frozen.tools_read_sha256,
+        digest(&outline_read).unwrap()
+    );
+    assert_eq!(
+        frozen.fill_tools_read_sha256,
+        digest(&fill_read).unwrap()
+    );
+    assert_ne!(frozen.tools_sha256, frozen.tools_read_sha256);
 }
 
 #[test]
@@ -981,6 +994,10 @@ fn sql_draft_reserve_skips_extract_owner_and_allows_fill_hash() {
         "reserve must accept frozen fill tools"
     );
     assert!(
+        body.contains("tools_read_sha256") && body.contains("fill_tools_read_sha256"),
+        "reserve must accept large-file read-tool hashes"
+    );
+    assert!(
         body.contains("draft outline/fill contract changed"),
         "draft tools/prompt mismatch must stay a digest error"
     );
@@ -992,6 +1009,93 @@ fn sql_draft_reserve_skips_extract_owner_and_allows_fill_hash() {
         owner > draft_if,
         "official first-source owner must sit in the non-draft branch"
     );
+}
+
+#[test]
+fn sql_draft_checkpoint_allows_outline_host_assignment() {
+    let sql = include_str!("../../../../../migrations/bidding_v2_baseline.sql");
+    let start = sql
+        .find("CREATE FUNCTION kb_bid_v2_tender_agent_checkpoint_put")
+        .expect("checkpoint_put");
+    let rest = &sql[start + 1..];
+    let end = rest
+        .find("CREATE FUNCTION")
+        .map(|i| start + 1 + i)
+        .unwrap_or(sql.len());
+    let body = &sql[start..end];
+    assert!(
+        body.contains("initial checkpoint must be empty"),
+        "empty first checkpoint remains a digest gate"
+    );
+    let empty = body
+        .find("initial checkpoint must be empty")
+        .expect("empty gate");
+    let draft = &body[..empty];
+    assert!(
+        draft.contains("draft_stage") && draft.contains("{main_work,status}"),
+        "draft first checkpoint may host-assign outline work"
+    );
+    let idle = body.find("draft_path}')::boolean,true) THEN").expect("draft dispatch idle");
+    let owner = body.find("Main committed owner changed").expect("extract owner charge");
+    assert!(
+        owner > idle,
+        "extract main_dispatch owner charge must sit in the non-draft branch"
+    );
+}
+
+#[test]
+fn sql_tender_outline_returns_draft_plan() {
+    let sql = include_str!("../../../../../migrations/bidding_v2_baseline.sql");
+    let start = sql
+        .find("CREATE FUNCTION kb_bid_v2_get_tender_outline")
+        .expect("outline");
+    let rest = &sql[start + 1..];
+    let end = rest
+        .find("CREATE FUNCTION")
+        .map(|i| start + 1 + i)
+        .unwrap_or(sql.len());
+    let body = &sql[start..end];
+    assert!(
+        body.contains("'draft_plan'") && body.contains("{analysis,draft_plan}"),
+        "outline preview must expose draft_plan parent/child tree"
+    );
+}
+
+#[test]
+fn numbered_heading_rejects_unrelated_child() {
+    let input = draft_input();
+    let config = config();
+    let mut state = journal_state(&input, &config);
+    cover(&input, &mut state.analysis);
+    let grounds = json!([{"source_id":"source","start":0,"end":input.source_units[0].text.len(),"view_id":null,"grid_cell":null}]);
+    agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "put_outline_item",
+        &json!({"id":"ch8","parent":null,"order":8,"title":"8. 包装及运输","prescribed":true,"grounds":grounds}),
+    )
+    .unwrap();
+    let err = agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "put_outline_item",
+        &json!({"id":"ex","parent":"ch8","order":1,"title":"业绩要求","prescribed":true,"grounds":grounds}),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("child title must belong under that parent"),
+        "{err}"
+    );
+    agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "put_outline_item",
+        &json!({"id":"ch81","parent":"ch8","order":1,"title":"8.1 大件运输","prescribed":true,"grounds":grounds}),
+    )
+    .unwrap();
 }
 
 #[test]

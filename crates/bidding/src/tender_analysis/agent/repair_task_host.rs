@@ -3,63 +3,6 @@ use super::*;
 
 pub(super) const POLICY: &str = "main-repair-tasks-v1";
 
-#[cfg(test)]
-pub(in crate::tender_analysis) fn schedule(
-    state: &mut Checkpoint,
-    limits: &Limits,
-) -> Result<(), String> {
-    if state.role != Role::Main || state.done {
-        state.repair.tasks.active = None;
-        return Ok(());
-    }
-    let previous = state.repair.tasks.active.clone();
-    repair::tasks::sync(state, limits)?;
-    let tasks = repair::tasks::current(state, limits)?;
-    let ready = |task: &&repair::tasks::Task| runnable(state, task);
-    let next = tasks
-        .iter()
-        .filter(ready)
-        .find(|task| Some(&task.id) == previous.as_ref())
-        .or_else(|| tasks.iter().find(ready));
-    if let Some(task) = next {
-        repair::tasks::select(state, &task.id, limits)?;
-        state.main_progress.watch = repair::tasks::active(state)
-            .ok_or("selected repair task missing")?
-            .1
-            .watch
-            .clone();
-        if previous.as_ref() != Some(&task.id) {
-            let deferred_sources = state
-                .main_work
-                .as_ref()
-                .map(|work| {
-                    work.deferred_sources
-                        .iter()
-                        .filter(|id| !task.source_scope.contains(id))
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default();
-            state.main_work = Some(WorkState {
-                source_scope: task.source_scope.clone(), deferred_sources,
-                objective: format!("Resolve assigned review finding {} from original evidence", task.id),
-                focus: Default::default(), output_refs: vec![], pending_refs: vec![],
-                status: WorkStatus::Active,
-                note: "Save a grounded revision or dispute; task allowance belongs to the finding, including cross-source work.".into(),
-            });
-            context::retain_outcomes(&state.analysis, state.main_work.as_mut().unwrap(), None);
-        }
-    } else {
-        state.repair.tasks.active = None;
-        if previous.is_some() && tasks.iter().all(|task| task.complete) {
-            // The task watch remains in its entry. Source/reviewer blockers and
-            // all publication gates still apply to the subsequent handoff.
-            state.main_progress.watch = Default::default();
-        }
-    }
-    Ok(())
-}
-
 // New task allowances cannot reopen an old source-level failure. The legacy
 // recovery path remains available only outside fixed-task execution.
 pub(super) fn check_scope(state: &Checkpoint, scope: &[String]) -> Result<(), String> {

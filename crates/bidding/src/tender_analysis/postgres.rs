@@ -353,22 +353,46 @@ pub fn publication(input: &FrozenInput, result: &AnalysisResult) -> Result<Value
 async fn stage_draft_docx(
     pool: &PgPool,
     journal: &PgJournal<'_>,
+    input: &FrozenInput,
     result: &AnalysisResult,
 ) -> Result<Option<Uuid>, AgentError> {
     if !result.review.draft {
         return Ok(None);
     }
-    let Some(state) = journal.load().await? else {
-        return Ok(None);
-    };
-    let Some(encoded) = state.draft_docx_base64.as_deref() else {
-        return Ok(None);
-    };
-    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+    let loaded = journal.load().await?;
+    let (object_ref, bytes) = if let Some(state) = loaded.as_ref()
+        && let (Some(object_id), Some(encoded)) = (
+            state.draft_compile_object_id.as_deref(),
+            state.draft_docx_base64.as_deref(),
+        )
+    {
+        let bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            encoded,
+        )
         .map_err(invalid)?;
-    let sha = hex::encode(Sha256::digest(&bytes));
-    let object_ref = format!("objects/{sha}");
-    if state.draft_compile_object_id.as_deref() != Some(object_ref.as_str()) {
+        (object_id.to_string(), bytes)
+    } else if result
+        .analysis
+        .draft_plan
+        .iter()
+        .any(|item| item.status == crate::tender_analysis::draft::DraftStatus::Filled)
+    {
+        let composed =
+            crate::docx_composition::synthesize_draft_document(input, result).map_err(invalid)?;
+        let compiled = crate::docx_composition::compiler::compile(
+            input, result, &composed, 2_000_000,
+        )
+        .map_err(invalid)?;
+        let sha = hex::encode(Sha256::digest(&compiled.docx));
+        (format!("objects/{sha}"), compiled.docx)
+    } else {
+        return Ok(None);
+    };
+    let sha = object_ref
+        .strip_prefix("objects/")
+        .ok_or_else(|| invalid("draft object identity mismatch"))?;
+    if hex::encode(Sha256::digest(&bytes)) != sha {
         return Err(invalid("draft object identity mismatch"));
     }
     let staging = Uuid::new_v4();
@@ -376,14 +400,14 @@ async fn stage_draft_docx(
         pool,
         staging,
         &object_ref,
-        &sha,
+        sha,
         DOCX_MEDIA,
         i64::try_from(bytes.len()).map_err(invalid)?,
         REQUIREMENT_COMPILE_ACTOR,
     )
     .await
     .map_err(db_error)?;
-    if let Err(error) = platform::write_blob_async(&sha, &bytes).await {
+    if let Err(error) = platform::write_blob_async(sha, &bytes).await {
         let _ = platform::abandon_object_upload(pool, staging, REQUIREMENT_COMPILE_ACTOR).await;
         return Err(AgentError::new("INTERNAL", error.to_string()));
     }
@@ -506,7 +530,7 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
                 })?;
             let result = agent::run(&input, &config, &journal, model, &local).await?;
             let compiled = publication(&input, &result)?;
-            let staging = stage_draft_docx(pool, &journal, &result).await?;
+            let staging = stage_draft_docx(pool, &journal, &input, &result).await?;
             let receipt = match sqlx::query_scalar(
                 "SELECT kb_bid_v2_publish_requirement_set_v4($1,$2,$3::kb_sha256,$4,$5::kb_actor_identity,$6,$7,$8)",
             )

@@ -305,6 +305,9 @@ pub(super) async fn execute_turn(
 ) -> Result<Vec<Value>, AgentError> {
     let l = &config.limits;
     agent_work::accept_pending(state, result).map_err(invalid)?;
+    if state.pending_delivery.is_none() && !state.workspace.done {
+        agent_work::install_next(input, result, state, l.max_tool_result_bytes).map_err(invalid)?;
+    }
     let write_authority =
         super::agent_scope::WriteAuthority::capture(input, result, state).map_err(invalid)?;
     let reviewing = state.workspace.reviewing;

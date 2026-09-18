@@ -138,17 +138,17 @@ export function AnalysisProgress({
     </section>
     {loaded && <section className="card stack" data-testid="tender-outline">
       <h2 className="h3">章节大纲</h2>
-      <p className="text-sm">目录预览不是编制依据。草稿由分析任务直接编译；终稿需另一次独立复核。</p>
+      <p className="text-sm">投标文件组成树来自分析大纲（一级分册 → 二级附件 → 必要时三级）。招标文件解析标题不是组成依据。草稿由分析任务直接编译；终稿需另一次独立复核。</p>
       {(outline?.extracted?.length ?? 0) > 0
-        ? <><h3 className="text-sm">抽取目录</h3><OutlineTree nodes={outline?.extracted ?? []} /></>
-        : <p className="text-sm">{job ? "分析尚未抽出目录。" : "开始分析后将显示抽取的投标文件目录。"}</p>}
+        ? <><h3 className="text-sm">投标文件组成</h3><OutlineTree nodes={outline?.extracted ?? []} /></>
+        : <p className="text-sm">{job ? "分析尚未写出投标组成树。" : "开始分析后将显示投标文件组成大纲。"}</p>}
       {(outline?.documents ?? []).map((document) => {
         const source = document.source ?? [];
         return <div key={document.id} className="stack">
-          <h3 className="text-sm">{document.file_name}</h3>
+          <h3 className="text-sm">{document.file_name}（招标文件解析标题）</h3>
           {source.length
             ? <OutlineTree nodes={source} />
-            : <p className="text-sm">已解析，但没有标题路径；目录以抽取结果为准。</p>}
+            : <p className="text-sm">已解析，但没有标题路径。</p>}
         </div>;
       })}
     </section>}

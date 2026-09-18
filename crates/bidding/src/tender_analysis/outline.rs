@@ -42,6 +42,8 @@ struct Bundle {
     documents: Vec<BundleDocument>,
     #[serde(default)]
     records: BTreeMap<String, Value>,
+    #[serde(default)]
+    draft_plan: Vec<crate::tender_analysis::draft::DraftPlanItem>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,7 +67,14 @@ pub fn from_bundle(value: Value) -> Result<TenderOutline, String> {
         quality: "draft".into(),
         compile_status: bundle.compile_status.filter(|s| !s.is_empty()),
         extracted_from: bundle.extracted_from,
-        extracted: extracted(&records),
+        extracted: {
+            let plan = plan_tree(&bundle.draft_plan);
+            if plan.is_empty() {
+                extracted(&records)
+            } else {
+                plan
+            }
+        },
         documents: bundle
             .documents
             .into_iter()
@@ -135,6 +144,62 @@ fn insert_path(nodes: &mut Vec<OutlineNode>, parts: &[String]) {
     };
     insert_path(&mut node.children, &parts[1..]);
     nodes.push(node);
+}
+
+pub fn plan_tree(plan: &[crate::tender_analysis::draft::DraftPlanItem]) -> Vec<OutlineNode> {
+    let live: Vec<_> = plan
+        .iter()
+        .filter(|item| item.status != crate::tender_analysis::draft::DraftStatus::Omitted)
+        .collect();
+    if live.is_empty() {
+        return Vec::new();
+    }
+    let ids: BTreeSet<_> = live.iter().map(|item| item.id.clone()).collect();
+    let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut roots = Vec::new();
+    let mut ordered = live;
+    ordered.sort_by(|a, b| a.order.cmp(&b.order).then(a.id.cmp(&b.id)));
+    for item in &ordered {
+        match &item.parent {
+            Some(parent) if ids.contains(parent) && parent != &item.id => {
+                children.entry(parent.clone()).or_default().push(item.id.clone());
+            }
+            _ => roots.push(item.id.clone()),
+        }
+    }
+    let titles: BTreeMap<_, _> = ordered
+        .iter()
+        .map(|item| (item.id.clone(), item.title.clone()))
+        .collect();
+    roots
+        .into_iter()
+        .filter_map(|id| plan_node(&id, &titles, &children, &mut BTreeSet::new()))
+        .collect()
+}
+
+fn plan_node(
+    id: &str,
+    titles: &BTreeMap<String, String>,
+    children: &BTreeMap<String, Vec<String>>,
+    stack: &mut BTreeSet<String>,
+) -> Option<OutlineNode> {
+    if !stack.insert(id.to_string()) {
+        return None;
+    }
+    let title = titles.get(id)?.clone();
+    let node = OutlineNode {
+        title,
+        kind: "chapter".into(),
+        children: children
+            .get(id)
+            .into_iter()
+            .flatten()
+            .filter_map(|child| plan_node(child, titles, children, stack))
+            .collect(),
+        record_id: Some(id.to_string()),
+    };
+    stack.remove(id);
+    Some(node)
 }
 
 pub fn extracted(records: &BTreeMap<String, Record>) -> Vec<OutlineNode> {
@@ -419,6 +484,28 @@ mod tests {
         assert_eq!(outline.quality, "draft");
         assert_eq!(outline.extracted_from, "checkpoint");
         assert_eq!(outline.extracted[0].title, "投标函");
+        assert_eq!(outline.documents[0].source[0].title, "须知");
+    }
+
+    #[test]
+    fn draft_plan_tree_nests_by_parent_not_heading_path() {
+        let outline = from_bundle(json!({
+            "compile_status": "succeeded",
+            "extracted_from": "checkpoint",
+            "documents": [{"id":"d","file_name":"招标文件.pdf","parse_status":"ready",
+                "headings":[{"ordinal":0,"kind":"section","heading_path":"须知 > 8. 包装","page_ordinal":null}]}],
+            "records": {},
+            "draft_plan": [
+                {"id":"vol","parent":null,"order":0,"title":"技术投标文件","prescribed":true,"source_ids":[],"windows":[],"window_index":0,"status":"pending"},
+                {"id":"ch8","parent":"vol","order":8,"title":"8. 包装及运输","prescribed":true,"source_ids":[],"windows":[],"window_index":0,"status":"pending"},
+                {"id":"ch81","parent":"ch8","order":1,"title":"8.1 大件运输","prescribed":true,"source_ids":[],"windows":[],"window_index":0,"status":"pending"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(outline.extracted[0].title, "技术投标文件");
+        assert_eq!(outline.extracted[0].kind, "chapter");
+        assert_eq!(outline.extracted[0].children[0].title, "8. 包装及运输");
+        assert_eq!(outline.extracted[0].children[0].children[0].title, "8.1 大件运输");
         assert_eq!(outline.documents[0].source[0].title, "须知");
     }
 }

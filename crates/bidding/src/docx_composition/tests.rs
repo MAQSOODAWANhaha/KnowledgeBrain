@@ -1836,9 +1836,19 @@ fn model(input: &FrozenInput) -> Model {
             plan_for_section(&result, &section(input, 1)),
         ),
         ("set_presentation", presentation(input)),
-        ("put_section", section(input, 0)),
-        ("put_section", section(input, 1)),
         ("put_omission", omission(input)),
+        (
+            "read_source",
+            json!({"source_id":"s0","start":0,"max_bytes":10000}),
+        ),
+        ("read_form", json!({"form_id":"f0","offset":0,"limit":100})),
+        ("put_section", section(input, 0)),
+        (
+            "read_source",
+            json!({"source_id":"s1","start":0,"max_bytes":10000}),
+        ),
+        ("read_form", json!({"form_id":"f1","offset":0,"limit":100})),
+        ("put_section", section(input, 1)),
         ("submit_composition_review", json!({"findings":[]})),
     ];
     for i in 0..2 {

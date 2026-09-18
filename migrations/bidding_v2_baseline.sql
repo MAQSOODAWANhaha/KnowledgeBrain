@@ -8721,7 +8721,9 @@ BEGIN
         OR (prompt_sha::text IS DISTINCT FROM runtime->>'main_prompt_sha256'
           AND prompt_sha::text IS DISTINCT FROM runtime->>'fill_prompt_sha256')
         OR (tools_sha::text IS DISTINCT FROM runtime->>'tools_sha256'
-          AND tools_sha::text IS DISTINCT FROM runtime->>'fill_tools_sha256') THEN
+          AND tools_sha::text IS DISTINCT FROM runtime->>'fill_tools_sha256'
+          AND tools_sha::text IS DISTINCT FROM nullif(runtime->>'tools_read_sha256','')
+          AND tools_sha::text IS DISTINCT FROM nullif(runtime->>'fill_tools_read_sha256','')) THEN
       RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: draft outline/fill contract changed' USING ERRCODE='23514';
     END IF;
   ELSE
@@ -8864,6 +8866,11 @@ BEGIN
       OR jsonb_typeof(dispatch_owner->'id') IS DISTINCT FROM 'string')) THEN
     RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: Main dispatch shape' USING ERRCODE='23514';
   END IF;
+  IF coalesce((runtime#>'{limits,draft_path}')::boolean,true) THEN
+    IF dispatch IS DISTINCT FROM '{"active":null,"entries":{},"last_committed_turn":null}'::jsonb THEN
+      RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: Main dispatch shape' USING ERRCODE='23514';
+    END IF;
+  ELSE
   IF dispatch->'entries'<>'{}'::jsonb AND (SELECT count(*) FROM jsonb_object_keys(dispatch->'entries'))<>jsonb_array_length(source_input->'source_units')+1 THEN
     RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: frozen Main root inventory changed' USING ERRCODE='23514';
   END IF;
@@ -8933,6 +8940,7 @@ BEGIN
       RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: Main batch must charge old owner exactly once' USING ERRCODE='23514';
     END IF;
   END LOOP;
+  END IF;
   -- Finding execution is domain checkpoint metadata, not a second Agent table.
   -- Content versions may change; already spent attempts must not disappear.
   tasks:=p_state#>'{repair,tasks}';
@@ -9095,6 +9103,7 @@ BEGIN
       OR p_state#>'{analysis,records}' IS DISTINCT FROM '{}'::jsonb
       OR p_state#>'{analysis,relations}' IS DISTINCT FROM '{}'::jsonb
       OR p_state#>'{analysis,dispositions}' IS DISTINCT FROM '{}'::jsonb
+      OR coalesce(p_state#>'{analysis,draft_plan}','[]'::jsonb) IS DISTINCT FROM '[]'::jsonb
       OR p_state->'review' IS DISTINCT FROM 'null'::jsonb
       OR ((p_state->'repair')-'tasks') IS DISTINCT FROM '{"feedback_sha256":null,"baseline":{},"results":{}}'::jsonb
       OR (tasks-'feedback_sha256') IS DISTINCT FROM '{"active":null,"aliases":{},"entries":{},"last_committed_turn":null}'::jsonb
@@ -9105,10 +9114,28 @@ BEGIN
       OR p_state->'pending_coverage' IS DISTINCT FROM 'null'::jsonb
       OR p_state->'main_progress' IS DISTINCT FROM '{"watch":{"no_progress_turns":0,"focus_turns":0,"replans":0,"recovery":"running"},"seen":[],"completions":[],"blockers":[]}'::jsonb
       OR p_state->'reviewer_progress' IS DISTINCT FROM '{"watch":{"no_progress_turns":0,"focus_turns":0,"replans":0,"recovery":"running"},"seen":[],"completions":[],"blockers":[]}'::jsonb
-      OR p_state->'main_work' IS DISTINCT FROM 'null'::jsonb
       OR p_state->'reviewer_work' IS DISTINCT FROM 'null'::jsonb
-      OR p_state#>'{analysis,coverage}' IS DISTINCT FROM '{"metadata":{},"text":{},"form_cells":{},"candidate":{},"views":{},"view_failures":{}}'::jsonb
-      OR p_state#>'{reviewer_coverage}' IS DISTINCT FROM '{"metadata":{},"text":{},"form_cells":{},"candidate":{},"views":{},"view_failures":{}}'::jsonb) THEN
+      OR p_state#>'{reviewer_coverage}' IS DISTINCT FROM '{"metadata":{},"text":{},"form_cells":{},"candidate":{},"views":{},"view_failures":{}}'::jsonb
+      OR (
+        coalesce((runtime#>'{limits,draft_path}')::boolean,true)
+        AND (
+          coalesce(p_state->>'draft_stage','none') NOT IN ('none','outline')
+          OR (
+            p_state->'main_work' IS DISTINCT FROM 'null'::jsonb
+            AND (
+              jsonb_typeof(p_state->'main_work') IS DISTINCT FROM 'object'
+              OR coalesce(p_state#>>'{main_work,status}','') IS DISTINCT FROM 'active'
+            )
+          )
+        )
+      )
+      OR (
+        NOT coalesce((runtime#>'{limits,draft_path}')::boolean,true)
+        AND (
+          p_state->'main_work' IS DISTINCT FROM 'null'::jsonb
+          OR p_state#>'{analysis,coverage}' IS DISTINCT FROM '{"metadata":{},"text":{},"form_cells":{},"candidate":{},"views":{},"view_failures":{}}'::jsonb
+        )
+      )) THEN
       RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: initial checkpoint must be empty' USING ERRCODE='23514';
     END IF;
   ELSIF prior_pending->'response'='null'::jsonb THEN
@@ -9141,6 +9168,7 @@ BEGIN
       OR (p_state->>'tool_calls')::bigint>(prior->>'tool_calls')::bigint+jsonb_array_length(prior_pending#>'{response,tool_calls}') THEN
       RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: tool commit must follow saved response' USING ERRCODE='23514';
     END IF;
+    IF NOT coalesce((runtime#>'{limits,draft_path}')::boolean,true) THEN
     charged_task:=CASE WHEN prior->>'role'='main' THEN prior_tasks->>'active' END;
     IF (charged_task IS NOT NULL AND tasks->>'last_committed_turn' IS DISTINCT FROM turn_value::text)
       OR (charged_task IS NULL AND tasks->'last_committed_turn' IS DISTINCT FROM prior_tasks->'last_committed_turn')
@@ -9154,6 +9182,7 @@ BEGIN
               FROM jsonb_each(tasks->'aliases') alias
               WHERE alias.value=to_jsonb(entry.key) AND prior_tasks->'aliases' ? alias.key) previous))) THEN
       RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: committed batch repair task charge' USING ERRCODE='23514';
+    END IF;
     END IF;
   END IF;
   INSERT INTO bid_tender_agent_checkpoint_artifacts(request_artifact_id,frozen_input_sha256,stage_kind,batch_ordinal,
@@ -9212,7 +9241,7 @@ CREATE FUNCTION kb_bid_v2_get_tender_outline(
 ) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
 DECLARE request_id uuid; request_status text; frozen_sha kb_sha256;
   requirement_set_id uuid; extracted_from text:='none'; analysis_records jsonb:='{}'::jsonb;
-  checkpoint jsonb; payload jsonb;
+  checkpoint jsonb; payload jsonb; draft_plan jsonb:='[]'::jsonb; analysis jsonb;
 BEGIN
   PERFORM kb_bid_v2_require_project_owner(p_project_id,p_actor);
   SELECT r.id,r.status,r.frozen_input_sha256 INTO request_id,request_status,frozen_sha
@@ -9223,30 +9252,40 @@ BEGIN
     SELECT (r.result_identity->>'requirement_set_id')::uuid INTO requirement_set_id
       FROM bid_async_request_snapshot_artifacts r WHERE r.id=request_id;
     IF requirement_set_id IS NOT NULL THEN
-      SELECT convert_from(canonical_payload,'UTF8')::jsonb#>'{analysis_result,analysis,records}'
-        INTO payload FROM bid_requirement_set_artifacts
+      SELECT convert_from(canonical_payload,'UTF8')::jsonb->'analysis_result'->'analysis'
+        INTO analysis FROM bid_requirement_set_artifacts
         WHERE project_id=p_project_id AND id=requirement_set_id;
+      payload:=analysis->'records';
+      IF jsonb_typeof(analysis->'draft_plan')='array' THEN
+        draft_plan:=analysis->'draft_plan';
+        extracted_from:='published';
+      END IF;
       IF jsonb_typeof(payload)='object' THEN
         SELECT coalesce(jsonb_object_agg(key,value),'{}'::jsonb) INTO analysis_records
           FROM jsonb_each(payload) rec(key,value)
           WHERE value#>>'{data,kind}' IN ('template','rule');
-        extracted_from:='published';
+        IF extracted_from='none' THEN extracted_from:='published'; END IF;
       END IF;
     END IF;
   ELSIF request_id IS NOT NULL THEN
     checkpoint:=kb_bid_v2_tender_agent_checkpoint_get(request_id,frozen_sha);
     payload:=checkpoint#>'{analysis,records}';
+    IF jsonb_typeof(checkpoint#>'{analysis,draft_plan}')='array' THEN
+      draft_plan:=checkpoint#>'{analysis,draft_plan}';
+      extracted_from:='checkpoint';
+    END IF;
     IF jsonb_typeof(payload)='object' THEN
       SELECT coalesce(jsonb_object_agg(key,value),'{}'::jsonb) INTO analysis_records
         FROM jsonb_each(payload) rec(key,value)
         WHERE value#>>'{data,kind}' IN ('template','rule');
-      extracted_from:='checkpoint';
+      IF extracted_from='none' THEN extracted_from:='checkpoint'; END IF;
     END IF;
   END IF;
   RETURN jsonb_build_object(
     'quality','draft',
     'compile_status',request_status,
     'extracted_from',extracted_from,
+    'draft_plan',coalesce(draft_plan,'[]'::jsonb),
     'records',coalesce(analysis_records,'{}'::jsonb),
     'documents',coalesce((
       SELECT jsonb_agg(jsonb_build_object(

@@ -1167,20 +1167,6 @@ fn has_executable_task(state: &Checkpoint, pending: &[Task]) -> Result<bool, Str
     Ok(false)
 }
 
-/// Completed input sources are not independent work. Evaluate the actual
-/// pending judgments, using the same dependency policy as task selection.
-pub(in crate::tender_analysis) fn execution_blocked(
-    input: &FrozenInput,
-    config: &Config,
-    state: &Checkpoint,
-) -> Result<bool, String> {
-    if state.role != Role::Reviewer || state.done || state.source_review.is_none() {
-        return Ok(false);
-    }
-    let pending = pending(input, config, state)?;
-    Ok(!pending.is_empty() && !has_executable_task(state, &pending)?)
-}
-
 pub fn select_next(
     input: &FrozenInput,
     config: &Config,
@@ -1543,19 +1529,6 @@ fn embedded_relationship_targets(record: &Record) -> BTreeSet<String> {
     }
 }
 
-/// This validates explicit evidence, not the model's semantic conclusion. A
-/// source-grounded decision may legitimately need no edge or retain ambiguity.
-#[cfg(test)]
-fn validate_relationship_checks(
-    input: &FrozenInput,
-    state: &Checkpoint,
-    judgment: &Judgment,
-    dependencies: &mut Dependencies,
-) -> Result<(), String> {
-    let required = references(&state.analysis, dependencies);
-    validate_relationship_subjects(input, state, judgment, dependencies, &required)
-}
-
 fn validate_relationship_subjects(
     input: &FrozenInput,
     state: &Checkpoint,
@@ -1846,21 +1819,6 @@ fn validate_relationship_subjects(
         ));
     }
     Ok(())
-}
-
-/// The reviewer decides which obligations use each template. The host checks
-/// that this explicit decision is supported by current edges or saved findings.
-/// An empty obligation list is permitted with a source-grounded explanation;
-/// neither names nor co-location imply a semantic relationship.
-#[cfg(test)]
-fn validate_template_mappings(
-    input: &FrozenInput,
-    state: &Checkpoint,
-    judgment: &Judgment,
-    dependencies: &mut Dependencies,
-) -> Result<(), String> {
-    let required = references(&state.analysis, dependencies);
-    validate_template_subjects(input, state, judgment, dependencies, &required)
 }
 
 fn validate_template_subjects(
@@ -2483,16 +2441,6 @@ impl BatchVersion {
     }
 }
 
-#[cfg(test)]
-pub(super) fn put(
-    input: &FrozenInput,
-    config: &Config,
-    state: &mut Checkpoint,
-    args: &Value,
-) -> Result<Value, String> {
-    put_in_batch(input, config, state, args, None)
-}
-
 pub(super) fn put_in_batch(
     input: &FrozenInput,
     config: &Config,
@@ -2797,5 +2745,4 @@ pub(super) fn put_in_batch(
     Ok(result)
 }
 
-#[cfg(test)]
-mod tests;
+

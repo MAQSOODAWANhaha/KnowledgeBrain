@@ -10,32 +10,8 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-mod context;
 mod draft;
-mod evidence_delivery_resume;
-mod id_navigation;
 mod input;
-mod main_dispatch;
-mod main_handoff;
-mod main_work;
-mod original_views;
-mod reading;
-mod records;
-mod relationships;
-mod repair;
-mod repair_dependencies;
-mod repair_dispute;
-mod repair_history;
-mod repair_history_navigation;
-mod repair_navigation;
-mod repair_recovery;
-mod repair_task_dispatch;
-mod repair_task_packet;
-mod resume;
-mod review;
-mod reviewer_support_reads;
-mod rule_items;
-mod work;
 
 fn input() -> FrozenInput {
     FrozenInput {
@@ -76,90 +52,6 @@ fn grid_citation_input() -> FrozenInput {
                 {"row":1,"column":1,"row_span":1,"col_span":1,"text":"供货时提供证书"}]}}),
     );
     input
-}
-
-fn requirement() -> Value {
-    json!({"id":null,"sources":[span()],"data":{"kind":"requirement","text":"提交规定格式",
-        "categories":["format"],"strength":"mandatory","compliance":[{"policy":"explicit_response","condition":"按须知提交","grounds":[span()]}],"applicability":{"state":"applicable","condition":"按须知提交","scope":"本次投标","grounds":[span()]},
-        "response":[{"channel":"structured_form","description":"按附表编制","condition":"按须知提交","grounds":[span()]}],"scoring_rule":null,"proofs":[],"criteria":[]}})
-}
-
-fn read_analysis(input: &FrozenInput) -> Analysis {
-    let mut analysis = Analysis::default();
-    for source in &input.source_units {
-        tools::cover(
-            analysis
-                .coverage
-                .text
-                .entry(source.source_unit_revision_id.clone())
-                .or_default(),
-            0,
-            source.text.len(),
-        );
-    }
-    analysis
-}
-
-fn analysis_query_fixture() -> (FrozenInput, Analysis, Vec<String>) {
-    let mut input = input();
-    input.source_units.push(Source {
-        source_unit_revision_id: "other-source".into(),
-        document_id: "other-document".into(),
-        ordinal: 1,
-        ..input.source_units[0].clone()
-    });
-    let mut analysis = Analysis::default();
-    let mut coverage = Coverage::default();
-    let mut ids = Vec::new();
-    for source_id in ["source", "other-source", "source"] {
-        tools::invoke(
-            &input,
-            &mut analysis,
-            &mut coverage,
-            false,
-            "read_source",
-            &json!({"source_id":source_id,"start":0,"max_bytes":1024}),
-            16000,
-        )
-        .unwrap();
-        let record = tools::invoke(
-            &input,
-            &mut analysis,
-            &mut coverage,
-            false,
-            "put_record",
-            &json!({"id":null,"sources":[Span {source_id:source_id.into(),..span()}],
-                "data":{"kind":"fact","name":"同名格式","value":source_id,"scope":"本文件"}}),
-            16000,
-        )
-        .unwrap();
-        ids.push(record["id"].as_str().unwrap().to_owned());
-        tools::invoke(
-            &input,
-            &mut analysis,
-            &mut coverage,
-            false,
-            "set_disposition",
-            &json!({"source_id":source_id,"state":"non_requirement","reason":"测试事实来源"}),
-            16000,
-        )
-        .unwrap();
-    }
-    let relation = tools::invoke(
-        &input,
-        &mut analysis,
-        &mut coverage,
-        false,
-        "put_relation",
-        &json!({"id":null,"from":ids[0],"to":ids[1],
-            "from_target":{"kind":"record"},"to_target":{"kind":"record"},
-            "kind":"references","state":"explicit","scope":"跨文件引用",
-            "explanation":"依据原文引用","grounds":[span()]}),
-        16000,
-    )
-    .unwrap();
-    ids.push(relation["id"].as_str().unwrap().to_owned());
-    (input, analysis, ids)
 }
 
 #[derive(Default)]
@@ -253,28 +145,6 @@ impl Journal for MemoryJournal {
             ));
         }
         Ok(())
-    }
-}
-
-fn test_view() -> views::SourceView {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use sha2::{Digest, Sha256};
-    let image = image::RgbImage::from_pixel(8, 8, image::Rgb([255, 255, 255]));
-    let mut bytes = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new(&mut bytes)
-        .encode_image(&image)
-        .unwrap();
-    views::SourceView {
-        identity: views::ViewIdentity {
-            source_id: "source".into(),
-            original_sha256: "a".repeat(64),
-            image_sha256: hex::encode(Sha256::digest(&bytes)),
-            page_ordinal: 0,
-            width: 8,
-            height: 8,
-            renderer: "docreader-source-view-v1/test-fixture".into(),
-        },
-        jpeg_base64: STANDARD.encode(bytes),
     }
 }
 
@@ -470,152 +340,9 @@ pub(super) fn config() -> Config {
     .unwrap()
 }
 
-fn active_work(source_id: &str) -> Value {
-    json!({"source_scope":[source_id],"objective":"核对当前来源及其响应要求",
-        "focus":{"action":"locate","source_spans":[],"references":[]},"status":"active","note":"从来源提取，保留跨范围引用"})
-}
-
 fn work_script(calls: Vec<(&str, Value)>) -> Script {
     Script {
         calls: Mutex::new(calls.into_iter().map(|(n, v)| (n.into(), v)).collect()),
         bodies: Mutex::new(vec![]),
-    }
-}
-
-async fn fresh_review_journal() -> MemoryJournal {
-    fresh_review_journal_config(&config()).await
-}
-
-async fn fresh_review_journal_config(config: &Config) -> MemoryJournal {
-    let journal = MemoryJournal::default();
-    agent::run(
-        &input(),
-        config,
-        &journal,
-        &script(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    let mut state = journal.load().await.unwrap().unwrap();
-    state.role = Role::Reviewer;
-    state.done = false;
-    state.review = None;
-    state.reviewer_coverage = Coverage::default();
-    state.analysis.review_global_checks.clear();
-    state.reviewer_progress = Default::default();
-    state.pending_coverage = None;
-    state.reviewer_work = None;
-    state.transcript.clear();
-    state.source_review = Some(source_review::initialize(&input(), config).unwrap());
-    source_review::select_next(&input(), config, &mut state).unwrap();
-    *journal.state.lock().unwrap() = Some(state);
-    journal
-}
-
-fn script() -> Script {
-    let read = (
-        "read_source",
-        json!({"source_id":"source","start":0,"max_bytes":1024}),
-    );
-    let calls = vec![
-        read.clone(),
-        (
-            "set_disposition",
-            json!({"source_id":"source","state":"non_requirement","reason":"incorrect initial interpretation"}),
-        ),
-        ("fixture_global_checks", json!({})),
-        read.clone(),
-        (
-            "put_review_finding",
-            json!({"id":null,"finding":{"code":"OMITTED_REQUIREMENT","message":"遗漏附表提交义务","correction":"按所引原文补全并重新核对该字段", "affected":[],"sources":[span()]}}),
-        ),
-        ("fixture_global_checks", json!({})),
-        ("put_source_review", json!({"fixture_status":"findings"})),
-        ("inspect_review", json!({"offset":0,"limit":10})),
-        ("put_record", requirement()),
-        (
-            "set_disposition",
-            json!({"source_id":"source","state":"requirement","reason":"须知要求按附表提交"}),
-        ),
-        (
-            "put_repair_result",
-            json!({"finding_sha256":"$fixture_repair", "conclusion":"revised",
-            "summary":"Added the previously omitted submission requirement from the cited fixture source.",
-            "sources":[span()],"candidate_refs":["$fixture_record"]}),
-        ),
-        ("fixture_global_checks", json!({})),
-        read,
-        ("inspect_review", json!({"offset":0,"limit":10})),
-        ("delete_review_finding", json!({"id":"$fixture_finding"})),
-        ("fixture_global_checks", json!({})),
-        ("put_source_review", json!({})),
-    ];
-    Script {
-        calls: Mutex::new(calls.into_iter().map(|(n, v)| (n.into(), v)).collect()),
-        bodies: Mutex::new(vec![]),
-    }
-}
-
-fn field_relation_fixture() -> (FrozenInput, Analysis, Value) {
-    let mut input = input();
-    input.structured_forms = vec![json!({
-        "form_definition_revision_id":"form-a", "source_unit_revision_id":"source",
-        "definition":{"kind":"grid","row_count":2,"column_count":2,"widths_mm":[40,40],"cells":[
-            {"row":0,"column":0,"row_span":1,"col_span":2,"text":"同号附表"},
-            {"row":1,"column":0,"row_span":1,"col_span":1,"text":"分项"},
-            {"row":1,"column":1,"row_span":1,"col_span":1,"text":"合计"}
-        ]}
-    })];
-    let mut analysis = read_analysis(&input);
-    analysis
-        .coverage
-        .form_cells
-        .insert("form-a".into(), vec![(0, 4)]);
-    analysis.dispositions.insert(
-        "source".into(),
-        Disposition {
-            state: DispositionState::Requirement,
-            reason: "表格字段".into(),
-        },
-    );
-    let record:Record=serde_json::from_value(json!({"id":"template-a","sources":[span()],"data":{
-        "kind":"template","label":"附表","title":"同号附表","parent":null,"order":null,"purpose":"投标格式",
-        "applicability":{"state":"applicable","scope":"本项目","condition":"原文指定","grounds":[span()]},
-        "regions":[{"source":span(),"role":"fixed_text","form_id":"form-a","cells":[{"row":0,"column":0}],"instruction":"保留"},
-                   {"source":span(),"role":"bidder_blank","form_id":"form-a","cells":[{"row":1,"column":0},{"row":1,"column":1}],"instruction":"后续填写"}]
-    }})).unwrap();
-    analysis.records.insert(record.id.clone(), record);
-    let args = json!({"id":null,"from":"template-a","to":"template-a",
-        "from_target":{"kind":"template_cell","form_id":"form-a","row":1,"column":0},
-        "to_target":{"kind":"template_cell","form_id":"form-a","row":1,"column":1},
-        "kind":"aggregates","state":"explicit","scope":"当前附件","explanation":"分项汇总到合计，保留原文条件，不执行计算","grounds":[span()]});
-    (input, analysis, args)
-}
-
-/// Explicit synthetic global judgments for direct state-machine tests. Never
-/// grants reading coverage; malformed or unread grounds still fail production tools.
-pub(super) fn fixture_global_checks(input: &FrozenInput, config: &Config, state: &mut Checkpoint) {
-    let grounds: Vec<_> = input
-        .source_units
-        .iter()
-        .filter_map(|source| {
-            let span = Span {
-                source_id: source.source_unit_revision_id.clone(),
-                start: 0,
-                end: source.text.len(),
-                view_id: None,
-                grid_cell: None,
-            };
-            (!source.text.is_empty()
-                && tools::validate_span(input, state.coverage(), &span).is_ok())
-            .then_some(span)
-        })
-        .take(1)
-        .collect();
-    for key in ANALYSIS_GLOBAL_CHECK_KEYS {
-        let args = json!({"key":key,"expected_scope_sha256":rule_contract::scope_sha256(input,&state.analysis).unwrap(),
-            "conclusion":"pass","grounds":grounds,"record_ids":[],"finding_ids":[]});
-        agent::apply(input, config, state, "put_analysis_check", &args).unwrap();
     }
 }
