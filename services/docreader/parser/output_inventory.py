@@ -6,6 +6,7 @@ physical carriers and explicit omissions; it never substitutes for source text.
 import base64
 import hashlib
 import json
+import re
 from importlib.metadata import version
 from collections import Counter
 from io import BytesIO
@@ -29,12 +30,69 @@ from docreader.parser.docx_parser import (
 PROFILE = "output_inventory_v1"
 
 
-def _entry(unit, part, ordinal, kind, *, bookmarks=None, fields=None, reason=None):
+def _entry(unit, part, ordinal, kind, *, bookmarks=None, fields=None, reason=None,
+           heading_level=None, field_region=None):
     return {
         "unit_key": unit.key, "part": part, "ordinal": ordinal, "kind": kind,
         "bookmarks": bookmarks or [], "fields": fields or [],
+        "heading_level": heading_level, "field_region": field_region,
         "status": "not_checked" if reason else "extracted", "reason": reason,
     }
+
+
+def _style_names(doc):
+    """styleId → `w:name`. Editors renumber `w:styleId` (Word writes plain digits
+    after a round trip), so an outline level may only be read from `w:name`."""
+    names = {}
+    for style in doc.styles.element.iter(qn("w:style")):
+        identity = style.get(qn("w:styleId"))
+        label = style.find(qn("w:name"))
+        if identity and label is not None:
+            names[identity] = label.get(qn("w:val")) or ""
+    return names
+
+
+def _heading_level(child, style_names):
+    properties = child.find(qn("w:pPr"))
+    reference = properties.find(qn("w:pStyle")) if properties is not None else None
+    identity = reference.get(qn("w:val")) if reference is not None else None
+    match = re.match(r"^heading\s+(\d+)$", (style_names.get(identity or "") or "").strip(), re.IGNORECASE)
+    if match is None:
+        return None
+    try:
+        return max(1, int(match.group(1)))
+    except ValueError:
+        return None
+
+
+def _field_region(child, stack):
+    """Classify a story child against enclosing field regions.
+
+    A table of contents spans several paragraphs: `fldChar begin` opens it, the
+    entries follow as ordinary paragraphs, `fldChar end` closes it. Those entries
+    repeat chapter titles verbatim, so a reader that cannot see the region reads
+    every chapter twice. `stack` carries the open regions across children.
+    """
+    region = stack[-1] if stack else None
+    for node in child.iter(qn("w:fldChar"), qn("w:instrText"), qn("w:fldSimple")):
+        if node.tag == qn("w:fldChar"):
+            kind = node.get(qn("w:fldCharType"), "")
+            if kind == "begin":
+                stack.append("field")
+                region = region or "field"
+            elif kind == "end" and stack:
+                region = region or stack[-1]
+                stack.pop()
+        elif node.tag == qn("w:instrText"):
+            if (node.text or "").strip().upper().startswith("TOC"):
+                if stack:
+                    stack[-1] = "toc"
+                region = "toc"
+        elif node.get(qn("w:instr"), "").strip().upper().startswith("TOC"):
+            region = "toc"
+        else:
+            region = region or "field"
+    return region
 
 
 def _plain_picture_is_backed(drawing, owner, image_refs):
@@ -71,6 +129,7 @@ def _plain_picture_is_backed(drawing, owner, image_refs):
 
 def _docx(content):
     doc = DocxDocument(BytesIO(content))
+    style_names = _style_names(doc)
     units, entries = [], []
     image_ordinal = 0
     parts = {str(part.partname): part for part in doc.part.package.parts}
@@ -135,19 +194,35 @@ def _docx(content):
     for part, story in stories:
         name = str(part.partname)
         owner = SimpleNamespace(part=part)
+        # Bookmarks that wrap a whole paragraph sit as siblings of `w:p`. Word
+        # normalizes them inline, but a freshly compiled document still has them
+        # outside, so they belong to the next carrier rather than to nothing.
+        block_bookmarks = []
+        open_fields = []
         for child in story:
+            if child.tag in {qn("w:bookmarkStart"), qn("w:bookmarkEnd")}:
+                bookmark = child.get(qn("w:name"))
+                if bookmark:
+                    block_bookmarks.append(bookmark)
+                continue
             ordinal = part_ordinals.get(name, 0)
             part_ordinals[name] = ordinal + 1
-            bookmarks = [node.get(qn("w:name")) for node in child.iter(qn("w:bookmarkStart"))
-                         if node.get(qn("w:name"))]
+            bookmarks = block_bookmarks + [
+                node.get(qn("w:name")) for node in child.iter(qn("w:bookmarkStart"))
+                if node.get(qn("w:name"))
+            ]
+            block_bookmarks = []
             fields = [node.text or "" for node in child.iter(qn("w:instrText"))]
             fields += [node.get(qn("w:instr"), "") for node in child.iter(qn("w:fldSimple"))]
+            field_region = _field_region(child, open_fields)
             section = len(units)
             locator = DocumentLocator(section_ordinal=section, heading_path="")
             grid = None
             anchors = []
+            heading_level = None
             if child.tag == qn("w:p"):
                 text = Paragraph(child, owner).text
+                heading_level = _heading_level(child, style_names)
                 kind = "paragraphs"
             elif child.tag == qn("w:tbl"):
                 try:
@@ -168,7 +243,8 @@ def _docx(content):
                 text=text, locator=locator, grid=grid,
             )
             units.append(unit)
-            entries.append(_entry(unit, name, ordinal, kind, bookmarks=bookmarks, fields=fields))
+            entries.append(_entry(unit, name, ordinal, kind, bookmarks=bookmarks, fields=fields,
+                                  heading_level=heading_level, field_region=field_region))
             # Preserve image bytes and their established typed parent identity.
             before = len(units)
             if grid:
@@ -195,6 +271,9 @@ def _docx(content):
                     unsupported(name, ordinal, "nested table requires independent geometry review")
             if fields:
                 unsupported(name, ordinal, "field instruction/result consistency requires review")
+        if block_bookmarks:
+            unsupported(name, part_ordinals.get(name, 0),
+                        f"block bookmarks carry no following content: {block_bookmarks}")
 
     bookmark_counts = Counter(name for entry in entries for name in entry["bookmarks"])
     for entry in list(entries):

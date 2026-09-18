@@ -2853,8 +2853,10 @@ CREATE TABLE bid_docx_composition_request_identities (
     AND frozen_input->>'actor' IS NOT DISTINCT FROM actor::text),
   CHECK (jsonb_typeof(frozen_input) IS NOT DISTINCT FROM 'object'
     AND kb_bid_v2_json_keys_exact(frozen_input,ARRAY['schema_version','workspace_id','actor','basis','expected',
-      'source_request','source_input_sha256','analysis_sha256','config','contract_sha256'])
-    AND frozen_input->'schema_version' IS NOT DISTINCT FROM '1'::jsonb),
+      'mode','seed_plan_sha256','source_request','source_input_sha256','analysis_sha256','config','contract_sha256'])
+    AND frozen_input->'schema_version' IS NOT DISTINCT FROM '1'::jsonb
+    AND frozen_input->>'mode' IN ('official','draft-fill')
+    AND (frozen_input->>'mode'='draft-fill')=kb_bid_v2_sha256_text(frozen_input->>'seed_plan_sha256')),
   CHECK (frozen_input->'basis' IS NOT DISTINCT FROM jsonb_build_object('document_set_id',document_set_id,
     'document_set_sha256',document_set_sha256,'requirement_set_id',requirement_set_id,'requirement_set_sha256',requirement_set_sha256)),
   CHECK (frozen_input->'source_request' IS NOT DISTINCT FROM jsonb_build_object('request_artifact_id',source_request_id,
@@ -8672,15 +8674,46 @@ BEGIN
   RETURN result_value;
 END $$;
 
+-- Filling chapters runs the analysis fill contract, but the request that carries
+-- it is a workspace-level docx_compose request (the only repeatable, user
+-- triggered one). Both attestations below therefore resolve the frozen runtime
+-- and the frozen analysis input from whichever identity table owns the request.
+CREATE FUNCTION kb_bid_v2_tender_agent_runtime(p_request_id uuid)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE runtime jsonb;
+BEGIN
+  SELECT agent_runtime INTO runtime FROM bid_requirement_set_compile_request_identities
+    WHERE request_artifact_id=p_request_id;
+  IF runtime IS NOT NULL THEN RETURN runtime; END IF;
+  SELECT frozen_input->'config' INTO STRICT runtime FROM bid_docx_composition_request_identities
+    WHERE request_artifact_id=p_request_id AND frozen_input->>'mode'='draft-fill';
+  RETURN runtime;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_tender_agent_source_input(p_request_id uuid,p_sha kb_sha256)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE revision bigint; source jsonb;
+BEGIN
+  SELECT request_revision INTO revision FROM bid_requirement_set_compile_request_identities
+    WHERE request_artifact_id=p_request_id;
+  IF revision IS NOT NULL THEN
+    RETURN kb_bid_v2_load_tender_analysis_input(p_request_id,revision,p_sha)->'input';
+  END IF;
+  SELECT frozen_input->'source_request' INTO STRICT source FROM bid_docx_composition_request_identities
+    WHERE request_artifact_id=p_request_id AND frozen_input_sha256=p_sha AND frozen_input->>'mode'='draft-fill';
+  RETURN kb_bid_v2_load_tender_analysis_input((source->>'request_artifact_id')::uuid,
+    (source->>'request_revision')::bigint,(source->>'frozen_input_sha256')::kb_sha256)->'input';
+END $$;
+
 CREATE FUNCTION kb_bid_v2_tender_agent_reserve(p_request_id uuid,p_sha kb_sha256,p_attempt integer,p_token uuid,
     p_turn integer,p_role text,p_body bytea)
 RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
 DECLARE stamp timestamptz; runtime jsonb; prior jsonb; body jsonb; role_key text; stage text;
   config_sha kb_sha256; body_sha kb_sha256; tools_sha kb_sha256; prompt_sha kb_sha256; ordinal_value integer;
-  dispatch_packet jsonb; initial_input jsonb; initial_revision bigint; initial_source jsonb;
+  dispatch_packet jsonb; initial_input jsonb; initial_source jsonb;
 BEGIN
   stamp:=kb_bid_v2_tender_agent_lock_owner(p_request_id,p_sha,p_attempt,p_token);
-  SELECT agent_runtime INTO STRICT runtime FROM bid_requirement_set_compile_request_identities WHERE request_artifact_id=p_request_id;
+  runtime:=kb_bid_v2_tender_agent_runtime(p_request_id);
   prior:=kb_bid_v2_tender_agent_checkpoint_get(p_request_id,p_sha);
   IF p_turn<0 OR p_turn<>coalesce((prior->>'turn')::integer,0)
       OR p_role<>coalesce(prior->>'role','main') OR p_role NOT IN ('main','reviewer')
@@ -8721,9 +8754,7 @@ BEGIN
         OR (prompt_sha::text IS DISTINCT FROM runtime->>'main_prompt_sha256'
           AND prompt_sha::text IS DISTINCT FROM runtime->>'fill_prompt_sha256')
         OR (tools_sha::text IS DISTINCT FROM runtime->>'tools_sha256'
-          AND tools_sha::text IS DISTINCT FROM runtime->>'fill_tools_sha256'
-          AND tools_sha::text IS DISTINCT FROM nullif(runtime->>'tools_read_sha256','')
-          AND tools_sha::text IS DISTINCT FROM nullif(runtime->>'fill_tools_read_sha256','')) THEN
+          AND tools_sha::text IS DISTINCT FROM runtime->>'fill_tools_sha256') THEN
       RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: draft outline/fill contract changed' USING ERRCODE='23514';
     END IF;
   ELSE
@@ -8743,8 +8774,7 @@ BEGIN
         RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: reserved Main owner changed or missing' USING ERRCODE='23514';
       END IF;
       IF prior IS NULL OR prior#>'{dispatch,entries}'='{}'::jsonb THEN
-        SELECT request_revision INTO STRICT initial_revision FROM bid_requirement_set_compile_request_identities WHERE request_artifact_id=p_request_id;
-        initial_input:=kb_bid_v2_load_tender_analysis_input(p_request_id,initial_revision,p_sha)->'input';
+        initial_input:=kb_bid_v2_tender_agent_source_input(p_request_id,p_sha);
         initial_source:=coalesce(initial_input#>'{source_units,0,source_unit_revision_id}','null'::jsonb);
         IF dispatch_packet#>>'{owner,kind}'<>'ordinary'
           OR dispatch_packet#>>'{owner,id}' IS DISTINCT FROM kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(jsonb_build_array(
@@ -8780,11 +8810,13 @@ DECLARE stamp timestamptz; runtime jsonb; config_sha kb_sha256; prior jsonb; pay
   tasks jsonb; prior_tasks jsonb; task_entry record; alias_entry record; old_entry jsonb; counter_key text;
   feedback_findings jsonb; feedback_sha text; charged_task text;
   dispatch jsonb; prior_dispatch jsonb; dispatch_owner jsonb; charged_owner jsonb;
-  dispatch_entry record; prior_entry jsonb; dispatch_cap numeric; source_input jsonb; source_revision bigint;
-  saved_body jsonb; saved_packet jsonb;
+  dispatch_entry record; prior_entry jsonb; dispatch_cap numeric; source_input jsonb;
+  saved_body jsonb; saved_packet jsonb; seed_plan text;
 BEGIN
   stamp:=kb_bid_v2_tender_agent_lock_owner(p_request_id,p_sha,p_attempt,p_token);
-  SELECT agent_runtime INTO STRICT runtime FROM bid_requirement_set_compile_request_identities WHERE request_artifact_id=p_request_id;
+  runtime:=kb_bid_v2_tender_agent_runtime(p_request_id);
+  SELECT frozen_input->>'seed_plan_sha256' INTO seed_plan FROM bid_docx_composition_request_identities
+    WHERE request_artifact_id=p_request_id AND frozen_input_sha256=p_sha AND frozen_input->>'mode'='draft-fill';
   config_sha:=kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(runtime),'UTF8'));
   turn_value:=(p_state->>'turn')::integer;
   sequence_value:=(p_state#>>'{journal,sequence}')::integer;
@@ -8851,8 +8883,7 @@ BEGIN
   dispatch_owner:=dispatch->'active';
   dispatch_cap:=least((runtime#>>'{limits,max_turns}')::numeric,
     (runtime#>>'{limits,max_focus_turns}')::numeric*((runtime#>>'{limits,max_focus_replans}')::numeric+1));
-  SELECT request_revision INTO STRICT source_revision FROM bid_requirement_set_compile_request_identities WHERE request_artifact_id=p_request_id;
-  source_input:=kb_bid_v2_load_tender_analysis_input(p_request_id,source_revision,p_sha)->'input';
+  source_input:=kb_bid_v2_tender_agent_source_input(p_request_id,p_sha);
   IF p_state->>'input_sha256' IS DISTINCT FROM kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(source_input),'UTF8'))::text
     OR NOT kb_bid_v2_json_keys_exact(dispatch,ARRAY['active','entries','last_committed_turn'])
     OR jsonb_typeof(dispatch->'entries') IS DISTINCT FROM 'object'
@@ -9103,7 +9134,12 @@ BEGIN
       OR p_state#>'{analysis,records}' IS DISTINCT FROM '{}'::jsonb
       OR p_state#>'{analysis,relations}' IS DISTINCT FROM '{}'::jsonb
       OR p_state#>'{analysis,dispositions}' IS DISTINCT FROM '{}'::jsonb
-      OR coalesce(p_state#>'{analysis,draft_plan}','[]'::jsonb) IS DISTINCT FROM '[]'::jsonb
+      -- 填章 run 的第一个检查点带着回读出来的整棵章树。它是**输入**：请求里冻
+      -- 着 seed_plan_sha256，这里逐字节核对，不是让 agent 随便塞一个 plan。
+      OR coalesce(p_state#>'{analysis,draft_plan}','[]'::jsonb) IS DISTINCT FROM CASE
+        WHEN seed_plan IS NULL THEN '[]'::jsonb ELSE p_state#>'{analysis,draft_plan}' END
+      OR (seed_plan IS NOT NULL AND kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(
+        p_state#>'{analysis,draft_plan}'),'UTF8'))::text IS DISTINCT FROM seed_plan)
       OR p_state->'review' IS DISTINCT FROM 'null'::jsonb
       OR ((p_state->'repair')-'tasks') IS DISTINCT FROM '{"feedback_sha256":null,"baseline":{},"results":{}}'::jsonb
       OR (tasks-'feedback_sha256') IS DISTINCT FROM '{"active":null,"aliases":{},"entries":{},"last_committed_turn":null}'::jsonb
@@ -9119,7 +9155,9 @@ BEGIN
       OR (
         coalesce((runtime#>'{limits,draft_path}')::boolean,true)
         AND (
-          coalesce(p_state->>'draft_stage','none') NOT IN ('none','outline')
+          coalesce(p_state->>'draft_stage','none') NOT IN
+            (CASE WHEN seed_plan IS NULL THEN 'none' ELSE 'fill' END,
+             CASE WHEN seed_plan IS NULL THEN 'outline' ELSE 'fill' END)
           OR (
             p_state->'main_work' IS DISTINCT FROM 'null'::jsonb
             AND (
@@ -9424,7 +9462,7 @@ DECLARE
   projection_id uuid:=gen_random_uuid(); projection_revision bigint;
   projection_payload bytea; projection_sha kb_sha256; publication_status text;
   result_value jsonb; result_sha kb_sha256; global_input jsonb; first_tools jsonb; global_contract boolean;
-  draft_bytes bytea; draft_sha kb_sha256; draft_length bigint; filled_draft boolean;
+  draft_bytes bytea; draft_sha kb_sha256; draft_length bigint; planned_draft boolean;
   draft_round uuid; draft_version uuid; draft_revision bigint; draft_payload bytea; draft_payload_sha kb_sha256;
   docx_head bid_docx_current%ROWTYPE; draft_docx jsonb;
 BEGIN
@@ -9715,12 +9753,14 @@ BEGIN
     RAISE EXCEPTION 'REQUIREMENT_PROJECTION_CAS_MISMATCH' USING ERRCODE='40001';
   END IF;
   draft_docx:='null'::jsonb;
-  filled_draft:=EXISTS(SELECT 1 FROM jsonb_array_elements(coalesce(p_compiled#>'{analysis_result,analysis,draft_plan}','[]'::jsonb)) item
-    WHERE item->>'status'='filled');
+  -- Phase one ends at the outline skeleton, so a draft with chapters must stage
+  -- a DOCX whether or not any chapter body was filled; otherwise the workspace
+  -- has nothing for the user to edit.
+  planned_draft:=jsonb_array_length(coalesce(p_compiled#>'{analysis_result,analysis,draft_plan}','[]'::jsonb))>0;
   IF p_compiled#>'{analysis_result,review,draft}' = 'true'::jsonb THEN
-    IF filled_draft THEN
+    IF planned_draft THEN
       IF p_docx_staging IS NULL THEN
-        RAISE EXCEPTION 'AGENT_OUTPUT_INVALID: filled draft requires staged DOCX' USING ERRCODE='23514';
+        RAISE EXCEPTION 'AGENT_OUTPUT_INVALID: draft chapters require staged DOCX' USING ERRCODE='23514';
       END IF;
       draft_bytes:=decode(checkpoint->>'draft_docx_base64','base64');
       draft_sha:=kb_bid_v2_sha256_bytes(draft_bytes);
@@ -9759,7 +9799,7 @@ BEGIN
       draft_docx:=jsonb_build_object('version_id',draft_version,'round_id',draft_round,'round_revision',draft_revision,
         'docx_sha256',draft_sha,'byte_length',draft_length,'object_ref','objects/'||draft_sha);
     ELSIF p_docx_staging IS NOT NULL THEN
-      RAISE EXCEPTION 'AGENT_OUTPUT_INVALID: outline-only draft cannot stage DOCX' USING ERRCODE='23514';
+      RAISE EXCEPTION 'AGENT_OUTPUT_INVALID: chapterless draft cannot stage DOCX' USING ERRCODE='23514';
     END IF;
   ELSIF p_docx_staging IS NOT NULL THEN
     RAISE EXCEPTION 'AGENT_OUTPUT_INVALID: official analysis cannot stage draft DOCX' USING ERRCODE='23514';
@@ -9785,7 +9825,7 @@ END $$;
 -- Resolve a specific immutable published analysis, including its original input
 -- decisions. Current source heads are deliberately not used for history reads.
 CREATE FUNCTION kb_bid_v2_load_docx_composition_source(
-  p_workspace_id uuid,p_basis jsonb,p_actor kb_actor_identity
+  p_workspace_id uuid,p_basis jsonb,p_actor kb_actor_identity,p_mode text DEFAULT 'official'
 ) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
 DECLARE project_value uuid; requirement_value bid_requirement_set_artifacts%ROWTYPE;
   source_request bid_async_request_snapshot_artifacts%ROWTYPE; payload jsonb; source_input jsonb;
@@ -9811,8 +9851,16 @@ BEGIN
     OR jsonb_typeof(payload->'analysis_result') IS DISTINCT FROM 'object' THEN
     RAISE EXCEPTION 'DOCX_COMPOSITION_ANALYSIS_MISSING' USING ERRCODE='23514';
   END IF;
-  IF payload#>'{analysis_result,review,draft}' = 'true'::jsonb THEN
+  IF p_mode NOT IN ('official','draft-fill') THEN
+    RAISE EXCEPTION 'DOCX_COMPOSITION_INPUT_INVALID: unknown composition mode' USING ERRCODE='23514';
+  END IF;
+  -- Filling chapters works on the draft skeleton and only on it; the official
+  -- final document keeps refusing a draft analysis.
+  IF p_mode='official' AND payload#>'{analysis_result,review,draft}' = 'true'::jsonb THEN
     RAISE EXCEPTION 'DOCX_COMPOSITION_INPUT_INVALID: official composition rejects draft analysis' USING ERRCODE='23514';
+  END IF;
+  IF p_mode='draft-fill' AND payload#>'{analysis_result,review,draft}' IS DISTINCT FROM 'true'::jsonb THEN
+    RAISE EXCEPTION 'DOCX_COMPOSITION_INPUT_INVALID: draft fill requires a draft analysis' USING ERRCODE='23514';
   END IF;
   SELECT r.* INTO source_request FROM bid_async_stage_receipts receipt
     JOIN bid_async_request_snapshot_artifacts r ON r.id=receipt.request_artifact_id
@@ -9838,12 +9886,12 @@ END $$;
 -- The eventual new-round publication must repeat the existing CAS: drafting
 -- does not reserve the current document or prevent the user from editing it.
 CREATE FUNCTION kb_bid_v2_prepare_docx_composition_source(
-  p_workspace_id uuid,p_basis jsonb,p_expected jsonb,p_actor kb_actor_identity
+  p_workspace_id uuid,p_basis jsonb,p_expected jsonb,p_actor kb_actor_identity,p_mode text DEFAULT 'official'
 ) RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
 DECLARE source_value jsonb; current_version jsonb;
 BEGIN
-  source_value:=kb_bid_v2_load_docx_composition_source(p_workspace_id,p_basis,p_actor);
-  IF source_value#>'{analysis,review,draft}' = 'true'::jsonb THEN
+  source_value:=kb_bid_v2_load_docx_composition_source(p_workspace_id,p_basis,p_actor,p_mode);
+  IF p_mode='official' AND source_value#>'{analysis,review,draft}' = 'true'::jsonb THEN
     RAISE EXCEPTION 'DOCX_COMPOSITION_INPUT_INVALID: official composition rejects draft analysis' USING ERRCODE='23514';
   END IF;
   IF p_basis IS DISTINCT FROM kb_bid_v2_get_docx_round_basis(p_workspace_id,p_actor) THEN
@@ -9873,18 +9921,35 @@ DECLARE workspace_value bid_submission_workspaces%ROWTYPE; source_value jsonb; h
 BEGIN
   IF jsonb_typeof(p_snapshot) IS DISTINCT FROM 'object'
     OR NOT kb_bid_v2_json_keys_exact(p_snapshot,ARRAY['schema_version','workspace_id','actor','basis','expected',
-      'source_request','source_input_sha256','analysis_sha256','config','contract_sha256'])
+      'mode','seed_plan_sha256','source_request','source_input_sha256','analysis_sha256','config','contract_sha256'])
     OR p_snapshot->'schema_version' IS DISTINCT FROM '1'::jsonb
+    OR p_snapshot->>'mode' NOT IN ('official','draft-fill')
+    OR (p_snapshot->>'mode'='draft-fill')<>kb_bid_v2_sha256_text(p_snapshot->>'seed_plan_sha256')
     OR p_snapshot->>'actor' IS DISTINCT FROM p_actor::text
     OR jsonb_typeof(p_contract) IS DISTINCT FROM 'object'
-    OR NOT kb_bid_v2_json_keys_exact(p_contract,ARRAY['checkpoint_contract_version','runtime_adapter','config','main','reviewer','tools','review_tools'])
     OR p_contract->'checkpoint_contract_version' IS DISTINCT FROM '3'::jsonb
     OR p_contract->>'runtime_adapter' IS DISTINCT FROM 'rig-chat-0.42.0/4'
     OR p_snapshot->'config' IS DISTINCT FROM p_contract->'config'
     OR p_snapshot->>'contract_sha256' IS DISTINCT FROM kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(p_contract),'UTF8'))::text THEN
     RAISE EXCEPTION 'DOCX_COMPOSITION_INPUT_INVALID' USING ERRCODE='23514';
   END IF;
-  IF jsonb_typeof(p_snapshot#>'{config,limits}') IS DISTINCT FROM 'object'
+  -- Official composition freezes the composer contract; draft fill freezes the
+  -- analysis fill contract instead, because that is the agent it actually runs.
+  IF p_snapshot->>'mode'='official' THEN
+    IF NOT kb_bid_v2_json_keys_exact(p_contract,ARRAY['checkpoint_contract_version','runtime_adapter','config','main','reviewer','tools','review_tools']) THEN
+      RAISE EXCEPTION 'DOCX_COMPOSITION_INPUT_INVALID' USING ERRCODE='23514';
+    END IF;
+  ELSIF NOT kb_bid_v2_json_keys_exact(p_contract,ARRAY['checkpoint_contract_version','runtime_adapter','config'])
+    OR NOT kb_bid_v2_json_keys_exact(p_snapshot->'config',ARRAY['checkpoint_contract_version','runtime_adapter',
+      'repair_task_policy','main_dispatch_policy','provider','limits','tools_sha256','review_tools_sha256',
+      'main_prompt_sha256','review_prompt_sha256','fill_tools_sha256','fill_prompt_sha256'])
+    OR p_snapshot#>>'{config,repair_task_policy}' IS DISTINCT FROM 'main-repair-tasks-v1'
+    OR p_snapshot#>>'{config,main_dispatch_policy}' IS DISTINCT FROM 'main-dispatch-v1'
+    OR NOT kb_bid_v2_sha256_text(p_snapshot#>>'{config,fill_tools_sha256}')
+    OR NOT kb_bid_v2_sha256_text(p_snapshot#>>'{config,fill_prompt_sha256}') THEN
+    RAISE EXCEPTION 'DOCX_COMPOSITION_INPUT_INVALID: draft fill contract' USING ERRCODE='23514';
+  END IF;
+  IF p_snapshot->>'mode'='official' AND (jsonb_typeof(p_snapshot#>'{config,limits}') IS DISTINCT FROM 'object'
     OR NOT kb_bid_v2_json_keys_exact(p_snapshot#>'{config,limits}',ARRAY['max_turns','max_tool_calls','max_physical_calls',
       'max_read_bytes','max_context_bytes','max_tool_result_bytes','max_review_rounds','max_docx_bytes','max_context_tokens','image_token_reserve','token_safety_margin','max_no_progress_turns','max_focus_turns','max_focus_replans'])
     OR EXISTS(SELECT 1 FROM unnest(ARRAY['max_turns','max_tool_calls','max_physical_calls','max_read_bytes',
@@ -9893,8 +9958,16 @@ BEGIN
     OR (p_snapshot#>>'{config,limits,max_context_bytes}')::bigint <= (p_snapshot#>>'{config,limits,max_tool_result_bytes}')::bigint
     OR (p_snapshot#>>'{config,limits,token_safety_margin}')::numeric
       + (p_snapshot#>>'{config,provider,max_tokens}')::numeric
-      >= (p_snapshot#>>'{config,limits,max_context_tokens}')::numeric THEN
+      >= (p_snapshot#>>'{config,limits,max_context_tokens}')::numeric) THEN
     RAISE EXCEPTION 'DOCX_COMPOSITION_INPUT_INVALID: explicit positive budgets required' USING ERRCODE='23514';
+  END IF;
+  -- The fill run spends the analysis budget shape, so require that one instead.
+  IF p_snapshot->>'mode'='draft-fill' AND (jsonb_typeof(p_snapshot#>'{config,limits}') IS DISTINCT FROM 'object'
+    OR EXISTS(SELECT 1 FROM unnest(ARRAY['max_turns','max_tool_calls','max_read_bytes','max_context_bytes',
+      'max_draft_docx_bytes','max_no_progress_turns','max_focus_turns','max_focus_replans']) key
+      WHERE NOT coalesce((p_snapshot#>>ARRAY['config','limits',key]) ~ '^[1-9][0-9]*$',false))
+    OR coalesce((p_snapshot#>'{config,limits,draft_path}')::boolean,false) IS DISTINCT FROM true) THEN
+    RAISE EXCEPTION 'DOCX_COMPOSITION_INPUT_INVALID: draft fill budgets required' USING ERRCODE='23514';
   END IF;
   SELECT * INTO STRICT workspace_value FROM bid_submission_workspaces WHERE id=(p_snapshot->>'workspace_id')::uuid;
   PERFORM kb_bid_v2_require_project_owner(workspace_value.project_id,p_actor);
@@ -9905,7 +9978,8 @@ BEGIN
   -- freezes its selected identities but does not reserve the user's document.
   PERFORM 1 FROM bid_projects WHERE id=workspace_value.project_id AND status='open' FOR SHARE;
   IF NOT FOUND THEN RAISE EXCEPTION 'PROJECT_ENDED' USING ERRCODE='55000'; END IF;
-  source_value:=kb_bid_v2_prepare_docx_composition_source(workspace_value.id,p_snapshot->'basis',p_snapshot->'expected',p_actor);
+  source_value:=kb_bid_v2_prepare_docx_composition_source(workspace_value.id,p_snapshot->'basis',
+    p_snapshot->'expected',p_actor,p_snapshot->>'mode');
   IF p_snapshot->'source_request' IS DISTINCT FROM source_value->'source_request'
     OR p_snapshot->>'source_input_sha256' IS DISTINCT FROM kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(source_value->'input'),'UTF8'))::text
     OR p_snapshot->>'analysis_sha256' IS DISTINCT FROM kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(source_value->'analysis'),'UTF8'))::text THEN
@@ -10564,6 +10638,91 @@ BEGIN
   RETURN response;
 END $$;
 
+-- Draft fill publishes one thing: the recompiled whole document. It carries no
+-- composition manifest and no 32-item review, because it is still a draft; the
+-- official gate above stays untouched. An open editor session blocks it: the
+-- user's unsaved work must not be replaced behind their back.
+CREATE FUNCTION kb_bid_v2_publish_docx_fill(p_id uuid,p_sha kb_sha256,p_attempt integer,p_token uuid,
+  p_checkpoint_sha kb_sha256,p_docx_staging uuid)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE typed bid_docx_composition_request_identities%ROWTYPE; checkpoint jsonb; head bid_docx_current%ROWTYPE;
+  docx_bytes bytea; docx_sha kb_sha256; response jsonb; stamp timestamptz;
+BEGIN
+  PERFORM kb_bid_v2_tender_agent_lock_owner(p_id,p_sha,p_attempt,p_token);
+  SELECT * INTO STRICT typed FROM bid_docx_composition_request_identities
+    WHERE request_artifact_id=p_id AND frozen_input_sha256=p_sha;
+  IF typed.frozen_input->>'mode' IS DISTINCT FROM 'draft-fill' THEN
+    RAISE EXCEPTION 'AGENT_OUTPUT_INVALID: draft fill publication requires draft-fill mode' USING ERRCODE='23514';
+  END IF;
+  checkpoint:=kb_bid_v2_tender_agent_checkpoint_get(p_id,p_sha);
+  IF checkpoint IS NULL OR p_checkpoint_sha IS DISTINCT FROM kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(checkpoint),'UTF8'))
+    OR checkpoint->>'config_sha256' IS DISTINCT FROM
+      kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(typed.frozen_input->'config'),'UTF8'))::text
+    OR checkpoint->'done' IS DISTINCT FROM 'true'::jsonb
+    OR checkpoint#>'{journal,pending}' IS DISTINCT FROM 'null'::jsonb
+    OR checkpoint#>'{review,draft}' IS DISTINCT FROM 'true'::jsonb
+    OR jsonb_array_length(coalesce(checkpoint#>'{analysis,draft_plan}','[]'::jsonb))=0 THEN
+    RAISE EXCEPTION 'AGENT_OUTPUT_INVALID: finished draft fill checkpoint required' USING ERRCODE='23514';
+  END IF;
+  IF p_docx_staging IS NULL THEN
+    RAISE EXCEPTION 'AGENT_OUTPUT_INVALID: draft fill requires staged DOCX' USING ERRCODE='23514';
+  END IF;
+  docx_bytes:=decode(checkpoint->>'draft_docx_base64','base64');
+  docx_sha:=kb_bid_v2_sha256_bytes(docx_bytes);
+  IF docx_bytes IS NULL OR octet_length(docx_bytes)=0
+    OR octet_length(docx_bytes)>(typed.frozen_input#>>'{config,limits,max_draft_docx_bytes}')::bigint
+    OR checkpoint->>'draft_compile_object_id' IS DISTINCT FROM ('objects/'||docx_sha::text) THEN
+    RAISE EXCEPTION 'AGENT_OUTPUT_INVALID: draft fill DOCX bytes missing or digest mismatch' USING ERRCODE='23514';
+  END IF;
+  PERFORM 1 FROM bid_submission_workspaces WHERE id=typed.workspace_id FOR UPDATE;
+  SELECT * INTO head FROM bid_docx_current WHERE scope_id=typed.workspace_id FOR UPDATE;
+  IF head.editor_key IS NOT NULL OR head.pending_save_id IS NOT NULL THEN
+    RAISE EXCEPTION 'DOCX_VERSION_CAS_MISMATCH' USING ERRCODE='40001';
+  END IF;
+  response:=kb_bid_v2_create_docx_round(typed.workspace_id,p_docx_staging,
+    (typed.frozen_input->'basis')||jsonb_build_object(
+      'expected_version_id',typed.frozen_input#>'{expected,version_id}',
+      'expected_docx_sha256',typed.frozen_input#>'{expected,docx_sha256}',
+      'docx_sha256',docx_sha,'byte_length',octet_length(docx_bytes)),typed.actor,'docx-fill:'||gen_random_uuid()::text);
+  stamp:=kb_bid_v2_tender_agent_lock_owner(p_id,p_sha,p_attempt,p_token);
+  response:=response||jsonb_build_object('schema_version',1,'request_artifact_id',p_id,
+    'workspace_id',typed.workspace_id,'frozen_input_sha256',p_sha,'checkpoint_sha256',p_checkpoint_sha,
+    'status','succeeded','composition_status','draft',
+    'filled_chapters',(SELECT count(*) FROM jsonb_array_elements(checkpoint#>'{analysis,draft_plan}') item
+      WHERE item->>'status'='filled'),
+    'degraded_chapters',jsonb_array_length(coalesce(checkpoint->'draft_degraded','[]'::jsonb)));
+  INSERT INTO bid_async_stage_receipts(request_artifact_id,stage_kind,frozen_input_sha256,result_identity,result_sha256)
+    VALUES(p_id,'object_commit',p_sha,response,kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(response),'UTF8')));
+  UPDATE bid_tender_agent_run_artifacts SET status='succeeded',progress_phase='succeeded',
+    lease_expires_at=least(lease_expires_at,stamp),updated_at=stamp
+    WHERE request_artifact_id=p_id AND attempt=p_attempt;
+  UPDATE bid_async_request_snapshot_artifacts SET status='succeeded',result_identity=response,finished_at=stamp WHERE id=p_id;
+  RETURN response;
+END $$;
+
+CREATE FUNCTION kb_bid_v2_replay_docx_fill(p_id uuid,p_sha kb_sha256)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE receipt bid_async_stage_receipts%ROWTYPE; typed bid_docx_composition_request_identities%ROWTYPE;
+BEGIN
+  SELECT * INTO STRICT typed FROM bid_docx_composition_request_identities
+    WHERE request_artifact_id=p_id AND frozen_input_sha256=p_sha;
+  SELECT * INTO receipt FROM bid_async_stage_receipts
+    WHERE request_artifact_id=p_id AND frozen_input_sha256=p_sha AND stage_kind='object_commit';
+  IF NOT FOUND THEN RETURN NULL; END IF;
+  IF receipt.result_sha256 IS DISTINCT FROM kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(receipt.result_identity),'UTF8'))
+    OR NOT EXISTS(SELECT 1 FROM bid_async_request_snapshot_artifacts WHERE id=p_id
+      AND status='succeeded' AND result_identity=receipt.result_identity)
+    OR NOT EXISTS(SELECT 1 FROM bid_docx_version_artifacts v
+      JOIN object_owner_references d ON d.owner_kind='bid_docx_version' AND d.owner_id=v.id AND d.occurrence='document' AND d.object_ref=v.object_ref
+      JOIN object_registry dr ON dr.object_ref=d.object_ref AND dr.state='available' AND dr.digest=v.docx_sha256 AND dr.byte_length=v.byte_length
+      WHERE v.workspace_id=typed.workspace_id AND v.id=(receipt.result_identity->>'version_id')::uuid
+        AND v.docx_sha256=receipt.result_identity->>'docx_sha256'
+        AND v.byte_length=(receipt.result_identity->>'byte_length')::bigint) THEN
+    RAISE EXCEPTION 'AGENT_OUTPUT_INVALID: draft fill publication identity changed' USING ERRCODE='23514';
+  END IF;
+  RETURN receipt.result_identity;
+END $$;
+
 -- Worker replay is read-only and independent of an expired execution lease.
 -- The caller must also verify both physical objects before reporting success.
 CREATE FUNCTION kb_bid_v2_replay_docx_composition(p_id uuid,p_sha kb_sha256)
@@ -10631,7 +10790,7 @@ DECLARE project_value uuid; payload bytea;
 BEGIN
   SELECT project_id INTO STRICT project_value FROM bid_submission_workspaces WHERE id=p_workspace;
   PERFORM kb_bid_v2_require_project_owner(project_value,p_actor);
-  IF jsonb_typeof(p_input) IS DISTINCT FROM 'object' OR NOT kb_bid_v2_json_keys_exact(p_input,ARRAY['basis','expected']) THEN
+  IF jsonb_typeof(p_input) IS DISTINCT FROM 'object' OR NOT kb_bid_v2_json_keys_exact(p_input,ARRAY['basis','expected','mode']) THEN
     RAISE EXCEPTION 'DOCX_COMPOSITION_INPUT_INVALID' USING ERRCODE='23514';
   END IF;
   payload:=convert_to(kb_bid_v2_jcs(jsonb_build_object('workspace_id',p_workspace,'input',p_input)),'UTF8');
@@ -10646,7 +10805,8 @@ BEGIN
   SELECT project_id INTO STRICT project_value FROM bid_submission_workspaces WHERE id=workspace_value;
   PERFORM kb_bid_v2_require_project_owner(project_value,p_actor);
   payload:=convert_to(kb_bid_v2_jcs(jsonb_build_object('workspace_id',workspace_value,
-    'input',jsonb_build_object('basis',p_snapshot->'basis','expected',p_snapshot->'expected'))),'UTF8');
+    'input',jsonb_build_object('basis',p_snapshot->'basis','expected',p_snapshot->'expected',
+      'mode',p_snapshot->'mode'))),'UTF8');
   sha:=kb_bid_v2_sha256_bytes(payload);
   replay:=kb_bid_v2_idempotency_begin(p_actor,'bid.v2.docx_compose.submit',p_key,payload,sha);
   IF replay IS NOT NULL THEN RETURN convert_from(replay,'UTF8')::jsonb; END IF;
@@ -10678,6 +10838,47 @@ BEGIN
     WHERE t.workspace_id=p_workspace AND (p_id IS NULL OR r.id=p_id)
     ORDER BY r.created_at DESC,r.id DESC LIMIT 1;
   RETURN result_value;
+END $$;
+
+-- 「停止填充」不是取消任务，是让填章 run 在当前章收尾后停下并照常出稿：已填的
+-- 章一个不丢，没填的仍是空 heading，用户随时可以再发起一次填充接着写。停止请求
+-- 独立于不可变的请求身份表，只记一次意向；填章回路每轮在章界读它一次。
+CREATE TABLE bid_docx_fill_stop_requests (
+  request_artifact_id uuid PRIMARY KEY REFERENCES bid_async_request_snapshot_artifacts(id),
+  workspace_id uuid NOT NULL REFERENCES bid_submission_workspaces(id),
+  actor kb_actor_identity NOT NULL,
+  requested_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE FUNCTION kb_bid_v2_request_docx_fill_stop(p_workspace uuid,p_request uuid,p_actor kb_actor_identity)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+DECLARE project_value uuid; request_value bid_async_request_snapshot_artifacts%ROWTYPE; stamp timestamptz;
+BEGIN
+  SELECT project_id INTO STRICT project_value FROM bid_submission_workspaces WHERE id=p_workspace;
+  PERFORM kb_bid_v2_require_project_owner(project_value,p_actor);
+  SELECT r.* INTO request_value FROM bid_async_request_snapshot_artifacts r
+    JOIN bid_docx_composition_request_identities t ON t.request_artifact_id=r.id
+    WHERE r.id=p_request AND t.workspace_id=p_workspace AND t.frozen_input->>'mode'='draft-fill';
+  IF request_value.id IS NULL THEN
+    RAISE EXCEPTION 'DOCX_COMPOSITION_REQUEST_NOT_FOUND' USING ERRCODE='P0002';
+  END IF;
+  -- 已经结束的任务没有可停的东西：告诉调用者当前状态，别假装停住了。
+  INSERT INTO bid_docx_fill_stop_requests(request_artifact_id,workspace_id,actor)
+    VALUES(p_request,p_workspace,p_actor)
+    ON CONFLICT (request_artifact_id) DO NOTHING;
+  SELECT requested_at INTO stamp FROM bid_docx_fill_stop_requests WHERE request_artifact_id=p_request;
+  RETURN jsonb_build_object('request_artifact_id',p_request,'status',request_value.status,
+    'stop_requested_at',to_jsonb(stamp));
+END $$;
+
+-- 填章 run 每轮在章界问一次。要求持锁的执行者身份：只有正在跑这次尝试的
+-- worker 能读到它，读到 true 也不撤销租约，收尾出稿仍走正常路径。
+CREATE FUNCTION kb_bid_v2_tender_agent_stop_requested(p_request_id uuid,p_sha kb_sha256,
+  p_attempt integer,p_token uuid)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
+BEGIN
+  PERFORM kb_bid_v2_tender_agent_lock_owner(p_request_id,p_sha,p_attempt,p_token);
+  RETURN EXISTS(SELECT 1 FROM bid_docx_fill_stop_requests WHERE request_artifact_id=p_request_id);
 END $$;
 
 -- Formal exports preserve a saved DOCX identity. The legacy workspace renderer
@@ -11183,12 +11384,16 @@ GRANT EXECUTE ON FUNCTION kb_bid_v2_get_docx_composition_basis(uuid,kb_actor_ide
   kb_bid_v2_replay_docx_composition_submission(uuid,jsonb,kb_actor_identity,text),
   kb_bid_v2_submit_docx_composition_request(jsonb,jsonb,kb_actor_identity,text),
   kb_bid_v2_get_docx_composition_request(uuid,uuid,kb_actor_identity),
+  kb_bid_v2_request_docx_fill_stop(uuid,uuid,kb_actor_identity),
   kb_bid_v2_create_docx_composition_request(uuid,jsonb,jsonb,kb_actor_identity,text)
   TO kb_runtime_api;
 GRANT EXECUTE ON FUNCTION kb_bid_v2_load_docx_composition_request(uuid,bigint,kb_sha256),
   kb_bid_v2_load_docx_composition_job(uuid,bigint,kb_sha256),
   kb_bid_v2_publish_docx_composition(uuid,kb_sha256,integer,uuid,kb_sha256,uuid,uuid),
   kb_bid_v2_replay_docx_composition(uuid,kb_sha256),
+  kb_bid_v2_publish_docx_fill(uuid,kb_sha256,integer,uuid,kb_sha256,uuid),
+  kb_bid_v2_replay_docx_fill(uuid,kb_sha256),
+  kb_bid_v2_tender_agent_stop_requested(uuid,kb_sha256,integer,uuid),
   kb_bid_v2_docx_composition_checkpoint_get(uuid,kb_sha256),
   kb_bid_v2_docx_composition_reserve(uuid,kb_sha256,integer,uuid,integer,boolean,bytea),
   kb_bid_v2_docx_composition_checkpoint_put(uuid,kb_sha256,integer,uuid,jsonb),
@@ -11199,8 +11404,8 @@ GRANT EXECUTE ON FUNCTION kb_bid_v2_load_docx_composition_request(uuid,bigint,kb
   kb_bid_v2_layout_checkpoint_get(uuid,kb_sha256),
   kb_bid_v2_layout_checkpoint_put(uuid,kb_sha256,integer,uuid,jsonb)
   TO kb_runtime_worker;
-GRANT EXECUTE ON FUNCTION kb_bid_v2_load_docx_composition_source(uuid,jsonb,kb_actor_identity),
-  kb_bid_v2_prepare_docx_composition_source(uuid,jsonb,jsonb,kb_actor_identity)
+GRANT EXECUTE ON FUNCTION kb_bid_v2_load_docx_composition_source(uuid,jsonb,kb_actor_identity,text),
+  kb_bid_v2_prepare_docx_composition_source(uuid,jsonb,jsonb,kb_actor_identity,text)
   TO kb_runtime_api,kb_runtime_worker;
 GRANT EXECUTE ON FUNCTION kb_bid_v2_get_tender_analysis(uuid,uuid,kb_actor_identity,text,integer,integer),
   kb_bid_v2_get_tender_outline(uuid,kb_actor_identity),

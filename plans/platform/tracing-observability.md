@@ -13,7 +13,7 @@ Queue depth is already a different surface: admin `GET /api/v1/ops/oxana` and UI
 
 `document_processing_spans` (`knowledge::obs`) stays the product timeline for the SPA. Tracing is for operators watching containers.
 
-招投标日志只围绕当前 Request/轮次、SourceUnit、候选、保存文件版本和导出结果定位，不恢复旧匹配/组卷任务。ONLYOFFICE 主链已有部分实现与隔离验证；保存请求、落盘和转换应分开观测，业务成功以真实持久化结果为准。当前接缝见 [运行手册](../../docs/bidding/backend-runbook.md)，编辑与出件顺序见 [计划](../bidding/onlyoffice-integration.md)；Agent 请求、工具、检查点及用量指标按 [Rig 方案](../bidding/agent-runtime-rig.md)接入既有 tracing，不另建观测服务。
+招投标日志只围绕当前 Request/轮次、SourceUnit、候选、保存文件版本和导出结果定位，不恢复旧匹配/组卷任务。ONLYOFFICE 主链已有部分实现与隔离验证；保存请求、落盘和转换应分开观测，业务成功以真实持久化结果为准。当前接缝见 [运行手册](../../docs/bidding/backend-runbook.md)，编辑与出件顺序见 [计划](../bidding/onlyoffice-integration.md)；Agent 请求、工具、检查点及用量指标按 [现行投标生成方案](../bidding/product-two-phase.md)接入既有 tracing，不另建观测服务。
 
 ## Approach
 

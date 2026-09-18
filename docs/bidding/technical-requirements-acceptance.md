@@ -1,5 +1,7 @@
 # 真实稿专用技术要求验收清单
 
+> 历史验证记录：仅说明所记录版本的结果，不是现行设计或新流程验收。当前方案与任务见 [统一方案](../../plans/bidding/product-two-phase.md)。
+
 针对 `testdata/bid/BiddingFile.pdf` 的物理第54–70页，已读取31个冻结来源单元、14个网格及140个非空单元格，并查看第57、58、59、60、61、63页原图。使用统一 Python docreader 的既有冻结结果，没有另行解析上传文件。本范围是专用技术部分，**不包括全部106页、前面的通用技术部分或真实 Agent DOCX 验收**。
 
 `artifacts/bid-full-sample/technical-review/source-inventory.json` 保存65项人工验收预期、43处精确文本区间、32处网格引用，以及原分析 JSON pointer。条目保留完整引文，验收说明另列；这些项目专用数据不导入生产规则或提示词。`verification.json` 核对来源摘要、所有引用、10处分析观测和6张原图摘要；参数表五页的27个非空参数/续页/表头单元格均有清单引用。这个通过只证明证据完整性，不代表 Agent 理解正确。

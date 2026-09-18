@@ -18,7 +18,7 @@
 | --- | --- | --- |
 | 共享平台 | [`platform/README.md`](platform/README.md) | 鉴权、运行时、队列、幂等与审计基础设施、对象注册表、可观测性 |
 | 知识库 | [`knowledge-base/README.md`](knowledge-base/README.md) | Workspace、Product、ProductVersion、Document、解析、索引、检索 |
-| 招投标 | [`bidding/README.md`](bidding/README.md) | BidProject、招标文件、要求与规范、ONLYOFFICE/DOCX 编制、证据与同稿出件。业务：[PRD](bidding/prd.md)；领域：[边界](bidding/authoring.md)；技术：[ONLYOFFICE](bidding/onlyoffice.md)；Agent 实施：[Rig 方案](../plans/bidding/agent-runtime-rig.md) |
+| 招投标 | [`bidding/README.md`](bidding/README.md) | BidProject、招标文件、要求与规范、ONLYOFFICE/DOCX 编制、证据与同稿出件。业务：[PRD](bidding/prd.md)；领域：[边界](bidding/authoring.md)；技术：[ONLYOFFICE](bidding/onlyoffice.md)；生成实施：[统一方案](../plans/bidding/product-two-phase.md) |
 | 调研材料 | [`research/README.md`](research/README.md) | 外部对标、实验和非规范性分析 |
 
 ## 现有综合规格

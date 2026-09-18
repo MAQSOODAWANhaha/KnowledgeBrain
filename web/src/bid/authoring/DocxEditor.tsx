@@ -107,7 +107,7 @@ export function DocxEditor({ workspaceId, onUnsafeChange, onCreateRound }: {
       const blob = await docxApi.download(workspaceId, state.current.version_id);
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
-      link.href = url; link.download = `投标草稿-${state.current.revision}.docx`;
+      link.href = url; link.download = `投标文件-${state.current.revision}.docx`;
       // This is explicitly the persisted version, even if editing has continued.
       link.click(); URL.revokeObjectURL(url);
     } catch { setNotice("已保存稿下载失败，请重试。"); }

@@ -13,7 +13,6 @@ import { fileStage } from "../helpers";
 type Progress = NonNullable<RequirementSetCompileRequestView["progress"]> & {
   checkpoint_sequence?: number;
   boundary?: string;
-  draft_stage?: string;
 };
 
 function parsed(docs: TenderDocumentView[]) {
@@ -32,13 +31,13 @@ function fileSummary(docs: TenderDocumentView[]) {
 function analysisSummary(job: RequirementSetCompileRequestView | null) {
   if (!job) return "未开始";
   if (job.status === "failed") return job.error_code ?? "未完成";
-  if (job.status === "succeeded") return "已完成草稿模板";
+  if (job.status === "succeeded") return "已完成章节大纲与骨架 Word";
   const progress = (job.progress ?? {}) as Progress;
   const step = typeof progress.turn === "number" ? progress.turn : progress.checkpoint_sequence;
   const parts: string[] = [];
+  // 阶段一只做大纲与骨架；填章是阶段二用户触发的独立任务，不会出现在这条任务里。
   if (progress.boundary === "prepared") parts.push("正在等待模型");
-  else if (progress.draft_stage === "fill") parts.push("正在按章填写模板");
-  else parts.push("正在生成大纲");
+  else parts.push("正在生成章节大纲");
   if (typeof step === "number") parts.push(`第 ${step} 步`);
   return parts.join(" · ");
 }
@@ -127,18 +126,18 @@ export function AnalysisProgress({
         {!loaded && <p>正在读取进度…</p>}
         {loaded && <>
           <p>文件 {fileSummary(docs)}</p>
-          <p>分析 {analysisSummary(job)}</p>
+          <p>大纲 {analysisSummary(job)}</p>
         </>}
       </div>
       {error && <p role="alert">暂时无法更新进度，正在重试。</p>}
       {job?.status === "failed" && <p role="alert">{job.error_code ?? "分析失败"}</p>}
       {startError && <p role="alert">{startError}</p>}
-      {showResume && <Button disabled={busy} onClick={() => void resume()}>继续分析</Button>}
-      {showStart && <Button disabled={busy || !parsed(docs)} onClick={() => void start()}>开始分析</Button>}
+      {showResume && <Button disabled={busy} onClick={() => void resume()}>继续生成大纲</Button>}
+      {showStart && <Button disabled={busy || !parsed(docs)} onClick={() => void start()}>生成章节大纲</Button>}
     </section>
     {loaded && <section className="card stack" data-testid="tender-outline">
       <h2 className="h3">章节大纲</h2>
-      <p className="text-sm">投标文件组成树来自分析大纲（一级分册 → 二级附件 → 必要时三级）。招标文件解析标题不是组成依据。草稿由分析任务直接编译；终稿需另一次独立复核。</p>
+      <p className="text-sm">根据招标要求生成章节层级和可编辑 Word 骨架。招标文件解析标题不是组成依据。终稿需另一次独立复核。</p>
       {(outline?.extracted?.length ?? 0) > 0
         ? <><h3 className="text-sm">投标文件组成</h3><OutlineTree nodes={outline?.extracted ?? []} /></>
         : <p className="text-sm">{job ? "分析尚未写出投标组成树。" : "开始分析后将显示投标文件组成大纲。"}</p>}

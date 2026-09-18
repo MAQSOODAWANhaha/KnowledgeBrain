@@ -1,16 +1,18 @@
 # 招标理解 Agent 实现审查
 
+> 历史验证记录：仅说明所记录版本的结果，不是现行设计或新流程验收。当前方案与任务见 [统一方案](../../plans/bidding/product-two-phase.md)。
+
 ## 当前方案与验收入口
 
-唯一有效实施方案为 [Agent 运行时与完整样稿方案](../../plans/bidding/agent-runtime-rig.md)；已合并方案评审修订，按 S0–S6 分阶段推进。保留完整最终目标，按分项能力逐步实施和验收；设计要求、已有实现与真实验收分别记录，新设计不等于已经实现或通过。
+唯一有效实施方案为 [现行投标生成方案](../../plans/bidding/product-two-phase.md)；已合并方案评审修订，按 S0–S6 分阶段推进。保留完整最终目标，按分项能力逐步实施和验收；设计要求、已有实现与真实验收分别记录，新设计不等于已经实现或通过。
 
-api-v4 已完成两轮完整独立复核，但尚未通过。最新进度、缺口与证据只维护在[主方案 §19](../../plans/bidding/agent-runtime-rig.md#19-当前能力真实验收与下一步)，本页不重复运行轮次或临时检查数字。
+api-v4 已完成两轮完整独立复核，但尚未通过。最新进度、缺口与证据只维护在[现行投标生成方案](../../plans/bidding/product-two-phase.md)，本页不重复运行轮次或临时检查数字。
 
 下列历史证据只说明对应版本与当时状态，不构成另一份现行方案。历史 Agent P0–P4 编号不再用作当前实施阶段；平台 P0/P1/P2 和 ONLYOFFICE O 阶段的既有任务编号不受影响。
 
 ## 历史运行与验证记录
 
-2026-09-16 早期历史快照：有界证据预装、Main自动推进和真实PG三边界恢复已验证；同版DOCX/PDF/报告正式导出接线通过隔离HTTP→worker测试（转换器模拟，非真实Office验收）。统一DocReader的DOCX列宽单位错误已修复，20项解析回归及3项真实DOCX冻结回归通过；新source-v4仅6表widths_mm变化，28个来源的文本、单元格、合并和ID保持一致。旧v3因错误冻结输入停止，47次调用及终态保留。api-v4在14:06 UTC观察到turn124/Main、49条候选、396次工具调用，首轮独立复核已完成28个来源判断并提出14项finding，现交回Main修复；这不是语义通过。同一request已自动由attempt1续至2，未手工continue，checkpoint与累计计数保留。379项库回归、API20项、worker38项及严格Clippy通过；解析合计23项（20项解析＋3项真实DOCX）、验收脚本18项及4个子测试通过，见[验证汇总](../../artifacts/minimal-bid-fixture/implementation/current-verification.json)。完整分析准入、编制及同版三件套仍未验收；最新明细以[统一方案](../../plans/bidding/agent-runtime-rig.md)及其验收证据为准。
+2026-09-16 早期历史快照：有界证据预装、Main自动推进和真实PG三边界恢复已验证；同版DOCX/PDF/报告正式导出接线通过隔离HTTP→worker测试（转换器模拟，非真实Office验收）。统一DocReader的DOCX列宽单位错误已修复，20项解析回归及3项真实DOCX冻结回归通过；新source-v4仅6表widths_mm变化，28个来源的文本、单元格、合并和ID保持一致。旧v3因错误冻结输入停止，47次调用及终态保留。api-v4在14:06 UTC观察到turn124/Main、49条候选、396次工具调用，首轮独立复核已完成28个来源判断并提出14项finding，现交回Main修复；这不是语义通过。同一request已自动由attempt1续至2，未手工continue，checkpoint与累计计数保留。379项库回归、API20项、worker38项及严格Clippy通过；解析合计23项（20项解析＋3项真实DOCX）、验收脚本18项及4个子测试通过，见[验证汇总](../../artifacts/minimal-bid-fixture/implementation/current-verification.json)。完整分析准入、编制及同版三件套仍未验收；最新明细以[统一方案](../../plans/bidding/product-two-phase.md)及其验收证据为准。
 
 106页历史终态摘要：106页真实文档的历史终态仍为 turn1604，424条候选、177条关系、104项有效修复说明、2项待处理、3处执行阻塞、0轮完整独立复核，累计3826/4000次调用。尚无验收通过的完整DOCX、同版PDF和报告。
 
@@ -18,7 +20,7 @@ api-v4 已完成两轮完整独立复核，但尚未通过。最新进度、缺�
 
 2026-09-12 UTC 最新终态：`real-run-v19-repair-scope-resume5` 已于 12:43:50 UTC 结束，运行退出码 1，本段耗时 4427.34 秒；[固定终态](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/resume5-terminal-verification.json)为 turn1604（SHA `5e69cacf…`），424 条候选、177 条关系、104 条保存修复说明，有效处置 104/106、待处理 2，保留 3 处执行阻塞，完整独立复核 0 轮。错误 `AGENT_TURN_BUDGET_EXCEEDED` 指局部执行及独立工作交接额度耗尽；全文累计调用 3826/4000、尚余 174 次，并非总调用帽耗尽或供应商超时。未重启。有效处置不等于独立语义批准；完整 106 页、32 项语义及同版 DOCX/PDF/报告验收仍未完成。正确性与稳定性优先，速度优化后置。
 
-2026-09-12 主修复异议闭环记录：[宿主核查与默认 CI 回归](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/repair-dispute-closed-loop.md)确认生产已有 disputed→独立保留或撤回→完整来源复核及编制准入的闭环；当时仅补测试，覆盖受影响候选详情门槛、主角色不能自批和独立裁定分支。[验证记录](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/repair-dispute-closed-loop-verification.json)为最终断言加强前 217 项 tender_analysis 测试通过、36 项既有忽略，随后加强断言的新专项 1 项通过，严格 Clippy、全仓 fmt 与 diff 整合检查通过。这是合成脚本的宿主协议验证，不是 grok 的真实语义成功。[主方案](../../plans/bidding/agent-runtime-rig.md)已记录“Main 修复任务隔离：turn1604 后续实施边界”，T1–T3 任务账本、Main 派发和既有 Journal 合同已进入代码整合与离线回归，尚未完成整合验收或部署，未授予新尝试；旧 turn1604 终态、检查点、阻塞及累计调用账本保持不变。
+2026-09-12 主修复异议闭环记录：[宿主核查与默认 CI 回归](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/repair-dispute-closed-loop.md)确认生产已有 disputed→独立保留或撤回→完整来源复核及编制准入的闭环；当时仅补测试，覆盖受影响候选详情门槛、主角色不能自批和独立裁定分支。[验证记录](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/repair-dispute-closed-loop-verification.json)为最终断言加强前 217 项 tender_analysis 测试通过、36 项既有忽略，随后加强断言的新专项 1 项通过，严格 Clippy、全仓 fmt 与 diff 整合检查通过。这是合成脚本的宿主协议验证，不是 grok 的真实语义成功。[主方案](../../plans/bidding/product-two-phase.md)已记录“Main 修复任务隔离：turn1604 后续实施边界”，T1–T3 任务账本、Main 派发和既有 Journal 合同已进入代码整合与离线回归，尚未完成整合验收或部署，未授予新尝试；旧 turn1604 终态、检查点、阻塞及累计调用账本保持不变。
 
 编制版式：[行内布局修复](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/inline-template-layout-implementation.md)已完成局部验证：同一冻结来源中连续文本区域保留原始换行和独立字段书签，示例填写值在原位置清除；跨来源、间隔和网格保持边界。固定 turn1571 的[真实候选前后 DOCX 对照](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/inline-layout-before-after.json)确认四个身份字段恢复同行、20 个区域定位均可回读。[整合验证](../../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/inline-layout-integration-verification.json)为 40 项编制测试通过、1 项既有忽略，严格 Clippy、全仓 fmt 与 diff 检查通过；无新增 migration，未改提取 schema 或配置。该局部诊断不是整单样稿，也不代表原页像素、完整 DOCX/PDF 或 R03/R06 验收通过。
 
@@ -72,11 +74,11 @@ api-v4 已完成两轮完整独立复核，但尚未通过。最新进度、缺�
 
 2026-09-12 UTC 前次实测记录：查询依赖与来源任务职责分离已实现，[工程验证](../../artifacts/bid-full-sample/loop-repair/source-task-ownership/verification.json)通过252项库测试（30项忽略）、20项合同、严格Clippy、全局fmt及编译。[局部复核终态](../../artifacts/bid-full-sample/loop-repair/source-task-ownership/fee-corrected-review-resume1/final-observation.json)为第68轮、累计69/80次调用、5轮复核、23记录/10关系，quality=needs_review；7项来源判断已完成，但末段组成要求缺少续页的1项发现仍未解决，生产编制校验正确拒绝。续跑619.19秒，加修复前243.58秒累计862.77秒（不含暂停），性能仍不合格。已观察到无业务写入的主Agent查询后再次复核往返，需验证完整分析摘要包含阅读回执是否干扰重复终止判断。当前无模型进程；旧费用80/80及全文第236轮998/1200保持终态。106页、32项语义与完整同版DOCX/PDF/报告仍待验。下方为历史记录。
 
-2026-09-11 UTC 最新状态：局部导航、历史来源判断取回及固定任务清单复用已通过248项库、严格Clippy及全局fmt。同一检查点离线请求构造中位耗时约556→295毫秒、请求摘要不变；尚无新的模型完成率或全文性能验收。全文兼容接续后已在第236轮因HTTP500/503/503终止，当前没有真实模型进程运行；累计998次调用，原总额度剩202次，但该边界三次尝试已耗尽，未重置。保留33项来源判断及27项发现，另有2处执行阻塞。32项与完整DOCX/PDF/报告仍未完成；费用正文两组亦未完成复核，不能宣称性能可用。以[方案§14](../../plans/bidding/agent-runtime-rig.md#14-成本可观测性与全文容量)及所链接证据为准，下方为历史运行记录。
+2026-09-11 UTC 最新状态：局部导航、历史来源判断取回及固定任务清单复用已通过248项库、严格Clippy及全局fmt。同一检查点离线请求构造中位耗时约556→295毫秒、请求摘要不变；尚无新的模型完成率或全文性能验收。全文兼容接续后已在第236轮因HTTP500/503/503终止，当前没有真实模型进程运行；累计998次调用，原总额度剩202次，但该边界三次尝试已耗尽，未重置。保留33项来源判断及27项发现，另有2处执行阻塞。32项与完整DOCX/PDF/报告仍未完成；费用正文两组亦未完成复核，不能宣称性能可用。以[现行投标生成方案](../../plans/bidding/product-two-phase.md)及所链接证据为准，下方为历史运行记录。
 
 2026-09-11 UTC 性能修复真实对照通过：同一七页目录、原7项候选和同.env配置，baseline为33次/239.30秒/10次工具错误，完整原文出处规则的provenance为8次/63.55秒/0次工具错误，两组均verified且生产结构审计通过、候选值不变。该局部对照墙钟减少73.44%，不代表完整106页性能。已合并有界边界证据，并将冻结原文读取/引文与实际候选依赖分开；实际候选查询、记录/映射/关系ID及同页原图排版依赖保留。241项库、严格Clippy和编译通过；同次导航复用清单，离线输出摘要一致。旧全文v3在146轮无在途边界暂停，累计759次；v4已使用原1200额度剩余441次启动，首请求合同与成功对照一致，保留416条记录/8条关系，未导入旧独立回执。32项和同版DOCX/PDF仍未完成。证据：artifacts/bid-full-sample/loop-repair/review-boundary-evidence/provenance-final.json、real-run-v15-review-v4/startup-verification.json。
 
-2026-09-11 UTC 当前执行状态以[统一方案](../../plans/bidding/agent-runtime-rig.md)为准：原文搜索的错误全局依赖已修复，239项库回归通过；全文v3保留主提取成果并在原1200次上限扣除613次后，以587次余额进行独立复核。完整语义及出件验收未完成。以下较早运行记录保留为历史证据。
+2026-09-11 UTC 当前执行状态以[统一方案](../../plans/bidding/product-two-phase.md)为准：原文搜索的错误全局依赖已修复，239项库回归通过；全文v3保留主提取成果并在原1200次上限扣除613次后，以587次余额进行独立复核。完整语义及出件验收未完成。以下较早运行记录保留为历史证据。
 
 **2026-09-10 当前修复进度：本地功能验证通过，独立复核已完成局部比较，未完成最终提交，运行已停止；完整验收尚未通过。** 已分离来源权限与局部焦点，自动维护成果/未解决引用，主提取、独立复核、编制和稿件复核共用进展与有界恢复策略。默认连续无进展6轮、焦点24轮、重规划2次；记录局部执行阻塞后允许转向独立范围，连续6轮仍未交接则在工具提交边界停止。重启、重复读取、笔记改写和任务改名不能刷新额度；有效局部写入可以完成当前动作。执行失败单独保存并阻止最终发布，不冒充来源缺项。候选当前版本参与窗口保留；各 reviewer 保留自己的冻结原文回执，修改后的候选/稿件仍按摘要核查。旧手抄引用输入及编制 `remember` 路径已删除，未新增 migration，既有 baseline 同步检查点与预算 JSON。
 
@@ -96,7 +98,7 @@ v13 已获明确外发授权并启动，向 `https://ai.zleiwork.cn` 发送同�
 
 **历史结论（v6/v7）：当时真实提取结果不通过，累计 32 项语义发现仍开放。** 早期格式批次的19项发现和12个模板文本区域重叠只是部分证据，完整范围见[真实稿复核](real-tender-acceptance-review.md)及[106页验收索引](../../artifacts/bid-full-sample/acceptance-index.json)。v6 因连续57轮无业务写入而人工停止；修复工作范围缺口反馈后的 v7 完成137轮后仍持续空转，已停止，尚未完成独立复核或完整 DOCX，见[性能诊断](extraction-performance.md)。
 
-下文记录历次运行层及业务实现证据；[改造方案](../../plans/bidding/agent-runtime-rig.md)的 P0 已实现精确查询、读取交付确认、结构化范围交接、有界历史、环境参数读取及输入 token 估算，并完成本地和历史请求投影测试。Rig AgentRun 已接入提取/编制并通过隔离回归，新运行持续提取/独立复核仍待完成。生产持久化、发布、HTTP/前端及合成生成至 Office 保存已在后续批次接通，真实内容验收仍未通过。
+下文记录历次运行层及业务实现证据；[改造方案](../../plans/bidding/product-two-phase.md)的 P0 已实现精确查询、读取交付确认、结构化范围交接、有界历史、环境参数读取及输入 token 估算，并完成本地和历史请求投影测试。Rig AgentRun 已接入提取/编制并通过隔离回归，新运行持续提取/独立复核仍待完成。生产持久化、发布、HTTP/前端及合成生成至 Office 保存已在后续批次接通，真实内容验收仍未通过。
 
 业务依据沿用 [PRD §1.3、§1.4、§2.3](prd.md)。目标覆盖网络安全行业的设备、软件、服务和综合类招标；当前真实主样稿是防火墙采购，不能据此宣称已覆盖全行业。当前阶段提取招标侧要求，生成所需章节、固定文字、模板与填写位置；投标方事实、报价、证明材料和具体响应后置。
 
@@ -213,7 +215,7 @@ v13 已获明确外发授权并启动，向 `https://ai.zleiwork.cn` 发送同�
 
 ## P1 首片：独立复核问题持久化
 
-本节记录早期 Agent P1 切片，不对应当前 S1。现行设计见[方案 §9](../../plans/bidding/agent-runtime-rig.md#9-分析复核修复与全局闭合)，最新实现与验收见 §19；以下为该历史切片结果：独立原文判断、依赖失效及宿主批次末汇总已落地，旧 `submit_review` 已删除；本轮工程验证通过，真实短测及完整语义验收进行中。以下旧工具描述只用于理解当时的持久化验收。
+本节记录早期 Agent P1 切片，不对应当前 S1。现行设计见[方案 §9](../../plans/bidding/product-two-phase.md)，最新实现与验收见 §19；以下为该历史切片结果：独立原文判断、依赖失效及宿主批次末汇总已落地，旧 `submit_review` 已删除；本轮工程验证通过，真实短测及完整语义验收进行中。以下旧工具描述只用于理解当时的持久化验收。
 
 reviewer 用 `put_review_finding` 逐项保存有依据的问题，服务分配 ID，已知 ID 可修订；`delete_review_finding` 只能明确撤回已存问题。`inspect_review` 分页返回 reviewer 草稿及 ID，主 Agent 继续读取上一轮已提交发现。`submit_review {}` 校验完整独立覆盖后提交存储中的草稿；旧的 `findings` 整数组参数已删除，传空数组不能清除已有问题。
 

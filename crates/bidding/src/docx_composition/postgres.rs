@@ -1,7 +1,7 @@
 //! Version-bound source resolution for durable composition requests. The small
 //! snapshot references existing immutable analysis/source records; it does not
 //! duplicate page images or copy the prior bid into the model's input.
-use super::{agent::Config, validate_basis};
+use super::{CompositionMode, agent::Config, validate_basis};
 use crate::{
     agent_error::AgentError,
     docx_round::{DocxRoundBasis, DocxVersionIdentity},
@@ -20,6 +20,10 @@ pub struct FrozenCompositionRequest {
     pub actor: String,
     pub basis: DocxRoundBasis,
     pub expected: Option<DocxVersionIdentity>,
+    pub mode: CompositionMode,
+    /// Only draft fill freezes a read-back seed; official composition writes the
+    /// whole document from the analysis and has nothing to seed.
+    pub seed_plan_sha256: Option<String>,
     pub source_request: BidAuthoringRequestIdentityV2,
     pub source_input_sha256: String,
     pub analysis_sha256: String,
@@ -76,6 +80,8 @@ impl FrozenCompositionRequest {
         self.source_request.validate().map_err(invalid)?;
         if self.schema_version != 1
             || self.workspace_id.is_nil()
+            || self.mode != CompositionMode::Official
+            || self.seed_plan_sha256.is_some()
             || self.source_request != source.source_request
             || self.source_input_sha256 != digest(&source.input).map_err(invalid)?
             || self.analysis_sha256 != digest(&source.analysis).map_err(invalid)?
@@ -116,6 +122,8 @@ pub async fn prepare(
         actor: actor.into(),
         basis,
         expected,
+        mode: CompositionMode::Official,
+        seed_plan_sha256: None,
         source_request: source.source_request.clone(),
         source_input_sha256: digest(&source.input).map_err(invalid)?,
         analysis_sha256: digest(&source.analysis).map_err(invalid)?,

@@ -14,6 +14,7 @@ import type { BidProjectView, TenderDocumentView } from "./api/types";
 import { AnalysisProgress } from "./authoring/AnalysisProgress";
 import { DocxEditor } from "./authoring/DocxEditor";
 import { DraftReady } from "./authoring/DraftReady";
+import { FillPane } from "./authoring/FillPane";
 import { ExportPane } from "./authoring/ExportPane";
 
 export function Workbench({ email }: { email: string }) {
@@ -72,8 +73,11 @@ function DocxGate({ email, projectId, step, tree }: { email: string; projectId: 
         : step === "authoring" && result.project.status !== "ended"
           ? <AnalysisProgress projectId={projectId}>
               {result.current
-                ? <DocxEditor key={result.project.workspace_id} workspaceId={result.project.workspace_id}
-                    onUnsafeChange={setUnsafe} />
+                ? <>
+                    <DocxEditor key={result.project.workspace_id} workspaceId={result.project.workspace_id}
+                      onUnsafeChange={setUnsafe} />
+                    <FillPane key={`fill:${result.project.workspace_id}`} workspaceId={result.project.workspace_id} />
+                  </>
                 : <DraftReady />}
             </AnalysisProgress>
           : <ExportPane key={result.project.workspace_id} workspaceId={result.project.workspace_id}

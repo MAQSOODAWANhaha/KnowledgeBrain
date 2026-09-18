@@ -163,14 +163,7 @@ pub(super) fn evidence(
             .clone()
             .filter(|work| work.status == WorkStatus::Active)
         {
-            Some(work) => {
-                if state.draft_stage == crate::tender_analysis::draft::DraftStage::Outline
-                    && !crate::tender_analysis::draft::small_file(input)
-                {
-                    return Ok(None);
-                }
-                (work, false)
-            }
+            Some(work) => (work, false),
             None => return Ok(None),
         }
     } else {
@@ -232,7 +225,7 @@ pub(super) fn evidence(
             != before["assigned_evidence"]["candidates"]
             || content["assigned_evidence"]["candidate_delivery"]["next_inspection"].is_object();
         let start = if config.limits.draft_path {
-            (!source.text.is_empty()).then_some(0)
+            unread(coverage.text.get(id), source.text.len())
         } else {
             unread(coverage.text.get(id), source.text.len()).or_else(|| {
                 (state.dispatch.active.is_none() && !source.text.is_empty()).then_some(0)
@@ -240,7 +233,7 @@ pub(super) fn evidence(
         };
         if let Some(start) = start {
             let max_bytes = if config.limits.draft_path {
-                (source.text.len() - start).min(crate::tender_analysis::draft::DRAFT_WINDOW_CHARS)
+                (source.text.len() - start).min(crate::tender_analysis::draft::DRAFT_WINDOW_BYTES)
             } else {
                 source.text.len() - start
             };

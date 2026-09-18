@@ -67,6 +67,9 @@ pub struct Limits {
     /// 可选组成绑定附加词；缺省只用 title 包含匹配，禁止代码内置行业词表。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub draft_bind_terms: Vec<String>,
+    /// 草稿编译字节上限。骨架用小值，整份填充用大值。
+    #[serde(default = "crate::tender_analysis::draft::default_draft_docx_bytes")]
+    pub max_draft_docx_bytes: usize,
 }
 
 fn default_pack_max_units() -> usize {
@@ -87,11 +90,13 @@ impl Limits {
         input: &FrozenInput,
     ) -> Result<Self, crate::tender_analysis::budget::BudgetRefused> {
         if self.draft_path {
-            self.max_turns = self
-                .max_turns
-                .min(crate::tender_analysis::draft::DRAFT_MAX_TURNS);
+            // 阶段一的绝对门。填章请求不走这里：它在冻结请求时按待填章数另记一套
+            // 额度（`draft::fill_limits`），所以这个 20 只约束大纲与骨架。
+            self.max_turns = self.max_turns.max(crate::tender_analysis::draft::outline_turn_cap(input));
+            self.max_tool_calls = self.max_tool_calls.max(self.max_turns.saturating_mul(12));
+            self.max_read_bytes = self.max_read_bytes.max(self.max_turns.saturating_mul(self.max_tool_result_bytes).saturating_mul(4));
             if self.max_turns == 0 {
-                self.max_turns = crate::tender_analysis::draft::DRAFT_MAX_TURNS;
+                self.max_turns = crate::tender_analysis::draft::OUTLINE_MAX_TURNS;
             }
             self.reviewer_reserve = 0;
             return Ok(self);
@@ -124,12 +129,6 @@ pub struct Config {
     pub review_prompt_sha256: String,
     pub fill_tools_sha256: String,
     pub fill_prompt_sha256: String,
-    /// Outline tools plus read tools (large-file request bodies).
-    #[serde(default)]
-    pub tools_read_sha256: String,
-    /// Fill tools plus read tools (large-file request bodies).
-    #[serde(default)]
-    pub fill_tools_read_sha256: String,
 }
 
 impl Config {
@@ -196,18 +195,12 @@ impl Config {
         _input: Option<&FrozenInput>,
     ) -> Result<Self, AgentError> {
         limits.draft_path = true;
-        let outline_tools = crate::tender_analysis::draft::outline_schemas();
-        let mut outline_read = outline_tools.clone();
-        outline_read.extend(crate::tender_analysis::draft::read_schemas());
-        let fill_tools = crate::tender_analysis::draft::fill_schemas();
-        let mut fill_read = fill_tools.clone();
-        fill_read.extend(crate::tender_analysis::draft::read_schemas());
-        let fill_tools_sha256 = digest(&fill_tools).map_err(invalid)?;
-        let fill_tools_read_sha256 = digest(&fill_read).map_err(invalid)?;
+        let fill_tools_sha256 =
+            digest(&crate::tender_analysis::draft::fill_schemas()).map_err(invalid)?;
         let fill_prompt_sha256 =
             digest(&crate::agent_runtime::chat::system_content(DRAFT_FILL)).map_err(invalid)?;
-        let tools_sha256 = digest(&outline_tools).map_err(invalid)?;
-        let tools_read_sha256 = digest(&outline_read).map_err(invalid)?;
+        let tools_sha256 =
+            digest(&crate::tender_analysis::draft::outline_schemas()).map_err(invalid)?;
         let review_tools_sha256 = digest(&tools::schemas_for(true, &limits)).map_err(invalid)?;
         let main_prompt_sha256 = digest(&crate::agent_runtime::chat::system_content(
             if limits.draft_path {
@@ -232,8 +225,6 @@ impl Config {
             review_prompt_sha256,
             fill_tools_sha256,
             fill_prompt_sha256,
-            tools_read_sha256,
-            fill_tools_read_sha256,
         };
         config.validate()?;
         Ok(config)
@@ -271,19 +262,10 @@ impl Config {
             || (l.draft_path && {
                 let outline =
                     digest(&crate::tender_analysis::draft::outline_schemas()).map_err(invalid)?;
-                let mut outline_read = crate::tender_analysis::draft::outline_schemas();
-                outline_read.extend(crate::tender_analysis::draft::read_schemas());
-                let outline_read = digest(&outline_read).map_err(invalid)?;
                 let fill =
                     digest(&crate::tender_analysis::draft::fill_schemas()).map_err(invalid)?;
-                let mut fill_read = crate::tender_analysis::draft::fill_schemas();
-                fill_read.extend(crate::tender_analysis::draft::read_schemas());
-                let fill_read = digest(&fill_read).map_err(invalid)?;
-                !((self.tools_sha256 == outline || self.tools_sha256 == outline_read)
-                    && (self.fill_tools_sha256 == fill || self.fill_tools_sha256 == fill_read)
-                    && (self.tools_read_sha256.is_empty() || self.tools_read_sha256 == outline_read)
-                    && (self.fill_tools_read_sha256.is_empty()
-                        || self.fill_tools_read_sha256 == fill_read)
+                !(self.tools_sha256 == outline
+                    && self.fill_tools_sha256 == fill
                     && self.main_prompt_sha256
                         == digest(&crate::agent_runtime::chat::system_content(DRAFT_OUTLINE))
                             .map_err(invalid)?
@@ -306,6 +288,17 @@ impl Config {
         }
         Ok(())
     }
+
+    /// 填章 Job 走 `docx_compose` 的请求轨道，那张 identity 表要求
+    /// `contract_definition->'config'` 与 `frozen_input->'config'` 逐字节相同。
+    /// 提示与工具本身由 `*_sha256` 钉住，这里不重复内联。
+    pub fn contract_definition(&self) -> Value {
+        json!({
+            "checkpoint_contract_version": crate::agent_runtime::CHECKPOINT_CONTRACT_VERSION,
+            "runtime_adapter": crate::agent_runtime::RUNTIME_ADAPTER_VERSION,
+            "config": self,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -313,6 +306,10 @@ impl Config {
 pub enum Role {
     Main,
     Reviewer,
+}
+
+fn no_stall(stalls: &usize) -> bool {
+    *stalls == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,6 +348,20 @@ pub struct Checkpoint {
     pub draft_stage: crate::tender_analysis::draft::DraftStage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_active_id: Option<String>,
+    /// 上一轮宿主完整性清单的缺口条数，用来判定修补轮是否还在减少缺口。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_outline_gaps: Option<usize>,
+    #[serde(default, skip_serializing_if = "no_stall")]
+    pub draft_outline_stalls: usize,
+    /// 大纲窗游标。宿主推进、随 committed 落盘，恢复后接着投下一窗。
+    #[serde(default, skip_serializing_if = "no_stall")]
+    pub draft_outline_window: usize,
+    /// 为压进字节上限而被退回空标题的章，供 UI 告知用户。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draft_degraded: Vec<String>,
+    /// 这次填章是用户叫停的，不是填完了。稿子照出，剩下的章仍空着。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draft_stopped: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft_compile_object_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -359,6 +370,7 @@ pub struct Checkpoint {
     pub outline_config_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill_config_sha256: Option<String>,
+    pub outline_run: crate::tender_analysis::outline_flow::OutlineRun,
 }
 
 impl Checkpoint {
@@ -417,6 +429,14 @@ impl Checkpoint {
             "review_findings":self.review.as_ref().map_or(0,|r|r.findings.len()),
             "draft_review_findings":self.review_draft.len(),
             "draft_active_id":self.draft_active_id,
+            // 填章面板要显示「已填 N/M 章 + 当前章」，这三项是它唯一的数据来源。
+            "draft_chapters":self.analysis.draft_plan.iter()
+                .filter(|item| item.status != crate::tender_analysis::draft::DraftStatus::Omitted).count(),
+            "draft_filled":self.analysis.draft_plan.iter()
+                .filter(|item| item.status == crate::tender_analysis::draft::DraftStatus::Filled).count(),
+            "draft_active_title":self.draft_active_id.as_ref().and_then(|id|
+                self.analysis.draft_plan.iter().find(|item| &item.id == id).map(|item| item.title.clone())),
+            "draft_stopped":self.draft_stopped,
             "execution_watch":self.execution().watch,"execution_blockers":self.main_progress.blockers.len()+self.reviewer_progress.blockers.len()})
     }
 }
@@ -438,6 +458,11 @@ pub trait Journal: Send + Sync {
             "SOURCE_VIEW_UNAVAILABLE",
             "source view service is not available",
         ))
+    }
+    /// 用户在填章过程中点了「停止填充」。停不是杀进程：本章写完就不再派新章，
+    /// 由正常收尾出稿，已填的章一个不丢，没填的仍是空 heading。
+    async fn stop_requested(&self) -> Result<bool, AgentError> {
+        Ok(false)
     }
 }
 
@@ -559,8 +584,43 @@ pub async fn run<J: Journal, M: Model>(
     model: &M,
     cancel: &CancellationToken,
 ) -> Result<AnalysisResult, AgentError> {
+    run_seeded(input, config, journal, model, cancel, None).await
+}
+
+/// 用户触发的填章 run：从**回读出来的章树**起跑，而不是从零开始拉大纲。
+///
+/// 种子是这次 Job 的输入（请求里冻着它的摘要），不是 agent 的产出：填章 run 的
+/// 第一个检查点就带着整棵树，checkpoint 闸门按摘要核对。已带正文的章在种子里
+/// 就是 `Filled`，填充回路只会派到还空着的章。
+pub async fn run_fill<J: Journal, M: Model>(
+    input: &FrozenInput,
+    config: &Config,
+    journal: &J,
+    model: &M,
+    cancel: &CancellationToken,
+    seed: Vec<crate::tender_analysis::draft::DraftPlanItem>,
+) -> Result<AnalysisResult, AgentError> {
+    if seed.is_empty() {
+        return Err(invalid("fill run needs a read-back chapter tree"));
+    }
+    if !config.limits.draft_path {
+        return Err(invalid("fill run requires the draft path"));
+    }
+    run_seeded(input, config, journal, model, cancel, Some(seed)).await
+}
+
+async fn run_seeded<J: Journal, M: Model>(
+    input: &FrozenInput,
+    config: &Config,
+    journal: &J,
+    model: &M,
+    cancel: &CancellationToken,
+    seed: Option<Vec<crate::tender_analysis::draft::DraftPlanItem>>,
+) -> Result<AnalysisResult, AgentError> {
     tools::validate_input(input).map_err(invalid)?;
     config.validate()?;
+    let started = Instant::now();
+    let seeded = seed.is_some();
     let input_sha256 = digest(input).map_err(invalid)?;
     let config_sha256 = digest(config).map_err(invalid)?;
     let mut state = journal.load().await?.unwrap_or(Checkpoint {
@@ -589,10 +649,16 @@ pub async fn run<J: Journal, M: Model>(
         source_views: BTreeMap::new(),
         draft_stage: Default::default(),
         draft_active_id: None,
+        draft_outline_gaps: None,
+        draft_outline_stalls: 0,
+        draft_outline_window: 0,
+        draft_degraded: Vec::new(),
+        draft_stopped: false,
         draft_compile_object_id: None,
         draft_docx_base64: None,
         outline_config_sha256: None,
         fill_config_sha256: None,
+        outline_run: Default::default(),
     });
     if state.input_sha256 != input_sha256 || state.config_sha256 != config_sha256 {
         return Err(error(
@@ -616,9 +682,24 @@ pub async fn run<J: Journal, M: Model>(
     }
     state.outline_config_sha256 = Some(config.tools_sha256.clone());
     state.fill_config_sha256 = Some(config.fill_tools_sha256.clone());
-    if state.draft_stage == crate::tender_analysis::draft::DraftStage::None {
-        state.draft_stage = crate::tender_analysis::draft::DraftStage::Outline;
-        crate::tender_analysis::draft::preload_outline_window(input, &mut state);
+    let is_outline_run = seed.is_none();
+    match seed {
+        Some(plan) => {
+            if state.draft_stage == crate::tender_analysis::draft::DraftStage::None {
+                state.analysis.draft_plan = plan;
+                state.draft_stage = crate::tender_analysis::draft::DraftStage::Fill;
+            } else if state.draft_stage == crate::tender_analysis::draft::DraftStage::Outline {
+                return Err(error(
+                    "FROZEN_INPUT_DIGEST_MISMATCH",
+                    "fill run resumed an outline checkpoint",
+                ));
+            }
+        }
+        None if state.draft_stage == crate::tender_analysis::draft::DraftStage::None => {
+            state.draft_stage = crate::tender_analysis::draft::DraftStage::Outline;
+            crate::tender_analysis::draft::preload_outline_window(input, &mut state);
+        }
+        None => {}
     }
     let driven = drive(
         &mut RunDriver {
@@ -632,27 +713,68 @@ pub async fn run<J: Journal, M: Model>(
     )
     .await;
     if let Err(error) = driven {
-        if !crate::tender_analysis::draft::draft_should_publish_partial(
-            &error.code,
-            &error.message,
-        ) {
-            return Err(error);
-        }
-        crate::tender_analysis::draft::omit_pending_deadline(&mut state.analysis.draft_plan);
+        if is_outline_run || !crate::tender_analysis::draft::draft_should_publish_partial(&error.code, &error.message) { return Err(error); }
     }
-    finish_draft_path(input, config, journal, &mut state, input_sha256).await
+    if is_outline_run && !super::outline_flow::checked(input, &state) {
+        return Err(invalid("outline completeness check has not passed; checkpoint retained"));
+    }
+    let stage = state.draft_stage;
+    let turns = state.turn;
+    let result = finish_draft_path(input, config, journal, &mut state, input_sha256).await;
+    // 出稿快慢是要压下去的目标，不是闸门：这里只记账，供回归对比，不影响成败。
+    if let Ok(published) = result.as_ref() {
+        let elapsed_secs = started.elapsed().as_secs();
+        let target = if seeded {
+            crate::tender_analysis::draft::FILL_DEADLINE_SECS
+        } else {
+            crate::tender_analysis::draft::OUTLINE_DEADLINE_TARGET_SECS
+        };
+        tracing::info!(
+            event = "draft_run_published",
+            stage = ?stage,
+            fill_run = seeded,
+            turns,
+            elapsed_secs,
+            chapters = published.analysis.draft_plan.len(),
+            filled = published
+                .analysis
+                .draft_plan
+                .iter()
+                .filter(|item| {
+                    item.status == crate::tender_analysis::draft::DraftStatus::Filled
+                })
+                .count(),
+            degraded = state.draft_degraded.len(),
+            stopped = state.draft_stopped,
+            turn_target = if seeded {
+                crate::tender_analysis::draft::fill_turn_cap(published.analysis.draft_plan.len())
+            } else {
+                crate::tender_analysis::draft::OUTLINE_TURN_TARGET
+            },
+            seconds_target = target,
+        );
+    }
+    result
 }
 
 async fn finish_draft_path<J: Journal>(
     input: &FrozenInput,
-    _config: &Config,
+    config: &Config,
     journal: &J,
     state: &mut Checkpoint,
     input_sha256: String,
 ) -> Result<AnalysisResult, AgentError> {
-    crate::tender_analysis::draft::omit_pending_deadline(&mut state.analysis.draft_plan);
+    // Running out of turns never retires a chapter. Pending means "still waiting
+    // for a body", and it compiles to an empty heading the user can write into;
+    // Omitted drops the heading entirely, which would delete a chapter the user
+    // has in front of them in Word.
     if !crate::tender_analysis::draft::plan_ready(&state.analysis.draft_plan) {
-        return Err(invalid("draft outline missing"));
+        // A zero-node outline cannot compile a chapter document without
+        // inventing a chapter, so this stays an explicit failure rather than a
+        // job that succeeds with no editable artifact.
+        return Err(invalid(
+            "draft outline has no chapter; tender parsing produced no bid composition clause",
+        ));
     }
     state.draft_stage = crate::tender_analysis::draft::DraftStage::Published;
     state.done = true;
@@ -672,42 +794,33 @@ async fn finish_draft_path<J: Journal>(
         quality: "needs_review".into(),
         source_views: state.source_views.clone(),
     };
-    if state
-        .analysis
-        .draft_plan
-        .iter()
-        .any(|item| item.status == crate::tender_analysis::draft::DraftStatus::Filled)
-    {
-        match crate::docx_composition::synthesize_draft_document(input, &result) {
-            Ok(composed) => {
-                match crate::docx_composition::compiler::compile(
-                    input, &result, &composed, 2_000_000,
-                ) {
-                    Ok(compiled) => {
-                        let sha = {
-                            use sha2::{Digest, Sha256};
-                            hex::encode(Sha256::digest(&compiled.docx))
-                        };
-                        state.draft_compile_object_id = Some(format!("objects/{sha}"));
-                        state.draft_docx_base64 = Some(base64::Engine::encode(
-                            &base64::engine::general_purpose::STANDARD,
-                            &compiled.docx,
-                        ));
-                    }
-                    Err(error) => tracing::warn!(
-                        event = "draft_compile_failed",
-                        %error,
-                        "filled draft chapters kept; compile skipped"
-                    ),
-                }
-            }
-            Err(error) => tracing::warn!(
-                event = "draft_synthesize_failed",
-                %error,
-                "filled draft chapters kept; compile skipped"
-            ),
-        }
+    // Phase one must hand the user an editable Word file, so the outline
+    // skeleton compiles too; a job that succeeds without a DOCX leaves the
+    // workspace with nothing to edit.
+    let outcome = crate::tender_analysis::draft::compile_draft(
+        input,
+        &result,
+        config.limits.max_draft_docx_bytes,
+    )
+    .map_err(|error| invalid(format!("draft compile failed: {error}")))?;
+    if !outcome.degraded.is_empty() {
+        tracing::warn!(
+            event = "draft_compile_degraded",
+            chapters = outcome.degraded.len(),
+            "chapter bodies dropped to fit the configured byte budget"
+        );
+        state.draft_degraded = outcome.degraded.clone();
     }
+    let compiled = outcome.compiled;
+    let sha = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(&compiled.docx))
+    };
+    state.draft_compile_object_id = Some(format!("objects/{sha}"));
+    state.draft_docx_base64 = Some(base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &compiled.docx,
+    ));
     if let Err(error) = journal.save(state, &state.progress(input)).await {
         if error.code == "FROZEN_INPUT_DIGEST_MISMATCH" {
             tracing::warn!(
@@ -762,6 +875,7 @@ pub(super) async fn execute_turn<J: Journal>(
     if let Some(delivered) = state.pending_coverage.take() {
         state.replace_coverage(delivered);
     }
+    let outline_phase_before = state.analysis.outline.phase;
     let role = state.role.clone();
     state.transcript.push(json!({"role":"assistant","content":if response.content.is_empty(){Value::Null}else{json!(response.content)},
         "tool_calls":response.tool_calls.iter().map(|c|json!({"id":c.id,"type":"function","function":{"name":c.name,"arguments":c.arguments}})).collect::<Vec<_>>()}));
@@ -774,7 +888,6 @@ pub(super) async fn execute_turn<J: Journal>(
     let mut tool_results = Vec::new();
     let mut local_completion = None;
     let mut batch_failed = false;
-    let mut analysis_mutated = false;
     fit_batch(input, config, state, &response.tool_calls, &pending_views).await?;
     for (call_index, call) in response.tool_calls.iter().enumerate() {
         let tool_started = Instant::now();
@@ -947,19 +1060,6 @@ pub(super) async fn execute_turn<J: Journal>(
             }
         }
         batch_failed |= !succeeded;
-        analysis_mutated |= succeeded
-            && matches!(
-                call.name.as_str(),
-                "put_record"
-                    | "put_relation"
-                    | "set_disposition"
-                    | "delete_record"
-                    | "put_repair_result"
-                    | "put_outline_item"
-                    | "omit_outline_item"
-                    | "put_chapter_template"
-                    | "put_chapter_omission"
-            );
         if succeeded
             && let Some(completion) =
                 context::focused_completion(state, &call.name, &out["result"]).map_err(invalid)?
@@ -1007,10 +1107,13 @@ pub(super) async fn execute_turn<J: Journal>(
         // full analysis digest without repairing any of its findings.
         record_completed_review(input, config, state, true).map_err(invalid)?;
     }
-    crate::tender_analysis::draft::after_batch(input, state, analysis_mutated, batch_failed)
+    // 停止只在填章回路里问一次，且只在章界生效：本章仍按预算写完，之后不再派新章。
+    let stop = state.draft_stage == crate::tender_analysis::draft::DraftStage::Fill
+        && journal.stop_requested().await?;
+    crate::tender_analysis::draft::after_batch(input, state, batch_failed, stop)
         .map_err(invalid)?;
     state.turn += 1;
-    if state.role != role {
+    if state.role != role || (outline_phase_before != state.analysis.outline.phase && state.analysis.outline.phase == super::outline_flow::Phase::Check) {
         state.transcript.clear();
     }
     Ok(tool_results)
@@ -1472,6 +1575,14 @@ pub(super) async fn prepare_request(
                 "progress":state.progress(input),
                 "work":context::request_work(state).map_err(invalid)?,
             });
+            if matches!(
+                state.draft_stage,
+                draft::DraftStage::None | draft::DraftStage::Outline
+            ) {
+                packet["source_index"] =
+                    draft::outline_index(input, state, config.limits.max_tool_result_bytes);
+                packet["outline_state"] = super::outline_flow::packet(input, state, config.limits.max_tool_result_bytes).map_err(invalid)?;
+            }
             if let Some(evidence) = &preloaded_evidence {
                 packet["preloaded_evidence"] = evidence.clone();
             }
@@ -1494,9 +1605,9 @@ pub(super) async fn prepare_request(
             messages,
             if config.limits.draft_path {
                 if draft_fill {
-                    crate::tender_analysis::draft::fill_schemas_for(input)
+                    crate::tender_analysis::draft::fill_schemas()
                 } else {
-                    crate::tender_analysis::draft::outline_schemas_for(input)
+                    crate::tender_analysis::draft::outline_schemas()
                 }
             } else {
                 tools::schemas_for(reviewer, &config.limits)
@@ -1947,6 +2058,11 @@ fn apply_inner(
             && matches!(
                 name,
                 "put_outline_item"
+                    | "put_outline_items"
+                    | "submit_outline_scan"
+                    | "read_outline"
+                    | "finish_outline"
+                    | "submit_outline_check"
                     | "omit_outline_item"
                     | "put_chapter_template"
                     | "put_chapter_omission"
@@ -1962,6 +2078,11 @@ fn apply_inner(
         if matches!(
             name,
             "put_outline_item"
+                    | "put_outline_items"
+                    | "submit_outline_scan"
+                    | "read_outline"
+                    | "finish_outline"
+                    | "submit_outline_check"
                 | "omit_outline_item"
                 | "put_chapter_template"
                 | "put_chapter_omission"
@@ -1970,7 +2091,7 @@ fn apply_inner(
         }
         if !matches!(
             name,
-            "read_source" | "read_form" | "search_sources" | "read_source_view"
+            "collection_index" | "source_index" | "read_source" | "read_form" | "search_sources" | "read_source_view"
         ) {
             return Err("unknown or role-forbidden tool".into());
         }

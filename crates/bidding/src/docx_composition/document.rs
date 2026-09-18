@@ -276,6 +276,19 @@ fn page_break(node: roxmltree::Node<'_, '_>) -> bool {
             == 1
 }
 
+fn preserved<'a>(
+    input: &'a Value,
+    block: &crate::docx_template::TemplateBlock,
+) -> Result<&'a Value, String> {
+    let key = block
+        .preserved_key
+        .as_deref()
+        .ok_or("preserved block has no receipt key")?;
+    input["preserved_units"]
+        .get(key)
+        .ok_or_else(|| "preserved content is not in the readback receipt".to_string())
+}
+
 pub fn verify(
     bytes: &[u8],
     input: &Value,
@@ -432,6 +445,55 @@ pub fn verify(
                                     "proposed response table contains unexpected content".into()
                                 );
                             }
+                        }
+                    }
+                }
+                // 保留内容按收据逐字校验：用户写的正文既不能被改写，也不能被
+                // 悄悄丢掉。收据在 input 里，块只带 key。
+                "preserved_paragraphs" => {
+                    let unit = preserved(input, block)?;
+                    let expected = unit["paragraphs"]
+                        .as_array()
+                        .ok_or("preserved paragraphs missing")?
+                        .iter()
+                        .map(|item| {
+                            item.as_str()
+                                .map(normalized)
+                                .ok_or("preserved paragraph is not text")
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if rendered.paragraphs != expected || rendered.table.is_some() {
+                        return Err("preserved paragraphs did not survive DOCX rendering".into());
+                    }
+                }
+                "preserved_table" => {
+                    let unit = preserved(input, block)?;
+                    if !rendered.paragraphs.is_empty() {
+                        return Err("paragraph unexpectedly replaces a preserved table".into());
+                    }
+                    let table = rendered
+                        .table
+                        .as_ref()
+                        .ok_or("preserved table is absent from DOCX")?;
+                    if Some(table.rows as u64) != unit["row_count"].as_u64()
+                        || table.grid_twips.len() as u64
+                            != unit["column_count"].as_u64().unwrap_or(0)
+                        || !table.headers.is_empty()
+                    {
+                        return Err("preserved table geometry changed".into());
+                    }
+                    let raw = unit["cells"].as_array().ok_or("preserved cells missing")?;
+                    for cell in &table.cells {
+                        let source = raw
+                            .iter()
+                            .find(|c| c["row"] == cell.row && c["column"] == cell.column)
+                            .ok_or("unexpected preserved cell")?;
+                        if cell.text
+                            != normalized(source["text"].as_str().ok_or("preserved cell text")?)
+                            || source["row_span"].as_u64() != Some(cell.rowspan as u64)
+                            || source["col_span"].as_u64() != Some(cell.colspan as u64)
+                        {
+                            return Err("preserved cell wording or merge changed".into());
                         }
                     }
                 }

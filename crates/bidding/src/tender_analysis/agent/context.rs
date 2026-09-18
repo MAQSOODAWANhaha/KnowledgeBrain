@@ -572,6 +572,12 @@ pub(in crate::tender_analysis) fn check_read_scope(
     let work = state
         .work()
         .ok_or("host must assign an active source pack before reading")?;
+    // 草稿通道的读取范围是「当前窗 ∪ S1 索引里列出的 source_id」：宿主逐窗投递，
+    // 缺依据的节点必须能按索引 id 定向补读，否则模型只能靠检索去撞。写入仍受
+    // grounds 覆盖与工作包约束。
+    if state.draft_stage != crate::tender_analysis::draft::DraftStage::None {
+        return Ok(());
+    }
     // Independent comparison can require another frozen original. Reading it
     // changes neither the assigned task nor candidate/write authorization.
     if work.status != WorkStatus::Active

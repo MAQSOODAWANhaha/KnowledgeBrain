@@ -283,6 +283,7 @@ async fn replay_recorded_requests_with_bounded_history() {
                 draft_docx_base64: None,
                 outline_config_sha256: None,
                 fill_config_sha256: None,
+                outline_run: Default::default(),
             };
             let before = state.clone();
             let bytes = agent::request(&input, &config, &mut state).await.unwrap();

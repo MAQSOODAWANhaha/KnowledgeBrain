@@ -1443,10 +1443,16 @@ fn oversized_delivered_images_release_pixels_without_losing_their_batch_candidat
         source_views: BTreeMap::new(),
         draft_stage: Default::default(),
         draft_active_id: None,
+        draft_outline_gaps: None,
+        draft_outline_stalls: 0,
+        draft_outline_window: 0,
+        draft_degraded: Vec::new(),
+        draft_stopped: false,
         draft_compile_object_id: None,
         draft_docx_base64: None,
         outline_config_sha256: None,
         fill_config_sha256: None,
+        outline_run: Default::default(),
     };
     for id in ["first", "second"] {
         let view = views::SourceView {

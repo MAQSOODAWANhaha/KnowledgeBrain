@@ -162,7 +162,10 @@ pub fn plan_tree(plan: &[crate::tender_analysis::draft::DraftPlanItem]) -> Vec<O
     for item in &ordered {
         match &item.parent {
             Some(parent) if ids.contains(parent) && parent != &item.id => {
-                children.entry(parent.clone()).or_default().push(item.id.clone());
+                children
+                    .entry(parent.clone())
+                    .or_default()
+                    .push(item.id.clone());
             }
             _ => roots.push(item.id.clone()),
         }
@@ -505,7 +508,10 @@ mod tests {
         assert_eq!(outline.extracted[0].title, "技术投标文件");
         assert_eq!(outline.extracted[0].kind, "chapter");
         assert_eq!(outline.extracted[0].children[0].title, "8. 包装及运输");
-        assert_eq!(outline.extracted[0].children[0].children[0].title, "8.1 大件运输");
+        assert_eq!(
+            outline.extracted[0].children[0].children[0].title,
+            "8.1 大件运输"
+        );
         assert_eq!(outline.documents[0].source[0].title, "须知");
     }
 }

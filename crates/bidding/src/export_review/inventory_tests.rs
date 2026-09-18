@@ -83,6 +83,8 @@ fn service_read(
             kind: "image".into(),
             bookmarks: vec![],
             fields: vec![],
+            heading_level: None,
+            field_region: None,
             status: "not_checked".into(),
             reason: Some("visual review required".into()),
         });

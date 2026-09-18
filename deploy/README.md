@@ -6,13 +6,13 @@ Redis、MinIO；Neo4j 可选。
 
 ## 招投标编辑接入状态
 
-[ONLYOFFICE/DOCX 技术方向](../docs/bidding/onlyoffice.md)已确认，普通实施与隔离开发验证已授权，任务见[实施台账](../plans/implementation-tasks.md)；ONLYOFFICE/DOCX 主链已有部分实现和隔离验证，真实整稿及生产部署仍待验收。编辑与出件顺序见 [接入计划](../plans/bidding/onlyoffice-integration.md)，Agent 运行、模型协议和配置改造见 [Rig 方案](../plans/bidding/agent-runtime-rig.md)。
+[ONLYOFFICE/DOCX 技术方向](../docs/bidding/onlyoffice.md)已确认，普通实施与隔离开发验证已授权，任务见[实施台账](../plans/implementation-tasks.md)；ONLYOFFICE/DOCX 主链已有部分实现和隔离验证，真实整稿及生产部署仍待验收。编辑与出件顺序见 [接入计划](../plans/bidding/onlyoffice-integration.md)，Agent 运行、模型协议和配置改造见 [投标生成统一方案](../plans/bidding/product-two-phase.md)。
 
-本地 `--profile runtime` **包含** Community Document Server（`onlyoffice`，映射 `ONLYOFFICE_HOST_PORT`，默认 18081）。`deploy/.env.example` 必须填写 `KB_ONLYOFFICE_*`（浏览器 origin、容器内 command origin、API origin、两套独立 secret）；缺项时打开编辑器 fail-closed。Community 镜像只用于本地闭环，不代表生产嵌入许可、字体或并发已验收。同稿 PDF 仍属 O2。基础编辑/保存不依赖外部 Automation API。
+本地 `--profile runtime` **包含** Community Document Server（`onlyoffice`，映射 `ONLYOFFICE_HOST_PORT`，默认 18081）。`deploy/.env.example` 必须填写 `KB_ONLYOFFICE_*`（浏览器 origin、容器内 command origin、API origin、两套独立 secret）；缺项时打开编辑器 fail-closed。Community 镜像只用于本地闭环，不代表生产嵌入许可、字体或并发已验收。同版 PDF 的当前实施与验收归主方案 T7／T9。基础编辑/保存不依赖外部 Automation API。
 
 ### Agent 与模型配置改造（待实施）
 
-投标 Agent 按 [统一 Agent 方案](../plans/bidding/agent-runtime-rig.md)仅使用 Chat Completions；不新增 Responses 或协议切换配置，模型与凭据统一来自 `deploy/.env`。Rig/Chat 已接入，新增语义修复、编制和终检按统一方案分阶段验证，真实全链尚未验收；能力与证据见[主方案 §19](../plans/bidding/agent-runtime-rig.md#19-当前能力真实验收与下一步)。Embedding 继续走知识库现有独立接口，索引身份一致性是[知识库独立事项](../plans/knowledge-base/README.md#模型与索引一致性独立事项)，不作为提取修复前置。
+投标 Agent 按 [投标生成统一方案](../plans/bidding/product-two-phase.md)仅使用 Chat Completions；不新增 Responses 或协议切换配置，模型与凭据统一来自 `deploy/.env`。Rig/Chat 已接入，发现、组织、片段核对、发布及可选填充按统一方案 T0–T9 分阶段验证，真实全链尚未验收；能力与证据见[投标生成统一方案](../plans/bidding/product-two-phase.md)。Embedding 继续走知识库现有独立接口，索引身份一致性是[知识库独立事项](../plans/knowledge-base/README.md#模型与索引一致性独立事项)，不作为提取修复前置。
 
 ## Fresh 启动
 

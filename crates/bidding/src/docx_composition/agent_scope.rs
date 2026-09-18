@@ -274,6 +274,7 @@ impl WriteAuthority {
                             }
                         }
                         Content::SourceResponse { need, .. } => self.reference(need)?,
+                        Content::BidderBlank | Content::Preserved { .. } => {}
                     }
                 }
                 Ok(())

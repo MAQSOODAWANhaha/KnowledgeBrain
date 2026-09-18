@@ -1,5 +1,7 @@
 # 真实稿指定格式验收清单
 
+> 历史验证记录：仅说明所记录版本的结果，不是现行设计或新流程验收。当前方案与任务见 [统一方案](../../plans/bidding/product-two-phase.md)。
+
 本清单针对 `testdata/bid/BiddingFile.pdf`，用于验收 Agent 生成的整稿。2026-09-08 已逐页核对物理第74–106页的文本和非空网格内容，共47个来源单元、14个网格、187个非空单元格；另查看第8、81、87、91、92、95、96、98页原图核对适用性、签署归属与表格布局。此处不宣称全部106页或实际 Agent DOCX 已通过验收。
 
 机器可核查依据：`artifacts/bid-full-sample/format-review/prescribed-format-inventory.json`（24项来源预期），`source-to-analysis-review-v2.json`（修订后的19项发现）。原始招标、旧提取结果和第一版审计报告均保留。

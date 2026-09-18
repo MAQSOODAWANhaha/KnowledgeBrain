@@ -60,13 +60,40 @@ async fn verify(
     }
     Ok(())
 }
+/// 请求的模式。终稿编制与草稿填章共用这条轨道，出稿产物与执行体都不同，所以
+/// 每次执行（包括 replay）都要先读出模式，不能按 request_kind 假定。
+async fn mode(pool: &PgPool, job: &DocxComposeJobV2) -> Result<super::CompositionMode, AgentError> {
+    let snapshot: Option<Value> =
+        sqlx::query_scalar("SELECT kb_bid_v2_load_docx_composition_request($1,$2,$3::kb_sha256)")
+            .bind(job.request.request_artifact_id)
+            .bind(job.request.request_revision)
+            .bind(&job.request.frozen_input_sha256)
+            .fetch_one(pool)
+            .await
+            .map_err(db_error)?;
+    match snapshot.as_ref().and_then(|value| value["mode"].as_str()) {
+        Some("official") => Ok(super::CompositionMode::Official),
+        Some("draft-fill") => Ok(super::CompositionMode::DraftFill),
+        _ => Err(AgentError::new(
+            "FROZEN_INPUT_MISSING",
+            "composition request mode missing",
+        )),
+    }
+}
+
 async fn replay(
     pool: &PgPool,
     job: &DocxComposeJobV2,
     io: &dyn ObjectIo,
+    mode: super::CompositionMode,
     cancel: &CancellationToken,
 ) -> Result<Option<Value>, AgentError> {
-    let receipt = postgres::replay_receipt(pool, &job.request).await?;
+    let receipt = match mode {
+        super::CompositionMode::Official => postgres::replay_receipt(pool, &job.request).await?,
+        super::CompositionMode::DraftFill => {
+            super::fill::replay_publication(pool, &job.request).await?
+        }
+    };
     if let Some(r) = &receipt {
         verify(
             io,
@@ -79,18 +106,123 @@ async fn replay(
             cancel,
         )
         .await?;
-        verify(
-            io,
-            r["manifest"]["sha256"]
-                .as_str()
-                .ok_or_else(|| invalid("manifest digest missing"))?,
-            r["manifest"]["byte_length"]
-                .as_u64()
-                .ok_or_else(|| invalid("manifest length missing"))?,
-            cancel,
-        )
-        .await?;
+        // 草稿填章不产出 composition manifest：它不是终稿，没有 32 项复核收据。
+        if mode == super::CompositionMode::Official {
+            verify(
+                io,
+                r["manifest"]["sha256"]
+                    .as_str()
+                    .ok_or_else(|| invalid("manifest digest missing"))?,
+                r["manifest"]["byte_length"]
+                    .as_u64()
+                    .ok_or_else(|| invalid("manifest length missing"))?,
+                cancel,
+            )
+            .await?;
+        }
     }
+    Ok(receipt)
+}
+
+/// 填章执行体：回读当前 Word → 分析侧 Fill 合同 → 整篇重编译 → 发布新版本。
+async fn fill_work<M: crate::tender_analysis::agent::Model>(
+    pool: &PgPool,
+    job: &DocxComposeJobV2,
+    owner: &AgentRunLease,
+    io: &dyn ObjectIo,
+    cleanup: &StagedObjectCleanupTracker,
+    model: &M,
+    cancel: &CancellationToken,
+) -> Result<Value, AgentError> {
+    use base64::Engine as _;
+    let request = super::fill::load_request(pool, &job.request).await?;
+    let expected = request
+        .expected
+        .clone()
+        .ok_or_else(|| invalid("fill request does not name the DOCX it fills"))?;
+    let ceiling = request.config.limits.max_draft_docx_bytes;
+    let current = io.read(&expected.docx_sha256, ceiling, cancel).await?;
+    let prepared = super::fill::restore(
+        pool,
+        request,
+        &job.request.frozen_input_sha256,
+        current,
+        cancel,
+    )
+    .await?;
+    let journal = crate::tender_analysis::postgres::PgJournal {
+        pool,
+        request: &job.request,
+        owner,
+        source_reader: None,
+    };
+    // 写作窗比信封窗短：到点只停「写」，编译、登记与入稿仍在信封里完成，所以到期
+    // 也有一份带已填章的 Word，而不是零产物。外层取消（worker 关停）照旧穿透。
+    let writing = cancel.child_token();
+    let stop_writing = writing.clone();
+    let window = tokio::spawn(async move {
+        tokio::select! {
+            biased;
+            _ = stop_writing.cancelled() => {}
+            _ = tokio::time::sleep(std::time::Duration::from_secs(
+                crate::tender_analysis::draft::FILL_DEADLINE_SECS)) => stop_writing.cancel(),
+        }
+    });
+    let run = crate::tender_analysis::agent::run_fill(
+        &prepared.input,
+        &prepared.request.config,
+        &journal,
+        model,
+        &writing,
+        prepared.seed,
+    )
+    .await;
+    writing.cancel();
+    window.abort();
+    run?;
+    // 出稿字节只认持久化的检查点：内存里的产物不能绕过 checkpoint 攻证。
+    let checkpoint = crate::tender_analysis::agent::Journal::load(&journal)
+        .await?
+        .ok_or_else(|| invalid("finished fill run has no checkpoint"))?;
+    let docx = base64::engine::general_purpose::STANDARD
+        .decode(
+            checkpoint
+                .draft_docx_base64
+                .as_deref()
+                .ok_or_else(|| invalid("fill run compiled no DOCX"))?,
+        )
+        .map_err(invalid)?;
+    let sha = hex::encode(Sha256::digest(&docx));
+    let stage = Uuid::new_v4();
+    if cancel.is_cancelled() {
+        return Err(cancelled());
+    }
+    cleanup.register(stage);
+    platform::stage_object_upload(
+        pool,
+        stage,
+        &platform::object_ref(&sha),
+        &sha,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        i64::try_from(docx.len()).map_err(invalid)?,
+        &prepared.request.actor,
+    )
+    .await
+    .map_err(db_error)?;
+    io.write(&sha, &docx, cancel).await?;
+    verify(io, &sha, docx.len() as u64, cancel).await?;
+    if cancel.is_cancelled() {
+        return Err(cancelled());
+    }
+    let receipt = super::fill::publish_staged(
+        pool,
+        &job.request,
+        owner,
+        &crate::tender_analysis::digest(&checkpoint).map_err(invalid)?,
+        stage,
+    )
+    .await?;
+    cleanup.disarm(stage);
     Ok(receipt)
 }
 
@@ -101,9 +233,25 @@ pub async fn execute(
     io: &dyn ObjectIo,
     cleanup: &StagedObjectCleanupTracker,
 ) -> Result<Value, AgentError> {
-    execute_with_model(pool, job, cancel, io, cleanup, &agent::ConfiguredModel).await
+    match mode(pool, job).await? {
+        super::CompositionMode::Official => {
+            execute_with_model(pool, job, cancel, io, cleanup, &agent::ConfiguredModel).await
+        }
+        super::CompositionMode::DraftFill => {
+            execute_fill_with_model(
+                pool,
+                job,
+                cancel,
+                io,
+                cleanup,
+                &crate::tender_analysis::agent::ConfiguredModel,
+            )
+            .await
+        }
+    }
 }
 
+/// 终稿编制：32 项 + Rechecker，出稿带 composition manifest。
 pub async fn execute_with_model<M: agent::Model>(
     pool: &PgPool,
     job: &DocxComposeJobV2,
@@ -111,6 +259,60 @@ pub async fn execute_with_model<M: agent::Model>(
     io: &dyn ObjectIo,
     cleanup: &StagedObjectCleanupTracker,
     model: &M,
+) -> Result<Value, AgentError> {
+    execute_work(
+        pool,
+        job,
+        cancel,
+        io,
+        cleanup,
+        Work::<M, crate::tender_analysis::agent::ConfiguredModel>::Official(model),
+    )
+    .await
+}
+
+/// 用户触发的填章：分析侧 Fill 合同，出稿只有整篇重编译的 DOCX。
+pub async fn execute_fill_with_model<M: crate::tender_analysis::agent::Model>(
+    pool: &PgPool,
+    job: &DocxComposeJobV2,
+    cancel: &CancellationToken,
+    io: &dyn ObjectIo,
+    cleanup: &StagedObjectCleanupTracker,
+    model: &M,
+) -> Result<Value, AgentError> {
+    execute_work(
+        pool,
+        job,
+        cancel,
+        io,
+        cleanup,
+        Work::<agent::ConfiguredModel, M>::Fill(model),
+    )
+    .await
+}
+
+/// 两种执行体共用同一套认领、心跳与队列语义；只有中间那段业务不同。
+enum Work<'a, C: agent::Model, F: crate::tender_analysis::agent::Model> {
+    Official(&'a C),
+    Fill(&'a F),
+}
+
+impl<C: agent::Model, F: crate::tender_analysis::agent::Model> Work<'_, C, F> {
+    fn mode(&self) -> super::CompositionMode {
+        match self {
+            Self::Official(_) => super::CompositionMode::Official,
+            Self::Fill(_) => super::CompositionMode::DraftFill,
+        }
+    }
+}
+
+async fn execute_work<C: agent::Model, F: crate::tender_analysis::agent::Model>(
+    pool: &PgPool,
+    job: &DocxComposeJobV2,
+    cancel: &CancellationToken,
+    io: &dyn ObjectIo,
+    cleanup: &StagedObjectCleanupTracker,
+    work_kind: Work<'_, C, F>,
 ) -> Result<Value, AgentError> {
     job.request.validate().map_err(invalid)?;
     // Attest every transported scope before claiming; a forged payload cannot
@@ -130,7 +332,15 @@ pub async fn execute_with_model<M: agent::Model>(
             "composition job scope changed",
         ));
     }
-    if let Some(receipt) = replay(pool, job, io, cancel).await? {
+    // 执行体必须与请求冻结的模式一致：终稿合同不得跑在填章请求上，反之亦然。
+    let mode = mode(pool, job).await?;
+    if mode != work_kind.mode() {
+        return Err(AgentError::new(
+            "FROZEN_INPUT_DIGEST_MISMATCH",
+            "composition request mode does not match this runtime",
+        ));
+    }
+    if let Some(receipt) = replay(pool, job, io, mode, cancel).await? {
         return Ok(receipt);
     }
     if cancel.is_cancelled() {
@@ -147,7 +357,7 @@ pub async fn execute_with_model<M: agent::Model>(
     match claim["disposition"].as_str() {
         Some("obsolete" | "live_owner" | "exhausted") => {
             // Publication may have committed between the initial read and claim.
-            return Ok(replay(pool, job, io, cancel).await?.unwrap_or(claim));
+            return Ok(replay(pool, job, io, mode, cancel).await?.unwrap_or(claim));
         }
         Some("claimed") => {}
         _ => return Err(invalid("unknown composition claim disposition")),
@@ -172,6 +382,12 @@ pub async fn execute_with_model<M: agent::Model>(
     let finished = CancellationToken::new();
     let work = async {
         let result = async {
+            let model = match work_kind {
+                Work::Fill(model) => {
+                    return fill_work(pool, job, &owner, io, cleanup, model, &local).await;
+                }
+                Work::Official(model) => model,
+            };
             let prepared = postgres::load_request(pool, &job.request).await?;
             let journal = postgres::PgJournal {
                 pool,
@@ -248,7 +464,15 @@ pub async fn execute_with_model<M: agent::Model>(
     let heartbeat = async {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let deadline = tokio::time::sleep(std::time::Duration::from_secs(45 * 60));
+        // 终稿编制与整体填充各记一套墙钟；两者都短于 SQL 的 46 分钟硬租约。
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(match mode {
+            super::CompositionMode::Official => {
+                crate::tender_analysis::draft::OFFICIAL_DEADLINE_SECS
+            }
+            super::CompositionMode::DraftFill => {
+                crate::tender_analysis::draft::FILL_ENVELOPE_DEADLINE_SECS
+            }
+        }));
         tokio::pin!(deadline);
         loop {
             let error = tokio::select! {
@@ -280,7 +504,7 @@ pub async fn execute_with_model<M: agent::Model>(
     }
     // Lost publication ACK must resolve through the immutable receipt before any
     // failure effect. This also covers a heartbeat racing a successful commit.
-    if let Some(receipt) = replay(pool, job, io, cancel).await? {
+    if let Some(receipt) = replay(pool, job, io, mode, cancel).await? {
         return Ok(receipt);
     }
     let error = heartbeat_error.unwrap_or_else(|| result.unwrap_err());

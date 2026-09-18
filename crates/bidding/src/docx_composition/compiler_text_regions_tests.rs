@@ -41,6 +41,7 @@ fn fixture(parts: &[(&str, bool)]) -> (FrozenInput, AnalysisResult) {
                     RegionRole::FixedText
                 },
                 form_id: None,
+                header_rows: None,
                 cells: vec![],
                 blank_ranges: vec![],
                 instruction: "source policy".into(),

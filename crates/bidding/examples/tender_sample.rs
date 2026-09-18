@@ -338,18 +338,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(false)
     {
         let turns = if operator_turns == 0 {
-            ta::draft::DRAFT_MAX_TURNS
+            ta::draft::OUTLINE_MAX_TURNS
         } else {
-            operator_turns.min(ta::draft::DRAFT_MAX_TURNS)
+            operator_turns.min(ta::draft::OUTLINE_MAX_TURNS)
         };
         limits["extraction"]["max_turns"] = json!(turns);
         limits["extraction"]["reviewer_reserve"] = json!(0);
+        // 阶段一记的是**绝对值目标**与兜底上限，不是「不达标就算失败」的门：先要
+        // 成功出骨架，然后把耗时往下压。旧的 extract-6 416 回合来自非 draft 的按
+        // source 抽取路径，与骨架不可比，不再作为基线出现在产物里。
         limits["budget_estimate"] = json!({
             "kind":"draft_path",
             "applied_turns":turns,
             "applied_physical":operator_physical,
             "reviewer_reserve":0,
-            "extract6_turns_reference":416
+            "outline_turn_target":ta::draft::OUTLINE_TURN_TARGET,
+            "outline_seconds_target":ta::draft::OUTLINE_DEADLINE_TARGET_SECS,
+            "outline_turn_backstop":ta::draft::OUTLINE_MAX_TURNS,
+            "outline_deadline_backstop_secs":ta::draft::DRAFT_DEADLINE_SECS,
+            "outline_attempt_backstop":ta::draft::DRAFT_MAX_ATTEMPTS
         });
     } else {
         match ta::budget::apply_with_pack(
@@ -470,10 +477,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     source_views: BTreeMap::new(),
                     draft_stage: Default::default(),
                     draft_active_id: None,
+                    draft_outline_gaps: None,
+                    draft_outline_stalls: 0,
+                    draft_outline_window: 0,
+                    draft_degraded: Vec::new(),
+                    draft_stopped: false,
                     draft_compile_object_id: None,
                     draft_docx_base64: None,
                     outline_config_sha256: None,
                     fill_config_sha256: None,
+                    outline_run: Default::default(),
                 };
                 if state.role == extraction::Role::Reviewer {
                     ta::source_review::select_next(&input, &config, &mut state)?;

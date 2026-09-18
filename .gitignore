@@ -27,3 +27,4 @@ artifacts/
 testdata/
 *.png
 .pi-lens.json
+.p4a-spike/

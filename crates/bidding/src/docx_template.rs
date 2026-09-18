@@ -90,6 +90,10 @@ pub struct TemplateBlock {
     pub blank_ranges: Vec<crate::template_grid::CellTextRange>,
     pub columns: Vec<String>,
     pub blank_rows: usize,
+    /// 回读保留内容的收据 key，指向 `input["preserved_units"]` 里的单元。块本身
+    /// 不带正文，和 `quote`/`source_excerpt` 一样只引用已验证的来源。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserved_key: Option<String>,
 }
 
 /// Exact frozen evidence; there is deliberately no model-supplied text field.
@@ -244,6 +248,27 @@ fn twips(mm: f64) -> usize {
 
 /// Produce only new OOXML bytes. Fixed text must occur in the frozen sources;
 /// cells and source/form coverage are checked before any package is returned.
+/// 回读保留内容只能从收据里取：块给 key，内容在 `input["preserved_units"]` 里，
+/// 那份 map 由宿主从绑 `file_sha256` 的 docreader 收据构造。
+fn preserved_unit<'a>(
+    input: &'a Value,
+    block: &TemplateBlock,
+    kind: &str,
+) -> Result<&'a Value, TemplateError> {
+    let key = block
+        .preserved_key
+        .as_deref()
+        .ok_or_else(|| invalid("preserved block has no receipt key"))?;
+    let unit = input["preserved_units"]
+        .get(key)
+        .ok_or_else(|| invalid("preserved content is not in the readback receipt"))?;
+    check(
+        unit["kind"] == kind,
+        "preserved receipt kind does not match the primitive",
+    )?;
+    Ok(unit)
+}
+
 pub fn compile_template(input: &Value, plan: &TemplatePlan) -> Result<Vec<u8>, TemplateError> {
     let sources = input["source_units"]
         .as_array()
@@ -371,6 +396,13 @@ pub fn compile_template(input: &Value, plan: &TemplatePlan) -> Result<Vec<u8>, T
             check(
                 block.kind == "text_regions" || block.text_regions.is_empty(),
                 "text regions require their own primitive",
+            )?;
+            check(
+                matches!(
+                    block.kind.as_str(),
+                    "preserved_paragraphs" | "preserved_table"
+                ) == block.preserved_key.is_some(),
+                "preserved content requires its own primitive and a receipt key",
             )?;
             match block.kind.as_str() {
                 "text_regions" => {
@@ -639,6 +671,90 @@ pub fn compile_template(input: &Value, plan: &TemplatePlan) -> Result<Vec<u8>, T
                         &cells,
                         &vec![printable / count as f64; count],
                         1,
+                        printable,
+                    )?;
+                }
+                // 用户已经写好的正文原样回去。文本不来自模型，也不来自招标原文，
+                // 而来自绑 file_sha256 的回读收据；这里只按 key 取，不接受内联文本。
+                "preserved_paragraphs" => {
+                    check(
+                        block.source_id.is_none()
+                            && block.quote.is_none()
+                            && block.form_id.is_none()
+                            && block.columns.is_empty()
+                            && block.blank_cells.is_empty()
+                            && block.header_rows == 0
+                            && block.blank_rows == 0,
+                        "unexpected preserved paragraph fields",
+                    )?;
+                    let unit = preserved_unit(input, block, "paragraphs")?;
+                    let paragraphs = unit["paragraphs"]
+                        .as_array()
+                        .filter(|items| !items.is_empty() && items.len() <= 10000)
+                        .ok_or_else(|| invalid("preserved paragraphs missing"))?;
+                    let mut written = false;
+                    for item in paragraphs {
+                        let text = item
+                            .as_str()
+                            .ok_or_else(|| invalid("preserved paragraph is not text"))?;
+                        written |= !text.trim().is_empty();
+                        body += &paragraph(text, None)?;
+                    }
+                    check(written, "preserved paragraphs are all blank")?;
+                }
+                "preserved_table" => {
+                    check(
+                        block.source_id.is_none()
+                            && block.quote.is_none()
+                            && block.form_id.is_none()
+                            && block.columns.is_empty()
+                            && block.blank_cells.is_empty()
+                            && block.blank_ranges.is_empty()
+                            && block.header_rows == 0
+                            && block.blank_rows == 0,
+                        "unexpected preserved table fields",
+                    )?;
+                    let unit = preserved_unit(input, block, "table")?;
+                    let rows = unit["row_count"].as_u64().unwrap_or(0) as usize;
+                    let columns = unit["column_count"].as_u64().unwrap_or(0) as usize;
+                    check(
+                        rows > 0 && rows <= 10000 && columns > 0 && columns <= 1000,
+                        "preserved table geometry",
+                    )?;
+                    let raw = unit["cells"]
+                        .as_array()
+                        .ok_or_else(|| invalid("preserved table cells missing"))?;
+                    let mut anchors = Vec::new();
+                    for cell in raw {
+                        let row = cell["row"].as_u64().unwrap_or(u64::MAX) as usize;
+                        let column = cell["column"].as_u64().unwrap_or(u64::MAX) as usize;
+                        let row_span = cell["row_span"].as_u64().unwrap_or(0) as usize;
+                        let col_span = cell["col_span"].as_u64().unwrap_or(0) as usize;
+                        let text = cell["text"]
+                            .as_str()
+                            .ok_or_else(|| invalid("preserved cell is not text"))?;
+                        check(
+                            row < rows
+                                && column < columns
+                                && row_span >= 1
+                                && col_span >= 1
+                                && row + row_span <= rows
+                                && column + col_span <= columns,
+                            "preserved cell outside its own grid",
+                        )?;
+                        anchors.push((row, column, row_span, col_span, text));
+                    }
+                    check(!anchors.is_empty(), "preserved table has no cell")?;
+                    cells_used = cells_used
+                        .checked_add(rows * columns)
+                        .ok_or_else(|| invalid("table capacity"))?;
+                    check(cells_used <= 100000, "aggregate table capacity")?;
+                    body += &table_xml(
+                        rows,
+                        columns,
+                        &anchors,
+                        &vec![printable / columns as f64; columns],
+                        0,
                         printable,
                     )?;
                 }

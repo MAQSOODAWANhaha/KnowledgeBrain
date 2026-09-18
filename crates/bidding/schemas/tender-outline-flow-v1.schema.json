@@ -1,0 +1,190 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "submit_outline_scan",
+      "description": "Commit only inspected, delivered text byte ranges and dense form cell ranges. Empty requirement id allocates an ID. Preserve unresolved references and input problems; issues is the complete remaining issue list.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "text",
+          "forms",
+          "empty_sources",
+          "requirements",
+          "references",
+          "issues"
+        ],
+        "properties": {
+          "text": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          },
+          "forms": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "integer"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          },
+          "empty_sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "requirements": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "description",
+                "kind",
+                "applicability",
+                "condition",
+                "grounds",
+                "format_grounds",
+                "order_constraints"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "applicability": {
+                  "type": "string",
+                  "enum": [
+                    "required",
+                    "conditional",
+                    "not_applicable"
+                  ]
+                },
+                "condition": {
+                  "type": "string"
+                },
+                "grounds": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                },
+                "format_grounds": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                },
+                "order_constraints": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "kind": { "type": "string" }
+              }
+            }
+          },
+          "references": {
+            "type": "array",
+            "items": { "type": "object", "additionalProperties": false }
+          },
+          "issues": {
+            "type": "array",
+            "items": { "type": "object", "additionalProperties": false }
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_outline",
+      "description": "Read saved business state after history compaction.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "offset",
+          "limit"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "chapters",
+              "requirements",
+              "references",
+              "issues"
+            ]
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "finish_outline",
+      "description": "Finish chapter organization and start independent semantic checking. No publication occurs.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {}
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "submit_outline_check",
+      "description": "Check the current checklist and tree against original source clauses, including omitted requirements. Empty issues confirms the snapshot; findings reopen repair.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "snapshot_sha256",
+          "issues"
+        ],
+        "properties": {
+          "snapshot_sha256": {
+            "type": "string"
+          },
+          "issues": {
+            "type": "array",
+            "items": { "type": "object", "additionalProperties": false }
+          }
+        }
+      }
+    }
+  }
+]

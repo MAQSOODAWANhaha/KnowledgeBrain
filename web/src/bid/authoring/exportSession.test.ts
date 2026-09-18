@@ -74,6 +74,13 @@ describe("same-version export package", () => {
     await f.session.start(); expect(f.calls.length).toBe(1); f.api.start = start; await f.session.load(true); await f.session.start();
     expect(f.calls[0].attempt.idempotencyKey === f.calls[1].attempt.idempotencyKey).toBe(false);
   });
+  it("says a draft cannot be exported as the final submission", async () => {
+    const f = fixture();
+    f.api.start = async () => { throw new ApiError(422, "draft", "SUBMISSION_EXPORT_CONTEXT_INVALID"); };
+    await f.session.load(); await f.session.start();
+    expect(f.session.getState().phase).toBe("blocked");
+    expect(f.session.getState().error).toBe("当前稿件仍是草稿，不能作为终稿导出。终稿需要另一次独立复核的编制。");
+  });
   it("read-only projects retain completed downloads but cannot export anew", async () => {
     const f = fixture(); f.api.list = async () => [f.result];
     const session = createExportSession(f.api, "workspace", f.store, true); await session.load(); await session.start();

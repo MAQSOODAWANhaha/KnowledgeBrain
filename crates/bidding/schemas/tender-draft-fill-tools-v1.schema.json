@@ -27,6 +27,11 @@
                 },
                 "role": { "type": "string", "enum": ["fixed_text", "bidder_blank", "instruction", "signature"] },
                 "form_id": { "type": ["string", "null"] },
+                "header_rows": {
+                  "type": ["integer", "null"],
+                  "minimum": 0,
+                  "description": "Required when form_id is set: how many leading rows repeat as the table header on every page. No tender form records this, so state it from the form you just read."
+                },
                 "cells": { "type": "array" },
                 "blank_ranges": { "type": "array" },
                 "instruction": { "type": "string" }

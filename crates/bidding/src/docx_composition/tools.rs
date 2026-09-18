@@ -402,6 +402,7 @@ impl Workspace {
                         Content::Template{record_id,bindings,..} => r.record_id==*record_id && r.target==RelationTarget::Record || bindings.iter().any(|b|b.need==*r),
                         Content::Placeholder{needs}|Content::ResponseTable{needs,..} => needs.contains(r),
                         Content::SourceResponse{need,..} => need == r,
+                        Content::BidderBlank | Content::Preserved { .. } => false,
                     })).map(|s|&s.id).collect();
                     let key = reference_key(r).expect("serializable reference");
                     let plan_items: Vec<_> = self.draft.plan.values().filter(|item| item.obligation_refs.contains(&key)).map(|item| &item.id).collect();
@@ -959,6 +960,14 @@ fn validate_section_content(
                 }
             }
             Content::SourceResponse { .. } => {}
+            // Draft-only primitives: the composition agent must write real
+            // content or record an omission, and it never re-emits read-back text.
+            Content::BidderBlank => {
+                return Err("official composition cannot leave a chapter body blank".into());
+            }
+            Content::Preserved { .. } => {
+                return Err("official composition cannot carry read-back bidder text".into());
+            }
         }
     }
     Ok(())

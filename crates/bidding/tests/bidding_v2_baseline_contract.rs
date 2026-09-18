@@ -745,6 +745,154 @@ fn request_delivery_uses_oxana_without_a_postgres_reconciler() {
     assert!(!BID_API_ROUTER.contains("reserve_request_delivery_v2(pool, &request, \"api\")"));
 }
 
+/// 填章跑在 `docx_compose` 请求轨道的 `draft-fill` 模式上。这条用例钉住那条轨道
+/// 上「谁能放行 draft、谁必须拒 draft」的两个方向，以及出稿的三道闸门：检查点攻
+/// 证、字节摘要、编辑器会话未关时不得入稿。
+#[test]
+fn draft_fill_mode_admits_drafts_while_official_composition_still_refuses_them() {
+    // 请求身份表：mode 与 seed_plan_sha256 是键集的一部分，且 seed 摘要只在
+    // draft-fill 上出现——official 请求带 seed 摘要一样过不了 CHECK。
+    let identities = SQL
+        .split_once("CREATE TABLE bid_docx_composition_request_identities (")
+        .unwrap()
+        .1
+        .split_once("\n);")
+        .unwrap()
+        .0;
+    assert!(identities.contains("'mode','seed_plan_sha256'"));
+    assert!(identities.contains("frozen_input->>'mode' IN ('official','draft-fill')"));
+    assert!(identities.contains(
+        "(frozen_input->>'mode'='draft-fill')=kb_bid_v2_sha256_text(frozen_input->>'seed_plan_sha256')"
+    ));
+    // 取源两处都按 mode 分流：官方拒 draft，填章反过来必须是 draft。
+    for function in [
+        "CREATE FUNCTION kb_bid_v2_load_docx_composition_source(",
+        "CREATE FUNCTION kb_bid_v2_prepare_docx_composition_source(",
+    ] {
+        let body = SQL
+            .split_once(function)
+            .unwrap()
+            .1
+            .split_once("END $$;")
+            .unwrap()
+            .0;
+        assert!(
+            body.contains("p_mode text DEFAULT 'official'"),
+            "{function} 必须带 mode 参数"
+        );
+        assert!(
+            body.contains(
+                "DOCX_COMPOSITION_INPUT_INVALID: official composition rejects draft analysis"
+            ),
+            "{function} 仍须拒绝把 draft 当终稿编制"
+        );
+    }
+    let load = SQL
+        .split_once("CREATE FUNCTION kb_bid_v2_load_docx_composition_source(")
+        .unwrap()
+        .1
+        .split_once("END $$;")
+        .unwrap()
+        .0;
+    assert!(
+        load.contains("DOCX_COMPOSITION_INPUT_INVALID: draft fill requires a draft analysis"),
+        "填章不能跑在已复核终稿上"
+    );
+    // 冻结请求时 draft-fill 走分析合同的键集与额度，official 走编制合同的。
+    let create = SQL
+        .split_once("CREATE FUNCTION kb_bid_v2_create_docx_composition_request(")
+        .unwrap()
+        .1
+        .split_once("END $$;")
+        .unwrap()
+        .0;
+    assert!(create.contains("DOCX_COMPOSITION_INPUT_INVALID: draft fill contract"));
+    assert!(create.contains("DOCX_COMPOSITION_INPUT_INVALID: draft fill budgets required"));
+    assert!(create.contains("'max_draft_docx_bytes'"));
+    assert!(create.contains("coalesce((p_snapshot#>'{config,limits,draft_path}')::boolean,false) IS DISTINCT FROM true"));
+    // 分析侧的 reserve/checkpoint 攻证对两种请求身份复用同一个解析器，填章才能跑
+    // 分析合同而不必新建 request_kind。
+    for function in [
+        "CREATE FUNCTION kb_bid_v2_tender_agent_runtime(",
+        "CREATE FUNCTION kb_bid_v2_tender_agent_source_input(",
+    ] {
+        let body = SQL
+            .split_once(function)
+            .unwrap()
+            .1
+            .split_once("END $$;")
+            .unwrap()
+            .0;
+        assert!(body.contains("bid_requirement_set_compile_request_identities"), "{function}");
+        assert!(
+            body.contains("bid_docx_composition_request_identities")
+                && body.contains("frozen_input->>'mode'='draft-fill'"),
+            "{function}"
+        );
+    }
+    // 填章的第一个检查点带着整棵回读章树，只能由请求里冻的 seed 摘要放行。
+    let checkpoint = SQL
+        .split_once("CREATE FUNCTION kb_bid_v2_tender_agent_checkpoint_put(")
+        .unwrap()
+        .1
+        .split_once("END $$;")
+        .unwrap()
+        .0;
+    assert!(checkpoint.contains("frozen_input->>'seed_plan_sha256' INTO seed_plan"));
+    assert!(checkpoint.contains(
+        "(seed_plan IS NOT NULL AND kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(\n        p_state#>'{analysis,draft_plan}'),'UTF8'))::text IS DISTINCT FROM seed_plan)"
+    ));
+    // 没冻 seed 的 run（大纲、官方编制）第一个检查点的 draft_plan 必须是空的。
+    assert!(checkpoint.contains("WHEN seed_plan IS NULL THEN '[]'::jsonb"));
+    // 出稿：草稿填章不出 composition manifest，但编辑器会话未关时一律拒绝入稿。
+    let publish = SQL
+        .split_once("CREATE FUNCTION kb_bid_v2_publish_docx_fill(")
+        .unwrap()
+        .1
+        .split_once("END $$;")
+        .unwrap()
+        .0;
+    assert!(publish.contains("AGENT_OUTPUT_INVALID: draft fill publication requires draft-fill mode"));
+    assert!(publish.contains("AGENT_OUTPUT_INVALID: finished draft fill checkpoint required"));
+    assert!(publish.contains("checkpoint#>'{review,draft}' IS DISTINCT FROM 'true'::jsonb"));
+    assert!(publish.contains("draft_compile_object_id"));
+    assert!(
+        publish.contains("head.editor_key IS NOT NULL OR head.pending_save_id IS NOT NULL")
+            && publish.contains("DOCX_VERSION_CAS_MISMATCH"),
+        "编辑器还开着就入稿会把用户正在写的内容顶掉"
+    );
+    assert!(publish.contains("kb_bid_v2_create_docx_round"));
+    assert!(!publish.contains("composition_manifest"));
+    assert!(SQL.contains("CREATE FUNCTION kb_bid_v2_replay_docx_fill("));
+    // 「停止填充」只记意向：API 记，worker 读，读的人必须持租约。
+    assert!(SQL.contains("CREATE TABLE bid_docx_fill_stop_requests ("));
+    let stop = SQL
+        .split_once("CREATE FUNCTION kb_bid_v2_tender_agent_stop_requested(")
+        .unwrap()
+        .1
+        .split_once("END $$;")
+        .unwrap()
+        .0;
+    assert!(stop.contains("kb_bid_v2_tender_agent_lock_owner"));
+    let request_stop = SQL
+        .split_once("CREATE FUNCTION kb_bid_v2_request_docx_fill_stop(")
+        .unwrap()
+        .1
+        .split_once("END $$;")
+        .unwrap()
+        .0;
+    assert!(request_stop.contains("kb_bid_v2_require_project_owner"));
+    assert!(request_stop.contains("ON CONFLICT (request_artifact_id) DO NOTHING"));
+    // 角色分工：出稿与停止查询归 worker，发起停止归 api。
+    let grants = SQL
+        .split_once("GRANT EXECUTE ON FUNCTION kb_bid_v2_load_docx_composition_request(")
+        .unwrap()
+        .1;
+    assert!(grants.contains("kb_bid_v2_publish_docx_fill(uuid,kb_sha256,integer,uuid,kb_sha256,uuid)"));
+    assert!(grants.contains("kb_bid_v2_tender_agent_stop_requested(uuid,kb_sha256,integer,uuid)"));
+    assert!(SQL.contains("kb_bid_v2_request_docx_fill_stop(uuid,uuid,kb_actor_identity),\n  kb_bid_v2_create_docx_composition_request"));
+}
+
 #[test]
 fn formal_export_freezes_saved_docx_and_atomically_binds_both_outputs() {
     let export = SQL

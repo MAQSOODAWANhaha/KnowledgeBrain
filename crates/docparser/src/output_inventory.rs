@@ -19,6 +19,15 @@ pub struct OutputInventoryEntry {
     pub kind: String,
     pub bookmarks: Vec<String>,
     pub fields: Vec<String>,
+    /// Outline level of a heading paragraph, read from the style `w:name` only:
+    /// editors renumber `w:styleId` after a round trip.
+    #[serde(default)]
+    pub heading_level: Option<u32>,
+    /// Set when the carrier sits inside a field region. Table-of-contents
+    /// entries repeat chapter titles verbatim, so a reader that cannot see the
+    /// region counts every chapter twice.
+    #[serde(default)]
+    pub field_region: Option<String>,
     pub status: String,
     pub reason: Option<String>,
 }
@@ -157,10 +166,19 @@ pub fn validate_output_inventory(
         if !compatible_kind || unit.ordinal as usize != ordinal {
             return Err(invalid("unit carrier kind or occurrence order mismatch"));
         }
+        let outline = entry
+            .heading_level
+            .is_none_or(|level| entry.kind == "paragraphs" && (1..=9).contains(&level));
+        let region = entry
+            .field_region
+            .as_deref()
+            .is_none_or(|region| matches!(region, "toc" | "field"));
         if entry.unit_key != unit.key
             || !keys.insert(&entry.unit_key)
             || entry.part.is_empty()
             || entry.kind.is_empty()
+            || !outline
+            || !region
             || !matches!(entry.status.as_str(), "extracted" | "not_checked")
             || (entry.status == "not_checked")
                 != entry

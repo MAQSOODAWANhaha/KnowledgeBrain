@@ -1,5 +1,7 @@
 # R1 真实隔离启动与对象生命周期
 
+> 历史验证记录：仅说明所记录版本的结果，不是现行设计或新流程验收。当前方案与任务见 [统一方案](../../plans/bidding/product-two-phase.md)。
+
 修复发布入口的依赖环境校验后，已用实际生产 Dockerfile 构建的镜像完成全新隔离环境验收。最终项目为 `kb-release-7dj2b332`，原始记录在 `/tmp/kb-release-final-7dj2b332/`，可归档副本及 SHA256 清单见 [`artifacts/release-live-acceptance/`](../../artifacts/release-live-acceptance/)。这是当前工作树的隔离运行证据；干净已提交候选和 hosted 发布 gate 尚未具备。
 
 ## 验证结果

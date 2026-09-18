@@ -109,7 +109,17 @@ fn block(kind: &str) -> TemplateBlock {
         blank_ranges: vec![],
         columns: vec![],
         blank_rows: 0,
+        preserved_key: None,
     }
+}
+
+/// 排章顺序就是 `kb_sN` 的编号顺序。回读要把书签映射回章 id，只能用同一个排序，
+/// 所以这里把它单独暴露出来，而不是让调用方自己重排一遍。
+pub fn ordered_section_ids(draft: &Draft) -> Result<Vec<String>, String> {
+    Ok(ordered_sections(draft)?
+        .into_iter()
+        .map(|(section, _)| section.id.clone())
+        .collect())
 }
 
 fn ordered_sections(draft: &Draft) -> Result<Vec<(&Section, usize)>, String> {
@@ -631,6 +641,37 @@ pub fn compile(
                         }
                     }
                 }
+                Content::BidderBlank => {
+                    if !result.review.draft {
+                        return Err("official composition cannot leave a chapter body blank".into());
+                    }
+                    blocks.push(block("blank"));
+                }
+                Content::Preserved { blocks: preserved } => {
+                    if !result.review.draft {
+                        return Err(
+                            "official composition cannot carry read-back bidder text".into()
+                        );
+                    }
+                    if preserved.is_empty() {
+                        return Err("preserved chapter has no read-back body".into());
+                    }
+                    for unit in preserved {
+                        use crate::tender_analysis::readback::Preserved;
+                        let (kind, key) = match unit {
+                            Preserved::Paragraphs { unit_keys, .. } => (
+                                "preserved_paragraphs",
+                                unit_keys
+                                    .first()
+                                    .ok_or("preserved paragraphs have no receipt key")?,
+                            ),
+                            Preserved::Table { unit_key, .. } => ("preserved_table", unit_key),
+                        };
+                        let mut out = block(kind);
+                        out.preserved_key = Some(key.clone());
+                        blocks.push(out);
+                    }
+                }
                 Content::Placeholder { needs } | Content::ResponseTable { needs, .. } => {
                     if needs.is_empty() {
                         return Err("empty bidder work placeholder".into());
@@ -755,7 +796,18 @@ pub fn compile(
             });
         }
     }
-    let value = serde_json::to_value(input).map_err(|e| e.to_string())?;
+    let mut value = serde_json::to_value(input).map_err(|e| e.to_string())?;
+    // Read-back text is not tender input, so it travels as its own receipt: the
+    // primitives may only name a key, never inline the words they re-emit.
+    if result.review.draft {
+        value["preserved_units"] = crate::tender_analysis::readback::preserved_units(
+            result
+                .analysis
+                .draft_plan
+                .iter()
+                .flat_map(|item| item.preserved.iter()),
+        );
+    }
     let docx = render::compile_template(&value, &plan).map_err(|e| e.to_string())?;
     if docx.len() > max_docx_bytes {
         return Err("compiled DOCX exceeds configured byte budget".into());

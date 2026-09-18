@@ -335,6 +335,7 @@ pub(super) fn config() -> Config {
             pack_max_turns: 0,
             draft_path: false,
             draft_bind_terms: vec![],
+            max_draft_docx_bytes: crate::tender_analysis::draft::DRAFT_MAX_DOCX_BYTES,
         },
     )
     .unwrap()

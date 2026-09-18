@@ -1,5 +1,7 @@
 # 真实稿通用技术及评标程序验收补充
 
+> 历史验证记录：仅说明所记录版本的结果，不是现行设计或新流程验收。当前方案与任务见 [统一方案](../../plans/bidding/product-two-phase.md)。
+
 对象为 `testdata/bid/BiddingFile.pdf` 的物理第43–53页，另并读第65页商业运行备件附表的适用性。使用统一 Python docreader 已冻结的文本，读取11个来源单元（本范围无网格），查看第47、51、52、53页原图。第51–53页对应纸面印刷页码43–45，验收引用统一使用物理页码。
 
 证据为 [general-review/source-inventory.json](../../artifacts/bid-full-sample/general-review/source-inventory.json)：47项人工预期、53处精确UTF-8引文、原结果全部41条记录的data及全部10条关系快照。校验器已核对来源/原结果摘要、全部引文、记录和关系观测、4张图片摘要。通过的是证据完整性，**原提取结果仍不通过，尚无本次修正后的真实Agent整稿**。人工预期仅供样稿验收，不导入生产关键词规则。

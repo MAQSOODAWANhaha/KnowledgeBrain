@@ -606,6 +606,7 @@ fn fixture() -> (FrozenInput, Config, Checkpoint) {
         draft_docx_base64: None,
         outline_config_sha256: None,
         fill_config_sha256: None,
+        outline_run: Default::default(),
     };
     select_next(&input, &config, &mut state).unwrap();
     compare(&input, &config, &mut state);

@@ -8,7 +8,7 @@
 | 管线对照 | `/opt/workspace/code/brain`（WeKnora）。任务类型、队列名、`parse_status`、分块算法、Wiki/图谱作用域与 brain **同语义** |
 | 投标 | 同仓部署；当前目标见 [`../bidding/authoring.md`](../bidding/authoring.md) |
 
-本文保留迁移前知识库与共享运行时研究快照，不作为当前运行命令或第二领域规范。废弃招投标流程/接口与施工顺序不在本文继续维护；招投标目标由 [PRD](../bidding/prd.md)、[ONLYOFFICE](../bidding/onlyoffice.md) 与 [编辑与出件计划](../../plans/bidding/onlyoffice-integration.md)、[Agent 实施方案](../../plans/bidding/agent-runtime-rig.md)定义。知识库研究中的 Markdown、chunk、检索与 Wiki 不受 DOCX 正文选型影响。
+本文保留迁移前知识库与共享运行时研究快照，不作为当前运行命令或第二领域规范。废弃招投标流程/接口与施工顺序不在本文继续维护；招投标目标由 [PRD](../bidding/prd.md)、[ONLYOFFICE](../bidding/onlyoffice.md) 与 [编辑与出件计划](../../plans/bidding/onlyoffice-integration.md)、[Agent 实施方案](../../plans/bidding/product-two-phase.md)定义。知识库研究中的 Markdown、chunk、检索与 Wiki 不受 DOCX 正文选型影响。
 
 ---
 

@@ -93,6 +93,7 @@ fn fixture() -> (FrozenInput, AnalysisResult) {
                 source: span(0, cut),
                 role: RegionRole::FixedText,
                 form_id: None,
+                header_rows: None,
                 cells: vec![],
                 blank_ranges: vec![],
                 instruction: "保留声明".into(),
@@ -101,6 +102,7 @@ fn fixture() -> (FrozenInput, AnalysisResult) {
                 source: span(0, cut),
                 role: RegionRole::FixedText,
                 form_id: Some(format!("f{i}")),
+                header_rows: Some(1),
                 cells: vec![
                     Cell { row: 0, column: 0 },
                     Cell { row: 1, column: 0 },
@@ -114,6 +116,7 @@ fn fixture() -> (FrozenInput, AnalysisResult) {
                 source: span(0, cut),
                 role: RegionRole::BidderBlank,
                 form_id: Some(format!("f{i}")),
+                header_rows: Some(1),
                 cells: vec![Cell { row: 1, column: 2 }, Cell { row: 2, column: 2 }],
                 blank_ranges: vec![],
                 instruction: "投标方后续填写".into(),
@@ -122,6 +125,7 @@ fn fixture() -> (FrozenInput, AnalysisResult) {
                 source: span(cut + 1, text.len()),
                 role: RegionRole::Instruction,
                 form_id: None,
+                header_rows: None,
                 cells: vec![],
                 blank_ranges: vec![],
                 instruction: "保留表后说明和签章".into(),
@@ -273,6 +277,7 @@ fn plan_for_section(result: &AnalysisResult, section: &Value) -> Value {
                     needs.contains(r)
                 }
                 Content::SourceResponse { need, .. } => need == *r,
+                Content::BidderBlank | Content::Preserved { .. } => false,
             })
         })
         .map(|r| reference_key(r).unwrap())
@@ -337,6 +342,55 @@ fn ready(input: &FrozenInput, result: &AnalysisResult) -> Workspace {
     }
     edit(&mut w, input, result, "put_omission", omission(input));
     w
+}
+
+/// 空正文只属于草稿骨架；官方编制路径必须拒绝 `bidder_blank`。
+#[test]
+fn put_section_rejects_bidder_blank_body_in_official_composition() {
+    let (input, result) = fixture();
+    let mut w = ready(&input, &result);
+    let mut args = section(&input, 0);
+    args["content"] = json!([{"kind":"bidder_blank"}]);
+    args["expected_draft_sha256"] = json!(digest(&w.draft).unwrap());
+    let error = w
+        .invoke(
+            &input,
+            &result,
+            "put_section",
+            &args,
+            tool_limits(100_000, 1_000_000),
+        )
+        .unwrap_err();
+    assert!(
+        error.contains("official composition cannot leave a chapter body blank"),
+        "{error}"
+    );
+}
+
+/// 回读保留正文只属于草稿填章；终稿必须自己写正文，不能夹带用户手写的文字。
+#[test]
+fn put_section_rejects_preserved_body_in_official_composition() {
+    let (input, result) = fixture();
+    let mut w = ready(&input, &result);
+    let mut args = section(&input, 0);
+    args["content"] = json!([{
+        "kind":"preserved",
+        "blocks":[{"kind":"paragraphs","unit_keys":["story:1"],"paragraphs":["用户写的"]}]
+    }]);
+    args["expected_draft_sha256"] = json!(digest(&w.draft).unwrap());
+    let error = w
+        .invoke(
+            &input,
+            &result,
+            "put_section",
+            &args,
+            tool_limits(100_000, 1_000_000),
+        )
+        .unwrap_err();
+    assert!(
+        error.contains("official composition cannot carry read-back bidder text"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -3808,4 +3862,65 @@ fn composition_dispatch_moves_from_saved_parent_container_to_planned_child() {
         child
     );
     super::agent_work::set_work(&input, &result, &mut state, &work, 100000).unwrap();
+}
+
+/// 保留段落与保留表格必须逐字回到文档里：报价表、业绩表都是用户手填的刚需。
+/// 内容只能从绑 `file_sha256` 的回读收据取，块本身不带正文。
+#[test]
+fn preserved_paragraphs_and_table_round_trip_from_the_readback_receipt() {
+    use crate::docx_template::{TemplatePlan, compile_template};
+    let (source, plan) = input_for_order_verification();
+    let mut source = source;
+    let mut plan = plan;
+    source["preserved_units"] = json!({
+        "story:7":{"kind":"paragraphs","unit_keys":["story:7","story:8"],
+            "paragraphs":["我方郑重承诺如下。","按招标文件要求提供全部资料。"]},
+        "story:9":{"kind":"table","unit_key":"story:9","row_count":2,"column_count":2,
+            "cells":[{"row":0,"column":0,"row_span":1,"col_span":1,"text":"项目"},
+                     {"row":0,"column":1,"row_span":1,"col_span":1,"text":"报价"},
+                     {"row":1,"column":0,"row_span":1,"col_span":1,"text":"总价"},
+                     {"row":1,"column":1,"row_span":1,"col_span":1,"text":"壹万元整"}]}
+    });
+    let paragraphs = json!({"kind":"preserved_paragraphs","source_id":null,"quote":null,"form_id":null,
+        "header_rows":0,"blank_cells":[],"columns":[],"blank_rows":0,"preserved_key":"story:7"});
+    let table = json!({"kind":"preserved_table","source_id":null,"quote":null,"form_id":null,
+        "header_rows":0,"blank_cells":[],"columns":[],"blank_rows":0,"preserved_key":"story:9"});
+    plan["sections"][1]["blocks"] = json!([paragraphs, table]);
+    let good: TemplatePlan = serde_json::from_value(plan.clone()).unwrap();
+    let bytes = compile_template(&source, &good).unwrap();
+    let rendered = document::verify(&bytes, &source, &good).unwrap();
+    let xml = document_xml(&bytes);
+    assert!(xml.contains("我方郑重承诺如下。"), "保留段落必须在文档里");
+    assert!(xml.contains("壹万元整"), "用户手填的报价必须原样回去");
+    assert!(
+        rendered.iter().any(|block| block.table.is_some()),
+        "保留表格必须渲染成表格"
+    );
+    // 收据缺失、kind 不符、块自带正文字段都必须编译失败，而不是渲染出无出处的文本。
+    let mut orphan = plan.clone();
+    orphan["sections"][1]["blocks"][0]["preserved_key"] = json!("story:404");
+    let orphan: TemplatePlan = serde_json::from_value(orphan).unwrap();
+    let err = compile_template(&source, &orphan).unwrap_err();
+    assert!(format!("{err:?}").contains("readback receipt"), "{err:?}");
+    let mut swapped = plan.clone();
+    swapped["sections"][1]["blocks"][0]["preserved_key"] = json!("story:9");
+    let swapped: TemplatePlan = serde_json::from_value(swapped).unwrap();
+    assert!(
+        compile_template(&source, &swapped).is_err(),
+        "kind 必须对上"
+    );
+    let mut inline = plan.clone();
+    inline["sections"][1]["blocks"][1]["header_rows"] = json!(1);
+    let inline: TemplatePlan = serde_json::from_value(inline).unwrap();
+    assert!(
+        compile_template(&source, &inline).is_err(),
+        "保留表格不接受额外表字段"
+    );
+    let mut mislabeled = plan.clone();
+    mislabeled["sections"][1]["blocks"][0]["kind"] = json!("blank");
+    let mislabeled: TemplatePlan = serde_json::from_value(mislabeled).unwrap();
+    assert!(
+        compile_template(&source, &mislabeled).is_err(),
+        "收据 key 不得挂在别的原语上"
+    );
 }

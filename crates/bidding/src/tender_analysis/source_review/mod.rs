@@ -2744,5 +2744,3 @@ pub(super) fn put_in_batch(
     }
     Ok(result)
 }
-
-

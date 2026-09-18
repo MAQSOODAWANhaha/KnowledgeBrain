@@ -7,7 +7,7 @@
 
 共享平台只提供两类业务都需要的基础能力，不拥有知识库或招投标业务状态机。
 
-投标 [Rig 运行层](../../plans/bidding/agent-runtime-rig.md)归属 `crates/bidding`，复用本域 Worker、调用预约、执行权、检查点和对象能力，不新增平台 Agent 服务或第二套队列。Rig 的 SDK `AgentRun` 与领域执行 token/lease 不同，前者不能授权业务副作用或发布。
+投标 [Rig 运行层](../../plans/bidding/product-two-phase.md)归属 `crates/bidding`，复用本域 Worker、调用预约、执行权、检查点和对象能力，不新增平台 Agent 服务或第二套队列。Rig 的 SDK `AgentRun` 与领域执行 token/lease 不同，前者不能授权业务副作用或发布。
 
 ## 共享平台拥有
 

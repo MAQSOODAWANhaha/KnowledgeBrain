@@ -254,6 +254,16 @@ impl Journal for PgJournal<'_> {
             .map_err(db_error)?;
         Ok(())
     }
+    async fn stop_requested(&self) -> Result<bool, AgentError> {
+        sqlx::query_scalar("SELECT kb_bid_v2_tender_agent_stop_requested($1,$2::kb_sha256,$3,$4)")
+            .bind(self.request.request_artifact_id)
+            .bind(&self.request.frozen_input_sha256)
+            .bind(self.owner.attempt)
+            .bind(self.owner.execution_owner_token)
+            .fetch_one(self.pool)
+            .await
+            .map_err(db_error)
+    }
 }
 
 pub fn publication(input: &FrozenInput, result: &AnalysisResult) -> Result<Value, AgentError> {
@@ -355,8 +365,14 @@ async fn stage_draft_docx(
     journal: &PgJournal<'_>,
     input: &FrozenInput,
     result: &AnalysisResult,
+    max_docx_bytes: usize,
 ) -> Result<Option<Uuid>, AgentError> {
     if !result.review.draft {
+        return Ok(None);
+    }
+    // A chapterless draft has no heading to compile, and the SQL gate refuses
+    // staged bytes for it, so leave the staging slot empty.
+    if result.analysis.draft_plan.is_empty() {
         return Ok(None);
     }
     let loaded = journal.load().await?;
@@ -364,30 +380,18 @@ async fn stage_draft_docx(
         && let (Some(object_id), Some(encoded)) = (
             state.draft_compile_object_id.as_deref(),
             state.draft_docx_base64.as_deref(),
-        )
-    {
-        let bytes = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            encoded,
-        )
-        .map_err(invalid)?;
+        ) {
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+            .map_err(invalid)?;
         (object_id.to_string(), bytes)
-    } else if result
-        .analysis
-        .draft_plan
-        .iter()
-        .any(|item| item.status == crate::tender_analysis::draft::DraftStatus::Filled)
-    {
-        let composed =
-            crate::docx_composition::synthesize_draft_document(input, result).map_err(invalid)?;
-        let compiled = crate::docx_composition::compiler::compile(
-            input, result, &composed, 2_000_000,
-        )
-        .map_err(invalid)?;
-        let sha = hex::encode(Sha256::digest(&compiled.docx));
-        (format!("objects/{sha}"), compiled.docx)
     } else {
-        return Ok(None);
+        // Same gate as the agent's finish_draft_path: the outline skeleton is
+        // staged too, otherwise the agent's bytes and this path disagree about
+        // what counts as publishable.
+        let outcome = crate::tender_analysis::draft::compile_draft(input, result, max_docx_bytes)
+            .map_err(invalid)?;
+        let sha = hex::encode(Sha256::digest(&outcome.compiled.docx));
+        (format!("objects/{sha}"), outcome.compiled.docx)
     };
     let sha = object_ref
         .strip_prefix("objects/")
@@ -530,7 +534,14 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
                 })?;
             let result = agent::run(&input, &config, &journal, model, &local).await?;
             let compiled = publication(&input, &result)?;
-            let staging = stage_draft_docx(pool, &journal, &input, &result).await?;
+            let staging = stage_draft_docx(
+                pool,
+                &journal,
+                &input,
+                &result,
+                config.limits.max_draft_docx_bytes,
+            )
+            .await?;
             let receipt = match sqlx::query_scalar(
                 "SELECT kb_bid_v2_publish_requirement_set_v4($1,$2,$3::kb_sha256,$4,$5::kb_actor_identity,$6,$7,$8)",
             )

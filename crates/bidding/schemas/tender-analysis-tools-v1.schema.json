@@ -1624,6 +1624,18 @@
                             }
                           ]
                         },
+                        "header_rows": {
+                          "description": "How many leading rows of this grid repeat as the table header on every page. Required for a grid region: no tender form records it.",
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
                         "cells": {
                           "type": "array",
                           "items": {

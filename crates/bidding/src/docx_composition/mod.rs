@@ -5,6 +5,7 @@ mod agent_scope;
 mod agent_work;
 pub mod compiler;
 pub mod document;
+pub mod fill;
 pub mod postgres;
 pub mod runtime;
 pub mod tools;
@@ -15,6 +16,16 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// 同一条 `docx_compose` 请求轨道上的两种运行：终稿编制，或用户触发的草稿填章。
+/// 模式决定跑哪个合同、允许什么样的分析、以及出稿走哪条路。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CompositionMode {
+    #[serde(rename = "official")]
+    Official,
+    #[serde(rename = "draft-fill")]
+    DraftFill,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -48,6 +59,15 @@ pub enum Content {
     },
     /// A pending bidder response/proof, deliberately without invented text.
     Placeholder { needs: Vec<Reference> },
+    /// A chapter listed in the outline whose body the bidder still writes.
+    /// Draft-only: it carries no obligation, so official composition rejects it.
+    BidderBlank,
+    /// The body the user already wrote, read back from the saved document and
+    /// re-emitted verbatim. Draft-only, and the text comes from the readback
+    /// receipt rather than from this plan, so refilling never rewrites it.
+    Preserved {
+        blocks: Vec<crate::tender_analysis::readback::Preserved>,
+    },
     /// Verbatim requirement paragraphs followed by a separate empty response.
     SourceResponse {
         need: Reference,
@@ -191,45 +211,168 @@ pub fn validate_draft_basis(input: &FrozenInput, result: &AnalysisResult) -> Res
     Ok(())
 }
 
+/// 每个 grid region 的 header 行数由填章时的作者声明，宿主只做搬运。
+///
+/// 编译器要求 header policy 与模板里的 grid **一一对应**，缺一个就整篇编译失
+/// 败；带表格的章是投标文件的主场景（报价表、业绩表、人员表），所以这里不允
+/// 许静默给默认值。
+fn form_headers(record: &crate::tender_analysis::Record) -> Result<Vec<FormHeader>, String> {
+    use crate::tender_analysis::RecordData;
+    let RecordData::Template { regions, .. } = &record.data else {
+        return Err("filled chapter record is not a template".into());
+    };
+    let mut headers: std::collections::BTreeMap<String, usize> = Default::default();
+    for region in regions {
+        let Some(form_id) = region.form_id.as_deref() else {
+            continue;
+        };
+        let header_rows = region
+            .header_rows
+            .ok_or("grid region has no header policy to compile")?;
+        if headers
+            .insert(form_id.to_string(), header_rows)
+            .is_some_and(|prior| prior != header_rows)
+        {
+            return Err("grid regions disagree on the form header policy".into());
+        }
+    }
+    Ok(headers
+        .into_iter()
+        .map(|(form_id, header_rows)| FormHeader {
+            form_id,
+            header_rows,
+        })
+        .collect())
+}
+
 /// 宿主从 draft_plan + Template 合成编制稿，无编制 Agent。
+///
+/// 每个活节点都进文档：Filled 章带模板正文，未填章保留为空 heading。只有
+/// `omitted` 章允许不出现，否则「填一部分也能出稿」会产出缺章的 Word，用户
+/// 会以为章节被删了。
 pub fn synthesize_draft_document(
     input: &FrozenInput,
     result: &AnalysisResult,
 ) -> Result<Draft, String> {
+    use crate::tender_analysis::draft::{DraftPlanItem, DraftStatus};
     validate_draft_basis(input, result)?;
     let mut draft = Draft::new(input, result)?;
-    let mut grounds = Vec::new();
     let plan = &result.analysis.draft_plan;
+    crate::tender_analysis::outline_flow::tree_valid(plan)?;
+    // The compiler validates every ground against what the run actually read.
+    // A large tender only reads its anchor windows, so a whole-source span would
+    // fail; the skeleton cites a read range instead.
+    let read = |source_id: &str| {
+        result
+            .analysis
+            .coverage
+            .text
+            .get(source_id)
+            .and_then(|ranges| ranges.first())
+            .map(|(start, end)| Span {
+                source_id: source_id.to_string(),
+                start: *start,
+                end: *end,
+                view_id: None,
+                grid_cell: None,
+            })
+    };
+    let unbound = result
+        .analysis
+        .coverage
+        .text
+        .iter()
+        .find(|(_, ranges)| !ranges.is_empty())
+        .map(|(id, _)| id.clone())
+        .ok_or("draft skeleton needs a read source range")?;
+    let node_of = |id: &str| plan.iter().find(|node| node.id == id);
+    // An omitted volume still holds its live children, so it keeps a heading;
+    // an omitted leaf is the only node allowed to leave the document.
+    let carries_live_child = |item: &DraftPlanItem| {
+        plan.iter().any(|node| {
+            let mut current = node.parent.clone();
+            while let Some(id) = current {
+                if id == item.id {
+                    return node.status != DraftStatus::Omitted;
+                }
+                current = node_of(&id).and_then(|node| node.parent.clone());
+            }
+            false
+        })
+    };
+    let mut sources = std::collections::BTreeSet::new();
     for item in plan {
-        if item.status != crate::tender_analysis::draft::DraftStatus::Filled {
+        if item.status == DraftStatus::Omitted && !carries_live_child(item) {
             continue;
         }
-        let template_id = item
-            .template_id
-            .clone()
-            .ok_or("filled chapter missing template")?;
-        let record = result
-            .analysis
-            .records
-            .get(&template_id)
-            .ok_or("filled chapter template missing from records")?;
-        let span = record
-            .sources
-            .first()
-            .cloned()
-            .ok_or("template needs source grounds")?;
-        grounds.push(span.clone());
-        let obligation = reference_key(&Reference {
-            record_id: template_id.clone(),
-            target: RelationTarget::Record,
-        })?;
         let mut parent = item.parent.clone();
-        if parent
-            .as_ref()
-            .is_some_and(|id| !plan.iter().any(|node| node.id == *id))
-        {
+        if parent.as_ref().is_some_and(|id| node_of(id).is_none()) {
             parent = None;
         }
+        let (content, grounds, obligation_refs) = match item.status {
+            // The user's own body outranks everything else: a chapter read back
+            // with text keeps that text, whatever the plan says about filling it.
+            _ if !item.preserved.is_empty() => {
+                let bound: Vec<_> = if !item.grounds.is_empty() { item.grounds.clone() } else { item.source_ids.iter().filter_map(|id| read(id)).collect() };
+                let grounds = match bound.is_empty() {
+                    false => bound,
+                    true => vec![read(&unbound).ok_or("read source range vanished")?],
+                };
+                (
+                    vec![Content::Preserved {
+                        blocks: item.preserved.clone(),
+                    }],
+                    grounds,
+                    vec![],
+                )
+            }
+            DraftStatus::Filled => {
+                let record_id = item
+                    .template_id
+                    .clone()
+                    .ok_or("filled chapter missing template")?;
+                let record = result
+                    .analysis
+                    .records
+                    .get(&record_id)
+                    .ok_or("filled chapter template missing from records")?;
+                let span = record
+                    .sources
+                    .first()
+                    .cloned()
+                    .ok_or("template needs source grounds")?;
+                let headers = form_headers(record)?;
+                let obligation = reference_key(&Reference {
+                    record_id: record_id.clone(),
+                    target: RelationTarget::Record,
+                })?;
+                (
+                    vec![Content::Template {
+                        record_id,
+                        headers,
+                        bindings: vec![],
+                    }],
+                    vec![span],
+                    vec![obligation],
+                )
+            }
+            // An unfilled chapter keeps its heading. A parent holds its children
+            // instead of a body; a leaf declares the body as bidder work. Either
+            // way it cites a read range so the compiler can ground it.
+            _ => {
+                let bound: Vec<_> = if !item.grounds.is_empty() { item.grounds.clone() } else { item.source_ids.iter().filter_map(|id| read(id)).collect() };
+                let grounds = match bound.is_empty() {
+                    false => bound,
+                    true => vec![read(&unbound).ok_or("read source range vanished")?],
+                };
+                let content = match carries_live_child(item) {
+                    true => vec![],
+                    false => vec![Content::BidderBlank],
+                };
+                (content, grounds, vec![])
+            }
+        };
+        sources.extend(grounds.iter().map(|span: &Span| span.source_id.clone()));
         draft.plan.insert(
             item.id.clone(),
             PlanItem {
@@ -240,8 +383,8 @@ pub fn synthesize_draft_document(
                 title: item.title.clone(),
                 placement: Default::default(),
                 prescribed: item.prescribed,
-                grounds: vec![span.clone()],
-                obligation_refs: vec![obligation],
+                grounds: grounds.clone(),
+                obligation_refs,
                 exception: None,
             },
         );
@@ -250,74 +393,17 @@ pub fn synthesize_draft_document(
             Section {
                 id: item.id.clone(),
                 placement: Default::default(),
-                parent: parent.clone(),
+                parent,
                 order: item.order,
                 title: item.title.clone(),
-                grounds: vec![span.clone()],
-                content: vec![Content::Template {
-                    record_id: template_id,
-                    headers: vec![],
-                    bindings: vec![],
-                }],
+                grounds,
+                content,
             },
         );
-        let mut ancestor = parent;
-        while let Some(id) = ancestor {
-            if draft.sections.contains_key(&id) {
-                break;
-            }
-            let Some(node) = plan.iter().find(|node| node.id == id) else {
-                break;
-            };
-            let mut node_parent = node.parent.clone();
-            if node_parent
-                .as_ref()
-                .is_some_and(|pid| !plan.iter().any(|n| n.id == *pid))
-            {
-                node_parent = None;
-            }
-            draft.plan.insert(
-                node.id.clone(),
-                PlanItem {
-                    id: node.id.clone(),
-                    kind: PlanItemKind::Section,
-                    parent: node_parent.clone(),
-                    order: node.order,
-                    title: node.title.clone(),
-                    placement: Default::default(),
-                    prescribed: node.prescribed,
-                    grounds: vec![span.clone()],
-                    obligation_refs: vec![],
-                    exception: None,
-                },
-            );
-            draft.sections.insert(
-                node.id.clone(),
-                Section {
-                    id: node.id.clone(),
-                    placement: Default::default(),
-                    parent: node_parent.clone(),
-                    order: node.order,
-                    title: node.title.clone(),
-                    grounds: vec![span.clone()],
-                    content: vec![],
-                },
-            );
-            ancestor = node_parent;
-        }
     }
+    let mut grounds: Vec<Span> = sources.iter().filter_map(|id| read(id)).collect();
     if grounds.is_empty() {
-        let source = input
-            .source_units
-            .first()
-            .ok_or("draft skeleton needs a frozen source")?;
-        grounds.push(Span {
-            source_id: source.source_unit_revision_id.clone(),
-            start: 0,
-            end: source.text.len(),
-            view_id: None,
-            grid_cell: None,
-        });
+        grounds.push(read(&unbound).ok_or("read source range vanished")?);
     }
     let title = input
         .documents

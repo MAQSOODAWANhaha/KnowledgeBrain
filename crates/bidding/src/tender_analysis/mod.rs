@@ -5,8 +5,10 @@ pub mod budget;
 pub mod draft;
 pub mod evidence_refs;
 pub mod outline;
+pub mod outline_flow;
 pub mod pack;
 pub mod postgres;
+pub mod readback;
 pub mod relations;
 pub mod rule_contract;
 pub mod semantic_compare;
@@ -211,6 +213,11 @@ pub struct TemplateRegion {
     pub role: RegionRole,
     pub form_id: Option<String>,
     pub cells: Vec<Cell>,
+    /// Grid header policy, stated by the author, never guessed by the host: no
+    /// tender form carries its header row count (`TableGrid` has none), so a
+    /// grid region has to say how many leading rows repeat across pages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_rows: Option<usize>,
     /// Optional partial blanks; nonempty means every selected cell uses ranges.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blank_ranges: Vec<crate::template_grid::CellTextRange>,
@@ -398,6 +405,8 @@ pub struct Coverage {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Analysis {
+    #[serde(default)]
+    pub outline: outline_flow::OutlineState,
     pub records: BTreeMap<String, Record>,
     /// Host allocation history; retained after item/record deletion to prevent identity reuse.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
