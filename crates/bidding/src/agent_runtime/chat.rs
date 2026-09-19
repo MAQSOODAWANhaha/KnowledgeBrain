@@ -68,6 +68,7 @@ struct OnceHttp {
     sent: Arc<AtomicBool>,
     received_bytes: Arc<AtomicU64>,
     received_chunks: Arc<AtomicU64>,
+    transport_failed: Arc<AtomicBool>,
 }
 
 impl HttpClientExt for OnceHttp {
@@ -122,6 +123,7 @@ impl HttpClientExt for OnceHttp {
         let mut first = true;
         let received_bytes = self.received_bytes.clone();
         let received_chunks = self.received_chunks.clone();
+        let transport_failed = self.transport_failed.clone();
         let stream = response.bytes_stream().map(move |chunk| {
             if let Ok(bytes) = &chunk {
                 received_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -135,6 +137,7 @@ impl HttpClientExt for OnceHttp {
                 );
             }
             chunk.map_err(|error| {
+                transport_failed.store(true, Ordering::Relaxed);
                 tracing::warn!(
                     event = "llm_stream_failure",
                     stage = "http_body",
@@ -338,11 +341,13 @@ async fn send(
     request.headers_mut().insert("authorization", auth);
     let received_bytes = Arc::new(AtomicU64::new(0));
     let received_chunks = Arc::new(AtomicU64::new(0));
+    let transport_failed = Arc::new(AtomicBool::new(false));
     let http = OnceHttp {
         client: client()?,
         sent: Arc::new(AtomicBool::new(false)),
         received_bytes: received_bytes.clone(),
         received_chunks: received_chunks.clone(),
+        transport_failed: transport_failed.clone(),
     };
     let started = Instant::now();
     let mut heartbeat = tokio::time::interval(WAIT_LOG);
@@ -369,7 +374,9 @@ async fn send(
                     false,
                     started,
                 );
-                return outcome;
+                return if outcome.is_err() && transport_failed.load(Ordering::Relaxed) {
+                    Err(AgentError::new("AGENT_PROVIDER_UNAVAILABLE", "provider HTTP response stream interrupted; incomplete tool calls were not accepted"))
+                } else { outcome };
             }
             _ = &mut deadline => {
                 handle.abort();
@@ -515,6 +522,17 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn truncated_http_body_is_transport_failure_without_accepting_partial_calls() {
+        let body = event(
+            json!({"role":"assistant","tool_calls":[{"index":0,"id":"partial","type":"function","function":{"name":"inspect_analysis","arguments":"{"}}]}),
+            Value::Null,
+        );
+        let (result, requests, _) = exchange_body(200, body, false, true).await;
+        assert_eq!(result.unwrap_err().code, "AGENT_PROVIDER_UNAVAILABLE");
+        assert_eq!(requests.len(), 1);
+    }
+
     #[test]
     fn response_type_never_exposes_arbitrary_header_values() {
         let mut headers = reqwest::header::HeaderMap::new();
@@ -534,6 +552,15 @@ mod tests {
         status: u16,
         response: String,
         hold: bool,
+    ) -> (Result<ChatTurn, AgentError>, Vec<Vec<u8>>, StreamStats) {
+        exchange_body(status, response, hold, false).await
+    }
+
+    async fn exchange_body(
+        status: u16,
+        response: String,
+        hold: bool,
+        truncated: bool,
     ) -> (Result<ChatTurn, AgentError>, Vec<Vec<u8>>, StreamStats) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!(
@@ -565,7 +592,7 @@ mod tests {
                         bytes.extend_from_slice(&block[..n]);
                     }
                     tx.send(bytes[end..end+size].to_vec()).unwrap();
-                    let size = response.len()+usize::from(hold)*10000;
+                    let size = response.len()+usize::from(hold || truncated)*10000;
                     let header = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: text/event-stream\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n");
                     if socket.write_all(header.as_bytes()).await.is_ok() {
                         let _ = socket.write_all(response.as_bytes()).await;

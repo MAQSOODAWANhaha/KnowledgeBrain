@@ -130,6 +130,43 @@ fn append(
                 .as_array_mut()
                 .expect("package evidence array")
                 .push(json!({"tool":name,"arguments":args,"source":source}));
+            if content["assigned_evidence"].get("scan_ranges").is_some() {
+                let source = &next["assigned_evidence"]["boundary_evidence"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()["source"];
+                let entry = match name {
+                    "read_source" => Some((
+                        "text",
+                        args["source_id"].as_str(),
+                        source["start"].as_u64(),
+                        source["end"].as_u64(),
+                    )),
+                    "read_form" => Some((
+                        "forms",
+                        args["form_id"].as_str(),
+                        source["offset"].as_u64(),
+                        source["next"].as_u64(),
+                    )),
+                    "collection_index" => Some((
+                        "metadata",
+                        args["kind"].as_str(),
+                        source["offset"].as_u64(),
+                        source["next"].as_u64(),
+                    )),
+                    _ => None,
+                };
+                if let Some((kind, Some(id), Some(start), Some(end))) = entry
+                    && start < end
+                {
+                    let ranges = &mut next["assigned_evidence"]["scan_ranges"][kind];
+                    if ranges.get(id).is_none() {
+                        ranges[id] = json!([]);
+                    }
+                    ranges[id].as_array_mut().unwrap().push(json!([start, end]));
+                }
+            }
             if size(&next)? <= budget {
                 *content = next;
                 *coverage = staged;
@@ -227,8 +264,10 @@ pub(super) fn evidence(
         "instruction":"This is the current bounded Main source package. Its main_work scope is installed when this response is received; no preliminary set_work_note or read call is needed for the included exact evidence. Save grounded records and known-endpoint relations, then set_disposition for each fully processed source. Keep missing targets or source uncertainty explicit. Newly allocated IDs may require another relation-writing response before the final dispositions. Partial text/grid ranges are not complete sources; read or receive the remaining ranges before final disposition. Adjacent sources are navigation, not a semantic relation. The host advances only after a successful complete batch and checks independent review separately."
     }});
     if discovering {
+        content["assigned_evidence"]["scan_ranges"] =
+            json!({"text":{},"forms":{},"metadata":{},"empty_sources":[]});
         content["assigned_evidence"]["instruction"] = json!(
-            "Inspect all exact delivered text, grid and metadata ranges together. Submit requirements, references, review fragments and inspected ranges in one submit_outline_scan batch. Navigation is not evidence. A reading package may cross multiple accounting chunks; never confirm unsent ranges."
+            "Inspect delivered evidence, then reuse scan_ranges for the inspected ranges in submit_outline_scan (or a smaller inspected subset). scan_ranges is not approval: it includes only this package, excludes empty text and incomplete cell reads; empty_sources requires separate disposition. Submit requirements, references, review fragments and inspected ranges in one submit_outline_scan batch. Navigation is not evidence. A reading package may cross multiple accounting chunks; never confirm unsent ranges."
         );
     }
     // Selection skips completed scans and evidence still visible, not lifetime

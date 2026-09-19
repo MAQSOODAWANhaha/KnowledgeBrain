@@ -20,7 +20,8 @@
                 "minItems": 2,
                 "maxItems": 2
               }
-            }
+            },
+            "description": "Confirmed inspected UTF-8 byte ranges with start < end. Reuse scan_ranges.text; never submit [0,0) for an empty source."
           },
           "forms": {
             "type": "object",
@@ -34,7 +35,8 @@
                 "minItems": 2,
                 "maxItems": 2
               }
-            }
+            },
+            "description": "Confirmed inspected grid ranges by form ID, start < end. Reuse scan_ranges.forms; partial cell-text reads do not imply whole-cell coverage."
           },
           "empty_sources": {
             "type": "array",
@@ -681,7 +683,8 @@
                 "minItems": 2,
                 "maxItems": 2
               }
-            }
+            },
+            "description": "Only documents, document_relations and decisions. Reuse confirmed package scan_ranges.metadata; source IDs and cell-text keys are not collection metadata kinds."
           },
           "requirement_replacements": {
             "type": "object",

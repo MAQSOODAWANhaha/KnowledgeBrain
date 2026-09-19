@@ -4106,6 +4106,37 @@ async fn discovery_package_crosses_accounting_chunks_and_replays_exact_receipts(
         serde_json::to_vec(&small.content).unwrap().len()
             < serde_json::to_vec(&large.content).unwrap().len()
     );
+    for package in [&large, &small] {
+        let ranges = &package.content["assigned_evidence"]["scan_ranges"];
+        for evidence in package.content["assigned_evidence"]["boundary_evidence"]
+            .as_array()
+            .unwrap()
+        {
+            if evidence["tool"] == "read_source" {
+                let source = &evidence["source"];
+                let id = source["source_id"].as_str().unwrap();
+                if source["start"] != source["end"] {
+                    assert!(
+                        ranges["text"][id]
+                            .as_array()
+                            .unwrap()
+                            .contains(&json!([source["start"], source["end"]]))
+                    );
+                }
+            }
+        }
+        let mut probe = state.clone();
+        let mut batch = ranges.clone();
+        for field in ["requirements", "references", "issues", "review_fragments"] {
+            batch[field] = json!([]);
+        }
+        assert!(
+            agent::apply(&input, &config, &mut probe, "submit_outline_scan", &batch).is_err(),
+            "package preparation is not confirmation"
+        );
+        probe.analysis.coverage = package.coverage.clone();
+        agent::apply(&input, &config, &mut probe, "submit_outline_scan", &batch).unwrap();
+    }
     let mut restored: Checkpoint = serde_json::from_slice(&saved).unwrap();
     let replay = agent::evidence_delivery::select(&input, &config, &restored)
         .unwrap()
@@ -5661,4 +5692,33 @@ fn chapter_final_candidate_preserves_only_unchanged_check_snapshots() {
             .values()
             .any(|c| c.status != "pass")
     );
+}
+
+#[test]
+fn scan_preflight_reports_metadata_and_empty_ranges_together() {
+    let (input, config, mut state, mut batch) = scan_repair_fixture();
+    batch["requirements"] = json!([]);
+    batch["review_fragments"] = json!([]);
+    batch["metadata"] = json!({"source_units":[[0,1]]});
+    batch["text"] = json!({"source":[[0,0]]});
+    let before = json!(state);
+    let failure =
+        agent::apply(&input, &config, &mut state, "submit_outline_scan", &batch).unwrap_err();
+    let feedback: Value = serde_json::from_str(&failure).unwrap();
+    assert_eq!(feedback["error_count"], 2);
+    assert!(
+        feedback["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["path"] == "/metadata/source_units")
+    );
+    assert!(
+        feedback["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["path"] == "/text/source/0")
+    );
+    assert_eq!(json!(state), before);
 }

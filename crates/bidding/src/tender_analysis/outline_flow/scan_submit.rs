@@ -159,8 +159,141 @@ fn error(path: String, id: &Value, code: &str, message: impl ToString) -> Value 
 
 /// Report independent field/identity/evidence failures together. Final apply
 /// remains authoritative for interdependent state transitions and range maps.
-fn preflight(input: &FrozenInput, state: &Checkpoint, args: &Value) -> Vec<Value> {
+fn range_errors(input: &FrozenInput, state: &Checkpoint, args: &Value) -> Vec<Value> {
     let mut errors = Vec::new();
+    for category in ["text", "forms", "metadata"] {
+        let Some(map) = args[category].as_object() else {
+            errors.push(error(
+                format!("/{category}"),
+                &Value::Null,
+                "MAP_REQUIRED",
+                "expected a map of IDs to ranges",
+            ));
+            continue;
+        };
+        for (id, raw) in map {
+            let path = format!("/{category}/{}", id.replace('~', "~0").replace('/', "~1"));
+            let identity = json!(id);
+            if category == "metadata"
+                && !matches!(
+                    id.as_str(),
+                    "documents" | "document_relations" | "decisions"
+                )
+            {
+                errors.push(error(path, &identity, "UNKNOWN_METADATA_KIND", "use documents, document_relations or decisions; table cells belong in forms, not metadata"));
+                continue;
+            }
+            let ranges: Vec<(usize, usize)> = match serde_json::from_value(raw.clone()) {
+                Ok(ranges) => ranges,
+                Err(_) => {
+                    errors.push(error(
+                        path,
+                        &identity,
+                        "INVALID_RANGE_SHAPE",
+                        "expected [[start,end],...] with nonnegative integer bounds",
+                    ));
+                    continue;
+                }
+            };
+            for (index, (start, end)) in ranges.into_iter().enumerate() {
+                let path = format!("{path}/{index}");
+                let result = if start >= end {
+                    Err("range requires start < end; grid-only sources use forms; empty sources require empty_sources disposition, never [0,0)".into())
+                } else if category == "text" {
+                    tools::validate_span(
+                        input,
+                        state.coverage(),
+                        &Span {
+                            source_id: id.clone(),
+                            start,
+                            end,
+                            view_id: None,
+                            grid_cell: None,
+                        },
+                    )
+                } else {
+                    let (total, delivered) = if category == "forms" {
+                        (
+                            input
+                                .structured_forms
+                                .iter()
+                                .find(|f| f["form_definition_revision_id"] == *id)
+                                .and_then(|f| {
+                                    super::super::relations::form_total(&f["definition"])
+                                }),
+                            state.coverage().form_cells.get(id),
+                        )
+                    } else {
+                        (
+                            Some(match id.as_str() {
+                                "documents" => input.documents.len(),
+                                "decisions" => input.decisions.len(),
+                                _ => input.document_relations.len(),
+                            }),
+                            state.coverage().metadata.get(id),
+                        )
+                    };
+                    match total {
+                        None => Err("unknown form or invalid grid definition".into()),
+                        Some(total) if end > total => Err(format!("range exceeds valid bounds [0,{total}); use the delivered scan_ranges")),
+                        Some(_) if !tools::contains(delivered, start, end) => Err("range not confirmed delivered; inspect the exact range before submitting".into()),
+                        _ => Ok(()),
+                    }
+                };
+                if let Err(message) = result {
+                    errors.push(error(path, &identity, "INVALID_SCAN_RANGE", message));
+                }
+            }
+        }
+    }
+    if let Some(ids) = args["empty_sources"].as_array() {
+        for (index, id) in ids.iter().enumerate() {
+            let source = input
+                .source_units
+                .iter()
+                .find(|s| id.as_str() == Some(s.source_unit_revision_id.as_str()));
+            let reason = match source {
+                None => Some("unknown source ID"),
+                Some(source) if !source.text.is_empty() => {
+                    Some("nonempty source needs text ranges")
+                }
+                Some(source)
+                    if !input.structured_forms.iter().any(|f| {
+                        f["source_unit_revision_id"] == source.source_unit_revision_id
+                    }) && !state
+                        .coverage()
+                        .views
+                        .values()
+                        .any(|v| v.source_id == source.source_unit_revision_id) =>
+                {
+                    Some(
+                        "empty text does not prove a blank page; inspect original view before disposition",
+                    )
+                }
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                errors.push(error(
+                    format!("/empty_sources/{index}"),
+                    id,
+                    "INVALID_EMPTY_SOURCE",
+                    reason,
+                ));
+            }
+        }
+    } else {
+        errors.push(error(
+            "/empty_sources".into(),
+            &Value::Null,
+            "ARRAY_REQUIRED",
+            "empty_sources must be an array",
+        ));
+    }
+    errors
+}
+
+fn preflight(input: &FrozenInput, state: &Checkpoint, args: &Value) -> Vec<Value> {
+    let mut errors = range_errors(input, state, args);
     let flow = &state.analysis.outline;
     let mut requirement_ids: BTreeSet<String> = flow.requirements.keys().cloned().collect();
     let mut reference_ids: BTreeSet<String> = flow.references.keys().cloned().collect();
