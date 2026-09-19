@@ -545,7 +545,7 @@ pub fn verify(
         .iter()
         .take_while(|s| !s.placement.is_body())
         .count();
-    let prefix = body_sections.len() + 4 + usize::from(front_sections > 0);
+    let prefix = body_sections.len() + 5;
     let expected_count = prefix
         + notice_ranges.len() * 3
         + out
@@ -565,12 +565,10 @@ pub fn verify(
         .sum::<usize>();
     let mut cursor = 1;
     consume_ranges(&children, &mut cursor, &out[..front_ranges])?;
-    if front_sections > 0 {
-        if !page_break(children[cursor]) {
-            return Err("front matter must end before the TOC page".into());
-        }
-        cursor += 1;
+    if !page_break(children[cursor]) {
+        return Err("cover and front matter must end before the TOC page".into());
     }
+    cursor += 1;
     let toc_nodes = &children[cursor..cursor + body_sections.len() + 3];
     if !toc_nodes.iter().all(|n| n.has_tag_name((W, "p")))
         || text(toc_nodes[0]) != normalized(&plan.toc_title)

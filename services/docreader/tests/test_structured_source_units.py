@@ -401,3 +401,24 @@ def test_inline_and_streaming_meta_have_identical_structured_units() -> None:
         unit.SerializeToString() for unit in frames[0].meta.structured_source_units
     ]
     assert inline.structured_source_units[0].image.width == 4
+
+
+@pytest.mark.parametrize("carrier", ["table", "image"])
+def test_leading_nontext_content_keeps_empty_owner_and_real_child(carrier):
+    doc = DocxDocument()
+    if carrier == "table":
+        doc.add_table(rows=1, cols=1).cell(0, 0).text = "报价填写位置"
+    else:
+        doc.add_picture(BytesIO(_image_bytes("PNG")))
+    output = BytesIO()
+    doc.save(output)
+    units = _docx_structured_units(output.getvalue())
+    owner, child = units[:2]
+    assert owner.kind is StructuredSourceUnitKind.SECTION
+    assert owner.text == ""
+    if carrier == "table":
+        assert child.locator.section_ordinal == owner.locator.section_ordinal
+        assert child.grid.cells[0].text == "报价填写位置"
+    else:
+        assert child.locator.compound_parent.section_ordinal == owner.locator.section_ordinal
+        assert child.kind is StructuredSourceUnitKind.IMAGE_REGION

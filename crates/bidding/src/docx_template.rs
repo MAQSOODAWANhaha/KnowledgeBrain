@@ -350,9 +350,7 @@ pub fn compile_template(input: &Value, plan: &TemplatePlan) -> Result<Vec<u8>, T
     for (ordinal, section) in plan.sections.iter().enumerate() {
         if section.placement.is_body() && !toc_written {
             check(section.depth == 0, "body must start at root depth")?;
-            if ordinal > 0 {
-                body += "<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>";
-            }
+            body += "<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>";
             body += &toc(plan)?;
             toc_written = true;
         }

@@ -108,6 +108,7 @@ fn complete_discovery(input: &FrozenInput, state: &mut agent::Checkpoint) {
         }
     }
     let args = json!({
+        "project_info": {"fields":{},"cover_lines":[],"cover_requirement_ids":[],"cover_status":"not_prescribed"},
         "text": text,
         "forms": forms,
         "metadata":metadata,"empty_sources": empty_sources,
@@ -3544,6 +3545,7 @@ impl Model for OutlinePublishScript {
             1 => vec![(
                 "submit_outline_scan".into(),
                 json!({
+                    "project_info":{"fields":{},"cover_status":"not_prescribed","cover_lines":[],"cover_requirement_ids":[]},
                     "text":{"source":[[0,end]]},
                     "forms":{},
                     "metadata":{"documents":[[0,1]]},"empty_sources":[],
@@ -3974,7 +3976,8 @@ async fn fill_preserves_outline_warnings_in_recompiled_document() {
         outline_flow::{IssueStatus, OutlineIssue, OutlineState},
         readback::Preserved,
     };
-    let input = draft_input();
+    let mut input = draft_input();
+    input.source_units[0].text.insert_str(0, "采购项目甲。");
     let config = config();
     let mut state = journal_state(&input, &config);
     enter_outline(&input, &mut state);
@@ -3984,7 +3987,26 @@ async fn fill_preserves_outline_warnings_in_recompiled_document() {
         unit_keys: vec!["body".into()],
         paragraphs: vec!["用户报价100万元".into()],
     }];
-    let mut outline = OutlineState::default();
+    let mut outline = OutlineState {
+        project_info: Some(crate::tender_analysis::outline_flow::ProjectInfo {
+            cover_status: crate::tender_analysis::outline_flow::CoverStatus::NotPrescribed,
+            fields: BTreeMap::from([(
+                "project_name".into(),
+                crate::tender_analysis::outline_flow::ProjectValue {
+                    value: "采购项目甲".into(),
+                    grounds: vec![Span {
+                        source_id: "source".into(),
+                        start: 0,
+                        end: "采购项目甲".len(),
+                        view_id: None,
+                        grid_cell: None,
+                    }],
+                },
+            )]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     outline.issues.insert(
         "warning-1".into(),
         OutlineIssue {
@@ -4031,6 +4053,10 @@ async fn fill_preserves_outline_warnings_in_recompiled_document() {
     let xml = docx_document_xml(&docx.compiled.docx);
     assert!(xml.contains("外部标准待确认"));
     assert!(xml.contains("用户报价100万元"));
+    assert!(
+        xml.contains("采购项目甲"),
+        "fill must retain source-backed project identity"
+    );
 }
 
 #[test]
@@ -5833,4 +5859,71 @@ fn grid_only_scan_closes_without_empty_marker_and_recovers_cursor() {
     )
     .unwrap();
     assert!(page.to_string().contains("empty_source"));
+}
+
+#[test]
+fn project_cover_compiles_before_toc_without_filename_or_duplicate_chapter() {
+    use crate::tender_analysis::outline_flow::{CoverStatus, ProjectInfo, ProjectValue};
+    let mut input = draft_input();
+    input.source_units[0].text = "南自华盾2024-2025年广域网防火墙框架采购\n投标文件\n投标人：（盖单位章）\n法定代表人或其委托代理人：（签字）\n年 月 日".into();
+    let mut result = draft_result(&input);
+    let grounds = vec![Span {
+        source_id: "source".into(),
+        start: 0,
+        end: input.source_units[0].text.len(),
+        view_id: None,
+        grid_cell: None,
+    }];
+    let title = "南自华盾2024-2025年广域网防火墙框架采购\n\n投标文件\n\n投标人：________________（盖单位章）\n\n法定代表人或其委托代理人：________（签字）\n\n______年______月______日";
+    result.analysis.outline.project_info = Some(ProjectInfo {
+        fields: BTreeMap::new(),
+        cover_status: CoverStatus::Prescribed,
+        cover_lines: vec![ProjectValue {
+            value: title.into(),
+            grounds,
+        }],
+        cover_requirement_ids: vec![],
+    });
+    result.review.analysis_sha256 = digest(&result.analysis).unwrap();
+    let restored: AnalysisResult = serde_json::from_value(json!(result)).unwrap();
+    let draft = crate::docx_composition::synthesize_draft_document(&input, &restored).unwrap();
+    assert_eq!(draft.presentation.as_ref().unwrap().title, title);
+    let compiled = compiler::compile(&input, &restored, &draft, 1_000_000).unwrap();
+    let xml = docx_document_xml(&compiled.docx);
+    assert!(!xml.contains("投标文件草稿") && !xml.contains("招标文件.pdf"));
+    assert!(xml.find("南自华盾").unwrap() < xml.find("目录").unwrap());
+    assert!(xml[..xml.find("目录").unwrap()].contains("w:type=\"page\""));
+    assert!(xml.contains(&crate::docx_template::notice_bookmark(title)));
+    assert!(!draft.sections.values().any(|s| s.title == "投标文件封面"));
+}
+
+#[test]
+fn discovered_cover_can_replace_an_existing_body_chapter_without_deadlock() {
+    use crate::tender_analysis::outline_flow;
+    let input = draft_input();
+    let config = config();
+    let mut state = journal_state(&input, &config);
+    enter_outline(&input, &mut state);
+    save_required(&mut state, "cover", "投标文件封面", "source", 3);
+    save_required(&mut state, "letter", "投标函", "source", 3);
+    let saved = agent::apply(&input,&config,&mut state,"put_outline_items", &json!({"items":[
+        {"id":"tmp-cover","parent":null,"order":0,"title":"投标文件封面","purpose":"response","prescribed":true,"requirement_ids":["cover"]},
+        {"id":"tmp-letter","parent":null,"order":1,"title":"投标函","purpose":"response","prescribed":true,"requirement_ids":["letter"]}
+    ],"remove_ids":[]})).unwrap();
+    agent::apply(&input,&config,&mut state,"submit_outline_scan",&json!({
+        "text":{},"forms":{},"metadata":{},"empty_sources":[],"requirements":[],"references":[],"issues":[],"review_fragments":[],
+        "project_info":{"fields":{},"cover_status":"prescribed","cover_lines":[{"value":"投标文件","grounds":[{"source_id":"source","start":0,"end":3}]}],"cover_requirement_ids":["cover"]}
+    })).unwrap();
+    assert!(outline_flow::blockers(&input, &state).contains(&"B_REQUIREMENT_UNMAPPED"));
+    agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "put_outline_items",
+        &json!({"items":[],"remove_ids":[saved["id_map"]["tmp-cover"]]}),
+    )
+    .unwrap();
+    assert!(!outline_flow::blockers(&input, &state).contains(&"B_REQUIREMENT_UNMAPPED"));
+    assert_eq!(state.analysis.draft_plan.len(), 1);
+    assert_eq!(state.analysis.draft_plan[0].title, "投标函");
 }

@@ -733,6 +733,192 @@
                 }
               }
             }
+          },
+          "project_info": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Save project fields and prescribed cover during existing discovery calls; omit to retain saved data. Do not hard-code chapter/page numbers. After full discovery, explicitly submit empty cover_lines only if no applicable prescribed cover exists. Full replacement: retain previously confirmed fields unless amendments supersede them. Values require actual inspected evidence. Preserve prescribed cover line order, project title, bidder/signature/seal/date blanks; never invent bidder identity, signature or date. Cover submission requirements are fulfilled here, not as body chapters. Mixed material requirements must first be split.",
+            "properties": {
+              "fields": {
+                "type": "object",
+                "description": "Supported keys: project_name, project_number, tender_number, lot_name, lot_number, purchaser. Omit unknown values. Preserve distinct project and tender numbers.",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "value": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "grounds": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "source_id",
+                          "start",
+                          "end"
+                        ],
+                        "properties": {
+                          "source_id": {
+                            "type": "string"
+                          },
+                          "start": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "end": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "view_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "grid_cell": {
+                            "anyOf": [
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "form_id",
+                                  "row",
+                                  "column"
+                                ],
+                                "properties": {
+                                  "form_id": {
+                                    "type": "string"
+                                  },
+                                  "row": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "column": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  }
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "grounds"
+                  ]
+                }
+              },
+              "cover_lines": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "value": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000
+                    },
+                    "grounds": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "source_id",
+                          "start",
+                          "end"
+                        ],
+                        "properties": {
+                          "source_id": {
+                            "type": "string"
+                          },
+                          "start": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "end": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "view_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "grid_cell": {
+                            "anyOf": [
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "form_id",
+                                  "row",
+                                  "column"
+                                ],
+                                "properties": {
+                                  "form_id": {
+                                    "type": "string"
+                                  },
+                                  "row": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  "column": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  }
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "grounds"
+                  ]
+                }
+              },
+              "cover_requirement_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "cover_status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "prescribed",
+                  "not_prescribed"
+                ],
+                "description": "pending saves project fields during scanning before cover discovery closes; prescribed requires cover_lines; not_prescribed requires complete discovery and empty cover_lines."
+              }
+            },
+            "required": [
+              "fields",
+              "cover_lines",
+              "cover_requirement_ids",
+              "cover_status"
+            ]
           }
         },
         "oneOf": [

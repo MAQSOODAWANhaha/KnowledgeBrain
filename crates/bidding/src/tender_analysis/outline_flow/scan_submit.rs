@@ -39,6 +39,7 @@ fn patched(base: &Value, repair: &Repair, tool: &str) -> Result<Value, String> {
                     | "issues"
                     | "review_fragments"
                     | "requirement_replacements"
+                    | "project_info"
             )
         }) {
             return Err(format!(

@@ -156,9 +156,97 @@ pub struct IdSequences {
     pub fragment: u64,
 }
 
+/// Source-backed cover data; saved with discovery, never inferred from a file name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectValue {
+    pub value: String,
+    pub grounds: Vec<Span>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverStatus {
+    #[default]
+    Pending,
+    Prescribed,
+    NotPrescribed,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectInfo {
+    pub cover_status: CoverStatus,
+    pub fields: BTreeMap<String, ProjectValue>,
+    /// Ordered prescribed cover lines, including blank bidder/signature/date fields.
+    /// Empty while pending or after discovery confirms no prescribed cover.
+    pub cover_lines: Vec<ProjectValue>,
+    pub cover_requirement_ids: Vec<String>,
+}
+
+impl ProjectInfo {
+    pub fn grounds(&self) -> impl Iterator<Item = &Span> {
+        self.fields
+            .values()
+            .chain(&self.cover_lines)
+            .flat_map(|v| &v.grounds)
+    }
+
+    pub fn title(&self) -> String {
+        if !self.cover_lines.is_empty() {
+            return self
+                .cover_lines
+                .iter()
+                .map(|line| line.value.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+        }
+        let mut lines = vec![
+            self.fields
+                .get("project_name")
+                .map(|v| v.value.clone())
+                .unwrap_or("项目名称：________________".into()),
+            "投标文件".into(),
+        ];
+        for (key, label) in [
+            ("project_number", "项目编号"),
+            ("tender_number", "招标编号"),
+            ("lot_name", "标段／包名称"),
+            ("lot_number", "标段／包编号"),
+        ] {
+            if let Some(value) = self.fields.get(key) {
+                lines.push(format!("{label}：{}", value.value));
+            }
+        }
+        lines.extend([
+            "投标人：________________".into(),
+            "日期：______年______月______日".into(),
+        ]);
+        lines.join("\n\n")
+    }
+}
+
+pub(super) fn cover_handles(flow: &OutlineState, id: &str) -> bool {
+    flow.project_info.as_ref().is_some_and(|info| {
+        info.cover_status == CoverStatus::Prescribed
+            && !info.cover_lines.is_empty()
+            && info.cover_requirement_ids.iter().any(|saved| saved == id)
+            && flow.requirements.get(id).is_some_and(|need| {
+                need.kind == NeedKind::Submission
+                    && need.needs_chapter()
+                    && (!need.format_required || !need.format_grounds.is_empty())
+                    && need
+                        .format_grounds
+                        .iter()
+                        .all(|span| info.grounds().any(|saved| saved == span))
+            })
+    })
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutlineState {
+    pub project_info: Option<ProjectInfo>,
     pub phase: Phase,
     pub scanned: Coverage,
     pub requirements: BTreeMap<String, SubmissionNeed>,
@@ -313,7 +401,7 @@ pub fn notices(state: &OutlineState) -> Vec<String> {
 
 pub fn snapshot(state: &Checkpoint) -> Result<String, String> {
     digest(
-        &json!({"requirements":state.analysis.outline.requirements,"chapters":state.analysis.draft_plan,"references":state.analysis.outline.references,"issues":state.analysis.outline.issues,"fragments":state.analysis.outline.review_fragments}),
+        &json!({"project_info":state.analysis.outline.project_info,"requirements":state.analysis.outline.requirements,"chapters":state.analysis.draft_plan,"references":state.analysis.outline.references,"issues":state.analysis.outline.issues,"fragments":state.analysis.outline.review_fragments}),
     )
 }
 
@@ -493,6 +581,7 @@ pub fn packet_snapshot(
         })
         .collect();
     digest(&json!({
+        "project_info": if packet_id == "composition" { state.analysis.outline.project_info.as_ref() } else { None },
         "packet_id": packet_id,
         "scope": check.scope,
         "fragments": fragments,
@@ -574,6 +663,9 @@ pub fn compose_check_packets(input: &FrozenInput, state: &mut Checkpoint) {
         .retain(|id, _| !id.starts_with("basis-"));
     let volumes = volume_ids(state);
     let mut bases = Vec::new();
+    if let Some(info) = &state.analysis.outline.project_info {
+        bases.extend(info.grounds().map(|span| (span.clone(), vec![], true)));
+    }
     for (id, need) in &state.analysis.outline.requirements {
         let affected: Vec<String> = volumes
             .iter()
@@ -900,6 +992,7 @@ pub fn blockers(input: &FrozenInput, state: &Checkpoint) -> Vec<&'static str> {
     }
     let unmapped = flow.requirements.iter().any(|(id, need)| {
         need.needs_chapter()
+            && !cover_handles(flow, id)
             && !state.analysis.draft_plan.iter().any(|node| {
                 node.status != DraftStatus::Omitted
                     && node.purpose == super::draft::ChapterPurpose::Response
@@ -912,15 +1005,17 @@ pub fn blockers(input: &FrozenInput, state: &Checkpoint) -> Vec<&'static str> {
     let invalid_mapping = state.analysis.draft_plan.iter().any(|node| {
         node.status != DraftStatus::Omitted
             && node.requirement_ids.iter().any(|id| {
-                flow.requirements
-                    .get(id)
-                    .is_none_or(|need| match node.purpose {
-                        super::draft::ChapterPurpose::Response => !need.needs_chapter(),
-                        super::draft::ChapterPurpose::Group => {
-                            need.kind != NeedKind::StructureConstraint
-                                || need.applicability == Applicability::NotApplicable
-                        }
-                    })
+                cover_handles(flow, id)
+                    || flow
+                        .requirements
+                        .get(id)
+                        .is_none_or(|need| match node.purpose {
+                            super::draft::ChapterPurpose::Response => !need.needs_chapter(),
+                            super::draft::ChapterPurpose::Group => {
+                                need.kind != NeedKind::StructureConstraint
+                                    || need.applicability == Applicability::NotApplicable
+                            }
+                        })
             })
     });
     if unmapped || invalid_mapping {
@@ -933,6 +1028,7 @@ pub fn blockers(input: &FrozenInput, state: &Checkpoint) -> Vec<&'static str> {
     }
     let missing_format = flow.requirements.iter().any(|(id, need)| {
         need.applicability != Applicability::NotApplicable
+            && !cover_handles(flow, id)
             && ((need.format_required && need.format_grounds.is_empty())
                 || need.format_grounds.iter().any(|span| {
                     !state.analysis.draft_plan.iter().any(|node| {
@@ -942,7 +1038,11 @@ pub fn blockers(input: &FrozenInput, state: &Checkpoint) -> Vec<&'static str> {
                     })
                 }))
     });
-    if missing_format
+    if flow
+        .project_info
+        .as_ref()
+        .is_none_or(|info| info.cover_status == CoverStatus::Pending)
+        || missing_format
         || flow.references.values().any(|reference| {
             reference.impact == ReferenceImpact::Format
                 && reference.status == ReferenceStatus::Unresolved
@@ -979,6 +1079,13 @@ pub fn blockers(input: &FrozenInput, state: &Checkpoint) -> Vec<&'static str> {
 fn blocker_details(input: &FrozenInput, state: &Checkpoint) -> Vec<Value> {
     let flow = &state.analysis.outline;
     let mut rows = Vec::new();
+    if flow
+        .project_info
+        .as_ref()
+        .is_none_or(|info| info.cover_status == CoverStatus::Pending)
+    {
+        rows.push(json!({"code":"B_FORMAT_EVIDENCE_MISSING","action":"save project_info with inspected project fields and applicable prescribed cover. Only after complete discovery may empty cover_lines select the generic cover; unknown fields remain blank."}));
+    }
     for node in &state.analysis.draft_plan {
         if node.status == DraftStatus::Omitted {
             continue;
@@ -994,14 +1101,14 @@ fn blocker_details(input: &FrozenInput, state: &Checkpoint) -> Vec<Value> {
                             && need.applicability != Applicability::NotApplicable
                     }
                 });
-            if !valid {
+            if !valid || cover_handles(flow, id) {
                 rows.push(json!({"code":"B_REQUIREMENT_UNMAPPED","requirement_id":id,"chapter_id":node.id,
-                    "action":"remove the invalid association; material and content obligations belong on response nodes, structure rules on groups, exclusions in review"}));
+                    "action":"remove the invalid association; cover submissions already implemented by project_info must be removed from body chapters; other materials belong on response nodes, structure rules on groups, exclusions in review"}));
             }
         }
     }
     for (id, need) in &flow.requirements {
-        if !need.needs_chapter() {
+        if !need.needs_chapter() || cover_handles(flow, id) {
             continue;
         }
         let chapters: Vec<_> = state
@@ -1123,7 +1230,7 @@ fn pending_scan_ranges(input: &FrozenInput, state: &Checkpoint) -> Vec<Value> {
 fn organization_items(state: &Checkpoint) -> Vec<Value> {
     let mut rows: Vec<_> = state.analysis.outline.requirements.iter().map(|(id, need)| {
         let chapters: Vec<_> = state.analysis.draft_plan.iter().filter(|n| n.status != DraftStatus::Omitted && n.requirement_ids.contains(id)).map(|n| &n.id).collect();
-        let destination = if need.applicability == Applicability::NotApplicable || need.kind == NeedKind::NonDocument { "review_exclusion" }
+        let destination = if cover_handles(&state.analysis.outline, id) { "cover" } else if need.applicability == Applicability::NotApplicable || need.kind == NeedKind::NonDocument { "review_exclusion" }
             else if need.kind == NeedKind::StructureConstraint { "group" } else { "response" };
         json!({"id":id,"kind":need.kind,"submission_name":need.submission_name,
             "description":need.description,"condition":need.condition,"applicability":need.applicability,
@@ -1143,7 +1250,7 @@ fn organization_items(state: &Checkpoint) -> Vec<Value> {
 pub fn packet(input: &FrozenInput, state: &Checkpoint, budget: usize) -> Result<Value, String> {
     let discovering = state.analysis.outline.phase == Phase::Discover;
     let chapters: Vec<_> = state.analysis.draft_plan.iter().map(|n| json!({"id":n.id,"parent":n.parent,"order":n.order,"title":n.title,"requirement_ids":n.requirement_ids,"status":n.status,"purpose":n.purpose,"body_status":n.body_status})).collect();
-    let mut out = json!({"phase":state.analysis.outline.phase,"snapshot_sha256":snapshot(state)?,
+    let mut out = json!({"project_info":state.analysis.outline.project_info,"phase":state.analysis.outline.phase,"snapshot_sha256":snapshot(state)?,
         "scanned_sources":input.source_units.iter().filter(|s| source_scanned(input, &state.analysis.outline, &s.source_unit_revision_id)).count(),
         "total_sources":input.source_units.len(),"chapters":tools::bounded_page(&chapters, 0, chapters.len().max(1), budget / 2)?,
         "requirement_count":state.analysis.outline.requirements.len(),
@@ -1306,6 +1413,7 @@ struct Scan {
     requirements: Vec<ScanNeed>,
     #[serde(default)]
     requirement_replacements: BTreeMap<String, Vec<String>>,
+    project_info: Option<ProjectInfo>,
     references: Vec<ScanReference>,
     issues: Vec<ScanIssue>,
     review_fragments: Vec<ScanFragment>,
@@ -1965,6 +2073,98 @@ fn apply_validated(
                 },
             );
         }
+        if let Some(mut info) = batch.project_info {
+            for key in info.fields.keys() {
+                if !matches!(
+                    key.as_str(),
+                    "project_name"
+                        | "project_number"
+                        | "tender_number"
+                        | "lot_name"
+                        | "lot_number"
+                        | "purchaser"
+                ) {
+                    return Err(format!("unknown project field {key}"));
+                }
+            }
+            for value in info.fields.values().chain(&info.cover_lines) {
+                if value.value.trim().is_empty()
+                    || value.value.len() > 2000
+                    || value.grounds.is_empty()
+                {
+                    return Err(
+                        "project values require nonempty bounded text and inspected grounds".into(),
+                    );
+                }
+                for span in &value.grounds {
+                    tools::validate_span(input, state.coverage(), span)?;
+                    span_text(input, span)?;
+                }
+            }
+            let normalize = |text: &str| {
+                text.chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect::<String>()
+            };
+            for value in info.fields.values() {
+                let text = value
+                    .grounds
+                    .iter()
+                    .map(|span| span_text(input, span))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join("");
+                if !normalize(&text).contains(&normalize(&value.value)) {
+                    return Err("project field value must occur in its cited source text (whitespace normalization only)".into());
+                }
+            }
+            if (info.cover_status == CoverStatus::Prescribed) != !info.cover_lines.is_empty() {
+                return Err("prescribed cover requires lines; pending/not_prescribed must not carry cover lines".into());
+            }
+            if info.cover_status == CoverStatus::NotPrescribed && !scan_complete(input, &next) {
+                return Err("generic cover can only be selected after full discovery; save prescribed cover now or defer project_info".into());
+            }
+            if !info.cover_lines.is_empty() {
+                let title = normalize(&info.title());
+                if let Some(name) = info.fields.get("project_name")
+                    && !title.contains(&normalize(&name.value))
+                {
+                    return Err("prescribed cover must include the confirmed project name".into());
+                }
+            }
+            if info.cover_lines.len() > 32 {
+                return Err("cover exceeds 32 lines; only cover fields belong here".into());
+            }
+            for id in &mut info.cover_requirement_ids {
+                if let Some(stable) = aliases.get(id) {
+                    *id = stable.clone();
+                }
+            }
+            for id in &info.cover_requirement_ids {
+                let need = next
+                    .requirements
+                    .get(id)
+                    .ok_or("unknown cover requirement")?;
+                if need.kind != NeedKind::Submission
+                    || !need.needs_chapter()
+                    || info.cover_lines.is_empty()
+                {
+                    return Err(
+                        "cover mappings require an applicable submission and a prescribed cover"
+                            .into(),
+                    );
+                }
+                if need.format_required
+                    && (need.format_grounds.is_empty()
+                        || need
+                            .format_grounds
+                            .iter()
+                            .any(|span| !info.grounds().any(|saved| saved == span)))
+                {
+                    return Err("cover must retain all prescribed format grounds".into());
+                }
+            }
+            next.project_info = Some(info);
+        }
         next.checked_sha256 = None;
         let mut replacements = batch.requirement_replacements;
         for (old, targets) in &mut replacements {
@@ -2042,6 +2242,14 @@ fn apply_validated(
                 issue.status = IssueStatus::Open;
                 issue.resolution_grounds.clear();
             }
+        }
+        if let Some(info) = &next.project_info
+            && info
+                .cover_requirement_ids
+                .iter()
+                .any(|id| !cover_handles(&next, id))
+        {
+            return Err("cover requirement changed or was replaced; update project_info with valid independent cover IDs and full format grounds in the same batch".into());
         }
         let mut candidate = state.clone();
         candidate.analysis.outline = next;
@@ -2267,6 +2475,149 @@ mod tests {
     use super::*;
 
     #[test]
+    fn project_info_uses_inspected_sources_and_survives_checkpoint_round_trip() {
+        let mut input = review_input();
+        input.source_units[0].text = "南自华盾2024-2025年广域网防火墙框架采购\n投标文件\n投标人：（盖单位章）\n法定代表人或其委托代理人：（签字）\n年 月 日".into();
+        // The source is deliberately located outside chapter six/page 73.
+        input.source_units[0].locator = json!({"page_ordinal":9,"heading_path":"附件：响应格式"});
+        let mut state = checked_state(&input);
+        state.analysis.outline.phase = Phase::Discover;
+        state.analysis.outline.project_info = None;
+        let grounds = vec![span("source", input.source_units[0].text.len())];
+        let info = json!({"fields":{"project_name":{"value":"南自华盾2024-2025年广域网防火墙框架采购","grounds":grounds}},
+            "cover_status":"prescribed","cover_lines":[{"value":input.source_units[0].text,"grounds":grounds}],"cover_requirement_ids":[]});
+        let mut args = json!({"text":{},"forms":{},"metadata":{},"empty_sources":[],"requirements":[],"references":[],"issues":[],"review_fragments":[],"project_info":info});
+        assert!(apply(&input, &mut state, "submit_outline_scan", &args, 64000).is_err());
+        assert!(
+            state.analysis.outline.project_info.is_none(),
+            "unread evidence cannot commit project identity"
+        );
+        state
+            .analysis
+            .coverage
+            .text
+            .insert("source".into(), vec![(0, input.source_units[0].text.len())]);
+        apply(&input, &mut state, "submit_outline_scan", &args, 64000).unwrap();
+        let restored: Checkpoint = serde_json::from_value(json!(state)).unwrap();
+        assert!(
+            restored
+                .analysis
+                .outline
+                .project_info
+                .as_ref()
+                .unwrap()
+                .title()
+                .starts_with("南自华盾")
+        );
+        compose_check_packets(&input, &mut state);
+        let before = packet_snapshot(&input, &state, "composition").unwrap();
+        assert!(
+            state.analysis.outline.checks["composition"]
+                .fragment_ids
+                .iter()
+                .any(|id| state.analysis.outline.review_fragments[id].span == grounds[0])
+        );
+        args["project_info"]["fields"]["project_name"]["value"] = json!("伪造项目名称");
+        assert!(apply(&input, &mut state, "submit_outline_scan", &args, 64000).is_err());
+        assert_eq!(
+            before,
+            packet_snapshot(&input, &state, "composition").unwrap(),
+            "failed update is atomic"
+        );
+        state
+            .analysis
+            .outline
+            .project_info
+            .as_mut()
+            .unwrap()
+            .cover_lines[0]
+            .value
+            .push_str("修订");
+        assert_ne!(
+            before,
+            packet_snapshot(&input, &state, "composition").unwrap()
+        );
+    }
+
+    #[test]
+    fn project_cover_disposition_is_required_and_generic_cover_waits_for_scan_completion() {
+        let input = review_input();
+        let mut state = checked_state(&input);
+        state.analysis.outline.phase = Phase::Discover;
+        state.analysis.outline.scanned = Coverage::default();
+        state.analysis.outline.project_info = None;
+        let mut args = json!({"text":{},"forms":{},"metadata":{},"empty_sources":[],"requirements":[],"references":[],"issues":[],"review_fragments":[],
+            "project_info":{"fields":{},"cover_status":"pending","cover_lines":[],"cover_requirement_ids":[]}});
+        apply(&input, &mut state, "submit_outline_scan", &args, 64000).unwrap();
+        assert!(blockers(&input, &state).contains(&"B_FORMAT_EVIDENCE_MISSING"));
+        args["project_info"]["cover_status"] = json!("not_prescribed");
+        assert!(apply(&input, &mut state, "submit_outline_scan", &args, 64000).is_err());
+        state
+            .analysis
+            .outline
+            .scanned
+            .text
+            .insert("source".into(), vec![(0, input.source_units[0].text.len())]);
+        apply(&input, &mut state, "submit_outline_scan", &args, 64000).unwrap();
+        let title = state
+            .analysis
+            .outline
+            .project_info
+            .as_ref()
+            .unwrap()
+            .title();
+        assert!(title.contains("项目名称：________________"));
+        assert!(!title.contains("草稿"));
+    }
+
+    #[test]
+    fn cover_mapping_requires_format_evidence_and_does_not_cover_other_materials() {
+        let input = review_input();
+        let mut state = checked_state(&input);
+        state.analysis.draft_plan.clear();
+        let span = span("source", input.source_units[0].text.len());
+        let need = state
+            .analysis
+            .outline
+            .requirements
+            .get_mut("requirement-1")
+            .unwrap();
+        need.description = "投标文件封面".into();
+        need.submission_name = Some("投标文件封面".into());
+        need.format_required = true;
+        need.format_grounds = vec![span.clone()];
+        state.analysis.outline.project_info = Some(ProjectInfo {
+            cover_status: CoverStatus::Prescribed,
+            fields: BTreeMap::new(),
+            cover_lines: vec![ProjectValue {
+                value: "项目名称\n投标文件\n投标人：____".into(),
+                grounds: vec![span],
+            }],
+            cover_requirement_ids: vec!["requirement-1".into()],
+        });
+        assert!(cover_handles(&state.analysis.outline, "requirement-1"));
+        assert!(!blockers(&input, &state).contains(&"B_REQUIREMENT_UNMAPPED"));
+        let mut other = state.analysis.outline.requirements["requirement-1"].clone();
+        other.description = "报价表".into();
+        state
+            .analysis
+            .outline
+            .requirements
+            .insert("requirement-2".into(), other);
+        assert!(blockers(&input, &state).contains(&"B_REQUIREMENT_UNMAPPED"));
+        state
+            .analysis
+            .outline
+            .project_info
+            .as_mut()
+            .unwrap()
+            .cover_lines[0]
+            .grounds
+            .clear();
+        assert!(!cover_handles(&state.analysis.outline, "requirement-1"));
+    }
+
+    #[test]
     fn current_contract_round_trips_and_legacy_fields_are_rejected() {
         let state = OutlineState::default();
         let json = serde_json::to_value(&state).unwrap();
@@ -2362,6 +2713,10 @@ mod tests {
             fill_config_sha256: None,
             outline_run: Default::default(),
         };
+        state.analysis.outline.project_info = Some(ProjectInfo {
+            cover_status: CoverStatus::NotPrescribed,
+            ..Default::default()
+        });
         let source = &input.source_units[0];
         tools::cover(
             state

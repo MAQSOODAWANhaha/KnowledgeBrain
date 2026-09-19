@@ -472,3 +472,21 @@ fn unchanged_system_note_is_not_body_but_edited_note_is_protected() {
     let read = read_chapters(&manifest, &units, &sections(), &prior_titles()).unwrap();
     assert!(read.chapters[0].has_body());
 }
+
+#[test]
+fn unchanged_project_cover_is_regenerated_but_edited_cover_is_protected() {
+    const COVER: &str = "真实采购项目\n\n投标文件\n\n投标人：________\n\n______年______月______日";
+    let bookmark: &'static str =
+        Box::leak(crate::docx_template::notice_bookmark(COVER).into_boxed_str());
+    let mut cover = paragraph(COVER);
+    cover.bookmarks = vec![bookmark];
+    let document = read(vec![cover, heading(1, "第一册 商务文件", vec!["kb_s0"])]);
+    assert!(document.not_checked.is_empty());
+    let mut cover = paragraph("真实采购项目\n\n投标文件\n\n投标人：用户填写公司");
+    cover.bookmarks = vec![bookmark];
+    let document = read(vec![cover, heading(1, "第一册 商务文件", vec!["kb_s0"])]);
+    assert!(
+        !document.not_checked.is_empty(),
+        "edited front matter must block fill, not disappear"
+    );
+}

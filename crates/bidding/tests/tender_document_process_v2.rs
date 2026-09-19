@@ -1064,3 +1064,118 @@ fn deterministic_uuid(material: &[u8]) -> Uuid {
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Uuid::from_bytes(bytes)
 }
+
+#[derive(Clone)]
+struct StructuredFixture(ReadResult);
+
+#[async_trait]
+impl TenderSourceConverter for StructuredFixture {
+    async fn convert(
+        &self,
+        _: &str,
+        _: Vec<u8>,
+        _: &CancellationToken,
+    ) -> Result<ReadResult, TenderDocumentProcessError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn docx_empty_owning_sections_publish_children_not_empty_reading_evidence() {
+    for child_kind in ["table", "form", "image", "orphan", "foreign", "empty_form"] {
+        let converter = FixtureConverter {
+            image_bytes: image_bytes(ImageFormat::Png),
+            seen: Arc::new(Mutex::new(vec![])),
+            omit_image_bytes: false,
+            empty_units: false,
+        };
+        let mut parsed = converter
+            .convert("tender.docx", office(true), &CancellationToken::new())
+            .await
+            .unwrap();
+        parsed.structured_source_units[0].text.clear();
+        let child = match child_kind {
+            "table" => {
+                let table_result = converter
+                    .convert("tender.pdf", minimal_pdf(), &CancellationToken::new())
+                    .await
+                    .unwrap();
+                let mut table = table_result.structured_source_units[1].clone();
+                table.locator = document_locator(0, Some(0), None, None);
+                table.text.clear();
+                Some(table)
+            }
+            "form" | "foreign" | "empty_form" => Some(parsed.structured_source_units[2].clone()),
+            "image" => Some(parsed.structured_source_units[4].clone()),
+            _ => None,
+        };
+        parsed.structured_source_units.truncate(1);
+        if let Some(mut child) = child {
+            child.ordinal = 1;
+            if child_kind == "empty_form" {
+                child.text.clear();
+            }
+            if child_kind == "foreign" {
+                child.locator = document_locator(99, None, None, Some(0));
+            }
+            parsed.structured_source_units.push(child);
+        }
+        let (document, payload) = frozen_fixture("tender.docx", DOCX_MEDIA_TYPE, office(true));
+        let repository = MockRepository::new(document);
+        let service = TenderDocumentProcessService::new(
+            repository.clone(),
+            StructuredFixture(parsed),
+            vision("image evidence"),
+            MockTransport::default(),
+        );
+        let result = service.process(&payload, &CancellationToken::new()).await;
+        if matches!(child_kind, "orphan" | "foreign" | "empty_form") {
+            assert!(
+                matches!(result,Err(TenderDocumentProcessError::StructuredSource(ref error)) if error.contains("empty text")),
+                "{child_kind}: {result:?}"
+            );
+            assert!(repository.publications.lock().unwrap().is_empty());
+        } else {
+            let receipt = result.unwrap();
+            assert_eq!(receipt.source_unit_count, 1);
+            {
+                let publications = repository.publications.lock().unwrap();
+                let child = &publications[0].source_units[0];
+                assert_eq!(
+                    child.source_span_v2.parser_ordinal, 1,
+                    "original parser identity must not be renumbered"
+                );
+                if child_kind == "table" {
+                    assert!(child.text_utf8.is_empty());
+                    assert!(
+                        child
+                            .grid
+                            .as_ref()
+                            .is_some_and(|grid| !grid.cells.is_empty())
+                    );
+                } else {
+                    assert!(!child.text_utf8.is_empty());
+                }
+                let snapshot: serde_json::Value =
+                    serde_json::from_slice(&publications[0].converted_source.canonical_payload)
+                        .unwrap();
+                assert_eq!(snapshot["structured_source_units"][0]["text"], "");
+                assert_eq!(
+                    snapshot["structured_source_units"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    2
+                );
+                assert_ne!(child.source_span_v2.parser_unit_key, "doc-section");
+            }
+            assert!(
+                service
+                    .process(&payload, &CancellationToken::new())
+                    .await
+                    .unwrap()
+                    .replayed
+            );
+        }
+    }
+}

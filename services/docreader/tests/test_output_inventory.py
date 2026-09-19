@@ -442,3 +442,26 @@ def test_fill_inventory_carries_unequal_widths_and_repeated_header():
     doc.save(stream)
     assert any("table layout cannot" in (entry["reason"] or "")
                for entry in manifest(parse("table.docx", stream.getvalue()))["units"])
+
+
+def test_project_cover_multiline_system_bookmark_survives_inventory():
+    title = "南自华盾2024-2025年广域网防火墙框架采购\n\n投标文件\n\n投标人：________（盖单位章）\n\n______年______月______日"
+    doc = Document()
+    paragraph = doc.add_paragraph(title)
+    name = "kb_note_" + hashlib.sha256(title.encode()).hexdigest()[:32]
+    start = OxmlElement("w:bookmarkStart")
+    start.set(qn("w:id"), "0")
+    start.set(qn("w:name"), name)
+    end = OxmlElement("w:bookmarkEnd")
+    end.set(qn("w:id"), "0")
+    paragraph._p.addprevious(start)
+    paragraph._p.addnext(end)
+    doc.add_page_break()
+    doc.add_paragraph("目录")
+    raw = BytesIO()
+    doc.save(raw)
+    result = parse("project-cover.docx", raw.getvalue())
+    receipt = manifest(result)
+    assert result.structured_source_units[0].text == title
+    assert name in receipt["units"][0]["bookmarks"]
+    assert not [entry for entry in receipt["units"] if entry["status"] == "not_checked"]

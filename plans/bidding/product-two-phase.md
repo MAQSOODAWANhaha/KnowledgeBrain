@@ -1,6 +1,6 @@
 # 招标解析与投标文件生成：统一设计与实施任务
 
-更新时间：2026-09-18。
+更新时间：2026-09-19。
 
 本文是招投标生成流程的**唯一现行设计和任务账本**。2026-09-18 的要求归类、组织效率和核对闭环修订见第 11 节，状态为**待开始**；第 3–5 节已同步目标合同，不代表这些修订已经部署。实现与验收状态见第 9 节。方案存在、代码已写或局部单测通过，都不代表产品验收完成。
 
@@ -10,7 +10,7 @@
 
 ```text
 上传招标文件及补遗 → 解析完成 → 用户点击“生成章节大纲” → 冻结本次输入
-→ 自动生成完整章节大纲和骨架 Word
+→ 自动生成项目信息首页、完整章节大纲和骨架 Word
 → 用户可选 AI 补充内容、自由编辑 → 保存、下载当前投标文件
 ```
 
@@ -133,6 +133,7 @@
 
 | 目标 JSON 路径 | 字段与拥有方 |
 | --- | --- |
+| `Checkpoint.analysis.outline.project_info` | fields（project_name／project_number／tender_number／lot_name／lot_number／purchaser，各含 value、grounds）、cover_status（pending／prescribed／not_prescribed）、cover_lines（有序 value、grounds）、cover_requirement_ids；扫描阶段写入，组成核对包负责核验，宿主生成首页。 |
 | `Checkpoint.analysis.outline.requirements[id]` | description、kind（submission／content_constraint／structure_constraint／non_document）、submission_name、classification_reason、applicability、condition、grounds、format_required、format_grounds、order_constraints；T2／O2 |
 | `Checkpoint.analysis.outline.references[id]` | grounds、target_description、target_ids、requirement_ids、impact（structure／format／content）、status（resolved／unresolved）、resolution_grounds；T2 |
 | `Checkpoint.analysis.outline.review_fragments[id]` | kind、原文／网格 Span、document_id、volume_ids；文本由冻结输入派生，不复制可变正文；T1 收集，T3 组包 |
@@ -718,3 +719,42 @@ O1先解除真实阻塞，O2改变“已发现要求→组织章节”的主要�
 空正文记账块复用source_scanned判断，扫描门和游标不再分歧。恢复从已保存扫描账重算游标，全量完成时游标为chunks.len()且不再分配最后一块。pending_scan补充真正无正文无表格来源的原页处置提示，不自动写覆盖或处置。
 
 本次回归按真实卡点9×3网格验证完整27格、缺一格、第二表未完成、仅读未扫、序列化恢复和无正文无表格的阻断。真实运行任务未修改，不能把回归通过等同于已经恢复线上任务。Rust与SQL合同同步部署，不迁移旧冻结请求。
+
+
+## 12. 项目信息与首页（2026-09-19）
+
+本次范围是首次生成时提供有项目信息的首页，不包含其余固定投标函正文和表格的完整重建。不以“第六章”、固定页码或某个章节名称作为程序规则；真实样本 PDF 第 73 页只是验收来源之一。
+
+### 12.1 发现与保存
+
+复用 `submit_outline_scan.project_info`，随已有扫描结论写入 `Checkpoint.analysis.outline.project_info`，结果与填充种子沿用同一份数据，不新增工具服务、领域表或模型运行。字段原文与值仅允许空白归一化，来源必须实际投递确认；未知字段不猜测、不使用文件名代替项目名称。项目编号、招标编号分别保存。明确补遗修改优先，冲突通过现有问题机制处理，由组成核对对照证据判断。
+
+封面处置区分三种状态：`pending` 允许发现尚未完成时先保存项目字段；`prescribed` 保存适用规定封面的有序文本行、待填写位置及完整依据；`not_prescribed` 仅在全量发现完成后使用，表示没有适用规定封面。未保存项目信息处置或仍为 pending，按现有 `B_FORMAT_EVIDENCE_MISSING` 阻止进入核对和发布。没有可靠项目名称时统一首页明确保留“项目名称：________________”，不能伪造。
+
+规定封面跨正文和结构化表格时，保存同一封面所需的全部依据。只保留实际首页内容，不复制招标页眉。招标人不是投标人；未知投标人、签字人、日期留空。当前只重建文字、字段顺序与填写位置，不承诺源文件的表格排版、字体或逐像素一致。
+
+### 12.2 组织、核对与编译
+
+封面独立提交项通过 `cover_requirement_ids` 由首页承接，保留要求和格式依据，禁止再挂到正文节点。多材料混合要求必须先拆分，不能用封面吞并授权书、报价表等其他材料。封面承接检查仍要求适用的 submission 身份及全部格式依据；修改或替换要求时同步更新关联，否则整批拒绝。
+
+项目信息依据由宿主加入 composition 核对包，复用已有分段投递与确认。包摘要包含项目信息，修改后旧核对结果失效。核对项目身份、补遗适用性、封面完整性与材料归属，不能仅因关联 ID 存在就通过。其他分册不为首页变化重新阅读全部来源。
+
+首页复用现有带摘要书签的系统内容区域，放在目录前并独立分页，不新增正文章节，不进入目录；没有规定封面时生成统一项目首页。移除“投标文件草稿”与招标文件名的首页回退。编译后的结构校验同步验证首页与目录间分页。
+
+### 12.3 可选填充与验收
+
+填充继承原大纲状态和项目信息。未改动的系统首页可按同一数据重新生成；编辑过的首页沿用首章前用户内容保护，提交填充前明确拒绝，原版本仍保留。本期不承诺可重建任意用户编辑封面。
+
+检查点合同升级为 14，Rust 与 SQL 基线保持一致；不新增旧检查点转换链。本次未部署，不自动重跑或替换已发布文件。
+
+验收包括：不同章节／页码下的封面提取合同；未读依据与伪造项目名拒绝；发现未结束不能选择无规定封面；封面要求独立承接且不能覆盖其他材料；检查点序列化恢复；项目信息原文进入组成核对及摘要失效；生成 Word 首页内容、分页和无重复目录章；用户修改首页时有损填充被阻止。代码回归结果与真实模型、真实数据库恢复、编辑器联验须分别记录。
+
+本次实现状态：**已实现**。本地完整 Rust 单测 383 passed、20 ignored；schema 合同 6 passed；SQL 静态合同 26 passed；DocReader output inventory 31 passed。包含首页正文与目录分页校验、封面节点迁移、检查点序列化、填充继承与编辑保护回归。未部署，未运行真实模型重新抽取、真实数据库故障恢复或 ONLYOFFICE 保存再填充联验，因此不标为产品端到端已验收。
+
+### DOCX 空章节容器合同修复（2026-09-19）
+
+DocReader 在前置图片、表格或表单之前可能输出空的 section，作为子内容定位的所属章节。这是结构容器，不是正文证据。Worker 保留完整冻结解析快照；仅当空 section 的 Document 定位确实被同 section_ordinal 的表格、表单或图片子内容引用时，不将该容器单独发布为 Agent 来源。子内容继续原有校验、OCR／网格发布及发现扫描，原始 parser ordinal 和定位不重编号。不放行孤立空 section，不填充伪造文本，空表单仍失败。预处理按来源数量线性遍历，无新增模型回合或数据库表。
+
+本次验证：文件处理集成测试 7 passed（包含前置网格／表单／图片、孤立空容器、错误所属章节、空表单拒绝、冻结快照保留与重放）；DocReader 结构化测试 18 passed。另只读检查本地三份真实 DOCX 的结构化输出，均无空 section，不能替代本次失败文件的端到端重跑。本次未部署、未自动重试用户任务。
+
+后续发布合同修正：空容器投影后，发布来源保留原始 parser ordinal，SQL 不再要求从 0 连续，而要求非负且严格递增；每项 parser_unit_key 必须匹配原始解析快照相应 ordinal。重复、倒序和负数继续拒绝，表约束仍保持 parser_ordinal=ordinal。本次补齐此前遗漏的数据库发布函数合同，SQL 静态合同 27 passed、文件处理集成 7 passed；PostgreSQL 只读验证连续／有间隔／重复／倒序／负数五组排序条件全部符合预期。未执行真实发布事务或更新运行中数据库函数；部署时必须同步数据库函数，仅重建 Worker 不会修复此报错。

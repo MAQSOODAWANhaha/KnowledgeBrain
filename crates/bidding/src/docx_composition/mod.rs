@@ -414,12 +414,16 @@ pub fn synthesize_draft_document(
                 .ok_or("read source range vanished")?,
         );
     }
-    let title = input
-        .documents
-        .first()
-        .and_then(|doc| doc.get("file_name").and_then(|value| value.as_str()))
-        .unwrap_or("投标文件草稿")
-        .to_string();
+    if let Some(info) = &result.analysis.outline.project_info {
+        grounds.extend(info.grounds().cloned());
+    }
+    let title = result
+        .analysis
+        .outline
+        .project_info
+        .as_ref()
+        .map(crate::tender_analysis::outline_flow::ProjectInfo::title)
+        .unwrap_or_else(|| "投标文件".into());
     draft.presentation = Some(Presentation {
         title: title.clone(),
         toc_title: "目录".into(),

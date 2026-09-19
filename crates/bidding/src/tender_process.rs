@@ -600,7 +600,52 @@ where
         let mut source_units = Vec::with_capacity(parser_units.len());
         let mut image_set_digests = Vec::new();
 
+        // DOCX creates empty owning sections for leading tables/forms/images.
+        // Keep them in the frozen parser snapshot, but do not expose structural
+        // anchors as empty reading evidence. Children retain their original locators.
+        let content_sections: HashSet<u32> = parser_units
+            .iter()
+            .filter_map(|unit| match (&unit.kind, &unit.locator) {
+                (
+                    StructuredSourceUnitKind::TableRegion
+                    | StructuredSourceUnitKind::TableRow
+                    | StructuredSourceUnitKind::FormRegion,
+                    StructuredSourceLocator::Document {
+                        section_ordinal, ..
+                    },
+                ) => Some(*section_ordinal),
+                (
+                    StructuredSourceUnitKind::ImageRegion,
+                    StructuredSourceLocator::Image {
+                        compound_parent: Some(parent),
+                        ..
+                    },
+                ) => {
+                    use docparser::CompoundImageParent;
+                    match parent {
+                        CompoundImageParent::Paragraph {
+                            section_ordinal, ..
+                        }
+                        | CompoundImageParent::TableCell {
+                            section_ordinal, ..
+                        }
+                        | CompoundImageParent::Form {
+                            section_ordinal, ..
+                        } => Some(*section_ordinal),
+                    }
+                }
+                _ => None,
+            })
+            .collect();
         for parser_unit in parser_units {
+            if parser_unit.kind == StructuredSourceUnitKind::Section
+                && parser_unit.text.is_empty()
+                && matches!(&parser_unit.locator,
+                    StructuredSourceLocator::Document { section_ordinal, table_ordinal: None, row_ordinal: None, form_ordinal: None, .. }
+                    if content_sections.contains(section_ordinal))
+            {
+                continue;
+            }
             let (unit_kind, text, image_artifact_id) =
                 if parser_unit.kind == StructuredSourceUnitKind::ImageRegion {
                     let StructuredSourceLocator::Image {

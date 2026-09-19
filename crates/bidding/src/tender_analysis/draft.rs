@@ -877,7 +877,7 @@ pub(super) fn apply_validated(
                                 != super::outline_flow::Applicability::NotApplicable
                     }
                 };
-                if !valid {
+                if !valid || super::outline_flow::cover_handles(&state.analysis.outline, id) {
                     return Err(format!(
                         "items[{index}].requirement_ids: {id} does not belong on a {purpose:?} node"
                     ));
@@ -996,6 +996,7 @@ pub(super) fn apply_validated(
         refresh_outline_basis(input, &mut next)?;
         let unmapped = next.analysis.outline.requirements.iter().any(|(id, need)| {
             need.needs_chapter()
+                && !super::outline_flow::cover_handles(&next.analysis.outline, id)
                 && state.analysis.draft_plan.iter().any(|node| {
                     node.status != DraftStatus::Omitted && node.requirement_ids.contains(id)
                 })
