@@ -2,6 +2,15 @@
 //! Delivered evidence and completed scanning are deliberately separate receipts.
 //! The stored JSON is the current contract only: unknown or missing fields fail.
 mod scan_submit;
+pub(super) fn apply_chapter_batch(
+    input: &FrozenInput,
+    config: &super::agent::Config,
+    state: &mut Checkpoint,
+    args: &Value,
+) -> Result<Value, String> {
+    scan_submit::apply_chapters(input, config, state, args)
+}
+
 pub(super) fn scan_repair_pending(state: &Checkpoint) -> bool {
     !scan_submit::projection(state).is_null()
 }
@@ -677,6 +686,47 @@ pub fn compose_check_packets(input: &FrozenInput, state: &mut Checkpoint) {
     state.outline_run.active_check_packet = Some("composition".into());
 }
 
+// Compare the final candidate, not transient nodes inside a batch. A saved
+// pass is reusable only when its exact evidence and business snapshot matches.
+fn retain_unchanged_checks(
+    input: &FrozenInput,
+    state: &mut Checkpoint,
+    previous: &BTreeMap<String, OutlineCheck>,
+) {
+    if previous.is_empty() {
+        return;
+    }
+    let active = state.outline_run.active_check_packet.clone();
+    compose_check_packets(input, state);
+    for (id, old) in previous {
+        if old.status == "pass"
+            && packet_snapshot(input, state, id).ok().as_ref() == Some(&old.snapshot_sha256)
+        {
+            state
+                .analysis
+                .outline
+                .checks
+                .insert(id.clone(), old.clone());
+        } else if let Some(check) = state.analysis.outline.checks.get_mut(id) {
+            for finding in &old.finding_ids {
+                if !check.finding_ids.contains(finding) {
+                    check.finding_ids.push(finding.clone());
+                }
+            }
+        }
+    }
+    state.outline_run.active_check_packet = active
+        .filter(|id| {
+            state
+                .analysis
+                .outline
+                .checks
+                .get(id)
+                .is_some_and(|c| c.status != "pass")
+        })
+        .or_else(|| next_pending_packet(state));
+}
+
 pub fn invalidate_checks(state: &mut Checkpoint, composition_changed: bool, volume_ids: &[String]) {
     state.analysis.outline.checked_sha256 = None;
     if composition_changed {
@@ -1053,6 +1103,26 @@ fn pending_scan_ranges(state: &Checkpoint) -> Vec<Value> {
     rows
 }
 
+fn organization_items(state: &Checkpoint) -> Vec<Value> {
+    let mut rows: Vec<_> = state.analysis.outline.requirements.iter().map(|(id, need)| {
+        let chapters: Vec<_> = state.analysis.draft_plan.iter().filter(|n| n.status != DraftStatus::Omitted && n.requirement_ids.contains(id)).map(|n| &n.id).collect();
+        let destination = if need.applicability == Applicability::NotApplicable || need.kind == NeedKind::NonDocument { "review_exclusion" }
+            else if need.kind == NeedKind::StructureConstraint { "group" } else { "response" };
+        json!({"id":id,"kind":need.kind,"submission_name":need.submission_name,
+            "description":need.description,"condition":need.condition,"applicability":need.applicability,
+            "classification_reason":need.classification_reason,"format_required":need.format_required,
+            "destination":destination,"chapter_ids":chapters})
+    }).collect();
+    // Unmapped material obligations first; stable IDs keep pagination deterministic.
+    rows.sort_by_key(|row| {
+        (
+            row["destination"] != "response" || !row["chapter_ids"].as_array().unwrap().is_empty(),
+            row["id"].as_str().unwrap_or_default().to_owned(),
+        )
+    });
+    rows
+}
+
 pub fn packet(input: &FrozenInput, state: &Checkpoint, budget: usize) -> Result<Value, String> {
     let discovering = state.analysis.outline.phase == Phase::Discover;
     let chapters: Vec<_> = state.analysis.draft_plan.iter().map(|n| json!({"id":n.id,"parent":n.parent,"order":n.order,"title":n.title,"requirement_ids":n.requirement_ids,"status":n.status,"purpose":n.purpose,"body_status":n.body_status})).collect();
@@ -1062,10 +1132,21 @@ pub fn packet(input: &FrozenInput, state: &Checkpoint, budget: usize) -> Result<
         "requirement_count":state.analysis.outline.requirements.len(),
         "blockers":blockers(input, state),"instruction":"Use read_outline pagination for remaining saved chapters and requirements. Scanning receipts describe only actual inspected ranges."});
     if !discovering {
+        out["pending_scan_repair"] = scan_submit::projection(state);
+        out["pending_chapter_repair"] = scan_submit::chapter_projection(state);
+        if state.analysis.outline.phase == Phase::Outline {
+            out["instruction"] = json!(
+                "requirements is a compact organization page, unmapped response obligations first. Continue read_outline(kind=organization) pagination. Use kind=requirements for exact evidence. Resolve mixed materials and applicability conflicts on their original evidence with submit_outline_scan and requirement_replacements before mapping. Do not automatically merge names or discard excluded conclusions. Repair all reported chapter fields together; keep valid structure unchanged."
+            );
+        }
         out["blocker_details"] =
             tools::bounded_page(&blocker_details(input, state), 0, usize::MAX, budget / 4)?;
         out["requirements"] = tools::bounded_page(
-            &identified(&state.analysis.outline.requirements),
+            &if state.analysis.outline.phase == Phase::Outline {
+                organization_items(state)
+            } else {
+                identified(&state.analysis.outline.requirements)
+            },
             0,
             usize::MAX,
             budget / 2,
@@ -1319,6 +1400,9 @@ fn apply_validated(
             }
             Some("blockers") => {
                 tools::bounded_page(&blocker_details(input, state), offset, limit, budget)
+            }
+            Some("organization") => {
+                tools::bounded_page(&organization_items(state), offset, limit, budget)
             }
             Some("requirements") => tools::bounded_page(
                 &identified(&state.analysis.outline.requirements),

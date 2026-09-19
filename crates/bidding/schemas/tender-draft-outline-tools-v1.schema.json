@@ -3,14 +3,10 @@
     "type": "function",
     "function": {
       "name": "put_outline_items",
-      "description": "Atomically organize actual submission materials. Provide structure and requirement IDs only; the host derives exact evidence. Independent prescribed forms need separately locatable response nodes; constraints attach to their actual response material.",
+      "description": "Atomically organize actual submission materials. Provide structure and requirement IDs only; the host derives exact evidence. Independent prescribed forms need separately locatable response nodes; constraints attach to their actual response material. On batch failure repair only the reported fields using repair {call_id,arguments_sha256,changes:[{path,value}]}; full batch and repair are mutually exclusive. All changes remain atomic.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "items",
-          "remove_ids"
-        ],
         "properties": {
           "items": {
             "type": "array",
@@ -70,8 +66,64 @@
             "items": {
               "type": "string"
             }
+          },
+          "repair": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "call_id",
+              "arguments_sha256",
+              "changes"
+            ],
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "arguments_sha256": {
+                "type": "string"
+              },
+              "changes": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "path",
+                    "value"
+                  ],
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "JSON pointer within the failed scan arguments; replace only the fields needing correction."
+                    },
+                    "value": {}
+                  }
+                }
+              }
+            }
           }
-        }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "items",
+              "remove_ids"
+            ],
+            "not": {
+              "required": [
+                "repair"
+              ]
+            }
+          },
+          {
+            "required": [
+              "repair"
+            ],
+            "maxProperties": 1
+          }
+        ]
       }
     }
   }

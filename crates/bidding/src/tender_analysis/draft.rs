@@ -819,6 +819,19 @@ pub fn apply(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
+    if name == "put_outline_items" {
+        return super::outline_flow::apply_chapter_batch(input, config, state, args);
+    }
+    apply_validated(input, config, state, name, args)
+}
+
+pub(super) fn apply_validated(
+    input: &FrozenInput,
+    config: &super::agent::Config,
+    state: &mut super::agent::Checkpoint,
+    name: &str,
+    args: &Value,
+) -> Result<Value, String> {
     if matches!(
         name,
         "submit_outline_scan"

@@ -1020,5 +1020,5 @@ fn compilation_checkpoint_is_an_immutable_host_boundary() {
         checkpoint
             .contains("sequence_value<>coalesce((prior#>>'{journal,sequence}')::integer,0)+1")
     );
-    assert!(SQL.contains("checkpoint_contract_version' IS DISTINCT FROM '7'"));
+    assert!(SQL.contains("checkpoint_contract_version' IS DISTINCT FROM '8'"));
 }

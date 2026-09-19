@@ -783,7 +783,8 @@
               "references",
               "issues",
               "fragments",
-              "blockers"
+              "blockers",
+              "organization"
             ]
           },
           "offset": {

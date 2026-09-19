@@ -270,3 +270,19 @@ fn scan_submission_and_compact_repair_are_exclusive() {
     repair["repair"]["changes"] = json!([]);
     assert!(!schema.is_valid(&repair));
 }
+
+#[test]
+fn chapter_batch_schema_accepts_only_exclusive_bounded_repairs() {
+    let tools: Value = serde_json::from_str(include_str!(
+        "../schemas/tender-draft-outline-tools-v1.schema.json"
+    ))
+    .unwrap();
+    let schema = validator_from(tools[0]["function"]["parameters"].clone());
+    let mut repair = json!({"repair":{"call_id":"chapter-failure","arguments_sha256":SHA,"changes":[{"path":"/items/0/purpose","value":"response"}]}});
+    assert!(schema.is_valid(&repair));
+    repair["items"] = json!([]);
+    assert!(!schema.is_valid(&repair));
+    repair.as_object_mut().unwrap().remove("items");
+    repair["repair"]["changes"] = json!([]);
+    assert!(!schema.is_valid(&repair));
+}

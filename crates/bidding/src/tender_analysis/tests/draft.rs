@@ -4951,7 +4951,7 @@ fn unknown_stable_chapter_id_rejects_entire_batch() {
         }),
     )
     .unwrap_err();
-    assert!(error.contains("items[1].id"), "{error}");
+    assert!(error.contains("/items/1/id"), "{error}");
     assert_eq!(json!(state), before);
 }
 
@@ -5171,7 +5171,7 @@ fn non_document_and_structure_conclusions_need_review_not_chapters() {
     let error = agent::apply(&input,&config,&mut state,"put_outline_items",&json!({"items":[
         {"id":"tmp-upload","parent":null,"order":0,"title":"电子上传","purpose":"response","prescribed":false,"requirement_ids":["upload"]}
     ],"remove_ids":[]})).unwrap_err();
-    assert!(error.contains("does not belong"), "{error}");
+    assert!(error.contains("REQUIREMENT_DESTINATION"), "{error}");
 }
 
 #[test]
@@ -5561,4 +5561,104 @@ fn scan_error_feedback_is_bounded_and_does_not_commit() {
     assert_eq!(feedback["truncated"], true);
     assert!(!feedback["errors"].as_array().unwrap().is_empty());
     assert_eq!(json!(state), before);
+}
+
+#[test]
+fn chapter_batch_aggregates_destinations_and_repairs_after_restore() {
+    let input = draft_input();
+    let config = config();
+    let mut state = journal_state(&input, &config);
+    enter_outline(&input, &mut state);
+    save_required(&mut state, "letter", "投标函", "source", 3);
+    save_required(&mut state, "excluded", "中标后保函", "source", 3);
+    state
+        .analysis
+        .outline
+        .requirements
+        .get_mut("excluded")
+        .unwrap()
+        .applicability = crate::tender_analysis::outline_flow::Applicability::NotApplicable;
+    let batch = json!({"items":[
+        {"id":"tmp-letter","parent":null,"order":0,"title":"投标函","purpose":"group","prescribed":false,"requirement_ids":["letter"]},
+        {"id":"tmp-volume","parent":null,"order":1,"title":"商务文件","purpose":"response","prescribed":false,"requirement_ids":["excluded"]}
+    ],"remove_ids":[]});
+    let before = json!(state);
+    let error = agent::apply(&input, &config, &mut state, "put_outline_items", &batch).unwrap_err();
+    let details: Value = serde_json::from_str(&error).unwrap();
+    assert_eq!(details["error_count"], 2);
+    assert_eq!(json!(state), before);
+    remember_scan(
+        &mut state,
+        "chapter-failure",
+        &batch,
+        json!({"ok":false,"details":details}),
+    );
+    state
+        .transcript
+        .iter_mut()
+        .find(|m| m["role"] == "assistant")
+        .unwrap()["tool_calls"][0]["function"]["name"] = json!("put_outline_items");
+    let mut state: agent::Checkpoint = serde_json::from_value(json!(state)).unwrap();
+    assert!(crate::tender_analysis::outline_flow::protects_scan_repair(
+        &state,
+        &state.transcript
+    ));
+    let repair = json!({"repair":{"call_id":"chapter-failure","arguments_sha256":details["arguments_sha256"],"changes":[
+        {"path":"/items/0/purpose","value":"response"},
+        {"path":"/items/1/purpose","value":"group"},
+        {"path":"/items/1/requirement_ids","value":[]}
+    ]}});
+    agent::apply(&input, &config, &mut state, "put_outline_items", &repair).unwrap();
+    assert_eq!(state.analysis.draft_plan.len(), 2);
+    assert!(state.analysis.outline.requirements.contains_key("excluded"));
+    let page = agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "read_outline",
+        &json!({"kind":"organization","offset":0,"limit":20}),
+    )
+    .unwrap();
+    assert!(page.to_string().contains("review_exclusion"));
+    assert!(!page.to_string().contains("grounds"));
+}
+
+#[test]
+fn chapter_final_candidate_preserves_only_unchanged_check_snapshots() {
+    use crate::tender_analysis::outline_flow;
+    let input = draft_input();
+    let config = config();
+    let mut state = journal_state(&input, &config);
+    enter_outline(&input, &mut state);
+    save_required(&mut state, "letter", "投标函", "source", 3);
+    let mut batch = json!({"items":[{"id":"tmp-letter","parent":null,"order":0,"title":"投标函","purpose":"response","prescribed":false,"requirement_ids":["letter"]}],"remove_ids":[]});
+    let result = agent::apply(&input, &config, &mut state, "put_outline_items", &batch).unwrap();
+    batch["items"][0]["id"] = result["id_map"]["tmp-letter"].clone();
+    outline_flow::compose_check_packets(&input, &mut state);
+    for id in state
+        .analysis
+        .outline
+        .checks
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        let sha = outline_flow::packet_snapshot(&input, &state, &id).unwrap();
+        let check = state.analysis.outline.checks.get_mut(&id).unwrap();
+        check.status = "pass".into();
+        check.snapshot_sha256 = sha;
+    }
+    let saved = json!(state.analysis.outline.checks);
+    agent::apply(&input, &config, &mut state, "put_outline_items", &batch).unwrap();
+    assert_eq!(json!(state.analysis.outline.checks), saved);
+    batch["items"][0]["title"] = json!("投标函及说明");
+    agent::apply(&input, &config, &mut state, "put_outline_items", &batch).unwrap();
+    assert!(
+        state
+            .analysis
+            .outline
+            .checks
+            .values()
+            .any(|c| c.status != "pass")
+    );
 }

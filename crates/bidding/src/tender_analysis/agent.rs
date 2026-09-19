@@ -1157,11 +1157,14 @@ pub(super) async fn execute_turn<J: Journal>(
                 json!({"ok":true,"result":value})
             }
             Err(message) => {
-                if call.name == "submit_outline_scan" {
+                if matches!(
+                    call.name.as_str(),
+                    "submit_outline_scan" | "put_outline_items"
+                ) {
                     match serde_json::from_str::<Value>(&message) {
                         Ok(mut details) if details["committed"] == false => {
                             details["call_id"] = json!(call.id);
-                            json!({"ok":false,"error":"SCAN_BATCH_INVALID","details":details})
+                            json!({"ok":false,"error":if call.name == "submit_outline_scan" { "SCAN_BATCH_INVALID" } else { "CHAPTER_BATCH_INVALID" },"details":details})
                         }
                         _ => json!({"ok":false,"error":message}),
                     }

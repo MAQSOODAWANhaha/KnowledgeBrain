@@ -15,7 +15,7 @@ struct Change {
     value: Value,
 }
 
-fn patched(base: &Value, repair: &Repair) -> Result<Value, String> {
+fn patched(base: &Value, repair: &Repair, tool: &str) -> Result<Value, String> {
     if digest(base)? != repair.arguments_sha256
         || repair.changes.is_empty()
         || repair.changes.len() > 64
@@ -25,18 +25,22 @@ fn patched(base: &Value, repair: &Repair) -> Result<Value, String> {
     let mut value = base.clone();
     for change in &repair.changes {
         let root = change.path.split('/').nth(1).unwrap_or_default();
-        if !matches!(
-            root,
-            "text"
-                | "forms"
-                | "metadata"
-                | "empty_sources"
-                | "requirements"
-                | "references"
-                | "issues"
-                | "review_fragments"
-                | "requirement_replacements"
-        ) {
+        if !(if tool == "put_outline_items" {
+            matches!(root, "items" | "remove_ids")
+        } else {
+            matches!(
+                root,
+                "text"
+                    | "forms"
+                    | "metadata"
+                    | "empty_sources"
+                    | "requirements"
+                    | "references"
+                    | "issues"
+                    | "review_fragments"
+                    | "requirement_replacements"
+            )
+        }) {
             return Err(format!(
                 "repair path is outside the scan contract: {}",
                 change.path
@@ -68,19 +72,17 @@ fn patched(base: &Value, repair: &Repair) -> Result<Value, String> {
 
 /// Last failed scan and all tool calls needed to reconstruct it. A successful
 /// scan consumes it. Other tool results do not manufacture a repair base.
-fn pending(state: &Checkpoint) -> Option<(String, Value, BTreeSet<String>)> {
+fn pending(state: &Checkpoint, tool: &str) -> Option<(String, Value, BTreeSet<String>)> {
     let mut calls = BTreeMap::new();
     let mut last: Option<(String, Value, BTreeSet<String>)> = None;
     for message in &state.transcript {
         for call in message["tool_calls"].as_array().into_iter().flatten() {
-            if call["function"]["name"] == "submit_outline_scan" {
-                if let (Some(id), Some(args)) =
+            if call["function"]["name"] == tool
+                && let (Some(id), Some(args)) =
                     (call["id"].as_str(), call["function"]["arguments"].as_str())
-                {
-                    if let Ok(args) = serde_json::from_str::<Value>(args) {
-                        calls.insert(id.to_owned(), args);
-                    }
-                }
+                && let Ok(args) = serde_json::from_str::<Value>(args)
+            {
+                calls.insert(id.to_owned(), args);
             }
         }
         let Some(id) = message["tool_call_id"].as_str() else {
@@ -110,7 +112,7 @@ fn pending(state: &Checkpoint) -> Option<(String, Value, BTreeSet<String>)> {
             if repair.call_id != *prior_id {
                 continue;
             }
-            if let Ok(base) = patched(prior, &repair) {
+            if let Ok(base) = patched(prior, &repair, tool) {
                 let mut dependencies = dependencies.clone();
                 dependencies.insert(id.to_owned());
                 last = Some((id.to_owned(), base, dependencies));
@@ -123,12 +125,16 @@ fn pending(state: &Checkpoint) -> Option<(String, Value, BTreeSet<String>)> {
 }
 
 pub(super) fn projection(state: &Checkpoint) -> Value {
-    pending(state).map(|(id, base, _)| json!({"call_id":id,"arguments_sha256":digest(&base).ok(),
+    pending(state, "submit_outline_scan").map(|(id, base, _)| json!({"call_id":id,"arguments_sha256":digest(&base).ok(),
         "instruction":"Repair the last failed scan with field changes; do not resend the full batch. No failed ranges have been committed."})).unwrap_or(Value::Null)
 }
 
 pub(super) fn protects(state: &Checkpoint, messages: &[Value]) -> bool {
-    let Some((_, _, ids)) = pending(state) else {
+    protects_tool(state, messages, "submit_outline_scan")
+        || protects_tool(state, messages, "put_outline_items")
+}
+fn protects_tool(state: &Checkpoint, messages: &[Value], tool: &str) -> bool {
+    let Some((_, _, ids)) = pending(state, tool) else {
         return false;
     };
     messages.iter().any(|message| {
@@ -193,7 +199,7 @@ fn preflight(input: &FrozenInput, state: &Checkpoint, args: &Value) -> Vec<Value
                 _ => flow.review_fragments.contains_key(id),
             });
             match id.as_str() {
-                Some(id) if id.is_empty() => {}
+                Some("") => {}
                 Some(id) if known || id.starts_with("tmp-") && id.len() > 4 => {
                     if !seen.insert(id) {
                         errors.push(error(
@@ -371,11 +377,12 @@ pub(super) fn apply(
             return Err("repair and full scan are mutually exclusive".into());
         }
         let repair: Repair = serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
-        let (id, base, _) = pending(state).ok_or("no failed scan available for repair")?;
+        let (id, base, _) =
+            pending(state, "submit_outline_scan").ok_or("no failed scan available for repair")?;
         if id != repair.call_id {
             return Err("repair must target the latest failed scan".into());
         }
-        resolved = patched(&base, &repair)?;
+        resolved = patched(&base, &repair, "submit_outline_scan")?;
         &resolved
     } else {
         args
@@ -385,8 +392,12 @@ pub(super) fn apply(
     let args = &expanded;
     let mut errors = preflight(input, state, args);
     if errors.is_empty() {
+        let previous = state.analysis.outline.checks.clone();
         match super::apply_validated(input, state, "submit_outline_scan", args, budget) {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                super::retain_unchanged_checks(input, state, &previous);
+                return Ok(value);
+            }
             Err(reason) => errors.push(error("/".into(), &Value::Null, "BATCH_INVALID", reason)),
         }
     }
@@ -400,6 +411,150 @@ pub(super) fn apply(
         .len()
         > budget
     {
+        let items = result["errors"].as_array_mut().unwrap();
+        if items.len() <= 1 {
+            break;
+        }
+        items.pop();
+        result["truncated"] = json!(true);
+    }
+    Err(result.to_string())
+}
+
+pub(super) fn chapter_projection(state: &Checkpoint) -> Value {
+    pending(state, "put_outline_items").map(|(id, base, _)| json!({
+        "call_id":id,"arguments_sha256":digest(&base).ok(),
+        "instruction":"Repair failed chapter fields with put_outline_items.repair; do not rewrite the batch. No chapters were committed."
+    })).unwrap_or(Value::Null)
+}
+
+pub(super) fn apply_chapters(
+    input: &FrozenInput,
+    config: &super::super::agent::Config,
+    state: &mut Checkpoint,
+    args: &Value,
+) -> Result<Value, String> {
+    let resolved;
+    let args = if let Some(raw) = args.get("repair") {
+        if args.as_object().is_none_or(|map| map.len() != 1) {
+            return Err("repair and full chapter batch are mutually exclusive".into());
+        }
+        let repair: Repair = serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
+        let (id, base, _) = pending(state, "put_outline_items")
+            .ok_or("no failed chapter batch available for repair")?;
+        if id != repair.call_id {
+            return Err("repair must target the latest failed chapter batch".into());
+        }
+        resolved = patched(&base, &repair, "put_outline_items")?;
+        &resolved
+    } else {
+        args
+    };
+    let mut errors = Vec::new();
+    let items = args["items"].as_array().ok_or("items required")?;
+    let mut seen = BTreeSet::new();
+    for (index, item) in items.iter().enumerate() {
+        let path = format!("/items/{index}");
+        let id = &item["id"];
+        let mut report = |field: &str, code: &str, message: String| {
+            errors.push(error(format!("{path}/{field}"), id, code, message));
+        };
+        match id.as_str() {
+            Some(id)
+                if state.analysis.draft_plan.iter().any(|n| n.id == id)
+                    || id.starts_with("tmp-") && id.len() > 4 =>
+            {
+                if !seen.insert(id) {
+                    report("id", "DUPLICATE_ID", "chapter ID repeated in batch".into());
+                }
+            }
+            _ => report(
+                "id",
+                "UNKNOWN_ID",
+                "new chapters need tmp- aliases; updates need saved chapter IDs".into(),
+            ),
+        }
+        if item.get("grounds").is_some() || item.get("format_refs").is_some() {
+            report(
+                "requirement_ids",
+                "HOST_DERIVED_BASIS",
+                "supply requirement_ids only; grounds and format_refs are host-derived".into(),
+            );
+        }
+        let purpose = item["purpose"].as_str();
+        if !matches!(purpose, Some("response" | "group")) {
+            report(
+                "purpose",
+                "INVALID_PURPOSE",
+                "purpose must be response or group".into(),
+            );
+        }
+        let Some(ids) = item["requirement_ids"].as_array() else {
+            report(
+                "requirement_ids",
+                "ARRAY_REQUIRED",
+                "requirement_ids must be an array of saved IDs".into(),
+            );
+            continue;
+        };
+        if purpose == Some("response") && ids.is_empty() {
+            report("requirement_ids", "RESPONSE_BASIS_REQUIRED", "response material needs saved obligations; use group only for organizational headings".into());
+        }
+        for (position, value) in ids.iter().enumerate() {
+            let field = format!("requirement_ids/{position}");
+            let Some(need) = value
+                .as_str()
+                .and_then(|id| state.analysis.outline.requirements.get(id))
+            else {
+                report(
+                    &field,
+                    "UNKNOWN_REQUIREMENT",
+                    format!("unknown requirement {value}; read saved requirement IDs"),
+                );
+                continue;
+            };
+            let valid = match purpose {
+                Some("response") => need.needs_chapter(),
+                Some("group") => {
+                    need.kind == NeedKind::StructureConstraint
+                        && need.applicability != Applicability::NotApplicable
+                }
+                _ => true,
+            };
+            if !valid {
+                let action = if need.applicability == Applicability::NotApplicable
+                    || need.kind == NeedKind::NonDocument
+                {
+                    "excluded/non-document: retain exclusion for review; do not attach to a chapter; correct classification only with source evidence"
+                } else if need.kind == NeedKind::StructureConstraint {
+                    "structure constraint: attach to an organizational group"
+                } else {
+                    "material/content constraint: attach to a response node; split mixed materials using submit_outline_scan before mapping"
+                };
+                report(
+                    &field,
+                    "REQUIREMENT_DESTINATION",
+                    format!("{}: {action}", value.as_str().unwrap_or_default()),
+                );
+            }
+        }
+    }
+    if errors.is_empty() {
+        let previous = state.analysis.outline.checks.clone();
+        match super::super::draft::apply_validated(input, config, state, "put_outline_items", args)
+        {
+            Ok(value) => {
+                super::retain_unchanged_checks(input, state, &previous);
+                return Ok(value);
+            }
+            Err(reason) => errors.push(error("/".into(), &Value::Null, "BATCH_INVALID", reason)),
+        }
+    }
+    let count = errors.len();
+    let mut result = json!({"committed":false,"arguments_sha256":digest(args)?,"error_count":count,
+        "errors":errors,"truncated":false,
+        "repair_hint":"Use put_outline_items.repair with call_id, arguments_sha256 and changes [{path,value}]. Revalidate the entire final tree; no partial commit."});
+    while result.to_string().len() > config.limits.max_tool_result_bytes {
         let items = result["errors"].as_array_mut().unwrap();
         if items.len() <= 1 {
             break;
