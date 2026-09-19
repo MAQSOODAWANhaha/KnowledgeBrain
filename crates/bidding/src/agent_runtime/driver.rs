@@ -120,6 +120,9 @@ pub(crate) async fn drive<D: Driver>(
                     valid_tool_turn = result.as_ref().is_ok_and(valid_tool_turn)
                 );
                 match result {
+                    // Yield the prepared checkpoint before consuming all
+                    // physical reservations in a tight transport retry loop.
+                    Err(error) if error.code == "AGENT_TRANSPORT_INTERRUPTED" => return Err(error),
                     Ok(response) if valid_tool_turn(&response) => break response,
                     Ok(_) if attempt >= 3 => {
                         return Err(AgentError::new(
@@ -318,6 +321,7 @@ mod tests {
 
     struct ScriptedHost {
         journal: TurnJournal,
+        interrupt_call: Option<usize>,
         turn: usize,
         done: bool,
         complete_after: usize,
@@ -333,6 +337,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 journal: TurnJournal::default(),
+                interrupt_call: None,
                 turn: 0,
                 done: false,
                 complete_after: 2,
@@ -413,6 +418,12 @@ mod tests {
         async fn call_model(&self, _: &[u8]) -> Result<ChatTurn, AgentError> {
             let mut calls = self.calls.lock().unwrap();
             *calls += 1;
+            if self.interrupt_call == Some(*calls) {
+                return Err(AgentError::new(
+                    "AGENT_TRANSPORT_INTERRUPTED",
+                    "synthetic stream disconnect",
+                ));
+            }
             Ok(tool_response(&format!("call-{calls}")))
         }
 
@@ -443,6 +454,29 @@ mod tests {
         assert_eq!(*host.sdk_turns.lock().unwrap(), vec![1, 2]);
         assert!(host.journal.pending.is_none());
         assert!(host.done);
+    }
+
+    #[tokio::test]
+    async fn interrupted_stream_yields_prepared_boundary_then_resumes_without_reexecuting() {
+        let mut host = ScriptedHost {
+            interrupt_call: Some(2),
+            ..Default::default()
+        };
+        let error = drive(&mut host, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "AGENT_TRANSPORT_INTERRUPTED");
+        assert_eq!(host.turn, 1);
+        assert_eq!(*host.executes.lock().unwrap(), 1);
+        assert_eq!(*host.calls.lock().unwrap(), 2);
+        let body = host.journal.body().unwrap().to_vec();
+        host.journal =
+            serde_json::from_value(serde_json::to_value(&host.journal).unwrap()).unwrap();
+        assert_eq!(host.journal.body().unwrap(), body);
+        drive(&mut host, &CancellationToken::new()).await.unwrap();
+        assert_eq!(host.turn, 2);
+        assert_eq!(*host.executes.lock().unwrap(), 2);
+        assert_eq!(*host.calls.lock().unwrap(), 3);
     }
 
     #[tokio::test]

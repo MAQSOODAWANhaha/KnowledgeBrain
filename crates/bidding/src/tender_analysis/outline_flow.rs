@@ -219,7 +219,11 @@ pub fn source_scanned(input: &FrozenInput, state: &OutlineState, id: &str) -> bo
         return false;
     };
     let text_done = if source.text.is_empty() {
-        state.scanned.metadata.contains_key(id)
+        input
+            .structured_forms
+            .iter()
+            .any(|form| form["source_unit_revision_id"] == id)
+            || state.scanned.metadata.contains_key(id)
     } else {
         tools::contains(state.scanned.text.get(id), 0, source.text.len())
     };
@@ -233,7 +237,7 @@ pub fn source_scanned(input: &FrozenInput, state: &OutlineState, id: &str) -> bo
                     return false;
                 };
                 super::relations::form_total(&f["definition"]).is_some_and(|n| {
-                    n == 0 || tools::contains(state.scanned.form_cells.get(form_id), 0, n)
+                    n > 0 && tools::contains(state.scanned.form_cells.get(form_id), 0, n)
                 })
             })
 }
@@ -1058,7 +1062,7 @@ pub fn checked(input: &FrozenInput, state: &Checkpoint) -> bool {
 
 /// Delivered evidence is not yet a scan conclusion. Project the exact difference
 /// after history eviction as well as during ordinary discovery.
-fn pending_scan_ranges(state: &Checkpoint) -> Vec<Value> {
+fn pending_scan_ranges(input: &FrozenInput, state: &Checkpoint) -> Vec<Value> {
     let mut rows = Vec::new();
     for (kind, delivered, scanned) in [
         (
@@ -1098,6 +1102,19 @@ fn pending_scan_ranges(state: &Checkpoint) -> Vec<Value> {
                     rows.push(json!({"kind":kind,"id":id,"start":cursor,"end":end}));
                 }
             }
+        }
+    }
+    for source in &input.source_units {
+        let id = &source.source_unit_revision_id;
+        if source.text.is_empty()
+            && !input
+                .structured_forms
+                .iter()
+                .any(|form| form["source_unit_revision_id"] == *id)
+            && !source_scanned(input, &state.analysis.outline, id)
+        {
+            rows.push(json!({"kind":"empty_source","id":id,
+                "action":"Inspect original page, then submit empty_sources disposition; empty text alone does not prove a blank page."}));
         }
     }
     rows
@@ -1156,11 +1173,15 @@ pub fn packet(input: &FrozenInput, state: &Checkpoint, budget: usize) -> Result<
         out["cursor_chunk"] =
             json!(super::draft::outline_chunks(input).get(state.outline_run.chunk_cursor));
         out["pending_scan_repair"] = scan_submit::projection(state);
-        out["pending_scan"] =
-            tools::bounded_page(&pending_scan_ranges(state), 0, usize::MAX, budget / 4)?;
+        out["pending_scan"] = tools::bounded_page(
+            &pending_scan_ranges(input, state),
+            0,
+            usize::MAX,
+            budget / 4,
+        )?;
         out["discovery_watch"] = json!(state.main_progress.watch);
         out["instruction"] = json!(
-            "cursor_chunk is the earliest incomplete accounting range; close its missing scan ranges first. pending_scan lists delivered ranges without scan conclusions, not unread ranges. Submit inspected ranges with submit_outline_scan, including empty requirements when appropriate. Partial table/text conclusions are allowed; do not wait to reread the entire document or table. If original text is no longer visible, reread only the needed pending range. Targeted cross-reference reads remain allowed. Repeating delivered reads is not progress."
+            "cursor_chunk is the earliest incomplete accounting range; close its missing scan ranges first. pending_scan lists delivered ranges without scan conclusions plus explicit empty_source dispositions requiring original-page inspection. Submit inspected ranges with submit_outline_scan, including empty requirements when appropriate. Partial table/text conclusions are allowed; do not wait to reread the entire document or table. If original text is no longer visible, reread only the needed pending range. Targeted cross-reference reads remain allowed. Repeating delivered reads is not progress."
         );
     }
     if !state.analysis.outline.checks.is_empty()
@@ -1409,7 +1430,7 @@ fn apply_validated(
             .ok_or("positive limit required")? as usize;
         return match args["kind"].as_str() {
             Some("pending_scan") if state.analysis.outline.phase == Phase::Discover => {
-                tools::bounded_page(&pending_scan_ranges(state), offset, limit, budget)
+                tools::bounded_page(&pending_scan_ranges(input, state), offset, limit, budget)
             }
             Some("chapters") => {
                 tools::bounded_page(&state.analysis.draft_plan, offset, limit, budget)

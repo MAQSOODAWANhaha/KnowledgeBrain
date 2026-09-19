@@ -1020,5 +1020,29 @@ fn compilation_checkpoint_is_an_immutable_host_boundary() {
         checkpoint
             .contains("sequence_value<>coalesce((prior#>>'{journal,sequence}')::integer,0)+1")
     );
-    assert!(SQL.contains("checkpoint_contract_version' IS DISTINCT FROM '10'"));
+    assert!(SQL.contains("checkpoint_contract_version' IS DISTINCT FROM '13'"));
+}
+
+#[test]
+fn interrupted_tender_stream_waits_for_user_continue() {
+    let source=include_str!("../src/tender_analysis/postgres.rs");
+    let branch=source.split("if error.code == \"AGENT_TRANSPORT_INTERRUPTED\"").nth(1).unwrap().split("match error.request_queue_effect()").next().unwrap();
+    assert!(branch.contains("record_attempt_sql(pool, request, owner, true, &error)"));
+    assert!(branch.contains("return Ok(json!"));
+    assert!(branch.contains("awaiting_continue"));
+    assert!(SQL.contains("THEN 'awaiting_continue' ELSE 'retrying' END"));
+    assert!(SQL.contains("IF ordinal_value>3 THEN RETURN NULL"));
+}
+
+#[test]
+fn manual_wait_preserves_remaining_budget_and_fencing() {
+    let claim=SQL.split("CREATE FUNCTION kb_bid_v2_tender_agent_claim").nth(1).unwrap().split("CREATE FUNCTION kb_bid_v2_tender_agent_frozen_deadline").next().unwrap();
+    assert!(claim.contains("claimed_at+greatest(current_run.hard_deadline_at-current_run.last_error_at,interval '0 seconds')"));
+    assert!(claim.contains("FOR UPDATE"));
+    assert!(claim.contains("'live_owner'"));
+    assert!(claim.contains("next_attempt:=request_value.current_attempt+1; token:=gen_random_uuid()"));
+    assert!(claim.contains("AND request_value.request_kind='requirement_set_compile'"));
+    assert!(SQL.contains("NEW.lease_acquired_at+greatest(prior_run.hard_deadline_at-prior_run.last_error_at,interval '0 seconds')"));
+    assert!(SQL.contains("ORDER BY attempt DESC LIMIT 1"));
+    assert!(SQL.contains("IF ordinal_value>3 THEN RETURN NULL"));
 }

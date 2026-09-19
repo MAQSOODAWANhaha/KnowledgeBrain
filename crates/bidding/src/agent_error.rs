@@ -23,9 +23,9 @@ impl AgentError {
             .unwrap_or(code);
         let disposition = match code {
             "REQUEST_OBSOLETE" | "REQUEST_ATTEMPT_SUPERSEDED" => RetryDisposition::Obsolete,
-            // A model boundary already exhausted its single three-call budget.
-            // Only internal infrastructure failures may be retried by the job
-            // runner; deterministic contract/provider exhaustion is terminal.
+            // Only infrastructure failures automatically reenter the queue.
+            // Tender stream interruption is handled explicitly by its host:
+            // retain pending state and wait for the user's continue action.
             "INTERNAL" => RetryDisposition::Transient,
             _ => RetryDisposition::Deterministic,
         };
@@ -86,10 +86,14 @@ mod tests {
     }
 
     #[test]
-    fn only_internal_failures_reenter_the_job_queue() {
+    fn only_infrastructure_failures_automatically_reenter_the_job_queue() {
         assert_eq!(
             AgentError::new("AGENT_PROVIDER_UNAVAILABLE", "exhausted").disposition,
             RetryDisposition::Deterministic
+        );
+        assert_eq!(
+            AgentError::new("AGENT_TRANSPORT_INTERRUPTED", "disconnect").request_queue_effect(),
+            RequestQueueEffect::FailRequest
         );
         assert_eq!(
             AgentError::new("INTERNAL", "database unavailable").disposition,

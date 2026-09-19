@@ -375,7 +375,7 @@ async fn send(
                     started,
                 );
                 return if outcome.is_err() && transport_failed.load(Ordering::Relaxed) {
-                    Err(AgentError::new("AGENT_PROVIDER_UNAVAILABLE", "provider HTTP response stream interrupted; incomplete tool calls were not accepted"))
+                    Err(AgentError::new("AGENT_TRANSPORT_INTERRUPTED", "provider HTTP response stream interrupted; incomplete tool calls were not accepted"))
                 } else { outcome };
             }
             _ = &mut deadline => {
@@ -529,7 +529,7 @@ mod tests {
             Value::Null,
         );
         let (result, requests, _) = exchange_body(200, body, false, true).await;
-        assert_eq!(result.unwrap_err().code, "AGENT_PROVIDER_UNAVAILABLE");
+        assert_eq!(result.unwrap_err().code, "AGENT_TRANSPORT_INTERRUPTED");
         assert_eq!(requests.len(), 1);
     }
 

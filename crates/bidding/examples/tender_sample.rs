@@ -318,8 +318,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "outline_turn_target":ta::draft::OUTLINE_TURN_TARGET,
             "outline_seconds_target":ta::draft::OUTLINE_DEADLINE_TARGET_SECS,
             "outline_turn_backstop":ta::draft::OUTLINE_MAX_TURNS,
-            "outline_deadline_backstop_secs":ta::draft::DRAFT_DEADLINE_SECS,
-            "outline_attempt_backstop":ta::draft::DRAFT_MAX_ATTEMPTS
+            "outline_deadline_backstop_secs":ta::draft::DRAFT_DEADLINE_SECS
         });
     } else {
         match ta::budget::apply_with_pack(

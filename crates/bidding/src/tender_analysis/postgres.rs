@@ -492,12 +492,8 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
             .fetch_one(pool)
             .await
             .map_err(db_error)?;
-    let draft_path = bundle["runtime"]["limits"]["draft_path"]
-        .as_bool()
-        .unwrap_or(true);
-    if crate::tender_analysis::draft::draft_claim_exhausted(draft_path, owner.attempt) {
-        return Ok(json!({"disposition":"exhausted","reason":"draft_attempt_limit"}));
-    }
+    // SQL claim owns the attempt limit; manual transport resumptions must
+    // not be rejected by their monotonically increasing lease identity.
     let journal = PgJournal {
         pool,
         request,
@@ -608,6 +604,12 @@ async fn persist_attempt_outcome(
         Ok(value) => return Ok(value),
         Err(error) => error,
     };
+    // A transport interruption retains this request as pending. Ack this
+    // queue job; only the existing user "continue" endpoint enqueues recovery.
+    if error.code == "AGENT_TRANSPORT_INTERRUPTED" {
+        record_attempt_sql(pool, request, owner, true, &error).await?;
+        return Ok(json!({"status":"pending","awaiting_continue":true,"error_code":error.code}));
+    }
     match error.request_queue_effect() {
         RequestQueueEffect::AckObsolete => Ok(json!({"disposition":"obsolete"})),
         RequestQueueEffect::RetryUnchanged => Err(error),

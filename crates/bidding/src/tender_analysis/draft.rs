@@ -29,7 +29,6 @@ pub const DRAFT_DEADLINE_SECS: u64 = 46 * 60;
 /// 阶段一的墙钟**目标**：正常文档应该几分钟出骨架。
 pub const OUTLINE_DEADLINE_TARGET_SECS: u64 = 5 * 60;
 pub const OFFICIAL_DEADLINE_SECS: u64 = 45 * 60;
-pub const DRAFT_MAX_ATTEMPTS: i32 = 3;
 /// 整体填充的**写作窗**：到点停止派章，把已填的章编译出稿。
 pub const FILL_DEADLINE_SECS: u64 = 40 * 60;
 /// 整体填充的**信封窗**：写作窗之后还留 5 分钟给编译、登记与入稿，且必须短于
@@ -79,10 +78,6 @@ pub fn compile_draft(
         compiled,
         degraded: vec![],
     })
-}
-
-pub fn draft_claim_exhausted(draft_path: bool, attempt: i32) -> bool {
-    draft_path && attempt > DRAFT_MAX_ATTEMPTS
 }
 
 /// 整体填充按**待填章数**记账，与阶段一的 20 回合门无关：一份 40 章的投标文件
@@ -599,7 +594,6 @@ fn chunk_scanned(
     outline: &super::outline_flow::OutlineState,
     chunk: &OutlineChunk,
 ) -> bool {
-    let _ = input;
     if chunk.kind == "metadata" {
         super::tools::contains(
             outline.scanned.metadata.get(&chunk.source_id),
@@ -607,7 +601,7 @@ fn chunk_scanned(
             chunk.account_end,
         )
     } else if chunk.kind == "empty" {
-        outline.scanned.metadata.contains_key(&chunk.source_id)
+        super::outline_flow::source_scanned(input, outline, &chunk.source_id)
     } else if chunk.kind == "form" {
         super::tools::contains(
             outline.scanned.form_cells.get(&chunk.form_id),
@@ -1653,8 +1647,12 @@ pub fn preload_outline_window(input: &FrozenInput, state: &mut super::agent::Che
     let index = chunks
         .iter()
         .position(|chunk| !chunk_scanned(input, &state.analysis.outline, chunk))
-        .unwrap_or(chunks.len().saturating_sub(1));
+        .unwrap_or(chunks.len());
     state.outline_run.chunk_cursor = index;
+    if index == chunks.len() {
+        state.main_work = None;
+        return;
+    }
     let windows = outline_windows(input);
     let active = chunks.get(index);
     let source_index = active

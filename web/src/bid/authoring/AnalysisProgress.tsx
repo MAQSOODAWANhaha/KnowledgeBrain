@@ -30,6 +30,7 @@ function analysisSummary(job: RequirementSetCompileRequestView | null) {
   if (job.status === "failed") return job.error_code ?? "未完成";
   if (job.status === "succeeded") return "已完成章节大纲与骨架 Word";
   const progress = (job.progress ?? {}) as Progress;
+  if (progress.phase === "awaiting_continue") return "连接中断，进度已保存。点击继续生成大纲，从检查点恢复。";
   const step = typeof progress.turn === "number" ? progress.turn : progress.checkpoint_sequence;
   const parts: string[] = [];
   const phase = progress.outline_phase ?? progress.draft_stage;

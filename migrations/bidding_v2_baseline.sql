@@ -905,7 +905,7 @@ CREATE TABLE bid_async_request_snapshot_artifacts (
   request_sha256 kb_sha256 NOT NULL,
   status text NOT NULL CHECK (status IN ('pending','succeeded','failed')),
   max_run_attempts integer NOT NULL DEFAULT 4 CHECK (max_run_attempts=4),
-  current_attempt integer NOT NULL DEFAULT 0 CHECK (current_attempt BETWEEN 0 AND max_run_attempts),
+  current_attempt integer NOT NULL DEFAULT 0 CHECK (current_attempt>=0 AND (current_attempt<=max_run_attempts OR request_kind='requirement_set_compile')),
   result_identity jsonb,
   error_code text CHECK (error_code IS NULL OR error_code IN (
     'INPUT_SCHEMA_INVALID','FROZEN_INPUT_MISSING','FROZEN_INPUT_DIGEST_MISMATCH',
@@ -2864,7 +2864,7 @@ CREATE TABLE bid_docx_composition_request_identities (
     ELSE jsonb_build_object('version_id',expected_version_id,'docx_sha256',expected_docx_sha256) END),
   CHECK (jsonb_typeof(contract_definition) IS NOT DISTINCT FROM 'object'
     AND kb_bid_v2_json_keys_exact(contract_definition,ARRAY['checkpoint_contract_version','runtime_adapter','config'])
-    AND contract_definition->'checkpoint_contract_version' IS NOT DISTINCT FROM '10'::jsonb
+    AND contract_definition->'checkpoint_contract_version' IS NOT DISTINCT FROM '13'::jsonb
     AND contract_definition->>'runtime_adapter' IS NOT DISTINCT FROM 'rig-chat-0.42.0/4'
     AND jsonb_typeof(contract_definition->'config') IS NOT DISTINCT FROM 'object'),
   FOREIGN KEY(request_artifact_id,project_id,workspace_id,request_kind,request_revision,request_sha256,frozen_input_sha256)
@@ -7529,7 +7529,7 @@ FOR EACH STATEMENT EXECUTE FUNCTION kb_reject_append_only();
 CREATE TABLE bid_tender_agent_run_artifacts (
   request_artifact_id uuid NOT NULL,
   frozen_input_sha256 kb_sha256 NOT NULL,
-  attempt integer NOT NULL CHECK (attempt BETWEEN 1 AND 4),
+  attempt integer NOT NULL CHECK (attempt>=1),
   status text NOT NULL CHECK (status IN ('running','retry_yielded','superseded','succeeded','failed')),
   execution_owner_token uuid NOT NULL,
   lease_acquired_at timestamptz NOT NULL,
@@ -7566,7 +7566,7 @@ CREATE TABLE bid_tender_agent_run_artifacts (
 
 CREATE FUNCTION kb_bid_v2_tender_agent_run_deadline_guard() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
-DECLARE first_started timestamptz; first_deadline timestamptz;
+DECLARE first_started timestamptz; first_deadline timestamptz; prior_run bid_tender_agent_run_artifacts%ROWTYPE;
 BEGIN
   IF NEW.attempt=1 THEN
     IF NEW.started_at<>NEW.lease_acquired_at
@@ -7574,12 +7574,16 @@ BEGIN
       RAISE EXCEPTION 'first AgentRun deadline must match frozen runtime budget' USING ERRCODE='23514';
     END IF;
   ELSE
-    SELECT started_at, hard_deadline_at INTO first_started, first_deadline
-      FROM bid_tender_agent_run_artifacts
-      WHERE request_artifact_id=NEW.request_artifact_id AND attempt=1;
+    SELECT * INTO prior_run FROM bid_tender_agent_run_artifacts
+      WHERE request_artifact_id=NEW.request_artifact_id AND attempt=NEW.attempt-1;
+    first_started:=prior_run.started_at;
+    first_deadline:=prior_run.hard_deadline_at;
+    IF prior_run.status='retry_yielded' AND prior_run.last_error_code='AGENT_TRANSPORT_INTERRUPTED' THEN
+      first_deadline:=NEW.lease_acquired_at+greatest(prior_run.hard_deadline_at-prior_run.last_error_at,interval '0 seconds');
+    END IF;
     IF first_started IS NULL OR NEW.started_at<>first_started
        OR NEW.hard_deadline_at<>first_deadline THEN
-      RAISE EXCEPTION 'later AgentRun must copy the first deadline' USING ERRCODE='23514';
+      RAISE EXCEPTION 'later AgentRun must preserve remaining execution budget' USING ERRCODE='23514';
     END IF;
   END IF;
   RETURN NEW;
@@ -8608,7 +8612,12 @@ BEGIN
       RETURN jsonb_build_object('disposition','obsolete');
     END IF;
   END IF;
-  IF request_value.current_attempt>=request_value.max_run_attempts THEN
+  -- Manual transport resumptions preserve work and consume the original
+  -- time/call budget, not an additional infrastructure retry allowance.
+  IF request_value.current_attempt-(SELECT count(*) FROM bid_tender_agent_run_artifacts
+      WHERE request_artifact_id=p_request_artifact_id AND status='retry_yielded'
+        AND last_error_code='AGENT_TRANSPORT_INTERRUPTED'
+        AND request_value.request_kind='requirement_set_compile')>=request_value.max_run_attempts THEN
     UPDATE bid_tender_agent_run_artifacts SET status='failed',lease_expires_at=least(lease_expires_at,claimed_at),
       heartbeat_at=greatest(heartbeat_at,claimed_at),last_error_code='REQUEST_ATTEMPT_BUDGET_EXCEEDED',
       last_error_message='maximum AgentRun attempts exhausted',last_error_at=claimed_at,
@@ -8627,9 +8636,11 @@ BEGIN
       RAISE EXCEPTION 'AGENT_PROVIDER_UNAVAILABLE: missing frozen time budget' USING ERRCODE='23514';
     END IF;
   ELSE
-    SELECT started_at, hard_deadline_at INTO STRICT first_started, first_deadline
-      FROM bid_tender_agent_run_artifacts
-      WHERE request_artifact_id=p_request_artifact_id AND attempt=1;
+    first_started:=current_run.started_at;
+    first_deadline:=current_run.hard_deadline_at;
+    IF current_run.status='retry_yielded' AND current_run.last_error_code='AGENT_TRANSPORT_INTERRUPTED' THEN
+      first_deadline:=claimed_at+greatest(current_run.hard_deadline_at-current_run.last_error_at,interval '0 seconds');
+    END IF;
     IF first_deadline<=claimed_at THEN
       UPDATE bid_tender_agent_run_artifacts SET status='failed',
         lease_expires_at=least(lease_expires_at,claimed_at),
@@ -8667,8 +8678,10 @@ END $$;
 
 CREATE FUNCTION kb_bid_v2_tender_agent_frozen_deadline(p_request_artifact_id uuid)
 RETURNS timestamptz LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public AS $$
-  SELECT hard_deadline_at FROM bid_tender_agent_run_artifacts
-  WHERE request_artifact_id=p_request_artifact_id AND attempt=1
+  SELECT CASE WHEN status='retry_yielded' AND last_error_code='AGENT_TRANSPORT_INTERRUPTED'
+    THEN now()+greatest(hard_deadline_at-last_error_at,interval '0 seconds') ELSE hard_deadline_at END
+  FROM bid_tender_agent_run_artifacts
+  WHERE request_artifact_id=p_request_artifact_id ORDER BY attempt DESC LIMIT 1
 $$;
 
 CREATE FUNCTION kb_bid_v2_tender_agent_heartbeat(
@@ -8701,13 +8714,13 @@ CREATE FUNCTION kb_bid_v2_tender_agent_yield_for_retry(
 ) RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $$
 DECLARE now_value timestamptz;
 BEGIN
-  IF p_error_code<>'INTERNAL' THEN RAISE EXCEPTION 'invalid retry-yield error code' USING ERRCODE='22023'; END IF;
+  IF p_error_code NOT IN ('INTERNAL','AGENT_TRANSPORT_INTERRUPTED') THEN RAISE EXCEPTION 'invalid retry-yield error code' USING ERRCODE='22023'; END IF;
   now_value:=kb_bid_v2_tender_agent_lock_owner(p_request_artifact_id,p_frozen_input_sha256,p_attempt,p_execution_owner_token);
   UPDATE bid_tender_agent_run_artifacts SET status='retry_yielded',lease_expires_at=now_value,
     heartbeat_at=now_value,last_error_code=p_error_code,
     last_error_message=kb_bid_v2_diagnostic_prefix(coalesce(p_error_message,'')),last_error_at=now_value,
     progress_phase='retrying',progress_detail=progress_detail||jsonb_build_object(
-      'phase','retrying','last_error_code',p_error_code,'last_error_message',kb_bid_v2_diagnostic_prefix(coalesce(p_error_message,''))),
+      'phase',CASE WHEN p_error_code='AGENT_TRANSPORT_INTERRUPTED' THEN 'awaiting_continue' ELSE 'retrying' END,'last_error_code',p_error_code,'last_error_message',kb_bid_v2_diagnostic_prefix(coalesce(p_error_message,''))),
     progress_sequence=progress_sequence+1,updated_at=now_value
   WHERE request_artifact_id=p_request_artifact_id AND attempt=p_attempt;
 END $$;
@@ -8823,7 +8836,7 @@ BEGIN
       OR coalesce(prior#>'{journal,pending,response}','null'::jsonb)<>'null'::jsonb THEN
     RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: turn or role changed' USING ERRCODE='23514';
   END IF;
-  IF runtime->'checkpoint_contract_version' IS DISTINCT FROM '10'::jsonb
+  IF runtime->'checkpoint_contract_version' IS DISTINCT FROM '13'::jsonb
       OR runtime->>'runtime_adapter' IS DISTINCT FROM 'rig-chat-0.42.0/4'
       OR runtime->>'repair_task_policy' IS DISTINCT FROM 'main-repair-tasks-v1'
       OR runtime->>'main_dispatch_policy' IS DISTINCT FROM 'main-dispatch-v1' THEN RAISE EXCEPTION 'AGENT_PROVIDER_UNAVAILABLE: frozen runtime missing' USING ERRCODE='23514'; END IF;
@@ -10053,7 +10066,7 @@ BEGIN
     OR NOT kb_bid_v2_sha256_text(p_snapshot->>'seed_plan_sha256')
     OR p_snapshot->>'actor' IS DISTINCT FROM p_actor::text
     OR jsonb_typeof(p_contract) IS DISTINCT FROM 'object'
-    OR p_contract->'checkpoint_contract_version' IS DISTINCT FROM '10'::jsonb
+    OR p_contract->'checkpoint_contract_version' IS DISTINCT FROM '13'::jsonb
     OR p_contract->>'runtime_adapter' IS DISTINCT FROM 'rig-chat-0.42.0/4'
     OR p_snapshot->'config' IS DISTINCT FROM p_contract->'config'
     OR p_snapshot->>'contract_sha256' IS DISTINCT FROM kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(p_contract),'UTF8'))::text THEN

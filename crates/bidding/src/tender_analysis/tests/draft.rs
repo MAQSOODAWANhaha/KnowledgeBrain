@@ -3184,16 +3184,7 @@ async fn draft_run_stops_at_skeleton_without_filling() {
 }
 
 #[test]
-fn draft_attempt_and_deadline_caps() {
-    assert!(!crate::tender_analysis::draft::draft_claim_exhausted(
-        false, 4
-    ));
-    assert!(!crate::tender_analysis::draft::draft_claim_exhausted(
-        true, 3
-    ));
-    assert!(crate::tender_analysis::draft::draft_claim_exhausted(
-        true, 4
-    ));
+fn draft_deadline_caps() {
     assert_eq!(
         crate::tender_analysis::draft::analysis_deadline_secs(true),
         46 * 60
@@ -3205,7 +3196,7 @@ fn draft_attempt_and_deadline_caps() {
 }
 
 #[test]
-fn retry_uses_the_same_absolute_deadline() {
+fn running_retry_preserves_deadline_and_manual_wait_preserves_remaining_budget() {
     let first = 1_700_000_000;
     let budget = crate::tender_analysis::draft::handler_budget_secs(None, first, 46 * 60);
     assert_eq!(budget, 46 * 60);
@@ -3220,7 +3211,7 @@ fn retry_uses_the_same_absolute_deadline() {
         0
     );
     let sql = include_str!("../../../../../migrations/bidding_v2_baseline.sql");
-    assert!(sql.contains("later AgentRun must copy the first deadline"));
+    assert!(sql.contains("later AgentRun must preserve remaining execution budget"));
     assert!(sql.contains("IF first_deadline<=claimed_at THEN"));
     assert!(!sql.contains("first_deadline<=claimed_at+interval '300 seconds'"));
     assert!(sql.contains("kb_bid_v2_tender_agent_frozen_deadline"));
@@ -5758,4 +5749,88 @@ fn repaired_discovery_returns_to_checks_without_erasing_scan_or_approving() {
     draft::after_batch(&input, &mut restored, false, false).unwrap();
     assert_eq!(restored.analysis.outline.phase, outline_flow::Phase::Check);
     assert!(!restored.done);
+}
+
+#[test]
+fn grid_only_scan_closes_without_empty_marker_and_recovers_cursor() {
+    use crate::tender_analysis::{draft, outline_flow};
+    let mut input = draft_input();
+    input.source_units[0].text.clear();
+    input.structured_forms = vec![
+        json!({"form_definition_revision_id":"grid","source_unit_revision_id":"source",
+        "definition":{"schema_version":3,"kind":"grid","row_count":9,"column_count":3,"cells":[]}}),
+    ];
+    let mut state = journal_state(&input, &config());
+    state
+        .analysis
+        .coverage
+        .form_cells
+        .insert("grid".into(), vec![(0, 27)]);
+    assert!(!outline_flow::source_scanned(
+        &input,
+        &state.analysis.outline,
+        "source"
+    ));
+    state
+        .analysis
+        .outline
+        .scanned
+        .form_cells
+        .insert("grid".into(), vec![(0, 26)]);
+    assert!(!outline_flow::source_scanned(
+        &input,
+        &state.analysis.outline,
+        "source"
+    ));
+    state
+        .analysis
+        .outline
+        .scanned
+        .form_cells
+        .insert("grid".into(), vec![(0, 27)]);
+    assert!(outline_flow::source_scanned(
+        &input,
+        &state.analysis.outline,
+        "source"
+    ));
+    assert!(
+        !state
+            .analysis
+            .outline
+            .scanned
+            .metadata
+            .contains_key("source")
+    );
+    let mut second = input.structured_forms[0].clone();
+    second["form_definition_revision_id"] = json!("second");
+    input.structured_forms.push(second);
+    assert!(!outline_flow::source_scanned(
+        &input,
+        &state.analysis.outline,
+        "source"
+    ));
+    input.structured_forms.pop();
+    let mut restored: agent::Checkpoint = serde_json::from_value(json!(state)).unwrap();
+    draft::preload_outline_window(&input, &mut restored);
+    assert!(
+        !draft::outline_chunks(&input)
+            .iter()
+            .skip(restored.outline_run.chunk_cursor)
+            .any(|c| c.source_id == "source")
+    );
+    input.structured_forms.clear();
+    assert!(!outline_flow::source_scanned(
+        &input,
+        &restored.analysis.outline,
+        "source"
+    ));
+    let page = outline_flow::apply(
+        &input,
+        &mut restored,
+        "read_outline",
+        &json!({"kind":"pending_scan","offset":0,"limit":20}),
+        8000,
+    )
+    .unwrap();
+    assert!(page.to_string().contains("empty_source"));
 }
