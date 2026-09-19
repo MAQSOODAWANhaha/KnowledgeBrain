@@ -33,7 +33,8 @@ function analysisSummary(job: RequirementSetCompileRequestView | null) {
   const step = typeof progress.turn === "number" ? progress.turn : progress.checkpoint_sequence;
   const parts: string[] = [];
   const phase = progress.outline_phase ?? progress.draft_stage;
-  if (phase === "discover") {
+  if (progress.outline_repairing) parts.push("正在修补核对问题");
+  else if (phase === "discover") {
     parts.push(progress.outline_scan_repair ? "正在修正扫描提交" : "正在发现提交要求");
     if (typeof progress.outline_scan_cursor === "number" && typeof progress.outline_scan_chunks === "number") {
       parts.push(`已扫描 ${progress.outline_scan_cursor}/${progress.outline_scan_chunks} 块`);

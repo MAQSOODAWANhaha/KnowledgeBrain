@@ -5722,3 +5722,40 @@ fn scan_preflight_reports_metadata_and_empty_ranges_together() {
     );
     assert_eq!(json!(state), before);
 }
+
+#[test]
+fn repaired_discovery_returns_to_checks_without_erasing_scan_or_approving() {
+    use crate::tender_analysis::{draft, outline_flow};
+    let input = draft_input();
+    let config = config();
+    let mut state = journal_state(&input, &config);
+    enter_outline(&input, &mut state);
+    save_required(&mut state, "letter", "投标函", "source", 3);
+    agent::apply(&input,&config,&mut state,"put_outline_items",&json!({"items":[{"id":"tmp-letter","parent":null,"order":0,"title":"投标函","purpose":"response","prescribed":false,"requirement_ids":["letter"]}],"remove_ids":[]})).unwrap();
+    agent::apply(&input, &config, &mut state, "finish_outline", &json!({})).unwrap();
+    let scanned = json!(state.analysis.outline.scanned);
+    state.analysis.outline.phase = outline_flow::Phase::Discover;
+    state.outline_run.phase = outline_flow::Phase::Discover;
+    let mut blocked = state.clone();
+    blocked.analysis.draft_plan.clear();
+    draft::after_batch(&input, &mut blocked, false, false).unwrap();
+    assert_eq!(blocked.analysis.outline.phase, outline_flow::Phase::Outline);
+    assert!(!blocked.analysis.outline.checks.is_empty());
+    assert_eq!(blocked.progress(&input)["outline_repairing"], true);
+    draft::after_batch(&input, &mut state, false, false).unwrap();
+    assert_eq!(state.analysis.outline.phase, outline_flow::Phase::Check);
+    assert_eq!(json!(state.analysis.outline.scanned), scanned);
+    assert!(
+        state
+            .analysis
+            .outline
+            .checks
+            .values()
+            .any(|check| check.status != "pass")
+    );
+    assert!(!state.done);
+    let mut restored: agent::Checkpoint = serde_json::from_value(json!(state)).unwrap();
+    draft::after_batch(&input, &mut restored, false, false).unwrap();
+    assert_eq!(restored.analysis.outline.phase, outline_flow::Phase::Check);
+    assert!(!restored.done);
+}

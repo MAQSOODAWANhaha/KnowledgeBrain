@@ -452,6 +452,7 @@ impl Checkpoint {
             &self.reviewer_coverage
         };
         json!({"phase":self.role,"draft_stage":self.draft_stage,"outline_phase":self.analysis.outline.phase,
+            "outline_repairing":!self.analysis.outline.checks.is_empty() && matches!(self.analysis.outline.phase, super::outline_flow::Phase::Discover | super::outline_flow::Phase::Outline),
             "outline_chapters":self.analysis.draft_plan.len(),
             "outline_scan_cursor":self.outline_run.chunk_cursor,
             "outline_scan_chunks":super::draft::outline_chunks(input).len(),

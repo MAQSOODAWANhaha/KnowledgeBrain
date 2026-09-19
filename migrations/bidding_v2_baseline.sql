@@ -2864,7 +2864,7 @@ CREATE TABLE bid_docx_composition_request_identities (
     ELSE jsonb_build_object('version_id',expected_version_id,'docx_sha256',expected_docx_sha256) END),
   CHECK (jsonb_typeof(contract_definition) IS NOT DISTINCT FROM 'object'
     AND kb_bid_v2_json_keys_exact(contract_definition,ARRAY['checkpoint_contract_version','runtime_adapter','config'])
-    AND contract_definition->'checkpoint_contract_version' IS NOT DISTINCT FROM '9'::jsonb
+    AND contract_definition->'checkpoint_contract_version' IS NOT DISTINCT FROM '10'::jsonb
     AND contract_definition->>'runtime_adapter' IS NOT DISTINCT FROM 'rig-chat-0.42.0/4'
     AND jsonb_typeof(contract_definition->'config') IS NOT DISTINCT FROM 'object'),
   FOREIGN KEY(request_artifact_id,project_id,workspace_id,request_kind,request_revision,request_sha256,frozen_input_sha256)
@@ -8823,7 +8823,7 @@ BEGIN
       OR coalesce(prior#>'{journal,pending,response}','null'::jsonb)<>'null'::jsonb THEN
     RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: turn or role changed' USING ERRCODE='23514';
   END IF;
-  IF runtime->'checkpoint_contract_version' IS DISTINCT FROM '9'::jsonb
+  IF runtime->'checkpoint_contract_version' IS DISTINCT FROM '10'::jsonb
       OR runtime->>'runtime_adapter' IS DISTINCT FROM 'rig-chat-0.42.0/4'
       OR runtime->>'repair_task_policy' IS DISTINCT FROM 'main-repair-tasks-v1'
       OR runtime->>'main_dispatch_policy' IS DISTINCT FROM 'main-dispatch-v1' THEN RAISE EXCEPTION 'AGENT_PROVIDER_UNAVAILABLE: frozen runtime missing' USING ERRCODE='23514'; END IF;
@@ -10053,7 +10053,7 @@ BEGIN
     OR NOT kb_bid_v2_sha256_text(p_snapshot->>'seed_plan_sha256')
     OR p_snapshot->>'actor' IS DISTINCT FROM p_actor::text
     OR jsonb_typeof(p_contract) IS DISTINCT FROM 'object'
-    OR p_contract->'checkpoint_contract_version' IS DISTINCT FROM '9'::jsonb
+    OR p_contract->'checkpoint_contract_version' IS DISTINCT FROM '10'::jsonb
     OR p_contract->>'runtime_adapter' IS DISTINCT FROM 'rig-chat-0.42.0/4'
     OR p_snapshot->'config' IS DISTINCT FROM p_contract->'config'
     OR p_snapshot->>'contract_sha256' IS DISTINCT FROM kb_bid_v2_sha256_bytes(convert_to(kb_bid_v2_jcs(p_contract),'UTF8'))::text THEN

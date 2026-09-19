@@ -100,6 +100,7 @@ export type RequirementSetCompileRequestView = {
     boundary?: string;
     draft_stage?: string;
     outline_phase?: string;
+    outline_repairing?: boolean;
     outline_chapters?: number;
     outline_scan_cursor?: number;
     outline_scan_chunks?: number;

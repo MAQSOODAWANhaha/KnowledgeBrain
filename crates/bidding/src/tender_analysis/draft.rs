@@ -1521,16 +1521,36 @@ pub fn after_batch(
                 return Err("outline semantic repair exhausted; checkpoint retained".into());
             }
             if state.analysis.outline.phase == Phase::Discover {
-                if outline_flow::scan_complete(input, &state.analysis.outline)
-                    && state.analysis.outline.checks.is_empty()
-                {
+                if outline_flow::scan_complete(input, &state.analysis.outline) {
                     state.analysis.outline.phase = Phase::Outline;
                     state.outline_run.phase = Phase::Outline;
                     state.outline_run.chunk_cursor = outline_chunks(input).len();
                     state.main_work = None;
-                    state.transcript.clear();
+                    // Preserve repair evidence and failed-call identities; only
+                    // first discovery hands off with a fresh conversation.
+                    if state.analysis.outline.checks.is_empty() {
+                        state.transcript.clear();
+                    }
                 } else if !outline_flow::scan_complete(input, &state.analysis.outline) {
                     preload_outline_window(input, state);
+                }
+            }
+            // A repaired outline must return through the same publication
+            // blockers and packet construction as an explicit finish call.
+            if state.analysis.outline.phase == Phase::Outline
+                && !state.analysis.outline.checks.is_empty()
+                && state
+                    .analysis
+                    .outline
+                    .issues
+                    .values()
+                    .all(|issue| issue.status != outline_flow::IssueStatus::Open)
+            {
+                let mut candidate = state.clone();
+                if outline_flow::apply(input, &mut candidate, "finish_outline", &json!({}), 8192)
+                    .is_ok()
+                {
+                    *state = candidate;
                 }
             }
             if outline_flow::checked(input, state) {

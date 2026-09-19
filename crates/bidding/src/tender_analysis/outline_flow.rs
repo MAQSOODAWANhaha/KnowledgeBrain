@@ -1163,6 +1163,22 @@ pub fn packet(input: &FrozenInput, state: &Checkpoint, budget: usize) -> Result<
             "cursor_chunk is the earliest incomplete accounting range; close its missing scan ranges first. pending_scan lists delivered ranges without scan conclusions, not unread ranges. Submit inspected ranges with submit_outline_scan, including empty requirements when appropriate. Partial table/text conclusions are allowed; do not wait to reread the entire document or table. If original text is no longer visible, reread only the needed pending range. Targeted cross-reference reads remain allowed. Repeating delivered reads is not progress."
         );
     }
+    if !state.analysis.outline.checks.is_empty()
+        && matches!(
+            state.analysis.outline.phase,
+            Phase::Discover | Phase::Outline
+        )
+    {
+        out["repair_issues"] = tools::bounded_page(
+            &identified(&state.analysis.outline.issues),
+            0,
+            usize::MAX,
+            budget / 4,
+        )?;
+        out["instruction"] = json!(
+            "This is directed repair after review, not a new full discovery. Preserve completed scan receipts. Repair the listed issues and affected chapters against their exact evidence. Use read_outline(kind=blockers) only for remaining blockers. Once repairs are complete, finish_outline returns to semantic checks; repeated metadata scans and organization pagination do not complete repair. The host also attempts this handoff when all issues are closed; it never approves checks automatically."
+        );
+    }
     if state.analysis.outline.phase == Phase::Check
         && let Some(packet_id) = &state.outline_run.active_check_packet
     {
@@ -2763,7 +2779,15 @@ mod tests {
         .unwrap();
         assert_eq!(result["repair_required"], true);
         super::super::draft::after_batch(&input, &mut state, false, false).unwrap();
-        assert_eq!(state.analysis.outline.phase, Phase::Discover);
+        assert_eq!(state.analysis.outline.phase, Phase::Outline);
+        assert!(
+            state
+                .analysis
+                .outline
+                .issues
+                .values()
+                .any(|issue| issue.status == IssueStatus::Open)
+        );
         assert!(!checked(&input, &state));
     }
 
