@@ -3,7 +3,9 @@
 set -euo pipefail
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
   cat <<'HELP'
-Usage: scripts/bidding_task_status.sh [request_artifact_id]
+Usage: scripts/bidding_task_status.sh [--list | request_artifact_id]
+--list lists all requirement_set_compile requests, newest first.
+Copy a request_artifact_id from the list to inspect its detailed progress.
 Omit the ID to inspect the latest requirement_set_compile request.
 Environment: KB_POSTGRES_CONTAINER (default knowledgebrain-postgres).
 POSTGRES_USER and POSTGRES_DB are read inside the container (default knowledgebrain).
@@ -14,8 +16,8 @@ Elapsed time is wall time, including time waiting for manual continuation.
 HELP
   exit 0
 fi
-if [[ $# -gt 1 || ( $# -eq 1 && ! $1 =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ) ]]; then
-  echo 'Expected an optional UUID; use --help for usage.' >&2
+if [[ $# -gt 1 || ( $# -eq 1 && $1 != --list && ! $1 =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ) ]]; then
+  echo 'Expected --list or an optional UUID; use --help for usage.' >&2
   exit 2
 fi
 docker exec -i "${KB_POSTGRES_CONTAINER:-knowledgebrain-postgres}" sh -c '
@@ -23,6 +25,25 @@ docker exec -i "${KB_POSTGRES_CONTAINER:-knowledgebrain-postgres}" sh -c '
 ' sh "${1:-}" <<'SQL'
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET LOCAL statement_timeout = '30s';
+SELECT :'requested_id' = '--list' AS list_requests \gset
+\if :list_requests
+\echo ==== OUTLINE REQUESTS (newest first; current attempt only) ====
+SELECT q.id AS request_artifact_id,q.project_id,q.status AS request_status,
+ q.current_attempt,r.status AS run_status,
+ r.progress_detail->>'outline_phase' AS phase,
+ r.progress_detail->>'outline_scan_cursor' AS cursor,
+ r.progress_detail->>'outline_scan_chunks' AS chunks,
+ r.progress_detail->>'outline_requirements' AS reqs,
+ r.progress_detail->>'outline_chapters' AS chapters,
+ r.turn_count,q.created_at,q.finished_at,
+ coalesce(q.error_code,r.last_error_code) AS last_error_code
+FROM bid_async_request_snapshot_artifacts q
+LEFT JOIN bid_tender_agent_run_artifacts r
+ ON r.request_artifact_id=q.id AND r.attempt=q.current_attempt
+WHERE q.request_kind='requirement_set_compile'
+ORDER BY q.created_at DESC,q.id DESC;
+\echo Details: ./scripts/bidding_task_status.sh <request_artifact_id>
+\else
 SELECT coalesce((SELECT id::text FROM bid_async_request_snapshot_artifacts
  WHERE request_kind='requirement_set_compile'
    AND (:'requested_id'='' OR id::text=lower(:'requested_id'))
@@ -91,6 +112,7 @@ SELECT turn,payload#>>'{outline_run,chunk_cursor}' AS cursor,
 FROM turns ORDER BY turn;
 \else
 \echo No matching requirement_set_compile request found.
+\endif
 \endif
 ROLLBACK;
 SQL
