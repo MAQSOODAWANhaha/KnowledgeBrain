@@ -5280,8 +5280,11 @@ fn requirement_replacement_is_atomic_and_reopens_affected_conclusions() {
     let result = agent::apply(&input, &config, &mut state, "submit_outline_scan", &batch).unwrap();
     assert!(!state.analysis.outline.requirements.contains_key("mixed"));
     let ids = vec![
-        result["id_map"]["tmp-letter"].as_str().unwrap().to_string(),
-        result["id_map"]["tmp-authority"]
+        result["id_map"]["requirements"]["tmp-letter"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+        result["id_map"]["requirements"]["tmp-authority"]
             .as_str()
             .unwrap()
             .to_string(),
@@ -5312,4 +5315,250 @@ fn requirement_replacement_is_atomic_and_reopens_affected_conclusions() {
             .keys()
             .any(|id| id.starts_with("replacement-"))
     );
+}
+
+fn scan_repair_fixture() -> (FrozenInput, Config, agent::Checkpoint, Value) {
+    let input = draft_input();
+    let config = config();
+    let mut state = journal_state(&input, &config);
+    enter_outline(&input, &mut state);
+    let batch = json!({"text":{},"forms":{},"metadata":{},"empty_sources":[],"requirements":[
+        {"id":"tmp-structure","description":"编排顺序","kind":"structure_constraint","submission_name":null,"classification_reason":"目录规则","format_required":true,
+        "applicability":"required","condition":"","grounds":[{"source_id":"source","start":0,"end":3}],"format_grounds":[],"order_constraints":[]},
+        {"id":"tmp-letter","description":"授权材料","kind":"submission","submission_name":"授权书","classification_reason":"","format_required":false,
+        "applicability":"conditional","condition":"","grounds":[{"source_id":"source","start":0,"end":3}],"format_grounds":[],"order_constraints":[]}
+    ],"references":[],"issues":[],"review_fragments":[
+        {"id":"tmp-fragment","kind":"composition","document_id":"document","volume_ids":[],"span":{"source_id":"source","start":0,"end":3}}
+    ]});
+    (input, config, state, batch)
+}
+
+fn remember_scan(state: &mut agent::Checkpoint, id: &str, args: &Value, output: Value) {
+    state.transcript.push(json!({"role":"assistant","tool_calls":[{"id":id,"type":"function","function":{"name":"submit_outline_scan","arguments":args.to_string()}}]}));
+    state
+        .transcript
+        .push(json!({"role":"tool","tool_call_id":id,"content":output.to_string()}));
+}
+
+#[test]
+fn scan_returns_all_field_errors_and_compact_repair_survives_restore() {
+    let (input, config, mut state, batch) = scan_repair_fixture();
+    let before = json!(state.analysis);
+    let message =
+        agent::apply(&input, &config, &mut state, "submit_outline_scan", &batch).unwrap_err();
+    let details: Value = serde_json::from_str(&message).unwrap();
+    assert_eq!(details["error_count"], 2);
+    assert_eq!(
+        details["errors"][0]["path"],
+        "/requirements/0/format_required"
+    );
+    assert_eq!(details["errors"][1]["path"], "/requirements/1/condition");
+    assert_eq!(json!(state.analysis), before);
+    remember_scan(
+        &mut state,
+        "failed-scan",
+        &batch,
+        json!({"ok":false,"details":details}),
+    );
+    let mut restored: agent::Checkpoint = serde_json::from_value(json!(state)).unwrap();
+    let repair = json!({"repair":{"call_id":"failed-scan","arguments_sha256":details["arguments_sha256"],"changes":[
+        {"path":"/requirements/0/format_required","value":false},
+        {"path":"/requirements/1/condition","value":"委托代理人签字时"}
+    ]}});
+    assert!(repair.to_string().len() < batch.to_string().len() / 2);
+    let output = agent::apply(
+        &input,
+        &config,
+        &mut restored,
+        "submit_outline_scan",
+        &repair,
+    )
+    .unwrap();
+    assert!(output["id_map"]["review_fragments"]["tmp-fragment"].is_string());
+    assert_eq!(restored.analysis.outline.requirements.len(), 2);
+    remember_scan(
+        &mut restored,
+        "repair-success",
+        &repair,
+        json!({"ok":true,"result":output}),
+    );
+    assert!(
+        agent::apply(
+            &input,
+            &config,
+            &mut restored,
+            "submit_outline_scan",
+            &repair
+        )
+        .unwrap_err()
+        .contains("no failed scan")
+    );
+}
+
+#[test]
+fn scan_repair_rejects_stale_identity_digest_and_outside_paths_atomically() {
+    let (input, config, mut state, batch) = scan_repair_fixture();
+    remember_scan(&mut state, "failed", &batch, json!({"ok":false}));
+    let before = json!(state);
+    let valid = json!({"repair":{"call_id":"failed","arguments_sha256":digest(&batch).unwrap(),"changes":[{"path":"/requirements/0/format_required","value":false}]}});
+    for (path, value) in [
+        ("/repair/call_id", json!("old")),
+        ("/repair/arguments_sha256", json!("bad")),
+        ("/repair/changes/0/path", json!("/analysis/coverage")),
+    ] {
+        let mut bad = valid.clone();
+        *bad.pointer_mut(path).unwrap() = value;
+        assert!(agent::apply(&input, &config, &mut state, "submit_outline_scan", &bad).is_err());
+        assert_eq!(json!(state), before);
+    }
+}
+
+#[test]
+fn latest_failed_scan_chain_is_pinned_until_success() {
+    use crate::tender_analysis::{agent::context, outline_flow};
+    let (input, config, mut state, batch) = scan_repair_fixture();
+    remember_scan(&mut state, "base", &batch, json!({"ok":false}));
+    let repair = json!({"repair":{"call_id":"base","arguments_sha256":digest(&batch).unwrap(),"changes":[{"path":"/requirements/0/format_required","value":false}]}});
+    let message =
+        agent::apply(&input, &config, &mut state, "submit_outline_scan", &repair).unwrap_err();
+    let details: Value = serde_json::from_str(&message).unwrap();
+    assert_eq!(details["error_count"], 1);
+    remember_scan(
+        &mut state,
+        "second",
+        &repair,
+        json!({"ok":false,"details":details}),
+    );
+    state
+        .transcript
+        .push(json!({"role":"assistant","tool_calls":[]}));
+    assert!(outline_flow::protects_scan_repair(
+        &state,
+        &state.transcript
+    ));
+    let before = json!(state.transcript);
+    context::evict_completed_discovery_history(&mut state, 1);
+    context::evict_delivered_group(&mut state, 1, true);
+    assert_eq!(json!(state.transcript), before);
+    let final_repair = json!({"repair":{"call_id":"second","arguments_sha256":details["arguments_sha256"],"changes":[{"path":"/requirements/1/condition","value":"代理人签字时"}]}});
+    let result = agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "submit_outline_scan",
+        &final_repair,
+    )
+    .unwrap();
+    remember_scan(
+        &mut state,
+        "done",
+        &final_repair,
+        json!({"ok":true,"result":result}),
+    );
+    assert!(!outline_flow::protects_scan_repair(
+        &state,
+        &state.transcript
+    ));
+}
+
+#[test]
+fn all_scan_categories_share_alias_rules_and_keep_associations() {
+    let (input, config, mut state, mut batch) = scan_repair_fixture();
+    batch["requirements"][0]["format_required"] = json!(false);
+    batch["requirements"][1]["condition"] = json!("代理签字");
+    batch["references"] = json!([{"id":"tmp-ref","grounds":[{"source_id":"source","start":0,"end":3}],"target_description":"格式","target_ids":["source"],"requirement_ids":["tmp-letter"],"impact":"content","status":"unresolved","resolution_grounds":[]}]);
+    batch["issues"] = json!([{"id":"tmp-issue","code":"W_CONTENT_REFERENCE","description":"待确认","requirement_ids":["tmp-letter"],"chapter_ids":[],"reference_ids":["tmp-ref"],"grounds":[],"status":"open","resolution_grounds":[]}]);
+    let result = agent::apply(&input, &config, &mut state, "submit_outline_scan", &batch).unwrap();
+    let map = &result["id_map"];
+    let issue = &state.analysis.outline.issues[map["issues"]["tmp-issue"].as_str().unwrap()];
+    assert_eq!(
+        issue.reference_ids[0],
+        map["references"]["tmp-ref"].as_str().unwrap()
+    );
+    assert_eq!(
+        issue.requirement_ids[0],
+        map["requirements"]["tmp-letter"].as_str().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn scan_turn_reports_repair_identity_and_progress_without_committing() {
+    let (input, config, mut state, batch) = scan_repair_fixture();
+    let before = json!(state.analysis.outline.scanned);
+    let body = agent::request(&input, &config, &mut state).await.unwrap();
+    state
+        .journal
+        .prepare_session(
+            &body,
+            crate::agent_runtime::SESSION_PREFIX,
+            crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
+            config.limits.max_turns,
+            config.limits.max_context_bytes,
+        )
+        .unwrap();
+    state.journal.prepare(state.turn, "main", &body).unwrap();
+    agent::execute_turn(
+        &input,
+        &config,
+        &mut state,
+        &MemoryJournal::default(),
+        ChatTurn {
+            tool_calls: vec![ChatToolCall {
+                id: "failed-scan".into(),
+                name: "submit_outline_scan".into(),
+                arguments: batch.to_string(),
+            }],
+            finish_reason: "tool_calls".into(),
+            ..Default::default()
+        },
+        Default::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let output: Value = state
+        .transcript
+        .iter()
+        .find(|m| m["role"] == "tool" && m["tool_call_id"] == "failed-scan")
+        .and_then(|m| m["content"].as_str())
+        .map(|s| serde_json::from_str(s).unwrap())
+        .unwrap();
+    assert_eq!(output["error"], "SCAN_BATCH_INVALID");
+    assert_eq!(output["details"]["call_id"], "failed-scan");
+    assert_eq!(output["details"]["error_count"], 2);
+    assert_eq!(json!(state.analysis.outline.scanned), before);
+    assert_eq!(state.progress(&input)["outline_scan_repair"], true);
+    assert_eq!(
+        state.progress(&input)["outline_scan_cursor"],
+        state.outline_run.chunk_cursor
+    );
+}
+
+#[test]
+fn scan_error_feedback_is_bounded_and_does_not_commit() {
+    let (input, mut config, mut state, mut batch) = scan_repair_fixture();
+    config.limits.max_tool_result_bytes = 1024;
+    let item = batch["requirements"][0].clone();
+    batch["requirements"] = json!(
+        (0..40)
+            .map(|i| {
+                let mut item = item.clone();
+                item["id"] = json!(format!("tmp-{i}"));
+                item
+            })
+            .collect::<Vec<_>>()
+    );
+    let before = json!(state);
+    let error =
+        agent::apply(&input, &config, &mut state, "submit_outline_scan", &batch).unwrap_err();
+    assert!(
+        error.len() <= config.limits.max_tool_result_bytes,
+        "{}",
+        error.len()
+    );
+    let feedback: Value = serde_json::from_str(&error).unwrap();
+    assert_eq!(feedback["error_count"], 40);
+    assert_eq!(feedback["truncated"], true);
+    assert!(!feedback["errors"].as_array().unwrap().is_empty());
+    assert_eq!(json!(state), before);
 }

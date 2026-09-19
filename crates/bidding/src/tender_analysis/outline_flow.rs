@@ -1,6 +1,15 @@
 //! Outline discovery and semantic checks share the existing durable turn journal.
 //! Delivered evidence and completed scanning are deliberately separate receipts.
 //! The stored JSON is the current contract only: unknown or missing fields fail.
+mod scan_submit;
+pub(super) fn scan_repair_pending(state: &Checkpoint) -> bool {
+    !scan_submit::projection(state).is_null()
+}
+
+pub(super) fn protects_scan_repair(state: &Checkpoint, messages: &[Value]) -> bool {
+    scan_submit::protects(state, messages)
+}
+
 use super::{
     agent::Checkpoint,
     draft::{DraftPlanItem, DraftStatus},
@@ -1065,6 +1074,7 @@ pub fn packet(input: &FrozenInput, state: &Checkpoint, budget: usize) -> Result<
     if discovering {
         out["cursor_chunk"] =
             json!(super::draft::outline_chunks(input).get(state.outline_run.chunk_cursor));
+        out["pending_scan_repair"] = scan_submit::projection(state);
         out["pending_scan"] =
             tools::bounded_page(&pending_scan_ranges(state), 0, usize::MAX, budget / 4)?;
         out["discovery_watch"] = json!(state.main_progress.watch);
@@ -1232,6 +1242,19 @@ fn record_fragment_delivery(
 }
 
 pub fn apply(
+    input: &FrozenInput,
+    state: &mut Checkpoint,
+    name: &str,
+    args: &Value,
+    budget: usize,
+) -> Result<Value, String> {
+    if name == "submit_outline_scan" {
+        return scan_submit::apply(input, state, args, budget);
+    }
+    apply_validated(input, state, name, args, budget)
+}
+
+fn apply_validated(
     input: &FrozenInput,
     state: &mut Checkpoint,
     name: &str,
@@ -1672,6 +1695,9 @@ pub fn apply(
             next.requirements.insert(id, value);
         }
 
+        let mut reference_aliases = BTreeMap::new();
+        let mut issue_aliases = BTreeMap::new();
+        let mut fragment_aliases = BTreeMap::new();
         for mut reference in batch.references {
             for id in &mut reference.requirement_ids {
                 if let Some(stable) = aliases.get(id) {
@@ -1709,13 +1735,24 @@ pub fn apply(
             {
                 tools::validate_span(input, state.coverage(), span)?;
             }
+            let alias = reference
+                .id
+                .starts_with("tmp-")
+                .then(|| reference.id.clone());
             let known = next.references.contains_key(&reference.id);
             let id = allocate(
                 &mut next.id_sequences.reference,
                 "reference",
-                reference.id,
+                if alias.is_some() {
+                    String::new()
+                } else {
+                    reference.id
+                },
                 known,
             )?;
+            if let Some(alias) = alias {
+                reference_aliases.insert(alias, id.clone());
+            }
             next.references.insert(
                 id,
                 OutlineReference {
@@ -1735,6 +1772,11 @@ pub fn apply(
                     *id = stable.clone();
                 }
             }
+            for id in &mut issue.reference_ids {
+                if let Some(stable) = reference_aliases.get(id) {
+                    *id = stable.clone();
+                }
+            }
             validate_issue_update(next.issues.get(&issue.id), &issue)?;
             if issue.description.trim().is_empty() {
                 return Err("issue description required".into());
@@ -1745,8 +1787,21 @@ pub fn apply(
             for span in issue.grounds.iter().chain(&issue.resolution_grounds) {
                 tools::validate_span(input, state.coverage(), span)?;
             }
+            let alias = issue.id.starts_with("tmp-").then(|| issue.id.clone());
             let known = next.issues.contains_key(&issue.id);
-            let id = allocate(&mut next.id_sequences.issue, "issue", issue.id, known)?;
+            let id = allocate(
+                &mut next.id_sequences.issue,
+                "issue",
+                if alias.is_some() {
+                    String::new()
+                } else {
+                    issue.id
+                },
+                known,
+            )?;
+            if let Some(alias) = alias {
+                issue_aliases.insert(alias, id.clone());
+            }
             next.issues.insert(
                 id,
                 OutlineIssue {
@@ -1764,13 +1819,21 @@ pub fn apply(
         for fragment in batch.review_fragments {
             tools::validate_span(input, state.coverage(), &fragment.span)?;
             span_text(input, &fragment.span)?;
+            let alias = fragment.id.starts_with("tmp-").then(|| fragment.id.clone());
             let known = next.review_fragments.contains_key(&fragment.id);
             let id = allocate(
                 &mut next.id_sequences.fragment,
                 "fragment",
-                fragment.id,
+                if alias.is_some() {
+                    String::new()
+                } else {
+                    fragment.id
+                },
                 known,
             )?;
+            if let Some(alias) = alias {
+                fragment_aliases.insert(alias, id.clone());
+            }
             next.review_fragments.insert(
                 id,
                 ReviewFragment {
@@ -1868,7 +1931,7 @@ pub fn apply(
         invalidate_checks(&mut candidate, true, &[]);
         *state = candidate;
         return Ok(
-            json!({"saved":saved,"id_map":aliases,"scan_complete":scan_complete(input, &state.analysis.outline)}),
+            json!({"saved":saved,"id_map":{"requirements":aliases,"references":reference_aliases,"issues":issue_aliases,"review_fragments":fragment_aliases},"scan_complete":scan_complete(input, &state.analysis.outline)}),
         );
     }
     if name == "submit_outline_check" {

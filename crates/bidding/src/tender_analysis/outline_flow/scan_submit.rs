@@ -1,0 +1,411 @@
+//! Scan retries reuse the failed tool arguments already in the durable transcript.
+use super::*;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Repair {
+    call_id: String,
+    arguments_sha256: String,
+    changes: Vec<Change>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Change {
+    path: String,
+    value: Value,
+}
+
+fn patched(base: &Value, repair: &Repair) -> Result<Value, String> {
+    if digest(base)? != repair.arguments_sha256
+        || repair.changes.is_empty()
+        || repair.changes.len() > 64
+    {
+        return Err("scan repair digest differs or changes must contain 1..64 entries".into());
+    }
+    let mut value = base.clone();
+    for change in &repair.changes {
+        let root = change.path.split('/').nth(1).unwrap_or_default();
+        if !matches!(
+            root,
+            "text"
+                | "forms"
+                | "metadata"
+                | "empty_sources"
+                | "requirements"
+                | "references"
+                | "issues"
+                | "review_fragments"
+                | "requirement_replacements"
+        ) {
+            return Err(format!(
+                "repair path is outside the scan contract: {}",
+                change.path
+            ));
+        }
+        let (parent, key) = change
+            .path
+            .rsplit_once('/')
+            .ok_or("repair needs a JSON pointer")?;
+        let key = key.replace("~1", "/").replace("~0", "~");
+        let container = value
+            .pointer_mut(parent)
+            .ok_or("repair parent does not exist")?;
+        match container {
+            Value::Object(map) => {
+                map.insert(key, change.value.clone());
+            }
+            Value::Array(items) => {
+                let index: usize = key.parse().map_err(|_| "repair array index invalid")?;
+                *items
+                    .get_mut(index)
+                    .ok_or("repair array index outside batch")? = change.value.clone();
+            }
+            _ => return Err("repair parent must be an object or array".into()),
+        }
+    }
+    Ok(value)
+}
+
+/// Last failed scan and all tool calls needed to reconstruct it. A successful
+/// scan consumes it. Other tool results do not manufacture a repair base.
+fn pending(state: &Checkpoint) -> Option<(String, Value, BTreeSet<String>)> {
+    let mut calls = BTreeMap::new();
+    let mut last: Option<(String, Value, BTreeSet<String>)> = None;
+    for message in &state.transcript {
+        for call in message["tool_calls"].as_array().into_iter().flatten() {
+            if call["function"]["name"] == "submit_outline_scan" {
+                if let (Some(id), Some(args)) =
+                    (call["id"].as_str(), call["function"]["arguments"].as_str())
+                {
+                    if let Ok(args) = serde_json::from_str::<Value>(args) {
+                        calls.insert(id.to_owned(), args);
+                    }
+                }
+            }
+        }
+        let Some(id) = message["tool_call_id"].as_str() else {
+            continue;
+        };
+        let Some(args) = calls.get(id) else { continue };
+        let Some(output) = message["content"]
+            .as_str()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        else {
+            continue;
+        };
+        if output["ok"] == true {
+            last = None;
+            continue;
+        }
+        if output["ok"] != false {
+            continue;
+        }
+        if let Some(repair) = args.get("repair") {
+            let Some((prior_id, prior, dependencies)) = &last else {
+                continue;
+            };
+            let Ok(repair) = serde_json::from_value::<Repair>(repair.clone()) else {
+                continue;
+            };
+            if repair.call_id != *prior_id {
+                continue;
+            }
+            if let Ok(base) = patched(prior, &repair) {
+                let mut dependencies = dependencies.clone();
+                dependencies.insert(id.to_owned());
+                last = Some((id.to_owned(), base, dependencies));
+            }
+        } else {
+            last = Some((id.to_owned(), args.clone(), BTreeSet::from([id.to_owned()])));
+        }
+    }
+    last
+}
+
+pub(super) fn projection(state: &Checkpoint) -> Value {
+    pending(state).map(|(id, base, _)| json!({"call_id":id,"arguments_sha256":digest(&base).ok(),
+        "instruction":"Repair the last failed scan with field changes; do not resend the full batch. No failed ranges have been committed."})).unwrap_or(Value::Null)
+}
+
+pub(super) fn protects(state: &Checkpoint, messages: &[Value]) -> bool {
+    let Some((_, _, ids)) = pending(state) else {
+        return false;
+    };
+    messages.iter().any(|message| {
+        message["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|call| call["id"].as_str().is_some_and(|id| ids.contains(id)))
+    })
+}
+
+fn error(path: String, id: &Value, code: &str, message: impl ToString) -> Value {
+    fn bounded(value: &str) -> &str {
+        let mut end = value.len().min(160);
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        &value[..end]
+    }
+    json!({"path":bounded(&path),"id":id.as_str().map(bounded),"code":code,"message":bounded(&message.to_string())})
+}
+
+/// Report independent field/identity/evidence failures together. Final apply
+/// remains authoritative for interdependent state transitions and range maps.
+fn preflight(input: &FrozenInput, state: &Checkpoint, args: &Value) -> Vec<Value> {
+    let mut errors = Vec::new();
+    let flow = &state.analysis.outline;
+    let mut requirement_ids: BTreeSet<String> = flow.requirements.keys().cloned().collect();
+    let mut reference_ids: BTreeSet<String> = flow.references.keys().cloned().collect();
+    for (category, ids) in [
+        ("requirements", &mut requirement_ids),
+        ("references", &mut reference_ids),
+    ] {
+        ids.extend(
+            args[category]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item["id"].as_str())
+                .filter(|id| id.starts_with("tmp-") && id.len() > 4)
+                .map(str::to_owned),
+        );
+    }
+    for category in ["requirements", "references", "issues", "review_fragments"] {
+        let Some(items) = args[category].as_array() else {
+            errors.push(error(
+                format!("/{category}"),
+                &Value::Null,
+                "ARRAY_REQUIRED",
+                "array required",
+            ));
+            continue;
+        };
+        let mut seen = BTreeSet::new();
+        for (index, item) in items.iter().enumerate() {
+            let path = format!("/{category}/{index}");
+            let id = &item["id"];
+            let known = id.as_str().is_some_and(|id| match category {
+                "requirements" => flow.requirements.contains_key(id),
+                "references" => flow.references.contains_key(id),
+                "issues" => flow.issues.contains_key(id),
+                _ => flow.review_fragments.contains_key(id),
+            });
+            match id.as_str() {
+                Some(id) if id.is_empty() => {}
+                Some(id) if known || id.starts_with("tmp-") && id.len() > 4 => {
+                    if !seen.insert(id) {
+                        errors.push(error(
+                            format!("{path}/id"),
+                            &item["id"],
+                            "DUPLICATE_ID",
+                            "ID repeated in this category",
+                        ));
+                    }
+                }
+                _ => errors.push(error(
+                    format!("{path}/id"),
+                    id,
+                    "UNKNOWN_ID",
+                    "use empty ID or tmp- alias for new entries; stable IDs must exist",
+                )),
+            }
+            let shape = match category {
+                "requirements" => serde_json::from_value::<ScanNeed>(item.clone()).map(|_| ()),
+                "references" => serde_json::from_value::<ScanReference>(item.clone()).map(|_| ()),
+                "issues" => serde_json::from_value::<ScanIssue>(item.clone()).map(|_| ()),
+                _ => serde_json::from_value::<ScanFragment>(item.clone()).map(|_| ()),
+            };
+            if let Err(reason) = shape {
+                errors.push(error(path.clone(), id, "INVALID_SHAPE", reason));
+                continue;
+            }
+            for (field, identities) in [
+                ("requirement_ids", &requirement_ids),
+                ("reference_ids", &reference_ids),
+            ] {
+                for (offset, raw) in item[field].as_array().into_iter().flatten().enumerate() {
+                    if raw.as_str().is_none_or(|id| !identities.contains(id)) {
+                        errors.push(error(format!("{path}/{field}/{offset}"), id, "UNKNOWN_ASSOCIATION", "reference targets must be frozen source IDs and requirement IDs must exist; associated IDs must be existing or same-batch aliases"));
+                    }
+                }
+            }
+            for (offset, source) in item["target_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                if !input
+                    .source_units
+                    .iter()
+                    .any(|entry| source == &entry.source_unit_revision_id)
+                {
+                    errors.push(error(
+                        format!("{path}/target_ids/{offset}"),
+                        id,
+                        "UNKNOWN_SOURCE",
+                        "reference target must be a frozen source ID",
+                    ));
+                }
+            }
+            if category == "requirements" {
+                if matches!(
+                    item["kind"].as_str(),
+                    Some("structure_constraint" | "non_document")
+                ) && item["format_required"] == true
+                {
+                    errors.push(error(format!("{path}/format_required"), id, "FORMAT_KIND_CONFLICT", "prescribed material format must belong to a submission or content constraint"));
+                }
+                if item["applicability"] != "required"
+                    && item["condition"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .trim()
+                        .is_empty()
+                {
+                    errors.push(error(
+                        format!("{path}/condition"),
+                        id,
+                        "CONDITION_REQUIRED",
+                        "conditional/not-applicable requirement needs its source condition",
+                    ));
+                }
+                let reclassified = id
+                    .as_str()
+                    .and_then(|id| flow.requirements.get(id))
+                    .is_some_and(|old| json!(old.kind) != item["kind"]);
+                if (item["kind"] == "non_document" || reclassified)
+                    && item["classification_reason"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .trim()
+                        .is_empty()
+                {
+                    errors.push(error(
+                        format!("{path}/classification_reason"),
+                        id,
+                        "CLASSIFICATION_REASON_REQUIRED",
+                        "non-document or reclassified requirement needs classification_reason",
+                    ));
+                }
+                if (item["kind"] == "submission"
+                    && item["submission_name"]
+                        .as_str()
+                        .is_none_or(|v| v.trim().is_empty()))
+                    || (item["kind"] != "submission" && !item["submission_name"].is_null())
+                {
+                    errors.push(error(format!("{path}/submission_name"), id, "MATERIAL_NAME_INVALID", "submission_name must name one actual material for submission and be null otherwise"));
+                }
+                if item["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+                    || item["grounds"].as_array().is_none_or(Vec::is_empty)
+                {
+                    errors.push(error(
+                        path.clone(),
+                        id,
+                        "BASIS_REQUIRED",
+                        "submission requirement needs description and exact grounds",
+                    ));
+                }
+            }
+            if matches!(category, "references" | "issues")
+                && item["status"] == "resolved"
+                && item["resolution_grounds"]
+                    .as_array()
+                    .is_none_or(Vec::is_empty)
+            {
+                errors.push(error(
+                    format!("{path}/resolution_grounds"),
+                    id,
+                    "RESOLUTION_REQUIRED",
+                    "resolved conclusion needs resolution grounds",
+                ));
+            }
+            for field in ["grounds", "format_grounds", "resolution_grounds"] {
+                for (offset, raw) in item[field].as_array().into_iter().flatten().enumerate() {
+                    let result = serde_json::from_value::<Span>(raw.clone())
+                        .map_err(|e| e.to_string())
+                        .and_then(|span| tools::validate_span(input, state.coverage(), &span));
+                    if let Err(reason) = result {
+                        errors.push(error(
+                            format!("{path}/{field}/{offset}"),
+                            id,
+                            "INVALID_EVIDENCE",
+                            reason,
+                        ));
+                    }
+                }
+            }
+            if category == "review_fragments" {
+                let result = serde_json::from_value::<Span>(item["span"].clone())
+                    .map_err(|e| e.to_string())
+                    .and_then(|span| tools::validate_span(input, state.coverage(), &span));
+                if let Err(reason) = result {
+                    errors.push(error(
+                        format!("{path}/span"),
+                        id,
+                        "INVALID_EVIDENCE",
+                        reason,
+                    ));
+                }
+            }
+        }
+    }
+    errors
+}
+
+pub(super) fn apply(
+    input: &FrozenInput,
+    state: &mut Checkpoint,
+    args: &Value,
+    budget: usize,
+) -> Result<Value, String> {
+    let resolved;
+    let args = if let Some(raw) = args.get("repair") {
+        if args.as_object().is_none_or(|map| map.len() != 1) {
+            return Err("repair and full scan are mutually exclusive".into());
+        }
+        let repair: Repair = serde_json::from_value(raw.clone()).map_err(|e| e.to_string())?;
+        let (id, base, _) = pending(state).ok_or("no failed scan available for repair")?;
+        if id != repair.call_id {
+            return Err("repair must target the latest failed scan".into());
+        }
+        resolved = patched(&base, &repair)?;
+        &resolved
+    } else {
+        args
+    };
+    let arguments_sha256 = digest(args)?;
+    let expanded = super::super::evidence_refs::expand(input, args)?;
+    let args = &expanded;
+    let mut errors = preflight(input, state, args);
+    if errors.is_empty() {
+        match super::apply_validated(input, state, "submit_outline_scan", args, budget) {
+            Ok(value) => return Ok(value),
+            Err(reason) => errors.push(error("/".into(), &Value::Null, "BATCH_INVALID", reason)),
+        }
+    }
+    let mut result = json!({"committed":false,"arguments_sha256":arguments_sha256,"errors":[],"truncated":false,
+        "repair_hint":"Use submit_outline_scan with repair.call_id from this tool result, arguments_sha256 and changes [{path,value}]. All changes are revalidated; no scan ranges were committed."});
+    let count = errors.len();
+    result["errors"] = json!(errors);
+    result["error_count"] = json!(count);
+    while serde_json::to_vec(&result)
+        .map_err(|e| e.to_string())?
+        .len()
+        > budget
+    {
+        let items = result["errors"].as_array_mut().unwrap();
+        if items.len() <= 1 {
+            break;
+        }
+        items.pop();
+        result["truncated"] = json!(true);
+    }
+    Err(result.to_string())
+}

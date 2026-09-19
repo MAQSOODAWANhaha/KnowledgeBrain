@@ -401,7 +401,7 @@ async fn stage_draft_docx(
     platform::stage_object_upload(
         pool,
         staging,
-        &object_ref,
+        object_ref,
         sha,
         DOCX_MEDIA,
         i64::try_from(bytes.len()).map_err(invalid)?,

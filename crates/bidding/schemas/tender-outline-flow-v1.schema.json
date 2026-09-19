@@ -3,20 +3,10 @@
     "type": "function",
     "function": {
       "name": "submit_outline_scan",
-      "description": "Commit inspected delivered text, grid and collection metadata ranges. Entries are upserts; omitted saved issues remain open. Use returned IDs for updates. In outline phase, add or revise conclusions with previously inspected, confirmed evidence and empty scan-range maps. Classify independent materials separately; constraints do not become standalone chapters. Use read_outline(kind=blockers) for actionable repair IDs.",
+      "description": "Commit inspected delivered text, grid and collection metadata ranges. Entries are upserts; omitted saved issues remain open. Use returned IDs for updates. In outline phase, add or revise conclusions with previously inspected, confirmed evidence and empty scan-range maps. Classify independent materials separately; constraints do not become standalone chapters. Use read_outline(kind=blockers) for actionable repair IDs. On failure, fix all returned errors together using repair {call_id,arguments_sha256,changes:[{path,value}]}; do not resend the full batch. Repair and full submission are mutually exclusive. All entry types accept empty or tmp- IDs to allocate, and existing stable IDs to update; id_map is grouped by category.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "text",
-          "forms",
-          "empty_sources",
-          "requirements",
-          "references",
-          "issues",
-          "review_fragments",
-          "metadata"
-        ],
         "properties": {
           "text": {
             "type": "object",
@@ -73,7 +63,7 @@
               "properties": {
                 "id": {
                   "type": "string",
-                  "description": "Existing stable ID to update; empty or tmp- alias to allocate. Use tmp- aliases to reference new requirements within this batch."
+                  "description": "Empty or unique tmp- alias for new entries; stable IDs must already exist. Aliases are local to their category and batch."
                 },
                 "description": {
                   "type": "string"
@@ -87,7 +77,8 @@
                   ]
                 },
                 "condition": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Required nonempty source condition when applicability is conditional or not_applicable. non_document means no document output, not automatically not_applicable."
                 },
                 "grounds": {
                   "type": "array",
@@ -234,7 +225,8 @@
                   "type": "string"
                 },
                 "format_required": {
-                  "type": "boolean"
+                  "type": "boolean",
+                  "description": "True only when this submission or content constraint requires a prescribed material form. Structure and non-document entries must use false; mentioning formatting is not a material form obligation."
                 }
               }
             }
@@ -256,7 +248,8 @@
               ],
               "properties": {
                 "id": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Empty or unique tmp- alias for new entries; stable IDs must already exist. Aliases are local to their category and batch."
                 },
                 "grounds": {
                   "type": "array",
@@ -429,7 +422,8 @@
               ],
               "properties": {
                 "id": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Empty or unique tmp- alias for new entries; stable IDs must already exist. Aliases are local to their category and batch."
                 },
                 "code": {
                   "type": "string"
@@ -600,7 +594,8 @@
               ],
               "properties": {
                 "id": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Empty or unique tmp- alias for new entries; stable IDs must already exist. Aliases are local to their category and batch."
                 },
                 "kind": {
                   "type": "string"
@@ -698,8 +693,70 @@
                 "type": "string"
               }
             }
+          },
+          "repair": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "call_id",
+              "arguments_sha256",
+              "changes"
+            ],
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "arguments_sha256": {
+                "type": "string"
+              },
+              "changes": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "path",
+                    "value"
+                  ],
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "description": "JSON pointer within the failed scan arguments; replace only the fields needing correction."
+                    },
+                    "value": {}
+                  }
+                }
+              }
+            }
           }
-        }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "text",
+              "forms",
+              "empty_sources",
+              "requirements",
+              "references",
+              "issues",
+              "review_fragments",
+              "metadata"
+            ],
+            "not": {
+              "required": [
+                "repair"
+              ]
+            }
+          },
+          {
+            "required": [
+              "repair"
+            ],
+            "maxProperties": 1
+          }
+        ]
       }
     }
   },

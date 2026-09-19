@@ -108,6 +108,8 @@ common_runtime=(
   KNOWLEDGEBRAIN_CHAT_BASE_URL="http://127.0.0.1:$gateway_port"
   KNOWLEDGEBRAIN_CHAT_API_KEY=deterministic-test-key
   KNOWLEDGEBRAIN_CHAT_MODEL=scripted-content
+  KB_AUTHORING_MAX_OUTPUT_TOKENS=8192
+  KB_AUTHORING_TIMEOUT_MS=180000
   JWT_SECRET=content-e2e-secret
 )
 env "${common_release[@]}" "${common_runtime[@]}" KB_COMPONENT_KIND=api \

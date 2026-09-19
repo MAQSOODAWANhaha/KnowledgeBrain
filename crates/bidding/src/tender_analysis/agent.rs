@@ -453,6 +453,9 @@ impl Checkpoint {
         };
         json!({"phase":self.role,"draft_stage":self.draft_stage,"outline_phase":self.analysis.outline.phase,
             "outline_chapters":self.analysis.draft_plan.len(),
+            "outline_scan_cursor":self.outline_run.chunk_cursor,
+            "outline_scan_chunks":super::draft::outline_chunks(input).len(),
+            "outline_scan_repair":super::outline_flow::scan_repair_pending(self),
             "outline_requirements":self.analysis.outline.requirements.len(),
             "outline_open_issues":self.analysis.outline.issues.values().filter(|issue| issue.status == crate::tender_analysis::outline_flow::IssueStatus::Open).count(),
             "turn":self.turn,"tool_calls":self.tool_calls,
@@ -1153,7 +1156,19 @@ pub(super) async fn execute_turn<J: Journal>(
                 };
                 json!({"ok":true,"result":value})
             }
-            Err(message) => json!({"ok":false,"error":message}),
+            Err(message) => {
+                if call.name == "submit_outline_scan" {
+                    match serde_json::from_str::<Value>(&message) {
+                        Ok(mut details) if details["committed"] == false => {
+                            details["call_id"] = json!(call.id);
+                            json!({"ok":false,"error":"SCAN_BATCH_INVALID","details":details})
+                        }
+                        _ => json!({"ok":false,"error":message}),
+                    }
+                } else {
+                    json!({"ok":false,"error":message})
+                }
+            }
         };
         let mut succeeded = out["ok"] == true;
         let content = match suppressed.get(&call.id) {
@@ -2128,7 +2143,11 @@ pub(super) fn apply_in_batch(
     args: &Value,
     review_batch: Option<&source_review::BatchVersion>,
 ) -> Result<Value, String> {
-    let args = evidence_refs::expand(input, args)?;
+    let args = if name == "submit_outline_scan" {
+        args.clone()
+    } else {
+        evidence_refs::expand(input, args)?
+    };
     let result = apply_inner(input, config, state, name, &args, review_batch)?;
     context::synchronize_outcomes(state);
     Ok(result)

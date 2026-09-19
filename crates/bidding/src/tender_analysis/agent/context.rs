@@ -1281,6 +1281,9 @@ pub(in crate::tender_analysis) fn evict_completed_discovery_history(
     for pair in starts.windows(2) {
         let start = if pair[0] == starts[0] { 0 } else { pair[0] };
         let end = pair[1];
+        if super::super::outline_flow::protects_scan_repair(state, &state.transcript[start..end]) {
+            continue;
+        }
         let evidence = visible_work_evidence(state, &state.transcript[start..end]);
         let complete = evidence.iter().all(|(key, ranges)| {
             let Some((kind, id)) = key.split_once(':') else {
@@ -1312,7 +1315,7 @@ pub(in crate::tender_analysis) fn evict_completed_discovery_history(
     false
 }
 
-pub(super) fn evict_delivered_group(
+pub(in crate::tender_analysis) fn evict_delivered_group(
     state: &mut Checkpoint,
     history_budget: usize,
     allow_unique: bool,
@@ -1345,11 +1348,20 @@ pub(super) fn evict_delivered_group(
             )
         })
         .collect();
+    let protected: Vec<_> = groups
+        .iter()
+        .map(|&(start, end)| {
+            super::super::outline_flow::protects_scan_repair(state, &state.transcript[start..end])
+        })
+        .collect();
     let evidence: Vec<_> = groups
         .iter()
         .map(|&(start, end)| visible_work_evidence(state, &state.transcript[start..end]))
         .collect();
     let redundant = (0..groups.len() - 1).find(|&candidate| {
+        if protected[candidate] {
+            return false;
+        }
         let mut other = BTreeMap::<String, Vec<(usize, usize)>>::new();
         for (_, items) in evidence
             .iter()
@@ -1376,6 +1388,9 @@ pub(super) fn evict_delivered_group(
     // separately retains the actual pixels of currently required views.
     // Use a lower bound from the actual cached payloads, not token estimates.
     let releasable_images = (0..groups.len() - 1).find(|&candidate| {
+        if protected[candidate] {
+            return false;
+        }
         let (start, end) = groups[candidate];
         let image_bytes = state.transcript[start..end]
             .iter()
@@ -1408,6 +1423,9 @@ pub(super) fn evict_delivered_group(
     // Preserve the latest pending group and enforce the frozen ceiling even
     // when all remaining groups contain unique evidence.
     let unfocused = (0..groups.len() - 1).find(|&candidate| {
+        if protected[candidate] {
+            return false;
+        }
         let (start, end) = groups[candidate];
         focused_work_evidence(state, &state.transcript[start..end]).is_empty()
     });
@@ -1416,7 +1434,13 @@ pub(super) fn evict_delivered_group(
     {
         return true;
     }
-    let (start, end) = groups[redundant.or(unfocused).unwrap_or(0)];
+    let Some(candidate) = redundant
+        .or(unfocused)
+        .or_else(|| (0..groups.len() - 1).find(|&index| !protected[index]))
+    else {
+        return false;
+    };
+    let (start, end) = groups[candidate];
     state.transcript.drain(start..end);
     true
 }

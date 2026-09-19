@@ -101,6 +101,9 @@ export type RequirementSetCompileRequestView = {
     draft_stage?: string;
     outline_phase?: string;
     outline_chapters?: number;
+    outline_scan_cursor?: number;
+    outline_scan_chunks?: number;
+    outline_scan_repair?: boolean;
     outline_requirements?: number;
     outline_open_issues?: number;
   } | null;
