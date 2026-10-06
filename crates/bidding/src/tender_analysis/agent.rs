@@ -1620,6 +1620,27 @@ pub(super) async fn prepare_request(
             draft::DraftStage::None | draft::DraftStage::Outline
         )
         && state.analysis.outline.phase == super::outline_flow::Phase::Discover;
+    let reading_sessions = if discovering {
+        crate::outline::discover::claim_turn(
+            &mut state.outline_run.reading_packs,
+            input,
+            crate::outline::discover::reading_budget(config.limits.pack_max_chars),
+            crate::outline::discover::DEFAULT_PACK_CONCURRENCY,
+        )
+    } else {
+        Vec::new()
+    };
+    let unmapped = config.limits.draft_path
+        && !crate::outline::chapters::unmapped_attachment_forms(
+            input,
+            &state.analysis.draft_plan,
+            &state.analysis.records,
+        )
+        .is_empty();
+    let duty_instructions = config.limits.draft_path.then(|| {
+        crate::outline::agent::duty(state.draft_stage, state.analysis.outline.phase, unmapped)
+            .instructions()
+    });
     loop {
         let reviewer = state.role == Role::Reviewer;
         let review_packet = if reviewer {
@@ -1633,7 +1654,7 @@ pub(super) async fn prepare_request(
                 crate::tender_analysis::draft::DraftStage::Fill
                     | crate::tender_analysis::draft::DraftStage::Published
             );
-        let system = if config.limits.draft_path {
+        let base = if config.limits.draft_path {
             if draft_fill {
                 DRAFT_FILL
             } else {
@@ -1644,12 +1665,23 @@ pub(super) async fn prepare_request(
         } else {
             MAIN
         };
+        let system;
+        let system = if let Some(instructions) = duty_instructions {
+            system = format!("{instructions}\n\n{base}");
+            system.as_str()
+        } else {
+            base
+        };
+        let mut brief = json!({"project_id":input.project_id,"document_set_id":input.document_set_id,
+            "source_count":input.source_units.len(),"form_count":input.structured_forms.len(),
+            "document_count":input.documents.len(),"relation_count":input.document_relations.len(),"decision_count":input.decisions.len(),
+        });
+        if !reading_sessions.is_empty() {
+            brief["reading_packs"] = json!(reading_sessions);
+        }
         let mut messages = vec![
             json!({"role":"system","content":system}),
-            json!({"role":"user","content":json!({"project_id":input.project_id,"document_set_id":input.document_set_id,
-                "source_count":input.source_units.len(),"form_count":input.structured_forms.len(),
-                "document_count":input.documents.len(),"relation_count":input.document_relations.len(),"decision_count":input.decisions.len(),
-            }).to_string()}),
+            json!({"role":"user","content":brief.to_string()}),
         ];
         let latest = state
             .transcript
@@ -2284,6 +2316,8 @@ fn apply_inner(
                     | "omit_outline_item"
                     | "put_chapter_template"
                     | "skip_chapter_content"
+                    | "submit_pack_scan"
+                    | "repair_pack_scan"
             ))
         && !matches!(
             name,
@@ -2314,6 +2348,15 @@ fn apply_inner(
             crate::outline::agent::duty(state.draft_stage, state.analysis.outline.phase, unmapped);
         if let Some(reason) = crate::outline::agent::deny(duty, name, unmapped) {
             return Err(reason.into());
+        }
+        if matches!(name, "submit_pack_scan" | "repair_pack_scan") {
+            return crate::outline::discover::apply_pack_tool(
+                &mut state.outline_run.reading_packs,
+                input,
+                crate::outline::discover::reading_budget(config.limits.pack_max_chars),
+                name,
+                args,
+            );
         }
         if matches!(
             name,

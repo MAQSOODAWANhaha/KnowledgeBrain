@@ -27,6 +27,27 @@ impl Duty {
             Self::Template => "只写规定模板内容，不改章节，不填写我方事实",
         }
     }
+
+    /// Turn instruction placed in front of the shared outline contract.
+    pub fn instructions(self) -> &'static str {
+        match self {
+            Self::Discover => {
+                "本轮只做发现。只阅读已领取的 reading pack，用 submit_pack_scan 提交该包范围内的要求。校验失败时用 repair_pack_scan 按反馈改正后重交。不要写章节，不要写模板，不要匹配知识库。"
+            }
+            Self::Organize => {
+                "本轮只做组章。用已保存的要求整理章节树。不要重新扫描招标文件，不要写模板正文，不要匹配知识库。"
+            }
+            Self::MapAttachments => {
+                "本轮只做附件表映射。每个附件表必须落到唯一章节后才能结束大纲。不要写模板正文，不要匹配知识库。"
+            }
+            Self::Check => {
+                "本轮只做核对。只阅读当前核对包并提交核对结论。不要重新扫描，不要改章节，不要写模板。"
+            }
+            Self::Template => {
+                "本轮只写规定模板。只填写招标文件已经给出的文字，投标人事实留空。不要改章节，不要重新扫描。"
+            }
+        }
+    }
 }
 
 pub fn duty(stage: DraftStage, phase: Phase, unmapped_attachments: bool) -> Duty {
@@ -198,6 +219,11 @@ mod tests {
             mapping.responsibility(),
             "把附件表映射到唯一章节后再结束大纲"
         );
+        assert!(mapping.instructions().contains("附件表"));
+        assert!(Duty::Discover.instructions().contains("submit_pack_scan"));
+        assert!(Duty::Discover.instructions().contains("repair_pack_scan"));
+        assert!(!Duty::Organize.instructions().contains("submit_pack_scan"));
+        assert!(Duty::Template.instructions().contains("留空"));
         assert!(deny(mapping, "finish_outline", true).is_some());
         assert!(deny(mapping, "read_form", true).is_none());
         assert!(deny(mapping, "put_outline_items", true).is_none());

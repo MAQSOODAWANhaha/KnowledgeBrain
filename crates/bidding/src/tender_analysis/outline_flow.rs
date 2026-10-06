@@ -267,6 +267,9 @@ pub struct OutlineRun {
     pub active_check_packet: Option<String>,
     pub repair_signatures: BTreeMap<String, Vec<String>>,
     pub no_progress_rounds: usize,
+    /// Reading packs for the discover duty. Absent until the first discover turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reading_packs: Option<crate::outline::discover::DiscoverWork>,
 }
 
 pub fn tree_valid(plan: &[DraftPlanItem]) -> Result<(), String> {

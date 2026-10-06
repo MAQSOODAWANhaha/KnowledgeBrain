@@ -3775,6 +3775,103 @@ fn check_phase_rejects_source_index_through_agent_gate() {
 }
 
 #[test]
+fn discover_duty_submits_a_reading_pack_and_organize_cannot() {
+    let mut input = draft_input();
+    input.source_units = vec![
+        Source {
+            source_unit_revision_id: "a".into(),
+            document_id: "document".into(),
+            text: "A".into(),
+            locator: json!({"heading_path": "第一章 > 投标函", "section_ordinal": 0}),
+            ordinal: 0,
+        },
+        Source {
+            source_unit_revision_id: "b".into(),
+            document_id: "document".into(),
+            text: "B".into(),
+            locator: json!({"heading_path": "第二章 > 技术方案", "section_ordinal": 1}),
+            ordinal: 1,
+        },
+    ];
+    let mut limits = config().limits;
+    limits.draft_path = true;
+    let config =
+        Config::with_provider_for(config().provider.clone(), limits, Some(&input)).unwrap();
+    let mut state = journal_state(&input, &config);
+    state.outline_run.reading_packs = Some(crate::outline::discover::DiscoverWork::plan(&input, 1));
+    assert_eq!(
+        state
+            .outline_run
+            .reading_packs
+            .as_mut()
+            .unwrap()
+            .claim(4)
+            .len(),
+        2
+    );
+    let bad = agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "submit_pack_scan",
+        &json!({
+            "pack_id": "pack-1",
+            "call_id": "bad",
+            "requirements": [{"description": "错", "source_id": "a", "start": 0, "end": 1}]
+        }),
+    )
+    .unwrap();
+    assert_eq!(bad["ok"], false);
+    assert_eq!(bad["feedback"]["errors"][0]["code"], "outside_pack");
+    let good = agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "submit_pack_scan",
+        &json!({
+            "pack_id": "pack-0",
+            "call_id": "ok",
+            "requirements": [{"description": "投标函", "source_id": "a", "start": 0, "end": 1}]
+        }),
+    )
+    .unwrap();
+    assert_eq!(good["ok"], true);
+    let fixed = agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "repair_pack_scan",
+        &json!({
+            "pack_id": "pack-1",
+            "call_id": "fix",
+            "requirements": [{"description": "技术", "source_id": "b", "start": 0, "end": 1}]
+        }),
+    )
+    .unwrap();
+    assert_eq!(fixed["ok"], true);
+    let packs = state.outline_run.reading_packs.as_ref().unwrap();
+    assert_eq!(
+        packs.status("pack-0"),
+        Some(crate::outline::discover::PackStatus::Committed)
+    );
+    assert_eq!(packs.requirement_count(), 2);
+    state.analysis.outline.phase = crate::tender_analysis::outline_flow::Phase::Outline;
+    state.outline_run.phase = crate::tender_analysis::outline_flow::Phase::Outline;
+    let err = agent::apply(
+        &input,
+        &config,
+        &mut state,
+        "submit_pack_scan",
+        &json!({"pack_id": "pack-0", "call_id": "again", "requirements": []}),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("discover and organize cannot write template content"),
+        "{err}"
+    );
+}
+
+#[test]
 fn outline_flow_rejects_unseen_scan_ranges() {
     let input = draft_input();
     let config = config();

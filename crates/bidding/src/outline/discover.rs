@@ -252,6 +252,88 @@ impl DiscoverWork {
     }
 }
 
+pub fn reading_budget(pack_max_chars: usize) -> usize {
+    if pack_max_chars == 0 {
+        8_000
+    } else {
+        pack_max_chars
+    }
+}
+
+/// Plan once, then mark up to `limit` pending packs running and return their sessions.
+pub fn claim_turn(
+    slot: &mut Option<DiscoverWork>,
+    input: &FrozenInput,
+    budget: usize,
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    let work = slot.get_or_insert_with(|| DiscoverWork::plan(input, budget));
+    let ids: Vec<String> = work.claim(limit).into_iter().map(|pack| pack.id).collect();
+    ids.iter()
+        .map(|id| work.session(id).expect("claimed pack has a session"))
+        .collect()
+}
+
+pub fn apply_pack_tool(
+    slot: &mut Option<DiscoverWork>,
+    input: &FrozenInput,
+    budget: usize,
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let pack_id = args["pack_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or("pack_id is required")?;
+    let work = slot.get_or_insert_with(|| DiscoverWork::plan(input, budget));
+    if name == "repair_pack_scan" && work.status(pack_id) != Some(PackStatus::Failed) {
+        return Err("repair_pack_scan requires a failed reading pack".into());
+    }
+    let submit = parse_submit(args)?;
+    match work.submit(pack_id, submit) {
+        Ok(()) => Ok(serde_json::json!({
+            "ok": true,
+            "pack_id": pack_id,
+            "status": "committed",
+        })),
+        Err(feedback) => Ok(serde_json::json!({"ok": false, "feedback": feedback})),
+    }
+}
+
+fn parse_submit(args: &serde_json::Value) -> Result<PackSubmit, String> {
+    let call_id = args["call_id"].as_str().unwrap_or("").trim();
+    if call_id.is_empty() {
+        return Err("call_id is required".into());
+    }
+    let rows = args["requirements"]
+        .as_array()
+        .ok_or("requirements must be an array")?;
+    let mut requirements = Vec::new();
+    for row in rows {
+        let description = row["description"].as_str().unwrap_or("").trim();
+        let source_id = row["source_id"].as_str().unwrap_or("").trim();
+        if description.is_empty() || source_id.is_empty() {
+            return Err("requirement description and source_id are required".into());
+        }
+        let start = row["start"]
+            .as_u64()
+            .ok_or("requirement start must be a byte offset")? as usize;
+        let end = row["end"]
+            .as_u64()
+            .ok_or("requirement end must be a byte offset")? as usize;
+        requirements.push(PackRequirement {
+            description: description.to_string(),
+            source_id: source_id.to_string(),
+            start,
+            end,
+        });
+    }
+    Ok(PackSubmit {
+        call_id: call_id.to_string(),
+        requirements,
+    })
+}
+
 pub fn plan_packs(input: &FrozenInput, soft_max_bytes: usize) -> Vec<ParsePack> {
     let budget = soft_max_bytes.max(1);
     let mut pieces = Vec::new();
@@ -835,5 +917,74 @@ mod tests {
         let session = work.session("pack-1").unwrap();
         assert!(session.get("feedback").is_some());
         assert!(!session.to_string().contains("投标函"));
+    }
+
+    #[test]
+    fn claim_turn_then_repair_keeps_a_committed_pack() {
+        let frozen = input(
+            vec![
+                source("a", 0, "A", "第一章 > 投标函"),
+                source("b", 1, "B", "第二章 > 技术方案"),
+            ],
+            vec![],
+        );
+        let mut slot = None;
+        let sessions = claim_turn(&mut slot, &frozen, 1, DEFAULT_PACK_CONCURRENCY);
+        assert_eq!(sessions.len(), 2);
+        let bad = apply_pack_tool(
+            &mut slot,
+            &frozen,
+            1,
+            "submit_pack_scan",
+            &json!({
+                "pack_id": "pack-1",
+                "call_id": "bad",
+                "requirements": [{"description": "错", "source_id": "a", "start": 0, "end": 1}]
+            }),
+        )
+        .unwrap();
+        assert_eq!(bad["ok"], false);
+        assert_eq!(bad["feedback"]["errors"][0]["code"], "outside_pack");
+        let err = apply_pack_tool(
+            &mut slot,
+            &frozen,
+            1,
+            "repair_pack_scan",
+            &json!({
+                "pack_id": "pack-0",
+                "call_id": "nope",
+                "requirements": []
+            }),
+        )
+        .unwrap_err();
+        assert!(err.contains("failed reading pack"));
+        apply_pack_tool(
+            &mut slot,
+            &frozen,
+            1,
+            "submit_pack_scan",
+            &json!({
+                "pack_id": "pack-0",
+                "call_id": "ok",
+                "requirements": [{"description": "投标函", "source_id": "a", "start": 0, "end": 1}]
+            }),
+        )
+        .unwrap();
+        apply_pack_tool(
+            &mut slot,
+            &frozen,
+            1,
+            "repair_pack_scan",
+            &json!({
+                "pack_id": "pack-1",
+                "call_id": "fix",
+                "requirements": [{"description": "技术", "source_id": "b", "start": 0, "end": 1}]
+            }),
+        )
+        .unwrap();
+        let work = slot.unwrap();
+        assert_eq!(work.status("pack-0"), Some(PackStatus::Committed));
+        assert_eq!(work.status("pack-1"), Some(PackStatus::Committed));
+        assert_eq!(work.requirement_count(), 2);
     }
 }
