@@ -273,7 +273,7 @@ BEGIN
     'phase1-disposition-partial',request_bytes,kb_bid_v2_sha256_bytes(request_bytes));
   compile_value:=kb_bid_v2_compile_requirement_set(
     (published->>'request_artifact_id')::uuid,(published->>'request_revision')::bigint,
-    (published->>'frozen_input_sha256')::kb_sha256,'system:requirement-set-compile-v2');
+    (published->>'frozen_input_sha256')::kb_sha256,'system:requirement-set-compile-v4');
   IF (compile_value->>'requirement_count')::integer<>1 THEN
     RAISE EXCEPTION 'partial DocumentSet compile did not use only ready input';
   END IF;
@@ -315,7 +315,7 @@ BEGIN
     'phase1-disposition-ready',request_bytes,kb_bid_v2_sha256_bytes(request_bytes));
   compile_value:=kb_bid_v2_compile_requirement_set(
     (published->>'request_artifact_id')::uuid,(published->>'request_revision')::bigint,
-    (published->>'frozen_input_sha256')::kb_sha256,'system:requirement-set-compile-v2');
+    (published->>'frozen_input_sha256')::kb_sha256,'system:requirement-set-compile-v4');
   IF (compile_value->>'requirement_count')::integer<>2 THEN
     RAISE EXCEPTION 'requirement compile count mismatch';
   END IF;

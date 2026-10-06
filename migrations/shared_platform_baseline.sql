@@ -14,19 +14,10 @@ SET search_path = pg_catalog
 AS $$
     SELECT value ~ '^(user|api_key):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
         OR value IN (
-            'system:bid-convert-worker',
-            'system:bid-attachment-preparation',
-            'system:bid-extraction-worker',
             'system:content-generate-v2',
-            'system:clause-lifecycle',
-            'system:kind-router-promotion',
-            'system:maintenance',
             'system:knowledge-document-delete',
             'system:knowledge-document-ingest',
-            'system:matching-invalidation',
-            'system:matching-publication',
-            'system:requirement-set-compile-v2',
-            'system:requirement-set-compile-v3',
+            'system:maintenance',
             'system:requirement-set-compile-v4',
             'system:retention-consumer',
             'system:submission-export-v2',

@@ -4987,7 +4987,7 @@ DECLARE
   projection_id uuid:=gen_random_uuid(); projection_revision bigint; projection_payload bytea; projection_sha kb_sha256;
   ordinal_value integer:=0; publication_status text; result_value jsonb; result_sha kb_sha256; prior bid_async_stage_receipts%ROWTYPE;
 BEGIN
-  IF p_actor<>'system:requirement-set-compile-v2' THEN
+  IF p_actor<>'system:requirement-set-compile-v4' THEN
     RAISE EXCEPTION 'SYSTEM_ACTOR_REQUIRED' USING ERRCODE='42501';
   END IF;
   SELECT * INTO STRICT request_value FROM bid_async_request_snapshot_artifacts

@@ -537,6 +537,48 @@ mod tests {
     }
 
     #[test]
+    fn system_actor_allowlist_keeps_only_live_writers() {
+        let allowed = [
+            "system:content-generate-v2",
+            "system:knowledge-document-delete",
+            "system:knowledge-document-ingest",
+            "system:maintenance",
+            "system:requirement-set-compile-v4",
+            "system:retention-consumer",
+            "system:submission-export-v2",
+            "system:tender-document-process-v2",
+        ];
+        let retired = [
+            "system:bid-convert-worker",
+            "system:bid-attachment-preparation",
+            "system:bid-extraction-worker",
+            "system:clause-lifecycle",
+            "system:kind-router-promotion",
+            "system:matching-invalidation",
+            "system:matching-publication",
+            "system:requirement-set-compile-v2",
+            "system:requirement-set-compile-v3",
+        ];
+        for actor in allowed {
+            assert!(
+                SHARED_PLATFORM_BASELINE.contains(&format!("'{actor}'")),
+                "missing live actor {actor}"
+            );
+        }
+        for actor in retired {
+            assert!(
+                !SHARED_PLATFORM_BASELINE.contains(actor),
+                "retired actor still allowed: {actor}"
+            );
+            assert!(
+                !BIDDING_BASELINE.contains(actor),
+                "retired actor still referenced by bidding baseline: {actor}"
+            );
+        }
+        assert!(BIDDING_BASELINE.contains("IF p_actor<>'system:requirement-set-compile-v4'"));
+    }
+
+    #[test]
     fn unverified_and_verified_connection_entrypoints_are_separate() {
         let source = include_str!("db.rs");
         assert!(source.contains("pub async fn connect_unverified()"));
