@@ -62,6 +62,56 @@ pub fn assert_complete(
     ))
 }
 
+/// Parser order of units that must be published. This is the publication order.
+pub fn publication_order(units: &[StructuredSourceUnit]) -> Vec<String> {
+    let sections = content_sections(units);
+    units
+        .iter()
+        .filter(|unit| !is_empty_owning_section(unit, &sections))
+        .map(|unit| unit.key.clone())
+        .collect()
+}
+
+/// Published keys must equal the parser order. A missing unit fails the file.
+/// A reorder also fails: OCR may finish out of order, but publication may not.
+pub fn assert_publication_order(expected: &[String], published: &[String]) -> Result<(), String> {
+    if expected == published {
+        return Ok(());
+    }
+    let expected_set: BTreeSet<_> = expected.iter().cloned().collect();
+    let published_set: BTreeSet<_> = published.iter().cloned().collect();
+    if expected_set != published_set {
+        return assert_complete(&expected_set, &published_set);
+    }
+    Err(format!(
+        "tender parse order differs from the parser: expected {expected:?}, published {published:?}"
+    ))
+}
+
+/// Put finished image results back into parser order.
+pub fn place_in_publication_order<T>(
+    order: &[String],
+    finished: Vec<(String, T)>,
+) -> Result<Vec<T>, String> {
+    let mut by_key = std::collections::HashMap::new();
+    for (key, value) in finished {
+        if by_key.insert(key.clone(), value).is_some() {
+            return Err(format!("tender parse published {key} twice"));
+        }
+    }
+    let mut published = Vec::with_capacity(order.len());
+    for key in order {
+        let Some(value) = by_key.remove(key) else {
+            return Err(format!("tender parse is incomplete: missing {key}"));
+        };
+        published.push(value);
+    }
+    if let Some((key, _)) = by_key.into_iter().next() {
+        return Err(format!("tender parse published extra unit {key}"));
+    }
+    Ok(published)
+}
+
 fn is_empty_owning_section(unit: &StructuredSourceUnit, content_sections: &HashSet<u32>) -> bool {
     unit.kind == StructuredSourceUnitKind::Section
         && unit.text.is_empty()
@@ -149,5 +199,69 @@ mod tests {
         })
         .await;
         assert_eq!(max.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn two_image_ocr_calls_overlap() {
+        let current = AtomicUsize::new(0);
+        let max = AtomicUsize::new(0);
+        map_concurrent(vec!["image-a", "image-b"], 4, |_| async {
+            let now = current.fetch_add(1, Ordering::SeqCst) + 1;
+            max.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            current.fetch_sub(1, Ordering::SeqCst);
+        })
+        .await;
+        assert_eq!(max.load(Ordering::SeqCst), 2);
+    }
+
+    fn document_unit(
+        key: &str,
+        kind: StructuredSourceUnitKind,
+        section: u32,
+        text: &str,
+    ) -> StructuredSourceUnit {
+        StructuredSourceUnit {
+            key: key.into(),
+            ordinal: 0,
+            kind,
+            text: text.into(),
+            locator: StructuredSourceLocator::Document {
+                section_ordinal: section,
+                table_ordinal: None,
+                row_ordinal: None,
+                form_ordinal: None,
+                heading_path: String::new(),
+            },
+            grid: None,
+        }
+    }
+
+    #[test]
+    fn missing_unit_fails_and_finished_images_return_to_parser_order() {
+        let mut table = document_unit("table", StructuredSourceUnitKind::TableRegion, 0, "");
+        if let StructuredSourceLocator::Document { table_ordinal, .. } = &mut table.locator {
+            *table_ordinal = Some(0);
+        }
+        let units = vec![
+            document_unit("section", StructuredSourceUnitKind::Section, 0, ""),
+            document_unit("body", StructuredSourceUnitKind::Section, 1, "投标函"),
+            table,
+        ];
+        let order = publication_order(&units);
+        assert_eq!(order, vec!["body".to_string(), "table".to_string()]);
+
+        let err = assert_publication_order(&order, &["body".into()]).unwrap_err();
+        assert!(err.contains("table"), "{err}");
+
+        let err = assert_publication_order(&order, &["table".into(), "body".into()]).unwrap_err();
+        assert!(err.contains("order"), "{err}");
+
+        let placed = place_in_publication_order(
+            &order,
+            vec![("table".into(), "表格"), ("body".into(), "正文")],
+        )
+        .unwrap();
+        assert_eq!(placed, vec!["正文", "表格"]);
     }
 }

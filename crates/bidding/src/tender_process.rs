@@ -9,10 +9,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures::stream::StreamExt;
 use docparser::{
     ReadResult, StructuredSourceLocator, StructuredSourceUnit, StructuredSourceUnitKind, TableGrid,
 };
+use futures::stream::StreamExt;
 use platform::{BidAuthoringJobPayloadV2, BidAuthoringRequestIdentityV2};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -755,13 +755,13 @@ where
             });
         }
 
-        let published = source_units
+        let published: Vec<_> = source_units
             .iter()
             .map(|unit| unit.source_span_v2.parser_unit_key.clone())
             .collect();
-        let expected = crate::outline::parse::expected_unit_keys(parser_units, &content_sections);
-        crate::outline::parse::assert_complete(&expected, &published)
-            .map_err(|error| TenderDocumentProcessError::StructuredSource(error))?;
+        let expected = crate::outline::parse::publication_order(parser_units);
+        crate::outline::parse::assert_publication_order(&expected, &published)
+            .map_err(TenderDocumentProcessError::StructuredSource)?;
 
         image_set_digests.sort();
         let image_asset_set_sha256 = sha256_hex(image_set_digests.join("").as_bytes());
@@ -821,12 +821,13 @@ where
                     staged: Vec::new(),
                 });
             };
-            let image = image_by_ref.get(original_ref.as_str()).ok_or_else(|| {
-                ImagePrepareFailure {
-                    error: TenderDocumentProcessError::MissingImage(original_ref.clone()),
-                    staged: Vec::new(),
-                }
-            })?;
+            let image =
+                image_by_ref
+                    .get(original_ref.as_str())
+                    .ok_or_else(|| ImagePrepareFailure {
+                        error: TenderDocumentProcessError::MissingImage(original_ref.clone()),
+                        staged: Vec::new(),
+                    })?;
             jobs.push(ImageJob {
                 key: unit.key.clone(),
                 ordinal: unit.ordinal,
