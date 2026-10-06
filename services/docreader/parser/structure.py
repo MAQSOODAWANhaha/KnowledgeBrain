@@ -35,17 +35,17 @@ def structural_heading(
         return None
     if raw[-1] in _HEADING_PUNCT:
         return None
-    if len(raw) <= 80 and (zh := _ZH_CHAPTER.match(raw)):
+    if zh := _ZH_CHAPTER.match(raw):
         level = 2 if zh.group(1) in {"节", "節"} else 1
         return level, raw
-    if len(raw) <= 80 and (en := _EN_CHAPTER.match(raw)):
+    if en := _EN_CHAPTER.match(raw):
         level = 2 if en.group(1).lower() in {"section", "abschnitt"} else 1
         return level, raw
-    if len(raw) <= 40 and _CN_ENUM.match(raw):
+    if _CN_ENUM.match(raw):
         return 2, raw
-    if len(raw) <= 40 and _CN_PAREN.match(raw):
+    if _CN_PAREN.match(raw):
         return 3, raw
-    if allow_numbered and len(raw) <= 40 and _NUMBERED_TITLE.match(raw):
+    if allow_numbered and _NUMBERED_TITLE.match(raw):
         token = raw.split()[0].rstrip(".")
         if not allow_deep_numbers and "." in token:
             return None
@@ -67,7 +67,7 @@ def outline_flags(texts: list[str]) -> tuple[bool, bool]:
             if not raw:
                 continue
             nonempty += 1
-            if len(raw) > 40 or raw[-1] in _HEADING_PUNCT or not _NUMBERED_TITLE.match(raw):
+            if raw[-1] in _HEADING_PUNCT or not _NUMBERED_TITLE.match(raw):
                 continue
             token = raw.split()[0].rstrip(".")
             if "." in token:

@@ -880,7 +880,6 @@ def _segments_to_markdown(lines: list) -> str:
         if (
             not DETECT_HEADINGS
             or body <= 0
-            or len(txt) > 80
             or len(txt) < MIN_HEADING_LINE_CHARS
         ):
             return 0

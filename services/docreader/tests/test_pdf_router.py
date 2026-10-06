@@ -154,6 +154,13 @@ class HeadingDetectionTest(unittest.TestCase):
         self.assertTrue(md.startswith("# Big Title"))
         self.assertIn("\nbody 0", md)
 
+    def test_promotes_a_long_large_line(self):
+        title = "Bid instructions " + "detail " * 16
+        self.assertGreater(len(title.strip()), 80)
+        lines = [_line(title.strip(), 24.0)] + [_line(f"body {i}", 10.0) for i in range(6)]
+        md = _segments_to_markdown(lines)
+        self.assertTrue(md.startswith("# " + title.strip()))
+
     def test_does_not_promote_when_sizes_uniform(self):
         lines = [_line(f"line {i}", 10.0) for i in range(6)]
         md = _segments_to_markdown(lines)
@@ -169,6 +176,12 @@ class HeadingDetectionTest(unittest.TestCase):
         self.assertIn("第一章 投标人须知前附表补充说明资料 > 一、投标函", titles)
         self.assertIn("第一章 投标人须知前附表补充说明资料 > 一、投标函 > （一）法定代表人", titles)
         self.assertTrue(promoted[1].startswith("## 一、投标函") or "\n## 一、投标函" in promoted[1] or promoted[1].startswith("# "))
+
+    def test_a_long_chapter_title_is_still_a_section(self):
+        title = "第一章 " + "投标人须知" * 20
+        self.assertGreater(len(title), 80)
+        _, fragments = _sectionize_pages([f"{title}\n本章说明资格条件。"])
+        self.assertEqual(fragments[0][0][1], title)
 
     def test_price_schedule_does_not_erase_real_chapters(self):
         rows = "\n".join(f"1.1 设备{i}" for i in range(8))
