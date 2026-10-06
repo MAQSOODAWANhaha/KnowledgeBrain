@@ -529,6 +529,7 @@ fn two_windows_fill_only_on_last() {
         preserved: vec![],
     });
     state.draft_active_id = Some("ch".into());
+    state.draft_stage = crate::tender_analysis::draft::DraftStage::Fill;
     mark_window_coverage(&input, &mut state.analysis.coverage, &windows[0]);
     mark_window_coverage(&input, &mut state.analysis.coverage, &windows[1]);
     let region = |id: &str, end: usize| {
@@ -3358,6 +3359,7 @@ async fn put_chapter_template_rejects_other_chapter() {
     .unwrap();
     let chapter_id = saved["id"].as_str().unwrap().to_string();
     state.draft_active_id = Some(chapter_id.clone());
+    state.draft_stage = crate::tender_analysis::draft::DraftStage::Fill;
     let err = agent::apply(
         &input,
         &config,
@@ -3420,6 +3422,7 @@ fn put_chapter_template_accepts_citation_ref_and_compact_ref() {
         json!({"source_id":"source","start":0,"end":end,"view_id":null,"grid_cell":null}),
     ] {
         let (config, mut state) = outlined_letter(&input);
+        state.draft_stage = crate::tender_analysis::draft::DraftStage::Fill;
         let chapter_id = state.draft_active_id.clone().unwrap();
         let saved = agent::apply(
             &input,
@@ -3438,6 +3441,7 @@ fn put_chapter_template_accepts_citation_ref_and_compact_ref() {
 fn draft_fill_ignores_official_execution_block() {
     let input = draft_input();
     let (config, mut state) = outlined_letter(&input);
+    state.draft_stage = crate::tender_analysis::draft::DraftStage::Fill;
     state.main_progress.watch.recovery = crate::agent_runtime::progress::Recovery::Blocked;
     let end = "投标函为固定格式。".len();
     let chapter_id = state.draft_active_id.clone().unwrap();

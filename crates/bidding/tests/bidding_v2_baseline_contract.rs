@@ -1066,7 +1066,9 @@ fn source_publication_keeps_sparse_parser_ordinals_after_empty_owner_projection(
     assert!(SQL.contains("previous_ordinal integer:=-1"));
     assert!(SQL.contains("(unit_value->>'ordinal')::integer<=previous_ordinal"));
     assert!(SQL.contains("previous_ordinal:=(unit_value->>'ordinal')::integer"));
-    assert!(SQL.contains("source_json->'structured_source_units'->((unit_value->>'ordinal')::integer)->>'key'"));
+    assert!(SQL.contains(
+        "source_json->'structured_source_units'->((unit_value->>'ordinal')::integer)->>'key'"
+    ));
     assert!(SQL.contains("(source_locator->>'parser_ordinal')::integer=ordinal"));
     assert!(!SQL.contains("(unit_value->>'ordinal')::integer<>expected_ordinal"));
 }

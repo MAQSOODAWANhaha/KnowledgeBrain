@@ -6,6 +6,7 @@
 //! in the separate `RequirementSetCompile` boundary.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use docparser::{
@@ -398,6 +399,23 @@ impl TenderProcessTransport for InactiveTenderProcessTransport {
     }
 }
 
+struct PreparedImage {
+    key: String,
+    text: String,
+    content_sha256: String,
+    artifact: TenderImageArtifactRevision,
+}
+
+struct PreparedImages {
+    by_key: HashMap<String, PreparedImage>,
+    staged: Vec<FrozenObjectIdentity>,
+}
+
+struct ImagePrepareFailure {
+    error: TenderDocumentProcessError,
+    staged: Vec<FrozenObjectIdentity>,
+}
+
 struct TenderPublicationInput<'a> {
     document: &'a FrozenTenderDocument,
     request: &'a BidAuthoringRequestIdentityV2,
@@ -603,40 +621,26 @@ where
         // DOCX creates empty owning sections for leading tables/forms/images.
         // Keep them in the frozen parser snapshot, but do not expose structural
         // anchors as empty reading evidence. Children retain their original locators.
-        let content_sections: HashSet<u32> = parser_units
-            .iter()
-            .filter_map(|unit| match (&unit.kind, &unit.locator) {
-                (
-                    StructuredSourceUnitKind::TableRegion
-                    | StructuredSourceUnitKind::TableRow
-                    | StructuredSourceUnitKind::FormRegion,
-                    StructuredSourceLocator::Document {
-                        section_ordinal, ..
-                    },
-                ) => Some(*section_ordinal),
-                (
-                    StructuredSourceUnitKind::ImageRegion,
-                    StructuredSourceLocator::Image {
-                        compound_parent: Some(parent),
-                        ..
-                    },
-                ) => {
-                    use docparser::CompoundImageParent;
-                    match parent {
-                        CompoundImageParent::Paragraph {
-                            section_ordinal, ..
-                        }
-                        | CompoundImageParent::TableCell {
-                            section_ordinal, ..
-                        }
-                        | CompoundImageParent::Form {
-                            section_ordinal, ..
-                        } => Some(*section_ordinal),
-                    }
-                }
-                _ => None,
-            })
-            .collect();
+        let content_sections = crate::phase1::parse::content_sections(parser_units);
+        let prepared_images = match self
+            .prepare_images(
+                document,
+                converted_source_id,
+                parser_units,
+                image_by_ref,
+                image_source_type,
+                language,
+                cancel,
+            )
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                staged.extend(failure.staged);
+                return Err(failure.error);
+            }
+        };
+        staged.extend(prepared_images.staged);
         for parser_unit in parser_units {
             if parser_unit.kind == StructuredSourceUnitKind::Section
                 && parser_unit.text.is_empty()
@@ -646,109 +650,32 @@ where
             {
                 continue;
             }
-            let (unit_kind, text, image_artifact_id) =
-                if parser_unit.kind == StructuredSourceUnitKind::ImageRegion {
-                    let StructuredSourceLocator::Image {
-                        original_ref,
-                        media_type,
-                        ..
-                    } = &parser_unit.locator
-                    else {
-                        return Err(TenderDocumentProcessError::StructuredSource(format!(
-                            "image unit {} lacks image locator",
+            let (unit_kind, text, image_artifact_id) = if parser_unit.kind
+                == StructuredSourceUnitKind::ImageRegion
+            {
+                let prepared = prepared_images
+                    .by_key
+                    .get(&parser_unit.key)
+                    .ok_or_else(|| {
+                        TenderDocumentProcessError::StructuredSource(format!(
+                            "image unit {} was not parsed",
                             parser_unit.key
-                        )));
-                    };
-                    let image = image_by_ref.get(original_ref.as_str()).ok_or_else(|| {
-                        TenderDocumentProcessError::MissingImage(original_ref.clone())
+                        ))
                     })?;
-                    if image.data.is_empty() || image.data.len() > MAX_TENDER_IMAGE_BYTES {
-                        return Err(TenderDocumentProcessError::ImageIdentity(format!(
-                            "{} has invalid byte length",
-                            original_ref
-                        )));
-                    }
-                    if !image_media_types_match(&image.mime_type, media_type) {
-                        return Err(TenderDocumentProcessError::ImageIdentity(format!(
-                            "{} media type differs between unit and image bytes",
-                            original_ref
-                        )));
-                    }
-                    let image_id = stable_uuid(
-                        b"tender-image-artifact-v2",
-                        format!("{}:{}", converted_source_id, parser_unit.key).as_bytes(),
-                    );
-                    let original = self
-                        .repository
-                        .stage_object(image_id, "original", media_type, &image.data)
-                        .await?;
-                    staged.push(original.clone());
-                    let enrichment = self
-                        .vision
-                        .enrich(&image.data, media_type, image_source_type, language, cancel)
-                        .await?;
-                    let ocr_text = enrichment.ocr_text.trim().to_string();
-                    let ocr_bytes = if ocr_text.is_empty() {
-                        UNRESOLVED_EMPTY_OCR
-                    } else {
-                        ocr_text.as_bytes()
-                    };
-                    let ocr_object = self
-                        .repository
-                        .stage_object(image_id, "ocr-text", "text/plain", ocr_bytes)
-                        .await?;
-                    staged.push(ocr_object.clone());
-                    let image_payload = canonical_json(&json!({
-                        "schema_version": 1,
-                        "tender_image_artifact_revision_id": image_id,
-                        "project_id": document.project_id,
-                        "document_id": document.document_id,
-                        "converted_source_revision_id": converted_source_id,
-                        "ordinal": parser_unit.ordinal,
-                        "source_purpose": TENDER_SOURCE_PURPOSE,
-                        "original_ref": original_ref,
-                        "source_locator": parser_unit.locator,
-                        "original_object": {
-                            "object_ref": original.object_ref,
-                            "sha256": original.sha256,
-                            "media_type": original.media_type,
-                            "byte_length": original.byte_length,
-                        },
-                        "ocr_text_object": {
-                            "object_ref": ocr_object.object_ref,
-                            "sha256": ocr_object.sha256,
-                            "media_type": ocr_object.media_type,
-                            "byte_length": ocr_object.byte_length,
-                        },
-                        "model_contract": enrichment.model_contract,
-                        "operation_contract": enrichment.operation_contract,
-                    }))?;
-                    let image_payload_sha = sha256_hex(&image_payload);
-                    image_set_digests.push(image_payload_sha.clone());
-                    image_artifacts.push(TenderImageArtifactRevision {
-                        id: image_id,
-                        ordinal: parser_unit.ordinal,
-                        original_ref: original_ref.clone(),
-                        original,
-                        ocr_text: ocr_object,
-                        model_contract: enrichment.model_contract,
-                        operation_contract: enrichment.operation_contract,
-                        source_locator: parser_unit.locator.clone(),
-                        canonical_payload: image_payload,
-                        content_sha256: image_payload_sha,
-                    });
-                    (
-                        PublishedSourceUnitKind::ImageOcrRegion,
-                        ocr_text,
-                        Some(image_id),
-                    )
-                } else {
-                    (
-                        map_non_image_kind(&parser_unit.kind)?,
-                        parser_unit.text.clone(),
-                        None,
-                    )
-                };
+                image_set_digests.push(prepared.content_sha256.clone());
+                image_artifacts.push(prepared.artifact.clone());
+                (
+                    PublishedSourceUnitKind::ImageOcrRegion,
+                    prepared.text.clone(),
+                    Some(prepared.artifact.id),
+                )
+            } else {
+                (
+                    map_non_image_kind(&parser_unit.kind)?,
+                    parser_unit.text.clone(),
+                    None,
+                )
+            };
             if text.is_empty()
                 && !matches!(
                     &parser_unit.kind,
@@ -818,6 +745,14 @@ where
             });
         }
 
+        let published = source_units
+            .iter()
+            .map(|unit| unit.source_span_v2.parser_unit_key.clone())
+            .collect();
+        let expected = crate::phase1::parse::expected_unit_keys(parser_units, &content_sections);
+        crate::phase1::parse::assert_complete(&expected, &published)
+            .map_err(|error| TenderDocumentProcessError::StructuredSource(error))?;
+
         image_set_digests.sort();
         let image_asset_set_sha256 = sha256_hex(image_set_digests.join("").as_bytes());
         let source_unit_set_sha256 = sha256_hex(
@@ -844,6 +779,170 @@ where
             },
             image_artifacts,
             source_units,
+        })
+    }
+
+    async fn prepare_images(
+        &self,
+        document: &FrozenTenderDocument,
+        converted_source_id: Uuid,
+        parser_units: &[docparser::StructuredSourceUnit],
+        image_by_ref: &HashMap<&str, &docparser::ImageRef>,
+        image_source_type: &str,
+        language: &str,
+        cancel: &CancellationToken,
+    ) -> Result<PreparedImages, ImagePrepareFailure> {
+        let jobs: Vec<_> = parser_units
+            .iter()
+            .filter(|unit| unit.kind == StructuredSourceUnitKind::ImageRegion)
+            .collect();
+        let staged_gate = Arc::new(Mutex::new(Vec::new()));
+        let results = crate::phase1::parse::map_concurrent(
+            jobs,
+            crate::phase1::parse::image_concurrency(),
+            |unit| {
+                let staged_gate = Arc::clone(&staged_gate);
+                async move {
+                    self.prepare_one_image(
+                        document,
+                        converted_source_id,
+                        unit,
+                        image_by_ref,
+                        image_source_type,
+                        language,
+                        &staged_gate,
+                        cancel,
+                    )
+                    .await
+                }
+            },
+        )
+        .await;
+        let staged = std::mem::take(&mut *staged_gate.lock().expect("image staging lock"));
+        let mut by_key = HashMap::new();
+        for result in results {
+            match result {
+                Ok(image) => {
+                    by_key.insert(image.key.clone(), image);
+                }
+                Err(error) => {
+                    return Err(ImagePrepareFailure { error, staged });
+                }
+            }
+        }
+        Ok(PreparedImages { by_key, staged })
+    }
+
+    async fn prepare_one_image(
+        &self,
+        document: &FrozenTenderDocument,
+        converted_source_id: Uuid,
+        parser_unit: &docparser::StructuredSourceUnit,
+        image_by_ref: &HashMap<&str, &docparser::ImageRef>,
+        image_source_type: &str,
+        language: &str,
+        staged: &Mutex<Vec<FrozenObjectIdentity>>,
+        cancel: &CancellationToken,
+    ) -> Result<PreparedImage, TenderDocumentProcessError> {
+        let StructuredSourceLocator::Image {
+            original_ref,
+            media_type,
+            ..
+        } = &parser_unit.locator
+        else {
+            return Err(TenderDocumentProcessError::StructuredSource(format!(
+                "image unit {} lacks image locator",
+                parser_unit.key
+            )));
+        };
+        let image = image_by_ref
+            .get(original_ref.as_str())
+            .ok_or_else(|| TenderDocumentProcessError::MissingImage(original_ref.clone()))?;
+        if image.data.is_empty() || image.data.len() > MAX_TENDER_IMAGE_BYTES {
+            return Err(TenderDocumentProcessError::ImageIdentity(format!(
+                "{} has invalid byte length",
+                original_ref
+            )));
+        }
+        if !image_media_types_match(&image.mime_type, media_type) {
+            return Err(TenderDocumentProcessError::ImageIdentity(format!(
+                "{} media type differs between unit and image bytes",
+                original_ref
+            )));
+        }
+        let image_id = stable_uuid(
+            b"tender-image-artifact-v2",
+            format!("{}:{}", converted_source_id, parser_unit.key).as_bytes(),
+        );
+        let original = self
+            .repository
+            .stage_object(image_id, "original", media_type, &image.data)
+            .await?;
+        staged
+            .lock()
+            .expect("image staging lock")
+            .push(original.clone());
+        let enrichment = self
+            .vision
+            .enrich(&image.data, media_type, image_source_type, language, cancel)
+            .await?;
+        let ocr_text = enrichment.ocr_text.trim().to_string();
+        let ocr_bytes = if ocr_text.is_empty() {
+            UNRESOLVED_EMPTY_OCR
+        } else {
+            ocr_text.as_bytes()
+        };
+        let ocr_object = self
+            .repository
+            .stage_object(image_id, "ocr-text", "text/plain", ocr_bytes)
+            .await?;
+        staged
+            .lock()
+            .expect("image staging lock")
+            .push(ocr_object.clone());
+        let image_payload = canonical_json(&json!({
+            "schema_version": 1,
+            "tender_image_artifact_revision_id": image_id,
+            "project_id": document.project_id,
+            "document_id": document.document_id,
+            "converted_source_revision_id": converted_source_id,
+            "ordinal": parser_unit.ordinal,
+            "source_purpose": TENDER_SOURCE_PURPOSE,
+            "original_ref": original_ref,
+            "source_locator": parser_unit.locator,
+            "original_object": {
+                "object_ref": original.object_ref,
+                "sha256": original.sha256,
+                "media_type": original.media_type,
+                "byte_length": original.byte_length,
+            },
+            "ocr_text_object": {
+                "object_ref": ocr_object.object_ref,
+                "sha256": ocr_object.sha256,
+                "media_type": ocr_object.media_type,
+                "byte_length": ocr_object.byte_length,
+            },
+            "model_contract": enrichment.model_contract,
+            "operation_contract": enrichment.operation_contract,
+        }))?;
+        let content_sha256 = sha256_hex(&image_payload);
+        let artifact = TenderImageArtifactRevision {
+            id: image_id,
+            ordinal: parser_unit.ordinal,
+            original_ref: original_ref.clone(),
+            original,
+            ocr_text: ocr_object,
+            model_contract: enrichment.model_contract,
+            operation_contract: enrichment.operation_contract,
+            source_locator: parser_unit.locator.clone(),
+            canonical_payload: image_payload,
+            content_sha256: content_sha256.clone(),
+        };
+        Ok(PreparedImage {
+            key: parser_unit.key.clone(),
+            text: ocr_text,
+            content_sha256,
+            artifact,
         })
     }
 

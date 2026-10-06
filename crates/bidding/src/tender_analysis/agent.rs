@@ -2293,6 +2293,12 @@ fn apply_inner(
         return Err("local execution is blocked; select an independent source scope, or retry after its saved dependencies change".into());
     }
     if config.limits.draft_path {
+        let unmapped = !crate::phase1::outline::unmapped_attachment_forms(
+            input,
+            &state.analysis.draft_plan,
+            &state.analysis.records,
+        )
+        .is_empty();
         if state.analysis.outline.phase == crate::tender_analysis::outline_flow::Phase::Check
             && !matches!(
                 name,
@@ -2303,6 +2309,11 @@ fn apply_inner(
                 "check phase allows only read_outline and submit_outline_check; rescanning and free source reads are closed"
                     .into(),
             );
+        }
+        let duty =
+            crate::phase1::agent::duty(state.draft_stage, state.analysis.outline.phase, unmapped);
+        if let Some(reason) = crate::phase1::agent::deny(duty, name, unmapped) {
+            return Err(reason.into());
         }
         if matches!(
             name,
