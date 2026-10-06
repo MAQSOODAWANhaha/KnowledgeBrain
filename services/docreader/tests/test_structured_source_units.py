@@ -250,6 +250,81 @@ def test_docx_preserves_body_order_heading_owner_and_drawing_identity() -> None:
     assert sum(unit.text.count("Narrative") for unit in units) == 1
 
 
+def _with_chapter_numbering(raw: bytes) -> bytes:
+    import zipfile
+    from io import BytesIO as Buffer
+
+    numbering = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0">
+      <w:start w:val="1"/>
+      <w:numFmt w:val="chineseCounting"/>
+      <w:lvlText w:val="第%1章"/>
+      <w:suff w:val="space"/>
+    </w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+</w:numbering>
+"""
+    source = zipfile.ZipFile(BytesIO(raw))
+    output = Buffer()
+    with zipfile.ZipFile(output, "w") as target:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == "word/numbering.xml":
+                continue
+            if info.filename == "[Content_Types].xml":
+                text = data.decode("utf-8")
+                needle = "</Types>"
+                override = (
+                    '<Override PartName="/word/numbering.xml" '
+                    'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>'
+                )
+                text = text.replace(needle, override + needle)
+                data = text.encode("utf-8")
+            elif info.filename == "word/_rels/document.xml.rels":
+                text = data.decode("utf-8")
+                if "numbering" not in text:
+                    rel = (
+                        '<Relationship Id="rIdNumbering" '
+                        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" '
+                        'Target="numbering.xml"/>'
+                    )
+                    text = text.replace("</Relationships>", rel + "</Relationships>")
+                    data = text.encode("utf-8")
+            target.writestr(info, data)
+        target.writestr("word/numbering.xml", numbering)
+    return output.getvalue()
+
+
+def test_docx_numbering_label_opens_the_chapter() -> None:
+    from docx.oxml import OxmlElement
+
+    document = DocxDocument()
+    for title in ("招标公告", "评标办法"):
+        paragraph = document.add_paragraph(title)
+        num_pr = OxmlElement("w:numPr")
+        ilvl = OxmlElement("w:ilvl")
+        ilvl.set(qn("w:val"), "0")
+        num_id = OxmlElement("w:numId")
+        num_id.set(qn("w:val"), "1")
+        num_pr.append(ilvl)
+        num_pr.append(num_id)
+        paragraph._p.get_or_add_pPr().append(num_pr)
+        if title == "招标公告":
+            document.add_paragraph("项目概况。")
+    raw = BytesIO()
+    document.save(raw)
+    units = _docx_structured_units(_with_chapter_numbering(raw.getvalue()))
+    sections = [unit for unit in units if unit.kind is StructuredSourceUnitKind.SECTION]
+    assert [unit.locator.heading_path for unit in sections] == [
+        "第一章 招标公告",
+        "第二章 评标办法",
+    ]
+    assert "项目概况。" in sections[0].text
+
+
 def test_docx_chapter_text_and_outline_level_own_the_following_body() -> None:
     from docx.oxml import OxmlElement
 

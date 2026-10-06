@@ -40,13 +40,15 @@ from docreader.models.document import (
 from docreader.parser.base_parser import BaseParser
 from docreader.parser.concurrency import parser_worker_limit
 from docreader.parser.image_identity import image_pixel_identity
-from docreader.parser.structure import numbered_headings_flood, promote_structural_headings
+from docreader.parser.structure import outline_flags, promote_structural_headings
 from docreader.parser.pdf_tables import (
     PdfTableGrid,
     chars_outside_tables,
     extract_tables_from_page,
     grid_markdown,
+    reading_order_lines,
     reading_order_text,
+    text_with_table_markers,
     widths_mm,
 )
 
@@ -919,6 +921,11 @@ def _chars_to_layout_markdown(chars: list, scale: float, width: float) -> str:
 
 
 def _extract_page_tables(page, raw) -> tuple[list[PdfTableGrid], str]:
+    tables, lines = _extract_page_lines(page, raw)
+    return tables, "\n".join(text for _, text in lines)
+
+
+def _extract_page_lines(page, raw) -> tuple[list[PdfTableGrid], list[tuple[float, str]]]:
     import pypdfium2 as pdfium
 
     textpage = None
@@ -930,18 +937,94 @@ def _extract_page_tables(page, raw) -> tuple[list[PdfTableGrid], str]:
         except pdfium.PdfiumError:
             # Glyph pass is unavailable; caller keeps the page text layer.
             logger.debug("pdf table glyph pass failed", exc_info=True)
-            return [], ""
+            return [], []
     finally:
         _close_pdfium_resource(textpage)
     if not chars:
-        return [], ""
+        return [], []
     # TableExtractionLimitError is skipped per table inside extract_tables_from_page.
     tables = extract_tables_from_page(page, raw, chars)
     if not tables:
-        return [], ""
+        return [], []
     leftover = chars_outside_tables(chars, tables)
-    leftover_text = reading_order_text(leftover) if leftover else ""
-    return tables, leftover_text
+    return tables, reading_order_lines(leftover)
+
+
+def _layout_heading_titles(layout: str) -> dict[str, int]:
+    titles: dict[str, int] = {}
+    for line in (layout or "").splitlines():
+        found = _atx_heading(line)
+        if found:
+            titles[found[1]] = found[0]
+    return titles
+
+
+def _apply_layout_heading_marks(text: str, titles: dict[str, int]) -> str:
+    """Mark plain lines that layout already classified as headings."""
+    if not text or not titles:
+        return text
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("\x00TABLE:"):
+            lines.append(line)
+            continue
+        level = titles.get(stripped)
+        if level:
+            lines.append(f"{'#' * level} {stripped}")
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+_TABLE_MARK = re.compile(r"\x00TABLE:\d+:(\d+)")
+
+
+def _pieces_with_tables(text: str) -> list[tuple[str, Optional[int]]]:
+    parts = _TABLE_MARK.split(text)
+    pieces: list[tuple[str, Optional[int]]] = []
+    for index, part in enumerate(parts):
+        if index % 2 == 1:
+            pieces.append(("", int(part)))
+        else:
+            cleaned = part.strip("\n")
+            if cleaned.strip():
+                pieces.append((cleaned, None))
+    return pieces
+
+
+def _postprocess_keeping_markers(text: str) -> str:
+    if "\x00TABLE:" not in text:
+        return _postprocess_pdf_text(text)
+    kept = []
+    for line in text.splitlines():
+        if line.startswith("\x00TABLE:"):
+            kept.append(line)
+            continue
+        cleaned = _postprocess_pdf_text(line).strip()
+        if cleaned:
+            kept.append(cleaned)
+    return "\n".join(kept)
+
+
+def _markdown_with_tables(text: str, grids: list) -> str:
+    if not text.strip() and not grids:
+        return ""
+    if "\x00TABLE:" not in text:
+        parts = [text] if text.strip() else []
+        for grid in grids:
+            table_md = grid_markdown(grid)
+            if table_md:
+                parts.append(table_md)
+        return "\n\n".join(parts)
+
+    def replace(match: re.Match) -> str:
+        index = int(match.group(1))
+        if index >= len(grids):
+            return ""
+        return grid_markdown(grids[index])
+
+    return _TABLE_MARK.sub(replace, text).strip()
 
 
 def _pdf_table_units(
@@ -1467,8 +1550,10 @@ def _sectionize_pages(
     The same ``section_ordinal`` repeats on the following page when the heading
     does not. Empty pages produce no fragment.
     """
-    allow_numbered = not numbered_headings_flood(texts)
-    promoted = [promote_structural_headings(text, allow_numbered) for text in texts]
+    allow_numbered, allow_deep = outline_flags(texts)
+    promoted = [
+        promote_structural_headings(text, allow_numbered, allow_deep) for text in texts
+    ]
     fragments: list[list[tuple[int, str, str]]] = [[] for _ in promoted]
     stack: list[str] = []
     next_ordinal = 0
@@ -1716,25 +1801,31 @@ class PDFParser(BaseParser):
                     cls = _classify_page(ratio, len(plain.strip()))
                     # Layout reconstruction only pays off (and is only spent) on
                     # native text pages; scanned pages are rendered, not read.
-                    if cls == "text" and LAYOUT_ORDERING:
+                    # Font-size headings are harvested even when the plain text
+                    # layer is the one we keep.
+                    layout_titles: dict[str, int] = {}
+                    if cls == "text" and LAYOUT_ORDERING and DETECT_HEADINGS:
+                        layout = _extract_layout_text(page, pdfium_r)
+                        layout_titles = _layout_heading_titles(layout)
                         if _plain_is_well_formed(plain):
                             text = plain
+                        elif layout and not _should_prefer_plain(plain, layout):
+                            text = layout
                         else:
-                            layout = _extract_layout_text(page, pdfium_r)
-                            if layout and not _should_prefer_plain(plain, layout):
-                                text = layout
-                            else:
-                                text = plain
+                            text = plain
+                    elif cls == "text" and LAYOUT_ORDERING:
+                        text = plain
                     else:
                         text = plain
                     if cls == "text":
-                        tables, leftover_text = _extract_page_tables(page, pdfium_r)
+                        tables, lines = _extract_page_lines(page, pdfium_r)
                         if tables:
                             page_tables[i] = tables
                             # Cell glyphs belong to TABLE_REGION. SECTION is the
                             # leftover outside table bboxes, never the full page.
+                            # Markers keep each table between the lines around it.
                             if not self._output_inventory:
-                                text = leftover_text
+                                text = text_with_table_markers(lines, tables, i)
                         clips = _extract_vector_figure_clips(
                             page,
                             i,
@@ -1752,11 +1843,13 @@ class PDFParser(BaseParser):
                     if self._output_inventory:
                         text = plain
                     else:
-                        text = _postprocess_pdf_text(text)
+                        text = _postprocess_keeping_markers(text)
                     if not self._output_inventory and cls == "text" and vector_clips.get(i):
                         text = _inject_figure_markdown_before_captions(
                             text, vector_clips[i]
                         )
+                    if not self._output_inventory and cls == "text" and layout_titles:
+                        text = _apply_layout_heading_marks(text, layout_titles)
                 finally:
                     _close_pdfium_resource(page)
                 texts.append(text)
@@ -1816,16 +1909,9 @@ class PDFParser(BaseParser):
             else:
                 # SECTION stays leftover. Markdown serializes leftover + GFM cells
                 # so knowledge ingest does not drop tables.
-                parts = []
-                leftover = promoted[i].strip()
+                leftover = _markdown_with_tables(promoted[i], page_tables.get(i, []))
                 if leftover:
-                    parts.append(leftover)
-                for grid in page_tables.get(i, []):
-                    table_md = grid_markdown(grid)
-                    if table_md:
-                        parts.append(table_md)
-                if parts:
-                    blocks.append("\n\n".join(parts))
+                    blocks.append(leftover)
                 vector_figure_count += len(vector_clips.get(i, []))
 
                 page_images = list(embedded.get(i, []))
@@ -1870,20 +1956,37 @@ class PDFParser(BaseParser):
                     )
                 )
             else:
+                emitted_tables: set[int] = set()
+                piece_ordinal = 0
                 for section_ordinal, heading_path, text in section_fragments[i]:
-                    structured_units.append(
-                        StructuredSourceUnit(
-                            key=f"section:{section_ordinal}:page:{i}",
-                            ordinal=len(structured_units),
-                            kind=StructuredSourceUnitKind.SECTION,
-                            text=text,
-                            locator=DocumentLocator(
-                                section_ordinal=section_ordinal,
-                                heading_path=heading_path,
-                            ),
-                        )
-                    )
+                    for piece, table_index in _pieces_with_tables(text):
+                        if piece:
+                            suffix = "" if piece_ordinal == 0 else f":{piece_ordinal}"
+                            structured_units.append(
+                                StructuredSourceUnit(
+                                    key=f"section:{section_ordinal}:page:{i}{suffix}",
+                                    ordinal=len(structured_units),
+                                    kind=StructuredSourceUnitKind.SECTION,
+                                    text=piece,
+                                    locator=DocumentLocator(
+                                        section_ordinal=section_ordinal,
+                                        heading_path=heading_path,
+                                    ),
+                                )
+                            )
+                            piece_ordinal += 1
+                        if table_index is not None:
+                            grids = page_tables.get(i, [])
+                            if table_index < len(grids):
+                                structured_units.extend(
+                                    _pdf_table_units(
+                                        i, table_index, len(structured_units), grids[table_index]
+                                    )
+                                )
+                                emitted_tables.add(table_index)
                 for table_ordinal, grid in enumerate(page_tables.get(i, [])):
+                    if table_ordinal in emitted_tables:
+                        continue
                     structured_units.extend(
                         _pdf_table_units(i, table_ordinal, len(structured_units), grid)
                     )

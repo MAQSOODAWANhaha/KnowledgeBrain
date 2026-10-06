@@ -19,55 +19,78 @@ _EN_CHAPTER = re.compile(
 _NUMBERED_TITLE = re.compile(
     r"^(?:[0-9]+(?:\.[0-9]+){1,3}|(?:[0-9]+|[IVX]{1,5})\.)[ \t]+\S.*$"
 )
+_CN_ENUM = re.compile(r"^[一二三四五六七八九十百千]+、\S.*$")
+_CN_PAREN = re.compile(r"^[（(][一二三四五六七八九十百千0-9]+[）)]\S.*$")
 _HEADING_PUNCT = "。.!！?？,，;；:："
 
 
-def structural_heading(line: str, allow_numbered: bool = True) -> Optional[tuple[int, str]]:
+def structural_heading(
+    line: str,
+    allow_numbered: bool = True,
+    allow_deep_numbers: bool = True,
+) -> Optional[tuple[int, str]]:
     """Return ``(level, title)`` when this line opens a chapter or clause."""
     raw = line.strip()
-    if not raw or raw.startswith("#") or len(raw) > 40:
+    if not raw or raw.startswith("#"):
         return None
     if raw[-1] in _HEADING_PUNCT:
         return None
-    zh = _ZH_CHAPTER.match(raw)
-    if zh:
+    if len(raw) <= 80 and (zh := _ZH_CHAPTER.match(raw)):
         level = 2 if zh.group(1) in {"节", "節"} else 1
         return level, raw
-    en = _EN_CHAPTER.match(raw)
-    if en:
+    if len(raw) <= 80 and (en := _EN_CHAPTER.match(raw)):
         level = 2 if en.group(1).lower() in {"section", "abschnitt"} else 1
         return level, raw
-    if allow_numbered and _NUMBERED_TITLE.match(raw):
+    if len(raw) <= 40 and _CN_ENUM.match(raw):
+        return 2, raw
+    if len(raw) <= 40 and _CN_PAREN.match(raw):
+        return 3, raw
+    if allow_numbered and len(raw) <= 40 and _NUMBERED_TITLE.match(raw):
         token = raw.split()[0].rstrip(".")
+        if not allow_deep_numbers and "." in token:
+            return None
         return min(token.count(".") + 1, 6), raw
     return None
 
 
-def numbered_headings_flood(texts: list[str]) -> bool:
-    """A price list of ``1.1`` rows is not a chapter tree."""
+def outline_flags(texts: list[str]) -> tuple[bool, bool]:
+    """``(allow_numbered, allow_deep_numbers)``.
+
+    A price schedule full of ``1.1`` rows does not become a chapter tree.
+    ``第一章`` and ``一、`` stay chapters either way.
+    """
     nonempty = 0
-    numbered = 0
+    deep = 0
     for text in texts:
         for line in text.splitlines():
             raw = line.strip()
             if not raw:
                 continue
             nonempty += 1
-            if (
-                len(raw) <= 40
-                and raw[-1] not in _HEADING_PUNCT
-                and _NUMBERED_TITLE.match(raw)
-            ):
-                numbered += 1
-    return nonempty > 0 and numbered * 5 > nonempty * 2
+            if len(raw) > 40 or raw[-1] in _HEADING_PUNCT or not _NUMBERED_TITLE.match(raw):
+                continue
+            token = raw.split()[0].rstrip(".")
+            if "." in token:
+                deep += 1
+    flooded = nonempty > 0 and deep * 5 > nonempty * 2
+    return True, not flooded
 
 
-def promote_structural_headings(text: str, allow_numbered: bool) -> str:
+def numbered_headings_flood(texts: list[str]) -> bool:
+    """True when deep decimal rows should not open sections."""
+    return not outline_flags(texts)[1]
+
+
+def promote_structural_headings(
+    text: str,
+    allow_numbered: bool,
+    allow_deep_numbers: bool = True,
+) -> str:
     if not text:
         return text
     lines = []
     for line in text.splitlines():
-        heading = structural_heading(line, allow_numbered)
+        heading = structural_heading(line, allow_numbered, allow_deep_numbers)
         if heading is None:
             lines.append(line)
         else:

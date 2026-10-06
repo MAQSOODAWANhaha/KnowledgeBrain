@@ -80,14 +80,10 @@ def chars_outside_tables(chars: list[dict], tables: list[PdfTableGrid]) -> list[
     return kept
 
 
-def reading_order_text(glyphs: list[dict]) -> str:
-    """Reconstruct visual reading order from glyph boxes (y up, x across).
-
-    Tiny punctuation uses the line's median height so leftover clauses keep
-    。 and ， next to the surrounding words instead of on a later line.
-    """
+def reading_order_lines(glyphs: list[dict]) -> list[tuple[float, str]]:
+    """Visual lines as ``(y_mid, text)``, top first. PDF y grows upward."""
     if not glyphs:
-        return ""
+        return []
     heights = [glyph["y1"] - glyph["y0"] for glyph in glyphs if glyph["y1"] > glyph["y0"]]
     med_h = statistics.median(heights) if heights else 10.0
     ordered = sorted(glyphs, key=lambda glyph: (-(glyph["y0"] + glyph["y1"]) / 2, glyph["x0"]))
@@ -100,10 +96,40 @@ def reading_order_text(glyphs: list[dict]) -> str:
                 lines[-1].append(glyph)
                 continue
         lines.append([glyph])
-    return "\n".join(
-        "".join(item["ch"] for item in sorted(line, key=lambda glyph: glyph["x0"]))
-        for line in lines
-    )
+    out: list[tuple[float, str]] = []
+    for line in lines:
+        text = "".join(item["ch"] for item in sorted(line, key=lambda glyph: glyph["x0"]))
+        y_mid = sum((item["y0"] + item["y1"]) / 2 for item in line) / len(line)
+        if text:
+            out.append((y_mid, text))
+    return out
+
+
+def reading_order_text(glyphs: list[dict]) -> str:
+    """Reconstruct visual reading order from glyph boxes (y up, x across).
+
+    Tiny punctuation uses the line's median height so leftover clauses keep
+    。 and ， next to the surrounding words instead of on a later line.
+    """
+    return "\n".join(text for _, text in reading_order_lines(glyphs))
+
+
+def text_with_table_markers(
+    lines: list[tuple[float, str]],
+    tables: list[PdfTableGrid],
+    page_ordinal: int,
+) -> str:
+    """Place each table between the text lines above and below it.
+
+    The marker is unique per page so repeating-line removal does not eat it.
+    """
+    events: list[tuple[float, int, str]] = [
+        (y_mid, 0, text) for y_mid, text in lines
+    ]
+    for index, table in enumerate(tables):
+        events.append((table.top, 1, f"\x00TABLE:{page_ordinal}:{index}"))
+    events.sort(key=lambda item: (-item[0], item[1]))
+    return "\n".join(payload for _, _, payload in events)
 
 
 def table_region_reading_text(chars: list[dict], tables: list[PdfTableGrid]) -> str:
