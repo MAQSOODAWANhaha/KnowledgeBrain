@@ -81,7 +81,7 @@ impl oxana::Worker<SubmissionExportJobV2> for SubmissionExportV2Worker {
             return Err(JobErr("postgres not configured".into()));
         };
         let cleanup =
-            platform::StagedObjectCleanupTracker::new(pool, "system:submission-export-v2");
+            platform::StagedObjectCleanupTracker::new(pool);
         let local_cancel = CancellationToken::new();
         let pipeline_pool = pool.clone();
         let pipeline_job = job.clone();
@@ -193,7 +193,7 @@ impl oxana::Worker<TenderDocumentProcessJobV2> for TenderDocumentProcessV2Worker
             document_revision_id: job.document_revision_id,
         };
         let cleanup =
-            platform::StagedObjectCleanupTracker::new(pool, "system:tender-document-process-v2");
+            platform::StagedObjectCleanupTracker::new(pool);
         let service = bidding::tender_process::TenderDocumentProcessService::new(
             bidding::tender_process::PgTenderDocumentProcessRepository::with_cleanup_tracker(
                 pool.clone(),
@@ -411,7 +411,7 @@ impl oxana::Worker<DocxComposeJobV2> for DocxComposeV2Worker {
         let Some(pool) = &self.pool else {
             return Err(JobErr("postgres not configured".into()));
         };
-        let cleanup = platform::StagedObjectCleanupTracker::new(pool, "system:docx-compose-v2");
+        let cleanup = platform::StagedObjectCleanupTracker::new(pool);
         let pipeline_cleanup = cleanup.clone();
         let cancel = CancellationToken::new();
         let pipeline_cancel = cancel.clone();

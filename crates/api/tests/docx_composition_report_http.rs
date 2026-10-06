@@ -194,7 +194,7 @@ async fn composition_report_is_authorized_verified_and_bound_to_its_published_ve
         document.sha256(),
         bidding::tender_upload::DOCX_MEDIA_TYPE,
         document.bytes().len() as i64,
-        actor,
+        Some(actor),
     )
     .await
     .unwrap();

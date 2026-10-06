@@ -72,7 +72,6 @@ pub struct PublishTenderDocumentProcessV2<'a> {
     pub source: &'a Value,
     pub images: &'a Value,
     pub units: &'a Value,
-    pub actor: &'a str,
 }
 
 pub async fn publish_tender_document_process_v2(
@@ -81,7 +80,7 @@ pub async fn publish_tender_document_process_v2(
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT kb_bid_v2_publish_tender_document_process(
-           $1,$2,$3::kb_sha256,$4,$5,$6::kb_sha256,$7,$8,$9,$10::kb_actor_identity
+           $1,$2,$3::kb_sha256,$4,$5,$6::kb_sha256,$7,$8,$9,NULL::kb_actor_identity
          )",
     )
     .bind(input.request_artifact_id)
@@ -93,7 +92,6 @@ pub async fn publish_tender_document_process_v2(
     .bind(input.source)
     .bind(input.images)
     .bind(input.units)
-    .bind(input.actor)
     .fetch_one(pool)
     .await
 }
@@ -1465,11 +1463,10 @@ pub async fn publish_submission_export_v2(
     manifest_id: Uuid,
     outputs: (SubmissionExportOutputV2<'_>, SubmissionExportOutputV2<'_>),
     report: &Value,
-    actor: &str,
     owner: &AgentRunLease,
 ) -> Result<Value, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT kb_bid_v2_publish_submission_export($1,$2,$3::kb_sha256,$4,$5,$6,$7,$8::kb_actor_identity,$9,$10)",
+        "SELECT kb_bid_v2_publish_submission_export($1,$2,$3::kb_sha256,$4,$5,$6,$7,NULL::kb_actor_identity,$8,$9)",
     )
     .bind(request.request_artifact_id)
     .bind(request.request_revision)
@@ -1478,7 +1475,6 @@ pub async fn publish_submission_export_v2(
     .bind(sqlx::types::Json(outputs.0))
     .bind(sqlx::types::Json(outputs.1))
     .bind(report)
-    .bind(actor)
     .bind(owner.attempt)
     .bind(owner.execution_owner_token)
     .fetch_one(pool)

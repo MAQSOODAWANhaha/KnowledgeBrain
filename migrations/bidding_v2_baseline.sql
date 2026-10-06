@@ -212,7 +212,7 @@ CREATE TABLE bid_document_role_revision_artifacts (
   provenance text NOT NULL CHECK (provenance IN ('system_suggested','human_confirmed','human_modified')),
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id,document_id,revision),
   UNIQUE(project_id,id),
@@ -242,7 +242,7 @@ CREATE TABLE bid_document_relation_revision_artifacts (
   tombstone boolean NOT NULL DEFAULT false,
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id,relation_lineage_id,revision),
   UNIQUE(project_id,id),
@@ -285,7 +285,7 @@ CREATE TABLE bid_document_set_artifacts (
   revision bigint NOT NULL CHECK (revision > 0),
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id,revision),
   UNIQUE(project_id,id),
@@ -408,7 +408,7 @@ CREATE TABLE bid_source_unit_disposition_set_artifacts (
   revision bigint NOT NULL CHECK (revision > 0),
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id,document_set_id,revision),
   UNIQUE(project_id,id),
@@ -489,7 +489,7 @@ CREATE TABLE bid_requirement_revision_artifacts (
   tombstone boolean NOT NULL DEFAULT false,
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id,lineage_id,revision),
   UNIQUE(project_id,id),
@@ -551,7 +551,7 @@ CREATE TABLE bid_requirement_supersession_revision_artifacts (
   tombstone boolean NOT NULL DEFAULT false,
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id,lineage_id,revision),
   UNIQUE(project_id,id),
@@ -656,7 +656,7 @@ CREATE TABLE bid_document_settings_revision_artifacts (
   settings jsonb NOT NULL CHECK (jsonb_typeof(settings)='object' AND settings->>'page_size'='A4'),
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(workspace_id,revision),
   UNIQUE(project_id,id),
@@ -754,7 +754,7 @@ CREATE TABLE bid_outline_fulfillment_binding_revision_artifacts (
       OR (target_kind='content_block' AND target_node_id IS NOT NULL AND candidate_id IS NOT NULL)
       OR (target_kind NOT IN ('outline_node','content_block') AND target_node_id IS NULL AND candidate_id IS NULL)),
   reason text NOT NULL CHECK (octet_length(reason) BETWEEN 1 AND 4096),
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -781,7 +781,7 @@ CREATE TABLE bid_workspace_revision_artifacts (
   quote_snapshot_sha256 kb_sha256,
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(workspace_id,revision),
   UNIQUE(project_id,id),
@@ -882,7 +882,7 @@ CREATE TABLE bid_outline_checkpoint_artifacts (
   requirement_projection_sha256 kb_sha256 NOT NULL,
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id,id),
   UNIQUE(project_id,workspace_id,id,workspace_revision_id,requirement_projection_id,requirement_projection_sha256,content_sha256),
@@ -999,7 +999,7 @@ CREATE TABLE bid_candidate_operations (
 
 CREATE TABLE bid_candidate_decision_receipts (
   candidate_id uuid PRIMARY KEY REFERENCES bid_candidate_artifacts(id),
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   accepted_operation_ordinals integer[] NOT NULL,
   accepted_operations jsonb NOT NULL CHECK (jsonb_typeof(accepted_operations)='array'),
   resulting_workspace_revision_id uuid,
@@ -1291,7 +1291,7 @@ CREATE TABLE bid_workspace_asset_artifacts (
   height_px integer CHECK (height_px > 0),
   page_count integer CHECK (page_count > 0 AND page_count <= 1000),
   source text NOT NULL CHECK (source IN ('human_upload','ai_evidence')),
-  created_by kb_actor_identity NOT NULL,
+  created_by kb_actor_identity,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id,id),
   UNIQUE(project_id,workspace_id,id),
@@ -1468,7 +1468,7 @@ CREATE TABLE bid_quote_snapshot_artifacts (
   currency text NOT NULL CHECK (currency='CNY'),
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(project_id,revision),
   UNIQUE(project_id,id),
@@ -2839,7 +2839,7 @@ CREATE TABLE bid_docx_composition_request_identities (
   expected_round_id uuid,
   expected_version_id uuid,
   expected_docx_sha256 kb_sha256,
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   frozen_input jsonb NOT NULL,
   contract_definition jsonb NOT NULL,
   contract_sha256 kb_sha256 NOT NULL,
@@ -4987,9 +4987,6 @@ DECLARE
   projection_id uuid:=gen_random_uuid(); projection_revision bigint; projection_payload bytea; projection_sha kb_sha256;
   ordinal_value integer:=0; publication_status text; result_value jsonb; result_sha kb_sha256; prior bid_async_stage_receipts%ROWTYPE;
 BEGIN
-  IF p_actor<>'system:requirement-set-compile-v4' THEN
-    RAISE EXCEPTION 'SYSTEM_ACTOR_REQUIRED' USING ERRCODE='42501';
-  END IF;
   SELECT * INTO STRICT request_value FROM bid_async_request_snapshot_artifacts
     WHERE id=p_request_artifact_id AND request_kind='requirement_set_compile'
       AND revision=p_request_revision AND frozen_input_sha256=p_frozen_input_sha256 FOR UPDATE;
@@ -6539,19 +6536,19 @@ BEGIN
           CASE WHEN jsonb_typeof(item_payload->'bounding_region')='null' THEN NULL ELSE item_payload->'bounding_region' END);
         INSERT INTO object_owner_references(object_ref,owner_kind,owner_id,occurrence,created_by)
         VALUES((item_payload->>'object_ref')::kb_object_ref,'bid_evidence_asset',(item_payload->>'evidence_item_id')::uuid,
-          'frozen-media','system:content-generate-v2');
+          'frozen-media',NULL);
         INSERT INTO bid_workspace_asset_artifacts(id,project_id,workspace_id,object_ref,content_sha256,
           media_type,file_name,byte_length,width_px,height_px,source,created_by)
         SELECT (item_payload->>'evidence_item_id')::uuid,typed.project_id,typed.workspace_id,
           registry.object_ref,registry.digest,registry.media_type,item_payload->>'frozen_document_display_name',
           registry.byte_length,(item_payload->>'width')::integer,(item_payload->>'height')::integer,
-          'ai_evidence','system:content-generate-v2'
+          'ai_evidence',NULL
         FROM object_registry registry WHERE registry.object_ref=(item_payload->>'object_ref')::kb_object_ref
           AND registry.digest=(item_payload->>'sha256')::kb_sha256 AND registry.state='available';
         IF NOT FOUND THEN RAISE EXCEPTION 'EVIDENCE_MEDIA_OBJECT_UNAVAILABLE' USING ERRCODE='23514'; END IF;
         INSERT INTO object_owner_references(object_ref,owner_kind,owner_id,occurrence,created_by)
         VALUES((item_payload->>'object_ref')::kb_object_ref,'bid_workspace_asset',(item_payload->>'evidence_item_id')::uuid,
-          'evidence-media','system:content-generate-v2');
+          'evidence-media',NULL);
       END IF;
       item_ordinal:=item_ordinal+1;
     END LOOP;
@@ -8096,7 +8093,7 @@ CREATE TABLE bid_docx_round_artifacts (
   requirement_set_id uuid NOT NULL,
   canonical_payload bytea NOT NULL,
   content_sha256 kb_sha256 NOT NULL,
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(workspace_id,revision),
   UNIQUE(project_id,workspace_id,id),
@@ -8116,7 +8113,7 @@ CREATE TABLE bid_docx_version_artifacts (
   object_ref kb_object_ref NOT NULL,
   docx_sha256 kb_sha256 NOT NULL,
   byte_length bigint NOT NULL CHECK (byte_length>0),
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(round_id,revision),
   UNIQUE(project_id,workspace_id,round_id,id),
@@ -9673,9 +9670,6 @@ BEGIN
     RAISE EXCEPTION 'AGENT_OUTPUT_INVALID: independent review checkpoint missing or changed' USING ERRCODE='23514';
   END IF;
   END IF;
-  IF p_actor<>'system:requirement-set-compile-v4' THEN
-    RAISE EXCEPTION 'SYSTEM_ACTOR_REQUIRED' USING ERRCODE='42501';
-  END IF;
   IF p_compiled#>'{analysis_result,review,draft}' IS DISTINCT FROM 'true'::jsonb AND p_docx_staging IS NOT NULL THEN
     RAISE EXCEPTION 'AGENT_OUTPUT_INVALID: official analysis cannot stage draft DOCX' USING ERRCODE='23514';
   END IF;
@@ -10653,7 +10647,7 @@ END $$;
 CREATE TABLE bid_docx_fill_stop_requests (
   request_artifact_id uuid PRIMARY KEY REFERENCES bid_async_request_snapshot_artifacts(id),
   workspace_id uuid NOT NULL REFERENCES bid_submission_workspaces(id),
-  actor kb_actor_identity NOT NULL,
+  actor kb_actor_identity,
   requested_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -10843,7 +10837,7 @@ BEGIN
  END IF;
  IF prior.request_artifact_id IS NULL OR EXISTS(SELECT 1 FROM object_upload_staging WHERE id=p_staging) THEN
    PERFORM kb_object_upload_commit(p_staging,(pdf->>'object_ref')::kb_object_ref,(pdf->>'sha256')::kb_sha256,
-     'application/pdf',(pdf->>'byte_length')::bigint,'bid_submission_export_request',p_id,'render:pdf','system:submission-export-v2');
+     'application/pdf',(pdf->>'byte_length')::bigint,'bid_submission_export_request',p_id,'render:pdf',NULL);
  END IF;
  IF prior.request_artifact_id IS NULL THEN
    INSERT INTO bid_async_stage_receipts(request_artifact_id,stage_kind,frozen_input_sha256,result_identity,result_sha256)
@@ -10914,7 +10908,7 @@ BEGIN
    IF p_image_stages ? image_key THEN
      PERFORM kb_object_upload_commit((p_image_stages->>image_key)::uuid,(image->>'object_ref')::kb_object_ref,
        image_key::kb_sha256,image->>'media_type',(image->>'byte_length')::bigint,
-       'bid_submission_export_request',p_id,'inventory:image:'||image_key,'system:submission-export-v2');
+       'bid_submission_export_request',p_id,'inventory:image:'||image_key,NULL);
    ELSIF prior.request_artifact_id IS NULL THEN
      RAISE EXCEPTION 'FROZEN_INPUT_DIGEST_MISMATCH: export image staging missing' USING ERRCODE='23514';
    END IF;
@@ -10940,7 +10934,6 @@ DECLARE typed bid_submission_export_request_identities%ROWTYPE; request_value bi
  render jsonb; snapshot jsonb; review_checkpoint jsonb; contract text; review_status text; check_status text; stamp timestamptz;
  docx_identity jsonb; pdf_identity jsonb; result_value jsonb; item jsonb; format_value text; output_id uuid; image_entry record; image jsonb;
 BEGIN
- IF p_actor IS DISTINCT FROM 'system:submission-export-v2' THEN RAISE EXCEPTION 'SYSTEM_ACTOR_REQUIRED' USING ERRCODE='42501'; END IF;
  SELECT * INTO STRICT typed FROM bid_submission_export_request_identities
  WHERE request_artifact_id=p_request_artifact_id AND request_revision=p_request_revision AND frozen_input_sha256=p_frozen_input_sha256;
  SELECT * INTO STRICT request_value FROM bid_async_request_snapshot_artifacts WHERE id=p_request_artifact_id FOR UPDATE;

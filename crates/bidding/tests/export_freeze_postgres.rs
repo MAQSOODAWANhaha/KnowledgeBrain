@@ -88,7 +88,7 @@ END $$;
     let source = request["source"].clone();
     let pdf_sha = bidding::tender_analysis::digest(&json!(Uuid::new_v4().to_string())).unwrap();
     let pdf_stage = Uuid::new_v4();
-    sqlx::query("SELECT kb_object_upload_stage($1,$2::kb_object_ref,$3::kb_sha256,'application/pdf',15,'system:submission-export-v2')")
+    sqlx::query("SELECT kb_object_upload_stage($1,$2::kb_object_ref,$3::kb_sha256,'application/pdf',15,NULL)")
         .bind(pdf_stage).bind(format!("objects/{pdf_sha}")).bind(&pdf_sha).execute(pool).await.unwrap();
     let render = json!({"schema_version":1,"source":source,"pdf":{"object_ref":format!("objects/{pdf_sha}"),"sha256":pdf_sha,"media_type":"application/pdf","byte_length":15}});
     let inventory = json!({"docx_sha256":source["docx_sha256"],"pdf_sha256":pdf_sha,"units":[],"images":{},"parser_manifests":[
@@ -334,7 +334,7 @@ async fn unconfigured_manual_export_requires_owner_frozen_files_and_explicit_not
     platform::write_blob_off_runtime(&image_sha, &bytes).unwrap();
     assert_eq!(platform::read_blob(&image_sha).unwrap(), bytes);
     let image_stage = Uuid::new_v4();
-    sqlx::query("SELECT kb_object_upload_stage($1,$2::kb_object_ref,$3::kb_sha256,'image/png',$4,'system:submission-export-v2')")
+    sqlx::query("SELECT kb_object_upload_stage($1,$2::kb_object_ref,$3::kb_sha256,'image/png',$4,NULL)")
         .bind(image_stage).bind(&image.object_ref).bind(&image_sha).bind(bytes.len() as i64).execute(&pool).await.unwrap();
     f.inventory["images"] = json!({image_sha.clone():image});
     f.inventory["parser_manifests"][1]["image_sha256"] = json!({"page-1":image_sha});
@@ -362,7 +362,7 @@ async fn unconfigured_manual_export_requires_owner_frozen_files_and_explicit_not
     let wrong_sha = hex::encode(Sha256::digest(&wrong_png));
     platform::write_blob_off_runtime(&wrong_sha, &wrong_png).unwrap();
     let wrong_stage = Uuid::new_v4();
-    sqlx::query("SELECT kb_object_upload_stage($1,$2::kb_object_ref,$3::kb_sha256,'image/png',$4,'system:submission-export-v2')")
+    sqlx::query("SELECT kb_object_upload_stage($1,$2::kb_object_ref,$3::kb_sha256,'image/png',$4,NULL)")
         .bind(wrong_stage).bind(format!("objects/{wrong_sha}")).bind(&wrong_sha).bind(wrong_png.len() as i64).execute(&pool).await.unwrap();
     assert!(
         snapshot_put_stages(
@@ -420,7 +420,7 @@ async fn unconfigured_manual_export_requires_owner_frozen_files_and_explicit_not
     let pdf_id = Uuid::new_v4();
     let package = Uuid::new_v4();
     let mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-    sqlx::query("SELECT kb_object_upload_stage($1,$2::kb_object_ref,$3::kb_sha256,$4,14,'system:submission-export-v2')")
+    sqlx::query("SELECT kb_object_upload_stage($1,$2::kb_object_ref,$3::kb_sha256,$4,14,NULL)")
         .bind(docx_stage).bind(f.source["object_ref"].as_str().unwrap()).bind(f.source["docx_sha256"].as_str().unwrap()).bind(mime).execute(&pool).await.unwrap();
     let docx = json!({"staging_id":docx_stage,"artifact_id":docx_id,"object_ref":f.source["object_ref"],"sha256":f.source["docx_sha256"],"media_type":mime,"byte_length":14});
     let mut pdf = f.render["pdf"].clone();
@@ -433,7 +433,7 @@ async fn unconfigured_manual_export_requires_owner_frozen_files_and_explicit_not
         let docx = &docx;
         let pdf = &pdf;
         async move {
-            sqlx::query_scalar::<_,Value>("SELECT kb_bid_v2_publish_submission_export($1,1,$2::kb_sha256,$3,$4,$5,$6,'system:submission-export-v2',$7,$8)").bind(f.id).bind(&f.sha).bind(package).bind(docx).bind(pdf).bind(report).bind(f.attempt).bind(token).fetch_one(pool).await
+            sqlx::query_scalar::<_,Value>("SELECT kb_bid_v2_publish_submission_export($1,1,$2::kb_sha256,$3,$4,$5,$6,NULL,$7,$8)").bind(f.id).bind(&f.sha).bind(package).bind(docx).bind(pdf).bind(report).bind(f.attempt).bind(token).fetch_one(pool).await
         }
     };
     assert!(
@@ -473,7 +473,7 @@ async fn unconfigured_manual_export_requires_owner_frozen_files_and_explicit_not
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("DELETE FROM object_owner_references WHERE owner_kind='bid_submission_export_request' AND owner_id=$1 AND object_ref=$2")
         .bind(f.id).bind(&image.object_ref).execute(&mut *tx).await.unwrap();
-    let missing=sqlx::query_scalar::<_,Value>("SELECT kb_bid_v2_publish_submission_export($1,1,$2::kb_sha256,$3,$4,$5,$6,'system:submission-export-v2',$7,$8)")
+    let missing=sqlx::query_scalar::<_,Value>("SELECT kb_bid_v2_publish_submission_export($1,1,$2::kb_sha256,$3,$4,$5,$6,NULL,$7,$8)")
         .bind(f.id).bind(&f.sha).bind(package).bind(&docx).bind(&pdf).bind(&report).bind(f.attempt).bind(f.token).fetch_one(&mut *tx).await.unwrap_err();
     assert!(missing.to_string().contains("image owner missing"));
     tx.rollback().await.unwrap();

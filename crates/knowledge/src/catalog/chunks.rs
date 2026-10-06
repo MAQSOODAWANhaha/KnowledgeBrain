@@ -147,9 +147,9 @@ pub async fn append_document_chunks(
         .await?;
     }
     for media in prepared {
-        sqlx::query("SELECT kb_register_knowledge_image_object($1,$2::kb_object_ref,$3::kb_sha256,$4,$5,$6::kb_actor_identity)")
+        sqlx::query("SELECT kb_register_knowledge_image_object($1,$2::kb_object_ref,$3::kb_sha256,$4,$5,NULL::kb_actor_identity)")
             .bind(media.id).bind(&media.object_ref).bind(&media.sha256).bind(&media.media_type)
-            .bind(media.byte_length).bind("system:knowledge-document-ingest").execute(&mut *tx).await?;
+            .bind(media.byte_length).execute(&mut *tx).await?;
         let artifact_sha = hex::encode(Sha256::digest(&media.payload));
         sqlx::query("INSERT INTO knowledge_image_artifact_revisions(id,product_version_id,document_id,revision,
             object_ref,content_sha256,media_type,width,height,page_ordinal,bounding_region,source_image_key,canonical_payload,artifact_sha256)

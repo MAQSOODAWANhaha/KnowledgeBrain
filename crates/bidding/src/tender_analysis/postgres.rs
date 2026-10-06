@@ -16,7 +16,6 @@ use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const REQUIREMENT_COMPILE_ACTOR: &str = "system:requirement-set-compile-v4";
 const DOCX_MEDIA: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 pub struct PgJournal<'a> {
@@ -405,12 +404,12 @@ async fn stage_draft_docx(
         sha,
         DOCX_MEDIA,
         i64::try_from(bytes.len()).map_err(invalid)?,
-        REQUIREMENT_COMPILE_ACTOR,
+        None,
     )
     .await
     .map_err(db_error)?;
     if let Err(error) = platform::write_blob_async(sha, &bytes).await {
-        let _ = platform::abandon_object_upload(pool, staging, REQUIREMENT_COMPILE_ACTOR).await;
+        let _ = platform::abandon_object_upload(pool, staging, None).await;
         return Err(AgentError::new("INTERNAL", error.to_string()));
     }
     Ok(Some(staging))
@@ -426,7 +425,7 @@ async fn abandon_draft_staging(pool: &PgPool, staging: Option<Uuid>) {
     let Some(staging) = staging else {
         return;
     };
-    let _ = platform::abandon_object_upload(pool, staging, REQUIREMENT_COMPILE_ACTOR).await;
+    let _ = platform::abandon_object_upload(pool, staging, None).await;
 }
 
 pub async fn execute(
@@ -523,13 +522,12 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
             let compiled = publication(&input, &result)?;
             let staging = stage_draft_docx(pool, &journal, &result).await?;
             let receipt = match sqlx::query_scalar(
-                "SELECT kb_bid_v2_publish_requirement_set_v4($1,$2,$3::kb_sha256,$4,$5::kb_actor_identity,$6,$7,$8)",
+                "SELECT kb_bid_v2_publish_requirement_set_v4($1,$2,$3::kb_sha256,$4,NULL::kb_actor_identity,$5,$6,$7)",
             )
             .bind(request.request_artifact_id)
             .bind(request.request_revision)
             .bind(&request.frozen_input_sha256)
             .bind(compiled)
-            .bind(REQUIREMENT_COMPILE_ACTOR)
             .bind(owner.attempt)
             .bind(owner.execution_owner_token)
             .bind(staging)

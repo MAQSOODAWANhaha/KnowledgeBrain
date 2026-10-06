@@ -107,7 +107,6 @@ pub trait ExportIo: Send + Sync {
         digest: &str,
         media_type: &str,
         bytes: &[u8],
-        actor: &str,
     ) -> Result<String, ExportError>;
 }
 
@@ -352,7 +351,6 @@ async fn execute_owned(
     limits: ExportLimits,
     owner: &AgentRunLease,
 ) -> Result<(), AgentError> {
-    const ACTOR: &str = "system:submission-export-v2";
     let input = crate::bid_authoring_v2::load_submission_export_input_v2(
         pool,
         job.request.request_artifact_id,
@@ -418,7 +416,6 @@ async fn execute_owned(
                 &pdf.pdf_sha256,
                 crate::tender_upload::PDF_MEDIA_TYPE,
                 &pdf.bytes,
-                ACTOR,
             )
             .await?;
         let identity = json!({"schema_version":1,"source":source,"pdf":{"object_ref":object_ref,"sha256":pdf.pdf_sha256,"media_type":crate::tender_upload::PDF_MEDIA_TYPE,"byte_length":pdf.bytes.len()}});
@@ -510,7 +507,7 @@ async fn execute_owned(
             let stage = Uuid::new_v4();
             cleanup.register(stage);
             let object_ref = objects
-                .stage_object(pool, stage, sha, &image.media_type, bytes, ACTOR)
+                .stage_object(pool, stage, sha, &image.media_type, bytes)
                 .await?;
             if object_ref != image.object_ref {
                 return Err(AgentError::new(
@@ -613,7 +610,6 @@ async fn execute_owned(
             &source.docx_sha256,
             crate::tender_upload::DOCX_MEDIA_TYPE,
             &docx,
-            ACTOR,
         )
         .await?;
     if cancel.is_cancelled() {
@@ -650,7 +646,6 @@ async fn execute_owned(
             },
         ),
         &report,
-        ACTOR,
         owner,
     )
     .await

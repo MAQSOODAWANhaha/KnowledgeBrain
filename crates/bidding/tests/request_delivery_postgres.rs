@@ -732,7 +732,7 @@ async fn non_agent_handler_timeout_codes_terminalize_requests_atomically() {
     require_local_objects();
     let digest = hex::encode(Sha256::digest(&bytes));
     let object_ref = platform::object_ref(&digest);
-    let cleanup = platform::StagedObjectCleanupTracker::new(&pool, "system:submission-export-v2");
+    let cleanup = platform::StagedObjectCleanupTracker::new(&pool);
     cleanup.register(staging_id);
     platform::stage_object_upload(
         &pool,
@@ -741,7 +741,7 @@ async fn non_agent_handler_timeout_codes_terminalize_requests_atomically() {
         &digest,
         "application/octet-stream",
         i64::try_from(bytes.len()).unwrap(),
-        "system:submission-export-v2",
+        None,
     )
     .await
     .unwrap();
@@ -872,7 +872,7 @@ async fn wait_for_deleted(
                       AND d.digest=$2 AND d.byte_length=$3 AND t.byte_length=$3
                       AND r.byte_length=$3 AND r.state='deleted'
                       AND r.deleted_at IS NOT NULL AND t.deleted_at IS NOT NULL
-                      AND t.deleted_by='system:retention-consumer')",
+                      AND t.deleted_by IS NULL)",
             )
             .bind(staging_id)
             .bind(digest)
@@ -913,7 +913,7 @@ async fn cleanup_native_duplicates_protect_references_and_retry_failed_blob_dele
             &digest,
             "application/octet-stream",
             bytes.len() as i64,
-            "system:submission-export-v2",
+            None,
         )
         .await
         .unwrap();
@@ -1081,7 +1081,7 @@ async fn cleanup_native_duplicates_protect_references_and_retry_failed_blob_dele
         &live_digest,
         "application/octet-stream",
         live_bytes.len() as i64,
-        "system:submission-export-v2",
+        None,
     )
     .await
     .unwrap();
@@ -1089,7 +1089,7 @@ async fn cleanup_native_duplicates_protect_references_and_retry_failed_blob_dele
         .await
         .unwrap();
     sqlx::query("SELECT kb_object_reference_add($1::kb_object_ref,$2::kb_sha256,'application/octet-stream',$3,
-        'cleanup_test_owner',$4,'payload','system:submission-export-v2')")
+        'cleanup_test_owner',$4,'payload',NULL)")
         .bind(&live_ref).bind(&live_digest).bind(live_bytes.len() as i64).bind(owner)
         .execute(&pool).await.unwrap();
     let live_job = storage
@@ -1357,7 +1357,7 @@ async fn cleanup_unconfirmed_handoff_keeps_staging_blob_and_tracker() {
             .collect();
         assert_eq!(ids.len(), 2);
         let tracker =
-            platform::StagedObjectCleanupTracker::new(&pool, "system:submission-export-v2");
+            platform::StagedObjectCleanupTracker::new(&pool);
         for id in &ids {
             let bytes = format!("unconfirmed cleanup {id}").into_bytes();
             let digest = platform::sha256_hex(&bytes);
@@ -1368,7 +1368,7 @@ async fn cleanup_unconfirmed_handoff_keeps_staging_blob_and_tracker() {
                 &digest,
                 "application/octet-stream",
                 bytes.len() as i64,
-                "system:submission-export-v2",
+                None,
             )
             .await
             .unwrap();
@@ -1469,7 +1469,7 @@ async fn cleanup_unconfirmed_handoff_keeps_staging_blob_and_tracker() {
         .recv_timeout(Duration::from_secs(1))
         .expect("Redis request actually arrived before cancellation");
     server.finish();
-    let tracker = platform::StagedObjectCleanupTracker::new(&pool, "system:submission-export-v2");
+    let tracker = platform::StagedObjectCleanupTracker::new(&pool);
     for id in &staged {
         tracker.register(*id);
     }

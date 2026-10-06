@@ -314,7 +314,7 @@ BEGIN
       (snapshot->'response'->>'request_artifact_id')::uuid,
       (snapshot->'response'->>'request_revision')::bigint,
       (snapshot->'response'->>'frozen_input_sha256')::kb_sha256,
-      compiled,'system:requirement-set-compile-v4');
+      compiled,NULL);
     IF snapshot_index=jsonb_array_length(snapshots)-1 THEN
       IF publication->'published_current' IS DISTINCT FROM 'true'::jsonb
         OR publication->'workspace_apply_required' IS DISTINCT FROM 'false'::jsonb THEN
@@ -345,7 +345,7 @@ BEGIN
       (snapshot->'response'->>'request_artifact_id')::uuid,
       (snapshot->'response'->>'request_revision')::bigint,
       (snapshot->'response'->>'frozen_input_sha256')::kb_sha256,
-      compiled,'system:requirement-set-compile-v4');
+      compiled,NULL);
     IF replay IS DISTINCT FROM publication || jsonb_build_object('replayed',true)
       OR (SELECT count(*) FROM bid_requirement_revision_artifacts WHERE project_id=project_id_value)<>requirement_count_before
       OR (SELECT count(*) FROM bid_workspace_requirement_projection_artifacts WHERE project_id=project_id_value)<>projection_count_before THEN
@@ -375,7 +375,7 @@ BEGIN
   response:=decision_requests->0;
   publication:=kb_fixture_publish_collection_v4((response->>'request_artifact_id')::uuid,
     (response->>'request_revision')::bigint,(response->>'frozen_input_sha256')::kb_sha256,
-    latest_compiled,'system:requirement-set-compile-v4');
+    latest_compiled,NULL);
   IF publication->'published_current' IS DISTINCT FROM 'false'::jsonb
     OR (SELECT artifact_id FROM bid_requirement_set_current WHERE scope_id=project_id_value)
       IS DISTINCT FROM (latest_publication->>'requirement_set_id')::uuid
@@ -388,7 +388,7 @@ BEGIN
   response:=decision_requests->1;
   latest_publication:=kb_fixture_publish_collection_v4((response->>'request_artifact_id')::uuid,
     (response->>'request_revision')::bigint,(response->>'frozen_input_sha256')::kb_sha256,
-    latest_compiled,'system:requirement-set-compile-v4');
+    latest_compiled,NULL);
   IF latest_publication->'published_current' IS DISTINCT FROM 'true'::jsonb
     OR (SELECT generation FROM bid_source_unit_disposition_set_current WHERE scope_id=project_id_value)
       <>disposition_head.generation+1
@@ -435,7 +435,7 @@ BEGIN
       END;
       latest_publication := kb_fixture_publish_collection_v4(request_id,
         (response->>'request_revision')::bigint,(response->>'frozen_input_sha256')::kb_sha256,
-        latest_compiled,'system:requirement-set-compile-v4');
+        latest_compiled,NULL);
       round_input := round_input || jsonb_build_object('requirement_set_id',latest_publication->>'requirement_set_id',
         'requirement_set_sha256',latest_publication->>'requirement_set_sha256');
       IF kb_bid_v2_get_current_docx(workspace_id_value,actor) IS DISTINCT FROM first_docx_current THEN

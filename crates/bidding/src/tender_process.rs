@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use futures::stream::StreamExt;
 use docparser::{
     ReadResult, StructuredSourceLocator, StructuredSourceUnit, StructuredSourceUnitKind, TableGrid,
 };
@@ -27,7 +28,6 @@ pub const TENDER_VISION_OPERATION: &str = "tender-image-ocr-v1";
 /// Non-empty OCR object payload when vision returned no text. Published unit
 /// text stays empty so Agent disposition must remain unresolved.
 pub const UNRESOLVED_EMPTY_OCR: &[u8] = b"unresolved-empty-ocr-v1\n";
-pub const TENDER_PROCESS_ACTOR: &str = "system:tender-document-process-v2";
 pub const MAX_TENDER_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 pub const MAX_TENDER_SOURCE_UNITS: usize = 100_000;
 pub const MAX_TENDER_SOURCE_TEXT_BYTES: usize = 16 * 1024 * 1024;
@@ -397,6 +397,16 @@ impl TenderProcessTransport for InactiveTenderProcessTransport {
             "TenderDocumentProcess cannot enqueue RequirementSetCompile".into(),
         ))
     }
+}
+
+struct ImageJob {
+    key: String,
+    ordinal: u32,
+    locator: StructuredSourceLocator,
+    original_ref: String,
+    media_type: String,
+    image_bytes: Vec<u8>,
+    image_mime: String,
 }
 
 struct PreparedImage {
@@ -792,32 +802,58 @@ where
         language: &str,
         cancel: &CancellationToken,
     ) -> Result<PreparedImages, ImagePrepareFailure> {
-        let jobs: Vec<_> = parser_units
+        let mut jobs = Vec::new();
+        for unit in parser_units
             .iter()
             .filter(|unit| unit.kind == StructuredSourceUnitKind::ImageRegion)
-            .collect();
-        let staged_gate = Arc::new(Mutex::new(Vec::new()));
-        let results = crate::phase1::parse::map_concurrent(
-            jobs,
-            crate::phase1::parse::image_concurrency(),
-            |unit| {
-                let staged_gate = Arc::clone(&staged_gate);
-                async move {
-                    self.prepare_one_image(
-                        document,
-                        converted_source_id,
-                        unit,
-                        image_by_ref,
-                        image_source_type,
-                        language,
-                        &staged_gate,
-                        cancel,
-                    )
-                    .await
+        {
+            let StructuredSourceLocator::Image {
+                original_ref,
+                media_type,
+                ..
+            } = &unit.locator
+            else {
+                return Err(ImagePrepareFailure {
+                    error: TenderDocumentProcessError::StructuredSource(format!(
+                        "image unit {} lacks image locator",
+                        unit.key
+                    )),
+                    staged: Vec::new(),
+                });
+            };
+            let image = image_by_ref.get(original_ref.as_str()).ok_or_else(|| {
+                ImagePrepareFailure {
+                    error: TenderDocumentProcessError::MissingImage(original_ref.clone()),
+                    staged: Vec::new(),
                 }
-            },
-        )
-        .await;
+            })?;
+            jobs.push(ImageJob {
+                key: unit.key.clone(),
+                ordinal: unit.ordinal,
+                locator: unit.locator.clone(),
+                original_ref: original_ref.clone(),
+                media_type: media_type.clone(),
+                image_bytes: image.data.clone(),
+                image_mime: image.mime_type.clone(),
+            });
+        }
+        let staged_gate = Arc::new(Mutex::new(Vec::new()));
+        let mut pending = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            pending.push(self.prepare_one_image(
+                document,
+                converted_source_id,
+                job,
+                image_source_type,
+                language,
+                &staged_gate,
+                cancel,
+            ));
+        }
+        let results: Vec<_> = futures::stream::iter(pending)
+            .buffer_unordered(crate::phase1::parse::image_concurrency())
+            .collect()
+            .await;
         let staged = std::mem::take(&mut *staged_gate.lock().expect("image staging lock"));
         let mut by_key = HashMap::new();
         for result in results {
@@ -837,46 +873,31 @@ where
         &self,
         document: &FrozenTenderDocument,
         converted_source_id: Uuid,
-        parser_unit: &docparser::StructuredSourceUnit,
-        image_by_ref: &HashMap<&str, &docparser::ImageRef>,
+        job: ImageJob,
         image_source_type: &str,
         language: &str,
         staged: &Mutex<Vec<FrozenObjectIdentity>>,
         cancel: &CancellationToken,
     ) -> Result<PreparedImage, TenderDocumentProcessError> {
-        let StructuredSourceLocator::Image {
-            original_ref,
-            media_type,
-            ..
-        } = &parser_unit.locator
-        else {
-            return Err(TenderDocumentProcessError::StructuredSource(format!(
-                "image unit {} lacks image locator",
-                parser_unit.key
-            )));
-        };
-        let image = image_by_ref
-            .get(original_ref.as_str())
-            .ok_or_else(|| TenderDocumentProcessError::MissingImage(original_ref.clone()))?;
-        if image.data.is_empty() || image.data.len() > MAX_TENDER_IMAGE_BYTES {
+        if job.image_bytes.is_empty() || job.image_bytes.len() > MAX_TENDER_IMAGE_BYTES {
             return Err(TenderDocumentProcessError::ImageIdentity(format!(
                 "{} has invalid byte length",
-                original_ref
+                job.original_ref
             )));
         }
-        if !image_media_types_match(&image.mime_type, media_type) {
+        if !image_media_types_match(&job.image_mime, &job.media_type) {
             return Err(TenderDocumentProcessError::ImageIdentity(format!(
                 "{} media type differs between unit and image bytes",
-                original_ref
+                job.original_ref
             )));
         }
         let image_id = stable_uuid(
             b"tender-image-artifact-v2",
-            format!("{}:{}", converted_source_id, parser_unit.key).as_bytes(),
+            format!("{}:{}", converted_source_id, job.key).as_bytes(),
         );
         let original = self
             .repository
-            .stage_object(image_id, "original", media_type, &image.data)
+            .stage_object(image_id, "original", &job.media_type, &job.image_bytes)
             .await?;
         staged
             .lock()
@@ -884,7 +905,13 @@ where
             .push(original.clone());
         let enrichment = self
             .vision
-            .enrich(&image.data, media_type, image_source_type, language, cancel)
+            .enrich(
+                &job.image_bytes,
+                &job.media_type,
+                image_source_type,
+                language,
+                cancel,
+            )
             .await?;
         let ocr_text = enrichment.ocr_text.trim().to_string();
         let ocr_bytes = if ocr_text.is_empty() {
@@ -906,10 +933,10 @@ where
             "project_id": document.project_id,
             "document_id": document.document_id,
             "converted_source_revision_id": converted_source_id,
-            "ordinal": parser_unit.ordinal,
+            "ordinal": job.ordinal,
             "source_purpose": TENDER_SOURCE_PURPOSE,
-            "original_ref": original_ref,
-            "source_locator": parser_unit.locator,
+            "original_ref": job.original_ref,
+            "source_locator": job.locator,
             "original_object": {
                 "object_ref": original.object_ref,
                 "sha256": original.sha256,
@@ -928,18 +955,18 @@ where
         let content_sha256 = sha256_hex(&image_payload);
         let artifact = TenderImageArtifactRevision {
             id: image_id,
-            ordinal: parser_unit.ordinal,
-            original_ref: original_ref.clone(),
+            ordinal: job.ordinal,
+            original_ref: job.original_ref.clone(),
             original,
             ocr_text: ocr_object,
             model_contract: enrichment.model_contract,
             operation_contract: enrichment.operation_contract,
-            source_locator: parser_unit.locator.clone(),
+            source_locator: job.locator.clone(),
             canonical_payload: image_payload,
             content_sha256: content_sha256.clone(),
         };
         Ok(PreparedImage {
-            key: parser_unit.key.clone(),
+            key: job.key,
             text: ocr_text,
             content_sha256,
             artifact,
@@ -1112,7 +1139,7 @@ impl TenderDocumentProcessRepository for PgTenderDocumentProcessRepository {
             &sha256,
             media_type,
             bytes.len() as i64,
-            TENDER_PROCESS_ACTOR,
+            None,
         )
         .await
         .map_err(classify_tender_sql_error)?;
@@ -1243,7 +1270,6 @@ impl TenderDocumentProcessRepository for PgTenderDocumentProcessRepository {
                 source: &source,
                 images: &images,
                 units: &units,
-                actor: TENDER_PROCESS_ACTOR,
             },
         )
         .await

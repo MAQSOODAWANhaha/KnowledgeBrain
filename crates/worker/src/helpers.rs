@@ -16,7 +16,6 @@ pub(crate) async fn stage_export_object(
     digest: &str,
     media_type: &str,
     bytes: &[u8],
-    actor: &str,
 ) -> Result<String, JobErr> {
     if bytes.is_empty() || bytes.len() > MAX_RENDER_OUTPUT_BYTES {
         return Err(JobErr(
@@ -33,7 +32,7 @@ pub(crate) async fn stage_export_object(
         digest,
         media_type,
         byte_length,
-        actor,
+        None,
     )
     .await
     .map_err(non_agent_sql_error)?;
@@ -232,9 +231,8 @@ impl bidding::submission_export::ExportIo for HelperExportIo {
         digest: &str,
         media_type: &str,
         bytes: &[u8],
-        actor: &str,
     ) -> Result<String, bidding::submission_export::ExportError> {
-        stage_export_object(pool, staging_id, digest, media_type, bytes, actor)
+        stage_export_object(pool, staging_id, digest, media_type, bytes)
             .await
             .map_err(|error| bidding::submission_export::ExportError(error.0))
     }

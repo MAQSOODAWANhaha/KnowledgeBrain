@@ -177,7 +177,7 @@ async fn fill_work<M: crate::tender_analysis::agent::Model>(
         &sha,
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         i64::try_from(docx.len()).map_err(invalid)?,
-        &prepared.request.actor,
+        Some(&prepared.request.actor),
     )
     .await
     .map_err(db_error)?;

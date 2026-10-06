@@ -259,14 +259,14 @@ mod tests {
             &digest,
             "application/octet-stream",
             bytes.len() as i64,
-            "system:tender-document-process-v2",
+            None,
         )
         .await
         .unwrap();
         let deletion = platform::abandon_object_upload(
             &admin,
             staging_id,
-            "system:tender-document-process-v2",
+            None,
         )
         .await
         .unwrap()
@@ -324,14 +324,14 @@ mod tests {
             &digest,
             "application/octet-stream",
             bytes.len() as i64,
-            "system:tender-document-process-v2",
+            None,
         )
         .await
         .unwrap();
         let deletion = platform::abandon_object_upload(
             &admin,
             staging_id,
-            "system:tender-document-process-v2",
+            None,
         )
         .await
         .unwrap()
@@ -400,7 +400,7 @@ mod tests {
             &digest,
             "application/pdf",
             bytes.len() as i64,
-            &actor,
+            Some(&actor),
         )
         .await
         .unwrap();
@@ -461,7 +461,7 @@ mod tests {
             &digest,
             "application/pdf",
             bytes.len() as i64,
-            &actor,
+            Some(&actor),
         )
         .await
         .unwrap();
@@ -508,7 +508,7 @@ mod tests {
                 &digest,
                 "application/pdf",
                 bytes.len() as i64,
-                &actor,
+                Some(&actor),
             )
             .await
             .unwrap();

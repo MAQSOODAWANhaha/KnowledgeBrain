@@ -628,7 +628,7 @@ async fn stage_upload(
         digest,
         media_type,
         byte_length,
-        actor,
+        Some(actor),
     )
     .await
     .map_err(map_sql)?;

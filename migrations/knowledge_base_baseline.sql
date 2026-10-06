@@ -2762,7 +2762,7 @@ BEGIN
       RAISE EXCEPTION 'knowledge image object metadata invalid' USING ERRCODE='23514';
     END IF;
     PERFORM kb_object_reference_add(p_object_ref,p_digest,p_media_type,p_byte_length,
-      'knowledge_image_artifact',p_image_artifact_revision_id,'source-media',p_actor);
+      'knowledge_image_artifact',p_image_artifact_revision_id,'source-media',NULL);
 END $$;
 
 CREATE FUNCTION kb_register_knowledge_document_object(
@@ -2780,40 +2780,34 @@ AS $$
 DECLARE
     doc documents%ROWTYPE;
     request_bytes bytea;
-    replay record;
     response_bytes bytea;
 BEGIN
     SELECT * INTO STRICT doc FROM documents WHERE id = p_document_id FOR SHARE;
+    IF EXISTS (
+        SELECT 1 FROM object_owner_references
+         WHERE owner_kind='knowledge_document' AND owner_id=p_document_id AND occurrence='original'
+    ) THEN
+        RETURN doc.object_ref;
+    END IF;
     request_bytes := convert_to(jsonb_build_object(
         'schema_version', 1, 'document_id', p_document_id, 'object_ref', doc.object_ref,
         'digest', doc.file_hash, 'media_type', p_media_type, 'byte_length', doc.file_size
     )::text, 'UTF8');
-    SELECT * INTO replay FROM kb_begin_intent(
-        p_actor, 'knowledge.document.object.register', p_idempotency_key, request_bytes
-    );
-    IF replay.replayed THEN
-        RETURN convert_from(replay.response_bytes, 'UTF8')::kb_object_ref;
-    END IF;
-
     PERFORM kb_object_reference_add(
         doc.object_ref, doc.file_hash, p_media_type, doc.file_size,
-        'knowledge_document', p_document_id, 'original', p_actor
+        'knowledge_document', p_document_id, 'original', NULL
     );
-
     response_bytes := convert_to(doc.object_ref::text, 'UTF8');
     INSERT INTO audit_events(
         id, schema_version, operation, actor_identity, idempotency_key,
         request_sha256, response_sha256, entity_kind, entity_locator,
         after_revision, after_sha256
     ) VALUES (
-        p_audit_id, 1, 'knowledge.document.object.register', p_actor, p_idempotency_key,
+        p_audit_id, 1, 'knowledge.document.object.register', NULL, p_idempotency_key,
         encode(digest(request_bytes, 'sha256'), 'hex'),
         encode(digest(response_bytes, 'sha256'), 'hex'),
         'knowledge_document', jsonb_build_object('document_id', p_document_id),
         1, doc.file_hash
-    );
-    PERFORM kb_complete_intent(
-        p_actor, 'knowledge.document.object.register', p_idempotency_key, 200, response_bytes
     );
     RETURN doc.object_ref;
 END
@@ -2833,42 +2827,36 @@ AS $$
 DECLARE
     doc documents%ROWTYPE;
     request_bytes bytea;
-    replay record;
     response_bytes bytea;
     deletion jsonb;
 BEGIN
     SELECT * INTO STRICT doc FROM documents WHERE id = p_document_id FOR SHARE;
+    IF doc.deleted_at IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM object_owner_references
+         WHERE owner_kind='knowledge_document' AND owner_id=p_document_id AND occurrence='original'
+    ) THEN
+        RETURN NULL;
+    END IF;
     request_bytes := convert_to(jsonb_build_object(
         'schema_version', 1, 'document_id', p_document_id, 'object_ref', doc.object_ref
     )::text, 'UTF8');
-    SELECT * INTO replay FROM kb_begin_intent(
-        p_actor, 'knowledge.document.object.release', p_idempotency_key, request_bytes
-    );
-    IF replay.replayed THEN
-        RETURN convert_from(replay.response_bytes, 'UTF8')::jsonb;
-    END IF;
-
     deletion := kb_object_reference_remove(
         doc.object_ref, 'knowledge_document', p_document_id, 'original', p_audit_id
     );
     UPDATE documents
        SET deleted_at = COALESCE(deleted_at, clock_timestamp()), updated_at = clock_timestamp()
      WHERE id = p_document_id;
-
     response_bytes := convert_to(coalesce(deletion, 'null'::jsonb)::text, 'UTF8');
     INSERT INTO audit_events(
         id, schema_version, operation, actor_identity, idempotency_key,
         request_sha256, response_sha256, entity_kind, entity_locator,
         before_revision, before_sha256
     ) VALUES (
-        p_audit_id, 1, 'knowledge.document.object.release', p_actor, p_idempotency_key,
+        p_audit_id, 1, 'knowledge.document.object.release', NULL, p_idempotency_key,
         encode(digest(request_bytes, 'sha256'), 'hex'),
         encode(digest(response_bytes, 'sha256'), 'hex'),
         'knowledge_document', jsonb_build_object('document_id', p_document_id),
         1, doc.file_hash
-    );
-    PERFORM kb_complete_intent(
-        p_actor, 'knowledge.document.object.release', p_idempotency_key, 200, response_bytes
     );
     RETURN deletion;
 END

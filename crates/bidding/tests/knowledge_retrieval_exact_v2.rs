@@ -397,7 +397,7 @@ async fn add_version(pool: &PgPool, fixture: &mut Fixture, chunks: &[(&str, &str
     sqlx::query(
         "INSERT INTO object_owner_references(
              object_ref,owner_kind,owner_id,occurrence,created_by)
-         VALUES($1,'knowledge_document',$2,'original','system:knowledge-document-ingest')",
+         VALUES($1,'knowledge_document',$2,'original',NULL)",
     )
     .bind(&object_ref)
     .bind(document_id)

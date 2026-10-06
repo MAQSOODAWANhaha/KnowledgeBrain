@@ -2897,7 +2897,7 @@ async fn semantic_index_v2_business_lifecycle_is_fenced() {
 
     sqlx::query("INSERT INTO object_registry(object_ref,digest,media_type,byte_length,state) VALUES($1,$2,'text/plain',0,'available')")
             .bind(&object_ref).bind(&file_hash).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO object_owner_references(object_ref,owner_kind,owner_id,occurrence,created_by) VALUES($1,'knowledge_document',$2,'original','system:knowledge-document-ingest')")
+    sqlx::query("INSERT INTO object_owner_references(object_ref,owner_kind,owner_id,occurrence,created_by) VALUES($1,'knowledge_document',$2,'original',NULL)")
             .bind(&object_ref).bind(document_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO documents(id,product_version_id,title,parse_status,pending_subtasks_count,summary_status,enable_status,index_ready,file_name,file_size,file_hash,object_ref) VALUES($1,$2,'lifecycle','finalizing',1,'pending','enabled',true,$3,0,$4,$5)")
             .bind(document_id).bind(version_id).bind(format!("{document_id}.txt"))

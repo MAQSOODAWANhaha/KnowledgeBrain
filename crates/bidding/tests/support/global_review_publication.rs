@@ -46,12 +46,12 @@ async fn analysis_v2_publication_and_export_basis_preserve_exact_frozen_input() 
             "unread_ground" => changed["analysis_result"]["review"]["coverage"]["text"] = json!({}),
             _ => unreachable!(),
         }
-        let error = sqlx::query_scalar::<_,Value>("SELECT kb_bid_v2_publish_requirement_set_v4($1,$2,$3::kb_sha256,$4,'system:requirement-set-compile-v4'::kb_actor_identity,$5,$6,$7)")
+        let error = sqlx::query_scalar::<_,Value>("SELECT kb_bid_v2_publish_requirement_set_v4($1,$2,$3::kb_sha256,$4,NULL::kb_actor_identity,$5,$6,$7)")
             .bind(request.request_artifact_id).bind(request.request_revision).bind(&request.frozen_input_sha256)
             .bind(changed).bind(owner.attempt).bind(owner.execution_owner_token).bind(None::<Uuid>).fetch_one(&pool).await.unwrap_err();
         assert!(error.to_string().contains("global"), "{case}: {error}");
     }
-    let output: Value = sqlx::query_scalar("SELECT kb_bid_v2_publish_requirement_set_v4($1,$2,$3::kb_sha256,$4,'system:requirement-set-compile-v4'::kb_actor_identity,$5,$6,$7)")
+    let output: Value = sqlx::query_scalar("SELECT kb_bid_v2_publish_requirement_set_v4($1,$2,$3::kb_sha256,$4,NULL::kb_actor_identity,$5,$6,$7)")
         .bind(request.request_artifact_id).bind(request.request_revision).bind(&request.frozen_input_sha256)
         .bind(compiled).bind(owner.attempt).bind(owner.execution_owner_token).bind(None::<Uuid>).fetch_one(&pool).await.unwrap();
     assert_eq!(output["analysis_quality"], "verified", "{output}");

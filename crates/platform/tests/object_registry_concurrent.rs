@@ -61,12 +61,11 @@ async fn add_owner(
     owner_kind: &str,
     owner_id: Uuid,
     occurrence: &str,
-    actor: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "SELECT kb_object_reference_add(
             $1::kb_object_ref,$2::kb_sha256,'application/octet-stream',$3,
-            $4,$5,$6,$7::kb_actor_identity
+            $4,$5,$6,NULL::kb_actor_identity
         )",
     )
     .bind(object.reference)
@@ -75,7 +74,6 @@ async fn add_owner(
     .bind(owner_kind)
     .bind(owner_id)
     .bind(occurrence)
-    .bind(actor)
     .execute(pool)
     .await?;
     Ok(())
@@ -117,15 +115,13 @@ async fn concurrent_add_and_partial_remove_keeps_remaining_owner() {
     let owner_seed = Uuid::new_v4();
     let owner_a = Uuid::new_v4();
     let owner_b = Uuid::new_v4();
-    let actor = "system:knowledge-document-ingest";
-
-    add_owner(&pool, &object, owner_kind, owner_seed, "payload", actor)
+    add_owner(&pool, &object, owner_kind, owner_seed, "payload")
         .await
         .expect("seed owner so FOR UPDATE hits an existing registry row");
 
     let (add_a, add_b) = tokio::join!(
-        add_owner(&pool, &object, owner_kind, owner_a, "payload", actor,),
-        add_owner(&pool, &object, owner_kind, owner_b, "payload", actor,),
+        add_owner(&pool, &object, owner_kind, owner_a, "payload"),
+        add_owner(&pool, &object, owner_kind, owner_b, "payload"),
     );
     add_a.expect("concurrent add owner a");
     add_b.expect("concurrent add owner b");
