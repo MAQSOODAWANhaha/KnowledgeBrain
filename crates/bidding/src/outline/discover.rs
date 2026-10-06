@@ -1,9 +1,10 @@
 //! Reading packs follow the structured document.
 //!
-//! The smallest unit is one heading, or one page when the parser has no heading.
-//! A pack contains whole units only. A byte budget decides whether the next
-//! heading can join the current pack. It never cuts inside a heading, a page,
-//! or a table.
+//! Adjacent sections merge while they fit in the byte budget. A section
+//! that does not fit splits at its own paragraphs, clauses, and table rows.
+//! A continuation table repeats its header as context and does not scan those
+//! cells again. A byte cut happens only inside one clause that is still larger
+//! than the budget, and it stays on a UTF-8 character boundary.
 
 use crate::tender_analysis::{FrozenInput, Source};
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,10 @@ pub struct FormSpan {
     pub form_id: String,
     pub start: usize,
     pub end: usize,
+    /// Header cells repeated on a continuation slice. They are not inside
+    /// `[start, end)` for that slice. Zero when this slice includes the header.
+    #[serde(default)]
+    pub header_cells: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,7 +39,7 @@ pub struct ParsePack {
     pub id: String,
     pub document_id: String,
     pub order: usize,
-    /// Parent heading. Empty at the top of a document or on a page pack.
+    /// Parent heading. Empty when the section has no parent.
     pub context_heading: String,
     pub heading: String,
     pub text: Vec<TextSpan>,
@@ -72,10 +77,13 @@ pub struct PackFeedback {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChapterBlock {
     document_id: String,
+    section_key: String,
     heading: String,
     context_heading: String,
     text: Vec<TextSpan>,
+    source_texts: Vec<String>,
     forms: Vec<FormSpan>,
+    form_columns: Vec<usize>,
     bytes: usize,
 }
 
@@ -225,15 +233,18 @@ impl DiscoverWork {
                 errors.push(field(
                     &path,
                     "outside_pack",
-                    "requirement cites a source outside this heading",
+                    "requirement cites a source outside this reading pack",
                 ));
                 continue;
             };
-            if requirement.start != span.start || requirement.end != span.end {
+            if requirement.start >= requirement.end
+                || requirement.start < span.start
+                || requirement.end > span.end
+            {
                 errors.push(field(
                     &path,
-                    "partial_chapter",
-                    "requirement must cite the whole heading or page, not a byte slice",
+                    "outside_slice",
+                    "requirement must cite text inside the delivered heading slice",
                 ));
             }
         }
@@ -242,23 +253,235 @@ impl DiscoverWork {
 }
 
 pub fn plan_packs(input: &FrozenInput, soft_max_bytes: usize) -> Vec<ParsePack> {
-    let blocks = chapter_blocks(input);
-    let mut packs = Vec::new();
-    let mut group: Vec<ChapterBlock> = Vec::new();
+    let budget = soft_max_bytes.max(1);
+    let mut pieces = Vec::new();
+    for block in chapter_blocks(input) {
+        pieces.extend(split_block(block, budget));
+    }
+    merge_pieces(pieces, budget)
+}
+
+fn merge_pieces(pieces: Vec<ChapterBlock>, budget: usize) -> Vec<ParsePack> {
+    let mut groups: Vec<Vec<ChapterBlock>> = Vec::new();
     let mut bytes = 0usize;
-    for block in blocks {
-        if !group.is_empty() && bytes.saturating_add(block.bytes) > soft_max_bytes.max(1) {
-            packs.push(pack_from(packs.len(), &group));
-            group.clear();
-            bytes = 0;
+    for piece in pieces {
+        let same_document = groups.last().is_some_and(|group| {
+            group
+                .last()
+                .is_some_and(|last| last.document_id == piece.document_id)
+        });
+        if !groups.is_empty() && same_document && bytes.saturating_add(piece.bytes) <= budget {
+            bytes = bytes.saturating_add(piece.bytes);
+            groups.last_mut().expect("group exists").push(piece);
+        } else {
+            bytes = piece.bytes;
+            groups.push(vec![piece]);
         }
-        bytes = bytes.saturating_add(block.bytes);
-        group.push(block);
     }
-    if !group.is_empty() {
-        packs.push(pack_from(packs.len(), &group));
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(order, group)| pack_from(order, &group))
+        .collect()
+}
+
+fn split_block(block: ChapterBlock, budget: usize) -> Vec<ChapterBlock> {
+    if block.bytes <= budget {
+        return vec![block];
     }
-    packs
+    if block.text.len() + block.forms.len() > 1 {
+        let mut pieces = Vec::new();
+        for (span, source_text) in block.text.iter().zip(block.source_texts.iter()) {
+            pieces.extend(split_block(
+                text_piece(&block, span.clone(), span.end - span.start, source_text),
+                budget,
+            ));
+        }
+        for (span, columns) in block.forms.iter().zip(block.form_columns.iter()) {
+            pieces.extend(split_form_piece(&block, span.clone(), *columns, budget));
+        }
+        return pieces;
+    }
+    if let Some(span) = block.text.first() {
+        let source_text = block.source_texts.first().map(String::as_str).unwrap_or("");
+        return split_text_piece(&block, span, source_text, budget);
+    }
+    if let Some(span) = block.forms.first() {
+        let columns = block.form_columns.first().copied().unwrap_or(0);
+        return split_form_piece(&block, span.clone(), columns, budget);
+    }
+    vec![block]
+}
+
+fn text_piece(
+    block: &ChapterBlock,
+    span: TextSpan,
+    bytes: usize,
+    source_text: &str,
+) -> ChapterBlock {
+    ChapterBlock {
+        document_id: block.document_id.clone(),
+        section_key: block.section_key.clone(),
+        heading: block.heading.clone(),
+        context_heading: block.context_heading.clone(),
+        text: vec![span],
+        source_texts: vec![source_text.to_string()],
+        forms: Vec::new(),
+        form_columns: Vec::new(),
+        bytes,
+    }
+}
+
+fn form_piece(block: &ChapterBlock, span: FormSpan, bytes: usize) -> ChapterBlock {
+    ChapterBlock {
+        document_id: block.document_id.clone(),
+        section_key: block.section_key.clone(),
+        heading: block.heading.clone(),
+        context_heading: block.context_heading.clone(),
+        text: Vec::new(),
+        source_texts: Vec::new(),
+        forms: vec![span],
+        form_columns: Vec::new(),
+        bytes,
+    }
+}
+
+fn split_text_piece(
+    block: &ChapterBlock,
+    span: &TextSpan,
+    source_text: &str,
+    budget: usize,
+) -> Vec<ChapterBlock> {
+    let width = span.end - span.start;
+    if width <= budget {
+        return vec![text_piece(block, span.clone(), width, source_text)];
+    }
+    let slice = source_text.get(span.start..span.end).unwrap_or("");
+    ranges_for_text(slice, budget)
+        .into_iter()
+        .map(|(start, end)| {
+            text_piece(
+                block,
+                TextSpan {
+                    source_id: span.source_id.clone(),
+                    start: span.start + start,
+                    end: span.start + end,
+                },
+                end - start,
+                source_text,
+            )
+        })
+        .collect()
+}
+
+fn split_form_piece(
+    block: &ChapterBlock,
+    span: FormSpan,
+    columns: usize,
+    budget: usize,
+) -> Vec<ChapterBlock> {
+    let width = span.end.saturating_sub(span.start);
+    if columns == 0 || width <= budget || width % columns != 0 {
+        return vec![form_piece(
+            block,
+            span.clone(),
+            width.saturating_add(span.header_cells),
+        )];
+    }
+    let mut pieces = Vec::new();
+    let mut cursor = span.start;
+    let mut first = true;
+    while cursor < span.end {
+        let repeated = if first && span.header_cells == 0 {
+            0
+        } else {
+            columns
+        };
+        let room = budget.saturating_sub(repeated).max(columns);
+        let mut take = columns;
+        while take + columns <= span.end - cursor && take + columns <= room {
+            take += columns;
+        }
+        let end = cursor + take;
+        let header_cells = if first { span.header_cells } else { columns };
+        let piece = FormSpan {
+            form_id: span.form_id.clone(),
+            start: cursor,
+            end,
+            header_cells,
+        };
+        pieces.push(form_piece(block, piece, (end - cursor) + header_cells));
+        cursor = end;
+        first = false;
+    }
+    pieces
+}
+
+fn clause_atoms(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    let mut index = 0usize;
+    for ch in text.chars() {
+        index += ch.len_utf8();
+        if ch == '\n' || ch == '。' || ch == '；' {
+            ranges.push((start, index));
+            start = index;
+        }
+    }
+    if start < text.len() {
+        ranges.push((start, text.len()));
+    }
+    ranges
+}
+
+fn char_chunks(text: &str, start: usize, end: usize, budget: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut cursor = start;
+    while cursor < end {
+        let mut limit = cursor.saturating_add(budget).min(end);
+        if limit < end {
+            while limit > cursor && !text.is_char_boundary(limit) {
+                limit -= 1;
+            }
+        }
+        if limit == cursor {
+            let ch = text[cursor..].chars().next().expect("cursor is in text");
+            limit = cursor + ch.len_utf8();
+        }
+        out.push((cursor, limit));
+        cursor = limit;
+    }
+    out
+}
+
+fn ranges_for_text(text: &str, budget: usize) -> Vec<(usize, usize)> {
+    if text.len() <= budget {
+        return vec![(0, text.len())];
+    }
+    let mut ranges = Vec::new();
+    let mut cursor = 0usize;
+    let mut packed = 0usize;
+    for (start, end) in clause_atoms(text) {
+        let len = end - start;
+        if len > budget {
+            if packed > cursor {
+                ranges.push((cursor, packed));
+            }
+            ranges.extend(char_chunks(text, start, end, budget));
+            cursor = end;
+            packed = end;
+            continue;
+        }
+        if packed > cursor && packed - cursor + len > budget {
+            ranges.push((cursor, packed));
+            cursor = start;
+        }
+        packed = end;
+    }
+    if packed > cursor {
+        ranges.push((cursor, packed));
+    }
+    ranges
 }
 
 fn chapter_blocks(input: &FrozenInput) -> Vec<ChapterBlock> {
@@ -268,18 +491,31 @@ fn chapter_blocks(input: &FrozenInput) -> Vec<ChapterBlock> {
     });
     let mut blocks: Vec<ChapterBlock> = Vec::new();
     for source in sources {
-        let heading = structural_heading(source);
-        let context_heading = parent_heading(&heading);
-        let same = blocks.last().is_some_and(|block| {
-            block.document_id == source.document_id && block.heading == heading
-        });
+        let key = section_key(source);
+        let heading = display_heading(source);
+        let same = match &key {
+            Some(key) => blocks.last().is_some_and(|block| {
+                block.document_id == source.document_id && block.section_key == *key
+            }),
+            None => blocks
+                .last()
+                .is_some_and(|block| block.document_id == source.document_id),
+        };
         if !same {
+            let heading = if key.is_some() {
+                heading
+            } else {
+                String::new()
+            };
             blocks.push(ChapterBlock {
                 document_id: source.document_id.clone(),
-                heading,
-                context_heading,
+                section_key: key.clone().unwrap_or_default(),
+                heading: heading.clone(),
+                context_heading: parent_heading(&heading),
                 text: Vec::new(),
+                source_texts: Vec::new(),
                 forms: Vec::new(),
+                form_columns: Vec::new(),
                 bytes: 0,
             });
         }
@@ -291,6 +527,7 @@ fn chapter_blocks(input: &FrozenInput) -> Vec<ChapterBlock> {
             start: 0,
             end,
         });
+        block.source_texts.push(source.text.clone());
         for form in input
             .structured_forms
             .iter()
@@ -299,12 +536,15 @@ fn chapter_blocks(input: &FrozenInput) -> Vec<ChapterBlock> {
             let Some(form_id) = form["form_definition_revision_id"].as_str() else {
                 continue;
             };
+            let columns = form["definition"]["column_count"].as_u64().unwrap_or(0) as usize;
             let cells = form_cell_count(&form["definition"]);
             block.forms.push(FormSpan {
                 form_id: form_id.to_string(),
                 start: 0,
                 end: cells,
+                header_cells: 0,
             });
+            block.form_columns.push(columns);
             block.bytes = block.bytes.saturating_add(cells);
         }
     }
@@ -331,15 +571,23 @@ fn pack_from(order: usize, blocks: &[ChapterBlock]) -> ParsePack {
     }
 }
 
-fn structural_heading(source: &Source) -> String {
+fn section_key(source: &Source) -> Option<String> {
+    if let Some(section) = source.locator["section_ordinal"].as_u64() {
+        return Some(format!("section:{section}"));
+    }
     let heading = source.locator["heading_path"].as_str().unwrap_or("").trim();
     if !heading.is_empty() {
-        return heading.to_string();
+        return Some(format!("heading:{heading}"));
     }
-    if let Some(page) = source.locator["page_ordinal"].as_u64() {
-        return format!("page:{page}");
-    }
-    format!("unit:{}", source.source_unit_revision_id)
+    None
+}
+
+fn display_heading(source: &Source) -> String {
+    source.locator["heading_path"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 fn parent_heading(heading: &str) -> String {
@@ -410,19 +658,43 @@ mod tests {
         }
     }
 
+    fn located(id: &str, ordinal: usize, text: &str, locator: serde_json::Value) -> Source {
+        Source {
+            source_unit_revision_id: id.into(),
+            document_id: "doc".into(),
+            text: text.into(),
+            locator,
+            ordinal,
+        }
+    }
+
     #[test]
-    fn a_heading_stays_whole_when_the_byte_budget_is_smaller_than_the_text() {
-        let text = "投标函".repeat(20);
-        let frozen = input(vec![source("s1", 0, &text, "第一章 > 投标函")], vec![]);
-        let packs = plan_packs(&frozen, 4);
-        assert_eq!(packs.len(), 1);
+    fn a_section_splits_on_clauses_before_characters() {
+        let frozen = input(vec![source("s1", 0, "甲。乙", "第一章 > 投标函")], vec![]);
+        let packs = plan_packs(&frozen, 6);
+        assert_eq!(packs.len(), 2);
         assert_eq!(packs[0].text[0].start, 0);
-        assert_eq!(packs[0].text[0].end, text.len());
+        assert_eq!(packs[0].text[0].end, "甲。".len());
+        assert_eq!(packs[1].text[0].start, "甲。".len());
+        assert_eq!(packs[1].text[0].end, "甲。乙".len());
         assert_eq!(packs[0].context_heading, "第一章");
     }
 
     #[test]
-    fn adjacent_headings_merge_only_on_chapter_boundaries() {
+    fn a_clause_larger_than_the_budget_splits_on_a_character_boundary() {
+        let frozen = input(vec![source("s1", 0, "投标", "第一章")], vec![]);
+        let packs = plan_packs(&frozen, 4);
+        assert_eq!(
+            packs
+                .iter()
+                .map(|pack| (pack.text[0].start, pack.text[0].end))
+                .collect::<Vec<_>>(),
+            vec![(0, "投".len()), ("投".len(), "投标".len())]
+        );
+    }
+
+    #[test]
+    fn adjacent_sections_merge_under_the_budget() {
         let frozen = input(
             vec![
                 source("a", 0, "商务", "第一章 > 投标函"),
@@ -435,13 +707,8 @@ mod tests {
                 "definition": {"row_count": 2, "column_count": 2}
             })],
         );
-        let separate = plan_packs(&frozen, 4);
-        assert_eq!(separate.len(), 3);
-        assert!(
-            separate
-                .iter()
-                .all(|pack| pack.text.iter().all(|span| span.start == 0))
-        );
+        let separate = plan_packs(&frozen, 20);
+        assert_eq!(separate.len(), 2);
         let price = separate
             .iter()
             .find(|pack| pack.heading.contains("报价"))
@@ -451,7 +718,8 @@ mod tests {
             vec![FormSpan {
                 form_id: "form-price".into(),
                 start: 0,
-                end: 4
+                end: 4,
+                header_cells: 0,
             }]
         );
 
@@ -462,11 +730,69 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_table_splits_by_body_row_and_does_not_rescan_the_header() {
+        let frozen = input(
+            vec![source("c", 0, "", "第二章 > 报价")],
+            vec![json!({
+                "form_definition_revision_id": "form-price",
+                "source_unit_revision_id": "c",
+                "definition": {"row_count": 3, "column_count": 2}
+            })],
+        );
+        let packs = plan_packs(&frozen, 4);
+        let forms: Vec<_> = packs.iter().flat_map(|pack| pack.forms.clone()).collect();
+        assert_eq!(
+            forms,
+            vec![
+                FormSpan {
+                    form_id: "form-price".into(),
+                    start: 0,
+                    end: 4,
+                    header_cells: 0,
+                },
+                FormSpan {
+                    form_id: "form-price".into(),
+                    start: 4,
+                    end: 6,
+                    header_cells: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_same_section_continues_across_pages_and_keeps_its_table() {
+        let frozen = input(
+            vec![
+                located(
+                    "a",
+                    0,
+                    "甲",
+                    json!({"section_ordinal": 0, "heading_path": "第一章", "page_ordinal": 0}),
+                ),
+                located("table", 1, "", json!({"page_ordinal": 0})),
+                located(
+                    "b",
+                    2,
+                    "乙",
+                    json!({"section_ordinal": 0, "heading_path": "第一章", "page_ordinal": 1}),
+                ),
+            ],
+            vec![],
+        );
+        let packs = plan_packs(&frozen, 10_000);
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].heading, "第一章");
+        assert_eq!(packs[0].text.len(), 3);
+        assert!(!packs[0].heading.contains("page:"));
+    }
+
+    #[test]
     fn a_failed_pack_does_not_commit_or_clear_another_pack() {
         let frozen = input(
             vec![
-                source("a", 0, "商务", "第一章 > 投标函"),
-                source("b", 1, "技术", "第二章 > 技术方案"),
+                source("a", 0, "A", "第一章 > 投标函"),
+                source("b", 1, "B", "第二章 > 技术方案"),
             ],
             vec![],
         );
@@ -481,7 +807,7 @@ mod tests {
                     description: "投标函".into(),
                     source_id: "a".into(),
                     start: 0,
-                    end: "商务".len(),
+                    end: 1,
                 }],
             },
         )
@@ -508,6 +834,6 @@ mod tests {
         assert_eq!(work.requirement_count(), 1);
         let session = work.session("pack-1").unwrap();
         assert!(session.get("feedback").is_some());
-        assert!(!session.to_string().contains("商务"));
+        assert!(!session.to_string().contains("投标函"));
     }
 }

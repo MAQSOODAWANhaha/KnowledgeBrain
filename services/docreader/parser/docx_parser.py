@@ -25,6 +25,7 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 from docreader.config import CONFIG
+from docreader.parser.structure import numbered_headings_flood, structural_heading
 from docreader.models.document import (
     AttachmentLocator,
     Document as DocumentModel,
@@ -89,15 +90,39 @@ def _docx_package_image_payloads(content: bytes) -> Dict[str, str]:
     return payloads
 
 
-def _heading_level(paragraph: Paragraph) -> Optional[int]:
-    style_name = str((paragraph.style.name if paragraph.style is not None else "") or "")
-    match = re.match(r"^heading\s+(\d+)$", style_name.strip(), re.IGNORECASE)
-    if match is None:
+def _style_or_outline_level(paragraph: Paragraph) -> Optional[int]:
+    """Word outline level, including localized style names such as 「标题 1」."""
+    p_pr = paragraph._p.pPr
+    if p_pr is not None and p_pr.outlineLvl is not None and p_pr.outlineLvl.val is not None:
+        return max(1, int(p_pr.outlineLvl.val) + 1)
+    style = paragraph.style
+    if style is None:
         return None
-    try:
-        return max(1, int(match.group(1)))
-    except ValueError:
+    style_id = str(getattr(style, "style_id", "") or "")
+    style_match = re.match(r"^Heading(\d+)$", style_id, re.IGNORECASE)
+    if style_match is None:
+        style_name = str(style.name or "")
+        style_match = re.match(r"^(?:heading|标题)\s*(\d+)$", style_name.strip(), re.IGNORECASE)
+    if style_match is not None:
+        return max(1, int(style_match.group(1)))
+    style_pr = style.element.find(qn("w:pPr"))
+    outline = None if style_pr is None else style_pr.find(qn("w:outlineLvl"))
+    if outline is None:
         return None
+    raw = outline.get(qn("w:val"))
+    if raw is None:
+        return None
+    return max(1, int(raw) + 1)
+
+
+def _heading_level(paragraph: Paragraph, allow_numbered: bool = True) -> Optional[int]:
+    level = _style_or_outline_level(paragraph)
+    if level is not None:
+        return level
+    found = structural_heading(paragraph.text or "", allow_numbered)
+    if found is None:
+        return None
+    return found[0]
 
 
 def _drawing_units(
@@ -244,6 +269,7 @@ def _docx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
     """Extract deterministic typed occurrences in one pass over the DOCX body."""
     doc = Document(BytesIO(content))
     units: List[StructuredSourceUnit] = []
+    allow_numbered = not numbered_headings_flood([paragraph.text or "" for paragraph in doc.paragraphs])
     heading_stack: List[str] = []
     pending_paragraphs: List[str] = []
     current_section: Optional[int] = None
@@ -284,7 +310,7 @@ def _docx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
         if child.tag == qn("w:p"):
             paragraph = Paragraph(child, doc)
             text = paragraph.text.strip()
-            level = _heading_level(paragraph)
+            level = _heading_level(paragraph, allow_numbered)
             if level is not None and text:
                 if pending_paragraphs:
                     flush_section()
@@ -566,11 +592,18 @@ class DocxParser(BaseParser):
             para_count = len(doc.paragraphs)
             logger.info(f"Extracting text from {para_count} paragraphs")
             para_with_text = 0
+            allow_numbered = not numbered_headings_flood(
+                [item.text or "" for item in doc.paragraphs]
+            )
             for i, para in enumerate(doc.paragraphs):
                 if i % 100 == 0:
                     logger.info(f"Processing paragraph {i + 1}/{para_count}")
                 if para.text.strip():
-                    text_parts.append(para.text.strip())
+                    text = para.text.strip()
+                    level = _heading_level(para, allow_numbered)
+                    if level is not None:
+                        text = f"{'#' * min(level, 6)} {text}"
+                    text_parts.append(text)
                     para_with_text += 1
 
             logger.info(f"Extracted text from {para_with_text}/{para_count} paragraphs")
@@ -1709,6 +1742,7 @@ def _extract_page_content_in_process(
     # Instead of separate collections, track content in paragraph sequence
     content_sequence = []
     current_text = ""
+    allow_numbered = not numbered_headings_flood([item.text or "" for item in doc.paragraphs])
 
     processed_paragraphs = 0
     paragraphs_with_text = 0
@@ -1724,11 +1758,14 @@ def _extract_page_content_in_process(
         paragraph = doc.paragraphs[para_idx]
         processed_paragraphs += 1
 
-        # Extract text content
+        # Extract text content. Chapter lines become ATX headings so the
+        # knowledge chunker sees the same sections as the structured units.
         text = paragraph.text.strip()
         if text:
-            # Clean text
             cleaned_text = re.sub(r"\u3000", " ", text).strip()
+            level = _heading_level(paragraph, allow_numbered)
+            if level is not None and cleaned_text:
+                cleaned_text = f"{'#' * min(level, 6)} {cleaned_text}"
             current_text += cleaned_text + "\n"
             paragraphs_with_text += 1
 

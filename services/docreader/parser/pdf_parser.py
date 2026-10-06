@@ -28,8 +28,8 @@ from typing import Optional
 from docreader.config import CONFIG
 from docreader.models.document import (
     Document,
+    DocumentLocator,
     ImageLocator,
-    PageLocator,
     PageTableLocator,
     PdfTableCell,
     StructuredSourceUnit,
@@ -40,6 +40,7 @@ from docreader.models.document import (
 from docreader.parser.base_parser import BaseParser
 from docreader.parser.concurrency import parser_worker_limit
 from docreader.parser.image_identity import image_pixel_identity
+from docreader.parser.structure import numbered_headings_flood, promote_structural_headings
 from docreader.parser.pdf_tables import (
     PdfTableGrid,
     chars_outside_tables,
@@ -1441,6 +1442,80 @@ def _strip_repeating_lines(texts: list, classes: list) -> list:
     return cleaned
 
 
+# A section is a heading and the body that follows it, including across pages.
+# Knowledge chunks the markdown on these ATX headings. Bidding reads the same
+# boundary as DocumentLocator.section_ordinal. A page is not a section.
+_ATX_HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)\s*#*\s*$")
+
+
+def _atx_heading(line: str) -> Optional[tuple[int, str]]:
+    match = _ATX_HEADING.match(line.strip())
+    if not match:
+        return None
+    title = match.group(2).strip()
+    if not title:
+        return None
+    return len(match.group(1)), title
+
+
+def _sectionize_pages(
+    texts: list[str],
+) -> tuple[list[str], list[list[tuple[int, str, str]]]]:
+    """Split page texts into sections that continue until the next heading.
+
+    Each fragment is ``(section_ordinal, heading_path, text)`` for one page.
+    The same ``section_ordinal`` repeats on the following page when the heading
+    does not. Empty pages produce no fragment.
+    """
+    allow_numbered = not numbered_headings_flood(texts)
+    promoted = [promote_structural_headings(text, allow_numbered) for text in texts]
+    fragments: list[list[tuple[int, str, str]]] = [[] for _ in promoted]
+    stack: list[str] = []
+    next_ordinal = 0
+    current: Optional[tuple[int, str]] = None
+    buf: list[str] = []
+
+    def heading_path() -> str:
+        return " > ".join(part for part in stack if part)
+
+    def flush(page: int) -> None:
+        nonlocal buf
+        if current is None:
+            buf = []
+            return
+        text = "\n".join(buf).strip()
+        buf = []
+        if not text:
+            return
+        fragments[page].append((current[0], current[1], text))
+
+    def open_section(level: int, title: str) -> None:
+        nonlocal stack, next_ordinal, current
+        if level <= 0:
+            stack = []
+        else:
+            stack = stack[: level - 1]
+            while len(stack) < level - 1:
+                stack.append("")
+            stack.append(title)
+        current = (next_ordinal, heading_path())
+        next_ordinal += 1
+
+    for page, text in enumerate(promoted):
+        for line in text.splitlines():
+            atx = _atx_heading(line)
+            if atx is not None:
+                flush(page)
+                open_section(atx[0], atx[1])
+                buf = [line]
+                continue
+            if line.strip() and current is None:
+                open_section(0, "")
+            buf.append(line)
+        flush(page)
+    return promoted, fragments
+
+
 def _pdf_image_unit(
     key: str,
     ordinal: int,
@@ -1722,7 +1797,15 @@ class PDFParser(BaseParser):
         finally:
             _close_pdfium_resource(pdf)
 
-        # Assemble markdown in reading order.
+        # Sections follow headings across pages. Scanned pages contribute an
+        # image, not a fake text section, and do not reset the open section.
+        readable = [
+            texts[i] if classes[i] == "text" else "" for i in range(page_count)
+        ]
+        promoted, section_fragments = _sectionize_pages(readable)
+
+        # Assemble markdown in reading order. ATX headings are the section
+        # boundaries the knowledge chunker and the bidding outline both read.
         embedded_count = 0
         vector_figure_count = 0
         blocks = []
@@ -1734,7 +1817,7 @@ class PDFParser(BaseParser):
                 # SECTION stays leftover. Markdown serializes leftover + GFM cells
                 # so knowledge ingest does not drop tables.
                 parts = []
-                leftover = texts[i].strip()
+                leftover = promoted[i].strip()
                 if leftover:
                     parts.append(leftover)
                 for grid in page_tables.get(i, []):
@@ -1775,14 +1858,6 @@ class PDFParser(BaseParser):
         )
         structured_units: list[StructuredSourceUnit] = []
         for i in range(page_count):
-            if self._output_inventory:
-                structured_units.append(
-                    StructuredSourceUnit(
-                        key=f"page:{i}:section:0", ordinal=len(structured_units),
-                        kind=StructuredSourceUnitKind.SECTION, text=texts[i],
-                        locator=PageLocator(page_ordinal=i),
-                    )
-                )
             if classes[i] == "scanned":
                 ref_path = f"images/{base_name}_page_{i+1}.jpg"
                 structured_units.append(
@@ -1795,15 +1870,17 @@ class PDFParser(BaseParser):
                     )
                 )
             else:
-                leftover = texts[i].strip()
-                if leftover and not self._output_inventory:
+                for section_ordinal, heading_path, text in section_fragments[i]:
                     structured_units.append(
                         StructuredSourceUnit(
-                            key=f"page:{i}:section:0",
+                            key=f"section:{section_ordinal}:page:{i}",
                             ordinal=len(structured_units),
                             kind=StructuredSourceUnitKind.SECTION,
-                            text=leftover,
-                            locator=PageLocator(page_ordinal=i),
+                            text=text,
+                            locator=DocumentLocator(
+                                section_ordinal=section_ordinal,
+                                heading_path=heading_path,
+                            ),
                         )
                     )
                 for table_ordinal, grid in enumerate(page_tables.get(i, [])):

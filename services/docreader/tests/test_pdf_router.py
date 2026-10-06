@@ -5,6 +5,7 @@ from PIL import Image
 
 from docreader.parser.pdf_parser import (
     PDFParser,
+    _sectionize_pages,
     _classify_page,
     _filter_reading_columns,
     _group_lines,
@@ -157,6 +158,24 @@ class HeadingDetectionTest(unittest.TestCase):
         lines = [_line(f"line {i}", 10.0) for i in range(6)]
         md = _segments_to_markdown(lines)
         self.assertNotIn("#", md)
+
+    def test_chapter_text_continues_across_pages_until_the_next_chapter(self):
+        promoted, fragments = _sectionize_pages([
+            "第一章 招标公告\n投标人应具备相应资格。",
+            "资格证明材料见附件。",
+            "第二章 评标办法\n综合评分。",
+        ])
+        self.assertTrue(promoted[0].startswith("# 第一章 招标公告"))
+        self.assertEqual(
+            [(item[0], item[1]) for page in fragments for item in page],
+            [
+                (0, "第一章 招标公告"),
+                (0, "第一章 招标公告"),
+                (1, "第二章 评标办法"),
+            ],
+        )
+        self.assertIn("资格证明材料见附件。", fragments[1][0][2])
+        self.assertIn("综合评分。", fragments[2][0][2])
 
     def test_skips_sentence_like_long_lines(self):
         # Large but ends with a period and is long -> body text, not a heading.

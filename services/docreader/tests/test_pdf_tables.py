@@ -19,7 +19,6 @@ from docreader.parser.pdf_tables import (
     widths_mm,
 )
 from docreader.models.document import (
-    PageLocator,
     PageTableLocator,
     PdfTableCell as ModelCell,
     StructuredSourceUnitKind,
@@ -288,8 +287,11 @@ def test_price_title_stays_outside_grid_and_parameters_keep_their_cell() -> None
     assert cells[1, 1] == "防火墙" and cells[1, 5] == "80"
     assert "20Gbps" in cells[1, 2] and "软件及特征库升级" in cells[1, 2]
     assert all(cells[1, column] == "" for column in (3, 4, 6, 7))
-    page = next(u.text for u in parsed.structured_source_units
-                if isinstance(u.locator, PageLocator) and u.locator.page_ordinal == 81)
+    page = "\n".join(
+        u.text or ""
+        for u in parsed.structured_source_units
+        if u.kind is StructuredSourceUnitKind.SECTION
+    )
     assert "单位：元人民币" in "".join(page.split())
     assert "单位：元人民币" not in "".join(cells.values())
 

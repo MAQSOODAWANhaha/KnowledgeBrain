@@ -108,14 +108,28 @@ def test_docx_preserves_stories_empty_paragraphs_grid_bookmarks_and_omissions():
 def test_pdf_preserves_all_pages_and_repeated_header_page_numbers(blank):
     result = parse("final.pdf", pdf_fixture(blank))
     receipt = manifest(result)
-    pages = [unit for unit in result.structured_source_units if unit.key.endswith(":section:0")]
-    assert receipt["page_count"] == len(pages) == 4
+    sections = [
+        unit for unit in result.structured_source_units
+        if unit.kind.value == "section"
+    ]
+    images = [
+        unit for unit in result.structured_source_units
+        if unit.kind.value == "image_region"
+    ]
+    assert receipt["page_count"] == 4
+    assert len(images) >= 4
     assert len(receipt["image_sha256"]) >= 4
-    assert [p.locator.page_ordinal for p in pages] == list(range(4))
     if blank:
-        assert all(not page.text for page in pages)
+        assert sections == []
     else:
-        assert all("Repeating header" in page.text and str(i + 1) in page.text for i, page in enumerate(pages))
+        # Uniform body text is one section that continues across pages.
+        assert {unit.locator.section_ordinal for unit in sections} == {0}
+        assert all(unit.locator.heading_path == "" for unit in sections)
+        blob = "\n".join(unit.text for unit in sections)
+        for index in range(4):
+            assert "Repeating header" in blob
+            assert f"Body {index}" in blob
+            assert str(index + 1) in blob
 
 
 def test_readstream_keeps_all_blank_pdf_profile_receipt():
@@ -130,7 +144,7 @@ def test_readstream_keeps_all_blank_pdf_profile_receipt():
                 config=ReadConfig(parser_engine="builtin", parser_engine_overrides={"output_inventory": "v1"}),
             )))
         assert not frames[0].meta.error
-        assert len(frames[0].meta.structured_source_units) == 8
+        assert len(frames[0].meta.structured_source_units) == 4
         assert frames[0].meta.image_count == 4
         assert len(frames) == 5
         assert json.loads(frames[0].meta.metadata["output_inventory_manifest"])["page_count"] == 4

@@ -513,10 +513,17 @@ def parse_output_inventory(file_name, file_type, content):
         document = PDFParser(file_name=file_name, file_type="pdf", output_inventory=True).parse_into_text(content)
         entries = []
         for unit in document.structured_source_units:
-            page = unit.locator.page_ordinal
+            page = getattr(unit.locator, "page_ordinal", None)
+            if page is None and ":page:" in unit.key:
+                tail = unit.key.rsplit(":page:", 1)[-1]
+                page = int(tail) if tail.isdigit() else None
+            if page is None:
+                part = f"pdf:section:{getattr(unit.locator, 'section_ordinal', unit.ordinal)}"
+            else:
+                part = f"pdf:page:{page + 1}"
             image = unit.kind == StructuredSourceUnitKind.IMAGE_REGION
-            entries.append(_entry(unit, f"pdf:page:{page + 1}", unit.ordinal,
-                                  "image" if image else "table" if unit.grid else "pdf_page",
+            kind = "image" if image else "table" if unit.grid else "section"
+            entries.append(_entry(unit, part, unit.ordinal, kind,
                                   reason="image requires visual review" if image else None))
         parser = f"docreader-output-inventory-v1/pdfium/{version('pypdfium2')}"
         config = {"profile": PROFILE, "preserve_all_pages": True, "preserve_page_images": True, "text_cleaning": False}
