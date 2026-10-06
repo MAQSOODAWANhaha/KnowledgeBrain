@@ -3,6 +3,7 @@
 //! | Module | Responsibility |
 //! | --- | --- |
 //! | `parse` | Complete structured parse. Image OCR runs concurrently. |
+//! | `discover` | Reading packs follow heading and page boundaries. |
 //! | `chapters` | Stable chapter identity and attachment-table mapping. |
 //! | `template` | Prescribed template slots. Bidder blanks stay empty. |
 //! | `agent` | One duty per turn: discover, organize, map attachments, check, or template. |
@@ -11,6 +12,7 @@
 
 pub mod agent;
 pub mod chapters;
+pub mod discover;
 pub mod parse;
 mod template;
 

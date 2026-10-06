@@ -48,7 +48,8 @@ pub fn deny(duty: Duty, tool: &str, unmapped_attachments: bool) -> Option<&'stat
         return Some("attachment tables must be mapped to a chapter before the outline can finish");
     }
     let allowed: &[&str] = match duty {
-        Duty::Discover | Duty::Organize => DISCOVER,
+        Duty::Discover => DISCOVER,
+        Duty::Organize => ORGANIZE,
         Duty::MapAttachments => MAP_ATTACHMENTS,
         Duty::Check => CHECK,
         Duty::Template => TEMPLATE,
@@ -90,9 +91,31 @@ const DRAFT_TOOLS: &[&str] = &[
     "omit_outline_item",
     "put_chapter_template",
     "skip_chapter_content",
+    "submit_pack_scan",
+    "repair_pack_scan",
 ];
 
 const DISCOVER: &[&str] = &[
+    "collection_index",
+    "source_index",
+    "search_sources",
+    "read_source",
+    "read_form",
+    "read_form_cell",
+    "read_source_view",
+    "submit_outline_scan",
+    "read_outline",
+    "read_outline_fragment",
+    "assign_outline_fragments",
+    "put_outline_item",
+    "put_outline_items",
+    "finish_outline",
+    "omit_outline_item",
+    "submit_pack_scan",
+    "repair_pack_scan",
+];
+
+const ORGANIZE: &[&str] = &[
     "collection_index",
     "source_index",
     "search_sources",
@@ -156,8 +179,12 @@ mod tests {
         let discover = duty(DraftStage::Outline, Phase::Discover, false);
         assert!(deny(discover, "put_chapter_template", false).is_some());
         assert!(deny(discover, "put_outline_items", false).is_none());
+        assert!(deny(discover, "submit_pack_scan", false).is_none());
+        let organize = duty(DraftStage::Outline, Phase::Outline, false);
+        assert!(deny(organize, "submit_pack_scan", false).is_some());
         let template = duty(DraftStage::Fill, Phase::Complete, false);
         assert_eq!(template, Duty::Template);
+        assert!(deny(template, "submit_pack_scan", false).is_some());
         assert!(deny(template, "put_outline_items", false).is_some());
         assert!(deny(template, "read_source", false).is_none());
         assert!(deny(template, "put_chapter_template", false).is_none());
