@@ -631,7 +631,7 @@ where
         // DOCX creates empty owning sections for leading tables/forms/images.
         // Keep them in the frozen parser snapshot, but do not expose structural
         // anchors as empty reading evidence. Children retain their original locators.
-        let content_sections = crate::phase1::parse::content_sections(parser_units);
+        let content_sections = crate::outline::parse::content_sections(parser_units);
         let prepared_images = match self
             .prepare_images(
                 document,
@@ -759,8 +759,8 @@ where
             .iter()
             .map(|unit| unit.source_span_v2.parser_unit_key.clone())
             .collect();
-        let expected = crate::phase1::parse::expected_unit_keys(parser_units, &content_sections);
-        crate::phase1::parse::assert_complete(&expected, &published)
+        let expected = crate::outline::parse::expected_unit_keys(parser_units, &content_sections);
+        crate::outline::parse::assert_complete(&expected, &published)
             .map_err(|error| TenderDocumentProcessError::StructuredSource(error))?;
 
         image_set_digests.sort();
@@ -851,7 +851,7 @@ where
             ));
         }
         let results: Vec<_> = futures::stream::iter(pending)
-            .buffer_unordered(crate::phase1::parse::image_concurrency())
+            .buffer_unordered(crate::outline::parse::image_concurrency())
             .collect()
             .await;
         let staged = std::mem::take(&mut *staged_gate.lock().expect("image staging lock"));

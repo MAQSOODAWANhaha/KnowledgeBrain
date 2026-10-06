@@ -17,7 +17,7 @@ const CLOSED: &[&str] = &[
 
 pub fn deny(tool: &str) -> Option<&'static str> {
     if CLOSED.contains(&tool) {
-        Some("phase 2 cannot parse the tender, edit chapters, or rewrite template content")
+        Some("response generation cannot parse the tender, edit chapters, or rewrite template content")
     } else {
         None
     }

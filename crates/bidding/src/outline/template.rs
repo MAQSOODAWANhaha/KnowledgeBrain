@@ -1,7 +1,7 @@
 //! Phase 1: project a completed tender outline into chapters and template slots.
 
 use super::{
-    ChapterOutline, ChapterPurpose, OpenIssue, Phase1Artifact, SCHEMA_VERSION, SlotKind,
+    ChapterOutline, ChapterPurpose, OpenIssue, OutlineArtifact, SCHEMA_VERSION, SlotKind,
     TemplateContent, validate_artifact,
 };
 use crate::tender_analysis::draft::{BodyStatus, ChapterPurpose as PlanPurpose, DraftStatus};
@@ -16,9 +16,9 @@ pub const COVER_CHAPTER_ID: &str = "cover";
 ///
 /// Bidder and signature slots stay empty. Fixed wording is copied from the
 /// frozen tender span or grid cell, never from company knowledge.
-pub fn project(input: &FrozenInput, result: &AnalysisResult) -> Result<Phase1Artifact, String> {
+pub fn project(input: &FrozenInput, result: &AnalysisResult) -> Result<OutlineArtifact, String> {
     if result.analysis.outline.phase != Phase::Complete {
-        return Err("phase 1 outline is not complete".into());
+        return Err("outline is not complete".into());
     }
     let mut chapters = Vec::new();
     let mut templates = Vec::new();
@@ -42,7 +42,7 @@ pub fn project(input: &FrozenInput, result: &AnalysisResult) -> Result<Phase1Art
             continue;
         }
         if item.id.is_empty() || item.id == COVER_CHAPTER_ID || item.title.is_empty() {
-            return Err("phase 1 chapter identity is invalid".into());
+            return Err("outline chapter identity is invalid".into());
         }
         let purpose = match item.purpose {
             PlanPurpose::Group => ChapterPurpose::Group,
@@ -92,7 +92,7 @@ pub fn project(input: &FrozenInput, result: &AnalysisResult) -> Result<Phase1Art
         })
         .collect();
     open_issues.sort_by(|left, right| left.id.cmp(&right.id));
-    let artifact = Phase1Artifact {
+    let artifact = OutlineArtifact {
         schema_version: SCHEMA_VERSION,
         project_id: input.project_id.clone(),
         frozen_input_sha256: result.frozen_input_sha256.clone(),
@@ -101,7 +101,7 @@ pub fn project(input: &FrozenInput, result: &AnalysisResult) -> Result<Phase1Art
         open_issues,
     };
     validate_artifact(&artifact)?;
-    if let Some(form_id) = super::outline::unmapped_attachment_forms(
+    if let Some(form_id) = super::chapters::unmapped_attachment_forms(
         input,
         &result.analysis.draft_plan,
         &result.analysis.records,

@@ -1,16 +1,16 @@
-//! Phase 1: parse the tender, then publish outline chapters and template content.
+//! Outline: parse the tender, then publish chapters and template content.
 //!
 //! | Module | Responsibility |
 //! | --- | --- |
 //! | `parse` | Complete structured parse. Image OCR runs concurrently. |
-//! | `outline` | Stable chapter identity and attachment-table mapping. |
+//! | `chapters` | Stable chapter identity and attachment-table mapping. |
 //! | `template` | Prescribed template slots. Bidder blanks stay empty. |
 //! | `agent` | One duty per turn: discover, organize, map attachments, check, or template. |
 //!
-//! This phase does not read the company knowledge base.
+//! This package does not read the company knowledge base.
 
 pub mod agent;
-pub mod outline;
+pub mod chapters;
 pub mod parse;
 mod template;
 
@@ -65,7 +65,7 @@ pub struct TemplateContent {
     pub slot_id: String,
     pub chapter_id: String,
     pub kind: SlotKind,
-    /// Prescribed tender wording. Empty for slots phase 2 is allowed to fill.
+    /// Prescribed tender wording. Empty when the response package may fill it.
     pub text: String,
     pub response_required: bool,
     /// Knowledge-base query. Empty unless `response_required`.
@@ -81,10 +81,10 @@ pub struct OpenIssue {
     pub chapter_ids: Vec<String>,
 }
 
-/// Frozen output of phase 1. Phase 2 must not read past this artifact.
+/// Frozen outline and template. The response package must not read past this.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Phase1Artifact {
+pub struct OutlineArtifact {
     pub schema_version: u32,
     pub project_id: String,
     pub frozen_input_sha256: String,
@@ -95,24 +95,24 @@ pub struct Phase1Artifact {
 
 pub fn canonical_sha256(value: &impl Serialize) -> Result<String, String> {
     let bytes = serde_json_canonicalizer::to_vec(value)
-        .map_err(|error| format!("phase 1 canonical JSON: {error}"))?;
+        .map_err(|error| format!("outline canonical JSON: {error}"))?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
-pub(crate) fn validate_artifact(artifact: &Phase1Artifact) -> Result<(), String> {
+pub(crate) fn validate_artifact(artifact: &OutlineArtifact) -> Result<(), String> {
     if artifact.schema_version != SCHEMA_VERSION {
-        return Err("phase 1 schema version is not supported".into());
+        return Err("outline schema version is not supported".into());
     }
     if artifact.project_id.is_empty() || artifact.frozen_input_sha256.is_empty() {
-        return Err("phase 1 artifact is missing project identity".into());
+        return Err("outline artifact is missing project identity".into());
     }
     if artifact.chapters.is_empty() && artifact.templates.is_empty() {
-        return Err("phase 1 published no chapters or template content".into());
+        return Err("outline published no chapters or template content".into());
     }
     let mut chapter_ids = std::collections::BTreeSet::new();
     for chapter in &artifact.chapters {
         if chapter.id.is_empty() || chapter.id == COVER_CHAPTER_ID || chapter.title.is_empty() {
-            return Err("phase 1 chapter identity is invalid".into());
+            return Err("outline chapter identity is invalid".into());
         }
         if !chapter_ids.insert(chapter.id.as_str()) {
             return Err(format!("duplicate chapter {}", chapter.id));
@@ -132,7 +132,7 @@ pub(crate) fn validate_artifact(artifact: &Phase1Artifact) -> Result<(), String>
     let mut slot_ids = std::collections::BTreeSet::new();
     for slot in &artifact.templates {
         if slot.slot_id.is_empty() || !slot_ids.insert(slot.slot_id.as_str()) {
-            return Err("phase 1 template slot identity is invalid".into());
+            return Err("outline template slot identity is invalid".into());
         }
         let known_chapter =
             slot.chapter_id == COVER_CHAPTER_ID || chapter_ids.contains(slot.chapter_id.as_str());

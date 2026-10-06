@@ -1,7 +1,7 @@
 //! Phase 2: bind knowledge-base hits to phase-1 response slots.
 
-use super::{Phase2Response, ResponseStatus, SlotResponse};
-use crate::phase1::{Phase1Artifact, SCHEMA_VERSION, canonical_sha256, validate_artifact};
+use super::{ResponseSet, ResponseStatus, SlotResponse};
+use crate::outline::{OutlineArtifact, SCHEMA_VERSION, canonical_sha256, validate_artifact};
 use serde::{Deserialize, Serialize};
 
 pub const NO_EVIDENCE_TEXT: &str = "【待人工补充】";
@@ -24,8 +24,8 @@ pub struct EvidenceHit {
     pub text: String,
 }
 
-/// Queries phase 2 may send to the knowledge base. Fixed template slots are absent.
-pub fn match_queries(artifact: &Phase1Artifact) -> Result<Vec<MatchQuery>, String> {
+/// Queries the response package may send to the knowledge base. Fixed template slots are absent.
+pub fn match_queries(artifact: &OutlineArtifact) -> Result<Vec<MatchQuery>, String> {
     validate_artifact(artifact)?;
     Ok(artifact
         .templates
@@ -40,7 +40,7 @@ pub fn match_queries(artifact: &Phase1Artifact) -> Result<Vec<MatchQuery>, Strin
 }
 
 /// Write response data for every response slot. Unmatched slots stay placeholders.
-pub fn respond(artifact: &Phase1Artifact, hits: &[EvidenceHit]) -> Result<Phase2Response, String> {
+pub fn respond(artifact: &OutlineArtifact, hits: &[EvidenceHit]) -> Result<ResponseSet, String> {
     validate_artifact(artifact)?;
     let response_slots: Vec<_> = artifact
         .templates
@@ -105,9 +105,9 @@ pub fn respond(artifact: &Phase1Artifact, hits: &[EvidenceHit]) -> Result<Phase2
             }
         })
         .collect();
-    Ok(Phase2Response {
+    Ok(ResponseSet {
         schema_version: SCHEMA_VERSION,
-        phase1_sha256: canonical_sha256(artifact)?,
+        outline_sha256: canonical_sha256(artifact)?,
         responses,
     })
 }

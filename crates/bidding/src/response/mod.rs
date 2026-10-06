@@ -1,17 +1,17 @@
-//! Phase 2: match knowledge-base evidence and publish response data.
+//! Response: match knowledge-base evidence and publish response data.
 //!
 //! | Module | Responsibility |
 //! | --- | --- |
 //! | `agent` | Response duty only. No tender parse, no new chapters, no template edits. |
-//! | `response` | Bind knowledge hits to phase-1 response slots. |
+//! | `bind` | Bind knowledge hits to outline response slots. |
 //!
-//! Input is a [`crate::phase1::Phase1Artifact`]. Unmatched slots stay
+//! Input is a [`crate::outline::OutlineArtifact`]. Unmatched slots stay
 //! `【待人工补充】`.
 
 pub mod agent;
-mod response;
+mod bind;
 
-pub use response::{EvidenceHit, MatchQuery, NO_EVIDENCE_TEXT, match_queries, respond};
+pub use bind::{EvidenceHit, MatchQuery, NO_EVIDENCE_TEXT, match_queries, respond};
 
 use serde::{Deserialize, Serialize};
 
@@ -32,11 +32,11 @@ pub struct SlotResponse {
     pub evidence_ids: Vec<String>,
 }
 
-/// Response data for phase-1 slots. `phase1_sha256` binds it to one artifact.
+/// Response data for outline slots. `outline_sha256` binds it to one artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Phase2Response {
+pub struct ResponseSet {
     pub schema_version: u32,
-    pub phase1_sha256: String,
+    pub outline_sha256: String,
     pub responses: Vec<SlotResponse>,
 }

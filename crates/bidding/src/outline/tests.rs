@@ -1,5 +1,5 @@
 use super::*;
-use crate::phase2::{EvidenceHit, NO_EVIDENCE_TEXT, ResponseStatus, match_queries, respond};
+use crate::response::{EvidenceHit, NO_EVIDENCE_TEXT, ResponseStatus, match_queries, respond};
 use crate::tender_analysis::draft::{
     BodyStatus, ChapterPurpose as PlanPurpose, DraftPlanItem, DraftStatus,
 };
@@ -156,7 +156,7 @@ fn fixture() -> (FrozenInput, AnalysisResult) {
 }
 
 #[test]
-fn phase1_publishes_chapters_and_template_without_bidder_facts() {
+fn outline_publishes_chapters_and_template_without_bidder_facts() {
     let (input, result) = fixture();
     let artifact = project(&input, &result).unwrap();
     assert_eq!(
@@ -202,12 +202,12 @@ fn phase1_publishes_chapters_and_template_without_bidder_facts() {
 }
 
 #[test]
-fn phase1_rejects_an_unfinished_outline_and_image_template_text() {
+fn outline_rejects_an_unfinished_tree_and_image_template_text() {
     let (input, mut result) = fixture();
     result.analysis.outline.phase = Phase::Check;
     assert_eq!(
         project(&input, &result).unwrap_err(),
-        "phase 1 outline is not complete"
+        "outline is not complete"
     );
     result.analysis.outline.phase = Phase::Complete;
     let RecordData::Template { regions, .. } =
@@ -224,7 +224,7 @@ fn phase1_rejects_an_unfinished_outline_and_image_template_text() {
 }
 
 #[test]
-fn phase1_copies_grid_wording_and_protects_user_chapters() {
+fn outline_copies_grid_wording_and_protects_user_chapters() {
     let (input, mut result) = fixture();
     let RecordData::Template { regions, .. } =
         &mut result.analysis.records.get_mut("tpl").unwrap().data
@@ -267,7 +267,7 @@ fn phase1_copies_grid_wording_and_protects_user_chapters() {
 }
 
 #[test]
-fn phase2_fills_only_response_slots_from_knowledge_hits() {
+fn response_fills_only_response_slots_from_knowledge_hits() {
     let (input, result) = fixture();
     let artifact = project(&input, &result).unwrap();
     let queries = match_queries(&artifact).unwrap();
@@ -279,7 +279,7 @@ fn phase2_fills_only_response_slots_from_knowledge_hits() {
     assert_eq!(unmatched.responses[0].status, ResponseStatus::NoEvidence);
     assert_eq!(unmatched.responses[0].text, NO_EVIDENCE_TEXT);
     assert_eq!(
-        unmatched.phase1_sha256,
+        unmatched.outline_sha256,
         canonical_sha256(&artifact).unwrap()
     );
 
@@ -321,7 +321,7 @@ fn phase_contracts_reject_unknown_fields_and_placeholder_hits() {
     let artifact = project(&input, &result).unwrap();
     let mut value = serde_json::to_value(&artifact).unwrap();
     value["company_fact"] = json!("不应出现");
-    assert!(serde_json::from_value::<Phase1Artifact>(value).is_err());
+    assert!(serde_json::from_value::<OutlineArtifact>(value).is_err());
 
     let placeholder = respond(
         &artifact,
@@ -353,7 +353,7 @@ fn attachment_table_mapping_follows_chapter_id_not_title() {
         panic!("template");
     };
     regions[0].form_id = Some("form-1".into());
-    let mapped = outline::map_attachment_tables(
+    let mapped = chapters::map_attachment_tables(
         &input,
         &result.analysis.draft_plan,
         &result.analysis.records,
@@ -363,7 +363,7 @@ fn attachment_table_mapping_follows_chapter_id_not_title() {
     assert_eq!(mapped[0].form_id, "form-1");
     assert_eq!(mapped[0].chapter_id, "letter");
     result.analysis.draft_plan[1].title = "报价响应".into();
-    let renamed = outline::map_attachment_tables(
+    let renamed = chapters::map_attachment_tables(
         &input,
         &result.analysis.draft_plan,
         &result.analysis.records,
@@ -379,7 +379,7 @@ fn attachment_table_mapping_follows_chapter_id_not_title() {
     };
     regions[0].form_id = None;
     assert_eq!(
-        outline::unmapped_attachment_forms(
+        chapters::unmapped_attachment_forms(
             &input,
             &result.analysis.draft_plan,
             &result.analysis.records

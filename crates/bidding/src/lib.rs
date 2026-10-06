@@ -1,12 +1,8 @@
 //! Tender-to-submission domain.
 //!
-//! Phase 1 parses the tender and publishes outline chapters plus template
-//! content: `tender_upload`, `tender_process`, `tender_analysis`,
-//! `docx_template`, `template_grid`, `docx_composition`.
-//! Phase 2 matches knowledge-base evidence and publishes response data:
-//! `content_generate`, `content_runtime`, `content_block`.
-//! [`phase1`] publishes the outline and template artifact. [`phase2`] matches
-//! knowledge-base evidence onto that artifact and publishes response data.
+//! [`outline`] parses the tender and publishes chapters plus template content.
+//! [`response`] matches knowledge-base evidence onto that outline and publishes
+//! response data. Shared DOCX, workspace, and export code stays at the crate root.
 
 pub mod bid_authoring_contract;
 pub use bid_authoring_contract::*;
@@ -24,8 +20,8 @@ pub mod docx_template;
 pub mod export_review;
 pub mod mutation;
 pub mod onlyoffice_conversion;
-pub mod phase1;
-pub mod phase2;
+pub mod outline;
+pub mod response;
 pub mod quote_snapshot;
 pub mod render_v2;
 pub mod submission_export;
