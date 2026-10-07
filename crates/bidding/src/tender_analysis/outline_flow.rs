@@ -270,6 +270,12 @@ pub struct OutlineRun {
     /// Reading packs for the discover duty. Absent until the first discover turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reading_packs: Option<crate::outline::discover::DiscoverWork>,
+    /// Chapters, attachment bindings, and template slots written by the outline tools.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::outline::tools::Draft::is_empty"
+    )]
+    pub tool_draft: crate::outline::tools::Draft,
 }
 
 pub fn tree_valid(plan: &[DraftPlanItem]) -> Result<(), String> {

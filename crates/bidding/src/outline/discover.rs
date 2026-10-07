@@ -206,6 +206,13 @@ impl DiscoverWork {
         self.requirements.len()
     }
 
+    /// True when every planned pack has been committed. An empty plan is done.
+    pub fn complete(&self) -> bool {
+        self.packs
+            .values()
+            .all(|record| record.status == PackStatus::Committed)
+    }
+
     fn validation_errors(&self, pack_id: &str, submit: &PackSubmit) -> Vec<FieldError> {
         let Some(record) = self.packs.get(pack_id) else {
             return vec![field(

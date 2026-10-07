@@ -6,7 +6,8 @@
 //! | `discover` | Reading packs follow section boundaries. |
 //! | `chapters` | Stable chapter identity and attachment-table mapping. |
 //! | `template` | Prescribed template slots. Bidder blanks stay empty. |
-//! | `agent` | One duty per turn: discover, organize, map attachments, check, or template. |
+//! | `tools` | The six outline tools. A turn sees only its duty's tools. |
+//! | `agent` | One duty per turn: discover, organize, map attachments, template, or finish. |
 //!
 //! This package does not read the company knowledge base.
 
@@ -16,6 +17,7 @@ pub mod discover;
 pub mod parse;
 pub mod store;
 mod template;
+pub mod tools;
 
 #[cfg(test)]
 mod tests;

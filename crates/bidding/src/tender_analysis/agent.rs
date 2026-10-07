@@ -898,7 +898,9 @@ async fn finish_draft_path<J: Journal>(
     // for a body", and it compiles to an empty heading the user can write into;
     // Omitted drops the heading entirely, which would delete a chapter the user
     // has in front of them in Word.
-    if !crate::tender_analysis::draft::plan_ready(&state.analysis.draft_plan) {
+    if !state.outline_run.tool_draft.finished
+        && !crate::tender_analysis::draft::plan_ready(&state.analysis.draft_plan)
+    {
         // A zero-node outline cannot compile a chapter document without
         // inventing a chapter, so this stays an explicit failure rather than a
         // job that succeeds with no editable artifact.
@@ -1007,6 +1009,7 @@ pub(super) async fn execute_turn<J: Journal>(
     let mut local_completion = None;
     let mut batch_failed = false;
     fit_batch(input, config, state, &response.tool_calls, &pending_views).await?;
+    let turn_duty = crate::outline::agent::current(input, state);
     for (call_index, call) in response.tool_calls.iter().enumerate() {
         let tool_started = Instant::now();
         state.tool_calls += 1;
@@ -1116,6 +1119,7 @@ pub(super) async fn execute_turn<J: Journal>(
                     &call.name,
                     &args,
                     review_batch.as_ref(),
+                    turn_duty,
                 )
             })
         };
@@ -1588,13 +1592,17 @@ pub(super) async fn prepare_request(
     let mut excluded_recall = std::collections::BTreeSet::new();
     let mut omit_preloaded_evidence = false;
     let mut package_budget = None;
-    let discovering = config.limits.draft_path
+    let reading_sessions = if config.limits.draft_path
         && matches!(
             state.draft_stage,
             draft::DraftStage::None | draft::DraftStage::Outline
         )
-        && state.analysis.outline.phase == super::outline_flow::Phase::Discover;
-    let reading_sessions = if discovering {
+        && state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .is_none_or(|work| !work.complete())
+    {
         crate::outline::discover::claim_turn(
             &mut state.outline_run.reading_packs,
             input,
@@ -1604,17 +1612,10 @@ pub(super) async fn prepare_request(
     } else {
         Vec::new()
     };
-    let unmapped = config.limits.draft_path
-        && !crate::outline::chapters::unmapped_attachment_forms(
-            input,
-            &state.analysis.draft_plan,
-            &state.analysis.records,
-        )
-        .is_empty();
-    let duty_instructions = config.limits.draft_path.then(|| {
-        crate::outline::agent::duty(state.draft_stage, state.analysis.outline.phase, unmapped)
-            .instructions()
-    });
+    let turn_duty = crate::outline::agent::current(input, state);
+    let discovering =
+        config.limits.draft_path && turn_duty == crate::outline::agent::Duty::Discover;
+    let duty_instructions = config.limits.draft_path.then(|| turn_duty.instructions());
     loop {
         let reviewer = state.role == Role::Reviewer;
         let review_packet = if reviewer {
@@ -1805,11 +1806,7 @@ pub(super) async fn prepare_request(
             &config.provider,
             messages,
             if config.limits.draft_path {
-                if draft_fill {
-                    crate::tender_analysis::draft::fill_schemas()
-                } else {
-                    crate::tender_analysis::draft::outline_schemas()
-                }
+                crate::outline::agent::schemas_for(turn_duty)
             } else {
                 tools::schemas_for(reviewer, &config.limits)
             },
@@ -2142,7 +2139,15 @@ pub(super) fn apply(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    apply_in_batch(input, config, state, name, args, None)
+    apply_in_batch(
+        input,
+        config,
+        state,
+        name,
+        args,
+        None,
+        crate::outline::agent::current(input, state),
+    )
 }
 
 pub(super) fn apply_in_batch(
@@ -2152,13 +2157,14 @@ pub(super) fn apply_in_batch(
     name: &str,
     args: &Value,
     review_batch: Option<&source_review::BatchVersion>,
+    turn_duty: crate::outline::agent::Duty,
 ) -> Result<Value, String> {
     let args = if name == "submit_outline_scan" {
         args.clone()
     } else {
         evidence_refs::expand(input, args)?
     };
-    let result = apply_inner(input, config, state, name, &args, review_batch)?;
+    let result = apply_inner(input, config, state, name, &args, review_batch, turn_duty)?;
     context::synchronize_outcomes(state);
     Ok(result)
 }
@@ -2274,24 +2280,19 @@ fn apply_inner(
     name: &str,
     args: &Value,
     review_batch: Option<&source_review::BatchVersion>,
+    turn_duty: crate::outline::agent::Duty,
 ) -> Result<Value, String> {
     let reviewer = state.role == Role::Reviewer;
     if state.execution().watch.recovery == Recovery::Blocked
         && !(config.limits.draft_path
             && matches!(
                 name,
-                "put_outline_item"
-                    | "put_outline_items"
-                    | "submit_outline_scan"
+                "submit_pack"
+                    | "put_chapters"
+                    | "bind_forms"
+                    | "put_slots"
                     | "read_outline"
-                    | "assign_outline_fragments"
                     | "finish_outline"
-                    | "submit_outline_check"
-                    | "omit_outline_item"
-                    | "put_chapter_template"
-                    | "skip_chapter_content"
-                    | "submit_pack_scan"
-                    | "repair_pack_scan"
             ))
         && !matches!(
             name,
@@ -2301,65 +2302,23 @@ fn apply_inner(
         return Err("local execution is blocked; select an independent source scope, or retry after its saved dependencies change".into());
     }
     if config.limits.draft_path {
-        let unmapped = !crate::outline::chapters::unmapped_attachment_forms(
-            input,
-            &state.analysis.draft_plan,
-            &state.analysis.records,
-        )
-        .is_empty();
-        if state.analysis.outline.phase == crate::tender_analysis::outline_flow::Phase::Check
-            && !matches!(
-                name,
-                "read_outline" | "read_outline_fragment" | "submit_outline_check"
-            )
-        {
-            return Err(
-                "check phase allows only read_outline and submit_outline_check; rescanning and free source reads are closed"
-                    .into(),
-            );
-        }
-        let duty =
-            crate::outline::agent::duty(state.draft_stage, state.analysis.outline.phase, unmapped);
-        if let Some(reason) = crate::outline::agent::deny(duty, name, unmapped) {
+        let unmapped =
+            !crate::outline::tools::unmapped_forms(input, &state.outline_run.tool_draft).is_empty();
+        if let Some(reason) = crate::outline::agent::deny(turn_duty, name, unmapped) {
             return Err(reason.into());
-        }
-        if matches!(name, "submit_pack_scan" | "repair_pack_scan") {
-            return crate::outline::discover::apply_pack_tool(
-                &mut state.outline_run.reading_packs,
-                input,
-                crate::outline::discover::reading_budget(config.limits.pack_max_chars),
-                name,
-                args,
-            );
         }
         if matches!(
             name,
-            "put_outline_item"
-                | "put_outline_items"
-                | "submit_outline_scan"
+            "submit_pack"
+                | "put_chapters"
+                | "bind_forms"
+                | "put_slots"
                 | "read_outline"
-                | "read_outline_fragment"
-                | "assign_outline_fragments"
                 | "finish_outline"
-                | "submit_outline_check"
-                | "omit_outline_item"
-                | "put_chapter_template"
-                | "skip_chapter_content"
         ) {
             return crate::tender_analysis::draft::apply(input, config, state, name, args);
         }
-        if !matches!(
-            name,
-            "collection_index"
-                | "source_index"
-                | "search_sources"
-                | "read_source"
-                | "read_form"
-                | "read_form_cell"
-                | "read_source_view"
-        ) {
-            return Err("unknown or role-forbidden tool".into());
-        }
+        return Err("unknown or role-forbidden tool".into());
     }
     main_dispatch::check_action(input, state, name, args)?;
     context::check_delete(state, name, args)?;

@@ -737,25 +737,29 @@ pub fn mark_window_coverage(input: &FrozenInput, coverage: &mut Coverage, window
     }
 }
 
-/// 大纲合同：写工具 + 常驻读工具。全书装得进一窗时也是同一套工具，只是窗数为 1。
+/// Tools the outline model may see. Reading packs, chapters, forms, and slots.
 pub fn outline_schemas() -> Vec<Value> {
-    let mut tools: Vec<Value> = serde_json::from_str(include_str!(
-        "../../schemas/tender-draft-outline-tools-v1.schema.json"
-    ))
-    .expect("draft outline schemas");
-    tools.extend(read_schemas());
-    tools.extend(super::outline_flow::schemas());
-    tools
+    serde_json::from_str(include_str!("../../schemas/outline-tools-v1.schema.json"))
+        .expect("outline tools")
 }
 
-/// 填章合同：填章工具 + 常驻读工具。
+/// Template writing uses two of the outline tools, not the old fill set.
 pub fn fill_schemas() -> Vec<Value> {
-    let mut tools: Vec<Value> = serde_json::from_str(include_str!(
-        "../../schemas/tender-draft-fill-tools-v1.schema.json"
-    ))
-    .expect("draft fill schemas");
-    tools.extend(read_schemas());
-    tools
+    outline_schemas()
+        .into_iter()
+        .filter(|tool| {
+            matches!(
+                tool["function"]["name"].as_str(),
+                Some("put_slots" | "read_outline")
+            )
+        })
+        .collect()
+}
+
+/// Response model: read the frozen outline and write slot responses.
+pub fn response_schemas() -> Vec<Value> {
+    serde_json::from_str(include_str!("../../schemas/response-tools-v1.schema.json"))
+        .expect("response tools")
 }
 
 /// Bounded navigation and search over the complete frozen collection.
@@ -790,6 +794,38 @@ pub fn apply(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
+    if name == "submit_pack" {
+        let repair = args["repair"].as_bool().ok_or("repair must be a boolean")?;
+        let mut forwarded = args.clone();
+        forwarded
+            .as_object_mut()
+            .ok_or("submit_pack arguments must be an object")?
+            .remove("repair");
+        let tool = if repair {
+            "repair_pack_scan"
+        } else {
+            "submit_pack_scan"
+        };
+        return crate::outline::discover::apply_pack_tool(
+            &mut state.outline_run.reading_packs,
+            input,
+            crate::outline::discover::reading_budget(config.limits.pack_max_chars),
+            tool,
+            &forwarded,
+        );
+    }
+    if matches!(
+        name,
+        "put_chapters" | "bind_forms" | "put_slots" | "read_outline" | "finish_outline"
+    ) {
+        let value =
+            crate::outline::tools::apply(input, &mut state.outline_run.tool_draft, name, args)?;
+        if name == "finish_outline" {
+            state.analysis.outline.phase = super::outline_flow::Phase::Complete;
+            state.outline_run.phase = super::outline_flow::Phase::Complete;
+        }
+        return Ok(value);
+    }
     if name == "put_outline_items" {
         return super::outline_flow::apply_chapter_batch(input, config, state, args);
     }

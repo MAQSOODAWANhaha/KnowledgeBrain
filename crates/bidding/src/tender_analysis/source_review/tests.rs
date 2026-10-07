@@ -978,6 +978,7 @@ async fn same_response_finding_withdrawal_preserves_version_and_evidence_checks(
         "delete_review_finding",
         &json!({"id":"issue"}),
         Some(&batch),
+        crate::outline::agent::Duty::Discover,
     )
     .unwrap();
     assert!(
@@ -1055,6 +1056,7 @@ async fn same_response_finding_withdrawal_preserves_version_and_evidence_checks(
         "put_source_review",
         &args,
         Some(&batch),
+        crate::outline::agent::Duty::Discover,
     )
     .unwrap();
     let receipt = &state.source_review.as_ref().unwrap().results[args["task_id"].as_str().unwrap()];
@@ -3511,6 +3513,7 @@ fn archived_same_response_judgment_reports_remaining_validation() {
         "put_source_review",
         &args,
         Some(&batch),
+        crate::outline::agent::Duty::Discover,
     )
     .unwrap_err();
     assert!(remaining_error.contains("/relationship_checks/1/sources"));
