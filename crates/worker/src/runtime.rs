@@ -13,8 +13,7 @@ use platform::{
     DatatableJob, DefaultQueue, DocumentProcessJob, HousekeepJob, ImageMultimodalJob,
     IndexDeleteJob, KbDeleteJob, KnowledgeSemanticIndexV2Job, ListDeleteJob, ListReparseJob,
     LowQueue, ManualProcessJob, MultimodalQueue, PostProcessJob, PostprocessQueue, SummaryJob,
-    SummaryQueue, VersionCloneJob,
-    WikiFinalizeJob, WikiIngestJob, WikiQueue,
+    SummaryQueue, VersionCloneJob, WikiFinalizeJob, WikiIngestJob, WikiQueue,
 };
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
@@ -71,29 +70,6 @@ pub(crate) async fn finish_knowledge_document_job(
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn non_agent_sql_error(error: sqlx::Error) -> JobErr {
-    let deterministic = match &error {
-        sqlx::Error::RowNotFound
-        | sqlx::Error::ColumnIndexOutOfBounds { .. }
-        | sqlx::Error::ColumnNotFound(_)
-        | sqlx::Error::ColumnDecode { .. }
-        | sqlx::Error::Decode(_)
-        | sqlx::Error::TypeNotFound { .. } => true,
-        sqlx::Error::Database(database) => database.code().is_some_and(|code| {
-            code.starts_with("22")
-                || code.starts_with("23")
-                || matches!(code.as_ref(), "P0001" | "P0002")
-        }),
-        _ => false,
-    };
-    if deterministic {
-        JobErr(error.to_string())
-    } else {
-        JobErr(format!("TRANSIENT_HANDLER:{error}"))
-    }
-}
-
 pub(crate) struct HandlerDeadline {
     pub(crate) hard: tokio::time::Instant,
     pub(crate) cleanup: tokio::time::Instant,
@@ -126,12 +102,6 @@ pub(crate) enum OwnedHandlerCompletion {
 #[derive(Debug)]
 pub(crate) struct OwnedHandlerRun {
     pub(crate) completion: OwnedHandlerCompletion,
-    #[allow(dead_code)]
-    pub(crate) cleanup_error: Option<String>,
-    #[allow(dead_code)]
-    pub(crate) cleanup_deadline: tokio::time::Instant,
-    #[cfg(test)]
-    pub(crate) teardown_deadline: tokio::time::Instant,
 }
 
 pub(crate) fn teardown_deadline_for_effect(
@@ -145,24 +115,6 @@ pub(crate) fn teardown_deadline_for_effect(
     } else {
         cleanup_deadline
     }
-}
-
-#[allow(dead_code)]
-pub(crate) async fn terminalize_until<F, T>(
-    cleanup_deadline: tokio::time::Instant,
-    label: &str,
-    future: F,
-) -> Result<T, JobErr>
-where
-    F: std::future::Future<Output = Result<T, JobErr>>,
-{
-    let terminal_deadline = std::cmp::min(
-        tokio::time::Instant::now() + TERMINAL_PERSISTENCE_RESERVE,
-        cleanup_deadline,
-    );
-    tokio::time::timeout_at(terminal_deadline, future)
-        .await
-        .map_err(|_| JobErr(format!("{label} exceeded the terminal persistence reserve")))?
 }
 
 pub(crate) async fn cleanup_tracker_until(
@@ -224,10 +176,12 @@ where
         OwnedHandlerCompletion::Completed(Ok(())) | OwnedHandlerCompletion::ShuttingDown => false,
     };
     let work_cleanup = teardown_deadline_for_effect(absolute_cleanup, requires_effect);
-    let cleanup_error = match &completion {
-        OwnedHandlerCompletion::Completed(_) => cleanup_tracker_until(cleanup, work_cleanup).await,
+    match &completion {
+        OwnedHandlerCompletion::Completed(_) => {
+            let _ = cleanup_tracker_until(cleanup, work_cleanup).await;
+        }
         OwnedHandlerCompletion::ShuttingDown => {
-            join_cancelled_handler(&mut handle, &local_cancel, cleanup, work_cleanup).await
+            let _ = join_cancelled_handler(&mut handle, &local_cancel, cleanup, work_cleanup).await;
         }
         OwnedHandlerCompletion::TimedOut => {
             local_cancel.cancel();
@@ -241,16 +195,9 @@ where
                 handle.abort();
                 let _ = tokio::time::timeout_at(work_cleanup, &mut handle).await;
             }
-            None
         }
-    };
-    OwnedHandlerRun {
-        completion,
-        cleanup_error,
-        cleanup_deadline: absolute_cleanup,
-        #[cfg(test)]
-        teardown_deadline: work_cleanup,
     }
+    OwnedHandlerRun { completion }
 }
 
 pub(crate) async fn wait_for_worker_shutdown(mut stop: tokio::sync::watch::Receiver<bool>) {

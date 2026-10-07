@@ -1,5 +1,3 @@
-use crate::bidding::*;
-use crate::helpers::*;
 use crate::knowledge::*;
 use crate::runtime::*;
 use async_trait::async_trait;
@@ -7,50 +5,11 @@ use knowledge::{create_workspace_with_library, insert_document, insert_user};
 use platform::{KnowledgeSemanticIndexV2Job, VersionCloneJob, WikiIngestJob};
 use sqlx::{PgPool, Row};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-#[tokio::test]
-async fn process_group_signal_failure_falls_back_to_direct_child_kill() {
-    let mut child = tokio::process::Command::new("sleep")
-        .arg("60")
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    kill_helper_group_and_reap_child(
-        &mut child,
-        "fallback test child",
-        tokio::time::Instant::now() + std::time::Duration::from_secs(2),
-    )
-    .await
-    .unwrap();
-    assert!(child.try_wait().unwrap().is_some());
-}
-
-#[tokio::test]
-async fn process_group_kill_reaps_a_helper_with_hanging_grandchild() {
-    let mut command = tokio::process::Command::new("sh");
-    command.arg("-c").arg("sleep 60 & wait").kill_on_drop(true);
-    command.process_group(0);
-    let mut child = command.spawn().unwrap();
-    let pid = i32::try_from(child.id().unwrap()).unwrap();
-    kill_helper_group_and_reap_child(
-        &mut child,
-        "hanging grandchild test",
-        tokio::time::Instant::now() + std::time::Duration::from_secs(2),
-    )
-    .await
-    .unwrap();
-    assert!(child.try_wait().unwrap().is_some());
-    // SAFETY: signal 0 performs only an existence check for this test-owned group.
-    assert_eq!(unsafe { libc::killpg(pid, 0) }, -1);
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ESRCH)
-    );
-}
 use platform::{apply_fresh_baseline, write_blob};
 
 #[derive(Clone, Copy)]

@@ -630,28 +630,6 @@ pub async fn run<J: Journal, M: Model>(
     run_seeded(input, config, journal, model, cancel, None, None).await
 }
 
-/// Stop model work at the reserve boundary; checked outlines may still compile.
-#[allow(dead_code)]
-pub(crate) async fn run_with_model_budget<J: Journal, M: Model>(
-    input: &FrozenInput,
-    config: &Config,
-    journal: &J,
-    model: &M,
-    cancel: &CancellationToken,
-    model_budget: std::time::Duration,
-) -> Result<AnalysisResult, AgentError> {
-    run_seeded(
-        input,
-        config,
-        journal,
-        model,
-        cancel,
-        None,
-        Some(model_budget),
-    )
-    .await
-}
-
 /// 用户触发的填章 run：从**回读出来的章树**起跑，而不是从零开始拉大纲。
 ///
 /// 种子是这次 Job 的输入（请求里冻着它的摘要），不是 agent 的产出：填章 run 的

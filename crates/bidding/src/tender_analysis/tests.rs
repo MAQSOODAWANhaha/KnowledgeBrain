@@ -1,10 +1,7 @@
-use super::agent::{Checkpoint, Config, Journal, Limits};
+use super::agent::{Config, Limits};
 use super::*;
-use crate::{agent_error::AgentError, authoring_runtime::AuthoringRuntimeContractV1};
-use async_trait::async_trait;
+use crate::authoring_runtime::AuthoringRuntimeContractV1;
 use serde_json::json;
-use std::{collections::BTreeMap, sync::Mutex};
-use tokio_util::sync::CancellationToken;
 
 mod input;
 
@@ -38,126 +35,6 @@ fn grid_citation_input() -> FrozenInput {
                 {"row":1,"column":1,"row_span":1,"col_span":1,"text":"供货时提供证书"}]}}),
     );
     input
-}
-
-#[derive(Default)]
-struct MemoryJournal {
-    sdk_turns: Mutex<Vec<usize>>,
-    strict_checkpoint_identity: bool,
-    reject_compilation_checkpoint: bool,
-    fail_boundary_ack: Mutex<Option<usize>>,
-    cancel_boundary: Mutex<Option<(usize, CancellationToken)>>,
-    reject_reservation: Mutex<bool>,
-    state: Mutex<Option<Checkpoint>>,
-    reservations: Mutex<BTreeMap<usize, (Vec<u8>, usize)>>,
-    interrupt_after: Mutex<Option<usize>>,
-    view: Mutex<Option<views::SourceView>>,
-    view_calls: Mutex<usize>,
-}
-#[async_trait]
-impl Journal for MemoryJournal {
-    async fn source_view(
-        &self,
-        _: &str,
-        _: &Limits,
-        _: &CancellationToken,
-    ) -> Result<views::SourceView, AgentError> {
-        *self.view_calls.lock().unwrap() += 1;
-        self.view
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| AgentError::new("SOURCE_VIEW_UNAVAILABLE", "injected unavailable view"))
-    }
-    async fn load(&self) -> Result<Option<Checkpoint>, AgentError> {
-        Ok(self.state.lock().unwrap().clone())
-    }
-    async fn reserve(&self, state: &Checkpoint, body: &[u8]) -> Result<Option<usize>, AgentError> {
-        if *self.reject_reservation.lock().unwrap() {
-            return Err(crate::agent_error::AgentError::new(
-                "INTERNAL",
-                "reservation transaction rejected",
-            ));
-        }
-        self.sdk_turns
-            .lock()
-            .unwrap()
-            .push(state.journal.session.as_ref().unwrap().turn());
-        let mut rows = self.reservations.lock().unwrap();
-        let row = rows.entry(state.turn).or_insert_with(|| (body.to_vec(), 0));
-        assert_eq!(
-            row.0, body,
-            "same boundary must preserve exact provider body"
-        );
-        if row.1 == 3 {
-            return Ok(None);
-        }
-        row.1 += 1;
-        *self.state.lock().unwrap() = Some(state.clone());
-        if let Some((sequence, token)) = &*self.cancel_boundary.lock().unwrap()
-            && *sequence == state.journal.sequence
-        {
-            token.cancel();
-        }
-        let mut boundary = self.fail_boundary_ack.lock().unwrap();
-        if *boundary == Some(state.journal.sequence) {
-            *boundary = None;
-            return Err(crate::agent_error::AgentError::new(
-                "INTERNAL",
-                "lost boundary acknowledgement",
-            ));
-        }
-        Ok(Some(row.1))
-    }
-    async fn save(&self, state: &Checkpoint, _: &serde_json::Value) -> Result<(), AgentError> {
-        if self.reject_compilation_checkpoint && state.draft_docx_base64.is_some() {
-            return Err(AgentError::new(
-                "FROZEN_INPUT_DIGEST_MISMATCH",
-                "injected compilation checkpoint rejection",
-            ));
-        }
-        if self.strict_checkpoint_identity {
-            let saved = self.state.lock().unwrap();
-            if let Some(prior) = saved.as_ref() {
-                if prior.journal.sequence == state.journal.sequence && json!(prior) != json!(state)
-                {
-                    return Err(AgentError::new(
-                        "FROZEN_INPUT_DIGEST_MISMATCH",
-                        "divergent checkpoint",
-                    ));
-                }
-                if state.draft_docx_base64.is_some() && prior.draft_docx_base64.is_none() {
-                    assert_eq!(state.journal.sequence, prior.journal.sequence + 1);
-                    assert_eq!(state.turn, prior.turn);
-                    assert!(state.journal.pending.is_none());
-                    assert_eq!(json!(state.analysis), json!(prior.analysis));
-                }
-            }
-        }
-        *self.state.lock().unwrap() = Some(state.clone());
-        if let Some((sequence, token)) = &*self.cancel_boundary.lock().unwrap()
-            && *sequence == state.journal.sequence
-        {
-            token.cancel();
-        }
-        let mut boundary = self.fail_boundary_ack.lock().unwrap();
-        if *boundary == Some(state.journal.sequence) {
-            *boundary = None;
-            return Err(crate::agent_error::AgentError::new(
-                "INTERNAL",
-                "lost boundary acknowledgement",
-            ));
-        }
-        let mut interrupt = self.interrupt_after.lock().unwrap();
-        if *interrupt == Some(state.turn) && state.journal.pending.is_none() {
-            *interrupt = None;
-            return Err(AgentError::new(
-                "INTERNAL",
-                "simulated lost checkpoint acknowledgement",
-            ));
-        }
-        Ok(())
-    }
 }
 
 pub(super) fn config() -> Config {

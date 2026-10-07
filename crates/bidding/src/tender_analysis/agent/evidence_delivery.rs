@@ -15,15 +15,6 @@ pub(super) fn is_retained_message(message: &Value) -> bool {
             .is_some_and(|content| content["preloaded_evidence"]["assigned_evidence"].is_object())
 }
 
-#[cfg(test)]
-pub(in crate::tender_analysis) fn select(
-    input: &FrozenInput,
-    config: &Config,
-    state: &Checkpoint,
-) -> Result<Option<source_review::Evidence>, AgentError> {
-    select_with_budget(input, config, state, None)
-}
-
 pub(super) fn select_with_budget(
     input: &FrozenInput,
     config: &Config,

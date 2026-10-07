@@ -14,19 +14,6 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tracing::instrument::WithSubscriber;
 
-#[allow(dead_code)]
-pub(crate) fn default_context_tokens() -> usize {
-    131072
-}
-#[allow(dead_code)]
-pub(crate) fn default_image_token_reserve() -> usize {
-    16384
-}
-#[allow(dead_code)]
-pub(crate) fn default_token_safety_margin() -> usize {
-    4096
-}
-
 /// Application estimate, not a provider tokenizer or an upper bound. Base64 is
 /// transport encoding; each image instead consumes its configured allowance.
 pub(crate) fn estimate_input_tokens(
