@@ -39,22 +39,21 @@
 
 ## 旧路径退役
 
-生产强制 `draft_path = true`。下列内容不是产品合同：
+已从产品路径隔离。`Config::environment_limits` 和 `with_provider_for` 把 `draft_path` 固定为 `true`。下列内容不是产品合同：
 
-- `plans/bidding/product-two-phase.md` 已删除。不要再把它写成唯一入口。
-- `analysis/outline_flow.rs` 以及工具名 `submit_outline_scan`、`put_outline_items`、`submit_outline_check`。`draft_path = false` 只覆盖抽取单测。
-- `draft::after_batch` 在旧 `outline.checks` 上调用 `outline_flow::apply(..., "finish_outline")`。新路径的结束只走 `outline::agent::apply` 的 `finish_outline`。
+- `plans/bidding/product-two-phase.md` 保持删除。文档索引不把它写成入口。
+- 产品请求只挂 `outline::agent::schemas_for` 的六个工具。`submit_outline_scan`、`put_outline_items`、`submit_outline_check` 不会出现在这份请求里。产品配置调用 `draft::apply` 会拒绝这三个名字，以及经 `outline_flow` 的 `finish_outline`。
+- `draft_path = false` 不调用 `Journal::publish_outline`。`analysis/outline_flow.rs` 仍只给抽取单测。
+- 产品收尾是 `outline::agent::apply` 的 `finish_outline`。`draft::after_batch` 只在 `draft_path = false` 时才对旧 `outline.checks` 调用 `outline_flow::apply(..., "finish_outline")`。空的 `analysis.outline.checks` 不挡住产品出场，出场不读 `outline_flow::checked`。
 - 双正式编制 / draft-fill、强制终稿复核，以及 T0–T9、A01–A20 那套任务表。
-
-退役完成时：生产请求构造不出这些旧工具；`draft_path = false` 不能发布 `OutlineArtifact`；文档索引不再把两阶段方案写成入口。
 
 ## 职责分叉
 
-模板维持独立职责，还是并入组织，见 [运行时](../../docs/bidding/outline.md) 的「职责分叉」。建议等缺口 1–3 落地再决定。合并会改 `outline/agent.rs` 的职责可见性、提示和对应测试；六个工具的 schema 形状不动。本文件的缺口不包含这次合并。
+模板维持独立职责，还是并入组织，见 [运行时](../../docs/bidding/outline.md) 的「职责分叉」。缺口 1–3 已落地，这次合并仍未决定。合并会改 `outline/agent.rs` 的职责可见性、提示和对应测试；六个工具的 schema 形状不动。本文件的缺口不包含这次合并。
 
 ## 一次成稿验收
 
-下面替换已删除的 A01–A20。对象是一条真实招标、`draft_path = true` 的大纲运行。缺口 1–3 未接通时，这条清单是目标，不是当前已经通过的记录。
+下面替换已删除的 A01–A20。对象是一条真实招标、`draft_path = true` 的大纲运行。缺口 1–3 和旧路径退役已接到代码上。这条清单仍是那次真实运行的验收目标，不是已经跑过的记录。
 
 通过：
 

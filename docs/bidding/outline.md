@@ -144,7 +144,7 @@
 4. **模型。** 返回工具调用。`responded` 先把响应写入检查点。
 5. **工具。** `outline::agent::apply` 在 `deny` 下执行。结果追加到检查点对话，`session.finish` 记到当前 SDK 会话。
 6. **提交。** 运行结束、角色改变，或序列化后的 SDK 状态超过 `max_context_bytes` 时，丢掉 SDK 会话。大纲草稿和对话留在检查点。`committed` 清掉待完成轮，`save` 再写同一检查点。
-7. **职责推进或结束。** 下一轮重新选择职责。发现包全部 `committed` 后阶段从 `discover` 到 `outline`。`finish_outline` 把 `tool_draft.finished` 和 phase 标成 `complete`。产品出场条件是 `tool_draft.finished` 且 `project_draft` 通过 `validate_artifact`。空的 `analysis.outline.checks` 不挡住出场，出场不读 `outline_flow::checked`。通过后 `Journal::publish_outline` 发布投影出的 `OutlineArtifact` 和附件绑定。`draft_path = false` 仍走旧的 `checked`，不发布这份 artifact。
+7. **职责推进或结束。** 下一轮重新选择职责。发现包全部 `committed` 后阶段从 `discover` 到 `outline`。`finish_outline` 把 `tool_draft.finished` 和 phase 标成 `complete`。产品出场条件是 `tool_draft.finished` 且 `project_draft` 通过 `validate_artifact`。空的 `analysis.outline.checks` 不挡住出场，出场不读 `outline_flow::checked`。通过后 `Journal::publish_outline` 发布投影出的 `OutlineArtifact` 和附件绑定。`draft_path = false` 仍走旧的 `checked`，不调用 `Journal::publish_outline`，不能发布这份 artifact。
 
 `draft_stage` 为 `None` 或 `Outline` 时（含发现轮），宿主包含 `progress`、`work`、来源索引和 `tool_draft` 的模型视图（比 `read_outline` 多 `unmapped_forms`）。组织轮还要带上检查点里的要求记录：身份、描述、`source_id`、`start`、`end`。这不按 phase 名字开关。前缀长度是 2（系统提示 + brief），后缀长度是 1（宿主包）。前缀、后缀不变且投影历史等于当前窗口时复用 `AgentRun`；否则按这个窗口重建。
 

@@ -392,6 +392,8 @@ fn one_shot_acceptance_publishes_from_the_tool_draft() {
             .all(|slot| { slot.chapter_id != "group" || !slot.response_required })
     );
 
+    assert!(state.analysis.outline.checks.is_empty());
+    assert!(!crate::analysis::outline_flow::checked(&input, &state));
     crate::analysis::draft::after_batch(&input, &mut state, false, false, true).unwrap();
     assert!(state.done);
 

@@ -708,10 +708,25 @@ pub fn apply(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
+    refuse_retired_outline_tool(config, name)?;
     if name == "put_outline_items" {
         return super::outline_flow::apply_chapter_batch(input, config, state, args);
     }
     apply_validated(input, config, state, name, args)
+}
+
+/// Product runs (`draft_path = true`) finish through `outline::agent::apply`.
+/// These names stay callable only for `draft_path = false` extraction tests.
+fn refuse_retired_outline_tool(config: &super::agent::Config, name: &str) -> Result<(), String> {
+    if config.limits.draft_path
+        && matches!(
+            name,
+            "submit_outline_scan" | "put_outline_items" | "submit_outline_check" | "finish_outline"
+        )
+    {
+        return Err("retired outline tool is not on the product path".into());
+    }
+    Ok(())
 }
 
 pub(super) fn apply_validated(
@@ -721,6 +736,7 @@ pub(super) fn apply_validated(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
+    refuse_retired_outline_tool(config, name)?;
     if matches!(
         name,
         "submit_outline_scan"
