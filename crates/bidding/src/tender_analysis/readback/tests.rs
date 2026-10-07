@@ -456,4 +456,3 @@ fn renamed_chapter_clears_prior_grounds_and_format_refs() {
     assert!(seeded[0].windows.is_empty());
     assert_eq!(seeded[0].status, DraftStatus::Pending);
 }
-

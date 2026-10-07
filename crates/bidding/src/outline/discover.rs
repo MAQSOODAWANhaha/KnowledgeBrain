@@ -470,7 +470,7 @@ fn split_form_piece(
     budget: usize,
 ) -> Vec<ChapterBlock> {
     let width = span.end.saturating_sub(span.start);
-    if columns == 0 || width <= budget || width % columns != 0 {
+    if columns == 0 || width <= budget || !width.is_multiple_of(columns) {
         return vec![form_piece(
             block,
             span.clone(),

@@ -33,24 +33,6 @@ pub fn fail(
     )
 }
 
-pub fn fail_with_details(
-    status: StatusCode,
-    code: &str,
-    message: impl Into<String>,
-    details: Value,
-) -> (StatusCode, Json<ErrorBody>) {
-    (
-        status,
-        Json(ErrorBody {
-            error: ErrorInner {
-                code: code.into(),
-                message: message.into(),
-                details: Some(Box::new(details)),
-            },
-        }),
-    )
-}
-
 pub fn unauthorized() -> (StatusCode, Json<ErrorBody>) {
     fail(
         StatusCode::UNAUTHORIZED,

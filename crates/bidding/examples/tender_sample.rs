@@ -260,15 +260,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let input_error = ta::tools::validate_input(&input).err();
         let gaps = ta::tools::gaps(&input, &result.analysis);
         let review_gaps = ta::tools::review_gaps(&input, &result.analysis, &result.review.coverage);
-        let basis_error = bidding::docx_composition::validate_basis(&input, &result).err();
-        let accepted = basis_error.is_none();
+        let accepted = input_error.is_none() && gaps.is_empty() && review_gaps.is_empty();
         fs::create_dir_all(output.parent().ok_or("audit output parent required")?)?;
         save(
             &output,
             &json!({"schema_version":1,"frozen_input_sha256":ta::digest(&input)?,
             "analysis_result_sha256":ta::digest(&result)?,"input_error":input_error,
-            "structural_gaps":gaps,"review_gaps":review_gaps,"composition_basis_error":basis_error,
-            "composition_basis_valid":accepted,"semantic_acceptance":"not_assessed_by_structural_validator"}),
+            "structural_gaps":gaps,"review_gaps":review_gaps,
+            "structural_valid":accepted,"semantic_acceptance":"not_assessed_by_structural_validator"}),
         )?;
         if !accepted {
             return Err("source analysis failed offline structural audit; see report".into());

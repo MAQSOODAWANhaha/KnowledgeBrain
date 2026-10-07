@@ -234,6 +234,55 @@ fn collect_blank_effects(evidence: &Evidence<'_>, record: &Record) -> Vec<Value>
     effects
 }
 
+/// Initial text for quote/blank and contiguous regions.
+/// Removed ranges address the original UTF-8 bytes, before newline normalization.
+fn initial_text_fragment(
+    raw: &str,
+    blank: bool,
+    inline: bool,
+    prior_cr: &mut bool,
+) -> (String, Vec<std::ops::Range<usize>>) {
+    if blank && !inline {
+        return (
+            String::new(),
+            (!raw.is_empty())
+                .then_some(0..raw.len())
+                .into_iter()
+                .collect(),
+        );
+    }
+    let mut fragment = String::new();
+    for ch in raw.chars() {
+        if ch != '\n' || !*prior_cr {
+            fragment.push(if ch == '\r' { '\n' } else { ch });
+        }
+        *prior_cr = ch == '\r';
+    }
+    let mut removed = Vec::new();
+    if blank {
+        fragment = fragment
+            .split('\n')
+            .map(|line| {
+                if line.chars().all(char::is_whitespace) {
+                    line
+                } else {
+                    " "
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut start = 0;
+        for line in raw.split_inclusive(['\r', '\n']) {
+            let text = line.trim_end_matches(['\r', '\n']);
+            if !text.chars().all(char::is_whitespace) {
+                removed.push(start..start + text.len());
+            }
+            start += line.len();
+        }
+    }
+    (fragment, removed)
+}
+
 fn collect_text_effects(
     evidence: &Evidence<'_>,
     regions: &[TemplateRegion],
@@ -275,9 +324,17 @@ fn collect_text_effects(
                 "instruction_note":"generated_text is this region's initial compiler fragment, not the whole template. Concatenate fragments within each text_regions group; quote/blank groups are separate paragraph blocks. Compare removed_ranges and generated_text with required fixed wording. Newlines are normalized and adjacent CRLF is shared. instruction cannot override the policy. Missing group evidence yields no generated text or removal claim."});
             if delivered {
                 let raw = original.expect("all group evidence independently delivered");
-                let _ = (blank, inline, &mut prior_cr);
-                effect["generated_text"] = json!(raw.replace("\r\n", "\n"));
-                effect["removed_ranges"] = json!([]);
+                let (generated, removed) = initial_text_fragment(raw, blank, inline, &mut prior_cr);
+                effect["generated_text"] = json!(generated);
+                effect["removed_ranges"] = json!(
+                    removed
+                        .into_iter()
+                        .map(|range| {
+                            json!({"start":region.source.start+range.start,
+                        "end":region.source.start+range.end,"text":&raw[range]})
+                        })
+                        .collect::<Vec<_>>()
+                );
             }
             effects.insert(index + offset, effect);
         }

@@ -263,14 +263,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let deletion = platform::abandon_object_upload(
-            &admin,
-            staging_id,
-            None,
-        )
-        .await
-        .unwrap()
-        .expect("sole staged owner creates deletion identity");
+        let deletion = platform::abandon_object_upload(&admin, staging_id, None)
+            .await
+            .unwrap()
+            .expect("sole staged owner creates deletion identity");
         assert!(
             sqlx::query("SELECT object_ref FROM object_registry LIMIT 1")
                 .execute(&retention)
@@ -328,14 +324,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let deletion = platform::abandon_object_upload(
-            &admin,
-            staging_id,
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let deletion = platform::abandon_object_upload(&admin, staging_id, None)
+            .await
+            .unwrap()
+            .unwrap();
         let storage = platform::oxana_connect().expect("configured Oxana Redis");
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
         let runtime = storage

@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn all_implemented_v2_workers_are_required() {
+    fn retired_v2_bid_workers_stay_disabled() {
         let registry = loaded();
         for task in [
             BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
@@ -366,7 +366,7 @@ mod tests {
         ] {
             assert_eq!(
                 registry.launch_mode(task),
-                Some(LaunchMode::RequiredEnabled)
+                Some(LaunchMode::DeclaredDisabled)
             );
         }
     }

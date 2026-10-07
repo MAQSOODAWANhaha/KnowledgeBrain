@@ -129,7 +129,10 @@ fn outline_and_response_replace_the_authoring_machine() {
         "kb_bid_v2_advance_workspace_head",
         "system:",
     ] {
-        assert!(!SQL.contains(removed), "old authoring flow still present: {removed}");
+        assert!(
+            !SQL.contains(removed),
+            "old authoring flow still present: {removed}"
+        );
     }
     assert!(SQL.contains("kb_bid_v2_publish_outline"));
     assert!(SQL.contains("kb_bid_v2_publish_response"));
@@ -140,4 +143,3 @@ fn outline_and_response_replace_the_authoring_machine() {
     assert!(SQL.contains("editor_key uuid"));
     assert!(SQL.contains("p_actor IS NOT NULL AND p_actor IS DISTINCT FROM"));
 }
-

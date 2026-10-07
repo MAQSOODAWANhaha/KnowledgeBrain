@@ -46,13 +46,13 @@ pub fn map_attachment_tables(
             if !attachment_form_ids(input).contains(&form_id) {
                 continue;
             }
-            if let Some(existing) = bindings.insert(form_id.clone(), item.id.clone()) {
-                if existing != item.id {
-                    return Err(format!(
-                        "attachment table {form_id} is mapped to both {existing} and {}",
-                        item.id
-                    ));
-                }
+            if let Some(existing) = bindings.insert(form_id.clone(), item.id.clone())
+                && existing != item.id
+            {
+                return Err(format!(
+                    "attachment table {form_id} is mapped to both {existing} and {}",
+                    item.id
+                ));
             }
         }
     }
