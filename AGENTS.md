@@ -76,3 +76,12 @@ LLM 经常默默选择一种解释然后执行。这个原则强制明确推理�
 2. [步骤] → 验证: [检查]
 3. [步骤] → 验证: [检查]
 ```
+
+## Cloud Agent
+
+每次启动会拉起本机开发栈。宿主进程不要使用 Compose 网络里的服务名。
+
+- Postgres `127.0.0.1:15432`，Redis `127.0.0.1:16379`，对象存储 `127.0.0.1:19000`。`minio/minio` 已从 Docker Hub 下架，对象存储使用 Chainguard MinIO，bucket 为 `knowledgebrain`。
+- API 是 `http://127.0.0.1:8080`（`/ready`）。网页是 `http://127.0.0.1:5174`，并代理到该 API。
+- 未设置 `KNOWLEDGEBRAIN_CHAT_*` 或 `KNOWLEDGEBRAIN_EMBEDDING_*` 时使用本机占位地址，只为让进程和 `/ready` 起来。真实模型调用要换成可用端点。
+- 未配置 LDAP 时本地登录不校验密码。开发账号可用 `dev@local`。
