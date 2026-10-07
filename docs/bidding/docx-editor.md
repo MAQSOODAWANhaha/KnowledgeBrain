@@ -21,7 +21,7 @@ key 与打开基线同时为空/非空；没有活动 key 时不得遗留 pendin
 
 ## HTTP 与配置
 
-实现：[API 子模块](../../crates/api/src/bid_v2_routes/docx/editor.rs)、[Bidding 调用](../../crates/bidding/src/docx_round.rs)。以下路径前缀为 `/api/v2/submission-workspaces/{workspace_id}/docx`：
+实现：[编辑器模块](../../crates/api/src/bid_v2_routes/docx/editor.rs)。以下路径前缀为 `/api/v2/submission-workspaces/{workspace_id}/docx`：
 
 | 方法/路径 | 输入和结果 |
 | --- | --- |
@@ -72,7 +72,7 @@ key 与打开基线同时为空/非空；没有活动 key 时不得遗留 pendin
 
 集合 fixture 分别保存“不可变版本元数据”和“包含 editor 状态的完整 current 快照”，继续完整比较来源发布前后 current，未改成只比较版本 ID。该 fixture 的 SQL 文件使用合成对象元数据；真实 bytes 由 HTTP 目标验证。
 
-配置缺失时启用的 HTTP 目标失败，不静默跳过。复跑在原[HTTP 测试前置](docx-rounds.md#http-增量验证)基础上还需本页的 ONLYOFFICE 配置和专属测试替身；本机完整准备脚本/源码副本、日志及清理收据保存在 `/tmp/knowledgebrain-docx-editor.51jzk7c2/`。这些替身测试不是整个 workspace、API 可执行文件启动、S3 或浏览器产品验收；真实服务的后续证据独立记录在[产品联调结果](archive/onlyoffice-product-results.md)。
+配置缺失时启用的 HTTP 目标失败，不静默跳过。复跑在原[验收](docx-rounds.md#验收)基础上还需本页的 ONLYOFFICE 配置和专属测试替身；本机完整准备脚本/源码副本、日志及清理收据保存在 `/tmp/knowledgebrain-docx-editor.51jzk7c2/`。这些替身测试不是整个 workspace、API 可执行文件启动、S3 或浏览器产品验收；真实服务的后续证据独立记录在[产品联调结果](archive/onlyoffice-product-results.md)。
 
 最终检查：路由级 HTTP 目标 **1/1、0 ignored、0 filtered、exit 0**；API `bid_v2_routes::` 模块 **12/12**（其他 3 项被模块过滤）；Bidding baseline 契约 **21/21**；API library 与该 HTTP 目标 clippy `-D warnings` 通过。仅最后对错误提示的 match 分支应用 rustfmt，不改变执行逻辑；格式检查通过，未为纯格式变化重复启动服务。
 

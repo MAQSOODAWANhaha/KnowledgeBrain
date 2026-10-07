@@ -10,13 +10,13 @@
 
 一轮只有一个职责。模型只看见这个职责的工具（`schemas_for`）。其它名字由 `deny` 拒绝。
 
-现行选择是 `outline::agent::current` / `select`，不看旧的扫描游标：
+现行选择是 `outline::agent::current` / `select`。`select` 先看 `DraftStage`，不看旧的扫描游标，也不要调用 `outline::agent::duty`。`duty` 把 phase `outline` 固定成组织，发现之后的模板和收尾都会选错。
 
-1. 发现包还没全部提交：发现。
-2. 还没有章节，或还有未绑定的附件表：组织。
-3. 还没提交过模板槽：模板。
-4. 否则：收尾。
-5. 阶段已经是填充或已发布：模板。填充阶段的系统提示用 `prompts/template.txt`，工具仍只有 `put_slots` 和 `read_outline`。
+1. `DraftStage::Fill` 或已发布：模板。这是模板职责的第二种用法，不是 `response` 的知识库填充。该阶段的系统提示用 `prompts/template.txt`，工具仍只有 `put_slots` 和 `read_outline`。
+2. 发现包还没全部提交：发现。
+3. 还没有章节，或还有未绑定的附件表：组织。
+4. 还没提交过模板槽：模板。一次成稿里，这是组织完成之后写槽。
+5. 否则：收尾。
 
 `phase` 是检查点上的阶段。职责是这一轮给模型的工具集，由 `current` / `select` 决定。
 
@@ -25,12 +25,12 @@
 | `discover` | 发现。阅读包还没全部 `committed` |
 | `outline` | 先组织，再模板，再收尾。章节未齐或附件未绑完是组织；章节和附件齐了、槽还没交是模板；槽已交是收尾 |
 | `check` | 收尾。旧路径会把 phase 写成 `check`。一次成稿的 `finish_outline` 直接写成 `complete` |
-| `complete` | 大纲已结束。阶段仍是大纲时职责是收尾；阶段已是填充或已发布时职责是模板 |
+| `complete` | 大纲已结束。`DraftStage` 仍是大纲时职责是收尾；`DraftStage` 已是 `Fill` 或已发布时职责是模板 |
 
-模板职责有两种用法，工具都是 `put_slots` 和 `read_outline`。这不是第二条产品生成流：
+模板职责有两种用法，工具都是 `put_slots` 和 `read_outline`。这不是第二条产品生成流，也不是 `response` 的知识库填充：
 
 1. 一次成稿：组织完成之后写槽。
-2. 填充或已发布：只能改槽，不能改章节。
+2. `DraftStage::Fill` 或已发布：只能改槽，不能改章节。
 
 | 职责 | 工具 | 提示约束 |
 | --- | --- | --- |
@@ -71,7 +71,7 @@
 
 预算是 `reading_budget(pack_max_chars)`。`pack_max_chars` 为 0 时用 8000 字节。
 
-每一轮发现调用 `claim_turn`，最多把 `DEFAULT_PACK_CONCURRENCY`（4）个 `pending` 包标成 `running` 并放进请求 brief 的 `reading_packs`。已经在跑的包保持不动。
+每一轮发现的现行 `claim_turn` 最多把 `DEFAULT_PACK_CONCURRENCY`（4）个 `pending` 包标成 `running` 并放进请求 brief 的 `reading_packs`。已经在跑的包保持不动，这是现行行为。缺口 1 要求本轮仍要处理的 `running` 和待修 `failed` 包每次重放，见 [实施计划](../../plans/bidding/outline-gaps.md)。
 
 `submit_pack` 由宿主拆开：`repair` 为 false 时走 `submit_pack_scan`，为 true 时走 `repair_pack_scan`。修复只接受状态已经是 `failed` 的同一包。
 
@@ -165,9 +165,9 @@
 4. **模型。** 返回工具调用。`responded` 先把响应写入检查点。
 5. **工具。** `outline::agent::apply` 在 `deny` 下执行。结果追加到检查点对话，`session.finish` 记到当前 SDK 会话。
 6. **提交。** 运行结束、角色改变，或序列化后的 SDK 状态超过 `max_context_bytes` 时，丢掉 SDK 会话。大纲草稿和对话留在检查点。`committed` 清掉待完成轮，`save` 再写同一检查点。
-7. **职责推进或结束。** 下一轮重新选择职责。发现包全部 `committed` 后阶段可从 `discover` 到 `outline`。`finish_outline` 把 `tool_draft.finished` 和 phase 标成结束。`draft::after_batch` 用旧扫描完成去结束大纲，不属于这条顺序。
+7. **职责推进或结束。** 下一轮重新选择职责。发现包全部 `committed` 后阶段可从 `discover` 到 `outline`。`finish_outline` 把 `tool_draft.finished` 和 phase 标成 `complete`。目标出场条件是 `tool_draft.finished` 且投影通过 `validate_artifact`，不再读 `outline_flow::checked` 或 `analysis.outline.checks`。现行生产驱动在 `finish_draft_path` 之前仍用旧的 `checked`；只把 `finished` 设为 true 会报 `outline completeness check has not passed`，运行也不会因此结束。这是 [缺口 3](../../plans/bidding/outline-gaps.md)。`draft::after_batch` 用旧扫描完成去结束大纲，也不属于这条顺序。
 
-宿主包在大纲阶段含 `progress`、`work`、来源索引和 `tool_draft` 的模型视图（比 `read_outline` 多 `unmapped_forms`）。前缀长度是 2（系统提示 + brief），后缀长度是 1（宿主包）。前缀、后缀不变且投影历史等于当前窗口时复用 `AgentRun`；否则按这个窗口重建。
+`draft_stage` 为 `None` 或 `Outline` 时（含发现轮），宿主包含 `progress`、`work`、来源索引和 `tool_draft` 的模型视图（比 `read_outline` 多 `unmapped_forms`）。这不按 phase 名字开关。前缀长度是 2（系统提示 + brief），后缀长度是 1（宿主包）。前缀、后缀不变且投影历史等于当前窗口时复用 `AgentRun`；否则按这个窗口重建。
 
 ## 上下文窗口
 
@@ -175,7 +175,7 @@
 
 每一轮从检查点重放：
 
-- 宿主包每次带上 `progress` 和 `work`。大纲阶段同时带上来源索引和大纲草稿。
+- 宿主包每次带上 `progress` 和 `work`。`draft_stage` 为 `None` 或 `Outline` 时同时带上来源索引和大纲草稿，发现轮也包括在内。
 - 发现轮要把这一轮仍要处理的包放进 brief：刚领取的，以及尚未 `committed` 的 `running` 和待修 `failed`。SDK 会话被丢掉之后，切片正文仍来自这一次请求。
 - 现行 `claim_turn` 只返回本轮从 `pending` 变成 `running` 的包，已经在跑的包不会再次出现。补上仍在处理中的包是缺口 1 的交付要求，存在 `DiscoverWork` 里，不新增存储。
 
@@ -226,4 +226,4 @@
 
 - 阅读包发给模型的是偏移。上文「目标」载荷和「仍在处理中的包每次重放」都还没接通。
 - 已提交的要求没有进入组织。
-- `tool_draft` 还没有投影成 `OutlineArtifact` 再发布。`Checkpoint::progress` 仍在报分析侧的旧计数字段。
+- `tool_draft` 还没有投影成 `OutlineArtifact` 再发布。出场仍看 `outline_flow::checked` 和 `analysis.outline.checks`。`Checkpoint::progress` 仍在报分析侧的旧计数字段。

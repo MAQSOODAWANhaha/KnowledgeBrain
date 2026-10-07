@@ -14,11 +14,12 @@
 
 ## 2. 发现要求要进入组织
 
-现状：提交成功后只把描述存进 `DiscoverWork.requirements`，键是 `{pack_id}:{index}`。`put_chapters` 的 schema 不接收 `requirement_ids`（章节项只要求 `id`、`parent_id`、`order`、`title`、`purpose`），宿主把 `ChapterOutline.requirement_ids` 写成空数组。空数组是现行行为，不是目标。组织轮宿主包没有这份要求。
+现状：提交成功后只把描述存进 `DiscoverWork.requirements`，键是 `{pack_id}:{index}`，值只有描述字符串，`source_id`、`start`、`end` 没有留下。`put_chapters` 的 schema 不接收 `requirement_ids`（章节项只要求 `id`、`parent_id`、`order`、`title`、`purpose`），宿主把 `ChapterOutline.requirement_ids` 写成空数组。空数组是现行行为，不是目标。组织轮宿主包没有这份要求。
 
 目标参数（改 `outline-tools-v1.schema.json` 里 `put_chapters` 的章节项，以及 `outline/tools.rs` 的写入）：
 
-- 每个章节增加必填 `requirement_ids`（字符串数组，允许空数组）。`id`、`parent_id`、`order`、`title`、`purpose` 仍必填。不新增其它字段。
+- 检查点上的要求记录必须留下 `source_id`、`start`、`end`，不能只留描述。`requirement_ids` 只把这些 id 挂到章节；组织轮还要能读到对应切片。
+- 每个章节增加必填 `requirement_ids`（字符串数组，允许空数组）。`id`、`parent_id`、`order`、`title`、`purpose` 仍必填。不新增其它章节字段。
 - id 就是发现时写入的键 `{pack_id}:{index}`。
 - 未知 id 拒绝。全部已提交 id 都要出现，每个 id 只出现在一个章节上。缺 `requirement_ids` 拒绝。
 - 发现职责仍然不能调用 `put_chapters`。
@@ -26,15 +27,15 @@
 
 完成：上面的参数生效，组织轮能把要求挂到章节。
 
-验证：两包提交之后，组织轮可见这些要求。缺 `requirement_ids`、未知 id、已提交 id 没有全部挂上、或同一 id 出现在两个章节时拒绝。发现轮调用 `put_chapters` 仍被拒绝。不带 `requirement_ids` 的现行调用不能再通过。
+验证：两包提交之后，组织轮可见这些要求的描述和 `source_id`、`start`、`end`。只存描述、缺 `requirement_ids`、未知 id、已提交 id 没有全部挂上、或同一 id 出现在两个章节时拒绝。发现轮调用 `put_chapters` 仍被拒绝。不带 `requirement_ids` 的现行调用不能再通过。
 
 ## 3. 从 tool_draft 投影并发布，进度改读这条状态
 
-现状：`outline::template::project` 从 `AnalysisResult` 的 `draft_plan`、records 和 outline issues 投影 `OutlineArtifact`，没有生产调用方。`outline::store::publish` 能把 artifact 写入 `kb_bid_v2_publish_outline`，`finish_draft_path` 不调用它。`Checkpoint::progress` 仍报告 `analysis.outline` 和 `draft_plan`（`outline_requirements`、`outline_chapters`、`outline_scan_repair` 等）。前端 `AnalysisProgress` 也读这些字段。
+现状：`outline::template::project` 从 `AnalysisResult` 的 `draft_plan`、records 和 outline issues 投影 `OutlineArtifact`，没有生产调用方。`outline::store::publish` 能把 artifact 写入 `kb_bid_v2_publish_outline`，`finish_draft_path` 不调用它。生产驱动在调用 `finish_draft_path` 之前仍要求 `outline_flow::checked`：phase 为 `complete` 还不够，`analysis.outline.checks` 必须非空且全部通过。新路径只把 `tool_draft.finished` 设为 true 时，驱动返回 `outline completeness check has not passed`，运行也不会因此结束。`Checkpoint::progress` 仍报告 `analysis.outline` 和 `draft_plan`（`outline_requirements`、`outline_chapters`、`outline_scan_repair` 等）。前端 `AnalysisProgress` 也读这些字段。
 
-完成：`tool_draft.finished` 且 phase 为 `complete` 时，投影出经 `validate_artifact` 的 `OutlineArtifact`（章节、槽、附件绑定）再发布。进度来自 `DiscoverWork` 的包计数和 `tool_draft` 的章节、未绑定附件、槽是否已交、是否结束。扫描游标不再代表发现进度。
+完成：出场条件改为 `tool_draft.finished` 且投影通过 `validate_artifact`。不再读 `outline_flow::checked` 或 `analysis.outline.checks`。通过后发布 `OutlineArtifact`（章节、槽、附件绑定）。进度来自 `DiscoverWork` 的包计数和 `tool_draft` 的章节、未绑定附件、槽是否已交、是否结束。扫描游标不再代表发现进度。
 
-验证：完成的工具草稿投影后，artifact 的章节 id、槽和绑定与草稿一致，未完成草稿不能发布。只有 `tool_draft` 里有章节时，进度里的章数等于这份草稿，而不是 `draft_plan` 的长度。
+验证：完成的工具草稿投影后，artifact 的章节 id、槽和绑定与草稿一致，未完成草稿不能发布。`tool_draft.finished` 且 `validate_artifact` 通过时，空的 `analysis.outline.checks` 也不再挡住出场。只有旧 checks 通过、工具草稿未结束时不能发布。只有 `tool_draft` 里有章节时，进度里的章数等于这份草稿，而不是 `draft_plan` 的长度。
 
 ## 旧路径退役
 
@@ -58,8 +59,8 @@
 通过：
 
 1. 冻结解析按解析器顺序发布。大纲运行读的是这份冻结输入。
-2. 计划中的每个阅读包变为 `committed`。每条要求的 `source_id`、`start`、`end` 落在该包切片内。续表的表头只作为上下文。
-3. 章节树非空、无环、同级顺序不重复。每个附件表恰好绑定一个章节。
+2. 计划中的每个阅读包变为 `committed`。发现轮 brief 里的包带上切片正文，以及 `[start, end)` 的行优先 `cells`。每条要求的 `source_id`、`start`、`end` 落在该包切片内。续表的 `header` 按列排列，且这些表头不在引用范围内。
+3. 章节树非空、无环、同级顺序不重复。每个附件表恰好绑定一个章节。每个已提交要求 id 恰好出现在一个章节的 `requirement_ids` 里。空的 `requirement_ids` 不能通过。
 4. 已经 `put_slots`。`bidder_blank` 和 `signature` 的文本为空、`match_query` 非空、`response_required` 为真。其它种类的 `match_query` 为空。每个 `response` 章节至少有一个槽。
 5. `finish_outline` 使 `tool_draft.finished` 为真，phase 为 `complete`。
 6. 投影出的 `OutlineArtifact` 通过 `validate_artifact`：版本和身份正确，章节或模板非空，id 不重复，分组章节不带知识库回答槽，回答槽文本为空且带 `match_query`。
