@@ -2,7 +2,7 @@
 //!
 //! | Module | Responsibility |
 //! | --- | --- |
-//! | `agent` | Response duty only. No tender parse, no new chapters, no template edits. |
+//! | `agent` | Response duty only. Owns the response tool schema. No tender parse, no new chapters, no template edits. |
 //! | `bind` | Bind knowledge hits to outline response slots. |
 //!
 //! Input is a [`crate::outline::OutlineArtifact`]. Unmatched slots stay

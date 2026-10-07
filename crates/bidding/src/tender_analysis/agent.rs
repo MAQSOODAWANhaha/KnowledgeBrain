@@ -20,11 +20,9 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use view_io::read_source_view;
 
-const MAIN: &str = include_str!("../../prompts/tender-analysis-main-v1.txt");
+const MAIN: &str = include_str!("prompts/main.txt");
 
-const REVIEWER: &str = include_str!("../../prompts/tender-analysis-reviewer-v1.txt");
-const DRAFT_OUTLINE: &str = include_str!("../../prompts/tender-draft-outline-v1.txt");
-const DRAFT_FILL: &str = include_str!("../../prompts/tender-draft-fill-v1.txt");
+const REVIEWER: &str = include_str!("prompts/reviewer.txt");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -223,15 +221,16 @@ impl Config {
             publish_reserve_secs: draft::PUBLISH_RESERVE_SECS,
         };
         let fill_tools_sha256 =
-            digest(&crate::tender_analysis::draft::fill_schemas()).map_err(invalid)?;
-        let fill_prompt_sha256 =
-            digest(&crate::agent_runtime::chat::system_content(DRAFT_FILL)).map_err(invalid)?;
-        let tools_sha256 =
-            digest(&crate::tender_analysis::draft::outline_schemas()).map_err(invalid)?;
+            digest(&crate::outline::agent::template_schemas()).map_err(invalid)?;
+        let fill_prompt_sha256 = digest(&crate::agent_runtime::chat::system_content(
+            crate::outline::agent::TEMPLATE_PROMPT,
+        ))
+        .map_err(invalid)?;
+        let tools_sha256 = digest(&crate::outline::agent::schemas()).map_err(invalid)?;
         let review_tools_sha256 = digest(&tools::schemas_for(true, &limits)).map_err(invalid)?;
         let main_prompt_sha256 = digest(&crate::agent_runtime::chat::system_content(
             if limits.draft_path {
-                DRAFT_OUTLINE
+                crate::outline::agent::OUTLINE_PROMPT
             } else {
                 MAIN
             },
@@ -290,18 +289,20 @@ impl Config {
             || (!l.draft_path
                 && self.tools_sha256 != digest(&tools::schemas_for(false, l)).map_err(invalid)?)
             || (l.draft_path && {
-                let outline =
-                    digest(&crate::tender_analysis::draft::outline_schemas()).map_err(invalid)?;
-                let fill =
-                    digest(&crate::tender_analysis::draft::fill_schemas()).map_err(invalid)?;
+                let outline = digest(&crate::outline::agent::schemas()).map_err(invalid)?;
+                let fill = digest(&crate::outline::agent::template_schemas()).map_err(invalid)?;
                 !(self.tools_sha256 == outline
                     && self.fill_tools_sha256 == fill
                     && self.main_prompt_sha256
-                        == digest(&crate::agent_runtime::chat::system_content(DRAFT_OUTLINE))
-                            .map_err(invalid)?
+                        == digest(&crate::agent_runtime::chat::system_content(
+                            crate::outline::agent::OUTLINE_PROMPT,
+                        ))
+                        .map_err(invalid)?
                     && self.fill_prompt_sha256
-                        == digest(&crate::agent_runtime::chat::system_content(DRAFT_FILL))
-                            .map_err(invalid)?)
+                        == digest(&crate::agent_runtime::chat::system_content(
+                            crate::outline::agent::TEMPLATE_PROMPT,
+                        ))
+                        .map_err(invalid)?)
             })
             || self.review_tools_sha256 != digest(&tools::schemas_for(true, l)).map_err(invalid)?
             || (!l.draft_path
@@ -1589,7 +1590,6 @@ pub(super) async fn prepare_request(
     let turn_duty = crate::outline::agent::current(input, state);
     let discovering =
         config.limits.draft_path && turn_duty == crate::outline::agent::Duty::Discover;
-    let duty_instructions = config.limits.draft_path.then(|| turn_duty.instructions());
     loop {
         let reviewer = state.role == Role::Reviewer;
         let review_packet = if reviewer {
@@ -1603,23 +1603,14 @@ pub(super) async fn prepare_request(
                 crate::tender_analysis::draft::DraftStage::Fill
                     | crate::tender_analysis::draft::DraftStage::Published
             );
-        let base = if config.limits.draft_path {
-            if draft_fill {
-                DRAFT_FILL
-            } else {
-                DRAFT_OUTLINE
-            }
+        let system_owned;
+        let system = if config.limits.draft_path {
+            system_owned = crate::outline::agent::system_prompt(turn_duty, draft_fill);
+            system_owned.as_str()
         } else if reviewer {
             REVIEWER
         } else {
             MAIN
-        };
-        let system;
-        let system = if let Some(instructions) = duty_instructions {
-            system = format!("{instructions}\n\n{base}");
-            system.as_str()
-        } else {
-            base
         };
         let mut brief = json!({"project_id":input.project_id,"document_set_id":input.document_set_id,
             "source_count":input.source_units.len(),"form_count":input.structured_forms.len(),
@@ -1745,23 +1736,14 @@ pub(super) async fn prepare_request(
         }
         let has_preloaded_evidence = preloaded_evidence.is_some();
         let host = if config.limits.draft_path {
-            let mut packet = json!({
-                "progress":state.progress(input),
-                "work":context::request_work(state).map_err(invalid)?,
-            });
-            if matches!(
-                state.draft_stage,
-                draft::DraftStage::None | draft::DraftStage::Outline
-            ) {
-                packet["sources"] =
-                    draft::outline_index(input, config.limits.max_tool_result_bytes);
-                packet["outline"] =
-                    crate::outline::tools::model_state(input, &state.outline_run.tool_draft);
-            }
-            if let Some(evidence) = &preloaded_evidence {
-                packet["preloaded_evidence"] = evidence.clone();
-            }
-            packet
+            crate::outline::agent::host_packet(
+                input,
+                state,
+                config.limits.max_tool_result_bytes,
+                state.progress(input),
+                context::request_work(state).map_err(invalid)?,
+                preloaded_evidence.as_ref(),
+            )
         } else {
             json!({
             "progress":state.progress(input),"work":context::request_work(state).map_err(invalid)?,
@@ -2289,7 +2271,13 @@ fn apply_inner(
                 | "read_outline"
                 | "finish_outline"
         ) {
-            return crate::tender_analysis::draft::apply(input, config, state, name, args);
+            return crate::outline::agent::apply(
+                input,
+                config.limits.pack_max_chars,
+                state,
+                name,
+                args,
+            );
         }
         return Err("unknown or role-forbidden tool".into());
     }

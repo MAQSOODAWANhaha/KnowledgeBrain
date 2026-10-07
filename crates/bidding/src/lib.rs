@@ -2,6 +2,9 @@
 //!
 //! [`outline`] parses the tender and publishes chapters plus template content.
 //! [`response`] matches knowledge-base evidence onto that outline.
+//! [`tender_analysis`] is the analysis agent: records, review, and repair, plus
+//! the shared checkpoint turn. Outline and response prompts, tool schemas, and
+//! tool application live in their own packages.
 
 pub mod agent_error;
 pub mod agent_runtime;

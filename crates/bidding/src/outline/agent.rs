@@ -4,8 +4,14 @@
 //! every attachment table to one chapter. Template writes prescribed slots.
 //! Check reads the draft and finishes it.
 
+use crate::tender_analysis::FrozenInput;
+use crate::tender_analysis::agent::Checkpoint;
 use crate::tender_analysis::draft::DraftStage;
 use crate::tender_analysis::outline_flow::Phase;
+use serde_json::{Value, json};
+
+pub const OUTLINE_PROMPT: &str = include_str!("prompts/outline.txt");
+pub const TEMPLATE_PROMPT: &str = include_str!("prompts/template.txt");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Duty {
@@ -100,7 +106,7 @@ pub fn schemas_for(duty: Duty) -> Vec<serde_json::Value> {
         Duty::Check => CHECK,
         Duty::Template => TEMPLATE,
     };
-    crate::tender_analysis::draft::outline_schemas()
+    schemas()
         .into_iter()
         .filter(|tool| {
             tool["function"]["name"]
@@ -148,6 +154,119 @@ fn duty_denial(duty: Duty) -> &'static str {
         Duty::Check => "check duty cannot rescan, reorganize, or write template content",
         Duty::Template => "template duty cannot change chapters or rescan the tender",
     }
+}
+
+/// Outline tool contract. Template writing uses two of these tools.
+pub fn schemas() -> Vec<Value> {
+    serde_json::from_str(include_str!("../../schemas/outline-tools-v1.schema.json"))
+        .expect("outline tools")
+}
+
+pub fn template_schemas() -> Vec<Value> {
+    schemas()
+        .into_iter()
+        .filter(|tool| {
+            matches!(
+                tool["function"]["name"].as_str(),
+                Some("put_slots" | "read_outline")
+            )
+        })
+        .collect()
+}
+
+/// Duty instruction in front of the outline or template prompt.
+pub fn system_prompt(duty: Duty, fill_stage: bool) -> String {
+    let base = if fill_stage {
+        TEMPLATE_PROMPT
+    } else {
+        OUTLINE_PROMPT
+    };
+    format!("{}\n\n{base}", duty.instructions())
+}
+
+/// Frozen sources for the outline model. Discovery reads claimed section packs.
+pub fn source_index(input: &FrozenInput, max_bytes: usize) -> Value {
+    let rows: Vec<Value> = input
+        .source_units
+        .iter()
+        .map(|source| {
+            json!({
+                "source_id":source.source_unit_revision_id,"document_id":source.document_id,
+                "ordinal":source.ordinal,"bytes":source.text.len(),"locator":source.locator,
+                "forms":input.structured_forms.iter().filter(|f| f["source_unit_revision_id"]==source.source_unit_revision_id)
+                    .map(|f| &f["form_definition_revision_id"]).collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    json!({"total_sources":rows.len(),
+        "sources":crate::tender_analysis::tools::bounded_page(&rows,0,rows.len().max(1),max_bytes/2).unwrap_or_else(|e| json!({"error":e})),
+        "documents":crate::tender_analysis::tools::bounded_page(&input.documents,0,input.documents.len().max(1),max_bytes/4).unwrap_or_else(|e|json!({"error":e})),
+        "instruction":"这些是冻结来源。发现只处理已领取的阅读包。组织时写章节，并把每个附件表绑到唯一章节。"})
+}
+
+/// Host packet for an outline turn. Names no retired tools.
+pub fn host_packet(
+    input: &FrozenInput,
+    state: &Checkpoint,
+    max_bytes: usize,
+    progress: Value,
+    work: Value,
+    preloaded_evidence: Option<&Value>,
+) -> Value {
+    let mut packet = json!({
+        "progress": progress,
+        "work": work,
+    });
+    if matches!(state.draft_stage, DraftStage::None | DraftStage::Outline) {
+        packet["sources"] = source_index(input, max_bytes);
+        packet["outline"] = super::tools::model_state(input, &state.outline_run.tool_draft);
+    }
+    if let Some(evidence) = preloaded_evidence {
+        packet["preloaded_evidence"] = evidence.clone();
+    }
+    packet
+}
+
+/// Apply one of the six outline tools. Anything else is refused.
+pub fn apply(
+    input: &FrozenInput,
+    pack_max_chars: usize,
+    state: &mut Checkpoint,
+    name: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    if name == "submit_pack" {
+        let repair = args["repair"].as_bool().ok_or("repair must be a boolean")?;
+        let mut forwarded = args.clone();
+        forwarded
+            .as_object_mut()
+            .ok_or("submit_pack arguments must be an object")?
+            .remove("repair");
+        let tool = if repair {
+            "repair_pack_scan"
+        } else {
+            "submit_pack_scan"
+        };
+        return super::discover::apply_pack_tool(
+            &mut state.outline_run.reading_packs,
+            input,
+            super::discover::reading_budget(pack_max_chars),
+            tool,
+            &forwarded,
+        );
+    }
+    if matches!(
+        name,
+        "put_chapters" | "bind_forms" | "put_slots" | "read_outline" | "finish_outline"
+    ) {
+        let value = super::tools::apply(input, &mut state.outline_run.tool_draft, name, args)?;
+        if name == "finish_outline" {
+            state.analysis.outline.phase = Phase::Complete;
+            state.outline_run.phase = Phase::Complete;
+        }
+        return Ok(value);
+    }
+    Err("unknown outline tool".into())
 }
 
 const DISCOVER: &[&str] = &["submit_pack", "read_outline"];
@@ -243,13 +362,14 @@ mod tests {
             ]
         );
         assert_eq!(names(Duty::Template).len(), 2);
-        assert_eq!(crate::tender_analysis::draft::outline_schemas().len(), 6);
+        assert_eq!(schemas().len(), 6);
+        assert_eq!(template_schemas().len(), 2);
     }
 
     #[test]
     fn prompts_name_only_the_closed_tools() {
-        let outline = include_str!("../../prompts/tender-draft-outline-v1.txt");
-        let fill = include_str!("../../prompts/tender-draft-fill-v1.txt");
+        let outline = OUTLINE_PROMPT;
+        let fill = TEMPLATE_PROMPT;
         assert!(outline.contains("put_chapters"));
         assert!(outline.contains("bind_forms"));
         assert!(outline.contains("submit_pack"));

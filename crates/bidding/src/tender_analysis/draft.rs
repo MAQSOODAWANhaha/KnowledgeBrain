@@ -1,4 +1,6 @@
-//! 草稿通道：大纲与按章模板。不走 source_unit 抽取或独立 Rechecker。
+//! Old scan and fill application. The six outline tools live in
+//! [`crate::outline::agent`]. The two response tools live in
+//! [`crate::response::agent`].
 use super::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -699,31 +701,6 @@ pub fn mark_window_coverage(input: &FrozenInput, coverage: &mut Coverage, window
     }
 }
 
-/// Tools the outline model may see. Reading packs, chapters, forms, and slots.
-pub fn outline_schemas() -> Vec<Value> {
-    serde_json::from_str(include_str!("../../schemas/outline-tools-v1.schema.json"))
-        .expect("outline tools")
-}
-
-/// Template writing uses two of the outline tools, not the old fill set.
-pub fn fill_schemas() -> Vec<Value> {
-    outline_schemas()
-        .into_iter()
-        .filter(|tool| {
-            matches!(
-                tool["function"]["name"].as_str(),
-                Some("put_slots" | "read_outline")
-            )
-        })
-        .collect()
-}
-
-/// Response model: read the frozen outline and write slot responses.
-pub fn response_schemas() -> Vec<Value> {
-    serde_json::from_str(include_str!("../../schemas/response-tools-v1.schema.json"))
-        .expect("response tools")
-}
-
 pub fn apply(
     input: &FrozenInput,
     config: &super::agent::Config,
@@ -731,38 +708,6 @@ pub fn apply(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    if name == "submit_pack" {
-        let repair = args["repair"].as_bool().ok_or("repair must be a boolean")?;
-        let mut forwarded = args.clone();
-        forwarded
-            .as_object_mut()
-            .ok_or("submit_pack arguments must be an object")?
-            .remove("repair");
-        let tool = if repair {
-            "repair_pack_scan"
-        } else {
-            "submit_pack_scan"
-        };
-        return crate::outline::discover::apply_pack_tool(
-            &mut state.outline_run.reading_packs,
-            input,
-            crate::outline::discover::reading_budget(config.limits.pack_max_chars),
-            tool,
-            &forwarded,
-        );
-    }
-    if matches!(
-        name,
-        "put_chapters" | "bind_forms" | "put_slots" | "read_outline" | "finish_outline"
-    ) {
-        let value =
-            crate::outline::tools::apply(input, &mut state.outline_run.tool_draft, name, args)?;
-        if name == "finish_outline" {
-            state.analysis.outline.phase = super::outline_flow::Phase::Complete;
-            state.outline_run.phase = super::outline_flow::Phase::Complete;
-        }
-        return Ok(value);
-    }
     if name == "put_outline_items" {
         return super::outline_flow::apply_chapter_batch(input, config, state, args);
     }
@@ -1524,21 +1469,6 @@ pub fn after_batch(
         DraftStage::Published => state.done = true,
     }
     Ok(())
-}
-
-/// Frozen sources for the outline model. Discovery reads claimed section packs,
-/// not a cursor through accounting chunks.
-pub fn outline_index(input: &FrozenInput, max_bytes: usize) -> Value {
-    let rows: Vec<Value> = input.source_units.iter().map(|source| json!({
-        "source_id":source.source_unit_revision_id,"document_id":source.document_id,
-        "ordinal":source.ordinal,"bytes":source.text.len(),"locator":source.locator,
-        "forms":input.structured_forms.iter().filter(|f| f["source_unit_revision_id"]==source.source_unit_revision_id)
-            .map(|f| &f["form_definition_revision_id"]).collect::<Vec<_>>()
-    })).collect();
-    json!({"total_sources":rows.len(),
-        "sources":super::tools::bounded_page(&rows,0,rows.len().max(1),max_bytes/2).unwrap_or_else(|e| json!({"error":e})),
-        "documents":super::tools::bounded_page(&input.documents,0,input.documents.len().max(1),max_bytes/4).unwrap_or_else(|e|json!({"error":e})),
-        "instruction":"这些是冻结来源。发现只处理已领取的阅读包。组织时写章节，并把每个附件表绑到唯一章节。"})
 }
 
 fn require_active_chapter(

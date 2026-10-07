@@ -1,5 +1,10 @@
-//! Tender-side semantic analysis. Source geometry is immutable; interpretations
-//! are versioned records, reviewed independently before publication.
+//! Analysis agent. Source geometry is immutable; interpretations are versioned
+//! records, reviewed independently before publication.
+//!
+//! Chapters, template slots, and knowledge responses are not defined here.
+//! [`crate::outline`] owns the outline prompt, the six tools, and their
+//! application. [`crate::response`] owns the two response tools. This module
+//! keeps the analysis catalog, the shared checkpoint, and the turn journal.
 pub mod agent;
 pub mod budget;
 pub mod draft;

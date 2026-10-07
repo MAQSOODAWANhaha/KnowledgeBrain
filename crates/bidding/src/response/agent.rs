@@ -18,7 +18,8 @@ pub fn deny(tool: &str) -> Option<&'static str> {
 }
 
 pub fn schemas() -> Vec<serde_json::Value> {
-    crate::tender_analysis::draft::response_schemas()
+    serde_json::from_str(include_str!("../../schemas/response-tools-v1.schema.json"))
+        .expect("response tools")
 }
 
 pub fn apply(artifact: &OutlineArtifact, name: &str, args: &Value) -> Result<Value, String> {
