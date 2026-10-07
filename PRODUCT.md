@@ -8,7 +8,7 @@ web
 
 ## Stack
 
-delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process (`KNOWLEDGEBRAIN_WEB_ROOT`). No extra SPA container; ONLYOFFICE service topology remains to be validated. Chosen after the user asked to ship the full UI immediately; they did not name a framework.
+delegated: Vite + TypeScript SPA in `web/`, served by the existing `api` process (`KNOWLEDGEBRAIN_WEB_ROOT`). No extra SPA container. The bid editor is ONLYOFFICE Docs; service origins are the Compose `KB_ONLYOFFICE_*` settings. Production embedding license, fonts, and concurrency are still unverified. Chosen after the user asked to ship the full UI immediately; they did not name a framework.
 
 编制目标为 **ONLYOFFICE Docs 直接编辑真实 DOCX**，DOCX 是正式正文唯一来源。主链已部分实现并完成隔离验证，真实 Agent 整稿及同版本 PDF 尚未通过完整验收；不将编辑后的 Word 回转为 Markdown/ContentBlock 再重建整稿。现有 SPA 交付方式不代表文档服务已部署。
 

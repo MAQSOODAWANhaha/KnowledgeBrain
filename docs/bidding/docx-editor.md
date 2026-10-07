@@ -104,7 +104,7 @@ HTTP 契约新增真实 GET 计数：替身以 `POST /test/mode {cache_available
 
 ## 编制前端接入
 
-`Workbench` 先读取项目和当前 DOCX。已有当前 DOCX 时，编制步骤使用独立 `DocxEditor`，只使用后端返回的官方脚本地址和签名配置；文件 / 编制 / 导出三步在左栏当前标下保留（hash 链接，testid `wizard-*`），当前稿不再挂载旧块编辑器、候选写入或旧 renderer 出件入口。只有后端明确返回 `404/NOT_FOUND` 才允许尚无 DOCX 的项目进入旧块编辑器；权限、网络或服务错误显示重试入口。版本是编辑历史，不是草稿／终稿等级，见 [docx-rounds.md](docx-rounds.md)。
+`Workbench` 先读取项目和当前 DOCX。编制步骤的编辑器是 ONLYOFFICE：`DocxEditor` 使用后端返回的官方脚本地址和签名配置。还没有当前 DOCX 时停留在骨架等待（`DraftReady`），稿件读取失败显示重试，两种情况都继续只挂这一套编辑器。文件 / 编制 / 导出三步在左栏当前标下保留（hash 链接，testid `wizard-*`）。版本是编辑历史，不是草稿／终稿等级，见 [docx-rounds.md](docx-rounds.md)。
 
 `docxSession` 区分编辑器同步、命令受理和后端版本发布：SDK 同步完成不会显示“已保存”。保存请求保留预期版本和幂等身份；响应不确定时，“确认保存结果”复用同一请求。轮次/key 未变、新版本发布且 pending/error 清除后，才确认本次保存；请求后继续输入仍标记未保存。状态查询失败立即撤销已保存提示，恢复查询可清理连接错误。新轮或 key 变化会暂停旧会话保存，要求显式重开。
 

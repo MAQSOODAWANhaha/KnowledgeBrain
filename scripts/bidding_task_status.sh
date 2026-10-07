@@ -9,9 +9,9 @@ Copy a request_artifact_id from the list to inspect its detailed progress.
 Omit the ID to inspect the latest requirement_set_compile request.
 Environment: KB_POSTGRES_CONTAINER (default knowledgebrain-postgres).
 POSTGRES_USER and POSTGRES_DB are read inside the container (default knowledgebrain).
-Sections: CURRENT (current_attempt only), ATTEMPTS (history), CURSOR (one row per completed turn).
-read_bytes is the checkpoint cumulative read counter, not unique source bytes.
-text_sources counts sources with committed text scan ranges, not merely delivered text.
+Sections: CURRENT (current_attempt only), ATTEMPTS (history), PHASE (one row per completed turn).
+Phase is discover, outline (organize slots, then check), check, or complete.
+read_bytes is the checkpoint cumulative read counter.
 Elapsed time is wall time, including time waiting for manual continuation.
 HELP
   exit 0
@@ -31,8 +31,10 @@ SELECT :'requested_id' = '--list' AS list_requests \gset
 SELECT q.id AS request_artifact_id,q.project_id,q.status AS request_status,
  q.current_attempt,r.status AS run_status,
  r.progress_detail->>'outline_phase' AS phase,
- r.progress_detail->>'outline_scan_cursor' AS cursor,
- r.progress_detail->>'outline_scan_chunks' AS chunks,
+ r.progress_detail->>'outline_pack_committed' AS packs_committed,
+ r.progress_detail->>'outline_pack_total' AS packs_total,
+ r.progress_detail->>'outline_slots_submitted' AS slots,
+ r.progress_detail->>'outline_finished' AS finished,
  r.progress_detail->>'outline_requirements' AS reqs,
  r.progress_detail->>'outline_chapters' AS chapters,
  r.turn_count,q.created_at,q.finished_at,
@@ -68,11 +70,16 @@ WITH current AS (
  WHERE q.id=:'selected_id'::uuid
 )
 SELECT id AS request_artifact_id,request_status AS status,current_attempt,run_status,
- payload#>>'{analysis,outline,phase}' AS phase,payload->>'turn' AS turn,
- payload#>>'{outline_run,chunk_cursor}' AS cursor,
- progress_detail->>'outline_scan_chunks' AS chunks,
- (SELECT count(*) FROM jsonb_object_keys(coalesce(payload#>'{analysis,outline,requirements}','{}'))) AS reqs,
- jsonb_array_length(coalesce(payload#>'{analysis,draft_plan}','[]')) AS chapters,
+ coalesce(progress_detail->>'outline_phase', payload#>>'{outline_run,phase}') AS phase,
+ payload->>'turn' AS turn,
+ progress_detail->>'outline_pack_committed' AS packs_committed,
+ progress_detail->>'outline_pack_total' AS packs_total,
+ progress_detail->>'outline_slots_submitted' AS slots,
+ progress_detail->>'outline_finished' AS finished,
+ coalesce(progress_detail->>'outline_requirements',
+   (SELECT count(*)::text FROM jsonb_object_keys(coalesce(payload#>'{analysis,outline,requirements}','{}')))) AS reqs,
+ coalesce(progress_detail->>'outline_chapters',
+   jsonb_array_length(coalesce(payload#>'{outline_run,tool_draft,chapters}', payload#>'{analysis,draft_plan}', '[]'::jsonb))::text) AS chapters,
  turn_count,text_bytes_read,
  coalesce(finished_at,now())-coalesce(started_at,created_at) AS elapsed,
  coalesce(error_code,last_error_code) AS last_error_code
@@ -91,7 +98,7 @@ WHERE q.id=:'selected_id'::uuid;
 \echo ==== ATTEMPTS (historical interruptions are not current failures) ====
 SELECT attempt,status,turn_count,started_at,lease_acquired_at,updated_at,last_error_code
 FROM bid_tender_agent_run_artifacts WHERE request_artifact_id=:'selected_id'::uuid ORDER BY attempt;
-\echo ==== CURSOR ====
+\echo ==== PHASE ====
 WITH snapshots AS (
  SELECT batch_ordinal,created_at,convert_from(canonical_payload,'UTF8')::jsonb AS payload
  FROM bid_tender_agent_checkpoint_artifacts
@@ -101,13 +108,12 @@ WITH snapshots AS (
    (payload->>'turn')::integer AS turn,created_at,payload
  FROM snapshots ORDER BY (payload->>'turn')::integer,batch_ordinal DESC,created_at DESC
 )
-SELECT turn,payload#>>'{outline_run,chunk_cursor}' AS cursor,
+SELECT turn,payload#>>'{outline_run,phase}' AS phase,
+ payload#>>'{outline_run,tool_draft,slots_submitted}' AS slots_submitted,
+ payload#>>'{outline_run,tool_draft,finished}' AS finished,
+ jsonb_array_length(coalesce(payload#>'{outline_run,tool_draft,chapters}','[]'::jsonb)) AS chapters,
  (SELECT count(*) FROM jsonb_object_keys(coalesce(payload#>'{analysis,outline,requirements}','{}'))) AS reqs,
- (SELECT count(*) FROM jsonb_each(coalesce(payload#>'{analysis,outline,scanned,text}','{}')) e
-  WHERE jsonb_array_length(e.value)>0) AS text_sources,
  payload->>'read_bytes' AS read_bytes,
- payload#>>'{analysis,outline,phase}' AS phase,
- jsonb_array_length(coalesce(payload#>'{analysis,draft_plan}','[]')) AS chapters,
  created_at AS checkpoint_at
 FROM turns ORDER BY turn;
 \else

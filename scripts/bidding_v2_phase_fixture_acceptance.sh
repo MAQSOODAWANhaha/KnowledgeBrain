@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Outline/response SQL publish acceptance.
 # Applies crates/bidding/tests/sql/outline_response_acceptance.sql on two fresh
-# bidding baselines. It does not load phase0/1/3/6_acceptance.sql.
+# bidding baselines. CI runs this from the rust job in .github/workflows/ci.yml.
+#
+# phase0_acceptance.sql, phase1_acceptance.sql, phase1_supersession_acceptance.sql,
+# phase3_acceptance.sql, and phase6_acceptance.sql were removed. They called
+# authoring functions (document-set CAS, outline checkpoints, quote snapshots,
+# preview HTML) that migrations/bidding_v2_baseline.sql no longer defines.
+# The live SQL contract is the outline, response, DOCX, and export fixture below.
 set -euo pipefail
 
 : "${KNOWLEDGEBRAIN_TEST_DATABASE_URL:?KNOWLEDGEBRAIN_TEST_DATABASE_URL is required}"

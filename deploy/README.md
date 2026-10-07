@@ -8,7 +8,7 @@ Redis、MinIO；Neo4j 可选。
 
 [ONLYOFFICE/DOCX 技术方向](../docs/bidding/onlyoffice.md)已确认。编辑器约束见 [接入计划](../plans/bidding/onlyoffice-integration.md)。大纲生成合同见 [运行时](../docs/bidding/outline.md)，未完成项见 [缺口计划](../plans/bidding/outline-gaps.md)。
 
-本地 `--profile runtime` **包含** Community Document Server（`onlyoffice`，映射 `ONLYOFFICE_HOST_PORT`，默认 18081）。`deploy/.env.example` 必须填写 `KB_ONLYOFFICE_*`（浏览器 origin、容器内 command origin、API origin、两套独立 secret）；缺项时打开编辑器 fail-closed。Community 镜像只用于本地闭环，不代表生产嵌入许可、字体或并发已验收。同版 PDF 的当前实施与验收归主方案 T7／T9。基础编辑/保存不依赖外部 Automation API。
+本地 `--profile runtime` **包含** Community Document Server（`onlyoffice`，映射 `ONLYOFFICE_HOST_PORT`，默认 18081）。`deploy/.env.example` 必须填写 `KB_ONLYOFFICE_*`（浏览器 origin、容器内 command origin、API origin、两套独立 secret）；缺项时打开编辑器 fail-closed。Community 镜像只用于本地闭环，不代表生产嵌入许可、字体或并发已验收。同版 PDF 由 ONLYOFFICE 转换同一已保存 DOCX，验收见 [接入计划](../plans/bidding/onlyoffice-integration.md)。基础编辑/保存不依赖外部 Automation API。
 
 ### Agent 与模型配置改造（待实施）
 
