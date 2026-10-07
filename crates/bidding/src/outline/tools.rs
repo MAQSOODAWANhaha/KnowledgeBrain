@@ -36,6 +36,13 @@ impl Draft {
     }
 }
 
+/// State the outline model reads. It names no retired tools.
+pub fn model_state(input: &FrozenInput, draft: &Draft) -> Value {
+    let mut state = view(draft);
+    state["unmapped_forms"] = json!(unmapped_forms(input, draft));
+    state
+}
+
 pub fn unmapped_forms(input: &FrozenInput, draft: &Draft) -> Vec<String> {
     let mapped: BTreeSet<_> = draft
         .bindings

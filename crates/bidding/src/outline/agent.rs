@@ -245,4 +245,25 @@ mod tests {
         assert_eq!(names(Duty::Template).len(), 2);
         assert_eq!(crate::tender_analysis::draft::outline_schemas().len(), 6);
     }
+
+    #[test]
+    fn prompts_name_only_the_closed_tools() {
+        let outline = include_str!("../../prompts/tender-draft-outline-v1.txt");
+        let fill = include_str!("../../prompts/tender-draft-fill-v1.txt");
+        assert!(outline.contains("put_chapters"));
+        assert!(outline.contains("bind_forms"));
+        assert!(outline.contains("submit_pack"));
+        assert!(fill.contains("put_slots"));
+        for retired in [
+            "put_outline_items",
+            "submit_outline_scan",
+            "submit_outline_check",
+            "read_source",
+            "put_chapter_template",
+            "skip_chapter_content",
+        ] {
+            assert!(!outline.contains(retired), "{retired}");
+            assert!(!fill.contains(retired), "{retired}");
+        }
+    }
 }

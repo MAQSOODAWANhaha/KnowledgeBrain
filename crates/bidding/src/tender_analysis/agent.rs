@@ -1757,11 +1757,10 @@ pub(super) async fn prepare_request(
                 state.draft_stage,
                 draft::DraftStage::None | draft::DraftStage::Outline
             ) {
-                packet["source_index"] =
+                packet["sources"] =
                     draft::outline_index(input, state, config.limits.max_tool_result_bytes);
-                packet["outline_state"] =
-                    super::outline_flow::packet(input, state, config.limits.max_tool_result_bytes)
-                        .map_err(invalid)?;
+                packet["outline"] =
+                    crate::outline::tools::model_state(input, &state.outline_run.tool_draft);
             }
             if let Some(evidence) = &preloaded_evidence {
                 packet["preloaded_evidence"] = evidence.clone();

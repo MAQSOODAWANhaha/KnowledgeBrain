@@ -1684,7 +1684,7 @@ pub fn preload_outline_window(input: &FrozenInput, state: &mut super::agent::Che
         .map(|chunk| vec![chunk.source_id.clone()])
         .unwrap_or_default();
     let note = format!(
-        "Inspect all actually delivered ranges and submit them together with submit_outline_scan. Chunk cursor {}/{} is accounting progress, not a one-chunk-per-turn restriction. Do not confirm navigation-only, unsent or overlapping context ranges.",
+        "阅读已领取的阅读包，用 submit_pack 提交该包范围内的要求。游标 {}/{} 只记进度，不是每轮只读一块。",
         index + 1,
         chunks.len().max(1)
     );
@@ -1721,7 +1721,7 @@ pub fn outline_index(
         "chunk_plan_sha256":state.outline_run.chunk_plan_sha256,"total_sources":rows.len(),
         "sources":super::tools::bounded_page(&rows,0,rows.len().max(1),max_bytes/2).unwrap_or_else(|e| json!({"error":e})),
         "documents":super::tools::bounded_page(&input.documents,0,input.documents.len().max(1),max_bytes/4).unwrap_or_else(|e|json!({"error":e})),
-        "instruction":"Use source_index(offset=next,limit=...) to continue. Tables are not automatically prescribed bid forms. Use collection_index for document relations and decisions."})
+        "instruction":"这些是冻结来源。发现只处理已领取的阅读包。组织时写章节，并把每个附件表绑到唯一章节。"})
 }
 
 fn require_active_chapter(
