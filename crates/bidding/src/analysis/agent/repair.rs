@@ -30,16 +30,6 @@ pub enum Conclusion {
     Disputed,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Arguments {
-    finding_sha256: String,
-    conclusion: Conclusion,
-    summary: String,
-    sources: Vec<Span>,
-    candidate_refs: Vec<String>,
-}
-
 fn feedback_version(state: &Checkpoint) -> Result<String, String> {
     digest(&json!([state.review_rounds, state.findings_for_repair()]))
 }
@@ -219,6 +209,7 @@ fn finding_scope(state: &Checkpoint, finding: &Finding, id: &str) -> Vec<String>
 
 /// Completing overlapping work must not refund an unfinished recovery target.
 /// Ordinary local work and independent review keep their own completion rules.
+#[cfg(test)]
 pub(super) fn recovery_completion_gaps(
     state: &Checkpoint,
     scope: &[String],
@@ -260,6 +251,7 @@ pub(super) fn recovery_completion_gaps(
     Ok(gaps)
 }
 
+#[cfg(test)]
 pub(super) fn packet(state: &Checkpoint, limits: &Limits) -> Result<Value, String> {
     let tasks = tasks::current(state, limits)?;
     let active_task = state.repair.tasks.active.as_deref();
@@ -424,39 +416,6 @@ pub(super) fn main_history(state: &Checkpoint, finding: &Finding) -> Result<Valu
     ))
 }
 
-pub(super) fn check_main_budget(
-    finding: &Finding,
-    receipt: Option<&Receipt>,
-    max_items: usize,
-    max_bytes: usize,
-) -> Result<(), String> {
-    // Reserve complete history even if every tracked dependency later changes.
-    // This projection is never displayed or persisted as an actual judgment.
-    let reserved = match receipt {
-        Some(receipt) => history(
-            Some(receipt),
-            "stale",
-            Some("feedback_generation_changed"),
-            receipt
-                .candidate_versions
-                .keys()
-                .map(|key| dependency_navigation(key, "dependency_changed", true))
-                .collect(),
-        ),
-        None => json!({"status":"never_handled"}),
-    };
-    let envelope = json!({"total":max_items,"next":max_items,"items":[finding],
-        "repair_history":{digest(finding)?:reserved}});
-    if serde_json::to_vec(&envelope)
-        .map_err(|e| e.to_string())?
-        .len()
-        > max_bytes
-    {
-        return Err("repair disposition and original finding exceed the main history budget; shorten the explanation or supporting references".into());
-    }
-    Ok(())
-}
-
 pub(super) fn reviewer_item(
     state: &Checkpoint,
     id: &str,
@@ -467,139 +426,6 @@ pub(super) fn reviewer_item(
         finding,
         state.repair.results.get(&digest(finding)?),
     ))
-}
-
-pub(super) fn put(
-    input: &FrozenInput,
-    config: &Config,
-    state: &mut Checkpoint,
-    args: &Value,
-) -> Result<Value, String> {
-    if state.role != Role::Main {
-        return Err("only the main Agent can record a repair disposition".into());
-    }
-    let args = evidence_refs::expand(input, args)?;
-    if serde_json::to_vec(&args).map_err(|e| e.to_string())?.len()
-        > config.limits.max_tool_result_bytes
-    {
-        return Err("repair disposition exceeds the frozen tool budget".into());
-    }
-    let args: Arguments = serde_json::from_value(args).map_err(|e| e.to_string())?;
-    let finding = state
-        .findings_for_repair()
-        .into_iter()
-        .find(|finding| digest(finding).ok().as_ref() == Some(&args.finding_sha256))
-        .ok_or("use the current finding_sha256 from review_findings.repair.next_finding")?;
-    if !state
-        .main_progress
-        .seen
-        .contains(&repair_finding_receipt(finding)?)
-    {
-        return Err("receive the complete current finding before recording its disposition".into());
-    }
-    if state.repair.feedback_sha256.as_ref() != Some(&feedback_version(state)?) {
-        return Err("repair baseline is not initialized at a completed response boundary".into());
-    }
-    if args.summary.trim().is_empty() || args.sources.is_empty() {
-        return Err("explain the actual correction or disagreement using original evidence".into());
-    }
-    for source in &args.sources {
-        tools::validate_span(input, &state.analysis.coverage, source)?;
-    }
-    for source in &finding.sources {
-        tools::validate_span(input, &state.analysis.coverage, source)?;
-    }
-    let keys: BTreeSet<_> = args.candidate_refs.iter().cloned().collect();
-    if keys.len() != args.candidate_refs.len() {
-        return Err("repair candidate_refs must be distinct".into());
-    }
-    for affected in &finding.affected {
-        if !keys
-            .iter()
-            .any(|key| key.split_once(':').is_some_and(|(_, id)| id == affected.id))
-        {
-            return Err(format!(
-                "include the affected candidate in candidate_refs, even when deleted: {}",
-                affected.id
-            ));
-        }
-    }
-    let mut versions = BTreeMap::new();
-    let mut changed = false;
-    for key in &keys {
-        let version = candidate_version(state, key)?;
-        if version.is_some() {
-            let value = context::reference(&state.analysis, key)?;
-            let current = digest(&value)?;
-            if state.analysis.coverage.candidate.get(key) != Some(&current) {
-                return Err(format!(
-                    "inspect the current repaired candidate detail before recording its disposition: {key}"
-                ));
-            }
-        }
-        changed |= relevant_change(state, finding, key)?;
-        versions.insert(key.clone(), version);
-    }
-    if args.conclusion == Conclusion::Revised && !changed {
-        return Err("revised requires an actual relevant candidate addition, edit or deletion since this repair baseline; use disputed only with a source-backed explanation of why the finding needs no further edit".into());
-    }
-    // Do not borrow an unrelated page to justify either kind of disposition.
-    let evidence_sources: BTreeSet<_> = finding
-        .sources
-        .iter()
-        .map(|s| s.source_id.as_str())
-        .chain(
-            finding
-                .affected
-                .iter()
-                .filter_map(|a| state.analysis.records.get(&a.id))
-                .flat_map(|r| r.sources.iter().map(|s| s.source_id.as_str())),
-        )
-        .collect();
-    if !evidence_sources.is_empty()
-        && !args
-            .sources
-            .iter()
-            .any(|s| evidence_sources.contains(s.source_id.as_str()))
-    {
-        return Err(
-            "cite original evidence belonging to this finding or its affected candidate".into(),
-        );
-    }
-    let receipt = Receipt {
-        conclusion: args.conclusion,
-        summary: args.summary,
-        sources: args.sources,
-        candidate_versions: versions,
-    };
-    check_main_budget(
-        finding,
-        Some(&receipt),
-        config.limits.max_tool_calls,
-        config.limits.max_tool_result_bytes,
-    )?;
-    // Keep the correction and original finding retrievable together. A valid
-    // write cannot strand the reviewer behind an oversized detail envelope.
-    for (id, original) in &state.review_draft {
-        if digest(original)? == args.finding_sha256 {
-            let envelope = json!({"total":state.review_draft.len(),"next":state.review_draft.len(),
-                "items":[detail(id,original,Some(&receipt))]});
-            if serde_json::to_vec(&envelope)
-                .map_err(|e| e.to_string())?
-                .len()
-                > config.limits.max_tool_result_bytes
-            {
-                return Err("repair disposition and original finding exceed the detail budget; shorten the explanation or supporting references".into());
-            }
-        }
-    }
-    state
-        .repair
-        .results
-        .insert(args.finding_sha256.clone(), receipt);
-    Ok(
-        json!({"finding_sha256":args.finding_sha256,"disposition_recorded":true,"independent_approval":false}),
-    )
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! One-shot outline acceptance for `draft_path = true`.
+//! One-shot outline acceptance.
 //!
 //! Discover, organize (chapters, bindings, and slots), and finish run against the frozen input.
 //! The checkpoint is the memory: clearing the transcript must not drop requirements.
@@ -224,7 +224,7 @@ fn one_shot_acceptance_publishes_from_the_tool_draft() {
     assert!(deny(Duty::Discover, "put_chapters", false).is_some());
     state.outline_run.reading_packs = Some(work);
     state.analysis.draft_plan = vec![plan_item()];
-    crate::analysis::draft::after_batch(&input, &mut state, false, false, true).unwrap();
+    crate::analysis::draft::after_batch(&input, &mut state, false, false).unwrap();
     assert!(state.transcript.is_empty());
     assert_eq!(state.analysis.outline.phase, Phase::Outline);
     assert_eq!(state.outline_run.phase, Phase::Outline);
@@ -412,7 +412,7 @@ fn one_shot_acceptance_publishes_from_the_tool_draft() {
 
     assert!(state.analysis.outline.checks.is_empty());
     assert!(!crate::analysis::outline_flow::checked(&input, &state));
-    crate::analysis::draft::after_batch(&input, &mut state, false, false, true).unwrap();
+    crate::analysis::draft::after_batch(&input, &mut state, false, false).unwrap();
     assert!(state.done);
 
     let progress = state.progress(&input);
@@ -440,7 +440,7 @@ fn one_shot_acceptance_publishes_from_the_tool_draft() {
         },
     );
     assert!(project_draft(&input, &sha, &checks_only.outline_run.tool_draft).is_err());
-    crate::analysis::draft::after_batch(&input, &mut checks_only, false, false, true).unwrap();
+    crate::analysis::draft::after_batch(&input, &mut checks_only, false, false).unwrap();
     assert!(!checks_only.done);
 
     let empty = Draft {
@@ -509,26 +509,4 @@ fn fill_and_published_stay_slot_only() {
             .collect();
         assert_eq!(names, ["put_slots", "read_outline"]);
     }
-}
-
-#[test]
-fn extraction_path_does_not_publish_a_finished_tool_draft() {
-    let input = frozen();
-    let mut state = checkpoint(&input);
-    state.outline_run.tool_draft.finished = true;
-    state.outline_run.tool_draft.chapters = vec![super::ChapterOutline {
-        id: "letter".into(),
-        parent_id: None,
-        order: 0,
-        title: "投标函".into(),
-        purpose: super::ChapterPurpose::Response,
-        requirement_ids: vec![],
-    }];
-    state.outline_run.tool_draft.slots_submitted = true;
-    crate::analysis::draft::after_batch(&input, &mut state, false, false, false).unwrap();
-    assert!(!state.done);
-    assert_ne!(
-        state.draft_stage,
-        crate::analysis::draft::DraftStage::Published
-    );
 }

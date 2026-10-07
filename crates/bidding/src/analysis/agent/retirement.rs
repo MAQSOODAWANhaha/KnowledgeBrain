@@ -1,8 +1,7 @@
-//! Product outline requests stay on the one-shot tools. `draft_path = false`
-//! can still exercise `outline_flow` in extraction tests, and it must not
-//! publish an `OutlineArtifact`.
+//! Product outline requests stay on the one-shot tools. Old outline tool names
+//! are not registered, and they do not publish an `OutlineArtifact`.
 
-use super::{Checkpoint, Config, Journal, Role, finish_draft_path};
+use super::{Checkpoint, Config, Journal, Role, finalize_run};
 use crate::analysis::draft::{
     BodyStatus, ChapterPurpose as PlanPurpose, DraftPlanItem, DraftStatus,
 };
@@ -173,15 +172,18 @@ impl Journal for RecordingJournal {
 }
 
 #[test]
-fn production_constructor_forces_the_one_shot_path() {
+fn production_constructor_uses_the_one_shot_contract() {
     let config = super::super::tests::config();
-    assert!(config.limits.draft_path);
+    assert_eq!(config.limits.reviewer_reserve, 0);
+    assert_eq!(
+        config.tools_sha256,
+        digest(&crate::outline::agent::schemas()).unwrap()
+    );
 }
 
 #[tokio::test]
 async fn product_requests_do_not_register_retired_outline_tools() {
     let config = super::super::tests::config();
-    assert!(config.limits.draft_path);
     let input = input();
     let mut discover = checkpoint(&input);
     let discover_body = request_body(&input, &config, &mut discover).await;
@@ -261,7 +263,7 @@ fn product_dispatch_rejects_retired_outline_tools_without_old_checks() {
 }
 
 #[tokio::test]
-async fn draft_path_false_does_not_publish_an_outline_artifact() {
+async fn finished_tool_draft_publishes_an_outline_artifact() {
     let config = super::super::tests::config();
     let input = input();
     let sha = digest(&input).unwrap();
@@ -284,20 +286,10 @@ async fn draft_path_false_does_not_publish_an_outline_artifact() {
     let product = RecordingJournal {
         published: Mutex::new(0),
     };
-    finish_draft_path(&input, &config, &product, &mut state.clone(), sha.clone())
+    finalize_run(&input, &config, &product, &mut state, sha)
         .await
         .unwrap();
     assert_eq!(*product.published.lock().unwrap(), 1);
-
-    let mut extraction = config.clone();
-    extraction.limits.draft_path = false;
-    let held = RecordingJournal {
-        published: Mutex::new(0),
-    };
-    finish_draft_path(&input, &extraction, &held, &mut state, sha)
-        .await
-        .unwrap();
-    assert_eq!(*held.published.lock().unwrap(), 0);
 }
 
 fn span(end: usize) -> Span {
@@ -417,14 +409,9 @@ fn product_after_batch_does_not_finish_through_old_checks() {
     assert_eq!(via_old_tool.analysis.outline.phase, Phase::Check);
 
     let mut product = state.clone();
-    crate::analysis::draft::after_batch(&input, &mut product, false, false, true).unwrap();
+    crate::analysis::draft::after_batch(&input, &mut product, false, false).unwrap();
     assert_eq!(product.analysis.outline.phase, Phase::Outline);
     assert!(!product.outline_run.tool_draft.finished);
     assert!(!product.done);
     assert!(!crate::analysis::outline_flow::checked(&input, &product));
-
-    let mut extraction = state;
-    crate::analysis::draft::after_batch(&input, &mut extraction, false, false, false).unwrap();
-    assert_eq!(extraction.analysis.outline.phase, Phase::Check);
-    assert!(!extraction.outline_run.tool_draft.finished);
 }

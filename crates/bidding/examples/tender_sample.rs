@@ -293,55 +293,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let operator_physical = limits["max_physical_calls"]
         .as_u64()
         .ok_or("explicit physical call limit required")? as usize;
-    let pack_max_units = limits["extraction"]["pack_max_units"].as_u64().unwrap_or(1) as usize;
-    let pack_max_chars = limits["extraction"]["pack_max_chars"].as_u64().unwrap_or(0) as usize;
-    if limits["extraction"]["draft_path"]
-        .as_bool()
-        .unwrap_or(false)
-    {
-        let turns = if operator_turns == 0 {
-            ta::draft::OUTLINE_MAX_TURNS
-        } else {
-            operator_turns.min(ta::draft::OUTLINE_MAX_TURNS)
-        };
-        limits["extraction"]["max_turns"] = json!(turns);
-        limits["extraction"]["reviewer_reserve"] = json!(0);
-        // 阶段一记的是**绝对值目标**与兜底上限，不是「不达标就算失败」的门：先要
-        // 成功出骨架，然后把耗时往下压。旧的 extract-6 416 回合来自非 draft 的按
-        // source 抽取路径，与骨架不可比，不再作为基线出现在产物里。
-        limits["budget_estimate"] = json!({
-            "kind":"draft_path",
-            "applied_turns":turns,
-            "applied_physical":operator_physical,
-            "reviewer_reserve":0,
-            "outline_turn_target":ta::draft::OUTLINE_TURN_TARGET,
-            "outline_seconds_target":ta::draft::OUTLINE_DEADLINE_TARGET_SECS,
-            "outline_turn_backstop":ta::draft::OUTLINE_MAX_TURNS,
-            "outline_deadline_backstop_secs":ta::draft::DRAFT_DEADLINE_SECS
-        });
+    let turns = if operator_turns == 0 {
+        ta::draft::OUTLINE_MAX_TURNS
     } else {
-        match ta::budget::apply_with_pack(
-            &input,
-            operator_turns,
-            operator_physical,
-            pack_max_units,
-            pack_max_chars,
-        ) {
-            Ok(budget) => {
-                limits["extraction"]["max_turns"] = json!(budget.applied_turns);
-                limits["extraction"]["reviewer_reserve"] = json!(budget.reviewer_reserve);
-                limits["max_physical_calls"] = json!(budget.applied_physical);
-                limits["budget_estimate"] = json!(budget);
-            }
-            Err(refused) => {
-                return Err(format!(
-                    "extraction turn estimate {} exceeds ceiling {}; refuse to start without an explicit operator override",
-                    refused.estimated_turns, refused.ceiling
-                )
-                .into());
-            }
-        }
-    }
+        operator_turns.min(ta::draft::OUTLINE_MAX_TURNS)
+    };
+    limits["extraction"]["max_turns"] = json!(turns);
+    limits["extraction"]["reviewer_reserve"] = json!(0);
+    // 阶段一记的是绝对值目标与兜底上限。先要成功出骨架，然后把耗时往下压。
+    limits["budget_estimate"] = json!({
+        "kind":"outline",
+        "applied_turns":turns,
+        "applied_physical":operator_physical,
+        "reviewer_reserve":0,
+        "outline_turn_target":ta::draft::OUTLINE_TURN_TARGET,
+        "outline_seconds_target":ta::draft::OUTLINE_DEADLINE_TARGET_SECS,
+        "outline_turn_backstop":ta::draft::OUTLINE_MAX_TURNS,
+        "outline_deadline_backstop_secs":ta::draft::DRAFT_DEADLINE_SECS
+    });
     let provider = AuthoringRuntimeContractV1::resolve_tools_from_environment()?;
     let repair_seed: Option<extraction::Checkpoint> = if mode == "repair" {
         let seed = read(input_dir.join("repair-seed.json"))?;

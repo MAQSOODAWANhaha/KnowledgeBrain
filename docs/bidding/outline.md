@@ -2,7 +2,7 @@
 
 产品行为见 [PRD](prd.md)。代码入口是 `crates/bidding/src/outline`。工具合同是 [`outline-tools-v1.schema.json`](../../crates/bidding/schemas/outline-tools-v1.schema.json)，共六个工具。
 
-生产配置在 `Config::environment_limits` 和 `with_provider_for` 里把 `draft_path` 设为 `true`。请求因此走本页的职责和工具。`draft_path = false` 只留给抽取合同的单测，走 `analysis/outline_flow.rs`，不是产品路径。
+产品请求走本页的职责和六个工具。一次成稿是唯一的大纲路径。`analysis/outline_flow.rs` 里的扫描、检查工具只留给不经过配置的抽取单测，不是产品请求。
 
 大纲运行的输入是已经发布的冻结解析。`outline::parse` 里的图片 OCR 并发（`KB_TENDER_PARSE_CONCURRENCY`，默认 4，上限 16）只决定解析时有多少图片同时识别；发布顺序仍必须等于解析器顺序。它不决定发现包怎么领。
 
@@ -124,7 +124,7 @@
 | --- | --- |
 | `reading_packs` | `DiscoverWork`。第一次发现轮才建立。包状态是 `pending`、`running`、`failed`、`committed` |
 | `tool_draft` | `Draft`：`chapters`、`bindings`、`slots`、`slots_submitted`、`finished` |
-| `phase` | `discover`、`outline`、`check`、`complete`。`finish_outline` 把它标成 `complete`。产品路径（`draft_path = true`）只在阅读包全部 `committed` 之后，由 `draft::after_batch` 从 `discover` 拨到 `outline`。此时若 `analysis.outline.checks` 为空，会 `transcript.clear()`。组织必须读检查点上的要求记录，不能指望发现对话还在。`draft_path = false` 仍可能因旧扫描完成而拨阶段，那不是产品路径 |
+| `phase` | `discover`、`outline`、`check`、`complete`。`finish_outline` 把它标成 `complete`。阅读包全部 `committed` 之后，`draft::after_batch` 从 `discover` 拨到 `outline`。此时若 `analysis.outline.checks` 为空，会 `transcript.clear()`。组织必须读检查点上的要求记录，不能指望发现对话还在 |
 
 每个章节的 `requirement_ids` 必填。组织轮宿主包带上已提交要求的身份、描述、`source_id`、`start`、`end`。发现职责不能调用 `put_chapters`。
 
@@ -138,7 +138,7 @@
 4. **模型。** 返回工具调用。`responded` 先把响应写入检查点。
 5. **工具。** `outline::agent::apply` 在 `deny` 下执行。结果追加到检查点对话，`session.finish` 记到当前 SDK 会话。
 6. **提交。** 运行结束、角色改变，或序列化后的 SDK 状态超过 `max_context_bytes` 时，丢掉 SDK 会话。大纲草稿和对话留在检查点。`committed` 清掉待完成轮，`save` 再写同一检查点。
-7. **职责推进或结束。** 下一轮重新选择职责。发现包全部 `committed` 后阶段从 `discover` 到 `outline`。`finish_outline` 把 `tool_draft.finished` 和 phase 标成 `complete`。产品出场条件是 `tool_draft.finished` 且 `project_draft` 通过 `validate_artifact`。空的 `analysis.outline.checks` 不挡住出场，出场不读 `outline_flow::checked`。通过后 `Journal::publish_outline` 发布投影出的 `OutlineArtifact` 和附件绑定。`draft_path = false` 仍走旧的 `checked`，不调用 `Journal::publish_outline`，不能发布这份 artifact。
+7. **职责推进或结束。** 下一轮重新选择职责。发现包全部 `committed` 后阶段从 `discover` 到 `outline`。`finish_outline` 把 `tool_draft.finished` 和 phase 标成 `complete`。出场条件是 `tool_draft.finished` 且 `project_draft` 通过 `validate_artifact`。空的 `analysis.outline.checks` 不挡住出场，出场不读 `outline_flow::checked`。通过后 `Journal::publish_outline` 发布投影出的 `OutlineArtifact` 和附件绑定。
 
 `draft_stage` 为 `None` 或 `Outline` 时（含发现轮），宿主包含 `progress`、`work`、来源索引和 `tool_draft` 的模型视图（比 `read_outline` 多 `unmapped_forms`）。组织轮还要带上检查点里的要求记录：身份、描述、`source_id`、`start`、`end`。这不按 phase 名字开关。前缀长度是 2（系统提示 + brief），后缀长度是 1（宿主包）。前缀、后缀不变且投影历史等于当前窗口时复用 `AgentRun`；否则按这个窗口重建。
 
@@ -156,7 +156,7 @@
 1. 已交付的旧导航（`source_index`、`search_sources`、`inspect_analysis`）收成一条 `history_omitted` 说明。
 2. 丢掉证据已在其它组里的已交付对话组。
 3. 裁掉可选的候选回忆。
-4. 发现轮装不下预装证据时，丢掉已经 `committed` 的包所在的发现轮，再把预装包减半。依据是 `DiscoverWork` 的包状态，不读 `analysis.outline.scanned`。没有阅读包计划时才退回旧的扫描游标淘汰，那只服务 `draft_path = false` 的抽取单测。
+4. 发现轮装不下预装证据时，丢掉已经 `committed` 的包所在的发现轮，再把预装包减半。依据是 `DiscoverWork` 的包状态，不读 `analysis.outline.scanned`。
 5. 仍放不下则推迟图片，或失败 `AGENT_TURN_BUDGET_EXCEEDED`，检查点保留。
 
 `prepare_session` 若发现序列化后的 SDK 状态超过 `max_context_bytes`，先按当前窗口重建一次。重建后仍超限，在预约和网络 IO 之前失败，错误同样是 `AGENT_TURN_BUDGET_EXCEEDED`。

@@ -1,6 +1,6 @@
 # 大纲缺口与旧路径退役
 
-现行合同是 [PRD](../../docs/bidding/prd.md) 和 [运行时](../../docs/bidding/outline.md)。缺口 1–3 已接到 `draft_path = true` 的产品路径。本文留下的「现状」是接通前的记录；下面的验证和一次成稿验收是回归合同。模板已并入组织：一次成稿是发现 → 组织（章节、绑定、槽）→ 收尾。
+现行合同是 [PRD](../../docs/bidding/prd.md) 和 [运行时](../../docs/bidding/outline.md)。缺口 1–3 已接到一次成稿产品路径。本文留下的「现状」是接通前的记录；下面的验证和一次成稿验收是回归合同。模板已并入组织：一次成稿是发现 → 组织（章节、绑定、槽）→ 收尾。
 
 本文件不授权另做一套产品设计。
 
@@ -31,7 +31,7 @@
 
 ## 3. 从 tool_draft 投影并发布，进度改读这条状态
 
-现状：`outline::template::project` 从 `AnalysisResult` 的 `draft_plan`、records 和 outline issues 投影 `OutlineArtifact`，没有生产调用方。`outline::store::publish` 能把 artifact 写入 `kb_bid_v2_publish_outline`，`finish_draft_path` 不调用它。生产驱动在调用 `finish_draft_path` 之前仍要求 `outline_flow::checked`：phase 为 `complete` 还不够，`analysis.outline.checks` 必须非空且全部通过。新路径只把 `tool_draft.finished` 设为 true 时，驱动返回 `outline completeness check has not passed`，运行也不会因此结束。`Checkpoint::progress` 仍报告 `analysis.outline` 和 `draft_plan`（`outline_requirements`、`outline_chapters`、`outline_scan_repair` 等）。前端 `AnalysisProgress` 也读这些字段。
+现状：`outline::template::project` 从 `AnalysisResult` 的 `draft_plan`、records 和 outline issues 投影 `OutlineArtifact`，没有生产调用方。`outline::store::publish` 能把 artifact 写入 `kb_bid_v2_publish_outline`，收尾函数不调用它。生产驱动在收尾之前仍要求 `outline_flow::checked`：phase 为 `complete` 还不够，`analysis.outline.checks` 必须非空且全部通过。新路径只把 `tool_draft.finished` 设为 true 时，驱动返回 `outline completeness check has not passed`，运行也不会因此结束。`Checkpoint::progress` 仍报告 `analysis.outline` 和 `draft_plan`（`outline_requirements`、`outline_chapters`、`outline_scan_repair` 等）。前端 `AnalysisProgress` 也读这些字段。
 
 完成：出场条件改为 `tool_draft.finished` 且投影通过 `validate_artifact`。不再读 `outline_flow::checked` 或 `analysis.outline.checks`。通过后发布 `OutlineArtifact`（章节、槽、附件绑定）。进度来自 `DiscoverWork` 的包计数和 `tool_draft` 的章节、未绑定附件、槽是否已交、是否结束。扫描游标不再代表发现进度。
 
@@ -39,12 +39,12 @@
 
 ## 旧路径退役
 
-已从产品路径隔离。`Config::environment_limits` 和 `with_provider_for` 把 `draft_path` 固定为 `true`。下列内容不是产品合同：
+已从产品路径删除。配置里没有第二条大纲开关。下列内容不是产品合同：
 
 - `plans/bidding/product-two-phase.md` 保持删除。文档索引不把它写成入口。
 - 产品请求只挂 `outline::agent::schemas_for` 的六个工具。`submit_outline_scan`、`put_outline_items`、`submit_outline_check` 不会出现在这份请求里。产品配置调用 `draft::apply` 会拒绝这三个名字，以及经 `outline_flow` 的 `finish_outline`。
-- `draft_path = false` 不调用 `Journal::publish_outline`。`analysis/outline_flow.rs` 仍只给抽取单测。
-- 产品收尾是 `outline::agent::apply` 的 `finish_outline`。`draft::after_batch` 只在 `draft_path = false` 时才对旧 `outline.checks` 调用 `outline_flow::apply(..., "finish_outline")`。空的 `analysis.outline.checks` 不挡住产品出场，出场不读 `outline_flow::checked`。
+- `analysis/outline_flow.rs` 仍只给不经过 `Config` 的抽取单测。产品在 `tool_draft.finished` 时调用 `Journal::publish_outline`。
+- 产品收尾是 `outline::agent::apply` 的 `finish_outline`。`draft::after_batch` 在阅读包全部提交后把阶段从 `discover` 拨到 `outline`，并在 `project_draft` 通过时结束。它不再对旧 `outline.checks` 调用 `outline_flow::apply(..., "finish_outline")`。空的 `analysis.outline.checks` 不挡住出场，出场不读 `outline_flow::checked`。
 - 双正式编制 / draft-fill、强制终稿复核，以及 T0–T9、A01–A20 那套任务表。
 
 ## 职责分叉
@@ -53,7 +53,7 @@
 
 ## 一次成稿验收
 
-下面替换已删除的 A01–A20。对象是一条真实招标、`draft_path = true` 的大纲运行。缺口 1–3 和旧路径退役已接到代码上。这条清单仍是那次真实运行的验收目标，不是已经跑过的记录。
+下面替换已删除的 A01–A20。对象是一条真实招标的一次成稿大纲运行。缺口 1–3 和旧路径退役已接到代码上。这条清单仍是那次真实运行的验收目标，不是已经跑过的记录。
 
 通过：
 

@@ -19,86 +19,6 @@ fn size(value: &Value) -> Result<usize, String> {
         .map_err(|error| error.to_string())
 }
 
-fn append_candidates(
-    input: &FrozenInput,
-    state: &Checkpoint,
-    scope: &[String],
-    content: &mut Value,
-    coverage: &mut Coverage,
-    budget: usize,
-) -> Result<(), String> {
-    let references = context::scope_references(&state.analysis, scope);
-    let mut delivered: std::collections::BTreeSet<String> =
-        content["assigned_evidence"]["candidates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|value| value["reference"].as_str().map(str::to_owned))
-            .collect();
-    let mut complete = 0;
-    let mut next = None;
-    for reference in &references {
-        let group = source_review::evidence_candidates::group(state, reference)?;
-        if group.iter().all(|key| delivered.contains(key)) {
-            complete += 1;
-            continue;
-        }
-        let values: Vec<_> = group
-            .iter()
-            .filter(|key| !delivered.contains(*key))
-            .map(|key| {
-                let value = context::reference(&state.analysis, key)?;
-                Ok(json!({"reference":key,"sha256":digest(&value)?,"value":value}))
-            })
-            .collect::<Result<_, String>>()?;
-        let ids: Vec<_> = group
-            .iter()
-            .map(|key| key.split_once(':').expect("typed candidate reference").1)
-            .collect();
-        let inspection =
-            json!({"kind":"all","view":"detail","ids":ids,"offset":0,"limit":ids.len()});
-        let mut proposed = content.clone();
-        proposed["assigned_evidence"]["candidate_delivery"] = json!({
-            "group_total":references.len(),"group_delivered":complete + 1,
-            "complete":false,"next_inspection":inspection,
-            "instruction":"Only complete groups are included. A relation is delivered with both complete endpoints; templates retain their parent. When complete is false, use the exact next_inspection IDs and continue its returned pagination. Missing groups are not received or judged. Narrow the comparison if the group and original evidence cannot fit together."
-        });
-        proposed["assigned_evidence"]["candidates"]
-            .as_array_mut()
-            .unwrap()
-            .extend(values.clone());
-        // Source evidence needs room in the same packet. This split is a
-        // conservative admission allowance, not a semantic output estimate.
-        if size(&proposed)? <= budget / 2 {
-            *content = proposed;
-            complete += 1;
-            for value in values {
-                let key = value["reference"].as_str().unwrap().to_owned();
-                coverage
-                    .candidate
-                    .insert(key.clone(), value["sha256"].as_str().unwrap().to_owned());
-                delivered.insert(key);
-            }
-        } else if next.is_none() {
-            next = Some(inspection);
-        }
-    }
-    content["assigned_evidence"]["candidate_delivery"] = json!({
-        "group_total":references.len(),"group_delivered":complete,
-        "complete":complete == references.len(),"next_inspection":next,
-        "instruction":"Missing groups are not received or judged. Continue with the exact next_inspection IDs; inspect returned pagination and narrow the comparison if the whole group and original evidence cannot fit."
-    });
-    crate::analysis::semantic_compare::annotate_candidates(
-        input,
-        &state.analysis,
-        coverage,
-        scope,
-        content,
-        budget / 2,
-    )?;
-    Ok(())
-}
-
 /// Read through the existing tools into a temporary ledger, admitting the
 /// exact returned payload and its receipts together or neither.
 fn append(
@@ -192,43 +112,21 @@ pub(super) fn evidence(
     state: &Checkpoint,
     package_budget: Option<usize>,
 ) -> Result<Option<source_review::Evidence>, String> {
-    if config.limits.draft_path
-        && matches!(
-            state.draft_stage,
-            draft::DraftStage::None | draft::DraftStage::Outline
-        )
-    {
+    if matches!(
+        state.draft_stage,
+        draft::DraftStage::None | draft::DraftStage::Outline
+    ) {
         return Ok(None);
     }
     if state.role != Role::Main || state.pending_coverage.is_some() {
         return Ok(None);
     }
-    let (work, check_replace) = if config.limits.draft_path {
-        match state
-            .main_work
-            .clone()
-            .filter(|work| work.status == WorkStatus::Active)
-        {
-            Some(work) => (work, false),
-            None => return Ok(None),
-        }
-    } else {
-        if state.source_review.is_some() && state.dispatch.active.is_none() {
-            return Ok(None);
-        }
-        let Some(assigned) = main_dispatch::projection(input, config, state)? else {
-            return Ok(None);
-        };
-        if matches!(assigned.owner, main_dispatch::Active::Repair(_)) {
-            return Ok(None);
-        }
-        let work = main_dispatch::work(input, &config.limits, state, &assigned);
-        if !work.deferred_sources.is_empty()
-            || context::scope_is_blocked(state, &work.source_scope)?
-        {
-            return Ok(None);
-        }
-        (work, true)
+    let Some(work) = state
+        .main_work
+        .clone()
+        .filter(|work| work.status == WorkStatus::Active)
+    else {
+        return Ok(None);
     };
     // Input and output are different budgets. Four input bytes per reserved
     // output token is a packing heuristic, not a promise about extraction size.
@@ -259,32 +157,13 @@ pub(super) fn evidence(
             "forms":input.structured_forms.iter().filter(|form| form["source_unit_revision_id"] == *id)
                 .map(|form| &form["form_definition_revision_id"]).collect::<Vec<_>>()
         }));
-        if !config.limits.draft_path {
-            append_candidates(
-                input,
-                state,
-                &work.source_scope,
-                &mut content,
-                &mut coverage,
-                budget,
-            )?;
-        }
         let mut delivered = content["assigned_evidence"]["candidates"]
             != before["assigned_evidence"]["candidates"]
             || content["assigned_evidence"]["candidate_delivery"]["next_inspection"].is_object();
-        let start = if config.limits.draft_path {
-            unread(selection.text.get(id), source.text.len())
-        } else {
-            unread(selection.text.get(id), source.text.len()).or_else(|| {
-                (state.dispatch.active.is_none() && !source.text.is_empty()).then_some(0)
-            })
-        };
+        let start = unread(selection.text.get(id), source.text.len());
         if let Some(start) = start {
-            let max_bytes = if config.limits.draft_path {
-                (source.text.len() - start).min(crate::analysis::draft::DRAFT_WINDOW_BYTES)
-            } else {
-                source.text.len() - start
-            };
+            let max_bytes =
+                (source.text.len() - start).min(crate::analysis::draft::DRAFT_WINDOW_BYTES);
             delivered |= append(
                 input,
                 &mut content,
@@ -317,7 +196,7 @@ pub(super) fn evidence(
                 let (rows, columns) =
                     super::super::relations::form_dimensions(&form["definition"]).unwrap_or((1, 1));
                 let header = if rows > 1 { columns } else { 0 };
-                if config.limits.draft_path && header > 0 && offset >= header {
+                if header > 0 && offset >= header {
                     let _ = append(
                         input,
                         &mut content,
@@ -327,15 +206,11 @@ pub(super) fn evidence(
                         budget,
                     )?;
                 }
-                let limit = if config.limits.draft_path {
-                    columns
-                        .saturating_mul(crate::analysis::draft::OUTLINE_FORM_BODY_ROWS)
-                        .max(1)
-                        .min(total - offset)
-                        .max(1)
-                } else {
-                    total - offset
-                };
+                let limit = columns
+                    .saturating_mul(crate::analysis::draft::OUTLINE_FORM_BODY_ROWS)
+                    .max(1)
+                    .min(total - offset)
+                    .max(1);
                 let grid_delivered = append(
                     input,
                     &mut content,
@@ -380,9 +255,7 @@ pub(super) fn evidence(
             "These are the remaining frozen collection metadata pages. Their exact kind and offset are in arguments. They do not replace the active/completed source scope or declare semantic approval. Inspect decisions and document relationships; save any grounded consequences before requesting independent review. Unsent metadata retains its reading gaps."
         );
     }
-    if !config.limits.draft_path
-        || state.analysis.outline.phase == super::super::outline_flow::Phase::Discover
-    {
+    if state.analysis.outline.phase == super::super::outline_flow::Phase::Discover {
         // Frozen metadata is evidence too. Admit bounded real collection pages;
         // an omitted page retains its existing global reading gap.
         for (kind, values) in [
@@ -417,31 +290,14 @@ pub(super) fn evidence(
     if size(&content)? > budget {
         return Ok(None);
     }
-    if check_replace && !work.source_scope.is_empty() {
-        context::validate(input, state, &work, config.limits.max_tool_result_bytes)?;
-    }
     Ok(Some(source_review::Evidence { content, coverage }))
 }
 
 pub(super) fn confirm_work(
-    input: &FrozenInput,
-    config: &Config,
-    state: &mut Checkpoint,
-    sent: &Value,
+    _input: &FrozenInput,
+    _config: &Config,
+    _state: &mut Checkpoint,
+    _sent: &Value,
 ) -> Result<(), String> {
-    if config.limits.draft_path {
-        return Ok(());
-    }
-    let Some(value) = sent.get("main_work") else {
-        return Ok(());
-    };
-    if state.role != Role::Main {
-        return Err("Main package cannot replace Reviewer work".into());
-    }
-    let work: WorkState =
-        serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
-    main_dispatch::check_scope(input, state, &config.limits, &work.source_scope)?;
-    context::validate(input, state, &work, config.limits.max_tool_result_bytes)?;
-    state.main_work = Some(work);
     Ok(())
 }
