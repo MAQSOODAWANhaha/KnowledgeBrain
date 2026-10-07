@@ -2,7 +2,7 @@
 
 本切片将已实测的 ONLYOFFICE 保存语义接入 KnowledgeBrain 后端：签名编辑配置、限定用途的打开文件地址、可关联的 forcesave 请求、回调文件校验和原子版本发布。**没有新增会话表或 migration 文件**，只修改尚未发布的 Bidding baseline；未操作现有数据库。
 
-已有 DOCX 正式稿的编制前端已接线，初稿自动生成及前端发布新轮入口尚未完成。后端故障契约使用真实 PostgreSQL/Redis/对象文件和受控文档服务替身；[真实 Document Server 与产品路由联调](archive/onlyoffice-product-results.md)提供保存、重开及历史文件验证，新增 `--web` 模式直接驱动 React 编制页。字体、生产许可与最终模板外观仍待落实，不能标完整 O1 已验收。
+已有当前 DOCX 版本时，编制前端已接线。大纲生成后的首次 DOCX 与前端发布新轮入口尚未完成。后端故障契约使用真实 PostgreSQL/Redis/对象文件和受控文档服务替身；[真实 Document Server 与产品路由联调](archive/onlyoffice-product-results.md)提供保存、重开及历史文件验证，新增 `--web` 模式直接驱动 React 编制页。字体、生产许可与最终模板外观仍待落实，不能标完整 O1 已验收。
 
 ## 四个字段为何需要持久化
 
@@ -104,7 +104,7 @@ HTTP 契约新增真实 GET 计数：替身以 `POST /test/mode {cache_available
 
 ## 编制前端接入
 
-`Workbench` 先读取项目和当前 DOCX。已有正式稿时，编制步骤使用独立 `DocxEditor`，只使用后端返回的官方脚本地址和签名配置；文件 / 编制 / 导出三步在左栏当前标下保留（hash 链接，testid `wizard-*`），当前稿不再挂载旧块编辑器、候选写入或旧 renderer 出件入口。只有后端明确返回 `404/NOT_FOUND` 才允许尚无 DOCX 的项目进入旧流程；权限、网络或服务错误显示重试入口。
+`Workbench` 先读取项目和当前 DOCX。已有当前 DOCX 时，编制步骤使用独立 `DocxEditor`，只使用后端返回的官方脚本地址和签名配置；文件 / 编制 / 导出三步在左栏当前标下保留（hash 链接，testid `wizard-*`），当前稿不再挂载旧块编辑器、候选写入或旧 renderer 出件入口。只有后端明确返回 `404/NOT_FOUND` 才允许尚无 DOCX 的项目进入旧块编辑器；权限、网络或服务错误显示重试入口。版本是编辑历史，不是草稿／终稿等级，见 [docx-rounds.md](docx-rounds.md)。
 
 `docxSession` 区分编辑器同步、命令受理和后端版本发布：SDK 同步完成不会显示“已保存”。保存请求保留预期版本和幂等身份；响应不确定时，“确认保存结果”复用同一请求。轮次/key 未变、新版本发布且 pending/error 清除后，才确认本次保存；请求后继续输入仍标记未保存。状态查询失败立即撤销已保存提示，恢复查询可清理连接错误。新轮或 key 变化会暂停旧会话保存，要求显式重开。
 

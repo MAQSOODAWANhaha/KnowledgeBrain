@@ -5,9 +5,9 @@
 | 文档 | 写什么 |
 | --- | --- |
 | [产品需求](prd.md) | 用户流程、三个包的边界、冻结的 `OutlineArtifact` |
-| [大纲运行时](outline.md) | 阅读包、六个工具、职责隔离、检查点 |
+| [大纲运行时](outline.md) | 阅读包目标载荷、六个工具、一轮顺序、上下文窗口、职责分叉 |
 | [模块归属](authoring.md) | `analysis` / `outline` / `response` 各写什么 |
-| [未完成与旧路径](../../plans/bidding/outline-gaps.md) | 还没接到这条链上的缺口，以及不再作为合同的遗留 |
+| [未完成与旧路径](../../plans/bidding/outline-gaps.md) | 缺口 1–3、一次成稿验收，以及不再作为合同的遗留 |
 
 编辑、保存和下载不定义生成合同：
 
