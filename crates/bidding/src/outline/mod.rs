@@ -7,7 +7,7 @@
 //! | `chapters` | Stable chapter identity and attachment-table mapping. |
 //! | `template` | Prescribed template slots. Bidder blanks stay empty. |
 //! | `tools` | The six outline tools. A turn sees only its duty's tools. |
-//! | `agent` | One duty per turn: discover, organize, map attachments, template, or finish. |
+//! | `agent` | One duty per turn: discover, organize, template, or finish. |
 //!
 //! This package does not read the company knowledge base.
 
