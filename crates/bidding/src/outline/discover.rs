@@ -2,9 +2,11 @@
 //!
 //! Adjacent sections merge while they fit in the byte budget. A section
 //! that does not fit splits at its own paragraphs, clauses, and table rows.
-//! A continuation table repeats its header as context and does not scan those
-//! cells again. A byte cut happens only inside one clause that is still larger
-//! than the budget, and it stays on a UTF-8 character boundary.
+//! Table bytes are the UTF-8 length of the cell text a pack sends, including
+//! a repeated header. A continuation table repeats its header as context and
+//! does not scan those cells again. A byte cut happens only inside one clause
+//! that is still larger than the budget, and it stays on a UTF-8 character
+//! boundary.
 
 use crate::analysis::{FrozenInput, Source};
 use serde::{Deserialize, Serialize};
@@ -84,6 +86,8 @@ struct ChapterBlock {
     source_texts: Vec<String>,
     forms: Vec<FormSpan>,
     form_columns: Vec<usize>,
+    /// Per-cell UTF-8 lengths, row-major, parallel to `forms`.
+    form_cell_bytes: Vec<Vec<usize>>,
     bytes: usize,
 }
 
@@ -471,8 +475,19 @@ fn split_block(block: ChapterBlock, budget: usize) -> Vec<ChapterBlock> {
                 budget,
             ));
         }
-        for (span, columns) in block.forms.iter().zip(block.form_columns.iter()) {
-            pieces.extend(split_form_piece(&block, span.clone(), *columns, budget));
+        for ((span, columns), cell_bytes) in block
+            .forms
+            .iter()
+            .zip(block.form_columns.iter())
+            .zip(block.form_cell_bytes.iter())
+        {
+            pieces.extend(split_form_piece(
+                &block,
+                span.clone(),
+                *columns,
+                cell_bytes,
+                budget,
+            ));
         }
         return pieces;
     }
@@ -482,7 +497,12 @@ fn split_block(block: ChapterBlock, budget: usize) -> Vec<ChapterBlock> {
     }
     if let Some(span) = block.forms.first() {
         let columns = block.form_columns.first().copied().unwrap_or(0);
-        return split_form_piece(&block, span.clone(), columns, budget);
+        let cell_bytes = block
+            .form_cell_bytes
+            .first()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        return split_form_piece(&block, span.clone(), columns, cell_bytes, budget);
     }
     vec![block]
 }
@@ -502,6 +522,7 @@ fn text_piece(
         source_texts: vec![source_text.to_string()],
         forms: Vec::new(),
         form_columns: Vec::new(),
+        form_cell_bytes: Vec::new(),
         bytes,
     }
 }
@@ -516,6 +537,7 @@ fn form_piece(block: &ChapterBlock, span: FormSpan, bytes: usize) -> ChapterBloc
         source_texts: Vec::new(),
         forms: vec![span],
         form_columns: Vec::new(),
+        form_cell_bytes: Vec::new(),
         bytes,
     }
 }
@@ -552,43 +574,60 @@ fn split_form_piece(
     block: &ChapterBlock,
     span: FormSpan,
     columns: usize,
+    cell_bytes: &[usize],
     budget: usize,
 ) -> Vec<ChapterBlock> {
     let width = span.end.saturating_sub(span.start);
-    if columns == 0 || width <= budget || !width.is_multiple_of(columns) {
-        return vec![form_piece(
-            block,
-            span.clone(),
-            width.saturating_add(span.header_cells),
-        )];
+    let billed = form_span_bytes(cell_bytes, &span);
+    if columns == 0 || billed <= budget || !width.is_multiple_of(columns) {
+        return vec![form_piece(block, span, billed)];
     }
     let mut pieces = Vec::new();
     let mut cursor = span.start;
     let mut first = true;
     while cursor < span.end {
-        let repeated = if first && span.header_cells == 0 {
-            0
-        } else {
-            columns
-        };
-        let room = budget.saturating_sub(repeated).max(columns);
+        let header_cells = if first { span.header_cells } else { columns };
+        let repeated = range_bytes(cell_bytes, 0, header_cells);
         let mut take = columns;
-        while take + columns <= span.end - cursor && take + columns <= room {
+        let mut body = range_bytes(cell_bytes, cursor, cursor + columns);
+        while cursor + take + columns <= span.end {
+            let next_start = cursor + take;
+            let next = range_bytes(cell_bytes, next_start, next_start + columns);
+            if body.saturating_add(next).saturating_add(repeated) > budget {
+                break;
+            }
             take += columns;
+            body = body.saturating_add(next);
         }
         let end = cursor + take;
-        let header_cells = if first { span.header_cells } else { columns };
         let piece = FormSpan {
             form_id: span.form_id.clone(),
             start: cursor,
             end,
             header_cells,
         };
-        pieces.push(form_piece(block, piece, (end - cursor) + header_cells));
+        let bytes = form_span_bytes(cell_bytes, &piece);
+        pieces.push(form_piece(block, piece, bytes));
         cursor = end;
         first = false;
     }
     pieces
+}
+
+fn form_span_bytes(cell_bytes: &[usize], span: &FormSpan) -> usize {
+    range_bytes(cell_bytes, span.start, span.end).saturating_add(range_bytes(
+        cell_bytes,
+        0,
+        span.header_cells,
+    ))
+}
+
+fn range_bytes(cell_bytes: &[usize], start: usize, end: usize) -> usize {
+    if start >= end || start >= cell_bytes.len() {
+        return 0;
+    }
+    let end = end.min(cell_bytes.len());
+    cell_bytes[start..end].iter().sum()
 }
 
 fn clause_atoms(text: &str) -> Vec<(usize, usize)> {
@@ -690,6 +729,7 @@ fn chapter_blocks(input: &FrozenInput) -> Vec<ChapterBlock> {
                 source_texts: Vec::new(),
                 forms: Vec::new(),
                 form_columns: Vec::new(),
+                form_cell_bytes: Vec::new(),
                 bytes: 0,
             });
         }
@@ -711,7 +751,9 @@ fn chapter_blocks(input: &FrozenInput) -> Vec<ChapterBlock> {
                 continue;
             };
             let columns = form["definition"]["column_count"].as_u64().unwrap_or(0) as usize;
-            let cells = form_cell_count(&form["definition"]);
+            let cell_bytes = form_cell_byte_lengths(&form["definition"]);
+            let text_bytes = cell_bytes.iter().sum::<usize>();
+            let cells = cell_bytes.len();
             block.forms.push(FormSpan {
                 form_id: form_id.to_string(),
                 start: 0,
@@ -719,7 +761,8 @@ fn chapter_blocks(input: &FrozenInput) -> Vec<ChapterBlock> {
                 header_cells: 0,
             });
             block.form_columns.push(columns);
-            block.bytes = block.bytes.saturating_add(cells);
+            block.form_cell_bytes.push(cell_bytes);
+            block.bytes = block.bytes.saturating_add(text_bytes);
         }
     }
     blocks
@@ -775,6 +818,14 @@ fn form_cell_count(definition: &serde_json::Value) -> usize {
     let rows = definition["row_count"].as_u64().unwrap_or(0) as usize;
     let columns = definition["column_count"].as_u64().unwrap_or(0) as usize;
     rows.saturating_mul(columns)
+}
+
+/// UTF-8 lengths of every grid cell, in the same order `materialize_form` sends.
+fn form_cell_byte_lengths(definition: &serde_json::Value) -> Vec<usize> {
+    let columns = definition["column_count"].as_u64().unwrap_or(0) as usize;
+    (0..form_cell_count(definition))
+        .map(|index| cell_text(Some(definition), columns, index).len())
+        .collect()
 }
 
 fn plan_sha(packs: &[ParsePack]) -> String {
@@ -961,9 +1012,14 @@ mod tests {
             vec![json!({
                 "form_definition_revision_id": "form-price",
                 "source_unit_revision_id": "c",
-                "definition": {"row_count": 2, "column_count": 2}
+                "definition": {
+                    "row_count": 2,
+                    "column_count": 2,
+                    "cells": [{"row": 0, "column": 0, "text": "abcd"}]
+                }
             })],
         );
+        // "报价表正文" is 15 bytes and the cell text is 4. Together they fit in 20.
         let separate = plan_packs(&frozen, 20);
         assert_eq!(separate.len(), 2);
         let price = separate
@@ -993,10 +1049,22 @@ mod tests {
             vec![json!({
                 "form_definition_revision_id": "form-price",
                 "source_unit_revision_id": "c",
-                "definition": {"row_count": 3, "column_count": 2}
+                "definition": {
+                    "row_count": 3,
+                    "column_count": 2,
+                    "cells": [
+                        {"row": 0, "column": 0, "text": "甲"},
+                        {"row": 0, "column": 1, "text": "甲"},
+                        {"row": 1, "column": 0, "text": "甲"},
+                        {"row": 1, "column": 1, "text": "甲"},
+                        {"row": 2, "column": 0, "text": "甲"},
+                        {"row": 2, "column": 1, "text": "甲"}
+                    ]
+                }
             })],
         );
-        let packs = plan_packs(&frozen, 4);
+        // Each cell is 3 bytes. Two rows are 12 bytes; six cells are not.
+        let packs = plan_packs(&frozen, 12);
         let forms: Vec<_> = packs.iter().flat_map(|pack| pack.forms.clone()).collect();
         assert_eq!(
             forms,
@@ -1015,6 +1083,111 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn many_empty_or_short_cells_do_not_exceed_the_byte_budget() {
+        let mut cells = Vec::new();
+        for column in 0..8 {
+            cells.push(json!({"row": 0, "column": column, "text": "a"}));
+        }
+        for column in 0..4 {
+            cells.push(json!({"row": 1, "column": column, "text": "ab"}));
+        }
+        let frozen = input(
+            vec![source("c", 0, "", "第二章 > 报价")],
+            vec![json!({
+                "form_definition_revision_id": "form-price",
+                "source_unit_revision_id": "c",
+                "definition": {
+                    "row_count": 8,
+                    "column_count": 8,
+                    "cells": cells
+                }
+            })],
+        );
+        // 64 cells hold 16 bytes. Counting cells would split this pack.
+        let packs = plan_packs(&frozen, 16);
+        assert_eq!(packs.len(), 1);
+        assert_eq!(
+            packs[0].forms,
+            vec![FormSpan {
+                form_id: "form-price".into(),
+                start: 0,
+                end: 64,
+                header_cells: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_few_long_cells_exceed_the_byte_budget_and_split_by_row() {
+        let long = "甲".repeat(30);
+        let frozen = input(
+            vec![source("c", 0, "", "第二章 > 报价")],
+            vec![json!({
+                "form_definition_revision_id": "form-price",
+                "source_unit_revision_id": "c",
+                "definition": {
+                    "row_count": 3,
+                    "column_count": 2,
+                    "cells": [
+                        {"row": 0, "column": 0, "text": "标题"},
+                        {"row": 0, "column": 1, "text": "说明"},
+                        {"row": 1, "column": 0, "text": long},
+                        {"row": 1, "column": 1, "text": ""},
+                        {"row": 2, "column": 0, "text": "x"},
+                        {"row": 2, "column": 1, "text": "y"}
+                    ]
+                }
+            })],
+        );
+        // Six cells fit in 30. The 90-byte cell does not, so the split follows row text.
+        let packs = plan_packs(&frozen, 30);
+        let forms: Vec<_> = packs.iter().flat_map(|pack| pack.forms.clone()).collect();
+        assert_eq!(
+            forms,
+            vec![
+                FormSpan {
+                    form_id: "form-price".into(),
+                    start: 0,
+                    end: 2,
+                    header_cells: 0,
+                },
+                FormSpan {
+                    form_id: "form-price".into(),
+                    start: 2,
+                    end: 4,
+                    header_cells: 2,
+                },
+                FormSpan {
+                    form_id: "form-price".into(),
+                    start: 4,
+                    end: 6,
+                    header_cells: 2,
+                },
+            ]
+        );
+        let mut work = DiscoverWork::plan(&frozen, 30);
+        work.claim(10);
+        let mut sent = Vec::new();
+        for session in work.inflight_sessions(&frozen) {
+            for form in session["pack"]["forms"].as_array().unwrap() {
+                let cells: usize = form["cells"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|cell| cell.as_str().unwrap().len())
+                    .sum();
+                let header: usize = form
+                    .get("header")
+                    .and_then(|header| header.as_array())
+                    .map(|header| header.iter().map(|cell| cell.as_str().unwrap().len()).sum())
+                    .unwrap_or(0);
+                sent.push(cells + header);
+            }
+        }
+        assert_eq!(sent, vec![12, 102, 14]);
     }
 
     #[test]
@@ -1304,8 +1477,9 @@ mod tests {
         let form = sessions
             .iter()
             .flat_map(|session| session["pack"]["forms"].as_array().unwrap().iter())
-            .find(|form| form["header_cells"].as_u64() == Some(2))
+            .find(|form| form["cells"] == json!(["2", "材料"]))
             .expect("continuation slice");
+        assert_eq!(form["header_cells"], 2);
         let start = form["start"].as_u64().unwrap() as usize;
         let end = form["end"].as_u64().unwrap() as usize;
         assert_eq!(form["header"], json!(["序号", "项目"]));
