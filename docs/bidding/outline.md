@@ -79,7 +79,7 @@
 
 字段错误包括：包不在冻结计划里（`unknown_pack`）、包不是本轮领取或失败待修（`pack_not_running`）、引用了包外来源（`outside_pack`）、偏移不在该标题切片内（`outside_slice`）。
 
-成功则包变为 `committed`，要求描述以 `{pack_id}:{index}` 存入 `DiscoverWork.requirements`。全部包都是 `committed` 时发现完成；空计划也算完成。
+成功则包变为 `committed`。现行只把要求描述以 `{pack_id}:{index}` 存入 `DiscoverWork.requirements`，不留下 `source_id`、`start`、`end`。目标是检查点上的要求记录留下这些切片，见 [缺口 2](../../plans/bidding/outline-gaps.md)。全部包都是 `committed` 时发现完成；空计划也算完成。
 
 ## 阅读包载荷：现行与目标
 
@@ -151,16 +151,16 @@
 | --- | --- |
 | `reading_packs` | `DiscoverWork`。第一次发现轮才建立。包状态是 `pending`、`running`、`failed`、`committed` |
 | `tool_draft` | `Draft`：`chapters`、`bindings`、`slots`、`slots_submitted`、`finished` |
-| `phase` | `discover`、`outline`、`check`、`complete`。`finish_outline` 把它标成 `complete`。发现包全部提交，或旧扫描被判定完成时，`draft::after_batch` 会从 `discover` 拨到 `outline`。旧扫描完成不是这条产品路径的完成条件 |
+| `phase` | `discover`、`outline`、`check`、`complete`。`finish_outline` 把它标成 `complete`。发现包全部提交，或旧扫描被判定完成时，`draft::after_batch` 会从 `discover` 拨到 `outline`。此时若 `analysis.outline.checks` 为空，会 `transcript.clear()`。组织必须读检查点上的要求记录，不能指望发现对话还在。旧扫描完成不是这条产品路径的完成条件 |
 
-现行 `put_chapters` 不接收 `requirement_ids`，写入的数组是空的。空数组是现行行为。目标参数（必填的 `requirement_ids`、未知 id 拒绝、发现仍不能调用）见 [缺口 2](../../plans/bidding/outline-gaps.md)。
+现行 `put_chapters` 不接收 `requirement_ids`，写入的数组是空的；要求记录也只有描述。这是现行行为。目标是检查点留下 `source_id`、`start`、`end`，并且每个章节必填 `requirement_ids`（未知 id 拒绝，发现仍不能调用），见 [缺口 2](../../plans/bidding/outline-gaps.md)。
 
 ## 一轮大纲
 
 记忆只有检查点。`TurnJournal` 是 `Checkpoint.journal`（检查点合同版本 14，运行适配 `rig-chat-0.42.0/4`）。`reading_packs`、`tool_draft` 和 `phase` 在同一检查点的 `outline_run` 上。`load` 恢复这一个对象；输入摘要或运行合同变了就拒绝恢复。`save` 写回这一个对象。
 
 1. **选职责。** `outline::agent::current`。本轮只挂该职责的工具。
-2. **领包。** 仅当职责是发现且包未完成：`discover::claim_turn` 在还没有计划时建一次计划，把最多 4 个 `pending` 包标成 `running`，会话对象放进 brief 的 `reading_packs`。
+2. **领包。** 现行 `claim_turn`：仅当职责是发现且包未完成，在还没有计划时建一次计划，只把本轮新的 `pending` 包（最多 4 个）标成 `running` 并放进 brief。已经在跑的包不会再次出现。目标是重放仍在处理的 `running` 和待修 `failed`，见 [缺口 1](../../plans/bidding/outline-gaps.md)。
 3. **准备会话并预约。** `prepare_request` 拼出系统提示、brief、检查点对话，以及宿主包。随后 `TurnJournal::prepare_session` 复用或重建 SDK 会话，`prepare` 把精确 UTF-8 请求体记成待完成轮。`reserve` 在调用模型之前冻结这同一份字节，最多三次。已经保存的响应不再预约，也不再调用模型。
 4. **模型。** 返回工具调用。`responded` 先把响应写入检查点。
 5. **工具。** `outline::agent::apply` 在 `deny` 下执行。结果追加到检查点对话，`session.finish` 记到当前 SDK 会话。
@@ -193,7 +193,7 @@
 
 这是尚未改代码的产品选择。建议在缺口 1–3 落地之前维持四个职责，然后再决定要不要合并。合并不作为修阅读包或发布投影的一部分。
 
-**维持现状。** 模板是独立职责，工具只有 `put_slots` 和 `read_outline`。组织不能写槽。填充和已发布阶段强制回到模板。
+**维持现状。** 模板是独立职责，工具只有 `put_slots` 和 `read_outline`。组织不能写槽。`DraftStage::Fill` 和已发布阶段强制回到模板。
 
 **并入组织。** 发现完成之后，同一职责看见 `put_chapters`、`bind_forms`、`put_slots`、`read_outline`。收尾仍只有 `read_outline` 和 `finish_outline`。章节、绑定和槽在同一次职责里提交。
 
@@ -201,13 +201,13 @@
 | --- | --- | --- |
 | 隔离 | 写槽时不能换章节树。换树会丢掉被删章节上的绑定和槽，并清掉 `slots_submitted` | 同一职责可以先换树再写槽 |
 | 轮次 | 章节和附件都齐之后才进入模板 | 少一次职责切换 |
-| 填充阶段 | 已经强制为模板，不能改章节 | 必须单独保住这条限制 |
+| `DraftStage::Fill` | 已经强制为模板，不能改章节 | 必须单独保住这条限制 |
 | 槽规则 | 投标人槽和签字槽留空；分组章节不能带这两种槽 | 规则不变，调用方从模板职责变成组织职责 |
 
 若合并，改的是谁看得见工具，不是工具形状：
 
-- `outline/agent.rs` 的 `ORGANIZE`、`TEMPLATE`、`select`、`current`、`deny`、`schemas_for`。填充阶段仍只给槽。
-- `prompts/outline.txt` 写上现在在 `prompts/template.txt` 里的槽规则。填充阶段的提示可以留下。
+- `outline/agent.rs` 的 `ORGANIZE`、`TEMPLATE`、`select`、`current`、`deny`、`schemas_for`。`DraftStage::Fill` 仍只给槽。
+- `prompts/outline.txt` 写上现在在 `prompts/template.txt` 里的槽规则。`DraftStage::Fill` 的提示可以留下。
 - `outline-tools-v1.schema.json` 的六个工具形状不动。
 - 断言组织轮不能 `put_slots` 的测试。
 - 本页的职责表。
