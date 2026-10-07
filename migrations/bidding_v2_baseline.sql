@@ -396,10 +396,14 @@ BEGIN
   IF p_object_ref IS DISTINCT FROM ('objects/' || p_docx_sha256)::kb_object_ref THEN
     RAISE EXCEPTION 'docx object ref does not match its digest' USING ERRCODE = '23514';
   END IF;
-  SELECT revision, version_id INTO current_revision, parent
-  FROM bid_docx_current
-  WHERE project_id = p_project_id AND outline_sha256 = p_outline_sha256
-  FOR UPDATE;
+  SELECT version.revision, head.version_id INTO current_revision, parent
+  FROM bid_docx_current head
+  JOIN bid_docx_versions version
+    ON version.project_id = head.project_id
+   AND version.outline_sha256 = head.outline_sha256
+   AND version.id = head.version_id
+  WHERE head.project_id = p_project_id AND head.outline_sha256 = p_outline_sha256
+  FOR UPDATE OF head;
   current_revision := COALESCE(current_revision, 0);
   IF current_revision IS DISTINCT FROM p_expected_revision THEN
     RAISE EXCEPTION 'DOCX_VERSION_CAS_MISMATCH' USING ERRCODE = '40001';
