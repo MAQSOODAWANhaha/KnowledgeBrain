@@ -58,11 +58,12 @@ pub fn unmapped_forms(input: &FrozenInput, draft: &Draft) -> Vec<String> {
 pub fn apply(
     input: &FrozenInput,
     draft: &mut Draft,
+    requirement_ids: &BTreeSet<String>,
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
     match name {
-        "put_chapters" => put_chapters(draft, args),
+        "put_chapters" => put_chapters(draft, requirement_ids, args),
         "bind_forms" => bind_forms(input, draft, args),
         "put_slots" => put_slots(draft, args),
         "read_outline" => Ok(view(draft)),
@@ -71,7 +72,11 @@ pub fn apply(
     }
 }
 
-fn put_chapters(draft: &mut Draft, args: &Value) -> Result<Value, String> {
+fn put_chapters(
+    draft: &mut Draft,
+    known_requirements: &BTreeSet<String>,
+    args: &Value,
+) -> Result<Value, String> {
     let rows = args["chapters"]
         .as_array()
         .ok_or("chapters must be an array")?;
@@ -80,6 +85,7 @@ fn put_chapters(draft: &mut Draft, args: &Value) -> Result<Value, String> {
     }
     let mut chapters = Vec::with_capacity(rows.len());
     let mut seen = HashSet::new();
+    let mut seen_requirements = HashSet::new();
     for chapter in rows {
         let id = required(chapter, "id")?;
         if !seen.insert(id.clone()) {
@@ -95,6 +101,8 @@ fn put_chapters(draft: &mut Draft, args: &Value) -> Result<Value, String> {
             Some("response") => ChapterPurpose::Response,
             _ => return Err(format!("chapter {id} purpose must be group or response")),
         };
+        let requirement_ids =
+            requirement_ids(chapter, &id, known_requirements, &mut seen_requirements)?;
         chapters.push(ChapterOutline {
             id,
             parent_id,
@@ -103,8 +111,14 @@ fn put_chapters(draft: &mut Draft, args: &Value) -> Result<Value, String> {
                 .ok_or("chapter order must be a non-negative integer")? as usize,
             title: required(chapter, "title")?,
             purpose,
-            requirement_ids: Vec::new(),
+            requirement_ids,
         });
+    }
+    if let Some(id) = known_requirements
+        .iter()
+        .find(|id| !seen_requirements.contains(id.as_str()))
+    {
+        return Err(format!("requirement {id} is not on a chapter"));
     }
     validate_tree(&chapters)?;
     let ids: HashSet<_> = chapters.iter().map(|chapter| chapter.id.as_str()).collect();
@@ -265,6 +279,7 @@ fn view(draft: &Draft) -> Value {
             "order": chapter.order,
             "title": chapter.title,
             "purpose": chapter.purpose,
+            "requirement_ids": chapter.requirement_ids,
         })).collect::<Vec<_>>(),
         "bindings": draft.bindings,
         "slots": draft.slots.iter().map(|slot| json!({
@@ -311,6 +326,34 @@ fn validate_tree(chapters: &[ChapterOutline]) -> Result<(), String> {
     Ok(())
 }
 
+fn requirement_ids(
+    chapter: &Value,
+    id: &str,
+    known: &BTreeSet<String>,
+    seen: &mut HashSet<String>,
+) -> Result<Vec<String>, String> {
+    let Some(rows) = chapter.get("requirement_ids").and_then(Value::as_array) else {
+        return Err(format!("chapter {id} requirement_ids must be an array"));
+    };
+    let mut ids = Vec::with_capacity(rows.len());
+    for requirement in rows {
+        let requirement = requirement
+            .as_str()
+            .filter(|requirement| !requirement.is_empty())
+            .ok_or_else(|| format!("chapter {id} requirement_ids must be strings"))?;
+        if !known.contains(requirement) {
+            return Err(format!("unknown requirement {requirement}"));
+        }
+        if !seen.insert(requirement.to_string()) {
+            return Err(format!(
+                "requirement {requirement} is assigned more than once"
+            ));
+        }
+        ids.push(requirement.to_string());
+    }
+    Ok(ids)
+}
+
 fn required(value: &Value, field: &str) -> Result<String, String> {
     value[field]
         .as_str()
@@ -355,10 +398,11 @@ mod tests {
         apply(
             &input,
             &mut draft,
+            &BTreeSet::new(),
             "put_chapters",
             &json!({"chapters":[
-                {"id":"group","parent_id":null,"order":0,"title":"投标文件","purpose":"group"},
-                {"id":"letter","parent_id":"group","order":0,"title":"投标函","purpose":"response"}
+                {"id":"group","parent_id":null,"order":0,"title":"投标文件","purpose":"group","requirement_ids":[]},
+                {"id":"letter","parent_id":"group","order":0,"title":"投标函","purpose":"response","requirement_ids":[]}
             ]}),
         )
         .unwrap();
@@ -366,6 +410,7 @@ mod tests {
         apply(
             &input,
             &mut draft,
+            &BTreeSet::new(),
             "bind_forms",
             &json!({"bindings":[{"form_id":"form-1","chapter_id":"letter"}]}),
         )
@@ -378,6 +423,7 @@ mod tests {
         apply(
             &input,
             &mut draft,
+            &BTreeSet::new(),
             "put_slots",
             &json!({"slots":[
                 {"slot_id":"letter:fixed","chapter_id":"letter","kind":"fixed_text","text":"投标函","match_query":""},
@@ -388,6 +434,7 @@ mod tests {
         let err = apply(
             &input,
             &mut draft,
+            &BTreeSet::new(),
             "put_slots",
             &json!({"slots":[{"slot_id":"group:bidder","chapter_id":"group","kind":"bidder_blank","text":"","match_query":"名称"}]}),
         )
@@ -397,7 +444,14 @@ mod tests {
         assert_eq!(finished["finished"], json!(true));
         assert_eq!(finished["bindings"][0]["form_id"], json!("form-1"));
         assert_eq!(draft.slots.len(), 2);
-        let again = apply(&input, &mut draft, "read_outline", &json!({})).unwrap();
+        let again = apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "read_outline",
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(again["slots"][1]["match_query"], json!("投标人名称"));
     }
 }

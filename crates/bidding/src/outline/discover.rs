@@ -9,7 +9,7 @@
 use crate::analysis::{FrozenInput, Source};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const DEFAULT_PACK_CONCURRENCY: usize = 4;
 
@@ -102,7 +102,25 @@ struct PackRecord {
 pub struct DiscoverWork {
     pub plan_sha256: String,
     packs: BTreeMap<String, PackRecord>,
-    requirements: BTreeMap<String, String>,
+    requirements: BTreeMap<String, RequirementRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequirementRecord {
+    pub description: String,
+    pub source_id: String,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackCounts {
+    pub total: usize,
+    pub pending: usize,
+    pub running: usize,
+    pub failed: usize,
+    pub committed: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -144,7 +162,7 @@ impl DiscoverWork {
         }
     }
 
-    /// Mark up to `limit` pending packs running. Already running packs stay put.
+    /// Mark up to `limit` pending packs running. Packs already running stay running.
     pub fn claim(&mut self, limit: usize) -> Vec<ParsePack> {
         let mut claimed = Vec::new();
         for record in self.packs.values_mut() {
@@ -179,23 +197,40 @@ impl DiscoverWork {
         for (index, requirement) in submit.requirements.iter().enumerate() {
             self.requirements.insert(
                 format!("{pack_id}:{index}"),
-                requirement.description.clone(),
+                RequirementRecord {
+                    description: requirement.description.clone(),
+                    source_id: requirement.source_id.clone(),
+                    start: requirement.start,
+                    end: requirement.end,
+                },
             );
         }
         Ok(())
     }
 
-    pub fn session(&self, pack_id: &str) -> Result<serde_json::Value, String> {
+    pub fn session(&self, input: &FrozenInput, pack_id: &str) -> Result<serde_json::Value, String> {
         let record = self
             .packs
             .get(pack_id)
             .ok_or_else(|| format!("unknown reading pack {pack_id}"))?;
         Ok(serde_json::json!({
             "duty": "discover",
-            "pack": record.pack,
+            "pack": materialize_pack(input, &record.pack)?,
             "status": record.status,
             "feedback": record.feedback,
         }))
+    }
+
+    /// Sessions for packs this discover turn still has to handle.
+    pub fn inflight_sessions(&self, input: &FrozenInput) -> Vec<serde_json::Value> {
+        self.packs
+            .values()
+            .filter(|record| matches!(record.status, PackStatus::Running | PackStatus::Failed))
+            .map(|record| {
+                self.session(input, &record.pack.id)
+                    .expect("in-flight pack has a session")
+            })
+            .collect()
     }
 
     pub fn status(&self, pack_id: &str) -> Option<PackStatus> {
@@ -204,6 +239,56 @@ impl DiscoverWork {
 
     pub fn requirement_count(&self) -> usize {
         self.requirements.len()
+    }
+
+    pub fn requirement(&self, id: &str) -> Option<&RequirementRecord> {
+        self.requirements.get(id)
+    }
+
+    pub fn requirement_ids(&self) -> BTreeSet<String> {
+        self.requirements.keys().cloned().collect()
+    }
+
+    pub fn requirement_packet(&self) -> Vec<serde_json::Value> {
+        self.requirements
+            .iter()
+            .map(|(id, record)| {
+                serde_json::json!({
+                    "id": id,
+                    "description": record.description,
+                    "source_id": record.source_id,
+                    "start": record.start,
+                    "end": record.end,
+                })
+            })
+            .collect()
+    }
+
+    pub fn pack_counts(&self) -> PackCounts {
+        let mut counts = PackCounts {
+            total: self.packs.len(),
+            pending: 0,
+            running: 0,
+            failed: 0,
+            committed: 0,
+        };
+        for record in self.packs.values() {
+            match record.status {
+                PackStatus::Pending => counts.pending += 1,
+                PackStatus::Running => counts.running += 1,
+                PackStatus::Failed => counts.failed += 1,
+                PackStatus::Committed => counts.committed += 1,
+            }
+        }
+        counts
+    }
+
+    /// A discovery turn can leave the window only when every pack it names is committed.
+    pub fn turn_only_committed(&self, pack_ids: &[String]) -> bool {
+        !pack_ids.is_empty()
+            && pack_ids
+                .iter()
+                .all(|id| self.status(id) == Some(PackStatus::Committed))
     }
 
     /// True when every planned pack has been committed. An empty plan is done.
@@ -267,7 +352,9 @@ pub fn reading_budget(pack_max_chars: usize) -> usize {
     }
 }
 
-/// Plan once, then mark up to `limit` pending packs running and return their sessions.
+/// Plan once, claim up to `limit` pending packs, and return every pack this turn
+/// still has to read: the ones just claimed, plus packs already `running` or
+/// `failed` and waiting for repair.
 pub fn claim_turn(
     slot: &mut Option<DiscoverWork>,
     input: &FrozenInput,
@@ -275,10 +362,8 @@ pub fn claim_turn(
     limit: usize,
 ) -> Vec<serde_json::Value> {
     let work = slot.get_or_insert_with(|| DiscoverWork::plan(input, budget));
-    let ids: Vec<String> = work.claim(limit).into_iter().map(|pack| pack.id).collect();
-    ids.iter()
-        .map(|id| work.session(id).expect("claimed pack has a session"))
-        .collect()
+    work.claim(limit);
+    work.inflight_sessions(input)
 }
 
 pub fn apply_pack_tool(
@@ -705,6 +790,89 @@ fn field(path: &str, code: &str, message: &str) -> FieldError {
     }
 }
 
+fn materialize_pack(input: &FrozenInput, pack: &ParsePack) -> Result<serde_json::Value, String> {
+    let mut text = Vec::with_capacity(pack.text.len());
+    for span in &pack.text {
+        let source = input
+            .source_units
+            .iter()
+            .find(|source| source.source_unit_revision_id == span.source_id)
+            .ok_or_else(|| format!("reading pack source {} is missing", span.source_id))?;
+        let body = source.text.get(span.start..span.end).ok_or_else(|| {
+            format!(
+                "reading pack slice {}..{} is outside {}",
+                span.start, span.end, span.source_id
+            )
+        })?;
+        text.push(serde_json::json!({
+            "source_id": span.source_id,
+            "start": span.start,
+            "end": span.end,
+            "text": body,
+        }));
+    }
+    let mut forms = Vec::with_capacity(pack.forms.len());
+    for span in &pack.forms {
+        forms.push(materialize_form(input, span));
+    }
+    Ok(serde_json::json!({
+        "id": pack.id,
+        "document_id": pack.document_id,
+        "order": pack.order,
+        "context_heading": pack.context_heading,
+        "heading": pack.heading,
+        "text": text,
+        "forms": forms,
+    }))
+}
+
+fn materialize_form(input: &FrozenInput, span: &FormSpan) -> serde_json::Value {
+    let definition = input
+        .structured_forms
+        .iter()
+        .find(|form| form["form_definition_revision_id"] == span.form_id)
+        .map(|form| &form["definition"]);
+    let columns = definition
+        .and_then(|definition| definition["column_count"].as_u64())
+        .unwrap_or(0) as usize;
+    let cells: Vec<String> = (span.start..span.end)
+        .map(|index| cell_text(definition, columns, index))
+        .collect();
+    let mut form = serde_json::json!({
+        "form_id": span.form_id,
+        "start": span.start,
+        "end": span.end,
+        "header_cells": span.header_cells,
+        "cells": cells,
+    });
+    if span.header_cells > 0 {
+        let header: Vec<String> = (0..span.header_cells)
+            .map(|index| cell_text(definition, columns, index))
+            .collect();
+        form["header"] = serde_json::json!(header);
+    }
+    form
+}
+
+fn cell_text(definition: Option<&serde_json::Value>, columns: usize, index: usize) -> String {
+    if columns == 0 {
+        return String::new();
+    }
+    let row = index / columns;
+    let column = index % columns;
+    definition
+        .and_then(|definition| definition["cells"].as_array())
+        .and_then(|cells| {
+            cells.iter().find(|cell| {
+                cell["row"].as_u64() == Some(row as u64)
+                    && cell["column"].as_u64() == Some(column as u64)
+            })
+        })
+        .and_then(|cell| cell["text"].as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 fn feedback(pack_id: &str, submit: &PackSubmit, errors: Vec<FieldError>) -> PackFeedback {
     let total = errors.len();
     PackFeedback {
@@ -921,9 +1089,14 @@ mod tests {
         assert_eq!(work.status("pack-0"), Some(PackStatus::Committed));
         assert_eq!(work.status("pack-1"), Some(PackStatus::Failed));
         assert_eq!(work.requirement_count(), 1);
-        let session = work.session("pack-1").unwrap();
+        let session = work.session(&frozen, "pack-1").unwrap();
         assert!(session.get("feedback").is_some());
+        assert_eq!(session["pack"]["text"][0]["text"], "B");
         assert!(!session.to_string().contains("投标函"));
+        assert!(work.requirement("pack-1:0").is_none());
+        let kept = work.requirement("pack-0:0").unwrap();
+        assert_eq!(kept.source_id, "a");
+        assert_eq!((kept.start, kept.end), (0, 1));
     }
 
     #[test]
@@ -993,5 +1166,214 @@ mod tests {
         assert_eq!(work.status("pack-0"), Some(PackStatus::Committed));
         assert_eq!(work.status("pack-1"), Some(PackStatus::Committed));
         assert_eq!(work.requirement_count(), 2);
+        assert_eq!(work.requirement("pack-1:0").unwrap().source_id, "b");
+    }
+
+    #[test]
+    fn outside_slice_does_not_store_the_requirement() {
+        let frozen = input(vec![source("a", 0, "甲乙", "第一章")], vec![]);
+        let mut work = DiscoverWork::plan(&frozen, 10_000);
+        work.claim(1);
+        let err = work
+            .submit(
+                "pack-0",
+                PackSubmit {
+                    call_id: "call".into(),
+                    requirements: vec![PackRequirement {
+                        description: "越界".into(),
+                        source_id: "a".into(),
+                        start: 0,
+                        end: "甲乙".len() + 1,
+                    }],
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.errors[0].code, "outside_slice");
+        assert_eq!(work.status("pack-0"), Some(PackStatus::Failed));
+        assert_eq!(work.requirement_count(), 0);
+    }
+
+    #[test]
+    fn brief_packs_carry_slice_text_and_continuation_headers() {
+        let prefix = "包外前";
+        let middle = "条款内容超过预算必须切开";
+        let suffix = "包外后";
+        let body = format!("{prefix}。{middle}。{suffix}");
+        let frozen = input(
+            vec![
+                located(
+                    "later",
+                    2,
+                    "后文",
+                    json!({"heading_path": "第三章", "section_ordinal": 2}),
+                ),
+                located(
+                    "body",
+                    0,
+                    &body,
+                    json!({"heading_path": "第一章 > 投标函", "section_ordinal": 0}),
+                ),
+                source("table", 1, "", "第二章 > 报价"),
+            ],
+            vec![json!({
+                "form_definition_revision_id": "form-price",
+                "source_unit_revision_id": "table",
+                "definition": {
+                    "title": "报价",
+                    "row_count": 3,
+                    "column_count": 2,
+                    "cells": [
+                        {"row": 0, "column": 0, "text": "序号"},
+                        {"row": 0, "column": 1, "text": "项目"},
+                        {"row": 1, "column": 0, "text": "1"},
+                        {"row": 1, "column": 1, "text": "人工"},
+                        {"row": 2, "column": 0, "text": "2"},
+                        {"row": 2, "column": 1, "text": "材料"}
+                    ]
+                }
+            })],
+        );
+        let mut work = DiscoverWork::plan(&frozen, 4);
+        work.claim(100);
+        let mut sessions = work.inflight_sessions(&frozen);
+        sessions.sort_by_key(|session| session["pack"]["order"].as_u64().unwrap());
+        let ids: Vec<_> = sessions
+            .iter()
+            .filter_map(|session| {
+                session["pack"]["text"]
+                    .as_array()
+                    .and_then(|rows| rows.first())
+                    .and_then(|row| row["source_id"].as_str())
+                    .filter(|id| !id.is_empty())
+            })
+            .collect();
+        assert!(
+            ids.windows(2).all(|pair| {
+                let left = frozen
+                    .source_units
+                    .iter()
+                    .find(|source| source.source_unit_revision_id == pair[0])
+                    .unwrap()
+                    .ordinal;
+                let right = frozen
+                    .source_units
+                    .iter()
+                    .find(|source| source.source_unit_revision_id == pair[1])
+                    .unwrap()
+                    .ordinal;
+                left <= right
+            }),
+            "packs follow frozen source order, got {ids:?}"
+        );
+        let sources = ["body", "later"];
+        for source_id in sources {
+            let source = frozen
+                .source_units
+                .iter()
+                .find(|source| source.source_unit_revision_id == source_id)
+                .unwrap();
+            let mut covered = String::new();
+            for session in &sessions {
+                for span in session["pack"]["text"].as_array().unwrap() {
+                    if span["source_id"] != source_id {
+                        continue;
+                    }
+                    let start = span["start"].as_u64().unwrap() as usize;
+                    let end = span["end"].as_u64().unwrap() as usize;
+                    let text = span["text"].as_str().unwrap();
+                    assert_eq!(text, &source.text[start..end]);
+                    assert!(
+                        !text.contains("人工"),
+                        "table cell text stays out of prose packs"
+                    );
+                    covered.push_str(text);
+                }
+            }
+            assert_eq!(covered, source.text);
+        }
+        let letter = sessions
+            .iter()
+            .find(|session| {
+                session["pack"]["heading"]
+                    .as_str()
+                    .unwrap()
+                    .contains("投标函")
+            })
+            .unwrap();
+        assert_eq!(letter["pack"]["context_heading"], "第一章");
+        let form = sessions
+            .iter()
+            .flat_map(|session| session["pack"]["forms"].as_array().unwrap().iter())
+            .find(|form| form["header_cells"].as_u64() == Some(2))
+            .expect("continuation slice");
+        let start = form["start"].as_u64().unwrap() as usize;
+        let end = form["end"].as_u64().unwrap() as usize;
+        assert_eq!(form["header"], json!(["序号", "项目"]));
+        assert_eq!(form["cells"], json!(["2", "材料"]));
+        assert_eq!(form["cells"].as_array().unwrap().len(), end - start);
+        assert!((0..2).all(|index| index < start || index >= end));
+        assert!(!form["cells"].to_string().contains("序号"));
+    }
+
+    #[test]
+    fn running_and_failed_packs_are_replayed_with_text() {
+        let frozen = input(
+            vec![
+                source("a", 0, "A", "第一章 > 投标函"),
+                source("b", 1, "B", "第二章 > 技术方案"),
+                source("c", 2, "C", "第三章"),
+            ],
+            vec![],
+        );
+        let mut slot = None;
+        let first = claim_turn(&mut slot, &frozen, 1, 1);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0]["pack"]["id"], "pack-0");
+        assert_eq!(first[0]["pack"]["text"][0]["text"], "A");
+        assert_eq!(first[0]["status"], "running");
+        let again = claim_turn(&mut slot, &frozen, 1, 1);
+        assert_eq!(again.len(), 2);
+        assert_eq!(again[0]["pack"]["text"][0]["text"], "A");
+        assert_eq!(again[1]["pack"]["id"], "pack-1");
+        assert_eq!(again[1]["pack"]["text"][0]["text"], "B");
+        apply_pack_tool(
+            &mut slot,
+            &frozen,
+            1,
+            "submit_pack_scan",
+            &json!({
+                "pack_id": "pack-0",
+                "call_id": "bad",
+                "requirements": [{"description": "越界", "source_id": "a", "start": 0, "end": 2}]
+            }),
+        )
+        .unwrap();
+        apply_pack_tool(
+            &mut slot,
+            &frozen,
+            1,
+            "submit_pack_scan",
+            &json!({
+                "pack_id": "pack-1",
+                "call_id": "ok",
+                "requirements": [{"description": "技术", "source_id": "b", "start": 0, "end": 1}]
+            }),
+        )
+        .unwrap();
+        let replay = claim_turn(&mut slot, &frozen, 1, 1);
+        let ids: Vec<_> = replay
+            .iter()
+            .map(|session| session["pack"]["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"pack-0"), "failed pack is replayed: {ids:?}");
+        assert!(!ids.contains(&"pack-1"), "committed pack leaves the brief");
+        assert!(ids.contains(&"pack-2"));
+        let failed = replay
+            .iter()
+            .find(|session| session["pack"]["id"] == "pack-0")
+            .unwrap();
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["pack"]["text"][0]["text"], "A");
+        assert!(failed["feedback"]["errors"][0]["code"] == "outside_slice");
     }
 }

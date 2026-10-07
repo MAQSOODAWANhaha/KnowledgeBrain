@@ -234,3 +234,147 @@ async fn source_review_final_batch_recovers_without_extra_model_calls_or_double_
         .expect_err("published claim");
     assert!(again.to_string().contains("published or leased"), "{again}");
 }
+
+#[tokio::test]
+#[ignore = "requires KB_TENDER_AGENT_TEST_DATABASE_URL pointing to a fresh owned test database"]
+async fn analysis_tool_draft_outline_publish_matches_the_finished_draft() {
+    use bidding::analysis::{FrozenInput, Source};
+    use bidding::outline::chapters::AttachmentBinding;
+    use bidding::outline::tools::Draft;
+    use bidding::outline::{ChapterOutline, ChapterPurpose, SlotKind, TemplateContent};
+
+    let pool = pool().await;
+    let project_id = project(&pool).await;
+    let run_id = Uuid::new_v4();
+    let input = FrozenInput {
+        schema_version: 1,
+        project_id: project_id.to_string(),
+        document_set_id: "set".into(),
+        documents: vec![],
+        document_relations: vec![],
+        source_units: vec![Source {
+            source_unit_revision_id: "source".into(),
+            document_id: "doc".into(),
+            text: "附件".into(),
+            locator: serde_json::json!({"heading_path": "附件"}),
+            ordinal: 0,
+        }],
+        structured_forms: vec![serde_json::json!({
+            "form_definition_revision_id": "form-1",
+            "source_unit_revision_id": "source",
+            "definition": {"title": "附件一 报价表", "row_count": 1, "column_count": 1, "cells": []}
+        })],
+        decisions: vec![],
+    };
+    let mut draft = Draft {
+        chapters: vec![
+            ChapterOutline {
+                id: "group".into(),
+                parent_id: None,
+                order: 0,
+                title: "投标文件".into(),
+                purpose: ChapterPurpose::Group,
+                requirement_ids: vec![],
+            },
+            ChapterOutline {
+                id: "letter".into(),
+                parent_id: Some("group".into()),
+                order: 0,
+                title: "投标函".into(),
+                purpose: ChapterPurpose::Response,
+                requirement_ids: vec!["pack-0:0".into()],
+            },
+        ],
+        bindings: vec![AttachmentBinding {
+            form_id: "form-1".into(),
+            chapter_id: "letter".into(),
+        }],
+        slots: vec![
+            TemplateContent {
+                slot_id: "letter:fixed".into(),
+                chapter_id: "letter".into(),
+                kind: SlotKind::FixedText,
+                text: "投标函".into(),
+                response_required: false,
+                match_query: String::new(),
+            },
+            TemplateContent {
+                slot_id: "letter:bidder".into(),
+                chapter_id: "letter".into(),
+                kind: SlotKind::BidderBlank,
+                text: String::new(),
+                response_required: true,
+                match_query: "投标人名称".into(),
+            },
+        ],
+        slots_submitted: true,
+        finished: false,
+    };
+    let sha = "ab".repeat(32);
+    let refused =
+        bidding::outline::store::publish_finished(&pool, project_id, run_id, &input, &sha, &draft)
+            .await
+            .expect_err("unfinished draft");
+    assert!(refused.contains("not finished"), "{refused}");
+    let artifacts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM bid_outline_artifacts WHERE project_id=$1")
+            .bind(project_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(artifacts, 0);
+
+    draft.finished = true;
+    let published =
+        bidding::outline::store::publish_finished(&pool, project_id, run_id, &input, &sha, &draft)
+            .await
+            .unwrap();
+    assert_eq!(published["replayed"], false);
+    let outline_sha = published["outline_sha256"].as_str().unwrap();
+    let chapters: Vec<(String, Option<String>, i32, String)> = sqlx::query_as(
+        "SELECT chapter_id, parent_id, ordinal, purpose FROM bid_outline_chapters WHERE outline_sha256=$1::kb_sha256 ORDER BY ordinal, chapter_id",
+    )
+    .bind(outline_sha)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        chapters,
+        vec![
+            ("group".into(), None, 0, "group".into()),
+            ("letter".into(), Some("group".into()), 0, "response".into()),
+        ]
+    );
+    let slots: Vec<(String, String, String, bool)> = sqlx::query_as(
+        "SELECT slot_id, kind, match_query, response_required FROM bid_outline_template_slots WHERE outline_sha256=$1::kb_sha256 ORDER BY slot_id",
+    )
+    .bind(outline_sha)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        slots,
+        vec![
+            (
+                "letter:bidder".into(),
+                "bidder_blank".into(),
+                "投标人名称".into(),
+                true
+            ),
+            (
+                "letter:fixed".into(),
+                "fixed_text".into(),
+                String::new(),
+                false
+            ),
+        ]
+    );
+    let bound: (String, String) = sqlx::query_as(
+        "SELECT form_id, chapter_id FROM bid_outline_attachment_bindings WHERE outline_sha256=$1::kb_sha256",
+    )
+    .bind(outline_sha)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(bound, ("form-1".into(), "letter".into()));
+}

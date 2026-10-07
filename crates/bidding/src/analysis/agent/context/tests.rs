@@ -2070,3 +2070,138 @@ fn token_estimate_counts_images_separately_and_preserves_utf8_and_tools() {
         .push(image);
     assert!(estimate_input_tokens(&body, &limits).unwrap() >= single + limits.image_token_reserve);
 }
+
+#[test]
+fn over_budget_eviction_drops_only_committed_pack_turns() {
+    use crate::outline::discover::{DiscoverWork, PackRequirement, PackSubmit};
+    let source = |id: &str, ordinal: usize| crate::analysis::Source {
+        source_unit_revision_id: id.into(),
+        document_id: "doc".into(),
+        text: "X".into(),
+        locator: json!({"heading_path": id}),
+        ordinal,
+    };
+    let input = FrozenInput {
+        schema_version: 1,
+        project_id: "project".into(),
+        document_set_id: "set".into(),
+        documents: vec![],
+        document_relations: vec![],
+        source_units: vec![source("a", 0), source("b", 1), source("c", 2)],
+        structured_forms: vec![],
+        decisions: vec![],
+    };
+    let mut work = DiscoverWork::plan(&input, 1);
+    work.claim(10);
+    work.submit(
+        "pack-0",
+        PackSubmit {
+            call_id: "ok".into(),
+            requirements: vec![],
+        },
+    )
+    .unwrap();
+    assert!(
+        work.submit(
+            "pack-1",
+            PackSubmit {
+                call_id: "bad".into(),
+                requirements: vec![PackRequirement {
+                    description: "越界".into(),
+                    source_id: "b".into(),
+                    start: 0,
+                    end: 2,
+                }],
+            },
+        )
+        .is_err()
+    );
+    let turn = |pack_id: &str| {
+        json!({"role":"assistant","tool_calls":[{
+            "function": {
+                "name": "submit_pack",
+                "arguments": json!({"pack_id": pack_id}).to_string()
+            }
+        }]})
+    };
+    let mut state = Checkpoint {
+        journal: Default::default(),
+        input_sha256: String::new(),
+        config_sha256: String::new(),
+        turn: 4,
+        tool_calls: 3,
+        read_bytes: 0,
+        review_rounds: 0,
+        role: Role::Main,
+        analysis: Analysis::default(),
+        review: None,
+        review_draft: BTreeMap::new(),
+        source_review: None,
+        repair: Default::default(),
+        dispatch: Default::default(),
+        reviewer_coverage: Coverage::default(),
+        pending_coverage: None,
+        transcript: vec![
+            turn("pack-0"),
+            turn("pack-1"),
+            turn("pack-2"),
+            json!({"role":"assistant","content":"latest"}),
+        ],
+        main_progress: Default::default(),
+        reviewer_progress: Default::default(),
+        main_work: None,
+        reviewer_work: None,
+        done: false,
+        source_views: BTreeMap::new(),
+        draft_stage: Default::default(),
+        draft_active_id: None,
+        draft_outline_gaps: None,
+        draft_outline_stalls: 0,
+        draft_outline_window: 0,
+        draft_degraded: Vec::new(),
+        draft_stopped: false,
+        draft_compile_object_id: None,
+        draft_docx_base64: None,
+        outline_config_sha256: None,
+        fill_config_sha256: None,
+        outline_run: Default::default(),
+    };
+    // Fully scanned running and failed sources. Groups carry no evidence ranges,
+    // so a scanned-cursor eviction would treat them as complete and drop them.
+    state
+        .analysis
+        .outline
+        .scanned
+        .text
+        .insert("b".into(), vec![(0, 1)]);
+    state
+        .analysis
+        .outline
+        .scanned
+        .text
+        .insert("c".into(), vec![(0, 1)]);
+    state.outline_run.reading_packs = Some(work);
+    let pack_ids = |state: &Checkpoint| -> Vec<String> {
+        state
+            .transcript
+            .iter()
+            .filter_map(|message| {
+                message["tool_calls"][0]["function"]["arguments"]
+                    .as_str()
+                    .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                    .and_then(|args| args["pack_id"].as_str().map(str::to_string))
+            })
+            .collect()
+    };
+    assert!(evict_completed_discovery_history(&mut state, 0));
+    assert_eq!(
+        pack_ids(&state),
+        ["pack-1".to_string(), "pack-2".to_string()]
+    );
+    assert!(!evict_completed_discovery_history(&mut state, 0));
+    assert_eq!(
+        pack_ids(&state),
+        ["pack-1".to_string(), "pack-2".to_string()]
+    );
+    assert!(state.transcript.last().unwrap()["content"] == "latest");
+}

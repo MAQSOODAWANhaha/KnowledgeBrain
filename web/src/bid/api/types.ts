@@ -107,6 +107,12 @@ export type RequirementSetCompileRequestView = {
     outline_scan_repair?: boolean;
     outline_requirements?: number;
     outline_open_issues?: number;
+    outline_pack_total?: number;
+    outline_pack_committed?: number;
+    outline_pack_failed?: number;
+    outline_unmapped_forms?: number;
+    outline_slots_submitted?: boolean;
+    outline_finished?: boolean;
   } | null;
   status: "pending" | "succeeded" | "failed";
   request_revision: number;
