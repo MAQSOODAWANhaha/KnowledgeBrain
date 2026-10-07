@@ -1,4 +1,10 @@
 //! Shared authoring error classification.
+//!
+//! Codes stay an open set because hosts match them. `thiserror` owns Display
+//! and the `Error` trait; queue disposition is decided from the code, not from
+//! a collapsed boolean.
+
+use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryDisposition {
@@ -7,7 +13,8 @@ pub enum RetryDisposition {
     Transient,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Error)]
+#[error("{code}: {message}")]
 pub struct AgentError {
     pub code: String,
     pub message: String,
@@ -61,14 +68,6 @@ pub enum RequestQueueEffect {
     YieldThenRetry,
     FailRequest,
 }
-
-impl std::fmt::Display for AgentError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for AgentError {}
 
 #[cfg(test)]
 mod tests {

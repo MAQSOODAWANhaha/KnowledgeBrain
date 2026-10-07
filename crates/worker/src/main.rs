@@ -1,5 +1,6 @@
 //! Worker process supervisor.
 
+use anyhow::Context;
 use tokio_util::sync::CancellationToken;
 use worker::helpers::{run_object_read_helper, run_object_write_helper};
 use worker::runtime::{AppCtx, run_core, shutdown_signal};
@@ -47,14 +48,15 @@ async fn main() {
             return;
         }
         result = platform::connect_runtime_verified(platform::SchemaComponentKind::Worker) => {
-            result.unwrap_or_else(|error| panic!("postgres schema readiness failed: {error}"))
+            result.context("postgres schema readiness failed").unwrap_or_else(fail)
         }
     };
 
     let probe_addr = worker::probe::probe_addr();
     let probe_listener = worker::probe::bind()
         .await
-        .unwrap_or_else(|error| panic!("worker probe bind {probe_addr}: {error}"));
+        .with_context(|| format!("worker probe bind {probe_addr}"))
+        .unwrap_or_else(fail);
     tracing::info!(addr = %probe_addr, "worker probe listening");
     let probe_cancel = CancellationToken::new();
     let mut probe_task = tokio::spawn(worker::probe::serve(probe_listener, probe_cancel.clone()));
@@ -141,9 +143,11 @@ async fn main() {
 
     match result {
         Ok(()) => tracing::info!("worker exiting after external shutdown"),
-        Err(error) => {
-            tracing::error!(%error, "worker supervisor failed");
-            std::process::exit(1);
-        }
+        Err(error) => fail(anyhow::anyhow!(error).context("worker supervisor failed")),
     }
+}
+
+fn fail<T>(error: anyhow::Error) -> T {
+    tracing::error!(error = format!("{error:#}"), "worker failed");
+    std::process::exit(1);
 }

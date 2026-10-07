@@ -33,16 +33,9 @@ pub struct AppCtx {
     pub root_cancel: CancellationToken,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
 pub struct JobErr(pub String);
-
-impl std::fmt::Display for JobErr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for JobErr {}
 
 pub(crate) async fn finish_knowledge_document_job(
     pool: &PgPool,
