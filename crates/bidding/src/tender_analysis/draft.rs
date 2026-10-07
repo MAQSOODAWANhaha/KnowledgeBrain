@@ -406,16 +406,6 @@ pub fn split_windows(input: &FrozenInput, source_ids: &[String]) -> Vec<Vec<Stri
     windows
 }
 
-/// 大纲阶段的窗序列：全部有效来源按原文顺序分窗，不截断尾部。
-pub fn outline_windows(input: &FrozenInput) -> Vec<Vec<String>> {
-    let ids = input
-        .source_units
-        .iter()
-        .map(|source| source.source_unit_revision_id.clone())
-        .collect::<Vec<_>>();
-    split_windows(input, &ids)
-}
-
 /// 续读重叠只作上下文，不进入扫描记账区间。
 pub const OUTLINE_RANGE_OVERLAP: usize = 256;
 pub const OUTLINE_FORM_BODY_ROWS: usize = 8;
@@ -564,34 +554,6 @@ pub fn outline_chunks(input: &FrozenInput) -> Vec<OutlineChunk> {
         }
     }
     chunks
-}
-
-fn chunk_scanned(
-    input: &FrozenInput,
-    outline: &super::outline_flow::OutlineState,
-    chunk: &OutlineChunk,
-) -> bool {
-    if chunk.kind == "metadata" {
-        super::tools::contains(
-            outline.scanned.metadata.get(&chunk.source_id),
-            chunk.account_start,
-            chunk.account_end,
-        )
-    } else if chunk.kind == "empty" {
-        super::outline_flow::source_scanned(input, outline, &chunk.source_id)
-    } else if chunk.kind == "form" {
-        super::tools::contains(
-            outline.scanned.form_cells.get(&chunk.form_id),
-            chunk.account_start,
-            chunk.account_end,
-        )
-    } else {
-        super::tools::contains(
-            outline.scanned.text.get(&chunk.source_id),
-            chunk.account_start,
-            chunk.account_end,
-        )
-    }
 }
 
 pub fn current_window(item: &DraftPlanItem) -> &[String] {
@@ -1528,19 +1490,21 @@ pub fn after_batch(
             if state.outline_run.no_progress_rounds > 2 {
                 return Err("outline semantic repair exhausted; checkpoint retained".into());
             }
-            if state.analysis.outline.phase == Phase::Discover {
-                if outline_flow::scan_complete(input, &state.analysis.outline) {
-                    state.analysis.outline.phase = Phase::Outline;
-                    state.outline_run.phase = Phase::Outline;
-                    state.outline_run.chunk_cursor = outline_chunks(input).len();
-                    state.main_work = None;
-                    // Preserve repair evidence and failed-call identities; only
-                    // first discovery hands off with a fresh conversation.
-                    if state.analysis.outline.checks.is_empty() {
-                        state.transcript.clear();
-                    }
-                } else if !outline_flow::scan_complete(input, &state.analysis.outline) {
-                    preload_outline_window(input, state);
+            let packs_done = state
+                .outline_run
+                .reading_packs
+                .as_ref()
+                .is_some_and(|work| work.complete());
+            if state.analysis.outline.phase == Phase::Discover
+                && (packs_done || outline_flow::scan_complete(input, &state.analysis.outline))
+            {
+                state.analysis.outline.phase = Phase::Outline;
+                state.outline_run.phase = Phase::Outline;
+                state.main_work = None;
+                // Preserve repair evidence and failed-call identities; only
+                // first discovery hands off with a fresh conversation.
+                if state.analysis.outline.checks.is_empty() {
+                    state.transcript.clear();
                 }
             }
             // A repaired outline must return through the same publication
@@ -1587,138 +1551,16 @@ pub fn after_batch(
     Ok(())
 }
 
-/// Select unscanned sources independently of the 8KB accounting chunks.
-pub(super) fn outline_reading_scope(
-    input: &FrozenInput,
-    state: &super::agent::Checkpoint,
-    budget: usize,
-) -> Vec<String> {
-    let mut ids = Vec::new();
-    let mut estimated = 0usize;
-    for chunk in outline_chunks(input) {
-        if chunk.kind == "metadata"
-            || chunk_scanned(input, &state.analysis.outline, &chunk)
-            || ids.contains(&chunk.source_id)
-        {
-            continue;
-        }
-        let bytes = input
-            .source_units
-            .iter()
-            .find(|source| source.source_unit_revision_id == chunk.source_id)
-            .map_or(0, |source| {
-                let read = state
-                    .analysis
-                    .coverage
-                    .text
-                    .get(&chunk.source_id)
-                    .into_iter()
-                    .flatten()
-                    .map(|(start, end)| end.saturating_sub(*start))
-                    .sum::<usize>();
-                source.text.len().saturating_sub(read).min(budget)
-            });
-        let form_bytes = input
-            .structured_forms
-            .iter()
-            .filter(|form| form["source_unit_revision_id"] == chunk.source_id)
-            .fold(0usize, |sum, form| {
-                let total = super::relations::form_total(&form["definition"]).unwrap_or(0);
-                let read = form["form_definition_revision_id"]
-                    .as_str()
-                    .and_then(|id| state.analysis.coverage.form_cells.get(id))
-                    .into_iter()
-                    .flatten()
-                    .map(|(start, end)| end.saturating_sub(*start))
-                    .sum::<usize>();
-                let remaining = total.saturating_sub(read);
-                let size =
-                    serde_json::to_vec(&form["definition"]).map_or(budget, |bytes| bytes.len());
-                sum.saturating_add(size.saturating_mul(remaining) / total.max(1))
-            });
-        // Reserve navigation/identity overhead; serialized evidence is checked again.
-        let cost = bytes
-            .saturating_add(form_bytes)
-            .min(budget)
-            .saturating_add(512);
-        if !ids.is_empty() && estimated.saturating_add(cost) > budget {
-            break;
-        }
-        estimated = estimated.saturating_add(cost);
-        ids.push(chunk.source_id);
-    }
-    ids
-}
-
-/// 保存大纲发现游标。阅读包大小由请求组包层决定。首次建立后冻结分块摘要，
-/// 游标指向下一个未记账的 UTF-8／表格区间，不因重试改计划。
-pub fn preload_outline_window(input: &FrozenInput, state: &mut super::agent::Checkpoint) {
-    let chunks = outline_chunks(input);
-    let plan_sha = super::digest(&chunks).expect("outline chunk plan digest");
-    if state.outline_run.chunk_plan_sha256.is_empty() {
-        state.outline_run.chunk_plan_sha256 = plan_sha;
-    }
-    let index = chunks
-        .iter()
-        .position(|chunk| !chunk_scanned(input, &state.analysis.outline, chunk))
-        .unwrap_or(chunks.len());
-    state.outline_run.chunk_cursor = index;
-    if index == chunks.len() {
-        state.main_work = None;
-        return;
-    }
-    let windows = outline_windows(input);
-    let active = chunks.get(index);
-    let source_index = active
-        .and_then(|chunk| {
-            windows
-                .iter()
-                .position(|window| window.iter().any(|id| id == &chunk.source_id))
-        })
-        .unwrap_or(windows.len().saturating_sub(1));
-    state.draft_outline_window = source_index;
-    // Only the recovery cursor lives here. The request builder sizes the
-    // reading package from the frozen model configuration.
-    let window = active
-        .filter(|chunk| chunk.kind != "metadata")
-        .map(|chunk| vec![chunk.source_id.clone()])
-        .unwrap_or_default();
-    let note = format!(
-        "阅读已领取的阅读包，用 submit_pack 提交该包范围内的要求。游标 {}/{} 只记进度，不是每轮只读一块。",
-        index + 1,
-        chunks.len().max(1)
-    );
-    state.main_work = Some(super::agent::WorkState {
-        source_scope: window,
-        deferred_sources: vec![],
-        objective: format!(
-            "按已投递原文写出投标文件组成大纲（第 {}/{} 块；缺依据的来源按索引 id 定向补读）",
-            index + 1,
-            chunks.len().max(1)
-        ),
-        focus: Default::default(),
-        output_refs: vec![],
-        pending_refs: vec![],
-        status: super::agent::context::WorkStatus::Active,
-        note,
-    });
-}
-
-/// S1 结构索引：全书标题树与来源清单投影，不含正文。draft 路径原先根本不投递
-/// `documents` 元数据，把最便宜、最结构化的信息藏起来却给了自由检索。
-pub fn outline_index(
-    input: &FrozenInput,
-    state: &super::agent::Checkpoint,
-    max_bytes: usize,
-) -> Value {
+/// Frozen sources for the outline model. Discovery reads claimed section packs,
+/// not a cursor through accounting chunks.
+pub fn outline_index(input: &FrozenInput, max_bytes: usize) -> Value {
     let rows: Vec<Value> = input.source_units.iter().map(|source| json!({
         "source_id":source.source_unit_revision_id,"document_id":source.document_id,
         "ordinal":source.ordinal,"bytes":source.text.len(),"locator":source.locator,
         "forms":input.structured_forms.iter().filter(|f| f["source_unit_revision_id"]==source.source_unit_revision_id)
             .map(|f| &f["form_definition_revision_id"]).collect::<Vec<_>>()
     })).collect();
-    json!({"current_window":state.draft_outline_window,"chunk_cursor":state.outline_run.chunk_cursor,
-        "chunk_plan_sha256":state.outline_run.chunk_plan_sha256,"total_sources":rows.len(),
+    json!({"total_sources":rows.len(),
         "sources":super::tools::bounded_page(&rows,0,rows.len().max(1),max_bytes/2).unwrap_or_else(|e| json!({"error":e})),
         "documents":super::tools::bounded_page(&input.documents,0,input.documents.len().max(1),max_bytes/4).unwrap_or_else(|e|json!({"error":e})),
         "instruction":"这些是冻结来源。发现只处理已领取的阅读包。组织时写章节，并把每个附件表绑到唯一章节。"})

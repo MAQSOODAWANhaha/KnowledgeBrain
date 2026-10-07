@@ -383,7 +383,6 @@ pub struct Checkpoint {
     pub draft_outline_gaps: Option<usize>,
     #[serde(default, skip_serializing_if = "no_stall")]
     pub draft_outline_stalls: usize,
-    /// 大纲窗游标。宿主推进、随 committed 落盘，恢复后接着投下一窗。
     #[serde(default, skip_serializing_if = "no_stall")]
     pub draft_outline_window: usize,
     /// 为压进字节上限而被退回空标题的章，供 UI 告知用户。
@@ -454,8 +453,6 @@ impl Checkpoint {
         json!({"phase":self.role,"draft_stage":self.draft_stage,"outline_phase":self.analysis.outline.phase,
             "outline_repairing":!self.analysis.outline.checks.is_empty() && matches!(self.analysis.outline.phase, super::outline_flow::Phase::Discover | super::outline_flow::Phase::Outline),
             "outline_chapters":self.analysis.draft_plan.len(),
-            "outline_scan_cursor":self.outline_run.chunk_cursor,
-            "outline_scan_chunks":super::draft::outline_chunks(input).len(),
             "outline_scan_repair":super::outline_flow::scan_repair_pending(self),
             "outline_requirements":self.analysis.outline.requirements.len(),
             "outline_open_issues":self.analysis.outline.issues.values().filter(|issue| issue.status == crate::tender_analysis::outline_flow::IssueStatus::Open).count(),
@@ -767,7 +764,6 @@ async fn run_seeded<J: Journal, M: Model>(
         }
         None if state.draft_stage == crate::tender_analysis::draft::DraftStage::None => {
             state.draft_stage = crate::tender_analysis::draft::DraftStage::Outline;
-            crate::tender_analysis::draft::preload_outline_window(input, &mut state);
         }
         None => {}
     }
@@ -1758,7 +1754,7 @@ pub(super) async fn prepare_request(
                 draft::DraftStage::None | draft::DraftStage::Outline
             ) {
                 packet["sources"] =
-                    draft::outline_index(input, state, config.limits.max_tool_result_bytes);
+                    draft::outline_index(input, config.limits.max_tool_result_bytes);
                 packet["outline"] =
                     crate::outline::tools::model_state(input, &state.outline_run.tool_draft);
             }

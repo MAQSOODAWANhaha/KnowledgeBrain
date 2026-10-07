@@ -197,14 +197,13 @@ pub(super) fn evidence(
             state.draft_stage,
             draft::DraftStage::None | draft::DraftStage::Outline
         )
-        && state.analysis.outline.phase != super::super::outline_flow::Phase::Discover
     {
         return Ok(None);
     }
     if state.role != Role::Main || state.pending_coverage.is_some() {
         return Ok(None);
     }
-    let (mut work, check_replace) = if config.limits.draft_path {
+    let (work, check_replace) = if config.limits.draft_path {
         match state
             .main_work
             .clone()
@@ -231,67 +230,22 @@ pub(super) fn evidence(
         }
         (work, true)
     };
-    let discovering = config.limits.draft_path
-        && matches!(
-            state.draft_stage,
-            draft::DraftStage::None | draft::DraftStage::Outline
-        )
-        && state.analysis.outline.phase == super::super::outline_flow::Phase::Discover;
     // Input and output are different budgets. Four input bytes per reserved
     // output token is a packing heuristic, not a promise about extraction size.
     // Leave context space for instructions, state, tools and retained history;
     // request() still checks the complete serialized request and token estimate.
-    let budget = if discovering {
-        config
-            .limits
-            .max_tool_result_bytes
-            .min(config.limits.max_context_bytes / 4)
-            .min((config.provider.max_tokens as usize).saturating_mul(4))
-    } else {
-        config
-            .limits
-            .max_tool_result_bytes
-            .min(config.provider.max_tokens as usize)
-    };
+    let budget = config
+        .limits
+        .max_tool_result_bytes
+        .min(config.provider.max_tokens as usize);
     let budget = package_budget.map_or(budget, |cap| cap.min(budget));
-    if discovering {
-        work.source_scope = draft::outline_reading_scope(input, state, budget);
-    }
     let mut coverage = state.coverage().clone();
     let mut content = json!({"main_work":work,"assigned_evidence":{
         "source":null,"candidates":[],"boundary_evidence":[],"navigation":[],
         "workload_bytes_limit":budget,
         "instruction":"This is the current bounded Main source package. Its main_work scope is installed when this response is received; no preliminary set_work_note or read call is needed for the included exact evidence. Save grounded records and known-endpoint relations, then set_disposition for each fully processed source. Keep missing targets or source uncertainty explicit. Newly allocated IDs may require another relation-writing response before the final dispositions. Partial text/grid ranges are not complete sources; read or receive the remaining ranges before final disposition. Adjacent sources are navigation, not a semantic relation. The host advances only after a successful complete batch and checks independent review separately."
     }});
-    if discovering {
-        content["assigned_evidence"]["scan_ranges"] =
-            json!({"text":{},"forms":{},"metadata":{},"empty_sources":[]});
-        content["assigned_evidence"]["instruction"] = json!(
-            "Inspect delivered evidence, then reuse scan_ranges for the inspected ranges in submit_outline_scan (or a smaller inspected subset). scan_ranges is not approval: it includes only this package, excludes empty text and incomplete cell reads; empty_sources requires separate disposition. Submit requirements, references, review fragments and inspected ranges in one submit_outline_scan batch. Navigation is not evidence. A reading package may cross multiple accounting chunks; never confirm unsent ranges."
-        );
-    }
-    // Selection skips completed scans and evidence still visible, not lifetime
-    // delivery receipts. Evicted, unsubmitted ranges must be offered again.
-    let selection = if discovering {
-        let mut selected = state.analysis.outline.scanned.clone();
-        for (key, ranges) in context::visible_work_evidence(state, &state.transcript) {
-            let Some((kind, id)) = key.split_once(':') else {
-                continue;
-            };
-            let map = match kind {
-                "text" => &mut selected.text,
-                "form" => &mut selected.form_cells,
-                "metadata" => &mut selected.metadata,
-                _ => continue,
-            };
-            for (start, end) in ranges {
-                tools::cover(map.entry(id.into()).or_default(), start, end);
-            }
-        }
-        selected
-    } else {
-        coverage.clone()
-    };
+    let selection = coverage.clone();
     for source in &input.source_units {
         let id = &source.source_unit_revision_id;
         if !work.source_scope.contains(id) {
@@ -326,9 +280,7 @@ pub(super) fn evidence(
             })
         };
         if let Some(start) = start {
-            let max_bytes = if discovering {
-                (source.text.len() - start).min(budget)
-            } else if config.limits.draft_path {
+            let max_bytes = if config.limits.draft_path {
                 (source.text.len() - start).min(crate::tender_analysis::draft::DRAFT_WINDOW_BYTES)
             } else {
                 source.text.len() - start
@@ -375,9 +327,7 @@ pub(super) fn evidence(
                         budget,
                     )?;
                 }
-                let limit = if discovering {
-                    total - offset
-                } else if config.limits.draft_path {
+                let limit = if config.limits.draft_path {
                     columns
                         .saturating_mul(crate::tender_analysis::draft::OUTLINE_FORM_BODY_ROWS)
                         .max(1)
