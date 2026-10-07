@@ -1,5 +1,7 @@
 # R1 Rust镜像构建来源修复
 
+> 历史构建记录，不是投标生成合同。生成合同见 [投标文档](README.md)。
+
 `deploy/Dockerfile.rust`原来只向Rust builder复制queue registry和数据库初始化脚本，没有复制平台编译期嵌入的三个合同文件：
 
 - `deploy/catalog-manifest-v1.schema.json`

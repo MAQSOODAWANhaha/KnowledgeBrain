@@ -1,12 +1,12 @@
 # ONLYOFFICE 与产品后端真实联调
 
-> 历史验证记录：仅说明所记录版本的结果，不是现行设计或新流程验收。当前方案与任务见 [统一方案](../../plans/bidding/product-two-phase.md)。
+> 历史验证记录：仅说明所记录版本的结果，不是现行设计。现行合同见 [投标文档](../README.md)。
 
 ## 2026-09-09 目录计算、保存书签与实际 PDF 页码
 
 现有验收入口增加 `--update-toc`（须同时使用 `--web --pdf`），通过编辑器引用工具栏的正常“更新目录”按钮，在每次修改后、保存前刷新整个原生目录。未调用内部编辑方法，也未在生成器填写页码。读回持久化 DOCX 时按实际 OOXML 标题层级解析，允许 Office 重编号样式 ID；检查目录标题/顺序、数字页码及其书签指向实际正文标题。随后沿用同稿转换，检查 PDF 指定页含目标章节文字，并保留独立目视核对。
 
-最终完整真实目标 **1 passed、0 failed、0 ignored、0 filtered、exit 0**，历时 98.88 秒，临时服务清理 exit 0；最终脚本与运行快照逐字节一致。两次 forcesave、最终保存及再次重开编辑后均保留计算结果。两页合成模板的目录显示点线与页码 **2**，第 2 页实际显示对应章节及两列表；PDF 两页均经共享 Python 服务渲染并实际查看。原始引擎输出另做正例及三项破坏检查：缺页码、错误书签、正文标题改写均被拒绝。证据见 [`artifacts/bid-full-sample/toc-pdf/`](../../artifacts/bid-full-sample/toc-pdf/)。
+最终完整真实目标 **1 passed、0 failed、0 ignored、0 filtered、exit 0**，历时 98.88 秒，临时服务清理 exit 0；最终脚本与运行快照逐字节一致。两次 forcesave、最终保存及再次重开编辑后均保留计算结果。两页合成模板的目录显示点线与页码 **2**，第 2 页实际显示对应章节及两列表；PDF 两页均经共享 Python 服务渲染并实际查看。原始引擎输出另做正例及三项破坏检查：缺页码、错误书签、正文标题改写均被拒绝。证据见 [`artifacts/bid-full-sample/toc-pdf/`](../../../artifacts/bid-full-sample/toc-pdf/)。
 
 此前页面加载失败、验收器误用原样式 ID、末尾故障页未载入三轮错误均保留。验收工具只在确切 `ERR_NETWORK_CHANGED` 且未发出编辑器打开请求时允许一次新页面导航；不重试编辑或保存。独立的应用状态读取故障页检查移至停服务前，避免与停 Docker 的接口变更混在一起；真实签名回调仍在服务已停止后重投，所有原断言保留。
 
@@ -18,11 +18,11 @@
 
 最终脚本在专属 PG/Redis/ONLYOFFICE 中完整 **1 passed、0 failed、0 ignored、0 filtered、exit 0**，所有临时服务清理 exit 0，脚本摘要与该轮运行快照一致。使用的是此前生成验收的本机合成模板，所得 PDF 为 2 页；两页已通过共享服务渲染并实际查看，三个保存标记、中文标题、章节与表格可见。此前两次 `ERR_NETWORK_CHANGED` 页面加载失败、一轮 PDF 标记空白比对失败及另一轮成功均保留，未跳过失败断言。Docker 网关从已启动容器的网络字段读取，诊断不输出整份容器环境。
 
-证据：[`artifacts/bid-full-sample/same-version-pdf/`](../../artifacts/bid-full-sample/same-version-pdf/)。`live-final-retry/pdf-source.docx` 与 `same-version.pdf` 由 `pdf-result.json` 绑定摘要；`pdf-source-after.docx` 是转换后的再次取回。没有归档环境文件、来源票据、服务凭据或原始容器运行日志。
+证据：[`artifacts/bid-full-sample/same-version-pdf/`](../../../artifacts/bid-full-sample/same-version-pdf/)。`live-final-retry/pdf-source.docx` 与 `same-version.pdf` 由 `pdf-result.json` 绑定摘要；`pdf-source-after.docx` 是转换后的再次取回。没有归档环境文件、来源票据、服务凭据或原始容器运行日志。
 
 **限制：** 这是同稿转换的验收工具和实证，不是 O2 产品导出流程已实现，也不是实际招标整稿验收。该合成 PDF 的目录缓存尚无页码；实际 Office 目录域更新、保存后的页码核验及整本版式仍须完成。未新增解析器、业务章节规则或 migration。
 
-工具：[隔离运行器及浏览器驱动](../../scripts/onlyoffice_product_probe.py)、[Rust TCP 测试目标](../../crates/api/tests/docx_native.rs)。此测试将真实 Document Server 接到 `api::router_with` 的 HTTP 路由，使用真实 PostgreSQL、Redis 和本地对象文件；没有增加测试 HTTP 端点，也没有改写编辑配置的签名字段。
+工具：[隔离运行器及浏览器驱动](../../../scripts/onlyoffice_product_probe.py)、[Rust TCP 测试目标](../../../crates/api/tests/docx_native.rs)。此测试将真实 Document Server 接到 `api::router_with` 的 HTTP 路由，使用真实 PostgreSQL、Redis 和本地对象文件；没有增加测试 HTTP 端点，也没有改写编辑配置的签名字段。
 
 ## 运行边界
 
@@ -52,7 +52,7 @@
 5. 完成编辑后停掉本轮 ownership 核对通过的 Document Server，确认其 healthcheck 已不可达，再主动重投其实际签名的两条 forcesave 和两条最终保存回调。四条都应确认成功，完整 current 以及对象 bytes/修改时间保持不变。
 6. 可选 `--config-ttl` 测试参数：打开后等配置到期再编辑。源地址无服务签名应拒绝，使用已捕获的有效服务读取签名仍能读取同一基线，后续保存仍成功；不更换活动编辑器的配置或回调地址。
 
-这覆盖真实服务与产品路由的读写及版本发布。浏览器入口是测试驱动生成的最小页面；编制产品前端、API 可执行文件完整启动/发布验证、S3、字体及最终版式、生产许可、网络断线与自然回调重试不在本测试范围内。权限、故障和乱序继续由[后端 HTTP 契约](docx-editor.md#验证范围)提供独立证据，不能声称所有故障都已在真实 Document Server 重现。
+这覆盖真实服务与产品路由的读写及版本发布。浏览器入口是测试驱动生成的最小页面；编制产品前端、API 可执行文件完整启动/发布验证、S3、字体及最终版式、生产许可、网络断线与自然回调重试不在本测试范围内。权限、故障和乱序继续由[后端 HTTP 契约](../docx-editor.md#验证范围)提供独立证据，不能声称所有故障都已在真实 Document Server 重现。
 
 ## 本机实跑结果
 
@@ -76,7 +76,7 @@
 
 ## 活动会话无需地址续期的实测
 
-[生命周期鉴权复核](docx-editor.md#生命周期鉴权复核无需前端续期)后，采用同一镜像、浏览器、样稿和 `--config-ttl 20` 重跑。先验证不带 Authorization 的源读取返回 401，再由真实 Document Server 发起带有效 JWT 的源读取并成功打开。等待配置的 `exp` 已经过期后，原活动会话完成两次 forcesave 和最终保存，新 key 重开再编辑保存及停机后的四条真实签名回调重投也通过。
+[生命周期鉴权复核](../docx-editor.md#生命周期鉴权复核无需前端续期)后，采用同一镜像、浏览器、样稿和 `--config-ttl 20` 重跑。先验证不带 Authorization 的源读取返回 401，再由真实 Document Server 发起带有效 JWT 的源读取并成功打开。等待配置的 `exp` 已经过期后，原活动会话完成两次 forcesave 和最终保存，新 key 重开再编辑保存及停机后的四条真实签名回调重投也通过。
 
 结果 **1 passed、0 failed、0 ignored、0 filtered、exit 0**，66.15 秒，run/cleanup exit 0。`result.json` 中 `saved_after_opening_config_expired:true`、`unsigned_source_rejected:true`、`authentic_callback_redeliveries_with_server_stopped:4`；测试没有重新签发活动配置，也没有关闭服务 JWT 的期限检查。20 秒为显式测试参数，不写入产品默认值；这仍不是长时间断网或完整编制前端验收。
 
@@ -131,10 +131,10 @@ DOCX 的目录标题、计算页码和书签仍按既有方法核对，并检查
 
 两页合成模板的实际结果：无标记整理用例 **1 passed、0 failed、0 ignored、0 filtered**（21.90 秒）；随后完整编辑/历史/PDF/四次停服回调重放回归 **1/0/0/0**（64.38 秒）。两轮执行脚本与当前源码摘要一致，所有临时服务清理零错误。通过共享 source-view 渲染并目视检查两页 PDF：第一页目录正确指向第二页，第二页对应标题及表格完整可见，没有探针标记。此文件仅用于工具验收，不能作为真实招标样稿。
 
-首次实测已完成保存及 PDF，但测试误等“无修改关闭后清除 key”，因此超时；失败日志与零错误清理证据保留。产品已有 `status=4` 只确认通知、保留可重开 key 的语义，见[保存说明](docx-editor.md#保存与失败行为)。修正的是验收脚本：无修改重开关闭后验证同一保存 identity 和原字节，不伪造新版本，也未修改产品会话逻辑。
+首次实测已完成保存及 PDF，但测试误等“无修改关闭后清除 key”，因此超时；失败日志与零错误清理证据保留。产品已有 `status=4` 只确认通知、保留可重开 key 的语义，见[保存说明](../docx-editor.md#保存与失败行为)。修正的是验收脚本：无修改重开关闭后验证同一保存 identity 和原字节，不伪造新版本，也未修改产品会话逻辑。
 
-证据见 [`artifacts/bid-full-sample/clean-finalization/`](../../artifacts/bid-full-sample/clean-finalization/)。真实提取通过独立复核并完成整稿编制后，应对其产物运行该模式，继续逐项审查实际完整 DOCX/PDF；32 项招标语义发现及 O1/O2 完整验收仍未关闭。
+证据见 [`artifacts/bid-full-sample/clean-finalization/`](../../../artifacts/bid-full-sample/clean-finalization/)。真实提取通过独立复核并完成整稿编制后，应对其产物运行该模式，继续逐项审查实际完整 DOCX/PDF；32 项招标语义发现及 O1/O2 完整验收仍未关闭。
 
 ## 2026-09-11 真实整稿出件依赖预检
 
-固定Community 9.4.0-129镜像缓存曾缺失，现恢复原摘要`e3da62a847b9a5d51a11f73cfea1d9c13c3be3809614490d4edddcf01dcf919b`，镜像ID与历史通过记录一致；未替换成另一份缓存的8.3.3。现有统一DocReader成功回读既有两页合成PDF，当前Chromium 151.0.7922.34可启动空白页。未启动Office服务、未访问业务数据库，也未生成真实招标文件的DOCX/PDF。[出件交接](../../artifacts/bid-full-sample/output-readiness-v15/finalization-handoff.json)保留真实提取/复核、32项和编制验收前置，复用上述整理流程。
+固定Community 9.4.0-129镜像缓存曾缺失，现恢复原摘要`e3da62a847b9a5d51a11f73cfea1d9c13c3be3809614490d4edddcf01dcf919b`，镜像ID与历史通过记录一致；未替换成另一份缓存的8.3.3。现有统一DocReader成功回读既有两页合成PDF，当前Chromium 151.0.7922.34可启动空白页。未启动Office服务、未访问业务数据库，也未生成真实招标文件的DOCX/PDF。[出件交接](../../../artifacts/bid-full-sample/output-readiness-v15/finalization-handoff.json)保留真实提取/复核、32项和编制验收前置，复用上述整理流程。

@@ -1,6 +1,6 @@
 # F1/F2 文件集合与来源回归
 
-> 历史验证记录：仅说明所记录版本的结果，不是现行设计或新流程验收。当前方案与任务见 [统一方案](../../plans/bidding/product-two-phase.md)。
+> 历史验证记录：仅说明所记录版本的结果，不是现行设计。现行合同见 [投标文档](../README.md)。
 
 当前文件集合回归已使用 V4 提取 Agent 的完整冻结输入和持久化发布协议。下文早期需求编译器及显式 apply 的记录仅为历史证据；这些旧生成设计不再指导当前 DOCX 链路。没有新增业务关键词、固定章节、样稿匹配规则或生产环境默认值。
 
@@ -12,7 +12,7 @@
 
 ## 数据库覆盖
 
-可重跑文件：[document_collection_acceptance.sql](../../crates/bidding/tests/sql/document_collection_acceptance.sql)。测试动态生成 UUID、内容及摘要，从上传请求读取 converter 身份。连接串由调用者提供，测试不内置服务器地址、端口、凭据或真实样稿路径。
+可重跑文件：[document_collection_acceptance.sql](../../../crates/bidding/tests/sql/document_collection_acceptance.sql)。测试动态生成 UUID、内容及摘要，从上传请求读取 converter 身份。连接串由调用者提供，测试不内置服务器地址、端口、凭据或真实样稿路径。
 
 | 场景 | 断言 |
 | --- | --- |
@@ -54,7 +54,7 @@ fixture 使用事务并最终 `ROLLBACK`，失败由 `ON_ERROR_STOP` 返回非�
 
 本切片证据位于 `/tmp/knowledgebrain-f2-publication.63sf05sk/`：`before/`、`empty-source-red.log`、`empty-source-green.log`、`real-source-summary.json`、`real-source-coverage.json`、`parser-source-sha256.json`；最终数据库执行在 `database-attempt2/`，含精确 SQL/基线副本、摘要、完整日志与清理收据。上述先前 7/7 与 SQL 结果保留为历史批次，本段是后续增量；没有改生产 SQL、P2 文件或依赖。
 
-后续 O1-S 已增加独立 DOCX 新轮/初始版本持久化，不使用旧 projection apply 复制正文，见[新轮接缝](docx-rounds.md)。这次后续切片修改了 Bidding 所属 baseline，并扩展同一 SQL fixture；上述“没有改生产 SQL”只描述当时的 F2 切片，不代表后续始终无 schema 增量。初稿生成、HTTP/对象读写整链、编辑会话及完整新轮业务隔离仍待验收。
+后续 O1-S 已增加独立 DOCX 新轮/初始版本持久化，不使用旧 projection apply 复制正文，见[新轮接缝](../docx-rounds.md)。这次后续切片修改了 Bidding 所属 baseline，并扩展同一 SQL fixture；上述“没有改生产 SQL”只描述当时的 F2 切片，不代表后续始终无 schema 增量。初稿生成、HTTP/对象读写整链、编辑会话及完整新轮业务隔离仍待验收。
 
 
 ## V4 集合与迟到结果回归

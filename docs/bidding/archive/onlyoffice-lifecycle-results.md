@@ -1,6 +1,6 @@
 # ONLYOFFICE 保存生命周期实测
 
-> 历史验证记录：仅说明所记录版本的结果，不是现行设计或新流程验收。当前方案与任务见 [统一方案](../../plans/bidding/product-two-phase.md)。
+> 历史验证记录：仅说明所记录版本的结果，不是现行设计。现行合同见 [投标文档](../README.md)。
 
 本轮在独立 Community 9.4.0-129 / Chromium 151.0.7922.34 上完成真实 DOCX 的两次 forcesave、继续编辑后的最终保存、新 key 重开、旧回调显式重投，以及无修改关闭后的同 key 重开。**这是协议与文件内容实证，不是 KnowledgeBrain 会话/版本发布已接入；本轮没有新增或修改数据库结构。**
 
@@ -42,7 +42,7 @@
 
 ## 可复跑工具与证据
 
-[`scripts/onlyoffice_lifecycle_probe.py`](../../scripts/onlyoffice_lifecycle_probe.py) 是显式运行的隔离试验工具，需要本机已安装 Python Playwright、浏览器文件以及已缓存、带 digest 的 Document Server 镜像。所有样稿/镜像/浏览器路径由参数传入；key/请求标记/专属资源标签/回环端口动态生成。不会拉取镜像，不读取产品数据库配置，也不自动修改部署配置。
+[`scripts/onlyoffice_lifecycle_probe.py`](../../../scripts/onlyoffice_lifecycle_probe.py) 是显式运行的隔离试验工具，需要本机已安装 Python Playwright、浏览器文件以及已缓存、带 digest 的 Document Server 镜像。所有样稿/镜像/浏览器路径由参数传入；key/请求标记/专属资源标签/回环端口动态生成。不会拉取镜像，不读取产品数据库配置，也不自动修改部署配置。
 
 ```sh
 python scripts/onlyoffice_lifecycle_probe.py \

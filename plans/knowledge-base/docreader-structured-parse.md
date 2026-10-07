@@ -13,7 +13,7 @@ v3 **不考虑旧冻结迁移**。S0 改生产者、发布缝、**以及 `table_
 
 知识库 PDF 已有 leftover+GFM。Office 默认仍走 anydoc。不把「Word 知识库解析变好」列为完成条件。
 
-招投标编辑/出件仍按 [ONLYOFFICE O0–O4](../bidding/onlyoffice-integration.md)；提取仍按 [Rig](../bidding/product-two-phase.md)。`search_sources` 格命中是 **Agent 切片**（§6），不是本方案实现项。
+招投标编辑约束见 [ONLYOFFICE](../bidding/onlyoffice-integration.md)。大纲生成合同见 [运行时](../../docs/bidding/outline.md)，不由本文定义。`search_sources` 格命中是 **Agent 切片**（§6），不是本方案实现项。
 
 ### 1.1 本期做 / 不做
 
