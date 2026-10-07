@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Outline/response SQL publish acceptance.
+# Applies crates/bidding/tests/sql/outline_response_acceptance.sql on two fresh
+# bidding baselines. It does not load phase0/1/3/6_acceptance.sql.
 set -euo pipefail
 
 : "${KNOWLEDGEBRAIN_TEST_DATABASE_URL:?KNOWLEDGEBRAIN_TEST_DATABASE_URL is required}"
@@ -6,7 +9,7 @@ readarray -t parsed < <(python3 - "$KNOWLEDGEBRAIN_TEST_DATABASE_URL" <<'PY'
 import sys, urllib.parse
 u=urllib.parse.urlsplit(sys.argv[1])
 if u.hostname != "127.0.0.1" or u.port != 25433 or not u.path.removeprefix("/").startswith("knowledgebrain_test_"):
-    raise SystemExit("phase fixture acceptance requires 127.0.0.1:25433/knowledgebrain_test_*")
+    raise SystemExit("outline/response SQL publish acceptance requires 127.0.0.1:25433/knowledgebrain_test_*")
 print(urllib.parse.urlunsplit((u.scheme,u.netloc,"/postgres",u.query,u.fragment)))
 print(u.path.removeprefix("/"))
 PY
@@ -14,7 +17,7 @@ PY
 admin_url=${parsed[0]}
 base_name=${parsed[1]}
 prefix="${base_name}_fixtures_$$"
-databases=("${prefix}_phase0_6" "${prefix}_phase1_3")
+databases=("${prefix}_outline_response_a" "${prefix}_outline_response_b")
 cleanup() {
   for database in "${databases[@]}"; do
     psql "$admin_url" -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"$database\" WITH (FORCE)" >/dev/null || true
@@ -52,4 +55,4 @@ url=${KNOWLEDGEBRAIN_TEST_DATABASE_URL%/*}/${databases[1]}
   cat crates/bidding/tests/sql/outline_response_acceptance.sql;
 } | psql "$url" -v ON_ERROR_STOP=1 >/dev/null
 
-printf '%s\n' 'bidding-v2-phase-fixture-acceptance-ok'
+printf '%s\n' 'outline-response-sql-publish-acceptance-ok'
