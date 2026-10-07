@@ -45,7 +45,8 @@ fn frozen() -> FrozenInput {
                 "title": "附件一 报价表",
                 "row_count": 1,
                 "column_count": 1,
-                "cells": [{"row": 0, "column": 0, "text": "报价"}]
+                // One byte, so the cell fits the budget of 1 these tests plan with.
+                "cells": [{"row": 0, "column": 0, "text": "1"}]
             }
         })],
         decisions: vec![],
