@@ -1,8 +1,8 @@
 # R1 真实隔离启动与对象生命周期
 
-> 历史验证记录：仅说明所记录版本的结果，不是现行设计或新流程验收。当前方案与任务见 [统一方案](../../plans/bidding/product-two-phase.md)。
+> 历史验证记录：仅说明所记录版本的结果，不是现行设计。现行合同见 [投标文档](../README.md)。
 
-修复发布入口的依赖环境校验后，已用实际生产 Dockerfile 构建的镜像完成全新隔离环境验收。最终项目为 `kb-release-7dj2b332`，原始记录在 `/tmp/kb-release-final-7dj2b332/`，可归档副本及 SHA256 清单见 [`artifacts/release-live-acceptance/`](../../artifacts/release-live-acceptance/)。这是当前工作树的隔离运行证据；干净已提交候选和 hosted 发布 gate 尚未具备。
+修复发布入口的依赖环境校验后，已用实际生产 Dockerfile 构建的镜像完成全新隔离环境验收。最终项目为 `kb-release-7dj2b332`，原始记录在 `/tmp/kb-release-final-7dj2b332/`，可归档副本及 SHA256 清单见 [`artifacts/release-live-acceptance/`](../../../artifacts/release-live-acceptance/)。这是当前工作树的隔离运行证据；干净已提交候选和 hosted 发布 gate 尚未具备。
 
 ## 验证结果
 
@@ -31,6 +31,6 @@
 
 ## 保留的失败
 
-最早启动因发布工具错误要求 Redis 显式 environment 而失败，修复及原证据见[发布入口记录](release-entry.md)。第一次修复后重跑 `kb-release-9rl_lzca` 的启动、重放、对象业务断言均通过；补充凭据核对的验收 SQL 错把 `object_deletion_artifacts.id` 写成 `deletion_id`，最终核对 exit 1。清理仍成功且残留为 0。源码复核同时修正了验收脚本对 `CMD`/`CMD-SHELL` 健康命令的处理，并在上述全新项目完整重跑通过。第一次重跑的记录保留在 `retry-1/`，不能用其 cleanup 通过掩盖最终核对失败。
+最早启动因发布工具错误要求 Redis 显式 environment 而失败，修复及原证据见[发布入口记录](../release-entry.md)。第一次修复后重跑 `kb-release-9rl_lzca` 的启动、重放、对象业务断言均通过；补充凭据核对的验收 SQL 错把 `object_deletion_artifacts.id` 写成 `deletion_id`，最终核对 exit 1。清理仍成功且残留为 0。源码复核同时修正了验收脚本对 `CMD`/`CMD-SHELL` 健康命令的处理，并在上述全新项目完整重跑通过。第一次重跑的记录保留在 `retry-1/`，不能用其 cleanup 通过掩盖最终核对失败。
 
 R1 的隔离启动及对象生命周期缺口现已取得真实证据。R1 正式完成仍需干净发布候选与对应构建身份的验收；R3 named required jobs/hosted gate 另行落实。本结果不改变 O1 完整 Agent 样稿及同版本 PDF 尚未验收的状态，也不授权生产部署或现有 namespace reset。

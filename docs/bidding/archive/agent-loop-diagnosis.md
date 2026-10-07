@@ -1,8 +1,8 @@
 # 真实提取停滞定位：候选反复核查而未执行局部交接
 
-> 历史验证记录：仅说明所记录版本的结果，不是现行设计或新流程验收。当前方案与任务见 [统一方案](../../plans/bidding/product-two-phase.md)。
+> 历史验证记录：仅说明所记录版本的结果，不是现行设计。现行合同见 [投标文档](../README.md)。
 
-2026-09-10 实施补充：局部焦点、自动成果引用、共享停滞恢复、候选保留及空响应/同类条件合同修复已实施。最新3来源兼容恢复的主提取完成41条记录、21条关系；独立复核收到全部当前候选后仍重复读取，两次重规划无效，于第101轮保留执行阻塞并停止。现补充复核完成指引和按实际缺口生成的下一动作，176项库测试、20项合同及Clippy/格式/编译通过。`reviewer-completion-trial` 在第85轮到诊断时限，复核未完成；现已增加局部无问题结果记录，新的 `clean-review-trial` 诊断已在第25轮保留终态；修复已完成焦点的反馈错位后，`clean-review-resume1` 已在保留计数的续跑中完成72个局部结果，但最终提交仍停滞，模型和预算继续只读 `.env`。32项语义发现及完整 DOCX/PDF 尚未通过；原样稿答案未注入。详见[验证记录](../../artifacts/bid-full-sample/loop-repair/verification.json)及[复核停滞终态](../../artifacts/bid-full-sample/loop-repair/response-contract-resume1/result.json)。
+2026-09-10 实施补充：局部焦点、自动成果引用、共享停滞恢复、候选保留及空响应/同类条件合同修复已实施。最新3来源兼容恢复的主提取完成41条记录、21条关系；独立复核收到全部当前候选后仍重复读取，两次重规划无效，于第101轮保留执行阻塞并停止。现补充复核完成指引和按实际缺口生成的下一动作，176项库测试、20项合同及Clippy/格式/编译通过。`reviewer-completion-trial` 在第85轮到诊断时限，复核未完成；现已增加局部无问题结果记录，新的 `clean-review-trial` 诊断已在第25轮保留终态；修复已完成焦点的反馈错位后，`clean-review-resume1` 已在保留计数的续跑中完成72个局部结果，但最终提交仍停滞，模型和预算继续只读 `.env`。32项语义发现及完整 DOCX/PDF 尚未通过；原样稿答案未注入。详见[验证记录](../../../artifacts/bid-full-sample/loop-repair/verification.json)及[复核停滞终态](../../../artifacts/bid-full-sample/loop-repair/response-contract-resume1/result.json)。
 
 日期：2026-09-10。对象：`real-run-v13-resume2` 第136–163轮模型执行及第137–164轮后继请求。此次仅做离线诊断，没有新增模型调用、修改生产行为或改写真实检查点。
 
@@ -68,10 +68,10 @@ Agent 可以在目标文字中选择小任务，但程序不知道它当前要�
 
 ## 证据与边界
 
-- [请求逐轮分析](../../artifacts/bid-full-sample/inspection-loop-diagnosis/request-analysis.json)，由同目录 `analyze.py` 离线生成。
-- [四组生产关系工具验证](../../artifacts/bid-full-sample/inspection-loop-diagnosis/relation-tool-verification.json)，同目录保存诊断 Rust 源码。
-- [第137轮可执行对象与缺口摘录](../../artifacts/bid-full-sample/inspection-loop-diagnosis/ready-pairs-request-excerpt.json)。
-- [真实终态](../../artifacts/bid-full-sample/real-run-v13-resume2/terminal.json)及[28轮停滞观察](../../artifacts/bid-full-sample/real-run-v13-resume2/repeated-inspection-observation.json)。
+- [请求逐轮分析](../../../artifacts/bid-full-sample/inspection-loop-diagnosis/request-analysis.json)，由同目录 `analyze.py` 离线生成。
+- [四组生产关系工具验证](../../../artifacts/bid-full-sample/inspection-loop-diagnosis/relation-tool-verification.json)，同目录保存诊断 Rust 源码。
+- [第137轮可执行对象与缺口摘录](../../../artifacts/bid-full-sample/inspection-loop-diagnosis/ready-pairs-request-excerpt.json)。
+- [真实终态](../../../artifacts/bid-full-sample/real-run-v13-resume2/terminal.json)及[28轮停滞观察](../../../artifacts/bid-full-sample/real-run-v13-resume2/repeated-inspection-observation.json)。
 
 诊断手工选取的四组引用仅用于证明生产工具可执行，未写回 Agent 成果、数据库或原检查点，也不能用于关闭32项验收发现。真实结果仍是67条记录、0关系、0轮独立复核，完整 DOCX/PDF 尚未生成。
 
@@ -81,11 +81,11 @@ Agent 可以在目标文字中选择小任务，但程序不知道它当前要�
 
 ### 独立复核读取完成后仍不提交
 
-兼容恢复 `response-contract-resume1` 主提取完成了41条记录、21条关系和3项来源处置。reviewer 收到65个候选当前版本、全部原文/网格及3张原页后，工作缺口清单已为空，仍反复声称要读取剩余对象；两次重规划后进入阻塞，于第101轮耗尽独立工作交接窗口，0轮复核。终态见[实跑结果](../../artifacts/bid-full-sample/loop-repair/response-contract-resume1/result.json)。
+兼容恢复 `response-contract-resume1` 主提取完成了41条记录、21条关系和3项来源处置。reviewer 收到65个候选当前版本、全部原文/网格及3张原页后，工作缺口清单已为空，仍反复声称要读取剩余对象；两次重规划后进入阻塞，于第101轮耗尽独立工作交接窗口，0轮复核。终态见[实跑结果](../../../artifacts/bid-full-sample/loop-repair/response-contract-resume1/result.json)。
 
 `submit_review` 原本就允许完成核查后提交空发现列表，不能诊断为缺少接口。可确认的反馈缺口是：主/复核共用“写出结果”的恢复语句，空工作清单只给出空集合，未明确切换到比较和完成。现动态反馈区分角色及真实缺口，明确保存问题、无问题完成原范围、处理待办后提交三个动作；程序不自动产生发现、批准候选或清除阻塞。回归验证独立阅读不被反馈替代、另一角色的阻塞不能被空清单掩盖。这个改动改善完成指引，不能仅凭测试断言模型会遵守；提示词合同变化后以新身份做真实对照，不重置已失败运行。
 
-离线检查该 reviewer 的32个实际请求，其中13个请求存在完整候选及其所引正文/网格共同可见的窗口（如第94轮24条记录与两页全文、48格网格同在）。因此不能把全部停滞归为“从未同时看到候选和证据”；这也不能证明图片判读或语义比较已完成。见[窗口核查](../../artifacts/bid-full-sample/loop-repair/response-contract-resume1/reviewer-context-observation.json)。
+离线检查该 reviewer 的32个实际请求，其中13个请求存在完整候选及其所引正文/网格共同可见的窗口（如第94轮24条记录与两页全文、48格网格同在）。因此不能把全部停滞归为“从未同时看到候选和证据”；这也不能证明图片判读或语义比较已完成。见[窗口核查](../../../artifacts/bid-full-sample/loop-repair/response-contract-resume1/reviewer-context-observation.json)。
 
 ### 待处理未决记录污染局部复核缺口
 
@@ -97,7 +97,7 @@ Agent 可以在目标文字中选择小任务，但程序不知道它当前要�
 
 完成指引使 reviewer 完成过一个局部范围，但第79轮已收到全部72个候选后仍反复读取，于第85轮到诊断时限，0轮最终复核。不能声称提示词已解决停滞。已有 put_review_finding 可持久化错误，缺少与之对应的单个候选无问题比较结果；整个来源范围的 complete 不能记录范围内逐项完成。现 complete_review_check 要求活动复核焦点、当前候选的独立详情回执、原文证据及比较说明，用候选引用和版本摘要生成唯一进展记录。改写说明、更换引用区间或重启不能重复计入同一候选版本；候选修改后需重新独立取回。已有问题不能被无问题声明覆盖，局部结果不是自动批准。复用进展账本与 Journal 工具历史，无新表、检查点字段或 migration。
 
-新增样稿程序 review 模式把归档主提取候选绑定为独立诊断输入：seed 摘要加入运行合同、reviewer 从空覆盖开始、旧运行及其计数不变，输出为 review-diagnostic-result.json，不能冒充新的完整提取样稿。176项库测试、20项合同及Clippy/格式/编译通过。新身份[诊断清单](../../artifacts/bid-full-sample/loop-repair/clean-review-trial/start.json)已获补充明确授权并执行；此前自动审批拒绝保留为历史记录，真实终态见下节，最终复核未完成。
+新增样稿程序 review 模式把归档主提取候选绑定为独立诊断输入：seed 摘要加入运行合同、reviewer 从空覆盖开始、旧运行及其计数不变，输出为 review-diagnostic-result.json，不能冒充新的完整提取样稿。176项库测试、20项合同及Clippy/格式/编译通过。新身份[诊断清单](../../../artifacts/bid-full-sample/loop-repair/clean-review-trial/start.json)已获补充明确授权并执行；此前自动审批拒绝保留为历史记录，真实终态见下节，最终复核未完成。
 
 ### 已完成焦点仍收到继续比较指令
 
@@ -105,7 +105,7 @@ Agent 可以在目标文字中选择小任务，但程序不知道它当前要�
 
 实际请求的范围级清单给出31项未完成比较，但执行反馈仍要求“比较当前焦点”，活动焦点又保留已完成的记录。现同时派生范围剩余数与焦点剩余数；当前焦点完成且无执行阻塞时，下一动作指向未完成引用。全部候选有结果后，仍须独立检查原文遗漏并显式完成范围及提交复核。反馈不修改候选、回执、焦点或计数，不新增工具/配置/检查点字段/migration。回归先复现旧指令，再验证转向剩余来源处置及进展不变。
 
-[终态证据](../../artifacts/bid-full-sample/loop-repair/clean-review-trial/result.json)、[比较与去重轨迹](../../artifacts/bid-full-sample/loop-repair/clean-review-trial/comparison-observation.json)、[兼容续跑核验](../../artifacts/bid-full-sample/loop-repair/clean-review-resume1/preflight-verification.json)。176项库测试、20项合同、严格Clippy、workspace fmt及样稿编译通过；续跑最终停止于第64轮，完整复核未通过，详见下节。
+[终态证据](../../../artifacts/bid-full-sample/loop-repair/clean-review-trial/result.json)、[比较与去重轨迹](../../../artifacts/bid-full-sample/loop-repair/clean-review-trial/comparison-observation.json)、[兼容续跑核验](../../../artifacts/bid-full-sample/loop-repair/clean-review-resume1/preflight-verification.json)。176项库测试、20项合同、严格Clippy、workspace fmt及样稿编译通过；续跑最终停止于第64轮，完整复核未通过，详见下节。
 
 ### 局部比较完成后最终提交仍停滞
 
@@ -113,6 +113,6 @@ Agent 可以在目标文字中选择小任务，但程序不知道它当前要�
 
 从尚未阻塞的第54轮检查点复制只读副本，通过正式 apply 顺序诊断完成范围及空草稿提交，两项均成功。该操作不写回 Journal、原检查点或真实分析结果，没有模型调用，不能冒充独立复核通过。它排除了“当时提交接口不可用或被未满足校验阻挡”的解释，不能证明模型内部为何持续重读。反复追加提示词尚不足以解决最终结束行为；后续应先明确来源完整性判断与最终提交的动作边界，再运行复杂附表和完整样稿。
 
-证据：[实际反馈切换](../../artifacts/bid-full-sample/loop-repair/clean-review-resume1/completed-focus-request-verification.json)、[最终工具可用性观察](../../artifacts/bid-full-sample/loop-repair/clean-review-resume1/finalization-observation.json)、[只读工具可调用性诊断](../../artifacts/bid-full-sample/loop-repair/clean-review-resume1/finalization-probe/report.json)。本地原页核查另发现一条关系说明含字面量Unicode转义，已单独保留为可读性问题，未改候选以影响盲测。
+证据：[实际反馈切换](../../../artifacts/bid-full-sample/loop-repair/clean-review-resume1/completed-focus-request-verification.json)、[最终工具可用性观察](../../../artifacts/bid-full-sample/loop-repair/clean-review-resume1/finalization-observation.json)、[只读工具可调用性诊断](../../../artifacts/bid-full-sample/loop-repair/clean-review-resume1/finalization-probe/report.json)。本地原页核查另发现一条关系说明含字面量Unicode转义，已单独保留为可读性问题，未改候选以影响盲测。
 
-最终实跑在第64轮结束，错误为 AGENT_TURN_BUDGET_EXCEEDED（局部执行与独立范围交接额度耗尽），保留1项执行阻塞、72个局部比较和0轮最终复核。两段累计65次物理调用，请求25144–396023字节，未观察到503；兼容续跑耗时1059.28秒。证据：[续跑终态](../../artifacts/bid-full-sample/loop-repair/clean-review-resume1/result.json)。最新176项库测试（11项忽略）、20项合同及1项显式离线诊断通过；严格Clippy和格式通过，本次未改SQL或已有配置。
+最终实跑在第64轮结束，错误为 AGENT_TURN_BUDGET_EXCEEDED（局部执行与独立范围交接额度耗尽），保留1项执行阻塞、72个局部比较和0轮最终复核。两段累计65次物理调用，请求25144–396023字节，未观察到503；兼容续跑耗时1059.28秒。证据：[续跑终态](../../../artifacts/bid-full-sample/loop-repair/clean-review-resume1/result.json)。最新176项库测试（11项忽略）、20项合同及1项显式离线诊断通过；严格Clippy和格式通过，本次未改SQL或已有配置。

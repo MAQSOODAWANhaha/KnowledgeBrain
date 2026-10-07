@@ -1,12 +1,12 @@
 # Agent 字段复核、检查点恢复与 Rig 接缝验证
 
-> 历史验证记录：仅说明所记录版本的结果，不是现行设计或新流程验收。当前方案与任务见 [统一方案](../../plans/bidding/product-two-phase.md)。
+> 历史验证记录：仅说明所记录版本的结果，不是现行设计。现行合同见 [投标文档](../README.md)。
 
-本文保留各日期的历史验证结果，版本号和运行状态不代表当前实现。最新合同、能力缺口及真实样稿验收见[统一方案 §19](../../plans/bidding/product-two-phase.md)。
+本文保留各日期的历史验证结果，版本号和运行状态不代表当前实现。最新合同、能力缺口及真实样稿验收见当时的两阶段方案（已删除）。
 
 **2026-09-10 当前修复进度：本地功能验证通过，独立复核已完成局部比较，未完成最终提交，运行已停止；完整验收尚未通过。** 已分离来源权限与局部焦点，自动维护成果/未解决引用，主提取、独立复核、编制和稿件复核共用进展与有界恢复策略。默认连续无进展6轮、焦点24轮、重规划2次；记录局部执行阻塞后允许转向独立范围，连续6轮仍未交接则在工具提交边界停止。重启、重复读取、笔记改写和任务改名不能刷新额度；有效局部写入可以完成当前动作。执行失败单独保存并阻止最终发布，不冒充来源缺项。候选当前版本参与窗口保留；各 reviewer 保留自己的冻结原文回执，修改后的候选/稿件仍按摘要核查。旧手抄引用输入及编制 `remember` 路径已删除，未新增 migration，既有 baseline 同步检查点与预算 JSON。
 
-验证：最新176项库测试（11项忽略）、20项合同、1项真实检查点离线提交诊断、严格 Clippy、workspace fmt及样稿编译通过；既有6项隔离 PostgreSQL结果保留，本次未改SQL。首次3来源短测在21轮停止，11条记录、0关系，发生一次超时后重试成功；第二次 v2 在32轮停止，29条记录、12条关系、2个来源处置，四组重点引用由真实Agent产生，但独立复核未开始。v2请求42214–353819字节，含必要原页图片，无503或超时。轨迹还暴露无响应要求被迫指定渠道、同类型合规属性的不同条件被拒绝、工作引用格式说明不足；均已修复并验证。未新增 migration，未修改实际 `.env` 或旧检查点，未执行暂存操作。包含全部修复的 `response-contract-trial` 已以新身份、空候选重测第11、16、17页的3处来源，模型与预算仍来自 `deploy/.env`；启动合同已核对，结果待验。该试验在34轮保留32条记录、21条关系后，进一步定位到重复读取会触发无实际缺口的 pending_delivery 阻塞。已删除这条冗余判断，尚未交付的原文/候选仍按真实缺口阻止交接；172项库测试、20项合同及Clippy/格式/编译通过，SQL未因本项调整。`response-contract-resume1` 已在第101轮由无进展/交接保护停止：主提取完成，41条记录、21条关系、3项来源处置；独立复核收到65个候选当前版本后仍重复读取，两次重规划无效，0轮复核、1项执行阻塞。已保留终态和计数，未将空缺口等同于语义通过。现补充复核专用完成指引与按实际缺口生成的下一动作：有问题逐项保存、无问题完成原范围后提交空草稿；执行阻塞仍禁止提交。173项库测试、20项合同及Clippy/格式通过，无新工具/配置/migration；提示词已改变，`reviewer-completion-trial` 已以新身份、空候选复测；启动核验确认实际配置、工具和预算未变，旧终态未改。该试验在第85轮到达诊断时限并取消：主提取41条记录、28条关系、3项来源处置；reviewer完成一个局部范围、收到72个候选当前版本，仍未提交最终结论。除精确读取位置反馈、局部复核排除不相关待办外，现新增 complete_review_check，在既有进展账本中记录当前候选的无问题比较；重复版本/改写结论不能续额度，来源、当前版本、执行阻塞及最终全局门槛保持不变。176项库测试、20项合同、3项.env启动测试及Clippy/格式/编译通过，无新表、migration、检查点字段或环境变量。新工具/提示词采用新身份：clean-review-trial 在补充明确授权后实跑656.16秒，停于第25轮：独立收到72个候选当前版本，完成41个记录版本的局部比较，46次重复比较被去重；28条关系和3项来源处置仍未形成比较结论，0轮最终复核。定位到当前焦点已完成但执行反馈仍要求比较该焦点，已增加焦点剩余数和转向未完成引用的派生反馈；176项库测试、20项合同、Clippy/格式/编译通过。clean-review-resume1 保留原检查点、预约正文及计数兼容续跑，在第40轮完成全部72个局部比较，但此后反复读取，0次完成范围、0次提交复核，第58轮进入执行阻塞，第64轮耗尽交接额度后停止。只读第54轮检查点副本的正式工具调用均通过，证明当时接口可用；离线副本不作为真实复核结果。最终结束行为仍未解决，本轮后续复杂附表及完整样稿重测未启动。此前自动审批拒绝已由用户补充明确授权解除。旧运行、原始来源和计数未改。复杂附表、完整106页独立复核、32项语义发现及完整 DOCX/PDF仍未通过。证据：[验证记录](../../artifacts/bid-full-sample/loop-repair/verification.json)、[v2真实轨迹](../../artifacts/bid-full-sample/loop-repair/source-scope-trial-v2/result.json)、[上一实跑启动核验](../../artifacts/bid-full-sample/loop-repair/reviewer-completion-trial/startup-verification.json)。
+验证：最新176项库测试（11项忽略）、20项合同、1项真实检查点离线提交诊断、严格 Clippy、workspace fmt及样稿编译通过；既有6项隔离 PostgreSQL结果保留，本次未改SQL。首次3来源短测在21轮停止，11条记录、0关系，发生一次超时后重试成功；第二次 v2 在32轮停止，29条记录、12条关系、2个来源处置，四组重点引用由真实Agent产生，但独立复核未开始。v2请求42214–353819字节，含必要原页图片，无503或超时。轨迹还暴露无响应要求被迫指定渠道、同类型合规属性的不同条件被拒绝、工作引用格式说明不足；均已修复并验证。未新增 migration，未修改实际 `.env` 或旧检查点，未执行暂存操作。包含全部修复的 `response-contract-trial` 已以新身份、空候选重测第11、16、17页的3处来源，模型与预算仍来自 `deploy/.env`；启动合同已核对，结果待验。该试验在34轮保留32条记录、21条关系后，进一步定位到重复读取会触发无实际缺口的 pending_delivery 阻塞。已删除这条冗余判断，尚未交付的原文/候选仍按真实缺口阻止交接；172项库测试、20项合同及Clippy/格式/编译通过，SQL未因本项调整。`response-contract-resume1` 已在第101轮由无进展/交接保护停止：主提取完成，41条记录、21条关系、3项来源处置；独立复核收到65个候选当前版本后仍重复读取，两次重规划无效，0轮复核、1项执行阻塞。已保留终态和计数，未将空缺口等同于语义通过。现补充复核专用完成指引与按实际缺口生成的下一动作：有问题逐项保存、无问题完成原范围后提交空草稿；执行阻塞仍禁止提交。173项库测试、20项合同及Clippy/格式通过，无新工具/配置/migration；提示词已改变，`reviewer-completion-trial` 已以新身份、空候选复测；启动核验确认实际配置、工具和预算未变，旧终态未改。该试验在第85轮到达诊断时限并取消：主提取41条记录、28条关系、3项来源处置；reviewer完成一个局部范围、收到72个候选当前版本，仍未提交最终结论。除精确读取位置反馈、局部复核排除不相关待办外，现新增 complete_review_check，在既有进展账本中记录当前候选的无问题比较；重复版本/改写结论不能续额度，来源、当前版本、执行阻塞及最终全局门槛保持不变。176项库测试、20项合同、3项.env启动测试及Clippy/格式/编译通过，无新表、migration、检查点字段或环境变量。新工具/提示词采用新身份：clean-review-trial 在补充明确授权后实跑656.16秒，停于第25轮：独立收到72个候选当前版本，完成41个记录版本的局部比较，46次重复比较被去重；28条关系和3项来源处置仍未形成比较结论，0轮最终复核。定位到当前焦点已完成但执行反馈仍要求比较该焦点，已增加焦点剩余数和转向未完成引用的派生反馈；176项库测试、20项合同、Clippy/格式/编译通过。clean-review-resume1 保留原检查点、预约正文及计数兼容续跑，在第40轮完成全部72个局部比较，但此后反复读取，0次完成范围、0次提交复核，第58轮进入执行阻塞，第64轮耗尽交接额度后停止。只读第54轮检查点副本的正式工具调用均通过，证明当时接口可用；离线副本不作为真实复核结果。最终结束行为仍未解决，本轮后续复杂附表及完整样稿重测未启动。此前自动审批拒绝已由用户补充明确授权解除。旧运行、原始来源和计数未改。复杂附表、完整106页独立复核、32项语义发现及完整 DOCX/PDF仍未通过。证据：[验证记录](../../../artifacts/bid-full-sample/loop-repair/verification.json)、[v2真实轨迹](../../../artifacts/bid-full-sample/loop-repair/source-scope-trial-v2/result.json)、[上一实跑启动核验](../../../artifacts/bid-full-sample/loop-repair/reviewer-completion-trial/startup-verification.json)。
 
 当前进度（2026-09-10）：v12 已人工停止并保留第152轮检查点：耗时2975.47秒，54条记录、6条关系、20个来源处置，独立复核未开始；最后47个完成轮次没有新增记录，期间仍有读取和导航。导航裁剪改善了原文保留，但未解决完整持续产出。终态见 `artifacts/bid-full-sample/real-run-v12/terminal.json` 和 `diagnostic-checkpoint.json`。
 
@@ -20,7 +20,7 @@ v13 已获明确外发授权并启动，向 `https://ai.zleiwork.cn` 发送同�
 
 2026-09-10 停滞进一步定位：四组简单引用的双方完整详情在7个真实请求中同时可见，生产关系工具的离线内存副本验证全部通过，单组详情仅1116–1288字节；不能再将零关系简单归因于窗口装不下。28轮内257份详情只有25个版本，工作笔记与17项缺口不变。当前缺口是局部任务推进和停滞恢复，候选历史保护不足会加重重复，但不是充分解释；模型内部选择原因仍不可由轨迹证明。详见[定位报告](agent-loop-diagnosis.md)。本次未修改生产逻辑或新增外发，修复方向尚待短范围真实验证。
 
-2026-09-09 历史批次。本轮完成当前提取/编制驱动的三边界 Journal 实现及隔离恢复测试，并验证 Rig 0.42.0 Chat Completions 的发送接缝。该批次尚未替换生产循环；后续已接入 Rig AgentRun 与 Journal v3，真实招标提取与完整 DOCX/PDF 仍未验收。 阶段定义见[实施方案](../../plans/bidding/product-two-phase.md)，整体进度见[执行台账](../../plans/implementation-tasks.md)。
+2026-09-09 历史批次。本轮完成当前提取/编制驱动的三边界 Journal 实现及隔离恢复测试，并验证 Rig 0.42.0 Chat Completions 的发送接缝。该批次尚未替换生产循环；后续已接入 Rig AgentRun 与 Journal v3，真实招标提取与完整 DOCX/PDF 仍未验收。 阶段定义见当时的两阶段方案（已删除），整体进度见[执行台账](../../../plans/implementation-tasks.md)。
 
 ## 已实现范围
 
@@ -71,7 +71,7 @@ v7 沿用冻结 `.env` 和 Python 来源，完成137轮、721次工具调用；�
 
 v7 终态的离线诊断还能列出36项当前范围缺口（含12项未处置来源），4页、每页最多2048字节；全局前50项仍无当前范围条目，说明不能只看全局首页。诊断只投影内存对象，不改写或恢复旧检查点。这说明有界请求与局部缺口工具尚未保证主流程持续产出。不能把此次恢复改造或 SDK 接缝证明成提取停滞已经解决；P1 的附表/关系完整性、P2 的32项真实语义复验、O1-S/O2 整稿和同版本出件继续开放。v7 使用旧的冻结二进制，不包含本轮字段反馈和三边界合同，也不能直接用新二进制恢复。
 
-证据：[验证清单](../../artifacts/bid-full-sample/agent-runtime-recovery/verification.json)、[Rig 七场景结果](../../artifacts/bid-full-sample/agent-runtime-recovery/rig-chat-seam.json)、[v7 性能与终态](../../artifacts/bid-full-sample/real-run-v7/performance.json)。本机完整日志为 `/tmp/kb-agent-runtime-implementation-606644sg/`。HEAD 与原 index 摘要保持不变；没有操作现有运行数据库、部署或提交 Git。
+证据：[验证清单](../../../artifacts/bid-full-sample/agent-runtime-recovery/verification.json)、[Rig 七场景结果](../../../artifacts/bid-full-sample/agent-runtime-recovery/rig-chat-seam.json)、[v7 性能与终态](../../../artifacts/bid-full-sample/real-run-v7/performance.json)。本机完整日志为 `/tmp/kb-agent-runtime-implementation-606644sg/`。HEAD 与原 index 摘要保持不变；没有操作现有运行数据库、部署或提交 Git。
 
 ## 解析 v3 交接与当前范围清单
 
@@ -99,7 +99,7 @@ Python 首次来源视图测试因沙箱禁止监听端口失败；使用自有 
 
 v8 已用新目录 `/tmp/kb-real-tender-v8-948dzgen/` 启动，输入重新通过统一服务冻结，使用归档二进制、Journal v2 和 `.env` 中的 grok-4.6 / Chat Completions。该运行随后因持续停滞人工停止（SIGINT，exit 1），见下节终态；最终提取、32项语义复验及 DOCX/PDF 仍待完成。运行只使用归档二进制及其工具合同；不能用后续源码直接恢复。
 
-证据：[本轮验证](../../artifacts/bid-full-sample/agent-work-context/verification.json)、[v7 离线清单](../../artifacts/bid-full-sample/agent-work-context/v7-work-state.json)、[v8 启动](../../artifacts/bid-full-sample/real-run-v8/start.json)。完整本机日志位于 `/tmp/kb-agent-work-context-wf4alwtb/`。
+证据：[本轮验证](../../../artifacts/bid-full-sample/agent-work-context/verification.json)、[v7 离线清单](../../../artifacts/bid-full-sample/agent-work-context/v7-work-state.json)、[v8 启动](../../../artifacts/bid-full-sample/real-run-v8/start.json)。完整本机日志位于 `/tmp/kb-agent-work-context-wf4alwtb/`。
 
 ## 共享驱动与候选来源共存修复
 
@@ -120,7 +120,7 @@ v8 运行1180.38秒后人工停止，完成67轮、366次工具、68次物理预
 
 最终验证：Bidding 库 **141 passed / 5 ignored**；20项 Schema/baseline 合同、五项隔离 PostgreSQL 测试再次全部通过且所属容器已删除；三个上述离线回放显式通过；Bidding/DocParser 全目标严格 Clippy、全仓 fmt 通过。解析 v3 的先前真实逐格测试保持其原证据，本次未重复耗时解析。离线回放没有模型调用，也没有改写旧检查点；真实持续产出、独立复核、32项语义发现与完整 DOCX/PDF 仍开放。
 
-证据：[共享驱动与窗口验证](../../artifacts/bid-full-sample/agent-shared-driver/verification.json)、[第36轮分页回放](../../artifacts/bid-full-sample/agent-shared-driver/v8-scope-replay-36.json)、[v8 终态](../../artifacts/bid-full-sample/real-run-v8/terminal.json)、[上下文诊断](../../artifacts/bid-full-sample/real-run-v8/context-forensics.json)。本机完整日志 `/tmp/kb-agent-shared-driver-wov2bamm/`。
+证据：[共享驱动与窗口验证](../../../artifacts/bid-full-sample/agent-shared-driver/verification.json)、[第36轮分页回放](../../../artifacts/bid-full-sample/agent-shared-driver/v8-scope-replay-36.json)、[v8 终态](../../../artifacts/bid-full-sample/real-run-v8/terminal.json)、[上下文诊断](../../../artifacts/bid-full-sample/real-run-v8/context-forensics.json)。本机完整日志 `/tmp/kb-agent-shared-driver-wov2bamm/`。
 
 
 ## Rig 生产 Chat 流解析接入
@@ -139,7 +139,7 @@ SDK/适配版本以 `runtime_adapter = rig-chat-0.42.0/1` 纳入冻结提取配�
 - Bidding library **141 passed / 6 ignored**，其中本轮网络测试已另行显式执行；旧适配身份/缺失身份的拒绝已扩展到恢复回归，拒绝不产生额外模型调用。
 - Schema/baseline **20 passed**；五项现有隔离 PostgreSQL 恢复回归再次通过，所属容器已删除。Bidding/DocParser 全目标严格 Clippy、API/worker 全目标 check 及全仓 fmt 通过。第一次临时库探针误认初始化阶段的 Unix socket 为最终就绪，已改为探测 TCP 后复跑通过，保留原失败日志。
 
-证据：[生产 Rig 传输验证](../../artifacts/bid-full-sample/rig-provider/verification.json)。本轮没有真实模型重跑，也不证明32项语义发现关闭。该批次仍缺 SDK 请求序列化与 AgentRun；请求序列化的后续接入见下节。完整来源提取、独立复核和 DOCX/PDF 仍待真实验收。
+证据：[生产 Rig 传输验证](../../../artifacts/bid-full-sample/rig-provider/verification.json)。本轮没有真实模型重跑，也不证明32项语义发现关闭。该批次仍缺 SDK 请求序列化与 AgentRun；请求序列化的后续接入见下节。完整来源提取、独立复核和 DOCX/PDF 仍待真实验收。
 
 
 ## Rig 请求序列化与最终正文预算
@@ -154,7 +154,7 @@ SDK 将系统指令序列化为内容数组，冻结提示摘要改为 SDK 实�
 
 最终库回归 **142 passed / 6 ignored**；其中本机 HTTP 测试已显式执行，**18场景通过**，其输入现已全部由生产 SDK 准备函数构造，服务器仍只收到一次、且收到字节与准备结果完全相同。五项隔离 PostgreSQL 恢复测试再次通过并清理所属容器，Schema/baseline 合同 **20 passed**。Bidding/DocParser 全目标严格 Clippy、API/worker 全目标 check 及全仓 fmt 通过。修改过程中两个旧测试仍把系统内容当字符串、一个测试跨 await 持有同步锁，已按 SDK 实际结构及缩小锁作用域修正，没有改用宽松业务断言。
 
-证据：[SDK 请求与恢复验证](../../artifacts/bid-full-sample/rig-request/verification.json)。**该批次完成 Chat 协议的生产接入，当时尚未接入 AgentRun；后续进度见下节。真实语义及完整 DOCX/PDF 验收继续开放。**
+证据：[SDK 请求与恢复验证](../../../artifacts/bid-full-sample/rig-request/verification.json)。**该批次完成 Chat 协议的生产接入，当时尚未接入 AgentRun；后续进度见下节。真实语义及完整 DOCX/PDF 验收继续开放。**
 
 
 ## AgentRun 多轮步进与有界检查点
@@ -169,18 +169,18 @@ SDK 将系统指令序列化为内容数组，冻结提示摘要改为 SDK 实�
 
 验收：**145项 Bidding 库测试、20项 schema/baseline 合同测试、18场景生产 Chat 回环测试、5项隔离 PostgreSQL 恢复测试通过**；严格 Bidding/Docparser 全目标 Clippy、API/worker 全目标编译及 workspace fmt 通过。提取和编制现有宿主测试均断言 SDK 活动轮次实际大于1；新测试覆盖序列化恢复、多轮复用、动态进度不积累、角色/窗口交接、剩余预算及完整抑制反馈。隔离容器已清理。Docparser 的46项库测试亦通过：首次受限沙箱中8项回环 gRPC 测试无法绑定端口，允许本地回环后全部通过，未据此修改解析代码。
 
-证据：[AgentRun 验证清单](../../artifacts/bid-full-sample/rig-agent/verification.json)。本批没有真实模型调用。v8 保持已停止状态；32项语义发现、主提取完成、实际独立复核、按招标要求生成的完整可编辑模板及同版本 PDF/report，均需新运行验收。
+证据：[AgentRun 验证清单](../../../artifacts/bid-full-sample/rig-agent/verification.json)。本批没有真实模型调用。v8 保持已停止状态；32项语义发现、主提取完成、实际独立复核、按招标要求生成的完整可编辑模板及同版本 PDF/report，均需新运行验收。
 
-后续 v9 已用当前统一解析服务重新冻结148个来源单元、42个表格并归档新二进制；配置重新读取 `deploy/.env`（grok-4.6 / https://ai.zleiwork.cn）。首次启动被自动审批拒绝，随后用户明确回复“允许”。已重新核对文件、二进制及环境摘要并启动 v9，初始调用 HTTP 200。先前“未发送”仅描述等待授权时的状态。见 [准备记录](../../artifacts/bid-full-sample/real-run-v9/start.json) 和 [审批拒绝记录](../../artifacts/bid-full-sample/real-run-v9/approval-rejection.json)。
+后续 v9 已用当前统一解析服务重新冻结148个来源单元、42个表格并归档新二进制；配置重新读取 `deploy/.env`（grok-4.6 / https://ai.zleiwork.cn）。首次启动被自动审批拒绝，随后用户明确回复“允许”。已重新核对文件、二进制及环境摘要并启动 v9，初始调用 HTTP 200。先前“未发送”仅描述等待授权时的状态。见 [准备记录](../../../artifacts/bid-full-sample/real-run-v9/start.json) 和 [审批拒绝记录](../../../artifacts/bid-full-sample/real-run-v9/approval-rejection.json)。
 
 
 ### v9 新冻结与独立来源验收引用核对
 
 真实外发等待明确目的地授权期间，离线验证了新冻结输入：统一解析服务的主招标 PDF 全页/附表、三份 DOCX 及 XLSM 结构回归 **12项通过**，大型产品手册1项未纳入本次范围。另将5份历史独立来源报告与新冻结逐项比对：**201条 UTF-8 原文引用、321条网格引用、16处已复核原页摘要、106页来源归属及106张实际原页图像摘要/尺寸全部匹配**。历史冻结与新冻结 JSON 的摘要不同，不能直接声明文件一致；此次核对证实验收索引的具体引用仍可用于新来源，没有重写旧报告或据此关闭任何语义发现。
 
-证据：[v9 离线来源验证](../../artifacts/bid-full-sample/real-run-v9/offline-source-verification.json)。解析/来源缺陷在此范围内未复现，未修改解析代码；32项提取发现仍开放；该离线验收批次的真实外发为0，后续已授权的 v9 真实运行见下文。
+证据：[v9 离线来源验证](../../../artifacts/bid-full-sample/real-run-v9/offline-source-verification.json)。解析/来源缺陷在此范围内未复现，未修改解析代码；32项提取发现仍开放；该离线验收批次的真实外发为0，后续已授权的 v9 真实运行见下文。
 
-用户后续已明确授权本次具体文件和目的地，v9 已于2026-09-10 UTC启动真实提取，见 [授权记录](../../artifacts/bid-full-sample/real-run-v9/approval.json)；离线来源验收保持独立范围，不作为真实语义通过结论。
+用户后续已明确授权本次具体文件和目的地，v9 已于2026-09-10 UTC启动真实提取，见 [授权记录](../../../artifacts/bid-full-sample/real-run-v9/approval.json)；离线来源验收保持独立范围，不作为真实语义通过结论。
 
 ### v9 停止与候选查询复现
 
@@ -201,18 +201,18 @@ v11 的真实第33轮请求包含4张完整网格及28274字节旧来源索引�
 
 请求超限时，先把已交付的旧 `source_index`、`search_sources` 和 `inspect_analysis(view=index)` 成功结果替换成明确省略标记，再按原规则裁剪整组。完整来源、网格、原页、集合元数据、候选详情和错误结果保持原样，最新尚待交付的整个工具组不改。协议调用 ID、阅读账本、预算和业务校验不变；使用已有 Rig 会话重建路径，不增加模型总结、配置项、表或 migration。主提取与独立复核共享此策略，提示词说明省略标记不是证据，变更提示词摘要后须新建运行。
 
-真实请求离线重放先红后绿：修复前仅保留2张网格、请求107508字节；修复后全部4张网格及当轮写入结果原样保留、请求95213字节，原检查点未改。库149项通过（9项需显式夹具/服务的测试默认忽略）、合同20项、5项隔离 PostgreSQL 恢复回归、严格 Clippy、workspace fmt 通过。证据见 [navigation-history/verification.json](../../artifacts/bid-full-sample/navigation-history/verification.json)。数据库回归验证既有三边界、重放和所有权合同，不代替真实导航轮次的语义验收。
+真实请求离线重放先红后绿：修复前仅保留2张网格、请求107508字节；修复后全部4张网格及当轮写入结果原样保留、请求95213字节，原检查点未改。库149项通过（9项需显式夹具/服务的测试默认忽略）、合同20项、5项隔离 PostgreSQL 恢复回归、严格 Clippy、workspace fmt 通过。证据见 [navigation-history/verification.json](../../../artifacts/bid-full-sample/navigation-history/verification.json)。数据库回归验证既有三边界、重放和所有权合同，不代替真实导航轮次的语义验收。
 
 v11 在第48轮检查点保存后停止以切换已验证修复，最终35条记录、12个来源处置、0关系、0复核。该轮仍有写入，且实际发生180秒超时重试；不能把停止描述为连续空转或宣称服务超时已解决。v12 使用原 `.env` 配置和新运行身份复验；32项语义发现、独立复核及完整 DOCX/PDF 仍开放。
 
 
 ## 2026-09-10 候选详情的角色独立回执
 
-v12 第54–89轮检查点的记录、关系、来源缺口及处置数量均不变，多轮重复取回已存详情后才继续写入。观察到188次完整详情对象返回，其中146次为此前已返回的相同版本；重复可能用于必要比较，不能将全部重复都归为无效调用。原主提取不保存候选详情回执，历史退出窗口后无法从目录判断已收到哪些版本。诊断见 [candidate-inspection-diagnostic.json](../../artifacts/bid-full-sample/real-run-v12/candidate-inspection-diagnostic.json)。
+v12 第54–89轮检查点的记录、关系、来源缺口及处置数量均不变，多轮重复取回已存详情后才继续写入。观察到188次完整详情对象返回，其中146次为此前已返回的相同版本；重复可能用于必要比较，不能将全部重复都归为无效调用。原主提取不保存候选详情回执，历史退出窗口后无法从目录判断已收到哪些版本。诊断见 [candidate-inspection-diagnostic.json](../../../artifacts/bid-full-sample/real-run-v12/candidate-inspection-diagnostic.json)。
 
 主提取和 reviewer 现在各自复用已有 `Coverage.candidate` 保存完整详情摘要。目录新增 `detail_received`，仅表示本角色在已完成模型轮次中收到过当前版本，不表示语义正确、比较已完成或原文已读。同一批工具中刚取回的详情仍标为未交付；记录修改后旧摘要不再匹配。目录查询自身不创建或刷新回执，另一角色不能继承回执。工作交接反馈明确：已有成果只需保留其引用，不要求为登记引用重新查询全文；原有完整阅读、成果引用和独立复核门槛保持。
 
-两项新增回归覆盖角色隔离、修改失效、检查点往返、未交付与已交付边界；分页回归确认仅完整返回的对象获得回执。151项库测试、20项合同、5项隔离 PostgreSQL 恢复回归、严格 Clippy 和 workspace fmt 通过。使用现有 Journal v3 和 JSON 字段，无新增表或 migration。证据见 [candidate-receipts/verification.json](../../artifacts/bid-full-sample/candidate-receipts/verification.json)。
+两项新增回归覆盖角色隔离、修改失效、检查点往返、未交付与已交付边界；分页回归确认仅完整返回的对象获得回执。151项库测试、20项合同、5项隔离 PostgreSQL 恢复回归、严格 Clippy 和 workspace fmt 通过。使用现有 Journal v3 和 JSON 字段，无新增表或 migration。证据见 [candidate-receipts/verification.json](../../../artifacts/bid-full-sample/candidate-receipts/verification.json)。
 
 提示词和工具摘要已改变；v12 已停止，v13 使用新身份和新归档程序复验，不混入旧代码或重写旧检查点。本项尚未证明实际消除循环，32项语义发现、独立复核及完整 DOCX/PDF 验收仍开放。
 
@@ -223,6 +223,6 @@ v13 第68轮交付两张原页并保存6条记录后，第69轮原逻辑既丢�
 
 保留既有完整协议组淘汰方式：先选证据冗余的已交付组；没有冗余组时，优先移除实际图片载荷总长已超过历史预算的旧组，再回退到原顺序。只按已有配置和缓存的真实载荷比较，不猜模型窗口、不增加配置项或 migration。最新待交付组、所有已提交阅读回执、原页缓存及业务成果保持；超大图片本身不能常驻这个历史窗口，需要像素时仍须重新读取。
 
-真实第68→69轮离线回放先红后绿：2张完整网格和62字节相关正文恢复保留，请求71136字节，满足原预算，当轮6条写入结果保持原样，原检查点未变。普通回归另覆盖多图合计超限、较大配置下原顺序及最新图片组不被淘汰；v11 导航回放也通过。154项库测试（9项默认忽略）、20项合同、5项隔离 PostgreSQL、严格 Clippy、workspace fmt 和样稿编译通过，临时数据库容器已删除。证据见 [image-history/verification.json](../../artifacts/bid-full-sample/image-history/verification.json)。
+真实第68→69轮离线回放先红后绿：2张完整网格和62字节相关正文恢复保留，请求71136字节，满足原预算，当轮6条写入结果保持原样，原检查点未变。普通回归另覆盖多图合计超限、较大配置下原顺序及最新图片组不被淘汰；v11 导航回放也通过。154项库测试（9项默认忽略）、20项合同、5项隔离 PostgreSQL、严格 Clippy、workspace fmt 和样稿编译通过，临时数据库容器已删除。证据见 [image-history/verification.json](../../../artifacts/bid-full-sample/image-history/verification.json)。
 
-最终修复保持主提取和 reviewer 的提示词、工具、预算及 Journal 合同不变。生产校验器已确认 v13 原配置摘要、来源、SDK 会话和已预约正文兼容。原实例停稳后，检查点及全部调用记录逐字节复制到独立恢复目录，用归档修复程序从第104轮继续，52条记录和105次调用不重置；原未完成请求沿用相同正文并累计第二次预约。见 [恢复验证](../../artifacts/bid-full-sample/real-run-v13-resume1/startup-verification.json)。改变提示词、工具、来源或预算的运行仍须新身份；这次兼容的内部缺陷修复不需要从头提取。独立复核、32项语义问题及完整 DOCX/PDF 验收仍开放。
+最终修复保持主提取和 reviewer 的提示词、工具、预算及 Journal 合同不变。生产校验器已确认 v13 原配置摘要、来源、SDK 会话和已预约正文兼容。原实例停稳后，检查点及全部调用记录逐字节复制到独立恢复目录，用归档修复程序从第104轮继续，52条记录和105次调用不重置；原未完成请求沿用相同正文并累计第二次预约。见 [恢复验证](../../../artifacts/bid-full-sample/real-run-v13-resume1/startup-verification.json)。改变提示词、工具、来源或预算的运行仍须新身份；这次兼容的内部缺陷修复不需要从头提取。独立复核、32项语义问题及完整 DOCX/PDF 验收仍开放。

@@ -2,13 +2,11 @@
 
 ## 当前任务归属
 
-招投标唯一流程为解析 → 大纲及骨架 Word → 可选内容补充 → 编辑、保存、下载。设计、任务 T0–T9 与验收 A01–A20 统一维护在 [主方案](bidding/product-two-phase.md)。废弃的 D/F、S0–S6 与独立正式编制任务不再作为待实施范围；本页保留平台、知识库跨域事项及历史验证记录。
-
-以下旧版本运行事实仅作证据，不定义现行业务、不代表新流程验收。
+招投标生成合同是解析完成后的一次大纲运行，见 [投标文档](../docs/bidding/README.md)。未完成项在 [缺口计划](bidding/outline-gaps.md)。两阶段方案及其 T0–T9、A01–A20 任务表已删除，不再作为待实施范围。本页保留平台、知识库跨域事项；下面的长文是历史运行记录，不定义现行生成设计。
 
 ## 历史运行与验证记录
 
-2026-09-16 早期历史快照：有界证据预装、Main自动推进和真实PG三边界恢复已验证；同版DOCX/PDF/报告正式导出接线通过隔离HTTP→worker测试（转换器模拟，非真实Office验收）。统一DocReader的DOCX列宽单位错误已修复，20项解析回归及3项真实DOCX冻结回归通过；新source-v4仅6表widths_mm变化，28个来源的文本、单元格、合并和ID保持一致。旧v3因错误冻结输入停止，47次调用及终态保留。api-v4在14:06 UTC观察到turn124/Main、49条候选、396次工具调用，首轮独立复核已完成28个来源判断并提出14项finding，现交回Main修复；这不是语义通过。同一request已自动由attempt1续至2，未手工continue，checkpoint与累计计数保留。379项库回归、API20项、worker38项及严格Clippy通过；解析合计23项（20项解析＋3项真实DOCX）、验收脚本18项及4个子测试通过，见[验证汇总](../artifacts/minimal-bid-fixture/implementation/current-verification.json)。完整分析准入、编制及同版三件套仍未验收；最新明细以[统一方案](bidding/product-two-phase.md)及其验收证据为准。
+2026-09-16 早期历史快照：有界证据预装、Main自动推进和真实PG三边界恢复已验证；同版DOCX/PDF/报告正式导出接线通过隔离HTTP→worker测试（转换器模拟，非真实Office验收）。统一DocReader的DOCX列宽单位错误已修复，20项解析回归及3项真实DOCX冻结回归通过；新source-v4仅6表widths_mm变化，28个来源的文本、单元格、合并和ID保持一致。旧v3因错误冻结输入停止，47次调用及终态保留。api-v4在14:06 UTC观察到turn124/Main、49条候选、396次工具调用，首轮独立复核已完成28个来源判断并提出14项finding，现交回Main修复；这不是语义通过。同一request已自动由attempt1续至2，未手工continue，checkpoint与累计计数保留。379项库回归、API20项、worker38项及严格Clippy通过；解析合计23项（20项解析＋3项真实DOCX）、验收脚本18项及4个子测试通过，见[验证汇总](../artifacts/minimal-bid-fixture/implementation/current-verification.json)。完整分析准入、编制及同版三件套仍未验收；最新明细以当时的两阶段方案（已删除）及其验收证据为准。
 
 106页历史终态摘要：106页真实文档的历史终态仍为 turn1604，424条候选、177条关系、104项有效修复说明、2项待处理、3处执行阻塞、0轮完整独立复核，累计3826/4000次调用。尚无验收通过的完整DOCX、同版PDF和报告。
 
@@ -16,7 +14,7 @@
 
 2026-09-12 UTC 最新终态：`real-run-v19-repair-scope-resume5` 已于 12:43:50 UTC 结束，运行退出码 1，本段耗时 4427.34 秒；[固定终态](../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/resume5-terminal-verification.json)为 turn1604（SHA `5e69cacf…`），424 条候选、177 条关系、104 条保存修复说明，有效处置 104/106、待处理 2，保留 3 处执行阻塞，完整独立复核 0 轮。错误 `AGENT_TURN_BUDGET_EXCEEDED` 指局部执行及独立工作交接额度耗尽；全文累计调用 3826/4000、尚余 174 次，并非总调用帽耗尽或供应商超时。未重启。有效处置不等于独立语义批准；完整 106 页、32 项语义及同版 DOCX/PDF/报告验收仍未完成。正确性与稳定性优先，速度优化后置。
 
-2026-09-12 主修复异议闭环记录：[宿主核查与默认 CI 回归](../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/repair-dispute-closed-loop.md)确认生产已有 disputed→独立保留或撤回→完整来源复核及编制准入的闭环；当时仅补测试，覆盖受影响候选详情门槛、主角色不能自批和独立裁定分支。[验证记录](../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/repair-dispute-closed-loop-verification.json)为最终断言加强前 217 项 tender_analysis 测试通过、36 项既有忽略，随后加强断言的新专项 1 项通过，严格 Clippy、全仓 fmt 与 diff 整合检查通过。这是合成脚本的宿主协议验证，不是 grok 的真实语义成功。[主方案](bidding/product-two-phase.md)已记录“Main 修复任务隔离：turn1604 后续实施边界”，T1–T3 任务账本、Main 派发和既有 Journal 合同已进入代码整合与离线回归，尚未完成整合验收或部署，未授予新尝试；旧 turn1604 终态、检查点、阻塞及累计调用账本保持不变。
+2026-09-12 主修复异议闭环记录：[宿主核查与默认 CI 回归](../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/repair-dispute-closed-loop.md)确认生产已有 disputed→独立保留或撤回→完整来源复核及编制准入的闭环；当时仅补测试，覆盖受影响候选详情门槛、主角色不能自批和独立裁定分支。[验证记录](../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/repair-dispute-closed-loop-verification.json)为最终断言加强前 217 项 tender_analysis 测试通过、36 项既有忽略，随后加强断言的新专项 1 项通过，严格 Clippy、全仓 fmt 与 diff 整合检查通过。这是合成脚本的宿主协议验证，不是 grok 的真实语义成功。当时的两阶段方案（已删除）已记录“Main 修复任务隔离：turn1604 后续实施边界”，T1–T3 任务账本、Main 派发和既有 Journal 合同已进入代码整合与离线回归，尚未完成整合验收或部署，未授予新尝试；旧 turn1604 终态、检查点、阻塞及累计调用账本保持不变。
 
 编制版式：[行内布局修复](../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/inline-template-layout-implementation.md)已完成局部验证：同一冻结来源中连续文本区域保留原始换行和独立字段书签，示例填写值在原位置清除；跨来源、间隔和网格保持边界。固定 turn1571 的[真实候选前后 DOCX 对照](../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/inline-layout-before-after.json)确认四个身份字段恢复同行、20 个区域定位均可回读。[整合验证](../artifacts/bid-full-sample/loop-repair/repair-history/scope-completion/inline-layout-integration-verification.json)为 40 项编制测试通过、1 项既有忽略，严格 Clippy、全仓 fmt 与 diff 检查通过；无新增 migration，未改提取 schema 或配置。该局部诊断不是整单样稿，也不代表原页像素、完整 DOCX/PDF 或 R03/R06 验收通过。
 
@@ -68,7 +66,7 @@
 
 2026-09-12 UTC 前次实测记录：查询依赖与来源任务职责分离已实现，[工程验证](../artifacts/bid-full-sample/loop-repair/source-task-ownership/verification.json)通过252项库测试（30项忽略）、20项合同、严格Clippy、全局fmt及编译。[局部复核终态](../artifacts/bid-full-sample/loop-repair/source-task-ownership/fee-corrected-review-resume1/final-observation.json)为第68轮、累计69/80次调用、5轮复核、23记录/10关系，quality=needs_review；7项来源判断已完成，但末段组成要求缺少续页的1项发现仍未解决，生产编制校验正确拒绝。续跑619.19秒，加修复前243.58秒累计862.77秒（不含暂停），性能仍不合格。已观察到无业务写入的主Agent查询后再次复核往返，需验证完整分析摘要包含阅读回执是否干扰重复终止判断。当前无模型进程；旧费用80/80及全文第236轮998/1200保持终态。106页、32项语义与完整同版DOCX/PDF/报告仍待验。下方为历史记录。
 
-2026-09-11 UTC 最新状态：局部导航、历史来源判断取回及固定任务清单复用已通过248项库、严格Clippy及全局fmt。同一检查点离线请求构造中位耗时约556→295毫秒、请求摘要不变；尚无新的模型完成率或全文性能验收。全文兼容接续后已在第236轮因HTTP500/503/503终止，当前没有真实模型进程运行；累计998次调用，原总额度剩202次，但该边界三次尝试已耗尽，未重置。保留33项来源判断及27项发现，另有2处执行阻塞。32项与完整DOCX/PDF/报告仍未完成；费用正文两组亦未完成复核，不能宣称性能可用。以[现行投标生成方案](bidding/product-two-phase.md)及所链接证据为准，下方为历史运行记录。
+2026-09-11 UTC 最新状态：局部导航、历史来源判断取回及固定任务清单复用已通过248项库、严格Clippy及全局fmt。同一检查点离线请求构造中位耗时约556→295毫秒、请求摘要不变；尚无新的模型完成率或全文性能验收。全文兼容接续后已在第236轮因HTTP500/503/503终止，当前没有真实模型进程运行；累计998次调用，原总额度剩202次，但该边界三次尝试已耗尽，未重置。保留33项来源判断及27项发现，另有2处执行阻塞。32项与完整DOCX/PDF/报告仍未完成；费用正文两组亦未完成复核，不能宣称性能可用。以当时的两阶段方案（已删除）及所链接证据为准，下方为历史运行记录。
 
 2026-09-11 UTC 性能修复真实对照通过：同一七页目录、原7项候选和同.env配置，baseline为33次/239.30秒/10次工具错误，完整原文出处规则的provenance为8次/63.55秒/0次工具错误，两组均verified且生产结构审计通过、候选值不变。该局部对照墙钟减少73.44%，不代表完整106页性能。已合并有界边界证据，并将冻结原文读取/引文与实际候选依赖分开；实际候选查询、记录/映射/关系ID及同页原图排版依赖保留。241项库、严格Clippy和编译通过；同次导航复用清单，离线输出摘要一致。旧全文v3在146轮无在途边界暂停，累计759次；v4已使用原1200额度剩余441次启动，首请求合同与成功对照一致，保留416条记录/8条关系，未导入旧独立回执。32项和同版DOCX/PDF仍未完成。证据：artifacts/bid-full-sample/loop-repair/review-boundary-evidence/provenance-final.json、real-run-v15-review-v4/startup-verification.json。
 
@@ -78,13 +76,13 @@
 
 2026-09-11 UTC 性能对照终态补充：同一第11页原格式27次调用/503.66秒，简短引用21次/410.91秒，墙钟缩短18.42%；新版主提取6次/模型162.54秒，独立复核15次/模型242.04秒。两组均完成一轮复核且生产结构审计通过，但新版quality=needs_review，原格式为verified，候选分类不同，不能宣称等质量提速或性能可用。新版仍有8次工具错误及重复读取/复核提交往返；下一步应缩减有界提取与复核的串行调用，保留独立证据和语义门槛。证据：artifacts/bid-full-sample/loop-repair/compact-evidence-references/final-comparison.json。全文旧合同运行继续，完整32项及DOCX/PDF验收仍未完成；本条取代下文“对照进行中/待终态”的状态。
 
-2026-09-11 UTC 历史进展（以上方状态为准）：简短证据引用已实现并共用于提取/独立复核和编制/稿件复核，领域Span、持久化成果和阅读校验保持原合同语义；232项库、20项合同和严格Clippy通过，离线5轮参数缩减约25%–55%且展开结果逐值等于原参数。相同第11页来源、同.env、同预算的原格式/简短格式顺序对照已启动，真实提速及语义质量尚未证明；当前workspace格式检查仍有其他并行修改的排版差异。全文real-run-v15-resume2仍使用其归档程序及旧合同继续，第196轮接入正文/表格导航修复时保留241条记录、2条关系和196次累计调用；新工具/提示词合同不套回旧检查点。全文独立复核、32项语义、完整同版DOCX/PDF/报告尚未完成，部分模板整段待填可能删除固定文字仍须复核修正。沿用deploy/.env的grok-4.6＋Chat＋low，无模型配置调整或新migration，人工答案不发送。 详见[统一方案](bidding/product-two-phase.md)。
+2026-09-11 UTC 历史进展（以上方状态为准）：简短证据引用已实现并共用于提取/独立复核和编制/稿件复核，领域Span、持久化成果和阅读校验保持原合同语义；232项库、20项合同和严格Clippy通过，离线5轮参数缩减约25%–55%且展开结果逐值等于原参数。相同第11页来源、同.env、同预算的原格式/简短格式顺序对照已启动，真实提速及语义质量尚未证明；当前workspace格式检查仍有其他并行修改的排版差异。全文real-run-v15-resume2仍使用其归档程序及旧合同继续，第196轮接入正文/表格导航修复时保留241条记录、2条关系和196次累计调用；新工具/提示词合同不套回旧检查点。全文独立复核、32项语义、完整同版DOCX/PDF/报告尚未完成，部分模板整段待填可能删除固定文字仍须复核修正。沿用deploy/.env的grok-4.6＋Chat＋low，无模型配置调整或新migration，人工答案不发送。 详见当时的两阶段方案（已删除）。
 
 **2026-09-10 前序修复记录（当前状态见顶部）：本地功能验证通过，独立复核已完成局部比较，未完成最终提交，运行已停止；完整验收尚未通过。** 已分离来源权限与局部焦点，自动维护成果/未解决引用，主提取、独立复核、编制和稿件复核共用进展与有界恢复策略。默认连续无进展6轮、焦点24轮、重规划2次；记录局部执行阻塞后允许转向独立范围，连续6轮仍未交接则在工具提交边界停止。重启、重复读取、笔记改写和任务改名不能刷新额度；有效局部写入可以完成当前动作。执行失败单独保存并阻止最终发布，不冒充来源缺项。候选当前版本参与窗口保留；各 reviewer 保留自己的冻结原文回执，修改后的候选/稿件仍按摘要核查。旧手抄引用输入及编制 `remember` 路径已删除，未新增 migration，既有 baseline 同步检查点与预算 JSON。
 
 验证：最新176项库测试（11项忽略）、20项合同、1项真实检查点离线提交诊断、严格 Clippy、workspace fmt及样稿编译通过；既有6项隔离 PostgreSQL结果保留，本次未改SQL。首次3来源短测在21轮停止，11条记录、0关系，发生一次超时后重试成功；第二次 v2 在32轮停止，29条记录、12条关系、2个来源处置，四组重点引用由真实Agent产生，但独立复核未开始。v2请求42214–353819字节，含必要原页图片，无503或超时。轨迹还暴露无响应要求被迫指定渠道、同类型合规属性的不同条件被拒绝、工作引用格式说明不足；均已修复并验证。未新增 migration，未修改实际 `.env` 或旧检查点，未执行暂存操作。包含全部修复的 `response-contract-trial` 已以新身份、空候选重测第11、16、17页的3处来源，模型与预算仍来自 `deploy/.env`；启动合同已核对，结果待验。该试验在34轮保留32条记录、21条关系后，进一步定位到重复读取会触发无实际缺口的 pending_delivery 阻塞。已删除这条冗余判断，尚未交付的原文/候选仍按真实缺口阻止交接；172项库测试、20项合同及Clippy/格式/编译通过，SQL未因本项调整。`response-contract-resume1` 已在第101轮由无进展/交接保护停止：主提取完成，41条记录、21条关系、3项来源处置；独立复核收到65个候选当前版本后仍重复读取，两次重规划无效，0轮复核、1项执行阻塞。已保留终态和计数，未将空缺口等同于语义通过。现补充复核专用完成指引与按实际缺口生成的下一动作：有问题逐项保存、无问题完成原范围后提交空草稿；执行阻塞仍禁止提交。173项库测试、20项合同及Clippy/格式通过，无新工具/配置/migration；提示词已改变，`reviewer-completion-trial` 已以新身份、空候选复测；启动核验确认实际配置、工具和预算未变，旧终态未改。该试验在第85轮到达诊断时限并取消：主提取41条记录、28条关系、3项来源处置；reviewer完成一个局部范围、收到72个候选当前版本，仍未提交最终结论。除精确读取位置反馈、局部复核排除不相关待办外，现新增 complete_review_check，在既有进展账本中记录当前候选的无问题比较；重复版本/改写结论不能续额度，来源、当前版本、执行阻塞及最终全局门槛保持不变。176项库测试、20项合同、3项.env启动测试及Clippy/格式/编译通过，无新表、migration、检查点字段或环境变量。新工具/提示词采用新身份：clean-review-trial 在补充明确授权后实跑656.16秒，停于第25轮：独立收到72个候选当前版本，完成41个记录版本的局部比较，46次重复比较被去重；28条关系和3项来源处置仍未形成比较结论，0轮最终复核。定位到当前焦点已完成但执行反馈仍要求比较该焦点，已增加焦点剩余数和转向未完成引用的派生反馈；176项库测试、20项合同、Clippy/格式/编译通过。clean-review-resume1 保留原检查点、预约正文及计数兼容续跑，在第40轮完成全部72个局部比较，但此后反复读取，0次完成范围、0次提交复核，第58轮进入执行阻塞，第64轮耗尽交接额度后停止。只读第54轮检查点副本的正式工具调用均通过，证明当时接口可用；离线副本不作为真实复核结果。最终结束行为仍未解决，本轮后续复杂附表及完整样稿重测未启动。此前自动审批拒绝已由用户补充明确授权解除。旧运行、原始来源和计数未改。复杂附表、完整106页独立复核、32项语义发现及完整 DOCX/PDF仍未通过。证据：[验证记录](../artifacts/bid-full-sample/loop-repair/verification.json)、[v2真实轨迹](../artifacts/bid-full-sample/loop-repair/source-scope-trial-v2/result.json)、[上一实跑启动核验](../artifacts/bid-full-sample/loop-repair/reviewer-completion-trial/startup-verification.json)。
 
-2026-09-09 v8 历史记录：v8 已停止；离线回放确认候选查询与当前原文相互挤出上下文。已实现按当前范围查询、保留来源证据的分页，以及提取/编制共享 I/O 驱动；Rig 已接生产 Chat 请求序列化、流解析及 AgentRun 多轮步进，有界会话和三边界恢复已通过隔离验收；32项语义验收及真实整稿仍待完成。见[最新验证](../docs/bidding/agent-runtime-recovery-results.md#agentrun-多轮步进与有界检查点)。
+2026-09-09 v8 历史记录：v8 已停止；离线回放确认候选查询与当前原文相互挤出上下文。已实现按当前范围查询、保留来源证据的分页，以及提取/编制共享 I/O 驱动；Rig 已接生产 Chat 请求序列化、流解析及 AgentRun 多轮步进，有界会话和三边界恢复已通过隔离验收；32项语义验收及真实整稿仍待完成。见[最新验证](../docs/bidding/archive/agent-runtime-recovery-results.md#agentrun-多轮步进与有界检查点)。
 
 v9 已在第45轮检查点停止：运行1043.91秒，34条记录、10个来源处置、0关系，独立复核未开始；第25–44轮仅查询已有候选，连续20轮没有新增成果或来源覆盖。后半段未观察到503，重复候选全文查询多次因无法与当前原文共存而失败。已保留全部请求及检查点，目录/详情取回修复已通过离线及隔离验收；不能视为真实语义或整稿验收通过。用户对 `.env` 目的地的具体外发授权持续有效。证据：`artifacts/bid-full-sample/real-run-v9/terminal.json`、`stagnation-report.json`。
 
@@ -104,7 +102,7 @@ v13 已获明确外发授权并启动，向 `https://ai.zleiwork.cn` 发送同�
 
 2026-09-10 正文字节定位修复：`read_source` 在保留原文及起止范围的同时返回逐行 `line_spans`，中文与原换行均按真实 UTF-8 字节定位，完整结果按原工具预算分页；兼容恢复仅给已交付历史补充确定性位置，不改已预约请求和阅读回执。真实第120→121轮离线回放保留两页58行完整正文及附表，请求116767字节；157项库测试（9项默认忽略）、20项合同、5项隔离 PostgreSQL、Clippy/格式及样稿编译通过，无新增 migration。v13-resume1 停稳于第129轮，52条记录、0关系、20个来源处置、0轮独立复核，累计131次调用。原状态已逐字节复制到 v13-resume2，生产合同校验通过；自动审批首次拒绝后，用户针对具体目的地和载荷再次明确回复“继续,允许”，现已从第129轮恢复，原预约正文保持不变并累计第二次调用；启动核验见 `artifacts/bid-full-sample/real-run-v13-resume2/startup-verification.json`。第130轮实际请求已验证包含两页58个逐行位置；随后新增15条记录，达到67条。第136轮后连续28个完成轮次无新增记录、关系或来源处置，期间73次候选详情/目录查询、29次搜索，未尝试写入关系。原文持续保留，但候选详情在有界窗口内反复取回；该相关性尚不能单独证明模型循环的根因。恢复实例运行777.78秒后安全停于第164轮，保留67条记录、0关系、20个来源处置及167次累计调用；未进入独立复核。逐行位置已验证可用，整体持续提取仍未通过，不能继续以相同正文重试或放宽预算冒充修复。证据见 `artifacts/bid-full-sample/real-run-v13-resume2/repeated-inspection-observation.json`、`terminal.json` 和 `line-spans-request-verification.json`。证据：`artifacts/bid-full-sample/source-line-spans/verification.json`、`artifacts/bid-full-sample/real-run-v13-resume2/preflight-verification.json`。32项语义发现及完整 DOCX/PDF 验收仍开放。
 
-2026-09-10 停滞进一步定位：四组简单引用的双方完整详情在7个真实请求中同时可见，生产关系工具的离线内存副本验证全部通过，单组详情仅1116–1288字节；不能再将零关系简单归因于窗口装不下。28轮内257份详情只有25个版本，工作笔记与17项缺口不变。当前缺口是局部任务推进和停滞恢复，候选历史保护不足会加重重复，但不是充分解释；模型内部选择原因仍不可由轨迹证明。详见[定位报告](../docs/bidding/agent-loop-diagnosis.md)。本次未修改生产逻辑或新增外发，修复方向尚待短范围真实验证。
+2026-09-10 停滞进一步定位：四组简单引用的双方完整详情在7个真实请求中同时可见，生产关系工具的离线内存副本验证全部通过，单组详情仅1116–1288字节；不能再将零关系简单归因于窗口装不下。28轮内257份详情只有25个版本，工作笔记与17项缺口不变。当前缺口是局部任务推进和停滞恢复，候选历史保护不足会加重重复，但不是充分解释；模型内部选择原因仍不可由轨迹证明。详见[定位报告](../docs/bidding/archive/agent-loop-diagnosis.md)。本次未修改生产逻辑或新增外发，修复方向尚待短范围真实验证。
 
 ## 授权与使用方式
 
@@ -112,9 +110,9 @@ v13 已获明确外发授权并启动，向 `https://ai.zleiwork.cn` 发送同�
 
 本台账只管理跨域交付与证据，不替代技术合同，不新增产品范围或技术顺序：
 
-- 产品范围：[PRD](../docs/bidding/prd.md)，文件 / 编制 / 导出，DOCX 唯一正式正文。共享解析（PDF/Word/Excel/OCR）见[DocReader 结构增强](knowledge-base/docreader-structured-parse.md)，不另建招标解析器。
-- 编辑与出件：[ONLYOFFICE 契约](../docs/bidding/onlyoffice.md)、[领域接缝](../docs/bidding/authoring.md)；[接入计划](bidding/onlyoffice-integration.md)只保留编辑器技术说明；当前工作归主方案 T5–T9。
-- Agent 改造：[投标生成方案](bidding/product-two-phase.md)，T0–T9 管发现、组织、核对、发布及可选填充，不替代下表平台 P0/P1/P2。
+- 产品范围：[PRD](../docs/bidding/prd.md)。共享解析（PDF/Word/Excel/OCR）见[DocReader 结构增强](knowledge-base/docreader-structured-parse.md)，不另建招标解析器。
+- 编辑与出件：[ONLYOFFICE 契约](../docs/bidding/onlyoffice.md)、[领域接缝](../docs/bidding/authoring.md)；[接入计划](bidding/onlyoffice-integration.md)只保留编辑器技术说明。
+- 大纲生成：[运行时](../docs/bidding/outline.md) 与 [缺口计划](bidding/outline-gaps.md)，不替代下表平台 P0/P1/P2。
 - 平台：[运行时基础](platform/runtime-foundation.md)、[队列](platform/queue-runtime.md)；清理唯一合同是[平台 §6](platform/runtime-foundation.md#6-retention-consumer)，不另建清理/调度/补偿框架、outbox、Request 或 artifact scanner。
 - 首发：[部署说明](../deploy/README.md)；性能：不列入当前计划，禁止项见 [crate.md](../docs/knowledge-base/crate.md)。两条工作独立于 O0，不要求先重做平台；知识库其他产品计划不并入。
 
@@ -126,7 +124,7 @@ v13 已获明确外发授权并启动，向 `https://ai.zleiwork.cn` 发送同�
 
 ## 招投标任务入口
 
-招投标生成、填充、编辑器接缝与导出任务统一由 [主方案 T0–T9](bidding/product-two-phase.md) 管理。本表不再维护 S0–S6 或另一套 O 阶段的当前状态。下方既有跨域任务与运行记录只保留平台／知识库责任和历史证据，不定义旧正式编制流程。
+招投标生成的未完成项由 [缺口计划](bidding/outline-gaps.md) 跟踪。本表不维护另一套生成阶段。下方既有跨域任务与运行记录只保留平台／知识库责任和历史证据。
 
 ## 既有增量与证据基线
 
@@ -142,13 +140,13 @@ v13 已获明确外发授权并启动，向 `https://ai.zleiwork.cn` 发送同�
 
 ## 当前工作区质量检查
 
-针对 fmt/check/Clippy/test 报错的修复及原始日志见[质量检查记录](../docs/bidding/workspace-quality-results.md)：首批 Rust 1.97 的 fmt、全工作区/全目标/全特性 check 与 Clippy `-D warnings` 通过，默认 Rust 测试 586 passed/0 failed/9 ignored；Python 150 passed/13 skipped，前端 lint/build/test 通过（33 tests），10 份 Schema 正反例通过。后续本地对象 reset 只读前置后的完整 Rust 回归日志统计为 **604 passed/0 failed/15 ignored**，fmt、全工作区全目标/全特性 check 和严格 Clippy 通过，见[最新质量记录](../docs/bidding/workspace-quality-results.md)。生成至 Office 的同次合成产品验收以及 R3 queue-faults 原样 CI 命令的本地 4/4 验证也已完成；二者不替代真实招标语义或 hosted 验收。CI 显式启动已有 Python DocReader 执行必跑 gRPC 重放，本机合成和真实 DOCX/PDF 两组均 1/1。基础设施 guard 提前返回及 skipped/ignored 的部分不算完整集成验收。
+针对 fmt/check/Clippy/test 报错的修复及原始日志见[质量检查记录](../docs/bidding/archive/workspace-quality-results.md)：首批 Rust 1.97 的 fmt、全工作区/全目标/全特性 check 与 Clippy `-D warnings` 通过，默认 Rust 测试 586 passed/0 failed/9 ignored；Python 150 passed/13 skipped，前端 lint/build/test 通过（33 tests），10 份 Schema 正反例通过。后续本地对象 reset 只读前置后的完整 Rust 回归日志统计为 **604 passed/0 failed/15 ignored**，fmt、全工作区全目标/全特性 check 和严格 Clippy 通过，见[最新质量记录](../docs/bidding/archive/workspace-quality-results.md)。生成至 Office 的同次合成产品验收以及 R3 queue-faults 原样 CI 命令的本地 4/4 验证也已完成；二者不替代真实招标语义或 hosted 验收。CI 显式启动已有 Python DocReader 执行必跑 gRPC 重放，本机合成和真实 DOCX/PDF 两组均 1/1。基础设施 guard 提前返回及 skipped/ignored 的部分不算完整集成验收。
 
 已删除固定签名关键词/机械区间切分的提取修补脚本，保留原始真实 Agent 结果及独立拒绝结论；招标结构和附表对应仍须从源文件语义提取并复核。模型继续读取 `deploy/.env`，无新增 migration。本次基础检查不等于 O1 完整样稿验收；R1 后续真实启动及对象生命周期已通过，干净候选与正式验收仍待落实，见 R1。
 
 ## 任务总览与依赖
 
-以下 18 项是既有跨域交付切片，Agent 改造的当前优先顺序见主方案 T0–T9；无工期、日期或虚构接口承诺。
+以下 18 项是既有跨域交付切片，不是现行大纲任务表。大纲未完成项见 [缺口计划](bidding/outline-gaps.md)。无工期、日期或虚构接口承诺。
 
 | ID | 可交付切片 | 必要依赖 | 当前状态 |
 | --- | --- | --- | --- |
@@ -237,7 +235,7 @@ P1 是后续第一个代码任务；P0 是证据复核，不重做已有实现�
 - **依赖：** P0、专用隔离解析服务/样本前置；不得假定全部外部服务已可用。
 - **产出：** 场景调用次数/冻结身份/集合成员对照、失败可见性证据与必要的最小修补。
 - **可证实验收：** A → A+B → A+B+补遗记录真实处理身份及转换/OCR/抽取次数；未变且有可用结果的 A 不重跑，B/补遗才处理；变更或尚无可用结果可处理/重试。项目汇总含当前完整集合而非仅差量；pending/failed/unresolved 明示，不抹掉成功结果，不阻止编制。仅改投标正文不触发招标解析。
-- **当前状态：** 独立 SQL fixture 五轮通过：A → A+B → A+B+补遗，随后加入 pending 成员并转 failed；旧来源 ID/摘要复用、完整集合、warning、冻结编译输入与幂等重放均有数据库实证。**convert 前短路已有限接受：** `/tmp/knowledgebrain-f1-skip-reconvert.f1a1/parent-acceptance/decision.md`。成功 frozen 结果不再重入 converter/vision；`tender_document_process_v2` 5/5。**真实 gRPC 计数已有限接受：** `/tmp/knowledgebrain-f1-real-parse.f1b1/parent-acceptance/decision.md`。B=`testdata/bid/BiddingFile.pdf`；旧镜像 101 保留（page_table column edges）；当前 parser 28 表合法，挂载源码后 A 二次不增量、B convert_count=2。未放宽解码器；生产 `knowledgebrain-docreader:local` 未重建。Vision 仍 mock。**BiddingFile.pdf 全量覆盖已有限接受：** `/tmp/knowledgebrain-f1-full-coverage.f1c1/parent-acceptance/decision.md`。pytest 13/13：106 页 SECTION、无 table_extraction_error、命名表含 tech_spec_cont、每页 4-gram≥0.95 全局≥0.99；超限按表跳过。超时 4 红保留。生产镜像未重建。**命名表 TABLE_REGION 已有限接受：** `/tmp/knowledgebrain-f1-table-canonical.f1d1/parent-acceptance/decision.md`。pytest 14/14；价格表/偏差表/tech_spec_cont 等为独立表格。**canonical P2 已接受：** `/tmp/knowledgebrain-f1-table-canonical.f1d1/parent-acceptance/p2-fix.md`。pytest 20/20：阅读序不写回 cells、per-cell 坐标、markdown leftover+GFM、无整页 Exception 吞表。生产镜像未重建。**无挂载 gRPC 已接受：** `/tmp/knowledgebrain-f1-parse-complete.f1e1/parent-acceptance/decision.md`。`kb-docreader:f1-parser` 无 bind-mount，BiddingFile.pdf 计次 1/1，pytest 20/20。compose/`knowledgebrain-docreader:local` 仍为旧 parser。真实 OCR 模型未验收。可重跑入口及边界见[回归记录](../docs/bidding/source-collection-regression.md)。
+- **当前状态：** 独立 SQL fixture 五轮通过：A → A+B → A+B+补遗，随后加入 pending 成员并转 failed；旧来源 ID/摘要复用、完整集合、warning、冻结编译输入与幂等重放均有数据库实证。**convert 前短路已有限接受：** `/tmp/knowledgebrain-f1-skip-reconvert.f1a1/parent-acceptance/decision.md`。成功 frozen 结果不再重入 converter/vision；`tender_document_process_v2` 5/5。**真实 gRPC 计数已有限接受：** `/tmp/knowledgebrain-f1-real-parse.f1b1/parent-acceptance/decision.md`。B=`testdata/bid/BiddingFile.pdf`；旧镜像 101 保留（page_table column edges）；当前 parser 28 表合法，挂载源码后 A 二次不增量、B convert_count=2。未放宽解码器；生产 `knowledgebrain-docreader:local` 未重建。Vision 仍 mock。**BiddingFile.pdf 全量覆盖已有限接受：** `/tmp/knowledgebrain-f1-full-coverage.f1c1/parent-acceptance/decision.md`。pytest 13/13：106 页 SECTION、无 table_extraction_error、命名表含 tech_spec_cont、每页 4-gram≥0.95 全局≥0.99；超限按表跳过。超时 4 红保留。生产镜像未重建。**命名表 TABLE_REGION 已有限接受：** `/tmp/knowledgebrain-f1-table-canonical.f1d1/parent-acceptance/decision.md`。pytest 14/14；价格表/偏差表/tech_spec_cont 等为独立表格。**canonical P2 已接受：** `/tmp/knowledgebrain-f1-table-canonical.f1d1/parent-acceptance/p2-fix.md`。pytest 20/20：阅读序不写回 cells、per-cell 坐标、markdown leftover+GFM、无整页 Exception 吞表。生产镜像未重建。**无挂载 gRPC 已接受：** `/tmp/knowledgebrain-f1-parse-complete.f1e1/parent-acceptance/decision.md`。`kb-docreader:f1-parser` 无 bind-mount，BiddingFile.pdf 计次 1/1，pytest 20/20。compose/`knowledgebrain-docreader:local` 仍为旧 parser。真实 OCR 模型未验收。可重跑入口及边界见[回归记录](../docs/bidding/archive/source-collection-regression.md)。
 
 ### F2 — 来源、要求/规范及新轮边界实证
 
@@ -247,7 +245,7 @@ P1 是后续第一个代码任务；P0 是证据复核，不重做已有实现�
 - **依赖：** F1。
 - **产出：** PRD 字段/业务类别到当前持久化结果的覆盖矩阵、缺口实证/最小补齐、供 O1-S 使用的新轮冻结输入。
 - **可证实验收：** SourceUnit revision 在 disposition 恰好一次，无遗漏/重复/孤立/越界；要求及规范带来源文件/章节/页码。资格/商务/技术/价格/人员、公共数据、目录/签章/暗标/提交规则、固定表行列/合并/证明名称与页码规则逐项有结果或明确待确认。补遗适用范围、冲突/撤回保留依据，不按时间“最后胜出”。集合变化开启新轮，不自动继承旧响应、检查或证明页码；旧稿可追溯、基础材料可重新匹配；招标图片不当作投标方证明。
-- **当前状态：** 已确证并修复四处“少于 8 字丢弃”造成的短要求遗漏，保留所有非空片段及原容量约束，不新增业务关键词或固定章节。完整 requirement_compile 测试模块修前 3/4、修后 7/0（通过/失败）；SQL 验证 ready 来源恰好覆盖、旧冻结输入保持，以及遗漏/重复/外来来源拒绝。PRD 类别/页码及 Workspace 新轮隔离仍待实证，不称 F2 完整完成。见[回归记录](../docs/bidding/source-collection-regression.md)。
+- **当前状态：** 已确证并修复四处“少于 8 字丢弃”造成的短要求遗漏，保留所有非空片段及原容量约束，不新增业务关键词或固定章节。完整 requirement_compile 测试模块修前 3/4、修后 7/0（通过/失败）；SQL 验证 ready 来源恰好覆盖、旧冻结输入保持，以及遗漏/重复/外来来源拒绝。PRD 类别/页码及 Workspace 新轮隔离仍待实证，不称 F2 完整完成。见[回归记录](../docs/bidding/archive/source-collection-regression.md)。
 - **source_views 真 Python RPC 已父接受：** `/tmp/knowledgebrain-f2-source-views.sv1/parent-acceptance/decision.md`。两路 review `OK`。owned `kb-docreader:f1-parser` 无挂载，`source_views_cross_real_python_rpc_and_publish_frozen_pixels` **1 passed / 0 failed / 2 filtered**。现网 compose 未动。真实提取 `quality=needs_review`、41 记录/10 关系/148 disposition、0 findings；编制仍待显式授权，不得把空 findings 当成 verified。
 - **后续增量：** 混合输入的空来源曾被静默记为已覆盖，已复现并改为含来源 ID 的技术错误，完整模块现为 **8/8、exit 0**。SQL 新增最新轮先发布、四旧轮迟到与重放，current 不回退、历史结果保留、非空人工 Workspace 不改写，最终 exit 0 且专属资源清理 exit 0；首次 PG 初始化连接失败仍保留。真实 DOCX 结构提取有 30 单元、486 非空正文段落文本/顺序及表/行计数实证。现有显式 projection apply 会复制旧节点/块/binding/quote，不能充当新轮隔离；新轮 DOCX 与不继承旧响应/检查/页码仍交 F2/O1-S 接缝实现。证据及限制见上述回归记录后续切片。
 
@@ -259,53 +257,53 @@ P1 是后续第一个代码任务；P0 是证据复核，不重做已有实现�
 - **依赖：** 外部前置有记录；不依赖 R1/R2/R3、V1 或 P2 全绿。不具备启动前置时只准备样稿/验收步骤。
 - **产出：** 服务版本/字体/样稿摘要、人工编辑后保存重开 DOCX 与同一文件 PDF、格式差异和许可核实记录。
 - **可证实验收：** 合并单元格、非等宽列、重复表头、页眉页脚、中文字体、图片附件页、指定模板/固定表实际保存重开及 PDF 对照；关键不可保真项明确而不直接切换。普通编辑/回调/初稿/转换不以额外 Automation API 采购为前置，实际本体许可与版本能力仍须核实。
-- **当前状态：** 用户提供 `testdata/bid` 真实稿；官方 Community 9.4.0-129 本地 PoC 已验证实际编辑、保存重开和同稿 PDF，真实稿全表结构保持，补充稿长表/图片通过。专属服务资源已清理；原字体缺失/回退、拟采用产品的嵌入并发许可及最终模板外观尚未验收，因此完整 O0 未完成；该批次尚未接入 O1，后续接线进展见 O1-S/C/W。见[O0 结果与证据](../docs/bidding/onlyoffice-o0-results.md)。
+- **当前状态：** 用户提供 `testdata/bid` 真实稿；官方 Community 9.4.0-129 本地 PoC 已验证实际编辑、保存重开和同稿 PDF，真实稿全表结构保持，补充稿长表/图片通过。专属服务资源已清理；原字体缺失/回退、拟采用产品的嵌入并发许可及最终模板外观尚未验收，因此完整 O0 未完成；该批次尚未接入 O1，后续接线进展见 O1-S/C/W。见[O0 结果与证据](../docs/bidding/archive/onlyoffice-o0-results.md)。
 
-- **F2 条件适用及真实样稿复核增量：** 来源明确且经独立复核的条件要求/规则/模板不再被等同于未知；DOCX 中保留条件说明和完整模板，未知、不适用和缺来源仍受校验。投标模块 **75/75**、分章 **10/10** 与定向 Clippy 通过，无新 migration。真实文件首轮复核指出附表遗漏，主 Agent 已补正并进入第二轮独立复核；整本 Agent 样稿仍未验收。第 22–23 页组成条款、第 74 页格式目录和第 13 页平台分区要求分别核对，不能相互替代；第 25 页诉讼仲裁材料纳入验收范围。详见[样稿记录](../docs/bidding/full-sample-results.md)。
+- **F2 条件适用及真实样稿复核增量：** 来源明确且经独立复核的条件要求/规则/模板不再被等同于未知；DOCX 中保留条件说明和完整模板，未知、不适用和缺来源仍受校验。投标模块 **75/75**、分章 **10/10** 与定向 Clippy 通过，无新 migration。真实文件首轮复核指出附表遗漏，主 Agent 已补正并进入第二轮独立复核；整本 Agent 样稿仍未验收。第 22–23 页组成条款、第 74 页格式目录和第 13 页平台分区要求分别核对，不能相互替代；第 25 页诉讼仲裁材料纳入验收范围。详见[样稿记录](../docs/bidding/archive/full-sample-results.md)。
 
-**F2/V4 本轮补充：** 集合 SQL 验收已迁到实际 V4 claim/reserve/checkpoint/publish，删除无调用方的 V3 loader/publisher 和授权。真实回归发现并修复迟到分析占用判定版本、导致下一轮连续 CAS 失败：迟到结果只保留原冻结身份和分析历史，只有当前输入推进判定。五轮集合、同集合两次判定替换、旧结果先完成、两轮 DOCX、重放/权限/非空旧稿保护通过；脚本模型数据库回归 2/2、模块 78/78、baseline 合同 17/17。无新 migration、表或业务硬编码。此项不代表真实模型完整样稿已验收；编制外发仍待明确授权，Office 人工基准本地复验 1/1 通过：52 张表、单元格/图片编辑、保存重开、首稿/新轮创建、同请求重试及四次离线回调重放，资源清理通过；不替代 Agent 全稿与同版本 PDF 验收。见[样稿记录](../docs/bidding/full-sample-results.md)。
+**F2/V4 本轮补充：** 集合 SQL 验收已迁到实际 V4 claim/reserve/checkpoint/publish，删除无调用方的 V3 loader/publisher 和授权。真实回归发现并修复迟到分析占用判定版本、导致下一轮连续 CAS 失败：迟到结果只保留原冻结身份和分析历史，只有当前输入推进判定。五轮集合、同集合两次判定替换、旧结果先完成、两轮 DOCX、重放/权限/非空旧稿保护通过；脚本模型数据库回归 2/2、模块 78/78、baseline 合同 17/17。无新 migration、表或业务硬编码。此项不代表真实模型完整样稿已验收；编制外发仍待明确授权，Office 人工基准本地复验 1/1 通过：52 张表、单元格/图片编辑、保存重开、首稿/新轮创建、同请求重试及四次离线回调重放，资源清理通过；不替代 Agent 全稿与同版本 PDF 验收。见[样稿记录](../docs/bidding/archive/full-sample-results.md)。
 
 ### O1-S — 新轮 DOCX 初稿、存储版本与编辑会话
 
 - **F2 核心方案已确认，实施中：** 招标内容提取与附表关系按 PRD 落实主 Agent＋独立复核；完整来源读取、五类产物、跨条款/附件/表格多对多关系、适用性依据、独立核查及真实 DOCX 承载分别验收。具体合同和实施顺序见接入计划的「F2 核心」。当前单次请求原型与关键词/默认强制判断不作为已完成成果；真实模型和最终文档验收取得证据前不得标记完成。
 
-- **F2 Agent 核心审查增量：** 已接统一 Python docreader 的冻结文本/网格，补齐可并存的响应属性、带依据的指标与证明条件、多个响应位置及逐项结果复核，取消新发布路径默认正文响应。投标模块单元测试 **53/53**（其中 Agent 核心 **11/11**）；独立临时 PG16 三 baseline 与 Agent 发布/重投/owner隔离/跨重试预算 **1/1**；真实 PDF 经 Python service 的关键来源锚点 **1/1**；API/worker check 通过，worker 有旧路径未使用告警。没有新增 migration 文件；Shared baseline 仅补新系统发布身份登记。尚未配置真实模型验收参数；原页回看、更多行业样稿、字段/章节到 DOCX 的实际映射、界面和旧单次原型撤除仍待完成。详见[逐步审查与证据](../docs/bidding/tender-analysis-review.md)，不代表完整 F2/O1-S 已验收。
+- **F2 Agent 核心审查增量：** 已接统一 Python docreader 的冻结文本/网格，补齐可并存的响应属性、带依据的指标与证明条件、多个响应位置及逐项结果复核，取消新发布路径默认正文响应。投标模块单元测试 **53/53**（其中 Agent 核心 **11/11**）；独立临时 PG16 三 baseline 与 Agent 发布/重投/owner隔离/跨重试预算 **1/1**；真实 PDF 经 Python service 的关键来源锚点 **1/1**；API/worker check 通过，worker 有旧路径未使用告警。没有新增 migration 文件；Shared baseline 仅补新系统发布身份登记。尚未配置真实模型验收参数；原页回看、更多行业样稿、字段/章节到 DOCX 的实际映射、界面和旧单次原型撤除仍待完成。详见[逐步审查与证据](../docs/bidding/archive/tender-analysis-review.md)，不代表完整 F2/O1-S 已验收。
 
-- **F2 原页证据增量：** 已通过统一 Python docreader 接入冻结 PDF 物理页和上传图片回看，主 Agent 与独立复核分别查看同一份图片，视觉引用与原件摘要随分析版本保存；越权、摘要不符、回看失败或预算不足不能判为已验证。复用已有原件读取、认证、渲染器与 checkpoint，无新表或 migration 文件。Rust 投标模块 **57/57**、docparser **46/46**、Python 原页与来源锚点 **11/11**、独立临时 PG16＋真实认证 Python RPC **2/2** 通过；真实样稿第70物理页已人工核对表格及表后说明。上述模型测试使用脚本，真实模型验收尚未运行；Office 物理页、局部放大、完整章节/附表到 DOCX 落位、界面和旧单次原型撤除仍待完成。此前“原页回看待完成”为较早切片状态，详见[审查记录](../docs/bidding/tender-analysis-review.md)。
+- **F2 原页证据增量：** 已通过统一 Python docreader 接入冻结 PDF 物理页和上传图片回看，主 Agent 与独立复核分别查看同一份图片，视觉引用与原件摘要随分析版本保存；越权、摘要不符、回看失败或预算不足不能判为已验证。复用已有原件读取、认证、渲染器与 checkpoint，无新表或 migration 文件。Rust 投标模块 **57/57**、docparser **46/46**、Python 原页与来源锚点 **11/11**、独立临时 PG16＋真实认证 Python RPC **2/2** 通过；真实样稿第70物理页已人工核对表格及表后说明。上述模型测试使用脚本，真实模型验收尚未运行；Office 物理页、局部放大、完整章节/附表到 DOCX 落位、界面和旧单次原型撤除仍待完成。此前“原页回看待完成”为较早切片状态，详见[审查记录](../docs/bidding/archive/tender-analysis-review.md)。
 
-- **F2 字段关系增量：** 已补模板区域/单元格、响应/证明/指标项的精确关系端点；相同附件名不作身份，多单元格区域不能冒充单值字段，修改端点记录使旧关系及独立复核失效。投标模块 **63/63**（Agent **21/21**），临时 PG16＋认证 Python RPC **2/2** 通过，包含关系发布、分页读取及重投；API/worker check 通过。已直接删除旧单次 LLM 模板路由、调用、专用 schema 和 SQL 函数/授权，保留确定性 DOCX 原语；无新表/列/migration。之前“旧单次原型撤除待完成”为历史状态。当前仍缺真实模型验收、关系界面、持久化分章生成及整本 DOCX 实际落位，不代表 F2/O1-S 已完成。详见[实现审查](../docs/bidding/tender-analysis-review.md)。
+- **F2 字段关系增量：** 已补模板区域/单元格、响应/证明/指标项的精确关系端点；相同附件名不作身份，多单元格区域不能冒充单值字段，修改端点记录使旧关系及独立复核失效。投标模块 **63/63**（Agent **21/21**），临时 PG16＋认证 Python RPC **2/2** 通过，包含关系发布、分页读取及重投；API/worker check 通过。已直接删除旧单次 LLM 模板路由、调用、专用 schema 和 SQL 函数/授权，保留确定性 DOCX 原语；无新表/列/migration。之前“旧单次原型撤除待完成”为历史状态。当前仍缺真实模型验收、关系界面、持久化分章生成及整本 DOCX 实际落位，不代表 F2/O1-S 已完成。详见[实现审查](../docs/bidding/archive/tender-analysis-review.md)。
 
-- **F2 分章 DOCX 核心增量：** 已实现独立分章 Agent＋独立文档复核核心，消费冻结分析版本，按章增量保存、编译完整模板/拟制响应表及留白，校验实际 DOCX 章节、原文、网格、合并、表后说明、签章和字段位置。长表单元格分页核查；修改使旧文件/复核失效，确认丢失可恢复，预算/取消不伪成功；条件模板的未选用须明确保存原文依据，不能把关系自动全当 AND。原网格宽度由页面设置校验，待填示例值不复制。投标模块 **72/72**（分章 **9/9**）、定向 Clippy `-D warnings`、API/worker check 通过；合成两章两表 DOCX 经统一 Python service 回读及独立包核对通过。无新表/列/migration；`Journal` 仍待接生产 PostgreSQL owner/lease，worker 任务、新轮发布、前端及真实模型/ONLYOFFICE 全稿验收未完成。测试文件与边界见[分章实现记录](../docs/bidding/docx-composition.md)。本项不代表完整 F2/O1-S 已验收。
+- **F2 分章 DOCX 核心增量：** 已实现独立分章 Agent＋独立文档复核核心，消费冻结分析版本，按章增量保存、编译完整模板/拟制响应表及留白，校验实际 DOCX 章节、原文、网格、合并、表后说明、签章和字段位置。长表单元格分页核查；修改使旧文件/复核失效，确认丢失可恢复，预算/取消不伪成功；条件模板的未选用须明确保存原文依据，不能把关系自动全当 AND。原网格宽度由页面设置校验，待填示例值不复制。投标模块 **72/72**（分章 **9/9**）、定向 Clippy `-D warnings`、API/worker check 通过；合成两章两表 DOCX 经统一 Python service 回读及独立包核对通过。无新表/列/migration；`Journal` 仍待接生产 PostgreSQL owner/lease，worker 任务、新轮发布、前端及真实模型/ONLYOFFICE 全稿验收未完成。测试文件与边界见[分章实现记录](../docs/bidding/archive/docx-composition.md)。本项不代表完整 F2/O1-S 已验收。
 
-- **分章生产依据接缝：** 已从已发布 V4 分析/收据接回原冻结来源，新增编制请求的可序列化身份合同及摘要校验；绑定 Workspace、当前文件/分析版本、预期 DOCX 和显式模型契约，不重复缓存原页或读取旧投标正文。runtime API 权限下验证越权、身份错配、过期版本、契约篡改以及新文件轮次后的精确历史恢复，临时 PG16 合计 3/3。未新增表/列/migration；完整编制请求入队、生产 Journal、文件/manifest 原子发布和前端生成入口仍未完成，不能据此标记 O1-S 完成。见[编制接线](../docs/bidding/docx-composition.md#生产接线编制依据与恢复合同)。
+- **分章生产依据接缝：** 已从已发布 V4 分析/收据接回原冻结来源，新增编制请求的可序列化身份合同及摘要校验；绑定 Workspace、当前文件/分析版本、预期 DOCX 和显式模型契约，不重复缓存原页或读取旧投标正文。runtime API 权限下验证越权、身份错配、过期版本、契约篡改以及新文件轮次后的精确历史恢复，临时 PG16 合计 3/3。未新增表/列/migration；完整编制请求入队、生产 Journal、文件/manifest 原子发布和前端生成入口仍未完成，不能据此标记 O1-S 完成。见[编制接线](../docs/bidding/archive/docx-composition.md#生产接线编制依据与恢复合同)。
 
-- **分章持久化接缝：** 已增加一张专用编制请求身份表，绑定原提取请求、文件/分析及预期 DOCX；复用已有 Request、AgentRun、调用记录和检查点，无新 migration 文件。生产 PgJournal 已验证完整脚本编制/独立复核、确认丢失恢复、旧 owner 拒绝、相同 checkpoint 重放及跨 attempt 调用预算。真实 PG 新用例 1/1，其他三项来源/提取/诊断回归通过。HTTP、Rust 队列注册、worker heartbeat/失败处理、DOCX+manifest 原子发布及前端仍待接线；请求持久化不等于已入队，不标 O1-S 完成。必要性与边界见[持久化编制](../docs/bidding/docx-composition.md#持久化编制请求与-journal)。
+- **分章持久化接缝：** 已增加一张专用编制请求身份表，绑定原提取请求、文件/分析及预期 DOCX；复用已有 Request、AgentRun、调用记录和检查点，无新 migration 文件。生产 PgJournal 已验证完整脚本编制/独立复核、确认丢失恢复、旧 owner 拒绝、相同 checkpoint 重放及跨 attempt 调用预算。真实 PG 新用例 1/1，其他三项来源/提取/诊断回归通过。HTTP、Rust 队列注册、worker heartbeat/失败处理、DOCX+manifest 原子发布及前端仍待接线；请求持久化不等于已入队，不标 O1-S 完成。必要性与边界见[持久化编制](../docs/bidding/archive/docx-composition.md#持久化编制请求与-journal)。
 
-- **分章文件发布接缝：** 已复用新轮 CAS、对象归属及收据，将已独立复核 DOCX 与规范清单、初始版本和 Request/AgentRun 完成状态原子发布；无新增表/列/migration。提交前重建核对实际文件，重试只读验证两对象；第二对象失败完整回滚、生成期间人工保存/来源更新拒绝覆盖，清单只绑定原版本。真实临时 PG 5/5（含四项共享回归）、78 项模块、17 项合同及定向 Clippy 通过，资源已清理。HTTP/队列/worker 写入清理编排、前端和真实模型整本验收仍未完成，不标 O1-S/F2 完成；见[原子发布](../docs/bidding/docx-composition.md#已复核-docx-与清单原子发布)。
+- **分章文件发布接缝：** 已复用新轮 CAS、对象归属及收据，将已独立复核 DOCX 与规范清单、初始版本和 Request/AgentRun 完成状态原子发布；无新增表/列/migration。提交前重建核对实际文件，重试只读验证两对象；第二对象失败完整回滚、生成期间人工保存/来源更新拒绝覆盖，清单只绑定原版本。真实临时 PG 5/5（含四项共享回归）、78 项模块、17 项合同及定向 Clippy 通过，资源已清理。HTTP/队列/worker 写入清理编排、前端和真实模型整本验收仍未完成，不标 O1-S/F2 完成；见[原子发布](../docs/bidding/archive/docx-composition.md#已复核-docx-与清单原子发布)。
 
-- **分章队列/worker 接线：** 已增加专用 typed job 和核心 worker 注册，复用原 Oxana 唯一身份/重试、执行心跳、检查点与原子发布；每次执行验证完整投递 scope。对象写入使用原平台 blob 接口及现有子进程取消/回收边界，失败 staging 由原 tracker 交接 RetentionQueue；无新表/列/migration。PG/Redis 6/6 与追加取消后恢复 CAS 用例通过；实际 worker helper 2/2、deadline 1/1、payload 3/3、registry 4/4、78 项模块、17 项合同及定向 Clippy 通过，资源已清理。真实 Redis envelope 后直接调用脚本模型 executor，尚未完成 HTTP/真实 consumer/provider/前端整链或最终物理回收验收；不标 F2/O1-S 完成。见[执行接线](../docs/bidding/docx-composition.md#编制队列与-worker-执行)。
+- **分章队列/worker 接线：** 已增加专用 typed job 和核心 worker 注册，复用原 Oxana 唯一身份/重试、执行心跳、检查点与原子发布；每次执行验证完整投递 scope。对象写入使用原平台 blob 接口及现有子进程取消/回收边界，失败 staging 由原 tracker 交接 RetentionQueue；无新表/列/migration。PG/Redis 6/6 与追加取消后恢复 CAS 用例通过；实际 worker helper 2/2、deadline 1/1、payload 3/3、registry 4/4、78 项模块、17 项合同及定向 Clippy 通过，资源已清理。真实 Redis envelope 后直接调用脚本模型 executor，尚未完成 HTTP/真实 consumer/provider/前端整链或最终物理回收验收；不标 F2/O1-S 完成。见[执行接线](../docs/bidding/archive/docx-composition.md#编制队列与-worker-执行)。
 
-- **分章 HTTP/前端接线：** 已接编制依据、提交、latest/指定进度 API 与“按招标要求生成”入口，保留已有 DOCX 导入。HTTP 重放先查原意图收据，不重取新配置/current；前端以原依据/key 恢复未知提交，后台任务重开不再 POST，空初始化要求集合不可生成。专属 PG/Redis 真实 API 1/1（脚本真实 DOCX 夹具 1/1）、前端 29/29、实际浏览器模拟 API 3/3、78 项模块/17 项合同及定向 Clippy/ESLint/build 通过，资源已清理。无新表/列/migration；编制预算沿用真实样稿既有 limits 写入 deploy/.env 新字段，模型配置未改。完整 consumer/provider/Office 整链与真实高质量验收仍未完成，不能标 F2/O1-S 完成；见[生成入口](../docs/bidding/docx-composition.md#生成-http-与前端入口)。
+- **分章 HTTP/前端接线：** 已接编制依据、提交、latest/指定进度 API 与“按招标要求生成”入口，保留已有 DOCX 导入。HTTP 重放先查原意图收据，不重取新配置/current；前端以原依据/key 恢复未知提交，后台任务重开不再 POST，空初始化要求集合不可生成。专属 PG/Redis 真实 API 1/1（脚本真实 DOCX 夹具 1/1）、前端 29/29、实际浏览器模拟 API 3/3、78 项模块/17 项合同及定向 Clippy/ESLint/build 通过，资源已清理。无新表/列/migration；编制预算沿用真实样稿既有 limits 写入 deploy/.env 新字段，模型配置未改。完整 consumer/provider/Office 整链与真实高质量验收仍未完成，不能标 F2/O1-S 完成；见[生成入口](../docs/bidding/archive/docx-composition.md#生成-http-与前端入口)。
 
-- **实际 API/consumer/provider 接缝：** 正式 migrator 空白建库与 API/worker 就绪、真实 HTTP 提交、Oxana 消费、30 次本地 SSE 工具调用、文件 helper、两轮 DOCX/manifest 发布、中途重启、重放/历史/越权及对象摘要核对通过，资源清理通过。联调发现正常上传追加合同使整表 frozen seed 指纹变化，最小修复为通用显式 baseline 主键选择及建库完整性检查；初始合同修改/缺失仍拒绝，无新表/列/migration，不改维护门或队列调度。平台 62/62、定向 Clippy/构建通过；全部集成目标 Clippy 有继承测试八参数告警。本批是合成来源/脚本模型的实际传输联调，真实招标 Agent 整稿、PDF 与浏览器/Office 联合验收仍待完成，不标 F2/O1-S 完成。见[执行证据](../docs/bidding/docx-composition.md#实际-apiconsumer-与-http-模型联调)。
+- **实际 API/consumer/provider 接缝：** 正式 migrator 空白建库与 API/worker 就绪、真实 HTTP 提交、Oxana 消费、30 次本地 SSE 工具调用、文件 helper、两轮 DOCX/manifest 发布、中途重启、重放/历史/越权及对象摘要核对通过，资源清理通过。联调发现正常上传追加合同使整表 frozen seed 指纹变化，最小修复为通用显式 baseline 主键选择及建库完整性检查；初始合同修改/缺失仍拒绝，无新表/列/migration，不改维护门或队列调度。平台 62/62、定向 Clippy/构建通过；全部集成目标 Clippy 有继承测试八参数告警。本批是合成来源/脚本模型的实际传输联调，真实招标 Agent 整稿、PDF 与浏览器/Office 联合验收仍待完成，不标 F2/O1-S 完成。见[执行证据](../docs/bidding/archive/docx-composition.md#实际-apiconsumer-与-http-模型联调)。
 
-- **浏览器生成至 Office 同次验收：** 复用已有产品浏览器/表格校验工具，完成 3 轮真实 API/consumer 编制（45 次本机合成 SSE 工具调用）；第三轮由完整 App 发起，下载后实际编辑、保存、关闭重开，再改单元格保存。新 editor key、保存版本/摘要、原生成结果不变与其余表格内容/结构通过核对。修复验收读取旧对象路径，改用平台返回的定位，不复制 namespace 规则；无产品业务改动或 migration。构建、fmt/check/全目标全特性严格 Clippy、数据库夹具 1/1 与表格校验器 2/2 通过，最终运行/清理通过。详见[同次产品验收](../docs/bidding/docx-composition.md#浏览器生成至实际-office-保存的同次验收)。这只完成合成来源的产品接线证据，真实招标完整 Agent 稿/同版本 PDF 与高质量语义验收仍缺，不标 O1-S/F2 完成。
+- **浏览器生成至 Office 同次验收：** 复用已有产品浏览器/表格校验工具，完成 3 轮真实 API/consumer 编制（45 次本机合成 SSE 工具调用）；第三轮由完整 App 发起，下载后实际编辑、保存、关闭重开，再改单元格保存。新 editor key、保存版本/摘要、原生成结果不变与其余表格内容/结构通过核对。修复验收读取旧对象路径，改用平台返回的定位，不复制 namespace 规则；无产品业务改动或 migration。构建、fmt/check/全目标全特性严格 Clippy、数据库夹具 1/1 与表格校验器 2/2 通过，最终运行/清理通过。详见[同次产品验收](../docs/bidding/archive/docx-composition.md#浏览器生成至实际-office-保存的同次验收)。这只完成合成来源的产品接线证据，真实招标完整 Agent 稿/同版本 PDF 与高质量语义验收仍缺，不标 O1-S/F2 完成。
 
-- **真实稿独立复核红色证据：** 对统一 Python 冻结来源作重点逐条复核，首轮列出14项发现与12个模板文本区域重叠（R08–R10已在后续全量要求交叉检查中更正，见下方指定格式复核）；8G/8H原文含义、2A跨页注释、技术阈值及评分条件均有遗漏/错配，原161轮提取的空 findings 不足以通过验收。新增通用文本区间互斥校验，历史已审结果不能跳过；离线 audit 无模型调用，当前真实结果预期退出1并列出12个 invalid_record。80项模块及定向 Clippy/build通过，无新 migration。下一步优先修提取粒度、完整模板/关系与逐段应答承载，再在授权环境用 deploy/.env 重跑真实模型，保留旧结果为失败证据。完整106页、Agent整稿、Office和同版本PDF仍未验收。见[逐项复核](../docs/bidding/real-tender-acceptance-review.md)。
+- **真实稿独立复核红色证据：** 对统一 Python 冻结来源作重点逐条复核，首轮列出14项发现与12个模板文本区域重叠（R08–R10已在后续全量要求交叉检查中更正，见下方指定格式复核）；8G/8H原文含义、2A跨页注释、技术阈值及评分条件均有遗漏/错配，原161轮提取的空 findings 不足以通过验收。新增通用文本区间互斥校验，历史已审结果不能跳过；离线 audit 无模型调用，当前真实结果预期退出1并列出12个 invalid_record。80项模块及定向 Clippy/build通过，无新 migration。下一步优先修提取粒度、完整模板/关系与逐段应答承载，再在授权环境用 deploy/.env 重跑真实模型，保留旧结果为失败证据。完整106页、Agent整稿、Office和同版本PDF仍未验收。见[逐项复核](../docs/bidding/archive/real-tender-acceptance-review.md)。
 
 - **逐段原文＋待填响应承载：** 已新增来源片段内容块，原文仅从冻结文本字节区间/网格锚点读取，可显式拼接跨页条款；响应留白独立落位，不能绕过指定附表，来源映射必须逐项复核。83项模块测试、定向 Clippy，以及真实第59–61页跨页原文的 DOCX 原语验证通过。验证件与精确文本证据在 `artifacts/bid-full-sample/source-response-carrier/`；无新 migration、模型配置或上传解析实现。R14 的结构承载已落地，但汇总提取仍需修正，旧真实结果继续拒绝，未标真实整稿/Office/PDF验收完成。
 
-- **要求/指标/证明的精确网格引用：** `read_form` 已返回实际锚点引用，要求证据可直接定位冻结表格中的单元格；核对归属、行列与独立阅读，拒绝混用图片/文本坐标。发布保留完整引用，网格依据不伪造文本引文，逐段编制须同时匹配要求与 response 的具体单元格。86项模块、17项 baseline 合同、定向 Clippy/build及真实第59–61页引用/原文承载验证通过；无新 migration、配置或解析器。记录粒度与完整性仍需通过真实模型重新提取和逐项复核证明，原结果保持拒绝。见[证据结构](../docs/bidding/tender-analysis-review.md#精确网格证据与逐段要求)。
+- **要求/指标/证明的精确网格引用：** `read_form` 已返回实际锚点引用，要求证据可直接定位冻结表格中的单元格；核对归属、行列与独立阅读，拒绝混用图片/文本坐标。发布保留完整引用，网格依据不伪造文本引文，逐段编制须同时匹配要求与 response 的具体单元格。86项模块、17项 baseline 合同、定向 Clippy/build及真实第59–61页引用/原文承载验证通过；无新 migration、配置或解析器。记录粒度与完整性仍需通过真实模型重新提取和逐项复核证明，原结果保持拒绝。见[证据结构](../docs/bidding/archive/tender-analysis-review.md#精确网格证据与逐段要求)。
 
-- **真实指定格式逐页复核：** 第74–106页47个来源单元、14个网格/187个非空格已核对；另查看8张原图，形成24项格式预期。新增附件6日期归属、8A固定字段提示、8D/8E标题与表体顺序、签署区示例值及附件8续页问题；同时纠正首轮R08–R10误报，已有技术/业绩加分和报价公式予以保留，修复重点包括对应评分来源。修订共19项发现，原提取与旧审计留存。通用提示词补充多表顺序、字段提示和跨记录复核，无编号规则、解析器或migration。仍须真实重新提取及整稿/Office/PDF验收。见[完整格式清单](../docs/bidding/prescribed-format-acceptance.md)。
+- **真实指定格式逐页复核：** 第74–106页47个来源单元、14个网格/187个非空格已核对；另查看8张原图，形成24项格式预期。新增附件6日期归属、8A固定字段提示、8D/8E标题与表体顺序、签署区示例值及附件8续页问题；同时纠正首轮R08–R10误报，已有技术/业绩加分和报价公式予以保留，修复重点包括对应评分来源。修订共19项发现，原提取与旧审计留存。通用提示词补充多表顺序、字段提示和跨记录复核，无编号规则、解析器或migration。仍须真实重新提取及整稿/Office/PDF验收。见[完整格式清单](../docs/bidding/archive/prescribed-format-acceptance.md)。
 
-- **目录前内容及真实封面：** 编制支持显式、来源驱动的前置内容，封面不进入正文目录；校验实际书签顺序及原生目录域。真实第73页封面九格/三处空白与目录位置通过定向原语验证，89项模块、17项baseline及Clippy通过。旧提取封面缺口另记R20；实际Agent整稿和Office封面版式仍待验收。见[封面验证](../docs/bidding/docx-composition.md#招标指定封面与目录顺序验证)。
+- **目录前内容及真实封面：** 编制支持显式、来源驱动的前置内容，封面不进入正文目录；校验实际书签顺序及原生目录域。真实第73页封面九格/三处空白与目录位置通过定向原语验证，89项模块、17项baseline及Clippy通过。旧提取封面缺口另记R20；实际Agent整稿和Office封面版式仍待验收。见[封面验证](../docs/bidding/archive/docx-composition.md#招标指定封面与目录顺序验证)。
 
-- **专用技术部分逐项复核：** 第54–70页31来源单元、14网格/140非空格及6张原图已核对，形成65项来源预期和R21–R25五项open发现；75处引用、10处原记录观测及原图摘要验证通过。已提取的硬件/服务关键数值保留，补查网络与编排复合条件、环境和服务细项、期限起算依据。Agent及独立复核提示补充相邻标记格/合并表头、实际阅读顺序及不得补造期限起点，无行业字典或migration。89项模块通过；真实重新提取、通用技术部分及全部106页/整稿/Office/PDF验收仍未完成。见[技术清单](../docs/bidding/technical-requirements-acceptance.md)。
+- **专用技术部分逐项复核：** 第54–70页31来源单元、14网格/140非空格及6张原图已核对，形成65项来源预期和R21–R25五项open发现；75处引用、10处原记录观测及原图摘要验证通过。已提取的硬件/服务关键数值保留，补查网络与编排复合条件、环境和服务细项、期限起算依据。Agent及独立复核提示补充相邻标记格/合并表头、实际阅读顺序及不得补造期限起点，无行业字典或migration。89项模块通过；真实重新提取、通用技术部分及全部106页/整稿/Office/PDF验收仍未完成。见[技术清单](../docs/bidding/archive/technical-requirements-acceptance.md)。
 
-- **混合单元格局部留白：** 提取区域可显式指定原格UTF-8范围，既有read_form支持精确子串定位，不由模型手算中文偏移或用行业关键词识别。编制只删除已审范围，保留固定提示/签章；同格重复策略、未读/越界/重叠范围、表头和合并覆盖格误删拒绝。94项模块及17项baseline通过；合成两格四个示例值清除、真实8A两表61锚点/19空值保留均有OOXML证据。真实8A不含混合示例值，原提取R16仍需修复，不据此关闭整稿验收；无新migration。见[实现及证据边界](../docs/bidding/docx-composition.md#混合单元格的局部留白)。
+- **混合单元格局部留白：** 提取区域可显式指定原格UTF-8范围，既有read_form支持精确子串定位，不由模型手算中文偏移或用行业关键词识别。编制只删除已审范围，保留固定提示/签章；同格重复策略、未读/越界/重叠范围、表头和合并覆盖格误删拒绝。94项模块及17项baseline通过；合成两格四个示例值清除、真实8A两表61锚点/19空值保留均有OOXML证据。真实8A不含混合示例值，原提取R16仍需修复，不据此关闭整稿验收；无新migration。见[实现及证据边界](../docs/bidding/archive/docx-composition.md#混合单元格的局部留白)。
 
-- **模板区域的字段落位修复：** 修正网格区域绑定只有整表书签、没有单元格坐标的问题。现按已审区域逐个记录实际锚点，单格区域与单元格别名定位一致，多格区域不混入邻格或合并覆盖格。编制工具说明纳入冻结契约摘要，旧契约不可静默恢复。模块 96 passed/1 ignored、定向全目标/全特性 Clippy、fmt 和10份 Schema 检查通过；红色回归保留。未增加业务规则、数据库/migration或解析器；原真实提取及32项拒绝发现不变，R12仍需真实关系修复和整稿验收。见[精确落位](../docs/bidding/docx-composition.md#网格区域的精确落位)。
+- **模板区域的字段落位修复：** 修正网格区域绑定只有整表书签、没有单元格坐标的问题。现按已审区域逐个记录实际锚点，单格区域与单元格别名定位一致，多格区域不混入邻格或合并覆盖格。编制工具说明纳入冻结契约摘要，旧契约不可静默恢复。模块 96 passed/1 ignored、定向全目标/全特性 Clippy、fmt 和10份 Schema 检查通过；红色回归保留。未增加业务规则、数据库/migration或解析器；原真实提取及32项拒绝发现不变，R12仍需真实关系修复和整稿验收。见[精确落位](../docs/bidding/archive/docx-composition.md#网格区域的精确落位)。
 
 - **目标 / 不做：** 用当前完整冻结输入单向生成包含全部章节和章内待填写表格的整本 DOCX 模板，关联项目/Workspace/新轮/文件版本与编辑会话；复用对象、幂等、CAS，不建设通用版本平台或 DOCX↔块双向同步。具体内容自动填充后置，不作为本期模板生成的验收前置。
 - **归属 / 候选文件面：** `crates/bidding/src/workspace.rs`、`bid_authoring_v2.rs`、`render_v2.rs` 及既有持久化边界；API 配置入口在 `crates/api/src/bid_v2_routes.rs`。需要 Schema 时只按已确认所属 baseline 原则和后续限定范围处理。
@@ -321,7 +319,7 @@ P1 是后续第一个代码任务；P0 是证据复核，不重做已有实现�
 - **会话持久化必要性复核：** 用户要求新增 migration 先确认必要性。已有 DOCX round/version/current 保留；本轮仅支持打开/替代的会话表及分配 API 试写已撤回，生产代码/SQL 回到本轮开始状态，未操作数据库。稳定 key 需要跨请求关联，但不等于必须另建表；先验证 forcesave/最终保存/无修改重连/乱序的生命周期，优先评估复用 current/version/idempotency/audit，再按实际读写需求确定最小结构。禁止以预留字段/接口替代真实接入，详见[持久化复核](../docs/bidding/docx-rounds.md#持久化必要性复核编辑会话增量暂不落表)。本记录不增加普通开发的人工批准前置。
 
 
-- **生命周期协议实测：** 新增显式隔离工具 `scripts/onlyoffice_lifecycle_probe.py`；真实样稿两次 forcesave 的不同 `userdata`/DOCX、同 key 继续编辑后的最终保存、新 key 打开最终文件、旧签名回调主动重投和无修改 `4 → 1` 重开均有文件/事件证据，run/cleanup exit 0。签名有效的旧回调仍指向旧 bytes，不能当成“最新”。本轮未增改 schema、未接产品 callback；不是自然乱序、断网恢复、产品并发分配或完整 O1 验收。具体约束见[生命周期实测](../docs/bidding/onlyoffice-lifecycle-results.md)，下一实现先评估现有 current 的最小活动关联与既有版本/幂等/audit 的原子联动。
+- **生命周期协议实测：** 新增显式隔离工具 `scripts/onlyoffice_lifecycle_probe.py`；真实样稿两次 forcesave 的不同 `userdata`/DOCX、同 key 继续编辑后的最终保存、新 key 打开最终文件、旧签名回调主动重投和无修改 `4 → 1` 重开均有文件/事件证据，run/cleanup exit 0。签名有效的旧回调仍指向旧 bytes，不能当成“最新”。本轮未增改 schema、未接产品 callback；不是自然乱序、断网恢复、产品并发分配或完整 O1 验收。具体约束见[生命周期实测](../docs/bidding/archive/onlyoffice-lifecycle-results.md)，下一实现先评估现有 current 的最小活动关联与既有版本/幂等/audit 的原子联动。
 
 
 - **编辑/保存后端接线：** 实测后复用现有 `bid_docx_current`，仅补活动 key、打开基线、pending 保存 ID 和错误状态；未新增会话表或 migration 文件。签名编辑配置、用途受限 source、后端关联 forcesave、双重校验 callback 和原子版本发布已有实际调用方；最终保存/新轮清除活动关联，旧回执不复活 key。配置均显式提供，未操作现有数据库。最终路由级 HTTP 1/1、API 模块 12/12、baseline 契约 21/21、API/HTTP clippy 通过，回调写盘失败及最终保存并发有实证，专属资源已清理。字段必要性、API、验证和技术限制见[编辑后端记录](../docs/bidding/docx-editor.md)。原“会话未接线”记录为较早切片，不代表此次增量的最终状态；完整 O1-S/C/W 仍未验收。
@@ -336,7 +334,7 @@ P1 是后续第一个代码任务；P0 是证据复核，不重做已有实现�
 - **依赖：** O1-S。
 - **产出：** 受控读取与签名配置、回调处理及真实服务回归，保存关联/幂等/乱序策略的明确实现与证据。
 - **可证实验收：** 用户/项目/新轮/文件/用途越权及伪造签名拒绝；secret 不入前端/日志。状态 2/6 按保存语义处理，3/7 明确失败，其他通知不伪保存；重复不重复发布，乱序、旧会话、旧轮不回滚当前稿，不能按到达时间猜最新。主机/协议/重定向/范围、超时/大小预算有效；损坏 DOCX、摘要不符或存储失败不推进 ready、不返回伪成功。
-- **当前状态：** 后端已接线，权限、签名、下载范围、幂等/乱序及写盘失败等已有独立 HTTP 契约证据；真实 Document Server 经产品 TCP 路由完成两次 forcesave、最终保存、新 key 重开再编辑和历史 bytes 核验。后续已补[已完成回调的缓存失效恢复](../docs/bidding/docx-editor.md#已完成回调的缓存失效恢复)：复用原幂等回执保存已验证通知摘要，重复通知直接核验已有文件；仅调整现有两个 baseline 函数，无新表/列/函数签名/migration 文件。再次复核后取消“令牌续期”独立任务：打开配置 TTL 与活动地址用途绑定分开，source/callback 均要求服务逐次有效签名，状态由既有 key/owner/基线和完成回执约束，无新增数据库修改。HTTP 1/1、API 模块 12/12、baseline 21/21、clippy 通过；真实 native 目标 1/1，打开配置过期后继续编辑保存及停机后四条真实签名回调主动重投均成功，所有 run/cleanup exit 0。详见[真实产品联调](../docs/bidding/onlyoffice-product-results.md)。首次保存缓存不可用、不确定命令 pending 与完整故障验收仍有边界；编制前端的后续进展见 O1-W，初稿生成仍待完成，不标完整 O1 完成。
+- **当前状态：** 后端已接线，权限、签名、下载范围、幂等/乱序及写盘失败等已有独立 HTTP 契约证据；真实 Document Server 经产品 TCP 路由完成两次 forcesave、最终保存、新 key 重开再编辑和历史 bytes 核验。后续已补[已完成回调的缓存失效恢复](../docs/bidding/docx-editor.md#已完成回调的缓存失效恢复)：复用原幂等回执保存已验证通知摘要，重复通知直接核验已有文件；仅调整现有两个 baseline 函数，无新表/列/函数签名/migration 文件。再次复核后取消“令牌续期”独立任务：打开配置 TTL 与活动地址用途绑定分开，source/callback 均要求服务逐次有效签名，状态由既有 key/owner/基线和完成回执约束，无新增数据库修改。HTTP 1/1、API 模块 12/12、baseline 21/21、clippy 通过；真实 native 目标 1/1，打开配置过期后继续编辑保存及停机后四条真实签名回调主动重投均成功，所有 run/cleanup exit 0。详见[真实产品联调](../docs/bidding/archive/onlyoffice-product-results.md)。首次保存缓存不可用、不确定命令 pending 与完整故障验收仍有边界；编制前端的后续进展见 O1-W，初稿生成仍待完成，不标完整 O1 完成。
 
 ### O1-W — 编制前端真实编辑、保存与重开
 
@@ -346,17 +344,17 @@ P1 是后续第一个代码任务；P0 是证据复核，不重做已有实现�
 - **依赖：** O1-C。
 - **产出：** 可打开/编辑/保存/关闭重开的编制入口、版本/保存中/失败反馈及真实浏览器回归。
 - **可证实验收：** 修改段落/表格/图片后重开恢复真实 bytes 中的内容；保存中与我方持久化成功明确区分，刷新/失败/迟到通知不报假 ready。密钥仅后端签发，不能跨项目换稿；业务缺料允许编辑。旧入口在切换前受控保留，不形成同一正式稿双主写入。
-- **当前状态：** 已有正式 DOCX 的项目进入独立编制页，使用真实配置、保存回执、关闭/重开和指定保存版本下载，保留三步导航；明确不存在 DOCX 才使用旧入口，权限/服务查询失败不切换写入器。同步完成不报已保存，不确定发送复用原请求身份，后续编辑和旧轮/迟到响应不误确认；未保存时拦截步骤、链接、退出、hash 跳转，离开浏览器有提示。前端测试 **42/42**、build 与定向 ESLint 通过；真实产品组件在 StrictMode 下完成两次按钮保存/下载、关闭最终保存、新 key 重开再编辑、干净关闭/重开、历史 bytes 和停机四条回调重投，native **1/1**、run/cleanup exit 0；另有 403/503 查询故障注入验证无旧编辑器回退。实测先暴露并修复直接 hash 跳转先卸载编辑器的问题，失败证据保留。详见[产品前端实测](../docs/bidding/onlyoffice-product-results.md#产品编制前端实测)。无本轮数据库/baseline/migration 变更或令牌续期功能。后续已接真实账户邮箱及应用语言，配置由后端签名；移除测试启动入口，改由完整 App 调用真实 me 恢复登录态。新增非法参数/伪造账户拒绝和签名覆盖契约，HTTP **1/1**、API 模块 **12/12**、Clippy、前端 **42/42**/build/lint 通过；完整 App 真实保存链 native **1/1**、run/cleanup exit 0，中文菜单及姓名提示消失已截图核对，详见[账户与语言实测](../docs/bidding/onlyoffice-product-results.md#账户语言与完整-app-登录态恢复)。无新表列或 migration。后续已补[表格/图片实测](../docs/bidding/onlyoffice-product-results.md#表格与图片的真实编辑回归)：真实页面改单元格、文件选择插图及高级设置改尺寸，两次保存、最终保存和新 key 重开再编辑后，四张表的被检结构/文字、原图片、新图片引用/摘要与尺寸均保持预期；native **1/1**，run/cleanup exit 0。此次仅变更测试工具与文档，原稿、baseline 和 index 不变。下一实施回到 O1-S 初稿生成及前端新轮入口；账号密码登录、完整故障与最终版式验收仍待完成，完成并复核 O1-S/C/W 后才进入 O2。
+- **当前状态：** 已有正式 DOCX 的项目进入独立编制页，使用真实配置、保存回执、关闭/重开和指定保存版本下载，保留三步导航；明确不存在 DOCX 才使用旧入口，权限/服务查询失败不切换写入器。同步完成不报已保存，不确定发送复用原请求身份，后续编辑和旧轮/迟到响应不误确认；未保存时拦截步骤、链接、退出、hash 跳转，离开浏览器有提示。前端测试 **42/42**、build 与定向 ESLint 通过；真实产品组件在 StrictMode 下完成两次按钮保存/下载、关闭最终保存、新 key 重开再编辑、干净关闭/重开、历史 bytes 和停机四条回调重投，native **1/1**、run/cleanup exit 0；另有 403/503 查询故障注入验证无旧编辑器回退。实测先暴露并修复直接 hash 跳转先卸载编辑器的问题，失败证据保留。详见[产品前端实测](../docs/bidding/archive/onlyoffice-product-results.md#产品编制前端实测)。无本轮数据库/baseline/migration 变更或令牌续期功能。后续已接真实账户邮箱及应用语言，配置由后端签名；移除测试启动入口，改由完整 App 调用真实 me 恢复登录态。新增非法参数/伪造账户拒绝和签名覆盖契约，HTTP **1/1**、API 模块 **12/12**、Clippy、前端 **42/42**/build/lint 通过；完整 App 真实保存链 native **1/1**、run/cleanup exit 0，中文菜单及姓名提示消失已截图核对，详见[账户与语言实测](../docs/bidding/archive/onlyoffice-product-results.md#账户语言与完整-app-登录态恢复)。无新表列或 migration。后续已补[表格/图片实测](../docs/bidding/archive/onlyoffice-product-results.md#表格与图片的真实编辑回归)：真实页面改单元格、文件选择插图及高级设置改尺寸，两次保存、最终保存和新 key 重开再编辑后，四张表的被检结构/文字、原图片、新图片引用/摘要与尺寸均保持预期；native **1/1**，run/cleanup exit 0。此次仅变更测试工具与文档，原稿、baseline 和 index 不变。下一实施回到 O1-S 初稿生成及前端新轮入口；账号密码登录、完整故障与最终版式验收仍待完成，完成并复核 O1-S/C/W 后才进入 O2。
 
-O1真实稿验收补充：已核对物理第43–53页通用技术及评标程序，新增47项人工预期与R26–R28（标准版本/优先范围、条件性材料、引用目标）；53处引文、原41条记录/10条关系与4张图片摘要通过完整性核对。已补充Agent通用指引，无业务字典、新表列或migration。详见[通用技术验收补充](../docs/bidding/general-requirements-acceptance.md)。原真实提取仍不通过，完整Agent DOCX与同稿PDF仍待完成。
+O1真实稿验收补充：已核对物理第43–53页通用技术及评标程序，新增47项人工预期与R26–R28（标准版本/优先范围、条件性材料、引用目标）；53处引文、原41条记录/10条关系与4张图片摘要通过完整性核对。已补充Agent通用指引，无业务字典、新表列或migration。详见[通用技术验收补充](../docs/bidding/archive/general-requirements-acceptance.md)。原真实提取仍不通过，完整Agent DOCX与同稿PDF仍待完成。
 
-O1来源核对现已形成[106页索引](../artifacts/bid-full-sample/acceptance-index.json)：前42页新增134项预期及R29–R32，55来源/13网格/308非空格与5张前附表原图已核对；引用完整性检查通过。累计32项发现保持open，原提取仍rejected，尚不能进入整稿已验收状态。详见[投标须知及评标核对](../docs/bidding/instructions-requirements-acceptance.md)。
+O1来源核对现已形成[106页索引](../artifacts/bid-full-sample/acceptance-index.json)：前42页新增134项预期及R29–R32，55来源/13网格/308非空格与5张前附表原图已核对；引用完整性检查通过。累计32项发现保持open，原提取仍rejected，尚不能进入整稿已验收状态。详见[投标须知及评标核对](../docs/bidding/archive/instructions-requirements-acceptance.md)。
 
-O1 模板校验补充：删除自动给空格分配 bidder_blank、添加“无内容填 /”并重绑复核摘要的修补程序；在现有提取校验中提前拒绝同表 regions 不连续及仅有截图的非网格正文，交由 Agent 依据原文处理。三项回归、fmt/check/严格 Clippy 通过，完整 Rust 测试 598 passed、0 failed、15 ignored。原始真实分析只读检查仍有 16 条结构无效记录，32 项语义发现未关闭；原文件摘要未变，未生成或验收完整 Agent DOCX/PDF。继续聚焦原文补正→独立复核→整稿生成；不扩展新框架或 migration。详见[模板校验记录](../docs/bidding/full-sample-results.md#模板校验与空格策略补充)。
+O1 模板校验补充：删除自动给空格分配 bidder_blank、添加“无内容填 /”并重绑复核摘要的修补程序；在现有提取校验中提前拒绝同表 regions 不连续及仅有截图的非网格正文，交由 Agent 依据原文处理。三项回归、fmt/check/严格 Clippy 通过，完整 Rust 测试 598 passed、0 failed、15 ignored。原始真实分析只读检查仍有 16 条结构无效记录，32 项语义发现未关闭；原文件摘要未变，未生成或验收完整 Agent DOCX/PDF。继续聚焦原文补正→独立复核→整稿生成；不扩展新框架或 migration。详见[模板校验记录](../docs/bidding/archive/full-sample-results.md#模板校验与空格策略补充)。
 
-O1 真实运行恢复补充：共享异步传输已修复“完整 SSE `[DONE]` 到达后仍等待 HTTP EOF”的可复现误报，11 项传输/解析回归及 fmt/check/严格 Clippy/完整默认 Rust 测试通过（606/0/16）。按 `deploy/.env`、同一 Python 冻结输入和原预算启动新 v5 完整提取；不重置 v4 已耗尽的边界或导入旧分析。旧超时原因尚未证实，32 项独立发现仍开放，真实完整 DOCX/PDF 尚未验收。见[样稿当前记录](../docs/bidding/full-sample-results.md)。
+O1 真实运行恢复补充：共享异步传输已修复“完整 SSE `[DONE]` 到达后仍等待 HTTP EOF”的可复现误报，11 项传输/解析回归及 fmt/check/严格 Clippy/完整默认 Rust 测试通过（606/0/16）。按 `deploy/.env`、同一 Python 冻结输入和原预算启动新 v5 完整提取；不重置 v4 已耗尽的边界或导入旧分析。旧超时原因尚未证实，32 项独立发现仍开放，真实完整 DOCX/PDF 尚未验收。见[样稿当前记录](../docs/bidding/archive/full-sample-results.md)。
 
-O1 整稿验收工具补充：现有办公探针增加只更新目录、保存重开及同版本 PDF 的无标记整理模式，正文文字保留检查及合成稿实际服务 1/1 通过；原完整编辑/历史/停服回调回归 1/1 通过，临时服务清理零错误。该模式用于之后输出可审阅文件，不代替真实招标语义、版式或 O2 产品导出验收；详情见[办公结果](../docs/bidding/onlyoffice-product-results.md#2026-09-09-只更新目录的-docxpdf-出件验证)。
+O1 整稿验收工具补充：现有办公探针增加只更新目录、保存重开及同版本 PDF 的无标记整理模式，正文文字保留检查及合成稿实际服务 1/1 通过；原完整编辑/历史/停服回调回归 1/1 通过，临时服务清理零错误。该模式用于之后输出可审阅文件，不代替真实招标语义、版式或 O2 产品导出验收；详情见[办公结果](../docs/bidding/archive/onlyoffice-product-results.md#2026-09-09-只更新目录的-docxpdf-出件验证)。
 
 ### O2-S — 保存关联与冻结出件版本
 
@@ -406,7 +404,7 @@ O1 整稿验收工具补充：现有办公探针增加只更新目录、保存�
 - **依赖：** O3-M（O3 验收）、F1/F2、P2；不把 R1/R2 或 V1 变为新开发前置。
 - **产出：** 可复现的新链端到端证据、旧路径替代映射、最小切换/删除 diff、更新后的操作手册。
 - **可证实验收：** 同一项目走上传→要求/规范→DOCX 初稿→人工编辑→AI 候选确认→保存→整本 DOCX/PDF+独立报告；复测 A→A+B→A+B+补遗与新轮，未变文件复用、旧稿可追溯。缺料/高风险可编制出件，保存/转换/损坏/不可信页码不假成功。源码与运行调用证明旧 Tiptap 主写入、自研正式 PDF 及隐式块出件路径已撤；有真实初稿/候选消费者的中间原语保留，未替换的解析/权限/身份回归通过。
-- **当前状态：** 旧大纲前后端生成、阶段 SQL/队列注册、专用 Schema/测试已撤除；新提取复用的执行/检查点/调用表按当前职责命名，诊断回归迁至新 Agent。专属空库三 baseline 应用及新 Agent 数据库回归通过，详见[样稿与撤旧记录](../docs/bidding/full-sample-results.md)。完整自动样稿、DOCX 内容填充及出件整链仍未验收；当前共享块模型的实际消费者后续收敛。未提交、修改业务数据或部署。
+- **当前状态：** 旧大纲前后端生成、阶段 SQL/队列注册、专用 Schema/测试已撤除；新提取复用的执行/检查点/调用表按当前职责命名，诊断回归迁至新 Agent。专属空库三 baseline 应用及新 Agent 数据库回归通过，详见[样稿与撤旧记录](../docs/bidding/archive/full-sample-results.md)。完整自动样稿、DOCX 内容填充及出件整链仍未验收；当前共享块模型的实际消费者后续收敛。未提交、修改业务数据或部署。
 
 ### R1 — release descriptor、RepoDigest 与启动验证
 
@@ -416,7 +414,7 @@ O1 整稿验收工具补充：现有办公探针增加只更新目录、保存�
 - **依赖：** P2；候选提交/镜像获取及任何生产动作需其对应授权，本任务可先做普通实现与隔离验证。
 - **产出：** 复用现有 checked schema 的唯一 release 工具、read-only descriptor mount 与启动顺序/实际 inspect 验证、拒绝矩阵及发布证据模板。
 - **可证实验收：** exact descriptor/JCS hash、mount/env/receipt、component kind/digest suffix 与实际 full RepoDigest inspect 一致；缺文件/非法字段/任一 mismatch fail-closed、无 tag fallback；migrator 先成功再启动 API/Worker/Retention，重复启动只读 readiness，DocReader 用 post-start inspect gate。空对象卷真实上传/读取/引用保护/最终回收，记录完整应用外部依赖启动而非仅 shared verifier。所有验收仅专用隔离环境。
-- **当前状态：** release 入口已实现，15 项脚本 Engine/输入故障测试、6 项身份合同通过，生产 Dockerfile 已构建 runtime/DocReader 并取得本机 registry 的实际 RepoDigest。修复无显式 environment 的依赖校验后，专属环境完整启动、migrator 先于 runtime、真实 receipt/readiness、容器及 receipt 不变的重复执行均通过；空对象卷真实 API 上传/读取、两业务引用的部分释放保护和最后引用释放后的 Worker/Retention 回收、精确删除凭据核对通过。最终四阶段 exit 0，9 服务容器、5 卷、专属网络及 registry 清理后零 runtime 残留。保留初次产品启动失败及第一次重跑的验收脚本失败，详见[真实隔离验收](../docs/bidding/release-live-results.md)和[入口记录](../docs/bidding/release-entry.md)。旧 tag 发布 overlay 已删除，无新增 migration。干净候选及对应构建身份验收仍缺，**R1 未正式完成**；hosted required gate 见 R3，不授权生产发布/提交。
+- **当前状态：** release 入口已实现，15 项脚本 Engine/输入故障测试、6 项身份合同通过，生产 Dockerfile 已构建 runtime/DocReader 并取得本机 registry 的实际 RepoDigest。修复无显式 environment 的依赖校验后，专属环境完整启动、migrator 先于 runtime、真实 receipt/readiness、容器及 receipt 不变的重复执行均通过；空对象卷真实 API 上传/读取、两业务引用的部分释放保护和最后引用释放后的 Worker/Retention 回收、精确删除凭据核对通过。最终四阶段 exit 0，9 服务容器、5 卷、专属网络及 registry 清理后零 runtime 残留。保留初次产品启动失败及第一次重跑的验收脚本失败，详见[真实隔离验收](../docs/bidding/archive/release-live-results.md)和[入口记录](../docs/bidding/release-entry.md)。旧 tag 发布 overlay 已删除，无新增 migration。干净候选及对应构建身份验收仍缺，**R1 未正式完成**；hosted required gate 见 R3，不授权生产发布/提交。
 
 ### R2 — 受保护 namespace reset
 
@@ -436,7 +434,7 @@ O1 整稿验收工具补充：现有办公探针增加只更新目录、保存�
 - **依赖：** P2、O4、R1、R2；hosted 运行及发布操作需满足各自权限，不自动提交/push 触发。
 - **产出：** `schema-contract`、`queue-faults`、`namespace-reset`、`outline-scripted-e2e`、`web-export-e2e`、`release-descriptor` 六个 named required jobs 的完整接线与同候选运行证据。
 - **可证实验收：** 六项均真实执行其业务/故障验收，新 DOCX 链不得用旧块 E2E 冒充；已有 rust/三个 suite guard、`--locked` 与 schema job 不丢失。依赖缺失、零用例、ignored/skipped 或 cleanup 失败使 job 失败；保留各命令退出码与资源零残留。无 hosted 结果时只能报告本地验证，正式发布仍不得放行。
-- **当前状态：** `schema-contract` 与 development checks 已接线；新增独立 `queue-faults` 岗位，强制真实 Redis、拒绝跳过/零用例/ignored/filtered、始终归档日志，并作为镜像构建依赖。复用现有 Oxana 原生测试，不新编队列产品。9 项实际 shell 控制流检查及该 CI 命令的专属 Redis 4/4 验证通过，清理零残留，见[岗位证据](../docs/bidding/workspace-quality-results.md#r3-queue-faults-ci-接线)。未提交或触发 hosted 工作流；其余 named jobs、分支 required 配置和同候选 hosted 跑通仍待完成，**R3 未完成**。
+- **当前状态：** `schema-contract` 与 development checks 已接线；新增独立 `queue-faults` 岗位，强制真实 Redis、拒绝跳过/零用例/ignored/filtered、始终归档日志，并作为镜像构建依赖。复用现有 Oxana 原生测试，不新编队列产品。9 项实际 shell 控制流检查及该 CI 命令的专属 Redis 4/4 验证通过，清理零残留，见[岗位证据](../docs/bidding/archive/workspace-quality-results.md#r3-queue-faults-ci-接线)。未提交或触发 hosted 工作流；其余 named jobs、分支 required 配置和同候选 hosted 跑通仍待完成，**R3 未完成**。
 
 ### V1 — 条件式 pgvector 分域基准
 

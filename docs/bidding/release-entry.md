@@ -1,5 +1,7 @@
 # 发布入口实现与隔离验证
 
+> 历史发布工具记录，不是投标生成合同。生成合同见 [投标文档](README.md)。
+
 本轮落实 [R1](../../plans/implementation-tasks.md) 的宿主发布入口，复用 `platform::ReleaseDescriptorV1`、平台 identity 校验和 JCS 摘要。没有新增 migration、表或依赖库，仅为已有 Tokio 启用 process feature。最初完成测试替身验证，后续已实际构建镜像并尝试专属隔离启动；没有操作业务库或部署生产。
 
 ## 已实现的边界
@@ -41,14 +43,14 @@ python3 artifacts/release-entry/verify_compose.py --binary target/debug/knowledg
 
 后续使用实际生产 Dockerfile 完成 Rust runtime（包含四个角色 binary）及 DocReader 镜像构建，并仅推入本机临时 loopback registry，取得真实 RepoDigest。Node 22 构建暴露的 npm lockfile 缺项已修复，Rust release 构建已启用 `--locked`。此证据来自带继承修改的工作树及源码 manifest，不是干净已提交发布候选。
 
-首次完整隔离启动返回 `RELEASE_NOT_READY: resolved environment missing`（exit 1）。实际 Redis Compose 没有显式环境映射，发布工具误将其当成配置缺失；已修复为核对声明的映射，继续独立强制 Rust identity/BIN 校验。新增依赖无显式环境的启动/重放回归后，发布入口测试现为 **15/15**；全工作区 check、Clippy 和默认测试通过，见[质量检查记录](workspace-quality-results.md)。原失败保留，后续已在新隔离环境完成真实启动重跑，见下文。
+首次完整隔离启动返回 `RELEASE_NOT_READY: resolved environment missing`（exit 1）。实际 Redis Compose 没有显式环境映射，发布工具误将其当成配置缺失；已修复为核对声明的映射，继续独立强制 Rust identity/BIN 校验。新增依赖无显式环境的启动/重放回归后，发布入口测试现为 **15/15**；全工作区 check、Clippy 和默认测试通过，见[质量检查记录](archive/workspace-quality-results.md)。原失败保留，后续已在新隔离环境完成真实启动重跑，见下文。
 
 原始构建及启动证据保留于 `/tmp/kb-release-live-564icf9k/`；其中 `isolated.env` 和 `compose.json` 含运行凭据，不得原样输出或归档。应用使用 internal 网络阻断外部出口，未执行真实模型调用。本次 9 个容器、5 个卷、专属网络及本机 registry 已按登记身份清理，`cleanup-verification.json` 确认 runtime 资源残留为 0；本地测试镜像仍保留。脱敏可归档证据见 `artifacts/workspace-quality/release/`。
 
 首次 Rust 构建请求曾因自动审批 429 限流未执行；后续前置审计将普通 parser unit fixture 误判为真实样稿而失败，但重试说明错误地声称审计成功。获批重试实际执行后因 npm lockfile 失败。补核源码 manifest 确认无 env 或真实招标文件，并保留该失误及审计记录 `rust-build-authorization-audit.json`；不覆盖原失败。
 
-后续专属项目 `kb-release-7dj2b332` 已完整通过真实启动、migrator 先于 runtime 的事件核对、全服务 readiness、整 receipt 与容器身份不变的重复执行，以及空对象卷的真实 API 上传/读取、多引用保护、实际 Worker/Retention 最终回收和精确删除凭据核对。9 个服务容器、5 个卷、专属网络及 registry 清理后零 runtime 残留。详细步骤、第一次重跑中验收脚本失败及最终四阶段 exit 0 证据见[真实隔离验收](release-live-results.md)。没有用业务数据库做验收。
+后续专属项目 `kb-release-7dj2b332` 已完整通过真实启动、migrator 先于 runtime 的事件核对、全服务 readiness、整 receipt 与容器身份不变的重复执行，以及空对象卷的真实 API 上传/读取、多引用保护、实际 Worker/Retention 最终回收和精确删除凭据核对。9 个服务容器、5 个卷、专属网络及 registry 清理后零 runtime 残留。详细步骤、第一次重跑中验收脚本失败及最终四阶段 exit 0 证据见[真实隔离验收](archive/release-live-results.md)。没有用业务数据库做验收。
 
 R1 仍未正式完成：上述镜像绑定带继承修改的工作树及源码 manifest，还需绑定干净候选 SHA、Cargo.lock 与对应五组件实际 RepoDigest 完成候选验收。R3 的 named required jobs/hosted gate 另行跟踪，不能将本机通过写成生产放行。
 
-本轮不改变 O1/O2 顺序，不证明真实招标 Agent 整稿或同版本 PDF 已生成。真实样稿的提取拒绝项和外部模型授权仍见[样稿结果](full-sample-results.md)及[逐页验收](real-tender-acceptance-review.md)。
+本轮不改变 O1/O2 顺序，不证明真实招标 Agent 整稿或同版本 PDF 已生成。真实样稿的提取拒绝项和外部模型授权仍见[样稿结果](archive/full-sample-results.md)及[逐页验收](archive/real-tender-acceptance-review.md)。

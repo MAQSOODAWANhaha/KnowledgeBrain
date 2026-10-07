@@ -2,7 +2,7 @@
 
 本切片将已实测的 ONLYOFFICE 保存语义接入 KnowledgeBrain 后端：签名编辑配置、限定用途的打开文件地址、可关联的 forcesave 请求、回调文件校验和原子版本发布。**没有新增会话表或 migration 文件**，只修改尚未发布的 Bidding baseline；未操作现有数据库。
 
-已有 DOCX 正式稿的编制前端已接线，初稿自动生成及前端发布新轮入口尚未完成。后端故障契约使用真实 PostgreSQL/Redis/对象文件和受控文档服务替身；[真实 Document Server 与产品路由联调](onlyoffice-product-results.md)提供保存、重开及历史文件验证，新增 `--web` 模式直接驱动 React 编制页。字体、生产许可与最终模板外观仍待落实，不能标完整 O1 已验收。
+已有 DOCX 正式稿的编制前端已接线，初稿自动生成及前端发布新轮入口尚未完成。后端故障契约使用真实 PostgreSQL/Redis/对象文件和受控文档服务替身；[真实 Document Server 与产品路由联调](archive/onlyoffice-product-results.md)提供保存、重开及历史文件验证，新增 `--web` 模式直接驱动 React 编制页。字体、生产许可与最终模板外观仍待落实，不能标完整 O1 已验收。
 
 ## 四个字段为何需要持久化
 
@@ -72,7 +72,7 @@ key 与打开基线同时为空/非空；没有活动 key 时不得遗留 pendin
 
 集合 fixture 分别保存“不可变版本元数据”和“包含 editor 状态的完整 current 快照”，继续完整比较来源发布前后 current，未改成只比较版本 ID。该 fixture 的 SQL 文件使用合成对象元数据；真实 bytes 由 HTTP 目标验证。
 
-配置缺失时启用的 HTTP 目标失败，不静默跳过。复跑在原[HTTP 测试前置](docx-rounds.md#http-增量验证)基础上还需本页的 ONLYOFFICE 配置和专属测试替身；本机完整准备脚本/源码副本、日志及清理收据保存在 `/tmp/knowledgebrain-docx-editor.51jzk7c2/`。这些替身测试不是整个 workspace、API 可执行文件启动、S3 或浏览器产品验收；真实服务的后续证据独立记录在[产品联调结果](onlyoffice-product-results.md)。
+配置缺失时启用的 HTTP 目标失败，不静默跳过。复跑在原[HTTP 测试前置](docx-rounds.md#http-增量验证)基础上还需本页的 ONLYOFFICE 配置和专属测试替身；本机完整准备脚本/源码副本、日志及清理收据保存在 `/tmp/knowledgebrain-docx-editor.51jzk7c2/`。这些替身测试不是整个 workspace、API 可执行文件启动、S3 或浏览器产品验收；真实服务的后续证据独立记录在[产品联调结果](archive/onlyoffice-product-results.md)。
 
 最终检查：路由级 HTTP 目标 **1/1、0 ignored、0 filtered、exit 0**；API `bid_v2_routes::` 模块 **12/12**（其他 3 项被模块过滤）；Bidding baseline 契约 **21/21**；API library 与该 HTTP 目标 clippy `-D warnings` 通过。仅最后对错误提示的 match 分支应用 rustfmt，不改变执行逻辑；格式检查通过，未为纯格式变化重复启动服务。
 
@@ -88,7 +88,7 @@ key 与打开基线同时为空/非空；没有活动 key 时不得遗留 pendin
 
 HTTP 契约新增真实 GET 计数：替身以 `POST /test/mode {cache_available:false}` 模拟所有缓存 URL 返回 410，`GET /test/downloads` 返回实际缓存请求记录。重复 forcesave、最终保存和新轮后的旧完成回调均不增加 GET、版本或回执；本地文件损坏返回 422、缺失返回 503，仍不依赖远端补写。还验证过期或错误服务签名拒绝、相同关联改变通知内容拒绝，以及 SQL 提交时摘要/长度不一致拒绝。
 
-结果：最终 HTTP 目标 1/1，API 模块 12/12（其他 3 项过滤），baseline 契约 21/21，API library 与两个 HTTP 目标 clippy `-D warnings` 通过。[真实服务联调](onlyoffice-product-results.md#已完成回调恢复实测)还完成停机后四条实际签名回调的主动重投。准备脚本与日志保存在 `/tmp/knowledgebrain-docx-recovery.v4m6dl89/`，`attempt2/` 为最终 HTTP 执行；两轮 HTTP 与真实服务 run/cleanup 均 exit 0。
+结果：最终 HTTP 目标 1/1，API 模块 12/12（其他 3 项过滤），baseline 契约 21/21，API library 与两个 HTTP 目标 clippy `-D warnings` 通过。[真实服务联调](archive/onlyoffice-product-results.md#已完成回调恢复实测)还完成停机后四条实际签名回调的主动重投。准备脚本与日志保存在 `/tmp/knowledgebrain-docx-recovery.v4m6dl89/`，`attempt2/` 为最终 HTTP 执行；两轮 HTTP 与真实服务 run/cleanup 均 exit 0。
 
 这一恢复仅确认已成功持久化且通知身份相同的保存，不解决首次保存时缓存已消失、不确定命令长期 pending 或自然重试策略。后续生命周期复核已纠正把固定地址绑定和打开配置共用有效期的设计，见下节；不引入活动编辑器的地址续期机制。
 
@@ -110,7 +110,7 @@ HTTP 契约新增真实 GET 计数：替身以 `POST /test/mode {cache_available
 
 未确认修改时，关闭、步骤跳转、导航链接和退出登录受保护；地址栏 hash 切换在 `useHash` 更新页面前检查编辑页守卫，浏览器离开使用 `beforeunload` 提示。下载按钮明确下载指定的已保存版本。页面关闭/重开会销毁和重建 SDK 实例，迟到的打开请求和实例事件不更新新会话，兼容 React StrictMode 的清理与重启。
 
-本切片未新增依赖、部署地址默认值、数据库表列或 migration，也没有前端令牌续期流程。后续已完成[账户与应用语言实测](onlyoffice-product-results.md#账户语言与完整-app-登录态恢复)：复用现有邮箱，无需新增姓名字段；浏览器通过产品 `main.tsx`/`App` 调用真实 `/api/v1/me` 恢复登录态。真实样稿的[表格与图片编辑回归](onlyoffice-product-results.md#表格与图片的真实编辑回归)已补齐：单元格修改、图片插入及尺寸修改经实际页面保存和重开，并核对 DOCX 表结构、图片引用/摘要和尺寸。新轮首次生成/发布入口、账号密码登录、最终字体版式和完整故障验收仍需后续完成；出件版本冻结/PDF 属于 O2。
+本切片未新增依赖、部署地址默认值、数据库表列或 migration，也没有前端令牌续期流程。后续已完成[账户与应用语言实测](archive/onlyoffice-product-results.md#账户语言与完整-app-登录态恢复)：复用现有邮箱，无需新增姓名字段；浏览器通过产品 `main.tsx`/`App` 调用真实 `/api/v1/me` 恢复登录态。真实样稿的[表格与图片编辑回归](archive/onlyoffice-product-results.md#表格与图片的真实编辑回归)已补齐：单元格修改、图片插入及尺寸修改经实际页面保存和重开，并核对 DOCX 表结构、图片引用/摘要和尺寸。新轮首次生成/发布入口、账号密码登录、最终字体版式和完整故障验收仍需后续完成；出件版本冻结/PDF 属于 O2。
 
 ## 本次保存的精确确认
 

@@ -1,12 +1,21 @@
 # 招投标文档
 
-唯一设计、任务分配和验收：[招标解析与投标文件生成](../../plans/bidding/product-two-phase.md)。
+现行生成合同只有一条：招标解析完成后，一次大纲运行写出**章节大纲和规定模板**（含附件表）。生产入口把 `draft_path` 设为 `true`。代码在 `crates/bidding/src/outline`。
 
-- [产品需求](prd.md)：解析 → 大纲与 Word → 可选填充 → 编辑保存下载。
-- [领域与状态](authoring.md)：要求、章节、依据和恢复。
-- [骨架编译与填充](docx-composition.md)。
-- [版本与并发](docx-rounds.md)。
-- [ONLYOFFICE 目标](onlyoffice.md)与[保存协议](docx-editor.md)。
-- [运行手册](backend-runbook.md)。
+| 文档 | 写什么 |
+| --- | --- |
+| [产品需求](prd.md) | 用户流程、三个包的边界、冻结的 `OutlineArtifact` |
+| [大纲运行时](outline.md) | 阅读包、六个工具、职责隔离、检查点 |
+| [模块归属](authoring.md) | `analysis` / `outline` / `response` 各写什么 |
+| [未完成与旧路径](../../plans/bidding/outline-gaps.md) | 还没接到这条链上的缺口，以及不再作为合同的遗留 |
 
-带 results、acceptance、review、diagnosis 或 regression 的既有记录及 artifacts 是相应版本的历史验证证据，不是并行设计，也不证明新方案已验收。旧运行的调用次数、合同和输出摘要不得改写成新结果；实际进度只在主方案第 9 节维护。
+编辑、保存和下载不定义生成合同：
+
+- [ONLYOFFICE](onlyoffice.md)
+- [保存协议](docx-editor.md)
+- [版本](docx-rounds.md)
+- [运行手册](backend-runbook.md)
+
+[archive/](archive/README.md) 里的 results、acceptance、review、diagnosis、regression 以及旧骨架编译说明，只证明当时那一版做了什么。不要把它们读成第二套大纲设计。
+
+`crates/bidding/src/analysis/outline_flow.rs` 和 `submit_outline_scan`、`put_outline_items`、`submit_outline_check` 是遗留抽取路径，不是这条产品合同。
