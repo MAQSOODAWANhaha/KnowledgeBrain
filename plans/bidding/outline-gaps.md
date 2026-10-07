@@ -8,17 +8,25 @@
 
 现状：`DiscoverWork::session` 把 `ParsePack` 放进请求 brief 的 `reading_packs`。`text` 只有 `source_id`、`start`、`end`，`forms` 只有 `form_id`、`start`、`end`、`header_cells`。冻结来源的文字和单元格不在包里。`claim_turn` 只返回本轮新领取的包，已经是 `running` 的包不会再次出现。
 
-完成：发现轮发给模型的包符合 [运行时](../../docs/bidding/outline.md) 里的目标载荷：`text[]` 带切片正文，`forms[]` 带 `[start, end)` 的单元格，续表另带 `header` 且这些表头不在引用范围内。本轮仍要处理的 `running` 和待修 `failed` 包每次重放。模型提交的 `start` / `end` 仍必须落在这个切片里。
+完成：发现轮发给模型的包符合 [运行时](../../docs/bidding/outline.md) 里的目标载荷：`text[]` 带切片正文，`forms[].cells` 是 `[start, end)` 的行优先一维文本，续表的 `header` 按列顺序且不在引用范围内。本轮仍要处理的 `running` 和待修 `failed` 包每次重放。模型提交的 `start` / `end` 仍必须落在这个切片里。超预算丢掉发现对话时，只丢掉已经 `committed` 的包所在轮次，依据是 `DiscoverWork` 的包状态，不读 `analysis.outline.scanned`。
 
-验证：用一份含标题、超长条款和续表的冻结输入组包，断言 brief 里的包文本等于来源切片，包外文字不出现，续表切片带 `header`，且这些表头单元格的下标不在 `[start, end)` 内。同一 `running` 包在下一轮请求里仍然带正文。
+验证：用一份含标题、超长条款和续表的冻结输入组包，断言 brief 里的包文本等于来源切片，包外文字不出现，续表切片带按列排列的 `header`，且这些表头单元格的下标不在 `[start, end)` 内。同一 `running` 包在下一轮请求里仍然带正文。已 `committed` 的发现轮在超预算时从窗口消失；仍是 `running` 或 `failed` 的轮次留下。判定不读 `analysis.outline.scanned`。
 
 ## 2. 发现要求要进入组织
 
-现状：提交成功后只把描述存进 `DiscoverWork.requirements`，键是 `{pack_id}:{index}`。`put_chapters` 不接收要求 id，写入的 `requirement_ids` 为空。组织轮宿主包没有这份要求。
+现状：提交成功后只把描述存进 `DiscoverWork.requirements`，键是 `{pack_id}:{index}`。`put_chapters` 的 schema 不接收 `requirement_ids`（章节项只要求 `id`、`parent_id`、`order`、`title`、`purpose`），宿主把 `ChapterOutline.requirement_ids` 写成空数组。空数组是现行行为，不是目标。组织轮宿主包没有这份要求。
 
-完成：组织轮能读到已提交要求（身份、描述、来源切片），并把要求挂到章节。发现轮仍然不能写章节。
+目标参数（改 `outline-tools-v1.schema.json` 里 `put_chapters` 的章节项，以及 `outline/tools.rs` 的写入）：
 
-验证：两包提交之后，组织轮可见这些要求。`put_chapters` 写出的 `requirement_ids` 覆盖已提交要求；未知 id 被拒绝；发现轮调用 `put_chapters` 仍被拒绝。
+- 每个章节增加必填 `requirement_ids`（字符串数组，允许空数组）。`id`、`parent_id`、`order`、`title`、`purpose` 仍必填。不新增其它字段。
+- id 就是发现时写入的键 `{pack_id}:{index}`。
+- 未知 id 拒绝。全部已提交 id 都要出现，每个 id 只出现在一个章节上。缺 `requirement_ids` 拒绝。
+- 发现职责仍然不能调用 `put_chapters`。
+- 组织轮宿主包能读到已提交要求的身份、描述和来源切片。
+
+完成：上面的参数生效，组织轮能把要求挂到章节。
+
+验证：两包提交之后，组织轮可见这些要求。缺 `requirement_ids`、未知 id、已提交 id 没有全部挂上、或同一 id 出现在两个章节时拒绝。发现轮调用 `put_chapters` 仍被拒绝。不带 `requirement_ids` 的现行调用不能再通过。
 
 ## 3. 从 tool_draft 投影并发布，进度改读这条状态
 

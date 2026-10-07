@@ -18,6 +18,20 @@
 4. 否则：收尾。
 5. 阶段已经是填充或已发布：模板。填充阶段的系统提示用 `prompts/template.txt`，工具仍只有 `put_slots` 和 `read_outline`。
 
+`phase` 是检查点上的阶段。职责是这一轮给模型的工具集，由 `current` / `select` 决定。
+
+| `phase` | 这一阶段的职责 |
+| --- | --- |
+| `discover` | 发现。阅读包还没全部 `committed` |
+| `outline` | 先组织，再模板，再收尾。章节未齐或附件未绑完是组织；章节和附件齐了、槽还没交是模板；槽已交是收尾 |
+| `check` | 收尾。旧路径会把 phase 写成 `check`。一次成稿的 `finish_outline` 直接写成 `complete` |
+| `complete` | 大纲已结束。阶段仍是大纲时职责是收尾；阶段已是填充或已发布时职责是模板 |
+
+模板职责有两种用法，工具都是 `put_slots` 和 `read_outline`。这不是第二条产品生成流：
+
+1. 一次成稿：组织完成之后写槽。
+2. 填充或已发布：只能改槽，不能改章节。
+
 | 职责 | 工具 | 提示约束 |
 | --- | --- | --- |
 | 发现 | `submit_pack`，`read_outline` | 只读已领取的包。同一包失败后才把 `repair` 设为 true |
@@ -32,7 +46,7 @@
 | 工具 | 写入 |
 | --- | --- |
 | `submit_pack` | `pack_id`、`call_id`、`repair`、`requirements[]`（`description`、`source_id`、`start`、`end`） |
-| `put_chapters` | 整棵树替换。字段是 `id`、`parent_id`、`order`、`title`、`purpose`（`group` 或 `response`） |
+| `put_chapters` | 整棵树替换。现行字段是 `id`、`parent_id`、`order`、`title`、`purpose`（`group` 或 `response`）。`requirement_ids` 还不是参数 |
 | `bind_forms` | `bindings[]` 的 `form_id`、`chapter_id`。整表替换。同一附件表出现两次会拒绝 |
 | `put_slots` | 整表替换。`kind` 为 `fixed_text`、`tender_value`、`instruction`、`bidder_blank`、`signature`、`preserved` |
 | `read_outline` | 无参数。返回当前章节、绑定、槽、`slots_submitted`、`finished` |
@@ -95,11 +109,11 @@
 | 字段 | 缺口 1 之后必须带上 |
 | --- | --- |
 | `pack.text[]` | 保留 `source_id`、`start`、`end`，并增加 `text`：该来源 `[start, end)` 的 UTF-8 切片 |
-| `pack.forms[]` | 保留 `form_id`、`start`、`end`、`header_cells`，并增加 `cells`：下标落在 `[start, end)` 的单元格文本 |
-| `pack.forms[].header` | `header_cells > 0` 时带上被重复的表头单元格文本。这些单元格不在该切片的 `[start, end)` 内 |
+| `pack.forms[]` | 保留 `form_id`、`start`、`end`、`header_cells`，并增加 `cells`：`[start, end)` 的单元格文本，按行优先排成一维数组。长度等于 `end - start`，顺序由宿主保证 |
+| `pack.forms[].header` | `header_cells > 0` 时带上被重复的表头文本，按列顺序，长度等于 `header_cells`。这些单元格不在该切片的 `[start, end)` 内 |
 | `id`、`document_id`、`order`、`context_heading`、`heading`、`status`、`feedback` | 与现行相同。`context_heading` 是父标题 |
 
-切片本身已经含表头时 `header_cells` 为 0，不另附 `header`。包外文字不出现。`outside_pack` 和 `outside_slice` 继续只检查偏移是否落在这些切片里。
+`cells` 不使用 `{row, column, text}`。有 `header` 时列数等于它的长度；下面的例子是 3 列、2 行，`["1", "人工", ""]` 是第一行。切片本身已经含表头时 `header_cells` 为 0，不另附 `header`，表头行就在 `cells` 里。包外文字不出现。`outside_pack` 和 `outside_slice` 继续只检查偏移是否落在这些切片里。
 
 ```json
 {
@@ -139,7 +153,7 @@
 | `tool_draft` | `Draft`：`chapters`、`bindings`、`slots`、`slots_submitted`、`finished` |
 | `phase` | `discover`、`outline`、`check`、`complete`。`finish_outline` 把它标成 `complete`。发现包全部提交，或旧扫描被判定完成时，`draft::after_batch` 会从 `discover` 拨到 `outline`。旧扫描完成不是这条产品路径的完成条件 |
 
-`put_chapters` 不接收要求 id，写入的 `requirement_ids` 为空。发现要求还没有进入组织轮的宿主包。这是缺口，见计划，不是本页已经完成的交接。
+现行 `put_chapters` 不接收 `requirement_ids`，写入的数组是空的。空数组是现行行为。目标参数（必填的 `requirement_ids`、未知 id 拒绝、发现仍不能调用）见 [缺口 2](../../plans/bidding/outline-gaps.md)。
 
 ## 一轮大纲
 
@@ -170,7 +184,7 @@
 1. 已交付的旧导航（`source_index`、`search_sources`、`inspect_analysis`）收成一条 `history_omitted` 说明。
 2. 丢掉证据已在其它组里的已交付对话组。
 3. 裁掉可选的候选回忆。
-4. 发现轮装不下预装证据时，丢掉已有持久结论的已完成发现对话，再把预装包减半。现行 `evict_completed_discovery_history` 仍对照 `analysis.outline.scanned`。要求改成：包已经 `committed`、要求已经在检查点上时丢掉对应发现对话。
+4. 发现轮装不下预装证据时，丢掉已经 `committed` 的包所在的发现轮，再把预装包减半。依据是 `DiscoverWork` 的包状态。现行 `evict_completed_discovery_history` 仍对照 `analysis.outline.scanned`，这不是目标。
 5. 仍放不下则推迟图片，或失败 `AGENT_TURN_BUDGET_EXCEEDED`，检查点保留。
 
 `prepare_session` 若发现序列化后的 SDK 状态超过 `max_context_bytes`，先按当前窗口重建一次。重建后仍超限，在预约和网络 IO 之前失败，错误同样是 `AGENT_TURN_BUDGET_EXCEEDED`。
