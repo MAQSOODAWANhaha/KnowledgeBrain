@@ -46,13 +46,17 @@
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["id", "parent_id", "order", "title", "purpose"],
+              "required": ["id", "parent_id", "order", "title", "purpose", "requirement_ids"],
               "properties": {
                 "id": { "type": "string", "minLength": 1 },
                 "parent_id": { "type": ["string", "null"] },
                 "order": { "type": "integer", "minimum": 0 },
                 "title": { "type": "string", "minLength": 1 },
-                "purpose": { "type": "string", "enum": ["group", "response"] }
+                "purpose": { "type": "string", "enum": ["group", "response"] },
+                "requirement_ids": {
+                  "type": "array",
+                  "items": { "type": "string", "minLength": 1 }
+                }
               }
             }
           }

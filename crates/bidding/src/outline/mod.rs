@@ -20,9 +20,11 @@ mod template;
 pub mod tools;
 
 #[cfg(test)]
+mod acceptance;
+#[cfg(test)]
 mod tests;
 
-pub use template::{COVER_CHAPTER_ID, project};
+pub use template::{COVER_CHAPTER_ID, ProjectedOutline, project, project_draft};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

@@ -64,8 +64,14 @@ fn outline_and_response_models_see_the_closed_tool_set() {
         );
     }
     let chapters = validator_from(outline[1]["function"]["parameters"].clone());
-    let mut chapter = json!({"chapters":[{"id":"letter","parent_id":null,"order":0,"title":"投标函","purpose":"response"}]});
+    let mut chapter = json!({"chapters":[{"id":"letter","parent_id":null,"order":0,"title":"投标函","purpose":"response","requirement_ids":[]}]});
     assert!(chapters.is_valid(&chapter));
+    chapter["chapters"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("requirement_ids");
+    assert!(!chapters.is_valid(&chapter));
+    chapter["chapters"][0]["requirement_ids"] = json!([]);
     chapter["chapters"][0]["grounds"] = json!([]);
     assert!(!chapters.is_valid(&chapter));
     let responses = validator_from(response[1]["function"]["parameters"].clone());

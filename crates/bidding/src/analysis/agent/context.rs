@@ -1248,16 +1248,40 @@ pub(super) fn compact_delivered_navigation(transcript: &mut [Value]) -> bool {
     false
 }
 
-/// Evict a complete delivered protocol group, preserving unique active source
-/// evidence when another group can be removed instead.
-/// Only discard unique discovery evidence after its delivered ranges have
-/// corresponding persisted scan conclusions. Unprocessed/latest groups stay.
+/// Evict one delivered discovery turn whose packs are already committed.
+///
+/// Product discovery keys that decision off `DiscoverWork` pack status.
+/// `analysis.outline.scanned` is only the fallback when no reading packs exist.
+/// Unprocessed and latest groups stay.
 pub(in crate::analysis) fn evict_completed_discovery_history(
     state: &mut Checkpoint,
     history_budget: usize,
 ) -> bool {
-    let _ = history_budget;
-    let starts: Vec<_> = state
+    if state.outline_run.reading_packs.is_some() {
+        return evict_committed_pack_turns(state);
+    }
+    evict_scanned_discovery_history(state, history_budget)
+}
+
+fn evict_committed_pack_turns(state: &mut Checkpoint) -> bool {
+    let Some(work) = state.outline_run.reading_packs.clone() else {
+        return false;
+    };
+    let starts = assistant_group_starts(state);
+    for pair in starts.windows(2) {
+        let start = if pair[0] == starts[0] { 0 } else { pair[0] };
+        let end = pair[1];
+        let ids = pack_ids_in_messages(&state.transcript[start..end]);
+        if work.turn_only_committed(&ids) {
+            state.transcript.drain(start..end);
+            return true;
+        }
+    }
+    false
+}
+
+fn assistant_group_starts(state: &Checkpoint) -> Vec<usize> {
+    state
         .transcript
         .iter()
         .enumerate()
@@ -1271,7 +1295,46 @@ pub(in crate::analysis) fn evict_completed_discovery_history(
                 index
             }
         })
-        .collect();
+        .collect()
+}
+
+fn pack_ids_in_messages(messages: &[Value]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for message in messages {
+        let Some(calls) = message["tool_calls"].as_array() else {
+            continue;
+        };
+        for call in calls {
+            if call["function"]["name"] != "submit_pack" {
+                continue;
+            }
+            let Some(id) = argument_pack_id(&call["function"]["arguments"]) else {
+                continue;
+            };
+            if !ids.iter().any(|existing| existing == &id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+fn argument_pack_id(value: &Value) -> Option<String> {
+    let parsed = if let Some(text) = value.as_str() {
+        serde_json::from_str::<Value>(text).ok()?
+    } else {
+        value.clone()
+    };
+    parsed
+        .get("pack_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+fn evict_scanned_discovery_history(state: &mut Checkpoint, history_budget: usize) -> bool {
+    let _ = history_budget;
+    let starts = assistant_group_starts(state);
     for pair in starts.windows(2) {
         let start = if pair[0] == starts[0] { 0 } else { pair[0] };
         let end = pair[1];

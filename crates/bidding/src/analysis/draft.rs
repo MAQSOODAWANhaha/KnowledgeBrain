@@ -1399,6 +1399,7 @@ pub fn after_batch(
     state: &mut super::agent::Checkpoint,
     batch_failed: bool,
     stop: bool,
+    draft_path: bool,
 ) -> Result<(), String> {
     if batch_failed {
         return Ok(());
@@ -1415,39 +1416,58 @@ pub fn after_batch(
                 .reading_packs
                 .as_ref()
                 .is_some_and(|work| work.complete());
-            if state.analysis.outline.phase == Phase::Discover
-                && (packs_done || outline_flow::scan_complete(input, &state.analysis.outline))
-            {
+            let discovery_done = if draft_path {
+                packs_done
+            } else {
+                packs_done || outline_flow::scan_complete(input, &state.analysis.outline)
+            };
+            if state.analysis.outline.phase == Phase::Discover && discovery_done {
                 state.analysis.outline.phase = Phase::Outline;
                 state.outline_run.phase = Phase::Outline;
                 state.main_work = None;
                 // Preserve repair evidence and failed-call identities; only
                 // first discovery hands off with a fresh conversation.
+                // The product path clears only after every pack is committed.
                 if state.analysis.outline.checks.is_empty() {
                     state.transcript.clear();
                 }
             }
-            // A repaired outline must return through the same publication
-            // blockers and packet construction as an explicit finish call.
-            if state.analysis.outline.phase == Phase::Outline
-                && !state.analysis.outline.checks.is_empty()
-                && state
-                    .analysis
-                    .outline
-                    .issues
-                    .values()
-                    .all(|issue| issue.status != outline_flow::IssueStatus::Open)
-            {
-                let mut candidate = state.clone();
-                if outline_flow::apply(input, &mut candidate, "finish_outline", &json!({}), 8192)
-                    .is_ok()
+            if draft_path {
+                let sha = super::digest(input)?;
+                if crate::outline::project_draft(input, &sha, &state.outline_run.tool_draft).is_ok()
                 {
-                    *state = candidate;
+                    state.draft_stage = DraftStage::Published;
+                    state.done = true;
                 }
-            }
-            if outline_flow::checked(input, state) {
-                state.draft_stage = DraftStage::Published;
-                state.done = true;
+            } else {
+                // A repaired outline must return through the same publication
+                // blockers and packet construction as an explicit finish call.
+                if state.analysis.outline.phase == Phase::Outline
+                    && !state.analysis.outline.checks.is_empty()
+                    && state
+                        .analysis
+                        .outline
+                        .issues
+                        .values()
+                        .all(|issue| issue.status != outline_flow::IssueStatus::Open)
+                {
+                    let mut candidate = state.clone();
+                    if outline_flow::apply(
+                        input,
+                        &mut candidate,
+                        "finish_outline",
+                        &json!({}),
+                        8192,
+                    )
+                    .is_ok()
+                    {
+                        *state = candidate;
+                    }
+                }
+                if outline_flow::checked(input, state) {
+                    state.draft_stage = DraftStage::Published;
+                    state.done = true;
+                }
             }
         }
         DraftStage::Fill => {

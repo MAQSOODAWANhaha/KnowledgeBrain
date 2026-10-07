@@ -1,10 +1,33 @@
 //! Publish a frozen outline into the bidding baseline.
 
-use super::{OutlineArtifact, canonical_sha256};
+use super::tools::Draft;
+use super::{OutlineArtifact, canonical_sha256, project_draft};
+use crate::analysis::FrozenInput;
 use crate::outline::chapters::AttachmentBinding;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+/// Project a finished tool draft and write that artifact. Unfinished drafts are not written.
+pub async fn publish_finished(
+    pool: &PgPool,
+    project_id: Uuid,
+    run_id: Uuid,
+    input: &FrozenInput,
+    frozen_input_sha256: &str,
+    draft: &Draft,
+) -> Result<Value, String> {
+    let projected = project_draft(input, frozen_input_sha256, draft)?;
+    publish(
+        pool,
+        project_id,
+        run_id,
+        &projected.artifact,
+        &projected.bindings,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
 
 pub async fn publish(
     pool: &PgPool,

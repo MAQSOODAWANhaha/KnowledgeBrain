@@ -42,7 +42,7 @@ impl Duty {
                 "本轮只做发现。只阅读已领取的阅读包，用 submit_pack 提交该包范围内的要求。同一包失败后把 repair 设为 true 再交。不要写章节，不要写模板，不要匹配知识库。"
             }
             Self::Organize => {
-                "本轮只做组章。用已保存的要求整理章节树，并把每个附件表绑定到唯一章节。不要重新扫描招标文件，不要写模板正文，不要匹配知识库。"
+                "本轮只做组章。用检查点里的要求整理章节树，每个章节带上 requirement_ids，并把每个附件表绑定到唯一章节。不要重新扫描招标文件，不要写模板正文，不要匹配知识库。"
             }
             Self::Check => {
                 "本轮只做收尾。用 read_outline 核对章节、附件绑定和模板槽，然后 finish_outline。不要改章节，不要重新扫描，不要写模板。"
@@ -221,6 +221,15 @@ pub fn host_packet(
         packet["sources"] = source_index(input, max_bytes);
         packet["outline"] = super::tools::model_state(input, &state.outline_run.tool_draft);
     }
+    if current(input, state) == Duty::Organize {
+        let requirements = state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .map(super::discover::DiscoverWork::requirement_packet)
+            .unwrap_or_default();
+        packet["requirements"] = json!(requirements);
+    }
     if let Some(evidence) = preloaded_evidence {
         packet["preloaded_evidence"] = evidence.clone();
     }
@@ -259,7 +268,14 @@ pub fn apply(
         name,
         "put_chapters" | "bind_forms" | "put_slots" | "read_outline" | "finish_outline"
     ) {
-        let value = super::tools::apply(input, &mut state.outline_run.tool_draft, name, args)?;
+        let known = state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .map(super::discover::DiscoverWork::requirement_ids)
+            .unwrap_or_default();
+        let value =
+            super::tools::apply(input, &mut state.outline_run.tool_draft, &known, name, args)?;
         if name == "finish_outline" {
             state.analysis.outline.phase = Phase::Complete;
             state.outline_run.phase = Phase::Complete;

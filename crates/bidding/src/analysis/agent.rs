@@ -451,11 +451,27 @@ impl Checkpoint {
         } else {
             &self.reviewer_coverage
         };
-        json!({"phase":self.role,"draft_stage":self.draft_stage,"outline_phase":self.analysis.outline.phase,
+        let product_outline =
+            self.outline_run.reading_packs.is_some() || !self.outline_run.tool_draft.is_empty();
+        let outline_chapters = if product_outline {
+            self.outline_run.tool_draft.chapters.len()
+        } else {
+            self.analysis.draft_plan.len()
+        };
+        let outline_requirements = self
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .map(crate::outline::discover::DiscoverWork::requirement_count)
+            .unwrap_or(self.analysis.outline.requirements.len());
+        let mut progress = json!({"phase":self.role,"draft_stage":self.draft_stage,"outline_phase":self.analysis.outline.phase,
             "outline_repairing":!self.analysis.outline.checks.is_empty() && matches!(self.analysis.outline.phase, super::outline_flow::Phase::Discover | super::outline_flow::Phase::Outline),
-            "outline_chapters":self.analysis.draft_plan.len(),
-            "outline_scan_repair":super::outline_flow::scan_repair_pending(self),
-            "outline_requirements":self.analysis.outline.requirements.len(),
+            "outline_chapters":outline_chapters,
+            "outline_scan_repair":self.outline_run.reading_packs.as_ref().map(|work| work.pack_counts().failed > 0).unwrap_or_else(|| super::outline_flow::scan_repair_pending(self)),
+            "outline_requirements":outline_requirements,
+            "outline_unmapped_forms":crate::outline::tools::unmapped_forms(input, &self.outline_run.tool_draft).len(),
+            "outline_slots_submitted":self.outline_run.tool_draft.slots_submitted,
+            "outline_finished":self.outline_run.tool_draft.finished,
             "outline_open_issues":self.analysis.outline.issues.values().filter(|issue| issue.status == crate::analysis::outline_flow::IssueStatus::Open).count(),
             "turn":self.turn,"tool_calls":self.tool_calls,
             "read_bytes":self.read_bytes,"review_rounds":self.review_rounds,"records":self.analysis.records.len(),
@@ -473,7 +489,16 @@ impl Checkpoint {
             "draft_active_title":self.draft_active_id.as_ref().and_then(|id|
                 self.analysis.draft_plan.iter().find(|item| &item.id == id).map(|item| item.title.clone())),
             "draft_stopped":self.draft_stopped,
-            "execution_watch":self.execution().watch,"execution_blockers":self.main_progress.blockers.len()+self.reviewer_progress.blockers.len()})
+            "execution_watch":self.execution().watch,"execution_blockers":self.main_progress.blockers.len()+self.reviewer_progress.blockers.len()});
+        if let Some(work) = &self.outline_run.reading_packs {
+            let counts = work.pack_counts();
+            progress["outline_pack_total"] = json!(counts.total);
+            progress["outline_pack_pending"] = json!(counts.pending);
+            progress["outline_pack_running"] = json!(counts.running);
+            progress["outline_pack_failed"] = json!(counts.failed);
+            progress["outline_pack_committed"] = json!(counts.committed);
+        }
+        progress
     }
 }
 
@@ -499,6 +524,14 @@ pub trait Journal: Send + Sync {
     /// 由正常收尾出稿，已填的章一个不丢，没填的仍是空 heading。
     async fn stop_requested(&self) -> Result<bool, AgentError> {
         Ok(false)
+    }
+    /// Write the projected outline. The default keeps unit journals free of a database.
+    async fn publish_outline(
+        &self,
+        _artifact: &crate::outline::OutlineArtifact,
+        _bindings: &[crate::outline::chapters::AttachmentBinding],
+    ) -> Result<(), AgentError> {
+        Ok(())
     }
 }
 
@@ -754,8 +787,14 @@ async fn run_seeded<J: Journal, M: Model>(
                 state.analysis.draft_plan = plan;
                 state.analysis.outline = outline;
                 state.draft_stage = crate::analysis::draft::DraftStage::Fill;
-                crate::analysis::draft::after_batch(input, &mut state, false, false)
-                    .map_err(invalid)?;
+                crate::analysis::draft::after_batch(
+                    input,
+                    &mut state,
+                    false,
+                    false,
+                    config.limits.draft_path,
+                )
+                .map_err(invalid)?;
             } else if state.draft_stage == crate::analysis::draft::DraftStage::Outline {
                 return Err(error(
                     "FROZEN_INPUT_DIGEST_MISMATCH",
@@ -768,7 +807,12 @@ async fn run_seeded<J: Journal, M: Model>(
         }
         None => {}
     }
-    let already_checked = is_outline_run && super::outline_flow::checked(input, &state);
+    let publication_ready = outline_publication_ready(input, &state, &input_sha256);
+    let already_checked = if config.limits.draft_path && is_outline_run {
+        publication_ready
+    } else {
+        is_outline_run && super::outline_flow::checked(input, &state)
+    };
     let driven = if already_checked {
         Ok(())
     } else {
@@ -804,7 +848,13 @@ async fn run_seeded<J: Journal, M: Model>(
     {
         return Err(error);
     }
-    if is_outline_run && !super::outline_flow::checked(input, &state) {
+    if config.limits.draft_path && is_outline_run {
+        if !outline_publication_ready(input, &state, &input_sha256) {
+            return Err(invalid(
+                "outline is not ready to publish; checkpoint retained",
+            ));
+        }
+    } else if is_outline_run && !super::outline_flow::checked(input, &state) {
         return Err(invalid(
             "outline completeness check has not passed; checkpoint retained",
         ));
@@ -859,9 +909,13 @@ async fn run_seeded<J: Journal, M: Model>(
     result
 }
 
+fn outline_publication_ready(input: &FrozenInput, state: &Checkpoint, input_sha256: &str) -> bool {
+    crate::outline::project_draft(input, input_sha256, &state.outline_run.tool_draft).is_ok()
+}
+
 async fn finish_draft_path<J: Journal>(
     input: &FrozenInput,
-    _config: &Config,
+    config: &Config,
     journal: &J,
     state: &mut Checkpoint,
     input_sha256: String,
@@ -882,6 +936,14 @@ async fn finish_draft_path<J: Journal>(
     }
     if state.journal.pending.is_some() {
         return Err(invalid("cannot finalize an uncommitted model turn"));
+    }
+    if config.limits.draft_path && state.outline_run.tool_draft.finished {
+        let projected =
+            crate::outline::project_draft(input, &input_sha256, &state.outline_run.tool_draft)
+                .map_err(invalid)?;
+        journal
+            .publish_outline(&projected.artifact, &projected.bindings)
+            .await?;
     }
     if state.draft_docx_base64.is_some() && state.draft_compile_object_id.is_some() {
         let review = state
@@ -1232,7 +1294,8 @@ pub(super) async fn execute_turn<J: Journal>(
     // 停止只在填章回路里问一次，且只在章界生效：本章仍按预算写完，之后不再派新章。
     let stop = state.draft_stage == crate::analysis::draft::DraftStage::Fill
         && journal.stop_requested().await?;
-    crate::analysis::draft::after_batch(input, state, batch_failed, stop).map_err(invalid)?;
+    crate::analysis::draft::after_batch(input, state, batch_failed, stop, config.limits.draft_path)
+        .map_err(invalid)?;
     state.turn += 1;
     if state.role != role
         || (outline_phase_before != state.analysis.outline.phase

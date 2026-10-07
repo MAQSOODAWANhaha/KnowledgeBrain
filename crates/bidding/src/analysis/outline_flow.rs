@@ -3156,7 +3156,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result["repair_required"], true);
-        super::super::draft::after_batch(&input, &mut state, false, false).unwrap();
+        super::super::draft::after_batch(&input, &mut state, false, false, false).unwrap();
         assert_eq!(state.analysis.outline.phase, Phase::Outline);
         assert!(
             state
