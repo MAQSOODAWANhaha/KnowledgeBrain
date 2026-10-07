@@ -73,7 +73,6 @@ fn map_catalog_verification_error(error: CatalogError) -> SchemaError {
         }
         CatalogError::Json(_)
         | CatalogError::UnsupportedValue(_)
-        | CatalogError::InvalidSeedSpec(_)
         | CatalogError::InvalidCatalog(_) => {
             SchemaError::mismatch("catalog manifest extraction violated its contract")
         }
@@ -378,9 +377,6 @@ pub async fn apply_fresh_baseline_with_identity(
         sqlx::raw_sql(BIDDING_BASELINE)
             .execute(&mut *transaction)
             .await?;
-        crate::catalog::verify_fresh_seed_selection(&mut transaction)
-            .await
-            .map_err(map_catalog_verification_error)?;
         let manifest = build_catalog_manifest(&mut transaction)
             .await
             .map_err(map_catalog_verification_error)?;

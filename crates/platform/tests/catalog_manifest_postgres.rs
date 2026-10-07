@@ -4,7 +4,7 @@ use platform::{
     build_catalog_manifest, catalog_manifest_sha256, jcs_canonical_bytes,
     validate_catalog_manifest, verify_runtime_schema, verify_runtime_schema_on_connection,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{Acquire, PgPool};
 use std::{path::PathBuf, str::FromStr};
@@ -192,26 +192,6 @@ async fn catalog_manifest_postgres_16_fixture() {
         CREATE TABLE catalog_dependency_source(id integer PRIMARY KEY,payload text NOT NULL);
         CREATE VIEW catalog_dependency_view AS
           SELECT source.id,source.payload FROM catalog_dependency_source source;
-        ALTER TABLE application_maintenance_gate
-          ADD COLUMN catalog_test_numeric numeric(50,20),
-          ADD COLUMN catalog_test_json jsonb,
-          ADD COLUMN catalog_test_uuid uuid,
-          ADD COLUMN catalog_test_timestamp timestamp,
-          ADD COLUMN catalog_test_timestamptz timestamptz,
-          ADD COLUMN catalog_test_bytes bytea,
-          ADD COLUMN catalog_test_null text,
-          ADD COLUMN catalog_test_boolean boolean,
-          ADD COLUMN catalog_test_matrix numeric[][];
-        UPDATE application_maintenance_gate SET
-          catalog_test_numeric=12345678901234567890.12345678901234567890,
-          catalog_test_json='{"fraction":1.5,"large":1e30,"small":1e-7}'::jsonb,
-          catalog_test_uuid='A0B1C2D3-E4F5-4678-9ABC-DEF012345678',
-          catalog_test_timestamp='2026-01-02 03:04:05.123456',
-          catalog_test_timestamptz='2026-01-02 11:04:05.654321+08',
-          catalog_test_bytes=decode('A0ff01','hex'),
-          catalog_test_null=NULL,
-          catalog_test_boolean=true,
-          catalog_test_matrix=ARRAY[[1.2300,NULL],[-0.00,2.5000]]::numeric[][];
         "#,
     )
     .execute(&mut *connection)
@@ -267,41 +247,11 @@ async fn catalog_manifest_postgres_16_fixture() {
         );
     }
 
-    let seed = records
-        .iter()
-        .find(|record| {
-            record.kind == CatalogKind::SeedRow && record.name == "application_maintenance_gate"
-        })
-        .unwrap();
-    let CatalogDefinition::SeedRow(seed) = &seed.definition else {
-        panic!("seed definition")
-    };
-    assert_eq!(
-        seed.values["catalog_test_numeric"],
-        json!("12345678901234567890.1234567890123456789")
-    );
-    assert_eq!(
-        seed.values["catalog_test_uuid"],
-        json!("a0b1c2d3-e4f5-4678-9abc-def012345678")
-    );
-    assert_eq!(
-        seed.values["catalog_test_timestamp"],
-        json!("2026-01-02T03:04:05.123456Z")
-    );
-    assert_eq!(
-        seed.values["catalog_test_timestamptz"],
-        json!("2026-01-02T03:04:05.654321Z")
-    );
-    assert_eq!(seed.values["catalog_test_bytes"], json!("a0ff01"));
-    assert_eq!(seed.values["catalog_test_null"], Value::Null);
-    assert_eq!(seed.values["catalog_test_boolean"], json!(true));
-    assert_eq!(
-        seed.values["catalog_test_matrix"],
-        json!([["1.23", null], ["0", "2.5"]])
-    );
-    assert_eq!(
-        String::from_utf8(jcs_canonical_bytes(&seed.values["catalog_test_json"]).unwrap()).unwrap(),
-        "{\"fraction\":1.5,\"large\":1e+30,\"small\":1e-7}"
+    assert!(
+        records
+            .iter()
+            .all(|record| record.kind != CatalogKind::SeedRow),
+        "catalog manifest does not fingerprint table rows"
     );
 
     assert!(
@@ -327,30 +277,12 @@ async fn catalog_manifest_postgres_16_fixture() {
         r#"
         DROP VIEW catalog_dependency_view;
         DROP TABLE catalog_dependency_source;
-        ALTER TABLE application_maintenance_gate
-          DROP COLUMN catalog_test_numeric,
-          DROP COLUMN catalog_test_json,
-          DROP COLUMN catalog_test_uuid,
-          DROP COLUMN catalog_test_timestamp,
-          DROP COLUMN catalog_test_timestamptz,
-          DROP COLUMN catalog_test_bytes,
-          DROP COLUMN catalog_test_null,
-          DROP COLUMN catalog_test_boolean,
-          DROP COLUMN catalog_test_matrix;
         "#,
     )
     .execute(&mut *connection)
     .await
     .unwrap();
 
-    let fixture_objects: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pg_catalog.pg_attribute
-         WHERE attrelid='application_maintenance_gate'::regclass AND attname LIKE 'catalog_test_%'",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .unwrap();
-    assert_eq!(fixture_objects, 0, "fixture columns must be cleaned");
     verify_runtime_schema_on_connection(&mut connection, &runtime_identity)
         .await
         .unwrap();
@@ -403,17 +335,23 @@ async fn catalog_manifest_postgres_16_fixture() {
     drift.rollback().await.unwrap();
 
     let mut drift = connection.begin().await.unwrap();
+    let before =
+        catalog_manifest_sha256(&build_catalog_manifest(&mut drift).await.unwrap()).unwrap();
     sqlx::query(
         "UPDATE application_maintenance_gate SET generation=generation+1 WHERE singleton_key",
     )
     .execute(&mut *drift)
     .await
     .unwrap();
-    assert!(
-        verify_runtime_schema_on_connection(&mut drift, &runtime_identity)
-            .await
-            .is_err()
+    let after =
+        catalog_manifest_sha256(&build_catalog_manifest(&mut drift).await.unwrap()).unwrap();
+    assert_eq!(
+        before, after,
+        "table rows are outside the catalog fingerprint"
     );
+    verify_runtime_schema_on_connection(&mut drift, &runtime_identity)
+        .await
+        .unwrap();
     drift.rollback().await.unwrap();
 
     let mut drift = connection.begin().await.unwrap();

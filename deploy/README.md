@@ -19,7 +19,7 @@ Redis、MinIO；Neo4j 可选。
 当前尚未发布，按 [未发布 baseline 策略](../plans/platform/runtime-foundation.md#2-fresh-baseline)直接修正三份 migration；不建设历史升级链。当前运行方式只支持 clean-slate fresh deploy，不承诺发布后的保数据升级。修改 baseline 不授权对运行库执行迁移、清库或部署。
 
 `migrate` job 在一个事务中按
-`shared_platform_baseline` → `knowledge_base_baseline` → `bidding_v2_baseline` 建立 catalog，随后写唯一 `platform_schema_snapshot` release receipt。混有运行期追加合同的 seed 表由 `platform-frozen-seed-tables-v2.json` 显式列出 baseline 主键，初始记录全部字段继续校验，建库时检查初始清单完整；正常业务新增合同不改变 schema 指纹。旧 first-launch/intended-state/verifier、兼容迁移和双运行模式已删除；API、Worker、Retention readiness 只读验证 compiled baseline digests、server/extensions 与 canonical catalog manifest，绝不执行 DDL 或在线修复。
+`shared_platform_baseline` → `knowledge_base_baseline` → `bidding_v2_baseline` 建立 catalog，随后写唯一 `platform_schema_snapshot` release receipt。Catalog 指纹只覆盖结构（表、列、函数、权限、角色），不哈希业务行。旧 first-launch/intended-state/verifier、兼容迁移、双运行模式和 frozen seed 表白名单已删除；API、Worker、Retention readiness 只读验证 compiled baseline digests、server/extensions 与 canonical catalog manifest，绝不执行 DDL 或在线修复。
 
 ```bash
 cp deploy/.env.example deploy/.env

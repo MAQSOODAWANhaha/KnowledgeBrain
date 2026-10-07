@@ -132,7 +132,7 @@ for _ in $(seq 1 120); do
 done
 curl -fsS "http://127.0.0.1:$api_port/health" >/dev/null
 
-# Runtime schema identity is verified before test-only fixture DML changes frozen seed tables.
+# Runtime schema identity is verified before test-only fixture DML.
 { echo 'SET ROLE kb_app_owner;'; cat crates/bidding/tests/sql/phase0_acceptance.sql; } \
   | docker exec -i "$pg_name" psql -U postgres -d "$database" -v ON_ERROR_STOP=1 >/dev/null
 # phase0 stores the node binding but does not attach it to the current revision.
