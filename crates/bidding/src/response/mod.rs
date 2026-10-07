@@ -10,6 +10,7 @@
 
 pub mod agent;
 mod bind;
+pub mod store;
 
 pub use bind::{EvidenceHit, MatchQuery, NO_EVIDENCE_TEXT, match_queries, respond};
 

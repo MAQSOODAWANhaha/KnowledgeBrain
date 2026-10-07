@@ -14,6 +14,7 @@ pub mod agent;
 pub mod chapters;
 pub mod discover;
 pub mod parse;
+pub mod store;
 mod template;
 
 #[cfg(test)]

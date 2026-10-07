@@ -11,12 +11,9 @@ use crate::{
 use async_trait::async_trait;
 use platform::BidAuthoringRequestIdentityV2;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-
-const DOCX_MEDIA: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 pub struct PgJournal<'a> {
     pub pool: &'a PgPool,
@@ -363,71 +360,6 @@ pub fn publication(input: &FrozenInput, result: &AnalysisResult) -> Result<Value
     )
 }
 
-async fn stage_draft_docx(
-    pool: &PgPool,
-    journal: &PgJournal<'_>,
-    result: &AnalysisResult,
-) -> Result<Option<Uuid>, AgentError> {
-    if !result.review.draft {
-        return Ok(None);
-    }
-    // A chapterless draft has no heading to compile, and the SQL gate refuses
-    // staged bytes for it, so leave the staging slot empty.
-    if result.analysis.draft_plan.is_empty() {
-        return Ok(None);
-    }
-    let state = journal
-        .load()
-        .await?
-        .ok_or_else(|| invalid("compiled checkpoint missing"))?;
-    let object_ref = state
-        .draft_compile_object_id
-        .as_deref()
-        .ok_or_else(|| invalid("compiled checkpoint lacks DOCX identity"))?;
-    let encoded = state
-        .draft_docx_base64
-        .as_deref()
-        .ok_or_else(|| invalid("compiled checkpoint lacks DOCX bytes"))?;
-    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
-        .map_err(invalid)?;
-    let sha = object_ref
-        .strip_prefix("objects/")
-        .ok_or_else(|| invalid("draft object identity mismatch"))?;
-    if hex::encode(Sha256::digest(&bytes)) != sha {
-        return Err(invalid("draft object identity mismatch"));
-    }
-    let staging = Uuid::new_v4();
-    platform::stage_object_upload(
-        pool,
-        staging,
-        object_ref,
-        sha,
-        DOCX_MEDIA,
-        i64::try_from(bytes.len()).map_err(invalid)?,
-        None,
-    )
-    .await
-    .map_err(db_error)?;
-    if let Err(error) = platform::write_blob_async(sha, &bytes).await {
-        let _ = platform::abandon_object_upload(pool, staging, None).await;
-        return Err(AgentError::new("INTERNAL", error.to_string()));
-    }
-    Ok(Some(staging))
-}
-
-fn draft_staging_committed(receipt: &Value) -> bool {
-    receipt["replayed"] != json!(true)
-        && receipt["published_current"] == json!(true)
-        && receipt["draft_docx"]["object_ref"].is_string()
-}
-
-async fn abandon_draft_staging(pool: &PgPool, staging: Option<Uuid>) {
-    let Some(staging) = staging else {
-        return;
-    };
-    let _ = platform::abandon_object_upload(pool, staging, None).await;
-}
-
 pub async fn execute(
     pool: &PgPool,
     request: &BidAuthoringRequestIdentityV2,
@@ -519,33 +451,34 @@ pub async fn execute_with_model_and_reader<M: agent::Model>(
                 &input, &config, &journal, model, &local,
                 std::time::Duration::from_secs(model_secs),
             ).await?;
-            let compiled = publication(&input, &result)?;
-            let staging = stage_draft_docx(pool, &journal, &result).await?;
-            let receipt = match sqlx::query_scalar(
-                "SELECT kb_bid_v2_publish_requirement_set_v4($1,$2,$3::kb_sha256,$4,NULL::kb_actor_identity,$5,$6,$7)",
+            let artifact = crate::outline::project(&input, &result).map_err(invalid)?;
+            let bindings = crate::outline::chapters::map_attachment_tables(
+                &input,
+                &result.analysis.draft_plan,
+                &result.analysis.records,
             )
-            .bind(request.request_artifact_id)
-            .bind(request.request_revision)
-            .bind(&request.frozen_input_sha256)
-            .bind(compiled)
-            .bind(owner.attempt)
-            .bind(owner.execution_owner_token)
-            .bind(staging)
-            .fetch_one(pool)
+            .map_err(invalid)?;
+            let project_id = Uuid::parse_str(&input.project_id).map_err(invalid)?;
+            let outline_receipt = crate::outline::store::publish(
+                pool,
+                project_id,
+                request.request_artifact_id,
+                &artifact,
+                &bindings,
+            )
             .await
-            {
-                Ok(value) => value,
-                Err(error) => {
-                    abandon_draft_staging(pool, staging).await;
-                    return Err(db_error(error));
-                }
-            };
-            if !draft_staging_committed(&receipt) {
-                abandon_draft_staging(pool, staging).await;
-            } else {
-                tracing::info!(event="draft_publication_committed", request_id=%request.request_artifact_id);
-            }
-            Ok(receipt)
+            .map_err(db_error)?;
+            let response = crate::response::respond(&artifact, &[]).map_err(invalid)?;
+            let response_receipt = crate::response::store::publish(pool, project_id, &response)
+                .await
+                .map_err(db_error)?;
+            tracing::info!(event="outline_publication_committed", request_id=%request.request_artifact_id);
+            Ok(json!({
+                "replayed": outline_receipt["replayed"],
+                "published_current": true,
+                "outline": outline_receipt,
+                "response": response_receipt,
+            }))
         }
         .await;
         finished.cancel();
