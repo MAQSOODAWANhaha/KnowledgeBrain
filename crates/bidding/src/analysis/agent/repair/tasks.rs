@@ -153,25 +153,3 @@ pub(in crate::analysis) fn active(state: &Checkpoint) -> Option<(&str, &Entry)> 
     let id = state.repair.tasks.active.as_deref()?;
     Some((id, state.repair.tasks.entries.get(id)?))
 }
-
-pub(in crate::analysis) fn check_put(
-    state: &Checkpoint,
-    sha: &str,
-    limits: &Limits,
-) -> Result<(), String> {
-    let id = state
-        .repair
-        .tasks
-        .active
-        .as_deref()
-        .ok_or("select a repair task before saving its disposition")?;
-    if !current(state, limits)?
-        .iter()
-        .any(|t| t.id == id && t.finding_sha256 == sha && !t.exhausted)
-    {
-        return Err(
-            "repair disposition must belong to the active task with remaining allowance".into(),
-        );
-    }
-    Ok(())
-}

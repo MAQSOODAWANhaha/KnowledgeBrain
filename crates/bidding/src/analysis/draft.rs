@@ -82,14 +82,6 @@ pub fn fill_limits(
     limits
 }
 
-pub fn analysis_deadline_secs(draft_path: bool) -> u64 {
-    if draft_path {
-        DRAFT_DEADLINE_SECS
-    } else {
-        OFFICIAL_DEADLINE_SECS
-    }
-}
-
 /// Seconds until a frozen absolute deadline. `None` is the first claim, which
 /// still uses the initial budget; a later claim must pass the same deadline.
 pub fn handler_budget_secs(
@@ -708,22 +700,16 @@ pub fn apply(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    refuse_retired_outline_tool(config, name)?;
-    if name == "put_outline_items" {
-        return super::outline_flow::apply_chapter_batch(input, config, state, args);
-    }
+    refuse_retired_outline_tool(name)?;
     apply_validated(input, config, state, name, args)
 }
 
-/// Product runs (`draft_path = true`) finish through `outline::agent::apply`.
-/// These names stay callable only for `draft_path = false` extraction tests.
-fn refuse_retired_outline_tool(config: &super::agent::Config, name: &str) -> Result<(), String> {
-    if config.limits.draft_path
-        && matches!(
-            name,
-            "submit_outline_scan" | "put_outline_items" | "submit_outline_check" | "finish_outline"
-        )
-    {
+/// The one-shot run finishes through `outline::agent::apply`.
+fn refuse_retired_outline_tool(name: &str) -> Result<(), String> {
+    if matches!(
+        name,
+        "submit_outline_scan" | "put_outline_items" | "submit_outline_check" | "finish_outline"
+    ) {
         return Err("retired outline tool is not on the product path".into());
     }
     Ok(())
@@ -736,193 +722,7 @@ pub(super) fn apply_validated(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
-    refuse_retired_outline_tool(config, name)?;
-    if matches!(
-        name,
-        "submit_outline_scan"
-            | "read_outline"
-            | "read_outline_fragment"
-            | "submit_outline_check"
-            | "assign_outline_fragments"
-            | "finish_outline"
-    ) {
-        return super::outline_flow::apply(
-            input,
-            state,
-            name,
-            args,
-            config.limits.max_tool_result_bytes,
-        );
-    }
-    if name == "put_outline_items" {
-        if !organization_allowed(input, state) {
-            return Err("chapter organization requires completed discovery".into());
-        }
-        let items = args["items"].as_array().ok_or("items required")?;
-        let mut next = state.clone();
-        let mut items = items.clone();
-        for (index, item) in items.iter_mut().enumerate() {
-            if item.get("grounds").is_some() || item.get("format_refs").is_some() {
-                return Err(format!(
-                    "items[{index}]: grounds and format_refs are host-derived; supply requirement_ids only"
-                ));
-            }
-            let ids: Vec<String> = serde_json::from_value(item["requirement_ids"].clone())
-                .map_err(|error| format!("items[{index}].requirement_ids: {error}"))?;
-            let purpose: ChapterPurpose = serde_json::from_value(item["purpose"].clone())
-                .map_err(|error| format!("items[{index}].purpose: {error}"))?;
-            let mut grounds = Vec::new();
-            let mut formats = Vec::new();
-            for id in &ids {
-                let need = state
-                    .analysis
-                    .outline
-                    .requirements
-                    .get(id)
-                    .ok_or_else(|| format!("items[{index}].requirement_ids: unknown {id}"))?;
-                let valid = match purpose {
-                    ChapterPurpose::Response => need.needs_chapter(),
-                    ChapterPurpose::Group => {
-                        need.kind == super::outline_flow::NeedKind::StructureConstraint
-                            && need.applicability
-                                != super::outline_flow::Applicability::NotApplicable
-                    }
-                };
-                if !valid || super::outline_flow::cover_handles(&state.analysis.outline, id) {
-                    return Err(format!(
-                        "items[{index}].requirement_ids: {id} does not belong on a {purpose:?} node"
-                    ));
-                }
-                grounds.extend(need.grounds.clone());
-                formats.extend(need.format_grounds.clone());
-            }
-            if purpose == ChapterPurpose::Response && ids.is_empty() {
-                return Err(format!(
-                    "items[{index}].requirement_ids: response material requires saved obligations"
-                ));
-            }
-            item["grounds"] = json!(grounds);
-            item["format_refs"] = json!(formats);
-        }
-        let mut id_map = std::collections::BTreeMap::new();
-        let mut seen_ids = BTreeSet::new();
-        for (index, item) in items.iter_mut().enumerate() {
-            let supplied = item["id"]
-                .as_str()
-                .filter(|id| !id.is_empty())
-                .map(str::to_owned);
-            if let Some(id) = &supplied
-                && !seen_ids.insert(id.clone())
-            {
-                return Err(format!("items[{index}].id: duplicate chapter ID {id}"));
-            }
-            if supplied
-                .as_ref()
-                .is_none_or(|id| !state.analysis.draft_plan.iter().any(|node| &node.id == id))
-            {
-                if !supplied
-                    .as_ref()
-                    .is_some_and(|id| id.starts_with("tmp-") && id.len() > 4)
-                {
-                    return Err(format!(
-                        "items[{index}].id: unknown chapter {:?}; new chapters require tmp- IDs",
-                        supplied
-                    ));
-                }
-                let id = loop {
-                    next.analysis.outline.id_sequences.chapter += 1;
-                    let id = format!("chapter-{}", next.analysis.outline.id_sequences.chapter);
-                    if !state.analysis.draft_plan.iter().any(|node| node.id == id) {
-                        break id;
-                    }
-                };
-                if let Some(alias) = supplied {
-                    id_map.insert(alias, id.clone());
-                }
-                item["id"] = json!(id);
-            }
-        }
-        for item in &mut items {
-            if let Some(parent) = item["parent"].as_str().and_then(|id| id_map.get(id)) {
-                item["parent"] = json!(parent);
-            }
-        }
-        let removed: Vec<String> =
-            serde_json::from_value(args["remove_ids"].clone()).map_err(|e| e.to_string())?;
-        if items
-            .iter()
-            .any(|item| removed.iter().any(|id| item["id"] == *id))
-        {
-            return Err("cannot update and remove the same chapter".into());
-        }
-        // Remove replaced/deleted nodes before checking sibling order; validate the final tree below.
-        next.analysis.draft_plan.retain(|node| {
-            !removed.contains(&node.id) && !items.iter().any(|item| item["id"] == node.id)
-        });
-        let mut saved = Vec::new();
-        let mut composition_changed = false;
-        let mut volume_touch = BTreeSet::new();
-        for (index, item) in items.iter().enumerate() {
-            let before_parent = item.get("id").and_then(Value::as_str).and_then(|id| {
-                state
-                    .analysis
-                    .draft_plan
-                    .iter()
-                    .find(|node| node.id == id)
-                    .and_then(|node| node.parent.clone())
-            });
-            let parent = item
-                .get("parent")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            if parent.is_none() || before_parent.is_none() {
-                composition_changed = true;
-            }
-            if let Some(volume) = parent.clone().or(before_parent) {
-                volume_touch.insert(volume);
-            }
-            saved.push(
-                put_outline_item(input, config, &mut next, item)
-                    .map_err(|error| format!("items[{index}] ({}): {error}", item["id"]))?,
-            );
-        }
-        if !removed.is_empty() {
-            composition_changed = true;
-            for id in &removed {
-                if let Some(parent) = next
-                    .analysis
-                    .draft_plan
-                    .iter()
-                    .find(|node| node.id == *id)
-                    .and_then(|node| node.parent.clone())
-                {
-                    volume_touch.insert(parent);
-                }
-            }
-        }
-        next.analysis
-            .draft_plan
-            .retain(|node| !removed.contains(&node.id));
-        super::outline_flow::tree_valid(&next.analysis.draft_plan)?;
-        refresh_outline_basis(input, &mut next)?;
-        let unmapped = next.analysis.outline.requirements.iter().any(|(id, need)| {
-            need.needs_chapter()
-                && !super::outline_flow::cover_handles(&next.analysis.outline, id)
-                && state.analysis.draft_plan.iter().any(|node| {
-                    node.status != DraftStatus::Omitted && node.requirement_ids.contains(id)
-                })
-                && !next.analysis.draft_plan.iter().any(|node| {
-                    node.status != DraftStatus::Omitted && node.requirement_ids.contains(id)
-                })
-        });
-        if unmapped {
-            return Err("batch would leave a required or conditional requirement unmapped".into());
-        }
-        let volumes: Vec<String> = volume_touch.into_iter().collect();
-        super::outline_flow::invalidate_checks(&mut next, composition_changed, &volumes);
-        *state = next;
-        return Ok(json!({"saved": saved, "id_map": id_map}));
-    }
+    refuse_retired_outline_tool(name)?;
     match name {
         "put_outline_item" => put_outline_item(input, config, state, args),
         "omit_outline_item" => omit_outline_item(input, config, state, args),
@@ -1415,14 +1215,13 @@ pub fn after_batch(
     state: &mut super::agent::Checkpoint,
     batch_failed: bool,
     stop: bool,
-    draft_path: bool,
 ) -> Result<(), String> {
     if batch_failed {
         return Ok(());
     }
     match state.draft_stage {
         DraftStage::None | DraftStage::Outline => {
-            use super::outline_flow::{self, Phase};
+            use super::outline_flow::Phase;
             state.draft_stage = DraftStage::Outline;
             if state.outline_run.no_progress_rounds > 2 {
                 return Err("outline semantic repair exhausted; checkpoint retained".into());
@@ -1432,58 +1231,21 @@ pub fn after_batch(
                 .reading_packs
                 .as_ref()
                 .is_some_and(|work| work.complete());
-            let discovery_done = if draft_path {
-                packs_done
-            } else {
-                packs_done || outline_flow::scan_complete(input, &state.analysis.outline)
-            };
-            if state.analysis.outline.phase == Phase::Discover && discovery_done {
+            if state.analysis.outline.phase == Phase::Discover && packs_done {
                 state.analysis.outline.phase = Phase::Outline;
                 state.outline_run.phase = Phase::Outline;
                 state.main_work = None;
                 // Preserve repair evidence and failed-call identities; only
                 // first discovery hands off with a fresh conversation.
-                // The product path clears only after every pack is committed.
+                // Clears only after every pack is committed.
                 if state.analysis.outline.checks.is_empty() {
                     state.transcript.clear();
                 }
             }
-            if draft_path {
-                let sha = super::digest(input)?;
-                if crate::outline::project_draft(input, &sha, &state.outline_run.tool_draft).is_ok()
-                {
-                    state.draft_stage = DraftStage::Published;
-                    state.done = true;
-                }
-            } else {
-                // A repaired outline must return through the same publication
-                // blockers and packet construction as an explicit finish call.
-                if state.analysis.outline.phase == Phase::Outline
-                    && !state.analysis.outline.checks.is_empty()
-                    && state
-                        .analysis
-                        .outline
-                        .issues
-                        .values()
-                        .all(|issue| issue.status != outline_flow::IssueStatus::Open)
-                {
-                    let mut candidate = state.clone();
-                    if outline_flow::apply(
-                        input,
-                        &mut candidate,
-                        "finish_outline",
-                        &json!({}),
-                        8192,
-                    )
-                    .is_ok()
-                    {
-                        *state = candidate;
-                    }
-                }
-                if outline_flow::checked(input, state) {
-                    state.draft_stage = DraftStage::Published;
-                    state.done = true;
-                }
+            let sha = super::digest(input)?;
+            if crate::outline::project_draft(input, &sha, &state.outline_run.tool_draft).is_ok() {
+                state.draft_stage = DraftStage::Published;
+                state.done = true;
             }
         }
         DraftStage::Fill => {

@@ -2,14 +2,6 @@
 //! Delivered evidence and completed scanning are deliberately separate receipts.
 //! The stored JSON is the current contract only: unknown or missing fields fail.
 mod scan_submit;
-pub(super) fn apply_chapter_batch(
-    input: &FrozenInput,
-    config: &super::agent::Config,
-    state: &mut Checkpoint,
-    args: &Value,
-) -> Result<Value, String> {
-    scan_submit::apply_chapters(input, config, state, args)
-}
 
 pub(super) fn scan_repair_pending(state: &Checkpoint) -> bool {
     !scan_submit::projection(state).is_null()
@@ -3156,8 +3148,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result["repair_required"], true);
-        super::super::draft::after_batch(&input, &mut state, false, false, false).unwrap();
-        assert_eq!(state.analysis.outline.phase, Phase::Outline);
+        assert_eq!(state.analysis.outline.phase, Phase::Discover);
         assert!(
             state
                 .analysis

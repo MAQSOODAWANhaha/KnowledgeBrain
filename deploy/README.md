@@ -12,7 +12,7 @@ Redis、MinIO；Neo4j 可选。
 
 ### Agent 与模型配置改造（待实施）
 
-投标大纲沿用 Chat Completions，不新增 Responses 或协议切换配置。模型与凭据来自 `deploy/.env`。生产配置强制 `draft_path = true`，工具合同见 [大纲运行时](../docs/bidding/outline.md)。Embedding 继续走知识库现有独立接口，索引身份一致性是[知识库独立事项](../plans/knowledge-base/README.md#模型与索引一致性独立事项)，不作为大纲缺口的前置。
+投标大纲沿用 Chat Completions，不新增 Responses 或协议切换配置。模型与凭据来自 `deploy/.env`。大纲运行只有一次成稿，工具合同见 [大纲运行时](../docs/bidding/outline.md)。Embedding 继续走知识库现有独立接口，索引身份一致性是[知识库独立事项](../plans/knowledge-base/README.md#模型与索引一致性独立事项)，不作为大纲缺口的前置。
 
 ## Fresh 启动
 

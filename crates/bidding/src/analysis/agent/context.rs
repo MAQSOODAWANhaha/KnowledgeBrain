@@ -146,6 +146,7 @@ fn work_references(state: &Checkpoint, work: &WorkState) -> Vec<String> {
     refs
 }
 
+#[cfg(test)]
 fn required_work_references(
     input: &FrozenInput,
     state: &Checkpoint,
@@ -225,167 +226,9 @@ pub(super) fn request_work(state: &Checkpoint) -> Result<Value, String> {
     Ok(value)
 }
 
-pub(super) fn execution_gaps(
-    state: &Checkpoint,
-    args: &Value,
-    max_bytes: usize,
-) -> Result<Value, String> {
-    if args.as_object().is_none_or(|o| {
-        o.keys()
-            .any(|key| !matches!(key.as_str(), "scope" | "offset" | "limit"))
-    }) {
-        return Err("gap query accepts only scope, offset and limit".into());
-    }
-    let number = |key: &str| {
-        args[key]
-            .as_u64()
-            .and_then(|n| usize::try_from(n).ok())
-            .ok_or_else(|| format!("{key} must be a nonnegative integer"))
-    };
-    let rows: Vec<_> = if args["scope"] == "pending" {
-        state.work().into_iter().flat_map(|w|&w.pending_refs).map(|key|json!({"reference":key,"kind":"source_uncertainty","instruction":"inspect this saved outcome when its content is needed; it is not an execution failure"})).collect()
-    } else {
-        state.execution().blockers.iter().map(|b| {
-            let mut row = json!({"source_scope":b.scope,"dependencies_sha256":b.dependencies_sha256,"kind":"execution_blocker"});
-            if super::repair_recovery::available(state, &b.scope)? {
-                row["history_recovery"] = json!({"tool":"set_work_note","source_scope":b.scope,
-                    "instruction":"Newly delivered original finding and prior repair history allow one bounded retry of this scope. Choose an exact correction objective and retain other deferred sources. Spent replans remain spent; this is neither evidence delivery nor approval. Re-reading this history does not renew the attempt."});
-            } else if let Some(query) = super::repair_recovery::history_query(state, &b.scope)? {
-                row["history_to_read"] = query;
-            }
-            Ok(row)
-        }).collect::<Result<_, String>>()?
-    };
-    tools::bounded_page(&rows, number("offset")?, number("limit")?, max_bytes)
-}
-
-pub(in crate::analysis) fn validate(
-    input: &FrozenInput,
-    state: &Checkpoint,
-    next: &WorkState,
-    max_bytes: usize,
-) -> Result<(), String> {
-    if next.source_scope.is_empty()
-        || next.objective.trim().is_empty()
-        || serde_json::to_vec(&work_input(next)?)
-            .map_err(|e| e.to_string())?
-            .len()
-            > max_bytes
-    {
-        return Err(
-            "work needs a nonempty source scope/objective and must fit the work budget".into(),
-        );
-    }
-    for list in [
-        &next.source_scope,
-        &next.deferred_sources,
-        &next.output_refs,
-        &next.pending_refs,
-        &next.focus.references,
-    ] {
-        if list.iter().collect::<BTreeSet<_>>().len() != list.len() {
-            return Err("work references and source IDs must be distinct".into());
-        }
-    }
-    for id in next.source_scope.iter().chain(&next.deferred_sources) {
-        if !input
-            .source_units
-            .iter()
-            .any(|s| &s.source_unit_revision_id == id)
-        {
-            return Err(format!("unknown work source: {id}"));
-        }
-    }
-    if next
-        .deferred_sources
-        .iter()
-        .any(|id| next.source_scope.contains(id))
-    {
-        return Err("a source cannot be both active and deferred".into());
-    }
-    for key in next.output_refs.iter().chain(&next.pending_refs) {
-        reference(&state.analysis, key)?;
-    }
-    for span in &next.focus.source_spans {
-        if !next.source_scope.contains(&span.source_id) {
-            return Err("focus evidence must belong to the permitted source scope".into());
-        }
-        // A work note plans where to read; it is not a submitted citation.
-        // Writes and review outcomes still validate delivered role coverage.
-        if span.grid_cell.is_some() {
-            tools::validate_grid_span(input, span)?;
-        } else if span.view_id.is_none() {
-            tools::validate_text_span(input, span)?;
-        } else {
-            tools::validate_span(input, state.coverage(), span)?;
-        }
-    }
-    let allowed_focus = work_references(state, next);
-    for key in &next.focus.references {
-        let value = reference(&state.analysis, key)?;
-        // A reviewer may focus on endpoints assigned by its current source
-        // task. This plans a candidate comparison, not access to other sources.
-        if !allowed_focus.contains(key) {
-            return Err(format!(
-                "focus reference lies outside permitted source scope: {key}"
-            ));
-        }
-        if serde_json::to_vec(&value).map_err(|e| e.to_string())?.len() > max_bytes {
-            return Err(
-                "focused candidate exceeds detail budget; split the candidate first".into(),
-            );
-        }
-    }
-    if next.status == WorkStatus::Active
-        && next.focus.action == FocusAction::Link
-        && next.focus.references.len() < 2
-    {
-        return Err("link focus requires the exact endpoint references to compare".into());
-    }
-    if next.status == WorkStatus::Active
-        && next.focus.action != FocusAction::Locate
-        && next.focus.action != FocusAction::Handoff
-        && next.focus.references.is_empty()
-        && next.focus.source_spans.is_empty()
-    {
-        return Err("focus needs valid planned source spans or saved candidate references".into());
-    }
-    if let Some(prior) = state.work() {
-        let removed: Vec<_> = prior
-            .source_scope
-            .iter()
-            .filter(|id| !next.source_scope.contains(id))
-            .cloned()
-            .collect();
-        if prior.status == WorkStatus::Active
-            && !removed.is_empty()
-            && (next.status != WorkStatus::Active
-                || removed.iter().any(|id| !next.deferred_sources.contains(id)))
-        {
-            return Err("finish the active scope before replacing it, or split it with status=active and retain every removed source in deferred_sources".into());
-        }
-        for id in &prior.deferred_sources {
-            if !next.deferred_sources.contains(id) && !next.source_scope.contains(id) {
-                return Err(format!(
-                    "resume the deferred source before removing it: {id}"
-                ));
-            }
-        }
-    }
-    if next.status != WorkStatus::Complete {
-        return Ok(());
-    }
-    if let Some(gap) = completion_gaps(input, state, next, max_bytes)?.first() {
-        return Err(format!(
-            "{}; use check_gaps with scope=work for exact fields and references",
-            gap["message"].as_str().unwrap_or("work gap")
-        ));
-    }
-    Ok(())
-}
-
 /// The same delivered-evidence checks drive diagnostics and handoff acceptance.
 /// These rows identify work; querying them does not establish reading coverage.
+#[cfg(test)]
 fn completion_gaps(
     input: &FrozenInput,
     state: &Checkpoint,
@@ -398,6 +241,7 @@ fn completion_gaps(
     scoped_gaps(input, state, work, state.coverage(), max_bytes)
 }
 
+#[cfg(test)]
 fn scoped_gaps(
     input: &FrozenInput,
     state: &Checkpoint,
@@ -458,6 +302,7 @@ fn scoped_gaps(
     Ok(gaps)
 }
 
+#[cfg(test)]
 pub(super) fn work_gaps(
     input: &FrozenInput,
     state: &Checkpoint,
@@ -489,6 +334,7 @@ pub(super) fn work_gaps(
     tools::bounded_page(&rows, number("offset")?, number("limit")?, max_bytes)
 }
 
+#[cfg(test)]
 fn fragment_gaps(
     input: &FrozenInput,
     state: &Checkpoint,
@@ -508,36 +354,6 @@ fn fragment_gaps(
         }));
     }
     Ok(rows)
-}
-
-pub(super) fn check_delete(state: &Checkpoint, name: &str, args: &Value) -> Result<(), String> {
-    let kind = match name {
-        "delete_record" => "record",
-        "delete_relation" => "relation",
-        _ => return Ok(()),
-    };
-    let key = format!(
-        "{kind}:{}",
-        args["id"].as_str().ok_or("delete needs an ID")?
-    );
-    // A prior reviewer finding can identify the pending item itself as wrong.
-    // Retirement still requires independent rereview; neither the finding nor
-    // the source obligation is cleared by deleting its candidate record.
-    let reviewed_issue = state.role == Role::Main
-        && state
-            .findings_for_repair()
-            .iter()
-            .any(|finding| finding.affected.iter().any(|field| args["id"] == field.id));
-    if unresolved(&state.analysis, &key)
-        && !reviewed_issue
-        && [&state.main_work, &state.reviewer_work]
-            .iter()
-            .filter_map(|w| w.as_ref())
-            .any(|w| w.pending_refs.contains(&key))
-    {
-        return Err("resolve the pending outcome before deleting it; deletion cannot erase a handoff obligation".into());
-    }
-    Ok(())
 }
 
 pub(in crate::analysis) fn check_read_scope(
@@ -588,6 +404,7 @@ pub(in crate::analysis) fn check_read_scope(
 /// evidence receipt. Pending reads are projected here only because that exact
 /// last protocol group is being delivered in this request; the durable ledger
 /// is still promoted only after a complete model response.
+#[cfg(test)]
 pub(in crate::analysis) fn request_work_state(
     input: &FrozenInput,
     state: &Checkpoint,
@@ -1250,17 +1067,15 @@ pub(super) fn compact_delivered_navigation(transcript: &mut [Value]) -> bool {
 
 /// Evict one delivered discovery turn whose packs are already committed.
 ///
-/// Product discovery keys that decision off `DiscoverWork` pack status.
-/// `analysis.outline.scanned` is only the fallback when no reading packs exist.
-/// Unprocessed and latest groups stay.
+/// The decision uses `DiscoverWork` pack status. Unprocessed and latest groups stay.
 pub(in crate::analysis) fn evict_completed_discovery_history(
     state: &mut Checkpoint,
-    history_budget: usize,
+    _history_budget: usize,
 ) -> bool {
     if state.outline_run.reading_packs.is_some() {
         return evict_committed_pack_turns(state);
     }
-    evict_scanned_discovery_history(state, history_budget)
+    false
 }
 
 fn evict_committed_pack_turns(state: &mut Checkpoint) -> bool {
@@ -1330,46 +1145,6 @@ fn argument_pack_id(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
         .map(str::to_string)
-}
-
-fn evict_scanned_discovery_history(state: &mut Checkpoint, history_budget: usize) -> bool {
-    let _ = history_budget;
-    let starts = assistant_group_starts(state);
-    for pair in starts.windows(2) {
-        let start = if pair[0] == starts[0] { 0 } else { pair[0] };
-        let end = pair[1];
-        if super::super::outline_flow::protects_scan_repair(state, &state.transcript[start..end]) {
-            continue;
-        }
-        let evidence = visible_work_evidence(state, &state.transcript[start..end]);
-        let complete = evidence.iter().all(|(key, ranges)| {
-            let Some((kind, id)) = key.split_once(':') else {
-                return false;
-            };
-            let scanned = &state.analysis.outline.scanned;
-            if kind == "metadata"
-                && let Some((form, offset)) = id
-                    .strip_prefix("form-cell:")
-                    .and_then(|key| key.rsplit_once(':'))
-            {
-                return offset.parse::<usize>().ok().is_some_and(|offset| {
-                    tools::contains(scanned.form_cells.get(form), offset, offset + 1)
-                });
-            }
-            let done = match kind {
-                "text" => scanned.text.get(id),
-                "form" => scanned.form_cells.get(id),
-                "metadata" => scanned.metadata.get(id),
-                _ => return false,
-            };
-            ranges.iter().all(|&(a, b)| tools::contains(done, a, b))
-        });
-        if complete {
-            state.transcript.drain(start..end);
-            return true;
-        }
-    }
-    false
 }
 
 pub(in crate::analysis) fn evict_delivered_group(
@@ -1694,8 +1469,7 @@ pub(in crate::analysis) fn observe_progress(
     local_completion: Option<String>,
     limits: &Limits,
 ) -> Result<(), String> {
-    if limits.draft_path
-        && *role == Role::Main
+    if *role == Role::Main
         && state.draft_stage == super::super::draft::DraftStage::Outline
         && state.analysis.outline.phase == super::super::outline_flow::Phase::Discover
     {
@@ -1711,10 +1485,7 @@ pub(in crate::analysis) fn observe_progress(
         );
         return Ok(());
     }
-    if limits.draft_path
-        && *role == Role::Main
-        && state.draft_stage == super::super::draft::DraftStage::Outline
-    {
+    if *role == Role::Main && state.draft_stage == super::super::draft::DraftStage::Outline {
         let flow = &state.analysis.outline;
         // Completion measures covered obligations, not node identity or array
         // order. Cosmetic edits still count as work, but cannot reset focus.
@@ -1841,25 +1612,6 @@ pub(in crate::analysis) fn observe_progress(
     let completion = completed
         .then(|| digest(&json!([scope, dependencies, state.role, state.done])))
         .transpose()?;
-    let active_progress = if *role == Role::Main {
-        &state.main_progress
-    } else {
-        &state.reviewer_progress
-    };
-    let active_dependencies: Vec<_> = active_progress
-        .blockers
-        .iter()
-        .filter(|blocker| {
-            blocker.watch.recovery != Recovery::Blocked
-                && blocker.scope.iter().any(|id| scope.contains(id))
-        })
-        .map(|blocker| {
-            Ok((
-                blocker.scope.clone(),
-                scope_dependencies(state, &blocker.scope)?,
-            ))
-        })
-        .collect::<Result<_, String>>()?;
     let progress = if *role == Role::Main {
         &mut state.main_progress
     } else {
@@ -1874,91 +1626,9 @@ pub(in crate::analysis) fn observe_progress(
         },
         &limits.progress(),
     );
-    if limits.draft_path {
-        progress.watch.recovery = Recovery::Running;
-        progress.watch.replans = 0;
-        return Ok(());
-    }
-    if completed {
-        progress
-            .blockers
-            .retain(|b| !b.scope.iter().all(|id| scope.contains(id)));
-    }
-    for (active_scope, active_hash) in active_dependencies {
-        if let Some(blocker) = progress
-            .blockers
-            .iter_mut()
-            .find(|b| b.scope == active_scope)
-        {
-            blocker.watch = progress.watch.clone();
-            if progress.watch.recovery == Recovery::Blocked {
-                // Expanded or narrowed work must also close the original retry.
-                blocker.dependencies_sha256 = active_hash;
-            }
-        }
-    }
-    progress.block(scope, dependencies);
-    if progress.watch.recovery == Recovery::Blocked {
-        let work = if *role == Role::Main {
-            &mut state.main_work
-        } else {
-            &mut state.reviewer_work
-        };
-        if let Some(work) = work {
-            work.status = WorkStatus::Blocked;
-        }
-    }
+    progress.watch.recovery = Recovery::Running;
+    progress.watch.replans = 0;
     Ok(())
-}
-
-pub(in crate::analysis) fn execution_packet(
-    state: &Checkpoint,
-    max_bytes: usize,
-) -> Result<Value, String> {
-    let progress = state.execution();
-    let completed_focus = review_focus_complete(state)?
-        && !scope_is_blocked(
-            state,
-            &state
-                .work()
-                .expect("completed review focus has work")
-                .source_scope,
-        )?;
-    let history_available = progress.blockers.iter().try_fold(false, |found, blocker| {
-        super::repair_recovery::available(state, &blocker.scope).map(|available| found || available)
-    })?;
-    let mut packet = json!({"watch":progress.watch,"blocker_count":progress.blockers.len(),
-    "next_action":if history_available {
-        "A blocker below has newly delivered prior repair history. Its history_recovery navigation permits one explicit set_work_note retry while retaining spent replans and deferred work. This does not approve or complete the scope."
-    } else if completed_focus {
-        "The current review focus already has recorded outcomes. Follow work_state.next_action and comparison_progress.next_reference to select unfinished comparisons. Do not repeat the completed focus. If none remain, complete the assigned source-to-result judgment with put_source_review; the host advances and aggregates. This guidance neither grants approval nor resets recovery budgets."
-    } else if state.role == Role::Reviewer && progress.watch.needs_replan_context() {
-        "Replan the stalled comparison now. Select a single unfinished candidate or one exact source uncertainty and narrow focus with set_work_note; retain the assigned source task and permitted cross-reference scope. Compare that candidate with its original evidence and save put_review_finding or complete_review_check before loading another inventory page. If a particular field is missing, retrieve only that evidence. Do not wait to read every candidate before saving the first comparison. After the local comparisons, judge source omissions and boundaries with put_source_review; the host advances tasks and aggregates complete judgments. Execution blockers prevent submission. This neither approves the analysis nor renews recovery allowances."
-    } else { match (&state.role, &progress.watch.recovery) {
-        (Role::Reviewer, Recovery::Running) => "Compare the focused source and candidate now. Save actionable mismatches with put_review_finding; record a correct comparison with complete_review_check, without inventing a finding. Judge the assigned source fragment with put_source_review, including omissions and continuation boundaries. The host advances tasks and aggregates complete judgments. Repeated reads/notes are not progress; inspect only a specific missing field. Execution blockers prevent submission.",
-        (_, Recovery::Running) => "Save the current grounded local result before expanding comparisons.",
-        (_, Recovery::Replan) => "Repeated reads/notes are not progress. Narrow focus to an exact clause or endpoint pair and write its result; inspect only a specific missing field.",
-        (_, Recovery::Blocked) => "Select an independent source scope. This execution failure prevents final acceptance and cannot be converted to source uncertainty."
-    }}});
-    if state.role == Role::Main
-        && let Some((id, entry)) = repair::tasks::active(state)
-    {
-        packet["repair_task"] = json!({"id":id,"finding_sha256":entry.finding_sha256,"committed_turns":entry.committed_turns});
-        packet["next_action"] = json!(
-            "Work on the host-assigned repair task. Changing source scope or focus does not change the task or renew its allowance. Save a grounded revised or disputed result; the host checks the full batch before selecting another task. Existing source blockers remain binding."
-        );
-    }
-    packet["blockers"] = execution_gaps(
-        state,
-        &json!({"scope":"execution","offset":0,"limit":progress.blockers.len().max(1)}),
-        max_bytes.saturating_sub(
-            serde_json::to_vec(&packet)
-                .map_err(|e| e.to_string())?
-                .len()
-                + 16,
-        ),
-    )?;
-    Ok(packet)
 }
 
 /// A clean comparison is a local outcome too. Its receipt is keyed by the
@@ -2003,6 +1673,7 @@ pub(in crate::analysis) fn has_review_outcome(
         || !candidate_findings(state, key).is_empty())
 }
 
+#[cfg(test)]
 fn review_focus_complete(state: &Checkpoint) -> Result<bool, String> {
     let Some(work) = state.work().filter(|work| {
         state.role == Role::Reviewer
@@ -2018,88 +1689,6 @@ fn review_focus_complete(state: &Checkpoint) -> Result<bool, String> {
         }
     }
     Ok(true)
-}
-
-pub(in crate::analysis) fn complete_review_check(
-    input: &FrozenInput,
-    state: &mut Checkpoint,
-    args: &Value,
-    max_bytes: usize,
-) -> Result<Value, String> {
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Check {
-        reference: String,
-        summary: String,
-        sources: Vec<Span>,
-    }
-    let check: Check = serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
-    let work = state.work().ok_or("declare a review focus first")?;
-    let assigned = state
-        .source_review
-        .as_ref()
-        .is_some_and(|r| r.active_task.is_some())
-        && work_references(state, work).contains(&check.reference);
-    if work.status != WorkStatus::Active
-        || (!assigned
-            && (work.focus.action != FocusAction::Review
-                || !work.focus.references.contains(&check.reference)))
-    {
-        return Err(
-            "clean review check must name an exact candidate in the active review focus".into(),
-        );
-    }
-    if check.summary.trim().is_empty() || check.sources.is_empty() {
-        return Err(
-            "clean review check needs a comparison summary and original source citations".into(),
-        );
-    }
-    let version = digest(&reference(&state.analysis, &check.reference)?)?;
-    if state.reviewer_coverage.candidate.get(&check.reference) != Some(&version) {
-        return Err(
-            "independently inspect the current candidate before recording a clean comparison"
-                .into(),
-        );
-    }
-    let findings = candidate_findings(state, &check.reference);
-    if !findings.is_empty() {
-        return Err(tools::field_error(
-            "/reference",
-            json!({"reference":check.reference,"recorded_outcome":"findings",
-                "finding_ids":tools::bounded_page(&findings,0,usize::MAX,max_bytes/4)?,
-                "instruction":"This candidate already has a recorded finding outcome. Do not submit a clean comparison for it or repeat an inventory just to record completion. Retain these findings and compare the remaining pending_candidate_refs, then judge source omissions, relationships and boundaries with put_source_review using status=findings. Use inspect_review only when finding details are needed for a correction or an evidence-backed withdrawal. This rejection grants no clean comparison or source approval."}),
-        ));
-    }
-    for source in &check.sources {
-        // The exact candidate was authorized by its task/focus above. Original
-        // evidence can already have been delivered by a boundary bundle or a
-        // previous cross-reference read. Citing it does not expand the current
-        // read scope or authorize comparisons of other candidates.
-        tools::validate_span(input, &state.reviewer_coverage, source)?;
-    }
-    let cited: Vec<_> = check.sources.iter().map(|s| s.source_id.clone()).collect();
-    if !scope_references(&state.analysis, &cited).contains(&check.reference) {
-        return Err("comparison citations must concern the referenced candidate".into());
-    }
-    let receipt = review_check_key(
-        &check.reference,
-        &source_review::candidate_version(state, &check.reference)?,
-    )?;
-    let fresh = !state.reviewer_progress.seen.contains(&receipt);
-    let output = json!({"reference":check.reference,"candidate_sha256":version,
-        "assessment":"no_issue_in_comparison","summary":check.summary,"sources":check.sources,
-        "new_completion":fresh,"completion_sha256":receipt});
-    if serde_json::to_vec(&output)
-        .map_err(|e| e.to_string())?
-        .len()
-        > max_bytes
-    {
-        return Err("clean comparison exceeds result budget; shorten the summary".into());
-    }
-    // Every check in a multi-tool batch is retained. The last novel local
-    // completion resets the turn watch once, at the normal commit boundary.
-    state.reviewer_progress.seen.insert(receipt);
-    Ok(output)
 }
 
 /// A validated focused write closes a local action without pretending the whole

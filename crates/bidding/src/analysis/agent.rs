@@ -3,7 +3,6 @@ use crate::agent_runtime::{Driver, Status, drive};
 pub(super) mod context;
 pub(super) mod evidence_delivery;
 pub(super) mod main_dispatch;
-mod main_handoff;
 pub(super) mod main_work;
 pub mod repair;
 pub(super) mod repair_recovery;
@@ -21,8 +20,6 @@ use serde_json::{Value, json};
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use view_io::read_source_view;
-
-const MAIN: &str = include_str!("prompts/main.txt");
 
 const REVIEWER: &str = include_str!("prompts/reviewer.txt");
 
@@ -61,9 +58,6 @@ pub struct Limits {
     /// 0 keeps the existing per-root batch cap. Production packs use 3.
     #[serde(default)]
     pub pack_max_turns: usize,
-    /// 分析入口固定大纲→填章。产品不提供开关；仅单测可构造 false 覆盖抽取合同。
-    #[serde(default)]
-    pub draft_path: bool,
     /// 可选组成绑定附加词；缺省只用 title 包含匹配，禁止代码内置行业词表。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub draft_bind_terms: Vec<String>,
@@ -89,33 +83,21 @@ impl Limits {
         mut self,
         input: &FrozenInput,
     ) -> Result<Self, crate::analysis::budget::BudgetRefused> {
-        if self.draft_path {
-            // 阶段一的绝对门。填章请求不走这里：它在冻结请求时按待填章数另记一套
-            // 额度（`draft::fill_limits`），所以这个 20 只约束大纲与骨架。
-            self.max_turns = self
-                .max_turns
-                .max(crate::analysis::draft::outline_turn_cap(input));
-            self.max_tool_calls = self.max_tool_calls.max(self.max_turns.saturating_mul(12));
-            self.max_read_bytes = self.max_read_bytes.max(
-                self.max_turns
-                    .saturating_mul(self.max_tool_result_bytes)
-                    .saturating_mul(4),
-            );
-            if self.max_turns == 0 {
-                self.max_turns = crate::analysis::draft::OUTLINE_MAX_TURNS;
-            }
-            self.reviewer_reserve = 0;
-            return Ok(self);
+        // 阶段一的绝对门。填章请求不走这里：它在冻结请求时按待填章数另记一套
+        // 额度（`draft::fill_limits`），所以这个 20 只约束大纲与骨架。
+        self.max_turns = self
+            .max_turns
+            .max(crate::analysis::draft::outline_turn_cap(input));
+        self.max_tool_calls = self.max_tool_calls.max(self.max_turns.saturating_mul(12));
+        self.max_read_bytes = self.max_read_bytes.max(
+            self.max_turns
+                .saturating_mul(self.max_tool_result_bytes)
+                .saturating_mul(4),
+        );
+        if self.max_turns == 0 {
+            self.max_turns = crate::analysis::draft::OUTLINE_MAX_TURNS;
         }
-        let budget = crate::analysis::budget::apply_with_pack(
-            input,
-            self.max_turns,
-            self.max_turns,
-            self.pack_max_units,
-            self.pack_max_chars,
-        )?;
-        self.max_turns = budget.applied_turns;
-        self.reviewer_reserve = self.reviewer_reserve.max(budget.reviewer_reserve);
+        self.reviewer_reserve = 0;
         Ok(self)
     }
 }
@@ -178,14 +160,13 @@ impl Config {
                 "KB_TENDER_AGENT_LIMITS is required",
             )
         })?;
-        let mut limits: Limits = serde_json::from_str(&raw).map_err(invalid)?;
+        let limits: Limits = serde_json::from_str(&raw).map_err(invalid)?;
         if limits.pack_max_units < 6 || limits.pack_max_chars < 1200 || limits.pack_max_turns < 3 {
             return Err(error(
                 "AGENT_PROVIDER_UNAVAILABLE",
                 "KB_TENDER_AGENT_LIMITS must set pack_max_units>=6, pack_max_chars>=1200, pack_max_turns>=3",
             ));
         }
-        limits.draft_path = true;
         Ok(limits)
     }
 
@@ -209,7 +190,6 @@ impl Config {
         mut limits: Limits,
         input: Option<&FrozenInput>,
     ) -> Result<Self, AgentError> {
-        limits.draft_path = true;
         if let Some(input) = input {
             limits = limits
                 .at_least_for(input)
@@ -231,11 +211,7 @@ impl Config {
         let tools_sha256 = digest(&crate::outline::agent::schemas()).map_err(invalid)?;
         let review_tools_sha256 = digest(&tools::schemas_for(true, &limits)).map_err(invalid)?;
         let main_prompt_sha256 = digest(&crate::agent_runtime::chat::system_content(
-            if limits.draft_path {
-                crate::outline::agent::OUTLINE_PROMPT
-            } else {
-                MAIN
-            },
+            crate::outline::agent::OUTLINE_PROMPT,
         ))
         .map_err(invalid)?;
         let review_prompt_sha256 =
@@ -287,10 +263,8 @@ impl Config {
             || l.max_review_rounds == 0
             || l.max_source_view_bytes == 0
             || l.max_source_view_edge == 0
-            || (l.draft_path && l.reviewer_reserve != 0)
-            || (!l.draft_path
-                && self.tools_sha256 != digest(&tools::schemas_for(false, l)).map_err(invalid)?)
-            || (l.draft_path && {
+            || l.reviewer_reserve != 0
+            || {
                 let outline = digest(&crate::outline::agent::schemas()).map_err(invalid)?;
                 let fill = digest(&crate::outline::agent::template_schemas()).map_err(invalid)?;
                 !(self.tools_sha256 == outline
@@ -305,12 +279,8 @@ impl Config {
                             crate::outline::agent::TEMPLATE_PROMPT,
                         ))
                         .map_err(invalid)?)
-            })
+            }
             || self.review_tools_sha256 != digest(&tools::schemas_for(true, l)).map_err(invalid)?
-            || (!l.draft_path
-                && self.main_prompt_sha256
-                    != digest(&crate::agent_runtime::chat::system_content(MAIN))
-                        .map_err(invalid)?)
             || self.review_prompt_sha256
                 != digest(&crate::agent_runtime::chat::system_content(REVIEWER)).map_err(invalid)?
         {
@@ -581,8 +551,7 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
             done: self.state.done,
             execution_blocked: (self.state.role == Role::Reviewer
                 && repair_task_host::exhausted(self.state, limits))
-                || (limits.draft_path
-                    && self.state.role == Role::Main
+                || (self.state.role == Role::Main
                     && self.state.draft_stage == draft::DraftStage::Outline
                     && self.state.analysis.outline.phase == super::outline_flow::Phase::Discover
                     && self.state.main_progress.watch.recovery == Recovery::Blocked),
@@ -679,9 +648,6 @@ pub async fn run_fill<J: Journal, M: Model>(
 ) -> Result<AnalysisResult, AgentError> {
     if seed.is_empty() {
         return Err(invalid("fill run needs a read-back chapter tree"));
-    }
-    if !config.limits.draft_path {
-        return Err(invalid("fill run requires the draft path"));
     }
     run_seeded(
         input,
@@ -789,14 +755,8 @@ async fn run_seeded<J: Journal, M: Model>(
                 state.analysis.draft_plan = plan;
                 state.analysis.outline = outline;
                 state.draft_stage = crate::analysis::draft::DraftStage::Fill;
-                crate::analysis::draft::after_batch(
-                    input,
-                    &mut state,
-                    false,
-                    false,
-                    config.limits.draft_path,
-                )
-                .map_err(invalid)?;
+                crate::analysis::draft::after_batch(input, &mut state, false, false)
+                    .map_err(invalid)?;
             } else if state.draft_stage == crate::analysis::draft::DraftStage::Outline {
                 return Err(error(
                     "FROZEN_INPUT_DIGEST_MISMATCH",
@@ -810,11 +770,7 @@ async fn run_seeded<J: Journal, M: Model>(
         None => {}
     }
     let publication_ready = outline_publication_ready(input, &state, &input_sha256);
-    let already_checked = if config.limits.draft_path && is_outline_run {
-        publication_ready
-    } else {
-        is_outline_run && super::outline_flow::checked(input, &state)
-    };
+    let already_checked = is_outline_run && publication_ready;
     let driven = if already_checked {
         Ok(())
     } else {
@@ -850,15 +806,9 @@ async fn run_seeded<J: Journal, M: Model>(
     {
         return Err(error);
     }
-    if config.limits.draft_path && is_outline_run {
-        if !outline_publication_ready(input, &state, &input_sha256) {
-            return Err(invalid(
-                "outline is not ready to publish; checkpoint retained",
-            ));
-        }
-    } else if is_outline_run && !super::outline_flow::checked(input, &state) {
+    if is_outline_run && !outline_publication_ready(input, &state, &input_sha256) {
         return Err(invalid(
-            "outline completeness check has not passed; checkpoint retained",
+            "outline is not ready to publish; checkpoint retained",
         ));
     }
     if !is_outline_run
@@ -874,7 +824,7 @@ async fn run_seeded<J: Journal, M: Model>(
     }
     let stage = state.draft_stage;
     let turns = state.turn;
-    let result = finish_draft_path(input, config, journal, &mut state, input_sha256).await;
+    let result = finalize_run(input, config, journal, &mut state, input_sha256).await;
     // 出稿快慢是要压下去的目标，不是闸门：这里只记账，供回归对比，不影响成败。
     if let Ok(published) = result.as_ref() {
         let elapsed_secs = started.elapsed().as_secs();
@@ -915,9 +865,9 @@ fn outline_publication_ready(input: &FrozenInput, state: &Checkpoint, input_sha2
     crate::outline::project_draft(input, input_sha256, &state.outline_run.tool_draft).is_ok()
 }
 
-async fn finish_draft_path<J: Journal>(
+async fn finalize_run<J: Journal>(
     input: &FrozenInput,
-    config: &Config,
+    _config: &Config,
     journal: &J,
     state: &mut Checkpoint,
     input_sha256: String,
@@ -939,7 +889,7 @@ async fn finish_draft_path<J: Journal>(
     if state.journal.pending.is_some() {
         return Err(invalid("cannot finalize an uncommitted model turn"));
     }
-    if config.limits.draft_path && state.outline_run.tool_draft.finished {
+    if state.outline_run.tool_draft.finished {
         let projected =
             crate::outline::project_draft(input, &input_sha256, &state.outline_run.tool_draft)
                 .map_err(invalid)?;
@@ -999,7 +949,6 @@ pub(super) async fn execute_turn<J: Journal>(
 ) -> Result<Vec<Value>, AgentError> {
     let body = serde_json::from_slice(state.journal.body()?).map_err(invalid)?;
     let estimated_input_tokens = context::estimate_input_tokens(&body, &config.limits)?;
-    let review_batch = source_review::BatchVersion::capture(state, &body).map_err(invalid)?;
     if response.tool_calls.len() > config.limits.max_tool_calls - state.tool_calls {
         return Err(error(
             "AGENT_TURN_BUDGET_EXCEEDED",
@@ -1027,8 +976,7 @@ pub(super) async fn execute_turn<J: Journal>(
     if let Some(delivered) = state.pending_coverage.take() {
         state.replace_coverage(delivered);
     }
-    let delivered_discovery = (config.limits.draft_path
-        && state.draft_stage == draft::DraftStage::Outline
+    let delivered_discovery = (state.draft_stage == draft::DraftStage::Outline
         && state.analysis.outline.phase == super::outline_flow::Phase::Discover)
         .then(|| context::visible_work_evidence(state, body["messages"].as_array().unwrap()));
     let outline_phase_before = state.analysis.outline.phase;
@@ -1147,17 +1095,8 @@ pub(super) async fn execute_turn<J: Journal>(
                 Err(error) => Err(error.to_string()),
             }
         } else {
-            args.map_err(|e| e.to_string()).and_then(|args| {
-                apply_in_batch(
-                    input,
-                    config,
-                    state,
-                    &call.name,
-                    &args,
-                    review_batch.as_ref(),
-                    turn_duty,
-                )
-            })
+            args.map_err(|e| e.to_string())
+                .and_then(|args| apply_in_batch(input, config, state, &call.name, &args, turn_duty))
         };
         if let Some(prior) = prior_coverage {
             state.pending_coverage = Some(state.replace_coverage(prior));
@@ -1296,8 +1235,7 @@ pub(super) async fn execute_turn<J: Journal>(
     // 停止只在填章回路里问一次，且只在章界生效：本章仍按预算写完，之后不再派新章。
     let stop = state.draft_stage == crate::analysis::draft::DraftStage::Fill
         && journal.stop_requested().await?;
-    crate::analysis::draft::after_batch(input, state, batch_failed, stop, config.limits.draft_path)
-        .map_err(invalid)?;
+    crate::analysis::draft::after_batch(input, state, batch_failed, stop).map_err(invalid)?;
     state.turn += 1;
     if state.role != role
         || (outline_phase_before != state.analysis.outline.phase
@@ -1628,16 +1566,14 @@ pub(super) async fn prepare_request(
     let mut excluded_recall = std::collections::BTreeSet::new();
     let mut omit_preloaded_evidence = false;
     let mut package_budget = None;
-    let reading_sessions = if config.limits.draft_path
-        && matches!(
-            state.draft_stage,
-            draft::DraftStage::None | draft::DraftStage::Outline
-        )
-        && state
-            .outline_run
-            .reading_packs
-            .as_ref()
-            .is_none_or(|work| !work.complete())
+    let reading_sessions = if matches!(
+        state.draft_stage,
+        draft::DraftStage::None | draft::DraftStage::Outline
+    ) && state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .is_none_or(|work| !work.complete())
     {
         crate::outline::discover::claim_turn(
             &mut state.outline_run.reading_packs,
@@ -1649,8 +1585,7 @@ pub(super) async fn prepare_request(
         Vec::new()
     };
     let turn_duty = crate::outline::agent::current(input, state);
-    let discovering =
-        config.limits.draft_path && turn_duty == crate::outline::agent::Duty::Discover;
+    let discovering = turn_duty == crate::outline::agent::Duty::Discover;
     loop {
         let reviewer = state.role == Role::Reviewer;
         let review_packet = if reviewer {
@@ -1658,21 +1593,12 @@ pub(super) async fn prepare_request(
         } else {
             Value::Null
         };
-        let draft_fill = config.limits.draft_path
-            && matches!(
-                state.draft_stage,
-                crate::analysis::draft::DraftStage::Fill
-                    | crate::analysis::draft::DraftStage::Published
-            );
-        let system_owned;
-        let system = if config.limits.draft_path {
-            system_owned = crate::outline::agent::system_prompt(turn_duty, draft_fill);
-            system_owned.as_str()
-        } else if reviewer {
-            REVIEWER
-        } else {
-            MAIN
-        };
+        let draft_fill = matches!(
+            state.draft_stage,
+            crate::analysis::draft::DraftStage::Fill
+                | crate::analysis::draft::DraftStage::Published
+        );
+        let system = crate::outline::agent::system_prompt(turn_duty, draft_fill);
         let mut brief = json!({"project_id":input.project_id,"document_set_id":input.document_set_id,
             "source_count":input.source_units.len(),"form_count":input.structured_forms.len(),
             "document_count":input.documents.len(),"relation_count":input.document_relations.len(),"decision_count":input.decisions.len(),
@@ -1796,36 +1722,19 @@ pub(super) async fn prepare_request(
             ));
         }
         let has_preloaded_evidence = preloaded_evidence.is_some();
-        let host = if config.limits.draft_path {
-            crate::outline::agent::host_packet(
-                input,
-                state,
-                config.limits.max_tool_result_bytes,
-                state.progress(input),
-                context::request_work(state).map_err(invalid)?,
-                preloaded_evidence.as_ref(),
-            )
-        } else {
-            json!({
-            "progress":state.progress(input),"work":context::request_work(state).map_err(invalid)?,
-            "execution":context::execution_packet(state,config.limits.max_tool_result_bytes).map_err(invalid)?,
-            "work_state":context::request_work_state(input,state,config.limits.max_tool_result_bytes).map_err(invalid)?,
-            "source_review":review_packet,
-            "main_dispatch":json!(main_dispatch::projection(input,config,state).map_err(invalid)?),
-            "global_analysis_checks":global_check_packet(input,state).map_err(invalid)?,
-            "preloaded_evidence":preloaded_evidence,
-            "review_findings":if reviewer {Value::Null}else{repair_feedback_packet(state, &messages, &config.limits).map_err(invalid)?}
-            })
-        };
+        let host = crate::outline::agent::host_packet(
+            input,
+            state,
+            config.limits.max_tool_result_bytes,
+            state.progress(input),
+            context::request_work(state).map_err(invalid)?,
+            preloaded_evidence.as_ref(),
+        );
         messages.push(json!({"role":"user","content":host.to_string()}));
         let bytes = crate::agent_runtime::chat::prepare(
             &config.provider,
             messages,
-            if config.limits.draft_path {
-                crate::outline::agent::schemas_for(turn_duty)
-            } else {
-                tools::schemas_for(reviewer, &config.limits)
-            },
+            crate::outline::agent::schemas_for(turn_duty),
         )
         .await?;
         let body: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
@@ -2020,6 +1929,7 @@ pub(super) fn delivered_repair_feedback(
     Ok(received)
 }
 
+#[cfg(test)]
 pub(super) fn repair_feedback_packet(
     state: &Checkpoint,
     messages: &[Value],
@@ -2161,7 +2071,6 @@ pub(super) fn apply(
         state,
         name,
         args,
-        None,
         crate::outline::agent::current(input, state),
     )
 }
@@ -2172,7 +2081,6 @@ pub(super) fn apply_in_batch(
     state: &mut Checkpoint,
     name: &str,
     args: &Value,
-    review_batch: Option<&source_review::BatchVersion>,
     turn_duty: crate::outline::agent::Duty,
 ) -> Result<Value, String> {
     let args = if name == "submit_outline_scan" {
@@ -2180,113 +2088,9 @@ pub(super) fn apply_in_batch(
     } else {
         evidence_refs::expand(input, args)?
     };
-    let result = apply_inner(input, config, state, name, &args, review_batch, turn_duty)?;
+    let result = apply_inner(input, config, state, name, &args, turn_duty)?;
     context::synchronize_outcomes(state);
     Ok(result)
-}
-
-fn put_analysis_check(
-    input: &FrozenInput,
-    state: &mut Checkpoint,
-    args: &Value,
-) -> Result<Value, String> {
-    let key = args["key"]
-        .as_str()
-        .ok_or("global check key required")?
-        .to_owned();
-    if !ANALYSIS_GLOBAL_CHECK_KEYS.contains(&key.as_str()) {
-        return Err(format!("unknown global check {key}"));
-    }
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Args {
-        key: String,
-        expected_scope_sha256: String,
-        conclusion: GlobalCheckConclusion,
-        grounds: Vec<Span>,
-        #[serde(default)]
-        record_ids: Vec<String>,
-        #[serde(default)]
-        finding_ids: Vec<String>,
-    }
-    let args: Args = serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
-    let expected = rule_contract::scope_sha256(input, &state.analysis)?;
-    if args.expected_scope_sha256 != expected {
-        return Err(format!(
-            "global check scope changed; compare the current graph at {expected}"
-        ));
-    }
-    let mut finding_ids = Vec::new();
-    for id in &args.finding_ids {
-        let finding = state
-            .review_draft
-            .get(id)
-            .or_else(|| {
-                state
-                    .review_draft
-                    .values()
-                    .find(|finding| digest(finding).ok().as_ref() == Some(id))
-            })
-            .ok_or_else(|| format!("unknown global check finding {id}"))?;
-        // Freeze the finding's content identity, which survives the published
-        // Review vector without trusting a free-form code or a discarded UUID.
-        if state.role == Role::Reviewer {
-            validate_finding(input, state, finding)?;
-        }
-        finding_ids.push(digest(finding)?);
-    }
-    let check = GlobalCheck {
-        key: args.key,
-        scope_sha256: expected,
-        conclusion: args.conclusion,
-        grounds: args.grounds,
-        record_ids: args.record_ids,
-        finding_ids,
-    };
-    rule_contract::validate_check(
-        input,
-        &state.analysis,
-        &check,
-        &state.review_draft.values().cloned().collect::<Vec<_>>(),
-    )?;
-    rule_contract::validate_evidence(input, &state.analysis, state.coverage(), &check)?;
-    if state.role == Role::Reviewer {
-        state
-            .analysis
-            .review_global_checks
-            .insert(key.clone(), check);
-    } else {
-        state.analysis.main_global_checks.insert(key.clone(), check);
-    }
-    Ok(json!({"saved":true,"key":key}))
-}
-
-fn global_check_packet(input: &FrozenInput, state: &Checkpoint) -> Result<Value, String> {
-    let checks = if state.role == Role::Reviewer {
-        &state.analysis.review_global_checks
-    } else {
-        &state.analysis.main_global_checks
-    };
-    let scope = rule_contract::scope_sha256(input, &state.analysis)?;
-    let findings: Vec<_> = state.review_draft.values().cloned().collect();
-    let pending: Vec<_> = ANALYSIS_GLOBAL_CHECK_KEYS
-        .iter()
-        .filter(|key| {
-            checks.get(**key).is_none_or(|check| {
-                rule_contract::validate_check(input, &state.analysis, check, &findings).is_err()
-                    || rule_contract::validate_evidence(
-                        input,
-                        &state.analysis,
-                        state.coverage(),
-                        check,
-                    )
-                    .is_err()
-            })
-        })
-        .copied()
-        .collect();
-    Ok(json!({"expected_scope_sha256":scope,"pending_keys":pending,
-        "instruction":"After source work and relevant candidate comparisons, independently judge these fixed global categories against the current graph and originals. Submit put_analysis_check with this expected scope. A write changing the graph invalidates the scope; prior receipts and empty findings are not semantic approval. Multiple checks may share a tool batch. Finding IDs must name saved findings; the host stores their content digests."}))
 }
 
 fn apply_inner(
@@ -2295,35 +2099,10 @@ fn apply_inner(
     state: &mut Checkpoint,
     name: &str,
     args: &Value,
-    review_batch: Option<&source_review::BatchVersion>,
     turn_duty: crate::outline::agent::Duty,
 ) -> Result<Value, String> {
-    let reviewer = state.role == Role::Reviewer;
     if state.execution().watch.recovery == Recovery::Blocked
-        && !(config.limits.draft_path
-            && matches!(
-                name,
-                "submit_pack"
-                    | "put_chapters"
-                    | "bind_forms"
-                    | "put_slots"
-                    | "read_outline"
-                    | "finish_outline"
-            ))
         && !matches!(
-            name,
-            "set_work_note" | "check_gaps" | "source_index" | "collection_index" | "inspect_review"
-        )
-    {
-        return Err("local execution is blocked; select an independent source scope, or retry after its saved dependencies change".into());
-    }
-    if config.limits.draft_path {
-        let unmapped =
-            !crate::outline::tools::unmapped_forms(input, &state.outline_run.tool_draft).is_empty();
-        if let Some(reason) = crate::outline::agent::deny(turn_duty, name, unmapped) {
-            return Err(reason.into());
-        }
-        if matches!(
             name,
             "submit_pack"
                 | "put_chapters"
@@ -2331,182 +2110,31 @@ fn apply_inner(
                 | "put_slots"
                 | "read_outline"
                 | "finish_outline"
-        ) {
-            return crate::outline::agent::apply(
-                input,
-                config.limits.pack_max_chars,
-                state,
-                name,
-                args,
-            );
-        }
-        return Err("unknown or role-forbidden tool".into());
+        )
+    {
+        return Err("local execution is blocked; select an independent source scope, or retry after its saved dependencies change".into());
     }
-    main_dispatch::check_action(input, state, name, args)?;
-    context::check_delete(state, name, args)?;
-    match name {
-        "read_review_task" if reviewer => {
-            if args.as_object().is_none_or(|args| !args.is_empty()) {
-                return Err("read_review_task takes no arguments; use the assigned task".into());
-            }
-            let evidence = source_review::evidence(input, config, state)?.ok_or(
-                "assigned task has no readable text/grid packet; use explicit reading tools",
-            )?;
-            state.reviewer_coverage = evidence.coverage;
-            Ok(evidence.content)
-        }
-        "put_source_review" if reviewer => {
-            source_review::put_in_batch(input, config, state, args, review_batch)
-        }
-        "complete_review_check" if reviewer => {
-            context::complete_review_check(input, state, args, config.limits.max_tool_result_bytes)
-        }
-        "set_work_note" => {
-            if args.get("output_refs").is_some() || args.get("pending_refs").is_some() {
-                return Err("output_refs and pending_refs are maintained by the host; omit them from tool input".into());
-            }
-            let mut next: WorkState =
-                serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
-            if next.status == WorkStatus::Blocked {
-                return Err("execution blocking is maintained by the host".into());
-            }
-            if !reviewer && repair::tasks::active(state).is_some() {
-                repair_task_host::check_scope(state, &next.source_scope)?;
-            }
-            context::check_blocked_scope(state, &next.source_scope)?;
-            context::retain_outcomes(&state.analysis, &mut next, state.work());
-            context::validate(input, state, &next, config.limits.max_tool_result_bytes)?;
-            let resume = if !reviewer && repair::tasks::active(state).is_some() {
-                false
-            } else {
-                repair_recovery::enter(state, &next.source_scope)?
-            };
-            let handoff = resume
-                || next.status == WorkStatus::Complete
-                || state.work().is_some_and(|w| {
-                    w.status != WorkStatus::Complete
-                        && w.source_scope
-                            .iter()
-                            .any(|id| !next.source_scope.contains(id))
-                });
-            if reviewer {
-                state.reviewer_work = Some(next);
-            } else {
-                state.main_work = Some(next);
-            }
-            if handoff
-                && let Some(start) = state
-                    .transcript
-                    .iter()
-                    .rposition(|m| m["role"] == "assistant")
-            {
-                state.transcript.drain(..start);
-            }
-            Ok(json!({"saved":true,"handoff":handoff}))
-        }
-        "check_gaps" if args["scope"] == "execution" || args["scope"] == "pending" => {
-            context::execution_gaps(state, args, config.limits.max_tool_result_bytes)
-        }
-        "check_gaps" if args["scope"] == "work" => {
-            context::work_gaps(input, state, args, config.limits.max_tool_result_bytes)
-        }
-        "put_review_finding" if reviewer => {
-            if args
-                .as_object()
-                .is_none_or(|o| o.len() != 2 || !o.contains_key("id") || !o.contains_key("finding"))
-            {
-                return Err("review finding needs exactly id and finding".into());
-            }
-            let id = if args["id"].is_null() {
-                uuid::Uuid::new_v4().to_string()
-            } else {
-                args["id"]
-                    .as_str()
-                    .filter(|id| state.review_draft.contains_key(*id))
-                    .ok_or("unknown review finding; use null to allocate an ID")?
-                    .to_owned()
-            };
-            let finding: Finding =
-                serde_json::from_value(args["finding"].clone()).map_err(|e| e.to_string())?;
-            validate_finding(input, state, &finding)?;
-            // A saved finding must remain retrievable as a whole page item,
-            // including its ID and pagination envelope. Draft size cannot
-            // exceed the request's existing tool-call budget.
-            let page = json!({"total":config.limits.max_tool_calls,
-                "next":config.limits.max_tool_calls,"items":[{"id":id,"finding":finding}]});
-            if serde_json::to_vec(&page).map_err(|e| e.to_string())?.len()
-                > config.limits.max_tool_result_bytes
-            {
-                return Err(
-                    "finding exceeds budget; retain a concise field error and source references"
-                        .into(),
-                );
-            }
-            repair::check_main_budget(
-                &finding,
-                state.repair.results.get(&digest(&finding)?),
-                config.limits.max_tool_calls,
-                config.limits.max_tool_result_bytes,
-            )?;
-            let prior = state.review_draft.get(&id).cloned();
-            source_review::finding_changed(state, prior.as_ref(), Some(&finding))?;
-            state.review_draft.insert(id.clone(), finding);
-            Ok(json!({"id":id,"saved":true}))
-        }
-        "delete_review_finding" if reviewer => {
-            if args
-                .as_object()
-                .is_none_or(|o| o.len() != 1 || !o.contains_key("id"))
-            {
-                return Err("only a review finding ID is accepted".into());
-            }
-            let id = args["id"].as_str().ok_or("review finding ID required")?;
-            let prior = state
-                .review_draft
-                .get(id)
-                .cloned()
-                .ok_or("unknown review finding")?;
-            source_review::finding_changed(state, Some(&prior), None)?;
-            state.review_draft.remove(id);
-            Ok(json!({"deleted":id}))
-        }
-        "inspect_review" => inspect_review(state, args, config.limits.max_tool_result_bytes),
-        "put_repair_result" => {
-            repair::tasks::check_put(
-                state,
-                args["finding_sha256"]
-                    .as_str()
-                    .ok_or("finding SHA required")?,
-                &config.limits,
-            )?;
-            repair::put(input, config, state, args)
-        }
-        "request_review" if !reviewer => {
-            if args.as_object().is_none_or(|o| !o.is_empty()) {
-                return Err("review request takes no arguments".into());
-            }
-            main_handoff::enter(input, config, state)
-        }
-        "put_analysis_check" => put_analysis_check(input, state, args),
-        _ => {
-            let mut coverage = if reviewer {
-                state.reviewer_coverage.clone()
-            } else {
-                state.analysis.coverage.clone()
-            };
-            let result = tools::invoke(
-                input,
-                &mut state.analysis,
-                &mut coverage,
-                reviewer,
-                name,
-                args,
-                config.limits.max_tool_result_bytes,
-            )?;
-            if reviewer {
-                state.reviewer_coverage = coverage;
-            }
-            Ok(result)
-        }
+    let unmapped =
+        !crate::outline::tools::unmapped_forms(input, &state.outline_run.tool_draft).is_empty();
+    if let Some(reason) = crate::outline::agent::deny(turn_duty, name, unmapped) {
+        return Err(reason.into());
     }
+    if matches!(
+        name,
+        "submit_pack"
+            | "put_chapters"
+            | "bind_forms"
+            | "put_slots"
+            | "read_outline"
+            | "finish_outline"
+    ) {
+        return crate::outline::agent::apply(
+            input,
+            config.limits.pack_max_chars,
+            state,
+            name,
+            args,
+        );
+    }
+    Err("unknown or role-forbidden tool".into())
 }

@@ -22,7 +22,6 @@ pub(super) fn select_with_budget(
     package_budget: Option<usize>,
 ) -> Result<Option<source_review::Evidence>, AgentError> {
     if state.pending_coverage.is_some()
-        || (state.execution().watch.recovery == Recovery::Blocked && !config.limits.draft_path)
         || (state.role == Role::Reviewer
             && state
                 .work()
@@ -58,8 +57,7 @@ pub(super) fn select_with_budget(
             .iter()
             .any(|&(start, end)| !tools::contains(state.coverage().metadata.get(kind), start, end))
     });
-    let draft_fill =
-        config.limits.draft_path && state.draft_stage == crate::analysis::draft::DraftStage::Fill;
+    let draft_fill = state.draft_stage == crate::analysis::draft::DraftStage::Fill;
     if !draft_fill
         && !new_metadata
         && !expected.is_empty()
