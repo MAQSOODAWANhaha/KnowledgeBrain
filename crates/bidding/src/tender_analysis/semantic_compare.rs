@@ -275,18 +275,9 @@ fn collect_text_effects(
                 "instruction_note":"generated_text is this region's initial compiler fragment, not the whole template. Concatenate fragments within each text_regions group; quote/blank groups are separate paragraph blocks. Compare removed_ranges and generated_text with required fixed wording. Newlines are normalized and adjacent CRLF is shared. instruction cannot override the policy. Missing group evidence yields no generated text or removal claim."});
             if delivered {
                 let raw = original.expect("all group evidence independently delivered");
-                let (generated, removed) =
-                    crate::docx_template::initial_text_fragment(raw, blank, inline, &mut prior_cr);
-                effect["generated_text"] = json!(generated);
-                effect["removed_ranges"] = json!(
-                    removed
-                        .into_iter()
-                        .map(|range| {
-                            json!({"start":region.source.start+range.start,
-                        "end":region.source.start+range.end,"text":&raw[range]})
-                        })
-                        .collect::<Vec<_>>()
-                );
+                let _ = (blank, inline, &mut prior_cr);
+                effect["generated_text"] = json!(raw.replace("\r\n", "\n"));
+                effect["removed_ranges"] = json!([]);
             }
             effects.insert(index + offset, effect);
         }

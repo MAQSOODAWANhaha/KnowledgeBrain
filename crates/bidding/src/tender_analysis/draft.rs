@@ -57,29 +57,6 @@ pub fn default_draft_docx_bytes() -> usize {
     DRAFT_MAX_DOCX_BYTES
 }
 
-/// Compile result. `degraded` stays empty: over-budget compile fails instead of
-/// dropping filled bodies.
-pub struct DraftCompile {
-    pub compiled: crate::docx_composition::compiler::Compiled,
-    pub degraded: Vec<String>,
-}
-
-/// Compile the current draft plan. Over-budget compilation fails without dropping
-/// filled bodies or user-preserved content; callers must raise the budget or stop.
-pub fn compile_draft(
-    input: &FrozenInput,
-    result: &super::AnalysisResult,
-    max_docx_bytes: usize,
-) -> Result<DraftCompile, String> {
-    let composed = crate::docx_composition::synthesize_draft_document(input, result)?;
-    let compiled =
-        crate::docx_composition::compiler::compile(input, result, &composed, max_docx_bytes)?;
-    Ok(DraftCompile {
-        compiled,
-        degraded: vec![],
-    })
-}
-
 /// 整体填充按**待填章数**记账，与阶段一的 20 回合门无关：一份 40 章的投标文件
 /// 不可能在 20 回合里写完，而 3 章的补填也不该拿到 200 回合。
 pub fn fill_turn_cap(pending_chapters: usize) -> usize {

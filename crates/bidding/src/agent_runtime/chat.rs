@@ -23,10 +23,7 @@ use std::{
 };
 
 mod request;
-pub(crate) use request::{
-    default_context_tokens, default_image_token_reserve, default_token_safety_margin,
-    estimate_input_tokens, prepare, system_content,
-};
+pub(crate) use request::{estimate_input_tokens, prepare, system_content};
 
 fn invalid() -> AgentError {
     AgentError::new(

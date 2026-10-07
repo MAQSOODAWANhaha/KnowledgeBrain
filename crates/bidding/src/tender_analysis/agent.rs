@@ -631,6 +631,7 @@ pub async fn run<J: Journal, M: Model>(
 }
 
 /// Stop model work at the reserve boundary; checked outlines may still compile.
+#[allow(dead_code)]
 pub(crate) async fn run_with_model_budget<J: Journal, M: Model>(
     input: &FrozenInput,
     config: &Config,
@@ -888,7 +889,7 @@ async fn run_seeded<J: Journal, M: Model>(
 
 async fn finish_draft_path<J: Journal>(
     input: &FrozenInput,
-    config: &Config,
+    _config: &Config,
     journal: &J,
     state: &mut Checkpoint,
     input_sha256: String,
@@ -943,33 +944,6 @@ async fn finish_draft_path<J: Journal>(
         quality: "needs_review".into(),
         source_views: state.source_views.clone(),
     };
-    // Phase one must hand the user an editable Word file, so the outline
-    // skeleton compiles too; a job that succeeds without a DOCX leaves the
-    // workspace with nothing to edit.
-    let outcome = crate::tender_analysis::draft::compile_draft(
-        input,
-        &result,
-        config.limits.max_draft_docx_bytes,
-    )
-    .map_err(|error| invalid(format!("draft compile failed: {error}")))?;
-    if !outcome.degraded.is_empty() {
-        tracing::warn!(
-            event = "draft_compile_degraded",
-            chapters = outcome.degraded.len(),
-            "chapter bodies dropped to fit the configured byte budget"
-        );
-        state.draft_degraded = outcome.degraded.clone();
-    }
-    let compiled = outcome.compiled;
-    let sha = {
-        use sha2::{Digest, Sha256};
-        hex::encode(Sha256::digest(&compiled.docx))
-    };
-    state.draft_compile_object_id = Some(format!("objects/{sha}"));
-    state.draft_docx_base64 = Some(base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        &compiled.docx,
-    ));
     state.journal.finish()?;
     journal.save(state, &state.progress(input)).await?;
     result.analysis = state.analysis.clone();

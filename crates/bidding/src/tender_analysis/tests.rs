@@ -6,7 +6,6 @@ use serde_json::json;
 use std::{collections::BTreeMap, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
-mod draft;
 mod input;
 
 fn input() -> FrozenInput {

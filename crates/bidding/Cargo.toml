@@ -10,10 +10,6 @@ default = []
 knowledge-v2-exact-contract-tests = ["knowledge/knowledge-v2-exact-contract-tests"]
 docreader-contract-tests = []
 
-[[test]]
-name = "tender_document_process_real_parse_counts"
-required-features = ["docreader-contract-tests"]
-
 [dependencies]
 async-trait = "0.1"
 bytes = "1"

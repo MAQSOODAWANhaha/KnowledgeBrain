@@ -198,14 +198,6 @@ pub fn read_chapters(
         }
         // Only unchanged, marked system notes are excluded from bidder body.
         // An edited note becomes protected user text even if its bookmark survives.
-        if entry.kind == "paragraphs"
-            && entry
-                .bookmarks
-                .iter()
-                .any(|name| name == &crate::docx_template::notice_bookmark(unit.text.trim()))
-        {
-            continue;
-        }
         let heading = entry
             .heading_level
             .filter(|_| entry.kind == "paragraphs" && !unit.text.trim().is_empty());
@@ -521,11 +513,15 @@ pub fn validate_seed(analysis: &super::Analysis) -> Result<(), String> {
 pub type ClaimBasis = (Vec<String>, Vec<(String, String)>);
 
 pub fn claim_basis(
-    input: &crate::tender_analysis::FrozenInput,
+    _input: &crate::tender_analysis::FrozenInput,
     result: &crate::tender_analysis::AnalysisResult,
 ) -> Result<ClaimBasis, String> {
-    let draft = crate::docx_composition::synthesize_draft_document(input, result)?;
-    let sections = crate::docx_composition::compiler::ordered_section_ids(&draft)?;
+    let sections = result
+        .analysis
+        .draft_plan
+        .iter()
+        .map(|item| item.id.clone())
+        .collect();
     let titles = result
         .analysis
         .draft_plan

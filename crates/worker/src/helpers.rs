@@ -1,7 +1,7 @@
 //! Unix helper subprocesses for immutable object I/O.
+#![allow(dead_code)]
 
 use crate::runtime::{JobErr, TASK_ABORT_DRAIN_RESERVE, non_agent_sql_error};
-use async_trait::async_trait;
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -71,6 +71,7 @@ pub(crate) async fn kill_and_reap_child(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) async fn kill_helper_group_and_reap_child(
     child: &mut tokio::process::Child,
     label: &str,
@@ -170,72 +171,6 @@ pub fn run_object_write_helper(arguments: &[String]) -> Result<(), String> {
         .lock()
         .write_all(b"ok")
         .map_err(|e| e.to_string())
-}
-
-pub(crate) struct HelperCompositionObjects;
-#[async_trait]
-impl bidding::docx_composition::runtime::ObjectIo for HelperCompositionObjects {
-    async fn read(
-        &self,
-        sha: &str,
-        max_bytes: usize,
-        cancel: &CancellationToken,
-    ) -> Result<Vec<u8>, bidding::agent_error::AgentError> {
-        read_blob_in_helper(sha, max_bytes, cancel)
-            .await
-            .map_err(|e| bidding::agent_error::AgentError::new("INTERNAL", e.0))
-    }
-    async fn write(
-        &self,
-        sha: &str,
-        bytes: &[u8],
-        cancel: &CancellationToken,
-    ) -> Result<(), bidding::agent_error::AgentError> {
-        run_helper_capture(
-            &[
-                OBJECT_WRITE_HELPER_ARG.into(),
-                sha.into(),
-                bytes.len().to_string(),
-            ],
-            bytes.to_vec(),
-            2,
-            std::time::Duration::from_secs(5 * 60),
-            cancel,
-            "object write helper",
-        )
-        .await
-        .map(|_| ())
-        .map_err(|e| bidding::agent_error::AgentError::new("INTERNAL", e.0))
-    }
-}
-
-pub(crate) struct HelperExportIo;
-
-#[async_trait]
-impl bidding::submission_export::ExportIo for HelperExportIo {
-    async fn read_blob(
-        &self,
-        sha256: &str,
-        max_bytes: usize,
-        cancel: &CancellationToken,
-    ) -> Result<Vec<u8>, bidding::submission_export::ExportError> {
-        read_blob_in_helper(sha256, max_bytes, cancel)
-            .await
-            .map_err(|error| bidding::submission_export::ExportError(error.0))
-    }
-
-    async fn stage_object(
-        &self,
-        pool: &PgPool,
-        staging_id: Uuid,
-        digest: &str,
-        media_type: &str,
-        bytes: &[u8],
-    ) -> Result<String, bidding::submission_export::ExportError> {
-        stage_export_object(pool, staging_id, digest, media_type, bytes)
-            .await
-            .map_err(|error| bidding::submission_export::ExportError(error.0))
-    }
 }
 
 pub(crate) async fn run_helper_capture(

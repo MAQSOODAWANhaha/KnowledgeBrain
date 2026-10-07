@@ -7,7 +7,6 @@ pub mod evidence_refs;
 pub mod outline;
 pub mod outline_flow;
 pub mod pack;
-pub mod postgres;
 pub mod readback;
 pub mod relations;
 pub mod rule_contract;
