@@ -1536,15 +1536,6 @@ mod tests {
                 ),
                 (
                     "public",
-                    "bid_attachment_preparation_contract_artifacts",
-                    "id".into()
-                ),
-                ("public", "bid_authoring_contract_artifacts", "id".into()),
-                ("public", "bid_render_style_contract_artifacts", "id".into()),
-                ("public", "bid_renderer_contract_artifacts", "id".into()),
-                ("public", "platform_role_contracts", "role_name".into()),
-                (
-                    "public",
                     "queue_contract_artifacts",
                     "contract_key,version".into()
                 ),

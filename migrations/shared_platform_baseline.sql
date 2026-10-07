@@ -46,18 +46,6 @@ CREATE TABLE platform_schema_snapshot (
     created_at timestamptz NOT NULL
 );
 
-CREATE TABLE platform_role_contracts (
-    role_name text PRIMARY KEY,
-    login boolean NOT NULL,
-    purpose text NOT NULL CHECK (octet_length(purpose) BETWEEN 1 AND 128)
-);
-INSERT INTO platform_role_contracts(role_name, login, purpose) VALUES
-    ('kb_app_owner', false, 'owns the application catalog'),
-    ('kb_migrator', true, 'explicit fresh-schema bootstrap writer'),
-    ('kb_runtime_api', true, 'runtime HTTP identity'),
-    ('kb_runtime_retention', true, 'exclusive physical object deletion identity'),
-    ('kb_runtime_worker', true, 'runtime asynchronous job identity');
-
 -- Runtime identities must not be able to shadow hardened helper dependencies
 -- through attacker-controlled temporary relations.
 DO $$
@@ -716,7 +704,7 @@ SELECT object_ref, digest, media_type, byte_length, registered_at
 -- Retention has the only database capability which can complete deletion state.
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
-GRANT SELECT ON platform_schema_snapshot, platform_role_contracts,
+GRANT SELECT ON platform_schema_snapshot,
     application_maintenance_gate, queue_contract_artifacts, queue_contract_current
 TO kb_migrator, kb_runtime_api, kb_runtime_worker, kb_runtime_retention;
 GRANT SELECT ON available_object_registry
