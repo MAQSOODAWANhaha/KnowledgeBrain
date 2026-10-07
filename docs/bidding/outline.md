@@ -39,7 +39,7 @@
 | 模板 | `put_slots`，`read_outline` | 只抄招标文件已有文字。投标人槽和签字槽留空并带 `match_query` |
 | 收尾 | `read_outline`，`finish_outline` | 核对后结束。有未绑定附件表时不能结束 |
 
-`finish_outline` 还要求：章节树非空且无环、同级顺序不重复、已经调用过 `put_slots`、每个 `response` 章节至少有一个槽。成功后 `tool_draft.finished = true`，并把 `outline_run.phase` 和 `analysis.outline.phase` 标成 `complete`。
+`finish_outline` 还要求：章节树非空且无环、同级顺序不重复、已经调用过 `put_slots`、每个 `ChapterPurpose::Response` 章节至少有一个槽。成功后 `tool_draft.finished = true`，并把 `outline_run.phase` 和 `analysis.outline.phase` 标成 `complete`。
 
 ## 六个工具
 
@@ -151,7 +151,7 @@
 | --- | --- |
 | `reading_packs` | `DiscoverWork`。第一次发现轮才建立。包状态是 `pending`、`running`、`failed`、`committed` |
 | `tool_draft` | `Draft`：`chapters`、`bindings`、`slots`、`slots_submitted`、`finished` |
-| `phase` | `discover`、`outline`、`check`、`complete`。`finish_outline` 把它标成 `complete`。发现包全部提交，或旧扫描被判定完成时，`draft::after_batch` 会从 `discover` 拨到 `outline`。此时若 `analysis.outline.checks` 为空，会 `transcript.clear()`。组织必须读检查点上的要求记录，不能指望发现对话还在。旧扫描完成不是这条产品路径的完成条件 |
+| `phase` | `discover`、`outline`、`check`、`complete`。`finish_outline` 把它标成 `complete`。发现包全部提交，或旧扫描被判定完成时，`draft::after_batch` 会从 `discover` 拨到 `outline`。现行副作用：此时若 `analysis.outline.checks` 为空，会 `transcript.clear()`，旧扫描被判定完成时也会清空，即使包还没交完。产品路径只在全部包 `committed` 之后清空；旧扫描触发的清空不是目标。组织必须读检查点上的要求记录，不能指望发现对话还在。旧扫描完成不是这条产品路径的完成条件 |
 
 现行 `put_chapters` 不接收 `requirement_ids`，写入的数组是空的；要求记录也只有描述。这是现行行为。目标是检查点留下 `source_id`、`start`、`end`，并且每个章节必填 `requirement_ids`（未知 id 拒绝，发现仍不能调用），见 [缺口 2](../../plans/bidding/outline-gaps.md)。
 
@@ -167,7 +167,7 @@
 6. **提交。** 运行结束、角色改变，或序列化后的 SDK 状态超过 `max_context_bytes` 时，丢掉 SDK 会话。大纲草稿和对话留在检查点。`committed` 清掉待完成轮，`save` 再写同一检查点。
 7. **职责推进或结束。** 下一轮重新选择职责。发现包全部 `committed` 后阶段可从 `discover` 到 `outline`。`finish_outline` 把 `tool_draft.finished` 和 phase 标成 `complete`。目标出场条件是 `tool_draft.finished` 且投影通过 `validate_artifact`，不再读 `outline_flow::checked` 或 `analysis.outline.checks`。现行生产驱动在 `finish_draft_path` 之前仍用旧的 `checked`；只把 `finished` 设为 true 会报 `outline completeness check has not passed`，运行也不会因此结束。这是 [缺口 3](../../plans/bidding/outline-gaps.md)。`draft::after_batch` 用旧扫描完成去结束大纲，也不属于这条顺序。
 
-`draft_stage` 为 `None` 或 `Outline` 时（含发现轮），宿主包含 `progress`、`work`、来源索引和 `tool_draft` 的模型视图（比 `read_outline` 多 `unmapped_forms`）。这不按 phase 名字开关。前缀长度是 2（系统提示 + brief），后缀长度是 1（宿主包）。前缀、后缀不变且投影历史等于当前窗口时复用 `AgentRun`；否则按这个窗口重建。
+`draft_stage` 为 `None` 或 `Outline` 时（含发现轮），宿主包含 `progress`、`work`、来源索引和 `tool_draft` 的模型视图（比 `read_outline` 多 `unmapped_forms`）。组织轮还要带上检查点里的要求记录：身份、描述、`source_id`、`start`、`end`。这不按 phase 名字开关。前缀长度是 2（系统提示 + brief），后缀长度是 1（宿主包）。前缀、后缀不变且投影历史等于当前窗口时复用 `AgentRun`；否则按这个窗口重建。
 
 ## 上下文窗口
 
@@ -218,7 +218,7 @@
 - 投标人槽和签字槽留空，并带 `match_query`。大纲运行不查企业知识库。
 - 每个附件表只绑定一个章节。未绑完不能 `finish_outline`。
 - `response` 只读冻结的 `OutlineArtifact`。工具是 `read_outline` 和 `put_responses`（[`response-tools-v1.schema.json`](../../crates/bidding/schemas/response-tools-v1.schema.json)）。
-- 检查点是记忆。会话只是当前窗口的 SDK 对话。
+- 检查点是记忆。可恢复的是 `DiscoverWork`、`tool_draft` 和 `phase`。对话不是那份可恢复记忆。会话只是当前窗口的 SDK 对话。
 
 ## 还不是现行行为
 

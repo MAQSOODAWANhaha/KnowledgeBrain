@@ -60,8 +60,8 @@
 
 1. 冻结解析按解析器顺序发布。大纲运行读的是这份冻结输入。
 2. 计划中的每个阅读包变为 `committed`。发现轮 brief 里的包带上切片正文，以及 `[start, end)` 的行优先 `cells`。每条要求的 `source_id`、`start`、`end` 落在该包切片内。续表的 `header` 按列排列，且这些表头不在引用范围内。同一 `running` 或待修 `failed` 包在下一轮 brief 里仍然带正文。超预算时只丢掉已经 `committed` 的发现轮，不读 `analysis.outline.scanned`。
-3. 章节树非空、无环、同级顺序不重复。每个附件表恰好绑定一个章节。每个已提交要求 id 恰好出现在一个章节的 `requirement_ids` 里。空的 `requirement_ids` 不能通过。组织轮读的是检查点上的要求记录。phase 拨到 `outline` 且 `analysis.outline.checks` 为空时，发现对话已被 `transcript.clear()`，不能再从对话里读要求。
-4. 已经 `put_slots`。`bidder_blank` 和 `signature` 的文本为空、`match_query` 非空、`response_required` 为真。其它种类的 `match_query` 为空。每个 `response` 章节至少有一个槽。
+3. 章节树非空、无环、同级顺序不重复。每个附件表恰好绑定一个章节。缺 `requirement_ids` 字段不能通过。有已提交 id 时，每个 id 恰好出现在一个章节上，不能靠各章全空数组过关。没有任何已提交 id 时，各章可以是空数组。组织轮读的是检查点上的要求记录。phase 拨到 `outline` 且 `analysis.outline.checks` 为空时，发现对话已被 `transcript.clear()`，不能再从对话里读要求。
+4. 已经 `put_slots`。`bidder_blank` 和 `signature` 的文本为空、`match_query` 非空、`response_required` 为真。其它种类的 `match_query` 为空。每个 `ChapterPurpose::Response` 章节至少有一个槽。
 5. `finish_outline` 使 `tool_draft.finished` 为真，phase 为 `complete`。
 6. 投影出的 `OutlineArtifact` 通过 `validate_artifact`：版本和身份正确，章节或模板非空，id 不重复，分组章节不带知识库回答槽，回答槽文本为空且带 `match_query`。
 7. `outline::store::publish` 写入该 artifact。进度里的包计数、章数、未绑定附件、槽是否已交和是否结束来自 `DiscoverWork` 与 `tool_draft`。空的 `analysis.outline.checks` 不得挡住出场，出场不读 `outline_flow::checked`。
