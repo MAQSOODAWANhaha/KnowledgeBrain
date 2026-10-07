@@ -66,72 +66,72 @@ async fn create_fill(
     .fetch_one(&pool)
     .await
     .map_err(map_docx_sql)?;
-    let receipt =
-        match replay {
-            Some(receipt) => receipt,
-            None => {
-                let config =
-                    bidding::tender_analysis::agent::Config::from_environment().map_err(|e| {
-                        fail(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "AGENT_PROVIDER_UNAVAILABLE",
-                            e.message,
-                        )
-                    })?;
-                let sha = expected.docx_sha256.clone();
-                let docx = tokio::task::spawn_blocking(move || platform::read_blob(&sha))
-                    .await
-                    .map_err(|_| {
-                        fail(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "DOCX_READ_FAILED",
-                            "document read task failed",
-                        )
-                    })?
-                    .map_err(|error| {
-                        tracing::error!(%error, "Draft fill source object read failed");
-                        fail(
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "DOCX_UNAVAILABLE",
-                            "document file is unavailable",
-                        )
-                    })?;
-                let prepared = bidding::docx_composition::fill::prepare(
-                    &pool,
-                    bidding::docx_composition::fill::FillIntent {
-                        workspace_id: workspace,
-                        basis: body.basis,
-                        expected: body.expected,
-                        actor: actor.clone(),
-                        docx,
-                    },
-                    config,
-                    &tokio_util::sync::CancellationToken::new(),
+    let receipt = match replay {
+        Some(receipt) => receipt,
+        None => {
+            let config = bidding::analysis::agent::Config::from_environment().map_err(|e| {
+                fail(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "AGENT_PROVIDER_UNAVAILABLE",
+                    e.message,
                 )
+            })?;
+            let sha = expected.docx_sha256.clone();
+            let docx = tokio::task::spawn_blocking(move || platform::read_blob(&sha))
                 .await
-                .map_err(map_composition)?;
-                if !prepared.seed.iter().any(|item| {
-                    item.status == bidding::tender_analysis::draft::DraftStatus::Pending
+                .map_err(|_| {
+                    fail(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "DOCX_READ_FAILED",
+                        "document read task failed",
+                    )
+                })?
+                .map_err(|error| {
+                    tracing::error!(%error, "Draft fill source object read failed");
+                    fail(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "DOCX_UNAVAILABLE",
+                        "document file is unavailable",
+                    )
+                })?;
+            let prepared = bidding::docx_composition::fill::prepare(
+                &pool,
+                bidding::docx_composition::fill::FillIntent {
+                    workspace_id: workspace,
+                    basis: body.basis,
+                    expected: body.expected,
+                    actor: actor.clone(),
+                    docx,
+                },
+                config,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .map_err(map_composition)?;
+            if !prepared
+                .seed
+                .iter()
+                .any(|item| item.status == bidding::analysis::draft::DraftStatus::Pending)
+            {
+                let current = bidding::docx_round::get_current_docx(&pool, workspace, &actor)
+                    .await
+                    .map_err(map_docx_sql)?;
+                if current.as_ref().is_none_or(|value| {
+                    value["version_id"] != json!(expected.version_id)
+                        || value["docx_sha256"] != json!(expected.docx_sha256)
                 }) {
-                    let current = bidding::docx_round::get_current_docx(&pool, workspace, &actor)
-                        .await
-                        .map_err(map_docx_sql)?;
-                    if current.as_ref().is_none_or(|value| {
-                        value["version_id"] != json!(expected.version_id)
-                            || value["docx_sha256"] != json!(expected.docx_sha256)
-                    }) {
-                        return Err(fail(
-                            StatusCode::CONFLICT,
-                            "WORKSPACE_CAS_CONFLICT",
-                            "document changed during fill preparation",
-                        ));
-                    }
-                    return Ok((
-                        StatusCode::OK,
-                        Json(json!({"status":"unchanged", "current":expected})),
+                    return Err(fail(
+                        StatusCode::CONFLICT,
+                        "WORKSPACE_CAS_CONFLICT",
+                        "document changed during fill preparation",
                     ));
                 }
-                sqlx::query_scalar(
+                return Ok((
+                    StatusCode::OK,
+                    Json(json!({"status":"unchanged", "current":expected})),
+                ));
+            }
+            sqlx::query_scalar(
                 "SELECT kb_bid_v2_submit_docx_composition_request($1,$2,$3::kb_actor_identity,$4)",
             )
             .bind(sqlx::types::Json(&prepared.request))
@@ -141,8 +141,8 @@ async fn create_fill(
             .fetch_one(&pool)
             .await
             .map_err(map_docx_sql)?
-            }
-        };
+        }
+    };
     enqueue_if_pending(&pool, &receipt).await?;
     Ok((StatusCode::ACCEPTED, Json(receipt)))
 }

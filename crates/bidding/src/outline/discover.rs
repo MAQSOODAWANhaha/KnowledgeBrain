@@ -6,7 +6,7 @@
 //! cells again. A byte cut happens only inside one clause that is still larger
 //! than the budget, and it stays on a UTF-8 character boundary.
 
-use crate::tender_analysis::{FrozenInput, Source};
+use crate::analysis::{FrozenInput, Source};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;

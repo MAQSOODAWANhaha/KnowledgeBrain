@@ -81,8 +81,8 @@ async fn outline(
     let bundle = bidding::bid_authoring_v2::get_tender_outline_v2(&pool, project, &actor)
         .await
         .map_err(map_sql)?;
-    let outline = bidding::tender_analysis::outline::from_bundle(bundle)
-        .map_err(|error| validation(&error))?;
+    let outline =
+        bidding::analysis::outline::from_bundle(bundle).map_err(|error| validation(&error))?;
     serde_json::to_value(&outline)
         .map(Json)
         .map_err(|error| validation(&error.to_string()))

@@ -4,10 +4,10 @@
 //! every attachment table to one chapter. Template writes prescribed slots.
 //! Check reads the draft and finishes it.
 
-use crate::tender_analysis::FrozenInput;
-use crate::tender_analysis::agent::Checkpoint;
-use crate::tender_analysis::draft::DraftStage;
-use crate::tender_analysis::outline_flow::Phase;
+use crate::analysis::FrozenInput;
+use crate::analysis::agent::Checkpoint;
+use crate::analysis::draft::DraftStage;
+use crate::analysis::outline_flow::Phase;
 use serde_json::{Value, json};
 
 pub const OUTLINE_PROMPT: &str = include_str!("prompts/outline.txt");
@@ -80,8 +80,8 @@ pub fn select(
 }
 
 pub fn current(
-    input: &crate::tender_analysis::FrozenInput,
-    state: &crate::tender_analysis::agent::Checkpoint,
+    input: &crate::analysis::FrozenInput,
+    state: &crate::analysis::agent::Checkpoint,
 ) -> Duty {
     let discovery_open = matches!(state.draft_stage, DraftStage::None | DraftStage::Outline)
         && state
@@ -199,8 +199,8 @@ pub fn source_index(input: &FrozenInput, max_bytes: usize) -> Value {
         })
         .collect();
     json!({"total_sources":rows.len(),
-        "sources":crate::tender_analysis::tools::bounded_page(&rows,0,rows.len().max(1),max_bytes/2).unwrap_or_else(|e| json!({"error":e})),
-        "documents":crate::tender_analysis::tools::bounded_page(&input.documents,0,input.documents.len().max(1),max_bytes/4).unwrap_or_else(|e|json!({"error":e})),
+        "sources":crate::analysis::tools::bounded_page(&rows,0,rows.len().max(1),max_bytes/2).unwrap_or_else(|e| json!({"error":e})),
+        "documents":crate::analysis::tools::bounded_page(&input.documents,0,input.documents.len().max(1),max_bytes/4).unwrap_or_else(|e|json!({"error":e})),
         "instruction":"这些是冻结来源。发现只处理已领取的阅读包。组织时写章节，并把每个附件表绑到唯一章节。"})
 }
 

@@ -4,8 +4,8 @@
 //! attachment table. Each attachment form binds to exactly one chapter through
 //! a template `form_id` or a format-reference grid cell.
 
-use crate::tender_analysis::draft::{DraftPlanItem, DraftStatus};
-use crate::tender_analysis::{FrozenInput, Record, RecordData};
+use crate::analysis::draft::{DraftPlanItem, DraftStatus};
+use crate::analysis::{FrozenInput, Record, RecordData};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};

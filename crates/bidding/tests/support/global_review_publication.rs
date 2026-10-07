@@ -20,7 +20,7 @@ async fn analysis_v2_publication_and_export_basis_preserve_exact_frozen_input() 
         owner: &owner,
         source_reader: None,
     };
-    let analysis = bidding::tender_analysis::agent::run(
+    let analysis = bidding::analysis::agent::run(
         &input,
         &config(),
         &journal,
@@ -65,15 +65,11 @@ async fn analysis_v2_publication_and_export_basis_preserve_exact_frozen_input() 
     .fetch_one(&pool)
     .await
     .unwrap();
-    let result: bidding::tender_analysis::AnalysisResult =
+    let result: bidding::analysis::AnalysisResult =
         serde_json::from_value(payload["analysis_result"].clone()).unwrap();
     assert_eq!(result.schema_version, 2);
-    bidding::tender_analysis::rule_contract::validate_review(
-        &input,
-        &result.analysis,
-        &result.review,
-    )
-    .unwrap();
+    bidding::analysis::rule_contract::validate_review(&input, &result.analysis, &result.review)
+        .unwrap();
 
     // SQL identity fixture only; this test does not claim real DOCX conversion.
     let bytes = b"global-review saved DOCX identity";
@@ -120,10 +116,10 @@ async fn analysis_v2_publication_and_export_basis_preserve_exact_frozen_input() 
     assert_eq!(loaded["analysis_result"], json!(result));
     let loaded_input: FrozenInput = serde_json::from_value(loaded["input"].clone()).unwrap();
     assert_eq!(
-        bidding::tender_analysis::digest(&loaded_input).unwrap(),
+        bidding::analysis::digest(&loaded_input).unwrap(),
         result.frozen_input_sha256
     );
-    bidding::tender_analysis::rule_contract::validate_review(
+    bidding::analysis::rule_contract::validate_review(
         &loaded_input,
         &result.analysis,
         &result.review,
@@ -159,7 +155,7 @@ async fn analysis_v2_publication_and_export_basis_preserve_exact_frozen_input() 
 
 #[test]
 fn legacy_v1_publication_projection_retains_its_own_contract() {
-    use bidding::tender_analysis::{Analysis, AnalysisResult, Review};
+    use bidding::analysis::{Analysis, AnalysisResult, Review};
     let input = FrozenInput {
         schema_version: 1,
         project_id: Uuid::new_v4().to_string(),
@@ -173,9 +169,9 @@ fn legacy_v1_publication_projection_retains_its_own_contract() {
     let analysis = Analysis::default();
     let result = AnalysisResult {
         schema_version: 1,
-        frozen_input_sha256: bidding::tender_analysis::digest(&input).unwrap(),
+        frozen_input_sha256: bidding::analysis::digest(&input).unwrap(),
         review: Review {
-            analysis_sha256: bidding::tender_analysis::digest(&analysis).unwrap(),
+            analysis_sha256: bidding::analysis::digest(&analysis).unwrap(),
             ..Default::default()
         },
         analysis,
@@ -190,11 +186,7 @@ fn legacy_v1_publication_projection_retains_its_own_contract() {
             .is_none()
     );
     assert!(
-        bidding::tender_analysis::rule_contract::validate_review(
-            &input,
-            &result.analysis,
-            &result.review
-        )
-        .is_err()
+        bidding::analysis::rule_contract::validate_review(&input, &result.analysis, &result.review)
+            .is_err()
     );
 }

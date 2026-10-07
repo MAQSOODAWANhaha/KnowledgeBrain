@@ -1,15 +1,15 @@
 use super::*;
-use crate::response::{EvidenceHit, NO_EVIDENCE_TEXT, ResponseStatus, match_queries, respond};
-use crate::tender_analysis::draft::{
+use crate::analysis::draft::{
     BodyStatus, ChapterPurpose as PlanPurpose, DraftPlanItem, DraftStatus,
 };
-use crate::tender_analysis::outline_flow::{
+use crate::analysis::outline_flow::{
     CoverStatus, IssueStatus, OutlineIssue, Phase, ProjectInfo, ProjectValue,
 };
-use crate::tender_analysis::{
+use crate::analysis::{
     Analysis, AnalysisResult, Applicability, ApplicabilityState, Cell, FrozenInput, Record,
     RecordData, RegionRole, Review, Source, Span, TemplateRegion,
 };
+use crate::response::{EvidenceHit, NO_EVIDENCE_TEXT, ResponseStatus, match_queries, respond};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -246,7 +246,7 @@ fn outline_copies_grid_wording_and_protects_user_chapters() {
 
     result.analysis.draft_plan[1].body_status = BodyStatus::User;
     result.analysis.draft_plan[1].preserved.push(
-        crate::tender_analysis::readback::Preserved::Paragraphs {
+        crate::analysis::readback::Preserved::Paragraphs {
             unit_keys: vec!["unit-1".into()],
             paragraphs: vec!["用户已写正文".into()],
         },

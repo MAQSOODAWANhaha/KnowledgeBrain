@@ -4,11 +4,9 @@ use super::{
     ChapterOutline, ChapterPurpose, OpenIssue, OutlineArtifact, SCHEMA_VERSION, SlotKind,
     TemplateContent, validate_artifact,
 };
-use crate::tender_analysis::draft::{BodyStatus, ChapterPurpose as PlanPurpose, DraftStatus};
-use crate::tender_analysis::outline_flow::{IssueStatus, Phase};
-use crate::tender_analysis::{
-    AnalysisResult, FrozenInput, RecordData, RegionRole, Span, TemplateRegion,
-};
+use crate::analysis::draft::{BodyStatus, ChapterPurpose as PlanPurpose, DraftStatus};
+use crate::analysis::outline_flow::{IssueStatus, Phase};
+use crate::analysis::{AnalysisResult, FrozenInput, RecordData, RegionRole, Span, TemplateRegion};
 
 pub const COVER_CHAPTER_ID: &str = "cover";
 
@@ -121,7 +119,7 @@ fn push_chapter_slots(
     result: &AnalysisResult,
     chapter_id: &str,
     title: &str,
-    item: &crate::tender_analysis::draft::DraftPlanItem,
+    item: &crate::analysis::draft::DraftPlanItem,
     templates: &mut Vec<TemplateContent>,
 ) -> Result<(), String> {
     let Some(template_id) = item.template_id.as_deref() else {

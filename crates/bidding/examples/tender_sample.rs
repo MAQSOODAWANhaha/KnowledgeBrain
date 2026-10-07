@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use bidding::{
     agent_error::AgentError,
+    analysis::{self as ta, agent as extraction},
     authoring_runtime::AuthoringRuntimeContractV1,
-    tender_analysis::{self as ta, agent as extraction},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};

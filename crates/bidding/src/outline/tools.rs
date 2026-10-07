@@ -6,7 +6,7 @@ use super::{
     ChapterOutline, ChapterPurpose, SlotKind, TemplateContent,
     chapters::{AttachmentBinding, attachment_form_ids},
 };
-use crate::tender_analysis::FrozenInput;
+use crate::analysis::FrozenInput;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashSet};
@@ -323,7 +323,7 @@ fn required(value: &Value, field: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tender_analysis::Source;
+    use crate::analysis::Source;
 
     fn input() -> FrozenInput {
         FrozenInput {
