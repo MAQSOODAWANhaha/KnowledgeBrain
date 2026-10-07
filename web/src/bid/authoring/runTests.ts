@@ -7,6 +7,7 @@ import "./fillSession.test";
 import "./exportSession.test";
 import { runAll, testSummary } from "./harness";
 import "./sha256.test";
+import "./analysisProgress.test";
 
 await runAll();
 const { failed, passed } = testSummary();

@@ -46,6 +46,7 @@
 - `analysis/outline_flow.rs` 仍只给不经过 `Config` 的抽取单测。产品在 `tool_draft.finished` 时调用 `Journal::publish_outline`。
 - 产品收尾是 `outline::agent::apply` 的 `finish_outline`。`draft::after_batch` 在阅读包全部提交后把阶段从 `discover` 拨到 `outline`，并在 `project_draft` 通过时结束。它不再对旧 `outline.checks` 调用 `outline_flow::apply(..., "finish_outline")`。空的 `analysis.outline.checks` 不挡住出场，出场不读 `outline_flow::checked`。
 - 双正式编制 / draft-fill、强制终稿复核，以及 T0–T9、A01–A20 那套任务表。
+- `phase0_acceptance.sql`、`phase1_acceptance.sql`、`phase1_supersession_acceptance.sql`、`phase3_acceptance.sql`、`phase6_acceptance.sql`。它们调用的文档集 CAS、大纲检查点、报价快照和预览 HTML 已不在 `bidding_v2_baseline.sql`。CI 的 SQL 门是 `scripts/bidding_v2_phase_fixture_acceptance.sh`，只应用 `outline_response_acceptance.sql`。
 
 ## 职责分叉
 

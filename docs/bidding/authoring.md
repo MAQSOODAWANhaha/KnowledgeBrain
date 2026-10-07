@@ -10,6 +10,6 @@
 
 章节身份是 id。标题可以改，附件绑定跟着章节 id，不跟着标题。一个附件表的 `form_id` 只能出现在一个章节上。
 
-Word 正文是用户保存的文件。大纲产物是冻结的 `OutlineArtifact`，不是另一份会随编辑回写的正文主源。响应结果用 `outline_sha256` 绑回这一份大纲。
+Word 正文是用户保存的文件。编制编辑器是 ONLYOFFICE，打开的是这份已保存 DOCX。大纲产物是冻结的 `OutlineArtifact`，不是另一份会随编辑回写的正文主源。响应结果用 `outline_sha256` 绑回这一份大纲。
 
 检查点保存 `DiscoverWork`、`tool_draft` 和 `phase`。Journal 负责恢复、请求预约和提交。不另建一套随对话增长的语义记忆。

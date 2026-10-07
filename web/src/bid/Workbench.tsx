@@ -74,6 +74,7 @@ function DocxGate({ email, projectId, step, tree }: { email: string; projectId: 
           ? <AnalysisProgress projectId={projectId}>
               {result.current
                 ? <>
+                    {/* ONLYOFFICE is the only bid editor. A missing DOCX stays on DraftReady. */}
                     <DocxEditor key={`${result.project.workspace_id}:${result.current.version_id}`}
                       workspaceId={result.project.workspace_id}
                       onUnsafeChange={setUnsafe} />

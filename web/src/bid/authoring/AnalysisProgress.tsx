@@ -25,7 +25,7 @@ function fileSummary(docs: TenderDocumentView[]) {
   return `已完成 ${docs.length} 个`;
 }
 
-function analysisSummary(job: RequirementSetCompileRequestView | null) {
+export function analysisSummary(job: RequirementSetCompileRequestView | null) {
   if (!job) return "未开始";
   if (job.status === "failed") return job.error_code ?? "未完成";
   if (job.status === "succeeded") return "已完成章节大纲与骨架 Word";
@@ -33,25 +33,23 @@ function analysisSummary(job: RequirementSetCompileRequestView | null) {
   if (progress.phase === "awaiting_continue") return "连接中断，进度已保存。点击继续生成大纲，从检查点恢复。";
   const step = typeof progress.turn === "number" ? progress.turn : progress.checkpoint_sequence;
   const parts: string[] = [];
-  const phase = progress.outline_phase ?? progress.draft_stage;
-  if (progress.outline_repairing) parts.push("正在修补核对问题");
-  else if (phase === "discover") {
-    const repairing = (progress.outline_pack_failed ?? 0) > 0 || progress.outline_scan_repair;
-    parts.push(repairing ? "正在修正阅读包" : "正在发现提交要求");
-    if (typeof progress.outline_pack_committed === "number" && typeof progress.outline_pack_total === "number") {
-      parts.push(`已提交 ${progress.outline_pack_committed}/${progress.outline_pack_total} 个阅读包`);
-    }
+  const phase = progress.outline_phase;
+  if (phase === "complete" || progress.outline_finished) parts.push("大纲已完成");
+  else if (phase === "discover") parts.push((progress.outline_pack_failed ?? 0) > 0 ? "正在修正发现" : "正在发现");
+  else if (phase === "outline" || phase === "check") {
+    const organizing = phase === "outline" && (
+      (progress.outline_chapters ?? 0) === 0
+      || (progress.outline_unmapped_forms ?? 0) > 0
+      || !progress.outline_slots_submitted
+    );
+    parts.push(organizing ? "正在组织章节和模板槽" : "正在核对");
   }
-  else if (phase === "outline") parts.push("正在组织章节");
-  else if (phase === "check") parts.push("正在语义核对");
   else if (progress.boundary === "prepared") parts.push("正在等待模型");
   else parts.push("正在生成章节大纲");
   if (typeof progress.outline_unmapped_forms === "number" && progress.outline_unmapped_forms > 0) {
     parts.push(`${progress.outline_unmapped_forms} 个附件未绑定`);
   }
-  if (progress.outline_slots_submitted) parts.push("模板槽已交");
-  if (progress.outline_finished) parts.push("大纲已结束");
-  if (typeof progress.outline_chapters === "number") parts.push(`已有 ${progress.outline_chapters} 章`);
+  if (typeof progress.outline_chapters === "number" && phase) parts.push(`已有 ${progress.outline_chapters} 章`);
   if (typeof progress.outline_requirements === "number" && progress.outline_requirements > 0) {
     parts.push(`${progress.outline_requirements} 项要求`);
   }

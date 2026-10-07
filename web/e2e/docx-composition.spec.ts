@@ -16,7 +16,11 @@ function savedDocx(editor: Partial<DocxCurrent["editor"]> = {}): DocxCurrent {
 }
 async function fixture(page: Page) {
   const analysis = { current: { status: "succeeded", error_code: null as string | null, progress: { phase: "main", draft_stage: "published", turn: 4 } } as
-    { status: string; error_code: string | null; progress: { phase?: string; draft_stage?: string; turn?: number; records?: number; review_rounds?: number; checkpoint_sequence?: number; boundary?: string } } | null };
+    { status: string; error_code: string | null; progress: {
+    phase?: string; draft_stage?: string; turn?: number; records?: number; review_rounds?: number;
+    checkpoint_sequence?: number; boundary?: string; outline_phase?: string; outline_pack_failed?: number;
+    outline_chapters?: number; outline_unmapped_forms?: number; outline_slots_submitted?: boolean;
+  } } | null };
   const docx = { current: null as DocxCurrent | null };
   const fill = { latest: null as unknown, posts: [] as unknown[], stops: [] as string[] };
   const documents = [{ id: "19191919-1919-1919-1919-191919191919", parse_status: "completed" }];
@@ -114,6 +118,25 @@ test("authoring starts analysis from the current files", async ({ page }) => {
   await expect(panel).toContainText("正在生成章节大纲");
   expect(f.freezeCalls).toHaveLength(1);
   expect(f.compositionPosts).toHaveLength(0);
+});
+
+test("outline progress follows discover, organize, check, and complete", async ({ page }) => {
+  const f = await fixture(page);
+  const panel = page.getByTestId("analysis-progress");
+  f.analysis.current = { status: "pending", error_code: null, progress: { outline_phase: "discover", outline_pack_failed: 1, turn: 2 } };
+  await page.goto(`/#/bids/${project}/authoring`);
+  await expect(panel).toContainText("正在修正发现");
+  await expect(panel).not.toContainText("阅读包");
+  f.analysis.current = { status: "pending", error_code: null, progress: { outline_phase: "outline", outline_chapters: 0, turn: 3 } };
+  await page.reload();
+  await expect(panel).toContainText("正在组织章节和模板槽");
+  f.analysis.current = { status: "pending", error_code: null, progress: { outline_phase: "outline", outline_chapters: 2, outline_unmapped_forms: 0, outline_slots_submitted: true } };
+  await page.reload();
+  await expect(panel).toContainText("正在核对");
+  await expect(panel).not.toContainText("语义核对");
+  f.analysis.current = { status: "pending", error_code: null, progress: { outline_phase: "complete", outline_chapters: 2 } };
+  await page.reload();
+  await expect(panel).toContainText("大纲已完成");
 });
 
 test("a prepared model call still shows the current analysis step", async ({ page }) => {
