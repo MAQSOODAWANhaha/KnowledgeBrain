@@ -1,6 +1,6 @@
 # 大纲缺口与旧路径退役
 
-现行合同是 [PRD](../../docs/bidding/prd.md) 和 [运行时](../../docs/bidding/outline.md)。缺口 1–3 已接到 `draft_path = true` 的产品路径。本文留下的「现状」是接通前的记录；下面的验证和一次成稿验收是回归合同。模板是否并入组织仍未决定。
+现行合同是 [PRD](../../docs/bidding/prd.md) 和 [运行时](../../docs/bidding/outline.md)。缺口 1–3 已接到 `draft_path = true` 的产品路径。本文留下的「现状」是接通前的记录；下面的验证和一次成稿验收是回归合同。模板已并入组织：一次成稿是发现 → 组织（章节、绑定、槽）→ 收尾。
 
 本文件不授权另做一套产品设计。
 
@@ -49,7 +49,7 @@
 
 ## 职责分叉
 
-模板维持独立职责，还是并入组织，见 [运行时](../../docs/bidding/outline.md) 的「职责分叉」。缺口 1–3 已落地，这次合并仍未决定。合并会改 `outline/agent.rs` 的职责可见性、提示和对应测试；六个工具的 schema 形状不动。本文件的缺口不包含这次合并。
+已决定并入组织。一次成稿是发现 → 组织（`put_chapters`、`bind_forms`、`put_slots`、`read_outline`）→ 收尾（`read_outline`、`finish_outline`）。`DraftStage::Fill` 和已发布仍只给 `put_slots` 和 `read_outline`，不能改章节或绑定。六个工具的 schema 形状不动。槽规则不变。见 [运行时](../../docs/bidding/outline.md) 的「职责分叉」。
 
 ## 一次成稿验收
 

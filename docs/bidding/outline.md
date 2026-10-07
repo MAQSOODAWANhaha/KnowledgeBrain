@@ -10,34 +10,28 @@
 
 一轮只有一个职责。模型只看见这个职责的工具（`schemas_for`）。其它名字由 `deny` 拒绝。
 
-现行选择是 `outline::agent::current` / `select`。`select` 先看 `DraftStage`，不看旧的扫描游标，也不要调用 `outline::agent::duty`。`duty` 把 phase `outline` 固定成组织，发现之后的模板和收尾都会选错。
+现行选择是 `outline::agent::current` / `select`。`select` 先看 `DraftStage`，不看旧的扫描游标，也不要调用 `outline::agent::duty`。`duty` 把 phase `outline` 固定成组织；槽已经提交、尚未 `finish_outline` 时会把收尾选成组织。
 
-1. `DraftStage::Fill` 或已发布：模板。这是模板职责的第二种用法，不是 `response` 的知识库填充。该阶段的系统提示用 `prompts/template.txt`，工具仍只有 `put_slots` 和 `read_outline`。
+1. `DraftStage::Fill` 或已发布：只写槽。这不是 `response` 的知识库填充，也不是一次成稿里的组织职责。该阶段的系统提示用 `prompts/template.txt`，工具只有 `put_slots` 和 `read_outline`。不能 `put_chapters`，不能 `bind_forms`。
 2. 发现包还没全部提交：发现。
-3. 还没有章节，或还有未绑定的附件表：组织。
-4. 还没提交过模板槽：模板。一次成稿里，这是组织完成之后写槽。
-5. 否则：收尾。
+3. 还没有章节，或还有未绑定的附件表，或还没提交过槽：组织。同一职责看见 `put_chapters`、`bind_forms`、`put_slots`、`read_outline`。
+4. 否则：收尾。工具只有 `read_outline` 和 `finish_outline`。
 
-`phase` 是检查点上的阶段。职责是这一轮给模型的工具集，由 `current` / `select` 决定。
+一次成稿因此是发现 → 组织（章节、绑定、槽）→ 收尾。`phase` 是检查点上的阶段。职责是这一轮给模型的工具集，由 `current` / `select` 决定。
 
 | `phase` | 这一阶段的职责 |
 | --- | --- |
 | `discover` | 发现。阅读包还没全部 `committed` |
-| `outline` | 先组织，再模板，再收尾。章节未齐或附件未绑完是组织；章节和附件齐了、槽还没交是模板；槽已交是收尾 |
+| `outline` | 先组织，再收尾。章节未齐、附件未绑完或槽还没交是组织；三者都齐是收尾 |
 | `check` | 收尾。旧路径会把 phase 写成 `check`。一次成稿的 `finish_outline` 直接写成 `complete` |
-| `complete` | 大纲已结束。`DraftStage` 仍是大纲时职责是收尾；`DraftStage` 已是 `Fill` 或已发布时职责是模板 |
-
-模板职责有两种用法，工具都是 `put_slots` 和 `read_outline`。这不是第二条产品生成流，也不是 `response` 的知识库填充：
-
-1. 一次成稿：组织完成之后写槽。
-2. `DraftStage::Fill` 或已发布：只能改槽，不能改章节。
+| `complete` | 大纲已结束。`DraftStage` 仍是大纲时职责是收尾；`DraftStage` 已是 `Fill` 或已发布时职责是只写槽 |
 
 | 职责 | 工具 | 提示约束 |
 | --- | --- | --- |
 | 发现 | `submit_pack`，`read_outline` | 只读已领取的包。同一包失败后才把 `repair` 设为 true |
-| 组织 | `put_chapters`，`bind_forms`，`read_outline` | 替换整棵章节树，并把每个附件表绑到唯一章节 |
-| 模板 | `put_slots`，`read_outline` | 只抄招标文件已有文字。投标人槽和签字槽留空并带 `match_query` |
-| 收尾 | `read_outline`，`finish_outline` | 核对后结束。有未绑定附件表时不能结束 |
+| 组织 | `put_chapters`，`bind_forms`，`put_slots`，`read_outline` | 替换整棵章节树，把每个附件表绑到唯一章节，并写入规定槽。投标人槽和签字槽留空并带 `match_query`。分组章节不能带这两种槽 |
+| 收尾 | `read_outline`，`finish_outline` | 核对后结束。有未绑定附件表时不能结束。不改章节，不改槽 |
+| 填槽（`Fill` / 已发布） | `put_slots`，`read_outline` | 只抄招标文件已有文字。不能改章节，不能改绑定 |
 
 `finish_outline` 还要求：章节树非空且无环、同级顺序不重复、已经调用过 `put_slots`、每个 `ChapterPurpose::Response` 章节至少有一个槽。成功后 `tool_draft.finished = true`，并把 `outline_run.phase` 和 `analysis.outline.phase` 标成 `complete`。
 
@@ -54,7 +48,7 @@
 
 `bidder_blank` 和 `signature` 的 `text` 必须为空，`match_query` 必须有内容，并且 `response_required` 为真。其它种类的 `match_query` 必须为空。分组章节不能带这两种槽。
 
-换掉章节树时，指向已删除章节的绑定和槽会被丢掉。槽被丢掉后 `slots_submitted` 回到 false，必须再交一次模板。
+换掉章节树时，指向已删除章节的绑定和槽会被丢掉。槽被丢掉后 `slots_submitted` 回到 false，同一组织职责必须再交一次槽。
 
 附件表来自冻结 `structured_forms`：标题同时含「附」和「件」，或该表所在来源的 `heading_path` 含「附件」。
 
@@ -167,28 +161,13 @@
 
 `prepare_session` 若发现序列化后的 SDK 状态超过 `max_context_bytes`，先按当前窗口重建一次。重建后仍超限，在预约和网络 IO 之前失败，错误同样是 `AGENT_TURN_BUDGET_EXCEEDED`。
 
-## 职责分叉：模板是否并入组织
+## 职责分叉：模板并入组织
 
-这是尚未改代码的产品选择。缺口 1–3 落地后仍维持四个职责。合并不作为这次发布的一部分。
+已决定并入组织。一次成稿在发现完成之后只有一个职责，看见 `put_chapters`、`bind_forms`、`put_slots`、`read_outline`。收尾仍只有 `read_outline` 和 `finish_outline`。章节、绑定和槽在同一次职责里提交。同一职责可以先换章节树再写槽；换树会丢掉被删章节上的绑定和槽，并清掉 `slots_submitted`。
 
-**维持现状。** 模板是独立职责，工具只有 `put_slots` 和 `read_outline`。组织不能写槽。`DraftStage::Fill` 和已发布阶段强制回到模板。
+`DraftStage::Fill` 和已发布不走这次合并。工具仍只有 `put_slots` 和 `read_outline`，不能 `put_chapters` 或 `bind_forms`。系统提示仍用 `prompts/template.txt`。
 
-**并入组织。** 发现完成之后，同一职责看见 `put_chapters`、`bind_forms`、`put_slots`、`read_outline`。收尾仍只有 `read_outline` 和 `finish_outline`。章节、绑定和槽在同一次职责里提交。
-
-| | 维持四个职责 | 并入组织 |
-| --- | --- | --- |
-| 隔离 | 写槽时不能换章节树。换树会丢掉被删章节上的绑定和槽，并清掉 `slots_submitted` | 同一职责可以先换树再写槽 |
-| 轮次 | 章节和附件都齐之后才进入模板 | 少一次职责切换 |
-| `DraftStage::Fill` | 已经强制为模板，不能改章节 | 必须单独保住这条限制 |
-| 槽规则 | 投标人槽和签字槽留空；分组章节不能带这两种槽 | 规则不变，调用方从模板职责变成组织职责 |
-
-若合并，改的是谁看得见工具，不是工具形状：
-
-- `outline/agent.rs` 的 `ORGANIZE`、`TEMPLATE`、`select`、`current`、`deny`、`schemas_for`。`DraftStage::Fill` 仍只给槽。
-- `prompts/outline.txt` 写上现在在 `prompts/template.txt` 里的槽规则。`DraftStage::Fill` 的提示可以留下。
-- `outline-tools-v1.schema.json` 的六个工具形状不动。
-- 断言组织轮不能 `put_slots` 的测试。
-- 本页的职责表。
+槽规则不变。投标人槽和签字槽留空并带 `match_query`；其它种类的 `match_query` 为空；分组章节不能带这两种槽。`outline-tools-v1.schema.json` 的六个工具形状不动。
 
 ## 必须遵守
 
@@ -204,4 +183,4 @@
 
 ## 尚未决定
 
-职责分叉（模板是否并入组织）仍未改代码。阅读包、要求进组织和 `tool_draft` 投影发布已经接通。回归合同仍是 [实施计划](../../plans/bidding/outline-gaps.md) 的验证和一次成稿验收。
+职责分叉已决定为并入组织，见上一节。阅读包、要求进组织、`tool_draft` 投影发布，以及这次合并，都已经接通。回归合同仍是 [实施计划](../../plans/bidding/outline-gaps.md) 的验证和一次成稿验收。

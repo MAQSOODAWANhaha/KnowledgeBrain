@@ -193,24 +193,21 @@ async fn product_requests_do_not_register_retired_outline_tools() {
     let mut organize = checkpoint(&input);
     organize.outline_run.reading_packs = Some(committed_packs(&input));
     let organize_body = request_body(&input, &config, &mut organize).await;
-    assert_eq!(
-        tool_names(&organize_body),
-        vec![
-            "put_chapters".to_string(),
-            "bind_forms".to_string(),
-            "read_outline".to_string()
-        ]
-    );
+    let organize_tools = vec![
+        "put_chapters".to_string(),
+        "bind_forms".to_string(),
+        "put_slots".to_string(),
+        "read_outline".to_string(),
+    ];
+    assert_eq!(tool_names(&organize_body), organize_tools);
 
-    let mut template = organize.clone();
-    template.outline_run.tool_draft.chapters = vec![chapter()];
-    let template_body = request_body(&input, &config, &mut template).await;
-    assert_eq!(
-        tool_names(&template_body),
-        vec!["put_slots".to_string(), "read_outline".to_string()]
-    );
+    let mut organize_with_chapters = organize.clone();
+    organize_with_chapters.outline_run.tool_draft.chapters = vec![chapter()];
+    let organize_with_chapters_body =
+        request_body(&input, &config, &mut organize_with_chapters).await;
+    assert_eq!(tool_names(&organize_with_chapters_body), organize_tools);
 
-    let mut check = template.clone();
+    let mut check = organize_with_chapters.clone();
     check.outline_run.tool_draft.slots_submitted = true;
     let check_body = request_body(&input, &config, &mut check).await;
     assert_eq!(
@@ -218,7 +215,12 @@ async fn product_requests_do_not_register_retired_outline_tools() {
         vec!["read_outline".to_string(), "finish_outline".to_string()]
     );
 
-    for body in [discover_body, organize_body, template_body, check_body] {
+    for body in [
+        discover_body,
+        organize_body,
+        organize_with_chapters_body,
+        check_body,
+    ] {
         let text = body.to_string();
         for name in RETIRED {
             assert!(!text.contains(name), "{name} leaked into {text}");
@@ -239,7 +241,9 @@ fn product_dispatch_rejects_retired_outline_tools_without_old_checks() {
     for name in RETIRED {
         let error = super::apply(&input, &config, &mut state, name, &json!({})).unwrap_err();
         assert!(
-            error.contains("discover and organize"),
+            error.contains(
+                "discover cannot write chapters, template slots, or knowledge responses"
+            ),
             "{name} reached outline_flow: {error}"
         );
     }

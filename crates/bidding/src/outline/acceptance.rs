@@ -1,6 +1,6 @@
 //! One-shot outline acceptance for `draft_path = true`.
 //!
-//! Discover, organize, template, and finish run against the frozen input.
+//! Discover, organize (chapters, bindings, and slots), and finish run against the frozen input.
 //! The checkpoint is the memory: clearing the transcript must not drop requirements.
 
 use super::agent::{Duty, apply, current, deny, host_packet};
@@ -219,6 +219,9 @@ fn one_shot_acceptance_publishes_from_the_tool_draft() {
     );
 
     let mut state = checkpoint(&input);
+    assert_eq!(current(&input, &state), Duty::Discover);
+    assert!(deny(Duty::Discover, "put_slots", false).is_some());
+    assert!(deny(Duty::Discover, "put_chapters", false).is_some());
     state.outline_run.reading_packs = Some(work);
     state.analysis.draft_plan = vec![plan_item()];
     crate::analysis::draft::after_batch(&input, &mut state, false, false, true).unwrap();
@@ -306,6 +309,16 @@ fn one_shot_acceptance_publishes_from_the_tool_draft() {
         &json!({"bindings":[{"form_id":"form-1","chapter_id":"letter"}]}),
     )
     .unwrap();
+    assert_eq!(current(&input, &state), Duty::Organize);
+    assert!(deny(Duty::Organize, "put_slots", false).is_none());
+    assert!(deny(Duty::Organize, "put_chapters", false).is_none());
+    assert!(deny(Duty::Organize, "bind_forms", false).is_none());
+    assert_eq!(
+        host_packet(&input, &state, 8_000, json!({}), json!({}), None)["requirements"]
+            .as_array()
+            .map(|rows| rows.len()),
+        Some(2)
+    );
     let no_slots = apply(&input, 0, &mut state, "finish_outline", &json!({})).unwrap_err();
     assert!(no_slots.contains("put_slots"));
     let grouped = apply(
@@ -331,6 +344,11 @@ fn one_shot_acceptance_publishes_from_the_tool_draft() {
         ]}),
     )
     .unwrap();
+    assert_eq!(current(&input, &state), Duty::Check);
+    assert!(deny(Duty::Check, "put_chapters", false).is_some());
+    assert!(deny(Duty::Check, "bind_forms", false).is_some());
+    assert!(deny(Duty::Check, "put_slots", false).is_some());
+    assert!(deny(Duty::Check, "finish_outline", false).is_none());
     apply(&input, 0, &mut state, "finish_outline", &json!({})).unwrap();
     assert!(state.outline_run.tool_draft.finished);
     assert_eq!(state.outline_run.phase, Phase::Complete);
@@ -460,6 +478,36 @@ fn chapters_may_carry_empty_requirement_lists_when_nothing_was_submitted() {
             .requirement_ids
             .is_empty()
     );
+}
+
+#[test]
+fn fill_and_published_stay_slot_only() {
+    let input = frozen();
+    for stage in [
+        crate::analysis::draft::DraftStage::Fill,
+        crate::analysis::draft::DraftStage::Published,
+    ] {
+        let mut state = checkpoint(&input);
+        state.draft_stage = stage;
+        state.outline_run.tool_draft.chapters = vec![super::ChapterOutline {
+            id: "letter".into(),
+            parent_id: None,
+            order: 0,
+            title: "投标函".into(),
+            purpose: super::ChapterPurpose::Response,
+            requirement_ids: vec![],
+        }];
+        state.outline_run.tool_draft.slots_submitted = true;
+        assert_eq!(current(&input, &state), Duty::Template);
+        assert!(deny(current(&input, &state), "put_chapters", false).is_some());
+        assert!(deny(current(&input, &state), "bind_forms", false).is_some());
+        assert!(deny(current(&input, &state), "put_slots", false).is_none());
+        let names: Vec<_> = super::agent::schemas_for(current(&input, &state))
+            .iter()
+            .map(|tool| tool["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["put_slots", "read_outline"]);
+    }
 }
 
 #[test]
