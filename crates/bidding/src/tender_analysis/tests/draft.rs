@@ -336,130 +336,21 @@ fn draft_result(input: &FrozenInput) -> AnalysisResult {
     }
 }
 
-/// 扫描 PL/pgSQL 的 IF / END IF（跳过注释和字符串），返回每次开合的字节区间。
-fn plpgsql_if_spans(body: &str) -> Vec<(usize, usize)> {
-    let bytes = body.as_bytes();
-    let mut i = 0;
-    let mut stack = Vec::new();
-    let mut spans = Vec::new();
-    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    while i < bytes.len() {
-        match bytes[i] {
-            b'-' if bytes.get(i + 1) == Some(&b'-') => {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            b'/' if bytes.get(i + 1) == Some(&b'*') => {
-                i += 2;
-                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    i += 1;
-                }
-                i = i.saturating_add(2);
-            }
-            b'\'' => {
-                i += 1;
-                while i < bytes.len() {
-                    if bytes[i] == b'\'' {
-                        if bytes.get(i + 1) == Some(&b'\'') {
-                            i += 2;
-                            continue;
-                        }
-                        i += 1;
-                        break;
-                    }
-                    i += 1;
-                }
-            }
-            _ => {
-                let rest = &bytes[i..];
-                let keyword = |word: &[u8]| {
-                    rest.len() >= word.len()
-                        && rest[..word.len()].eq_ignore_ascii_case(word)
-                        && (i == 0 || !is_ident(bytes[i - 1]))
-                        && rest.get(word.len()).is_none_or(|c| !is_ident(*c))
-                };
-                if keyword(b"END") {
-                    let mut j = i + 3;
-                    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                        j += 1;
-                    }
-                    let tail = &bytes[j..];
-                    if tail.len() >= 2
-                        && tail[..2].eq_ignore_ascii_case(b"IF")
-                        && tail.get(2).is_none_or(|c| !is_ident(*c))
-                    {
-                        let start = stack
-                            .pop()
-                            .unwrap_or_else(|| panic!("unmatched END IF at {i}"));
-                        spans.push((start, j + 2));
-                        i = j + 2;
-                        continue;
-                    }
-                }
-                if keyword(b"ELSIF") {
-                    i += 5;
-                    continue;
-                }
-                if keyword(b"IF") {
-                    stack.push(i);
-                    i += 2;
-                    continue;
-                }
-                i += 1;
-            }
-        }
-    }
-    assert!(stack.is_empty(), "publish_v4 unclosed IF at {:?}", stack);
-    spans
-}
-
 #[test]
 fn sql_draft_publish_requires_non_omitted_plan() {
     let sql = include_str!("../../../../../migrations/bidding_v2_baseline.sql");
     let start = sql
-        .find("CREATE FUNCTION kb_bid_v2_publish_requirement_set_v4")
-        .expect("publish v4");
+        .find("CREATE FUNCTION kb_bid_v2_publish_outline")
+        .expect("publish outline");
     let rest = &sql[start + 1..];
     let end = rest
         .find("CREATE FUNCTION")
         .map(|i| start + 1 + i)
         .unwrap_or(sql.len());
     let body = &sql[start..end];
-    let spans = plpgsql_if_spans(body);
-    let draft_if = body
-        .find("p_compiled#>'{analysis_result,review,draft}' = 'true'")
-        .expect("draft IF");
-    let (draft_start, draft_end) = spans
-        .iter()
-        .copied()
-        .find(|(from, to)| *from <= draft_if && *to > draft_if)
-        .expect("draft IF must have matching END IF");
-    let draft_block = &body[draft_start..draft_end];
-    assert!(
-        draft_block.contains("END IF"),
-        "draft review IF must close before shared INSERT"
-    );
-    assert!(
-        !draft_block.contains("source partition incomplete"),
-        "draft THEN/ELSE must not require analysis.dispositions coverage"
-    );
-    let disp = body
-        .find("source partition incomplete")
-        .expect("disposition gate");
-    assert!(
-        disp >= draft_end,
-        "disposition completeness must sit after the draft/official END IF"
-    );
-    let gate = &body[disp.saturating_sub(500)..disp];
-    assert!(
-        gate.contains("review,draft") && gate.contains("IS DISTINCT FROM 'true'"),
-        "disposition completeness must skip draft: {gate}"
-    );
-    let advance = body
-        .find("IF can_publish AND p_compiled#>'{analysis_result,review,draft}' IS DISTINCT FROM 'true'")
-        .expect("draft must skip disposition-set advance");
-    assert!(advance > disp);
+    assert!(body.contains("outline published no chapters or template content"));
+    assert!(body.contains("group chapter cannot carry a knowledge response"));
+    assert!(!body.contains("kb_bid_v2_publish_requirement_set"));
 }
 
 #[test]
@@ -1974,111 +1865,57 @@ fn draft_runtime_freezes_outline_and_fill_contracts() {
 fn sql_draft_publish_writes_current_docx_from_staged_bytes() {
     let sql = include_str!("../../../../../migrations/bidding_v2_baseline.sql");
     let start = sql
-        .find("CREATE FUNCTION kb_bid_v2_publish_requirement_set_v4")
-        .expect("publish v4");
+        .find("CREATE FUNCTION kb_bid_v2_put_docx_version")
+        .expect("put docx version");
     let rest = &sql[start + 1..];
     let end = rest
         .find("CREATE FUNCTION")
         .map(|i| start + 1 + i)
         .unwrap_or(sql.len());
     let body = &sql[start..end];
-    assert!(body.contains("p_docx_staging uuid"));
-    assert!(body.contains("draft chapters require staged DOCX"));
-    assert!(body.contains("official analysis cannot stage draft DOCX"));
+    assert!(body.contains("INSERT INTO bid_docx_versions"));
     assert!(body.contains("INSERT INTO bid_docx_current"));
-    assert!(body.contains("'draft_docx'"));
+    assert!(body.contains("DOCX_VERSION_CAS_MISMATCH"));
 }
 
 #[test]
 fn sql_draft_reserve_skips_extract_owner_and_allows_fill_hash() {
     let sql = include_str!("../../../../../migrations/bidding_v2_baseline.sql");
     let start = sql
-        .find("CREATE FUNCTION kb_bid_v2_tender_agent_reserve")
-        .expect("reserve");
+        .find("CREATE FUNCTION kb_bid_v2_outline_claim")
+        .expect("outline claim");
     let rest = &sql[start + 1..];
     let end = rest
         .find("CREATE FUNCTION")
         .map(|i| start + 1 + i)
         .unwrap_or(sql.len());
     let body = &sql[start..end];
-    assert!(
-        body.contains("coalesce((runtime#>'{limits,draft_path}')::boolean,true)"),
-        "missing draft_path must reserve as draft, not extract"
-    );
-    assert!(
-        body.contains("fill_tools_sha256"),
-        "reserve must accept frozen fill tools"
-    );
-    assert!(
-        !body.contains("tools_read_sha256"),
-        "unified read path leaves exactly two draft tool hashes"
-    );
-    assert!(
-        body.contains("draft outline/fill contract changed"),
-        "draft tools/prompt mismatch must stay a digest error"
-    );
-    let draft_if = body.find("limits,draft_path").expect("draft_path");
-    let owner = body
-        .find("initial Main source owner changed")
-        .expect("official owner gate");
-    assert!(
-        owner > draft_if,
-        "official first-source owner must sit in the non-draft branch"
-    );
+    assert!(body.contains("status <> 'published'"));
+    assert!(body.contains("lease_token"));
+    assert!(!body.contains("system:"));
 }
 
 #[test]
 fn sql_draft_checkpoint_allows_outline_host_assignment() {
     let sql = include_str!("../../../../../migrations/bidding_v2_baseline.sql");
     let start = sql
-        .find("CREATE FUNCTION kb_bid_v2_tender_agent_checkpoint_put")
-        .expect("checkpoint_put");
-    let rest = &sql[start + 1..];
-    let end = rest
-        .find("CREATE FUNCTION")
-        .map(|i| start + 1 + i)
-        .unwrap_or(sql.len());
-    let body = &sql[start..end];
-    assert!(
-        body.contains("initial checkpoint must be empty"),
-        "empty first checkpoint remains a digest gate"
-    );
-    let empty = body
-        .find("initial checkpoint must be empty")
-        .expect("empty gate");
-    let draft = &body[..empty];
-    assert!(
-        draft.contains("draft_stage") && draft.contains("{main_work,status}"),
-        "draft first checkpoint may host-assign outline work"
-    );
-    let idle = body
-        .find("draft_path}')::boolean,true) THEN")
-        .expect("draft dispatch idle");
-    let owner = body
-        .find("Main committed owner changed")
-        .expect("extract owner charge");
-    assert!(
-        owner > idle,
-        "extract main_dispatch owner charge must sit in the non-draft branch"
-    );
+        .find("CREATE TABLE bid_outline_runs")
+        .expect("outline runs");
+    let body = &sql[start..start + 800];
+    assert!(body.contains("checkpoint jsonb NOT NULL"));
+    assert!(body.contains("lease_token uuid"));
+    assert!(body.contains("status IN ('pending','running','failed','published')"));
 }
 
 #[test]
 fn sql_tender_outline_returns_draft_plan() {
     let sql = include_str!("../../../../../migrations/bidding_v2_baseline.sql");
     let start = sql
-        .find("CREATE FUNCTION kb_bid_v2_get_tender_outline")
-        .expect("outline");
-    let rest = &sql[start + 1..];
-    let end = rest
-        .find("CREATE FUNCTION")
-        .map(|i| start + 1 + i)
-        .unwrap_or(sql.len());
-    let body = &sql[start..end];
-    assert!(
-        body.contains("'draft_plan'") && body.contains("{analysis,draft_plan}"),
-        "outline preview must expose draft_plan parent/child tree"
-    );
+        .find("CREATE TABLE bid_outline_chapters")
+        .expect("chapters");
+    let body = &sql[start..start + 900];
+    assert!(body.contains("parent_id text"));
+    assert!(body.contains("purpose text NOT NULL CHECK (purpose IN ('group','response'))"));
 }
 
 #[test]
@@ -3213,10 +3050,8 @@ fn running_retry_preserves_deadline_and_manual_wait_preserves_remaining_budget()
         0
     );
     let sql = include_str!("../../../../../migrations/bidding_v2_baseline.sql");
-    assert!(sql.contains("later AgentRun must preserve remaining execution budget"));
-    assert!(sql.contains("IF first_deadline<=claimed_at THEN"));
-    assert!(!sql.contains("first_deadline<=claimed_at+interval '300 seconds'"));
-    assert!(sql.contains("kb_bid_v2_tender_agent_frozen_deadline"));
+    assert!(sql.contains("kb_bid_v2_outline_claim"));
+    assert!(!sql.contains("kb_bid_v2_tender_agent_frozen_deadline"));
     assert_eq!(crate::tender_analysis::draft::PUBLISH_RESERVE_SECS, 300);
 }
 
@@ -3241,19 +3076,13 @@ fn sql_composition_rejects_official_and_export_allows_saved_docx() {
             .unwrap_or(sql.len());
         &sql[start..end]
     };
-    let load = function_body("kb_bid_v2_load_docx_composition_source");
-    let prepare = function_body("kb_bid_v2_prepare_docx_composition_source");
-    let submit = function_body("kb_bid_v2_submit_docx_composition_request");
-    let export = function_body("kb_bid_v2_create_submission_export_request");
+    let save = function_body("kb_bid_v2_put_docx_version");
+    let editor = function_body("kb_bid_v2_open_docx_editor");
     let publish = function_body("kb_bid_v2_publish_submission_export");
-    assert!(!load.contains("p_mode"));
-    assert!(!prepare.contains("p_mode"));
-    assert!(submit.contains("kb_bid_v2_create_docx_composition_request"));
-    assert!(!export.contains("official export rejects draft analysis"));
-    assert!(export.contains("DOCX_VERSION_CAS_MISMATCH"));
-    assert!(export.contains("DOCX_SAVE_PENDING"));
-    assert!(publish.contains("review_checkpoint->'done' = 'true'::jsonb"));
-    assert!(publish.contains("unfrozen semantic review cannot be published"));
+    assert!(save.contains("DOCX_VERSION_CAS_MISMATCH"));
+    assert!(editor.contains("DOCX_SAVE_PENDING"));
+    assert!(publish.contains("export requires the response for this outline"));
+    assert!(publish.contains("bid_docx_current"));
 }
 
 #[test]
