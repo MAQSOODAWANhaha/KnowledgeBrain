@@ -241,9 +241,8 @@ fn product_dispatch_rejects_retired_outline_tools_without_old_checks() {
     for name in RETIRED {
         let error = super::apply(&input, &config, &mut state, name, &json!({})).unwrap_err();
         assert!(
-            error.contains(
-                "discover cannot write chapters, template slots, or knowledge responses"
-            ),
+            error
+                .contains("discover cannot write chapters, template slots, or knowledge responses"),
             "{name} reached outline_flow: {error}"
         );
     }
