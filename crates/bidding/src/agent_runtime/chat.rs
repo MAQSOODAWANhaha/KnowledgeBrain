@@ -461,20 +461,36 @@ mod tests {
             vec![json!({"type":"function","function":{"name":"inspect_analysis","description":"Read fixture evidence","parameters":{"type":"object"}}})],
         ).await.unwrap();
         let stats = Arc::default();
+        // Hold keeps the HTTP body open after [DONE] (or never writes [DONE]).
+        // The deadline only bounds a turn that does not finish. It has to
+        // outlast scheduling the accept: a short deadline drops the socket
+        // before this task publishes the body, and aborting the server then
+        // leaves the channel empty.
         let result = send(
             &endpoint,
             "local-fixture",
             &request,
-            Duration::from_millis(if hold { 200 } else { 2000 }),
+            Duration::from_millis(if hold { 5_000 } else { 2_000 }),
             Arc::clone(&stats),
         )
         .await;
+        // The handler publishes the body before any response byte. Take that
+        // publish before abort; abort drops the socket task and discards a
+        // read that has not reached `tx.send` yet.
+        let bodies = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut bodies = Vec::new();
+            if let Some(body) = received.recv().await {
+                bodies.push(body);
+            }
+            while let Ok(body) = received.try_recv() {
+                bodies.push(body);
+            }
+            bodies
+        })
+        .await
+        .expect("fixture records the request body before the handler is cancelled");
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
-        let mut bodies = Vec::new();
-        while let Ok(body) = received.try_recv() {
-            bodies.push(body);
-        }
         assert_eq!(
             bodies,
             vec![request],

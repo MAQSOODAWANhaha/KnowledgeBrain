@@ -8,6 +8,8 @@ pub(super) mod main_work;
 pub mod repair;
 pub(super) mod repair_recovery;
 pub(super) mod repair_task_host;
+#[cfg(test)]
+mod retirement;
 mod view_io;
 use crate::agent_runtime::progress::{Progress, Recovery};
 use crate::{agent_error::AgentError, authoring_runtime::AuthoringRuntimeContractV1};

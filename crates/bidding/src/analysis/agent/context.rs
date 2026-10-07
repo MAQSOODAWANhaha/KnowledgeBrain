@@ -2190,5 +2190,5 @@ pub(in crate::analysis) fn visible_read_receipt(
         return result;
     }
     json!({"already_visible":true,"ranges":requested,
-        "instruction":"Original evidence is already in the delivered request. Submit inspected ranges with submit_outline_scan; reading receipts are not scan conclusions. If evidence is evicted later, reread the required range."})
+        "instruction":"Original evidence is already in the delivered request. Reading receipts are not new conclusions. If evidence is evicted later, reread the required range."})
 }
