@@ -502,7 +502,8 @@ fn fill_and_published_stay_slot_only() {
         assert!(deny(current(&input, &state), "put_chapters", false).is_some());
         assert!(deny(current(&input, &state), "bind_forms", false).is_some());
         assert!(deny(current(&input, &state), "put_slots", false).is_none());
-        let names: Vec<_> = super::agent::schemas_for(current(&input, &state))
+        let schemas = super::agent::schemas_for(current(&input, &state));
+        let names: Vec<_> = schemas
             .iter()
             .map(|tool| tool["function"]["name"].as_str().unwrap())
             .collect();
