@@ -73,7 +73,6 @@ fn map_catalog_verification_error(error: CatalogError) -> SchemaError {
         }
         CatalogError::Json(_)
         | CatalogError::UnsupportedValue(_)
-        | CatalogError::InvalidSeedSpec(_)
         | CatalogError::InvalidCatalog(_) => {
             SchemaError::mismatch("catalog manifest extraction violated its contract")
         }
@@ -378,9 +377,6 @@ pub async fn apply_fresh_baseline_with_identity(
         sqlx::raw_sql(BIDDING_BASELINE)
             .execute(&mut *transaction)
             .await?;
-        crate::catalog::verify_fresh_seed_selection(&mut transaction)
-            .await
-            .map_err(map_catalog_verification_error)?;
         let manifest = build_catalog_manifest(&mut transaction)
             .await
             .map_err(map_catalog_verification_error)?;
@@ -534,6 +530,22 @@ mod tests {
             );
         }
         assert!(!SHARED_PLATFORM_BASELINE.contains("INSERT INTO platform_schema_snapshot"));
+    }
+
+    #[test]
+    fn actor_identity_is_only_a_user_or_api_key() {
+        let allowlist = SHARED_PLATFORM_BASELINE
+            .split_once("CREATE FUNCTION kb_actor_identity_valid")
+            .unwrap()
+            .1
+            .split_once("$$;")
+            .unwrap()
+            .0;
+        assert!(allowlist.contains("^(user|api_key):"));
+        assert!(!allowlist.contains("system:"));
+        assert!(!SHARED_PLATFORM_BASELINE.contains("SYSTEM_ACTOR_REQUIRED"));
+        assert!(!BIDDING_BASELINE.contains("SYSTEM_ACTOR_REQUIRED"));
+        assert!(!KNOWLEDGE_BASE_BASELINE.contains("system:"));
     }
 
     #[test]

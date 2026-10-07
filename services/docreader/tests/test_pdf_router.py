@@ -5,6 +5,7 @@ from PIL import Image
 
 from docreader.parser.pdf_parser import (
     PDFParser,
+    _sectionize_pages,
     _classify_page,
     _filter_reading_columns,
     _group_lines,
@@ -153,10 +154,74 @@ class HeadingDetectionTest(unittest.TestCase):
         self.assertTrue(md.startswith("# Big Title"))
         self.assertIn("\nbody 0", md)
 
+    def test_promotes_a_long_large_line(self):
+        title = "Bid instructions " + "detail " * 16
+        self.assertGreater(len(title.strip()), 80)
+        lines = [_line(title.strip(), 24.0)] + [_line(f"body {i}", 10.0) for i in range(6)]
+        md = _segments_to_markdown(lines)
+        self.assertTrue(md.startswith("# " + title.strip()))
+
     def test_does_not_promote_when_sizes_uniform(self):
         lines = [_line(f"line {i}", 10.0) for i in range(6)]
         md = _segments_to_markdown(lines)
         self.assertNotIn("#", md)
+
+    def test_chinese_enumeration_and_long_chapter_titles_open_sections(self):
+        promoted, fragments = _sectionize_pages([
+            "第一章 投标人须知前附表补充说明资料",
+            "一、投标函\n投标人名称。\n（一）法定代表人\n身份证明。",
+        ])
+        titles = [item[1] for page in fragments for item in page]
+        self.assertEqual(titles[0], "第一章 投标人须知前附表补充说明资料")
+        self.assertIn("第一章 投标人须知前附表补充说明资料 > 一、投标函", titles)
+        self.assertIn("第一章 投标人须知前附表补充说明资料 > 一、投标函 > （一）法定代表人", titles)
+        self.assertTrue(promoted[1].startswith("## 一、投标函") or "\n## 一、投标函" in promoted[1] or promoted[1].startswith("# "))
+
+    def test_a_long_chapter_title_is_still_a_section(self):
+        title = "第一章 " + "投标人须知" * 20
+        self.assertGreater(len(title), 80)
+        _, fragments = _sectionize_pages([f"{title}\n本章说明资格条件。"])
+        self.assertEqual(fragments[0][0][1], title)
+
+    def test_price_schedule_does_not_erase_real_chapters(self):
+        rows = "\n".join(f"1.1 设备{i}" for i in range(8))
+        _, fragments = _sectionize_pages([f"第一章 招标公告\n{rows}\n公告正文。"])
+        paths = [item[1] for item in fragments[0]]
+        self.assertIn("第一章 招标公告", paths)
+        self.assertFalse(any(path.endswith("设备0") for path in paths))
+
+    def test_layout_font_heading_marks_a_plain_line(self):
+        from docreader.parser.pdf_parser import _apply_layout_heading_marks
+        marked = _apply_layout_heading_marks(
+            "投标人须知\n正文",
+            {"投标人须知": 1},
+        )
+        self.assertTrue(marked.startswith("# 投标人须知"))
+
+    def test_table_marker_sits_between_the_lines_around_it(self):
+        from docreader.parser.pdf_tables import PdfTableGrid, text_with_table_markers
+        grid = PdfTableGrid(0, 100, 10, 90, 2, 2)
+        text = text_with_table_markers([(180, "第一章 报价"), (40, "表下说明")], [grid], 3)
+        self.assertLess(text.find("第一章 报价"), text.find("\x00TABLE:3:0"))
+        self.assertLess(text.find("\x00TABLE:3:0"), text.find("表下说明"))
+
+    def test_chapter_text_continues_across_pages_until_the_next_chapter(self):
+        promoted, fragments = _sectionize_pages([
+            "第一章 招标公告\n投标人应具备相应资格。",
+            "资格证明材料见附件。",
+            "第二章 评标办法\n综合评分。",
+        ])
+        self.assertTrue(promoted[0].startswith("# 第一章 招标公告"))
+        self.assertEqual(
+            [(item[0], item[1]) for page in fragments for item in page],
+            [
+                (0, "第一章 招标公告"),
+                (0, "第一章 招标公告"),
+                (1, "第二章 评标办法"),
+            ],
+        )
+        self.assertIn("资格证明材料见附件。", fragments[1][0][2])
+        self.assertIn("综合评分。", fragments[2][0][2])
 
     def test_skips_sentence_like_long_lines(self):
         # Large but ends with a period and is long -> body text, not a heading.

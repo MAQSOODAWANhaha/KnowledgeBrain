@@ -962,7 +962,6 @@ pub async fn run_list_delete(pool: &PgPool, document_id: Uuid) -> Result<(), Str
     let deletion = platform::release_knowledge_document_object(
         pool,
         document_id,
-        "system:knowledge-document-delete",
         &format!("knowledge-document-delete:{document_id}"),
     )
     .await

@@ -47,7 +47,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Frozen authoring JSON Schema acceptance
+      - name: Live bidding schema acceptance
         run: |
           python -m venv "$RUNNER_TEMP/kb-schema-validation"
           "$RUNNER_TEMP/kb-schema-validation/bin/python" -m pip install -r scripts/requirements-schema-validation.txt

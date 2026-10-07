@@ -1,3 +1,4 @@
+use anyhow::Context;
 use axum::{Json, Router, http::StatusCode, routing::get};
 use retention::{ObjectRetentionWorker, ObjectUploadExpireWorker, RetentionCtx};
 use sqlx::PgPool;
@@ -35,12 +36,14 @@ async fn main() {
     platform::init_tracing();
     let pool = platform::connect_runtime_verified(platform::SchemaComponentKind::Retention)
         .await
-        .unwrap_or_else(|error| panic!("retention schema readiness failed: {error}"));
+        .context("retention schema readiness failed")
+        .unwrap_or_else(fail);
 
     let _expiry_task = spawn_upload_staging_expiry(pool.clone(), UPLOAD_STAGING_EXPIRY_INTERVAL);
 
     let storage = platform::oxana_connect()
-        .unwrap_or_else(|error| panic!("retention Oxana configuration failed: {error}"));
+        .context("retention Oxana configuration failed")
+        .unwrap_or_else(fail);
     let runtime = storage
         .runtime(RetentionCtx::new(pool.clone()))
         .queue_with_concurrency::<platform::RetentionQueue>(platform::runtime_concurrency(
@@ -80,13 +83,23 @@ async fn main() {
         std::env::var("RETENTION_PROBE_ADDR").unwrap_or_else(|_| "0.0.0.0:8082".to_owned());
     let listener = TcpListener::bind(&address)
         .await
-        .unwrap_or_else(|error| panic!("retention probe bind {address}: {error}"));
+        .with_context(|| format!("retention probe bind {address}"))
+        .unwrap_or_else(fail);
     tracing::info!(%address, "retention consumer ready");
     let probe = axum::serve(listener, app);
     tokio::select! {
-        result = runtime => { result.unwrap_or_else(|error| panic!("retention Oxana runtime failed: {error}")); },
-        result = probe => result.unwrap_or_else(|error| panic!("retention probe failed: {error}")),
+        result = runtime => {
+            result.context("retention Oxana runtime failed").unwrap_or_else(fail);
+        }
+        result = probe => {
+            result.context("retention probe failed").unwrap_or_else(fail);
+        }
     }
+}
+
+fn fail<T>(error: anyhow::Error) -> T {
+    tracing::error!(error = format!("{error:#}"), "retention failed");
+    std::process::exit(1);
 }
 
 #[cfg(test)]
@@ -259,18 +272,14 @@ mod tests {
             &digest,
             "application/octet-stream",
             bytes.len() as i64,
-            "system:tender-document-process-v2",
+            None,
         )
         .await
         .unwrap();
-        let deletion = platform::abandon_object_upload(
-            &admin,
-            staging_id,
-            "system:tender-document-process-v2",
-        )
-        .await
-        .unwrap()
-        .expect("sole staged owner creates deletion identity");
+        let deletion = platform::abandon_object_upload(&admin, staging_id, None)
+            .await
+            .unwrap()
+            .expect("sole staged owner creates deletion identity");
         assert!(
             sqlx::query("SELECT object_ref FROM object_registry LIMIT 1")
                 .execute(&retention)
@@ -324,18 +333,14 @@ mod tests {
             &digest,
             "application/octet-stream",
             bytes.len() as i64,
-            "system:tender-document-process-v2",
+            None,
         )
         .await
         .unwrap();
-        let deletion = platform::abandon_object_upload(
-            &admin,
-            staging_id,
-            "system:tender-document-process-v2",
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let deletion = platform::abandon_object_upload(&admin, staging_id, None)
+            .await
+            .unwrap()
+            .unwrap();
         let storage = platform::oxana_connect().expect("configured Oxana Redis");
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
         let runtime = storage
@@ -400,7 +405,7 @@ mod tests {
             &digest,
             "application/pdf",
             bytes.len() as i64,
-            &actor,
+            Some(&actor),
         )
         .await
         .unwrap();
@@ -461,7 +466,7 @@ mod tests {
             &digest,
             "application/pdf",
             bytes.len() as i64,
-            &actor,
+            Some(&actor),
         )
         .await
         .unwrap();
@@ -508,7 +513,7 @@ mod tests {
                 &digest,
                 "application/pdf",
                 bytes.len() as i64,
-                &actor,
+                Some(&actor),
             )
             .await
             .unwrap();

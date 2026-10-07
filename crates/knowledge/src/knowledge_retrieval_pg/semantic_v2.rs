@@ -1863,7 +1863,7 @@ pub(super) mod tests {
             let object_ref = format!("objects/{digest}");
             sqlx::query("INSERT INTO object_registry(object_ref,digest,media_type,byte_length,state) VALUES($1,$2,'text/plain',1,'available')")
                 .bind(&object_ref).bind(&digest).execute(&mut *tx).await.unwrap();
-            sqlx::query("INSERT INTO object_owner_references(object_ref,owner_kind,owner_id,occurrence,created_by) VALUES($1,'knowledge_document',$2,'original','system:knowledge-document-ingest')")
+            sqlx::query("INSERT INTO object_owner_references(object_ref,owner_kind,owner_id,occurrence,created_by) VALUES($1,'knowledge_document',$2,'original',NULL)")
                 .bind(&object_ref).bind(id).execute(&mut *tx).await.unwrap();
             sqlx::query("INSERT INTO documents(id,product_version_id,title,parse_status,enable_status,index_ready,file_name,file_size,file_hash,object_ref) VALUES($1,$2,'semantic','completed','enabled',true,$3,1,$4,$5)")
                 .bind(id).bind(version_id).bind(format!("{id}.txt")).bind(&digest).bind(&object_ref).execute(&mut *tx).await.unwrap();

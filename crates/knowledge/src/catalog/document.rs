@@ -215,10 +215,9 @@ pub async fn insert_ingest_document(
     .await?;
     sqlx::query_scalar::<_, String>(
         "SELECT kb_register_knowledge_document_object(
-            $1,'application/octet-stream',$2::kb_actor_identity,$3,$4)",
+            $1,'application/octet-stream',NULL::kb_actor_identity,$2,$3)",
     )
     .bind(doc.id)
-    .bind("system:knowledge-document-ingest")
     .bind(format!("knowledge-document:{}", doc.id))
     .bind(Uuid::new_v4())
     .fetch_one(&mut *tx)
@@ -255,10 +254,9 @@ pub async fn insert_document(pool: &PgPool, doc: NewDocument<'_>) -> Result<(), 
     .await?;
     sqlx::query_scalar::<_, String>(
         "SELECT kb_register_knowledge_document_object(
-            $1,'application/octet-stream',$2::kb_actor_identity,$3,$4)",
+            $1,'application/octet-stream',NULL::kb_actor_identity,$2,$3)",
     )
     .bind(doc.id)
-    .bind("system:knowledge-document-ingest")
     .bind(format!("knowledge-document:{}", doc.id))
     .bind(Uuid::new_v4())
     .fetch_one(&mut *tx)

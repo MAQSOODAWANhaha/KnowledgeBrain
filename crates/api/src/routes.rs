@@ -59,7 +59,6 @@ use uuid::Uuid;
 
 pub fn build(state: AppState) -> Router {
     let app = Router::<AppState>::new()
-        .merge(crate::bid_v2_routes::router())
         .route("/health", get_s(health))
         .route("/live", get_s(live))
         .route("/ready", get_s(ready))
@@ -324,17 +323,6 @@ async fn user_from(headers: &HeaderMap, state: &AppState) -> Result<Uuid, ApiErr
         .ok_or_else(unauthorized)
 }
 
-#[allow(dead_code)]
-fn key_role(scopes: &[String]) -> Role {
-    if scopes.iter().any(|s| s == "admin") {
-        Role::Admin
-    } else if scopes.iter().any(|s| s == "ingest") {
-        Role::Contributor
-    } else {
-        Role::Viewer
-    }
-}
-
 fn require_ws(_ws: Uuid, actor: &Actor, _write: bool, _admin: bool) -> Result<Role, ApiErr> {
     match actor {
         Actor::User(_) | Actor::Bootstrap | Actor::Key(_) => Ok(Role::Owner),
@@ -364,29 +352,6 @@ async fn register(
         "GONE",
         "registration is disabled; use LDAP login",
     ))
-}
-
-#[allow(dead_code)]
-async fn register_local(
-    State(state): State<AppState>,
-    Json(body): Json<AuthBody>,
-) -> Result<Json<TokenBody>, ApiErr> {
-    let pool = pg().await?;
-    if knowledge::find_user_by_email(&pool, &body.email)
-        .await
-        .map_err(pg_err)?
-        .is_some()
-    {
-        return Err(fail(StatusCode::CONFLICT, "CONFLICT", "email taken"));
-    }
-    let hash = platform::hash_password(&body.password);
-    let id = Uuid::new_v4();
-    knowledge::insert_user(&pool, id, &body.email, Some(&hash))
-        .await
-        .map_err(pg_err)?;
-    let token =
-        platform::issue_jwt(id, &state.jwt_secret).map_err(|e| validation(&e.to_string()))?;
-    Ok(Json(TokenBody { token, user_id: id }))
 }
 
 async fn login(
@@ -2940,39 +2905,6 @@ async fn global_file(
         return Err(not_found("file"));
     }
     platform::read_blob(hash).map_err(|_| not_found("file"))
-}
-
-pub(crate) fn durable_human_actor(actor: &Actor) -> Result<String, ApiErr> {
-    match actor {
-        Actor::User(id) => Ok(format!("user:{id}")),
-        Actor::Key(key) => Ok(format!("api_key:{}", key.id)),
-        Actor::Bootstrap => Err(fail(
-            StatusCode::FORBIDDEN,
-            "HUMAN_ACTOR_REQUIRED",
-            "Bootstrap cannot perform this bidding mutation",
-        )),
-    }
-}
-
-pub(crate) fn required_idempotency_key(headers: &HeaderMap) -> Result<String, ApiErr> {
-    headers
-        .get("idempotency-key")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && value.len() <= 200)
-        .map(str::to_string)
-        .ok_or_else(|| validation("Idempotency-Key header is required"))
-}
-
-pub(crate) async fn require_bid_pool() -> Result<sqlx::PgPool, ApiErr> {
-    platform::connect().await.map_err(|error| {
-        tracing::error!(error = %error, "bid database unavailable");
-        fail(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "DATABASE_UNAVAILABLE",
-            "bid database unavailable",
-        )
-    })
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@ docx-http-contract-tests = []
 docx-native-tests = []
 
 [dependencies]
+anyhow.workspace = true
 axum.workspace = true
 bidding = { path = "../bidding" }
 chrono.workspace = true

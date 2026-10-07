@@ -1,28 +1,18 @@
-//! Clean-slate tender-to-submission V2 domain.
+//! Three packages, three outputs.
+//!
+//! [`analysis`] reads the frozen tender into reviewed records, relations, and repairs.
+//! [`outline`] publishes the chapter tree and prescribed template slots.
+//! [`response`] fills those response slots from the knowledge base.
+//!
+//! Analysis does not publish chapters or write knowledge responses.
+//! Outline does not review records or match the knowledge base.
+//! Response does not parse the tender or change chapters.
 
-pub mod bid_authoring_contract;
-pub use bid_authoring_contract::*;
 pub mod agent_error;
 pub mod agent_runtime;
+pub mod analysis;
 pub mod authoring_runtime;
-pub mod bid_authoring_v2;
 pub mod content_block;
-pub mod content_generate;
-pub mod content_runtime;
-pub mod docx_composition;
-pub mod docx_layout;
-pub mod docx_round;
-pub mod docx_template;
-pub mod export_review;
-pub mod mutation;
-pub mod onlyoffice_conversion;
-pub mod quote_snapshot;
-pub mod render_v2;
-pub mod submission_export;
+pub mod outline;
+pub mod response;
 pub mod template_grid;
-pub mod tender_analysis;
-pub mod tender_process;
-pub mod tender_upload;
-pub mod workspace;
-
-pub use mutation::{MutationContext, RequestIdentity};

@@ -13,25 +13,6 @@ PARALLEL SAFE
 SET search_path = pg_catalog
 AS $$
     SELECT value ~ '^(user|api_key):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-        OR value IN (
-            'system:bid-convert-worker',
-            'system:bid-attachment-preparation',
-            'system:bid-extraction-worker',
-            'system:content-generate-v2',
-            'system:clause-lifecycle',
-            'system:kind-router-promotion',
-            'system:maintenance',
-            'system:knowledge-document-delete',
-            'system:knowledge-document-ingest',
-            'system:matching-invalidation',
-            'system:matching-publication',
-            'system:requirement-set-compile-v2',
-            'system:requirement-set-compile-v3',
-            'system:requirement-set-compile-v4',
-            'system:retention-consumer',
-            'system:submission-export-v2',
-            'system:tender-document-process-v2'
-        )
 $$;
 
 CREATE DOMAIN kb_actor_identity AS text CHECK (kb_actor_identity_valid(VALUE));
@@ -64,18 +45,6 @@ CREATE TABLE platform_schema_snapshot (
     deployment_namespace_id uuid NOT NULL,
     created_at timestamptz NOT NULL
 );
-
-CREATE TABLE platform_role_contracts (
-    role_name text PRIMARY KEY,
-    login boolean NOT NULL,
-    purpose text NOT NULL CHECK (octet_length(purpose) BETWEEN 1 AND 128)
-);
-INSERT INTO platform_role_contracts(role_name, login, purpose) VALUES
-    ('kb_app_owner', false, 'owns the application catalog'),
-    ('kb_migrator', true, 'explicit fresh-schema bootstrap writer'),
-    ('kb_runtime_api', true, 'runtime HTTP identity'),
-    ('kb_runtime_retention', true, 'exclusive physical object deletion identity'),
-    ('kb_runtime_worker', true, 'runtime asynchronous job identity');
 
 -- Runtime identities must not be able to shadow hardened helper dependencies
 -- through attacker-controlled temporary relations.
@@ -157,7 +126,7 @@ CREATE TABLE audit_events (
     id uuid PRIMARY KEY,
     schema_version smallint NOT NULL CHECK (schema_version = 1),
     operation text NOT NULL CHECK (operation ~ '^[a-z][a-z0-9_.-]{0,127}$'),
-    actor_identity kb_actor_identity NOT NULL,
+    actor_identity kb_actor_identity,
     idempotency_key text,
     request_sha256 kb_sha256 NOT NULL,
     response_sha256 kb_sha256 NOT NULL,
@@ -184,20 +153,20 @@ CREATE TABLE application_maintenance_gate (
     singleton_key boolean PRIMARY KEY DEFAULT true CHECK (singleton_key),
     mode text NOT NULL CHECK (mode IN ('maintenance', 'open', 'draining', 'rollback')),
     generation bigint NOT NULL CHECK (generation >= 0),
-    updated_by kb_actor_identity NOT NULL,
+    updated_by kb_actor_identity,
     updated_at timestamptz NOT NULL,
     CHECK (isfinite(updated_at))
 );
 INSERT INTO application_maintenance_gate
     (singleton_key, mode, generation, updated_by, updated_at)
-VALUES (true, 'open', 0, 'system:maintenance', '1970-01-01 UTC');
+VALUES (true, 'open', 0, NULL, '1970-01-01 UTC');
 
 CREATE TABLE maintenance_gate_audit (
     id uuid PRIMARY KEY,
     from_mode text NOT NULL CHECK (from_mode IN ('maintenance', 'open', 'draining', 'rollback')),
     to_mode text NOT NULL CHECK (to_mode IN ('maintenance', 'open', 'draining', 'rollback')),
     generation bigint NOT NULL CHECK (generation > 0),
-    actor_identity kb_actor_identity NOT NULL,
+    actor_identity kb_actor_identity,
     reason text NOT NULL CHECK (octet_length(reason) BETWEEN 1 AND 512),
     occurred_at timestamptz NOT NULL DEFAULT now()
 );
@@ -287,7 +256,7 @@ CREATE TABLE object_owner_references (
     owner_kind text NOT NULL CHECK (owner_kind ~ '^[a-z][a-z0-9_.-]{0,63}$'),
     owner_id uuid NOT NULL,
     occurrence text NOT NULL CHECK (octet_length(occurrence) BETWEEN 1 AND 128),
-    created_by kb_actor_identity NOT NULL,
+    created_by kb_actor_identity,
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (object_ref, owner_kind, owner_id, occurrence),
     UNIQUE (owner_kind, owner_id, occurrence)
@@ -296,7 +265,7 @@ CREATE TABLE object_owner_references (
 CREATE TABLE object_upload_staging (
     id uuid PRIMARY KEY,
     object_ref kb_object_ref NOT NULL REFERENCES object_registry(object_ref) ON DELETE RESTRICT,
-    created_by kb_actor_identity NOT NULL,
+    created_by kb_actor_identity,
     created_at timestamptz NOT NULL DEFAULT now(),
     expires_at timestamptz NOT NULL DEFAULT (now() + interval '24 hours'),
     CHECK (expires_at > created_at)
@@ -324,7 +293,7 @@ CREATE TABLE object_retention_tombstones (
     object_ref kb_object_ref PRIMARY KEY,
     digest kb_sha256 NOT NULL UNIQUE,
     byte_length bigint NOT NULL CHECK (byte_length >= 0),
-    deleted_by kb_actor_identity NOT NULL,
+    deleted_by kb_actor_identity,
     deletion_id uuid NOT NULL UNIQUE,
     deleted_at timestamptz NOT NULL,
     CHECK (object_ref = 'objects/' || digest)
@@ -457,7 +426,8 @@ BEGIN
     ON CONFLICT (id) DO NOTHING;
     IF NOT EXISTS (
         SELECT 1 FROM object_upload_staging
-         WHERE id = p_staging_id AND object_ref = p_object_ref AND created_by = p_actor
+         WHERE id = p_staging_id AND object_ref = p_object_ref
+           AND created_by IS NOT DISTINCT FROM p_actor
     ) THEN
         RAISE EXCEPTION 'object upload staging identity mismatch'
             USING ERRCODE = '23514';
@@ -490,7 +460,7 @@ DECLARE
 BEGIN
     SELECT * INTO STRICT staging FROM object_upload_staging
      WHERE id = p_staging_id FOR UPDATE;
-    IF staging.object_ref <> p_object_ref OR staging.created_by <> p_actor THEN
+    IF staging.object_ref <> p_object_ref OR staging.created_by IS DISTINCT FROM p_actor THEN
         RAISE EXCEPTION 'object upload staging owner mismatch' USING ERRCODE = '23514';
     END IF;
     SELECT * INTO STRICT registry FROM object_registry
@@ -537,7 +507,7 @@ BEGIN
         END IF;
         RETURN NULL;
     END IF;
-    IF staging.created_by <> p_actor THEN
+    IF staging.created_by IS DISTINCT FROM p_actor THEN
         RAISE EXCEPTION 'object upload staging owner mismatch' USING ERRCODE = '42501';
     END IF;
     DELETE FROM object_upload_staging WHERE id = p_staging_id;
@@ -718,7 +688,7 @@ BEGIN
     INSERT INTO object_retention_tombstones(
         object_ref,digest,byte_length,deleted_by,deletion_id,deleted_at
     ) VALUES(p_object_ref,p_digest,registry.byte_length,
-      'system:retention-consumer',p_deletion_id,clock_timestamp());
+      NULL,p_deletion_id,clock_timestamp());
     UPDATE object_registry SET state='deleted',deleted_at=clock_timestamp()
      WHERE object_ref=p_object_ref;
     RETURN true;
@@ -734,7 +704,7 @@ SELECT object_ref, digest, media_type, byte_length, registered_at
 -- Retention has the only database capability which can complete deletion state.
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
-GRANT SELECT ON platform_schema_snapshot, platform_role_contracts,
+GRANT SELECT ON platform_schema_snapshot,
     application_maintenance_gate, queue_contract_artifacts, queue_contract_current
 TO kb_migrator, kb_runtime_api, kb_runtime_worker, kb_runtime_retention;
 GRANT SELECT ON available_object_registry

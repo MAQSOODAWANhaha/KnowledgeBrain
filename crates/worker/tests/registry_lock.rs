@@ -47,12 +47,12 @@ fn worker_runtime_matches_queue_registry() {
     assert!(production.contains(".worker::<HousekeepWorker, HousekeepJob>()"));
     assert!(production.contains(".worker::<DocumentProcessWorker, DocumentProcessJob>()"));
     assert!(production.contains(".worker::<DocumentProcessWorker, ManualProcessJob>()"));
-    assert!(production.contains("queue_with_concurrency::<BidAuthoringV2Queue>"));
-    assert!(production.contains("TenderDocumentProcessV2Worker"));
-    assert!(production.contains("RequirementSetCompileV2Worker"));
-    assert!(production.contains("DocxComposeV2Worker"));
-    assert!(production.contains("ContentGenerateV2Worker"));
-    assert!(production.contains("SubmissionExportV2Worker"));
+    assert!(!production.contains("queue_with_concurrency::<BidAuthoringV2Queue>"));
+    assert!(!production.contains("TenderDocumentProcessV2Worker"));
+    assert!(!production.contains("RequirementSetCompileV2Worker"));
+    assert!(!production.contains("DocxComposeV2Worker"));
+    assert!(!production.contains("ContentGenerateV2Worker"));
+    assert!(!production.contains("SubmissionExportV2Worker"));
     assert!(production.contains(".worker::<PostProcessWorker, PostProcessJob>()"));
     assert!(
         production

@@ -1,32 +1,21 @@
-//! Rig Chat transport for an already reserved, canonical request. The SDK's
-//! public raw-request entry point does not serialize or rebuild its body.
+//! Chat transport for one reserved request. The provider response is parsed
+//! with eventsource-stream; the body is not rebuilt into another SSE stream.
 use crate::agent_error::AgentError;
-use bytes::Bytes;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use knowledge::models::{ChatToolCall, ChatTurn, ChatUsage};
-use rig::{
-    completion::{CompletionError, FinishReason},
-    http_client::{
-        self, HttpClientExt, LazyBody, MultipartForm, Request, Response, StreamingResponse,
-    },
-    message::AssistantContent,
-    providers::openai::completion::streaming::send_compatible_streaming_request,
-    streaming::{StreamedAssistantContent, ToolCallDeltaContent},
-};
+use serde_json::Value;
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 
 mod request;
-pub(crate) use request::{
-    default_context_tokens, default_image_token_reserve, default_token_safety_margin,
-    estimate_input_tokens, prepare, system_content,
-};
+pub(crate) use request::{estimate_input_tokens, prepare, system_content};
 
 fn invalid() -> AgentError {
     AgentError::new(
@@ -42,170 +31,11 @@ fn unavailable() -> AgentError {
     )
 }
 
-fn http_unavailable() -> http_client::Error {
-    // Never pass a reqwest URL or provider error body into SDK diagnostics.
-    http_client::Error::Instance(std::io::Error::other("provider transport failed").into())
-}
-
-fn response_error(error: CompletionError) -> AgentError {
-    match error {
-        CompletionError::HttpError(http_client::Error::InvalidStatusCode(status)) => {
-            AgentError::new(
-                "AGENT_PROVIDER_UNAVAILABLE",
-                format!("configured provider returned HTTP {status}"),
-            )
-        }
-        CompletionError::HttpError(_) => unavailable(),
-        _ => invalid(),
-    }
-}
-
-/// One physical reservation permits one HTTP request, including when an SDK
-/// event source attempts to reconnect. Retry ownership stays with the Journal.
-#[derive(Clone)]
-struct OnceHttp {
-    client: reqwest::Client,
-    sent: Arc<AtomicBool>,
-    received_bytes: Arc<AtomicU64>,
-    received_chunks: Arc<AtomicU64>,
-    transport_failed: Arc<AtomicBool>,
-}
-
-impl HttpClientExt for OnceHttp {
-    fn send<T, U>(
-        &self,
-        _: Request<T>,
-    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + Send + 'static
-    where
-        T: Into<Bytes> + Send,
-        U: From<Bytes> + Send + 'static,
-    {
-        std::future::ready(Err(http_unavailable()))
-    }
-
-    fn send_multipart<U>(
-        &self,
-        _: Request<MultipartForm>,
-    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + Send + 'static
-    where
-        U: From<Bytes> + Send + 'static,
-    {
-        std::future::ready(Err(http_unavailable()))
-    }
-
-    async fn send_streaming<T>(&self, request: Request<T>) -> http_client::Result<StreamingResponse>
-    where
-        T: Into<Bytes> + Send,
-    {
-        if self.sent.swap(true, Ordering::SeqCst) {
-            return Err(http_unavailable());
-        }
-        let request = reqwest::Request::try_from(request.map(Into::<Bytes>::into))
-            .map_err(|_| http_unavailable())?;
-        let started = Instant::now();
-        let response = self
-            .client
-            .execute(request)
-            .await
-            .map_err(|_| http_unavailable())?;
-        tracing::info!(
-            event = "llm_response_headers",
-            status = response.status().as_u16(),
-            content_type = response_type(response.headers()),
-            elapsed_ms = started.elapsed().as_millis() as u64
-        );
-        if !response.status().is_success() {
-            // Capture status before touching a potentially truncated error body.
-            return Err(http_client::Error::InvalidStatusCode(response.status()));
-        }
-        let mut output = Response::builder().status(response.status());
-        *output.headers_mut().ok_or_else(http_unavailable)? = response.headers().clone();
-        let mut first = true;
-        let received_bytes = self.received_bytes.clone();
-        let received_chunks = self.received_chunks.clone();
-        let transport_failed = self.transport_failed.clone();
-        let stream = response.bytes_stream().map(move |chunk| {
-            if let Ok(bytes) = &chunk {
-                received_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                received_chunks.fetch_add(1, Ordering::Relaxed);
-            }
-            if first && chunk.is_ok() {
-                first = false;
-                tracing::info!(
-                    event = "llm_first_body_chunk",
-                    elapsed_ms = started.elapsed().as_millis() as u64
-                );
-            }
-            chunk.map_err(|error| {
-                transport_failed.store(true, Ordering::Relaxed);
-                tracing::warn!(
-                    event = "llm_stream_failure",
-                    stage = "http_body",
-                    timeout = error.is_timeout(),
-                    decode = error.is_decode(),
-                    body = error.is_body()
-                );
-                http_unavailable()
-            })
-        });
-        // Rig 0.42 records [DONE] but waits for HTTP EOF before flushing its
-        // final response. Bound the transport at the actual SSE sentinel.
-        // Reuse Rig's SSE parser for split frames/UTF-8; Rig still owns all
-        // JSON, tool-call assembly, finish-reason and usage interpretation.
-        let stream = futures::stream::unfold(
-            (Box::pin(stream.eventsource()), false),
-            move |(mut stream, done)| async move {
-                if done {
-                    return None;
-                }
-                let event = stream.next().await?;
-                let mut done = false;
-                let item = event
-                    .map_err(|_| {
-                        tracing::warn!(event = "llm_stream_failure", stage = "sse_frame");
-                        http_unavailable()
-                    })
-                    .map(|event| {
-                        done = event.data == "[DONE]";
-                        if done {
-                            tracing::info!(
-                                event = "llm_sse_done",
-                                elapsed_ms = started.elapsed().as_millis() as u64
-                            );
-                        } else if let Ok(frame) =
-                            serde_json::from_str::<serde_json::Value>(&event.data)
-                        {
-                            // Protocol labels only: never log provider text or
-                            // arbitrary finish-reason strings as diagnostics.
-                            for reason in frame["choices"]
-                                .as_array()
-                                .into_iter()
-                                .flatten()
-                                .filter_map(|choice| choice["finish_reason"].as_str())
-                            {
-                                let reason = match reason {
-                                    "tool_calls" | "stop" | "length" | "content_filter" => reason,
-                                    _ => "other",
-                                };
-                                tracing::info!(
-                                    event = "llm_sse_finish_reason",
-                                    finish_reason = reason,
-                                    elapsed_ms = started.elapsed().as_millis() as u64
-                                );
-                            }
-                        }
-                        let data = event.data.replace('\n', "\ndata: ");
-                        Bytes::from(format!("data: {data}\n\n"))
-                    });
-                Some((item, (stream, done)))
-            },
-        );
-        output
-            .headers_mut()
-            .ok_or_else(http_unavailable)?
-            .remove("content-length");
-        output.body(Box::pin(stream) as _).map_err(Into::into)
-    }
+fn interrupted() -> AgentError {
+    AgentError::new(
+        "AGENT_TRANSPORT_INTERRUPTED",
+        "provider HTTP response stream interrupted; incomplete tool calls were not accepted",
+    )
 }
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -237,7 +67,6 @@ fn response_type(headers: &reqwest::header::HeaderMap) -> &'static str {
     let Ok(value) = value.to_str() else {
         return "other";
     };
-    // Only bounded protocol classifications, never arbitrary header contents.
     let mime = value.split(';').next().unwrap_or_default().trim();
     if mime.eq_ignore_ascii_case("text/event-stream") {
         "sse"
@@ -268,16 +97,10 @@ fn client() -> Result<reqwest::Client, AgentError> {
 
 #[derive(Clone, Default)]
 struct StreamStats {
-    sdk_events: u64,
-    text_events: u64,
+    events: u64,
     text_delta_bytes: u64,
-    reasoning_events: u64,
-    reasoning_delta_bytes: u64,
-    tool_delta_events: u64,
-    tool_argument_delta_bytes: u64,
-    completed_tool_events: u64,
-    final_events: u64,
-    last_sdk_event_ms: Option<u64>,
+    tool_events: u64,
+    last_event_ms: Option<u64>,
 }
 
 fn log_stream(
@@ -291,16 +114,10 @@ fn log_stream(
         event = "llm_stream_completed",
         received_bytes = received_bytes.load(Ordering::Relaxed),
         received_chunks = received_chunks.load(Ordering::Relaxed),
-        sdk_events = stats.sdk_events,
-        text_events = stats.text_events,
+        events = stats.events,
         text_delta_bytes = stats.text_delta_bytes,
-        reasoning_events = stats.reasoning_events,
-        reasoning_delta_bytes = stats.reasoning_delta_bytes,
-        tool_delta_events = stats.tool_delta_events,
-        tool_argument_delta_bytes = stats.tool_argument_delta_bytes,
-        completed_tool_events = stats.completed_tool_events,
-        final_events = stats.final_events,
-        last_sdk_event_ms = stats.last_sdk_event_ms,
+        tool_events = stats.tool_events,
+        last_event_ms = stats.last_event_ms,
         timed_out,
         elapsed_ms = started.elapsed().as_millis() as u64
     );
@@ -328,36 +145,20 @@ async fn send(
     timeout: Duration,
     stats: Arc<Mutex<StreamStats>>,
 ) -> Result<ChatTurn, AgentError> {
-    let mut request = Request::builder()
-        .method("POST")
-        .uri(endpoint)
-        .header("content-type", "application/json")
-        .header("accept", "text/event-stream")
-        .body(body.to_vec())
-        .map_err(|_| unavailable())?;
-    let mut auth =
-        http_client::HeaderValue::from_str(&format!("Bearer {key}")).map_err(|_| unavailable())?;
-    auth.set_sensitive(true);
-    request.headers_mut().insert("authorization", auth);
     let received_bytes = Arc::new(AtomicU64::new(0));
     let received_chunks = Arc::new(AtomicU64::new(0));
-    let transport_failed = Arc::new(AtomicBool::new(false));
-    let http = OnceHttp {
-        client: client()?,
-        sent: Arc::new(AtomicBool::new(false)),
-        received_bytes: received_bytes.clone(),
-        received_chunks: received_chunks.clone(),
-        transport_failed: transport_failed.clone(),
-    };
     let started = Instant::now();
     let mut heartbeat = tokio::time::interval(WAIT_LOG);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await;
     let mut deadline = std::pin::pin!(tokio::time::sleep(timeout));
     let mut handle = AbortOnDrop {
-        handle: tokio::spawn(complete_provider_stream(
-            http,
-            request,
+        handle: tokio::spawn(read_provider_events(
+            endpoint.to_owned(),
+            key.to_owned(),
+            body.to_vec(),
+            received_bytes.clone(),
+            received_chunks.clone(),
             started,
             stats.clone(),
         )),
@@ -374,9 +175,7 @@ async fn send(
                     false,
                     started,
                 );
-                return if outcome.is_err() && transport_failed.load(Ordering::Relaxed) {
-                    Err(AgentError::new("AGENT_TRANSPORT_INTERRUPTED", "provider HTTP response stream interrupted; incomplete tool calls were not accepted"))
-                } else { outcome };
+                return outcome;
             }
             _ = &mut deadline => {
                 handle.abort();
@@ -402,107 +201,156 @@ async fn send(
     }
 }
 
-async fn complete_provider_stream(
-    http: OnceHttp,
-    request: Request<Vec<u8>>,
+async fn read_provider_events(
+    endpoint: String,
+    key: String,
+    body: Vec<u8>,
+    received_bytes: Arc<AtomicU64>,
+    received_chunks: Arc<AtomicU64>,
     started: Instant,
     stats: Arc<Mutex<StreamStats>>,
 ) -> Result<ChatTurn, AgentError> {
-    let mut stream = send_compatible_streaming_request(http, request, "openai-chat-compatible")
+    let response = client()?
+        .post(&endpoint)
+        .header("content-type", "application/json")
+        .header("accept", "text/event-stream")
+        .bearer_auth(key)
+        .body(body)
+        .send()
         .await
-        .map_err(response_error)?;
-    while let Some(event) = stream.next().await {
-        let event = event.map_err(|error| {
-            tracing::warn!(event = "llm_stream_failure", stage = "sdk_stream");
-            response_error(error)
-        })?;
-        // Retain observations even when a later frame fails or the task times out.
-        // This guard never spans an await.
-        let mut stats = stats.lock().expect("stream statistics");
-        match event {
-            StreamedAssistantContent::Text(text) => {
-                stats.text_events += 1;
-                stats.text_delta_bytes = stats
-                    .text_delta_bytes
-                    .saturating_add(text.text.len() as u64);
-            }
-            StreamedAssistantContent::Reasoning { .. } => stats.reasoning_events += 1,
-            StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
-                stats.reasoning_events += 1;
-                stats.reasoning_delta_bytes = stats
-                    .reasoning_delta_bytes
-                    .saturating_add(reasoning.len() as u64);
-            }
-            StreamedAssistantContent::ToolCallDelta { content, .. } => {
-                stats.tool_delta_events += 1;
-                if let ToolCallDeltaContent::Delta(arguments) = content {
-                    stats.tool_argument_delta_bytes = stats
-                        .tool_argument_delta_bytes
-                        .saturating_add(arguments.len() as u64);
-                }
-            }
-            StreamedAssistantContent::ToolCall { .. } => stats.completed_tool_events += 1,
-            StreamedAssistantContent::Final(_) => stats.final_events += 1,
-            _ => {}
+        .map_err(|_| unavailable())?;
+    tracing::info!(
+        event = "llm_response_headers",
+        status = response.status().as_u16(),
+        content_type = response_type(response.headers()),
+        elapsed_ms = started.elapsed().as_millis() as u64
+    );
+    if !response.status().is_success() {
+        return Err(AgentError::new(
+            "AGENT_PROVIDER_UNAVAILABLE",
+            format!("configured provider returned HTTP {}", response.status()),
+        ));
+    }
+    let stream = response.bytes_stream().map(move |chunk| {
+        if let Ok(bytes) = &chunk {
+            received_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            received_chunks.fetch_add(1, Ordering::Relaxed);
         }
-        stats.last_sdk_event_ms = Some(started.elapsed().as_millis() as u64);
-        if stats.sdk_events == 0 {
+        chunk.map_err(|error| {
+            tracing::warn!(
+                event = "llm_stream_failure",
+                stage = "http_body",
+                timeout = error.is_timeout(),
+                decode = error.is_decode(),
+                body = error.is_body()
+            );
+            std::io::Error::other("provider transport failed")
+        })
+    });
+    let mut events = stream.eventsource();
+    let mut turn = ChatTurn::default();
+    let mut calls = BTreeMap::new();
+    let mut done = false;
+    while let Some(event) = events.next().await {
+        let event = event.map_err(|_| {
+            tracing::warn!(event = "llm_stream_failure", stage = "sse_frame");
+            interrupted()
+        })?;
+        if event.data == "[DONE]" {
             tracing::info!(
-                event = "llm_first_sdk_event",
+                event = "llm_sse_done",
                 elapsed_ms = started.elapsed().as_millis() as u64
             );
+            done = true;
+            break;
         }
-        stats.sdk_events += 1;
+        apply_event(&mut turn, &mut calls, &event.data, &stats, started)?;
     }
-    let response = stream.response.as_ref().ok_or_else(invalid)?;
-    // Rig normalizes `stop` with tools to ToolCalls. The frozen provider
-    // contract is stricter: require its preserved wire reason as well.
-    if response.finish_reason != Some(FinishReason::ToolCalls)
-        || response.raw["finish_reason"] != "tool_calls"
-    {
+    if !done {
+        return Err(interrupted());
+    }
+    turn.tool_calls = calls.into_values().collect();
+    if turn.finish_reason != "tool_calls" {
         return Err(invalid());
     }
-    let mut result = ChatTurn {
-        finish_reason: "tool_calls".into(),
-        ..Default::default()
-    };
-    for item in &stream.choice {
-        match item {
-            AssistantContent::Text(text) => result.content.push_str(&text.text),
-            AssistantContent::ToolCall(call) => {
-                // Rig can mint correlation IDs for id-less providers. Our
-                // frozen Chat contract requires a provider-issued call ID.
-                let provider = call.provider.as_ref().ok_or_else(invalid)?;
-                result.tool_calls.push(ChatToolCall {
-                    id: provider.call_id.as_str().into(),
-                    name: call.function.name.clone(),
-                    arguments: serde_json::to_string(&call.function.arguments)
-                        .map_err(|_| invalid())?,
-                });
-            }
-            _ => {}
-        }
+    for call in &turn.tool_calls {
+        serde_json::from_str::<Value>(&call.arguments).map_err(|_| invalid())?;
     }
-    // The SDK uses zero as the missing-usage sentinel. Never record that
-    // as observed zero consumption. Optional detail counts stay unknown.
-    if response.usage.has_values() {
-        let raw = &response.raw["usage"];
-        result.usage = Some(ChatUsage {
-            prompt_tokens: raw["prompt_tokens"].as_u64(),
-            completion_tokens: raw["completion_tokens"].as_u64(),
-            total_tokens: raw["total_tokens"].as_u64(),
-            cached_tokens: raw["prompt_tokens_details"]["cached_tokens"]
+    if !super::valid_tool_turn(&turn) {
+        return Err(invalid());
+    }
+    Ok(turn)
+}
+
+fn apply_event(
+    turn: &mut ChatTurn,
+    calls: &mut BTreeMap<u64, ChatToolCall>,
+    data: &str,
+    stats: &Arc<Mutex<StreamStats>>,
+    started: Instant,
+) -> Result<(), AgentError> {
+    let value: Value = serde_json::from_str(data).map_err(|_| invalid())?;
+    if value.get("error").is_some() {
+        return Err(invalid());
+    }
+    if value["usage"].is_object() {
+        turn.usage = Some(ChatUsage {
+            prompt_tokens: value["usage"]["prompt_tokens"].as_u64(),
+            completion_tokens: value["usage"]["completion_tokens"].as_u64(),
+            total_tokens: value["usage"]["total_tokens"].as_u64(),
+            cached_tokens: value["usage"]["prompt_tokens_details"]["cached_tokens"]
                 .as_u64()
-                .filter(|&n| n != 0),
-            reasoning_tokens: raw["completion_tokens_details"]["reasoning_tokens"]
+                .filter(|&count| count != 0),
+            reasoning_tokens: value["usage"]["completion_tokens_details"]["reasoning_tokens"]
                 .as_u64()
-                .filter(|&n| n != 0),
+                .filter(|&count| count != 0),
         });
     }
-    if !super::valid_tool_turn(&result) {
-        return Err(invalid());
+    if let Some(reason) = value["choices"][0]["finish_reason"].as_str() {
+        turn.finish_reason = reason.to_owned();
+        let reason = match reason {
+            "tool_calls" | "stop" | "length" | "content_filter" => reason,
+            _ => "other",
+        };
+        tracing::info!(
+            event = "llm_sse_finish_reason",
+            finish_reason = reason,
+            elapsed_ms = started.elapsed().as_millis() as u64
+        );
     }
-    Ok(result)
+    if let Some(text) = value["choices"][0]["delta"]["content"].as_str() {
+        turn.content.push_str(text);
+        let mut stats = stats.lock().expect("stream statistics");
+        stats.text_delta_bytes = stats.text_delta_bytes.saturating_add(text.len() as u64);
+    }
+    if let Some(items) = value["choices"][0]["delta"]["tool_calls"].as_array() {
+        let mut stats = stats.lock().expect("stream statistics");
+        stats.tool_events = stats.tool_events.saturating_add(items.len() as u64);
+        drop(stats);
+        for item in items {
+            let index = item["index"].as_u64().unwrap_or(0);
+            let slot = calls.entry(index).or_default();
+            if let Some(id) = item["id"].as_str() {
+                slot.id = id.to_owned();
+            }
+            if let Some(name) = item["function"]["name"].as_str() {
+                slot.name.push_str(name);
+            }
+            if let Some(arguments) = item["function"]["arguments"].as_str() {
+                slot.arguments.push_str(arguments);
+            }
+        }
+    }
+    let mut stats = stats.lock().expect("stream statistics");
+    if stats.events == 0 {
+        tracing::info!(
+            event = "llm_first_sse_event",
+            elapsed_ms = started.elapsed().as_millis() as u64
+        );
+    }
+    stats.events += 1;
+    stats.last_event_ms = Some(started.elapsed().as_millis() as u64);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -637,8 +485,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "owned loopback HTTP server; no external provider or credentials"]
-    async fn reserved_chat_bytes_use_rig_and_reject_invalid_terminals() {
+    async fn eventsource_turn_accepts_done_without_waiting_for_http_eof() {
         let tool = event(
             json!({"tool_calls":[{"index":0,"id":"call-a","type":"function","function":{"name":"inspect_analysis","arguments":"{\"kind\":\"all\"}"}}]}),
             Value::Null,
@@ -769,30 +616,6 @@ mod tests {
         }
         let (result, _, _) = exchange(200, tool, true).await;
         assert_eq!(result.unwrap_err().code, "AGENT_TURN_TIMEOUT");
-    }
-
-    #[tokio::test]
-    #[ignore = "owned loopback HTTP server; no external provider or credentials"]
-    async fn partial_stream_statistics_survive_failure_and_timeout() {
-        let partial = event(json!({"content":"partial evidence"}), Value::Null);
-        for (body, hold) in [
-            (format!("{partial}data: {{corrupt\n\n"), false),
-            (partial.clone(), false),
-            (partial, true),
-        ] {
-            let (result, _, stats) = exchange(200, body, hold).await;
-            let error = result.unwrap_err();
-            if hold {
-                assert_eq!(error.code, "AGENT_TURN_TIMEOUT");
-            }
-            assert!(
-                stats.sdk_events > 0,
-                "partial output must not be reported as no SDK events"
-            );
-            assert!(stats.text_delta_bytes > 0);
-            assert!(stats.last_sdk_event_ms.is_some());
-            assert_eq!(stats.completed_tool_events, 0);
-        }
     }
 
     #[tokio::test]

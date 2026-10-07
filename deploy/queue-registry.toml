@@ -241,7 +241,7 @@ protocol = 1
 handler = "TenderDocumentProcessV2Handler"
 snapshots = ["request", "document", "parser_contract"]
 capabilities = ["postgresql", "object_store", "docreader", "ocr", "vlm"]
-launch_mode = "required_enabled"
+launch_mode = "declared_disabled"
 
 [[entries]]
 physical_queue = "bid-authoring-v2"
@@ -253,7 +253,7 @@ protocol = 1
 handler = "RequirementSetCompileV2Handler"
 snapshots = ["request", "document_set", "disposition_set"]
 capabilities = ["postgresql"]
-launch_mode = "required_enabled"
+launch_mode = "declared_disabled"
 
 [[entries]]
 physical_queue = "bid-authoring-v2"
@@ -265,7 +265,7 @@ protocol = 1
 handler = "DocxComposeV2Handler"
 snapshots = ["request", "document_set", "requirement_set", "expected_docx", "prompt", "model"]
 capabilities = ["postgresql", "chat", "object_store"]
-launch_mode = "required_enabled"
+launch_mode = "declared_disabled"
 
 [[entries]]
 physical_queue = "bid-authoring-v2"
@@ -277,7 +277,7 @@ protocol = 1
 handler = "ContentGenerateV2Handler"
 snapshots = ["request", "workspace", "requirement_projection", "evidence", "prompt", "model"]
 capabilities = ["postgresql", "chat", "embedding", "index", "object_store"]
-launch_mode = "required_enabled"
+launch_mode = "declared_disabled"
 
 [[entries]]
 physical_queue = "bid-authoring-v2"
@@ -289,4 +289,4 @@ protocol = 1
 handler = "SubmissionExportV2Handler"
 snapshots = ["request", "workspace", "assessment", "render", "style", "font", "assets"]
 capabilities = ["postgresql", "object_store", "docx", "pdf"]
-launch_mode = "required_enabled"
+launch_mode = "declared_disabled"

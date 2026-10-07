@@ -17,7 +17,7 @@ SELECT kb_object_reference_add(
  'objects/'||encode(digest(convert_to('knowledge-fixture','UTF8'),'sha256'),'hex'),
  encode(digest(convert_to('knowledge-fixture','UTF8'),'sha256'),'hex'),
  'text/plain',17,'knowledge_document','00000000-0000-4000-8000-0000000001b2','original',
- 'system:knowledge-document-ingest');
+ NULL);
 INSERT INTO documents(id,product_version_id,title,parse_status,enable_status,index_ready,file_name,file_size,file_hash,object_ref) VALUES
  ('00000000-0000-4000-8000-0000000001b2','00000000-0000-4000-8000-0000000001b4','verified source','completed','enabled',true,'verified-source.txt',17,
   encode(digest(convert_to('knowledge-fixture','UTF8'),'sha256'),'hex'),
@@ -273,7 +273,7 @@ BEGIN
     'phase1-disposition-partial',request_bytes,kb_bid_v2_sha256_bytes(request_bytes));
   compile_value:=kb_bid_v2_compile_requirement_set(
     (published->>'request_artifact_id')::uuid,(published->>'request_revision')::bigint,
-    (published->>'frozen_input_sha256')::kb_sha256,'system:requirement-set-compile-v2');
+    (published->>'frozen_input_sha256')::kb_sha256,NULL);
   IF (compile_value->>'requirement_count')::integer<>1 THEN
     RAISE EXCEPTION 'partial DocumentSet compile did not use only ready input';
   END IF;
@@ -315,7 +315,7 @@ BEGIN
     'phase1-disposition-ready',request_bytes,kb_bid_v2_sha256_bytes(request_bytes));
   compile_value:=kb_bid_v2_compile_requirement_set(
     (published->>'request_artifact_id')::uuid,(published->>'request_revision')::bigint,
-    (published->>'frozen_input_sha256')::kb_sha256,'system:requirement-set-compile-v2');
+    (published->>'frozen_input_sha256')::kb_sha256,NULL);
   IF (compile_value->>'requirement_count')::integer<>2 THEN
     RAISE EXCEPTION 'requirement compile count mismatch';
   END IF;

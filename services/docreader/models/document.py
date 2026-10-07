@@ -360,10 +360,20 @@ class Document(BaseModel):
 
     chunks: List[Chunk] = Field(default_factory=list, description="document chunks")
     structured_source_units: List[StructuredSourceUnit] = Field(default_factory=list)
+    #: Nested chapters. Tables, images and sheet rows hang under the node they belong to.
+    tree: Any = None
     metadata: Dict[str, Any] = Field(
         default_factory=dict,
         description="metadata fields",
     )
+
+    @model_validator(mode="after")
+    def _attach_document_tree(self) -> "Document":
+        from docreader.parser.document_tree import build_document_tree
+
+        self.tree = build_document_tree(self.structured_source_units, self.content)
+        self.metadata["document_tree"] = self.tree.model_dump_json()
+        return self
 
     def set_content(self, content: str) -> None:
         """Set document content."""

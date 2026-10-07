@@ -17,7 +17,7 @@ pub async fn stage_object_upload(
     digest: &str,
     media_type: &str,
     byte_length: i64,
-    actor_identity: &str,
+    actor_identity: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "SELECT kb_object_upload_stage(
@@ -38,7 +38,7 @@ pub async fn stage_object_upload(
 pub async fn abandon_object_upload(
     pool: &PgPool,
     staging_id: Uuid,
-    actor_identity: &str,
+    actor_identity: Option<&str>,
 ) -> Result<Option<ObjectDeletionIdentity>, sqlx::Error> {
     let value: Option<serde_json::Value> =
         sqlx::query_scalar("SELECT kb_object_upload_abandon($1,$2::kb_actor_identity)")
@@ -84,7 +84,7 @@ pub struct StagedObjectCleanupTracker {
 }
 
 impl StagedObjectCleanupTracker {
-    pub fn new(_pool: &PgPool, _actor: &str) -> Self {
+    pub fn new(_pool: &PgPool) -> Self {
         Self {
             staging_ids: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -168,8 +168,8 @@ pub struct StagedObjectCleanupGuard {
 }
 
 impl StagedObjectCleanupGuard {
-    pub fn new(pool: &PgPool, actor: &str) -> Self {
-        StagedObjectCleanupTracker::new(pool, actor).guard()
+    pub fn new(pool: &PgPool) -> Self {
+        StagedObjectCleanupTracker::new(pool).guard()
     }
 
     pub fn tracker(&self) -> StagedObjectCleanupTracker {
@@ -264,15 +264,13 @@ pub async fn register_knowledge_document_object(
     pool: &PgPool,
     document_id: Uuid,
     media_type: &str,
-    actor_identity: &str,
     idempotency_key: &str,
 ) -> Result<String, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT kb_register_knowledge_document_object($1,$2,$3::kb_actor_identity,$4,$5)",
+        "SELECT kb_register_knowledge_document_object($1,$2,NULL::kb_actor_identity,$3,$4)",
     )
     .bind(document_id)
     .bind(media_type)
-    .bind(actor_identity)
     .bind(idempotency_key)
     .bind(Uuid::new_v4())
     .fetch_one(pool)
@@ -282,14 +280,12 @@ pub async fn register_knowledge_document_object(
 pub async fn release_knowledge_document_object(
     pool: &PgPool,
     document_id: Uuid,
-    actor_identity: &str,
     idempotency_key: &str,
 ) -> Result<Option<ObjectDeletionIdentity>, sqlx::Error> {
     let value: Option<serde_json::Value> = sqlx::query_scalar(
-        "SELECT kb_release_knowledge_document_object($1,$2::kb_actor_identity,$3,$4)",
+        "SELECT kb_release_knowledge_document_object($1,NULL::kb_actor_identity,$2,$3)",
     )
     .bind(document_id)
-    .bind(actor_identity)
     .bind(idempotency_key)
     .bind(Uuid::new_v4())
     .fetch_one(pool)
@@ -352,7 +348,7 @@ mod tests {
             .unwrap();
         let first = Uuid::new_v4();
         let second = Uuid::new_v4();
-        let mut guard = StagedObjectCleanupGuard::new(&pool, "system:test");
+        let mut guard = StagedObjectCleanupGuard::new(&pool);
         guard.register(first);
         guard.register(first);
         guard.register(second);

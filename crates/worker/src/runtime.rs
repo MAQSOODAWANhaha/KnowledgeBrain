@@ -3,10 +3,6 @@
 #[cfg(not(unix))]
 compile_error!("the Worker subprocess supervision contract requires Unix process groups");
 
-use crate::bidding::{
-    ContentGenerateV2Worker, DocxComposeV2Worker, RequirementSetCompileV2Worker,
-    SubmissionExportV2Worker, TenderDocumentProcessV2Worker,
-};
 use crate::knowledge::{
     DatatableWorker, DocumentProcessWorker, HousekeepWorker, ImageMultimodalWorker,
     IndexDeleteWorker, KbDeleteWorker, KnowledgeSemanticIndexV2Worker, ListDeleteWorker,
@@ -14,12 +10,10 @@ use crate::knowledge::{
     WikiIngestWorker,
 };
 use platform::{
-    BidAuthoringV2Queue, ContentGenerateJobV2, DatatableJob, DefaultQueue, DocumentProcessJob,
-    DocxComposeJobV2, HousekeepJob, ImageMultimodalJob, IndexDeleteJob, KbDeleteJob,
-    KnowledgeSemanticIndexV2Job, ListDeleteJob, ListReparseJob, LowQueue, ManualProcessJob,
-    MultimodalQueue, PostProcessJob, PostprocessQueue, RequirementSetCompileJobV2,
-    SubmissionExportJobV2, SummaryJob, SummaryQueue, TenderDocumentProcessJobV2, VersionCloneJob,
-    WikiFinalizeJob, WikiIngestJob, WikiQueue,
+    DatatableJob, DefaultQueue, DocumentProcessJob, HousekeepJob, ImageMultimodalJob,
+    IndexDeleteJob, KbDeleteJob, KnowledgeSemanticIndexV2Job, ListDeleteJob, ListReparseJob,
+    LowQueue, ManualProcessJob, MultimodalQueue, PostProcessJob, PostprocessQueue, SummaryJob,
+    SummaryQueue, VersionCloneJob, WikiFinalizeJob, WikiIngestJob, WikiQueue,
 };
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
@@ -30,14 +24,6 @@ pub(crate) const TERMINAL_PERSISTENCE_RESERVE: std::time::Duration =
     std::time::Duration::from_secs(5);
 pub(crate) const TASK_ABORT_DRAIN_RESERVE: std::time::Duration =
     std::time::Duration::from_millis(100);
-pub(crate) const TENDER_HANDLER_HARD_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(30 * 60);
-pub(crate) const SUBMISSION_EXPORT_HANDLER_HARD_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(30 * 60);
-pub(crate) const CONTENT_GENERATE_HANDLER_HARD_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(45 * 60);
-pub(crate) const CONTENT_MATCH_HANDLER_HARD_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(10 * 60);
 #[derive(Clone)]
 pub struct AppCtx {
     pub pool: Option<PgPool>,
@@ -47,16 +33,9 @@ pub struct AppCtx {
     pub root_cancel: CancellationToken,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
 pub struct JobErr(pub String);
-
-impl std::fmt::Display for JobErr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for JobErr {}
 
 pub(crate) async fn finish_knowledge_document_job(
     pool: &PgPool,
@@ -82,78 +61,6 @@ pub(crate) async fn finish_knowledge_document_job(
         }
         Err(error) => Err(JobErr(error)),
     }
-}
-
-pub(crate) fn non_agent_sql_error(error: sqlx::Error) -> JobErr {
-    let deterministic = match &error {
-        sqlx::Error::RowNotFound
-        | sqlx::Error::ColumnIndexOutOfBounds { .. }
-        | sqlx::Error::ColumnNotFound(_)
-        | sqlx::Error::ColumnDecode { .. }
-        | sqlx::Error::Decode(_)
-        | sqlx::Error::TypeNotFound { .. } => true,
-        sqlx::Error::Database(database) => database.code().is_some_and(|code| {
-            code.starts_with("22")
-                || code.starts_with("23")
-                || matches!(code.as_ref(), "P0001" | "P0002")
-        }),
-        _ => false,
-    };
-    if deterministic {
-        JobErr(error.to_string())
-    } else {
-        JobErr(format!("TRANSIENT_HANDLER:{error}"))
-    }
-}
-
-pub(crate) async fn bid_request_is_terminal(
-    pool: &PgPool,
-    request_artifact_id: Uuid,
-) -> Result<bool, JobErr> {
-    let status = bidding::bid_authoring_v2::async_request_status_v2(pool, request_artifact_id)
-        .await
-        .map_err(non_agent_sql_error)?;
-    Ok(matches!(status.as_deref(), Some("succeeded" | "failed")))
-}
-
-pub(crate) async fn require_bid_request_terminal(
-    pool: &PgPool,
-    request_artifact_id: Uuid,
-    operation: &str,
-) -> Result<(), JobErr> {
-    if bid_request_is_terminal(pool, request_artifact_id).await? {
-        Ok(())
-    } else {
-        Err(JobErr(format!(
-            "{operation} terminal transition returned without settling the request"
-        )))
-    }
-}
-
-pub(crate) async fn terminalize_tender_document_failure_until(
-    pool: &PgPool,
-    request: &platform::BidAuthoringRequestIdentityV2,
-    code: &str,
-    cleanup_deadline: tokio::time::Instant,
-    label: &str,
-) -> Result<bool, JobErr> {
-    terminalize_until(cleanup_deadline, label, async {
-        if bid_request_is_terminal(pool, request.request_artifact_id).await? {
-            return Ok(true);
-        }
-        let result = bidding::bid_authoring_v2::mark_tender_document_failed_v2(
-            pool,
-            request.request_artifact_id,
-            request.request_revision,
-            &request.frozen_input_sha256,
-            code,
-        )
-        .await;
-        result.map_err(|error| JobErr(format!("{label}: terminal transition failed: {error}")))?;
-        require_bid_request_terminal(pool, request.request_artifact_id, label).await?;
-        Ok(false)
-    })
-    .await
 }
 
 pub(crate) struct HandlerDeadline {
@@ -188,10 +95,6 @@ pub(crate) enum OwnedHandlerCompletion {
 #[derive(Debug)]
 pub(crate) struct OwnedHandlerRun {
     pub(crate) completion: OwnedHandlerCompletion,
-    pub(crate) cleanup_error: Option<String>,
-    pub(crate) cleanup_deadline: tokio::time::Instant,
-    #[cfg(test)]
-    pub(crate) teardown_deadline: tokio::time::Instant,
 }
 
 pub(crate) fn teardown_deadline_for_effect(
@@ -205,23 +108,6 @@ pub(crate) fn teardown_deadline_for_effect(
     } else {
         cleanup_deadline
     }
-}
-
-pub(crate) async fn terminalize_until<F, T>(
-    cleanup_deadline: tokio::time::Instant,
-    label: &str,
-    future: F,
-) -> Result<T, JobErr>
-where
-    F: std::future::Future<Output = Result<T, JobErr>>,
-{
-    let terminal_deadline = std::cmp::min(
-        tokio::time::Instant::now() + TERMINAL_PERSISTENCE_RESERVE,
-        cleanup_deadline,
-    );
-    tokio::time::timeout_at(terminal_deadline, future)
-        .await
-        .map_err(|_| JobErr(format!("{label} exceeded the terminal persistence reserve")))?
 }
 
 pub(crate) async fn cleanup_tracker_until(
@@ -283,10 +169,12 @@ where
         OwnedHandlerCompletion::Completed(Ok(())) | OwnedHandlerCompletion::ShuttingDown => false,
     };
     let work_cleanup = teardown_deadline_for_effect(absolute_cleanup, requires_effect);
-    let cleanup_error = match &completion {
-        OwnedHandlerCompletion::Completed(_) => cleanup_tracker_until(cleanup, work_cleanup).await,
+    match &completion {
+        OwnedHandlerCompletion::Completed(_) => {
+            let _ = cleanup_tracker_until(cleanup, work_cleanup).await;
+        }
         OwnedHandlerCompletion::ShuttingDown => {
-            join_cancelled_handler(&mut handle, &local_cancel, cleanup, work_cleanup).await
+            let _ = join_cancelled_handler(&mut handle, &local_cancel, cleanup, work_cleanup).await;
         }
         OwnedHandlerCompletion::TimedOut => {
             local_cancel.cancel();
@@ -300,16 +188,9 @@ where
                 handle.abort();
                 let _ = tokio::time::timeout_at(work_cleanup, &mut handle).await;
             }
-            None
         }
-    };
-    OwnedHandlerRun {
-        completion,
-        cleanup_error,
-        cleanup_deadline: absolute_cleanup,
-        #[cfg(test)]
-        teardown_deadline: work_cleanup,
     }
+    OwnedHandlerRun { completion }
 }
 
 pub(crate) async fn wait_for_worker_shutdown(mut stop: tokio::sync::watch::Receiver<bool>) {
@@ -325,11 +206,6 @@ pub(crate) async fn wait_for_worker_shutdown(mut stop: tokio::sync::watch::Recei
 pub const WORKER_REGISTERED_TASKS: &[&str] = &[
     platform::TYPE_DOCUMENT_PROCESS,
     platform::TYPE_MANUAL_PROCESS,
-    platform::BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
-    platform::BID_REQUIREMENT_SET_COMPILE_V2_TASK,
-    platform::BID_DOCX_COMPOSE_V2_TASK,
-    platform::BID_CONTENT_GENERATE_V2_TASK,
-    platform::BID_SUBMISSION_EXPORT_V2_TASK,
     platform::TYPE_POST_PROCESS,
     platform::TYPE_SEMANTIC_INDEX_V2,
     platform::TYPE_SUMMARY,
@@ -417,15 +293,6 @@ pub(crate) async fn run_transport_group(
         .queue_with_concurrency::<DefaultQueue>(platform::runtime_concurrency("CORE", 8))
         .worker::<DocumentProcessWorker, DocumentProcessJob>()
         .worker::<DocumentProcessWorker, ManualProcessJob>()
-        .queue_with_concurrency::<BidAuthoringV2Queue>(platform::runtime_concurrency(
-            "BID_AUTHORING",
-            platform::BID_AUTHORING_V2_CONCURRENCY,
-        ))
-        .worker::<TenderDocumentProcessV2Worker, TenderDocumentProcessJobV2>()
-        .worker::<RequirementSetCompileV2Worker, RequirementSetCompileJobV2>()
-        .worker::<DocxComposeV2Worker, DocxComposeJobV2>()
-        .worker::<ContentGenerateV2Worker, ContentGenerateJobV2>()
-        .worker::<SubmissionExportV2Worker, SubmissionExportJobV2>()
         .shutdown_on(shut(stop_rx.clone()))
         .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
         .run();

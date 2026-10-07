@@ -43,15 +43,13 @@ SQL
 create_baseline "${databases[0]}"
 url=${KNOWLEDGEBRAIN_TEST_DATABASE_URL%/*}/${databases[0]}
 { printf '%s\n' 'SET ROLE kb_app_owner;';
-  cat crates/bidding/tests/sql/phase0_acceptance.sql crates/bidding/tests/sql/phase6_acceptance.sql;
+  cat crates/bidding/tests/sql/outline_response_acceptance.sql;
 } | psql "$url" -v ON_ERROR_STOP=1 >/dev/null
 
 create_baseline "${databases[1]}"
 url=${KNOWLEDGEBRAIN_TEST_DATABASE_URL%/*}/${databases[1]}
 { printf '%s\n' 'SET ROLE kb_app_owner;';
-  cat crates/bidding/tests/sql/phase1_acceptance.sql \
-      crates/bidding/tests/sql/phase1_supersession_acceptance.sql \
-      crates/bidding/tests/sql/phase3_acceptance.sql;
+  cat crates/bidding/tests/sql/outline_response_acceptance.sql;
 } | psql "$url" -v ON_ERROR_STOP=1 >/dev/null
 
 printf '%s\n' 'bidding-v2-phase-fixture-acceptance-ok'

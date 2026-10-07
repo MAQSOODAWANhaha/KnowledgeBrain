@@ -250,6 +250,112 @@ def test_docx_preserves_body_order_heading_owner_and_drawing_identity() -> None:
     assert sum(unit.text.count("Narrative") for unit in units) == 1
 
 
+def _with_chapter_numbering(raw: bytes) -> bytes:
+    import zipfile
+    from io import BytesIO as Buffer
+
+    numbering = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:abstractNum w:abstractNumId="0">
+    <w:lvl w:ilvl="0">
+      <w:start w:val="1"/>
+      <w:numFmt w:val="chineseCounting"/>
+      <w:lvlText w:val="第%1章"/>
+      <w:suff w:val="space"/>
+    </w:lvl>
+  </w:abstractNum>
+  <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+</w:numbering>
+"""
+    source = zipfile.ZipFile(BytesIO(raw))
+    output = Buffer()
+    with zipfile.ZipFile(output, "w") as target:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == "word/numbering.xml":
+                continue
+            if info.filename == "[Content_Types].xml":
+                text = data.decode("utf-8")
+                needle = "</Types>"
+                override = (
+                    '<Override PartName="/word/numbering.xml" '
+                    'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>'
+                )
+                text = text.replace(needle, override + needle)
+                data = text.encode("utf-8")
+            elif info.filename == "word/_rels/document.xml.rels":
+                text = data.decode("utf-8")
+                if "numbering" not in text:
+                    rel = (
+                        '<Relationship Id="rIdNumbering" '
+                        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" '
+                        'Target="numbering.xml"/>'
+                    )
+                    text = text.replace("</Relationships>", rel + "</Relationships>")
+                    data = text.encode("utf-8")
+            target.writestr(info, data)
+        target.writestr("word/numbering.xml", numbering)
+    return output.getvalue()
+
+
+def test_docx_numbering_label_opens_the_chapter() -> None:
+    from docx.oxml import OxmlElement
+
+    document = DocxDocument()
+    for title in ("招标公告", "评标办法"):
+        paragraph = document.add_paragraph(title)
+        num_pr = OxmlElement("w:numPr")
+        ilvl = OxmlElement("w:ilvl")
+        ilvl.set(qn("w:val"), "0")
+        num_id = OxmlElement("w:numId")
+        num_id.set(qn("w:val"), "1")
+        num_pr.append(ilvl)
+        num_pr.append(num_id)
+        paragraph._p.get_or_add_pPr().append(num_pr)
+        if title == "招标公告":
+            document.add_paragraph("项目概况。")
+    raw = BytesIO()
+    document.save(raw)
+    units = _docx_structured_units(_with_chapter_numbering(raw.getvalue()))
+    sections = [unit for unit in units if unit.kind is StructuredSourceUnitKind.SECTION]
+    assert [unit.locator.heading_path for unit in sections] == [
+        "第一章 招标公告",
+        "第二章 评标办法",
+    ]
+    assert "项目概况。" in sections[0].text
+
+
+def test_docx_chapter_text_and_outline_level_own_the_following_body() -> None:
+    from docx.oxml import OxmlElement
+
+    document = DocxDocument()
+    document.add_paragraph("第一章 招标公告")
+    document.add_paragraph("投标人应具备相应资格。")
+    document.add_paragraph("1.1 项目概况")
+    document.add_paragraph("项目位于本地。")
+    outlined = document.add_paragraph("评标办法")
+    p_pr = outlined._p.get_or_add_pPr()
+    outline = OxmlElement("w:outlineLvl")
+    outline.set(qn("w:val"), "0")
+    p_pr.append(outline)
+    document.add_paragraph("综合评分。")
+    output = BytesIO()
+    document.save(output)
+    raw = output.getvalue()
+
+    units = _docx_structured_units(raw)
+    sections = [unit for unit in units if unit.kind is StructuredSourceUnitKind.SECTION]
+    assert [unit.locator.heading_path for unit in sections] == [
+        "第一章 招标公告",
+        "第一章 招标公告 > 1.1 项目概况",
+        "评标办法",
+    ]
+    assert "投标人应具备相应资格。" in sections[0].text
+    assert "项目位于本地。" in sections[1].text
+    assert "综合评分。" in sections[2].text
+    assert "# 第一章 招标公告" in Parser().parse_file("tender.docx", "docx", raw).content
+
+
 def test_docx_headingless_narrative_table_narrative_order_and_typed_image_parents() -> None:
     from docx.oxml import OxmlElement
 
@@ -346,7 +452,10 @@ def test_pdf_preserves_page_structure_where_supported() -> None:
     document = PDFParser(file_name="tender.pdf", file_type="pdf").parse_into_text(_minimal_pdf())
     assert document.metadata["page_count"] == 1
     assert document.structured_source_units
-    assert document.structured_source_units[0].key.startswith("page:0:")
+    section = document.structured_source_units[0]
+    assert section.key == "section:0:page:0"
+    assert section.locator.heading_path == ""
+    assert "Tender page" in section.text
 
 
 def test_pdf_image_unit_preserves_typed_page_bounds() -> None:

@@ -8,7 +8,7 @@ pub(crate) mod chat;
 mod driver;
 pub mod progress;
 mod session;
-pub(crate) use driver::{Driver, Status, check_cancel, drive};
+pub(crate) use driver::{Driver, Status, drive};
 
 /// Versioned persistence contract, independent of provider and business rules.
 pub const CHECKPOINT_CONTRACT_VERSION: u32 = 14;
@@ -20,8 +20,6 @@ pub const RUNTIME_ADAPTER_VERSION: &str = "rig-chat-0.42.0/4";
 pub(crate) const SESSION_PREFIX: usize = 2;
 /// Extraction/review append a dynamic progress packet after the transcript.
 pub(crate) const ANALYSIS_SESSION_SUFFIX: usize = 1;
-/// Composition folds progress into the metadata message; no trailing packet.
-pub(crate) const COMPOSITION_SESSION_SUFFIX: usize = 0;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

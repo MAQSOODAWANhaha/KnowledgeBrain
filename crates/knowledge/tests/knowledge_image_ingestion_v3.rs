@@ -84,7 +84,7 @@ async fn image_ocr_publication_is_atomic_idempotent_and_retained() {
         .expect("current version fixture");
     sqlx::query(
         "SELECT kb_object_reference_add($1::kb_object_ref,$2::kb_sha256,'text/plain',$3,
-          'knowledge_document',$4,'original','system:knowledge-document-ingest')",
+          'knowledge_document',$4,'original',NULL)",
     )
     .bind(&source_ref)
     .bind(&source_sha)

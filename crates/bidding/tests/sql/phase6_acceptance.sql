@@ -98,7 +98,7 @@ DO $$
 DECLARE
  workspace_value uuid; export_project uuid:=gen_random_uuid();
  actor kb_actor_identity:='user:00000000-0000-4000-8000-000000000001';
- worker_actor kb_actor_identity:='system:submission-export-v2';
+ worker_actor kb_actor_identity:=NULL;
  mime text:='application/vnd.openxmlformats-officedocument.wordprocessingml.document';
  source_bytes bytea:=convert_to('SQL saved DOCX identity fixture','UTF8');
  pdf_bytes bytea:=convert_to('%PDF SQL conversion identity fixture','UTF8');

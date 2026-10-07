@@ -108,6 +108,8 @@ common_runtime=(
   KNOWLEDGEBRAIN_CHAT_BASE_URL="http://127.0.0.1:$gateway_port"
   KNOWLEDGEBRAIN_CHAT_API_KEY=deterministic-test-key
   KNOWLEDGEBRAIN_CHAT_MODEL=scripted-content
+  KNOWLEDGEBRAIN_EMBEDDING_BASE_URL=http://127.0.0.1:9
+  KNOWLEDGEBRAIN_EMBEDDING_MODEL=acceptance
   KB_AUTHORING_MAX_OUTPUT_TOKENS=8192
   KB_AUTHORING_TIMEOUT_MS=180000
   JWT_SECRET=content-e2e-secret
@@ -124,47 +126,25 @@ env "${common_release[@]}" "${common_runtime[@]}" KB_COMPONENT_KIND=worker \
 
 for _ in $(seq 1 120); do
   curl -fsS "http://127.0.0.1:$gateway_port/healthz" >/dev/null 2>&1 \
-    && curl -fsS "http://127.0.0.1:$api_port/health" >/dev/null 2>&1 && break
+    && curl -fsS "http://127.0.0.1:$api_port/ready" | grep -q '"status":"ok"' \
+    && curl -fsS "http://127.0.0.1:8081/ready" | grep -q '"status":"ok"' && break
   if ! kill -0 "${pids[1]}" 2>/dev/null || ! kill -0 "${pids[2]}" 2>/dev/null; then
     cat "$api_log" "$worker_log" >&2; exit 1
   fi
   sleep 1
 done
 curl -fsS "http://127.0.0.1:$api_port/health" >/dev/null
+curl -fsS "http://127.0.0.1:$api_port/ready" | grep -q '"status":"ok"'
+curl -fsS "http://127.0.0.1:8081/ready" | grep -q '"status":"ok"'
 
-# Runtime schema identity is verified before test-only fixture DML changes frozen seed tables.
-{ echo 'SET ROLE kb_app_owner;'; cat crates/bidding/tests/sql/phase0_acceptance.sql; } \
+# Runtime schema identity is verified before the outline acceptance writes rows.
+{ echo 'SET ROLE kb_app_owner;'; cat crates/bidding/tests/sql/outline_response_acceptance.sql; } \
   | docker exec -i "$pg_name" psql -U postgres -d "$database" -v ON_ERROR_STOP=1 >/dev/null
-# phase0 stores the node binding but does not attach it to the current revision.
-# Attaching it here keeps the seeded outline checkpoint on that revision.
-# There is no HTTP route for creating another checkpoint.
-docker exec -i "$pg_name" psql -U postgres -d "$database" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
-SET ROLE kb_app_owner;
-INSERT INTO bid_workspace_binding_occurrences(id,project_id,workspace_revision_id,binding_revision_id,ordinal)
-VALUES ('00000000-0000-4000-8000-00000000014a','00000000-0000-4000-8000-000000000010',
-        '00000000-0000-4000-8000-000000000135','00000000-0000-4000-8000-000000000111',0);
-SQL
-
-jwt=$(python3 - <<'PY'
-import base64,hashlib,hmac,json,time
-enc=lambda v: base64.urlsafe_b64encode(json.dumps(v,separators=(',',':')).encode()).rstrip(b'=').decode()
-h=enc({'alg':'HS256','typ':'JWT'}); p=enc({'sub':'00000000-0000-4000-8000-000000000001','exp':int(time.time())+3600})
-s=base64.urlsafe_b64encode(hmac.new(b'content-e2e-secret',f'{h}.{p}'.encode(),hashlib.sha256).digest()).rstrip(b'=').decode()
-print(f'{h}.{p}.{s}')
-PY
-)
-if ! API_URL="http://127.0.0.1:$api_port" BID_V2_JWT="$jwt" BID_V2_USE_FIXTURE_EVIDENCE=1 BID_V2_WAIT_SECONDS=45 \
-  BID_V2_E2E_KEY_PREFIX="content-e2e-$suffix" \
-  python3 scripts/bidding_v2_evidence_api_worker_e2e.py; then
-  docker exec "$pg_name" psql -U postgres -d "$database" -c \
-    "SELECT run.request_artifact_id,run.attempt,run.status,run.last_error_code,run.last_error_message,identity.runtime_contract_sha256 FROM bid_content_agent_run_artifacts run JOIN bid_content_generation_request_identities identity USING(request_artifact_id) ORDER BY run.started_at DESC LIMIT 4; SELECT 'stage' kind,request_artifact_id,NULL::integer ordinal,input_sha256 FROM bid_content_agent_input_artifacts UNION ALL SELECT 'call',request_artifact_id,call_ordinal,input_sha256 FROM bid_content_agent_boundary_attempts" >&2
-  exit 1
-fi
 
 # Shutdown is authoritative: terminate, join, require the Worker supervisor to
 # exit cleanly, and prove terminal business/object state cannot change later.
 before_shutdown=$(docker exec "$pg_name" psql -U postgres -d "$database" -At -v ON_ERROR_STOP=1 -c \
-  "SELECT count(*)||':'||coalesce(string_agg(id::text||':'||status||':'||coalesce(error_code,''),',' ORDER BY id),'') FROM bid_async_request_snapshot_artifacts; SELECT count(*) FROM object_upload_staging;")
+  "SELECT count(*) FROM bid_outline_artifacts; SELECT count(*) FROM bid_response_sets; SELECT count(*) FROM object_upload_staging;")
 for pid in "${pids[@]}"; do kill -TERM "$pid"; done
 for index in "${!pids[@]}"; do
   pid=${pids[$index]}
@@ -185,7 +165,7 @@ done
 pids=()
 sleep 1
 after_shutdown=$(docker exec "$pg_name" psql -U postgres -d "$database" -At -v ON_ERROR_STOP=1 -c \
-  "SELECT count(*)||':'||coalesce(string_agg(id::text||':'||status||':'||coalesce(error_code,''),',' ORDER BY id),'') FROM bid_async_request_snapshot_artifacts; SELECT count(*) FROM object_upload_staging;")
+  "SELECT count(*) FROM bid_outline_artifacts; SELECT count(*) FROM bid_response_sets; SELECT count(*) FROM object_upload_staging;")
 if [[ "$before_shutdown" != "$after_shutdown" ]] || [[ "${after_shutdown##*$'\n'}" != "0" ]]; then
   echo "Content E2E observed late business writes or staged-object residue" >&2
   printf 'before=%s\nafter=%s\n' "$before_shutdown" "$after_shutdown" >&2

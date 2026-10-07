@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from docreader.models.document import (
-    PageLocator,
+    DocumentLocator,
     PageTableLocator,
     StructuredSourceUnitKind,
     TableGrid,
@@ -94,18 +94,13 @@ def _pdftotext_pages() -> tuple[str, ...]:
     return tuple(pages)
 
 
-def _page_units(parsed, page_ordinal: int):
-    leftover = []
-    cells = []
-    for unit in parsed.structured_source_units:
-        locator = unit.locator
-        if isinstance(locator, PageLocator) and locator.page_ordinal == page_ordinal:
-            leftover.append(unit.text or "")
-        elif isinstance(locator, PageTableLocator) and locator.page_ordinal == page_ordinal:
-            if unit.grid is not None:
-                for cell in unit.grid.cells:
-                    cells.append(cell.text or "")
-    return leftover, cells
+def _section_text(parsed) -> str:
+    return "\n".join(
+        unit.text or ""
+        for unit in parsed.structured_source_units
+        if unit.kind is StructuredSourceUnitKind.SECTION
+        and isinstance(unit.locator, DocumentLocator)
+    )
 
 
 def _owner_cell(grid: TableGrid, row: int, column: int):
@@ -143,7 +138,7 @@ def _table_reconstructions() -> tuple[str, ...]:
     return tuple(out)
 
 
-def test_bidding_file_has_section_per_page_without_table_error() -> None:
+def test_bidding_file_sections_cover_the_document_without_table_error() -> None:
     parsed = _parsed()
     assert "table_extraction_error" not in parsed.metadata
     assert parsed.metadata.get("page_count") == PAGE_COUNT
@@ -151,15 +146,11 @@ def test_bidding_file_has_section_per_page_without_table_error() -> None:
         unit
         for unit in parsed.structured_source_units
         if unit.kind is StructuredSourceUnitKind.SECTION
-        and isinstance(unit.locator, PageLocator)
+        and isinstance(unit.locator, DocumentLocator)
     ]
-    pages = {
-        unit.locator.page_ordinal
-        for unit in sections
-        if isinstance(unit.locator, PageLocator)
-    }
-    assert len(sections) == PAGE_COUNT
-    assert pages == set(range(PAGE_COUNT))
+    assert sections
+    assert any(unit.locator.heading_path for unit in sections)
+    assert compact(_section_text(parsed))
 
 
 def test_original_blank_forms_have_complete_independent_grids() -> None:
@@ -193,9 +184,9 @@ def test_original_blank_forms_have_complete_independent_grids() -> None:
         assert compact(_owner_cell(grid, 0, 9).text) == "签约合同价"
         assert all(not c.text for c in grid.cells if c.row >= 1)
     assert not any(page == 100 for page, _ in grids), "declaration prose is not a table"
-    text = next(u.text for u in _parsed().structured_source_units
-                if isinstance(u.locator, PageLocator) and u.locator.page_ordinal == 99)
-    assert '6.我公司未被“信用中国”网站（www.creditchina.gov.cn）列入“失信被执行' in compact(text)
+    assert '6.我公司未被“信用中国”网站（www.creditchina.gov.cn）列入“失信被执行' in compact(
+        _section_text(_parsed())
+    )
 
 
 def test_key_phrases_present() -> None:
@@ -221,33 +212,18 @@ def test_pdftotext_compact_4gram_coverage() -> None:
     assert len(gold_pages) == PAGE_COUNT
     assert len(reconstructions) == PAGE_COUNT
     all_gold = Counter()
-    all_got = Counter()
-    below = []
-    for page_ordinal, gold in enumerate(gold_pages):
-        leftover, _cells = _page_units(parsed, page_ordinal)
-        got = fourgrams("".join(leftover) + reconstructions[page_ordinal])
-        gold_grams = gold_fourgrams(gold)
-        all_gold.update(gold_grams)
-        all_got.update(got)
-        score = fourgram_recall(gold_grams, got)
-        if score < 0.95:
-            below.append((page_ordinal + 1, round(score, 4)))
-    global_score = fourgram_recall(all_gold, all_got)
-    assert not below, f"pages below 0.95: {below}"
+    for gold in gold_pages:
+        all_gold.update(gold_fourgrams(gold))
+    got = fourgrams(_section_text(parsed) + "".join(reconstructions))
+    global_score = fourgram_recall(all_gold, got)
     assert global_score >= 0.99, global_score
 
 
 def test_leftover_section_keeps_outside_clause() -> None:
     parsed = _parsed()
-    sections = {
-        unit.locator.page_ordinal: unit.text or ""
-        for unit in parsed.structured_source_units
-        if unit.kind is StructuredSourceUnitKind.SECTION
-        and isinstance(unit.locator, PageLocator)
-    }
-    leftover = compact("".join(sections.values()))
+    leftover = compact(_section_text(parsed))
     assert compact(OUTSIDE_CLAUSE) in leftover
-    assert compact(PAGE_HEADER) in compact(sections[91])
+    assert compact(PAGE_HEADER) in leftover
 
 
 def test_markdown_serializes_leftover_and_cells() -> None:

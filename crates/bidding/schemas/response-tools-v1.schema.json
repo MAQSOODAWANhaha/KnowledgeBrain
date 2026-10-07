@@ -1,0 +1,41 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "read_outline",
+      "description": "Read the frozen outline. Only response slots may be filled.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "put_responses",
+      "description": "Write one response per outline slot. Unmatched slots use status no_evidence and the text 【待人工补充】.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["responses"],
+        "properties": {
+          "responses": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["slot_id", "status", "text"],
+              "properties": {
+                "slot_id": { "type": "string", "minLength": 1 },
+                "status": { "type": "string", "enum": ["matched", "no_evidence"] },
+                "text": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+]

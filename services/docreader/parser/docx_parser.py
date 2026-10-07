@@ -25,6 +25,7 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 from docreader.config import CONFIG
+from docreader.parser.structure import outline_flags, structural_heading
 from docreader.models.document import (
     AttachmentLocator,
     Document as DocumentModel,
@@ -89,15 +90,220 @@ def _docx_package_image_payloads(content: bytes) -> Dict[str, str]:
     return payloads
 
 
-def _heading_level(paragraph: Paragraph) -> Optional[int]:
-    style_name = str((paragraph.style.name if paragraph.style is not None else "") or "")
-    match = re.match(r"^heading\s+(\d+)$", style_name.strip(), re.IGNORECASE)
-    if match is None:
+def _chinese_count(value: int) -> str:
+    digits = "零一二三四五六七八九"
+    if value <= 0:
+        return str(value)
+    if value < 10:
+        return digits[value]
+    if value == 10:
+        return "十"
+    if value < 20:
+        return "十" + digits[value % 10]
+    if value < 100:
+        tens, ones = divmod(value, 10)
+        return digits[tens] + "十" + (digits[ones] if ones else "")
+    return str(value)
+
+
+def _roman(value: int) -> str:
+    if value <= 0 or value >= 4000:
+        return str(value)
+    pairs = (
+        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+        (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+    )
+    out = []
+    for number, glyph in pairs:
+        while value >= number:
+            out.append(glyph)
+            value -= number
+    return "".join(out)
+
+
+def _format_list_value(fmt: str, value: int) -> str:
+    if fmt == "bullet":
+        return ""
+    if fmt in {
+        "chineseCounting", "chineseCountingThousand", "ideographDigital",
+        "japaneseCounting", "taiwaneseCounting", "ideographTraditional",
+    }:
+        return _chinese_count(value)
+    if fmt == "upperRoman":
+        return _roman(value)
+    if fmt == "lowerRoman":
+        return _roman(value).lower()
+    if fmt == "upperLetter":
+        return chr(ord("A") + (value - 1) % 26)
+    if fmt == "lowerLetter":
+        return chr(ord("a") + (value - 1) % 26)
+    return str(value)
+
+
+class _DocxNumbering:
+    """Visible list labels stored in numbering.xml, not in paragraph text."""
+
+    def __init__(self, doc):
+        self._levels: dict[int, dict[int, dict]] = {}
+        self._nums: dict[int, tuple[int, dict[int, int]]] = {}
+        self._counters: dict[int, dict[int, int]] = {}
+        self._load(doc)
+
+    def _load(self, doc) -> None:
+        try:
+            root = doc.part.numbering_part.element
+        except (AttributeError, KeyError, NotImplementedError, ValueError):
+            return
+        except Exception:
+            logger.debug("DOCX numbering part is unavailable", exc_info=True)
+            return
+        abstracts: dict[int, dict[int, dict]] = {}
+        for abstract in root.findall(qn("w:abstractNum")):
+            abstract_id = int(abstract.get(qn("w:abstractNumId")))
+            levels: dict[int, dict] = {}
+            for level in abstract.findall(qn("w:lvl")):
+                ilvl = int(level.get(qn("w:ilvl")))
+                levels[ilvl] = _level_def(level)
+            abstracts[abstract_id] = levels
+        for num in root.findall(qn("w:num")):
+            abstract_node = num.find(qn("w:abstractNumId"))
+            if abstract_node is None or num.get(qn("w:numId")) is None:
+                continue
+            num_id = int(num.get(qn("w:numId")))
+            abstract_id = int(abstract_node.get(qn("w:val")))
+            overrides: dict[int, int] = {}
+            for override in num.findall(qn("w:lvlOverride")):
+                ilvl = int(override.get(qn("w:ilvl")))
+                start = override.find(qn("w:startOverride"))
+                if start is not None:
+                    overrides[ilvl] = int(start.get(qn("w:val")))
+            self._nums[num_id] = (abstract_id, overrides)
+            self._levels[num_id] = abstracts.get(abstract_id, {})
+
+    def display(self, paragraph: Paragraph) -> str:
+        text = re.sub(r"\u3000", " ", paragraph.text or "").strip()
+        prefix, suff = self._prefix(paragraph)
+        if not prefix:
+            return text
+        if text.startswith(prefix):
+            return text
+        if not text:
+            return prefix
+        if suff == "nothing":
+            return f"{prefix}{text}"
+        return f"{prefix} {text}"
+
+    def _prefix(self, paragraph: Paragraph) -> tuple[str, str]:
+        num_id, ilvl = _num_pr(paragraph)
+        if num_id is None or num_id == 0 or ilvl is None:
+            return "", "space"
+        levels = self._levels.get(num_id)
+        if not levels or ilvl not in levels:
+            return "", "space"
+        level = levels[ilvl]
+        if level["fmt"] == "bullet":
+            return "", level["suff"]
+        counters = self._counters.setdefault(num_id, {})
+        for deeper in [key for key in counters if key > ilvl]:
+            del counters[deeper]
+        _, overrides = self._nums.get(num_id, (0, {}))
+        start = overrides.get(ilvl, level["start"])
+        counters[ilvl] = start if ilvl not in counters else counters[ilvl] + 1
+        label = level["text"]
+        for index in range(9, 0, -1):
+            if f"%{index}" not in label:
+                continue
+            if index - 1 == ilvl:
+                value = counters[ilvl]
+            elif index - 1 in counters:
+                value = counters[index - 1]
+            else:
+                parent = levels.get(index - 1, {})
+                value = overrides.get(index - 1, parent.get("start", 1))
+            rendered = _format_list_value(levels.get(index - 1, level)["fmt"], value)
+            label = label.replace(f"%{index}", rendered)
+        return label, level["suff"]
+
+
+def _level_def(level) -> dict:
+    def val(name: str, default: str) -> str:
+        node = level.find(qn(name))
+        if node is None:
+            return default
+        return node.get(qn("w:val")) or default
+
+    return {
+        "start": int(val("w:start", "1")),
+        "fmt": val("w:numFmt", "decimal"),
+        "text": val("w:lvlText", "%1."),
+        "suff": val("w:suff", "space"),
+    }
+
+
+def _num_pr(paragraph: Paragraph) -> tuple[Optional[int], Optional[int]]:
+    p_pr = paragraph._p.pPr
+    num_pr = None if p_pr is None else p_pr.numPr
+    if num_pr is None and paragraph.style is not None:
+        style_pr = paragraph.style.element.find(qn("w:pPr"))
+        num_pr = None if style_pr is None else style_pr.find(qn("w:numPr"))
+    if num_pr is None:
+        return None, None
+    num_id = getattr(num_pr, "numId", None)
+    ilvl = getattr(num_pr, "ilvl", None)
+    if num_id is None:
+        num_id = num_pr.find(qn("w:numId"))
+        ilvl = num_pr.find(qn("w:ilvl"))
+        if num_id is None or ilvl is None:
+            return None, None
+        return int(num_id.get(qn("w:val"))), int(ilvl.get(qn("w:val")))
+    if ilvl is None or num_id.val is None or ilvl.val is None:
+        return None, None
+    return int(num_id.val), int(ilvl.val)
+
+
+def _style_or_outline_level(paragraph: Paragraph) -> Optional[int]:
+    """Word outline level, including localized style names such as 「标题 1」."""
+    p_pr = paragraph._p.pPr
+    if p_pr is not None and p_pr.outlineLvl is not None and p_pr.outlineLvl.val is not None:
+        return max(1, int(p_pr.outlineLvl.val) + 1)
+    style = paragraph.style
+    if style is None:
         return None
-    try:
-        return max(1, int(match.group(1)))
-    except ValueError:
+    style_id = str(getattr(style, "style_id", "") or "")
+    style_match = re.match(r"^Heading(\d+)$", style_id, re.IGNORECASE)
+    if style_match is None:
+        style_name = str(style.name or "")
+        style_match = re.match(r"^(?:heading|标题)\s*(\d+)$", style_name.strip(), re.IGNORECASE)
+    if style_match is not None:
+        return max(1, int(style_match.group(1)))
+    style_pr = style.element.find(qn("w:pPr"))
+    outline = None if style_pr is None else style_pr.find(qn("w:outlineLvl"))
+    if outline is None:
         return None
+    raw = outline.get(qn("w:val"))
+    if raw is None:
+        return None
+    return max(1, int(raw) + 1)
+
+
+def _heading_level(
+    paragraph: Paragraph,
+    allow_numbered: bool = True,
+    allow_deep_numbers: bool = True,
+    display_text: Optional[str] = None,
+) -> Optional[int]:
+    level = _style_or_outline_level(paragraph)
+    if level is not None:
+        return level
+    found = structural_heading(
+        display_text if display_text is not None else (paragraph.text or ""),
+        allow_numbered,
+        allow_deep_numbers,
+    )
+    if found is None:
+        return None
+    return found[0]
 
 
 def _drawing_units(
@@ -244,6 +450,11 @@ def _docx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
     """Extract deterministic typed occurrences in one pass over the DOCX body."""
     doc = Document(BytesIO(content))
     units: List[StructuredSourceUnit] = []
+    preview = _DocxNumbering(doc)
+    allow_numbered, allow_deep = outline_flags(
+        [preview.display(paragraph) for paragraph in doc.paragraphs]
+    )
+    numbering = _DocxNumbering(doc)
     heading_stack: List[str] = []
     pending_paragraphs: List[str] = []
     current_section: Optional[int] = None
@@ -283,8 +494,8 @@ def _docx_structured_units(content: bytes) -> List[StructuredSourceUnit]:
     for child in doc.element.body.iterchildren():
         if child.tag == qn("w:p"):
             paragraph = Paragraph(child, doc)
-            text = paragraph.text.strip()
-            level = _heading_level(paragraph)
+            text = numbering.display(paragraph)
+            level = _heading_level(paragraph, allow_numbered, allow_deep, text)
             if level is not None and text:
                 if pending_paragraphs:
                     flush_section()
@@ -566,11 +777,20 @@ class DocxParser(BaseParser):
             para_count = len(doc.paragraphs)
             logger.info(f"Extracting text from {para_count} paragraphs")
             para_with_text = 0
+            preview = _DocxNumbering(doc)
+            allow_numbered, allow_deep = outline_flags(
+                [preview.display(item) for item in doc.paragraphs]
+            )
+            numbering = _DocxNumbering(doc)
             for i, para in enumerate(doc.paragraphs):
                 if i % 100 == 0:
                     logger.info(f"Processing paragraph {i + 1}/{para_count}")
-                if para.text.strip():
-                    text_parts.append(para.text.strip())
+                text = numbering.display(para)
+                if text:
+                    level = _heading_level(para, allow_numbered, allow_deep, text)
+                    if level is not None:
+                        text = f"{'#' * min(level, 6)} {text}"
+                    text_parts.append(text)
                     para_with_text += 1
 
             logger.info(f"Extracted text from {para_with_text}/{para_count} paragraphs")
@@ -1709,27 +1929,32 @@ def _extract_page_content_in_process(
     # Instead of separate collections, track content in paragraph sequence
     content_sequence = []
     current_text = ""
+    preview = _DocxNumbering(doc)
+    allow_numbered, allow_deep = outline_flags(
+        [preview.display(item) for item in doc.paragraphs]
+    )
+    numbering = _DocxNumbering(doc)
+    wanted = set(paragraphs)
 
     processed_paragraphs = 0
     paragraphs_with_text = 0
     paragraphs_with_images = 0
 
-    for para_idx in paragraphs:
-        if para_idx >= len(doc.paragraphs):
-            logger.warning(
-                f"[PID:{os.getpid()}] Paragraph index {para_idx} out of range"
-            )
+    for para_idx, paragraph in enumerate(doc.paragraphs):
+        display = numbering.display(paragraph)
+        if para_idx not in wanted:
             continue
-
-        paragraph = doc.paragraphs[para_idx]
         processed_paragraphs += 1
 
-        # Extract text content
-        text = paragraph.text.strip()
-        if text:
-            # Clean text
-            cleaned_text = re.sub(r"\u3000", " ", text).strip()
-            current_text += cleaned_text + "\n"
+        # Extract text content. Chapter lines become ATX headings so the
+        # knowledge chunker sees the same sections as the structured units.
+        # Numbering labels are replayed in document order so later pages keep
+        # the right chapter number.
+        if display:
+            level = _heading_level(paragraph, allow_numbered, allow_deep, display)
+            if level is not None:
+                display = f"{'#' * min(level, 6)} {display}"
+            current_text += display + "\n"
             paragraphs_with_text += 1
 
         # Process image - if multimodal processing is enabled

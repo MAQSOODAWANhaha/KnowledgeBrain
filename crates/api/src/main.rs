@@ -1,5 +1,5 @@
+use anyhow::Context;
 use api::{bind_addr, router};
-use axum::Router;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -7,26 +7,28 @@ use tokio::signal::unix::{SignalKind, signal};
 async fn main() {
     let _ = dotenvy::dotenv();
     platform::init_tracing();
+    if let Err(error) = run().await {
+        tracing::error!(error = format!("{error:#}"), "api failed");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
     platform::require_openai_chat();
     platform::connect_runtime_verified(platform::SchemaComponentKind::Api)
         .await
-        .unwrap_or_else(|e| panic!("postgres schema readiness failed: {e}"));
+        .context("postgres schema readiness failed")?;
     let addr = bind_addr();
     let listener = TcpListener::bind(&addr)
         .await
-        .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
+        .with_context(|| format!("bind {addr}"))?;
     tracing::info!(addr = %addr, "api ready");
-    run(listener, router()).await;
-    tracing::info!("api exiting");
-}
-
-async fn run(listener: TcpListener, app: Router) {
-    let result = axum::serve(listener, app)
+    axum::serve(listener, router())
         .with_graceful_shutdown(shutdown_signal())
-        .await;
-    if let Err(e) = result {
-        panic!("serve: {e}");
-    }
+        .await
+        .context("api serve failed")?;
+    tracing::info!("api exiting");
+    Ok(())
 }
 
 async fn shutdown_signal() {

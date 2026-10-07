@@ -1,10 +1,16 @@
 //! Request preparation uses Rig's public compatible-provider builder and HTTP
 //! seam. This client has no network backend; only the reserved bytes are sent.
-use super::*;
+use super::{invalid, unavailable};
+use crate::agent_error::AgentError;
 use crate::authoring_runtime::AuthoringRuntimeContractV1;
+use bytes::Bytes;
+use futures::StreamExt;
 use rig::{
     client::{Client, ClientBuilder, DebugExt, Nothing, Provider, ProviderBuilder},
-    completion::{CompletionModel, CompletionRequest, ToolDefinition},
+    completion::{CompletionError, CompletionModel, CompletionRequest, ToolDefinition},
+    http_client::{
+        self, HttpClientExt, LazyBody, MultipartForm, Request, Response, StreamingResponse,
+    },
     message::{Message, ToolChoice},
     providers::openai::completion::{
         self as wire, GenericCompletionModel, OpenAICompatibleProvider,
@@ -14,14 +20,21 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tracing::instrument::WithSubscriber;
 
-pub(crate) fn default_context_tokens() -> usize {
-    131072
+fn http_unavailable() -> http_client::Error {
+    http_client::Error::Instance(std::io::Error::other("provider transport failed").into())
 }
-pub(crate) fn default_image_token_reserve() -> usize {
-    16384
-}
-pub(crate) fn default_token_safety_margin() -> usize {
-    4096
+
+fn response_error(error: CompletionError) -> AgentError {
+    match error {
+        CompletionError::HttpError(http_client::Error::InvalidStatusCode(status)) => {
+            AgentError::new(
+                "AGENT_PROVIDER_UNAVAILABLE",
+                format!("configured provider returned HTTP {status}"),
+            )
+        }
+        CompletionError::HttpError(_) => unavailable(),
+        _ => invalid(),
+    }
 }
 
 /// Application estimate, not a provider tokenizer or an upper bound. Base64 is

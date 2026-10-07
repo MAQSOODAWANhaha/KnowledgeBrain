@@ -17,7 +17,7 @@ SELECT kb_object_reference_add(
  'objects/'||encode(digest(convert_to('knowledge-fixture','UTF8'),'sha256'),'hex'),
  encode(digest(convert_to('knowledge-fixture','UTF8'),'sha256'),'hex'),
  'text/plain',17,'knowledge_document','00000000-0000-4000-8000-0000000001b2','original',
- 'system:knowledge-document-ingest');
+ NULL);
 INSERT INTO documents(id,product_version_id,title,parse_status,enable_status,index_ready,file_name,file_size,file_hash,object_ref) VALUES
  ('00000000-0000-4000-8000-0000000001b2','00000000-0000-4000-8000-0000000001b4','verified source','completed','enabled',true,'verified-source.txt',17,
   encode(digest(convert_to('knowledge-fixture','UTF8'),'sha256'),'hex'),
@@ -111,7 +111,7 @@ INSERT INTO bid_source_unit_disposition_set_items(disposition_set_id,project_id,
 DO $$ BEGIN
   BEGIN
     INSERT INTO bid_source_unit_disposition_set_artifacts(id,project_id,document_set_id,document_set_sequence,revision,canonical_payload,content_sha256,actor)
-    VALUES('00000000-0000-4000-8000-00000000006a','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000042',1,4,convert_to('bad-disp','UTF8'),encode(digest(convert_to('bad-disp','UTF8'),'sha256'),'hex'),'system:bid-extraction-worker');
+    VALUES('00000000-0000-4000-8000-00000000006a','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000042',1,4,convert_to('bad-disp','UTF8'),encode(digest(convert_to('bad-disp','UTF8'),'sha256'),'hex'),NULL);
     RAISE EXCEPTION 'disposition composite identity unexpectedly accepted';
   EXCEPTION WHEN foreign_key_violation THEN NULL; END;
 END $$;
@@ -128,9 +128,9 @@ END $$;
 -- RequirementSet monotonic publication explicitly starts with revision 7,
 -- then receives revision 3 late, and finally advances to revision 11.
 INSERT INTO bid_requirement_revision_artifacts(id,project_id,lineage_id,revision,requirement_kind,requiredness,compliance_policy,lifecycle,text_utf8,text_sha256,fulfillment_expr,applicability,canonical_payload,content_sha256,actor) VALUES
- ('00000000-0000-4000-8000-000000000071','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a1',1,'technical','mandatory','must_comply','current',convert_to('req1','UTF8'),encode(digest(convert_to('req1','UTF8'),'sha256'),'hex'),'{"kind":"need","need_occurrence_id":"00000000-0000-4000-8000-000000000201","channel":"narrative_content"}','{}',convert_to('req1','UTF8'),encode(digest(convert_to('req1','UTF8'),'sha256'),'hex'),'system:bid-extraction-worker'),
- ('00000000-0000-4000-8000-000000000072','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a1',2,'technical','mandatory','must_comply','current',convert_to('req2','UTF8'),encode(digest(convert_to('req2','UTF8'),'sha256'),'hex'),'{"kind":"need","need_occurrence_id":"00000000-0000-4000-8000-000000000201","channel":"narrative_content"}','{}',convert_to('req2','UTF8'),encode(digest(convert_to('req2','UTF8'),'sha256'),'hex'),'system:bid-extraction-worker'),
- ('00000000-0000-4000-8000-000000000079','00000000-0000-4000-8000-000000000019','00000000-0000-4000-8000-0000000000a9',1,'technical','mandatory','must_comply','current',convert_to('req9','UTF8'),encode(digest(convert_to('req9','UTF8'),'sha256'),'hex'),'{"kind":"need","need_occurrence_id":"00000000-0000-4000-8000-000000000209","channel":"narrative_content"}','{}',convert_to('req9','UTF8'),encode(digest(convert_to('req9','UTF8'),'sha256'),'hex'),'system:bid-extraction-worker');
+ ('00000000-0000-4000-8000-000000000071','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a1',1,'technical','mandatory','must_comply','current',convert_to('req1','UTF8'),encode(digest(convert_to('req1','UTF8'),'sha256'),'hex'),'{"kind":"need","need_occurrence_id":"00000000-0000-4000-8000-000000000201","channel":"narrative_content"}','{}',convert_to('req1','UTF8'),encode(digest(convert_to('req1','UTF8'),'sha256'),'hex'),NULL),
+ ('00000000-0000-4000-8000-000000000072','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a1',2,'technical','mandatory','must_comply','current',convert_to('req2','UTF8'),encode(digest(convert_to('req2','UTF8'),'sha256'),'hex'),'{"kind":"need","need_occurrence_id":"00000000-0000-4000-8000-000000000201","channel":"narrative_content"}','{}',convert_to('req2','UTF8'),encode(digest(convert_to('req2','UTF8'),'sha256'),'hex'),NULL),
+ ('00000000-0000-4000-8000-000000000079','00000000-0000-4000-8000-000000000019','00000000-0000-4000-8000-0000000000a9',1,'technical','mandatory','must_comply','current',convert_to('req9','UTF8'),encode(digest(convert_to('req9','UTF8'),'sha256'),'hex'),'{"kind":"need","need_occurrence_id":"00000000-0000-4000-8000-000000000209","channel":"narrative_content"}','{}',convert_to('req9','UTF8'),encode(digest(convert_to('req9','UTF8'),'sha256'),'hex'),NULL);
 INSERT INTO bid_requirement_set_artifacts(id,project_id,document_set_id,document_set_sequence,disposition_set_id,disposition_set_sequence,revision,canonical_payload,content_sha256) VALUES
  ('00000000-0000-4000-8000-000000000081','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000041',1,'00000000-0000-4000-8000-000000000061',1,3,convert_to('rset-old','UTF8'),encode(digest(convert_to('rset-old','UTF8'),'sha256'),'hex')),
  ('00000000-0000-4000-8000-000000000082','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000042',2,'00000000-0000-4000-8000-000000000062',2,7,convert_to('rset-high','UTF8'),encode(digest(convert_to('rset-high','UTF8'),'sha256'),'hex')),
@@ -159,12 +159,12 @@ END $$;
 
 -- Requirement supersession aggregate.
 INSERT INTO bid_requirement_supersession_revision_artifacts(id,project_id,lineage_id,revision,old_requirement_revision_id,new_requirement_revision_id,applicability,canonical_payload,content_sha256,actor) VALUES
- ('00000000-0000-4000-8000-000000000091','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000b1',1,'00000000-0000-4000-8000-000000000071','00000000-0000-4000-8000-000000000072','{}',convert_to('sup1','UTF8'),encode(digest(convert_to('sup1','UTF8'),'sha256'),'hex'),'system:bid-extraction-worker'),
- ('00000000-0000-4000-8000-000000000092','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000b1',2,'00000000-0000-4000-8000-000000000072','00000000-0000-4000-8000-000000000071','{}',convert_to('sup2','UTF8'),encode(digest(convert_to('sup2','UTF8'),'sha256'),'hex'),'system:bid-extraction-worker');
+ ('00000000-0000-4000-8000-000000000091','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000b1',1,'00000000-0000-4000-8000-000000000071','00000000-0000-4000-8000-000000000072','{}',convert_to('sup1','UTF8'),encode(digest(convert_to('sup1','UTF8'),'sha256'),'hex'),NULL),
+ ('00000000-0000-4000-8000-000000000092','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000b1',2,'00000000-0000-4000-8000-000000000072','00000000-0000-4000-8000-000000000071','{}',convert_to('sup2','UTF8'),encode(digest(convert_to('sup2','UTF8'),'sha256'),'hex'),NULL);
 DO $$ BEGIN
   BEGIN
     INSERT INTO bid_requirement_supersession_revision_artifacts(id,project_id,lineage_id,revision,old_requirement_revision_id,new_requirement_revision_id,applicability,canonical_payload,content_sha256,actor)
-    VALUES('00000000-0000-4000-8000-000000000099','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000b9',1,'00000000-0000-4000-8000-000000000071','00000000-0000-4000-8000-000000000079','{}',convert_to('bad-sup','UTF8'),encode(digest(convert_to('bad-sup','UTF8'),'sha256'),'hex'),'system:bid-extraction-worker');
+    VALUES('00000000-0000-4000-8000-000000000099','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000b9',1,'00000000-0000-4000-8000-000000000071','00000000-0000-4000-8000-000000000079','{}',convert_to('bad-sup','UTF8'),encode(digest(convert_to('bad-sup','UTF8'),'sha256'),'hex'),NULL);
     RAISE EXCEPTION 'supersession cross-project identity unexpectedly accepted';
   EXCEPTION WHEN foreign_key_violation THEN NULL; END;
 END $$;
@@ -236,10 +236,10 @@ INSERT INTO bid_quote_snapshot_artifacts(id,project_id,revision,currency,canonic
 INSERT INTO bid_outline_fulfillment_binding_lineages(id,project_id,workspace_id)
 SELECT ('00000000-0000-4000-8000-'||lpad(to_hex(n),12,'0'))::uuid,'00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0' FROM generate_series(257,264) n;
 INSERT INTO bid_outline_fulfillment_binding_revision_artifacts(id,project_id,workspace_id,lineage_id,revision,need_occurrence_id,requirement_projection_id,channel,target_kind,target_id,state,reason,actor,canonical_payload,content_sha256) VALUES
- ('00000000-0000-4000-8000-000000000111','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000101',1,'00000000-0000-4000-8000-000000000201','00000000-0000-4000-8000-0000000000b2','narrative_content','outline_node','00000000-0000-4000-8000-0000000000c1','bound','valid node','system:bid-extraction-worker',convert_to('bind1','UTF8'),encode(digest(convert_to('bind1','UTF8'),'sha256'),'hex')),
- ('00000000-0000-4000-8000-000000000112','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000102',1,'00000000-0000-4000-8000-000000000202','00000000-0000-4000-8000-0000000000b2','response_table','response_table','00000000-0000-4000-8000-0000000000d1','bound','valid table','system:bid-extraction-worker',convert_to('bind2','UTF8'),encode(digest(convert_to('bind2','UTF8'),'sha256'),'hex')),
- ('00000000-0000-4000-8000-000000000113','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000103',1,'00000000-0000-4000-8000-000000000203','00000000-0000-4000-8000-0000000000b2','structured_form','structured_form','00000000-0000-4000-8000-000000000053','bound','valid form','system:bid-extraction-worker',convert_to('bind3','UTF8'),encode(digest(convert_to('bind3','UTF8'),'sha256'),'hex')),
- ('00000000-0000-4000-8000-000000000114','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000104',1,'00000000-0000-4000-8000-000000000204','00000000-0000-4000-8000-0000000000b2','quotation','quote','00000000-0000-4000-8000-0000000000f1','bound','valid quote','system:bid-extraction-worker',convert_to('bind4','UTF8'),encode(digest(convert_to('bind4','UTF8'),'sha256'),'hex'));
+ ('00000000-0000-4000-8000-000000000111','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000101',1,'00000000-0000-4000-8000-000000000201','00000000-0000-4000-8000-0000000000b2','narrative_content','outline_node','00000000-0000-4000-8000-0000000000c1','bound','valid node',NULL,convert_to('bind1','UTF8'),encode(digest(convert_to('bind1','UTF8'),'sha256'),'hex')),
+ ('00000000-0000-4000-8000-000000000112','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000102',1,'00000000-0000-4000-8000-000000000202','00000000-0000-4000-8000-0000000000b2','response_table','response_table','00000000-0000-4000-8000-0000000000d1','bound','valid table',NULL,convert_to('bind2','UTF8'),encode(digest(convert_to('bind2','UTF8'),'sha256'),'hex')),
+ ('00000000-0000-4000-8000-000000000113','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000103',1,'00000000-0000-4000-8000-000000000203','00000000-0000-4000-8000-0000000000b2','structured_form','structured_form','00000000-0000-4000-8000-000000000053','bound','valid form',NULL,convert_to('bind3','UTF8'),encode(digest(convert_to('bind3','UTF8'),'sha256'),'hex')),
+ ('00000000-0000-4000-8000-000000000114','00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0','00000000-0000-4000-8000-000000000104',1,'00000000-0000-4000-8000-000000000204','00000000-0000-4000-8000-0000000000b2','quotation','quote','00000000-0000-4000-8000-0000000000f1','bound','valid quote',NULL,convert_to('bind4','UTF8'),encode(digest(convert_to('bind4','UTF8'),'sha256'),'hex'));
 DO $$ DECLARE k text; DECLARE target uuid; DECLARE line uuid; BEGIN
   FOR k,target,line IN VALUES
     ('outline_node','00000000-0000-4000-8000-0000000000c9'::uuid,'00000000-0000-4000-8000-000000000105'::uuid),
@@ -249,7 +249,7 @@ DO $$ DECLARE k text; DECLARE target uuid; DECLARE line uuid; BEGIN
   LOOP
     BEGIN
       INSERT INTO bid_outline_fulfillment_binding_revision_artifacts(id,project_id,workspace_id,lineage_id,revision,need_occurrence_id,requirement_projection_id,channel,target_kind,target_id,state,reason,actor,canonical_payload,content_sha256)
-      VALUES(gen_random_uuid(),'00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0',line,1,gen_random_uuid(),'00000000-0000-4000-8000-0000000000b2','narrative_content',k,target,'bound','must reject','system:bid-extraction-worker',convert_to('invalid-'||k,'UTF8'),encode(digest(convert_to('invalid-'||k,'UTF8'),'sha256'),'hex'));
+      VALUES(gen_random_uuid(),'00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-0000000000a0',line,1,gen_random_uuid(),'00000000-0000-4000-8000-0000000000b2','narrative_content',k,target,'bound','must reject',NULL,convert_to('invalid-'||k,'UTF8'),encode(digest(convert_to('invalid-'||k,'UTF8'),'sha256'),'hex'));
       RAISE EXCEPTION 'invalid % binding target accepted',k;
     EXCEPTION WHEN foreign_key_violation THEN NULL; END;
   END LOOP;
@@ -264,7 +264,7 @@ INSERT INTO products(id,workspace_id,kind,name,slug) VALUES
 INSERT INTO product_versions(id,product_id,label,status) VALUES
  ('00000000-0000-4000-8000-000000000172','00000000-0000-4000-8000-000000000171','v1','active');
 SELECT kb_object_reference_add('objects/'||repeat('5',64),repeat('5',64),'image/png',4,
- 'knowledge_document','00000000-0000-4000-8000-000000000173','original','system:knowledge-document-ingest');
+ 'knowledge_document','00000000-0000-4000-8000-000000000173','original',NULL);
 UPDATE products SET current_version_id='00000000-0000-4000-8000-000000000172'
  WHERE id='00000000-0000-4000-8000-000000000171';
 INSERT INTO documents(id,product_version_id,type,title,parse_status,enable_status,index_ready,file_name,file_size,file_hash,object_ref) VALUES
