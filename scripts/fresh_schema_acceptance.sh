@@ -116,7 +116,9 @@ SELECT CASE WHEN
   AND to_regclass('public.workspaces') IS NOT NULL
   AND to_regclass('public.object_registry') IS NOT NULL
   AND to_regclass('public.bid_projects') IS NOT NULL
-  AND to_regclass('public.bid_submission_workspaces') IS NOT NULL
+  AND to_regclass('public.bid_outline_artifacts') IS NOT NULL
+  AND to_regclass('public.bid_response_sets') IS NOT NULL
+  AND to_regclass('public.bid_docx_current') IS NOT NULL
   AND jsonb_array_length((SELECT extensions FROM public.platform_schema_snapshot WHERE singleton)) > 0
   AND (SELECT postgres_server_version_num FROM public.platform_schema_snapshot WHERE singleton)=current_setting('server_version_num')::integer
 THEN 'fresh-receipt-ok' ELSE 'fresh-receipt-invalid' END;
