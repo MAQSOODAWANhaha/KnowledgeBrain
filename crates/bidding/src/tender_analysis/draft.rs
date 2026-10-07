@@ -724,31 +724,6 @@ pub fn response_schemas() -> Vec<Value> {
         .expect("response tools")
 }
 
-/// Bounded navigation and search over the complete frozen collection.
-pub fn read_schemas() -> Vec<Value> {
-    let tools: Vec<Value> = serde_json::from_str(include_str!(
-        "../../schemas/tender-analysis-tools-v1.schema.json"
-    ))
-    .expect("analysis tools");
-    tools
-        .into_iter()
-        .filter(|tool| {
-            matches!(
-                tool["function"]["name"].as_str(),
-                Some(
-                    "collection_index"
-                        | "search_sources"
-                        | "source_index"
-                        | "read_source"
-                        | "read_form"
-                        | "read_form_cell"
-                        | "read_source_view"
-                )
-            )
-        })
-        .collect()
-}
-
 pub fn apply(
     input: &FrozenInput,
     config: &super::agent::Config,

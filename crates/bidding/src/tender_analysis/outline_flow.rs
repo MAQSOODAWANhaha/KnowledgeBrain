@@ -2450,13 +2450,6 @@ fn apply_validated(
     Err("unknown outline flow tool".into())
 }
 
-pub fn schemas() -> Vec<Value> {
-    serde_json::from_str(include_str!(
-        "../../schemas/tender-outline-flow-v1.schema.json"
-    ))
-    .expect("outline flow schema")
-}
-
 #[cfg(test)]
 pub(super) fn read_check_evidence(input: &FrozenInput, state: &mut Checkpoint) {
     let packet = state.outline_run.active_check_packet.clone().unwrap();
@@ -3222,38 +3215,6 @@ mod tests {
                 .join(" ")
                 .contains("外部附件暂未提供")
         );
-    }
-
-    #[test]
-    fn scan_schema_accepts_evidence_bearing_records() {
-        let schema = schemas()
-            .into_iter()
-            .find(|s| s["function"]["name"] == "submit_outline_scan")
-            .unwrap();
-        let validator = jsonschema::JSONSchema::compile(&schema["function"]["parameters"]).unwrap();
-        let ground = json!({"source_id":"s","start":0,"end":12,"view_id":null,"grid_cell":null});
-        let payload = json!({
-            "text":{"s":[[0,12]]},"forms":{},"metadata":{},"empty_sources":[],
-            "requirements":[],
-            "issues":[{"id":"","code":"W_CONTENT_REFERENCE","description":"附件缺失",
-                "requirement_ids":[],"chapter_ids":[],"reference_ids":[],"grounds":[ground.clone()],
-                "status":"open","resolution_grounds":[]}],
-            "references":[{"id":"","grounds":[ground.clone()],"target_description":"附件一",
-                "target_ids":[],"requirement_ids":[],"impact":"content","status":"unresolved","resolution_grounds":[]}],
-            "review_fragments":[{"id":"","kind":"composition","span":ground,"document_id":"doc","volume_ids":[]}]
-        });
-        if let Err(errors) = validator.validate(&payload) {
-            panic!(
-                "{}",
-                errors.map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
-            );
-        }
-        let mut invalid = payload;
-        invalid["issues"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("description");
-        assert!(!validator.is_valid(&invalid));
     }
 
     #[test]
