@@ -1551,6 +1551,104 @@ def _atx_heading(line: str) -> Optional[tuple[int, str]]:
     return len(match.group(1)), title
 
 
+def _demote_banner_headings(texts: list, classes: list, repeating: set) -> list:
+    """短标题横幅让位：重复出现的页眉/页脚横幅行不冻结为标题。
+
+    `_apply_layout_heading_marks` runs before `_drop_repeating_lines`, so a
+    repeating banner that the layout pass marked as a heading becomes
+    `"# <banner>"` and no longer matches the repeating set — it would survive
+    the drop and freeze a bogus section on every page. Demote such headings
+    back to plain text first so the drop pass can remove them.
+    """
+    if not repeating:
+        return list(texts)
+    demoted = []
+    for i, text in enumerate(texts):
+        if classes[i] != "text":
+            demoted.append(text)
+            continue
+        lines = []
+        for ln in text.splitlines():
+            found = _atx_heading(ln)
+            if found and found[1] in repeating:
+                lines.append(found[1])
+            else:
+                lines.append(ln)
+        demoted.append("\n".join(lines))
+    return demoted
+
+
+_INDEX_ENTRY_RE = re.compile(r"[.…·‐‑―─]{2,}\s*\d{1,4}\s*$")
+_INDEX_ENTRY_PREFIX_RE = re.compile(r"[.…·‐‑―─]{2,}\s*$")
+
+
+def _looks_like_index_entry(title: str) -> bool:
+    """目录/索引短条目：短行 + 省略号引导线 + 页码。"""
+    title = title.strip()
+    if not title or len(title) > 80:
+        return False
+    return bool(_INDEX_ENTRY_RE.search(title))
+
+
+def _looks_like_index_entry_prefix(title: str) -> bool:
+    """疑似跨页条目的上半部分：短行，以省略号引导线结尾但还没有页码。"""
+    title = title.strip()
+    if not title or len(title) > 80:
+        return False
+    if _INDEX_ENTRY_RE.search(title):
+        return False
+    return bool(_INDEX_ENTRY_PREFIX_RE.search(title))
+
+
+def _merge_short_index_continuations(texts: list, classes: list) -> list:
+    """短索引续写池：跨页合并目录/索引短条目后再判定是否为标题。
+
+    目录项被版式识别误标为标题时会冻结出伪章节；跨页断开的条目
+    （上半部分在页末、下半部分在下页页首）先合并再判定。合并后或
+    单独成条的目录项一律降级为普通文本（去掉 ATX 标记），不冻结为标题，
+    但文本本身保留在正文流中。
+    """
+    out: list[str] = []
+    carry: Optional[str] = None
+    for i, text in enumerate(texts):
+        if classes[i] != "text":
+            if carry is not None and out:
+                out[-1] = out[-1] + "\n" + carry
+                carry = None
+            out.append(text)
+            continue
+        new_lines: list[str] = []
+        lines = text.splitlines()
+        if carry is not None:
+            if lines:
+                first = lines.pop(0)
+                found = _atx_heading(first)
+                first_title = found[1] if found else first.strip()
+                merged = carry + first_title
+                if _looks_like_index_entry(merged):
+                    new_lines.append(merged)
+                else:
+                    new_lines.append(carry)
+                    new_lines.append(first)
+            carry = None
+        for ln in lines:
+            stripped = ln.strip()
+            found = _atx_heading(ln)
+            title = found[1] if found else stripped
+            demoted = title if found else ln
+            if _looks_like_index_entry(title):
+                new_lines.append(demoted)
+            elif _looks_like_index_entry_prefix(title):
+                # 疑似跨页上半部分：暂存到续写池，本页不输出。
+                carry = demoted
+            else:
+                new_lines.append(ln)
+        out.append("\n".join(new_lines))
+    if carry is not None and out:
+        out[-1] = out[-1] + "\n" + carry
+    return out
+
+
 def _sectionize_pages(
     texts: list[str],
 ) -> tuple[list[str], list[list[tuple[int, str, str]]]]:
@@ -1868,7 +1966,13 @@ class PDFParser(BaseParser):
             repeating_lines: list[str] = []
             if not self._output_inventory:
                 repeating = _repeating_edge_lines(texts, classes)
+                # 规则1：短标题横幅让位——先去掉横幅行的标题标记，再清除重复行，
+                # 使页眉式短标题横幅不被冻结为伪章节。
+                texts = _demote_banner_headings(texts, classes, repeating)
                 texts = _drop_repeating_lines(texts, classes, repeating)
+                # 规则2：短索引续写池——跨页合并目录/索引短条目后再判定，
+                # 目录项降级为普通文本，不冻结为标题。
+                texts = _merge_short_index_continuations(texts, classes)
                 repeating_lines = sorted(repeating)
             scanned_indices = [i for i, c in enumerate(classes) if c == "scanned"]
 
