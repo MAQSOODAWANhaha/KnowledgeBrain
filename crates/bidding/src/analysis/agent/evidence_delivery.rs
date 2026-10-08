@@ -74,10 +74,11 @@ pub(super) fn select_with_budget(
     let bytes = serde_json::to_vec(&evidence.content)
         .map_err(invalid)?
         .len();
-    if state
-        .read_bytes
-        .checked_add(bytes)
-        .is_none_or(|total| total > config.limits.max_read_bytes)
+    if !super::one_shot_outline(state)
+        && state
+            .read_bytes
+            .checked_add(bytes)
+            .is_none_or(|total| total > config.limits.max_read_bytes)
     {
         return Ok(None);
     }

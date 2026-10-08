@@ -71,7 +71,8 @@ pub(super) async fn read_source_view<J: Journal>(
         .checked_add(serde_json::to_vec(&out).map_err(invalid)?.len())
         .ok_or_else(|| invalid("source view budget overflow"))?;
     if bytes > config.limits.max_context_bytes
-        || state.read_bytes.saturating_add(bytes) > config.limits.max_read_bytes
+        || (!super::one_shot_outline(state)
+            && state.read_bytes.saturating_add(bytes) > config.limits.max_read_bytes)
     {
         return Err(error(
             "AGENT_TURN_BUDGET_EXCEEDED",

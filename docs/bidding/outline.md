@@ -182,7 +182,7 @@
 
 产品路径的进度来自 `DiscoverWork` 和 `tool_draft`：包的总数、待领、在跑、失败、已提交，章节数，未绑定附件数，槽是否已交，草稿是否结束。有阅读包时，发现阶段的停滞观察读包计数和要求条数，不读 `analysis.outline.scanned`。组织、收尾和完成读 `tool_draft`。有阅读包或工具草稿时，章数是 `tool_draft.chapters` 的长度，不是 `draft_plan` 的长度。扫描游标不再代表发现进度。
 
-一次成稿没有回合上限，也没有阶段墙钟。`Limits::at_least_for` 不改写 `max_turns`，也不在缺省时填入固定回合数。已经有阅读包、且 `draft_stage` 仍是大纲时，`max_turns` 不截停循环，SDK 会话也不再按剩余回合数封顶。工具调用和读字节仍按调用方写明的 `max_turns` 放大。旧的无阅读包扫描路径仍受 `max_turns` 约束。
+一次成稿没有回合上限，也没有阶段墙钟，也不用累计的 `max_tool_calls` 或 `max_read_bytes` 截停。`Limits::at_least_for` 不改写 `max_turns`，不按 `max_turns` 放大工具调用或读字节，只把 `reviewer_reserve` 清成 0。已经有阅读包、且 `draft_stage` 仍是大纲时，这三个累计额度都不结束循环，SDK 会话也不再按剩余回合数封顶。单次请求仍受 `max_context_bytes`、`max_context_tokens` 和 `max_tool_result_bytes` 约束，装不下就缩小这一次请求。没有阅读包的旧扫描路径仍受调用方写明的 `max_turns`、`max_tool_calls` 和 `max_read_bytes` 约束；那条路径只留给不经过配置的抽取单测。
 
 卡住时只看 `Limits` 里的 `max_no_progress_turns`、`max_focus_turns`、`max_focus_replans`。观察进入 `Blocked` 后运行结束。错误码仍是 `AGENT_TURN_BUDGET_EXCEEDED`，正文是 `outline stalled in phase {phase}`，`phase` 取检查点上的 `discover`、`outline`、`check` 或 `complete`。这是逻辑停滞，不是回合预算。
 

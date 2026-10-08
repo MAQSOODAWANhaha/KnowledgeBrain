@@ -82,14 +82,9 @@ impl Limits {
         mut self,
         _input: &FrozenInput,
     ) -> Result<Self, crate::analysis::budget::BudgetRefused> {
-        // 一次成稿不把 `max_turns` 当成回合上限，也不在缺省时填一个固定回合数。
-        // 工具调用和读字节仍随调用方写明的 `max_turns` 放开，旧的无阅读包路径还受回合数约束。
-        self.max_tool_calls = self.max_tool_calls.max(self.max_turns.saturating_mul(12));
-        self.max_read_bytes = self.max_read_bytes.max(
-            self.max_turns
-                .saturating_mul(self.max_tool_result_bytes)
-                .saturating_mul(4),
-        );
+        // 一次成稿不从 `max_turns` 放大工具调用或读字节，也不把它们当停止条件。
+        // 这里只清掉复核预留：大纲运行不留独立复核回合。
+        // 没有阅读包的旧扫描仍使用调用方写明的 `max_turns`、`max_tool_calls`、`max_read_bytes`。
         self.reviewer_reserve = 0;
         Ok(self)
     }
@@ -519,6 +514,15 @@ pub(in crate::analysis) fn turn_limit_reached(state: &Checkpoint, max_turns: usi
     !one_shot_outline(state) && state.turn >= max_turns
 }
 
+/// Cumulative turn, tool-call, and read-byte totals. One-shot outline ignores
+/// all three. Per-response context fitting is separate and still applies.
+pub(in crate::analysis) fn run_budget_exhausted(state: &Checkpoint, limits: &Limits) -> bool {
+    turn_limit_reached(state, limits.max_turns)
+        || (!one_shot_outline(state)
+            && (state.tool_calls >= limits.max_tool_calls
+                || state.read_bytes >= limits.max_read_bytes))
+}
+
 /// Stall stop for the one-shot outline. Names the checkpoint phase.
 /// This is failed progress, not a turn budget.
 pub(in crate::analysis) fn outline_stall_message(state: &Checkpoint) -> String {
@@ -561,9 +565,7 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
                 || (self.state.role == Role::Main
                     && self.state.draft_stage == draft::DraftStage::Outline
                     && outline_execution_blocked(self.state)),
-            budget_exhausted: turn_limit_reached(self.state, limits.max_turns)
-                || self.state.tool_calls >= limits.max_tool_calls
-                || self.state.read_bytes >= limits.max_read_bytes,
+            budget_exhausted: run_budget_exhausted(self.state, limits),
         }
     }
     fn journal_mut(&mut self) -> &mut crate::agent_runtime::TurnJournal {
@@ -859,7 +861,9 @@ pub(super) async fn execute_turn<J: Journal>(
 ) -> Result<Vec<Value>, AgentError> {
     let body = serde_json::from_slice(state.journal.body()?).map_err(invalid)?;
     let estimated_input_tokens = context::estimate_input_tokens(&body, &config.limits)?;
-    if response.tool_calls.len() > config.limits.max_tool_calls - state.tool_calls {
+    if !one_shot_outline(state)
+        && response.tool_calls.len() > config.limits.max_tool_calls - state.tool_calls
+    {
         return Err(error(
             "AGENT_TURN_BUDGET_EXCEEDED",
             "tool batch exceeds remaining budget; checkpoint retained",
@@ -907,7 +911,7 @@ pub(super) async fn execute_turn<J: Journal>(
     for (call_index, call) in response.tool_calls.iter().enumerate() {
         let tool_started = Instant::now();
         state.tool_calls += 1;
-        if state.tool_calls > config.limits.max_tool_calls {
+        if !one_shot_outline(state) && state.tool_calls > config.limits.max_tool_calls {
             return Err(error("AGENT_TURN_BUDGET_EXCEEDED", "tool budget exhausted"));
         }
         let readonly = matches!(
@@ -1046,7 +1050,7 @@ pub(super) async fn execute_turn<J: Journal>(
             .read_bytes
             .checked_add(content.len())
             .ok_or_else(|| invalid("read budget overflow"))?;
-        if state.read_bytes > config.limits.max_read_bytes {
+        if !one_shot_outline(state) && state.read_bytes > config.limits.max_read_bytes {
             return Err(error(
                 "AGENT_TURN_BUDGET_EXCEEDED",
                 "tool output exceeds remaining read budget; checkpoint retained",

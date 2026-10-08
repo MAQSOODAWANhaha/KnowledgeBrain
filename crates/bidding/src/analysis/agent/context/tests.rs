@@ -2406,9 +2406,13 @@ fn pack_commits_are_discover_progress_and_later_phases_can_block() {
         "stall error names the phase: {stalled}"
     );
     state.turn = limits.max_turns;
+    state.tool_calls = limits.max_tool_calls;
+    state.read_bytes = limits.max_read_bytes;
     assert!(!super::super::turn_limit_reached(&state, limits.max_turns));
+    assert!(!super::super::run_budget_exhausted(&state, &limits));
     state.draft_stage = crate::analysis::draft::DraftStage::Fill;
     assert!(super::super::turn_limit_reached(&state, limits.max_turns));
+    assert!(super::super::run_budget_exhausted(&state, &limits));
 
     let mut scanned = outline_checkpoint();
     observe_progress(&mut scanned, &Role::Main, None, &limits).unwrap();
@@ -2429,4 +2433,10 @@ fn pack_commits_are_discover_progress_and_later_phases_can_block() {
     assert!(super::super::outline_execution_blocked(&scanned));
     scanned.turn = limits.max_turns;
     assert!(super::super::turn_limit_reached(&scanned, limits.max_turns));
+    scanned.turn = 0;
+    scanned.tool_calls = limits.max_tool_calls;
+    assert!(super::super::run_budget_exhausted(&scanned, &limits));
+    scanned.tool_calls = 0;
+    scanned.read_bytes = limits.max_read_bytes;
+    assert!(super::super::run_budget_exhausted(&scanned, &limits));
 }
