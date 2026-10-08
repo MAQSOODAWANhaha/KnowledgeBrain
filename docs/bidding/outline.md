@@ -133,7 +133,7 @@
 记忆只有检查点。`TurnJournal` 是 `Checkpoint.journal`（检查点合同版本 14，运行适配 `rig-chat-0.42.0/4`）。`reading_packs`、`tool_draft` 和 `phase` 在同一检查点的 `outline_run` 上。`load` 恢复这一个对象；输入摘要或运行合同变了就拒绝恢复。`save` 写回这一个对象。
 
 1. **选职责。** `outline::agent::current`。本轮只挂该职责的工具。
-2. **领包。** 仅当包未完成，在还没有计划时建一次计划。`claim_turn` 使本轮在途包（`running` 加待修 `failed`）不超过 4，按 `order` 补满空位，并把这些包放进 brief。
+2. **领包。** 仅当包未完成，在还没有计划时建一次计划。`claim_turn` 使本轮在途包（`running` 加待修 `failed`）不超过 `DEFAULT_PACK_CONCURRENCY`，按 `order` 补满空位，并把这些包放进 brief。
 3. **准备会话并预约。** `prepare_request` 拼出系统提示、brief、检查点对话，以及宿主包。随后 `TurnJournal::prepare_session` 复用或重建 SDK 会话，`prepare` 把精确 UTF-8 请求体记成待完成轮。`reserve` 在调用模型之前冻结这同一份字节，最多三次。已经保存的响应不再预约，也不再调用模型。
 4. **模型。** 返回工具调用。`responded` 先把响应写入检查点。
 5. **工具。** `outline::agent::apply` 在 `deny` 下执行。结果追加到检查点对话，`session.finish` 记到当前 SDK 会话。

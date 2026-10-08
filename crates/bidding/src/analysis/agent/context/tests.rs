@@ -2289,7 +2289,9 @@ async fn sizing_does_not_stick_claims_and_an_oversized_brief_releases_packs() {
         .as_ref()
         .unwrap()
         .pack_counts();
-    assert!(counts.running >= 1 && counts.running <= 4);
+    assert!(
+        counts.running >= 1 && counts.running <= crate::outline::discover::DEFAULT_PACK_CONCURRENCY
+    );
     assert!(counts.running < counts.total);
     assert!(counts.pending > 0);
     let body: Value = serde_json::from_slice(&bytes).unwrap();
@@ -2316,11 +2318,16 @@ async fn sizing_does_not_stick_claims_and_an_oversized_brief_releases_packs() {
 
 #[test]
 fn pack_commits_are_discover_progress_and_later_phases_can_block() {
-    use crate::outline::discover::{DiscoverWork, PackSubmit};
+    use crate::outline::discover::{DEFAULT_PACK_CONCURRENCY, DiscoverWork, PackSubmit};
     let input = pack_input(3, "A");
     let mut state = outline_checkpoint();
     state.outline_run.reading_packs = Some(DiscoverWork::plan(&input, 1));
-    state.outline_run.reading_packs.as_mut().unwrap().claim(4);
+    state
+        .outline_run
+        .reading_packs
+        .as_mut()
+        .unwrap()
+        .claim(DEFAULT_PACK_CONCURRENCY);
     observe_progress(
         &mut state,
         &Role::Main,
@@ -2375,7 +2382,14 @@ fn pack_commits_are_discover_progress_and_later_phases_can_block() {
     observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
     assert_eq!(state.main_progress.watch.no_progress_turns, 0);
     state.main_progress = Default::default();
-    for _ in 0..40 {
+    // The first observation records the completion key and resets the watch.
+    // Each later window is one no-progress or focus allowance, repeated once
+    // per replan plus the window that blocks.
+    let window = limits.max_no_progress_turns.min(limits.max_focus_turns);
+    let stalls = window
+        .saturating_mul(limits.max_focus_replans.saturating_add(1))
+        .saturating_add(1);
+    for _ in 0..stalls {
         observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
     }
     assert_eq!(state.main_progress.watch.recovery, Recovery::Blocked);

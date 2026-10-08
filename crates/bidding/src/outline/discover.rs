@@ -1601,19 +1601,30 @@ mod tests {
 
     #[test]
     fn claim_fills_remaining_room_in_pack_order() {
+        let concurrency = DEFAULT_PACK_CONCURRENCY;
+        let by_order: Vec<String> = (0..concurrency)
+            .map(|index| format!("pack-{index}"))
+            .collect();
+        // `pack-10` sorts before `pack-2`, so id order and `order` disagree.
+        let count = concurrency.max(10) + 1;
         let frozen = input(
-            (0..12)
+            (0..count)
                 .map(|index| source(&format!("s{index}"), index, "x", &format!("章{index}")))
                 .collect(),
             vec![],
         );
         let mut work = DiscoverWork::plan(&frozen, 1);
-        assert!(work.pack_counts().total >= 12);
-        let claimed = work.claim(DEFAULT_PACK_CONCURRENCY);
-        let ids: Vec<_> = claimed.iter().map(|pack| pack.id.as_str()).collect();
-        assert_eq!(ids, ["pack-0", "pack-1", "pack-2", "pack-3"]);
-        assert!(work.claim(DEFAULT_PACK_CONCURRENCY).is_empty());
-        assert_eq!(work.pack_counts().running, DEFAULT_PACK_CONCURRENCY);
+        assert!(work.pack_counts().total > concurrency);
+        let claimed = work.claim(concurrency);
+        let ids: Vec<_> = claimed.iter().map(|pack| pack.id.clone()).collect();
+        assert_eq!(ids, by_order);
+        let mut by_id: Vec<_> = (0..work.pack_counts().total)
+            .map(|index| format!("pack-{index}"))
+            .collect();
+        by_id.sort();
+        assert_ne!(ids, by_id[..concurrency]);
+        assert!(work.claim(concurrency).is_empty());
+        assert_eq!(work.pack_counts().running, concurrency);
         let sessions = work.inflight_sessions(&frozen);
         let session_ids: Vec<_> = sessions
             .iter()

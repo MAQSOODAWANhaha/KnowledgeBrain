@@ -91,13 +91,14 @@ fn configured_max_turns_is_not_raised_to_the_outline_estimate() {
     let estimate = crate::analysis::draft::outline_turn_cap(&input);
     assert!(estimate > crate::analysis::draft::OUTLINE_MAX_TURNS);
     let mut limits = config().limits;
-    limits.max_turns = 80;
+    let cap = crate::analysis::draft::OUTLINE_MAX_TURNS;
+    limits.max_turns = cap;
     limits.max_tool_calls = 1;
     limits.max_read_bytes = 1;
     let applied = limits.clone().at_least_for(&input).unwrap();
-    assert_eq!(applied.max_turns, 80);
-    assert_eq!(applied.max_tool_calls, 80 * 12);
-    assert!(applied.max_read_bytes >= 80 * applied.max_tool_result_bytes * 4);
+    assert_eq!(applied.max_turns, cap);
+    assert_eq!(applied.max_tool_calls, cap * 12);
+    assert!(applied.max_read_bytes >= cap * applied.max_tool_result_bytes * 4);
     limits.max_turns = 0;
     let applied = limits.at_least_for(&input).unwrap();
     assert_eq!(applied.max_turns, crate::analysis::draft::OUTLINE_MAX_TURNS);
