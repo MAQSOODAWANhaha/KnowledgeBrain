@@ -604,7 +604,7 @@ pub async fn copy_document_index(
 ) -> Result<usize, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT id, chunk_type, content, context_header, start_at, end_at,
-                parent_chunk_id, generated_questions
+                parent_chunk_id, generated_questions, source_locator
          FROM chunks WHERE document_id = $1",
     )
     .bind(source_document_id)
@@ -623,8 +623,9 @@ pub async fn copy_document_index(
         sqlx::query(
             "INSERT INTO chunks (
                 id, product_version_id, document_id, chunk_type, content,
-                context_header, start_at, end_at, parent_chunk_id, generated_questions
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                context_header, start_at, end_at, parent_chunk_id, generated_questions,
+                source_locator
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
         )
         .bind(new_id)
         .bind(target_version_id)
@@ -636,6 +637,7 @@ pub async fn copy_document_index(
         .bind(r.try_get::<i32, _>("end_at")?)
         .bind(parent)
         .bind(r.try_get::<serde_json::Value, _>("generated_questions")?)
+        .bind(r.try_get::<Option<serde_json::Value>, _>("source_locator")?)
         .execute(pool)
         .await?;
     }

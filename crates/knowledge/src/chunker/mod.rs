@@ -177,6 +177,7 @@ pub fn split_from_config(
             end_at: p.end as i32,
             parent_chunk_id: None,
             generated_questions: Vec::new(),
+            source_locator: None,
         });
     }
     for c in result.children {
@@ -192,9 +193,68 @@ pub fn split_from_config(
             end_at: c.chunk.end as i32,
             parent_chunk_id,
             generated_questions: Vec::new(),
+            source_locator: None,
         });
     }
     out
+}
+
+/// D3: annotate chunks with structured source locators from docparser.
+///
+/// Each source unit's `text` is located in the markdown (scanned in ordinal
+/// order so repeated texts map to successive occurrences); a chunk receives
+/// the units whose match offset falls inside its `[start_at, end_at)` char
+/// range. `start_at`/`end_at` are char offsets into the same markdown.
+/// Units that cannot be located (e.g. rewritten image refs) are skipped.
+pub fn annotate_source_locators(
+    chunks: &mut [Chunk],
+    markdown: &str,
+    units: &[docparser::StructuredSourceUnit],
+) {
+    if chunks.is_empty() || units.is_empty() || markdown.is_empty() {
+        return;
+    }
+    let mut order: Vec<usize> = (0..units.len()).collect();
+    order.sort_by_key(|&i| units[i].ordinal);
+    // (char_offset, unit_index)
+    let mut located: Vec<(usize, usize)> = Vec::new();
+    let mut search_from: usize = 0;
+    for i in order {
+        let text = units[i].text.trim();
+        if text.is_empty() || search_from >= markdown.len() {
+            continue;
+        }
+        if let Some(rel) = markdown[search_from..].find(text) {
+            let abs_byte = search_from + rel;
+            let char_pos = markdown[..abs_byte].chars().count();
+            located.push((char_pos, i));
+            search_from = abs_byte + text.len();
+        }
+    }
+    if located.is_empty() {
+        return;
+    }
+    for chunk in chunks.iter_mut() {
+        let start = chunk.start_at.max(0) as usize;
+        let end = chunk.end_at.max(0) as usize;
+        let hits: Vec<serde_json::Value> = located
+            .iter()
+            .filter(|(pos, _)| *pos >= start && *pos < end)
+            .map(|(_, ui)| {
+                let u = &units[*ui];
+                serde_json::json!({
+                    "key": u.key,
+                    "ordinal": u.ordinal,
+                    "kind": u.kind,
+                    "locator": u.locator,
+                    "grid": u.grid,
+                })
+            })
+            .collect();
+        if !hits.is_empty() {
+            chunk.source_locator = Some(serde_json::Value::Array(hits));
+        }
+    }
 }
 
 fn to_domain(raw: Vec<TextChunk>, version_id: Uuid, document_id: Uuid) -> Vec<Chunk> {
@@ -210,6 +270,7 @@ fn to_domain(raw: Vec<TextChunk>, version_id: Uuid, document_id: Uuid) -> Vec<Ch
             end_at: c.end as i32,
             parent_chunk_id: None,
             generated_questions: Vec::new(),
+            source_locator: None,
         })
         .collect()
 }
@@ -329,4 +390,57 @@ mod tests {
         assert!(b.content.contains("## Section B"));
         assert!(!b.content.contains(&b.context_header));
     }
+    #[test]
+    fn annotate_source_locators_attaches_table_grid_and_page() {
+        use docparser::{StructuredSourceLocator, StructuredSourceUnit, StructuredSourceUnitKind, TableGrid};
+        let md = "# Report\n\nIntro text here.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let units = vec![
+            StructuredSourceUnit {
+                key: "u0".into(),
+                ordinal: 0,
+                kind: StructuredSourceUnitKind::Section,
+                text: "Intro text here.".into(),
+                locator: StructuredSourceLocator::Page {
+                    page_ordinal: 1,
+                    left: None, top: None, right: None, bottom: None,
+                },
+                grid: None,
+            },
+            StructuredSourceUnit {
+                key: "u1".into(),
+                ordinal: 1,
+                kind: StructuredSourceUnitKind::TableRegion,
+                text: "| a | b |".into(),
+                locator: StructuredSourceLocator::PageTable {
+                    page_ordinal: 1, table_ordinal: 0,
+                    left: 10.0, top: 20.0, right: 100.0, bottom: 60.0,
+                },
+                grid: Some(TableGrid {
+                    row_count: 2, column_count: 2, cells: vec![], widths_mm: None,
+                }),
+            },
+        ];
+        let mut chunks = split(md, Uuid::new_v4(), Uuid::new_v4(), 512, 0);
+        assert!(!chunks.is_empty());
+        annotate_source_locators(&mut chunks, md, &units);
+        // section chunk carries the Page locator
+        let sec = chunks.iter().find(|c| c.content.contains("Intro text here."))
+            .expect("section chunk");
+        let loc = sec.source_locator.as_ref().expect("section locator");
+        assert_eq!(loc[0]["locator"]["locator_kind"], "page");
+        assert_eq!(loc[0]["locator"]["page_ordinal"], 1);
+        // table chunk carries the grid with row_count (find the table hit by kind)
+        let tbl = chunks.iter().find(|c| c.content.contains("| a | b |"))
+            .expect("table chunk");
+        let tloc = tbl.source_locator.as_ref().expect("table locator");
+        let thit = tloc.iter().find(|h| h["kind"] == "table_region")
+            .expect("table_region hit");
+        assert_eq!(thit["grid"]["row_count"], 2);
+        assert_eq!(thit["locator"]["locator_kind"], "page_table");
+        // unknown units leave chunks untouched
+        let mut chunks2 = split(md, Uuid::new_v4(), Uuid::new_v4(), 512, 0);
+        annotate_source_locators(&mut chunks2, md, &[]);
+        assert!(chunks2.iter().all(|c| c.source_locator.is_none()));
+    }
 }
+

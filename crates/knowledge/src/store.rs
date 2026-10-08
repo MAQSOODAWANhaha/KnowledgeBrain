@@ -241,6 +241,7 @@ pub struct Chunk {
     pub end_at: i32,
     pub parent_chunk_id: Option<Uuid>,
     pub generated_questions: Vec<String>,
+    pub source_locator: Option<serde_json::Value>,
 }
 
 impl Chunk {
