@@ -329,6 +329,8 @@ fn v2_publication_rejects_wrong_contract_and_forged_post_review_grounds() {
         review,
         quality: "verified".into(),
         source_views: BTreeMap::new(),
+        usage: Default::default(),
+        outline: None,
     };
     crate::analysis::postgres::publication(&input, &result).unwrap();
     result.review.contract_sha256.clear();

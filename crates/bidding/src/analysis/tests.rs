@@ -94,3 +94,90 @@ fn at_least_for_does_not_scale_tool_or_read_caps() {
     assert_eq!(applied.max_tool_calls, 1);
     assert_eq!(applied.max_read_bytes, 1);
 }
+
+#[test]
+fn max_turns_zero_is_not_a_contract_mismatch() {
+    let mut limits = config().limits;
+    limits.max_turns = 0;
+    let provider = config().provider;
+    let built = Config::with_provider(provider, limits).unwrap();
+    assert_eq!(built.limits.max_turns, 0);
+    built.validate().unwrap();
+    let focus = built.limits.max_focus_turns * (built.limits.max_focus_replans + 1);
+    assert_eq!(
+        super::agent::repair::tasks::limit(&built.limits).unwrap(),
+        focus
+    );
+    let mut broken = built.clone();
+    broken.limits.max_tool_calls = 0;
+    let error = broken.validate().unwrap_err();
+    assert_ne!(error.code, "FROZEN_INPUT_DIGEST_MISMATCH");
+    assert!(
+        error.message.contains("max_tool_calls"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn analysis_result_writes_usage_and_the_finished_outline() {
+    let outline = crate::outline::tools::Draft {
+        chapters: vec![crate::outline::ChapterOutline {
+            id: "letter".into(),
+            parent_id: None,
+            order: 0,
+            title: "投标函".into(),
+            purpose: crate::outline::ChapterPurpose::Response,
+            requirement_ids: vec![],
+        }],
+        bindings: vec![crate::outline::chapters::AttachmentBinding {
+            form_id: "form-1".into(),
+            chapter_id: "letter".into(),
+        }],
+        slots_submitted: true,
+        finished: true,
+        ..Default::default()
+    };
+    let result = AnalysisResult {
+        schema_version: 2,
+        frozen_input_sha256: "sha".into(),
+        analysis: Analysis::default(),
+        review: Review::default(),
+        quality: "needs_review".into(),
+        source_views: Default::default(),
+        usage: crate::agent_runtime::TokenUsage {
+            input_tokens: 11,
+            output_tokens: 2,
+            total_tokens: 13,
+            cached_input_tokens: 1,
+            reasoning_tokens: 0,
+        },
+        outline: Some(outline),
+    };
+    let value = serde_json::to_value(&result).unwrap();
+    assert_eq!(value["usage"]["input_tokens"], 11);
+    assert_eq!(value["usage"]["output_tokens"], 2);
+    assert_eq!(value["usage"]["total_tokens"], 13);
+    assert_eq!(value["usage"]["cached_input_tokens"], 1);
+    assert_eq!(value["outline"]["finished"], true);
+    assert_eq!(value["outline"]["chapters"][0]["id"], "letter");
+    assert_eq!(value["outline"]["bindings"][0]["form_id"], "form-1");
+    assert_eq!(value["outline"]["slots_submitted"], true);
+    let bare = serde_json::json!({
+        "schema_version": 2,
+        "frozen_input_sha256": "sha",
+        "analysis": serde_json::to_value(Analysis::default()).unwrap(),
+        "review": serde_json::to_value(Review::default()).unwrap(),
+        "quality": "needs_review",
+        "source_views": {}
+    });
+    let loaded: AnalysisResult = serde_json::from_value(bare).unwrap();
+    assert!(loaded.usage.is_empty());
+    assert!(loaded.outline.is_none());
+    let mut empty = result;
+    empty.usage = Default::default();
+    empty.outline = None;
+    let omitted = serde_json::to_value(&empty).unwrap();
+    assert!(omitted.get("usage").is_none());
+    assert!(omitted.get("outline").is_none());
+}

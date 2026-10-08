@@ -4,7 +4,7 @@
 
 use super::{
     ChapterOutline, ChapterPurpose, SlotKind, TemplateContent,
-    chapters::{AttachmentBinding, attachment_form_ids},
+    chapters::{AttachmentBinding, attachment_form_ids, form_cards},
 };
 use crate::analysis::FrozenInput;
 use serde::{Deserialize, Serialize};
@@ -37,10 +37,23 @@ impl Draft {
 }
 
 /// State the outline model reads. It names no retired tools.
-pub fn model_state(input: &FrozenInput, draft: &Draft) -> Value {
-    let mut state = view(draft);
-    state["unmapped_forms"] = json!(unmapped_forms(input, draft));
+///
+/// `unmapped_forms` is a byte-bounded page of form cards, not bare ids.
+/// `max_bytes` is the same per-request budget as the rest of the host packet.
+pub fn model_state(input: &FrozenInput, draft: &Draft, max_bytes: usize) -> Value {
+    let mut state = view(input, draft);
+    state["unmapped_forms"] = page_form_cards(input, draft, max_bytes);
     state
+}
+
+fn page_form_cards(input: &FrozenInput, draft: &Draft, max_bytes: usize) -> Value {
+    let cards = form_cards(input, &unmapped_forms(input, draft));
+    if cards.is_empty() {
+        return json!({"total": 0, "next": 0, "items": []});
+    }
+    crate::analysis::tools::bounded_page(&cards, 0, cards.len(), max_bytes.max(1)).unwrap_or_else(
+        |error| json!({"total": cards.len(), "next": 0, "items": [], "error": error}),
+    )
 }
 
 pub fn unmapped_forms(input: &FrozenInput, draft: &Draft) -> Vec<String> {
@@ -63,16 +76,17 @@ pub fn apply(
     args: &Value,
 ) -> Result<Value, String> {
     match name {
-        "put_chapters" => put_chapters(draft, requirement_ids, args),
+        "put_chapters" => put_chapters(input, draft, requirement_ids, args),
         "bind_forms" => bind_forms(input, draft, args),
-        "put_slots" => put_slots(draft, args),
-        "read_outline" => Ok(view(draft)),
+        "put_slots" => put_slots(input, draft, args),
+        "read_outline" => Ok(view(input, draft)),
         "finish_outline" => finish(input, draft),
         _ => Err("unknown outline tool".into()),
     }
 }
 
 fn put_chapters(
+    input: &FrozenInput,
     draft: &mut Draft,
     known_requirements: &BTreeSet<String>,
     args: &Value,
@@ -86,41 +100,29 @@ fn put_chapters(
     let mut chapters = Vec::with_capacity(rows.len());
     let mut seen = HashSet::new();
     let mut seen_requirements = HashSet::new();
+    let mut errors = Vec::new();
     for chapter in rows {
-        let id = required(chapter, "id")?;
-        if !seen.insert(id.clone()) {
-            return Err(format!("duplicate chapter {id}"));
+        match parse_chapter(
+            chapter,
+            known_requirements,
+            &mut seen,
+            &mut seen_requirements,
+        ) {
+            Ok(chapter) => chapters.push(chapter),
+            Err(found) => errors.extend(found),
         }
-        let parent_id = match &chapter["parent_id"] {
-            Value::Null => None,
-            Value::String(parent) if !parent.is_empty() => Some(parent.clone()),
-            _ => return Err(format!("chapter {id} parent_id must be an id or null")),
-        };
-        let purpose = match chapter["purpose"].as_str() {
-            Some("group") => ChapterPurpose::Group,
-            Some("response") => ChapterPurpose::Response,
-            _ => return Err(format!("chapter {id} purpose must be group or response")),
-        };
-        let requirement_ids =
-            requirement_ids(chapter, &id, known_requirements, &mut seen_requirements)?;
-        chapters.push(ChapterOutline {
-            id,
-            parent_id,
-            order: chapter["order"]
-                .as_u64()
-                .ok_or("chapter order must be a non-negative integer")? as usize,
-            title: required(chapter, "title")?,
-            purpose,
-            requirement_ids,
-        });
     }
-    if let Some(id) = known_requirements
-        .iter()
-        .find(|id| !seen_requirements.contains(id.as_str()))
-    {
-        return Err(format!("requirement {id} is not on a chapter"));
+    for id in known_requirements {
+        if !seen_requirements.contains(id.as_str()) {
+            errors.push(format!("requirement {id} is not on a chapter"));
+        }
     }
-    validate_tree(&chapters)?;
+    if errors.is_empty() {
+        errors.extend(validate_tree(&chapters));
+    }
+    if !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
     let ids: HashSet<_> = chapters.iter().map(|chapter| chapter.id.as_str()).collect();
     let slots_before = draft.slots.len();
     draft
@@ -134,7 +136,7 @@ fn put_chapters(
     }
     draft.chapters = chapters;
     draft.finished = false;
-    Ok(view(draft))
+    Ok(view(input, draft))
 }
 
 fn bind_forms(input: &FrozenInput, draft: &mut Draft, args: &Value) -> Result<Value, String> {
@@ -147,33 +149,64 @@ fn bind_forms(input: &FrozenInput, draft: &mut Draft, args: &Value) -> Result<Va
         .iter()
         .map(|chapter| chapter.id.as_str())
         .collect();
+    let groups: HashSet<_> = draft
+        .chapters
+        .iter()
+        .filter(|chapter| chapter.purpose == ChapterPurpose::Group)
+        .map(|chapter| chapter.id.as_str())
+        .collect();
     let mut bindings = Vec::with_capacity(rows.len());
     let mut seen = HashSet::new();
+    let mut errors = Vec::new();
     for binding in rows {
-        let form_id = required(binding, "form_id")?;
-        let chapter_id = required(binding, "chapter_id")?;
+        let form_id = match required(binding, "form_id") {
+            Ok(id) => id,
+            Err(error) => {
+                errors.push(error);
+                continue;
+            }
+        };
+        let chapter_id = match required(binding, "chapter_id") {
+            Ok(id) => id,
+            Err(error) => {
+                errors.push(error);
+                continue;
+            }
+        };
         if !attachments.contains(&form_id) {
-            return Err(format!("form {form_id} is not an attachment table"));
+            errors.push(format!("form {form_id} is not an attachment table"));
+            continue;
         }
         if !chapters.contains(chapter_id.as_str()) {
-            return Err(format!("chapter {chapter_id} is not in the outline"));
+            errors.push(format!("chapter {chapter_id} is not in the outline"));
+            continue;
+        }
+        if groups.contains(chapter_id.as_str()) {
+            errors.push(format!(
+                "chapter {chapter_id} is a group chapter and cannot take an attachment table"
+            ));
+            continue;
         }
         if !seen.insert(form_id.clone()) {
-            return Err(format!(
+            errors.push(format!(
                 "attachment table {form_id} is bound more than once"
             ));
+            continue;
         }
         bindings.push(AttachmentBinding {
             form_id,
             chapter_id,
         });
     }
+    if !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
     draft.bindings = bindings;
     draft.finished = false;
-    Ok(view(draft))
+    Ok(view(input, draft))
 }
 
-fn put_slots(draft: &mut Draft, args: &Value) -> Result<Value, String> {
+fn put_slots(input: &FrozenInput, draft: &mut Draft, args: &Value) -> Result<Value, String> {
     let rows = args["slots"].as_array().ok_or("slots must be an array")?;
     let chapters: HashSet<_> = draft
         .chapters
@@ -234,14 +267,17 @@ fn put_slots(draft: &mut Draft, args: &Value) -> Result<Value, String> {
     draft.slots = slots;
     draft.slots_submitted = true;
     draft.finished = false;
-    Ok(view(draft))
+    Ok(view(input, draft))
 }
 
 fn finish(input: &FrozenInput, draft: &mut Draft) -> Result<Value, String> {
     if draft.chapters.is_empty() {
         return Err("put_chapters before finishing the outline".into());
     }
-    validate_tree(&draft.chapters)?;
+    let tree = validate_tree(&draft.chapters);
+    if !tree.is_empty() {
+        return Err(tree.join("\n"));
+    }
     if let Some(form_id) = unmapped_forms(input, draft).into_iter().next() {
         return Err(format!(
             "attachment table {form_id} is not mapped to a chapter"
@@ -254,7 +290,7 @@ fn finish(input: &FrozenInput, draft: &mut Draft) -> Result<Value, String> {
         return Err(format!("response chapter {id} has no template slot"));
     }
     draft.finished = true;
-    Ok(view(draft))
+    Ok(view(input, draft))
 }
 
 /// First response chapter, in chapter order, that has no template slot.
@@ -266,8 +302,8 @@ pub fn missing_response_slot(draft: &Draft) -> Option<&str> {
     })
 }
 
-fn view(draft: &Draft) -> Value {
-    json!({
+fn view(input: &FrozenInput, draft: &Draft) -> Value {
+    let mut state = json!({
         "chapters": draft.chapters.iter().map(|chapter| json!({
             "id": chapter.id,
             "parent_id": chapter.parent_id,
@@ -286,23 +322,56 @@ fn view(draft: &Draft) -> Value {
         })).collect::<Vec<_>>(),
         "slots_submitted": draft.slots_submitted,
         "finished": draft.finished,
-    })
+    });
+    state["readiness"] = readiness(input, draft);
+    state
 }
 
-fn validate_tree(chapters: &[ChapterOutline]) -> Result<(), String> {
+/// What is still missing, and the one next tool once the draft can be finished.
+pub fn readiness(input: &FrozenInput, draft: &Draft) -> Value {
+    let mut missing = Vec::new();
+    if draft.chapters.is_empty() {
+        missing.push("chapters are missing".to_string());
+    }
+    let unmapped = unmapped_forms(input, draft);
+    if !unmapped.is_empty() {
+        missing.push(format!(
+            "{} attachment tables are not bound",
+            unmapped.len()
+        ));
+    }
+    if !draft.slots_submitted {
+        missing.push("slots have not been submitted".to_string());
+    }
+    if let Some(id) = missing_response_slot(draft) {
+        missing.push(format!("response chapter {id} has no template slot"));
+    }
+    let ready = missing.is_empty();
+    let mut value = json!({
+        "ready": ready,
+        "missing": missing,
+    });
+    if ready {
+        value["next"] = json!("finish_outline");
+    }
+    value
+}
+
+fn validate_tree(chapters: &[ChapterOutline]) -> Vec<String> {
     let ids: HashSet<_> = chapters.iter().map(|chapter| chapter.id.as_str()).collect();
     let mut orders = HashSet::new();
+    let mut errors = Vec::new();
     for chapter in chapters {
         if chapter.id.is_empty() || chapter.title.trim().is_empty() {
-            return Err("chapter id and title are required".into());
+            errors.push("chapter id and title are required".to_string());
         }
         if let Some(parent) = chapter.parent_id.as_deref()
             && !ids.contains(parent)
         {
-            return Err(format!("chapter {} parent is missing", chapter.id));
+            errors.push(format!("chapter {} parent is missing", chapter.id));
         }
         if !orders.insert((chapter.parent_id.as_deref(), chapter.order)) {
-            return Err(format!("chapter {} repeats a sibling order", chapter.id));
+            errors.push(format!("chapter {} repeats a sibling order", chapter.id));
         }
     }
     for chapter in chapters {
@@ -310,7 +379,8 @@ fn validate_tree(chapters: &[ChapterOutline]) -> Result<(), String> {
         let mut parent = chapter.parent_id.as_deref();
         while let Some(id) = parent {
             if !seen.insert(id) {
-                return Err("chapter parent cycle".into());
+                errors.push("chapter parent cycle".to_string());
+                break;
             }
             parent = chapters
                 .iter()
@@ -318,35 +388,104 @@ fn validate_tree(chapters: &[ChapterOutline]) -> Result<(), String> {
                 .and_then(|candidate| candidate.parent_id.as_deref());
         }
     }
-    Ok(())
+    errors
 }
 
-fn requirement_ids(
+fn parse_chapter(
+    chapter: &Value,
+    known: &BTreeSet<String>,
+    seen: &mut HashSet<String>,
+    seen_requirements: &mut HashSet<String>,
+) -> Result<ChapterOutline, Vec<String>> {
+    let mut errors = Vec::new();
+    let id = match required(chapter, "id") {
+        Ok(id) => id,
+        Err(error) => return Err(vec![error]),
+    };
+    if !seen.insert(id.clone()) {
+        errors.push(format!("duplicate chapter {id}"));
+    }
+    let parent_id = match &chapter["parent_id"] {
+        Value::Null => Some(None),
+        Value::String(parent) if !parent.is_empty() => Some(Some(parent.clone())),
+        _ => {
+            errors.push(format!("chapter {id} parent_id must be an id or null"));
+            None
+        }
+    };
+    let purpose = match chapter["purpose"].as_str() {
+        Some("group") => Some(ChapterPurpose::Group),
+        Some("response") => Some(ChapterPurpose::Response),
+        _ => {
+            errors.push(format!("chapter {id} purpose must be group or response"));
+            None
+        }
+    };
+    let order = match chapter["order"].as_u64() {
+        Some(order) => Some(order as usize),
+        None => {
+            errors.push(format!("chapter {id} order must be a non-negative integer"));
+            None
+        }
+    };
+    let title = match required(chapter, "title") {
+        Ok(title) => Some(title),
+        Err(error) => {
+            errors.push(format!("chapter {id} {error}"));
+            None
+        }
+    };
+    let (requirement_ids, requirement_errors) =
+        take_requirement_ids(chapter, &id, known, seen_requirements);
+    errors.extend(requirement_errors);
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    Ok(ChapterOutline {
+        id,
+        parent_id: parent_id.expect("parent checked"),
+        order: order.expect("order checked"),
+        title: title.expect("title checked"),
+        purpose: purpose.expect("purpose checked"),
+        requirement_ids,
+    })
+}
+
+fn take_requirement_ids(
     chapter: &Value,
     id: &str,
     known: &BTreeSet<String>,
     seen: &mut HashSet<String>,
-) -> Result<Vec<String>, String> {
+) -> (Vec<String>, Vec<String>) {
     let Some(rows) = chapter.get("requirement_ids").and_then(Value::as_array) else {
-        return Err(format!("chapter {id} requirement_ids must be an array"));
+        return (
+            Vec::new(),
+            vec![format!("chapter {id} requirement_ids must be an array")],
+        );
     };
     let mut ids = Vec::with_capacity(rows.len());
+    let mut errors = Vec::new();
     for requirement in rows {
-        let requirement = requirement
+        let Some(requirement) = requirement
             .as_str()
             .filter(|requirement| !requirement.is_empty())
-            .ok_or_else(|| format!("chapter {id} requirement_ids must be strings"))?;
+        else {
+            errors.push(format!("chapter {id} requirement_ids must be strings"));
+            continue;
+        };
         if !known.contains(requirement) {
-            return Err(format!("unknown requirement {requirement}"));
+            errors.push(format!("unknown requirement {requirement}"));
+            continue;
         }
         if !seen.insert(requirement.to_string()) {
-            return Err(format!(
+            errors.push(format!(
                 "requirement {requirement} is assigned more than once"
             ));
+            continue;
         }
         ids.push(requirement.to_string());
     }
-    Ok(ids)
+    (ids, errors)
 }
 
 fn required(value: &Value, field: &str) -> Result<String, String> {
@@ -458,5 +597,82 @@ mod tests {
         )
         .unwrap();
         assert_eq!(again["slots"][1]["match_query"], json!("投标人名称"));
+        assert_eq!(again["readiness"]["ready"], json!(true));
+        assert_eq!(again["readiness"]["next"], json!("finish_outline"));
+    }
+
+    #[test]
+    fn bind_forms_rejects_a_group_chapter() {
+        let input = input();
+        let mut draft = Draft::default();
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_chapters",
+            &json!({"chapters":[
+                {"id":"group","parent_id":null,"order":0,"title":"投标文件","purpose":"group","requirement_ids":[]},
+                {"id":"letter","parent_id":"group","order":0,"title":"投标函","purpose":"response","requirement_ids":[]}
+            ]}),
+        )
+        .unwrap();
+        let err = apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "bind_forms",
+            &json!({"bindings":[{"form_id":"form-1","chapter_id":"group"}]}),
+        )
+        .unwrap_err();
+        assert!(err.contains("group chapter"));
+        assert!(draft.bindings.is_empty());
+    }
+
+    #[test]
+    fn put_chapters_reports_every_requirement_violation_together() {
+        let input = input();
+        let mut draft = Draft::default();
+        let known = BTreeSet::from(["pack-0:0".to_string(), "pack-1:0".to_string()]);
+        let err = apply(
+            &input,
+            &mut draft,
+            &known,
+            "put_chapters",
+            &json!({"chapters":[
+                {"id":"letter","parent_id":null,"order":0,"title":"投标函","purpose":"response","requirement_ids":["missing","pack-0:0"]},
+                {"id":"other","parent_id":"letter","order":0,"title":"其他","purpose":"response","requirement_ids":["pack-0:0"]}
+            ]}),
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown requirement missing"), "{err}");
+        assert!(
+            err.contains("requirement pack-0:0 is assigned more than once"),
+            "{err}"
+        );
+        assert!(
+            err.contains("requirement pack-1:0 is not on a chapter"),
+            "{err}"
+        );
+        assert!(draft.chapters.is_empty());
+    }
+
+    #[test]
+    fn unmapped_form_cards_fit_the_request_budget() {
+        let input = input();
+        let state = model_state(&input, &Draft::default(), 4_000);
+        let items = state["unmapped_forms"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["form_id"], "form-1");
+        assert_eq!(items[0]["header"], json!(["A", ""]));
+        assert_eq!(items[0]["ordinal"], 0);
+        assert_eq!(items[0]["heading"], "附件");
+        let tight = model_state(&input, &Draft::default(), 8);
+        assert_eq!(
+            tight["unmapped_forms"]["items"].as_array().unwrap().len(),
+            0
+        );
+        assert!(tight["unmapped_forms"]["error"].is_string());
+        assert_eq!(state["readiness"]["ready"], json!(false));
+        assert!(state["readiness"].get("next").is_none());
     }
 }

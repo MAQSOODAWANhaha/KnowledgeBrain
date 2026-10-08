@@ -40,7 +40,13 @@ pub(in crate::analysis) fn limit(limits: &Limits) -> Result<usize, String> {
         .checked_add(1)
         .and_then(|n| limits.max_focus_turns.checked_mul(n))
         .ok_or("repair task turn limit overflow")?;
-    let limit = limits.max_turns.min(attempts);
+    // `max_turns == 0` is not a cap, including on the one-shot path where the
+    // field is unused. A repair task still stops at the focus budget.
+    let limit = if limits.max_turns == 0 {
+        attempts
+    } else {
+        limits.max_turns.min(attempts)
+    };
     if limit == 0 {
         return Err("repair task turn limit must be positive".into());
     }

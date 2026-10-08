@@ -45,7 +45,7 @@ impl Duty {
                 "本轮写章节、附件绑定和规定模板槽。用检查点里的要求整理章节树，每个章节带上 requirement_ids，并把每个附件表绑定到唯一章节。用 put_slots 写入招标文件已经给出的文字。每个应答章节至少有一个槽。投标人和签字槽留空并带上 match_query，其他槽的 match_query 为空，分组章节不能带这两种槽。不要重新扫描招标文件，不要匹配知识库，不要填写我方事实。"
             }
             Self::Check => {
-                "本轮只做收尾。用 read_outline 核对章节、附件绑定和模板槽，然后 finish_outline。不要改章节，不要重新扫描，不要写模板。"
+                "本轮只做收尾。outline.readiness.ready 为 true 时下一步只有 finish_outline，核对结果已经在 readiness 里，不要反复 read_outline。不要改章节，不要重新扫描，不要写模板。"
             }
             Self::Template => {
                 "本轮只写规定模板。用 put_slots 写入招标文件已经给出的文字，投标人和签字槽留空并带上 match_query。不要改章节，不要重新扫描。"
@@ -218,7 +218,8 @@ pub fn host_packet(
     });
     if matches!(state.draft_stage, DraftStage::None | DraftStage::Outline) {
         packet["sources"] = source_index(input, max_bytes);
-        packet["outline"] = super::tools::model_state(input, &state.outline_run.tool_draft);
+        packet["outline"] =
+            super::tools::model_state(input, &state.outline_run.tool_draft, max_bytes / 2);
     }
     if current(input, state) == Duty::Organize {
         let requirements = state
@@ -283,6 +284,7 @@ pub fn apply(
             }
             state.outline_run.tool_draft = probe;
             state.outline_run.finish_rejected = false;
+            note_check_phase(input, state);
             return Ok(value);
         }
         if name == "finish_outline" {
@@ -294,6 +296,18 @@ pub fn apply(
                 args,
             ) {
                 Ok(value) => {
+                    // A finished draft that cannot be published must not enter
+                    // complete: that duty can only read or finish again.
+                    if let Err(error) = super::project_draft(
+                        input,
+                        &state.input_sha256,
+                        &state.outline_run.tool_draft,
+                    ) {
+                        state.outline_run.tool_draft.finished = false;
+                        state.outline_run.finish_rejected = true;
+                        note_check_phase(input, state);
+                        return Err(error);
+                    }
                     state.outline_run.finish_rejected = false;
                     state.analysis.outline.phase = Phase::Complete;
                     state.outline_run.phase = Phase::Complete;
@@ -301,6 +315,7 @@ pub fn apply(
                 }
                 Err(error) => {
                     state.outline_run.finish_rejected = true;
+                    note_check_phase(input, state);
                     Err(error)
                 }
             };
@@ -309,10 +324,27 @@ pub fn apply(
             super::tools::apply(input, &mut state.outline_run.tool_draft, &known, name, args)?;
         if matches!(name, "put_chapters" | "bind_forms" | "put_slots") {
             state.outline_run.finish_rejected = false;
+            note_check_phase(input, state);
         }
         return Ok(value);
     }
     Err("unknown outline tool".into())
+}
+
+/// Check is a reported phase, not only a duty. It starts when the draft can
+/// be finished and ends at `finish_outline` or when the draft is no longer
+/// checkable. Discover and complete are left alone.
+fn note_check_phase(input: &FrozenInput, state: &mut Checkpoint) {
+    if !matches!(state.analysis.outline.phase, Phase::Outline | Phase::Check) {
+        return;
+    }
+    let phase = if current(input, state) == Duty::Check {
+        Phase::Check
+    } else {
+        Phase::Outline
+    };
+    state.analysis.outline.phase = phase;
+    state.outline_run.phase = phase;
 }
 
 const DISCOVER: &[&str] = &["submit_pack", "read_outline"];

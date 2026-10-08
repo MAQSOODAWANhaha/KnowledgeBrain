@@ -209,53 +209,135 @@ impl Config {
     pub fn validate(&self) -> Result<(), AgentError> {
         self.provider.validate().map_err(invalid)?;
         let l = &self.limits;
-        if !l.progress().validate()
-            || self.checkpoint_contract_version != crate::agent_runtime::CHECKPOINT_CONTRACT_VERSION
-            || self.repair_task_policy != repair_task_host::POLICY
-            || self.main_dispatch_policy != main_dispatch::POLICY
-            || repair::tasks::limit(l).is_err()
-            || self.runtime_adapter != crate::agent_runtime::RUNTIME_ADAPTER_VERSION
-            || self.provider.response_mode != "tool_calls"
-            || l.max_turns == 0
-            || l.reviewer_reserve >= l.max_turns
-            || l.max_tool_calls == 0
-            || l.max_read_bytes == 0
-            || l.max_tool_result_bytes < 1024
-            || l.max_context_bytes <= l.max_tool_result_bytes
-            || l.max_history_bytes == 0
-            || l.max_history_bytes >= l.max_context_bytes
-            || l.image_token_reserve == 0
-            || l.token_safety_margin == 0
-            || l.token_safety_margin
-                .checked_add(self.provider.max_tokens as usize)
-                .is_none_or(|reserved| reserved >= l.max_context_tokens)
-            || l.max_review_rounds == 0
-            || l.max_source_view_bytes == 0
-            || l.max_source_view_edge == 0
-            || l.reviewer_reserve != 0
-            || {
-                let outline = digest(&crate::outline::agent::schemas()).map_err(invalid)?;
-                let fill = digest(&crate::outline::agent::template_schemas()).map_err(invalid)?;
-                !(self.tools_sha256 == outline
-                    && self.fill_tools_sha256 == fill
-                    && self.main_prompt_sha256
-                        == digest(&crate::agent_runtime::chat::system_content(
-                            crate::outline::agent::OUTLINE_PROMPT,
-                        ))
-                        .map_err(invalid)?
-                    && self.fill_prompt_sha256
-                        == digest(&crate::agent_runtime::chat::system_content(
-                            crate::outline::agent::TEMPLATE_PROMPT,
-                        ))
-                        .map_err(invalid)?)
-            }
-            || self.review_tools_sha256 != digest(&tools::schemas_for(true, l)).map_err(invalid)?
-            || self.review_prompt_sha256
-                != digest(&crate::agent_runtime::chat::system_content(REVIEWER)).map_err(invalid)?
+        if !l.progress().validate() {
+            return Err(invalid("progress limits must be positive"));
+        }
+        if self.checkpoint_contract_version != crate::agent_runtime::CHECKPOINT_CONTRACT_VERSION {
+            return Err(error(
+                "FROZEN_INPUT_DIGEST_MISMATCH",
+                format!(
+                    "checkpoint contract version {} is not {}",
+                    self.checkpoint_contract_version,
+                    crate::agent_runtime::CHECKPOINT_CONTRACT_VERSION
+                ),
+            ));
+        }
+        if self.repair_task_policy != repair_task_host::POLICY {
+            return Err(invalid("repair task policy changed"));
+        }
+        if self.main_dispatch_policy != main_dispatch::POLICY {
+            return Err(invalid("main dispatch policy changed"));
+        }
+        if let Err(message) = repair::tasks::limit(l) {
+            return Err(invalid(message));
+        }
+        if self.runtime_adapter != crate::agent_runtime::RUNTIME_ADAPTER_VERSION {
+            return Err(error(
+                "FROZEN_INPUT_DIGEST_MISMATCH",
+                format!(
+                    "runtime adapter {} is not {}",
+                    self.runtime_adapter,
+                    crate::agent_runtime::RUNTIME_ADAPTER_VERSION
+                ),
+            ));
+        }
+        if self.provider.response_mode != "tool_calls" {
+            return Err(invalid("response_mode must be tool_calls"));
+        }
+        // `max_turns == 0` is unused on the one-shot path and means no turn cap.
+        if l.max_turns > 0 && l.reviewer_reserve >= l.max_turns {
+            return Err(invalid("reviewer_reserve must be smaller than max_turns"));
+        }
+        if l.max_tool_calls == 0 {
+            return Err(invalid("max_tool_calls must be positive"));
+        }
+        if l.max_read_bytes == 0 {
+            return Err(invalid("max_read_bytes must be positive"));
+        }
+        if l.max_tool_result_bytes < 1024 {
+            return Err(invalid("max_tool_result_bytes must be at least 1024"));
+        }
+        if l.max_context_bytes <= l.max_tool_result_bytes {
+            return Err(invalid(
+                "max_context_bytes must be greater than max_tool_result_bytes",
+            ));
+        }
+        if l.max_history_bytes == 0 || l.max_history_bytes >= l.max_context_bytes {
+            return Err(invalid(
+                "max_history_bytes must be positive and below max_context_bytes",
+            ));
+        }
+        if l.image_token_reserve == 0 {
+            return Err(invalid("image_token_reserve must be positive"));
+        }
+        if l.token_safety_margin == 0 {
+            return Err(invalid("token_safety_margin must be positive"));
+        }
+        if l.token_safety_margin
+            .checked_add(self.provider.max_tokens as usize)
+            .is_none_or(|reserved| reserved >= l.max_context_tokens)
+        {
+            return Err(invalid(
+                "token_safety_margin plus max_tokens must fit in max_context_tokens",
+            ));
+        }
+        if l.max_review_rounds == 0 {
+            return Err(invalid("max_review_rounds must be positive"));
+        }
+        if l.max_source_view_bytes == 0 || l.max_source_view_edge == 0 {
+            return Err(invalid("source view limits must be positive"));
+        }
+        if l.reviewer_reserve != 0 {
+            return Err(invalid("reviewer_reserve must be 0"));
+        }
+        let outline = digest(&crate::outline::agent::schemas()).map_err(invalid)?;
+        let fill = digest(&crate::outline::agent::template_schemas()).map_err(invalid)?;
+        if self.tools_sha256 != outline {
+            return Err(error(
+                "FROZEN_INPUT_DIGEST_MISMATCH",
+                "outline tools digest changed",
+            ));
+        }
+        if self.fill_tools_sha256 != fill {
+            return Err(error(
+                "FROZEN_INPUT_DIGEST_MISMATCH",
+                "template tools digest changed",
+            ));
+        }
+        if self.main_prompt_sha256
+            != digest(&crate::agent_runtime::chat::system_content(
+                crate::outline::agent::OUTLINE_PROMPT,
+            ))
+            .map_err(invalid)?
         {
             return Err(error(
                 "FROZEN_INPUT_DIGEST_MISMATCH",
-                "invalid or changed frozen Agent contract",
+                "outline prompt digest changed",
+            ));
+        }
+        if self.fill_prompt_sha256
+            != digest(&crate::agent_runtime::chat::system_content(
+                crate::outline::agent::TEMPLATE_PROMPT,
+            ))
+            .map_err(invalid)?
+        {
+            return Err(error(
+                "FROZEN_INPUT_DIGEST_MISMATCH",
+                "template prompt digest changed",
+            ));
+        }
+        if self.review_tools_sha256 != digest(&tools::schemas_for(true, l)).map_err(invalid)? {
+            return Err(error(
+                "FROZEN_INPUT_DIGEST_MISMATCH",
+                "review tools digest changed",
+            ));
+        }
+        if self.review_prompt_sha256
+            != digest(&crate::agent_runtime::chat::system_content(REVIEWER)).map_err(invalid)?
+        {
+            return Err(error(
+                "FROZEN_INPUT_DIGEST_MISMATCH",
+                "review prompt digest changed",
             ));
         }
         Ok(())
@@ -511,7 +593,8 @@ pub(in crate::analysis) fn one_shot_outline(state: &Checkpoint) -> bool {
 }
 
 pub(in crate::analysis) fn turn_limit_reached(state: &Checkpoint, max_turns: usize) -> bool {
-    !one_shot_outline(state) && state.turn >= max_turns
+    // Zero is not a cap. The one-shot path ignores this value entirely.
+    !one_shot_outline(state) && max_turns > 0 && state.turn >= max_turns
 }
 
 /// Cumulative turn, tool-call, and read-byte totals. One-shot outline ignores
@@ -773,6 +856,14 @@ async fn run_seeded<J: Journal, M: Model>(
     result
 }
 
+fn published_outline(state: &Checkpoint) -> Option<crate::outline::tools::Draft> {
+    state
+        .outline_run
+        .tool_draft
+        .finished
+        .then(|| state.outline_run.tool_draft.clone())
+}
+
 fn outline_publication_ready(input: &FrozenInput, state: &Checkpoint, input_sha256: &str) -> bool {
     crate::outline::project_draft(input, input_sha256, &state.outline_run.tool_draft).is_ok()
 }
@@ -824,6 +915,8 @@ async fn finalize_run<J: Journal>(
             review,
             quality: "needs_review".into(),
             source_views: state.source_views.clone(),
+            usage: state.journal.usage.clone(),
+            outline: published_outline(state),
         });
     }
     state.draft_stage = crate::analysis::draft::DraftStage::Published;
@@ -843,6 +936,8 @@ async fn finalize_run<J: Journal>(
         review,
         quality: "needs_review".into(),
         source_views: state.source_views.clone(),
+        usage: state.journal.usage.clone(),
+        outline: published_outline(state),
     };
     state.journal.finish()?;
     journal.save(state, &state.progress(input)).await?;

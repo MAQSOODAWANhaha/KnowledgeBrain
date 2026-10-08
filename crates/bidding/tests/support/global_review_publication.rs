@@ -177,6 +177,8 @@ fn legacy_v1_publication_projection_retains_its_own_contract() {
         analysis,
         quality: "verified".into(),
         source_views: Default::default(),
+        usage: Default::default(),
+        outline: None,
     };
     let projected = postgres::publication(&input, &result).unwrap();
     assert_eq!(projected["analysis_result"]["schema_version"], 1);

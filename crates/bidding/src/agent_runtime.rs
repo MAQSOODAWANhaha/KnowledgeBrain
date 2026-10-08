@@ -21,12 +21,51 @@ pub(crate) const SESSION_PREFIX: usize = 2;
 /// Extraction/review append a dynamic progress packet after the transcript.
 pub(crate) const ANALYSIS_SESSION_SUFFIX: usize = 1;
 
+/// Cumulative provider usage. It lives on the journal so dropping the SDK
+/// session at the end of a run does not discard the totals.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub reasoning_tokens: u64,
+}
+
+impl TokenUsage {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn add_reported(&mut self, reported: &knowledge::models::ChatUsage) {
+        self.input_tokens = self
+            .input_tokens
+            .saturating_add(reported.prompt_tokens.unwrap_or(0));
+        self.output_tokens = self
+            .output_tokens
+            .saturating_add(reported.completion_tokens.unwrap_or(0));
+        self.total_tokens = self
+            .total_tokens
+            .saturating_add(reported.total_tokens.unwrap_or(0));
+        self.cached_input_tokens = self
+            .cached_input_tokens
+            .saturating_add(reported.cached_tokens.unwrap_or(0));
+        self.reasoning_tokens = self
+            .reasoning_tokens
+            .saturating_add(reported.reasoning_tokens.unwrap_or(0));
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TurnJournal {
     pub sequence: usize,
     pub pending: Option<PendingTurn>,
     pub session: Option<session::Session>,
+    /// Survives `session = None`. Absent on older checkpoints.
+    #[serde(default, skip_serializing_if = "TokenUsage::is_empty")]
+    pub usage: TokenUsage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +132,23 @@ impl TurnJournal {
             return Err(invalid("finalization requires a committed checkpoint"));
         }
         self.advance()
+    }
+
+    /// Add this response's provider usage onto the durable total.
+    /// Missing usage stays missing: an absent object is not zero consumption.
+    pub fn note_usage(&mut self, response: &ChatTurn) {
+        let Some(reported) = &response.usage else {
+            return;
+        };
+        if reported.prompt_tokens.is_none()
+            && reported.completion_tokens.is_none()
+            && reported.total_tokens.is_none()
+            && reported.cached_tokens.is_none()
+            && reported.reasoning_tokens.is_none()
+        {
+            return;
+        }
+        self.usage.add_reported(reported);
     }
 
     pub fn validate(&self, turn: usize, role: &str) -> Result<(), AgentError> {
