@@ -70,6 +70,43 @@ def test_caption_skips_running_headers_unit_lines_and_prefers_a_number():
         'locator': type('Locator', (), {'page_ordinal': 0})(),
     })()]
     assert '甲' not in module.running_lines(same_page)
+    assert not module.is_unit_line('续表 1：标准一览')
+    assert module.caption_line('续表 1：标准一览\n标签：短注') == '续表 1：标准一览'
+    assert module.is_fragment('名称及件数(后半没有收束')
+    assert not module.is_fragment('清单(包括如下设备)')
+    assert module.caption_line('名称及件数(后半没有收束\n清单(包括如下设备)') == '清单(包括如下设备)'
+    assert module.caption_line('8F 明细一览表\n序 8F') == '8F 明细一览表'
+    assert module.caption_line('表 2 报价一览\n表 2 A') == '表 2 报价一览'
+    assert module.caption_line('表 2 A') == '表 2 A'
+    section_units = []
+    for page in (3, 4):
+        section_units.append(type('Unit', (), {
+            'text': '# 反复出现的书名标题\n正文',
+            'key': f'section:1:page:{page}',
+            'locator': type('Locator', (), {'heading_path': ''})(),
+        })())
+    section_running = module.running_lines(section_units)
+    assert '反复出现的书名标题' in section_running
+    assert module.caption_line('反复出现的书名标题\n续表 1：标准一览', section_running) == '续表 1：标准一览'
+    same_section_page = [
+        type('Unit', (), {
+            'text': '甲',
+            'key': 'section:0:page:1',
+            'locator': type('Locator', (), {})(),
+        })(),
+        type('Unit', (), {
+            'text': '甲',
+            'key': 'section:0:page:1:1',
+            'locator': type('Locator', (), {})(),
+        })(),
+    ]
+    assert '甲' not in module.running_lines(same_section_page)
+    stub_grid = type('Grid', (), {
+        'column_count': 2,
+        'cells': [cell(0, 0, 2, '表 2 A'), cell(1, 0, 1, '名称')],
+    })()
+    assert module.form_title(stub_grid, '表 2 报价一览') == '表 2 报价一览'
+    assert module.form_title(stub_grid, '') == '表 2 A'
 
 
 @pytest.mark.parametrize('extension', ['docx', 'xlsx'])

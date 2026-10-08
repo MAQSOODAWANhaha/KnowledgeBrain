@@ -9,16 +9,21 @@ import base64
 import hashlib
 import json
 from pathlib import Path
+import re
 import uuid
 
 
 _SENTENCE_END = '。.!！?？;；'
 _FRAGMENT_START = '）。)》」』、，,;；'
 # Same short-label bound as outline attachment detection. A unit note is one
-# colon with both sides inside it. Documented in docs/bidding/outline.md.
+# colon with both sides inside it. An index stub is at most half that bound.
+# Documented in docs/bidding/outline.md.
 _LABEL_CHARS = 12
 _NUMERALS = '一二三四五六七八九十'
 _DIGITS = '0123456789０１２３４５６７８９'
+_INDEX_TOKEN = re.compile(rf'^[{_DIGITS}]{{1,3}}[A-Za-zＡ-Ｚａ-ｚ]?$')
+_PAGE_IN_KEY = re.compile(r'(?:^|:)page:(\d+)(?::|$)')
+_BRACKETS = (('(', ')'), ('（', '）'), ('[', ']'), ('【', '】'))
 
 
 def _normalize(text):
@@ -35,44 +40,91 @@ def page_ordinal(locator):
     return value if isinstance(value, int) else None
 
 
+def unit_page(unit):
+    """Page of a source unit.
+
+    Table and image locators carry ``page_ordinal``. Section text does not; the
+    parser records that page in the unit key (``page:<n>``). Either one is enough.
+    """
+    locator = unit.get('locator') if isinstance(unit, dict) else getattr(unit, 'locator', None)
+    page = page_ordinal(locator)
+    if page is not None:
+        return page
+    key = unit.get('key') if isinstance(unit, dict) else getattr(unit, 'key', None)
+    if not isinstance(key, str):
+        return None
+    match = _PAGE_IN_KEY.search(key)
+    return int(match.group(1)) if match else None
+
+
+def plain_line(text):
+    """Drop a leading heading mark. The mark is not part of the line."""
+    line = (text or '').strip()
+    if line.startswith('#'):
+        line = line.lstrip('#').strip()
+    return line
+
+
 def running_lines(units):
     """Lines that occur on at least two pages are page furniture.
 
     Repetition across pages is the signal, wherever the line sits on the page.
     The words themselves are not a list. A line repeated only inside one page
-    is not furniture.
+    is not furniture. Comparison ignores a leading heading mark.
     """
     seen = {}
     for unit in units:
-        page = page_ordinal(getattr(unit, 'locator', None) if not isinstance(unit, dict) else unit.get('locator'))
+        page = unit_page(unit)
         text = unit['text'] if isinstance(unit, dict) else getattr(unit, 'text', '')
         if page is None:
             continue
         for line in (text or '').splitlines():
-            line = _normalize(line.strip())
+            line = _normalize(plain_line(line))
             if line:
                 seen.setdefault(line, set()).add(page)
     return {line for line, pages in seen.items() if len(pages) >= 2}
 
 
 def is_fragment(text):
-    """A line that starts mid-sentence or contains an internal sentence stop."""
-    line = (text or '').strip()
+    """A line that starts mid-sentence, stops inside, or leaves a bracket open."""
+    line = plain_line(text)
     if not line:
         return False
     if line[0] in _FRAGMENT_START:
         return True
-    return any(ch in '。！？!?' for ch in line[:-1])
+    if any(ch in '。！？!?' for ch in line[:-1]):
+        return True
+    return any(line.count(open_) != line.count(close) for open_, close in _BRACKETS)
+
+
+def _has_index_token(text):
+    """A 1–3 digit token, optional single letter. Not a year and not a decimal."""
+    line = plain_line(text)
+    if line[:1] in '（([':
+        line = line[1:].lstrip()
+    for sep in ('：', ':'):
+        line = line.replace(sep, ' ')
+    for token in line.split():
+        token = token.strip('、.．)）]】')
+        if _INDEX_TOKEN.match(token):
+            return True
+    return False
+
+
+def is_index_stub(text):
+    """An index line no longer than half the short-label bound."""
+    line = plain_line(text)
+    return bool(line) and len(line) * 2 <= _LABEL_CHARS and (is_numbered(line) or _has_index_token(line))
 
 
 def is_unit_line(text):
     """A parenthetical note, or one short colon annotation.
 
-    Both sides of the colon have to be short labels. A numbered caption is not
-    a unit note even when it contains a colon.
+    Both sides of the colon have to be short labels. A digit makes the line an
+    index, not a unit note. A numbered caption is not a unit note either.
     """
-    line = (text or '').strip()
-    if len(line) < 3 or is_numbered(line):
+    line = plain_line(text)
+    if len(line) < 3 or is_numbered(line) or any(ch in _DIGITS for ch in line):
         return False
     if (line[0], line[-1]) in {('(', ')'), ('（', '）')}:
         return True
@@ -100,7 +152,7 @@ def is_numbered(text):
 
 
 def usable_line(text, running):
-    line = (text or '').strip()
+    line = plain_line(text)
     if not line or len(line) > 80 or line[-1] in _SENTENCE_END or is_fragment(line):
         return ''
     if _normalize(line) in running or is_unit_line(line):
@@ -108,12 +160,17 @@ def usable_line(text, running):
     return line
 
 
+def _is_index_line(text):
+    return is_numbered(text) or _has_index_token(text)
+
+
 def form_title(grid, previous_text, running=()):
     """Caption carried by the grid, or the numbered line nearest the table.
 
     A cell in row 0 whose span covers every column is the caption when it is
-    not page furniture and not a unit note. Otherwise walk the previous source
-    from the table backward. Detection does not read this title.
+    not page furniture and not a unit note. A stub index there loses to a fuller
+    index line in the previous source. Otherwise walk that source from the table
+    backward. Detection does not read this title.
     """
     columns = getattr(grid, 'column_count', 0) or 0
     spanning = []
@@ -123,18 +180,34 @@ def form_title(grid, previous_text, running=()):
             spanning.append(text)
     if len(spanning) == 1:
         chosen = usable_line(spanning[0], running)
-        if chosen:
+        if chosen and not is_index_stub(chosen):
             return chosen
+        fallback = caption_line(previous_text, running)
+        if chosen and (not fallback or not _is_index_line(fallback) or is_index_stub(fallback)):
+            return chosen
+        if fallback:
+            return fallback
     return caption_line(previous_text, running)
 
 
 def caption_line(text, running=()):
-    """Nearest eligible line. A numbered line beats a closer unnumbered one."""
+    """Nearest eligible line. An index line beats a closer unnumbered one.
+
+    A stub index (at most half the short-label bound) loses to a longer index
+    line in the same text. A stub with no fuller index line is kept.
+    """
     lines = [line.strip() for line in (text or '').splitlines() if line.strip()]
     candidates = [line for line in lines if usable_line(line, running)]
-    numbered = [line for line in candidates if is_numbered(line)]
-    pool = numbered or candidates
-    return pool[-1] if pool else ''
+    indexed = [line for line in candidates if _is_index_line(line)]
+    pool = indexed or candidates
+    if not pool:
+        return ''
+    chosen = pool[-1]
+    if is_index_stub(chosen):
+        fuller = [line for line in indexed if not is_index_stub(line)]
+        if fuller:
+            return fuller[-1]
+    return chosen
 
 
 def main():
