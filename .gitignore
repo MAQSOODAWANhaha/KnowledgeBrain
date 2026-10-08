@@ -1,4 +1,5 @@
 /target
+/ci-binaries/
 /test-results/
 /.artifacts/
 **/*.rs.bk

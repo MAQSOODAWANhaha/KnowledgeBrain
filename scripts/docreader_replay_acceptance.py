@@ -80,8 +80,12 @@ def main():
             env = dict(os.environ, DOCREADER_ADDR=f"127.0.0.1:{port}", GRPC_AUTH_TOKEN=token,
                        KNOWLEDGEBRAIN_REQUIRE_DOCREADER_TESTS="1",
                        KB_DOCREADER_TEST_DOCX=str(docx_path), KB_DOCREADER_TEST_PDF=str(pdf_path))
-            command = ["cargo", "test", "--locked", "-p", "bidding", "--features", "docreader-contract-tests",
-                       "--test", "tender_document_process_real_parse_counts", "--", "--nocapture"]
+            replay_bin = os.environ.get("KB_DOCREADER_REPLAY_BIN")
+            if replay_bin:
+                command = [replay_bin, "--nocapture"]
+            else:
+                command = ["cargo", "test", "--locked", "-p", "bidding", "--features", "docreader-contract-tests",
+                           "--test", "tender_document_process_real_parse_counts", "--", "--nocapture"]
             result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
             sys.stdout.write(result.stdout)
             sys.stderr.write(result.stderr)
