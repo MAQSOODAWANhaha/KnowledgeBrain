@@ -337,13 +337,19 @@ jobs:
         working-directory: services/docreader
     steps:
       - uses: actions/checkout@v4
+      - name: Load CI config
+        working-directory: .
+        run: bash scripts/ci_load_config.sh
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
       - name: sync
         run: uv sync --frozen
       - name: pytest
-        run: uv run pytest tests/
+        run: |
+          set -euo pipefail
+          uv run pytest ${CI_DOCREADER_PYTEST_PATHS:?}
+          PYTHONPATH=${CI_DOCREADER_PYTHONPATH:?} uv run pytest ${CI_SAMPLE_SOURCE_PYTEST:?}
 
   docreader-replay:
     needs: rust-build
