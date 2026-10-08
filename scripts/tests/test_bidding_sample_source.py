@@ -227,6 +227,55 @@ def test_caption_residuals_follow_structure():
         _unit('', 0, grid=_grid(2, [_cell(0, 0, 1, '名称'), _cell(0, 1, 1, '')])),
     ]
     assert module.form_captions(only_header, extra_running=['书名']) == ['']
+    # 第n页 makes each page a different string, so a 60% edge set never joins
+    # them. The folded label is still furniture. A one-page copy then drops.
+    marked = [
+        _unit('正文\n书名第1页', 0),
+        _unit('正文\n书名第2页', 1),
+        _unit('项目全称一览\n书名', 2),
+        _unit('', 2, grid=_grid(2, [_cell(0, 0, 1, '名称'), _cell(0, 1, 1, '')])),
+    ]
+    assert '书名' in module.running_lines(marked)
+    assert module.form_captions(marked) == ['项目全称一览']
+    # The short line is a field inside the grid, not a second-page header and
+    # not in the repeating set. It is empty when nothing else is usable, and
+    # a longer line that is not a cell wins. A full-span caption stays.
+    label_grid = _grid(3, [
+        _cell(0, 0, 1, '书名'), _cell(0, 1, 1, ''), _cell(0, 2, 1, ''),
+        _cell(1, 0, 1, '甲'), _cell(1, 1, 1, ''), _cell(1, 2, 1, ''),
+        _cell(2, 0, 1, '乙'), _cell(2, 1, 1, ''), _cell(2, 2, 1, ''),
+    ])
+    assert module.form_captions([
+        _unit('书名', 0),
+        _unit('', 0, grid=label_grid),
+    ]) == ['']
+    assert module.form_captions([
+        _unit('项目全称一览\n书名', 0),
+        _unit('', 0, grid=label_grid),
+    ]) == ['项目全称一览']
+    assert module.form_title(
+        _grid(2, [_cell(0, 0, 2, '合并表头'), _cell(1, 0, 1, '名称')]),
+        '不应采用这一行') == '合并表头'
+    # The longer title shares the stub's lettered token, or the same letters
+    # with different spaces, and may live on the heading or in the grid.
+    token_heading = [
+        _unit('附件 3Z', 0, heading='分册 > 3Z 资质一览'),
+        _unit('', 0, grid=_grid(2, [_cell(0, 0, 1, '名称'), _cell(0, 1, 1, '')])),
+    ]
+    assert module.form_captions(token_heading) == ['3Z 资质一览']
+    packed = [
+        _unit('附件 3Z', 0, heading='分册'),
+        _unit('', 0, grid=_grid(2, [
+            _cell(0, 0, 1, '附件3Z资质一览'), _cell(0, 1, 1, '')])),
+    ]
+    assert module.form_captions(packed) == ['附件3Z资质一览']
+    split = [
+        _unit('附件 3Z', 0),
+        _unit('', 0, grid=_grid(2, [
+            _cell(0, 0, 1, '附件 3Z'), _cell(0, 1, 1, '资质一览')])),
+    ]
+    assert module.form_captions(split) == ['附件 3Z 资质一览']
+    assert module.caption_line('表 2 A', headings=['第 2 节 总则']) == '表 2 A'
 
 
 @pytest.mark.parametrize('extension', ['docx', 'xlsx'])
