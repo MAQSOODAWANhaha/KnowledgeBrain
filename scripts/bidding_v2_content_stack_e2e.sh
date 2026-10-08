@@ -8,15 +8,12 @@ import json
 import re
 from pathlib import Path
 
-expected = {
-    "postgres": "pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b",
-    "redis": "redis@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf",
-}
 lock = json.loads(Path("deploy/images.lock.json").read_bytes())
 rows = lock["platforms"]["linux/amd64"]["runtime_deployable"]
+pattern = re.compile(r"[^:@]+(?:/[^:@]+)*@sha256:[0-9a-f]{64}")
 for lock_id in ("postgres", "redis"):
     matches = [row["image"] for row in rows if row.get("lock_id") == lock_id]
-    if matches != [expected[lock_id]] or not re.fullmatch(r"[^:@]+(?:/[^:@]+)*@sha256:[0-9a-f]{64}", matches[0]):
+    if len(matches) != 1 or not pattern.fullmatch(matches[0]):
         raise SystemExit(f"invalid immutable {lock_id} image lock")
     print(matches[0])
 PY
@@ -93,12 +90,23 @@ common_release=(
   KB_RELEASE_DESCRIPTOR_SHA256=770ce81ba32a38ff76cdee4e26abe276e3645a07dd6a6bf9d14ebf2bee76d84c
   KB_DEPLOYMENT_NAMESPACE_ID="$namespace"
 )
-env "${common_release[@]}" KB_COMPONENT_KIND=migrator \
-  KB_COMPONENT_IMAGE_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111 \
-  DATABASE_URL="postgres://kb_migrator:migrator@127.0.0.1:25433/$database" \
-  cargo run --locked -q -p platform --bin migrator
-cargo build --locked -q -p api -p worker
-target_dir=$(cargo metadata --locked --format-version=1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
+if [[ -n "${KB_MIGRATOR_BIN:-}" && -n "${KB_API_BIN:-}" && -n "${KB_WORKER_BIN:-}" ]]; then
+  env "${common_release[@]}" KB_COMPONENT_KIND=migrator \
+    KB_COMPONENT_IMAGE_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+    DATABASE_URL="postgres://kb_migrator:migrator@127.0.0.1:25433/$database" \
+    "$KB_MIGRATOR_BIN"
+  api_bin=$KB_API_BIN
+  worker_bin=$KB_WORKER_BIN
+else
+  env "${common_release[@]}" KB_COMPONENT_KIND=migrator \
+    KB_COMPONENT_IMAGE_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+    DATABASE_URL="postgres://kb_migrator:migrator@127.0.0.1:25433/$database" \
+    cargo run --locked -q -p platform --bin migrator
+  cargo build --locked -q -p api -p worker
+  target_dir=$(cargo metadata --locked --format-version=1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
+  api_bin=$target_dir/debug/api
+  worker_bin=$target_dir/debug/worker
+fi
 
 GATEWAY_PORT="$gateway_port" GATEWAY_MODEL=scripted-content \
   python3 scripts/bidding_v2_deterministic_gateway.py >"$gateway_log" 2>&1 & pids+=("$!")
@@ -117,12 +125,12 @@ common_runtime=(
 env "${common_release[@]}" "${common_runtime[@]}" KB_COMPONENT_KIND=api \
   KB_COMPONENT_IMAGE_DIGEST=sha256:2222222222222222222222222222222222222222222222222222222222222222 \
   DATABASE_URL="postgres://kb_runtime_api:api@127.0.0.1:25433/$database" API_PORT="$api_port" \
-  "$target_dir/debug/api" >"$api_log" 2>&1 & pids+=("$!")
+  "$api_bin" >"$api_log" 2>&1 & pids+=("$!")
 env "${common_release[@]}" "${common_runtime[@]}" KB_COMPONENT_KIND=worker \
   KB_COMPONENT_IMAGE_DIGEST=sha256:3333333333333333333333333333333333333333333333333333333333333333 \
   DATABASE_URL="postgres://kb_runtime_worker:worker@127.0.0.1:25433/$database" \
   KB_V2_TEST_EMBEDDING_KEY=unused-exact-only KB_V2_TEST_RERANK_KEY=unused-exact-only \
-  "$target_dir/debug/worker" >"$worker_log" 2>&1 & pids+=("$!")
+  "$worker_bin" >"$worker_log" 2>&1 & pids+=("$!")
 
 for _ in $(seq 1 120); do
   curl -fsS "http://127.0.0.1:$gateway_port/healthz" >/dev/null 2>&1 \

@@ -2,6 +2,21 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+run_platform_bin() {
+  local name=$1
+  local bin=""
+  case "$name" in
+    migrator) bin=${KB_MIGRATOR_BIN:-} ;;
+    schema-verifier) bin=${KB_SCHEMA_VERIFIER_BIN:-} ;;
+    *) echo "unknown platform binary: $name" >&2; return 2 ;;
+  esac
+  if [[ -n "$bin" ]]; then
+    "$bin"
+  else
+    cargo run --quiet --locked -p platform --bin "$name"
+  fi
+}
+
 : "${KNOWLEDGEBRAIN_TEST_DATABASE_URL:?KNOWLEDGEBRAIN_TEST_DATABASE_URL is required}"
 : "${KNOWLEDGEBRAIN_MIGRATOR_PASSWORD:?KNOWLEDGEBRAIN_MIGRATOR_PASSWORD is required}"
 : "${KNOWLEDGEBRAIN_API_DB_PASSWORD:?KNOWLEDGEBRAIN_API_DB_PASSWORD is required}"
@@ -107,7 +122,7 @@ SQL
 export DATABASE_URL="$migrator_url"
 export KB_COMPONENT_KIND=migrator
 export KB_COMPONENT_IMAGE_DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
-cargo run --quiet --locked -p platform --bin migrator
+run_platform_bin migrator
 
 schema_state="$(psql "$admin_url" -X -v ON_ERROR_STOP=1 -At <<'SQL'
 SELECT CASE WHEN
@@ -133,7 +148,7 @@ SELECT created_at::text||'|'||catalog_manifest_sha256::text||'|'||
 FROM public.platform_schema_snapshot WHERE singleton;
 SQL
 )"
-cargo run --quiet --locked -p platform --bin migrator
+run_platform_bin migrator
 after_replay="$(psql "$admin_url" -X -v ON_ERROR_STOP=1 -At <<'SQL'
 SELECT created_at::text||'|'||catalog_manifest_sha256::text||'|'||
   (SELECT count(*) FROM pg_catalog.pg_class relation JOIN pg_catalog.pg_roles owner_role ON owner_role.oid=relation.relowner WHERE owner_role.rolname='kb_app_owner')||'|'||
@@ -154,7 +169,7 @@ for component in api worker retention; do
   export DATABASE_URL="$runtime_url" KB_COMPONENT_KIND="$component"
   KB_COMPONENT_IMAGE_DIGEST="sha256:$(printf '%064d' 0 | tr 0 "$digest_digit")"
   export KB_COMPONENT_IMAGE_DIGEST
-  cargo run --quiet --locked -p platform --bin schema-verifier
+  run_platform_bin schema-verifier
   for denied_sql in 'CREATE TEMP TABLE forbidden_temp(id integer)' \
       'CREATE TABLE public.forbidden_runtime_ddl(id integer)' 'SET ROLE kb_app_owner'; do
     if denied_output="$(psql "$runtime_url" -X -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -c "$denied_sql" 2>&1)"; then
@@ -172,7 +187,7 @@ psql "$admin_url" -X -v ON_ERROR_STOP=1 -c "UPDATE public.platform_schema_snapsh
 export DATABASE_URL="$migrator_url"
 export KB_COMPONENT_KIND=migrator
 export KB_COMPONENT_IMAGE_DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
-if mismatch_output="$(cargo run --quiet --locked -p platform --bin migrator 2>&1)"; then
+if mismatch_output="$(run_platform_bin migrator 2>&1)"; then
   echo "migrator accepted a mismatched receipt" >&2; exit 1
 fi
 [[ "$mismatch_output" == *"SCHEMA_REVISION_MISMATCH"* && "$mismatch_output" == *"reset required"* ]] || {
@@ -181,11 +196,11 @@ fi
 psql "$admin_url" -X -v ON_ERROR_STOP=1 -v revision="$original_revision" >/dev/null <<'SQL'
 UPDATE public.platform_schema_snapshot SET schema_revision=:'revision' WHERE singleton;
 SQL
-cargo run --quiet --locked -p platform --bin migrator
+run_platform_bin migrator
 
 # Catalog drift must also be refused by the migrator, without repairing it.
 psql "$admin_url" -X -v ON_ERROR_STOP=1 -c 'ALTER FUNCTION kb_actor_identity_valid(text) VOLATILE' >/dev/null
-if mismatch_output="$(cargo run --quiet --locked -p platform --bin migrator 2>&1)"; then
+if mismatch_output="$(run_platform_bin migrator 2>&1)"; then
   echo "migrator accepted catalog drift" >&2; exit 1
 fi
 [[ "$mismatch_output" == *"SCHEMA_REVISION_MISMATCH"* ]] || {
@@ -195,6 +210,6 @@ fi
   echo "migrator repaired catalog drift" >&2; exit 1
 }
 psql "$admin_url" -X -v ON_ERROR_STOP=1 -c 'ALTER FUNCTION kb_actor_identity_valid(text) IMMUTABLE' >/dev/null
-cargo run --quiet --locked -p platform --bin migrator
+run_platform_bin migrator
 
 printf '%s\n' 'fresh-schema-acceptance-ok'

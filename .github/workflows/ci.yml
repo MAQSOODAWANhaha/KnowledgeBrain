@@ -1,96 +1,133 @@
 name: CI
 
 on:
-  push:
   pull_request:
+  push:
+    # One workflow run per PR commit: pull_request covers PR heads, and push
+    # covers only CI_PUSH_BRANCH. Concurrency cancel does not dedupe those two
+    # events, because their refs differ. GitHub cannot read the default branch
+    # inside `on:`. scripts/ci_check_sources.sh fails when CI_PUSH_BRANCH is not
+    # that default branch. Images still publish only on the default branch.
+    branches: [main]
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  rust:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: knowledgebrain_test_ci
-        ports:
-          - 25433:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d knowledgebrain_test_ci"
-          --health-interval 5s --health-timeout 5s --health-retries 20
-      redis:
-        image: redis@sha256:71da9275c5f3fcb97d0fa0c8c5b36cc995327265420f17a04bfd544f458059f7
-        ports:
-          - 26379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s --health-timeout 5s --health-retries 20
+  rust-build:
+    # CI_RUNNER. Later jobs reuse the alias. runs-on cannot read env.
+    runs-on: &runner ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - name: Load CI config
+        run: bash scripts/ci_load_config.sh
+      - name: Toolchain matches rust-toolchain.toml
+        run: grep -Fq "channel = \"${RUST_TOOLCHAIN}\"" rust-toolchain.toml
+      - name: Config matches the repository
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: bash scripts/ci_check_sources.sh
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.97.0
-          components: rustfmt, clippy
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: ${{ env.RUST_COMPONENTS }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ env.RUST_CACHE_SHARED_KEY }}
+          cache-on-failure: false
       - name: format
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: tests
-        run: cargo test --locked --workspace --no-fail-fast
-      - name: One-shot outline acceptance
         run: |
           set -euo pipefail
-          log="$RUNNER_TEMP/one-shot-outline.log"
-          cargo test --locked -p bidding --lib outline::acceptance::one_shot_acceptance_publishes_from_the_tool_draft -- --exact --nocapture 2>&1 | tee "$log"
-          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"
-          log="$RUNNER_TEMP/outline-retirement.log"
-          cargo test --locked -p bidding --lib analysis::agent::retirement:: -- --nocapture 2>&1 | tee "$log"
-          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"
-      - uses: actions/setup-python@v5
+          log="$RUNNER_TEMP/workspace-tests.log"
+          cargo test --locked --workspace --no-fail-fast 2>&1 | tee "$log"
+          bash scripts/ci_assert_workspace_tests.sh "$log"
+      - name: runtime binaries
+        run: |
+          set -euo pipefail
+          cargo build --locked -p "$CI_API_BIN" -p "$CI_WORKER_BIN"
+          cargo build --locked -p "$CI_PLATFORM_PACKAGE" --bin "$CI_MIGRATOR_BIN" --bin "$CI_SCHEMA_VERIFIER_BIN"
+      - name: Package dev binaries and integration tests
+        run: bash scripts/ci_package_binaries.sh
+      - uses: actions/upload-artifact@v7
         with:
-          python-version: '3.12'
+          name: ${{ env.CI_ARTIFACT_NAME }}
+          path: ${{ env.CI_BIN_DIR }}
+          if-no-files-found: error
+          retention-days: ${{ env.CI_ARTIFACT_RETENTION_DAYS }}
+
+  postgres-acceptance:
+    needs: rust-build
+    runs-on: *runner
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Load CI config
+        run: bash scripts/ci_load_config.sh
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ env.CI_ARTIFACT_NAME }}
+          path: ${{ env.CI_BIN_DIR }}
+      - name: Bind packaged binaries
+        run: bash scripts/ci_bind_binaries.sh
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
       - name: Live bidding schema acceptance
         run: |
           python -m venv "$RUNNER_TEMP/kb-schema-validation"
           "$RUNNER_TEMP/kb-schema-validation/bin/python" -m pip install -r scripts/requirements-schema-validation.txt
           "$RUNNER_TEMP/kb-schema-validation/bin/python" -m pip check
           "$RUNNER_TEMP/kb-schema-validation/bin/python" scripts/bid_authoring_schema_validation.py
-      - name: bootstrap isolated PostgreSQL acceptance schema
-        env:
-          PGPASSWORD: postgres
+      - name: PostgreSQL client
         run: |
-          psql -h 127.0.0.1 -p 25433 -U postgres -d knowledgebrain_test_ci -v ON_ERROR_STOP=1 <<'SQL'
+          if ! command -v psql >/dev/null || ! command -v createdb >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+          fi
+      - name: Start PostgreSQL and Redis
+        run: |
+          export CI_POSTGRES_USER="$CI_APP_POSTGRES_USER"
+          export CI_POSTGRES_PASSWORD="$CI_APP_POSTGRES_PASSWORD"
+          export CI_POSTGRES_DB="$CI_APP_POSTGRES_DB"
+          bash scripts/ci_services.sh start both
+      - name: bootstrap isolated PostgreSQL acceptance schema
+        run: |
+          export PGPASSWORD="$CI_APP_POSTGRES_PASSWORD"
+          psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -d "$CI_APP_POSTGRES_DB" -v ON_ERROR_STOP=1 <<SQL
           CREATE EXTENSION IF NOT EXISTS pgcrypto;
           CREATE EXTENSION IF NOT EXISTS vector;
           CREATE ROLE kb_app_owner NOLOGIN NOINHERIT;
-          CREATE ROLE kb_migrator LOGIN NOINHERIT PASSWORD 'migrator';
-          CREATE ROLE kb_runtime_api LOGIN PASSWORD 'api';
-          CREATE ROLE kb_runtime_worker LOGIN PASSWORD 'worker';
-          CREATE ROLE kb_runtime_retention LOGIN PASSWORD 'retention';
+          CREATE ROLE kb_migrator LOGIN NOINHERIT PASSWORD '${KNOWLEDGEBRAIN_MIGRATOR_PASSWORD}';
+          CREATE ROLE kb_runtime_api LOGIN PASSWORD '${KNOWLEDGEBRAIN_API_DB_PASSWORD}';
+          CREATE ROLE kb_runtime_worker LOGIN PASSWORD '${KNOWLEDGEBRAIN_WORKER_DB_PASSWORD}';
+          CREATE ROLE kb_runtime_retention LOGIN PASSWORD '${KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD}';
           GRANT kb_app_owner TO kb_migrator;
           ALTER SCHEMA public OWNER TO kb_app_owner;
-          REVOKE TEMPORARY,CREATE ON DATABASE knowledgebrain_test_ci FROM PUBLIC;
+          REVOKE TEMPORARY,CREATE ON DATABASE ${CI_APP_POSTGRES_DB} FROM PUBLIC;
           REVOKE CREATE ON SCHEMA public FROM PUBLIC;
           SQL
           { echo 'BEGIN; SET LOCAL ROLE kb_app_owner;'; cat migrations/shared_platform_baseline.sql migrations/knowledge_base_baseline.sql migrations/bidding_v2_baseline.sql; echo 'COMMIT;'; } \
-            | psql -h 127.0.0.1 -p 25433 -U postgres -d knowledgebrain_test_ci -v ON_ERROR_STOP=1
+            | psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -d "$CI_APP_POSTGRES_DB" -v ON_ERROR_STOP=1
       - name: Content AgentRun and typed cleanup delivery PostgreSQL acceptance
         env:
-          KNOWLEDGEBRAIN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:25433/knowledgebrain_test_ci
           KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS: "1"
           KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS: "1"
-          KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD: retention
-          REDIS_URL: redis://127.0.0.1:26379/
-          KB_DEPLOYMENT_NAMESPACE_ID: 8fa19c5f-2afb-4cd8-b1c9-3378bcfd41a3
         run: |
           set -euo pipefail
+          export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
+          export KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD
+          export REDIS_URL="redis://${CI_POSTGRES_HOST}:${CI_REDIS_PORT}/"
+          export KB_DEPLOYMENT_NAMESPACE_ID="$CI_CONTENT_NAMESPACE_ID"
           export OBJECT_DIR
           OBJECT_DIR=$(mktemp -d "$RUNNER_TEMP/request-delivery-objects.XXXXXX")
           cleanup() {
@@ -101,15 +138,15 @@ jobs:
             exit "$result"
           }
           trap cleanup EXIT
-          for suite in content_agent_run_postgres request_delivery_postgres; do
+          read -r -a suites <<< "$CI_CONTENT_POSTGRES_TESTS"
+          for suite in "${suites[@]}"; do
             log="$RUNNER_TEMP/$suite.log"
-            cargo test --locked -p bidding --test "$suite" -- --test-threads=1 --nocapture 2>&1 | tee "$log"
-            grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' "$log"
+            bash scripts/ci_run_packaged_test.sh "$suite" "$log" --unfiltered -- --test-threads=1 --nocapture
             if grep -Eq 'skipped .*contract:' "$log"; then
               echo "required PostgreSQL suite $suite skipped a contract" >&2
               exit 1
             fi
-            if [ "$suite" = request_delivery_postgres ]; then
+            if [ "$suite" = "$CI_REQUEST_DELIVERY_TEST" ]; then
               grep -Eq '^test cleanup_native_duplicates_protect_references_and_retry_failed_blob_deletion \.\.\.' "$log"
               grep -Eq '^test cleanup_unconfirmed_handoff_keeps_staging_blob_and_tracker \.\.\.' "$log"
               grep -q 'native retry observed job=' "$log"
@@ -118,81 +155,79 @@ jobs:
             fi
           done
       - name: Tender analysis publication and fencing PostgreSQL acceptance
-        env:
-          KB_TENDER_AGENT_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:25433/knowledgebrain_test_ci
         run: |
           set -euo pipefail
-          for filter in analysis_ repair_checkpoint_ review_draft_ source_review_; do
-            log="$RUNNER_TEMP/tender-$filter.log"
-            cargo test --locked -p bidding --test tender_analysis_postgres "$filter" -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$log"
-            grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$log"
-          done
+          export KB_TENDER_AGENT_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
+          log="$RUNNER_TEMP/tender-analysis.log"
+          bash scripts/ci_run_packaged_test.sh "$CI_TENDER_TEST" "$log" -- --ignored --test-threads=1 --nocapture
       - name: Frozen exact-version retrieval PostgreSQL acceptance
-        env:
-          PGPASSWORD: postgres
-          KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS: "1"
-          KNOWLEDGEBRAIN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:25433/knowledgebrain_test_frozen_replay_ci
         run: |
-          cleanup() { dropdb -h 127.0.0.1 -p 25433 -U postgres --if-exists --force knowledgebrain_test_frozen_replay_ci; }
+          set -euo pipefail
+          export PGPASSWORD="$CI_APP_POSTGRES_PASSWORD"
+          export KNOWLEDGEBRAIN_REQUIRE_POSTGRES_TESTS=1
+          export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_FROZEN_DATABASE}"
+          cleanup() { dropdb -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" --if-exists --force "$CI_FROZEN_DATABASE"; }
           trap cleanup EXIT
-          createdb -h 127.0.0.1 -p 25433 -U postgres -T template0 knowledgebrain_test_frozen_replay_ci
-          psql -h 127.0.0.1 -p 25433 -U postgres -d knowledgebrain_test_frozen_replay_ci -v ON_ERROR_STOP=1 <<'SQL'
+          createdb -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -T template0 "$CI_FROZEN_DATABASE"
+          psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -d "$CI_FROZEN_DATABASE" -v ON_ERROR_STOP=1 <<SQL
           CREATE EXTENSION pgcrypto;
           CREATE EXTENSION vector;
           ALTER SCHEMA public OWNER TO kb_app_owner;
-          REVOKE TEMPORARY,CREATE ON DATABASE knowledgebrain_test_frozen_replay_ci FROM PUBLIC;
+          REVOKE TEMPORARY,CREATE ON DATABASE ${CI_FROZEN_DATABASE} FROM PUBLIC;
           REVOKE CREATE ON SCHEMA public FROM PUBLIC;
           SQL
           { echo 'BEGIN; SET LOCAL ROLE kb_app_owner;'; cat migrations/shared_platform_baseline.sql migrations/knowledge_base_baseline.sql; echo 'COMMIT;'; } \
-            | psql -h 127.0.0.1 -p 25433 -U postgres -d knowledgebrain_test_frozen_replay_ci -v ON_ERROR_STOP=1
-          cargo test --locked -p bidding --features knowledge-v2-exact-contract-tests \
-            --test knowledge_retrieval_exact_v2 \
-            frozen_exact_replay_and_attestation_survive_current_version_and_latest_policy_changes \
-            -- --exact --test-threads=1
-
+            | psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -d "$CI_FROZEN_DATABASE" -v ON_ERROR_STOP=1
+          log="$RUNNER_TEMP/frozen-exact.log"
+          bash scripts/ci_run_packaged_test.sh "$CI_FROZEN_TEST_BIN" "$log" -- "$CI_FROZEN_EXACT_TEST" --exact --test-threads=1
       - name: Outline/response SQL publish acceptance
-        env:
-          PGPASSWORD: postgres
-          KNOWLEDGEBRAIN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:25433/knowledgebrain_test_ci
-        run: bash scripts/bidding_v2_phase_fixture_acceptance.sh
+        run: |
+          export PGPASSWORD="$CI_APP_POSTGRES_PASSWORD"
+          export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
+          bash scripts/bidding_v2_phase_fixture_acceptance.sh
+      - name: Stop services
+        if: always()
+        run: bash scripts/ci_services.sh stop
 
   schema-contract:
-    runs-on: ubuntu-latest
+    needs: rust-build
+    runs-on: *runner
     timeout-minutes: 30
-    services:
-      postgres:
-        image: pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
-        env:
-          POSTGRES_USER: knowledgebrain
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 25433:5432
-        options: >-
-          --health-cmd "pg_isready -U knowledgebrain -d postgres"
-          --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@v7
+      - name: Load CI config
+        run: bash scripts/ci_load_config.sh
+      - uses: actions/download-artifact@v8
         with:
-          toolchain: 1.97.0
+          name: ${{ env.CI_ARTIFACT_NAME }}
+          path: ${{ env.CI_BIN_DIR }}
+      - name: Bind packaged binaries
+        run: bash scripts/ci_bind_binaries.sh
+      - name: PostgreSQL client
+        run: |
+          if ! command -v psql >/dev/null || ! command -v createdb >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+          fi
+      - name: Start PostgreSQL
+        run: |
+          export CI_POSTGRES_USER="$CI_SCHEMA_POSTGRES_USER"
+          export CI_POSTGRES_PASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
+          export CI_POSTGRES_DB="$CI_SCHEMA_POSTGRES_DB"
+          bash scripts/ci_services.sh start postgres
       - name: Fresh lifecycle and required catalog PostgreSQL acceptance
-        env:
-          PGHOST: 127.0.0.1
-          PGPORT: '25433'
-          PGUSER: knowledgebrain
-          PGPASSWORD: postgres
-          POSTGRES_USER: knowledgebrain
-          KNOWLEDGEBRAIN_MIGRATOR_PASSWORD: migrator
-          KNOWLEDGEBRAIN_API_DB_PASSWORD: api
-          KNOWLEDGEBRAIN_WORKER_DB_PASSWORD: worker
-          KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD: retention
-          KNOWLEDGEBRAIN_TEST_DATABASE_URL: postgres://knowledgebrain:postgres@127.0.0.1:25433/knowledgebrain_test_lifecycle_ci
-          KNOWLEDGEBRAIN_CATALOG_TEST_DATABASE_URL: postgres://kb_migrator:migrator@127.0.0.1:25433/knowledgebrain_test_catalog_ci
-          KNOWLEDGEBRAIN_CATALOG_TEST_ADMIN_PASSWORD: postgres
-          KNOWLEDGEBRAIN_REQUIRE_CATALOG_POSTGRES_TEST: '1'
         run: |
           set -euo pipefail
+          export PGHOST="$CI_POSTGRES_HOST"
+          export PGPORT="$CI_POSTGRES_PORT"
+          export PGUSER="$CI_SCHEMA_POSTGRES_USER"
+          export PGPASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
+          export POSTGRES_USER="$CI_SCHEMA_POSTGRES_USER"
+          export KNOWLEDGEBRAIN_MIGRATOR_PASSWORD KNOWLEDGEBRAIN_API_DB_PASSWORD KNOWLEDGEBRAIN_WORKER_DB_PASSWORD KNOWLEDGEBRAIN_RETENTION_DB_PASSWORD
+          export KNOWLEDGEBRAIN_TEST_DATABASE_URL="postgres://${CI_SCHEMA_POSTGRES_USER}:${CI_SCHEMA_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_SCHEMA_LIFECYCLE_DATABASE}"
+          export KNOWLEDGEBRAIN_CATALOG_TEST_DATABASE_URL="postgres://kb_migrator:${KNOWLEDGEBRAIN_MIGRATOR_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_SCHEMA_CATALOG_DATABASE}"
+          export KNOWLEDGEBRAIN_CATALOG_TEST_ADMIN_PASSWORD="$CI_SCHEMA_POSTGRES_PASSWORD"
+          export KNOWLEDGEBRAIN_REQUIRE_CATALOG_POSTGRES_TEST=1
           created_databases=()
           cleanup() {
             result=$?
@@ -203,78 +238,89 @@ jobs:
             exit "$result"
           }
           trap cleanup EXIT
-          for database in knowledgebrain_test_lifecycle_ci knowledgebrain_test_catalog_ci; do
+          for database in "$CI_SCHEMA_LIFECYCLE_DATABASE" "$CI_SCHEMA_CATALOG_DATABASE"; do
             createdb -T template0 "$database"
             created_databases+=("$database")
             POSTGRES_DB="$database" sh deploy/postgres-init/010-runtime-identities.sh
           done
           bash scripts/fresh_schema_acceptance.sh
-          log="$RUNNER_TEMP/catalog_manifest_postgres.log"
-          cargo test --locked -p platform --test catalog_manifest_postgres -- --test-threads=1 --nocapture 2>&1 | tee "$log"
-          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' "$log"
+          log="$RUNNER_TEMP/${CI_CATALOG_TEST}.log"
+          bash scripts/ci_run_packaged_test.sh "$CI_CATALOG_TEST" "$log" --unfiltered -- --test-threads=1 --nocapture
           if grep -Eq 'skipped catalog manifest PostgreSQL fixture:' "$log"; then
             echo "required catalog PostgreSQL fixture was skipped" >&2
             exit 1
           fi
+      - name: Stop services
+        if: always()
+        run: bash scripts/ci_services.sh stop
 
   queue-faults:
-    runs-on: ubuntu-latest
+    needs: rust-build
+    runs-on: *runner
     timeout-minutes: 20
-    services:
-      redis:
-        image: redis@sha256:71da9275c5f3fcb97d0fa0c8c5b36cc995327265420f17a04bfd544f458059f7
-        ports:
-          - 6379/tcp
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@v7
+      - name: Load CI config
+        run: bash scripts/ci_load_config.sh
+      - uses: actions/download-artifact@v8
         with:
-          toolchain: 1.97.0
+          name: ${{ env.CI_ARTIFACT_NAME }}
+          path: ${{ env.CI_BIN_DIR }}
+      - name: Bind packaged binaries
+        run: bash scripts/ci_bind_binaries.sh
+      - name: Start Redis
+        run: bash scripts/ci_services.sh start redis
       - name: Required native Oxana faults against isolated Redis
-        env:
-          KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS: '1'
-          REDIS_URL: redis://127.0.0.1:${{ job.services.redis.ports[6379] }}/
         run: |
           set -euo pipefail
           unset OXANA_NATIVE_FAULTS_CHILD OXANA_NATIVE_FAULTS_NAMESPACE
+          export KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS=1
+          export REDIS_URL="redis://${CI_POSTGRES_HOST}:${CI_REDIS_PORT}/"
           log="$RUNNER_TEMP/queue-faults.log"
-          cargo test --locked -p platform --test oxana_native_faults -- --test-threads=1 --nocapture 2>&1 | tee "$log"
-          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;' "$log"
+          bash scripts/ci_run_packaged_test.sh "$CI_OXANA_TEST" "$log" --unfiltered -- --test-threads=1 --nocapture
           if grep -Eq 'skip oxana native faults:|skip runtime test' "$log"; then
             echo "required native Oxana fault tests skipped execution" >&2
             exit 1
           fi
       - name: Preserve native fault evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: queue-faults-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/queue-faults.log
           if-no-files-found: error
+      - name: Stop services
+        if: always()
+        run: bash scripts/ci_services.sh stop
 
   content-e2e:
-    runs-on: ubuntu-latest
+    needs: rust-build
+    runs-on: *runner
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@v7
+      - name: Load CI config
+        run: bash scripts/ci_load_config.sh
+      - uses: actions/download-artifact@v8
         with:
-          toolchain: 1.97.0
+          name: ${{ env.CI_ARTIFACT_NAME }}
+          path: ${{ env.CI_BIN_DIR }}
+      - name: Bind packaged binaries
+        run: bash scripts/ci_bind_binaries.sh
       - name: Content E2E fail-closed cleanup contract
         run: bash scripts/tests/bidding_v2_content_e2e_cleanup_test.sh
       - name: Hermetic Content API Redis Worker E2E
         run: bash scripts/bidding_v2_content_stack_e2e.sh
 
   web:
-    runs-on: ubuntu-latest
+    runs-on: *runner
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - name: Load CI config
+        run: bash scripts/ci_load_config.sh
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci --prefix web
@@ -286,29 +332,54 @@ jobs:
         run: npm run build --prefix web
 
   python:
-    runs-on: ubuntu-latest
+    runs-on: *runner
     defaults:
       run:
         working-directory: services/docreader
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - name: Load CI config
+        working-directory: .
+        run: bash scripts/ci_load_config.sh
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
       - name: sync
         run: uv sync --frozen
       - name: pytest
-        run: uv run pytest tests/
-      - uses: dtolnay/rust-toolchain@master
+        run: |
+          set -euo pipefail
+          uv run pytest ${CI_DOCREADER_PYTEST_PATHS:?}
+          PYTHONPATH=${CI_DOCREADER_PYTHONPATH:?} uv run pytest ${CI_SAMPLE_SOURCE_PYTEST:?}
+
+  docreader-replay:
+    needs: rust-build
+    runs-on: *runner
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Load CI config
+        run: bash scripts/ci_load_config.sh
+      - uses: actions/download-artifact@v8
         with:
-          toolchain: 1.97.0
+          name: ${{ env.CI_ARTIFACT_NAME }}
+          path: ${{ env.CI_BIN_DIR }}
+      - name: Bind packaged binaries
+        run: bash scripts/ci_bind_binaries.sh
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+      - name: sync
+        working-directory: services/docreader
+        run: uv sync --frozen
       - name: Required Rust replay contract against real DocReader service
+        working-directory: services/docreader
         run: uv run python ../../scripts/docreader_replay_acceptance.py
 
   images:
-    needs: [rust, schema-contract, queue-faults, content-e2e, web, python]
+    needs: [rust-build, postgres-acceptance, schema-contract, queue-faults, content-e2e, web, python, docreader-replay]
     if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-latest
+    runs-on: *runner
     timeout-minutes: 120
     permissions:
       contents: read
@@ -316,17 +387,19 @@ jobs:
     env:
       REGISTRY: ghcr.io
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - name: Load CI config
+        run: bash scripts/ci_load_config.sh
       - name: Image prefix
         run: echo "IMAGE_PREFIX=${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Build and push api
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/Dockerfile.rust
@@ -335,13 +408,13 @@ jobs:
           sbom: false
           tags: ${{ env.IMAGE_PREFIX }}/api:latest
           build-args: |
-            BIN=api
+            BIN=${{ env.CI_API_BIN }}
             CARGO_MIRROR=none
             APT_MIRROR=none
           cache-from: type=gha,scope=rust-runtime
           cache-to: type=gha,mode=max,scope=rust-runtime
       - name: Build and push worker
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/Dockerfile.rust
@@ -350,13 +423,13 @@ jobs:
           sbom: false
           tags: ${{ env.IMAGE_PREFIX }}/worker:latest
           build-args: |
-            BIN=worker
+            BIN=${{ env.CI_WORKER_BIN }}
             CARGO_MIRROR=none
             APT_MIRROR=none
           cache-from: type=gha,scope=rust-runtime
           cache-to: type=gha,mode=max,scope=rust-runtime
       - name: Build and push migrator
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/Dockerfile.rust
@@ -365,13 +438,13 @@ jobs:
           sbom: false
           tags: ${{ env.IMAGE_PREFIX }}/migrator:latest
           build-args: |
-            BIN=migrator
+            BIN=${{ env.CI_MIGRATOR_BIN }}
             CARGO_MIRROR=none
             APT_MIRROR=none
           cache-from: type=gha,scope=rust-runtime
           cache-to: type=gha,mode=max,scope=rust-runtime
       - name: Build and push docreader
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/Dockerfile.docreader
