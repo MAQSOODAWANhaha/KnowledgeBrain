@@ -13,6 +13,8 @@ pub mod agent_runtime;
 pub mod analysis;
 pub mod authoring_runtime;
 pub mod content_block;
+pub mod journal_db;
 pub mod outline;
 pub mod response;
 pub mod template_grid;
+pub mod worker;

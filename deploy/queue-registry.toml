@@ -241,7 +241,7 @@ protocol = 1
 handler = "TenderDocumentProcessV2Handler"
 snapshots = ["request", "document", "parser_contract"]
 capabilities = ["postgresql", "object_store", "docreader", "ocr", "vlm"]
-launch_mode = "declared_disabled"
+launch_mode = "required_enabled"
 
 [[entries]]
 physical_queue = "bid-authoring-v2"
@@ -277,7 +277,7 @@ protocol = 1
 handler = "ContentGenerateV2Handler"
 snapshots = ["request", "workspace", "requirement_projection", "evidence", "prompt", "model"]
 capabilities = ["postgresql", "chat", "embedding", "index", "object_store"]
-launch_mode = "declared_disabled"
+launch_mode = "required_enabled"
 
 [[entries]]
 physical_queue = "bid-authoring-v2"
