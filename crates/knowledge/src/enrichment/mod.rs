@@ -136,6 +136,7 @@ pub fn generate_summary_on_job(
         end_at: summary.chars().count() as i32,
         parent_chunk_id: parent_id,
         generated_questions: Vec::new(),
+        source_locator: None,
     };
     crate::index::index_one_in(
         &mut job.embeddings,
@@ -250,6 +251,7 @@ pub fn generate_questions_on_job(
                 end_at: q.chars().count() as i32,
                 parent_chunk_id: Some(ch.id),
                 generated_questions: Vec::new(),
+                source_locator: None,
             };
             crate::index::index_one_in(
                 &mut job.embeddings,
@@ -360,6 +362,7 @@ pub fn process_image_on_job(
             end_at: content.chars().count() as i32,
             parent_chunk_id: parent,
             generated_questions: Vec::new(),
+            source_locator: None,
         };
         crate::index::index_one_in(
             &mut job.embeddings,
@@ -689,6 +692,7 @@ mod tests {
                 end_at: 19,
                 parent_chunk_id: None,
                 generated_questions: Vec::new(),
+                source_locator: None,
             },
         );
         job.chunks.insert(
@@ -704,6 +708,7 @@ mod tests {
                 end_at: 48,
                 parent_chunk_id: None,
                 generated_questions: Vec::new(),
+                source_locator: None,
             },
         );
         assert_eq!(parent_text_chunk_job(&job, "images/p1.jpg"), Some(second));
@@ -744,6 +749,7 @@ mod tests {
                 end_at: 18,
                 parent_chunk_id: None,
                 generated_questions: Vec::new(),
+                source_locator: None,
             },
         );
         generate_summary_on_job(&mut job, 0, false).unwrap();
@@ -783,6 +789,7 @@ mod tests {
                 end_at: 20,
                 parent_chunk_id: None,
                 generated_questions: Vec::new(),
+                source_locator: None,
             },
         );
         generate_questions_on_job(&mut job, &[cid], &[], &[], 0).unwrap();
@@ -815,6 +822,7 @@ mod tests {
                 end_at: 33,
                 parent_chunk_id: None,
                 generated_questions: Vec::new(),
+                source_locator: None,
             },
         );
         let out = generate_questions_on_job(&mut job, &[cid], &[], &[], 1).unwrap();
@@ -848,6 +856,7 @@ mod tests {
                 end_at: 0,
                 parent_chunk_id: None,
                 generated_questions: Vec::new(),
+                source_locator: None,
             },
         );
         job.chunks.insert(
@@ -863,6 +872,7 @@ mod tests {
                 end_at: 26,
                 parent_chunk_id: None,
                 generated_questions: Vec::new(),
+                source_locator: None,
             },
         );
         job.chunks.insert(
@@ -878,6 +888,7 @@ mod tests {
                 end_at: 56,
                 parent_chunk_id: None,
                 generated_questions: Vec::new(),
+                source_locator: None,
             },
         );
         generate_questions_on_job(&mut job, &[empty, ocr, text], &[], &[], 0).unwrap();
@@ -917,6 +928,7 @@ mod tests {
                     end_at: start + body.chars().count() as i32,
                     parent_chunk_id: None,
                     generated_questions: Vec::new(),
+                    source_locator: None,
                 },
             );
         }

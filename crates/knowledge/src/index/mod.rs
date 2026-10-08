@@ -417,6 +417,7 @@ mod tests {
             end_at: 17,
             parent_chunk_id: None,
             generated_questions: Vec::new(),
+            source_locator: None,
         };
         let mut embeddings = std::collections::HashMap::new();
         index_one_in(&mut embeddings, &ch, "T", true, true).unwrap();
