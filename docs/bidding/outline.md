@@ -33,7 +33,7 @@
 | 收尾 | `read_outline`，`finish_outline` | 核对后结束。有未绑定附件表时不能结束。不改章节，不改槽 |
 | 填槽（`Fill` / 已发布） | `put_slots`，`read_outline` | 只抄招标文件已有文字。不能改章节，不能改绑定 |
 
-`finish_outline` 还要求：章节树非空且无环、同级顺序不重复、已经调用过 `put_slots`、每个 `ChapterPurpose::Response` 章节至少有一个槽。一次成稿的 `put_slots` 在还有应答章节没有槽时拒绝，不把 `slots_submitted` 写成 true，职责留在组织。已经交过槽后又多出一个没有槽的应答章节，职责回到组织。成功后 `tool_draft.finished = true`，并把 `outline_run.phase` 和 `analysis.outline.phase` 标成 `complete`。
+`finish_outline` 还要求：章节树非空且无环、同级顺序不重复、已经调用过 `put_slots`、每个 `ChapterPurpose::Response` 章节至少有一个槽。一次成稿的 `put_slots` 在还有应答章节没有槽时拒绝，不把 `slots_submitted` 写成 true，职责留在组织。已经交过槽后又多出一个没有槽的应答章节，职责回到组织。`finish_outline` 被拒绝时检查点记下 `finish_rejected`，下一轮职责回到组织，不再挂出 `finish_outline`。之后组织成功写入章节、绑定或槽，这次拒绝撤销，结构齐全时可以再进入收尾。成功后 `tool_draft.finished = true`，并把 `outline_run.phase` 和 `analysis.outline.phase` 标成 `complete`。
 
 ## 六个工具
 
@@ -180,7 +180,11 @@
 
 ## 进度
 
-产品路径的进度来自 `DiscoverWork` 和 `tool_draft`：包的总数、待领、在跑、失败、已提交，章节数，未绑定附件数，槽是否已交，草稿是否结束。有阅读包时，发现阶段的停滞观察读包计数和要求条数，不读 `analysis.outline.scanned`。组织、收尾和完成读 `tool_draft`。这些阶段停滞也会以 `AGENT_TURN_BUDGET_EXCEEDED` 结束运行。有阅读包或工具草稿时，章数是 `tool_draft.chapters` 的长度，不是 `draft_plan` 的长度。扫描游标不再代表发现进度。
+产品路径的进度来自 `DiscoverWork` 和 `tool_draft`：包的总数、待领、在跑、失败、已提交，章节数，未绑定附件数，槽是否已交，草稿是否结束。有阅读包时，发现阶段的停滞观察读包计数和要求条数，不读 `analysis.outline.scanned`。组织、收尾和完成读 `tool_draft`。有阅读包或工具草稿时，章数是 `tool_draft.chapters` 的长度，不是 `draft_plan` 的长度。扫描游标不再代表发现进度。
+
+一次成稿没有回合上限。`Limits::at_least_for` 不改写 `max_turns`，也不在缺省时填入固定回合数。已经有阅读包、且 `draft_stage` 仍是大纲时，`max_turns` 不截停循环，SDK 会话也不再按剩余回合数封顶。填章仍用 `fill_limits` 自己的回合额度。旧的无阅读包扫描路径仍受 `max_turns` 约束。
+
+卡住时只看 `Limits` 里的 `max_no_progress_turns`、`max_focus_turns`、`max_focus_replans`。观察进入 `Blocked` 后运行结束。错误码仍是 `AGENT_TURN_BUDGET_EXCEEDED`，正文是 `outline stalled in phase {phase}`，`phase` 取检查点上的 `discover`、`outline`、`check` 或 `complete`。这是逻辑停滞，不是回合预算。
 
 编制页按 `outline_phase` 显示发现、组织（章节和模板槽）、核对、完成。`outline` 且章节、附件绑定或槽还没齐时是组织；三者都齐，以及 `check`，是核对；`complete` 是完成。页面文案只写这四个阶段。应答章节缺槽时职责仍是组织，即使 `slots_submitted` 已经为真。
 

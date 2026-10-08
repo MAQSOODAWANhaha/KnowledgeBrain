@@ -2394,6 +2394,21 @@ fn pack_commits_are_discover_progress_and_later_phases_can_block() {
     }
     assert_eq!(state.main_progress.watch.recovery, Recovery::Blocked);
     assert!(super::super::outline_execution_blocked(&state));
+    let stalled = super::super::outline_stall_message(&state);
+    assert!(
+        stalled.contains("phase check"),
+        "stall error names the phase: {stalled}"
+    );
+    state.analysis.outline.phase = crate::analysis::outline_flow::Phase::Discover;
+    let stalled = super::super::outline_stall_message(&state);
+    assert!(
+        stalled.contains("phase discover"),
+        "stall error names the phase: {stalled}"
+    );
+    state.turn = limits.max_turns;
+    assert!(!super::super::turn_limit_reached(&state, limits.max_turns));
+    state.draft_stage = crate::analysis::draft::DraftStage::Fill;
+    assert!(super::super::turn_limit_reached(&state, limits.max_turns));
 
     let mut scanned = outline_checkpoint();
     observe_progress(&mut scanned, &Role::Main, None, &limits).unwrap();
@@ -2412,4 +2427,6 @@ fn pack_commits_are_discover_progress_and_later_phases_can_block() {
     assert!(!super::super::outline_execution_blocked(&scanned));
     scanned.analysis.outline.phase = crate::analysis::outline_flow::Phase::Discover;
     assert!(super::super::outline_execution_blocked(&scanned));
+    scanned.turn = limits.max_turns;
+    assert!(super::super::turn_limit_reached(&scanned, limits.max_turns));
 }

@@ -615,3 +615,54 @@ fn a_response_chapter_without_a_slot_stays_in_organize() {
     assert!(fill.outline_run.tool_draft.slots_submitted);
     assert_eq!(current(&input, &fill), Duty::Template);
 }
+
+#[test]
+fn rejected_finish_outline_returns_to_organize() {
+    let input = frozen();
+    let mut state = checkpoint(&input);
+    let mut work = DiscoverWork::plan(&input, 1);
+    work.claim(10);
+    for index in 0..work.pack_counts().total {
+        submit(&mut work, &format!("pack-{index}"), vec![]);
+    }
+    state.outline_run.reading_packs = Some(work);
+    state.analysis.outline.phase = Phase::Outline;
+    state.outline_run.phase = Phase::Outline;
+    let chapters = json!({"chapters":[
+        {"id":"group","parent_id":null,"order":0,"title":"投标文件","purpose":"group","requirement_ids":[]},
+        {"id":"letter","parent_id":"group","order":0,"title":"投标函","purpose":"response","requirement_ids":[]}
+    ]});
+    apply(&input, 0, &mut state, "put_chapters", &chapters).unwrap();
+    apply(
+        &input,
+        0,
+        &mut state,
+        "bind_forms",
+        &json!({"bindings":[{"form_id":"form-1","chapter_id":"letter"}]}),
+    )
+    .unwrap();
+    apply(
+        &input,
+        0,
+        &mut state,
+        "put_slots",
+        &json!({"slots":[
+            {"slot_id":"letter:fixed","chapter_id":"letter","kind":"fixed_text","text":"函","match_query":""}
+        ]}),
+    )
+    .unwrap();
+    assert_eq!(current(&input, &state), Duty::Check);
+    state.outline_run.tool_draft.chapters[1].parent_id = None;
+    let rejected = apply(&input, 0, &mut state, "finish_outline", &json!({})).unwrap_err();
+    assert!(rejected.contains("sibling order"));
+    assert!(state.outline_run.finish_rejected);
+    assert_eq!(current(&input, &state), Duty::Organize);
+    assert!(deny(current(&input, &state), "finish_outline", false).is_some());
+    assert!(deny(current(&input, &state), "put_chapters", false).is_none());
+    apply(&input, 0, &mut state, "put_chapters", &chapters).unwrap();
+    assert!(!state.outline_run.finish_rejected);
+    assert_eq!(current(&input, &state), Duty::Check);
+    apply(&input, 0, &mut state, "finish_outline", &json!({})).unwrap();
+    assert_eq!(state.outline_run.phase, Phase::Complete);
+    assert!(!state.outline_run.finish_rejected);
+}

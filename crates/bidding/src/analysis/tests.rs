@@ -77,7 +77,7 @@ pub(super) fn config() -> Config {
 }
 
 #[test]
-fn configured_max_turns_is_not_raised_to_the_outline_estimate() {
+fn at_least_for_does_not_rewrite_max_turns() {
     let mut input = input();
     input.source_units = (0..20)
         .map(|ordinal| Source {
@@ -89,18 +89,16 @@ fn configured_max_turns_is_not_raised_to_the_outline_estimate() {
         })
         .collect();
     let estimate = crate::analysis::draft::outline_turn_cap(&input);
-    assert!(estimate > crate::analysis::draft::OUTLINE_MAX_TURNS);
     let mut limits = config().limits;
-    let cap = crate::analysis::draft::OUTLINE_MAX_TURNS;
-    limits.max_turns = cap;
+    let configured = limits.max_turns;
+    assert!(estimate > configured);
     limits.max_tool_calls = 1;
     limits.max_read_bytes = 1;
     let applied = limits.clone().at_least_for(&input).unwrap();
-    assert_eq!(applied.max_turns, cap);
-    assert_eq!(applied.max_tool_calls, cap * 12);
-    assert!(applied.max_read_bytes >= cap * applied.max_tool_result_bytes * 4);
+    assert_eq!(applied.max_turns, configured);
+    assert_eq!(applied.max_tool_calls, configured.saturating_mul(12).max(1));
     limits.max_turns = 0;
     let applied = limits.at_least_for(&input).unwrap();
-    assert_eq!(applied.max_turns, crate::analysis::draft::OUTLINE_MAX_TURNS);
+    assert_eq!(applied.max_turns, 0);
     assert_ne!(applied.max_turns, estimate);
 }

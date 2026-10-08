@@ -268,6 +268,10 @@ pub struct OutlineRun {
         skip_serializing_if = "crate::outline::tools::Draft::is_empty"
     )]
     pub tool_draft: crate::outline::tools::Draft,
+    /// `finish_outline` was rejected. The next outline duty is Organize until
+    /// chapters, bindings, or slots are written again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub finish_rejected: bool,
 }
 
 pub fn tree_valid(plan: &[DraftPlanItem]) -> Result<(), String> {

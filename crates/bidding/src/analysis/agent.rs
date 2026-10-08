@@ -81,15 +81,11 @@ impl Limits {
 
     pub fn at_least_for(
         mut self,
-        input: &FrozenInput,
+        _input: &FrozenInput,
     ) -> Result<Self, crate::analysis::budget::BudgetRefused> {
-        // 配置的 `max_turns` 是天花板。0 用 `OUTLINE_MAX_TURNS`。
-        // `outline_turn_cap` 只估算这份文档有多长，不再把回合帽抬上去。
+        // 一次成稿不把 `max_turns` 当成回合上限，也不在缺省时填一个固定回合数。
         // 填章请求不走这里：它在冻结请求时按待填章数另记一套额度（`draft::fill_limits`）。
-        let _estimate = crate::analysis::draft::outline_turn_cap(input);
-        if self.max_turns == 0 {
-            self.max_turns = crate::analysis::draft::OUTLINE_MAX_TURNS;
-        }
+        // 工具调用和读字节仍随调用方写明的 `max_turns` 放开，旧路径还受回合数约束。
         self.max_tool_calls = self.max_tool_calls.max(self.max_turns.saturating_mul(12));
         self.max_read_bytes = self.max_read_bytes.max(
             self.max_turns
@@ -530,6 +526,31 @@ pub(in crate::analysis) fn outline_execution_blocked(state: &Checkpoint) -> bool
         && (state.outline_run.reading_packs.is_some()
             || state.analysis.outline.phase == super::outline_flow::Phase::Discover)
 }
+
+/// Reading packs mean this checkpoint is the one-shot outline loop.
+/// That loop is not stopped by `max_turns`. Fill and the old scan path still are.
+pub(in crate::analysis) fn one_shot_outline(state: &Checkpoint) -> bool {
+    matches!(
+        state.draft_stage,
+        draft::DraftStage::None | draft::DraftStage::Outline
+    ) && state.outline_run.reading_packs.is_some()
+}
+
+pub(in crate::analysis) fn turn_limit_reached(state: &Checkpoint, max_turns: usize) -> bool {
+    !one_shot_outline(state) && state.turn >= max_turns
+}
+
+/// Stall stop for the one-shot outline. Names the checkpoint phase.
+/// This is failed progress, not a turn budget.
+pub(in crate::analysis) fn outline_stall_message(state: &Checkpoint) -> String {
+    let phase = match state.analysis.outline.phase {
+        super::outline_flow::Phase::Discover => "discover",
+        super::outline_flow::Phase::Outline => "outline",
+        super::outline_flow::Phase::Check => "check",
+        super::outline_flow::Phase::Complete => "complete",
+    };
+    format!("outline stalled in phase {phase}: no progress; checkpoint retained")
+}
 fn invalid(message: impl std::fmt::Display) -> AgentError {
     error("AGENT_OUTPUT_INVALID", message.to_string())
 }
@@ -561,7 +582,7 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
                 || (self.state.role == Role::Main
                     && self.state.draft_stage == draft::DraftStage::Outline
                     && outline_execution_blocked(self.state)),
-            budget_exhausted: self.state.turn >= limits.max_turns
+            budget_exhausted: turn_limit_reached(self.state, limits.max_turns)
                 || self.state.tool_calls >= limits.max_tool_calls
                 || self.state.read_bytes >= limits.max_read_bytes,
         }
@@ -583,7 +604,11 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
             &body,
             crate::agent_runtime::SESSION_PREFIX,
             crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
-            self.config.limits.max_turns - self.state.turn,
+            if one_shot_outline(self.state) {
+                usize::MAX
+            } else {
+                self.config.limits.max_turns.saturating_sub(self.state.turn)
+            },
             self.config.limits.max_context_bytes,
         )?;
         Ok(body)
@@ -620,6 +645,17 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
             cancel,
         )
         .await
+    }
+    fn block_message(&self) -> String {
+        if self.state.role == Role::Main
+            && self.state.draft_stage == draft::DraftStage::Outline
+            && outline_execution_blocked(self.state)
+        {
+            outline_stall_message(self.state)
+        } else {
+            "local execution and independent-work handoff allowances exhausted; blockers and checkpoint retained"
+                .into()
+        }
     }
     async fn save(&self) -> Result<(), AgentError> {
         self.journal

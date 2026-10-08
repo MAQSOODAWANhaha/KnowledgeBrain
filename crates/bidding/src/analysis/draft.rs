@@ -6,12 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-/// 配置没写 `max_turns`（0）时的回合上限。调用方写明的值是天花板：
-/// `Limits::at_least_for` 不会把它抬到 `outline_turn_cap`。整体填充是另一次
-/// 请求、另一套账（`fill_turn_cap`），不共用这个上限。
-pub const OUTLINE_MAX_TURNS: usize = 80;
-/// 阶段一的**目标**回合数：出骨架应该在这个量级内完成。超了不失败、不截断。
-/// 运行停在配置的 `max_turns`，不在这个目标上。
+/// 阶段一的**目标**回合数：出骨架通常在这个量级。一次成稿不按它截停，
+/// 也没有单独的回合上限。整体填充是另一次请求、另一套账（`fill_turn_cap`）。
 pub const OUTLINE_TURN_TARGET: usize = 20;
 /// 每章的回合额度：读表 / 写模板 / 一次返工。
 pub const FILL_TURNS_PER_CHAPTER: usize = 4;
@@ -38,10 +34,6 @@ pub const FILL_ENVELOPE_DEADLINE_SECS: u64 = 45 * 60;
 
 // 写作窗必须短于信封窗，信封窗必须短于 SQL 硬租约。
 const _: () = assert!(
-    OUTLINE_MAX_TURNS > OUTLINE_TURN_TARGET,
-    "兜底上限必须宽于目标：时间是要压的目标，不是砍掉大纲的理由"
-);
-const _: () = assert!(
     FILL_DEADLINE_SECS < FILL_ENVELOPE_DEADLINE_SECS && FILL_ENVELOPE_DEADLINE_SECS < 46 * 60,
     "写作窗 < 信封窗 < SQL 硬租约，到期才有时间把已填的章编译出稿"
 );
@@ -58,7 +50,7 @@ pub fn default_draft_docx_bytes() -> usize {
     DRAFT_MAX_DOCX_BYTES
 }
 
-/// 整体填充按**待填章数**记账，与阶段一的 20 回合门无关：一份 40 章的投标文件
+/// 整体填充按**待填章数**记账，不跟一次成稿共用回合数：一份 40 章的投标文件
 /// 不可能在 20 回合里写完，而 3 章的补填也不该拿到 200 回合。
 pub fn fill_turn_cap(pending_chapters: usize) -> usize {
     pending_chapters
@@ -198,7 +190,7 @@ fn heading_parts(source: &Source) -> Vec<String> {
         .collect()
 }
 
-/// 按窗数估算的大纲工作量。不是运行回合上限；配置的 `max_turns` 才是。
+/// 按窗数估算的大纲工作量。一次成稿不用它当回合上限。
 pub fn outline_turn_cap(input: &FrozenInput) -> usize {
     outline_chunks(input)
         .len()

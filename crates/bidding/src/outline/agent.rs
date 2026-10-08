@@ -93,7 +93,8 @@ pub fn current(
         !state.outline_run.tool_draft.chapters.is_empty(),
         !super::tools::unmapped_forms(input, &state.outline_run.tool_draft).is_empty(),
         state.outline_run.tool_draft.slots_submitted
-            && super::tools::missing_response_slot(&state.outline_run.tool_draft).is_none(),
+            && super::tools::missing_response_slot(&state.outline_run.tool_draft).is_none()
+            && !state.outline_run.finish_rejected,
     )
 }
 
@@ -281,13 +282,33 @@ pub fn apply(
                 return Err(format!("response chapter {id} has no template slot"));
             }
             state.outline_run.tool_draft = probe;
+            state.outline_run.finish_rejected = false;
             return Ok(value);
+        }
+        if name == "finish_outline" {
+            return match super::tools::apply(
+                input,
+                &mut state.outline_run.tool_draft,
+                &known,
+                name,
+                args,
+            ) {
+                Ok(value) => {
+                    state.outline_run.finish_rejected = false;
+                    state.analysis.outline.phase = Phase::Complete;
+                    state.outline_run.phase = Phase::Complete;
+                    Ok(value)
+                }
+                Err(error) => {
+                    state.outline_run.finish_rejected = true;
+                    Err(error)
+                }
+            };
         }
         let value =
             super::tools::apply(input, &mut state.outline_run.tool_draft, &known, name, args)?;
-        if name == "finish_outline" {
-            state.analysis.outline.phase = Phase::Complete;
-            state.outline_run.phase = Phase::Complete;
+        if matches!(name, "put_chapters" | "bind_forms" | "put_slots") {
+            state.outline_run.finish_rejected = false;
         }
         return Ok(value);
     }

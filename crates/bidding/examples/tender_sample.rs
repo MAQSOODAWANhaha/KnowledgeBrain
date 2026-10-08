@@ -293,22 +293,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let operator_physical = limits["max_physical_calls"]
         .as_u64()
         .ok_or("explicit physical call limit required")? as usize;
-    let turns = if operator_turns == 0 {
-        ta::draft::OUTLINE_MAX_TURNS
-    } else {
-        operator_turns.min(ta::draft::OUTLINE_MAX_TURNS)
-    };
-    limits["extraction"]["max_turns"] = json!(turns);
     limits["extraction"]["reviewer_reserve"] = json!(0);
-    // 阶段一记的是绝对值目标与兜底上限。先要成功出骨架，然后把耗时往下压。
+    // 一次成稿不按回合数截停。这里记下调用方原来的 max_turns，不把它改成固定上限。
     limits["budget_estimate"] = json!({
         "kind":"outline",
-        "applied_turns":turns,
+        "applied_turns":operator_turns,
         "applied_physical":operator_physical,
         "reviewer_reserve":0,
+        "turn_cap":false,
         "outline_turn_target":ta::draft::OUTLINE_TURN_TARGET,
         "outline_seconds_target":ta::draft::OUTLINE_DEADLINE_TARGET_SECS,
-        "outline_turn_backstop":ta::draft::OUTLINE_MAX_TURNS,
         "outline_deadline_backstop_secs":ta::draft::DRAFT_DEADLINE_SECS
     });
     let provider = AuthoringRuntimeContractV1::resolve_tools_from_environment()?;
