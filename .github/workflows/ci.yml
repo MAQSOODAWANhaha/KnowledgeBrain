@@ -3,8 +3,11 @@ name: CI
 on:
   pull_request:
   push:
-    # GitHub cannot read the default branch inside `on:`. Images below still
-    # publish only when the ref is the repository default branch.
+    # One workflow run per PR commit: pull_request covers PR heads, and push
+    # covers only CI_PUSH_BRANCH. Concurrency cancel does not dedupe those two
+    # events, because their refs differ. GitHub cannot read the default branch
+    # inside `on:`. scripts/ci_check_sources.sh fails when CI_PUSH_BRANCH is not
+    # that default branch. Images still publish only on the default branch.
     branches: [main]
 
 permissions:
@@ -25,6 +28,10 @@ jobs:
         run: bash scripts/ci_load_config.sh
       - name: Toolchain matches rust-toolchain.toml
         run: grep -Fq "channel = \"${RUST_TOOLCHAIN}\"" rust-toolchain.toml
+      - name: Config matches the repository
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: bash scripts/ci_check_sources.sh
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -46,8 +53,8 @@ jobs:
       - name: runtime binaries
         run: |
           set -euo pipefail
-          cargo build --locked -p api -p worker
-          cargo build --locked -p platform --bin migrator --bin schema-verifier
+          cargo build --locked -p "$CI_API_BIN" -p "$CI_WORKER_BIN"
+          cargo build --locked -p "$CI_PLATFORM_PACKAGE" --bin "$CI_MIGRATOR_BIN" --bin "$CI_SCHEMA_VERIFIER_BIN"
       - name: Package dev binaries and integration tests
         run: bash scripts/ci_package_binaries.sh
       - uses: actions/upload-artifact@v4
@@ -55,7 +62,7 @@ jobs:
           name: ${{ env.CI_ARTIFACT_NAME }}
           path: ${{ env.CI_BIN_DIR }}
           if-no-files-found: error
-          retention-days: 7
+          retention-days: ${{ env.CI_ARTIFACT_RETENTION_DAYS }}
 
   postgres-acceptance:
     needs: rust-build
@@ -130,14 +137,15 @@ jobs:
             exit "$result"
           }
           trap cleanup EXIT
-          for suite in content_agent_run_postgres request_delivery_postgres; do
+          read -r -a suites <<< "$CI_CONTENT_POSTGRES_TESTS"
+          for suite in "${suites[@]}"; do
             log="$RUNNER_TEMP/$suite.log"
             bash scripts/ci_run_packaged_test.sh "$suite" "$log" --unfiltered -- --test-threads=1 --nocapture
             if grep -Eq 'skipped .*contract:' "$log"; then
               echo "required PostgreSQL suite $suite skipped a contract" >&2
               exit 1
             fi
-            if [ "$suite" = request_delivery_postgres ]; then
+            if [ "$suite" = "$CI_REQUEST_DELIVERY_TEST" ]; then
               grep -Eq '^test cleanup_native_duplicates_protect_references_and_retry_failed_blob_deletion \.\.\.' "$log"
               grep -Eq '^test cleanup_unconfirmed_handoff_keeps_staging_blob_and_tracker \.\.\.' "$log"
               grep -q 'native retry observed job=' "$log"
@@ -150,7 +158,7 @@ jobs:
           set -euo pipefail
           export KB_TENDER_AGENT_TEST_DATABASE_URL="postgres://${CI_APP_POSTGRES_USER}:${CI_APP_POSTGRES_PASSWORD}@${CI_POSTGRES_HOST}:${CI_POSTGRES_PORT}/${CI_APP_POSTGRES_DB}"
           log="$RUNNER_TEMP/tender-analysis.log"
-          bash scripts/ci_run_packaged_test.sh tender_analysis_postgres "$log" -- --ignored --test-threads=1 --nocapture
+          bash scripts/ci_run_packaged_test.sh "$CI_TENDER_TEST" "$log" -- --ignored --test-threads=1 --nocapture
       - name: Frozen exact-version retrieval PostgreSQL acceptance
         run: |
           set -euo pipefail
@@ -170,7 +178,7 @@ jobs:
           { echo 'BEGIN; SET LOCAL ROLE kb_app_owner;'; cat migrations/shared_platform_baseline.sql migrations/knowledge_base_baseline.sql; echo 'COMMIT;'; } \
             | psql -h "$CI_POSTGRES_HOST" -p "$CI_POSTGRES_PORT" -U "$CI_APP_POSTGRES_USER" -d "$CI_FROZEN_DATABASE" -v ON_ERROR_STOP=1
           log="$RUNNER_TEMP/frozen-exact.log"
-          bash scripts/ci_run_packaged_test.sh knowledge_retrieval_exact_v2 "$log" -- "$CI_FROZEN_EXACT_TEST" --exact --test-threads=1
+          bash scripts/ci_run_packaged_test.sh "$CI_FROZEN_TEST_BIN" "$log" -- "$CI_FROZEN_EXACT_TEST" --exact --test-threads=1
       - name: Outline/response SQL publish acceptance
         run: |
           export PGPASSWORD="$CI_APP_POSTGRES_PASSWORD"
@@ -235,8 +243,8 @@ jobs:
             POSTGRES_DB="$database" sh deploy/postgres-init/010-runtime-identities.sh
           done
           bash scripts/fresh_schema_acceptance.sh
-          log="$RUNNER_TEMP/catalog_manifest_postgres.log"
-          bash scripts/ci_run_packaged_test.sh catalog_manifest_postgres "$log" --unfiltered -- --test-threads=1 --nocapture
+          log="$RUNNER_TEMP/${CI_CATALOG_TEST}.log"
+          bash scripts/ci_run_packaged_test.sh "$CI_CATALOG_TEST" "$log" --unfiltered -- --test-threads=1 --nocapture
           if grep -Eq 'skipped catalog manifest PostgreSQL fixture:' "$log"; then
             echo "required catalog PostgreSQL fixture was skipped" >&2
             exit 1
@@ -268,7 +276,7 @@ jobs:
           export KNOWLEDGEBRAIN_REQUIRE_REDIS_TESTS=1
           export REDIS_URL="redis://${CI_POSTGRES_HOST}:${CI_REDIS_PORT}/"
           log="$RUNNER_TEMP/queue-faults.log"
-          bash scripts/ci_run_packaged_test.sh oxana_native_faults "$log" --unfiltered -- --test-threads=1 --nocapture
+          bash scripts/ci_run_packaged_test.sh "$CI_OXANA_TEST" "$log" --unfiltered -- --test-threads=1 --nocapture
           if grep -Eq 'skip oxana native faults:|skip runtime test' "$log"; then
             echo "required native Oxana fault tests skipped execution" >&2
             exit 1
@@ -373,6 +381,8 @@ jobs:
       REGISTRY: ghcr.io
     steps:
       - uses: actions/checkout@v4
+      - name: Load CI config
+        run: bash scripts/ci_load_config.sh
       - name: Image prefix
         run: echo "IMAGE_PREFIX=${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
       - uses: docker/login-action@v3
@@ -391,7 +401,7 @@ jobs:
           sbom: false
           tags: ${{ env.IMAGE_PREFIX }}/api:latest
           build-args: |
-            BIN=api
+            BIN=${{ env.CI_API_BIN }}
             CARGO_MIRROR=none
             APT_MIRROR=none
           cache-from: type=gha,scope=rust-runtime
@@ -406,7 +416,7 @@ jobs:
           sbom: false
           tags: ${{ env.IMAGE_PREFIX }}/worker:latest
           build-args: |
-            BIN=worker
+            BIN=${{ env.CI_WORKER_BIN }}
             CARGO_MIRROR=none
             APT_MIRROR=none
           cache-from: type=gha,scope=rust-runtime
@@ -421,7 +431,7 @@ jobs:
           sbom: false
           tags: ${{ env.IMAGE_PREFIX }}/migrator:latest
           build-args: |
-            BIN=migrator
+            BIN=${{ env.CI_MIGRATOR_BIN }}
             CARGO_MIRROR=none
             APT_MIRROR=none
           cache-from: type=gha,scope=rust-runtime

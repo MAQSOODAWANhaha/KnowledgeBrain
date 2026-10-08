@@ -19,6 +19,19 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "services"))
 
 
+def ci_setting(key):
+    value = os.environ.get(key, "").strip().strip('"').strip("'")
+    if value:
+        return value
+    for line in (ROOT / ".github" / "ci.env").read_text().splitlines():
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, raw = line.split("=", 1)
+        if name == key:
+            return raw.strip().strip('"').strip("'")
+    raise SystemExit(f"missing {key} in .github/ci.env")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--docx", type=Path)
@@ -84,8 +97,8 @@ def main():
             if replay_bin:
                 command = [replay_bin, "--nocapture"]
             else:
-                command = ["cargo", "test", "--locked", "-p", "bidding", "--features", "docreader-contract-tests",
-                           "--test", "tender_document_process_real_parse_counts", "--", "--nocapture"]
+                command = ["cargo", "test", "--locked", "-p", "bidding", "--features", ci_setting("CI_DOCREADER_FEATURE"),
+                           "--test", ci_setting("CI_DOCREADER_TEST_BIN"), "--", "--nocapture"]
             result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
             sys.stdout.write(result.stdout)
             sys.stderr.write(result.stderr)

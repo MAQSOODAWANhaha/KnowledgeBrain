@@ -14,12 +14,17 @@ fi
   find "$root/${CI_BIN_DIR}" -maxdepth 4 -type f >&2 || true
   exit 1
 }
+: "${CI_MIGRATOR_BIN:?}"
+: "${CI_SCHEMA_VERIFIER_BIN:?}"
+: "${CI_API_BIN:?}"
+: "${CI_WORKER_BIN:?}"
+: "${CI_DOCREADER_TEST_BIN:?}"
 {
   printf 'CI_BIN_ROOT=%s\n' "$base"
-  printf 'KB_MIGRATOR_BIN=%s\n' "$base/bins/migrator"
-  printf 'KB_SCHEMA_VERIFIER_BIN=%s\n' "$base/bins/schema-verifier"
-  printf 'KB_API_BIN=%s\n' "$base/bins/api"
-  printf 'KB_WORKER_BIN=%s\n' "$base/bins/worker"
-  printf 'KB_DOCREADER_REPLAY_BIN=%s\n' "$base/tests/tender_document_process_real_parse_counts"
+  printf 'KB_MIGRATOR_BIN=%s\n' "$base/bins/$CI_MIGRATOR_BIN"
+  printf 'KB_SCHEMA_VERIFIER_BIN=%s\n' "$base/bins/$CI_SCHEMA_VERIFIER_BIN"
+  printf 'KB_API_BIN=%s\n' "$base/bins/$CI_API_BIN"
+  printf 'KB_WORKER_BIN=%s\n' "$base/bins/$CI_WORKER_BIN"
+  printf 'KB_DOCREADER_REPLAY_BIN=%s\n' "$base/tests/$CI_DOCREADER_TEST_BIN"
 } >> "${GITHUB_ENV:?}"
 chmod +x "$base/bins/"* "$base/tests/"*

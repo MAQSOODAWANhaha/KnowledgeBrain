@@ -6,6 +6,16 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 : "${CI_BIN_DIR:?}"
 : "${CI_CONTRACT_FEATURES:?}"
+: "${CI_API_BIN:?}"
+: "${CI_WORKER_BIN:?}"
+: "${CI_MIGRATOR_BIN:?}"
+: "${CI_SCHEMA_VERIFIER_BIN:?}"
+: "${CI_CONTENT_POSTGRES_TESTS:?}"
+: "${CI_TENDER_TEST:?}"
+: "${CI_CATALOG_TEST:?}"
+: "${CI_OXANA_TEST:?}"
+: "${CI_FROZEN_TEST_BIN:?}"
+: "${CI_DOCREADER_TEST_BIN:?}"
 out=$root/$CI_BIN_DIR
 rm -rf "$out"
 mkdir -p "$out/bins" "$out/tests"
@@ -20,10 +30,10 @@ copy_bin() {
   chmod +x "$out/bins/$name"
 }
 
-copy_bin api
-copy_bin worker
-copy_bin migrator
-copy_bin schema-verifier
+copy_bin "$CI_API_BIN"
+copy_bin "$CI_WORKER_BIN"
+copy_bin "$CI_MIGRATOR_BIN"
+copy_bin "$CI_SCHEMA_VERIFIER_BIN"
 
 copy_tests() {
   local package=$1
@@ -69,12 +79,10 @@ print(found)
   done
 }
 
-read -r -a bidding_tests <<< "${CI_DEFAULT_BIDDING_TESTS:?}"
-read -r -a platform_tests <<< "${CI_DEFAULT_PLATFORM_TESTS:?}"
-read -r -a feature_tests <<< "${CI_FEATURE_BIDDING_TESTS:?}"
-copy_tests bidding default "${bidding_tests[@]}"
-copy_tests platform default "${platform_tests[@]}"
-copy_tests bidding features "${feature_tests[@]}"
+read -r -a content_tests <<< "$CI_CONTENT_POSTGRES_TESTS"
+copy_tests bidding default "${content_tests[@]}" "$CI_TENDER_TEST"
+copy_tests platform default "$CI_CATALOG_TEST" "$CI_OXANA_TEST"
+copy_tests bidding features "$CI_FROZEN_TEST_BIN" "$CI_DOCREADER_TEST_BIN"
 
 {
   printf '%s\n' "bins:"

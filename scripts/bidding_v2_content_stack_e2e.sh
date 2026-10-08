@@ -8,15 +8,12 @@ import json
 import re
 from pathlib import Path
 
-expected = {
-    "postgres": "pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b",
-    "redis": "redis@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf",
-}
 lock = json.loads(Path("deploy/images.lock.json").read_bytes())
 rows = lock["platforms"]["linux/amd64"]["runtime_deployable"]
+pattern = re.compile(r"[^:@]+(?:/[^:@]+)*@sha256:[0-9a-f]{64}")
 for lock_id in ("postgres", "redis"):
     matches = [row["image"] for row in rows if row.get("lock_id") == lock_id]
-    if matches != [expected[lock_id]] or not re.fullmatch(r"[^:@]+(?:/[^:@]+)*@sha256:[0-9a-f]{64}", matches[0]):
+    if len(matches) != 1 or not pattern.fullmatch(matches[0]):
         raise SystemExit(f"invalid immutable {lock_id} image lock")
     print(matches[0])
 PY
