@@ -449,10 +449,7 @@ pub async fn run_image(
         .filter(|e| ids.contains(&e.chunk_id))
         .cloned()
         .collect();
-    crate::delete_image_chunks(pool, document_id, image_key)
-        .await
-        .map_err(|e| e.to_string())?;
-    crate::insert_document_chunks(pool, &image_chunks, &embeddings)
+    crate::replace_image_chunks(pool, document_id, image_key, &image_chunks, &embeddings)
         .await
         .map_err(|e| e.to_string())?;
     if crate::enrichment::decr_pending_count(document_id)? {
