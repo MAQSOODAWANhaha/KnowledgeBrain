@@ -47,6 +47,29 @@ def test_caption_skips_running_headers_unit_lines_and_prefers_a_number():
         'cells': [cell(0, 0, 2, '合并表头'), cell(1, 0, 1, '名称')],
     })()
     assert module.form_title(kept, '不应采用这一行') == '合并表头'
+    assert module.is_unit_line('单位：元人民币')
+    assert module.is_unit_line('unit: yuan')
+    assert not module.is_unit_line('8：报价一览')
+    assert module.caption_line('单位：元人民币\n8A 报价表') == '8A 报价表'
+    assert module.caption_line('出)。后半句还没写完\n字段一览') == '字段一览'
+    assert module.caption_line('）后半句还没写完\n字段一览') == '字段一览'
+    assert module.is_fragment('出)。后半句还没写完')
+    assert module.is_fragment('）后半句还没写完')
+    assert module.caption_line('8：报价一览\n单位：元人民币') == '8：报价一览'
+    repeated = []
+    for page in (0, 1):
+        repeated.append(type('Unit', (), {
+            'text': '前言\n全书标题反复出现\n正文',
+            'locator': type('Locator', (), {'page_ordinal': page})(),
+        })())
+    running_middle = module.running_lines(repeated)
+    assert '全书标题反复出现' in running_middle
+    assert module.caption_line('全书标题反复出现\n8A 报价表', running_middle) == '8A 报价表'
+    same_page = [type('Unit', (), {
+        'text': '甲\n甲\n正文',
+        'locator': type('Locator', (), {'page_ordinal': 0})(),
+    })()]
+    assert '甲' not in module.running_lines(same_page)
 
 
 @pytest.mark.parametrize('extension', ['docx', 'xlsx'])

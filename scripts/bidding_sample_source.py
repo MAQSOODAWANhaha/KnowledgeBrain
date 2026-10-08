@@ -13,6 +13,10 @@ import uuid
 
 
 _SENTENCE_END = '。.!！?？;；'
+_FRAGMENT_START = '）。)》」』、，,;；'
+# Same short-label bound as outline attachment detection. A unit note is one
+# colon with both sides inside it. Documented in docs/bidding/outline.md.
+_LABEL_CHARS = 12
 _NUMERALS = '一二三四五六七八九十'
 _DIGITS = '0123456789０１２３４５６７８９'
 
@@ -32,36 +36,55 @@ def page_ordinal(locator):
 
 
 def running_lines(units):
-    """Lines that open or close at least two pages are page furniture.
+    """Lines that occur on at least two pages are page furniture.
 
-    Repetition is the signal. The words themselves are not a list.
+    Repetition across pages is the signal, wherever the line sits on the page.
+    The words themselves are not a list. A line repeated only inside one page
+    is not furniture.
     """
-    firsts, lasts = {}, {}
-    pages = {}
+    seen = {}
     for unit in units:
         page = page_ordinal(getattr(unit, 'locator', None) if not isinstance(unit, dict) else unit.get('locator'))
         text = unit['text'] if isinstance(unit, dict) else getattr(unit, 'text', '')
-        lines = [line.strip() for line in (text or '').splitlines() if line.strip()]
-        if page is None or not lines:
+        if page is None:
             continue
-        pages.setdefault(page, []).extend(lines)
-    for page, lines in pages.items():
-        firsts.setdefault(_normalize(lines[0]), set()).add(page)
-        lasts.setdefault(_normalize(lines[-1]), set()).add(page)
-    running = set()
-    for groups in (firsts, lasts):
-        for line, seen in groups.items():
-            if len(seen) >= 2:
-                running.add(line)
-    return running
+        for line in (text or '').splitlines():
+            line = _normalize(line.strip())
+            if line:
+                seen.setdefault(line, set()).add(page)
+    return {line for line, pages in seen.items() if len(pages) >= 2}
+
+
+def is_fragment(text):
+    """A line that starts mid-sentence or contains an internal sentence stop."""
+    line = (text or '').strip()
+    if not line:
+        return False
+    if line[0] in _FRAGMENT_START:
+        return True
+    return any(ch in '。！？!?' for ch in line[:-1])
 
 
 def is_unit_line(text):
-    """A line that is only a parenthetical note, such as a unit annotation."""
+    """A parenthetical note, or one short colon annotation.
+
+    Both sides of the colon have to be short labels. A numbered caption is not
+    a unit note even when it contains a colon.
+    """
     line = (text or '').strip()
-    if len(line) < 3:
+    if len(line) < 3 or is_numbered(line):
         return False
-    return (line[0], line[-1]) in {('(', ')'), ('（', '）')}
+    if (line[0], line[-1]) in {('(', ')'), ('（', '）')}:
+        return True
+    if any(ch in _SENTENCE_END for ch in line):
+        return False
+    for sep in ('：', ':'):
+        if line.count(sep) != 1:
+            continue
+        left, right = (part.strip() for part in line.split(sep))
+        if left and right and len(left) <= _LABEL_CHARS and len(right) <= _LABEL_CHARS:
+            return True
+    return False
 
 
 def is_numbered(text):
@@ -78,7 +101,7 @@ def is_numbered(text):
 
 def usable_line(text, running):
     line = (text or '').strip()
-    if not line or len(line) > 80 or line[-1] in _SENTENCE_END:
+    if not line or len(line) > 80 or line[-1] in _SENTENCE_END or is_fragment(line):
         return ''
     if _normalize(line) in running or is_unit_line(line):
         return ''

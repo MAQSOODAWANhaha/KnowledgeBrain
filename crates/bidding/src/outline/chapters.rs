@@ -292,6 +292,7 @@ fn chain_blocked(definition: &Value) -> bool {
     let Some(stats) = grid_stats(definition) else {
         return false;
     };
+    // `body_max` already ignores one lone long note and full-width footers.
     stats.body_max > SHORT_LABEL_CHARS
         || (stats.body_substantive > 0 && stats.digit_body * 3 >= stats.body_substantive)
 }
@@ -331,37 +332,72 @@ fn caption_section_form(form: &Value, index: &SectionIndex, stats: &GridStats) -
     shape.forms == 1 && shape.prose_chars <= CAPTION_PROSE_CHARS
 }
 
+/// One anchor covering every column. Used for a caption above the header and
+/// for a footer under the body. The footer is not a value in each column.
+fn full_width_rows(cells: &[Value], columns: usize) -> BTreeSet<usize> {
+    if columns < 2 {
+        return BTreeSet::new();
+    }
+    let mut per_row: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+    for cell in cells {
+        let row = cell["row"].as_u64().unwrap_or(0) as usize;
+        let span = cell["col_span"].as_u64().unwrap_or(1).max(1) as usize;
+        let entry = per_row.entry(row).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 = entry.1.max(span);
+    }
+    per_row
+        .into_iter()
+        .filter(|(_row, (anchors, span))| *anchors == 1 && *span >= columns)
+        .map(|(row, _)| row)
+        .collect()
+}
+
 fn grid_stats(definition: &Value) -> Option<GridStats> {
     let cells = definition.get("cells")?.as_array()?;
     if cells.is_empty() {
         return None;
     }
+    let columns = column_count(definition);
+    let wide = full_width_rows(cells, columns);
+    let first = cells
+        .iter()
+        .filter_map(|cell| cell["row"].as_u64())
+        .min()
+        .unwrap_or(0) as usize;
     let mut by_row: BTreeMap<usize, Vec<CellKind>> = BTreeMap::new();
     let mut blank = 0;
     let mut inline = 0;
     let mut substantive = 0;
     let mut placed_cells: Vec<(usize, CellKind, usize, bool)> = Vec::new();
+    let mut counted = 0;
     for cell in cells {
+        let row = cell["row"].as_u64().unwrap_or(0) as usize;
+        // A full-width footer is one sentence under the grid, not a body cell.
+        if row != first && wide.contains(&row) {
+            continue;
+        }
         let text = cell["text"].as_str().unwrap_or("");
         let kind = classify_cell(text);
-        let row = cell["row"].as_u64().unwrap_or(0) as usize;
         by_row.entry(row).or_default().push(kind);
         let digits = text.chars().any(|ch| ch.is_ascii_digit());
         placed_cells.push((row, kind, text.chars().count(), digits));
+        counted += 1;
         match kind {
             CellKind::Blank => blank += 1,
             CellKind::InlineBlank => inline += 1,
             CellKind::Substantive => substantive += 1,
         }
     }
-    let total = cells.len();
-    let first = *by_row.keys().next()?;
+    if counted == 0 {
+        return None;
+    }
     let mut body_total = 0;
     let mut body_fill = 0;
-    let mut body_max = 0;
     let mut body_substantive = 0;
     let mut digit_body = 0;
     let mut header_substantive = 0;
+    let mut body_lengths: Vec<usize> = Vec::new();
     for (row, kinds) in &by_row {
         if *row == first {
             header_substantive = kinds
@@ -381,24 +417,43 @@ fn grid_stats(definition: &Value) -> Option<GridStats> {
             continue;
         }
         body_substantive += 1;
-        body_max = body_max.max(chars);
+        body_lengths.push(chars);
         if digits {
             digit_body += 1;
         }
     }
     let header_body = header_substantive >= 1 && body_total >= 2 && body_fill * 2 >= body_total;
     Some(GridStats {
-        total,
+        total: counted,
         blank,
         inline,
         substantive,
         header_body,
         body_total,
         body_fill,
-        body_max,
+        body_max: blocking_body_max(&body_lengths),
         body_substantive,
         digit_body,
     })
+}
+
+/// Length used to reject requirement prose. One body cell past the short-label
+/// bound is a note beside the row, not a column of requirements. Two or more
+/// long cells still count.
+fn blocking_body_max(body: &[usize]) -> usize {
+    let long = body
+        .iter()
+        .filter(|chars| **chars > SHORT_LABEL_CHARS)
+        .count();
+    if long == 1 {
+        return body
+            .iter()
+            .copied()
+            .filter(|chars| *chars <= SHORT_LABEL_CHARS)
+            .max()
+            .unwrap_or(0);
+    }
+    body.iter().copied().max().unwrap_or(0)
 }
 
 fn classify_cell(text: &str) -> CellKind {
@@ -562,6 +617,7 @@ fn blank_header_columns(definition: &Value) -> Option<usize> {
     if columns < 2 || rows < 2 {
         return None;
     }
+    let wide = full_width_rows(cells, columns);
     let mut header_substantive = vec![false; columns];
     let mut body_blank = vec![0usize; columns];
     let mut body_substantive = vec![0usize; columns];
@@ -570,7 +626,7 @@ fn blank_header_columns(definition: &Value) -> Option<usize> {
         let row = cell["row"].as_u64().unwrap_or(0) as usize;
         let column = cell["column"].as_u64().unwrap_or(0) as usize;
         let span = cell["col_span"].as_u64().unwrap_or(1).max(1) as usize;
-        if row >= rows || column >= columns {
+        if row >= rows || column >= columns || (row != header && wide.contains(&row)) {
             continue;
         }
         let kind = classify_cell(cell["text"].as_str().unwrap_or(""));
@@ -593,7 +649,10 @@ fn blank_header_columns(definition: &Value) -> Option<usize> {
             }
         }
     }
-    for row_seen in seen.iter().skip(header + 1) {
+    for (row, row_seen) in seen.iter().enumerate().skip(header + 1) {
+        if wide.contains(&row) {
+            continue;
+        }
         for (column, marked) in row_seen.iter().enumerate() {
             if !marked {
                 body_blank[column] += 1;
@@ -985,5 +1044,159 @@ mod tests {
         assert_eq!(cards[0]["page"], 12);
         assert_eq!(cards[0]["heading"], "投标文件格式 > 报价");
         assert_eq!(cards[0]["source_id"], "table");
+    }
+
+    fn spanned(row: usize, column: usize, col_span: usize, text: &str) -> Value {
+        json!({
+            "row": row,
+            "column": column,
+            "row_span": 1,
+            "col_span": col_span,
+            "text": text
+        })
+    }
+
+    #[test]
+    fn a_full_width_footer_does_not_hide_blank_columns() {
+        let mut cells = Vec::new();
+        for (column, text) in ["序号", "名称", "参数", "品牌", "单价", "总价"]
+            .iter()
+            .enumerate()
+        {
+            cells.push(spanned(0, column, 1, text));
+        }
+        for (column, text) in ["1", "设备", "规格", "甲", "", ""].iter().enumerate() {
+            cells.push(spanned(1, column, 1, text));
+        }
+        cells.push(spanned(
+            2,
+            0,
+            6,
+            "表尾横跨各列的一句说明，不应当把空白列涂成已填写。",
+        ));
+        let input = frozen(
+            vec![source("price", 40, &long_prose(), "报价", "document")],
+            vec![form("price", "price", table_definition(6, 3, cells))],
+        );
+        assert_eq!(attachment_form_ids(&input), vec!["price".to_string()]);
+    }
+
+    #[test]
+    fn a_full_width_footer_does_not_tip_the_body_fill() {
+        let mut cells = Vec::new();
+        for (column, text) in ["名称", "规格", "", ""].iter().enumerate() {
+            cells.push(spanned(0, column, 1, text));
+        }
+        for (column, text) in ["设备", "参数", "", ""].iter().enumerate() {
+            cells.push(spanned(1, column, 1, text));
+        }
+        cells.push(spanned(
+            2,
+            0,
+            4,
+            "表尾横跨各列的一句说明，多算一个已填格子就会差一格。",
+        ));
+        let input = frozen(
+            vec![source("fill", 41, &long_prose(), "报价", "document")],
+            vec![form("fill", "fill", table_definition(4, 3, cells))],
+        );
+        assert_eq!(attachment_form_ids(&input), vec!["fill".to_string()]);
+    }
+
+    #[test]
+    fn a_filled_grid_with_a_full_width_footer_stays_out() {
+        let mut cells = Vec::new();
+        for (column, text) in ["项目", "要求", "参数", "响应"].iter().enumerate() {
+            cells.push(spanned(0, column, 1, text));
+        }
+        cells.push(spanned(1, 0, 1, "电压"));
+        cells.push(spanned(1, 1, 1, "额定"));
+        cells.push(spanned(1, 2, 1, "220V"));
+        cells.push(spanned(1, 3, 1, "满足"));
+        cells.push(spanned(2, 0, 4, "表尾横跨各列的一句说明，正文都已经写满。"));
+        let input = frozen(
+            vec![source("spec", 3, "", "技术规格", "page_table")],
+            vec![form(
+                "spec",
+                "spec",
+                json!({
+                    "title": "source_unit:form",
+                    "row_count": 3,
+                    "column_count": 4,
+                    "cells": cells
+                }),
+            )],
+        );
+        assert!(attachment_form_ids(&input).is_empty());
+    }
+
+    #[test]
+    fn one_long_note_does_not_block_a_blank_column_or_a_continuation() {
+        let header = ["字段", "说明", "填写", "注记"];
+        let mut head_cells = Vec::new();
+        for (column, text) in header.iter().enumerate() {
+            head_cells.push(spanned(0, column, 1, text));
+        }
+        head_cells.push(spanned(1, 0, 1, "名称"));
+        head_cells.push(spanned(1, 1, 1, "全称"));
+        head_cells.push(spanned(1, 2, 1, ""));
+        head_cells.push(spanned(1, 3, 1, ""));
+        head_cells.push(spanned(2, 0, 1, "地址"));
+        head_cells.push(spanned(2, 1, 1, "注册"));
+        head_cells.push(spanned(2, 2, 1, ""));
+        head_cells.push(spanned(2, 3, 1, ""));
+        let note = "这一格单独写了一句比较长的说明文字";
+        let mut note_cells = Vec::new();
+        for (column, text) in header.iter().enumerate() {
+            note_cells.push(spanned(0, column, 1, text));
+        }
+        note_cells.push(spanned(1, 0, 1, "甲"));
+        note_cells.push(spanned(1, 1, 1, "乙"));
+        note_cells.push(spanned(1, 2, 1, "丙"));
+        note_cells.push(spanned(1, 3, 1, note));
+        let mut blank_note = note_cells.clone();
+        blank_note[6]["text"] = json!("");
+        let mut numbered = Vec::new();
+        for (column, text) in header.iter().enumerate() {
+            numbered.push(spanned(0, column, 1, text));
+        }
+        numbered.push(spanned(1, 0, 1, "1"));
+        numbered.push(spanned(1, 1, 1, "220V"));
+        numbered.push(spanned(1, 2, 1, "5kW"));
+        numbered.push(spanned(1, 3, 1, note));
+        let chain = frozen(
+            vec![
+                source("head-src", 10, "", "格式", "page_table"),
+                source("note-src", 11, "", "", "page_table"),
+                source("num-src", 12, "", "技术规格", "page_table"),
+            ],
+            vec![
+                form("head", "head-src", table_definition(4, 3, head_cells)),
+                form("note", "note-src", table_definition(4, 2, note_cells)),
+                form("numbered", "num-src", table_definition(4, 2, numbered)),
+            ],
+        );
+        let ids = attachment_form_ids(&chain);
+        assert!(ids.contains(&"head".to_string()), "{ids:?}");
+        assert!(ids.contains(&"note".to_string()), "{ids:?}");
+        assert!(!ids.contains(&"numbered".to_string()), "{ids:?}");
+        let alone = frozen(
+            vec![source("alone", 20, &long_prose(), "商务", "document")],
+            vec![form("alone", "alone", table_definition(4, 2, blank_note))],
+        );
+        assert_eq!(attachment_form_ids(&alone), vec!["alone".to_string()]);
+    }
+
+    fn long_prose() -> String {
+        "这一段说明写得很长，用来挡住只靠标题下只有一张表才成立的那条规则。".repeat(3)
+    }
+
+    fn table_definition(columns: usize, rows: usize, cells: Vec<Value>) -> Value {
+        json!({
+            "title": "source_unit:form",
+            "row_count": rows,
+            "column_count": columns,
+            "cells": cells
+        })
     }
 }
