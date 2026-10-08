@@ -14,21 +14,39 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
-def test_caption_falls_back_to_a_short_preceding_line():
+def test_caption_skips_running_headers_unit_lines_and_prefers_a_number():
     cell = lambda row, column, span, text: type('Cell', (), {
         'row': row, 'column': column, 'col_span': span, 'text': text})()
     grid = type('Grid', (), {
         'column_count': 2,
         'cells': [cell(0, 0, 1, '名称'), cell(0, 1, 1, '')],
     })()
-    assert module.form_title(grid, '字段一览\n请按下表填写。') == ''
+    assert module.form_title(grid, '字段一览\n请按下表填写。') == '字段一览'
     assert module.form_title(grid, '说明正文。\n字段一览') == '字段一览'
     assert module.caption_line('字' * 81) == ''
+    assert module.is_unit_line('（单位：元）')
+    assert module.caption_line('8A 商务部分摘要表\n（单位：元）') == '8A 商务部分摘要表'
+    assert module.caption_line('8B 股权结构\n填写说明') == '8B 股权结构'
+    units = []
+    for page in (0, 1, 2):
+        units.append(type('Unit', (), {
+            'text': '投标文件\n正文',
+            'locator': type('Locator', (), {'page_ordinal': page})(),
+        })())
+    running = module.running_lines(units)
+    assert '投标文件' in running
+    assert module.caption_line('8A 商务部分摘要表\n投标文件', running) == '8A 商务部分摘要表'
+    assert module.caption_line('投标文件', running) == ''
     spanning = type('Grid', (), {
+        'column_count': 2,
+        'cells': [cell(0, 0, 2, '（单位：元）'), cell(1, 0, 1, '名称')],
+    })()
+    assert module.form_title(spanning, '8A 商务部分摘要表') == '8A 商务部分摘要表'
+    kept = type('Grid', (), {
         'column_count': 2,
         'cells': [cell(0, 0, 2, '合并表头'), cell(1, 0, 1, '名称')],
     })()
-    assert module.form_title(spanning, '不应采用这一行') == '合并表头'
+    assert module.form_title(kept, '不应采用这一行') == '合并表头'
 
 
 @pytest.mark.parametrize('extension', ['docx', 'xlsx'])

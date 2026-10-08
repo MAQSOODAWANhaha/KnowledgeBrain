@@ -4341,6 +4341,8 @@ fn reviewed_source_gap_can_remain_open_without_an_outstanding_extraction_error()
         review: state.review.clone().unwrap(),
         quality: "needs_review".into(),
         source_views: BTreeMap::new(),
+        usage: Default::default(),
+        outline: None,
     };
     assert!(!result.open_items(&input).is_empty());
     assert_eq!(result.expected_quality(&input), "needs_review");
@@ -5363,6 +5365,8 @@ async fn main_source_backed_dispute_requires_independent_reconsideration() {
         review: review.clone(),
         quality: "needs_review".into(),
         source_views: BTreeMap::new(),
+        usage: Default::default(),
+        outline: None,
     };
     assert_eq!(result.expected_quality(&input), "needs_review");
     assert!(crate::docx_composition::validate_basis(&input, &result).is_err());

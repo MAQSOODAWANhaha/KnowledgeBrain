@@ -23,27 +23,27 @@
 | --- | --- |
 | `discover` | 发现。阅读包还没全部 `committed` |
 | `outline` | 先组织，再收尾。章节未齐、附件未绑完、槽还没交，或应答章节没有槽，是组织；这些都齐是收尾 |
-| `check` | 收尾。旧路径会把 phase 写成 `check`。一次成稿的 `finish_outline` 直接写成 `complete` |
+| `check` | 收尾。草稿可结束时（章节、附件、槽都齐，应答章节都有槽，且没有被拒绝的 `finish_outline`）阶段写成 `check`。`finish_outline` 成功写成 `complete`；被拒绝则回到 `outline` |
 | `complete` | 大纲已结束。`DraftStage` 仍是大纲时职责是收尾；`DraftStage` 已是 `Fill` 或已发布时职责是只写槽 |
 
 | 职责 | 工具 | 提示约束 |
 | --- | --- | --- |
 | 发现 | `submit_pack`，`read_outline` | 应答义务是投标人必须提交、填写、声明、承诺、报价、列偏差、提供资格证明或按指定格式作答的事项。读完已领取的包再 `submit_pack`。整包没有应答义务时 `requirements` 用空数组。同一包失败后才把 `repair` 设为 true |
 | 组织 | `put_chapters`，`bind_forms`，`put_slots`，`read_outline` | 替换整棵章节树，把每个附件表绑到唯一章节，并写入规定槽。每个应答章节至少有一个槽。投标人槽和签字槽留空并带 `match_query`。分组章节不能带这两种槽 |
-| 收尾 | `read_outline`，`finish_outline` | 核对后结束。有未绑定附件表时不能结束。不改章节，不改槽 |
+| 收尾 | `read_outline`，`finish_outline` | `readiness.ready` 为 true 时下一步是 `finish_outline`。核对结果在 `readiness` 里，不要反复 `read_outline`。不改章节，不改槽 |
 | 填槽（`Fill` / 已发布） | `put_slots`，`read_outline` | 只抄招标文件已有文字。不能改章节，不能改绑定 |
 
-`finish_outline` 还要求：章节树非空且无环、同级顺序不重复、已经调用过 `put_slots`、每个 `ChapterPurpose::Response` 章节至少有一个槽。一次成稿的 `put_slots` 在还有应答章节没有槽时拒绝，不把 `slots_submitted` 写成 true，职责留在组织。已经交过槽后又多出一个没有槽的应答章节，职责回到组织。`finish_outline` 被拒绝时检查点记下 `finish_rejected`，下一轮职责回到组织，不再挂出 `finish_outline`。之后组织成功写入章节、绑定或槽，这次拒绝撤销，结构齐全时可以再进入收尾。成功后 `tool_draft.finished = true`，并把 `outline_run.phase` 和 `analysis.outline.phase` 标成 `complete`。
+`finish_outline` 还要求：章节树非空且无环、同级顺序不重复、已经调用过 `put_slots`、每个 `ChapterPurpose::Response` 章节至少有一个槽。一次成稿的 `put_slots` 在还有应答章节没有槽时拒绝，不把 `slots_submitted` 写成 true，职责留在组织。已经交过槽后又多出一个没有槽的应答章节，职责回到组织。`finish_outline` 被拒绝时检查点记下 `finish_rejected`，阶段回到 `outline`，下一轮职责回到组织，不再挂出 `finish_outline`。之后组织成功写入章节、绑定或槽，这次拒绝撤销。结构齐全时阶段写成 `check`，职责进入收尾。成功后 `tool_draft.finished = true`，并把 `outline_run.phase` 和 `analysis.outline.phase` 标成 `complete`。进度里的 `outline_phase` 因此会经过 `check`，不会从 `outline` 直接跳到 `complete`。
 
 ## 六个工具
 
 | 工具 | 写入 |
 | --- | --- |
 | `submit_pack` | `pack_id`、`call_id`、`repair`、`requirements[]`（`description`、`source_id`、`start`、`end`） |
-| `put_chapters` | 整棵树替换。必填 `id`、`parent_id`、`order`、`title`、`purpose`（`group` 或 `response`）、`requirement_ids`（字符串数组，允许空数组）。未知 id 拒绝；已提交的 id 必须各出现在恰好一个章节上 |
-| `bind_forms` | `bindings[]` 的 `form_id`、`chapter_id`。整表替换。同一附件表出现两次会拒绝 |
+| `put_chapters` | 整棵树替换。必填 `id`、`parent_id`、`order`、`title`、`purpose`（`group` 或 `response`）、`requirement_ids`（字符串数组，允许空数组）。未知 id、重复 id、未挂上的已提交 id，同一次调用全部报出 |
+| `bind_forms` | `bindings[]` 的 `form_id`、`chapter_id`。整表替换。同一附件表出现两次会拒绝。分组章节不能接收附件表 |
 | `put_slots` | 整表替换。`kind` 为 `fixed_text`、`tender_value`、`instruction`、`bidder_blank`、`signature`、`preserved` |
-| `read_outline` | 无参数。返回当前章节、绑定、槽、`slots_submitted`、`finished` |
+| `read_outline` | 无参数。返回当前章节、绑定、槽、`slots_submitted`、`finished`，以及 `readiness` |
 | `finish_outline` | 无参数。通过上面的门之后把草稿标成结束 |
 
 `bidder_blank` 和 `signature` 的 `text` 必须为空，`match_query` 必须有内容，并且 `response_required` 为真。其它种类的 `match_query` 必须为空。分组章节不能带这两种槽。
@@ -55,11 +55,14 @@
 满足下面任一条件即是附件表：
 
 1. 网格至少有两个锚点、其中一个有内容，并且出现至少两处行内占位（连续三个 `_`、`.`、`-`、`~`、`…`、`□` 一类笔画，空白不打断），或者至少一半锚点是空白或占位，或者首行有内容且其后至少一半锚点是空白或占位。
-2. 该表是某一非空标题下的唯一表，该标题下正文不超过 80 个字符，表体至少三分之一是空白或占位，表体里有内容的格子都不超过 12 个字符，并且表体里带数字的格子不到三分之一。
+2. 表头行下有空白列。表头单元格有内容，且该列在表头之下的空格多于有内容的格子。有两列及以上这样的列时，其余格子带数字也不排除。只有一列时，表体里有内容的格子都不超过 12 个字符，并且表体里带数字的格子不到三分之一。第一行若是一个跨满列的标题格，表头改看下一行。
+3. 该表是某一非空标题下的唯一表，该标题下正文不超过 80 个字符，表体至少三分之一是空白或占位，表体里有内容的格子都不超过 12 个字符，并且表体里带数字的格子不到三分之一。
 
-来源定位器自己的 `heading_path` 为空时，标题取同一文档里顺序在前、最近一条非空 `heading_path`。页表因此跟在它前面的章节后面，不必把标题写进页表定位器。合成标题（例如 `source_unit:` 加来源 id）不参与判断。样本冻结仍会把结构标题写进定义：第一行跨满列的格子，否则前一条非空来源的最后一行（不超过 80 字，且不以句末标点结束）。那只是冻结记录，检测不读它。
+续表跟表头表走。同一文档里、中间没有别的表、列数相同，并且后一张表重复前一张的表头，或后一张表的表头整行是空的，它们是同一条链。链上只要有一张表自己满足上面的条件，链上其余的表也是附件表。编号参数表和长要求行不从邻居继承：表体最长的有内容格子超过 12 个字符，或表体里带数字的格子达到三分之一。
 
-宿主包里的 `outline` 比 `read_outline` 多一个 `unmapped_forms` 列表。工具返回本身不含这个字段。
+来源定位器自己的 `heading_path` 为空时，标题取同一文档里顺序在前、最近一条非空 `heading_path`。页表因此跟在它前面的章节后面，不必把标题写进页表定位器。合成标题（例如 `source_unit:` 加来源 id）不参与判断。样本冻结仍会把结构标题写进定义。优先用第一行跨满列、且不是页眉页脚也不是括号单元注的格子。否则在前一条来源里，从靠近表格的一行往前找：跳过在至少两页的页首或页尾重复出现的行，跳过整行包在括号里的单元注，跳过超过 80 字或以句末标点结束的行。有编号行（以数字或「一二三…」加顿号、点、括号开头）时用最靠近表格的那一行，否则用剩下的最靠近表格的一行。那只是冻结记录，检测不读它。
+
+宿主包里的 `outline` 比工具返回多一个 `unmapped_forms` 页。每一项是一张卡片：`form_id`、`title`、`header`（表头行）、`source_id`、`ordinal`、`page`、`heading`（最近的前一标题）。页按来源顺序排，预算是宿主包 `max_bytes` 的一半，装不下的留在 `next`。来源索引那一页不必翻到这些序号。`readiness` 在宿主包和每次工具返回里都有：`ready`、`missing`，齐了才有 `next: finish_outline`。
 
 ## 发现：阅读包与并发
 
@@ -74,7 +77,7 @@
 
 每一轮 brief 里同时处于 `running` 或待修 `failed` 的包不超过 `DEFAULT_PACK_CONCURRENCY`（4）。`claim` 只补满这个名额里的空位，按包的 `order` 领取，不按包 id 的字符串序。请求 brief 的 `reading_packs` 就是这些在途包。已 `committed` 的包不再出现。试装（`fit_batch`、检查）调用的 `prepare_request` 不留下额外领取。
 
-`submit_pack` 由宿主拆开：`repair` 为 false 时走 `submit_pack_scan`，为 true 时走 `repair_pack_scan`。修复只接受状态已经是 `failed` 的同一包。
+`submit_pack` 由宿主拆开：`repair` 为 false 时走 `submit_pack_scan`，为 true 时走 `repair_pack_scan`。修复只接受状态已经是 `failed` 的同一包。包 id 不在计划里时，错误是 `unknown_pack`，并列出当前失败包的 id。已知但还没失败的包仍是「requires a failed reading pack」。
 
 校验失败不写入要求。返回 `{ok: false, feedback}`，包变为 `failed`。`PackFeedback` 含 `pack_id`、`call_id`、参数摘要 `arguments_sha256`、`errors[]`（`path`、`code`、`message`）、`total`、`truncated`。当前构造函数把 `truncated` 设为 false，并返回全部字段错误。参数缺 `pack_id` / `call_id`，或对未失败的包要求修复，是工具错误，不是这条 feedback。
 
@@ -183,13 +186,13 @@
 - 投标人槽和签字槽留空，并带 `match_query`。大纲运行不查企业知识库。
 - 每个附件表只绑定一个章节。未绑完不能 `finish_outline`。
 - `response` 只读冻结的 `OutlineArtifact`。工具是 `read_outline` 和 `put_responses`（[`response-tools-v1.schema.json`](../../crates/bidding/schemas/response-tools-v1.schema.json)）。
-- 检查点是记忆。可恢复的是 `DiscoverWork`、`tool_draft` 和 `phase`。对话不是那份可恢复记忆。会话只是当前窗口的 SDK 对话。
+- 检查点是记忆。可恢复的是 `DiscoverWork`、`tool_draft` 和 `phase`。对话不是那份可恢复记忆。会话只是当前窗口的 SDK 对话。供应商用量累加在 `journal.usage`。会话在运行结束时丢掉，用量还在。`analysis-result.json` 带同一份累计用量，并在 `finish_outline` 成功后带上已发布的大纲（章节、槽、附件绑定）。用量全空或大纲尚未结束时这两个字段不写出。检查点合同版本仍是 14。
 
 ## 进度
 
 产品路径的进度来自 `DiscoverWork` 和 `tool_draft`：包的总数、待领、在跑、失败、已提交，章节数，未绑定附件数，槽是否已交，草稿是否结束。有阅读包时，发现阶段的停滞观察读包计数和要求条数，不读 `analysis.outline.scanned`。组织、收尾和完成读 `tool_draft`。有阅读包或工具草稿时，章数是 `tool_draft.chapters` 的长度，不是 `draft_plan` 的长度。扫描游标不再代表发现进度。
 
-一次成稿没有回合上限，也没有阶段墙钟，也不用累计的 `max_tool_calls` 或 `max_read_bytes` 截停。`Limits::at_least_for` 不改写 `max_turns`，不按 `max_turns` 放大工具调用或读字节，只把 `reviewer_reserve` 清成 0。已经有阅读包、且 `draft_stage` 仍是大纲时，这三个累计额度都不结束循环，SDK 会话也不再按剩余回合数封顶。单次请求仍受 `max_context_bytes`、`max_context_tokens` 和 `max_tool_result_bytes` 约束，装不下就缩小这一次请求。没有阅读包的旧扫描路径仍受调用方写明的 `max_turns`、`max_tool_calls` 和 `max_read_bytes` 约束；那条路径只留给不经过配置的抽取单测。
+一次成稿没有回合上限，也没有阶段墙钟，也不用累计的 `max_tool_calls` 或 `max_read_bytes` 截停。`Limits::at_least_for` 不改写 `max_turns`，不按 `max_turns` 放大工具调用或读字节，只把 `reviewer_reserve` 清成 0。`max_turns` 为 0 表示没有回合上限，校验接受它；一次成稿本来就不读这个数。修复任务的回合上限在这时只看焦点预算（`max_focus_turns` 乘 `max_focus_replans + 1`），不把 0 当成上限。已经有阅读包、且 `draft_stage` 仍是大纲时，这三个累计额度都不结束循环，SDK 会话也不再按剩余回合数封顶。单次请求仍受 `max_context_bytes`、`max_context_tokens` 和 `max_tool_result_bytes` 约束，装不下就缩小这一次请求。没有阅读包的旧扫描路径仍受调用方写明的正数 `max_turns`、`max_tool_calls` 和 `max_read_bytes` 约束；`max_turns` 为 0 在那条路径上同样不是上限。那条路径只留给不经过配置的抽取单测。配置校验失败时，错误写明是哪一条不成立。摘要对不上才用 `FROZEN_INPUT_DIGEST_MISMATCH`。
 
 卡住时只看 `Limits` 里的 `max_no_progress_turns`、`max_focus_turns`、`max_focus_replans`。观察进入 `Blocked` 后运行结束。错误码仍是 `AGENT_TURN_BUDGET_EXCEEDED`，正文是 `outline stalled in phase {phase}`，`phase` 取检查点上的 `discover`、`outline`、`check` 或 `complete`。这是逻辑停滞，不是回合预算。
 

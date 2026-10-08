@@ -350,6 +350,13 @@ fn one_shot_acceptance_publishes_from_the_tool_draft() {
         ]}),
     )
     .unwrap();
+    assert_eq!(state.analysis.outline.phase, Phase::Check);
+    assert_eq!(state.outline_run.phase, Phase::Check);
+    let read = apply(&input, 0, &mut state, "read_outline", &json!({})).unwrap();
+    assert_eq!(read["readiness"]["ready"], true);
+    assert_eq!(read["readiness"]["next"], "finish_outline");
+    let progress = state.progress(&input);
+    assert_eq!(progress["outline_phase"], "check");
     assert_eq!(current(&input, &state), Duty::Check);
     assert!(deny(Duty::Check, "put_chapters", false).is_some());
     assert!(deny(Duty::Check, "bind_forms", false).is_some());

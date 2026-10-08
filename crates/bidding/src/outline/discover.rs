@@ -288,6 +288,21 @@ impl DiscoverWork {
         self.packs.get(pack_id).map(|record| record.status)
     }
 
+    /// Failed pack ids in plan order. Repair of an unknown id lists these.
+    pub fn failed_pack_ids(&self) -> Vec<String> {
+        let mut failed: Vec<_> = self
+            .packs
+            .values()
+            .filter(|record| record.status == PackStatus::Failed)
+            .map(|record| record.pack.id.clone())
+            .collect();
+        failed.sort_by_key(|id| {
+            let pack = &self.packs[id].pack;
+            (pack.order, pack.id.clone())
+        });
+        failed
+    }
+
     pub fn requirement_count(&self) -> usize {
         self.requirements.len()
     }
@@ -427,8 +442,22 @@ pub fn apply_pack_tool(
         .filter(|id| !id.is_empty())
         .ok_or("pack_id is required")?;
     let work = slot.get_or_insert_with(|| DiscoverWork::plan(input, budget));
-    if name == "repair_pack_scan" && work.status(pack_id) != Some(PackStatus::Failed) {
-        return Err("repair_pack_scan requires a failed reading pack".into());
+    if name == "repair_pack_scan" {
+        match work.status(pack_id) {
+            Some(PackStatus::Failed) => {}
+            None => {
+                let failed = work.failed_pack_ids();
+                let listed = if failed.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    failed.join(", ")
+                };
+                return Err(format!("unknown_pack {pack_id}; failed packs: {listed}"));
+            }
+            Some(_) => {
+                return Err("repair_pack_scan requires a failed reading pack".into());
+            }
+        }
     }
     let submit = parse_submit(args)?;
     match work.submit(pack_id, submit) {
@@ -1385,6 +1414,62 @@ mod tests {
         assert_eq!(work.status("pack-1"), Some(PackStatus::Committed));
         assert_eq!(work.requirement_count(), 2);
         assert_eq!(work.requirement("pack-1:0").unwrap().source_id, "b");
+    }
+
+    #[test]
+    fn repair_of_an_unknown_pack_lists_failed_pack_ids() {
+        let frozen = input(
+            vec![
+                source("a", 0, "A", "第一章 > 投标函"),
+                source("b", 1, "B", "第二章 > 技术方案"),
+            ],
+            vec![],
+        );
+        let mut slot = None;
+        claim_turn(&mut slot, &frozen, 1, DEFAULT_PACK_CONCURRENCY);
+        apply_pack_tool(
+            &mut slot,
+            &frozen,
+            1,
+            "submit_pack_scan",
+            &json!({
+                "pack_id": "pack-1",
+                "call_id": "bad",
+                "requirements": [{"description": "错", "source_id": "a", "start": 0, "end": 1}]
+            }),
+        )
+        .unwrap();
+        let unknown = apply_pack_tool(
+            &mut slot,
+            &frozen,
+            1,
+            "repair_pack_scan",
+            &json!({
+                "pack_id": "pack-22",
+                "call_id": "missing",
+                "requirements": []
+            }),
+        )
+        .unwrap_err();
+        assert!(unknown.contains("unknown_pack pack-22"), "{unknown}");
+        assert!(unknown.contains("failed packs: pack-1"), "{unknown}");
+        assert!(!unknown.contains("requires a failed reading pack"));
+        let running = apply_pack_tool(
+            &mut slot,
+            &frozen,
+            1,
+            "repair_pack_scan",
+            &json!({
+                "pack_id": "pack-0",
+                "call_id": "running",
+                "requirements": []
+            }),
+        )
+        .unwrap_err();
+        assert!(
+            running.contains("requires a failed reading pack"),
+            "{running}"
+        );
     }
 
     #[test]

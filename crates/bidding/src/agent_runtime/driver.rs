@@ -155,6 +155,7 @@ pub(crate) async fn drive<D: Driver>(
             if let Some(session) = host.journal_mut().session.as_mut() {
                 session.note_provider_usage(&response);
             }
+            host.journal_mut().note_usage(&response);
             host.journal_mut().responded(response.clone())?;
             host.save().await?;
             response
@@ -367,6 +368,13 @@ mod tests {
                 arguments: "{}".into(),
             }],
             finish_reason: "tool_calls".into(),
+            usage: Some(knowledge::models::ChatUsage {
+                prompt_tokens: Some(10),
+                completion_tokens: Some(2),
+                total_tokens: Some(12),
+                cached_tokens: Some(1),
+                reasoning_tokens: Some(0),
+            }),
             ..Default::default()
         }
     }
@@ -462,6 +470,11 @@ mod tests {
         assert_eq!(*host.sdk_turns.lock().unwrap(), vec![1, 2]);
         assert!(host.journal.pending.is_none());
         assert!(host.done);
+        assert!(host.journal.session.is_none());
+        assert_eq!(host.journal.usage.input_tokens, 20);
+        assert_eq!(host.journal.usage.output_tokens, 4);
+        assert_eq!(host.journal.usage.total_tokens, 24);
+        assert_eq!(host.journal.usage.cached_input_tokens, 2);
     }
 
     #[tokio::test]

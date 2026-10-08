@@ -102,6 +102,8 @@ fn grid_grounded_obligations_publish_without_fabricating_text_quotes() {
         analysis,
         quality: "needs_review".into(),
         source_views: BTreeMap::new(),
+        usage: Default::default(),
+        outline: None,
     };
     let publication = super::postgres::publication(&input, &result).unwrap();
     let req = &publication["requirements"][0];
@@ -463,6 +465,8 @@ fn same_compliance_policy_preserves_distinct_conditions_and_ground_ranges() {
         analysis,
         quality: "needs_review".into(),
         source_views: BTreeMap::new(),
+        usage: Default::default(),
+        outline: None,
     };
     let publication = super::postgres::publication(&input, &result).unwrap();
     assert_eq!(

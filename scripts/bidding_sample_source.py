@@ -12,12 +12,85 @@ from pathlib import Path
 import uuid
 
 
-def form_title(grid, previous_text):
-    """Caption carried by the grid, or the short line that introduces it.
+_SENTENCE_END = '。.!！?？;；'
+_NUMERALS = '一二三四五六七八九十'
+_DIGITS = '0123456789０１２３４５６７８９'
 
-    A cell in row 0 whose span covers every column is the caption. Otherwise
-    the last non-empty line of the previous source is used when it is short
-    and does not end a sentence. Detection does not read this title.
+
+def _normalize(text):
+    return ' '.join((text or '').split())
+
+
+def page_ordinal(locator):
+    if locator is None:
+        return None
+    if isinstance(locator, dict):
+        value = locator.get('page_ordinal')
+    else:
+        value = getattr(locator, 'page_ordinal', None)
+    return value if isinstance(value, int) else None
+
+
+def running_lines(units):
+    """Lines that open or close at least two pages are page furniture.
+
+    Repetition is the signal. The words themselves are not a list.
+    """
+    firsts, lasts = {}, {}
+    pages = {}
+    for unit in units:
+        page = page_ordinal(getattr(unit, 'locator', None) if not isinstance(unit, dict) else unit.get('locator'))
+        text = unit['text'] if isinstance(unit, dict) else getattr(unit, 'text', '')
+        lines = [line.strip() for line in (text or '').splitlines() if line.strip()]
+        if page is None or not lines:
+            continue
+        pages.setdefault(page, []).extend(lines)
+    for page, lines in pages.items():
+        firsts.setdefault(_normalize(lines[0]), set()).add(page)
+        lasts.setdefault(_normalize(lines[-1]), set()).add(page)
+    running = set()
+    for groups in (firsts, lasts):
+        for line, seen in groups.items():
+            if len(seen) >= 2:
+                running.add(line)
+    return running
+
+
+def is_unit_line(text):
+    """A line that is only a parenthetical note, such as a unit annotation."""
+    line = (text or '').strip()
+    if len(line) < 3:
+        return False
+    return (line[0], line[-1]) in {('(', ')'), ('（', '）')}
+
+
+def is_numbered(text):
+    """A caption index: a digit, or a numeral token closed by a delimiter."""
+    line = (text or '').strip()
+    if line[:1] in '（([':
+        line = line[1:].lstrip()
+    if not line:
+        return False
+    if line[0] in _DIGITS:
+        return True
+    return line[0] in _NUMERALS and (len(line) == 1 or line[1] in '、.．)）')
+
+
+def usable_line(text, running):
+    line = (text or '').strip()
+    if not line or len(line) > 80 or line[-1] in _SENTENCE_END:
+        return ''
+    if _normalize(line) in running or is_unit_line(line):
+        return ''
+    return line
+
+
+def form_title(grid, previous_text, running=()):
+    """Caption carried by the grid, or the numbered line nearest the table.
+
+    A cell in row 0 whose span covers every column is the caption when it is
+    not page furniture and not a unit note. Otherwise walk the previous source
+    from the table backward. Detection does not read this title.
     """
     columns = getattr(grid, 'column_count', 0) or 0
     spanning = []
@@ -25,19 +98,20 @@ def form_title(grid, previous_text):
         text = (getattr(cell, 'text', '') or '').strip()
         if getattr(cell, 'row', None) == 0 and columns and getattr(cell, 'col_span', 1) >= columns and text:
             spanning.append(text)
-    if len(spanning) == 1 and len(spanning[0]) <= 80:
-        return spanning[0]
-    return caption_line(previous_text)
+    if len(spanning) == 1:
+        chosen = usable_line(spanning[0], running)
+        if chosen:
+            return chosen
+    return caption_line(previous_text, running)
 
 
-def caption_line(text):
+def caption_line(text, running=()):
+    """Nearest eligible line. A numbered line beats a closer unnumbered one."""
     lines = [line.strip() for line in (text or '').splitlines() if line.strip()]
-    if not lines:
-        return ''
-    last = lines[-1]
-    if len(last) > 80 or last[-1] in '。.!！?？;；':
-        return ''
-    return last
+    candidates = [line for line in lines if usable_line(line, running)]
+    numbered = [line for line in candidates if is_numbered(line)]
+    pool = numbered or candidates
+    return pool[-1] if pool else ''
 
 
 def main():
@@ -66,6 +140,7 @@ def main():
     document = identity('document')
     sources, forms = [], []
     previous_text = ''
+    running = running_lines(parsed.structured_source_units)
     for unit in parsed.structured_source_units:
         sid = identity(unit.key)
         locator = unit.locator.model_dump(mode='json')
@@ -76,7 +151,7 @@ def main():
             definition = dict(unit.grid.model_dump(mode='json', exclude_none=True),
                               schema_version=3, kind='grid',
                               form_definition_revision_id=form_id,
-                              source_unit_revision_id=sid, title=form_title(unit.grid, previous_text))
+                              source_unit_revision_id=sid, title=form_title(unit.grid, previous_text, running))
             forms.append(dict(form_definition_revision_id=form_id,
                               source_unit_revision_id=sid, definition=definition))
         if unit.text.strip():

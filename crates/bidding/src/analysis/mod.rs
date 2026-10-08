@@ -455,6 +455,15 @@ pub struct AnalysisResult {
     pub review: Review,
     pub quality: String,
     pub source_views: BTreeMap<String, views::SourceView>,
+    /// Cumulative provider usage. Empty when the provider reported none.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::agent_runtime::TokenUsage::is_empty"
+    )]
+    pub usage: crate::agent_runtime::TokenUsage,
+    /// Published outline. Present once `finish_outline` has succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<crate::outline::tools::Draft>,
 }
 
 /// Known source-side uncertainty, retained in the separate composition report.

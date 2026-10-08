@@ -7,7 +7,7 @@
 use crate::analysis::draft::{DraftPlanItem, DraftStatus};
 use crate::analysis::{FrozenInput, Record, RecordData};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,17 +19,56 @@ pub struct AttachmentBinding {
 
 /// Attachment tables in the frozen tender, in form id order.
 pub fn attachment_form_ids(input: &FrozenInput) -> Vec<String> {
-    let index = SectionIndex::build(input);
-    let mut ids: Vec<_> = input
-        .structured_forms
-        .iter()
-        .filter(|form| is_attachment_form(form, &index))
-        .filter_map(|form| form["form_definition_revision_id"].as_str())
-        .map(str::to_string)
-        .collect();
+    let mut ids: Vec<_> = attachment_ids(input).into_iter().collect();
     ids.sort();
     ids.dedup();
     ids
+}
+
+fn attachment_ids(input: &FrozenInput) -> BTreeSet<String> {
+    let index = SectionIndex::build(input);
+    let mut placed = Vec::new();
+    for form in &input.structured_forms {
+        let Some(id) = form["form_definition_revision_id"].as_str() else {
+            continue;
+        };
+        let source_id = form["source_unit_revision_id"].as_str().unwrap_or("");
+        let source = input
+            .source_units
+            .iter()
+            .find(|source| source.source_unit_revision_id == source_id);
+        placed.push(PlacedForm {
+            id,
+            document_id: source
+                .map(|source| source.document_id.as_str())
+                .unwrap_or(""),
+            ordinal: source.map(|source| source.ordinal).unwrap_or(0),
+            columns: column_count(&form["definition"]),
+            header: header_texts(&form["definition"]),
+            own: is_attachment_form(form, &index),
+            blocked: chain_blocked(&form["definition"]),
+        });
+    }
+    placed.sort_by(|left, right| {
+        (left.document_id, left.ordinal, left.id).cmp(&(right.document_id, right.ordinal, right.id))
+    });
+    let mut attached = BTreeSet::new();
+    let mut index = 0;
+    while index < placed.len() {
+        let mut end = index;
+        while end + 1 < placed.len() && continues(&placed[end], &placed[end + 1]) {
+            end += 1;
+        }
+        if placed[index..=end].iter().any(|form| form.own) {
+            for form in &placed[index..=end] {
+                if form.own || !form.blocked {
+                    attached.insert(form.id.to_string());
+                }
+            }
+        }
+        index = end + 1;
+    }
+    attached
 }
 
 /// Bind every attachment table to the chapter that carries its form id.
@@ -190,18 +229,71 @@ struct GridStats {
     digit_body: usize,
 }
 
+struct PlacedForm<'a> {
+    id: &'a str,
+    document_id: &'a str,
+    ordinal: usize,
+    columns: usize,
+    header: Vec<String>,
+    own: bool,
+    /// Numbered parameter grids and long requirement rows do not inherit
+    /// attachment status from a neighboring continuation.
+    blocked: bool,
+}
+
+fn continues(prev: &PlacedForm<'_>, next: &PlacedForm<'_>) -> bool {
+    prev.document_id == next.document_id
+        && prev.columns >= 2
+        && prev.columns == next.columns
+        && prev.header.iter().any(|cell| !cell.is_empty())
+        && (prev.header == next.header || next.header.iter().all(String::is_empty))
+}
+
 /// A table the bidder is meant to fill in.
 ///
 /// The decision uses the grid and where the table sits in document order.
-/// Titles and heading words are not read.
+/// Titles and heading words are not read. A continuation that repeats the
+/// preceding table's header, or that has an empty header under the same
+/// column count, shares that table's attachment status.
 fn is_attachment_form(form: &Value, index: &SectionIndex) -> bool {
     let Some(stats) = grid_stats(&form["definition"]) else {
         return false;
     };
-    if fill_in_grid(&stats) {
+    if fill_in_grid(&stats) || fill_in_columns(&form["definition"]) {
         return true;
     }
     caption_section_form(form, index, &stats)
+}
+
+/// Columns whose header cell has text and whose body is mostly empty.
+/// Two such columns are a fill-in grid even when the rest of the table is
+/// numbered. One such column still has to look like labels, not a parameter
+/// grid or a requirement paragraph.
+fn fill_in_columns(definition: &Value) -> bool {
+    let Some(columns) = blank_header_columns(definition) else {
+        return false;
+    };
+    if columns >= 2 {
+        return true;
+    }
+    if columns == 0 {
+        return false;
+    }
+    let Some(stats) = grid_stats(definition) else {
+        return false;
+    };
+    if stats.body_max > SHORT_LABEL_CHARS {
+        return false;
+    }
+    !(stats.body_substantive > 0 && stats.digit_body * 3 >= stats.body_substantive)
+}
+
+fn chain_blocked(definition: &Value) -> bool {
+    let Some(stats) = grid_stats(definition) else {
+        return false;
+    };
+    stats.body_max > SHORT_LABEL_CHARS
+        || (stats.body_substantive > 0 && stats.digit_body * 3 >= stats.body_substantive)
 }
 
 fn fill_in_grid(stats: &GridStats) -> bool {
@@ -361,6 +453,212 @@ fn is_blank_cell(text: &str) -> bool {
             .iter()
             .all(|token| token.chars().filter(|ch| !is_placeholder(*ch)).count() <= 1)
         && kept.chars().count() <= 4
+}
+
+fn column_count(definition: &Value) -> usize {
+    definition["column_count"]
+        .as_u64()
+        .map(|count| count as usize)
+        .filter(|count| *count > 0)
+        .unwrap_or_else(|| {
+            definition["cells"]
+                .as_array()
+                .map(|cells| {
+                    cells
+                        .iter()
+                        .map(|cell| {
+                            cell["column"].as_u64().unwrap_or(0) as usize
+                                + cell["col_span"].as_u64().unwrap_or(1) as usize
+                        })
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0)
+        })
+}
+
+fn row_count(definition: &Value) -> usize {
+    definition["row_count"]
+        .as_u64()
+        .map(|count| count as usize)
+        .filter(|count| *count > 0)
+        .unwrap_or_else(|| {
+            definition["cells"]
+                .as_array()
+                .map(|cells| {
+                    cells
+                        .iter()
+                        .map(|cell| cell["row"].as_u64().unwrap_or(0) as usize + 1)
+                        .max()
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0)
+        })
+}
+
+/// Header row under an optional spanning caption. A caption is one cell that
+/// covers every column; the next row is then the header.
+fn header_row(definition: &Value) -> Option<usize> {
+    let cells = definition.get("cells")?.as_array()?;
+    if cells.is_empty() {
+        return None;
+    }
+    let columns = column_count(definition);
+    let first = cells
+        .iter()
+        .filter_map(|cell| cell["row"].as_u64())
+        .min()
+        .unwrap_or(0) as usize;
+    let spans_table = cells.iter().any(|cell| {
+        cell["row"].as_u64().unwrap_or(0) as usize == first
+            && cell["col_span"].as_u64().unwrap_or(1) as usize >= columns.max(1)
+            && !cell["text"].as_str().unwrap_or("").trim().is_empty()
+    });
+    if spans_table {
+        let next = cells
+            .iter()
+            .filter_map(|cell| cell["row"].as_u64())
+            .map(|row| row as usize)
+            .filter(|row| *row > first)
+            .min();
+        return next.or(Some(first));
+    }
+    Some(first)
+}
+
+fn header_texts(definition: &Value) -> Vec<String> {
+    let columns = column_count(definition);
+    if columns == 0 {
+        return Vec::new();
+    }
+    let Some(header) = header_row(definition) else {
+        return vec![String::new(); columns];
+    };
+    let mut texts = vec![String::new(); columns];
+    let Some(cells) = definition["cells"].as_array() else {
+        return texts;
+    };
+    for cell in cells {
+        if cell["row"].as_u64().unwrap_or(0) as usize != header {
+            continue;
+        }
+        let column = cell["column"].as_u64().unwrap_or(0) as usize;
+        let text = cell["text"].as_str().unwrap_or("").trim().to_string();
+        if column < texts.len() && texts[column].is_empty() {
+            texts[column] = text;
+        }
+    }
+    texts
+}
+
+fn blank_header_columns(definition: &Value) -> Option<usize> {
+    let cells = definition.get("cells")?.as_array()?;
+    if cells.is_empty() {
+        return None;
+    }
+    let columns = column_count(definition);
+    let rows = row_count(definition);
+    let header = header_row(definition)?;
+    if columns < 2 || rows < 2 {
+        return None;
+    }
+    let mut header_substantive = vec![false; columns];
+    let mut body_blank = vec![0usize; columns];
+    let mut body_substantive = vec![0usize; columns];
+    let mut seen = vec![vec![false; columns]; rows];
+    for cell in cells {
+        let row = cell["row"].as_u64().unwrap_or(0) as usize;
+        let column = cell["column"].as_u64().unwrap_or(0) as usize;
+        let span = cell["col_span"].as_u64().unwrap_or(1).max(1) as usize;
+        if row >= rows || column >= columns {
+            continue;
+        }
+        let kind = classify_cell(cell["text"].as_str().unwrap_or(""));
+        for offset in 0..span {
+            let column = column + offset;
+            if column >= columns || row >= seen.len() {
+                break;
+            }
+            seen[row][column] = true;
+            if row == header {
+                if kind == CellKind::Substantive {
+                    header_substantive[column] = true;
+                }
+            } else if row > header {
+                if kind == CellKind::Substantive {
+                    body_substantive[column] += 1;
+                } else {
+                    body_blank[column] += 1;
+                }
+            }
+        }
+    }
+    for row_seen in seen.iter().skip(header + 1) {
+        for (column, marked) in row_seen.iter().enumerate() {
+            if !marked {
+                body_blank[column] += 1;
+            }
+        }
+    }
+    Some(
+        header_substantive
+            .iter()
+            .enumerate()
+            .filter(|(column, substantive)| {
+                let body = body_blank[*column] + body_substantive[*column];
+                **substantive && body > 0 && body_blank[*column] > body_substantive[*column]
+            })
+            .count(),
+    )
+}
+
+/// Structural context for the forms the model still has to bind.
+///
+/// Each card carries the stored caption, the header row, and where the table
+/// sits. The source index page does not have to reach that ordinal.
+pub fn form_cards(input: &FrozenInput, form_ids: &[String]) -> Vec<Value> {
+    let index = SectionIndex::build(input);
+    let mut cards = Vec::new();
+    for id in form_ids {
+        let Some(form) = input
+            .structured_forms
+            .iter()
+            .find(|form| form["form_definition_revision_id"].as_str() == Some(id))
+        else {
+            continue;
+        };
+        let source_id = form["source_unit_revision_id"].as_str().unwrap_or("");
+        let source = input
+            .source_units
+            .iter()
+            .find(|source| source.source_unit_revision_id == source_id);
+        let heading = index
+            .placed
+            .get(source_id)
+            .map(|(_, heading)| heading.clone())
+            .unwrap_or_default();
+        let page = source.and_then(|source| source.locator["page_ordinal"].as_u64());
+        cards.push(json!({
+            "form_id": id,
+            "title": form["definition"]["title"].as_str().unwrap_or(""),
+            "header": header_texts(&form["definition"]),
+            "source_id": source_id,
+            "ordinal": source.map(|source| source.ordinal).unwrap_or(0),
+            "page": page,
+            "heading": heading,
+        }));
+    }
+    cards.sort_by(|left, right| {
+        (
+            left["ordinal"].as_u64().unwrap_or(0),
+            left["form_id"].as_str().unwrap_or(""),
+        )
+            .cmp(&(
+                right["ordinal"].as_u64().unwrap_or(0),
+                right["form_id"].as_str().unwrap_or(""),
+            ))
+    });
+    cards
 }
 
 #[cfg(test)]
@@ -562,5 +860,130 @@ mod tests {
             )],
         );
         assert!(attachment_form_ids(&input).is_empty());
+    }
+
+    #[test]
+    fn a_blank_column_under_the_header_is_a_form_below_half_fill() {
+        let mut cells = Vec::new();
+        for column in 0..4 {
+            cells.push(["项目", "说明", "数量", "填写"][column]);
+        }
+        for _row in 1..6 {
+            for column in 0..4 {
+                cells.push(if column == 3 {
+                    ""
+                } else if column == 0 {
+                    "名称"
+                } else {
+                    "全称"
+                });
+            }
+        }
+        let input = frozen(
+            vec![source(
+                "wide",
+                40,
+                "这一段说明很长，后面还有另一张表，不能靠章节里只有一张表来判断。",
+                "商务文件",
+                "document",
+            )],
+            vec![form("wide", "wide", grid(&cells, 4))],
+        );
+        assert_eq!(attachment_form_ids(&input), vec!["wide".to_string()]);
+    }
+
+    #[test]
+    fn two_blank_columns_are_a_form_even_when_other_cells_are_numbered() {
+        let mut cells = Vec::new();
+        for column in 0..6 {
+            cells.push(["序号", "名称", "参数", "单价", "总价", "备注"][column]);
+        }
+        for _row in 1..5 {
+            for column in 0..6 {
+                cells.push(match column {
+                    0 => "1",
+                    1 => "设备",
+                    2 => "220V",
+                    3 => "2",
+                    _ => "",
+                });
+            }
+        }
+        let input = frozen(
+            vec![source("price", 492, "", "报价", "page_table")],
+            vec![form("price", "price", grid(&cells, 6))],
+        );
+        assert_eq!(attachment_form_ids(&input), vec!["price".to_string()]);
+    }
+
+    #[test]
+    fn a_continuation_inherits_its_head_and_a_parameter_grid_does_not() {
+        let head = grid(
+            &[
+                "字段",
+                "说明",
+                "填写",
+                "名称",
+                "全称",
+                "",
+                "地址",
+                "注册地",
+                "",
+                "电话",
+                "号码",
+                "",
+            ],
+            3,
+        );
+        let mut tail_cells = vec!["字段", "说明", "填写"];
+        tail_cells.extend(["联系人", "姓名", "张三", "传真", "号码", "010"]);
+        let tail = grid(&tail_cells, 3);
+        let spec = grid(
+            &[
+                "序号", "项目", "参数", "响应", "1", "电压", "220V", "", "2", "功率", "5kW", "",
+                "3", "重量", "30kg", "",
+            ],
+            4,
+        );
+        let mut spec_tail_cells = vec!["序号", "项目", "参数", "响应"];
+        spec_tail_cells.extend(["", "", "", "", "", "", "", ""]);
+        let spec_tail = grid(&spec_tail_cells, 4);
+        let input = frozen(
+            vec![
+                source("head-src", 10, "", "格式", "page_table"),
+                source("tail-src", 11, "", "", "page_table"),
+                source("spec-src", 12, "", "技术规格", "page_table"),
+                source("spec-tail-src", 13, "", "", "page_table"),
+            ],
+            vec![
+                form("head", "head-src", head),
+                form("tail", "tail-src", tail),
+                form("spec", "spec-src", spec),
+                form("spec-tail", "spec-tail-src", spec_tail),
+            ],
+        );
+        let ids = attachment_form_ids(&input);
+        assert!(ids.contains(&"head".to_string()), "{ids:?}");
+        assert!(ids.contains(&"tail".to_string()), "{ids:?}");
+        assert!(!ids.contains(&"spec".to_string()), "{ids:?}");
+    }
+
+    #[test]
+    fn form_cards_carry_header_ordinal_and_heading() {
+        let mut table = source("table", 449, "", "", "page_table");
+        table.locator["page_ordinal"] = json!(12);
+        let earlier = source("earlier", 448, "见下表", "投标文件格式 > 报价", "document");
+        let definition = grid(&["名称", "单价", "总价", "", "", ""], 3);
+        let input = frozen(
+            vec![earlier, table],
+            vec![form("late", "table", definition)],
+        );
+        let cards = form_cards(&input, &["late".to_string()]);
+        assert_eq!(cards[0]["form_id"], "late");
+        assert_eq!(cards[0]["header"], json!(["名称", "单价", "总价"]));
+        assert_eq!(cards[0]["ordinal"], 449);
+        assert_eq!(cards[0]["page"], 12);
+        assert_eq!(cards[0]["heading"], "投标文件格式 > 报价");
+        assert_eq!(cards[0]["source_id"], "table");
     }
 }

@@ -151,6 +151,8 @@ fn fixture() -> (FrozenInput, AnalysisResult) {
         review: Review::default(),
         quality: "draft".into(),
         source_views: BTreeMap::new(),
+        usage: Default::default(),
+        outline: None,
     };
     (input, result)
 }
