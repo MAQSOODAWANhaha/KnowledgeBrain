@@ -1,6 +1,6 @@
 //! The outline model writes chapters, attachment bindings, and template slots.
 //!
-//! Six tools, and a turn is shown only the ones its duty allows.
+//! Eight tools, and a turn is shown only the ones its duty allows.
 //!
 //! 禁止硬编码: chapter shape uses attachment chains and the documented depth
 //! constants. It does not match chapter titles or a sample keyword list.
@@ -84,7 +84,9 @@ pub fn apply(
     match name {
         "put_chapters" => put_chapters(input, draft, requirement_ids, args),
         "bind_forms" => bind_forms(input, draft, args),
+        "bind_forms_append" => bind_forms_append(input, draft, args),
         "put_slots" => put_slots(input, draft, args),
+        "put_slots_append" => put_slots_append(input, draft, args),
         "read_outline" => Ok(view(input, draft)),
         "finish_outline" => finish(input, draft),
         _ => Err("unknown outline tool".into()),
@@ -134,83 +136,101 @@ fn put_chapters(
     }
     let ids: HashSet<_> = chapters.iter().map(|chapter| chapter.id.as_str()).collect();
     let slots_before = draft.slots.len();
-    draft
-        .bindings
-        .retain(|binding| ids.contains(binding.chapter_id.as_str()));
-    draft
-        .slots
-        .retain(|slot| ids.contains(slot.chapter_id.as_str()));
+    let mut dropped_bindings = Vec::new();
+    draft.bindings.retain(|binding| {
+        let keep = ids.contains(binding.chapter_id.as_str());
+        if !keep {
+            dropped_bindings.push(binding.form_id.clone());
+        }
+        keep
+    });
+    let mut dropped_slots = Vec::new();
+    draft.slots.retain(|slot| {
+        let keep = ids.contains(slot.chapter_id.as_str());
+        if !keep {
+            dropped_slots.push(slot.slot_id.clone());
+        }
+        keep
+    });
     if draft.slots.len() != slots_before {
         draft.slots_submitted = false;
     }
     draft.chapters = chapters;
     draft.finished = false;
-    Ok(view(input, draft))
+    let mut state = view(input, draft);
+    state["dropped_bindings"] = json!(dropped_bindings);
+    state["dropped_slots"] = json!(dropped_slots);
+    Ok(state)
+}
+
+fn binding_sets<'a>(
+    input: &FrozenInput,
+    draft: &'a Draft,
+) -> (HashSet<String>, HashSet<&'a str>, HashSet<&'a str>) {
+    let attachments: HashSet<String> = attachment_form_ids(input).into_iter().collect();
+    let chapters: HashSet<&str> = draft
+        .chapters
+        .iter()
+        .map(|chapter| chapter.id.as_str())
+        .collect();
+    let groups: HashSet<&str> = draft
+        .chapters
+        .iter()
+        .filter(|chapter| chapter.purpose == ChapterPurpose::Group)
+        .map(|chapter| chapter.id.as_str())
+        .collect();
+    (attachments, chapters, groups)
+}
+
+fn parse_binding(
+    binding: &Value,
+    attachments: &HashSet<String>,
+    chapters: &HashSet<&str>,
+    groups: &HashSet<&str>,
+    seen: &mut HashSet<String>,
+) -> Result<AttachmentBinding, String> {
+    let form_id = required(binding, "form_id")?;
+    let chapter_id = required(binding, "chapter_id")?;
+    if !attachments.contains(&form_id) {
+        return Err(format!("form {form_id} is not an attachment table"));
+    }
+    if !chapters.contains(chapter_id.as_str()) {
+        return Err(format!("chapter {chapter_id} is not in the outline"));
+    }
+    if groups.contains(chapter_id.as_str()) {
+        return Err(format!(
+            "chapter {chapter_id} is a group chapter and cannot take an attachment table"
+        ));
+    }
+    if !seen.insert(form_id.clone()) {
+        return Err(format!(
+            "attachment table {form_id} is bound more than once"
+        ));
+    }
+    Ok(AttachmentBinding {
+        form_id,
+        chapter_id,
+    })
 }
 
 fn bind_forms(input: &FrozenInput, draft: &mut Draft, args: &Value) -> Result<Value, String> {
     let rows = args["bindings"]
         .as_array()
         .ok_or("bindings must be an array")?;
-    let attachments: HashSet<_> = attachment_form_ids(input).into_iter().collect();
-    let chapters: HashSet<_> = draft
-        .chapters
-        .iter()
-        .map(|chapter| chapter.id.as_str())
-        .collect();
-    let groups: HashSet<_> = draft
-        .chapters
-        .iter()
-        .filter(|chapter| chapter.purpose == ChapterPurpose::Group)
-        .map(|chapter| chapter.id.as_str())
-        .collect();
+    let (attachments, chapters, groups) = binding_sets(input, draft);
     let mut bindings = Vec::with_capacity(rows.len());
     let mut seen = HashSet::new();
     let mut errors = Vec::new();
     for binding in rows {
-        let form_id = match required(binding, "form_id") {
-            Ok(id) => id,
-            Err(error) => {
-                errors.push(error);
-                continue;
-            }
-        };
-        let chapter_id = match required(binding, "chapter_id") {
-            Ok(id) => id,
-            Err(error) => {
-                errors.push(error);
-                continue;
-            }
-        };
-        if !attachments.contains(&form_id) {
-            errors.push(format!("form {form_id} is not an attachment table"));
-            continue;
+        match parse_binding(binding, &attachments, &chapters, &groups, &mut seen) {
+            Ok(parsed) => bindings.push(parsed),
+            Err(error) => errors.push(error),
         }
-        if !chapters.contains(chapter_id.as_str()) {
-            errors.push(format!("chapter {chapter_id} is not in the outline"));
-            continue;
-        }
-        if groups.contains(chapter_id.as_str()) {
-            errors.push(format!(
-                "chapter {chapter_id} is a group chapter and cannot take an attachment table"
-            ));
-            continue;
-        }
-        if !seen.insert(form_id.clone()) {
-            errors.push(format!(
-                "attachment table {form_id} is bound more than once"
-            ));
-            continue;
-        }
-        bindings.push(AttachmentBinding {
-            form_id,
-            chapter_id,
-        });
     }
     if errors.is_empty() {
         let mut probe = draft.clone();
         probe.bindings = bindings.clone();
-        errors.extend(chain_gaps(input, &probe));
+        errors.extend(render_chain_gaps(&chain_gaps(input, &probe)));
     }
     if !errors.is_empty() {
         return Err(errors.join("\n"));
@@ -220,69 +240,178 @@ fn bind_forms(input: &FrozenInput, draft: &mut Draft, args: &Value) -> Result<Va
     Ok(view(input, draft))
 }
 
-fn put_slots(input: &FrozenInput, draft: &mut Draft, args: &Value) -> Result<Value, String> {
-    let rows = args["slots"].as_array().ok_or("slots must be an array")?;
-    let chapters: HashSet<_> = draft
+/// Incrementally bind attachment forms: submitted rows are upserted by
+/// `form_id`, untouched bindings are kept. Only the chains touched by this
+/// call are probe-checked, so one bad chain no longer rejects the whole table.
+fn bind_forms_append(
+    input: &FrozenInput,
+    draft: &mut Draft,
+    args: &Value,
+) -> Result<Value, String> {
+    let rows = args["bindings"]
+        .as_array()
+        .ok_or("bindings must be an array")?;
+    if rows.is_empty() {
+        return Err("bindings must name at least one binding".into());
+    }
+    let (attachments, chapters, groups) = binding_sets(input, draft);
+    let mut upserts = Vec::with_capacity(rows.len());
+    let mut seen = HashSet::new();
+    let mut errors = Vec::new();
+    for binding in rows {
+        match parse_binding(binding, &attachments, &chapters, &groups, &mut seen) {
+            Ok(parsed) => upserts.push(parsed),
+            Err(error) => errors.push(error),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
+    let mut probe = draft.clone();
+    for upsert in &upserts {
+        match probe
+            .bindings
+            .iter_mut()
+            .find(|binding| binding.form_id == upsert.form_id)
+        {
+            Some(existing) => existing.chapter_id = upsert.chapter_id.clone(),
+            None => probe.bindings.push(upsert.clone()),
+        }
+    }
+    let chains = attachment_chains(input);
+    let form_chain: std::collections::HashMap<&str, usize> = chains
+        .iter()
+        .enumerate()
+        .flat_map(|(index, chain)| chain.iter().map(move |id| (id.as_str(), index)))
+        .collect();
+    let affected: HashSet<usize> = upserts
+        .iter()
+        .filter_map(|binding| form_chain.get(binding.form_id.as_str()).copied())
+        .collect();
+    let gaps: Vec<ChainGap> = chain_gaps(input, &probe)
+        .into_iter()
+        .filter(|gap| affected.contains(&gap.chain_index))
+        .collect();
+    if !gaps.is_empty() {
+        return Err(render_chain_gaps(&gaps).join("\n"));
+    }
+    draft.bindings = probe.bindings;
+    draft.finished = false;
+    Ok(view(input, draft))
+}
+
+fn parse_slot(
+    slot: &Value,
+    chapters: &HashSet<&str>,
+    groups: &HashSet<&str>,
+    seen: &mut HashSet<String>,
+) -> Result<TemplateContent, String> {
+    let slot_id = required(slot, "slot_id")?;
+    let chapter_id = required(slot, "chapter_id")?;
+    if !seen.insert(slot_id.clone()) {
+        return Err(format!("duplicate slot {slot_id}"));
+    }
+    if !chapters.contains(chapter_id.as_str()) {
+        return Err(format!("slot {slot_id} is not on a chapter"));
+    }
+    let kind = match slot["kind"].as_str() {
+        Some("fixed_text") => SlotKind::FixedText,
+        Some("tender_value") => SlotKind::TenderValue,
+        Some("instruction") => SlotKind::Instruction,
+        Some("bidder_blank") => SlotKind::BidderBlank,
+        Some("signature") => SlotKind::Signature,
+        Some("preserved") => SlotKind::Preserved,
+        _ => return Err(format!("slot {slot_id} kind is not recognized")),
+    };
+    let text = slot["text"].as_str().unwrap_or("");
+    let match_query = slot["match_query"].as_str().unwrap_or("");
+    if kind.accepts_knowledge_response() {
+        if groups.contains(chapter_id.as_str()) {
+            return Err(format!(
+                "group chapter {chapter_id} cannot carry a knowledge response"
+            ));
+        }
+        if !text.is_empty() || match_query.trim().is_empty() {
+            return Err(format!(
+                "slot {slot_id} stays empty and needs a match query"
+            ));
+        }
+    } else if !match_query.is_empty() {
+        return Err(format!("slot {slot_id} cannot carry a knowledge query"));
+    }
+    Ok(TemplateContent {
+        slot_id,
+        chapter_id,
+        kind,
+        text: text.to_string(),
+        response_required: kind.accepts_knowledge_response(),
+        match_query: match_query.to_string(),
+    })
+}
+
+fn slot_sets(draft: &Draft) -> (HashSet<&str>, HashSet<&str>) {
+    let chapters: HashSet<&str> = draft
         .chapters
         .iter()
         .map(|chapter| chapter.id.as_str())
         .collect();
-    let groups: HashSet<_> = draft
+    let groups: HashSet<&str> = draft
         .chapters
         .iter()
         .filter(|chapter| chapter.purpose == ChapterPurpose::Group)
         .map(|chapter| chapter.id.as_str())
         .collect();
+    (chapters, groups)
+}
+
+fn put_slots(input: &FrozenInput, draft: &mut Draft, args: &Value) -> Result<Value, String> {
+    let rows = args["slots"].as_array().ok_or("slots must be an array")?;
+    let (chapters, groups) = slot_sets(draft);
     let mut slots = Vec::with_capacity(rows.len());
     let mut seen = HashSet::new();
     for slot in rows {
-        let slot_id = required(slot, "slot_id")?;
-        let chapter_id = required(slot, "chapter_id")?;
-        if !seen.insert(slot_id.clone()) {
-            return Err(format!("duplicate slot {slot_id}"));
-        }
-        if !chapters.contains(chapter_id.as_str()) {
-            return Err(format!("slot {slot_id} is not on a chapter"));
-        }
-        let kind = match slot["kind"].as_str() {
-            Some("fixed_text") => SlotKind::FixedText,
-            Some("tender_value") => SlotKind::TenderValue,
-            Some("instruction") => SlotKind::Instruction,
-            Some("bidder_blank") => SlotKind::BidderBlank,
-            Some("signature") => SlotKind::Signature,
-            Some("preserved") => SlotKind::Preserved,
-            _ => return Err(format!("slot {slot_id} kind is not recognized")),
-        };
-        let text = slot["text"].as_str().unwrap_or("");
-        let match_query = slot["match_query"].as_str().unwrap_or("");
-        if kind.accepts_knowledge_response() {
-            if groups.contains(chapter_id.as_str()) {
-                return Err(format!(
-                    "group chapter {chapter_id} cannot carry a knowledge response"
-                ));
-            }
-            if !text.is_empty() || match_query.trim().is_empty() {
-                return Err(format!(
-                    "slot {slot_id} stays empty and needs a match query"
-                ));
-            }
-        } else if !match_query.is_empty() {
-            return Err(format!("slot {slot_id} cannot carry a knowledge query"));
-        }
-        slots.push(TemplateContent {
-            slot_id,
-            chapter_id,
-            kind,
-            text: text.to_string(),
-            response_required: kind.accepts_knowledge_response(),
-            match_query: match_query.to_string(),
-        });
+        slots.push(parse_slot(slot, &chapters, &groups, &mut seen)?);
     }
     draft.slots = slots;
     draft.slots_submitted = true;
     draft.finished = false;
     Ok(view(input, draft))
 }
+
+/// Incrementally write template slots: submitted rows are upserted by
+/// `slot_id`, untouched slots are kept. Only the submitted rows are
+/// validated; the full-readiness gate stays in `finish` and
+/// `missing_response_slot`, so Organize can fill leaves round by round.
+fn put_slots_append(
+    input: &FrozenInput,
+    draft: &mut Draft,
+    args: &Value,
+) -> Result<Value, String> {
+    let rows = args["slots"].as_array().ok_or("slots must be an array")?;
+    if rows.is_empty() {
+        return Err("slots must name at least one slot".into());
+    }
+    let (chapters, groups) = slot_sets(draft);
+    let mut parsed = Vec::with_capacity(rows.len());
+    let mut seen = HashSet::new();
+    for slot in rows {
+        parsed.push(parse_slot(slot, &chapters, &groups, &mut seen)?);
+    }
+    for slot in parsed {
+        match draft
+            .slots
+            .iter_mut()
+            .find(|existing| existing.slot_id == slot.slot_id)
+        {
+            Some(existing) => *existing = slot,
+            None => draft.slots.push(slot),
+        }
+    }
+    draft.slots_submitted = true;
+    draft.finished = false;
+    Ok(view(input, draft))
+}
+
 
 fn finish(input: &FrozenInput, draft: &mut Draft) -> Result<Value, String> {
     if draft.chapters.is_empty() {
@@ -384,7 +513,7 @@ pub fn readiness(input: &FrozenInput, draft: &Draft) -> Value {
 /// One chain may not be split across leaves.
 fn granularity_gaps(input: &FrozenInput, draft: &Draft) -> Vec<String> {
     let mut gaps = depth_gaps(input, &draft.chapters);
-    gaps.extend(chain_gaps(input, draft));
+    gaps.extend(render_chain_gaps(&chain_gaps(input, draft)));
     gaps
 }
 
@@ -412,7 +541,21 @@ fn depth_gaps(input: &FrozenInput, chapters: &[ChapterOutline]) -> Vec<String> {
     gaps
 }
 
-fn chain_gaps(input: &FrozenInput, draft: &Draft) -> Vec<String> {
+/// One attachment chain bound across more than one response leaf.
+///
+/// Returned by [`chain_gaps`] so callers can render an actionable error or
+/// filter to the chains a single incremental call touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainGap {
+    pub chain_index: usize,
+    pub form_ids: Vec<String>,
+    pub chapter_ids: Vec<String>,
+    pub hint: String,
+}
+
+/// Attachment chains split across response leaves, as structured gaps.
+/// Empty when fewer than [`DEPTH_CHAIN_MIN`] chains exist.
+fn chain_gaps(input: &FrozenInput, draft: &Draft) -> Vec<ChainGap> {
     let chains = attachment_chains(input);
     if chains.len() < DEPTH_CHAIN_MIN {
         return Vec::new();
@@ -441,15 +584,52 @@ fn chain_gaps(input: &FrozenInput, draft: &Draft) -> Vec<String> {
     split.sort_unstable();
     let mut gaps = Vec::new();
     for chain in split {
-        let ids = chains
-            .get(chain)
-            .map(|ids| ids.join(", "))
+        let form_ids: Vec<String> = chains.get(chain).cloned().unwrap_or_default();
+        let chapter_ids: Vec<String> = chain_chapters
+            .get(&chain)
+            .map(|set| set.iter().map(|id| id.to_string()).collect())
             .unwrap_or_default();
-        gaps.push(format!(
-            "attachment chain {chain} ({ids}) is split across response chapters"
-        ));
+        // Suggest the leaf that already holds most of the chain; ties fall
+        // back to the last id in sort order, which is deterministic.
+        let mut counts: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for binding in &draft.bindings {
+            if form_chain.get(binding.form_id.as_str()) == Some(&chain) {
+                *counts.entry(binding.chapter_id.as_str()).or_default() += 1;
+            }
+        }
+        let suggested = chapter_ids
+            .iter()
+            .max_by_key(|id| counts.get(id.as_str()).copied().unwrap_or(0))
+            .cloned()
+            .unwrap_or_default();
+        gaps.push(ChainGap {
+            chain_index: chain,
+            chapter_ids,
+            hint: format!(
+                "bind all {} forms to the same leaf (suggested: {suggested})",
+                form_ids.len(),
+            ),
+            form_ids,
+        });
     }
     gaps
+}
+
+/// Actionable rendering of [`chain_gaps`]: names the chain, its forms, the
+/// chapters they are split across, and a suggested fix.
+pub fn render_chain_gaps(gaps: &[ChainGap]) -> Vec<String> {
+    gaps.iter()
+        .map(|gap| {
+            format!(
+                "attachment chain {} ({}) is split across response chapters [{}]; fix: {}",
+                gap.chain_index,
+                gap.form_ids.join(", "),
+                gap.chapter_ids.join(", "),
+                gap.hint
+            )
+        })
+        .collect()
 }
 
 fn response_depth(chapters: &[ChapterOutline], chapter: &ChapterOutline) -> usize {
@@ -970,6 +1150,218 @@ mod tests {
         )
         .unwrap();
         assert_eq!(draft.bindings.len(), 3);
+    }
+
+    fn three_level_chapters() -> Value {
+        json!({"chapters":[
+            {"id":"root","parent_id":null,"order":0,"title":"根","purpose":"group","requirement_ids":[]},
+            {"id":"mid","parent_id":"root","order":0,"title":"中","purpose":"group","requirement_ids":[]},
+            {"id":"leaf-a","parent_id":"mid","order":0,"title":"甲","purpose":"response","requirement_ids":[]},
+            {"id":"leaf-b","parent_id":"mid","order":1,"title":"乙","purpose":"response","requirement_ids":[]}
+        ]})
+    }
+
+    #[test]
+    fn bind_forms_append_fixes_one_split_chain_incrementally() {
+        // chain 0 = [form-a, form-b] (continuation), chain 1 = [form-c].
+        let input = continued_chain();
+        let mut draft = Draft::default();
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_chapters",
+            &three_level_chapters(),
+        )
+        .unwrap();
+
+        // Full-table submit with one split chain is still rejected, now with
+        // an actionable error naming the chain, forms, chapters, and fix.
+        let err = apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "bind_forms",
+            &json!({"bindings":[
+                {"form_id":"form-a","chapter_id":"leaf-a"},
+                {"form_id":"form-b","chapter_id":"leaf-b"},
+                {"form_id":"form-c","chapter_id":"leaf-b"}
+            ]}),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(
+                "attachment chain 0 (form-a, form-b) is split across response chapters [leaf-a, leaf-b]"
+            ),
+            "{err}"
+        );
+        assert!(err.contains("suggested:"), "{err}");
+        assert!(draft.bindings.is_empty());
+
+        // Incremental fix: only the split chain's rows; the rest is untouched.
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "bind_forms_append",
+            &json!({"bindings":[
+                {"form_id":"form-a","chapter_id":"leaf-a"},
+                {"form_id":"form-b","chapter_id":"leaf-a"}
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(draft.bindings.len(), 2);
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "bind_forms_append",
+            &json!({"bindings":[{"form_id":"form-c","chapter_id":"leaf-b"}]}),
+        )
+        .unwrap();
+        assert_eq!(draft.bindings.len(), 3);
+
+        // An append that would split a chain is rejected without touching
+        // the draft; chains not touched by the call are never reported.
+        let err = apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "bind_forms_append",
+            &json!({"bindings":[{"form_id":"form-b","chapter_id":"leaf-b"}]}),
+        )
+        .unwrap_err();
+        assert!(err.contains("attachment chain 0"), "{err}");
+        assert!(!err.contains("attachment chain 1"), "{err}");
+        assert_eq!(
+            draft
+                .bindings
+                .iter()
+                .find(|binding| binding.form_id == "form-b")
+                .unwrap()
+                .chapter_id,
+            "leaf-a"
+        );
+    }
+
+    #[test]
+    fn put_slots_append_builds_slots_incrementally() {
+        let input = two_chains();
+        let mut draft = Draft::default();
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_chapters",
+            &three_level_chapters(),
+        )
+        .unwrap();
+
+        // Round 1: one leaf only. No full-readiness probe on append.
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_slots_append",
+            &json!({"slots":[
+                {"slot_id":"a:fixed","chapter_id":"leaf-a","kind":"fixed_text","text":"甲","match_query":""}
+            ]}),
+        )
+        .unwrap();
+        assert!(draft.slots_submitted);
+        assert_eq!(missing_response_slot(&draft), Some("leaf-b"));
+
+        // Round 2: a bad row is rejected; earlier rounds are kept.
+        let err = apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_slots_append",
+            &json!({"slots":[
+                {"slot_id":"b:fixed","chapter_id":"leaf-b","kind":"bogus","text":"乙","match_query":""}
+            ]}),
+        )
+        .unwrap_err();
+        assert!(err.contains("kind is not recognized"), "{err}");
+        assert_eq!(draft.slots.len(), 1);
+
+        // Round 3: upsert by slot_id, then the second leaf completes.
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_slots_append",
+            &json!({"slots":[
+                {"slot_id":"a:fixed","chapter_id":"leaf-a","kind":"fixed_text","text":"甲改","match_query":""},
+                {"slot_id":"b:fixed","chapter_id":"leaf-b","kind":"fixed_text","text":"乙","match_query":""}
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(draft.slots.len(), 2);
+        assert_eq!(
+            draft
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == "a:fixed")
+                .unwrap()
+                .text,
+            "甲改"
+        );
+        assert!(missing_response_slot(&draft).is_none());
+    }
+
+    #[test]
+    fn put_chapters_reports_dropped_bindings_and_slots() {
+        let input = two_chains();
+        let mut draft = Draft::default();
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_chapters",
+            &three_level_chapters(),
+        )
+        .unwrap();
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "bind_forms",
+            &json!({"bindings":[
+                {"form_id":"form-a","chapter_id":"leaf-a"},
+                {"form_id":"form-b","chapter_id":"leaf-b"}
+            ]}),
+        )
+        .unwrap();
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_slots",
+            &json!({"slots":[
+                {"slot_id":"a:fixed","chapter_id":"leaf-a","kind":"fixed_text","text":"甲","match_query":""},
+                {"slot_id":"b:fixed","chapter_id":"leaf-b","kind":"fixed_text","text":"乙","match_query":""}
+            ]}),
+        )
+        .unwrap();
+
+        // Rename/drop leaf-b: the view must name what was dropped.
+        let state = apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_chapters",
+            &json!({"chapters":[
+                {"id":"root","parent_id":null,"order":0,"title":"根","purpose":"group","requirement_ids":[]},
+                {"id":"mid","parent_id":"root","order":0,"title":"中","purpose":"group","requirement_ids":[]},
+                {"id":"leaf-a","parent_id":"mid","order":0,"title":"甲","purpose":"response","requirement_ids":[]}
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(state["dropped_bindings"], json!(["form-b"]));
+        assert_eq!(state["dropped_slots"], json!(["b:fixed"]));
+        assert_eq!(draft.bindings.len(), 1);
+        assert_eq!(draft.slots.len(), 1);
     }
 
     fn continued_chain() -> FrozenInput {

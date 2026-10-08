@@ -45,7 +45,7 @@ impl Duty {
                 "本轮只做发现。应答义务是招标文件要求投标人必须提交、填写、声明、承诺、报价、列偏差、提供资格证明或按指定格式作答的事项。看到这类事项就提交一条要求，覆盖规定格式、声明与承诺、报价、偏差说明、资格材料和技术响应。只阅读已领取的阅读包，每一段都要读完再 submit_pack。整包读完仍没有应答义务时，requirements 用空数组。同一包失败后把 repair 设为 true 再交。不要写章节，不要写模板，不要匹配知识库。"
             }
             Self::Organize => {
-                "本轮写章节、附件绑定和规定模板槽。用检查点里的要求整理章节树，每个章节带上 requirement_ids，并把每个附件表绑定到唯一章节。有两张及以上互不续表的附件表时，章节树要有三层：根分组、中间分组、叶子应答。中间层是 group，沿用招标文件自己的章节，不要为每一张附件表设一个应答章。同一条续表链只绑一个叶子；互不续表的附件表可以绑在同一个应答章。用 put_slots 写入招标文件已经给出的文字。每个应答章节至少有一个槽。投标人和签字槽留空并带上 match_query，其他槽的 match_query 为空，分组章节不能带这两种槽。不要重新扫描招标文件，不要匹配知识库，不要填写我方事实。"
+                "本轮写章节、附件绑定和规定模板槽。用检查点里的要求整理章节树，每个章节带上 requirement_ids，并把每个附件表绑定到唯一章节。有两张及以上互不续表的附件表时，章节树要有三层：根分组、中间分组、叶子应答。中间层是 group，沿用招标文件自己的章节，不要为每一张附件表设一个应答章。同一条续表链只绑一个叶子；互不续表的附件表可以绑在同一个应答章。用 put_slots 写入招标文件已经给出的文字。每个应答章节至少有一个槽。投标人和签字槽留空并带上 match_query，其他槽的 match_query 为空，分组章节不能带这两种槽。bind_forms 一次被打回后改用 bind_forms_append，每次只修一条续表链，不要重发全表；模板槽用 put_slots_append 逐轮补齐，put_slots 只用于全量重写。不要重新扫描招标文件，不要匹配知识库，不要填写我方事实。"
             }
             Self::Check => {
                 "本轮只做收尾。outline.readiness.ready 为 true 时下一步只有 finish_outline，核对结果已经在 readiness 里，不要反复 read_outline。不要改章节，不要重新扫描，不要写模板。"
@@ -239,7 +239,7 @@ pub fn host_packet(
     packet
 }
 
-/// Apply one of the six outline tools. Anything else is refused.
+/// Apply one of the eight outline tools. Anything else is refused.
 pub fn apply(
     input: &FrozenInput,
     pack_max_chars: usize,
@@ -269,7 +269,13 @@ pub fn apply(
     }
     if matches!(
         name,
-        "put_chapters" | "bind_forms" | "put_slots" | "read_outline" | "finish_outline"
+        "put_chapters"
+            | "bind_forms"
+            | "bind_forms_append"
+            | "put_slots"
+            | "put_slots_append"
+            | "read_outline"
+            | "finish_outline"
     ) {
         let known = state
             .outline_run
@@ -325,7 +331,10 @@ pub fn apply(
         }
         let value =
             super::tools::apply(input, &mut state.outline_run.tool_draft, &known, name, args)?;
-        if matches!(name, "put_chapters" | "bind_forms" | "put_slots") {
+        if matches!(
+            name,
+            "put_chapters" | "bind_forms" | "bind_forms_append" | "put_slots" | "put_slots_append"
+        ) {
             state.outline_run.finish_rejected = false;
             note_check_phase(input, state);
         }
@@ -351,7 +360,14 @@ fn note_check_phase(input: &FrozenInput, state: &mut Checkpoint) {
 }
 
 const DISCOVER: &[&str] = &["submit_pack", "read_outline"];
-const ORGANIZE: &[&str] = &["put_chapters", "bind_forms", "put_slots", "read_outline"];
+const ORGANIZE: &[&str] = &[
+    "put_chapters",
+    "bind_forms",
+    "bind_forms_append",
+    "put_slots",
+    "put_slots_append",
+    "read_outline",
+];
 const CHECK: &[&str] = &["read_outline", "finish_outline"];
 const TEMPLATE: &[&str] = &["put_slots", "read_outline"];
 
