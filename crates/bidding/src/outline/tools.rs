@@ -380,7 +380,17 @@ mod tests {
             structured_forms: vec![json!({
                 "form_definition_revision_id": "form-1",
                 "source_unit_revision_id": "source",
-                "definition": {"title": "附件一 报价表", "cells": []}
+                "definition": {
+                    "title": "source_unit:form-1",
+                    "row_count": 2,
+                    "column_count": 2,
+                    "cells": [
+                        {"row": 0, "column": 0, "text": "A"},
+                        {"row": 0, "column": 1, "text": ""},
+                        {"row": 1, "column": 0, "text": ""},
+                        {"row": 1, "column": 1, "text": ""}
+                    ]
+                }
             })],
             decisions: vec![],
         }

@@ -72,6 +72,8 @@
 | --- | --- |
 | 引用了别的包，或偏移不在本包切片内 | `outside_pack` 或 `outside_slice`，包变为 `failed`，该条要求不入库 |
 | 还有未绑定的附件表就 `finish_outline` | 拒绝结束，`finished` 保持 false |
+
+发现提交：空的 `requirements` 只表示整包已经读完且没有应答义务。附件表的判定见 [运行时](../../docs/bidding/outline.md)，按表格结构和所在章节位置，不按标题用词。
 | 分组章节带 `bidder_blank` 或 `signature` | `put_slots` 拒绝 |
 
 ## 不做

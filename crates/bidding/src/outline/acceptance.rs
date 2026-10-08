@@ -36,17 +36,22 @@ fn frozen() -> FrozenInput {
         source_units: vec![
             source("b", 1, "B", "第二章 > 技术方案"),
             source("a", 0, "A", "第一章 > 投标函"),
-            source("form-source", 2, "", "附件"),
+            source("form-source", 2, "", "form"),
         ],
         structured_forms: vec![json!({
             "form_definition_revision_id": "form-1",
             "source_unit_revision_id": "form-source",
             "definition": {
-                "title": "附件一 报价表",
-                "row_count": 1,
-                "column_count": 1,
-                // One byte, so the cell fits the budget of 1 these tests plan with.
-                "cells": [{"row": 0, "column": 0, "text": "1"}]
+                "title": "source_unit:form-1",
+                "row_count": 2,
+                "column_count": 2,
+                // One byte of cell text, so the grid still fits the budget of 1.
+                "cells": [
+                    {"row": 0, "column": 0, "text": "A"},
+                    {"row": 0, "column": 1, "text": ""},
+                    {"row": 1, "column": 0, "text": ""},
+                    {"row": 1, "column": 1, "text": ""}
+                ]
             }
         })],
         decisions: vec![],
@@ -665,4 +670,178 @@ fn rejected_finish_outline_returns_to_organize() {
     apply(&input, 0, &mut state, "finish_outline", &json!({})).unwrap();
     assert_eq!(state.outline_run.phase, Phase::Complete);
     assert!(!state.outline_run.finish_rejected);
+}
+
+#[test]
+fn format_obligations_become_chapters_and_only_fill_in_tables_bind() {
+    let letter = "投标人应按指定格式提交函件。";
+    let proof = "投标人应提供资格证明。";
+    let prose = format!("{letter}{proof}");
+    let spec = "下列参数为采购需求，投标人按参数逐条响应并提供检测报告。此表记录的是指标而不是待填写的空白格式，检测报告随响应一并提交，不把参数表当成需要填写的格式表。补充说明用于把正文拉过标题长度上限。";
+    assert!(
+        spec.chars().count() > 80,
+        "spec prose must stay outside a caption"
+    );
+    let table = |id: &str, ordinal: usize, page: u64| Source {
+        source_unit_revision_id: id.into(),
+        document_id: "doc".into(),
+        text: String::new(),
+        locator: json!({
+            "locator_kind": "page_table",
+            "page_ordinal": page,
+            "table_ordinal": ordinal,
+            "heading_path": ""
+        }),
+        ordinal,
+    };
+    let input = FrozenInput {
+        schema_version: 1,
+        project_id: "project-1".into(),
+        document_set_id: "set-1".into(),
+        documents: vec![],
+        document_relations: vec![],
+        source_units: vec![
+            source("format", 0, &prose, "格式章 > 填写表"),
+            table("fill-source", 1, 6),
+            source("spec", 2, spec, "技术规格"),
+            table("spec-source", 3, 3),
+        ],
+        structured_forms: vec![
+            json!({
+                "form_definition_revision_id": "fill-form",
+                "source_unit_revision_id": "fill-source",
+                "definition": {
+                    "title": "source_unit:fill-form",
+                    "row_count": 3,
+                    "column_count": 3,
+                    "cells": [
+                        {"row": 0, "column": 0, "text": "字段"},
+                        {"row": 0, "column": 1, "text": "说明"},
+                        {"row": 0, "column": 2, "text": "填写"},
+                        {"row": 1, "column": 0, "text": "名称"},
+                        {"row": 1, "column": 1, "text": "全称"},
+                        {"row": 1, "column": 2, "text": ""},
+                        {"row": 2, "column": 0, "text": "地址"},
+                        {"row": 2, "column": 1, "text": "注册地"},
+                        {"row": 2, "column": 2, "text": ""}
+                    ]
+                }
+            }),
+            json!({
+                "form_definition_revision_id": "spec-form",
+                "source_unit_revision_id": "spec-source",
+                "definition": {
+                    "title": "source_unit:spec-form",
+                    "row_count": 4,
+                    "column_count": 4,
+                    "cells": [
+                        {"row": 0, "column": 0, "text": "序号"},
+                        {"row": 0, "column": 1, "text": "项目"},
+                        {"row": 0, "column": 2, "text": "参数"},
+                        {"row": 0, "column": 3, "text": "响应"},
+                        {"row": 1, "column": 0, "text": "1"},
+                        {"row": 1, "column": 1, "text": "电压"},
+                        {"row": 1, "column": 2, "text": "220V"},
+                        {"row": 1, "column": 3, "text": ""},
+                        {"row": 2, "column": 0, "text": "2"},
+                        {"row": 2, "column": 1, "text": "功率"},
+                        {"row": 2, "column": 2, "text": "5kW"},
+                        {"row": 2, "column": 3, "text": ""},
+                        {"row": 3, "column": 0, "text": "3"},
+                        {"row": 3, "column": 1, "text": "重量"},
+                        {"row": 3, "column": 2, "text": "30kg"},
+                        {"row": 3, "column": 3, "text": ""}
+                    ]
+                }
+            }),
+        ],
+        decisions: vec![],
+    };
+    assert_eq!(
+        super::chapters::attachment_form_ids(&input),
+        vec!["fill-form".to_string()]
+    );
+
+    let mut state = checkpoint(&input);
+    let mut work = DiscoverWork::plan(&input, 8_000);
+    assert_eq!(work.pack_counts().total, 1);
+    work.claim(10);
+    submit(
+        &mut work,
+        "pack-0",
+        vec![
+            PackRequirement {
+                description: "规定格式".into(),
+                source_id: "format".into(),
+                start: 0,
+                end: letter.len(),
+            },
+            PackRequirement {
+                description: "资格材料".into(),
+                source_id: "format".into(),
+                start: letter.len(),
+                end: prose.len(),
+            },
+        ],
+    );
+    assert!(work.complete());
+    state.outline_run.reading_packs = Some(work);
+    crate::analysis::draft::after_batch(&input, &mut state, false, false).unwrap();
+    assert_eq!(current(&input, &state), Duty::Organize);
+    apply(
+        &input,
+        0,
+        &mut state,
+        "put_chapters",
+        &json!({"chapters":[
+            {"id":"group","parent_id":null,"order":0,"title":"响应文件","purpose":"group","requirement_ids":[]},
+            {"id":"letter","parent_id":"group","order":0,"title":"规定格式","purpose":"response","requirement_ids":["pack-0:0"]},
+            {"id":"proof","parent_id":"group","order":1,"title":"资格材料","purpose":"response","requirement_ids":["pack-0:1"]}
+        ]}),
+    )
+    .unwrap();
+    let unbound = apply(&input, 0, &mut state, "finish_outline", &json!({})).unwrap_err();
+    assert!(unbound.contains("fill-form"));
+    assert!(!unbound.contains("spec-form"));
+    apply(
+        &input,
+        0,
+        &mut state,
+        "bind_forms",
+        &json!({"bindings":[{"form_id":"fill-form","chapter_id":"letter"}]}),
+    )
+    .unwrap();
+    let spec_bind = apply(
+        &input,
+        0,
+        &mut state,
+        "bind_forms",
+        &json!({"bindings":[{"form_id":"spec-form","chapter_id":"proof"}]}),
+    )
+    .unwrap_err();
+    assert!(spec_bind.contains("not an attachment"));
+    apply(
+        &input,
+        0,
+        &mut state,
+        "put_slots",
+        &json!({"slots":[
+            {"slot_id":"letter:fixed","chapter_id":"letter","kind":"fixed_text","text":"按规定格式填写。","match_query":""},
+            {"slot_id":"proof:fixed","chapter_id":"proof","kind":"fixed_text","text":"附资格证明。","match_query":""}
+        ]}),
+    )
+    .unwrap();
+    apply(&input, 0, &mut state, "finish_outline", &json!({})).unwrap();
+    let projected =
+        project_draft(&input, &state.input_sha256, &state.outline_run.tool_draft).unwrap();
+    assert_eq!(
+        projected.artifact.chapters[1].requirement_ids,
+        vec!["pack-0:0".to_string()]
+    );
+    assert_eq!(
+        projected.artifact.chapters[2].requirement_ids,
+        vec!["pack-0:1".to_string()]
+    );
+    assert_eq!(projected.bindings.len(), 1);
+    assert_eq!(projected.bindings[0].form_id, "fill-form");
 }

@@ -345,7 +345,17 @@ fn phase_contracts_reject_unknown_fields_and_placeholder_hits() {
 #[test]
 fn attachment_table_mapping_follows_chapter_id_not_title() {
     let (mut input, mut result) = fixture();
-    input.structured_forms[0]["definition"]["title"] = json!("附件1 报价表");
+    input.structured_forms[0]["definition"] = json!({
+        "title": "source_unit:form-1",
+        "row_count": 2,
+        "column_count": 2,
+        "cells": [
+            {"row": 0, "column": 0, "text": "名称"},
+            {"row": 0, "column": 1, "text": ""},
+            {"row": 1, "column": 0, "text": "地址"},
+            {"row": 1, "column": 1, "text": ""}
+        ]
+    });
     input.structured_forms[0]["source_unit_revision_id"] = json!("source");
     let RecordData::Template { regions, .. } =
         &mut result.analysis.records.get_mut("tpl").unwrap().data

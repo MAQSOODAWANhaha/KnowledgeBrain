@@ -39,7 +39,7 @@ impl Duty {
     pub fn instructions(self) -> &'static str {
         match self {
             Self::Discover => {
-                "本轮只做发现。只阅读已领取的阅读包，用 submit_pack 提交该包范围内的要求。同一包失败后把 repair 设为 true 再交。不要写章节，不要写模板，不要匹配知识库。"
+                "本轮只做发现。应答义务是招标文件要求投标人必须提交、填写、声明、承诺、报价、列偏差、提供资格证明或按指定格式作答的事项。看到这类事项就提交一条要求，覆盖规定格式、声明与承诺、报价、偏差说明、资格材料和技术响应。只阅读已领取的阅读包，每一段都要读完再 submit_pack。整包读完仍没有应答义务时，requirements 用空数组。同一包失败后把 repair 设为 true 再交。不要写章节，不要写模板，不要匹配知识库。"
             }
             Self::Organize => {
                 "本轮写章节、附件绑定和规定模板槽。用检查点里的要求整理章节树，每个章节带上 requirement_ids，并把每个附件表绑定到唯一章节。用 put_slots 写入招标文件已经给出的文字。每个应答章节至少有一个槽。投标人和签字槽留空并带上 match_query，其他槽的 match_query 为空，分组章节不能带这两种槽。不要重新扫描招标文件，不要匹配知识库，不要填写我方事实。"
@@ -358,6 +358,9 @@ mod tests {
         assert!(organize.instructions().contains("附件表"));
         assert!(Duty::Discover.instructions().contains("submit_pack"));
         assert!(Duty::Discover.instructions().contains("repair"));
+        assert!(Duty::Discover.instructions().contains("应答义务"));
+        assert!(Duty::Discover.instructions().contains("读完再 submit_pack"));
+        assert!(Duty::Discover.instructions().contains("空数组"));
         assert!(!Duty::Organize.instructions().contains("submit_pack"));
         assert!(Duty::Organize.instructions().contains("put_slots"));
         assert!(Duty::Organize.instructions().contains("留空"));
@@ -453,6 +456,23 @@ mod tests {
         assert!(outline.contains("留空"));
         assert!(outline.contains("分组章节"));
         assert!(outline.contains("submit_pack"));
+        assert!(outline.contains("应答义务"));
+        assert!(outline.contains("读完再 submit_pack"));
+        assert!(outline.contains("空数组"));
+        assert!(outline.contains("规定格式"));
+        assert!(outline.contains("资格"));
+        assert!(outline.contains("技术响应"));
+        for tender_chapter in ["投标函", "授权委托书", "法定代表人身份证明", "廉洁承诺"]
+        {
+            assert!(
+                !outline.contains(tender_chapter),
+                "discover guidance must not list one tender's chapters: {tender_chapter}"
+            );
+            assert!(
+                !Duty::Discover.instructions().contains(tender_chapter),
+                "discover guidance must not list one tender's chapters: {tender_chapter}"
+            );
+        }
         assert!(fill.contains("put_slots"));
         assert!(fill.contains("留空"));
         assert!(fill.contains("不要改章节"));
