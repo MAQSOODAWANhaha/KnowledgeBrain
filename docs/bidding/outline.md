@@ -14,7 +14,7 @@
 
 1. `DraftStage::Fill` 或已发布：只写槽。这不是 `response` 的知识库填充，也不是一次成稿里的组织职责。该阶段的系统提示用 `prompts/template.txt`，工具只有 `put_slots` 和 `read_outline`。不能 `put_chapters`，不能 `bind_forms`。
 2. 发现包还没全部提交：发现。
-3. 还没有章节，或还有未绑定的附件表，或还没提交过槽：组织。同一职责看见 `put_chapters`、`bind_forms`、`put_slots`、`read_outline`。
+3. 还没有章节，或还有未绑定的附件表，或还没提交过槽，或有应答章节没有槽：组织。同一职责看见 `put_chapters`、`bind_forms`、`put_slots`、`read_outline`。
 4. 否则：收尾。工具只有 `read_outline` 和 `finish_outline`。
 
 一次成稿因此是发现 → 组织（章节、绑定、槽）→ 收尾。`phase` 是检查点上的阶段。职责是这一轮给模型的工具集，由 `current` / `select` 决定。
@@ -22,18 +22,18 @@
 | `phase` | 这一阶段的职责 |
 | --- | --- |
 | `discover` | 发现。阅读包还没全部 `committed` |
-| `outline` | 先组织，再收尾。章节未齐、附件未绑完或槽还没交是组织；三者都齐是收尾 |
+| `outline` | 先组织，再收尾。章节未齐、附件未绑完、槽还没交，或应答章节没有槽，是组织；这些都齐是收尾 |
 | `check` | 收尾。旧路径会把 phase 写成 `check`。一次成稿的 `finish_outline` 直接写成 `complete` |
 | `complete` | 大纲已结束。`DraftStage` 仍是大纲时职责是收尾；`DraftStage` 已是 `Fill` 或已发布时职责是只写槽 |
 
 | 职责 | 工具 | 提示约束 |
 | --- | --- | --- |
 | 发现 | `submit_pack`，`read_outline` | 只读已领取的包。同一包失败后才把 `repair` 设为 true |
-| 组织 | `put_chapters`，`bind_forms`，`put_slots`，`read_outline` | 替换整棵章节树，把每个附件表绑到唯一章节，并写入规定槽。投标人槽和签字槽留空并带 `match_query`。分组章节不能带这两种槽 |
+| 组织 | `put_chapters`，`bind_forms`，`put_slots`，`read_outline` | 替换整棵章节树，把每个附件表绑到唯一章节，并写入规定槽。每个应答章节至少有一个槽。投标人槽和签字槽留空并带 `match_query`。分组章节不能带这两种槽 |
 | 收尾 | `read_outline`，`finish_outline` | 核对后结束。有未绑定附件表时不能结束。不改章节，不改槽 |
 | 填槽（`Fill` / 已发布） | `put_slots`，`read_outline` | 只抄招标文件已有文字。不能改章节，不能改绑定 |
 
-`finish_outline` 还要求：章节树非空且无环、同级顺序不重复、已经调用过 `put_slots`、每个 `ChapterPurpose::Response` 章节至少有一个槽。成功后 `tool_draft.finished = true`，并把 `outline_run.phase` 和 `analysis.outline.phase` 标成 `complete`。
+`finish_outline` 还要求：章节树非空且无环、同级顺序不重复、已经调用过 `put_slots`、每个 `ChapterPurpose::Response` 章节至少有一个槽。一次成稿的 `put_slots` 在还有应答章节没有槽时拒绝，不把 `slots_submitted` 写成 true，职责留在组织。已经交过槽后又多出一个没有槽的应答章节，职责回到组织。成功后 `tool_draft.finished = true`，并把 `outline_run.phase` 和 `analysis.outline.phase` 标成 `complete`。
 
 ## 六个工具
 
@@ -65,7 +65,7 @@
 
 预算是 `reading_budget(pack_max_chars)`。`pack_max_chars` 为 0 时用 8000 字节。
 
-每一轮发现的 `claim_turn` 最多把 `DEFAULT_PACK_CONCURRENCY`（4）个 `pending` 包标成 `running`。请求 brief 的 `reading_packs` 重放本轮仍要处理的包：刚领取的，以及已经是 `running` 或待修 `failed` 的。已 `committed` 的包不再出现。新领取仍受并发上限；重放不另占这个名额。
+每一轮 brief 里同时处于 `running` 或待修 `failed` 的包不超过 `DEFAULT_PACK_CONCURRENCY`（4）。`claim` 只补满这个名额里的空位，按包的 `order` 领取，不按包 id 的字符串序。请求 brief 的 `reading_packs` 就是这些在途包。已 `committed` 的包不再出现。试装（`fit_batch`、检查）调用的 `prepare_request` 不留下额外领取。
 
 `submit_pack` 由宿主拆开：`repair` 为 false 时走 `submit_pack_scan`，为 true 时走 `repair_pack_scan`。修复只接受状态已经是 `failed` 的同一包。
 
@@ -133,7 +133,7 @@
 记忆只有检查点。`TurnJournal` 是 `Checkpoint.journal`（检查点合同版本 14，运行适配 `rig-chat-0.42.0/4`）。`reading_packs`、`tool_draft` 和 `phase` 在同一检查点的 `outline_run` 上。`load` 恢复这一个对象；输入摘要或运行合同变了就拒绝恢复。`save` 写回这一个对象。
 
 1. **选职责。** `outline::agent::current`。本轮只挂该职责的工具。
-2. **领包。** 仅当职责是发现且包未完成，在还没有计划时建一次计划。`claim_turn` 把至多 4 个 `pending` 包标成 `running`，并把仍在处理的 `running` 和待修 `failed` 包连同刚领取的包放进 brief。
+2. **领包。** 仅当包未完成，在还没有计划时建一次计划。`claim_turn` 使本轮在途包（`running` 加待修 `failed`）不超过 4，按 `order` 补满空位，并把这些包放进 brief。
 3. **准备会话并预约。** `prepare_request` 拼出系统提示、brief、检查点对话，以及宿主包。随后 `TurnJournal::prepare_session` 复用或重建 SDK 会话，`prepare` 把精确 UTF-8 请求体记成待完成轮。`reserve` 在调用模型之前冻结这同一份字节，最多三次。已经保存的响应不再预约，也不再调用模型。
 4. **模型。** 返回工具调用。`responded` 先把响应写入检查点。
 5. **工具。** `outline::agent::apply` 在 `deny` 下执行。结果追加到检查点对话，`session.finish` 记到当前 SDK 会话。
@@ -157,7 +157,8 @@
 2. 丢掉证据已在其它组里的已交付对话组。
 3. 裁掉可选的候选回忆。
 4. 发现轮装不下预装证据时，丢掉已经 `committed` 的包所在的发现轮，再把预装包减半。依据是 `DiscoverWork` 的包状态，不读 `analysis.outline.scanned`。
-5. 仍放不下则推迟图片，或失败 `AGENT_TURN_BUDGET_EXCEEDED`，检查点保留。
+5. 仍放不下则推迟图片。
+6. 仍放不下且在途阅读包多于一个时，把 `order` 最大的 `running` 或 `failed` 包放回 `pending`（清掉 feedback，attempt 减一），再装一次。只剩一个在途包仍放不下才失败 `AGENT_TURN_BUDGET_EXCEEDED`，检查点保留。试装通过后恢复调用前的包状态，不把这次放回写进检查点。
 
 `prepare_session` 若发现序列化后的 SDK 状态超过 `max_context_bytes`，先按当前窗口重建一次。重建后仍超限，在预约和网络 IO 之前失败，错误同样是 `AGENT_TURN_BUDGET_EXCEEDED`。
 
@@ -179,9 +180,9 @@
 
 ## 进度
 
-产品路径的进度来自 `DiscoverWork` 和 `tool_draft`：包的总数、待领、在跑、失败、已提交，章节数，未绑定附件数，槽是否已交，草稿是否结束。有阅读包或工具草稿时，章数是 `tool_draft.chapters` 的长度，不是 `draft_plan` 的长度。扫描游标不再代表发现进度。
+产品路径的进度来自 `DiscoverWork` 和 `tool_draft`：包的总数、待领、在跑、失败、已提交，章节数，未绑定附件数，槽是否已交，草稿是否结束。有阅读包时，发现阶段的停滞观察读包计数和要求条数，不读 `analysis.outline.scanned`。组织、收尾和完成读 `tool_draft`。这些阶段停滞也会以 `AGENT_TURN_BUDGET_EXCEEDED` 结束运行。有阅读包或工具草稿时，章数是 `tool_draft.chapters` 的长度，不是 `draft_plan` 的长度。扫描游标不再代表发现进度。
 
-编制页按 `outline_phase` 显示发现、组织（章节和模板槽）、核对、完成。`outline` 且章节、附件绑定或槽还没齐时是组织；三者都齐，以及 `check`，是核对；`complete` 是完成。页面文案只写这四个阶段。
+编制页按 `outline_phase` 显示发现、组织（章节和模板槽）、核对、完成。`outline` 且章节、附件绑定或槽还没齐时是组织；三者都齐，以及 `check`，是核对；`complete` 是完成。页面文案只写这四个阶段。应答章节缺槽时职责仍是组织，即使 `slots_submitted` 已经为真。
 
 ## 尚未决定
 

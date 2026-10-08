@@ -21,6 +21,21 @@ pub struct Session {
     /// system message remains the SDK anchor, including on an empty window.
     prefix: usize,
     suffix: usize,
+    /// This turn's provider usage was added before `tools`, so the SDK call
+    /// must not add it again. Absent on older checkpoints.
+    #[serde(default, skip_serializing_if = "is_false")]
+    usage_noted: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn apply_usage(run: &mut AgentRun, usage: Usage) -> Result<(), AgentError> {
+    let mut value = serde_json::to_value(&*run).map_err(|_| failure())?;
+    value["usage"] = serde_json::to_value(usage).map_err(|_| failure())?;
+    *run = serde_json::from_value(value).map_err(|_| failure())?;
+    Ok(())
 }
 
 fn failure() -> AgentError {
@@ -114,17 +129,23 @@ impl Session {
             _ => false,
         };
         let prompt = context.pop().ok_or_else(failure)?;
+        let carried = active.as_ref().map(|session| session.run.usage());
         // Rebase once if accumulated SDK call accounting alone crosses the
         // state ceiling. No I/O has occurred, and the selected evidence stays.
         for reset in [!reuse, true] {
             if reset {
+                let mut run = AgentRun::new(prompt.clone())
+                    .with_history(context.clone())
+                    .max_turns(remaining_turns)
+                    .with_tool_choice(ToolChoice::Required);
+                if let Some(usage) = carried.filter(|usage| usage.has_values()) {
+                    apply_usage(&mut run, usage)?;
+                }
                 *active = Some(Self {
-                    run: AgentRun::new(prompt.clone())
-                        .with_history(context.clone())
-                        .max_turns(remaining_turns)
-                        .with_tool_choice(ToolChoice::Required),
+                    run,
                     prefix,
                     suffix,
+                    usage_noted: false,
                 });
             }
             let session = active.as_mut().ok_or_else(failure)?;
@@ -196,7 +217,9 @@ impl Session {
             ));
         }
         let mut usage = Usage::new();
-        if let Some(reported) = &response.usage {
+        if self.usage_noted {
+            self.usage_noted = false;
+        } else if let Some(reported) = &response.usage {
             usage.input_tokens = reported.prompt_tokens.unwrap_or(0);
             usage.output_tokens = reported.completion_tokens.unwrap_or(0);
             usage.total_tokens = reported.total_tokens.unwrap_or(0);
@@ -277,6 +300,48 @@ impl Session {
             content.extend(items);
         }
         self.run.tool_results(content).map_err(|_| failure())
+    }
+
+    /// Add this turn's reported usage onto the run before the responded save.
+    /// Missing usage stays missing: an absent object is not zero consumption.
+    pub(super) fn note_provider_usage(&mut self, response: &ChatTurn) {
+        let Some(reported) = &response.usage else {
+            return;
+        };
+        if reported.prompt_tokens.is_none()
+            && reported.completion_tokens.is_none()
+            && reported.total_tokens.is_none()
+            && reported.cached_tokens.is_none()
+            && reported.reasoning_tokens.is_none()
+        {
+            return;
+        }
+        let addition = Usage {
+            input_tokens: reported.prompt_tokens.unwrap_or(0),
+            output_tokens: reported.completion_tokens.unwrap_or(0),
+            total_tokens: reported.total_tokens.unwrap_or(0),
+            cached_input_tokens: reported.cached_tokens.unwrap_or(0),
+            cache_creation_input_tokens: 0,
+            tool_use_prompt_tokens: 0,
+            reasoning_tokens: reported.reasoning_tokens.unwrap_or(0),
+        };
+        let current = self.run.usage();
+        let summed = Usage {
+            input_tokens: current.input_tokens.saturating_add(addition.input_tokens),
+            output_tokens: current.output_tokens.saturating_add(addition.output_tokens),
+            total_tokens: current.total_tokens.saturating_add(addition.total_tokens),
+            cached_input_tokens: current
+                .cached_input_tokens
+                .saturating_add(addition.cached_input_tokens),
+            cache_creation_input_tokens: current.cache_creation_input_tokens,
+            tool_use_prompt_tokens: current.tool_use_prompt_tokens,
+            reasoning_tokens: current
+                .reasoning_tokens
+                .saturating_add(addition.reasoning_tokens),
+        };
+        if apply_usage(&mut self.run, summed).is_ok() {
+            self.usage_noted = true;
+        }
     }
 
     /// Serialized SDK AgentRun size, not the Chat Completions wire body.
@@ -564,5 +629,69 @@ mod tests {
             session.run.next_step().is_err(),
             "handoff cannot reset remaining global budget"
         );
+    }
+
+    #[test]
+    fn provider_usage_is_on_the_run_before_tools_and_survives_rebuild() {
+        use knowledge::models::ChatUsage;
+        let body = request(vec![Message::system("main")], "first progress");
+        let mut active = None;
+        Session::prepare(
+            &mut active,
+            &body,
+            crate::agent_runtime::SESSION_PREFIX,
+            crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
+            3,
+            16384,
+        )
+        .unwrap();
+        let mut turn = response(&["read_source"]);
+        turn.usage = Some(ChatUsage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(7),
+            total_tokens: Some(107),
+            cached_tokens: Some(3),
+            reasoning_tokens: Some(1),
+        });
+        active.as_mut().unwrap().note_provider_usage(&turn);
+        let usage = active.as_ref().unwrap().run.usage();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.total_tokens, 107);
+        assert_eq!(usage.cached_input_tokens, 3);
+        assert_eq!(usage.reasoning_tokens, 1);
+        active.as_mut().unwrap().tools(&body, &turn).unwrap();
+        assert_eq!(active.as_ref().unwrap().run.usage().input_tokens, 100);
+        active
+            .as_mut()
+            .unwrap()
+            .finish(vec![result("provider-0", "原文")])
+            .unwrap();
+        let next = request(active.as_ref().unwrap().run.full_history(), "next");
+        Session::prepare(
+            &mut active,
+            &next,
+            crate::agent_runtime::SESSION_PREFIX,
+            crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
+            2,
+            16384,
+        )
+        .unwrap();
+        assert_eq!(active.as_ref().unwrap().run.usage().input_tokens, 100);
+        let mut again = response(&["read_source"]);
+        again.usage = Some(ChatUsage {
+            prompt_tokens: Some(50),
+            completion_tokens: Some(1),
+            total_tokens: Some(51),
+            ..ChatUsage::default()
+        });
+        active.as_mut().unwrap().note_provider_usage(&again);
+        assert_eq!(active.as_ref().unwrap().run.usage().input_tokens, 150);
+        let kept = active.as_ref().unwrap().run.usage().input_tokens;
+        active
+            .as_mut()
+            .unwrap()
+            .note_provider_usage(&response(&["read_source"]));
+        assert_eq!(active.as_ref().unwrap().run.usage().input_tokens, kept);
     }
 }

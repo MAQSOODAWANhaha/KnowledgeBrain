@@ -75,3 +75,31 @@ pub(super) fn config() -> Config {
     )
     .unwrap()
 }
+
+#[test]
+fn configured_max_turns_is_not_raised_to_the_outline_estimate() {
+    let mut input = input();
+    input.source_units = (0..20)
+        .map(|ordinal| Source {
+            source_unit_revision_id: format!("s{ordinal}"),
+            document_id: "document".into(),
+            text: String::new(),
+            locator: json!({}),
+            ordinal,
+        })
+        .collect();
+    let estimate = crate::analysis::draft::outline_turn_cap(&input);
+    assert!(estimate > crate::analysis::draft::OUTLINE_MAX_TURNS);
+    let mut limits = config().limits;
+    limits.max_turns = 80;
+    limits.max_tool_calls = 1;
+    limits.max_read_bytes = 1;
+    let applied = limits.clone().at_least_for(&input).unwrap();
+    assert_eq!(applied.max_turns, 80);
+    assert_eq!(applied.max_tool_calls, 80 * 12);
+    assert!(applied.max_read_bytes >= 80 * applied.max_tool_result_bytes * 4);
+    limits.max_turns = 0;
+    let applied = limits.at_least_for(&input).unwrap();
+    assert_eq!(applied.max_turns, crate::analysis::draft::OUTLINE_MAX_TURNS);
+    assert_ne!(applied.max_turns, estimate);
+}

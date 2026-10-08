@@ -83,20 +83,19 @@ impl Limits {
         mut self,
         input: &FrozenInput,
     ) -> Result<Self, crate::analysis::budget::BudgetRefused> {
-        // 阶段一的绝对门。填章请求不走这里：它在冻结请求时按待填章数另记一套
-        // 额度（`draft::fill_limits`），所以这个 20 只约束大纲与骨架。
-        self.max_turns = self
-            .max_turns
-            .max(crate::analysis::draft::outline_turn_cap(input));
+        // 配置的 `max_turns` 是天花板。0 用 `OUTLINE_MAX_TURNS`。
+        // `outline_turn_cap` 只估算这份文档有多长，不再把回合帽抬上去。
+        // 填章请求不走这里：它在冻结请求时按待填章数另记一套额度（`draft::fill_limits`）。
+        let _estimate = crate::analysis::draft::outline_turn_cap(input);
+        if self.max_turns == 0 {
+            self.max_turns = crate::analysis::draft::OUTLINE_MAX_TURNS;
+        }
         self.max_tool_calls = self.max_tool_calls.max(self.max_turns.saturating_mul(12));
         self.max_read_bytes = self.max_read_bytes.max(
             self.max_turns
                 .saturating_mul(self.max_tool_result_bytes)
                 .saturating_mul(4),
         );
-        if self.max_turns == 0 {
-            self.max_turns = crate::analysis::draft::OUTLINE_MAX_TURNS;
-        }
         self.reviewer_reserve = 0;
         Ok(self)
     }
@@ -523,6 +522,14 @@ impl Model for ConfiguredModel {
 fn error(code: &str, message: impl Into<String>) -> AgentError {
     AgentError::new(code, message)
 }
+
+/// One-shot outline stalls at every phase. The old scan path still blocks only
+/// while discovery has no reading packs.
+pub(in crate::analysis) fn outline_execution_blocked(state: &Checkpoint) -> bool {
+    state.main_progress.watch.recovery == Recovery::Blocked
+        && (state.outline_run.reading_packs.is_some()
+            || state.analysis.outline.phase == super::outline_flow::Phase::Discover)
+}
 fn invalid(message: impl std::fmt::Display) -> AgentError {
     error("AGENT_OUTPUT_INVALID", message.to_string())
 }
@@ -553,8 +560,7 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
                 && repair_task_host::exhausted(self.state, limits))
                 || (self.state.role == Role::Main
                     && self.state.draft_stage == draft::DraftStage::Outline
-                    && self.state.analysis.outline.phase == super::outline_flow::Phase::Discover
-                    && self.state.main_progress.watch.recovery == Recovery::Blocked),
+                    && outline_execution_blocked(self.state)),
             budget_exhausted: self.state.turn >= limits.max_turns
                 || self.state.tool_calls >= limits.max_tool_calls
                 || self.state.read_bytes >= limits.max_read_bytes,
@@ -1548,6 +1554,23 @@ pub(super) async fn prepare_request(
     state: &mut Checkpoint,
     defer_images: bool,
 ) -> Result<Vec<u8>, AgentError> {
+    // Sizing (`fit_batch`, inspection) calls this with `defer_images` false.
+    // It may claim and release packs to see whether a smaller brief fits, then
+    // the snapshot is restored so those passes do not stick.
+    let saved_packs = (!defer_images).then(|| state.outline_run.reading_packs.clone());
+    let result = prepare_fitted_request(input, config, state, defer_images).await;
+    if let Some(saved) = saved_packs {
+        state.outline_run.reading_packs = saved;
+    }
+    result
+}
+
+async fn prepare_fitted_request(
+    input: &FrozenInput,
+    config: &Config,
+    state: &mut Checkpoint,
+    defer_images: bool,
+) -> Result<Vec<u8>, AgentError> {
     context::annotate_delivered_source_lines(state, config.limits.max_tool_result_bytes)
         .map_err(invalid)?;
     if state.execution().watch.needs_replan_context() {
@@ -1566,7 +1589,7 @@ pub(super) async fn prepare_request(
     let mut excluded_recall = std::collections::BTreeSet::new();
     let mut omit_preloaded_evidence = false;
     let mut package_budget = None;
-    let reading_sessions = if matches!(
+    let mut reading_sessions = if matches!(
         state.draft_stage,
         draft::DraftStage::None | draft::DraftStage::Outline
     ) && state
@@ -1817,6 +1840,20 @@ pub(super) async fn prepare_request(
             {
                 pending.views.remove(&id);
             }
+        } else if state
+            .outline_run
+            .reading_packs
+            .as_mut()
+            .is_some_and(|work| work.release_highest_inflight())
+        {
+            // Reading packs live in the brief, which the shrink steps above do
+            // not touch. Drop the highest-order in-flight pack and rebuild.
+            reading_sessions = state
+                .outline_run
+                .reading_packs
+                .as_ref()
+                .map(|work| work.inflight_sessions(input))
+                .unwrap_or_default();
         } else {
             return Err(error(
                 "AGENT_TURN_BUDGET_EXCEEDED",

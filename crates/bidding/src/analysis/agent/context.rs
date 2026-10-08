@@ -1463,12 +1463,41 @@ fn reviewer_assigned_progress_versions(
     Ok(versions)
 }
 
+/// One-shot progress. Discover reads pack counts and the requirement total.
+/// Later phases read `tool_draft`. `scanned` is not discovery progress.
+fn one_shot_progress_marker(state: &Checkpoint) -> Result<Option<String>, String> {
+    let Some(work) = state.outline_run.reading_packs.as_ref() else {
+        return Ok(None);
+    };
+    if state.analysis.outline.phase == super::super::outline_flow::Phase::Discover {
+        let counts = work.pack_counts();
+        return Ok(Some(digest(&json!([
+            counts.total,
+            counts.pending,
+            counts.running,
+            counts.failed,
+            counts.committed,
+            work.requirement_count(),
+        ]))?));
+    }
+    Ok(Some(digest(&state.outline_run.tool_draft)?))
+}
+
 pub(in crate::analysis) fn observe_progress(
     state: &mut Checkpoint,
     role: &Role,
     local_completion: Option<String>,
     limits: &Limits,
 ) -> Result<(), String> {
+    if *role == Role::Main
+        && state.draft_stage == super::super::draft::DraftStage::Outline
+        && let Some(marker) = one_shot_progress_marker(state)?
+    {
+        state
+            .main_progress
+            .observe([marker.clone()], Some(marker), &limits.progress());
+        return Ok(());
+    }
     if *role == Role::Main
         && state.draft_stage == super::super::draft::DraftStage::Outline
         && state.analysis.outline.phase == super::super::outline_flow::Phase::Discover

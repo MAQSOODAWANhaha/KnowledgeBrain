@@ -136,10 +136,10 @@ fn one_shot_acceptance_publishes_from_the_tool_draft() {
     assert_eq!(first[0]["pack"]["text"][0]["text"], "A");
     assert_eq!(first[0]["pack"]["heading"], "第一章 > 投标函");
     let replay = claim_turn(&mut slot, &input, 1, 1);
+    assert_eq!(replay.len(), 1);
     assert_eq!(replay[0]["pack"]["id"], "pack-0");
     assert_eq!(replay[0]["status"], "running");
     assert_eq!(replay[0]["pack"]["text"][0]["text"], "A");
-    assert_eq!(replay[1]["pack"]["text"][0]["text"], "B");
 
     let mut work = slot.take().unwrap();
     work.claim(10);
@@ -510,4 +510,108 @@ fn fill_and_published_stay_slot_only() {
             .collect();
         assert_eq!(names, ["put_slots", "read_outline"]);
     }
+}
+
+#[test]
+fn a_response_chapter_without_a_slot_stays_in_organize() {
+    let input = frozen();
+    let mut state = checkpoint(&input);
+    let mut work = DiscoverWork::plan(&input, 1);
+    work.claim(10);
+    for index in 0..work.pack_counts().total {
+        submit(&mut work, &format!("pack-{index}"), vec![]);
+    }
+    assert!(work.complete());
+    state.outline_run.reading_packs = Some(work);
+    state.analysis.outline.phase = Phase::Outline;
+    state.outline_run.phase = Phase::Outline;
+    apply(
+        &input,
+        0,
+        &mut state,
+        "put_chapters",
+        &json!({"chapters":[
+            {"id":"group","parent_id":null,"order":0,"title":"投标文件","purpose":"group","requirement_ids":[]},
+            {"id":"letter","parent_id":"group","order":0,"title":"投标函","purpose":"response","requirement_ids":[]},
+            {"id":"extra","parent_id":"group","order":1,"title":"其他","purpose":"response","requirement_ids":[]}
+        ]}),
+    )
+    .unwrap();
+    apply(
+        &input,
+        0,
+        &mut state,
+        "bind_forms",
+        &json!({"bindings":[{"form_id":"form-1","chapter_id":"letter"}]}),
+    )
+    .unwrap();
+    let grouped = apply(
+        &input,
+        0,
+        &mut state,
+        "put_slots",
+        &json!({"slots":[{"slot_id":"group:bidder","chapter_id":"group","kind":"bidder_blank","text":"","match_query":"名称"}]}),
+    )
+    .unwrap_err();
+    assert!(grouped.contains("group chapter"));
+    assert!(!state.outline_run.tool_draft.slots_submitted);
+    let gap = apply(
+        &input,
+        0,
+        &mut state,
+        "put_slots",
+        &json!({"slots":[
+            {"slot_id":"letter:fixed","chapter_id":"letter","kind":"fixed_text","text":"函","match_query":""}
+        ]}),
+    )
+    .unwrap_err();
+    assert!(gap.contains("response chapter extra has no template slot"));
+    assert!(!state.outline_run.tool_draft.slots_submitted);
+    assert_eq!(current(&input, &state), Duty::Organize);
+    apply(
+        &input,
+        0,
+        &mut state,
+        "put_slots",
+        &json!({"slots":[
+            {"slot_id":"letter:fixed","chapter_id":"letter","kind":"fixed_text","text":"函","match_query":""},
+            {"slot_id":"extra:fixed","chapter_id":"extra","kind":"fixed_text","text":"其他","match_query":""}
+        ]}),
+    )
+    .unwrap();
+    assert!(state.outline_run.tool_draft.slots_submitted);
+    assert_eq!(current(&input, &state), Duty::Check);
+    apply(
+        &input,
+        0,
+        &mut state,
+        "put_chapters",
+        &json!({"chapters":[
+            {"id":"group","parent_id":null,"order":0,"title":"投标文件","purpose":"group","requirement_ids":[]},
+            {"id":"letter","parent_id":"group","order":0,"title":"投标函","purpose":"response","requirement_ids":[]},
+            {"id":"extra","parent_id":"group","order":1,"title":"其他","purpose":"response","requirement_ids":[]},
+            {"id":"more","parent_id":"group","order":2,"title":"补充","purpose":"response","requirement_ids":[]}
+        ]}),
+    )
+    .unwrap();
+    assert!(state.outline_run.tool_draft.slots_submitted);
+    assert_eq!(current(&input, &state), Duty::Organize);
+    assert!(deny(current(&input, &state), "finish_outline", false).is_some());
+    assert!(deny(current(&input, &state), "put_slots", false).is_none());
+
+    let mut fill = checkpoint(&input);
+    fill.draft_stage = crate::analysis::draft::DraftStage::Fill;
+    fill.outline_run.tool_draft.chapters = state.outline_run.tool_draft.chapters.clone();
+    apply(
+        &input,
+        0,
+        &mut fill,
+        "put_slots",
+        &json!({"slots":[
+            {"slot_id":"letter:fixed","chapter_id":"letter","kind":"fixed_text","text":"函","match_query":""}
+        ]}),
+    )
+    .unwrap();
+    assert!(fill.outline_run.tool_draft.slots_submitted);
+    assert_eq!(current(&input, &fill), Duty::Template);
 }

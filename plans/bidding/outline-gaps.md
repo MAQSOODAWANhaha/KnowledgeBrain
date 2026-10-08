@@ -8,9 +8,9 @@
 
 现状：`DiscoverWork::session` 把 `ParsePack` 放进请求 brief 的 `reading_packs`。`text` 只有 `source_id`、`start`、`end`，`forms` 只有 `form_id`、`start`、`end`、`header_cells`。冻结来源的文字和单元格不在包里。`claim_turn` 只返回本轮新领取的包，已经是 `running` 的包不会再次出现。
 
-完成：发现轮发给模型的包符合 [运行时](../../docs/bidding/outline.md) 里的目标载荷：`text[]` 带切片正文，`forms[].cells` 是 `[start, end)` 的行优先一维文本，续表的 `header` 按列顺序且不在引用范围内。本轮仍要处理的 `running` 和待修 `failed` 包每次重放。模型提交的 `start` / `end` 仍必须落在这个切片里。超预算丢掉发现对话时，只丢掉已经 `committed` 的包所在轮次，依据是 `DiscoverWork` 的包状态，不读 `analysis.outline.scanned`。
+完成：发现轮发给模型的包符合 [运行时](../../docs/bidding/outline.md) 里的目标载荷：`text[]` 带切片正文，`forms[].cells` 是 `[start, end)` 的行优先一维文本，续表的 `header` 按列顺序且不在引用范围内。本轮仍要处理的 `running` 和待修 `failed` 包每次重放，且两者合计不超过并发上限，按包 `order` 补空位。提交一个包算发现进度。模型提交的 `start` / `end` 仍必须落在这个切片里。超预算丢掉发现对话时，只丢掉已经 `committed` 的包所在轮次，依据是 `DiscoverWork` 的包状态，不读 `analysis.outline.scanned`。
 
-验证：用一份含标题、超长条款和续表的冻结输入组包，断言 brief 里的包文本等于来源切片，包外文字不出现，续表切片带按列排列的 `header`，且这些表头单元格的下标不在 `[start, end)` 内。同一 `running` 包在下一轮请求里仍然带正文。已 `committed` 的发现轮在超预算时从窗口消失；仍是 `running` 或 `failed` 的轮次留下。判定不读 `analysis.outline.scanned`。
+验证：用一份含标题、超长条款和续表的冻结输入组包，断言 brief 里的包文本等于来源切片，包外文字不出现，续表切片带按列排列的 `header`，且这些表头单元格的下标不在 `[start, end)` 内。同一 `running` 包在下一轮请求里仍然带正文，一轮在途包不超过并发上限，领取按 `order`。已 `committed` 的发现轮在超预算时从窗口消失；仍是 `running` 或 `failed` 的轮次留下。判定不读 `analysis.outline.scanned`。提交包算发现进度。
 
 ## 2. 发现要求要进入组织
 
@@ -59,7 +59,7 @@
 通过：
 
 1. 冻结解析按解析器顺序发布。大纲运行读的是这份冻结输入。
-2. 计划中的每个阅读包变为 `committed`。发现轮 brief 里的包带上切片正文，以及 `[start, end)` 的行优先 `cells`。每条要求的 `source_id`、`start`、`end` 落在该包切片内。续表的 `header` 按列排列，且这些表头不在引用范围内。同一 `running` 或待修 `failed` 包在下一轮 brief 里仍然带正文。超预算时只丢掉已经 `committed` 的发现轮，不读 `analysis.outline.scanned`。
+2. 计划中的每个阅读包变为 `committed`。发现轮 brief 里的包带上切片正文，以及 `[start, end)` 的行优先 `cells`。每条要求的 `source_id`、`start`、`end` 落在该包切片内。续表的 `header` 按列排列，且这些表头不在引用范围内。同一 `running` 或待修 `failed` 包在下一轮 brief 里仍然带正文，一轮在途包不超过并发上限，领取按 `order`。提交包记为发现进度，不读 `analysis.outline.scanned`。超预算时只丢掉已经 `committed` 的发现轮，不读 `analysis.outline.scanned`。
 3. 章节树非空、无环、同级顺序不重复。每个附件表恰好绑定一个章节。缺 `requirement_ids` 字段不能通过。有已提交 id 时，每个 id 恰好出现在一个章节上，不能靠各章全空数组过关。没有任何已提交 id 时，各章可以是空数组。组织轮读的是检查点上的要求记录。phase 拨到 `outline` 且 `analysis.outline.checks` 为空时，发现对话已被 `transcript.clear()`，不能再从对话里读要求。
 4. 已经 `put_slots`。`bidder_blank` 和 `signature` 的文本为空、`match_query` 非空、`response_required` 为真。其它种类的 `match_query` 为空。每个 `ChapterPurpose::Response` 章节至少有一个槽。
 5. `finish_outline` 使 `tool_draft.finished` 为真，phase 为 `complete`。

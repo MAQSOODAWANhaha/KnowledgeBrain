@@ -147,6 +147,9 @@ pub(crate) async fn drive<D: Driver>(
                     _ = tokio::time::sleep(delay) => {}
                 }
             };
+            if let Some(session) = host.journal_mut().session.as_mut() {
+                session.note_provider_usage(&response);
+            }
             host.journal_mut().responded(response.clone())?;
             host.save().await?;
             response

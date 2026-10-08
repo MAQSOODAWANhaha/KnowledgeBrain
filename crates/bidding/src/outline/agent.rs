@@ -42,7 +42,7 @@ impl Duty {
                 "本轮只做发现。只阅读已领取的阅读包，用 submit_pack 提交该包范围内的要求。同一包失败后把 repair 设为 true 再交。不要写章节，不要写模板，不要匹配知识库。"
             }
             Self::Organize => {
-                "本轮写章节、附件绑定和规定模板槽。用检查点里的要求整理章节树，每个章节带上 requirement_ids，并把每个附件表绑定到唯一章节。用 put_slots 写入招标文件已经给出的文字。投标人和签字槽留空并带上 match_query，其他槽的 match_query 为空，分组章节不能带这两种槽。不要重新扫描招标文件，不要匹配知识库，不要填写我方事实。"
+                "本轮写章节、附件绑定和规定模板槽。用检查点里的要求整理章节树，每个章节带上 requirement_ids，并把每个附件表绑定到唯一章节。用 put_slots 写入招标文件已经给出的文字。每个应答章节至少有一个槽。投标人和签字槽留空并带上 match_query，其他槽的 match_query 为空，分组章节不能带这两种槽。不要重新扫描招标文件，不要匹配知识库，不要填写我方事实。"
             }
             Self::Check => {
                 "本轮只做收尾。用 read_outline 核对章节、附件绑定和模板槽，然后 finish_outline。不要改章节，不要重新扫描，不要写模板。"
@@ -55,8 +55,9 @@ impl Duty {
 }
 
 /// Live duty. Discovery stays open until every reading pack is committed.
-/// Organize then writes chapters, bindings, and slots together. Fill and
-/// published stay slot-only. Finish is `read_outline` and `finish_outline`.
+/// Organize then writes chapters, bindings, and slots together. A response
+/// chapter without a slot stays in Organize. Fill and published stay
+/// slot-only. Finish is `read_outline` and `finish_outline`.
 pub fn select(
     stage: DraftStage,
     discovery_open: bool,
@@ -91,7 +92,8 @@ pub fn current(
         discovery_open,
         !state.outline_run.tool_draft.chapters.is_empty(),
         !super::tools::unmapped_forms(input, &state.outline_run.tool_draft).is_empty(),
-        state.outline_run.tool_draft.slots_submitted,
+        state.outline_run.tool_draft.slots_submitted
+            && super::tools::missing_response_slot(&state.outline_run.tool_draft).is_none(),
     )
 }
 
@@ -270,6 +272,17 @@ pub fn apply(
             .as_ref()
             .map(super::discover::DiscoverWork::requirement_ids)
             .unwrap_or_default();
+        if name == "put_slots"
+            && !matches!(state.draft_stage, DraftStage::Fill | DraftStage::Published)
+        {
+            let mut probe = state.outline_run.tool_draft.clone();
+            let value = super::tools::apply(input, &mut probe, &known, name, args)?;
+            if let Some(id) = super::tools::missing_response_slot(&probe) {
+                return Err(format!("response chapter {id} has no template slot"));
+            }
+            state.outline_run.tool_draft = probe;
+            return Ok(value);
+        }
         let value =
             super::tools::apply(input, &mut state.outline_run.tool_draft, &known, name, args)?;
         if name == "finish_outline" {

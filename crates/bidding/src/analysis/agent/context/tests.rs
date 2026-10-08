@@ -2205,3 +2205,197 @@ fn over_budget_eviction_drops_only_committed_pack_turns() {
     );
     assert!(state.transcript.last().unwrap()["content"] == "latest");
 }
+
+fn outline_checkpoint() -> Checkpoint {
+    Checkpoint {
+        journal: Default::default(),
+        input_sha256: String::new(),
+        config_sha256: String::new(),
+        turn: 0,
+        tool_calls: 0,
+        read_bytes: 0,
+        review_rounds: 0,
+        role: Role::Main,
+        analysis: Analysis::default(),
+        review: None,
+        review_draft: BTreeMap::new(),
+        source_review: None,
+        repair: Default::default(),
+        dispatch: Default::default(),
+        reviewer_coverage: Coverage::default(),
+        pending_coverage: None,
+        transcript: Vec::new(),
+        main_progress: Default::default(),
+        reviewer_progress: Default::default(),
+        main_work: None,
+        reviewer_work: None,
+        done: false,
+        source_views: BTreeMap::new(),
+        draft_stage: crate::analysis::draft::DraftStage::Outline,
+        draft_active_id: None,
+        draft_outline_gaps: None,
+        draft_outline_stalls: 0,
+        draft_outline_window: 0,
+        draft_degraded: Vec::new(),
+        draft_stopped: false,
+        draft_compile_object_id: None,
+        draft_docx_base64: None,
+        outline_config_sha256: None,
+        fill_config_sha256: None,
+        outline_run: Default::default(),
+    }
+}
+
+fn pack_input(count: usize, text: &str) -> FrozenInput {
+    FrozenInput {
+        schema_version: 1,
+        project_id: "project".into(),
+        document_set_id: "set".into(),
+        documents: vec![],
+        document_relations: vec![],
+        source_units: (0..count)
+            .map(|ordinal| crate::analysis::Source {
+                source_unit_revision_id: format!("s{ordinal}"),
+                document_id: "doc".into(),
+                text: text.into(),
+                locator: json!({"heading_path": format!("章{ordinal}")}),
+                ordinal,
+            })
+            .collect(),
+        structured_forms: vec![],
+        decisions: vec![],
+    }
+}
+
+#[tokio::test]
+async fn sizing_does_not_stick_claims_and_an_oversized_brief_releases_packs() {
+    let input = pack_input(6, &"x".repeat(8_000));
+    let mut config = crate::analysis::tests::config();
+    config.limits.pack_max_chars = 8_000;
+    config.limits.max_context_bytes = 24_000;
+    config.limits.max_history_bytes = 8_000;
+    let mut state = outline_checkpoint();
+    let before = state.outline_run.reading_packs.clone();
+    super::super::prepare_request(&input, &config, &mut state, false)
+        .await
+        .unwrap();
+    assert_eq!(state.outline_run.reading_packs, before);
+    let bytes = super::super::prepare_request(&input, &config, &mut state, true)
+        .await
+        .unwrap();
+    let counts = state
+        .outline_run
+        .reading_packs
+        .as_ref()
+        .unwrap()
+        .pack_counts();
+    assert!(counts.running >= 1 && counts.running <= 4);
+    assert!(counts.running < counts.total);
+    assert!(counts.pending > 0);
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let brief: Value =
+        serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+    let packs = brief["reading_packs"].as_array().unwrap();
+    assert_eq!(packs.len(), counts.running);
+    assert_eq!(packs[0]["pack"]["id"], "pack-0");
+    let running = counts.running;
+    super::super::prepare_request(&input, &config, &mut state, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .outline_run
+            .reading_packs
+            .as_ref()
+            .unwrap()
+            .pack_counts()
+            .running,
+        running
+    );
+}
+
+#[test]
+fn pack_commits_are_discover_progress_and_later_phases_can_block() {
+    use crate::outline::discover::{DiscoverWork, PackSubmit};
+    let input = pack_input(3, "A");
+    let mut state = outline_checkpoint();
+    state.outline_run.reading_packs = Some(DiscoverWork::plan(&input, 1));
+    state.outline_run.reading_packs.as_mut().unwrap().claim(4);
+    observe_progress(
+        &mut state,
+        &Role::Main,
+        None,
+        &crate::analysis::tests::config().limits,
+    )
+    .unwrap();
+    state
+        .analysis
+        .outline
+        .scanned
+        .text
+        .insert("s0".into(), vec![(0, 1)]);
+    observe_progress(
+        &mut state,
+        &Role::Main,
+        None,
+        &crate::analysis::tests::config().limits,
+    )
+    .unwrap();
+    assert_eq!(state.main_progress.watch.no_progress_turns, 1);
+    state
+        .outline_run
+        .reading_packs
+        .as_mut()
+        .unwrap()
+        .submit(
+            "pack-0",
+            PackSubmit {
+                call_id: "ok".into(),
+                requirements: vec![],
+            },
+        )
+        .unwrap();
+    observe_progress(
+        &mut state,
+        &Role::Main,
+        None,
+        &crate::analysis::tests::config().limits,
+    )
+    .unwrap();
+    assert_eq!(state.main_progress.watch.no_progress_turns, 0);
+    assert_eq!(state.main_progress.watch.recovery, Recovery::Running);
+
+    state.main_progress = Default::default();
+    state.analysis.outline.phase = crate::analysis::outline_flow::Phase::Check;
+    let limits = crate::analysis::tests::config().limits;
+    observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+    observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+    assert_eq!(state.main_progress.watch.no_progress_turns, 1);
+    state.outline_run.tool_draft.slots_submitted = true;
+    observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+    assert_eq!(state.main_progress.watch.no_progress_turns, 0);
+    state.main_progress = Default::default();
+    for _ in 0..40 {
+        observe_progress(&mut state, &Role::Main, None, &limits).unwrap();
+    }
+    assert_eq!(state.main_progress.watch.recovery, Recovery::Blocked);
+    assert!(super::super::outline_execution_blocked(&state));
+
+    let mut scanned = outline_checkpoint();
+    observe_progress(&mut scanned, &Role::Main, None, &limits).unwrap();
+    observe_progress(&mut scanned, &Role::Main, None, &limits).unwrap();
+    assert_eq!(scanned.main_progress.watch.no_progress_turns, 1);
+    scanned
+        .analysis
+        .outline
+        .scanned
+        .text
+        .insert("s0".into(), vec![(0, 1)]);
+    observe_progress(&mut scanned, &Role::Main, None, &limits).unwrap();
+    assert_eq!(scanned.main_progress.watch.no_progress_turns, 0);
+    scanned.main_progress.watch.recovery = Recovery::Blocked;
+    scanned.analysis.outline.phase = crate::analysis::outline_flow::Phase::Check;
+    assert!(!super::super::outline_execution_blocked(&scanned));
+    scanned.analysis.outline.phase = crate::analysis::outline_flow::Phase::Discover;
+    assert!(super::super::outline_execution_blocked(&scanned));
+}

@@ -6,13 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-/// 阶段一的**兜底**回合上限，防跑飞用，不是验收门。真正决定阶段一多快的是按窗数
-/// 推导的帽（`outline_turn_cap`，通常十来回合）；这里留够余量，宁可让难文档多跑几
-/// 轮把大纲写全，也不为凑一个数字把它砍成半张大纲。整体填充是另一次请求、另一套
-/// 账（`fill_turn_cap`），不共用这个上限。
+/// 配置没写 `max_turns`（0）时的回合上限。调用方写明的值是天花板：
+/// `Limits::at_least_for` 不会把它抬到 `outline_turn_cap`。整体填充是另一次
+/// 请求、另一套账（`fill_turn_cap`），不共用这个上限。
 pub const OUTLINE_MAX_TURNS: usize = 80;
-/// 阶段一的**目标**回合数：出骨架应该在这个量级内完成。超了不失败、不截断，只是
-/// 说明该优化投递与绑定，让 `outline_turn_cap` 更早闭合。
+/// 阶段一的**目标**回合数：出骨架应该在这个量级内完成。超了不失败、不截断。
+/// 运行停在配置的 `max_turns`，不在这个目标上。
 pub const OUTLINE_TURN_TARGET: usize = 20;
 /// 每章的回合额度：读表 / 写模板 / 一次返工。
 pub const FILL_TURNS_PER_CHAPTER: usize = 4;
@@ -199,7 +198,7 @@ fn heading_parts(source: &Source) -> Vec<String> {
         .collect()
 }
 
-/// 大纲阶段的回合帽：索引 + 逐窗投递 + 修补轮，按窗数推导。
+/// 按窗数估算的大纲工作量。不是运行回合上限；配置的 `max_turns` 才是。
 pub fn outline_turn_cap(input: &FrozenInput) -> usize {
     outline_chunks(input)
         .len()
