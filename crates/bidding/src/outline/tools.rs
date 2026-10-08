@@ -1,10 +1,16 @@
 //! The outline model writes chapters, attachment bindings, and template slots.
 //!
 //! Six tools, and a turn is shown only the ones its duty allows.
+//!
+//! 禁止硬编码: chapter shape uses attachment chains and the documented depth
+//! constants. It does not match chapter titles or a sample keyword list.
 
 use super::{
     ChapterOutline, ChapterPurpose, SlotKind, TemplateContent,
-    chapters::{AttachmentBinding, attachment_form_ids, form_cards},
+    chapters::{
+        AttachmentBinding, DEPTH_CHAIN_MIN, RESPONSE_LEAF_DEPTH, attachment_chains,
+        attachment_form_ids, form_cards,
+    },
 };
 use crate::analysis::FrozenInput;
 use serde::{Deserialize, Serialize};
@@ -120,6 +126,9 @@ fn put_chapters(
     if errors.is_empty() {
         errors.extend(validate_tree(&chapters));
     }
+    if errors.is_empty() {
+        errors.extend(depth_gaps(input, &chapters));
+    }
     if !errors.is_empty() {
         return Err(errors.join("\n"));
     }
@@ -197,6 +206,11 @@ fn bind_forms(input: &FrozenInput, draft: &mut Draft, args: &Value) -> Result<Va
             form_id,
             chapter_id,
         });
+    }
+    if errors.is_empty() {
+        let mut probe = draft.clone();
+        probe.bindings = bindings.clone();
+        errors.extend(chain_gaps(input, &probe));
     }
     if !errors.is_empty() {
         return Err(errors.join("\n"));
@@ -289,6 +303,10 @@ fn finish(input: &FrozenInput, draft: &mut Draft) -> Result<Value, String> {
     if let Some(id) = missing_response_slot(draft) {
         return Err(format!("response chapter {id} has no template slot"));
     }
+    let shape = granularity_gaps(input, draft);
+    if !shape.is_empty() {
+        return Err(shape.join("\n"));
+    }
     draft.finished = true;
     Ok(view(input, draft))
 }
@@ -346,6 +364,7 @@ pub fn readiness(input: &FrozenInput, draft: &Draft) -> Value {
     if let Some(id) = missing_response_slot(draft) {
         missing.push(format!("response chapter {id} has no template slot"));
     }
+    missing.extend(granularity_gaps(input, draft));
     let ready = missing.is_empty();
     let mut value = json!({
         "ready": ready,
@@ -355,6 +374,99 @@ pub fn readiness(input: &FrozenInput, draft: &Draft) -> Value {
         value["next"] = json!("finish_outline");
     }
     value
+}
+
+/// Flat merges are rejected once several attachment chains exist.
+///
+/// A chain is a continuation run from [`attachment_chains`]. With at least
+/// [`DEPTH_CHAIN_MIN`] chains, every response chapter sits at
+/// [`RESPONSE_LEAF_DEPTH`] under a group. One leaf may bind several chains.
+/// One chain may not be split across leaves.
+fn granularity_gaps(input: &FrozenInput, draft: &Draft) -> Vec<String> {
+    let mut gaps = depth_gaps(input, &draft.chapters);
+    gaps.extend(chain_gaps(input, draft));
+    gaps
+}
+
+fn depth_gaps(input: &FrozenInput, chapters: &[ChapterOutline]) -> Vec<String> {
+    if attachment_chains(input).len() < DEPTH_CHAIN_MIN {
+        return Vec::new();
+    }
+    let mut gaps = Vec::new();
+    for chapter in chapters {
+        if chapter.purpose != ChapterPurpose::Response {
+            continue;
+        }
+        let parent_is_group = chapter
+            .parent_id
+            .as_deref()
+            .and_then(|id| chapters.iter().find(|candidate| candidate.id == id))
+            .is_some_and(|parent| parent.purpose == ChapterPurpose::Group);
+        if response_depth(chapters, chapter) < RESPONSE_LEAF_DEPTH || !parent_is_group {
+            gaps.push(format!(
+                "response chapter {} is not under a mid-level group",
+                chapter.id
+            ));
+        }
+    }
+    gaps
+}
+
+fn chain_gaps(input: &FrozenInput, draft: &Draft) -> Vec<String> {
+    let chains = attachment_chains(input);
+    if chains.len() < DEPTH_CHAIN_MIN {
+        return Vec::new();
+    }
+    let form_chain: std::collections::HashMap<&str, usize> = chains
+        .iter()
+        .enumerate()
+        .flat_map(|(index, chain)| chain.iter().map(move |id| (id.as_str(), index)))
+        .collect();
+    let mut chain_chapters: std::collections::HashMap<usize, BTreeSet<&str>> =
+        std::collections::HashMap::new();
+    for binding in &draft.bindings {
+        let Some(&chain) = form_chain.get(binding.form_id.as_str()) else {
+            continue;
+        };
+        chain_chapters
+            .entry(chain)
+            .or_default()
+            .insert(binding.chapter_id.as_str());
+    }
+    let mut split: Vec<_> = chain_chapters
+        .iter()
+        .filter(|(_, chapters)| chapters.len() > 1)
+        .map(|(chain, _)| *chain)
+        .collect();
+    split.sort_unstable();
+    let mut gaps = Vec::new();
+    for chain in split {
+        let ids = chains
+            .get(chain)
+            .map(|ids| ids.join(", "))
+            .unwrap_or_default();
+        gaps.push(format!(
+            "attachment chain {chain} ({ids}) is split across response chapters"
+        ));
+    }
+    gaps
+}
+
+fn response_depth(chapters: &[ChapterOutline], chapter: &ChapterOutline) -> usize {
+    let mut depth = 1;
+    let mut parent = chapter.parent_id.as_deref();
+    let mut seen = HashSet::from([chapter.id.as_str()]);
+    while let Some(id) = parent {
+        if !seen.insert(id) {
+            break;
+        }
+        depth += 1;
+        parent = chapters
+            .iter()
+            .find(|candidate| candidate.id == id)
+            .and_then(|candidate| candidate.parent_id.as_deref());
+    }
+    depth
 }
 
 fn validate_tree(chapters: &[ChapterOutline]) -> Vec<String> {
@@ -674,5 +786,228 @@ mod tests {
         assert!(tight["unmapped_forms"]["error"].is_string());
         assert_eq!(state["readiness"]["ready"], json!(false));
         assert!(state["readiness"].get("next").is_none());
+    }
+
+    fn fill_in(id: &str, source_id: &str, header: &str) -> Value {
+        json!({
+            "form_definition_revision_id": id,
+            "source_unit_revision_id": source_id,
+            "definition": {
+                "title": "source_unit:form",
+                "row_count": 2,
+                "column_count": 2,
+                "cells": [
+                    {"row": 0, "column": 0, "text": header},
+                    {"row": 0, "column": 1, "text": ""},
+                    {"row": 1, "column": 0, "text": ""},
+                    {"row": 1, "column": 1, "text": ""}
+                ]
+            }
+        })
+    }
+
+    fn two_chains() -> FrozenInput {
+        FrozenInput {
+            schema_version: 1,
+            project_id: "project".into(),
+            document_set_id: "set".into(),
+            documents: vec![],
+            document_relations: vec![],
+            source_units: vec![
+                Source {
+                    source_unit_revision_id: "left".into(),
+                    document_id: "doc".into(),
+                    text: String::new(),
+                    locator: json!({"heading_path": "卷一 > 甲"}),
+                    ordinal: 0,
+                },
+                Source {
+                    source_unit_revision_id: "right".into(),
+                    document_id: "doc".into(),
+                    text: String::new(),
+                    locator: json!({"heading_path": "卷一 > 乙"}),
+                    ordinal: 1,
+                },
+            ],
+            structured_forms: vec![
+                fill_in("form-a", "left", "甲"),
+                fill_in("form-b", "right", "乙"),
+            ],
+            decisions: vec![],
+        }
+    }
+
+    #[test]
+    fn two_attachment_chains_need_a_three_level_tree() {
+        let input = two_chains();
+        assert_eq!(crate::outline::chapters::attachment_chains(&input).len(), 2);
+        let mut draft = Draft::default();
+        let flat = apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_chapters",
+            &json!({"chapters":[
+                {"id":"root","parent_id":null,"order":0,"title":"根","purpose":"group","requirement_ids":[]},
+                {"id":"letter","parent_id":"root","order":0,"title":"甲","purpose":"response","requirement_ids":[]},
+                {"id":"other","parent_id":"root","order":1,"title":"乙","purpose":"response","requirement_ids":[]}
+            ]}),
+        )
+        .unwrap_err();
+        assert!(flat.contains("not under a mid-level group"), "{flat}");
+        assert!(draft.chapters.is_empty());
+
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_chapters",
+            &json!({"chapters":[
+                {"id":"root","parent_id":null,"order":0,"title":"根","purpose":"group","requirement_ids":[]},
+                {"id":"mid","parent_id":"root","order":0,"title":"中","purpose":"group","requirement_ids":[]},
+                {"id":"leaf","parent_id":"mid","order":0,"title":"叶","purpose":"response","requirement_ids":[]}
+            ]}),
+        )
+        .unwrap();
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "bind_forms",
+            &json!({"bindings":[
+                {"form_id":"form-a","chapter_id":"leaf"},
+                {"form_id":"form-b","chapter_id":"leaf"}
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(draft.bindings.len(), 2);
+
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_chapters",
+            &json!({"chapters":[
+                {"id":"root","parent_id":null,"order":0,"title":"根","purpose":"group","requirement_ids":[]},
+                {"id":"mid","parent_id":"root","order":0,"title":"中","purpose":"group","requirement_ids":[]},
+                {"id":"leaf-a","parent_id":"mid","order":0,"title":"甲","purpose":"response","requirement_ids":[]},
+                {"id":"leaf-b","parent_id":"mid","order":1,"title":"乙","purpose":"response","requirement_ids":[]}
+            ]}),
+        )
+        .unwrap();
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "bind_forms",
+            &json!({"bindings":[
+                {"form_id":"form-a","chapter_id":"leaf-a"},
+                {"form_id":"form-b","chapter_id":"leaf-b"}
+            ]}),
+        )
+        .unwrap();
+        apply(
+            &input,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_slots",
+            &json!({"slots":[
+                {"slot_id":"a:fixed","chapter_id":"leaf-a","kind":"fixed_text","text":"甲","match_query":""},
+                {"slot_id":"b:fixed","chapter_id":"leaf-b","kind":"fixed_text","text":"乙","match_query":""}
+            ]}),
+        )
+        .unwrap();
+        let finished = finish(&input, &mut draft).unwrap();
+        assert_eq!(finished["readiness"]["ready"], json!(true));
+        assert_eq!(finished["chapters"].as_array().unwrap().len(), 4);
+
+        let continued = continued_chain();
+        assert_eq!(
+            crate::outline::chapters::attachment_chains(&continued).len(),
+            2
+        );
+        let mut draft = Draft::default();
+        apply(
+            &continued,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_chapters",
+            &json!({"chapters":[
+                {"id":"root","parent_id":null,"order":0,"title":"根","purpose":"group","requirement_ids":[]},
+                {"id":"mid","parent_id":"root","order":0,"title":"中","purpose":"group","requirement_ids":[]},
+                {"id":"leaf-a","parent_id":"mid","order":0,"title":"甲","purpose":"response","requirement_ids":[]},
+                {"id":"leaf-b","parent_id":"mid","order":1,"title":"乙","purpose":"response","requirement_ids":[]}
+            ]}),
+        )
+        .unwrap();
+        let split = apply(
+            &continued,
+            &mut draft,
+            &BTreeSet::new(),
+            "bind_forms",
+            &json!({"bindings":[
+                {"form_id":"form-a","chapter_id":"leaf-a"},
+                {"form_id":"form-b","chapter_id":"leaf-b"},
+                {"form_id":"form-c","chapter_id":"leaf-b"}
+            ]}),
+        )
+        .unwrap_err();
+        assert!(
+            split.contains("is split across response chapters"),
+            "{split}"
+        );
+        assert!(draft.bindings.is_empty());
+        apply(
+            &continued,
+            &mut draft,
+            &BTreeSet::new(),
+            "bind_forms",
+            &json!({"bindings":[
+                {"form_id":"form-a","chapter_id":"leaf-a"},
+                {"form_id":"form-b","chapter_id":"leaf-a"},
+                {"form_id":"form-c","chapter_id":"leaf-a"}
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(draft.bindings.len(), 3);
+    }
+
+    fn continued_chain() -> FrozenInput {
+        FrozenInput {
+            schema_version: 1,
+            project_id: "project".into(),
+            document_set_id: "set".into(),
+            documents: vec![],
+            document_relations: vec![],
+            source_units: vec![
+                Source {
+                    source_unit_revision_id: "left".into(),
+                    document_id: "doc".into(),
+                    text: String::new(),
+                    locator: json!({"heading_path": "卷一"}),
+                    ordinal: 0,
+                },
+                Source {
+                    source_unit_revision_id: "right".into(),
+                    document_id: "doc".into(),
+                    text: String::new(),
+                    locator: json!({"heading_path": ""}),
+                    ordinal: 1,
+                },
+                Source {
+                    source_unit_revision_id: "other".into(),
+                    document_id: "doc".into(),
+                    text: String::new(),
+                    locator: json!({"heading_path": "卷二"}),
+                    ordinal: 2,
+                },
+            ],
+            structured_forms: vec![
+                fill_in("form-a", "left", "甲"),
+                fill_in("form-b", "right", "甲"),
+                fill_in("form-c", "other", "乙"),
+            ],
+            decisions: vec![],
+        }
     }
 }

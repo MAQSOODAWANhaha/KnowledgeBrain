@@ -203,6 +203,126 @@ def test_caption_residuals_follow_structure():
     ]
     assert module.form_captions(continued) == [
         '8A 摘要一览', '8A 摘要一览', '续表 1：标准一览']
+    # A repeating header the parser already stripped can survive once, including
+    # with spaces or as a full-span cell. A longer line in the window wins.
+    # A thin stub loses to a longer heading segment that starts with the stub.
+    once = [
+        _unit('项目全称一览\n书 名', 0),
+        _unit('', 0, grid=_grid(2, [
+            _cell(0, 0, 2, '书名'), _cell(1, 0, 1, '名称')])),
+    ]
+    assert module.form_captions(once, extra_running=['书名']) == ['项目全称一览']
+    assert module.form_title(
+        _grid(2, [_cell(0, 0, 2, '合并表头'), _cell(1, 0, 1, '名称')]),
+        '不应采用这一行') == '合并表头'
+    headed = [
+        _unit('附件 3Z', 0, heading='分册 > 附件 3Z 资质一览'),
+        _unit('', 0, grid=_grid(2, [_cell(0, 0, 1, '名称'), _cell(0, 1, 1, '')])),
+    ]
+    assert module.form_captions(headed) == ['附件 3Z 资质一览']
+    assert module.caption_line('附件 3Z', headings=['分册', '附件 3Z 资质一览']) == '附件 3Z 资质一览'
+    assert module.caption_line('附件 3Z', headings=['分册']) == '附件 3Z'
+    only_header = [
+        _unit('书名', 0),
+        _unit('', 0, grid=_grid(2, [_cell(0, 0, 1, '名称'), _cell(0, 1, 1, '')])),
+    ]
+    assert module.form_captions(only_header, extra_running=['书名']) == ['']
+    # 第n页 makes each page a different string, so a 60% edge set never joins
+    # them. The folded label is still furniture. A one-page copy then drops.
+    marked = [
+        _unit('正文\n书名第1页', 0),
+        _unit('正文\n书名第2页', 1),
+        _unit('项目全称一览\n书名', 2),
+        _unit('', 2, grid=_grid(2, [_cell(0, 0, 1, '名称'), _cell(0, 1, 1, '')])),
+    ]
+    assert '书名' in module.running_lines(marked)
+    assert module.form_captions(marked) == ['项目全称一览']
+    # The short line is a field inside the grid, not a second-page header and
+    # not in the repeating set. It is empty when nothing else is usable, and
+    # a longer line that is not a cell wins. A full-span caption stays.
+    label_grid = _grid(3, [
+        _cell(0, 0, 1, '书名'), _cell(0, 1, 1, ''), _cell(0, 2, 1, ''),
+        _cell(1, 0, 1, '甲'), _cell(1, 1, 1, ''), _cell(1, 2, 1, ''),
+        _cell(2, 0, 1, '乙'), _cell(2, 1, 1, ''), _cell(2, 2, 1, ''),
+    ])
+    assert module.form_captions([
+        _unit('书名', 0),
+        _unit('', 0, grid=label_grid),
+    ]) == ['']
+    assert module.form_captions([
+        _unit('项目全称一览\n书名', 0),
+        _unit('', 0, grid=label_grid),
+    ]) == ['项目全称一览']
+    assert module.form_title(
+        _grid(2, [_cell(0, 0, 2, '合并表头'), _cell(1, 0, 1, '名称')]),
+        '不应采用这一行') == '合并表头'
+    # The longer title shares the stub's lettered token, or the same letters
+    # with different spaces, and may live on the heading or in the grid.
+    token_heading = [
+        _unit('附件 3Z', 0, heading='分册 > 3Z 资质一览'),
+        _unit('', 0, grid=_grid(2, [_cell(0, 0, 1, '名称'), _cell(0, 1, 1, '')])),
+    ]
+    assert module.form_captions(token_heading) == ['3Z 资质一览']
+    packed = [
+        _unit('附件 3Z', 0, heading='分册'),
+        _unit('', 0, grid=_grid(2, [
+            _cell(0, 0, 1, '附件3Z资质一览'), _cell(0, 1, 1, '')])),
+    ]
+    assert module.form_captions(packed) == ['附件3Z资质一览']
+    split = [
+        _unit('附件 3Z', 0),
+        _unit('', 0, grid=_grid(2, [
+            _cell(0, 0, 1, '附件 3Z'), _cell(0, 1, 1, '资质一览')])),
+    ]
+    assert module.form_captions(split) == ['附件 3Z 资质一览']
+    assert module.caption_line('表 2 A', headings=['第 2 节 总则']) == '表 2 A'
+    # A short non-index line contained in a longer heading is a banner. Another
+    # usable line wins. Alone, and with no full-width caption cell, it is empty.
+    # A full-width caption cell stays even when the heading contains it.
+    piece_heading = '卷一 书名格式补充说明文字'
+    assert len(piece_heading) > module._LABEL_CHARS
+    assert '书名' in piece_heading
+    signature = _grid(3, [
+        _cell(0, 0, 1, '甲'), _cell(0, 1, 1, ''), _cell(0, 2, 1, ''),
+        _cell(1, 0, 1, '乙'), _cell(1, 1, 1, ''), _cell(1, 2, 1, ''),
+        _cell(2, 0, 1, '丙'), _cell(2, 1, 1, ''), _cell(2, 2, 1, ''),
+    ])
+    assert module.form_captions([
+        _unit('项目全称一览\n书名', 0, heading=piece_heading),
+        _unit('', 0, grid=signature),
+    ]) == ['项目全称一览']
+    assert module.form_captions([
+        _unit('书名', 0, heading=piece_heading),
+        _unit('', 0, grid=signature),
+    ]) == ['']
+    assert module.caption_line('项目全称一览\n书名', headings=[piece_heading]) == '项目全称一览'
+    span_heading = '卷一 合并表头补充说明文字'
+    assert len(span_heading) > module._LABEL_CHARS
+    assert module.form_captions([
+        _unit('不应采用这一行', 0, heading=span_heading),
+        _unit('', 0, grid=_grid(2, [
+            _cell(0, 0, 2, '合并表头'), _cell(1, 0, 1, '名称')])),
+    ]) == ['合并表头']
+    # A thin stub's next line can fail only because of a trailing sentence mark,
+    # including a space before that mark. Strip it and take that line when the
+    # prefix and the lettered token do not match. A fragment after the strip,
+    # or a non-furniture line in between, keeps the stub. The sentence before
+    # the stub does not count.
+    prose = '供方提交有效等级证书及相关证明文件'
+    prose_grid = _grid(2, [_cell(0, 0, 1, '名称'), _cell(0, 1, 1, '')])
+    assert module.form_captions([
+        _unit(f'附件 3Z\n{prose} 。', 0, heading='分册'),
+        _unit('', 0, grid=prose_grid),
+    ]) == [prose]
+    assert module.caption_line(f'附件 3Z\n{prose} 。') == prose
+    assert module.caption_line('附件 3Z\n见 3Z 资质一览。') == '见 3Z 资质一览'
+    assert module.caption_line(
+        '附件 3Z\n供方提交有效等级证书，及相关证明文件。') == '附件 3Z'
+    assert module.caption_line(
+        f'附件 3Z\n这是分句，还没写完\n{prose}。') == '附件 3Z'
+    assert module.caption_line(f'{prose}。\n附件 3Z') == '附件 3Z'
+    assert module.caption_line(
+        f'附件 3Z\n书名\n{prose}。', running={'书名'}) == prose
 
 
 @pytest.mark.parametrize('extension', ['docx', 'xlsx'])

@@ -3,6 +3,10 @@
 
 No chapter inference, document association or bidder-data defaults. Run with the
 service virtualenv and PYTHONPATH=services. All budgets come from the run file.
+
+禁止硬编码: no document-specific strings, keyword lists, magic numbers, or
+sample special-cases. Caption rules use the documented short-label bound, the
+parser's repeating-line set, the active heading path, and sentence-end shape.
 """
 import argparse
 import base64
@@ -23,9 +27,13 @@ _NUMERALS = '一二三四五六七八九十'
 _DIGITS = '0123456789０１２３４５６７８９'
 _INDEX_TOKEN = re.compile(rf'^[{_DIGITS}]{{1,3}}[A-Za-zＡ-Ｚａ-ｚ]?$')
 _PAGE_IN_KEY = re.compile(r'(?:^|:)page:(\d+)(?::|$)')
-# A short line may carry a 1–3 digit page number. Same width as an index token,
-# so a four-digit year is not a page number. Documented in docs/bidding/outline.md.
-_TRAILING_PAGE = re.compile(rf'[\s\-—]*[{_DIGITS}]{{1,3}}$')
+# A short line may carry a 1–3 digit page number, optionally wrapped as 第n页.
+# Same width as an index token, so a four-digit year is not a page number.
+# The parser's repeating-line set compares the whole edge string, so "标题第1页"
+# and "标题第2页" never meet there. Folding the marker is what joins them.
+# Documented in docs/bidding/outline.md.
+_TRAILING_PAGE = re.compile(
+    rf'(?:[\s\-—]*第)?[\s\-—]*[{_DIGITS}]{{1,3}}页?$')
 _BRACKETS = (('(', ')'), ('（', '）'), ('[', ']'), ('【', '】'))
 
 
@@ -99,43 +107,68 @@ def _without_trailing_page(line):
     return stripped or line
 
 
+def _compact_label(line):
+    """Short non-index label with spaces removed. Index lines stay whole."""
+    if len(line) > _LABEL_CHARS or _is_index_line(line):
+        return ''
+    compact = ''.join(line.split())
+    return compact if compact and compact != line else ''
+
+
+def _remember_line(seen, line, page):
+    """Record a line and, for a short label, the same line without spaces."""
+    line = _normalize(plain_line(line))
+    if not line or page is None:
+        return ''
+    seen.setdefault(line, set()).add(page)
+    compact = _compact_label(line)
+    if compact:
+        seen.setdefault(compact, set()).add(page)
+    return line
+
+
 def running_lines(units):
     """Lines that occur on at least two pages are page furniture.
 
     Repetition across pages is the signal, wherever the line sits on the page.
     A heading segment repeated on two pages is the same signal. The words
     themselves are not a list. A line repeated only inside one page is not
-    furniture.     Comparison ignores a leading heading mark. A short edge line (first or
-    last on the page) and that line with a trailing page number are one line.
+    furniture. Comparison ignores a leading heading mark. A short line and that line
+    with a trailing page number (digits, or 第n页) are one line, wherever the
+    line sits. A short non-index label matches with its spaces removed.
     """
     seen = {}
-    page_lines = {}
 
     def add(line, page):
-        line = _normalize(plain_line(line))
-        if not line or page is None:
+        added = _remember_line(seen, line, page)
+        if not added:
             return
-        seen.setdefault(line, set()).add(page)
-        return line
+        # A header with 第n页 is a different string on each page, so the
+        # parser's 60% set misses it. Fold the marker wherever the line sits.
+        folded = _without_trailing_page(added)
+        if folded != added and not _is_index_line(folded):
+            _remember_line(seen, folded, page)
 
     for unit in units:
         page = unit_page(unit)
         if page is None:
             continue
         for line in _unit_text(unit).splitlines():
-            added = add(line, page)
-            if added:
-                page_lines.setdefault(page, []).append(added)
+            add(line, page)
         for part in _heading_path(_locator(unit)).split('>'):
             add(part, page)
-    # A page number sits on the first or last line. The short line without it
-    # is the same header. A numbered caption in the middle of the page is not.
-    for page, lines in page_lines.items():
-        for edge in {lines[0], lines[-1]}:
-            folded = _without_trailing_page(edge)
-            if folded != edge:
-                seen.setdefault(folded, set()).add(page)
     return {line for line, pages in seen.items() if len(pages) >= 2}
+
+
+def _furniture(line, running):
+    """True when the line, or its spaceless short form, is page furniture."""
+    folded = _normalize(plain_line(line))
+    if not folded or _is_index_line(folded):
+        return False
+    if folded in running:
+        return True
+    compact = _compact_label(folded)
+    return bool(compact) and compact in running
 
 
 def heading_banners(units):
@@ -157,6 +190,24 @@ def heading_banners(units):
 def _is_banner(text, banners):
     line = _normalize(plain_line(text))
     return bool(line) and line in banners
+
+
+def _is_heading_piece(text, headings):
+    """Short non-index line contained in the active heading segment.
+
+    Exact banners store the whole segment. A shorter piece of that segment is
+    not in the set, even when the segment itself is inside the short-label
+    bound. A full-width caption cell is not judged here.
+    禁止硬编码: containment after plain_line, not a word list.
+    """
+    line = _normalize(plain_line(text))
+    if not line or len(line) > _LABEL_CHARS or _is_index_line(line):
+        return False
+    for segment in headings or ():
+        host = _normalize(plain_line(segment))
+        if host and len(line) < len(host) and line in host:
+            return True
+    return False
 
 
 def _outside_brackets(line):
@@ -255,8 +306,9 @@ def usable_line(text, running):
     if is_unit_line(line):
         return ''
     # A repeated index line is a caption, not page furniture. A repeated
-    # heading or book line is furniture.
-    if _normalize(line) in running and not _is_index_line(line):
+    # heading or book line is furniture. A short label matches with spaces
+    # removed, so one surviving copy of a stripped header still drops.
+    if _furniture(line, running):
         return ''
     return line
 
@@ -265,11 +317,14 @@ def _is_index_line(text):
     return is_numbered(text) or _has_index_token(text)
 
 
-def _demote_banner(chosen, candidates, banners):
-    """A short heading segment loses to another usable line in the window."""
-    if not chosen or not _is_banner(chosen, banners):
+def _demote_banner(chosen, candidates, banners, headings=()):
+    """A short heading segment, or a piece of one, loses to another usable line."""
+    def blocked(text):
+        return _is_banner(text, banners) or _is_heading_piece(text, headings)
+
+    if not chosen or not blocked(chosen):
         return chosen
-    others = [line for line in candidates if not _is_banner(line, banners)]
+    others = [line for line in candidates if not blocked(line)]
     return others[-1] if others else chosen
 
 
@@ -285,15 +340,204 @@ def _longer_than_stub(chosen, candidates):
     return longer[-1] if longer else chosen
 
 
-def form_title(grid, previous_text, running=(), banners=()):
+def _heading_segments(path):
+    return [plain_line(part) for part in (path or '').split('>') if plain_line(part)]
+
+
+def _index_tokens(text):
+    line = plain_line(text)
+    if line[:1] in '（([':
+        line = line[1:].lstrip()
+    for sep in ('：', ':'):
+        line = line.replace(sep, ' ')
+    tokens = []
+    for token in line.split():
+        token = token.strip('、.．)）]】')
+        if _INDEX_TOKEN.match(token):
+            tokens.append(token)
+    return tokens
+
+
+def _lettered_tokens(text):
+    """Index tokens that include a letter. A bare digit is shared too widely."""
+    return [token for token in _index_tokens(text) if any(ch.isalpha() for ch in token)]
+
+
+def _cell_texts(grid):
+    return [
+        (getattr(cell, 'text', '') or '').strip()
+        for cell in (getattr(grid, 'cells', None) or [])
+        if (getattr(cell, 'text', '') or '').strip()
+    ]
+
+
+def _label_cells(grid):
+    """Short non-index cells that are not a full-width caption row.
+
+    A line above the table that only repeats one of these is a field label.
+    """
+    columns = getattr(grid, 'column_count', 0) or 0
+    labels = set()
+    for cell in getattr(grid, 'cells', None) or []:
+        text = _normalize(plain_line(getattr(cell, 'text', '') or ''))
+        # Longer than an index stub: this is a caption cell, not a field label.
+        if not text or len(text) * 2 > _LABEL_CHARS or _is_index_line(text):
+            continue
+        span = getattr(cell, 'col_span', 1) or 1
+        if getattr(cell, 'row', None) == 0 and columns and span >= columns:
+            continue
+        labels.add(text)
+        compact = _compact_label(text)
+        if compact:
+            labels.add(compact)
+    return labels
+
+
+def _is_cell_label(text, labels):
+    line = _normalize(plain_line(text))
+    if not line or _is_index_line(line):
+        return False
+    if line in labels:
+        return True
+    compact = _compact_label(line)
+    return bool(compact) and compact in labels
+
+
+def _drop_cell_label(chosen, labels, candidates):
+    """A short label copied from the grid is not the table caption.
+
+    Another usable line that is not itself a cell label wins. With none, the
+    caption is empty. An index stub is left for the stub rule.
+    """
+    if not chosen or not _is_cell_label(chosen, labels):
+        return chosen
+    others = [line for line in candidates if line and not _is_cell_label(line, labels)]
+    return others[-1] if others else ''
+
+
+def _recover_sentence_end(line, running):
+    """A line that is usable once its one trailing sentence mark is removed.
+
+    Stub extension is the only caller. A mark still inside the line, a
+    fragment, furniture, or the length bound still reject the stripped line.
+    禁止硬编码: the mark is the documented sentence-end set, not a word list.
+    """
+    text = plain_line(line)
+    if len(text) < 2 or text[-1] not in _SENTENCE_END:
+        return ''
+    return usable_line(text[:-1].rstrip(), running)
+
+
+def _sentence_after_stub(chosen, window, running):
+    """Immediate next non-furniture window line after a thin stub.
+
+    Used only when a compact prefix and a lettered token both miss. Furniture
+    is skipped. That next line has to become usable by dropping one trailing
+    sentence mark, and it has to be longer than the stub. Any other failure
+    stops the scan.
+    """
+    if not is_index_stub(chosen):
+        return ''
+    stub = _normalize(plain_line(chosen))
+    if not stub:
+        return ''
+    idx = None
+    for i, line in enumerate(window or ()):
+        if _normalize(plain_line(line)) == stub:
+            idx = i
+    if idx is None:
+        return ''
+    for line in list(window)[idx + 1:]:
+        if not plain_line(line):
+            continue
+        if _furniture(line, running):
+            continue
+        recovered = _recover_sentence_end(line, running)
+        if recovered and len(plain_line(recovered)) > len(plain_line(chosen)):
+            return recovered
+        return ''
+    return ''
+
+
+def _stub_extensions(chosen, lines, running, window=()):
+    """Longer lines that continue a thin stub.
+
+    Spaces are ignored, so a heading written without the stub's space still
+    matches. A shared lettered index token matches too (``8F`` with ``8F``),
+    which a bare digit does not. A parent heading with neither stays out.
+    A line that fails only because it ends on a sentence mark is eligible
+    after that mark is removed. If neither the prefix nor the token matches,
+    the immediate next non-furniture line after the stub can, on the same terms.
+    """
+    if not is_index_stub(chosen):
+        return []
+    stub = plain_line(chosen)
+    stub_compact = ''.join(stub.split())
+    letters = set(_lettered_tokens(stub))
+    found = []
+    for line in lines:
+        text = usable_line(line, running) or _recover_sentence_end(line, running)
+        if not text or len(plain_line(text)) <= len(stub):
+            continue
+        compact = ''.join(plain_line(text).split())
+        if compact.startswith(stub_compact) and len(compact) > len(stub_compact):
+            found.append(text)
+            continue
+        if letters and letters & set(_lettered_tokens(text)):
+            found.append(text)
+    if found:
+        return found
+    adjacent = _sentence_after_stub(chosen, window, running)
+    return [adjacent] if adjacent else []
+
+
+def _prefer_extension(chosen, lines, running, window=()):
+    found = _stub_extensions(chosen, lines, running, window)
+    if not found:
+        return chosen
+    return max(found, key=lambda text: len(plain_line(text)))
+
+
+def _joined_row(grid, row):
+    """Non-empty cells of one row, in column order, as one line."""
+    found = [cell for cell in (getattr(grid, 'cells', None) or []) if getattr(cell, 'row', None) == row]
+    found.sort(key=lambda cell: getattr(cell, 'column', 0))
+    texts = [plain_line(getattr(cell, 'text', '') or '') for cell in found]
+    texts = [text for text in texts if text]
+    if len(texts) < 2:
+        return ''
+    return ' '.join(texts)
+
+
+def form_title(grid, previous_text, running=(), banners=(), headings=()):
     """Caption carried by the grid, or the numbered line nearest the table.
 
     A cell in row 0 whose span covers every column is the caption when it is
-    not page furniture, not a unit note, and not a short heading banner. A stub
-    index there loses to a fuller line in the previous source. Otherwise walk
-    that source from the table backward. Detection does not read this title.
+    not page furniture, not a unit note, and not a short heading banner. That
+    cell is kept even when it is a piece of the heading. A stub index loses to
+    a fuller line in the previous source, a heading, or a grid row that
+    continues the stub. A short line that only repeats a grid label is dropped.
+    With no full-width caption cell, a short non-index line that is only a
+    piece of the active heading is empty when nothing else is usable.
+    Detection does not read this title.
     """
     columns = getattr(grid, 'column_count', 0) or 0
+    labels = _label_cells(grid)
+    extra = [line for line in list(headings) + _cell_texts(grid) if line]
+    for row in (0, 1):
+        joined = _joined_row(grid, row)
+        if joined:
+            extra.append(joined)
+    raw_window = [line for line in (previous_text or '').splitlines() if line.strip()]
+    window = [line for line in raw_window if usable_line(line, running)]
+
+    def finish(title, clear_heading_piece):
+        title = _prefer_extension(title, extra + raw_window, running, raw_window)
+        title = _drop_cell_label(title, labels, window)
+        if clear_heading_piece and _is_heading_piece(title, headings):
+            return ''
+        return title
+
     spanning = []
     for cell in getattr(grid, 'cells', None) or []:
         text = (getattr(cell, 'text', '') or '').strip()
@@ -301,29 +545,36 @@ def form_title(grid, previous_text, running=(), banners=()):
             spanning.append(text)
     if len(spanning) == 1:
         chosen = usable_line(spanning[0], running)
-        fallback = caption_line(previous_text, running, banners)
+        fallback = caption_line(previous_text, running, banners, headings)
         if chosen and not is_index_stub(chosen) and not _is_banner(chosen, banners):
-            return chosen
+            return finish(chosen, False)
         if chosen and is_index_stub(chosen):
-            promoted = _longer_than_stub(chosen, [line for line in (fallback, chosen) if line])
+            promoted = _prefer_extension(
+                _longer_than_stub(chosen, [line for line in (fallback, chosen) if line]),
+                extra + raw_window, running, raw_window)
             if promoted != chosen:
                 return promoted
-            return chosen
+            return finish(chosen, False)
         if chosen and _is_banner(chosen, banners):
             if fallback and not _is_banner(fallback, banners):
-                return fallback
-            return chosen
+                return finish(fallback, False)
+            return finish(chosen, False)
         if fallback:
-            return fallback
-    return caption_line(previous_text, running, banners)
+            return finish(fallback, False)
+    return finish(caption_line(previous_text, running, banners, headings), True)
 
 
-def caption_line(text, running=(), banners=()):
+def caption_line(text, running=(), banners=(), headings=()):
     """Nearest eligible line. An index line beats a closer unnumbered one.
 
     A stub index (at most half the short-label bound) loses to a longer index
-    line in the same text, and otherwise to a longer usable line. A stub with
-    neither is kept. A short heading banner loses to another usable line.
+    line in the same text, and otherwise to a longer usable line. A stub also
+    loses to a longer heading or window line that continues it (same letters
+    once spaces are removed, or a shared lettered index token). A window line
+    that failed only on a trailing sentence mark can continue it too; otherwise
+    the next non-furniture line after the stub, once that mark is removed.
+    A short heading banner, including a short piece of the active heading,
+    loses to another usable line. A stub with neither is kept.
     """
     lines = [line.strip() for line in (text or '').splitlines() if line.strip()]
     candidates = [line for line in lines if usable_line(line, running)]
@@ -331,8 +582,9 @@ def caption_line(text, running=(), banners=()):
     pool = indexed or candidates
     if not pool:
         return ''
-    chosen = _demote_banner(_longer_than_stub(pool[-1], candidates), candidates, banners)
-    return chosen
+    chosen = _demote_banner(
+        _longer_than_stub(pool[-1], candidates), candidates, banners, headings)
+    return _prefer_extension(chosen, list(headings) + lines, running, lines)
 
 
 def _header_labels(grid):
@@ -383,22 +635,37 @@ def _only_furniture(text, running):
     return saw
 
 
-def form_captions(units):
+def _union_running(running, extra):
+    """Parser repeating lines are furniture even when only one copy remains."""
+    seen = {line: {0, 1} for line in running}
+    for line in extra or ():
+        _remember_line(seen, line, 0)
+        _remember_line(seen, line, 1)
+    return {line for line, pages in seen.items() if len(pages) >= 2}
+
+
+def form_captions(units, extra_running=()):
     """One title per grid. Text since the previous grid is the candidate window.
 
     When that window is only furniture, a continuation keeps the previous title.
+    ``extra_running`` is the parser's repeating-line set. The table uses the
+    nearest earlier heading path, the same way a page table hangs on a section.
     """
-    running = running_lines(units)
+    running = _union_running(running_lines(units), extra_running)
     banners = heading_banners(units)
     gap = []
     titles = []
     previous_grid = None
     previous_title = ''
+    heading = ''
     for unit in units:
+        path = _heading_path(_locator(unit)).strip()
+        if path:
+            heading = path
         grid = _unit_grid(unit)
         if grid is not None:
             window = '\n'.join(gap)
-            title = form_title(grid, window, running, banners)
+            title = form_title(grid, window, running, banners, _heading_segments(heading))
             if not title and previous_title and _only_furniture(window, running) and _continues(previous_grid, grid):
                 title = previous_title
             titles.append(title)
@@ -437,7 +704,8 @@ def main():
     identity = lambda key: str(uuid.uuid5(uuid.NAMESPACE_URL, f'{sha}/{key}'))
     document = identity('document')
     sources, forms = [], []
-    captions = iter(form_captions(parsed.structured_source_units))
+    repeating = parsed.metadata.get('repeating_lines') or ()
+    captions = iter(form_captions(parsed.structured_source_units, repeating))
     for unit in parsed.structured_source_units:
         sid = identity(unit.key)
         locator = unit.locator.model_dump(mode='json')

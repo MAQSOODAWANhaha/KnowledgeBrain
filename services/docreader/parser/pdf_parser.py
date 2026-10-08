@@ -1483,19 +1483,19 @@ def _extract_embedded_images(pdf, classes, raw, base_name: str, quality: int) ->
     return result
 
 
-def _strip_repeating_lines(texts: list, classes: list) -> list:
-    """Remove running headers/footers that repeat across most text pages.
+def _repeating_edge_lines(texts: list, classes: list) -> set:
+    """Short first/last lines that repeat on most text pages.
 
-    Conservative: only the first/last non-empty line of each text page is a
-    candidate, the line must be short, and it must appear on at least 60% of the
-    text pages (and there must be enough pages to judge). Mirrors DeepDoc's
-    cross-page "garbage set" idea without risking removal of real content.
+    The line must be at most 80 characters and appear on at least 60% of the
+    text pages, and there must be at least four text pages. This is the same
+    structural signal as running-header removal. It is not a word list.
+    Documented in docs/bidding/outline.md.
     """
     from collections import Counter
 
     text_indices = [i for i, c in enumerate(classes) if c == "text"]
     if len(text_indices) < 4:
-        return list(texts)
+        return set()
 
     counter: Counter = Counter()
     for i in text_indices:
@@ -1510,10 +1510,21 @@ def _strip_repeating_lines(texts: list, classes: list) -> list:
         threshold = max(2, int(len(text_indices) * 0.6))
     except (TypeError, ValueError):
         threshold = 2
-    repeating = {line for line, count in counter.items() if count >= threshold}
+    return {line for line, count in counter.items() if count >= threshold}
+
+
+def _strip_repeating_lines(texts: list, classes: list) -> list:
+    """Remove running headers/footers that repeat across most text pages.
+
+    See ``_repeating_edge_lines``. The set is also published on document
+    metadata so a copy that survives inside a table still counts as furniture.
+    """
+    return _drop_repeating_lines(texts, classes, _repeating_edge_lines(texts, classes))
+
+
+def _drop_repeating_lines(texts: list, classes: list, repeating: set) -> list:
     if not repeating:
         return list(texts)
-
     cleaned = []
     for i, text in enumerate(texts):
         if classes[i] != "text":
@@ -1854,8 +1865,11 @@ class PDFParser(BaseParser):
                 texts.append(text)
                 classes.append(cls)
 
+            repeating_lines: list[str] = []
             if not self._output_inventory:
-                texts = _strip_repeating_lines(texts, classes)
+                repeating = _repeating_edge_lines(texts, classes)
+                texts = _drop_repeating_lines(texts, classes, repeating)
+                repeating_lines = sorted(repeating)
             scanned_indices = [i for i, c in enumerate(classes) if c == "scanned"]
 
             # Final-file inventory keeps every page's pixels, including blank
@@ -1929,6 +1943,9 @@ class PDFParser(BaseParser):
             "embedded_image_count": embedded_count,
             "vector_figure_count": vector_figure_count,
             "image_source_type": "scanned_pdf" if scanned_indices else "pdf_text_layer",
+            # Edge lines the parser already judged as cross-page furniture.
+            # Caption selection treats a surviving copy as the same signal.
+            "repeating_lines": repeating_lines,
         }
 
         logger.info(

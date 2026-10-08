@@ -73,6 +73,16 @@ class StripRepeatingLinesTest(unittest.TestCase):
         classes = ["text"] * 2
         self.assertEqual(_strip_repeating_lines(texts, classes), texts)
 
+    def test_repeating_edge_set_is_the_stripped_header(self):
+        from docreader.parser.pdf_parser import _repeating_edge_lines
+        header = "ACME CONFIDENTIAL"
+        texts = [f"{header}\nbody page {i}\nshared footer" for i in range(6)]
+        classes = ["text"] * 6
+        self.assertEqual(
+            _repeating_edge_lines(texts, classes),
+            {header, "shared footer"},
+        )
+
 
 class SelectEmbeddedImagesTest(unittest.TestCase):
     def _fig(self, page, h="fig", w=200, ht=200, area=0.2):
