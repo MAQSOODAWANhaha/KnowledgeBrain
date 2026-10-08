@@ -145,6 +145,66 @@ def test_caption_skips_running_headers_unit_lines_and_prefers_a_number():
     assert '全书' in module.running_lines(units)
 
 
+def _cell(row, column, span, text):
+    return type('Cell', (), {
+        'row': row, 'column': column, 'col_span': span, 'text': text})()
+
+
+def _grid(columns, cells):
+    return type('Grid', (), {'column_count': columns, 'cells': cells})()
+
+
+def _unit(text, page, grid=None, heading=''):
+    return type('Unit', (), {
+        'text': text,
+        'key': f'section:1:page:{page}',
+        'locator': type('Locator', (), {'page_ordinal': page, 'heading_path': heading})(),
+        'grid': grid,
+    })()
+
+
+def test_caption_residuals_follow_structure():
+    """Short edge headers, furniture-only gaps, and thin stubs.
+
+    Strings are synthetic. Nothing here is a document-specific list.
+    """
+    paged = [_unit(f'书名 {page + 1}\n正文', page) for page in (0, 1)]
+    paged.append(_unit('项目全称一览\n书名', 2))
+    paged.append(_unit('', 2, grid=_grid(2, [
+        _cell(0, 0, 1, '名称'), _cell(0, 1, 1, '内容')])))
+    assert '书名' in module.running_lines(paged)
+    assert module.form_captions(paged) == ['项目全称一览']
+    banner = [
+        _unit('项目全称一览\n书名短题', 0, heading='书名短题'),
+        _unit('', 0, grid=_grid(2, [_cell(0, 0, 1, '名称'), _cell(0, 1, 1, '')])),
+    ]
+    assert '书名短题' not in module.running_lines(banner)
+    assert module.form_captions(banner) == ['项目全称一览']
+    spanning = _grid(2, [_cell(0, 0, 2, '书名短题'), _cell(1, 0, 1, '名称')])
+    assert module.form_title(spanning, '项目全称一览', banners={'书名短题'}) == '项目全称一览'
+    assert module.form_title(spanning, '', banners={'书名短题'}) == '书名短题'
+    kept = _grid(2, [_cell(0, 0, 2, '合并表头'), _cell(1, 0, 1, '名称')])
+    assert module.form_title(kept, '不应采用这一行') == '合并表头'
+    assert module.caption_line('原厂资质证书一览\n附件 8F') == '原厂资质证书一览'
+    assert module.caption_line('表 2 报价一览\n表 2 A') == '表 2 报价一览'
+    assert module.caption_line('表 2 A') == '表 2 A'
+    assert module.caption_line('续表 1：标准一览', {'续表 1：标准一览'}) == '续表 1：标准一览'
+    headers = [_cell(0, 0, 1, '名称'), _cell(0, 1, 1, '内容'),
+               _cell(1, 0, 1, '甲'), _cell(1, 1, 1, '')]
+    continued = [
+        _unit('全书书名', 0),
+        _unit('全书书名', 1),
+        _unit('8A 摘要一览', 2),
+        _unit('', 2, grid=_grid(2, headers)),
+        _unit('全书书名\n（单位：元）', 3),
+        _unit('', 3, grid=_grid(2, headers)),
+        _unit('全书书名\n续表 1：标准一览', 4),
+        _unit('', 4, grid=_grid(2, headers)),
+    ]
+    assert module.form_captions(continued) == [
+        '8A 摘要一览', '8A 摘要一览', '续表 1：标准一览']
+
+
 @pytest.mark.parametrize('extension', ['docx', 'xlsx'])
 def test_freeze_preserves_v3_sparse_grid_and_source_identity(tmp_path, monkeypatch, extension):
     source = tmp_path / f'source.{extension}'
