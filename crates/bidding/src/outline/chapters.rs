@@ -3,6 +3,9 @@
 //! A chapter id is the identity. Titles may be renamed without moving an
 //! attachment table. Each attachment form binds to exactly one chapter through
 //! a template `form_id` or a format-reference grid cell.
+//!
+//! 禁止硬编码: no document-specific strings, keyword lists, or sample
+//! special-cases. Depth below is two documented constants, not a title list.
 
 use crate::analysis::draft::{DraftPlanItem, DraftStatus};
 use crate::analysis::{FrozenInput, Record, RecordData};
@@ -17,15 +20,27 @@ pub struct AttachmentBinding {
     pub chapter_id: String,
 }
 
+/// Response leaves sit under a mid-level group, which sits under a root group.
+/// Used when the tender has at least [`DEPTH_CHAIN_MIN`] attachment chains.
+/// One chain may stay on a shallower tree. Documented in `docs/bidding/outline.md`.
+pub const RESPONSE_LEAF_DEPTH: usize = 3;
+
+/// Distinct attachment chains before [`RESPONSE_LEAF_DEPTH`] is required.
+/// Documented in `docs/bidding/outline.md`.
+pub const DEPTH_CHAIN_MIN: usize = 2;
+
 /// Attachment tables in the frozen tender, in form id order.
 pub fn attachment_form_ids(input: &FrozenInput) -> Vec<String> {
-    let mut ids: Vec<_> = attachment_ids(input).into_iter().collect();
+    let mut ids: Vec<_> = attachment_chains(input).into_iter().flatten().collect();
     ids.sort();
     ids.dedup();
     ids
 }
 
-fn attachment_ids(input: &FrozenInput) -> BTreeSet<String> {
+/// One chain per run of continuation tables. A later table continues when it
+/// repeats the header or its header row is empty, under the same column count.
+/// Titles are not read.
+pub fn attachment_chains(input: &FrozenInput) -> Vec<Vec<String>> {
     let index = SectionIndex::build(input);
     let mut placed = Vec::new();
     for form in &input.structured_forms {
@@ -52,7 +67,7 @@ fn attachment_ids(input: &FrozenInput) -> BTreeSet<String> {
     placed.sort_by(|left, right| {
         (left.document_id, left.ordinal, left.id).cmp(&(right.document_id, right.ordinal, right.id))
     });
-    let mut attached = BTreeSet::new();
+    let mut chains = Vec::new();
     let mut index = 0;
     while index < placed.len() {
         let mut end = index;
@@ -60,15 +75,18 @@ fn attachment_ids(input: &FrozenInput) -> BTreeSet<String> {
             end += 1;
         }
         if placed[index..=end].iter().any(|form| form.own) {
-            for form in &placed[index..=end] {
-                if form.own || !form.blocked {
-                    attached.insert(form.id.to_string());
-                }
+            let chain: Vec<String> = placed[index..=end]
+                .iter()
+                .filter(|form| form.own || !form.blocked)
+                .map(|form| form.id.to_string())
+                .collect();
+            if !chain.is_empty() {
+                chains.push(chain);
             }
         }
         index = end + 1;
     }
-    attached
+    chains
 }
 
 /// Bind every attachment table to the chapter that carries its form id.

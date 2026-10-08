@@ -203,6 +203,30 @@ def test_caption_residuals_follow_structure():
     ]
     assert module.form_captions(continued) == [
         '8A 摘要一览', '8A 摘要一览', '续表 1：标准一览']
+    # A repeating header the parser already stripped can survive once, including
+    # with spaces or as a full-span cell. A longer line in the window wins.
+    # A thin stub loses to a longer heading segment that starts with the stub.
+    once = [
+        _unit('项目全称一览\n书 名', 0),
+        _unit('', 0, grid=_grid(2, [
+            _cell(0, 0, 2, '书名'), _cell(1, 0, 1, '名称')])),
+    ]
+    assert module.form_captions(once, extra_running=['书名']) == ['项目全称一览']
+    assert module.form_title(
+        _grid(2, [_cell(0, 0, 2, '合并表头'), _cell(1, 0, 1, '名称')]),
+        '不应采用这一行') == '合并表头'
+    headed = [
+        _unit('附件 3Z', 0, heading='分册 > 附件 3Z 资质一览'),
+        _unit('', 0, grid=_grid(2, [_cell(0, 0, 1, '名称'), _cell(0, 1, 1, '')])),
+    ]
+    assert module.form_captions(headed) == ['附件 3Z 资质一览']
+    assert module.caption_line('附件 3Z', headings=['分册', '附件 3Z 资质一览']) == '附件 3Z 资质一览'
+    assert module.caption_line('附件 3Z', headings=['分册']) == '附件 3Z'
+    only_header = [
+        _unit('书名', 0),
+        _unit('', 0, grid=_grid(2, [_cell(0, 0, 1, '名称'), _cell(0, 1, 1, '')])),
+    ]
+    assert module.form_captions(only_header, extra_running=['书名']) == ['']
 
 
 @pytest.mark.parametrize('extension', ['docx', 'xlsx'])

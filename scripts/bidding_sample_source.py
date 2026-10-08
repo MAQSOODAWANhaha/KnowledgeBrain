@@ -3,6 +3,10 @@
 
 No chapter inference, document association or bidder-data defaults. Run with the
 service virtualenv and PYTHONPATH=services. All budgets come from the run file.
+
+禁止硬编码: no document-specific strings, keyword lists, magic numbers, or
+sample special-cases. Caption rules use the documented short-label bound and
+the parser's repeating-line set.
 """
 import argparse
 import base64
@@ -99,24 +103,42 @@ def _without_trailing_page(line):
     return stripped or line
 
 
+def _compact_label(line):
+    """Short non-index label with spaces removed. Index lines stay whole."""
+    if len(line) > _LABEL_CHARS or _is_index_line(line):
+        return ''
+    compact = ''.join(line.split())
+    return compact if compact and compact != line else ''
+
+
+def _remember_line(seen, line, page):
+    """Record a line and, for a short label, the same line without spaces."""
+    line = _normalize(plain_line(line))
+    if not line or page is None:
+        return ''
+    seen.setdefault(line, set()).add(page)
+    compact = _compact_label(line)
+    if compact:
+        seen.setdefault(compact, set()).add(page)
+    return line
+
+
 def running_lines(units):
     """Lines that occur on at least two pages are page furniture.
 
     Repetition across pages is the signal, wherever the line sits on the page.
     A heading segment repeated on two pages is the same signal. The words
     themselves are not a list. A line repeated only inside one page is not
-    furniture.     Comparison ignores a leading heading mark. A short edge line (first or
-    last on the page) and that line with a trailing page number are one line.
+    furniture. Comparison ignores a leading heading mark. A short edge line
+    (first or last on the page) and that line with a trailing page number are
+    one line. A short non-index label matches with its spaces removed.
     """
     seen = {}
     page_lines = {}
 
     def add(line, page):
-        line = _normalize(plain_line(line))
-        if not line or page is None:
-            return
-        seen.setdefault(line, set()).add(page)
-        return line
+        added = _remember_line(seen, line, page)
+        return added or None
 
     for unit in units:
         page = unit_page(unit)
@@ -134,8 +156,19 @@ def running_lines(units):
         for edge in {lines[0], lines[-1]}:
             folded = _without_trailing_page(edge)
             if folded != edge:
-                seen.setdefault(folded, set()).add(page)
+                _remember_line(seen, folded, page)
     return {line for line, pages in seen.items() if len(pages) >= 2}
+
+
+def _furniture(line, running):
+    """True when the line, or its spaceless short form, is page furniture."""
+    folded = _normalize(plain_line(line))
+    if not folded or _is_index_line(folded):
+        return False
+    if folded in running:
+        return True
+    compact = _compact_label(folded)
+    return bool(compact) and compact in running
 
 
 def heading_banners(units):
@@ -255,8 +288,9 @@ def usable_line(text, running):
     if is_unit_line(line):
         return ''
     # A repeated index line is a caption, not page furniture. A repeated
-    # heading or book line is furniture.
-    if _normalize(line) in running and not _is_index_line(line):
+    # heading or book line is furniture. A short label matches with spaces
+    # removed, so one surviving copy of a stripped header still drops.
+    if _furniture(line, running):
         return ''
     return line
 
@@ -285,7 +319,29 @@ def _longer_than_stub(chosen, candidates):
     return longer[-1] if longer else chosen
 
 
-def form_title(grid, previous_text, running=(), banners=()):
+def _heading_segments(path):
+    return [plain_line(part) for part in (path or '').split('>') if plain_line(part)]
+
+
+def _prefer_heading(chosen, headings, running):
+    """A thin index stub loses to a longer heading segment that starts with it.
+
+    The segment is the section heading already on the unit. A parent heading
+    that does not start with the stub stays out. Detection does not read a
+    title list.
+    """
+    if not is_index_stub(chosen):
+        return chosen
+    stub = plain_line(chosen)
+    longer = []
+    for line in headings:
+        text = usable_line(line, running)
+        if text.startswith(stub) and len(text) > len(stub):
+            longer.append(text)
+    return longer[-1] if longer else chosen
+
+
+def form_title(grid, previous_text, running=(), banners=(), headings=()):
     """Caption carried by the grid, or the numbered line nearest the table.
 
     A cell in row 0 whose span covers every column is the caption when it is
@@ -301,11 +357,13 @@ def form_title(grid, previous_text, running=(), banners=()):
             spanning.append(text)
     if len(spanning) == 1:
         chosen = usable_line(spanning[0], running)
-        fallback = caption_line(previous_text, running, banners)
+        fallback = caption_line(previous_text, running, banners, headings)
         if chosen and not is_index_stub(chosen) and not _is_banner(chosen, banners):
             return chosen
         if chosen and is_index_stub(chosen):
-            promoted = _longer_than_stub(chosen, [line for line in (fallback, chosen) if line])
+            promoted = _prefer_heading(
+                _longer_than_stub(chosen, [line for line in (fallback, chosen) if line]),
+                headings, running)
             if promoted != chosen:
                 return promoted
             return chosen
@@ -314,16 +372,18 @@ def form_title(grid, previous_text, running=(), banners=()):
                 return fallback
             return chosen
         if fallback:
-            return fallback
-    return caption_line(previous_text, running, banners)
+            return _prefer_heading(fallback, headings, running)
+    return caption_line(previous_text, running, banners, headings)
 
 
-def caption_line(text, running=(), banners=()):
+def caption_line(text, running=(), banners=(), headings=()):
     """Nearest eligible line. An index line beats a closer unnumbered one.
 
     A stub index (at most half the short-label bound) loses to a longer index
-    line in the same text, and otherwise to a longer usable line. A stub with
-    neither is kept. A short heading banner loses to another usable line.
+    line in the same text, and otherwise to a longer usable line. A stub that
+    is a prefix of a longer heading segment on this section uses that segment.
+    A stub with neither is kept. A short heading banner loses to another usable
+    line.
     """
     lines = [line.strip() for line in (text or '').splitlines() if line.strip()]
     candidates = [line for line in lines if usable_line(line, running)]
@@ -332,7 +392,7 @@ def caption_line(text, running=(), banners=()):
     if not pool:
         return ''
     chosen = _demote_banner(_longer_than_stub(pool[-1], candidates), candidates, banners)
-    return chosen
+    return _prefer_heading(chosen, headings, running)
 
 
 def _header_labels(grid):
@@ -383,22 +443,37 @@ def _only_furniture(text, running):
     return saw
 
 
-def form_captions(units):
+def _union_running(running, extra):
+    """Parser repeating lines are furniture even when only one copy remains."""
+    seen = {line: {0, 1} for line in running}
+    for line in extra or ():
+        _remember_line(seen, line, 0)
+        _remember_line(seen, line, 1)
+    return {line for line, pages in seen.items() if len(pages) >= 2}
+
+
+def form_captions(units, extra_running=()):
     """One title per grid. Text since the previous grid is the candidate window.
 
     When that window is only furniture, a continuation keeps the previous title.
+    ``extra_running`` is the parser's repeating-line set. The table uses the
+    nearest earlier heading path, the same way a page table hangs on a section.
     """
-    running = running_lines(units)
+    running = _union_running(running_lines(units), extra_running)
     banners = heading_banners(units)
     gap = []
     titles = []
     previous_grid = None
     previous_title = ''
+    heading = ''
     for unit in units:
+        path = _heading_path(_locator(unit)).strip()
+        if path:
+            heading = path
         grid = _unit_grid(unit)
         if grid is not None:
             window = '\n'.join(gap)
-            title = form_title(grid, window, running, banners)
+            title = form_title(grid, window, running, banners, _heading_segments(heading))
             if not title and previous_title and _only_furniture(window, running) and _continues(previous_grid, grid):
                 title = previous_title
             titles.append(title)
@@ -437,7 +512,8 @@ def main():
     identity = lambda key: str(uuid.uuid5(uuid.NAMESPACE_URL, f'{sha}/{key}'))
     document = identity('document')
     sources, forms = [], []
-    captions = iter(form_captions(parsed.structured_source_units))
+    repeating = parsed.metadata.get('repeating_lines') or ()
+    captions = iter(form_captions(parsed.structured_source_units, repeating))
     for unit in parsed.structured_source_units:
         sid = identity(unit.key)
         locator = unit.locator.model_dump(mode='json')
