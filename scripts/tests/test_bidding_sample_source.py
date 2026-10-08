@@ -276,6 +276,53 @@ def test_caption_residuals_follow_structure():
     ]
     assert module.form_captions(split) == ['附件 3Z 资质一览']
     assert module.caption_line('表 2 A', headings=['第 2 节 总则']) == '表 2 A'
+    # A short non-index line contained in a longer heading is a banner. Another
+    # usable line wins. Alone, and with no full-width caption cell, it is empty.
+    # A full-width caption cell stays even when the heading contains it.
+    piece_heading = '卷一 书名格式补充说明文字'
+    assert len(piece_heading) > module._LABEL_CHARS
+    assert '书名' in piece_heading
+    signature = _grid(3, [
+        _cell(0, 0, 1, '甲'), _cell(0, 1, 1, ''), _cell(0, 2, 1, ''),
+        _cell(1, 0, 1, '乙'), _cell(1, 1, 1, ''), _cell(1, 2, 1, ''),
+        _cell(2, 0, 1, '丙'), _cell(2, 1, 1, ''), _cell(2, 2, 1, ''),
+    ])
+    assert module.form_captions([
+        _unit('项目全称一览\n书名', 0, heading=piece_heading),
+        _unit('', 0, grid=signature),
+    ]) == ['项目全称一览']
+    assert module.form_captions([
+        _unit('书名', 0, heading=piece_heading),
+        _unit('', 0, grid=signature),
+    ]) == ['']
+    assert module.caption_line('项目全称一览\n书名', headings=[piece_heading]) == '项目全称一览'
+    span_heading = '卷一 合并表头补充说明文字'
+    assert len(span_heading) > module._LABEL_CHARS
+    assert module.form_captions([
+        _unit('不应采用这一行', 0, heading=span_heading),
+        _unit('', 0, grid=_grid(2, [
+            _cell(0, 0, 2, '合并表头'), _cell(1, 0, 1, '名称')])),
+    ]) == ['合并表头']
+    # A thin stub's next line can fail only because of a trailing sentence mark,
+    # including a space before that mark. Strip it and take that line when the
+    # prefix and the lettered token do not match. A fragment after the strip,
+    # or a non-furniture line in between, keeps the stub. The sentence before
+    # the stub does not count.
+    prose = '供方提交有效等级证书及相关证明文件'
+    prose_grid = _grid(2, [_cell(0, 0, 1, '名称'), _cell(0, 1, 1, '')])
+    assert module.form_captions([
+        _unit(f'附件 3Z\n{prose} 。', 0, heading='分册'),
+        _unit('', 0, grid=prose_grid),
+    ]) == [prose]
+    assert module.caption_line(f'附件 3Z\n{prose} 。') == prose
+    assert module.caption_line('附件 3Z\n见 3Z 资质一览。') == '见 3Z 资质一览'
+    assert module.caption_line(
+        '附件 3Z\n供方提交有效等级证书，及相关证明文件。') == '附件 3Z'
+    assert module.caption_line(
+        f'附件 3Z\n这是分句，还没写完\n{prose}。') == '附件 3Z'
+    assert module.caption_line(f'{prose}。\n附件 3Z') == '附件 3Z'
+    assert module.caption_line(
+        f'附件 3Z\n书名\n{prose}。', running={'书名'}) == prose
 
 
 @pytest.mark.parametrize('extension', ['docx', 'xlsx'])
