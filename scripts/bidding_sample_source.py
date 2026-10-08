@@ -23,6 +23,9 @@ _NUMERALS = '一二三四五六七八九十'
 _DIGITS = '0123456789０１２３４５６７８９'
 _INDEX_TOKEN = re.compile(rf'^[{_DIGITS}]{{1,3}}[A-Za-zＡ-Ｚａ-ｚ]?$')
 _PAGE_IN_KEY = re.compile(r'(?:^|:)page:(\d+)(?::|$)')
+# A short line may carry a 1–3 digit page number. Same width as an index token,
+# so a four-digit year is not a page number. Documented in docs/bidding/outline.md.
+_TRAILING_PAGE = re.compile(rf'[\s\-—]*[{_DIGITS}]{{1,3}}$')
 _BRACKETS = (('(', ')'), ('（', '）'), ('[', ']'), ('【', '】'))
 
 
@@ -88,30 +91,72 @@ def _unit_grid(unit):
     return unit.get('grid') if isinstance(unit, dict) else getattr(unit, 'grid', None)
 
 
+def _without_trailing_page(line):
+    """Drop a trailing page number from a short line. A long line stays whole."""
+    if len(line) > _LABEL_CHARS:
+        return line
+    stripped = _TRAILING_PAGE.sub('', line).strip()
+    return stripped or line
+
+
 def running_lines(units):
     """Lines that occur on at least two pages are page furniture.
 
     Repetition across pages is the signal, wherever the line sits on the page.
     A heading segment repeated on two pages is the same signal. The words
     themselves are not a list. A line repeated only inside one page is not
-    furniture. Comparison ignores a leading heading mark.
+    furniture.     Comparison ignores a leading heading mark. A short edge line (first or
+    last on the page) and that line with a trailing page number are one line.
     """
     seen = {}
+    page_lines = {}
 
     def add(line, page):
         line = _normalize(plain_line(line))
-        if line and page is not None:
-            seen.setdefault(line, set()).add(page)
+        if not line or page is None:
+            return
+        seen.setdefault(line, set()).add(page)
+        return line
 
     for unit in units:
         page = unit_page(unit)
         if page is None:
             continue
         for line in _unit_text(unit).splitlines():
-            add(line, page)
+            added = add(line, page)
+            if added:
+                page_lines.setdefault(page, []).append(added)
         for part in _heading_path(_locator(unit)).split('>'):
             add(part, page)
+    # A page number sits on the first or last line. The short line without it
+    # is the same header. A numbered caption in the middle of the page is not.
+    for page, lines in page_lines.items():
+        for edge in {lines[0], lines[-1]}:
+            folded = _without_trailing_page(edge)
+            if folded != edge:
+                seen.setdefault(folded, set()).add(page)
     return {line for line, pages in seen.items() if len(pages) >= 2}
+
+
+def heading_banners(units):
+    """Short heading segments. A section banner is not a table caption.
+
+    The segment has to be inside the short-label bound and not an index.
+    Repetition is not required: one page's own heading is enough to demote it
+    when the window has another line.
+    """
+    banners = set()
+    for unit in units:
+        for part in _heading_path(_locator(unit)).split('>'):
+            line = _normalize(plain_line(part))
+            if line and len(line) <= _LABEL_CHARS and not _is_index_line(line):
+                banners.add(line)
+    return banners
+
+
+def _is_banner(text, banners):
+    line = _normalize(plain_line(text))
+    return bool(line) and line in banners
 
 
 def _outside_brackets(line):
@@ -220,13 +265,33 @@ def _is_index_line(text):
     return is_numbered(text) or _has_index_token(text)
 
 
-def form_title(grid, previous_text, running=()):
+def _demote_banner(chosen, candidates, banners):
+    """A short heading segment loses to another usable line in the window."""
+    if not chosen or not _is_banner(chosen, banners):
+        return chosen
+    others = [line for line in candidates if not _is_banner(line, banners)]
+    return others[-1] if others else chosen
+
+
+def _longer_than_stub(chosen, candidates):
+    """Fuller index first, otherwise the nearest longer usable line."""
+    if not is_index_stub(chosen):
+        return chosen
+    indexed = [line for line in candidates if _is_index_line(line)]
+    fuller = [line for line in indexed if not is_index_stub(line)]
+    if fuller:
+        return fuller[-1]
+    longer = [line for line in candidates if len(plain_line(line)) > len(plain_line(chosen))]
+    return longer[-1] if longer else chosen
+
+
+def form_title(grid, previous_text, running=(), banners=()):
     """Caption carried by the grid, or the numbered line nearest the table.
 
     A cell in row 0 whose span covers every column is the caption when it is
-    not page furniture and not a unit note. A stub index there loses to a fuller
-    index line in the previous source. Otherwise walk that source from the table
-    backward. Detection does not read this title.
+    not page furniture, not a unit note, and not a short heading banner. A stub
+    index there loses to a fuller line in the previous source. Otherwise walk
+    that source from the table backward. Detection does not read this title.
     """
     columns = getattr(grid, 'column_count', 0) or 0
     spanning = []
@@ -236,21 +301,29 @@ def form_title(grid, previous_text, running=()):
             spanning.append(text)
     if len(spanning) == 1:
         chosen = usable_line(spanning[0], running)
-        if chosen and not is_index_stub(chosen):
+        fallback = caption_line(previous_text, running, banners)
+        if chosen and not is_index_stub(chosen) and not _is_banner(chosen, banners):
             return chosen
-        fallback = caption_line(previous_text, running)
-        if chosen and (not fallback or not _is_index_line(fallback) or is_index_stub(fallback)):
+        if chosen and is_index_stub(chosen):
+            promoted = _longer_than_stub(chosen, [line for line in (fallback, chosen) if line])
+            if promoted != chosen:
+                return promoted
+            return chosen
+        if chosen and _is_banner(chosen, banners):
+            if fallback and not _is_banner(fallback, banners):
+                return fallback
             return chosen
         if fallback:
             return fallback
-    return caption_line(previous_text, running)
+    return caption_line(previous_text, running, banners)
 
 
-def caption_line(text, running=()):
+def caption_line(text, running=(), banners=()):
     """Nearest eligible line. An index line beats a closer unnumbered one.
 
     A stub index (at most half the short-label bound) loses to a longer index
-    line in the same text. A stub with no fuller index line is kept.
+    line in the same text, and otherwise to a longer usable line. A stub with
+    neither is kept. A short heading banner loses to another usable line.
     """
     lines = [line.strip() for line in (text or '').splitlines() if line.strip()]
     candidates = [line for line in lines if usable_line(line, running)]
@@ -258,23 +331,79 @@ def caption_line(text, running=()):
     pool = indexed or candidates
     if not pool:
         return ''
-    chosen = pool[-1]
-    if is_index_stub(chosen):
-        fuller = [line for line in indexed if not is_index_stub(line)]
-        if fuller:
-            return fuller[-1]
+    chosen = _demote_banner(_longer_than_stub(pool[-1], candidates), candidates, banners)
     return chosen
 
 
+def _header_labels(grid):
+    """Header row, skipping a full-width caption cell in row 0."""
+    columns = getattr(grid, 'column_count', 0) or 0
+    cells = list(getattr(grid, 'cells', None) or [])
+
+    def row_cells(row):
+        found = [cell for cell in cells if getattr(cell, 'row', None) == row]
+        found.sort(key=lambda cell: getattr(cell, 'column', 0))
+        return found
+
+    row = 0
+    found = row_cells(0)
+    if len(found) == 1 and columns and getattr(found[0], 'col_span', 1) >= columns:
+        found = row_cells(1)
+    return [_normalize(getattr(cell, 'text', '') or '') for cell in found]
+
+
+def _continues(previous, grid):
+    """Same column count, and the header repeats or this header row is empty."""
+    if previous is None:
+        return False
+    columns = getattr(grid, 'column_count', 0) or 0
+    if columns < 2 or columns != (getattr(previous, 'column_count', 0) or 0):
+        return False
+    current = _header_labels(grid)
+    if not current:
+        return False
+    if not any(current):
+        return True
+    return current == _header_labels(previous)
+
+
+def _only_furniture(text, running):
+    """Every line was page furniture or a unit note, and at least one was."""
+    lines = [plain_line(line) for line in (text or '').splitlines() if plain_line(line)]
+    if not lines:
+        return False
+    saw = False
+    for line in lines:
+        if usable_line(line, running):
+            return False
+        if _normalize(line) in running or is_unit_line(line):
+            saw = True
+            continue
+        return False
+    return saw
+
+
 def form_captions(units):
-    """One title per grid. Text since the previous grid is the candidate window."""
+    """One title per grid. Text since the previous grid is the candidate window.
+
+    When that window is only furniture, a continuation keeps the previous title.
+    """
     running = running_lines(units)
+    banners = heading_banners(units)
     gap = []
     titles = []
+    previous_grid = None
+    previous_title = ''
     for unit in units:
         grid = _unit_grid(unit)
         if grid is not None:
-            titles.append(form_title(grid, '\n'.join(gap), running))
+            window = '\n'.join(gap)
+            title = form_title(grid, window, running, banners)
+            if not title and previous_title and _only_furniture(window, running) and _continues(previous_grid, grid):
+                title = previous_title
+            titles.append(title)
+            previous_grid = grid
+            previous_title = title
             gap = []
         else:
             text = _unit_text(unit).strip()
