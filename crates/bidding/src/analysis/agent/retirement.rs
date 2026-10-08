@@ -211,6 +211,14 @@ async fn product_requests_do_not_register_retired_outline_tools() {
 
     let mut check = organize_with_chapters.clone();
     check.outline_run.tool_draft.slots_submitted = true;
+    check.outline_run.tool_draft.slots = vec![TemplateContent {
+        slot_id: "letter:fixed".into(),
+        chapter_id: "letter".into(),
+        kind: SlotKind::FixedText,
+        text: "投标函".into(),
+        response_required: false,
+        match_query: String::new(),
+    }];
     let check_body = request_body(&input, &config, &mut check).await;
     assert_eq!(
         tool_names(&check_body),

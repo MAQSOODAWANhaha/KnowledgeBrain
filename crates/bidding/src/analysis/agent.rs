@@ -52,7 +52,9 @@ pub struct Limits {
     /// 1 keeps tests on one source per dispatch root. Production must set ≥6.
     #[serde(default = "default_pack_max_units")]
     pub pack_max_units: usize,
-    /// 0 means only the unit cap applies.
+    /// Discover reading window in bytes. Analysis packs treat 0 as no character
+    /// cap. Discover uses this value directly; production sets it in
+    /// `KB_TENDER_AGENT_LIMITS` (see `deploy/.env.example`).
     #[serde(default)]
     pub pack_max_chars: usize,
     /// 0 keeps the existing per-root batch cap. Production packs use 3.
@@ -61,9 +63,6 @@ pub struct Limits {
     /// 可选组成绑定附加词；缺省只用 title 包含匹配，禁止代码内置行业词表。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub draft_bind_terms: Vec<String>,
-    /// 草稿编译字节上限。骨架用小值，整份填充用大值。
-    #[serde(default = "crate::analysis::draft::default_draft_docx_bytes")]
-    pub max_draft_docx_bytes: usize,
 }
 
 fn default_pack_max_units() -> usize {
@@ -81,33 +80,14 @@ impl Limits {
 
     pub fn at_least_for(
         mut self,
-        input: &FrozenInput,
+        _input: &FrozenInput,
     ) -> Result<Self, crate::analysis::budget::BudgetRefused> {
-        // 阶段一的绝对门。填章请求不走这里：它在冻结请求时按待填章数另记一套
-        // 额度（`draft::fill_limits`），所以这个 20 只约束大纲与骨架。
-        self.max_turns = self
-            .max_turns
-            .max(crate::analysis::draft::outline_turn_cap(input));
-        self.max_tool_calls = self.max_tool_calls.max(self.max_turns.saturating_mul(12));
-        self.max_read_bytes = self.max_read_bytes.max(
-            self.max_turns
-                .saturating_mul(self.max_tool_result_bytes)
-                .saturating_mul(4),
-        );
-        if self.max_turns == 0 {
-            self.max_turns = crate::analysis::draft::OUTLINE_MAX_TURNS;
-        }
+        // 一次成稿不从 `max_turns` 放大工具调用或读字节，也不把它们当停止条件。
+        // 这里只清掉复核预留：大纲运行不留独立复核回合。
+        // 没有阅读包的旧扫描仍使用调用方写明的 `max_turns`、`max_tool_calls`、`max_read_bytes`。
         self.reviewer_reserve = 0;
         Ok(self)
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RunBudget {
-    pub chunk_count: usize,
-    pub total_timeout_secs: u64,
-    pub publish_reserve_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,7 +99,6 @@ pub struct Config {
     pub main_dispatch_policy: String,
     pub provider: AuthoringRuntimeContractV1,
     pub limits: Limits,
-    pub budget: RunBudget,
     pub tools_sha256: String,
     pub review_tools_sha256: String,
     pub main_prompt_sha256: String,
@@ -195,13 +174,6 @@ impl Config {
                 .at_least_for(input)
                 .map_err(|e| invalid(format!("outline budget refused: {e:?}")))?;
         }
-        let budget = RunBudget {
-            chunk_count: input.map_or(0, |input| draft::outline_chunks(input).len()),
-            // A task deadline is independent of the worst-case cost of every
-            // permitted turn. Retries consume this same frozen wall-clock budget.
-            total_timeout_secs: 60 * 60,
-            publish_reserve_secs: draft::PUBLISH_RESERVE_SECS,
-        };
         let fill_tools_sha256 =
             digest(&crate::outline::agent::template_schemas()).map_err(invalid)?;
         let fill_prompt_sha256 = digest(&crate::agent_runtime::chat::system_content(
@@ -223,7 +195,6 @@ impl Config {
             main_dispatch_policy: main_dispatch::POLICY.into(),
             provider,
             limits,
-            budget,
             tools_sha256,
             review_tools_sha256,
             main_prompt_sha256,
@@ -238,9 +209,7 @@ impl Config {
     pub fn validate(&self) -> Result<(), AgentError> {
         self.provider.validate().map_err(invalid)?;
         let l = &self.limits;
-        if self.budget.publish_reserve_secs == 0
-            || self.budget.total_timeout_secs <= self.budget.publish_reserve_secs
-            || !l.progress().validate()
+        if !l.progress().validate()
             || self.checkpoint_contract_version != crate::agent_runtime::CHECKPOINT_CONTRACT_VERSION
             || self.repair_task_policy != repair_task_host::POLICY
             || self.main_dispatch_policy != main_dispatch::POLICY
@@ -523,6 +492,48 @@ impl Model for ConfiguredModel {
 fn error(code: &str, message: impl Into<String>) -> AgentError {
     AgentError::new(code, message)
 }
+
+/// One-shot outline stalls at every phase. The old scan path still blocks only
+/// while discovery has no reading packs.
+pub(in crate::analysis) fn outline_execution_blocked(state: &Checkpoint) -> bool {
+    state.main_progress.watch.recovery == Recovery::Blocked
+        && (state.outline_run.reading_packs.is_some()
+            || state.analysis.outline.phase == super::outline_flow::Phase::Discover)
+}
+
+/// Reading packs mean this checkpoint is the one-shot outline loop.
+/// That loop is not stopped by `max_turns`. Fill and the old scan path still are.
+pub(in crate::analysis) fn one_shot_outline(state: &Checkpoint) -> bool {
+    matches!(
+        state.draft_stage,
+        draft::DraftStage::None | draft::DraftStage::Outline
+    ) && state.outline_run.reading_packs.is_some()
+}
+
+pub(in crate::analysis) fn turn_limit_reached(state: &Checkpoint, max_turns: usize) -> bool {
+    !one_shot_outline(state) && state.turn >= max_turns
+}
+
+/// Cumulative turn, tool-call, and read-byte totals. One-shot outline ignores
+/// all three. Per-response context fitting is separate and still applies.
+pub(in crate::analysis) fn run_budget_exhausted(state: &Checkpoint, limits: &Limits) -> bool {
+    turn_limit_reached(state, limits.max_turns)
+        || (!one_shot_outline(state)
+            && (state.tool_calls >= limits.max_tool_calls
+                || state.read_bytes >= limits.max_read_bytes))
+}
+
+/// Stall stop for the one-shot outline. Names the checkpoint phase.
+/// This is failed progress, not a turn budget.
+pub(in crate::analysis) fn outline_stall_message(state: &Checkpoint) -> String {
+    let phase = match state.analysis.outline.phase {
+        super::outline_flow::Phase::Discover => "discover",
+        super::outline_flow::Phase::Outline => "outline",
+        super::outline_flow::Phase::Check => "check",
+        super::outline_flow::Phase::Complete => "complete",
+    };
+    format!("outline stalled in phase {phase}: no progress; checkpoint retained")
+}
 fn invalid(message: impl std::fmt::Display) -> AgentError {
     error("AGENT_OUTPUT_INVALID", message.to_string())
 }
@@ -553,11 +564,8 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
                 && repair_task_host::exhausted(self.state, limits))
                 || (self.state.role == Role::Main
                     && self.state.draft_stage == draft::DraftStage::Outline
-                    && self.state.analysis.outline.phase == super::outline_flow::Phase::Discover
-                    && self.state.main_progress.watch.recovery == Recovery::Blocked),
-            budget_exhausted: self.state.turn >= limits.max_turns
-                || self.state.tool_calls >= limits.max_tool_calls
-                || self.state.read_bytes >= limits.max_read_bytes,
+                    && outline_execution_blocked(self.state)),
+            budget_exhausted: run_budget_exhausted(self.state, limits),
         }
     }
     fn journal_mut(&mut self) -> &mut crate::agent_runtime::TurnJournal {
@@ -577,7 +585,11 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
             &body,
             crate::agent_runtime::SESSION_PREFIX,
             crate::agent_runtime::ANALYSIS_SESSION_SUFFIX,
-            self.config.limits.max_turns - self.state.turn,
+            if one_shot_outline(self.state) {
+                usize::MAX
+            } else {
+                self.config.limits.max_turns.saturating_sub(self.state.turn)
+            },
             self.config.limits.max_context_bytes,
         )?;
         Ok(body)
@@ -615,6 +627,17 @@ impl<J: Journal, M: Model> Driver for RunDriver<'_, J, M> {
         )
         .await
     }
+    fn block_message(&self) -> String {
+        if self.state.role == Role::Main
+            && self.state.draft_stage == draft::DraftStage::Outline
+            && outline_execution_blocked(self.state)
+        {
+            outline_stall_message(self.state)
+        } else {
+            "local execution and independent-work handoff allowances exhausted; blockers and checkpoint retained"
+                .into()
+        }
+    }
     async fn save(&self) -> Result<(), AgentError> {
         self.journal
             .save(self.state, &self.state.progress(self.input))
@@ -629,36 +652,7 @@ pub async fn run<J: Journal, M: Model>(
     model: &M,
     cancel: &CancellationToken,
 ) -> Result<AnalysisResult, AgentError> {
-    run_seeded(input, config, journal, model, cancel, None, None).await
-}
-
-/// 用户触发的填章 run：从**回读出来的章树**起跑，而不是从零开始拉大纲。
-///
-/// 种子是这次 Job 的输入（请求里冻着它的摘要），不是 agent 的产出：填章 run 的
-/// 第一个检查点就带着整棵树，checkpoint 闸门按摘要核对。已带正文的章在种子里
-/// 就是 `Filled`，填充回路只会派到还空着的章。
-pub async fn run_fill<J: Journal, M: Model>(
-    input: &FrozenInput,
-    config: &Config,
-    journal: &J,
-    model: &M,
-    cancel: &CancellationToken,
-    seed: Vec<crate::analysis::draft::DraftPlanItem>,
-    outline: super::outline_flow::OutlineState,
-) -> Result<AnalysisResult, AgentError> {
-    if seed.is_empty() {
-        return Err(invalid("fill run needs a read-back chapter tree"));
-    }
-    run_seeded(
-        input,
-        config,
-        journal,
-        model,
-        cancel,
-        Some((seed, outline)),
-        None,
-    )
-    .await
+    run_seeded(input, config, journal, model, cancel).await
 }
 
 async fn run_seeded<J: Journal, M: Model>(
@@ -667,17 +661,10 @@ async fn run_seeded<J: Journal, M: Model>(
     journal: &J,
     model: &M,
     cancel: &CancellationToken,
-    seed: Option<(
-        Vec<crate::analysis::draft::DraftPlanItem>,
-        super::outline_flow::OutlineState,
-    )>,
-    model_budget: Option<std::time::Duration>,
 ) -> Result<AnalysisResult, AgentError> {
-    let model_deadline = model_budget.map(|budget| tokio::time::Instant::now() + budget);
     tools::validate_input(input).map_err(invalid)?;
     config.validate()?;
     let started = Instant::now();
-    let seeded = seed.is_some();
     let input_sha256 = digest(input).map_err(invalid)?;
     let config_sha256 = digest(config).map_err(invalid)?;
     let mut state = journal.load().await?.unwrap_or(Checkpoint {
@@ -739,39 +726,11 @@ async fn run_seeded<J: Journal, M: Model>(
     }
     state.outline_config_sha256 = Some(config.tools_sha256.clone());
     state.fill_config_sha256 = Some(config.fill_tools_sha256.clone());
-    let is_outline_run = seed.is_none();
-    match seed {
-        Some((plan, outline)) => {
-            let seed_identities = super::readback::seed_identities(&plan).map_err(invalid)?;
-            if state.draft_stage != crate::analysis::draft::DraftStage::None
-                && state.analysis.fill_seed_chapters != seed_identities
-            {
-                return Err(invalid(
-                    "fill checkpoint differs from the frozen saved-document seed",
-                ));
-            }
-            state.analysis.fill_seed_chapters = seed_identities;
-            if state.draft_stage == crate::analysis::draft::DraftStage::None {
-                state.analysis.draft_plan = plan;
-                state.analysis.outline = outline;
-                state.draft_stage = crate::analysis::draft::DraftStage::Fill;
-                crate::analysis::draft::after_batch(input, &mut state, false, false)
-                    .map_err(invalid)?;
-            } else if state.draft_stage == crate::analysis::draft::DraftStage::Outline {
-                return Err(error(
-                    "FROZEN_INPUT_DIGEST_MISMATCH",
-                    "fill run resumed an outline checkpoint",
-                ));
-            }
-        }
-        None if state.draft_stage == crate::analysis::draft::DraftStage::None => {
-            state.draft_stage = crate::analysis::draft::DraftStage::Outline;
-        }
-        None => {}
+    if state.draft_stage == crate::analysis::draft::DraftStage::None {
+        state.draft_stage = crate::analysis::draft::DraftStage::Outline;
     }
     let publication_ready = outline_publication_ready(input, &state, &input_sha256);
-    let already_checked = is_outline_run && publication_ready;
-    let driven = if already_checked {
+    let driven = if publication_ready {
         Ok(())
     } else {
         let mut driver = RunDriver {
@@ -781,64 +740,23 @@ async fn run_seeded<J: Journal, M: Model>(
             journal,
             model,
         };
-        if let Some(deadline) = model_deadline {
-            if deadline <= tokio::time::Instant::now() {
-                return Err(error(
-                    "AGENT_DEADLINE_EXCEEDED",
-                    "publish reserve reached before checking completed",
-                ));
-            }
-            tokio::time::timeout_at(deadline, drive(&mut driver, cancel))
-                .await
-                .map_err(|_| {
-                    error(
-                        "AGENT_DEADLINE_EXCEEDED",
-                        "model deadline reached; no partial outline published",
-                    )
-                })?
-        } else {
-            drive(&mut driver, cancel).await
-        }
+        drive(&mut driver, cancel).await
     };
-    if let Err(error) = driven
-        && (is_outline_run
-            || !crate::analysis::draft::draft_should_publish_partial(&error.code, &error.message))
-    {
-        return Err(error);
-    }
-    if is_outline_run && !outline_publication_ready(input, &state, &input_sha256) {
+    driven?;
+    if !outline_publication_ready(input, &state, &input_sha256) {
         return Err(invalid(
             "outline is not ready to publish; checkpoint retained",
-        ));
-    }
-    if !is_outline_run
-        && !state
-            .analysis
-            .draft_plan
-            .iter()
-            .any(|item| item.template_id.is_some())
-    {
-        return Err(invalid(
-            "fill produced no new content; current document remains unchanged",
         ));
     }
     let stage = state.draft_stage;
     let turns = state.turn;
     let result = finalize_run(input, config, journal, &mut state, input_sha256).await;
-    // 出稿快慢是要压下去的目标，不是闸门：这里只记账，供回归对比，不影响成败。
     if let Ok(published) = result.as_ref() {
-        let elapsed_secs = started.elapsed().as_secs();
-        let target = if seeded {
-            crate::analysis::draft::FILL_DEADLINE_SECS
-        } else {
-            crate::analysis::draft::OUTLINE_DEADLINE_TARGET_SECS
-        };
         tracing::info!(
             event = "draft_compile_ready",
             stage = ?stage,
-            fill_run = seeded,
             turns,
-            elapsed_secs,
+            elapsed_secs = started.elapsed().as_secs(),
             chapters = published.analysis.draft_plan.len(),
             filled = published
                 .analysis
@@ -850,12 +768,6 @@ async fn run_seeded<J: Journal, M: Model>(
                 .count(),
             degraded = state.draft_degraded.len(),
             stopped = state.draft_stopped,
-            turn_target = if seeded {
-                crate::analysis::draft::fill_turn_cap(published.analysis.draft_plan.len())
-            } else {
-                crate::analysis::draft::OUTLINE_TURN_TARGET
-            },
-            seconds_target = target,
         );
     }
     result
@@ -949,7 +861,9 @@ pub(super) async fn execute_turn<J: Journal>(
 ) -> Result<Vec<Value>, AgentError> {
     let body = serde_json::from_slice(state.journal.body()?).map_err(invalid)?;
     let estimated_input_tokens = context::estimate_input_tokens(&body, &config.limits)?;
-    if response.tool_calls.len() > config.limits.max_tool_calls - state.tool_calls {
+    if !one_shot_outline(state)
+        && response.tool_calls.len() > config.limits.max_tool_calls - state.tool_calls
+    {
         return Err(error(
             "AGENT_TURN_BUDGET_EXCEEDED",
             "tool batch exceeds remaining budget; checkpoint retained",
@@ -997,7 +911,7 @@ pub(super) async fn execute_turn<J: Journal>(
     for (call_index, call) in response.tool_calls.iter().enumerate() {
         let tool_started = Instant::now();
         state.tool_calls += 1;
-        if state.tool_calls > config.limits.max_tool_calls {
+        if !one_shot_outline(state) && state.tool_calls > config.limits.max_tool_calls {
             return Err(error("AGENT_TURN_BUDGET_EXCEEDED", "tool budget exhausted"));
         }
         let readonly = matches!(
@@ -1136,7 +1050,7 @@ pub(super) async fn execute_turn<J: Journal>(
             .read_bytes
             .checked_add(content.len())
             .ok_or_else(|| invalid("read budget overflow"))?;
-        if state.read_bytes > config.limits.max_read_bytes {
+        if !one_shot_outline(state) && state.read_bytes > config.limits.max_read_bytes {
             return Err(error(
                 "AGENT_TURN_BUDGET_EXCEEDED",
                 "tool output exceeds remaining read budget; checkpoint retained",
@@ -1548,6 +1462,23 @@ pub(super) async fn prepare_request(
     state: &mut Checkpoint,
     defer_images: bool,
 ) -> Result<Vec<u8>, AgentError> {
+    // Sizing (`fit_batch`, inspection) calls this with `defer_images` false.
+    // It may claim and release packs to see whether a smaller brief fits, then
+    // the snapshot is restored so those passes do not stick.
+    let saved_packs = (!defer_images).then(|| state.outline_run.reading_packs.clone());
+    let result = prepare_fitted_request(input, config, state, defer_images).await;
+    if let Some(saved) = saved_packs {
+        state.outline_run.reading_packs = saved;
+    }
+    result
+}
+
+async fn prepare_fitted_request(
+    input: &FrozenInput,
+    config: &Config,
+    state: &mut Checkpoint,
+    defer_images: bool,
+) -> Result<Vec<u8>, AgentError> {
     context::annotate_delivered_source_lines(state, config.limits.max_tool_result_bytes)
         .map_err(invalid)?;
     if state.execution().watch.needs_replan_context() {
@@ -1566,7 +1497,7 @@ pub(super) async fn prepare_request(
     let mut excluded_recall = std::collections::BTreeSet::new();
     let mut omit_preloaded_evidence = false;
     let mut package_budget = None;
-    let reading_sessions = if matches!(
+    let mut reading_sessions = if matches!(
         state.draft_stage,
         draft::DraftStage::None | draft::DraftStage::Outline
     ) && state
@@ -1817,6 +1748,20 @@ pub(super) async fn prepare_request(
             {
                 pending.views.remove(&id);
             }
+        } else if state
+            .outline_run
+            .reading_packs
+            .as_mut()
+            .is_some_and(|work| work.release_highest_inflight())
+        {
+            // Reading packs live in the brief, which the shrink steps above do
+            // not touch. Drop the highest-order in-flight pack and rebuild.
+            reading_sessions = state
+                .outline_run
+                .reading_packs
+                .as_ref()
+                .map(|work| work.inflight_sessions(input))
+                .unwrap_or_default();
         } else {
             return Err(error(
                 "AGENT_TURN_BUDGET_EXCEEDED",

@@ -166,20 +166,59 @@ impl DiscoverWork {
         }
     }
 
-    /// Mark up to `limit` pending packs running. Packs already running stay running.
+    /// Fill the in-flight cap. `running` and `failed` together already count
+    /// toward `limit`, so a second call cannot claim another full batch.
+    /// Pending packs are taken in `order`, not by pack id.
     pub fn claim(&mut self, limit: usize) -> Vec<ParsePack> {
+        let inflight = self
+            .packs
+            .values()
+            .filter(|record| matches!(record.status, PackStatus::Running | PackStatus::Failed))
+            .count();
+        let room = limit.saturating_sub(inflight);
+        let mut pending: Vec<String> = self
+            .packs
+            .values()
+            .filter(|record| record.status == PackStatus::Pending)
+            .map(|record| record.pack.id.clone())
+            .collect();
+        pending.sort_by_key(|id| {
+            let pack = &self.packs[id].pack;
+            (pack.order, pack.id.clone())
+        });
         let mut claimed = Vec::new();
-        for record in self.packs.values_mut() {
-            if claimed.len() >= limit {
-                break;
-            }
-            if record.status == PackStatus::Pending {
-                record.status = PackStatus::Running;
-                record.attempt = record.attempt.saturating_add(1);
-                claimed.push(record.pack.clone());
-            }
+        for id in pending.into_iter().take(room) {
+            let record = self.packs.get_mut(&id).expect("pending pack");
+            record.status = PackStatus::Running;
+            record.attempt = record.attempt.saturating_add(1);
+            claimed.push(record.pack.clone());
         }
         claimed
+    }
+
+    /// Put the highest-order in-flight pack back to `pending` so the brief can
+    /// shrink. A single in-flight pack stays: the turn still has something to read.
+    pub fn release_highest_inflight(&mut self) -> bool {
+        let inflight: Vec<String> = self
+            .packs
+            .values()
+            .filter(|record| matches!(record.status, PackStatus::Running | PackStatus::Failed))
+            .map(|record| record.pack.id.clone())
+            .collect();
+        if inflight.len() <= 1 {
+            return false;
+        }
+        let Some(id) = inflight.into_iter().max_by_key(|id| {
+            let pack = &self.packs[id].pack;
+            (pack.order, pack.id.clone())
+        }) else {
+            return false;
+        };
+        let record = self.packs.get_mut(&id).expect("in-flight pack");
+        record.status = PackStatus::Pending;
+        record.feedback = None;
+        record.attempt = record.attempt.saturating_sub(1);
+        true
     }
 
     pub fn submit(&mut self, pack_id: &str, submit: PackSubmit) -> Result<(), PackFeedback> {
@@ -225,11 +264,19 @@ impl DiscoverWork {
         }))
     }
 
-    /// Sessions for packs this discover turn still has to handle.
+    /// Sessions for packs this discover turn still has to handle, in pack order.
     pub fn inflight_sessions(&self, input: &FrozenInput) -> Vec<serde_json::Value> {
-        self.packs
+        let mut inflight: Vec<&PackRecord> = self
+            .packs
             .values()
             .filter(|record| matches!(record.status, PackStatus::Running | PackStatus::Failed))
+            .collect();
+        inflight.sort_by(|left, right| {
+            (left.pack.order, left.pack.id.as_str())
+                .cmp(&(right.pack.order, right.pack.id.as_str()))
+        });
+        inflight
+            .into_iter()
             .map(|record| {
                 self.session(input, &record.pack.id)
                     .expect("in-flight pack has a session")
@@ -348,17 +395,15 @@ impl DiscoverWork {
     }
 }
 
+/// Discover reading window. The value is `Limits.pack_max_chars`; the deployment
+/// default is `pack_max_chars` in `deploy/.env.example`.
 pub fn reading_budget(pack_max_chars: usize) -> usize {
-    if pack_max_chars == 0 {
-        8_000
-    } else {
-        pack_max_chars
-    }
+    pack_max_chars
 }
 
-/// Plan once, claim up to `limit` pending packs, and return every pack this turn
-/// still has to read: the ones just claimed, plus packs already `running` or
-/// `failed` and waiting for repair.
+/// Plan once. Keep at most `limit` packs in flight (`running` and `failed`
+/// together), filling the remaining room in pack `order`. Return those
+/// sessions. A later call does not claim past the cap.
 pub fn claim_turn(
     slot: &mut Option<DiscoverWork>,
     input: &FrozenInput,
@@ -1500,16 +1545,19 @@ mod tests {
             vec![],
         );
         let mut slot = None;
-        let first = claim_turn(&mut slot, &frozen, 1, 1);
-        assert_eq!(first.len(), 1);
+        let first = claim_turn(&mut slot, &frozen, 1, 2);
+        assert_eq!(first.len(), 2);
         assert_eq!(first[0]["pack"]["id"], "pack-0");
         assert_eq!(first[0]["pack"]["text"][0]["text"], "A");
         assert_eq!(first[0]["status"], "running");
-        let again = claim_turn(&mut slot, &frozen, 1, 1);
-        assert_eq!(again.len(), 2);
-        assert_eq!(again[0]["pack"]["text"][0]["text"], "A");
-        assert_eq!(again[1]["pack"]["id"], "pack-1");
-        assert_eq!(again[1]["pack"]["text"][0]["text"], "B");
+        assert_eq!(first[1]["pack"]["id"], "pack-1");
+        assert_eq!(first[1]["pack"]["text"][0]["text"], "B");
+        let again = claim_turn(&mut slot, &frozen, 1, 2);
+        let again_ids: Vec<_> = again
+            .iter()
+            .map(|session| session["pack"]["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(again_ids, ["pack-0", "pack-1"]);
         apply_pack_tool(
             &mut slot,
             &frozen,
@@ -1534,14 +1582,12 @@ mod tests {
             }),
         )
         .unwrap();
-        let replay = claim_turn(&mut slot, &frozen, 1, 1);
+        let replay = claim_turn(&mut slot, &frozen, 1, 2);
         let ids: Vec<_> = replay
             .iter()
             .map(|session| session["pack"]["id"].as_str().unwrap())
             .collect();
-        assert!(ids.contains(&"pack-0"), "failed pack is replayed: {ids:?}");
-        assert!(!ids.contains(&"pack-1"), "committed pack leaves the brief");
-        assert!(ids.contains(&"pack-2"));
+        assert_eq!(ids, ["pack-0", "pack-2"]);
         let failed = replay
             .iter()
             .find(|session| session["pack"]["id"] == "pack-0")
@@ -1549,5 +1595,39 @@ mod tests {
         assert_eq!(failed["status"], "failed");
         assert_eq!(failed["pack"]["text"][0]["text"], "A");
         assert!(failed["feedback"]["errors"][0]["code"] == "outside_slice");
+    }
+
+    #[test]
+    fn claim_fills_remaining_room_in_pack_order() {
+        let concurrency = DEFAULT_PACK_CONCURRENCY;
+        let by_order: Vec<String> = (0..concurrency)
+            .map(|index| format!("pack-{index}"))
+            .collect();
+        // `pack-10` sorts before `pack-2`, so id order and `order` disagree.
+        let count = concurrency.max(10) + 1;
+        let frozen = input(
+            (0..count)
+                .map(|index| source(&format!("s{index}"), index, "x", &format!("章{index}")))
+                .collect(),
+            vec![],
+        );
+        let mut work = DiscoverWork::plan(&frozen, 1);
+        assert!(work.pack_counts().total > concurrency);
+        let claimed = work.claim(concurrency);
+        let ids: Vec<_> = claimed.iter().map(|pack| pack.id.clone()).collect();
+        assert_eq!(ids, by_order);
+        let mut by_id: Vec<_> = (0..work.pack_counts().total)
+            .map(|index| format!("pack-{index}"))
+            .collect();
+        by_id.sort();
+        assert_ne!(ids, by_id[..concurrency]);
+        assert!(work.claim(concurrency).is_empty());
+        assert_eq!(work.pack_counts().running, concurrency);
+        let sessions = work.inflight_sessions(&frozen);
+        let session_ids: Vec<_> = sessions
+            .iter()
+            .map(|session| session["pack"]["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(session_ids, ids);
     }
 }

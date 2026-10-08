@@ -70,8 +70,27 @@ pub(super) fn config() -> Config {
             pack_max_chars: 0,
             pack_max_turns: 0,
             draft_bind_terms: vec![],
-            max_draft_docx_bytes: crate::analysis::draft::DRAFT_MAX_DOCX_BYTES,
         },
     )
     .unwrap()
+}
+
+#[test]
+fn at_least_for_does_not_scale_tool_or_read_caps() {
+    let input = input();
+    let mut limits = config().limits;
+    let configured = limits.max_turns;
+    limits.max_tool_calls = 1;
+    limits.max_read_bytes = 1;
+    limits.reviewer_reserve = 3;
+    let applied = limits.clone().at_least_for(&input).unwrap();
+    assert_eq!(applied.max_turns, configured);
+    assert_eq!(applied.max_tool_calls, 1);
+    assert_eq!(applied.max_read_bytes, 1);
+    assert_eq!(applied.reviewer_reserve, 0);
+    limits.max_turns = 0;
+    let applied = limits.at_least_for(&input).unwrap();
+    assert_eq!(applied.max_turns, 0);
+    assert_eq!(applied.max_tool_calls, 1);
+    assert_eq!(applied.max_read_bytes, 1);
 }

@@ -162,8 +162,7 @@ pub(super) fn evidence(
             || content["assigned_evidence"]["candidate_delivery"]["next_inspection"].is_object();
         let start = unread(selection.text.get(id), source.text.len());
         if let Some(start) = start {
-            let max_bytes =
-                (source.text.len() - start).min(crate::analysis::draft::DRAFT_WINDOW_BYTES);
+            let max_bytes = (source.text.len() - start).min(budget).max(1);
             delivered |= append(
                 input,
                 &mut content,
@@ -206,11 +205,7 @@ pub(super) fn evidence(
                         budget,
                     )?;
                 }
-                let limit = columns
-                    .saturating_mul(crate::analysis::draft::OUTLINE_FORM_BODY_ROWS)
-                    .max(1)
-                    .min(total - offset)
-                    .max(1);
+                let limit = (total - offset).max(1);
                 let grid_delivered = append(
                     input,
                     &mut content,

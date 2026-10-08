@@ -42,6 +42,11 @@ pub(crate) trait Driver: Send + Sync {
         cancel: &CancellationToken,
     ) -> Result<Vec<Value>, AgentError>;
     async fn save(&self) -> Result<(), AgentError>;
+    /// Why `status().execution_blocked` is stopping a new model call.
+    fn block_message(&self) -> String {
+        "local execution and independent-work handoff allowances exhausted; blockers and checkpoint retained"
+            .into()
+    }
 }
 
 pub(crate) fn check_cancel(cancel: &CancellationToken) -> Result<(), AgentError> {
@@ -67,7 +72,7 @@ pub(crate) async fn drive<D: Driver>(
             if host.status().execution_blocked {
                 return Err(AgentError::new(
                     "AGENT_TURN_BUDGET_EXCEEDED",
-                    "local execution and independent-work handoff allowances exhausted; blockers and checkpoint retained",
+                    host.block_message(),
                 ));
             }
             if host.status().budget_exhausted {
@@ -147,6 +152,9 @@ pub(crate) async fn drive<D: Driver>(
                     _ = tokio::time::sleep(delay) => {}
                 }
             };
+            if let Some(session) = host.journal_mut().session.as_mut() {
+                session.note_provider_usage(&response);
+            }
             host.journal_mut().responded(response.clone())?;
             host.save().await?;
             response

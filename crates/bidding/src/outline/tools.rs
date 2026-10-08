@@ -250,25 +250,20 @@ fn finish(input: &FrozenInput, draft: &mut Draft) -> Result<Value, String> {
     if !draft.slots_submitted {
         return Err("put_slots before finishing the outline".into());
     }
-    let response_chapters: HashSet<_> = draft
-        .chapters
-        .iter()
-        .filter(|chapter| chapter.purpose == ChapterPurpose::Response)
-        .map(|chapter| chapter.id.as_str())
-        .collect();
-    let slotted: HashSet<_> = draft
-        .slots
-        .iter()
-        .map(|slot| slot.chapter_id.as_str())
-        .collect();
-    if let Some(id) = response_chapters
-        .into_iter()
-        .find(|id| !slotted.contains(id))
-    {
+    if let Some(id) = missing_response_slot(draft) {
         return Err(format!("response chapter {id} has no template slot"));
     }
     draft.finished = true;
     Ok(view(draft))
+}
+
+/// First response chapter, in chapter order, that has no template slot.
+pub fn missing_response_slot(draft: &Draft) -> Option<&str> {
+    draft.chapters.iter().find_map(|chapter| {
+        (chapter.purpose == ChapterPurpose::Response
+            && !draft.slots.iter().any(|slot| slot.chapter_id == chapter.id))
+        .then_some(chapter.id.as_str())
+    })
 }
 
 fn view(draft: &Draft) -> Value {
