@@ -966,6 +966,16 @@ pub async fn run_list_delete(pool: &PgPool, document_id: Uuid) -> Result<(), Str
     if let Some(deletion) = deletion {
         platform::dispatch_object_deletion(pool, deletion).await?;
     }
+    // D4: mark the document row deleted only after all cleanup succeeded.
+    // Requires the 'deleted' parse_status migration (see PR description).
+    sqlx::query(
+        "UPDATE documents SET deleted_at = now(), parse_status = 'deleted', updated_at = now()
+         WHERE id = $1 AND parse_status = 'deleting'",
+    )
+    .bind(document_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
     let _ = ws;
     Ok(())
 }
@@ -1076,6 +1086,28 @@ fn datatable_chunks(
     })?;
     let col_content =
         format!("# Table Column Information\n\nTable name: {table_name}\n\n{col_raw}");
+    // D3: table chunks carry a Spreadsheet source locator (sheet = this file).
+    let table_locator = serde_json::json!([{
+        "key": format!("datatable:{table_name}"),
+        "ordinal": 0u32,
+        "kind": "spreadsheet",
+        "locator": {
+            "locator_kind": "spreadsheet",
+            "sheet_ordinal": 0u32,
+            "sheet_name": table_name,
+            "region": {
+                "a1_range": "",
+                "start_row": 0u32,
+                "start_column": 0u32,
+                "end_row": rows.len() as u32,
+                "end_column": headers.len() as u32
+            },
+            "cells": [],
+            "merged_ranges": [],
+            "defined_tables": []
+        },
+        "grid": null
+    }]);
     let summary = crate::Chunk {
         id: Uuid::new_v4(),
         document_id: doc.id,
@@ -1087,6 +1119,7 @@ fn datatable_chunks(
         end_at: table_content.chars().count() as i32,
         parent_chunk_id: None,
         generated_questions: Vec::new(),
+        source_locator: Some(table_locator.clone()),
     };
     let column = crate::Chunk {
         id: Uuid::new_v4(),
@@ -1099,6 +1132,7 @@ fn datatable_chunks(
         end_at: col_content.chars().count() as i32,
         parent_chunk_id: Some(summary.id),
         generated_questions: Vec::new(),
+        source_locator: Some(table_locator),
     };
     let mut embeddings = std::collections::HashMap::new();
     for ch in [&summary, &column] {

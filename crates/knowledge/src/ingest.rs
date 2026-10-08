@@ -165,6 +165,8 @@ pub async fn run_convert(
         return Ok(());
     }
     let mut convert_image_source = String::new();
+    // D3: structured source units from docparser (empty when markdown is reused/manual).
+    let mut source_units: Vec<docparser::StructuredSourceUnit> = Vec::new();
     let prior_spans = document_stage_spans(pool, document_id, attempt).await;
     let markdown = if manual {
         let bytes = platform::read_blob(&file_hash).map_err(|e| e.to_string())?;
@@ -322,6 +324,8 @@ pub async fn run_convert(
             anydoc_fallback = result.metadata.get("anydoc_fallback").map(String::as_str).unwrap_or("-"),
             "parse convert done"
         );
+        // D3: keep structured units before markdown is rewritten/consumed.
+        source_units = std::mem::take(&mut result.structured_source_units);
         result.markdown = persist_and_rewrite_images(&result).await;
         let _ = platform::write_blob_async(&format!("{file_hash}.md"), result.markdown.as_bytes())
             .await;
@@ -372,7 +376,7 @@ pub async fn run_convert(
             None,
         )
         .await;
-        let split = crate::chunker::split_from_config(
+        let mut split = crate::chunker::split_from_config(
             &markdown,
             version_id,
             document_id,
@@ -388,6 +392,8 @@ pub async fn run_convert(
             opts.parent_size,
             opts.child_size,
         );
+        // D3: attach structured source locators (page/bbox/table grid) to chunks.
+        crate::chunker::annotate_source_locators(&mut split, &markdown, &source_units);
         let kept = crate::index::keep_nonempty_chunks(split);
         crate::delete_graph_for_document(pool, document_id)
             .await
@@ -513,6 +519,7 @@ async fn persist_passage_index(
             end_at: text.chars().count() as i32,
             parent_chunk_id: None,
             generated_questions: Vec::new(),
+            source_locator: None,
         })
         .collect();
     let opts = version_index_opts(pool, version_id).await;
