@@ -52,7 +52,9 @@ pub struct Limits {
     /// 1 keeps tests on one source per dispatch root. Production must set ≥6.
     #[serde(default = "default_pack_max_units")]
     pub pack_max_units: usize,
-    /// 0 means only the unit cap applies.
+    /// Discover reading window in bytes. Analysis packs treat 0 as no character
+    /// cap. Discover uses this value directly; production sets it in
+    /// `KB_TENDER_AGENT_LIMITS` (see `deploy/.env.example`).
     #[serde(default)]
     pub pack_max_chars: usize,
     /// 0 keeps the existing per-root batch cap. Production packs use 3.
@@ -61,9 +63,6 @@ pub struct Limits {
     /// 可选组成绑定附加词；缺省只用 title 包含匹配，禁止代码内置行业词表。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub draft_bind_terms: Vec<String>,
-    /// 草稿编译字节上限。骨架用小值，整份填充用大值。
-    #[serde(default = "crate::analysis::draft::default_draft_docx_bytes")]
-    pub max_draft_docx_bytes: usize,
 }
 
 fn default_pack_max_units() -> usize {
@@ -84,8 +83,7 @@ impl Limits {
         _input: &FrozenInput,
     ) -> Result<Self, crate::analysis::budget::BudgetRefused> {
         // 一次成稿不把 `max_turns` 当成回合上限，也不在缺省时填一个固定回合数。
-        // 填章请求不走这里：它在冻结请求时按待填章数另记一套额度（`draft::fill_limits`）。
-        // 工具调用和读字节仍随调用方写明的 `max_turns` 放开，旧路径还受回合数约束。
+        // 工具调用和读字节仍随调用方写明的 `max_turns` 放开，旧的无阅读包路径还受回合数约束。
         self.max_tool_calls = self.max_tool_calls.max(self.max_turns.saturating_mul(12));
         self.max_read_bytes = self.max_read_bytes.max(
             self.max_turns
@@ -99,14 +97,6 @@ impl Limits {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RunBudget {
-    pub chunk_count: usize,
-    pub total_timeout_secs: u64,
-    pub publish_reserve_secs: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Config {
     pub checkpoint_contract_version: u32,
     pub runtime_adapter: String,
@@ -114,7 +104,6 @@ pub struct Config {
     pub main_dispatch_policy: String,
     pub provider: AuthoringRuntimeContractV1,
     pub limits: Limits,
-    pub budget: RunBudget,
     pub tools_sha256: String,
     pub review_tools_sha256: String,
     pub main_prompt_sha256: String,
@@ -190,13 +179,6 @@ impl Config {
                 .at_least_for(input)
                 .map_err(|e| invalid(format!("outline budget refused: {e:?}")))?;
         }
-        let budget = RunBudget {
-            chunk_count: input.map_or(0, |input| draft::outline_chunks(input).len()),
-            // A task deadline is independent of the worst-case cost of every
-            // permitted turn. Retries consume this same frozen wall-clock budget.
-            total_timeout_secs: 60 * 60,
-            publish_reserve_secs: draft::PUBLISH_RESERVE_SECS,
-        };
         let fill_tools_sha256 =
             digest(&crate::outline::agent::template_schemas()).map_err(invalid)?;
         let fill_prompt_sha256 = digest(&crate::agent_runtime::chat::system_content(
@@ -218,7 +200,6 @@ impl Config {
             main_dispatch_policy: main_dispatch::POLICY.into(),
             provider,
             limits,
-            budget,
             tools_sha256,
             review_tools_sha256,
             main_prompt_sha256,
@@ -233,9 +214,7 @@ impl Config {
     pub fn validate(&self) -> Result<(), AgentError> {
         self.provider.validate().map_err(invalid)?;
         let l = &self.limits;
-        if self.budget.publish_reserve_secs == 0
-            || self.budget.total_timeout_secs <= self.budget.publish_reserve_secs
-            || !l.progress().validate()
+        if !l.progress().validate()
             || self.checkpoint_contract_version != crate::agent_runtime::CHECKPOINT_CONTRACT_VERSION
             || self.repair_task_policy != repair_task_host::POLICY
             || self.main_dispatch_policy != main_dispatch::POLICY
@@ -671,36 +650,7 @@ pub async fn run<J: Journal, M: Model>(
     model: &M,
     cancel: &CancellationToken,
 ) -> Result<AnalysisResult, AgentError> {
-    run_seeded(input, config, journal, model, cancel, None, None).await
-}
-
-/// 用户触发的填章 run：从**回读出来的章树**起跑，而不是从零开始拉大纲。
-///
-/// 种子是这次 Job 的输入（请求里冻着它的摘要），不是 agent 的产出：填章 run 的
-/// 第一个检查点就带着整棵树，checkpoint 闸门按摘要核对。已带正文的章在种子里
-/// 就是 `Filled`，填充回路只会派到还空着的章。
-pub async fn run_fill<J: Journal, M: Model>(
-    input: &FrozenInput,
-    config: &Config,
-    journal: &J,
-    model: &M,
-    cancel: &CancellationToken,
-    seed: Vec<crate::analysis::draft::DraftPlanItem>,
-    outline: super::outline_flow::OutlineState,
-) -> Result<AnalysisResult, AgentError> {
-    if seed.is_empty() {
-        return Err(invalid("fill run needs a read-back chapter tree"));
-    }
-    run_seeded(
-        input,
-        config,
-        journal,
-        model,
-        cancel,
-        Some((seed, outline)),
-        None,
-    )
-    .await
+    run_seeded(input, config, journal, model, cancel).await
 }
 
 async fn run_seeded<J: Journal, M: Model>(
@@ -709,17 +659,10 @@ async fn run_seeded<J: Journal, M: Model>(
     journal: &J,
     model: &M,
     cancel: &CancellationToken,
-    seed: Option<(
-        Vec<crate::analysis::draft::DraftPlanItem>,
-        super::outline_flow::OutlineState,
-    )>,
-    model_budget: Option<std::time::Duration>,
 ) -> Result<AnalysisResult, AgentError> {
-    let model_deadline = model_budget.map(|budget| tokio::time::Instant::now() + budget);
     tools::validate_input(input).map_err(invalid)?;
     config.validate()?;
     let started = Instant::now();
-    let seeded = seed.is_some();
     let input_sha256 = digest(input).map_err(invalid)?;
     let config_sha256 = digest(config).map_err(invalid)?;
     let mut state = journal.load().await?.unwrap_or(Checkpoint {
@@ -781,39 +724,11 @@ async fn run_seeded<J: Journal, M: Model>(
     }
     state.outline_config_sha256 = Some(config.tools_sha256.clone());
     state.fill_config_sha256 = Some(config.fill_tools_sha256.clone());
-    let is_outline_run = seed.is_none();
-    match seed {
-        Some((plan, outline)) => {
-            let seed_identities = super::readback::seed_identities(&plan).map_err(invalid)?;
-            if state.draft_stage != crate::analysis::draft::DraftStage::None
-                && state.analysis.fill_seed_chapters != seed_identities
-            {
-                return Err(invalid(
-                    "fill checkpoint differs from the frozen saved-document seed",
-                ));
-            }
-            state.analysis.fill_seed_chapters = seed_identities;
-            if state.draft_stage == crate::analysis::draft::DraftStage::None {
-                state.analysis.draft_plan = plan;
-                state.analysis.outline = outline;
-                state.draft_stage = crate::analysis::draft::DraftStage::Fill;
-                crate::analysis::draft::after_batch(input, &mut state, false, false)
-                    .map_err(invalid)?;
-            } else if state.draft_stage == crate::analysis::draft::DraftStage::Outline {
-                return Err(error(
-                    "FROZEN_INPUT_DIGEST_MISMATCH",
-                    "fill run resumed an outline checkpoint",
-                ));
-            }
-        }
-        None if state.draft_stage == crate::analysis::draft::DraftStage::None => {
-            state.draft_stage = crate::analysis::draft::DraftStage::Outline;
-        }
-        None => {}
+    if state.draft_stage == crate::analysis::draft::DraftStage::None {
+        state.draft_stage = crate::analysis::draft::DraftStage::Outline;
     }
     let publication_ready = outline_publication_ready(input, &state, &input_sha256);
-    let already_checked = is_outline_run && publication_ready;
-    let driven = if already_checked {
+    let driven = if publication_ready {
         Ok(())
     } else {
         let mut driver = RunDriver {
@@ -823,64 +738,23 @@ async fn run_seeded<J: Journal, M: Model>(
             journal,
             model,
         };
-        if let Some(deadline) = model_deadline {
-            if deadline <= tokio::time::Instant::now() {
-                return Err(error(
-                    "AGENT_DEADLINE_EXCEEDED",
-                    "publish reserve reached before checking completed",
-                ));
-            }
-            tokio::time::timeout_at(deadline, drive(&mut driver, cancel))
-                .await
-                .map_err(|_| {
-                    error(
-                        "AGENT_DEADLINE_EXCEEDED",
-                        "model deadline reached; no partial outline published",
-                    )
-                })?
-        } else {
-            drive(&mut driver, cancel).await
-        }
+        drive(&mut driver, cancel).await
     };
-    if let Err(error) = driven
-        && (is_outline_run
-            || !crate::analysis::draft::draft_should_publish_partial(&error.code, &error.message))
-    {
-        return Err(error);
-    }
-    if is_outline_run && !outline_publication_ready(input, &state, &input_sha256) {
+    driven?;
+    if !outline_publication_ready(input, &state, &input_sha256) {
         return Err(invalid(
             "outline is not ready to publish; checkpoint retained",
-        ));
-    }
-    if !is_outline_run
-        && !state
-            .analysis
-            .draft_plan
-            .iter()
-            .any(|item| item.template_id.is_some())
-    {
-        return Err(invalid(
-            "fill produced no new content; current document remains unchanged",
         ));
     }
     let stage = state.draft_stage;
     let turns = state.turn;
     let result = finalize_run(input, config, journal, &mut state, input_sha256).await;
-    // 出稿快慢是要压下去的目标，不是闸门：这里只记账，供回归对比，不影响成败。
     if let Ok(published) = result.as_ref() {
-        let elapsed_secs = started.elapsed().as_secs();
-        let target = if seeded {
-            crate::analysis::draft::FILL_DEADLINE_SECS
-        } else {
-            crate::analysis::draft::OUTLINE_DEADLINE_TARGET_SECS
-        };
         tracing::info!(
             event = "draft_compile_ready",
             stage = ?stage,
-            fill_run = seeded,
             turns,
-            elapsed_secs,
+            elapsed_secs = started.elapsed().as_secs(),
             chapters = published.analysis.draft_plan.len(),
             filled = published
                 .analysis
@@ -892,12 +766,6 @@ async fn run_seeded<J: Journal, M: Model>(
                 .count(),
             degraded = state.draft_degraded.len(),
             stopped = state.draft_stopped,
-            turn_target = if seeded {
-                crate::analysis::draft::fill_turn_cap(published.analysis.draft_plan.len())
-            } else {
-                crate::analysis::draft::OUTLINE_TURN_TARGET
-            },
-            seconds_target = target,
         );
     }
     result

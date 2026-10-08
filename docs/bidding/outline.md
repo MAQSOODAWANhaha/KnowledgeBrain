@@ -63,7 +63,7 @@
 - 续表把表头重复成上下文（`header_cells`）。这些表头单元格不在该切片的 `[start, end)` 里，也不再扫一遍。
 - 只有一条条款仍然大于预算时，才在 UTF-8 字符边界上按字节切开。
 
-预算是 `reading_budget(pack_max_chars)`。`pack_max_chars` 为 0 时用 8000 字节。
+预算是 `reading_budget(pack_max_chars)`，直接使用 `Limits.pack_max_chars`。部署缺省写在 `deploy/.env.example` 的 `KB_TENDER_AGENT_LIMITS.pack_max_chars`（8000 字节）。代码里没有另一份 8000 回退。省略该键时 serde 缺省是 0，产品环境拒绝小于 1200 的值。
 
 每一轮 brief 里同时处于 `running` 或待修 `failed` 的包不超过 `DEFAULT_PACK_CONCURRENCY`（4）。`claim` 只补满这个名额里的空位，按包的 `order` 领取，不按包 id 的字符串序。请求 brief 的 `reading_packs` 就是这些在途包。已 `committed` 的包不再出现。试装（`fit_batch`、检查）调用的 `prepare_request` 不留下额外领取。
 
@@ -182,7 +182,7 @@
 
 产品路径的进度来自 `DiscoverWork` 和 `tool_draft`：包的总数、待领、在跑、失败、已提交，章节数，未绑定附件数，槽是否已交，草稿是否结束。有阅读包时，发现阶段的停滞观察读包计数和要求条数，不读 `analysis.outline.scanned`。组织、收尾和完成读 `tool_draft`。有阅读包或工具草稿时，章数是 `tool_draft.chapters` 的长度，不是 `draft_plan` 的长度。扫描游标不再代表发现进度。
 
-一次成稿没有回合上限。`Limits::at_least_for` 不改写 `max_turns`，也不在缺省时填入固定回合数。已经有阅读包、且 `draft_stage` 仍是大纲时，`max_turns` 不截停循环，SDK 会话也不再按剩余回合数封顶。填章仍用 `fill_limits` 自己的回合额度。旧的无阅读包扫描路径仍受 `max_turns` 约束。
+一次成稿没有回合上限，也没有阶段墙钟。`Limits::at_least_for` 不改写 `max_turns`，也不在缺省时填入固定回合数。已经有阅读包、且 `draft_stage` 仍是大纲时，`max_turns` 不截停循环，SDK 会话也不再按剩余回合数封顶。工具调用和读字节仍按调用方写明的 `max_turns` 放大。旧的无阅读包扫描路径仍受 `max_turns` 约束。
 
 卡住时只看 `Limits` 里的 `max_no_progress_turns`、`max_focus_turns`、`max_focus_replans`。观察进入 `Blocked` 后运行结束。错误码仍是 `AGENT_TURN_BUDGET_EXCEEDED`，正文是 `outline stalled in phase {phase}`，`phase` 取检查点上的 `discover`、`outline`、`check` 或 `complete`。这是逻辑停滞，不是回合预算。
 

@@ -6,95 +6,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-/// 阶段一的**目标**回合数：出骨架通常在这个量级。一次成稿不按它截停，
-/// 也没有单独的回合上限。整体填充是另一次请求、另一套账（`fill_turn_cap`）。
-pub const OUTLINE_TURN_TARGET: usize = 20;
-/// 每章的回合额度：读表 / 写模板 / 一次返工。
-pub const FILL_TURNS_PER_CHAPTER: usize = 4;
-/// 一次整体填充的回合上限。章多也不许无限跑；到点按已填章出稿。
-pub const FILL_MAX_TURNS: usize = 200;
-/// 一窗的**字节**上限（不是字数：中文约 3 字节/字）。
-pub const DRAFT_WINDOW_BYTES: usize = 8000;
-/// 历史 8 窗上限已删除；保留常数仅作回归对照，不再截断扫描。
-pub const OUTLINE_MAX_WINDOWS: usize = 8;
-/// 一个标题最多绑这么多来源，其余留给定向补读。
-pub const BIND_MAX_SOURCES: usize = 8;
-/// 连续这么多轮修补都没减少缺口就结束自动执行，不空转、不出部分骨架。
-pub const OUTLINE_MAX_STALLED_ROUNDS: usize = 2;
-/// 阶段一墙钟保护额度（非完整性定义）；到点保持未完成，不编译部分骨架。
-pub const DRAFT_DEADLINE_SECS: u64 = 46 * 60;
-/// 阶段一的墙钟**目标**：正常文档应该几分钟出骨架。
-pub const OUTLINE_DEADLINE_TARGET_SECS: u64 = 5 * 60;
-pub const OFFICIAL_DEADLINE_SECS: u64 = 45 * 60;
-/// 整体填充的**写作窗**：到点停止派章，把已填的章编译出稿。
-pub const FILL_DEADLINE_SECS: u64 = 40 * 60;
-/// 整体填充的**信封窗**：写作窗之后还留 5 分钟给编译、登记与入稿，且必须短于
-/// SQL 的 46 分钟硬租约（SQL 只作兜底，不在那边再调一遍）。
-pub const FILL_ENVELOPE_DEADLINE_SECS: u64 = 45 * 60;
-
-// 写作窗必须短于信封窗，信封窗必须短于 SQL 硬租约。
-const _: () = assert!(
-    FILL_DEADLINE_SECS < FILL_ENVELOPE_DEADLINE_SECS && FILL_ENVELOPE_DEADLINE_SECS < 46 * 60,
-    "写作窗 < 信封窗 < SQL 硬租约，到期才有时间把已填的章编译出稿"
-);
-/// Default compile ceiling for the draft channel. The agent and the publication
-/// path must read one configured value or the agent stages bytes the
-/// publication rejects. A whole filled bid can outgrow this, so the ceiling is
-/// configurable per stage (`Limits::max_draft_docx_bytes`) and an over-budget
-/// document degrades to fewer bodies instead of failing the run.
-pub const DRAFT_MAX_DOCX_BYTES: usize = 2_000_000;
-/// 整份填满的投标文件远大于骨架，填章请求按这个上限编译；仍超限就降级出稿。
-pub const FILL_MAX_DOCX_BYTES: usize = 8_000_000;
-
-pub fn default_draft_docx_bytes() -> usize {
-    DRAFT_MAX_DOCX_BYTES
-}
-
-/// 整体填充按**待填章数**记账，不跟一次成稿共用回合数：一份 40 章的投标文件
-/// 不可能在 20 回合里写完，而 3 章的补填也不该拿到 200 回合。
-pub fn fill_turn_cap(pending_chapters: usize) -> usize {
-    pending_chapters
-        .saturating_mul(FILL_TURNS_PER_CHAPTER)
-        .saturating_add(4)
-        .clamp(FILL_TURNS_PER_CHAPTER + 4, FILL_MAX_TURNS)
-}
-
-/// 把运行期额度换成这次填充的额度并冻进请求。工具调用与读字节随回合等比放开，
-/// 否则回合还没用完就先撞上工具帽；编译上限按整份正文放大（骨架用小值）。
-pub fn fill_limits(
-    mut limits: super::agent::Limits,
-    pending_chapters: usize,
-) -> super::agent::Limits {
-    let turns = fill_turn_cap(pending_chapters);
-    limits.max_turns = turns;
-    limits.max_tool_calls = limits.max_tool_calls.max(turns * 3);
-    limits.max_read_bytes = limits.max_read_bytes.max(turns * DRAFT_WINDOW_BYTES * 4);
-    limits.max_draft_docx_bytes = limits.max_draft_docx_bytes.max(FILL_MAX_DOCX_BYTES);
-    limits
-}
-
-/// Seconds until a frozen absolute deadline. `None` is the first claim, which
-/// still uses the initial budget; a later claim must pass the same deadline.
-pub fn handler_budget_secs(
-    deadline_unix: Option<i64>,
-    now_unix: i64,
-    first_claim_secs: u64,
-) -> u64 {
-    match deadline_unix {
-        None => first_claim_secs,
-        Some(deadline) => (deadline - now_unix).max(0) as u64,
-    }
-}
-
-pub const PUBLISH_RESERVE_SECS: u64 = 300;
-
-pub fn draft_should_publish_partial(code: &str, _message: &str) -> bool {
-    !matches!(
-        code,
-        "FROZEN_INPUT_DIGEST_MISMATCH" | "AGENT_OUTPUT_INVALID" | "AGENT_PROVIDER_UNAVAILABLE"
-    )
-}
-
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DraftStage {
@@ -190,14 +101,6 @@ fn heading_parts(source: &Source) -> Vec<String> {
         .collect()
 }
 
-/// 按窗数估算的大纲工作量。一次成稿不用它当回合上限。
-pub fn outline_turn_cap(input: &FrozenInput) -> usize {
-    outline_chunks(input)
-        .len()
-        .saturating_mul(4)
-        .saturating_add(12)
-}
-
 /// 「已填」必须真有正文可编译：要么有模板 record，要么带回读来的用户正文。
 pub fn filled_templates_present(analysis: &Analysis) -> bool {
     analysis.draft_plan.iter().all(|item| match item.status {
@@ -275,8 +178,6 @@ fn bind_rank(input: &FrozenInput, source: &Source, terms: &[String]) -> u8 {
 }
 
 /// 按 title（及可选配置词）在冻结正文/表名中包含匹配；空白/换行不拆词。失败不猜页。
-/// 命中按优先级取前 `BIND_MAX_SOURCES` 个：全部命中都绑上等于让一章拖着全书正文，
-/// 剩下的留给定向补读。
 pub fn bind_source_ids(
     input: &FrozenInput,
     title: &str,
@@ -303,7 +204,6 @@ pub fn bind_source_ids(
     }
     hits.sort();
     hits.dedup();
-    hits.truncate(BIND_MAX_SOURCES);
     Ok(hits.into_iter().map(|(_, _, id)| id).collect())
 }
 
@@ -324,7 +224,7 @@ fn specialize_pending_windows(input: &FrozenInput, plan: &mut [DraftPlanItem]) {
         from_grounds.dedup();
         if !from_grounds.is_empty() {
             item.source_ids = from_grounds;
-            item.windows = split_windows(input, &item.source_ids);
+            item.windows = vec![item.source_ids.clone()];
             item.omit_reason = None;
             continue;
         }
@@ -333,7 +233,7 @@ fn specialize_pending_windows(input: &FrozenInput, plan: &mut [DraftPlanItem]) {
         match bind_source_ids(input, &item.title, &[]) {
             Ok(hits) => {
                 item.source_ids = hits;
-                item.windows = split_windows(input, &item.source_ids);
+                item.windows = vec![item.source_ids.clone()];
                 item.omit_reason = None;
             }
             Err(reason) => {
@@ -356,189 +256,6 @@ fn form_titles(input: &FrozenInput, source_id: &str) -> Vec<String> {
                 .map(str::to_string)
         })
         .collect()
-}
-
-pub fn split_windows(input: &FrozenInput, source_ids: &[String]) -> Vec<Vec<String>> {
-    let mut windows = Vec::new();
-    let mut current = Vec::new();
-    let mut bytes = 0usize;
-    let mut document: Option<String> = None;
-    for id in source_ids {
-        let source = input
-            .source_units
-            .iter()
-            .find(|source| source.source_unit_revision_id == *id);
-        let extra = source.map(|source| source.text.len()).unwrap_or(0);
-        let owner = source.map(|source| source.document_id.clone());
-        // 跨文档不混窗；同一文档内按顺序累加到窗字节上限。
-        let split = !current.is_empty()
-            && (owner != document
-                || (extra > 0 && bytes.saturating_add(extra) > DRAFT_WINDOW_BYTES));
-        if split {
-            windows.push(std::mem::take(&mut current));
-            bytes = 0;
-        }
-        document = owner;
-        current.push(id.clone());
-        bytes = bytes.saturating_add(extra);
-    }
-    if !current.is_empty() {
-        windows.push(current);
-    }
-    if windows.is_empty() {
-        windows.push(Vec::new());
-    }
-    windows
-}
-
-/// 续读重叠只作上下文，不进入扫描记账区间。
-pub const OUTLINE_RANGE_OVERLAP: usize = 256;
-pub const OUTLINE_FORM_BODY_ROWS: usize = 8;
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub struct OutlineChunk {
-    pub source_id: String,
-    pub kind: String,
-    pub form_id: String,
-    pub account_start: usize,
-    pub account_end: usize,
-    pub deliver_start: usize,
-    pub header_cells: usize,
-}
-
-/// 不相交的 UTF-8 记账区间。切点落在字符边界上。
-pub fn utf8_account_ranges(text: &str, window: usize) -> Vec<(usize, usize)> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let window = window.max(1);
-    let mut ranges = Vec::new();
-    let mut start = 0;
-    while start < text.len() {
-        let mut end = (start + window).min(text.len());
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        if end == start {
-            end = text[start..]
-                .chars()
-                .next()
-                .map(|ch| start + ch.len_utf8())
-                .unwrap_or(text.len());
-        }
-        ranges.push((start, end));
-        if end >= text.len() {
-            break;
-        }
-        start = end;
-    }
-    ranges
-}
-
-fn delivery_start(text: &str, account_start: usize) -> usize {
-    if account_start == 0 {
-        return 0;
-    }
-    let mut start = account_start.saturating_sub(OUTLINE_RANGE_OVERLAP);
-    while start < account_start && !text.is_char_boundary(start) {
-        start += 1;
-    }
-    start
-}
-
-/// 表头单元格不重复记账；续段的 `header_cells` 是投递时必须带上的前缀。
-pub fn form_account_slices(
-    definition: &serde_json::Value,
-    body_rows: usize,
-) -> Vec<(usize, usize, usize)> {
-    let Some((rows, columns)) = super::relations::form_dimensions(definition) else {
-        return Vec::new();
-    };
-    if columns == 0 || rows == 0 {
-        return Vec::new();
-    }
-    let total = rows * columns;
-    let header = if rows > 1 { columns } else { 0 };
-    if header >= total {
-        return vec![(0, total, 0)];
-    }
-    let step = columns.saturating_mul(body_rows.max(1)).max(columns);
-    let mut start = 0;
-    let mut slices = Vec::new();
-    while start < total {
-        let end = (start + step + if start == 0 { header } else { 0 }).min(total);
-        slices.push((start, end, header));
-        start = end;
-    }
-    slices
-}
-
-pub fn outline_chunks(input: &FrozenInput) -> Vec<OutlineChunk> {
-    let mut chunks = Vec::new();
-    for source in &input.source_units {
-        if source.text.is_empty() {
-            chunks.push(OutlineChunk {
-                source_id: source.source_unit_revision_id.clone(),
-                kind: "empty".into(),
-                form_id: String::new(),
-                account_start: 0,
-                account_end: 0,
-                deliver_start: 0,
-                header_cells: 0,
-            });
-        }
-        for (start, end) in utf8_account_ranges(&source.text, DRAFT_WINDOW_BYTES) {
-            chunks.push(OutlineChunk {
-                source_id: source.source_unit_revision_id.clone(),
-                kind: "text".into(),
-                form_id: String::new(),
-                account_start: start,
-                account_end: end,
-                deliver_start: delivery_start(&source.text, start),
-                header_cells: 0,
-            });
-        }
-        for form in input
-            .structured_forms
-            .iter()
-            .filter(|form| form["source_unit_revision_id"] == source.source_unit_revision_id)
-        {
-            let Some(form_id) = form["form_definition_revision_id"].as_str() else {
-                continue;
-            };
-            for (start, end, header) in
-                form_account_slices(&form["definition"], OUTLINE_FORM_BODY_ROWS)
-            {
-                chunks.push(OutlineChunk {
-                    source_id: source.source_unit_revision_id.clone(),
-                    kind: "form".into(),
-                    form_id: form_id.into(),
-                    account_start: start,
-                    account_end: end,
-                    deliver_start: if header > 0 { 0 } else { start },
-                    header_cells: header,
-                });
-            }
-        }
-    }
-    for (kind, values) in [
-        ("documents", &input.documents),
-        ("document_relations", &input.document_relations),
-        ("decisions", &input.decisions),
-    ] {
-        for index in 0..values.len() {
-            chunks.push(OutlineChunk {
-                source_id: kind.into(),
-                kind: "metadata".into(),
-                form_id: String::new(),
-                account_start: index,
-                account_end: index + 1,
-                deliver_start: index,
-                header_cells: 0,
-            });
-        }
-    }
-    chunks
 }
 
 pub fn current_window(item: &DraftPlanItem) -> &[String] {
@@ -725,7 +442,7 @@ pub(super) fn apply_validated(
 
 /// Recompute provenance from saved obligations and the final tree, never titles.
 pub(super) fn refresh_outline_basis(
-    input: &FrozenInput,
+    _input: &FrozenInput,
     state: &mut super::agent::Checkpoint,
 ) -> Result<(), String> {
     super::outline_flow::tree_valid(&state.analysis.draft_plan)?;
@@ -801,7 +518,7 @@ pub(super) fn refresh_outline_basis(
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        node.windows = split_windows(input, &node.source_ids);
+        node.windows = vec![node.source_ids.clone()];
         node.window_index = 0;
         if let Some(parent) = parents[index] {
             pending[parent] -= 1;
@@ -894,7 +611,7 @@ fn put_outline_item(
     }
     let mut seen = BTreeSet::new();
     source_ids.retain(|id| seen.insert(id.clone()));
-    let windows = split_windows(input, &source_ids);
+    let windows = vec![source_ids.clone()];
     upsert_plan(
         state,
         DraftPlanItem {
@@ -1214,9 +931,6 @@ pub fn after_batch(
         DraftStage::None | DraftStage::Outline => {
             use super::outline_flow::Phase;
             state.draft_stage = DraftStage::Outline;
-            if state.outline_run.no_progress_rounds > 2 {
-                return Err("outline semantic repair exhausted; checkpoint retained".into());
-            }
             let packs_done = state
                 .outline_run
                 .reading_packs

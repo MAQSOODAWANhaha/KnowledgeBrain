@@ -70,7 +70,6 @@ pub(super) fn config() -> Config {
             pack_max_chars: 0,
             pack_max_turns: 0,
             draft_bind_terms: vec![],
-            max_draft_docx_bytes: crate::analysis::draft::DRAFT_MAX_DOCX_BYTES,
         },
     )
     .unwrap()
@@ -78,20 +77,9 @@ pub(super) fn config() -> Config {
 
 #[test]
 fn at_least_for_does_not_rewrite_max_turns() {
-    let mut input = input();
-    input.source_units = (0..20)
-        .map(|ordinal| Source {
-            source_unit_revision_id: format!("s{ordinal}"),
-            document_id: "document".into(),
-            text: String::new(),
-            locator: json!({}),
-            ordinal,
-        })
-        .collect();
-    let estimate = crate::analysis::draft::outline_turn_cap(&input);
+    let input = input();
     let mut limits = config().limits;
     let configured = limits.max_turns;
-    assert!(estimate > configured);
     limits.max_tool_calls = 1;
     limits.max_read_bytes = 1;
     let applied = limits.clone().at_least_for(&input).unwrap();
@@ -100,5 +88,4 @@ fn at_least_for_does_not_rewrite_max_turns() {
     limits.max_turns = 0;
     let applied = limits.at_least_for(&input).unwrap();
     assert_eq!(applied.max_turns, 0);
-    assert_ne!(applied.max_turns, estimate);
 }

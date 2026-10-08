@@ -1282,8 +1282,6 @@ pub fn packet(input: &FrozenInput, state: &Checkpoint, budget: usize) -> Result<
         )?;
     }
     if discovering {
-        out["cursor_chunk"] =
-            json!(super::draft::outline_chunks(input).get(state.outline_run.chunk_cursor));
         out["pending_scan_repair"] = scan_submit::projection(state);
         out["pending_scan"] = tools::bounded_page(
             &pending_scan_ranges(input, state),
@@ -1293,7 +1291,7 @@ pub fn packet(input: &FrozenInput, state: &Checkpoint, budget: usize) -> Result<
         )?;
         out["discovery_watch"] = json!(state.main_progress.watch);
         out["instruction"] = json!(
-            "cursor_chunk is the earliest incomplete accounting range; close its missing scan ranges first. pending_scan lists delivered ranges without scan conclusions plus explicit empty_source dispositions requiring original-page inspection. Submit inspected ranges with submit_outline_scan, including empty requirements when appropriate. Partial table/text conclusions are allowed; do not wait to reread the entire document or table. If original text is no longer visible, reread only the needed pending range. Targeted cross-reference reads remain allowed. Repeating delivered reads is not progress."
+            "pending_scan lists delivered ranges without scan conclusions plus explicit empty_source dispositions requiring original-page inspection. Submit inspected ranges with submit_outline_scan, including empty requirements when appropriate. Partial table/text conclusions are allowed; do not wait to reread the entire document or table. If original text is no longer visible, reread only the needed pending range. Targeted cross-reference reads remain allowed. Repeating delivered reads is not progress."
         );
     }
     if !state.analysis.outline.checks.is_empty()
@@ -2380,9 +2378,6 @@ fn apply_validated(
         }
         let blocked = blockers(input, state);
         if !blocked.is_empty() {
-            if blocker_stalled {
-                state.outline_run.no_progress_rounds = 3;
-            }
             state.analysis.outline.phase = Phase::Discover;
             state.outline_run.phase = Phase::Discover;
             if let Some(check) = state.analysis.outline.checks.get_mut(&packet_id) {
@@ -2393,7 +2388,6 @@ fn apply_validated(
             return Ok(json!({"repair_required":true,"blockers":blocked,"packet_id":packet_id}));
         }
         if blocker_stalled {
-            state.outline_run.no_progress_rounds = 3;
             if let Some(check) = state.analysis.outline.checks.get_mut(&packet_id) {
                 check.status = "fail".into();
                 check.snapshot_sha256 = expected;

@@ -300,10 +300,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "applied_turns":operator_turns,
         "applied_physical":operator_physical,
         "reviewer_reserve":0,
-        "turn_cap":false,
-        "outline_turn_target":ta::draft::OUTLINE_TURN_TARGET,
-        "outline_seconds_target":ta::draft::OUTLINE_DEADLINE_TARGET_SECS,
-        "outline_deadline_backstop_secs":ta::draft::DRAFT_DEADLINE_SECS
+        "turn_cap":false
     });
     let provider = AuthoringRuntimeContractV1::resolve_tools_from_environment()?;
     let repair_seed: Option<extraction::Checkpoint> = if mode == "repair" {

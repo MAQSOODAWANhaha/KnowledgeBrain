@@ -395,12 +395,10 @@ impl DiscoverWork {
     }
 }
 
+/// Discover reading window. The value is `Limits.pack_max_chars`; the deployment
+/// default is `pack_max_chars` in `deploy/.env.example`.
 pub fn reading_budget(pack_max_chars: usize) -> usize {
-    if pack_max_chars == 0 {
-        8_000
-    } else {
-        pack_max_chars
-    }
+    pack_max_chars
 }
 
 /// Plan once. Keep at most `limit` packs in flight (`running` and `failed`
