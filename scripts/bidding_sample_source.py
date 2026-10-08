@@ -12,6 +12,34 @@ from pathlib import Path
 import uuid
 
 
+def form_title(grid, previous_text):
+    """Caption carried by the grid, or the short line that introduces it.
+
+    A cell in row 0 whose span covers every column is the caption. Otherwise
+    the last non-empty line of the previous source is used when it is short
+    and does not end a sentence. Detection does not read this title.
+    """
+    columns = getattr(grid, 'column_count', 0) or 0
+    spanning = []
+    for cell in getattr(grid, 'cells', None) or []:
+        text = (getattr(cell, 'text', '') or '').strip()
+        if getattr(cell, 'row', None) == 0 and columns and getattr(cell, 'col_span', 1) >= columns and text:
+            spanning.append(text)
+    if len(spanning) == 1 and len(spanning[0]) <= 80:
+        return spanning[0]
+    return caption_line(previous_text)
+
+
+def caption_line(text):
+    lines = [line.strip() for line in (text or '').splitlines() if line.strip()]
+    if not lines:
+        return ''
+    last = lines[-1]
+    if len(last) > 80 or last[-1] in '。.!！?？;；':
+        return ''
+    return last
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True)
@@ -37,6 +65,7 @@ def main():
     identity = lambda key: str(uuid.uuid5(uuid.NAMESPACE_URL, f'{sha}/{key}'))
     document = identity('document')
     sources, forms = [], []
+    previous_text = ''
     for unit in parsed.structured_source_units:
         sid = identity(unit.key)
         locator = unit.locator.model_dump(mode='json')
@@ -47,9 +76,11 @@ def main():
             definition = dict(unit.grid.model_dump(mode='json', exclude_none=True),
                               schema_version=3, kind='grid',
                               form_definition_revision_id=form_id,
-                              source_unit_revision_id=sid, title='source_unit:' + sid)
+                              source_unit_revision_id=sid, title=form_title(unit.grid, previous_text))
             forms.append(dict(form_definition_revision_id=form_id,
                               source_unit_revision_id=sid, definition=definition))
+        if unit.text.strip():
+            previous_text = unit.text
     frozen = dict(schema_version=1, project_id=identity('sample-project'),
                   document_set_id=identity('document-set'),
                   documents=[dict(document_id=document, file_name=args.source.name,

@@ -14,6 +14,23 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
+def test_caption_falls_back_to_a_short_preceding_line():
+    cell = lambda row, column, span, text: type('Cell', (), {
+        'row': row, 'column': column, 'col_span': span, 'text': text})()
+    grid = type('Grid', (), {
+        'column_count': 2,
+        'cells': [cell(0, 0, 1, '名称'), cell(0, 1, 1, '')],
+    })()
+    assert module.form_title(grid, '字段一览\n请按下表填写。') == ''
+    assert module.form_title(grid, '说明正文。\n字段一览') == '字段一览'
+    assert module.caption_line('字' * 81) == ''
+    spanning = type('Grid', (), {
+        'column_count': 2,
+        'cells': [cell(0, 0, 2, '合并表头'), cell(1, 0, 1, '名称')],
+    })()
+    assert module.form_title(spanning, '不应采用这一行') == '合并表头'
+
+
 @pytest.mark.parametrize('extension', ['docx', 'xlsx'])
 def test_freeze_preserves_v3_sparse_grid_and_source_identity(tmp_path, monkeypatch, extension):
     source = tmp_path / f'source.{extension}'
@@ -56,6 +73,8 @@ def test_freeze_preserves_v3_sparse_grid_and_source_identity(tmp_path, monkeypat
     assert definition['row_count'] == definition['column_count'] == 2
     assert len(definition['cells']) == 3
     assert definition['cells'][0]['col_span'] == 2
+    assert definition['title'] == '合并表头'
+    assert not definition['title'].startswith('source_unit:')
     assert definition.get('widths_mm') == grid.get('widths_mm')
     table_source = sources[form['source_unit_revision_id']]
     assert table_source['text'] == ''
