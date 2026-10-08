@@ -118,8 +118,11 @@ pub(crate) fn validate_artifact(artifact: &OutlineArtifact) -> Result<(), String
     }
     let mut chapter_ids = std::collections::BTreeSet::new();
     for chapter in &artifact.chapters {
-        if chapter.id.is_empty() || chapter.id == COVER_CHAPTER_ID || chapter.title.is_empty() {
-            return Err("outline chapter identity is invalid".into());
+        if chapter.id.is_empty() || chapter.title.is_empty() {
+            return Err("chapter id and title are required".into());
+        }
+        if chapter.id == COVER_CHAPTER_ID {
+            return Err(format!("chapter id {COVER_CHAPTER_ID} is reserved"));
         }
         if !chapter_ids.insert(chapter.id.as_str()) {
             return Err(format!("duplicate chapter {}", chapter.id));

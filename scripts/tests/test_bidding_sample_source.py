@@ -107,6 +107,42 @@ def test_caption_skips_running_headers_unit_lines_and_prefers_a_number():
     })()
     assert module.form_title(stub_grid, '表 2 报价一览') == '表 2 报价一览'
     assert module.form_title(stub_grid, '') == '表 2 A'
+    assert module.is_fragment('签订后 2 日内收取，对方须在通知发出')
+    assert not module.is_fragment('标准一览（不含甲，含乙）')
+    assert module.caption_line(
+        '收费标准一览\n签订后 2 日内收取，对方须在通知发出') == '收费标准一览'
+    assert module.caption_line(
+        '签订后 2 日内收取，对方须在通知发出\n续表 1：标准一览') == '续表 1：标准一览'
+    assert module.caption_line('8 报价一览', {'8 报价一览'}) == '8 报价一览'
+    assert module.caption_line('续表 1：标准一览', {'续表 1：标准一览'}) == '续表 1：标准一览'
+    units = []
+    for page in (0, 1):
+        units.append(type('Unit', (), {
+            'text': '正文',
+            'key': f'section:1:page:{page}',
+            'locator': type('Locator', (), {'heading_path': '全书'})(),
+            'grid': None,
+        })())
+    units.append(type('Unit', (), {
+        'text': '表 2 报价一览',
+        'key': 'section:2:page:2',
+        'locator': type('Locator', (), {'heading_path': '全书'})(),
+        'grid': None,
+    })())
+    units.append(type('Unit', (), {
+        'text': '全书',
+        'key': 'section:2:page:2:1',
+        'locator': type('Locator', (), {'heading_path': '全书'})(),
+        'grid': None,
+    })())
+    units.append(type('Unit', (), {
+        'text': '',
+        'key': 'page:2:table:0',
+        'locator': type('Locator', (), {'page_ordinal': 2, 'heading_path': '全书'})(),
+        'grid': grid,
+    })())
+    assert module.form_captions(units) == ['表 2 报价一览']
+    assert '全书' in module.running_lines(units)
 
 
 @pytest.mark.parametrize('extension', ['docx', 'xlsx'])

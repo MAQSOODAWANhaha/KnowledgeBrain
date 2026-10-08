@@ -65,28 +65,77 @@ def plain_line(text):
     return line
 
 
+def _locator(unit):
+    return unit.get('locator') if isinstance(unit, dict) else getattr(unit, 'locator', None)
+
+
+def _heading_path(locator):
+    if locator is None:
+        return ''
+    if isinstance(locator, dict):
+        value = locator.get('heading_path') or ''
+    else:
+        value = getattr(locator, 'heading_path', '') or ''
+    return value if isinstance(value, str) else ''
+
+
+def _unit_text(unit):
+    text = unit['text'] if isinstance(unit, dict) else getattr(unit, 'text', '')
+    return text or ''
+
+
+def _unit_grid(unit):
+    return unit.get('grid') if isinstance(unit, dict) else getattr(unit, 'grid', None)
+
+
 def running_lines(units):
     """Lines that occur on at least two pages are page furniture.
 
     Repetition across pages is the signal, wherever the line sits on the page.
-    The words themselves are not a list. A line repeated only inside one page
-    is not furniture. Comparison ignores a leading heading mark.
+    A heading segment repeated on two pages is the same signal. The words
+    themselves are not a list. A line repeated only inside one page is not
+    furniture. Comparison ignores a leading heading mark.
     """
     seen = {}
+
+    def add(line, page):
+        line = _normalize(plain_line(line))
+        if line and page is not None:
+            seen.setdefault(line, set()).add(page)
+
     for unit in units:
         page = unit_page(unit)
-        text = unit['text'] if isinstance(unit, dict) else getattr(unit, 'text', '')
         if page is None:
             continue
-        for line in (text or '').splitlines():
-            line = _normalize(plain_line(line))
-            if line:
-                seen.setdefault(line, set()).add(page)
+        for line in _unit_text(unit).splitlines():
+            add(line, page)
+        for part in _heading_path(_locator(unit)).split('>'):
+            add(part, page)
     return {line for line, pages in seen.items() if len(pages) >= 2}
 
 
+def _outside_brackets(line):
+    """Characters that are not inside a bracket pair."""
+    depth = 0
+    opens = {open_ for open_, _close in _BRACKETS}
+    closes = {close for _open, close in _BRACKETS}
+    kept = []
+    for ch in line:
+        if ch in opens:
+            depth += 1
+        elif ch in closes and depth:
+            depth -= 1
+        elif depth == 0:
+            kept.append(ch)
+    return ''.join(kept)
+
+
 def is_fragment(text):
-    """A line that starts mid-sentence, stops inside, or leaves a bracket open."""
+    """A line that starts mid-sentence, stops inside, or leaves a bracket open.
+
+    A comma outside brackets is a clause break, not a caption. A comma inside
+    brackets can still be a title.
+    """
     line = plain_line(text)
     if not line:
         return False
@@ -94,7 +143,10 @@ def is_fragment(text):
         return True
     if any(ch in '。！？!?' for ch in line[:-1]):
         return True
-    return any(line.count(open_) != line.count(close) for open_, close in _BRACKETS)
+    if any(line.count(open_) != line.count(close) for open_, close in _BRACKETS):
+        return True
+    outside = _outside_brackets(line)
+    return any(ch in outside for ch in '，、；;')
 
 
 def _has_index_token(text):
@@ -155,7 +207,11 @@ def usable_line(text, running):
     line = plain_line(text)
     if not line or len(line) > 80 or line[-1] in _SENTENCE_END or is_fragment(line):
         return ''
-    if _normalize(line) in running or is_unit_line(line):
+    if is_unit_line(line):
+        return ''
+    # A repeated index line is a caption, not page furniture. A repeated
+    # heading or book line is furniture.
+    if _normalize(line) in running and not _is_index_line(line):
         return ''
     return line
 
@@ -210,6 +266,23 @@ def caption_line(text, running=()):
     return chosen
 
 
+def form_captions(units):
+    """One title per grid. Text since the previous grid is the candidate window."""
+    running = running_lines(units)
+    gap = []
+    titles = []
+    for unit in units:
+        grid = _unit_grid(unit)
+        if grid is not None:
+            titles.append(form_title(grid, '\n'.join(gap), running))
+            gap = []
+        else:
+            text = _unit_text(unit).strip()
+            if text:
+                gap.append(text)
+    return titles
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, required=True)
@@ -235,8 +308,7 @@ def main():
     identity = lambda key: str(uuid.uuid5(uuid.NAMESPACE_URL, f'{sha}/{key}'))
     document = identity('document')
     sources, forms = [], []
-    previous_text = ''
-    running = running_lines(parsed.structured_source_units)
+    captions = iter(form_captions(parsed.structured_source_units))
     for unit in parsed.structured_source_units:
         sid = identity(unit.key)
         locator = unit.locator.model_dump(mode='json')
@@ -247,11 +319,9 @@ def main():
             definition = dict(unit.grid.model_dump(mode='json', exclude_none=True),
                               schema_version=3, kind='grid',
                               form_definition_revision_id=form_id,
-                              source_unit_revision_id=sid, title=form_title(unit.grid, previous_text, running))
+                              source_unit_revision_id=sid, title=next(captions))
             forms.append(dict(form_definition_revision_id=form_id,
                               source_unit_revision_id=sid, definition=definition))
-        if unit.text.strip():
-            previous_text = unit.text
     frozen = dict(schema_version=1, project_id=identity('sample-project'),
                   document_set_id=identity('document-set'),
                   documents=[dict(document_id=document, file_name=args.source.name,

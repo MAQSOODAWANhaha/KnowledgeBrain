@@ -3,6 +3,7 @@
 //! Discover, organize (chapters, bindings, and slots), and finish run against the frozen input.
 //! The checkpoint is the memory: clearing the transcript must not drop requirements.
 
+use super::COVER_CHAPTER_ID;
 use super::agent::{Duty, apply, current, deny, host_packet};
 use super::discover::{DiscoverWork, PackRequirement, PackSubmit, claim_turn};
 use super::tools::Draft;
@@ -851,4 +852,59 @@ fn format_obligations_become_chapters_and_only_fill_in_tables_bind() {
     );
     assert_eq!(projected.bindings.len(), 1);
     assert_eq!(projected.bindings[0].form_id, "fill-form");
+}
+
+#[test]
+fn reserved_chapter_id_rejects_finish_and_returns_to_organize() {
+    let input = frozen();
+    let mut work = DiscoverWork::plan(&input, 80_000);
+    while !work.complete() {
+        let claimed = work.claim(8);
+        assert!(!claimed.is_empty());
+        for pack in claimed {
+            submit(&mut work, &pack.id, vec![]);
+        }
+    }
+    let mut state = checkpoint(&input);
+    state.outline_run.reading_packs = Some(work);
+    state.analysis.outline.phase = Phase::Outline;
+    state.outline_run.phase = Phase::Outline;
+    apply(
+        &input,
+        0,
+        &mut state,
+        "put_chapters",
+        &json!({"chapters":[
+            {"id":COVER_CHAPTER_ID,"parent_id":null,"order":0,"title":"函件","purpose":"response","requirement_ids":[]}
+        ]}),
+    )
+    .unwrap();
+    apply(
+        &input,
+        0,
+        &mut state,
+        "bind_forms",
+        &json!({"bindings":[{"form_id":"form-1","chapter_id":COVER_CHAPTER_ID}]}),
+    )
+    .unwrap();
+    apply(
+        &input,
+        0,
+        &mut state,
+        "put_slots",
+        &json!({"slots":[
+            {"slot_id":"letter:fixed","chapter_id":COVER_CHAPTER_ID,"kind":"fixed_text","text":"函件","match_query":""}
+        ]}),
+    )
+    .unwrap();
+    assert_eq!(state.analysis.outline.phase, Phase::Check);
+    let rejected = apply(&input, 0, &mut state, "finish_outline", &json!({})).unwrap_err();
+    assert!(rejected.contains("reserved"), "{rejected}");
+    assert!(rejected.contains(COVER_CHAPTER_ID), "{rejected}");
+    assert!(!state.outline_run.tool_draft.finished);
+    assert!(state.outline_run.finish_rejected);
+    assert_eq!(state.analysis.outline.phase, Phase::Outline);
+    assert_eq!(current(&input, &state), Duty::Organize);
+    assert!(deny(Duty::Organize, "put_chapters", false).is_none());
+    assert!(deny(Duty::Organize, "finish_outline", false).is_some());
 }

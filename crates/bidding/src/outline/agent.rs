@@ -296,6 +296,18 @@ pub fn apply(
                 args,
             ) {
                 Ok(value) => {
+                    // A finished draft that cannot be published must not enter
+                    // complete: that duty can only read or finish again.
+                    if let Err(error) = super::project_draft(
+                        input,
+                        &state.input_sha256,
+                        &state.outline_run.tool_draft,
+                    ) {
+                        state.outline_run.tool_draft.finished = false;
+                        state.outline_run.finish_rejected = true;
+                        note_check_phase(input, state);
+                        return Err(error);
+                    }
                     state.outline_run.finish_rejected = false;
                     state.analysis.outline.phase = Phase::Complete;
                     state.outline_run.phase = Phase::Complete;
