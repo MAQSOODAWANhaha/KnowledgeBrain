@@ -38,8 +38,10 @@ pub fn attachment_form_ids(input: &FrozenInput) -> Vec<String> {
 }
 
 /// One chain per run of continuation tables. A later table continues when it
-/// repeats the header or its header row is empty, under the same column count.
-/// Titles are not read.
+/// repeats the header or its header row is empty, under the same column count,
+/// and it stays in the same resolved heading with no prose between the grids.
+/// A new heading, or any non-empty source line between the two tables, starts
+/// another chain. Titles are not read.
 pub fn attachment_chains(input: &FrozenInput) -> Vec<Vec<String>> {
     let index = SectionIndex::build(input);
     let mut placed = Vec::new();
@@ -58,6 +60,11 @@ pub fn attachment_chains(input: &FrozenInput) -> Vec<Vec<String>> {
                 .map(|source| source.document_id.as_str())
                 .unwrap_or(""),
             ordinal: source.map(|source| source.ordinal).unwrap_or(0),
+            heading: index
+                .placed
+                .get(source_id)
+                .map(|(_, heading)| heading.as_str())
+                .unwrap_or(""),
             columns: column_count(&form["definition"]),
             header: header_texts(&form["definition"]),
             own: is_attachment_form(form, &index),
@@ -71,7 +78,7 @@ pub fn attachment_chains(input: &FrozenInput) -> Vec<Vec<String>> {
     let mut index = 0;
     while index < placed.len() {
         let mut end = index;
-        while end + 1 < placed.len() && continues(&placed[end], &placed[end + 1]) {
+        while end + 1 < placed.len() && continues(input, &placed[end], &placed[end + 1]) {
             end += 1;
         }
         if placed[index..=end].iter().any(|form| form.own) {
@@ -251,6 +258,8 @@ struct PlacedForm<'a> {
     id: &'a str,
     document_id: &'a str,
     ordinal: usize,
+    /// Heading the table hangs on, including a page table with an empty path.
+    heading: &'a str,
     columns: usize,
     header: Vec<String>,
     own: bool,
@@ -259,12 +268,24 @@ struct PlacedForm<'a> {
     blocked: bool,
 }
 
-fn continues(prev: &PlacedForm<'_>, next: &PlacedForm<'_>) -> bool {
+fn continues(input: &FrozenInput, prev: &PlacedForm<'_>, next: &PlacedForm<'_>) -> bool {
     prev.document_id == next.document_id
+        && prev.heading == next.heading
         && prev.columns >= 2
         && prev.columns == next.columns
         && prev.header.iter().any(|cell| !cell.is_empty())
         && (prev.header == next.header || next.header.iter().all(String::is_empty))
+        && !prose_between(input, prev, next)
+}
+
+/// A non-empty source line between two grids is a new table, not a continuation.
+fn prose_between(input: &FrozenInput, prev: &PlacedForm<'_>, next: &PlacedForm<'_>) -> bool {
+    input.source_units.iter().any(|source| {
+        source.document_id == prev.document_id
+            && source.ordinal > prev.ordinal
+            && source.ordinal < next.ordinal
+            && !source.text.trim().is_empty()
+    })
 }
 
 /// A table the bidder is meant to fill in.
@@ -691,10 +712,12 @@ fn blank_header_columns(definition: &Value) -> Option<usize> {
 
 /// Structural context for the forms the model still has to bind.
 ///
-/// Each card carries the stored caption, the header row, and where the table
-/// sits. The source index page does not have to reach that ordinal.
+/// Each card carries the stored caption, the header row, where the table
+/// sits, and the continuation `chain` index. Forms that share a chain bind
+/// to one leaf. The source index page does not have to reach that ordinal.
 pub fn form_cards(input: &FrozenInput, form_ids: &[String]) -> Vec<Value> {
     let index = SectionIndex::build(input);
+    let chains = attachment_chains(input);
     let mut cards = Vec::new();
     for id in form_ids {
         let Some(form) = input
@@ -715,6 +738,9 @@ pub fn form_cards(input: &FrozenInput, form_ids: &[String]) -> Vec<Value> {
             .map(|(_, heading)| heading.clone())
             .unwrap_or_default();
         let page = source.and_then(|source| source.locator["page_ordinal"].as_u64());
+        let chain = chains
+            .iter()
+            .position(|chain| chain.iter().any(|form_id| form_id == id));
         cards.push(json!({
             "form_id": id,
             "title": form["definition"]["title"].as_str().unwrap_or(""),
@@ -723,6 +749,7 @@ pub fn form_cards(input: &FrozenInput, form_ids: &[String]) -> Vec<Value> {
             "ordinal": source.map(|source| source.ordinal).unwrap_or(0),
             "page": page,
             "heading": heading,
+            "chain": chain,
         }));
     }
     cards.sort_by(|left, right| {
@@ -1062,6 +1089,49 @@ mod tests {
         assert_eq!(cards[0]["page"], 12);
         assert_eq!(cards[0]["heading"], "投标文件格式 > 报价");
         assert_eq!(cards[0]["source_id"], "table");
+        assert_eq!(cards[0]["chain"], 0);
+    }
+
+    #[test]
+    fn a_continuation_stops_at_a_new_heading_or_at_prose() {
+        let cells = grid(&["名称", "内容", "", ""], 2);
+        let same = frozen(
+            vec![
+                source("left", 0, "", "格式", "page_table"),
+                source("right", 1, "", "", "page_table"),
+            ],
+            vec![
+                form("left", "left", cells.clone()),
+                form("right", "right", cells.clone()),
+            ],
+        );
+        assert_eq!(
+            attachment_chains(&same),
+            vec![vec!["left".to_string(), "right".to_string()]]
+        );
+        let headed = frozen(
+            vec![
+                source("left", 0, "", "格式 > 甲", "page_table"),
+                source("right", 1, "", "格式 > 乙", "page_table"),
+            ],
+            vec![
+                form("left", "left", cells.clone()),
+                form("right", "right", cells.clone()),
+            ],
+        );
+        assert_eq!(attachment_chains(&headed).len(), 2);
+        let prose = frozen(
+            vec![
+                source("left", 0, "", "格式", "page_table"),
+                source("note", 1, "另起一表", "格式", "document"),
+                source("right", 2, "", "格式", "page_table"),
+            ],
+            vec![
+                form("left", "left", cells.clone()),
+                form("right", "right", cells),
+            ],
+        );
+        assert_eq!(attachment_chains(&prose).len(), 2);
     }
 
     fn spanned(row: usize, column: usize, col_span: usize, text: &str) -> Value {

@@ -380,7 +380,8 @@ pub fn readiness(input: &FrozenInput, draft: &Draft) -> Value {
 ///
 /// A chain is a continuation run from [`attachment_chains`]. With at least
 /// [`DEPTH_CHAIN_MIN`] chains, every response chapter sits at
-/// [`RESPONSE_LEAF_DEPTH`] under a group, and each chain binds to one leaf.
+/// [`RESPONSE_LEAF_DEPTH`] under a group. One leaf may bind several chains.
+/// One chain may not be split across leaves.
 fn granularity_gaps(input: &FrozenInput, draft: &Draft) -> Vec<String> {
     let mut gaps = depth_gaps(input, &draft.chapters);
     gaps.extend(chain_gaps(input, draft));
@@ -421,34 +422,16 @@ fn chain_gaps(input: &FrozenInput, draft: &Draft) -> Vec<String> {
         .enumerate()
         .flat_map(|(index, chain)| chain.iter().map(move |id| (id.as_str(), index)))
         .collect();
-    let mut chapter_chains: std::collections::HashMap<&str, BTreeSet<usize>> =
-        std::collections::HashMap::new();
     let mut chain_chapters: std::collections::HashMap<usize, BTreeSet<&str>> =
         std::collections::HashMap::new();
     for binding in &draft.bindings {
         let Some(&chain) = form_chain.get(binding.form_id.as_str()) else {
             continue;
         };
-        chapter_chains
-            .entry(binding.chapter_id.as_str())
-            .or_default()
-            .insert(chain);
         chain_chapters
             .entry(chain)
             .or_default()
             .insert(binding.chapter_id.as_str());
-    }
-    let mut gaps = Vec::new();
-    let mut shared: Vec<_> = chapter_chains
-        .iter()
-        .filter(|(_, set)| set.len() > 1)
-        .map(|(chapter, _)| *chapter)
-        .collect();
-    shared.sort_unstable();
-    for chapter in shared {
-        gaps.push(format!(
-            "response chapter {chapter} binds more than one attachment chain"
-        ));
     }
     let mut split: Vec<_> = chain_chapters
         .iter()
@@ -456,9 +439,14 @@ fn chain_gaps(input: &FrozenInput, draft: &Draft) -> Vec<String> {
         .map(|(chain, _)| *chain)
         .collect();
     split.sort_unstable();
+    let mut gaps = Vec::new();
     for chain in split {
+        let ids = chains
+            .get(chain)
+            .map(|ids| ids.join(", "))
+            .unwrap_or_default();
         gaps.push(format!(
-            "attachment chain {chain} is split across response chapters"
+            "attachment chain {chain} ({ids}) is split across response chapters"
         ));
     }
     gaps
@@ -881,7 +869,7 @@ mod tests {
             ]}),
         )
         .unwrap();
-        let shared = apply(
+        apply(
             &input,
             &mut draft,
             &BTreeSet::new(),
@@ -891,12 +879,8 @@ mod tests {
                 {"form_id":"form-b","chapter_id":"leaf"}
             ]}),
         )
-        .unwrap_err();
-        assert!(
-            shared.contains("binds more than one attachment chain"),
-            "{shared}"
-        );
-        assert!(draft.bindings.is_empty());
+        .unwrap();
+        assert_eq!(draft.bindings.len(), 2);
 
         apply(
             &input,
@@ -936,5 +920,94 @@ mod tests {
         let finished = finish(&input, &mut draft).unwrap();
         assert_eq!(finished["readiness"]["ready"], json!(true));
         assert_eq!(finished["chapters"].as_array().unwrap().len(), 4);
+
+        let continued = continued_chain();
+        assert_eq!(
+            crate::outline::chapters::attachment_chains(&continued).len(),
+            2
+        );
+        let mut draft = Draft::default();
+        apply(
+            &continued,
+            &mut draft,
+            &BTreeSet::new(),
+            "put_chapters",
+            &json!({"chapters":[
+                {"id":"root","parent_id":null,"order":0,"title":"根","purpose":"group","requirement_ids":[]},
+                {"id":"mid","parent_id":"root","order":0,"title":"中","purpose":"group","requirement_ids":[]},
+                {"id":"leaf-a","parent_id":"mid","order":0,"title":"甲","purpose":"response","requirement_ids":[]},
+                {"id":"leaf-b","parent_id":"mid","order":1,"title":"乙","purpose":"response","requirement_ids":[]}
+            ]}),
+        )
+        .unwrap();
+        let split = apply(
+            &continued,
+            &mut draft,
+            &BTreeSet::new(),
+            "bind_forms",
+            &json!({"bindings":[
+                {"form_id":"form-a","chapter_id":"leaf-a"},
+                {"form_id":"form-b","chapter_id":"leaf-b"},
+                {"form_id":"form-c","chapter_id":"leaf-b"}
+            ]}),
+        )
+        .unwrap_err();
+        assert!(
+            split.contains("is split across response chapters"),
+            "{split}"
+        );
+        assert!(draft.bindings.is_empty());
+        apply(
+            &continued,
+            &mut draft,
+            &BTreeSet::new(),
+            "bind_forms",
+            &json!({"bindings":[
+                {"form_id":"form-a","chapter_id":"leaf-a"},
+                {"form_id":"form-b","chapter_id":"leaf-a"},
+                {"form_id":"form-c","chapter_id":"leaf-a"}
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(draft.bindings.len(), 3);
+    }
+
+    fn continued_chain() -> FrozenInput {
+        FrozenInput {
+            schema_version: 1,
+            project_id: "project".into(),
+            document_set_id: "set".into(),
+            documents: vec![],
+            document_relations: vec![],
+            source_units: vec![
+                Source {
+                    source_unit_revision_id: "left".into(),
+                    document_id: "doc".into(),
+                    text: String::new(),
+                    locator: json!({"heading_path": "卷一"}),
+                    ordinal: 0,
+                },
+                Source {
+                    source_unit_revision_id: "right".into(),
+                    document_id: "doc".into(),
+                    text: String::new(),
+                    locator: json!({"heading_path": ""}),
+                    ordinal: 1,
+                },
+                Source {
+                    source_unit_revision_id: "other".into(),
+                    document_id: "doc".into(),
+                    text: String::new(),
+                    locator: json!({"heading_path": "卷二"}),
+                    ordinal: 2,
+                },
+            ],
+            structured_forms: vec![
+                fill_in("form-a", "left", "甲"),
+                fill_in("form-b", "right", "甲"),
+                fill_in("form-c", "other", "乙"),
+            ],
+            decisions: vec![],
+        }
     }
 }
