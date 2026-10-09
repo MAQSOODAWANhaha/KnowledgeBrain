@@ -49,6 +49,12 @@ CREATE TABLE bid_outline_runs (
   CHECK ((lease_token IS NULL) = (lease_until IS NULL))
 );
 
+CREATE TABLE bid_frozen_inputs (
+  input_sha256 kb_sha256 PRIMARY KEY,
+  project_id uuid NOT NULL REFERENCES bid_projects(id) ON DELETE RESTRICT,
+  document_set_id text
+);
+
 CREATE TABLE bid_outline_artifacts (
   sha256 kb_sha256 PRIMARY KEY,
   project_id uuid NOT NULL REFERENCES bid_projects(id) ON DELETE RESTRICT,
@@ -56,7 +62,10 @@ CREATE TABLE bid_outline_artifacts (
   frozen_input_sha256 kb_sha256 NOT NULL,
   artifact jsonb NOT NULL CHECK (jsonb_typeof(artifact) = 'object'),
   created_by kb_actor_identity,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT bid_outline_artifacts_frozen_input_fkey
+    FOREIGN KEY (frozen_input_sha256)
+    REFERENCES bid_frozen_inputs(input_sha256) ON DELETE RESTRICT
 );
 
 ALTER TABLE bid_outline_runs
@@ -235,8 +244,8 @@ SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
 DECLARE
-  digest kb_sha256 := kb_bid_v2_sha256_bytes(p_artifact_bytes);
-  artifact jsonb := convert_from(p_artifact_bytes, 'UTF8')::jsonb;
+  digest kb_sha256;
+  artifact jsonb;
   chapter jsonb;
   slot jsonb;
   binding jsonb;
@@ -244,6 +253,14 @@ DECLARE
   slot_count integer := 0;
 BEGIN
   PERFORM kb_bid_v2_require_project_owner(p_project_id, p_actor);
+  IF NOT EXISTS (
+    SELECT 1 FROM bid_frozen_inputs WHERE input_sha256 = p_frozen_input_sha256
+  ) THEN
+    RAISE EXCEPTION 'BID_FROZEN_INPUT_UNKNOWN: %', p_frozen_input_sha256
+      USING ERRCODE = '23503';
+  END IF;
+  digest := kb_bid_v2_sha256_bytes(p_artifact_bytes);
+  artifact := convert_from(p_artifact_bytes, 'UTF8')::jsonb;
   IF p_bindings IS NULL OR jsonb_typeof(p_bindings) <> 'array' THEN
     RAISE EXCEPTION 'attachment bindings must be an array' USING ERRCODE = '23514';
   END IF;
@@ -511,7 +528,7 @@ REVOKE ALL ON FUNCTION
 FROM PUBLIC;
 
 GRANT SELECT, INSERT, UPDATE ON
-  bid_projects, bid_documents, bid_outline_runs, bid_outline_artifacts, bid_outline_chapters,
+  bid_projects, bid_documents, bid_frozen_inputs, bid_outline_runs, bid_outline_artifacts, bid_outline_chapters,
   bid_outline_attachment_bindings, bid_outline_template_slots, bid_response_sets, bid_response_slots,
   bid_docx_versions, bid_docx_current, bid_submission_exports
 TO kb_runtime_api, kb_runtime_worker;

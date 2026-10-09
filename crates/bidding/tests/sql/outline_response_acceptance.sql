@@ -48,6 +48,7 @@ BEGIN
   DELETE FROM bid_outline_chapters
   WHERE outline_sha256 IN (SELECT sha256 FROM bid_outline_artifacts WHERE project_id = v_project_id);
   DELETE FROM bid_outline_artifacts WHERE project_id = v_project_id;
+  DELETE FROM bid_frozen_inputs WHERE project_id = v_project_id;
   DELETE FROM bid_outline_runs WHERE project_id = v_project_id OR id IN (v_run_id, v_bad_run_id);
   DELETE FROM bid_documents WHERE project_id = v_project_id;
   DELETE FROM bid_projects WHERE id = v_project_id;
@@ -63,6 +64,23 @@ BEGIN
     v_document_id, v_project_id, 'tender.pdf', 'application/pdf',
     ('objects/' || doc_sha)::kb_object_ref, doc_sha, octet_length(doc_bytes)
   );
+
+  BEGIN
+    PERFORM kb_bid_v2_publish_outline(
+      v_bad_run_id, v_project_id, repeat('ff', 32)::kb_sha256,
+      convert_to('{"chapters":[],"templates":[]}'::jsonb::text, 'UTF8'), '[]'::jsonb, NULL
+    );
+    RAISE EXCEPTION 'unknown frozen input was accepted';
+  EXCEPTION
+    WHEN SQLSTATE '23503' THEN
+      IF SQLERRM NOT LIKE '%BID_FROZEN_INPUT_UNKNOWN%' THEN
+        RAISE;
+      END IF;
+  END;
+
+  INSERT INTO bid_frozen_inputs(input_sha256, project_id, document_set_id)
+  VALUES (frozen_sha, v_project_id, NULL)
+  ON CONFLICT (input_sha256) DO NOTHING;
 
   bad_artifact := jsonb_build_object(
     'chapters', jsonb_build_array(jsonb_build_object(

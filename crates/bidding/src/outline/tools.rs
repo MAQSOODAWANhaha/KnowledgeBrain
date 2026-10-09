@@ -1104,6 +1104,7 @@ mod tests {
         let finished = finish(&input, &mut draft).unwrap();
         assert_eq!(finished["readiness"]["ready"], json!(true));
         assert_eq!(finished["chapters"].as_array().unwrap().len(), 4);
+        assert_eq!(finished["roots"], json!(["root"]));
 
         let continued = continued_chain();
         assert_eq!(
