@@ -340,6 +340,7 @@ async fn persist_blank_chunks_completes_without_postprocess() {
         end_at: 0,
         parent_chunk_id: None,
         generated_questions: Vec::new(),
+        source_locator: None,
     };
     let out = knowledge::ingest::persist_indexed_chunks(
         &pool,
@@ -432,6 +433,7 @@ async fn persist_indexed_chunks_keeps_rows_when_embed_fails() {
         end_at: 15,
         parent_chunk_id: None,
         generated_questions: Vec::new(),
+        source_locator: None,
     };
     let prev_base = std::env::var("KNOWLEDGEBRAIN_EMBEDDING_BASE_URL").ok();
     let prev_alias = std::env::var("EMBEDDING_BASE_URL").ok();
@@ -1082,6 +1084,7 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
             end_at: 27,
             parent_chunk_id: None,
             generated_questions: vec![],
+            source_locator: None,
         }],
         &[],
     )
@@ -1182,6 +1185,7 @@ async fn wiki_ingest_job_is_direct_idempotent_and_finalizes() {
                 end_at: 27,
                 parent_chunk_id: None,
                 generated_questions: vec![],
+                source_locator: None,
             }],
             &[],
         )
@@ -1510,6 +1514,7 @@ async fn process_post_process_clone_keep_requires_typed_wiki_delivery() {
             end_at: 15,
             parent_chunk_id: None,
             generated_questions: vec![],
+            source_locator: None,
         }],
         &[knowledge::ChunkEmbedding {
             chunk_id: cid,
@@ -1603,6 +1608,7 @@ async fn process_post_process_writes_summary_and_keeps_question_payload_closed()
             end_at: body.len() as i32,
             parent_chunk_id: None,
             generated_questions: vec![],
+            source_locator: None,
         }],
         &[knowledge::ChunkEmbedding {
             chunk_id: cid,

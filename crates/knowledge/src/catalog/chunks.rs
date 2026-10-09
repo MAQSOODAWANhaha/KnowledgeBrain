@@ -206,11 +206,13 @@ async fn append_document_chunks_tx(
         sqlx::query(
             "INSERT INTO chunks (
                 id, product_version_id, document_id, chunk_type, content,
-                context_header, start_at, end_at, parent_chunk_id, generated_questions
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                context_header, start_at, end_at, parent_chunk_id, generated_questions,
+                source_locator
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
              ON CONFLICT (id) DO UPDATE SET
                 content = EXCLUDED.content,
-                generated_questions = EXCLUDED.generated_questions",
+                generated_questions = EXCLUDED.generated_questions,
+                source_locator = EXCLUDED.source_locator",
         )
         .bind(ch.id)
         .bind(ch.product_version_id)
@@ -222,6 +224,7 @@ async fn append_document_chunks_tx(
         .bind(ch.end_at)
         .bind(ch.parent_chunk_id)
         .bind(serde_json::json!(ch.generated_questions))
+        .bind(ch.source_locator.clone())
         .execute(&mut **tx)
         .await?;
     }
@@ -333,8 +336,9 @@ pub async fn insert_document_chunks(
         sqlx::query(
             "INSERT INTO chunks (
                 id, product_version_id, document_id, chunk_type, content,
-                context_header, start_at, end_at, parent_chunk_id, generated_questions
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                context_header, start_at, end_at, parent_chunk_id, generated_questions,
+                source_locator
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
         )
         .bind(ch.id)
         .bind(ch.product_version_id)
@@ -346,6 +350,7 @@ pub async fn insert_document_chunks(
         .bind(ch.end_at)
         .bind(ch.parent_chunk_id)
         .bind(serde_json::json!(ch.generated_questions))
+        .bind(ch.source_locator.clone())
         .execute(pool)
         .await?;
     }
@@ -398,7 +403,8 @@ pub async fn load_document_chunks(
 ) -> Result<Vec<crate::Chunk>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT id, document_id, product_version_id, chunk_type, content,
-                context_header, start_at, end_at, parent_chunk_id, generated_questions
+                context_header, start_at, end_at, parent_chunk_id, generated_questions,
+                source_locator
          FROM chunks WHERE document_id = $1
          ORDER BY start_at, id",
     )
@@ -421,6 +427,7 @@ pub async fn load_document_chunks(
             end_at: c.try_get("end_at")?,
             parent_chunk_id: c.try_get("parent_chunk_id")?,
             generated_questions: serde_json::from_value(qs).unwrap_or_default(),
+            source_locator: c.try_get("source_locator").unwrap_or(None),
         });
     }
     Ok(out)

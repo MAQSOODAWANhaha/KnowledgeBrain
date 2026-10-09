@@ -1174,6 +1174,7 @@ mod tests {
                 end_at: text.len() as i32,
                 parent_chunk_id: None,
                 generated_questions: vec![],
+                source_locator: None,
             }],
             &[crate::ChunkEmbedding {
                 chunk_id: cid,

@@ -549,6 +549,44 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_baseline_stores_chunk_source_locator_and_deleted_parse_status() {
+        let documents = KNOWLEDGE_BASE_BASELINE
+            .split_once("CREATE TABLE documents (")
+            .unwrap()
+            .1
+            .split_once("CREATE UNIQUE INDEX documents_live_file_uidx")
+            .unwrap()
+            .0;
+        assert!(documents.contains(
+            "'pending', 'processing', 'finalizing', 'completed', 'failed', 'cancelled', 'deleting',\n        'deleted'"
+        ));
+        let chunks = KNOWLEDGE_BASE_BASELINE
+            .split_once("CREATE TABLE chunks (")
+            .unwrap()
+            .1
+            .split_once("CREATE INDEX chunks_document_idx")
+            .unwrap()
+            .0;
+        assert!(chunks.contains("source_locator jsonb,"));
+        assert!(
+            !chunks.contains("source_locator jsonb NOT NULL"),
+            "existing chunks stay readable when no locator was stored"
+        );
+        let upgrade = include_str!("../../../migrations/knowledge_base_d3d4_existing.sql");
+        assert!(upgrade.contains("ADD COLUMN IF NOT EXISTS source_locator jsonb"));
+        assert!(upgrade.contains("DROP CONSTRAINT IF EXISTS documents_parse_status_check"));
+        assert!(upgrade.contains("'deleted'"));
+        let apply = include_str!("db.rs")
+            .split_once("pub async fn apply_fresh_baseline_with_identity")
+            .unwrap()
+            .1
+            .split_once("#[cfg(test)]")
+            .unwrap()
+            .0;
+        assert!(!apply.contains("knowledge_base_d3d4_existing"));
+    }
+
+    #[test]
     fn unverified_and_verified_connection_entrypoints_are_separate() {
         let source = include_str!("db.rs");
         assert!(source.contains("pub async fn connect_unverified()"));

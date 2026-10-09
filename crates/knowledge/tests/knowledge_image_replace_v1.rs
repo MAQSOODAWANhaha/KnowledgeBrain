@@ -37,6 +37,7 @@ fn image_chunk(
         end_at: 10,
         parent_chunk_id: None,
         generated_questions: Vec::new(),
+        source_locator: None,
     }
 }
 

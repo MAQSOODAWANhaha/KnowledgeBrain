@@ -1108,6 +1108,7 @@ mod tests {
             end_at: 14,
             parent_chunk_id: None,
             generated_questions: Vec::new(),
+            source_locator: None,
         };
         let page = page_content_for(
             PAGE_CONCEPT,
@@ -1155,6 +1156,7 @@ mod tests {
             end_at: i + 1,
             parent_chunk_id: None,
             generated_questions: Vec::new(),
+            source_locator: None,
         };
         let chunks = vec![mk(0, &big), mk(1, &big), mk(2, "short")];
         let batches = split_citation_batches(&chunks);
@@ -1176,6 +1178,7 @@ mod tests {
             end_at: 40,
             parent_chunk_id: None,
             generated_questions: Vec::new(),
+            source_locator: None,
         };
         let body = Chunk {
             id: Uuid::new_v4(),
@@ -1188,6 +1191,7 @@ mod tests {
             end_at: 60,
             parent_chunk_id: None,
             generated_questions: Vec::new(),
+            source_locator: None,
         };
         let items = vec![Candidate {
             title: "奇安信集团".into(),
@@ -1217,6 +1221,7 @@ mod tests {
             end_at: 40,
             parent_chunk_id: None,
             generated_questions: Vec::new(),
+            source_locator: None,
         };
         let body = Chunk {
             id: Uuid::new_v4(),
@@ -1229,6 +1234,7 @@ mod tests {
             end_at: 60,
             parent_chunk_id: None,
             generated_questions: Vec::new(),
+            source_locator: None,
         };
         let ids = cite_chunks(&[cover.clone(), body.clone()], "奇安信集团", &[]);
         assert_eq!(ids, vec![body.id]);
@@ -1262,6 +1268,7 @@ mod tests {
             end_at: 20,
             parent_chunk_id: None,
             generated_questions: Vec::new(),
+            source_locator: None,
         };
         let ids = cite_chunks(std::slice::from_ref(&ch), "ISO 9001", &["ISO9001".into()]);
         assert_eq!(ids, vec![ch.id]);

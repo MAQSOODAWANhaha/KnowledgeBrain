@@ -375,6 +375,7 @@ mod tests {
             end_at: 13,
             parent_chunk_id: None,
             generated_questions: vec!["q?".into()],
+            source_locator: None,
         };
         let emb = crate::ChunkEmbedding {
             chunk_id: cid,
@@ -496,6 +497,7 @@ mod tests {
                 end_at: 5,
                 parent_chunk_id: None,
                 generated_questions: vec![],
+                source_locator: None,
             }],
             &[crate::ChunkEmbedding {
                 chunk_id: cid,

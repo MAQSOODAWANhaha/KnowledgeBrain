@@ -1041,6 +1041,7 @@ fn index_wiki_page(
         end_at: content.chars().count() as i32,
         parent_chunk_id: None,
         generated_questions: Vec::new(),
+        source_locator: None,
     };
     let _ = crate::index::index_one_in(&mut store.embeddings, &ch, title, vector_on, keyword_on);
     store.chunks.insert(ch.id, ch);
@@ -1443,6 +1444,7 @@ fn reduce_slug(store: &mut WikiJob, version_id: Uuid, op: &WikiPendingOp) -> Res
         end_at: page.content.chars().count() as i32,
         parent_chunk_id: None,
         generated_questions: Vec::new(),
+        source_locator: None,
     };
     crate::index::index_one_in(
         &mut store.embeddings,
@@ -1635,6 +1637,7 @@ mod tests {
             end_at: 13,
             parent_chunk_id: None,
             generated_questions: Vec::new(),
+            source_locator: None,
         };
         s.chunks.insert(c.id, c);
         (s, vid, did)
@@ -1767,6 +1770,7 @@ mod tests {
                 end_at: 6,
                 parent_chunk_id: None,
                 generated_questions: Vec::new(),
+                source_locator: None,
             };
             s.chunks.insert(c.id, c);
             enqueue_ingest_on_job(&mut s, vid, did);
@@ -1946,6 +1950,7 @@ mod tests {
             end_at: 22,
             parent_chunk_id: None,
             generated_questions: Vec::new(),
+            source_locator: None,
         };
         s.chunks.insert(c2.id, c2.clone());
         s.graph.insert(
