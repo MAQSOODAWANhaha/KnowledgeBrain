@@ -33,6 +33,8 @@ jobs:
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: bash scripts/ci_check_sources.sh
+      - name: createdb retry after ready
+        run: bash scripts/tests/ci_services_createdb_retry_test.sh
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -239,7 +241,7 @@ jobs:
           }
           trap cleanup EXIT
           for database in "$CI_SCHEMA_LIFECYCLE_DATABASE" "$CI_SCHEMA_CATALOG_DATABASE"; do
-            createdb -T template0 "$database"
+            bash scripts/ci_services.sh createdb -T template0 "$database"
             created_databases+=("$database")
             POSTGRES_DB="$database" sh deploy/postgres-init/010-runtime-identities.sh
           done

@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Start or stop the PostgreSQL and Redis containers a CI job needs.
-# Images come from deploy/images.lock.json. Ports and credentials come from .github/ci.env.
+# `createdb` retries a database create after pg_isready. Attempts and the
+# interval come from CI_SERVICE_READY_* in .github/ci.env (same budget as
+# wait_ready). Images come from deploy/images.lock.json. Ports and credentials
+# come from .github/ci.env.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-cmd=${1:?start or stop}
+cmd=${1:?start, stop, or createdb}
 kind=${2:-both}
 state_dir=${CI_SERVICE_STATE_DIR:-${RUNNER_TEMP:-/tmp}/kb-ci-services}
 mkdir -p "$state_dir"
@@ -40,8 +43,53 @@ if [[ "$cmd" == "stop" ]]; then
   stop_recorded
   exit 0
 fi
+
+# pg_isready can succeed on the image's temporary postmaster. The next client
+# then sees the connection close when that process restarts. Retry createdb
+# across that window. A dropped connection can still commit CREATE DATABASE;
+# a row in pg_database is success. The probe connects to CI_SCHEMA_POSTGRES_DB,
+# the database this job's container was started with.
+createdb_retry() {
+  local database=$1
+  shift
+  local attempts=${CI_SERVICE_READY_ATTEMPTS:?}
+  local interval=${CI_SERVICE_READY_INTERVAL_SECONDS:?}
+  local admin=${CI_SCHEMA_POSTGRES_DB:?}
+  local attempt output
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if output=$(createdb "$@" "$database" 2>&1); then
+      return 0
+    fi
+    printf '%s\n' "$output" >&2
+    if psql -d "$admin" -v ON_ERROR_STOP=1 -v name="$database" -tAc \
+      "SELECT 1 FROM pg_database WHERE datname = :'name'" 2>/dev/null | grep -qx 1; then
+      return 0
+    fi
+    if ((attempt < attempts)); then
+      sleep "$interval"
+    fi
+  done
+  echo "createdb ${database} did not succeed after ${attempts} attempts" >&2
+  return 1
+}
+
+if [[ "$cmd" == "createdb" ]]; then
+  shift
+  if [[ $# -lt 1 ]]; then
+    echo "usage: scripts/ci_services.sh createdb [createdb-options...] dbname" >&2
+    exit 2
+  fi
+  database=${@: -1}
+  if [[ $# -gt 1 ]]; then
+    createdb_retry "$database" "${@:1:$#-1}"
+  else
+    createdb_retry "$database"
+  fi
+  exit
+fi
 if [[ "$cmd" != "start" ]]; then
   echo "usage: scripts/ci_services.sh start|stop [postgres|redis|both]" >&2
+  echo "       scripts/ci_services.sh createdb [createdb-options...] dbname" >&2
   exit 2
 fi
 
