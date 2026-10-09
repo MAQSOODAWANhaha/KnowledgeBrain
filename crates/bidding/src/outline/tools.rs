@@ -445,6 +445,15 @@ pub fn missing_response_slot(draft: &Draft) -> Option<&str> {
 }
 
 fn view(input: &FrozenInput, draft: &Draft) -> Value {
+    // B6: forest roots (chapters without a parent). A draft may legally hold
+    // multiple roots (multi-package tender); validate_tree only checks
+    // parent existence and acyclicity.
+    let roots: Vec<&str> = draft
+        .chapters
+        .iter()
+        .filter(|chapter| chapter.parent_id.is_none())
+        .map(|chapter| chapter.id.as_str())
+        .collect();
     let mut state = json!({
         "chapters": draft.chapters.iter().map(|chapter| json!({
             "id": chapter.id,
@@ -454,6 +463,7 @@ fn view(input: &FrozenInput, draft: &Draft) -> Value {
             "purpose": chapter.purpose,
             "requirement_ids": chapter.requirement_ids,
         })).collect::<Vec<_>>(),
+        "roots": roots,
         "bindings": draft.bindings,
         "slots": draft.slots.iter().map(|slot| json!({
             "slot_id": slot.slot_id,

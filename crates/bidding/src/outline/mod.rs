@@ -24,7 +24,7 @@ mod acceptance;
 #[cfg(test)]
 mod tests;
 
-pub use template::{COVER_CHAPTER_ID, ProjectedOutline, project, project_draft};
+pub use template::{COVER_CHAPTER_ID, ProjectedOutline, project_draft};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

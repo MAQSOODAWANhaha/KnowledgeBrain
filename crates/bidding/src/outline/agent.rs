@@ -45,7 +45,7 @@ impl Duty {
                 "本轮只做发现。应答义务是招标文件要求投标人必须提交、填写、声明、承诺、报价、列偏差、提供资格证明或按指定格式作答的事项。看到这类事项就提交一条要求，覆盖规定格式、声明与承诺、报价、偏差说明、资格材料和技术响应。只阅读已领取的阅读包，每一段都要读完再 submit_pack。整包读完仍没有应答义务时，requirements 用空数组。同一包失败后把 repair 设为 true 再交。不要写章节，不要写模板，不要匹配知识库。"
             }
             Self::Organize => {
-                "本轮写章节、附件绑定和规定模板槽。用检查点里的要求整理章节树，每个章节带上 requirement_ids，并把每个附件表绑定到唯一章节。有两张及以上互不续表的附件表时，章节树要有三层：根分组、中间分组、叶子应答。中间层是 group，沿用招标文件自己的章节，不要为每一张附件表设一个应答章。同一条续表链只绑一个叶子；互不续表的附件表可以绑在同一个应答章。用 put_slots 写入招标文件已经给出的文字。每个应答章节至少有一个槽。投标人和签字槽留空并带上 match_query，其他槽的 match_query 为空，分组章节不能带这两种槽。bind_forms 一次被打回后改用 bind_forms_append，每次只修一条续表链，不要重发全表；模板槽用 put_slots_append 逐轮补齐，put_slots 只用于全量重写。不要重新扫描招标文件，不要匹配知识库，不要填写我方事实。"
+                "本轮写章节、附件绑定和规定模板槽。用检查点里的要求整理章节树，每个章节带上 requirement_ids，并把每个附件表绑定到唯一章节。有两张及以上互不续表的附件表时，章节树要有三层：根分组（可多个，即森林）、中间分组、叶子应答。中间层是 group，沿用招标文件自己的章节，不要为每一张附件表设一个应答章。同一条续表链只绑一个叶子；互不续表的附件表可以绑在同一个应答章。用 put_slots 写入招标文件已经给出的文字。每个应答章节至少有一个槽。投标人和签字槽留空并带上 match_query，其他槽的 match_query 为空，分组章节不能带这两种槽。bind_forms 一次被打回后改用 bind_forms_append，每次只修一条续表链，不要重发全表；模板槽用 put_slots_append 逐轮补齐，put_slots 只用于全量重写。不要重新扫描招标文件，不要匹配知识库，不要填写我方事实。"
             }
             Self::Check => {
                 "本轮只做收尾。outline.readiness.ready 为 true 时下一步只有 finish_outline，核对结果已经在 readiness 里，不要反复 read_outline。不要改章节，不要重新扫描，不要写模板。"
@@ -117,17 +117,6 @@ pub fn schemas_for(duty: Duty) -> Vec<serde_json::Value> {
                 .is_some_and(|name| allowed.contains(&name))
         })
         .collect()
-}
-
-pub fn duty(stage: DraftStage, phase: Phase, _unmapped_attachments: bool) -> Duty {
-    match stage {
-        DraftStage::Fill | DraftStage::Published => Duty::Template,
-        DraftStage::None | DraftStage::Outline => match phase {
-            Phase::Check | Phase::Complete => Duty::Check,
-            Phase::Outline => Duty::Organize,
-            Phase::Discover => Duty::Discover,
-        },
-    }
 }
 
 /// `Some` when this duty must reject the tool. `None` leaves non-draft tools
@@ -377,24 +366,24 @@ mod tests {
 
     #[test]
     fn duties_keep_template_writing_away_from_discovery() {
-        let discover = duty(DraftStage::Outline, Phase::Discover, false);
+        let discover = Duty::Discover;
         assert!(deny(discover, "put_slots", false).is_some());
         assert!(deny(discover, "put_chapters", false).is_some());
         assert!(deny(discover, "submit_pack", false).is_none());
         assert!(deny(discover, "read_source", false).is_some());
-        let organize = duty(DraftStage::Outline, Phase::Outline, true);
+        let organize = Duty::Organize;
         assert!(deny(organize, "submit_pack", false).is_some());
         assert!(deny(organize, "put_chapters", false).is_none());
         assert!(deny(organize, "bind_forms", false).is_none());
         assert!(deny(organize, "put_slots", false).is_none());
-        let template = duty(DraftStage::Fill, Phase::Complete, false);
+        let template = Duty::Template;
         assert_eq!(template, Duty::Template);
         assert!(deny(template, "submit_pack", false).is_some());
         assert!(deny(template, "put_chapters", false).is_some());
         assert!(deny(template, "bind_forms", false).is_some());
         assert!(deny(template, "read_source", false).is_some());
         assert!(deny(template, "put_slots", false).is_none());
-        let published = duty(DraftStage::Published, Phase::Complete, false);
+        let published = Duty::Template;
         assert_eq!(published, Duty::Template);
         assert!(deny(published, "put_chapters", false).is_some());
         assert!(deny(published, "bind_forms", false).is_some());
@@ -403,7 +392,7 @@ mod tests {
 
     #[test]
     fn organize_binds_attachments_before_the_outline_can_finish() {
-        let organize = duty(DraftStage::Outline, Phase::Outline, true);
+        let organize = Duty::Organize;
         assert_eq!(organize, Duty::Organize);
         assert!(organize.responsibility().contains("附件表"));
         assert!(organize.instructions().contains("附件表"));

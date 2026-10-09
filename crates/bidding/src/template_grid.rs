@@ -83,19 +83,35 @@ pub fn table_block_from_grid(
         return Err("DOCX_TEMPLATE_GRID_INVALID: grid dimensions are invalid".into());
     }
 
-    let widths = definition
+    // B7: missing widths degrade to an equal distribution (warn + widths_fallback
+    // flag); invalid values still fail closed.
+    let (widths, widths_fallback) = match definition
         .get("widths_mm")
         .and_then(Value::as_array)
         .filter(|items| items.len() == columns)
-        .ok_or_else(|| "DOCX_TEMPLATE_GRID_INVALID: objective widths are missing".to_string())?
-        .iter()
-        .map(|value| {
-            value
-                .as_f64()
-                .filter(|width| width.is_finite() && *width > 0.0)
-                .ok_or_else(|| "DOCX_TEMPLATE_GRID_INVALID: objective width is invalid".to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    {
+        Some(items) => (
+            items
+                .iter()
+                .map(|value| {
+                    value
+                        .as_f64()
+                        .filter(|width| width.is_finite() && *width > 0.0)
+                        .ok_or_else(|| {
+                            "DOCX_TEMPLATE_GRID_INVALID: objective width is invalid".to_string()
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            false,
+        ),
+        None => {
+            tracing::warn!(
+                columns,
+                "DOCX_TEMPLATE_GRID_INVALID: objective widths are missing; using equal distribution"
+            );
+            (vec![1.0; columns], true)
+        }
+    };
     if !widths.iter().copied().sum::<f64>().is_finite() {
         return Err("DOCX_TEMPLATE_GRID_INVALID: objective widths are not finite".into());
     }
@@ -230,6 +246,7 @@ pub fn table_block_from_grid(
         column_count: columns,
         cells,
         widths_mm: widths,
+        widths_fallback,
         repeat_header_rows: header_row_count,
     };
     block
@@ -352,7 +369,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_invalid_widths_fail_closed() {
+    fn missing_or_mismatched_widths_fall_back_to_equal_distribution() {
+        // B7: widths_mm missing or with a wrong length degrades to an equal
+        // distribution (widths_fallback = true); invalid values still fail.
         let base = json!({"kind":"grid","row_count":1,"column_count":2,
             "widths_mm":[45.0,135.0],
             "cells":[{"row":0,"column":0,"row_span":1,"col_span":1,"text":"甲"},
@@ -361,15 +380,60 @@ mod tests {
             json!({"column":0,"role":"copy_verbatim"}),
             json!({"column":1,"role":"copy_verbatim"}),
         ];
-        assert!(table_block_from_grid(&base, &policies, 0).is_ok());
-        for mutate in ["width_count", "width_zero", "width_missing"] {
+        // explicit widths: no fallback
+        let block = table_block_from_grid(&base, &policies, 0).expect("grid");
+        let BlockContent::Table {
+            widths_mm,
+            widths_fallback,
+            ..
+        } = block
+        else {
+            panic!("table")
+        };
+        assert_eq!(widths_mm, vec![45.0, 135.0]);
+        assert!(!widths_fallback);
+        // missing widths / wrong length: equal distribution + fallback flag
+        for mutate in ["width_count", "width_missing"] {
+            let mut degraded = base.clone();
+            match mutate {
+                "width_count" => degraded["widths_mm"] = json!([180.0]),
+                "width_missing" => {
+                    degraded.as_object_mut().unwrap().remove("widths_mm");
+                }
+                _ => unreachable!(),
+            }
+            let block = table_block_from_grid(&degraded, &policies, 0)
+                .unwrap_or_else(|error| panic!("{mutate}: {error}"));
+            let BlockContent::Table {
+                widths_mm,
+                widths_fallback,
+                ..
+            } = block
+            else {
+                panic!("table")
+            };
+            assert_eq!(widths_mm, vec![1.0, 1.0], "{mutate}");
+            assert!(widths_fallback, "{mutate}");
+        }
+    }
+
+    #[test]
+    fn invalid_width_values_still_fail_closed() {
+        let base = json!({"kind":"grid","row_count":1,"column_count":2,
+            "widths_mm":[45.0,135.0],
+            "cells":[{"row":0,"column":0,"row_span":1,"col_span":1,"text":"甲"},
+                     {"row":0,"column":1,"row_span":1,"col_span":1,"text":"乙"}]});
+        let policies = [
+            json!({"column":0,"role":"copy_verbatim"}),
+            json!({"column":1,"role":"copy_verbatim"}),
+        ];
+        for mutate in ["width_zero", "width_negative", "width_nan", "width_string"] {
             let mut invalid = base.clone();
             match mutate {
-                "width_count" => invalid["widths_mm"] = json!([180.0]),
                 "width_zero" => invalid["widths_mm"] = json!([0.0, 180.0]),
-                "width_missing" => {
-                    invalid.as_object_mut().unwrap().remove("widths_mm");
-                }
+                "width_negative" => invalid["widths_mm"] = json!([-1.0, 20.0]),
+                "width_nan" => invalid["widths_mm"] = json!([f64::NAN, 20.0]),
+                "width_string" => invalid["widths_mm"] = json!(["wide", 20.0]),
                 _ => unreachable!(),
             }
             assert!(

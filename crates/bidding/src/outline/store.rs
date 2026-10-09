@@ -66,3 +66,25 @@ fn canonical_sha256_bytes(artifact: &OutlineArtifact) -> Result<Vec<u8>, sqlx::E
 pub fn outline_sha256(artifact: &OutlineArtifact) -> Result<String, String> {
     canonical_sha256(artifact)
 }
+
+/// B5: register a frozen input so `kb_bid_v2_publish_outline` accepts its SHA.
+/// Workers call this when they freeze the tender input, before publishing.
+/// Idempotent: re-registering the same SHA is a no-op.
+pub async fn register_frozen_input(
+    pool: &PgPool,
+    project_id: Uuid,
+    input_sha256: &str,
+    document_set_id: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO bid_frozen_inputs (input_sha256, project_id, document_set_id)
+         VALUES ($1::kb_sha256, $2, $3)
+         ON CONFLICT (input_sha256) DO NOTHING",
+    )
+    .bind(input_sha256)
+    .bind(project_id)
+    .bind(document_set_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
