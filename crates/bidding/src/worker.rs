@@ -5,7 +5,8 @@
 //! stays unit-testable without a queue.
 //!
 //! Chain wired by this module:
-//! - `bid:tender_document_process:v2`: frozen tender input -> analysis agent ->
+//! - `bid:tender_document_process:v2`: frozen tender input ->
+//!   `outline::store::register_frozen_input` -> analysis agent ->
 //!   `DbJournal::publish_outline` -> `outline::store::publish` ->
 //!   `bid_outline_runs.status = 'published'`
 //! - `bid:content_generate:v2`: latest published outline -> `match_queries` ->
@@ -54,7 +55,9 @@ pub fn tender_run_id(job: &TenderDocumentProcessJobV2) -> Uuid {
 /// The freeze step (docreader parse -> canonical FrozenInput JSON) is
 /// upstream's responsibility: the API freezes the tender and stores the bytes
 /// in the blob store under `objects/{frozen_input_sha256}` before enqueueing.
-/// The worker only loads by digest and verifies.
+/// The worker loads that blob and checks the raw bytes against the request SHA.
+/// Publish cites [`crate::analysis::digest`] of the decoded input, so that
+/// canonical SHA is what [`register_established_frozen_input`] records.
 async fn load_frozen_input(frozen_input_sha256: &str) -> Result<FrozenInput, String> {
     if frozen_input_sha256.len() != 64
         || !frozen_input_sha256
@@ -80,6 +83,42 @@ fn agent_error_message(error: &crate::agent_error::AgentError) -> String {
     format!("{}: {}", error.code, error.message)
 }
 
+/// SHA that `kb_bid_v2_publish_outline` will see on the outline artifact.
+///
+/// The agent stamps `analysis::digest(input)` onto the artifact. The request
+/// SHA is the blob address of that same canonical JSON. They must be the same
+/// value or publish would look up a SHA this worker never registered.
+fn registration_sha(input: &FrozenInput, requested_sha256: &str) -> Result<String, String> {
+    let input_sha256 = crate::analysis::digest(input)
+        .map_err(|error| format!("FROZEN_INPUT_DIGEST_FAILED: {error}"))?;
+    if input_sha256 != requested_sha256 {
+        return Err(format!(
+            "FROZEN_INPUT_IDENTITY_MISMATCH: canonical frozen input {input_sha256} does not match request {requested_sha256}"
+        ));
+    }
+    Ok(input_sha256)
+}
+
+/// Register the established frozen input before the agent publishes.
+///
+/// `kb_bid_v2_publish_outline` rejects an unknown SHA with
+/// `BID_FROZEN_INPUT_UNKNOWN`. Registration failure stops the job; publish is
+/// not attempted.
+pub async fn register_established_frozen_input(
+    pool: &PgPool,
+    project_id: Uuid,
+    input: &FrozenInput,
+    requested_sha256: &str,
+) -> Result<(), String> {
+    let input_sha256 = registration_sha(input, requested_sha256)?;
+    let document_set_id =
+        (!input.document_set_id.is_empty()).then_some(input.document_set_id.as_str());
+    outline::store::register_frozen_input(pool, project_id, &input_sha256, document_set_id)
+        .await
+        .map_err(|error| format!("FROZEN_INPUT_REGISTER_FAILED: {error}"))?;
+    Ok(())
+}
+
 /// `bid:tender_document_process:v2` handler body.
 pub async fn run_tender_document_process(
     pool: &PgPool,
@@ -100,6 +139,13 @@ pub async fn run_tender_document_process(
             job.project_id
         ));
     }
+    register_established_frozen_input(
+        pool,
+        job.project_id,
+        &input,
+        &job.request.frozen_input_sha256,
+    )
+    .await?;
     let config =
         Config::from_environment_for(&input).map_err(|error| agent_error_message(&error))?;
     let journal = DbJournal::new(pool.clone(), job.project_id, tender_run_id(job));
@@ -278,5 +324,26 @@ mod tests {
     async fn load_frozen_input_reports_missing_blob() {
         let error = load_frozen_input(&"b".repeat(64)).await.unwrap_err();
         assert!(error.starts_with("FROZEN_INPUT_MISSING"), "{error}");
+    }
+
+    #[test]
+    fn registration_sha_accepts_only_the_canonical_digest() {
+        let input = FrozenInput {
+            schema_version: 1,
+            project_id: Uuid::from_u128(0x2222).to_string(),
+            document_set_id: String::new(),
+            documents: vec![],
+            document_relations: vec![],
+            source_units: vec![],
+            structured_forms: vec![],
+            decisions: vec![],
+        };
+        let sha = crate::analysis::digest(&input).unwrap();
+        assert_eq!(registration_sha(&input, &sha).unwrap(), sha);
+        let error = registration_sha(&input, &"c".repeat(64)).unwrap_err();
+        assert!(
+            error.starts_with("FROZEN_INPUT_IDENTITY_MISMATCH"),
+            "{error}"
+        );
     }
 }
