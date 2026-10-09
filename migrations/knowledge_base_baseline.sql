@@ -73,7 +73,8 @@ CREATE TABLE documents (
     type text NOT NULL DEFAULT 'file' CHECK (type IN ('file', 'url', 'passage', 'manual')),
     title text NOT NULL,
     parse_status text NOT NULL CHECK (parse_status IN (
-        'pending', 'processing', 'finalizing', 'completed', 'failed', 'cancelled', 'deleting'
+        'pending', 'processing', 'finalizing', 'completed', 'failed', 'cancelled', 'deleting',
+        'deleted'
     )),
     pending_subtasks_count integer NOT NULL DEFAULT 0,
     summary_status text NOT NULL DEFAULT 'none'
@@ -161,6 +162,7 @@ CREATE TABLE chunks (
     end_at integer NOT NULL DEFAULT 0,
     parent_chunk_id uuid,
     generated_questions jsonb NOT NULL DEFAULT '[]'::jsonb,
+    source_locator jsonb,
     UNIQUE (id,product_version_id),
     UNIQUE (id,product_version_id,document_id)
 );

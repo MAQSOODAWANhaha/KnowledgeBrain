@@ -967,7 +967,7 @@ pub async fn run_list_delete(pool: &PgPool, document_id: Uuid) -> Result<(), Str
         platform::dispatch_object_deletion(pool, deletion).await?;
     }
     // D4: mark the document row deleted only after all cleanup succeeded.
-    // Requires the 'deleted' parse_status migration (see PR description).
+    // documents.parse_status allows 'deleted' in knowledge_base_baseline.sql.
     sqlx::query(
         "UPDATE documents SET deleted_at = now(), parse_status = 'deleted', updated_at = now()
          WHERE id = $1 AND parse_status = 'deleting'",
