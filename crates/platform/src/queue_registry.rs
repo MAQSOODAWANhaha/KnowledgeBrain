@@ -357,11 +357,19 @@ mod tests {
     #[test]
     fn retired_v2_bid_workers_stay_disabled() {
         let registry = loaded();
+        // B4 enabled tender_document_process and content_generate; the rest stay retired.
         for task in [
             BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
+            BID_CONTENT_GENERATE_V2_TASK,
+        ] {
+            assert_eq!(
+                registry.launch_mode(task),
+                Some(LaunchMode::RequiredEnabled)
+            );
+        }
+        for task in [
             BID_REQUIREMENT_SET_COMPILE_V2_TASK,
             BID_DOCX_COMPOSE_V2_TASK,
-            BID_CONTENT_GENERATE_V2_TASK,
             BID_SUBMISSION_EXPORT_V2_TASK,
         ] {
             assert_eq!(
