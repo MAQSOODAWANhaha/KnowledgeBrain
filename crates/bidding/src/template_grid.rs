@@ -353,19 +353,27 @@ mod tests {
     }
 
     #[test]
-    fn missing_geometry_has_no_even_width_fallback() {
+    fn missing_widths_on_a_single_column_use_the_equal_fallback() {
         let definition = json!({
             "kind":"grid","row_count":1,"column_count":1,
             "cells":[{"row":0,"column":0,"row_span":1,"col_span":1,"text":"甲"}]
         });
-        assert!(
-            table_block_from_grid(
-                &definition,
-                &[json!({"column":0,"role":"copy_verbatim"})],
-                1
-            )
-            .is_err()
-        );
+        let block = table_block_from_grid(
+            &definition,
+            &[json!({"column":0,"role":"copy_verbatim"})],
+            1,
+        )
+        .expect("missing widths fall back");
+        let BlockContent::Table {
+            widths_mm,
+            widths_fallback,
+            ..
+        } = block
+        else {
+            panic!("table")
+        };
+        assert_eq!(widths_mm, vec![1.0]);
+        assert!(widths_fallback);
     }
 
     #[test]
