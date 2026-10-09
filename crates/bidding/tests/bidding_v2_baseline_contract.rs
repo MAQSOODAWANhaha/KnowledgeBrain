@@ -106,6 +106,7 @@ fn outline_and_response_replace_the_authoring_machine() {
     for table in [
         "bid_projects",
         "bid_documents",
+        "bid_frozen_inputs",
         "bid_outline_runs",
         "bid_outline_artifacts",
         "bid_outline_chapters",
@@ -135,6 +136,8 @@ fn outline_and_response_replace_the_authoring_machine() {
         );
     }
     assert!(SQL.contains("kb_bid_v2_publish_outline"));
+    assert!(SQL.contains("CONSTRAINT bid_outline_artifacts_frozen_input_fkey"));
+    assert!(SQL.contains("BID_FROZEN_INPUT_UNKNOWN"));
     assert!(SQL.contains("kb_bid_v2_publish_response"));
     assert!(SQL.contains("【待人工补充】"));
     assert!(SQL.contains("DOCX_VERSION_CAS_MISMATCH"));

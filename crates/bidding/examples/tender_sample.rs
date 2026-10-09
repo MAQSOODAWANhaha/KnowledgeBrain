@@ -401,7 +401,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     draft_outline_gaps: None,
                     draft_outline_stalls: 0,
                     draft_outline_window: 0,
-                    draft_degraded: Vec::new(),
                     draft_stopped: false,
                     draft_compile_object_id: None,
                     draft_docx_base64: None,

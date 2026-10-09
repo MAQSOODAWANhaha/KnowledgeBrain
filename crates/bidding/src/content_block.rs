@@ -175,6 +175,10 @@ pub enum BlockContent {
         column_count: usize,
         cells: Vec<TableCell>,
         widths_mm: Vec<f64>,
+        /// B7: true when widths_mm was synthesized as an equal distribution
+        /// because the template definition omitted widths_mm.
+        #[serde(default)]
+        widths_fallback: bool,
         repeat_header_rows: usize,
     },
     Image {
@@ -303,6 +307,7 @@ impl BlockContent {
                 cells,
                 widths_mm,
                 repeat_header_rows,
+                ..
             } => {
                 if !(1..=10_000).contains(row_count)
                     || !(1..=256).contains(column_count)
@@ -506,6 +511,7 @@ mod tests {
                 content: vec![],
             }],
             widths_mm: vec![100.0],
+            widths_fallback: false,
             repeat_header_rows: 0,
         };
         assert!(table.validate().is_err());

@@ -6,9 +6,10 @@ use super::{
     ChapterOutline, ChapterPurpose, OpenIssue, OutlineArtifact, SCHEMA_VERSION, SlotKind,
     TemplateContent, validate_artifact,
 };
+use crate::analysis::FrozenInput;
 use crate::analysis::draft::{BodyStatus, ChapterPurpose as PlanPurpose, DraftStatus};
 use crate::analysis::outline_flow::{IssueStatus, Phase};
-use crate::analysis::{AnalysisResult, FrozenInput, RecordData, RegionRole, Span, TemplateRegion};
+use crate::analysis::{AnalysisResult, RecordData, RegionRole, Span, TemplateRegion};
 
 pub const COVER_CHAPTER_ID: &str = "cover";
 
@@ -47,8 +48,6 @@ pub fn project_draft(
         bindings: draft.bindings.clone(),
     })
 }
-
-/// Build the phase-1 artifact from a completed outline analysis.
 ///
 /// Bidder and signature slots stay empty. Fixed wording is copied from the
 /// frozen tender span or grid cell, never from company knowledge.
@@ -151,7 +150,6 @@ pub fn project(input: &FrozenInput, result: &AnalysisResult) -> Result<OutlineAr
     }
     Ok(artifact)
 }
-
 fn push_chapter_slots(
     input: &FrozenInput,
     result: &AnalysisResult,
@@ -220,7 +218,6 @@ fn push_chapter_slots(
     }
     Ok(())
 }
-
 fn response_slot(
     slot_id: String,
     chapter_id: &str,
@@ -244,7 +241,6 @@ fn response_slot(
         match_query,
     })
 }
-
 fn slot_kind(role: RegionRole) -> SlotKind {
     match role {
         RegionRole::FixedText => SlotKind::FixedText,
@@ -254,7 +250,6 @@ fn slot_kind(role: RegionRole) -> SlotKind {
         RegionRole::Signature => SlotKind::Signature,
     }
 }
-
 fn prescribed_text(input: &FrozenInput, region: &TemplateRegion) -> Result<String, String> {
     if region.role == RegionRole::Instruction && !region.instruction.trim().is_empty() {
         return Ok(region.instruction.clone());
@@ -278,7 +273,6 @@ fn prescribed_text(input: &FrozenInput, region: &TemplateRegion) -> Result<Strin
     }
     Ok(text)
 }
-
 fn span_text(input: &FrozenInput, span: &Span) -> Result<String, String> {
     if span.view_id.is_some() || span.grid_cell.is_some() {
         return Err("prescribed template text needs a tender text span".into());
@@ -294,7 +288,6 @@ fn span_text(input: &FrozenInput, span: &Span) -> Result<String, String> {
         .map(str::to_string)
         .ok_or_else(|| format!("template span on {} is out of range", span.source_id))
 }
-
 fn cell_text(
     input: &FrozenInput,
     form_id: &str,

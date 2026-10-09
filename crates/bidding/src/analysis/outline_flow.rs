@@ -2697,7 +2697,6 @@ mod tests {
             draft_outline_gaps: None,
             draft_outline_stalls: 0,
             draft_outline_window: 0,
-            draft_degraded: vec![],
             draft_stopped: false,
             draft_compile_object_id: None,
             draft_docx_base64: None,

@@ -29,11 +29,11 @@
 | 职责 | 工具 | 提示约束 |
 | --- | --- | --- |
 | 发现 | `submit_pack`，`read_outline` | 应答义务是投标人必须提交、填写、声明、承诺、报价、列偏差、提供资格证明或按指定格式作答的事项。读完已领取的包再 `submit_pack`。整包没有应答义务时 `requirements` 用空数组。同一包失败后才把 `repair` 设为 true |
-| 组织 | `put_chapters`，`bind_forms`，`put_slots`，`read_outline` | 替换整棵章节树，把每个附件表绑到唯一章节，并写入规定槽。有两张及以上互不续表的附件表时，树要有三层：根分组、中间分组、叶子应答。中间层是 `group`，沿用招标文件自己的章节，不要为每一张附件表设一个应答章。同一条续表链只绑一个叶子；互不续表的附件表可以绑在同一个应答章。每个应答章节至少有一个槽。投标人槽和签字槽留空并带 `match_query`。分组章节不能带这两种槽 |
+| 组织 | `put_chapters`，`bind_forms`，`put_slots`，`read_outline` | 替换整棵章节树，把每个附件表绑到唯一章节，并写入规定槽。有两张及以上互不续表的附件表时，树要有三层：根分组（可多个，即森林）、中间分组、叶子应答。中间层是 `group`，沿用招标文件自己的章节，不要为每一张附件表设一个应答章。同一条续表链只绑一个叶子；互不续表的附件表可以绑在同一个应答章。每个应答章节至少有一个槽。投标人槽和签字槽留空并带 `match_query`。分组章节不能带这两种槽 |
 | 收尾 | `read_outline`，`finish_outline` | `readiness.ready` 为 true 时下一步是 `finish_outline`。核对结果在 `readiness` 里，不要反复 `read_outline`。不改章节，不改槽 |
 | 填槽（`Fill` / 已发布） | `put_slots`，`read_outline` | 只抄招标文件已有文字。不能改章节，不能改绑定 |
 
-`finish_outline` 还要求：章节树非空且无环、同级顺序不重复、已经调用过 `put_slots`、每个 `ChapterPurpose::Response` 章节至少有一个槽。附件链有两条及以上时，每个应答章节的父章节必须是 `group`，并且从根数起深度至少为 3（根分组、中间分组、叶子应答，见 `RESPONSE_LEAF_DEPTH` 与 `DEPTH_CHAIN_MIN`）。同一条续表链只绑一个叶子；互不续表的附件可以绑在同一个应答章。链按表头延续判定，不读标题：换了标题路径，或两表之间有非空正文，就不是同一条链。一条链时仍可以是两层。未绑定的附件卡片带 `chain`，同一条链的表要绑到同一个叶子。一次成稿的 `put_slots` 在还有应答章节没有槽时拒绝，不把 `slots_submitted` 写成 true，职责留在组织。已经交过槽后又多出一个没有槽的应答章节，职责回到组织。`finish_outline` 被拒绝时检查点记下 `finish_rejected`，阶段回到 `outline`，下一轮职责回到组织，不再挂出 `finish_outline`。草稿能过工具门、却过不了发布校验时同样拒绝，不进入 `complete`。拒绝理由就是发布校验的那一句，例如章节 id `cover` 是保留字。之后组织成功写入章节、绑定或槽，这次拒绝撤销。结构齐全时阶段写成 `check`，职责进入收尾。成功后 `tool_draft.finished = true`，并把 `outline_run.phase` 和 `analysis.outline.phase` 标成 `complete`。进度里的 `outline_phase` 因此会经过 `check`，不会从 `outline` 直接跳到 `complete`。
+`finish_outline` 还要求：章节树非空且无环、同级顺序不重复、已经调用过 `put_slots`、每个 `ChapterPurpose::Response` 章节至少有一个槽。附件链有两条及以上时，每个应答章节的父章节必须是 `group`，并且从根数起深度至少为 3（根分组（可多个，即森林）、中间分组、叶子应答，见 `RESPONSE_LEAF_DEPTH` 与 `DEPTH_CHAIN_MIN`）。同一条续表链只绑一个叶子；互不续表的附件可以绑在同一个应答章。链按表头延续判定，不读标题：换了标题路径，或两表之间有非空正文，就不是同一条链。一条链时仍可以是两层。未绑定的附件卡片带 `chain`，同一条链的表要绑到同一个叶子。一次成稿的 `put_slots` 在还有应答章节没有槽时拒绝，不把 `slots_submitted` 写成 true，职责留在组织。已经交过槽后又多出一个没有槽的应答章节，职责回到组织。`finish_outline` 被拒绝时检查点记下 `finish_rejected`，阶段回到 `outline`，下一轮职责回到组织，不再挂出 `finish_outline`。草稿能过工具门、却过不了发布校验时同样拒绝，不进入 `complete`。拒绝理由就是发布校验的那一句，例如章节 id `cover` 是保留字。之后组织成功写入章节、绑定或槽，这次拒绝撤销。结构齐全时阶段写成 `check`，职责进入收尾。成功后 `tool_draft.finished = true`，并把 `outline_run.phase` 和 `analysis.outline.phase` 标成 `complete`。进度里的 `outline_phase` 因此会经过 `check`，不会从 `outline` 直接跳到 `complete`。
 
 ## 六个工具
 

@@ -35,6 +35,19 @@ async fn project(pool: &PgPool) -> Uuid {
     project_id
 }
 
+async fn register_frozen(pool: &PgPool, project_id: Uuid, sha: &str) {
+    sqlx::query(
+        "INSERT INTO bid_frozen_inputs (input_sha256, project_id, document_set_id)
+         VALUES ($1::kb_sha256, $2, NULL)
+         ON CONFLICT (input_sha256) DO NOTHING",
+    )
+    .bind(sha)
+    .bind(project_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 fn outline_artifact(group_responds: bool, mark: &str) -> serde_json::Value {
     let slot_chapter = if group_responds { "ch-1" } else { "ch-2" };
     let purpose_slot = if group_responds {
@@ -72,6 +85,7 @@ async fn review_draft_survives_committed_checkpoint_ack_loss() {
     let run_id = Uuid::new_v4();
     let bytes = serde_json::to_vec(&outline_artifact(false, &run_id.to_string())).unwrap();
     let frozen = "ab".repeat(32);
+    register_frozen(&pool, project_id, &frozen).await;
     let first: serde_json::Value = sqlx::query_scalar(
         "SELECT kb_bid_v2_publish_outline($1,$2,$3::kb_sha256,$4,'[]'::jsonb,NULL)",
     )
@@ -112,12 +126,14 @@ async fn analysis_publishes_constraints_without_fabricating_submission_needs() {
     let project_id = project(&pool).await;
     let run_id = Uuid::new_v4();
     let bytes = serde_json::to_vec(&outline_artifact(false, &run_id.to_string())).unwrap();
+    let frozen = "ab".repeat(32);
+    register_frozen(&pool, project_id, &frozen).await;
     let published: serde_json::Value = sqlx::query_scalar(
         "SELECT kb_bid_v2_publish_outline($1,$2,$3::kb_sha256,$4,'[]'::jsonb,NULL)",
     )
     .bind(run_id)
     .bind(project_id)
-    .bind("ab".repeat(32))
+    .bind(&frozen)
     .bind(&bytes)
     .fetch_one(&pool)
     .await
@@ -158,11 +174,13 @@ async fn repair_checkpoint_rejects_malformed_dispositions_without_changing_saved
     let project_id = project(&pool).await;
     let run_id = Uuid::new_v4();
     let bytes = serde_json::to_vec(&outline_artifact(true, &run_id.to_string())).unwrap();
+    let frozen = "ab".repeat(32);
+    register_frozen(&pool, project_id, &frozen).await;
     let error =
         sqlx::query("SELECT kb_bid_v2_publish_outline($1,$2,$3::kb_sha256,$4,'[]'::jsonb,NULL)")
             .bind(run_id)
             .bind(project_id)
-            .bind("ab".repeat(32))
+            .bind(&frozen)
             .bind(&bytes)
             .execute(&pool)
             .await
@@ -215,12 +233,14 @@ async fn source_review_final_batch_recovers_without_extra_model_calls_or_double_
         "{blocked}"
     );
     let bytes = serde_json::to_vec(&outline_artifact(false, &run_id.to_string())).unwrap();
+    let frozen = "cd".repeat(32);
+    register_frozen(&pool, project_id, &frozen).await;
     let published: serde_json::Value = sqlx::query_scalar(
         "SELECT kb_bid_v2_publish_outline($1,$2,$3::kb_sha256,$4,'[]'::jsonb,NULL)",
     )
     .bind(run_id)
     .bind(project_id)
-    .bind("cd".repeat(32))
+    .bind(&frozen)
     .bind(&bytes)
     .fetch_one(&pool)
     .await
@@ -311,6 +331,7 @@ async fn analysis_tool_draft_outline_publish_matches_the_finished_draft() {
         finished: false,
     };
     let sha = "ab".repeat(32);
+    register_frozen(&pool, project_id, &sha).await;
     let refused =
         bidding::outline::store::publish_finished(&pool, project_id, run_id, &input, &sha, &draft)
             .await
@@ -377,4 +398,33 @@ async fn analysis_tool_draft_outline_publish_matches_the_finished_draft() {
     .await
     .unwrap();
     assert_eq!(bound, ("form-1".into(), "letter".into()));
+}
+
+#[tokio::test]
+#[ignore = "requires KB_TENDER_AGENT_TEST_DATABASE_URL pointing to a fresh owned test database"]
+async fn publish_rejects_an_unregistered_frozen_input() {
+    let pool = pool().await;
+    let project_id = project(&pool).await;
+    let run_id = Uuid::new_v4();
+    let bytes = serde_json::to_vec(&outline_artifact(false, &run_id.to_string())).unwrap();
+    let error =
+        sqlx::query("SELECT kb_bid_v2_publish_outline($1,$2,$3::kb_sha256,$4,'[]'::jsonb,NULL)")
+            .bind(run_id)
+            .bind(project_id)
+            .bind("ee".repeat(32))
+            .bind(&bytes)
+            .execute(&pool)
+            .await
+            .expect_err("unknown frozen input");
+    assert!(
+        error.to_string().contains("BID_FROZEN_INPUT_UNKNOWN"),
+        "{error}"
+    );
+    let artifacts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM bid_outline_artifacts WHERE project_id=$1")
+            .bind(project_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(artifacts, 0);
 }
