@@ -1,4 +1,5 @@
 //! SQL persistence split from persist.rs (behavior unchanged).
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -20,50 +21,72 @@ pub async fn delete_image_chunks(
     Ok(())
 }
 
-pub async fn append_document_chunks(
-    pool: &PgPool,
+/// Strictness of image OCR artifact registration.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArtifactMode {
+    /// Fail the whole write when an image_ocr chunk lacks a valid
+    /// `objects/{sha256}` source identity (previous behavior).
+    Strict,
+    /// Write the chunk anyway and skip artifact registration for chunks
+    /// without a valid source identity (logs a warning instead of failing).
+    Lenient,
+}
+
+struct PreparedImage {
+    chunk_id: Uuid,
+    product_version_id: Uuid,
+    document_id: Uuid,
+    id: Uuid,
+    object_ref: String,
+    sha256: String,
+    media_type: String,
+    byte_length: i64,
+    width: i32,
+    height: i32,
+    source_key: String,
+    payload: Vec<u8>,
+}
+
+/// Validate image_ocr chunks and read/verify their media blobs.
+/// Performs no DB writes; runs before the transaction is opened so blob
+/// I/O failures never hold a transaction open.
+async fn prepare_image_artifacts(
     chunks: &[crate::Chunk],
-    embeddings: &[crate::ChunkEmbedding],
-) -> Result<(), sqlx::Error> {
-    use sha2::{Digest, Sha256};
-    struct PreparedImage {
-        chunk_id: Uuid,
-        product_version_id: Uuid,
-        document_id: Uuid,
-        id: Uuid,
-        object_ref: String,
-        sha256: String,
-        media_type: String,
-        byte_length: i64,
-        width: i32,
-        height: i32,
-        source_key: String,
-        payload: Vec<u8>,
-    }
+    mode: ArtifactMode,
+) -> Result<Vec<PreparedImage>, sqlx::Error> {
     let mut prepared = Vec::new();
     for chunk in chunks
         .iter()
         .filter(|chunk| chunk.chunk_type == "image_ocr")
     {
-        if !chunk.context_header.starts_with("objects/") {
-            return Err(sqlx::Error::Protocol(
-                "image OCR chunk requires an objects/{sha256} source identity".into(),
-            ));
-        }
         let sha256 = chunk
             .context_header
             .strip_prefix("objects/")
-            .unwrap_or_default()
-            .to_owned();
-        if sha256.len() != 64
-            || !sha256
+            .unwrap_or_default();
+        let identity_valid = !sha256.is_empty()
+            && sha256.len() == 64
+            && sha256
                 .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        {
-            return Err(sqlx::Error::Protocol(
-                "image OCR source object identity is invalid".into(),
-            ));
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
+        if !identity_valid {
+            let reason = if chunk.context_header.starts_with("objects/") {
+                "image OCR source object identity is invalid"
+            } else {
+                "image OCR chunk requires an objects/{sha256} source identity"
+            };
+            match mode {
+                ArtifactMode::Strict => return Err(sqlx::Error::Protocol(reason.into())),
+                ArtifactMode::Lenient => {
+                    tracing::warn!(
+                        chunk_id = %chunk.id,
+                        context_header = %chunk.context_header,
+                        "skipping image artifact registration for chunk without valid objects source identity"
+                    );
+                    continue;
+                }
+            }
         }
+        let sha256 = sha256.to_owned();
         let digest_for_read = sha256.clone();
         let bytes = tokio::task::spawn_blocking(move || platform::read_blob(&digest_for_read))
             .await
@@ -122,7 +145,63 @@ pub async fn append_document_chunks(
             payload,
         });
     }
-    let mut tx = pool.begin().await?;
+    Ok(prepared)
+}
+
+/// Register image artifacts for already-prepared media inside `tx`.
+async fn register_image_artifacts_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    prepared: &[PreparedImage],
+) -> Result<(), sqlx::Error> {
+    for media in prepared {
+        sqlx::query("SELECT kb_register_knowledge_image_object($1,$2::kb_object_ref,$3::kb_sha256,$4,$5,NULL::kb_actor_identity)")
+            .bind(media.id).bind(&media.object_ref).bind(&media.sha256).bind(&media.media_type)
+            .bind(media.byte_length).execute(&mut **tx).await?;
+        let artifact_sha = hex::encode(Sha256::digest(&media.payload));
+        sqlx::query("INSERT INTO knowledge_image_artifact_revisions(id,product_version_id,document_id,revision,
+            object_ref,content_sha256,media_type,width,height,page_ordinal,bounding_region,source_image_key,canonical_payload,artifact_sha256)
+          VALUES($1,$2,$3,1,$4,$5,$6,$7,$8,NULL,NULL,$9,$10,$11) ON CONFLICT(id) DO NOTHING")
+            .bind(media.id).bind(media.product_version_id).bind(media.document_id).bind(&media.object_ref)
+            .bind(&media.sha256).bind(&media.media_type).bind(media.width).bind(media.height).bind(&media.source_key)
+            .bind(&media.payload).bind(&artifact_sha).execute(&mut **tx).await?;
+        let artifact_matches:bool=sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM knowledge_image_artifact_revisions
+            WHERE id=$1 AND product_version_id=$2 AND document_id=$3 AND revision=1 AND object_ref=$4
+              AND content_sha256=$5 AND media_type=$6 AND width=$7 AND height=$8 AND source_image_key=$9
+              AND canonical_payload=$10 AND artifact_sha256=$11)")
+            .bind(media.id).bind(media.product_version_id).bind(media.document_id).bind(&media.object_ref)
+            .bind(&media.sha256).bind(&media.media_type).bind(media.width).bind(media.height).bind(&media.source_key)
+            .bind(&media.payload).bind(&artifact_sha).fetch_one(&mut **tx).await?;
+        if !artifact_matches {
+            return Err(sqlx::Error::Protocol(
+                "image artifact idempotency conflict".into(),
+            ));
+        }
+        sqlx::query("INSERT INTO knowledge_image_ocr_chunk_artifact_mappings(chunk_id,product_version_id,document_id,
+            image_artifact_revision_id,object_ref,content_sha256,media_type)
+          VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(chunk_id) DO NOTHING")
+            .bind(media.chunk_id).bind(media.product_version_id).bind(media.document_id).bind(media.id)
+            .bind(&media.object_ref).bind(&media.sha256).bind(&media.media_type).execute(&mut **tx).await?;
+        let mapping_matches:bool=sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings
+            WHERE chunk_id=$1 AND product_version_id=$2 AND document_id=$3 AND image_artifact_revision_id=$4
+              AND object_ref=$5 AND content_sha256=$6 AND media_type=$7)")
+            .bind(media.chunk_id).bind(media.product_version_id).bind(media.document_id).bind(media.id)
+            .bind(&media.object_ref).bind(&media.sha256).bind(&media.media_type).fetch_one(&mut **tx).await?;
+        if !mapping_matches {
+            return Err(sqlx::Error::Protocol(
+                "image OCR mapping idempotency conflict".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Chunk upsert + artifact registration + embeddings inside `tx`.
+async fn append_document_chunks_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    chunks: &[crate::Chunk],
+    embeddings: &[crate::ChunkEmbedding],
+    prepared: &[PreparedImage],
+) -> Result<(), sqlx::Error> {
     for ch in chunks {
         sqlx::query(
             "INSERT INTO chunks (
@@ -143,48 +222,10 @@ pub async fn append_document_chunks(
         .bind(ch.end_at)
         .bind(ch.parent_chunk_id)
         .bind(serde_json::json!(ch.generated_questions))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
-    for media in prepared {
-        sqlx::query("SELECT kb_register_knowledge_image_object($1,$2::kb_object_ref,$3::kb_sha256,$4,$5,NULL::kb_actor_identity)")
-            .bind(media.id).bind(&media.object_ref).bind(&media.sha256).bind(&media.media_type)
-            .bind(media.byte_length).execute(&mut *tx).await?;
-        let artifact_sha = hex::encode(Sha256::digest(&media.payload));
-        sqlx::query("INSERT INTO knowledge_image_artifact_revisions(id,product_version_id,document_id,revision,
-            object_ref,content_sha256,media_type,width,height,page_ordinal,bounding_region,source_image_key,canonical_payload,artifact_sha256)
-          VALUES($1,$2,$3,1,$4,$5,$6,$7,$8,NULL,NULL,$9,$10,$11) ON CONFLICT(id) DO NOTHING")
-            .bind(media.id).bind(media.product_version_id).bind(media.document_id).bind(&media.object_ref)
-            .bind(&media.sha256).bind(&media.media_type).bind(media.width).bind(media.height).bind(&media.source_key)
-            .bind(&media.payload).bind(&artifact_sha).execute(&mut *tx).await?;
-        let artifact_matches:bool=sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM knowledge_image_artifact_revisions
-            WHERE id=$1 AND product_version_id=$2 AND document_id=$3 AND revision=1 AND object_ref=$4
-              AND content_sha256=$5 AND media_type=$6 AND width=$7 AND height=$8 AND source_image_key=$9
-              AND canonical_payload=$10 AND artifact_sha256=$11)")
-            .bind(media.id).bind(media.product_version_id).bind(media.document_id).bind(&media.object_ref)
-            .bind(&media.sha256).bind(&media.media_type).bind(media.width).bind(media.height).bind(&media.source_key)
-            .bind(&media.payload).bind(&artifact_sha).fetch_one(&mut *tx).await?;
-        if !artifact_matches {
-            return Err(sqlx::Error::Protocol(
-                "image artifact idempotency conflict".into(),
-            ));
-        }
-        sqlx::query("INSERT INTO knowledge_image_ocr_chunk_artifact_mappings(chunk_id,product_version_id,document_id,
-            image_artifact_revision_id,object_ref,content_sha256,media_type)
-          VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(chunk_id) DO NOTHING")
-            .bind(media.chunk_id).bind(media.product_version_id).bind(media.document_id).bind(media.id)
-            .bind(&media.object_ref).bind(&media.sha256).bind(&media.media_type).execute(&mut *tx).await?;
-        let mapping_matches:bool=sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings
-            WHERE chunk_id=$1 AND product_version_id=$2 AND document_id=$3 AND image_artifact_revision_id=$4
-              AND object_ref=$5 AND content_sha256=$6 AND media_type=$7)")
-            .bind(media.chunk_id).bind(media.product_version_id).bind(media.document_id).bind(media.id)
-            .bind(&media.object_ref).bind(&media.sha256).bind(&media.media_type).fetch_one(&mut *tx).await?;
-        if !mapping_matches {
-            return Err(sqlx::Error::Protocol(
-                "image OCR mapping idempotency conflict".into(),
-            ));
-        }
-    }
+    register_image_artifacts_tx(tx, prepared).await?;
     for e in embeddings {
         let lit = vector_literal(&e.vector);
         sqlx::query(
@@ -201,9 +242,49 @@ pub async fn append_document_chunks(
         .bind(e.document_id)
         .bind(&lit)
         .bind(&e.content)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
+    Ok(())
+}
+
+pub async fn append_document_chunks(
+    pool: &PgPool,
+    chunks: &[crate::Chunk],
+    embeddings: &[crate::ChunkEmbedding],
+) -> Result<(), sqlx::Error> {
+    let prepared = prepare_image_artifacts(chunks, ArtifactMode::Strict).await?;
+    let mut tx = pool.begin().await?;
+    append_document_chunks_tx(&mut tx, chunks, embeddings, &prepared).await?;
+    tx.commit().await
+}
+
+/// Replace all image chunks of one image key in a single transaction,
+/// including image OCR artifact registration (D1 fix).
+///
+/// Requires the D2 schema change: mappings follow chunk deletes through
+/// `ON DELETE CASCADE`; revision rows are intentionally left behind as an
+/// immutable audit trail.
+pub async fn replace_image_chunks(
+    pool: &PgPool,
+    document_id: Uuid,
+    image_key: &str,
+    chunks: &[crate::Chunk],
+    embeddings: &[crate::ChunkEmbedding],
+) -> Result<(), sqlx::Error> {
+    let prepared = prepare_image_artifacts(chunks, ArtifactMode::Lenient).await?;
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "DELETE FROM chunks
+         WHERE document_id = $1
+           AND context_header = $2
+           AND chunk_type IN ('image_ocr', 'image_caption')",
+    )
+    .bind(document_id)
+    .bind(image_key)
+    .execute(&mut *tx)
+    .await?;
+    append_document_chunks_tx(&mut tx, chunks, embeddings, &prepared).await?;
     tx.commit().await
 }
 

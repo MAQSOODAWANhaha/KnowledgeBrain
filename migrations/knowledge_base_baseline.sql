@@ -208,7 +208,8 @@ CREATE TABLE knowledge_image_ocr_chunk_artifact_mappings (
     object_state text NOT NULL DEFAULT 'available' CHECK (object_state='available'),
     created_at timestamptz NOT NULL DEFAULT now(),
     FOREIGN KEY(chunk_id,product_version_id,document_id)
-      REFERENCES chunks(id,product_version_id,document_id),
+      REFERENCES chunks(id,product_version_id,document_id)
+      ON DELETE CASCADE,
     FOREIGN KEY(image_artifact_revision_id,product_version_id,document_id)
       REFERENCES knowledge_image_artifact_revisions(id,product_version_id,document_id),
     FOREIGN KEY(image_artifact_revision_id,object_ref,content_sha256,media_type,object_state)
@@ -244,8 +245,8 @@ FOR EACH ROW EXECUTE FUNCTION kb_knowledge_reject_image_media_mutation();
 CREATE TRIGGER knowledge_image_artifact_revisions_truncate_guard
 BEFORE TRUNCATE ON knowledge_image_artifact_revisions
 FOR EACH STATEMENT EXECUTE FUNCTION kb_knowledge_reject_image_media_mutation();
-CREATE TRIGGER knowledge_image_ocr_mappings_immutable
-BEFORE UPDATE OR DELETE ON knowledge_image_ocr_chunk_artifact_mappings
+CREATE TRIGGER knowledge_image_ocr_mappings_no_update
+BEFORE UPDATE ON knowledge_image_ocr_chunk_artifact_mappings
 FOR EACH ROW EXECUTE FUNCTION kb_knowledge_reject_image_media_mutation();
 CREATE TRIGGER knowledge_image_ocr_mappings_truncate_guard
 BEFORE TRUNCATE ON knowledge_image_ocr_chunk_artifact_mappings
