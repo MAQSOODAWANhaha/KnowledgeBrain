@@ -392,7 +392,9 @@ mod tests {
     }
     #[test]
     fn annotate_source_locators_attaches_table_grid_and_page() {
-        use docparser::{StructuredSourceLocator, StructuredSourceUnit, StructuredSourceUnitKind, TableGrid};
+        use docparser::{
+            StructuredSourceLocator, StructuredSourceUnit, StructuredSourceUnitKind, TableGrid,
+        };
         let md = "# Report\n\nIntro text here.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
         let units = vec![
             StructuredSourceUnit {
@@ -402,7 +404,10 @@ mod tests {
                 text: "Intro text here.".into(),
                 locator: StructuredSourceLocator::Page {
                     page_ordinal: 1,
-                    left: None, top: None, right: None, bottom: None,
+                    left: None,
+                    top: None,
+                    right: None,
+                    bottom: None,
                 },
                 grid: None,
             },
@@ -412,11 +417,18 @@ mod tests {
                 kind: StructuredSourceUnitKind::TableRegion,
                 text: "| a | b |".into(),
                 locator: StructuredSourceLocator::PageTable {
-                    page_ordinal: 1, table_ordinal: 0,
-                    left: 10.0, top: 20.0, right: 100.0, bottom: 60.0,
+                    page_ordinal: 1,
+                    table_ordinal: 0,
+                    left: 10.0,
+                    top: 20.0,
+                    right: 100.0,
+                    bottom: 60.0,
                 },
                 grid: Some(TableGrid {
-                    row_count: 2, column_count: 2, cells: vec![], widths_mm: None,
+                    row_count: 2,
+                    column_count: 2,
+                    cells: vec![],
+                    widths_mm: None,
                 }),
             },
         ];
@@ -424,16 +436,24 @@ mod tests {
         assert!(!chunks.is_empty());
         annotate_source_locators(&mut chunks, md, &units);
         // section chunk carries the Page locator
-        let sec = chunks.iter().find(|c| c.content.contains("Intro text here."))
+        let sec = chunks
+            .iter()
+            .find(|c| c.content.contains("Intro text here."))
             .expect("section chunk");
         let loc = sec.source_locator.as_ref().expect("section locator");
         assert_eq!(loc[0]["locator"]["locator_kind"], "page");
         assert_eq!(loc[0]["locator"]["page_ordinal"], 1);
         // table chunk carries the grid with row_count (find the table hit by kind)
-        let tbl = chunks.iter().find(|c| c.content.contains("| a | b |"))
+        let tbl = chunks
+            .iter()
+            .find(|c| c.content.contains("| a | b |"))
             .expect("table chunk");
         let tloc = tbl.source_locator.as_ref().expect("table locator");
-        let thit = tloc.iter().find(|h| h["kind"] == "table_region")
+        let thit = tloc
+            .as_array()
+            .expect("locator array")
+            .iter()
+            .find(|h| h["kind"] == "table_region")
             .expect("table_region hit");
         assert_eq!(thit["grid"]["row_count"], 2);
         assert_eq!(thit["locator"]["locator_kind"], "page_table");
@@ -443,4 +463,3 @@ mod tests {
         assert!(chunks2.iter().all(|c| c.source_locator.is_none()));
     }
 }
-

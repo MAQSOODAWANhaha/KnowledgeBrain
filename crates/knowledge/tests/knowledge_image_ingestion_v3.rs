@@ -31,6 +31,7 @@ fn chunk(
         end_at: 17,
         parent_chunk_id: None,
         generated_questions: Vec::new(),
+        source_locator: None,
     }
 }
 
@@ -157,6 +158,7 @@ async fn image_ocr_publication_is_atomic_idempotent_and_retained() {
         end_at: 14,
         parent_chunk_id: None,
         generated_questions: Vec::new(),
+        source_locator: None,
     };
     let error = knowledge::append_document_chunks(&pool, &[ordinary, conflicting], &[])
         .await

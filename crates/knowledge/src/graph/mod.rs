@@ -115,6 +115,7 @@ mod tests {
             end_at: content.chars().count() as i32,
             parent_chunk_id: None,
             generated_questions: Vec::new(),
+            source_locator: None,
         }
     }
 
