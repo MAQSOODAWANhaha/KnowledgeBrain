@@ -11,17 +11,17 @@
 //! - `bid:content_generate:v2`: latest published outline -> `match_queries` ->
 //!   v2 knowledge retrieval -> `respond` -> `response::store::publish`
 
-use crate::analysis::agent::{Config, ConfiguredModel};
 use crate::analysis::FrozenInput;
+use crate::analysis::agent::{Config, ConfiguredModel};
 use crate::journal_db::DbJournal;
 use crate::outline;
 use crate::response;
 use crate::response::EvidenceHit;
+use knowledge::PostgresKnowledgeRetrievalAdapter;
 use knowledge::knowledge_retrieval::{
     KnowledgeEvidenceScopeV2, KnowledgeRetrievalPortV3, ProductEvidenceRequestV1,
     RetrievalPolicyIdentityV1,
 };
-use knowledge::PostgresKnowledgeRetrievalAdapter;
 use platform::{ContentGenerateJobV2, ContentGenerateOperationV2, TenderDocumentProcessJobV2};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -61,9 +61,7 @@ async fn load_frozen_input(frozen_input_sha256: &str) -> Result<FrozenInput, Str
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     {
-        return Err(format!(
-            "FROZEN_INPUT_SHA_INVALID: {frozen_input_sha256}"
-        ));
+        return Err(format!("FROZEN_INPUT_SHA_INVALID: {frozen_input_sha256}"));
     }
     let bytes = platform::read_blob(frozen_input_sha256)
         .map_err(|error| format!("FROZEN_INPUT_MISSING: objects/{frozen_input_sha256}: {error}"))?;
@@ -130,8 +128,8 @@ async fn resolve_supported_policy(pool: &PgPool) -> Result<RetrievalPolicyIdenti
     .fetch_optional(pool)
     .await
     .map_err(|error| format!("RETRIEVAL_POLICY_LOOKUP_FAILED: {error}"))?;
-    let (policy_sha256, contract_version, max_hits, max_chunk_bytes, max_total_bytes) =
-        row.ok_or("RETRIEVAL_POLICY_UNAVAILABLE: no supported knowledge_retrieval_policies_v2 row")?;
+    let (policy_sha256, contract_version, max_hits, max_chunk_bytes, max_total_bytes) = row
+        .ok_or("RETRIEVAL_POLICY_UNAVAILABLE: no supported knowledge_retrieval_policies_v2 row")?;
     Ok(RetrievalPolicyIdentityV1 {
         contract_version,
         policy_sha256,
@@ -149,10 +147,7 @@ fn sha256_hex(value: &str) -> String {
 }
 
 /// `bid:content_generate:v2` handler body.
-pub async fn run_content_generate(
-    pool: &PgPool,
-    job: &ContentGenerateJobV2,
-) -> Result<(), String> {
+pub async fn run_content_generate(pool: &PgPool, job: &ContentGenerateJobV2) -> Result<(), String> {
     job.request
         .validate()
         .map_err(|error| format!("BID_REQUEST_INVALID: {error}"))?;

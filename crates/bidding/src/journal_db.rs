@@ -45,7 +45,9 @@ impl Journal for DbJournal {
                 .bind(self.run_id)
                 .fetch_optional(&self.pool)
                 .await
-                .map_err(|error| Self::error("JOURNAL_LOAD_FAILED", format!("journal load: {error}")))?;
+                .map_err(|error| {
+                    Self::error("JOURNAL_LOAD_FAILED", format!("journal load: {error}"))
+                })?;
         match row {
             None => Ok(None),
             Some((value,)) => {
@@ -67,11 +69,7 @@ impl Journal for DbJournal {
         }
     }
 
-    async fn reserve(
-        &self,
-        _state: &Checkpoint,
-        body: &[u8],
-    ) -> Result<Option<usize>, AgentError> {
+    async fn reserve(&self, _state: &Checkpoint, body: &[u8]) -> Result<Option<usize>, AgentError> {
         // Minimal production semantic: the attempt-independent budget is not
         // tracked in the database here; the agent's own limits (max turns,
         // provider budgets in Config) still apply.

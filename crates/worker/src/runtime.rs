@@ -3,13 +3,13 @@
 #[cfg(not(unix))]
 compile_error!("the Worker subprocess supervision contract requires Unix process groups");
 
+use crate::bidding::{ContentGenerateV2Adapter, TenderDocumentProcessV2Adapter};
 use crate::knowledge::{
     DatatableWorker, DocumentProcessWorker, HousekeepWorker, ImageMultimodalWorker,
     IndexDeleteWorker, KbDeleteWorker, KnowledgeSemanticIndexV2Worker, ListDeleteWorker,
     ListReparseWorker, PostProcessWorker, SummaryWorker, VersionCloneWorker, WikiFinalizeWorker,
     WikiIngestWorker,
 };
-use crate::bidding::{ContentGenerateV2Adapter, TenderDocumentProcessV2Adapter};
 use platform::{
     DatatableJob, DefaultQueue, DocumentProcessJob, HousekeepJob, ImageMultimodalJob,
     IndexDeleteJob, KbDeleteJob, KnowledgeSemanticIndexV2Job, ListDeleteJob, ListReparseJob,
@@ -351,12 +351,10 @@ pub(crate) async fn run_transport_group(
     tasks.spawn(async move { multimodal.await.map(|_| ()) });
     let bid = bid_storage
         .runtime(ctx.clone())
-        .queue_with_concurrency::<platform::BidAuthoringV2Queue>(
-            platform::runtime_concurrency(
-                "BID_AUTHORING_V2",
-                platform::BID_AUTHORING_V2_CONCURRENCY,
-            ),
-        )
+        .queue_with_concurrency::<platform::BidAuthoringV2Queue>(platform::runtime_concurrency(
+            "BID_AUTHORING_V2",
+            platform::BID_AUTHORING_V2_CONCURRENCY,
+        ))
         .worker::<TenderDocumentProcessV2Adapter, platform::TenderDocumentProcessJobV2>()
         .worker::<ContentGenerateV2Adapter, platform::ContentGenerateJobV2>()
         .shutdown_on(shut(stop_rx.clone()))
