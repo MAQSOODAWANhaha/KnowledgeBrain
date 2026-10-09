@@ -451,12 +451,17 @@ pub async fn set_parse_status(
     Ok(())
 }
 
-/// Spec 3.2: flip to `processing` only if the row is not already abort/completed.
+/// Spec 3.2: flip to `processing` only from an explicit source-state whitelist.
+/// D6: the previous `NOT IN (...)` form also matched rows already in `processing`,
+/// so two workers racing on the same attempt could both "win".
+/// Crash recovery for stuck `processing`/`finalizing` rows is owned by
+/// `housekeep_documents` (resets them to `failed`), hence `failed` — not
+/// `finalizing` — is the legal re-entry state here.
 pub async fn try_set_processing(pool: &PgPool, document_id: Uuid) -> Result<bool, sqlx::Error> {
     let n = sqlx::query(
         "UPDATE documents SET parse_status = 'processing', error_message = '', updated_at = now()
          WHERE id = $1
-           AND parse_status NOT IN ('cancelled', 'deleting', 'completed')",
+           AND parse_status IN ('pending', 'failed')",
     )
     .bind(document_id)
     .execute(pool)
@@ -585,7 +590,10 @@ pub async fn bump_document_attempt(pool: &PgPool, document_id: Uuid) -> Result<i
 
 pub async fn purge_document_index(pool: &PgPool, document_id: Uuid) -> Result<(), sqlx::Error> {
     delete_graph_for_document(pool, document_id).await?;
-    sqlx::query("DELETE FROM chunks WHERE document_id = $1")
+    // D5: wiki_page chunks are version-level aggregates; their document_id is only a
+    // storage host (see persist_wiki_job). They must survive document deletion and
+    // are owned by the wiki retract path instead.
+    sqlx::query("DELETE FROM chunks WHERE document_id = $1 AND chunk_type <> 'wiki_page'")
         .bind(document_id)
         .execute(pool)
         .await?;
@@ -602,59 +610,148 @@ pub async fn copy_document_index(
     target_document_id: Uuid,
     target_version_id: Uuid,
 ) -> Result<usize, sqlx::Error> {
+    // D7: the whole copy (chunks + embeddings + graph) runs in a single
+    // transaction; chunk inserts are batched (1000 rows per statement)
+    // instead of one INSERT per row, so a mid-copy crash leaves no half copy.
+    let mut tx = pool.begin().await?;
+    let source_version_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT product_version_id FROM documents WHERE id = $1")
+            .bind(source_document_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(source_version_id) = source_version_id else {
+        tx.commit().await?;
+        return Ok(0);
+    };
     let rows = sqlx::query(
         "SELECT id, chunk_type, content, context_header, start_at, end_at,
                 parent_chunk_id, generated_questions, source_locator
          FROM chunks WHERE document_id = $1",
     )
     .bind(source_document_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
-    let mut id_map: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
-    for r in &rows {
-        let old: Uuid = r.try_get("id")?;
-        id_map.insert(old, Uuid::new_v4());
+
+    struct ChunkCopy {
+        new_id: Uuid,
+        chunk_type: String,
+        content: String,
+        context_header: String,
+        start_at: i32,
+        end_at: i32,
+        parent_chunk_id: Option<Uuid>,
+        generated_questions: serde_json::Value,
+        source_locator: Option<serde_json::Value>,
     }
+    let mut id_map: std::collections::HashMap<Uuid, Uuid> =
+        std::collections::HashMap::with_capacity(rows.len());
+    let mut copies: Vec<ChunkCopy> = Vec::with_capacity(rows.len());
     for r in &rows {
         let old: Uuid = r.try_get("id")?;
-        let new_id = id_map[&old];
+        let new_id = Uuid::new_v4();
+        id_map.insert(old, new_id);
+        copies.push(ChunkCopy {
+            new_id,
+            chunk_type: r.try_get("chunk_type")?,
+            content: r.try_get("content")?,
+            context_header: r.try_get("context_header")?,
+            start_at: r.try_get("start_at")?,
+            end_at: r.try_get("end_at")?,
+            parent_chunk_id: None,
+            generated_questions: r.try_get("generated_questions")?,
+            source_locator: r.try_get("source_locator")?,
+        });
+    }
+    for (r, c) in rows.iter().zip(copies.iter_mut()) {
         let parent: Option<Uuid> = r.try_get("parent_chunk_id")?;
-        let parent = parent.and_then(|p| id_map.get(&p).copied());
-        sqlx::query(
-            "INSERT INTO chunks (
-                id, product_version_id, document_id, chunk_type, content,
-                context_header, start_at, end_at, parent_chunk_id, generated_questions,
-                source_locator
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-        )
-        .bind(new_id)
-        .bind(target_version_id)
-        .bind(target_document_id)
-        .bind(r.try_get::<String, _>("chunk_type")?)
-        .bind(r.try_get::<String, _>("content")?)
-        .bind(r.try_get::<String, _>("context_header")?)
-        .bind(r.try_get::<i32, _>("start_at")?)
-        .bind(r.try_get::<i32, _>("end_at")?)
-        .bind(parent)
-        .bind(r.try_get::<serde_json::Value, _>("generated_questions")?)
-        .bind(r.try_get::<Option<serde_json::Value>, _>("source_locator")?)
-        .execute(pool)
-        .await?;
+        c.parent_chunk_id = parent.and_then(|p| id_map.get(&p).copied());
     }
-    for (old, new_id) in &id_map {
+    for batch in copies.chunks(1000) {
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT INTO chunks (id, product_version_id, document_id, chunk_type, content,
+               context_header, start_at, end_at, parent_chunk_id, generated_questions,
+               source_locator) ",
+        );
+        qb.push_values(batch, |mut b, c| {
+            b.push_bind(c.new_id)
+                .push_bind(target_version_id)
+                .push_bind(target_document_id)
+                .push_bind(&c.chunk_type)
+                .push_bind(&c.content)
+                .push_bind(&c.context_header)
+                .push_bind(c.start_at)
+                .push_bind(c.end_at)
+                .push_bind(c.parent_chunk_id)
+                .push_bind(&c.generated_questions)
+                .push_bind(&c.source_locator);
+        });
+        qb.build().execute(&mut *tx).await?;
+    }
+    if !id_map.is_empty() {
+        // Set-based embedding copy through the chunk id map: one statement.
+        let old_ids: Vec<Uuid> = id_map.keys().copied().collect();
+        let new_ids: Vec<Uuid> = old_ids.iter().map(|o| id_map[o]).collect();
         sqlx::query(
             "INSERT INTO chunk_embeddings
                 (chunk_id, product_version_id, document_id, embedding, tsv, content)
-             SELECT $1, $2, $3, e.embedding, e.tsv, e.content
-             FROM chunk_embeddings e WHERE e.chunk_id = $4",
+             SELECT m.new_id, $1, $2, e.embedding, e.tsv, e.content
+             FROM chunk_embeddings e
+             JOIN (SELECT * FROM unnest($3::uuid[], $4::uuid[])) AS m(old_id, new_id)
+               ON m.old_id = e.chunk_id",
         )
-        .bind(new_id)
         .bind(target_version_id)
         .bind(target_document_id)
-        .bind(old)
-        .execute(pool)
+        .bind(&old_ids)
+        .bind(&new_ids)
+        .execute(&mut *tx)
         .await?;
     }
+    // D7: deep-copy the per-document graph, remapping chunk_ids to the new ids.
+    let graph_nodes = sqlx::query(
+        "SELECT name, chunk_ids FROM graph_nodes
+         WHERE product_version_id = $1 AND document_id = $2",
+    )
+    .bind(source_version_id)
+    .bind(source_document_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut node_copies: Vec<(String, Vec<Uuid>)> = Vec::with_capacity(graph_nodes.len());
+    for n in &graph_nodes {
+        let name: String = n.try_get("name")?;
+        let chunk_ids: Vec<Uuid> = n.try_get("chunk_ids")?;
+        let remapped: Vec<Uuid> = chunk_ids
+            .into_iter()
+            .filter_map(|c| id_map.get(&c).copied())
+            .collect();
+        node_copies.push((name, remapped));
+    }
+    for batch in node_copies.chunks(1000) {
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT INTO graph_nodes (product_version_id, document_id, name, chunk_ids) ",
+        );
+        qb.push_values(batch, |mut b, (name, chunk_ids)| {
+            b.push_bind(target_version_id)
+                .push_bind(target_document_id)
+                .push_bind(name)
+                .push_bind(chunk_ids);
+        });
+        qb.push(" ON CONFLICT DO NOTHING");
+        qb.build().execute(&mut *tx).await?;
+    }
+    sqlx::query(
+        "INSERT INTO graph_relations
+            (product_version_id, document_id, node1, node2, rel_type)
+         SELECT $1, $2, node1, node2, rel_type FROM graph_relations
+         WHERE product_version_id = $3 AND document_id = $4
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(target_version_id)
+    .bind(target_document_id)
+    .bind(source_version_id)
+    .bind(source_document_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(rows.len())
 }
 

@@ -10,8 +10,8 @@ pub async fn list_versions_for_product(
     let rows = sqlx::query(
         "SELECT id, label, status, cloned_from_version_id, indexing_strategy,
                 image_processing_config, chunking_config,
-                embedding_model_id, summary_model_id, asr_model_id, asr_config,
-                extract_config, wiki_config, question_generation_config
+                embedding_model_id, summary_model_id, vlm_model_id, asr_model_id,
+                vlm_config, asr_config, extract_config, wiki_config, question_generation_config
          FROM product_versions WHERE product_id = $1 AND deleted_at IS NULL",
     )
     .bind(product_id)
@@ -29,8 +29,8 @@ pub async fn load_version(
     let row = sqlx::query(
         "SELECT id, product_id, label, status, cloned_from_version_id, indexing_strategy,
                 image_processing_config, chunking_config,
-                embedding_model_id, summary_model_id, asr_model_id, asr_config,
-                extract_config, wiki_config, question_generation_config
+                embedding_model_id, summary_model_id, vlm_model_id, asr_model_id,
+                vlm_config, asr_config, extract_config, wiki_config, question_generation_config
          FROM product_versions WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(version_id)
@@ -257,6 +257,12 @@ pub(crate) fn product_version_from_row(
     if let Ok(Some(m)) = v.try_get::<Option<String>, _>("asr_model_id") {
         pv.asr_model_id = m;
     }
+    if let Ok(Some(m)) = v.try_get::<Option<String>, _>("vlm_model_id") {
+        pv.vlm_model_id = m;
+    }
+    pv.vlm_config = v
+        .try_get("vlm_config")
+        .unwrap_or_else(|_| serde_json::json!({}));
     let wiki_cfg: serde_json::Value = v
         .try_get("wiki_config")
         .unwrap_or_else(|_| serde_json::json!({}));
@@ -411,6 +417,8 @@ pub struct VersionConfig {
     pub extract_config: Option<serde_json::Value>,
     pub wiki_config: Option<serde_json::Value>,
     pub question_generation_config: Option<serde_json::Value>,
+    pub vlm_model_id: Option<String>,
+    pub vlm_config: Option<serde_json::Value>,
 }
 
 pub async fn update_version_config(
@@ -431,6 +439,8 @@ pub async fn update_version_config(
             extract_config = COALESCE($10, extract_config),
             wiki_config = COALESCE($11, wiki_config),
             question_generation_config = COALESCE($12, question_generation_config),
+            vlm_model_id = COALESCE($13, vlm_model_id),
+            vlm_config = COALESCE($14, vlm_config),
             updated_at = now()
          WHERE id = $1",
     )
@@ -446,6 +456,8 @@ pub async fn update_version_config(
     .bind(cfg.extract_config)
     .bind(cfg.wiki_config)
     .bind(cfg.question_generation_config)
+    .bind(cfg.vlm_model_id)
+    .bind(cfg.vlm_config)
     .execute(pool)
     .await?;
     Ok(())

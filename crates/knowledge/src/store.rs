@@ -84,6 +84,8 @@ pub struct ProductVersion {
     pub chunk_languages: Vec<String>,
     pub parser_engine_rules: Vec<ParserEngineRule>,
     pub table_metadata_instructions: String,
+    pub vlm_model_id: String,
+    pub vlm_config: serde_json::Value,
 }
 
 impl ProductVersion {
@@ -120,6 +122,8 @@ impl ProductVersion {
             chunk_languages: Vec::new(),
             parser_engine_rules: default_parser_engine_rules(),
             table_metadata_instructions: String::new(),
+            vlm_model_id: String::new(),
+            vlm_config: serde_json::json!({}),
         }
     }
 
@@ -179,7 +183,7 @@ pub struct Document {
     pub pending_subtasks_count: i32,
     pub error_message: String,
     pub description: String,
-    pub markdown: String,
+    // E1: removed `markdown` (was write-never; converted markdown comes from the blob).
     pub attempt: i32,
     pub processed_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
@@ -216,7 +220,6 @@ impl Document {
             pending_subtasks_count: 0,
             error_message: String::new(),
             description: String::new(),
-            markdown: String::new(),
             attempt: 1,
             processed_at: None,
             started_at: None,
