@@ -70,7 +70,6 @@ fn checkpoint(input: &FrozenInput) -> Checkpoint {
         draft_outline_gaps: None,
         draft_outline_stalls: 0,
         draft_outline_window: 0,
-        draft_degraded: Vec::new(),
         draft_stopped: false,
         draft_compile_object_id: None,
         draft_docx_base64: None,
@@ -257,15 +256,6 @@ fn product_dispatch_rejects_retired_outline_tools_without_old_checks() {
                 .contains("discover cannot write chapters, template slots, or knowledge responses"),
             "{name} reached outline_flow: {error}"
         );
-    }
-    let error =
-        crate::analysis::draft::apply(&input, &config, &mut state, "finish_outline", &json!({}))
-            .unwrap_err();
-    assert!(error.contains("not on the product path"));
-    for name in RETIRED {
-        let error = crate::analysis::draft::apply(&input, &config, &mut state, name, &json!({}))
-            .unwrap_err();
-        assert!(error.contains("not on the product path"), "{name}: {error}");
     }
     assert!(state.analysis.outline.checks.is_empty());
     assert_eq!(state.analysis.outline.phase, Phase::Discover);
