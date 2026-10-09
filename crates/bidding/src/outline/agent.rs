@@ -475,7 +475,9 @@ mod tests {
             [
                 "put_chapters".to_string(),
                 "bind_forms".to_string(),
+                "bind_forms_append".to_string(),
                 "put_slots".to_string(),
+                "put_slots_append".to_string(),
                 "read_outline".to_string()
             ]
         );
@@ -495,7 +497,7 @@ mod tests {
             assert!(deny(slot_only, "finish_outline", false).is_some());
             assert!(deny(slot_only, "put_slots", false).is_none());
         }
-        assert_eq!(schemas().len(), 6);
+        assert_eq!(schemas().len(), 8);
         assert_eq!(template_schemas().len(), 2);
     }
 

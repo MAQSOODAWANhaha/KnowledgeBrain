@@ -46,7 +46,9 @@ fn outline_and_response_models_see_the_closed_tool_set() {
             "submit_pack",
             "put_chapters",
             "bind_forms",
+            "bind_forms_append",
             "put_slots",
+            "put_slots_append",
             "read_outline",
             "finish_outline"
         ]
