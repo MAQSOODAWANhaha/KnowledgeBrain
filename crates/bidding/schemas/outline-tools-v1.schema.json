@@ -1,149 +1,341 @@
 [
-  {
-    "type": "function",
-    "function": {
-      "name": "submit_pack",
-      "description": "Submit the claimed reading pack. Set repair to true only when that same pack already failed.",
-      "parameters": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["pack_id", "call_id", "repair", "requirements"],
-        "properties": {
-          "pack_id": { "type": "string", "minLength": 1 },
-          "call_id": { "type": "string", "minLength": 1 },
-          "repair": { "type": "boolean" },
-          "requirements": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["description", "source_id", "start", "end"],
-              "properties": {
-                "description": { "type": "string", "minLength": 1 },
-                "source_id": { "type": "string", "minLength": 1 },
-                "start": { "type": "integer", "minimum": 0 },
-                "end": { "type": "integer", "minimum": 0 }
-              }
-            }
-          }
+ {
+  "type": "function",
+  "function": {
+   "name": "submit_pack",
+   "description": "Submit the claimed reading pack. Set repair to true only when that same pack already failed.",
+   "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "pack_id",
+     "call_id",
+     "repair",
+     "requirements"
+    ],
+    "properties": {
+     "pack_id": {
+      "type": "string",
+      "minLength": 1
+     },
+     "call_id": {
+      "type": "string",
+      "minLength": 1
+     },
+     "repair": {
+      "type": "boolean"
+     },
+     "requirements": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "description",
+        "source_id",
+        "start",
+        "end"
+       ],
+       "properties": {
+        "description": {
+         "type": "string",
+         "minLength": 1
+        },
+        "source_id": {
+         "type": "string",
+         "minLength": 1
+        },
+        "start": {
+         "type": "integer",
+         "minimum": 0
+        },
+        "end": {
+         "type": "integer",
+         "minimum": 0
         }
+       }
       }
+     }
     }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "put_chapters",
-      "description": "Replace the chapter tree. A group chapter holds children. A response chapter is where the bidder answers.",
-      "parameters": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["chapters"],
-        "properties": {
-          "chapters": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["id", "parent_id", "order", "title", "purpose", "requirement_ids"],
-              "properties": {
-                "id": { "type": "string", "minLength": 1 },
-                "parent_id": { "type": ["string", "null"] },
-                "order": { "type": "integer", "minimum": 0 },
-                "title": { "type": "string", "minLength": 1 },
-                "purpose": { "type": "string", "enum": ["group", "response"] },
-                "requirement_ids": {
-                  "type": "array",
-                  "items": { "type": "string", "minLength": 1 }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "bind_forms",
-      "description": "Bind each attachment form to exactly one chapter.",
-      "parameters": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["bindings"],
-        "properties": {
-          "bindings": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["form_id", "chapter_id"],
-              "properties": {
-                "form_id": { "type": "string", "minLength": 1 },
-                "chapter_id": { "type": "string", "minLength": 1 }
-              }
-            }
-          }
-        }
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "put_slots",
-      "description": "Write prescribed template slots. Bidder and signature slots stay empty and carry a match query. Group chapters cannot take those slots.",
-      "parameters": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["slots"],
-        "properties": {
-          "slots": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["slot_id", "chapter_id", "kind", "text", "match_query"],
-              "properties": {
-                "slot_id": { "type": "string", "minLength": 1 },
-                "chapter_id": { "type": "string", "minLength": 1 },
-                "kind": {
-                  "type": "string",
-                  "enum": ["fixed_text", "tender_value", "instruction", "bidder_blank", "signature", "preserved"]
-                },
-                "text": { "type": "string" },
-                "match_query": { "type": "string" }
-              }
-            }
-          }
-        }
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "read_outline",
-      "description": "Read the current chapter tree and template slots.",
-      "parameters": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {}
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "finish_outline",
-      "description": "Finish the outline after chapters, attachment bindings, and template slots are complete.",
-      "parameters": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {}
-      }
-    }
+   }
   }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "put_chapters",
+   "description": "Replace the chapter tree. A group chapter holds children. A response chapter is where the bidder answers.",
+   "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "chapters"
+    ],
+    "properties": {
+     "chapters": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "id",
+        "parent_id",
+        "order",
+        "title",
+        "purpose",
+        "requirement_ids"
+       ],
+       "properties": {
+        "id": {
+         "type": "string",
+         "minLength": 1
+        },
+        "parent_id": {
+         "type": [
+          "string",
+          "null"
+         ]
+        },
+        "order": {
+         "type": "integer",
+         "minimum": 0
+        },
+        "title": {
+         "type": "string",
+         "minLength": 1
+        },
+        "purpose": {
+         "type": "string",
+         "enum": [
+          "group",
+          "response"
+         ]
+        },
+        "requirement_ids": {
+         "type": "array",
+         "items": {
+          "type": "string",
+          "minLength": 1
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "bind_forms",
+   "description": "Bind each attachment form to exactly one chapter.",
+   "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "bindings"
+    ],
+    "properties": {
+     "bindings": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "form_id",
+        "chapter_id"
+       ],
+       "properties": {
+        "form_id": {
+         "type": "string",
+         "minLength": 1
+        },
+        "chapter_id": {
+         "type": "string",
+         "minLength": 1
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "bind_forms_append",
+   "description": "Incrementally bind attachment forms: submitted rows are upserted by form_id, untouched bindings are kept. Only chains touched by this call are checked for splits. Use after bind_forms is rejected to fix one chain at a time.",
+   "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "bindings"
+    ],
+    "properties": {
+     "bindings": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "form_id",
+        "chapter_id"
+       ],
+       "properties": {
+        "form_id": {
+         "type": "string",
+         "minLength": 1
+        },
+        "chapter_id": {
+         "type": "string",
+         "minLength": 1
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "put_slots",
+   "description": "Write prescribed template slots. Bidder and signature slots stay empty and carry a match query. Group chapters cannot take those slots.",
+   "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "slots"
+    ],
+    "properties": {
+     "slots": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "slot_id",
+        "chapter_id",
+        "kind",
+        "text",
+        "match_query"
+       ],
+       "properties": {
+        "slot_id": {
+         "type": "string",
+         "minLength": 1
+        },
+        "chapter_id": {
+         "type": "string",
+         "minLength": 1
+        },
+        "kind": {
+         "type": "string",
+         "enum": [
+          "fixed_text",
+          "tender_value",
+          "instruction",
+          "bidder_blank",
+          "signature",
+          "preserved"
+         ]
+        },
+        "text": {
+         "type": "string"
+        },
+        "match_query": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "put_slots_append",
+   "description": "Incrementally write template slots: submitted rows are upserted by slot_id, untouched slots are kept. Only the submitted rows are validated. Prefer this over put_slots when filling leaves round by round; put_slots is for full rewrites.",
+   "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "slots"
+    ],
+    "properties": {
+     "slots": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "slot_id",
+        "chapter_id",
+        "kind",
+        "text",
+        "match_query"
+       ],
+       "properties": {
+        "slot_id": {
+         "type": "string",
+         "minLength": 1
+        },
+        "chapter_id": {
+         "type": "string",
+         "minLength": 1
+        },
+        "kind": {
+         "type": "string",
+         "enum": [
+          "fixed_text",
+          "tender_value",
+          "instruction",
+          "bidder_blank",
+          "signature",
+          "preserved"
+         ]
+        },
+        "text": {
+         "type": "string"
+        },
+        "match_query": {
+         "type": "string"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "read_outline",
+   "description": "Read the current chapter tree and template slots.",
+   "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "finish_outline",
+   "description": "Finish the outline after chapters, attachment bindings, and template slots are complete.",
+   "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+   }
+  }
+ }
 ]

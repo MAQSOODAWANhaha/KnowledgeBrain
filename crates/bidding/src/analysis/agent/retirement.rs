@@ -198,7 +198,9 @@ async fn product_requests_do_not_register_retired_outline_tools() {
     let organize_tools = vec![
         "put_chapters".to_string(),
         "bind_forms".to_string(),
+        "bind_forms_append".to_string(),
         "put_slots".to_string(),
+        "put_slots_append".to_string(),
         "read_outline".to_string(),
     ];
     assert_eq!(tool_names(&organize_body), organize_tools);
