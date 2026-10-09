@@ -428,3 +428,107 @@ async fn publish_rejects_an_unregistered_frozen_input() {
             .unwrap();
     assert_eq!(artifacts, 0);
 }
+
+#[tokio::test]
+#[ignore = "requires KB_TENDER_AGENT_TEST_DATABASE_URL pointing to a fresh owned test database"]
+async fn registered_frozen_input_publishes_and_unknown_sha_stays_rejected() {
+    use bidding::analysis::FrozenInput;
+    use bidding::outline::{
+        ChapterOutline, ChapterPurpose, OutlineArtifact, SCHEMA_VERSION, SlotKind, TemplateContent,
+    };
+
+    fn publishable_outline(project_id: Uuid, sha: &str) -> OutlineArtifact {
+        OutlineArtifact {
+            schema_version: SCHEMA_VERSION,
+            project_id: project_id.to_string(),
+            frozen_input_sha256: sha.to_string(),
+            chapters: vec![
+                ChapterOutline {
+                    id: "ch-1".into(),
+                    parent_id: None,
+                    order: 0,
+                    title: "group".into(),
+                    purpose: ChapterPurpose::Group,
+                    requirement_ids: vec![],
+                },
+                ChapterOutline {
+                    id: "ch-2".into(),
+                    parent_id: Some("ch-1".into()),
+                    order: 0,
+                    title: "response".into(),
+                    purpose: ChapterPurpose::Response,
+                    requirement_ids: vec![],
+                },
+            ],
+            templates: vec![TemplateContent {
+                slot_id: "slot-blank".into(),
+                chapter_id: "ch-2".into(),
+                kind: SlotKind::BidderBlank,
+                text: String::new(),
+                response_required: true,
+                match_query: "slot".into(),
+            }],
+            open_issues: vec![],
+        }
+    }
+
+    let pool = pool().await;
+    let project_id = project(&pool).await;
+    let document_set_id = project_id.to_string();
+    let input = FrozenInput {
+        schema_version: 1,
+        project_id: project_id.to_string(),
+        document_set_id: document_set_id.clone(),
+        documents: vec![],
+        document_relations: vec![],
+        source_units: vec![],
+        structured_forms: vec![],
+        decisions: vec![],
+    };
+    let registered = bidding::analysis::digest(&input).unwrap();
+    let unknown = "ee".repeat(32);
+
+    let unknown_artifact = publishable_outline(project_id, &unknown);
+    let unknown_error =
+        bidding::outline::store::publish(&pool, project_id, Uuid::new_v4(), &unknown_artifact, &[])
+            .await
+            .expect_err("unregistered frozen input");
+    assert!(
+        unknown_error
+            .to_string()
+            .contains("BID_FROZEN_INPUT_UNKNOWN"),
+        "{unknown_error}"
+    );
+
+    bidding::worker::register_established_frozen_input(&pool, project_id, &input, &registered)
+        .await
+        .unwrap();
+    bidding::worker::register_established_frozen_input(&pool, project_id, &input, &registered)
+        .await
+        .unwrap();
+
+    let artifact = publishable_outline(project_id, &registered);
+    let published =
+        bidding::outline::store::publish(&pool, project_id, Uuid::new_v4(), &artifact, &[])
+            .await
+            .unwrap();
+    assert_eq!(published["replayed"], false);
+
+    let stored: (Uuid, Option<String>) = sqlx::query_as(
+        "SELECT project_id, document_set_id FROM bid_frozen_inputs WHERE input_sha256 = $1::kb_sha256",
+    )
+    .bind(&registered)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.0, project_id);
+    assert_eq!(stored.1.as_deref(), Some(document_set_id.as_str()));
+    let published_sha: String = sqlx::query_scalar(
+        "SELECT frozen_input_sha256 FROM bid_outline_artifacts WHERE project_id = $1",
+    )
+    .bind(project_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(published_sha, registered);
+}

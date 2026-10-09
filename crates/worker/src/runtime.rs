@@ -3,6 +3,7 @@
 #[cfg(not(unix))]
 compile_error!("the Worker subprocess supervision contract requires Unix process groups");
 
+use crate::bidding::{ContentGenerateV2Adapter, TenderDocumentProcessV2Adapter};
 use crate::knowledge::{
     DatatableWorker, DocumentProcessWorker, HousekeepWorker, ImageMultimodalWorker,
     IndexDeleteWorker, KbDeleteWorker, KnowledgeSemanticIndexV2Worker, ListDeleteWorker,
@@ -219,9 +220,11 @@ pub const WORKER_REGISTERED_TASKS: &[&str] = &[
     platform::TYPE_LIST_REPARSE,
     platform::TYPE_INDEX_DELETE,
     platform::TYPE_MAINTENANCE_HOUSEKEEP,
+    platform::BID_TENDER_DOCUMENT_PROCESS_V2_TASK,
+    platform::BID_CONTENT_GENERATE_V2_TASK,
 ];
 
-pub(crate) const TRANSPORT_RUNTIME_COUNT: usize = 6;
+pub(crate) const TRANSPORT_RUNTIME_COUNT: usize = 7;
 
 pub(crate) async fn join_transport_group(
     mut tasks: tokio::task::JoinSet<Result<(), oxana::OxanaError>>,
@@ -282,6 +285,7 @@ pub(crate) async fn run_transport_group(
     let maintenance_storage = platform::oxana_connect()?;
     let wiki_storage = platform::oxana_connect()?;
     let multimodal_storage = platform::oxana_connect()?;
+    let bid_storage = platform::oxana_connect()?;
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let shut = |stop: tokio::sync::watch::Receiver<bool>| async move {
         wait_for_worker_shutdown(stop).await;
@@ -345,6 +349,18 @@ pub(crate) async fn run_transport_group(
         .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
         .run();
     tasks.spawn(async move { multimodal.await.map(|_| ()) });
+    let bid = bid_storage
+        .runtime(ctx.clone())
+        .queue_with_concurrency::<platform::BidAuthoringV2Queue>(platform::runtime_concurrency(
+            "BID_AUTHORING_V2",
+            platform::BID_AUTHORING_V2_CONCURRENCY,
+        ))
+        .worker::<TenderDocumentProcessV2Adapter, platform::TenderDocumentProcessJobV2>()
+        .worker::<ContentGenerateV2Adapter, platform::ContentGenerateJobV2>()
+        .shutdown_on(shut(stop_rx.clone()))
+        .shutdown_timeout(HANDLER_CLEANUP_MARGIN)
+        .run();
+    tasks.spawn(async move { bid.await.map(|_| ()) });
     debug_assert_eq!(tasks.len(), TRANSPORT_RUNTIME_COUNT);
     join_transport_group(tasks, &ctx.shutdown, stop_tx).await
 }

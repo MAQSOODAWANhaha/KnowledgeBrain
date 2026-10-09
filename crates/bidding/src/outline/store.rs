@@ -88,3 +88,21 @@ pub async fn register_frozen_input(
     .await?;
     Ok(())
 }
+
+/// Load the most recently published outline artifact for a project.
+///
+/// Used by `bid:content_generate:v2`: response generation always builds on the
+/// latest published outline. Returns the full [`OutlineArtifact`] (deserialized
+/// from the stored canonical JSON), not just the digest.
+pub async fn load_published(pool: &PgPool, project_id: Uuid) -> Result<OutlineArtifact, String> {
+    let artifact: Option<Value> = sqlx::query_scalar(
+        "SELECT artifact FROM bid_outline_artifacts WHERE project_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("load published outline: {error}"))?;
+    let value = artifact.ok_or_else(|| "no published outline for project".to_string())?;
+    serde_json::from_value::<OutlineArtifact>(value)
+        .map_err(|error| format!("published outline decode: {error}"))
+}
