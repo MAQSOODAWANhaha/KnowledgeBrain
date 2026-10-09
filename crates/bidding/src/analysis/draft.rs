@@ -3,7 +3,6 @@
 //! [`crate::response::agent`].
 use super::*;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -401,13 +400,97 @@ pub fn mark_window_coverage(input: &FrozenInput, coverage: &mut Coverage, window
     }
 }
 
-fn next_sibling_order(plan: &[DraftPlanItem], parent: Option<&str>) -> usize {
-    plan.iter()
-        .filter(|item| item.parent.as_deref() == parent)
-        .map(|item| item.order)
-        .max()
-        .map(|order| order + 1)
-        .unwrap_or(0)
+/// Recompute provenance from saved obligations and the final tree, never titles.
+///
+/// Restored: still called by `outline_flow.rs` after requirement-ID remapping.
+/// (B3 removed the old fill tool cluster around it, but this helper is live.)
+pub(super) fn refresh_outline_basis(
+    _input: &FrozenInput,
+    state: &mut super::agent::Checkpoint,
+) -> Result<(), String> {
+    super::outline_flow::tree_valid(&state.analysis.draft_plan)?;
+    let positions: std::collections::BTreeMap<_, _> = state
+        .analysis
+        .draft_plan
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect();
+    let mut children = vec![Vec::new(); positions.len()];
+    let mut parents = vec![None; positions.len()];
+    for (index, node) in state.analysis.draft_plan.iter().enumerate() {
+        if let Some(parent) = &node.parent {
+            let parent = positions[parent];
+            children[parent].push(index);
+            parents[index] = Some(parent);
+        }
+    }
+    let mut pending: Vec<_> = children.iter().map(Vec::len).collect();
+    let mut ready: Vec<_> = pending
+        .iter()
+        .enumerate()
+        .filter_map(|(i, count)| (*count == 0).then_some(i))
+        .collect();
+    while let Some(index) = ready.pop() {
+        let node = &state.analysis.draft_plan[index];
+        let mut grounds = std::collections::BTreeMap::new();
+        let mut formats = std::collections::BTreeMap::new();
+        for id in &node.requirement_ids {
+            let need = state
+                .analysis
+                .outline
+                .requirements
+                .get(id)
+                .ok_or("unknown chapter requirement")?;
+            if need.applicability == super::outline_flow::Applicability::NotApplicable {
+                continue;
+            }
+            for span in &need.grounds {
+                grounds.insert(serde_json::to_string(span).unwrap(), span.clone());
+            }
+            for span in &need.format_grounds {
+                formats.insert(serde_json::to_string(span).unwrap(), span.clone());
+            }
+        }
+        if node.purpose == ChapterPurpose::Group {
+            for child in &children[index] {
+                let child = &state.analysis.draft_plan[*child];
+                if child.status != DraftStatus::Omitted {
+                    for span in &child.grounds {
+                        grounds.insert(serde_json::to_string(span).unwrap(), span.clone());
+                    }
+                    for span in &child.format_refs {
+                        formats.insert(serde_json::to_string(span).unwrap(), span.clone());
+                    }
+                }
+            }
+        }
+        let node = &mut state.analysis.draft_plan[index];
+        node.requirement_ids.sort();
+        node.requirement_ids.dedup();
+        node.grounds = grounds.into_values().collect();
+        node.format_refs = formats.into_values().collect();
+        let spans = if node.format_refs.is_empty() {
+            &node.grounds
+        } else {
+            &node.format_refs
+        };
+        node.source_ids = spans
+            .iter()
+            .map(|span| span.source_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        node.windows = vec![node.source_ids.clone()];
+        node.window_index = 0;
+        if let Some(parent) = parents[index] {
+            pending[parent] -= 1;
+            if pending[parent] == 0 {
+                ready.push(parent);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn assign_next_chapter(input: &FrozenInput, state: &mut super::agent::Checkpoint) -> bool {
@@ -514,119 +597,4 @@ pub fn after_batch(
         DraftStage::Published => state.done = true,
     }
     Ok(())
-}
-
-fn require_active_chapter(
-    state: &super::agent::Checkpoint,
-    chapter_id: &str,
-) -> Result<(), String> {
-    let assigned = state.draft_active_id.as_deref().unwrap_or("");
-    if assigned != chapter_id {
-        return Err(format!(
-            "chapter_id must equal assigned draft_active_id \"{assigned}\"; do not send the title"
-        ));
-    }
-    Ok(())
-}
-
-fn unwrap_citation(value: &Value) -> Value {
-    if value.get("source_id").is_none()
-        && let Some(inner) = value
-            .get("citation_ref")
-            .or_else(|| value.get("citation_refs"))
-    {
-        return unwrap_citation(inner);
-    }
-    value.clone()
-}
-
-fn parse_span(value: &Value) -> Result<Span, String> {
-    serde_json::from_value(unwrap_citation(value)).map_err(|e| e.to_string())
-}
-
-fn parse_spans(value: &Value) -> Result<Vec<Span>, String> {
-    let Value::Array(items) = value else {
-        return Err("grounds must be an array".into());
-    };
-    items.iter().map(parse_span).collect()
-}
-
-/// §7.1 的填章校验清单，补上 `validate_record` 在填章路径缺失的那几项。
-///
-/// 窗成员、读取收据、引文非空与「空白不吞源」由调用方先行校验（`validate_span`
-/// 本来就拒零长文本区间）；这里管 grid header policy 与 grid 锚点的覆盖与不重
-/// 叠——少了它们，带表格的章要么编译不出来，要么把用户看不见的单元格悄悄写坏。
-fn validate_fill_regions(input: &FrozenInput, regions: &[TemplateRegion]) -> Result<(), String> {
-    let mut assigned: BTreeMap<(String, usize, usize), ()> = BTreeMap::new();
-    for region in regions {
-        if region.role == RegionRole::Instruction && region.instruction.trim().is_empty() {
-            return Err("instruction region needs the instruction text".into());
-        }
-        let Some(form_id) = region.form_id.as_deref() else {
-            if !region.cells.is_empty() {
-                return Err("only a grid region can select cells".into());
-            }
-            continue;
-        };
-        let form = input
-            .structured_forms
-            .iter()
-            .find(|form| form["form_definition_revision_id"] == *form_id)
-            .ok_or("grid region names a form outside the frozen input")?;
-        let definition = &form["definition"];
-        let rows = definition["row_count"]
-            .as_u64()
-            .ok_or("grid rows missing")? as usize;
-        let columns = definition["column_count"]
-            .as_u64()
-            .ok_or("grid columns missing")? as usize;
-        let header_rows = region
-            .header_rows
-            .ok_or("grid region must state its header policy")?;
-        if header_rows >= rows {
-            return Err("grid header policy covers the whole form".into());
-        }
-        if region.cells.is_empty() {
-            return Err("grid region must select at least one cell".into());
-        }
-        // Anchors come from the same renderer the compiler uses, so a region can
-        // never name a cell that the merged grid does not actually expose.
-        let policies: Vec<_> = (0..columns)
-            .map(|column| json!({"column":column,"role":"copy_verbatim"}))
-            .collect();
-        let table =
-            crate::template_grid::table_block_from_grid(definition, &policies, header_rows)?;
-        let crate::content_block::BlockContent::Table { cells, .. } = table else {
-            return Err("grid expected".into());
-        };
-        let anchors: BTreeSet<_> = cells.iter().map(|cell| (cell.row, cell.column)).collect();
-        for cell in &region.cells {
-            if !anchors.contains(&(cell.row, cell.column)) {
-                return Err("grid region selects a foreign or covered cell".into());
-            }
-            if assigned
-                .insert((form_id.to_string(), cell.row, cell.column), ())
-                .is_some()
-            {
-                return Err("grid regions assign the same cell twice".into());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn parse_regions(value: &Value) -> Result<Vec<TemplateRegion>, String> {
-    let Value::Array(items) = value else {
-        return Err("regions must be an array".into());
-    };
-    items
-        .iter()
-        .map(|item| {
-            let mut item = item.clone();
-            if let Some(source) = item.get("source").cloned() {
-                item["source"] = unwrap_citation(&source);
-            }
-            serde_json::from_value(item).map_err(|e| e.to_string())
-        })
-        .collect()
 }
