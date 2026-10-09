@@ -562,6 +562,7 @@ async fn publish_exact_ocr_fixture(
         end_at: i32::try_from(content.len()).unwrap(),
         parent_chunk_id: None,
         generated_questions: Vec::new(),
+        source_locator: None,
     };
     knowledge::append_document_chunks(pool, &[chunk], &[])
         .await
