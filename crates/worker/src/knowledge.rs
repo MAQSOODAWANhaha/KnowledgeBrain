@@ -257,7 +257,15 @@ pub async fn process_version_clone(pool: &PgPool, job: &VersionCloneJob) -> Resu
     )
     .await?;
     for f in follow {
-        if f.clone_keep || f.task_type == platform::TYPE_POST_PROCESS {
+        if f.task_type == platform::TYPE_WIKI_INGEST {
+            // D7: rebuild the cloned version's wiki from its new documents.
+            let _ = platform::enqueue_wiki_ingest(
+                f.product_version_id,
+                f.document_id,
+                knowledge::wiki::OP_INGEST,
+            )
+            .await;
+        } else if f.clone_keep || f.task_type == platform::TYPE_POST_PROCESS {
             let _ =
                 platform::enqueue_post_process(f.document_id, f.product_version_id, f.clone_keep)
                     .await;

@@ -1180,6 +1180,8 @@ struct PatchVersion {
     summary_model_id: Option<String>,
     wiki_synthesis_model_id: Option<String>,
     asr_model_id: Option<String>,
+    vlm_model_id: Option<String>,
+    vlm_config: Option<serde_json::Value>,
     question_count: Option<usize>,
     question_custom_instructions: Option<String>,
     table_metadata_instructions: Option<String>,
@@ -1270,6 +1272,12 @@ fn apply_patch_version(v: &mut ProductVersion, body: &PatchVersion) {
     if let Some(m) = body.asr_model_id.clone() {
         v.asr_model_id = m;
     }
+    if let Some(m) = body.vlm_model_id.clone().filter(|s| !s.is_empty()) {
+        v.vlm_model_id = m;
+    }
+    if let Some(cfg) = body.vlm_config.clone() {
+        v.vlm_config = cfg;
+    }
 }
 
 fn version_config_of(v: &ProductVersion) -> knowledge::VersionConfig {
@@ -1308,6 +1316,8 @@ fn version_config_of(v: &ProductVersion) -> knowledge::VersionConfig {
             "question_count": v.question_count(),
             "custom_instructions": v.question_custom_instructions,
         })),
+        vlm_model_id: Some(v.vlm_model_id.clone()),
+        vlm_config: Some(v.vlm_config.clone()),
     }
 }
 
@@ -2042,7 +2052,9 @@ async fn document_content(
         .await
         .map_err(pg_err)?;
     chunks.sort_by_key(|c| (c.start_at, c.id));
-    let mut markdown = meta.markdown.clone();
+    // E1: Document.markdown removed (was write-never); converted markdown
+    // always comes from the {file_hash}.md blob.
+    let mut markdown = String::new();
     if markdown.is_empty()
         && !meta.file_hash.is_empty()
         && let Ok(bytes) = platform::read_blob(&format!("{}.md", meta.file_hash))

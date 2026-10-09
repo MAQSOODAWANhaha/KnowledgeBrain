@@ -48,6 +48,20 @@ pub(crate) fn pg_hit_from_row(r: &sqlx::postgres::PgRow) -> Result<PgSearchHit, 
     })
 }
 
+/// E3: feature flag for the v1 `index_ready` visibility gate (aligns v1 with v2:
+/// documents that have not finished indexing are not searchable).
+/// Enabled by default; set `KNOWLEDGEBRAIN_V1_INDEX_READY_GATE=0` to restore the
+/// legacy behavior for gray-scale observation.
+fn v1_index_ready_gate_on() -> bool {
+    match std::env::var("KNOWLEDGEBRAIN_V1_INDEX_READY_GATE") {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            !(v == "0" || v == "false" || v == "off" || v == "no")
+        }
+        Err(_) => true,
+    }
+}
+
 pub async fn hybrid_search_pg(
     pool: &PgPool,
     version_id: Uuid,
@@ -91,6 +105,7 @@ pub async fn hybrid_search_pg(
          WHERE e.product_version_id = $1
            AND d.enable_status = 'enabled'
            AND d.deleted_at IS NULL
+           AND ($7 OR d.index_ready)
            AND ($4 OR c.chunk_type <> 'wiki_page')
            AND (
                 cardinality($5::uuid[]) = 0
@@ -126,6 +141,7 @@ pub async fn hybrid_search_pg(
          WHERE e.product_version_id = $1
            AND d.enable_status = 'enabled'
            AND d.deleted_at IS NULL
+           AND ($7 OR d.index_ready)
            AND ($4 OR c.chunk_type <> 'wiki_page')
            AND (
                 cardinality($5::uuid[]) = 0
@@ -137,6 +153,8 @@ pub async fn hybrid_search_pg(
            AND e.tsv @@ plainto_tsquery('simple', $3)
          ORDER BY ts_rank_cd(e.tsv, plainto_tsquery('simple', $3)) DESC
          LIMIT $6";
+    // $7 = bypass: when the gate is on, only index_ready documents are visible.
+    let index_ready_bypass = !v1_index_ready_gate_on();
     let vec_rows = if vector_on {
         sqlx::query(VEC_SQL)
             .bind(version_id)
@@ -145,6 +163,7 @@ pub async fn hybrid_search_pg(
             .bind(expand_wiki)
             .bind(tag_ids)
             .bind(top_k.max(1))
+            .bind(index_ready_bypass)
             .fetch_all(pool)
             .await?
     } else {
@@ -158,6 +177,7 @@ pub async fn hybrid_search_pg(
             .bind(expand_wiki)
             .bind(tag_ids)
             .bind(limit.max(1))
+            .bind(index_ready_bypass)
             .fetch_all(pool)
             .await?
     } else {

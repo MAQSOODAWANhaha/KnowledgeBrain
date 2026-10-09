@@ -768,6 +768,12 @@ async fn persist_wiki_job(
         .collect::<Vec<_>>();
     for chunk in &mut wiki_chunks {
         if chunk.document_id.is_nil() {
+            // D5: version-level wiki chunks have no owning document; document_id is
+            // only a storage host to satisfy the NOT NULL FK. Their lifecycle is
+            // owned by the wiki retract path (retracted pages are removed from
+            // job.wiki, their slugs flow into changed_slugs, and
+            // persist_wiki_changes_atomic deletes the matching wiki_page chunks),
+            // and purge_document_index explicitly spares chunk_type = 'wiki_page'.
             chunk.document_id = document_id;
         }
     }
@@ -1184,9 +1190,8 @@ fn sample_rows_json(headers: &[String], rows: &[Vec<String>]) -> String {
 }
 
 fn converted_markdown(doc: &crate::Document) -> String {
-    if !doc.markdown.trim().is_empty() {
-        return doc.markdown.clone();
-    }
+    // E1: Document.markdown was write-never (always empty); the converted
+    // markdown now always comes from the {file_hash}.md blob.
     platform::read_blob(&format!("{}.md", doc.file_hash))
         .ok()
         .map(|b| String::from_utf8_lossy(&b).into_owned())

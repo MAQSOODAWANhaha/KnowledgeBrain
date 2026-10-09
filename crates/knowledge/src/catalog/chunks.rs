@@ -327,8 +327,8 @@ pub fn vector_literal(v: &[f32]) -> String {
     format!("[{}]", body.join(","))
 }
 
-pub async fn insert_document_chunks(
-    pool: &PgPool,
+async fn insert_document_chunks_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     chunks: &[crate::Chunk],
     embeddings: &[crate::ChunkEmbedding],
 ) -> Result<(), sqlx::Error> {
@@ -351,7 +351,7 @@ pub async fn insert_document_chunks(
         .bind(ch.parent_chunk_id)
         .bind(serde_json::json!(ch.generated_questions))
         .bind(ch.source_locator.clone())
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     }
     for e in embeddings {
@@ -366,10 +366,21 @@ pub async fn insert_document_chunks(
         .bind(e.document_id)
         .bind(&lit)
         .bind(&e.content)
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     }
     Ok(())
+}
+
+pub async fn insert_document_chunks(
+    pool: &PgPool,
+    chunks: &[crate::Chunk],
+    embeddings: &[crate::ChunkEmbedding],
+) -> Result<(), sqlx::Error> {
+    // E2: previously each INSERT ran in its own implicit transaction.
+    let mut tx = pool.begin().await?;
+    insert_document_chunks_tx(&mut tx, chunks, embeddings).await?;
+    tx.commit().await
 }
 
 pub async fn replace_document_chunks(
@@ -378,11 +389,15 @@ pub async fn replace_document_chunks(
     chunks: &[crate::Chunk],
     embeddings: &[crate::ChunkEmbedding],
 ) -> Result<(), sqlx::Error> {
+    // E2: DELETE + INSERT are now atomic; a crash between them no longer
+    // leaves the document with zero chunks.
+    let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM chunks WHERE document_id = $1")
         .bind(document_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
-    insert_document_chunks(pool, chunks, embeddings).await
+    insert_document_chunks_tx(&mut tx, chunks, embeddings).await?;
+    tx.commit().await
 }
 
 pub async fn replace_document_embeddings(
@@ -390,11 +405,14 @@ pub async fn replace_document_embeddings(
     document_id: Uuid,
     embeddings: &[crate::ChunkEmbedding],
 ) -> Result<(), sqlx::Error> {
+    // E2: same atomicity fix as replace_document_chunks.
+    let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM chunk_embeddings WHERE document_id = $1")
         .bind(document_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
-    insert_document_chunks(pool, &[], embeddings).await
+    insert_document_chunks_tx(&mut tx, &[], embeddings).await?;
+    tx.commit().await
 }
 
 pub async fn load_document_chunks(
