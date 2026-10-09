@@ -156,21 +156,21 @@ async fn register_image_artifacts_tx(
     for media in prepared {
         sqlx::query("SELECT kb_register_knowledge_image_object($1,$2::kb_object_ref,$3::kb_sha256,$4,$5,NULL::kb_actor_identity)")
             .bind(media.id).bind(&media.object_ref).bind(&media.sha256).bind(&media.media_type)
-            .bind(media.byte_length).execute(&mut *tx).await?;
+            .bind(media.byte_length).execute(&mut **tx).await?;
         let artifact_sha = hex::encode(Sha256::digest(&media.payload));
         sqlx::query("INSERT INTO knowledge_image_artifact_revisions(id,product_version_id,document_id,revision,
             object_ref,content_sha256,media_type,width,height,page_ordinal,bounding_region,source_image_key,canonical_payload,artifact_sha256)
           VALUES($1,$2,$3,1,$4,$5,$6,$7,$8,NULL,NULL,$9,$10,$11) ON CONFLICT(id) DO NOTHING")
             .bind(media.id).bind(media.product_version_id).bind(media.document_id).bind(&media.object_ref)
             .bind(&media.sha256).bind(&media.media_type).bind(media.width).bind(media.height).bind(&media.source_key)
-            .bind(&media.payload).bind(&artifact_sha).execute(&mut *tx).await?;
+            .bind(&media.payload).bind(&artifact_sha).execute(&mut **tx).await?;
         let artifact_matches:bool=sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM knowledge_image_artifact_revisions
             WHERE id=$1 AND product_version_id=$2 AND document_id=$3 AND revision=1 AND object_ref=$4
               AND content_sha256=$5 AND media_type=$6 AND width=$7 AND height=$8 AND source_image_key=$9
               AND canonical_payload=$10 AND artifact_sha256=$11)")
             .bind(media.id).bind(media.product_version_id).bind(media.document_id).bind(&media.object_ref)
             .bind(&media.sha256).bind(&media.media_type).bind(media.width).bind(media.height).bind(&media.source_key)
-            .bind(&media.payload).bind(&artifact_sha).fetch_one(&mut *tx).await?;
+            .bind(&media.payload).bind(&artifact_sha).fetch_one(&mut **tx).await?;
         if !artifact_matches {
             return Err(sqlx::Error::Protocol(
                 "image artifact idempotency conflict".into(),
@@ -180,12 +180,12 @@ async fn register_image_artifacts_tx(
             image_artifact_revision_id,object_ref,content_sha256,media_type)
           VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(chunk_id) DO NOTHING")
             .bind(media.chunk_id).bind(media.product_version_id).bind(media.document_id).bind(media.id)
-            .bind(&media.object_ref).bind(&media.sha256).bind(&media.media_type).execute(&mut *tx).await?;
+            .bind(&media.object_ref).bind(&media.sha256).bind(&media.media_type).execute(&mut **tx).await?;
         let mapping_matches:bool=sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM knowledge_image_ocr_chunk_artifact_mappings
             WHERE chunk_id=$1 AND product_version_id=$2 AND document_id=$3 AND image_artifact_revision_id=$4
               AND object_ref=$5 AND content_sha256=$6 AND media_type=$7)")
             .bind(media.chunk_id).bind(media.product_version_id).bind(media.document_id).bind(media.id)
-            .bind(&media.object_ref).bind(&media.sha256).bind(&media.media_type).fetch_one(&mut *tx).await?;
+            .bind(&media.object_ref).bind(&media.sha256).bind(&media.media_type).fetch_one(&mut **tx).await?;
         if !mapping_matches {
             return Err(sqlx::Error::Protocol(
                 "image OCR mapping idempotency conflict".into(),
@@ -222,7 +222,7 @@ async fn append_document_chunks_tx(
         .bind(ch.end_at)
         .bind(ch.parent_chunk_id)
         .bind(serde_json::json!(ch.generated_questions))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
     register_image_artifacts_tx(tx, prepared).await?;
@@ -242,7 +242,7 @@ async fn append_document_chunks_tx(
         .bind(e.document_id)
         .bind(&lit)
         .bind(&e.content)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
     Ok(())

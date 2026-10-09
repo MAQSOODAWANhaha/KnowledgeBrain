@@ -131,22 +131,35 @@ async fn replace_image_chunks_registers_artifacts_and_replaces_atomically() {
     let first_sha = hex::encode(Sha256::digest(&first_bytes));
     let first_path = platform::write_blob(&first_sha, &first_bytes).expect("write first blob");
     let first_ref = platform::object_ref(&first_sha);
-    let first = image_chunk(first_id, document_id, version_id, first_ref.clone(), "image_ocr");
+    let first = image_chunk(
+        first_id,
+        document_id,
+        version_id,
+        first_ref.clone(),
+        "image_ocr",
+    );
     knowledge::replace_image_chunks(&pool, document_id, &first_ref, &[first], &[])
         .await
         .expect("first replace");
 
-    let mapping_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM knowledge_image_ocr_chunk_artifact_mappings WHERE chunk_id=$1")
-            .bind(first_id)
-            .fetch_one(&pool)
-            .await
-            .expect("first mapping state");
+    let mapping_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge_image_ocr_chunk_artifact_mappings WHERE chunk_id=$1",
+    )
+    .bind(first_id)
+    .fetch_one(&pool)
+    .await
+    .expect("first mapping state");
     assert_eq!(mapping_count, 1, "image_ocr chunk must be registered");
 
     // Re-run with a fresh chunk id for the same image key (same bytes).
     let second_id = Uuid::new_v4();
-    let second = image_chunk(second_id, document_id, version_id, first_ref.clone(), "image_ocr");
+    let second = image_chunk(
+        second_id,
+        document_id,
+        version_id,
+        first_ref.clone(),
+        "image_ocr",
+    );
     knowledge::replace_image_chunks(&pool, document_id, &first_ref, &[second], &[])
         .await
         .expect("second replace");
@@ -165,7 +178,8 @@ async fn replace_image_chunks_registers_artifacts_and_replaces_atomically() {
     .await
     .expect("replace state");
     assert_eq!(
-        state, (false, true, 0, 1, 2),
+        state,
+        (false, true, 0, 1, 2),
         "old chunk+mapping replaced, new mapping registered, old revision row retained as immutable audit trail"
     );
 
@@ -211,7 +225,13 @@ async fn image_ocr_mappings_cascade_on_chunk_delete_but_reject_update() {
     let sha = hex::encode(Sha256::digest(&bytes));
     let blob_path = platform::write_blob(&sha, &bytes).expect("write blob");
     let object_ref = platform::object_ref(&sha);
-    let chunk = image_chunk(chunk_id, document_id, version_id, object_ref.clone(), "image_ocr");
+    let chunk = image_chunk(
+        chunk_id,
+        document_id,
+        version_id,
+        object_ref.clone(),
+        "image_ocr",
+    );
     knowledge::replace_image_chunks(&pool, document_id, &object_ref, &[chunk], &[])
         .await
         .expect("replace");
@@ -222,17 +242,24 @@ async fn image_ocr_mappings_cascade_on_chunk_delete_but_reject_update() {
         .execute(&pool)
         .await
         .expect("chunk delete cascades to mappings");
-    let mapping_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM knowledge_image_ocr_chunk_artifact_mappings WHERE document_id=$1")
-            .bind(document_id)
-            .fetch_one(&pool)
-            .await
-            .expect("mapping state");
+    let mapping_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM knowledge_image_ocr_chunk_artifact_mappings WHERE document_id=$1",
+    )
+    .bind(document_id)
+    .fetch_one(&pool)
+    .await
+    .expect("mapping state");
     assert_eq!(mapping_count, 0);
 
     // Re-register, then confirm UPDATE is still rejected.
     let chunk_id2 = Uuid::new_v4();
-    let chunk2 = image_chunk(chunk_id2, document_id, version_id, object_ref.clone(), "image_ocr");
+    let chunk2 = image_chunk(
+        chunk_id2,
+        document_id,
+        version_id,
+        object_ref.clone(),
+        "image_ocr",
+    );
     knowledge::replace_image_chunks(&pool, document_id, &object_ref, &[chunk2], &[])
         .await
         .expect("re-replace");
@@ -244,7 +271,9 @@ async fn image_ocr_mappings_cascade_on_chunk_delete_but_reject_update() {
     .await
     .expect_err("mapping update stays rejected");
     assert!(
-        update_err.to_string().contains("KNOWLEDGE_IMAGE_MEDIA_IMMUTABLE"),
+        update_err
+            .to_string()
+            .contains("KNOWLEDGE_IMAGE_MEDIA_IMMUTABLE"),
         "unexpected error: {update_err}"
     );
 
