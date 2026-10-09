@@ -409,9 +409,6 @@ pub struct Checkpoint {
     pub draft_outline_stalls: usize,
     #[serde(default, skip_serializing_if = "no_stall")]
     pub draft_outline_window: usize,
-    /// 为压进字节上限而被退回空标题的章，供 UI 告知用户。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub draft_degraded: Vec<String>,
     /// 这次填章是用户叫停的，不是填完了。稿子照出，剩下的章仍空着。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub draft_stopped: bool,
@@ -779,7 +776,6 @@ async fn run_seeded<J: Journal, M: Model>(
         draft_outline_gaps: None,
         draft_outline_stalls: 0,
         draft_outline_window: 0,
-        draft_degraded: Vec::new(),
         draft_stopped: false,
         draft_compile_object_id: None,
         draft_docx_base64: None,
@@ -849,7 +845,6 @@ async fn run_seeded<J: Journal, M: Model>(
                     item.status == crate::analysis::draft::DraftStatus::Filled
                 })
                 .count(),
-            degraded = state.draft_degraded.len(),
             stopped = state.draft_stopped,
         );
     }
