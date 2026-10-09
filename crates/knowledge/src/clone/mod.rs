@@ -83,6 +83,8 @@ pub async fn run_clone(
     };
 
     let mut follow = Vec::new();
+    // D7: documents whose index was copied verbatim ("keep").
+    let mut kept_docs: Vec<Uuid> = Vec::new();
 
     for d in ops {
         match d.op.as_str() {
@@ -133,6 +135,7 @@ pub async fn run_clone(
                 .map_err(|e| e.to_string())?;
                 let copy_keep = d.op == "keep" && keep_copy;
                 if copy_keep {
+                    kept_docs.push(nid);
                     crate::copy_document_index(pool, sid, nid, target_version_id)
                         .await
                         .map_err(|e| e.to_string())?;
@@ -171,6 +174,31 @@ pub async fn run_clone(
                 }
             }
             _ => {}
+        }
+    }
+
+    // D7: wiki is derived data — rebuild it for the new version instead of copying
+    // rows. Only kept documents need an explicit trigger here; reprocessed
+    // ("add"/"replace") documents re-enter the normal pipeline, which enqueues
+    // wiki ingest itself.
+    if !kept_docs.is_empty() {
+        let source_had_wiki: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM wiki_pages WHERE product_version_id = $1)",
+        )
+        .bind(source_version_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        if source_had_wiki {
+            for document_id in kept_docs {
+                follow.push(FollowUp {
+                    task_type: platform::TYPE_WIKI_INGEST,
+                    queue: platform::QUEUE_WIKI,
+                    document_id,
+                    product_version_id: target_version_id,
+                    clone_keep: false,
+                });
+            }
         }
     }
 
