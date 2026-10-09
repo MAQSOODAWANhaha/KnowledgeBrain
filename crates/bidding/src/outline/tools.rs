@@ -382,11 +382,7 @@ fn put_slots(input: &FrozenInput, draft: &mut Draft, args: &Value) -> Result<Val
 /// `slot_id`, untouched slots are kept. Only the submitted rows are
 /// validated; the full-readiness gate stays in `finish` and
 /// `missing_response_slot`, so Organize can fill leaves round by round.
-fn put_slots_append(
-    input: &FrozenInput,
-    draft: &mut Draft,
-    args: &Value,
-) -> Result<Value, String> {
+fn put_slots_append(input: &FrozenInput, draft: &mut Draft, args: &Value) -> Result<Value, String> {
     let rows = args["slots"].as_array().ok_or("slots must be an array")?;
     if rows.is_empty() {
         return Err("slots must name at least one slot".into());
@@ -411,7 +407,6 @@ fn put_slots_append(
     draft.finished = false;
     Ok(view(input, draft))
 }
-
 
 fn finish(input: &FrozenInput, draft: &mut Draft) -> Result<Value, String> {
     if draft.chapters.is_empty() {
@@ -591,8 +586,7 @@ fn chain_gaps(input: &FrozenInput, draft: &Draft) -> Vec<ChainGap> {
             .unwrap_or_default();
         // Suggest the leaf that already holds most of the chain; ties fall
         // back to the last id in sort order, which is deterministic.
-        let mut counts: std::collections::HashMap<&str, usize> =
-            std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for binding in &draft.bindings {
             if form_chain.get(binding.form_id.as_str()) == Some(&chain) {
                 *counts.entry(binding.chapter_id.as_str()).or_default() += 1;
